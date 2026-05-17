@@ -261,12 +261,28 @@ export async function askPromptUser(
             keybindings: kb,
             onDone: (result) => done(result),
           }) as unknown,
-        { overlay: true, overlayOptions: { width: "70%", minWidth: 60 } },
+        // 2026-05-17 R6 UX fix: inline底部 editor 区域替换
+        // (`overlay: false`) 取代屏幕居中弹窗。理由：
+        //   1. 业内对齐 — Claude Code AskUserQuestion / Codex
+        //      request_user_input / OpenCode question 都是底部 inline;
+        //   2. pi 内建 — ctx.ui.select / input / confirm / editor 都走
+        //      editorContainer 替换路径,prompt_user 用 overlay 是
+        //      ADR 0022 §D7 当时对 ctx.ui.custom 默认行为的误读
+        //      (`overlay: false` 才是 pi 默认);
+        //   3. UX — overlay 遮挡上方对话流,inline 自然融入消息流;
+        //   4. ADR §D7 主路径 5 条理由 (紧凑布局 / chip / variant /
+        //      keybindings / countdown) 在 inline 下全部成立 ——
+        //      <PromptDialog> 组件代码完全不变,只是宿主容器换了。
+        // 三个 variant (question / vault_release / bash_output_release)
+        // 一起改为 inline,保持视觉路径一致。
+        { overlay: false },
       );
     } catch (err) {
-      // ctx.ui.custom can throw synchronously when overlay subsystem
-      // is unhealthy — degrade to chained fallback.
-      ctx.ui.notify?.(`prompt_user: overlay failed, falling back: ${(err as Error)?.message}`, "warning");
+      // ctx.ui.custom can throw synchronously when the editor subsystem
+      // is unhealthy — degrade to chained fallback. (Pre-R6 this comment
+      // said "overlay subsystem"; the API surface is now inline editor
+      // replacement, but the fallback path is unchanged.)
+      ctx.ui.notify?.(`prompt_user: inline dialog failed, falling back: ${(err as Error)?.message}`, "warning");
       return finalizeWithAudit(
         await chainedFallback(ctx, params, handle, startedAt),
       );

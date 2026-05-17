@@ -1,23 +1,50 @@
 /**
- * Validator for `PromptUserParams` (ADR 0022 P2).
+ * Validator for `PromptUserParams` (ADR 0022 P2, R7.2 simplification).
  *
  * Pure logic — no I/O, no UI, no audit side effects. The handler calls
  * `validatePromptUserParams` first thing; only after `{ ok: true }` does
  * anything else happen.
  *
- * Why so strict at the schema layer:
- *   - INV-G: refuse any vault-shaped field (`key`, `scope`) at the
- *     schema boundary, not later. Closes the door on a future LLM
- *     trying to use prompt_user as a vault surface.
- *   - INV-H: `answers` is always `Record<string, string[]>` — that
- *     contract starts at validation; we reject duplicate ids that would
- *     collide in `answers`.
- *   - INV-D: the 5 user-visible fields (reason / header / question /
- *     option.label / option.description) all flow into the UI and
- *     audit. We do NOT redact here — redaction is a separate concern
- *     handled by `redactPromptParams` in the handler entry. But we DO
- *     enforce bounded sizes here so a 1MB `reason` cannot crash the
- *     dialog renderer.
+ * R7.2 (2026-05-17) simplification (per user request):
+ *
+ *   - 删除所有 user-visible 字段的长度上限 (MAX_HEADER_DISPLAY_CELLS /
+ *     MAX_REASON_LEN / MAX_QUESTION_LEN / MAX_OPTION_LABEL_LEN /
+ *     MAX_OPTION_LABEL_WORDS / MAX_OPTION_DESC_LEN /
+ *     MAX_OPTION_DESC_DISPLAY_CELLS) 和总 payload 4KB soft cap
+ *     (MAX_PARAMS_BYTES)。OptionList / pi-tui Text 都能自动 wrap,
+ *     技术理由消失;长度由 LLM 自决。
+ *
+ *   - 删除 PromptUserOption.description 字段。R7.1 之前是 `{label,
+ *     description}` 二字段,用户反馈"为什么要一个名称+一个描述,LLM 自己
+ *     决定如何输入" — 合并为单字段 `label`。validator silent-drop 老
+ *     LLM 仍传的 description (未声明字段不报错),避免迁移期 LLM 调用挂。
+ *
+ *   - 删除 displayWidth() / countWords() — 不再有 cell 或 word 计数
+ *     校验需要它们。
+ *
+ * 保留的硬约束 (结构性 / 安全性,不是长度):
+ *
+ *   - MIN/MAX_QUESTIONS = [1, 4]  (ADR §D1: UI 装不下更多)
+ *   - MIN/MAX_OPTIONS = [2, 4]    (ADR §D1: 同上)
+ *   - ID_REGEX                    (snake_case, answer key)
+ *   - VALID_TYPES                 (4 种合法类型)
+ *   - FORBIDDEN_TOP_LEVEL_KEYS    (INV-G 拒 vault 字段)
+ *   - hasControlChars             (TUI 安全: \n\r\t 造布局攻击)
+ *   - timeoutSec clamp [30, 1800] (防 0 / Infinity 误传)
+ *
+ * INV-G: refuse any vault-shaped field (`key`, `scope`) at the
+ * schema boundary, not later. Closes the door on a future LLM
+ * trying to use prompt_user as a vault surface.
+ *
+ * INV-H: `answers` is always `Record<string, string[]>` — that
+ * contract starts at validation; we reject duplicate ids that would
+ * collide in `answers`.
+ *
+ * INV-D (R7.2 update): the 4 user-visible fields (reason / header /
+ * question / option.label) all flow into the UI and audit. We do
+ * NOT redact here — redaction is a separate concern handled by
+ * `redactPromptParams` in the handler entry. R7.2 删除了第 5 字段
+ * option.description。
  *
  * Errors are RETURNED, never thrown — the handler converts them into
  * `{ ok:false, reason:"schema-invalid", detail }`.
@@ -30,22 +57,15 @@ import type {
   PromptUserQuestionType,
 } from "./types";
 
-// ── Bounds (ADR 0022 §D1 / R4) ──────────────────────────────────────
+// ── Bounds (structural / safety only, R7.2 simplified) ──────────────
 
 export const MIN_QUESTIONS = 1;
 export const MAX_QUESTIONS = 4;
 export const MIN_OPTIONS = 2;
 export const MAX_OPTIONS = 4;
-export const MAX_HEADER_DISPLAY_CELLS = 12;
-export const MAX_REASON_LEN = 1000;
-export const MAX_QUESTION_LEN = 500;
-export const MAX_OPTION_LABEL_LEN = 80;
-export const MAX_OPTION_DESC_LEN = 200;
-export const MAX_OPTION_LABEL_WORDS = 5;
 export const DEFAULT_TIMEOUT_SEC = 600;
 export const MIN_TIMEOUT_SEC = 30;
 export const MAX_TIMEOUT_SEC = 1800;
-export const MAX_PARAMS_BYTES = 4096; // §D1: total payload soft-cap
 
 export const VALID_TYPES: readonly PromptUserQuestionType[] = [
   "single",
@@ -57,72 +77,12 @@ export const VALID_TYPES: readonly PromptUserQuestionType[] = [
 const ID_REGEX = /^[a-z][a-z0-9_]{0,31}$/;
 const FORBIDDEN_TOP_LEVEL_KEYS = ["scope", "key", "vault", "secret_key"];
 
-/**
- * Count Unicode display cells (East Asian Wide / Fullwidth = 2, the
- * rest = 1). Not perfect — does not handle emoji ZWJ sequences or
- * variation selectors — but matches the budget Claude Code /
- * Codex use and is good enough for a 12-cell header bound.
- *
- * The crucial property under test: `"中文" → 4`, `"abcd" → 4`,
- * `"a中" → 3`. JS `string.length` would say 2/4/2 — we MUST not use
- * that for the header bound.
- */
-export function displayWidth(s: string): number {
-  let w = 0;
-  for (const ch of s) {
-    const cp = ch.codePointAt(0) ?? 0;
-    // East Asian Wide / Fullwidth ranges (a practical, not exhaustive, list)
-    if (
-      (cp >= 0x1100 && cp <= 0x115f) ||           // Hangul Jamo
-      (cp >= 0x2e80 && cp <= 0x303e) ||           // CJK Radicals / Symbols
-      (cp >= 0x3041 && cp <= 0x33ff) ||           // Hiragana, Katakana, CJK Symbols
-      (cp >= 0x3400 && cp <= 0x4dbf) ||           // CJK Unified Extension A
-      (cp >= 0x4e00 && cp <= 0x9fff) ||           // CJK Unified Ideographs
-      (cp >= 0xa000 && cp <= 0xa4cf) ||           // Yi
-      (cp >= 0xac00 && cp <= 0xd7a3) ||           // Hangul Syllables
-      (cp >= 0xf900 && cp <= 0xfaff) ||           // CJK Compatibility Ideographs
-      (cp >= 0xfe30 && cp <= 0xfe4f) ||           // CJK Compatibility Forms
-      (cp >= 0xff00 && cp <= 0xff60) ||           // Fullwidth Forms
-      (cp >= 0xffe0 && cp <= 0xffe6) ||
-      (cp >= 0x1f300 && cp <= 0x1f64f) ||         // Emoji (rough — keeps us conservative)
-      (cp >= 0x1f900 && cp <= 0x1f9ff) ||
-      (cp >= 0x20000 && cp <= 0x2fffd) ||         // CJK Extension B-F
-      (cp >= 0x30000 && cp <= 0x3fffd)
-    ) {
-      w += 2;
-    } else if (cp >= 0x20) {
-      w += 1;
-    }
-    // control chars (< 0x20) add 0 — we reject them separately
-  }
-  return w;
-}
-
 function hasControlChars(s: string): boolean {
-  // ADR 0022 P1-fix (OPUS review): reject ALL C0 controls including
-  // \t (0x09) / \n (0x0a) / \r (0x0d), plus DEL (0x7f). The earlier
-  // implementation allowed \t / \n / \r through; the comment lied.
-  //
-  // Concrete failure mode that motivated the tightening:
-  // `header = "abc\n\n\n\n\n"` has displayWidth=3 (each \n is 0
-  // cells per the East Asian Wide budget), so it passed the 12-cell
-  // bound — but PromptDialog rendered as a vertical stack of blanks
-  // pushing every subsequent question off-screen. \r is also a
-  // cursor-reset attack on terminals that survive the TUI buffer.
-  // jsonl is safe (JSON.stringify escapes \n), so this is a P1 UX
-  // hardening, not a P0 injection bug.
+  // R7.2 keep: 拒所有 C0 控制字符 (\t 0x09 / \n 0x0a / \r 0x0d) + DEL (0x7f)。
+  // 不是长度限制,而是 TUI 布局安全 —— \n 会让单个 header / label
+  // 在终端中竖向展开破坏 chip 布局; \r 是 cursor-reset attack。
+  // jsonl 安全(JSON.stringify escapes \n)所以这是 UX hardening 不是 P0 injection。
   return /[\x00-\x1f\x7f]/.test(s);
-}
-
-function countWords(s: string): number {
-  // Simple whitespace split; good enough for the "1-5 words" guideline.
-  // For pure-CJK labels (no spaces), each character is conceptually
-  // its own word — we don't penalize "确定" (2 chars / 0 spaces).
-  // To keep the rule meaningful for English, we count whitespace-
-  // separated tokens.
-  const trimmed = s.trim();
-  if (!trimmed) return 0;
-  return trimmed.split(/\s+/).length;
 }
 
 // ── Result type ─────────────────────────────────────────────────────
@@ -152,26 +112,13 @@ function validateOption(
   const o = opt as Record<string, unknown>;
   if (typeof o.label !== "string" || !o.label.trim()) {
     errors.push(`${prefix}.label: required non-empty string`);
-  } else {
-    if (o.label.length > MAX_OPTION_LABEL_LEN) {
-      errors.push(`${prefix}.label: > ${MAX_OPTION_LABEL_LEN} chars`);
-    }
-    if (countWords(o.label) > MAX_OPTION_LABEL_WORDS) {
-      errors.push(`${prefix}.label: > ${MAX_OPTION_LABEL_WORDS} words (keep it terse)`);
-    }
-    if (hasControlChars(o.label)) {
-      errors.push(`${prefix}.label: contains control characters`);
-    }
+  } else if (hasControlChars(o.label)) {
+    // R7.2: 长度 / 词数限制全删,但 control chars 仍拒(TUI 安全)。
+    errors.push(`${prefix}.label: contains control characters`);
   }
-  if (o.description !== undefined) {
-    if (typeof o.description !== "string") {
-      errors.push(`${prefix}.description: must be string if present`);
-    } else if (o.description.length > MAX_OPTION_DESC_LEN) {
-      errors.push(`${prefix}.description: > ${MAX_OPTION_DESC_LEN} chars`);
-    } else if (hasControlChars(o.description)) {
-      errors.push(`${prefix}.description: contains control characters`);
-    }
-  }
+  // R7.2: `description` 字段已从 PromptUserOption 中删除。
+  // 老 LLM 仍传 silent-drop —— validator 默认对未声明字段不报错,
+  // 避免迁移期中断。OptionList 不读它,UI / audit 看不到。
   if (o.recommended !== undefined && typeof o.recommended !== "boolean") {
     errors.push(`${prefix}.recommended: must be boolean if present`);
   }
@@ -205,27 +152,17 @@ function validateQuestion(
     }
   }
 
-  // header
+  // header — R7.2: 不再限制 display cells (12)。pi-tui Text 自动 wrap。
+  // 仅保留非空检查 + control chars 拒 (TUI 安全)。
   if (typeof qq.header !== "string" || !qq.header.trim()) {
     errors.push(`${prefix}.header: required non-empty string`);
-  } else {
-    if (hasControlChars(qq.header)) {
-      errors.push(`${prefix}.header: contains control characters`);
-    }
-    const w = displayWidth(qq.header);
-    if (w > MAX_HEADER_DISPLAY_CELLS) {
-      errors.push(
-        `${prefix}.header: ${w} display cells, max ${MAX_HEADER_DISPLAY_CELLS} ` +
-        `(CJK chars count as 2; current ${JSON.stringify(qq.header)})`,
-      );
-    }
+  } else if (hasControlChars(qq.header)) {
+    errors.push(`${prefix}.header: contains control characters`);
   }
 
-  // question
+  // question — R7.2: 删除 MAX_QUESTION_LEN (500 chars) 限制。
   if (typeof qq.question !== "string" || !qq.question.trim()) {
     errors.push(`${prefix}.question: required non-empty string`);
-  } else if (qq.question.length > MAX_QUESTION_LEN) {
-    errors.push(`${prefix}.question: > ${MAX_QUESTION_LEN} chars`);
   } else if (hasControlChars(qq.question)) {
     errors.push(`${prefix}.question: contains control characters`);
   }
@@ -315,11 +252,9 @@ export function validatePromptUserParams(raw: unknown): ValidationResult {
     }
   }
 
-  // reason
+  // reason — R7.2: 删除 MAX_REASON_LEN (1000 chars) 限制。
   if (typeof p.reason !== "string" || !p.reason.trim()) {
     errors.push("params.reason: required non-empty string explaining why you must pause");
-  } else if (p.reason.length > MAX_REASON_LEN) {
-    errors.push(`params.reason: > ${MAX_REASON_LEN} chars`);
   } else if (hasControlChars(p.reason)) {
     errors.push("params.reason: contains control characters");
   }
@@ -340,7 +275,7 @@ export function validatePromptUserParams(raw: unknown): ValidationResult {
     p.questions.forEach((q, i) => validateQuestion(q, i, seenIds, errors));
   }
 
-  // timeoutSec (optional)
+  // timeoutSec (optional, clamped)
   let timeoutSec = DEFAULT_TIMEOUT_SEC;
   if (p.timeoutSec !== undefined) {
     if (typeof p.timeoutSec !== "number" || !Number.isFinite(p.timeoutSec)) {
@@ -353,15 +288,10 @@ export function validatePromptUserParams(raw: unknown): ValidationResult {
     }
   }
 
-  // Payload total-size soft check (mostly to fail closed on accidental
-  // 1MB pastes; matches §D1)
+  // R7.2: 删除 4KB payload 总长度检查。仍保留 JSON-serializable 检查
+  // (防 circular ref) —— 这不是长度限制,是结构完整性。
   try {
-    const serialized = JSON.stringify(p);
-    if (serialized.length > MAX_PARAMS_BYTES) {
-      errors.push(
-        `params: serialized size ${serialized.length} bytes > ${MAX_PARAMS_BYTES} (keep prompts terse)`,
-      );
-    }
+    JSON.stringify(p);
   } catch {
     errors.push("params: not JSON-serializable (circular reference?)");
   }

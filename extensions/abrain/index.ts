@@ -1045,6 +1045,10 @@ export default function activate(pi: ExtensionAPI): void {
         Input: tuiModule.Input,
         SelectList: tuiModule.SelectList,
         DynamicBorder: codingAgent.DynamicBorder,
+        // R6.3 (2026-05-17): 加入 Spacer。PromptDialog 需要真正的空行间距 —
+        // pi-tui Text 对 "" / "   " 走「不渲染」路径，以前用 Text("")
+        // 当 spacer 一直是 0 行 (所以用户看到拥挤)。Spacer(1) 才是可靠间距。
+        Spacer: tuiModule.Spacer,
       };
     } catch (err) {
       // pi-tui not available in this process — OK, prompt_user will
@@ -1128,9 +1132,13 @@ export default function activate(pi: ExtensionAPI): void {
       promptSnippet:
         "prompt_user({ reason, questions: [{ id, header, question, type, options? }], timeoutSec? })",
       promptGuidelines: [
+        // R7.2 (2026-05-17): 以下 guideline 随 schema 简化同步。原
+        // "header ≤ 12 cells / option labels 1-5 words" 被删除 —
+        // validator R7.2 不再强制 (用户要求 LLM 自决长度)。
         "Issue a single prompt_user call with multiple questions[] rather than chaining calls. Concurrent prompts are rejected (INV-I).",
         "reason explains why you must pause (e.g. 'project framework choice affects scaffolding'), not a re-statement of the questions.",
-        "header \u2264 12 display cells (CJK char = 2 cells, ASCII = 1 cell); question is a complete sentence; option labels 1\u20135 words.",
+        "Keep header / label / description-equivalent text short but length is up to you \u2014 the UI wraps automatically. CJK and ASCII both render correctly.",
+        "option.label is the displayed text AND the canonical answer value. If you want to convey a tradeoff, write it directly in the label (e.g. 'TypeScript \u2014 \u5f3a\u7c7b\u578b\u5168\u6808'); the UI wraps long labels onto multiple lines.",
         "memory_search past preferences first (e.g. memory_search('user preference framework')) before asking.",
         "For irreversibility (deploy, rm -rf, push to main), prefer type:'single' with explicit Yes/No labels rather than free-form text.",
         "type:'secret' raw input never reaches you \u2014 you get a placeholder. Use vault_release for known stored secrets instead.",
@@ -1151,8 +1159,8 @@ export default function activate(pi: ExtensionAPI): void {
               type: "object",
               properties: {
                 id: { type: "string", description: "snake_case identifier; unique within the call." },
-                header: { type: "string", description: "\u2264 12 display cells; CJK = 2 each." },
-                question: { type: "string", description: "Complete sentence shown above options." },
+                header: { type: "string", description: "Short section header. Any length; UI wraps automatically." },
+                question: { type: "string", description: "Complete sentence shown above options. Any length; UI wraps automatically." },
                 type: { type: "string", enum: ["single", "multi", "text", "secret"] },
                 options: {
                   type: "array",
@@ -1162,9 +1170,12 @@ export default function activate(pi: ExtensionAPI): void {
                   items: {
                     type: "object",
                     properties: {
-                      label: { type: "string", description: "1\u20135 words." },
-                      description: { type: "string" },
-                      recommended: { type: "boolean", description: "At most one option per question." },
+                      // R7.2 合并 description→label。LLM 可以在 label 里直接
+                      // 写「Name — tradeoff」格式，UI 多行 wrap。老调用仍传
+                      // `description` 会被 validator silent-drop，不报错但
+                      // 不会呈现。
+                      label: { type: "string", description: "Displayed option text AND canonical answer value. Any length; wraps to multiple lines if long." },
+                      recommended: { type: "boolean", description: "At most one option per question may be recommended; UI suffixes ' (Recommended)' to the label." },
                     },
                     required: ["label"],
                   },
@@ -1199,7 +1210,29 @@ export default function activate(pi: ExtensionAPI): void {
           promptCtx as unknown as Parameters<typeof promptHandlerModule.executePromptUserTool>[2],
           handlerDeps,
         );
-        return json;
+        // pi's agent-core (pi-agent-core/dist/agent-loop.js) expects
+        // execute() to return a ToolResult { content, details }, not a
+        // raw string. When the tool returns a string, pi spreads it
+        // into the tool_execution_end event (`{...event.result}`),
+        // which yields an object with numeric keys per character and
+        // no `content` field — `render-utils.js getTextOutput()` then
+        // crashes on `result.content.filter(...)` and the whole TUI
+        // dies via uncaughtException. This is the same failure mode
+        // that bit the memory extension on 2026-05-09 (see decision
+        // memory-tools-must-return-toolresult-content). Wrap the
+        // canonical JSON string (which handler.ts is contractually
+        // required to produce — smoke tests parse it back) into the
+        // ToolResult envelope. We also expose the parsed payload as
+        // `details` so any future custom renderer can read it without
+        // re-parsing; JSON.parse is guarded so a malformed handler
+        // return (defense in depth — handler never throws and always
+        // JSON.stringify's a known shape) can't crash the registry.
+        let details: unknown;
+        try { details = JSON.parse(json); } catch { details = { raw: json }; }
+        return {
+          content: [{ type: "text", text: json }],
+          details,
+        };
       },
     });
 

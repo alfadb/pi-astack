@@ -36,19 +36,27 @@ export type PromptUserQuestionType = "single" | "multi" | "text" | "secret";
 /**
  * One option for `single` / `multi` questions.
  *
- *   - `label`:       1-5 words, what the chip shows
- *   - `description`: optional 1-line explanation under the chip
- *   - `recommended`: optional; the UI may highlight at most ONE
- *                    recommended option per question (validator
- *                    enforces this)
+ *   - `label`:       任意长度的选项文本 (R7.2 合并后唯一的用户可见
+ *                    字段)。OptionList 在渲染时会自动 wrap 到多行,LLM
+ *                    可以写“TypeScript” 这样的短标签也可以写
+ *                    “TypeScript — 强类型 web 全栈” 这样的带描述的
+ *                    长文本。
+ *   - `recommended`: optional; the UI appends "(Recommended)" suffix
+ *                    to at most ONE option per question (validator
+ *                    enforces this).
  *
- * All user-visible fields (`label`, `description`) are run through
- * `redactCredentials` + `sanitizeForMemory` at the handler entry
- * (ADR 0022 INV-D). LLM may embed a URL credential in any of them.
+ * 历史: R7.1 之前有一个独立的 `description?: string` 字段。
+ * 用户反馈 “为什么要一个名称+一个描述,直接一个描述就可以
+ * 了,LLM 自己决定如何输入”——R7.2 合并为单一 `label` 字段。
+ * 老调用仍传 `description` 由 schema validator silent drop
+ * (不报错但不渲染,避免迁移期间 LLM 中断)。
+ *
+ * 用户可见字段 `label` 过完整的 `redactCredentials` +
+ * `sanitizeForMemory` 才会进入 UI / audit。LLM 写的任何 URL
+ * credential 都会被剩下 ***@host 的占位。
  */
 export interface PromptUserOption {
   label: string;
-  description?: string;
   recommended?: boolean;
 }
 

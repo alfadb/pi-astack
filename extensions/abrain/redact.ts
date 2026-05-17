@@ -22,12 +22,15 @@
  *   ADR 0022 INV-C — `redactSecretAnswer` is how `type:"secret"` raw
  *     answers are replaced before the value crosses any audit / LLM /
  *     log boundary.
- *   ADR 0022 INV-D — `redactPromptParams` is the single funnel through
- *     which 5 user-visible fields (reason / header / question /
- *     option.label / option.description) get scrubbed before they
- *     reach UI / audit / sediment. Lives here (not handler.ts) so
- *     both `handler.executePromptUserTool` AND `service.askPromptUser`
- *     can call it without circular import; calls are idempotent.
+ *   ADR 0022 INV-D (R7.2 updated 5→4) — `redactPromptParams` is the
+ *     single funnel through which 4 user-visible fields (reason /
+ *     header / question / option.label) get scrubbed before they reach
+ *     UI / audit / sediment. R7.2 (2026-05-17) 删除了第 5 字段
+ *     option.description —— 用户要求「合并为单字段 label,LLM
+ *     自决长度」,description 从 schema 中被刪除。Lives here (not
+ *     handler.ts) so both `handler.executePromptUserTool` AND
+ *     `service.askPromptUser` can call it without circular import;
+ *     calls are idempotent.
  */
 
 import * as os from "node:os";
@@ -98,14 +101,13 @@ export function sanitizePathLike(s: string): string {
 /**
  * Single funnel for INV-D redaction of `PromptUserParams`.
  *
- * Covers all 5 user-visible fields (R4 P0 fix vs R3 which missed
- * `header` and `option.label`):
+ * Covers all 4 user-visible fields (R7.2 update: 从 R4 的 5 字段减为 4,
+ * 删除 `option.description`,合并到 `option.label`。):
  *
  *   - `reason`
  *   - `question.header`
  *   - `question.question`
  *   - `option.label`
- *   - `option.description`
  *
  * Each field passes through `redactCredentials` (URL credentials in
  * any scheme) then `sanitizePathLike` (home-path / IPv4) so a single
@@ -113,6 +115,10 @@ export function sanitizePathLike(s: string): string {
  * becomes `"deploy to postgres://***@[HOST]/db at $HOME/x"` before it
  * touches PromptDialog, audit jsonl, or any future sediment evidence
  * pre-pass.
+ *
+ * R7.2: 老 LLM 如果仍传 `option.description`,validator silent-drop
+ * 不报错但也不会进入 PromptUserOption 类型,这里也不需要 redact
+ * (字段不存在于 redact 路径 = 不会进 UI 或 audit)。
  *
  * Idempotent: `***@` doesn't match `[^@\s\/]+@`, `$HOME` doesn't
  * match the home-path literal, and `[HOST]` doesn't match the IPv4
@@ -125,11 +131,16 @@ export function sanitizePathLike(s: string): string {
  */
 export function redactPromptParams(p: PromptUserParams): PromptUserParams {
   const scrub = (s: string): string => sanitizePathLike(redactCredentials(s));
-  const redactOption = (o: PromptUserOption): PromptUserOption => ({
-    ...o,
-    label: scrub(o.label),
-    ...(o.description !== undefined ? { description: scrub(o.description) } : {}),
-  });
+  const redactOption = (o: PromptUserOption): PromptUserOption => {
+    // R7.2 + opus review P0.1: 明式重建对象 + 白名单字段，不用 `...o`
+    // spread。原在使用 spread, 老 LLM 仍传 `description` 会随 spread
+    // 透传到 redacted 输出里且未被 scrub —— 今天没下游读它
+    // 所以不泄，但另一个 debug JSON.stringify 就会衰送 credentials。
+    // 显式白名单全 strip 未知字段，避免未来 regression。
+    const out: PromptUserOption = { label: scrub(o.label) };
+    if (o.recommended !== undefined) out.recommended = o.recommended;
+    return out;
+  };
   const redactQuestion = (q: PromptUserQuestion): PromptUserQuestion => ({
     ...q,
     header: scrub(q.header),

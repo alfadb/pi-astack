@@ -142,30 +142,25 @@ export async function executePromptUserTool(
     });
   }
 
-  // 2b. Narrow terminal guard (ADR §D3 / INV-A third arm; DEEPSEEK P1
-  //     review). PromptDialog renders chip-style options that need
-  //     ≥ 60 cells to be readable. Below that the user sees a clipped
-  //     mess. Reject up front with `ui-unavailable` so the LLM picks
-  //     a degraded code path. `process.stdout.columns` is undefined
-  //     in non-TTY environments — fall back to 80 so we don't
-  //     false-positive reject when running under pi RPC.
-  const cols =
-    (typeof process !== "undefined" &&
-      process.stdout &&
-      (process.stdout as { columns?: number }).columns) ||
-    80;
-  if (cols < 60) {
-    deps.recordBlocked({
-      reason: "no-ui",
-      detail: `terminal width ${cols} < 60 cells`,
-    });
-    return toolJson({
-      ok: false,
-      reason: "ui-unavailable",
-      durationMs: Date.now() - started,
-      detail: `prompt_user requires terminal width ≥ 60 cells (got ${cols})`,
-    });
-  }
+  // 2b. Narrow terminal guard — REMOVED in R6 (2026-05-17).
+  //
+  // The pre-R6 implementation rejected `cols < 60` because the
+  // <PromptDialog> overlay was rendered as a centered 60%-wide window
+  // that became unreadable on narrow terminals. After R6 the dialog
+  // is rendered inline as an editor-region replacement (ADR 0022 §D7
+  // R6 update): pi-tui Text components wrap automatically, the editor
+  // container's width tracks the terminal width, and there is no
+  // double DynamicBorder ± 60% margin math to break on narrow widths.
+  // Rejecting narrow terminals would now be a regression — split-pane
+  // tmux setups, mobile terminals, and SSH-from-phone all live in the
+  // 40–59 cell band and have no problem rendering inline. INV-A keeps
+  // its hasUI + sub-pi arms; the terminal-width arm is dropped because
+  // it no longer protects against a real failure mode.
+  //
+  // (Test coverage: smoke-prompt-user.mjs previously asserted
+  // `narrow terminal (< 60 cols) → ui-unavailable`; that assertion
+  // is updated alongside this change to verify the inline path no
+  // longer false-positives on cols=40.)
 
   // 3. Schema validation.
   const validation = validatePromptUserParams(rawParams);

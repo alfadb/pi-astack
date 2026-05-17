@@ -225,26 +225,52 @@ check("schema: options.length=1 → schema-invalid", () => {
   if (r.ok) throw new Error("expected reject");
 });
 
-check("schema: header > 12 display cells (CJK = 2) → schema-invalid", () => {
+// R7.2 (2026-05-17): 删除三个“长度限制 reject”的测试。原本这几条
+// 验证: header > 12 cells 拒 / option.description > 80 cells 拒 /
+// option.description ≤ 80 cells 放过。R7.2 删除了所有用户可见字段
+// 的长度限制(用户反馈“LLM 自己决定长度”),同时删除了
+// `description` 字段本身。替换为“这些增加名后不再 reject”的全覆盖。
+
+check("R7.2: header > 12 display cells (CJK = 2) → ok (no length limit)", () => {
   const r = schema.validatePromptUserParams({
     reason: "x",
     questions: [{
       id: "a",
-      header: "中文标头长度超过限制", // 10 chars × 2 cells = 20 cells
+      header: "中文标头长度超过原限制但没关系",  // 12 chars × 2 = 24 cells
       question: "q?",
       type: "text",
     }],
   });
-  if (r.ok) throw new Error("expected reject");
-  if (!r.errors.some((e) => /display cells/.test(e))) throw new Error(r.errors.join(","));
+  if (!r.ok) throw new Error(`R7.2 长 header 不应 reject: ${r.errors.join(",")}`);
 });
 
-check("schema: header within budget (ASCII 12 chars) → ok", () => {
+check("R7.2: option.description silently dropped (field no longer in schema)", () => {
+  // 老 LLM 仍传 description 字段。validator 默认不拒未声明字段,
+  // 使老 LLM 调用不中断。OptionList 不读它,UI 看不到。
   const r = schema.validatePromptUserParams({
     reason: "x",
-    questions: [{ id: "a", header: "abcdefghijkl", question: "q?", type: "text" }],
+    questions: [{
+      id: "a", header: "h", question: "q?", type: "single",
+      options: [
+        { label: "yes", description: "任意长度的老字段应静默丢弃不报错" },
+        { label: "no" },
+      ],
+    }],
   });
-  if (!r.ok) throw new Error(`unexpected reject: ${r.errors.join(", ")}`);
+  if (!r.ok) throw new Error(`description silent drop 失败: ${r.errors.join(",")}`);
+});
+
+check("R7.2: long option.label → ok (no length limit)", () => {
+  // 原 MAX_OPTION_LABEL_LEN=80 chars + MAX_OPTION_LABEL_WORDS=5 词。R7.2 全删。
+  const longLabel = "TypeScript — 强类型 web 全栈语言,工具链成熟,与 React/Vue 生态集成严密,超过 5 词超过 80 字符";
+  const r = schema.validatePromptUserParams({
+    reason: "x",
+    questions: [{
+      id: "a", header: "h", question: "q?", type: "single",
+      options: [{ label: longLabel }, { label: "no" }],
+    }],
+  });
+  if (!r.ok) throw new Error(`R7.2 长 label 不应 reject: ${r.errors.join(",")}`);
 });
 
 check("schema: id failing regex → schema-invalid", () => {
@@ -314,18 +340,26 @@ check("P1-fix: reason containing \\t → schema-invalid (all C0 rejected)", () =
   if (r.ok) throw new Error("expected reject for \\t in reason");
 });
 
-check("schema: > 4KB total → schema-invalid", () => {
+check("R7.2: > 4KB total → ok (no payload size limit)", () => {
+  // 原 MAX_PARAMS_BYTES=4096 限。R7.2 删,只保留 JSON-serializable 检查。
   const huge = "x".repeat(5000);
   const r = schema.validatePromptUserParams({
     reason: huge,
     questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
   });
-  if (r.ok) throw new Error("expected reject");
+  if (!r.ok) throw new Error(`R7.2 超4KB payload 不应 reject: ${r.errors.join(",")}`);
 });
 
-// ── 2. INV-D redaction: handler-entry redactPromptParams covers all 5 fields ──
+check("R7.2: circular reference still rejected (JSON-serializable check kept)", () => {
+  const circular = { reason: "x", questions: [{ id: "a", header: "h", question: "q?", type: "text" }] };
+  circular.self = circular;
+  const r = schema.validatePromptUserParams(circular);
+  if (r.ok) throw new Error("circular ref should still be rejected");
+});
 
-check("INV-D: redactPromptParams covers reason / header / question / option.label / option.description", () => {
+// ── 2. INV-D redaction (R7.2 update: 5→4 fields, 刪除 option.description) ──
+
+check("R7.2 INV-D: redactPromptParams covers 4 user-visible fields (reason / header / question / option.label)", () => {
   const cred = "https://user:tok@host.local/x";
   const before = {
     reason: `release token to ${cred}`,
@@ -335,7 +369,7 @@ check("INV-D: redactPromptParams covers reason / header / question / option.labe
       question: `confirm ${cred}`,
       type: "single",
       options: [
-        { label: `${cred}/l`, description: `desc ${cred}` },
+        { label: `${cred}/l` },
         { label: "no" },
       ],
     }],
@@ -346,12 +380,11 @@ check("INV-D: redactPromptParams covers reason / header / question / option.labe
   if (all.includes("user:tok@")) {
     throw new Error(`credential leaked after redactPromptParams: ${all.slice(0, 200)}`);
   }
-  // Spot-check each of the 5 fields explicitly:
+  // 4 user-visible 字段全覆盖:
   if (!after.reason.includes("***@")) throw new Error("reason missing ***@");
   if (!after.questions[0].header.includes("***@")) throw new Error("header missing ***@");
   if (!after.questions[0].question.includes("***@")) throw new Error("question missing ***@");
   if (!after.questions[0].options[0].label.includes("***@")) throw new Error("option.label missing ***@");
-  if (!after.questions[0].options[0].description.includes("***@")) throw new Error("option.description missing ***@");
 });
 
 // ── 3. Handler guards (no UI, sub-pi) ──────────────────────────────
@@ -407,50 +440,22 @@ await asyncCheck("handler: !ctx.hasUI → ui-unavailable", async () => {
   }
 });
 
-// P1-fix (DEEPSEEK review): narrow terminal rejection.
-await asyncCheck("P1-fix: narrow terminal (< 60 cols) → ui-unavailable", async () => {
+// R6 (2026-05-17): narrow-terminal rejection REMOVED. <PromptDialog> now
+// renders inline as editor-region replacement (no centered overlay, no
+// 60% width math), so cols=40 is fine and an old `cols < 60 → reject`
+// would be a false-positive regression. Replacement assertion: narrow
+// terminal MUST NOT reject; it must continue to schema validation.
+await asyncCheck("R6: narrow terminal (40 cols) does NOT reject anymore", async () => {
   manager.__resetForTests();
   recordedBlocked.length = 0;
-  // Mock process.stdout.columns by stashing original + replacing.
   const origCols = process.stdout.columns;
   Object.defineProperty(process.stdout, "columns", {
     configurable: true, get: () => 40,
   });
   try {
-    const json = await handlerMod.executePromptUserTool(
-      { reason: "x", questions: [{ id: "a", header: "h", question: "q?", type: "text" }] },
-      undefined,
-      { ui: { custom: () => {}, notify: () => {} }, hasUI: true },
-      handlerDeps,
-    );
-    const r = JSON.parse(json);
-    if (r.ok || r.reason !== "ui-unavailable") {
-      throw new Error(`expected ui-unavailable for narrow terminal, got ${JSON.stringify(r)}`);
-    }
-    if (!r.detail?.includes("60 cells")) {
-      throw new Error(`detail should mention 60 cells: ${r.detail}`);
-    }
-    if (!recordedBlocked.find((b) => b.reason === "no-ui" && b.detail?.includes("width 40"))) {
-      throw new Error("audit row for narrow terminal missing");
-    }
-  } finally {
-    Object.defineProperty(process.stdout, "columns", {
-      configurable: true, get: () => origCols,
-    });
-  }
-});
-
-await asyncCheck("P1-fix: terminal cols undefined (RPC mode) → fallback to 80, no reject", async () => {
-  manager.__resetForTests();
-  recordedBlocked.length = 0;
-  const origCols = process.stdout.columns;
-  Object.defineProperty(process.stdout, "columns", {
-    configurable: true, get: () => undefined,
-  });
-  try {
-    // Should pass the cols check (fallback 80 >= 60) and continue
-    // to schema validation. We pass intentionally invalid params so
-    // the smoke can confirm we made it PAST the cols guard.
+    // Pass intentionally invalid params (empty questions) so we can
+    // confirm we reached schema validation — i.e. the narrow-cols
+    // guard did NOT short-circuit with ui-unavailable.
     const json = await handlerMod.executePromptUserTool(
       { reason: "x", questions: [] },
       undefined,
@@ -460,7 +465,38 @@ await asyncCheck("P1-fix: terminal cols undefined (RPC mode) → fallback to 80,
     const r = JSON.parse(json);
     if (r.reason !== "schema-invalid") {
       throw new Error(
-        `cols-undefined should fall back to 80; expected schema-invalid (from empty questions), got ${r.reason}`,
+        `narrow terminal should fall through to schema validation; expected schema-invalid (empty questions), got ${r.reason}: ${JSON.stringify(r)}`,
+      );
+    }
+    // Audit must NOT record a no-ui width-related block.
+    if (recordedBlocked.find((b) => b.reason === "no-ui" && /width \d+/.test(b.detail || ""))) {
+      throw new Error("narrow terminal incorrectly emitted no-ui width audit row");
+    }
+  } finally {
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true, get: () => origCols,
+    });
+  }
+});
+
+await asyncCheck("R6: cols=undefined (RPC mode) still passes through to schema", async () => {
+  manager.__resetForTests();
+  recordedBlocked.length = 0;
+  const origCols = process.stdout.columns;
+  Object.defineProperty(process.stdout, "columns", {
+    configurable: true, get: () => undefined,
+  });
+  try {
+    const json = await handlerMod.executePromptUserTool(
+      { reason: "x", questions: [] },
+      undefined,
+      { ui: { custom: () => {}, notify: () => {} }, hasUI: true },
+      handlerDeps,
+    );
+    const r = JSON.parse(json);
+    if (r.reason !== "schema-invalid") {
+      throw new Error(
+        `cols=undefined should not affect routing; expected schema-invalid, got ${r.reason}`,
       );
     }
   } finally {
