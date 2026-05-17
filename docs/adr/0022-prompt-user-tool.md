@@ -704,14 +704,26 @@ P0 范围（本 ADR ship 即落地）：
 - Smoke: ~800 LOC（不含 fixture data；含 fixture ≈ 1000）
 - **合计 ~2050-2400 LOC**，单 PR 仍可落地（参考 ADR 0020 / 0021 同量级 PR 已 ship）。
 
-### 4.5 后续 Phase（不在本 ADR P0）
+### 4.5 实施进度 + 后续 Phase
 
-| Phase | 内容 |
-|---|---|
-| **P1** | `/about-me` slash 接 `askPromptUser` service（ADR 0021 G2 落实，SDK 支持后）；`/decide` 类 high-level slash 试用 |
-| **P2** | `vault_release` UI 迁移 fallback 移除（满足 §D2 末 3 条件后） |
-| **P3** | `type:"secret"` 经 `sessionVaultKeys` → `$PROMPT_VAULT_<id>` bash injection 路径（新 follow-up ADR）；vault_release 也用 timeoutSec=600 默认；TUI footer pending prompt 指示 |
-| **P4 (backlog)** | defer/resume；richer types（slider/date picker）；plan-mode 等价工具；hard rate-limit |
+**已 ship（2026-05-17）**：
+
+| Phase | 内容 | Commit | Smoke |
+|---|---|---|---|
+| **P1** ✅ | `redactCredentials` 提升到 `abrain/redact.ts`；redact primitives 高级 family；`prompt-user/types.ts` 骨架 | `0e937f7` | `smoke:abrain-redact` |
+| **P2** ✅ | 完整 LLM 工具表面（schema / manager / service / handler / PromptDialog）+ abrain wire-up + session_shutdown finalizer + globalThis pending hook | `b9565c2` | `smoke:prompt-user{,-finalizer,-subpi}` |
+| **P3a** ✅ | `compaction-tuner/prompt-user-defer.ts` 叶模块 + INV-K guard | `29439cb` | `smoke:compaction-tuner-prompt-user` |
+| **P2-fix** ✅ | OPUS+DEEPSEEK xhigh review 产出 7 项 P1 全修：`hasControlChars` 拒 \t\n\r / `redactCredentials` 扩全 scheme / `redactPromptParams` 下沉 service + 加 `sanitizePathLike` / narrow terminal reject / fallback multi 多次 confirm / INV-I 发 audit | `8676c5f` | +11 redact / +10 prompt-user assertion |
+
+P1+P2+P3a+P2-fix 合计：TS ~5300 LOC + smoke ~3500 LOC，22/22 全量 smoke 零回归。
+
+**deferred（本 ADR P0 不要求）**：
+
+| Phase | 内容 | 估算 |
+|---|---|---|
+| **P3b** | `authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁移到 `<PromptDialog>` overlay（variant `vault_release` / `bash_output_release`），保留 `ui.select` fallback。验证 INV-E smoke。 | ~150 LOC + 5 assertion |
+| **P3c** | sediment evidence assembly 读 `lane:"prompt_user"` audit 行 → curator prompt，让 sediment 区分「用户决策」与「LLM 思考」。 | ~80 LOC + smoke |
+| **P4** | `/about-me` slash 接 `askPromptUser` service（ADR 0021 G2 可复用）；`/decide` 类 high-level slash；`type:"secret"` raw consumer callback API；`type:"multi"` 真正多选 toggle；`type:"secret"` 经 `$PROMPT_VAULT_<id>` bash injection（新 follow-up ADR）；defer/resume（需 pi 核心 turn-resume API）；richer types（slider/date picker）；hard rate-limit | per-feature |
 
 ---
 

@@ -5,12 +5,16 @@
 > **2026-05-15 同步**：roadmap 上一版有几条 debt 已经在 2026-05-14 R5/R6 audit 中落地（dispatch temp prompt uniqueness、vault read/bash fail-closed、writer git rollback、migrate-go frontmatter preservation、Vault P1 active project resolver），本次清理移出 backlog，列入下方 **§ "已落地的旧 backlog（不要再当 debt）"** 防止再被当成未完成项。
 >
 > **2026-05-15 PM 补充**：multi-LLM audit (round 1+2) 同日关闭三项 backlog：**Curator scope binding (create 分支)**、**sediment update/merge unknown frontmatter preservation 系统化测试**、**memory parser kind/status 枚举 enforcement**（该项本次初检才发现，同日修复）。均进§"已落地不变量"。
+>
+> **2026-05-17 同步**：ADR 0022 (`prompt_user` LLM-facing 同步问答工具) P1 + P2 + P3a + P2-fix 完成。LLM 现在可以调 `prompt_user(...)` 暂停 turn 问用户问题，解决 sediment 拿到残缺 turn 的问题。详 [ADR 0022](./adr/0022-prompt-user-tool.md) §4 与 [current-state §10](./current-state.md#10-prompt_user-状态adr-0022)。R4 multi-LLM ADR audit + 1 轮 implementation P1 audit (OPUS + DEEPSEEK xhigh)，P0 共识 0，7 个 P1 全部 ship-with-smoke。P3b/P3c 进入 backlog（下表）。
 
 ## P0/P1 product backlog
 
 | Item | Intent | Notes |
 |---|---|---|
-| Lane G G2–G5 | G1 writer（`writeAbrainAboutMe` + fence extractor + router）✅ shipped 2026-05-16，详 [ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)。剩余：G2 `/about-me` slash + transcript inject、G3 aboutness LLM classifier、G4 `review-staging` slash + 30-day TTL、G5 region-aware ranking hint。 | G2 在等 pi extension SDK 确认 user-role transcript inject API；其他无阻塞。 |
+| **ADR 0022 P3b：vault_release UI 迁移** | `authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 `<PromptDialog>` overlay（variant `vault_release` / `bash_output_release`），保留 `ui.select` fallback。¨ ~150 LOC 代码 + `smoke:abrain-vault-reader` +5 assertion。验证 INV-E（PromptDialog 不持 grant 状态）。 | 安排时对 vault state machinery 做完整 multi-LLM audit（high-value review 点）。 |
+| **ADR 0022 P3c：sediment evidence 注入 `prompt_user` 信号** | sediment evidence assembly 读本 turn `lane:"prompt_user"` audit 行，输出 user-attested signal 段注入 curator prompt。让 curator 区分「用户决策」与「LLM 思考」。¨ ~80 LOC + smoke。 | 需先读 sediment curator prompt 结构。与 P3b 独立，可独立 ship。 |
+| Lane G G2–G5 | G1 writer（`writeAbrainAboutMe` + fence extractor + router）✅ shipped 2026-05-16，详 [ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)。剩余：G2 `/about-me` slash + transcript inject、G3 aboutness LLM classifier、G4 `review-staging` slash + 30-day TTL、G5 region-aware ranking hint。 | G2 在等 pi extension SDK 确认 user-role transcript inject API；其他无阻塞。**ADR 0022 P2 后 G2 可考虑复用 `askPromptUser` service 作为 `/about-me` UI substrate**，不再依赖 user-role inject API。 |
 | Vault P0d | masked input、`.env` import、`/vault migrate-backend` wizard | 保持 fail-closed，不引入 plaintext fallback。Vault P1（active project resolver + `/secret` scope 路由 + `$PVAULT_/$GVAULT_`）已 ship。 |
 | `abrain-age-key` identity passphrase wrap | 让 `~/.abrain/.vault-identity/master.age` 能用 passphrase 加密后进 git，实现跨设备仅 `git clone abrain` + 输一次 passphrase。详见 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md) §"P0d 增强"。 | 技术依赖未定：(Y2) `age-encryption` JS lib in-process unwrap · (Y1) `node-pty` 模拟 pseudo-tty 。合并 P0d ADR 决策。 |
 | Tier 3 legacy backends reader UX | `ssh-key` / `gpg-file` / `passphrase-only` 在 ADR 0019 后是 explicit-only。`passphrase-only` reader 仍不能解锁（同一 tty pass-through 问题）。 | 上项 abrain-age-key passphrase wrap 落地后该 gap 自动关闭（同一 unwrap 路径）；在那之前 `/vault status` 仍会在旧 backend init 后显示 deprecation 提示。 |
@@ -24,6 +28,7 @@
 | Runtime path docs/tests | 避免 `.pensieve`/`.pi-astack`/`.abrain .state` 路径漂移。 |
 | Model fallback vs curator whitelist | 当前 model-curator session_start 只 WARN，不阻止 curator 删掉 fallback 候选；需要 curator 在 whitelist 时尊重 fallbackModels 列表，或 fallback 路径自带 whitelist bypass。 |
 | Sediment audit candidates.title sanitize | explicit lane 的 audit `candidates[].title` 字段在 R5 之前未走 `sanitizeForMemory`（auto-write lane 同）；2026-05-15 已修，但保留此项提醒未来新加 audit 字段须默认走 `sanitizeAuditText`。 |
+| ADR 0022 P2 review P2 polish 丝项 | OPUS+DEEPSEEK review 中 7 项 P2 未动：`__secretLengths` 重命名 / `redactCredentials` 多-@ 边界 case / `displayWidth` 补 East Asian 码点 / `globalThis` hook non-configurable / `via=fallback_chain` audit 结构化 / overlayOptions 响应式宽度。 | 年中 housekeeping commit 项。不阻塞。 |
 
 ## Architecture invariants（已守护，禁止退化）
 
