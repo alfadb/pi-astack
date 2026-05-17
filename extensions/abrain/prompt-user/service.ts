@@ -24,7 +24,11 @@
 
 import type { PromptUserParams, PromptUserResult } from "./types";
 import { acquirePending } from "./manager";
-import { lengthBucket, redactSecretAnswer } from "../redact";
+import {
+  lengthBucket,
+  redactPromptParams,
+  redactSecretAnswer,
+} from "../redact";
 
 // ── External adapters ───────────────────────────────────────────────
 
@@ -52,6 +56,15 @@ export interface PromptUserCtx {
       prompt: string,
       opts?: { signal?: AbortSignal },
     ) => Promise<string | undefined>;
+    // ADR 0022 P1-fix (DEEPSEEK review): chained fallback for
+    // type:"multi" walks each option through ui.confirm so the user
+    // can include/exclude N items independently. Without confirm in
+    // the surface, multi degrades to single-pick which loses semantics.
+    confirm?: (
+      title: string,
+      message: string,
+      opts?: { signal?: AbortSignal },
+    ) => Promise<boolean>;
     notify?: (message: string, level?: string) => void;
   };
   signal?: AbortSignal;
@@ -158,6 +171,14 @@ export async function askPromptUser(
   const startedAt = Date.now();
   const variant = options.variant ?? "question";
   const timeoutSec = params.timeoutSec ?? 600;
+
+  // ADR 0022 P1-fix (OPUS review): re-run redactPromptParams at the
+  // service entry as defense-in-depth. handler.ts already calls it,
+  // but service is the canonical entry for future slash commands
+  // (ADR 0021 G2 /about-me, P3b vault_release migration). The call
+  // is idempotent, so the double pass for LLM-driven callers is a
+  // no-op on the second sweep.
+  params = redactPromptParams(params);
 
   const handle = acquirePending({
     timeoutSec,
@@ -365,7 +386,7 @@ async function chainedFallback(
       // to do. Return promise so caller sees the manager's verdict.
       return handle.promise;
     }
-    if (q.type === "single" || q.type === "multi") {
+    if (q.type === "single") {
       const labels = (q.options ?? []).map((o) => o.label);
       // Always append "Other (specify)" — INV: LLM cannot disable Other
       const otherSentinel = "Other (specify)";
@@ -397,6 +418,57 @@ async function chainedFallback(
         final = free;
       }
       answers[q.id] = [final];
+    } else if (q.type === "multi") {
+      // ADR 0022 P1-fix (DEEPSEEK review): real multi-select via
+      // sequential ui.confirm per option. Without this, multi was
+      // degrading to single-pick by sharing the single branch above,
+      // losing the LLM-visible semantics that multi answers can be
+      // length 0..N. If ui.confirm is unavailable, fall back to
+      // ui-unavailable rather than silently degrading.
+      if (typeof ctx.ui.confirm !== "function") {
+        handle.resolve({
+          ok: false,
+          reason: "ui-unavailable",
+          durationMs: Date.now() - startedAt,
+          detail:
+            'type:"multi" fallback requires ctx.ui.confirm; surface unavailable',
+        });
+        return handle.promise;
+      }
+      const picks: string[] = [];
+      for (const opt of q.options ?? []) {
+        if (handle.signal.aborted) return handle.promise;
+        const include = await ctx.ui.confirm(
+          `${q.header}: ${q.question}`,
+          `Include: ${opt.label}?`,
+          { signal: handle.signal },
+        );
+        if (include === undefined) {
+          // confirm cancelled — treat as user-rejected for the whole prompt
+          handle.resolve({
+            ok: false,
+            reason: "user-rejected",
+            durationMs: Date.now() - startedAt,
+          });
+          return handle.promise;
+        }
+        if (include) picks.push(opt.label);
+      }
+      // "Other (specify)" as a trailing yes/no with free-text follow-up.
+      const wantOther = await ctx.ui.confirm(
+        `${q.header}: ${q.question}`,
+        "Add a custom answer (Other)?",
+        { signal: handle.signal },
+      );
+      if (wantOther) {
+        const free = await ctx.ui.input("Enter your custom answer:", {
+          signal: handle.signal,
+        });
+        if (free) picks.push(free);
+      }
+      // Empty multi answer is legal (length 0). The LLM gets an empty
+      // array; INV-H still holds (still an array).
+      answers[q.id] = picks;
     } else {
       // text
       const ans = await ctx.ui.input(`${q.header}: ${q.question}`, {

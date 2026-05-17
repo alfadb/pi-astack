@@ -33,12 +33,7 @@
  * NEVER throws. Every error path returns a `PromptUserResult`.
  */
 
-import type {
-  PromptUserOption,
-  PromptUserParams,
-  PromptUserQuestion,
-  PromptUserResult,
-} from "./types";
+import type { PromptUserResult } from "./types";
 import { validatePromptUserParams } from "./schema";
 import { getPendingPromptCount } from "./manager";
 import {
@@ -47,53 +42,27 @@ import {
   type PromptDialogDeps,
   type PromptAuditSink,
 } from "./service";
-import { redactCredentials } from "../redact";
+// redactPromptParams now lives in ../redact (next to redactCredentials)
+// so service.askPromptUser can also call it without a circular import.
+// Re-exported below to keep handler.ts the historical import path.
+import { redactPromptParams as redactPromptParamsImpl } from "../redact";
 
 // ── Redact user-visible fields (INV-D) ──────────────────────────────
 
 /**
- * Run `redactCredentials` over every user-visible string in the params.
- * P0 only does URL credential redaction here — the heavier
- * `sanitizeForMemory` (sediment's home-path / IP scanner) is NOT
- * called from this hot path to avoid pulling sediment internals into
- * abrain. INV-D third layer (sediment transcript pre-pass) is where
- * that runs.
+ * Re-export for backward compatibility. Implementation lives in
+ * `../redact.ts` (ADR 0022 P1-fix from OPUS + DEEPSEEK review).
  *
- * 5 fields covered (R4 P0 fix vs R3 which missed `header` and
- * `option.label`):
+ * Both handler.ts entry AND service.askPromptUser entry call this;
+ * it is idempotent so the double call is safe (and intentional
+ * defense-in-depth, especially once P3b wires vault_release through
+ * service directly without going through this handler).
  *
- *   - `reason`
- *   - `question.header`
- *   - `question.question`
- *   - `option.label`
- *   - `option.description`
- *
- * The redacted label is what both the UI renders AND the answer
- * comparator expects, so LLM-visible schema stays consistent with
- * user-visible chip rendering.
+ * Coverage: 5 user-visible fields × (redactCredentials +
+ * sanitizePathLike). See ../redact.ts for the rationale split
+ * between URL credentials and home-path / IPv4 sanitization.
  */
-export function redactPromptParams(p: PromptUserParams): PromptUserParams {
-  const redactOption = (o: PromptUserOption): PromptUserOption => ({
-    ...o,
-    label: redactCredentials(o.label),
-    ...(o.description !== undefined
-      ? { description: redactCredentials(o.description) }
-      : {}),
-  });
-  const redactQuestion = (q: PromptUserQuestion): PromptUserQuestion => ({
-    ...q,
-    header: redactCredentials(q.header),
-    question: redactCredentials(q.question),
-    ...(q.options !== undefined
-      ? { options: q.options.map(redactOption) }
-      : {}),
-  });
-  return {
-    ...p,
-    reason: redactCredentials(p.reason),
-    questions: p.questions.map(redactQuestion),
-  };
-}
+export const redactPromptParams = redactPromptParamsImpl;
 
 // ── Soft-cap counter (§D8.4) ────────────────────────────────────────
 
@@ -173,6 +142,31 @@ export async function executePromptUserTool(
     });
   }
 
+  // 2b. Narrow terminal guard (ADR §D3 / INV-A third arm; DEEPSEEK P1
+  //     review). PromptDialog renders chip-style options that need
+  //     ≥ 60 cells to be readable. Below that the user sees a clipped
+  //     mess. Reject up front with `ui-unavailable` so the LLM picks
+  //     a degraded code path. `process.stdout.columns` is undefined
+  //     in non-TTY environments — fall back to 80 so we don't
+  //     false-positive reject when running under pi RPC.
+  const cols =
+    (typeof process !== "undefined" &&
+      process.stdout &&
+      (process.stdout as { columns?: number }).columns) ||
+    80;
+  if (cols < 60) {
+    deps.recordBlocked({
+      reason: "no-ui",
+      detail: `terminal width ${cols} < 60 cells`,
+    });
+    return toolJson({
+      ok: false,
+      reason: "ui-unavailable",
+      durationMs: Date.now() - started,
+      detail: `prompt_user requires terminal width ≥ 60 cells (got ${cols})`,
+    });
+  }
+
   // 3. Schema validation.
   const validation = validatePromptUserParams(rawParams);
   if (!validation.ok || !validation.normalized) {
@@ -188,14 +182,21 @@ export async function executePromptUserTool(
 
   // 4. INV-I concurrent gate.
   if (getPendingPromptCount() > 0) {
+    const detail =
+      "another prompt is pending — wait for the previous prompt_user " +
+      "to resolve before issuing a new one (INV-I: concurrent ≤ 1)";
+    // P1-fix (DEEPSEEK review): emit an audit row so operators can
+    // see concurrent-prompt rejections. The other three reject paths
+    // (sub-pi / no-ui / schema-invalid via validator) all call
+    // recordBlocked; INV-I was the only silent gate. Cardinality is
+    // low (LLM has to actively be misbehaving for this to fire).
+    deps.recordBlocked({ reason: "schema-invalid", detail });
     return toolJson({
       ok: false,
       reason: "schema-invalid",
       durationMs: Date.now() - started,
       // R3 INV-I dictates a DISTINCT detail string so smoke can grep.
-      detail:
-        "another prompt is pending — wait for the previous prompt_user " +
-        "to resolve before issuing a new one (INV-I: concurrent ≤ 1)",
+      detail,
     });
   }
 

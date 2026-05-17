@@ -212,6 +212,50 @@ check("redactCredentials: multiple URLs in one string all redacted", () => {
   }
 });
 
+// P1-fix (OPUS review): broader scheme coverage.
+check("P1-fix: postgres:// connection string redacted", () => {
+  const got = redactCredentials("deploy to postgres://admin:hunter2@db.local/app");
+  if (got.includes("admin:hunter2")) throw new Error(`postgres leaked: ${got}`);
+  if (!got.includes("postgres://***@db.local")) throw new Error(`expected ***@: ${got}`);
+});
+
+check("P1-fix: redis:// connection string redacted", () => {
+  const got = redactCredentials("redis://user:pw@cache.example.com:6379/0");
+  if (got.includes("user:pw")) throw new Error(`redis leaked: ${got}`);
+});
+
+check("P1-fix: mongodb+srv:// connection string redacted (scheme has + char)", () => {
+  const got = redactCredentials("mongodb+srv://u:p@cluster.mongodb.net/db");
+  if (got.includes("u:p")) throw new Error(`mongodb+srv leaked: ${got}`);
+  if (!got.includes("mongodb+srv://***@")) throw new Error(`scheme broken: ${got}`);
+});
+
+check("P1-fix: amqp:// (RabbitMQ) credentials redacted", () => {
+  const got = redactCredentials("amqp://guest:guest@rabbit.local:5672/vhost");
+  if (got.includes("guest:guest")) throw new Error(`amqp leaked: ${got}`);
+});
+
+check("P1-fix: ftp:// credentials redacted (legacy scheme)", () => {
+  const got = redactCredentials("ftp://user:pass@files.local/path");
+  if (got.includes("user:pass")) throw new Error(`ftp leaked: ${got}`);
+});
+
+check("P1-fix: git-sync URLs (https?) still match (backward compat)", () => {
+  // Critical: the regex broadening must NOT lose coverage of any
+  // URL the old `https?:` regex matched. Spot check the exact
+  // patterns git-sync.ts callers feed through.
+  const got1 = redactCredentials("https://alice:ghp_xxx@github.com/repo.git");
+  if (!got1.includes("https://***@github.com")) throw new Error(`https regress: ${got1}`);
+  const got2 = redactCredentials("HTTP://USER:PASS@HOST/path");
+  if (!got2.includes("HTTP://***@HOST")) throw new Error(`HTTP regress: ${got2}`);
+});
+
+check("P1-fix: random word looking like scheme:// (no @ inside) untouched", () => {
+  // Verify the @ requirement still gates the substitution.
+  const got = redactCredentials("see notes://no-creds-here/page");
+  if (got !== "see notes://no-creds-here/page") throw new Error(`false positive: ${got}`);
+});
+
 // ── 3. redactSecretAnswer (INV-C) ──────────────────────────────────
 
 check("redactSecretAnswer: returns stable placeholder regardless of raw", () => {
@@ -274,6 +318,40 @@ check("lengthBucket: only 3 distinct return values, ever", () => {
   if (seen.size !== 3) {
     throw new Error(`expected exactly 3 buckets, got ${seen.size}: ${[...seen].join(",")}`);
   }
+});
+
+// ── P1-fix: sanitizePathLike helper + redactPromptParams ride-along ───
+
+check("P1-fix: sanitizePathLike replaces home path with $HOME", () => {
+  const { sanitizePathLike } = redactMod;
+  if (typeof sanitizePathLike !== "function") throw new Error("sanitizePathLike not exported");
+  const home = process.env.HOME || require("node:os").homedir();
+  if (!home) {
+    // CI without HOME — skip; sanitizePathLike returns identity
+    return;
+  }
+  const got = sanitizePathLike(`config at ${home}/.config/x.toml`);
+  if (got.includes(home)) throw new Error(`home leaked: ${got}`);
+  if (!got.includes("$HOME/.config")) throw new Error(`expected $HOME: ${got}`);
+});
+
+check("P1-fix: sanitizePathLike replaces IPv4 with [HOST]", () => {
+  const { sanitizePathLike } = redactMod;
+  const got = sanitizePathLike("connect to 192.168.1.42 port 5432");
+  if (got.includes("192.168.1.42")) throw new Error(`IP leaked: ${got}`);
+  if (!got.includes("[HOST]")) throw new Error(`expected [HOST]: ${got}`);
+});
+
+check("P1-fix: sanitizePathLike is idempotent", () => {
+  const { sanitizePathLike } = redactMod;
+  const once = sanitizePathLike("contact 10.0.0.1");
+  const twice = sanitizePathLike(once);
+  if (once !== twice) throw new Error(`not idempotent: '${once}' vs '${twice}'`);
+});
+
+check("P1-fix: sanitizePathLike on empty / undefined input returns input", () => {
+  const { sanitizePathLike } = redactMod;
+  if (sanitizePathLike("") !== "") throw new Error("empty broken");
 });
 
 // ── 5. types.ts is pure types (INV — no runtime surface) ───────────

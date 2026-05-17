@@ -288,6 +288,32 @@ check("schema: control char in reason → schema-invalid", () => {
   if (r.ok) throw new Error("expected reject");
 });
 
+// P1-fix (OPUS review): hasControlChars must reject \t \n \r too.
+check("P1-fix: header containing \\n → schema-invalid (TUI layout safety)", () => {
+  const r = schema.validatePromptUserParams({
+    reason: "x",
+    questions: [{ id: "a", header: "abc\ndef", question: "q?", type: "text" }],
+  });
+  if (r.ok) throw new Error("expected reject for \\n in header");
+  if (!r.errors.some((e) => e.includes("control characters"))) throw new Error(r.errors.join(","));
+});
+
+check("P1-fix: question containing \\r → schema-invalid (cursor reset attack)", () => {
+  const r = schema.validatePromptUserParams({
+    reason: "x",
+    questions: [{ id: "a", header: "h", question: "q?\rEVIL", type: "text" }],
+  });
+  if (r.ok) throw new Error("expected reject for \\r in question");
+});
+
+check("P1-fix: reason containing \\t → schema-invalid (all C0 rejected)", () => {
+  const r = schema.validatePromptUserParams({
+    reason: "hello\tworld",
+    questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
+  });
+  if (r.ok) throw new Error("expected reject for \\t in reason");
+});
+
 check("schema: > 4KB total → schema-invalid", () => {
   const huge = "x".repeat(5000);
   const r = schema.validatePromptUserParams({
@@ -378,6 +404,69 @@ await asyncCheck("handler: !ctx.hasUI → ui-unavailable", async () => {
   if (r.ok || r.reason !== "ui-unavailable") throw new Error(`got ${JSON.stringify(r)}`);
   if (!recordedBlocked.find((b) => b.reason === "no-ui")) {
     throw new Error("audit recordBlocked(no-ui) missing");
+  }
+});
+
+// P1-fix (DEEPSEEK review): narrow terminal rejection.
+await asyncCheck("P1-fix: narrow terminal (< 60 cols) → ui-unavailable", async () => {
+  manager.__resetForTests();
+  recordedBlocked.length = 0;
+  // Mock process.stdout.columns by stashing original + replacing.
+  const origCols = process.stdout.columns;
+  Object.defineProperty(process.stdout, "columns", {
+    configurable: true, get: () => 40,
+  });
+  try {
+    const json = await handlerMod.executePromptUserTool(
+      { reason: "x", questions: [{ id: "a", header: "h", question: "q?", type: "text" }] },
+      undefined,
+      { ui: { custom: () => {}, notify: () => {} }, hasUI: true },
+      handlerDeps,
+    );
+    const r = JSON.parse(json);
+    if (r.ok || r.reason !== "ui-unavailable") {
+      throw new Error(`expected ui-unavailable for narrow terminal, got ${JSON.stringify(r)}`);
+    }
+    if (!r.detail?.includes("60 cells")) {
+      throw new Error(`detail should mention 60 cells: ${r.detail}`);
+    }
+    if (!recordedBlocked.find((b) => b.reason === "no-ui" && b.detail?.includes("width 40"))) {
+      throw new Error("audit row for narrow terminal missing");
+    }
+  } finally {
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true, get: () => origCols,
+    });
+  }
+});
+
+await asyncCheck("P1-fix: terminal cols undefined (RPC mode) → fallback to 80, no reject", async () => {
+  manager.__resetForTests();
+  recordedBlocked.length = 0;
+  const origCols = process.stdout.columns;
+  Object.defineProperty(process.stdout, "columns", {
+    configurable: true, get: () => undefined,
+  });
+  try {
+    // Should pass the cols check (fallback 80 >= 60) and continue
+    // to schema validation. We pass intentionally invalid params so
+    // the smoke can confirm we made it PAST the cols guard.
+    const json = await handlerMod.executePromptUserTool(
+      { reason: "x", questions: [] },
+      undefined,
+      { ui: { custom: () => {}, notify: () => {} }, hasUI: true },
+      handlerDeps,
+    );
+    const r = JSON.parse(json);
+    if (r.reason !== "schema-invalid") {
+      throw new Error(
+        `cols-undefined should fall back to 80; expected schema-invalid (from empty questions), got ${r.reason}`,
+      );
+    }
+  } finally {
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true, get: () => origCols,
+    });
   }
 });
 
@@ -490,6 +579,44 @@ await asyncCheck("INV-C secret: ok:true with placeholder + redactions field", as
   if (blob.includes("ghp_AAAA")) throw new Error(`raw secret leaked: ${blob}`);
 });
 
+// P1-fix (DEEPSEEK review): INV-I reject must also emit audit row.
+await asyncCheck("P1-fix: INV-I concurrent reject also calls recordBlocked", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  recordedBlocked.length = 0;
+  // Open a hanging first prompt.
+  const ui = {
+    custom: async (factory) => await new Promise((_resolve) => {
+      factory({}, {}, {}, () => { /* never */ });
+    }),
+  };
+  const deps = { ...handlerDeps, dialog: { buildDialog: () => ({}) } };
+  const firstPromise = handlerMod.executePromptUserTool(
+    { reason: "first", timeoutSec: 30, questions: [{ id: "a", header: "h", question: "q?", type: "text" }] },
+    undefined,
+    { ui, hasUI: true },
+    deps,
+  );
+  await new Promise((r) => setImmediate(r));
+  // Concurrent second should reject + write audit.
+  await handlerMod.executePromptUserTool(
+    { reason: "second", questions: [{ id: "b", header: "h", question: "q?", type: "text" }] },
+    undefined,
+    { ui, hasUI: true },
+    deps,
+  );
+  const invIBlocked = recordedBlocked.find(
+    (b) => b.reason === "schema-invalid" && b.detail?.includes("INV-I"),
+  );
+  if (!invIBlocked) {
+    throw new Error(
+      `INV-I reject did not emit recordBlocked. Got: ${JSON.stringify(recordedBlocked)}`,
+    );
+  }
+  manager.cancelAllPending("cancelled");
+  await firstPromise;
+});
+
 await asyncCheck("INV-I: concurrent prompt_user returns distinctive detail", async () => {
   manager.__resetForTests();
   handlerMod.resetSoftCapCounter();
@@ -543,6 +670,162 @@ await asyncCheck("INV-I: concurrent prompt_user returns distinctive detail", asy
   // Drain the first prompt with cancelAllPending so we don't leak it.
   manager.cancelAllPending("cancelled");
   await firstPromise;
+});
+
+// P1-fix (DEEPSEEK review): chained fallback multi uses ui.confirm per option.
+await asyncCheck("P1-fix: fallback multi walks each option through ui.confirm", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  const confirmCalls = [];
+  const inputCalls = [];
+  const ui = {
+    // custom MISSING → forces chained fallback
+    confirm: async (title, message, _opts) => {
+      confirmCalls.push({ title, message });
+      // Include first option, skip second, decline Other.
+      if (message.includes("yes")) return true;
+      if (message.includes("no")) return false;
+      if (message.includes("Other")) return false;
+      return false;
+    },
+    input: async (prompt) => { inputCalls.push(prompt); return undefined; },
+    select: async () => undefined,  // not used for multi
+    notify: () => {},
+  };
+  const deps = { ...handlerDeps, dialog: { buildDialog: () => ({}) } };
+  const json = await handlerMod.executePromptUserTool(
+    {
+      reason: "pick frameworks",
+      timeoutSec: 30,
+      questions: [{
+        id: "frameworks", header: "Pick", question: "Which?", type: "multi",
+        options: [{ label: "yes" }, { label: "no" }],
+      }],
+    },
+    undefined,
+    { ui, hasUI: true },
+    deps,
+  );
+  const r = JSON.parse(json);
+  if (!r.ok) throw new Error(`expected ok, got ${JSON.stringify(r)}`);
+  // Should have asked confirm for each option + Other (3 total).
+  if (confirmCalls.length !== 3) {
+    throw new Error(`expected 3 confirm calls (2 opts + Other), got ${confirmCalls.length}`);
+  }
+  // answers[frameworks] should be array of length 1 (only "yes" included).
+  if (!Array.isArray(r.answers.frameworks)) throw new Error("INV-H violated: not array");
+  if (r.answers.frameworks.length !== 1) {
+    throw new Error(`expected ['yes'], got ${JSON.stringify(r.answers.frameworks)}`);
+  }
+  if (r.answers.frameworks[0] !== "yes") throw new Error(`got ${r.answers.frameworks[0]}`);
+  if (!r.detail?.includes("fallback")) throw new Error(`detail should mark fallback path: ${r.detail}`);
+});
+
+await asyncCheck("P1-fix: fallback multi WITHOUT ctx.ui.confirm → ui-unavailable", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  const ui = {
+    // No custom, no confirm.
+    select: async () => undefined,
+    input: async () => undefined,
+    notify: () => {},
+  };
+  const deps = { ...handlerDeps, dialog: { buildDialog: () => ({}) } };
+  const json = await handlerMod.executePromptUserTool(
+    {
+      reason: "x",
+      timeoutSec: 30,
+      questions: [{
+        id: "a", header: "h", question: "q?", type: "multi",
+        options: [{ label: "yes" }, { label: "no" }],
+      }],
+    },
+    undefined,
+    { ui, hasUI: true },
+    deps,
+  );
+  const r = JSON.parse(json);
+  if (r.ok || r.reason !== "ui-unavailable") {
+    throw new Error(`expected ui-unavailable, got ${JSON.stringify(r)}`);
+  }
+});
+
+await asyncCheck("P1-fix: fallback single still works (regression check after multi split)", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  const ui = {
+    select: async () => "yes",  // picks first option directly
+    input: async () => undefined,
+    notify: () => {},
+  };
+  const deps = { ...handlerDeps, dialog: { buildDialog: () => ({}) } };
+  const json = await handlerMod.executePromptUserTool(
+    {
+      reason: "pick one",
+      timeoutSec: 30,
+      questions: [{
+        id: "x", header: "h", question: "q?", type: "single",
+        options: [{ label: "yes" }, { label: "no" }],
+      }],
+    },
+    undefined,
+    { ui, hasUI: true },
+    deps,
+  );
+  const r = JSON.parse(json);
+  if (!r.ok) throw new Error(`single fallback regressed: ${JSON.stringify(r)}`);
+  if (r.answers.x[0] !== "yes") throw new Error(`got ${r.answers.x[0]}`);
+});
+
+// P1-fix (DEEPSEEK review): redactPromptParams runs at service entry too.
+await asyncCheck("P1-fix: service.askPromptUser entry re-runs redactPromptParams (defense-in-depth)", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  // The defensive call is idempotent; smoke verifies it doesn't break
+  // legitimate calls and that credential URLs leaking past handler
+  // would still get caught. We invoke service directly via require
+  // path the same way handler does.
+  const serviceMod = require(path.join(promptUserDir, "service"));
+  const askPromptUser = serviceMod.askPromptUser;
+  if (typeof askPromptUser !== "function") throw new Error("askPromptUser not exported");
+  // Pre-redact via handler call (normal path).
+  const recordedAsk = [];
+  const audit = {
+    recordAsk: (ev) => recordedAsk.push(ev),
+    recordResult: () => {},
+  };
+  const ctx = {
+    ui: { custom: async (factory) => await new Promise((resolve) => factory({}, {}, {}, resolve)) },
+    hasUI: true,
+  };
+  const deps = {
+    buildDialog: ({ onDone }) => {
+      queueMicrotask(() => onDone({ outcome: "submit", answers: { a: ["x"] }, rawSecrets: {} }));
+      return {};
+    },
+  };
+  // Pass deliberately UN-redacted params (skipping handler):
+  const result = await askPromptUser(
+    ctx,
+    {
+      reason: "connect to https://user:secret@example.com/repo",  // raw credential
+      questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
+      timeoutSec: 30,
+    },
+    deps,
+    audit,
+  );
+  // audit.recordAsk should have received SANITIZED reason, not raw.
+  if (recordedAsk.length === 0) throw new Error("recordAsk not called");
+  if (recordedAsk[0].reason.includes("user:secret")) {
+    throw new Error(
+      `service entry did NOT re-redact — raw credential leaked to audit: ${recordedAsk[0].reason}`,
+    );
+  }
+  if (!recordedAsk[0].reason.includes("***@")) {
+    throw new Error(`expected ***@ placeholder in audit reason: ${recordedAsk[0].reason}`);
+  }
+  void result;
 });
 
 await asyncCheck("soft cap: 3rd call in same session has detail batching warning", async () => {

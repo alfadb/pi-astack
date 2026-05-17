@@ -22,7 +22,20 @@
  *   ADR 0022 INV-C — `redactSecretAnswer` is how `type:"secret"` raw
  *     answers are replaced before the value crosses any audit / LLM /
  *     log boundary.
+ *   ADR 0022 INV-D — `redactPromptParams` is the single funnel through
+ *     which 5 user-visible fields (reason / header / question /
+ *     option.label / option.description) get scrubbed before they
+ *     reach UI / audit / sediment. Lives here (not handler.ts) so
+ *     both `handler.executePromptUserTool` AND `service.askPromptUser`
+ *     can call it without circular import; calls are idempotent.
  */
+
+import * as os from "node:os";
+import type {
+  PromptUserOption,
+  PromptUserParams,
+  PromptUserQuestion,
+} from "./prompt-user/types";
 
 /**
  * Redact userinfo from a URL so credentials don't leak into logs or UI.
@@ -39,11 +52,95 @@
  * gap. SSH-style URLs (`git@host:path`) are not touched — they have no
  * embedded secret.
  *
- * ADR 0022 promoted this from git-sync.ts unchanged. Behavior is identical;
- * git-sync.ts now re-exports for backward compat.
+ * ADR 0022 P1: moved here from git-sync.ts unchanged.
+ * ADR 0022 P1-fix (OPUS review): scheme broadened from `https?:` to
+ *   `[a-z][a-z0-9+\-.]*` so postgres:// / mysql:// / mongodb:// /
+ *   redis:// / amqp:// / mongodb+srv:// connection strings get the
+ *   same treatment as HTTP(S). LLM can paste any of these into
+ *   prompt_user user-visible fields; the old regex left them raw on
+ *   disk. Backward-compatible — every previously-matched URL is still
+ *   matched (https? is a strict subset of the new scheme alphabet);
+ *   smoke verifies git-sync's existing https URLs unchanged.
  */
 export function redactCredentials(s: string): string {
-  return s.replace(/(https?:\/\/)[^@\s\/]+@/gi, "$1***@");
+  return s.replace(/([a-z][a-z0-9+\-.]*:\/\/)[^@\s\/]+@/gi, "$1***@");
+}
+
+/**
+ * Light path-like sanitizer for user-visible fields in `prompt_user`.
+ *
+ * ADR 0022 INV-D requires `redactCredentials` + `sanitizeForMemory`
+ * coverage on the 5 user-visible fields. The full `sanitizeForMemory`
+ * lives in sediment/sanitizer.ts and pulls in vendor-specific
+ * credential patterns (sk-... / AKIA... / PEM blocks), which is
+ * overkill for prompt_user UI display (PromptDialog will literally
+ * show those bytes back to the user).
+ *
+ * This light variant covers the two patterns most likely to leak via
+ * LLM-supplied prompt text: HOME path expansion and bare IPv4. Lives
+ * in abrain/redact.ts (not sediment) so prompt_user does NOT take a
+ * runtime dependency on sediment internals.
+ *
+ * Composes with redactCredentials: call them in either order; both
+ * are idempotent.
+ */
+export function sanitizePathLike(s: string): string {
+  if (!s) return s;
+  let out = s;
+  const home = os.homedir();
+  if (home && out.includes(home)) {
+    out = out.split(home).join("$HOME");
+  }
+  out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[HOST]");
+  return out;
+}
+
+/**
+ * Single funnel for INV-D redaction of `PromptUserParams`.
+ *
+ * Covers all 5 user-visible fields (R4 P0 fix vs R3 which missed
+ * `header` and `option.label`):
+ *
+ *   - `reason`
+ *   - `question.header`
+ *   - `question.question`
+ *   - `option.label`
+ *   - `option.description`
+ *
+ * Each field passes through `redactCredentials` (URL credentials in
+ * any scheme) then `sanitizePathLike` (home-path / IPv4) so a single
+ * LLM-injected `"deploy to postgres://u:p@10.0.0.1/db at /home/alice/x"`
+ * becomes `"deploy to postgres://***@[HOST]/db at $HOME/x"` before it
+ * touches PromptDialog, audit jsonl, or any future sediment evidence
+ * pre-pass.
+ *
+ * Idempotent: `***@` doesn't match `[^@\s\/]+@`, `$HOME` doesn't
+ * match the home-path literal, and `[HOST]` doesn't match the IPv4
+ * regex. Safe to call twice (handler entry + service entry both call
+ * it as defense-in-depth; second call is a no-op on the second pass).
+ *
+ * ADR 0022 P1-fix (OPUS + DEEPSEEK review): moved here from
+ * handler.ts so service.askPromptUser can call it at its entry too
+ * (future slash command callers go through service, not handler).
+ */
+export function redactPromptParams(p: PromptUserParams): PromptUserParams {
+  const scrub = (s: string): string => sanitizePathLike(redactCredentials(s));
+  const redactOption = (o: PromptUserOption): PromptUserOption => ({
+    ...o,
+    label: scrub(o.label),
+    ...(o.description !== undefined ? { description: scrub(o.description) } : {}),
+  });
+  const redactQuestion = (q: PromptUserQuestion): PromptUserQuestion => ({
+    ...q,
+    header: scrub(q.header),
+    question: scrub(q.question),
+    ...(q.options !== undefined ? { options: q.options.map(redactOption) } : {}),
+  });
+  return {
+    ...p,
+    reason: scrub(p.reason),
+    questions: p.questions.map(redactQuestion),
+  };
 }
 
 /**

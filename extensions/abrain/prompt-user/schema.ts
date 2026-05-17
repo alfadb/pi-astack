@@ -99,10 +99,19 @@ export function displayWidth(s: string): number {
 }
 
 function hasControlChars(s: string): boolean {
-  // C0 controls except tab/lf/cr — and we reject those in headers too.
-  // Anywhere in user-visible fields, C0 is suspicious (paste accident,
-  // terminal escape injection vector).
-  return /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(s);
+  // ADR 0022 P1-fix (OPUS review): reject ALL C0 controls including
+  // \t (0x09) / \n (0x0a) / \r (0x0d), plus DEL (0x7f). The earlier
+  // implementation allowed \t / \n / \r through; the comment lied.
+  //
+  // Concrete failure mode that motivated the tightening:
+  // `header = "abc\n\n\n\n\n"` has displayWidth=3 (each \n is 0
+  // cells per the East Asian Wide budget), so it passed the 12-cell
+  // bound — but PromptDialog rendered as a vertical stack of blanks
+  // pushing every subsequent question off-screen. \r is also a
+  // cursor-reset attack on terminals that survive the TUI buffer.
+  // jsonl is safe (JSON.stringify escapes \n), so this is a P1 UX
+  // hardening, not a P0 injection bug.
+  return /[\x00-\x1f\x7f]/.test(s);
 }
 
 function countWords(s: string): number {
