@@ -796,7 +796,7 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
         ? `↑↓ navigate${q.type === "multi" ? " • space toggle" : ""}`
         : q.type === "text"
           ? "type to fill"
-          : "type to fill (masked)";
+          : "type to fill (masked; paste with Ctrl+Shift+V / Cmd+V / mouse middle-click)";
     root.addChild(
       new pitui.Text(
         theme.fg("dim", `${typeHint} • ${enterHint}${arrowHint} • esc cancel`),
