@@ -8,7 +8,13 @@
 >
 > **2026-05-17 同步**：ADR 0022 (`prompt_user` LLM-facing 同步问答工具) P1 + P2 + P3a + P2-fix 完成。LLM 现在可以调 `prompt_user(...)` 暂停 turn 问用户问题，解决 sediment 拿到残缺 turn 的问题。详 [ADR 0022](./adr/0022-prompt-user-tool.md) §4 与 [current-state §10](./current-state.md#10-prompt_user-状态adr-0022)。R4 multi-LLM ADR audit + 1 轮 implementation P1 audit (OPUS + DEEPSEEK xhigh)，P0 共识 0，7 个 P1 全部 ship-with-smoke。P3b/P3c 进入 backlog（下表）。
 >
-> **2026-05-18 同步**：**ADR 0022 P3b shipped**：`authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 PromptDialog overlay，保留 `ui.select` fallback。`smoke:abrain-vault-reader` 6 → 14 assertion（8 个 P3b 专项）。INV-E (PromptDialog 不持 grant 状态) 首次可 smoke 验证。新增叶文件 `extensions/abrain/vault-authorize.ts`。P3c 原重量路径（~80 LOC 独立 audit consumer）**降为 YAGNI**，代以轻量路径：扩 `llm-extractor.ts` trust boundary白名单 `name="prompt_user"` toolResult 为 user-attested（≈10 LOC）。
+> **2026-05-18 同步**：**ADR 0022 P3b shipped + post-audit fix shipped**。
+>
+> P3b 主体（commit 8abb48b）：`authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 PromptDialog overlay，保留 `ui.select` fallback。新增叶文件 `extensions/abrain/vault-authorize.ts`。`smoke:abrain-vault-reader` 6 → 14 assertion。INV-E (PromptDialog 不持 grant 状态) 首次可 smoke 验证。
+>
+> P3b post-audit fix（commit 待推）：OPUS+GPT-5.5+DEEPSEEK 三路并行 xhigh audit 产出 **0 P0 / 6 共识 P1**，全部 ship：(#1) pre-aborted signal early-return、(#2) mid-dialog abort 主动 done(null) teardown、(#3) **vault 独立 concurrent gate**（pi parallel tool mode 下两个 vault_release 同发不会串话授权）、(#4) vault variant shape invariant choices.length ≥ 2、(#5) signal narrow type check 防 fake AbortSignal 报错、(#6) INV-E refinement 明确 dialog lock 是 concurrency state 不是 grant state。`smoke:abrain-vault-reader` 14 → 21 assertion (+7)。
+>
+> P3c 原重量路径（~80 LOC 独立 audit consumer）**降为 YAGNI**，代以轻量路径：扩 `llm-extractor.ts` trust boundary白名单 `name="prompt_user"` toolResult 为 user-attested（≈10 LOC）。
 
 ## P0/P1 product backlog
 

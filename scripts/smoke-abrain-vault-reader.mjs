@@ -181,8 +181,14 @@ await check("decryptSecret: missing or forgotten key fails closed", async () => 
 //   - INV-E: the helper carries NO grant state of its own (no closure side-effect)
 //   - INV-D boundary: caller controls audit lane; the helper writes nothing
 //   - fallback path: ui.custom missing → ui_unavailable; ui.custom throws → dialog_error
-function makeMockUi({ chooseLabel, throwOnCustom = false }) {
-  const events = { customCalled: 0, factoryVariant: null, factoryOptions: null, notifications: [] };
+function makeMockUi({ chooseLabel, throwOnCustom = false, recordDone = false }) {
+  const events = {
+    customCalled: 0,
+    factoryVariant: null,
+    factoryOptions: null,
+    notifications: [],
+    doneCalls: [],          // null entries = teardown (mid-dialog abort)
+  };
   const ui = {
     notify: (msg, level) => events.notifications.push({ msg, level }),
     custom: (factory, options) => {
@@ -194,11 +200,27 @@ function makeMockUi({ chooseLabel, throwOnCustom = false }) {
       // captures variant + drives onDone synchronously with the chosen
       // label, simulating an instant user pick.
       return Promise.resolve().then(() => {
-        factory({}, {}, {}, () => { /* pi swallows the result */ });
+        const done = (v) => { if (recordDone) events.doneCalls.push(v); };
+        factory({}, {}, {}, done);
       });
     },
   };
   return { ui, events, chooseLabel };
+}
+
+// Build a NON-resolving fake dialog (factory captures done but never
+// invokes it). Used to verify lock acquisition / teardown without
+// racing the happy-path resolution. The dialog stays "open" until
+// either signal abort or the test releases the lock by other means.
+function makeHangingBuildDialog(captureRef) {
+  return (a) => {
+    captureRef.variant = a.variant;
+    captureRef.optionLabels = a.params.questions[0].options.map((o) => o.label);
+    // Capture done so the test can verify whether mid-dialog teardown
+    // actually invoked it. DO NOT call done() from this factory.
+    captureRef.dialogDoneRef = null; // set by the wrapper's onDone path
+    return {};
+  };
 }
 
 // Fake buildDialog: instead of building a real OptionList, it inspects
@@ -379,10 +401,13 @@ await check("P3b: cancel outcome → cancelled", async () => {
   if (r.reason !== "cancelled") throw new Error(`reason: ${r.reason}`);
 });
 
-await check("P3b: pre-aborted signal → cancelled before dialog opens", async () => {
-  // Important security property: if the caller's AbortSignal is already
-  // aborted at entry, the helper must NOT call ctx.ui.custom. Otherwise
-  // a stale dialog could appear after the operation was logically cancelled.
+await check("P3b: pre-aborted signal → cancelled WITHOUT opening dialog (post-audit fix #1)", async () => {
+  // Critical fail-closed property (OPUS/GPT-5.5 P1): if the caller's
+  // AbortSignal is already aborted at entry, the helper MUST NOT call
+  // ctx.ui.custom. The pre-audit version resolved outer but continued
+  // into the try block, causing a stale dialog to flash on screen after
+  // the caller had already received `cancelled`.
+  vaultAuth.__resetVaultDialogLockForTests();
   const { ui, events } = makeMockUi({ chooseLabel: "Session" });
   const ac = new AbortController();
   ac.abort();
@@ -398,10 +423,220 @@ await check("P3b: pre-aborted signal → cancelled before dialog opens", async (
   });
   if (r.ok) throw new Error(`expected !ok for pre-aborted signal: ${JSON.stringify(r)}`);
   if (r.reason !== "cancelled") throw new Error(`reason: ${r.reason}`);
-  // The helper may or may not still call ui.custom (race with
-  // queueMicrotask in fake buildDialog), but in any case the result
-  // must be cancelled.
-  void events;
+  // HARD assertion (P3b audit tightened): ui.custom MUST NOT be called
+  // when signal is pre-aborted. Previously this assertion was wished-but-not-checked.
+  if (events.customCalled !== 0) {
+    throw new Error(`fail #1: ui.custom called ${events.customCalled} times for pre-aborted signal — stale dialog risk`);
+  }
+  // Lock must NOT be held after pre-abort fast-reject (returned
+  // BEFORE the lock acquisition site).
+  if (vaultAuth.__peekVaultDialogLockForTests() !== false) {
+    throw new Error("fail #3: vault dialog lock held after pre-aborted fast-reject");
+  }
+});
+
+// ── P3b post-audit fixes #2-5 + #6 ───────────────────────────────────
+//
+// These assertions cover the OPUS+GPT-5.5+DEEPSEEK audit findings on
+// commit 8abb48b. Each maps to a numbered fix in vault-authorize.ts:
+//   #2 mid-dialog abort → actively call done(null) to tear overlay down
+//   #3 module-level concurrent gate — second call returns dialog_error
+//   #4 shape invariant — choices.length < 2 returns dialog_error
+//   #5 narrow signal type check — fake AbortSignals don't crash
+//   #6 INV-E refinement — lock is concurrency state, NOT grant state
+
+await check("P3b-fix #2: mid-dialog abort calls done(null) to tear overlay down", async () => {
+  vaultAuth.__resetVaultDialogLockForTests();
+  const { ui, events } = makeMockUi({ chooseLabel: "Session", recordDone: true });
+  const ac = new AbortController();
+  // Hanging dialog — done is captured by ui.custom but never invoked
+  // from inside the factory. Abort fires from outside; the helper must
+  // actively tear down via the captured done ref.
+  const promise = vaultAuth.askVaultAuthorizationViaDialog({
+    ui,
+    variant: "vault_release",
+    reason: "x",
+    header: "x",
+    question: "x?",
+    choices: ["No", "Yes once"],
+    signal: ac.signal,
+    buildDialog: () => ({}), // factory returns dummy; never invokes done
+  });
+  // Wait one microtask for ui.custom's .then() to fire → factory runs →
+  // dialogDone captured inside the helper closure.
+  await new Promise((r) => setImmediate(r));
+  ac.abort();
+  const r = await promise;
+  if (r.ok) throw new Error(`expected !ok: ${JSON.stringify(r)}`);
+  if (r.reason !== "cancelled") throw new Error(`reason: ${r.reason}`);
+  // Mid-dialog abort MUST have invoked done(null) exactly once — that
+  // is the mechanism by which pi's overlay system closes the dialog.
+  if (events.doneCalls.length !== 1) {
+    throw new Error(`fix #2: expected exactly 1 done() call from teardown, got ${events.doneCalls.length}: ${JSON.stringify(events.doneCalls)}`);
+  }
+  if (events.doneCalls[0] !== null) {
+    throw new Error(`fix #2: teardown done() must pass null, got ${JSON.stringify(events.doneCalls[0])}`);
+  }
+  // Lock released after teardown.
+  if (vaultAuth.__peekVaultDialogLockForTests() !== false) {
+    throw new Error("fix #2: vault dialog lock not released after mid-dialog abort");
+  }
+});
+
+await check("P3b-fix #3: concurrent vault dialog → second call returns dialog_error", async () => {
+  // pi runs sibling tool calls in parallel (extensions.md §680). Two
+  // `vault_release` calls in one assistant message would otherwise
+  // open two overlapping PromptDialog overlays. Verify the
+  // module-level lock rejects the second.
+  vaultAuth.__resetVaultDialogLockForTests();
+  const { ui: ui1 } = makeMockUi({ chooseLabel: "Session" });
+  const { ui: ui2 } = makeMockUi({ chooseLabel: "No" });
+  // First call uses hanging dialog (never resolves) so the lock stays held.
+  const hangFirst = vaultAuth.askVaultAuthorizationViaDialog({
+    ui: ui1,
+    variant: "vault_release",
+    reason: "first",
+    header: "first",
+    question: "q?",
+    choices: ["No", "Session"],
+    buildDialog: () => ({}), // never invokes done
+  });
+  // Yield so ui.custom's .then() runs and the lock is in-flight.
+  await new Promise((r) => setImmediate(r));
+  if (vaultAuth.__peekVaultDialogLockForTests() !== true) {
+    throw new Error("fix #3: lock NOT acquired after first call entered");
+  }
+  // Second concurrent call MUST return dialog_error immediately.
+  const r2 = await vaultAuth.askVaultAuthorizationViaDialog({
+    ui: ui2,
+    variant: "vault_release",
+    reason: "second",
+    header: "second",
+    question: "q?",
+    choices: ["No", "Session"],
+    buildDialog: makeFakeBuildDialog({}, "Session"),
+  });
+  if (r2.ok) throw new Error(`fix #3: second call should NOT succeed during pending dialog: ${JSON.stringify(r2)}`);
+  if (r2.reason !== "dialog_error") throw new Error(`fix #3: expected dialog_error, got ${r2.reason}`);
+  if (!/pending/i.test(r2.detail ?? "")) {
+    throw new Error(`fix #3: error detail should mention pending, got: ${r2.detail}`);
+  }
+  // Tear down the hanging first dialog so the lock releases cleanly.
+  vaultAuth.__resetVaultDialogLockForTests();
+  void hangFirst; // intentionally leaked (test-only hang); finally{} resets module-level lock anyway after this test
+});
+
+await check("P3b-fix #3 (continued): lock releases after first call finishes → second call proceeds", async () => {
+  vaultAuth.__resetVaultDialogLockForTests();
+  const { ui: ui1 } = makeMockUi({ chooseLabel: "Session" });
+  const r1 = await vaultAuth.askVaultAuthorizationViaDialog({
+    ui: ui1, variant: "vault_release", reason: "first", header: "f", question: "q?",
+    choices: ["No", "Session"], buildDialog: makeFakeBuildDialog({}, "Session"),
+  });
+  if (!r1.ok || r1.choice !== "Session") throw new Error("first call should succeed");
+  // After first resolves, lock MUST be released (finally{} block in entry).
+  if (vaultAuth.__peekVaultDialogLockForTests() !== false) {
+    throw new Error("fix #3: lock NOT released after first call finished");
+  }
+  // Second call proceeds normally.
+  const { ui: ui2 } = makeMockUi({ chooseLabel: "No" });
+  const r2 = await vaultAuth.askVaultAuthorizationViaDialog({
+    ui: ui2, variant: "vault_release", reason: "second", header: "s", question: "q?",
+    choices: ["No", "Session"], buildDialog: makeFakeBuildDialog({}, "No"),
+  });
+  if (!r2.ok || r2.choice !== "No") throw new Error("second call after release should succeed");
+});
+
+await check("P3b-fix #4: empty choices array → dialog_error (shape invariant)", async () => {
+  vaultAuth.__resetVaultDialogLockForTests();
+  const { ui, events } = makeMockUi({ chooseLabel: "x" });
+  const r = await vaultAuth.askVaultAuthorizationViaDialog({
+    ui,
+    variant: "vault_release",
+    reason: "x", header: "x", question: "x?",
+    choices: [], // INVARIANT VIOLATION
+    buildDialog: makeFakeBuildDialog({}, "x"),
+  });
+  if (r.ok) throw new Error(`empty choices should NOT be ok: ${JSON.stringify(r)}`);
+  if (r.reason !== "dialog_error") throw new Error(`reason: ${r.reason}`);
+  if (!/>= 2 choices/.test(r.detail ?? "")) {
+    throw new Error(`fix #4: detail should mention >= 2 choices requirement: ${r.detail}`);
+  }
+  // Shape rejection happens BEFORE lock acquisition — verify.
+  if (events.customCalled !== 0) throw new Error("fix #4: ui.custom should NOT be called for invalid shape");
+});
+
+await check("P3b-fix #4: single-choice array → dialog_error (shape invariant)", async () => {
+  vaultAuth.__resetVaultDialogLockForTests();
+  const { ui } = makeMockUi({ chooseLabel: "x" });
+  const r = await vaultAuth.askVaultAuthorizationViaDialog({
+    ui,
+    variant: "vault_release",
+    reason: "x", header: "x", question: "x?",
+    choices: ["Only one"],
+    buildDialog: makeFakeBuildDialog({}, "Only one"),
+  });
+  if (r.ok) throw new Error(`single choice should NOT be ok: ${JSON.stringify(r)}`);
+  if (r.reason !== "dialog_error") throw new Error(`reason: ${r.reason}`);
+});
+
+await check("P3b-fix #5: fake AbortSignal (no addEventListener) does NOT throw", async () => {
+  vaultAuth.__resetVaultDialogLockForTests();
+  const { ui } = makeMockUi({ chooseLabel: "Yes once" });
+  // Bare object posing as signal — some pi runtimes / test fixtures
+  // pass `{}` instead of a real AbortSignal. Pre-fix: TypeError thrown
+  // when wiring addEventListener, escaping to tool executor as an
+  // unhandled promise rejection. Post-fix: narrow type check, signal
+  // wiring silently skipped.
+  const fakeSignal = { aborted: false }; // intentionally missing addEventListener
+  let threw = null;
+  let r;
+  try {
+    r = await vaultAuth.askVaultAuthorizationViaDialog({
+      ui,
+      variant: "vault_release",
+      reason: "x", header: "x", question: "x?",
+      choices: ["No", "Yes once"],
+      signal: fakeSignal,
+      buildDialog: makeFakeBuildDialog({}, "Yes once"),
+    });
+  } catch (e) {
+    threw = e;
+  }
+  if (threw) throw new Error(`fix #5: fake signal caused throw: ${threw.message}`);
+  if (!r || !r.ok) throw new Error(`fix #5: expected ok with fake signal: ${JSON.stringify(r)}`);
+  if (r.choice !== "Yes once") throw new Error(`fix #5: wrong choice: ${r.choice}`);
+});
+
+await check("P3b-fix #6 (INV-E refinement): module lock is concurrency state, NOT grant state", async () => {
+  // INV-E originally read 'vault-authorize.ts holds no grant state'.
+  // P3b post-audit fix #3 introduces a module-level Boolean for the
+  // concurrent dialog gate. Verify the distinction:
+  //   - The lock IS module-level mutable state (concurrency machinery)
+  //   - The lock is NOT grant state (release/remember/session sets are
+  //     still owned entirely by index.ts closures)
+  //   - INV-E module-state smoke (above) iterates exports and asserts
+  //     all are functions; the lock variable is NOT exported.
+  vaultAuth.__resetVaultDialogLockForTests();
+  // Sanity: lock variable is internal — not in module exports.
+  const exportedKeys = Object.keys(vaultAuth).filter((k) => k !== "default");
+  for (const k of exportedKeys) {
+    if (typeof vaultAuth[k] !== "function") {
+      throw new Error(`vault-authorize.ts exported non-function '${k}': ${typeof vaultAuth[k]} — INV-E forbids exposed mutable state`);
+    }
+  }
+  // Verify the only lock-related exports are the two test-helpers:
+  // reset (mutate) + peek (read). Both are __ prefixed and named
+  // explicitly ForTests to signal non-production status.
+  const lockFns = exportedKeys.filter((k) => /VaultDialogLock/i.test(k));
+  if (lockFns.length !== 2) {
+    throw new Error(`fix #6: expected exactly 2 lock test-helpers, got: ${lockFns.join(",")}`);
+  }
+  for (const k of lockFns) {
+    if (!k.startsWith("__") || !k.endsWith("ForTests")) {
+      throw new Error(`fix #6: lock helper '${k}' must be __<name>ForTests to mark as test-only`);
+    }
+  }
 });
 
 if (failures.length > 0) {
