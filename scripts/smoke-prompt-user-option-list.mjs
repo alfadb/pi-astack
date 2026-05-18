@@ -498,6 +498,50 @@ check("MaskedInput: control chars are filtered out of buffer", () => {
   if (m.getValue() !== "ab") throw new Error(`expected 'ab', got '${m.getValue()}'`);
 });
 
+check("R7.4+opus-P1.NEW: MaskedInput accepts bracketed paste (password manager UX)", () => {
+  // 原 R7.3 bug: 用户从密码管理器复制粘贴, pi-tui terminal 包为
+  // \x1b[200~<content>\x1b[201~ 一个 chunk. R7.3 的 startsWith("\x1b[")
+  // 早返回全部吞掉。R7.4 mirror pi-tui Input 的 paste 处理。
+  const m = new MaskedInput();
+  m.handleInput("\x1b[200~gh_secret_token_abc123\x1b[201~");
+  if (m.getValue() !== "gh_secret_token_abc123") {
+    throw new Error(`paste should accept content, got '${m.getValue()}'`);
+  }
+});
+
+check("R7.4: MaskedInput paste with embedded BEL char gets cleaned", () => {
+  const m = new MaskedInput();
+  m.handleInput("\x1b[200~abc\x07def\x1b[201~");
+  if (m.getValue() !== "abcdef") {
+    throw new Error(`paste should strip BEL, got '${m.getValue()}'`);
+  }
+});
+
+check("R7.4: MaskedInput multi-chunk paste (start in one chunk, end in another)", () => {
+  const m = new MaskedInput();
+  m.handleInput("\x1b[200~part1-");
+  m.handleInput("part2\x1b[201~");
+  if (m.getValue() !== "part1-part2") {
+    throw new Error(`multi-chunk paste failed, got '${m.getValue()}'`);
+  }
+});
+
+check("R7.4: MaskedInput wipe() also clears pasteBuffer", () => {
+  // mid-paste cancel — user typed paste-begin marker, hasn't sent
+  // paste-end yet, then dialog cancels. pasteBuffer must wipe too.
+  const m = new MaskedInput();
+  m.handleInput("\x1b[200~partial-secret-no-end-yet");
+  // No end marker so still in paste mode; getValue() reads buffer
+  // which is empty (paste content not yet flushed).
+  m.wipe();
+  if (m.getValue() !== "") throw new Error("buffer not wiped");
+  // After wipe, re-paste should work cleanly.
+  m.handleInput("\x1b[200~fresh\x1b[201~");
+  if (m.getValue() !== "fresh") {
+    throw new Error(`post-wipe paste broken: got '${m.getValue()}'`);
+  }
+});
+
 // ── Wizard: multi-question Enter advance + collect on submit ────────
 
 function buildWizard(questions) {

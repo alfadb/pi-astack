@@ -131,27 +131,33 @@ export function sanitizePathLike(s: string): string {
  */
 export function redactPromptParams(p: PromptUserParams): PromptUserParams {
   const scrub = (s: string): string => sanitizePathLike(redactCredentials(s));
+
+  // R7.4 (opus post-fix review P1.NEW): 三层全部采用显式白名单重建,
+  // 不用 `...spread`。R7.2 + opus P0.1 只修了 option 级,但 question / params
+  // 两层仍是 spread,老 LLM 传 description 在 question 级 / params 级同样会
+  // 随 spread 透传。今天不活跃(下游不读),但 future debug `JSON.stringify`
+  // 会重新打开同一类漏洞。全三层显式重建杭绝这个 regression 路径。
   const redactOption = (o: PromptUserOption): PromptUserOption => {
-    // R7.2 + opus review P0.1: 明式重建对象 + 白名单字段，不用 `...o`
-    // spread。原在使用 spread, 老 LLM 仍传 `description` 会随 spread
-    // 透传到 redacted 输出里且未被 scrub —— 今天没下游读它
-    // 所以不泄，但另一个 debug JSON.stringify 就会衰送 credentials。
-    // 显式白名单全 strip 未知字段，避免未来 regression。
     const out: PromptUserOption = { label: scrub(o.label) };
     if (o.recommended !== undefined) out.recommended = o.recommended;
     return out;
   };
-  const redactQuestion = (q: PromptUserQuestion): PromptUserQuestion => ({
-    ...q,
-    header: scrub(q.header),
-    question: scrub(q.question),
-    ...(q.options !== undefined ? { options: q.options.map(redactOption) } : {}),
-  });
-  return {
-    ...p,
+  const redactQuestion = (q: PromptUserQuestion): PromptUserQuestion => {
+    const out: PromptUserQuestion = {
+      id: q.id,
+      header: scrub(q.header),
+      question: scrub(q.question),
+      type: q.type,
+    };
+    if (q.options !== undefined) out.options = q.options.map(redactOption);
+    return out;
+  };
+  const out: PromptUserParams = {
     reason: scrub(p.reason),
     questions: p.questions.map(redactQuestion),
   };
+  if (p.timeoutSec !== undefined) out.timeoutSec = p.timeoutSec;
+  return out;
 }
 
 /**

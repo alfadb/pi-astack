@@ -68,14 +68,13 @@ export interface PromptUserOption {
  * secret placeholder (`[REDACTED_SECRET:<id>]`), the audit metadata
  * row, and the `answers` Record key. It is NEVER a user-facing label.
  *
- * `header` is what the UI shows as the chip / section header. ≤ 12
- * display cells (CJK = 2, ASCII = 1). The validator counts display
- * cells, not JS `string.length`. This bound matches Claude Code
- * `AskUserQuestion` and Codex `request_user_input` field shapes; with
- * narrow terminals 13+ cells start to wrap awkwardly.
+ * `header` is what the UI shows as the section header.
+ * R7.2 (2026-05-17): 任意长度,UI 自动 wrap。原 R4 设计的 ≤ 12 display
+ * cells 限制在 R7.2 删除(用户要求 LLM 自决长度 + R7 OptionList 策略
+ * 改为 wizard 竖向,不再依赖 chip 横排)。
  *
- * `question` is the full sentence shown above the chips. No length
- * cap in P0 beyond the 4KB total params payload limit (§D1).
+ * `question` is the full sentence shown above the options.
+ * R7.2: 任意长度,原 500 chars 限制删除。仅保留「非空 + 无控制字符」检查。
  *
  * `options` MUST be present for `single` / `multi`, and MUST be
  * absent for `text` / `secret`. The validator rejects mismatches.

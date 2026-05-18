@@ -491,7 +491,12 @@ export class OptionList implements PiTuiComponent {
  */
 export class MaskedInput implements PiTuiComponent {
   private buffer = "";
+  /** Paste-mode buffering (mirror of pi-tui Input.js paste path). */
+  private isInPaste = false;
+  private pasteBuffer = "";
   focused = false;
+  /** Brand for safe instanceof-failure fallback (opus P2.1 mitigation). */
+  readonly __maskedInputBrand = true;
 
   /** Current secret length — used by service.ts to compute lengthBucket. */
   getValue(): string {
@@ -506,7 +511,44 @@ export class MaskedInput implements PiTuiComponent {
 
   handleInput(data: string): void {
     if (!data) return;
-    // Enter / Esc / arrows bubble to wizard.
+
+    // R7.4 (opus post-fix review P1.NEW): bracketed paste support.
+    //
+    // pi-tui terminal.js wraps every paste in \x1b[200~...\x1b[201~
+    // and forwards the WHOLE wrapped chunk to component.handleInput.
+    // R7.3 MaskedInput had `if (data.startsWith("\x1b[")) return`
+    // which silently swallowed the entire paste — user pastes their
+    // 40-char token from a password manager and sees zero dots, no
+    // feedback. Secret inputs are the HIGHEST-frequency paste target.
+    //
+    // Mirror pi-tui Input.js paste handling: detect start marker,
+    // buffer until end marker, then run the paste content through the
+    // C0/DEL filter and append to buffer.
+    const START = "\x1b[200~";
+    const END = "\x1b[201~";
+    if (data.includes(START)) {
+      this.isInPaste = true;
+      this.pasteBuffer = "";
+      data = data.replace(START, "");
+    }
+    if (this.isInPaste) {
+      this.pasteBuffer += data;
+      const endIdx = this.pasteBuffer.indexOf(END);
+      if (endIdx !== -1) {
+        const pasteContent = this.pasteBuffer.substring(0, endIdx);
+        const remaining = this.pasteBuffer.substring(endIdx + END.length);
+        // wipe pasteBuffer BEFORE recursing so we don't carry secret
+        // bytes through the recursion frame (INV-C).
+        this.pasteBuffer = "\0".repeat(this.pasteBuffer.length);
+        this.pasteBuffer = "";
+        this.isInPaste = false;
+        this.appendCleaned(pasteContent);
+        if (remaining) this.handleInput(remaining);
+      }
+      return;
+    }
+
+    // Single-key path. Enter / Esc / arrows / SS3 bubble to wizard.
     if (data === "\r" || data === "\n") return;
     if (data === "\x1b") return;
     if (data.startsWith("\x1b[") || data.startsWith("\x1bO")) return;
@@ -517,31 +559,45 @@ export class MaskedInput implements PiTuiComponent {
       }
       return;
     }
-    // Filter ALL C0 controls + DEL from the data — opus review P1.2.
-    // Pre-fix: only data.length===1 was filtered, so a bracketed paste
-    // like "abc\x07def" landed in the buffer with the BEL byte. Doesn't
-    // break INV-C but feeds garbage into lengthBucket and into the
-    // raw secret value handed to the caller.
+    this.appendCleaned(data);
+  }
+
+  /**
+   * Append `data` to buffer after stripping ALL C0 controls + DEL.
+   * Iterates by Unicode codepoint via `for...of` so UTF-8 multi-byte
+   * chars (CJK, surrogate pairs) come through intact — opus P1.2 fix.
+   */
+  private appendCleaned(data: string): void {
+    if (!data) return;
     let cleaned = "";
     for (const ch of data) {
       const code = ch.charCodeAt(0);
       if (code < 0x20 || code === 0x7f) continue;
       cleaned += ch;
     }
-    if (!cleaned) return;
-    this.buffer += cleaned;
+    if (cleaned) this.buffer += cleaned;
   }
 
   invalidate(): void { /* no-op */ }
 
   /**
    * INV-C: explicit teardown called by the wizard on finish().
-   * Overwriting with NUL bytes first nudges the V8 GC to drop the
-   * old string content sooner.
+   * R7.4: also wipes pasteBuffer (could hold a partial mid-paste
+   * secret if the user pressed Esc during a multi-chunk paste).
+   *
+   * NOTE: per opus review P1.4, JS strings are immutable so the
+   * `this.buffer = "\0".repeat(...)" reassignment does NOT overwrite
+   * the previous buffer bytes in the V8 heap; it allocates a new
+   * NUL-filled string and orphans the original for GC. INV-C relies
+   * on closure scope discipline + caller drop-after-use, not on
+   * byte-level scrub.
    */
   wipe(): void {
     this.buffer = "\0".repeat(this.buffer.length);
     this.buffer = "";
+    this.pasteBuffer = "\0".repeat(this.pasteBuffer.length);
+    this.pasteBuffer = "";
+    this.isInPaste = false;
   }
 }
 
