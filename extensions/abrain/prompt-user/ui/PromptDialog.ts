@@ -365,22 +365,34 @@ export class OptionList implements PiTuiComponent {
 
   render(width: number): string[] {
     const lines: string[] = [];
-    const descIndent = this.mode === "multi" ? 8 : 4;
-    const descPad = " ".repeat(descIndent);
-    const labelIndent = this.mode === "multi" ? 6 : 2; // "  [×] " or "  "
+    // R7.7 (2026-05-18) 列宽往右拉: 原设计拆 prefix/number/checkbox 三段
+    // 各自计列宽, 使 wrap 续行能精准缩进到 label 文字起始列。
+    //
+    //   single:  "  N. label..."
+    //             ↑↑↑↑↑
+    //             prefix(2) + number(3) = 5 cells → wrap 续行缩进 5
+    //
+    //   multi:   "  [×] N. label..."
+    //             ↑↑↑↑↑↑↑↑↑
+    //             prefix(2) + checkbox(4) + number(3) = 9 cells → wrap 缩进 9
+    //
+    // 序号 schema MIN/MAX_OPTIONS=[2,4] + Other = 最多 5 项 → 序号是
+    // 单位数 1-5 → prefix 为 "N. " (3 cells) 。硬编码 3 是安全的。
+    const NUMBER_PREFIX_WIDTH = 3;
+    const arrowWidth = 2;            // "→ " / "  "
+    const checkboxWidth = this.mode === "multi" ? 4 : 0;  // "[×] " / 0
+    const labelIndent = arrowWidth + checkboxWidth + NUMBER_PREFIX_WIDTH;
     const labelWidth = Math.max(1, width - labelIndent);
+    // Other input + placeholder 对齐 label 文字起始列 (不是序号列)。
+    const descIndent = labelIndent;
+    const descPad = " ".repeat(descIndent);
 
     for (let i = 0; i < this.items.length; i++) {
       const item = this.items[i];
       const isHighlight = i === this.highlightIdx;
       const arrow = isHighlight ? "→ " : "  ";
-      // R7.6 (2026-05-18): Other 行不再用 「[+]」语义化前缀 — 用户
-      // 反馈误导。现在 Other 行与预设项视觉一致:
-      //   - multi Other text 非空 (=隐含选中) → "[×] Other"
-      //   - multi Other text 为空 (=未选中) → "[ ] Other"
-      //   - multi preset selected/not → "[×]" / "[ ]"
-      //   - single: 无 checkbox
-      // “是否选中 Other” 完全由 otherText.trim() 推导, 不表语义。
+      // Other 行与预设项视觉一致 (R7.6): empty=[ ], has-text=[×]。
+      // "是否选中 Other" 由 otherText.trim() 推导。
       let checkbox = "";
       if (this.mode === "multi") {
         if (item.isOther) {
@@ -390,17 +402,14 @@ export class OptionList implements PiTuiComponent {
         }
       }
 
-      // R7.6: 加序号 「1. / 2. / 3.」 前缀 (R6.7 设计, R7 重写时遗漏)。
-      // 序号让用户快速识别选项位置，与 cc/codex 同类组件一致。
-      // 序号走 "plain display" 路径 — OptionListItem.value (canonical answer
-      // value) 不变, INV-H 保护。
+      // 序号 "N. " (R6.7 设计, R7.6 恢复)。
       const numberPrefix = `${i + 1}. `;
-      const decoratedLabel = `${numberPrefix}${item.label}`;
-      // Wrap label across multiple lines if it exceeds labelWidth.
-      const labelLines = wrapToWidth(decoratedLabel, labelWidth);
+      // Wrap label 到 labelWidth —— prefix 不进 wrap, 仅 item.label 本身
+      // 参与 wrap。这样续行能准确缩进到 label 文字列。
+      const labelLines = wrapToWidth(item.label, labelWidth);
       for (let li = 0; li < labelLines.length; li++) {
         const lineText = li === 0
-          ? `${arrow}${checkbox}${labelLines[li]}`
+          ? `${arrow}${checkbox}${numberPrefix}${labelLines[li]}`
           : `${" ".repeat(labelIndent)}${labelLines[li]}`;
         lines.push(
           isHighlight ? this.themeBag.accent(lineText) : this.themeBag.dim(lineText),
