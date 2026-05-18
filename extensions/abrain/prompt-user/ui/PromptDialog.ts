@@ -374,25 +374,30 @@ export class OptionList implements PiTuiComponent {
       const item = this.items[i];
       const isHighlight = i === this.highlightIdx;
       const arrow = isHighlight ? "→ " : "  ";
-      // R7.3 checkbox semantics:
-      //   - multi preset: "[×]" if selected, "[ ]" if not.
-      //   - multi Other:  "[×]" if otherText.trim() non-empty, "[+]" else.
-      //                   "+" hints at "add a custom answer" (implicit
-      //                   selection via has-text rather than explicit
-      //                   space-toggle). Uses `.trim()` so a single
-      //                   space doesn't flip to [×] (gpt-5.5 review).
-      //   - single:       no checkbox.
+      // R7.6 (2026-05-18): Other 行不再用 「[+]」语义化前缀 — 用户
+      // 反馈误导。现在 Other 行与预设项视觉一致:
+      //   - multi Other text 非空 (=隐含选中) → "[×] Other"
+      //   - multi Other text 为空 (=未选中) → "[ ] Other"
+      //   - multi preset selected/not → "[×]" / "[ ]"
+      //   - single: 无 checkbox
+      // “是否选中 Other” 完全由 otherText.trim() 推导, 不表语义。
       let checkbox = "";
       if (this.mode === "multi") {
         if (item.isOther) {
-          checkbox = this.otherText.trim() ? "[×] " : "[+] ";
+          checkbox = this.otherText.trim() ? "[×] " : "[ ] ";
         } else {
           checkbox = this.selected.has(i) ? "[×] " : "[ ] ";
         }
       }
 
+      // R7.6: 加序号 「1. / 2. / 3.」 前缀 (R6.7 设计, R7 重写时遗漏)。
+      // 序号让用户快速识别选项位置，与 cc/codex 同类组件一致。
+      // 序号走 "plain display" 路径 — OptionListItem.value (canonical answer
+      // value) 不变, INV-H 保护。
+      const numberPrefix = `${i + 1}. `;
+      const decoratedLabel = `${numberPrefix}${item.label}`;
       // Wrap label across multiple lines if it exceeds labelWidth.
-      const labelLines = wrapToWidth(item.label, labelWidth);
+      const labelLines = wrapToWidth(decoratedLabel, labelWidth);
       for (let li = 0; li < labelLines.length; li++) {
         const lineText = li === 0
           ? `${arrow}${checkbox}${labelLines[li]}`
