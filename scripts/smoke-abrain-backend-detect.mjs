@@ -465,6 +465,13 @@ fs.writeFileSync(
 );
 fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts")));
 fs.writeFileSync(path.join(tmpDir, "git-sync.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts")));
+// ADR 0022 P3b: index.ts imports ./vault-authorize for PromptDialog overlay
+// path. Stage the transpiled module alongside the other abrain helpers.
+fs.writeFileSync(
+  path.join(tmpDir, "vault-authorize.cjs"),
+  transpileTsToCjs(path.join(repoRoot, "extensions/abrain/vault-authorize.ts")),
+);
+fs.copyFileSync(path.join(tmpDir, "vault-authorize.cjs"), path.join(tmpDir, "vault-authorize.js"));
 // ADR 0022 P1: git-sync.ts now re-exports redactCredentials from ./redact.
 // transpile + extensionless .js alias so CJS `require("./redact")` resolves.
 fs.writeFileSync(path.join(tmpDir, "redact.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/redact.ts")));
@@ -507,6 +514,7 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
+  .replace(/require\("\.\/vault-authorize"\)/g, 'require("./vault-authorize.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);

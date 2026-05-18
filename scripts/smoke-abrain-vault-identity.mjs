@@ -95,6 +95,8 @@ fs.mkdirSync(abrainHome, { recursive: true, mode: 0o700 });
 // Compile relevant abrain modules into the tmp dir (same pattern as other smokes).
 // ADR 0022 P1: "redact" added — git-sync.ts re-exports redactCredentials
 // from ./redact. The loop already writes both .cjs and .js aliases.
+// ADR 0022 P3b: "vault-authorize" added — abrain/index.ts imports it for
+// PromptDialog overlay path on vault release / bash output authorization.
 for (const file of [
   "backend-detect",
   "bootstrap",
@@ -102,6 +104,7 @@ for (const file of [
   "vault-reader",
   "vault-writer",
   "vault-bash",
+  "vault-authorize",
   "brain-layout",
   "i18n",
   "git-sync",
@@ -137,6 +140,7 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/vault-writer"\)/g, 'require("./vault-writer.cjs")')
   .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")')
   .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")')
+  .replace(/require\("\.\/vault-authorize"\)/g, 'require("./vault-authorize.cjs")')
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')

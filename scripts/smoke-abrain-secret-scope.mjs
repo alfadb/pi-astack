@@ -50,7 +50,9 @@ fs.copyFileSync(path.join(sharedTarget, "runtime.cjs"), path.join(sharedTarget, 
 // ADR 0022 P1: "redact" added — git-sync.ts re-exports redactCredentials
 // from ./redact. The for-loop already writes both .cjs and .js aliases,
 // so adding the name suffices.
-for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "bootstrap", "backend-detect", "i18n", "brain-layout", "git-sync", "redact"]) {
+// ADR 0022 P3b: "vault-authorize" added — abrain/index.ts imports it for
+// PromptDialog overlay path on vault release / bash output authorization.
+for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "bootstrap", "backend-detect", "i18n", "brain-layout", "git-sync", "redact", "vault-authorize"]) {
   // P1-2 audit fix 2026-05-16 round 4: brain-layout.ts now imports
   // `../_shared/runtime` for computeAbrainStateGitignoreNext. Rewrite
   // the relative require to point at the shared helper we already wrote
@@ -79,6 +81,7 @@ const indexCjs = ts.transpileModule(indexSrc, {
   .replace(/require\("\.\/vault-writer"\)/g, 'require("./vault-writer.cjs")')
   .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")')
   .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")')
+  .replace(/require\("\.\/vault-authorize"\)/g, 'require("./vault-authorize.cjs")')
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')

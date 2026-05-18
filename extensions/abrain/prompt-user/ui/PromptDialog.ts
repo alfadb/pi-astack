@@ -37,8 +37,18 @@
  *
  * Variants:
  *   - `question`            (this ADR's main path; LLM-driven)
- *   - `vault_release`       (P3 will route authorizeVaultRelease here)
- *   - `bash_output_release` (P3 will route authorizeVaultBashOutput here)
+ *   - `vault_release`       (P3b: authorizeVaultRelease 主路径,Other 关闭)
+ *   - `bash_output_release` (P3b: authorizeVaultBashOutput 主路径,Other 关闭)
+ *
+ * P3b (2026-05-18) vault variant 渲染差异：
+ *   1. `allowOther = (variant === "question")` —— vault 决策不允许
+ *      自由文本逃逸（与现有 `ui.select` 4-choice 严格 enum 语义对齐）；
+ *      INV-G 边界在 LLM-facing schema 层守护,vault caller 走
+ *      buildPromptDialog 内部 path,不经 schema validator,因此本层
+ *      额外加一道 push-Other-gate。
+ *   2. variant ≠ question 时 typeHint 改为 `↑↓ navigate • enter
+ *      authorize • esc deny`,移除 type-specific paste hint。
+ *   3. variant ≠ question 时不渲染 `(N/M)` progress（vault 始终单题）。
  *
  * INV-C: `type:"secret"` raw never leaves PromptDialog closure —
  *        MaskedInput.buffer is wiped on finish() (submit AND cancel).
@@ -303,8 +313,15 @@ export class OptionList implements PiTuiComponent {
     this.otherInput.focused = false;
   }
 
+  /**
+   * Index of the Other row, or -1 when this list has no Other row
+   * (P3b vault variant). Callers compare highlightIdx with otherIdx
+   * for routing decisions; returning -1 ensures those comparisons
+   * never fire in vault-mode (highlightIdx is always ≥ 0).
+   */
   private get otherIdx(): number {
-    return this.items.length - 1;
+    const last = this.items[this.items.length - 1];
+    return last?.isOther ? this.items.length - 1 : -1;
   }
 
   private get otherText(): string {
@@ -692,6 +709,9 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
     variant === "vault_release" ? "warning" :
     "warning";
   const paint = (s: string) => theme.fg(accentColor, s);
+  // P3b: vault variants disallow Other (free-form). 'question' variant
+  // (LLM-facing) keeps Other forced-open per ADR 0022 §2.E.
+  const allowOther = variant === "question";
 
   // Build ALL question components up-front so navigating back to a
   // previous question preserves its state.
@@ -704,11 +724,13 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
         label: opt.recommended ? `${opt.label} (Recommended)` : opt.label,
         isOther: false,
       }));
-      items.push({
-        value: OTHER_VALUE,
-        label: "Other (specify)",
-        isOther: true,
-      });
+      if (allowOther) {
+        items.push({
+          value: OTHER_VALUE,
+          label: "Other (specify)",
+          isOther: true,
+        });
+      }
       const list = new OptionList(
         items,
         q.type,
@@ -774,7 +796,8 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
     root.addChild(new pitui.Spacer(1));
     const entry = entries[currentIdx];
     const q = entry.q;
-    const progress = entries.length > 1
+    // P3b: vault variants are always single-question; suppress (1/1) progress.
+    const progress = (variant === "question" && entries.length > 1)
       ? ` (${currentIdx + 1}/${entries.length})`
       : "";
     root.addChild(
@@ -784,10 +807,13 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
     root.addChild(new pitui.Spacer(1));
     root.addChild(new PaddedBox(entry.component, 1));
     root.addChild(new pitui.Spacer(1));
-    // Hint changes per type + wizard position.
+    // Hint changes per type + wizard position + variant.
     const enterHint = currentIdx < entries.length - 1
       ? "enter next"
-      : "enter submit";
+      : variant === "question"
+        ? "enter submit"
+        : "enter authorize";
+    const cancelHint = variant === "question" ? "esc cancel" : "esc deny";
     const arrowHint = entries.length > 1
       ? " • ← → switch question"
       : "";
@@ -799,7 +825,7 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
           : "type to fill (masked; paste with Ctrl+Shift+V / Cmd+V / mouse middle-click)";
     root.addChild(
       new pitui.Text(
-        theme.fg("dim", `${typeHint} • ${enterHint}${arrowHint} • esc cancel`),
+        theme.fg("dim", `${typeHint} • ${enterHint}${arrowHint} • ${cancelHint}`),
         1,
         0,
       ),

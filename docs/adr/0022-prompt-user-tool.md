@@ -783,7 +783,7 @@ P0 范围（本 ADR ship 即落地）：
 
 ### 4.5 实施进度 + 后续 Phase
 
-**已 ship（2026-05-17）**：
+**已 ship（2026-05-17 ~ 18）**：
 
 | Phase | 内容 | Commit | Smoke |
 |---|---|---|---|
@@ -791,15 +791,15 @@ P0 范围（本 ADR ship 即落地）：
 | **P2** ✅ | 完整 LLM 工具表面（schema / manager / service / handler / PromptDialog）+ abrain wire-up + session_shutdown finalizer + globalThis pending hook | `b9565c2` | `smoke:prompt-user{,-finalizer,-subpi}` |
 | **P3a** ✅ | `compaction-tuner/prompt-user-defer.ts` 叶模块 + INV-K guard | `29439cb` | `smoke:compaction-tuner-prompt-user` |
 | **P2-fix** ✅ | OPUS+DEEPSEEK xhigh review 产出 7 项 P1 全修：`hasControlChars` 拒 \t\n\r / `redactCredentials` 扩全 scheme / `redactPromptParams` 下沉 service + 加 `sanitizePathLike` / narrow terminal reject / fallback multi 多次 confirm / INV-I 发 audit | `8676c5f` | +11 redact / +10 prompt-user assertion |
+| **P3b** ✅ (2026-05-18) | `authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 PromptDialog overlay。新增叶文件 `extensions/abrain/vault-authorize.ts` thin wrapper（不走 `service.askPromptUser`）。`PromptDialog` 扩 `allowOther` flag：variant != "question" 时关闭 Other、隐藏 progress、提示改为 `enter authorize • esc deny`。`ui.select` 保留为 fallback。INV-E (PromptDialog 不持 grant 状态) 首次可 smoke 验证。 | TBD | `smoke:abrain-vault-reader` 6 → 14 (+8 P3b 专项：4-choice mapping / 3-choice bash variant / ui.custom missing / throws / pre-aborted signal / unknown choice / cancel outcome / INV-E module-state assertion) |
 
-P1+P2+P3a+P2-fix 合计：TS ~5300 LOC + smoke ~3500 LOC，22/22 全量 smoke 零回归。
+P1→P3b 合计：TS ~5500 LOC + smoke ~3700 LOC，23/23 全量 smoke 零回归。
 
 **deferred（本 ADR P0 不要求）**：
 
 | Phase | 内容 | 估算 |
 |---|---|---|
-| **P3b** | `authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁移到 `<PromptDialog>` overlay（variant `vault_release` / `bash_output_release`），保留 `ui.select` fallback。验证 INV-E smoke。 | ~150 LOC + 5 assertion |
-| **P3c** | sediment evidence assembly 读 `lane:"prompt_user"` audit 行 → curator prompt，让 sediment 区分「用户决策」与「LLM 思考」。 | ~80 LOC + smoke |
+| **P3c** 调整 (2026-05-18) | 原重量路径（sediment evidence assembly 读 `lane:"prompt_user"` audit 行独立 consumer）**降为 YAGNI**，等 curator 误判 prompt_user 答案的实际案例出现再启动。代之以轻量路径：扩 `extensions/sediment/llm-extractor.ts` trust boundary 段，白名单 `name="prompt_user"` 的 `role=toolResult` 为 user-attested（≈1个 `Exception:` 句子）。让 curator 区分「用户亲手勾选/输入的 prompt_user 答案」与「普通 toolResult」。 | 轻量路径：~10 LOC prompt 修改。重量路径（0原计划）保留在 backlog。 |
 | **P4** | `/about-me` slash 接 `askPromptUser` service（ADR 0021 G2 可复用）；`/decide` 类 high-level slash；`type:"secret"` raw consumer callback API；`type:"multi"` 真正多选 toggle；`type:"secret"` 经 `$PROMPT_VAULT_<id>` bash injection（新 follow-up ADR）；defer/resume（需 pi 核心 turn-resume API）；richer types（slider/date picker）；hard rate-limit | per-feature |
 
 ---

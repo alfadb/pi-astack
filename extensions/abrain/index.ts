@@ -81,8 +81,12 @@ import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18
 import type {
   PromptUserHandlerDeps,
 } from "./prompt-user/handler";
-import type { PromptAuditSink } from "./prompt-user/service";
+import type { PromptAuditSink, PromptDialogDeps } from "./prompt-user/service";
 import type { PiTuiBag } from "./prompt-user/ui/PromptDialog";
+// ADR 0022 P3b: vault authorization via PromptDialog overlay.
+import {
+  askVaultAuthorizationViaDialog,
+} from "./vault-authorize";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 // Priority: ABRAIN_ROOT env var > default ~/.abrain (aligned with memory/parser.ts)
@@ -212,6 +216,13 @@ interface VaultReleaseUi {
   notify?(message: string, type?: string): void;
   select?(title: string, items: string[], opts?: { timeout?: number; signal?: AbortSignal }): Promise<string | undefined>;
   confirm?(title: string, message: string, opts?: { timeout?: number; signal?: AbortSignal }): Promise<boolean>;
+  // ADR 0022 P3b: ctx.ui.custom is the inline-overlay primitive pi exposes
+  // to extensions. PromptDialog overlay rides on top of this; vault auth
+  // delegates to it when present, with ui.select retained as fallback.
+  custom?(
+    factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: unknown) => void) => unknown,
+    options?: Record<string, unknown>,
+  ): Promise<unknown> | unknown;
 }
 
 export const VAULT_RELEASE_AUTH_CHOICES = ["No", "Deny + remember", "Yes once", "Session"] as const;
@@ -393,6 +404,35 @@ export function __resetBootActiveProjectForTests(value: ResolveActiveProjectResu
 const releaseSessionGrants = new Set<string>();
 const releaseRememberDenies = new Set<string>();
 const bashOutputSessionGrants = new Set<string>();
+
+// ── ADR 0022 P3b: PromptDialog factory cache ────────────────────────
+// activate() lazy-requires the prompt-user subtree + pi-tui ONCE (in the
+// prompt_user tool registration block) and stores the builder here.
+// `authorizeVaultRelease` / `authorizeVaultBashOutput` read this to
+// decide whether to use the PromptDialog overlay (primary path) or
+// fall through to the legacy `ui.select` chain. `null` means the
+// pi-tui surface failed to load on this process — fail-soft, the
+// caller still has `ui.select`/`ui.confirm` fallbacks.
+let cachedVaultDialogBuilder: PromptDialogDeps["buildDialog"] | null = null;
+
+/** Test-only: reset the dialog builder cache (e.g. for smoke fixtures). */
+export function __setVaultDialogBuilderForTests(
+  fn: PromptDialogDeps["buildDialog"] | null,
+): void {
+  cachedVaultDialogBuilder = fn;
+}
+
+/** Test-only: reset all in-memory vault grant sets between smoke cases. */
+export function __resetVaultGrantsForTests(): void {
+  releaseSessionGrants.clear();
+  releaseRememberDenies.clear();
+  bashOutputSessionGrants.clear();
+}
+
+/** Test-only: read the current dialog builder (for INV-E identity asserts). */
+export function __getVaultDialogBuilderForTests(): PromptDialogDeps["buildDialog"] | null {
+  return cachedVaultDialogBuilder;
+}
 const vaultBashRuns = new Map<string, VaultBashRunRecord>();
 
 function vaultReleaseChoiceReason(choice: string | undefined): string {
@@ -535,23 +575,58 @@ async function authorizeVaultBashOutput(
   hostCtx: unknown,
 ): Promise<"release" | "withhold"> {
   if (bashOutputSessionGrants.has(record.grantKey)) return "release";
-  if (!ui?.select) return "withhold";
+  if (!ui) return "withhold";
   const descriptions = collectReleaseDescriptions(record.releases);
   const englishTitle = formatBashAuthorizationTitle(record, descriptions);
   const title = await localizePrompt(englishTitle, hostCtx);
   // Also push the full context into the message stream so it survives any TUI
   // truncation of the select title.
   ui.notify?.(title, "warning");
-  // Fail closed in non-interactive/API runners that may auto-return the first
-  // select item: put the deny option first. Interactive users can still move to
-  // an explicit release choice.
-  const choice = await ui.select(title, [...VAULT_BASH_OUTPUT_AUTH_CHOICES], { signal });
-  if (choice === "Yes once") return "release";
-  if (choice === "Session") {
-    bashOutputSessionGrants.add(record.grantKey);
-    return "release";
-  }
+
   const keyList = record.releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ");
+  const applyChoice = (choice: string | undefined): "release" | "withhold" => {
+    if (choice === "Yes once") return "release";
+    if (choice === "Session") {
+      bashOutputSessionGrants.add(record.grantKey);
+      return "release";
+    }
+    ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
+    return "withhold";
+  };
+
+  // ADR 0022 P3b: prefer PromptDialog overlay when available; fall
+  // through to ui.select on dialog_error / ui_unavailable. cancelled
+  // is treated as deny (fail-closed) so an Esc / abort during overlay
+  // is equivalent to choosing "No".
+  if (typeof ui.custom === "function" && cachedVaultDialogBuilder) {
+    const r = await askVaultAuthorizationViaDialog({
+      ui,
+      variant: "bash_output_release",
+      reason: title,
+      header: "Vault bash output",
+      question: `Release this command's output to the LLM? (keys: ${keyList || "<none>"})`,
+      choices: VAULT_BASH_OUTPUT_AUTH_CHOICES,
+      signal,
+      buildDialog: cachedVaultDialogBuilder,
+    });
+    if (r.ok) return applyChoice(r.choice);
+    if (r.reason === "cancelled") {
+      ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
+      return "withhold";
+    }
+    // dialog_error / ui_unavailable — best effort notify and fall through.
+    if (r.reason === "dialog_error") {
+      ui.notify?.(`vault bash output: dialog error, falling back to select: ${r.detail ?? "(no detail)"}`, "warning");
+    }
+  }
+
+  if (typeof ui.select === "function") {
+    // Fail closed in non-interactive/API runners that may auto-return the first
+    // select item: put the deny option first. Interactive users can still move to
+    // an explicit release choice.
+    const choice = await ui.select(title, [...VAULT_BASH_OUTPUT_AUTH_CHOICES], { signal });
+    return applyChoice(choice);
+  }
   ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
   return "withhold";
 }
@@ -576,10 +651,7 @@ async function authorizeVaultRelease(
   // what is about to be released, even if the TUI select clips long titles.
   ui.notify?.(title, "warning");
 
-  if (typeof ui.select === "function") {
-    // Fail closed in non-interactive/API runners that may auto-return the first
-    // select item: put deny choices before explicit release choices.
-    const choice = await ui.select(title, [...VAULT_RELEASE_AUTH_CHOICES], { signal });
+  const applyChoice = (choice: string | undefined): { ok: true } | { ok: false; reason: string } => {
     if (choice === "Yes once") return { ok: true };
     if (choice === "Session") {
       releaseSessionGrants.add(gate);
@@ -587,6 +659,36 @@ async function authorizeVaultRelease(
     }
     if (choice === "Deny + remember") releaseRememberDenies.add(gate);
     return { ok: false, reason: vaultReleaseChoiceReason(choice) };
+  };
+
+  // ADR 0022 P3b: prefer PromptDialog overlay when ctx.ui.custom is
+  // available AND the dialog builder loaded successfully in activate().
+  // Fall through to ui.select on dialog_error / ui_unavailable. A
+  // cancelled overlay is treated as deny-this-call (NOT deny+remember).
+  if (typeof ui.custom === "function" && cachedVaultDialogBuilder) {
+    const r = await askVaultAuthorizationViaDialog({
+      ui,
+      variant: "vault_release",
+      reason: title,
+      header: `Release ${authKey(scope, key)}?`,
+      question: "Authorize plaintext release into LLM context?",
+      choices: VAULT_RELEASE_AUTH_CHOICES,
+      signal,
+      buildDialog: cachedVaultDialogBuilder,
+    });
+    if (r.ok) return applyChoice(r.choice);
+    if (r.reason === "cancelled") return { ok: false, reason: "cancelled" };
+    // dialog_error / ui_unavailable — best effort notify and fall through.
+    if (r.reason === "dialog_error") {
+      ui.notify?.(`vault_release: dialog error, falling back to select: ${r.detail ?? "(no detail)"}`, "warning");
+    }
+  }
+
+  if (typeof ui.select === "function") {
+    // Fail closed in non-interactive/API runners that may auto-return the first
+    // select item: put deny choices before explicit release choices.
+    const choice = await ui.select(title, [...VAULT_RELEASE_AUTH_CHOICES], { signal });
+    return applyChoice(choice);
   }
 
   if (typeof ui.confirm === "function") {
@@ -597,6 +699,15 @@ async function authorizeVaultRelease(
   ui.notify?.("vault_release denied: no UI authorization method available", "warning");
   return { ok: false, reason: "ui_authorization_unavailable" };
 }
+
+// Export so smoke can invoke + INV-E identity asserts can run against
+// the real function (not a copy). These are file-internal helpers; the
+// LLM-facing surface remains the registered `vault_release` tool +
+// bash output guard.
+export {
+  authorizeVaultRelease as __authorizeVaultReleaseForTests,
+  authorizeVaultBashOutput as __authorizeVaultBashOutputForTests,
+};
 
 export default function activate(pi: ExtensionAPI): void {
   // ── Sub-pi enforce: vault-bootstrap.md §5 layer (b) ───────────────────
@@ -1054,6 +1165,16 @@ export default function activate(pi: ExtensionAPI): void {
       // pi-tui not available in this process — OK, prompt_user will
       // gracefully reject with ui-unavailable when called.
       void err;
+    }
+
+    // ADR 0022 P3b: cache the dialog builder so authorizeVaultRelease /
+    // authorizeVaultBashOutput (top-level functions defined earlier in
+    // this file) can use the same PromptDialog substrate. activate() is
+    // synchronous; the cache is written here BEFORE the first
+    // vault_release tool invocation can run (tool callbacks fire on
+    // user actions which happen after activate returns).
+    if (pitui) {
+      cachedVaultDialogBuilder = promptDialogModule.makeBuildDialog(pitui);
     }
 
     // Audit sink: feeds prompt_user events into VAULT_EVENTS with

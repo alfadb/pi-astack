@@ -7,13 +7,14 @@
 > **2026-05-15 PM 补充**：multi-LLM audit (round 1+2) 同日关闭三项 backlog：**Curator scope binding (create 分支)**、**sediment update/merge unknown frontmatter preservation 系统化测试**、**memory parser kind/status 枚举 enforcement**（该项本次初检才发现，同日修复）。均进§"已落地不变量"。
 >
 > **2026-05-17 同步**：ADR 0022 (`prompt_user` LLM-facing 同步问答工具) P1 + P2 + P3a + P2-fix 完成。LLM 现在可以调 `prompt_user(...)` 暂停 turn 问用户问题，解决 sediment 拿到残缺 turn 的问题。详 [ADR 0022](./adr/0022-prompt-user-tool.md) §4 与 [current-state §10](./current-state.md#10-prompt_user-状态adr-0022)。R4 multi-LLM ADR audit + 1 轮 implementation P1 audit (OPUS + DEEPSEEK xhigh)，P0 共识 0，7 个 P1 全部 ship-with-smoke。P3b/P3c 进入 backlog（下表）。
+>
+> **2026-05-18 同步**：**ADR 0022 P3b shipped**：`authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 PromptDialog overlay，保留 `ui.select` fallback。`smoke:abrain-vault-reader` 6 → 14 assertion（8 个 P3b 专项）。INV-E (PromptDialog 不持 grant 状态) 首次可 smoke 验证。新增叶文件 `extensions/abrain/vault-authorize.ts`。P3c 原重量路径（~80 LOC 独立 audit consumer）**降为 YAGNI**，代以轻量路径：扩 `llm-extractor.ts` trust boundary白名单 `name="prompt_user"` toolResult 为 user-attested（≈10 LOC）。
 
 ## P0/P1 product backlog
 
 | Item | Intent | Notes |
 |---|---|---|
-| **ADR 0022 P3b：vault_release UI 迁移** | `authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 `<PromptDialog>` overlay（variant `vault_release` / `bash_output_release`），保留 `ui.select` fallback。¨ ~150 LOC 代码 + `smoke:abrain-vault-reader` +5 assertion。验证 INV-E（PromptDialog 不持 grant 状态）。 | 安排时对 vault state machinery 做完整 multi-LLM audit（high-value review 点）。 |
-| **ADR 0022 P3c：sediment evidence 注入 `prompt_user` 信号** | sediment evidence assembly 读本 turn `lane:"prompt_user"` audit 行，输出 user-attested signal 段注入 curator prompt。让 curator 区分「用户决策」与「LLM 思考」。¨ ~80 LOC + smoke。 | 需先读 sediment curator prompt 结构。与 P3b 独立，可独立 ship。 |
+| **ADR 0022 P3c（轻量路径）** | 扩 `extensions/sediment/llm-extractor.ts` 的 trust boundary 段，白名单 `name="prompt_user"` 的 `role=toolResult` 为 user-attested。让 curator 区分「用户亲手勾选/输入的 prompt_user 答案」与「普通 toolResult」。¨ ~10 LOC prompt 修改 + smoke (可复用 `smoke:memory` 现有 fixture)。 | **取代原重量 P3c 路径**（2026-05-18 设计讨论决定）。老路径≈80 LOC 独立 audit consumer，ROI 实证后再考虑。 |
 | Lane G G2–G5 | G1 writer（`writeAbrainAboutMe` + fence extractor + router）✅ shipped 2026-05-16，详 [ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)。剩余：G2 `/about-me` slash + transcript inject、G3 aboutness LLM classifier、G4 `review-staging` slash + 30-day TTL、G5 region-aware ranking hint。 | G2 在等 pi extension SDK 确认 user-role transcript inject API；其他无阻塞。**ADR 0022 P2 后 G2 可考虑复用 `askPromptUser` service 作为 `/about-me` UI substrate**，不再依赖 user-role inject API。 |
 | Vault P0d | masked input、`.env` import、`/vault migrate-backend` wizard | 保持 fail-closed，不引入 plaintext fallback。Vault P1（active project resolver + `/secret` scope 路由 + `$PVAULT_/$GVAULT_`）已 ship。 |
 | `abrain-age-key` identity passphrase wrap | 让 `~/.abrain/.vault-identity/master.age` 能用 passphrase 加密后进 git，实现跨设备仅 `git clone abrain` + 输一次 passphrase。详见 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md) §"P0d 增强"。 | 技术依赖未定：(Y2) `age-encryption` JS lib in-process unwrap · (Y1) `node-pty` 模拟 pseudo-tty 。合并 P0d ADR 决策。 |
