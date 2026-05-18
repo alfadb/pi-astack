@@ -1194,6 +1194,23 @@ END_MEMORY`;
         "Wikilinks target abrain memory entry slugs only",
         "MUST be referenced in PROSE",
         "ADR 0017 (`docs/adr/0017-project-binding-strict-mode.md`)",
+        // ADR 0022 P3c lightweight path (added 2026-05-18): prompt_user
+        // tool results are user-attested, not generic untrusted toolResult
+        // data. The exception lets curator sediment candidates derived
+        // from prompt_user answers as preference/decision without the
+        // assistant having to independently re-establish the substance.
+        // Locks the entire exception block so a future trust-boundary
+        // refactor cannot silently drop the prompt_user carve-out.
+        "EXCEPTION (ADR 0022 P3c lightweight path, 2026-05-18)",
+        "message/toolResult:prompt_user",
+        "USER-ATTESTED",
+        "the structured dialog IS",
+        "User picks 'Next.js' in a framework prompt",
+        // Defense in depth: prompt_user 'Other' free-form text MUST still
+        // go through the credential/secret sanitizer. The exception is
+        // about trust budget for SUBSTANCE, not for SECRET DISCLOSURE.
+        "Still apply the credential/secret sanitizer",
+        "not as a license to leak secrets",
       ];
       for (const needle of required) {
         assert(p.includes(needle), `prompt missing required marker: ${JSON.stringify(needle)}`);

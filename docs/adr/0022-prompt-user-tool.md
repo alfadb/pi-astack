@@ -791,16 +791,19 @@ P0 范围（本 ADR ship 即落地）：
 | **P2** ✅ | 完整 LLM 工具表面（schema / manager / service / handler / PromptDialog）+ abrain wire-up + session_shutdown finalizer + globalThis pending hook | `b9565c2` | `smoke:prompt-user{,-finalizer,-subpi}` |
 | **P3a** ✅ | `compaction-tuner/prompt-user-defer.ts` 叶模块 + INV-K guard | `29439cb` | `smoke:compaction-tuner-prompt-user` |
 | **P2-fix** ✅ | OPUS+DEEPSEEK xhigh review 产出 7 项 P1 全修：`hasControlChars` 拒 \t\n\r / `redactCredentials` 扩全 scheme / `redactPromptParams` 下沉 service + 加 `sanitizePathLike` / narrow terminal reject / fallback multi 多次 confirm / INV-I 发 audit | `8676c5f` | +11 redact / +10 prompt-user assertion |
-| **P3b** ✅ (2026-05-18) | `authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 PromptDialog overlay。新增叶文件 `extensions/abrain/vault-authorize.ts` thin wrapper（不走 `service.askPromptUser`）。`PromptDialog` 扩 `allowOther` flag：variant != "question" 时关闭 Other、隐藏 progress、提示改为 `enter authorize • esc deny`。`ui.select` 保留为 fallback。INV-E (PromptDialog 不持 grant 状态) 首次可 smoke 验证。 | TBD | `smoke:abrain-vault-reader` 6 → 14 (+8 P3b 专项：4-choice mapping / 3-choice bash variant / ui.custom missing / throws / pre-aborted signal / unknown choice / cancel outcome / INV-E module-state assertion) |
+| **P3b** ✅ (2026-05-18 上午) | `authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 PromptDialog overlay。新增叶文件 `extensions/abrain/vault-authorize.ts` thin wrapper（不走 `service.askPromptUser`）。`PromptDialog` 扩 `allowOther` flag：variant != "question" 时关闭 Other、隐藏 progress、提示改为 `enter authorize • esc deny`。`ui.select` 保留为 fallback。INV-E (PromptDialog 不持 grant 状态) 首次可 smoke 验证。 | `8abb48b` | `smoke:abrain-vault-reader` 6 → 14 (+8 P3b 专项) |
+| **P3b post-audit** ✅ (2026-05-18 下午) | OPUS+GPT-5.5+DEEPSEEK 三路并行 xhigh audit 产出 **0 P0 / 6 共识 P1**，全部 ship：(#1) pre-aborted signal early-return、(#2) mid-dialog abort 主动 `done(null)` teardown、(#3) **vault 独立 concurrent gate**（pi parallel tool mode 下两个 `vault_release` 同发不会串话授权）、(#4) vault variant shape invariant (`choices.length >= 2`)、(#5) `signal` narrow type check、(#6) INV-E refinement 明确 dialog lock = concurrency state ≠ grant state。 | `6ae5771` | `smoke:abrain-vault-reader` 14 → 21 (+7) |
+| **P3c-lightweight** ✅ (2026-05-18 晚间) | 扩 `extensions/sediment/llm-extractor.ts` trust boundary 段加 prompt_user exception（18 行 prompt + 2 个正例 + 1 个反例 + 1 句 sanitizer defense-in-depth）。`message/toolResult:prompt_user` entry 被明确标为 USER-ATTESTED；curator 可将基于 prompt_user 答案的候选沉淀为 `preference` / `decision`。取代原重量 P3c 路径（≈80 LOC 独立 audit consumer）。 | TBD | `smoke:memory` extractor-prompt assertion +8 anchor needles（negative test 验证） |
 
-P1→P3b 合计：TS ~5500 LOC + smoke ~3700 LOC，23/23 全量 smoke 零回归。
+P1→P3c 合计：TS ~5600 LOC + smoke ~3900 LOC，23/23 全量 smoke 零回归。**ADR 0022 的所有 P0/P1 stage 完全 ship**，后续 P4 与 P3b post-audit 留的 10 项 P2 进入 housekeeping 阶段。
 
 **deferred（本 ADR P0 不要求）**：
 
 | Phase | 内容 | 估算 |
 |---|---|---|
-| **P3c** 调整 (2026-05-18) | 原重量路径（sediment evidence assembly 读 `lane:"prompt_user"` audit 行独立 consumer）**降为 YAGNI**，等 curator 误判 prompt_user 答案的实际案例出现再启动。代之以轻量路径：扩 `extensions/sediment/llm-extractor.ts` trust boundary 段，白名单 `name="prompt_user"` 的 `role=toolResult` 为 user-attested（≈1个 `Exception:` 句子）。让 curator 区分「用户亲手勾选/输入的 prompt_user 答案」与「普通 toolResult」。 | 轻量路径：~10 LOC prompt 修改。重量路径（0原计划）保留在 backlog。 |
+| **P3c-heavyweight**（重量路径，调整为 YAGNI 2026-05-18） | sediment evidence assembly 读 `lane:"prompt_user"` audit 行独立 consumer，输出 user-attested signal 段注入 curator prompt。轻量路径已 ship 覆盖主要 ROI；重量路径等 curator 误判 prompt_user 答案的实际案例出现再启动。 | ~80 LOC + smoke，deferred |
 | **P4** | `/about-me` slash 接 `askPromptUser` service（ADR 0021 G2 可复用）；`/decide` 类 high-level slash；`type:"secret"` raw consumer callback API；`type:"multi"` 真正多选 toggle；`type:"secret"` 经 `$PROMPT_VAULT_<id>` bash injection（新 follow-up ADR）；defer/resume（需 pi 核心 turn-resume API）；richer types（slider/date picker）；hard rate-limit | per-feature |
+| **P3b post-audit P2 backlog**（10 项） | applyChoice helper 抽取 · cachedVaultDialogBuilder=null 静默退化 telemetry · `__authorizeVault*ForTests` grant isolation E2E smoke（需 stage 完整 index.ts）· `ui.select` fallback 路径 smoke · 真实 PromptDialog vault variant render smoke · vault enum 本地化 vs 审计稳定性 tension · INV-D ui_path 元数据 · unknown choice 该返 dialog_error 调论 · 40 列 hint wrap · vault OptionList 变体。 | 详 [roadmap.md](../roadmap.md) `Architecture debt` |
 
 ---
 

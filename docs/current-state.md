@@ -182,7 +182,9 @@ smoke:compaction-tuner-prompt-user     # ADR 0022 P3a
 
 LLM-facing 同步问答工具，与 `vault_release` 共享 `<PromptDialog>` overlay substrate但 LLM tool / grant 状态 / audit lane / tool name 独立。解决主会话需要用户决策时 sediment 拿到残缺 turn 的问题。
 
-### 已 ship（P1 + P2 + P3a + P2-fix + P3b + P3b-post-audit）
+### 已 ship（P1 + P2 + P3a + P2-fix + P3b + P3b-post-audit + P3c-lightweight）
+
+> **2026-05-18 closing milestone**: 这一轮合计 5 个 commit（8abb48b P3b / 6ae5771 post-audit / + P3c 轻量路径 + P2 backlog 入档）后，**ADR 0022 的所有 P0/P1 stage 完全 ship**。后续 P4 以及 P3b post-audit 留下的 10 项 P2 进入 housekeeping 阶段（详见 [roadmap.md](./roadmap.md) `Architecture debt` 表）。
 
 - **P1**：`redactCredentials` 提升到 `abrain/redact.ts`；新增 `redactSecretAnswer` / `lengthBucket` / `redactPromptParams` / `sanitizePathLike`；`prompt-user/types.ts` 纯类型骨架。¨commit `0e937f7`。
 - **P2**：完整 LLM 工具表面¨`prompt-user/{schema,manager,service,handler,ui/PromptDialog}.ts`；abrain/index.ts 注册 `prompt_user` tool + session_shutdown finalizer + globalThis pending hook。commit `b9565c2`。
@@ -216,13 +218,19 @@ LLM-facing 同步问答工具，与 `vault_release` 共享 `<PromptDialog>` over
 
 INV-E 的端到端实现另一半（`index.ts` 内 grant 状态在 dialog session 中不被串话）由原有 `smoke:abrain-vault-bash` + `smoke:prompt-user` 各自覆盖；更强度的串行 E2E 验证是 P3b multi-LLM audit 时的作业。
 
+### 已 ship - P3c 轻量路径 (2026-05-18 晚间)
+
+- **P3c-lightweight**：扩 `extensions/sediment/llm-extractor.ts` trust boundary 段加 prompt_user exception（18 行 prompt + 2 个正例 + 1 个反例 + 1 句 sanitizer defense-in-depth）。`message/toolResult:prompt_user` 开头的 entry 被明确标为 USER-ATTESTED，与普通 `role=toolResult` 区分；curator 可将基于 prompt_user 答案的候选沉淀为 `preference` / `decision`，不需 assistant 重新 establish substance。`smoke:memory` extractor-prompt assertion 加 8 个 anchor needle 锁住 exception block，**negative test 验证**：删任何一个 anchor 都会 fail-fast。**原重量 P3c（≈80 LOC 独立 audit consumer）仍保留在 deferred YAGNI**，等出现「curator 误判 prompt_user 答案」的实际案例再启动。
+
 ### 未实现（deferred）
 
-- **P3c**：sediment evidence assembly 注入 `prompt_user` audit 行 → curator prompt。**2026-05-18 设计讨论后调整**：原重量 P3c（≈80 LOC 独立 audit consumer）降为 YAGNI，等出现「curator 误判 prompt_user 答案」的实际案例再启动。代之以轻量路径：扩 `llm-extractor.ts` trust boundary，白名单 `name="prompt_user"` 的 toolResult 为 user-attested（≈10 LOC prompt 修改、零基础设施变动）。
+- **P3c-heavyweight**（原重量路径，调整为 YAGNI）：sediment evidence assembly 读本 turn `lane:"prompt_user"` audit 行，输出独立 user-attested signal 段注入 curator prompt。轻量路径 ship 后该多事。
 - **P4**：`type:multi` 真正多选 toggle UI（现 P0 退化为单选）；caller-side raw secret consumer API；defer/resume API（需 pi 核心支持）。
+- **P3b post-audit P2 backlog**（10 项）：applyChoice 复制 · cachedVaultDialogBuilder=null 静默退化 telemetry 缺失 · `__authorizeVault*ForTests` grant isolation E2E smoke · `ui.select` fallback 路径无 smoke · 真实 PromptDialog vault variant 渲染 smoke · vault enum 本地化 vs 审计稳定性 tension · INV-D ui_path 元数据 · unknown choice 该返 `dialog_error` 调论 · 40 列 hint wrap · vault OptionList 小重构。详 [roadmap.md](./roadmap.md) `Architecture debt`。
 
 ### 多-LLM 审计轨迹
 
 - ADR 本体：R1 独立提案 → R2 交叉审计 → R3 综合 → R4 P0 收敛 3→0。
 - P2 实施：1 轮 P1 audit（OPUS + DEEPSEEK；GPT-5.5 执行失败）¨P0 共识 0，7 个 P1 全部 ship-with-smoke。
 - P3b ship + post-audit fix （2026-05-18）：3-way parallel xhigh audit（opus-4-7 / gpt-5.5 / deepseek-v4-pro）产出 0 P0 / 6 共识 P1 全部 ship-with-smoke。这轮 audit 发现的最大问题是 pi 默认 parallel tool mode 下 vault 需要独立 concurrent gate（原设计考虑了 prompt_user INV-I，但 vault 走独立 path 后丢了同类保护）。P2 项推迟为下一轮 housekeeping。
+- P3c-lightweight ship（2026-05-18 晚间）：不走 multi-LLM audit¨¨10 LOC prompt 修改不值得，negative test 已证明 assertion 生效。后续 dogfood 与实际 usage signal 评估足够。
