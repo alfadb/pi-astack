@@ -1141,7 +1141,8 @@ export default function activate(pi: ExtensionAPI): void {
         "option.label is the displayed text AND the canonical answer value. If you want to convey a tradeoff, write it directly in the label (e.g. 'TypeScript \u2014 \u5f3a\u7c7b\u578b\u5168\u6808'); the UI wraps long labels onto multiple lines.",
         "memory_search past preferences first (e.g. memory_search('user preference framework')) before asking.",
         "For irreversibility (deploy, rm -rf, push to main), prefer type:'single' with explicit Yes/No labels rather than free-form text.",
-        "type:'secret' raw input never reaches you \u2014 you get a placeholder. Use vault_release for known stored secrets instead.",
+        "type:'secret' raw input never reaches you \u2014 you get [REDACTED_SECRET:<id>] placeholder. P0 LIMITATION (ADR 0022 \u00a7D6.4): there is no caller-side callback API yet, so the raw value is captured into a per-prompt internal Record that NO downstream code can read. Practical implication: do NOT use type:'secret' unless a specific extension has been written to consume it. For releasing stored vault secrets use vault_release instead. For generic user input that you yourself need to use, type:'text' is the right choice.",
+        "Server-side 'Other (specify)' is ALWAYS appended to single/multi options \u2014 you cannot disable it. If the user picks Other and types free-form text T, the answer comes back as a string in answers[id]: for single \u2192 answers[id] = [T]; for multi \u2192 answers[id] contains the chosen preset labels PLUS T (length 0..N+1). There is no markup on Other text in the result \u2014 to distinguish it from a preset, check if the returned string matches any of your preset labels.",
       ],
       parameters: {
         type: "object",

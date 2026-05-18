@@ -567,9 +567,10 @@ toolRegistry.registerTool({
     "Call prompt_user ONLY when the answer materially changes which code path you take next. If the answer would not change your action, do not pause.",
     "Do not use prompt_user to confirm work you are about to do (the user expects you to act unless told otherwise). Use it to disambiguate between branches.",
     "Do not chain prompt_user calls back-to-back in the same turn — batch related questions into a single call (up to 4 questions).",
-    "Do not use prompt_user(type:'secret') to release stored vault secrets — use vault_release. type:'secret' is for one-time user-provided tokens consumed by an extension; the raw value is NOT returned to you.",
+    "Do not use prompt_user(type:'secret') to release stored vault secrets — use vault_release. type:'secret' is for one-time user-provided tokens. P0 LIMITATION: the raw value is NOT returned to you AND there is no caller-side callback API yet (ADR §D6.4) — the user-typed value is captured into a per-prompt rawSecrets Record but no downstream code can read it. Practical implication: do NOT ask for a secret unless a specific extension has been written to consume it.",
     "Provide concrete options whenever possible. type:'text' is for inputs that do not have a small finite set of correct answers.",
-    "header ≤ 12 display cells (count visible terminal cells, not JS string length — each CJK char = 2 cells, each ASCII char = 1 cell); question is a complete sentence; option labels 1–5 words.",
+    // R7.2 (2026-05-17): 原 'header ≤ 12 display cells / option labels 1–5 words' 限制已在 validator 中删除。原文仅作历史保留 (R4 原决议,R7.2 以 OptionList 自动 wrap 代替)。
+    "header / question / option.label can be any length. The UI wraps text automatically; long labels render across multiple lines. Keep them concise for cognitive load, but the validator does not enforce a length budget.",
     "reason explains why you must pause (e.g. 'project framework choice affects scaffolding'), not a re-statement of the questions.",
     "memory_search past preferences first (e.g. memory_search('user preference framework')) before asking.",
   ],
