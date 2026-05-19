@@ -17,6 +17,8 @@
 > P3c 原重量路径（~80 LOC 独立 audit consumer）**降为 YAGNI**，代以轻量路径：扩 `llm-extractor.ts` trust boundary白名单 `name="prompt_user"` toolResult 为 user-attested（≈10 LOC）。
 >
 > **2026-05-18 同步后续**：**ADR 0022 P3c（轻量路径）shipped** — `extensions/sediment/llm-extractor.ts` trust boundary 段加 prompt_user exception（18 行 prompt + 2 个正例 1 个反例 + 1 句 sanitizer defense-in-depth）。`smoke:memory` extractor-prompt assertion 加 8 个 anchor needle 锁定住 exception block (negative-test 验证：删任何一个 anchor 都会 fail-fast)。加上 P3b + P3b post-audit fix，**ADR 0022（`prompt_user` LLM-facing 同步问答工具）的所有 P0/P1 stage 完全 ship**；P4 (multi-select toggle / secret consumer API / defer-resume) 与下表 P3b audit 留的 10 个 P2 进入 housekeeping 阶段。
+>
+> **2026-05-19 同步**：**ADR 0022 P3b post-audit P2 (e) + (h) shipped**（commit `8571257` + `ec20b27`，已 push）。(e) 补 real-PromptDialog vault variant 渲染 smoke，锁定 allowOther / titlePrefix / accentColor / hint text，`smoke:prompt-user-option-list` 46 → 54。(h) 改 unknown choice 返回 `dialog_error` 以触发 ui.select fallback，`smoke:abrain-vault-reader` 21 → 22。均经 negative-test 双向锁定。**同日 OPUS-4-7 + GPT-5.5 + DEEPSEEK-V4-pro 三路并行 xhigh audit 对剩余 22 项 P2 重组为 housekeeping batch plan**（5 项 won't-fix / 1 项 awaiting-user-decision / 14 项 进 3 个 batch），详下方专设章节 [`## ADR 0022 housekeeping batch`](#adr-0022-housekeeping-batch-2026-05-19-multi-llm-synthesis)。
 
 ## P0/P1 product backlog
 
@@ -36,9 +38,90 @@
 | Runtime path docs/tests | 避免 `.pensieve`/`.pi-astack`/`.abrain .state` 路径漂移。 |
 | Model fallback vs curator whitelist | 当前 model-curator session_start 只 WARN，不阻止 curator 删掉 fallback 候选；需要 curator 在 whitelist 时尊重 fallbackModels 列表，或 fallback 路径自带 whitelist bypass。 |
 | Sediment audit candidates.title sanitize | explicit lane 的 audit `candidates[].title` 字段在 R5 之前未走 `sanitizeForMemory`（auto-write lane 同）；2026-05-15 已修，但保留此项提醒未来新加 audit 字段须默认走 `sanitizeAuditText`。 |
-| ADR 0022 P2 review P2 polish 丝项 | OPUS+DEEPSEEK review 中 7 项 P2 未动：`__secretLengths` 重命名 / `redactCredentials` 多-@ 边界 case / `displayWidth` 补 East Asian 码点 / `globalThis` hook non-configurable / `via=fallback_chain` audit 结构化 / overlayOptions 响应式宽度。 | 年中 housekeeping commit 项。不阻塞。 |
-| **ADR 0022 P3b post-audit P2 backlog** (2026-05-18 P3b high audit 留) | 10 项 P2/P3，全部为 UX / 重构 / 覆盖 gap，**不影响正确性**：<br>**(a) Refactor**: `applyChoice` 在 `authorizeVaultRelease` + `authorizeVaultBashOutput` 双份复制¨抽 `mapVaultReleaseChoice` / `mapVaultBashOutputChoice` helper (OPUS)。<br>**(b) Telemetry**: `cachedVaultDialogBuilder=null` 时（pi-tui 加载失败）静默退化到 `ui.select`，没有 startup audit / notify；“fallback 可画生” 的观察期拿不到信号 (OPUS)。<br>**(c) Test gap**: `__authorizeVaultReleaseForTests` + `__authorizeVaultBashOutputForTests` exports 为 dead code¨需 stage 完整 `index.ts` 的 smoke 写一个 grant isolation E2E (vault → prompt_user → vault 不串话)，填 INV-E 端到端验证的另一半 (DEEPSEEK)。**R8 中 GPT-5.5 P1#1 fail-closed envelope smoke gap 也并入该 stage-index 工作**。<br>**(d) Test gap**: `ui.select` fallback 路径 (cachedBuilder=null) 无 smoke (DEEPSEEK)。<br>**(e) Test gap**: 真实 PromptDialog vault variant 渲染 smoke ~~¨现在 P3b smoke 用 fake buildDialog，如果 `allowOther` flag 退化虚假仍绿~~ ✅ **shipped 2026-05-19** (commit 8571257): `smoke:prompt-user-option-list` 46 → 54 (+8 assertion) 渲染真实 `buildPromptDialog` 映证 vault_release / bash_output_release variant，覆盖 allowOther 门控 / titlePrefix / accentColor / progress marker / hint text。Negative test 验证：强改 `allowOther = true` 会 fail-fast 3 条 assertion，invariant 双向锁定 (GPT-5.5 + DEEPSEEK)。<br>**(f) UX**: Vault auth options 不本地化¨中文 session 下顶部 reason 是中文但选项还是英文。修补需拆分 display label vs stable enum value，或文档化「英文 enum 是审计稳定值」(GPT-5.5)。<br>**(g) Telemetry**: INV-D audit row 不记 `ui_path` 元数据¨问题排查时无法区分 overlay 路径 vs select fallback 产生的 `reason: "cancelled"` (DEEPSEEK P0 重分类 P2)。<br>**(h) Defense in depth**: vault-authorize.ts 里 unknown choice ~~现在返回 `cancelled`~~ ✅ **shipped 2026-05-19** (commit 待推): unknown choice 返回 `dialog_error` + `detail` 包含截断后的非法值与期望 choices，触发 `index.ts` 中已有的 `ui.select` fallback 路径。detail 中 choice slice 到 64 字符 + choices.join 到 256，避免 hostile dialog flood audit/notify。`smoke:abrain-vault-reader` 21 → 22 (+1 新 truncation 断言 + 原 unknown choice 断言语义更新)；negative test 验证改回 `cancelled` 会 fail-fast 2 条 (OPUS)。<br>**(i) UX**: 40 列 narrow terminal 下 vault dialog hint text 可能 wrap 两行¨中文本地化后更明显 (GPT-5.5)。<br>**(j) Code style**: OptionList 在 vault variant 下的 `otherIdx=-1` 逻辑是 defense in depth，但 vault 路径理论上永不调 Other-related path；可考虑 vault 专用 OptionList 变体进一步减一条代码路径 (DEEPSEEK)。 | 不阻塞 P3b 可用。推荐一轮汇总 housekeeping commit 一起清（各项独立 commit 会丢失 audit 原始联动上下文）。 |
-| **ADR 0022 T0 xhigh audit P2 backlog** (2026-05-18 T0 xhigh 留) | T0 xhigh 三路并行（opus-4-7 / gpt-5.5 / deepseek-v4-pro）后留下的 6 项 P2 架构层 / UX / 防护增强，**不影响 ADR 0022 closing**：<br>**(D5) Vault visual confusion attack surface**: LLM 可以构造 prompt_user 调用让其 header/options 文案接近真实 vault 对话框（如设 header="Release github-token?"，options="Yes once/Session/No/Deny + remember"）。颜色（accent vs warning）与标题（"Question" vs "Vault Release"）不同，但用户可能误认为真实授权。实际危害有限（prompt_user "Yes once" 不会释放任何 secret），但信任侵蚀是真的。修补方案：PromptDialog vault variant 加固定锁图标 🔒，question variant 加 footnote 「此对话框询问的是普通问题，不是 vault 授权」 (DEEPSEEK xhigh)。<br>**(D7) Compaction defer for vault dialog**: INV-K 仅覆盖 prompt_user pending，vault dialog pending 时 compaction 仍会触发。修补方案：vault-authorize.ts 暴露 `isVaultDialogInFlight()`，compaction-tuner 同时检查两者。或者 INV-K 提升为“存在 active user-facing overlay 时 defer” (DEEPSEEK xhigh)。<br>**(D4) Curator answer quality 分级**: P3c-lightweight 当前是单层 USER-ATTESTED；未来可能需 attestation: "guided" / "deliberate" / "neutral" 三级 (推荐 vs Other vs non-recommended) (DEEPSEEK xhigh)。留 P3c-heavyweight 启动时启用。<br>**(D6) Vault cross-host pre-flight**: SSH 到新机器未 scp identity 时，vault 对话框仍会弹出 → 授权 → 解密失败。可优化为在 vault-authorize 构造对话框之前 pre-flight 检查 identity file，未成功直接 fail 不弹框 (DEEPSEEK xhigh)。<br>**(D9) ADR 0014 Lane V 定义补充 PromptDialog 共享 substrate 注释**: P3b 后 vault 授权 UI 走 PromptDialog overlay variant，但 ADR 0014 Lane V 原文本未提及。加一句说明：UI substrate 共享但 lane trust / grant state / audit lane / writer path 独立 (DEEPSEEK xhigh)。<br>**(GPT-5.5 #1 smoke gap)** fail-closed envelope for ui.select/confirm in authorizeVaultRelease 代码已 ship（R8 commit 4f7a4cc）但 smoke 需 stage 完整 index.ts，合并到 (c) 一起做。 | DEEPSEEK xhigh “audit-fatigue” 元策略（原 P0）不在 ADR 0022 范围，独立走 ADR 0001 §8 amendment 未来 session。推荐这轮汇总 housekeeping commit 与 P3b post-audit P2 backlog 合并一起清。 |
+| ADR 0022 housekeeping batch (2026-05-19 multi-LLM synthesis) | 参见下方专设章节 [`## ADR 0022 housekeeping batch`](#adr-0022-housekeeping-batch-2026-05-19-multi-llm-synthesis)。原 P3b post-audit P2 10 项 + T0 xhigh P2 6 项 + P2 review polish 6 项 经 OPUS-4-7 / GPT-5.5 / DEEPSEEK-V4-pro 三路并行 xhigh audit 重组：2 项 shipped, 5 项 won't-fix, 1 项 awaiting-user-decision, 3 个执行 batch。 | 下一轮 housekeeping session 拿该章节直接执行。 |
+| ~~**ADR 0022 P3b post-audit P2 backlog** (2026-05-18 P3b high audit 留)~~ → **已被 2026-05-19 multi-LLM synthesis 章节取代**。本行保留 audit 轨迹 origin 供历史查询；执行请看下方章节。 (2026-05-18 P3b high audit 留) | 10 项 P2/P3，全部为 UX / 重构 / 覆盖 gap，**不影响正确性**：<br>**(a) Refactor**: `applyChoice` 在 `authorizeVaultRelease` + `authorizeVaultBashOutput` 双份复制¨抽 `mapVaultReleaseChoice` / `mapVaultBashOutputChoice` helper (OPUS)。<br>**(b) Telemetry**: `cachedVaultDialogBuilder=null` 时（pi-tui 加载失败）静默退化到 `ui.select`，没有 startup audit / notify；“fallback 可画生” 的观察期拿不到信号 (OPUS)。<br>**(c) Test gap**: `__authorizeVaultReleaseForTests` + `__authorizeVaultBashOutputForTests` exports 为 dead code¨需 stage 完整 `index.ts` 的 smoke 写一个 grant isolation E2E (vault → prompt_user → vault 不串话)，填 INV-E 端到端验证的另一半 (DEEPSEEK)。**R8 中 GPT-5.5 P1#1 fail-closed envelope smoke gap 也并入该 stage-index 工作**。<br>**(d) Test gap**: `ui.select` fallback 路径 (cachedBuilder=null) 无 smoke (DEEPSEEK)。<br>**(e) Test gap**: 真实 PromptDialog vault variant 渲染 smoke ~~¨现在 P3b smoke 用 fake buildDialog，如果 `allowOther` flag 退化虚假仍绿~~ ✅ **shipped 2026-05-19** (commit 8571257): `smoke:prompt-user-option-list` 46 → 54 (+8 assertion) 渲染真实 `buildPromptDialog` 映证 vault_release / bash_output_release variant，覆盖 allowOther 门控 / titlePrefix / accentColor / progress marker / hint text。Negative test 验证：强改 `allowOther = true` 会 fail-fast 3 条 assertion，invariant 双向锁定 (GPT-5.5 + DEEPSEEK)。<br>**(f) UX**: Vault auth options 不本地化¨中文 session 下顶部 reason 是中文但选项还是英文。修补需拆分 display label vs stable enum value，或文档化「英文 enum 是审计稳定值」(GPT-5.5)。<br>**(g) Telemetry**: INV-D audit row 不记 `ui_path` 元数据¨问题排查时无法区分 overlay 路径 vs select fallback 产生的 `reason: "cancelled"` (DEEPSEEK P0 重分类 P2)。<br>**(h) Defense in depth**: vault-authorize.ts 里 unknown choice ~~现在返回 `cancelled`~~ ✅ **shipped 2026-05-19** (commit 待推): unknown choice 返回 `dialog_error` + `detail` 包含截断后的非法值与期望 choices，触发 `index.ts` 中已有的 `ui.select` fallback 路径。detail 中 choice slice 到 64 字符 + choices.join 到 256，避免 hostile dialog flood audit/notify。`smoke:abrain-vault-reader` 21 → 22 (+1 新 truncation 断言 + 原 unknown choice 断言语义更新)；negative test 验证改回 `cancelled` 会 fail-fast 2 条 (OPUS)。<br>**(i) UX**: 40 列 narrow terminal 下 vault dialog hint text 可能 wrap 两行¨中文本地化后更明显 (GPT-5.5)。<br>**(j) Code style**: OptionList 在 vault variant 下的 `otherIdx=-1` 逻辑是 defense in depth，但 vault 路径理论上永不调 Other-related path；可考虑 vault 专用 OptionList 变体进一步减一条代码路径 (DEEPSEEK)。 | 不阻塞 P3b 可用。推荐一轮汇总 housekeeping commit 一起清（各项独立 commit 会丢失 audit 原始联动上下文）。 |
+| ~~**ADR 0022 T0 xhigh audit P2 backlog** (2026-05-18 T0 xhigh 留)~~ → **已被 2026-05-19 multi-LLM synthesis 章节取代**。本行保留 audit 轨迹 origin。 (2026-05-18 T0 xhigh 留) | T0 xhigh 三路并行（opus-4-7 / gpt-5.5 / deepseek-v4-pro）后留下的 6 项 P2 架构层 / UX / 防护增强，**不影响 ADR 0022 closing**：<br>**(D5) Vault visual confusion attack surface**: LLM 可以构造 prompt_user 调用让其 header/options 文案接近真实 vault 对话框（如设 header="Release github-token?"，options="Yes once/Session/No/Deny + remember"）。颜色（accent vs warning）与标题（"Question" vs "Vault Release"）不同，但用户可能误认为真实授权。实际危害有限（prompt_user "Yes once" 不会释放任何 secret），但信任侵蚀是真的。修补方案：PromptDialog vault variant 加固定锁图标 🔒，question variant 加 footnote 「此对话框询问的是普通问题，不是 vault 授权」 (DEEPSEEK xhigh)。<br>**(D7) Compaction defer for vault dialog**: INV-K 仅覆盖 prompt_user pending，vault dialog pending 时 compaction 仍会触发。修补方案：vault-authorize.ts 暴露 `isVaultDialogInFlight()`，compaction-tuner 同时检查两者。或者 INV-K 提升为“存在 active user-facing overlay 时 defer” (DEEPSEEK xhigh)。<br>**(D4) Curator answer quality 分级**: P3c-lightweight 当前是单层 USER-ATTESTED；未来可能需 attestation: "guided" / "deliberate" / "neutral" 三级 (推荐 vs Other vs non-recommended) (DEEPSEEK xhigh)。留 P3c-heavyweight 启动时启用。<br>**(D6) Vault cross-host pre-flight**: SSH 到新机器未 scp identity 时，vault 对话框仍会弹出 → 授权 → 解密失败。可优化为在 vault-authorize 构造对话框之前 pre-flight 检查 identity file，未成功直接 fail 不弹框 (DEEPSEEK xhigh)。<br>**(D9) ADR 0014 Lane V 定义补充 PromptDialog 共享 substrate 注释**: P3b 后 vault 授权 UI 走 PromptDialog overlay variant，但 ADR 0014 Lane V 原文本未提及。加一句说明：UI substrate 共享但 lane trust / grant state / audit lane / writer path 独立 (DEEPSEEK xhigh)。<br>**(GPT-5.5 #1 smoke gap)** fail-closed envelope for ui.select/confirm in authorizeVaultRelease 代码已 ship（R8 commit 4f7a4cc）但 smoke 需 stage 完整 index.ts，合并到 (c) 一起做。 | DEEPSEEK xhigh “audit-fatigue” 元策略（原 P0）不在 ADR 0022 范围，独立走 ADR 0001 §8 amendment 未来 session。推荐这轮汇总 housekeeping commit 与 P3b post-audit P2 backlog 合并一起清。 |
+
+## ADR 0022 housekeeping batch (2026-05-19 multi-LLM synthesis)
+
+> 三路并行 xhigh audit：OPUS-4-7 + GPT-5.5 + DEEPSEEK-V4-pro。2.5× parallel speedup（522.6s → 211.3s）。
+>
+> **输入**: P3b post-audit P2 10 项 + T0 xhigh P2 6 项 + P2 review polish 6 项 = 合计 22 项 P2
+> **输出**: 2 项 shipped (e/h) · 5 项 won't-fix · 1 项 awaiting-user-decision · 14 项 进 3 个执行 batch
+>
+> 三家共识则直接应用；分歧处采取“守势选项”（例如 (a) refactor 是否 won't-fix 一项上 OPUS 认为高价值、GPT-5.5 中等、DEEPSEEK 判为 cosmetic，采 DEEPSEEK）。
+
+### ✅ Shipped
+
+| 项 | commit | 效果 |
+|---|---|---|
+| (e) real-PromptDialog vault variant 渲染 smoke | `8571257` | `smoke:prompt-user-option-list` 46 → 54 (+8); allowOther 双向锁定 |
+| (h) unknown choice → `dialog_error` | `ec20b27` | `smoke:abrain-vault-reader` 21 → 22; 触发 ui.select fallback 而非静默拒绝 |
+
+### ❌ Closed as won't-fix (三路共识 / 主调采纳)
+
+| 项 | 不修理由 | 主调来源 |
+|---|---|---|
+| (a) `applyChoice` refactor | Cosmetic refactor；消除 15 行复制品却引入 indirect helper，无多次修改痕迹时不增加可读性 | DEEPSEEK |
+| (D4) Curator attestation 分级 | "YAGNI 的 YAGNI"；P3c-heavyweight 本身已 deferred，在未产生 curator 误判样本前不启动三级划分 | DEEPSEEK |
+| (D6) Vault cross-host pre-flight | 用户操作失误场景；加 pre-flight 只把报错从“解密失败”前移到“弹框前”。UX 差异微小，且需 vault-reader 暴露 pre-flight API，改动面大 | DEEPSEEK + GPT-5.5 |
+| (j) vault-only OptionList 变体 | `otherIdx=-1` 是单条 if，零维护成本；抽变体反而增加 PromptDialog variant 矩阵复杂度 | OPUS + DEEPSEEK |
+| `overlayOptions` 响应式宽度 | inline `{ overlay:false }` 已是主路径，旧 overlay 宽度议题 obsolete；且依赖 pi-tui 还没有的 width-reactive API | GPT-5.5 |
+
+### 🟡 Awaiting user decision (不该 LLM 拍板)
+
+| 项 | 决策点 |
+|---|---|
+| (f) Vault auth options 本地化 | 二选一：**(1)** 保持英文 enum + 文档化为“审计稳定值”。**(2)** 拆 display label / stable enum value，UI 本地化但 audit/value 英文稳定。选 (2) 需要同步改 PromptDialog result / mapping / smoke / audit。 |
+
+### 📦 Batch A — Vault auth observability + index-level smoke (优先)
+
+代码集中：`extensions/abrain/index.ts` + `extensions/abrain/vault-authorize.ts` + `scripts/smoke-abrain-vault-reader.mjs` (或新增 `smoke:abrain-vault-grant-isolation`)。
+
+| 项 | 做法 | LOC |
+|---|---|---|
+| (b) `cachedVaultDialogBuilder=null` telemetry | activate() 中 builder=null 且 ui.custom 可用时一次性 audit + `ui.notify`；观察期能收到 fallback 退化信号 | ~15 |
+| (g) INV-D `ui_path` metadata | vault audit row 加 `ui_path: "overlay"\|"select"\|"confirm"` 字段；区分 overlay 路径与 select fallback 产生的 `reason:"cancelled"` | ~25 |
+| (D9) ADR 0014 Lane V 注释 | docs only：加一句“UI substrate 共享但 lane trust / grant state / audit lane / writer path 独立” | ~10 |
+| (c) Grant isolation E2E + GPT-5.5 #1 fail-closed envelope | stage 完整 index.ts smoke：vault → prompt_user → vault 不串话 + ui.select/confirm throw 走 try/catch fail-closed；DEEPSEEK 估 ~50 / OPUS+GPT-5.5 估 ~150 LOC，**取上限** | ~150 |
+| (d) ui.select fallback smoke | cachedBuilder=null 路径的 mock ui.select 覆盖；与 (c) 共用 stage | ~50 |
+
+**子组切分建议**：(b)(g)(D9) 合一次 commit (~50 LOC, 低风险)；(c)(d) 合另一次 commit (~200 LOC, stage-index 脚手架需独立 audit)。
+
+**回归风险**：stage-index 可能触发 lazy require / CJS transpile / pi API mock 漂移 (GPT-5.5)。INV-D 加字段是向后兼容的，但需 grep 确认无硬编码 audit schema consumer。
+
+### 📦 Batch B — Vault UX defense
+
+| 项 | 做法 | LOC |
+|---|---|---|
+| (D5) Vault visual confusion 🔒 | PromptDialog vault variant 加固定锁图标；question variant 加 footnote“此对话框非 vault 授权”；补 render smoke | ~20 |
+| (D7) Compaction defer for vault | vault-authorize.ts export `isVaultDialogInFlight()`；compaction-tuner 添 OR 条件。复用 `getPendingPromptCount` 的 hook 模式，避免引入跨扩展反向依赖 | ~15 |
+| (i) 40-col narrow terminal hint wrap | vault hint text 按 width 分档或缩短；DEEPSEEK 指出与 (D5) 同 batch 一起测（(D5) 改变渲染高度可能与窄终端 wrap 叠加） | ~10 |
+
+**回归风险**：(D5) 渲染高度变化 × (i) 窄终端 wrap 在同一代码路径交错。(D7) 如 `__vaultDialogInFlight` finally 丢解锁，compaction 永远被 defer—— 动 compaction-tuner 前先补 vault-authorize lock 泄漏 smoke。
+
+### 📦 Batch C — P2 polish sweep (一次 edit + 多 edits[] 完成)
+
+| 项 | 做法 | LOC |
+|---|---|---|
+| `__secretLengths` 重命名 | 改为 `__secretLengthsInternal` 或 Symbol；明确“非 wire” | ~10 |
+| `redactCredentials` 多-@ 边界 | userinfo vs `user@host@realm` 区分，只 redact userinfo | ~10 |
+| `displayWidth` East Asian | **先 grep `PromptDialog.ts:145` 的 helper 是否仍在 layout 路径**；若 dead code 直接删（DEEPSEEK 提示：fix vs delete 需 audit后决定） | ~5 或 delete |
+| `globalThis` hook non-configurable | `Object.defineProperty(globalThis, '__abrain*', { configurable:false, writable:false })` | ~5 |
+| `via=fallback_chain` audit 结构化 | model-fallback audit 加 `{ via, fallbackSteps }`；诊断价值有限但顺手做 | ~10 |
+
+### 执行优先级
+
+1. **Batch A 子组 1** (b + g + D9) — ~50 LOC, 单 commit, 低风险。首先做。
+2. **Batch A 子组 2** (c + d) — ~200 LOC, 新 smoke entry `smoke:abrain-vault-grant-isolation`；三路并行 xhigh audit。INV-E 端到端封口。
+3. **Batch B** (D5 + D7 + i) — ~45 LOC, 单 commit。
+4. **Batch C** (polish sweep) — ~40 LOC, 单 commit (多 edits[])。
+
+**合计**：4 commit, ~335 LOC, 预计单 session 可完成前 3 个。每 commit 跑一轮三路 high-thinking audit。
+
+### 本表说明
+
+本表取代原 Architecture debt 表中三行 P2 backlog（P2 review polish / P3b post-audit / T0 xhigh）。原三行作为 audit 轨迹 origin 以 strikethrough 保留供历史查阅。下一轮 housekeeping session 拿本章节直接执行。
 
 ## Architecture invariants（已守护，禁止退化）
 
