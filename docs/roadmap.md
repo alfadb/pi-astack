@@ -72,7 +72,9 @@
 
 | 项 | 决策点 |
 |---|---|
-| (f) Vault auth options 本地化 | 二选一：**(1)** 保持英文 enum + 文档化为“审计稳定值”。**(2)** 拆 display label / stable enum value，UI 本地化但 audit/value 英文稳定。选 (2) 需要同步改 PromptDialog result / mapping / smoke / audit。 |
+| (f.copy) Vault auth options 各 locale 的具体翻译文案 | 例如"Yes once"译为“本次允许”还是“授权一次”。属于 UI 文案选择，不是技术决策。在 (f.arch) ship 后另起 PR 填。 |
+
+> **2026-05-19 OPUS 复检后调整**: 原 (f) 被拆为 (f.arch) 与 (f.copy)。OPUS 论证：“拆 display label / stable enum value 是事实正确答案” — 理由 (a) audit 字段必须英文稳定，否则跨 locale 不可 grep；(b) “Yes once” 之类 UI 字符串直接进 audit 是 R5 之前那批 sanitize bug 同类。方案 (1) 永久把 UI 钉死英文违反 i18n 友好原则。架构决策被从 awaiting 中移出，进 (f.arch)；仅保留具体译文为用户决策点。
 
 ### 📦 Batch A — Vault auth observability + index-level smoke (优先)
 
@@ -88,6 +90,8 @@
 
 **子组切分建议**：(b)(g)(D9) 合一次 commit (~50 LOC, 低风险)；(c)(d) 合另一次 commit (~200 LOC, stage-index 脚手架需独立 audit)。
 
+**OPUS 2026-05-19 补充**: A3 (unknown-choice → fallback 集成 smoke gap) 与 A4 (dialog_error 不写 audit row) 都会被 (g) `ui_path` 字段自然覆盖 — fallback 路径产生的 audit row 携 `ui_path:"select"` 可作为“发生过 fallback” 的证据。不需单独补。
+
 **回归风险**：stage-index 可能触发 lazy require / CJS transpile / pi API mock 漂移 (GPT-5.5)。INV-D 加字段是向后兼容的，但需 grep 确认无硬编码 audit schema consumer。
 
 ### 📦 Batch B — Vault UX defense
@@ -97,6 +101,7 @@
 | (D5) Vault visual confusion 🔒 | PromptDialog vault variant 加固定锁图标；question variant 加 footnote“此对话框非 vault 授权”；补 render smoke | ~20 |
 | (D7) Compaction defer for vault | vault-authorize.ts export `isVaultDialogInFlight()`；compaction-tuner 添 OR 条件。复用 `getPendingPromptCount` 的 hook 模式，避免引入跨扩展反向依赖 | ~15 |
 | (i) 40-col narrow terminal hint wrap | vault hint text 按 width 分档或缩短；DEEPSEEK 指出与 (D5) 同 batch 一起测（(D5) 改变渲染高度可能与窄终端 wrap 叠加） | ~10 |
+| (f.arch) Vault auth label/value 拆分架构 | 拆 display label / stable enum value：PromptDialog result 返回 stable value，mapping 层产生 locale-specific label。audit 中永远写 stable value。同步改 smoke 验证 value 稳定 + label 可本地化。具体翻译文案留空 (f.copy) | ~40 |
 
 **回归风险**：(D5) 渲染高度变化 × (i) 窄终端 wrap 在同一代码路径交错。(D7) 如 `__vaultDialogInFlight` finally 丢解锁，compaction 永远被 defer—— 动 compaction-tuner 前先补 vault-authorize lock 泄漏 smoke。
 
