@@ -33,6 +33,62 @@ export interface CuratorOutcome {
   audit: CuratorAudit;
 }
 
+/**
+ * Typed reject error for curator policy violations. Carries a stable
+ * machine-readable `code` so the outer catch in curateProjectDraft can
+ * surface it as the audit-row `reason` — preserving the grep-ability
+ * the pre-2d2b010 `entry_not_found` row had (round-2 review Opus P1-2
+ * + gpt-5.5 P2 "curator_error conflates failure modes").
+ *
+ * Anything thrown without this class still falls through to the generic
+ * `curator_error` bucket (JSON parse failures, callCuratorModel errors,
+ * unexpected exceptions), so true model/transport errors remain distinct
+ * from LLM-side policy violations.
+ *
+ * Stable code set (do not rename without coordinating with whoever is
+ * counting audit buckets):
+ *
+ *   - workflow_lane_read_only
+ *       any write op (update/supersede/merge/archive/delete) targets
+ *       a workflow-lane neighbor; the writer cannot reach it.
+ *
+ *   - scope_mismatch_world_on_non_world_neighbor
+ *       scope:"world" on a non-world existing neighbor.
+ *
+ *   - scope_mismatch_project_on_world_neighbor
+ *       scope omitted but the existing neighbor is world-scope.
+ *
+ *   - invented_neighbor_slug
+ *       any op's slug field (update.slug, merge.target/sources,
+ *       archive/delete/supersede slug, create.derives_from) references
+ *       a slug not in the candidate neighbor list.
+ *
+ *   - world_create_from_non_world_source
+ *       create with scope:"world" whose derives_from contains a
+ *       project- or workflow-scope neighbor.
+ *
+ *   - malformed_curator_op
+ *       structural issues with the curator decision: non-object
+ *       payload, unsupported op, merge missing compiled_truth, etc.
+ *       Not the same as unparseable JSON (which stays under generic
+ *       `curator_error`, since that often signals transport truncation
+ *       rather than LLM intent).
+ *
+ * (Round-3 2026-05-19 follow-up: the round-2 fix only typed validateScope's
+ * three throws; the remaining 10+ throws in parseDecision were still plain
+ * Error, so audit row 22:32:00 fell into the generic curator_error bucket
+ * when the curator picked scope:world create with project-scope derives_from
+ * — the workflow-lane fix's audit improvement was incomplete.)
+ */
+export class CuratorRejectError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "CuratorRejectError";
+    this.code = code;
+  }
+}
+
 // (2026-05-11: timeout/retries moved to SedimentSettings.curatorTimeoutMs/curatorMaxRetries)
 
 function parseModelRef(ref: string): { provider: string; id: string } | null {
@@ -80,27 +136,6 @@ function asNumber(value: unknown): number | undefined {
     if (Number.isFinite(n)) return n;
   }
   return undefined;
-}
-
-/**
- * Typed reject error for curator policy violations. Carries a stable
- * machine-readable `code` so the outer catch in curateProjectDraft can
- * surface it as the audit-row `reason` (preserving the grep-ability the
- * pre-fix `entry_not_found` row had — see 2026-05-19 round-2 review,
- * Opus P1-2 + gpt-5.5 P2 "curator_error conflates failure modes").
- *
- * Anything thrown without this class still falls through to the generic
- * `curator_error` bucket (JSON parse failures, callCuratorModel errors,
- * malformed candidate, etc.), so true model/transport errors remain
- * distinct from policy rejects.
- */
-export class CuratorRejectError extends Error {
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = "CuratorRejectError";
-    this.code = code;
-  }
 }
 
 /**
@@ -184,7 +219,7 @@ export function neighborLaneFor(entry: MemoryEntry): CuratorNeighborLane {
 // Internal-use otherwise — production callers go through curateProjectDraft.
 export function parseDecision(rawText: string, neighborScopes: Map<string, string>): CuratorDecision {
   const payload = unwrapJsonText(rawText);
-  if (!payload || typeof payload !== "object") throw new Error("curator JSON must be an object");
+  if (!payload || typeof payload !== "object") throw new CuratorRejectError("malformed_curator_op", "curator JSON must be an object");
   const obj = payload as Record<string, unknown>;
   const op = asString(obj.op)?.toLowerCase();
   const rationale = asString(obj.rationale ?? obj.why);
@@ -241,7 +276,7 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
 
   if (op === "update") {
     const slug = asString(obj.slug);
-    if (!slug || !allowedSlugs.has(slug)) throw new Error(`curator update slug is not an allowed neighbor: ${slug || "<missing>"}`);
+    if (!slug || !allowedSlugs.has(slug)) throw new CuratorRejectError("invented_neighbor_slug", `curator update slug is not an allowed neighbor: ${slug || "<missing>"}`);
     validateScope(slug);
     const patchObj = (obj.patch && typeof obj.patch === "object" ? obj.patch : obj) as Record<string, unknown>;
     const patch: ProjectEntryUpdateDraft = {
@@ -260,23 +295,23 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
     const target = asString(obj.target);
     const sources = asStringArray(obj.sources);
     const compiledTruth = asString(obj.compiled_truth ?? obj.compiledTruth);
-    if (!target || !allowedSlugs.has(target)) throw new Error(`curator merge target is not an allowed neighbor: ${target || "<missing>"}`);
+    if (!target || !allowedSlugs.has(target)) throw new CuratorRejectError("invented_neighbor_slug", `curator merge target is not an allowed neighbor: ${target || "<missing>"}`);
     validateScope(target);
     const invalidSource = sources.find((slug) => !allowedSlugs.has(slug));
-    if (invalidSource) throw new Error(`curator merge source is not an allowed neighbor: ${invalidSource}`);
+    if (invalidSource) throw new CuratorRejectError("invented_neighbor_slug", `curator merge source is not an allowed neighbor: ${invalidSource}`);
     // R6 review P1: validate scope for all sources, not just target.
     // If curator declares scope:world but a source is project-scope,
     // the merge would cross scope boundaries and produce partial results
     // (source deletion targeting the wrong store).
     for (const src of sources) validateScope(src);
     if (!sources.includes(target)) sources.unshift(target);
-    if (!compiledTruth) throw new Error("curator merge requires compiled_truth");
+    if (!compiledTruth) throw new CuratorRejectError("malformed_curator_op", "curator merge requires compiled_truth");
     return { op: "merge", target, sources: Array.from(new Set(sources)), ...(scope ? { scope } : {}), compiledTruth, timelineNote: asString(obj.timeline_note ?? obj.timelineNote) ?? rationale, ...(rationale ? { rationale } : {}) };
   }
 
   if (op === "archive") {
     const slug = asString(obj.slug);
-    if (!slug || !allowedSlugs.has(slug)) throw new Error(`curator archive slug is not an allowed neighbor: ${slug || "<missing>"}`);
+    if (!slug || !allowedSlugs.has(slug)) throw new CuratorRejectError("invented_neighbor_slug", `curator archive slug is not an allowed neighbor: ${slug || "<missing>"}`);
     validateScope(slug);
     return { op: "archive", slug, ...(scope ? { scope } : {}), reason: asString(obj.reason) ?? rationale ?? "archived by sediment curator", ...(rationale ? { rationale } : {}) };
   }
@@ -284,9 +319,9 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
   if (op === "supersede") {
     const oldSlug = asString(obj.old_slug ?? obj.oldSlug ?? obj.slug);
     const newSlug = asString(obj.new_slug ?? obj.newSlug);
-    if (!oldSlug || !allowedSlugs.has(oldSlug)) throw new Error(`curator supersede old_slug is not an allowed neighbor: ${oldSlug || "<missing>"}`);
+    if (!oldSlug || !allowedSlugs.has(oldSlug)) throw new CuratorRejectError("invented_neighbor_slug", `curator supersede old_slug is not an allowed neighbor: ${oldSlug || "<missing>"}`);
     validateScope(oldSlug);
-    if (newSlug && !allowedSlugs.has(newSlug)) throw new Error(`curator supersede new_slug is not an allowed neighbor: ${newSlug}`);
+    if (newSlug && !allowedSlugs.has(newSlug)) throw new CuratorRejectError("invented_neighbor_slug", `curator supersede new_slug is not an allowed neighbor: ${newSlug}`);
     // 2026-05-19 round-2 review (Opus P1-1 + gpt-5.5 P2): the prompt's
     // Workflow-lane section explicitly forbids workflow-lane slugs "as
     // the target/source" of supersede, but the decoder previously only
@@ -303,7 +338,7 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
 
   if (op === "delete") {
     const slug = asString(obj.slug);
-    if (!slug || !allowedSlugs.has(slug)) throw new Error(`curator delete slug is not an allowed neighbor: ${slug || "<missing>"}`);
+    if (!slug || !allowedSlugs.has(slug)) throw new CuratorRejectError("invented_neighbor_slug", `curator delete slug is not an allowed neighbor: ${slug || "<missing>"}`);
     validateScope(slug);
     return {
       op: "delete",
@@ -345,7 +380,10 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
     // matching would prevent legit project-from-world derivations.
     for (const src of derives_from) {
       if (!allowedSlugs.has(src)) {
-        throw new Error(`curator create derives_from slug is not an allowed neighbor: ${src} (do not invent derivation slugs; only use slugs from the candidate list)`);
+        throw new CuratorRejectError(
+          "invented_neighbor_slug",
+          `curator create derives_from slug is not an allowed neighbor: ${src} (do not invent derivation slugs; only use slugs from the candidate list)`,
+        );
       }
       if (scope === "world") {
         const srcScope = neighborScopes.get(src);
@@ -354,14 +392,26 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
           // neighbor) in addition to "project". Both are disallowed as
           // upstream for a world create; reflect the actual scope in
           // the error so the curator/LLM sees an accurate diagnostic.
-          throw new Error(`curator create scope:"world" cannot derive from ${srcScope ?? "project"}-scope neighbor "${src}" — either drop the scope (let it default to project) or only derive from world neighbors`);
+          //
+          // Round-3 (2026-05-19, this commit): typed reject so the
+          // audit row carries `reason:"world_create_from_non_world_source"`
+          // instead of falling into the generic `curator_error` bucket
+          // — closes the round-2 P1-2 fix's missed throw sites. The
+          // 22:32:00 audit row that prompted this round was a project
+          // pi-global preference candidate where the curator picked
+          // scope:world + derives_from:[project-scope neighbor], which
+          // is exactly the policy this guard exists to reject.
+          throw new CuratorRejectError(
+            "world_create_from_non_world_source",
+            `curator create scope:"world" cannot derive from ${srcScope ?? "project"}-scope neighbor "${src}" — either drop the scope (let it default to project) or only derive from world neighbors`,
+          );
         }
       }
     }
     return { op: "create", ...(scope ? { scope } : {}), ...(derives_from.length ? { derives_from } : {}), ...(rationale ? { rationale } : {}) };
   }
 
-  throw new Error(`unsupported curator op: ${op || "<missing>"}`);
+  throw new CuratorRejectError("malformed_curator_op", `unsupported curator op: ${op || "<missing>"}`);
 }
 
 function relevantEntriesForCurator(entries: MemoryEntry[]): MemoryEntry[] {

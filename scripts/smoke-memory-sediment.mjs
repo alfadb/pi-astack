@@ -1289,7 +1289,7 @@ END_MEMORY`;
     // neighbors (leaking project context into world store). Same fix
     // also closes deepseek audit [LOW] re: derives_from existence check.
     {
-      const { parseDecision } = req("./sediment/curator.js");
+      const { parseDecision, CuratorRejectError } = req("./sediment/curator.js");
       const neighbors = new Map([
         ["world-maxim-a", "world"],
         ["project-fact-x", "project"],
@@ -1301,6 +1301,19 @@ END_MEMORY`;
         try { p(obj); } catch (e) { threw = true; msg = e.message; }
         assert(threw, `parseDecision should throw for ${JSON.stringify(obj)}`);
         assert(msg.includes(substr), `error should include ${JSON.stringify(substr)}, got: ${msg}`);
+      };
+      // Round-3 (2026-05-19) follow-up of round-2 P1-2: every
+      // LLM-policy-violation throw must be a typed CuratorRejectError so
+      // the audit row carries a grep-able `reason` code instead of
+      // collapsing into generic `curator_error`. expectCode pins both
+      // the type and the exact code per throw site.
+      const expectCode = (obj, expectedCode, label) => {
+        let err = null;
+        try { p(obj); } catch (e) { err = e; }
+        assert(err instanceof CuratorRejectError,
+          `${label}: expected CuratorRejectError, got ${err && err.constructor && err.constructor.name}: ${err && err.message}`);
+        assert(err.code === expectedCode,
+          `${label}: code should be '${expectedCode}', got '${err.code}'`);
       };
 
       // baseline: plain create with no derives_from passes
@@ -1319,6 +1332,106 @@ END_MEMORY`;
       // hallucinated slugs rejected on both project and world create
       expectThrows({ op: "create", derives_from: ["invented-slug"] }, "not an allowed neighbor");
       expectThrows({ op: "create", scope: "world", derives_from: ["made-up"] }, "not an allowed neighbor");
+
+      // === round-3 reason-code coverage (2026-05-19, pi-global audit row 22:32) =====
+      // Pi-global audit row 22:32:00 captured curator picking
+      //   {op:"create", scope:"world", derives_from:["<project-scope neighbor>"]}
+      // for a candidate user preference. The world-from-non-world guard
+      // fired, but the audit row's reason was generic `curator_error`
+      // because the throw at create-derives_from was still plain Error.
+      // Round-3 typed it; smoke now pins:
+      expectCode(
+        { op: "create", scope: "world", derives_from: ["project-fact-x"] },
+        "world_create_from_non_world_source",
+        "world create from project-scope source",
+      );
+      expectCode(
+        { op: "create", scope: "world", derives_from: ["world-maxim-a", "project-fact-x"] },
+        "world_create_from_non_world_source",
+        "world create from mixed sources (project triggers)",
+      );
+
+      // invented_neighbor_slug across every op that accepts a slug.
+      expectCode(
+        { op: "create", derives_from: ["made-up-slug"] },
+        "invented_neighbor_slug",
+        "create derives_from invented slug",
+      );
+      expectCode(
+        { op: "update", slug: "made-up-slug", patch: {}, timeline_note: "n" },
+        "invented_neighbor_slug",
+        "update on invented slug",
+      );
+      expectCode(
+        { op: "merge", target: "made-up", sources: ["project-fact-x"], compiled_truth: "x", timeline_note: "n" },
+        "invented_neighbor_slug",
+        "merge target invented",
+      );
+      // target = legit project neighbor (passes validateScope without
+      // scope:"world"); source = invented — trips invented_neighbor_slug
+      // BEFORE validateScope source loop. (If we used a world target
+      // here without scope:"world", scope_mismatch_project_on_world_neighbor
+      // would fire first on the target and we'd be testing the wrong code.)
+      expectCode(
+        { op: "merge", target: "project-fact-x", sources: ["made-up"], compiled_truth: "x", timeline_note: "n" },
+        "invented_neighbor_slug",
+        "merge source invented",
+      );
+      expectCode(
+        { op: "archive", slug: "made-up-slug", reason: "x" },
+        "invented_neighbor_slug",
+        "archive invented slug",
+      );
+      expectCode(
+        { op: "supersede", old_slug: "made-up", reason: "x" },
+        "invented_neighbor_slug",
+        "supersede old invented",
+      );
+      expectCode(
+        { op: "supersede", old_slug: "project-fact-x", new_slug: "made-up", reason: "x" },
+        "invented_neighbor_slug",
+        "supersede new invented",
+      );
+      expectCode(
+        { op: "delete", slug: "made-up", mode: "soft", reason: "x" },
+        "invented_neighbor_slug",
+        "delete invented slug",
+      );
+
+      // malformed_curator_op: structural issues, distinct from invented slugs.
+      expectCode(
+        { op: "frobnicate", slug: "world-maxim-a" },
+        "malformed_curator_op",
+        "unsupported op",
+      );
+      // merge with valid (project) target+sources but missing compiled_truth.
+      // validateScope passes (omitted scope, project neighbor), then the
+      // missing-compiled_truth guard fires.
+      expectCode(
+        { op: "merge", target: "project-fact-x", sources: ["project-fact-x"], timeline_note: "n" },
+        "malformed_curator_op",
+        "merge missing compiled_truth",
+      );
+      // Non-object JSON payload (LLM emitted an array or scalar) — the
+      // unwrap step itself succeeds, then the type guard at parseDecision
+      // entry fires. Note: unparseable JSON (e.g. truncated transport)
+      // stays under generic `curator_error` because retry can succeed.
+      {
+        let err = null;
+        try { parseDecision(JSON.stringify(["not", "an", "object"]), neighbors); } catch (e) { err = e; }
+        assert(err instanceof CuratorRejectError && err.code === "malformed_curator_op",
+          `array payload should throw CuratorRejectError(malformed_curator_op), got ${err && err.constructor && err.constructor.name}: ${err && err.code}`);
+      }
+
+      // sanity: unparseable JSON STAYS at plain Error (transport-edge
+      // failure, not LLM policy violation — outer catch routes it to
+      // generic curator_error so retry remains meaningful).
+      {
+        let err = null;
+        try { parseDecision("this is not json at all !!", neighbors); } catch (e) { err = e; }
+        assert(err && !(err instanceof CuratorRejectError),
+          `unparseable JSON should remain plain Error so it falls to generic curator_error; got: ${err && err.constructor && err.constructor.name}`);
+      }
     }
 
     // === curator parseDecision: workflow-lane read/write asymmetry guard (2026-05-19) =====
