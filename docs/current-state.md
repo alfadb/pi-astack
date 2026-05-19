@@ -157,7 +157,7 @@ smoke:abrain
 smoke:abrain-bootstrap
 smoke:abrain-vault-writer              # 2026-05-19 batch A (g): ui_path + startup_telemetry schema (+2 assertion, 28→30)
 smoke:abrain-vault-reader              # ADR 0022 P3b + post-audit: 6 → 21 assertion
-smoke:abrain-vault-grant-isolation     # 2026-05-19 batch A 子组 2: stage-index E2E (17 assertion)
+smoke:abrain-vault-grant-isolation     # 2026-05-19 batch A 子组 2: stage-index E2E (22 assertion, post-audit +5 handler E2E)
 smoke:abrain-vault-bash
 smoke:abrain-vault-identity
 smoke:abrain-git-sync

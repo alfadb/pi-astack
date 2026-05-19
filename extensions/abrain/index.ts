@@ -815,6 +815,89 @@ async function authorizeVaultRelease(
   return { ok: false, reason: "ui_authorization_unavailable", ui_path: "none" };
 }
 
+// ── ADR 0022 housekeeping batch A subgroup 2 post-audit refactor ──
+// (2026-05-19, 3-way T0 reviewer unanimous consensus: OPUS-4-7 +
+// GPT-5.5 + DEEPSEEK-V4-pro xhigh)
+//
+// Subgroup 1's P0 lived in the tool_result handler body where it
+// compared an outcome object against the string "release" (always
+// true — every vault bash output silently withheld). Subgroup 2's
+// stage-index smoke as-written calls `authorizeVaultBashOutput`
+// DIRECTLY via the helper, NOT through the listener — so the
+// regression site was still uncovered. All three T0 reviewers (P0 of
+// 912d5f0) independently flagged this. This refactor extracts the
+// listener body into a module-level async function the smoke can
+// invoke end-to-end via __handleVaultBashToolResultForTests after
+// seeding a synthetic vaultBashRuns record with
+// __seedVaultBashRunForTests. The runtime listener delegates to this
+// function; behaviour is byte-identical.
+async function processVaultBashToolResult(
+  event: { toolName?: string; toolCallId?: string; content?: unknown; details?: Record<string, unknown>; input?: { command?: string } },
+  ctx: { ui?: VaultReleaseUi; signal?: AbortSignal },
+): Promise<{ content?: unknown; details?: unknown } | undefined> {
+  // ── Vault bash output authorization guard ─────────────────
+  // Outer try/catch: if authorizeVaultBashOutput or redaction
+  // throws, we fail-CLOSED — withhold the bash output rather than
+  // releasing raw vault-touched data to LLM context. Audit row
+  // records the failure for forensic diagnosis. (Changed from
+  // fail-open in R6 audit, 2026-05-14.)
+  try {
+    if (event.toolName !== "bash") return;
+    const record = vaultBashRuns.get(event.toolCallId!);
+    if (!record) return;
+    vaultBashRuns.delete(event.toolCallId!);
+    try { fs.rmSync(record.envFile, { force: true }); } catch {}
+
+    // ADR 0022 housekeeping batch A subgroup 1 post-audit fix
+    // (2026-05-19, OPUS-4-7 + DEEPSEEK-V4-pro xhigh consensus P0):
+    // authorizeVaultBashOutput returns { decision, ui_path }. The
+    // original `decision !== "release"` comparison was object-vs-string,
+    // ALWAYS true — every vault bash output silently withheld, and
+    // every `bash_output_release` audit row misclassified. Renamed
+    // local to `outcome` so `.decision` visually forces destructure.
+    const outcome = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal, ctx);
+    if (outcome.decision !== "release") {
+      auditBashOutput("bash_output_withhold", record, outcome.ui_path);
+      return {
+        content: withheldVaultBashContent(record),
+        details: { ...(event.details ?? {}), vault: { outputWithheld: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
+      };
+    }
+    auditBashOutput("bash_output_release", record, outcome.ui_path);
+    return {
+      content: redactVaultBashContent(event.content, record.releases),
+      details: { ...(event.details ?? {}), vault: { outputReleased: true, redacted: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
+    };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`[abrain] vault bash output authorization error (withholding output — authorization boundary failure): ${message}`);
+    // Fail-closed: authorization/redaction failure MUST NOT release
+    // raw vault-backed output into LLM context. The user can re-run
+    // the command manually to get their output; a leaked secret is
+    // irreversible. The vault operator can inspect vault-events.jsonl
+    // to diagnose the authorization failure.
+    //
+    // ADR 0022 housekeeping batch A (g): this withhold happened
+    // BEFORE / OUTSIDE authorizeVaultBashOutput (the outer try threw
+    // somewhere in redaction / authorize / record bookkeeping), so we
+    // genuinely don't know which UI path would have been taken. Leave
+    // ui_path unset rather than guessing — the absence of ui_path on
+    // this row is itself a diagnostic signal ("never made it to UI").
+    try {
+      const record = vaultBashRuns.get(event.toolCallId!);
+      if (record) {
+        vaultBashRuns.delete(event.toolCallId!);
+        try { fs.rmSync(record.envFile, { force: true }); } catch {}
+        auditBashOutput("bash_output_withhold", record);
+      }
+    } catch { /* best-effort */ }
+    return {
+      content: [{ type: "text", text: `[vault] bash output withheld — authorization/redaction error: ${message.slice(0, 300)}` }],
+      details: { ...(event.details ?? {}), vault: { outputWithheld: true, reason: "authorization_error" } },
+    };
+  }
+}
+
 // Export so smoke can invoke + INV-E identity asserts can run against
 // the real function (not a copy). These are file-internal helpers; the
 // LLM-facing surface remains the registered `vault_release` tool +
@@ -822,7 +905,24 @@ async function authorizeVaultRelease(
 export {
   authorizeVaultRelease as __authorizeVaultReleaseForTests,
   authorizeVaultBashOutput as __authorizeVaultBashOutputForTests,
+  processVaultBashToolResult as __handleVaultBashToolResultForTests,
 };
+
+/** Test-only: inject a synthetic vault bash run record so smoke can
+ *  drive processVaultBashToolResult without going through the
+ *  prepareBootVaultBashCommand tool_call path. Used by
+ *  smoke:abrain-vault-grant-isolation (Batch A subgroup 2 post-audit). */
+export function __seedVaultBashRunForTests(
+  toolCallId: string,
+  record: VaultBashRunRecord,
+): void {
+  vaultBashRuns.set(toolCallId, record);
+}
+
+/** Test-only: drain the vaultBashRuns map (for hermetic smoke fixtures). */
+export function __clearVaultBashRunsForTests(): void {
+  vaultBashRuns.clear();
+}
 
 export default function activate(pi: ExtensionAPI): void {
   // ── Sub-pi enforce: vault-bootstrap.md §5 layer (b) ───────────────────
@@ -1090,71 +1190,14 @@ export default function activate(pi: ExtensionAPI): void {
       }
     });
 
-    eventRegistry.on("tool_result", async (event, ctx) => {
-      // ── Vault bash output authorization guard ─────────────────
-      // Outer try/catch: if authorizeVaultBashOutput or redaction
-      // throws, we fail-CLOSED — withhold the bash output rather
-      // than releasing raw vault-touched data to LLM context.
-      // Audit row records the failure for forensic diagnosis.
-      // (Changed from fail-open in R6 audit, 2026-05-14.)
-      try {
-        if (event.toolName !== "bash") return;
-        const record = vaultBashRuns.get(event.toolCallId);
-        if (!record) return;
-        vaultBashRuns.delete(event.toolCallId);
-        try { fs.rmSync(record.envFile, { force: true }); } catch {}
-
-        // ADR 0022 housekeeping batch A subgroup 1 post-audit fix
-        // (2026-05-19, OPUS-4-7 + DEEPSEEK-V4-pro xhigh consensus P0):
-        // authorizeVaultBashOutput now returns { decision, ui_path }
-        // (changed earlier in this commit for batch A (g) wiring).
-        // The original `decision !== "release"` comparison was object-vs-string,
-        // ALWAYS true — every vault bash output was silently withheld,
-        // and every `bash_output_release` audit row was misclassified.
-        // Renamed local to `outcome` so the field name `outcome.decision`
-        // visually forces destructure thinking (P1-4 reviewer note).
-        const outcome = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal, ctx);
-        if (outcome.decision !== "release") {
-          auditBashOutput("bash_output_withhold", record, outcome.ui_path);
-          return {
-            content: withheldVaultBashContent(record),
-            details: { ...(event.details ?? {}), vault: { outputWithheld: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
-          };
-        }
-        auditBashOutput("bash_output_release", record, outcome.ui_path);
-        return {
-          content: redactVaultBashContent(event.content, record.releases),
-          details: { ...(event.details ?? {}), vault: { outputReleased: true, redacted: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
-        };
-      } catch (e: unknown) {
-        const message = e instanceof Error ? e.message : String(e);
-        console.error(`[abrain] vault bash output authorization error (withholding output — authorization boundary failure): ${message}`);
-        // Fail-closed: authorization/redaction failure MUST NOT release
-        // raw vault-backed output into LLM context. The user can re-run
-        // the command manually to get their output; a leaked secret is
-        // irreversible. The vault operator can inspect vault-events.jsonl
-        // to diagnose the authorization failure.
-        //
-        // ADR 0022 housekeeping batch A (g): this withhold happened
-        // BEFORE / OUTSIDE authorizeVaultBashOutput (the outer try threw
-        // somewhere in redaction / authorize / record bookkeeping), so we
-        // genuinely don't know which UI path would have been taken. Leave
-        // ui_path unset rather than guessing — the absence of ui_path on
-        // this row is itself a diagnostic signal ("never made it to UI").
-        try {
-          const record = vaultBashRuns.get(event.toolCallId);
-          if (record) {
-            vaultBashRuns.delete(event.toolCallId);
-            try { fs.rmSync(record.envFile, { force: true }); } catch {}
-            auditBashOutput("bash_output_withhold", record);
-          }
-        } catch { /* best-effort */ }
-        return {
-          content: [{ type: "text", text: `[vault] bash output withheld — authorization/redaction error: ${message.slice(0, 300)}` }],
-          details: { ...(event.details ?? {}), vault: { outputWithheld: true, reason: "authorization_error" } },
-        };
-      }
-    });
+    // ADR 0022 housekeeping batch A subgroup 2 post-audit (2026-05-19,
+    // 3-way T0 reviewer consensus): listener body extracted to
+    // module-level `processVaultBashToolResult` so smoke can drive it
+    // end-to-end via __handleVaultBashToolResultForTests. Runtime
+    // behavior is byte-identical — listener now is a thin delegator.
+    eventRegistry.on("tool_result", async (event, ctx) =>
+      processVaultBashToolResult(event as any, ctx as any),
+    );
 
     // P2 fix (R6 audit): session_shutdown cleanup for orphaned vault bash runs.
     // vaultBashRuns and env files are normally cleaned in tool_result, but

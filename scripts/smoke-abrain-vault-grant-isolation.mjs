@@ -588,8 +588,212 @@ await check("telemetry: __peek + __set + __reset helpers wired correctly", () =>
 });
 
 // ── Cleanup ────────────────────────────────────────────────────────────
+// ── P0 GAP CLOSURE: tool_result handler end-to-end (3-way T0 review) ──
+//
+// 2026-05-19 OPUS-4-7 + GPT-5.5 + DEEPSEEK-V4-pro xhigh unanimous P0:
+// the helper-only checks above do NOT catch the ff3dd9e P0. That P0
+// lived in the tool_result handler's `const decision = await ...; if
+// (decision !== "release")` (object-vs-string compare). authorize* helper
+// return shape was already correct in ff3dd9e — only the caller mis-used
+// it. To cover the bug class, we drive the handler body via
+// `__handleVaultBashToolResultForTests` (this commit's post-audit
+// refactor extracted it from the listener so smoke can invoke it).
+//
+// Each check below seeds a synthetic vaultBashRuns record via
+// `__seedVaultBashRunForTests`, then awaits the handler with a fake
+// event/ctx. Negative-test verified: reverting the inline handler
+// `outcome.decision` back to `decision` makes the release assertion
+// fail immediately (object !== string → forced withhold path).
+async function readAuditRows() {
+  const p = path.join(abrainHome, ".state", "vault-events.jsonl");
+  if (!fs.existsSync(p)) return [];
+  return fs.readFileSync(p, "utf8").split("\n").filter(Boolean).map(JSON.parse);
+}
+
+function buildSeededRecord(toolCallId, { plaintextValue = "SECRET_VALUE_FOR_TEST", placeholder = "<vault:global:alpha>" } = {}) {
+  return {
+    toolCallId,
+    grantKey: `${toolCallId}-grant`,
+    envFile: path.join(tmpDir, `seeded-env-${toolCallId}`),
+    originalCommand: `curl -H 'Authorization: token $VAULT_alpha' (test ${toolCallId})`,
+    releases: [{
+      scope: "global",
+      key: "alpha",
+      value: plaintextValue,
+      placeholder,
+    }],
+    variables: [{ varName: "VAULT_alpha", scopeKey: "global:alpha" }],
+  };
+}
+
+function clearAuditFile() {
+  const p = path.join(abrainHome, ".state", "vault-events.jsonl");
+  try { fs.rmSync(p, { force: true }); } catch {}
+}
+
+await check("handler E2E: release path — outcome.decision destructure works (catches ff3dd9e P0)", async () => {
+  resetState();
+  installOverlayBuilder("Yes once");
+  clearAuditFile();
+  const tcid = "e2e-release-1";
+  indexModule.__seedVaultBashRunForTests(tcid, buildSeededRecord(tcid));
+
+  const event = {
+    toolName: "bash",
+    toolCallId: tcid,
+    content: [{ type: "text", text: "output containing SECRET_VALUE_FOR_TEST literally" }],
+    details: { foo: "bar" },
+  };
+  const { ui } = makeOverlayUi();
+  const result = await indexModule.__handleVaultBashToolResultForTests(event, { ui });
+
+  // PRIMARY ASSERTION (catches ff3dd9e P0): the release branch MUST be
+  // reachable. Pre-fix `decision !== "release"` compared the wrapper
+  // object against the literal string — always true — making the entire
+  // release branch unreachable.
+  if (!result || !result.details || !result.details.vault) {
+    throw new Error(`handler returned no vault details: ${JSON.stringify(result)}`);
+  }
+  if (result.details.vault.outputReleased !== true) {
+    throw new Error(
+      `expected outputReleased=true (release branch reached), got: ${JSON.stringify(result.details.vault)}. ` +
+        "This would be the ff3dd9e P0 reappearing.",
+    );
+  }
+  if (result.details.vault.outputWithheld) {
+    throw new Error(`release branch wrote outputWithheld=true (regression to ff3dd9e P0): ${JSON.stringify(result.details.vault)}`);
+  }
+  // Redaction substitutes the placeholder for the literal value.
+  const serialized = JSON.stringify(result.content);
+  if (serialized.includes("SECRET_VALUE_FOR_TEST")) {
+    throw new Error(`redaction failed: plaintext leaked in returned content: ${serialized.slice(0, 200)}`);
+  }
+  if (!serialized.includes("<vault:global:alpha>")) {
+    throw new Error(`redaction missing placeholder: ${serialized.slice(0, 200)}`);
+  }
+
+  // (g) ui_path propagated end-to-end into the audit row.
+  const rows = await readAuditRows();
+  const releaseRow = rows.find((r) => r.op === "bash_output_release");
+  if (!releaseRow) {
+    throw new Error(`bash_output_release row missing from audit: ${JSON.stringify(rows)}`);
+  }
+  if (releaseRow.ui_path !== "overlay") {
+    throw new Error(`expected ui_path=overlay on release row, got ${JSON.stringify(releaseRow)}`);
+  }
+});
+
+await check("handler E2E: withhold path — audit gets ui_path + content is withheld payload", async () => {
+  resetState();
+  installOverlayBuilder("No");
+  clearAuditFile();
+  const tcid = "e2e-withhold-1";
+  indexModule.__seedVaultBashRunForTests(tcid, buildSeededRecord(tcid));
+
+  const event = {
+    toolName: "bash",
+    toolCallId: tcid,
+    content: [{ type: "text", text: "output containing SECRET_VALUE_FOR_TEST" }],
+    details: {},
+  };
+  const { ui } = makeOverlayUi();
+  const result = await indexModule.__handleVaultBashToolResultForTests(event, { ui });
+
+  if (!result.details.vault.outputWithheld) {
+    throw new Error(`expected outputWithheld=true, got ${JSON.stringify(result.details.vault)}`);
+  }
+  const serialized = JSON.stringify(result.content);
+  if (serialized.includes("SECRET_VALUE_FOR_TEST")) {
+    throw new Error(`withhold path leaked plaintext: ${serialized.slice(0, 200)}`);
+  }
+  const rows = await readAuditRows();
+  const withholdRow = rows.find((r) => r.op === "bash_output_withhold");
+  if (!withholdRow) {
+    throw new Error(`bash_output_withhold row missing: ${JSON.stringify(rows)}`);
+  }
+  if (withholdRow.ui_path !== "overlay") {
+    throw new Error(`expected ui_path=overlay on withhold row, got ${JSON.stringify(withholdRow)}`);
+  }
+});
+
+await check("handler E2E: non-bash toolName is bypassed silently", async () => {
+  resetState();
+  const result = await indexModule.__handleVaultBashToolResultForTests(
+    { toolName: "edit", toolCallId: "irrelevant", content: [], details: {} },
+    { ui: undefined },
+  );
+  if (result !== undefined) {
+    throw new Error(`non-bash tool should yield undefined return, got ${JSON.stringify(result)}`);
+  }
+});
+
+await check("handler E2E: unknown toolCallId is bypassed silently", async () => {
+  resetState();
+  clearAuditFile();
+  const result = await indexModule.__handleVaultBashToolResultForTests(
+    { toolName: "bash", toolCallId: "no-such-record", content: [], details: {} },
+    { ui: undefined },
+  );
+  if (result !== undefined) {
+    throw new Error(`unknown toolCallId should yield undefined, got ${JSON.stringify(result)}`);
+  }
+  const rows = await readAuditRows();
+  if (rows.some((r) => r.op === "bash_output_release" || r.op === "bash_output_withhold")) {
+    throw new Error(`unexpected audit rows for missing record: ${JSON.stringify(rows)}`);
+  }
+});
+
+await check("handler E2E: outer-envelope fail-closed catch withholds (OPUS P1-5 intentional ui_path omit)", async () => {
+  resetState();
+  clearAuditFile();
+  // Poison record.releases so the `.releases.map(...)` inside the try
+  // throws — reaches the outer catch block which writes
+  // `auditBashOutput("bash_output_withhold", record)` in the 2-arg form
+  // (ui_path intentionally absent per OPUS P1-5).
+  const tcid = "e2e-outer-catch";
+  indexModule.__seedVaultBashRunForTests(tcid, {
+    toolCallId: tcid,
+    grantKey: `${tcid}-grant`,
+    envFile: path.join(tmpDir, `outer-env-${tcid}`),
+    originalCommand: "echo synthetic",
+    releases: "NOT_AN_ARRAY",
+    variables: [],
+  });
+  installOverlayBuilder("Yes once");
+  const { ui } = makeOverlayUi();
+  const result = await indexModule.__handleVaultBashToolResultForTests(
+    { toolName: "bash", toolCallId: tcid, content: [], details: {} },
+    { ui },
+  );
+  if (!result?.details?.vault?.outputWithheld) {
+    throw new Error(`outer catch should fail-closed: ${JSON.stringify(result)}`);
+  }
+  if (result.details.vault.reason !== "authorization_error") {
+    throw new Error(`expected reason=authorization_error, got ${result.details.vault.reason}`);
+  }
+  const rows = await readAuditRows();
+  for (const r of rows) {
+    if (r.op === "bash_output_withhold" && "ui_path" in r) {
+      throw new Error(`outer-catch withhold row MUST omit ui_path, got ${JSON.stringify(r)}`);
+    }
+  }
+});
+
 fs.rmSync(tmpDir, { recursive: true, force: true });
 delete process.env.ABRAIN_ROOT;
+
+// ADR 0022 batch A subgroup 2 post-audit (2026-05-19): pin assertion
+// count so a future edit that drops a `check(...)` block fails this
+// smoke instead of silently shrinking coverage (3-way T0 P2 consensus).
+const EXPECTED_ASSERTIONS = 22;
+if (total !== EXPECTED_ASSERTIONS && failures.length === 0) {
+  console.log("");
+  console.log(
+    `FAIL — assertion count drifted: expected ${EXPECTED_ASSERTIONS}, ran ${total}. ` +
+      "If you intentionally added/removed a check(...), bump EXPECTED_ASSERTIONS.",
+  );
+  process.exit(1);
+}
 
 console.log("");
 if (failures.length === 0) {
