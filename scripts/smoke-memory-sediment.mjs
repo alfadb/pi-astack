@@ -1321,6 +1321,151 @@ END_MEMORY`;
       expectThrows({ op: "create", scope: "world", derives_from: ["made-up"] }, "not an allowed neighbor");
     }
 
+    // === curator parseDecision: workflow-lane read/write asymmetry guard (2026-05-19) =====
+    // sub2api audit row 32 case: curator chose op=update slug=run-when-releasing,
+    // writer (updateProjectEntry/findProjectEntryFile) skips workflows/ subdir,
+    // returned entry_not_found, candidate's claim silently dropped. The decoder
+    // now rejects any write op targeting a workflow-lane neighbor, forcing the
+    // upper curator_error catch in curateProjectDraft to convert the decision
+    // to op=skip (no entry_not_found audit row, no silent data loss).
+    {
+      const { parseDecision, isWorkflowNeighborEntry, neighborLaneFor } = req("./sediment/curator.js");
+
+      // 1. detector recognises all three signals
+      const wfByFrontmatter = {
+        slug: "run-when-x",
+        frontmatter: { scope: "workflow", kind: "workflow" },
+        legacyKind: "workflow",
+        scope: "project",
+        sourcePath: "/home/u/.abrain/projects/p/workflows/run-when-x.md",
+      };
+      assert(isWorkflowNeighborEntry(wfByFrontmatter) === true, "frontmatter.scope=workflow should detect");
+
+      const wfByLegacyKind = {
+        slug: "legacy-pipe",
+        frontmatter: { scope: "project" },
+        legacyKind: "workflow",
+        scope: "project",
+        sourcePath: "/home/u/.abrain/projects/p/knowledge/legacy-pipe.md",
+      };
+      assert(isWorkflowNeighborEntry(wfByLegacyKind) === true, "legacyKind=workflow should detect");
+
+      const wfByPath = {
+        slug: "by-path",
+        frontmatter: { scope: "project" },
+        scope: "project",
+        sourcePath: "/home/u/.abrain/workflows/by-path.md",
+      };
+      assert(isWorkflowNeighborEntry(wfByPath) === true, "sourcePath /workflows/ should detect");
+
+      const notWf = {
+        slug: "plain-fact",
+        frontmatter: { scope: "project" },
+        scope: "project",
+        sourcePath: "/home/u/.abrain/projects/p/knowledge/plain-fact.md",
+      };
+      assert(isWorkflowNeighborEntry(notWf) === false, "plain knowledge entry should NOT detect as workflow");
+
+      // 2. neighborLaneFor returns lane labels
+      assert(neighborLaneFor(wfByFrontmatter) === "workflow", "wf entry -> lane=workflow");
+      assert(neighborLaneFor(notWf) === "project", "plain project entry -> lane=project");
+      const worldEntry = { ...notWf, scope: "world", sourcePath: "/home/u/.abrain/knowledge/m.md" };
+      assert(neighborLaneFor(worldEntry) === "world", "world entry -> lane=world");
+
+      // 3. parseDecision rejects every write op targeting workflow-lane neighbor
+      const wfNeighbors = new Map([
+        ["run-when-releasing", "workflow"],
+        ["some-fact", "project"],
+        ["some-maxim", "world"],
+      ]);
+      const pWf = (obj) => parseDecision(JSON.stringify(obj), wfNeighbors);
+      const expectWfThrows = (obj, opLabel) => {
+        let threw = false;
+        let msg = "";
+        try { pWf(obj); } catch (e) { threw = true; msg = e.message; }
+        assert(threw, `parseDecision should throw for ${opLabel}: ${JSON.stringify(obj)}`);
+        assert(msg.includes("workflow-lane neighbor"), `${opLabel} error should mention workflow-lane: ${msg}`);
+        assert(msg.includes("run-when-releasing"), `${opLabel} error should name the workflow slug: ${msg}`);
+      };
+      expectWfThrows({ op: "update", slug: "run-when-releasing", patch: { confidence: 8 }, timeline_note: "n" }, "update");
+      expectWfThrows({ op: "supersede", old_slug: "run-when-releasing", reason: "x" }, "supersede");
+      expectWfThrows({ op: "archive", slug: "run-when-releasing", reason: "x" }, "archive");
+      expectWfThrows({ op: "delete", slug: "run-when-releasing", mode: "soft", reason: "x" }, "delete");
+      expectWfThrows({ op: "merge", target: "run-when-releasing", sources: ["some-fact"], compiled_truth: "c", timeline_note: "n" }, "merge target");
+      expectWfThrows({ op: "merge", target: "some-fact", sources: ["run-when-releasing"], compiled_truth: "c", timeline_note: "n" }, "merge source");
+
+      // 4. op=skip is unaffected (workflow can be cited in skip rationale)
+      const skipOk = pWf({ op: "skip", reason: "workflow already covers", rationale: "run-when-releasing Task 4 covers this" });
+      assert(skipOk.op === "skip", "op=skip should pass even when discussing a workflow neighbor");
+
+      // 5. op=create with derives_from pointing at workflow IS allowed
+      //    (legit graph relation: downstream knowledge observation built on workflow premise)
+      const createOk = pWf({ op: "create", derives_from: ["run-when-releasing"], rationale: "downstream observation" });
+      assert(createOk.op === "create" && createOk.derives_from && createOk.derives_from[0] === "run-when-releasing",
+        `create with derives_from:[workflow-slug] should pass: ${JSON.stringify(createOk)}`);
+
+      // 6. world create cannot derive from workflow (error message should
+      //    name 'workflow-scope', not 'project-scope', as before the fix)
+      let wcThrew = false; let wcMsg = "";
+      try { pWf({ op: "create", scope: "world", derives_from: ["run-when-releasing"] }); } catch (e) { wcThrew = true; wcMsg = e.message; }
+      assert(wcThrew, "world create with workflow derives_from should throw");
+      assert(wcMsg.includes("workflow-scope"), `world<-workflow error should mention workflow-scope, got: ${wcMsg}`);
+    }
+
+    // === curator prompt embeds workflow-lane rule (2026-05-19) ============
+    // Pin the directive markers so future prompt refactors don't silently
+    // drop the rule (the decoder still enforces, but without the prompt
+    // hint the LLM wastes a decision per workflow-touching candidate).
+    {
+      const { buildCuratorPrompt, isWorkflowNeighborEntry } = req("./sediment/curator.js");
+      const wfNeighbor = {
+        slug: "run-when-releasing",
+        scope: "project",
+        kind: "fact",
+        legacyKind: "workflow",
+        status: "provisional",
+        confidence: 5,
+        title: "release flow",
+        compiledTruth: "checklist body",
+        timeline: ["2026-05-15 | smoke | captured"],
+        frontmatter: { scope: "workflow", kind: "workflow" },
+        sourcePath: "/home/u/.abrain/projects/p/workflows/run-when-releasing.md",
+      };
+      const plainNeighbor = {
+        slug: "some-fact",
+        scope: "project",
+        kind: "fact",
+        status: "active",
+        confidence: 5,
+        title: "plain",
+        compiledTruth: "plain body",
+        timeline: [],
+        frontmatter: { scope: "project" },
+        sourcePath: "/home/u/.abrain/projects/p/knowledge/some-fact.md",
+      };
+      const draft = { title: "c", kind: "fact", compiledTruth: "candidate body" };
+      const prompt = buildCuratorPrompt(draft, [wfNeighbor, plainNeighbor]);
+      const required = [
+        "Workflow-lane neighbors",
+        "do NOT emit op=update / op=supersede / op=merge / op=archive / op=delete with a workflow-lane slug",
+        "scope: workflow (READ-ONLY reference",
+        // make sure plain neighbor still gets a normal scope line
+        "scope: project",
+      ];
+      for (const needle of required) {
+        assert(prompt.includes(needle), `curator prompt missing workflow-lane marker: ${JSON.stringify(needle)} \n--- prompt head ---\n${prompt.slice(0, 800)}`);
+      }
+      // sanity: the plain neighbor's scope line must NOT be polluted by
+      // the workflow READ-ONLY suffix (only workflow entries get it).
+      const plainLineMatch = prompt.match(/^## some-fact\nscope: ([^\n]+)$/m);
+      assert(plainLineMatch && plainLineMatch[1] === "project",
+        `plain neighbor's scope line should be 'scope: project', got: ${plainLineMatch && plainLineMatch[1]}`);
+      // and isWorkflowNeighborEntry is reachable for callers that want
+      // pre-filter logic (currently we keep workflow neighbors visible).
+      assert(isWorkflowNeighborEntry(wfNeighbor) === true, "detector must agree with prompt branch");
+      assert(isWorkflowNeighborEntry(plainNeighbor) === false, "detector must NOT misclassify plain neighbor");
+    }
+
     // === writer trigger_phrases UNION =====
     // Mechanical UNION ensures curator update with new trigger_phrases
     // preserves existing retrieval anchors (never replaces).

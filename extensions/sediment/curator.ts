@@ -82,6 +82,62 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * Heuristic detector for workflow-lane entries. Workflow entries live in
+ * `~/.abrain/[projects/<id>/]workflows/<slug>.md`. They are produced and
+ * mutated by a SEPARATE writer (`writeAbrainWorkflow`, B1) and the regular
+ * sediment auto-write path (`updateProjectEntry` / `supersedeProjectEntry`
+ * / `deleteProjectEntry`) explicitly skips the `workflows/` subdir when
+ * resolving target files (see extensions/sediment/writer.ts::findProjectEntryFile).
+ *
+ * However, the read side (memory parser → llmSearchEntries → curator
+ * neighbor pool) DOES surface workflow entries, with `scope` collapsed to
+ * `project` (or `world` for cross-project ones) because `Scope` only has
+ * those two values. That asymmetry caused real `entry_not_found` rejections
+ * in production (2026-05-19 sub2api audit row 32: curator chose op=update
+ * slug=run-when-releasing, writer scanned `~/.abrain/projects/sub2api/`
+ * minus `workflows/`, found nothing, rejected as entry_not_found — the
+ * candidate's claim was silently dropped instead of merging into the
+ * workflow or becoming a new derived knowledge entry).
+ *
+ * Detection signals (OR; the writer-side ground truth is the path, but we
+ * also accept frontmatter markers for robustness against future store
+ * layout changes):
+ *   1. `frontmatter.scope === "workflow"` (canonical declaration; B1 writer
+ *      emits this).
+ *   2. `legacyKind === "workflow"` (parser.ts::normalizeKind preserves the
+ *      raw `kind: workflow` here because "workflow" is not in ENTRY_KINDS).
+ *   3. sourcePath contains a `/workflows/` segment (mechanical fallback).
+ *
+ * Exported for smoke (smoke-memory-sediment.mjs ~entry 1320) so future
+ * refactors that move the workflow store do not silently regress the
+ * curator-side read/write asymmetry guard.
+ */
+export function isWorkflowNeighborEntry(entry: MemoryEntry): boolean {
+  const fmScope = entry.frontmatter && typeof (entry.frontmatter as any).scope === "string"
+    ? String((entry.frontmatter as any).scope).trim()
+    : "";
+  if (fmScope === "workflow") return true;
+  if (entry.legacyKind === "workflow") return true;
+  const segs = entry.sourcePath.split(/[\\/]+/);
+  if (segs.includes("workflows")) return true;
+  return false;
+}
+
+/**
+ * Lane label fed to parseDecision. "workflow" is a sediment-curator-only
+ * extension of MemoryEntry.scope ("project" | "world") used to tag
+ * neighbors whose physical store is the workflows lane. The decoder uses
+ * this to reject write ops targeting workflow neighbors before they reach
+ * the writer (which would silently reject with entry_not_found).
+ */
+export type CuratorNeighborLane = "project" | "world" | "workflow";
+
+export function neighborLaneFor(entry: MemoryEntry): CuratorNeighborLane {
+  if (isWorkflowNeighborEntry(entry)) return "workflow";
+  return (entry.scope ?? "project") as CuratorNeighborLane;
+}
+
 // Exported (2026-05-15) so smoke can pin the create-branch scope guard.
 // Internal-use otherwise — production callers go through curateProjectDraft.
 export function parseDecision(rawText: string, neighborScopes: Map<string, string>): CuratorDecision {
@@ -96,8 +152,22 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
   // that permitted world→project and project→world scope confusion;
   // now neighborScopes (Map<slug, scope>) carries the ground truth.
   const allowedSlugs = new Set(neighborScopes.keys());
+  // 2026-05-19 fix (sub2api audit row 32: entry_not_found on run-when-releasing).
+  // Workflow-lane neighbors are surfaced by the search/index side but the
+  // auto-write writer (updateProjectEntry / supersedeProjectEntry /
+  // archiveProjectEntry / deleteProjectEntry / mergeProjectEntries) skips
+  // the `workflows/` subdir on findProjectEntryFile and would silently
+  // reject as entry_not_found. Catch the mismatch at the decoder so the
+  // candidate either falls through to op=skip (via the curator_error
+  // catch in curateProjectDraft) or, in a future curator pass with the
+  // workflow-lane prompt rule visible, gets correctly classified as skip
+  // (when the workflow already covers the claim) or create-with-derives
+  // (when the candidate is a separate downstream observation).
   function validateScope(slug: string): void {
     const neighborScope = neighborScopes.get(slug);
+    if (neighborScope === "workflow") {
+      throw new Error(`curator op "${op}" targets workflow-lane neighbor "${slug}" — workflow entries are read-only references in the sediment auto-write path (they live in ~/.abrain/[projects/<id>/]workflows/ and are mutated only by writeAbrainWorkflow). Use op=skip (when the workflow already covers the candidate's claim) or op=create with derives_from:["${slug}"] (when the candidate is a separate downstream observation building on the workflow).`);
+    }
     if (scope === "world" && neighborScope !== "world") {
       throw new Error(`curator set scope:world on project-scope neighbor "${slug}" — use project scope (omit scope) instead`);
     }
@@ -213,7 +283,11 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
       if (scope === "world") {
         const srcScope = neighborScopes.get(src);
         if (srcScope !== "world") {
-          throw new Error(`curator create scope:"world" cannot derive from project-scope neighbor "${src}" — either drop the scope (let it default to project) or only derive from world neighbors`);
+          // 2026-05-19: srcScope can now be "workflow" (workflow-lane
+          // neighbor) in addition to "project". Both are disallowed as
+          // upstream for a world create; reflect the actual scope in
+          // the error so the curator/LLM sees an accurate diagnostic.
+          throw new Error(`curator create scope:"world" cannot derive from ${srcScope ?? "project"}-scope neighbor "${src}" — either drop the scope (let it default to project) or only derive from world neighbors`);
         }
       }
     }
@@ -253,9 +327,17 @@ function sanitizeDecisionStrings<T>(value: T): T {
 
 function entryForPrompt(entry: MemoryEntry): string {
   const timelineTail = entry.timeline.slice(-4).join("\n") || "(none)";
+  // 2026-05-19 fix: mark workflow-lane neighbors as read-only references so
+  // the curator LLM does not pick op=update/supersede/merge/archive/delete
+  // on them (the writer cannot reach workflows/ — see isWorkflowNeighborEntry
+  // JSDoc + parseDecision::validateScope workflow branch).
+  const isWorkflow = isWorkflowNeighborEntry(entry);
+  const scopeLine = isWorkflow
+    ? `scope: workflow (READ-ONLY reference — sediment auto-write CANNOT modify workflow-lane entries; do not op=update/supersede/merge/archive/delete this slug, prefer op=skip or op=create with derives_from)`
+    : `scope: ${entry.scope ?? "project"}`;
   return [
     `## ${entry.slug}`,
-    `scope: ${entry.scope ?? "project"}`,
+    scopeLine,
     `title: ${sanitizePromptText(entry.title)}`,
     `kind: ${entry.kind}`,
     `status: ${entry.status}`,
@@ -342,6 +424,11 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "- timeline_note should be short and evidence-based.",
     "- Do not invent slugs. update/merge/archive/delete/supersede slugs must be one of the neighbor slugs.",
     "- Cross-scope wikilink hygiene (soft, prefer but not strict): if compiled_truth references entries outside this project, prefer the explicit scope prefix `[[world:slug]]` (for ~/.abrain/knowledge/ maxims and durable knowledge), `[[workflow:slug]]` (for ~/.abrain/workflows/ pipelines), or `[[project:<projectId>:slug]]` (for other projects). Bare `[[slug]]` resolves to the current project by default and to global as fallback during read, but explicit prefixes reduce future graph-rewrite work. Do not invent slugs you have not seen.",
+    "",
+    "Workflow-lane neighbors (added 2026-05-19 after sub2api audit row 32 entry_not_found):",
+    "- Neighbors whose `scope:` header reads `workflow (READ-ONLY reference ...)` live in the abrain workflows lane (`~/.abrain/[projects/<id>/]workflows/<slug>.md`) and are NOT writable via this auto-write path. Their writer is `writeAbrainWorkflow` (B1), which the sediment curator does not call.",
+    "- HARD CONSTRAINT: do NOT emit op=update / op=supersede / op=merge / op=archive / op=delete with a workflow-lane slug as the target/source. The decoder will reject it and the candidate will fall through to op=skip — wasting one curator decision and silently dropping the candidate's claim.",
+    "- Correct dispositions when a workflow neighbor matches the candidate's topic: (1) op=skip with rationale referencing the workflow if the workflow already fully covers the claim (this was the right answer for sub2api's 'release preconditions checklist' candidate); (2) op=create with derives_from:[\"<workflow-slug>\"] when the candidate is a separate downstream observation building on the workflow's premise — derives_from MAY point at workflow neighbors even though update/etc may not.",
     "",
     "Scope stickiness (CRITICAL — added 2026-05-14 after world-scope neighbor pool opened):",
     "- Scope is immutable on update/merge/archive/supersede/delete. You MUST NOT change an entry's scope via these operations. The scope shown in the neighbor header is authoritative.",
@@ -491,7 +578,7 @@ export async function curateProjectDraft(
       makeCuratorPrompt(safeDraft, neighbors),
       deps.signal,
     );
-    const decision = sanitizeDecisionStrings(parseDecision(raw, new Map(neighbors.map((entry) => [entry.slug, entry.scope ?? "project"]))));
+    const decision = sanitizeDecisionStrings(parseDecision(raw, new Map(neighbors.map((entry) => [entry.slug, neighborLaneFor(entry)]))));
     const decideMs = Date.now() - decideStart;
     return {
       decision,
