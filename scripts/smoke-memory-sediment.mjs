@@ -1275,6 +1275,13 @@ END_MEMORY`;
         "HARD CONSTRAINT (2026-05-15)",
         "every derives_from slug MUST be one of the neighbor slugs",
         "every derives_from neighbor MUST also be world-scope",
+        // Round-3 prompt hardening after pi-global audit row 22:32:
+        // curator correctly saw a cross-project preference (scope:world)
+        // but incorrectly attached derives_from to a project-scope neighbor.
+        // The decoder now emits a typed reason code; the prompt should
+        // steer the LLM to omit derives_from up front.
+        "If the candidate is world-scope but the only related/upstream neighbors are project-scope or workflow-scope, OMIT derives_from",
+        "Correct output is {\"op\":\"create\", \"scope\":\"world\", \"rationale\":...} with no derives_from",
       ];
       for (const needle of curatorRequired) {
         assert(cp.includes(needle), `curator prompt missing required marker: ${JSON.stringify(needle)}`);
