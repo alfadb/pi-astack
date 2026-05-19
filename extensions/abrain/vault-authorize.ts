@@ -23,7 +23,14 @@
  * Failure modes (caller falls through to `ui.select`):
  *   - `ui_unavailable` — `ctx.ui.custom` not registered
  *   - `dialog_error`  — buildDialog threw / ui.custom threw /
- *                       choices.length < 2 / concurrent gate held
+ *                       choices.length < 2 / concurrent gate held /
+ *                       dialog returned unknown choice (post-audit P2
+ *                       (h), 2026-05-19): a buggy or hostile dialog
+ *                       returning a value not in choices[] is NOT a
+ *                       user cancellation — it's substrate failure, so
+ *                       fall through to ui.select to give the user a
+ *                       real decision opportunity rather than silently
+ *                       denying. OPUS xhigh review.
  *   - `cancelled`     — user pressed Esc / signal abort / outcome=cancel
  *
  * P3b post-ship audit fixes (commit follows 8abb48b):
@@ -226,9 +233,21 @@ async function __runVaultDialog(
     // Validate against the supplied choices — guard against a synthetic
     // dialog returning an unknown string (defense in depth; should not
     // happen in production since OptionList only emits item.value).
+    //
+    // P3b post-audit P2 (h) (2026-05-19, OPUS): unknown choice is
+    // substrate-level failure (buggy/hostile dialog component), NOT
+    // user cancellation. Returning `cancelled` would silently deny
+    // without giving the user a chance to re-decide; `dialog_error`
+    // triggers the caller's ui.select fallback path.
     const choice = String(ans[0]);
     if (!choices.includes(choice)) {
-      resolveOuter({ ok: false, reason: "cancelled" });
+      resolveOuter({
+        ok: false,
+        reason: "dialog_error",
+        detail:
+          `dialog returned unknown choice '${choice.slice(0, 64)}' ` +
+          `(expected one of: ${choices.join(", ").slice(0, 256)})`,
+      });
       return;
     }
     resolveOuter({ ok: true, choice });

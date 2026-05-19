@@ -367,11 +367,18 @@ await check("P3b INV-E: helper holds no grant state — sequential calls are ind
   }
 });
 
-await check("P3b: unknown choice from dialog → cancelled (defense in depth)", async () => {
-  // If a synthetic / buggy dialog returns answers.choice not in choices[],
-  // the helper must NOT propagate it as ok:true. This guards against an
-  // attacker-controlled OptionList variant returning "Approve everything"
-  // when the legitimate choices were ["No", "Yes once"].
+await check("P3b post-audit P2 (h): unknown choice → dialog_error (triggers ui.select fallback, NOT silent deny)", async () => {
+  // P3b post-audit P2 (h) (2026-05-19, OPUS xhigh): a buggy or
+  // hostile dialog returning a value not in choices[] is substrate-
+  // level failure, NOT user cancellation. Returning `cancelled` (pre-
+  // fix) silently denies without giving the user a chance to re-decide;
+  // returning `dialog_error` triggers the caller's ui.select fallback
+  // in index.ts so the user actually sees a working selector.
+  //
+  // This still guards against an attacker-controlled OptionList
+  // variant returning "Approve everything" when legitimate choices
+  // were ["No", "Yes once"]: r.ok is still false (deny), but the
+  // failure mode is now distinguishable from a real cancel.
   const { ui } = makeMockUi({ chooseLabel: "Bogus" });
   const r = await vaultAuth.askVaultAuthorizationViaDialog({
     ui,
@@ -383,7 +390,48 @@ await check("P3b: unknown choice from dialog → cancelled (defense in depth)", 
     buildDialog: makeFakeBuildDialog({}, "Bogus"),
   });
   if (r.ok) throw new Error(`unknown choice should NOT be ok: ${JSON.stringify(r)}`);
-  if (r.reason !== "cancelled") throw new Error(`reason: ${r.reason}`);
+  if (r.reason !== "dialog_error") {
+    throw new Error(`P2(h): expected dialog_error to trigger ui.select fallback, got '${r.reason}': ${JSON.stringify(r)}`);
+  }
+  // Detail MUST include the offending unknown value so audit + notify
+  // can surface what went wrong. Truncated to <= 64 chars in helper
+  // to avoid leaking large payloads.
+  if (!/unknown choice/i.test(r.detail ?? "")) {
+    throw new Error(`P2(h): detail should mention 'unknown choice', got: ${r.detail}`);
+  }
+  if (!/Bogus/.test(r.detail ?? "")) {
+    throw new Error(`P2(h): detail should include offending value 'Bogus', got: ${r.detail}`);
+  }
+  // Detail must list the legitimate choices so the fallback log is
+  // diagnosable (e.g. shows the caller's intent vs the actual return).
+  if (!/No/.test(r.detail ?? "") || !/Yes once/.test(r.detail ?? "")) {
+    throw new Error(`P2(h): detail should list expected choices, got: ${r.detail}`);
+  }
+});
+
+await check("P3b post-audit P2 (h): unknown choice detail truncates pathological values to <=64 chars", async () => {
+  // Defense in depth: if a hostile dialog returns a very long string
+  // (e.g. an attempt to flood the audit log or notify channel), the
+  // detail field must truncate to a bounded length. Verify the slice
+  // boundary (64 chars for the choice itself).
+  const longBogus = "X".repeat(500);
+  const { ui } = makeMockUi({ chooseLabel: longBogus });
+  const r = await vaultAuth.askVaultAuthorizationViaDialog({
+    ui,
+    variant: "vault_release",
+    reason: "x", header: "x", question: "x?",
+    choices: ["No", "Yes once"],
+    buildDialog: makeFakeBuildDialog({}, longBogus),
+  });
+  if (r.ok || r.reason !== "dialog_error") {
+    throw new Error(`expected dialog_error, got ${JSON.stringify(r)}`);
+  }
+  // The choice was 500 X's; detail should contain at most 64 X's in a row.
+  const match = (r.detail ?? "").match(/X+/);
+  if (!match) throw new Error(`detail missing truncated X-run: ${r.detail}`);
+  if (match[0].length > 64) {
+    throw new Error(`detail leaked unbounded value: ${match[0].length} X's (max 64): ${r.detail?.slice(0, 200)}`);
+  }
 });
 
 await check("P3b: cancel outcome → cancelled", async () => {
