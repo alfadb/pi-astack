@@ -235,7 +235,16 @@ export type VaultEventOp =
   // entries that never reach the dialog.
   | "prompt_user_ask"
   | "prompt_user_answer"
-  | "prompt_user_blocked";
+  | "prompt_user_blocked"
+  // ADR 0022 housekeeping batch A (b) (2026-05-19): activate() probes
+  // pi-tui at startup. If pi-tui fails to load OR makeBuildDialog
+  // throws, we emit exactly ONE startup_telemetry row + ui.notify on
+  // the first session_start that has ctx.ui.custom available so
+  // operators can detect silent fallback to ui.select. lane is
+  // "vault_substrate" so existing vault tooling filters (which select
+  // on lane="vault_release" / "bash_inject" / "bash_output" / "prompt_user")
+  // ignore it.
+  | "startup_telemetry";
 
 export interface VaultEvent {
   ts: string;
@@ -263,6 +272,22 @@ export interface VaultEvent {
    *  Plaintext is NOT involved — this is the OS error string, not the
    *  secret. Round 7 P0 (gpt-5.5 audit fix). */
   error?: string;
+  /** ADR 0022 housekeeping batch A (g) (2026-05-19, INV-D metadata):
+   *  which UI substrate produced this read-path decision. Lets ops
+   *  distinguish PromptDialog overlay outcomes from ui.select / ui.confirm
+   *  fallback paths in the same vault-events.jsonl when reading a row
+   *  with `reason:"cancelled"` or `op:"release"`. Pre-fix the row was
+   *  ambiguous: a cancelled overlay and a cancelled ui.select looked
+   *  identical. (DEEPSEEK xhigh P0 reclassified P2; A-batch synthesis
+   *  2026-05-19 multi-LLM round.)
+   *    - "overlay"  : PromptDialog overlay (default since ADR 0022 P3b)
+   *    - "select"   : ui.select fallback (ui.custom unavailable / dialog_error)
+   *    - "confirm"  : ui.confirm fallback (legacy binary y/n)
+   *    - "cached"   : session grant short-circuit, no UI surfaced this call
+   *    - "none"     : no UI method available, forced deny / withhold
+   *  Free-form optional; consumers should treat unknown values as
+   *  forward-compat unknown rather than error. */
+  ui_path?: "overlay" | "select" | "confirm" | "cached" | "none";
 }
 
 /**

@@ -415,6 +415,16 @@ const bashOutputSessionGrants = new Set<string>();
 // caller still has `ui.select`/`ui.confirm` fallbacks.
 let cachedVaultDialogBuilder: PromptDialogDeps["buildDialog"] | null = null;
 
+// ADR 0022 housekeeping batch A (b) (2026-05-19): telemetry state. We
+// track two flags so the first session_start can decide whether to emit
+// a startup_telemetry audit row + ui.notify warning. Conditions are
+// (i) the dialog builder failed to load AND (ii) ctx.ui.custom IS
+// present — i.e. overlay is the expected UX but we will silently fall
+// back to ui.select. If ui.custom is also missing this is a headless
+// session, not a degradation, so we stay quiet.
+let vaultDialogBuilderInitFailed = false;
+let vaultDialogBuilderTelemetrySent = false;
+
 /** Test-only: reset the dialog builder cache (e.g. for smoke fixtures). */
 export function __setVaultDialogBuilderForTests(
   fn: PromptDialogDeps["buildDialog"] | null,
@@ -433,6 +443,32 @@ export function __resetVaultGrantsForTests(): void {
 export function __getVaultDialogBuilderForTests(): PromptDialogDeps["buildDialog"] | null {
   return cachedVaultDialogBuilder;
 }
+
+/** Test-only: reset telemetry flags between fixtures (batch A (b)). */
+export function __resetVaultDialogBuilderTelemetryForTests(): void {
+  vaultDialogBuilderInitFailed = false;
+  vaultDialogBuilderTelemetrySent = false;
+}
+
+/** Test-only: introspect telemetry flag state (batch A (b)). */
+export function __peekVaultDialogBuilderTelemetryForTests(): {
+  failed: boolean;
+  sent: boolean;
+} {
+  return { failed: vaultDialogBuilderInitFailed, sent: vaultDialogBuilderTelemetrySent };
+}
+
+/** Test-only: force-flip the init-failed flag (smoke can simulate pi-tui
+ *  load failure without actually breaking the require graph). */
+export function __setVaultDialogBuilderInitFailedForTests(v: boolean): void {
+  vaultDialogBuilderInitFailed = v;
+}
+
+// Module-typed alias for which UI substrate produced a vault decision.
+// Mirror of VaultEvent.ui_path in vault-writer.ts; kept narrow so any
+// drift between authorizeVault* return shape and the audit field surfaces
+// at compile time.
+type VaultUiPath = "overlay" | "select" | "confirm" | "cached" | "none";
 const vaultBashRuns = new Map<string, VaultBashRunRecord>();
 
 function vaultReleaseChoiceReason(choice: string | undefined): string {
@@ -503,7 +539,12 @@ function safeAuditAppend(ev: Parameters<typeof appendVaultReadAudit>[1]): void {
   });
 }
 
-function auditReleaseDecision(op: VaultEventOp, scope: VaultScope, key: string, extras: { reason?: string } = {}): void {
+function auditReleaseDecision(
+  op: VaultEventOp,
+  scope: VaultScope,
+  key: string,
+  extras: { reason?: string; ui_path?: VaultUiPath } = {},
+): void {
   safeAuditAppend({
     ts: new Date().toISOString(),
     op,
@@ -511,6 +552,10 @@ function auditReleaseDecision(op: VaultEventOp, scope: VaultScope, key: string, 
     key,
     lane: "vault_release",
     ...(extras.reason ? { reason: extras.reason } : {}),
+    // ADR 0022 housekeeping batch A (g): omit when undefined so existing
+    // jsonl rows stay byte-identical when caller doesn’t supply ui_path
+    // (e.g. pre-authorize fast-fails like key_not_found).
+    ...(extras.ui_path ? { ui_path: extras.ui_path } : {}),
   });
 }
 
@@ -539,7 +584,11 @@ function auditBashInjectBlock(originalCommand: string, reason: string): void {
   });
 }
 
-function auditBashOutput(op: "bash_output_release" | "bash_output_withhold", record: VaultBashRunRecord): void {
+function auditBashOutput(
+  op: "bash_output_release" | "bash_output_withhold",
+  record: VaultBashRunRecord,
+  ui_path?: VaultUiPath,
+): void {
   if (record.releases.length === 0) return;
   const firstScope = record.releases[0]!.scope;
   safeAuditAppend({
@@ -549,6 +598,12 @@ function auditBashOutput(op: "bash_output_release" | "bash_output_withhold", rec
     lane: "bash_output",
     keys: record.releases.map((r) => authKey(r.scope, r.key)),
     command_preview: record.originalCommand ? truncateForPrompt(record.originalCommand, 240) : undefined,
+    // ADR 0022 housekeeping batch A (g): ui_path metadata. Omitted when
+    // caller does not supply (e.g. the fail-closed outer try/catch in
+    // tool_result handler that runs WITHOUT going through
+    // authorizeVaultBashOutput — we genuinely don't know which UI path
+    // would have been taken there).
+    ...(ui_path ? { ui_path } : {}),
   });
 }
 
@@ -568,14 +623,24 @@ function readReleaseDescription(scope: VaultScope, key: string): string | undefi
   catch { return undefined; }
 }
 
+// ADR 0022 housekeeping batch A (g) (2026-05-19): return type carries
+// ui_path so the caller can stamp the audit row with which substrate
+// produced the decision. Pre-fix callers wrote audit rows with no way
+// to distinguish PromptDialog overlay outcomes from ui.select fallback
+// outcomes, making `reason:"cancelled"` ambiguous in postmortems.
+type BashOutputAuthOutcome = {
+  decision: "release" | "withhold";
+  ui_path: VaultUiPath;
+};
+
 async function authorizeVaultBashOutput(
   ui: VaultReleaseUi | undefined,
   record: VaultBashRunRecord,
   signal: AbortSignal | undefined,
   hostCtx: unknown,
-): Promise<"release" | "withhold"> {
-  if (bashOutputSessionGrants.has(record.grantKey)) return "release";
-  if (!ui) return "withhold";
+): Promise<BashOutputAuthOutcome> {
+  if (bashOutputSessionGrants.has(record.grantKey)) return { decision: "release", ui_path: "cached" };
+  if (!ui) return { decision: "withhold", ui_path: "none" };
   const descriptions = collectReleaseDescriptions(record.releases);
   const englishTitle = formatBashAuthorizationTitle(record, descriptions);
   const title = await localizePrompt(englishTitle, hostCtx);
@@ -584,14 +649,19 @@ async function authorizeVaultBashOutput(
   ui.notify?.(title, "warning");
 
   const keyList = record.releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ");
-  const applyChoice = (choice: string | undefined): "release" | "withhold" => {
-    if (choice === "Yes once") return "release";
+  // ADR 0022 housekeeping batch A (g): ui_path is bound by the caller of
+  // applyChoice (overlay vs select), not by the choice itself.
+  const applyChoice = (
+    choice: string | undefined,
+    ui_path: VaultUiPath,
+  ): BashOutputAuthOutcome => {
+    if (choice === "Yes once") return { decision: "release", ui_path };
     if (choice === "Session") {
       bashOutputSessionGrants.add(record.grantKey);
-      return "release";
+      return { decision: "release", ui_path };
     }
     ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
-    return "withhold";
+    return { decision: "withhold", ui_path };
   };
 
   // ADR 0022 P3b: prefer PromptDialog overlay when available; fall
@@ -609,10 +679,10 @@ async function authorizeVaultBashOutput(
       signal,
       buildDialog: cachedVaultDialogBuilder,
     });
-    if (r.ok) return applyChoice(r.choice);
+    if (r.ok) return applyChoice(r.choice, "overlay");
     if (r.reason === "cancelled") {
       ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
-      return "withhold";
+      return { decision: "withhold", ui_path: "overlay" };
     }
     // dialog_error / ui_unavailable — best effort notify and fall through.
     if (r.reason === "dialog_error") {
@@ -631,16 +701,22 @@ async function authorizeVaultBashOutput(
     // authorizeVaultRelease which has NO outer envelope.
     try {
       const choice = await ui.select(title, [...VAULT_BASH_OUTPUT_AUTH_CHOICES], { signal });
-      return applyChoice(choice);
+      return applyChoice(choice, "select");
     } catch (err) {
       const message = (err as Error)?.message ?? String(err);
       ui.notify?.(`Withheld bash output: ui.select failed: ${message.slice(0, 200)}`, "warning");
-      return "withhold";
+      return { decision: "withhold", ui_path: "select" };
     }
   }
   ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
-  return "withhold";
+  return { decision: "withhold", ui_path: "none" };
 }
+
+// ADR 0022 housekeeping batch A (g) (2026-05-19): return type carries
+// ui_path. Mirrors BashOutputAuthOutcome above.
+type ReleaseAuthOutcome =
+  | { ok: true; ui_path: VaultUiPath }
+  | { ok: false; reason: string; ui_path: VaultUiPath };
 
 async function authorizeVaultRelease(
   ui: VaultReleaseUi | undefined,
@@ -649,11 +725,12 @@ async function authorizeVaultRelease(
   reason: string | undefined,
   signal: AbortSignal | undefined,
   hostCtx: unknown,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<ReleaseAuthOutcome> {
   const gate = authKey(scope, key);
-  if (releaseRememberDenies.has(gate)) return { ok: false, reason: "denied_remembered" };
-  if (releaseSessionGrants.has(gate)) return { ok: true };
-  if (!ui) return { ok: false, reason: "ui_unavailable" };
+  if (releaseRememberDenies.has(gate))
+    return { ok: false, reason: "denied_remembered", ui_path: "cached" };
+  if (releaseSessionGrants.has(gate)) return { ok: true, ui_path: "cached" };
+  if (!ui) return { ok: false, reason: "ui_unavailable", ui_path: "none" };
 
   const description = readReleaseDescription(scope, key);
   const englishTitle = formatReleaseAuthorizationTitle(scope, key, reason, description);
@@ -662,14 +739,19 @@ async function authorizeVaultRelease(
   // what is about to be released, even if the TUI select clips long titles.
   ui.notify?.(title, "warning");
 
-  const applyChoice = (choice: string | undefined): { ok: true } | { ok: false; reason: string } => {
-    if (choice === "Yes once") return { ok: true };
+  // ADR 0022 housekeeping batch A (g): ui_path bound by caller (overlay vs
+  // select vs confirm). applyChoice stays a pure choice-→-outcome mapping.
+  const applyChoice = (
+    choice: string | undefined,
+    ui_path: VaultUiPath,
+  ): ReleaseAuthOutcome => {
+    if (choice === "Yes once") return { ok: true, ui_path };
     if (choice === "Session") {
       releaseSessionGrants.add(gate);
-      return { ok: true };
+      return { ok: true, ui_path };
     }
     if (choice === "Deny + remember") releaseRememberDenies.add(gate);
-    return { ok: false, reason: vaultReleaseChoiceReason(choice) };
+    return { ok: false, reason: vaultReleaseChoiceReason(choice), ui_path };
   };
 
   // ADR 0022 P3b: prefer PromptDialog overlay when ctx.ui.custom is
@@ -687,8 +769,8 @@ async function authorizeVaultRelease(
       signal,
       buildDialog: cachedVaultDialogBuilder,
     });
-    if (r.ok) return applyChoice(r.choice);
-    if (r.reason === "cancelled") return { ok: false, reason: "cancelled" };
+    if (r.ok) return applyChoice(r.choice, "overlay");
+    if (r.reason === "cancelled") return { ok: false, reason: "cancelled", ui_path: "overlay" };
     // dialog_error / ui_unavailable — best effort notify and fall through.
     if (r.reason === "dialog_error") {
       ui.notify?.(`vault_release: dialog error, falling back to select: ${r.detail ?? "(no detail)"}`, "warning");
@@ -708,27 +790,29 @@ async function authorizeVaultRelease(
     // select item: put deny choices before explicit release choices.
     try {
       const choice = await ui.select(title, [...VAULT_RELEASE_AUTH_CHOICES], { signal });
-      return applyChoice(choice);
+      return applyChoice(choice, "select");
     } catch (err) {
       const message = (err as Error)?.message ?? String(err);
       ui.notify?.(`vault_release denied: ui.select failed: ${message.slice(0, 200)}`, "warning");
-      return { ok: false, reason: "ui_authorization_error" };
+      return { ok: false, reason: "ui_authorization_error", ui_path: "select" };
     }
   }
 
   if (typeof ui.confirm === "function") {
     try {
       const ok = await ui.confirm("Vault release authorization", title, { signal });
-      return ok ? { ok: true } : { ok: false, reason: "denied" };
+      return ok
+        ? { ok: true, ui_path: "confirm" }
+        : { ok: false, reason: "denied", ui_path: "confirm" };
     } catch (err) {
       const message = (err as Error)?.message ?? String(err);
       ui.notify?.(`vault_release denied: ui.confirm failed: ${message.slice(0, 200)}`, "warning");
-      return { ok: false, reason: "ui_authorization_error" };
+      return { ok: false, reason: "ui_authorization_error", ui_path: "confirm" };
     }
   }
 
   ui.notify?.("vault_release denied: no UI authorization method available", "warning");
-  return { ok: false, reason: "ui_authorization_unavailable" };
+  return { ok: false, reason: "ui_authorization_unavailable", ui_path: "none" };
 }
 
 // Export so smoke can invoke + INV-E identity asserts can run against
@@ -913,6 +997,51 @@ export default function activate(pi: ExtensionAPI): void {
         // Defensive: never let our sync trigger break the session.
         console.error(`[abrain] session_start auto-sync trigger threw:`, err);
       }
+      // ADR 0022 housekeeping batch A (b) (2026-05-19): vault dialog
+      // builder telemetry. If activate() detected that pi-tui /
+      // makeBuildDialog failed AND this session has a working ctx.ui.custom,
+      // overlay was expected but vault auth will silently fall back to
+      // ui.select. Emit ONE audit row + ui.notify warning so operators
+      // can detect the degradation (otherwise it shows up only as a
+      // subtle UX difference — line-based prompt vs. boxed overlay).
+      //
+      // Why session_start (not activate): activate() runs before any
+      // ctx exists; we need ctx.ui to know whether ui.custom is
+      // present. session_start is the first hook with ctx and runs
+      // once per session. We guard with vaultDialogBuilderTelemetrySent
+      // so refresh / fork / reactivate cycles don’t double-emit.
+      try {
+        const hasUiCustom = typeof (ctx as any)?.ui?.custom === "function";
+        if (
+          vaultDialogBuilderInitFailed &&
+          hasUiCustom &&
+          !vaultDialogBuilderTelemetrySent
+        ) {
+          vaultDialogBuilderTelemetrySent = true;
+          safeAuditAppend({
+            ts: new Date().toISOString(),
+            op: "startup_telemetry",
+            scope: "global",
+            lane: "vault_substrate",
+            reason: "dialog_builder_unavailable",
+            ui_path: "select",
+          });
+          try {
+            (ctx as any)?.ui?.notify?.(
+              "vault: PromptDialog overlay failed to load (pi-tui missing or makeBuildDialog threw); " +
+                "vault authorization will use ui.select fallback. See vault-events.jsonl op=startup_telemetry.",
+              "warning",
+            );
+          } catch { /* notify is best-effort */ }
+        }
+      } catch (err) {
+        // Telemetry failures must never break the session.
+        try {
+          process.stderr.write(
+            `[abrain] vault dialog builder telemetry threw: ${(err as Error)?.message ?? err}\n`,
+          );
+        } catch {}
+      }
     });
 
     // Track the user's current conversation language by sampling recent user
@@ -996,6 +1125,13 @@ export default function activate(pi: ExtensionAPI): void {
         // the command manually to get their output; a leaked secret is
         // irreversible. The vault operator can inspect vault-events.jsonl
         // to diagnose the authorization failure.
+        //
+        // ADR 0022 housekeeping batch A (g): this withhold happened
+        // BEFORE / OUTSIDE authorizeVaultBashOutput (the outer try threw
+        // somewhere in redaction / authorize / record bookkeeping), so we
+        // genuinely don't know which UI path would have been taken. Leave
+        // ui_path unset rather than guessing — the absence of ui_path on
+        // this row is itself a diagnostic signal ("never made it to UI").
         try {
           const record = vaultBashRuns.get(event.toolCallId);
           if (record) {
@@ -1129,13 +1265,16 @@ export default function activate(pi: ExtensionAPI): void {
 
         const auth = await authorizeVaultRelease(ctx.ui, scope, key, reason, signal, ctx);
         if (!auth.ok) {
-          auditReleaseDecision("release_denied", scope, key, { reason: auth.reason });
+          // ADR 0022 housekeeping batch A (g): stamp the audit row with
+          // the ui_path the deny came from. Lets ops distinguish a
+          // cancelled overlay (Esc / abort) from a cancelled ui.select.
+          auditReleaseDecision("release_denied", scope, key, { reason: auth.reason, ui_path: auth.ui_path });
           return toolJson({ ok: false, key, scope, denied: true, reason: auth.reason });
         }
 
         try {
           const released = await releaseSecret({ abrainHome: ABRAIN_HOME, scope, key });
-          auditReleaseDecision("release", scope, key);
+          auditReleaseDecision("release", scope, key, { ui_path: auth.ui_path });
           return toolJson({
             ok: true,
             key,
@@ -1145,7 +1284,12 @@ export default function activate(pi: ExtensionAPI): void {
             warning: "Plaintext is now in model context. Redaction is best-effort and does not cover encoded/transformed values.",
           });
         } catch (err: any) {
-          auditReleaseDecision("release_blocked", scope, key, { reason: `release_error: ${err?.message ?? "unknown"}` });
+          // release_error happens AFTER authorization, so the ui_path the
+          // user took to grant is still meaningful for postmortems.
+          auditReleaseDecision("release_blocked", scope, key, {
+            reason: `release_error: ${err?.message ?? "unknown"}`,
+            ui_path: auth.ui_path,
+          });
           return toolJson({ ok: false, key, scope, error: err?.message ?? String(err) });
         }
       },
@@ -1195,6 +1339,11 @@ export default function activate(pi: ExtensionAPI): void {
     } catch (err) {
       // pi-tui not available in this process — OK, prompt_user will
       // gracefully reject with ui-unavailable when called.
+      // ADR 0022 housekeeping batch A (b) (2026-05-19): record this
+      // failure so the first session_start with a real ctx.ui.custom
+      // can emit ONE startup_telemetry row + ui.notify warning. We
+      // can't emit here because activate() doesn't see ctx.ui yet.
+      vaultDialogBuilderInitFailed = true;
       void err;
     }
 
@@ -1204,8 +1353,27 @@ export default function activate(pi: ExtensionAPI): void {
     // synchronous; the cache is written here BEFORE the first
     // vault_release tool invocation can run (tool callbacks fire on
     // user actions which happen after activate returns).
+    //
+    // ADR 0022 housekeeping batch A (b) (2026-05-19): makeBuildDialog
+    // can also throw (e.g. pitui surface present but a member is
+    // undefined). Wrap so the failure is detected + telemetrized
+    // instead of crashing extension activation.
     if (pitui) {
-      cachedVaultDialogBuilder = promptDialogModule.makeBuildDialog(pitui);
+      try {
+        cachedVaultDialogBuilder = promptDialogModule.makeBuildDialog(pitui);
+      } catch (err) {
+        cachedVaultDialogBuilder = null;
+        vaultDialogBuilderInitFailed = true;
+        try {
+          process.stderr.write(
+            `[abrain] makeBuildDialog failed during activate(); vault auth will fall back to ui.select: ${(err as Error)?.message ?? err}\n`,
+          );
+        } catch {}
+      }
+    } else {
+      // pitui never assigned — catch above also set the flag, but be
+      // explicit so the invariant is local to this block.
+      vaultDialogBuilderInitFailed = true;
     }
 
     // Audit sink: feeds prompt_user events into VAULT_EVENTS with

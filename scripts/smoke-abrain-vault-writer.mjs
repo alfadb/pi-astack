@@ -235,6 +235,86 @@ await check("appendVaultReadAudit: read-path ops land in vault-events.jsonl with
   }
 });
 
+// ── ADR 0022 housekeeping batch A (g) (2026-05-19): ui_path INV-D metadata
+//
+// The VaultEvent schema gained an optional `ui_path` field so audit rows
+// can carry which UI substrate produced a decision (overlay / select /
+// confirm / cached / none). The field is OPTIONAL — callers that don’t
+// know which path produced the row (e.g. pre-authorize fast-fails,
+// outer-envelope withholds in tool_result catch) MUST be able to write a
+// row WITHOUT the field, and the row MUST round-trip.
+//
+// Smoke verifies the schema-level behavior here (no stage-index needed).
+// The end-to-end “caller·stamps·correct·path” wiring lives in
+// scripts/smoke-abrain-vault-grant-isolation.mjs (Batch A subgroup 2).
+// Negative-test: comment out the ui_path spread in vault-writer.ts to
+// verify these assertions fail (manual check during edit).
+
+await check("INV-D (batch A g): VaultEvent.ui_path round-trips through jsonl write", async () => {
+  const { home } = freshAbrainHome();
+  fs.mkdirSync(path.join(home, ".state"), { recursive: true });
+  // All five legal ui_path values, plus one row with ui_path absent.
+  const cases = [
+    { op: "release",         lane: "vault_release", ui_path: "overlay" },
+    { op: "release_denied",  lane: "vault_release", ui_path: "select", reason: "cancelled" },
+    { op: "release_denied",  lane: "vault_release", ui_path: "confirm", reason: "denied" },
+    { op: "release",         lane: "vault_release", ui_path: "cached" },
+    { op: "release_denied",  lane: "vault_release", ui_path: "none", reason: "ui_authorization_unavailable" },
+    { op: "release_blocked", lane: "vault_release", reason: "key_not_found" }, // ui_path absent
+  ];
+  for (const c of cases) {
+    await vw.appendVaultReadAudit(home, {
+      ts: new Date().toISOString(),
+      scope: "global",
+      key: "github-token",
+      ...c,
+    });
+  }
+  const rows = fs.readFileSync(path.join(home, ".state", "vault-events.jsonl"), "utf8")
+    .split("\n").filter(Boolean).map(JSON.parse);
+  if (rows.length !== cases.length)
+    throw new Error(`expected ${cases.length} rows, got ${rows.length}`);
+  for (let i = 0; i < cases.length - 1; i++) {
+    if (rows[i].ui_path !== cases[i].ui_path)
+      throw new Error(`row ${i}: expected ui_path=${cases[i].ui_path}, got ${rows[i].ui_path}`);
+  }
+  // Last row has no ui_path — must NOT appear in jsonl (no `undefined` leak).
+  if ("ui_path" in rows[rows.length - 1]) {
+    throw new Error(`row ${rows.length - 1}: ui_path should be absent, got ${JSON.stringify(rows[rows.length - 1])}`);
+  }
+});
+
+await check("INV-D (batch A b): startup_telemetry op writes lane=vault_substrate without plaintext", async () => {
+  const { home } = freshAbrainHome();
+  fs.mkdirSync(path.join(home, ".state"), { recursive: true });
+  // Mirror what extensions/abrain/index.ts emits on session_start when
+  // vaultDialogBuilderInitFailed && ctx.ui.custom is present.
+  await vw.appendVaultReadAudit(home, {
+    ts: new Date().toISOString(),
+    op: "startup_telemetry",
+    scope: "global",
+    lane: "vault_substrate",
+    reason: "dialog_builder_unavailable",
+    ui_path: "select",
+  });
+  const rows = fs.readFileSync(path.join(home, ".state", "vault-events.jsonl"), "utf8")
+    .split("\n").filter(Boolean).map(JSON.parse);
+  if (rows.length !== 1) throw new Error(`expected 1 telemetry row, got ${rows.length}`);
+  const r = rows[0];
+  if (r.op !== "startup_telemetry") throw new Error(`op: ${r.op}`);
+  if (r.lane !== "vault_substrate") throw new Error(`lane: ${r.lane}`);
+  if (r.ui_path !== "select") throw new Error(`ui_path: ${r.ui_path}`);
+  if (r.reason !== "dialog_builder_unavailable") throw new Error(`reason: ${r.reason}`);
+  // INV: lane="vault_substrate" so existing tools that grep on
+  // lane="vault_release" / "bash_*" / "prompt_user" ignore it.
+  // Sanity-check by enumerating the union of known lanes.
+  const KNOWN_VAULT_LANES = new Set([
+    "vault_release", "bash_inject", "bash_output", "prompt_user", "vault_substrate",
+  ]);
+  if (!KNOWN_VAULT_LANES.has(r.lane))
+    throw new Error(`lane not in known set: ${r.lane}`);
+});
+
 // ── 5. listSecrets ──────────────────────────────────────────────
 
 await check("listSecrets: returns metadata for all written keys, no decrypt", async () => {

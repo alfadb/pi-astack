@@ -155,7 +155,7 @@ smoke:paths
 smoke:vault-subpi-isolation
 smoke:abrain
 smoke:abrain-bootstrap
-smoke:abrain-vault-writer
+smoke:abrain-vault-writer              # 2026-05-19 batch A (g): ui_path + startup_telemetry schema (+2 assertion, 28→30)
 smoke:abrain-vault-reader              # ADR 0022 P3b + post-audit: 6 → 21 assertion
 smoke:abrain-vault-bash
 smoke:abrain-vault-identity

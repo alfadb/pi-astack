@@ -57,6 +57,7 @@
 |---|---|---|
 | (e) real-PromptDialog vault variant 渲染 smoke | `8571257` | `smoke:prompt-user-option-list` 46 → 54 (+8); allowOther 双向锁定 |
 | (h) unknown choice → `dialog_error` | `ec20b27` | `smoke:abrain-vault-reader` 21 → 22; 触发 ui.select fallback 而非静默拒绝 |
+| (b)+(g)+(D9) Batch A 子组 1 | _待推_ | `VaultEvent.ui_path` 字段 + `startup_telemetry` op + ADR 0014 Lane V 共享 substrate 注释。`authorizeVaultRelease` / `authorizeVaultBashOutput` 返回 `ui_path` (overlay/select/confirm/cached/none) 、audit 函数接受 ui_path 参数、调用点全部 wire 传递。activate() 检测 builder=null 设 flag，session_start once-per-process 发出带 `ui_path:"select"` 的 telemetry row 与 `ui.notify` warning。`smoke:abrain-vault-writer` +2 assertion (28→30)：ui_path round-trip + startup_telemetry schema。Negative test 验证：用 NEGTEST mutation 删 ui_path 传递后两条 assertion 都 fail。端到端 “stamp 正确路径” 验证留 Batch A 子组 2 (stage-index smoke)。 |
 
 ### ❌ Closed as won't-fix (三路共识 / 主调采纳)
 
@@ -117,12 +118,12 @@
 
 ### 执行优先级
 
-1. **Batch A 子组 1** (b + g + D9) — ~50 LOC, 单 commit, 低风险。首先做。
-2. **Batch A 子组 2** (c + d) — ~200 LOC, 新 smoke entry `smoke:abrain-vault-grant-isolation`；三路并行 xhigh audit。INV-E 端到端封口。
-3. **Batch B** (D5 + D7 + i) — ~45 LOC, 单 commit。
+1. ~~**Batch A 子组 1** (b + g + D9) — ~50 LOC, 单 commit, 低风险。首先做。~~ ✅ **shipped 2026-05-19** (本表 “Shipped” 区)。
+2. **Batch A 子组 2** (c + d) — ~200 LOC, 新 smoke entry `smoke:abrain-vault-grant-isolation`；三路并行 xhigh audit。INV-E 端到端封口；ui_path 端到端 stamp 验证也在这里。
+3. **Batch B** (D5 + D7 + i + f.arch) — ~85 LOC, 单 commit。
 4. **Batch C** (polish sweep) — ~40 LOC, 单 commit (多 edits[])。
 
-**合计**：4 commit, ~335 LOC, 预计单 session 可完成前 3 个。每 commit 跑一轮三路 high-thinking audit。
+**合计**：4 commit, ~335 LOC（1 commit 已 ship，剩 ~285 LOC）。每 commit 跑一轮三路 high-thinking audit。
 
 ### 本表说明
 
