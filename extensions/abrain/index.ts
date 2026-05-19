@@ -1104,15 +1104,24 @@ export default function activate(pi: ExtensionAPI): void {
         vaultBashRuns.delete(event.toolCallId);
         try { fs.rmSync(record.envFile, { force: true }); } catch {}
 
-        const decision = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal, ctx);
-        if (decision !== "release") {
-          auditBashOutput("bash_output_withhold", record);
+        // ADR 0022 housekeeping batch A subgroup 1 post-audit fix
+        // (2026-05-19, OPUS-4-7 + DEEPSEEK-V4-pro xhigh consensus P0):
+        // authorizeVaultBashOutput now returns { decision, ui_path }
+        // (changed earlier in this commit for batch A (g) wiring).
+        // The original `decision !== "release"` comparison was object-vs-string,
+        // ALWAYS true — every vault bash output was silently withheld,
+        // and every `bash_output_release` audit row was misclassified.
+        // Renamed local to `outcome` so the field name `outcome.decision`
+        // visually forces destructure thinking (P1-4 reviewer note).
+        const outcome = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal, ctx);
+        if (outcome.decision !== "release") {
+          auditBashOutput("bash_output_withhold", record, outcome.ui_path);
           return {
             content: withheldVaultBashContent(record),
             details: { ...(event.details ?? {}), vault: { outputWithheld: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
           };
         }
-        auditBashOutput("bash_output_release", record);
+        auditBashOutput("bash_output_release", record, outcome.ui_path);
         return {
           content: redactVaultBashContent(event.content, record.releases),
           details: { ...(event.details ?? {}), vault: { outputReleased: true, redacted: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
@@ -1361,6 +1370,14 @@ export default function activate(pi: ExtensionAPI): void {
     if (pitui) {
       try {
         cachedVaultDialogBuilder = promptDialogModule.makeBuildDialog(pitui);
+        // ADR 0022 housekeeping batch A subgroup 1 post-audit fix
+        // (2026-05-19, OPUS-4-7 xhigh P1-1): clear the flag on success
+        // so an extension hot-reload / deactivate-reactivate cycle
+        // where pi-tui was unavailable last time but is available now
+        // does NOT emit a false telemetry row on the next session_start.
+        // The flag is the source of truth for "is overlay broken right
+        // now"; after a successful re-init, the truth is "no".
+        vaultDialogBuilderInitFailed = false;
       } catch (err) {
         cachedVaultDialogBuilder = null;
         vaultDialogBuilderInitFailed = true;

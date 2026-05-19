@@ -225,6 +225,77 @@ await check("authorization choice order is deny-first for bash output", () => {
   if (bash.VAULT_BASH_OUTPUT_AUTH_CHOICES[0] !== "No") throw new Error(`first choice is ${bash.VAULT_BASH_OUTPUT_AUTH_CHOICES[0]}`);
 });
 
+// ── ADR 0022 housekeeping batch A subgroup 1 post-audit (2026-05-19) ──
+//
+// OPUS-4-7 + DEEPSEEK-V4-pro xhigh consensus P0 caught a regression in
+// the original batch A subgroup 1 ship: `authorizeVaultBashOutput`
+// returns { decision, ui_path } now, but the tool_result handler
+// initially still wrote `if (decision !== "release")` against the
+// wrapper object — always true, every bash output silently withheld.
+//
+// We have no stage-index smoke yet (planned in Batch A subgroup 2:
+// `smoke:abrain-vault-grant-isolation`). In the meantime grep-anchors
+// in extensions/abrain/index.ts lock the post-fix contract so a future
+// edit that reverts the wire-up fails this smoke deterministically.
+//
+// Negative-test verified manually: editing `outcome.decision` back to
+// `decision` (the bug) or removing `outcome.ui_path` from either audit
+// call makes the matching anchor fail.
+await check("post-audit P0 fix anchors: tool_result handler wires outcome.decision + outcome.ui_path", () => {
+  const indexSrc = fs.readFileSync(path.join(repoRoot, "extensions", "abrain", "index.ts"), "utf8");
+  const anchors = [
+    // (a) The fix renamed the local to `outcome` AND destructured
+    //     `.decision` for the comparison. Both must appear together.
+    "const outcome = await authorizeVaultBashOutput(",
+    'if (outcome.decision !== "release") {',
+    // (b) Both audit calls MUST pass outcome.ui_path — this is the
+    //     payoff of batch A (g) on the bash_output lane. Without
+    //     these, `ui_path` is missing from every bash_output audit row
+    //     and (g) is only half-shipped (vault_release lane only).
+    'auditBashOutput("bash_output_withhold", record, outcome.ui_path)',
+    'auditBashOutput("bash_output_release", record, outcome.ui_path)',
+    // (c) The buggy pre-fix patterns MUST NOT reappear. We grep them
+    //     out to catch a regression that re-introduces the object-vs-string
+    //     comparison.
+  ];
+  for (const needle of anchors) {
+    if (!indexSrc.includes(needle)) {
+      throw new Error(
+        `regression: post-audit P0-fix anchor missing from index.ts:\n  needle: ${JSON.stringify(needle)}\n  ` +
+          "This anchor locks the fix from 2026-05-19 OPUS+DEEPSEEK xhigh review. " +
+          "If the wire-up between authorizeVaultBashOutput's outcome and the audit " +
+          "call was intentionally restructured, update both the code and the anchor list.",
+      );
+    }
+  }
+  // Negative anchors: the pre-fix buggy patterns MUST be gone.
+  //
+  // NOTE: we do NOT grep the bare `auditBashOutput(..., record);` /
+  // `auditBashOutput(..., record);` 2-arg calls in isolation, because
+  // ONE legitimate 2-arg call survives in the outer-envelope catch
+  // block: when the outer try around authorizeVaultBashOutput throws,
+  // we genuinely don't know which UI path would have been taken, so
+  // we deliberately omit ui_path (the absence itself is the
+  // diagnostic signal). OPUS-4-7 P1-5 (2026-05-19) verified this
+  // omission is intentional. Anchor on the unambiguous bug signature
+  // instead: `if (decision !== "release")` is ONLY emitted by the
+  // pre-fix object-vs-string compare.
+  const buggy = [
+    'if (decision !== "release")',
+  ];
+  for (const needle of buggy) {
+    if (indexSrc.includes(needle)) {
+      throw new Error(
+        `regression: pre-fix buggy pattern reappeared in index.ts:\n  needle: ${JSON.stringify(needle)}\n  ` +
+          "This is the exact pattern the 2026-05-19 post-audit P0 fix removed. " +
+          "It compared the BashOutputAuthOutcome wrapper object against the literal " +
+          'string "release", which is always true — silently withholding every vault ' +
+          "bash output. Restore the outcome.decision destructure.",
+      );
+    }
+  }
+});
+
 console.log("");
 if (failures.length === 0) {
   console.log(`all ok — vault-backed bash helper holds (${total} assertions).`);
