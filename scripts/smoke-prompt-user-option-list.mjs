@@ -544,17 +544,34 @@ check("R7.4: MaskedInput wipe() also clears pasteBuffer", () => {
 
 // ── Wizard: multi-question Enter advance + collect on submit ────────
 
-function buildWizard(questions) {
+function buildWizard(questions, variant = "question") {
   let resolved = null;
   const root = buildPromptDialog({
     params: { reason: "test", questions, timeoutSec: 30 },
-    variant: "question",
+    variant,
     tui: { requestRender: () => {} },
     theme: fullTheme,
     pitui: pituiBag,
     onDone: (r) => { resolved = r; },
   });
   return { root, getResolved: () => resolved };
+}
+
+// Render-only helper for static-output assertions (vault variant tests
+// below don't need the resolved promise — they read the rendered lines
+// to verify allowOther / titlePrefix / hint / progress wiring).
+function renderRoot(questions, variant, reason = "test reason") {
+  let resolved = null;
+  const root = buildPromptDialog({
+    params: { reason, questions, timeoutSec: 30 },
+    variant,
+    tui: { requestRender: () => {} },
+    theme: fullTheme,
+    pitui: pituiBag,
+    onDone: (r) => { resolved = r; },
+  });
+  const lines = root.render(80);
+  return { root, lines, joined: lines.join("\n"), getResolved: () => resolved };
 }
 
 check("Wizard: single question Enter on last → submit with collect", () => {
@@ -926,6 +943,181 @@ check("R8 P1#2 integration: empty intermediate ENTER no-ops, real fill submits",
   const r = getResolved();
   if (!r || r.answers.q1?.[0] !== "a" || r.answers.q2?.[0] !== "b") {
     throw new Error(`expected q1=a q2=b, got ${JSON.stringify(r?.answers)}`);
+  }
+});
+
+// ── ADR 0022 P3b: real-PromptDialog vault variant render smoke ──────
+//
+// Roadmap (Architecture debt → P3b post-audit P2 backlog → (e) Test gap):
+//   '真实 PromptDialog vault variant 渲染 smoke¨现在 P3b smoke 用 fake
+//    buildDialog,如果 `allowOther` flag 退化虚假仍绿'.
+//
+// `smoke-abrain-vault-reader.mjs` exercises the dialog WIRING (lock,
+// teardown, signal handling, choice mapping) but feeds it a fake
+// buildDialog that never enters PromptDialog.ts. If `allowOther =
+// (variant === "question")` regressed to `allowOther = true`, the LLM
+// could inject an Other-row free-form text and the vault path would
+// silently accept arbitrary strings as choices — the existing smoke
+// would still be green because no real dialog was rendered.
+//
+// These assertions load REAL buildPromptDialog from PromptDialog.ts
+// (already staged at top of this file) and verify the rendered output
+// directly: variant-specific titlePrefix / accentColor / hint text /
+// progress-marker suppression / Other-row suppression.
+
+check("P3b render: vault_release variant → no Other (specify) in rendered output", () => {
+  const { joined } = renderRoot(
+    [{
+      id: "q", header: "Release github-token?", question: "Authorize plaintext release?",
+      type: "single",
+      options: [{ label: "No" }, { label: "Deny + remember" }, { label: "Yes once" }, { label: "Session" }],
+    }],
+    "vault_release",
+  );
+  if (/Other \(specify\)/i.test(joined)) {
+    throw new Error(`vault_release variant LEAKED 'Other (specify)' row — allowOther flag regressed:\n${joined}`);
+  }
+  // Sanity: the 4 preset labels MUST be visible (otherwise the assertion
+  // above would be vacuously true on an empty render).
+  for (const label of ["No", "Deny + remember", "Yes once", "Session"]) {
+    if (!joined.includes(label)) throw new Error(`render missing label '${label}':\n${joined}`);
+  }
+});
+
+check("P3b render: vault_release variant → title chip says 'Vault Release', not 'Question'", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single", options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+  );
+  if (!/Vault Release/.test(joined)) {
+    throw new Error(`expected 'Vault Release' title chip:\n${joined}`);
+  }
+  if (/\*\*Question\*\*/.test(joined)) {
+    throw new Error(`vault_release leaked 'Question' title chip:\n${joined}`);
+  }
+});
+
+check("P3b render: vault_release variant → hint shows 'enter authorize' + 'esc deny'", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single", options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+  );
+  if (!/enter authorize/.test(joined)) {
+    throw new Error(`expected 'enter authorize' hint:\n${joined}`);
+  }
+  if (!/esc deny/.test(joined)) {
+    throw new Error(`expected 'esc deny' hint:\n${joined}`);
+  }
+  // Negative: question-variant hints MUST NOT leak.
+  if (/enter submit/.test(joined)) {
+    throw new Error(`vault_release leaked 'enter submit' hint (question variant):\n${joined}`);
+  }
+  if (/esc cancel/.test(joined)) {
+    throw new Error(`vault_release leaked 'esc cancel' hint (question variant):\n${joined}`);
+  }
+});
+
+check("P3b render: vault_release single-question → NO (N/M) progress marker", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "Release", question: "q?", type: "single", options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+  );
+  // PromptDialog suppresses (currentIdx+1/total) for vault variants.
+  if (/\(\s*\d+\s*\/\s*\d+\s*\)/.test(joined)) {
+    throw new Error(`vault_release leaked progress marker '(N/M)':\n${joined}`);
+  }
+});
+
+check("P3b render: vault_release variant uses WARNING accent (not ACCENT)", () => {
+  // Mock fullTheme stamps color name into the rendered string:
+  // WARNING for vault variants vs ACCENT for question. Verify the
+  // variant boundary is observable in rendered output — if accentColor
+  // wiring regresses to 'accent', vault dialogs would render in the
+  // wrong (more permissive-looking) color.
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single", options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+  );
+  if (!joined.includes("[WARNING]")) {
+    throw new Error(`vault_release should paint WARNING color tokens; none found:\n${joined}`);
+  }
+  // Negative: title chip uses the variant's accent. If ACCENT leaks
+  // into vault output, accentColor wiring regressed.
+  if (/\[ACCENT\]\*\*Vault Release\*\*\[\/ACCENT\]/.test(joined)) {
+    throw new Error(`vault_release title painted with ACCENT (should be WARNING):\n${joined}`);
+  }
+});
+
+check("P3b render: bash_output_release variant → same Other-absent + 'esc deny'", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "Release bash output?", question: "Send output to LLM?", type: "single",
+      options: [{ label: "No" }, { label: "Yes once" }, { label: "Session" }] }],
+    "bash_output_release",
+  );
+  if (/Other \(specify\)/i.test(joined)) {
+    throw new Error(`bash_output_release leaked Other row:\n${joined}`);
+  }
+  if (!/esc deny/.test(joined)) throw new Error(`missing 'esc deny' hint:\n${joined}`);
+  if (!/enter authorize/.test(joined)) throw new Error(`missing 'enter authorize' hint:\n${joined}`);
+  if (!/Vault Bash Output/.test(joined)) {
+    throw new Error(`expected 'Vault Bash Output' title chip:\n${joined}`);
+  }
+  // bash_output is also single-question → no progress marker.
+  if (/\(\s*\d+\s*\/\s*\d+\s*\)/.test(joined)) {
+    throw new Error(`bash_output_release leaked progress marker:\n${joined}`);
+  }
+});
+
+check("P3b render: question variant baseline → Other row + 'esc cancel' present", () => {
+  // Regression guard: if someone tightens allowOther / hint wiring
+  // for ALL variants by accident, the question-variant must still
+  // keep its Other affordance and the user-cancel hint.
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single", options: [{ label: "A" }, { label: "B" }] }],
+    "question",
+  );
+  if (!/Other \(specify\)/i.test(joined)) {
+    throw new Error(`question variant should ALWAYS show 'Other (specify)' row — regression:\n${joined}`);
+  }
+  if (!/esc cancel/.test(joined)) {
+    throw new Error(`question variant should show 'esc cancel' (not 'esc deny'):\n${joined}`);
+  }
+  if (/esc deny/.test(joined)) {
+    throw new Error(`question variant leaked 'esc deny' (vault hint):\n${joined}`);
+  }
+});
+
+check("P3b render: vault_release with label='Other' → plain option, NOT OTHER_VALUE sentinel", () => {
+  // Defense in depth: even if a caller (e.g. a future vault choice
+  // table) supplies the literal string 'Other' as a label, the dialog
+  // MUST NOT wire it to the free-form OTHER_VALUE sentinel. Otherwise
+  // a bug elsewhere could let an attacker-shaped Other-row act as a
+  // text-input bypass on the vault path.
+  //
+  // Observable check 1: rendered output should NOT contain the literal
+  //   'Other (specify)' label (only added for the OTHER_VALUE sentinel,
+  //   never for user-supplied 'Other' labels).
+  // Observable check 2: selecting the row whose label === 'Other' and
+  //   pressing Enter MUST resolve with answers=['Other'], not with
+  //   answers=[] (empty Other text) or answers=['__pu_other__'].
+  const { root, getResolved, joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "No" }, { label: "Other" }] }],
+    "vault_release",
+  );
+  if (/Other \(specify\)/.test(joined)) {
+    throw new Error(`vault_release rendered Other-sentinel even though caller passed 'Other' as a plain label:\n${joined}`);
+  }
+  // Move to the 'Other' row and Enter — must collect ['Other'] as a
+  // normal value, NOT trigger OTHER text-input semantics.
+  root.handleInput(ARROW_DOWN);
+  root.handleInput(ENTER);
+  const r = getResolved();
+  if (!r || r.outcome !== "submit") {
+    throw new Error(`expected submit on 'Other' label, got ${r?.outcome}`);
+  }
+  if (r.answers.q[0] !== "Other") {
+    throw new Error(`expected literal 'Other' value, got ${JSON.stringify(r.answers.q)} — OTHER_VALUE sentinel leaked into vault variant`);
   }
 });
 
