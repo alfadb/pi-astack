@@ -142,7 +142,7 @@ Backend 架构按 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md)�
 
 ## 8. 当前测试入口
 
-`package.json#scripts` 是 smoke 列表 live truth。当前 **24 个**（2026-05-17 ADR 0022 P1+P2+P3a +5；2026-05-18 R7 OptionList +1；2026-05-19 dispatch-output-format +1），P3b + post-audit fix assertion 在 `smoke:abrain-vault-reader` 内 +15（6 → 21）：
+`package.json#scripts` 是 smoke 列表 live truth。当前 **25 个**（2026-05-17 ADR 0022 P1+P2+P3a +5；2026-05-18 R7 OptionList +1；2026-05-19 dispatch-output-format +1；2026-05-19 batch A 子组 2 grant-isolation +1），P3b + post-audit fix assertion 在 `smoke:abrain-vault-reader` 内 +15（6 → 21）：
 
 ```text
 smoke:memory
@@ -157,6 +157,7 @@ smoke:abrain
 smoke:abrain-bootstrap
 smoke:abrain-vault-writer              # 2026-05-19 batch A (g): ui_path + startup_telemetry schema (+2 assertion, 28→30)
 smoke:abrain-vault-reader              # ADR 0022 P3b + post-audit: 6 → 21 assertion
+smoke:abrain-vault-grant-isolation     # 2026-05-19 batch A 子组 2: stage-index E2E (17 assertion)
 smoke:abrain-vault-bash
 smoke:abrain-vault-identity
 smoke:abrain-git-sync
@@ -171,7 +172,7 @@ smoke:prompt-user-option-list          # ADR 0022 R7 OptionList
 smoke:compaction-tuner-prompt-user     # ADR 0022 P3a
 ```
 
-24/24 全绿为 ship 门槛。
+25/25 全绿为 ship 门槛。
 
 ## 9. 历史文档处理原则
 
