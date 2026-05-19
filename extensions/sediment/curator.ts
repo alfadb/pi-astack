@@ -83,6 +83,27 @@ function asNumber(value: unknown): number | undefined {
 }
 
 /**
+ * Typed reject error for curator policy violations. Carries a stable
+ * machine-readable `code` so the outer catch in curateProjectDraft can
+ * surface it as the audit-row `reason` (preserving the grep-ability the
+ * pre-fix `entry_not_found` row had — see 2026-05-19 round-2 review,
+ * Opus P1-2 + gpt-5.5 P2 "curator_error conflates failure modes").
+ *
+ * Anything thrown without this class still falls through to the generic
+ * `curator_error` bucket (JSON parse failures, callCuratorModel errors,
+ * malformed candidate, etc.), so true model/transport errors remain
+ * distinct from policy rejects.
+ */
+export class CuratorRejectError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "CuratorRejectError";
+    this.code = code;
+  }
+}
+
+/**
  * Heuristic detector for workflow-lane entries. Workflow entries live in
  * `~/.abrain/[projects/<id>/]workflows/<slug>.md`. They are produced and
  * mutated by a SEPARATE writer (`writeAbrainWorkflow`, B1) and the regular
@@ -119,8 +140,29 @@ export function isWorkflowNeighborEntry(entry: MemoryEntry): boolean {
     : "";
   if (fmScope === "workflow") return true;
   if (entry.legacyKind === "workflow") return true;
-  const segs = entry.sourcePath.split(/[\\/]+/);
-  if (segs.includes("workflows")) return true;
+  // 2026-05-19 round-2 review (Opus P2-1): scope the path probe to the
+  // entry's storeRoot so an ancestor directory literally named
+  // "workflows" (e.g. $HOME=/var/workflows/alice or a worktree clone
+  // placed under a path with that segment) cannot falsely tag every
+  // entry as workflow-lane. The writer-side invariant (writer.ts:347-360,
+  // findProjectEntryFile skips `entry.name === "workflows"` during the
+  // store-rooted recursion) is exactly "first relative segment under
+  // storeRoot is `workflows`". Mirror that invariant here.
+  //
+  // Fallback when storeRoot is missing (shouldn't happen for parsed
+  // entries — parser.ts always sets it — but mock entries in tests
+  // and any future caller-constructed MemoryEntry could omit it):
+  // refuse to detect via path. Frontmatter signals 1+2 are still active.
+  if (entry.storeRoot) {
+    const rel = path.relative(entry.storeRoot, entry.sourcePath);
+    // path.relative returns an absolute path or ".."-prefixed string
+    // when sourcePath escapes storeRoot — reject those rather than
+    // matching a `workflows` segment outside the store boundary.
+    if (!rel.startsWith("..") && !path.isAbsolute(rel)) {
+      const firstSeg = rel.split(/[\\/]+/)[0];
+      if (firstSeg === "workflows") return true;
+    }
+  }
   return false;
 }
 
@@ -166,16 +208,30 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
   function validateScope(slug: string): void {
     const neighborScope = neighborScopes.get(slug);
     if (neighborScope === "workflow") {
-      throw new Error(`curator op "${op}" targets workflow-lane neighbor "${slug}" — workflow entries are read-only references in the sediment auto-write path (they live in ~/.abrain/[projects/<id>/]workflows/ and are mutated only by writeAbrainWorkflow). Use op=skip (when the workflow already covers the candidate's claim) or op=create with derives_from:["${slug}"] (when the candidate is a separate downstream observation building on the workflow).`);
+      // 2026-05-19 round-2 review (Opus P1-2 + gpt-5.5 P2): use a typed
+      // reject so curateProjectDraft can surface a stable `reason` code
+      // distinct from the generic `curator_error` bucket. Dashboard
+      // grepping for workflow-lane rejects no longer has to scan free
+      // text inside `rationale`.
+      throw new CuratorRejectError(
+        "workflow_lane_read_only",
+        `curator op "${op}" targets workflow-lane neighbor "${slug}" — workflow entries are read-only references in the sediment auto-write path (they live in ~/.abrain/[projects/<id>/]workflows/ and are mutated only by writeAbrainWorkflow). Use op=skip (when the workflow already covers the candidate's claim) or op=create with derives_from:["${slug}"] (when the candidate is a separate downstream observation building on the workflow).`,
+      );
     }
     if (scope === "world" && neighborScope !== "world") {
-      throw new Error(`curator set scope:world on project-scope neighbor "${slug}" — use project scope (omit scope) instead`);
+      throw new CuratorRejectError(
+        "scope_mismatch_world_on_non_world_neighbor",
+        `curator set scope:world on project-scope neighbor "${slug}" — use project scope (omit scope) instead`,
+      );
     }
     // curator omitted scope (defaults to project) but neighbor is world-scope:
     // this is also an error — updating a world entry as project would write
     // to the wrong directory and produce entry_not_found.
     if (!scope && neighborScope === "world") {
-      throw new Error(`curator omitted scope on world-scope neighbor "${slug}" — must set scope:"world"`);
+      throw new CuratorRejectError(
+        "scope_mismatch_project_on_world_neighbor",
+        `curator omitted scope on world-scope neighbor "${slug}" — must set scope:"world"`,
+      );
     }
   }
 
@@ -231,6 +287,17 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
     if (!oldSlug || !allowedSlugs.has(oldSlug)) throw new Error(`curator supersede old_slug is not an allowed neighbor: ${oldSlug || "<missing>"}`);
     validateScope(oldSlug);
     if (newSlug && !allowedSlugs.has(newSlug)) throw new Error(`curator supersede new_slug is not an allowed neighbor: ${newSlug}`);
+    // 2026-05-19 round-2 review (Opus P1-1 + gpt-5.5 P2): the prompt's
+    // Workflow-lane section explicitly forbids workflow-lane slugs "as
+    // the target/source" of supersede, but the decoder previously only
+    // checked oldSlug. A curator decision like
+    //   {op:"supersede", old_slug:"some-fact", new_slug:"run-when-x"}
+    // would pass the decoder and the writer would write
+    // `superseded_by:["run-when-x"]` into the old project entry's
+    // frontmatter — a semantically wrong graph edge declaring "project
+    // entry X superseded by workflow Y". Workflows are not knowledge
+    // entries; they cannot supersede them. Enforce the prompt promise.
+    if (newSlug) validateScope(newSlug);
     return { op: "supersede", oldSlug, ...(newSlug ? { newSlug } : {}), ...(scope ? { scope } : {}), reason: asString(obj.reason) ?? rationale ?? "superseded by sediment curator", ...(rationale ? { rationale } : {}) };
   }
 
@@ -586,7 +653,14 @@ export async function curateProjectDraft(
     };
   } catch (e: unknown) {
     const error = sanitizePromptText(e instanceof Error ? e.message : String(e));
-    const decision: CuratorDecision = { op: "skip", reason: "curator_error", rationale: error };
+    // 2026-05-19 round-2 review (Opus P1-2 + gpt-5.5 P2): preserve
+    // grep-able reason codes for policy rejects. Generic `curator_error`
+    // stays the catch-all for JSON parse / model errors / unexpected
+    // exceptions; CuratorRejectError instances surface their `code`
+    // (e.g. `workflow_lane_read_only`) so audit-log scanners can count
+    // each policy bucket independently.
+    const reason = e instanceof CuratorRejectError ? e.code : "curator_error";
+    const decision: CuratorDecision = { op: "skip", reason, rationale: error };
     const decideMs = Date.now() - decideStart;
     return {
       decision,

@@ -1329,14 +1329,18 @@ END_MEMORY`;
     // upper curator_error catch in curateProjectDraft to convert the decision
     // to op=skip (no entry_not_found audit row, no silent data loss).
     {
-      const { parseDecision, isWorkflowNeighborEntry, neighborLaneFor } = req("./sediment/curator.js");
+      const { parseDecision, isWorkflowNeighborEntry, neighborLaneFor, CuratorRejectError } = req("./sediment/curator.js");
 
-      // 1. detector recognises all three signals
+      // 1. detector recognises all three signals.
+      //    NOTE (2026-05-19 round-2 review): storeRoot is now load-bearing
+      //    for signal 3 (path probe is store-relative, not absolute). Every
+      //    mock entry must set storeRoot to mirror what parser.ts emits.
       const wfByFrontmatter = {
         slug: "run-when-x",
         frontmatter: { scope: "workflow", kind: "workflow" },
         legacyKind: "workflow",
         scope: "project",
+        storeRoot: "/home/u/.abrain/projects/p",
         sourcePath: "/home/u/.abrain/projects/p/workflows/run-when-x.md",
       };
       assert(isWorkflowNeighborEntry(wfByFrontmatter) === true, "frontmatter.scope=workflow should detect");
@@ -1346,6 +1350,7 @@ END_MEMORY`;
         frontmatter: { scope: "project" },
         legacyKind: "workflow",
         scope: "project",
+        storeRoot: "/home/u/.abrain/projects/p",
         sourcePath: "/home/u/.abrain/projects/p/knowledge/legacy-pipe.md",
       };
       assert(isWorkflowNeighborEntry(wfByLegacyKind) === true, "legacyKind=workflow should detect");
@@ -1354,6 +1359,7 @@ END_MEMORY`;
         slug: "by-path",
         frontmatter: { scope: "project" },
         scope: "project",
+        storeRoot: "/home/u/.abrain",
         sourcePath: "/home/u/.abrain/workflows/by-path.md",
       };
       assert(isWorkflowNeighborEntry(wfByPath) === true, "sourcePath /workflows/ should detect");
@@ -1362,14 +1368,75 @@ END_MEMORY`;
         slug: "plain-fact",
         frontmatter: { scope: "project" },
         scope: "project",
+        storeRoot: "/home/u/.abrain/projects/p",
         sourcePath: "/home/u/.abrain/projects/p/knowledge/plain-fact.md",
       };
       assert(isWorkflowNeighborEntry(notWf) === false, "plain knowledge entry should NOT detect as workflow");
 
+      // 1b. Store-relative path probe regression (Opus P2-1 round-2): when
+      //     an ancestor of storeRoot is literally named "workflows" (e.g.
+      //     $HOME=/var/workflows/alice), entries OUTSIDE the store's
+      //     workflows/ subdir must NOT be misclassified.
+      const ancestorTrap = {
+        slug: "ancestor-trap",
+        frontmatter: { scope: "project" },
+        scope: "project",
+        storeRoot: "/var/workflows/alice/.abrain/projects/p",
+        sourcePath: "/var/workflows/alice/.abrain/projects/p/knowledge/x.md",
+      };
+      assert(isWorkflowNeighborEntry(ancestorTrap) === false,
+        "ancestor dir named 'workflows' must NOT trip detector (store-relative probe)");
+
+      //     And the same store CAN still detect a genuine workflows/
+      //     entry under it.
+      const ancestorTrapButReal = {
+        ...ancestorTrap,
+        slug: "real",
+        sourcePath: "/var/workflows/alice/.abrain/projects/p/workflows/real.md",
+      };
+      assert(isWorkflowNeighborEntry(ancestorTrapButReal) === true,
+        "real workflows/ entry under same trap-store must still detect");
+
+      //     Defensive: sourcePath outside storeRoot (path.relative would
+      //     emit '..' prefix) must not match.
+      const escaped = {
+        slug: "escaped",
+        frontmatter: { scope: "project" },
+        scope: "project",
+        storeRoot: "/home/u/.abrain/projects/p",
+        sourcePath: "/somewhere/else/workflows/escaped.md",
+      };
+      assert(isWorkflowNeighborEntry(escaped) === false,
+        "sourcePath escaping storeRoot must NOT detect via path probe");
+
+      //     Defensive: missing storeRoot disables path probe but keeps
+      //     frontmatter signals.
+      const noStoreRootButFm = {
+        slug: "nsr-fm",
+        frontmatter: { scope: "workflow" },
+        scope: "project",
+        sourcePath: "/anywhere/workflows/nsr-fm.md",
+      };
+      assert(isWorkflowNeighborEntry(noStoreRootButFm) === true,
+        "missing storeRoot + frontmatter.scope=workflow must still detect via signal 1");
+      const noStoreRootNoFm = {
+        slug: "nsr",
+        frontmatter: { scope: "project" },
+        scope: "project",
+        sourcePath: "/anywhere/workflows/nsr.md",
+      };
+      assert(isWorkflowNeighborEntry(noStoreRootNoFm) === false,
+        "missing storeRoot disables signal 3 (no frontmatter fallback to false-positive on)");
+
       // 2. neighborLaneFor returns lane labels
       assert(neighborLaneFor(wfByFrontmatter) === "workflow", "wf entry -> lane=workflow");
       assert(neighborLaneFor(notWf) === "project", "plain project entry -> lane=project");
-      const worldEntry = { ...notWf, scope: "world", sourcePath: "/home/u/.abrain/knowledge/m.md" };
+      const worldEntry = {
+        ...notWf,
+        scope: "world",
+        storeRoot: "/home/u/.abrain",
+        sourcePath: "/home/u/.abrain/knowledge/m.md",
+      };
       assert(neighborLaneFor(worldEntry) === "world", "world entry -> lane=world");
 
       // 3. parseDecision rejects every write op targeting workflow-lane neighbor
@@ -1381,18 +1448,59 @@ END_MEMORY`;
       const pWf = (obj) => parseDecision(JSON.stringify(obj), wfNeighbors);
       const expectWfThrows = (obj, opLabel) => {
         let threw = false;
-        let msg = "";
-        try { pWf(obj); } catch (e) { threw = true; msg = e.message; }
+        let err = null;
+        try { pWf(obj); } catch (e) { threw = true; err = e; }
         assert(threw, `parseDecision should throw for ${opLabel}: ${JSON.stringify(obj)}`);
+        const msg = err && err.message || "";
         assert(msg.includes("workflow-lane neighbor"), `${opLabel} error should mention workflow-lane: ${msg}`);
         assert(msg.includes("run-when-releasing"), `${opLabel} error should name the workflow slug: ${msg}`);
+        // 2026-05-19 round-2 (Opus P1-2 + gpt-5.5 P2): policy rejects must
+        // surface a typed CuratorRejectError with code 'workflow_lane_read_only'
+        // so audit log row keeps reason granularity (not generic curator_error).
+        assert(err instanceof CuratorRejectError, `${opLabel} should throw CuratorRejectError, got: ${err && err.constructor && err.constructor.name}`);
+        assert(err.code === "workflow_lane_read_only", `${opLabel} reject code should be 'workflow_lane_read_only', got: ${err.code}`);
       };
       expectWfThrows({ op: "update", slug: "run-when-releasing", patch: { confidence: 8 }, timeline_note: "n" }, "update");
-      expectWfThrows({ op: "supersede", old_slug: "run-when-releasing", reason: "x" }, "supersede");
+      expectWfThrows({ op: "supersede", old_slug: "run-when-releasing", reason: "x" }, "supersede-old");
       expectWfThrows({ op: "archive", slug: "run-when-releasing", reason: "x" }, "archive");
       expectWfThrows({ op: "delete", slug: "run-when-releasing", mode: "soft", reason: "x" }, "delete");
       expectWfThrows({ op: "merge", target: "run-when-releasing", sources: ["some-fact"], compiled_truth: "c", timeline_note: "n" }, "merge target");
       expectWfThrows({ op: "merge", target: "some-fact", sources: ["run-when-releasing"], compiled_truth: "c", timeline_note: "n" }, "merge source");
+      // 3b. supersede new_slug guard (Opus P1-1 round-2): decoder must also
+      //     reject when the workflow appears as the REPLACEMENT, not just
+      //     the target. Previously only validateScope(oldSlug) ran, so a
+      //     `{op:supersede, old:some-fact, new:run-when-releasing}` would
+      //     pass and write a semantically wrong superseded_by edge.
+      expectWfThrows(
+        { op: "supersede", old_slug: "some-fact", new_slug: "run-when-releasing", reason: "x" },
+        "supersede-new",
+      );
+
+      // 3c. scope-mismatch rejects also carry typed codes (regression
+      //     guard for the typed-error refactor — ensures we did not
+      //     accidentally widen workflow_lane_read_only to cover plain
+      //     scope mismatches).
+      const mixedNeighbors = new Map([
+        ["world-only", "world"],
+        ["project-only", "project"],
+      ]);
+      const pm = (obj) => parseDecision(JSON.stringify(obj), mixedNeighbors);
+      const expectCode = (obj, expectedCode, label) => {
+        let err = null;
+        try { pm(obj); } catch (e) { err = e; }
+        assert(err && err instanceof CuratorRejectError, `${label} should throw CuratorRejectError, got: ${err && err.constructor && err.constructor.name}`);
+        assert(err.code === expectedCode, `${label} code should be '${expectedCode}', got: '${err.code}'`);
+      };
+      expectCode(
+        { op: "update", scope: "world", slug: "project-only", patch: {}, timeline_note: "x" },
+        "scope_mismatch_world_on_non_world_neighbor",
+        "scope:world on project neighbor",
+      );
+      expectCode(
+        { op: "update", slug: "world-only", patch: {}, timeline_note: "x" },
+        "scope_mismatch_project_on_world_neighbor",
+        "omitted scope on world neighbor",
+      );
 
       // 4. op=skip is unaffected (workflow can be cited in skip rationale)
       const skipOk = pWf({ op: "skip", reason: "workflow already covers", rationale: "run-when-releasing Task 4 covers this" });
@@ -1410,6 +1518,81 @@ END_MEMORY`;
       try { pWf({ op: "create", scope: "world", derives_from: ["run-when-releasing"] }); } catch (e) { wcThrew = true; wcMsg = e.message; }
       assert(wcThrew, "world create with workflow derives_from should throw");
       assert(wcMsg.includes("workflow-scope"), `world<-workflow error should mention workflow-scope, got: ${wcMsg}`);
+    }
+
+    // === end-to-end: workflow neighbor flows through parser → lane label ===
+    // 2026-05-19 round-2 review (Opus P2-3 + gpt-5.5 P2): the per-function
+    // assertions above use hand-built MemoryEntry mocks. If parser frontmatter
+    // emission or the workflow writer's id/scope keys ever drift, the mocks
+    // would still pass while production silently regresses. This integration
+    // wedge writes a real workflow entry via writeAbrainWorkflow (B1 lane),
+    // loads it back through the parser, and checks neighborLaneFor() returns
+    // 'workflow' from the parsed shape.
+    {
+      const ieTarget = setupAbrainTarget("integration-workflow-detect");
+      const ieMemorySettings = (() => {
+        const s = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
+        s.includeWorld = false;
+        return s;
+      })();
+      const ieRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-wf-detect-"));
+      // parser.resolveStores reads abrainHome from process.env.ABRAIN_ROOT,
+      // and resolveActiveProject reads the binding from cwd/.abrain-project.json.
+      // Bind the temp project so loadEntries can find the abrain project store,
+      // then point ABRAIN_ROOT at the temp abrainHome for the duration of this
+      // wedge.
+      await bindAbrainProject({
+        abrainHome: ieTarget.abrainHome,
+        cwd: ieRoot,
+        projectId: ieTarget.projectId,
+        now: "2026-05-19T22:00:00.000+08:00",
+      });
+      const savedAbrainRoot = process.env.ABRAIN_ROOT;
+      process.env.ABRAIN_ROOT = ieTarget.abrainHome;
+      try {
+        // Write a project-scoped workflow via the canonical B1 writer.
+        const wfWritten = await writeAbrainWorkflow(
+          {
+            title: "Run when releasing (smoke)",
+            slug: "run-when-releasing-smoke",
+            projectId: ieTarget.projectId,
+            trigger: "smoke: detect workflow lane via parser",
+            body: "Task blueprint body.",
+            tags: ["workflow", "smoke"],
+          },
+          { abrainHome: ieTarget.abrainHome, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+        );
+        assert(wfWritten.status === "created" && wfWritten.lane === "workflow",
+          `writeAbrainWorkflow should create the workflow: ${JSON.stringify(wfWritten)}`);
+
+        // Load via parser (memory.parser.loadEntries) and locate the slug.
+        const { loadEntries } = req("./memory/parser.js");
+        const { isWorkflowNeighborEntry, neighborLaneFor } = req("./sediment/curator.js");
+        const entries = await loadEntries(ieRoot, ieMemorySettings);
+        const wfEntry = entries.find((e) => e.slug === "run-when-releasing-smoke");
+        assert(wfEntry, `parser should surface the workflow entry; got slugs: ${entries.map((e) => e.slug).join(", ")}`);
+        assert(isWorkflowNeighborEntry(wfEntry) === true,
+          `parsed workflow entry must trip detector; sourcePath=${wfEntry.sourcePath}, storeRoot=${wfEntry.storeRoot}, legacyKind=${wfEntry.legacyKind}, fm.scope=${JSON.stringify(wfEntry.frontmatter && wfEntry.frontmatter.scope)}`);
+        assert(neighborLaneFor(wfEntry) === "workflow",
+          `parsed workflow entry must map to lane=workflow; got ${neighborLaneFor(wfEntry)}`);
+
+        // Sanity: a sibling knowledge entry on the same store does NOT trip.
+        const sib = await writeProjectEntry(
+          { title: "Sibling Fact", kind: "fact", status: "active", confidence: 5, compiledTruth: "Sibling body for the lane-detector smoke (sufficiently long to pass validation).", timelineNote: "seed", sessionId: "smoke-wf-detect" },
+          { projectRoot: ieRoot, abrainHome: ieTarget.abrainHome, projectId: ieTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+        );
+        assert(sib.status === "created", `sibling knowledge write must succeed: ${JSON.stringify(sib)}`);
+        const entries2 = await loadEntries(ieRoot, ieMemorySettings);
+        const sibEntry = entries2.find((e) => e.slug === "sibling-fact");
+        assert(sibEntry, `parser should surface the sibling fact`);
+        assert(isWorkflowNeighborEntry(sibEntry) === false,
+          `sibling knowledge entry MUST NOT trip detector; sourcePath=${sibEntry.sourcePath}, storeRoot=${sibEntry.storeRoot}`);
+        assert(neighborLaneFor(sibEntry) === "project",
+          `sibling knowledge entry must map to lane=project; got ${neighborLaneFor(sibEntry)}`);
+      } finally {
+        if (savedAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+        else process.env.ABRAIN_ROOT = savedAbrainRoot;
+      }
     }
 
     // === curator prompt embeds workflow-lane rule (2026-05-19) ============
