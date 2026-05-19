@@ -508,7 +508,11 @@ function formatRetrySummary(history?: RetryHistory): string {
   return `retries: ${n} ${word}, ${outcome}${errPart}`;
 }
 
-function formatResult(
+// Exported for smoke test only — not part of the public extension surface.
+// `smoke:dispatch-output-format` requires this to verify the no-truncation
+// invariant (caller LLM must receive sub-agent's full output, mirror of
+// dispatch_parallel `lines.push(r.output)` path).
+export function formatResult(
   label: string,
   model: string,
   result: SubprocessResult,
@@ -524,11 +528,20 @@ function formatResult(
     return `## ${label} (${model}) ❌ ${dur}\n${result.error}${usageStr ? `\n_${usageStr}_` : ""}${retrySuffix}`;
   }
 
-  const preview = result.output.length > 500
-    ? result.output.slice(0, 500) + "..."
-    : result.output;
-
-  return `## ${label} (${model}) ✅ ${dur}${usageStr ? ` _${usageStr}_` : ""}${retrySuffix}\n\n${preview}`;
+  // No truncation: dispatch_agent's primary purpose is returning the
+  // sub-agent's full reasoning output to the caller. Mirrors
+  // dispatch_parallel which also returns r.output verbatim (line ~850).
+  //
+  // Pre-2026-05-19: this path hard-sliced to 500 chars + '...' which
+  // silently truncated any review / analysis longer than ~80 words.
+  // Symptom: caller LLM appears to receive a half-finished response
+  // from the sub-agent and has no way to ask for the rest (sub-agent
+  // is a single-shot subprocess; the missing tail is gone). The
+  // caller's token budget for the returned text is the caller's own
+  // problem to manage — if the sub-agent emits 100K chars, that's a
+  // sub-agent prompt design issue, not something to hide via
+  // truncation in the result-formatting path.
+  return `## ${label} (${model}) ✅ ${dur}${usageStr ? ` _${usageStr}_` : ""}${retrySuffix}\n\n${result.output}`;
 }
 
 // ── Extension ───────────────────────────────────────────────────
