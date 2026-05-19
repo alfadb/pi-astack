@@ -830,6 +830,105 @@ check("R7.3+gpt-5.5: single+Other with whitespace-only text → no-op (trim chec
   if (r.answers.q1[0] !== " x") throw new Error(`expected ' x' (space + x), got ${JSON.stringify(r.answers.q1)}`);
 });
 
+// R8 (post-T0 OPUS xhigh P1#2, 2026-05-18): wizard navigation validation.
+//
+// Pre-fix: → on an invalid intermediate question (single+Other-empty,
+// empty text, empty secret) advances `currentIdx` because
+// `componentCursorAtEnd` returns true on those states; submit then
+// shipped `answers[qid] = []`.
+//
+// Post-fix: → is gated by `activeIsInvalid(currentIdx) === false`.
+// finishWithSubmit is defense-in-depth: scans every question and
+// jumps back to the first invalid one instead of shipping.
+
+check("R8 P1#2: → on single+Other-empty intermediate q is blocked", () => {
+  const { root, getResolved } = buildWizard([
+    {
+      id: "q1", header: "h", question: "q?", type: "single",
+      options: [{ label: "A" }, { label: "B" }],
+    },
+    {
+      id: "q2", header: "h", question: "q?", type: "single",
+      options: [{ label: "X" }, { label: "Y" }],
+    },
+  ]);
+  root.handleInput(ARROW_UP);    // q1 highlight wraps to Other, empty
+  root.handleInput(ARROW_RIGHT); // BLOCKED (q1 invalid)
+  root.handleInput(ENTER);       // still on q1, no-op
+  if (getResolved()) {
+    throw new Error(`→ bypass shipped invalid wizard: ${JSON.stringify(getResolved())}`);
+  }
+});
+
+check("R8 P1#2: → on empty-text intermediate q is blocked", () => {
+  const { root, getResolved } = buildWizard([
+    { id: "q1", header: "h", question: "q?", type: "text" },
+    { id: "q2", header: "h", question: "q?", type: "text" },
+  ]);
+  root.handleInput(ARROW_RIGHT); // q1 text empty, would bypass pre-fix
+  if (getResolved()) {
+    throw new Error("→ bypass shipped empty text q1");
+  }
+  root.handleInput("x");
+  root.handleInput(ARROW_RIGHT);
+  root.handleInput("y");
+  root.handleInput(ENTER);
+  const r = getResolved();
+  if (!r || r.answers.q1?.[0] !== "x" || r.answers.q2?.[0] !== "y") {
+    throw new Error(`after fill, expected q1=x q2=y, got ${JSON.stringify(r?.answers)}`);
+  }
+});
+
+check("R8 P1#2: → on empty-secret intermediate q is blocked", () => {
+  const { root, getResolved } = buildWizard([
+    { id: "s1", header: "h", question: "q?", type: "secret" },
+    { id: "q2", header: "h", question: "q?", type: "text" },
+  ]);
+  root.handleInput(ARROW_RIGHT); // empty secret, would bypass pre-fix
+  if (getResolved()) {
+    throw new Error("→ bypass shipped empty secret s1");
+  }
+});
+
+check("R8 P1#2: ← from invalid q is symmetric (also blocked)", () => {
+  const { root, getResolved } = buildWizard([
+    {
+      id: "q1", header: "h", question: "q?", type: "single",
+      options: [{ label: "A" }, { label: "B" }],
+    },
+    {
+      id: "q2", header: "h", question: "q?", type: "single",
+      options: [{ label: "X" }, { label: "Y" }],
+    },
+  ]);
+  root.handleInput(ENTER);       // q1 valid → advance to q2
+  root.handleInput(ARROW_UP);    // q2 highlight wraps to Other (empty)
+  root.handleInput(ARROW_LEFT);  // ← must be BLOCKED (q2 invalid)
+  root.handleInput(ENTER);       // still on q2, no-op
+  if (getResolved()) {
+    throw new Error("← bypass + ENTER shipped invalid wizard");
+  }
+});
+
+check("R8 P1#2 integration: empty intermediate ENTER no-ops, real fill submits", () => {
+  const { root, getResolved } = buildWizard([
+    { id: "q1", header: "h", question: "q?", type: "text" },
+    { id: "q2", header: "h", question: "q?", type: "text" },
+  ]);
+  root.handleInput(ENTER);
+  if (getResolved()) throw new Error("empty q1 should not have advanced via ENTER");
+  root.handleInput("a");
+  root.handleInput(ENTER);
+  root.handleInput(ENTER); // q2 empty
+  if (getResolved()) throw new Error("empty q2 should not have submitted via final ENTER");
+  root.handleInput("b");
+  root.handleInput(ENTER);
+  const r = getResolved();
+  if (!r || r.answers.q1?.[0] !== "a" || r.answers.q2?.[0] !== "b") {
+    throw new Error(`expected q1=a q2=b, got ${JSON.stringify(r?.answers)}`);
+  }
+});
+
 // ── Summary ────────────────────────────────────────────────────────
 
 console.log("");

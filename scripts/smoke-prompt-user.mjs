@@ -898,6 +898,185 @@ await asyncCheck("soft cap: 3rd call in same session has detail batching warning
   }
 });
 
+// ── R8 (post-T0 OPUS xhigh P1#1): INV-C teardown on manager-side cancel ──
+//
+// Pre-fix: MaskedInput.wipe() was reached ONLY via the wizard's
+// Enter/Esc handlers (finishWithSubmit / finishWithCancel). When the
+// MANAGER side settled the promise (timeout / ctx.signal abort /
+// cancelAllPending), the dialog stayed on screen with the secret
+// buffer intact. INV-C "secret raw never leaves PromptDialog closure"
+// was violated for a window of seconds to minutes.
+//
+// Post-fix: service.ts captures the dialog root (which now exposes
+// __wipeSecrets) and the pi-side `done` callback, then registers a
+// manager disposer that calls both on EVERY terminal resolution.
+
+await asyncCheck("R8 P1#1: timeout fires → service.ts disposer calls dialog.__wipeSecrets + done(null)", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  let wipeCalls = 0;
+  let doneCalls = [];
+  const ui = {
+    custom: (factory) => {
+      // Never resolve from the factory — hold the dialog open so the
+      // manager's timeout is the ONLY source of resolution.
+      return new Promise(() => {
+        factory({}, {}, {}, (v) => { doneCalls.push(v); });
+      });
+    },
+  };
+  const fakeDialog = {
+    __wipeSecrets: () => { wipeCalls += 1; },
+  };
+  const deps = {
+    ...handlerDeps,
+    dialog: {
+      buildDialog: ({ onDone }) => {
+        // Capture onDone but don't call it — dialog is "hanging".
+        void onDone;
+        return fakeDialog;
+      },
+    },
+  };
+  // timeoutSec is clamped to [30, 1800] in schema, but service / handler
+  // pass through whatever the schema returned. Use the lowest valid
+  // value the schema accepts (30) but then trigger cancelAllPending
+  // shortly after so we don't actually wait 30 seconds.
+  const promise = handlerMod.executePromptUserTool(
+    {
+      reason: "test INV-C teardown",
+      questions: [{
+        id: "tok",
+        header: "Token",
+        question: "Enter:",
+        type: "secret",
+      }],
+      timeoutSec: 30,
+    },
+    undefined,
+    { ui, hasUI: true },
+    deps,
+  );
+  // Yield so service.ts kicks off the dialog factory + registers disposer.
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  // Trigger manager-side cancel (simulates session_shutdown).
+  manager.cancelAllPending("cancelled");
+  const json = await promise;
+  const r = JSON.parse(json);
+  if (r.ok) throw new Error(`expected !ok on cancel, got ${JSON.stringify(r)}`);
+  // The disposer MUST have fired __wipeSecrets exactly once.
+  if (wipeCalls !== 1) {
+    throw new Error(`expected __wipeSecrets called exactly once, got ${wipeCalls}`);
+  }
+  // The disposer MUST have called done(null) to tear pi's editor region.
+  if (doneCalls.length !== 1 || doneCalls[0] !== null) {
+    throw new Error(`expected done(null) called once, got ${JSON.stringify(doneCalls)}`);
+  }
+});
+
+await asyncCheck("R8 P1#1: ctx.signal abort → disposer fires teardown", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  let wipeCalls = 0;
+  let doneCalls = [];
+  const ui = {
+    custom: (factory) => {
+      return new Promise(() => {
+        factory({}, {}, {}, (v) => { doneCalls.push(v); });
+      });
+    },
+  };
+  const fakeDialog = { __wipeSecrets: () => { wipeCalls += 1; } };
+  const deps = {
+    ...handlerDeps,
+    dialog: { buildDialog: () => fakeDialog },
+  };
+  const ac = new AbortController();
+  const promise = handlerMod.executePromptUserTool(
+    {
+      reason: "test signal abort",
+      questions: [{ id: "s", header: "h", question: "q?", type: "secret" }],
+      timeoutSec: 30,
+    },
+    ac.signal,
+    { ui, hasUI: true, signal: ac.signal },
+    deps,
+  );
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  ac.abort();
+  const json = await promise;
+  const r = JSON.parse(json);
+  if (r.ok) throw new Error(`expected !ok on signal abort: ${JSON.stringify(r)}`);
+  if (wipeCalls !== 1) {
+    throw new Error(`signal abort: __wipeSecrets calls=${wipeCalls}, expected 1`);
+  }
+  if (doneCalls.length !== 1 || doneCalls[0] !== null) {
+    throw new Error(`signal abort: done calls=${JSON.stringify(doneCalls)}, expected [null]`);
+  }
+});
+
+await asyncCheck("R8 P1#1: successful submit → disposer still runs (idempotent re-wipe)", async () => {
+  // PromptDialog already wipes secrets in finishWithSubmit before
+  // onDone fires. The disposer then runs on manager success-path
+  // settlement. MaskedInput.wipe() is idempotent (string reassign),
+  // so the second wipe call is harmless. Verify both fire.
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  let wipeCalls = 0;
+  let doneCalls = [];
+  const ui = {
+    custom: (factory) => new Promise((resolve) => {
+      factory({}, {}, {}, (v) => { doneCalls.push(v); resolve(v); });
+    }),
+  };
+  const fakeDialog = { __wipeSecrets: () => { wipeCalls += 1; } };
+  const deps = {
+    ...handlerDeps,
+    dialog: {
+      buildDialog: ({ onDone }) => {
+        // Immediately submit a successful answer.
+        queueMicrotask(() =>
+          onDone({
+            outcome: "submit",
+            answers: { s: ["[REDACTED_SECRET:s]"] },
+            rawSecrets: { s: "ghp_test" },
+          }),
+        );
+        return fakeDialog;
+      },
+    },
+  };
+  const json = await handlerMod.executePromptUserTool(
+    {
+      reason: "test successful path disposer",
+      questions: [{ id: "s", header: "h", question: "q?", type: "secret" }],
+      timeoutSec: 30,
+    },
+    undefined,
+    { ui, hasUI: true },
+    deps,
+  );
+  const r = JSON.parse(json);
+  if (!r.ok) throw new Error(`expected ok, got ${JSON.stringify(r)}`);
+  // Disposer must have fired at least once (it's the manager's
+  // teardown). Whether it ran 1 or 2 times depends on real PromptDialog
+  // also calling wipe, but in the FAKE dialog only the disposer calls
+  // it. Either way it must be ≥ 1.
+  if (wipeCalls < 1) {
+    throw new Error(`success path: __wipeSecrets calls=${wipeCalls}, expected ≥ 1`);
+  }
+  // done was called with the real submit payload by the fake factory,
+  // and the disposer also tries done(null) but the service.ts impl
+  // clears dialogDone in the success-path onDone wrapper BEFORE calling
+  // handleDone, so the disposer sees dialogDone=null and skips done(null).
+  // Verify only the real submit done call landed.
+  if (doneCalls.length !== 1) {
+    throw new Error(`success path: done calls=${JSON.stringify(doneCalls)}, expected 1 (the submit, not extra null)`);
+  }
+});
+
 // ── Summary ────────────────────────────────────────────────────────
 
 console.log("");

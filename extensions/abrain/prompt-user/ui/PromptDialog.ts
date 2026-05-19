@@ -761,6 +761,30 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
     variant === "vault_release" ? "Vault Release" :
     "Vault Bash Output";
 
+  // R8 (post-T0 OPUS xhigh P1#2, 2026-05-18): unified per-question
+  // validation. Hoisted above wipeAllSecrets / finishWithSubmit so
+  // both submit-time defense-in-depth and wizard nav guards reference
+  // the same predicate — no forward-ref dance.
+  //
+  // Rules for "active question is invalid (no-op the action)":
+  //   - OptionList single with collect()==[] (Other highlight + empty text)
+  //   - OptionList multi: 0..N selected is VALID (multi semantics) → never invalid
+  //   - pi-tui Input (text) with whitespace-only value
+  //   - MaskedInput (secret) with empty buffer
+  const activeIsInvalid = (idx: number): boolean => {
+    const entry = entries[idx];
+    const c = entry.component;
+    const q = entry.q;
+    if (isOptionList(c)) {
+      return q.type === "single" && (c as OptionList).collect().length === 0;
+    }
+    if (isMaskedInput(c)) {
+      return (c as MaskedInput).getValue().length === 0;
+    }
+    // pi-tui Input (type:text)
+    return !((c as PiTuiInput).getValue() ?? "").trim();
+  };
+
   /** Wipe all masked secret buffers on the way out (INV-C). */
   const wipeAllSecrets = (): void => {
     for (const e of entries) {
@@ -769,6 +793,19 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
   };
 
   const finishWithSubmit = (): void => {
+    // R8 (post-T0 OPUS xhigh P1#2 defense-in-depth, 2026-05-18):
+    // even if a future change re-introduces a navigation bypass, the
+    // submit path itself MUST refuse to ship an invalid wizard.
+    // Scan every question — first invalid one jumps the wizard back
+    // to it instead of submitting.
+    for (let i = 0; i < entries.length; i++) {
+      if (activeIsInvalid(i)) {
+        currentIdx = i;
+        rebuildLayout();
+        tui.requestRender();
+        return;
+      }
+    }
     const answers: Record<string, string[]> = {};
     const rawSecrets: Record<string, string> = {};
     for (const e of entries) {
@@ -834,6 +871,9 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
   };
 
   // ── Wizard input router ───────────────────────────────────────────
+  // Wizard input router — see activeIsInvalid (helper group above)
+  // for the per-question validation predicate referenced from Enter
+  // and ←/→ handlers below.
   (root as PiTuiContainer & { handleInput?: (data: string) => void }).handleInput = (
     data: string,
   ) => {
@@ -846,28 +886,7 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
     }
     // Enter → advance or submit.
     if (data === "\r" || data === "\n") {
-      // R7.3 + opus P1.5 fix: validate before advancing.
-      // Rules:
-      //   - single mode + collect()==[]  (highlight on Other empty)  → no-op
-      //   - multi mode + collect()==[]   (nothing toggled, empty Other) → ALLOW (multi can be 0..N)
-      //   - text mode + empty value     → no-op (same UX as single+Other+empty)
-      //   - secret mode + empty buffer  → no-op (don't submit a placeholder for an empty secret)
-      const entry = entries[currentIdx];
-      const q = entry.q;
-      if (isOptionList(active)) {
-        const c = (active as OptionList).collect();
-        if (c.length === 0 && q.type === "single") {
-          return; // user must pick something or type into Other
-        }
-      } else if (isMaskedInput(active)) {
-        if ((active as MaskedInput).getValue().length === 0) {
-          return; // empty secret — user must type or press Esc
-        }
-      } else {
-        // pi-tui Input (type:text)
-        const text = (active as PiTuiInput).getValue();
-        if (!text.trim()) return; // empty / whitespace-only text — no-op
-      }
+      if (activeIsInvalid(currentIdx)) return; // no-op on invalid active q
       if (currentIdx === entries.length - 1) {
         finishWithSubmit();
       } else {
@@ -877,9 +896,16 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
       tui.requestRender();
       return;
     }
-    // ← →: switch question when cursor is at start/end.
+    // ← →: switch question when cursor is at start/end AND the active
+    // question is currently valid. The invalid-q guard prevents the user
+    // from jumping forward (or back, symmetrically) off an unsatisfied
+    // required answer and reaching submit with empty intermediate answers.
     if (data === "\x1b[D" || data === "\x1bOD") {
-      if (currentIdx > 0 && componentCursorAtStart(active)) {
+      if (
+        currentIdx > 0
+        && componentCursorAtStart(active)
+        && !activeIsInvalid(currentIdx)
+      ) {
         currentIdx -= 1;
         rebuildLayout();
         tui.requestRender();
@@ -891,7 +917,11 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
       return;
     }
     if (data === "\x1b[C" || data === "\x1bOC") {
-      if (currentIdx < entries.length - 1 && componentCursorAtEnd(active)) {
+      if (
+        currentIdx < entries.length - 1
+        && componentCursorAtEnd(active)
+        && !activeIsInvalid(currentIdx)
+      ) {
         currentIdx += 1;
         rebuildLayout();
         tui.requestRender();
@@ -905,6 +935,21 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
     active.handleInput?.(data);
     tui.requestRender();
   };
+
+  // R8 (post-T0 OPUS xhigh P1#1, 2026-05-18): expose the secret-wipe
+  // teardown on the root container so service.ts can register it as a
+  // manager disposer. Pre-fix the only callers were finishWithSubmit /
+  // finishWithCancel — reached EXCLUSIVELY through user Enter / Esc.
+  // Manager-side terminal events (timeout, ctx.signal abort, session
+  // shutdown via cancelAllPending) settled the promise BUT never
+  // touched the dialog, leaving MaskedInput.buffer (and pasteBuffer)
+  // holding plaintext until the user noticed the stale dialog — a
+  // window of seconds-to-minutes. That violates INV-C ("secret raw
+  // never leaves PromptDialog closure"). Wiring this method onto the
+  // root container lets service.ts call it from a registerDisposer
+  // hook so ALL terminal resolution paths converge on wipe().
+  (root as PiTuiContainer & { __wipeSecrets?: () => void }).__wipeSecrets =
+    wipeAllSecrets;
 
   rebuildLayout();
   return root;

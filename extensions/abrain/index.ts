@@ -624,8 +624,19 @@ async function authorizeVaultBashOutput(
     // Fail closed in non-interactive/API runners that may auto-return the first
     // select item: put the deny option first. Interactive users can still move to
     // an explicit release choice.
-    const choice = await ui.select(title, [...VAULT_BASH_OUTPUT_AUTH_CHOICES], { signal });
-    return applyChoice(choice);
+    //
+    // R8 (post-T0 GPT-5.5 xhigh P1#1, 2026-05-18): try/catch envelope.
+    // bash output has an OUTER tool_result envelope that already turns
+    // throws into withhold, so this is defense-in-depth + parity with
+    // authorizeVaultRelease which has NO outer envelope.
+    try {
+      const choice = await ui.select(title, [...VAULT_BASH_OUTPUT_AUTH_CHOICES], { signal });
+      return applyChoice(choice);
+    } catch (err) {
+      const message = (err as Error)?.message ?? String(err);
+      ui.notify?.(`Withheld bash output: ui.select failed: ${message.slice(0, 200)}`, "warning");
+      return "withhold";
+    }
   }
   ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
   return "withhold";
@@ -684,16 +695,36 @@ async function authorizeVaultRelease(
     }
   }
 
+  // R8 (post-T0 GPT-5.5 xhigh P1#1, 2026-05-18): wrap ui.select /
+  // ui.confirm in try/catch so a throw / reject from the UI primitive
+  // becomes a fail-closed deny rather than escaping the tool executor.
+  // Pre-fix the only catch was the OUTER `tool_result` handler for the
+  // bash output path; the `vault_release` tool execute had no envelope,
+  // so a UI throw would propagate as an unhandled rejection past the
+  // ADR 0019 "authorization boundary failure MUST fail closed and
+  // observable" contract.
   if (typeof ui.select === "function") {
     // Fail closed in non-interactive/API runners that may auto-return the first
     // select item: put deny choices before explicit release choices.
-    const choice = await ui.select(title, [...VAULT_RELEASE_AUTH_CHOICES], { signal });
-    return applyChoice(choice);
+    try {
+      const choice = await ui.select(title, [...VAULT_RELEASE_AUTH_CHOICES], { signal });
+      return applyChoice(choice);
+    } catch (err) {
+      const message = (err as Error)?.message ?? String(err);
+      ui.notify?.(`vault_release denied: ui.select failed: ${message.slice(0, 200)}`, "warning");
+      return { ok: false, reason: "ui_authorization_error" };
+    }
   }
 
   if (typeof ui.confirm === "function") {
-    const ok = await ui.confirm("Vault release authorization", title, { signal });
-    return ok ? { ok: true } : { ok: false, reason: "denied" };
+    try {
+      const ok = await ui.confirm("Vault release authorization", title, { signal });
+      return ok ? { ok: true } : { ok: false, reason: "denied" };
+    } catch (err) {
+      const message = (err as Error)?.message ?? String(err);
+      ui.notify?.(`vault_release denied: ui.confirm failed: ${message.slice(0, 200)}`, "warning");
+      return { ok: false, reason: "ui_authorization_error" };
+    }
   }
 
   ui.notify?.("vault_release denied: no UI authorization method available", "warning");

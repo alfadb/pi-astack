@@ -249,18 +249,38 @@ export async function askPromptUser(
     // resolves the manager handle. This means timeout / signal / shutdown
     // all win the race uniformly without needing custom() to be
     // cancellable.
+    //
+    // R8 (post-T0 OPUS xhigh P1#1, 2026-05-18): capture both the
+    // dialog root (for __wipeSecrets) and pi's `done` callback so
+    // manager-side terminal resolutions (timeout / signal abort /
+    // cancelAllPending) can ACTIVELY tear down both the dialog's
+    // secret buffers and pi's editor-region overlay. Without this,
+    // MaskedInput.buffer would linger holding plaintext until the
+    // user manually pressed Esc/Enter on the now-stale dialog —
+    // an INV-C violation window of seconds to minutes.
     let customPromise: Promise<unknown> | null = null;
+    let dialogRoot: { __wipeSecrets?: () => void } | null = null;
+    let dialogDone: ((v: unknown) => void) | null = null;
     try {
       customPromise = ctx.ui.custom(
-        (tui, theme, kb, done) =>
-          deps.buildDialog({
+        (tui, theme, kb, done) => {
+          dialogDone = done;
+          const root = deps.buildDialog({
             params,
             variant,
             tui,
             theme,
             keybindings: kb,
-            onDone: (result) => done(result),
-          }) as unknown,
+            onDone: (result) => {
+              try { done(result); } catch { /* second-done from pi runtime */ }
+              // Dialog resolved itself — release done ref so the
+              // disposer below does not double-fire done(null).
+              dialogDone = null;
+            },
+          }) as { __wipeSecrets?: () => void };
+          dialogRoot = root;
+          return root as unknown;
+        },
         // 2026-05-17 R6 UX fix: inline底部 editor 区域替换
         // (`overlay: false`) 取代屏幕居中弹窗。理由：
         //   1. 业内对齐 — Claude Code AskUserQuestion / Codex
@@ -287,6 +307,19 @@ export async function askPromptUser(
         await chainedFallback(ctx, params, handle, startedAt),
       );
     }
+
+    // R8 (post-T0 OPUS xhigh P1#1): register a disposer that runs on
+    // every terminal resolution. Success path runs it AFTER the
+    // PromptDialog already wiped its own state (idempotent re-wipe);
+    // timeout / signal / shutdown paths rely on this as the ONLY
+    // wipe hook. The disposer is also responsible for tearing down
+    // pi's editor region by calling the captured `done(null)`.
+    handle.registerDisposer(() => {
+      try { dialogRoot?.__wipeSecrets?.(); } catch { /* best-effort */ }
+      try { dialogDone?.(null); } catch { /* pi may reject second done */ }
+      dialogRoot = null;
+      dialogDone = null;
+    });
 
     // Wire custom's promise into manager so async errors don't strand us.
     customPromise.then(
