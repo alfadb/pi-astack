@@ -200,13 +200,15 @@ LLM-facing 同步问答工具，与 `vault_release` 共享 `<PromptDialog>` over
   - **#6** INV-E refinement— module-level `__vaultDialogInFlight` lock 是 **concurrency state**，**不是** grant state；smoke 明确区分两者边界
   - `smoke:abrain-vault-reader` 14 → 21 assertion (+7）。P2 （applyChoice 复制 / startup telemetry / 真实 PromptDialog render smoke / vault enum localization / `__authorizeVault*ForTests` exports 的 grant isolation smoke）推迟。
 
-### 不变量覆盖（10 / 11 — P3b 后 INV-E 可验证）
+### 不变量覆盖（11 / 11 — P3b 后 INV-E 可验证；R8 后 INV-C 在所有 cancel 路径上均验证）
+
+> **2026-05-18 R8 同步**：T0 xhigh GPT-5.5 #4 报告 coverage table 与代码漂移— row A 原写 `cols < 60 三层 reject` 但 R6 已删 narrow terminal reject（R6§2026-05-17 inline editor 走后 Text 自动 wrap，40-col 不拒）。已同步到 actual state。
 
 | INV | 覆盖路径 | smoke |
 |---|---|---|
-| A | sub-pi 3 层 + hasUI=false + cols < 60 三层 reject | `smoke:prompt-user`, `smoke:prompt-user-subpi` |
+| A | sub-pi 3 层（PI_ABRAIN_DISABLED env / activate early-return / handler subagent reject）+ hasUI=false reject；narrow terminal 不再 reject（R6 2026-05-17 删） | `smoke:prompt-user`, `smoke:prompt-user-subpi` |
 | B | 4 个 cancel 源全部 wire （timeout / signal / cancelAll / done） | `smoke:prompt-user-finalizer` |
-| C | secret raw 不跨 PromptDialog 闭包；placeholder + lengthBucket 走 audit | `smoke:prompt-user` |
+| C | secret raw 不跨 PromptDialog 闭包；placeholder + lengthBucket 走 audit；R8 后所有 cancel 路径（timeout / signal / cancelAllPending）均调 `__wipeSecrets` + `done(null)` teardown | `smoke:prompt-user` (R8 +3 disposer assertion) |
 | D | 4 字段 (reason/header/question/option.label) × (redactCredentials + sanitizePathLike) | `smoke:prompt-user`, `smoke:abrain-redact` |
 | **E** | `vault-authorize.ts` 零 grant state（dialog lock 是 concurrency state不是 grant state，P3b-post-audit fix #6 明确边界）；dialog substrate 不持 grant。连续 vault_release 不串话；vault variant 不含 Other；concurrent vault dialog 被拒 | **`smoke:abrain-vault-reader` (P3b + post-audit 合计 +15 assertion)** |
 | F | 只写 audit jsonl，不写 markdown | `smoke:prompt-user` fs.readdirSync 验证 |

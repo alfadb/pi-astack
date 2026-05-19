@@ -1211,6 +1211,20 @@ END_MEMORY`;
         // about trust budget for SUBSTANCE, not for SECRET DISCLOSURE.
         "Still apply the credential/secret sanitizer",
         "not as a license to leak secrets",
+        // ADR 0022 INV-M (R8 2026-05-18, GPT-5.5 xhigh P1#2): prompt_user is
+        // EVIDENCE not a sediment trigger. Anchors the "don't generalize
+        // binary Yes/No into broader preferences" clause so curator prompt
+        // can't silently lose this safeguard.
+        "`prompt_user` is EVIDENCE, NOT a sediment",
+        "NOT command a memory write",
+        "binary 'Yes/No' confirmations",
+        // ADR 0022 INV-N (R8 2026-05-18, GPT-5.5 xhigh P1#3 + DEEPSEEK P1#2):
+        // G2 provenance split. Anchors the "do NOT promote LLM-facing
+        // prompt_user answers into MEMORY-ABOUT-ME" boundary so future
+        // Lane G G2 landing can't double-count trust.
+        "slash will route",
+        "through internal `askPromptUser` service",
+        "MEMORY-ABOUT-ME equivalents",
       ];
       for (const needle of required) {
         assert(p.includes(needle), `prompt missing required marker: ${JSON.stringify(needle)}`);
