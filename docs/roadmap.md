@@ -105,10 +105,10 @@
 
 | 项 | 做法 | LOC | 状态 |
 |---|---|---|---|
-| (D5) Vault visual confusion 🔒 | PromptDialog vault variant 加固定锁图标；question variant 加 footnote“此对话框非 vault 授权”；补 render smoke | ~20 | ⏭️ |
+| **(D5)** Vault visual confusion 🔒 | PromptDialog vault variant 加固定锁图标；question variant 加 footnote“此对话框非 vault 授权”；补 render smoke | ~20 | ✅ **shipped 2026-05-20** — vault variant 标题 prefix 加 🔒 (三重视觉信号：WARNING 色 + 🔒 + 'Vault Release' 文本); question variant 加 muted footnote "(LLM question — not a vault authorization)"。LLM 构造的 prompt_user 不能伪造这些 chrome (未暂露给 LLM)。`smoke:prompt-user-option-list` +5 D5 assertion + 1 negative test。 |
 | **(D7)** Compaction defer for vault | vault-authorize.ts export `isVaultDialogInFlight()`；compaction-tuner 添 OR 条件。复用 `getPendingPromptCount` 的 hook 模式，避免引入跨扩展反向依赖 | ~15 | ✅ **shipped 2026-05-20** — 新 `extensions/compaction-tuner/vault-defer.ts` 叶模块镜像 `prompt-user-defer.ts`；`vault-authorize.ts` 新增公共 API `isVaultDialogInFlight()`；`abrain/index.ts` activate() 发布 `__abrainVaultDialogInFlight` hook 同用 `defineProperty configurable:false` 加固；compaction-tuner trigger 路径添独立 audit reason `vault_dialog_pending`。新 `smoke:compaction-tuner-vault-defer` 14 assertion + 3 negative test 双向锁定（helper 常返 false / trigger 路径刪 vault check / hardening 退化 `configurable:true` 都能 fail-fast）。不含 multi-LLM audit——镜像 P3a (`prompt-user-defer.ts`) 已经三轮审计过的成熟模式，仅需 negative test 验证 assertion 生效。 |
-| (i) 40-col narrow terminal hint wrap | vault hint text 按 width 分档或缩短；DEEPSEEK 指出与 (D5) 同 batch 一起测（(D5) 改变渲染高度可能与窄终端 wrap 叠加） | ~10 | ⏭️ |
-| (f.arch) Vault auth label/value 拆分架构 | 拆 display label / stable enum value：PromptDialog result 返回 stable value，mapping 层产生 locale-specific label。audit 中永远写 stable value。同步改 smoke 验证 value 稳定 + label 可本地化。具体翻译文案留空 (f.copy) | ~40 | ⏭️ |
+| **(i)** 40-col narrow terminal hint wrap | vault hint text 按 width 分档或缩短 | ~10 | ✅ **shipped 2026-05-20** — `BuildDialogArgs` 新 `compactHint?: boolean`；vault variants 默认 true (hint 拆 typeHint / actionHint 两行), question variant default false (LLM-facing 宽终端假设)；40-col 终端现在 wrap 在确定边界。`smoke:prompt-user-option-list` +3 i assertion + 1 negative test。 |
+| **(f.arch)** Vault auth label/value 拆分架构 | 拆 display label / stable enum value | ~40 | ✅ **shipped 2026-05-20** — `BuildDialogArgs` 新 `labelFor?: (rawValue) => string`；OptionList items 明确分离 value (稳定 enum) 与 label (显示文本)。`VAULT_RELEASE_AUTH_CHOICES` / `VAULT_BASH_OUTPUT_AUTH_CHOICES` 文档明确声明为 STABLE ENUM + 新增 `VaultReleaseChoice` / `VaultBashOutputChoice` 类型别名。新增 `vaultReleaseDisplayLabel` / `vaultBashOutputDisplayLabel` (今日 identity、预留 f.copy localize)。`applyChoice` 与所有 audit row 文中以 enum 记录，audit 跨 locale grep 不受 UI 译文影响。`smoke:prompt-user-option-list` +5 f.arch assertion + 1 negative test。Translation copy (f.copy) 仍留空 awaiting user decision。 |
 
 **回归风险**：(D5) 渲染高度变化 × (i) 窄终端 wrap 在同一代码路径交错。~~(D7) 如 `__vaultDialogInFlight` finally 丢解锁，compaction 永远被 defer）动 compaction-tuner 前先补 vault-authorize lock 泄漏 smoke。~~ → (D7) 实际 ship 时发现 `smoke:abrain-vault-reader` 已覆盖 5 条 lock 泄漏 assertion（成功 / pre-abort fast reject / mid-dialog abort / dual-call sequencing / concurrent gate），prerequisite 自动满足。
 
@@ -129,11 +129,11 @@
 
 1. ~~**Batch A 子组 1** (b + g + D9) — ~50 LOC, 单 commit, 低风险。首先做。~~ ✅ **shipped 2026-05-19** (本表 “Shipped” 区)。
 2. ~~**Batch A 子组 2** (c + d) — ~200 LOC, 新 smoke entry `smoke:abrain-vault-grant-isolation`；三路并行 xhigh audit。INV-E 端到端封口；ui_path 端到端 stamp 验证也在这里。~~ ✅ **shipped 2026-05-19** (`912d5f0` + post-audit fix: 3-way T0 unanimous P0 “smoke 不能抓 ff3dd9e P0” 补 handler E2E)。
-3. **Batch B 部分 shipped** — ~~(D7) ✅ **shipped 2026-05-20** 独立 commit：`compaction-tuner/vault-defer.ts` + `vault-authorize.ts` `isVaultDialogInFlight()` export + `abrain/index.ts` `__abrainVaultDialogInFlight` defineProperty hook + `compaction-tuner/index.ts` 独立 audit reason。初 ship c409cde + post-audit fix。度量口径明确：**diff +lines** ~250 (含注释/JSDoc)，**executable statements** ~90；smoke ~330 diff lines / ~150 executable；3 negative tests double-verified.~~ 剩余 (D5) + (i) + (f.arch) 未做 (估 ~150 diff lines，单 commit)。
+3. **Batch B 全部 shipped (2026-05-20)** — ~~(D7)~~ + ~~(D5+i+f.arch)~~：<br>   • (D7) commits `c409cde` + `157ba38` (post-audit fix)：INV-K 从 prompt_user 拓宽到 vault dialog。`smoke:compaction-tuner-vault-defer` 17 assertion。<br>   • (D5 + i + f.arch) 本轮 commit：Vault 视觉防骗骗化 🔒 + 40-col 宽容 hint 拆 2 行 + label/value 架构拆分（`labelFor` + `vaultReleaseDisplayLabel`/`vaultBashOutputDisplayLabel` 作为 localize hook point）。`smoke:prompt-user-option-list` 54 → 67 (+13 assertion + 4 negative test)。(f.copy) 译文进入 awaiting user decision。
 4. ~~**Batch C** (polish sweep) — ~40 LOC, 单 commit (多 edits[])。~~ ✅ **shipped 2026-05-19** (上表 6/8 完成，2 项顺延 Batch D)。实际 ~110 LOC (超过原计划，因为 3rd-round audit deferred 项一并闭环)。
 5. **Batch D** — `redactCredentials` 多-@ + `via=fallback_chain` audit schema，需独立 smoke + audit。~20 LOC。
 
-**合计**：~~4 commit, ~335 LOC~~ → 实际 5+ commit (audit 轮次超出预期，不是 bug — 是三轮 audit 闭环 deferred 项的额外价值)。每 commit 跑一轮三路 xhigh audit。
+**合计**：~~4 commit, ~335 LOC~~ → 实际 6+ commit。Batch A/B/C 均 ship，仅剩 Batch D + (f.copy) translation copy。每 commit 跑一轮三路 xhigh audit（镜像 P3a 的 D7 例外）。
 
 ### 本表说明
 

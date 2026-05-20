@@ -560,7 +560,12 @@ function buildWizard(questions, variant = "question") {
 // Render-only helper for static-output assertions (vault variant tests
 // below don't need the resolved promise — they read the rendered lines
 // to verify allowOther / titlePrefix / hint / progress wiring).
-function renderRoot(questions, variant, reason = "test reason") {
+//
+// Batch B (D5/i/f.arch), 2026-05-20: optional `extra` accepts
+// `labelFor` (f.arch) and `compactHint` (i) overrides for new
+// assertions below. Default behavior preserved for all existing
+// callers (extra=undefined).
+function renderRoot(questions, variant, reason = "test reason", extra) {
   let resolved = null;
   const root = buildPromptDialog({
     params: { reason, questions, timeoutSec: 30 },
@@ -569,6 +574,8 @@ function renderRoot(questions, variant, reason = "test reason") {
     theme: fullTheme,
     pitui: pituiBag,
     onDone: (r) => { resolved = r; },
+    labelFor: extra?.labelFor,
+    compactHint: extra?.compactHint,
   });
   const lines = root.render(80);
   return { root, lines, joined: lines.join("\n"), getResolved: () => resolved };
@@ -1118,6 +1125,240 @@ check("P3b render: vault_release with label='Other' → plain option, NOT OTHER_
   }
   if (r.answers.q[0] !== "Other") {
     throw new Error(`expected literal 'Other' value, got ${JSON.stringify(r.answers.q)} — OTHER_VALUE sentinel leaked into vault variant`);
+  }
+});
+
+// ══ ADR 0022 Batch B: D5 + i + f.arch (2026-05-20) ══════════════════════════
+//
+// (D5) Visual confusion defense: lock icon 🔒 in vault title chip;
+//      anti-spoof footnote 'not a vault authorization' in question variant.
+// (i)  40-col narrow terminal: vault hint split across two text rows.
+// (f.arch) label/value separation: labelFor maps stable enum to display
+//      label; returned answer is the enum, not the label.
+//
+// All three are tested via real-render assertions (renderRoot uses the
+// actual buildPromptDialog) + driving-input assertions (submit/cancel).
+
+check("Batch B (D5): vault_release title prefix contains 🔒 lock icon", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+  );
+  if (!joined.includes("\u{1F512}")) {
+    throw new Error(`vault_release title MUST contain 🔒 (D5 visual signal):\n${joined}`);
+  }
+  // The icon must be IN the warning-colored title chip.
+  if (!/\[WARNING\][^\[]*\u{1F512}/u.test(joined)) {
+    throw new Error(`🔒 must appear inside the warning-colored title chip:\n${joined}`);
+  }
+});
+
+check("Batch B (D5): bash_output_release title prefix contains 🔒 lock icon", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "No" }, { label: "Yes once" }] }],
+    "bash_output_release",
+  );
+  if (!joined.includes("\u{1F512}")) {
+    throw new Error(`bash_output_release title MUST contain 🔒:\n${joined}`);
+  }
+});
+
+check("Batch B (D5): question variant title does NOT contain 🔒", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "A" }, { label: "B" }] }],
+    "question",
+  );
+  if (joined.includes("\u{1F512}")) {
+    throw new Error(`question variant leaked 🔒 (vault visual signal):\n${joined}`);
+  }
+});
+
+check("Batch B (D5): question variant renders anti-spoof footnote", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "A" }, { label: "B" }] }],
+    "question",
+  );
+  if (!/not a vault authorization/i.test(joined)) {
+    throw new Error(`question variant MUST render anti-spoof footnote:\n${joined}`);
+  }
+  // Footnote must be muted-color (low visual weight).
+  if (!/\[MUTED\][^\[]*not a vault authorization/i.test(joined)) {
+    throw new Error(`footnote must be muted-color:\n${joined}`);
+  }
+});
+
+check("Batch B (D5): vault_release does NOT render the question footnote", () => {
+  const { joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+  );
+  if (/not a vault authorization/i.test(joined)) {
+    throw new Error(`vault_release leaked question-only footnote:\n${joined}`);
+  }
+});
+
+check("Batch B (i): vault_release hint split across two text rows", () => {
+  const { lines, joined } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+  );
+  const typeHintRow = lines.find((l) => /↑↓ navigate/.test(l));
+  if (!typeHintRow) throw new Error(`could not find ↑↓ navigate row:\n${joined}`);
+  if (/enter authorize|esc deny/.test(typeHintRow)) {
+    throw new Error(`vault hint should split: typeHint row leaked action hints:\n${typeHintRow}`);
+  }
+  const actionRow = lines.find(
+    (l) => /enter authorize/.test(l) && /esc deny/.test(l),
+  );
+  if (!actionRow) {
+    throw new Error(`could not find combined action-hint row:\n${joined}`);
+  }
+  if (/↑↓ navigate/.test(actionRow)) {
+    throw new Error(`action row leaked ↑↓ navigate:\n${actionRow}`);
+  }
+});
+
+check("Batch B (i): question variant keeps single-row hint by default", () => {
+  const { lines } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "A" }, { label: "B" }] }],
+    "question",
+  );
+  const combined = lines.find(
+    (l) => /↑↓ navigate/.test(l) && /enter submit/.test(l) && /esc cancel/.test(l),
+  );
+  if (!combined) {
+    throw new Error(`question variant should render combined hint row:\n${lines.join("\n")}`);
+  }
+});
+
+check("Batch B (i): caller can force compactHint=true on question variant", () => {
+  const { lines } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "A" }, { label: "B" }] }],
+    "question",
+    "test reason",
+    { compactHint: true },
+  );
+  const typeHintRow = lines.find((l) => /↑↓ navigate/.test(l));
+  if (!typeHintRow) throw new Error("no ↑↓ navigate row");
+  if (/enter submit/.test(typeHintRow)) {
+    throw new Error("forced compactHint=true should split hint rows");
+  }
+});
+
+check("Batch B (f.arch): labelFor maps display text; returned value is the stable enum", () => {
+  const { root, getResolved, joined } = renderRoot(
+    [{ id: "q", header: "Release github-token?", question: "q?", type: "single",
+      options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+    "reason",
+    { labelFor: (v) => (v === "Yes once" ? "本次允许" : v === "No" ? "拒绝" : v) },
+  );
+  if (!/本次允许/.test(joined)) {
+    throw new Error(`labelFor display label '本次允许' not rendered:\n${joined}`);
+  }
+  if (!/拒绝/.test(joined)) {
+    throw new Error(`labelFor display label '拒绝' not rendered:\n${joined}`);
+  }
+  // 'Yes once' must NOT appear in the rendered option-list rows (only
+  // in the title chip header, which is the question.header field).
+  const rowsWithEnglish = joined.split("\n").filter(
+    (l) => /Yes once/.test(l) && (/\[[\sX]?\]/.test(l) || /\u2192/.test(l)),
+  );
+  if (rowsWithEnglish.length > 0) {
+    throw new Error(
+      `Display label leaked: 'Yes once' visible in option-list row:\n${rowsWithEnglish.join("\n")}`,
+    );
+  }
+  // Drive submit on the 'Yes once' row (index 1; ARROW_DOWN once).
+  root.handleInput(ARROW_DOWN);
+  root.handleInput(ENTER);
+  const r = getResolved();
+  if (!r || r.outcome !== "submit") {
+    throw new Error(`expected submit, got ${r?.outcome}`);
+  }
+  if (r.answers.q[0] !== "Yes once") {
+    throw new Error(
+      `f.arch violation: returned answer must be STABLE ENUM 'Yes once', got ${JSON.stringify(r.answers.q)}`,
+    );
+  }
+});
+
+check("Batch B (f.arch): labelFor undefined preserves identity behavior", () => {
+  const { joined, root, getResolved } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "No" }, { label: "Yes once" }] }],
+    "vault_release",
+  );
+  for (const label of ["No", "Yes once"]) {
+    if (!joined.includes(label)) throw new Error(`label '${label}' missing:\n${joined}`);
+  }
+  root.handleInput(ARROW_DOWN);
+  root.handleInput(ENTER);
+  const r = getResolved();
+  if (r.answers.q[0] !== "Yes once") {
+    throw new Error(`identity default: expected 'Yes once', got ${JSON.stringify(r.answers.q)}`);
+  }
+});
+
+check("Batch B (f.arch): labelFor + (Recommended) suffix combine on display label", () => {
+  const { joined, root, getResolved } = renderRoot(
+    [{ id: "q", header: "h", question: "q?", type: "single",
+      options: [{ label: "No" }, { label: "Yes once", recommended: true }] }],
+    "vault_release",
+    "reason",
+    { labelFor: (v) => (v === "Yes once" ? "本次允许" : v) },
+  );
+  if (!/本次允许 \(Recommended\)/.test(joined)) {
+    throw new Error(`expected mapped label + (Recommended):\n${joined}`);
+  }
+  if (/Yes once \(Recommended\)/.test(joined)) {
+    throw new Error(`raw enum + (Recommended) leaked:\n${joined}`);
+  }
+  root.handleInput(ARROW_DOWN);
+  root.handleInput(ENTER);
+  const r = getResolved();
+  if (r.answers.q[0] !== "Yes once") {
+    throw new Error(`recommended row: returned value must be raw enum 'Yes once', got ${JSON.stringify(r.answers.q)}`);
+  }
+});
+
+check("Batch B (f.arch) anchor: vault-authorize.ts forwards labelFor + compactHint", () => {
+  const src = fs.readFileSync(
+    path.join(repoRoot, "extensions/abrain/vault-authorize.ts"),
+    "utf8",
+  );
+  if (!/labelFor\s*[,:]/.test(src)) {
+    throw new Error("vault-authorize.ts must accept + forward labelFor");
+  }
+  if (!/compactHint:\s*true/.test(src)) {
+    throw new Error("vault-authorize.ts must pass compactHint:true to buildDialog");
+  }
+  if (!/STABLE ENUM/.test(src)) {
+    throw new Error("vault-authorize.ts choices doc must declare STABLE ENUM contract");
+  }
+});
+
+check("Batch B (f.arch) anchor: index.ts wires display-label functions on both vault paths", () => {
+  const src = fs.readFileSync(
+    path.join(repoRoot, "extensions/abrain/index.ts"),
+    "utf8",
+  );
+  if (!/export function vaultReleaseDisplayLabel/.test(src)) {
+    throw new Error("index.ts must export vaultReleaseDisplayLabel");
+  }
+  if (!/labelFor:\s*vaultReleaseDisplayLabel/.test(src)) {
+    throw new Error("index.ts vault_release call site must pass labelFor:vaultReleaseDisplayLabel");
+  }
+  if (!/labelFor:\s*vaultBashOutputDisplayLabel/.test(src)) {
+    throw new Error("index.ts bash_output call site must pass labelFor:vaultBashOutputDisplayLabel");
   }
 });
 

@@ -76,8 +76,29 @@ export interface AskVaultAuthorizationArgs {
   header: string;
   /** The actual question shown beneath header. */
   question: string;
-  /** Ordered choice labels — first is the deny default for fail-closed TUI auto-pick. */
+  /**
+   * Ordered stable-enum choice values — first is the deny default
+   * for fail-closed TUI auto-pick. These strings flow back to the
+   * caller AS-IS in the `choice` field of a successful result; the
+   * caller (`authorizeVaultRelease` / `authorizeVaultBashOutput`)
+   * compares them against the same constants (`VAULT_RELEASE_AUTH_CHOICES`
+   * / `VAULT_BASH_OUTPUT_AUTH_CHOICES`) to derive grant state.
+   *
+   * ADR 0022 Batch B (f.arch), 2026-05-20: these are now formally
+   * the STABLE ENUM. Display labels go through `labelFor` below.
+   * Audit logs (vault_release / bash_output lanes) record the enum,
+   * not the display label, so cross-locale grep works.
+   */
   choices: readonly string[];
+  /**
+   * ADR 0022 Batch B (f.arch), 2026-05-20: optional display-label
+   * mapper. When provided, each choice's display text becomes
+   * `labelFor(choice)`; the returned answer remains the raw choice
+   * (stable enum). Today the only caller (vault) passes identity, so
+   * UI text is unchanged. Reserved for (f.copy) localization once the
+   * translation copy is decided.
+   */
+  labelFor?: (rawValue: string) => string;
   /** AbortSignal — when aborted, dialog resolves with `cancelled`. */
   signal?: AbortSignal;
   /** PromptDialog factory injected by activate() in index.ts. */
@@ -237,7 +258,7 @@ export async function askVaultAuthorizationViaDialog(
 async function __runVaultDialog(
   args: AskVaultAuthorizationArgs,
 ): Promise<AskVaultAuthorizationResult> {
-  const { ui, variant, reason, header, question, choices, signal, buildDialog } = args;
+  const { ui, variant, reason, header, question, choices, signal, buildDialog, labelFor } = args;
 
   // Internal PromptUserParams: vault decisions are always one single-question
   // with N options. The schema validator is NOT invoked (we bypass
@@ -347,6 +368,15 @@ async function __runVaultDialog(
           tui,
           theme,
           keybindings: kb,
+          // ADR 0022 Batch B (f.arch), 2026-05-20: pass through label
+          // mapper. buildDialog (PromptDialog) renders display text via
+          // labelFor while keeping the value (returned to handleDone)
+          // as the raw enum from `choices`.
+          labelFor,
+          // compactHint defaults to true inside buildPromptDialog for
+          // vault variants; explicit pass-through here makes the
+          // contract greppable from vault-authorize.
+          compactHint: true,
           onDone: (result) => {
             try {
               done(result);

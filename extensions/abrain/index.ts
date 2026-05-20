@@ -63,6 +63,7 @@ import {
   redactVaultBashContent,
   scopeLabel,
   VAULT_BASH_OUTPUT_AUTH_CHOICES,
+  vaultBashOutputDisplayLabel,
   withheldVaultBashContent,
   type VaultBashRunRecord,
 } from "./vault-bash";
@@ -230,7 +231,45 @@ interface VaultReleaseUi {
   ): Promise<unknown> | unknown;
 }
 
+/**
+ * Stable enum values for vault release authorization. These strings
+ * are simultaneously:
+ *
+ *   (1) the choices passed into `askVaultAuthorizationViaDialog` /
+ *       `ui.select` / `ui.confirm` fallback,
+ *   (2) the values compared against in `authorizeVaultRelease.applyChoice`,
+ *   (3) the strings written into the `vault_release` audit lane,
+ *   (4) the strings tested against `releaseSessionGrants` /
+ *       `releaseRememberDenies` Set membership.
+ *
+ * ADR 0022 Batch B (f.arch), 2026-05-20: explicitly typed as STABLE
+ * ENUM. Display labels for users go through `vaultReleaseDisplayLabel`
+ * below (currently identity; (f.copy) housekeeping will fill in real
+ * localized labels once translation copy is decided). audit and grant
+ * comparison must NEVER use the display label.
+ */
 export const VAULT_RELEASE_AUTH_CHOICES = ["No", "Deny + remember", "Yes once", "Session"] as const;
+export type VaultReleaseChoice = typeof VAULT_RELEASE_AUTH_CHOICES[number];
+
+/**
+ * Display label mapper for vault release choices.
+ *
+ * Identity today: the enum values happen to be English UI text that
+ * users see directly. (f.copy) follow-up will replace this with a
+ * locale-aware mapper once translation copy is approved. The split
+ * exists in the architecture today so the audit-vs-display invariant
+ * can be locked down by smoke before any locale-specific copy lands.
+ *
+ * Callers MUST treat `VAULT_RELEASE_AUTH_CHOICES` strings as opaque
+ * enum tags (compare-by-equality, audit-grep-friendly) and use this
+ * function for any user-facing surface.
+ */
+export function vaultReleaseDisplayLabel(choice: string): string {
+  // f.copy: replace identity with a switch over VaultReleaseChoice
+  // when localized copy lands. Until then, returning `choice` unchanged
+  // preserves current behavior exactly.
+  return choice;
+}
 
 export type AutoCommitStatus = "committed" | "clean" | "not_git" | "failed";
 
@@ -681,6 +720,10 @@ async function authorizeVaultBashOutput(
       header: "Vault bash output",
       question: `Release this command's output to the LLM? (keys: ${keyList || "<none>"})`,
       choices: VAULT_BASH_OUTPUT_AUTH_CHOICES,
+      // ADR 0022 Batch B (f.arch), 2026-05-20: identity today; (f.copy)
+      // follow-up swaps in a locale-aware mapper. Audit always logs
+      // the raw enum from `choices`, not the display label.
+      labelFor: vaultBashOutputDisplayLabel,
       signal,
       buildDialog: cachedVaultDialogBuilder,
     });
@@ -771,6 +814,10 @@ async function authorizeVaultRelease(
       header: `Release ${authKey(scope, key)}?`,
       question: "Authorize plaintext release into LLM context?",
       choices: VAULT_RELEASE_AUTH_CHOICES,
+      // ADR 0022 Batch B (f.arch), 2026-05-20: identity today; (f.copy)
+      // follow-up swaps in a locale-aware mapper. Audit always logs
+      // the raw enum from `choices`, not the display label.
+      labelFor: vaultReleaseDisplayLabel,
       signal,
       buildDialog: cachedVaultDialogBuilder,
     });

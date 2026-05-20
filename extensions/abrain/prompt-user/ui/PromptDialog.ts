@@ -137,6 +137,36 @@ export interface BuildDialogArgs {
   theme: ThemeBag;
   pitui: PiTuiBag;
   onDone: (result: RawDialogResult | null) => void;
+  /**
+   * ADR 0022 Batch B (f.arch), 2026-05-20: label/value split.
+   *
+   * When provided, OptionList items render `labelFor(opt.label)` as
+   * display text while the answer returned to the caller is
+   * `opt.label` itself (the stable enum). Used by vault variants so
+   * future locale-specific UI text never leaks into audit logs or
+   * grant-state comparisons (`applyChoice` in abrain/index.ts compares
+   * against `VAULT_RELEASE_AUTH_CHOICES` literal strings).
+   *
+   * Today identity (`labelFor = (v) => v`) is the only behavior wired,
+   * so this is a zero-behavior-change refactor. The concrete
+   * locale-aware implementation arrives with (f.copy) housekeeping
+   * (which is awaiting user decision on translation copy).
+   *
+   * Undefined for LLM-facing question variant: LLM provides the label
+   * it wants the user to see; there is no separate enum to map to.
+   */
+  labelFor?: (rawValue: string) => string;
+  /**
+   * ADR 0022 Batch B (i), 2026-05-20: hint compaction hint.
+   *
+   * If true, the bottom hint line is split across two text rows
+   * (typeHint on row 1, action hints on row 2) so a 40-column narrow
+   * terminal wraps on a deliberate boundary rather than mid-action.
+   * Vault variants set this true by default since they always render
+   * single-question + warning-accent and need to stay readable on the
+   * narrowest pi terminals.
+   */
+  compactHint?: boolean;
 }
 
 // ── CJK-aware char-level wrap ───────────────────────────────────────
@@ -701,7 +731,7 @@ function componentCursorAtEnd(c: PiTuiComponent): boolean {
 }
 
 export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
-  const { params, variant, tui, theme, pitui, onDone } = args;
+  const { params, variant, tui, theme, pitui, onDone, labelFor } = args;
   const root = new pitui.Container();
 
   const accentColor =
@@ -712,6 +742,10 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
   // P3b: vault variants disallow Other (free-form). 'question' variant
   // (LLM-facing) keeps Other forced-open per ADR 0022 §2.E.
   const allowOther = variant === "question";
+  // Batch B (i), 2026-05-20: vault variants default to compact 2-line
+  // hint so 40-col terminals wrap on a deliberate boundary. Caller can
+  // override (e.g. tests) via args.compactHint.
+  const compactHint = args.compactHint ?? (variant !== "question");
 
   // Build ALL question components up-front so navigating back to a
   // previous question preserves its state.
@@ -719,11 +753,19 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
     if (q.type === "single" || q.type === "multi") {
       const options = q.options ?? [];
       const OTHER_VALUE = "__pu_other__";
-      const items: OptionListItem[] = options.map((opt) => ({
-        value: opt.label,
-        label: opt.recommended ? `${opt.label} (Recommended)` : opt.label,
-        isOther: false,
-      }));
+      const items: OptionListItem[] = options.map((opt) => {
+        // Batch B (f.arch), 2026-05-20: value is the stable enum;
+        // label is the display text. When labelFor is provided, the
+        // display label may differ (e.g. localized); value stays the
+        // raw `opt.label` so audit + grant-state comparison are
+        // locale-invariant.
+        const displayLabel = labelFor ? labelFor(opt.label) : opt.label;
+        return {
+          value: opt.label,
+          label: opt.recommended ? `${displayLabel} (Recommended)` : displayLabel,
+          isOther: false,
+        };
+      });
       if (allowOther) {
         items.push({
           value: OTHER_VALUE,
@@ -756,10 +798,25 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
 
   let currentIdx = 0;
 
+  // Batch B (D5), 2026-05-20: visual confusion defense.
+  //   - Vault variants prepend a lock icon 🔒 so the user has a
+  //     stable visual signal that this dialog will release plaintext
+  //     into LLM context (or a bash command output back to LLM).
+  //   - Question variant adds a muted footnote (rendered in
+  //     rebuildLayout) clarifying "not a vault authorization" so an
+  //     LLM-constructed prompt_user dialog mimicking vault wording
+  //     (e.g. options 'Yes once'/'Session') cannot deceive the user.
+  //
+  // The lock icon goes INSIDE the title chip; the chip itself is
+  // already painted with `accentColor` (warning for vault, accent for
+  // question). Together: warning color + lock icon + 'Vault Release'
+  // wording = three independent visual signals that this is
+  // a real vault authorization. Removing any one would not be enough
+  // to forge a convincing fake.
   const titlePrefix =
     variant === "question" ? "Question" :
-    variant === "vault_release" ? "Vault Release" :
-    "Vault Bash Output";
+    variant === "vault_release" ? "🔒 Vault Release" :
+    "🔒 Vault Bash Output";
 
   // R8 (post-T0 OPUS xhigh P1#2, 2026-05-18): unified per-question
   // validation. Hoisted above wipeAllSecrets / finishWithSubmit so
@@ -860,13 +917,50 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
         : q.type === "text"
           ? "type to fill"
           : "type to fill (masked; paste with Ctrl+Shift+V / Cmd+V / mouse middle-click)";
-    root.addChild(
-      new pitui.Text(
-        theme.fg("dim", `${typeHint} • ${enterHint}${arrowHint} • ${cancelHint}`),
-        1,
-        0,
-      ),
-    );
+    // Batch B (i), 2026-05-20: compactHint splits the hint across two
+    // rows (typeHint on row 1, action hints on row 2) so 40-col
+    // narrow terminals wrap on a deliberate boundary rather than
+    // mid-action. compactHint defaults to true for vault variants.
+    // Combined hint is preserved for variant="question" (LLM-facing,
+    // wider-terminal assumption holds in practice).
+    if (compactHint) {
+      root.addChild(new pitui.Text(theme.fg("dim", typeHint), 1, 0));
+      root.addChild(
+        new pitui.Text(
+          theme.fg("dim", `${enterHint}${arrowHint} • ${cancelHint}`),
+          1,
+          0,
+        ),
+      );
+    } else {
+      root.addChild(
+        new pitui.Text(
+          theme.fg("dim", `${typeHint} • ${enterHint}${arrowHint} • ${cancelHint}`),
+          1,
+          0,
+        ),
+      );
+    }
+    // Batch B (D5), 2026-05-20: anti-spoofing footnote on question
+    // variant. An LLM-constructed prompt_user dialog mimicking vault
+    // wording (header='Release github-token?', options 'Yes once' /
+    // 'Session') cannot reproduce this footnote (LLM does not get to
+    // override the rendered chrome). Three-signal defense: warning
+    // color is ABSENT in question variant; 🔒 is ABSENT; this
+    // footnote is PRESENT. Forging requires bypassing the entire
+    // PromptDialog substrate, which is sub-pi-blocked + audit-logged.
+    if (variant === "question") {
+      root.addChild(
+        new pitui.Text(
+          theme.fg(
+            "muted",
+            "(LLM question — not a vault authorization)",
+          ),
+          1,
+          0,
+        ),
+      );
+    }
     root.addChild(new pitui.DynamicBorder(paint));
   };
 
@@ -963,6 +1057,8 @@ export function makeBuildDialog(pitui: PiTuiBag): (
     tui: unknown;
     theme: unknown;
     keybindings: unknown;
+    labelFor?: (rawValue: string) => string;
+    compactHint?: boolean;
   },
 ) => unknown {
   return (a) =>
@@ -973,5 +1069,7 @@ export function makeBuildDialog(pitui: PiTuiBag): (
       theme: a.theme as ThemeBag,
       pitui,
       onDone: a.onDone,
+      labelFor: a.labelFor,
+      compactHint: a.compactHint,
     });
 }

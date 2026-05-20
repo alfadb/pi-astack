@@ -137,6 +137,22 @@ export interface PromptDialogDeps {
     tui: unknown;
     theme: unknown;
     keybindings: unknown;
+    /**
+     * ADR 0022 Batch B (f.arch), 2026-05-20: label/value split for
+     * vault variants. When provided, OptionList renders
+     * `labelFor(opt.label)` as display text while the returned answer
+     * is the raw `opt.label` (stable enum). LLM-facing `prompt_user`
+     * leaves this undefined — LLM passes the label it wants the user
+     * to see, no separate enum exists.
+     */
+    labelFor?: (rawValue: string) => string;
+    /**
+     * ADR 0022 Batch B (i), 2026-05-20: split the bottom hint across
+     * two text rows so 40-col terminals wrap on a deliberate
+     * boundary. Defaults to true for vault variants inside
+     * `buildPromptDialog`; callers normally do not need to pass this.
+     */
+    compactHint?: boolean;
   }) => unknown;
 }
 

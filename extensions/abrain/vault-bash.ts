@@ -21,7 +21,29 @@ import * as path from "node:path";
 import { validateKey, type VaultScope } from "./vault-writer";
 import { releaseSecret, redactWithReleasedSecrets, type ReleaseSecretResult } from "./vault-reader";
 
+/**
+ * Stable enum values for vault bash output authorization (deciding
+ * whether the output of a vault-secret-bearing bash command should be
+ * sent back to the LLM). Same architectural role as
+ * `VAULT_RELEASE_AUTH_CHOICES` in abrain/index.ts (ADR 0022 Batch B
+ * (f.arch), 2026-05-20): these strings are the STABLE ENUM — used by
+ * audit grep, grant Set membership, and `applyChoice` equality
+ * comparison. Display labels come from `vaultBashOutputDisplayLabel`
+ * below (currently identity; (f.copy) follow-up adds localization).
+ */
 export const VAULT_BASH_OUTPUT_AUTH_CHOICES = ["No", "Yes once", "Session"] as const;
+export type VaultBashOutputChoice = typeof VAULT_BASH_OUTPUT_AUTH_CHOICES[number];
+
+/**
+ * Display label mapper for vault bash output choices.
+ *
+ * Identity today (same rationale as `vaultReleaseDisplayLabel` in
+ * abrain/index.ts). Audit + grant comparison must NEVER use the
+ * display label.
+ */
+export function vaultBashOutputDisplayLabel(choice: string): string {
+  return choice;
+}
 
 export type VaultVarPrefix = "VAULT_" | "GVAULT_" | "PVAULT_";
 
