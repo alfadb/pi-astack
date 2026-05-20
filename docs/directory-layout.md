@@ -23,6 +23,7 @@ pi-astack/
 │   ├── memory/
 │   ├── model-curator/
 │   ├── model-fallback/
+│   ├── persistent-input-history/
 │   ├── sediment/
 │   └── vision/
 ├── scripts/
@@ -64,6 +65,7 @@ Vendor dirs are git submodules. Treat them as read-only source material; port id
 | `extensions/model-curator/` | model whitelist + capability prompt injection. |
 | `extensions/model-fallback/` | retry/fallback chain after model errors. |
 | `extensions/compaction-tuner/` | context percent compaction trigger. |
+| `extensions/persistent-input-history/` | persist editor ↑/↓ history across pi restarts, per-cwd; absorbs renderInitialMessages replay; `/history-compact` + `/history-status` commands. |
 | `extensions/_shared/` | shared runtime infrastructure (NOT a pi-loaded extension; library imported by all others). Key exports in `runtime.ts`: `resolveActiveProject` (strict three-file binding resolver — the actual home of the "Vault P1 active project resolver" called by abrain/memory/sediment/dispatch), `bindAbrainProject`, `abrainProjectDir`, `acquireFileLock`/`withFileLock`, `ensureSedimentLegacyMigrated`, `ensureProjectGitignoredOnce`; `footer-status.ts` holds the cross-extension footer key registry. |
 
 ## 4. Runtime paths
@@ -88,6 +90,16 @@ Vendor dirs are git submodules. Treat them as read-only source material; port id
 ```
 
 `.pi-astack/` 是 runtime state/log/output，应该 gitignored。sediment project-scope audit 与 checkpoint/locks 仍保留在 project side，因为它们记录本项目 session/window/candidate 事件；跨项目 entry write lock 在 abrain side。
+
+### 4.1a User-level runtime artifacts (cwd-keyed, not project-keyed)
+
+```text
+~/.pi/agent/input-history/
+├── .notified                              # marker: privacy notice already shown for this machine
+└── <sha1(cwd)[0..8]>--<slug>.jsonl       # one file per cwd; chmod 0600 best-effort
+```
+
+`persistent-input-history` deliberately lives at the **user level**, not under `<projectRoot>/.pi-astack/`, because the buffer is keyed by **cwd, not project**: the same project at different sub-cwds should get independent buffers (monorepo packages, scratch dirs), and starting pi outside any project should still get history. Should be gitignored at the user dotfiles repo level (e.g. `~/.pi/.gitignore`).
 
 ### 4.2 Abrain repository
 

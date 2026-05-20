@@ -217,6 +217,48 @@
       }
     },
 
+    "persistentInputHistory": {
+      "type": "object",
+      "description": "Persist the editor's ↑/↓ prompt history across pi restarts, per-cwd (extensions/persistent-input-history/). Replaces pi-tui's default in-memory-only, 100-cap, no-persistence history. On every session_start, installs a CustomEditor subclass that preloads `<historyDir>/<sha1(cwd)>--<slug>.jsonl` into the buffer (newest at front, capped maxEntries), silently absorbs pi's renderInitialMessages populateHistory pass via an expectedReplay matcher so the current session's messages are NOT re-appended on every restart, and appends every new submitted prompt with chmod 600. Default `enabled: true` because the extension is pure data-persistence with no LLM-loop side effects. Privacy: every prompt (including expanded paste content) lands on disk in plain text; use /history-compact to dedupe or delete the directory to purge. Composition: calls setEditorComponent unconditionally; cannot coexist with other custom-editor extensions (e.g. modal-editor).",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch. When false the extension factory returns early before any hooks register, leaving pi's native in-memory-only history behavior."
+        },
+
+        "historyDir": {
+          "type": "string",
+          "default": "~/.pi/agent/input-history",
+          "description": "Where per-cwd JSONL history files live. Tilde-expanded if it starts with ~. Chosen at user level (NOT <projectRoot>/.pi-astack/...) because history is keyed by cwd, not project; the same project at different sub-cwds should have independent buffers, and starting pi outside any project should still get history."
+        },
+
+        "maxEntries": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 1,
+          "description": "Hard cap on in-memory buffer length (newest at front). Disk file is NOT auto-truncated; use /history-compact for cleanup."
+        },
+
+        "maxEntryBytes": {
+          "type": "number",
+          "default": 8192,
+          "minimum": 64,
+          "description": "Skip persisting any single entry whose UTF-8 byte length exceeds this. Defends against expanded paste blobs blowing up the JSONL. Keeping each line under PIPE_BUF (~4 KB on Linux) also makes concurrent appends from multiple pi instances safe; default 8192 is a soft compromise."
+        },
+
+        "maxPreloadReadBytes": {
+          "type": "number",
+          "default": 5242880,
+          "minimum": 4096,
+          "description": "When the on-disk history file exceeds this size, only the tail window of this many bytes is read on preload (and the first, likely-truncated line of that window is discarded). Keeps TUI startup snappy on installations that accumulate huge files."
+        }
+      }
+    },
+
     "compactionTuner": {
       "type": "object",
       "description": "Trigger pi's compaction at a configurable percentage of contextWindow (extensions/compaction-tuner/). Solves the problem that pi's built-in `compaction.reserveTokens` is an absolute number, while user-stack models span 200k–1M+ contextWindow — a single number can't represent a fixed percentage uniformly. Hooks `agent_end`, reads `ctx.getContextUsage()`, and calls `ctx.compact()` once `percent >= thresholdPercent`. Pi's built-in threshold (default reserveTokens=16384, ~92% on 200k) remains as a last-resort safety net. Audit log: `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`.",

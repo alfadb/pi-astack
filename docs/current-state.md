@@ -21,6 +21,7 @@ pi-astack 当前是一个 **local pi package**：提供 9 个扩展、10 个 LLM
 | `extensions/model-curator/` | 模型能力表注入 | shipped；curated/raw model snapshot。 |
 | `extensions/model-fallback/` | error hooks | shipped；初始模型重试耗尽后 fallback。 |
 | `extensions/compaction-tuner/` | `/compaction-tuner ...` | shipped；按 context 百分比触发 compaction。INV-K (ADR 0022 P3a) — 检测到待决 `prompt_user` 对话时推迟本轮 compaction。 |
+| `extensions/persistent-input-history/` | `setEditorComponent` 子类；`/history-compact`、`/history-status` | shipped；按 cwd 持久化 ↑/↓ 输入历史到 `~/.pi/agent/input-history/<sha1(cwd)>--<slug>.jsonl`。默认 `enabled: true`（纯数据持久化，无 LLM 路径副作用）。 |
 
 ### 2.2 Vendor methodology references
 
