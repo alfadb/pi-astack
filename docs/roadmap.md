@@ -60,7 +60,9 @@
 | (b)+(g)+(D9) Batch A 子组 1 | `ff3dd9e` | `VaultEvent.ui_path` 字段 + `startup_telemetry` op + ADR 0014 Lane V 共享 substrate 注释。`authorizeVaultRelease` / `authorizeVaultBashOutput` 返回 `ui_path` (overlay/select/confirm/cached/none) 、audit 函数接受 ui_path 参数、调用点全部 wire 传递。activate() 检测 builder=null 设 flag，session_start once-per-process 发出带 `ui_path:"select"` 的 telemetry row 与 `ui.notify` warning。`smoke:abrain-vault-writer` +2 assertion (28→30)：ui_path round-trip + startup_telemetry schema。 |
 | → Batch A 子组 1 post-audit fix (P0 + P1-1) | `c2cbe85` | **2026-05-19 OPUS-4-7 + DEEPSEEK-V4-pro xhigh 三路 audit 测出共识 P0**：`ff3dd9e` 中 `tool_result` bash output handler 的 inline 调用未随 `authorizeVaultBashOutput` 返回型重构同步，`decision !== "release"` 变成 object-vs-string 永真 → 所有 vault bash output 被静默 withhold，且 `auditBashOutput` 两个调用点都没传 `ui_path` (g) 在 bash_output lane 上未生效。修：`outcome.decision !== "release"` 与两处传 `outcome.ui_path`。顺手修 OPUS P1-1：activate() 成功路径 clear `vaultDialogBuilderInitFailed=false` 防热 reload false-positive telemetry。`smoke:abrain-vault-bash` +1 assertion (18→19) grep-anchor 锁 “outcome.decision !== release” 与 “outcome.ui_path”，同时 negative anchor 拒绝 `decision !== "release"` 重现 (outer-envelope catch 的 legitimate 2-arg 调用被有意排除，详 OPUS P1-5)。Negative test 双向验证。**P1-2 (OPUS) / P1-4 (DEEPSEEK) coverage gap 仍留 Batch A 子组 2 (stage-index `smoke:abrain-vault-grant-isolation`) 端到端覆盖**。其余 P1（OPUS P1-3 telemetry i18n 与 “wait for first ui.custom” 异步、P1-4 两个 outcome shape 不一致、P1-5 outer-catch outcome hoist、P1-6 ADR 0022 INV table 加 INV-O、DEEPSEEK P1-2 startup_telemetry 语义漂移、P1-3 `none` vs absent）与 P2 项进 Batch C polish sweep。 |
 | (c)+(d) Batch A 子组 2: stage-index grant isolation E2E (初 ship) | `912d5f0` | 新 `scripts/smoke-abrain-vault-grant-isolation.mjs` (17 assertion)。Stage `extensions/abrain/index.ts`，通过 `__authorizeVaultReleaseForTests` / `__authorizeVaultBashOutputForTests` 驱动五个 UI substrate 分支。覆盖：**(c)** INV-E grant isolation、fail-closed envelope、**(d)** ui.select/confirm fallback、**(g)** ui_path 端到端 stamp。Vault 释放 6 + Bash output 5 + grant isolation 3 + telemetry 1 + export shape 1 + cached fast-path 1 = 17 assertion。 |
-| → Batch A 子组 2 post-audit fix (3-way T0 一致 P0) | `863d6e6` + 本轮 fix-up | **2026-05-19 OPUS-4-7 + GPT-5.5 + DEEPSEEK-V4-pro xhigh 三路一致 P0** (罕见 unanimous)：912d5f0 的 smoke 并不能抓住 ff3dd9e 的 P0。原因：ff3dd9e 的 bug 在 `tool_result` handler 调用点，而 smoke 只直接调 `__authorizeVaultBashOutputForTests` helper — helper 返回在 ff3dd9e 时已正确，bug 完全在 caller 侧。修：抽 `processVaultBashToolResult` 为 module-level function (eventRegistry listener 变为薄委托)，加 `__handleVaultBashToolResultForTests` / `__seedVaultBashRunForTests` / `__clearVaultBashRunsForTests` test-only exports。smoke +5 handler E2E assertion (17→22)：release path 能到达并 audit 带 ui_path、withhold path、non-bash bypass、unknown toolCallId bypass、outer-envelope fail-closed。以及 3 路 reviewer P1 共识：resetState 中 telemetry reset 的 `typeof` silent-skip guard 改为 require-time fail-fast 校验 10 个 test-only exports、顶部加 EXPECTED_ASSERTIONS=22 锁住 count 防静默收缩。**Negative test 双向验证**：把 fix 退回 ff3dd9e bug 后运行，handler E2E release-path assertion 立即 fail — 证明新 smoke 真能拦截 P0。 |
+| → Batch A 子组 2 post-audit fix (3-way T0 一致 P0) | `863d6e6` | **2026-05-19 OPUS-4-7 + GPT-5.5 + DEEPSEEK-V4-pro xhigh 三路一致 P0** (罕见 unanimous)：912d5f0 的 smoke 并不能抓住 ff3dd9e 的 P0。原因：ff3dd9e 的 bug 在 `tool_result` handler 调用点，而 smoke 只直接调 `__authorizeVaultBashOutputForTests` helper — helper 返回在 ff3dd9e 时已正确，bug 完全在 caller 侧。修：抽 `processVaultBashToolResult` 为 module-level function，加 handler E2E test-only exports。smoke +5 handler E2E assertion (17→22)。**Negative test 双向验证**。 |
+| → Batch A 子组 2 third-round audit fix | `d5d5881` | **第 3 轮 GPT-5.5 + DEEPSEEK-V4-pro 2/2 共识 P1** (OPUS 本轮 timeout)：863d6e6 的 commit body 声称 require-time fail-fast 已加，但 edit batch atomic rollback 只营 commit message，代码中从未落实。修：真正加 fail-fast loop 验证 11 个 test-only exports + DEEPSEEK P2-2 vacuous assertion 改为诚实断言 + GPT P2-1 count drift 不再受 failures.length 干扰 + docs sync。**双 Negative test 验证**：加 bogus export 名后 fail-fast 立即 throw；改 EXPECTED=99 后 drift 立即 fail。 |
+| Batch C polish sweep + 3rd-round audit deferred closure | _本轮_ | **本 batch 同时闭环原计划与 3 轮 audit deferred 项**：(1) `__secretLengths` → `__secretLengthsInternal` 改名明确“非 wire”、(2) `displayWidth` helper grep 发现早被删 (no-op)、(3) `__abrainPromptUserGetPending` hook 改用 `Object.defineProperty configurable:false writable:false` 防 LLM eval / extension 静默重绑为 `() => 0` 绕过 INV-K compaction defer + `smoke:abrain-vault-bash` 19→20 grep anchor、(4) `__seedVaultBashRunForTests` / `__clearVaultBashRunsForTests` 加 `PI_ASTACK_ENABLE_TEST_HOOKS=1` env gate (GPT P1#2 3rd round)、(5) **DEEPSEEK P2-1 + P2-2 闭环**：发现原 outer-envelope test 是 vacuous-true 原因是原代码 outer try 内 `vaultBashRuns.delete(toolCallId)` 在 throw 之前已跱，outer catch 再 `.get()` 永远 undefined — fallback 路径不可达。修：record 提升到 outer scope + `auditBashOutput` 外 加 try/catch + fallback `safeAuditAppend({key:"(unreadable)", reason:"outer_catch_audit_failed:*"})`。outer-envelope assertion 升级为验证 fallback row 真存在。(6) docs/reference/smoke-tests.md 从 15 →25 + docs/directory-layout.md 从 17 →25 同步。**Negative test**：移除 env var 、重现 record.delete-before-throw、重现原 plain assignment 都能独立拦截。 |
 
 ### ❌ Closed as won't-fix (三路共识 / 主调采纳)
 
@@ -109,24 +111,28 @@
 
 **回归风险**：(D5) 渲染高度变化 × (i) 窄终端 wrap 在同一代码路径交错。(D7) 如 `__vaultDialogInFlight` finally 丢解锁，compaction 永远被 defer—— 动 compaction-tuner 前先补 vault-authorize lock 泄漏 smoke。
 
-### 📦 Batch C — P2 polish sweep (一次 edit + 多 edits[] 完成)
+### 📦 Batch C — P2 polish sweep + 3rd-round audit deferred (partial shipped)
 
-| 项 | 做法 | LOC |
-|---|---|---|
-| `__secretLengths` 重命名 | 改为 `__secretLengthsInternal` 或 Symbol；明确“非 wire” | ~10 |
-| `redactCredentials` 多-@ 边界 | userinfo vs `user@host@realm` 区分，只 redact userinfo | ~10 |
-| `displayWidth` East Asian | **先 grep `PromptDialog.ts:145` 的 helper 是否仍在 layout 路径**；若 dead code 直接删（DEEPSEEK 提示：fix vs delete 需 audit后决定） | ~5 或 delete |
-| `globalThis` hook non-configurable | `Object.defineProperty(globalThis, '__abrain*', { configurable:false, writable:false })` | ~5 |
-| `via=fallback_chain` audit 结构化 | model-fallback audit 加 `{ via, fallbackSteps }`；诊断价值有限但顺手做 | ~10 |
+| 项 | 做法 | LOC | 状态 |
+|---|---|---|---|
+| `__secretLengths` 重命名 | 改为 `__secretLengthsInternal` 明确“非 wire” | ~10 | ✅ |
+| `displayWidth` East Asian | grep 发现 helper 早被删 (stale backlog entry) | 0 | ✅ (no-op) |
+| `globalThis` hook non-configurable | `Object.defineProperty(globalThis, '__abrainPromptUserGetPending', { configurable:false, writable:false })` + grep-anchor smoke | ~25 | ✅ |
+| `PI_ASTACK_ENABLE_TEST_HOOKS` env gate | `__seedVaultBashRunForTests` / `__clearVaultBashRunsForTests` 添加 env gate（GPT P1#2 3rd round） | ~15 | ✅ |
+| outer catch `auditBashOutput` defense-in-depth | `record` hoist 到 outer scope；加 fallback `safeAuditAppend` 漏网 (DEEPSEEK P2-1+P2-2 3rd round) | ~30 | ✅ |
+| docs/reference/smoke-tests.md + directory-layout.md 同步 | 补全 25 条 smoke (从 17 过期) | ~30 | ✅ |
+| `redactCredentials` 多-@ 边界 | userinfo vs `user@host@realm` 区分，只 redact userinfo — 需新 smoke fixture | ~10 | ⏭️ Batch D |
+| `via=fallback_chain` audit 结构化 | model-fallback audit 加 `{ via, fallbackSteps }`；audit schema 变动需独立 audit | ~10 | ⏭️ Batch D |
 
 ### 执行优先级
 
 1. ~~**Batch A 子组 1** (b + g + D9) — ~50 LOC, 单 commit, 低风险。首先做。~~ ✅ **shipped 2026-05-19** (本表 “Shipped” 区)。
 2. ~~**Batch A 子组 2** (c + d) — ~200 LOC, 新 smoke entry `smoke:abrain-vault-grant-isolation`；三路并行 xhigh audit。INV-E 端到端封口；ui_path 端到端 stamp 验证也在这里。~~ ✅ **shipped 2026-05-19** (`912d5f0` + post-audit fix: 3-way T0 unanimous P0 “smoke 不能抓 ff3dd9e P0” 补 handler E2E)。
-3. **Batch B** (D5 + D7 + i + f.arch) — ~85 LOC, 单 commit。
-4. **Batch C** (polish sweep) — ~40 LOC, 单 commit (多 edits[])。
+3. **Batch B** (D5 + D7 + i + f.arch) — ~85 LOC, 单 commit。还未做。
+4. ~~**Batch C** (polish sweep) — ~40 LOC, 单 commit (多 edits[])。~~ ✅ **shipped 2026-05-19** (上表 6/8 完成，2 项顺延 Batch D)。实际 ~110 LOC (超过原计划，因为 3rd-round audit deferred 项一并闭环)。
+5. **Batch D** — `redactCredentials` 多-@ + `via=fallback_chain` audit schema，需独立 smoke + audit。~20 LOC。
 
-**合计**：4 commit, ~335 LOC（1 commit 已 ship，剩 ~285 LOC）。每 commit 跑一轮三路 high-thinking audit。
+**合计**：~~4 commit, ~335 LOC~~ → 实际 5+ commit (audit 轮次超出预期，不是 bug — 是三轮 audit 闭环 deferred 项的额外价值)。每 commit 跑一轮三路 xhigh audit。
 
 ### 本表说明
 

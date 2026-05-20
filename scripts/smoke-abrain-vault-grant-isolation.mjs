@@ -164,6 +164,13 @@ const abrainHome = fs.mkdtempSync(path.join(tmpDir, "abrain-home-"));
 fs.mkdirSync(path.join(abrainHome, ".state"), { recursive: true, mode: 0o700 });
 process.env.ABRAIN_ROOT = abrainHome;
 
+// ADR 0022 batch C (2026-05-19): opt into plaintext-bearing test hooks
+// (__seedVaultBashRunForTests / __clearVaultBashRunsForTests). Production
+// processes never set this env var; smoke fixtures must explicitly opt in.
+// Removing this line would make the require-time fail-fast loop below
+// surface a thrown exception out of the very first resetState() call.
+process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+
 const indexModule = require(path.join(tmpDir, "index.cjs"));
 
 console.log("abrain — vault authorization grant isolation E2E (batch A subgroup 2)");
@@ -808,27 +815,35 @@ await check("handler E2E: outer-envelope fail-closed catch withholds (OPUS P1-5 
   if (result.details.vault.reason !== "authorization_error") {
     throw new Error(`expected reason=authorization_error, got ${result.details.vault.reason}`);
   }
-  // DEEPSEEK P2-2 (third audit round, 2026-05-19): the previous assertion
-  // `for (const r of rows) { if (...) throw }` was vacuous-true on a
-  // poisoned-record fixture because `auditBashOutput` itself throws on
-  // `record.releases.map(...)` (the very same throw site we tested in
-  // the outer try block), and that exception is swallowed by the inner
-  // `catch { /* best-effort */ }` in the outer-catch path — NO audit row
-  // ever gets written. So iterating an empty array trivially passed.
-  //
-  // The honest contract under test in this fixture is just the OUTER
-  // FAIL-CLOSED RETURN SHAPE (already asserted above). We document the
-  // KNOWN-GAP and defer the audit-fidelity strengthening (DEEPSEEK P2-1:
-  // wrap auditBashOutput in defense-in-depth try/catch + fallback row)
-  // to Batch C. Until then, do NOT pretend this fixture verifies
-  // ui_path absence — a separate fixture is required where the throw
-  // happens AFTER authorizeVaultBashOutput already returned (e.g. by
-  // poisoning record.releases[0].value to be a non-string that breaks
-  // redactVaultBashContent rather than the audit pre-write).
-  //
-  // What we CAN assert here: the outer catch's response does NOT carry
-  // ui_path in result.details.vault (that field only appears on the
-  // success/withhold paths inside the try block).
+  // DEEPSEEK P2-2 (third audit round, 2026-05-19) — NOW CLOSED in Batch C:
+  // the previous assertion `for (const r of rows) { if (...) throw }` was
+  // vacuous-true on this fixture because `auditBashOutput` itself threw
+  // on `record.releases.map(...)` (same throw site as the outer try), and
+  // the inner `catch { /* best-effort */ }` swallowed the exception — NO
+  // audit row was ever written. Batch C (this commit) added defense-in-
+  // depth: when the structured audit fails, the handler writes a minimal
+  // fallback row via safeAuditAppend with `key:"(unreadable)"` and
+  // `reason:"outer_catch_audit_failed:<msg>"`. We can now verify the row
+  // EXISTS and does NOT carry ui_path (the OPUS P1-5 contract).
+  const ocRows = await readAuditRows();
+  const fallbackRows = ocRows.filter(
+    (r) => r.op === "bash_output_withhold" && r.key === "(unreadable)",
+  );
+  if (fallbackRows.length !== 1) {
+    throw new Error(
+      `expected exactly 1 outer-catch fallback audit row (key="(unreadable)"), got ${fallbackRows.length}: ${JSON.stringify(ocRows)}`,
+    );
+  }
+  const fbRow = fallbackRows[0];
+  if (!String(fbRow.reason || "").startsWith("outer_catch_audit_failed:")) {
+    throw new Error(`expected reason='outer_catch_audit_failed:*', got ${JSON.stringify(fbRow.reason)}`);
+  }
+  if ("ui_path" in fbRow) {
+    throw new Error(`outer-catch fallback row MUST omit ui_path (OPUS P1-5), got ${JSON.stringify(fbRow)}`);
+  }
+  // Also: the outer catch's response shape does NOT carry ui_path in
+  // result.details.vault (that field only appears on success/withhold
+  // paths inside the try block).
   if ("ui_path" in (result.details.vault || {})) {
     throw new Error(`outer-catch response vault details MUST NOT carry ui_path: ${JSON.stringify(result.details.vault)}`);
   }

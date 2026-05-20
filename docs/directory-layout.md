@@ -163,21 +163,29 @@ smoke-abrain-backend-detect.mjs
 smoke-abrain-bootstrap.mjs
 smoke-abrain-git-sync.mjs
 smoke-abrain-i18n.mjs
+smoke-abrain-redact.mjs
 smoke-abrain-secret-scope.mjs
 smoke-abrain-vault-bash.mjs
+smoke-abrain-vault-grant-isolation.mjs
 smoke-abrain-vault-identity.mjs
 smoke-abrain-vault-reader.mjs
 smoke-abrain-vault-writer.mjs
+smoke-compaction-tuner-prompt-user.mjs
 smoke-dispatch-input-compat.mjs
+smoke-dispatch-output-format.mjs
 smoke-imagine.mjs
 smoke-memory-sediment.mjs
 smoke-model-fallback-mutation-timing.mjs
 smoke-pi-astack-paths.mjs
+smoke-prompt-user-finalizer.mjs
+smoke-prompt-user.mjs
+smoke-prompt-user-option-list.mjs
+smoke-prompt-user-subpi.mjs
 smoke-vault-subpi-isolation.mjs
 smoke-vision.mjs
 ```
 
-Current count: **17** files, one per `package.json#scripts:smoke:*` entry. Last drift fixed 2026-05-15 (multi-LLM audit added `git-sync` + `vault-identity`).
+Current count: **25** files, one per `package.json#scripts:smoke:*` entry. Last drift fixed 2026-05-19 (ADR 0022 batch C: 17 → 25, added 8 entries since 2026-05-15: `grant-isolation`, `redact`, `compaction-tuner-prompt-user`, `dispatch-output-format`, `prompt-user`, `prompt-user-finalizer`, `prompt-user-option-list`, `prompt-user-subpi`).
 
 See [reference/smoke-tests.md](./reference/smoke-tests.md).
 

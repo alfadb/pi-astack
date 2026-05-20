@@ -296,6 +296,46 @@ await check("post-audit P0 fix anchors: tool_result handler wires outcome.decisi
   }
 });
 
+// ADR 0022 batch C (2026-05-19): grep anchor for non-configurable
+// globalThis hook (`__abrainPromptUserGetPending`). This is the
+// defense-in-depth follow-up to OPUS P1-3 round 2: published as a
+// plain assignment, the INV-K compaction-defer hook could be
+// silently rebound to `() => 0` by a misbehaving extension or LLM
+// eval path, disabling defer and letting compaction tear down
+// active prompt_user dialogs. Anchor the defineProperty +
+// configurable:false form so a future edit that reverts to plain
+// assignment fails this smoke.
+//
+// Negative-test verified manually: replacing `Object.defineProperty`
+// with the prior `(globalThis as ...).X = fn` form makes this fail.
+await check("batch C: __abrainPromptUserGetPending is installed non-configurable", () => {
+  const indexSrc = fs.readFileSync(path.join(repoRoot, "extensions", "abrain", "index.ts"), "utf8");
+  const anchors = [
+    'Object.defineProperty(globalThis, "__abrainPromptUserGetPending"',
+    "configurable: false",
+    "writable: false",
+  ];
+  for (const needle of anchors) {
+    if (!indexSrc.includes(needle)) {
+      throw new Error(
+        `regression: batch C non-configurable hook anchor missing:\n  needle: ${JSON.stringify(needle)}\n  ` +
+          "ADR 0022 batch C made __abrainPromptUserGetPending non-configurable so a " +
+          "misbehaving extension cannot silently rebind it to '() => 0' and disable " +
+          "INV-K compaction defer. If you intentionally reverted, update this anchor.",
+      );
+    }
+  }
+  // Negative anchor: the prior plain-assignment form must NOT reappear
+  // at the activate() publish site. We anchor on the EXACT prior
+  // assignment line, not the type cast or the helper itself.
+  if (indexSrc.includes(".__abrainPromptUserGetPending =\n      ()")) {
+    throw new Error(
+      "regression: plain-assignment publish of __abrainPromptUserGetPending reappeared. " +
+        "Batch C 2026-05-19 replaced this with Object.defineProperty + configurable:false.",
+    );
+  }
+});
+
 console.log("");
 if (failures.length === 0) {
   console.log(`all ok — vault-backed bash helper holds (${total} assertions).`);

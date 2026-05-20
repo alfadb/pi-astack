@@ -841,12 +841,20 @@ async function processVaultBashToolResult(
   // releasing raw vault-touched data to LLM context. Audit row
   // records the failure for forensic diagnosis. (Changed from
   // fail-open in R6 audit, 2026-05-14.)
+  if (event.toolName !== "bash") return;
+  // ADR 0022 batch C (2026-05-19): hoist `record` to outer scope so
+  // the outer catch can audit it. The previous structure read+deleted
+  // record INSIDE the try block, then re-fetched inside the catch —
+  // but the delete had already run when authorizeVaultBashOutput threw,
+  // so the catch's `.get()` returned undefined and the fallback audit
+  // path was unreachable. DEEPSEEK third-audit P2-2 (initial vacuous-
+  // true detection) + OPUS P1-5 (outcome hoist intent) both prompted
+  // this restructure.
+  const record = vaultBashRuns.get(event.toolCallId!);
+  if (!record) return;
+  vaultBashRuns.delete(event.toolCallId!);
+  try { fs.rmSync(record.envFile, { force: true }); } catch {}
   try {
-    if (event.toolName !== "bash") return;
-    const record = vaultBashRuns.get(event.toolCallId!);
-    if (!record) return;
-    vaultBashRuns.delete(event.toolCallId!);
-    try { fs.rmSync(record.envFile, { force: true }); } catch {}
 
     // ADR 0022 housekeeping batch A subgroup 1 post-audit fix
     // (2026-05-19, OPUS-4-7 + DEEPSEEK-V4-pro xhigh consensus P0):
@@ -883,14 +891,36 @@ async function processVaultBashToolResult(
     // genuinely don't know which UI path would have been taken. Leave
     // ui_path unset rather than guessing — the absence of ui_path on
     // this row is itself a diagnostic signal ("never made it to UI").
+    // ADR 0022 batch C (2026-05-19): DEEPSEEK third-audit P2-1 defense
+    // in depth. Previously, if `record.releases` was corrupted (e.g.
+    // outer try threw because releases was a non-array), the inner
+    // `auditBashOutput` itself would re-throw on `.releases.map(...)`
+    // and the outer `catch { /* best-effort */ }` would silently
+    // swallow it. Result: NO audit row at all for the outer-envelope
+    // fail-closed path. Operator forensic trail vanished exactly when
+    // most needed. Now: try the structured audit; on failure write a
+    // minimal fallback row via safeAuditAppend directly so the row
+    // still exists in vault-events.jsonl, just with degraded keys/
+    // description fidelity. The fallback row carries the op so it can
+    // be grep'd, plus a `reason` describing the cascade.
+    // ADR 0022 batch C (2026-05-19): record already hoisted to outer
+    // scope, so we don't re-fetch (the delete inside the try ran
+    // before the throw — .get() would return undefined here).
     try {
-      const record = vaultBashRuns.get(event.toolCallId!);
-      if (record) {
-        vaultBashRuns.delete(event.toolCallId!);
-        try { fs.rmSync(record.envFile, { force: true }); } catch {}
-        auditBashOutput("bash_output_withhold", record);
-      }
-    } catch { /* best-effort */ }
+      auditBashOutput("bash_output_withhold", record);
+    } catch (auditErr) {
+      // Structured audit failed (record.releases corrupted or
+      // similar). Write a minimal fallback row so the forensic
+      // trail is preserved.
+      safeAuditAppend({
+        ts: new Date().toISOString(),
+        op: "bash_output_withhold",
+        scope: "global",
+        lane: "bash_output",
+        key: "(unreadable)",
+        reason: `outer_catch_audit_failed:${(auditErr as Error)?.message ?? "unknown"}`.slice(0, 200),
+      });
+    }
     return {
       content: [{ type: "text", text: `[vault] bash output withheld — authorization/redaction error: ${message.slice(0, 300)}` }],
       details: { ...(event.details ?? {}), vault: { outputWithheld: true, reason: "authorization_error" } },
@@ -908,6 +938,30 @@ export {
   processVaultBashToolResult as __handleVaultBashToolResultForTests,
 };
 
+// ADR 0022 batch C (2026-05-19): env gate for plaintext-bearing
+// test-only mutators. GPT-5.5 P1#2 (third audit round): even though
+// the LLM has no `require()` tool today, `__seedVaultBashRunForTests`
+// + `__clearVaultBashRunsForTests` accept a plaintext-bearing
+// VaultBashRunRecord and write into the live vaultBashRuns map. Any
+// future co-loaded extension or debug shim that does `require("abrain")`
+// would gain plaintext-write access via the *ForTests naming — the
+// suffix is documentation, not a mechanism boundary. We gate on
+// PI_ASTACK_ENABLE_TEST_HOOKS=1 so smoke fixtures explicitly opt in;
+// production processes never set this env var, so the export becomes
+// a noisy throw rather than a silent footgun. The gate is NOT applied
+// to read-only test helpers (authorizeVaultRelease* / *DialogBuilder*
+// telemetry peek) because those have no plaintext-injection capability.
+function assertTestHooksEnabled(name: string): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error(
+      `${name}() is a plaintext-bearing test-only mutator; set ` +
+        "PI_ASTACK_ENABLE_TEST_HOOKS=1 in the smoke harness to enable. " +
+        "This guard is defense-in-depth against a future co-loaded extension " +
+        "calling the export by accident.",
+    );
+  }
+}
+
 /** Test-only: inject a synthetic vault bash run record so smoke can
  *  drive processVaultBashToolResult without going through the
  *  prepareBootVaultBashCommand tool_call path. Used by
@@ -916,11 +970,13 @@ export function __seedVaultBashRunForTests(
   toolCallId: string,
   record: VaultBashRunRecord,
 ): void {
+  assertTestHooksEnabled("__seedVaultBashRunForTests");
   vaultBashRuns.set(toolCallId, record);
 }
 
 /** Test-only: drain the vaultBashRuns map (for hermetic smoke fixtures). */
 export function __clearVaultBashRunsForTests(): void {
+  assertTestHooksEnabled("__clearVaultBashRunsForTests");
   vaultBashRuns.clear();
 }
 
@@ -1621,8 +1677,28 @@ export default function activate(pi: ExtensionAPI): void {
     // We attach to globalThis (not the pi API) because compaction-tuner
     // is a separate extension and a runtime fetch keeps the coupling
     // explicit + breakable for tests.
-    (globalThis as { __abrainPromptUserGetPending?: () => number }).__abrainPromptUserGetPending =
-      () => promptManagerModule.getPendingPromptCount();
+    //
+    // ADR 0022 batch C (2026-05-19): publish via defineProperty with
+    // configurable:false + writable:false, so a misbehaving extension
+    // (or future LLM-accessible eval path) cannot silently rebind the
+    // hook to a function that always returns 0 — which would silently
+    // disable INV-K compaction defer and cause active prompt_user
+    // dialogs to be torn down by compaction. Failure to install (e.g.
+    // hot reload re-running activate()) is non-fatal: existing
+    // immutable hook keeps working, smoke can detect via __getPending
+    // semantics. Tests that NEED to mutate the hook MUST use the
+    // dedicated test-only API rather than reassign globalThis.
+    try {
+      Object.defineProperty(globalThis, "__abrainPromptUserGetPending", {
+        value: () => promptManagerModule.getPendingPromptCount(),
+        configurable: false,
+        writable: false,
+        enumerable: false,
+      });
+    } catch {
+      // Already defined as non-configurable (hot reload of activate);
+      // first hook wins. This is the desired property.
+    }
   }
 
   if (typeof registry.registerCommand !== "function") return;

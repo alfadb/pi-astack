@@ -212,8 +212,14 @@ export async function askPromptUser(
         // when we successfully read a raw value before redacting.
         // The detail is supplied via `result.detail` flag set by
         // the dialog→service bridge below.
-        const raw = (result as { __secretLengths?: Record<string, string> })
-          .__secretLengths?.[q.id];
+        // ADR 0022 batch C (2026-05-19): renamed `__secretLengths` to
+        // `__secretLengthsInternal` to make 'NOT wire-visible' explicit
+        // in the field name itself. Tightens P0d INV-G (secret length
+        // disclosure) audit: any future code reviewer sees `Internal`
+        // suffix and knows this MUST be stripped before audit/LLM exit.
+        const raw = (
+          result as { __secretLengthsInternal?: Record<string, string> }
+        ).__secretLengthsInternal?.[q.id];
         return {
           qid: q.id,
           type: q.type,
@@ -235,9 +241,12 @@ export async function askPromptUser(
       durationMs: result.durationMs,
       perQuestion,
     });
-    // Strip the internal channel before returning to caller.
-    const clean = { ...result } as PromptUserResult & { __secretLengths?: unknown };
-    delete clean.__secretLengths;
+    // Strip the internal channel before returning to caller. ADR 0022
+    // batch C: renamed `__secretLengths` -> `__secretLengthsInternal`.
+    const clean = { ...result } as PromptUserResult & {
+      __secretLengthsInternal?: unknown;
+    };
+    delete clean.__secretLengthsInternal;
     return clean;
   };
 
@@ -365,9 +374,13 @@ export async function askPromptUser(
           answers,
           durationMs: Date.now() - startedAt,
           ...(hasSecret ? { redactions } : {}),
-          // Stashed for audit metadata; stripped before returning.
-          __secretLengths: secretLengths,
-        } as PromptUserResult & { __secretLengths: Record<string, string> });
+          // Stashed for audit metadata; stripped before returning. ADR 0022
+          // batch C: explicit `Internal` suffix to make non-wire status
+          // self-evident at the call site.
+          __secretLengthsInternal: secretLengths,
+        } as PromptUserResult & {
+          __secretLengthsInternal: Record<string, string>;
+        });
       },
       (err) => {
         ctx.ui.notify?.(
