@@ -1,6 +1,6 @@
 # ADR 0021 — Lane G writer：`identity/skills/habits` 三区落地
 
-- **状态**：Accepted（2026-05-15）；**G1 ✅ shipped 2026-05-16**（commit `63bb9da`）；G2–G5 backlog。G1 经 4 轮 multi-LLM audit（opus-4-7 / opus-4-6 / gpt-5.5 / sonnet-4-6 / deepseek-v4-pro 多厂交叉验证），P0 收敛轨迹 2 → 1 → 1 → 0。
+- **状态**：Accepted（2026-05-15）；**G1 ✅ shipped 2026-05-16**（commit `63bb9da`）；**G2 ✅ shipped 2026-05-20**（`/about-me` slash + agent_end 双 lane wire-up）；G3–G5 backlog。G1 经 4 轮 multi-LLM audit（opus-4-7 / opus-4-6 / gpt-5.5 / sonnet-4-6 / deepseek-v4-pro 多厂交叉验证），P0 收敛轨迹 2 → 1 → 1 → 0。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md)（§3.3 + §3.5 deterministic router 是本 ADR 的设计前置）、[ADR 0013](0013-asymmetric-trust-three-lanes.md)（trust lane 框架）、[ADR 0016](0016-sediment-as-llm-curator.md)（sediment-as-curator 架构，本 ADR 复用其 writer/sanitizer/lock substrate）、[ADR 0018](0018-sediment-curator-defense-layers.md)（writer 防御层 trigger_phrases UNION、body-preservation）
 - **被引用**：G1 ship 后反向更新：ADR 0014 实施现状表的 Lane G 行从 "待实施" 改为“G1 ✅ shipped 2026-05-16”；docs/current-state.md、docs/roadmap.md、docs/brain-redesign-spec.md 同步。
 - **触发**：2026-05-15 multi-LLM doc-vs-code audit（round 1+2）关闭 9 项 backlog 后，剩余三项真 backlog 中 Lane G 工程量最大但**无外部依赖阻塞**；现有 ADR 0014 §3.5 已有完整 router spec，再 defer 没有意义。
@@ -170,12 +170,19 @@ ADR 0014 §2.2 / §2.3 提到 skills/habits 90 天未强化 → confidence decay
 | Phase | 内容 | 验收 |
 |---|---|---|
 | **G1 (this ship)** | `writeAbrainAboutMe` writer 三区落盘 + sanitizer/lint/lock/audit/git commit 全套；`parseExplicitAboutMeBlocks` fence extractor；`validateRouteDecision` 在 `extensions/sediment/about-me-router.ts` 暴露 + Lane G 路径 wire-up；**parser.ts 加 STAGING_IGNORE_REL_PATHS 实施不变量 #7**（P0-B 2026-05-16）；smoke fixture 覆盖：三区 happy path、validation_error、sanitizer reject、staging 路径（confidence<0.6）、lane-target mismatch reject、git rollback、dedupe collision、全管道 loadEntries 验证 staging 被排 + identity 被发现 | smoke-memory-sediment.mjs 新增 about-me block 全绿 |
-| **G2** | `/about-me` slash command 注册 + transcript inject 路径 + i18n message；空 body 走 TUI prompt | manual + scripted smoke `/about-me "X"` → 下一 agent_end 写出 identity entry |
+| **G2 ✅ shipped 2026-05-20** | `/about-me` slash command 注册 + transcript inject 路径（`pi.sendUserMessage` → MEMORY-ABOUT-ME fence → 下一 agent_end 同步写）；agent_end 内 Lane A + Lane G 双同步写循环并行（共用 parse 阶段，独立 audit / correlation_id / shouldAdvance；checkpoint 仅在两 lane 都 terminal 时 advance）；空 body 走 `ctx.ui.select` + `ctx.ui.input` 两步 prompt（与 /abrain / /secret / /vault 一致；askPromptUser overlay 作为未来 polish 入口预留）；`--region=` / `--title="..."` 标志解析；body ≥ 20 / ≤ 4000 chars 前置 gate；fence builder ↔ extractor round-trip smoke 验证 | smoke-memory-sediment.mjs 新增 G2 block 全绿：parseAboutMeArgs 9 用例 / deriveAboutMeTitle / 三区 fence round-trip / fence-in-code-block 防御 / 默认 confidence=1.0 + canonical routingReason / 低置信 fence → router 自动降级 staging（验证 P0-1 wire-up 不变量） |
 | **G3** | aboutness LLM classifier 接入（curator model 复用，prompt 模板 + JSON-mode + temperature=0）；当前 G1 暂用 fence 内 `region:` 显式声明（user-attested），G3 接入后 LLM 默认决策、用户 `region:` 强制覆盖 | router fixture 10-15 例正反样本 |
 | **G4** | `review-staging` slash + staging 30-day TTL job（facade walker 排除已在 G1 落实，见不变量 #7） | manual + smoke |
 | **G5** | identity/skills/habits **已在 G1 后被 world store walker 默认包含**（P1-7 audit 2026-05-15 修正：resolveStores 不需动）。G5 真正要做的是 region-aware ranking hint：在 stage1 candidate selection / stage2 rerank prompt 里把 `frontmatter.region` 作为 surface boost 信号 → ADR 0014 §4.1 about-me+world 的 1.0× baseline + region 级别微调 | smoke：Lane G entry 写后能被 memory_search 找到（已 G1）+ ranking hint 负载测试 |
 
-P0 实施单元 = **G1**，本 ADR 落地的同一会话内完成。G2-G5 列入 roadmap，由真实使用反馈决定优先级。
+P0 实施单元 = **G1**，本 ADR 落地的同一会话内完成。**G2 已 2026-05-20 ship**，G3-G5 列入 roadmap，由真实使用反馈决定优先级。
+
+### G2 关键设计决定（2026-05-20）
+
+1. **transcript inject 走 `pi.sendUserMessage`**：ADR 0021 D4 草拟时担心 "SDK 是否支持 user-role inject"；2026-05-20 确认 pi 0.75+ 一直暴露 `pi.sendUserMessage(content, options?)`，直接用即可。代价是每次 `/about-me` 触发一次 LLM turn（fence 出现 in chat → assistant 通常回 "Noted." → sediment 在该 turn agent_end 写入），可接受 — layer-1 mechanic 由此自然满足。
+2. **slash UI 用 `ctx.ui.select` + `ctx.ui.input` 不复用 askPromptUser overlay**：askPromptUser 的 chained-fallback path 走的就是这两个 primitive；overlay 路径需要 sediment lazy require pi-tui + buildDialog + audit sink wiring — 跨 extension 耦合退不出价值。未来 polish PR 可升级。
+3. **routingReason 是 canonical fixed string**（`"user-attested via MEMORY-ABOUT-ME fence (G1)"`），不拼接 timelineNote。理由：routing_reason 是 routing rationale（D5 设计），timelineNote 是 Timeline section 叙事 — G2 初版误将二者同源导致 “route_rejected (router rule)” 轮废当理由使用。Smoke 捕获后修复。G3 LLM classifier 上线后会用 LLM 给出的 rationale 覆盖。
+4. **agent_end 双 lane checkpoint 互锁**：`combinedShouldAdvance = laneA && laneG`。任一 lane 失败都不 advance — 避免 Lane A 在 Lane G git 失败后静默吐掉 下一会话重试机会，反之亦然。两个 audit row 都携 `checkpoint_advanced: combined` + `lane_advance_decision: <self>` 双字段以供取证。
 
 ## 与上游 ADR 的关系
 

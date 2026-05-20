@@ -185,6 +185,11 @@ async function main() {
     const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow, writeAbrainAboutMe } = req("./sediment/writer.js");
     const { parseExplicitAboutMeBlocks, previewAboutMeExtraction } = req("./sediment/extractor.js");
     const { validateRouteDecision, applyStagingDowngrade, RouterError, LANE_G_ALLOWED_REGIONS, ROUTING_CONFIDENCE_THRESHOLD } = req("./sediment/about-me-router.js");
+    // ADR 0021 G2 helpers (2026-05-20): parseAboutMeArgs / deriveAboutMeTitle /
+    // buildAboutMeFence are exported from sediment/index.ts for the
+    // /about-me slash. shouldAdvanceAfterAboutMeResults is internal; we
+    // re-exercise its semantics through the writer in this smoke.
+    const { parseAboutMeArgs, deriveAboutMeTitle, buildAboutMeFence } = req("./sediment/index.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     // P2 fix (2026-05-14): smoke tests don't use real git repos, so disable
     // gitCommit by default. Tests that need git (migration tests) override
@@ -3030,6 +3035,211 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       );
       assert(amOrphanRow.lane === "about_me", `P1-1: rollback audit row must carry lane=about_me, got: ${amOrphanRow.lane}`);
       fs.rmSync(amFailRoot, { recursive: true, force: true });
+    }
+
+    // === Lane G G2 (ADR 0021 G2, 2026-05-20) =============================
+    // /about-me slash command helpers: arg parsing + title derivation +
+    // fence builder + extractor round-trip + agent_end Lane G defaults.
+    {
+      // ---- parseAboutMeArgs: flag parsing edge cases ------------------
+      assert(typeof parseAboutMeArgs === "function", `parseAboutMeArgs must be exported from sediment/index`);
+      assert(typeof deriveAboutMeTitle === "function", `deriveAboutMeTitle must be exported from sediment/index`);
+      assert(typeof buildAboutMeFence === "function", `buildAboutMeFence must be exported from sediment/index`);
+
+      // empty input
+      const pa0 = parseAboutMeArgs("");
+      assert(pa0.body === "" && pa0.region === undefined && pa0.title === undefined, `empty args: ${JSON.stringify(pa0)}`);
+
+      // plain body, no flags
+      const pa1 = parseAboutMeArgs("I prefer fail-closed designs");
+      assert(pa1.body === "I prefer fail-closed designs" && pa1.region === undefined, `plain body: ${JSON.stringify(pa1)}`);
+
+      // --region= flag at start
+      const pa2 = parseAboutMeArgs("--region=skills I am proficient in TypeScript");
+      assert(pa2.region === "skills" && pa2.body === "I am proficient in TypeScript", `region flag start: ${JSON.stringify(pa2)}`);
+
+      // --region= flag in middle (still word-boundary)
+      const pa3 = parseAboutMeArgs("I am proficient --region=skills in TypeScript");
+      assert(pa3.region === "skills" && pa3.body === "I am proficient in TypeScript", `region flag mid: ${JSON.stringify(pa3)}`);
+
+      // --title="quoted phrase"
+      const pa4 = parseAboutMeArgs('--title="My Custom Title" --region=identity body text here');
+      assert(pa4.title === "My Custom Title" && pa4.region === "identity" && pa4.body === "body text here", `quoted title: ${JSON.stringify(pa4)}`);
+
+      // --title='single quotes' too
+      const pa5 = parseAboutMeArgs("--title='single q' --region=habits a habit body");
+      assert(pa5.title === "single q" && pa5.region === "habits" && pa5.body === "a habit body", `single-quoted title: ${JSON.stringify(pa5)}`);
+
+      // --title bare word (no quotes)
+      const pa6 = parseAboutMeArgs("--title=BareTitle some body");
+      assert(pa6.title === "BareTitle" && pa6.body === "some body", `bare title: ${JSON.stringify(pa6)}`);
+
+      // Flag-like substring INSIDE a word (no preceding space): MUST NOT be
+      // treated as a flag. Documents the (?:^|\s) word-boundary contract.
+      const pa7 = parseAboutMeArgs("prefix--region=identity body");
+      assert(pa7.region === undefined && pa7.body === "prefix--region=identity body", `flag must require preceding space: ${JSON.stringify(pa7)}`);
+
+      // Both flags + interleaved body
+      const pa8 = parseAboutMeArgs("first --region=identity middle --title=T1 last");
+      assert(pa8.region === "identity" && pa8.title === "T1" && pa8.body === "first middle last", `interleaved: ${JSON.stringify(pa8)}`);
+
+      // ---- deriveAboutMeTitle: derive from body --------------------------
+      assert(deriveAboutMeTitle("Hello world") === "Hello world", `derive plain`);
+      assert(deriveAboutMeTitle("# Markdown heading\n\nbody") === "Markdown heading", `derive strips leading #`);
+      assert(deriveAboutMeTitle("   leading spaces here\nmore") === "leading spaces here", `derive strips leading spaces`);
+      const longLine = "a".repeat(120);
+      const longDerived = deriveAboutMeTitle(longLine);
+      assert(longDerived.length === 80, `derive truncates to 80, got ${longDerived.length}`);
+      assert(deriveAboutMeTitle("") === "about-me", `empty body falls back to 'about-me'`);
+      assert(deriveAboutMeTitle("   \n\n   ") === "about-me", `whitespace-only body falls back`);
+
+      // ---- buildAboutMeFence: round-trip through parseExplicitAboutMeBlocks
+      // ADR 0021 G2 invariant: the slash handler's fence output must be
+      // bit-for-bit recognizable by the same parser the agent_end pipeline
+      // runs. A fence-build / fence-parse mismatch would mean every
+      // /about-me invocation gets silently dropped by sediment.
+      const rt1 = buildAboutMeFence({
+        title: "I prefer fail-closed designs",
+        region: "identity",
+        body: "I consistently choose designs that refuse to operate on missing inputs rather than silently degrading.",
+      });
+      const rt1Blocks = parseExplicitAboutMeBlocks(rt1);
+      assert(rt1Blocks.length === 1, `round-trip: expected 1 fence, got ${rt1Blocks.length}\n${rt1}`);
+      assert(rt1Blocks[0].title === "I prefer fail-closed designs", `round-trip title: ${rt1Blocks[0].title}`);
+      assert(rt1Blocks[0].region === "identity", `round-trip region: ${rt1Blocks[0].region}`);
+      assert(rt1Blocks[0].body.startsWith("I consistently choose"), `round-trip body: ${rt1Blocks[0].body}`);
+
+      // Round-trip preserves region for all 3 valid Lane G regions
+      for (const region of ["identity", "skills", "habits"]) {
+        const fence = buildAboutMeFence({
+          title: `Test title for ${region}`,
+          region,
+          body: `This is the about-me body for the ${region} region, padded to twenty plus chars.`,
+        });
+        const blocks = parseExplicitAboutMeBlocks(fence);
+        assert(blocks.length === 1 && blocks[0].region === region, `region=${region} round-trip: ${JSON.stringify(blocks)}`);
+      }
+
+      // Fence inside a fenced code block must be IGNORED (Lane G inv #5
+      // = Lane A's trust boundary). Pasting an /about-me example into a
+      // markdown code block must not silently write an entry.
+      const inFence = ["```", buildAboutMeFence({ title: "trapped", region: "identity", body: "this should not extract because it sits inside fenced code" }), "```"].join("\n");
+      assert(parseExplicitAboutMeBlocks(inFence).length === 0, `fence-in-code must NOT extract`);
+
+      // ---- agent_end Lane G defaults: simulate the wire-up via writer ----
+      // index.ts L1240+ (agent_end Lane G block) builds an AboutMeDraft
+      // from an ExtractedAboutMeDraft with these defaults:
+      //   routingConfidence: fence.routingConfidence ?? 1.0
+      //   routeCandidates: [region]
+      //   routingReason: fallback string
+      //   stagingProjectId: <active project id>
+      //   stagingSessionEpoch: Date.now() (per agent_end batch)
+      // Verify that a fence WITHOUT explicit confidence/reason results
+      // in a written entry with confidence=1.00 and the expected fallback
+      // reason. This is the contract sediment guarantees to the slash.
+      const g2Home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-g2-"));
+      execFileSync("git", ["-C", g2Home, "init", "-q"]);
+      execFileSync("git", ["-C", g2Home, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", g2Home, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", g2Home, "config", "commit.gpgsign", "false"]);
+      fs.mkdirSync(path.join(g2Home, "projects", "g2-project"), { recursive: true });
+      const g2Settings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: true };
+
+      // Simulate what agent_end Lane G does: extract → build AboutMeDraft
+      // with the same defaults → write.
+      const slashFence = buildAboutMeFence({
+        title: "G2 slash round-trip",
+        region: "identity",
+        body: "This entry was authored through the /about-me slash command path, verified end-to-end in smoke.",
+      });
+      const extracted = parseExplicitAboutMeBlocks(slashFence);
+      assert(extracted.length === 1, `G2 wire-up: extractor must yield 1 fence`);
+      const e = extracted[0];
+      const wireupSessionEpoch = Date.now();
+      const written = await writeAbrainAboutMe(
+        {
+          title: e.title,
+          body: e.body,
+          region: e.region,
+          // EXACT defaults the agent_end Lane G block applies (sediment/index.ts).
+          // routingReason is FIXED to the canonical G1 string — it is a routing
+          // rationale, NOT a timeline narrative. timelineNote comes from the
+          // fence (or extractor default).
+          routingConfidence: e.routingConfidence ?? 1.0,
+          routeCandidates: [e.region],
+          routingReason: "user-attested via MEMORY-ABOUT-ME fence (G1)",
+          triggerPhrases: e.triggerPhrases,
+          tags: e.tags,
+          status: e.status,
+          timelineNote: e.timelineNote,
+          sessionId: "smoke-g2-wireup",
+          stagingProjectId: "g2-project",
+          stagingSessionEpoch: wireupSessionEpoch,
+        },
+        { abrainHome: g2Home, settings: g2Settings, auditContext: { lane: "about_me", sessionId: "smoke-g2-wireup", correlationId: "about_me-test-1", candidateId: "about_me-test-1:c1" } },
+      );
+      assert(written.status === "created" && written.region === "identity", `G2 wire-up write failed: ${JSON.stringify(written)}`);
+      const wireupText = fs.readFileSync(written.path, "utf-8");
+      assert(/^routing_confidence: 1\.00$/m.test(wireupText), `G2 default confidence must be 1.00 (user-attested fence):\n${wireupText}`);
+      // routingReason is FIXED for G1 fence path (canonical attestation
+      // rationale, not the timeline narrative). G3 LLM classifier will
+      // populate a real rationale later.
+      // Note: yamlString wraps any string with non-[A-Za-z0-9_.:/@+-] chars
+      // (the canonical G1 reason has spaces + parens, so it lands quoted).
+      assert(/^routing_reason: "user-attested via MEMORY-ABOUT-ME fence \(G1\)"$/m.test(wireupText), `G2 default reason must be canonical G1 string:\n${wireupText}`);
+      // timelineNote IS the extractor default ("explicit MEMORY-ABOUT-ME block")
+      // and shows up in the Timeline section, NOT in routing_reason.
+      assert(/## Timeline\s*\n- .* \| smoke-g2-wireup \| created \| explicit MEMORY-ABOUT-ME block/m.test(wireupText), `G2 timeline note must come from extractor default:\n${wireupText}`);
+      assert(/route_candidates:\s*\n\s*-\s*identity/m.test(wireupText), `G2 default candidates = [region]`);
+      assert(/^lane: about_me$/m.test(wireupText), `G2 lane must be about_me`);
+      assert(/^region: identity$/m.test(wireupText), `G2 region must be identity`);
+
+      // ---- agent_end Lane G defaults: low-confidence fence triggers staging
+      // A fence carrying `confidence: 0.4` should auto-downgrade to staging.
+      // The wire-up MUST supply stagingProjectId + stagingSessionEpoch so
+      // the writer doesn't throw (P0-1 audit-fix surface pre-registered).
+      const lcFence = [
+        "MEMORY-ABOUT-ME:",
+        "title: G2 low-conf fence",
+        "region: identity",
+        "confidence: 0.4",
+        "---",
+        "This is an ambiguous identity-or-habit signal authored through /about-me; router should downgrade to staging.",
+        "END_MEMORY",
+      ].join("\n");
+      const lcExtracted = parseExplicitAboutMeBlocks(lcFence);
+      assert(lcExtracted.length === 1 && lcExtracted[0].routingConfidence === 0.4, `low-conf fence parse: ${JSON.stringify(lcExtracted)}`);
+      const lc = lcExtracted[0];
+      const lcWritten = await writeAbrainAboutMe(
+        {
+          title: lc.title,
+          body: lc.body,
+          region: lc.region,
+          routingConfidence: lc.routingConfidence ?? 1.0,
+          routeCandidates: [lc.region],
+          routingReason: "user-attested via MEMORY-ABOUT-ME fence (G1)",
+          timelineNote: lc.timelineNote,
+          sessionId: "smoke-g2-lc",
+          stagingProjectId: "g2-project",
+          stagingSessionEpoch: wireupSessionEpoch,
+        },
+        { abrainHome: g2Home, settings: g2Settings, auditContext: { lane: "about_me", sessionId: "smoke-g2-lc", correlationId: "about_me-test-2", candidateId: "about_me-test-2:c1" } },
+      );
+      assert(lcWritten.status === "created" && lcWritten.region === "staging", `low-conf fence must downgrade to staging: ${JSON.stringify(lcWritten)}`);
+      assert(/observations\/staging\//.test(lcWritten.path), `low-conf staging path: ${lcWritten.path}`);
+
+      // ---- audit row shape: agent_end Lane G writes a `lane: about_me`
+      // audit row with `operation: about_me_extract` etc. We can't drive
+      // the real agent_end here, but we CAN verify the writer's audit
+      // surface (the audit rows it appends per write) carries lane=about_me
+      // — which is what the Lane G audit row aggregates over.
+      const g2AuditPath = path.join(g2Home, ".state", "sediment", "audit.jsonl");
+      const g2AuditRows = fs.readFileSync(g2AuditPath, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+      assert(g2AuditRows.every((r) => r.lane === "about_me"), `G2 writer audit rows must all carry lane=about_me`);
+      assert(g2AuditRows.some((r) => r.operation === "create" && r.region === "identity"), `G2 expected create row for identity`);
+      assert(g2AuditRows.some((r) => r.operation === "create" && r.region === "staging"), `G2 expected create row for staging (downgrade)`);
+
+      fs.rmSync(g2Home, { recursive: true, force: true });
     }
 
     // === per-repo migration --go (B4) ====================================

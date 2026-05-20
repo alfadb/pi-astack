@@ -38,7 +38,7 @@ import {
 } from "./checkpoint";
 import { curateProjectDraft, type CuratorAudit } from "./curator";
 import { detectProjectDuplicate } from "./dedupe";
-import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
+import { parseExplicitAboutMeBlocks, parseExplicitMemoryBlocks, previewExtraction, type ExtractedAboutMeDraft } from "./extractor";
 import {
   runLlmExtractor,
   summarizeLlmExtractorResult,
@@ -54,11 +54,15 @@ import {
   mergeProjectEntries,
   supersedeProjectEntry,
   updateProjectEntry,
+  writeAbrainAboutMe,
   writeProjectEntry,
+  type AboutMeDraft,
   type ProjectEntryDraft,
+  type WriteAboutMeResult,
   type WriteProjectEntryResult,
   type WriterAuditContext,
 } from "./writer";
+import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { abrainProjectDir, resolveActiveProject } from "../_shared/runtime";
 
@@ -281,6 +285,33 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
   });
 }
 
+/**
+ * Lane G analogue of `shouldAdvanceAfterResults` (ADR 0021 G2, 2026-05-20).
+ *
+ * Lane G's `WriteAboutMeResult.status` taxonomy is narrower than Lane A's
+ * (only created / skipped / dry_run / rejected — no merge/update lifecycle
+ * yet), so we keep this helper local rather than overloading the Lane A
+ * one. Terminal-advance reasons mirror Lane A's: a user-attested fence
+ * that fails validation / router / dedupe / lint should NOT block the
+ * checkpoint, because re-processing the same fence on a future run will
+ * fail identically. Transient failures (git_commit_failed, IO errors)
+ * keep the checkpoint pinned so the next agent_end retries them.
+ */
+function shouldAdvanceAfterAboutMeResults(results: WriteAboutMeResult[]): boolean {
+  const terminalReasons = new Set([
+    "duplicate_slug",
+    "duplicate_slug_race",
+    "validation_error",
+    "route_rejected",
+    "lint_error",
+  ]);
+  return results.every((result) => {
+    if (result.status === "created" || result.status === "skipped" || result.status === "dry_run") return true;
+    if (!result.reason) return false;
+    return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
+  });
+}
+
 function safeAuditIdPart(value: string | undefined, fallback: string): string {
   const cleaned = (value || fallback)
     .replace(/[^A-Za-z0-9_.-]+/g, "-")
@@ -289,7 +320,7 @@ function safeAuditIdPart(value: string | undefined, fallback: string): string {
 }
 
 function makeCorrelationId(
-  lane: "explicit" | "auto_write",
+  lane: "explicit" | "auto_write" | "about_me",
   sessionId: string,
   window: RunWindow,
 ): string {
@@ -450,6 +481,7 @@ export default function (pi: ExtensionAPI) {
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
   registerSedimentCommand(pi);
+  registerAboutMeCommand(pi);
 
   // Footer state machine: session_start always sets idle.
   // Used cast for ctx.ui because older pi versions may not expose
@@ -753,8 +785,16 @@ export default function (pi: ExtensionAPI) {
 
       const tParseStart = Date.now();
       const drafts = parseExplicitMemoryBlocks(window.text);
+      // ADR 0021 G2 (2026-05-20): parse Lane G MEMORY-ABOUT-ME fences in
+      // the same window pass. Lane A and Lane G run as TWO independent
+      // synchronous write loops further below; if neither hits we still
+      // drop into the LLM auto-write lane (Lane C). The bg auto-write
+      // lane intentionally does NOT consume Lane G fences — explicit
+      // attestation is the only way to write identity/skills/habits in
+      // G1–G2 (G3 will add an LLM aboutness classifier).
+      const aboutMeDrafts = parseExplicitAboutMeBlocks(window.text);
       const tParseEnd = Date.now();
-      if (drafts.length === 0) {
+      if (drafts.length === 0 && aboutMeDrafts.length === 0) {
         // Phase 1.4 A2 + UX fix: LLM auto-write lane is FIRE-AND-FORGET.
         //
         // pi awaits agent_end synchronously; if we await the LLM call
@@ -1223,116 +1263,294 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Synchronous explicit lane: status visible briefly during the
-      // write loop (each writeProjectEntry typically < 200ms). Lands at
-      // completed/failed when agent_end returns.
-      applySedimentStatus(
-        setStatus,
-        sessionId,
-        "running",
-        `writing x${drafts.length}`,
-      );
+      // Synchronous explicit lanes: Lane A (MEMORY:) and Lane G
+      // (MEMORY-ABOUT-ME:) both run here, in that order. Status is
+      // visible briefly during each write loop (each writer call is
+      // typically < 200ms). Final completed/failed lands AFTER both
+      // lanes have run so the user sees one combined verdict per
+      // agent_end.
+      //
+      // ADR 0021 G2 (2026-05-20): Lane G was added here as a parallel
+      // synchronous block. Both lanes share the same parsed window;
+      // either or both may produce drafts. The checkpoint advances
+      // ONLY if BOTH lanes report terminal outcomes (combinedShouldAdvance
+      // below) — a Lane G git failure should not silently bury a Lane A
+      // write under an advanced checkpoint, and vice versa.
+      const laneSummary = [
+        drafts.length > 0 ? `A:${drafts.length}` : null,
+        aboutMeDrafts.length > 0 ? `G:${aboutMeDrafts.length}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      applySedimentStatus(setStatus, sessionId, "running", `writing ${laneSummary}`);
 
-      const tWriteStart = Date.now();
-      const explicitCorrelationId = makeCorrelationId(
-        "explicit",
-        sessionId,
-        window,
-      );
+      // ── Lane A (MEMORY:) ─────────────────────────────────────────
       const results: WriteProjectEntryResult[] = [];
-      for (const [i, draft] of drafts.entries()) {
-        const auditContext: WriterAuditContext = {
-          lane: "explicit",
+      let tWriteStart = 0;
+      let tWriteEnd = 0;
+      let explicitCorrelationId: string | undefined;
+      let laneAShouldAdvance = true; // vacuous-true when Lane A has 0 drafts
+      if (drafts.length > 0) {
+        tWriteStart = Date.now();
+        explicitCorrelationId = makeCorrelationId(
+          "explicit",
           sessionId,
-          correlationId: explicitCorrelationId,
-          candidateId: candidateIdFor(explicitCorrelationId, i),
-        };
-        results.push(
-          await writeProjectEntry( /* writer-call: auto-write-block */
-            {
-              ...draft,
-              sessionId,
-              timelineNote:
-                draft.timelineNote || "captured from explicit MEMORY block",
-            },
-            { projectRoot: cwd, abrainHome, projectId, settings, dryRun: false, auditContext },
-          ),
+          window,
         );
+        for (const [i, draft] of drafts.entries()) {
+          const auditContext: WriterAuditContext = {
+            lane: "explicit",
+            sessionId,
+            correlationId: explicitCorrelationId,
+            candidateId: candidateIdFor(explicitCorrelationId, i),
+          };
+          results.push(
+            await writeProjectEntry( /* writer-call: auto-write-block */
+              {
+                ...draft,
+                sessionId,
+                timelineNote:
+                  draft.timelineNote || "captured from explicit MEMORY block",
+              },
+              { projectRoot: cwd, abrainHome, projectId, settings, dryRun: false, auditContext },
+            ),
+          );
+        }
+        tWriteEnd = Date.now();
+        laneAShouldAdvance = shouldAdvanceAfterResults(results);
       }
-      const tWriteEnd = Date.now();
 
-      const shouldAdvance = shouldAdvanceAfterResults(results);
-      if (shouldAdvance)
+      // ── Lane G (MEMORY-ABOUT-ME:) ────────────────────────────────
+      // ADR 0021 G2. For each fence draft, build an AboutMeDraft and
+      // call writeAbrainAboutMe. Defaults applied here for fence fields
+      // the extractor leaves optional:
+      //   - routingConfidence: 1.0 when fence omits (user-attested fence
+      //     = highest trust; consistent with extractor.ts comment).
+      //   - routeCandidates: [region] (single candidate; G3 LLM
+      //     classifier will broaden this when it lands).
+      //   - routingReason: default explainer; fence may override.
+      //   - stagingProjectId / stagingSessionEpoch: ALWAYS supplied so
+      //     that even if a fence carries confidence < threshold (router
+      //     auto-downgrades to staging), the writer has the anchor it
+      //     needs and does not throw. This is exactly the P0-1 audit-fix
+      //     surface that smoke pre-registered for G2 wire-up.
+      const aboutMeResults: WriteAboutMeResult[] = [];
+      let tAboutMeStart = 0;
+      let tAboutMeEnd = 0;
+      let aboutMeCorrelationId: string | undefined;
+      let laneGShouldAdvance = true;
+      const aboutMeSkipped: Array<{ markerIndex: number; reason: string }> = [];
+      if (aboutMeDrafts.length > 0) {
+        tAboutMeStart = Date.now();
+        aboutMeCorrelationId = makeCorrelationId(
+          "about_me",
+          sessionId,
+          window,
+        );
+        // One epoch per agent_end batch — staging filenames already use
+        // independent Date.now() + 8-hex randomBytes suffix to defeat
+        // intra-batch collisions, so sharing the epoch across candidates
+        // is fine and keeps the batch traceable in audit/logs.
+        const aboutMeSessionEpoch = Date.now();
+        let candidateIndex = 0;
+        for (const fence of aboutMeDrafts) {
+          // Defensive: extractor already rejects fences with missing /
+          // unknown region (parseAboutMeBlock returns null), but the
+          // ExtractedAboutMeDraft type leaves region optional for G3
+          // anticipation. Skip + audit when region absent so a future
+          // extractor relaxation cannot silently land an entry with a
+          // bogus kind / region (would corrupt frontmatter).
+          if (!fence.region || !LANE_G_ALLOWED_REGIONS.includes(fence.region as AboutMeRegion)) {
+            aboutMeSkipped.push({
+              markerIndex: fence.markerIndex,
+              reason: "missing_or_invalid_region",
+            });
+            continue;
+          }
+          const draftDoc: AboutMeDraft = {
+            title: fence.title,
+            body: fence.body,
+            region: fence.region as AboutMeRegion,
+            routingConfidence: fence.routingConfidence ?? 1.0,
+            routeCandidates: [fence.region as AboutMeRegion],
+            // routingReason is a routing rationale (≤ 200 char sanitized),
+            // NOT a timeline narrative. For G1 the only routing signal is
+            // user attestation through the fence; G3 LLM classifier will
+            // populate a real rationale later. Keep the timelineNote
+            // separate so the Timeline section still reads naturally
+            // ("explicit MEMORY-ABOUT-ME block" from the extractor).
+            routingReason: "user-attested via MEMORY-ABOUT-ME fence (G1)",
+            triggerPhrases: fence.triggerPhrases,
+            tags: fence.tags,
+            status: (fence.status as AboutMeDraft["status"]) || undefined,
+            timelineNote: fence.timelineNote,
+            sessionId,
+            stagingProjectId: projectId,
+            stagingSessionEpoch: aboutMeSessionEpoch,
+          };
+          const auditContext: WriterAuditContext = {
+            lane: "about_me",
+            sessionId,
+            correlationId: aboutMeCorrelationId,
+            candidateId: candidateIdFor(aboutMeCorrelationId, candidateIndex++),
+          };
+          aboutMeResults.push(
+            await writeAbrainAboutMe(draftDoc, {
+              abrainHome,
+              settings,
+              dryRun: false,
+              auditContext,
+            }),
+          );
+        }
+        tAboutMeEnd = Date.now();
+        laneGShouldAdvance = shouldAdvanceAfterAboutMeResults(aboutMeResults);
+      }
+
+      // ── Combined checkpoint advance ─────────────────────────────
+      const combinedShouldAdvance = laneAShouldAdvance && laneGShouldAdvance;
+      if (combinedShouldAdvance) {
         await saveSessionCheckpoint(cwd, sessionId, {
           lastProcessedEntryId: window.lastEntryId,
         });
-      await appendAudit(cwd, {
-        operation: "explicit_extract",
-        lane: "explicit",
-        session_id: sessionId,
-        ...summary,
-        extractor: "explicit_marker",
-        parser_version: PARSER_VERSION,
-        settings_snapshot: settingsSnapshot,
-        entry_breakdown: entryBreakdown,
-        correlation_id: explicitCorrelationId,
-        candidate_count: drafts.length,
-        candidates: drafts.map((d, i) => ({
-          candidate_id: candidateIdFor(explicitCorrelationId, i),
-          // 2026-05-15: see auto_write lane above. Explicit MEMORY blocks are
-          // user-authored; usually clean, but a stray `password=hunter2`-style
-          // title is exactly the kind of thing the sanitizer was built to
-          // catch before it reaches audit.jsonl.
-          title: sanitizeAuditText(d.title, 500),
-          kind: d.kind,
-          confidence: d.confidence,
-          status: d.status,
-          body_chars: (d.compiledTruth || "").length,
-        })),
-        results: results.map(resultSummary),
-        stage_ms: {
-          window_build: tWindowBuilt - tStart,
-          parse: tParseEnd - tParseStart,
-          write_total: tWriteEnd - tWriteStart,
-          total: Date.now() - tStart,
-        },
-        checkpoint_advanced: shouldAdvance,
-      });
+      }
 
+      // ── Lane A audit row ────────────────────────────────────────
+      if (drafts.length > 0 && explicitCorrelationId) {
+        await appendAudit(cwd, {
+          operation: "explicit_extract",
+          lane: "explicit",
+          session_id: sessionId,
+          ...summary,
+          extractor: "explicit_marker",
+          parser_version: PARSER_VERSION,
+          settings_snapshot: settingsSnapshot,
+          entry_breakdown: entryBreakdown,
+          correlation_id: explicitCorrelationId,
+          candidate_count: drafts.length,
+          candidates: drafts.map((d, i) => ({
+            candidate_id: candidateIdFor(explicitCorrelationId!, i),
+            // 2026-05-15: see auto_write lane above. Explicit MEMORY blocks are
+            // user-authored; usually clean, but a stray `password=hunter2`-style
+            // title is exactly the kind of thing the sanitizer was built to
+            // catch before it reaches audit.jsonl.
+            title: sanitizeAuditText(d.title, 500),
+            kind: d.kind,
+            confidence: d.confidence,
+            status: d.status,
+            body_chars: (d.compiledTruth || "").length,
+          })),
+          results: results.map(resultSummary),
+          stage_ms: {
+            window_build: tWindowBuilt - tStart,
+            parse: tParseEnd - tParseStart,
+            write_total: tWriteEnd - tWriteStart,
+            total: Date.now() - tStart,
+          },
+          // ADR 0021 G2: report the COMBINED advance decision so a Lane G
+          // failure that pins the checkpoint shows up as `false` on the
+          // Lane A row too — grepping correlation_id within one batch
+          // gives operators a consistent picture of disk state.
+          checkpoint_advanced: combinedShouldAdvance,
+          lane_advance_decision: laneAShouldAdvance,
+        });
+      }
+
+      // ── Lane G audit row ────────────────────────────────────────
+      if (aboutMeDrafts.length > 0 && aboutMeCorrelationId) {
+        await appendAudit(cwd, {
+          operation: "about_me_extract",
+          lane: "about_me",
+          session_id: sessionId,
+          ...summary,
+          extractor: "explicit_marker",
+          parser_version: PARSER_VERSION,
+          settings_snapshot: settingsSnapshot,
+          entry_breakdown: entryBreakdown,
+          correlation_id: aboutMeCorrelationId,
+          candidate_count: aboutMeDrafts.length,
+          candidates: aboutMeDrafts.map((d, i) => ({
+            candidate_id: candidateIdFor(aboutMeCorrelationId!, i),
+            title: sanitizeAuditText(d.title, 500),
+            region: d.region,
+            routing_confidence: d.routingConfidence,
+            status: d.status,
+            body_chars: (d.body || "").length,
+          })),
+          results: aboutMeResults.map((r) => ({
+            status: r.status,
+            slug: r.slug,
+            region: r.region,
+            reason: r.reason,
+            path: r.path,
+            routeRejected: r.routeRejected,
+            validationErrors: r.validationErrors,
+            sanitizedReplacements: r.sanitizedReplacements,
+            gitCommit: r.gitCommit,
+            correlation_id: r.correlationId,
+            candidate_id: r.candidateId,
+          })),
+          skipped: aboutMeSkipped,
+          stage_ms: {
+            window_build: tWindowBuilt - tStart,
+            parse: tParseEnd - tParseStart,
+            write_total: tAboutMeEnd - tAboutMeStart,
+            total: Date.now() - tStart,
+          },
+          checkpoint_advanced: combinedShouldAdvance,
+          lane_advance_decision: laneGShouldAdvance,
+        });
+      }
+
+      // ── Notify (one notification per active lane) ────────────────
       // Use captured `notify` (ctx.ui.notify pre-bound) rather than ctx.ui
       // directly, so a late ctx invalidation does not throw here.
       if (notify) {
-        try {
-          // 2026-05-15 UX fix: same multi-line + scope formatter as the
-          // auto-write lane. Consistency across lanes; users see the
-          // same vertical layout regardless of which lane wrote.
-          notify(
-            formatSedimentNotify("explicit marker extraction", results, abrainHome),
-            shouldAdvance ? "info" : "warning",
-          );
-        } catch {
-          // notify against a stale ui is best-effort; the audit is the
-          // canonical record.
+        if (drafts.length > 0) {
+          try {
+            notify(
+              formatSedimentNotify("explicit marker extraction", results, abrainHome),
+              laneAShouldAdvance ? "info" : "warning",
+            );
+          } catch { /* best-effort */ }
+        }
+        if (aboutMeDrafts.length > 0) {
+          try {
+            // Lane G result shape (WriteAboutMeResult) is a structural
+            // subset of WriteProjectEntryResult for the four fields
+            // formatSedimentNotify reads (path/status/slug/reason), so
+            // the cast is safe and reuses the same vertical layout.
+            notify(
+              formatSedimentNotify(
+                "about-me explicit extraction",
+                aboutMeResults as unknown as WriteProjectEntryResult[],
+                abrainHome,
+              ),
+              laneGShouldAdvance ? "info" : "warning",
+            );
+          } catch { /* best-effort */ }
         }
       }
-      const createdCount = results.filter((r) => r.status === "created").length;
-      const rejectedCount = results.filter(
-        (r) => r.status === "rejected",
-      ).length;
-      if (rejectedCount > 0 || !shouldAdvance) {
-        applySedimentStatus(
-          setStatus,
-          sessionId,
-          "failed",
-          compactResultSummary(results),
-        );
+
+      // ── Status: combined verdict ─────────────────────────────────
+      const allResultsStatusSummary = [
+        ...results.map((r) => r.status),
+        ...aboutMeResults.map((r) => r.status),
+      ];
+      const anyRejected = allResultsStatusSummary.includes("rejected");
+      const compactCombined = (() => {
+        const c: Record<string, number> = {};
+        for (const s of allResultsStatusSummary) c[s] = (c[s] || 0) + 1;
+        const parts: string[] = [];
+        for (const st of ["created", "updated", "merged", "archived", "superseded", "deleted", "skipped", "dry_run", "rejected"]) {
+          if (c[st]) parts.push(`${c[st]} ${st}`);
+        }
+        return parts.join(", ") || "no changes";
+      })();
+      if (anyRejected || !combinedShouldAdvance) {
+        applySedimentStatus(setStatus, sessionId, "failed", compactCombined);
       } else {
-        applySedimentStatus(
-          setStatus,
-          sessionId,
-          "completed",
-          compactResultSummary(results),
-        );
+        applySedimentStatus(setStatus, sessionId, "completed", compactCombined);
       }
     },
   );
@@ -1878,4 +2096,279 @@ function readSessionId(
   } catch {
     return undefined;
   }
+}
+
+// ===========================================================================
+// /about-me slash command (ADR 0021 G2, 2026-05-20)
+// ===========================================================================
+//
+// `/about-me [--region=identity|skills|habits] [--title="..."] <body>`
+//
+// Builds a MEMORY-ABOUT-ME fence and injects it into the transcript via
+// `pi.sendUserMessage`. The next agent_end then runs sediment's Lane G
+// pipeline (parseExplicitAboutMeBlocks → writeAbrainAboutMe), keeping
+// the layer-1 mechanic from ADR 0014 §6 / ADR 0021 invariant #3: the
+// slash handler NEVER touches the writer directly. The cost is one
+// extra LLM turn per /about-me invocation (the fence shows up in chat;
+// the assistant typically acknowledges, then sediment writes on the
+// resulting agent_end). The UX trade-off is documented in ADR 0021 D4.
+//
+// UI substrate decision (2026-05-20): G2 uses ctx.ui.select + ctx.ui.input
+// rather than ADR 0022's askPromptUser overlay. Rationale:
+//   - askPromptUser's chained-fallback path runs exactly these primitives
+//     (service.ts chainedFallback), so functionally equivalent;
+//   - avoids a sediment → abrain prompt-user dependency (no buildDialog /
+//     pi-tui require + no PromptAuditSink wiring required here);
+//   - consistent with /abrain, /secret, /vault — all of which use
+//     ctx.ui.select + ctx.ui.input directly.
+// A future polish PR can upgrade to the askPromptUser overlay if the
+// unified UX is desired; the slash contract (args parsing + fence build
+// + sendUserMessage) does not depend on the input modality.
+
+/**
+ * Parse `/about-me` args. Recognized flags (anywhere in `args`):
+ *   --region=<id|skills|habits>
+ *   --title=<bareWord|"quoted phrase"|'quoted phrase'>
+ * Anything else becomes the body.
+ *
+ * Flags must start at the beginning OR after whitespace (the regex
+ * uses `(?:^|\s)`), so a literal occurrence of `--region=foo` inside a
+ * body sentence (e.g. mid-word `--region=foo`) is NOT stripped — the
+ * common false-positive of "user types --region=identity is my pick"
+ * is the unavoidable edge case; we accept it because it's unambiguous
+ * at the syntactic level.
+ */
+export function parseAboutMeArgs(args: string): {
+  region?: string;
+  title?: string;
+  body: string;
+} {
+  let s = args || "";
+  let region: string | undefined;
+  let title: string | undefined;
+  s = s.replace(/(?:^|\s)--region=(\S+)/g, (_m, v) => {
+    region = String(v);
+    return "";
+  });
+  s = s.replace(
+    /(?:^|\s)--title=("([^"]*)"|'([^']*)'|(\S+))/g,
+    (_m, _all, dq, sq, bare) => {
+      title = dq !== undefined ? dq : sq !== undefined ? sq : bare;
+      return "";
+    },
+  );
+  return { region, title, body: s.replace(/\s+/g, " ").trim() };
+}
+
+/**
+ * Derive a fence title from the body when --title is omitted. Takes the
+ * first non-empty line, strips leading markdown ornamentation, truncates
+ * to 80 chars. Writer constraint is ≤ 200, but 80 keeps the fence header
+ * readable and matches Lane A's typical title length.
+ */
+export function deriveAboutMeTitle(body: string): string {
+  const firstLine =
+    body.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? body;
+  const stripped = firstLine.replace(/^[#>*\-\s]+/, "").trim();
+  const slim = stripped.slice(0, 80).trim();
+  return slim || "about-me";
+}
+
+/**
+ * Build the MEMORY-ABOUT-ME fence text exactly as parseExplicitAboutMeBlocks
+ * expects to parse it back out. Kept as an exported helper so smoke can
+ * round-trip the slash output through the extractor.
+ */
+export function buildAboutMeFence(opts: {
+  title: string;
+  region: string;
+  body: string;
+}): string {
+  return [
+    "MEMORY-ABOUT-ME:",
+    `title: ${opts.title}`,
+    `region: ${opts.region}`,
+    "---",
+    opts.body,
+    "END_MEMORY",
+  ].join("\n");
+}
+
+function registerAboutMeCommand(pi: ExtensionAPI): void {
+  const maybePi = pi as unknown as {
+    registerCommand?: (
+      name: string,
+      options: {
+        description?: string;
+        getArgumentCompletions?: (
+          prefix: string,
+        ) => Array<{ value: string; label: string }> | null;
+        handler: (
+          args: string,
+          ctx: {
+            cwd?: string;
+            ui: {
+              notify(message: string, type?: string): void;
+              select?: (
+                title: string,
+                items: string[],
+                opts?: { signal?: AbortSignal },
+              ) => Promise<string | undefined>;
+              input?: (
+                prompt: string,
+                opts?: { signal?: AbortSignal },
+              ) => Promise<string | undefined>;
+            };
+            isIdle?(): boolean;
+            waitForIdle?(): Promise<void>;
+            signal?: AbortSignal;
+          },
+        ) => Promise<void> | void;
+      },
+    ) => void;
+    sendUserMessage?: (
+      content: string,
+      options?: { deliverAs?: "steer" | "followUp" },
+    ) => void | Promise<void>;
+  };
+  if (typeof maybePi.registerCommand !== "function") return;
+
+  const VALID_REGIONS = ["identity", "skills", "habits"] as const;
+  const FLAGS = [
+    "--region=identity",
+    "--region=skills",
+    "--region=habits",
+    "--title=",
+  ];
+
+  maybePi.registerCommand("about-me", {
+    description:
+      "Declare an about-me fact: /about-me [--region=identity|skills|habits] [--title=\"...\"] <body>. Injects a MEMORY-ABOUT-ME fence into the transcript; sediment writes to ~/.abrain/<region>/ on the next agent_end (ADR 0021 G2). Empty body opens interactive prompts.",
+    getArgumentCompletions(prefix: string) {
+      const filtered = FLAGS.filter((item) => item.startsWith(prefix));
+      return filtered.length
+        ? filtered.map((value) => ({ value, label: value }))
+        : null;
+    },
+    async handler(args, ctx) {
+      const parsed = parseAboutMeArgs(args || "");
+      let region = parsed.region?.toLowerCase();
+      let title = parsed.title;
+      let body = parsed.body;
+
+      // Empty body + no region → interactive prompt for both.
+      // Empty body + region supplied (e.g. `/about-me --region=skills`)
+      // → only prompt for body.
+      if (!body) {
+        if (!region) {
+          if (typeof ctx.ui.select !== "function") {
+            ctx.ui.notify(
+              "/about-me requires an interactive UI. Provide body inline: /about-me [--region=identity|skills|habits] <text>",
+              "warning",
+            );
+            return;
+          }
+          const picked = await ctx.ui.select(
+            "Which about-me region?",
+            VALID_REGIONS as unknown as string[],
+            { signal: ctx.signal },
+          );
+          if (!picked) {
+            ctx.ui.notify("/about-me cancelled", "info");
+            return;
+          }
+          region = picked.toLowerCase();
+        }
+        if (typeof ctx.ui.input !== "function") {
+          ctx.ui.notify(
+            "/about-me requires an interactive UI. Provide body inline: /about-me [--region=...] <text>",
+            "warning",
+          );
+          return;
+        }
+        const text = await ctx.ui.input(
+          "Your about-me statement (≥ 20 chars):",
+          { signal: ctx.signal },
+        );
+        if (!text || !text.trim()) {
+          ctx.ui.notify("/about-me cancelled", "info");
+          return;
+        }
+        body = text.trim();
+      }
+
+      // Default region when body inline + no --region flag.
+      if (!region) region = "identity";
+      if (!(VALID_REGIONS as readonly string[]).includes(region)) {
+        ctx.ui.notify(
+          `/about-me --region must be one of ${VALID_REGIONS.join(", ")}; got '${region}'`,
+          "warning",
+        );
+        return;
+      }
+
+      // Writer requires body ≥ 20 chars. Fail fast in the slash so the
+      // user gets a clear error rather than waiting for sediment to
+      // reject the fence with `validation_error` next turn.
+      if (body.length < 20) {
+        ctx.ui.notify(
+          `/about-me body must be at least 20 characters (got ${body.length}). Tip: full sentences make better memory entries.`,
+          "warning",
+        );
+        return;
+      }
+      // Cap the fence body to keep one /about-me from dominating the
+      // run window. Writer accepts much larger bodies, but a 4KB fence
+      // is plenty for an identity / skills / habits declaration; longer
+      // entries belong in markdown edits via memory tools.
+      const MAX_BODY = 4000;
+      if (body.length > MAX_BODY) {
+        ctx.ui.notify(
+          `/about-me body must be ≤ ${MAX_BODY} characters (got ${body.length}). Split into multiple /about-me declarations or edit the markdown directly.`,
+          "warning",
+        );
+        return;
+      }
+
+      title = (title && title.trim()) || deriveAboutMeTitle(body);
+      const fence = buildAboutMeFence({ title, region, body });
+
+      // pi.sendUserMessage triggers an LLM turn whose agent_end will
+      // pick the fence up via parseExplicitAboutMeBlocks. ADR 0021 D4 +
+      // inv #3: slash must NOT call the writer directly.
+      if (typeof maybePi.sendUserMessage !== "function") {
+        ctx.ui.notify(
+          "/about-me failed: pi.sendUserMessage is not available in this pi runtime. Paste the MEMORY-ABOUT-ME fence into your next message manually.",
+          "error",
+        );
+        return;
+      }
+
+      // waitForIdle is the recommended safety hook before sendUserMessage
+      // in non-streaming mode (pi extensions.md). Best-effort: older pi
+      // versions may not expose it.
+      try {
+        const maybeWait = (ctx as { waitForIdle?: () => Promise<void> })
+          .waitForIdle;
+        if (typeof maybeWait === "function") {
+          await maybeWait.call(ctx);
+        }
+      } catch {
+        /* best-effort */
+      }
+
+      try {
+        await maybePi.sendUserMessage(fence);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`/about-me sendUserMessage failed: ${message}`, "error");
+        return;
+      }
+
+      ctx.ui.notify(
+        `/about-me [${region}] submitted (title="${title.slice(0, 60)}${title.length > 60 ? "…" : ""}"). Sediment will write to ~/.abrain/${region}/ after this turn finishes.`,
+        "info",
+      );
+    },
+  });
 }
