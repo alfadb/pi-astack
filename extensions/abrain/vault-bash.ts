@@ -40,6 +40,14 @@ export type VaultBashOutputChoice = typeof VAULT_BASH_OUTPUT_AUTH_CHOICES[number
  * Identity today (same rationale as `vaultReleaseDisplayLabel` in
  * abrain/index.ts). Audit + grant comparison must NEVER use the
  * display label.
+ *
+ * ## Contract (post-audit 2026-05-20)
+ *
+ * Any non-identity implementation MUST be: total over
+ * `VaultBashOutputChoice`, never-throwing, with distinct outputs per
+ * enum value. See `vaultReleaseDisplayLabel` JSDoc in
+ * `abrain/index.ts` for the full contract — same rules apply to this
+ * mapper.
  */
 export function vaultBashOutputDisplayLabel(choice: string): string {
   return choice;

@@ -169,7 +169,7 @@ smoke:abrain-redact                    # ADR 0022 P1
 smoke:prompt-user                      # ADR 0022 P2
 smoke:prompt-user-finalizer            # ADR 0022 P2
 smoke:prompt-user-subpi                # ADR 0022 P2
-smoke:prompt-user-option-list          # ADR 0022 R7 OptionList + Batch B D5/i/f.arch real-render (54→67 assertion, 5 negative tests)
+smoke:prompt-user-option-list          # ADR 0022 R7 OptionList + Batch B D5/i/f.arch real-render + post-audit (54→72 assertion, 4 negative tests verified)
 smoke:compaction-tuner-prompt-user     # ADR 0022 P3a
 smoke:compaction-tuner-vault-defer     # ADR 0022 Batch B D7 (2026-05-20, 17 assertion + 3 negative test)
 smoke:persistent-input-history         # 2026-05-20 SDK-drift defense (27 assertion)

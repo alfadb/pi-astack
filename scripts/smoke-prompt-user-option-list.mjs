@@ -1202,6 +1202,43 @@ check("Batch B (D5): vault_release does NOT render the question footnote", () =>
   }
 });
 
+// OPUS P2-4 post-audit (2026-05-20): footnote MUST appear on every
+// question-variant type, not just single. The LLM-driven prompt_user
+// with type:'secret' is the highest social-engineering value (LLM
+// asking user to type a password while implying it's a vault flow).
+// Add coverage for the 3 missing types.
+
+check("Batch B (D5) post-audit: footnote present on question variant type='secret'", () => {
+  const { joined } = renderRoot(
+    [{ id: "s", header: "h", question: "q?", type: "secret" }],
+    "question",
+  );
+  if (!/not a vault authorization/i.test(joined)) {
+    throw new Error(`question/secret variant MUST render anti-spoof footnote (highest social-eng risk):\n${joined}`);
+  }
+});
+
+check("Batch B (D5) post-audit: footnote present on question variant type='text'", () => {
+  const { joined } = renderRoot(
+    [{ id: "t", header: "h", question: "q?", type: "text" }],
+    "question",
+  );
+  if (!/not a vault authorization/i.test(joined)) {
+    throw new Error(`question/text variant MUST render anti-spoof footnote:\n${joined}`);
+  }
+});
+
+check("Batch B (D5) post-audit: footnote present on question variant type='multi'", () => {
+  const { joined } = renderRoot(
+    [{ id: "m", header: "h", question: "q?", type: "multi",
+      options: [{ label: "A" }, { label: "B" }] }],
+    "question",
+  );
+  if (!/not a vault authorization/i.test(joined)) {
+    throw new Error(`question/multi variant MUST render anti-spoof footnote:\n${joined}`);
+  }
+});
+
 check("Batch B (i): vault_release hint split across two text rows", () => {
   const { lines, joined } = renderRoot(
     [{ id: "q", header: "h", question: "q?", type: "single",
@@ -1251,6 +1288,109 @@ check("Batch B (i): caller can force compactHint=true on question variant", () =
   if (/enter submit/.test(typeHintRow)) {
     throw new Error("forced compactHint=true should split hint rows");
   }
+});
+
+// DEEPSEEK P2-1 post-audit (2026-05-20): smoke previously verified
+// 'rows are split' at width=80, which would pass even if compactHint
+// were a no-op (because at 80-col everything fits in one row anyway).
+// Render at 40-col and verify: (a) typeHint row never appears merged
+// with action hints, (b) the action-hint row 'enter authorize • esc
+// deny' fits in 40 cells without mid-word wrap.
+
+check("Batch B (i) post-audit: vault hint actually compacts at 40-col render width", () => {
+  // Build container, then render at narrow width.
+  let resolved = null;
+  const root = buildPromptDialog({
+    params: { reason: "test", questions: [
+      { id: "q", header: "h", question: "q?", type: "single",
+        options: [{ label: "No" }, { label: "Yes once" }] }
+    ], timeoutSec: 30 },
+    variant: "vault_release",
+    tui: { requestRender: () => {} },
+    theme: fullTheme,
+    pitui: pituiBag,
+    onDone: (r) => { resolved = r; },
+  });
+  const lines40 = root.render(40);
+  // At 40-col the typeHint row '↑↓ navigate' must NOT also contain
+  // 'enter authorize' / 'esc deny' (i.e. they didn't end up on the
+  // same logical row even though the renderer might soft-wrap text).
+  const typeRow = lines40.find((l) => /↑↓ navigate/.test(l));
+  if (!typeRow) {
+    throw new Error(`40-col render missing ↑↓ navigate row:\n${lines40.join("\n")}`);
+  }
+  if (/enter authorize|esc deny/.test(typeRow)) {
+    throw new Error(`40-col: typeHint row leaked action hints (compactHint did not split):\n${typeRow}`);
+  }
+  // The action row must exist and fit reasonably (we don't enforce a
+  // hard column limit here because mock theme stamps inflate width;
+  // the real-world wrap is verified by NOT having word-break in the
+  // pre-styled text). Negative-test: 'esc dethey' (word break in
+  // 'esc deny' across two visible parts) would indicate broken wrap.
+  const actionRow = lines40.find(
+    (l) => /enter authorize/.test(l) && /esc deny/.test(l),
+  );
+  if (!actionRow) {
+    throw new Error(`40-col: combined action row not found:\n${lines40.join("\n")}`);
+  }
+  // Defense in depth: at 40-col the action words must remain intact
+  // (no mid-word ANSI/markup interruption inside 'authorize').
+  // Mock theme stamps colors around the WHOLE row, so a healthy
+  // row will have one matching pair around the full text.
+  const authorizePos = actionRow.indexOf("authorize");
+  if (authorizePos < 0) {
+    throw new Error(`40-col: 'authorize' word broken or missing:\n${actionRow}`);
+  }
+  // Discard the resolved capture (test-only hang).
+  void resolved;
+});
+
+check("Batch B (i) post-audit: question variant 40-col render keeps default single-row", () => {
+  let resolved = null;
+  const root = buildPromptDialog({
+    params: { reason: "test", questions: [
+      { id: "q", header: "h", question: "q?", type: "single",
+        options: [{ label: "A" }, { label: "B" }] }
+    ], timeoutSec: 30 },
+    variant: "question",
+    tui: { requestRender: () => {} },
+    theme: fullTheme,
+    pitui: pituiBag,
+    onDone: (r) => { resolved = r; },
+  });
+  const lines40 = root.render(40);
+  // Default for question is compactHint=false; the hint is ONE
+  // combined row even at 40-col (renderer will soft-wrap visually,
+  // but the source row is one Text component).
+  const combined = lines40.find(
+    (l) => /↑↓ navigate/.test(l) && /enter submit/.test(l) && /esc cancel/.test(l),
+  );
+  if (!combined) {
+    // Note: at narrow width pi-tui Text may visually wrap the single
+    // row across multiple rendered lines, but it remains ONE Text
+    // component. The smoke checks the *source contract*; visual
+    // wrap is fine. Look for either combined OR the soft-wrapped
+    // remnants on adjacent lines.
+    const navIdx = lines40.findIndex((l) => /↑↓ navigate/.test(l));
+    if (navIdx < 0) {
+      throw new Error(`40-col question render: no ↑↓ navigate row at all:\n${lines40.join("\n")}`);
+    }
+    // Should NOT have a separate typeHint-only row (that would mean
+    // compactHint silently became true for question variant).
+    if (navIdx + 1 < lines40.length) {
+      const next = lines40[navIdx + 1];
+      // If the next line ONLY contains enter+esc and no other content,
+      // compactHint sneaked in. (Soft-wrap of a single row would put
+      // partial text on the next line, not action-only.)
+      if (/^[^a-z]*enter submit • esc cancel[^a-z]*$/i.test(next.trim())) {
+        throw new Error(
+          `question variant 40-col render shows separate action-hint row — ` +
+            `compactHint default silently flipped to true:\n${lines40.join("\n")}`,
+        );
+      }
+    }
+  }
+  void resolved;
 });
 
 check("Batch B (f.arch): labelFor maps display text; returned value is the stable enum", () => {

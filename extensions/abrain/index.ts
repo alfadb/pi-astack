@@ -263,11 +263,49 @@ export type VaultReleaseChoice = typeof VAULT_RELEASE_AUTH_CHOICES[number];
  * Callers MUST treat `VAULT_RELEASE_AUTH_CHOICES` strings as opaque
  * enum tags (compare-by-equality, audit-grep-friendly) and use this
  * function for any user-facing surface.
+ *
+ * ## Contract for future (f.copy) implementations
+ *
+ * Post-audit 2026-05-20 (DEEPSEEK P2-2/P2-3 + OPUS P2-3 documentation):
+ * any non-identity implementation MUST satisfy:
+ *
+ *   1. **Total function over VaultReleaseChoice**: must return a
+ *      non-empty string for EVERY enum value (compile-time enforce
+ *      with `switch (choice as VaultReleaseChoice) { case ...:
+ *      ... default: const _e: never = choice; throw new Error(...) }`).
+ *      A missing case yielding `undefined` would render "undefined
+ *      (Recommended)" — not a security bug (the returned answer is
+ *      still the enum), but a UX disaster.
+ *
+ *   2. **Never throws**: PromptDialog's `rebuildLayout` does not wrap
+ *      `labelFor` in try/catch (intentional today because identity
+ *      cannot throw). A throwing labelFor would crash the dialog —
+ *      same caveat as #1. When (f.copy) lands a real mapper, that PR
+ *      must also add the rebuildLayout-side guard (or guarantee
+ *      total-with-fallback inside the mapper).
+ *
+ *   3. **Distinct outputs (no collision)**: two different enum values
+ *      must NOT map to the same display string. A collision would not
+ *      affect security (audit + grant comparison are enum-keyed) but
+ *      would leave the user unable to distinguish two visually-identical
+ *      options. The translation-copy review must spot-check pairwise.
+ *
+ *   4. **Pure ASCII not required**: emoji / CJK / RTL are all fine.
+ *      The rendering layer (OptionList + pi-tui Text) handles CJK
+ *      wrap via cellWidth (`PromptDialog.ts::cellWidth`).
+ *
+ *   5. **(Recommended) suffix stays English** (until a separate
+ *      f.copy pass also localizes it): PromptDialog appends
+ *      ' (Recommended)' to the labelFor output verbatim. If (f.copy)
+ *      wants to localize the suffix too, it must extend `BuildDialogArgs`
+ *      with a `recommendedSuffixLabel?: string` parameter. Documented
+ *      here so the f.copy PR scope is explicit.
  */
 export function vaultReleaseDisplayLabel(choice: string): string {
   // f.copy: replace identity with a switch over VaultReleaseChoice
-  // when localized copy lands. Until then, returning `choice` unchanged
-  // preserves current behavior exactly.
+  // when localized copy lands. See contract clauses in JSDoc above.
+  // Until then, returning `choice` unchanged preserves current
+  // behavior exactly.
   return choice;
 }
 
