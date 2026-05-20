@@ -912,12 +912,31 @@ async function processVaultBashToolResult(
       // Structured audit failed (record.releases corrupted or
       // similar). Write a minimal fallback row so the forensic
       // trail is preserved.
+      // ADR 0022 batch C post-audit (2026-05-19, 3-way OPUS+GPT+DEEPSEEK
+      // unanimous P1): be honest about scope. Hardcoding scope:"global"
+      // misled audit grep (project-scoped bash output failures looked like
+      // global ones). Try to recover a real scope from record.releases[0],
+      // fall back to scope:"(unknown)" only when even that read throws.
+      // Use `keys` (plural) to match the schema of healthy bash_output
+      // rows (which set keys: record.releases.map(...)). The placeholder
+      // "(unreadable)" sits inside the array so downstream consumers
+      // grepping `jq 'select(.keys[] | startswith("global:"))'` don't
+      // false-positive match this row.
+      let derivedScope: string = "(unknown)";
+      try {
+        const first = Array.isArray((record as { releases?: unknown }).releases)
+          ? ((record as { releases: ReleaseSecretResult[] }).releases[0] as ReleaseSecretResult | undefined)
+          : undefined;
+        if (first?.scope) {
+          derivedScope = scopeAuditLabel(first.scope);
+        }
+      } catch { /* keep "(unknown)" */ }
       safeAuditAppend({
         ts: new Date().toISOString(),
         op: "bash_output_withhold",
-        scope: "global",
+        scope: derivedScope,
         lane: "bash_output",
-        key: "(unreadable)",
+        keys: ["(unreadable)"],
         reason: `outer_catch_audit_failed:${(auditErr as Error)?.message ?? "unknown"}`.slice(0, 200),
       });
     }
@@ -1683,11 +1702,20 @@ export default function activate(pi: ExtensionAPI): void {
     // (or future LLM-accessible eval path) cannot silently rebind the
     // hook to a function that always returns 0 — which would silently
     // disable INV-K compaction defer and cause active prompt_user
-    // dialogs to be torn down by compaction. Failure to install (e.g.
-    // hot reload re-running activate()) is non-fatal: existing
-    // immutable hook keeps working, smoke can detect via __getPending
-    // semantics. Tests that NEED to mutate the hook MUST use the
-    // dedicated test-only API rather than reassign globalThis.
+    // dialogs to be torn down by compaction.
+    //
+    // Hot reload safety (3-way audit P1-3, 2026-05-19): two activate()
+    // calls in the same process is rare but possible. The hook value
+    // captures `promptManagerModule` by closure; Node's require cache
+    // returns the SAME module instance on repeat require, so the
+    // captured reference still sees the latest manager state. The
+    // second defineProperty throws (non-configurable) and we ALLOW
+    // that throw via the inspect-and-classify catch below: a benign
+    // re-install collision is silenced; any other failure (e.g.
+    // globalThis frozen, foreign hook squatted, descriptor mismatch)
+    // is escalated via stderr so ops can find why INV-K defer is
+    // silently inactive. Tests that NEED to mutate the hook MUST
+    // use the test-only export in production-disabled smoke harness.
     try {
       Object.defineProperty(globalThis, "__abrainPromptUserGetPending", {
         value: () => promptManagerModule.getPendingPromptCount(),
@@ -1695,9 +1723,28 @@ export default function activate(pi: ExtensionAPI): void {
         writable: false,
         enumerable: false,
       });
-    } catch {
-      // Already defined as non-configurable (hot reload of activate);
-      // first hook wins. This is the desired property.
+    } catch (err) {
+      // Classify: benign hot-reload collision vs pathological install
+      // failure. Benign = an existing non-configurable property already
+      // exists with a callable value (we're the second activate()).
+      // Pathological = no descriptor, or descriptor with non-function
+      // value, or descriptor still configurable (someone is racing us).
+      const existing = Object.getOwnPropertyDescriptor(
+        globalThis,
+        "__abrainPromptUserGetPending",
+      );
+      const benign =
+        existing && existing.configurable === false && typeof existing.value === "function";
+      if (!benign) {
+        try {
+          process.stderr.write(
+            `[abrain] FAILED to install non-configurable __abrainPromptUserGetPending hook: ` +
+              `${(err as Error)?.message ?? String(err)}\n` +
+              "INV-K compaction defer may not be active. See ADR 0022 §D11 + batch C audit notes.\n",
+          );
+        } catch { /* stderr write failure is itself non-fatal */ }
+      }
+      // else: first-wins hot reload, intentional silence.
     }
   }
 

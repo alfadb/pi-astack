@@ -295,9 +295,17 @@ function runSubprocess(
       // invariant #6 (sub-pi 默认看不到任何 vault). Order matters: ...process.env
       // first, PI_ABRAIN_DISABLED last — so user's `export PI_ABRAIN_DISABLED=0`
       // cannot bypass. See migration/vault-bootstrap.md §5 layer (a).
+      //
+      // ADR 0022 batch C post-audit (2026-05-19, 3-way OPUS+GPT+DEEPSEEK
+      // unanimous P1): symmetrically strip PI_ASTACK_ENABLE_TEST_HOOKS so
+      // smoke harnesses opting in via that env in the parent never let
+      // sub-pi unlock plaintext-bearing test mutators. Node's child_process
+      // treats env values of `undefined` as "do not inherit". This
+      // mirrors PI_ABRAIN_DISABLED's force-override pattern.
       const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
         PI_ABRAIN_DISABLED: "1",
+        PI_ASTACK_ENABLE_TEST_HOOKS: undefined,
       };
       child = spawn("pi", args, {
         stdio: ["ignore", "pipe", "pipe"],

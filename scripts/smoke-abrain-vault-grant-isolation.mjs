@@ -825,16 +825,34 @@ await check("handler E2E: outer-envelope fail-closed catch withholds (OPUS P1-5 
   // fallback row via safeAuditAppend with `key:"(unreadable)"` and
   // `reason:"outer_catch_audit_failed:<msg>"`. We can now verify the row
   // EXISTS and does NOT carry ui_path (the OPUS P1-5 contract).
+  // ADR 0022 batch C post-audit (2026-05-19, 3-way OPUS+GPT+DEEPSEEK
+  // unanimous P1): fallback row schema reshaped from hardcoded
+  // scope:"global" + singular key to derived scope + keys:[]. Match
+  // the new shape: when record.releases is a non-array string, the
+  // try-derive-from-releases-first path catches/falls back to
+  // scope:"(unknown)" rather than misclaiming "global".
   const ocRows = await readAuditRows();
   const fallbackRows = ocRows.filter(
-    (r) => r.op === "bash_output_withhold" && r.key === "(unreadable)",
+    (r) =>
+      r.op === "bash_output_withhold" &&
+      Array.isArray(r.keys) &&
+      r.keys.includes("(unreadable)"),
   );
   if (fallbackRows.length !== 1) {
     throw new Error(
-      `expected exactly 1 outer-catch fallback audit row (key="(unreadable)"), got ${fallbackRows.length}: ${JSON.stringify(ocRows)}`,
+      `expected exactly 1 outer-catch fallback audit row (keys=["(unreadable)"]), got ${fallbackRows.length}: ${JSON.stringify(ocRows)}`,
     );
   }
   const fbRow = fallbackRows[0];
+  if (fbRow.scope !== "(unknown)") {
+    // record.releases = "NOT_AN_ARRAY" — the derive-from-releases path
+    // throws, so we should land in the "(unknown)" sentinel branch.
+    // If we ever see "global" here on this fixture, it means someone
+    // reverted the audit batch C honest-scope fix.
+    throw new Error(
+      `expected fallback row scope="(unknown)" on poisoned releases, got ${JSON.stringify(fbRow)}`,
+    );
+  }
   if (!String(fbRow.reason || "").startsWith("outer_catch_audit_failed:")) {
     throw new Error(`expected reason='outer_catch_audit_failed:*', got ${JSON.stringify(fbRow.reason)}`);
   }

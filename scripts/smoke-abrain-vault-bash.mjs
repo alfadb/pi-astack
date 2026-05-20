@@ -336,6 +336,22 @@ await check("batch C: __abrainPromptUserGetPending is installed non-configurable
   }
 });
 
+// ADR 0022 batch C post-audit (2026-05-19, 3-way OPUS+GPT+DEEPSEEK
+// unanimous P1): pin assertion count to match the discipline already
+// applied in smoke-abrain-vault-grant-isolation. A future edit that
+// silently drops a check(...) block now fails this smoke with
+// 'assertion count drift' rather than passing with reduced coverage.
+const EXPECTED_ASSERTIONS = 20;
+if (total !== EXPECTED_ASSERTIONS) {
+  failures.push({
+    name: "assertion count drift",
+    err: new Error(
+      `expected ${EXPECTED_ASSERTIONS} assertions, ran ${total}. ` +
+        "If you intentionally added/removed a check(...), bump EXPECTED_ASSERTIONS.",
+    ),
+  });
+}
+
 console.log("");
 if (failures.length === 0) {
   console.log(`all ok — vault-backed bash helper holds (${total} assertions).`);
