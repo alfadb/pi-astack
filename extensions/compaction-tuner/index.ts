@@ -26,10 +26,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-// ADR 0022 INV-K: cross-extension defer check. Imported from its own
-// leaf module so smoke can exercise it in isolation. See
-// ./prompt-user-defer.ts for the why.
+// ADR 0022 INV-K: cross-extension defer checks. Both imported from their
+// own leaf modules so smoke can exercise each in isolation. See
+// ./prompt-user-defer.ts and ./vault-defer.ts for the why.
 import { isPendingPromptUserBlocking } from "./prompt-user-defer";
+import { isPendingVaultDialogBlocking } from "./vault-defer";
 import {
   compactionTunerAuditPath,
   compactionTunerDir,
@@ -199,21 +200,36 @@ export default function (pi: ExtensionAPI) {
     // decision === "trigger"
     const ts = Date.now();
 
-    // ADR 0022 INV-K: defer compaction while a prompt_user dialog
-    // is pending. We check AFTER classifyDecision returned "trigger"
-    // but BEFORE consuming rearm state — so the next agent_end after
-    // the prompt resolves will re-classify and trigger normally
-    // (no missed compaction; just delayed one turn).
+    // ADR 0022 INV-K: defer compaction while a user-facing overlay
+    // (prompt_user dialog OR vault authorization dialog) is pending.
+    // We check AFTER classifyDecision returned "trigger" but BEFORE
+    // consuming rearm state — so the next agent_end after the user
+    // answers will re-classify and trigger normally (no missed
+    // compaction; just delayed one turn).
     //
     // Unlike the silent skips above, we DO audit this branch because
-    // (a) the cardinality is low (only fires while user is at the
+    // (a) the cardinality is low (only fires while the user is at the
     // keyboard), and (b) operators chasing "why didn't compaction
     // fire at 90%?" need an observable trace.
+    //
+    // Two separate checks, separate audit reasons. See
+    // ./vault-defer.ts header for why these are NOT collapsed into a
+    // single "any overlay" hook. prompt_user is checked first because
+    // it's the more common path (vault auth is per-secret-release).
     if (isPendingPromptUserBlocking()) {
       await recordSimpleSkip(cwd, {
         ts: new Date(ts).toISOString(),
         decision: "skip",
         reason: "prompt_user_pending",
+        usage_percent: percent,
+      });
+      return;
+    }
+    if (isPendingVaultDialogBlocking()) {
+      await recordSimpleSkip(cwd, {
+        ts: new Date(ts).toISOString(),
+        decision: "skip",
+        reason: "vault_dialog_pending",
         usage_percent: percent,
       });
       return;

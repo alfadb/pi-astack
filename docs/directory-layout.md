@@ -183,11 +183,13 @@ smoke-abrain-vault-identity.mjs
 smoke-abrain-vault-reader.mjs
 smoke-abrain-vault-writer.mjs
 smoke-compaction-tuner-prompt-user.mjs
+smoke-compaction-tuner-vault-defer.mjs
 smoke-dispatch-input-compat.mjs
 smoke-dispatch-output-format.mjs
 smoke-imagine.mjs
 smoke-memory-sediment.mjs
 smoke-model-fallback-mutation-timing.mjs
+smoke-persistent-input-history.mjs
 smoke-pi-astack-paths.mjs
 smoke-prompt-user-finalizer.mjs
 smoke-prompt-user.mjs
@@ -197,7 +199,7 @@ smoke-vault-subpi-isolation.mjs
 smoke-vision.mjs
 ```
 
-Current count: **25** files, one per `package.json#scripts:smoke:*` entry. Last drift fixed 2026-05-19 (ADR 0022 batch C: 17 → 25, added 8 entries since 2026-05-15: `grant-isolation`, `redact`, `compaction-tuner-prompt-user`, `dispatch-output-format`, `prompt-user`, `prompt-user-finalizer`, `prompt-user-option-list`, `prompt-user-subpi`).
+Current count: **27** files, one per `package.json#scripts:smoke:*` entry. Drift history: 2026-05-19 ADR 0022 batch C 17 → 25 (+8: `grant-isolation`, `redact`, `compaction-tuner-prompt-user`, `dispatch-output-format`, `prompt-user`, `prompt-user-finalizer`, `prompt-user-option-list`, `prompt-user-subpi`); 2026-05-20 `persistent-input-history` 25 → 26; 2026-05-20 `compaction-tuner-vault-defer` 26 → 27 (ADR 0022 Batch B D7).
 
 See [reference/smoke-tests.md](./reference/smoke-tests.md).
 

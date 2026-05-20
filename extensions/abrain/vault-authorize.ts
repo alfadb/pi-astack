@@ -104,6 +104,28 @@ export type AskVaultAuthorizationResult =
 // answers them, creating a backlog the user can't escape.
 let __vaultDialogInFlight = false;
 
+/**
+ * Stable runtime API: true iff a vault authorization dialog is currently
+ * waiting on user input. Goes true at `__vaultDialogInFlight = true`
+ * inside `askVaultAuthorizationViaDialog` and back to false in the
+ * `finally` block, so it reflects exactly the window during which the
+ * user is staring at the overlay.
+ *
+ * Published by `abrain/index.ts` activate() as `globalThis
+ * .__abrainVaultDialogInFlight` for cross-extension consumption (e.g.
+ * compaction-tuner's INV-K defer; see
+ * `extensions/compaction-tuner/vault-defer.ts`). The wiring intentionally
+ * mirrors the `__abrainPromptUserGetPending` hook installed for
+ * prompt_user (ADR 0022 INV-K) so both substrates have symmetric defer
+ * semantics.
+ *
+ * Returns boolean (not a count) because the lock is binary — vault
+ * never queues, so "in flight" is at most 1.
+ */
+export function isVaultDialogInFlight(): boolean {
+  return __vaultDialogInFlight;
+}
+
 /** Test-only: reset the module-level vault dialog lock. */
 export function __resetVaultDialogLockForTests(): void {
   __vaultDialogInFlight = false;

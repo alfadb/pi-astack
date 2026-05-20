@@ -84,8 +84,13 @@ import type {
 import type { PromptAuditSink, PromptDialogDeps } from "./prompt-user/service";
 import type { PiTuiBag } from "./prompt-user/ui/PromptDialog";
 // ADR 0022 P3b: vault authorization via PromptDialog overlay.
+// `isVaultDialogInFlight` is the cross-extension query used by
+// compaction-tuner (ADR 0022 §D11) to defer compaction while the user
+// is answering a vault authorization overlay — same INV-K shape as
+// prompt_user, but a separate substrate/hook.
 import {
   askVaultAuthorizationViaDialog,
+  isVaultDialogInFlight,
 } from "./vault-authorize";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
@@ -1741,6 +1746,44 @@ export default function activate(pi: ExtensionAPI): void {
             `[abrain] FAILED to install non-configurable __abrainPromptUserGetPending hook: ` +
               `${(err as Error)?.message ?? String(err)}\n` +
               "INV-K compaction defer may not be active. See ADR 0022 §D11 + batch C audit notes.\n",
+          );
+        } catch { /* stderr write failure is itself non-fatal */ }
+      }
+      // else: first-wins hot reload, intentional silence.
+    }
+
+    // ADR 0022 Batch B (D7), 2026-05-20: extend INV-K defer to the
+    // vault authorization overlay. Symmetric to `__abrainPromptUserGetPending`
+    // above — returns boolean (vault never queues, so binary flag, not a
+    // count). compaction-tuner reads this via `vault-defer.ts` and skips
+    // compaction while the user is staring at a vault overlay.
+    //
+    // Hardening rationale identical to prompt_user hook: defineProperty
+    // with configurable:false + writable:false to block a misbehaving
+    // extension (or future LLM-accessible eval path) from rebinding the
+    // hook to a function that always returns false — which would silently
+    // disable INV-K vault defer and let compaction tear down an active
+    // authorization overlay.
+    try {
+      Object.defineProperty(globalThis, "__abrainVaultDialogInFlight", {
+        value: () => isVaultDialogInFlight(),
+        configurable: false,
+        writable: false,
+        enumerable: false,
+      });
+    } catch (err) {
+      const existing = Object.getOwnPropertyDescriptor(
+        globalThis,
+        "__abrainVaultDialogInFlight",
+      );
+      const benign =
+        existing && existing.configurable === false && typeof existing.value === "function";
+      if (!benign) {
+        try {
+          process.stderr.write(
+            `[abrain] FAILED to install non-configurable __abrainVaultDialogInFlight hook: ` +
+              `${(err as Error)?.message ?? String(err)}\n` +
+              "INV-K vault-dialog defer may not be active. See ADR 0022 §D11 + Batch B (D7) notes.\n",
           );
         } catch { /* stderr write failure is itself non-fatal */ }
       }

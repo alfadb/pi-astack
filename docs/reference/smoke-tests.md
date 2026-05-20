@@ -2,7 +2,7 @@
 
 `package.json#scripts` 是 smoke test live truth。本文只是便于阅读的镜像；修改脚本时请同步本文。
 
-## Current scripts（2026-05-20, 26 total）
+## Current scripts（2026-05-20, 27 total）
 
 | npm script | File | Coverage |
 |---|---|---|
@@ -27,6 +27,7 @@
 | `smoke:abrain-i18n` | `scripts/smoke-abrain-i18n.mjs` | abrain i18n strings |
 | `smoke:abrain-redact` | `scripts/smoke-abrain-redact.mjs` | abrain redactor unit coverage |
 | `smoke:compaction-tuner-prompt-user` | `scripts/smoke-compaction-tuner-prompt-user.mjs` | INV-K compaction-defer hook (`__abrainPromptUserGetPending`) |
+| `smoke:compaction-tuner-vault-defer` | `scripts/smoke-compaction-tuner-vault-defer.mjs` | INV-K compaction-defer hook for vault dialog (`__abrainVaultDialogInFlight`) — ADR 0022 Batch B D7. Mirrors prompt-user-defer structure: hook absent/throws/wrong-type → false; real `vault-authorize.isVaultDialogInFlight()` integration; symmetry guard (prompt_user hook ≠ vault hook); 2 source-anchor + trigger-path anchors (hook name + `defineProperty configurable:false` + import + audit reason `vault_dialog_pending`). 14 assertion, 3 negative tests verified. |
 | `smoke:prompt-user` | `scripts/smoke-prompt-user.mjs` | prompt_user manager + secret redaction + INV-A/B/C/D contracts |
 | `smoke:prompt-user-finalizer` | `scripts/smoke-prompt-user-finalizer.mjs` | R8 P1#1: dialog teardown / disposer / __wipeSecrets |
 | `smoke:prompt-user-option-list` | `scripts/smoke-prompt-user-option-list.mjs` | PromptDialog real-render vault & question variants |

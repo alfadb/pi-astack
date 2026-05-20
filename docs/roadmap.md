@@ -62,6 +62,7 @@
 | (c)+(d) Batch A 子组 2: stage-index grant isolation E2E (初 ship) | `912d5f0` | 新 `scripts/smoke-abrain-vault-grant-isolation.mjs` (17 assertion)。Stage `extensions/abrain/index.ts`，通过 `__authorizeVaultReleaseForTests` / `__authorizeVaultBashOutputForTests` 驱动五个 UI substrate 分支。覆盖：**(c)** INV-E grant isolation、fail-closed envelope、**(d)** ui.select/confirm fallback、**(g)** ui_path 端到端 stamp。Vault 释放 6 + Bash output 5 + grant isolation 3 + telemetry 1 + export shape 1 + cached fast-path 1 = 17 assertion。 |
 | → Batch A 子组 2 post-audit fix (3-way T0 一致 P0) | `863d6e6` | **2026-05-19 OPUS-4-7 + GPT-5.5 + DEEPSEEK-V4-pro xhigh 三路一致 P0** (罕见 unanimous)：912d5f0 的 smoke 并不能抓住 ff3dd9e 的 P0。原因：ff3dd9e 的 bug 在 `tool_result` handler 调用点，而 smoke 只直接调 `__authorizeVaultBashOutputForTests` helper — helper 返回在 ff3dd9e 时已正确，bug 完全在 caller 侧。修：抽 `processVaultBashToolResult` 为 module-level function，加 handler E2E test-only exports。smoke +5 handler E2E assertion (17→22)。**Negative test 双向验证**。 |
 | → Batch A 子组 2 third-round audit fix | `d5d5881` | **第 3 轮 GPT-5.5 + DEEPSEEK-V4-pro 2/2 共识 P1** (OPUS 本轮 timeout)：863d6e6 的 commit body 声称 require-time fail-fast 已加，但 edit batch atomic rollback 只营 commit message，代码中从未落实。修：真正加 fail-fast loop 验证 11 个 test-only exports + DEEPSEEK P2-2 vacuous assertion 改为诚实断言 + GPT P2-1 count drift 不再受 failures.length 干扰 + docs sync。**双 Negative test 验证**：加 bogus export 名后 fail-fast 立即 throw；改 EXPECTED=99 后 drift 立即 fail。 |
+| **(D7) Batch B Compaction defer for vault dialog** ✅ (2026-05-20) | _本轮_ | INV-K 从 prompt_user 拓宽到 vault 授权 dialog。新增 `extensions/compaction-tuner/vault-defer.ts` 叶模块 (`isPendingVaultDialogBlocking()`)，镜像 `prompt-user-defer.ts` 同一防御语义（hook 抩/缺失/类型错 → false）。`extensions/abrain/vault-authorize.ts` 新增稳定公共 API `isVaultDialogInFlight()`（不同于现有 `__peekVaultDialogLockForTests` test-only 函数，该 API 是 cross-extension contract）。`abrain/index.ts` activate() 发布 `__abrainVaultDialogInFlight` globalThis hook，同用 `Object.defineProperty configurable:false writable:false` 加固（镜像 Batch C 对 `__abrainPromptUserGetPending` 的保护）。`compaction-tuner/index.ts` trigger 路径双 check：prompt_user 在前（更常见），vault 在后；audit reason 独立（`prompt_user_pending` 保留 + `vault_dialog_pending` 新增）以便调试。新 `smoke:compaction-tuner-vault-defer` 14 assertion 覆盖所有 hook 状态分枝 + 真实 vault-authorize 集成 + 两个 substrate 不名称折叠防御 + 2 个 grep-anchor 锁 hook 名称与 hardening。3 个 negative test 双向验证：(1) helper 常返 false fail、(2) trigger 路径刪 vault check fail、(3) hardening 退化 `configurable:true` fail。Prerequisite “vault-authorize lock 泄漏 smoke” 发现已被 `smoke:abrain-vault-reader` 5 条 assertion 覆盖（成功 / pre-abort / mid-dialog abort / dual-call sequencing / concurrent gate）。 |
 | Batch C polish sweep + 3rd-round audit deferred closure | _本轮_ | **本 batch 同时闭环原计划与 3 轮 audit deferred 项**：(1) `__secretLengths` → `__secretLengthsInternal` 改名明确“非 wire”、(2) `displayWidth` helper grep 发现早被删 (no-op)、(3) `__abrainPromptUserGetPending` hook 改用 `Object.defineProperty configurable:false writable:false` 防 LLM eval / extension 静默重绑为 `() => 0` 绕过 INV-K compaction defer + `smoke:abrain-vault-bash` 19→20 grep anchor、(4) `__seedVaultBashRunForTests` / `__clearVaultBashRunsForTests` 加 `PI_ASTACK_ENABLE_TEST_HOOKS=1` env gate (GPT P1#2 3rd round)、(5) **DEEPSEEK P2-1 + P2-2 闭环**：发现原 outer-envelope test 是 vacuous-true 原因是原代码 outer try 内 `vaultBashRuns.delete(toolCallId)` 在 throw 之前已跱，outer catch 再 `.get()` 永远 undefined — fallback 路径不可达。修：record 提升到 outer scope + `auditBashOutput` 外 加 try/catch + fallback `safeAuditAppend({key:"(unreadable)", reason:"outer_catch_audit_failed:*"})`。outer-envelope assertion 升级为验证 fallback row 真存在。(6) docs/reference/smoke-tests.md 从 15 →25 + docs/directory-layout.md 从 17 →25 同步。**Negative test**：移除 env var 、重现 record.delete-before-throw、重现原 plain assignment 都能独立拦截。 |
 
 ### ❌ Closed as won't-fix (三路共识 / 主调采纳)
@@ -102,14 +103,14 @@
 
 ### 📦 Batch B — Vault UX defense
 
-| 项 | 做法 | LOC |
-|---|---|---|
-| (D5) Vault visual confusion 🔒 | PromptDialog vault variant 加固定锁图标；question variant 加 footnote“此对话框非 vault 授权”；补 render smoke | ~20 |
-| (D7) Compaction defer for vault | vault-authorize.ts export `isVaultDialogInFlight()`；compaction-tuner 添 OR 条件。复用 `getPendingPromptCount` 的 hook 模式，避免引入跨扩展反向依赖 | ~15 |
-| (i) 40-col narrow terminal hint wrap | vault hint text 按 width 分档或缩短；DEEPSEEK 指出与 (D5) 同 batch 一起测（(D5) 改变渲染高度可能与窄终端 wrap 叠加） | ~10 |
-| (f.arch) Vault auth label/value 拆分架构 | 拆 display label / stable enum value：PromptDialog result 返回 stable value，mapping 层产生 locale-specific label。audit 中永远写 stable value。同步改 smoke 验证 value 稳定 + label 可本地化。具体翻译文案留空 (f.copy) | ~40 |
+| 项 | 做法 | LOC | 状态 |
+|---|---|---|---|
+| (D5) Vault visual confusion 🔒 | PromptDialog vault variant 加固定锁图标；question variant 加 footnote“此对话框非 vault 授权”；补 render smoke | ~20 | ⏭️ |
+| **(D7)** Compaction defer for vault | vault-authorize.ts export `isVaultDialogInFlight()`；compaction-tuner 添 OR 条件。复用 `getPendingPromptCount` 的 hook 模式，避免引入跨扩展反向依赖 | ~15 | ✅ **shipped 2026-05-20** — 新 `extensions/compaction-tuner/vault-defer.ts` 叶模块镜像 `prompt-user-defer.ts`；`vault-authorize.ts` 新增公共 API `isVaultDialogInFlight()`；`abrain/index.ts` activate() 发布 `__abrainVaultDialogInFlight` hook 同用 `defineProperty configurable:false` 加固；compaction-tuner trigger 路径添独立 audit reason `vault_dialog_pending`。新 `smoke:compaction-tuner-vault-defer` 14 assertion + 3 negative test 双向锁定（helper 常返 false / trigger 路径刪 vault check / hardening 退化 `configurable:true` 都能 fail-fast）。不含 multi-LLM audit——镜像 P3a (`prompt-user-defer.ts`) 已经三轮审计过的成熟模式，仅需 negative test 验证 assertion 生效。 |
+| (i) 40-col narrow terminal hint wrap | vault hint text 按 width 分档或缩短；DEEPSEEK 指出与 (D5) 同 batch 一起测（(D5) 改变渲染高度可能与窄终端 wrap 叠加） | ~10 | ⏭️ |
+| (f.arch) Vault auth label/value 拆分架构 | 拆 display label / stable enum value：PromptDialog result 返回 stable value，mapping 层产生 locale-specific label。audit 中永远写 stable value。同步改 smoke 验证 value 稳定 + label 可本地化。具体翻译文案留空 (f.copy) | ~40 | ⏭️ |
 
-**回归风险**：(D5) 渲染高度变化 × (i) 窄终端 wrap 在同一代码路径交错。(D7) 如 `__vaultDialogInFlight` finally 丢解锁，compaction 永远被 defer—— 动 compaction-tuner 前先补 vault-authorize lock 泄漏 smoke。
+**回归风险**：(D5) 渲染高度变化 × (i) 窄终端 wrap 在同一代码路径交错。~~(D7) 如 `__vaultDialogInFlight` finally 丢解锁，compaction 永远被 defer）动 compaction-tuner 前先补 vault-authorize lock 泄漏 smoke。~~ → (D7) 实际 ship 时发现 `smoke:abrain-vault-reader` 已覆盖 5 条 lock 泄漏 assertion（成功 / pre-abort fast reject / mid-dialog abort / dual-call sequencing / concurrent gate），prerequisite 自动满足。
 
 ### 📦 Batch C — P2 polish sweep + 3rd-round audit deferred (partial shipped)
 
@@ -128,7 +129,7 @@
 
 1. ~~**Batch A 子组 1** (b + g + D9) — ~50 LOC, 单 commit, 低风险。首先做。~~ ✅ **shipped 2026-05-19** (本表 “Shipped” 区)。
 2. ~~**Batch A 子组 2** (c + d) — ~200 LOC, 新 smoke entry `smoke:abrain-vault-grant-isolation`；三路并行 xhigh audit。INV-E 端到端封口；ui_path 端到端 stamp 验证也在这里。~~ ✅ **shipped 2026-05-19** (`912d5f0` + post-audit fix: 3-way T0 unanimous P0 “smoke 不能抓 ff3dd9e P0” 补 handler E2E)。
-3. **Batch B** (D5 + D7 + i + f.arch) — ~85 LOC, 单 commit。还未做。
+3. **Batch B 部分 shipped** — ~~(D7) ✅ **shipped 2026-05-20** 独立 commit (~95 LOC 代码 + ~250 LOC smoke + 3 negative test)：`compaction-tuner/vault-defer.ts` + `vault-authorize.ts` `isVaultDialogInFlight()` export + `abrain/index.ts` `__abrainVaultDialogInFlight` defineProperty hook + `compaction-tuner/index.ts` 独立 audit reason。~~ 剩余 (D5) + (i) + (f.arch) 未做 (~70 LOC, 单 commit)。
 4. ~~**Batch C** (polish sweep) — ~40 LOC, 单 commit (多 edits[])。~~ ✅ **shipped 2026-05-19** (上表 6/8 完成，2 项顺延 Batch D)。实际 ~110 LOC (超过原计划，因为 3rd-round audit deferred 项一并闭环)。
 5. **Batch D** — `redactCredentials` 多-@ + `via=fallback_chain` audit schema，需独立 smoke + audit。~20 LOC。
 

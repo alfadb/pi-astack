@@ -143,7 +143,7 @@ Backend 架构按 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md)�
 
 ## 8. 当前测试入口
 
-`package.json#scripts` 是 smoke 列表 live truth。当前 **26 个**（2026-05-20 `smoke:persistent-input-history` SDK-drift defense +1）（2026-05-17 ADR 0022 P1+P2+P3a +5；2026-05-18 R7 OptionList +1；2026-05-19 dispatch-output-format +1；2026-05-19 batch A 子组 2 grant-isolation +1），P3b + post-audit fix assertion 在 `smoke:abrain-vault-reader` 内 +15（6 → 21）：
+`package.json#scripts` 是 smoke 列表 live truth。当前 **27 个**（2026-05-20 `smoke:compaction-tuner-vault-defer` ADR 0022 Batch B D7 +1）（2026-05-20 `smoke:persistent-input-history` SDK-drift defense +1）（2026-05-17 ADR 0022 P1+P2+P3a +5；2026-05-18 R7 OptionList +1；2026-05-19 dispatch-output-format +1；2026-05-19 batch A 子组 2 grant-isolation +1），P3b + post-audit fix assertion 在 `smoke:abrain-vault-reader` 内 +15（6 → 21）：
 
 ```text
 smoke:memory
@@ -171,10 +171,11 @@ smoke:prompt-user-finalizer            # ADR 0022 P2
 smoke:prompt-user-subpi                # ADR 0022 P2
 smoke:prompt-user-option-list          # ADR 0022 R7 OptionList
 smoke:compaction-tuner-prompt-user     # ADR 0022 P3a
+smoke:compaction-tuner-vault-defer     # ADR 0022 Batch B D7 (2026-05-20, 14 assertion + 3 negative test)
 smoke:persistent-input-history         # 2026-05-20 SDK-drift defense (27 assertion)
 ```
 
-26/26 全绿为 ship 门槛。
+27/27 全绿为 ship 门槛。
 
 ## 9. 历史文档处理原则
 
