@@ -129,6 +129,12 @@ function tryMigrateLegacyHistory(newFile: string, cwd: string): void {
   try {
     mkdirSync(dirname(newFile), { recursive: true });
     renameSync(legacy, newFile);
+    // renameSync preserves the legacy file's permission bits. Early
+    // versions wrote with the inherited umask (typically 0644), which
+    // violates the chmod-600 promise documented in the README/schema.
+    // Tighten on migration so prompts (incl. expanded paste content)
+    // aren't world/group-readable post-upgrade.
+    tightenPermissions(newFile);
   } catch {
     // best-effort
   }
