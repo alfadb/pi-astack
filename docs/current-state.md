@@ -157,7 +157,7 @@ smoke:abrain
 smoke:abrain-bootstrap
 smoke:abrain-vault-writer              # 2026-05-19 batch A (g): ui_path + startup_telemetry schema (+2 assertion, 28→30)
 smoke:abrain-vault-reader              # ADR 0022 P3b + post-audit: 6 → 21 assertion
-smoke:abrain-vault-grant-isolation     # 2026-05-19 batch A 子组 2: stage-index E2E (22 assertion, post-audit +5 handler E2E)
+smoke:abrain-vault-grant-isolation     # 2026-05-19 batch A 子组 2: stage-index E2E (23 assertion, third-audit fixed require-time fail-fast + count drift)
 smoke:abrain-vault-bash
 smoke:abrain-vault-identity
 smoke:abrain-git-sync
@@ -220,7 +220,7 @@ LLM-facing 同步问答工具，与 `vault_release` 共享 `<PromptDialog>` over
 | J | `redactCredentials` 单一定义点 + import 双路径 `===` | `smoke:abrain-redact` |
 | K | compaction-tuner 检测到 pending 时跳过 + audit，不消耗 rearm | `smoke:compaction-tuner-prompt-user` |
 
-INV-E 的端到端实现另一半（`index.ts` 内 grant 状态在 dialog session 中不被串话）由原有 `smoke:abrain-vault-bash` + `smoke:prompt-user` 各自覆盖；更强度的串行 E2E 验证是 P3b multi-LLM audit 时的作业。
+INV-E 的端到端实现另一半（`index.ts` 内 grant 状态在 dialog session 中不被串话）现在由 **`smoke:abrain-vault-grant-isolation`** (Batch A 子组 2 ～ Batch A 子组 2 第三轮 post-audit, 23 assertion) 端到端覆盖：grant cross-key isolation、deny+remember cross-key no-pollution、PromptDialog substrate 零 module-level state、UI substrate 全 5 路径 (overlay/select/confirm/cached/none) 的 ui_path stamp、fail-closed envelope on ui.select/confirm throw、handler E2E 驱动的 release/withhold/non-bash/unknown-toolCallId/outer-envelope 五路径。原文提到的 `smoke:abrain-vault-bash` + `smoke:prompt-user` 仍作为辅助覆盖与源代码 grep-anchor 防线保留。
 
 ### 已 ship - P3c 轻量路径 (2026-05-18 晚间)
 

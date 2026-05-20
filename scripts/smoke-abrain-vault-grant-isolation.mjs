@@ -170,12 +170,49 @@ console.log("abrain — vault authorization grant isolation E2E (batch A subgrou
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
+// ── ADR 0022 batch A subgroup 2 post-audit (third audit round, 2026-05-19) ──
+// require-time fail-fast on required test-only exports. GPT-5.5 +
+// DEEPSEEK-V4-pro 2/2 consensus P1 (third round): commit 863d6e6's body
+// CLAIMED this guard was added but the edit batch silently rolled back —
+// the original `typeof === "function"` silent-skip pattern survived in
+// resetState. If any required export is renamed/removed the smoke now
+// fails LOUDLY at require time with the exact missing name, rather than
+// silently leaking state into subsequent fixtures.
+const REQUIRED_TEST_EXPORTS = [
+  "__authorizeVaultReleaseForTests",
+  "__authorizeVaultBashOutputForTests",
+  "__handleVaultBashToolResultForTests",
+  "__seedVaultBashRunForTests",
+  "__clearVaultBashRunsForTests",
+  "__resetVaultGrantsForTests",
+  "__setVaultDialogBuilderForTests",
+  "__getVaultDialogBuilderForTests",
+  "__resetVaultDialogBuilderTelemetryForTests",
+  "__peekVaultDialogBuilderTelemetryForTests",
+  "__setVaultDialogBuilderInitFailedForTests",
+];
+for (const name of REQUIRED_TEST_EXPORTS) {
+  if (typeof indexModule[name] !== "function") {
+    throw new Error(
+      `index.cjs missing required test-only export: ${name} ` +
+        `(got ${typeof indexModule[name]}) — was it renamed/removed in a refactor? ` +
+        "Update REQUIRED_TEST_EXPORTS or restore the export.",
+    );
+  }
+}
+
+console.log(`  ok    require-time fail-fast: all ${REQUIRED_TEST_EXPORTS.length} required test-only exports present`);
+total += 1;
+
 function resetState() {
   indexModule.__resetVaultGrantsForTests();
   indexModule.__setVaultDialogBuilderForTests(null);
-  if (typeof indexModule.__resetVaultDialogBuilderTelemetryForTests === "function") {
-    indexModule.__resetVaultDialogBuilderTelemetryForTests();
-  }
+  // Third-round audit (2026-05-19): typeof guard removed — require-time
+  // fail-fast above already guarantees the export exists.
+  indexModule.__resetVaultDialogBuilderTelemetryForTests();
+  // DEEPSEEK P2-5 (third round): drain vaultBashRuns so handler E2E
+  // fixtures stay hermetic if a future check seeds-but-bypasses.
+  indexModule.__clearVaultBashRunsForTests();
 }
 
 // Build a ui that EXERCISES the overlay (PromptDialog) path. The
@@ -771,11 +808,29 @@ await check("handler E2E: outer-envelope fail-closed catch withholds (OPUS P1-5 
   if (result.details.vault.reason !== "authorization_error") {
     throw new Error(`expected reason=authorization_error, got ${result.details.vault.reason}`);
   }
-  const rows = await readAuditRows();
-  for (const r of rows) {
-    if (r.op === "bash_output_withhold" && "ui_path" in r) {
-      throw new Error(`outer-catch withhold row MUST omit ui_path, got ${JSON.stringify(r)}`);
-    }
+  // DEEPSEEK P2-2 (third audit round, 2026-05-19): the previous assertion
+  // `for (const r of rows) { if (...) throw }` was vacuous-true on a
+  // poisoned-record fixture because `auditBashOutput` itself throws on
+  // `record.releases.map(...)` (the very same throw site we tested in
+  // the outer try block), and that exception is swallowed by the inner
+  // `catch { /* best-effort */ }` in the outer-catch path — NO audit row
+  // ever gets written. So iterating an empty array trivially passed.
+  //
+  // The honest contract under test in this fixture is just the OUTER
+  // FAIL-CLOSED RETURN SHAPE (already asserted above). We document the
+  // KNOWN-GAP and defer the audit-fidelity strengthening (DEEPSEEK P2-1:
+  // wrap auditBashOutput in defense-in-depth try/catch + fallback row)
+  // to Batch C. Until then, do NOT pretend this fixture verifies
+  // ui_path absence — a separate fixture is required where the throw
+  // happens AFTER authorizeVaultBashOutput already returned (e.g. by
+  // poisoning record.releases[0].value to be a non-string that breaks
+  // redactVaultBashContent rather than the audit pre-write).
+  //
+  // What we CAN assert here: the outer catch's response does NOT carry
+  // ui_path in result.details.vault (that field only appears on the
+  // success/withhold paths inside the try block).
+  if ("ui_path" in (result.details.vault || {})) {
+    throw new Error(`outer-catch response vault details MUST NOT carry ui_path: ${JSON.stringify(result.details.vault)}`);
   }
 });
 
@@ -785,14 +840,20 @@ delete process.env.ABRAIN_ROOT;
 // ADR 0022 batch A subgroup 2 post-audit (2026-05-19): pin assertion
 // count so a future edit that drops a `check(...)` block fails this
 // smoke instead of silently shrinking coverage (3-way T0 P2 consensus).
-const EXPECTED_ASSERTIONS = 22;
-if (total !== EXPECTED_ASSERTIONS && failures.length === 0) {
-  console.log("");
-  console.log(
-    `FAIL — assertion count drifted: expected ${EXPECTED_ASSERTIONS}, ran ${total}. ` +
-      "If you intentionally added/removed a check(...), bump EXPECTED_ASSERTIONS.",
-  );
-  process.exit(1);
+//
+// Third-round audit fix (GPT-5.5 P2-1): record count drift as a regular
+// failure regardless of other failures, so a delete-check + other-fail
+// combination still surfaces the drift.
+// 22 helper E2E + handler E2E + 1 require-time fail-fast = 23.
+const EXPECTED_ASSERTIONS = 23;
+if (total !== EXPECTED_ASSERTIONS) {
+  failures.push({
+    name: "assertion count drift",
+    err: new Error(
+      `expected ${EXPECTED_ASSERTIONS} assertions, ran ${total}. ` +
+        "If you intentionally added/removed a check(...), bump EXPECTED_ASSERTIONS.",
+    ),
+  });
 }
 
 console.log("");
