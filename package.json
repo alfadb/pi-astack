@@ -44,13 +44,14 @@
     "smoke:prompt-user-finalizer": "node scripts/smoke-prompt-user-finalizer.mjs",
     "smoke:prompt-user-subpi": "node scripts/smoke-prompt-user-subpi.mjs",
     "smoke:prompt-user-option-list": "node scripts/smoke-prompt-user-option-list.mjs",
-    "smoke:compaction-tuner-prompt-user": "node scripts/smoke-compaction-tuner-prompt-user.mjs"
+    "smoke:compaction-tuner-prompt-user": "node scripts/smoke-compaction-tuner-prompt-user.mjs",
+    "smoke:persistent-input-history": "node scripts/smoke-persistent-input-history.mjs"
   },
   "pi": {
     "extensions": ["./extensions"]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=0.75.0 <1.0.0",
     "@earendil-works/pi-ai": "*",
     "typebox": "*"
   }

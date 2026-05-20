@@ -14,6 +14,28 @@ const PI_STACK_SETTINGS_PATH = path.join(
 );
 
 /**
+ * Hard escape hatch for users whose pi version drifts off the tested
+ * range (or who simply don't want the extension active). Read once at
+ * module load to match the rest of the extension's settings model.
+ *
+ * Truthy values: "1", "true", "yes", "on" (case-insensitive). Any other
+ * value, including unset, leaves the extension under normal `enabled`
+ * gating from pi-astack-settings.json.
+ *
+ * Rationale: when pi-tui or pi-coding-agent ship a breaking change to
+ * Editor internals, this lets the user disable persistence in one
+ * shell line (`export PI_ASTACK_DISABLE_PERSISTENT_INPUT_HISTORY=1`)
+ * without editing JSON or pulling a new pi-astack commit. Env wins
+ * over settings.
+ */
+export const FORCE_DISABLED: boolean = (() => {
+  const raw = process.env.PI_ASTACK_DISABLE_PERSISTENT_INPUT_HISTORY;
+  if (typeof raw !== "string") return false;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+})();
+
+/**
  * Persistent input history settings.
  *
  * Unlike compaction-tuner (which has destructive side effects and

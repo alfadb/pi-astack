@@ -2,7 +2,7 @@
 
 `package.json#scripts` 是 smoke test live truth。本文只是便于阅读的镜像；修改脚本时请同步本文。
 
-## Current scripts（2026-05-19, 25 total）
+## Current scripts（2026-05-20, 26 total）
 
 | npm script | File | Coverage |
 |---|---|---|
@@ -31,6 +31,7 @@
 | `smoke:prompt-user-finalizer` | `scripts/smoke-prompt-user-finalizer.mjs` | R8 P1#1: dialog teardown / disposer / __wipeSecrets |
 | `smoke:prompt-user-option-list` | `scripts/smoke-prompt-user-option-list.mjs` | PromptDialog real-render vault & question variants |
 | `smoke:prompt-user-subpi` | `scripts/smoke-prompt-user-subpi.mjs` | sub-pi prompt_user disabled |
+| `smoke:persistent-input-history` | `scripts/smoke-persistent-input-history.mjs` | persistent-input-history SDK-drift defense: capability probe (`addToHistory`) + semver gate (0.75.x–0.99.x) + `FORCE_DISABLED` env escape + degraded-mode notify on missing `Editor.history` field + replay-matcher no-double-feed (27 assertion, 4 negative tests verified) |
 
 ## Recommended subsets
 

@@ -61,13 +61,108 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import {
   DEFAULT_PERSISTENT_INPUT_HISTORY_SETTINGS,
   expandHome,
+  FORCE_DISABLED,
   resolvePersistentInputHistorySettings,
   type PersistentInputHistorySettings,
 } from "./settings";
+
+// ──────────────────────────────────────────────────────────────────────
+// pi SDK capability + version probe (defense against internal API drift)
+//
+// Three load-bearing assumptions this extension makes that are NOT in
+// any pi SDK contract:
+//
+//   (1) `CustomEditor extends Editor` (pi-tui), and `Editor.prototype
+//       .addToHistory(text: string): void` is a public, override-able
+//       method.  ← Stable across all pi 0.7x; checked at module load.
+//   (2) `Editor.history` is a plain JS instance array (TS-private but
+//       runtime-readable via cast).  ← Could become `#history` /
+//       WeakMap / renamed at any release.  Checked at FIRST ctor.
+//   (3) `InteractiveMode.renderInitialMessages()` synchronously calls
+//       `addToHistory(text)` once per visible user message during the
+//       `populateHistory` pass, and that pass finishes before the next
+//       `setImmediate` tick.  ← Pure internal timing; no detection.
+//
+// If (1) breaks → integer regression: editor factory throw → user has
+// no input box.  We therefore probe (1) at module load and refuse to
+// install `setEditorComponent` if it's gone, surfacing one `error`
+// notify so the user knows.
+//
+// If (2) breaks → preload + replay matcher silently no-op; the user
+// would still get persistence of new prompts but lose ↑/↓ cross-restart
+// recall.  Surfaced as one `warning` notify per session.
+//
+// (3) cannot be probed cheaply.  If it breaks the disk file grows by
+// one session's worth of prompts on every restart; cleaned up by
+// `/history-compact`.  Future work: add a runtime monitor that emits
+// `warning` when expectedReplay had entries but cursor never advanced.
+// ──────────────────────────────────────────────────────────────────────
+
+interface Capability {
+  /** `CustomEditor.prototype.addToHistory` is a function (assumption 1). */
+  hasAddToHistory: boolean;
+}
+
+const CAPABILITY: Capability = (() => {
+  try {
+    const proto = (CustomEditor as unknown as { prototype?: unknown }).prototype as
+      | { addToHistory?: unknown }
+      | undefined;
+    const hasAddToHistory =
+      !!proto && typeof proto.addToHistory === "function";
+    return { hasAddToHistory };
+  } catch {
+    return { hasAddToHistory: false };
+  }
+})();
+
+/**
+ * pi-coding-agent semver as reported by its package.json. Best-effort:
+ * if resolution fails (alternative load layout, ESM-only package, etc.)
+ * we return `"unknown"` and `PI_VERSION_OK` stays true (don't punish
+ * exotic setups; only warn when we can prove the version is outside
+ * the tested range).
+ */
+const PI_VERSION: string = (() => {
+  try {
+    const req = createRequire(__filename);
+    const pkg = req("@earendil-works/pi-coding-agent/package.json") as {
+      version?: unknown;
+    };
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
+
+/**
+ * Whether the running pi-coding-agent version falls in the range this
+ * extension has been tested against. Boundaries:
+ *
+ *   - Lower: 0.75.x  — first version where this extension's
+ *            populateHistory + setImmediate sequencing was validated.
+ *   - Upper: < 1.0.0 — pi-mono is still pre-1.0; any 1.x.x bump is
+ *            explicitly a signal to re-validate.
+ *
+ * Anything outside (including `"unknown"` which means resolution
+ * failed) returns true to avoid false alarms — we only fire a warning
+ * when we can prove drift.
+ */
+const PI_VERSION_OK: boolean = (() => {
+  if (PI_VERSION === "unknown") return true;
+  const m = /^(\d+)\.(\d+)\./.exec(PI_VERSION);
+  if (!m) return true;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  if (major !== 0) return false;          // 1.x.x+ → re-validate
+  if (minor < 75) return false;           // < 0.75 untested
+  return true;
+})();
 
 // ──────────────────────────────────────────────────────────────────────
 // Resolved settings (loaded once at module load)
@@ -306,6 +401,16 @@ class PersistentHistoryEditor extends CustomEditor {
   private readonly historyFile: string;
 
   /**
+   * Optional notifier injected by the session_start wiring. Used
+   * exactly ONCE per editor instance, only when the TS-private
+   * `Editor.history` field probe (assumption 2) returns null. This
+   * preserves the "persistence still partially works" UX while
+   * making the degradation visible to the user — pi-tui upgrades
+   * have shipped silently otherwise.
+   */
+  public degradedNotify?: (msg: string) => void;
+
+  /**
    * Snapshot of the disk history (chronological, dedup'd) at
    * construction time. After session_start, pi's renderInitialMessages
    * will fire addToHistory() once per visible user message in
@@ -348,6 +453,26 @@ class PersistentHistoryEditor extends CustomEditor {
     tryMigrateLegacyHistory(this.historyFile, cwd);
     this.internalUnavailable = getInternalHistory(this) === null;
     this.preloadFromDisk();
+
+    // One-shot degraded notice. Deferred to next tick so the
+    // notifier can be assigned by the factory between `new` and the
+    // event-loop returning. queueMicrotask runs BEFORE setImmediate,
+    // so the warning lands before renderInitialMessages absorbs the
+    // replay pass — keeps log ordering legible.
+    if (this.internalUnavailable) {
+      queueMicrotask(() => {
+        try {
+          this.degradedNotify?.(
+            `persistent-input-history: pi-tui Editor.history field is unreachable ` +
+              `(pi ${PI_VERSION}); preload + ↑/↓ cross-restart recall disabled this session. ` +
+              `New prompts will still persist to disk. ` +
+              `Set PI_ASTACK_DISABLE_PERSISTENT_INPUT_HISTORY=1 to silence this warning.`,
+          );
+        } catch {
+          // notifier errors must never break editing
+        }
+      });
+    }
 
     // renderInitialMessages runs synchronously after init() resumes
     // from `await rebindCurrentSession()`. We need expectedReplay to
@@ -487,87 +612,172 @@ class PersistentHistoryEditor extends CustomEditor {
 // ──────────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  if (FORCE_DISABLED) return;
   if (!SETTINGS.enabled) return;
 
-  pi.on("session_start", (_event, ctx) => {
-    // Capture cwd at session_start so each session's editor binds
-    // to the right history file.
-    const cwd = ctx.cwd;
-
-    // Ensure dir + migrate legacy file BEFORE the factory runs so
-    // PersistentHistoryEditor's preload sees the migrated file.
+  // Hard fail-fast: if pi-tui no longer exposes addToHistory, the
+  // extension's core contract is broken. Don't even attempt to install
+  // the editor — overriding a missing method would either no-op (and
+  // we'd silently lose persistence) or crash on `super.addToHistory`.
+  // Commands stay registered so the user can still run /history-status
+  // to inspect leftover data.
+  let capabilityWarned = false;
+  const warnCapabilityOnce = (ctx: { ui: { notify: (m: string, t?: "info" | "warning" | "error") => void } }) => {
+    if (capabilityWarned) return;
+    capabilityWarned = true;
     try {
-      ensureHistoryDir();
-      tryMigrateLegacyHistory(historyFileFor(cwd), cwd);
+      ctx.ui.notify(
+        `persistent-input-history disabled: pi-tui Editor.addToHistory not found ` +
+          `(pi ${PI_VERSION}). The extension's contract with pi-tui has changed; ` +
+          `↑/↓ persistence is OFF this session. ` +
+          `Set PI_ASTACK_DISABLE_PERSISTENT_INPUT_HISTORY=1 to silence this warning, ` +
+          `or pin pi-astack to a commit predating the pi-tui change.`,
+        "error",
+      );
+    } catch {
+      // even notify errors must never crash session_start
+    }
+  };
+
+  // Version-drift warning: one-shot per session, non-blocking. Fires
+  // when we can PROVE the pi-coding-agent semver is outside the tested
+  // range; "unknown" (resolution failed) stays quiet to avoid false
+  // alarms on exotic load layouts.
+  let versionWarned = false;
+  const warnVersionOnce = (ctx: { ui: { notify: (m: string, t?: "info" | "warning" | "error") => void } }) => {
+    if (versionWarned || PI_VERSION_OK) return;
+    versionWarned = true;
+    try {
+      ctx.ui.notify(
+        `persistent-input-history: pi-coding-agent ${PI_VERSION} is outside the tested ` +
+          `range (0.75.x – 0.99.x). ↑/↓ persistence may behave unexpectedly. ` +
+          `If broken, set PI_ASTACK_DISABLE_PERSISTENT_INPUT_HISTORY=1 and report a pi-astack issue.`,
+        "warning",
+      );
     } catch {
       // non-fatal
     }
+  };
 
-    // Hold a reference to the editor we install so we can read its
-    // in-memory history length (post-preload + post-populateHistory)
-    // when updating the footer status.
-    let editorRef: PersistentHistoryEditor | null = null;
-
-    // Wrap factory in try/catch: if construction throws, pi's
-    // setCustomEditorComponent has ALREADY cleared the editor
-    // container, so a throw here leaves the user with no input
-    // box. Fall back to the default CustomEditor instead.
-    ctx.ui.setEditorComponent((tui, theme, kb) => {
-      try {
-        const ed = new PersistentHistoryEditor(tui, theme, kb, cwd);
-        // Live-refresh footer on every successful real append.
-        ed.onPersist = (count) => {
-          try {
-            ctx.ui.setStatus("input-history", `↑${count}`);
-          } catch {
-            // non-fatal
-          }
-        };
-        editorRef = ed;
-        return ed;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        ctx.ui.notify(`persistent-input-history disabled: ${msg}`, "error");
-        return new CustomEditor(tui, theme, kb);
+  pi.on("session_start", (_event, ctx) => {
+    // Outermost guard: even if everything below explodes, the editor
+    // container must not be left torn down. Any throw → notify error
+    // and bail (pi's default editor stays installed).
+    try {
+      if (!CAPABILITY.hasAddToHistory) {
+        warnCapabilityOnce(ctx);
+        return; // do NOT call setEditorComponent; commands still register below
       }
-    });
+      warnVersionOnce(ctx);
 
-    // Surface install status in the footer. Done in setImmediate so
-    // the count reflects what's actually in the editor's in-memory
-    // history AFTER renderInitialMessages has run — not the disk
-    // state at the moment session_start fires (which may pre-date
-    // the first install's populateHistory pass and falsely show 0).
-    setImmediate(() => {
+      // Capture cwd at session_start so each session's editor binds
+      // to the right history file.
+      const cwd = ctx.cwd;
+
+      // Ensure dir + migrate legacy file BEFORE the factory runs so
+      // PersistentHistoryEditor's preload sees the migrated file.
       try {
-        const internal = editorRef ? getInternalHistory(editorRef) : null;
-        const count = internal
-          ? internal.length
-          : readDiskHistory(historyFileFor(cwd)).length;
-        ctx.ui.setStatus("input-history", `↑${count}`);
+        ensureHistoryDir();
+        tryMigrateLegacyHistory(historyFileFor(cwd), cwd);
       } catch {
         // non-fatal
       }
-    });
 
-    // One-time privacy notice. Touch a marker file so we only nag
-    // the user once per machine, not once per session.
-    try {
-      if (!existsSync(PRIVACY_NOTICE_MARKER)) {
-        ctx.ui.notify(
-          `Persistent input history enabled. Every prompt is stored in ` +
-            `${HISTORY_DIR}/ (incl. expanded pastes). Use ` +
-            `/history-compact to dedupe, or delete the dir to purge.`,
-          "info",
-        );
-        writeFileSync(PRIVACY_NOTICE_MARKER, `${new Date().toISOString()}\n`);
+      // Hold a reference to the editor we install so we can read its
+      // in-memory history length (post-preload + post-populateHistory)
+      // when updating the footer status.
+      let editorRef: PersistentHistoryEditor | null = null;
+
+      // Wrap factory in try/catch: if construction throws, pi's
+      // setCustomEditorComponent has ALREADY cleared the editor
+      // container, so a throw here leaves the user with no input
+      // box. Fall back to the default CustomEditor instead.
+      ctx.ui.setEditorComponent((tui, theme, kb) => {
         try {
-          chmodSync(PRIVACY_NOTICE_MARKER, 0o600);
-        } catch {
-          // best-effort
+          const ed = new PersistentHistoryEditor(tui, theme, kb, cwd);
+          // Live-refresh footer on every successful real append.
+          ed.onPersist = (count) => {
+            try {
+              ctx.ui.setStatus("input-history", `↑${count}`);
+            } catch {
+              // non-fatal
+            }
+          };
+          // Inject the degraded-notice channel: PersistentHistoryEditor
+          // calls this exactly once if its internal-field probe fails,
+          // making pi-tui drift visible without spamming on every keystroke.
+          ed.degradedNotify = (msg: string) => {
+            try {
+              ctx.ui.notify(msg, "warning");
+            } catch {
+              // non-fatal
+            }
+          };
+          editorRef = ed;
+          return ed;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          ctx.ui.notify(
+            `persistent-input-history disabled: ${msg}. ` +
+              `Set PI_ASTACK_DISABLE_PERSISTENT_INPUT_HISTORY=1 to silence on next restart.`,
+            "error",
+          );
+          return new CustomEditor(tui, theme, kb);
         }
+      });
+
+      // Surface install status in the footer. Done in setImmediate so
+      // the count reflects what's actually in the editor's in-memory
+      // history AFTER renderInitialMessages has run — not the disk
+      // state at the moment session_start fires (which may pre-date
+      // the first install's populateHistory pass and falsely show 0).
+      setImmediate(() => {
+        try {
+          const internal = editorRef ? getInternalHistory(editorRef) : null;
+          const count = internal
+            ? internal.length
+            : readDiskHistory(historyFileFor(cwd)).length;
+          ctx.ui.setStatus("input-history", `↑${count}`);
+        } catch {
+          // non-fatal
+        }
+      });
+
+      // One-time privacy notice. Touch a marker file so we only nag
+      // the user once per machine, not once per session.
+      try {
+        if (!existsSync(PRIVACY_NOTICE_MARKER)) {
+          ctx.ui.notify(
+            `Persistent input history enabled. Every prompt is stored in ` +
+              `${HISTORY_DIR}/ (incl. expanded pastes). Use ` +
+              `/history-compact to dedupe, or delete the dir to purge.`,
+            "info",
+          );
+          writeFileSync(PRIVACY_NOTICE_MARKER, `${new Date().toISOString()}\n`);
+          try {
+            chmodSync(PRIVACY_NOTICE_MARKER, 0o600);
+          } catch {
+            // best-effort
+          }
+        }
+      } catch {
+        // non-fatal
       }
-    } catch {
-      // non-fatal
+    } catch (e) {
+      // Truly unexpected (e.g. ctx.ui.setEditorComponent threw). We
+      // can't recover but at least surface why the input editor is
+      // back to pi's default.
+      const msg = e instanceof Error ? e.message : String(e);
+      try {
+        ctx.ui.notify(
+          `persistent-input-history: session_start failed (${msg}); ` +
+            `falling back to pi's default editor. ` +
+            `Set PI_ASTACK_DISABLE_PERSISTENT_INPUT_HISTORY=1 to silence on next restart.`,
+          "error",
+        );
+      } catch {
+        // last-resort: nothing more to do
+      }
     }
   });
 
@@ -627,9 +837,16 @@ export default function (pi: ExtensionAPI) {
     description: "Show the persistent input history file path and entry count",
     handler: async (_args, ctx) => {
       const file = historyFileFor(ctx.cwd);
+      // Surface SDK capability + version status alongside file info
+      // so the user can self-diagnose drift without grepping logs.
+      const sdkLine =
+        `pi-coding-agent=${PI_VERSION} ` +
+        `tested-range-ok=${PI_VERSION_OK} ` +
+        `addToHistory=${CAPABILITY.hasAddToHistory} ` +
+        `force-disabled=${FORCE_DISABLED}`;
       if (!existsSync(file)) {
         ctx.ui.notify(
-          `No history yet for ${ctx.cwd} (would be: ${file})`,
+          `No history yet for ${ctx.cwd} (would be: ${file})\n${sdkLine}`,
           "info",
         );
         return;
@@ -642,9 +859,33 @@ export default function (pi: ExtensionAPI) {
         // ignore
       }
       ctx.ui.notify(
-        `${file}\n${count} entries, ${(size / 1024).toFixed(1)} KB`,
+        `${file}\n${count} entries, ${(size / 1024).toFixed(1)} KB\n${sdkLine}`,
         "info",
       );
     },
   });
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// Test-only exports (kept stable for scripts/smoke-persistent-input-history.mjs)
+//
+// These are intentionally underscore-prefixed and exported so the smoke
+// can probe capability detection + version parsing without running the
+// full session_start path. Renaming any of these IS a smoke-breaking
+// change — keep the smoke and these exports in lock-step.
+// ──────────────────────────────────────────────────────────────────────
+
+export const __TEST = {
+  CAPABILITY,
+  PI_VERSION,
+  PI_VERSION_OK,
+  encodeCwd,
+  historyFileFor,
+  legacyHistoryFileFor,
+  readDiskHistory,
+  appendDiskHistory,
+  PersistentHistoryEditor,
+  // Re-export the helper so the smoke can verify gracefully-degrades-to-null
+  // behavior without depending on pi-tui internals.
+  getInternalHistory,
+};
