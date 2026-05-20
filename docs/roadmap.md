@@ -129,7 +129,7 @@
 
 1. ~~**Batch A 子组 1** (b + g + D9) — ~50 LOC, 单 commit, 低风险。首先做。~~ ✅ **shipped 2026-05-19** (本表 “Shipped” 区)。
 2. ~~**Batch A 子组 2** (c + d) — ~200 LOC, 新 smoke entry `smoke:abrain-vault-grant-isolation`；三路并行 xhigh audit。INV-E 端到端封口；ui_path 端到端 stamp 验证也在这里。~~ ✅ **shipped 2026-05-19** (`912d5f0` + post-audit fix: 3-way T0 unanimous P0 “smoke 不能抓 ff3dd9e P0” 补 handler E2E)。
-3. **Batch B 部分 shipped** — ~~(D7) ✅ **shipped 2026-05-20** 独立 commit (~95 LOC 代码 + ~250 LOC smoke + 3 negative test)：`compaction-tuner/vault-defer.ts` + `vault-authorize.ts` `isVaultDialogInFlight()` export + `abrain/index.ts` `__abrainVaultDialogInFlight` defineProperty hook + `compaction-tuner/index.ts` 独立 audit reason。~~ 剩余 (D5) + (i) + (f.arch) 未做 (~70 LOC, 单 commit)。
+3. **Batch B 部分 shipped** — ~~(D7) ✅ **shipped 2026-05-20** 独立 commit：`compaction-tuner/vault-defer.ts` + `vault-authorize.ts` `isVaultDialogInFlight()` export + `abrain/index.ts` `__abrainVaultDialogInFlight` defineProperty hook + `compaction-tuner/index.ts` 独立 audit reason。初 ship c409cde + post-audit fix。度量口径明确：**diff +lines** ~250 (含注释/JSDoc)，**executable statements** ~90；smoke ~330 diff lines / ~150 executable；3 negative tests double-verified.~~ 剩余 (D5) + (i) + (f.arch) 未做 (估 ~150 diff lines，单 commit)。
 4. ~~**Batch C** (polish sweep) — ~40 LOC, 单 commit (多 edits[])。~~ ✅ **shipped 2026-05-19** (上表 6/8 完成，2 项顺延 Batch D)。实际 ~110 LOC (超过原计划，因为 3rd-round audit deferred 项一并闭环)。
 5. **Batch D** — `redactCredentials` 多-@ + `via=fallback_chain` audit schema，需独立 smoke + audit。~20 LOC。
 

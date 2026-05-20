@@ -17,6 +17,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+// ADR 0022 Batch B (D7) post-audit fix (DEEPSEEK P1-1, 2026-05-20):
+// vault-authorize.ts __resetVaultDialogLockForTests is gated by
+// PI_ASTACK_ENABLE_TEST_HOOKS=1 (mirrors Batch C policy). Smoke opts in.
+process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);

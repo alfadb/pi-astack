@@ -126,12 +126,53 @@ export function isVaultDialogInFlight(): boolean {
   return __vaultDialogInFlight;
 }
 
-/** Test-only: reset the module-level vault dialog lock. */
+// ADR 0022 Batch B (D7) post-audit fix (DEEPSEEK P1-1, 2026-05-20):
+// env gate the lock-mutating test-only export. Mirrors Batch C
+// policy on `__seedVaultBashRunForTests` / `__clearVaultBashRunsForTests`
+// (extensions/abrain/index.ts ~L967-1005). Misuse risk: clearing the
+// vault dialog lock mid-flight bypasses the concurrent gate (fix #3,
+// see askVaultAuthorizationViaDialog), letting two vault dialogs open
+// in parallel and cross-grant a 'Session' answer. Read-only
+// __peekVaultDialogLockForTests is intentionally NOT gated — same
+// principle as Batch C (read helpers have no plaintext / state-mutation
+// capability).
+//
+// Defined inline (not imported from abrain/index.ts) to keep this
+// module a true leaf — no cycle with the abrain entry point.
+function __assertVaultTestHooksEnabled(name: string): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error(
+      `${name}() is a vault-lock-mutating test-only export; set ` +
+        "PI_ASTACK_ENABLE_TEST_HOOKS=1 in the smoke harness to enable. " +
+        "Misuse risk: clearing __vaultDialogInFlight mid-flight bypasses " +
+        "the concurrent gate (vault-authorize.ts fix #3) and allows two " +
+        "vault dialogs to open in parallel. Mirrors Batch C policy on " +
+        "plaintext-bearing test-only mutators — see " +
+        "abrain/index.ts assertTestHooksEnabled() for the original rationale.",
+    );
+  }
+}
+
+/**
+ * Test-only: reset the module-level vault dialog lock.
+ *
+ * Gated by `PI_ASTACK_ENABLE_TEST_HOOKS=1` (post-audit fix 2026-05-20,
+ * DEEPSEEK P1-1). Calling without the env var throws a noisy error so
+ * a future co-loaded extension that accidentally requires this module
+ * cannot silently clear the lock.
+ */
 export function __resetVaultDialogLockForTests(): void {
+  __assertVaultTestHooksEnabled("__resetVaultDialogLockForTests");
   __vaultDialogInFlight = false;
 }
 
-/** Test-only: introspect the lock for serial-call smoke. */
+/**
+ * Test-only: introspect the lock for serial-call smoke.
+ *
+ * NOT gated by env var because it is read-only (no state mutation, no
+ * plaintext). Matches Batch C principle: only mutators / plaintext
+ * carriers need the env gate.
+ */
 export function __peekVaultDialogLockForTests(): boolean {
   return __vaultDialogInFlight;
 }

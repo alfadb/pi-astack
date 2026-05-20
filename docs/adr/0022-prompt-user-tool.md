@@ -713,7 +713,7 @@ pi.on("agent_end", async (event, ctx) => {
 
 P3b 之后 vault 授权 UI 也走 PromptDialog overlay 路径（variant=`vault_release` / `bash_output_release`），但走独立 concurrent gate 与独立 audit lane（INV-E）。最初 INV-K 只覆盖 `prompt_user`；vault dialog pending 时 compaction 仍会触发，同样会丢掉用户正在决策的上下文（“是否释放 github-token”的 reason 可能被压缩掉，你看到一个孤立的 "Yes once" 选项）。
 
-**解决**：DEFER 覆盖面从 prompt_user 拓宽到“所有 user-facing overlay”。两个 substrate 独立索取：
+**解决**：DEFER 覆盖面从 prompt_user 拓宽到 vault 授权 dialog（当前这是唯一的第二个 user-facing overlay；任何后续新增的 overlay substrate 须独立加 hook + leaf module + audit reason，不会被本机制自动覆盖）。两个 substrate 独立索取：
 
 ```typescript
 // extensions/compaction-tuner/index.ts (trigger path)

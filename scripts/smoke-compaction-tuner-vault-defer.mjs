@@ -40,6 +40,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// ADR 0022 Batch B (D7) post-audit fix (DEEPSEEK P1-1, 2026-05-20):
+// vault-authorize.ts __resetVaultDialogLockForTests is gated by
+// PI_ASTACK_ENABLE_TEST_HOOKS=1. The negative-gate assertion at the
+// end of this smoke unsets it temporarily inside a child scope; the
+// integration test that uses __reset relies on it being set here.
+process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);
@@ -292,9 +299,28 @@ check("real vault-authorize.isVaultDialogInFlight integrates with the helper", (
 // publishing ONLY the prompt_user hook and confirming the vault helper
 // remains false (different hook name → no spurious coupling).
 
+// ══ NEGATIVE TEST / ANTI-REGRESSION BLOCK (smoke 8–10) ════════════
+//
+// OPUS P2-5 (2026-05-20): comment marker identifying smoke 8-10 as
+// the structural negative-test trio referenced in commit message and
+// docs. They are NOT unit tests of the helper — they are regression
+// guards that fail when a future refactor weakens a contract.
+//
+// To verify they aren't vacuous, each is paired with a documented
+// failure mode reproducible by inverting one line of production code.
+//
+// OPUS P2-1 fix (2026-05-20): symmetry guard uses `() => true`
+// (boolean) not `() => 99` (number). vault-defer's strict `=== true`
+// check returns false for any number, so `() => 99` couldn't distinguish
+// a correct implementation from a name-collapsed implementation reading
+// __abrainPromptUserGetPending. With `() => true`, a regressed (coupled)
+// vault helper would return true and this assertion fails-fast.
+
 check("prompt_user hook ≠ vault hook (no name-collapse regression)", () => {
-  // Only install prompt_user hook.
-  globalThis.__abrainPromptUserGetPending = () => 99;
+  // Only install prompt_user hook; use boolean true so a coupled
+  // implementation would propagate it through the strict === true
+  // check in vault-defer.ts.
+  globalThis.__abrainPromptUserGetPending = () => true;
   try {
     if (isPendingVaultDialogBlocking() !== false) {
       throw new Error("vault helper read prompt_user hook — name collapse regression");
@@ -363,6 +389,118 @@ check("trigger-path anchor: compaction-tuner/index.ts imports + calls vault help
   }
   if (!src.includes('"prompt_user_pending"')) {
     throw new Error('compaction-tuner/index.ts must KEEP reason:"prompt_user_pending" (do not break audit-schema)');
+  }
+});
+
+// ── 11. Trigger-path ORDERING anchor (OPUS P2-2, 2026-05-20) ─────
+//
+// Beyond presence (smoke #10), the defer checks MUST happen BEFORE
+// `armedBySession.set(stateKey, false)` (rearm consumption). A future
+// refactor that reorders — same substrings present, ordering wrong —
+// would silently consume rearm during defer and break the "next turn
+// re-classify" contract of INV-K.
+//
+// Anchor: byte offset of both defer checks < byte offset of rearm set.
+
+check("trigger-path ORDERING anchor: defer checks before rearm consumption (OPUS P2-2)", () => {
+  const src = fs.readFileSync(
+    path.join(repoRoot, "extensions/compaction-tuner/index.ts"),
+    "utf8",
+  );
+  const promptIdx = src.indexOf("isPendingPromptUserBlocking()");
+  const vaultIdx = src.indexOf("isPendingVaultDialogBlocking()");
+  // Match the actual rearm-consumption statement, not other
+  // armedBySession.set(...) sites (the error/rearm-on-failure branch
+  // calls it with true, the consumption uses false).
+  const armedIdx = src.indexOf("armedBySession.set(stateKey, false)");
+  if (promptIdx < 0 || vaultIdx < 0 || armedIdx < 0) {
+    throw new Error(
+      `trigger-path anchors missing: prompt=${promptIdx} vault=${vaultIdx} armed=${armedIdx}`,
+    );
+  }
+  if (promptIdx >= armedIdx) {
+    throw new Error(
+      `INV-K contract regression: isPendingPromptUserBlocking() at ${promptIdx} ` +
+        `must precede armedBySession.set(stateKey, false) at ${armedIdx} — ` +
+        `rearm consumed BEFORE defer would lose the next-turn retry guarantee`,
+    );
+  }
+  if (vaultIdx >= armedIdx) {
+    throw new Error(
+      `INV-K contract regression: isPendingVaultDialogBlocking() at ${vaultIdx} ` +
+        `must precede armedBySession.set(stateKey, false) at ${armedIdx} — ` +
+        `rearm consumed BEFORE defer would lose the next-turn retry guarantee`,
+    );
+  }
+});
+
+// ── 12. env gate for __resetVaultDialogLockForTests (DEEPSEEK P1-1) ─
+//
+// Post-audit fix (2026-05-20): __resetVaultDialogLockForTests now
+// requires PI_ASTACK_ENABLE_TEST_HOOKS=1, mirroring Batch C policy on
+// plaintext-bearing test-only mutators. Verify the gate throws when
+// disabled. Read-only __peekVaultDialogLockForTests stays ungated.
+
+check("env gate: __resetVaultDialogLockForTests throws without PI_ASTACK_ENABLE_TEST_HOOKS=1", () => {
+  const vaDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vault-auth-gate-"));
+  fs.writeFileSync(
+    path.join(vaDir, "vault-authorize.cjs"),
+    transpile(path.join(repoRoot, "extensions/abrain/vault-authorize.ts")),
+  );
+  const vaultAuth = require(path.join(vaDir, "vault-authorize.cjs"));
+  const saved = process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+  delete process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+  try {
+    let threw = null;
+    try { vaultAuth.__resetVaultDialogLockForTests(); }
+    catch (e) { threw = e; }
+    if (!threw) {
+      throw new Error("__resetVaultDialogLockForTests must throw when env var unset");
+    }
+    if (!/PI_ASTACK_ENABLE_TEST_HOOKS/i.test(threw.message)) {
+      throw new Error(`error message must mention env var, got: ${threw.message}`);
+    }
+    if (!/vault-lock-mutating|concurrent gate|fix #3/i.test(threw.message)) {
+      throw new Error(`error message must mention misuse risk, got: ${threw.message}`);
+    }
+    // Read-only peek must NOT throw (no gate).
+    const peek = vaultAuth.__peekVaultDialogLockForTests();
+    if (typeof peek !== "boolean") {
+      throw new Error(`__peekVaultDialogLockForTests should remain ungated read-only, got: ${typeof peek}`);
+    }
+  } finally {
+    if (saved !== undefined) process.env.PI_ASTACK_ENABLE_TEST_HOOKS = saved;
+    else delete process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+    try { fs.rmSync(vaDir, { recursive: true, force: true }); } catch {}
+  }
+  // Restore the env var for any subsequent tests that need it.
+  process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+});
+
+// ── 13. Source anchor for env gate (DEEPSEEK P1-1) ─────────────
+//
+// Prevents a future refactor from removing the gate without removing
+// the corresponding smoke (and the negative test above).
+
+check("source anchor: vault-authorize.ts gates __resetVaultDialogLockForTests", () => {
+  const src = fs.readFileSync(
+    path.join(repoRoot, "extensions/abrain/vault-authorize.ts"),
+    "utf8",
+  );
+  // The gate function must exist.
+  if (!/__assertVaultTestHooksEnabled\s*\(/.test(src)) {
+    throw new Error("vault-authorize.ts must define __assertVaultTestHooksEnabled gate");
+  }
+  // The gate must be CALLED from __resetVaultDialogLockForTests.
+  if (!/__resetVaultDialogLockForTests[\s\S]{0,200}__assertVaultTestHooksEnabled/.test(src)) {
+    throw new Error(
+      "__resetVaultDialogLockForTests must call __assertVaultTestHooksEnabled " +
+        "(Batch C policy on test-only mutators; DEEPSEEK P1-1 post-audit fix)",
+    );
+  }
+  // The env var name must match the Batch C policy.
+  if (!/PI_ASTACK_ENABLE_TEST_HOOKS/.test(src)) {
+    throw new Error("gate must use PI_ASTACK_ENABLE_TEST_HOOKS (Batch C established env var)");
   }
 });
 
