@@ -231,13 +231,34 @@ export default function (pi: ExtensionAPI) {
 
     const wasArmed = armedBySession.get(stateKey) ?? true;
     const percent = usage?.percent ?? null;
+
+    // Opportunistic backoff clear (P1-1 fix from 2026-05-21 review):
+    // if percent dropped below the rearm floor, real context reduction
+    // happened somewhere (manual /compact, pi's own auto-compact,
+    // message-slice from retry, etc.). Clear stale failure state
+    // regardless of HOW armed got to its current value. This closes
+    // the gap where timed re-arm beats percent-based rearm: it sets
+    // armed=true at the top of the handler, so classifyDecision's
+    // "rearm" branch (which requires !armed) is unreachable, leaving
+    // failureCount/cooldown stale to bias the next trigger's backoff.
+    if (
+      failureCountBySession.has(stateKey) &&
+      percent !== null &&
+      percent < settings.thresholdPercent - settings.rearmMarginPercent
+    ) {
+      failureCountBySession.delete(stateKey);
+      cooldownUntilBySession.delete(stateKey);
+    }
+
     const decision = classifyDecision(percent, settings.thresholdPercent, wasArmed, settings.rearmMarginPercent);
 
     // Update arming state for "rearm" decisions before logging/short-circuiting.
     if (decision.decision === "rearm") {
       armedBySession.set(stateKey, true);
-      // Percent dropped below floor → real progress was made; clear
-      // error backoff so the next trigger gets a fresh slate.
+      // Percent dropped below floor → real progress was made; the
+      // opportunistic block above already cleared backoff state in
+      // this case, but be explicit (idempotent .delete()) so future
+      // refactors don't accidentally rely on the upstream clear.
       failureCountBySession.delete(stateKey);
       cooldownUntilBySession.delete(stateKey);
       // Don't audit pure rearm transitions to keep the log focused on triggers.
@@ -288,6 +309,11 @@ export default function (pi: ExtensionAPI) {
       });
       return;
     }
+    // Note: `failuresSoFar` is captured before the opportunistic
+    // clear above, so it can be stale here. That's OK because
+    // opportunistic clear only fires when percent < floor, in which
+    // case classifyDecision returns "skip below_threshold" and we
+    // never reach this trigger block.
 
     // ADR 0022 INV-K: defer compaction while a user-facing overlay
     // (prompt_user dialog OR vault authorization dialog) is pending.
@@ -351,8 +377,13 @@ export default function (pi: ExtensionAPI) {
           if (hasUI && settings.notifyOnTrigger && notify) {
             notify("compaction-tuner: compaction completed", "info");
           }
-          // Compact succeeded → clear error backoff so subsequent
-          // triggers start fresh.
+          // Compact succeeded → wipe ALL session state so a fresh
+          // cycle starts. armedBySession is also deleted (rather
+          // than left at false) so it doesn't accumulate stale
+          // entries for long-lived pi processes (DEEPSEEK P1-2);
+          // .get(stateKey) ?? true correctly defaults to armed on
+          // the next agent_end.
+          armedBySession.delete(stateKey);
           failureCountBySession.delete(stateKey);
           cooldownUntilBySession.delete(stateKey);
           void recordOutcome({
@@ -388,6 +419,20 @@ export default function (pi: ExtensionAPI) {
             ERROR_COOLDOWN_BASE_MS * 2 ** (nextFailures - 1),
           );
           cooldownUntilBySession.set(stateKey, Date.now() + cooldownMs);
+          // When MAX reached, the session is permanently disarmed
+          // until percent drops below floor (impossible on an
+          // overflowed context where compact is the only way to
+          // shrink). Tell the user about the escape hatch so they
+          // don't think auto-compaction is silently broken.
+          if (hasUI && notify && nextFailures >= MAX_CONSECUTIVE_FAILURES) {
+            notify(
+              `compaction-tuner: ${MAX_CONSECUTIVE_FAILURES} consecutive failures — ` +
+              `auto-compaction disabled for this session until usage drops ` +
+              `below ${settings.thresholdPercent - settings.rearmMarginPercent}%. ` +
+              `Use '/compaction-tuner reset' to clear backoff and try again.`,
+              "warning",
+            );
+          }
           void recordOutcome({
             operation: "trigger",
             outcome: "error",
@@ -401,15 +446,18 @@ export default function (pi: ExtensionAPI) {
             model_id: modelInfo.id ?? null,
             elapsed_ms: Date.now() - ts,
             consecutive_failures: nextFailures,
-            cooldown_ms: cooldownMs,
+            cooldown_remaining_ms: cooldownMs,
             settings_snapshot: snapshotCompactionTunerSettings(settings),
           });
         },
       });
     } catch (err) {
-      // ctx.compact is fire-and-forget so a sync throw is highly
-      // unlikely, but guard anyway. Same backoff policy as onError —
-      // see comment there for rationale.
+      // Defense-in-depth only. The pi runtime wraps ctx.compact() in
+      // an async IIFE (see agent-session.js:1770-1781) that routes
+      // sync throws to onError(), so this catch is effectively
+      // unreachable in normal pi builds. We keep it (with the same
+      // backoff policy as onError) so a future pi change that drops
+      // the IIFE wrapper doesn't silently bypass backoff.
       const message = err instanceof Error ? err.message : String(err);
       const nextFailures = (failureCountBySession.get(stateKey) ?? 0) + 1;
       failureCountBySession.set(stateKey, nextFailures);
@@ -427,14 +475,14 @@ export default function (pi: ExtensionAPI) {
         threshold_percent: settings.thresholdPercent,
         elapsed_ms: Date.now() - ts,
         consecutive_failures: nextFailures,
-        cooldown_ms: cooldownMs,
+        cooldown_remaining_ms: cooldownMs,
         settings_snapshot: snapshotCompactionTunerSettings(settings),
       });
     }
   });
 
   pi.registerCommand("compaction-tuner", {
-    description: "Inspect / debug compaction-tuner: status | trigger",
+    description: "Inspect / debug compaction-tuner: status | trigger | reset",
     handler: async (
       args: string,
       ctx: CompactionTunerCtx & {
@@ -446,26 +494,31 @@ export default function (pi: ExtensionAPI) {
       const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
 
       if (sub === "status") {
-        // Surface backoff state per-session so operators chasing
-        // "why isn't compaction firing at 90%?" can see whether it's
-        // disarmed due to recent errors. Shows ALL sessions known to
-        // this process (usually 1, but dispatch-agent / multi-session
-        // hosts can have more).
-        const backoffLines: string[] = [];
+        // Surface per-session state so operators chasing "why isn't
+        // compaction firing at 90%?" can see whether it's disarmed
+        // (post-trigger awaiting rearm), in error backoff, or at
+        // MAX. Shows ALL sessions known to this process (usually 1,
+        // but dispatch-agent / multi-session hosts can have more).
         const knownSessions = new Set<string>([
+          ...armedBySession.keys(),
           ...failureCountBySession.keys(),
           ...cooldownUntilBySession.keys(),
         ]);
+        const sessionLines: string[] = [];
         if (knownSessions.size > 0) {
           const now = Date.now();
           for (const sid of knownSessions) {
+            const armed = armedBySession.get(sid);
             const f = failureCountBySession.get(sid) ?? 0;
             const cu = cooldownUntilBySession.get(sid) ?? 0;
             const remainingMs = Math.max(0, cu - now);
-            backoffLines.push(
-              `  ${sid.slice(0, 8)}…: failures=${f}/${MAX_CONSECUTIVE_FAILURES}` +
+            const armedStr = armed === undefined
+              ? "armed=default(true)"
+              : `armed=${armed}`;
+            sessionLines.push(
+              `  ${sid.slice(0, 8)}…: ${armedStr}, failures=${f}/${MAX_CONSECUTIVE_FAILURES}` +
               (remainingMs > 0 ? `, cooldown=${Math.ceil(remainingMs / 1000)}s` : "") +
-              (f >= MAX_CONSECUTIVE_FAILURES ? " (max reached — awaiting percent drop)" : ""),
+              (f >= MAX_CONSECUTIVE_FAILURES ? " (max reached — use /compaction-tuner reset)" : ""),
             );
           }
         }
@@ -481,10 +534,46 @@ export default function (pi: ExtensionAPI) {
           `current usage: ${usage?.percent != null ? `${usage.percent.toFixed(1)}% (${usage.tokens}/${usage.contextWindow} tokens)` : "(unknown — no post-compaction usage yet)"}`,
           `model: ${ctx.model?.provider ?? "?"}/${ctx.model?.id ?? "?"}`,
           "",
-          `error backoff (per session):${backoffLines.length === 0 ? " none" : ""}`,
-          ...backoffLines,
+          `per-session state:${sessionLines.length === 0 ? " none (fresh process)" : ""}`,
+          ...sessionLines,
         ];
         ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
+      if (sub === "reset") {
+        // Escape hatch from a permanently-disarmed session (MAX
+        // failures reached on an overflowed context where percent
+        // can't drop without compact succeeding). Clears ALL
+        // per-session state for the current session so the next
+        // agent_end re-evaluates fresh.
+        const sid = readSessionId(ctx.sessionManager);
+        if (!sid) {
+          ctx.ui.notify(
+            "compaction-tuner: no resumable session bound (ephemeral / --no-session)",
+            "warning",
+          );
+          return;
+        }
+        const hadArmed = armedBySession.has(sid);
+        const hadFailures = failureCountBySession.has(sid);
+        const f = failureCountBySession.get(sid) ?? 0;
+        const cu = cooldownUntilBySession.get(sid) ?? 0;
+        const remainingMs = Math.max(0, cu - Date.now());
+        armedBySession.delete(sid);
+        failureCountBySession.delete(sid);
+        cooldownUntilBySession.delete(sid);
+        const summary = hadFailures
+          ? `cleared backoff (was failures=${f}/${MAX_CONSECUTIVE_FAILURES}` +
+            (remainingMs > 0 ? `, cooldown=${Math.ceil(remainingMs / 1000)}s` : "") +
+            `)`
+          : hadArmed
+            ? "cleared armed state (no error backoff was set)"
+            : "no state to clear (session was already fresh)";
+        ctx.ui.notify(
+          `compaction-tuner: reset ${sid.slice(0, 8)}… — ${summary}`,
+          "info",
+        );
         return;
       }
 
@@ -505,7 +594,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify(`unknown subcommand: ${sub}\nusage: /compaction-tuner [status|trigger]`, "warning");
+      ctx.ui.notify(`unknown subcommand: ${sub}\nusage: /compaction-tuner [status|trigger|reset]`, "warning");
     },
   });
 }
