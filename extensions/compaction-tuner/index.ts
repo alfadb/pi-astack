@@ -73,6 +73,37 @@ interface CompactionTunerCtx {
 const armedBySession = new Map<string, boolean>();
 
 /**
+ * Per-session error backoff state.
+ *
+ * Background — 2026-05-18 retry storm (audit at
+ * `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`,
+ * session 019e3968...): 71 seconds, 7 triggers, all identical
+ * (percent=130.93%, tokens=356132/272000, outcome=error,
+ * provider 500 on summarization). Root cause: the old onError
+ * unconditionally `armedBySession.set(stateKey, true)`, which
+ * re-armed instantly. Because percent didn't drop after a failed
+ * compact (messages unchanged), every subsequent agent_end
+ * re-evaluated, re-triggered, re-failed, re-armed — an unbounded
+ * loop until the user quit or the provider stopped 500ing.
+ *
+ * Fix: onError no longer re-arms. Instead it bumps `failureCount`
+ * and sets `cooldownUntil` to now + exponential backoff. The
+ * top-of-handler timed re-arm gives one fresh attempt after the
+ * cooldown elapses (so a truly transient 500 self-heals), but
+ * after `MAX_CONSECUTIVE_FAILURES` the session stays disarmed
+ * until a legitimate percent-based rearm fires (classifyDecision
+ * "rearm" branch, which only triggers when percent drops below
+ * the floor — i.e. context actually shrank). onComplete clears
+ * both maps so a successful compact resets the backoff.
+ */
+const failureCountBySession = new Map<string, number>();
+const cooldownUntilBySession = new Map<string, number>();
+
+const ERROR_COOLDOWN_BASE_MS = 60_000;       // 1 min after first failure
+const ERROR_COOLDOWN_MAX_MS = 5 * 60_000;    // cap at 5 min
+const MAX_CONSECUTIVE_FAILURES = 3;
+
+/**
  * Best-effort sessionId reader, with ephemeral-session filtering.
  * Mirrors the sediment extension: a session is treated as ephemeral
  * (returns undefined) when `getSessionFile()` is unavailable or
@@ -179,14 +210,36 @@ export default function (pi: ExtensionAPI) {
 
     // sessionId is guaranteed truthy past the ephemeral early-return.
     const stateKey = sessionId;
-    const wasArmed = armedBySession.get(stateKey) ?? true;
 
+    // Timed re-arm after error cooldown. If a previous trigger failed,
+    // armed is stuck at false; the only paths out are (a) percent drops
+    // below floor (classifyDecision "rearm" branch), or (b) the
+    // cooldown elapses AND failures < MAX (this block). This gives a
+    // truly transient provider error one fresh attempt without forming
+    // a retry storm.
+    const failuresSoFar = failureCountBySession.get(stateKey) ?? 0;
+    const cooldownUntil = cooldownUntilBySession.get(stateKey) ?? 0;
+    const nowMs = Date.now();
+    if (
+      armedBySession.get(stateKey) === false &&
+      failuresSoFar > 0 &&
+      failuresSoFar < MAX_CONSECUTIVE_FAILURES &&
+      nowMs >= cooldownUntil
+    ) {
+      armedBySession.set(stateKey, true);
+    }
+
+    const wasArmed = armedBySession.get(stateKey) ?? true;
     const percent = usage?.percent ?? null;
     const decision = classifyDecision(percent, settings.thresholdPercent, wasArmed, settings.rearmMarginPercent);
 
     // Update arming state for "rearm" decisions before logging/short-circuiting.
     if (decision.decision === "rearm") {
       armedBySession.set(stateKey, true);
+      // Percent dropped below floor → real progress was made; clear
+      // error backoff so the next trigger gets a fresh slate.
+      failureCountBySession.delete(stateKey);
+      cooldownUntilBySession.delete(stateKey);
       // Don't audit pure rearm transitions to keep the log focused on triggers.
       return;
     }
@@ -199,6 +252,42 @@ export default function (pi: ExtensionAPI) {
 
     // decision === "trigger"
     const ts = Date.now();
+
+    // Error backoff guards (defensive depth). In the current control
+    // flow these are UNREACHABLE — classifyDecision short-circuits with
+    // "already_triggered_awaiting_rearm" while armed=false, and the
+    // top-of-handler timed re-arm only sets armed=true when
+    // failures<MAX and cooldown elapsed. So if we got here, the upstream
+    // checks already vetted both conditions.
+    //
+    // BUT — if a future refactor leaves armed=true with pending
+    // failures/cooldown (e.g. someone adds another rearm path that
+    // doesn't clear backoff state), these guards stop a retry storm
+    // instead of launching unbounded compact() calls. The audit reason
+    // makes the situation visible. See failureCountBySession header
+    // comment for the 2026-05-18 incident that motivated this entire
+    // backoff machinery.
+    if (failuresSoFar >= MAX_CONSECUTIVE_FAILURES) {
+      await recordSimpleSkip(cwd, {
+        ts: new Date(ts).toISOString(),
+        decision: "skip",
+        reason: "max_failures_reached",
+        usage_percent: percent,
+        consecutive_failures: failuresSoFar,
+      });
+      return;
+    }
+    if (failuresSoFar > 0 && ts < cooldownUntil) {
+      await recordSimpleSkip(cwd, {
+        ts: new Date(ts).toISOString(),
+        decision: "skip",
+        reason: "in_error_cooldown",
+        usage_percent: percent,
+        consecutive_failures: failuresSoFar,
+        cooldown_remaining_ms: cooldownUntil - ts,
+      });
+      return;
+    }
 
     // ADR 0022 INV-K: defer compaction while a user-facing overlay
     // (prompt_user dialog OR vault authorization dialog) is pending.
@@ -262,6 +351,10 @@ export default function (pi: ExtensionAPI) {
           if (hasUI && settings.notifyOnTrigger && notify) {
             notify("compaction-tuner: compaction completed", "info");
           }
+          // Compact succeeded → clear error backoff so subsequent
+          // triggers start fresh.
+          failureCountBySession.delete(stateKey);
+          cooldownUntilBySession.delete(stateKey);
           void recordOutcome({
             operation: "trigger",
             outcome: "completed",
@@ -281,9 +374,20 @@ export default function (pi: ExtensionAPI) {
           if (hasUI && notify) {
             notify(`compaction-tuner: compaction failed: ${error.message}`, "error");
           }
-          // Re-arm on error so a transient failure doesn't permanently
-          // suppress future triggers.
-          armedBySession.set(stateKey, true);
+          // Do NOT re-arm immediately (the old code's bug — see
+          // failureCountBySession header comment for the 2026-05-18
+          // retry storm this caused). Instead bump failure count and
+          // set exponential cooldown; the top-of-handler timed re-arm
+          // grants one fresh attempt after cooldown IFF failures <
+          // MAX. armedBySession stays at false (set just above when we
+          // decided to trigger).
+          const nextFailures = (failureCountBySession.get(stateKey) ?? 0) + 1;
+          failureCountBySession.set(stateKey, nextFailures);
+          const cooldownMs = Math.min(
+            ERROR_COOLDOWN_MAX_MS,
+            ERROR_COOLDOWN_BASE_MS * 2 ** (nextFailures - 1),
+          );
+          cooldownUntilBySession.set(stateKey, Date.now() + cooldownMs);
           void recordOutcome({
             operation: "trigger",
             outcome: "error",
@@ -296,15 +400,24 @@ export default function (pi: ExtensionAPI) {
             model_provider: modelInfo.provider ?? null,
             model_id: modelInfo.id ?? null,
             elapsed_ms: Date.now() - ts,
+            consecutive_failures: nextFailures,
+            cooldown_ms: cooldownMs,
             settings_snapshot: snapshotCompactionTunerSettings(settings),
           });
         },
       });
     } catch (err) {
       // ctx.compact is fire-and-forget so a sync throw is highly
-      // unlikely, but guard anyway.
+      // unlikely, but guard anyway. Same backoff policy as onError —
+      // see comment there for rationale.
       const message = err instanceof Error ? err.message : String(err);
-      armedBySession.set(stateKey, true);
+      const nextFailures = (failureCountBySession.get(stateKey) ?? 0) + 1;
+      failureCountBySession.set(stateKey, nextFailures);
+      const cooldownMs = Math.min(
+        ERROR_COOLDOWN_MAX_MS,
+        ERROR_COOLDOWN_BASE_MS * 2 ** (nextFailures - 1),
+      );
+      cooldownUntilBySession.set(stateKey, Date.now() + cooldownMs);
       await recordOutcome({
         operation: "trigger",
         outcome: "sync_error",
@@ -313,6 +426,8 @@ export default function (pi: ExtensionAPI) {
         percent_at_trigger: percent,
         threshold_percent: settings.thresholdPercent,
         elapsed_ms: Date.now() - ts,
+        consecutive_failures: nextFailures,
+        cooldown_ms: cooldownMs,
         settings_snapshot: snapshotCompactionTunerSettings(settings),
       });
     }
@@ -331,6 +446,29 @@ export default function (pi: ExtensionAPI) {
       const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
 
       if (sub === "status") {
+        // Surface backoff state per-session so operators chasing
+        // "why isn't compaction firing at 90%?" can see whether it's
+        // disarmed due to recent errors. Shows ALL sessions known to
+        // this process (usually 1, but dispatch-agent / multi-session
+        // hosts can have more).
+        const backoffLines: string[] = [];
+        const knownSessions = new Set<string>([
+          ...failureCountBySession.keys(),
+          ...cooldownUntilBySession.keys(),
+        ]);
+        if (knownSessions.size > 0) {
+          const now = Date.now();
+          for (const sid of knownSessions) {
+            const f = failureCountBySession.get(sid) ?? 0;
+            const cu = cooldownUntilBySession.get(sid) ?? 0;
+            const remainingMs = Math.max(0, cu - now);
+            backoffLines.push(
+              `  ${sid.slice(0, 8)}…: failures=${f}/${MAX_CONSECUTIVE_FAILURES}` +
+              (remainingMs > 0 ? `, cooldown=${Math.ceil(remainingMs / 1000)}s` : "") +
+              (f >= MAX_CONSECUTIVE_FAILURES ? " (max reached — awaiting percent drop)" : ""),
+            );
+          }
+        }
         const lines = [
           "# compaction-tuner",
           "",
@@ -342,6 +480,9 @@ export default function (pi: ExtensionAPI) {
           "",
           `current usage: ${usage?.percent != null ? `${usage.percent.toFixed(1)}% (${usage.tokens}/${usage.contextWindow} tokens)` : "(unknown — no post-compaction usage yet)"}`,
           `model: ${ctx.model?.provider ?? "?"}/${ctx.model?.id ?? "?"}`,
+          "",
+          `error backoff (per session):${backoffLines.length === 0 ? " none" : ""}`,
+          ...backoffLines,
         ];
         ctx.ui.notify(lines.join("\n"), "info");
         return;

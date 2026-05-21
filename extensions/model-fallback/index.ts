@@ -5,36 +5,31 @@
  * 耗尽后切成下一个已配置的 fallback 模型继续——直到列表里有人成功，或全部
  * 失败。Fallback 模型任一错误直接切（不重试）。
  *
- * 加 "connection lost — " 前缀让 pi 的 retry regex（含 "connection\\.?lost"）能
- * 命中任意错误上游错误字面不一致的 case，最典型的是 anthropic.js
- * 抛的 "Anthropic stream ended before message_stop"（regex 要的是 "ended
- * without"）。不加前缀则让 pi 跳过 retry 分支（用于 fallback 模型，
- * 不重试）。
+ * 加 "connection lost — " 前缀让 pi 的 retry regex（含 "connection.?lost"）能
+ * 命中任意上游错误字面不一致的 case，最典型的是 anthropic.js 抛的
+ * "Anthropic stream ended before message_stop"（regex 要的是 "ended
+ * without"）。不加前缀则让 pi 跳过 retry 分支（用于 fallback 模型，不重试）。
  *
  * 【为什么 mutation 在 message_end 而不是 agent_end】
- * pi-coding-agent 的 _handleAgentEvent 是 sync listener，会在 agent_end
- * 分发时**同步**调用 _createRetryPromiseForAgentEnd 评估
- * _isRetryableError——这个评估是 race fix，决定 prompt() 是否要等 retry。
+ * pi 评估 _isRetryableError 时读 errorMessage 字段。要让它看到加了前缀的
+ * 版本，mutation 必须在评估前完成。pi 内部至少有两条评估路径：
+ *   1. _willRetryAfterAgentEnd —— 在 agent_end emit 时同步评估，用于设置
+ *      event.willRetry 字段。_handleAgentEvent 先 await 跑完所有 extension
+ *      handlers（包括 message_end + agent_end），然后才 _emit 这个 willRetry，
+ *      所以如果只看这条路径，agent_end handler 里 mutate 也能 affect。
+ *   2. _handlePostAgentRun —— 在 agent.prompt() resolve 后 async 跑，读
+ *      _lastAssistantMessage.errorMessage 决定是否 retry。这是实际触发
+ *      retry 的路径，也读的是 message_end 时记录的那个引用。
  *
- * 如果 mutation 在 agent_end handler 里，几个事实会合谋让 retry 完全跳过：
- *   1. agent_end emit 同步分发 _handleAgentEvent
- *   2. _createRetryPromiseForAgentEnd 同步评估 —— 读原始 errorMessage
- *      （如 "stream_read_error"）→ regex 不命中 → _retryPromise 不创建
- *   3. _processAgentEvent 入 queue，model-fallback agent_end handler
- *      才进行 mutation——但这时过晚
- *   4. prompt() 的 waitForRetry 看到 _retryPromise=undefined 立即 resolve
- *   5. print mode 退出，后续 setTimeout schedule 的 agent.continue() 永不执行
+ * message_end 必然在 agent_end 之前 emit，两条路径都看到 mutated 版本。
+ * 历史上有过一段 agent_end handler 里的"防御式 mutation"代码，但 message_end
+ * 已经做了 mutation——agent_end 再 mutate 是 idempotent no-op，2026-05-21
+ * 清理掉。老版 pi (含 _createRetryPromiseForAgentEnd 同步评估) 那条描述
+ * 现在也不存在了，新版走的是上面两条 async 路径。
  *
- * 把 mutation 提前到 message_end handler（在 agent_end 之前 emit），
- * 且 message_end 的 _processAgentEvent 是主动 await——在同一个 microtask
- * drain 中比 agent_end 的同步评估**更早完成**（实证验证：见
- * scripts/smoke-model-fallback-mutation-timing.mjs）。这样 agent_end
- * 评估 _isRetryableError 时看到的是 mutated 版本，retry 能正常启动。
- *
- * agent_end handler 仍保留：
- *   - consecutiveErrors 计数 + fallback 调度（走到 give-up 后切模型）
- *   - 防御式 mutation（如果 message_end 未能 mutate ．例如某些错误路径不
- *     走 message_end）
+ * agent_end handler 保留：
+ *   - consecutiveErrors 计数（每次 pi retry 失败都 emit 新 agent_end，累加）
+ *   - fallback 调度（到达 piMaxRetries+1 阈值后切下一个模型）
  *
  * 扩展自动读取 pi settings.json#retry.maxRetries，对齐 give-up 节点。
  * 旧名 retry-stream-eof → retry-all-errors。
@@ -391,32 +386,22 @@ export default function (pi: ExtensionAPI) {
 		consecutiveErrors++;
 
 		// Policy:
-		//   - Initial model: prefix → pi auto-retries; we switch only after pi exhausts
-		//     its retries (consecutiveErrors >= piMaxRetries + 1 = pi's give-up node).
-		//   - Fallback model: do NOT prefix → pi sees non-retryable error and skips its
-		//     retry branch; we switch on the very first error (threshold = 1).
+		//   - Initial model: message_end already prefixed → pi auto-retries; we
+		//     switch only after pi exhausts its retries (consecutiveErrors >=
+		//     piMaxRetries + 1 = pi's give-up node).
+		//   - Fallback model: message_end did NOT prefix → pi skipped its retry
+		//     branch; we switch on the very first error (threshold = 1).
 		const threshold = isOnFallback ? fallbackErrorThreshold : initialErrorThreshold;
-		const allowPiAutoRetry = !isOnFallback;
 
-		// 防御式 mutation：正常路径下 message_end handler 已经 mutate 过，这里
-		// idempotent 跳过。但如果 message_end 未被触发过（某些错误路径可能跳过
-		// message_end 直接 emit agent_end），这里还是能加上前缀——但这个路径
-		// 上的 retry 会失效（因为 _createRetryPromiseForAgentEnd 已评估过原始
-		// errorMessage），mutation 只能让 fallback 路径能譯 model-fallback 的意图。
-		if (allowPiAutoRetry && !msg.errorMessage.startsWith(RETRYABLE_PREFIX)) {
-			msg.errorMessage = RETRYABLE_PREFIX + msg.errorMessage;
-			canaryLog(
-				projectRoot,
-				`mutated@agent_end (defensive—message_end skipped) errorMessage="${msg.errorMessage.slice(0, 200).replace(/[\r\n]+/g, " ")}"`,
-			);
-			ctx.ui?.notify?.("Error detected — auto-retrying", "info");
-		} else if (allowPiAutoRetry) {
-			// 已被 message_end mutate——这是 normal path。仅记录调调用于调试，不 notify。
-			canaryLog(
-				projectRoot,
-				`agent_end-skip-already-mutated errorMessage="${msg.errorMessage.slice(0, 80).replace(/[\r\n]+/g, " ")}"`,
-			);
-		}
+		// No mutation here — message_end has already done it (or deliberately
+		// skipped it for fallback models). The historical "defensive mutation"
+		// block here was idempotent no-op in the normal path and was removed
+		// 2026-05-21 along with the obsolete _createRetryPromiseForAgentEnd
+		// race description in the file header.
+		canaryLog(
+			projectRoot,
+			`agent_end error consecutiveErrors=${consecutiveErrors}/${threshold} isOnFallback=${isOnFallback} errorMessage="${msg.errorMessage.slice(0, 80).replace(/[\r\n]+/g, " ")}"`,
+		);
 
 		// Trigger our fallback once we hit the per-role threshold. Guarded by
 		// fallbackInFlight to avoid double-fire if agent_end is emitted twice.
