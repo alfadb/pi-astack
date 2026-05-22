@@ -36,17 +36,18 @@
 
 如果发现本 ADR 在重复 ADR 0024 的内容，**删掉**（重复就是 drift 风险）。
 
-### R0 → R5 演进路径
+### R0 → R7 演进路径（R8 audit 后伸长一轮）
 
-| 阶段 | 范围 | 体量估算 |
+| 阶段 | 范围 | 状态 |
 |---|---|---|
-| **R0**（本稿） | 骨架 + 能力点 1（主动纠错识别）完整设计 + 其余 5 条骨架 | ~400 行 |
-| R1 | 能力点 2（outcome self-report）完整设计 | + ~100 行 |
-| R2 | 能力点 3（aggregator）完整设计 | + ~120 行 |
-| R3 | 能力点 4（multi-view）完整设计 | + ~120 行 |
-| R4 | 能力点 5（classifier prompt 演进）完整设计 | + ~80 行 |
-| R5 | 能力点 6（静默归档 + 回滚窗口）完整设计 | + ~80 行 |
-| R6 | 三层 smoke 完整设计 + 实施 phase 路线图细化 | + ~80 行 |
+| R0 | 骨架 + 能力点 1 完整 + 其余 5 条骨架（534 行） | ✅ ship（bd16805），[R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) 查出 6 个 P0 |
+| **R1**（本稿） | R0 + R8 audit 6 P0 落地（事实错误 + 6 P0 + 1 P1 + 7 盲点） | 起草中 |
+| R2 | 能力点 2（outcome self-report）完整 prompt + schema | 待 R1 ship |
+| R3 | 能力点 3（aggregator）完整设计 | 待 R2 ship |
+| R4 | 能力点 4（multi-view full）完整设计 | 待 R3 ship（P0.5 minimal multi-view 与 P0 并行）|
+| R5 | 能力点 5（classifier prompt 演进）完整设计 | 待 R4 ship（P4a substrate 与 P0 并行）|
+| R6 | 能力点 6（静默归档 + 回滚窗口）完整设计 | 待 R5 ship（P5a substrate 与 P0 并行）|
+| R7 | 三层 smoke 完整设计 + 实施 phase 路线图细化 | 待 R6 ship |
 
 每个 R 阶段独立做多模型评审 → 收敛 → ship。**不一次性写完所有 6 条能力点的完整设计**——一次性写完风险高（reviewer 无法收敛、用户读不动、单点错位影响全局）。
 
@@ -826,17 +827,71 @@ in audit for future review.
 
 ### 10.1 Invariant 边界
 
-| ADR 0024 边界 | 本 Phase 是否触碰 |
-|---|---|
-| §2 INV-INVISIBILITY | 任何 ui.notify / `/brain health` 自动弹窗？✗ |
-| §2 INV-AUTONOMY | 任何 prompt_user / `/rule veto` / 月度 manual workflow？✗ |
-| §2 INV-IMPLICIT-GROUND-TRUTH | 任何信号收集走元 UI 不走自然对话？✗ |
-| §2 INV-ACTIVE-CORRECTION | classifier 能稳定识别 task-natural 纠错？✓ 必须 |
-| §3 AI-Native 原则 | 任何防出错路径是机械 gate / schema enforcement / threshold？✗（违反 → 必须 justify 为什么不能 prompt 工程） |
-| §4.2 反模式 | `MEMORY-RULE:` fence / `/rule add` / `/about-me` / 月度 self-improve？✗ |
-| §6 接受的代价 | 错误传播跨设备 / 数月才纠正 / multi-view 翻倍成本 — 已显式 acknowledge？✓ |
+| # | ADR 0024 边界 | 本 Phase 检查 |
+|---|---|---|
+| 1 | §2 INV-INVISIBILITY（直接）| 任何 ui.notify / `/brain health` 自动弹窗 / 主动授权弹窗？✗ |
+| 2 | §2 INV-INVISIBILITY（间接）| staging 条目是否可能通过 curator 错误操作间接被用户感知？✗（R8 DeepSeek D6） |
+| 3 | §2 INV-AUTONOMY | 任何 prompt_user 询问 sediment 生命周期 / `/rule veto` / 月度 manual workflow？✗ |
+| 4 | §2 INV-IMPLICIT-GROUND-TRUTH（不走元 UI）| 任何信号收集走元 UI 不走自然对话？✗ |
+| 5 | §2 INV-IMPLICIT-GROUND-TRUTH（充分利用隐式信号）| 本 Phase 是否充分利用 acceptance / 沉默 / 跟进 / 修改 等隐式信号？✓ |
+| 6 | §2 INV-IMPLICIT-GROUND-TRUTH（不诱导反馈）| 任何 agent_end prompt 是否可能诱导主会话 LLM 中主动向用户收集反馈？✗（R8 DeepSeek D7） |
+| 7 | §2 INV-IMPLICIT-GROUND-TRUTH（LLM 解释 ≠ 用户信号）| outcome / multi-view / aggregator 是否被误升为 ground truth？✗（R8 GPT G1） |
+| 8 | §2 INV-ACTIVE-CORRECTION | classifier 能稳定识别 task-natural 纠错？✓ 必须 |
 
-任何一项触碰 → 该 Phase 不能 ship，必须先回 ADR 0024 调 invariant。
+### 10.2 AI-Native 原则（3 态标注）
+
+| 状态 | 检查 |
+|---|---|
+| ☑ PE-form | LLM 行为层防出错走 prompt 工程？✓（默认期望） |
+| ☑ Infra | 持久化基础设施（JSON parse / schema validate / file I/O / git op / audit log）走机械？✓（允许） |
+| ✗ Mech-on-LLM | LLM 行为层加机械门（schema 拦截 / 阈值 / 哈希 / TTL / smoke-as-block）？✗（违反 → 必须 justify (1) PE-first 不够 (2) Infra 决不了 (3) 仅限局部范围 + 未来移除条件） |
+
+### 10.3 §4.2 反模式（逐项列出）
+
+本 Phase 是否引入或还原以下反模式？任一触发 → ✗。
+
+- 系统弹窗“我学到了 X” / LLM 问“沉淀为规则吗？” / 学习周报
+- `MEMORY-RULE:` / `MEMORY-ABOUT-ME:` 围栏让用户手动注入
+- `/rule add` / `/rule veto` / `/about-me`
+- 月度 sediment self-improve 要用户主动跑
+- `/brain health` 自动展板让用户检视
+- 机械关卡替代 prompt 工程作为 LLM 行为层主要防出错手段
+- fixture 准确率当发布拦截关卡
+- 预定义枚举字段替代 LLM 自然语言推理
+
+### 10.4 §6 接受的代价（9 行逐项 acknowledge）
+
+本 Phase 是否显式 acknowledge 以下代价？任一项未 acknowledge = 设计漏接受面。
+
+| # | 代价 | 本 Phase 额外需求 |
+|---|---|---|
+| 1 | 错误传播跨设备 | sync-aware check：ADR 0020 sync 是否能在 N 天 archive 窗口内正确传播反证 |
+| 2 | 偏发“假高置信” | dogfood 校准“数周到数月”假设 |
+| 3 | 静默归档误删 | reactivation prompt 必须 ship（§7）|
+| 4 | 跨设备最终一致延迟 | staging 加 `originating_device` 字段（§2.5）|
+| 5 | 用户察觉不到的偏差累积 | aggregator + Classifier Health Meta-Check（§4.3）|
+| 6 | 主动纠错疲劳 | 不强制 N=2 机械升级（§2.4）|
+| 7 | Multi-view 翻倍调用成本 | P3 ship 后验证实际 vs 预期 |
+| 8 | 早期推理质量参差 | classifier §2.3 step 7 self-rating + audit |
+| 9 | LLM 推理失败本底概率 | multi-view 部分补偿；devil's advocate prompt（§5.3）加码 |
+
+### 10.5 §7 走偏信号
+
+本 Phase ship 前是否检查了 ADR 0024 §7 走偏信号 1-7 中的任何一条是否已触发？任何触发需先解决再 ship。另需补充检查：staging 区 age-out 率 + 未 resolve 率是否持续 > 60%（R8 盲点 X3 手动补的走偏信号 #8）。
+
+### 10.6 下游 ADR 边界
+
+本 Phase 是否触及以下 ADR 边界？任一触及 → 需在该 ADR 项下逐项说明不违反原 invariant。
+
+- ADR 0014 invariant #7（七区互斥）——staging 路径不是第 8/9 区（§1.4）
+- ADR 0017 strict-binding——project-rules 注入不泄漏
+- ADR 0020 transport-only——staging 同步加 `originating_device`
+- ADR 0022 prompt_user contract——仅任务相关，不是 sediment 生命周期决策
+- ADR 0003 主会话只读——outcome self-report 走 §3.3 方案 C 隐藏 metadata 路径
+
+### 10.7 高级用户诊断入口调用面
+
+`/abrain audit classifier` / `/rule list` / `/abrain status` 等诊断入口是否在 quickstart / `/help` / 推广文案中被抑制？✓ 必须（符合 ADR 0024 §4.3）
 
 ---
 
@@ -851,3 +906,13 @@ in audit for future review.
 - `sediment-self-evolution-philosophy-trusts-llm-over-mechanical-blocking` (maxim, conf 8) — 同上
 - `sediment-is-currently-write-only-loop-lacking-outcome-feedback` (pattern, conf 9) — §3 outcome self-report 要解决的根本问题
 - `sediment-meta-curator-five-capability-outline` (pattern, conf 8) — 上游 outline（注：该 entry 写于 R5，列了 5 条；ADR 0024 R6/R7 后精炼为 6 条，§2 主动纠错识别从 classifier 子任务升格为独立能力点。该 memory entry 不主动 patch，让 sediment 自己消化）
+
+**R8 audit 沉淀候选**（sediment 后续会看到 audit + R1 产出后决定是否沉淀）：
+
+- `layer-f-three-state-protocol-distinguishes-infra-from-llm-behavior`（预计 maxim, conf 9）——R8 验证的 Layer F v2 3 态标注协议，供后续所有 capability-level ADR 的多 LLM audit 复用
+- `provisional-staging-hypothesis-as-prompt-form-anti-anchoring`（预计 pattern, conf 8）——本 ADR §2.5 _provenance_warning banner + WARNING prompt 段 + pending resolution queue 三者组合防 LLM 将 provisional hypothesis 错读为事实的设计模式
+
+**评审文档**（不是 memory entry，是 audit 文档）：
+
+- [R0 R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) — 本 R1 落地的 6 个 P0 + 1 个 P1 + 7 个盲点全部来源
+- [ADR 0024 R7 audit](../audits/2026-05-22-adr-0024-r7-prompt-engineering-review.md) — 上游哲学 ADR 的 R7 评审快照；R8 中 D1 / D2 / D3 盲点 R8 完整继承
