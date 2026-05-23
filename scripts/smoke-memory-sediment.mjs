@@ -102,10 +102,18 @@ function transpileExtensions(outRoot) {
   }
 
   // Minimal typebox subset for registerTool schemas.
+  //
+  // Keep this in sync with `Type.<Method>` usage across extensions/*/index.ts.
+  // If a new method is added there and forgotten here, the smoke crashes at
+  // module-load with "typebox_1.Type.<X> is not a function" — the failure is
+  // unrelated to whatever the contributor was testing. Audit with:
+  //   grep -hPo 'Type\.\w+' extensions/*/index.ts | sort -u
   writeFile(path.join(outRoot, "node_modules", "typebox", "index.js"), `
 exports.Type = {
   Object: (properties, opts = {}) => ({ type: 'object', properties, ...opts }),
   String: (opts = {}) => ({ type: 'string', ...opts }),
+  Number: (opts = {}) => ({ type: 'number', ...opts }),
+  Array: (items, opts = {}) => ({ type: 'array', items, ...opts }),
   Optional: (schema) => ({ ...schema, optional: true }),
   Any: (opts = {}) => ({ ...opts }),
 };
@@ -250,7 +258,12 @@ async function main() {
     memoryExt({ registerTool(t) { tools.set(t.name, t); }, registerCommand(n, o) { commands.set(n, o); } });
     sedimentExt({ registerCommand(n, o) { commands.set(n, o); }, on() {} });
     compactionTunerExt({ registerCommand(n, o) { commands.set(n, o); }, on() {} });
-    assert(tools.size === 4, `expected 4 memory tools, got ${tools.size}`);
+    // memory_search / memory_get / memory_list / memory_neighbors / memory_decide
+    // (memory_decide was added by ADR 0026 P0a in commit 552c7b4; 4 → 5).
+    assert(tools.size === 5, `expected 5 memory tools, got ${tools.size}`);
+    for (const name of ["memory_search", "memory_get", "memory_list", "memory_neighbors", "memory_decide"]) {
+      assert(tools.has(name), `missing tool: ${name}`);
+    }
     assert(commands.has("memory") && commands.has("sediment") && commands.has("compaction-tuner"), "expected memory, sediment, and compaction-tuner commands");
 
     // === sediment agent_end strict-binding hook glue ===

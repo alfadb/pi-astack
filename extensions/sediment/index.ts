@@ -1041,7 +1041,14 @@ export default function (pi: ExtensionAPI) {
                     sessionId,
                     win,
                   );
-                  const bg = (async () => {
+                  // Forward-declare with definite-assignment assertion so
+                  // the IIFE body's `if (autoWriteInFlight.get(...) === bg)`
+                  // typechecks under TS strict. Runtime-safe: the closure
+                  // body cannot reach the comparison until after the
+                  // assignment one line below completes (async body runs
+                  // up to first await, which is the inner tryAutoWriteLane).
+                  let bg!: Promise<void>;
+                  bg = (async () => {
                     try {
                       const auto = await tryAutoWriteLane({
                         cwd,
@@ -1210,7 +1217,12 @@ export default function (pi: ExtensionAPI) {
           window,
         );
 
-        let bgPromise: Promise<void>;
+        // Definite-assignment assertion: TS can't prove the IIFE body's
+        // `if (autoWriteInFlight.get(...) === bgPromise)` closure read
+        // happens after the assignment on the next line, but runtime-wise
+        // the async body suspends at its first await before reaching
+        // that comparison. `!` silences the spurious strict-mode warning.
+        let bgPromise!: Promise<void>;
         bgPromise = (async () => {
           try {
             const auto = await tryAutoWriteLane({
