@@ -26,6 +26,28 @@ export interface SedimentSettings {
   curatorMaxRetries: number;
   autoLlmWriteEnabled: boolean;
   autoWriteRawAuditChars: number;
+  /** ADR 0025 P0: semantic version tags for each classifier prompt.
+   *  Written into every audit row so downstream aggregator/health-check
+   *  can track prompt changes without manual cross-reference. */
+  promptVersion: {
+    activeCorrectionClassifier: string;
+    multiViewPass1: string;
+    multiViewPass2: string;
+    outcomeSelfReport: string;
+    aggregator: string;
+    archiveReactivationReviewer: string;
+  };
+  /** ADR 0025 P0: multi-view verification provider lists.
+   *  If empty, multi-view is effectively disabled (single-provider
+   *  degradation). The proposer and reviewer MUST be from DIFFERENT
+   *  providers per ADR 0024 §5.4. */
+  multiView: {
+    proposerProviders: string[];
+    reviewerProviders: string[];
+    fallbackProviders: string[];
+    /** Soft budget in USD per multi-view op. Exceeded → DEFER to staging. */
+    costBudgetPerOpUsd: number;
+  };
 }
 
 export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
@@ -57,6 +79,20 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   curatorMaxRetries: 1,
   autoLlmWriteEnabled: false,
   autoWriteRawAuditChars: 8_000,
+  promptVersion: {
+    activeCorrectionClassifier: "v0",
+    multiViewPass1: "v0",
+    multiViewPass2: "v0",
+    outcomeSelfReport: "v0",
+    aggregator: "v0",
+    archiveReactivationReviewer: "v0",
+  },
+  multiView: {
+    proposerProviders: [],
+    reviewerProviders: [],
+    fallbackProviders: [],
+    costBudgetPerOpUsd: 0.05,
+  },
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -95,5 +131,28 @@ export function resolveSedimentSettings(): SedimentSettings {
     curatorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.curatorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.curatorMaxRetries))),
     autoLlmWriteEnabled: asBoolean(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
+    promptVersion: {
+      activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
+        ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,
+      multiViewPass1: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.multiViewPass1 === "string"
+        ? (cfg.promptVersion as Record<string,unknown>).multiViewPass1 as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.multiViewPass1,
+      multiViewPass2: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.multiViewPass2 === "string"
+        ? (cfg.promptVersion as Record<string,unknown>).multiViewPass2 as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.multiViewPass2,
+      outcomeSelfReport: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.outcomeSelfReport === "string"
+        ? (cfg.promptVersion as Record<string,unknown>).outcomeSelfReport as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.outcomeSelfReport,
+      aggregator: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.aggregator === "string"
+        ? (cfg.promptVersion as Record<string,unknown>).aggregator as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.aggregator,
+      archiveReactivationReviewer: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.archiveReactivationReviewer === "string"
+        ? (cfg.promptVersion as Record<string,unknown>).archiveReactivationReviewer as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.archiveReactivationReviewer,
+    },
+    multiView: {
+      proposerProviders: Array.isArray((cfg.multiView as Record<string,unknown>|undefined)?.proposerProviders)
+        ? (cfg.multiView as Record<string,unknown>).proposerProviders as string[] : DEFAULT_SEDIMENT_SETTINGS.multiView.proposerProviders,
+      reviewerProviders: Array.isArray((cfg.multiView as Record<string,unknown>|undefined)?.reviewerProviders)
+        ? (cfg.multiView as Record<string,unknown>).reviewerProviders as string[] : DEFAULT_SEDIMENT_SETTINGS.multiView.reviewerProviders,
+      fallbackProviders: Array.isArray((cfg.multiView as Record<string,unknown>|undefined)?.fallbackProviders)
+        ? (cfg.multiView as Record<string,unknown>).fallbackProviders as string[] : DEFAULT_SEDIMENT_SETTINGS.multiView.fallbackProviders,
+      costBudgetPerOpUsd: asNumber((cfg.multiView as Record<string,unknown>|undefined)?.costBudgetPerOpUsd, DEFAULT_SEDIMENT_SETTINGS.multiView.costBudgetPerOpUsd),
+    },
   };
 }

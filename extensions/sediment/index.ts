@@ -27,6 +27,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { mkdir } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveSedimentSettings, type SedimentSettings } from "./settings";
 import {
@@ -64,7 +65,7 @@ import {
 } from "./writer";
 import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
-import { abrainProjectDir, resolveActiveProject } from "../_shared/runtime";
+import { abrainProjectDir, abrainSedimentStagingPath, resolveActiveProject } from "../_shared/runtime";
 
 // ---------------------------------------------------------------
 // Phase 1.4 A2 / ADR 0016: in-process bg work tracking.
@@ -500,6 +501,14 @@ export default function (pi: ExtensionAPI) {
     ) => {
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
+
+      // ADR 0025 P0: ensure the sidecar staging directory exists.
+      // Created eagerly on first session_start so downstream
+      // correction-pipeline / staging-loader can assume the path is
+      // there. mkdir recursive is a no-op on subsequent calls.
+      const abrainHome = resolveAbrainHomeForSediment();
+      await mkdir(abrainSedimentStagingPath(abrainHome), { recursive: true });
+
       const sessionId = readSessionId(ctx.sessionManager);
       const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
       const setStatus = setStatusRaw

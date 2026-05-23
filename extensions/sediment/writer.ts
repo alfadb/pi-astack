@@ -669,6 +669,12 @@ export async function appendAudit(projectRoot: string, event: Record<string, unk
   // analysis on the JSONL doesn't need to cross-reference other sources.
   // Per-operation fields from `event` are spread last so callers can
   // override anything (rarely needed).
+  //
+  // ADR 0025 P0: callers SHOULD include `prompt_version` in their event
+  // object (additive, backward-compatible — absent rows default to
+  // "v0-unknown"). The field tracks which prompt produced the classifier
+  // reasoning trace so aggregator health checks can attribute quality
+  // changes to specific prompt versions.
   const enriched = {
     timestamp: formatLocalIsoTimestamp(),
     audit_version: AUDIT_SCHEMA_VERSION,

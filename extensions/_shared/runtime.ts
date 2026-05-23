@@ -320,6 +320,12 @@ export function abrainSedimentDir(abrainHome: string): string {
 export function abrainSedimentAuditPath(abrainHome: string): string {
   return path.join(abrainSedimentDir(abrainHome), "audit.jsonl");
 }
+/** ADR 0025 P0: sidecar staging directory for provisional classifier
+ *  hypotheses with attribution_pending=true. Lives alongside checkpoint
+ *  under `<abrainHome>/.state/sediment/`. */
+export function abrainSedimentStagingPath(abrainHome: string): string {
+  return path.join(abrainSedimentDir(abrainHome), "staging");
+}
 export function abrainSedimentLocksDir(abrainHome: string): string {
   return path.join(abrainSedimentDir(abrainHome), "locks");
 }
