@@ -562,4 +562,57 @@ export default function (pi: ExtensionAPI) {
       });
     },
   });
+
+  // ── System-prompt injection: memory-footnote self-report protocol ──
+  //
+  // Why this lives in the memory extension (not the user's AGENTS.md):
+  //
+  // The footnote protocol is a cross-tool convention spanning the
+  // memory_search / memory_get / memory_decide trio — it has no meaning
+  // when those tools aren't loaded, and its taxonomy (decisive /
+  // confirmatory / retrieved-unused) is tied to the outcome-collector
+  // schema in extensions/sediment/outcome-collector.ts. Pinning the
+  // contract in user-global AGENTS.md drifts when:
+  //   (a) the tool surface changes (e.g. memory_decide was added by ADR
+  //       0026 P0a, the listed tools needed manual updating in AGENTS.md),
+  //   (b) users disable the memory extension yet still see the rule,
+  //   (c) sub-pi forks where PI_ABRAIN_DISABLED=1 short-circuited the
+  //       module never see the protocol, which is correct — but
+  //       AGENTS.md would still tell them to follow it.
+  //
+  // Hosting it here couples the protocol to its enforcement code: when
+  // outcome-collector's footnote-parsing schema evolves, this string
+  // moves in the same commit. Pattern mirrors model-curator's
+  // before_agent_start injector (extensions/model-curator/index.ts:350)
+  // and sediment's main-session-read-only injector.
+  const MEMORY_INJECT_MARKER = "<!-- pi-astack/memory: memory-footnote protocol -->";
+  pi.on("before_agent_start", async (event: { systemPrompt?: string }) => {
+    const current = event.systemPrompt ?? "";
+    if (current.includes(MEMORY_INJECT_MARKER)) return undefined;
+    const block = `${MEMORY_INJECT_MARKER}
+## memory-footnote：使用记忆条目的自我报告
+
+当你在回复过程中调用了 \`memory_search\` / \`memory_get\` /
+\`memory_decide\` 并实际使用了返回的记忆条目时，在回复最末尾
+附加一个隐藏 fenced block：
+
+\`\`\`memory-footnote
+entry: <slug>
+used: decisive | confirmatory | retrieved-unused
+counterfactual: <如果这条记忆不在上下文里，你会做什么不同的决定？
+  decisive=引用具体行为差异，confirmatory="相同决定"，
+  retrieved-unused=解释为什么没用>
+\`\`\`
+
+- \`decisive\` = 这条记忆改变了你的行为（没有它你会做不同的事）
+- \`confirmatory\` = 你本来就会做这个决定，记忆只是印证
+- \`retrieved-unused\` = 你搜到了但没用，解释原因
+- 默认偏向 \`confirmatory\`：能说清 counterfactual 才标 \`decisive\`
+- 如果没实际使用任何记忆条目，不写 footnote
+
+这是给第二大脑追踪条目使用情况的内部信号，正常回复给用户，
+不用总结它。
+`;
+    return { systemPrompt: current + "\n\n" + block };
+  });
 }

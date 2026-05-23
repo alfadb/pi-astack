@@ -255,9 +255,27 @@ async function main() {
 
     const tools = new Map();
     const commands = new Map();
-    memoryExt({ registerTool(t) { tools.set(t.name, t); }, registerCommand(n, o) { commands.set(n, o); } });
-    sedimentExt({ registerCommand(n, o) { commands.set(n, o); }, on() {} });
-    compactionTunerExt({ registerCommand(n, o) { commands.set(n, o); }, on() {} });
+    // The fake `pi` mock has historically only stubbed the methods each
+    // extension actually used at load time. As of pi-astack adding
+    // before_agent_start injectors to memory + sediment, every extension
+    // now expects `pi.on()` to exist (memory previously only needed
+    // registerTool+registerCommand). Capture handlers per event so the
+    // injection assertions below can drive them directly.
+    const hookHandlers = { memory: new Map(), sediment: new Map(), compactionTuner: new Map() };
+    const makePi = (slot, withRegisterTool) => {
+      const pi = {
+        registerCommand(n, o) { commands.set(n, o); },
+        on(event, handler) {
+          if (!hookHandlers[slot].has(event)) hookHandlers[slot].set(event, []);
+          hookHandlers[slot].get(event).push(handler);
+        },
+      };
+      if (withRegisterTool) pi.registerTool = (t) => tools.set(t.name, t);
+      return pi;
+    };
+    memoryExt(makePi("memory", true));
+    sedimentExt(makePi("sediment", false));
+    compactionTunerExt(makePi("compactionTuner", false));
     // memory_search / memory_get / memory_list / memory_neighbors / memory_decide
     // (memory_decide was added by ADR 0026 P0a in commit 552c7b4; 4 → 5).
     assert(tools.size === 5, `expected 5 memory tools, got ${tools.size}`);
@@ -265,6 +283,40 @@ async function main() {
       assert(tools.has(name), `missing tool: ${name}`);
     }
     assert(commands.has("memory") && commands.has("sediment") && commands.has("compaction-tuner"), "expected memory, sediment, and compaction-tuner commands");
+
+    // === before_agent_start system-prompt injection contract ===
+    // memory + sediment moved their LLM-facing guidance out of the user's
+    // AGENTS.md into native before_agent_start injectors. Lock the
+    // contract here so a future refactor doesn't silently drop the
+    // injection or the idempotency check.
+    {
+      const sedimentHandlers = hookHandlers.sediment.get("before_agent_start") ?? [];
+      const memoryHandlers = hookHandlers.memory.get("before_agent_start") ?? [];
+      assert(sedimentHandlers.length === 1, `sediment must register exactly 1 before_agent_start handler, got ${sedimentHandlers.length}`);
+      assert(memoryHandlers.length === 1, `memory must register exactly 1 before_agent_start handler, got ${memoryHandlers.length}`);
+
+      // First call appends; second call must short-circuit on the marker.
+      const sedMarker = "<!-- pi-astack/sediment: main-session read-only contract -->";
+      const memMarker = "<!-- pi-astack/memory: memory-footnote protocol -->";
+      const seed = "BASE-SYSTEM-PROMPT";
+      const sedFirst = await sedimentHandlers[0]({ systemPrompt: seed });
+      assert(sedFirst && typeof sedFirst.systemPrompt === "string", "sediment injector first call must return { systemPrompt }");
+      assert(sedFirst.systemPrompt.startsWith(seed), "sediment injector must APPEND to existing prompt, not replace");
+      assert(sedFirst.systemPrompt.includes(sedMarker), `sediment injection missing marker: ${sedFirst.systemPrompt.slice(-200)}`);
+      assert(sedFirst.systemPrompt.includes("主会话只读不写"), "sediment injection missing core rule heading");
+      assert(!sedFirst.systemPrompt.includes("gbrain"), "sediment injection must not mention retired gbrain tool");
+      assert(!sedFirst.systemPrompt.includes(".pensieve/"), "sediment injection must not reference legacy .pensieve location");
+      const sedSecond = await sedimentHandlers[0]({ systemPrompt: sedFirst.systemPrompt });
+      assert(sedSecond === undefined, "sediment injector must be idempotent (return undefined when marker already present)");
+
+      const memFirst = await memoryHandlers[0]({ systemPrompt: seed });
+      assert(memFirst && typeof memFirst.systemPrompt === "string", "memory injector first call must return { systemPrompt }");
+      assert(memFirst.systemPrompt.includes(memMarker), `memory injection missing marker: ${memFirst.systemPrompt.slice(-200)}`);
+      assert(memFirst.systemPrompt.includes("memory-footnote"), "memory injection must include the protocol name 'memory-footnote'");
+      assert(memFirst.systemPrompt.includes("decisive") && memFirst.systemPrompt.includes("confirmatory") && memFirst.systemPrompt.includes("retrieved-unused"), "memory injection must enumerate the used taxonomy");
+      const memSecond = await memoryHandlers[0]({ systemPrompt: memFirst.systemPrompt });
+      assert(memSecond === undefined, "memory injector must be idempotent (return undefined when marker already present)");
+    }
 
     // === sediment agent_end strict-binding hook glue ===
     // This drives the actual pi.on('agent_end') handler rather than only

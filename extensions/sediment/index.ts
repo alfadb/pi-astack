@@ -553,6 +553,59 @@ export default function (pi: ExtensionAPI) {
   registerSedimentCommand(pi);
   registerAboutMeCommand(pi);
 
+  // ── System-prompt injection: main-session read-only contract ──
+  //
+  // Why this lives here (not in the user's AGENTS.md):
+  //
+  // The rule "main session reads memory but does NOT write" is a
+  // sediment-extension behavior contract — it only makes sense when
+  // sediment is loaded and enabled, and the wording references
+  // sediment-specific lanes (auto-write / explicit MEMORY: marker /
+  // /sediment slash). Pinning it in a user-global AGENTS.md means:
+  //   (a) users who disable sediment still see the rule (confusing),
+  //   (b) users on older pi-astack with stale terminology (gbrain /
+  //       /skill:pensieve) drift out of sync with what the extension
+  //       actually exposes today,
+  //   (c) the rule appears even in sub-pi contexts where
+  //       PI_ABRAIN_DISABLED=1 already short-circuits the extension.
+  //
+  // Hosting it inside the extension fixes all three: the text ships
+  // alongside the code that enforces it, evolves with the same commit,
+  // and only appears when the extension is actually active.
+  //
+  // Pattern mirrors model-curator/index.ts:350 (idempotency marker +
+  // string-concat append — the only native API for system-prompt
+  // injection per docs/extensions.md §before_agent_start).
+  const SEDIMENT_INJECT_MARKER = "<!-- pi-astack/sediment: main-session read-only contract -->";
+  pi.on("before_agent_start", async (event: { systemPrompt?: string }) => {
+    const settings = resolveSedimentSettings();
+    if (!settings.enabled) return undefined;
+    const current = event.systemPrompt ?? "";
+    if (current.includes(SEDIMENT_INJECT_MARKER)) return undefined;
+    const block = `${SEDIMENT_INJECT_MARKER}
+## 长期记忆：主会话只读不写
+
+主会话**不要**主动写 memory entry，不论是直接编辑
+\`~/.abrain/projects/<id>/\` 下的 markdown、调用任何 memory 写入 API，
+还是在仓库里顺手 git commit 进去。这些是后台 sediment
+sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
+写什么、如何去重、slug 冲突怎么处理。主会话越位会：
+
+- 和 sediment race（同一洞察两份 slug）
+- 绕过去重 / 风格对齐
+- 推动 LLM 将每件事都评价为“值得记录”，污染主线思考
+
+例外：用户**明确**说“沉淀这条” / 调用 \`/sediment\` 或 \`/about-me\`
+slash 命令、或在回复里主动写 \`MEMORY:\` / \`MEMORY-ABOUT-ME:\`
+fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
+它看到了。不确定是否“明确”时不要写。
+
+读是完全开放的：\`memory_search\` / \`memory_get\` / \`memory_list\` /
+\`memory_neighbors\` / \`memory_decide\` 都鼓励动手前查。
+`;
+    return { systemPrompt: current + "\n\n" + block };
+  });
+
   // Footer state machine: session_start sets idle UNLESS bg work from
   // a previous session is still inflight (e.g. user did /new while
   // sediment was extracting). In that case show running so the user
