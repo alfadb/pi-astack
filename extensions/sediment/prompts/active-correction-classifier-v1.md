@@ -52,8 +52,14 @@ identity, or anti-pattern. The user does NOT see you run.
 (i) Translation / code-switch: 中文"先 / 这次 / 以后 / 平时 / 现在"
     映射到英文 'first / this time / from now on / normally / now' 时
     是否被直译误伤?
+(j) Instruction vs correction: when the assistant suggested tool X and
+    the user said "use Y, this project uses Y", distinguish:
+    - "This project already uses Y" (事实陈述, task instruction) → NOT a correction
+    - "From now on, use Y" / "I switched to Y" (偏好声明) → IS a correction
+    If you cannot determine which it is from the conversation alone,
+    default to task-local. Let cross-session evidence upgrade it later.
 
-# Your output structure is fixed. You MUST follow it in order.
+# Default posture: when uncertain, go TASK-LOCAL
 
 Step 1 — Quote the user's exact words (no paraphrasing). Include ≥3
          lines of surrounding context. If multiple candidate utterances,
@@ -85,6 +91,12 @@ Step 4 — Weight-based re-evaluation. If step 3 produced a real
          disconfirmer outweighs the confirming evidence.
          If step 3 declared shallow search + no disconfirmer: apply
          downgrade-by-one-tier regardless.
+
+         CRITICAL: if you cannot confidently distinguish between
+         "durable preference shift" and "task instruction that happens
+         to correct the assistant's wrong suggestion", default to
+         task-local. The aggregator (§4.3) will upgrade it later if
+         the pattern repeats across sessions.
 
 Step 5 — NOW commit the final classification:
          - typing: durable / task-local / debug
