@@ -236,7 +236,7 @@ autoLlmWriteEnabled: false,  // ← Lane C 默认不跑
 | INV-INVISIBILITY（直接） | ✓ Lane C fire-and-forget @ `index.ts:1035`、agent_end 不 await bg | 已实现 |
 | INV-INVISIBILITY（间接 — staging 不可能间接被用户感知） | △ 部分 | 现有 Lane G staging 不进 memory_search corpus（OK），但 §4.1 新增 sidecar staging 设计时需保证同样 |
 | INV-AUTONOMY | △ 部分 | `prompt_user` 仅用任务决策（OK，ADR 0022），但 `/about-me` 让用户做元工作 violates；`autoLlmWriteEnabled` 默认 false 也让用户做"手动启用整个设想"的元工作 |
-| INV-IMPLICIT-GROUND-TRUTH | △ 部分 | sediment 已读 conversation window 作为隐式信号（OK），但没有任何"用户接受/修改/拒绝/沉默/跟进/主动纠错"的差异化处理；classifier 输出只有 kind/status/confidence，丢了 acceptance/rejection 信号 |
+| INV-IMPLICIT-GROUND-TRUTH | △ 部分 | sediment 已读 conversation window 作为隐式信号（OK），但**最关键的隐式信号——用户接受/修改/拒绝 LLM 输出——完全没有仪器化**。用户接受了 yarn 的建议 = 用户至少不排斥 yarn；用户改了 pnpm 的 import = 用户偏好 pnpm。这个信号比主动纠错更频繁、更细粒度，但当前 classifier 只产 kind/status/confidence，没有任何 acceptance/rejection 信号产出。R10 三方审计都指出来了。0025 §4.2 outcome self-report 部分覆盖了"entry 用没用"，但不覆盖"LLM 的建议被用户接受/修改/拒绝了"——这是两个不同的信号维度 |
 | INV-ACTIVE-CORRECTION | ✗ 未实现 | extractor + curator 没有任何 active correction 识别；用户说 "以后用 X" 完全依赖 LLM 偶然把 `status` 字段理解对，没有 6 步推理、没有 disconfirmation、没有 bias cautions |
 
 ### 2.2 六能力点：现实 baseline + 缺多少
@@ -656,6 +656,8 @@ This is a SUCCESSFUL run.
 
 **不确定时的默认**：偏向 task-local（避免污染 durable 区）。
 
+**⚠️ conf<8 的盲区**：conf<8 的 durable 输出直接走 curator 直写，没有 multi-view 审查。R10 审计指出这是"最大的 blast radius"——分类器把一句闲聊误判为 conf=6 的 durable correction，直接绕过所有保护层写入。大多数 correction 落在 conf<8 这个区间（真正高置信的很少），但恰好是这个区间没有任何独立验证。P1 原型验证时会专门测这个区间的误判率。如果原型发现 conf<8 误判率高，考虑临时把直写门槛提到 conf=7 或加一条 staging-only 中间路径。
+
 #### 4.1.5 记忆归属处理（找不到对应 entry 时）
 
 当 step 5 的 `target_entry_slug` 为 null 但 typing 是 durable（或升级的 durable candidate）时，**写一条 provisional staging entry**——schema：
@@ -1060,6 +1062,8 @@ ADR 0020 sync 处理 archive 中间状态：
 ### 5.1 基于 §1 现实的 phase 安排
 
 **重要：现状是 `autoLlmWriteEnabled` 默认 false，大多数用户没开 Lane C**。所以 phase 0 / 1 / 2 ship 在 default-off 下不影响大多数用户。这是天然的渐进 dogfood 安全网。
+
+**⚠️ R10 三方审计三家一致要求：P1 开工前必须先验证 classifier prompt 在真实对话上的表现。** 这是硬性前置——不跑原型验证不准写 P1 代码。原型验证的要求：拿 50-60 条真实对话窗口（20 条明显该有 correction、20 条模糊、20 条明显不该有），用 §4.1.3 prompt 跑 3 个不同 model，人工 review：(a) 7 步顺序是否被遵守（step 2b 真的在站反面还是走形式？）(b) 误判率——该 null 却 produce signal / 该 durable 却判 task-local 的比例 (c) staging provisional 的创建率 vs resolve 率。原型通过标准：false positive rate < 20%（考虑到还没 multi-view 保护，这个门槛比 P5.5 的 15% 宽松），且 step-skipping 率（明显跳步或合并步的比例）< 15%。原型不过 → 回炉调 prompt 重跑 → 再不过 → 考虑拆 prompt（DeepSeek 建议的 Call 1 分类 + Call 2 staging resolution 两段式）。
 
 | Phase | 范围 | 工程量 | 阻塞前置 |
 |---|---|---|---|

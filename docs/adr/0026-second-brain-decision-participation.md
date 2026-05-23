@@ -161,6 +161,8 @@ LLM 到达决策点 → 大脑主动提供情境化建议 →
 
 **输出是一段自然语言简报**，不是 JSON schema。主 LLM 拿到后像读一段"专家意见"一样融进自己的推理。
 
+**⚠️ 什么不该出现在简报里**：provisional staging 条目（attribution_pending=true）**不准**进决策简报。provisional 是分类器的未确认猜测——不是用户事实。如果一条 provisional 说"用户可能偏好 X"而决策简报把它当 confirmed preference 推荐给 LLM，LLM 采纳后用户说"我没说过这个"——这就是大脑自己编了条偏好然后自己信了。provisional 的唯一用途是等 0025 的 staging resolution 流程确认或废弃——**在确认前不参与任何"用"侧的决策**。
+
 **为什么直接给自然语言而不是 JSON**：JSON 迫使 LLM 把判断拆成字段，容易丢失跨条目的综合判断。"用户偏好 pnpm"和"用户试 yarn 后改回来"这两条放一起才能看出"用户不是一般偏好 pnpm，是试过 yarn 不好用之后确认的偏好"。JSON schema 很难表达这种跨条目的综合判断。
 
 **跟当前 memory_search 的关系**：不是取代。当前 LLM 自己调 memory_search 的场景仍然保留——很多场景不需要决策简报（比如"这个函数的 API 是什么"），LLM 自己搜就够。决策简报只在**检测到决策点时**触发，作为附加的参谋输入。
@@ -216,6 +218,8 @@ outcome 数据影响的是**推荐的力度**——活跃条目 → 强推荐；
 
 **具体机制**：outcome-ledger（ADR 0025 §4.2.4）里存了每条 outcome 的 timestamp + used 字段。§3.2 调之前扫一次 ledger，算出每条相关条目的近 30 天活跃度和 outcome 倾向，写进决策简报 prompt 的 context 里。这个计算是 Infra 行为（读文件、统计数字），不需要 LLM 推理。
 
+**⚠️ 防止回声室**：大脑推荐 A → LLM 采纳 → outcome 记 DECISIVE → 下次大脑更强推 A → LLM 更倾向采纳 A → 循环。这个正反馈会让大脑把自己的推荐当成"用户确认过的偏好"，而实际上用户只是没反对。断路器：同一条目连续 5 次被 DECISIVE 使用且期间用户没有产生任何主动纠错信号（说明用户没反对但也没主动确认）→ aggregator（0025 §4.3）自动把这条标记为"pending reconfirmation"——下次决策简报里不再推荐为"明确偏好"，降级为"之前你经常用，但最近没有明确确认过"。这个降级不是归档、不是删除——只是让大脑的推荐语气从"你应该"变成"你之前好像"。
+
 ---
 
 ## 4. 怎么落地——两条互补路径
@@ -236,16 +240,16 @@ agent_turn hook @ before_agent_turn
   └─ is_decision_point == false → 跳过
 ```
 
-**注入方式**：决策简报放在本轮 system prompt 末尾，格式：
+**注入方式**：决策简报放在本轮 system prompt 末尾。
 
-```
-🧠 决策参考（基于你的历史偏好和使用记录）：
-{decision_brief}
-```
+**⚠️ 延迟不是"可接受"——得说清楚代价**：R10 审计指出，在 `agent_turn` 里加决策点检测 + 简报生成会让 LLM 首 token 时间（TTFT）从 1-2s 涨到 3-5s。对用户来说，"LLM 开始回复"慢了一倍多。这不是小代价——在 20% 的轮次上三倍延迟，用户会感觉"这个 AI 怎么卡了一下"。
 
-🧠 emoji 是给 LLM 看的标记（不是给用户的），帮助 LLM 区分"这是大脑给的背景"和"这是用户说的指令"。
+**怎么缓解**：
+1. P0 阶段只用路径 B（LLM 主动拉 `memory_decide`）——延迟完全由 LLM 自己控制，不额外增加每轮开销
+2. P1 自动简报先只在低频高价值场景触发——不是每个疑似决策点都跑，而是只在"用户显式问选 A 还是 B"或"LLM 上轮给了选项等用户选"这两种明确场景才触发
+3. 如果用户反馈"卡"——退回到纯路径 B，不跑自动注入
 
-**延迟**：决策点检测 + 召回 + 简报生成 = 一次 LLM 调用（检测和简报可以合并成一个 prompt，减少 roundtrip）。加上 memory_search 的延迟，总延迟 ≤ 2 次 LLM 调用。在用户等待 LLM 回复的间隙里（agent_turn 过程中），这个延迟可以接受。
+这不是"延迟可接受"——这是"延迟有代价，我们有限范围内承担"。
 
 ### 4.2 路径 B：即时深潜（辅助路径，LLM 主动调）
 
@@ -322,6 +326,14 @@ extensions/sediment/
 | `extensions/sediment/writer.ts` | outcome-ledger 读接口（供 §3.4 统计活跃度） |
 
 ### 6.3 Phase 安排
+
+**⚠️ R10 审计发现的 bootstrap 死锁**：0026 的价值依赖 0025 产出的语料（durable entry + outcome 数据），但 0025 的语料依赖 `autoLlmWriteEnabled: true`，而 `autoLlmWriteEnabled` 改 true 又要等 0025 P1-P5 ship 并验证完。这是"先有鸡还是先有蛋"。
+
+**怎么解**：0026 分两层 ship。
+
+**第 1 层（P0a，立即可 ship）**：`memory_decide` 工具的骨架——注册工具、写好 50 行精简版简报 prompt（只包装 `memory_search` 结果，不含 outcome 数据、不含矛盾检测、不含 provisional staging）。这层对 0025 零依赖。用户在开 `autoLlmWriteEnabled: true` 之前，`memory_decide` 搜到的是已有的手动 fence 记忆 + legacy `.pensieve/` 数据——不是空的，但质量参差。这已经比"LLM 自己调 memory_search 然后自己理解"强了。
+
+**第 2 层（P1，等 0025 有数据后）**：完整版决策简报（含 outcome 摘要 + 矛盾检测）。在 0025 P1 ship 且积累 1-2 个月的 outcome 数据后启动。
 
 | Phase | 范围 | 依赖 | 工程量 |
 |---|---|---|---|
