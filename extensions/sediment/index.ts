@@ -109,6 +109,12 @@ const sessionAgentCycle = new Map<string, { started: number; ended: number; drai
 const _G = globalThis as typeof globalThis & {
   __sediment_latestSetStatus?: ((msg?: string) => void) | undefined;
   __sediment_inflightCount?: number;
+  /** sessionId of the CURRENT foreground session (updated by
+   *  session_start / agent_start). Used by maybeSetIdleIfNoInflight
+   *  to distinguish same-session bg completion (keep completed/failed
+   *  indicator visible) from cross-session /new bg completion (flip
+   *  the new session's stuck 'running (prev session)' back to idle). */
+  __sediment_currentSessionId?: string | undefined;
 };
 if (_G.__sediment_inflightCount === undefined) _G.__sediment_inflightCount = 0;
 
@@ -208,15 +214,36 @@ function applySedimentStatus(
 }
 
 /**
- * Transition footer to idle IFF no bg work is inflight across any
- * session. Safe to call from fire-and-forget finally blocks.
+ * Transition footer to idle IFF no bg work is inflight AND the bg
+ * work that just settled belongs to a DIFFERENT session than the
+ * current foreground. Safe to call from fire-and-forget finally blocks.
+ *
+ * Why the session check: the original intent (per docstring of the
+ * call site in the bg auto-write finally) was to recover the footer
+ * after `/new` — the new session's session_start shows 'running (prev
+ * session)' while the old session's bg work finishes, and once that
+ * settles we want the new session's footer to go idle. But blindly
+ * flipping to idle on every bg completion also nukes the in-session
+ * completed/failed indicator (e.g. '✅ sediment: 3 created') the user
+ * wants to see persist until the next agent_start.
+ *
+ * Resolution: only flip to idle when `bgSessionId !== currentSessionId`
+ * (i.e. cross-session /new case). Same-session bg completion leaves
+ * the just-set ✅/⚠️ display in place — agent_start on the next user
+ * prompt resets it to idle.
  */
-function maybeSetIdleIfNoInflight(): void {
-  if ((_G.__sediment_inflightCount ?? 0) <= 0 && _G.__sediment_latestSetStatus) {
-    try {
-      _G.__sediment_latestSetStatus(renderSedimentStatus("idle"));
-    } catch { /* best-effort */ }
-  }
+function maybeSetIdleIfNoInflight(bgSessionId: string | undefined): void {
+  if ((_G.__sediment_inflightCount ?? 0) > 0) return;
+  if (!_G.__sediment_latestSetStatus) return;
+  // Same-session bg completion: keep the completed/failed indicator
+  // visible. agent_start on the next prompt will reset to idle.
+  // (Undefined bg/foreground sessionId falls through to the cross-
+  // session path — better to risk one extra idle flip than to leave a
+  // stuck 'prev session' display when sessionId tracking is missing.)
+  if (bgSessionId && _G.__sediment_currentSessionId === bgSessionId) return;
+  try {
+    _G.__sediment_latestSetStatus(renderSedimentStatus("idle"));
+  } catch { /* best-effort */ }
 }
 
 /**
@@ -560,8 +587,11 @@ export default function (pi: ExtensionAPI) {
         : undefined;
       // Always refresh globalThis.__sediment_latestSetStatus so bg work
       // from a PREVIOUS session (whose module was torn down by pi on
-      // /new) can still reach the current footer.
+      // /new) can still reach the current footer. Same for
+      // currentSessionId — used by maybeSetIdleIfNoInflight to tell
+      // same-session vs cross-session bg completion apart.
       _G.__sediment_latestSetStatus = setStatus;
+      _G.__sediment_currentSessionId = sessionId;
 
       if ((_G.__sediment_inflightCount ?? 0) > 0) {
         // Inflight bg work from previous session — show running, NOT idle.
@@ -608,6 +638,7 @@ export default function (pi: ExtensionAPI) {
           }
         : undefined;
       _G.__sediment_latestSetStatus = setStatus;
+      _G.__sediment_currentSessionId = sessionId;
       // If bg work from a previous session is still inflight, keep
       // showing running instead of resetting to idle.
       if ((_G.__sediment_inflightCount ?? 0) > 0) {
@@ -1113,7 +1144,10 @@ export default function (pi: ExtensionAPI) {
                         _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
                       }
                       scheduleDrainIfBacklog(); // recurse
-                      maybeSetIdleIfNoInflight();
+                      // Pass sessionId so same-session drain completion
+                      // leaves the ✅/⚠️ indicator visible (only cross-
+                      // session /new flips it back to idle).
+                      maybeSetIdleIfNoInflight(sessionId);
                     }
                   })();
                   _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
@@ -1417,10 +1451,14 @@ export default function (pi: ExtensionAPI) {
             scheduleDrainIfBacklog();
 
             // When ALL inflight work (including drain cycles) settles,
-            // switch the footer back to idle. Needed after /new because
-            // the new session's session_start showed "running (prev
-            // session)" — without this, the footer would stay stuck.
-            maybeSetIdleIfNoInflight();
+            // switch the footer back to idle ONLY if this bg work
+            // belongs to a different session than the current foreground
+            // (i.e. /new happened mid-flight). Same-session completion
+            // leaves the ✅/⚠️ indicator visible — agent_start on the
+            // next user prompt resets it. Passing sessionId lets
+            // maybeSetIdleIfNoInflight do that disambiguation; without
+            // it the helper would nuke the just-set completed display.
+            maybeSetIdleIfNoInflight(sessionId);
           }
         })();
         _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
