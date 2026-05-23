@@ -20,6 +20,7 @@ import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./ty
 import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
 import { llmSearchEntries } from "./llm-search";
+import { runMemoryDecide } from "./decide";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";
 import { formatMigrationGoSummary, runMigrationGo } from "./migrate-go";
@@ -459,6 +460,105 @@ export default function (pi: ExtensionAPI) {
           params.options?.hop ?? 1,
           params.options?.max ?? 20,
         ),
+      });
+    },
+  });
+
+  // memory_decide — second-brain decision participation (ADR 0026 P0a)
+  pi.registerTool({
+    name: "memory_decide",
+    label: "Decide with Memory",
+    description:
+      "Ask the second brain to synthesize relevant memories into a decision brief. " +
+      "Unlike memory_search (which returns raw entries), memory_decide reads the user's " +
+      "documented preferences and past experiences, then produces a concise recommendation " +
+      "tailored to the current decision context. " +
+      "Use when the LLM is at a decision point (tech choice, architecture, workflow, tool selection) " +
+      "and wants the brain's active interpretation, not just raw recall.",
+    promptSnippet: "memory_decide(context: string, options?: string[], constraints?: string)",
+    promptGuidelines: [
+      "Use memory_decide when you face a decision and want the brain's synthesis — not just raw entries.",
+      "context describes what you are deciding (e.g. 'choosing a package manager for a new React project').",
+      "options lists the choices on the table (e.g. ['pnpm', 'yarn', 'npm']). Omit if the decision is open-ended.",
+      "constraints describe limitations (e.g. 'must work with monorepo, team uses yarn'). Omit if none.",
+      "memory_decide internally searches memories AND synthesizes them — it replaces memory_search + manual synthesis.",
+      "The brief is ≤500 tokens. Read it as expert advice, not as a command.",
+    ],
+    parameters: Type.Object({
+      context: Type.String({ description: "What decision you are making. Be specific: 'choosing between pnpm and yarn for a new Next.js project' not 'package manager'." }),
+      options: Type.Optional(Type.Array(Type.String(), { description: "Choices on the table, e.g. ['pnpm', 'yarn']. Omit for open-ended decisions." })),
+      constraints: Type.Optional(Type.String({ description: "Constraints or requirements, e.g. 'must work with monorepo, team standardized on yarn'." })),
+    }),
+    prepareArguments(args: Record<string, unknown>) {
+      return {
+        context: String(args.context ?? ""),
+        options: Array.isArray(args.options) ? args.options.map(String) : [],
+        constraints: typeof args.constraints === "string" ? args.constraints : "",
+      };
+    },
+    async execute(
+      _id: string,
+      params: { context: string; options: string[]; constraints: string },
+      signal: AbortSignal,
+      _onUpdate: unknown,
+      ctx: { cwd?: string; modelRegistry?: unknown },
+    ) {
+      const settings = resolveSettings();
+      const entries = await loadEntries(ctx.cwd, settings, signal);
+
+      // Step 1: search for relevant memories
+      let searchCards: Array<{ slug: unknown }>;
+      try {
+        const result = await llmSearchEntries(
+          entries,
+          { query: params.context, filters: { limit: 8, status: ["active"] } },
+          settings,
+          ctx.modelRegistry,
+          signal,
+          ctx.cwd,
+        );
+        searchCards = (result as any)?.ok === false ? [] : (result as Array<{ slug: unknown }> ?? []);
+      } catch {
+        searchCards = [];
+      }
+
+      // Step 2: load full entries from slugs
+      const fullEntries = searchCards
+        .map((card) => findEntry(entries, String((card as any).slug ?? "")).entry)
+        .filter((entry): entry is NonNullable<typeof entry> => !!entry);
+
+      const searchResults = fullEntries.map((entry) => ({
+        slug: entry.slug,
+        title: entry.title,
+        kind: entry.kind,
+        compiledTruth: entry.compiledTruth,
+      }));
+
+      // Step 3: synthesize decision brief
+      const result = await runMemoryDecide({
+        context: params.context,
+        options: params.options,
+        constraints: params.constraints,
+        searchResults,
+        settings,
+        modelRegistry: ctx.modelRegistry,
+        signal,
+      });
+
+      if (!result.ok) {
+        return wrapToolResult({
+          ok: false,
+          error: result.error,
+          entryCount: result.entryCount,
+          hint: "memory_decide LLM call failed. Fall back to memory_search + manual synthesis.",
+        });
+      }
+
+      return wrapToolResult({
+        ok: true,
+        brief: result.brief,
+        entryCount: result.entryCount,
+        hint: "This is a synthesized decision brief based on the user's documented history. The LLM should treat it as expert advice, not as a binding command.",
       });
     },
   });
