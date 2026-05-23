@@ -3,23 +3,26 @@
  * Smoke test: persistent-input-history defends against pi SDK
  * internal API drift.
  *
- * The extension depends on three load-bearing assumptions that are
+ * The extension depends on two load-bearing assumptions that are
  * NOT in any pi SDK contract (see `extensions/persistent-input-history/
- * index.ts` header comment). This smoke locks the defensive behavior
- * for the two that are detectable at runtime:
+ * index.ts` header comment). v4 eliminated the third (timing) assumption
+ * by moving disk writes to the `input` event handler. This smoke locks
+ * the defensive behavior for the two that are detectable at runtime:
  *
  *   (1) CustomEditor.prototype.addToHistory is a function.
  *       → fail-fast: extension does NOT install setEditorComponent;
  *         a single error notify fires.
  *   (2) Editor.history is a plain JS array on `this`.
- *       → degrade gracefully: preload + replay matcher skipped;
- *         a single warning notify fires; new prompts still persist.
+ *       → degrade gracefully: preload skipped;
+ *         a single warning notify fires; new prompts still persist
+ *         via the `input` event handler.
  *
  * Also covers:
  *   - PI_VERSION_OK semver gate (0.75.x – 0.99.x in-range; 1.x.x and
  *     pre-0.75 out-of-range; "unknown" stays quiet).
  *   - FORCE_DISABLED env escape hatch parses 1/true/yes/on (case-insensitive).
- *   - happy path: replay absorption + no double-feed on next restart.
+ *   - happy path (v4): MRU dedup prevents in-memory duplication during
+ *     renderInitialMessages replay; disk writes ONLY via input event.
  *
  * The "fake pi-tui" mock here is deliberately minimal: just a class
  * shape that mirrors what PersistentHistoryEditor reaches into. If
@@ -604,8 +607,9 @@ await asyncCheck("session_start E2E: history field missing → exactly 1 warning
   }
 });
 
-// 6. Happy path: replay matcher absorbs populateHistory, no double-feed.
-await asyncCheck("happy path: replay matcher absorbs populateHistory; new submit persists exactly once", async () => {
+// 6. Happy path (v4): MRU dedup absorbs populateHistory in-memory;
+//    disk writes ONLY via input event / appendDiskHistory.
+await asyncCheck("happy path (v4): MRU dedup absorbs replay; addToHistory does NOT write to disk", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pih-happy-cwd-"));
   try {
     const { mod } = stageExtension({
@@ -616,7 +620,7 @@ await asyncCheck("happy path: replay matcher absorbs populateHistory; new submit
     });
 
     // Seed disk history as if a previous session wrote 3 entries.
-    const { encodeCwd, historyFileFor, appendDiskHistory } = mod.__TEST;
+    const { encodeCwd, historyFileFor, appendDiskHistory, getInternalHistory } = mod.__TEST;
     const file = historyFileFor(cwd);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     appendDiskHistory(file, "msg-1");
@@ -624,32 +628,51 @@ await asyncCheck("happy path: replay matcher absorbs populateHistory; new submit
     appendDiskHistory(file, "msg-3");
     const sizeBefore = fs.statSync(file).size;
 
-    // Construct editor (which preloads + arms expectedReplay).
+    // Construct editor (which preloads from disk).
     const ed = new mod.__TEST.PersistentHistoryEditor({}, {}, {}, cwd);
 
-    // Simulate pi's populateHistory pass: it would replay user messages
-    // in chronological order via addToHistory.
-    ed.addToHistory("msg-1");
-    ed.addToHistory("msg-2");
-    ed.addToHistory("msg-3");
+    // Verify preload seeded 3 entries (newest first).
+    const hist = getInternalHistory(ed);
+    if (!hist) throw new Error("getInternalHistory returned null for happy path");
+    if (hist.length !== 3) throw new Error(`expected 3 preloaded entries, got ${hist.length}`);
+    if (hist[0] !== "msg-3" || hist[1] !== "msg-2" || hist[2] !== "msg-1") {
+      throw new Error(`expected [msg-3, msg-2, msg-1], got ${JSON.stringify(hist)}`);
+    }
 
-    // None of those should have re-appended to disk.
+    // Simulate pi's populateHistory pass: replay user messages in
+    // chronological order via addToHistory. v4 MRU dedup should move
+    // each entry to front without creating duplicates.
+    ed.addToHistory("msg-1"); // oldest → moves to front
+    if (hist.length !== 3) throw new Error(`MRU should not grow array, got ${hist.length}`);
+    if (hist[0] !== "msg-1") throw new Error(`MRU: msg-1 should be at front, got ${hist[0]}`);
+
+    ed.addToHistory("msg-2");
+    if (hist.length !== 3) throw new Error(`MRU should not grow array, got ${hist.length}`);
+    if (hist[0] !== "msg-2") throw new Error(`MRU: msg-2 should be at front, got ${hist[0]}`);
+
+    ed.addToHistory("msg-3"); // newest → moves to front
+    if (hist.length !== 3) throw new Error(`MRU should not grow array, got ${hist.length}`);
+    if (hist[0] !== "msg-3") throw new Error(`MRU: msg-3 should be at front, got ${hist[0]}`);
+
+    // After full replay, order should be same as preload: [msg-3, msg-2, msg-1]
+    if (hist[0] !== "msg-3" || hist[1] !== "msg-2" || hist[2] !== "msg-1") {
+      throw new Error(`post-replay order mismatch: ${JSON.stringify(hist)}`);
+    }
+
+    // P0 ASSERTION: addToHistory MUST NOT write to disk (v4 contract).
     const sizeAfterReplay = fs.statSync(file).size;
     if (sizeAfterReplay !== sizeBefore) {
       throw new Error(
-        `replay absorption failed: disk grew ${sizeBefore} → ${sizeAfterReplay}; ` +
-        `populateHistory pass should not re-persist already-on-disk entries`,
+        `v4 contract violation: addToHistory wrote to disk! ` +
+        `Disk grew ${sizeBefore} → ${sizeAfterReplay}`,
       );
     }
 
-    // Let setImmediate-cleanup of expectedReplay run.
-    await new Promise((r) => setImmediate(r));
-
-    // New user submit → must persist exactly once.
-    ed.addToHistory("msg-4");
+    // Disk write happens via appendDiskHistory (simulating `input` event handler).
+    appendDiskHistory(file, "msg-4");
     const sizeAfterNew = fs.statSync(file).size;
-    if (sizeAfterNew <= sizeAfterReplay) {
-      throw new Error(`new submit should grow disk, got ${sizeAfterReplay} → ${sizeAfterNew}`);
+    if (sizeAfterNew <= sizeBefore) {
+      throw new Error(`appendDiskHistory should grow disk, got ${sizeBefore} → ${sizeAfterNew}`);
     }
 
     // Reading back, only msg-4 should be NEW vs the original 3.

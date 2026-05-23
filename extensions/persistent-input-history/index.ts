@@ -1,20 +1,19 @@
 /**
- * persistent-input-history extension for pi-astack.
+ * persistent-input-history extension for pi-astack (v4 — event-driven).
  *
  * Persists the editor's ↑/↓ prompt history across pi restarts, per-cwd.
- * Pi's default behavior is in-memory only (capped 100) and on startup
- * rebuilds history from `buildSessionContext()`, which drops everything
- * before the last compaction's `firstKeptEntryId` — so cold-starts
- * begin empty and long sessions can only walk back to the latest
- * compaction window. This extension fixes both by:
  *
- *   1. installing a `CustomEditor` subclass on every `session_start`
- *      (covers startup, reload, new, resume, fork)
- *   2. preloading the in-memory buffer from disk on construction
- *   3. silently absorbing pi's `renderInitialMessages` "populateHistory"
- *      pass via an `expectedReplay` matcher, so the current session's
- *      messages are NOT re-appended to disk on every restart
- *   4. appending every new submitted prompt to a per-cwd JSONL file
+ * Architecture (v4):
+ *   - Disk writes happen exclusively in the `input` event handler — never
+ *     from addToHistory, never from renderInitialMessages replay. This
+ *     eliminates the fragile expectedReplay matcher and its setImmediate
+ *     timing dependency that caused the P0 double-feed bug.
+ *   - addToHistory() override performs MRU deduplication: if the text
+ *     already exists anywhere in the history, it is moved to the front
+ *     rather than duplicated. This naturally absorbs renderInitialMessages
+ *     replay without any special matcher logic.
+ *   - preloadFromDisk() seeds the base Editor's history array from disk
+ *     at construction time (consecutive-dedup, reverse, cap).
  *
  * Configuration lives in `~/.pi/agent/pi-astack-settings.json`:
  *
@@ -26,10 +25,6 @@
  *     "maxPreloadReadBytes": 5242880
  *   }
  *
- * Default `enabled: true` — unlike compaction-tuner this is a pure
- * data-persistence extension with no LLM-loop side effects, so it
- * starts working the moment pi-astack is installed.
- *
  * Runtime data:
  *   - per-cwd JSONL: `<historyDir>/<sha1(cwd)[0..8]>--<slug>.jsonl`
  *   - privacy notice marker: `<historyDir>/.notified`
@@ -39,10 +34,6 @@
  * sensitive you do not want persisted should not be submitted as a
  * prompt. Use `/history-compact` to dedupe or delete the directory
  * to purge.
- *
- * Composition: calls `setEditorComponent` unconditionally. If you
- * install another custom-editor extension (e.g. modal-editor), whichever
- * loads LAST wins — they cannot coexist with the current wiring.
  */
 
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -74,7 +65,7 @@ import {
 // ──────────────────────────────────────────────────────────────────────
 // pi SDK capability + version probe (defense against internal API drift)
 //
-// Three load-bearing assumptions this extension makes that are NOT in
+// Two load-bearing assumptions this extension makes that are NOT in
 // any pi SDK contract:
 //
 //   (1) `CustomEditor extends Editor` (pi-tui), and `Editor.prototype
@@ -83,24 +74,18 @@ import {
 //   (2) `Editor.history` is a plain JS instance array (TS-private but
 //       runtime-readable via cast).  ← Could become `#history` /
 //       WeakMap / renamed at any release.  Checked at FIRST ctor.
-//   (3) `InteractiveMode.renderInitialMessages()` synchronously calls
-//       `addToHistory(text)` once per visible user message during the
-//       `populateHistory` pass, and that pass finishes before the next
-//       `setImmediate` tick.  ← Pure internal timing; no detection.
+//
+// v4 eliminates assumption (3) (the renderInitialMessages synchronous
+// timing contract) by moving disk writes to the `input` event handler.
 //
 // If (1) breaks → integer regression: editor factory throw → user has
 // no input box.  We therefore probe (1) at module load and refuse to
 // install `setEditorComponent` if it's gone, surfacing one `error`
 // notify so the user knows.
 //
-// If (2) breaks → preload + replay matcher silently no-op; the user
-// would still get persistence of new prompts but lose ↑/↓ cross-restart
-// recall.  Surfaced as one `warning` notify per session.
-//
-// (3) cannot be probed cheaply.  If it breaks the disk file grows by
-// one session's worth of prompts on every restart; cleaned up by
-// `/history-compact`.  Future work: add a runtime monitor that emits
-// `warning` when expectedReplay had entries but cursor never advanced.
+// If (2) breaks → preload silently no-op; the user would still get
+// persistence of new prompts but lose ↑/↓ cross-restart recall.
+// Surfaced as one `warning` notify per session.
 // ──────────────────────────────────────────────────────────────────────
 
 interface Capability {
@@ -168,9 +153,6 @@ const PI_VERSION_OK: boolean = (() => {
 // Resolved settings (loaded once at module load)
 // ──────────────────────────────────────────────────────────────────────
 
-// Resolve once at module load. pi-astack convention: settings changes
-// require a /reload or pi restart, matching how compaction-tuner /
-// memory / etc. work.
 const SETTINGS: PersistentInputHistorySettings = (() => {
   try {
     return resolvePersistentInputHistorySettings();
@@ -192,10 +174,6 @@ const MAX_PRELOAD_READ_BYTES = SETTINGS.maxPreloadReadBytes;
 /**
  * Stable, collision-free filename for a cwd: 8 hex chars of sha1(cwd)
  * for uniqueness + a human-readable slug for grep-ability.
- *
- * An earlier encoding (`--home-worker-foo--`) collided on cases like
- * `/foo-bar` vs `/foo/bar`. Anything created under that scheme is
- * migrated lazily by `tryMigrateLegacyHistory()`.
  */
 function encodeCwd(cwd: string): string {
   const hash = createHash("sha1").update(cwd).digest("hex").slice(0, 8);
@@ -224,11 +202,6 @@ function tryMigrateLegacyHistory(newFile: string, cwd: string): void {
   try {
     mkdirSync(dirname(newFile), { recursive: true });
     renameSync(legacy, newFile);
-    // renameSync preserves the legacy file's permission bits. Early
-    // versions wrote with the inherited umask (typically 0644), which
-    // violates the chmod-600 promise documented in the README/schema.
-    // Tighten on migration so prompts (incl. expanded paste content)
-    // aren't world/group-readable post-upgrade.
     tightenPermissions(newFile);
   } catch {
     // best-effort
@@ -247,8 +220,7 @@ interface HistoryRecord {
  * (declared private only at the TS level), so reading it via cast
  * works at runtime. If upstream ever switches to a `#history` private
  * field, a renamed field, or a WeakMap, this returns null and we
- * degrade gracefully (no preload, no replay matching) instead of
- * crashing the factory.
+ * degrade gracefully (no preload) instead of crashing the factory.
  */
 function getInternalHistory(editor: unknown): string[] | null {
   const value = (editor as { history?: unknown }).history;
@@ -386,16 +358,14 @@ function tightenPermissions(file: string): void {
 // ──────────────────────────────────────────────────────────────────────
 
 /**
- * Override addToHistory() so every submitted prompt is persisted, and
- * preload the in-memory history from disk on construction.
+ * Override addToHistory() with MRU dedup and higher cap. Disk writes
+ * happen in the `input` event handler, not here.
  *
- * We deliberately do NOT delegate to super.addToHistory(). The base
- * impl caps the buffer at 100 and would silently drop our preloaded
- * entries as new submissions arrive. Re-implementing it here lets us:
- *   - keep "skip consecutive duplicate" semantics
- *   - raise the cap to MAX_ENTRIES
- *   - persist after the in-memory update
- *   - silently absorb the populateHistory replay pass
+ * MRU dedup: if the text already exists anywhere in the history, it is
+ * removed from its old position and re-inserted at the front. This
+ * naturally absorbs pi's renderInitialMessages populateHistory replay
+ * without any special-case matcher — replayed entries are simply moved
+ * to the front rather than duplicated.
  */
 class PersistentHistoryEditor extends CustomEditor {
   private readonly historyFile: string;
@@ -403,43 +373,12 @@ class PersistentHistoryEditor extends CustomEditor {
   /**
    * Optional notifier injected by the session_start wiring. Used
    * exactly ONCE per editor instance, only when the TS-private
-   * `Editor.history` field probe (assumption 2) returns null. This
-   * preserves the "persistence still partially works" UX while
-   * making the degradation visible to the user — pi-tui upgrades
-   * have shipped silently otherwise.
+   * `Editor.history` field probe (assumption 2) returns null.
    */
   public degradedNotify?: (msg: string) => void;
 
-  /**
-   * Snapshot of the disk history (chronological, dedup'd) at
-   * construction time. After session_start, pi's renderInitialMessages
-   * will fire addToHistory() once per visible user message in
-   * chronological order. Those messages are typically the tail of our
-   * disk history (because last session persisted them). We use this
-   * array as a matcher: any incoming text that lines up against the
-   * next expected replay entry is treated as a replay (silently
-   * absorbed, no unshift, no disk append). The first mismatch ends
-   * replay matching for the lifetime of this editor.
-   *
-   * Cleared via setImmediate (NOT process.nextTick) so the matcher
-   * survives renderInitialMessages — see invalidation handler below
-   * for the timing rationale.
-   */
-  private expectedReplay: string[] = [];
-  private replayCursor = 0;
-
-  /** Tracks whether we've already given up on persisting (e.g. EROFS). */
-  private persistDisabled = false;
-
   /** True if pi-tui's internal `history` field is gone (upstream change). */
-  private readonly internalUnavailable: boolean;
-
-  /**
-   * Optional listener called after a successful real append (not
-   * during replay absorption). Extension wires this to setStatus so
-   * the footer counter stays in sync without polling.
-   */
-  public onPersist?: (count: number) => void;
+  public readonly internalUnavailable: boolean;
 
   constructor(
     tui: TUI,
@@ -454,11 +393,9 @@ class PersistentHistoryEditor extends CustomEditor {
     this.internalUnavailable = getInternalHistory(this) === null;
     this.preloadFromDisk();
 
-    // One-shot degraded notice. Deferred to next tick so the
-    // notifier can be assigned by the factory between `new` and the
-    // event-loop returning. queueMicrotask runs BEFORE setImmediate,
-    // so the warning lands before renderInitialMessages absorbs the
-    // replay pass — keeps log ordering legible.
+    // One-shot degraded notice. Deferred to microtask so the
+    // notifier can be assigned by the factory between `new` and
+    // the event-loop returning.
     if (this.internalUnavailable) {
       queueMicrotask(() => {
         try {
@@ -473,24 +410,10 @@ class PersistentHistoryEditor extends CustomEditor {
         }
       });
     }
-
-    // renderInitialMessages runs synchronously after init() resumes
-    // from `await rebindCurrentSession()`. We need expectedReplay to
-    // stay populated through that entire pass and only invalidate
-    // afterwards. setImmediate fires in the event-loop check phase,
-    // which is strictly later than microtasks, so by the time it runs
-    // renderInitialMessages is done. process.nextTick would be too
-    // early — nextTick drains BEFORE microtasks resume init() from
-    // the await, i.e. before renderInitialMessages runs.
-    setImmediate(() => {
-      this.expectedReplay = [];
-      this.replayCursor = 0;
-    });
   }
 
   /**
-   * Seed the base Editor's `history` array from disk (newest at [0]),
-   * and build the expectedReplay matcher.
+   * Seed the base Editor's `history` array from disk (newest at [0]).
    */
   private preloadFromDisk(): void {
     if (this.internalUnavailable) return;
@@ -512,98 +435,54 @@ class PersistentHistoryEditor extends CustomEditor {
     if (!internal) return;
     internal.length = 0;
     for (const t of seeded) internal.push(t);
-
-    // expectedReplay is chronological (oldest first), bounded so that
-    // a pathologically large file doesn't make linear matching slow.
-    // 1000 entries comfortably covers any single session's worth of
-    // user messages even with no compaction.
-    this.expectedReplay = dedup.slice(-1000);
-    this.replayCursor = 0;
   }
 
+  /**
+   * MRU-dedup addToHistory. NO disk I/O — disk writes happen in
+   * the `input` event handler exclusively.
+   *
+   * Behavior:
+   *   - Drop empty / oversized entries.
+   *   - If already at the front → skip (consecutive duplicate).
+   *   - If found elsewhere → remove old occurrence, unshift to front.
+   *   - Otherwise → unshift to front, cap at MAX_ENTRIES.
+   *
+   * This naturally absorbs renderInitialMessages replay: preloaded
+   * entries are found at their old positions, moved to the front,
+   * and by the end of the replay pass the order is preserved without
+   * any duplication.
+   */
   override addToHistory(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    // Drop oversized entries entirely (expanded pastes, etc.). Not
-    // added to in-memory history either — scrolling ↑ to a 1 MB blob
-    // would be unusable. The user still sees the prompt in chat; only
-    // ↑/↓ replay is affected.
+    // Drop oversized entries entirely.
     if (Buffer.byteLength(trimmed, "utf8") > MAX_ENTRY_BYTES) return;
 
     const internal = getInternalHistory(this);
     if (!internal) {
-      // Internal field unreachable. Attempt to delegate to super so
-      // basic ↑/↓ within this session still works, then persist.
+      // Internal field unreachable. Delegate to super for basic
+      // session-local ↑/↓. Disk persistence is handled by the
+      // `input` event handler independently.
       try {
         super.addToHistory(trimmed);
       } catch {
-        // give up on in-memory, but still try to persist
+        // give up on in-memory
       }
-      this.maybePersist(trimmed);
       return;
     }
 
     // Skip consecutive duplicates (same as base behavior).
     if (internal.length > 0 && internal[0] === trimmed) return;
 
-    // Replay-matching phase: silently absorb messages that pi is
-    // replaying from buildSessionContext, since they are already in
-    // disk + in-memory thanks to preloadFromDisk.
-    //
-    // Subtlety: disk-side history collapses consecutive duplicates,
-    // but session-side keeps them (e.g. model-fallback's auto-injected
-    // "continue" can sit right next to a user's manual "continue";
-    // `/clear` + follow-up creates similar dup pairs). We must allow
-    // replay messages to RE-absorb against the just-absorbed entry
-    // without advancing the cursor — otherwise the session stream
-    // goes out of sync with expectedReplay and every entry after the
-    // first dup pair gets re-appended to disk.
-    if (this.expectedReplay.length > 0) {
-      // Allow re-absorbing the just-absorbed entry as a consecutive
-      // duplicate. Cursor doesn't move.
-      if (
-        this.replayCursor > 0 &&
-        this.expectedReplay[this.replayCursor - 1] === trimmed
-      ) {
-        return; // absorbed (session-side consecutive dup)
-      }
-      const idx = this.expectedReplay.indexOf(trimmed, this.replayCursor);
-      if (idx >= 0) {
-        this.replayCursor = idx + 1;
-        return; // absorbed; no unshift, no disk append
-      }
-      // First non-matching submission ends replay mode for good.
-      this.expectedReplay = [];
-      this.replayCursor = 0;
+    // MRU dedup: remove any existing occurrence before unshifting.
+    const existingIdx = internal.indexOf(trimmed);
+    if (existingIdx >= 0) {
+      internal.splice(existingIdx, 1);
     }
 
     internal.unshift(trimmed);
     if (internal.length > MAX_ENTRIES) internal.length = MAX_ENTRIES;
-
-    this.maybePersist(trimmed);
-  }
-
-  private maybePersist(text: string): void {
-    if (this.persistDisabled) return;
-    const created = !existsSync(this.historyFile);
-    const ok = appendDiskHistory(this.historyFile, text);
-    if (!ok) {
-      this.persistDisabled = true;
-      return;
-    }
-    if (created) tightenPermissions(this.historyFile);
-
-    // Notify listener so the footer status refreshes live.
-    if (this.onPersist) {
-      const internal = getInternalHistory(this);
-      const count = internal?.length ?? 0;
-      try {
-        this.onPersist(count);
-      } catch {
-        // listener errors must never break editing
-      }
-    }
   }
 }
 
@@ -615,12 +494,16 @@ export default function (pi: ExtensionAPI) {
   if (FORCE_DISABLED) return;
   if (!SETTINGS.enabled) return;
 
-  // Hard fail-fast: if pi-tui no longer exposes addToHistory, the
-  // extension's core contract is broken. Don't even attempt to install
-  // the editor — overriding a missing method would either no-op (and
-  // we'd silently lose persistence) or crash on `super.addToHistory`.
-  // Commands stay registered so the user can still run /history-status
-  // to inspect leftover data.
+  // Tracks per-cwd persistence health so we can stop trying after
+  // a fatal error (e.g. EROFS, disk full).
+  const persistDisabled = new Set<string>();
+
+  // Per-cwd editor reference, populated by session_start, consumed
+  // by the `input` handler for footer updates.
+  const editorByCwd = new Map<string, PersistentHistoryEditor>();
+
+  // ── Capability / version warning guards (one-shot per session) ──
+
   let capabilityWarned = false;
   const warnCapabilityOnce = (ctx: { ui: { notify: (m: string, t?: "info" | "warning" | "error") => void } }) => {
     if (capabilityWarned) return;
@@ -639,10 +522,6 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  // Version-drift warning: one-shot per session, non-blocking. Fires
-  // when we can PROVE the pi-coding-agent semver is outside the tested
-  // range; "unknown" (resolution failed) stays quiet to avoid false
-  // alarms on exotic load layouts.
   let versionWarned = false;
   const warnVersionOnce = (ctx: { ui: { notify: (m: string, t?: "info" | "warning" | "error") => void } }) => {
     if (versionWarned || PI_VERSION_OK) return;
@@ -659,23 +538,54 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
+  // ── input event: the ONLY place disk writes happen ─────────────
+
+  pi.on("input", (_event, ctx) => {
+    // Only persist real user input — not RPC or extension-generated messages.
+    if (_event.source !== "interactive") return;
+
+    const trimmed = _event.text.trim();
+    if (!trimmed) return;
+    if (Buffer.byteLength(trimmed, "utf8") > MAX_ENTRY_BYTES) return;
+
+    const cwd = ctx.cwd;
+    const file = historyFileFor(cwd);
+
+    if (persistDisabled.has(cwd)) return;
+
+    tryMigrateLegacyHistory(file, cwd);
+
+    const created = !existsSync(file);
+    const ok = appendDiskHistory(file, trimmed);
+    if (!ok) {
+      persistDisabled.add(cwd);
+      return;
+    }
+    if (created) tightenPermissions(file);
+
+    // Update footer with current in-memory count.
+    try {
+      const editor = editorByCwd.get(cwd);
+      const internal = editor ? getInternalHistory(editor) : null;
+      const count = internal?.length ?? readDiskHistory(file).length;
+      ctx.ui.setStatus("input-history", `↑${count}`);
+    } catch {
+      // non-fatal
+    }
+  });
+
+  // ── session_start: install the editor ─────────────────────────
+
   pi.on("session_start", (_event, ctx) => {
-    // Outermost guard: even if everything below explodes, the editor
-    // container must not be left torn down. Any throw → notify error
-    // and bail (pi's default editor stays installed).
     try {
       if (!CAPABILITY.hasAddToHistory) {
         warnCapabilityOnce(ctx);
-        return; // do NOT call setEditorComponent; commands still register below
+        return;
       }
       warnVersionOnce(ctx);
 
-      // Capture cwd at session_start so each session's editor binds
-      // to the right history file.
       const cwd = ctx.cwd;
 
-      // Ensure dir + migrate legacy file BEFORE the factory runs so
-      // PersistentHistoryEditor's preload sees the migrated file.
       try {
         ensureHistoryDir();
         tryMigrateLegacyHistory(historyFileFor(cwd), cwd);
@@ -683,29 +593,12 @@ export default function (pi: ExtensionAPI) {
         // non-fatal
       }
 
-      // Hold a reference to the editor we install so we can read its
-      // in-memory history length (post-preload + post-populateHistory)
-      // when updating the footer status.
       let editorRef: PersistentHistoryEditor | null = null;
 
-      // Wrap factory in try/catch: if construction throws, pi's
-      // setCustomEditorComponent has ALREADY cleared the editor
-      // container, so a throw here leaves the user with no input
-      // box. Fall back to the default CustomEditor instead.
       ctx.ui.setEditorComponent((tui, theme, kb) => {
         try {
           const ed = new PersistentHistoryEditor(tui, theme, kb, cwd);
-          // Live-refresh footer on every successful real append.
-          ed.onPersist = (count) => {
-            try {
-              ctx.ui.setStatus("input-history", `↑${count}`);
-            } catch {
-              // non-fatal
-            }
-          };
-          // Inject the degraded-notice channel: PersistentHistoryEditor
-          // calls this exactly once if its internal-field probe fails,
-          // making pi-tui drift visible without spamming on every keystroke.
+          // Wire degraded-notify channel.
           ed.degradedNotify = (msg: string) => {
             try {
               ctx.ui.notify(msg, "warning");
@@ -714,6 +607,7 @@ export default function (pi: ExtensionAPI) {
             }
           };
           editorRef = ed;
+          editorByCwd.set(cwd, ed);
           return ed;
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -726,11 +620,7 @@ export default function (pi: ExtensionAPI) {
         }
       });
 
-      // Surface install status in the footer. Done in setImmediate so
-      // the count reflects what's actually in the editor's in-memory
-      // history AFTER renderInitialMessages has run — not the disk
-      // state at the moment session_start fires (which may pre-date
-      // the first install's populateHistory pass and falsely show 0).
+      // Surface install status in footer (after renderInitialMessages).
       setImmediate(() => {
         try {
           const internal = editorRef ? getInternalHistory(editorRef) : null;
@@ -743,8 +633,7 @@ export default function (pi: ExtensionAPI) {
         }
       });
 
-      // One-time privacy notice. Touch a marker file so we only nag
-      // the user once per machine, not once per session.
+      // One-time privacy notice.
       try {
         if (!existsSync(PRIVACY_NOTICE_MARKER)) {
           ctx.ui.notify(
@@ -764,9 +653,6 @@ export default function (pi: ExtensionAPI) {
         // non-fatal
       }
     } catch (e) {
-      // Truly unexpected (e.g. ctx.ui.setEditorComponent threw). We
-      // can't recover but at least surface why the input editor is
-      // back to pi's default.
       const msg = e instanceof Error ? e.message : String(e);
       try {
         ctx.ui.notify(
@@ -776,7 +662,7 @@ export default function (pi: ExtensionAPI) {
           "error",
         );
       } catch {
-        // last-resort: nothing more to do
+        // last-resort
       }
     }
   });
@@ -803,8 +689,7 @@ export default function (pi: ExtensionAPI) {
 
       // Global MRU dedup: keep each unique text's last occurrence,
       // preserving overall chronological order of those last-seen
-      // positions. This handles the "double-feed every restart" bug
-      // that earlier versions of this extension had.
+      // positions.
       const lastIndex = new Map<string, number>();
       for (let i = 0; i < all.length; i++) lastIndex.set(all[i]!.text, i);
       const kept = new Set<number>(lastIndex.values());
@@ -813,8 +698,7 @@ export default function (pi: ExtensionAPI) {
         if (kept.has(i)) compacted.push(all[i]!);
       }
 
-      // Also drop oversize entries that may have slipped in before
-      // MAX_ENTRY_BYTES was enforced.
+      // Drop oversize entries.
       const filtered = compacted.filter(
         (rec) => Buffer.byteLength(rec.text, "utf8") <= MAX_ENTRY_BYTES,
       );
@@ -837,8 +721,6 @@ export default function (pi: ExtensionAPI) {
     description: "Show the persistent input history file path and entry count",
     handler: async (_args, ctx) => {
       const file = historyFileFor(ctx.cwd);
-      // Surface SDK capability + version status alongside file info
-      // so the user can self-diagnose drift without grepping logs.
       const sdkLine =
         `pi-coding-agent=${PI_VERSION} ` +
         `tested-range-ok=${PI_VERSION_OK} ` +
@@ -868,11 +750,6 @@ export default function (pi: ExtensionAPI) {
 
 // ──────────────────────────────────────────────────────────────────────
 // Test-only exports (kept stable for scripts/smoke-persistent-input-history.mjs)
-//
-// These are intentionally underscore-prefixed and exported so the smoke
-// can probe capability detection + version parsing without running the
-// full session_start path. Renaming any of these IS a smoke-breaking
-// change — keep the smoke and these exports in lock-step.
 // ──────────────────────────────────────────────────────────────────────
 
 export const __TEST = {
@@ -885,7 +762,5 @@ export const __TEST = {
   readDiskHistory,
   appendDiskHistory,
   PersistentHistoryEditor,
-  // Re-export the helper so the smoke can verify gracefully-degrades-to-null
-  // behavior without depending on pi-tui internals.
   getInternalHistory,
 };
