@@ -1,6 +1,12 @@
 # ADR 0025 — Sediment Meta-Curator 子系统：六条能力点的落地设计
 
-- **状态**：**R1（2026-05-22）**。本 ADR 是 [ADR 0024](0024-second-brain-from-natural-conversation.md) §5 六条能力点的具体机制设计。R0 骨架经 [R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) 三家 T0 在 Layer F v2 硬注入下评审（平均可行性 61%）后起 R1，落地三家共识 6 个 P0（§2.3 prompt 漏洞 / §1 接口面错位 / §8 phase 错排 / §10 self-check 不到位 / §2.5 staging 链断裂 / §3.3 outcome 三方案选定）+ 1 个 P1（context-packer 作为 0 号 capability）+ 三家关键盲点。**目前仅设计，未实施**。
+- **状态**：**R1.1（2026-05-22 用户约束修订后）**。本 ADR 是 [ADR 0024](0024-second-brain-from-natural-conversation.md) §5 六条能力点的具体机制设计。
+
+  **R1 路径**：R0 骨架经 [R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) 三家 T0 在 Layer F v2 硬注入下评审（平均可行性 61%）后起 R1，落地 6 个 P0 + 1 个 P1 + 多个盲点。
+
+  **R1.1 关键约束修订**（用户指示）：“已有代码是可以改造甚至重写的，一切以实现 ADR 0024 为目的，任何代价都可以接受。” 这条引发本 ADR 的架构约束重新分层：§0.5 明确 A（不可破的安全边界，仅 ADR 0003 / 0018 / 0019）vs B（可为 ADR 0024 vision 重设计的架构约束，含 ADR 0014 七区 / 0015 memory_search / 0016 7 op / 0020 sync / 0023 R4 unified classifier / 现有 sediment write-only loop）vs C（实施风格放松：渐进 vs 大重写不预设）。§1.3 / §1.5 / §8 相应修订。
+
+  **目前仅设计，未实施**。
 - **依赖**：
   - [ADR 0024](0024-second-brain-from-natural-conversation.md) — 总框架文档；本 ADR 不重复 §2 invariant、§3 AI-Native 原则、§4 边界，下面只在违反检测时引用
   - [ADR 0014](0014-abrain-as-personal-brain.md) — 七区 layout + invariant #7 互斥；本 ADR §1.4 明确 staging 不是第 8 区 / 9 区，是 sediment 内部 transient store
@@ -35,6 +41,58 @@
 - 演进历史 / 评审过程——那在 audit/ 目录
 
 如果发现本 ADR 在重复 ADR 0024 的内容，**删掉**（重复就是 drift 风险）。
+
+---
+
+## 0.5 设计约束分层（R1.1 用户指示后新增）
+
+用户明确表达：**“一切以实现 ADR 0024 为目的，任何代价都可以接受。”** 本 ADR 实施不被现有代码 / 现有下游 ADR 绑架。但“不被绑架”不等于“所有约束同等可破”——安全约束与架构约束本质不同，混淆会出安全事故。
+
+### A. 不可破的安全边界（不为 ADR 0024 vision 牺牲）
+
+下面三条是安全 / 正确性约束，本 ADR 任何能力点都**不能破**。违反 → 该能力点不能 ship。
+
+- **ADR 0003 主会话只读**：写工具不暴露给主会话 LLM 的 sandbox 约束。防止 prompt injection 让主会话写错 brain。**outcome self-report 的实现可调整**（§3.3 方案 B sidecar / 方案 C 隐藏 metadata 都允许），但**绝不**给主会话 LLM 加 brain 写权限。
+- **ADR 0018 sanitizer + storage gate**：safety / storage 边界。raw secret / token / credential / private key 不进 LLM / audit / memory。本 ADR 任何能力点都不绕过 sanitizer。audit.jsonl 写入 reasoning trace 走同款 sanitize。
+- **ADR 0019 vault 自管理**：vault 私钥 / 凭证边界。本 ADR 不接触 vault 内容，不绕过用户授权 `vault_release` 路径。
+
+### B. 可为 ADR 0024 vision 重设计的架构约束
+
+下面这些以前在 R1 §1.3 “不要改的”里被作为硬约束看待，**R1.1 后可以为 ADR 0024 vision 全部或部分重新设计 + 反向 patch 下游 ADR**。R2+ 详细设计里不预设“兼容现状”为默认，选择“重写”还是“兼容”走 R2+ multi-LLM audit 评估。
+
+| 架构约束 | 原作为硬约束的位置 | R1.1 后重设计的可能形态 |
+|---|---|---|
+| ADR 0014 七区 layout / core frontmatter schema | R1 §1.3 | 为 ADR 0024 vision 重组 zone（如 staging 升格为正式区 / 新 zone 表达 confidence-tiered preferences / 合并某些冷 zone）以及 core frontmatter 增字段 |
+| ADR 0015 memory_search corpus / ranking | R1 §1.3 / §2.5 走 staging-loader 避免改 corpus | 为 ADR 0024 vision 扩展 corpus 包含 staging / outcome-ledger / aggregator hypothesis；unified retrieval 取代 multi-path 走丝 |
+| ADR 0016 curator 7 op | R1 §1.3 说“不新增 op” | 新增 op（如 promote-to-staging / reactivate-from-archive / accept-provisional / defer）或重设 op 语义 |
+| ADR 0017 strict-binding | R1 §1.3 | 安全语义保留，具体注入路径 / scope 语义可重设计 |
+| ADR 0020 transport-only sync | R1 §2.5 加 originating_device | 区分 staging / durable / outcome-ledger 不同同步语义，甚至拆拆同步协议 |
+| ADR 0023 R4 unified zone+tier+op classifier | R1 §1.5 “主动纠错必须合入 unified 避免第 3 个 LLM 调用” | 重新设计让 unified classifier 拆为多个专精 LLM 调用（每个 scope 更小推理质量更高），token 成本上涨作为 R1.1 后可接受代价 |
+| 现有 sediment write-only loop（`index.ts` / `llm-extractor.ts` / `curator.ts` / `writer.ts`） | R1 §1.1 / §1.2 把这个结构当 baseline 挂接 hook | **整段重写**为 active reflection agent 原生结构、不拘于“agent_end hook 不动仅加另一套 hook”的渐进 framing |
+
+**反向 patch 下游 ADR**：以上任一重设计需与本 ADR R× ship 同 PR 交付对应 ADR 的 patch（同 R1.0 原反向 patch 机制）。patch 不同 PR 交付 → 本 ADR R× 不准 ship。
+
+### C. 实施风格的放松（渐进 vs 大重写）
+
+R1 §8 Phase 路线图按“渐进 P0/P0.5/P1/.../P5 各 ship 后 dogfood 数周”设计。**R1.1 后允许“大重写”作为 R2+ 可评估选项**：
+
+- **渐进路径**（R1 默认）：dogfood 数据驱动迭代、减少一次性重写风险、保留现有架构中已考验过的安全点。
+- **大重写路径**（R1.1 后合法选项）：一次性重写整个 sediment 路径作为 active reflection agent，跨多 PR 但形成一个 vision-coherent batch ship，不被“在旧 hook 上加新能力点”的 framing 绑架。
+
+两者**都不是默认**。R2+ 详细设计时多 LLM audit 显式 review 该能力点 / 该阶段适合哪条路径，出于【设计哈使万事 OK】避免默认选渐进为“安全选择”。
+
+### 适用范围说明
+
+本§0.5 适用于：
+
+- §1 接口面（§1.3 不要改的重新分类 / §1.5 unified classifier 整合从“必须合并”转为“可选择”）
+- §2-§7 六条能力点设计（R2+ 展开时选 PE-form / Infra / 架构重写三个维度独立考虑）
+- §8 phase 路线图（渐进 vs 大重写两路径不预设）
+- §10 self-check 表（架构重设计不跨 A 层安全约束是合法的，跨 A 层 → ✗ hard stop）
+
+不适用于：
+
+- ADR 0024 本身的 4 条 invariant + AI-Native 原则 + §6 接受代价 + §7 走偏信号——这些是 vision 本身，本§0.5 是为了实现 vision 而设，不能反过来动 vision。
 
 ### R0 → R7 演进路径（R8 audit 后伸长一轮）
 
@@ -114,18 +172,33 @@ extensions/sediment/prompts/
 └── archive-reactivation-reviewer-v1.md      ← §7
 ```
 
-### 1.3 不要改的
+### 1.3 不要改的（R1.1 重新分层：仅保留 A 层安全边界）
 
-- **七区 layout / core entry frontmatter schema** — ADR 0014 invariant #7，不动。core entry frontmatter 指 slug / kind / status / confidence / timeline / body 六字段。R1 新增字段（outcome_history）走 **独立 sidecar ledger** 不进 entry frontmatter；staging 条目的字段拓展限定在 staging 路径内（详 §1.4）。
-- **`memory_search` 行为 + corpus** — ADR 0015 定下来的 LLM-driven retrieval，不动。staging 不进 memory_search corpus，走独立 `staging-loader.ts`。
-- **writer 的 atomic write + git + appendAudit** — 持久化基础设施，不动；audit.jsonl schema 是 **additive 向后兼容 增量扩展**（加新字段 OK，不改现有字段语义）。
-- **主会话只读** — ADR 0003，sediment 是 sidecar；任何能力点都不能给主会话加写工具。**§3.3 outcome self-report 选方案 C 隐藏 metadata 路径**以避免“主会话 LLM 写 brain”违反。
-- **Sanitizer 走向 / typed redaction** — ADR 0016 / 0018 决定的同款 sanitize substrate，classifier 拿到的 conversation_window 已 sanitize，audit.jsonl 写入也走同款（R8 Opus 盲点 1）。
-- **不增加主会话 UI / slash command** — 不新增 `prompt_user` 询问 sediment 生命周期决定 / 不新增 `/rule add` / `/rule veto` / 不默认暴露 staging 内容给主会话。高级用户诊断入口（§6）是例外但不推广。
-- **ADR 0017 strict-binding** — project-rules 注入走严格绑定，主动纠错 typing=durable + scope_description 含“applies to current project”时归属不违反严格绑定。
-- **ADR 0020 transport-only sync** — 跨设备同步只传输不仲裁；staging 同步加 `originating_device` 字段避免分布式 provisional 垃圾。
-- **ADR 0022 prompt_user contract** — 任务相关 prompt_user 合法，**sediment 生命周期 prompt_user 是反模式**（ADR 0024 §4.2）。§3 outcome 是 LLM-to-LLM，不是 LLM-to-user。
-- **现有 curator 7 op set** — ADR 0016 7 op（create/update/merge/supersede/archive/delete/skip）足以肩 R1 需要的所有路径，**不新增 op**。主动纠错产出的信号通过现有 7 op 落地。
+**R1.1 诖释**：原 R1 §1.3 列了 9 条“不要改的”。按 §0.5 架构重新分层，现仅保留三条 A 层安全 / 正确性边界。**原列表其余项全部迁为 B 层**（可为 ADR 0024 vision 重设计），在 §0.5 B 层表内响应。
+
+#### A 层（本§保留 = 硬约束，违反 → 该能力点不准 ship）
+
+- **主会话只读**（ADR 0003）— 任何能力点都不能给主会话 LLM 加 brain 写权限。outcome self-report 走 §3.3 方案 C 隐藏 metadata，或 R2+ 评审决定改走方案 B sidecar——谁都不能给主会话 LLM 实际写 entry 的路径。
+- **Sanitizer + storage gate**（ADR 0018）— raw secret / token / credential / private key 不进 LLM / audit / memory。classifier 拿到的 conversation_window 已 sanitize；audit.jsonl 写入 reasoning trace 走同款路径。
+- **Vault 边界**（ADR 0019）— 本 ADR 不接触 vault 私钥 / 凭证，不绕过用户授权 `vault_release` 路径。
+
+#### "不增加主会话 UI / slash command" — 中间状态
+
+这是 ADR 0024 §4.2 反模式 直接带出，不是架构兼容约束。本 ADR R1.1 仍然不新增面向用户推送 brain 元工作的 UI / slash command（`/rule add` / `/rule veto` / sediment 生命周期 `prompt_user`）。高级用户诊断入口（§6）是例外但不推广。**这不受 R1.1 架构重设计放松影响——ADR 0024 invariant 本身是 vision，§0.5 不适用于 vision 本身。**
+
+#### B 层（迁到 §0.5 B 层，**不再作为 R1 §1.3 硬约束**）
+
+原 R1 §1.3 中以下项全部迁为“可重设计”，R2+ 多 LLM audit 评估具体走 “保留现状" 还是 "重设计"（详 §0.5 B 层表）：
+
+- ADR 0014 七区 layout / core entry frontmatter schema
+- ADR 0015 `memory_search` corpus / ranking / context-inject 路径
+- ADR 0016 curator 7 op 集合
+- ADR 0017 strict-binding 具体注入路径（安全语义保留）
+- ADR 0020 transport-only sync 协议细节（安全语义保留）
+- ADR 0023 R4 unified zone+tier+op classifier 合并选择（§1.5 三个选项 X/Y/Z）
+- writer atomic write + git + appendAudit 主路径结构、现有 sediment write-only loop 逻辑结构
+
+**仅 ADR 0022 prompt_user contract 中的 "sediment 生命周期 prompt_user 是反模式" 部分仍是 A 层**（同上面中间状态说明）。ADR 0022 任务相关 prompt_user 边界本身也是安全语义保留（sandbox），具体调用时机可调。
 
 ### 1.4 staging 路径定义（R8 P0-B4）
 
@@ -145,19 +218,40 @@ staging 不是 core 七区、也不是 ADR 0023 第 8 区 rules。staging 是 **
 
 staging frontmatter schema 是本 ADR 独定、与 core entry frontmatter 独立，详 §2.5。
 
-### 1.5 与 ADR 0023 R4 unified classifier 的整合关系（R8 P0-B3）
+### 1.5 与 ADR 0023 R4 unified classifier 的整合选项（R1.1 不强制合并）
 
-ADR 0023 R4 D4 已经把 G3 aboutness classifier 合并为 unified zone+tier+op classifier。本 ADR §2 主动纠错识别 **作为 unified classifier 的新输出维度**，不是第 3 个独立 LLM 调用：
+**R1 原设计（合并路径）**：主动纠错识别作为 unified classifier 新输出维度，同一 LLM 调用同时产 zone + tier + op + correction_signal，latency / token 不倍加。
+
+**R1.1 重新评估**（§0.5 B 层）：“避免第 3 个 LLM 调用”是以现有 token 预算为隐含限制的保守判断。用户明确表达任何代价可接受后，拆为多个专精 LLM 调用（每个 scope 更小推理质量更高）也是合法选项：R1.1 后不预设“必须合并”。
+
+**三个选项**（R2+ multi-LLM audit 选择）：
 
 ```
-unified classifier output（R1 后）：
-  - zone（rules / preferences / knowledge / facts / persona / ...）  ← ADR 0023
-  - tier（always / listed）                                       ← ADR 0023
-  - op（create / update / merge / supersede / archive / delete / skip） ← ADR 0016 / 0023
-  - correction_signal（null / CorrectionSignal）                    ← 本 ADR 新增
+选项 X：R1 合并路径（低成本但 prompt 变复杂）
+  unified classifier output：
+    - zone     ← ADR 0023
+    - tier     ← ADR 0023
+    - op       ← ADR 0016 / 0023
+    - correction_signal  ← 本 ADR 新增
+  优势：一次调用、全局上下文、cost 低
+  劣势：prompt 越越肿、debug 难度高、单点失败独站多输出都丢
+
+选项 Y：全拆（高成本但每个 prompt 专精、debug 容易）
+  classifier_zone(window) → zone
+  classifier_tier(window, zone) → tier
+  classifier_op(window, zone, tier, related_entries) → op
+  classifier_correction(window, related, staging) → correction_signal
+  优势：每个 prompt scope 小，易迭代；failure isolation
+  劣势：4x token / latency
+
+选项 Z：中道（推荐起点）
+  classifier_zone_tier_op(window, related) → {zone, tier, op}
+  classifier_correction(window, related, staging) → correction_signal
+  优势：主价值路径 latency = 2x；correction 与 zone routing 拆开减少 prompt 趋补
+  劣势：仍需设计上下文传递
 ```
 
-同一调用同时产出四个维度，latency / token 成本不倍加。R1 §2.3 prompt 是主动纠错识别维度的部分，需与 ADR 0023 R5 unified classifier prompt 合并。合并点在 ADR 0023 R5 patch（本 ADR P0 反向交付项）。
+R2+ 多 LLM audit 评估 X/Y/Z 试验得失。本 ADR R1.1 **不预设选 X**。任何选择都需 ADR 0023 R5 同步 patch（本 ADR R× ship 的反向 patch 交付项）。
 
 ---
 
@@ -769,7 +863,22 @@ in audit for future review.
 
 ---
 
-## 8. 实施 Phase 路线图（R8 P0-C 重排 + 拆并行轨）
+## 8. 实施 Phase 路线图（R8 P0-C 重排 + 拆并行轨，R1.1 后允许“大重写”作为替代路径）
+
+**R1.1 重要补充**（§0.5 C 层）：下面的 phase 路线图是**渐进路径**。**大重写路径**（一次性重写整个 sediment 路径作为 active reflection agent）是 R1.1 后同等合法选项，详 §8.2。两者选择在 R2+ multi-LLM audit 评估，不预设默认。
+
+### 8.0 两条路径对比（R2+ 评估点）
+
+| 维度 | 渐进路径（R1 原设计，§8.1） | 大重写路径（R1.1 新增，§8.2） |
+|---|---|---|
+| 实施粒度 | 6 Phase，每 Phase ship 后 dogfood 数周 | 一次性重写 sediment 主路径，跨多 PR 一批 ship |
+| 理论优势 | dogfood 数据驱动迭代、减少一次性重写风险、小步可回滚 | 不被“在旧 hook 上加新能力” framing 绑架；vision-coherent 设计；避免中间状态架构妥协 |
+| 理论劣势 | 保留现有架构中可能不适合 ADR 0024 vision 的点；各 phase 间中间状态架构妥协多 | 一次性重写风险高；dogfood 数据仅能在 ship 后反馈；过渡期长 |
+| ADR 0024 vision 适配 | 中（保留旧架构逻辑，需多 phase 逐步靠近）| **高**（从零为 vision 设计，不被老 framing 绑架）|
+| 用户明确接受代价后适配 | 中（原作为唯一默认路径是保守选择）| **高**（用户明说任何代价可接受）|
+| ADR 0014/0015/0016/0020/0023 反向 patch | 多个 phase 各提一点小 patch | 一批 patch 同一 PR 与 ADR 0025 主体交付 |
+
+### 8.1 渐进路径（R1 原设计，下表）
 
 按能力点依赖关系重排：**P0 §2 → P0.5 §5 minimal multi-view → P1 §3 outcome → P2 §4 aggregator → P3 §5 full → P4 §6 → P5 §7**。路由理由：multi-view 是§2 conf≥8 durable correction 的保护层，不能等 P3（R0 设计错排）。
 
@@ -789,7 +898,42 @@ in audit for future review.
 
 **每个 Phase 独立交付要求**：independent ship + independent multi-LLM audit + independent dogfood 数周 → 才进下一 Phase。**不一次性 ship 全部六条**——为 pi-astack maxim `staged-rollout-better-than-big-bang` 适用。
 
-**总工程量**按 ADR 0024 §9 估算“约 pi-astack 当前体量翻倍”，多季度迭代。R8 三家 reviewer 一致认为 R0 工程量估计偏低（各 Phase 均上调一个档位，详上表）。
+**总工程量**按 ADR 0024 §9 估算“约 pi-astack 当前体量翻倍”，多季度迭代。R8 三家 reviewer 一致认为 R0 工程量估计偏低（渐进路径各 Phase 均上调一个档位，详上表）。
+
+### 8.2 大重写路径（R1.1 后合法替代）
+
+R1.1 后允许拆如下（顶层逻辑，R2+ 详细设计）：
+
+```
+B0（设计 + multi-LLM audit 收敛）：
+  ADR 0025 R2-R6 一次性完成六能力点详细设计 +
+  ADR 0023 R5 / ADR 0014/0015/0016/0020 反向 patch 同批设计，
+  多 LLM xhigh audit ≥2 轮收敛后才进 B1。
+
+B1（重写 sediment 主路径，一批 PR）：
+  - active-reflection-agent 原生架构（代替现有 write-only loop）
+  - 六能力点同期上线（不拆 P0-P5）
+  - ADR 0014/0015/0016/0020/0023 R5 patch 同 PR
+  - context-packer / staging-loader / outcome-collector / aggregator /
+    multi-view-reviewer / archive-rollback 全部上线
+
+B2（dogfood + iteration）：
+  ship 后 dogfood 数月，audit 数据驱动 prompt 迭代 + 架构微调。
+  不再是“phase ship 后进下一 phase”，是“整体 ship 后迭代”。
+
+B3（下一代 vision 升级）：
+  基于 B2 dogfood 数据决定下一个重写里程碑。
+```
+
+**两路径选择不是 R1.1 本稿决策**：R2+ 详细设计阶段 multi-LLM audit 显式评估两者，评审者不允许默认选渐进作为“安全选择”（§0.5 C）。选择依据：
+
+- ADR 0024 4 条 invariant + AI-Native 原则 哪个路径更能保证？
+- §0.5 B 层 6 项架构重设计 哪个路径更能交付？
+- “dogfood 在 ship 后才能反馈”的代价 vs “中间状态架构妥协”的代价 哪个高？
+
+**不一次性 ship 全部六条**仅适用渐进路径。R1.1 后 pi-astack maxim `staged-rollout-better-than-big-bang` **不再被默认推论为本 ADR 唯一选择**。
+
+大重写路径 B1 单 PR 工程量估为 §8.1 P0+P0.5+P1+P2+P3 五个 phase 总和量级，拆多个 PR 但同一批交付。
 
 ---
 
