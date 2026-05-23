@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import type { MemorySettings } from "../memory/settings";
 import { loadEntries } from "../memory/parser";
 import { llmSearchEntries } from "../memory/llm-search";
@@ -6,6 +8,27 @@ import type { MemoryEntry } from "../memory/types";
 import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import type { DeleteMode, ProjectEntryDraft, ProjectEntryUpdateDraft } from "./writer";
+import type { CorrectionSignal } from "./correction-pipeline";
+
+// ── Curator metrics (mirrors extractor-metrics.jsonl pattern) ─────────────
+const CURATOR_METRICS_DIR = path.join(os.homedir(), ".pi", ".pi-astack", "sediment");
+
+function logCuratorMetrics(entry: {
+  ts: string;
+  model: string;
+  promptChars: number;
+  estimatedTokens: number;
+  ok: boolean;
+  durationMs: number;
+}): void {
+  try {
+    fs.mkdirSync(CURATOR_METRICS_DIR, { recursive: true });
+    const line = JSON.stringify(entry) + "\n";
+    fs.appendFileSync(path.join(CURATOR_METRICS_DIR, "curator-metrics.jsonl"), line, "utf-8");
+  } catch {
+    // metrics are best-effort; never throw
+  }
+}
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
@@ -494,8 +517,41 @@ export function buildCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEn
   return makeCuratorPrompt(draft, neighbors);
 }
 
-function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): string {
+function makeCuratorPrompt(
+  draft: ProjectEntryDraft,
+  neighbors: MemoryEntry[],
+  correctionSignal?: CorrectionSignal | null,
+): string {
+  const correctionBlock = correctionSignal?.signal_found
+    ? [
+        "=== ACTIVE CORRECTION SIGNAL ===",
+        "The user just expressed a correction in the conversation.",
+        "The classifier below produced this signal; treat it as a HYPOTHESIS,",
+        "not ground truth. Read the classifier's own uncertainty signals before deciding.",
+        "",
+        `Typing: ${correctionSignal.typing ?? "unknown"}`,
+        `Confidence: ${correctionSignal.confidence ?? "?"}/10`,
+        `Intent: ${correctionSignal.correction_intent ?? "unknown"}`,
+        `Scope: ${correctionSignal.scope_description ?? "unknown"}`,
+        correctionSignal.user_quote ? `User said: "${correctionSignal.user_quote}"` : "",
+        correctionSignal.target_entry_slug ? `Target entry: ${correctionSignal.target_entry_slug}` : "",
+        correctionSignal.most_likely_error
+          ? `Classifier uncertainty: "${correctionSignal.most_likely_error}"` : "",
+        correctionSignal.surrounding_context
+          ? `Context: "${correctionSignal.surrounding_context.slice(0, 300)}"` : "",
+        "",
+        "If the classifier says it may have confused durable with task-instruction",
+        "or debug frustration, prefer SKIP or narrow-scope CREATE over broad UPDATE.",
+        "If this candidate is related to the correction, prefer UPDATE",
+        "over CREATE. If the correction contradicts the candidate, prefer",
+        "SKIP (the correction signal will create a separate entry).",
+        "=== END CORRECTION SIGNAL ===",
+        "",
+      ].filter(Boolean).join("\n")
+    : "";
+
   return [
+    correctionBlock,
     "You are pi-astack sediment curator.",
     "Your job is to maintain the current best knowledge state, not append duplicate notes.",
     "Decide whether the candidate should create a new memory, update/merge existing memories, archive/supersede/delete an existing memory, or be skipped.",
@@ -580,7 +636,10 @@ async function callCuratorModel(
   prompt: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const parsed = parseModelRef(settings.curatorModel);
+  const t0 = Date.now();
+  const estimatedTokens = Math.ceil(prompt.length / 3);
+  try {
+    const parsed = parseModelRef(settings.curatorModel);
   if (!parsed) throw new Error(`invalid sediment.curatorModel: ${settings.curatorModel || "<empty>"}; expected provider/model`);
   const model = modelRegistry.find(parsed.provider, parsed.id);
   if (!model) throw new Error(`sediment curator model not found in registry: ${settings.curatorModel}`);
@@ -610,7 +669,28 @@ async function callCuratorModel(
     .join("\n")
     .trim();
   if (!rawText) throw new Error("sediment curator returned empty text");
+
+  logCuratorMetrics({
+    ts: new Date().toISOString(),
+    model: settings.curatorModel,
+    promptChars: prompt.length,
+    estimatedTokens,
+    ok: true,
+    durationMs: Date.now() - t0,
+  });
+
   return rawText;
+  } catch (e: unknown) {
+    logCuratorMetrics({
+      ts: new Date().toISOString(),
+      model: settings.curatorModel,
+      promptChars: prompt.length,
+      estimatedTokens,
+      ok: false,
+      durationMs: Date.now() - t0,
+    });
+    throw e;
+  }
 }
 
 export async function curateProjectDraft(
@@ -621,6 +701,10 @@ export async function curateProjectDraft(
     memorySettings: MemorySettings;
     modelRegistry: ModelRegistryLike;
     signal?: AbortSignal;
+    /** ADR 0025 P1: active correction signal from the conversation window.
+     *  When present, injected into the curator prompt so update/merge
+     *  decisions account for user corrections. */
+    correctionSignal?: CorrectionSignal | null;
   },
 ): Promise<CuratorOutcome> {
   const totalStart = Date.now();
@@ -693,7 +777,7 @@ export async function curateProjectDraft(
     const raw = await callCuratorModel(
       deps.sedimentSettings,
       deps.modelRegistry,
-      makeCuratorPrompt(safeDraft, neighbors),
+      makeCuratorPrompt(safeDraft, neighbors, deps.correctionSignal),
       deps.signal,
     );
     const decision = sanitizeDecisionStrings(parseDecision(raw, new Map(neighbors.map((entry) => [entry.slug, neighborLaneFor(entry)]))));

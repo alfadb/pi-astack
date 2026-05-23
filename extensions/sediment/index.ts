@@ -45,7 +45,9 @@ import {
   summarizeLlmExtractorResult,
   type LlmExtractorResult,
 } from "./llm-extractor";
-import { runCorrectionClassifier } from "./correction-pipeline";
+import { runCorrectionPipeline, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
+import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
+import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests } from "../_shared/pi-internals";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { sanitizeForMemory } from "./sanitizer";
 
@@ -96,7 +98,19 @@ const autoWriteInFlight = new Map<string, Promise<void>>();
  *  the main-session LLM is in agent_end state (finished, not working) —
  *  safe for bg drain. When started > ended, the LLM is working — drain
  *  must wait for the next agent_end. */
-const sessionAgentCycle = new Map<string, { started: number; ended: number }>();
+const sessionAgentCycle = new Map<string, { started: number; ended: number; drainCount: number }>();
+
+/**
+ * Cross-module-instance state for footer bridging across /new /resume.
+ * pi tears down and reloads extensions on session switch, which resets
+ * module-level variables. globalThis survives teardown so bg work from
+ * a previous session can still update the current footer.
+ */
+const _G = globalThis as typeof globalThis & {
+  __sediment_latestSetStatus?: ((msg?: string) => void) | undefined;
+  __sediment_inflightCount?: number;
+};
+if (_G.__sediment_inflightCount === undefined) _G.__sediment_inflightCount = 0;
 
 /** Status key for ctx.ui.setStatus(). */
 const SEDIMENT_STATUS_KEY = FOOTER_STATUS_KEYS.sediment;
@@ -127,11 +141,13 @@ function resolveAbrainHomeForSediment(): string {
  *   failed    The most recent extraction hit an error path: lint /
  *             validation reject, LLM call errored, or bg work threw.
  *
- * Transitions, per user spec (2026-05-08):
- *   - session_start                          -> idle (always)
+ * Transitions, per user spec (2026-05-08), amended 2026-05-23:
+ *   - session_start (no inflight)            -> idle
+ *   - session_start (inflight bg work)       -> running (prev session)
  *   - agent_start while in completed/failed  -> idle (reset)
  *   - agent_start while in running           -> running (unchanged)
  *   - agent_end                              -> running -> completed/failed
+ *   - bg work drain completes + no inflight  -> idle
  */
 type SedimentStatus = "idle" | "running" | "completed" | "failed";
 
@@ -174,11 +190,32 @@ function applySedimentStatus(
   detail?: string,
 ): void {
   if (sessionId) sedimentStatusBySession.set(sessionId, state);
-  if (!setStatus) return;
-  try {
-    setStatus(renderSedimentStatus(state, detail));
-  } catch {
-    /* stale ctx late fire is best-effort */
+  const msg = renderSedimentStatus(state, detail);
+  if (setStatus) {
+    try {
+      setStatus(msg);
+    } catch {
+      /* stale ctx late fire is best-effort; fall through to globalThis */
+    }
+  }
+  // Fallback via globalThis: bg work from a PREVIOUS session (after
+  // /new) has a stale captured setStatus. globalThis survives pi's
+  // extension-module teardown/reload, so the current session's footer
+  // gets updated even when the calling module instance is dead.
+  if (_G.__sediment_latestSetStatus) {
+    try { _G.__sediment_latestSetStatus(msg); } catch { /* best-effort */ }
+  }
+}
+
+/**
+ * Transition footer to idle IFF no bg work is inflight across any
+ * session. Safe to call from fire-and-forget finally blocks.
+ */
+function maybeSetIdleIfNoInflight(): void {
+  if ((_G.__sediment_inflightCount ?? 0) <= 0 && _G.__sediment_latestSetStatus) {
+    try {
+      _G.__sediment_latestSetStatus(renderSedimentStatus("idle"));
+    } catch { /* best-effort */ }
   }
 }
 
@@ -482,12 +519,17 @@ export default function (pi: ExtensionAPI) {
   // write hooks or tools. Dispatch sets PI_ABRAIN_DISABLED=1.
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
+  // Verify internal pi APIs we depend on. Missing APIs degrade gracefully
+  // but log a warning so operators know after a pi upgrade.
+  verifyPiInternals({ pi });
+
   registerSedimentCommand(pi);
   registerAboutMeCommand(pi);
 
-  // Footer state machine: session_start always sets idle.
-  // Used cast for ctx.ui because older pi versions may not expose
-  // setStatus; applySedimentStatus already tolerates undefined.
+  // Footer state machine: session_start sets idle UNLESS bg work from
+  // a previous session is still inflight (e.g. user did /new while
+  // sediment was extracting). In that case show running so the user
+  // knows sediment didn't silently abort.
   pi.on(
     "session_start",
     async (
@@ -504,9 +546,6 @@ export default function (pi: ExtensionAPI) {
       if (!settings.enabled) return;
 
       // ADR 0025 P0: ensure the sidecar staging directory exists.
-      // Created eagerly on first session_start so downstream
-      // correction-pipeline / staging-loader can assume the path is
-      // there. mkdir recursive is a no-op on subsequent calls.
       const abrainHome = resolveAbrainHomeForSediment();
       await mkdir(abrainSedimentStagingPath(abrainHome), { recursive: true });
 
@@ -519,14 +558,25 @@ export default function (pi: ExtensionAPI) {
             } catch {}
           }
         : undefined;
-      applySedimentStatus(setStatus, sessionId, "idle");
+      // Always refresh globalThis.__sediment_latestSetStatus so bg work
+      // from a PREVIOUS session (whose module was torn down by pi on
+      // /new) can still reach the current footer.
+      _G.__sediment_latestSetStatus = setStatus;
+
+      if ((_G.__sediment_inflightCount ?? 0) > 0) {
+        // Inflight bg work from previous session — show running, NOT idle.
+        applySedimentStatus(setStatus, sessionId, "running", "prev session");
+      } else {
+        applySedimentStatus(setStatus, sessionId, "idle");
+      }
     },
   );
 
   // Footer state machine: agent_start resets completed/failed back to
   // idle so each new prompt starts visually clean. running stays
   // unchanged so a long-running bg work from the previous turn
-  // remains visible.
+  // remains visible. Also checks autoWriteInFlight in case bg work
+  // from a previous session is still running after /new.
   pi.on(
     "agent_start",
     async (
@@ -543,8 +593,9 @@ export default function (pi: ExtensionAPI) {
       if (!settings.enabled) return;
       const sessionId = readSessionId(ctx.sessionManager);
       if (!sessionId) return;
-      const c = sessionAgentCycle.get(sessionId) ?? { started: 0, ended: 0 };
+      const c = sessionAgentCycle.get(sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
       c.started++;
+      c.drainCount = 0; // reset drain counter for new agent cycle
       sessionAgentCycle.set(sessionId, c);
       const prev = sedimentStatusBySession.get(sessionId);
       if (prev !== "completed" && prev !== "failed") return; // running -> stay; idle -> already idle
@@ -556,7 +607,14 @@ export default function (pi: ExtensionAPI) {
             } catch {}
           }
         : undefined;
-      applySedimentStatus(setStatus, sessionId, "idle");
+      _G.__sediment_latestSetStatus = setStatus;
+      // If bg work from a previous session is still inflight, keep
+      // showing running instead of resetting to idle.
+      if ((_G.__sediment_inflightCount ?? 0) > 0) {
+        applySedimentStatus(setStatus, sessionId, "running", "prev session");
+      } else {
+        applySedimentStatus(setStatus, sessionId, "idle");
+      }
     },
   );
 
@@ -605,12 +663,22 @@ export default function (pi: ExtensionAPI) {
       const sessionId = readSessionId(ctx.sessionManager);
       // Track agent_end for drain-loop gating (only drain when LLM not working).
       if (sessionId) {
-        const c = sessionAgentCycle.get(sessionId) ?? { started: 0, ended: 0 };
+        const c = sessionAgentCycle.get(sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
         c.ended++;
         sessionAgentCycle.set(sessionId, c);
       }
       // Capture getBranch for drain-loop re-reads (bg work outlives ctx).
       const getBranch = ctx.sessionManager.getBranch.bind(ctx.sessionManager);
+      // Capture sessionManager for continuation-call extractor (bg work outlives ctx).
+      const sessMgr = ctx.sessionManager;
+      // Fire-and-forget outcome collection: scan branch for memory tool
+      // invocations and log retrieved entries to outcome-ledger (ADR 0025 P2).
+      if (sessionId && branch.length > 0) {
+        const outcomeRows = collectOutcomes(branch, sessionId);
+        if (outcomeRows.length > 0) {
+          writeOutcomeLedger(outcomeRows, cwd);
+        }
+      }
       const notify = ctx.ui?.notify?.bind(ctx.ui);
       // setStatus is ctx.ui.setStatus; we need to bind it AND tolerate
       // older pi versions where the method is missing. Wrap in a
@@ -804,6 +872,68 @@ export default function (pi: ExtensionAPI) {
       // G1–G2 (G3 will add an LLM aboutness classifier).
       const aboutMeDrafts = parseExplicitAboutMeBlocks(window.text);
       const tParseEnd = Date.now();
+
+      // ADR 0025 P1: run correction classifier as FIRE-AND-FORGET.
+      // Must not block agent_end — the classifier does 2 LLM calls
+      // (memory_search + classifier) which take 10-45s. Blocking here
+      // makes the main session show "Working" and prevents the user
+      // from continuing.
+      //
+      // The classifier Promise is stored so the auto-write lane can
+      // await it before launching curator (correctionSignal is needed
+      // for better update/merge decisions). Lane A/G don't consume it.
+      let correctionPromise: Promise<Awaited<ReturnType<typeof runCorrectionPipeline>>> | null = null;
+      const classifierLane =
+        drafts.length > 0 ? "explicit" : aboutMeDrafts.length > 0 ? "about_me" : "auto_write";
+      if (branch) {
+        correctionPromise = (async () => {
+          let relatedEntries: RelatedEntryCard[] = [];
+          try {
+            const memSettings = resolveMemorySettings();
+            const searchQuery = window.text.slice(-2000);
+            const memResult = await (await import("../memory/llm-search")).llmSearchEntries(
+              await (await import("../memory/parser")).loadEntries(cwd, memSettings, ctx.signal),
+              { query: `Find memory entries related to: ${searchQuery.slice(-500)}`, filters: { limit: 10, status: ["active"] } },
+              memSettings,
+              modelRegistry,
+              ctx.signal,
+              cwd,
+            ) as Array<{ slug: unknown; title?: unknown; kind?: unknown; status?: unknown; scope?: unknown; compiled_truth?: unknown }>;
+            relatedEntries = (memResult && !(memResult as any).ok)
+              ? []
+              : (Array.isArray(memResult) ? memResult.map((c: any) => ({
+                  slug: String(c.slug ?? ""),
+                  title: typeof c.title === "string" ? c.title : undefined,
+                  scope: typeof c.scope === "string" ? c.scope : typeof c.metadata?.scope === "string" ? c.metadata.scope : undefined,
+                  kind: typeof c.kind === "string" ? c.kind : undefined,
+                  status: typeof c.status === "string" ? c.status : undefined,
+                  summary: typeof c.compiled_truth === "string" ? c.compiled_truth.slice(0, 150) : undefined,
+                })).filter(e => e.slug) : []);
+          } catch { /* search failure is non-fatal */ }
+          const cr = await runCorrectionPipeline(branch, relatedEntries, {
+            settings,
+            modelRegistry: modelRegistry as Parameters<typeof runCorrectionPipeline>[2]["modelRegistry"],
+            signal: ctx.signal,
+          });
+          // Log classifier result to audit — always, so failures are traceable.
+          appendAudit(cwd, {
+            operation: "correction_classifier",
+            lane: classifierLane,
+            session_id: sessionId,
+            ok: cr.ok,
+            signal: cr.signal,
+            model: cr.model,
+            duration_ms: cr.durationMs,
+            staging_written: cr.stagingWritten,
+            prompt_version: settings.promptVersion.activeCorrectionClassifier,
+            ...(cr.error ? { error: cr.error } : {}),
+            ...(cr.stagingAdvisory ? { staging_advisory: cr.stagingAdvisory } : {}),
+          }).catch(() => {});
+          return cr;
+        })();
+        // Don't await — fire-and-forget. Auto-write lane will await it.
+      }
+
       if (drafts.length === 0 && aboutMeDrafts.length === 0) {
         // Phase 1.4 A2 + UX fix: LLM auto-write lane is FIRE-AND-FORGET.
         //
@@ -836,8 +966,13 @@ export default function (pi: ExtensionAPI) {
           // (agent_end fires and no new agent_start has followed).
           // If started > ended, the LLM is mid-response — the next
           // agent_end will trigger sediment naturally.
+          // Drain cap: at most 3 drain cycles per agent_end to prevent
+          // budget exhaustion from log-monitor or continuous-input loops.
+          const MAX_DRAIN_PER_CYCLE = 3;
           const cyc = sessionAgentCycle.get(sessionId);
           if (!cyc || cyc.started > cyc.ended) return;
+          if (cyc.drainCount >= MAX_DRAIN_PER_CYCLE) return;
+          cyc.drainCount++;
 
           let branchNow: unknown[];
           try {
@@ -887,6 +1022,9 @@ export default function (pi: ExtensionAPI) {
                         correlationId: corrId,
                         abrainHome,
                         projectId,
+                        branchEntries: branchNow,
+                        sessionManager: sessMgr,
+                        correctionSignal: undefined, // drain re-reads branch — original signal may be stale
                       });
                       // Round 8 P1 (sonnet R8 audit fix): drain loop now
                       // writes audit rows for ALL outcomes (wrote /
@@ -970,11 +1108,15 @@ export default function (pi: ExtensionAPI) {
                         `err: ${err?.message?.slice(0, 40) ?? String(err).slice(0, 40)}`,
                       );
                     } finally {
-                      if (autoWriteInFlight.get(sessionId) === bg)
+                      if (autoWriteInFlight.get(sessionId) === bg) {
                         autoWriteInFlight.delete(sessionId);
+                        _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
+                      }
                       scheduleDrainIfBacklog(); // recurse
+                      maybeSetIdleIfNoInflight();
                     }
                   })();
+                  _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
                   autoWriteInFlight.set(sessionId, bg);
                   bg.catch(() => {});
                 })
@@ -1047,6 +1189,14 @@ export default function (pi: ExtensionAPI) {
               correlationId: autoCorrelationId,
               abrainHome,
               projectId,
+              branchEntries: branch,
+              sessionManager: sessMgr, // captured, not ctx.sessionManager (stale ctx risk)
+              // Await the fire-and-forget classifier promise (started before lane branching).
+              // If classifier hasn't finished yet, wait for it; if it failed or wasn't
+              // started, fall back to null signal (curator works without it).
+              correctionSignal: correctionPromise
+                ? (await correctionPromise.catch(() => ({ ok: false, signal: null } as const))).signal
+                : null,
             });
             const tAutoEnd = Date.now();
 
@@ -1250,6 +1400,7 @@ export default function (pi: ExtensionAPI) {
             // agent_start resets to idle.
             if (autoWriteInFlight.get(sessionId) === bgPromise) {
               autoWriteInFlight.delete(sessionId);
+              _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
             }
 
             // Drain loop: while this bg cycle ran, the user may have sent
@@ -1264,8 +1415,15 @@ export default function (pi: ExtensionAPI) {
             // silently ignored the extra arg but tsc --strict would flag
             // it. Keep this call argument-free.
             scheduleDrainIfBacklog();
+
+            // When ALL inflight work (including drain cycles) settles,
+            // switch the footer back to idle. Needed after /new because
+            // the new session's session_start showed "running (prev
+            // session)" — without this, the footer would stay stuck.
+            maybeSetIdleIfNoInflight();
           }
         })();
+        _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
         autoWriteInFlight.set(sessionId, bgPromise);
         bgPromise.catch(() => {});
         // DO NOT await bgPromise. agent_end returns immediately so the
@@ -1700,8 +1858,19 @@ async function tryAutoWriteLane(args: {
   // writers directly, not via tryAutoWriteLane.
   abrainHome: string;
   projectId: string;
+  /** When provided, enables continuation-call: reuses the main session's
+   *  assembled messages as prompt prefix for KV cache reuse. */
+  sessionManager?: unknown;
+  /** When provided, the extractor uses the full branch for richer context
+   *  instead of the pruned RunWindow. The fixed system prefix (AGENTS.md)
+   *  + full transcript enables prompt caching across consecutive calls. */
+  branchEntries?: unknown[];
+  /** ADR 0025 P1: correction classifier result from the pre-lane run.
+   *  Injected into curator context for better update/merge decisions.
+   *  null when classifier didn't run (ephemeral session) or found no signal. */
+  correctionSignal?: CorrectionSignal | null;
 }): Promise<AutoWriteLaneOutcome> {
-  const { cwd, sessionId, settings, window, correlationId, abrainHome, projectId } = args;
+  const { cwd, sessionId, settings, window, correlationId, abrainHome, projectId, branchEntries, sessionManager } = args;
   const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
 
   if (!settings.autoLlmWriteEnabled) {
@@ -1725,7 +1894,18 @@ async function tryAutoWriteLane(args: {
   // 1. Run extractor. It does not write or commit; it only runs the
   //    model and parses the MEMORY/SKIP response. The curator/writer
   //    stages below decide and persist lifecycle operations.
+  //
+  //    Continuation-call: if sessionManager is available, reuse the main
+  //    session's assembled messages as prompt prefix so the provider-side
+  //    KV cache from the main session call can be reused.
   const llmStart = Date.now();
+  let continuationMessages: unknown[] | undefined;
+  if (sessionManager) {
+    continuationMessages = tryGetSessionMessages(sessionManager);
+    if (!continuationMessages) {
+      warnOnceIfUnavailable("SessionManager.buildSessionContext");
+    }
+  }
   let llmResult: LlmExtractorResult;
   try {
     llmResult = await runLlmExtractor(window.text, {
@@ -1734,6 +1914,8 @@ async function tryAutoWriteLane(args: {
         typeof runLlmExtractor
       >[1]["modelRegistry"],
       signal: args.signal,
+      branchEntries,
+      continuationMessages,
     });
   } catch (e: any) {
     llmResult = {
@@ -1757,27 +1939,6 @@ async function tryAutoWriteLane(args: {
   } = sanitizeAndTruncateRawForAudit(llmResult.rawText, settings.autoWriteRawAuditChars);
 
   if (!llmResult.ok) {
-    // ADR 0025 P1: run correction classifier even when extractor fails.
-    // The conversation window may contain active correction signals
-    // independent of whether the extractor produced MEMORY: drafts.
-    runCorrectionClassifier(window.text, {
-      settings,
-      modelRegistry: modelRegistry as Parameters<typeof runCorrectionClassifier>[1]["modelRegistry"],
-      signal: args.signal,
-    }).then((cr) => {
-      if (cr.ok && cr.signal?.signal_found) {
-        appendAudit(cwd, {
-          operation: "correction_classifier",
-          lane: "auto_write",
-          session_id: sessionId,
-          correlation_id: correlationId,
-          signal: cr.signal,
-          model: cr.model,
-          duration_ms: cr.durationMs,
-        }).catch(() => {});
-      }
-    }).catch(() => {});
-
     return {
       kind: "llm_error",
       llmAuditSummary,
@@ -1788,29 +1949,6 @@ async function tryAutoWriteLane(args: {
       rawTextRedactionReason,
     };
   }
-
-  // ADR 0025 P1: run correction classifier on the conversation window.
-  // Fire-and-forget — doesn't block the curator loop. The signal, if any,
-  // is written to audit for downstream aggregator/staging resolution.
-  // In P1.x follow-ups: curator context injection + staging writes.
-  runCorrectionClassifier(window.text, {
-    settings,
-    modelRegistry: modelRegistry as Parameters<typeof runCorrectionClassifier>[1]["modelRegistry"],
-    signal: args.signal,
-  }).then((cr) => {
-    if (cr.ok && cr.signal?.signal_found) {
-      appendAudit(cwd, {
-        operation: "correction_classifier",
-        lane: "auto_write",
-        session_id: sessionId,
-        correlation_id: correlationId,
-        signal: cr.signal,
-        model: cr.model,
-        duration_ms: cr.durationMs,
-        raw_text_preview: cr.rawText?.slice(0, 1000),
-      }).catch(() => {});
-    }
-  }).catch(() => {});
 
   // 2. Keep only schema-valid candidates. Semantic gates are gone; the
   //    curator decides create/update/merge/archive/supersede/delete/skip after looking up existing memory.
@@ -1857,6 +1995,7 @@ async function tryAutoWriteLane(args: {
         memorySettings: resolveMemorySettings(),
         modelRegistry,
         signal: args.signal,
+        correctionSignal: args.correctionSignal,
       });
     } catch (e: any) {
       // F4 defense (2026-05-14): curateProjectDraft has internal try/catch
@@ -2055,6 +2194,7 @@ function snapshotSedimentSettings(
     defaultConfidence: settings.defaultConfidence,
     maxWindowChars: settings.maxWindowChars,
     maxWindowEntries: settings.maxWindowEntries,
+    skipContinuationSanitize: settings.skipContinuationSanitize,
   };
 }
 
@@ -2066,6 +2206,8 @@ function snapshotSedimentSettings(
 export function _resetAutoWriteStateForTests(): void {
   autoWriteInFlight.clear();
   sedimentStatusBySession.clear();
+  sessionAgentCycle.clear();
+  _resetWarnedApisForTests();
 }
 
 /**

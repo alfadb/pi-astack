@@ -19,6 +19,10 @@ export interface SedimentSettings {
   extractorModel: string;
   extractorTimeoutMs: number;
   extractorMaxRetries: number;
+  /** ADR 0025 P1: model for the active correction classifier.
+   *  Classification task, not reasoning — v4-flash is sufficient. */
+  classifierModel: string;
+  classifierTimeoutMs: number;
   extractorMaxCandidates: number;
   extractorAuditRawChars: number;
   curatorModel: string;
@@ -26,6 +30,11 @@ export interface SedimentSettings {
   curatorMaxRetries: number;
   autoLlmWriteEnabled: boolean;
   autoWriteRawAuditChars: number;
+  /** When true, skip credential sanitization in continuation-call path.
+   *  Safe for air-gapped deployments where extractor LLM provider
+   *  cannot reach internal infrastructure even with leaked keys.
+   *  Default: false (sanitize is ON by default). */
+  skipContinuationSanitize: boolean;
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
    *  can track prompt changes without manual cross-reference. */
@@ -68,6 +77,10 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   extractorModel: "deepseek/deepseek-v4-pro",
   extractorTimeoutMs: 180_000,
   extractorMaxRetries: 0,
+  // Classifier is a reading-comprehension + classification task.
+  // v4-flash is fast ($0.14/M), cheap, and sufficient — no reasoning needed.
+  classifierModel: "deepseek/deepseek-v4-flash",
+  classifierTimeoutMs: 30_000,
   extractorMaxCandidates: 5,
   extractorAuditRawChars: 1_000,
   // 2026-05-11: curator split from extractorModel (3-model audit).
@@ -79,8 +92,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   curatorMaxRetries: 1,
   autoLlmWriteEnabled: false,
   autoWriteRawAuditChars: 8_000,
+  skipContinuationSanitize: false,
   promptVersion: {
-    activeCorrectionClassifier: "v0",
+    activeCorrectionClassifier: "v1",
     multiViewPass1: "v0",
     multiViewPass2: "v0",
     outcomeSelfReport: "v0",
@@ -122,6 +136,10 @@ export function resolveSedimentSettings(): SedimentSettings {
       : DEFAULT_SEDIMENT_SETTINGS.extractorModel,
     extractorTimeoutMs: Math.max(1_000, asNumber(cfg.extractorTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.extractorTimeoutMs)),
     extractorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.extractorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.extractorMaxRetries))),
+    classifierModel: typeof cfg.classifierModel === "string" && cfg.classifierModel.trim()
+      ? cfg.classifierModel.trim()
+      : DEFAULT_SEDIMENT_SETTINGS.classifierModel,
+    classifierTimeoutMs: Math.max(5_000, asNumber(cfg.classifierTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.classifierTimeoutMs)),
     extractorMaxCandidates: Math.max(1, Math.floor(asNumber(cfg.extractorMaxCandidates, DEFAULT_SEDIMENT_SETTINGS.extractorMaxCandidates))),
     extractorAuditRawChars: Math.max(0, Math.floor(asNumber(cfg.extractorAuditRawChars, DEFAULT_SEDIMENT_SETTINGS.extractorAuditRawChars))),
     curatorModel: typeof cfg.curatorModel === "string" && cfg.curatorModel.trim()
@@ -131,6 +149,7 @@ export function resolveSedimentSettings(): SedimentSettings {
     curatorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.curatorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.curatorMaxRetries))),
     autoLlmWriteEnabled: asBoolean(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
+    skipContinuationSanitize: asBoolean(cfg.skipContinuationSanitize, DEFAULT_SEDIMENT_SETTINGS.skipContinuationSanitize),
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,

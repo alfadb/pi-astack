@@ -277,8 +277,6 @@ async function main() {
   const prompt = loadPrompt();
   const fixtures = buildFixtures();
   const results = [];
-  let passed = 0, failed = 0;
-
   for (let i = 0; i < fixtures.length; i++) {
     const f = fixtures[i];
     const windowText = f.turns.map(t => `[${t.role}]: ${t.content}`).join("\n\n");
@@ -293,33 +291,33 @@ async function main() {
       output.expected = f.expected;
 
       const p = output.parsed;
-      if (f.category === "negative" && p?.signal_found === false) {
-        console.log("✅ (correctly no signal)");
-        passed++;
-      } else if (f.category === "obvious" && p?.signal_found === true && p?.typing === "durable") {
-        console.log(`✅ (durable, conf=${p?.confidence})`);
-        passed++;
-      } else if (f.category === "ambiguous") {
-        const t = p?.typing ?? "parse error";
-        const c = p?.confidence ?? "?";
-        console.log(`📋 (${t}, conf=${c})`);
-        passed++;
-      } else if (p?.signal_found === true && f.category === "negative") {
-        console.log(`⚠️  FALSE POS (typing=${p?.typing}, conf=${p?.confidence})`);
-        failed++;
-      } else if (p?.signal_found === false && f.category === "obvious") {
-        console.log(`⚠️  FALSE NEG (no signal)`);
-        failed++;
-      } else {
-        console.log(`✅ (parsed OK)`);
-        passed++;
-      }
+      const t = p?.typing ?? "parse error";
+      const c = p?.confidence ?? "?";
 
+      // Review buckets (not pass/fail — ADR 0024 §5.5: smoke is a
+      // prompt-development dossier, not a release gate).
+      let bucket = "needs-human-review";
+      if (f.category === "negative" && p?.signal_found === false) {
+        bucket = "expected-aligned";
+      } else if (f.category === "obvious" && p?.signal_found === true && p?.typing === "durable") {
+        bucket = "expected-aligned";
+      } else if (f.category === "ambiguous") {
+        bucket = "needs-human-review"; // ambiguous fixtures always need human read
+      } else if (p?.signal_found === true && f.category === "negative") {
+        bucket = "surprising-signal";
+      } else if (p?.signal_found === false && f.category === "obvious") {
+        bucket = "surprising-null";
+      } else if (!p) {
+        bucket = "parse-or-infra-issue";
+      }
+      output.review_bucket = bucket;
+
+      const icon = bucket === "expected-aligned" ? "✓" : bucket === "surprising-signal" ? "⚡" : bucket === "surprising-null" ? "∅" : "📋";
+      console.log(`${icon} [${bucket}] typing=${t}, conf=${c}`);
       results.push(output);
     } catch (e) {
       console.log(`❌ ${e.message}`);
-      results.push({ id: f.id, category: f.category, error: e.message });
-      failed++;
+      results.push({ id: f.id, category: f.category, error: e.message, review_bucket: "parse-or-infra-issue" });
     }
 
     // Rate limiting — DeepSeek free tier is 20 RPM
@@ -329,24 +327,25 @@ async function main() {
   // ── Output ─────────────────────────────────────────────────────────
   const outPath = path.join(repoRoot, "smoke-classifier-results.json");
   fs.writeFileSync(outPath, JSON.stringify(results, null, 2));
-  console.log(`\n📄 Results: ${outPath}`);
-  console.log(`   ${results.length} runs, ${passed} passed heuristic, ${failed} failed`);
+  console.log(`\n📄 Full reasoning traces: ${outPath}`);
+  console.log(`   ${results.length} fixtures run.`);
 
-  // Quick stats
-  const negatives = results.filter(r => r.category === "negative");
-  const obvious = results.filter(r => r.category === "obvious");
-  const fp = negatives.filter(r => r.parsed?.signal_found === true);
-  const fn = obvious.filter(r => r.parsed?.signal_found === false);
-  console.log(`   FP (neg→signal): ${fp.length}/${negatives.length}  FN (obv→null): ${fn.length}/${obvious.length}`);
-  const fpRate = negatives.length > 0 ? fp.length / negatives.length : 0;
-  const fnRate = obvious.length > 0 ? fn.length / obvious.length : 0;
-  console.log(`   FP rate: ${(fpRate*100).toFixed(0)}%  FN rate: ${(fnRate*100).toFixed(0)}%`);
-
-  if (fpRate > 0.2 || fnRate > 0.2) {
-    console.log(`⚠️  Threshold exceeded — prompt needs iteration.`);
-  } else {
-    console.log(`✅  Within thresholds.`);
+  // Review bucket summary (informational only — NOT a gate. ADR 0024 §5.5).
+  const byBucket = {};
+  for (const r of results) {
+    const b = r.review_bucket ?? "parse-or-infra-issue";
+    byBucket[b] = (byBucket[b] || 0) + 1;
   }
+  for (const [b, n] of Object.entries(byBucket)) {
+    const label = b === "expected-aligned" ? "expected-aligned" :
+                  b === "surprising-signal" ? "surprising-signal (author: review)" :
+                  b === "surprising-null" ? "surprising-null (author: review)" :
+                  b === "needs-human-review" ? "needs-human-review (ambiguous)" :
+                  b;
+    console.log(`   ${n} ${label}`);
+  }
+  console.log(`\n📖 Author should read reasoning_trace for surprising-signal and surprising-null buckets.`);
+  console.log(`   This is a prompt-development dossier, not a release gate (ADR 0024 §4.2).`);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
