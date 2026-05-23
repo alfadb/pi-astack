@@ -1,168 +1,277 @@
-# ADR 0025 — Sediment Meta-Curator 子系统：六条能力点的落地设计
+# ADR 0025 - Sediment Meta-Curator 子系统:六条能力点的落地设计
 
-- **状态**：**R1.1（2026-05-22 用户约束修订后）**。本 ADR 是 [ADR 0024](0024-second-brain-from-natural-conversation.md) §5 六条能力点的具体机制设计。
+- **状态**:**R1.2(2026-05-22 ADR 0003 内在张力识别后)**。本 ADR 是 [ADR 0024](0024-second-brain-from-natural-conversation.md) §5 六条能力点的具体机制设计。
 
-  **R1 路径**：R0 骨架经 [R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) 三家 T0 在 Layer F v2 硬注入下评审（平均可行性 61%）后起 R1，落地 6 个 P0 + 1 个 P1 + 多个盲点。
+  **R1 路径**:R0 骨架经 [R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) 三家 T0 在 Layer F v2 硬注入下评审(平均可行性 61%)后起 R1,落地 6 个 P0 + 1 个 P1 + 多个盲点。
 
-  **R1.1 关键约束修订**（用户指示）：“已有代码是可以改造甚至重写的，一切以实现 ADR 0024 为目的，任何代价都可以接受。” 这条引发本 ADR 的架构约束重新分层：§0.5 明确 A（不可破的安全边界，仅 ADR 0003 / 0018 / 0019）vs B（可为 ADR 0024 vision 重设计的架构约束，含 ADR 0014 七区 / 0015 memory_search / 0016 7 op / 0020 sync / 0023 R4 unified classifier / 现有 sediment write-only loop）vs C（实施风格放松：渐进 vs 大重写不预设）。§1.3 / §1.5 / §8 相应修订。
+  **R1.1 关键约束修订**(用户指示):"已有代码是可以改造甚至重写的,一切以实现 ADR 0024 为目的,任何代价都可以接受。" 为本 ADR 设三层架构约束分层(A/B/C)。
 
-  **目前仅设计，未实施**。
-- **依赖**：
-  - [ADR 0024](0024-second-brain-from-natural-conversation.md) — 总框架文档；本 ADR 不重复 §2 invariant、§3 AI-Native 原则、§4 边界，下面只在违反检测时引用
-  - [ADR 0014](0014-abrain-as-personal-brain.md) — 七区 layout + invariant #7 互斥；本 ADR §1.4 明确 staging 不是第 8 区 / 9 区，是 sediment 内部 transient store
-  - [ADR 0016](0016-sediment-as-llm-curator.md) — sediment 当 LLM curator 的哲学；本 ADR 是这条哲学的能力点级落地
-  - [ADR 0018](0018-sediment-curator-defense-layers.md) — 删机械护栏的先例；本 ADR 的"防出错全走 prompt 工程"是同款延续
-  - [ADR 0015](0015-memory-search-llm-driven-retrieval.md) — LLM-driven retrieval；能力点 1 的 related_entries 走 memory_search，但 staging 走独立 staging-loader 不改 memory_search corpus
-  - [ADR 0020](0020-abrain-auto-sync-to-remote.md) — 跨设备一致传播；§2.5 staging 加 `originating_device` 字段避免分布式 provisional 垃圾
-  - [ADR 0023](0023-session-start-rule-injection.md) R4 — D4 unified zone+tier+op classifier；本 ADR §1.5 明确主动纠错识别作为 unified classifier 的新输出维度，不是第 3 个独立 LLM 调用
-  - [ADR 0003](0003-main-session-read-only.md) — 主会话只读；§3.3 outcome self-report 选方案 C（隐藏 metadata）以避免主会话 LLM 写 brain
-- **被引用**：本 ADR 实施 P0 后反向 patch ADR 0023 R5 / 0021（unified classifier 落到本 ADR 能力点 1）
-- **评审快照**：[R0 R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md)（Opus 4-7 / GPT-5.5 / DeepSeek V4 Pro 在 Layer F v2 硬注入下的并行 xhigh 评审）4
-- **触发**：ADR 0024 R7 之后六条能力点的 prompt skeleton 已经稳定，但 skeleton 不是 production-ready prompt——还差完整文本、输入输出 schema、调用编排、与现有 `extensions/sediment/` 代码的接口。本 ADR 填这个缺口。
+  **R1.2 安全边界重新识别**(用户追问):R1.1 把 ADR 0003 / 0018 / 0019 三条一刀切归为"A 层不可破的安全边界"是错的。重新分析后:
+  - **ADR 0003 主会话只读跟 ADR 0024 vision 有根本性内在张力**--详 §0.6。三个冲突点:(1) latency / friction 违 INV-ACTIVE-CORRECTION;(2) outcome self-report 选方案 C 是结构性妥协不是最优;(3) 防御目标与 ADR 0024 §3 AI-Native + multi-view 重叠。**ADR 0003 现状当为机制是架构选择,不是不可破边界。**
+  - **ADR 0018 拆为结果 vs 机制**:raw secret 不出屏障是 A' 结果(不可破);deterministic regex 当前实现是 B' 机制(可重设计)。
+  - **ADR 0019 vault 几乎无冲突**:面向表达"vault 明确授权外不自动 release"的结果仍是 A'。机制细节(age 加密 / passphrase)与本 ADR 无关。
+
+  R1.2 升级:§0.5 三层重命名为 A' / B' / C';新增 §0.6 ADR 0003 张力专论与 R2+ 处理三选项(含 ADR 0018 机制重评估 §0.6.5);§3.3 方案 A 重新进入候选。
+
+  **目前仅设计,未实施**。
+- **依赖**:
+  - [ADR 0024](0024-second-brain-from-natural-conversation.md) - 总框架文档;本 ADR 不重复 §2 invariant、§3 AI-Native 原则、§4 边界,下面只在违反检测时引用
+  - [ADR 0014](0014-abrain-as-personal-brain.md) - 七区 layout + invariant #7 互斥;本 ADR §1.4 明确 staging 不是第 8 区 / 9 区,是 sediment 内部 transient store
+  - [ADR 0016](0016-sediment-as-llm-curator.md) - sediment 当 LLM curator 的哲学;本 ADR 是这条哲学的能力点级落地
+  - [ADR 0018](0018-sediment-curator-defense-layers.md) - 删机械护栏的先例;本 ADR 的"防出错全走 prompt 工程"是同款延续
+  - [ADR 0015](0015-memory-search-llm-driven-retrieval.md) - LLM-driven retrieval;能力点 1 的 related_entries 走 memory_search,但 staging 走独立 staging-loader 不改 memory_search corpus
+  - [ADR 0020](0020-abrain-auto-sync-to-remote.md) - 跨设备一致传播;§2.5 staging 加 `originating_device` 字段避免分布式 provisional 垃圾
+  - [ADR 0023](0023-session-start-rule-injection.md) R4 - D4 unified zone+tier+op classifier;本 ADR §1.5 明确主动纠错识别作为 unified classifier 的新输出维度,不是第 3 个独立 LLM 调用
+  - [ADR 0003](0003-main-session-read-only.md) - 主会话只读;§3.3 outcome self-report 选方案 C(隐藏 metadata)以避免主会话 LLM 写 brain
+- **被引用**:本 ADR 实施 P0 后反向 patch ADR 0023 R5 / 0021(unified classifier 落到本 ADR 能力点 1)
+- **评审快照**:[R0 R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md)(Opus 4-7 / GPT-5.5 / DeepSeek V4 Pro 在 Layer F v2 硬注入下的并行 xhigh 评审)4
+- **触发**:ADR 0024 R7 之后六条能力点的 prompt skeleton 已经稳定,但 skeleton 不是 production-ready prompt--还差完整文本、输入输出 schema、调用编排、与现有 `extensions/sediment/` 代码的接口。本 ADR 填这个缺口。
 
 ---
 
-## 0. 起草说明（这份文档干什么 / 不干什么）
+## 0. 起草说明(这份文档干什么 / 不干什么)
 
 ### 这份文档**只写**
 
-- 六条能力点的**production-ready prompt 完整文本**（不只是 skeleton 摘要）
-- 输入 / 输出 schema（哪些字段、什么类型、谁读谁写）
-- 触发条件（agent_end / cron / 高价值操作 / 用户诊断入口）
-- 调用编排（哪些 LLM 调用、顺序、失败处理）
-- 与现有 `extensions/sediment/` 代码的接口（要加哪些文件 / 改哪些 hook）
-- 测试设计（按 ADR 0024 §5 / §6 走三层 smoke）
+- 六条能力点的**production-ready prompt 完整文本**(不只是 skeleton 摘要)
+- 输入 / 输出 schema(哪些字段、什么类型、谁读谁写)
+- 触发条件(agent_end / cron / 高价值操作 / 用户诊断入口)
+- 调用编排(哪些 LLM 调用、顺序、失败处理)
+- 与现有 `extensions/sediment/` 代码的接口(要加哪些文件 / 改哪些 hook)
+- 测试设计(按 ADR 0024 §5 / §6 走三层 smoke)
 
 ### 这份文档**不写**
 
-- 设计哲学 / invariant / 自然交互 vs 管理大脑边界——那在 ADR 0024
-- 反模式列表 / 灰色地带处理原则——那在 ADR 0024 §4
-- 走偏信号 / 接受的代价——那在 ADR 0024 §6 / §7
-- 演进历史 / 评审过程——那在 audit/ 目录
+- 设计哲学 / invariant / 自然交互 vs 管理大脑边界--那在 ADR 0024
+- 反模式列表 / 灰色地带处理原则--那在 ADR 0024 §4
+- 走偏信号 / 接受的代价--那在 ADR 0024 §6 / §7
+- 演进历史 / 评审过程--那在 audit/ 目录
 
-如果发现本 ADR 在重复 ADR 0024 的内容，**删掉**（重复就是 drift 风险）。
+如果发现本 ADR 在重复 ADR 0024 的内容,**删掉**(重复就是 drift 风险)。
 
 ---
 
-## 0.5 设计约束分层（R1.1 用户指示后新增）
+## 0.5 设计约束分层(R1.1 新增,R1.2 重新分类)
 
-用户明确表达：**“一切以实现 ADR 0024 为目的，任何代价都可以接受。”** 本 ADR 实施不被现有代码 / 现有下游 ADR 绑架。但“不被绑架”不等于“所有约束同等可破”——安全约束与架构约束本质不同，混淆会出安全事故。
+用户明确表达:**"一切以实现 ADR 0024 为目的,任何代价都可以接受。"** 本 ADR 实施不被现有代码 / 现有下游 ADR 绑架。
 
-### A. 不可破的安全边界（不为 ADR 0024 vision 牺牲）
+**R1.2 重新分类理由**:R1.1 把 ADR 0003 / 0018 / 0019 三条一刀切归为"不可破安全边界"是粗鲁判断。三条跟 ADR 0024 的关系不同:ADR 0019 几乎无冲突;ADR 0018 有"结果该硬 / 机制可变"的内在可拆分;**ADR 0003 跟 ADR 0024 vision 有根本性内在张力**--决不是"不可破安全边界",是"ADR 0024 之前的架构选择"(详 §0.6)。架构选择 ≠ 安全边界。
 
-下面三条是安全 / 正确性约束，本 ADR 任何能力点都**不能破**。违反 → 该能力点不能 ship。
+### A' 层:结果约束(不可破,机制可换)
 
-- **ADR 0003 主会话只读**：写工具不暴露给主会话 LLM 的 sandbox 约束。防止 prompt injection 让主会话写错 brain。**outcome self-report 的实现可调整**（§3.3 方案 B sidecar / 方案 C 隐藏 metadata 都允许），但**绝不**给主会话 LLM 加 brain 写权限。
-- **ADR 0018 sanitizer + storage gate**：safety / storage 边界。raw secret / token / credential / private key 不进 LLM / audit / memory。本 ADR 任何能力点都不绕过 sanitizer。audit.jsonl 写入 reasoning trace 走同款 sanitize。
-- **ADR 0019 vault 自管理**：vault 私钥 / 凭证边界。本 ADR 不接触 vault 内容，不绕过用户授权 `vault_release` 路径。
+下面两条是结果不可破。机制可换。本 ADR 任何能力点都不能破结果。
 
-### B. 可为 ADR 0024 vision 重设计的架构约束
+- **raw secret / credential 不出屏障**(当前机制走 ADR 0018 sanitizer)- raw secret / token / credential / private key 不进 LLM context / audit / memory / git blob。机制可从 deterministic regex 升级为 LLM-based 语义判断 / 混合路径(详 §0.6.5),但结果不变。
+- **vault 明确授权外不自动 release**(当前机制走 ADR 0019 / `vault_release` 用户授权)-本 ADR 不接触 vault 内容,不绕过用户授权路径。机制细节(age / passphrase)与本 ADR 无关。
 
-下面这些以前在 R1 §1.3 “不要改的”里被作为硬约束看待，**R1.1 后可以为 ADR 0024 vision 全部或部分重新设计 + 反向 patch 下游 ADR**。R2+ 详细设计里不预设“兼容现状”为默认，选择“重写”还是“兼容”走 R2+ multi-LLM audit 评估。
+### B' 层:跟 ADR 0024 vision 有内在张力的现有机制(R2+ 需 explicit 重新评估)
+
+下面三条是"安全 / 正确性低层联动不严重,但机制本身跟 ADR 0024 vision 有内在张力"。R2+ 必须 explicit 评估三条是保留、重新设计、或在本 ADR 场景下特例:
+
+- **ADR 0003 主会话只读**(详 §0.6)- latency / friction / outcome 设计妥协 / 防御目标重叠,四处张力。处理三选项【保留 / 部分放松 / 彻底重设计】详 §0.6。该项在 R2+ 选定前是**本 ADR 最大的未决 framing**。
+- **ADR 0018 sanitizer 当前 deterministic regex 实现**(§0.6.5)- regex 误 redact 用户语义讨论 secret pattern 的对话违 INV-IMPLICIT-GROUND-TRUTH。机制可重设计(LLM-based / 混合),结果走 A'。
+- **ADR 0017 strict-binding 实现路径**- project rules 不泄漏到其他项目是结果约束(走 A' 子项);具体注入路径 / scope 语义可重设计。
+
+**B' 补充说明:为什么 ADR 0003 不是 A'**
+
+这是 R1.1 错误的修正点。错误思路:"ADR 0003 是写工具 sandbox 约束 → 是防 prompt injection 的安全边界 → 是 A 层不可破。" 这个推论隐含两个错误假设:
+
+1. **现有机制是唯一防御机制**-错。ADR 0024 §3 AI-Native + §5 multi-view + ADR 0016 LLM curator + A' 层 raw secret 屏障 多套防御机制叠加,去掉 sandbox 不等于去掉防御。
+2. **机制 = 结果**-错。ADR 0003 机制是"写工具不暴露";要保护的结果是"恶意输入不能造成不可逆 brain 污染"。结果可以由其他机制保护(multi-view / staging / archive rollback / git history / sanitizer)。
+
+所以 ADR 0003 现状作为机制是**架构选择**,不是结果约束。架构选择跟 ADR 0024 vision 有张力 → 应该上桌重新评估,不是隐含作为硬约束。
+
+### C' 层:纯架构选择(可为 ADR 0024 vision 重设计)
+
+C' 层约束以前在 R1 §1.3 "不要改的"里被作为硬约束看待,**R1.1+ 后可以为 ADR 0024 vision 全部或部分重新设计 + 反向 patch 下游 ADR**。R2+ 详细设计里不预设"兼容现状"为默认,选择"重写"还是"兼容"走 R2+ multi-LLM audit 评估。
+
+**与 B' 层的区别**:B' 层的约束需要 explicit 论证你怎么保现有安全结果(或 explicit accept 变化)。C' 层纯交架构选型,不需安全论证。
 
 | 架构约束 | 原作为硬约束的位置 | R1.1 后重设计的可能形态 |
 |---|---|---|
-| ADR 0014 七区 layout / core frontmatter schema | R1 §1.3 | 为 ADR 0024 vision 重组 zone（如 staging 升格为正式区 / 新 zone 表达 confidence-tiered preferences / 合并某些冷 zone）以及 core frontmatter 增字段 |
-| ADR 0015 memory_search corpus / ranking | R1 §1.3 / §2.5 走 staging-loader 避免改 corpus | 为 ADR 0024 vision 扩展 corpus 包含 staging / outcome-ledger / aggregator hypothesis；unified retrieval 取代 multi-path 走丝 |
-| ADR 0016 curator 7 op | R1 §1.3 说“不新增 op” | 新增 op（如 promote-to-staging / reactivate-from-archive / accept-provisional / defer）或重设 op 语义 |
-| ADR 0017 strict-binding | R1 §1.3 | 安全语义保留，具体注入路径 / scope 语义可重设计 |
-| ADR 0020 transport-only sync | R1 §2.5 加 originating_device | 区分 staging / durable / outcome-ledger 不同同步语义，甚至拆拆同步协议 |
-| ADR 0023 R4 unified zone+tier+op classifier | R1 §1.5 “主动纠错必须合入 unified 避免第 3 个 LLM 调用” | 重新设计让 unified classifier 拆为多个专精 LLM 调用（每个 scope 更小推理质量更高），token 成本上涨作为 R1.1 后可接受代价 |
-| 现有 sediment write-only loop（`index.ts` / `llm-extractor.ts` / `curator.ts` / `writer.ts`） | R1 §1.1 / §1.2 把这个结构当 baseline 挂接 hook | **整段重写**为 active reflection agent 原生结构、不拘于“agent_end hook 不动仅加另一套 hook”的渐进 framing |
+| ADR 0014 七区 layout / core frontmatter schema | R1 §1.3 | 为 ADR 0024 vision 重组 zone(如 staging 升格为正式区 / 新 zone 表达 confidence-tiered preferences / 合并某些冷 zone)以及 core frontmatter 增字段 |
+| ADR 0015 memory_search corpus / ranking | R1 §1.3 / §2.5 走 staging-loader 避免改 corpus | 为 ADR 0024 vision 扩展 corpus 包含 staging / outcome-ledger / aggregator hypothesis;unified retrieval 取代 multi-path 走丝 |
+| ADR 0016 curator 7 op | R1 §1.3 说"不新增 op" | 新增 op(如 promote-to-staging / reactivate-from-archive / accept-provisional / defer)或重设 op 语义 |
+| ADR 0017 strict-binding | R1 §1.3 | 安全语义保留,具体注入路径 / scope 语义可重设计 |
+| ADR 0020 transport-only sync | R1 §2.5 加 originating_device | 区分 staging / durable / outcome-ledger 不同同步语义,甚至拆拆同步协议 |
+| ADR 0023 R4 unified zone+tier+op classifier | R1 §1.5 "主动纠错必须合入 unified 避免第 3 个 LLM 调用" | 重新设计让 unified classifier 拆为多个专精 LLM 调用(每个 scope 更小推理质量更高),token 成本上涨作为 R1.1 后可接受代价 |
+| 现有 sediment write-only loop(`index.ts` / `llm-extractor.ts` / `curator.ts` / `writer.ts`) | R1 §1.1 / §1.2 把这个结构当 baseline 挂接 hook | **整段重写**为 active reflection agent 原生结构、不拘于"agent_end hook 不动仅加另一套 hook"的渐进 framing |
 
-**反向 patch 下游 ADR**：以上任一重设计需与本 ADR R× ship 同 PR 交付对应 ADR 的 patch（同 R1.0 原反向 patch 机制）。patch 不同 PR 交付 → 本 ADR R× 不准 ship。
+**反向 patch 下游 ADR**:以上任一重设计需与本 ADR R× ship 同 PR 交付对应 ADR 的 patch(同 R1.0 原反向 patch 机制)。patch 不同 PR 交付 → 本 ADR R× 不准 ship。
 
-### C. 实施风格的放松（渐进 vs 大重写）
+### C. 实施风格的放松(渐进 vs 大重写)
 
-R1 §8 Phase 路线图按“渐进 P0/P0.5/P1/.../P5 各 ship 后 dogfood 数周”设计。**R1.1 后允许“大重写”作为 R2+ 可评估选项**：
+R1 §8 Phase 路线图按"渐进 P0/P0.5/P1/.../P5 各 ship 后 dogfood 数周"设计。**R1.1 后允许"大重写"作为 R2+ 可评估选项**:
 
-- **渐进路径**（R1 默认）：dogfood 数据驱动迭代、减少一次性重写风险、保留现有架构中已考验过的安全点。
-- **大重写路径**（R1.1 后合法选项）：一次性重写整个 sediment 路径作为 active reflection agent，跨多 PR 但形成一个 vision-coherent batch ship，不被“在旧 hook 上加新能力点”的 framing 绑架。
+- **渐进路径**(R1 默认):dogfood 数据驱动迭代、减少一次性重写风险、保留现有架构中已考验过的安全点。
+- **大重写路径**(R1.1 后合法选项):一次性重写整个 sediment 路径作为 active reflection agent,跨多 PR 但形成一个 vision-coherent batch ship,不被"在旧 hook 上加新能力点"的 framing 绑架。
 
-两者**都不是默认**。R2+ 详细设计时多 LLM audit 显式 review 该能力点 / 该阶段适合哪条路径，出于【设计哈使万事 OK】避免默认选渐进为“安全选择”。
+两者**都不是默认**。R2+ 详细设计时多 LLM audit 显式 review 该能力点 / 该阶段适合哪条路径,出于【设计哈使万事 OK】避免默认选渐进为"安全选择"。
 
 ### 适用范围说明
 
-本§0.5 适用于：
+本§0.5 适用于:
 
-- §1 接口面（§1.3 不要改的重新分类 / §1.5 unified classifier 整合从“必须合并”转为“可选择”）
-- §2-§7 六条能力点设计（R2+ 展开时选 PE-form / Infra / 架构重写三个维度独立考虑）
-- §8 phase 路线图（渐进 vs 大重写两路径不预设）
-- §10 self-check 表（架构重设计不跨 A 层安全约束是合法的，跨 A 层 → ✗ hard stop）
+- §1 接口面(§1.3 不要改的重新分类 / §1.5 unified classifier 整合从"必须合并"转为"可选择")
+- §2-§7 六条能力点设计(R2+ 展开时选 PE-form / Infra / 架构重写三个维度独立考虑)
+- §8 phase 路线图(渐进 vs 大重写两路径不预设)
+- §10 self-check 表(架构重设计不跨 A 层安全约束是合法的,跨 A 层 → ✗ hard stop)
 
 不适用于：
 
 - ADR 0024 本身的 4 条 invariant + AI-Native 原则 + §6 接受代价 + §7 走偏信号——这些是 vision 本身，本§0.5 是为了实现 vision 而设，不能反过来动 vision。
-
-### R0 → R7 演进路径（R8 audit 后伸长一轮）
-
-| 阶段 | 范围 | 状态 |
-|---|---|---|
-| R0 | 骨架 + 能力点 1 完整 + 其余 5 条骨架（534 行） | ✅ ship（bd16805），[R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) 查出 6 个 P0 |
-| **R1**（本稿） | R0 + R8 audit 6 P0 落地（事实错误 + 6 P0 + 1 P1 + 7 盲点） | 起草中 |
-| R2 | 能力点 2（outcome self-report）完整 prompt + schema | 待 R1 ship |
-| R3 | 能力点 3（aggregator）完整设计 | 待 R2 ship |
-| R4 | 能力点 4（multi-view full）完整设计 | 待 R3 ship（P0.5 minimal multi-view 与 P0 并行）|
-| R5 | 能力点 5（classifier prompt 演进）完整设计 | 待 R4 ship（P4a substrate 与 P0 并行）|
-| R6 | 能力点 6（静默归档 + 回滚窗口）完整设计 | 待 R5 ship（P5a substrate 与 P0 并行）|
-| R7 | 三层 smoke 完整设计 + 实施 phase 路线图细化 | 待 R6 ship |
-
-每个 R 阶段独立做多模型评审 → 收敛 → ship。**不一次性写完所有 6 条能力点的完整设计**——一次性写完风险高（reviewer 无法收敛、用户读不动、单点错位影响全局）。
+- A' 层结果本身不适用于本§。本§是“机制可不可换”的分层；A' 层 “结果不可破” 是上一层原则。
 
 ---
 
-## 1. 现有 Sediment 接口面（要改什么 / 不要改什么）
+## 0.6 ADR 0003 与 ADR 0024 vision 的内在张力专论（R1.2 新增）
 
-### 1.1 现有结构（high-level，R8 audit P0-B1 事实纠正）
+本§是 R1.2 最关键的 framing 识别。**ADR 0003 主会话只读跟 ADR 0024 vision 有根本性内在张力，不是不可破安全边界。R2+ 详细设计中必须 explicit 评估下面的处理三选项。**
 
-**R0 误写**：“`llm-extractor.ts ← 当前 curator prompt（决定 create/update/merge/...）`”。这是事实错误。真实结构：
+### 0.6.1 ADR 0003 的隐含假设
+
+ADR 0003 设计时隐含三个假设：
+
+1. **LLM 是潜在不可信 actor**：prompt injection 可以让主会话 LLM 被诱导写错 brain。
+2. **写工具暴露 = brain 污染价你点升高**：sandbox 隐离是主防御机制。
+3. **sediment sidecar 是可信写者**—与主会话 LLM 在信任级别上本质不同。
+
+这三个假设都跟 ADR 0024 哲学有张力——§3 AI-Native 原则 "信任 LLM curator" 明确在 reject 假设 1；§5 multi-view + ADR 0016 LLM curator + A' 层 sanitizer 多套体系在取代假设 2；ADR 0024 INV-ACTIVE-CORRECTION “用户任务中纠错是主会话 LLM 看到的 first-class 信号” 在 reject 假设 3（主会话不低人一等）。
+
+### 0.6.2 三个冲突点
+
+**冲突 1—latency / friction 违 INV-ACTIVE-CORRECTION**
+
+ADR 0024 INV-ACTIVE-CORRECTION 说用户任务中说“以后用 X” / “忘掉那条”跟“用 React 不用 Vue”**性质一样**，不增加认知负担。
+
+但 ADR 0003 强制路径：主会话 LLM 看到 “忘掉那条” → 不能直接 mutate brain → 信号交给 sediment sidecar → agent_end 跑 classifier → 几轮后才生效。
+
+用户体验：大脑反应迟钝，“延伸大脑” 体验打折。例如用户任务中说“以后不要推荐 yarn 了”，几分钟后同一 session 未结束时又谈到包管理，lLLM 仍推荐 yarn（因为 sediment 还没处理那个信号）——实际用户跟你说“以后不用 yarn”你还推荐 yarn。你不是延伸大脑，你是装没听见。
+
+**冲突 2—outcome self-report 选方案 C 是结构性妥协**
+
+ADR 0024 §5.2 + R7 audit DeepSeek 独家发现：outcome attribution 最高信噪比是“当时干活那个 LLM 自己第一人称交代”。事后 curator 旁观猜测或隐藏 metadata 解读都是退而求其次。
+
+但 ADR 0003 强制：主会话 LLM 不能写 outcome ledger → 退而求其次。R1 §3.3 选了方案 C（隐藏 metadata + sidecar 解读），或者方案 B（sidecar LLM 旁观）。**不是最优选择，是 ADR 0003 强制的结构妥协。**
+
+**冲突 3—防御目标与 ADR 0024 体系重叠**
+
+ADR 0003 防的是“LLM 被 prompt injection 写错 brain”。
+
+ADR 0024 §3 AI-Native 原则 + §5 multi-view verification + ADR 0016 sediment LLM curator + A' 层 sanitizer 在防**同一件事**。
+
+R7 audit 验证：21/21 PE-form、Layer F v2 能防 RLHF 机械主义偏置——这些是**正面证据** AI-Native + multi-view 体系能防 prompt injection 那一类错误。
+
+问题：两套防御机制叠加是凗余吗？**不一定是**——depth-in-defense 多套防御本身不是错误。错误是 "其中一套生成 latency 破坏 vision 的同时，另一套能提供同等保护”。R2+ multi-LLM audit 需 explicit 评估。
+
+### 0.6.3 R2+ 处理三选项
+
+| 选项 | 内容 | ADR 0024 适配 | 安全代价 | 实现工程量 |
+|---|---|---|---|---|
+| **1**（R1 默认） | 保留 ADR 0003 + 接受 latency 代价；outcome 走方案 C 隐藏 metadata；active correction 走 sediment sidecar | 中 | 最低（现状） | 低 |
+| **2** | 部分放松 ADR 0003 ——主会话 LLM 在 active correction 场景下可调 `brain.supersede(slug, reason)` / `brain.note(content)` / `brain.update(slug, patch)` 工具，**工具内部仍走 sediment writer + multi-view + audit**（不是直写文件）；outcome 走方案 A（主会话本人第一人称在 session 内走同款 brain 工具写 outcome ledger）| 高 | 中（依赖 sediment LLM curator + multi-view 防御替代 sandbox 防御） | 中-大 |
+| **3** | 彻底重设计——没有“主会话 vs sediment”二分；主会话 LLM **本身就是** sediment 在用户任务对话中的化身；ADR 0003 / 0010（sediment single agent）/ 0013（lane 框架）同步重写 | 最高 | 高（需详细设计新防御体系） | 大 |
+
+**选项 2 工具设计补充**：brain.* 工具不是“打开了主会话 LLM 的内存​​"，是“提供了几个试验性 op 入口”，每个 op 内部仍走：
+  - sediment writer.commit（atomic + git + audit）
+  - 高价值 op 触发 multi-view verification
+  - audit trace 记录原始会话 context + correction signal
+  - 付作用不能绕过 A' 层 sanitizer
+这不是"主会话 LLM 现在能任意写 brain"，是“主会话 LLM 可调用与 sediment 同款的 brain op”。
+
+### 0.6.4 三选项选择的决策依据
+
+R2+ multi-LLM audit 需明确评估以下问题才能选项：
+
+1. **AI-Native + multi-view 能不能提供跟 sandbox 同等的 prompt injection 防护？** R7 audit 证据是“能防 RLHF 偏置”，但能不能防恶意 injection 需 dogfood + 独立评估。
+2. **active correction latency 实际是几秒？几轮对话？几分钟？** 决定“是否足够破坏延伸大脑体验”。R2+ dogfood 量化。
+3. **outcome self-report 方案 C（隐藏 metadata）在实践中质量与方案 A（本人交代）相差多少？** 决定“妥协是否可接受”。R2+ 双试验。
+4. **如果选项 2/3，ADR 0003 / 0010 / 0013 的 patch 工程量多大？** 选项 3 工程量可能超出本 ADR R× 主体。
+
+### 0.6.5 ADR 0018 sanitizer 机制重评估（§0.6 下联小节）
+
+ADR 0018 sanitizer 的**结果**（raw secret 不出屏障）在 §0.5 A' 层不可破。但当前**机制**（deterministic regex pattern-match）跟 ADR 0024 §3 AI-Native 有轻度张力：
+
+- 用户说“我的 API key 配置遵循 sk-xxxx 这种 pattern” → regex 误判 redact 该语义讨论 → classifier 看不到原句 → 丢失 active correction 信号
+- 本例不是“防护过度”问题——是误抦截成本走 LLM 行为层跟 ADR 0024 INV-IMPLICIT-GROUND-TRUTH 冲突
+
+**R2+ 处理三选项**：
+
+| 选项 | 内容 | 优势 | 劣势 |
+|---|---|---|---|
+| 1（R1 默认） | 保留 regex sanitizer + 接受误 redact | 机制简单、避免漏过 | 丢失部分 active correction 信号 |
+| 2 | 升级为 LLM-based sanitize：LLM 判断“这是真 secret 还是讨论 secret pattern” | 与 AI-Native 一致、语义准 | LLM 错判可能漏过 raw secret → 破坏 A' 结果 |
+| 3（推荐） | 混合。regex 作底（保 A' 结果不漏过 raw secret）+ LLM advisory（regex 拦住的区间重新评估是否为语义讨论，是的话恢复原文提供 classifier） | 结果安全 + 信号不丢 | 机制复杂、LLM 错判还原存在但丢过避免 |
+
+### R0 → R7 演进路径(R8 audit 后伸长一轮)
+
+| 阶段 | 范围 | 状态 |
+|---|---|---|
+| R0 | 骨架 + 能力点 1 完整 + 其余 5 条骨架(534 行) | ✅ ship(bd16805),[R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) 查出 6 个 P0 |
+| **R1**(本稿) | R0 + R8 audit 6 P0 落地(事实错误 + 6 P0 + 1 P1 + 7 盲点) | 起草中 |
+| R2 | 能力点 2(outcome self-report)完整 prompt + schema | 待 R1 ship |
+| R3 | 能力点 3(aggregator)完整设计 | 待 R2 ship |
+| R4 | 能力点 4(multi-view full)完整设计 | 待 R3 ship(P0.5 minimal multi-view 与 P0 并行)|
+| R5 | 能力点 5(classifier prompt 演进)完整设计 | 待 R4 ship(P4a substrate 与 P0 并行)|
+| R6 | 能力点 6(静默归档 + 回滚窗口)完整设计 | 待 R5 ship(P5a substrate 与 P0 并行)|
+| R7 | 三层 smoke 完整设计 + 实施 phase 路线图细化 | 待 R6 ship |
+
+每个 R 阶段独立做多模型评审 → 收敛 → ship。**不一次性写完所有 6 条能力点的完整设计**--一次性写完风险高(reviewer 无法收敛、用户读不动、单点错位影响全局)。
+
+---
+
+## 1. 现有 Sediment 接口面(要改什么 / 不要改什么)
+
+### 1.1 现有结构(high-level,R8 audit P0-B1 事实纠正)
+
+**R0 误写**:"`llm-extractor.ts ← 当前 curator prompt(决定 create/update/merge/...)`"。这是事实错误。真实结构:
 
 ```
 extensions/sediment/
 ├── index.ts                  ← agent_end hook 入口 + orchestration
-├── llm-extractor.ts          ← runLlmExtractor() 产 candidate（不决定 op）
+├── llm-extractor.ts          ← runLlmExtractor() 产 candidate(不决定 op)
 ├── curator.ts                ← curateProjectDraft() 决定 create/update/merge/... 7 op
-├── writer.ts                 ← 落盘（atomic write + git + appendAudit）
+├── writer.ts                 ← 落盘(atomic write + git + appendAudit)
 ├── memory-architecture/      ← 七区 layout
 └── ...
 ```
 
-注意：`audit.ts` 不是独立文件，`appendAudit` 是 `writer.ts` 里的函数。R1 可以选择 (a) 保持现状，audit 逻辑留在 writer / (b) 拆出独立 `audit.ts`——选 (a)，减少重构面。
+注意:`audit.ts` 不是独立文件,`appendAudit` 是 `writer.ts` 里的函数。R1 可以选择 (a) 保持现状,audit 逻辑留在 writer / (b) 拆出独立 `audit.ts`--选 (a),减少重构面。
 
-current 路径（write-only loop）：
+current 路径(write-only loop):
 
 ```
 agent_end
   → index.ts 接 hook
   → 读 conversation window
-  → runLlmExtractor()（产 candidate）
-  → curateProjectDraft()（决定 7 op）
+  → runLlmExtractor()(产 candidate)
+  → curateProjectDraft()(决定 7 op)
   → writer 落盘 + appendAudit
   → done
 ```
 
-主动纠错 classifier 应在 `index.ts` orchestration 层 hook，不是塞进 `llm-extractor.ts`。与 ADR 0023 D4 unified zone+tier+op classifier 的整合详 §1.5。
+主动纠错 classifier 应在 `index.ts` orchestration 层 hook,不是塞进 `llm-extractor.ts`。与 ADR 0023 D4 unified zone+tier+op classifier 的整合详 §1.5。
 
-### 1.2 本 ADR 要在哪些层动（R8 audit P0-B2/B3 一致化）
+### 1.2 本 ADR 要在哪些层动(R8 audit P0-B2/B3 一致化)
 
-R1 采用 **unified classifier 路径**（对齐 ADR 0023 D4）：主动纠错识别是现有 `curator.ts::curateProjectDraft()` 的一个新输出维度，不新建独立 classifier（避免第 3 个 LLM 调用、对齐 ADR 0024 §3 “同一调用多任务”哲学）。
+R1 采用 **unified classifier 路径**(对齐 ADR 0023 D4):主动纠错识别是现有 `curator.ts::curateProjectDraft()` 的一个新输出维度,不新建独立 classifier(避免第 3 个 LLM 调用、对齐 ADR 0024 §3 "同一调用多任务"哲学)。
 
 | 能力点 | 改 / 加什么 |
 |---|---|
-| §2 主动纠错识别 | **改 `llm-extractor.ts` + `curator.ts`**：classifier prompt 合并 evidence-first 6 步骨架 + 三类语义为 unified classifier 的新输出维度（CorrectionSignal field set）；**加 `correction-pipeline.ts`**：后续处理（staging 写入 + multi-view 排队 + session cache） |
-| §2 P1 context-packer | **加 `context-packer.ts`**（0 号 capability，R8 P1-1 / R7 audit D1）：conversation_window 超 token budget 时，prompt 驱动裁剪 + 明译¨'Omitted context that could change interpretation: ...' |
-| §2 staging 召回 | **加 `staging-loader.ts`**（R8 P0-B5）：从 staging/ 加载 attribution_pending 条目作为 classifier 独立输入字段 `staging_context`，**不改 `memory_search` corpus** |
-| §3 outcome self-report | **加 `outcome-collector.ts`**：agent_end 时读主会话 LLM 每轮隐藏 metadata（方案 C，详 §3.3）汇总为 outcome_history；**不进 entry frontmatter**——独立 sidecar ledger（R8 P0-B §1.3）避免 frontmatter 无限增长 |
-| §4 cross-session aggregator | **加 `aggregator.ts` + scheduler hook**：定时任务（daily/weekly/monthly），独立于 agent_end |
-| §5 multi-view verification | **加 `multi-view-reviewer.ts`**：触发条件命中时拆两次独立 API 调用；**P0.5 minimal 版本与 P0 并行**（R8 P0-C1）保护 P0 高置信度 durable correction |
-| §6 classifier prompt 演进 | **加 `/abrain audit classifier` 诊断入口**；**`prompt_version` substrate 与 P0 同期上线**（R8 P0-C2）；prompt 改动是人在 loop，不加自动 iteration |
-| §7 静默归档 + 回滚窗口 | **改 `writer.ts`**：`status=archived` 软删 N 天后才 `git rm`——soft-delete substrate 与 P0 并行上线（R8 Opus 盲点）；**加 `archive-rollback.ts`**：N 天窗口内反证检测的 prompt |
+| §2 主动纠错识别 | **改 `llm-extractor.ts` + `curator.ts`**:classifier prompt 合并 evidence-first 6 步骨架 + 三类语义为 unified classifier 的新输出维度(CorrectionSignal field set);**加 `correction-pipeline.ts`**:后续处理(staging 写入 + multi-view 排队 + session cache) |
+| §2 P1 context-packer | **加 `context-packer.ts`**(0 号 capability,R8 P1-1 / R7 audit D1):conversation_window 超 token budget 时,prompt 驱动裁剪 + 明译 ̈'Omitted context that could change interpretation: ...' |
+| §2 staging 召回 | **加 `staging-loader.ts`**(R8 P0-B5):从 staging/ 加载 attribution_pending 条目作为 classifier 独立输入字段 `staging_context`,**不改 `memory_search` corpus** |
+| §3 outcome self-report | **加 `outcome-collector.ts`**:agent_end 时读主会话 LLM 每轮隐藏 metadata(方案 C,详 §3.3)汇总为 outcome_history;**不进 entry frontmatter**--独立 sidecar ledger(R8 P0-B §1.3)避免 frontmatter 无限增长 |
+| §4 cross-session aggregator | **加 `aggregator.ts` + scheduler hook**:定时任务(daily/weekly/monthly),独立于 agent_end |
+| §5 multi-view verification | **加 `multi-view-reviewer.ts`**:触发条件命中时拆两次独立 API 调用;**P0.5 minimal 版本与 P0 并行**(R8 P0-C1)保护 P0 高置信度 durable correction |
+| §6 classifier prompt 演进 | **加 `/abrain audit classifier` 诊断入口**;**`prompt_version` substrate 与 P0 同期上线**(R8 P0-C2);prompt 改动是人在 loop,不加自动 iteration |
+| §7 静默归档 + 回滚窗口 | **改 `writer.ts`**:`status=archived` 软删 N 天后才 `git rm`--soft-delete substrate 与 P0 并行上线(R8 Opus 盲点);**加 `archive-rollback.ts`**:N 天窗口内反证检测的 prompt |
 
-**Prompt 文件清单**（独立 .md，方便述斸 + prompt_version 追溯）：
+**Prompt 文件清单**(独立 .md,方便述斸 + prompt_version 追溯):
 
 ```
 extensions/sediment/prompts/
-├── reasoning-normalization-preamble-v1.md   ← 共用 preamble（§2/4/5 皆 prepend）
+├── reasoning-normalization-preamble-v1.md   ← 共用 preamble(§2/4/5 皆 prepend)
 ├── active-correction-classifier-v1.md       ← §2.3 完整 prompt
 ├── context-packer-v1.md                     ← long-session 裁剪 prompt
 ├── outcome-self-report-v1.md                ← §3 隐藏 metadata prompt
@@ -172,37 +281,37 @@ extensions/sediment/prompts/
 └── archive-reactivation-reviewer-v1.md      ← §7
 ```
 
-### 1.3 不要改的（R1.1 重新分层：仅保留 A 层安全边界）
+### 1.3 不要改的(R1.1 重新分层:仅保留 A 层安全边界)
 
-**R1.1 诖释**：原 R1 §1.3 列了 9 条“不要改的”。按 §0.5 架构重新分层，现仅保留三条 A 层安全 / 正确性边界。**原列表其余项全部迁为 B 层**（可为 ADR 0024 vision 重设计），在 §0.5 B 层表内响应。
+**R1.1 诖释**:原 R1 §1.3 列了 9 条"不要改的"。按 §0.5 架构重新分层,现仅保留三条 A 层安全 / 正确性边界。**原列表其余项全部迁为 B 层**(可为 ADR 0024 vision 重设计),在 §0.5 B 层表内响应。
 
-#### A 层（本§保留 = 硬约束，违反 → 该能力点不准 ship）
+#### A 层(本§保留 = 硬约束,违反 → 该能力点不准 ship)
 
-- **主会话只读**（ADR 0003）— 任何能力点都不能给主会话 LLM 加 brain 写权限。outcome self-report 走 §3.3 方案 C 隐藏 metadata，或 R2+ 评审决定改走方案 B sidecar——谁都不能给主会话 LLM 实际写 entry 的路径。
-- **Sanitizer + storage gate**（ADR 0018）— raw secret / token / credential / private key 不进 LLM / audit / memory。classifier 拿到的 conversation_window 已 sanitize；audit.jsonl 写入 reasoning trace 走同款路径。
-- **Vault 边界**（ADR 0019）— 本 ADR 不接触 vault 私钥 / 凭证，不绕过用户授权 `vault_release` 路径。
+- **主会话只读**(ADR 0003)- 任何能力点都不能给主会话 LLM 加 brain 写权限。outcome self-report 走 §3.3 方案 C 隐藏 metadata,或 R2+ 评审决定改走方案 B sidecar--谁都不能给主会话 LLM 实际写 entry 的路径。
+- **Sanitizer + storage gate**(ADR 0018)- raw secret / token / credential / private key 不进 LLM / audit / memory。classifier 拿到的 conversation_window 已 sanitize;audit.jsonl 写入 reasoning trace 走同款路径。
+- **Vault 边界**(ADR 0019)- 本 ADR 不接触 vault 私钥 / 凭证,不绕过用户授权 `vault_release` 路径。
 
-#### "不增加主会话 UI / slash command" — 中间状态
+#### "不增加主会话 UI / slash command" - 中间状态
 
-这是 ADR 0024 §4.2 反模式 直接带出，不是架构兼容约束。本 ADR R1.1 仍然不新增面向用户推送 brain 元工作的 UI / slash command（`/rule add` / `/rule veto` / sediment 生命周期 `prompt_user`）。高级用户诊断入口（§6）是例外但不推广。**这不受 R1.1 架构重设计放松影响——ADR 0024 invariant 本身是 vision，§0.5 不适用于 vision 本身。**
+这是 ADR 0024 §4.2 反模式 直接带出,不是架构兼容约束。本 ADR R1.1 仍然不新增面向用户推送 brain 元工作的 UI / slash command(`/rule add` / `/rule veto` / sediment 生命周期 `prompt_user`)。高级用户诊断入口(§6)是例外但不推广。**这不受 R1.1 架构重设计放松影响--ADR 0024 invariant 本身是 vision,§0.5 不适用于 vision 本身。**
 
-#### B 层（迁到 §0.5 B 层，**不再作为 R1 §1.3 硬约束**）
+#### B 层(迁到 §0.5 B 层,**不再作为 R1 §1.3 硬约束**)
 
-原 R1 §1.3 中以下项全部迁为“可重设计”，R2+ 多 LLM audit 评估具体走 “保留现状" 还是 "重设计"（详 §0.5 B 层表）：
+原 R1 §1.3 中以下项全部迁为"可重设计",R2+ 多 LLM audit 评估具体走 "保留现状" 还是 "重设计"(详 §0.5 B 层表):
 
 - ADR 0014 七区 layout / core entry frontmatter schema
 - ADR 0015 `memory_search` corpus / ranking / context-inject 路径
 - ADR 0016 curator 7 op 集合
-- ADR 0017 strict-binding 具体注入路径（安全语义保留）
-- ADR 0020 transport-only sync 协议细节（安全语义保留）
-- ADR 0023 R4 unified zone+tier+op classifier 合并选择（§1.5 三个选项 X/Y/Z）
+- ADR 0017 strict-binding 具体注入路径(安全语义保留)
+- ADR 0020 transport-only sync 协议细节(安全语义保留)
+- ADR 0023 R4 unified zone+tier+op classifier 合并选择(§1.5 三个选项 X/Y/Z)
 - writer atomic write + git + appendAudit 主路径结构、现有 sediment write-only loop 逻辑结构
 
-**仅 ADR 0022 prompt_user contract 中的 "sediment 生命周期 prompt_user 是反模式" 部分仍是 A 层**（同上面中间状态说明）。ADR 0022 任务相关 prompt_user 边界本身也是安全语义保留（sandbox），具体调用时机可调。
+**仅 ADR 0022 prompt_user contract 中的 "sediment 生命周期 prompt_user 是反模式" 部分仍是 A 层**(同上面中间状态说明)。ADR 0022 任务相关 prompt_user 边界本身也是安全语义保留(sandbox),具体调用时机可调。
 
-### 1.4 staging 路径定义（R8 P0-B4）
+### 1.4 staging 路径定义(R8 P0-B4)
 
-staging 不是 core 七区、也不是 ADR 0023 第 8 区 rules。staging 是 **sediment 内部 transient store**，路径：
+staging 不是 core 七区、也不是 ADR 0023 第 8 区 rules。staging 是 **sediment 内部 transient store**,路径:
 
 ```
 ~/.abrain/.state/sediment/staging/
@@ -212,77 +321,77 @@ staging 不是 core 七区、也不是 ADR 0023 第 8 区 rules。staging 是 **
 
 - 不进 core zone index
 - 不被 memory_search 召回进主会话 context
-- 只被 `staging-loader.ts` 读取，作为 classifier / aggregator 的独立输入字段
-- ADR 0014 invariant #7 七区互斥不被违反（staging 不是 zone）
-- ADR 0023 第 8 区 rules 不被动（staging 不是 rule）
+- 只被 `staging-loader.ts` 读取,作为 classifier / aggregator 的独立输入字段
+- ADR 0014 invariant #7 七区互斥不被违反(staging 不是 zone)
+- ADR 0023 第 8 区 rules 不被动(staging 不是 rule)
 
-staging frontmatter schema 是本 ADR 独定、与 core entry frontmatter 独立，详 §2.5。
+staging frontmatter schema 是本 ADR 独定、与 core entry frontmatter 独立,详 §2.5。
 
-### 1.5 与 ADR 0023 R4 unified classifier 的整合选项（R1.1 不强制合并）
+### 1.5 与 ADR 0023 R4 unified classifier 的整合选项(R1.1 不强制合并)
 
-**R1 原设计（合并路径）**：主动纠错识别作为 unified classifier 新输出维度，同一 LLM 调用同时产 zone + tier + op + correction_signal，latency / token 不倍加。
+**R1 原设计(合并路径)**:主动纠错识别作为 unified classifier 新输出维度,同一 LLM 调用同时产 zone + tier + op + correction_signal,latency / token 不倍加。
 
-**R1.1 重新评估**（§0.5 B 层）：“避免第 3 个 LLM 调用”是以现有 token 预算为隐含限制的保守判断。用户明确表达任何代价可接受后，拆为多个专精 LLM 调用（每个 scope 更小推理质量更高）也是合法选项：R1.1 后不预设“必须合并”。
+**R1.1 重新评估**(§0.5 B 层):"避免第 3 个 LLM 调用"是以现有 token 预算为隐含限制的保守判断。用户明确表达任何代价可接受后,拆为多个专精 LLM 调用(每个 scope 更小推理质量更高)也是合法选项:R1.1 后不预设"必须合并"。
 
-**三个选项**（R2+ multi-LLM audit 选择）：
+**三个选项**(R2+ multi-LLM audit 选择):
 
 ```
-选项 X：R1 合并路径（低成本但 prompt 变复杂）
-  unified classifier output：
+选项 X:R1 合并路径(低成本但 prompt 变复杂)
+  unified classifier output:
     - zone     ← ADR 0023
     - tier     ← ADR 0023
     - op       ← ADR 0016 / 0023
     - correction_signal  ← 本 ADR 新增
-  优势：一次调用、全局上下文、cost 低
-  劣势：prompt 越越肿、debug 难度高、单点失败独站多输出都丢
+  优势:一次调用、全局上下文、cost 低
+  劣势:prompt 越越肿、debug 难度高、单点失败独站多输出都丢
 
-选项 Y：全拆（高成本但每个 prompt 专精、debug 容易）
+选项 Y:全拆(高成本但每个 prompt 专精、debug 容易)
   classifier_zone(window) → zone
   classifier_tier(window, zone) → tier
   classifier_op(window, zone, tier, related_entries) → op
   classifier_correction(window, related, staging) → correction_signal
-  优势：每个 prompt scope 小，易迭代；failure isolation
-  劣势：4x token / latency
+  优势:每个 prompt scope 小,易迭代;failure isolation
+  劣势:4x token / latency
 
-选项 Z：中道（推荐起点）
+选项 Z:中道(推荐起点)
   classifier_zone_tier_op(window, related) → {zone, tier, op}
   classifier_correction(window, related, staging) → correction_signal
-  优势：主价值路径 latency = 2x；correction 与 zone routing 拆开减少 prompt 趋补
-  劣势：仍需设计上下文传递
+  优势:主价值路径 latency = 2x;correction 与 zone routing 拆开减少 prompt 趋补
+  劣势:仍需设计上下文传递
 ```
 
-R2+ 多 LLM audit 评估 X/Y/Z 试验得失。本 ADR R1.1 **不预设选 X**。任何选择都需 ADR 0023 R5 同步 patch（本 ADR R× ship 的反向 patch 交付项）。
+R2+ 多 LLM audit 评估 X/Y/Z 试验得失。本 ADR R1.1 **不预设选 X**。任何选择都需 ADR 0023 R5 同步 patch(本 ADR R× ship 的反向 patch 交付项)。
 
 ---
 
-## 2. 能力点 1：主动纠错识别（前置能力，本 R0 完整设计）
+## 2. 能力点 1:主动纠错识别(前置能力,本 R0 完整设计)
 
 ### 2.1 为什么这是前置能力
 
-INV-ACTIVE-CORRECTION 是 ADR 0024 §2 第四条 invariant，定下"用户在任务里说'以后用 X'是核心真实信号通道"。但**主动纠错的识别质量决定其他五条能力的输入质量**：
+INV-ACTIVE-CORRECTION 是 ADR 0024 §2 第四条 invariant,定下"用户在任务里说'以后用 X'是核心真实信号通道"。但**主动纠错的识别质量决定其他五条能力的输入质量**:
 
 - §3 outcome self-report 要知道"用户在 task 里反馈了什么" → 需要主动纠错识别
 - §4 aggregator 要看跨会话趋势 → 需要先识别出每个会话里的纠错信号
 - §5 multi-view 触发条件之一是"主动纠错相关的归档" → 需要识别
 - §7 静默归档反证检测 → 需要识别用户是否在自然对话里"重新启用旧偏好"
 
-**所以本 ADR R0 阶段先完整设计这一条；其他 5 条在本 ADR 落 R0 骨架就够，R1-R5 详细展开**。
+**所以本 ADR R0 阶段先完整设计这一条;其他 5 条在本 ADR 落 R0 骨架就够,R1-R5 详细展开**。
 
 ### 2.2 触发条件
 
-在 **`agent_end` hook 中、curator op 决定之前**插入。所有 `agent_end` 都跑——不需要预筛选（与 ADR 0024 §3.3 "几个典型机械形态" 表第一行对齐：classifier 不靠预筛选阈值，靠 prompt 引导）。
+在 **`agent_end` hook 中、curator op 决定之前**插入。所有 `agent_end` 都跑--不需要预筛选(与 ADR 0024 §3.3 "几个典型机械形态" 表第一行对齐:classifier 不靠预筛选阈值,靠 prompt 引导)。
 
-输入：
+输入:
 
 ```ts
 interface ClassifierInput {
-  conversation_window: ConversationTurn[];  // 完整 window，不预剪
-  recently_loaded_entries: MemoryEntry[];   // 本 session 主会话 inject 过的 entry（含 always / listed / search 结果）
-  related_entries: MemoryEntry[];           // memory_search 召回的相关 entry（按主题 / 触发词）
+  conversation_window: ConversationTurn[];  // 完整 window,不预剪
+  recently_loaded_entries: MemoryEntry[];   // 本 session 主会话 inject 过的 entry(含 always / listed / search 结果)
+  related_entries: MemoryEntry[];           // memory_search 召回的相关 entry(按主题 / 触发词)
 }
 ```
 
-输出：
+输出:
 
 ```ts
 interface CorrectionSignal {
@@ -297,12 +406,12 @@ interface CorrectionSignal {
 
   // Step 3-4 disconfirmation
   initial_lean: "durable" | "task-local" | "debug";
-  disconfirmer: string | null;              // 找到的最强反证（null = 没找到，自身是 signal）
+  disconfirmer: string | null;              // 找到的最强反证(null = 没找到,自身是 signal)
   downgrade_applied: boolean;               // step 4 是否触发降级
 
   // Step 5 final classification
   typing: "durable" | "task-local" | "debug";
-  scope_description: string;                // 自然语言 scope 描述（不是枚举字段）
+  scope_description: string;                // 自然语言 scope 描述(不是枚举字段)
   confidence: number;                       // 0-10
 
   // Step 6 self-critique
@@ -310,15 +419,15 @@ interface CorrectionSignal {
   most_likely_error_reason: string;
 
   // 归属处理
-  target_entry_slug: string | null;         // 找到对应 entry → slug；未找到 → null + 写 staging hypothesis
-  resolution_hypothesis: string | null;     // null 时为 null；未找到时是自然语言假设
+  target_entry_slug: string | null;         // 找到对应 entry → slug;未找到 → null + 写 staging hypothesis
+  resolution_hypothesis: string | null;     // null 时为 null;未找到时是自然语言假设
 }
 ```
 
-### 2.3 完整 Prompt（production-ready，R8 P0-A 全量重写）
+### 2.3 完整 Prompt(production-ready,R8 P0-A 全量重写)
 
 ```
-# Reasoning normalization preamble (§1.5 unified classifier 共用，prepended)
+# Reasoning normalization preamble (§1.5 unified classifier 共用,prepended)
 
 Your reasoning trace MUST follow this fixed structure across all
 classification dimensions: quote → claim → alternative → uncertainty
@@ -331,18 +440,18 @@ verification (§5) can compare apples-to-apples.
 
 You are reading the latest conversation window. Among other classification
 dimensions (zone / tier / op), decide whether a user utterance contains
-an active correction signal — a natural-language statement that updates
+an active correction signal - a natural-language statement that updates
 the brain's knowledge about user preference, identity, or anti-pattern.
 The user does NOT see you run.
 
 # What counts as active correction (positive examples)
 
 - "以后用 X" / "from now on use X"                  ← durable preference shift
-- "我换了，现在用 pnpm" / "I switched, using pnpm now"  ← durable shift, no “以后” marker (pattern-match 防护)
+- "我换了,现在用 pnpm" / "I switched, using pnpm now"  ← durable shift, no "以后" marker (pattern-match 防护)
 - "忘掉那条" / "forget that one"                    ← supersede instruction
 - "你怎么记成 Y 了" / "wait you remembered Y?"      ← contradiction surfacing
 - "现在我更倾向 Z" / "now I prefer Z"                ← preference update
-- "这个项目用 X，但平时用 Y" / "this project uses X, but normally Y"  ← scoped durable
+- "这个项目用 X,但平时用 Y" / "this project uses X, but normally Y"  ← scoped durable
 - "X 项目不要用 Y" / "don't use Y in project X"   ← scoped negation
 - "以后不要用 X 了" / "no more X from now on"      ← durable + supersession 复合
 
@@ -356,7 +465,7 @@ The user does NOT see you run.
 - "哎 X 又挂了" / "ugh X broke again"             ← casual complaint, not correction
 - (用户选 A 不选 B 但未说明)                       ← indirect signal, not active correction
 
-# Bias cautions — self-check BEFORE producing the structured output below
+# Bias cautions - self-check BEFORE producing the structured output below
 
 (a) Post-hoc rationalization: am I about to write step 5 first in my
     head then back-fill step 1-4? If I notice this urge, restart from
@@ -384,17 +493,17 @@ The user does NOT see you run.
     not exhaustive. "我换了现在用 pnpm" has no "以后" marker but is
     semantically equivalent to durable shift. Am I missing such
     non-template-shaped corrections?
-(i) Translation / code-switch: 中文“先 / 这次 / 以后 / 平时 / 现在” 映射到英文
-    'first / this time / from now on / normally / now' 时是否被直译误伤？
+(i) Translation / code-switch: 中文"先 / 这次 / 以后 / 平时 / 现在" 映射到英文
+    'first / this time / from now on / normally / now' 时是否被直译误伤?
 
 # Your output structure is fixed. You MUST follow it in order.
 
-Step 1 — Quote the user's exact words (no paraphrasing). Include ≥3
+Step 1 - Quote the user's exact words (no paraphrasing). Include ≥3
          lines of surrounding context (what was said before and after).
          If there are multiple candidate utterances, list ALL of them
          in this step; you'll narrow down later.
 
-Step 2 — For EACH of {durable, task-local, debug, NOT-A-CORRECTION},
+Step 2 - For EACH of {durable, task-local, debug, NOT-A-CORRECTION},
          write the strongest 1-sentence case FOR that reading, using
          ONLY step-1 quotes as evidence. The fourth option NOT-A-CORRECTION
          is required (negative space 避免 over-extraction bias). If the
@@ -402,7 +511,7 @@ Step 2 — For EACH of {durable, task-local, debug, NOT-A-CORRECTION},
          combined → return null and exit. For the remaining three: give
          each a real case, not a strawman.
 
-Step 2b — LEAN-DECLARATION (R8 P0-A1): Re-read your four cases. State
+Step 2b - LEAN-DECLARATION (R8 P0-A1): Re-read your four cases. State
           which one currently looks strongest, in one sentence, citing
           which step-1 quote made it strongest. Then state: "If I were
           forced to argue the OPPOSITE of my current lean in a debate,
@@ -410,14 +519,14 @@ Step 2b — LEAN-DECLARATION (R8 P0-A1): Re-read your four cases. State
           argument? Quote that case." This forces a brief role-detach
           before you commit.
 
-Step 3 — Disconfirmation search. For the reading you currently lean
+Step 3 - Disconfirmation search. For the reading you currently lean
          toward, find the SINGLE observation in this transcript that
          would MOST undermine your lean. Quote it. If you cannot find
          one, say so explicitly + declare your search depth: "I scanned
          full window" / "I only scanned last N turns". Shallow search
          + no disconfirmer is itself a signal.
 
-Step 4 — Weight-based re-evaluation (R8 P0-A2). If step 3 produced a
+Step 4 - Weight-based re-evaluation (R8 P0-A2). If step 3 produced a
          real disconfirmer (not a hedge, not a tautology), weigh it
          against step-2 evidence:
            - Does the disconfirmer attack DURABILITY (long-term validity),
@@ -432,19 +541,19 @@ Step 4 — Weight-based re-evaluation (R8 P0-A2). If step 3 produced a
          downgrade-by-one-tier regardless (shallow search is not a
          license for high confidence).
 
-Step 5 — NOW commit the final classification:
+Step 5 - NOW commit the final classification:
          - typing: durable / task-local / debug
          - scope_description: natural-language paragraph describing
            when this correction applies. This is where SCOPED DURABLE
-           lives — e.g. "durable for current React project, may extend
+           lives - e.g. "durable for current React project, may extend
            to all frontend projects, unclear if cross-device; user has
            not stated whether other projects should switch". NOT an
-           enum field — write free text. Complex semantics (scoped /
+           enum field - write free text. Complex semantics (scoped /
            conditional / identity / negation) all live here.
          - correction_intent: natural-language phrase describing the
            intent type ("new preference" / "scope narrowing" / "supersede"
            / "forget" / "contradiction surfacing" / "identity declaration").
-           Free text, not enum — typing is a coarse routing primitive,
+           Free text, not enum - typing is a coarse routing primitive,
            intent captures the semantic action.
          - confidence: 0-10
          - target_entry_slug: from related_entries (NOT staging_context),
@@ -452,14 +561,14 @@ Step 5 — NOW commit the final classification:
            a strong match, set slug. If you find a weak / no match, set
            null AND fill resolution_hypothesis below.
 
-Step 6 — Self-critique: "If I am wrong, the most likely error direction
+Step 6 - Self-critique: "If I am wrong, the most likely error direction
          is ___ because ___". The 'because' clause MUST cite EITHER a
-         step-3 disconfirmer OR a step-2 alternative case quote — not
+         step-3 disconfirmer OR a step-2 alternative case quote - not
          generic phrases like 'context might be different' or 'user
          might change mind later'. The 'direction' must name a specific
          alternative typing or NOT-A-CORRECTION.
 
-Step 7 — Reasoning quality self-rating (R8 DeepSeek D2; 仅写 audit不影响 commit):
+Step 7 - Reasoning quality self-rating (R8 DeepSeek D2; 仅写 audit不影响 commit):
          Rate your own reasoning trace on three dimensions, 0-10:
          - quote_faithfulness: did I quote verbatim or paraphrase?
          - alternative_consideration: did I genuinely engage with the
@@ -517,14 +626,14 @@ If NO existing provisional matches: this hypothesis goes to staging/
 via correction-pipeline, marked attribution_pending=true.
 
 If target_entry_slug is null but typing is task-local or debug, do NOT
-write to staging — only durable / aggregator-upgraded warrant staging
+write to staging - only durable / aggregator-upgraded warrant staging
 (R8 P1: avoid over-provisioning).
 
 # Output
 
 Return strict JSON matching the CorrectionSignal schema (§2.2).
 If no active correction is present in the window, return:
-  { "signal_found": false, "reasoning": "<1-2 sentences why—cite step-2
+  { "signal_found": false, "reasoning": "<1-2 sentences why-cite step-2
     NOT-A-CORRECTION case if applicable>" }
 This is a SUCCESSFUL run (most windows have no correction).
 ```
@@ -533,24 +642,24 @@ This is a SUCCESSFUL run (most windows have no correction).
 
 | typing | 处理 | 写到哪里 |
 |---|---|---|
-| **durable**，confidence ≥ 8 | 高价值操作 → 走 §5 multi-view verification → 通过后 update existing entry / create new entry | curator 按 ADR 0023 R5 unified classifier 路由到 zone（rules / preferences / persona …），**不是顶层独立 preferences/ 区** |
-| **durable**，confidence < 8 | 中价值操作 → directly update entry via curator（不走 multi-view。**P0 dogfood 期间临时例外**：P0.5 multi-view ship 前所有 conf ≥ 7 durable 默认写 staging 不落 durable 区，等 P0.5 ship 后批量回放验证，R8 Opus 盲点 2） | 对应 zone |
-| **task-local** | 不进 sediment 永久区，但**代入同会话后续 agent_end 的 curator context**（则 attach point 是 same-conversation 同一会话未结束的 hook，R8 GPT 盲点 G2） | session-local working set（不持久化）；session 结束自动清除 |
+| **durable**,confidence ≥ 8 | 高价值操作 → 走 §5 multi-view verification → 通过后 update existing entry / create new entry | curator 按 ADR 0023 R5 unified classifier 路由到 zone(rules / preferences / persona ...),**不是顶层独立 preferences/ 区** |
+| **durable**,confidence < 8 | 中价值操作 → directly update entry via curator(不走 multi-view。**P0 dogfood 期间临时例外**:P0.5 multi-view ship 前所有 conf ≥ 7 durable 默认写 staging 不落 durable 区,等 P0.5 ship 后批量回放验证,R8 Opus 盲点 2) | 对应 zone |
+| **task-local** | 不进 sediment 永久区,但**代入同会话后续 agent_end 的 curator context**(则 attach point 是 same-conversation 同一会话未结束的 hook,R8 GPT 盲点 G2) | session-local working set(不持久化);session 结束自动清除 |
 | **debug** | 不进任何持久区 | 仅 audit.jsonl 记一条 |
 
-**复杂语义由 scope_description 承载**：scoped durable（“这个项目用 pnpm平时用 yarn”）/ identity declaration（“我叫 alfadb”）/ negation（“以后不要用 X”）都不强填三类。typing 只是 confidence routing primitive，复杂语义全部走 scope_description + correction_intent 两个自然语言字段。
+**复杂语义由 scope_description 承载**:scoped durable("这个项目用 pnpm平时用 yarn")/ identity declaration("我叫 alfadb")/ negation("以后不要用 X")都不强填三类。typing 只是 confidence routing primitive,复杂语义全部走 scope_description + correction_intent 两个自然语言字段。
 
-**升级路径**（task-local → durable candidate）：不走机械 N=2 阈值（R8 GPT P0）。Aggregator（§4）读多次 task-local 证据，**由 prompt 引导**判断是否提出 durable candidate：“为什么这可能仍不是 durable / 未来两周什么会证伪”写出后再提 candidate。重复次数作为 evidence，不作为自动升级条件。
+**升级路径**(task-local → durable candidate):不走机械 N=2 阈值(R8 GPT P0)。Aggregator(§4)读多次 task-local 证据,**由 prompt 引导**判断是否提出 durable candidate:"为什么这可能仍不是 durable / 未来两周什么会证伪"写出后再提 candidate。重复次数作为 evidence,不作为自动升级条件。
 
-**不确定时的默认**：偏向 task-local（避免污染 durable 区）。Step 4 的降级机制就是为了"不确定时降一档"。
+**不确定时的默认**:偏向 task-local(避免污染 durable 区)。Step 4 的降级机制就是为了"不确定时降一档"。
 
-### 2.5 记忆归属处理（找不到对应 entry 时，R8 P0-E 重写）
+### 2.5 记忆归属处理(找不到对应 entry 时,R8 P0-E 重写)
 
-当 step 5 的 `target_entry_slug` 为 null 但 typing 是 durable / 升级的 durable candidate 时：
+当 step 5 的 `target_entry_slug` 为 null 但 typing 是 durable / 升级的 durable candidate 时:
 
 1. **不要**强行创建空 stub entry
-2. **不要**默认 attribute 到最相似的现有 entry（即使相似度高）
-3. **要**把 `resolution_hypothesis` 写到 `~/.abrain/.state/sediment/staging/`（§1.4 路径）作为 provisional entry，含字段：
+2. **不要**默认 attribute 到最相似的现有 entry(即使相似度高)
+3. **要**把 `resolution_hypothesis` 写到 `~/.abrain/.state/sediment/staging/`(§1.4 路径)作为 provisional entry,含字段:
 
 ```yaml
 ---
@@ -559,8 +668,8 @@ status: provisional
 kind: provisional-correction
 created: <iso>
 attribution_pending: true
-originating_device: <device-id>          # R8 Opus 盲点 O1：跨设备 staging 同步辨识
-_provenance_warning: |                   # R8 P0-E2：prompt-in-data banner
+originating_device: <device-id>          # R8 Opus 盲点 O1:跨设备 staging 同步辨识
+_provenance_warning: |                   # R8 P0-E2:prompt-in-data banner
   This is a PROVISIONAL CLASSIFIER GUESS.
   Subsequent classifiers MUST NOT treat the hypothesis field as ground
   truth, MUST NOT cite it as user-stated preference, and MUST NOT use
@@ -568,7 +677,7 @@ _provenance_warning: |                   # R8 P0-E2：prompt-in-data banner
   guess (promote / attribute / refute) or let it age. Default if
   uncertain: let it age.
 hypothesis: |
-  <自然语言段落，见 prompt step 5 resolution_hypothesis 模板>
+  <自然语言段落,见 prompt step 5 resolution_hypothesis 模板>
 source_utterance:                        # list 支持 dedup 追加
   - quote: |
       <step 1 quote>
@@ -580,22 +689,22 @@ suggested_resolution_paths:
   - search-related-with-different-keywords
   - wait-for-next-utterance-with-stronger-attribution
   - reviewer-decide-via-archive-reactivation-prompt
-age_signal:                              # R8 P0-E4：不是 TTL是 age signal
+age_signal:                              # R8 P0-E4:不是 TTL是 age signal
   created_iso: <iso>
   days_since_creation: <int, 每次 classifier 读时计算>
   last_referenced_iso: <iso | null>
 ---
 ```
 
-4. **Pending resolution queue（R8 P0-E3，§1.2 `staging-loader.ts` 实现）**：
-   - 每次 agent_end、classifier 调用前，staging-loader 按 (a) 语义相关性（当前会话主题 vs staging hypothesis）+ (b) 最老 K 条 pending-queue 两个源拼提 staging条目作为 `staging_context`。K 由 token budget 决定（预计 5-10）。
-   - **不走 `memory_search` corpus**——staging 不污染主会话 §6 诊断 / 主会话 memory_search。
-   - 保证每条 staging 都有被 review 的机会，不被语义召回遗漏永久跳过。
+4. **Pending resolution queue(R8 P0-E3,§1.2 `staging-loader.ts` 实现)**:
+   - 每次 agent_end、classifier 调用前,staging-loader 按 (a) 语义相关性(当前会话主题 vs staging hypothesis)+ (b) 最老 K 条 pending-queue 两个源拼提 staging条目作为 `staging_context`。K 由 token budget 决定(预计 5-10)。
+   - **不走 `memory_search` corpus**--staging 不污染主会话 §6 诊断 / 主会话 memory_search。
+   - 保证每条 staging 都有被 review 的机会,不被语义召回遗漏永久跳过。
 
-5. **classifier 处理 staging 的路径**走 §2.3 prompt “Staging-context handling” 独立逻辑段：WARNING + 三种 outcome（同一件事→升格／不同事→继续 age／直接反驳→归档），默认偏向“让它 age”，只有 unambiguous + side-by-side quote 才 resolve。
+5. **classifier 处理 staging 的路径**走 §2.3 prompt "Staging-context handling" 独立逻辑段:WARNING + 三种 outcome(同一件事→升格/不同事→继续 age/直接反驳→归档),默认偏向"让它 age",只有 unambiguous + side-by-side quote 才 resolve。
 
-6. **30 天 age-out 改 PE-form decision（R8 P0-E4）**：
-   - 30 天**不是自动 archive trigger**，是 age signal。超 30 天未 resolve 的 staging 走 archive-reactivation-reviewer prompt（与 §7 同 prompt）判断：
+6. **30 天 age-out 改 PE-form decision(R8 P0-E4)**:
+   - 30 天**不是自动 archive trigger**,是 age signal。超 30 天未 resolve 的 staging 走 archive-reactivation-reviewer prompt(与 §7 同 prompt)判断:
      ```
      You are reviewing staging hypothesis aged ≥ 30 days without
      resolution. Decide: archive / keep aging / promote to durable.
@@ -610,22 +719,22 @@ age_signal:                              # R8 P0-E4：不是 TTL是 age signal
      Output: decision + 1 paragraph reasoning quoting hypothesis +
      relevant evidence.
      ```
-   - Infra 层边界：硬删除窗口（`git rm` 后 git history 仍可恢复）仍是文件 lifecycle，允许机械（同 ADR 0024 §5.6）。**但软归档判断**走 prompt decision。
+   - Infra 层边界:硬删除窗口(`git rm` 后 git history 仍可恢复)仍是文件 lifecycle,允许机械(同 ADR 0024 §5.6)。**但软归档判断**走 prompt decision。
 
-7. **跨设备 staging 同步处理（R8 Opus 盲点 O1）**：设备 B classifier 看到 `originating_device != current_device` 且当前 context 无关 → prompt 引导默认 “wait for next session on originating device”，不强行在设备 B resolve。
+7. **跨设备 staging 同步处理(R8 Opus 盲点 O1)**:设备 B classifier 看到 `originating_device != current_device` 且当前 context 无关 → prompt 引导默认 "wait for next session on originating device",不强行在设备 B resolve。
 
-### 2.6 与现有代码的接口（R8 P0-B2 与 §1.2 一致化）
+### 2.6 与现有代码的接口(R8 P0-B2 与 §1.2 一致化)
 
 #### 新文件
 
 ```
 extensions/sediment/
-├── correction-pipeline.ts        ← 合并 classifier+resolver：后续处理主动纠错信号
-├── context-packer.ts             ← R8 P1-1：conversation_window 裁剪 prompt callable
-├── staging-loader.ts             ← R8 P0-B5：从 staging/ 加载 staging_context
+├── correction-pipeline.ts        ← 合并 classifier+resolver:后续处理主动纠错信号
+├── context-packer.ts             ← R8 P1-1:conversation_window 裁剪 prompt callable
+├── staging-loader.ts             ← R8 P0-B5:从 staging/ 加载 staging_context
 ├── staging-types.ts              ← staging frontmatter schema 定义与 parser
 ├── outcome-collector.ts          ← §3 隐藏 metadata 汇总
-├── outcome-ledger.ts             ← 独立 sidecar ledger，不进 entry frontmatter
+├── outcome-ledger.ts             ← 独立 sidecar ledger,不进 entry frontmatter
 └── prompts/
     ├── reasoning-normalization-preamble-v1.md
     ├── active-correction-classifier-v1.md
@@ -635,13 +744,13 @@ extensions/sediment/
 
 #### 现有文件改动
 
-- **`index.ts`**（orchestration 层，R8 P0-B1 事实修正）：添加 agent_end hook 编排——context-packer → staging-loader → outcome-collector → unified classifier → correction-pipeline → curator → writer。
-- **`llm-extractor.ts`**：runLlmExtractor() 产 candidate。主动纠错识别 prompt 合并入 unified classifier——需跟 ADR 0023 R5 patch 同 PR 交付（§1.5 合并点）。
-- **`curator.ts`**：curateProjectDraft() 里加一个输入 context：CorrectionSignal。curator 区分“来自主动纠错的 create/update”与“来自正常 observation 的 create/update”，高价值路径加上 P0.5 multi-view 门禁。
-- **`writer.ts`**：接受 staging 路径写入；soft-delete substrate（§7）与 P0 并行上线；appendAudit schema 加 prompt_version 字段（R8 P0-C2）。
-- **audit 逻辑**（在 writer.ts 中的 appendAudit）：每次 classifier run 不论是否识别出 correction 都写 audit.jsonl 一条（含完整 reasoning trace + prompt_version + step 7 self-rating）。audit 字段 sanitize 走 ADR 0016/0018 typed-redaction substrate。
+- **`index.ts`**(orchestration 层,R8 P0-B1 事实修正):添加 agent_end hook 编排--context-packer → staging-loader → outcome-collector → unified classifier → correction-pipeline → curator → writer。
+- **`llm-extractor.ts`**:runLlmExtractor() 产 candidate。主动纠错识别 prompt 合并入 unified classifier--需跟 ADR 0023 R5 patch 同 PR 交付(§1.5 合并点)。
+- **`curator.ts`**:curateProjectDraft() 里加一个输入 context:CorrectionSignal。curator 区分"来自主动纠错的 create/update"与"来自正常 observation 的 create/update",高价值路径加上 P0.5 multi-view 门禁。
+- **`writer.ts`**:接受 staging 路径写入;soft-delete substrate(§7)与 P0 并行上线;appendAudit schema 加 prompt_version 字段(R8 P0-C2)。
+- **audit 逻辑**(在 writer.ts 中的 appendAudit):每次 classifier run 不论是否识别出 correction 都写 audit.jsonl 一条(含完整 reasoning trace + prompt_version + step 7 self-rating)。audit 字段 sanitize 走 ADR 0016/0018 typed-redaction substrate。
 
-#### 数据流（R1 完整版）
+#### 数据流(R1 完整版)
 
 ```
 agent_end
@@ -676,45 +785,49 @@ agent_end
 
 ---
 
-## 3. 能力点 2：结果反馈（outcome self-report）— R1 骨架 + 方案 C 选定
+## 3. 能力点 2:结果反馈(outcome self-report)- R1 骨架 + 方案 C 选定
 
-**详细 prompt + schema → 本 ADR R2**。R1 选定方案 C（R8 P0-F）并论证 ADR 0003 不被破坏。
+**详细 prompt + schema → 本 ADR R2**。R1 选定方案 C(R8 P0-F)并论证 ADR 0003 不被破坏。
 
 ### 3.1 触发
 
-`agent_end` hook，在 unified classifier 之前跑（outcome 是 classifier 的 context 之一）。
+`agent_end` hook,在 unified classifier 之前跑(outcome 是 classifier 的 context 之一)。
 
 ### 3.2 核心 prompt skeleton
 
-见 ADR 0024 §5.2。R1 骨架增量：
+见 ADR 0024 §5.2。R1 骨架增量:
 
-- 触发条件：所有 agent_end 都跑（不预筛）
-- prompt 输入：本 session 注入过的所有 entry + 完整 conversation + tool_result
-- prompt 输出：每条 entry 的 self-report（DECISIVE / CONFIRMATORY / RETRIEVED-UNUSED + counterfactual quote）
-- **引用同款 bias cautions**：outcome LLM 也是 RLHF 训练的，“yes used it” 是 helpful answer（R8 DeepSeek G1 / 盲点 2）。Prompt 引导：“Am I marking DECISIVE because I genuinely couldn’t have made this decision without the entry, or because saying ‘yes I used it’ feels helpful? If I cannot quote a counterfactual action I would have taken otherwise → mark CONFIRMATORY not DECISIVE.”
+- 触发条件:所有 agent_end 都跑(不预筛)
+- prompt 输入:本 session 注入过的所有 entry + 完整 conversation + tool_result
+- prompt 输出:每条 entry 的 self-report(DECISIVE / CONFIRMATORY / RETRIEVED-UNUSED + counterfactual quote)
+- **引用同款 bias cautions**:outcome LLM 也是 RLHF 训练的,"yes used it" 是 helpful answer(R8 DeepSeek G1 / 盲点 2)。Prompt 引导:"Am I marking DECISIVE because I genuinely couldn't have made this decision without the entry, or because saying 'yes I used it' feels helpful? If I cannot quote a counterfactual action I would have taken otherwise → mark CONFIRMATORY not DECISIVE."
 
-### 3.3 谁来跑 outcome self-report：选方案 C（R8 P0-F 关键选定）
+### 3.3 谁来跑 outcome self-report：R1 选方案 C，R1.2 后重新开放评估
 
-**背景**：R0 §3.3 似乎提示“原始会话 LLM 在 session 结束时被 prompt self-report”，DeepSeek R8 评审指出这走 §3.3 原文“方案 A”路径——**主会话 LLM 在 session 内输出被写入 entry frontmatter 的 outcome_history，这是主会话 LLM 在写 brain，违反 ADR 0003**。
+**R1.2 关键重新评估**：§0.6 识别 ADR 0003 不是 "不可破安全边界” 而是 "架构选择与 ADR 0024 有张力” 后，本小节 R1 选方案 C 的唯一理由 — “ADR 0003 强制” — 不再是硬类型。**方案 A（本人第一人称交代 + 直接写 outcome ledger）重新进入候选**，需§0.6.3 选项 2 或 3 的 ADR 0003 放松。R2 详细设计时 multi-LLM audit 重新评估 A/B/C 三方案。下面 R1 选 C 的论证仅作为保守默认路径（等同于 §0.6.3 选项 1）。
 
-**三方案对比**：
+**原 R1 选定论证**（R8 P0-F 关键选定）
+
+**背景**:R0 §3.3 似乎提示"原始会话 LLM 在 session 结束时被 prompt self-report",DeepSeek R8 评审指出这走 §3.3 原文"方案 A"路径--**主会话 LLM 在 session 内输出被写入 entry frontmatter 的 outcome_history,这是主会话 LLM 在写 brain,违反 ADR 0003**。
+
+**三方案对比**:
 
 | 方案 | 描述 | ADR 0003 主会话只读 | 信息优势 | 会话面优势 |
 |---|---|---|---|---|
 | A | session 最后一轮 prompt 原始 LLM self-report | ✗ 违反 | ✓ 本人交代 | ✗ user exit / timeout / crash 时丢失 |
 | B | agent_end 启独立 sidecar LLM 读 transcript + entry 列表后 self-report | ✓ | ✗ 失去本人交代优势 | ✓ |
-| **C** | **原始会话 LLM 每轮隐藏 metadata，sediment 在 agent_end 汇总** | **✓** | **✓** | **✓** |
+| **C** | **原始会话 LLM 每轮隐藏 metadata,sediment 在 agent_end 汇总** | **✓** | **✓** | **✓** |
 
-**选 C。论证 ADR 0003 不被破坏**：
+**选 C。论证 ADR 0003 不被破坏**:
 
-- 主会话 LLM 不知道“这在写 brain”——它只是在“记录工作过程”（类似 chain-of-thought metadata）
-- metadata 的获取走 pi runtime 现有的 LLM response 中的 reasoning trace 接口（读）不是 new tool（写）。主会话 LLM 仍无写 brain 的能力。
-- sediment（sidecar）在 agent_end 汇总 metadata 之后才写 outcome-ledger——写者是 sediment，不是主会话 LLM。
-- 主会话 LLM 看不到 outcome-ledger 的内容（outcome 是 §2 unified classifier 的 input 之一，但不是主会话上下文 inject）。
+- 主会话 LLM 不知道"这在写 brain"--它只是在"记录工作过程"(类似 chain-of-thought metadata)
+- metadata 的获取走 pi runtime 现有的 LLM response 中的 reasoning trace 接口(读)不是 new tool(写)。主会话 LLM 仍无写 brain 的能力。
+- sediment(sidecar)在 agent_end 汇总 metadata 之后才写 outcome-ledger--写者是 sediment,不是主会话 LLM。
+- 主会话 LLM 看不到 outcome-ledger 的内容(outcome 是 §2 unified classifier 的 input 之一,但不是主会话上下文 inject)。
 
-### 3.4 prompt skeleton（方案 C 雏型，R2 展开完整版）
+### 3.4 prompt skeleton(方案 C 雏型,R2 展开完整版)
 
-主会话 LLM 的 system prompt 中加一段（不破坏任务体验，只作为工作日志）：
+主会话 LLM 的 system prompt 中加一段(不破坏任务体验,只作为工作日志):
 
 ```
 # Self-tracking footnote (R2 elaboration: scope/exact format)
@@ -738,49 +851,49 @@ This footnote is for the second-brain to track entry usage; it is not
 user-facing. Do not summarize it to the user. Do not skip it.
 ```
 
-sediment 在 agent_end 从 response stream 中提取 `memory-footnote` fenced block，汇总为 outcome_history_increment，写 outcome-ledger。不进 entry frontmatter（R8 P0-B §1.3）。
+sediment 在 agent_end 从 response stream 中提取 `memory-footnote` fenced block,汇总为 outcome_history_increment,写 outcome-ledger。不进 entry frontmatter(R8 P0-B §1.3)。
 
 ### 3.5 与能力点 1 / 3 / 5 的依赖
 
-- 能力点 1（§2）：unified classifier 的 confidence 评估会读最近的 outcome 记录（被纠错过的 entry 更不可信）
-- 能力点 3（§4）：aggregator 跨会话比对 outcome 趋势
-- 能力点 5（§6）：classifier prompt 演进要看 outcome 数据是否系统性偏差
-- 能力点 4（§5）：P1 上线后可选择性抽样调用 multi-view 复查 outcome self-report 质量（防主会话 LLM sycophancy）
+- 能力点 1(§2):unified classifier 的 confidence 评估会读最近的 outcome 记录(被纠错过的 entry 更不可信)
+- 能力点 3(§4):aggregator 跨会话比对 outcome 趋势
+- 能力点 5(§6):classifier prompt 演进要看 outcome 数据是否系统性偏差
+- 能力点 4(§5):P1 上线后可选择性抽样调用 multi-view 复查 outcome self-report 质量(防主会话 LLM sycophancy)
 
 ---
 
-## 4. 能力点 3：跨会话趋势观察（aggregator）— R0 骨架
+## 4. 能力点 3:跨会话趋势观察(aggregator)- R0 骨架
 
 **详细设计 → 本 ADR R2**。
 
 ### 4.1 调度
 
-定时任务（不在 agent_end 跑），频率：daily / weekly / monthly 三层窗口。每层窗口跑一次独立 prompt。
+定时任务(不在 agent_end 跑),频率:daily / weekly / monthly 三层窗口。每层窗口跑一次独立 prompt。
 
 ### 4.2 核心 prompt skeleton
 
-见 ADR 0024 §5.3（怀疑论史官 + 默认无发现就是成功 + falsifiability + sycophancy self-check）。
+见 ADR 0024 §5.3(怀疑论史官 + 默认无发现就是成功 + falsifiability + sycophancy self-check)。
 
-### 4.3 Classifier Health Meta-Check（附加任务）
+### 4.3 Classifier Health Meta-Check(附加任务)
 
-每次 aggregator 跑完正常工作后，追加一段 prompt 让它审视最近 50 条 classifier audit trace：
+每次 aggregator 跑完正常工作后,追加一段 prompt 让它审视最近 50 条 classifier audit trace:
 
-- quote rate（含 verbatim quote 的比例）
+- quote rate(含 verbatim quote 的比例)
 - alternative mention rate
 - concrete self-critique rate
 
-任一维度低于 40% → 写 advisory flag 进 audit.jsonl，下次作者读诊断入口时看到。
+任一维度低于 40% → 写 advisory flag 进 audit.jsonl,下次作者读诊断入口时看到。
 
-### 4.4 关键设计点（R2 必须解决）
+### 4.4 关键设计点(R2 必须解决)
 
-- **调度机制**：cron job / pi runtime scheduler / 启动时检测 last_aggregator_run 然后决定是否跑？
-- **窗口大小**：daily=24h / weekly=7d / monthly=30d 是不是合适？
-- **hypothesis → staging 接口**：aggregator 找到 candidate hypothesis 后写到 staging/，schema 跟 §2.5 的 attribution_pending 是不是同款？
-- **cron 资源消耗**：每次跑要扫多少 audit.jsonl + entry，token 成本估算
+- **调度机制**:cron job / pi runtime scheduler / 启动时检测 last_aggregator_run 然后决定是否跑?
+- **窗口大小**:daily=24h / weekly=7d / monthly=30d 是不是合适?
+- **hypothesis → staging 接口**:aggregator 找到 candidate hypothesis 后写到 staging/,schema 跟 §2.5 的 attribution_pending 是不是同款?
+- **cron 资源消耗**:每次跑要扫多少 audit.jsonl + entry,token 成本估算
 
 ---
 
-## 5. 能力点 4：双 AI 互相审查（multi-view verification）— R0 骨架
+## 5. 能力点 4:双 AI 互相审查(multi-view verification)- R0 骨架
 
 **详细设计 → 本 ADR R3**。
 
@@ -789,25 +902,25 @@ sediment 在 agent_end 从 response stream 中提取 `memory-footnote` fenced bl
 - 置信度 ≥ 8 的 create
 - 提升到 always tier 的 promote
 - 归档高置信度 entry
-- 跨区迁移（preferences → maxims）
-- 用户主动纠错触发的 durable update（来自 §2）
+- 跨区迁移(preferences → maxims)
+- 用户主动纠错触发的 durable update(来自 §2)
 
 ### 5.2 核心 prompt skeleton
 
-见 ADR 0024 §5.4（两次独立 API 调用 / Blind Pass 1 / Reveal Pass 2 / anchor bias self-check）+ §2.3 开头 reasoning normalization preamble（§1.5 unified classifier 共用）。
+见 ADR 0024 §5.4(两次独立 API 调用 / Blind Pass 1 / Reveal Pass 2 / anchor bias self-check)+ §2.3 开头 reasoning normalization preamble(§1.5 unified classifier 共用)。
 
-**P0.5 minimal 版本（R8 P0-C1 与 P0 并行上线）**：仅覆盖以下触发条件 — conf ≥ 8 durable correction + 高置信 archive；blind-first 两次调用逻辑完整；provider 选择允许 hard-coded fallback list（R3 变 dynamic）。完整 P3 版本补足跨 provider 选择 + rate-limit + cost 预算 + DEFER 处理。
+**P0.5 minimal 版本(R8 P0-C1 与 P0 并行上线)**:仅覆盖以下触发条件 - conf ≥ 8 durable correction + 高置信 archive;blind-first 两次调用逻辑完整;provider 选择允许 hard-coded fallback list(R3 变 dynamic)。完整 P3 版本补足跨 provider 选择 + rate-limit + cost 预算 + DEFER 处理。
 
-### 5.3 Devil's advocate 层（R8 DeepSeek D1）
+### 5.3 Devil's advocate 层(R8 DeepSeek D1)
 
-ADR 0024 §5.4 末尾承认“跨基座仍有 RLHF 训练相关性，multi-view 不能验证用户真实意图”。为避免两个 reviewer 同方向错 — Reveal Pass 2 末尾加一段。
+ADR 0024 §5.4 末尾承认"跨基座仍有 RLHF 训练相关性,multi-view 不能验证用户真实意图"。为避免两个 reviewer 同方向错 - Reveal Pass 2 末尾加一段。
 
 ```
 You and the proposer reached agreement above. Before committing:
 
 Play devil's advocate ONE MORE TIME. What is the strongest objection
-a skeptical third reviewer—someone from a DIFFERENT model family with
-DIFFERENT RLHF training—would raise against your shared conclusion?
+a skeptical third reviewer-someone from a DIFFERENT model family with
+DIFFERENT RLHF training-would raise against your shared conclusion?
 Write this objection out in 1-3 sentences, citing specific evidence.
 
 Then judge: does this devil's-advocate objection identify a real risk,
@@ -816,185 +929,185 @@ to DEFER. If strawman → keep your agreement but record the objection
 in audit for future review.
 ```
 
-这是纯 prompt-engineered 三拨 layer，不增加 API 调用（虚拟 reviewer）。
+这是纯 prompt-engineered 三拨 layer,不增加 API 调用(虚拟 reviewer)。
 
-### 5.4 关键设计点（R3 必须解决）
+### 5.4 关键设计点(R3 必须解决)
 
-- **provider 选择**：proposer 和 reviewer 必须不同 provider；具体怎么从 pi 可用 provider 列表里选？(失败 / rate-limit 处理；P0.5 hard-coded fallback list 上线，R3 转 dynamic)
-- **DEFER 后的归宿**：reviewer DEFER 时，那个 op 是写 staging 还是直接丢弃？**默认写 staging**（与 §2.5 attribution_pending 同款路径），避免信号丢失。
-- **成本预算**：每个高价值操作翻倍 token 调用，预估每月 abrain 维护成本（R8 GPT-5.5 §6接受的代价需后续 dogfood 校准）
-- **两个 reviewer 同方向错的限制**（R8 DeepSeek D1）已在 §5.3 prompt 增加 devil's advocate 层缓解，但本身仅能部分缓解——本 ADR 明确接受这个局限（同 ADR 0024 §6隐式包含）。
+- **provider 选择**:proposer 和 reviewer 必须不同 provider;具体怎么从 pi 可用 provider 列表里选?(失败 / rate-limit 处理;P0.5 hard-coded fallback list 上线,R3 转 dynamic)
+- **DEFER 后的归宿**:reviewer DEFER 时,那个 op 是写 staging 还是直接丢弃?**默认写 staging**(与 §2.5 attribution_pending 同款路径),避免信号丢失。
+- **成本预算**:每个高价值操作翻倍 token 调用,预估每月 abrain 维护成本(R8 GPT-5.5 §6接受的代价需后续 dogfood 校准)
+- **两个 reviewer 同方向错的限制**(R8 DeepSeek D1)已在 §5.3 prompt 增加 devil's advocate 层缓解,但本身仅能部分缓解--本 ADR 明确接受这个局限(同 ADR 0024 §6隐式包含)。
 
 ---
 
-## 6. 能力点 5：Classifier prompt 自身的演进 — R0 骨架
+## 6. 能力点 5:Classifier prompt 自身的演进 - R0 骨架
 
 **详细设计 → 本 ADR R4**。
 
-### 6.1 关键设计点（R4 必须解决）
+### 6.1 关键设计点(R4 必须解决)
 
-- **诊断入口**：`/abrain audit classifier` 命令展示什么？最近 N 条 reasoning trace？按类型分组？标红 advisory flag？
-- **prompt_version substrate 与 P0 同期上线**（R8 P0-C2 从 R4 提前到 P0）：audit.jsonl 每条记录含 `prompt_version` + semantic note + reasoning_trace 结构说明。无这些字段几周后 prompt v2 读旧 trace 会出现软 schema migration 问题。诊断 UI / iteration ritual 本身在 R4 展开。
-- **跨 prompt 版本兼容**：ADR 0024 §4.2 R7 加的 row “reasoning_trace 跨 prompt 版本兼容”在这里落地 — 新 prompt 读旧 trace 时被 prompt 中的 semantic note 告知“这是旧版 prompt 产出，提取 quote 和 uncertainty 即可，别套现在的 label”。
-- **人在 loop 的工作流**：作者发现 systematic blind spot → 修改 prompt → 怎么验证新 prompt 不引入回归？fixture 仅供参考，不是 ship-block gate（违反 §3 AI-Native 原则）
+- **诊断入口**:`/abrain audit classifier` 命令展示什么?最近 N 条 reasoning trace?按类型分组?标红 advisory flag?
+- **prompt_version substrate 与 P0 同期上线**(R8 P0-C2 从 R4 提前到 P0):audit.jsonl 每条记录含 `prompt_version` + semantic note + reasoning_trace 结构说明。无这些字段几周后 prompt v2 读旧 trace 会出现软 schema migration 问题。诊断 UI / iteration ritual 本身在 R4 展开。
+- **跨 prompt 版本兼容**:ADR 0024 §4.2 R7 加的 row "reasoning_trace 跨 prompt 版本兼容"在这里落地 - 新 prompt 读旧 trace 时被 prompt 中的 semantic note 告知"这是旧版 prompt 产出,提取 quote 和 uncertainty 即可,别套现在的 label"。
+- **人在 loop 的工作流**:作者发现 systematic blind spot → 修改 prompt → 怎么验证新 prompt 不引入回归?fixture 仅供参考,不是 ship-block gate(违反 §3 AI-Native 原则)
 
 ### 6.2 不做的事
 
 - **不**做月度自动 prompt diff job
-- **不**做 LLM 自动改自己 prompt（闭环自我修改风险）
+- **不**做 LLM 自动改自己 prompt(闭环自我修改风险)
 - **不**做 prompt accuracy threshold gate
 
 ---
 
-## 7. 能力点 6：静默归档 + 回滚窗口 — R0 骨架
+## 7. 能力点 6:静默归档 + 回滚窗口 - R0 骨架
 
 **详细设计 → 本 ADR R5**。
 
-### 7.1 关键设计点（R5 必须解决）
+### 7.1 关键设计点(R5 必须解决)
 
-- **N 天窗口的具体值**：建议 30 天，但需要 dogfood 验证
-- **反证检测的 prompt**：N 天内 sediment 看到用户在自然对话里提到旧 entry 内容时，区分"仅 mention"vs"reactivation"；prompt 要明确"默认偏向保持归档，仅 live-use bridge 时恢复"
-- **git rm 时机**：硬归档后 git history 仍可恢复；但 `memory_search` / curator context 会不会还看到？需要 ensure 硬归档 entry 不进检索 corpus
-- **跨设备归档同步**：ADR 0020 sync 怎么处理 archive 中间状态？设备 A 归档后立刻同步到设备 B，设备 B 的 N 天窗口是 reset 还是续？建议续（用 archive_at 字段而非本地时间）
+- **N 天窗口的具体值**:建议 30 天,但需要 dogfood 验证
+- **反证检测的 prompt**:N 天内 sediment 看到用户在自然对话里提到旧 entry 内容时,区分"仅 mention"vs"reactivation";prompt 要明确"默认偏向保持归档,仅 live-use bridge 时恢复"
+- **git rm 时机**:硬归档后 git history 仍可恢复;但 `memory_search` / curator context 会不会还看到?需要 ensure 硬归档 entry 不进检索 corpus
+- **跨设备归档同步**:ADR 0020 sync 怎么处理 archive 中间状态?设备 A 归档后立刻同步到设备 B,设备 B 的 N 天窗口是 reset 还是续?建议续(用 archive_at 字段而非本地时间)
 
 ### 7.2 与 §2.5 staging age-out 的关系
 
-§2.5 的 `attribution_pending` staging 条目 age out 走的也是本能力点的同款 archive 路径——统一软删 → N 天窗口 → 硬归档。
+§2.5 的 `attribution_pending` staging 条目 age out 走的也是本能力点的同款 archive 路径--统一软删 → N 天窗口 → 硬归档。
 
 ---
 
-## 8. 实施 Phase 路线图（R8 P0-C 重排 + 拆并行轨，R1.1 后允许“大重写”作为替代路径）
+## 8. 实施 Phase 路线图(R8 P0-C 重排 + 拆并行轨,R1.1 后允许"大重写"作为替代路径)
 
-**R1.1 重要补充**（§0.5 C 层）：下面的 phase 路线图是**渐进路径**。**大重写路径**（一次性重写整个 sediment 路径作为 active reflection agent）是 R1.1 后同等合法选项，详 §8.2。两者选择在 R2+ multi-LLM audit 评估，不预设默认。
+**R1.1 重要补充**(§0.5 C 层):下面的 phase 路线图是**渐进路径**。**大重写路径**(一次性重写整个 sediment 路径作为 active reflection agent)是 R1.1 后同等合法选项,详 §8.2。两者选择在 R2+ multi-LLM audit 评估,不预设默认。
 
-### 8.0 两条路径对比（R2+ 评估点）
+### 8.0 两条路径对比(R2+ 评估点)
 
-| 维度 | 渐进路径（R1 原设计，§8.1） | 大重写路径（R1.1 新增，§8.2） |
+| 维度 | 渐进路径(R1 原设计,§8.1) | 大重写路径(R1.1 新增,§8.2) |
 |---|---|---|
-| 实施粒度 | 6 Phase，每 Phase ship 后 dogfood 数周 | 一次性重写 sediment 主路径，跨多 PR 一批 ship |
-| 理论优势 | dogfood 数据驱动迭代、减少一次性重写风险、小步可回滚 | 不被“在旧 hook 上加新能力” framing 绑架；vision-coherent 设计；避免中间状态架构妥协 |
-| 理论劣势 | 保留现有架构中可能不适合 ADR 0024 vision 的点；各 phase 间中间状态架构妥协多 | 一次性重写风险高；dogfood 数据仅能在 ship 后反馈；过渡期长 |
-| ADR 0024 vision 适配 | 中（保留旧架构逻辑，需多 phase 逐步靠近）| **高**（从零为 vision 设计，不被老 framing 绑架）|
-| 用户明确接受代价后适配 | 中（原作为唯一默认路径是保守选择）| **高**（用户明说任何代价可接受）|
+| 实施粒度 | 6 Phase,每 Phase ship 后 dogfood 数周 | 一次性重写 sediment 主路径,跨多 PR 一批 ship |
+| 理论优势 | dogfood 数据驱动迭代、减少一次性重写风险、小步可回滚 | 不被"在旧 hook 上加新能力" framing 绑架;vision-coherent 设计;避免中间状态架构妥协 |
+| 理论劣势 | 保留现有架构中可能不适合 ADR 0024 vision 的点;各 phase 间中间状态架构妥协多 | 一次性重写风险高;dogfood 数据仅能在 ship 后反馈;过渡期长 |
+| ADR 0024 vision 适配 | 中(保留旧架构逻辑,需多 phase 逐步靠近)| **高**(从零为 vision 设计,不被老 framing 绑架)|
+| 用户明确接受代价后适配 | 中(原作为唯一默认路径是保守选择)| **高**(用户明说任何代价可接受)|
 | ADR 0014/0015/0016/0020/0023 反向 patch | 多个 phase 各提一点小 patch | 一批 patch 同一 PR 与 ADR 0025 主体交付 |
 
-### 8.1 渐进路径（R1 原设计，下表）
+### 8.1 渐进路径(R1 原设计,下表)
 
-按能力点依赖关系重排：**P0 §2 → P0.5 §5 minimal multi-view → P1 §3 outcome → P2 §4 aggregator → P3 §5 full → P4 §6 → P5 §7**。路由理由：multi-view 是§2 conf≥8 durable correction 的保护层，不能等 P3（R0 设计错排）。
+按能力点依赖关系重排:**P0 §2 → P0.5 §5 minimal multi-view → P1 §3 outcome → P2 §4 aggregator → P3 §5 full → P4 §6 → P5 §7**。路由理由:multi-view 是§2 conf≥8 durable correction 的保护层,不能等 P3(R0 设计错排)。
 
 | Phase | 能力点 | 阻塞前置 | 工程量 | 备注 |
 |---|---|---|---|---|
-| **P0** | §2 主动纠错识别（合入 unified classifier） | ADR 0024 ship + ADR 0023 R5 patch + 本 ADR R1 ship | **中-大**（R8 P0-C3 上调） | 含 prompt 数轮 + correction-pipeline + staging + context-packer + staging-loader + outcome-collector + audit + prompt_version substrate |
-| **P0.5** | §5 minimal multi-view | **与 P0 并行**（R8 P0-C1） | 中 | blind-first 两次调用逻辑 + hard-coded provider fallback list；仅覆盖 conf≥8 durable + 高置信 archive；保护 P0 不被污染 |
-| **P4a** | §6 诊断入口与 prompt_version substrate | **与 P0 并行**（R8 P0-C2） | 小 | `/abrain audit classifier` UI + audit schema 加 prompt_version 字段；必须 P0 同期避免软 schema migration |
-| **P5a** | §7 writer soft-delete substrate | **与 P0 并行**（R8 Opus 盲点） | 中 | `status=archived` 软删 + N 天后 `git rm`；archive_at 跨设备字段；reactivation prompt 未上（R5 才上） |
-| **P1** | §3 outcome self-report | P0 + P0.5 ship + 本 ADR R2 ship | **中-大**（R8 P0-C3 上调） | 隐藏 metadata 方案 C attach point + outcome-ledger + bias cautions prompt |
-| **P2** | §4 aggregator + Classifier Health Meta-Check | P1 ship + 本 ADR R3 ship | 大 | 含调度基础设施；**与 P3 可并行不串行** |
-| **P3** | §5 full multi-view（dynamic provider + DEFER + cost） | P0 + P0.5 ship，**不依赖 P2**（R8 DeepSeek Q3） | **大**（R8 P0-C3 上调） | 跨 provider 选择抽象、rate-limit 处理、cost 预算、Pass1/Pass2 audit 持久化 |
-| **P4b** | §6 iteration ritual | P0 audit 数据积累数周 + 本 ADR R4 ship | 小-中 | 作者 review prompt 迭代 ritual；P4a 上线后数据自然积累 |
-| **P5b** | §7 reactivation reasoning | P5a + P0/P1 ship + 本 ADR R5 ship | **中-大**（R8 P0-C3 上调） | reactivation prompt + cross-device archive_at + ensure memory_search 不召回硬归档 |
+| **P0** | §2 主动纠错识别(合入 unified classifier) | ADR 0024 ship + ADR 0023 R5 patch + 本 ADR R1 ship | **中-大**(R8 P0-C3 上调) | 含 prompt 数轮 + correction-pipeline + staging + context-packer + staging-loader + outcome-collector + audit + prompt_version substrate |
+| **P0.5** | §5 minimal multi-view | **与 P0 并行**(R8 P0-C1) | 中 | blind-first 两次调用逻辑 + hard-coded provider fallback list;仅覆盖 conf≥8 durable + 高置信 archive;保护 P0 不被污染 |
+| **P4a** | §6 诊断入口与 prompt_version substrate | **与 P0 并行**(R8 P0-C2) | 小 | `/abrain audit classifier` UI + audit schema 加 prompt_version 字段;必须 P0 同期避免软 schema migration |
+| **P5a** | §7 writer soft-delete substrate | **与 P0 并行**(R8 Opus 盲点) | 中 | `status=archived` 软删 + N 天后 `git rm`;archive_at 跨设备字段;reactivation prompt 未上(R5 才上) |
+| **P1** | §3 outcome self-report | P0 + P0.5 ship + 本 ADR R2 ship | **中-大**(R8 P0-C3 上调) | 隐藏 metadata 方案 C attach point + outcome-ledger + bias cautions prompt |
+| **P2** | §4 aggregator + Classifier Health Meta-Check | P1 ship + 本 ADR R3 ship | 大 | 含调度基础设施;**与 P3 可并行不串行** |
+| **P3** | §5 full multi-view(dynamic provider + DEFER + cost) | P0 + P0.5 ship,**不依赖 P2**(R8 DeepSeek Q3) | **大**(R8 P0-C3 上调) | 跨 provider 选择抽象、rate-limit 处理、cost 预算、Pass1/Pass2 audit 持久化 |
+| **P4b** | §6 iteration ritual | P0 audit 数据积累数周 + 本 ADR R4 ship | 小-中 | 作者 review prompt 迭代 ritual;P4a 上线后数据自然积累 |
+| **P5b** | §7 reactivation reasoning | P5a + P0/P1 ship + 本 ADR R5 ship | **中-大**(R8 P0-C3 上调) | reactivation prompt + cross-device archive_at + ensure memory_search 不召回硬归档 |
 
-**并行轨总结**：P0 / P0.5 / P4a / P5a 四轨可并行（同一 PR 或分 PR 但同阶段交付），缩短整体路线图 4-8 周。P2 / P3 安全并行。P1 / P4b / P5b 串行。
+**并行轨总结**:P0 / P0.5 / P4a / P5a 四轨可并行(同一 PR 或分 PR 但同阶段交付),缩短整体路线图 4-8 周。P2 / P3 安全并行。P1 / P4b / P5b 串行。
 
-**每个 Phase 独立交付要求**：independent ship + independent multi-LLM audit + independent dogfood 数周 → 才进下一 Phase。**不一次性 ship 全部六条**——为 pi-astack maxim `staged-rollout-better-than-big-bang` 适用。
+**每个 Phase 独立交付要求**:independent ship + independent multi-LLM audit + independent dogfood 数周 → 才进下一 Phase。**不一次性 ship 全部六条**--为 pi-astack maxim `staged-rollout-better-than-big-bang` 适用。
 
-**总工程量**按 ADR 0024 §9 估算“约 pi-astack 当前体量翻倍”，多季度迭代。R8 三家 reviewer 一致认为 R0 工程量估计偏低（渐进路径各 Phase 均上调一个档位，详上表）。
+**总工程量**按 ADR 0024 §9 估算"约 pi-astack 当前体量翻倍",多季度迭代。R8 三家 reviewer 一致认为 R0 工程量估计偏低(渐进路径各 Phase 均上调一个档位,详上表)。
 
-### 8.2 大重写路径（R1.1 后合法替代）
+### 8.2 大重写路径(R1.1 后合法替代)
 
-R1.1 后允许拆如下（顶层逻辑，R2+ 详细设计）：
+R1.1 后允许拆如下(顶层逻辑,R2+ 详细设计):
 
 ```
-B0（设计 + multi-LLM audit 收敛）：
+B0(设计 + multi-LLM audit 收敛):
   ADR 0025 R2-R6 一次性完成六能力点详细设计 +
-  ADR 0023 R5 / ADR 0014/0015/0016/0020 反向 patch 同批设计，
+  ADR 0023 R5 / ADR 0014/0015/0016/0020 反向 patch 同批设计,
   多 LLM xhigh audit ≥2 轮收敛后才进 B1。
 
-B1（重写 sediment 主路径，一批 PR）：
-  - active-reflection-agent 原生架构（代替现有 write-only loop）
-  - 六能力点同期上线（不拆 P0-P5）
+B1(重写 sediment 主路径,一批 PR):
+  - active-reflection-agent 原生架构(代替现有 write-only loop)
+  - 六能力点同期上线(不拆 P0-P5)
   - ADR 0014/0015/0016/0020/0023 R5 patch 同 PR
   - context-packer / staging-loader / outcome-collector / aggregator /
     multi-view-reviewer / archive-rollback 全部上线
 
-B2（dogfood + iteration）：
-  ship 后 dogfood 数月，audit 数据驱动 prompt 迭代 + 架构微调。
-  不再是“phase ship 后进下一 phase”，是“整体 ship 后迭代”。
+B2(dogfood + iteration):
+  ship 后 dogfood 数月,audit 数据驱动 prompt 迭代 + 架构微调。
+  不再是"phase ship 后进下一 phase",是"整体 ship 后迭代"。
 
-B3（下一代 vision 升级）：
+B3(下一代 vision 升级):
   基于 B2 dogfood 数据决定下一个重写里程碑。
 ```
 
-**两路径选择不是 R1.1 本稿决策**：R2+ 详细设计阶段 multi-LLM audit 显式评估两者，评审者不允许默认选渐进作为“安全选择”（§0.5 C）。选择依据：
+**两路径选择不是 R1.1 本稿决策**:R2+ 详细设计阶段 multi-LLM audit 显式评估两者,评审者不允许默认选渐进作为"安全选择"(§0.5 C)。选择依据:
 
-- ADR 0024 4 条 invariant + AI-Native 原则 哪个路径更能保证？
-- §0.5 B 层 6 项架构重设计 哪个路径更能交付？
-- “dogfood 在 ship 后才能反馈”的代价 vs “中间状态架构妥协”的代价 哪个高？
+- ADR 0024 4 条 invariant + AI-Native 原则 哪个路径更能保证?
+- §0.5 B 层 6 项架构重设计 哪个路径更能交付?
+- "dogfood 在 ship 后才能反馈"的代价 vs "中间状态架构妥协"的代价 哪个高?
 
 **不一次性 ship 全部六条**仅适用渐进路径。R1.1 后 pi-astack maxim `staged-rollout-better-than-big-bang` **不再被默认推论为本 ADR 唯一选择**。
 
-大重写路径 B1 单 PR 工程量估为 §8.1 P0+P0.5+P1+P2+P3 五个 phase 总和量级，拆多个 PR 但同一批交付。
+大重写路径 B1 单 PR 工程量估为 §8.1 P0+P0.5+P1+P2+P3 五个 phase 总和量级,拆多个 PR 但同一批交付。
 
 ---
 
-## 9. 测试设计（三层 smoke 框架）
+## 9. 测试设计(三层 smoke 框架)
 
-按 ADR 0024 §3 AI-Native 原则，**三层 smoke 都不是 ship-block gate**——只用于"留信号给作者"，不阻断写入。
+按 ADR 0024 §3 AI-Native 原则,**三层 smoke 都不是 ship-block gate**--只用于"留信号给作者",不阻断写入。
 
-### 9.1 Tier 1 — 自动断言（机械可验证的局部约束）
+### 9.1 Tier 1 - 自动断言(机械可验证的局部约束)
 
-- classifier 输出符合 JSON schema（CorrectionSignal）
+- classifier 输出符合 JSON schema(CorrectionSignal)
 - staging entry frontmatter 字段齐全
 - 软归档 entry 在 N 天内文件仍存在
-- multi-view 触发条件命中时确实跑了两次独立 API 调用（log 验证）
+- multi-view 触发条件命中时确实跑了两次独立 API 调用(log 验证)
 
-这些是**结构性验证**，不是行为正确性验证。fail = bug，必须修。
+这些是**结构性验证**,不是行为正确性验证。fail = bug,必须修。
 
-### 9.2 Tier 2 — LLM-as-judge advisory
+### 9.2 Tier 2 - LLM-as-judge advisory
 
-- 用一个独立 LLM 读 classifier 在 30 个 fixture utterance 上的 reasoning trace，按 §1.3 五大 anti-pattern 打分
-- 输出 advisory report：哪几个 trace 看起来 post-hoc rationalization、哪几个 anchor bias 严重
-- **不是 ship-block**：分数低不阻断，只留 advisory flag 给作者改 prompt
+- 用一个独立 LLM 读 classifier 在 30 个 fixture utterance 上的 reasoning trace,按 §1.3 五大 anti-pattern 打分
+- 输出 advisory report:哪几个 trace 看起来 post-hoc rationalization、哪几个 anchor bias 严重
+- **不是 ship-block**:分数低不阻断,只留 advisory flag 给作者改 prompt
 
-### 9.3 Tier 3 — 信息对照 dossier
+### 9.3 Tier 3 - 信息对照 dossier
 
-- 每次 prompt 重大改动后，跑一份 dogfood 对比 dossier：旧 prompt vs 新 prompt 在最近 100 个真实 utterance 上的输出差异
-- 不是测试，是给作者 review 的对照表
+- 每次 prompt 重大改动后,跑一份 dogfood 对比 dossier:旧 prompt vs 新 prompt 在最近 100 个真实 utterance 上的输出差异
+- 不是测试,是给作者 review 的对照表
 
-每个 Phase 实施时按上面三层各做一份，存 `docs/audits/2026-XX-XX-adr-0025-pN-smoke.md`。
+每个 Phase 实施时按上面三层各做一份,存 `docs/audits/2026-XX-XX-adr-0025-pN-smoke.md`。
 
 ---
 
-## 10. 与 ADR 0024 边界的对齐自检（R8 P0-D 升级：7 行 → 14 行）
+## 10. 与 ADR 0024 边界的对齐自检(R8 P0-D 升级:7 行 → 14 行)
 
-每个 Phase ship 前必须走这张表。任何 ✗ 触碰 → 该 Phase 不能 ship，必须先回 ADR 0024 调 invariant。
+每个 Phase ship 前必须走这张表。任何 ✗ 触碰 → 该 Phase 不能 ship,必须先回 ADR 0024 调 invariant。
 
 ### 10.1 Invariant 边界
 
 | # | ADR 0024 边界 | 本 Phase 检查 |
 |---|---|---|
-| 1 | §2 INV-INVISIBILITY（直接）| 任何 ui.notify / `/brain health` 自动弹窗 / 主动授权弹窗？✗ |
-| 2 | §2 INV-INVISIBILITY（间接）| staging 条目是否可能通过 curator 错误操作间接被用户感知？✗（R8 DeepSeek D6） |
-| 3 | §2 INV-AUTONOMY | 任何 prompt_user 询问 sediment 生命周期 / `/rule veto` / 月度 manual workflow？✗ |
-| 4 | §2 INV-IMPLICIT-GROUND-TRUTH（不走元 UI）| 任何信号收集走元 UI 不走自然对话？✗ |
-| 5 | §2 INV-IMPLICIT-GROUND-TRUTH（充分利用隐式信号）| 本 Phase 是否充分利用 acceptance / 沉默 / 跟进 / 修改 等隐式信号？✓ |
-| 6 | §2 INV-IMPLICIT-GROUND-TRUTH（不诱导反馈）| 任何 agent_end prompt 是否可能诱导主会话 LLM 中主动向用户收集反馈？✗（R8 DeepSeek D7） |
-| 7 | §2 INV-IMPLICIT-GROUND-TRUTH（LLM 解释 ≠ 用户信号）| outcome / multi-view / aggregator 是否被误升为 ground truth？✗（R8 GPT G1） |
-| 8 | §2 INV-ACTIVE-CORRECTION | classifier 能稳定识别 task-natural 纠错？✓ 必须 |
+| 1 | §2 INV-INVISIBILITY(直接)| 任何 ui.notify / `/brain health` 自动弹窗 / 主动授权弹窗?✗ |
+| 2 | §2 INV-INVISIBILITY(间接)| staging 条目是否可能通过 curator 错误操作间接被用户感知?✗(R8 DeepSeek D6) |
+| 3 | §2 INV-AUTONOMY | 任何 prompt_user 询问 sediment 生命周期 / `/rule veto` / 月度 manual workflow?✗ |
+| 4 | §2 INV-IMPLICIT-GROUND-TRUTH(不走元 UI)| 任何信号收集走元 UI 不走自然对话?✗ |
+| 5 | §2 INV-IMPLICIT-GROUND-TRUTH(充分利用隐式信号)| 本 Phase 是否充分利用 acceptance / 沉默 / 跟进 / 修改 等隐式信号?✓ |
+| 6 | §2 INV-IMPLICIT-GROUND-TRUTH(不诱导反馈)| 任何 agent_end prompt 是否可能诱导主会话 LLM 中主动向用户收集反馈?✗(R8 DeepSeek D7) |
+| 7 | §2 INV-IMPLICIT-GROUND-TRUTH(LLM 解释 ≠ 用户信号)| outcome / multi-view / aggregator 是否被误升为 ground truth?✗(R8 GPT G1) |
+| 8 | §2 INV-ACTIVE-CORRECTION | classifier 能稳定识别 task-natural 纠错?✓ 必须 |
 
-### 10.2 AI-Native 原则（3 态标注）
+### 10.2 AI-Native 原则(3 态标注)
 
 | 状态 | 检查 |
 |---|---|
-| ☑ PE-form | LLM 行为层防出错走 prompt 工程？✓（默认期望） |
-| ☑ Infra | 持久化基础设施（JSON parse / schema validate / file I/O / git op / audit log）走机械？✓（允许） |
-| ✗ Mech-on-LLM | LLM 行为层加机械门（schema 拦截 / 阈值 / 哈希 / TTL / smoke-as-block）？✗（违反 → 必须 justify (1) PE-first 不够 (2) Infra 决不了 (3) 仅限局部范围 + 未来移除条件） |
+| ☑ PE-form | LLM 行为层防出错走 prompt 工程?✓(默认期望) |
+| ☑ Infra | 持久化基础设施(JSON parse / schema validate / file I/O / git op / audit log)走机械?✓(允许) |
+| ✗ Mech-on-LLM | LLM 行为层加机械门(schema 拦截 / 阈值 / 哈希 / TTL / smoke-as-block)?✗(违反 → 必须 justify (1) PE-first 不够 (2) Infra 决不了 (3) 仅限局部范围 + 未来移除条件) |
 
-### 10.3 §4.2 反模式（逐项列出）
+### 10.3 §4.2 反模式(逐项列出)
 
-本 Phase 是否引入或还原以下反模式？任一触发 → ✗。
+本 Phase 是否引入或还原以下反模式?任一触发 → ✗。
 
-- 系统弹窗“我学到了 X” / LLM 问“沉淀为规则吗？” / 学习周报
+- 系统弹窗"我学到了 X" / LLM 问"沉淀为规则吗?" / 学习周报
 - `MEMORY-RULE:` / `MEMORY-ABOUT-ME:` 围栏让用户手动注入
 - `/rule add` / `/rule veto` / `/about-me`
 - 月度 sediment self-improve 要用户主动跑
@@ -1003,60 +1116,60 @@ B3（下一代 vision 升级）：
 - fixture 准确率当发布拦截关卡
 - 预定义枚举字段替代 LLM 自然语言推理
 
-### 10.4 §6 接受的代价（9 行逐项 acknowledge）
+### 10.4 §6 接受的代价(9 行逐项 acknowledge)
 
-本 Phase 是否显式 acknowledge 以下代价？任一项未 acknowledge = 设计漏接受面。
+本 Phase 是否显式 acknowledge 以下代价?任一项未 acknowledge = 设计漏接受面。
 
 | # | 代价 | 本 Phase 额外需求 |
 |---|---|---|
-| 1 | 错误传播跨设备 | sync-aware check：ADR 0020 sync 是否能在 N 天 archive 窗口内正确传播反证 |
-| 2 | 偏发“假高置信” | dogfood 校准“数周到数月”假设 |
-| 3 | 静默归档误删 | reactivation prompt 必须 ship（§7）|
-| 4 | 跨设备最终一致延迟 | staging 加 `originating_device` 字段（§2.5）|
-| 5 | 用户察觉不到的偏差累积 | aggregator + Classifier Health Meta-Check（§4.3）|
-| 6 | 主动纠错疲劳 | 不强制 N=2 机械升级（§2.4）|
+| 1 | 错误传播跨设备 | sync-aware check:ADR 0020 sync 是否能在 N 天 archive 窗口内正确传播反证 |
+| 2 | 偏发"假高置信" | dogfood 校准"数周到数月"假设 |
+| 3 | 静默归档误删 | reactivation prompt 必须 ship(§7)|
+| 4 | 跨设备最终一致延迟 | staging 加 `originating_device` 字段(§2.5)|
+| 5 | 用户察觉不到的偏差累积 | aggregator + Classifier Health Meta-Check(§4.3)|
+| 6 | 主动纠错疲劳 | 不强制 N=2 机械升级(§2.4)|
 | 7 | Multi-view 翻倍调用成本 | P3 ship 后验证实际 vs 预期 |
 | 8 | 早期推理质量参差 | classifier §2.3 step 7 self-rating + audit |
-| 9 | LLM 推理失败本底概率 | multi-view 部分补偿；devil's advocate prompt（§5.3）加码 |
+| 9 | LLM 推理失败本底概率 | multi-view 部分补偿;devil's advocate prompt(§5.3)加码 |
 
 ### 10.5 §7 走偏信号
 
-本 Phase ship 前是否检查了 ADR 0024 §7 走偏信号 1-7 中的任何一条是否已触发？任何触发需先解决再 ship。另需补充检查：staging 区 age-out 率 + 未 resolve 率是否持续 > 60%（R8 盲点 X3 手动补的走偏信号 #8）。
+本 Phase ship 前是否检查了 ADR 0024 §7 走偏信号 1-7 中的任何一条是否已触发?任何触发需先解决再 ship。另需补充检查:staging 区 age-out 率 + 未 resolve 率是否持续 > 60%(R8 盲点 X3 手动补的走偏信号 #8)。
 
 ### 10.6 下游 ADR 边界
 
-本 Phase 是否触及以下 ADR 边界？任一触及 → 需在该 ADR 项下逐项说明不违反原 invariant。
+本 Phase 是否触及以下 ADR 边界?任一触及 → 需在该 ADR 项下逐项说明不违反原 invariant。
 
-- ADR 0014 invariant #7（七区互斥）——staging 路径不是第 8/9 区（§1.4）
-- ADR 0017 strict-binding——project-rules 注入不泄漏
-- ADR 0020 transport-only——staging 同步加 `originating_device`
-- ADR 0022 prompt_user contract——仅任务相关，不是 sediment 生命周期决策
-- ADR 0003 主会话只读——outcome self-report 走 §3.3 方案 C 隐藏 metadata 路径
+- ADR 0014 invariant #7(七区互斥)--staging 路径不是第 8/9 区(§1.4)
+- ADR 0017 strict-binding--project-rules 注入不泄漏
+- ADR 0020 transport-only--staging 同步加 `originating_device`
+- ADR 0022 prompt_user contract--仅任务相关,不是 sediment 生命周期决策
+- ADR 0003 主会话只读--outcome self-report 走 §3.3 方案 C 隐藏 metadata 路径
 
 ### 10.7 高级用户诊断入口调用面
 
-`/abrain audit classifier` / `/rule list` / `/abrain status` 等诊断入口是否在 quickstart / `/help` / 推广文案中被抑制？✓ 必须（符合 ADR 0024 §4.3）
+`/abrain audit classifier` / `/rule list` / `/abrain status` 等诊断入口是否在 quickstart / `/help` / 推广文案中被抑制?✓ 必须(符合 ADR 0024 §4.3)
 
 ---
 
 ## 11. 相关项目记忆
 
-- `in-vivo-correction-channel-as-durable-knowledge-source` (pattern, conf 8) — 主动纠错通道作为最可信 ground truth；§2 设计的直接依据
-- `adr-0024-r7-prompt-engineering-review-classifier-must-use-evidence-first-decision-last-cot` (pattern, conf 8) — §2.3 prompt step 1-6 顺序的直接来源
-- `multi-llm-review-exposes-five-actionable-design-flaws-in-intent-classification-architecture` (pattern, conf 8) — §2.3 prompt 末尾 "bias cautions" 三条（post-hoc / sycophantic / anchoring）的直接来源
-- `adr-0024-r7-review-multi-view-verification-requires-blind-first-reviewer-protocol-with-two-api-calls` (pattern, conf 8) — §5.2 两次独立 API 调用约束的直接来源
-- `rlhf-reviewer-bias-toward-mechanical-derisk-in-ai-native-system-critique` (anti-pattern, conf 9) — §5 reviewer prompt 设计必须反 RLHF 机械偏置
-- `prefer-prompt-engineering-over-mechanical-guards` (maxim, conf 9) — 本 ADR 全局指导原则
-- `sediment-self-evolution-philosophy-trusts-llm-over-mechanical-blocking` (maxim, conf 8) — 同上
-- `sediment-is-currently-write-only-loop-lacking-outcome-feedback` (pattern, conf 9) — §3 outcome self-report 要解决的根本问题
-- `sediment-meta-curator-five-capability-outline` (pattern, conf 8) — 上游 outline（注：该 entry 写于 R5，列了 5 条；ADR 0024 R6/R7 后精炼为 6 条，§2 主动纠错识别从 classifier 子任务升格为独立能力点。该 memory entry 不主动 patch，让 sediment 自己消化）
+- `in-vivo-correction-channel-as-durable-knowledge-source` (pattern, conf 8) - 主动纠错通道作为最可信 ground truth;§2 设计的直接依据
+- `adr-0024-r7-prompt-engineering-review-classifier-must-use-evidence-first-decision-last-cot` (pattern, conf 8) - §2.3 prompt step 1-6 顺序的直接来源
+- `multi-llm-review-exposes-five-actionable-design-flaws-in-intent-classification-architecture` (pattern, conf 8) - §2.3 prompt 末尾 "bias cautions" 三条(post-hoc / sycophantic / anchoring)的直接来源
+- `adr-0024-r7-review-multi-view-verification-requires-blind-first-reviewer-protocol-with-two-api-calls` (pattern, conf 8) - §5.2 两次独立 API 调用约束的直接来源
+- `rlhf-reviewer-bias-toward-mechanical-derisk-in-ai-native-system-critique` (anti-pattern, conf 9) - §5 reviewer prompt 设计必须反 RLHF 机械偏置
+- `prefer-prompt-engineering-over-mechanical-guards` (maxim, conf 9) - 本 ADR 全局指导原则
+- `sediment-self-evolution-philosophy-trusts-llm-over-mechanical-blocking` (maxim, conf 8) - 同上
+- `sediment-is-currently-write-only-loop-lacking-outcome-feedback` (pattern, conf 9) - §3 outcome self-report 要解决的根本问题
+- `sediment-meta-curator-five-capability-outline` (pattern, conf 8) - 上游 outline(注:该 entry 写于 R5,列了 5 条;ADR 0024 R6/R7 后精炼为 6 条,§2 主动纠错识别从 classifier 子任务升格为独立能力点。该 memory entry 不主动 patch,让 sediment 自己消化)
 
-**R8 audit 沉淀候选**（sediment 后续会看到 audit + R1 产出后决定是否沉淀）：
+**R8 audit 沉淀候选**(sediment 后续会看到 audit + R1 产出后决定是否沉淀):
 
-- `layer-f-three-state-protocol-distinguishes-infra-from-llm-behavior`（预计 maxim, conf 9）——R8 验证的 Layer F v2 3 态标注协议，供后续所有 capability-level ADR 的多 LLM audit 复用
-- `provisional-staging-hypothesis-as-prompt-form-anti-anchoring`（预计 pattern, conf 8）——本 ADR §2.5 _provenance_warning banner + WARNING prompt 段 + pending resolution queue 三者组合防 LLM 将 provisional hypothesis 错读为事实的设计模式
+- `layer-f-three-state-protocol-distinguishes-infra-from-llm-behavior`(预计 maxim, conf 9)--R8 验证的 Layer F v2 3 态标注协议,供后续所有 capability-level ADR 的多 LLM audit 复用
+- `provisional-staging-hypothesis-as-prompt-form-anti-anchoring`(预计 pattern, conf 8)--本 ADR §2.5 _provenance_warning banner + WARNING prompt 段 + pending resolution queue 三者组合防 LLM 将 provisional hypothesis 错读为事实的设计模式
 
-**评审文档**（不是 memory entry，是 audit 文档）：
+**评审文档**(不是 memory entry,是 audit 文档):
 
-- [R0 R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) — 本 R1 落地的 6 个 P0 + 1 个 P1 + 7 个盲点全部来源
-- [ADR 0024 R7 audit](../audits/2026-05-22-adr-0024-r7-prompt-engineering-review.md) — 上游哲学 ADR 的 R7 评审快照；R8 中 D1 / D2 / D3 盲点 R8 完整继承
+- [R0 R8 audit](../audits/2026-05-22-adr-0025-r0-prompt-engineering-review.md) - 本 R1 落地的 6 个 P0 + 1 个 P1 + 7 个盲点全部来源
+- [ADR 0024 R7 audit](../audits/2026-05-22-adr-0024-r7-prompt-engineering-review.md) - 上游哲学 ADR 的 R7 评审快照;R8 中 D1 / D2 / D3 盲点 R8 完整继承
