@@ -3,7 +3,7 @@ import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 
-interface ModelRegistryLike {
+export interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
   getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
 }

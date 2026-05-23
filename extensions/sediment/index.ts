@@ -45,6 +45,7 @@ import {
   summarizeLlmExtractorResult,
   type LlmExtractorResult,
 } from "./llm-extractor";
+import { runCorrectionClassifier } from "./correction-pipeline";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { sanitizeForMemory } from "./sanitizer";
 
@@ -1756,6 +1757,27 @@ async function tryAutoWriteLane(args: {
   } = sanitizeAndTruncateRawForAudit(llmResult.rawText, settings.autoWriteRawAuditChars);
 
   if (!llmResult.ok) {
+    // ADR 0025 P1: run correction classifier even when extractor fails.
+    // The conversation window may contain active correction signals
+    // independent of whether the extractor produced MEMORY: drafts.
+    runCorrectionClassifier(window.text, {
+      settings,
+      modelRegistry: modelRegistry as Parameters<typeof runCorrectionClassifier>[1]["modelRegistry"],
+      signal: args.signal,
+    }).then((cr) => {
+      if (cr.ok && cr.signal?.signal_found) {
+        appendAudit(cwd, {
+          operation: "correction_classifier",
+          lane: "auto_write",
+          session_id: sessionId,
+          correlation_id: correlationId,
+          signal: cr.signal,
+          model: cr.model,
+          duration_ms: cr.durationMs,
+        }).catch(() => {});
+      }
+    }).catch(() => {});
+
     return {
       kind: "llm_error",
       llmAuditSummary,
@@ -1766,6 +1788,29 @@ async function tryAutoWriteLane(args: {
       rawTextRedactionReason,
     };
   }
+
+  // ADR 0025 P1: run correction classifier on the conversation window.
+  // Fire-and-forget — doesn't block the curator loop. The signal, if any,
+  // is written to audit for downstream aggregator/staging resolution.
+  // In P1.x follow-ups: curator context injection + staging writes.
+  runCorrectionClassifier(window.text, {
+    settings,
+    modelRegistry: modelRegistry as Parameters<typeof runCorrectionClassifier>[1]["modelRegistry"],
+    signal: args.signal,
+  }).then((cr) => {
+    if (cr.ok && cr.signal?.signal_found) {
+      appendAudit(cwd, {
+        operation: "correction_classifier",
+        lane: "auto_write",
+        session_id: sessionId,
+        correlation_id: correlationId,
+        signal: cr.signal,
+        model: cr.model,
+        duration_ms: cr.durationMs,
+        raw_text_preview: cr.rawText?.slice(0, 1000),
+      }).catch(() => {});
+    }
+  }).catch(() => {});
 
   // 2. Keep only schema-valid candidates. Semantic gates are gone; the
   //    curator decides create/update/merge/archive/supersede/delete/skip after looking up existing memory.
