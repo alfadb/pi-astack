@@ -43,12 +43,29 @@
  * uniformity, but loaders + writers are separate (clear blast radius).
  *
  * See design review (deepseek-v4-pro 2026-05-24): D1 schema completeness,
- * D2 cross-device race (originating_device + optimistic lock in IO layer
- * = batch 3a-ii), D3 neighbor re-load semantics (re-load NOT snapshot),
- * D4 backlog caps (5 attempts × 14 days), D5 state-machine viability,
- * D6 slicing (3a-i / 3a-ii / 3b / 3c-i / 3c-ii), D7 terminal path
- * (simplified delete, NOT §4.6 reactivation-reviewer — that prompt
+ * D2 cross-device race, D3 neighbor re-load semantics (re-load NOT
+ * snapshot), D4 backlog caps (5 attempts × 14 days), D5 state-machine
+ * viability, D6 slicing (3a-i / 3a-ii / 3b / 3c-i / 3c-ii), D7 terminal
+ * path (simplified delete, NOT §4.6 reactivation-reviewer — that prompt
  * does not exist yet; batch 3 ships before §4.6).
+ *
+ * D2 cross-device race (post-discovery 2026-05-24): the design review's
+ * D2 analysis assumed staging files propagate cross-device via git-sync.
+ * Subsequent verification on a live abrain checkout shows
+ * `~/.abrain/.gitignore` line 2 is literally `.state/`, which causes
+ * `git check-ignore .state/sediment/staging/<file>.json` to return TRUE.
+ * The staging directory is SINGLE-DEVICE LOCAL by design — cross-device
+ * git-sync transports `knowledge/`, `projects/`, etc. but NOT `.state/`.
+ * Consequences:
+ *   • No cross-device duplicate-replay race exists (D2.2B blocker
+ *     evaporates without code).
+ *   • No need for optimistic-lock `git fetch + ls-tree origin` in 3a-ii.
+ *   • No need for retryable/context_only split in `loadMultiviewPending`.
+ *   • `originating_device` field kept as AUDIT MARKER only (matches the
+ *     existing `StagingEntry.originating_device` semantics); it does
+ *     NOT gate replay eligibility. Future multi-process-on-one-device
+ *     race (two pi instances racing) is out of scope — pi is
+ *     single-process in practice.
  *
  * Co-tenancy with `staging-types.ts` (provisional-correction):
  *   Both staging kinds share the on-disk directory
@@ -140,11 +157,16 @@ export interface MultiviewPendingEntry {
   updated?: string;
 
   /**
-   * Hostname of the device that captured this staging entry. Design
-   * review D2.2A verdict: only THIS device's agent_end may attempt
-   * replay. Other devices see the entry as context-only (read but
-   * do not retry) to prevent cross-device duplicate brain writes.
-   * Set from `process.env.HOSTNAME ?? os.hostname() ?? "unknown"`.
+   * Hostname of the device that captured this staging entry. Set from
+   * `process.env.HOSTNAME ?? os.hostname() ?? "unknown"`.
+   *
+   * AUDIT MARKER ONLY — does not gate replay eligibility (see file
+   * header: `.state/` is gitignored, staging is single-device-local,
+   * the design review's cross-device race was a false alarm). The
+   * field is kept for parity with `StagingEntry.originating_device`
+   * and for future debugging when a developer copies their abrain
+   * checkout to a fresh machine and needs to know which device the
+   * stale pending entry came from.
    */
   originating_device: string;
 
