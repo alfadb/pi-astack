@@ -1996,6 +1996,14 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
                 // which is misleading (the failure is in our scope, not
                 // the writer's). Returning normally lets replay record
                 // outcome=succeeded with the actual decision.
+                //
+                // `candidate_lost: true` flag added in batch 3c-ii.5 fix
+                // (deepseek review I4): even though replay outcome will
+                // be "succeeded", the candidate is genuinely lost —
+                // staging is removed (replay path's design) and no brain
+                // write happened (stub). Audit consumers grepping
+                // `candidate_lost: true` can quantify v1-stub-driven
+                // candidate loss separately from honest skip decisions.
                 appendAudit(replayCwd, {
                   operation: "multi_view_replay_would_write",
                   session_id: replaySessionId,
@@ -2004,6 +2012,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
                   decision: decision,
                   candidate_title: candidate.title,
                   candidate_kind: candidate.kind,
+                  candidate_lost: true,
                   note: "v1 stub: writer dispatch not implemented in batch 3c-ii; candidate dropped after audit. Follow-up batch will wire writer.",
                 });
               },
