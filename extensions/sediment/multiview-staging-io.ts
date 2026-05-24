@@ -102,23 +102,99 @@ function clipForStaging(text: string): string {
   return text.slice(0, PROPOSER_RAW_TEXT_CAP) + "…[truncated]";
 }
 
+// Per-field caps (separate from PROPOSER_RAW_TEXT_CAP so changes don't
+// cascade). Tuned per deepseek 3a-ii review I2: candidate_snapshot.
+// compiledTruth is the highest bloat risk (curator-side
+// settings.maxEntryChars allows 30,000 chars, but replay's
+// renderCandidate only needs enough context for the reviewer to judge;
+// matching PROPOSER_RAW_TEXT_CAP = 4000 is sufficient).
+const CANDIDATE_COMPILED_TRUTH_CAP = PROPOSER_RAW_TEXT_CAP;  // 4000
+const CANDIDATE_SUMMARY_CAP = 1000;
+const REVIEWER_FREEFORM_CAP = 2000;  // reasoning / rationale / quote etc.
+
 /**
  * Apply staging-time field caps to an entry. Returns a new entry —
- * caller's reference is NOT mutated. Caps: proposer_raw_text, and
- * pass1_verdict.raw / pass2_verdict.raw if those verdicts exist.
+ * caller's reference is NOT mutated. This is DEFENSIVE: the IO layer
+ * is the contract surface guaranteeing "no matter what the caller
+ * passes in, disk doesn't bloat unboundedly". Callers may pre-clip
+ * (and 3b SHOULD because it knows the runMultiView prompt budget),
+ * but we never assume they did.
+ *
+ * Capped fields and their rationale:
+ *   proposer_raw_text                            → 4000 (matches Pass 2 prompt cap)
+ *   pass1_verdict.raw / pass2_verdict.raw        → 4000 (full reviewer output)
+ *   candidate_snapshot.compiledTruth             → 4000 (P1 from review I2; main bloat risk)
+ *   candidate_snapshot.summary                   → 1000
+ *   candidate_snapshot.title                     → NOT capped (typically <200)
+ *   pass1_verdict.reasoning / .key_evidence_quote
+ *     / .strongest_objection_to_your_own_op      → 2000
+ *   pass2_verdict.rationale / .anchor_bias_self_check
+ *     / .devils_advocate_objection               → 2000
+ *   pass2_verdict.missed_evidence_quote          → 2000
+ *
+ * Worst-case per-entry size after caps: ~30KB JSON
+ * (3 × 4000 + 1000 + 6 × 2000 + frontmatter + serialization overhead).
+ * With max ~20 entries in staging dir, total ~600KB bound — acceptable.
  */
 function applyFieldCaps(entry: MultiviewPendingEntry): MultiviewPendingEntry {
   const out: MultiviewPendingEntry = {
     ...entry,
     proposer_raw_text: clipForStaging(entry.proposer_raw_text),
+    candidate_snapshot: {
+      ...entry.candidate_snapshot,
+      compiledTruth: clipTo(entry.candidate_snapshot.compiledTruth, CANDIDATE_COMPILED_TRUTH_CAP),
+      ...(entry.candidate_snapshot.summary !== undefined && {
+        summary: clipTo(entry.candidate_snapshot.summary, CANDIDATE_SUMMARY_CAP),
+      }),
+    },
   };
   if (entry.pass1_verdict) {
-    out.pass1_verdict = { ...entry.pass1_verdict, raw: clipForStaging(entry.pass1_verdict.raw) };
+    out.pass1_verdict = {
+      ...entry.pass1_verdict,
+      raw: clipForStaging(entry.pass1_verdict.raw),
+      ...(entry.pass1_verdict.reasoning !== undefined && {
+        reasoning: clipTo(entry.pass1_verdict.reasoning, REVIEWER_FREEFORM_CAP),
+      }),
+      ...(entry.pass1_verdict.key_evidence_quote !== undefined && {
+        key_evidence_quote: clipTo(entry.pass1_verdict.key_evidence_quote, REVIEWER_FREEFORM_CAP),
+      }),
+      ...(entry.pass1_verdict.strongest_objection_to_your_own_op !== undefined && {
+        strongest_objection_to_your_own_op: clipTo(
+          entry.pass1_verdict.strongest_objection_to_your_own_op, REVIEWER_FREEFORM_CAP),
+      }),
+    };
   }
   if (entry.pass2_verdict) {
-    out.pass2_verdict = { ...entry.pass2_verdict, raw: clipForStaging(entry.pass2_verdict.raw) };
+    out.pass2_verdict = {
+      ...entry.pass2_verdict,
+      raw: clipForStaging(entry.pass2_verdict.raw),
+      ...(entry.pass2_verdict.rationale !== undefined && {
+        rationale: clipTo(entry.pass2_verdict.rationale, REVIEWER_FREEFORM_CAP),
+      }),
+      ...(entry.pass2_verdict.anchor_bias_self_check !== undefined && {
+        anchor_bias_self_check: clipTo(
+          entry.pass2_verdict.anchor_bias_self_check, REVIEWER_FREEFORM_CAP),
+      }),
+      ...(entry.pass2_verdict.devils_advocate_objection !== undefined && {
+        devils_advocate_objection: clipTo(
+          entry.pass2_verdict.devils_advocate_objection, REVIEWER_FREEFORM_CAP),
+      }),
+      ...(entry.pass2_verdict.missed_evidence_quote !== undefined &&
+          entry.pass2_verdict.missed_evidence_quote !== null && {
+        missed_evidence_quote: clipTo(
+          entry.pass2_verdict.missed_evidence_quote, REVIEWER_FREEFORM_CAP),
+      }),
+    };
   }
   return out;
+}
+
+/** Generic clip helper used by per-field caps. Same shape as
+ *  clipForStaging but with arbitrary cap so the bigger function can
+ *  use multiple thresholds. */
+function clipTo(text: string, cap: number): string {
+  if (text.length <= cap) return text;
+  return text.slice(0, cap) + "…[truncated]";
 }
 
 // ── Write ────────────────────────────────────────────────────────────────
@@ -134,6 +210,20 @@ function applyFieldCaps(entry: MultiviewPendingEntry): MultiviewPendingEntry {
  * surface the error. Unlike the metrics sidecar, staging IO is NOT
  * best-effort: if we can't write the entry, the brain write would have
  * been silently dropped, and we want loud failure for that.
+ *
+ * Contrast with `writeStagingEntry` (staging-loader.ts) which silently
+ * swallows IO errors — that's correct for provisional-correction
+ * staging (best-effort context for future classifier runs, lossy is
+ * acceptable). multiview-pending is brain-write replacement, lossy
+ * is NOT acceptable.
+ *
+ * Caller contract reminders:
+ *   - All required fields per multiview-staging-types.ts D1.G must
+ *     be present. The IO layer does NOT verify (deepseek 3a-ii review
+ *     I1: redundant for programmatic callers); missing fields will
+ *     surface at replay time as runMultiView arg validation failures.
+ *   - Length caps are applied DEFENSIVELY here. Caller may pre-clip
+ *     but is not required to.
  *
  * Returns the absolute path of the written file so the caller can log
  * it to audit.
@@ -185,6 +275,12 @@ export interface MultiviewPendingLoadResult {
  * silently. Files with NO `kind` field, wrong schema_version, or
  * unparseable JSON are also skipped and counted in `skippedCount`.
  *
+ * Forward-compat note (deepseek 3a-ii review I5): a future v2
+ * entry on disk is skipped silently here. We emit a `console.debug`
+ * line in that case so a dogfooder grepping their stderr can spot
+ * the silent-skip pile-up. Audit-row-level signaling is deferred
+ * to 3c-i which will report load stats per agent_end.
+ *
  * Sort order: oldest first (chronological), determined by parsing
  * `entry.created` as ISO timestamp. Files with unparseable timestamps
  * are skipped.
@@ -209,10 +305,16 @@ export function loadMultiviewPending(): MultiviewPendingLoadResult {
       const raw = fs.readFileSync(path.join(STAGING_DIR, file), "utf-8");
       const parsed = JSON.parse(raw) as Partial<MultiviewPendingFileOnDisk>;
 
-      // Schema version guard: silently skip unknown versions (forward
-      // compat — a future v2 entry on disk is not parseable here, but
-      // also not crashable).
-      if (parsed.schema_version !== MULTIVIEW_PENDING_SCHEMA_VERSION) continue;
+      // Schema version guard: skip unknown versions (forward compat
+      // — a future v2 entry on disk is not parseable here, but also
+      // not crashable). Emit a debug line so dogfooders can grep their
+      // logs and notice silent skip pile-up (review I5).
+      if (parsed.schema_version !== MULTIVIEW_PENDING_SCHEMA_VERSION) {
+        console.debug(
+          `[multiview-staging-io] skipping v${String(parsed.schema_version)} entry (current v${MULTIVIEW_PENDING_SCHEMA_VERSION}): ${file}`,
+        );
+        continue;
+      }
 
       // Co-tenancy discriminator: explicitly skip non-multiview entries.
       // Provisional-correction files share this dir and will appear here.
@@ -257,7 +359,14 @@ export function loadMultiviewPending(): MultiviewPendingLoadResult {
  *
  * The filename was built with a timestamp prefix we don't have at
  * delete time — so we readdir + find the suffix-matching file. O(N)
- * but N ≤ MAX_STAGING_ENTRIES * 2 typically (~20), trivial.
+ * but N ≤ ~20 typically, trivial.
+ *
+ * Process-level concurrency: not a concern. pi runs as a single Node
+ * process per device, fs operations are synchronous and not
+ * interleavable, so the readdir → unlink window cannot observe a
+ * partially-written file from a concurrent write (the writer's
+ * `writeFileSync` is also synchronous, and would block this delete
+ * until complete — see file header concurrency note).
  *
  * Best-effort: missing file is NOT an error (idempotent). Filesystem
  * errors (EACCES) are swallowed; the caller can detect failure via
@@ -291,31 +400,26 @@ export function deleteMultiviewPending(slug: string): boolean {
 // ── Stats (for monitoring / audit) ───────────────────────────────────────
 
 /**
- * Count multiview-pending entries currently on disk. Cheaper than
- * loadMultiviewPending because it skips JSON parse — useful for
- * audit log fields and monitoring "are we accumulating pending?".
+ * Count multiview-pending entries currently on disk. Uses filename
+ * pattern match — every multiview-pending file's name contains
+ * `-multiview-pending-` because buildFilename concatenates the slug
+ * which always starts with `multiview-pending-`. This avoids the
+ * readFileSync + JSON.parse cost of inspecting every staging file,
+ * which matters when the staging dir grows or count is called
+ * frequently (audit row injection).
+ *
+ * Trade-off vs loadMultiviewPending's stricter parsing: pattern match
+ * cannot detect corrupt files OR wrong schema_version. Both cases
+ * still get counted here; loadMultiviewPending filters them. Acceptable
+ * because count is monitoring / observability use, not gate-keeping.
  */
 export function countMultiviewPending(): number {
   if (!fs.existsSync(STAGING_DIR)) return 0;
   try {
     return fs
       .readdirSync(STAGING_DIR)
-      .filter((f) => f.endsWith(".json"))
-      .reduce((n, f) => {
-        try {
-          const raw = fs.readFileSync(path.join(STAGING_DIR, f), "utf-8");
-          const parsed = JSON.parse(raw) as Partial<MultiviewPendingFileOnDisk>;
-          if (
-            parsed.schema_version === MULTIVIEW_PENDING_SCHEMA_VERSION &&
-            parsed.entry?.kind === "multiview-pending"
-          ) {
-            return n + 1;
-          }
-        } catch {
-          // ignore unparseable for count
-        }
-        return n;
-      }, 0);
+      .filter((f) => f.includes("-multiview-pending-") && f.endsWith(".json"))
+      .length;
   } catch {
     return 0;
   }
