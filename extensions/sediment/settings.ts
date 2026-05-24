@@ -118,20 +118,34 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // Head 25K + tail 5K preserved; middle truncated with marker.
   maxEntryChars: 30_000,
   extractorModel: "deepseek/deepseek-v4-pro",
-  extractorTimeoutMs: 180_000,
+  // 2026-05-24: raised 180_000 → 1_200_000 (20 min) per user directive.
+  // Rationale: sediment is fire-and-forget background; pi-ai underlying SDK
+  // default is 10 min anyway (see pi-ai types.ts:121). Tight timeouts caused
+  // noisy "Request timed out" footer/audit entries during provider blips
+  // (deepseek routing flake / brief rate-limit) that would have resolved if
+  // given more time. 20 min tolerates extreme provider latency while still
+  // bounded so a truly hung socket eventually fails. Trade-off: a stuck
+  // request now shows `📝 sediment: extracting` for up to 20 min before
+  // flipping to `⚠️ LLM err: ...` — acceptable per Lane C fire-and-forget.
+  extractorTimeoutMs: 1_200_000,
   extractorMaxRetries: 0,
   // Classifier is a reading-comprehension + classification task.
   // v4-flash is fast ($0.14/M), cheap, and sufficient — no reasoning needed.
   classifierModel: "deepseek/deepseek-v4-flash",
-  classifierTimeoutMs: 30_000,
+  // 2026-05-24: raised 30_000 → 1_200_000 (20 min) per user directive.
+  // See extractorTimeoutMs rationale above. classifier was the most frequent
+  // false-fail offender (e.g. audit.jsonl 15:14 + 15:17 deepseek blip).
+  classifierTimeoutMs: 1_200_000,
   extractorMaxCandidates: 5,
   extractorAuditRawChars: 1_000,
   // 2026-05-11: curator split from extractorModel (3-model audit).
   // Curator is a small-context entity-resolution task (candidate +
-  // ≤5 neighbors). v4-flash is sufficient; timeout dropped to 60s;
-  // 1 retry to recover from JSON parse errors.
+  // ≤5 neighbors). v4-flash is sufficient; 1 retry to recover from JSON
+  // parse errors.
   curatorModel: "deepseek/deepseek-v4-flash",
-  curatorTimeoutMs: 60_000,
+  // 2026-05-24: raised 60_000 → 1_200_000 (20 min) per user directive.
+  // See extractorTimeoutMs rationale above.
+  curatorTimeoutMs: 1_200_000,
   curatorMaxRetries: 1,
   // ADR 0025 §5.3 P5.5: default changed false → true 2026-05-24.
   //
