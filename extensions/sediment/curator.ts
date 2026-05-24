@@ -85,6 +85,20 @@ export interface CuratorAudit {
       durationMs: number;
     };
     error?: string;
+    /** Batch 3b: set when runMultiView staged the candidate for replay
+     *  on one of the 6 transient-failure paths. When present, `decision`
+     *  is guaranteed to be op=skip(multiview_staged_for_replay). The
+     *  audit consumer should NOT treat this as a brain write; replay
+     *  at next agent_end may produce a real decision. */
+    staged?: {
+      slug: string;
+      state: string;        // MultiviewPendingState; kept as string
+                            // here to avoid leaking the union from
+                            // multiview-staging-types into the audit
+                            // schema (audit is consumed by external
+                            // tools that should not be coupled).
+      path: string;
+    };
     durationMs: number;
   };
 }
@@ -468,6 +482,17 @@ function buildMultiViewAudit(
       durationMs: mv.pass2.durationMs,
     };
   }
+  // batch 3b: propagate staged-for-replay ref into audit. Audit consumers
+  // can grep for `multi_view.staged.state` to count how often each
+  // transient-failure path fires, and `multi_view.staged.slug` to follow
+  // a specific candidate's replay history.
+  if (mv.staged) {
+    out.staged = {
+      slug: mv.staged.slug,
+      state: mv.staged.state,
+      path: mv.staged.path,
+    };
+  }
   return out;
 }
 
@@ -836,6 +861,10 @@ export async function curateProjectDraft(
       modelRegistry: deps.modelRegistry,
       signal: deps.signal,
     });
+    // batch 3b: when staged, final_decision is guaranteed to be
+    // op=skip(multiview_staged_for_replay) so the downstream caller
+    // naturally skips brain write. We surface this in the audit by
+    // copying mvResult.staged through buildMultiViewAudit.
     const decision = sanitizeDecisionStrings(mvResult.final_decision);
 
     return {

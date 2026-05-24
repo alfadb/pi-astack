@@ -51,6 +51,16 @@ import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shar
 import type { CorrectionSignal } from "./correction-pipeline";
 import type { ProjectEntryDraft } from "./writer";
 import type { SedimentSettings } from "./settings";
+import type {
+  MultiviewPendingEntry,
+  MultiviewPendingState,
+  CandidateSnapshot,
+} from "./multiview-staging-types";
+import {
+  generateMultiviewPendingSlug,
+  writeMultiviewPending,
+} from "./multiview-staging-io";
+import * as os from "node:os";
 import type { ModelRegistryLike } from "./llm-extractor";
 import { sanitizeForMemory } from "./sanitizer";
 
@@ -95,6 +105,13 @@ export interface Pass2Verdict {
   durationMs: number;
 }
 
+export interface MultiViewStagedRef {
+  slug: string;
+  state: MultiviewPendingState;
+  /** Absolute on-disk path for audit traceability. */
+  path: string;
+}
+
 export interface MultiViewResult {
   triggered: boolean;
   trigger_reason?: MultiViewTriggerReason;
@@ -102,12 +119,22 @@ export interface MultiViewResult {
    *  confirm_proposer → equals input proposerDecision.
    *  confirm_pass1 → a CuratorDecision synthesized from Pass1Verdict
    *  (when synthesizable; otherwise op=skip with multiview audit).
-   *  defer → op=skip with reason=multiview_deferred. */
+   *  defer → op=skip with reason=multiview_staged_for_replay (batch 3b
+   *  promoted DEFER from old skip(multiview_deferred) into staging).
+   *
+   *  When `staged` is non-undefined, this is op=skip(reason=
+   *  multiview_staged_for_replay) regardless of the original failure
+   *  mode — the curator must NOT execute the proposer's intent. */
   final_decision: CuratorDecision;
   pass1?: Pass1Verdict;
   pass2?: Pass2Verdict;
   /** When triggered but reviewer was unavailable / both passes failed. */
   error?: string;
+  /** Set when this multi-view run produced a staged entry on disk
+   *  (one of the 6 transient-failure fallback paths). The downstream
+   *  curator should write `op: skip` to audit but NOT execute the
+   *  candidate; replay will pick it up at the next agent_end. */
+  staged?: MultiViewStagedRef;
   durationMs: number;
 }
 
@@ -699,30 +726,33 @@ function synthesizeFromPass1(
   }
 }
 
-// ── Main entry ────────────────────────────────────────────────────────
+// ── Staging fallback (batch 3b) ───────────────────────────────────────
+//
+// ADR 0025 P0.5 R-series review batch 3b: six transient-failure
+// fallback paths in runMultiView used to silently fall back to the
+// proposer's CuratorDecision being written directly to brain, which
+// violates ADR 0025 §3.1 A' layer hard constraint ("non-trivial
+// create / destructive ops MUST be double-reviewed"). Each of those
+// six paths is now routed through stageAndSkipDecision — the
+// candidate is staged for replay (batch 3c-i) and the curator is
+// instructed to op=skip(multiview_staged_for_replay).
+//
+// The seventh path, confirm_pass1_not_synthesizable, is NOT staged —
+// it represents the known P0.5 schema limitation that Pass 1 schema
+// does not carry rich payload for update/merge/supersede/delete.
+// Staging it would dead-loop (replay hits the same limitation). That
+// path keeps op=skip(multiview_pass1_op_not_synthesizable) per
+// design review D5.5A.
+//
+// Error policy: writeMultiviewPending propagates IO + validation
+// errors. runMultiView does NOT catch them — we deliberately prefer
+// "this round's sediment auto-write fails loudly" over "silently fall
+// back to proposer direct-write". P0.3 (A' layer must hold) outranks
+// candidate-loss cost (this turn's candidate is discarded). The
+// classifier may re-detect the same signal on a future turn; A'
+// violations are unrecoverable.
 
-/**
- * Run the multi-view pipeline. Caller MUST already have checked
- * shouldTriggerMultiView. We re-run that check here for safety but
- * primarily expect the check to be done upstream so curator can
- * audit `triggered: false` rows independently.
- *
- * Returns final_decision = proposerDecision when:
- *   - multi-view not triggered, OR
- *   - reviewer model unavailable (no audit advisory; falls back to proposer), OR
- *   - Pass 1 unparseable (audit-flagged), OR
- *   - Pass 2 unparseable (audit-flagged), OR
- *   - Pass 2 verdict = confirm_proposer
- *
- * Returns final_decision = synthesized from Pass 1 when:
- *   - Pass 2 verdict = confirm_pass1 AND Pass 1 is synthesizable
- *
- * Returns final_decision = op=skip(multiview_deferred) when:
- *   - Pass 2 verdict = defer
- *   - Pass 2 verdict = confirm_pass1 but Pass 1 not synthesizable
- *     (rich-payload op without writer-ready fields)
- */
-export async function runMultiView(args: {
+export type RunMultiViewArgs = {
   proposerDecision: CuratorDecision;
   proposerRawText: string;
   candidate: ProjectEntryDraft;
@@ -731,7 +761,126 @@ export async function runMultiView(args: {
   settings: SedimentSettings;
   modelRegistry: ModelRegistryLike;
   signal?: AbortSignal;
-}): Promise<MultiViewResult> {
+};
+
+/** Project the candidate draft onto the staging-entry's snapshot
+ *  subset. Only the fields renderCandidate consumes are kept (see
+ *  multiview-staging-types.ts::CandidateSnapshot JSDoc); summary is
+ *  included as a defensive context field for the reviewer at replay
+ *  time even though current renderCandidate does not surface it,
+ *  because the schema is forward-compatible with prompt evolution. */
+function snapshotCandidate(draft: ProjectEntryDraft): CandidateSnapshot {
+  return {
+    title: draft.title,
+    kind: draft.kind,
+    compiledTruth: draft.compiledTruth,
+    ...(draft.status !== undefined && { status: draft.status }),
+    ...(draft.confidence !== undefined && { confidence: draft.confidence }),
+    ...(draft.summary !== undefined && { summary: draft.summary }),
+  };
+}
+
+/** Build a MultiviewPendingEntry from runMultiView's local state. The
+ *  caller passes the partial verdicts that were produced before the
+ *  failure (none for reviewer_unavailable / pass1_*; pass1 for
+ *  pass2_*; both for deferred). validateMultiviewPendingConsistency
+ *  runs inside writeMultiviewPending and will throw if the verdict
+ *  presence doesn't match the state (programmer-bug fail-fast). */
+function buildPendingEntry(
+  args: RunMultiViewArgs,
+  state: MultiviewPendingState,
+  triggerReason: MultiViewTriggerReason,
+  pass1Verdict: Pass1Verdict | undefined,
+  pass2Verdict: Pass2Verdict | undefined,
+): MultiviewPendingEntry {
+  const nowIso = new Date().toISOString();
+  const slug = generateMultiviewPendingSlug({
+    compiledTruth: args.candidate.compiledTruth,
+    isoTs: nowIso,
+  });
+  return {
+    slug,
+    status: "provisional",
+    kind: "multiview-pending",
+    created: nowIso,
+    originating_device: process.env.HOSTNAME ?? os.hostname() ?? "unknown",
+    multiview_state: state,
+    proposer_decision: args.proposerDecision,
+    proposer_raw_text: args.proposerRawText,
+    candidate_snapshot: snapshotCandidate(args.candidate),
+    correction_signal: args.correctionSignal ?? null,
+    neighbor_slugs: args.neighbors.map((n) => n.slug),
+    trigger_reason: triggerReason,
+    ...(pass1Verdict !== undefined && { pass1_verdict: pass1Verdict }),
+    ...(pass2Verdict !== undefined && { pass2_verdict: pass2Verdict }),
+    retry_attempts: 0,
+    last_attempt_iso: nowIso,
+  };
+}
+
+/** Build a staging entry, persist it, and return a MultiViewResult
+ *  with final_decision = op=skip(multiview_staged_for_replay) plus
+ *  the staged ref. The rationale is auto-built so audit readers can
+ *  see why the candidate was deferred (state code + error string).
+ *
+ *  Throws if writeMultiviewPending throws (IO or validation error).
+ *  Caller (runMultiView) does NOT catch — see file-level error
+ *  policy comment. */
+function stageAndSkipDecision(
+  args: RunMultiViewArgs,
+  state: MultiviewPendingState,
+  triggerReason: MultiViewTriggerReason,
+  pass1Verdict: Pass1Verdict | undefined,
+  pass2Verdict: Pass2Verdict | undefined,
+  errorContext: string,
+  overallStart: number,
+): MultiViewResult {
+  const entry = buildPendingEntry(args, state, triggerReason, pass1Verdict, pass2Verdict);
+  const writtenPath = writeMultiviewPending(entry);
+  return {
+    triggered: true,
+    trigger_reason: triggerReason,
+    final_decision: {
+      op: "skip",
+      reason: "multiview_staged_for_replay",
+      rationale: `runMultiView state=${state} (${errorContext}); candidate staged at slug=${entry.slug} for replay at next agent_end. Replay will retry the reviewer; final disposition decided by replay loop (multiview-staging-replay).`,
+    },
+    error: `${state}: ${errorContext}`,
+    ...(pass1Verdict !== undefined && { pass1: pass1Verdict }),
+    ...(pass2Verdict !== undefined && { pass2: pass2Verdict }),
+    staged: { slug: entry.slug, state, path: writtenPath },
+    durationMs: Date.now() - overallStart,
+  };
+}
+
+// ── Main entry ────────────────────────────────────────────────────────
+
+/**
+ * Run the multi-view pipeline. Caller MUST already have checked
+ * shouldTriggerMultiView. We re-run that check here for safety but
+ * primarily expect the check to be done upstream so curator can
+ * audit `triggered: false` rows independently.
+ *
+ * After batch 3b, 6 of the 7 transient fallback paths route through
+ * stageAndSkipDecision (final_decision = op=skip(multiview_staged_for_replay)
+ * + `staged` ref). Returns final_decision = proposerDecision ONLY when:
+ *   - multi-view not triggered, OR
+ *   - Pass 2 verdict = confirm_proposer (reviewer agrees)
+ *
+ * Returns final_decision = synthesized from Pass 1 when:
+ *   - Pass 2 verdict = confirm_pass1 AND Pass 1 is synthesizable
+ *
+ * Returns final_decision = op=skip(multiview_pass1_op_not_synthesizable)
+ * when Pass 2 verdict = confirm_pass1 but Pass 1 not synthesizable
+ * (rich-payload op without writer-ready fields — known P0.5 schema
+ * limitation, NOT staged per D5.5A).
+ *
+ * Returns final_decision = op=skip(multiview_staged_for_replay) +
+ * `staged` ref when reviewer unavailable / Pass 1 call failed / Pass
+ * 1 unparseable / Pass 2 call failed / Pass 2 unparseable / Pass 2
+ * verdict = defer.
+ */
+export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewResult> {
   const overallStart = Date.now();
   const trigger = shouldTriggerMultiView(
     args.proposerDecision,
@@ -749,13 +898,13 @@ export async function runMultiView(args: {
 
   const reviewer = selectReviewerModel(args.settings, args.modelRegistry);
   if (!reviewer) {
-    return {
-      triggered: true,
-      trigger_reason: trigger.reason,
-      final_decision: args.proposerDecision,
-      error: "no_reviewer_model_available",
-      durationMs: Date.now() - overallStart,
-    };
+    // batch 3b: stage instead of falling back to proposer direct-write.
+    return stageAndSkipDecision(
+      args, "reviewer_unavailable", trigger.reason!,
+      undefined, undefined,
+      "no reviewer model registered or auth unavailable",
+      overallStart,
+    );
   }
 
   const contextBlock = [
@@ -780,30 +929,28 @@ export async function runMultiView(args: {
   const pass1DurationMs = Date.now() - pass1Start;
 
   if (!pass1Resp.ok) {
-    return {
-      triggered: true,
-      trigger_reason: trigger.reason,
-      final_decision: args.proposerDecision,
-      error: `pass1_call_failed: ${pass1Resp.error}`,
-      durationMs: Date.now() - overallStart,
-    };
+    // batch 3b: stage instead of falling back to proposer direct-write.
+    return stageAndSkipDecision(
+      args, "pass1_call_failed", trigger.reason!,
+      undefined, undefined,
+      pass1Resp.error,
+      overallStart,
+    );
   }
 
   const pass1 = parsePass1(pass1Resp.text, reviewer.ref, pass1DurationMs);
   if (!pass1) {
-    return {
-      triggered: true,
-      trigger_reason: trigger.reason,
-      final_decision: args.proposerDecision,
-      error: "pass1_unparseable",
-      pass1: {
-        op: "<unparseable>",
-        raw: pass1Resp.text,
-        model: reviewer.ref,
-        durationMs: pass1DurationMs,
-      },
-      durationMs: Date.now() - overallStart,
-    };
+    // batch 3b: stage instead of falling back to proposer direct-write.
+    // We do NOT pass pass1_verdict (state=pass1_unparseable implies
+    // the verdict structure could not be reconstructed); the raw
+    // text is preserved in the multi-view-metrics.jsonl sidecar from
+    // batch 2 for downstream prompt-quality debugging.
+    return stageAndSkipDecision(
+      args, "pass1_unparseable", trigger.reason!,
+      undefined, undefined,
+      `parsePass1 returned null; raw text length=${pass1Resp.text.length} (full text in multi-view-metrics.jsonl)`,
+      overallStart,
+    );
   }
 
   // ── Pass 2 (Reveal) — same reviewer model, separate API call ──
@@ -833,32 +980,27 @@ export async function runMultiView(args: {
   const pass2DurationMs = Date.now() - pass2Start;
 
   if (!pass2Resp.ok) {
-    return {
-      triggered: true,
-      trigger_reason: trigger.reason,
-      final_decision: args.proposerDecision,
-      pass1,
-      error: `pass2_call_failed: ${pass2Resp.error}`,
-      durationMs: Date.now() - overallStart,
-    };
+    // batch 3b: stage instead of falling back to proposer direct-write.
+    // Pass 1 succeeded so we preserve pass1 in the staging entry; replay
+    // may choose to skip Pass 1 re-execution if the entry has a fresh
+    // pass1_verdict (3c-i policy).
+    return stageAndSkipDecision(
+      args, "pass2_call_failed", trigger.reason!,
+      pass1, undefined,
+      pass2Resp.error,
+      overallStart,
+    );
   }
 
   const pass2 = parsePass2(pass2Resp.text, reviewer.ref, pass2DurationMs);
   if (!pass2) {
-    return {
-      triggered: true,
-      trigger_reason: trigger.reason,
-      final_decision: args.proposerDecision,
-      pass1,
-      pass2: {
-        verdict: "confirm_proposer",
-        raw: pass2Resp.text,
-        model: reviewer.ref,
-        durationMs: pass2DurationMs,
-      },
-      error: "pass2_unparseable",
-      durationMs: Date.now() - overallStart,
-    };
+    // batch 3b: stage instead of falling back to proposer direct-write.
+    return stageAndSkipDecision(
+      args, "pass2_unparseable", trigger.reason!,
+      pass1, undefined,
+      `parsePass2 returned null; raw text length=${pass2Resp.text.length} (full text in multi-view-metrics.jsonl)`,
+      overallStart,
+    );
   }
 
   // ── Resolve final decision ──
@@ -883,14 +1025,17 @@ export async function runMultiView(args: {
       break;
     }
     case "defer":
-      final_decision = {
-        op: "skip",
-        reason: "multiview_deferred",
-        rationale: pass2.rationale
-          ? `Pass 2 deferred: ${pass2.rationale.slice(0, 500)}`
-          : "Pass 2 deferred without rationale.",
-      };
-      break;
+      // batch 3b: DEFER no longer maps to op=skip(multiview_deferred).
+      // It now stages for replay (§4.4.5 staging-pending tier finally
+      // implemented). Pass 1 and Pass 2 verdicts are both preserved so
+      // replay can decide whether to re-run Pass 2 only (cheap) or
+      // both passes (full refresh). 3c-i decides; 3b just records.
+      return stageAndSkipDecision(
+        args, "deferred", trigger.reason!,
+        pass1, pass2,
+        pass2.rationale ? `pass 2 deferred: ${pass2.rationale.slice(0, 200)}` : "pass 2 deferred without rationale",
+        overallStart,
+      );
   }
 
   return {
