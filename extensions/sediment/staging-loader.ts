@@ -16,7 +16,16 @@ import * as path from "node:path";
 import * as os from "node:os";
 import type { StagingEntry, StagingFileOnDisk } from "./staging-types";
 
-const STAGING_DIR = path.join(
+/**
+ * Shared staging directory for ALL staging kinds (provisional-correction,
+ * multiview-pending, future kinds). Exported so sibling IO modules
+ * (multiview-staging-io.ts) write to the same directory as this loader
+ * reads, without duplicating the path. The directory is single-device
+ * local: `~/.abrain/.gitignore` line 2 (`.state/`) excludes it from
+ * git-sync, so no cross-device replay race exists (see
+ * multiview-staging-types.ts file header for the D2 discovery write-up).
+ */
+export const STAGING_DIR = path.join(
   os.homedir(), ".abrain", ".state", "sediment", "staging",
 );
 
