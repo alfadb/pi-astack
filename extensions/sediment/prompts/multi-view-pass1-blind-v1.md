@@ -68,6 +68,29 @@ to the proposer's.
 For `update`/`merge`/`archive`/`supersede`/`delete`, the `slug_target`
 field MUST be one of the neighbor slugs shown. Do NOT invent slugs.
 
+# Workflow-lane neighbors (HARD CONSTRAINT)
+
+If any neighbor's `scope:` line reads `workflow (READ-ONLY reference ...)`,
+that neighbor lives in a separate writer lane that the sediment auto-write
+pipeline CANNOT modify. You MUST NOT emit any of `update` / `merge` /
+`archive` / `supersede` / `delete` with a workflow-lane slug as the
+`slug_target` — the writer will refuse the op and the candidate it relates
+to will be silently dropped (NOT what you want).
+
+Correct dispositions when a workflow-lane neighbor is the closest topic
+match:
+
+- The workflow already fully expresses the candidate's claim → `op=skip`
+  with rationale referencing the workflow.
+- The candidate is a separate downstream observation building on the
+  workflow's premise → `op=create` (workflow neighbors CAN appear in a
+  `derives_from` field, though Pass 1's schema doesn't expose that; this
+  is for the proposer to decide — you just don't recommend a destructive
+  op on the workflow itself).
+
+Treat workflow-lane neighbors as a read-only context anchor when judging
+the candidate, not as a target you can mutate.
+
 # Output — strict JSON, no markdown fence
 
 ```json

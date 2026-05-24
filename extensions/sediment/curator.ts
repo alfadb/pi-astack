@@ -199,68 +199,13 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-/**
- * Heuristic detector for workflow-lane entries. Workflow entries live in
- * `~/.abrain/[projects/<id>/]workflows/<slug>.md`. They are produced and
- * mutated by a SEPARATE writer (`writeAbrainWorkflow`, B1) and the regular
- * sediment auto-write path (`updateProjectEntry` / `supersedeProjectEntry`
- * / `deleteProjectEntry`) explicitly skips the `workflows/` subdir when
- * resolving target files (see extensions/sediment/writer.ts::findProjectEntryFile).
- *
- * However, the read side (memory parser → llmSearchEntries → curator
- * neighbor pool) DOES surface workflow entries, with `scope` collapsed to
- * `project` (or `world` for cross-project ones) because `Scope` only has
- * those two values. That asymmetry caused real `entry_not_found` rejections
- * in production (2026-05-19 sub2api audit row 32: curator chose op=update
- * slug=run-when-releasing, writer scanned `~/.abrain/projects/sub2api/`
- * minus `workflows/`, found nothing, rejected as entry_not_found — the
- * candidate's claim was silently dropped instead of merging into the
- * workflow or becoming a new derived knowledge entry).
- *
- * Detection signals (OR; the writer-side ground truth is the path, but we
- * also accept frontmatter markers for robustness against future store
- * layout changes):
- *   1. `frontmatter.scope === "workflow"` (canonical declaration; B1 writer
- *      emits this).
- *   2. `legacyKind === "workflow"` (parser.ts::normalizeKind preserves the
- *      raw `kind: workflow` here because "workflow" is not in ENTRY_KINDS).
- *   3. sourcePath contains a `/workflows/` segment (mechanical fallback).
- *
- * Exported for smoke (smoke-memory-sediment.mjs ~entry 1320) so future
- * refactors that move the workflow store do not silently regress the
- * curator-side read/write asymmetry guard.
- */
-export function isWorkflowNeighborEntry(entry: MemoryEntry): boolean {
-  const fmScope = entry.frontmatter && typeof (entry.frontmatter as any).scope === "string"
-    ? String((entry.frontmatter as any).scope).trim()
-    : "";
-  if (fmScope === "workflow") return true;
-  if (entry.legacyKind === "workflow") return true;
-  // 2026-05-19 round-2 review (Opus P2-1): scope the path probe to the
-  // entry's storeRoot so an ancestor directory literally named
-  // "workflows" (e.g. $HOME=/var/workflows/alice or a worktree clone
-  // placed under a path with that segment) cannot falsely tag every
-  // entry as workflow-lane. The writer-side invariant (writer.ts:347-360,
-  // findProjectEntryFile skips `entry.name === "workflows"` during the
-  // store-rooted recursion) is exactly "first relative segment under
-  // storeRoot is `workflows`". Mirror that invariant here.
-  //
-  // Fallback when storeRoot is missing (shouldn't happen for parsed
-  // entries — parser.ts always sets it — but mock entries in tests
-  // and any future caller-constructed MemoryEntry could omit it):
-  // refuse to detect via path. Frontmatter signals 1+2 are still active.
-  if (entry.storeRoot) {
-    const rel = path.relative(entry.storeRoot, entry.sourcePath);
-    // path.relative returns an absolute path or ".."-prefixed string
-    // when sourcePath escapes storeRoot — reject those rather than
-    // matching a `workflows` segment outside the store boundary.
-    if (!rel.startsWith("..") && !path.isAbsolute(rel)) {
-      const firstSeg = rel.split(/[\\/]+/)[0];
-      if (firstSeg === "workflows") return true;
-    }
-  }
-  return false;
-}
+// isWorkflowNeighborEntry moved to ./workflow-utils to break a circular
+// dependency with ./multi-view (multi-view imports the detector;
+// curator.ts imports runMultiView from multi-view → cycle). Re-exported
+// here so existing callers (smoke tests, anything else `import {
+// isWorkflowNeighborEntry } from "./curator"`) continue working.
+export { isWorkflowNeighborEntry } from "./workflow-utils";
+import { isWorkflowNeighborEntry } from "./workflow-utils";
 
 /**
  * Lane label fed to parseDecision. "workflow" is a sediment-curator-only

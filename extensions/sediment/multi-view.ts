@@ -42,7 +42,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MemoryEntry } from "../memory/types";
 import type { CuratorDecision } from "./curator";
-import { isWorkflowNeighborEntry } from "./curator";
+// isWorkflowNeighborEntry sourced from ./workflow-utils, NOT ./curator —
+// importing from ./curator would re-create the value-level circular
+// dependency (curator.ts imports runMultiView from this file). See
+// workflow-utils.ts header comment for full rationale.
+import { isWorkflowNeighborEntry } from "./workflow-utils";
 import type { CorrectionSignal } from "./correction-pipeline";
 import type { ProjectEntryDraft } from "./writer";
 import type { SedimentSettings } from "./settings";
@@ -140,14 +144,20 @@ export function shouldTriggerMultiView(
       if (target && (target.confidence ?? 0) >= 8) {
         return { triggered: true, reason: "archive_high_conf_neighbor" };
       }
-      // Fail-safe: if the curator archived a slug NOT present in the
-      // neighbor list, we cannot read its confidence to make the
-      // high/low decision. Reviewer R2 (R-series multi-view review) flagged
-      // this as a silent-false: archive is destructive; treat "target
-      // unknown" as fail-safe TRIGGER instead of fail-safe SKIP. The
-      // worst case is one extra reviewer pair call; the alternative
-      // (silent skip) lets adversarial / malformed proposer slugs land
-      // a destructive archive op without review.
+      // Defensive fail-safe: if the archive slug is NOT in the neighbor
+      // list, we cannot read its confidence. Trigger anyway.
+      //
+      // Reviewer note (batch-1.5 review): in the CURRENT curator route
+      // this branch is dead code — parseDecision (curator.ts ~:383)
+      // throws CuratorRejectError("invented_neighbor_slug") for any
+      // archive op whose slug is not in `allowedSlugs`, so a
+      // CuratorDecision with op=archive + unknown slug never reaches
+      // shouldTriggerMultiView in production. The branch is retained
+      // because shouldTriggerMultiView is an exported public function:
+      // Batch 3's planned staging-promotion path will dispatch to the
+      // multi-view layer WITHOUT going through parseDecision, and
+      // future callers must not be allowed to silently skip review for
+      // an archive op whose target the reviewer cannot inspect.
       if (!target) {
         return { triggered: true, reason: "archive_target_not_in_neighbors" };
       }
@@ -176,11 +186,19 @@ export function shouldTriggerMultiView(
       //       neighbor, so review.
       //   (2) high-confidence neighbor — mutating a high-conf entry is
       //       inherently destructive; review.
-      //   (3) compiled_truth rewrite — the update patch carries new
-      //       body text, which is the path that overwrites load-bearing
+      //   (3) compiledTruth rewrite — the update patch carries new body
+      //       text, which is the path that overwrites load-bearing
       //       sections per the curator-prompt warning. ANY confidence
-      //       level triggers review when compiled_truth is being
-      //       rewritten.
+      //       level triggers review when compiledTruth is being rewritten.
+      //
+      // Schema note: ProjectEntryUpdateDraft (writer.ts) declares the
+      // body field as camelCase `compiledTruth`. parseDecision
+      // (curator.ts ~:349) normalizes the LLM's snake_case
+      // `compiled_truth` to camelCase before constructing the
+      // CuratorDecision, so by the time we land here only the camelCase
+      // form is ever populated. We rely on the discriminated union
+      // narrowing inside `case "update"` for type safety — no cast
+      // needed.
       const candidateConf = candidate.confidence ?? 0;
       if (candidateConf >= 8) {
         return { triggered: true, reason: "update_high_confidence_candidate" };
@@ -189,12 +207,7 @@ export function shouldTriggerMultiView(
       if (target && (target.confidence ?? 0) >= 8) {
         return { triggered: true, reason: "update_high_confidence_neighbor" };
       }
-      // `patch.compiled_truth` (snake_case) is the writer-facing field;
-      // CuratorDecision.update.patch is the ProjectEntryUpdateDraft
-      // shape from writer.ts. Detecting any truthy string means "the
-      // curator wants to rewrite the body, not just tweak metadata".
-      const patch = (decision as { patch?: { compiled_truth?: unknown; compiledTruth?: unknown } }).patch;
-      const ct = patch?.compiled_truth ?? patch?.compiledTruth;
+      const ct = decision.patch.compiledTruth;
       if (typeof ct === "string" && ct.trim().length > 0) {
         return { triggered: true, reason: "update_compiled_truth_rewrite" };
       }
