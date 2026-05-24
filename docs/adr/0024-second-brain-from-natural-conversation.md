@@ -362,6 +362,7 @@ resolving evidence 顺序展开。
 | 主动纠错疲劳 | 用户对同一 entry 错了 3 次纠正 3 次后第 4 次可能不再纠正 → 系统误读为"已经对了"。设计上靠 N=2 次重复就升级 durable 缓解 |
 | Multi-view 翻倍调用成本 | 每个高价值操作双倍 token。INV-AUTONOMY 的必要代价 |
 | Multi-view 失败 → staging 重审 (P0.5 实施) | reviewer 不可用 / pass call failed / parse 失败 / DEFER 都走 staging-pending 队列。这里代价三个：(1) candidate 在 staging 期间不进入脑——迟到最多 14 天者丢。(2) 每次 agent_end 起多 3 条重审×2 reviewer call 成本×N 设备 (单设备本地，.state/ gitignored)。(3) v1 stub: replay 决定 op!=skip 时 candidate 丢失 (writer dispatcher 未接入、留后续 phase)。这些代价 < silent fall back to proposer (破 §3 A' 层)，是 INV-AUTONOMY 与 A' 硬约束双重下的最低费选择。实施详见 ADR 0025 §4.4.6 |
+| `confirm_pass1_not_synthesizable` dead-loop 冲击 (P0.5 接受) | Pass 1 schema 仅能生成 create / archive / skip 的 rich payload；update / merge / supersede / delete 需要的补丁 / source / mode 字段不在 schema 中。同 candidate 下次 turn 仍可能被 classifier 重复提取，进入 multi-view 后 Pass 1 仍返 update 类 op，仍被 `synthesizeFromPass1` 拒 → op=skip(multiview_pass1_op_not_synthesizable)，不进 staging (D5.5A: staging 会多 dead-loop)。代价是同 candidate 反复烧 ~$0.005-0.02/周期的 reviewer API call。移除条件：ADR 0025 §4.4.6 P1.5 Pass 1 schema 升级后不再发生。dogfood 在 audit.jsonl grep `multiview_pass1_op_not_synthesizable` >5/week 时提前启动 P1.5 |
 | 早期推理质量参差 | prompt v0 阶段作者需要迭代数轮才能稳定。但 prompt 迭代成本远低于机械 schema 一旦定型的修改成本 |
 | LLM 推理失败的本底概率 | 所有 AI-Native 系统共担的背景风险。基座模型迭代会持续降低 |
 | 默认开启后用户察觉不到的偏差累积（`autoLlmWriteEnabled` default true 以后首次真正存在） | ADR 0025 §5.3 P5.5 指出：默认关闭时用户必须主动改 settings 才启动 —— 此时偏差累积的供给侧未启动，代价不存在。默认 true 后，用户不再需要元动作启动 sediment，但这意味着错沉淀会静默发生。对冲机制：§5.1 aggregator + §5.4 multi-view + ADR 0025 §3.2.B sanitizer + tristate `"staging-only"` 退路（中度关闭，剩下只启 classifier 与 staging、不进 durable 写入） |
@@ -378,6 +379,9 @@ resolving evidence 顺序展开。
 4. **跨设备主动纠错疲劳信号显著** → 重复升级阈值需下调，或引入"已经说过了" speech act 显式识别
 5. **classifier 推理质量持续退化** → §5.3 advisory flag 任一维度（quote rate / alternative rate / concrete self-critique rate）持续低于 40% 或下降 ≥15 个百分点，且改 prompt 数轮无改善 → 该能力点降级为 staging-only 或拆到独立 ADR
 6. **AI-Native 原则在某个能力点反复证伪**（多轮 prompt 迭代仍无法达到 baseline）→ 该能力点单独允许机械兜底（需显式说明 (1) prompt-first 已尝试的轮次 (2) 仍然系统性失败的推理证据 (3) 兜底的局部范围 (4) 未来移除兜底的条件），**不全盘 walkback 原则**
+
+   > **注：defense-in-depth (prompt + code belt-and-suspenders) 跟本条说的 "反复证伪后 walkback 兑底" 是两种 pattern**。multi-view P0.5 的 `workflowLaneRefusal` (代码拒绝 reviewer 在 workflow-lane neighbor 上的 archive/update 以化除按推荐) + `synthesizeFromPass1 返 null` (Pass 1 schema 缺 rich payload 时拒 update/merge/supersede/delete) 都是 belt-and-suspenders：prompt 已经含 HARD CONSTRAINT (`multi-view-pass1-blind-v1.md:60-83`)，代码兑底仅是 “万一 prompt 不听话” 的二道防线。本条 (1)轮数 / (2)证据 不适用于这种 pattern——兑底跟 prompt 同时上线。defense-in-depth 需满足：(a) prompt 仍是主路径 (b) 代码兑底只能拒绝 (c) 走明确 audit-flagged skip。multi-view.ts 中两个点都满足。
+
 7. **R6 删除的"准确率阈值 / 月度自动迭代 / 准确率 smoke" 在实战中被证明确实必需** → 重新引入但必须 framed 为"仅供参考的指标 / 迭代辅助"而非硬关卡
 
 **重要原则**：以上 walkback 必须基于真实实战数据，不是基于"想象中可能会"。**不试试无法判断这份设计是否可行**。
