@@ -2235,6 +2235,73 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       assert(/^status: archived$/m.test(archivedWritten), `archive should mark status archived:\n${archivedWritten}`);
       assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| archived \| archive substrate smoke$/m.test(archivedWritten), `archive timeline missing:\n${archivedWritten}`);
 
+      // === ADR 0025 §4.6 archive_at lifecycle regression ===
+      //
+      // Three transitions must hold on the writer:
+      //   (a) NON-ARCHIVED → ARCHIVED stamps archive_at = now
+      //   (b) ARCHIVED → ARCHIVED (subsequent update) PRESERVES it
+      //   (c) ARCHIVED → NON-ARCHIVED (reactivation) CLEARS it
+      //
+      // (a) Just-archived entry must carry an ISO archive_at field.
+      const archiveAtMatchA = archivedWritten.match(/^archive_at: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2})$/m);
+      assert(archiveAtMatchA, `(a) archive should stamp archive_at:\n${archivedWritten}`);
+      const stampedArchiveAt = archiveAtMatchA[1];
+
+      // (b) Subsequent update to an already-archived entry must NOT slide
+      // the archive_at forward, otherwise the future N-day soft-delete
+      // reviewer window can never close.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const archivedAgain = await updateProjectEntry(w1.slug, {
+        timelineNote: "touch archived entry to verify archive_at sticks",
+        timelineAction: "updated",
+      }, {
+        projectRoot: aRoot,
+        abrainHome: aTarget.abrainHome,
+        projectId: aTarget.projectId,
+        settings: a2Settings,
+        dryRun: false,
+      });
+      assert(archivedAgain.status === "updated", `(b) update on archived entry should succeed: ${JSON.stringify(archivedAgain)}`);
+      const archivedAgainWritten = fs.readFileSync(archivedAgain.path, "utf-8");
+      const archiveAtMatchB = archivedAgainWritten.match(/^archive_at: (.+)$/m);
+      assert(archiveAtMatchB, `(b) second update should preserve archive_at:\n${archivedAgainWritten}`);
+      assert(archiveAtMatchB[1] === stampedArchiveAt, `(b) archive_at must NOT slide forward on subsequent update: was ${stampedArchiveAt}, now ${archiveAtMatchB[1]}`);
+
+      // (c) Reactivation via update(status:"active") must clear archive_at.
+      // (Reactivation flow is what the not-yet-implemented ADR §4.6
+      // archive-reactivation-reviewer will eventually trigger. The field
+      // contract must already be right today so the reviewer can be
+      // written against a stable shape later.)
+      const reactivated = await updateProjectEntry(w1.slug, {
+        status: "active",
+        timelineNote: "reactivate archived entry",
+        timelineAction: "reactivated",
+      }, {
+        projectRoot: aRoot,
+        abrainHome: aTarget.abrainHome,
+        projectId: aTarget.projectId,
+        settings: a2Settings,
+        dryRun: false,
+      });
+      assert(reactivated.status === "updated", `(c) reactivation update should succeed: ${JSON.stringify(reactivated)}`);
+      const reactivatedWritten = fs.readFileSync(reactivated.path, "utf-8");
+      assert(/^status: active$/m.test(reactivatedWritten), `(c) reactivation should flip status back to active:\n${reactivatedWritten}`);
+      assert(!/^archive_at:/m.test(reactivatedWritten), `(c) reactivation must clear archive_at:\n${reactivatedWritten}`);
+
+      // Re-archive after reactivation: archive_at must be stamped fresh
+      // (NOT carried over from the prior stamp, which is no longer
+      // semantically valid for the new archive episode).
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const reArchived = await archiveProjectEntry(w1.slug, {
+        projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId,
+        settings: a2Settings, dryRun: false, reason: "re-archive after reactivation", sessionId: "smoke-a2",
+      });
+      assert(reArchived.status === "archived", `(d) re-archive should succeed: ${JSON.stringify(reArchived)}`);
+      const reArchivedWritten = fs.readFileSync(reArchived.path, "utf-8");
+      const archiveAtMatchD = reArchivedWritten.match(/^archive_at: (.+)$/m);
+      assert(archiveAtMatchD, `(d) re-archive should stamp archive_at:\n${reArchivedWritten}`);
+      assert(archiveAtMatchD[1] !== stampedArchiveAt, `(d) re-archive must stamp fresh archive_at, not carry over ${stampedArchiveAt}`);
+
       const superseded = await supersedeProjectEntry(w1.slug, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false, newSlug: w3.slug, reason: "supersede substrate smoke", sessionId: "smoke-a2" });
       assert(superseded.status === "superseded", `supersedeProjectEntry should supersede existing entry: ${JSON.stringify(superseded)}`);
       const supersededWritten = fs.readFileSync(superseded.path, "utf-8");
@@ -5806,6 +5873,115 @@ Body.
         assert(Array.isArray(parsed.frontmatter.legacy_tags) && parsed.frontmatter.legacy_tags.length === 2, `parser exposes unknown array via .frontmatter: ${JSON.stringify(parsed.frontmatter.legacy_tags)}`);
 
         fs.rmSync(preRoot, { recursive: true, force: true });
+      }
+    }
+
+    // === ADR 0026 §3.4 P1.A: outcome-ledger read + summarize + brief wiring ===
+    //
+    // Three things to lock:
+    //   1. readOutcomeLedger() honors ABRAIN_ROOT and tolerates corrupt rows
+    //   2. summarizeEntryActivity() counts decisive/confirmatory/retrieved-unused
+    //      correctly, respects the 30-day window, and emits zero records
+    //      for slugs absent from the ledger.
+    //   3. buildDecisionBriefPrompt() injects the activity into the prompt
+    //      under "RECENT USAGE OF THESE ENTRIES".
+    {
+      const { readOutcomeLedger, summarizeEntryActivity } = req("./sediment/outcome-collector.js");
+      const { buildDecisionBriefPrompt } = req("./memory/decide.js");
+
+      const ledgerAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-ledger-"));
+      const savedAbrainRoot = process.env.ABRAIN_ROOT;
+      process.env.ABRAIN_ROOT = ledgerAbrain;
+      try {
+        // Empty ledger — readOutcomeLedger must return [] without throwing.
+        const emptyRows = readOutcomeLedger();
+        assert(Array.isArray(emptyRows) && emptyRows.length === 0, `readOutcomeLedger on missing file should return [], got ${JSON.stringify(emptyRows)}`);
+
+        // Seed a ledger with mixed sources, valid + corrupt rows, and one
+        // out-of-window row (older than 30 days).
+        const sedimentDir = path.join(ledgerAbrain, ".state", "sediment");
+        fs.mkdirSync(sedimentDir, { recursive: true });
+        const now = Date.now();
+        const recent = (offsetDays) => new Date(now - offsetDays * 24 * 60 * 60 * 1000).toISOString();
+        const ledgerLines = [
+          JSON.stringify({ ts: recent(1), session_id: "s1", entry_slug: "prefer-pnpm", source: "memory-footnote", used: "decisive", counterfactual: "would have used yarn", retrieval_count: 1 }),
+          JSON.stringify({ ts: recent(2), session_id: "s1", entry_slug: "prefer-pnpm", source: "tool-result", retrieval_count: 3 }),
+          JSON.stringify({ ts: recent(5), session_id: "s2", entry_slug: "prefer-pnpm", source: "memory-footnote", used: "decisive", counterfactual: "same", retrieval_count: 1 }),
+          JSON.stringify({ ts: recent(7), session_id: "s3", entry_slug: "prefer-pnpm", source: "memory-footnote", used: "confirmatory", counterfactual: "would have decided same way", retrieval_count: 1 }),
+          JSON.stringify({ ts: recent(10), session_id: "s4", entry_slug: "ci-github-actions", source: "memory-footnote", used: "retrieved-unused", counterfactual: "not relevant to current task", retrieval_count: 1 }),
+          JSON.stringify({ ts: recent(45), session_id: "sold", entry_slug: "prefer-pnpm", source: "memory-footnote", used: "decisive", counterfactual: "out-of-window", retrieval_count: 1 }),
+          "<<<corrupt non-json line>>>",
+          "",
+          JSON.stringify({ ts: recent(3), entry_slug: "", source: "memory-footnote", retrieval_count: 1 }), // missing session_id but valid entry_slug="" is also dropped by isValidSlug? No, here entry_slug="" so it should still be read but summarize will not match anything in slugs list anyway.
+        ];
+        fs.writeFileSync(path.join(sedimentDir, "outcome-ledger.jsonl"), ledgerLines.join("\n") + "\n");
+
+        const rows = readOutcomeLedger();
+        assert(rows.length >= 7, `readOutcomeLedger should parse all valid rows and skip the corrupt one; got ${rows.length}`);
+        assert(rows.some((r) => r.entry_slug === "prefer-pnpm" && r.used === "decisive"), `read rows must include the decisive prefer-pnpm row`);
+
+        // Summarize within the 30-day window for three slugs:
+        //   prefer-pnpm   → 2 decisive + 1 confirmatory (in window), 0 retrieved-unused,
+        //                  total_retrievals = 1 + 3 + 1 + 1 = 6
+        //                  (45-day-old row excluded)
+        //   ci-github-actions → 0 decisive, 0 confirmatory, 1 retrieved-unused, total=1
+        //   cold-slug-never-seen → all zeros
+        const stats = summarizeEntryActivity(rows, ["prefer-pnpm", "ci-github-actions", "cold-slug-never-seen"], 30);
+        assert(stats.length === 3, `summarizeEntryActivity should return one record per input slug, got ${stats.length}`);
+        assert(stats[0].slug === "prefer-pnpm", `slug order should match input`);
+
+        const pnpm = stats[0];
+        assert(pnpm.decisive_count === 2, `prefer-pnpm decisive_count should be 2 (45-day-old excluded), got ${pnpm.decisive_count}`);
+        assert(pnpm.confirmatory_count === 1, `prefer-pnpm confirmatory_count should be 1, got ${pnpm.confirmatory_count}`);
+        assert(pnpm.retrieved_unused_count === 0, `prefer-pnpm retrieved_unused_count should be 0, got ${pnpm.retrieved_unused_count}`);
+        assert(pnpm.total_retrievals === 6, `prefer-pnpm total_retrievals (1+3+1+1) should be 6, got ${pnpm.total_retrievals}`);
+        assert(typeof pnpm.last_seen === "string" && pnpm.last_seen.length > 10, `prefer-pnpm should have a last_seen timestamp`);
+
+        const ciSlug = stats[1];
+        assert(ciSlug.retrieved_unused_count === 1, `ci-github-actions retrieved_unused_count should be 1, got ${ciSlug.retrieved_unused_count}`);
+        assert(ciSlug.decisive_count === 0, `ci-github-actions decisive_count should be 0`);
+
+        const cold = stats[2];
+        assert(cold.decisive_count === 0 && cold.confirmatory_count === 0 && cold.total_retrievals === 0, `cold slug should be all-zero, got ${JSON.stringify(cold)}`);
+        assert(cold.last_seen === undefined, `cold slug should have undefined last_seen`);
+
+        // Verify prompt builder injects the section. We don't grade the
+        // LLM output — we only assert the activity table renders into
+        // the prompt with the right slug → counts mapping. The LLM is the
+        // weighting layer, per ADR 0024 §3.
+        const prompt = buildDecisionBriefPrompt({
+          context: "choosing package manager for new React project",
+          options: ["pnpm", "yarn"],
+          constraints: "",
+          entries: [
+            { slug: "prefer-pnpm", title: "Prefer pnpm", kind: "preference", compiledTruth: "User prefers pnpm." },
+            { slug: "ci-github-actions", title: "CI on Actions", kind: "decision", compiledTruth: "User uses GH Actions." },
+            { slug: "cold-slug-never-seen", title: "Cold", kind: "fact", compiledTruth: "Cold fact." },
+          ],
+          activity: stats,
+          activityWindowDays: 30,
+        });
+        assert(/RECENT USAGE OF THESE ENTRIES/.test(prompt), `prompt must include RECENT USAGE section header`);
+        assert(/prefer-pnpm: decisive=2, confirmatory=1, total_retrievals=6/.test(prompt), `prompt should show prefer-pnpm counts in canonical format; prompt was:\n${prompt}`);
+        assert(/ci-github-actions: retrieved_unused=1, total_retrievals=1/.test(prompt), `prompt should show ci-github-actions counts; prompt was:\n${prompt}`);
+        assert(/cold-slug-never-seen: no signals/.test(prompt), `cold slug should be tagged 'no signals' in prompt`);
+        assert(/Do NOT apply hard thresholds/.test(prompt), `prompt must instruct LLM to weight by judgment not threshold (ADR 0024 §3 AI-Native)`);
+
+        // All-zero activity path: prompt should still emit a clarifying
+        // sentence rather than silently dropping the section.
+        const zeroPrompt = buildDecisionBriefPrompt({
+          context: "x",
+          options: [],
+          constraints: "",
+          entries: [{ slug: "cold-slug-never-seen", title: "Cold", kind: "fact", compiledTruth: "Cold fact." }],
+          activity: [stats[2]],
+          activityWindowDays: 30,
+        });
+        assert(/no outcome history recorded for any of these entries in the last 30 days/.test(zeroPrompt), `all-zero activity must render a clarifying sentence not a blank section`);
+      } finally {
+        if (savedAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+        else process.env.ABRAIN_ROOT = savedAbrainRoot;
+        fs.rmSync(ledgerAbrain, { recursive: true, force: true });
       }
     }
 

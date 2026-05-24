@@ -279,6 +279,14 @@ function buildMarkdown(draft: ProjectEntryDraft, scope: "project" | "world", pro
     `title: ${yamlString(draft.title)}`,
     `created: ${timestamp}`,
     `updated: ${timestamp}`,
+    // ADR 0025 §4.6: when an entry is born directly in `archived` state
+    // (rare but legal — e.g. a curator may decide CREATE→ARCHIVE in the
+    // same op for a self-superseded smell), persist the absolute archive
+    // timestamp so future archive-reactivation-reviewer can age it.
+    // For the common path (created as `active`/`provisional`), no
+    // archive_at field is emitted; it appears only when `status=archived`
+    // is set, either here or via the update path (see mergeUpdateMarkdown).
+    ...(status === "archived" ? [`archive_at: ${timestamp}`] : []),
     ...yamlList("trigger_phrases", draft.triggerPhrases),
     ...yamlList("derives_from", draft.derivesFrom),
   ];
@@ -312,7 +320,11 @@ function frontmatterOrder(frontmatterText: string): string[] {
 function renderFrontmatter(frontmatter: Record<string, Jsonish>, originalOrder: string[]): string {
   const preferred = [
     "id", "scope", "kind", "status", "confidence", "schema_version",
-    "title", "created", "updated", "trigger_phrases", "derives_from",
+    "title", "created", "updated",
+    // ADR 0025 §4.6: keep archive_at adjacent to the other lifecycle
+    // timestamps so a hand-reader can spot the archive epoch at a glance.
+    "archive_at",
+    "trigger_phrases", "derives_from",
   ];
   const keys = [
     ...preferred,
@@ -433,6 +445,13 @@ function mergeUpdateMarkdown(
   const PROTECTED_FRONTMATTER_KEYS = new Set([
     "id", "scope", "kind", "status", "confidence", "schema_version",
     "title", "created", "updated", "trigger_phrases",
+    // ADR 0025 §4.6 archive_at is lifecycle-managed: it is the absolute
+    // ISO timestamp of the first transition into `status=archived`. Setting
+    // it from frontmatterPatch would let curator's natural-language rationale
+    // route around the lifecycle logic below (set/preserve/clear), defeating
+    // the future archive-reactivation-reviewer's N-day age window. Lifecycle
+    // path: mergeUpdateMarkdown below manages it based on status transition.
+    "archive_at",
   ]);
   const userPatch = patch.frontmatterPatch ?? {};
   for (const k of Object.keys(userPatch)) {
@@ -467,6 +486,45 @@ function mergeUpdateMarkdown(
   };
   for (const [key, value] of Object.entries(userPatch)) {
     if (value === undefined) delete nextFrontmatter[key];
+  }
+
+  // ADR 0025 §4.6 archive_at lifecycle management.
+  //
+  // Three transitions to handle:
+  //   (a) NON-ARCHIVED → ARCHIVED: stamp archive_at = now. This is the
+  //       wall-clock origin from which the future archive-reactivation
+  //       reviewer counts its N-day soft-delete window.
+  //   (b) ARCHIVED → ARCHIVED (subsequent update to an already-archived
+  //       entry, e.g. reason rewrite): PRESERVE existing archive_at. If
+  //       we reset on every update, an automated re-archive sweep (or a
+  //       trivial cosmetic patch) would silently slide the N-day window
+  //       forward, defeating the whole reviewer-window idea.
+  //   (c) ARCHIVED → NON-ARCHIVED (reactivation, however performed): clear
+  //       archive_at. The field's meaning is "currently archived since
+  //       ..."; leaving it set on a reactivated entry would be a lie.
+  //
+  // status was resolved above from patch.status OR existing frontmatter
+  // (which may itself be "archived"). The PRIOR status is what determines
+  // (a) vs (b); we read it from the on-disk frontmatter directly.
+  const priorStatus = typeof frontmatter.status === "string" ? frontmatter.status : null;
+  if (status === "archived") {
+    if (priorStatus !== "archived") {
+      // (a) New archive event — always stamp fresh, ignore any leaked value.
+      nextFrontmatter.archive_at = timestamp;
+    } else if (typeof frontmatter.archive_at === "string" && frontmatter.archive_at) {
+      // (b) Preserve existing absolute timestamp.
+      nextFrontmatter.archive_at = frontmatter.archive_at;
+    } else {
+      // (b′) Already-archived entry missing archive_at (e.g. legacy entries
+      // archived before this field existed). Backfill with now — N-day
+      // window starts from this backfill, which is the safest default:
+      // a stale legacy archive will not be eligible for early hard-delete
+      // but also not for indefinite review accumulation.
+      nextFrontmatter.archive_at = timestamp;
+    }
+  } else {
+    // (c) Reactivation — explicitly clear the field if present.
+    delete nextFrontmatter.archive_at;
   }
   if (triggerPhrases) {
     // Defense-in-depth against curator P0 (2026-05-13 abrain commit
