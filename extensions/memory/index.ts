@@ -21,6 +21,7 @@ import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
 import { llmSearchEntries } from "./llm-search";
 import { runMemoryDecide } from "./decide";
+import { readOutcomeLedger, summarizeEntryActivity } from "../sediment/outcome-collector";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";
 import { formatMigrationGoSummary, runMigrationGo } from "./migrate-go";
@@ -556,12 +557,41 @@ export default function (pi: ExtensionAPI) {
         compiledTruth: entry.compiledTruth,
       }));
 
+      // Step 2.5 (ADR 0026 §3.4 P1.A): outcome activity summary.
+      //
+      // Read the user-global outcome-ledger.jsonl, summarize the last 30
+      // days of decisive / confirmatory / retrieved-unused counts per slug,
+      // and hand the RAW counts to the decision brief so the LLM can
+      // weight its recommendation.
+      //
+      // Best-effort: any ledger read failure returns []. We then call
+      // summarizeEntryActivity() anyway, which yields a zeroed record per
+      // slug — the prompt is built to handle "all-zero" gracefully
+      // (renderActivitySection prints a clarifying sentence).
+      //
+      // Per ADR 0024 §3 AI-Native + the three-state marking: read+count
+      // is Infra (mechanical, allowed); weighting is left to the LLM
+      // prompt (no `if decisive_count < 3 then drop` threshold here).
+      let activity: ReturnType<typeof summarizeEntryActivity> = [];
+      try {
+        const ledger = readOutcomeLedger();
+        activity = summarizeEntryActivity(
+          ledger,
+          searchResults.map((r) => r.slug),
+          30,
+        );
+      } catch {
+        // best-effort — decide.ts handles undefined activity cleanly.
+      }
+
       // Step 3: synthesize decision brief
       const result = await runMemoryDecide({
         context: params.context,
         options: params.options,
         constraints: params.constraints,
         searchResults,
+        activity,
+        activityWindowDays: 30,
         settings,
         modelRegistry: ctx.modelRegistry,
         signal,

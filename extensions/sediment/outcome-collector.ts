@@ -295,3 +295,131 @@ export function writeOutcomeLedger(
     // best-effort
   }
 }
+
+// ── Read side (ADR 0026 §3.4) ─────────────────────────────────────────────
+//
+// The ledger above is the write side (agent_end → collect → append).
+// ADR 0026 §3.4 "Outcome-driven recommendations" needs the read side:
+// decide.ts wants to know, for each candidate memory entry returned by
+// memory_search, "how was this entry treated by the LLM over the last
+// N days?". The brain then weights its recommendation by activity.
+//
+// Design notes:
+//
+//   - Read is BEST-EFFORT: if the ledger doesn't exist yet (first session,
+//     migration window, disk error) we return an empty array. decide.ts
+//     handles "no outcome data" by simply not including the section.
+//
+//   - We deliberately do NOT cap memory by streaming the JSONL — current
+//     volume is tiny (single user × N footnotes per session). If the file
+//     grows beyond ~10MB we'll add rolling truncation upstream, not here.
+//
+//   - This is INFRA (read jsonl + count) per ADR 0024 §3 three-state
+//     marking. The LLM-behavior layer (decide.ts prompt) stays purely
+//     prompt-form: we hand the LLM raw counts and let it judge weight,
+//     we do NOT apply a hard threshold like "if decisive_count < 3,
+//     suppress recommendation". That would be Mech-on-LLM.
+
+export interface LedgerOutcomeRow extends OutcomeRow {
+  /** Optional — added by writeOutcomeLedger at write time. */
+  project_root?: string;
+}
+
+/**
+ * Read the full user-global outcome ledger. Returns an empty array on
+ * any failure (missing file, partial line, parse error). Caller never
+ * sees an exception. Order = file order (oldest-first append).
+ */
+export function readOutcomeLedger(): LedgerOutcomeRow[] {
+  try {
+    ensureUserGlobalSidecarMigrated();
+    const dir = userGlobalSedimentDir();
+    const filePath = path.join(dir, "outcome-ledger.jsonl");
+    if (!fs.existsSync(filePath)) return [];
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const rows: LedgerOutcomeRow[] = [];
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object" && typeof parsed.entry_slug === "string") {
+          rows.push(parsed as LedgerOutcomeRow);
+        }
+      } catch {
+        // Skip corrupt line — do not throw out the entire history for
+        // one bad row (typically a partial write at process kill).
+      }
+    }
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Per-entry activity summary over a recent time window. ADR 0026 §3.4
+ * "high decisive + low unused → strong recommend; high unused → demote;
+ * cold → weak reference" — but we surface RAW COUNTS not a precooked
+ * label. The decide.ts prompt reads the counts and lets the LLM judge.
+ *
+ * `windowDays = 30` per ADR 0026 §3.4 default. If the window is too short
+ * relative to user task cadence, decide.ts's prompt warns the LLM about
+ * sample-size uncertainty.
+ */
+export interface EntryActivityStats {
+  slug: string;
+  decisive_count: number;
+  confirmatory_count: number;
+  retrieved_unused_count: number;
+  /** Sum across all sources (memory-footnote + tool-result). */
+  total_retrievals: number;
+  /** ISO timestamp of most recent ledger row for this slug, or null. */
+  last_seen?: string;
+}
+
+/**
+ * Summarize ledger rows for a specific set of slugs within `windowDays`.
+ *
+ * Returns one stats record per slug in `slugs` (in input order). Slugs
+ * absent from the ledger get a zeroed record (NOT omitted) — decide.ts
+ * needs to know "this entry has zero outcome history" vs "this entry has
+ * been used decisively 10 times".
+ */
+export function summarizeEntryActivity(
+  rows: LedgerOutcomeRow[],
+  slugs: string[],
+  windowDays: number = 30,
+): EntryActivityStats[] {
+  const cutoffMs = Date.now() - windowDays * 24 * 60 * 60 * 1000;
+  const slugSet = new Set(slugs);
+  const byslug = new Map<string, EntryActivityStats>();
+  for (const slug of slugs) {
+    byslug.set(slug, {
+      slug,
+      decisive_count: 0,
+      confirmatory_count: 0,
+      retrieved_unused_count: 0,
+      total_retrievals: 0,
+    });
+  }
+
+  for (const row of rows) {
+    if (!slugSet.has(row.entry_slug)) continue;
+    const tsMs = Date.parse(row.ts);
+    if (!Number.isFinite(tsMs) || tsMs < cutoffMs) continue;
+
+    const stats = byslug.get(row.entry_slug)!;
+    stats.total_retrievals += row.retrieval_count ?? 1;
+    if (row.source === "memory-footnote" && row.used) {
+      if (row.used === "decisive") stats.decisive_count++;
+      else if (row.used === "confirmatory") stats.confirmatory_count++;
+      else if (row.used === "retrieved-unused") stats.retrieved_unused_count++;
+    }
+    if (!stats.last_seen || row.ts > stats.last_seen) {
+      stats.last_seen = row.ts;
+    }
+  }
+
+  return slugs.map((slug) => byslug.get(slug)!);
+}
