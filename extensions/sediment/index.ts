@@ -29,7 +29,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveSedimentSettings, type SedimentSettings } from "./settings";
+import { buildPromptVersionAudit, resolveSedimentSettings, type SedimentSettings } from "./settings";
 import {
   buildRunWindow,
   checkpointSummary,
@@ -1103,7 +1103,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
             model: cr.model,
             duration_ms: cr.durationMs,
             staging_written: cr.stagingWritten,
-            prompt_version: settings.promptVersion.activeCorrectionClassifier,
+            prompt_version: buildPromptVersionAudit("activeCorrectionClassifier", settings),
             ...(cr.error ? { error: cr.error } : {}),
             ...(cr.stagingAdvisory ? { staging_advisory: cr.stagingAdvisory } : {}),
           }).catch(() => {});
@@ -1408,7 +1408,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
                     signal_typing: classifierResult.signal.typing ?? null,
                     signal_confidence: classifierResult.signal.confidence ?? null,
                     signal_target_slug: classifierResult.signal.target_entry_slug ?? null,
-                    prompt_version: settings.promptVersion.activeCorrectionClassifier,
+                    prompt_version: buildPromptVersionAudit("activeCorrectionClassifier", settings),
                   }).catch(() => {});
                 }
                 return dispatch.forwarded;

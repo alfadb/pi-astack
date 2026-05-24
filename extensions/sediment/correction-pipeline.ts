@@ -79,8 +79,16 @@ let _classifierPromptCache: string | null = null;
 
 function loadClassifierPrompt(): string {
   if (_classifierPromptCache) return _classifierPromptCache;
-  const promptPath = path.join(__dirname, "prompts", "active-correction-classifier-v1.md");
-  _classifierPromptCache = fs.readFileSync(promptPath, "utf-8");
+  // ADR 0025 §4.1.3 + §4.4.2: prepend reasoning-normalization-preamble so the
+  // classifier's reasoning surface is comparable to multi-view pass-1/2 output
+  // when the latter ships. Loading order is preamble → separator → task prompt.
+  // Both files are cached on first call; bumping either's version requires
+  // a process restart for the cache to refresh.
+  const preamblePath = path.join(__dirname, "prompts", "reasoning-normalization-preamble-v1.md");
+  const taskPath = path.join(__dirname, "prompts", "active-correction-classifier-v1.md");
+  const preamble = fs.readFileSync(preamblePath, "utf-8");
+  const taskPrompt = fs.readFileSync(taskPath, "utf-8");
+  _classifierPromptCache = `${preamble}\n\n---\n\n${taskPrompt}`;
   return _classifierPromptCache;
 }
 

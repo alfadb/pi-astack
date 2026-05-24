@@ -75,9 +75,13 @@ export interface SedimentSettings {
   skipContinuationSanitize: boolean;
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
-   *  can track prompt changes without manual cross-reference. */
+   *  can track prompt changes without manual cross-reference.
+   *
+   *  Each version is paired with a `_semantic_note` in PROMPT_VERSION_NOTES
+   *  below; the audit helper combines them per ADR 0025 §4.5.2 schema. */
   promptVersion: {
     activeCorrectionClassifier: string;
+    reasoningNormalizationPreamble: string;
     multiViewPass1: string;
     multiViewPass2: string;
     outcomeSelfReport: string;
@@ -153,6 +157,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   skipContinuationSanitize: false,
   promptVersion: {
     activeCorrectionClassifier: "v1",
+    reasoningNormalizationPreamble: "v1",
     multiViewPass1: "v0",
     multiViewPass2: "v0",
     outcomeSelfReport: "v0",
@@ -166,6 +171,58 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     costBudgetPerOpUsd: 0.05,
   },
 };
+
+/**
+ * Semantic notes paired with `promptVersion.*` for ADR 0025 §4.5.2 audit
+ * schema. When a prompt is bumped (e.g. activeCorrectionClassifier "v1"
+ * → "v2"), bump the note here in the SAME commit so audit rows written
+ * after the bump carry the new semantic context. Aggregator readers
+ * (ADR §4.3) compare these notes when grouping trace data across versions.
+ *
+ * Keys must match `PromptVersionSubstrate` field names; missing entries
+ * resolve to a default "(no semantic note registered)" string.
+ */
+export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"], string> = {
+  activeCorrectionClassifier:
+    "v1: 7-step evidence-first reasoning (quote → cases → lean → disconfirmer → commit → self-critique → self-rating) + 10 bias cautions (post-hoc rationalization, sycophancy, anchoring, recency, provisional-as-fact, translation pitfalls, etc.) + staging_context anti-anchoring protocol. Prepended with reasoning-normalization-preamble v1.",
+  reasoningNormalizationPreamble:
+    "v1: fixed 5-stage reasoning surface (quote → claim → alternative → uncertainty → resolving evidence) shared across classifier + multi-view pass-1/2 so cross-prompt comparison works.",
+  multiViewPass1:
+    "v0 placeholder — multi-view verification (ADR §4.4) not yet implemented; no real prompt exists.",
+  multiViewPass2:
+    "v0 placeholder — multi-view verification (ADR §4.4) not yet implemented; no real prompt exists.",
+  outcomeSelfReport:
+    "v0: memory-footnote protocol injected via memory extension's before_agent_start hook (extensions/memory/index.ts). Not a sediment-owned prompt file; this version tag tracks the protocol-level contract (entry/used/counterfactual fields, 3-option taxonomy).",
+  aggregator:
+    "v0 placeholder — aggregator + Classifier Health Meta-Check (ADR §4.3) not yet implemented.",
+  archiveReactivationReviewer:
+    "v0 placeholder — archive-rollback reviewer prompt (ADR §4.6) not yet implemented.",
+};
+
+/**
+ * Build the prompt_version object embedded in sediment audit rows per
+ * ADR 0025 §4.5.2 schema:
+ *
+ *   {
+ *     "prompt_version": {
+ *       "<prompt_key_in_snake_case>": "<version>",
+ *       "_semantic_note": "<human note>"
+ *     }
+ *   }
+ *
+ * `key` is the camelCase field name in PromptVersionSubstrate; we convert
+ * to snake_case for audit readability (matches ADR examples).
+ */
+export function buildPromptVersionAudit(
+  key: keyof SedimentSettings["promptVersion"],
+  settings: SedimentSettings,
+): Record<string, string> {
+  const snakeKey = key.replace(/[A-Z]/g, (m) => "_" + m.toLowerCase()).replace(/^_/, "");
+  return {
+    [snakeKey]: settings.promptVersion[key],
+    _semantic_note: PROMPT_VERSION_NOTES[key] ?? "(no semantic note registered)",
+  };
+}
 
 function loadPiStackSettings(): Record<string, unknown> {
   try {
@@ -211,6 +268,8 @@ export function resolveSedimentSettings(): SedimentSettings {
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,
+      reasoningNormalizationPreamble: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.reasoningNormalizationPreamble === "string"
+        ? (cfg.promptVersion as Record<string,unknown>).reasoningNormalizationPreamble as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.reasoningNormalizationPreamble,
       multiViewPass1: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.multiViewPass1 === "string"
         ? (cfg.promptVersion as Record<string,unknown>).multiViewPass1 as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.multiViewPass1,
       multiViewPass2: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.multiViewPass2 === "string"
