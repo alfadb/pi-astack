@@ -757,10 +757,22 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
       const sessMgr = ctx.sessionManager;
       // Fire-and-forget outcome collection: scan branch for memory tool
       // invocations and log retrieved entries to outcome-ledger (ADR 0025 P2).
+      // Invalid footnotes (placeholder slugs, unknown 'used' values) are
+      // routed to audit.jsonl as 'outcome_footnote_parse_error' instead of
+      // silently defaulted to 'confirmatory' — per pattern
+      // `outcome-footnote-handling-principle-prefer-loss-over-guessing`.
       if (sessionId && branch.length > 0) {
-        const outcomeRows = collectOutcomes(branch, sessionId);
-        if (outcomeRows.length > 0) {
-          writeOutcomeLedger(outcomeRows, cwd);
+        const outcome = collectOutcomes(branch, sessionId);
+        if (outcome.rows.length > 0) {
+          writeOutcomeLedger(outcome.rows, cwd);
+        }
+        if (outcome.dropped.length > 0) {
+          appendAudit(cwd, {
+            operation: "outcome_footnote_parse_error",
+            session_id: sessionId,
+            dropped_count: outcome.dropped.length,
+            dropped: outcome.dropped,
+          }).catch(() => {});
         }
       }
       const notify = ctx.ui?.notify?.bind(ctx.ui);

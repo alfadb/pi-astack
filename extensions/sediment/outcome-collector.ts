@@ -29,11 +29,41 @@ interface OutcomeRow {
   used?: "decisive" | "confirmatory" | "retrieved-unused";
   /** Only for footnotes: counterfactual explanation */
   counterfactual?: string;
-  /** For footnotes: parse status. "ok" = valid used value;
-   *  "invalid_used" = LLM wrote unrecognized value, defaulted to confirmatory. */
-  footnote_parse_status?: "ok" | "invalid_used";
   /** For tool-result rows: how many times this entry appeared in results */
   retrieval_count: number;
+}
+
+/**
+ * A footnote that was parsed but failed validation. Per pattern
+ * `outcome-footnote-handling-principle-prefer-loss-over-guessing`:
+ * invalid footnotes go to audit.jsonl, NOT to outcome-ledger.jsonl.
+ * The aggregator must see clean self-report data; "used: confirmatory
+ * default on parse error" silently fabricates a usage signal.
+ */
+export interface DroppedFootnote {
+  reason: "invalid_slug" | "invalid_used" | "empty_slug";
+  raw_slug: string;
+  raw_used?: string;
+  /** First 200 chars of the fenced block for audit traceability */
+  raw_block_preview?: string;
+}
+
+/**
+ * Slug validation: an abrain entry slug is kebab-case ASCII or CJK,
+ * no whitespace / placeholders / pipes / brackets. We are deliberately
+ * permissive about CJK (e.g. multi-agent-review-必须结合真实运行验证 is
+ * a legitimate slug in this codebase) but reject everything that looks
+ * like a prompt-template placeholder (`<slug>`, `<id>`), separator
+ * artifact (`used- decisive | ...`), or markdown bullet leakage.
+ */
+function isValidSlug(s: string): boolean {
+  if (!s || s.length < 3) return false;
+  // Reject angle-bracket placeholders, whitespace, pipes, slashes,
+  // colons, quotes, brackets, parens, commas.
+  if (/[\s<>|\\/:'"`,()\[\]{}]/.test(s)) return false;
+  // Reject leading/trailing hyphen (markdown bullet artifact).
+  if (s.startsWith("-") || s.endsWith("-")) return false;
+  return true;
 }
 
 /**
@@ -63,27 +93,35 @@ function extractText(content: unknown): string {
 }
 
 /**
- * Parse a ```memory-footnote fenced block from text.
- * Returns { entry, used, counterfactual } or null.
+ * Parse all ```memory-footnote fenced blocks from text.
+ *
+ * Per pattern `outcome-footnote-handling-principle-prefer-loss-over-guessing`:
+ *   - Invalid slug (placeholder like `<slug>`, whitespace, pipes, etc.) → dropped
+ *   - Invalid `used` value (not in the 3-option taxonomy) → dropped
+ *   - Both go to `dropped[]` for audit; only valid entries reach the ledger.
  */
-function parseMemoryFootnote(text: string): Array<{
-  entry_slug: string;
-  used: "decisive" | "confirmatory" | "retrieved-unused";
-  counterfactual: string;
-  parse_status: "ok" | "invalid_used";
-}> {
-  const results: Array<{
+function parseMemoryFootnote(text: string): {
+  entries: Array<{
     entry_slug: string;
     used: "decisive" | "confirmatory" | "retrieved-unused";
     counterfactual: string;
-    parse_status: "ok" | "invalid_used";
+  }>;
+  dropped: DroppedFootnote[];
+} {
+  const entries: Array<{
+    entry_slug: string;
+    used: "decisive" | "confirmatory" | "retrieved-unused";
+    counterfactual: string;
   }> = [];
+  const dropped: DroppedFootnote[] = [];
 
   // Find all ```memory-footnote blocks
   const fenceRegex = /```memory-footnote\s*\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
   while ((match = fenceRegex.exec(text)) !== null) {
     const body = match[1].trim();
+    const blockPreview = body.slice(0, 200);
+
     // Parse YAML-like key: value pairs
     const entry: Record<string, string> = {};
     let currentKey = "";
@@ -103,41 +141,53 @@ function parseMemoryFootnote(text: string): Array<{
     }
     if (currentKey) entry[currentKey] = currentValue.trim();
 
-    const slug = sanitizeSlug(entry.entry ?? entry.slug ?? "");
+    const rawSlug = (entry.entry ?? entry.slug ?? "").trim();
+    const slug = sanitizeSlug(rawSlug);
     const usedRaw = (entry.used ?? "").toLowerCase().trim();
-    let used: "decisive" | "confirmatory" | "retrieved-unused" = "confirmatory";
-    let footnoteParseStatus: "ok" | "invalid_used" = "ok";
-    if (usedRaw === "decisive") {
-      used = "decisive";
-    } else if (usedRaw === "confirmatory") {
-      used = "confirmatory";
-    } else if (usedRaw === "retrieved-unused") {
-      used = "retrieved-unused";
+
+    // Slug validation first (cheap, deterministic).
+    if (!slug) {
+      dropped.push({ reason: "empty_slug", raw_slug: rawSlug, raw_used: usedRaw, raw_block_preview: blockPreview });
+      continue;
+    }
+    if (!isValidSlug(slug)) {
+      dropped.push({ reason: "invalid_slug", raw_slug: slug, raw_used: usedRaw, raw_block_preview: blockPreview });
+      continue;
+    }
+
+    // Used-field validation. Per `outcome-footnote-handling-principle`:
+    // do NOT default to confirmatory — that fabricates a usage signal.
+    let used: "decisive" | "confirmatory" | "retrieved-unused";
+    if (usedRaw === "decisive" || usedRaw === "confirmatory" || usedRaw === "retrieved-unused") {
+      used = usedRaw;
     } else {
-      // Unknown used value — default to confirmatory but mark parse status
-      footnoteParseStatus = "invalid_used";
+      dropped.push({ reason: "invalid_used", raw_slug: slug, raw_used: usedRaw, raw_block_preview: blockPreview });
+      continue;
     }
 
     const counterfactual = entry.counterfactual ?? "";
-
-    if (slug) {
-      results.push({ entry_slug: slug, used, counterfactual, parse_status: footnoteParseStatus });
-    }
+    entries.push({ entry_slug: slug, used, counterfactual });
   }
 
-  return results;
+  return { entries, dropped };
 }
 
 /**
  * Collect outcomes from the conversation branch.
  * Combines mechanical retrieval tracking + self-report footnote parsing.
+ *
+ * Returns `{ rows, dropped }`:
+ *   - `rows` → write to outcome-ledger.jsonl (clean self-report data)
+ *   - `dropped` → write to audit.jsonl as `outcome_footnote_parse_error`
+ *     (per pattern `outcome-footnote-handling-principle-prefer-loss-over-guessing`)
  */
 export function collectOutcomes(
   branch: unknown[],
   sessionId: string,
-): OutcomeRow[] {
+): { rows: OutcomeRow[]; dropped: DroppedFootnote[] } {
   const ts = new Date().toISOString();
   const rows: OutcomeRow[] = [];
+  const dropped: DroppedFootnote[] = [];
   const seen = new Map<string, OutcomeRow>(); // key = slug|source
 
   for (const entry of branch) {
@@ -200,7 +250,8 @@ export function collectOutcomes(
 
       // ── Source B: Assistant footnotes ────────────────────────
       if (role === "assistant") {
-        const footnotes = parseMemoryFootnote(text);
+        const { entries: footnotes, dropped: footnoteDropped } = parseMemoryFootnote(text);
+        dropped.push(...footnoteDropped);
         for (const fn of footnotes) {
           const key = `${fn.entry_slug}|memory-footnote`;
           if (seen.has(key)) continue; // dedupe: one footnote per entry per session
@@ -211,7 +262,6 @@ export function collectOutcomes(
             source: "memory-footnote",
             used: fn.used,
             counterfactual: fn.counterfactual,
-            footnote_parse_status: fn.parse_status,
             retrieval_count: 1,
           };
           seen.set(key, row);
@@ -221,7 +271,7 @@ export function collectOutcomes(
     }
   }
 
-  return rows;
+  return { rows, dropped };
 }
 
 /**
