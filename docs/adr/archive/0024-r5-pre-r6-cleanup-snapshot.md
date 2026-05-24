@@ -1,5 +1,15 @@
 # ADR 0024 — Invisible Autonomous Second Brain：自然交互驱动的自我演进
 
+> ⚠️ **废弃快照 —— 勿引用本文定义 (2026-05-24)**
+>
+> 本快照包含的 INV-INVISIBILITY 措辞 "大脑内部所有生命周期事件默认完全静默" **已于 2026-05-24 被 ADR 0024 §2 重写取代**。原措辞被实现误读为 "大脑不能告诉用户做了什么"，导致 commit f3555e8 / 16cb6f0 误删 footer 状态机 + Lane C notify。
+>
+> **新定义**：INV-INVISIBILITY = "用户不参与大脑管理" + "运行状态应该正常显示让用户明确感知"。详 [当前 ADR 0024 §2](../0024-second-brain-from-natural-conversation.md#2-四条核心不变量-hard-invariant)。
+>
+> 本快照仅作为 R5 演进过程的 paper trail 保留，**不是当前设计**。下面原文内的 "默认完全静默" 等措辞已过时，不可再引用。
+
+---
+
 - **状态**：**Accepted (R5 终版, 2026-05-21)** — 用户产品哲学 redirect 后的总 framing ADR。本 ADR 给出第二大脑的产品哲学边界，是后续所有用户入口设计的总约束。详细机制设计推迟到 ADR 0025（meta-curator subsystem）。**R5 内部修订**：R4 经三家 T0 reviewer（opus-4-7 / gpt-5.5 / deepseek-v4-pro）三轮 cross-critique（平均可行性 33%）后用户再次 reframe："我始终会与第二大脑进行交互，发现偏移会提醒或要求变更，这个交互窗口本身就是隐性但直接的人工干预。" R4 文档（含三家 reviewer）把 "observed subject" 误读为"被动观察对象"——ADR 实际产品形态是用户在 task 中**持续 active**、不被叫去做元工作。R5 把 §3.1 白名单第 3 行升级为**第四条 hard invariant INV-ACTIVE-CORRECTION**，对应修订 §3.1 / §3.3 / §8 / §9 / §10，新增 §4.2.6 capability + §5.7 ADR 0023 追加 patch + §6.4 smoke。三家 T0 critique 中"闭环无外部 ground truth 注入"在 R5 下自动废除——active correction 通道就是核心外部 signal 通道。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md)（第二大脑七区基础；invariant #5 vault 明确同意是本 ADR 例外）、[ADR 0016](0016-sediment-as-llm-curator.md)（sediment-as-curator 哲学是本 ADR 的实施载体）、[ADR 0020](0020-abrain-auto-sync-to-remote.md)（跨设备一致传播是设计目标）、[ADR 0023 R4](0023-session-start-rule-injection.md)（rules zone + 第二大脑 mental model §1.4 是本 ADR 的直接前置）
 - **Supersedes（部分）**：
