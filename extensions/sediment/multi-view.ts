@@ -25,8 +25,10 @@
  *     own pass 1 verdict).
  *   - Devil's advocate third layer baked into the Pass 2 prompt
  *     (virtual third reviewer, no extra API call).
- *   - DEFER outcomes convert to op=skip with audit-flagged reason.
- *     Staging write-back for DEFER deferred to P3.5 full version.
+ *   - DEFER outcomes route to staging-pending replay (batch 3b
+ *     promoted DEFER from skip(multiview_deferred) into the
+ *     unified multiview-pending staging queue). See §4.4.5 +
+ *     §4.4.6 in ADR 0025 and multiview-staging-types.ts.
  *   - No cost budget enforcement yet (settings field present;
  *     consumed in P3.5 along with rate-limit handling).
  *

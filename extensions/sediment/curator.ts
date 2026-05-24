@@ -862,10 +862,17 @@ export async function curateProjectDraft(
     // ops (see shouldTriggerMultiView). For low-value ops triggered=false
     // and proposer decision is used as-is. Two separate API calls to the
     // reviewer model (different family from curator) — Pass 1 blind, Pass
-    // 2 reveal. On any reviewer error / unparseable output: fall back to
-    // proposer decision (audit-flagged) — multi-view is a safety net, not
-    // a blocking gate (ADR 0024 §3 AI-Native principle: prompt-engineered
-    // safety, not mechanical block).
+    // 2 reveal.
+    //
+    // ADR 0025 §4.4.6 batch 3b: on any of 6 transient reviewer failure
+    // paths (reviewer_unavailable / pass1_call_failed / pass1_unparseable
+    // / pass2_call_failed / pass2_unparseable / deferred), runMultiView
+    // writes a multiview-pending staging entry and returns op=skip
+    // (multiview_staged_for_replay). The candidate is NOT silently
+    // written to brain (would violate §3.1 A' layer). The 7th path
+    // (confirm_pass1_not_synthesizable) keeps op=skip(multiview_pass1_op_
+    // not_synthesizable) deliberately — known Pass 1 schema limitation.
+    // Multi-view is a safety net + staging queue, not a blocking gate.
     const mvResult = await runMultiView({
       proposerDecision,
       proposerRawText,

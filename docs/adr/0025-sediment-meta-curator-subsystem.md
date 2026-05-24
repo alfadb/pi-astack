@@ -978,10 +978,13 @@ batch 3 全系列 (commits `3718d91` → `1a6f6f7`, 11 commits) 实施§4.4.5 ·
 v1 限制 (P0.5 acceptable)：
 
   - `writeApprovedToBrain` stub—— replay 决定 op!=skip 时 audit `multi_view_replay_would_write` + `candidate_lost: true` 但**不实际调 op dispatcher**。需抽 `sediment/index.ts:2280-2440` 里的 300 行 op dispatcher 为独立函数后接入，留下一 phase
+  - **原 turn vs replay 写脑不对称**（batch 6 T0 review 补记）：原 turn 走 `confirm_proposer` / `confirm_pass1` synthesizable 时 proposer / synthesized decision 会被常规写入脑 (curator 主路径)。但 staging 重审后走同样路径时，`writeApprovedToBrain` v1 stub 会抹去写脑动作。同一个 candidate 被 proposer 创建时 reviewer 同意则写，被 staging 重审时 reviewer 同意**仍不写**。A' 层不破（reviewer 跰了）但 INV-AUTONOMY “脑从自然对话学习” 出现隐性 gap。dogfood 用户 audit 里 grep `candidate_lost: true` 能陆续定量这个损失。
   - kill switch 复用 `classifierEnabled` (`settings.autoLlmWriteEnabled !== false`)—— v2 可加独立 `multiViewReplayEnabled`
   - `confirm_pass1_not_synthesizable` 依然 dead-loop 风险（candidate 下轮 extractor 可能重复产出）—— P3 加 candidate-identity throttle。本轮不拦截
 
-T0 reviewer 同意上述 v1 限制不影响 A' 闭合 (Opus PASS、Sonnet re-verified)。
+T0 reviewer 同意上述 v1 限制不影响 A' 闭合 (Opus PASS、Sonnet re-verified、DeepSeek ship-ready)。batch 6 三家 T0 重审 (Opus 4-7 / GPT-5.5 / DeepSeek v4-pro) 返回 PASS / HOLD / PASS — GPT 找出的 ctx.signal 传递 P1 是 user pre-existing pattern 不在本批次范围。
+
+**详细 invariant 表 + state machine + commit timeline：** 见 `docs/audits/2026-05-24-adr-0025-p0.5-multi-view-batch-1-3-implementation.md` (T3 dossier, ADR 0025 §6.3 指定模式)。
 
 ### 4.5 Classifier prompt 自身演进
 
