@@ -1103,7 +1103,7 @@ R2+ multi-LLM audit 必须 explicit 评估以下问题才能选项：
 
 P5.5 原设想的三条硬条件是为了“原作者不在看时防静默 durable 区污染”设计的。单用户仓里**用户 = 作者**，错沉淀表现为直接的 dogfood 挫败 —— 反馈环比三用户 dogfood 设想的紧得多。因此在该仓上以“用户授权 + 三态退路在位”为前提提前跳过三条硬条件。
 
-**仍待完成**：§4.1 T1-1 typing 路由。一旦那条 ship，audit 能直接计算 false-positive 率，可以回头验证本次跳过硬条件的决策是否被数据证伪。
+**仍待完成**：§4.1 T1-1 typing 路由部分完成（2026-05-24 commit `<dispatch-helper>`）：debug 不进 curator、task-local 不污染当前 curator、durable 保留 curator forward；session-local working set 未实现（task-local 从未来 curator 丢失）。现在 audit 能直接按 dispatch decision (`forwarded_to_curator`/`dropped_debug`/`dropped_task_local`/`dropped_unknown_typing`) 分 bucket 计算 false-positive 率，一旦积累一段时间可回头验证本次跳过硬条件的决策是否被数据证伪。
 
 ---
 

@@ -363,6 +363,83 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
  * fail identically. Transient failures (git_commit_failed, IO errors)
  * keep the checkpoint pinned so the next agent_end retries them.
  */
+/**
+ * ADR §4.1.4 typing-based dispatch for correction signals.
+ *
+ * Before this helper existed, ALL signal_found=true signals were forwarded
+ * to the curator advisory regardless of typing. That violated ADR §4.1.4:
+ *   - debug      → should ONLY land in audit.jsonl, NEVER influence curator
+ *   - task-local → should accumulate into a session-local working set and
+ *                  inject into FUTURE curator calls, not the current one
+ *   - durable    → forward to curator (current behavior preserved)
+ *
+ * The blast-radius case this fixes: a classifier hit on "X 坏了先用 Y"
+ * (debug, conf=6) used to enter the curator prompt as an advisory hypothesis,
+ * potentially nudging create/update decisions toward a temporary debugging
+ * preference. Per ADR 0024 §4.1 INV-ACTIVE-CORRECTION the three typings are
+ * structurally different signals and must be routed differently.
+ *
+ * Session-local working set for task-local: NOT IMPLEMENTED in this commit.
+ * Until that lands, task-local signals are dropped from the current curator
+ * (preventing pollution) but lost from future curators (incomplete
+ * ADR §4.1.4 fulfillment). The dispatch audit row records the drop so a
+ * future aggregator can quantify how much task-local signal we are losing.
+ */
+function dispatchCorrectionSignal(
+  signal: CorrectionSignal | null | undefined,
+): {
+  forwarded: CorrectionSignal | null;
+  decision:
+    | "forwarded_to_curator"
+    | "dropped_debug"
+    | "dropped_task_local"
+    | "dropped_unknown_typing"
+    | "no_signal";
+  reason: string;
+} {
+  if (!signal || !signal.signal_found) {
+    return {
+      forwarded: null,
+      decision: "no_signal",
+      reason: "classifier produced no active-correction signal",
+    };
+  }
+  switch (signal.typing) {
+    case "debug":
+      return {
+        forwarded: null,
+        decision: "dropped_debug",
+        reason: "per ADR §4.1.4 debug signals only land in classifier audit, never curator advisory",
+      };
+    case "task-local":
+      // TODO(session-local-working-set): ADR §4.1.4 says task-local should
+      // accumulate into a session-local working set and inject into FUTURE
+      // curator calls (not the current one). Until that's implemented, we
+      // drop from the current curator to prevent task-local pollution; the
+      // signal is lost from future curators too. Audit captures the drop.
+      return {
+        forwarded: null,
+        decision: "dropped_task_local",
+        reason: "per ADR §4.1.4 task-local belongs in a session-local working set (not yet implemented); dropped from current curator to prevent pollution",
+      };
+    case "durable":
+      return {
+        forwarded: signal,
+        decision: "forwarded_to_curator",
+        reason: `durable typing${signal.confidence !== undefined ? ` (conf=${signal.confidence})` : ""} forwarded to curator advisory`,
+      };
+    default:
+      // Unknown / missing typing — conservative: forward as advisory
+      // (preserves pre-T1-1 behavior for any signal whose typing field
+      // didn't parse). Audit flags it so we can spot classifier regressions.
+      return {
+        forwarded: signal,
+        decision: "dropped_unknown_typing",
+        reason: `signal has unknown or missing typing (${JSON.stringify(signal.typing ?? null)}); forwarded conservatively`,
+      };
+  }
+}
+
 function shouldAdvanceAfterAboutMeResults(results: WriteAboutMeResult[]): boolean {
   const terminalReasons = new Set([
     "duplicate_slug",
@@ -1310,9 +1387,32 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
               // Await the fire-and-forget classifier promise (started before lane branching).
               // If classifier hasn't finished yet, wait for it; if it failed or wasn't
               // started, fall back to null signal (curator works without it).
-              correctionSignal: correctionPromise
-                ? (await correctionPromise.catch(() => ({ ok: false, signal: null } as const))).signal
-                : null,
+              // ADR §4.1.4 typing-based dispatch (T1-1 fix). dispatchCorrectionSignal
+              // routes by typing so debug doesn't pollute curator and task-local
+              // doesn't leak into the current curator's prompt. The decision goes
+              // to audit so the aggregator can attribute future false-positive rates
+              // to the right dispatch bucket.
+              correctionSignal: await (async () => {
+                const classifierResult = correctionPromise
+                  ? await correctionPromise.catch(() => ({ ok: false, signal: null } as const))
+                  : null;
+                const dispatch = dispatchCorrectionSignal(classifierResult?.signal ?? null);
+                if (classifierResult?.signal) {
+                  appendAudit(cwd, {
+                    operation: "correction_signal_dispatch",
+                    lane: "auto_write",
+                    session_id: sessionId,
+                    correlation_id: autoCorrelationId,
+                    decision: dispatch.decision,
+                    reason: dispatch.reason,
+                    signal_typing: classifierResult.signal.typing ?? null,
+                    signal_confidence: classifierResult.signal.confidence ?? null,
+                    signal_target_slug: classifierResult.signal.target_entry_slug ?? null,
+                    prompt_version: settings.promptVersion.activeCorrectionClassifier,
+                  }).catch(() => {});
+                }
+                return dispatch.forwarded;
+              })(),
             });
             const tAutoEnd = Date.now();
 
