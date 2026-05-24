@@ -329,6 +329,108 @@ export function abrainSedimentStagingPath(abrainHome: string): string {
 export function abrainSedimentLocksDir(abrainHome: string): string {
   return path.join(abrainSedimentDir(abrainHome), "locks");
 }
+
+// ── user-global sediment sidecar (cross-project long-term accumulation) ──────
+//
+// ADR 0025 §4.2.4 places `outcome-ledger.jsonl` (and by extension other
+// user-global cross-project sidecars: `extractor-metrics.jsonl`,
+// `curator-metrics.jsonl`) under `<abrainHome>/.state/sediment/`.
+//
+// Earlier code derived this path as `~/.pi/.pi-astack/sediment/` — a
+// user-home-derived path that is neither project-side (project-side is
+// `<projectRoot>/.pi-astack/sediment/`) nor user-global per ADR. The
+// historical accident: when pi runs with `cwd=~/.pi` the bogus path
+// coincides with project-side audit, masking the bug.
+//
+// `resolveUserGlobalAbrainHome()` mirrors the lazy env-honoring lookup in
+// `extensions/sediment/index.ts::resolveAbrainHomeForSediment` so tests
+// that flip ABRAIN_ROOT post-import are honored.
+export function resolveUserGlobalAbrainHome(): string {
+  return process.env.ABRAIN_ROOT
+    ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+    : path.join(os.homedir(), ".abrain");
+}
+export function userGlobalSedimentDir(): string {
+  return abrainSedimentDir(resolveUserGlobalAbrainHome());
+}
+
+/**
+ * One-shot migration of user-global sidecar JSONL files from the legacy
+ * user-home-derived path `~/.pi/.pi-astack/sediment/` to the canonical
+ * `<abrainHome>/.state/sediment/` location. Idempotent (process-level
+ * flag). Best-effort — never throws.
+ *
+ * Migrates ONLY the three user-global cross-project files. Does NOT touch
+ * `audit.jsonl` / `checkpoint.json` / `locks/` at the legacy location
+ * because at that coincidental path those are legitimate project-side
+ * artifacts (when `cwd=~/.pi`).
+ */
+let userGlobalSidecarMigrated = false;
+export function ensureUserGlobalSidecarMigrated(): void {
+  if (userGlobalSidecarMigrated) return;
+  userGlobalSidecarMigrated = true;
+
+  const oldDir = path.join(os.homedir(), ".pi", ".pi-astack", "sediment");
+  if (!fs.existsSync(oldDir)) return;
+
+  const newDir = userGlobalSedimentDir();
+  const USER_GLOBAL_FILES = [
+    "outcome-ledger.jsonl",
+    "extractor-metrics.jsonl",
+    "curator-metrics.jsonl",
+  ];
+
+  try {
+    fs.mkdirSync(newDir, { recursive: true });
+  } catch {
+    return; // can't create target, abort silently
+  }
+
+  for (const file of USER_GLOBAL_FILES) {
+    const src = path.join(oldDir, file);
+    const dst = path.join(newDir, file);
+    try {
+      if (!fs.existsSync(src)) continue;
+      if (!fs.existsSync(dst)) {
+        try {
+          fs.renameSync(src, dst);
+        } catch (e: any) {
+          if (e?.code === "EXDEV") {
+            fs.copyFileSync(src, dst);
+            fs.unlinkSync(src);
+          } else {
+            throw e;
+          }
+        }
+        continue;
+      }
+      // Both exist: append legacy lines to canonical, then remove legacy.
+      // Mirrors `migrateAuditFile()` JSONL-safe append (collapse internal
+      // blank lines, guarantee single `\n` separator).
+      const legacy = fs.readFileSync(src, "utf-8");
+      const lines = legacy.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+      if (lines.length > 0) {
+        const dstStat = fs.statSync(dst);
+        let endsWithNL = dstStat.size === 0;
+        if (!endsWithNL) {
+          const fd = fs.openSync(dst, "r");
+          try {
+            const buf = Buffer.alloc(1);
+            fs.readSync(fd, buf, 0, 1, dstStat.size - 1);
+            endsWithNL = buf[0] === 0x0a;
+          } finally {
+            fs.closeSync(fd);
+          }
+        }
+        const prefix = endsWithNL ? "" : "\n";
+        fs.appendFileSync(dst, prefix + lines.join("\n") + "\n", "utf-8");
+      }
+      fs.unlinkSync(src);
+    } catch {
+      // best-effort per-file; continue to next file
+    }
+  }
+}
 /**
  * List every project id that has a directory under ~/.abrain/projects/.
  * Skips entries that fail validateAbrainProjectId (defense against

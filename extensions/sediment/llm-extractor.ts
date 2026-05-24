@@ -35,7 +35,10 @@ export function buildBranchTranscript(branchEntries: unknown[]): string {
 }
 
 // ── Extractor metrics (mirrors search-metrics.jsonl pattern) ──────────────
-const EXTRACTOR_METRICS_DIR = path.join(os.homedir(), ".pi", ".pi-astack", "sediment");
+// User-global cross-project sidecar (ADR 0025 §4.2.4): lives under
+// <abrainHome>/.state/sediment/, not user-home-derived ~/.pi/.pi-astack/.
+// See _shared/runtime.ts userGlobalSedimentDir + ensureUserGlobalSidecarMigrated.
+import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 
 function logExtractorMetrics(entry: {
   ts: string;
@@ -50,9 +53,11 @@ function logExtractorMetrics(entry: {
   durationMs: number;
 }): void {
   try {
-    fs.mkdirSync(EXTRACTOR_METRICS_DIR, { recursive: true });
+    ensureUserGlobalSidecarMigrated();
+    const dir = userGlobalSedimentDir();
+    fs.mkdirSync(dir, { recursive: true });
     const line = JSON.stringify(entry) + "\n";
-    fs.appendFileSync(path.join(EXTRACTOR_METRICS_DIR, "extractor-metrics.jsonl"), line, "utf-8");
+    fs.appendFileSync(path.join(dir, "extractor-metrics.jsonl"), line, "utf-8");
   } catch {
     // metrics are best-effort; never throw
   }

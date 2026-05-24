@@ -13,11 +13,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
-
-const OUTCOME_LEDGER_DIR = path.join(
-  os.homedir(), ".pi", ".pi-astack", "sediment",
-);
+import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 
 interface OutcomeRow {
   ts: string;
@@ -284,12 +280,14 @@ export function writeOutcomeLedger(
   if (rows.length === 0) return;
 
   try {
-    fs.mkdirSync(OUTCOME_LEDGER_DIR, { recursive: true });
+    ensureUserGlobalSidecarMigrated();
+    const dir = userGlobalSedimentDir();
+    fs.mkdirSync(dir, { recursive: true });
     const lines = rows.map((row) =>
       JSON.stringify({ ...row, project_root: projectRoot ?? "" }) + "\n",
     ).join("");
     fs.appendFileSync(
-      path.join(OUTCOME_LEDGER_DIR, "outcome-ledger.jsonl"),
+      path.join(dir, "outcome-ledger.jsonl"),
       lines,
       "utf-8",
     );

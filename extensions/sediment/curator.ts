@@ -1,18 +1,18 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import type { MemorySettings } from "../memory/settings";
 import { loadEntries } from "../memory/parser";
 import { llmSearchEntries } from "../memory/llm-search";
 import type { MemoryEntry } from "../memory/types";
+import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import type { DeleteMode, ProjectEntryDraft, ProjectEntryUpdateDraft } from "./writer";
 import type { CorrectionSignal } from "./correction-pipeline";
 
 // ── Curator metrics (mirrors extractor-metrics.jsonl pattern) ─────────────
-const CURATOR_METRICS_DIR = path.join(os.homedir(), ".pi", ".pi-astack", "sediment");
-
+// User-global cross-project sidecar (ADR 0025 §4.2.4): lives under
+// <abrainHome>/.state/sediment/, not user-home-derived ~/.pi/.pi-astack/.
 function logCuratorMetrics(entry: {
   ts: string;
   model: string;
@@ -22,9 +22,11 @@ function logCuratorMetrics(entry: {
   durationMs: number;
 }): void {
   try {
-    fs.mkdirSync(CURATOR_METRICS_DIR, { recursive: true });
+    ensureUserGlobalSidecarMigrated();
+    const dir = userGlobalSedimentDir();
+    fs.mkdirSync(dir, { recursive: true });
     const line = JSON.stringify(entry) + "\n";
-    fs.appendFileSync(path.join(CURATOR_METRICS_DIR, "curator-metrics.jsonl"), line, "utf-8");
+    fs.appendFileSync(path.join(dir, "curator-metrics.jsonl"), line, "utf-8");
   } catch {
     // metrics are best-effort; never throw
   }
