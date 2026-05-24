@@ -42,13 +42,25 @@
  * Both kinds coexist in `~/.abrain/.state/sediment/staging/` for git-sync
  * uniformity, but loaders + writers are separate (clear blast radius).
  *
- * See design review (deepseek-v4-pro 2026-05-XX): D1 schema completeness,
+ * See design review (deepseek-v4-pro 2026-05-24): D1 schema completeness,
  * D2 cross-device race (originating_device + optimistic lock in IO layer
  * = batch 3a-ii), D3 neighbor re-load semantics (re-load NOT snapshot),
  * D4 backlog caps (5 attempts × 14 days), D5 state-machine viability,
  * D6 slicing (3a-i / 3a-ii / 3b / 3c-i / 3c-ii), D7 terminal path
  * (simplified delete, NOT §4.6 reactivation-reviewer — that prompt
  * does not exist yet; batch 3 ships before §4.6).
+ *
+ * Co-tenancy with `staging-types.ts` (provisional-correction):
+ *   Both staging kinds share the on-disk directory
+ *   `~/.abrain/.state/sediment/staging/`. There is NO type-level
+ *   isolation — the same readdir() will surface both file kinds.
+ *   The current `loadStagingContext` accidentally filters out
+ *   multiview-pending entries because it checks `attribution_pending`
+ *   (a field that exists only on StagingEntry); this is fragile.
+ *   Batch 3a-ii's `loadMultiviewPending` MUST do an explicit
+ *   `kind === "multiview-pending"` discriminator check at the top of
+ *   the parse loop, NOT rely on field-presence coincidence. Same for
+ *   any future loader; document this in the loader header.
  */
 
 import type { CuratorDecision } from "./curator";
@@ -180,12 +192,17 @@ export interface MultiviewPendingEntry {
    * CorrectionSignal — `renderCorrectionSignal` does its own field
    * extraction at render time.
    *
-   * Loose typing (`unknown`) because importing CorrectionSignal type
-   * from `./correction-pipeline` would risk a value-level cycle
-   * (correction-pipeline imports staging-loader). The replay routine
-   * casts back to CorrectionSignal when loading.
+   * `null` represents the non-correction-signal path (proposer was
+   * triggered by some non-classifier route). The replay routine
+   * checks for null and passes it straight through to runMultiView.
+   *
+   * Loose typing (`unknown`, which already includes null) because
+   * importing CorrectionSignal type from `./correction-pipeline`
+   * would risk a value-level cycle (correction-pipeline imports
+   * staging-loader). The replay routine casts back to
+   * CorrectionSignal when loading.
    */
-  correction_signal: unknown | null;
+  correction_signal: unknown;
 
   /** Neighbor slugs at trigger time; replay re-loads current content. */
   neighbor_slugs: NeighborSlugSnapshot;
@@ -200,9 +217,16 @@ export interface MultiviewPendingEntry {
    * present when multiview_state ∈ {pass2_call_failed,
    * pass2_unparseable, deferred}; must be ABSENT when multiview_state
    * ∈ {reviewer_unavailable, pass1_call_failed, pass1_unparseable}.
-   * Runtime-checked at write (see assertConsistent below); not
-   * encoded in the type to keep the type non-discriminated for
-   * easier serialization.
+   * Runtime-checked at write (see validateMultiviewPendingConsistency
+   * below); not encoded in the type to keep the type non-discriminated
+   * for easier JSON serialization.
+   *
+   * `Pass1Verdict.raw` contains the full reviewer model output; the
+   * batch 3a-ii writer (writeMultiviewPending) MUST clip this field
+   * to PROPOSER_RAW_TEXT_CAP (4000 chars) at write time to avoid
+   * staging files bloating to 25KB+ when reviewer models emit long
+   * chain-of-thought. Type-level enforcement is impractical without
+   * a wrapper type; runtime clipping is the contract.
    */
   pass1_verdict?: Pass1Verdict;
 
@@ -210,6 +234,9 @@ export interface MultiviewPendingEntry {
    * Pass 2 verdict if reviewer reached Pass 2 successfully. Must be
    * present when multiview_state === "deferred"; must be ABSENT
    * otherwise. Runtime-checked at write.
+   *
+   * Same `raw` clipping contract applies: batch 3a-ii writer clips
+   * `Pass2Verdict.raw` to PROPOSER_RAW_TEXT_CAP before persistence.
    */
   pass2_verdict?: Pass2Verdict;
 
@@ -310,10 +337,15 @@ export interface SlugInputs {
  * are consistent with its multiview_state. Returns null when
  * consistent, or a description of the inconsistency.
  *
- * Used by writeMultiviewPending (3a-ii) and replay (3c-i) to fail
- * fast on schema violations. NOT a type-level guard (the type
- * intentionally allows the cross-product to keep serialization
- * trivial).
+ * Renamed from `assertMultiviewPendingConsistent` (batch 3a-i review
+ * S3): the original name implied throw-on-fail per JS/TS convention
+ * (Node `assert.*`, jest `expect`); this function returns the error
+ * message instead so callers can decide whether to throw / log /
+ * audit. The batch 3a-ii writer throws on non-null; the replay
+ * routine logs to audit and skips.
+ *
+ * NOT a type-level guard (the type intentionally allows the
+ * cross-product to keep JSON serialization trivial).
  *
  * Rules:
  *   state=reviewer_unavailable    → pass1_verdict ABSENT, pass2_verdict ABSENT
@@ -323,7 +355,7 @@ export interface SlugInputs {
  *   state=pass2_unparseable       → pass1_verdict PRESENT, pass2_verdict ABSENT
  *   state=deferred                → pass1_verdict PRESENT, pass2_verdict PRESENT
  */
-export function assertMultiviewPendingConsistent(
+export function validateMultiviewPendingConsistency(
   entry: MultiviewPendingEntry,
 ): string | null {
   const has1 = entry.pass1_verdict !== undefined;
@@ -359,10 +391,32 @@ export function assertMultiviewPendingConsistent(
 }
 
 /**
- * Return the retry cap for a given state. Default is MAX_RETRY_ATTEMPTS
- * (5); `deferred` uses the lower MAX_RETRY_ATTEMPTS_DEFERRED (3) per
- * D5.5B.
+ * Return the retry cap for a given state. `deferred` uses the lower
+ * MAX_RETRY_ATTEMPTS_DEFERRED (3) per D5.5B; transient failures use
+ * MAX_RETRY_ATTEMPTS (5).
+ *
+ * Implemented as a switch + never-guard rather than a ternary (batch
+ * 3a-i review S3) so adding a new MultiviewPendingState in the future
+ * fails to compile here — forcing a deliberate decision on whether
+ * the new state is a transient failure (5 attempts) or a
+ * waiting-for-signal pattern (3 attempts). Silent default was the
+ * original risk.
  */
 export function retryCapForState(state: MultiviewPendingState): number {
-  return state === "deferred" ? MAX_RETRY_ATTEMPTS_DEFERRED : MAX_RETRY_ATTEMPTS;
+  switch (state) {
+    case "deferred":
+      return MAX_RETRY_ATTEMPTS_DEFERRED;
+    case "reviewer_unavailable":
+    case "pass1_call_failed":
+    case "pass1_unparseable":
+    case "pass2_call_failed":
+    case "pass2_unparseable":
+      return MAX_RETRY_ATTEMPTS;
+    default: {
+      const _exhaustive: never = state;
+      // Unreachable at type-check; defensive return for forced-cast callers.
+      return MAX_RETRY_ATTEMPTS;
+      void _exhaustive;
+    }
+  }
 }
