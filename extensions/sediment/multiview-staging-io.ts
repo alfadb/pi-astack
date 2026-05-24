@@ -397,6 +397,77 @@ export function deleteMultiviewPending(slug: string): boolean {
   }
 }
 
+// ── Update (replay attempt accounting) ───────────────────────────────
+//
+// batch 3c-i: replay needs to record "I attempted to retry this
+// staging entry on agent_end at time T" without changing the slug
+// or recreating the file (recreating would lose the original
+// `created` timestamp used for age-out, and would yield a new slug
+// that breaks audit-trail continuity).
+//
+// updateMultiviewPendingAttempts is a read-modify-write on the
+// existing on-disk file, updating only `retry_attempts`,
+// `last_attempt_iso`, and `updated`. Other fields are preserved
+// byte-for-byte (we serialize the original parsed object back, only
+// the three counted fields change).
+//
+// Concurrency: single-process pi (see file header). No fs-level lock
+// needed.
+
+/**
+ * Bump retry counter and timestamp on an existing staging entry.
+ * Returns true on success, false when the entry isn't found OR a
+ * parse/IO failure prevents the update (best-effort; replay logs
+ * the failure and proceeds — see batch 3c-i replay loop).
+ *
+ * Implementation: readdir → find suffix match (same as delete) → read
+ * → JSON.parse → mutate three fields → JSON.stringify → write same
+ * filename. ETag-style race avoidance unnecessary in single-process pi.
+ */
+export function updateMultiviewPendingAttempts(
+  slug: string,
+  newAttempts: number,
+  lastAttemptIso: string,
+): boolean {
+  if (!fs.existsSync(STAGING_DIR)) return false;
+  const suffix = `-${slug}.json`;
+
+  let matchedFile: string | null = null;
+  try {
+    const files = fs.readdirSync(STAGING_DIR);
+    matchedFile = files.find((f) => f.endsWith(suffix)) ?? null;
+  } catch {
+    return false;
+  }
+  if (!matchedFile) return false;
+
+  const absPath = path.join(STAGING_DIR, matchedFile);
+  let parsed: MultiviewPendingFileOnDisk;
+  try {
+    const raw = fs.readFileSync(absPath, "utf-8");
+    parsed = JSON.parse(raw) as MultiviewPendingFileOnDisk;
+  } catch {
+    return false;
+  }
+
+  // Defensive: only update if the file is actually a multiview-pending
+  // entry of the current schema (don't accidentally mutate a
+  // colliding-named provisional-correction file).
+  if (parsed.schema_version !== MULTIVIEW_PENDING_SCHEMA_VERSION) return false;
+  if (!parsed.entry || parsed.entry.kind !== "multiview-pending") return false;
+
+  parsed.entry.retry_attempts = newAttempts;
+  parsed.entry.last_attempt_iso = lastAttemptIso;
+  parsed.entry.updated = lastAttemptIso;
+
+  try {
+    fs.writeFileSync(absPath, JSON.stringify(parsed, null, 2), "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Stats (for monitoring / audit) ───────────────────────────────────────
 
 /**
