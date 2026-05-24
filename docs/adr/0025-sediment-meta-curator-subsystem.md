@@ -932,6 +932,57 @@ interface MultiViewSettings {
 - 成本预算：每个高价值操作翻倍 token 调用，预估每月成本（dogfood 校准）
 - 两 reviewer 同方向错的限制：devil's advocate 部分缓解；明确接受局限（同 ADR 0024 §6）
 
+#### 4.4.6 Implementation status (post-batch 1-3, 2026-05-24)
+
+P0.5 初始实现（commit `fec969e`）在选出后由三家 T0 reviewer（Opus 4-7 / GPT-5.5 / DeepSeek v4-pro）审查，识别出 4 条 P0 阻塞 + 7 条 P1。随后的 batch 1–3 (16 commits) 逐条修补。本小节记录“设计 (§4.4.1–4.4.5) 跟实现”的差异，以免后续 reviewer 重研。
+
+##### A. §4.4.1 触发条件
+
+设计劗5 条。**实现 (batch 1)** 扩充为含更 fine-grained 的 OR 触发路径（见§4.4 原始 5 条以外 + `update_high_confidence_candidate` / `update_high_confidence_neighbor` / `update_compiled_truth_rewrite` / `archive_target_not_in_neighbors` fail-safe）。 fail-safe 分支是 public-API defense （避免绕过 parseDecision 的 caller silently skip review）。
+
+未实现： "提升到 always tier 的 promote" 、"跨区迁移”两条—— promote tier 语义依赖 §4.5 classifier prompt 演进 (未 ship)，cross-zone migration 依赖 ADR 0014 zone semantic clarification (未实现)。
+
+##### B. §4.4.2 prompt skeleton + §4.4.3 devil's advocate
+
+P0.5 使用 ` extensions/sediment/prompts/multi-view-pass{1-blind,2-reveal}-v1.md`，跟 §4.4.2 + §4.4.3 设计 1:1 实现。两次独立 API 调用 + Blind Pass 1 + Reveal Pass 2 + devil's advocate prompt 末尾 都在位。batch 1.5 G4 reviewer 反馈后给 Pass 1 prompt 加了 “Workflow-lane neighbors (HARD CONSTRAINT)” 章节 —— 避免 Pass 1 reviewer 推荐 workflow-lane 上的 destructive op。
+
+##### C. §4.4.4 跨 provider 策略
+
+P0.5 默认 settings (extensions/sediment/settings.ts)：
+  - `reviewerProviders: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4-mini"]`
+  - `fallbackProviders: []`
+  - proposer 仍是单一 deepseek (curator 默认)
+
+静态名单在 selectReviewerModel 中顺序选择。P3 计划动态选择 + rate-limit 处理 + cost 预算  4.4 全部设计跟进。
+
+##### D. §4.4.5 关键设计点 — batch 3 重点修补
+
+P0.5 初始实现在这里**产生了 R-series 三家 T0 reviewer 一致识别的 P0.3 冲击**：runMultiView 在 7 条 fallback path 上 silent 回退到 proposer 直写。这违反 §3.1 A' 层 "non-trivial create / destructive ops MUST be double-reviewed" 硬约束。
+
+batch 3 全系列 (commits `3718d91` → `1a6f6f7`, 11 commits) 实施§4.4.5 · "DEFER 默认写 staging" 的全面推广：
+
+  - 新 staging kind `multiview-pending` (独立于 `provisional-correction`)
+  - 6 条 transient fallback path 都走 staging（`reviewer_unavailable` / `pass1_call_failed` / `pass1_unparseable` / `pass2_call_failed` / `pass2_unparseable` / `deferred`）
+  - 第 7 条 `confirm_pass1_not_synthesizable` **保留 op=skip** 不 staging（设计同事以外：Pass 1 schema 缺 rich payload 是已知限制，staging 会 dead-loop。P1.5 护 Pass 1 schema 后可以重考虑）
+  - Reviewer raw text 持久化：`<abrainHome>/.state/sediment/multi-view-metrics.jsonl` sidecar (batch 2)
+  - agent_end 独立 Lane R 跟进 staging 重审，`MAX_REPLAY_PER_AGENT_END = 3` · retry caps `5/3 (transient/deferred)` · stale cutoff `14 天`
+  - Replay terminal 走 “op=skip + 删除 + audit”（不依赖 §4.6 archive-reactivation prompt）
+
+“一锁”补充设计点：
+
+  - 跨设备 race（deepseek D2 design review 原担心）实测抵消—— `~/.abrain/.gitignore` line 2 是 `.state/`，staging 文件完全单设备本地存储。`originating_device` 字段限定为 audit marker，不 gate replay
+  - A' 层默认错误策略：`writeMultiviewPending` throw IO/validation 错误 不 catch—— 本轮 candidate 丢失 优于 silent fall back to proposer 直写。Replay framework 错误 付 audit 阶段 catch
+  - signal abort 不消耗 retry budget（batch 3c-i.5 fix R4）：abort 时 delete 新 staging + 原 entry attempts 不变
+  - replay `triggered=false` 守 A' （batch 3c-i.5 fix R1）：replay 中 shouldTriggerMultiView 返回 false (e.g. neighbor archived 让 confidence 不足) drop candidate 而非 silent fall back
+
+v1 限制 (P0.5 acceptable)：
+
+  - `writeApprovedToBrain` stub—— replay 决定 op!=skip 时 audit `multi_view_replay_would_write` + `candidate_lost: true` 但**不实际调 op dispatcher**。需抽 `sediment/index.ts:2280-2440` 里的 300 行 op dispatcher 为独立函数后接入，留下一 phase
+  - kill switch 复用 `classifierEnabled` (`settings.autoLlmWriteEnabled !== false`)—— v2 可加独立 `multiViewReplayEnabled`
+  - `confirm_pass1_not_synthesizable` 依然 dead-loop 风险（candidate 下轮 extractor 可能重复产出）—— P3 加 candidate-identity throttle。本轮不拦截
+
+T0 reviewer 同意上述 v1 限制不影响 A' 闭合 (Opus PASS、Sonnet re-verified)。
+
 ### 4.5 Classifier prompt 自身演进
 
 #### 4.5.1 诊断入口

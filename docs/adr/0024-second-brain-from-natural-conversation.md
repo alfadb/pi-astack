@@ -361,6 +361,7 @@ resolving evidence 顺序展开。
 | 错沉淀**内容**察觉不到 | 用户能看到大脑在写（footer / notify）但 INV-INVISIBILITY 不要求用户审阅每条 entry。不刺激用户 push back 的场景（"pnpm 恰好能用"类）会沉积一层低度假信心。**不同于原"察觉不到"**: 2026-05-24 INV 重写后,大脑会主动告诉用户写发生了什么（X created/updated/archived）,但不会要求用户检阅每条内容——偏差由此。对冲靠 ADR 0025 §4.3 Classifier Health Meta-Check + §5.3 aggregator。 |
 | 主动纠错疲劳 | 用户对同一 entry 错了 3 次纠正 3 次后第 4 次可能不再纠正 → 系统误读为"已经对了"。设计上靠 N=2 次重复就升级 durable 缓解 |
 | Multi-view 翻倍调用成本 | 每个高价值操作双倍 token。INV-AUTONOMY 的必要代价 |
+| Multi-view 失败 → staging 重审 (P0.5 实施) | reviewer 不可用 / pass call failed / parse 失败 / DEFER 都走 staging-pending 队列。这里代价三个：(1) candidate 在 staging 期间不进入脑——迟到最多 14 天者丢。(2) 每次 agent_end 起多 3 条重审×2 reviewer call 成本×N 设备 (单设备本地，.state/ gitignored)。(3) v1 stub: replay 决定 op!=skip 时 candidate 丢失 (writer dispatcher 未接入、留后续 phase)。这些代价 < silent fall back to proposer (破 §3 A' 层)，是 INV-AUTONOMY 与 A' 硬约束双重下的最低费选择。实施详见 ADR 0025 §4.4.6 |
 | 早期推理质量参差 | prompt v0 阶段作者需要迭代数轮才能稳定。但 prompt 迭代成本远低于机械 schema 一旦定型的修改成本 |
 | LLM 推理失败的本底概率 | 所有 AI-Native 系统共担的背景风险。基座模型迭代会持续降低 |
 | 默认开启后用户察觉不到的偏差累积（`autoLlmWriteEnabled` default true 以后首次真正存在） | ADR 0025 §5.3 P5.5 指出：默认关闭时用户必须主动改 settings 才启动 —— 此时偏差累积的供给侧未启动，代价不存在。默认 true 后，用户不再需要元动作启动 sediment，但这意味着错沉淀会静默发生。对冲机制：§5.1 aggregator + §5.4 multi-view + ADR 0025 §3.2.B sanitizer + tristate `"staging-only"` 退路（中度关闭，剩下只启 classifier 与 staging、不进 durable 写入） |
