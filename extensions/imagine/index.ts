@@ -53,6 +53,26 @@ interface ImagineParams {
   style?: string;
 }
 
+// 2026-05-24 fix: explicit discriminated-union return type. Without
+// the annotation, TS infers `ok: boolean` (not `true | false` literal),
+// so the caller's `if (!result.ok) return` cannot narrow the union and
+// every subsequent `result.actualSize` / `result.filepath` etc. errors
+// as "Property does not exist on type {ok: boolean; error: string} |
+// {ok: boolean; filepath; ...}". This was bug 7 in the 6-bug sprint.
+type GenerateImageResult =
+  | { ok: false; error: string }
+  | {
+      ok: true;
+      filepath: string;
+      model: string;
+      requestedSize: string | undefined;
+      actualSize: string | undefined;
+      requestedQuality: string | undefined;
+      actualQuality: string | undefined;
+      imageBase64?: string;
+      mimeType?: "image/png";
+    };
+
 async function generateImage(
   params: ImagineParams,
   opts: {
@@ -62,7 +82,7 @@ async function generateImage(
     baseUrl: string;
     apiKey: string;
   },
-) {
+): Promise<GenerateImageResult> {
   const baseUrl = opts.baseUrl.replace(/\/$/, "");
 
   // Style is encoded into the prompt — the Responses image_generation_call
@@ -206,32 +226,55 @@ export default function (pi: ExtensionAPI) {
       })),
     }),
 
-    prepareArguments(args: Record<string, unknown>) {
+    // 2026-05-24 fix: pi SDK 0.75 tightened prepareArguments to
+    // (args: unknown) => Static<TParams>. Narrow inside via local
+    // helper. Conditional spread for optional fields so the inferred
+    // return type doesn't emit `prop: undefined` (incompatible with
+    // SDK's `prop?: string` schema-derived shape).
+    prepareArguments(rawArgs: unknown) {
+      const args =
+        rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+          ? (rawArgs as Record<string, unknown>)
+          : {};
+      const model = args.model ? String(args.model) : undefined;
+      const size = validateEnum(args.size, ALLOWED_SIZES, "size");
+      const quality = validateEnum(args.quality, ALLOWED_QUALITIES, "quality");
+      const style = validateEnum(args.style, ALLOWED_STYLES, "style");
       return {
         prompt: String(args.prompt ?? ""),
-        model: args.model ? String(args.model) : undefined,
-        size: validateEnum(args.size, ALLOWED_SIZES, "size"),
-        quality: validateEnum(args.quality, ALLOWED_QUALITIES, "quality"),
-        style: validateEnum(args.style, ALLOWED_STYLES, "style"),
+        ...(model !== undefined ? { model } : {}),
+        ...(size !== undefined ? { size } : {}),
+        ...(quality !== undefined ? { quality } : {}),
+        ...(style !== undefined ? { style } : {}),
       };
     },
 
+    // 2026-05-24 fix: explicit `Promise<{...; details: unknown}>` return
+    // annotation prevents TS from locking TDetails to the first return's
+    // shape (which breaks subsequent returns with different details).
+    // Same pattern as memory/index.ts wrapToolResult.
     async execute(
       _id: string,
       params: ImagineParams,
       signal: AbortSignal,
       _onUpdate: unknown,
+      // 2026-05-24 fix: ctx widened to match SDK ExtensionContext
+      // contravariance. model + modelRegistry are `unknown` because
+      // SDK's Model<any> and ModelRegistry are wider than the structural
+      // subsets imagine uses; inner code casts to what it actually needs.
+      // Same pattern as memory/index.ts.
       ctx: {
-        cwd: string;
-        model?: { input?: string[] };
-        modelRegistry: {
-          getAll(): Array<{ provider: string; baseUrl: string; api: string }>;
-          getApiKeyForProvider(provider: string): Promise<string | undefined>;
-        };
+        cwd?: string;
+        model?: unknown;
+        modelRegistry: unknown;
       },
-    ) {
+    ): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; details: unknown; isError?: boolean }> {
+      const registry = ctx.modelRegistry as {
+        getAll(): Array<{ provider: string; baseUrl: string; api: string }>;
+        getApiKeyForProvider(provider: string): Promise<string | undefined>;
+      };
       // ── Key + baseUrl both from the existing openai provider ─
-      const apiKey = await ctx.modelRegistry.getApiKeyForProvider("openai");
+      const apiKey = await registry.getApiKeyForProvider("openai");
       if (!apiKey) {
         return {
           content: [{
@@ -250,17 +293,21 @@ export default function (pi: ExtensionAPI) {
       // The provider may use a completions-style baseUrl (https://x.com/v1) or
       // a responses-style one (https://x.com). We need the host root + /v1/responses.
       // Strip /v1 suffix if present to avoid double /v1.
-      const allModels = ctx.modelRegistry.getAll();
+      const allModels = registry.getAll();
       const anyOpenai = allModels.find((m) => m.provider === "openai");
       const raw = anyOpenai?.baseUrl || "https://api.openai.com";
       // Remove trailing slashes, then strip /v1 if it's the last path segment
       const baseUrl = raw.replace(/\/+$/, "").replace(/\/v1$/, "");
 
       // ── Generate ──────────────────────────────────────────
-      const callerSupportsImages = !!ctx.model?.input?.includes?.("image");
+      const model = ctx.model as { input?: string[] } | undefined;
+      const callerSupportsImages = !!model?.input?.includes?.("image");
 
       const result = await generateImage(params, {
-        cwd: ctx.cwd,
+        // SDK's ExtensionContext.cwd is required-string, but our widened
+        // typing made it optional for contravariance — default to process
+        // cwd for the rare case it's missing.
+        cwd: ctx.cwd ?? process.cwd(),
         callerSupportsImages,
         signal,
         baseUrl,
@@ -281,12 +328,12 @@ export default function (pi: ExtensionAPI) {
         `✅ Image saved: ${result.filepath}\n` +
         `Model: ${result.model} | Size: ${sizeInfo} | Quality: ${qualityInfo}`;
 
-      const content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> = [
-        { type: "text", text },
+      const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
+        { type: "text" as const, text },
       ];
       if (result.imageBase64 && result.mimeType) {
         content.push({
-          type: "image",
+          type: "image" as const,
           data: result.imageBase64,
           mimeType: result.mimeType,
         });

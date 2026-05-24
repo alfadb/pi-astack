@@ -47,7 +47,16 @@ export interface GraphSnapshot {
     node_count: number;
     edge_count: number;
     orphans: string[];
-    dead_links: Array<{ from: string; to: string; type: string }>;
+    dead_links: Array<{
+      from: string;
+      to: string;
+      type: string;
+      /** 2026-05-24: edge scope/qualifier surfaced so downstream
+       *  consumers (doctor / lint) can distinguish typo-in-world-prefix
+       *  vs typo-in-typed-prefix vs implicit-no-prefix dead links. */
+      scope?: RelationScope;
+      qualifier?: string;
+    }>;
     /**
      * Cross-scope wikilinks: from a project entry to a slug that is NOT
      * present in the project but IS present in global abrain
@@ -57,7 +66,18 @@ export interface GraphSnapshot {
      * Empty array when target is not an abrain project (legacy
      * .pensieve / global abrain target / arbitrary markdown tree).
      */
-    cross_scope_links: Array<{ from: string; to: string; type: string }>;
+    cross_scope_links: Array<{
+      from: string;
+      to: string;
+      type: string;
+      /** 2026-05-24: edge scope ("world" | "workflow" | "project" |
+       *  "unknown") and qualifier (project id when scope=project)
+       *  forwarded so UI/log can show "crossed into X" instead of
+       *  generic "cross-scope". Implicit-fallback edges (no explicit
+       *  prefix) leave scope undefined. */
+      scope?: RelationScope;
+      qualifier?: string;
+    }>;
   };
 }
 
@@ -290,8 +310,21 @@ export async function buildGraphSnapshot(
     ? await collectAbrainGlobalSlugsByScope(projectCtx.abrainHome, settings, signal, cwd)
     : null;
 
-  const dead_links: Array<{ from: string; to: string; type: string }> = [];
-  const cross_scope_links: Array<{ from: string; to: string; type: string }> = [];
+  type LinkEntry = { from: string; to: string; type: string; scope?: RelationScope; qualifier?: string };
+  const dead_links: LinkEntry[] = [];
+  const cross_scope_links: LinkEntry[] = [];
+  // 2026-05-24: small helper closure to forward edge.scope/qualifier
+  // into each pushed link entry so dead-link UI can distinguish
+  // `[[world:foo]]` typo from `[[person:foo]]` typo from bare-slug typo.
+  const pushLink = (
+    target: LinkEntry[],
+    edge: GraphEdge,
+  ) => {
+    const out: LinkEntry = { from: edge.from, to: edge.to, type: edge.type };
+    if (edge.scope) out.scope = edge.scope;
+    if (edge.qualifier) out.qualifier = edge.qualifier;
+    target.push(out);
+  };
   for (const edge of edges) {
     if (nodes[edge.from]) nodes[edge.from].out_degree += 1;
 
@@ -301,11 +334,11 @@ export async function buildGraphSnapshot(
     if (edge.scope === "world" || edge.scope === "workflow") {
       const zoneSlugs = globalZones ? globalZones[edge.scope] : null;
       if (zoneSlugs && zoneSlugs.has(edge.to)) {
-        cross_scope_links.push({ from: edge.from, to: edge.to, type: edge.type });
+        pushLink(cross_scope_links, edge);
       } else {
         // Explicit prefix but slug not in target zone — genuine dead
         // link (typo / target moved / not yet seeded).
-        dead_links.push({ from: edge.from, to: edge.to, type: edge.type });
+        pushLink(dead_links, edge);
       }
       continue;
     }
@@ -314,7 +347,11 @@ export async function buildGraphSnapshot(
       // resolved by buildGraphSnapshot — we'd need to scan another
       // project's directory. Treat as cross-scope (acknowledged) so it
       // doesn't fire as dead. Cross-project resolution is future work.
-      cross_scope_links.push({ from: edge.from, to: edge.to, type: edge.type });
+      // 2026-05-24 TODO: a bounded validation step — verify
+      // `~/.abrain/projects/<edge.qualifier>/` directory exists —
+      // would catch typo'd project ids without needing full inner-tree
+      // scan. Acceptable in a separate commit (touches abrain layout).
+      pushLink(cross_scope_links, edge);
       continue;
     }
     if (edge.scope === "unknown") {
@@ -323,7 +360,7 @@ export async function buildGraphSnapshot(
       // dead but DON'T cross-scope fall back (the prefix means the
       // author already declared this isn't a regular slug).
       if (nodes[edge.to]) nodes[edge.to].in_degree += 1;
-      else dead_links.push({ from: edge.from, to: edge.to, type: edge.type });
+      else pushLink(dead_links, edge);
       continue;
     }
 
@@ -335,9 +372,9 @@ export async function buildGraphSnapshot(
     if (nodes[edge.to]) {
       nodes[edge.to].in_degree += 1;
     } else if (globalZones && (globalZones.world.has(edge.to) || globalZones.workflow.has(edge.to))) {
-      cross_scope_links.push({ from: edge.from, to: edge.to, type: edge.type });
+      pushLink(cross_scope_links, edge);
     } else {
-      dead_links.push({ from: edge.from, to: edge.to, type: edge.type });
+      pushLink(dead_links, edge);
     }
   }
 

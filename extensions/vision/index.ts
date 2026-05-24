@@ -443,12 +443,21 @@ export default function (pi: ExtensionAPI) {
       }),
     }),
 
-    prepareArguments(args: Record<string, unknown>) {
+    // 2026-05-24 fix: pi SDK 0.75 prepareArguments must be (args: unknown).
+    // Conditional spread keeps optional fields aligned with TParams schema.
+    prepareArguments(rawArgs: unknown) {
+      const args =
+        rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+          ? (rawArgs as Record<string, unknown>)
+          : {};
+      const imageBase64 = args.imageBase64 ? String(args.imageBase64) : undefined;
+      const pathArg = args.path ? String(args.path) : undefined;
+      const mimeType = args.mimeType ? String(args.mimeType) : undefined;
       return {
-        imageBase64: args.imageBase64 ? String(args.imageBase64) : undefined,
-        path: args.path ? String(args.path) : undefined,
-        mimeType: args.mimeType ? String(args.mimeType) : undefined,
         prompt: String(args.prompt ?? "Describe this image in detail."),
+        ...(imageBase64 !== undefined ? { imageBase64 } : {}),
+        ...(pathArg !== undefined ? { path: pathArg } : {}),
+        ...(mimeType !== undefined ? { mimeType } : {}),
       };
     },
 
@@ -457,42 +466,47 @@ export default function (pi: ExtensionAPI) {
       params: VisionParams,
       signal: AbortSignal,
       _onUpdate: unknown,
+      // 2026-05-24 fix: ctx widened for contravariance vs SDK
+      // ExtensionContext. model/modelRegistry are `unknown`; inner code
+      // casts to the shape it needs. Same pattern as memory/imagine.
       ctx: {
-        cwd: string;
-        model?: { provider: string; id: string; input?: string[] };
-        modelRegistry: VisionDeps["modelRegistry"];
+        cwd?: string;
+        model?: unknown;
+        modelRegistry: unknown;
       },
-    ) {
+    ): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
+      const model = ctx.model as { provider: string; id: string; input?: string[] } | undefined;
+      const modelRegistry = ctx.modelRegistry as VisionDeps["modelRegistry"] | undefined;
       // P0 fix (2026-05-14 audit round 6): modelRegistry may be undefined in
       // some pi versions — return isError instead of crashing.
-      if (!ctx.modelRegistry) {
+      if (!modelRegistry) {
         return {
           content: [{
             type: "text" as const,
             text: "❌ vision: modelRegistry not available in this pi session.",
           }],
           details: { error: "modelRegistry missing" },
-          isError: true,
+          ...{ isError: true },
         };
       }
 
       const prefs = loadVisionPrefs();
 
       const result = await analyzeImage(params, {
-        modelRegistry: ctx.modelRegistry,
+        modelRegistry,
         prefs,
-        excludeMain: ctx.model
-          ? { provider: ctx.model.provider, id: ctx.model.id, input: ctx.model.input }
+        excludeMain: model
+          ? { provider: model.provider, id: model.id, input: model.input }
           : undefined,
         signal,
-        cwd: ctx.cwd,
+        cwd: ctx.cwd ?? process.cwd(),
       });
 
       if (!result.ok) {
         return {
           content: [{ type: "text" as const, text: `❌ ${result.error}` }],
           details: { error: result.error },
-          isError: true,
+          ...{ isError: true },
         };
       }
 

@@ -39,6 +39,19 @@ import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 
 // ── Constants ───────────────────────────────────────────────────
 
+// 2026-05-24 fix: pi SDK 0.75 ToolDefinition.prepareArguments is typed
+// (args: unknown) => Static<TParams>. Local closures previously declared
+// (args: Record<string, unknown>) which is more restrictive (contravariant
+// position) and doesn't assign. This helper narrows safely and lets the
+// tool registrations below keep their internal `args.foo` access style.
+// Reject Array.isArray so prepareArguments doesn't silently accept
+// `dispatch_agent([{...}])` instead of `dispatch_agent({...})`.
+function asRecord(args: unknown): Record<string, unknown> {
+  return args && typeof args === "object" && !Array.isArray(args)
+    ? (args as Record<string, unknown>)
+    : {};
+}
+
 const MAX_PARALLEL = 16;
 const MAX_CONCURRENCY = 4;
 const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
@@ -759,23 +772,48 @@ export default function (pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
     }),
 
-    prepareArguments(args: Record<string, unknown>) {
+    prepareArguments(rawArgs: unknown) {
+      const args = asRecord(rawArgs);
       const n = normalizeTaskSpec(args);
+      // Conditional spread for optional fields: SDK schema infers
+      // `tools?: string` / `timeoutMs?: number` (optional, not
+      // `T | undefined`). Returning `{ tools: undefined }` literally
+      // would conflict under exactOptionalPropertyTypes; spreading
+      // only when present yields `tools?: string` shape.
       return {
         model: n.model,
         thinking: n.thinking,
         prompt: n.prompt,
-        tools: n.tools,
-        timeoutMs: n.timeoutMs,
+        ...(n.tools !== undefined ? { tools: n.tools } : {}),
+        ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
       };
     },
 
-    async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: any, ctx: any) {
+    // 2026-05-24 fix: pi SDK 0.75 narrowing pattern follows the memory
+    // extension lead (extensions/memory/index.ts) — keep `signal:
+    // AbortSignal` (matches existing internal `signal.aborted` usage)
+    // and `_onUpdate: unknown` (`any` widens the return type and breaks
+    // strict-function-types assignment to ToolDefinition.execute).
+    //
+    // Explicit Promise<{...; details: unknown}> annotation prevents TS
+    // from locking TDetails to the first return's specific shape (which
+    // happens with bare `async execute` — then subsequent returns with
+    // different details shapes fail to assign to that locked TDetails).
+    // This matches what memory/index.ts does via wrapToolResult.
+    async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
       const toolCheck = validateTools(params.tools);
       if (!toolCheck.ok) {
         return {
           content: [{ type: "text" as const, text: `❌ ${toolCheck.reason}` }],
-          isError: true,
+          // pi SDK 0.75: AgentToolResult.details is required. Carry the
+          // rejection reason as structured detail so UI / log consumers
+          // can branch on `details.kind === "tool_rejected"`.
+          details: { kind: "tool_rejected", reason: toolCheck.reason },
+          // isError is a pi-SDK excess property (not in AgentToolResult<T>
+          // strict type) but pi runtime honors it. Spread instead of
+          // literal-property so the inferred return type tags it as
+          // optional and stays assignable to AgentToolResult.
+          ...{ isError: true },
         };
       }
 
@@ -817,6 +855,14 @@ export default function (pi: ExtensionAPI) {
       const text = formatResult("dispatch", params.model, result);
       return {
         content: [{ type: "text" as const, text }],
+        details: {
+          kind: "dispatch_agent_result",
+          model: params.model,
+          durationMs,
+          ok: !result.error,
+          ...(result.error ? { error: result.error, failureType: result.failureType } : {}),
+          ...(result.usage ? { usage: result.usage } : {}),
+        },
         ...(result.error ? { isError: true } : {}),
       };
     },
@@ -855,7 +901,8 @@ export default function (pi: ExtensionAPI) {
       timeoutMs: Type.Optional(Type.Number({ description: "Default per-task timeout in ms (default 1800000 = 30min)" })),
     }),
 
-    prepareArguments(args: Record<string, unknown>) {
+    prepareArguments(rawArgs: unknown) {
+      const args = asRecord(rawArgs);
       const rawTasks = (args as any).tasks;
       const raw = coerceTasksParam(rawTasks);
       if (!Array.isArray(raw) || raw.length === 0) {
@@ -879,19 +926,24 @@ export default function (pi: ExtensionAPI) {
           model: n.model,
           thinking: n.thinking,
           prompt: n.prompt,
-          tools: n.tools,
-          timeoutMs: n.timeoutMs,
+          ...(n.tools !== undefined ? { tools: n.tools } : {}),
+          ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
         };
       });
-      return { tasks, timeoutMs: (args as any).timeoutMs };
+      const topTimeoutMs = (args as any).timeoutMs;
+      return {
+        tasks,
+        ...(topTimeoutMs !== undefined ? { timeoutMs: topTimeoutMs } : {}),
+      };
     },
 
-    async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: any, ctx: any) {
+    async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
       const tasks = params.tasks ?? [];
       if (tasks.length === 0) {
         return {
           content: [{ type: "text" as const, text: "No tasks provided." }],
-          isError: true,
+          details: { kind: "dispatch_parallel_no_tasks" },
+          ...{ isError: true },
         };
       }
       if (tasks.length === 1) {
@@ -905,7 +957,8 @@ export default function (pi: ExtensionAPI) {
               `calling it with 1 task wastes the parallelism infrastructure and makes ` +
               `the output harder to read (table format for a single row).`,
           }],
-          isError: true,
+          details: { kind: "dispatch_parallel_single_task_rejected", suggestion: "use dispatch_agent" },
+          ...{ isError: true },
         };
       }
 
@@ -1057,6 +1110,22 @@ export default function (pi: ExtensionAPI) {
       const hasErrors = results.some((r) => r?.error);
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
+        details: {
+          kind: "dispatch_parallel_summary",
+          taskCount: tasks.length,
+          success,
+          failed,
+          totalWallMs,
+          serialEstimateMs: serialEstimate,
+          maxSingleMs: maxSingle,
+          tasks: tasks.map((t: any, i: number) => ({
+            model: t.model,
+            durationMs: results[i]?.durationMs ?? 0,
+            ok: !results[i]?.error,
+            ...(results[i]?.error ? { error: results[i].error, failureType: results[i].failureType } : {}),
+            ...(results[i]?.usage ? { usage: results[i].usage } : {}),
+          })),
+        },
         ...(hasErrors ? { isError: true } : {}),
       };
     },

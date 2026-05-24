@@ -142,7 +142,12 @@ function normalizeRelPath(relPath: string): string {
   return relPath.split(/[\\/]+/).filter(Boolean).join("/");
 }
 
-function frontmatterString(frontmatter: Record<string, unknown>, key: string): string {
+// 2026-05-24 fix: align with parser.parseFrontmatter return shape
+// (Record<string, Jsonish>). Was `unknown` — type noise only (function
+// does its own typeof narrowing so runtime unaffected), but tightening
+// the contract makes callers fail at compile time when they pass a
+// non-frontmatter object by mistake.
+function frontmatterString(frontmatter: Record<string, import("./types").Jsonish>, key: string): string {
   const value = frontmatter[key];
   if (typeof value === "string") return value.trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -155,7 +160,8 @@ function normalizeLegacyId(id: string): string {
 
 export function legacyPensieveSeedFor(
   relSource: string,
-  frontmatter: Record<string, unknown>,
+  // 2026-05-24 fix: align with parser.parseFrontmatter return shape.
+  frontmatter: Record<string, import("./types").Jsonish>,
 ): LegacyPensieveSeed | null {
   const seed = LEGACY_PENSIEVE_SEEDS_BY_PATH.get(normalizeRelPath(relSource));
   if (!seed) return null;
