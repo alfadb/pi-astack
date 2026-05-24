@@ -3,6 +3,27 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { asBoolean, asNumber } from "../memory/settings";
 
+/**
+ * Resolve `autoLlmWriteEnabled` from raw config to the tristate type.
+ * Accepts:
+ *   - boolean true / false
+ *   - string "true" / "false" / "staging-only" (case-insensitive, trimmed)
+ *   - anything else → fallback (preserves backward compat for bool callers)
+ */
+function resolveAutoLlmWriteEnabled(
+  raw: unknown,
+  fallback: boolean | "staging-only",
+): boolean | "staging-only" {
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "string") {
+    const v = raw.trim().toLowerCase();
+    if (v === "true") return true;
+    if (v === "false") return false;
+    if (v === "staging-only" || v === "staging") return "staging-only";
+  }
+  return fallback;
+}
+
 const PI_STACK_SETTINGS_PATH = path.join(
   os.homedir(), ".pi", "agent", "pi-astack-settings.json",
 );
@@ -28,7 +49,24 @@ export interface SedimentSettings {
   curatorModel: string;
   curatorTimeoutMs: number;
   curatorMaxRetries: number;
-  autoLlmWriteEnabled: boolean;
+  /**
+   * Sediment auto-write tristate (ADR 0025 §5.3 P5.5 retreat-path requirement).
+   *
+   *   true            — full pipeline: classifier + extractor + curator + writer
+   *   "staging-only"  — classifier runs and writes provisional staging entries,
+   *                     but tryAutoWriteLane (extractor / curator / writer) is
+   *                     skipped. Observation continues; no durable entry mutation.
+   *   false           — hard kill switch: classifier also stops (no LLM tokens
+   *                     spent on sediment in any agent_end). Use this when the
+   *                     user explicitly does not want sediment observing.
+   *
+   * Default is `true` (P5.5, this commit). Rollback path:
+   *   - immediate concerns about durable writes → set to `"staging-only"` in
+   *     ~/.pi/agent/pi-astack-settings.json sediment.autoLlmWriteEnabled
+   *   - want sediment entirely silent → set to `false`
+   * Both rollback values are honored at process start without code change.
+   */
+  autoLlmWriteEnabled: boolean | "staging-only";
   autoWriteRawAuditChars: number;
   /** When true, skip credential sanitization in continuation-call path.
    *  Safe for air-gapped deployments where extractor LLM provider
@@ -90,7 +128,27 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   curatorModel: "deepseek/deepseek-v4-flash",
   curatorTimeoutMs: 60_000,
   curatorMaxRetries: 1,
-  autoLlmWriteEnabled: false,
+  // ADR 0025 §5.3 P5.5: default changed false → true 2026-05-24.
+  //
+  // Strict ADR §5.3 hard conditions (3 users × 4 weeks, false-positive rate
+  // < 15%, no user complaints, staging growth < 50/month with resolve > 30%)
+  // are NOT fully satisfied: pi-astack is a single-user project (alfadb), so
+  // the 3-user requirement is structurally unmeetable. Single-user dogfood
+  // signals available:
+  //   - 77 classifier runs, 15 (19%) signal_found, durable conf 7–8 multiple
+  //     times — quality looks healthy but false-positive rate not directly
+  //     computable until typing routing lands (Tier-1 §4.1 ship-block T1-1)
+  //   - 495 create operations under autoLlmWriteEnabled=true in user-local
+  //     settings, no manifest user complaints in audit
+  //   - 9 staging provisional entries, well under any inflation cap
+  //
+  // The strict P5.5 conditions exist to prevent silent durable-region pollution
+  // when the original author isn't watching. For a single-user repo the user
+  // IS the author, so the polluted entries surface as direct dogfood frustration
+  // — a tighter feedback loop than the 3-user dogfood was designed to provide.
+  // Both "staging-only" and false retreat paths are wired (this file's tristate
+  // semantics + index.ts gate logic), so rollback is one settings line away.
+  autoLlmWriteEnabled: true,
   autoWriteRawAuditChars: 8_000,
   skipContinuationSanitize: false,
   promptVersion: {
@@ -147,7 +205,7 @@ export function resolveSedimentSettings(): SedimentSettings {
       : DEFAULT_SEDIMENT_SETTINGS.curatorModel,
     curatorTimeoutMs: Math.max(1_000, asNumber(cfg.curatorTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.curatorTimeoutMs)),
     curatorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.curatorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.curatorMaxRetries))),
-    autoLlmWriteEnabled: asBoolean(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
+    autoLlmWriteEnabled: resolveAutoLlmWriteEnabled(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
     skipContinuationSanitize: asBoolean(cfg.skipContinuationSanitize, DEFAULT_SEDIMENT_SETTINGS.skipContinuationSanitize),
     promptVersion: {

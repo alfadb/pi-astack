@@ -1093,7 +1093,21 @@ R2+ multi-LLM audit 必须 explicit 评估以下问题才能选项：
 
 ### 5.3 `autoLlmWriteEnabled` default 改 true 决策点（新 — §1.4 现实驱动）
 
-R2+ 必答：
+**2026-05-24 状态更新：部分完成**。
+默认值已改 `true`（commit `<本提交>`），tristate `boolean | "staging-only"` 退路已接入、ADR 0024 §6 代价 #10 反向 patch 已落。
+
+注：下面三条 R2+ 必答 + 三条硬条件是原设计送付门槛。**本仓是单用户项目（alfadb）**，其中“3 用户 × 4 周”结构性不可能满足。单用户 dogfood 实证可用信号：
+- 77 次 classifier 运行、5 次 durable conf 7–8 命中（质量看起来健康，但 typing 路由未实现 §4.1 T1-1 前无法直接计算 false-positive 率）
+- 495 次 create operation 在用户本地 `autoLlmWriteEnabled: true` override 下跑过，未出现 manifest 用户投诉
+- 9 条 staging provisional，远低任何胀胀阈值
+
+P5.5 原设想的三条硬条件是为了“原作者不在看时防静默 durable 区污染”设计的。单用户仓里**用户 = 作者**，错沉淀表现为直接的 dogfood 挫败 —— 反馈环比三用户 dogfood 设想的紧得多。因此在该仓上以“用户授权 + 三态退路在位”为前提提前跳过三条硬条件。
+
+**仍待完成**：§4.1 T1-1 typing 路由。一旦那条 ship，audit 能直接计算 false-positive 率，可以回头验证本次跳过硬条件的决策是否被数据证伪。
+
+---
+
+R2+ 必答（历史记录，以下问题仍适用于多用户仓增量评估）：
 
 1. P1-P5 ship 后**积累几个月 dogfood 数据**：classifier 在 P1.5 multi-view 保护下的 false positive 率？错沉淀的频率？
 2. 跨设备错误传播代价（ADR 0024 §6 #1）实测有多大？

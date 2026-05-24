@@ -320,6 +320,7 @@ resolving evidence 顺序展开。
 | Multi-view 翻倍调用成本 | 每个高价值操作双倍 token。INV-AUTONOMY 的必要代价 |
 | 早期推理质量参差 | prompt v0 阶段作者需要迭代数轮才能稳定。但 prompt 迭代成本远低于机械 schema 一旦定型的修改成本 |
 | LLM 推理失败的本底概率 | 所有 AI-Native 系统共担的背景风险。基座模型迭代会持续降低 |
+| 默认开启后用户察觉不到的偏差累积（`autoLlmWriteEnabled` default true 以后首次真正存在） | ADR 0025 §5.3 P5.5 指出：默认关闭时用户必须主动改 settings 才启动 —— 此时偏差累积的供给侧未启动，代价不存在。默认 true 后，用户不再需要元动作启动 sediment，但这意味着错沉淀会静默发生。对冲机制：§5.1 aggregator + §5.4 multi-view + ADR 0025 §3.2.B sanitizer + tristate `"staging-only"` 退路（中度关闭，剩下只启 classifier 与 staging、不进 durable 写入） |
 
 ---
 

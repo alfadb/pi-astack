@@ -981,7 +981,12 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
       let correctionPromise: Promise<Awaited<ReturnType<typeof runCorrectionPipeline>>> | null = null;
       const classifierLane =
         drafts.length > 0 ? "explicit" : aboutMeDrafts.length > 0 ? "about_me" : "auto_write";
-      if (branch) {
+      // ADR 0025 §5.3 P5.5 tristate: when autoLlmWriteEnabled === false (strict),
+      // classifier is also disabled — a hard kill switch for users who explicitly
+      // do not want sediment observing. `true` and `"staging-only"` both run the
+      // classifier (staging-only writes provisional staging but skips curator/writer).
+      const classifierEnabled = settings.autoLlmWriteEnabled !== false;
+      if (branch && classifierEnabled) {
         correctionPromise = (async () => {
           let relatedEntries: RelatedEntryCard[] = [];
           try {
@@ -1988,10 +1993,19 @@ async function tryAutoWriteLane(args: {
   const { cwd, sessionId, settings, window, correlationId, abrainHome, projectId, branchEntries, sessionManager } = args;
   const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
 
-  if (!settings.autoLlmWriteEnabled) {
+  // ADR 0025 §5.3 P5.5 tristate gate:
+  //   - false          → skip (full kill switch, also gates classifier upstream)
+  //   - "staging-only" → skip tryAutoWriteLane but classifier+staging keep running
+  //   - true           → run extractor / curator / writer (default since P5.5)
+  if (settings.autoLlmWriteEnabled !== true) {
     return {
       kind: "ineligible",
-      eligibility: { eligible: false, reason: "auto_write_disabled_setting" },
+      eligibility: {
+        eligible: false,
+        reason: settings.autoLlmWriteEnabled === "staging-only"
+          ? "auto_write_staging_only_mode"
+          : "auto_write_disabled_setting",
+      },
     };
   }
 
