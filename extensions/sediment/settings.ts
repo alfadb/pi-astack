@@ -73,25 +73,7 @@ export interface SedimentSettings {
    *  cannot reach internal infrastructure even with leaked keys.
    *  Default: false (sanitize is ON by default). */
   skipContinuationSanitize: boolean;
-  /**
-   * Show sediment lifecycle in pi's footer status slot — power-user
-   * diagnostic surface. Default false to satisfy ADR 0024 §2
-   * INV-INVISIBILITY ("brain lifecycle events stay completely silent
-   * by default").
-   *
-   * When true, the footer shows: 💤 sediment / 📝 sediment: extracting
-   * / ✅ sediment: 3 created / ⚠️ sediment: lint_error etc., refreshed
-   * per agent_end. This is the same surface that existed before
-   * 2026-05-24 commit f3555e8 — that commit hard-disabled it as part of
-   * INV-INVISIBILITY collapse, which over-reached: ADR 0024 §4.3
-   * explicitly allows "high-power user diagnostic" surfaces, just not
-   * promoted to quickstart / `/help`. The correct semantic is opt-in
-   * via this flag, not hard-disable.
-   *
-   * To enable: add to ~/.pi/agent/pi-astack-settings.json:
-   *   { "sediment": { "devFooterEnabled": true } }
-   */
-  devFooterEnabled: boolean;
+
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
    *  can track prompt changes without manual cross-reference.
@@ -174,9 +156,6 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoLlmWriteEnabled: true,
   autoWriteRawAuditChars: 8_000,
   skipContinuationSanitize: false,
-  // Default false per ADR 0024 §2 INV-INVISIBILITY. Power users (the
-  // author, dogfood debuggers) set this to true in their settings.json.
-  devFooterEnabled: false,
   promptVersion: {
     activeCorrectionClassifier: "v1",
     reasoningNormalizationPreamble: "v1",
@@ -287,7 +266,6 @@ export function resolveSedimentSettings(): SedimentSettings {
     autoLlmWriteEnabled: resolveAutoLlmWriteEnabled(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
     skipContinuationSanitize: asBoolean(cfg.skipContinuationSanitize, DEFAULT_SEDIMENT_SETTINGS.skipContinuationSanitize),
-    devFooterEnabled: asBoolean(cfg.devFooterEnabled, DEFAULT_SEDIMENT_SETTINGS.devFooterEnabled),
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,

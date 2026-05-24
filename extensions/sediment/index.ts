@@ -184,33 +184,33 @@ export function renderSedimentStatus(
 
 /**
  * Apply a sediment status to ctx.ui.setStatus and remember it under
- * the sessionId.
+ * the sessionId. Both setStatus and sessionId may be undefined (older
+ * pi version without setStatus, or ephemeral session); the function
+ * tolerates both. The setStatus call is always wrapped in try/catch
+ * so a stale-ctx late fire from background work never throws.
  *
- * 2026-05-24 history:
- *   commit f3555e8 hard-disabled this function (no-op) as part of
- *   INV-INVISIBILITY collapse — the reasoning was that the footer
- *   slot's persistent "📝 sediment / ✅ sediment: 3 created" display
- *   was the status-bar equivalent of the "I learned X" popup explicitly
- *   banned by ADR 0024 §4.2 anti-pattern #1.
+ * 2026-05-24 history (recorded for future readers):
+ *   commit f3555e8 hard-disabled this function (no-op) on the mistaken
+ *   theory that the footer "📝 sediment / ✅ sediment: 3 created"
+ *   display violated ADR 0024 INV-INVISIBILITY.
  *
- *   That collapse over-reached: ADR 0024 §4.3 explicitly carves out
- *   "high-power user diagnostic" surfaces (the author / dogfood debugger
- *   needs to see what sediment is doing in the background — hard-disabling
- *   the footer removes that observability without replacement).
+ *   commit 16cb6f0 walked that back partially by adding
+ *   `devFooterEnabled: boolean` (default false, power users opt in).
  *
- *   The correct semantic is opt-in:
- *     - default false — INV-INVISIBILITY satisfied for regular users
- *     - settings.devFooterEnabled = true — power users opt in
+ *   This commit removes the opt-in flag entirely and restores the
+ *   original always-on behaviour. The author clarified:
+ *     INV-INVISIBILITY = user does NOT participate in brain management
+ *                        (no approval / no vetoing / no scheduled review)
+ *     INV-INVISIBILITY ≠ brain runtime state is hidden from user
  *
- *   This commit (post-f3555e8) restores the original write path under
- *   the settings flag. Both setStatus call and the in-memory Map are
- *   kept inside the gate so flipping the flag doesn't require restart
- *   to re-populate state.
+ *   In fact: brain runtime indicators (footer status, completion
+ *   notifications, audit visibility) SHOULD be on by default so the user
+ *   feels the brain working in the background. The forbidden surface is
+ *   "system asking the user to DO something for the brain" — the
+ *   indicator itself is healthy feedback, not management burden.
  *
- * Map invariant: sedimentStatusBySession.set() always runs (even when
- * devFooterEnabled=false) so agent_start's reset-to-idle gate logic
- * keeps working consistently. Reads of this Map are NOT user-visible;
- * only setStatus / _G.__sediment_latestSetStatus are footer surfaces.
+ *   See ADR 0024 §2 / §4.2 / §8 (updated in the same commit) for the
+ *   restated invariant.
  */
 function applySedimentStatus(
   setStatus: ((msg?: string) => void) | undefined,
@@ -218,16 +218,7 @@ function applySedimentStatus(
   state: SedimentStatus,
   detail?: string,
 ): void {
-  // Always track in-memory state (call-site compat for agent_start reset).
   if (sessionId) sedimentStatusBySession.set(sessionId, state);
-
-  // Opt-in footer surface (ADR 0024 §4.3 power-user diagnostic).
-  // resolveSedimentSettings is cheap (file read + parse) but called per
-  // status update, which is per-agent_end + drain ticks. If this turns
-  // into a hotspot, hoist the check to a module-level cached flag with
-  // a session_start reload — not needed at current call frequency.
-  if (!resolveSedimentSettings().devFooterEnabled) return;
-
   const msg = renderSedimentStatus(state, detail);
   if (setStatus) {
     try {
@@ -250,18 +241,25 @@ function applySedimentStatus(
  * work that just settled belongs to a DIFFERENT session than the
  * current foreground. Safe to call from fire-and-forget finally blocks.
  *
- * Same opt-in semantics as applySedimentStatus: only runs when
- * settings.devFooterEnabled = true.
+ * Why the session check: the original intent (per docstring of the
+ * call site in the bg auto-write finally) was to recover the footer
+ * after `/new` — the new session's session_start shows 'running (prev
+ * session)' while the old session's bg work finishes, and once that
+ * settles we want the new session's footer to go idle. But blindly
+ * flipping to idle on every bg completion also nukes the in-session
+ * completed/failed indicator (e.g. '✅ sediment: 3 created') the user
+ * wants to see persist until the next agent_start.
+ *
+ * Resolution: only flip to idle when `bgSessionId !== currentSessionId`
+ * (i.e. cross-session /new case). Same-session bg completion leaves
+ * the just-set ✅/⚠️ display in place — agent_start on the next user
+ * prompt resets it to idle.
  */
 function maybeSetIdleIfNoInflight(bgSessionId: string | undefined): void {
-  if (!resolveSedimentSettings().devFooterEnabled) return;
   if ((_G.__sediment_inflightCount ?? 0) > 0) return;
   if (!_G.__sediment_latestSetStatus) return;
   // Same-session bg completion: keep the completed/failed indicator
   // visible. agent_start on the next prompt will reset to idle.
-  // (Undefined bg/foreground sessionId falls through to the cross-
-  // session path — better to risk one extra idle flip than to leave a
-  // stuck 'prev session' display when sessionId tracking is missing.)
   if (bgSessionId && _G.__sediment_currentSessionId === bgSessionId) return;
   try {
     _G.__sediment_latestSetStatus(renderSedimentStatus("idle"));
@@ -1482,27 +1480,27 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
                 checkpoint_advanced: true,
                 background_async: true,
               });
-              // ADR 0024 §2 INV-INVISIBILITY (2026-05-24): Lane C
-              // auto-write is fully autonomous — the user did NOT trigger
-              // it with an explicit fence or slash command. Notifying
-              // "Sediment auto-write (bg): N entries" after every turn
-              // is the literal form of §4.2 anti-pattern #1 (system
-              // popup 'I learned X'). audit.jsonl below retains the
-              // full per-result record for diagnostic recovery.
-              //
-              // Explicit-lane notifies (Lane A MEMORY: / Lane G
-              // MEMORY-ABOUT-ME:) below are preserved because the user
-              // actively wrote the fence — those are user-attested
-              // actions, not autonomous brain lifecycle, and feedback
-              // on user actions is a legitimate natural-interaction
-              // surface (§4.1).
-              //
-              // Removed block kept here as a deletion marker so future
-              // readers see the explicit ADR justification:
-              //   notify(
-              //     formatSedimentNotify("auto-write (bg)", auto.results, abrainHome),
-              //     "info",
-              //   );
+              if (notify) {
+                try {
+                  // 2026-05-15 UX fix: per-result lines + scope label
+                  // (world / project:<id> / workflow / etc.) instead of
+                  // a single comma-joined line. Format helper lives at
+                  // top of file alongside compactResultSummary.
+                  //
+                  // 2026-05-24 history: commit f3555e8 deleted this
+                  // notify on the mistaken theory it violated ADR 0024
+                  // INV-INVISIBILITY. Restored — the author clarified
+                  // that brain runtime indicators ("sediment auto-write
+                  // (bg): N entries") are healthy feedback signals, NOT
+                  // management burden. INV-INVISIBILITY = user does no
+                  // brain-management work, NOT brain hides what it did.
+                  // See ADR 0024 §2 / §4.2 (updated same commit).
+                  notify(
+                    formatSedimentNotify("auto-write (bg)", auto.results, abrainHome),
+                    "info",
+                  );
+                } catch {}
+              }
               const createdCount = auto.results.filter(
                 (r) => r.status === "created",
               ).length;
