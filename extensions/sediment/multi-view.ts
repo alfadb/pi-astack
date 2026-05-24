@@ -524,10 +524,24 @@ function synthesizeFromPass1(
   // Helper: workflow-lane refusal short-circuit. Returns a skip
   // decision with the specific reason so audit readers can
   // distinguish workflow-lane refusal from payload-shape refusal.
+  //
+  // Length cap on pass1.reasoning matches the in-file convention:
+  // proposer raw reasoning is clipped to 4000 (multi-view.ts:709),
+  // defer rationale to 500 (multi-view.ts:775). Uncapped reasoning
+  // can be 5-10KB; an unbounded splice into every workflow-lane
+  // refusal would bloat audit rows under reviewer regressions where
+  // many candidates touch the same workflow slug. 500 chars matches
+  // the defer-rationale tier (same audit-prominence).
+  const REASONING_CAP = 500;
+  const cappedReasoning = pass1.reasoning
+    ? (pass1.reasoning.length > REASONING_CAP
+        ? pass1.reasoning.slice(0, REASONING_CAP) + "…[truncated]"
+        : pass1.reasoning)
+    : "(none)";
   const workflowLaneRefusal = (op: string, slug: string): CuratorDecision => ({
     op: "skip",
     reason: "multiview_workflow_lane_protected",
-    rationale: `Pass 1 reviewer recommended op=${op} on slug=${slug}, but that neighbor is workflow-lane (READ-ONLY: writer cannot mutate it). Dropping the candidate is safer than emitting a write the writer would refuse. Pass 1 reasoning: ${pass1.reasoning ?? "(none)"}.`,
+    rationale: `Pass 1 reviewer recommended op=${op} on slug=${slug}, but that neighbor is workflow-lane (READ-ONLY: writer cannot mutate it). Dropping the candidate is safer than emitting a write the writer would refuse. Pass 1 reasoning: ${cappedReasoning}.`,
   });
 
   switch (pass1.op) {
