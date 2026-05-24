@@ -148,16 +148,18 @@ export function shouldTriggerMultiView(
       // list, we cannot read its confidence. Trigger anyway.
       //
       // Reviewer note (batch-1.5 review): in the CURRENT curator route
-      // this branch is dead code — parseDecision (curator.ts ~:383)
+      // this branch is dead code — parseDecision (curator.ts:320)
       // throws CuratorRejectError("invented_neighbor_slug") for any
       // archive op whose slug is not in `allowedSlugs`, so a
       // CuratorDecision with op=archive + unknown slug never reaches
-      // shouldTriggerMultiView in production. The branch is retained
-      // because shouldTriggerMultiView is an exported public function:
-      // Batch 3's planned staging-promotion path will dispatch to the
-      // multi-view layer WITHOUT going through parseDecision, and
-      // future callers must not be allowed to silently skip review for
-      // an archive op whose target the reviewer cannot inspect.
+      // shouldTriggerMultiView in production.
+      //
+      // The branch is retained as PUBLIC API DEFENSE: shouldTriggerMultiView
+      // is exported, so any caller that constructs a CuratorDecision
+      // directly (bypassing parseDecision) must not silently skip review
+      // for an unknown-slug archive. This includes test harnesses and
+      // any future caller that wants to dispatch to multi-view without
+      // running the full curator pipeline.
       if (!target) {
         return { triggered: true, reason: "archive_target_not_in_neighbors" };
       }
@@ -472,38 +474,61 @@ async function callReviewerModel(
 
 /**
  * Try to convert a Pass 1 verdict into a CuratorDecision the writer
- * can execute. Returns null when the verdict can't be safely
- * synthesized (e.g. update without compiled_truth) — caller falls
- * back to op=skip with multiview audit.
+ * can execute. The returned value is ALWAYS a valid CuratorDecision
+ * when non-null — either a writer-actionable op, OR an `op=skip`
+ * carrying the SPECIFIC failure reason. Returns null only when the
+ * verdict is truly unrecognized.
  *
- * P0.5 conservative scope: we ONLY synthesize ops where the
- * proposer would have a writable shape but reviewer disagrees on
- * direction (e.g. proposer said create, reviewer said skip). For
- * ops requiring rich payload (update/merge), reviewer didn't
- * provide compiled_truth/patch in their Pass 1 schema, so we
- * convert those to op=skip with audit explanation rather than
- * fabricate writer payloads from reviewer text.
+ * Three categories of refusal are distinguished so audit readers
+ * can tell them apart (batch-1.5 review N1: the original generic
+ * `multiview_pass1_op_not_synthesizable` message was misleading
+ * for the workflow-lane case, where the actual cause is "write
+ * forbidden" not "payload missing"):
+ *
+ *   reason=multiview_pass1_recommends_skip
+ *     Pass 1 recommended skip; proposer disagreed; Pass 2 sided
+ *     with Pass 1. Honored as-is.
+ *
+ *   reason=multiview_workflow_lane_protected
+ *     Pass 1 recommended a destructive op on a workflow-lane
+ *     neighbor (slug detected via isWorkflowNeighborEntry). The
+ *     writer would refuse it; the candidate's claim is dropped
+ *     rather than executed against the wrong lane. NOT a rich-
+ *     payload issue — it's a writer-side hard constraint.
+ *
+ *   reason=multiview_pass1_op_not_synthesizable
+ *     Pass 1 recommended update/merge/supersede/delete, but the
+ *     Pass 1 schema (op + scope + slug_target only) does not carry
+ *     the rich payload (update.patch / merge.compiledTruth /
+ *     supersede slug pair / delete.mode) the writer needs to safely
+ *     execute the op. P0.5 conservative choice: skip rather than
+ *     fabricate payload from reviewer's free-text reasoning. P1.5
+ *     plan is to expand Pass 1 schema so reviewer can produce rich
+ *     payload; until then this remains a known signal-loss path.
  *
  * `neighbors` is consulted to enforce workflow-lane read-only
- * (ADR 0025 P0.5 R-series review Reviewer C5): if reviewer
- * recommends a destructive op on a workflow-lane slug, the writer
- * will refuse it anyway; we short-circuit to null here so caller
- * falls back to the original proposer decision via the
- * not-synthesizable path, which is more honest than emitting a
- * decision the writer will reject.
+ * (ADR 0025 P0.5 R-series review Reviewer C5).
  */
 function synthesizeFromPass1(
   pass1: Pass1Verdict,
   neighbors: MemoryEntry[],
 ): CuratorDecision | null {
   // Helper: is this slug a workflow-lane neighbor? Destructive ops
-  // on workflow lanes are writer-rejected; treat as not-synthesizable
-  // so the audit row carries the right reason code.
+  // on workflow lanes are writer-rejected.
   const isWorkflowSlug = (slug: string | null | undefined): boolean => {
     if (!slug) return false;
     const target = neighbors.find((n) => n.slug === slug);
     return !!target && isWorkflowNeighborEntry(target);
   };
+
+  // Helper: workflow-lane refusal short-circuit. Returns a skip
+  // decision with the specific reason so audit readers can
+  // distinguish workflow-lane refusal from payload-shape refusal.
+  const workflowLaneRefusal = (op: string, slug: string): CuratorDecision => ({
+    op: "skip",
+    reason: "multiview_workflow_lane_protected",
+    rationale: `Pass 1 reviewer recommended op=${op} on slug=${slug}, but that neighbor is workflow-lane (READ-ONLY: writer cannot mutate it). Dropping the candidate is safer than emitting a write the writer would refuse. Pass 1 reasoning: ${pass1.reasoning ?? "(none)"}.`,
+  });
 
   switch (pass1.op) {
     case "skip":
@@ -525,7 +550,9 @@ function synthesizeFromPass1(
     }
     case "archive": {
       if (!pass1.slug_target) return null;
-      if (isWorkflowSlug(pass1.slug_target)) return null;
+      if (isWorkflowSlug(pass1.slug_target)) {
+        return workflowLaneRefusal("archive", pass1.slug_target);
+      }
       return {
         op: "archive",
         slug: pass1.slug_target,
@@ -536,13 +563,22 @@ function synthesizeFromPass1(
     }
     // update/merge/supersede/delete require rich payload the reviewer
     // didn't produce in Pass 1 (the schema only collects op + scope +
-    // slug_target). Rather than fabricate writer payloads, convert
-    // to skip with audit context so the candidate falls through
-    // safely.
+    // slug_target).
+    //
+    // Even though these branches don't have synthesizable payload,
+    // we still check the workflow-lane case first so the audit row
+    // carries the SPECIFIC reason (workflow_lane_protected) rather
+    // than the generic payload-missing reason. The user-visible effect
+    // is the same (op=skip), but downstream aggregator analytics need
+    // to tell these two failure modes apart.
     case "update":
     case "merge":
     case "supersede":
     case "delete":
+      if (isWorkflowSlug(pass1.slug_target)) {
+        return workflowLaneRefusal(pass1.op, pass1.slug_target!);
+      }
+      return null;
     default:
       return null;
   }
