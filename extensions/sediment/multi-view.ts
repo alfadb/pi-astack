@@ -42,6 +42,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MemoryEntry } from "../memory/types";
 import type { CuratorDecision } from "./curator";
+import { isWorkflowNeighborEntry } from "./curator";
 import type { CorrectionSignal } from "./correction-pipeline";
 import type { ProjectEntryDraft } from "./writer";
 import type { SedimentSettings } from "./settings";
@@ -54,10 +55,14 @@ export type MultiViewTriggerReason =
   | "create_high_confidence"
   | "create_world_scope"
   | "archive_high_conf_neighbor"
+  | "archive_target_not_in_neighbors"
   | "supersede_op"
   | "merge_op"
   | "delete_hard_mode"
-  | "durable_correction_high_conf";
+  | "durable_correction_high_conf"
+  | "update_high_confidence_candidate"
+  | "update_high_confidence_neighbor"
+  | "update_compiled_truth_rewrite";
 
 export interface Pass1Verdict {
   op: string;
@@ -135,6 +140,17 @@ export function shouldTriggerMultiView(
       if (target && (target.confidence ?? 0) >= 8) {
         return { triggered: true, reason: "archive_high_conf_neighbor" };
       }
+      // Fail-safe: if the curator archived a slug NOT present in the
+      // neighbor list, we cannot read its confidence to make the
+      // high/low decision. Reviewer R2 (R-series multi-view review) flagged
+      // this as a silent-false: archive is destructive; treat "target
+      // unknown" as fail-safe TRIGGER instead of fail-safe SKIP. The
+      // worst case is one extra reviewer pair call; the alternative
+      // (silent skip) lets adversarial / malformed proposer slugs land
+      // a destructive archive op without review.
+      if (!target) {
+        return { triggered: true, reason: "archive_target_not_in_neighbors" };
+      }
       return { triggered: false };
     }
     case "supersede":
@@ -145,7 +161,45 @@ export function shouldTriggerMultiView(
       // Soft delete is reversible; hard delete is permanent.
       if (decision.mode === "hard") return { triggered: true, reason: "delete_hard_mode" };
       return { triggered: false };
-    case "update":
+    case "update": {
+      // ADR 0025 P0.5 R-series review (Reviewer C3 P1 + Reviewer R4):
+      // `update` is high risk — curator prompt itself warns at
+      // curator.ts:671 that mis-update overwrites load-bearing
+      // Evidence/Fix/Principle sections (data loss recoverable only via
+      // git history). Original P0.5 skipped update entirely; this is a
+      // dangerous gap when correctionSignal is absent / parse-failed and
+      // candidate or target is high-confidence.
+      //
+      // Three orthogonal trigger paths:
+      //   (1) high-confidence candidate — the new claim is asserted
+      //       strongly; an update propagates that strength onto the
+      //       neighbor, so review.
+      //   (2) high-confidence neighbor — mutating a high-conf entry is
+      //       inherently destructive; review.
+      //   (3) compiled_truth rewrite — the update patch carries new
+      //       body text, which is the path that overwrites load-bearing
+      //       sections per the curator-prompt warning. ANY confidence
+      //       level triggers review when compiled_truth is being
+      //       rewritten.
+      const candidateConf = candidate.confidence ?? 0;
+      if (candidateConf >= 8) {
+        return { triggered: true, reason: "update_high_confidence_candidate" };
+      }
+      const target = neighbors.find((n) => n.slug === decision.slug);
+      if (target && (target.confidence ?? 0) >= 8) {
+        return { triggered: true, reason: "update_high_confidence_neighbor" };
+      }
+      // `patch.compiled_truth` (snake_case) is the writer-facing field;
+      // CuratorDecision.update.patch is the ProjectEntryUpdateDraft
+      // shape from writer.ts. Detecting any truthy string means "the
+      // curator wants to rewrite the body, not just tweak metadata".
+      const patch = (decision as { patch?: { compiled_truth?: unknown; compiledTruth?: unknown } }).patch;
+      const ct = patch?.compiled_truth ?? patch?.compiledTruth;
+      if (typeof ct === "string" && ct.trim().length > 0) {
+        return { triggered: true, reason: "update_compiled_truth_rewrite" };
+      }
+      return { triggered: false };
+    }
     case "skip":
     default:
       return { triggered: false };
@@ -204,9 +258,23 @@ function renderNeighbors(neighbors: MemoryEntry[]): string {
   if (neighbors.length === 0) return "Neighbors:\n<<<SEDIMENT_NEIGHBORS\n(none)\nSEDIMENT_NEIGHBORS>>>";
   const blocks = neighbors.map((entry) => {
     const timelineTail = entry.timeline.slice(-3).join("\n") || "(none)";
+    // ADR 0025 P0.5 R-series review (Reviewer C5):
+    // curator.ts:558-565 marks workflow-lane neighbors as READ-ONLY so the
+    // curator LLM does not pick op=update/supersede/merge/archive/delete
+    // on them. Multi-view reviewer was missing this marker, so a
+    // reviewer could recommend `update workflow_slug` (or worse,
+    // `archive workflow_slug`) and Pass 2 confirm_pass1, then
+    // synthesizeFromPass1 would emit an archive decision the writer
+    // refuses. The candidate's create would also not execute (because
+    // final_decision is the synthesized archive), so the entire turn
+    // silently drops. Mirroring the curator's marker fixes this.
+    const isWorkflow = isWorkflowNeighborEntry(entry);
+    const scopeLine = isWorkflow
+      ? `scope: workflow (READ-ONLY reference — multi-view reviewer CANNOT recommend update/merge/archive/supersede/delete on this slug; treat as a context anchor only)`
+      : `scope: ${entry.scope ?? "project"}`;
     return [
       `## ${entry.slug}`,
-      `scope: ${entry.scope ?? "project"}`,
+      scopeLine,
       `title: ${sanitizeText(entry.title)}`,
       `kind: ${entry.kind}`,
       `status: ${entry.status}`,
@@ -402,8 +470,28 @@ async function callReviewerModel(
  * provide compiled_truth/patch in their Pass 1 schema, so we
  * convert those to op=skip with audit explanation rather than
  * fabricate writer payloads from reviewer text.
+ *
+ * `neighbors` is consulted to enforce workflow-lane read-only
+ * (ADR 0025 P0.5 R-series review Reviewer C5): if reviewer
+ * recommends a destructive op on a workflow-lane slug, the writer
+ * will refuse it anyway; we short-circuit to null here so caller
+ * falls back to the original proposer decision via the
+ * not-synthesizable path, which is more honest than emitting a
+ * decision the writer will reject.
  */
-function synthesizeFromPass1(pass1: Pass1Verdict): CuratorDecision | null {
+function synthesizeFromPass1(
+  pass1: Pass1Verdict,
+  neighbors: MemoryEntry[],
+): CuratorDecision | null {
+  // Helper: is this slug a workflow-lane neighbor? Destructive ops
+  // on workflow lanes are writer-rejected; treat as not-synthesizable
+  // so the audit row carries the right reason code.
+  const isWorkflowSlug = (slug: string | null | undefined): boolean => {
+    if (!slug) return false;
+    const target = neighbors.find((n) => n.slug === slug);
+    return !!target && isWorkflowNeighborEntry(target);
+  };
+
   switch (pass1.op) {
     case "skip":
       return {
@@ -424,6 +512,7 @@ function synthesizeFromPass1(pass1: Pass1Verdict): CuratorDecision | null {
     }
     case "archive": {
       if (!pass1.slug_target) return null;
+      if (isWorkflowSlug(pass1.slug_target)) return null;
       return {
         op: "archive",
         slug: pass1.slug_target,
@@ -615,7 +704,7 @@ export async function runMultiView(args: {
       final_decision = args.proposerDecision;
       break;
     case "confirm_pass1": {
-      const synthesized = synthesizeFromPass1(pass1);
+      const synthesized = synthesizeFromPass1(pass1, args.neighbors);
       if (synthesized) {
         final_decision = synthesized;
       } else {
