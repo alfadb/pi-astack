@@ -113,7 +113,26 @@ export interface ReplayDeps {
   modelRegistry: ModelRegistryLike;
   /** Resolve neighbor slugs to current MemoryEntry contents. Slugs
    *  that no longer exist (archived/deleted/never-existed) should be
-   *  omitted from the return value; replay will audit the diff. */
+   *  omitted from the return value; replay will audit the diff.
+   *
+   *  Contract (3c-i.5 R6 review):
+   *    - MUST use the same load semantics as the original multi-view
+   *      trigger (curator.ts::loadEntries → relevantEntriesForCurator)
+   *      so the reviewer prompt at replay time matches a reproducible
+   *      version of the original context. Using a different source
+   *      (e.g. memory_search BM25 only) would drift the prompt and
+   *      change reviewer decision for non-staging-state reasons.
+   *    - MUST resolve `bare slug` with project > world priority when
+   *      a slug collides across scopes (currently single-scope-per-slug
+   *      is the convention, but the resolver must commit to one).
+   *    - MUST preserve `sourcePath` / `frontmatter` so the
+   *      `isWorkflowNeighborEntry` check still works on the replay
+   *      path (workflow-lane neighbors are read-only at writer layer;
+   *      losing the marker would let reviewer recommend forbidden ops).
+   *    - If `loadNeighborsBySlug` throws, the whole entry's replay is
+   *      logged as `error` and retry_attempts is NOT incremented
+   *      (framework error, not reviewer instability). The next
+   *      agent_end will try again. */
   loadNeighborsBySlug: (slugs: string[]) => Promise<MemoryEntry[]>;
   /** Execute the actual brain write when replay decides
    *  final_decision is writer-actionable. Replay does NOT call this
@@ -132,20 +151,52 @@ export interface ReplayDeps {
 
 /**
  * Rebuild a `ProjectEntryDraft` from the candidate_snapshot stored at
- * staging time. Fields not captured in the snapshot
- * (triggerPhrases, derivesFrom, sessionId, timelineNote) are set to
- * undefined — `renderCandidate` in runMultiView does not consume
- * those, so the reviewer prompt is reproducible.
+ * staging time, optionally enriched with derives_from from the final
+ * decision (when replay decides op=create with a derives_from
+ * relation, we want to preserve the brain graph edge that the
+ * original curator would have produced).
  *
- * If 3c-ii (agent_end hook) eventually wants to pass through to a
- * writer that DOES consume those fields, the draft will carry empty
- * trigger phrases / derives_from — semantically meaning "we lost
- * that context, do your best". This is acceptable for replay because
- * brain-write triggered by replay already represents a deferred
- * decision; the original captured signal is the source of truth.
+ * Batch 3c-i.5 (R3 fix): trigger phrases / sessionId / timelineNote
+ * are NOT captured in CandidateSnapshot (schema decided to keep the
+ * snapshot small for staging-disk-size budget; see
+ * multiview-staging-types.ts::CandidateSnapshot). For replay-driven
+ * brain writes those fields will be undefined. The downstream writer
+ * (buildMarkdown) silently skips undefined; impact is:
+ *   - trigger_phrases lost → the entry has no classifier hooks for
+ *     future correction-signal matching. Audit detail flags this.
+ *   - sessionId lost → timeline notes the replay session, not the
+ *     original turn. Acceptable.
+ *   - timelineNote lost → timeline notes default "sediment" text
+ *     rather than the original capture rationale. Acceptable.
+ * derivesFrom is preserved when finalDecision carries one (it
+ * usually does for create-with-relation).
+ *
+ * If a future phase decides metadata loss is unacceptable, the
+ * CandidateSnapshot schema is bumpable; see
+ * MULTIVIEW_PENDING_SCHEMA_VERSION migration plan.
  */
-function draftFromSnapshot(entry: MultiviewPendingEntry): ProjectEntryDraft {
+function draftFromSnapshot(
+  entry: MultiviewPendingEntry,
+  finalDecision?: CuratorDecision,
+): ProjectEntryDraft {
   const snap = entry.candidate_snapshot;
+  // Try to recover derivesFrom from a few possible homes:
+  //   - decision.derives_from (CuratorDecision.create / .merge carry it)
+  //   - decision.payload?.derives_from (legacy nested shape)
+  // Both are runtime-loose checks because CuratorDecision is a
+  // discriminated union and not every variant has the field.
+  let derivesFrom: string[] | undefined;
+  if (finalDecision && typeof finalDecision === "object") {
+    const decision = finalDecision as { derives_from?: unknown; payload?: { derives_from?: unknown } };
+    const candidate = Array.isArray(decision.derives_from)
+      ? decision.derives_from
+      : Array.isArray(decision.payload?.derives_from)
+        ? decision.payload?.derives_from
+        : undefined;
+    if (candidate && candidate.every((s) => typeof s === "string")) {
+      derivesFrom = candidate as string[];
+    }
+  }
   return {
     title: snap.title,
     kind: snap.kind as ProjectEntryDraft["kind"],
@@ -153,6 +204,7 @@ function draftFromSnapshot(entry: MultiviewPendingEntry): ProjectEntryDraft {
     ...(snap.status !== undefined && { status: snap.status as ProjectEntryDraft["status"] }),
     ...(snap.confidence !== undefined && { confidence: snap.confidence }),
     ...(snap.summary !== undefined && { summary: snap.summary }),
+    ...(derivesFrom !== undefined && { derivesFrom }),
   };
 }
 
@@ -304,11 +356,62 @@ async function processOneEntry(
     return;
   }
 
+  // ── P0 fix (3c-i.5 R4): signal aborted during runMultiView ──
+  //
+  // If the foreground turn was cancelled while reviewer call was in
+  // flight, runMultiView's stageAndSkipDecision path would have
+  // written a fresh staging entry (pass1/2_call_failed). Treating that
+  // as a "failed retry" would consume the retry budget for a non-
+  // reviewer-instability reason (just user impatience). Detect abort
+  // AFTER runMultiView and bail without incrementing.
+  if (deps.signal?.aborted) {
+    if (mvResult.staged) {
+      // runMultiView wrote a new staging file we don't want — it duplicates
+      // the candidate. Remove it so the next agent_end sees only the
+      // ORIGINAL entry (still at retry_attempts=N, ready for a fresh try).
+      deleteMultiviewPending(mvResult.staged.slug);
+    }
+    audit.outcome = "error";
+    audit.detail = `replay aborted by signal mid-flight; retry_attempts NOT incremented (cancellation is not reviewer instability)${mvResult.staged ? `; new staging ${mvResult.staged.slug} removed` : ""}`;
+    audit.durationMs = Date.now() - entryStart;
+    result.errors++;
+    result.auditRows.push(audit);
+    return;
+  }
+
+  // ── P1 fix (3c-i.5 R1): triggered=false guards against A' bypass ──
+  //
+  // If runMultiView decided not to trigger multi-view at replay time
+  // (e.g. neighbor vanished so the candidate's confidence no longer
+  // meets A' threshold), it returns final_decision = proposerDecision.
+  // Writing that directly to brain would bypass reviewer verdict and
+  // re-introduce the A' violation that batch 3b/3c exists to close.
+  //
+  // The original staging entry was created EXACTLY because
+  // shouldTriggerMultiView said "this needs review". If the trigger
+  // disappeared, the candidate's basis for needing brain-write also
+  // disappeared (the same trigger criteria that demanded review).
+  // Safer to drop the candidate and audit than to silently write.
+  if (!mvResult.triggered) {
+    deleteMultiviewPending(entry.slug);
+    audit.outcome = "succeeded";
+    audit.new_decision = { op: "skip", reason: "replay_no_longer_triggers_multiview", rationale: `Replay's shouldTriggerMultiView returned false (likely neighbor/candidate state changed since original staging). Candidate dropped without brain write to preserve A' constraint.` };
+    audit.detail = `replay no longer triggers multi-view (A' guard); original trigger_reason=${entry.trigger_reason}; staging removed, no brain write.${vanishedDetail()}`;
+    audit.durationMs = Date.now() - entryStart;
+    result.succeeded++;
+    result.auditRows.push(audit);
+    return;
+  }
+
   // Record neighbor vanish context so audit reader knows context
   // shrank between original staging and replay.
-  const vanishedDetail = vanishedSlugs.length > 0
-    ? ` neighbor_vanished_count=${vanishedSlugs.length} (slugs: ${vanishedSlugs.slice(0, 5).join(",")}${vanishedSlugs.length > 5 ? ",..." : ""})`
-    : "";
+  // (vanishedDetail moved earlier into a function so the triggered=false
+  //  fast-path can reference it; same return value.)
+  function vanishedDetail(): string {
+    return vanishedSlugs.length > 0
+      ? ` neighbor_vanished_count=${vanishedSlugs.length} (slugs: ${vanishedSlugs.slice(0, 5).join(",")}${vanishedSlugs.length > 5 ? ",..." : ""})`
+      : "";
+  }
 
   // ── Outcome branch ──
 
@@ -325,10 +428,25 @@ async function processOneEntry(
       entry.slug, newAttempts, new Date().toISOString(),
     );
 
+    if (!updated) {
+      // 3c-i.5 R2.c fix: update failure means retry_attempts on disk
+      // stayed at prior value. If we audit as re_staged, the next
+      // agent_end will see same retry_attempts and hit the same cap
+      // check, retrying again forever (until terminal_stale at day
+      // 14). That's expensive (each retry costs reviewer API calls).
+      // Instead, audit as error so monitoring can spot the gap.
+      audit.outcome = "error";
+      audit.detail = `replay still staged but updateMultiviewPendingAttempts FAILED on slug=${entry.slug}; retry_attempts on disk did NOT advance from ${entry.retry_attempts}. Next agent_end will see the same entry and try again; if this persists, terminal_stale will eventually clean it. Investigate fs write permission / disk space.${vanishedDetail()}`;
+      audit.durationMs = Date.now() - entryStart;
+      result.errors++;
+      result.auditRows.push(audit);
+      return;
+    }
+
     audit.outcome = "re_staged";
     audit.new_state = mvResult.staged.state;
     audit.new_attempts = newAttempts;
-    audit.detail = `replay still staged (new state=${mvResult.staged.state}); attempts ${entry.retry_attempts}→${newAttempts}; updated=${updated ? "ok" : "FAILED"}.${vanishedDetail}`;
+    audit.detail = `replay still staged (new state=${mvResult.staged.state}); attempts ${entry.retry_attempts}→${newAttempts}.${vanishedDetail()}`;
     audit.durationMs = Date.now() - entryStart;
     result.re_staged++;
     result.auditRows.push(audit);
@@ -352,20 +470,24 @@ async function processOneEntry(
     // write needed; staging file already removed.
     audit.outcome = "succeeded";
     audit.new_decision = finalDecision;
-    audit.detail = `replay decided op=skip(${finalDecision.reason ?? "no reason"}); staging removed, no brain write.${vanishedDetail}`;
+    audit.detail = `replay decided op=skip(${finalDecision.reason ?? "no reason"}); staging removed, no brain write.${vanishedDetail()}`;
     audit.durationMs = Date.now() - entryStart;
     result.succeeded++;
     result.auditRows.push(audit);
     return;
   }
 
-  // Real brain write
+  // Real brain write. Pass finalDecision into draftFromSnapshot so
+  // derivesFrom (if decision carries one) is preserved on the draft.
+  // Other metadata fields (triggerPhrases / sessionId / timelineNote)
+  // are NOT in CandidateSnapshot — schema decision per R3 fix-up,
+  // see draftFromSnapshot JSDoc above.
   try {
-    const draft = draftFromSnapshot(entry);
+    const draft = draftFromSnapshot(entry, finalDecision);
     await deps.writeApprovedToBrain(finalDecision, draft);
     audit.outcome = "succeeded";
     audit.new_decision = finalDecision;
-    audit.detail = `replay decided op=${finalDecision.op}; brain write executed; staging removed.${vanishedDetail}`;
+    audit.detail = `replay decided op=${finalDecision.op}; brain write executed; staging removed. metadata_lost: triggerPhrases${draft.derivesFrom ? "" : ", derivesFrom"}, sessionId, timelineNote${vanishedDetail()}`;
     audit.durationMs = Date.now() - entryStart;
     result.succeeded++;
     result.auditRows.push(audit);
@@ -377,7 +499,7 @@ async function processOneEntry(
     // (reviewer agreed) — the loss is in the persistence layer.
     audit.outcome = "error";
     audit.new_decision = finalDecision;
-    audit.detail = `replay decided op=${finalDecision.op} but writeApprovedToBrain threw: ${e instanceof Error ? e.message : String(e)}. Staging already removed; candidate is LOST. Investigate writer logs.${vanishedDetail}`;
+    audit.detail = `replay decided op=${finalDecision.op} but writeApprovedToBrain threw: ${e instanceof Error ? e.message : String(e)}. Staging already removed; candidate is LOST. Investigate writer logs.${vanishedDetail()}`;
     audit.durationMs = Date.now() - entryStart;
     result.errors++;
     result.auditRows.push(audit);
