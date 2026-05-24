@@ -183,67 +183,59 @@ export function renderSedimentStatus(
 }
 
 /**
- * Apply a sediment status to ctx.ui.setStatus and remember it under
- * the sessionId. Both setStatus and sessionId may be undefined (older
- * pi version without setStatus, or ephemeral session); the function
- * tolerates both. The setStatus call is always wrapped in try/catch
- * so a stale-ctx late fire from background work never throws.
+ * Apply a sediment status — NO-OP since 2026-05-24 (ADR 0024 INV-INVISIBILITY).
+ *
+ * Original intent (2026-05-08 spec): persistently render the sediment bg
+ * lifecycle (idle/running/completed/failed) in pi's footer slot so the user
+ * could see "💤 sediment" / "📝 sediment" / "✅ sediment: 3 created" /
+ * "⚠️ sediment" change every turn.
+ *
+ * Why it's a no-op now: ADR 0024 §2 INV-INVISIBILITY mandates that brain
+ * lifecycle events (create / update / merge / archive / supersede / delete)
+ * stay completely silent by default — vault_release is the ONLY exception
+ * (§2 vault carve-out). A footer slot persistently reading
+ * "📝 sediment / ✅ sediment: 3 created" is the status-bar equivalent of
+ * the "I learned X" popup explicitly listed as §4.2 anti-pattern #1. Users
+ * should never feel they are "managing the brain"; the brain learns from
+ * natural conversation without surfacing its lifecycle.
+ *
+ * Why the function still exists (instead of removing all call sites):
+ *  - Preserves the 22+ call-site signatures untouched — minimizes diff
+ *    and rollback cost.
+ *  - sedimentStatusBySession Map is still cleared elsewhere; keeping the
+ *    set() here avoids changing Map ownership semantics.
+ *  - Future debug builds may want to re-enable status display under an
+ *    explicit settings flag (e.g. sediment.devFooterEnabled). That's a
+ *    separate decision; for now, no user-facing surface.
+ *
+ * Audit trail (where lifecycle events ARE still recorded): audit.jsonl
+ * per write + git history per commit. Diagnostic-only surfaces stay in
+ * §4.3 "high-power user diagnostic" category, not pushed to the user.
  */
 function applySedimentStatus(
-  setStatus: ((msg?: string) => void) | undefined,
+  _setStatus: ((msg?: string) => void) | undefined,
   sessionId: string | undefined,
   state: SedimentStatus,
-  detail?: string,
+  _detail?: string,
 ): void {
+  // Retain the in-memory Map for call-site compatibility (agent_start
+  // reads `sedimentStatusBySession.get(sessionId)` to gate its reset
+  // logic). The Map is intentionally never observed by user-facing code.
   if (sessionId) sedimentStatusBySession.set(sessionId, state);
-  const msg = renderSedimentStatus(state, detail);
-  if (setStatus) {
-    try {
-      setStatus(msg);
-    } catch {
-      /* stale ctx late fire is best-effort; fall through to globalThis */
-    }
-  }
-  // Fallback via globalThis: bg work from a PREVIOUS session (after
-  // /new) has a stale captured setStatus. globalThis survives pi's
-  // extension-module teardown/reload, so the current session's footer
-  // gets updated even when the calling module instance is dead.
-  if (_G.__sediment_latestSetStatus) {
-    try { _G.__sediment_latestSetStatus(msg); } catch { /* best-effort */ }
-  }
+  // Intentionally do NOT call setStatus / _G.__sediment_latestSetStatus.
+  // No footer surface for sediment lifecycle (ADR 0024 §2).
 }
 
 /**
- * Transition footer to idle IFF no bg work is inflight AND the bg
- * work that just settled belongs to a DIFFERENT session than the
- * current foreground. Safe to call from fire-and-forget finally blocks.
+ * No-op since 2026-05-24 (ADR 0024 INV-INVISIBILITY).
  *
- * Why the session check: the original intent (per docstring of the
- * call site in the bg auto-write finally) was to recover the footer
- * after `/new` — the new session's session_start shows 'running (prev
- * session)' while the old session's bg work finishes, and once that
- * settles we want the new session's footer to go idle. But blindly
- * flipping to idle on every bg completion also nukes the in-session
- * completed/failed indicator (e.g. '✅ sediment: 3 created') the user
- * wants to see persist until the next agent_start.
- *
- * Resolution: only flip to idle when `bgSessionId !== currentSessionId`
- * (i.e. cross-session /new case). Same-session bg completion leaves
- * the just-set ✅/⚠️ display in place — agent_start on the next user
- * prompt resets it to idle.
+ * Originally flipped the footer back to idle on cross-session bg
+ * completion (post-/new). Since sediment no longer occupies a footer
+ * slot, there is nothing to flip. Kept as a no-op so call sites in
+ * fire-and-forget finally blocks remain untouched.
  */
-function maybeSetIdleIfNoInflight(bgSessionId: string | undefined): void {
-  if ((_G.__sediment_inflightCount ?? 0) > 0) return;
-  if (!_G.__sediment_latestSetStatus) return;
-  // Same-session bg completion: keep the completed/failed indicator
-  // visible. agent_start on the next prompt will reset to idle.
-  // (Undefined bg/foreground sessionId falls through to the cross-
-  // session path — better to risk one extra idle flip than to leave a
-  // stuck 'prev session' display when sessionId tracking is missing.)
-  if (bgSessionId && _G.__sediment_currentSessionId === bgSessionId) return;
-  try {
-    _G.__sediment_latestSetStatus(renderSedimentStatus("idle"));
-  } catch { /* best-effort */ }
+function maybeSetIdleIfNoInflight(_bgSessionId: string | undefined): void {
+  // Intentionally empty. See applySedimentStatus for full rationale.
 }
 
 /**
@@ -1460,18 +1452,27 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
                 checkpoint_advanced: true,
                 background_async: true,
               });
-              if (notify) {
-                try {
-                  // 2026-05-15 UX fix: per-result lines + scope label
-                  // (world / project:<id> / workflow / etc.) instead of
-                  // a single comma-joined line. Format helper lives at
-                  // top of file alongside compactResultSummary.
-                  notify(
-                    formatSedimentNotify("auto-write (bg)", auto.results, abrainHome),
-                    "info",
-                  );
-                } catch {}
-              }
+              // ADR 0024 §2 INV-INVISIBILITY (2026-05-24): Lane C
+              // auto-write is fully autonomous — the user did NOT trigger
+              // it with an explicit fence or slash command. Notifying
+              // "Sediment auto-write (bg): N entries" after every turn
+              // is the literal form of §4.2 anti-pattern #1 (system
+              // popup 'I learned X'). audit.jsonl below retains the
+              // full per-result record for diagnostic recovery.
+              //
+              // Explicit-lane notifies (Lane A MEMORY: / Lane G
+              // MEMORY-ABOUT-ME:) below are preserved because the user
+              // actively wrote the fence — those are user-attested
+              // actions, not autonomous brain lifecycle, and feedback
+              // on user actions is a legitimate natural-interaction
+              // surface (§4.1).
+              //
+              // Removed block kept here as a deletion marker so future
+              // readers see the explicit ADR justification:
+              //   notify(
+              //     formatSedimentNotify("auto-write (bg)", auto.results, abrainHome),
+              //     "info",
+              //   );
               const createdCount = auto.results.filter(
                 (r) => r.status === "created",
               ).length;
