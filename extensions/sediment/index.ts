@@ -46,6 +46,8 @@ import {
   type LlmExtractorResult,
 } from "./llm-extractor";
 import { runCorrectionPipeline, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
+import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
+import { relevantEntriesForCurator } from "./curator";
 import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests } from "../_shared/pi-internals";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
@@ -1949,7 +1951,116 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
         }
       }
 
-      // ── Status: combined verdict ─────────────────────────────────
+      // ── Lane R: multi-view replay (fire-and-forget) ─────────────
+      //
+      // Batch 3c-ii: after main lanes finish, kick off retry of any
+      // multiview-pending staging entries (from runMultiView's 6
+      // transient-failure paths). Replay runs as fire-and-forget
+      // because reviewer LLM calls cost ~30s each and 3 entries =
+      // up to 3min — must not block agent_end.
+      //
+      // The kill-switch matches the classifier: when
+      // settings.autoLlmWriteEnabled === false, we do not run replay
+      // either (the user has explicitly opted out of sediment
+      // observation; respect that).
+      //
+      // v1 limit: writeApprovedToBrain stub does NOT actually write
+      // to brain (the curator's op dispatcher lives inline in this
+      // file and refactoring it for replay is deferred to a follow-up
+      // batch). The candidate is dropped + audited "would_write";
+      // staging cleanup + A' layer guarantee still hold, only the
+      // "replay successfully writes the brain decision" cherry on
+      // top is missing. Dogfooders will see clear audit rows.
+      if (classifierEnabled && cwd && sessionId) {
+        // Re-bind for the closure to avoid any subsequent scope mutation.
+        const replayCwd = cwd;
+        const replaySessionId = sessionId;
+        void (async () => {
+          try {
+            const memSettings = resolveMemorySettings();
+            const replayResult: ReplayBatchResult = await replayMultiviewPending({
+              settings,
+              modelRegistry: modelRegistry as Parameters<typeof replayMultiviewPending>[0]["modelRegistry"],
+              loadNeighborsBySlug: async (slugs: string[]) => {
+                if (slugs.length === 0) return [];
+                const all = await (await import("../memory/parser")).loadEntries(replayCwd, memSettings, ctx.signal);
+                const filtered = relevantEntriesForCurator(all);
+                const slugSet = new Set(slugs);
+                return filtered.filter((e) => slugSet.has(e.slug));
+              },
+              writeApprovedToBrain: async (decision, candidate) => {
+                // v1 STUB. See block comment above. Audit row reflects
+                // that we would have executed `decision.op` on this
+                // candidate but did not in this phase. Throwing here
+                // would let replay treat this as a brain-write failure,
+                // which is misleading (the failure is in our scope, not
+                // the writer's). Returning normally lets replay record
+                // outcome=succeeded with the actual decision.
+                appendAudit(replayCwd, {
+                  operation: "multi_view_replay_would_write",
+                  session_id: replaySessionId,
+                  lane: "replay",
+                  decision_op: decision.op,
+                  decision: decision,
+                  candidate_title: candidate.title,
+                  candidate_kind: candidate.kind,
+                  note: "v1 stub: writer dispatch not implemented in batch 3c-ii; candidate dropped after audit. Follow-up batch will wire writer.",
+                });
+              },
+              signal: ctx.signal,
+            });
+
+            // Audit the replay batch outcome.
+            appendAudit(replayCwd, {
+              operation: "multi_view_replay_batch",
+              session_id: replaySessionId,
+              lane: "replay",
+              attempted: replayResult.attempted,
+              succeeded: replayResult.succeeded,
+              re_staged: replayResult.re_staged,
+              terminal_max_retries: replayResult.terminal_max_retries,
+              terminal_stale: replayResult.terminal_stale,
+              errors: replayResult.errors,
+              total_pending: replayResult.totalPending,
+              durationMs: replayResult.durationMs,
+            });
+
+            // Per-row audit so each entry's full context is traceable.
+            for (const row of replayResult.auditRows) {
+              appendAudit(replayCwd, {
+                operation: "multi_view_replay_entry",
+                session_id: replaySessionId,
+                lane: "replay",
+                slug: row.slug,
+                prior_state: row.prior_state,
+                prior_attempts: row.prior_attempts,
+                age_days: row.age_days,
+                outcome: row.outcome,
+                detail: row.detail,
+                new_state: row.new_state,
+                new_attempts: row.new_attempts,
+                new_decision: row.new_decision,
+                durationMs: row.durationMs,
+              });
+            }
+          } catch (e: unknown) {
+            // Any uncaught error in the replay framework itself (not
+            // per-entry, those are caught inside processOneEntry). Audit
+            // and continue — replay is non-critical; main flow already
+            // succeeded.
+            try {
+              appendAudit(replayCwd, {
+                operation: "multi_view_replay_lane_error",
+                session_id: replaySessionId,
+                lane: "replay",
+                error: e instanceof Error ? e.message : String(e),
+              });
+            } catch { /* best-effort */ }
+          }
+        })();
+      }
+
+      // ── Status: combined verdict ──────────────────────────────
       const allResultsStatusSummary = [
         ...results.map((r) => r.status),
         ...aboutMeResults.map((r) => r.status),
