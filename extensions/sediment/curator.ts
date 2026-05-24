@@ -421,11 +421,15 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
 }
 
 /** Project the runMultiView result onto the CuratorAudit.multi_view
- *  shape. Drops the raw model text fields (preserved in the
- *  curator-metrics sidecar, not the main audit row) and the
- *  synthesized final_decision (the outer audit already records that
- *  as `decision`). Keeps proposer_decision when triggered so audit
- *  readers can compare proposer-vs-final without joining tables. */
+ *  shape. Drops the raw model text fields (those live in the
+ *  multi-view-metrics.jsonl sidecar written by callReviewerModel —
+ *  see logReviewerMetrics in multi-view.ts; ADR 0025 P0.5 R-series
+ *  batch-2 wired the sidecar after batch-1 review found the previous
+ *  comment claimed sidecar storage that did not actually exist) and
+ *  drops the synthesized final_decision (the outer audit already
+ *  records that as `decision`). Keeps proposer_decision when
+ *  triggered so audit readers can compare proposer-vs-final without
+ *  joining tables. */
 function buildMultiViewAudit(
   mv: MultiViewResult,
   proposerDecision: CuratorDecision,

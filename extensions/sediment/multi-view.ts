@@ -47,6 +47,7 @@ import type { CuratorDecision } from "./curator";
 // dependency (curator.ts imports runMultiView from this file). See
 // workflow-utils.ts header comment for full rationale.
 import { isWorkflowNeighborEntry } from "./workflow-utils";
+import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import type { CorrectionSignal } from "./correction-pipeline";
 import type { ProjectEntryDraft } from "./writer";
 import type { SedimentSettings } from "./settings";
@@ -420,18 +421,93 @@ function selectReviewerModel(
   return null;
 }
 
+// ── Multi-view reviewer metrics (sidecar) ─────────────────────────────
+//
+// ADR 0025 P0.5 R-series review batch-2 (commit b575eab pre-batch-2 the
+// `buildMultiViewAudit` comment claimed reviewer raw text is "preserved
+// in curator-metrics sidecar", but `callReviewerModel` never actually
+// wrote anywhere; main audit also dropped `raw`, so reviewer outputs
+// were unrecoverable for debugging Pass 1/2 parse failures, prompt
+// quality regressions, or reviewer-cost analysis).
+//
+// This sidecar mirrors curator.ts::logCuratorMetrics + extractor-metrics.
+// User-global cross-project file (ADR 0025 §4.2.4):
+//   <abrainHome>/.state/sediment/multi-view-metrics.jsonl
+//
+// Each reviewer call (pass1 OR pass2 — separately) appends one line.
+// `rawText` is clipped to RAW_TEXT_AUDIT_CAP to avoid unbounded growth
+// under reviewer prompt regressions; the cap matches the same
+// in-file convention as proposer raw clip (4000 chars). Full raw text
+// is NOT stored — if you need it, dogfood with provider-side logging
+// or capture in a smoke run.
+const REVIEWER_METRICS_RAW_TEXT_CAP = 4000;
+
+interface ReviewerMetricsEntry {
+  ts: string;
+  pass: "pass1" | "pass2";
+  model: string;
+  promptChars: number;
+  estimatedTokens: number;
+  ok: boolean;
+  durationMs: number;
+  rawText?: string;
+  rawTextTruncated?: boolean;
+  error?: string;
+}
+
+function logReviewerMetrics(entry: ReviewerMetricsEntry): void {
+  try {
+    ensureUserGlobalSidecarMigrated();
+    const dir = userGlobalSedimentDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const line = JSON.stringify(entry) + "\n";
+    fs.appendFileSync(path.join(dir, "multi-view-metrics.jsonl"), line, "utf-8");
+  } catch {
+    // metrics are best-effort; never throw
+  }
+}
+
+/** Apply the raw-text cap and return both clipped text and a truncation
+ *  flag for the audit row. Null/empty inputs return undefined so the
+ *  metrics row omits the field rather than emitting an empty string. */
+function clipRawForAudit(text: string | undefined): { clipped?: string; truncated?: boolean } {
+  if (!text) return {};
+  if (text.length <= REVIEWER_METRICS_RAW_TEXT_CAP) return { clipped: text, truncated: false };
+  return { clipped: text.slice(0, REVIEWER_METRICS_RAW_TEXT_CAP) + "…[truncated]", truncated: true };
+}
+
 async function callReviewerModel(
   ref: string,
   parsed: { provider: string; id: string },
   modelRegistry: ModelRegistryLike,
   prompt: string,
   settings: SedimentSettings,
+  pass: "pass1" | "pass2",
   signal?: AbortSignal,
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const t0 = Date.now();
+  const promptChars = prompt.length;
+  const estimatedTokens = Math.ceil(promptChars / 3);
   const model = modelRegistry.find(parsed.provider, parsed.id);
-  if (!model) return { ok: false, error: `reviewer model not registered: ${ref}` };
+  if (!model) {
+    const error = `reviewer model not registered: ${ref}`;
+    logReviewerMetrics({
+      ts: new Date().toISOString(), pass, model: ref,
+      promptChars, estimatedTokens, ok: false,
+      durationMs: Date.now() - t0, error,
+    });
+    return { ok: false, error };
+  }
   const auth = await modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth.ok || !auth.apiKey) return { ok: false, error: `reviewer auth unavailable for ${ref}: ${auth.error ?? "no api key"}` };
+  if (!auth.ok || !auth.apiKey) {
+    const error = `reviewer auth unavailable for ${ref}: ${auth.error ?? "no api key"}`;
+    logReviewerMetrics({
+      ts: new Date().toISOString(), pass, model: ref,
+      promptChars, estimatedTokens, ok: false,
+      durationMs: Date.now() - t0, error,
+    });
+    return { ok: false, error };
+  }
 
   try {
     const piAi: {
@@ -455,18 +531,43 @@ async function callReviewerModel(
       },
     );
     const result = await stream.result();
+    const durationMs = Date.now() - t0;
     if (result.errorMessage || result.stopReason === "error" || result.stopReason === "aborted") {
-      return { ok: false, error: result.errorMessage ?? result.stopReason ?? "reviewer call failed" };
+      const error = result.errorMessage ?? result.stopReason ?? "reviewer call failed";
+      logReviewerMetrics({
+        ts: new Date().toISOString(), pass, model: ref,
+        promptChars, estimatedTokens, ok: false, durationMs, error,
+      });
+      return { ok: false, error };
     }
     const text = (result.content ?? [])
       .filter((part) => part.type === "text")
       .map((part) => part.text ?? "")
       .join("")
       .trim();
-    if (!text) return { ok: false, error: "reviewer returned empty text" };
+    if (!text) {
+      logReviewerMetrics({
+        ts: new Date().toISOString(), pass, model: ref,
+        promptChars, estimatedTokens, ok: false, durationMs,
+        error: "reviewer returned empty text",
+      });
+      return { ok: false, error: "reviewer returned empty text" };
+    }
+    const { clipped, truncated } = clipRawForAudit(text);
+    logReviewerMetrics({
+      ts: new Date().toISOString(), pass, model: ref,
+      promptChars, estimatedTokens, ok: true, durationMs,
+      rawText: clipped, rawTextTruncated: truncated,
+    });
     return { ok: true, text };
   } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    const error = e instanceof Error ? e.message : String(e);
+    logReviewerMetrics({
+      ts: new Date().toISOString(), pass, model: ref,
+      promptChars, estimatedTokens, ok: false,
+      durationMs: Date.now() - t0, error,
+    });
+    return { ok: false, error };
   }
 }
 
@@ -674,7 +775,7 @@ export async function runMultiView(args: {
   const pass1Start = Date.now();
   const pass1Resp = await callReviewerModel(
     reviewer.ref, { provider: reviewer.provider, id: reviewer.id },
-    args.modelRegistry, pass1Prompt, args.settings, args.signal,
+    args.modelRegistry, pass1Prompt, args.settings, "pass1", args.signal,
   );
   const pass1DurationMs = Date.now() - pass1Start;
 
@@ -727,7 +828,7 @@ export async function runMultiView(args: {
   const pass2Start = Date.now();
   const pass2Resp = await callReviewerModel(
     reviewer.ref, { provider: reviewer.provider, id: reviewer.id },
-    args.modelRegistry, pass2Prompt, args.settings, args.signal,
+    args.modelRegistry, pass2Prompt, args.settings, "pass2", args.signal,
   );
   const pass2DurationMs = Date.now() - pass2Start;
 
