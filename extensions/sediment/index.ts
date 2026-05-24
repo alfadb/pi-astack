@@ -183,59 +183,89 @@ export function renderSedimentStatus(
 }
 
 /**
- * Apply a sediment status — NO-OP since 2026-05-24 (ADR 0024 INV-INVISIBILITY).
+ * Apply a sediment status to ctx.ui.setStatus and remember it under
+ * the sessionId.
  *
- * Original intent (2026-05-08 spec): persistently render the sediment bg
- * lifecycle (idle/running/completed/failed) in pi's footer slot so the user
- * could see "💤 sediment" / "📝 sediment" / "✅ sediment: 3 created" /
- * "⚠️ sediment" change every turn.
+ * 2026-05-24 history:
+ *   commit f3555e8 hard-disabled this function (no-op) as part of
+ *   INV-INVISIBILITY collapse — the reasoning was that the footer
+ *   slot's persistent "📝 sediment / ✅ sediment: 3 created" display
+ *   was the status-bar equivalent of the "I learned X" popup explicitly
+ *   banned by ADR 0024 §4.2 anti-pattern #1.
  *
- * Why it's a no-op now: ADR 0024 §2 INV-INVISIBILITY mandates that brain
- * lifecycle events (create / update / merge / archive / supersede / delete)
- * stay completely silent by default — vault_release is the ONLY exception
- * (§2 vault carve-out). A footer slot persistently reading
- * "📝 sediment / ✅ sediment: 3 created" is the status-bar equivalent of
- * the "I learned X" popup explicitly listed as §4.2 anti-pattern #1. Users
- * should never feel they are "managing the brain"; the brain learns from
- * natural conversation without surfacing its lifecycle.
+ *   That collapse over-reached: ADR 0024 §4.3 explicitly carves out
+ *   "high-power user diagnostic" surfaces (the author / dogfood debugger
+ *   needs to see what sediment is doing in the background — hard-disabling
+ *   the footer removes that observability without replacement).
  *
- * Why the function still exists (instead of removing all call sites):
- *  - Preserves the 22+ call-site signatures untouched — minimizes diff
- *    and rollback cost.
- *  - sedimentStatusBySession Map is still cleared elsewhere; keeping the
- *    set() here avoids changing Map ownership semantics.
- *  - Future debug builds may want to re-enable status display under an
- *    explicit settings flag (e.g. sediment.devFooterEnabled). That's a
- *    separate decision; for now, no user-facing surface.
+ *   The correct semantic is opt-in:
+ *     - default false — INV-INVISIBILITY satisfied for regular users
+ *     - settings.devFooterEnabled = true — power users opt in
  *
- * Audit trail (where lifecycle events ARE still recorded): audit.jsonl
- * per write + git history per commit. Diagnostic-only surfaces stay in
- * §4.3 "high-power user diagnostic" category, not pushed to the user.
+ *   This commit (post-f3555e8) restores the original write path under
+ *   the settings flag. Both setStatus call and the in-memory Map are
+ *   kept inside the gate so flipping the flag doesn't require restart
+ *   to re-populate state.
+ *
+ * Map invariant: sedimentStatusBySession.set() always runs (even when
+ * devFooterEnabled=false) so agent_start's reset-to-idle gate logic
+ * keeps working consistently. Reads of this Map are NOT user-visible;
+ * only setStatus / _G.__sediment_latestSetStatus are footer surfaces.
  */
 function applySedimentStatus(
-  _setStatus: ((msg?: string) => void) | undefined,
+  setStatus: ((msg?: string) => void) | undefined,
   sessionId: string | undefined,
   state: SedimentStatus,
-  _detail?: string,
+  detail?: string,
 ): void {
-  // Retain the in-memory Map for call-site compatibility (agent_start
-  // reads `sedimentStatusBySession.get(sessionId)` to gate its reset
-  // logic). The Map is intentionally never observed by user-facing code.
+  // Always track in-memory state (call-site compat for agent_start reset).
   if (sessionId) sedimentStatusBySession.set(sessionId, state);
-  // Intentionally do NOT call setStatus / _G.__sediment_latestSetStatus.
-  // No footer surface for sediment lifecycle (ADR 0024 §2).
+
+  // Opt-in footer surface (ADR 0024 §4.3 power-user diagnostic).
+  // resolveSedimentSettings is cheap (file read + parse) but called per
+  // status update, which is per-agent_end + drain ticks. If this turns
+  // into a hotspot, hoist the check to a module-level cached flag with
+  // a session_start reload — not needed at current call frequency.
+  if (!resolveSedimentSettings().devFooterEnabled) return;
+
+  const msg = renderSedimentStatus(state, detail);
+  if (setStatus) {
+    try {
+      setStatus(msg);
+    } catch {
+      /* stale ctx late fire is best-effort; fall through to globalThis */
+    }
+  }
+  // Fallback via globalThis: bg work from a PREVIOUS session (after
+  // /new) has a stale captured setStatus. globalThis survives pi's
+  // extension-module teardown/reload, so the current session's footer
+  // gets updated even when the calling module instance is dead.
+  if (_G.__sediment_latestSetStatus) {
+    try { _G.__sediment_latestSetStatus(msg); } catch { /* best-effort */ }
+  }
 }
 
 /**
- * No-op since 2026-05-24 (ADR 0024 INV-INVISIBILITY).
+ * Transition footer to idle IFF no bg work is inflight AND the bg
+ * work that just settled belongs to a DIFFERENT session than the
+ * current foreground. Safe to call from fire-and-forget finally blocks.
  *
- * Originally flipped the footer back to idle on cross-session bg
- * completion (post-/new). Since sediment no longer occupies a footer
- * slot, there is nothing to flip. Kept as a no-op so call sites in
- * fire-and-forget finally blocks remain untouched.
+ * Same opt-in semantics as applySedimentStatus: only runs when
+ * settings.devFooterEnabled = true.
  */
-function maybeSetIdleIfNoInflight(_bgSessionId: string | undefined): void {
-  // Intentionally empty. See applySedimentStatus for full rationale.
+function maybeSetIdleIfNoInflight(bgSessionId: string | undefined): void {
+  if (!resolveSedimentSettings().devFooterEnabled) return;
+  if ((_G.__sediment_inflightCount ?? 0) > 0) return;
+  if (!_G.__sediment_latestSetStatus) return;
+  // Same-session bg completion: keep the completed/failed indicator
+  // visible. agent_start on the next prompt will reset to idle.
+  // (Undefined bg/foreground sessionId falls through to the cross-
+  // session path — better to risk one extra idle flip than to leave a
+  // stuck 'prev session' display when sessionId tracking is missing.)
+  if (bgSessionId && _G.__sediment_currentSessionId === bgSessionId) return;
+  try {
+    _G.__sediment_latestSetStatus(renderSedimentStatus("idle"));
+  } catch { /* best-effort */ }
 }
 
 /**
