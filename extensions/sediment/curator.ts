@@ -496,7 +496,22 @@ function buildMultiViewAudit(
   return out;
 }
 
-function relevantEntriesForCurator(entries: MemoryEntry[]): MemoryEntry[] {
+/**
+ * Filter loaded MemoryEntry list down to the subset that the curator
+ * (and any A'-layer replay) should consider as neighbor context.
+ *
+ * Currently retained scopes: "project" and "world". Workflow-lane
+ * entries are intentionally NOT filtered out here because reviewer
+ * needs to see them (with READ-ONLY marker injected later via
+ * `isWorkflowNeighborEntry`); the parser does not give them their
+ * own scope, so they ride along with project/world here.
+ *
+ * Exported (batch 3c-i.5 review N3) so multiview-staging-replay's
+ * loadNeighborsBySlug callback can reproduce the same context as
+ * the original multi-view trigger — without duplicating the filter
+ * logic in two places, which would silently drift over time.
+ */
+export function relevantEntriesForCurator(entries: MemoryEntry[]): MemoryEntry[] {
   // Include both project and world entries so the curator can:
   //   1. dedupe world candidates against existing world maxims
   //   2. run full lifecycle ops (update/merge/archive/supersede/delete) on world entries

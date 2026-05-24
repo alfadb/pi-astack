@@ -180,21 +180,18 @@ function draftFromSnapshot(
   finalDecision?: CuratorDecision,
 ): ProjectEntryDraft {
   const snap = entry.candidate_snapshot;
-  // Try to recover derivesFrom from a few possible homes:
-  //   - decision.derives_from (CuratorDecision.create / .merge carry it)
-  //   - decision.payload?.derives_from (legacy nested shape)
-  // Both are runtime-loose checks because CuratorDecision is a
-  // discriminated union and not every variant has the field.
+  // Recover derivesFrom from decision.derives_from when present.
+  // Per curator.ts CuratorDecision type, only the `create` variant
+  // carries `derives_from: string[]` at the top level — no nested
+  // `payload` shape exists in the discriminated union. The runtime
+  // narrow uses Array.isArray + every-typeof so type-checking with
+  // `unknown` is safe.
   let derivesFrom: string[] | undefined;
   if (finalDecision && typeof finalDecision === "object") {
-    const decision = finalDecision as { derives_from?: unknown; payload?: { derives_from?: unknown } };
-    const candidate = Array.isArray(decision.derives_from)
-      ? decision.derives_from
-      : Array.isArray(decision.payload?.derives_from)
-        ? decision.payload?.derives_from
-        : undefined;
-    if (candidate && candidate.every((s) => typeof s === "string")) {
-      derivesFrom = candidate as string[];
+    const decision = finalDecision as { derives_from?: unknown };
+    if (Array.isArray(decision.derives_from)
+        && decision.derives_from.every((s) => typeof s === "string")) {
+      derivesFrom = decision.derives_from as string[];
     }
   }
   return {
@@ -395,7 +392,7 @@ async function processOneEntry(
   if (!mvResult.triggered) {
     deleteMultiviewPending(entry.slug);
     audit.outcome = "succeeded";
-    audit.new_decision = { op: "skip", reason: "replay_no_longer_triggers_multiview", rationale: `Replay's shouldTriggerMultiView returned false (likely neighbor/candidate state changed since original staging). Candidate dropped without brain write to preserve A' constraint.` };
+    audit.new_decision = { op: "skip", reason: "multiview_trigger_disappeared_on_replay", rationale: `Replay's shouldTriggerMultiView returned false (likely neighbor/candidate state changed since original staging). Candidate dropped without brain write to preserve A' constraint.` };
     audit.detail = `replay no longer triggers multi-view (A' guard); original trigger_reason=${entry.trigger_reason}; staging removed, no brain write.${vanishedDetail()}`;
     audit.durationMs = Date.now() - entryStart;
     result.succeeded++;
