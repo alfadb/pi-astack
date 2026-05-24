@@ -9,6 +9,7 @@ import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import type { DeleteMode, ProjectEntryDraft, ProjectEntryUpdateDraft } from "./writer";
 import type { CorrectionSignal } from "./correction-pipeline";
+import { runMultiView, type MultiViewResult } from "./multi-view";
 
 // ── Curator metrics (mirrors extractor-metrics.jsonl pattern) ─────────────
 // User-global cross-project sidecar (ADR 0025 §4.2.4): lives under
@@ -51,6 +52,41 @@ export interface CuratorAudit {
   neighbors: Array<{ slug: string; score?: number; rank_reason?: string }>;
   stage_ms: { search: number; decide: number; total: number };
   error?: string;
+  /** ADR 0025 P0.5: multi-view verification result, present only when
+   *  the proposer's decision triggered review (high-value ops). When
+   *  absent, the proposer's decision was treated as authoritative.
+   *  When present + triggered=true + final_decision differs from
+   *  proposer decision: the writer executed the reviewer's verdict
+   *  (confirm_pass1 or defer→skip), and audit readers can compare
+   *  the original `proposer_decision` field against `decision` to
+   *  see what was overridden. */
+  multi_view?: {
+    triggered: boolean;
+    trigger_reason?: string;
+    proposer_decision?: CuratorDecision;
+    pass1?: {
+      model: string;
+      op: string;
+      scope?: string;
+      slug_target?: string | null;
+      confidence?: number;
+      key_evidence_quote?: string;
+      strongest_objection_to_your_own_op?: string;
+      reasoning?: string;
+      durationMs: number;
+    };
+    pass2?: {
+      model: string;
+      verdict: "confirm_proposer" | "confirm_pass1" | "defer";
+      rationale?: string;
+      anchor_bias_self_check?: string;
+      devils_advocate_objection?: string;
+      missed_evidence_quote?: string | null;
+      durationMs: number;
+    };
+    error?: string;
+    durationMs: number;
+  };
 }
 
 export interface CuratorOutcome {
@@ -439,6 +475,53 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
   throw new CuratorRejectError("malformed_curator_op", `unsupported curator op: ${op || "<missing>"}`);
 }
 
+/** Project the runMultiView result onto the CuratorAudit.multi_view
+ *  shape. Drops the raw model text fields (preserved in the
+ *  curator-metrics sidecar, not the main audit row) and the
+ *  synthesized final_decision (the outer audit already records that
+ *  as `decision`). Keeps proposer_decision when triggered so audit
+ *  readers can compare proposer-vs-final without joining tables. */
+function buildMultiViewAudit(
+  mv: MultiViewResult,
+  proposerDecision: CuratorDecision,
+): CuratorAudit["multi_view"] {
+  if (!mv.triggered) {
+    return { triggered: false, durationMs: mv.durationMs };
+  }
+  const out: NonNullable<CuratorAudit["multi_view"]> = {
+    triggered: true,
+    trigger_reason: mv.trigger_reason,
+    proposer_decision: proposerDecision,
+    durationMs: mv.durationMs,
+  };
+  if (mv.error) out.error = mv.error;
+  if (mv.pass1) {
+    out.pass1 = {
+      model: mv.pass1.model,
+      op: mv.pass1.op,
+      scope: mv.pass1.scope,
+      slug_target: mv.pass1.slug_target,
+      confidence: mv.pass1.confidence,
+      key_evidence_quote: mv.pass1.key_evidence_quote,
+      strongest_objection_to_your_own_op: mv.pass1.strongest_objection_to_your_own_op,
+      reasoning: mv.pass1.reasoning,
+      durationMs: mv.pass1.durationMs,
+    };
+  }
+  if (mv.pass2) {
+    out.pass2 = {
+      model: mv.pass2.model,
+      verdict: mv.pass2.verdict,
+      rationale: mv.pass2.rationale,
+      anchor_bias_self_check: mv.pass2.anchor_bias_self_check,
+      devils_advocate_objection: mv.pass2.devils_advocate_objection,
+      missed_evidence_quote: mv.pass2.missed_evidence_quote,
+      durationMs: mv.pass2.durationMs,
+    };
+  }
+  return out;
+}
+
 function relevantEntriesForCurator(entries: MemoryEntry[]): MemoryEntry[] {
   // Include both project and world entries so the curator can:
   //   1. dedupe world candidates against existing world maxims
@@ -775,18 +858,45 @@ export async function curateProjectDraft(
   }
 
   const decideStart = Date.now();
+  let proposerRawText = "";
   try {
-    const raw = await callCuratorModel(
+    proposerRawText = await callCuratorModel(
       deps.sedimentSettings,
       deps.modelRegistry,
       makeCuratorPrompt(safeDraft, neighbors, deps.correctionSignal),
       deps.signal,
     );
-    const decision = sanitizeDecisionStrings(parseDecision(raw, new Map(neighbors.map((entry) => [entry.slug, neighborLaneFor(entry)]))));
+    const proposerDecision = sanitizeDecisionStrings(parseDecision(proposerRawText, new Map(neighbors.map((entry) => [entry.slug, neighborLaneFor(entry)]))));
     const decideMs = Date.now() - decideStart;
+
+    // ADR 0025 P0.5 multi-view verification. Runs ONLY for high-value
+    // ops (see shouldTriggerMultiView). For low-value ops triggered=false
+    // and proposer decision is used as-is. Two separate API calls to the
+    // reviewer model (different family from curator) — Pass 1 blind, Pass
+    // 2 reveal. On any reviewer error / unparseable output: fall back to
+    // proposer decision (audit-flagged) — multi-view is a safety net, not
+    // a blocking gate (ADR 0024 §3 AI-Native principle: prompt-engineered
+    // safety, not mechanical block).
+    const mvResult = await runMultiView({
+      proposerDecision,
+      proposerRawText,
+      candidate: safeDraft,
+      neighbors,
+      correctionSignal: deps.correctionSignal ?? null,
+      settings: deps.sedimentSettings,
+      modelRegistry: deps.modelRegistry,
+      signal: deps.signal,
+    });
+    const decision = sanitizeDecisionStrings(mvResult.final_decision);
+
     return {
       decision,
-      audit: { decision, neighbors: neighborAudit, stage_ms: { search: searchMs, decide: decideMs, total: Date.now() - totalStart } },
+      audit: {
+        decision,
+        neighbors: neighborAudit,
+        stage_ms: { search: searchMs, decide: decideMs, total: Date.now() - totalStart },
+        multi_view: buildMultiViewAudit(mvResult, proposerDecision),
+      },
     };
   } catch (e: unknown) {
     const error = sanitizePromptText(e instanceof Error ? e.message : String(e));

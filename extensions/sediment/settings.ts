@@ -173,15 +173,23 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   promptVersion: {
     activeCorrectionClassifier: "v1",
     reasoningNormalizationPreamble: "v1",
-    multiViewPass1: "v0",
-    multiViewPass2: "v0",
+    multiViewPass1: "v1",
+    multiViewPass2: "v1",
     outcomeSelfReport: "v0",
     aggregator: "v0",
     archiveReactivationReviewer: "v0",
   },
   multiView: {
+    // P0.5 default reviewer list: cross-family from default curator
+    // (deepseek). Anthropic first (different RLHF training direction),
+    // OpenAI as fallback. Empty fallbackProviders[] leaves room for
+    // site-specific overrides via pi-astack-settings.json without
+    // losing the default primary reviewer pair.
     proposerProviders: [],
-    reviewerProviders: [],
+    reviewerProviders: [
+      "anthropic/claude-sonnet-4-6",
+      "openai/gpt-5.4-mini",
+    ],
     fallbackProviders: [],
     costBudgetPerOpUsd: 0.05,
   },
@@ -203,9 +211,9 @@ export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"
   reasoningNormalizationPreamble:
     "v1: fixed 5-stage reasoning surface (quote → claim → alternative → uncertainty → resolving evidence) shared across classifier + multi-view pass-1/2 so cross-prompt comparison works.",
   multiViewPass1:
-    "v0 placeholder — multi-view verification (ADR §4.4) not yet implemented; no real prompt exists.",
+    "v1: Blind reviewer pass. Independent op recommendation from a DIFFERENT-family model than the proposer (default reviewer = anthropic/claude-sonnet-4-6; proposer = deepseek). Outputs op + scope + slug_target + confidence + key_evidence_quote + strongest_objection_to_your_own_op + reasoning (≤200 words). Prepended with reasoning-normalization-preamble v1 so Pass 2 can compare surfaces apples-to-apples. Triggered for high-value ops only: create(conf≥8 or scope=world) / archive(high-conf neighbor) / supersede / merge / hard-delete / durable-correction(conf≥8).",
   multiViewPass2:
-    "v0 placeholder — multi-view verification (ADR §4.4) not yet implemented; no real prompt exists.",
+    "v1: Reveal reviewer pass. SAME reviewer model as Pass 1 (different API call). Sees its own Pass 1 + proposer decision + proposer raw reasoning. Emits verdict={confirm_proposer, confirm_pass1, defer} + anchor_bias_self_check + devils_advocate_objection (virtual third-reviewer layer, no extra API call). Defer → caller converts proposer decision to op=skip(multiview_deferred).",
   outcomeSelfReport:
     "v0: memory-footnote protocol injected via memory extension's before_agent_start hook (extensions/memory/index.ts). Not a sediment-owned prompt file; this version tag tracks the protocol-level contract (entry/used/counterfactual fields, 3-option taxonomy).",
   aggregator:
