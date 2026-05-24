@@ -113,13 +113,37 @@ async function callSearchModel(
     throw new Error(`memory.search model auth unavailable for ${modelRef}: ${auth.error || "missing api key"}`);
   }
 
+  // pi-ai's SimpleStreamOptions.reasoning is typed as ThinkingLevel
+  // ("minimal" | "low" | "medium" | "high" | "xhigh") — it does NOT
+  // include "off". memory.settings.ThinkingLevel does include "off".
+  //
+  // 2026-05-24 fix: passing reasoning="off" through SimpleStreamOptions
+  // is silently misinterpreted by some providers:
+  //   - Google: clampThinkingLevel returns "off", then
+  //     `effort = (clamped === "off" ? "high" : clamped)` — turns off
+  //     into HIGH thinking. Spends real tokens on hidden reasoning when
+  //     the caller explicitly asked for no thinking.
+  //   - Anthropic: `!options?.reasoning` is false for "off" (truthy
+  //     string), so it bypasses the `thinkingEnabled: false` gate and
+  //     enters the adaptive-thinking path.
+  //   - OpenAI (all three protocols): correctly maps "off" → undefined,
+  //     no harm.
+  //
+  // The semantic intent of memory's "off" is "don't enable thinking".
+  // pi-ai expresses that by NOT setting reasoning at all (the guard
+  // `if (!options?.reasoning)` then takes the thinking-disabled path on
+  // every provider). So translate "off" to omission here.
+  type PiAiThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
   const piAi: {
     streamSimple(
       model: unknown,
       opts: { messages: unknown[] },
-      config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number; reasoning?: ThinkingLevel },
+      config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number; reasoning?: PiAiThinkingLevel },
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai");
+
+  const reasoningField: { reasoning?: PiAiThinkingLevel } =
+    thinking === "off" ? {} : { reasoning: thinking };
 
   const stream = piAi.streamSimple(
     model,
@@ -135,7 +159,7 @@ async function callSearchModel(
       signal,
       timeoutMs,
       maxRetries: STAGE_MAX_RETRIES,
-      reasoning: thinking,
+      ...reasoningField,
     },
   );
 

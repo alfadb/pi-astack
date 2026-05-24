@@ -17,6 +17,21 @@
 import * as fs from "node:fs";
 import { execFileSync as nodeExecFileSync } from "node:child_process";
 import * as path from "node:path";
+import * as os from "node:os";  // ← 2026-05-24 fix: missing in commit 55933dc;
+                                  //   resolveUserGlobalAbrainHome() +
+                                  //   ensureUserGlobalSidecarMigrated()
+                                  //   call os.homedir(). Without this import
+                                  //   both functions threw `ReferenceError:
+                                  //   os is not defined` and got swallowed by
+                                  //   the try/catch around every caller —
+                                  //   silently breaking outcome-ledger.jsonl
+                                  //   / curator-metrics.jsonl / extractor-
+                                  //   metrics.jsonl writes for ~9 hours
+                                  //   (verified: last successful ledger row
+                                  //   was 03:32:01 UTC, 40s after commit;
+                                  //   no writes after that despite ~9h of
+                                  //   active sediment auto-write).
+                                  //   See: extensions/_shared/runtime.ts:350-373.
 
 /**
  * Format a Date as ISO 8601 with the LOCAL timezone offset, e.g.:
@@ -822,12 +837,18 @@ export async function bindAbrainProject(opts: {
 function findGitRoot(cwd: string, opts: ResolveActiveProjectOptions): string | undefined {
   const exec = opts.execFileSync ?? nodeExecFileSync;
   try {
-    return path.resolve(exec("git", ["rev-parse", "--show-toplevel"], {
+    // execFileSync with `encoding: "utf8"` returns string at runtime, but
+    // Node's TypeScript overloads widen the return to `string | Buffer`
+    // because the overload narrowing only kicks in for literal options
+    // objects in some compiler versions. Cast to string keeps .trim()
+    // valid without changing runtime behavior.
+    const out = exec("git", ["rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 2000,
-    }).trim());
+    }) as string;
+    return path.resolve(out.trim());
   } catch {
     return undefined;
   }

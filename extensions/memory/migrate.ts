@@ -105,7 +105,9 @@ export interface MigrationDryRunOptions {
    *  `<unresolved>` markers in target_path. */
   projectId?: string;
   /** Defaults to inferring crossProject from frontmatter `cross_project: true`. */
-  isCrossProject?: (relPath: string, frontmatter: Record<string, unknown>) => boolean;
+  // 2026-05-24 fix: align with scalarString(value: Jsonish | undefined)
+  // expectation — frontmatter is structurally Jsonish, not arbitrary unknown.
+  isCrossProject?: (relPath: string, frontmatter: Record<string, import("./types").Jsonish>) => boolean;
 }
 
 /** Round 7 P0-C: target_path now reflects where `--go` will actually move
@@ -121,7 +123,8 @@ function legacyTargetPath(
   slug: string,
   kind: string,
   status: string,
-  frontmatter: Record<string, unknown>,
+  // 2026-05-24 fix: align with scalarString(value: Jsonish | undefined).
+  frontmatter: Record<string, import("./types").Jsonish>,
   opts: MigrationDryRunOptions,
 ): string {
   const { area, shortTerm } = inferLegacyArea(relPath);

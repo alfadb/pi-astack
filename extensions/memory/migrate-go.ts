@@ -539,7 +539,10 @@ async function readFsTimes(fileAbs: string): Promise<{ birthtime: string | null;
  */
 async function resolveCreated(
   fileAbs: string,
-  frontmatter: Record<string, unknown>,
+  // 2026-05-24 fix: align with scalarString(value: Jsonish | undefined).
+  // resolveUpdated below tightened the same way; both feed the same
+  // parser-produced frontmatter shape (Record<string, Jsonish>).
+  frontmatter: Record<string, import("./types").Jsonish>,
   gitTimes: GitAuthorTimes,
   migrationTimestamp: string,
 ): Promise<string> {
@@ -570,7 +573,8 @@ async function resolveCreated(
  */
 async function resolveUpdated(
   fileAbs: string,
-  frontmatter: Record<string, unknown>,
+  // 2026-05-24 fix: same as resolveCreated above — align with scalarString.
+  frontmatter: Record<string, import("./types").Jsonish>,
   gitTimes: GitAuthorTimes,
   migrationTimestamp: string,
   sourceDirty: boolean,

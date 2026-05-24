@@ -56,7 +56,7 @@ import { resolveActiveProject } from "../_shared/runtime";
 // ─────────────────────────────────────────────────────────────────────────
 function wrapToolResult(
   payload: unknown,
-): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+): { content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean } {
   const isError =
     !!payload &&
     typeof payload === "object" &&
@@ -74,10 +74,27 @@ function wrapToolResult(
     }
   }
 
+  // 2026-05-24 fix: pi SDK 0.75 ToolDefinition tightened AgentToolResult
+  // shape: `details: T` is now required (was optional). Without this, the
+  // ToolDefinition.execute return type no longer assigns. Runtime stayed
+  // compatible because pi-agent-core treats missing details as undefined,
+  // but the typecheck regression was masked by smoke tests. Pass payload
+  // itself as details so UI/log consumers retain the structured object
+  // alongside the text serialization.
   return {
     content: [{ type: "text" as const, text }],
+    details: payload,
     ...(isError ? { isError: true } : {}),
   };
+}
+
+// 2026-05-24 fix: pi SDK 0.75 ToolDefinition.prepareArguments is typed
+// (args: unknown) => Static<TParams>. Local closures previously declared
+// (args: Record<string, unknown>) which is more restrictive (contravariant
+// position) and so doesn't assign. This helper narrows safely and lets the
+// tool registrations below keep their internal `args.foo` access style.
+function asRecord(args: unknown): Record<string, unknown> {
+  return (args && typeof args === "object") ? (args as Record<string, unknown>) : {};
 }
 
 function registerMemoryCommand(pi: ExtensionAPI) {
@@ -320,7 +337,8 @@ export default function (pi: ExtensionAPI) {
         description: "Optional filters: { kinds?: string[], status?: string|string[], limit?: number }",
       })),
     }),
-    prepareArguments(args: Record<string, unknown>) {
+    prepareArguments(rawArgs: unknown) {
+      const args = asRecord(rawArgs);
       return {
         query: String(args.query ?? ""),
         filters: normalizeSearchFilters(args.filters ?? args),
@@ -359,7 +377,8 @@ export default function (pi: ExtensionAPI) {
         description: "Optional: { include_related?: boolean }",
       })),
     }),
-    prepareArguments(args: Record<string, unknown>) {
+    prepareArguments(rawArgs: unknown) {
+      const args = asRecord(rawArgs);
       const options = (parseMaybeJson(args.options) as Record<string, unknown>) ?? {};
       const includeRelated = asBoolean(
         options.include_related ?? options.includeRelated ?? args.include_related ?? args.includeRelated,
@@ -403,7 +422,8 @@ export default function (pi: ExtensionAPI) {
         description: "Optional filters: { kinds?: string[], status?: string|string[], limit?: number, cursor?: string }",
       })),
     }),
-    prepareArguments(args: Record<string, unknown>) {
+    prepareArguments(rawArgs: unknown) {
+      const args = asRecord(rawArgs);
       return { filters: normalizeListFilters(args.filters ?? args) };
     },
     async execute(_id: string, params: { filters?: ListFilters }, signal: AbortSignal, _onUpdate: unknown, ctx: { cwd?: string }) {
@@ -430,7 +450,8 @@ export default function (pi: ExtensionAPI) {
         description: "Optional: { hop?: number, max?: number }",
       })),
     }),
-    prepareArguments(args: Record<string, unknown>) {
+    prepareArguments(rawArgs: unknown) {
+      const args = asRecord(rawArgs);
       const options = (parseMaybeJson(args.options) as Record<string, unknown>) ?? {};
       return {
         slug: String(args.slug ?? args.id ?? ""),
@@ -489,7 +510,8 @@ export default function (pi: ExtensionAPI) {
       options: Type.Optional(Type.Array(Type.String(), { description: "Choices on the table, e.g. ['pnpm', 'yarn']. Omit for open-ended decisions." })),
       constraints: Type.Optional(Type.String({ description: "Constraints or requirements, e.g. 'must work with monorepo, team standardized on yarn'." })),
     }),
-    prepareArguments(args: Record<string, unknown>) {
+    prepareArguments(rawArgs: unknown) {
+      const args = asRecord(rawArgs);
       return {
         context: String(args.context ?? ""),
         options: Array.isArray(args.options) ? args.options.map(String) : [],

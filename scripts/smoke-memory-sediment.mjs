@@ -619,7 +619,22 @@ async function main() {
     // "high" to "off" — rerank is reading comprehension + relevance judgment,
     // not a reasoning task. settings.ts default was updated in commit 4b4432f
     // but this smoke assertion was missed; now restored.
-    assert(piAiStub.__configs[0]?.reasoning === "off" && piAiStub.__configs[1]?.reasoning === "off", `memory_search thinking config mismatch (expected both stages off per ADR 0015 D3): ${JSON.stringify(piAiStub.__configs)}`);
+    //
+    // 2026-05-24 update: when memory.search.stage*Thinking is "off", the
+    // memory extension now OMITS the reasoning field entirely instead of
+    // passing reasoning: "off" through to pi-ai. Rationale: pi-ai's
+    // streamSimpleGoogle clamps "off" then forces effort to "high"
+    // (silently turning thinking ON), and streamSimpleAnthropic treats
+    // any truthy reasoning string as "thinking enabled" — only the
+    // omitted-field path is uniformly interpreted as thinking disabled
+    // across all providers. See extensions/memory/llm-search.ts for the
+    // full rationale. The smoke assertion correspondingly checks that the
+    // reasoning field is ABSENT, which is the semantic equivalent of
+    // "thinking off" for the pi-ai SimpleStreamOptions surface.
+    assert(
+      piAiStub.__configs[0]?.reasoning === undefined && piAiStub.__configs[1]?.reasoning === undefined,
+      `memory_search thinking config mismatch (expected both stages to OMIT reasoning field when settings.stage*Thinking is "off" per 2026-05-24 fix): ${JSON.stringify(piAiStub.__configs)}`,
+    );
 
     // Metrics logs must store the sanitized query, not raw credential-like
     // text pasted into memory_search.

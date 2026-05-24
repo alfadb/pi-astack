@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { MemorySettings } from "./settings";
-import type { MemoryEntry, Scope } from "./types";
+import type { MemoryEntry, RelationScope, Scope } from "./types";
 import { parseEntry, scanStore } from "./parser";
 import { prettyPath } from "./utils";
 import { formatLocalIsoTimestamp } from "../_shared/runtime";
@@ -24,6 +24,17 @@ interface GraphEdge {
   to: string;
   type: string;
   source: "frontmatter" | "body_wikilink";
+  /** Explicit scope from a prefixed wikilink / URL (parseWikilinkTarget).
+   *  Mirrors RelationEdge.scope; undefined = implicit bare wikilink.
+   *  2026-05-24 fix: previously dropped on edge creation — every
+   *  edge.scope === "world" | "workflow" | "project" | "unknown"
+   *  branch in cross-scope routing below evaluated false, so explicit
+   *  prefixed wikilinks were silently treated as implicit fallthrough
+   *  and `cross_scope_links` was always empty. */
+  scope?: RelationScope;
+  /** Extra qualifier: project id when scope==="project"; raw prefix when
+   *  scope==="unknown". Mirrors RelationEdge.qualifier. */
+  qualifier?: string;
 }
 
 export interface GraphSnapshot {
@@ -256,12 +267,18 @@ export async function buildGraphSnapshot(
 
   for (const entry of entries) {
     for (const relation of entry.relations) {
-      edges.push({
+      const edge: GraphEdge = {
         from: entry.slug,
         to: relation.to,
         type: relation.type,
         source: relation.source,
-      });
+      };
+      // 2026-05-24 fix: forward scope/qualifier from RelationEdge so
+      // cross-scope routing (edges with explicit world: / workflow: /
+      // project: / typed-prefix) actually works downstream.
+      if (relation.scope) edge.scope = relation.scope;
+      if (relation.qualifier) edge.qualifier = relation.qualifier;
+      edges.push(edge);
     }
   }
 
