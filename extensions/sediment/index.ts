@@ -993,7 +993,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           checkpoint_advanced: false,
           stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
         });
-        applySedimentStatus(setStatus, sessionId, "completed", `project_not_bound:${binding.reason}`);
+        // Strict binding failure means sediment did NOT observe/write the
+        // project. Surface it as a warning/error state, not as ✅ completed;
+        // INV-INVISIBILITY means no user management burden, not misleading
+        // health reporting.
+        applySedimentStatus(setStatus, sessionId, "failed", `project_not_bound:${binding.reason}`);
         return;
       }
       // From this point on, all checkpoint/audit/writer paths must use the

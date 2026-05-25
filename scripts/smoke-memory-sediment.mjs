@@ -595,6 +595,7 @@ async function main() {
         });
         const boundSessionFile = path.join(hookRoot, "sessions", "bound.jsonl");
         writeFile(boundSessionFile, "{}\n");
+        const boundStatuses = [];
         await agentEnd(
           { messages: [{ role: "assistant", stopReason: "aborted", errorMessage: "user aborted" }] },
           {
@@ -604,7 +605,7 @@ async function main() {
               getSessionId: () => "hook-bound-session",
               getSessionFile: () => boundSessionFile,
             },
-            ui: { notify() {}, setStatus() {} },
+            ui: { notify() {}, setStatus(_key, msg) { boundStatuses.push(msg); } },
           },
         );
         const boundAudit = path.join(boundRoot, ".pi-astack", "sediment", "audit.jsonl");
@@ -623,6 +624,7 @@ async function main() {
         execFileSync("git", ["-C", unboundRoot, "init", "-q"]);
         const unboundSessionFile = path.join(hookRoot, "sessions", "unbound.jsonl");
         writeFile(unboundSessionFile, "{}\n");
+        const unboundStatuses = [];
         await agentEnd(
           { messages: [{ role: "assistant", stopReason: "stop" }] },
           {
@@ -632,7 +634,7 @@ async function main() {
               getSessionId: () => "hook-unbound-session",
               getSessionFile: () => unboundSessionFile,
             },
-            ui: { notify() {}, setStatus() {} },
+            ui: { notify() {}, setStatus(_key, msg) { unboundStatuses.push(msg); } },
           },
         );
         const unboundAudit = path.join(unboundRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
@@ -641,6 +643,8 @@ async function main() {
         const unboundRow = unboundRows.find((r) => r.reason === "project_not_bound");
         assert(unboundRow, `unbound project_not_bound row missing: ${JSON.stringify(unboundRows)}`);
         assert(unboundRow.binding_status === "manifest_missing", `unbound binding_status mismatch: ${unboundRow.binding_status}`);
+        assert(unboundStatuses.some((msg) => /^⚠️\s+sediment: project_not_bound:manifest_missing/.test(String(msg))), `unbound project_not_bound footer must be warning/failed, not completed: ${JSON.stringify(unboundStatuses)}`);
+        assert(!unboundStatuses.some((msg) => /^✅\s+sediment: project_not_bound/.test(String(msg))), `unbound project_not_bound footer must not show completed/✅: ${JSON.stringify(unboundStatuses)}`);
         assert(unboundRow.checkpoint_advanced === false, `unbound project_not_bound must not advance checkpoint`);
         assert(!fs.existsSync(path.join(unboundRoot, "subdir", ".pi-astack", "sediment", "checkpoint.json")), `unbound project_not_bound must not create checkpoint`);
 
