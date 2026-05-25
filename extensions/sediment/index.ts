@@ -50,6 +50,7 @@ import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-stag
 import { relevantEntriesForCurator } from "./curator";
 import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
+import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests } from "../_shared/pi-internals";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { sanitizeForMemory } from "./sanitizer";
@@ -1054,6 +1055,45 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           }).catch(() => {});
         }
       }
+
+      // ADR 0025 §4.3 skeptical-historian MVP: schedule deterministic
+      // advisory aggregation over existing sidecars. setImmediate keeps the
+      // sync JSONL scans off the hot agent_end path; last-run gating keeps
+      // the sidecar bounded to a daily cadence. It never prompts the user,
+      // gates writes, or mutates memory entries.
+      const scheduleAggregator = typeof setImmediate === "function"
+        ? setImmediate
+        : (fn: () => void) => setTimeout(fn, 0);
+      scheduleAggregator(() => {
+        void (async () => {
+          try {
+            const summary = runAndWriteSedimentAggregatorIfDue({ projectRoot: cwd, settings, sessionId });
+            if (!summary || summary.advisories.length === 0) return;
+            await appendAudit(cwd, {
+              operation: "aggregator_advisory",
+              lane: "diagnostic",
+              session_id: sessionId,
+              ok: summary.ok,
+              advisory_count: summary.advisories.length,
+              advisories: summary.advisories,
+              staging: summary.staging,
+              outcome: {
+                window_rows: summary.outcome.window_rows,
+                slugs_seen: summary.outcome.slugs_seen,
+                high_unused_count: summary.outcome.high_unused.length,
+                echo_chamber_candidate_count: summary.outcome.echo_chamber_candidates.length,
+              },
+              audit: {
+                recent_rows: summary.audit.recent_rows,
+                error_like_count: summary.audit.error_like_count,
+              },
+              prompt_version: buildPromptVersionAudit("aggregator", settings),
+            });
+          } catch {
+            // Advisory-only; aggregator failures must never affect sediment.
+          }
+        })();
+      });
 
       const tStart = Date.now();
       const checkpoint = await loadSessionCheckpoint(cwd, sessionId);

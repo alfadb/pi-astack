@@ -176,7 +176,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     multiViewPass1: "v1",
     multiViewPass2: "v1",
     outcomeSelfReport: "v0",
-    aggregator: "v0",
+    aggregator: "v0.2",
     archiveReactivationReviewer: "v0",
   },
   multiView: {
@@ -217,7 +217,7 @@ export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"
   outcomeSelfReport:
     "v0: memory-footnote protocol injected via memory extension's before_agent_start hook (extensions/memory/index.ts). Not a sediment-owned prompt file; this version tag tracks the protocol-level contract (entry/used/counterfactual fields, 3-option taxonomy).",
   aggregator:
-    "v0.1: deterministic advisory Classifier Health Meta-Check over recent correction_classifier audit traces (quote / alternative / concrete self-critique rates). Full cross-session aggregator prompt, trend detection, contradiction handling, and echo-chamber breaker remain P1+.",
+    "v0.2: deterministic skeptical-historian MVP. agent_end reads audit.jsonl + outcome-ledger.jsonl + staging + memory search metrics + classifier health, emits advisory aggregator-ledger.jsonl and aggregator_advisory audit rows. No memory mutation, no user prompt, no write gate; prompt-native trend synthesis remains P1+.",
   archiveReactivationReviewer:
     "v0 placeholder — archive-rollback reviewer prompt (ADR §4.6) not yet implemented.",
 };

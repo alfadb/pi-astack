@@ -412,6 +412,74 @@ async function main() {
       assert(missingTrace.advisories.some((item) => item.includes("No classifier reasoning traces")), `missing-trace health should explain parser/schema drift risk: ${JSON.stringify(missingTrace)}`);
     }
 
+    // === sediment aggregator skeptical-historian MVP ==================
+    // ADR 0025 §4.3: deterministic advisory aggregation over audit,
+    // outcome-ledger, staging, search metrics, and classifier health. It
+    // must never gate writes or require user management.
+    {
+      const { runSedimentAggregator, runAndWriteSedimentAggregator, runAndWriteSedimentAggregatorIfDue, aggregatorLedgerPath } = req("./sediment/aggregator.js");
+      const { stagingDir } = req("./sediment/staging-loader.js");
+      const aggRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-aggregator-"));
+      const aggAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-aggregator-abrain-"));
+      const prevAbrainRoot = process.env.ABRAIN_ROOT;
+      try {
+        process.env.ABRAIN_ROOT = aggAbrain;
+        const now = new Date("2026-05-25T12:00:00.000Z");
+        const recent = (daysAgo) => new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000).toISOString();
+        writeFile(path.join(aggRoot, ".pi-astack", "sediment", "audit.jsonl"), [
+          JSON.stringify({ timestamp: recent(1), operation: "correction_classifier", ok: false, reason: "classifier_unparseable", signal: { reasoning_trace: { summary: "Looks good." } } }),
+          JSON.stringify({ timestamp: recent(2), operation: "skip", reason: "llm_extraction_error", error: "provider down" }),
+          "{corrupt audit row",
+        ].join("\n") + "\n");
+        writeFile(path.join(aggRoot, ".pi-astack", "memory", "search-metrics.jsonl"), [
+          JSON.stringify({ ts: recent(1), query: "x", results: 0 }),
+          JSON.stringify({ ts: recent(2), query: "y", results: 2 }),
+        ].join("\n") + "\n");
+        writeFile(path.join(aggAbrain, ".state", "sediment", "outcome-ledger.jsonl"), [
+          JSON.stringify({ ts: recent(1), session_id: "s1", entry_slug: "stale-entry", source: "memory-footnote", used: "retrieved-unused", counterfactual: "not relevant", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(2), session_id: "s2", entry_slug: "stale-entry", source: "memory-footnote", used: "retrieved-unused", counterfactual: "not relevant", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(3), session_id: "s3", entry_slug: "stale-entry", source: "memory-footnote", used: "retrieved-unused", counterfactual: "not relevant", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(4), session_id: "s4", entry_slug: "echo-entry", source: "memory-footnote", used: "decisive", counterfactual: "changed", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(5), session_id: "s5", entry_slug: "echo-entry", source: "memory-footnote", used: "decisive", counterfactual: "changed", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(6), session_id: "s6", entry_slug: "echo-entry", source: "memory-footnote", used: "decisive", counterfactual: "changed", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(7), session_id: "s7", entry_slug: "echo-entry", source: "memory-footnote", used: "decisive", counterfactual: "changed", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(8), session_id: "s8", entry_slug: "echo-entry", source: "memory-footnote", used: "decisive", counterfactual: "changed", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(1), session_id: "other-project", entry_slug: "foreign-entry", source: "memory-footnote", used: "retrieved-unused", counterfactual: "foreign", retrieval_count: 1, project_root: path.join(aggRoot, "other") }),
+        ].join("\n") + "\n");
+        const aggStagingDir = stagingDir();
+        writeFile(path.join(aggStagingDir, "2026-04-01T00-00-00-000Z-provisional-old.json"), JSON.stringify({
+          schema_version: 1,
+          entry: { slug: "provisional-old", status: "provisional", kind: "provisional-correction", created: "2026-04-01T00:00:00.000Z", attribution_pending: true, originating_device: "smoke", hypothesis: "old", source_utterance: [], suggested_resolution_paths: [], _provenance_warning: "test" },
+        }));
+        writeFile(path.join(aggStagingDir, "2026-05-24T00-00-00-000Z-multiview-pending-abc12345.json"), JSON.stringify({
+          schema_version: 1,
+          entry: { slug: "multiview-pending-abc12345", status: "provisional", kind: "multiview-pending", created: recent(1) },
+        }));
+        const summary = runSedimentAggregator({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now, auditRowLimit: 50, searchMetricsRowLimit: 50 });
+        assert(summary.outcome.high_unused.some((x) => x.slug === "stale-entry"), `aggregator should flag high retrieved-unused entries: ${JSON.stringify(summary.outcome)}`);
+        assert(!summary.outcome.high_unused.some((x) => x.slug === "foreign-entry"), `aggregator must not mix outcome rows from another project: ${JSON.stringify(summary.outcome)}`);
+        assert(summary.outcome.echo_chamber_candidates.some((x) => x.slug === "echo-entry" && x.decisive_streak === 5), `aggregator should flag decisive echo streaks: ${JSON.stringify(summary.outcome)}`);
+        assert(summary.audit.error_like_count === 3, `aggregator should count current corrupt/error audit rows once, got: ${JSON.stringify(summary.audit)}`);
+        assert(summary.staging.provisional_stale === 1, `aggregator should count stale provisional staging: ${JSON.stringify(summary.staging)}`);
+        assert(summary.staging.multiview_pending === 1, `aggregator should count multiview pending files: ${JSON.stringify(summary.staging)}`);
+        assert(summary.advisories.some((a) => a.kind === "classifier_health"), `aggregator should include classifier health advisory: ${JSON.stringify(summary.advisories)}`);
+        assert(summary.advisories.some((a) => a.kind === "staging_backlog"), `aggregator should include staging advisory: ${JSON.stringify(summary.advisories)}`);
+        assert(summary.advisories.some((a) => a.kind === "multiview_pending"), `aggregator should include multiview advisory: ${JSON.stringify(summary.advisories)}`);
+        const written = runAndWriteSedimentAggregator({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now, auditRowLimit: 50, searchMetricsRowLimit: 50 });
+        assert(written.advisories.length === summary.advisories.length, "runAndWriteSedimentAggregator should return the same advisory summary shape");
+        const ledgerFile = aggregatorLedgerPath();
+        const ledgerRows = fs.readFileSync(ledgerFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+        const lastLedger = ledgerRows[ledgerRows.length - 1];
+        assert(lastLedger.prompt_version && lastLedger.prompt_version.aggregator, `aggregator ledger row should carry prompt_version: ${JSON.stringify(lastLedger)}`);
+        assert(lastLedger.session_id === "agg-session", `aggregator ledger should preserve session id: ${JSON.stringify(lastLedger)}`);
+        const firstDue = runAndWriteSedimentAggregatorIfDue({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now, minIntervalMs: 60_000, auditRowLimit: 50, searchMetricsRowLimit: 50 });
+        const secondDue = runAndWriteSedimentAggregatorIfDue({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now: new Date(now.getTime() + 1_000), minIntervalMs: 60_000, auditRowLimit: 50, searchMetricsRowLimit: 50 });
+        assert(firstDue && secondDue === null, `aggregator due gate should run once then skip: first=${!!firstDue} second=${JSON.stringify(secondDue)}`);
+      } finally {
+        if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
+      }
+    }
+
     // === correction classifier dispatch safety ========================
     {
       const { _dispatchCorrectionSignalForTests, _resetAutoWriteStateForTests } = req("./sediment/index.js");

@@ -244,7 +244,7 @@
             "multiViewPass1": { "type": "string", "default": "v1" },
             "multiViewPass2": { "type": "string", "default": "v1" },
             "outcomeSelfReport": { "type": "string", "default": "v0" },
-            "aggregator": { "type": "string", "default": "v0", "description": "v0 placeholder: aggregator + Classifier Health Meta-Check not implemented yet." },
+            "aggregator": { "type": "string", "default": "v0.2", "description": "Aggregator prompt/protocol version. Current implementation is v0.2 deterministic advisory: reads audit/outcome/staging/search metrics and writes aggregator-ledger.jsonl; prompt-native trend synthesis remains future work." },
             "archiveReactivationReviewer": { "type": "string", "default": "v0", "description": "v0 placeholder: archive rollback / reactivation reviewer not implemented yet." }
           }
         },

@@ -1,10 +1,12 @@
 # Aggregator + Classifier Health Meta-Check — P0 实施设计 (v2)
 
-**状态**: 设计已固化, 待 coding (估 1-1.5 天)
+**状态**: v0.2 deterministic advisory MVP 已实现（2026-05-25）；本设计里的 LLM 史官 prompt、`/sediment health`、footer health flag、weekly/monthly scheduler 仍是 P1+
 **对应 ADR**: 0024 §5.3 + 0025 §4.3 + §4.5
 **前置 commit**: b25db52 (timeout 20min) / 9b5fd47 (INV-INVISIBILITY 重定义)
 **v2 修订自**: /tmp/aggregator-design-draft.md (v1)
 **Review by**: deepseek-v4-pro (full critique 在本会话上下文)
+
+**2026-05-25 implementation note**: shipped a smaller deterministic MVP in `extensions/sediment/aggregator.ts`: daily due-gated agent_end advisory over project-local audit/search metrics + project-filtered user-global outcome-ledger + staging/multiview counts + classifier health. It writes bounded `aggregator-ledger.jsonl` rows and `aggregator_advisory` audit rows, but performs no memory mutation, no user prompt, and no write gating. This intentionally closes the first read-side feedback loop before adding the prompt-native historian.
 
 ---
 
