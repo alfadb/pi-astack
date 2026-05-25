@@ -1037,7 +1037,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           unhealthyStopReason === "agent_error"
             ? "agent error"
             : "agent aborted";
-        applySedimentStatus(setStatus, sessionId, "completed", detail);
+        // Error/abort means sediment intentionally skipped this turn and
+        // held the checkpoint for retry. Surface as ⚠️, not ✅ completed.
+        applySedimentStatus(setStatus, sessionId, "failed", detail);
         return;
       }
 

@@ -616,6 +616,8 @@ async function main() {
         const boundRow = boundRows.find((r) => r.reason === "agent_aborted");
         assert(boundRow, `bound unhealthy audit row missing: ${JSON.stringify(boundRows)}`);
         assert(boundRow.project_root === path.resolve(boundRoot), `bound audit project_root mismatch: ${boundRow.project_root}`);
+        assert(boundStatuses.some((msg) => /^⚠️\s+sediment: agent aborted/.test(String(msg))), `bound unhealthy stop footer must be warning/failed, not completed: ${JSON.stringify(boundStatuses)}`);
+        assert(!boundStatuses.some((msg) => /^✅\s+sediment: agent aborted/.test(String(msg))), `bound unhealthy stop footer must not show completed/✅: ${JSON.stringify(boundStatuses)}`);
         assert(boundRow.checkpoint_advanced === false, `bound unhealthy stop must not advance checkpoint`);
         assert(!fs.existsSync(path.join(boundRoot, ".pi-astack", "sediment", "checkpoint.json")), `bound unhealthy stop must not create checkpoint`);
 
