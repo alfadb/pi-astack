@@ -21,7 +21,7 @@
  * 设计:
  *   1. 扫 session 目录里所有 .jsonl
  *   2. 对每个 session,跑 collectOutcomes(整个 branch)
- *   3. 跟现有 outcome-ledger.jsonl 的 (session_id, entry_slug, source) 去重
+ *   3. 跟现有 outcome-ledger.jsonl 的 event_id-aware key 去重
  *   4. 只 append 没出现过的 outcome row
  *   5. --dry-run 模式只打印不写
  *
@@ -92,6 +92,50 @@ function extractText(content) {
     .join("");
 }
 
+function firstString(obj, keys) {
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function stableHash(input) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(36);
+}
+
+function toolResultEventId(msg, eventIndex, decisionBriefId) {
+  const explicit = firstString(msg, ["toolCallId", "tool_call_id", "toolResultId", "tool_result_id", "id", "messageId", "message_id"]);
+  if (explicit) return `tool:${explicit}`;
+  if (decisionBriefId) return `decision:${decisionBriefId}`;
+  const toolName = typeof msg.toolName === "string" ? msg.toolName : "unknown";
+  const contentHash = stableHash(extractText(msg.content).slice(0, 4096));
+  // Without a runtime toolCallId, prefer a content-derived fallback over
+  // positional identity. It may undercount two identical tool results in one
+  // session, but it will not overcount after branch index drift.
+  void eventIndex;
+  return `tool:${toolName}:${contentHash}`;
+}
+
+function footnoteOutcomeEventId(entry, eventIndex) {
+  const counterfactualHash = stableHash((entry.counterfactual ?? "").slice(0, 1024));
+  if (entry.decision_brief_id) return `footnote:${entry.entry_slug}:${entry.decision_brief_id}:${entry.used}:${counterfactualHash}`;
+  void eventIndex;
+  return `footnote:${entry.entry_slug}:${entry.used}:${counterfactualHash}`;
+}
+
+function outcomeLedgerDedupKey(row) {
+  if (row.event_id) return `${row.session_id}|${row.entry_slug}|${row.source}|${row.event_id}`;
+  const brief = row.decision_brief_id ? `|${row.decision_brief_id}` : "";
+  if (row.source === "tool-result") return `${row.session_id}|${row.entry_slug}|tool-result${brief}`;
+  return `${row.session_id}|${row.entry_slug}|memory-footnote|${row.used ?? ""}|${stableHash(row.counterfactual ?? "")}${brief}`;
+}
+
 function parseMemoryFootnote(text) {
   const entries = [];
   const dropped = [];
@@ -122,7 +166,13 @@ function parseMemoryFootnote(text) {
     if (!["decisive", "confirmatory", "retrieved-unused"].includes(usedRaw)) {
       dropped.push({ reason: "invalid_used", raw_slug: slug, raw_used: usedRaw, raw_block_preview: blockPreview }); continue;
     }
-    entries.push({ entry_slug: slug, used: usedRaw, counterfactual: entry.counterfactual ?? "" });
+    const decisionBriefId = (entry.decision_brief_id ?? entry.decisionBriefId ?? "").trim();
+    entries.push({
+      entry_slug: slug,
+      used: usedRaw,
+      counterfactual: entry.counterfactual ?? "",
+      ...(decisionBriefId ? { decision_brief_id: decisionBriefId } : {}),
+    });
   }
   return { entries, dropped };
 }
@@ -131,9 +181,11 @@ function collectOutcomes(branch, sessionId, ts) {
   const rows = [];
   const dropped = [];
   const seen = new Map();
+  let messageIndex = 0;
   for (const entry of branch) {
     if (!entry || typeof entry !== "object") continue;
     if (entry.type !== "message" || !entry.message) continue;
+    const eventIndex = messageIndex++;
     const msg = entry.message;
     const role = msg.role ?? "";
     const text = extractText(msg.content);
@@ -141,37 +193,53 @@ function collectOutcomes(branch, sessionId, ts) {
       const toolName = msg.toolName ?? "";
       if (!["memory_search", "memory_get", "memory_decide"].includes(toolName)) continue;
       let results = [];
+      let decisionBriefId;
+      const absorbParsedToolResult = (parsed) => {
+        if (Array.isArray(parsed)) { results.push(...parsed); return; }
+        if (!parsed || typeof parsed !== "object") return;
+        if (typeof parsed.decisionBriefId === "string") decisionBriefId = parsed.decisionBriefId;
+        if (typeof parsed.decision_brief_id === "string") decisionBriefId = parsed.decision_brief_id;
+        if (Array.isArray(parsed.cards)) results.push(...parsed.cards);
+        if (Array.isArray(parsed.results)) results.push(...parsed.results);
+        if (Array.isArray(parsed.entrySlugs)) results.push(...parsed.entrySlugs.map((slug) => ({ slug })));
+        if (Array.isArray(parsed.entry_slugs)) results.push(...parsed.entry_slugs.map((slug) => ({ slug })));
+        // Backward compatibility with older memory_decide payloads that
+        // exposed `_meta.results`; current payloads only need entrySlugs.
+        if (parsed._meta && typeof parsed._meta === "object") absorbParsedToolResult(parsed._meta);
+        if (typeof parsed.slug === "string") results.push({ slug: parsed.slug });
+      };
       try {
         if (typeof msg.content === "string") {
-          const parsed = JSON.parse(msg.content);
-          if (Array.isArray(parsed)) results = parsed;
-          else if (parsed && typeof parsed === "object") {
-            if (Array.isArray(parsed.cards ?? parsed.results)) results = parsed.cards ?? parsed.results;
-            else if (typeof parsed.slug === "string") results = [parsed];
-          }
+          absorbParsedToolResult(JSON.parse(msg.content));
         } else if (Array.isArray(msg.content)) {
           for (const block of msg.content) {
             if (block.type !== "text" || typeof block.text !== "string") continue;
-            try {
-              const parsed = JSON.parse(block.text);
-              if (Array.isArray(parsed)) results = parsed;
-              else if (parsed && typeof parsed === "object") {
-                if (Array.isArray(parsed.cards ?? parsed.results)) results = parsed.cards ?? parsed.results;
-                else if (typeof parsed.slug === "string") results = [parsed];
-              }
-            } catch {}
+            try { absorbParsedToolResult(JSON.parse(block.text)); } catch {}
           }
         }
       } catch {}
+      const toolEventId = toolResultEventId(msg, eventIndex, decisionBriefId);
+      const slugsInThisToolResult = new Set();
       for (const item of results) {
         const slug = item && typeof item === "object" ? String(item.slug ?? item.id ?? "") : "";
         if (!slug) continue;
         const bareSlug = sanitizeSlug(slug);
-        const key = `${bareSlug}|tool-result`;
+        if (!isValidSlug(bareSlug)) continue;
+        if (slugsInThisToolResult.has(bareSlug)) continue;
+        slugsInThisToolResult.add(bareSlug);
+        const key = `${bareSlug}|tool-result|${toolEventId}`;
         const existing = seen.get(key);
         if (existing) existing.retrieval_count++;
         else {
-          const row = { ts, session_id: sessionId, entry_slug: bareSlug, source: "tool-result", retrieval_count: 1 };
+          const row = {
+            ts,
+            session_id: sessionId,
+            entry_slug: bareSlug,
+            source: "tool-result",
+            event_id: toolEventId,
+            retrieval_count: 1,
+            ...(decisionBriefId && toolName === "memory_decide" ? { decision_brief_id: decisionBriefId } : {}),
+          };
           seen.set(key, row);
           rows.push(row);
         }
@@ -181,9 +249,20 @@ function collectOutcomes(branch, sessionId, ts) {
       const { entries: footnotes, dropped: fd } = parseMemoryFootnote(text);
       dropped.push(...fd);
       for (const fn of footnotes) {
-        const key = `${fn.entry_slug}|memory-footnote`;
+        const footnoteEventId = footnoteOutcomeEventId(fn, eventIndex);
+        const key = `${fn.entry_slug}|memory-footnote|${footnoteEventId}`;
         if (seen.has(key)) continue;
-        const row = { ts, session_id: sessionId, entry_slug: fn.entry_slug, source: "memory-footnote", used: fn.used, counterfactual: fn.counterfactual, retrieval_count: 1 };
+        const row = {
+          ts,
+          session_id: sessionId,
+          entry_slug: fn.entry_slug,
+          source: "memory-footnote",
+          event_id: footnoteEventId,
+          used: fn.used,
+          counterfactual: fn.counterfactual,
+          retrieval_count: 1,
+          ...(fn.decision_brief_id ? { decision_brief_id: fn.decision_brief_id } : {}),
+        };
         seen.set(key, row);
         rows.push(row);
       }
@@ -200,7 +279,9 @@ function loadLedgerKeys(ledgerPath) {
   for (const line of lines) {
     try {
       const row = JSON.parse(line);
-      keys.add(`${row.session_id}|${row.entry_slug}|${row.source}`);
+      if (row && typeof row === "object" && typeof row.session_id === "string" && typeof row.entry_slug === "string" && typeof row.source === "string") {
+        keys.add(outcomeLedgerDedupKey(row));
+      }
     } catch {
       // skip malformed
     }
@@ -260,7 +341,7 @@ function processSessions() {
     // best signal available for the historical replay.
     const replayTs = latestTs || new Date().toISOString();
     const { rows, dropped } = collectOutcomes(branch, sessionId, replayTs);
-    const sessionNewRows = rows.filter((r) => !existingKeys.has(`${r.session_id}|${r.entry_slug}|${r.source}`));
+    const sessionNewRows = rows.filter((r) => !existingKeys.has(outcomeLedgerDedupKey(r)));
     if (sessionNewRows.length > 0 || dropped.length > 0) {
       statsByFile.push({
         fname: fname.slice(0, 60),
@@ -275,7 +356,7 @@ function processSessions() {
     for (const r of sessionNewRows) {
       // mark as replay so aggregator can downweight if needed
       newRows.push({ ...r, project_root: "/home/worker/.pi", _replay: true, _replay_source: fname });
-      existingKeys.add(`${r.session_id}|${r.entry_slug}|${r.source}`);
+      existingKeys.add(outcomeLedgerDedupKey(r));
     }
     allDropped.push(...dropped.map((d) => ({ ...d, _source_file: fname, _source_session: sessionId })));
   }

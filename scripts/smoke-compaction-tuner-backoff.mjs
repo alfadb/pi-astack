@@ -186,6 +186,37 @@ check("audit field name consistency: cooldown_remaining_ms not cooldown_ms", () 
   }
 });
 
+check("anchor: summaryModels custom compaction hook exists and default stays empty", () => {
+  const settingsSrc = fs.readFileSync(
+    path.join(repoRoot, "extensions/compaction-tuner/settings.ts"),
+    "utf8",
+  );
+  if (!/summaryModels:\s*\[\]/.test(settingsSrc)) {
+    throw new Error("DEFAULT_COMPACTION_TUNER_SETTINGS.summaryModels must stay [] so default = main session model");
+  }
+  if (!/pi\.on\("session_before_compact"/.test(indexSrc)) {
+    throw new Error("session_before_compact hook missing for custom summary model override");
+  }
+  if (!/runPiCompaction\(/.test(indexSrc)) {
+    throw new Error("custom hook should delegate to pi core compact() implementation for summary fidelity");
+  }
+  if (!/fallback_to_default/.test(indexSrc)) {
+    throw new Error("all custom summary model failures must fall back to pi core default compaction");
+  }
+  if (!/custom_summary_hook_threw/.test(indexSrc)) {
+    throw new Error("unexpected hook throws must be caught and fall back to pi core default compaction");
+  }
+  if (!/hasSummaryModelsKey\s*\?\s*explicitSummaryModels\s*:\s*legacySummaryModel/.test(settingsSrc)) {
+    throw new Error("explicit summaryModels: [] must override deprecated summaryModel and preserve default main-session model");
+  }
+});
+
+check("anchor: status displays default main-session model when summaryModels empty", () => {
+  if (!/default — main session model/.test(indexSrc)) {
+    throw new Error("/compaction-tuner status should show empty summaryModels as default main-session model");
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────
 // Pure-function tests for the exported `classifyDecision`.
 // ──────────────────────────────────────────────────────────────────

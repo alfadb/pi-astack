@@ -618,7 +618,10 @@ function makeCuratorPrompt(
         "or debug frustration, prefer SKIP or narrow-scope CREATE over broad UPDATE.",
         "If this candidate is related to the correction, prefer UPDATE",
         "over CREATE. If the correction contradicts the candidate, prefer",
-        "SKIP (the correction signal will create a separate entry).",
+        "SKIP only when the candidate is not the right vehicle for the correction.",
+        "Do NOT assume the correction signal will create a separate durable entry by itself;",
+        "if this candidate is the only safe vehicle, decide accordingly or defer explicitly.",
+        "Task-local signals should not reach this prompt; if one appears, do not use it to create or update durable entries.",
         "=== END CORRECTION SIGNAL ===",
         "",
       ].filter(Boolean).join("\n")

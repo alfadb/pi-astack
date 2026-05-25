@@ -10,6 +10,7 @@
  */
 
 import { entryToText } from "./checkpoint";
+import { getCurrentRuleInjectionNonce, stripCurrentRuleInjection } from "../abrain/rule-injector";
 
 export interface ConversationTurn {
   role: string;
@@ -53,15 +54,15 @@ export function packClassifierWindow(branchEntries: unknown[]): PackedWindow {
     let text: string;
     if (role === "toolResult") {
       const toolName = typeof msg.toolName === "string" ? msg.toolName : "unknown";
-      const content = extractTextContent(msg.content);
+      const content = stripCurrentRules(extractTextContent(msg.content));
       text = `[toolResult:${toolName}]\n${truncate(content, maxEntryChars)}`;
     } else if (role === "bashExecution") {
       const cmd = typeof msg.command === "string" ? msg.command : "";
       const exitCode = typeof msg.exitCode === "number" ? String(msg.exitCode) : "?";
-      const output = typeof msg.output === "string" ? msg.output : extractTextContent(msg.content);
+      const output = stripCurrentRules(typeof msg.output === "string" ? msg.output : extractTextContent(msg.content));
       text = `[bashExecution] cmd: ${cmd} (exit ${exitCode})\n${truncate(output, maxEntryChars)}`;
     } else {
-      text = truncate(extractTextContent(msg.content), maxEntryChars);
+      text = truncate(stripCurrentRules(extractTextContent(msg.content)), maxEntryChars);
     }
 
     if (turns.length > 0 && chars + text.length > TARGET_CHARS) break;
@@ -101,6 +102,10 @@ function extractTextContent(content: unknown): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function stripCurrentRules(text: string): string {
+  return stripCurrentRuleInjection(text, getCurrentRuleInjectionNonce());
 }
 
 function truncate(text: string, maxChars: number): string {

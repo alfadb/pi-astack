@@ -49,6 +49,7 @@ import { runCorrectionPipeline, type RelatedEntryCard, type CorrectionSignal } f
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
 import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
+import { summarizeClassifierHealth } from "./health";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests } from "../_shared/pi-internals";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { sanitizeForMemory } from "./sanitizer";
@@ -95,6 +96,14 @@ import { abrainProjectDir, abrainSedimentStagingPath, resolveActiveProject } fro
  * starts from the checkpoint advanced by that previous sediment run.
  */
 const autoWriteInFlight = new Map<string, Promise<void>>();
+
+interface SessionCorrectionState {
+  signals: CorrectionSignal[];
+  updatedAt: number;
+}
+
+const sessionCorrectionWorkingSet = new Map<string, SessionCorrectionState>();
+const MAX_SESSION_CORRECTIONS = 5;
 
 /** Track agent_start/end balance per session. When ended >= started,
  *  the main-session LLM is in agent_end state (finished, not working) —
@@ -401,21 +410,46 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
  * preference. Per ADR 0024 §4.1 INV-ACTIVE-CORRECTION the three typings are
  * structurally different signals and must be routed differently.
  *
- * Session-local working set for task-local: NOT IMPLEMENTED in this commit.
- * Until that lands, task-local signals are dropped from the current curator
- * (preventing pollution) but lost from future curators (incomplete
- * ADR §4.1.4 fulfillment). The dispatch audit row records the drop so a
- * future aggregator can quantify how much task-local signal we are losing.
+ * Minimal closure note: only durable signals enter the in-memory working
+ * set today. Task-local remains audit-only until a non-durable session
+ * context surface exists; never inject task-local into the durable curator.
  */
+function rememberSessionCorrection(sessionId: string | undefined, signal: CorrectionSignal): void {
+  if (!sessionId) return;
+  const state = sessionCorrectionWorkingSet.get(sessionId) ?? { signals: [], updatedAt: Date.now() };
+  const key = `${signal.typing || "unknown"}|${signal.target_entry_slug || ""}|${signal.user_quote || signal.correction_intent || ""}`;
+  state.signals = [
+    signal,
+    ...state.signals.filter((item) => `${item.typing || "unknown"}|${item.target_entry_slug || ""}|${item.user_quote || item.correction_intent || ""}` !== key),
+  ].slice(0, MAX_SESSION_CORRECTIONS);
+  state.updatedAt = Date.now();
+  sessionCorrectionWorkingSet.set(sessionId, state);
+}
+
+function takeSessionCorrectionForCurator(sessionId: string | undefined): CorrectionSignal | null {
+  if (!sessionId) return null;
+  const state = sessionCorrectionWorkingSet.get(sessionId);
+  if (!state) return null;
+  const index = state.signals.findIndex((signal) => signal.typing === "durable");
+  if (index < 0) return null;
+  const [signal] = state.signals.splice(index, 1);
+  if (state.signals.length === 0) sessionCorrectionWorkingSet.delete(sessionId);
+  else state.updatedAt = Date.now();
+  return signal ?? null;
+}
+
 function dispatchCorrectionSignal(
   signal: CorrectionSignal | null | undefined,
+  opts: { sessionId?: string; currentCurator?: boolean } = {},
 ): {
   forwarded: CorrectionSignal | null;
   decision:
     | "forwarded_to_curator"
+    | "stored_durable"
+    | "stored_task_local"
     | "dropped_debug"
-    | "dropped_task_local"
     | "dropped_unknown_typing"
+    | "pending_multiview"
     | "no_signal";
   reason: string;
 } {
@@ -434,30 +468,33 @@ function dispatchCorrectionSignal(
         reason: "per ADR §4.1.4 debug signals only land in classifier audit, never curator advisory",
       };
     case "task-local":
-      // TODO(session-local-working-set): ADR §4.1.4 says task-local should
-      // accumulate into a session-local working set and inject into FUTURE
-      // curator calls (not the current one). Until that's implemented, we
-      // drop from the current curator to prevent task-local pollution; the
-      // signal is lost from future curators too. Audit captures the drop.
       return {
         forwarded: null,
-        decision: "dropped_task_local",
-        reason: "per ADR §4.1.4 task-local belongs in a session-local working set (not yet implemented); dropped from current curator to prevent pollution",
+        decision: "stored_task_local",
+        reason: "task-local correction kept audit-only in this minimal closure; it is not injected into durable curator calls",
       };
     case "durable":
+      if (!opts.currentCurator) {
+        rememberSessionCorrection(opts.sessionId, signal);
+        return {
+          forwarded: null,
+          decision: "stored_durable",
+          reason: "durable correction stored for later same-session curator calls; no current curator is available in this lane",
+        };
+      }
       return {
         forwarded: signal,
-        decision: "forwarded_to_curator",
-        reason: `durable typing${signal.confidence !== undefined ? ` (conf=${signal.confidence})` : ""} forwarded to curator advisory`,
+        decision: (signal.confidence ?? 0) >= 8 ? "pending_multiview" : "forwarded_to_curator",
+        reason: `durable typing${signal.confidence !== undefined ? ` (conf=${signal.confidence})` : ""} forwarded to curator advisory${(signal.confidence ?? 0) >= 8 ? "; multi-view must gate any resulting high-value write" : ""}`,
       };
     default:
-      // Unknown / missing typing — conservative: forward as advisory
-      // (preserves pre-T1-1 behavior for any signal whose typing field
-      // didn't parse). Audit flags it so we can spot classifier regressions.
+      // Unknown / missing typing indicates classifier schema drift or a
+      // partial parse. Keep it in audit, but do NOT forward to curator:
+      // an untyped correction hypothesis has no safe dispatch semantics.
       return {
-        forwarded: signal,
+        forwarded: null,
         decision: "dropped_unknown_typing",
-        reason: `signal has unknown or missing typing (${JSON.stringify(signal.typing ?? null)}); forwarded conservatively`,
+        reason: `signal has unknown or missing typing (${JSON.stringify(signal.typing ?? null)}); dropped from curator advisory`,
       };
   }
 }
@@ -490,6 +527,10 @@ function makeCorrelationId(
   window: RunWindow,
 ): string {
   return `${lane}-${safeAuditIdPart(sessionId, "session")}-${safeAuditIdPart(window.lastEntryId, "entry")}-${Date.now().toString(36)}`;
+}
+
+function makeShortWindow(window: RunWindow): RunWindow {
+  return window.skipReason === "window_too_small" ? { ...window, skipReason: undefined } : window;
 }
 
 function candidateIdFor(correlationId: string, index: number): string {
@@ -694,10 +735,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 - 绕过去重 / 风格对齐
 - 推动 LLM 将每件事都评价为“值得记录”，污染主线思考
 
-例外：用户**明确**说“沉淀这条” / 调用 \`/sediment\` 或 \`/about-me\`
-slash 命令、或在回复里主动写 \`MEMORY:\` / \`MEMORY-ABOUT-ME:\`
-fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
-它看到了。不确定是否“明确”时不要写。
+过渡期仍存在少量显式诊断/迁移入口，但主会话不要主动教用户使用或生成
+任何大脑管理类入口。只有当用户已经主动输入这类命令/结构化块，或明确要求
+“按这个显式入口处理”时，才把它当作用户给出的数据/命令继续当前任务；
+否则不要写结构化记忆块、不要建议 slash，让后台 sediment 自己接 —— 它看到了。
 
 读是完全开放的：\`memory_search\` / \`memory_get\` / \`memory_list\` /
 \`memory_neighbors\` / \`memory_decide\` 都鼓励动手前查。
@@ -854,26 +895,6 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
       const getBranch = ctx.sessionManager.getBranch.bind(ctx.sessionManager);
       // Capture sessionManager for continuation-call extractor (bg work outlives ctx).
       const sessMgr = ctx.sessionManager;
-      // Fire-and-forget outcome collection: scan branch for memory tool
-      // invocations and log retrieved entries to outcome-ledger (ADR 0025 P2).
-      // Invalid footnotes (placeholder slugs, unknown 'used' values) are
-      // routed to audit.jsonl as 'outcome_footnote_parse_error' instead of
-      // silently defaulted to 'confirmatory' — per pattern
-      // `outcome-footnote-handling-principle-prefer-loss-over-guessing`.
-      if (sessionId && branch.length > 0) {
-        const outcome = collectOutcomes(branch, sessionId);
-        if (outcome.rows.length > 0) {
-          writeOutcomeLedger(outcome.rows, cwd);
-        }
-        if (outcome.dropped.length > 0) {
-          appendAudit(cwd, {
-            operation: "outcome_footnote_parse_error",
-            session_id: sessionId,
-            dropped_count: outcome.dropped.length,
-            dropped: outcome.dropped,
-          }).catch(() => {});
-        }
-      }
       const notify = ctx.ui?.notify?.bind(ctx.ui);
       // setStatus is ctx.ui.setStatus; we need to bind it AND tolerate
       // older pi versions where the method is missing. Wrap in a
@@ -1015,6 +1036,25 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
         return;
       }
 
+      // Outcome collection runs only after the turn is known healthy and the
+      // launch cwd has been canonicalized to the bound project root. Aborted /
+      // errored assistant messages can contain partial footnotes/tool traces;
+      // keep those out of ADR 0026 weighting.
+      if (sessionId) {
+        const outcome = collectOutcomes(branch, sessionId);
+        if (outcome.rows.length > 0) {
+          writeOutcomeLedger(outcome.rows, cwd);
+        }
+        if (outcome.dropped.length > 0) {
+          appendAudit(cwd, {
+            operation: "outcome_footnote_parse_error",
+            session_id: sessionId,
+            dropped_count: outcome.dropped.length,
+            dropped: outcome.dropped,
+          }).catch(() => {});
+        }
+      }
+
       const tStart = Date.now();
       const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
       const window = buildRunWindow(branch, checkpoint, settings);
@@ -1022,7 +1062,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
       const summary = checkpointSummary(window);
       const entryBreakdown = countEntryTypes(window.entries);
 
-      if (window.skipReason || !window.lastEntryId) {
+      if ((window.skipReason && window.skipReason !== "window_too_small") || !window.lastEntryId) {
         if (window.lastEntryId)
           await saveSessionCheckpoint(cwd, sessionId, {
             lastProcessedEntryId: window.lastEntryId,
@@ -1045,8 +1085,8 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
           },
           checkpoint_advanced: !!window.lastEntryId,
         });
-        // Healthy no-op skip (window too small or empty). Mark completed
-        // so the agent_start of the next prompt resets to idle.
+        // Healthy no-op skip (no new entries). Mark completed so the
+        // agent_start of the next prompt resets to idle.
         applySedimentStatus(
           setStatus,
           sessionId,
@@ -1056,8 +1096,11 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
         return;
       }
 
+      const shortWindowClassifierOnly = window.skipReason === "window_too_small";
+      const effectiveWindow = makeShortWindow(window);
+
       const tParseStart = Date.now();
-      const drafts = parseExplicitMemoryBlocks(window.text);
+      const drafts = parseExplicitMemoryBlocks(effectiveWindow.text);
       // ADR 0021 G2 (2026-05-20): parse Lane G MEMORY-ABOUT-ME fences in
       // the same window pass. Lane A and Lane G run as TWO independent
       // synchronous write loops further below; if neither hits we still
@@ -1065,7 +1108,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
       // lane intentionally does NOT consume Lane G fences — explicit
       // attestation is the only way to write identity/skills/habits in
       // G1–G2 (G3 will add an LLM aboutness classifier).
-      const aboutMeDrafts = parseExplicitAboutMeBlocks(window.text);
+      const aboutMeDrafts = parseExplicitAboutMeBlocks(effectiveWindow.text);
       const tParseEnd = Date.now();
 
       // ADR 0025 P1: run correction classifier as FIRE-AND-FORGET.
@@ -1076,7 +1119,10 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
       //
       // The classifier Promise is stored so the auto-write lane can
       // await it before launching curator (correctionSignal is needed
-      // for better update/merge decisions). Lane A/G don't consume it.
+      // for better update/merge decisions). Lane A/G don't block on it,
+      // but still dispatch/audit its result asynchronously so explicit
+      // correction signals are observable and available to later same-session
+      // curator calls.
       let correctionPromise: Promise<Awaited<ReturnType<typeof runCorrectionPipeline>>> | null = null;
       const classifierLane =
         drafts.length > 0 ? "explicit" : aboutMeDrafts.length > 0 ? "about_me" : "auto_write";
@@ -1090,30 +1136,37 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
           let relatedEntries: RelatedEntryCard[] = [];
           try {
             const memSettings = resolveMemorySettings();
-            const searchQuery = window.text.slice(-2000);
+            const searchQuery = effectiveWindow.text.slice(-2000);
+            const loadedEntries = await (await import("../memory/parser")).loadEntries(cwd, memSettings, undefined);
             const memResult = await (await import("../memory/llm-search")).llmSearchEntries(
-              await (await import("../memory/parser")).loadEntries(cwd, memSettings, ctx.signal),
+              loadedEntries,
               { query: `Find memory entries related to: ${searchQuery.slice(-500)}`, filters: { limit: 10, status: ["active"] } },
               memSettings,
               modelRegistry,
-              ctx.signal,
+              undefined,
               cwd,
-            ) as Array<{ slug: unknown; title?: unknown; kind?: unknown; status?: unknown; scope?: unknown; compiled_truth?: unknown }>;
+            ) as Array<{ slug: unknown; title?: unknown; summary?: unknown; kind?: unknown; status?: unknown; scope?: unknown; compiled_truth?: unknown }>;
+            const bySlug = new Map(loadedEntries.map((entry: any) => [String(entry.slug), entry]));
             relatedEntries = (memResult && !(memResult as any).ok)
               ? []
-              : (Array.isArray(memResult) ? memResult.map((c: any) => ({
-                  slug: String(c.slug ?? ""),
-                  title: typeof c.title === "string" ? c.title : undefined,
-                  scope: typeof c.scope === "string" ? c.scope : typeof c.metadata?.scope === "string" ? c.metadata.scope : undefined,
-                  kind: typeof c.kind === "string" ? c.kind : undefined,
-                  status: typeof c.status === "string" ? c.status : undefined,
-                  summary: typeof c.compiled_truth === "string" ? c.compiled_truth.slice(0, 150) : undefined,
-                })).filter(e => e.slug) : []);
+              : (Array.isArray(memResult) ? memResult.map((c: any) => {
+                  const full = bySlug.get(String(c.slug ?? ""));
+                  return {
+                    slug: String(c.slug ?? ""),
+                    title: typeof c.title === "string" ? c.title : undefined,
+                    scope: typeof c.scope === "string" ? c.scope : typeof c.metadata?.scope === "string" ? c.metadata.scope : undefined,
+                    kind: typeof c.kind === "string" ? c.kind : undefined,
+                    status: typeof c.status === "string" ? c.status : undefined,
+                    summary: typeof full?.compiledTruth === "string"
+                      ? full.compiledTruth.slice(0, 150)
+                      : typeof c.summary === "string" ? c.summary.slice(0, 150) : undefined,
+                  };
+                }).filter(e => e.slug) : []);
           } catch { /* search failure is non-fatal */ }
-          const cr = await runCorrectionPipeline(branch, relatedEntries, {
+          const cr = await runCorrectionPipeline(effectiveWindow.entries.length > 0 ? effectiveWindow.entries : branch, relatedEntries, {
             settings,
             modelRegistry: modelRegistry as Parameters<typeof runCorrectionPipeline>[2]["modelRegistry"],
-            signal: ctx.signal,
+            signal: undefined,
           });
           // Log classifier result to audit — always, so failures are traceable.
           appendAudit(cwd, {
@@ -1128,11 +1181,76 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
             prompt_version: buildPromptVersionAudit("activeCorrectionClassifier", settings),
             ...(cr.error ? { error: cr.error } : {}),
             ...(cr.stagingAdvisory ? { staging_advisory: cr.stagingAdvisory } : {}),
+          }).then(() => {
+            const health = summarizeClassifierHealth(cwd);
+            if (health.classifierRowCount === 0 || health.ok) return undefined;
+            return appendAudit(cwd, {
+              operation: "classifier_health_meta_check",
+              lane: "diagnostic",
+              session_id: sessionId,
+              ok: health.ok,
+              classifier_row_count: health.classifierRowCount,
+              sample_size: health.sampleSize,
+              window_size: health.windowSize,
+              quote_rate: Number(health.quoteRate.toFixed(3)),
+              alternative_rate: Number(health.alternativeRate.toFixed(3)),
+              concrete_self_critique_rate: Number(health.concreteSelfCritiqueRate.toFixed(3)),
+              threshold: health.threshold,
+              advisories: health.advisories,
+            });
           }).catch(() => {});
           return cr;
         })();
         // Don't await — fire-and-forget. Auto-write lane will await it.
       }
+
+      const writeCorrectionDispatchAudit = (
+        lane: "auto_write" | "explicit" | "about_me" | "drain",
+        correlationId: string,
+        dispatch: ReturnType<typeof dispatchCorrectionSignal>,
+        signal: CorrectionSignal | null | undefined,
+        model?: string,
+      ): void => {
+        appendAudit(cwd, {
+          operation: "correction_signal_dispatch",
+          lane,
+          session_id: sessionId,
+          correlation_id: correlationId,
+          decision: dispatch.decision,
+          reason: dispatch.reason,
+          signal_found: signal?.signal_found ?? false,
+          signal_typing: signal?.typing ?? null,
+          signal_confidence: signal?.confidence ?? null,
+          signal_target_slug: signal?.target_entry_slug ?? null,
+          ...(model ? { model } : {}),
+          prompt_version: buildPromptVersionAudit("activeCorrectionClassifier", settings),
+        }).catch(() => {});
+      };
+
+      const recordCorrectionDispatch = (
+        lane: "auto_write" | "explicit" | "about_me" | "drain",
+        correlationId: string,
+        classifierResult: Awaited<ReturnType<typeof runCorrectionPipeline>> | null | undefined,
+        currentCurator: boolean,
+      ): CorrectionSignal | null => {
+        const dispatch = dispatchCorrectionSignal(classifierResult?.signal ?? null, { sessionId, currentCurator });
+        writeCorrectionDispatchAudit(lane, correlationId, dispatch, classifierResult?.signal ?? null, classifierResult?.model);
+        return dispatch.forwarded;
+      };
+
+      const recordConsumedSessionCorrection = (
+        lane: "auto_write" | "drain",
+        correlationId: string,
+        signal: CorrectionSignal,
+      ): CorrectionSignal => {
+        const dispatch = {
+          forwarded: signal,
+          decision: (signal.confidence ?? 0) >= 8 ? "pending_multiview" as const : "forwarded_to_curator" as const,
+          reason: `consumed durable session-working-set correction${signal.confidence !== undefined ? ` (conf=${signal.confidence})` : ""}${(signal.confidence ?? 0) >= 8 ? "; multi-view must gate any resulting high-value write" : ""}`,
+        };
+        writeCorrectionDispatchAudit(lane, correlationId, dispatch, signal, "session-working-set");
+        return signal;
+      };
 
       if (drafts.length === 0 && aboutMeDrafts.length === 0) {
         // Phase 1.4 A2 + UX fix: LLM auto-write lane is FIRE-AND-FORGET.
@@ -1231,7 +1349,10 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
                         projectId,
                         branchEntries: branchNow,
                         sessionManager: sessMgr,
-                        correctionSignal: undefined, // drain re-reads branch — original signal may be stale
+                        correctionSignal: (() => {
+                          const stored = takeSessionCorrectionForCurator(sessionId);
+                          return stored ? recordConsumedSessionCorrection("drain", corrId, stored) : null;
+                        })(),
                       });
                       // Round 8 P1 (sonnet R8 audit fix): drain loop now
                       // writes audit rows for ALL outcomes (wrote /
@@ -1364,16 +1485,143 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
 
         if (autoWriteInFlight.has(sessionId)) {
           // A previous background sediment run is still authoritative.
-          // Do not advance the checkpoint and do not write audit noise:
-          // the next agent_end after that worker drains will start from
-          // the checkpoint advanced by the previous run and include this
-          // turn's content in the next window.
+          // Do not advance the checkpoint; the next drain/agent_end will
+          // re-read this backlog. Still dispatch the classifier result so
+          // active corrections observed during the in-flight window are
+          // not stranded as classifier-only audit rows.
+          if (correctionPromise) {
+            const inflightCorrelationId = makeCorrelationId("auto_write", sessionId, effectiveWindow);
+            _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
+            correctionPromise
+              .then((classifierResult) => {
+                recordCorrectionDispatch("auto_write", inflightCorrelationId, classifierResult, false);
+              })
+              .catch(() => {})
+              .finally(() => {
+                _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
+                maybeSetIdleIfNoInflight(sessionId);
+              });
+          }
+          return;
+        }
+
+        // Short windows are classifier-only: run active-correction routing
+        // and advance checkpoint, but do not spend extractor/curator calls
+        // on tiny windows that used to be auto-write-ineligible. If the
+        // classifier hard kill-switch is off, preserve the old skip behavior.
+        if (shortWindowClassifierOnly) {
+          if (!classifierEnabled || !correctionPromise) {
+            await appendAudit(cwd, {
+              operation: "skip",
+              lane: "window",
+              reason: "window_too_small",
+              session_id: sessionId,
+              ...summary,
+              extractor: "explicit_marker",
+              parser_version: PARSER_VERSION,
+              settings_snapshot: settingsSnapshot,
+              entry_breakdown: entryBreakdown,
+              stage_ms: {
+                window_build: tWindowBuilt - tStart,
+                parse: tParseEnd - tParseStart,
+                write_total: 0,
+                total: Date.now() - tStart,
+              },
+              checkpoint_advanced: false,
+            });
+            applySedimentStatus(setStatus, sessionId, "completed", "window_too_small");
+            return;
+          }
+
+          const shortCorrelationId = makeCorrelationId("auto_write", sessionId, effectiveWindow);
+          applySedimentStatus(setStatus, sessionId, "running", "classifier-only");
+          let shortBg!: Promise<void>;
+          shortBg = (async () => {
+            let checkpointAdvanced = false;
+            try {
+              const classifierResult = await correctionPromise.catch(() => ({ ok: false, signal: null } as const));
+              const forwarded = recordCorrectionDispatch("auto_write", shortCorrelationId, classifierResult, false);
+              const signalFound = classifierResult.signal?.signal_found === true;
+              checkpointAdvanced = !!(classifierResult.ok && classifierResult.signal && !signalFound);
+              if (checkpointAdvanced) {
+                await saveSessionCheckpoint(cwd, sessionId, {
+                  lastProcessedEntryId: effectiveWindow.lastEntryId,
+                });
+              }
+              await appendAudit(cwd, {
+                operation: "skip",
+                lane: "auto_write",
+                reason: classifierResult.ok
+                  ? signalFound ? "window_too_small_classifier_signal_checkpoint_held" : checkpointAdvanced ? "window_too_small_classifier_no_signal" : "window_too_small_classifier_unparseable"
+                  : "window_too_small_classifier_failed_or_unparseable",
+                session_id: sessionId,
+                ...summary,
+                extractor: "active_correction_classifier",
+                parser_version: PARSER_VERSION,
+                settings_snapshot: settingsSnapshot,
+                entry_breakdown: entryBreakdown,
+                correlation_id: shortCorrelationId,
+                checkpoint_advanced: checkpointAdvanced,
+                classifier_only: true,
+                classifier_ok: classifierResult.ok,
+                classifier_signal_found: signalFound,
+                correction_forwarded: !!forwarded,
+                stage_ms: {
+                  window_build: tWindowBuilt - tStart,
+                  parse: tParseEnd - tParseStart,
+                  write_total: 0,
+                  total: Date.now() - tStart,
+                  background: true,
+                },
+              });
+              applySedimentStatus(
+                setStatus,
+                sessionId,
+                checkpointAdvanced ? "completed" : classifierResult.ok ? "completed" : "failed",
+                checkpointAdvanced ? "no correction; checkpoint advanced" : signalFound ? "correction found; checkpoint held" : classifierResult.ok ? "classifier unparseable; checkpoint held" : "classifier failed; checkpoint held",
+              );
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : String(err);
+              await appendAudit(cwd, {
+                operation: "skip",
+                lane: "auto_write",
+                reason: "window_too_small_classifier_threw",
+                session_id: sessionId,
+                ...summary,
+                extractor: "active_correction_classifier",
+                parser_version: PARSER_VERSION,
+                settings_snapshot: settingsSnapshot,
+                entry_breakdown: entryBreakdown,
+                correlation_id: shortCorrelationId,
+                checkpoint_advanced: false,
+                classifier_only: true,
+                error: sanitizeAuditText(message, 500),
+                stage_ms: {
+                  window_build: tWindowBuilt - tStart,
+                  parse: tParseEnd - tParseStart,
+                  write_total: 0,
+                  total: Date.now() - tStart,
+                  background: true,
+                },
+              }).catch(() => {});
+              applySedimentStatus(setStatus, sessionId, "failed", `classifier err: ${message.slice(0, 40)}`);
+            } finally {
+              if (autoWriteInFlight.get(sessionId) === shortBg) {
+                autoWriteInFlight.delete(sessionId);
+                _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
+              }
+              maybeSetIdleIfNoInflight(sessionId);
+            }
+          })();
+          _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
+          autoWriteInFlight.set(sessionId, shortBg);
+          shortBg.catch(() => {});
           return;
         }
 
         // Optimistic checkpoint advance before launching bg work.
         await saveSessionCheckpoint(cwd, sessionId, {
-          lastProcessedEntryId: window.lastEntryId,
+          lastProcessedEntryId: effectiveWindow.lastEntryId,
         });
 
         // Mark running BEFORE scheduling the bg promise so the footer
@@ -1383,7 +1631,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
         const autoCorrelationId = makeCorrelationId(
           "auto_write",
           sessionId,
-          window,
+          effectiveWindow,
         );
 
         // Definite-assignment assertion: TS can't prove the IIFE body's
@@ -1398,7 +1646,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
               cwd,
               sessionId,
               settings,
-              window,
+              window: effectiveWindow,
               modelRegistry,
               signal: undefined,
               correlationId: autoCorrelationId,
@@ -1418,22 +1666,10 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
                 const classifierResult = correctionPromise
                   ? await correctionPromise.catch(() => ({ ok: false, signal: null } as const))
                   : null;
-                const dispatch = dispatchCorrectionSignal(classifierResult?.signal ?? null);
-                if (classifierResult?.signal) {
-                  appendAudit(cwd, {
-                    operation: "correction_signal_dispatch",
-                    lane: "auto_write",
-                    session_id: sessionId,
-                    correlation_id: autoCorrelationId,
-                    decision: dispatch.decision,
-                    reason: dispatch.reason,
-                    signal_typing: classifierResult.signal.typing ?? null,
-                    signal_confidence: classifierResult.signal.confidence ?? null,
-                    signal_target_slug: classifierResult.signal.target_entry_slug ?? null,
-                    prompt_version: buildPromptVersionAudit("activeCorrectionClassifier", settings),
-                  }).catch(() => {});
-                }
-                return dispatch.forwarded;
+                const forwarded = recordCorrectionDispatch("auto_write", autoCorrelationId, classifierResult, true);
+                if (forwarded) return forwarded;
+                const stored = takeSessionCorrectionForCurator(sessionId);
+                return stored ? recordConsumedSessionCorrection("auto_write", autoCorrelationId, stored) : null;
               })(),
             });
             const tAutoEnd = Date.now();
@@ -1826,11 +2062,29 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
         laneGShouldAdvance = shouldAdvanceAfterAboutMeResults(aboutMeResults);
       }
 
+      // Lane A/G do not run a curator in-line, but the classifier still
+      // contributes active-correction routing state and audit. Keep it
+      // fire-and-forget so explicit user-attested writes stay synchronous.
+      const explicitDispatchCorrelationId = explicitCorrelationId ?? aboutMeCorrelationId;
+      if (correctionPromise && explicitDispatchCorrelationId) {
+        const explicitDispatchLane: "explicit" | "about_me" = explicitCorrelationId ? "explicit" : "about_me";
+        _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
+        correctionPromise
+          .then((classifierResult) => {
+            recordCorrectionDispatch(explicitDispatchLane, explicitDispatchCorrelationId, classifierResult, false);
+          })
+          .catch(() => {})
+          .finally(() => {
+            _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
+            maybeSetIdleIfNoInflight(sessionId);
+          });
+      }
+
       // ── Combined checkpoint advance ─────────────────────────────
       const combinedShouldAdvance = laneAShouldAdvance && laneGShouldAdvance;
       if (combinedShouldAdvance) {
         await saveSessionCheckpoint(cwd, sessionId, {
-          lastProcessedEntryId: window.lastEntryId,
+          lastProcessedEntryId: effectiveWindow.lastEntryId,
         });
       }
 
@@ -1983,7 +2237,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
               modelRegistry: modelRegistry as Parameters<typeof replayMultiviewPending>[0]["modelRegistry"],
               loadNeighborsBySlug: async (slugs: string[]) => {
                 if (slugs.length === 0) return [];
-                const all = await (await import("../memory/parser")).loadEntries(replayCwd, memSettings, ctx.signal);
+                const all = await (await import("../memory/parser")).loadEntries(replayCwd, memSettings, undefined);
                 const filtered = relevantEntriesForCurator(all);
                 const slugSet = new Set(slugs);
                 return filtered.filter((e) => slugSet.has(e.slug));
@@ -2016,7 +2270,7 @@ fence 时才走显式 lane。没有明确请求就让 sediment 自己接 ——
                   note: "v1 stub: writer dispatch not implemented in batch 3c-ii; candidate dropped after audit. Follow-up batch will wire writer.",
                 });
               },
-              signal: ctx.signal,
+              signal: undefined,
             });
 
             // Audit the replay batch outcome.
@@ -2330,12 +2584,9 @@ async function tryAutoWriteLane(args: {
 
   // 2. Keep only schema-valid candidates. Semantic gates are gone; the
   //    curator decides create/update/merge/archive/supersede/delete/skip after looking up existing memory.
-  const fullDrafts =
-    llmResult.rawText && llmResult.rawText !== "SKIP"
-      ? (await import("./extractor")).parseExplicitMemoryBlocks(
-          llmResult.rawText,
-        )
-      : [];
+  const fullDrafts = llmResult.rawText && llmResult.rawText !== "SKIP"
+    ? parseExplicitMemoryBlocks(llmResult.rawText)
+    : [];
   const schemaPreview = previewExtraction(fullDrafts);
   const compliantDrafts: ProjectEntryDraft[] = fullDrafts.filter(
     (_, i) => schemaPreview.drafts[i]?.validationErrors.length === 0,
@@ -2585,6 +2836,7 @@ export function _resetAutoWriteStateForTests(): void {
   autoWriteInFlight.clear();
   sedimentStatusBySession.clear();
   sessionAgentCycle.clear();
+  sessionCorrectionWorkingSet.clear();
   _resetWarnedApisForTests();
 }
 
@@ -2600,6 +2852,7 @@ export function _resetAutoWriteStateForTests(): void {
  * model registry to lock the closure-arg threading invariant.
  */
 export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
+export const _dispatchCorrectionSignalForTests = dispatchCorrectionSignal;
 
 /**
  * Test-only hook to await any background auto-write work to settle.
@@ -2817,7 +3070,7 @@ function registerAboutMeCommand(pi: ExtensionAPI): void {
 
   maybePi.registerCommand("about-me", {
     description:
-      "Declare an about-me fact: /about-me [--region=identity|skills|habits] [--title=\"...\"] <body>. Injects a MEMORY-ABOUT-ME fence into the transcript; sediment writes to ~/.abrain/<region>/ on the next agent_end (ADR 0021 G2). Empty body opens interactive prompts.",
+      "Advanced transition/diagnostic entry: /about-me [--region=identity|skills|habits] [--title=\"...\"] <body>. Injects a MEMORY-ABOUT-ME fence into the transcript; sediment writes to ~/.abrain/<region>/ on the next agent_end (ADR 0021 G2). Prefer natural conversation + background sediment for normal use. Empty body opens interactive prompts.",
     getArgumentCompletions(prefix: string) {
       const filtered = FLAGS.filter((item) => item.startsWith(prefix));
       return filtered.length

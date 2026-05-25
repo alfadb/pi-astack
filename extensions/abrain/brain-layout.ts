@@ -1,8 +1,8 @@
 /**
  * abrain — brain directory layout bootstrap.
  *
- * Ensures the 7-zone directory structure exists under ~/.abrain/.
- * Per brain-redesign-spec.md §1 and ADR 0014 §D1:
+ * Ensures the abrain directory structure exists under ~/.abrain/.
+ * Per brain-redesign-spec.md §1, ADR 0014 §D1, and ADR 0023-R5:
  *
  *   ~/.abrain/
  *   ├── identity/     # Lane G: about-me declarations
@@ -11,7 +11,8 @@
  *   ├── workflows/    # workflow lane (B1, 2026-05-12): writeAbrainWorkflow
  *   ├── projects/     # Lane C target: per-project memory (B4 /memory migrate --go)
  *   ├── knowledge/    # Lane A: cross-project world knowledge
- *   └── vault/        # Lane V: encrypted secrets (created by /vault init)
+ *   ├── vault/        # Lane V: encrypted secrets (created by /vault init)
+ *   └── rules/        # ADR 0023-R5 read-path: session-start injected rules
  *
  * Idempotent: safe to call on every boot; only creates missing dirs.
  * Creates with mode 0o700 (owner-only, consistent with vault security posture).
@@ -22,8 +23,7 @@ import * as path from "node:path";
 import { computeAbrainStateGitignoreNext } from "../_shared/runtime";
 
 /**
- * All 7 zone directory names (excluding vault, which is created by /vault init).
- * Ordered for readability in ls output.
+ * All top-level zone directory names. Ordered for readability in ls output.
  */
 const BRAIN_ZONES = [
   "identity",
@@ -33,6 +33,7 @@ const BRAIN_ZONES = [
   "projects",
   "knowledge",
   "vault",
+  "rules",
 ] as const;
 
 /** Per-zone metadata: which lane owns it, whether it holds markdown entries.
@@ -52,10 +53,11 @@ const ZONE_META: Record<string, { lane: string; description: string }> = {
   projects:  { lane: "C (curator)",         description: "per-project memory (migration target from .pensieve/, see B4 /memory migrate --go)" },
   knowledge: { lane: "A (agent)",           description: "cross-project world knowledge" },
   vault:     { lane: "V (vault)",           description: "age-encrypted secrets (managed by /vault init)" },
+  rules:     { lane: "rules (read-path)",   description: "session-start injected behavioral rules (ADR 0023-R5 read-only path)" },
 };
 
 /**
- * Create or verify the 7-zone directory layout under abrainHome.
+ * Create or verify the abrain zone directory layout under abrainHome.
  *
  * - Idempotent: skips already-existing zones.
  * - Creates with mode 0o700 (rwx------).
@@ -103,8 +105,27 @@ export function ensureBrainLayout(abrainHome: string): { created: string[]; warn
     try {
       fs.mkdirSync(dir, { mode: 0o700 });
       created.push(zone);
+      if (zone === "rules") {
+        fs.mkdirSync(path.join(dir, "always"), { recursive: true, mode: 0o700 });
+        fs.mkdirSync(path.join(dir, "listed"), { recursive: true, mode: 0o700 });
+      }
     } catch (err: any) {
       warnings.push(`${zone}: mkdir failed: ${err.message}`);
+    }
+  }
+
+  // ADR 0023-R5 read path: rules has two read-only injection tiers.
+  // Ensure subdirs even when a pre-existing `rules/` directory was created
+  // by hand or by an older build before tier directories existed.
+  const rulesDir = path.join(resolved, "rules");
+  if (fs.existsSync(rulesDir)) {
+    for (const tier of ["always", "listed"] as const) {
+      const tierDir = path.join(rulesDir, tier);
+      try {
+        if (!fs.existsSync(tierDir)) fs.mkdirSync(tierDir, { mode: 0o700 });
+      } catch (err: any) {
+        warnings.push(`rules/${tier}: mkdir failed: ${err.message}`);
+      }
     }
   }
 

@@ -2,7 +2,7 @@
 
 `package.json#scripts` 是 smoke test live truth。本文只是便于阅读的镜像；修改脚本时请同步本文。
 
-## Current scripts（2026-05-20, 27 total）
+## Current scripts（2026-05-25, 28 total）
 
 | npm script | File | Coverage |
 |---|---|---|
@@ -26,6 +26,7 @@
 | `smoke:abrain-secret-scope` | `scripts/smoke-abrain-secret-scope.mjs` | project/global secret scope behavior |
 | `smoke:abrain-i18n` | `scripts/smoke-abrain-i18n.mjs` | abrain i18n strings |
 | `smoke:abrain-redact` | `scripts/smoke-abrain-redact.mjs` | abrain redactor unit coverage |
+| `smoke:abrain-rule-injector` | `scripts/smoke-abrain-rule-injector.mjs` | ADR 0023-R5 read-only rules injection: scan, strict binding, nonce strip, idempotent before_agent_start, no veto/add/write path |
 | `smoke:compaction-tuner-prompt-user` | `scripts/smoke-compaction-tuner-prompt-user.mjs` | INV-K compaction-defer hook (`__abrainPromptUserGetPending`) |
 | `smoke:compaction-tuner-vault-defer` | `scripts/smoke-compaction-tuner-vault-defer.mjs` | INV-K compaction-defer hook for vault dialog (`__abrainVaultDialogInFlight`) — ADR 0022 Batch B D7. Mirrors prompt-user-defer structure: hook absent/throws/wrong-type → false; real `vault-authorize.isVaultDialogInFlight()` integration; symmetry guard (prompt_user hook ≠ vault hook); 2 source-anchor + trigger-path anchors (hook name + `defineProperty configurable:false` + import + audit reason `vault_dialog_pending`). 14 assertion, 3 negative tests verified. |
 | `smoke:prompt-user` | `scripts/smoke-prompt-user.mjs` | prompt_user manager + secret redaction + INV-A/B/C/D contracts |
@@ -40,6 +41,7 @@
 npm run smoke:memory
 npm run smoke:dispatch
 npm run smoke:abrain-active-project
+npm run smoke:abrain-rule-injector
 npm run smoke:abrain-vault-reader
 npm run smoke:abrain-vault-bash
 npm run smoke:vision

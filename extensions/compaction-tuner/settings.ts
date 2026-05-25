@@ -26,6 +26,12 @@ export interface CompactionTunerSettings {
   /** Optional custom instructions passed to the compaction LLM. */
   customInstructions: string;
   /**
+   * Optional ordered model refs (provider/model) for custom compaction
+   * summarization. Empty default intentionally preserves pi core behavior:
+   * summary generation uses the current main-session model.
+   */
+  summaryModels: string[];
+  /**
    * Hysteresis margin (percentage points) below threshold that we must
    * dip to before re-arming. After triggering at e.g. 75%, we won't
    * re-trigger until usage drops below 75 - rearmMarginPercent and rises
@@ -44,6 +50,7 @@ export const DEFAULT_COMPACTION_TUNER_SETTINGS: CompactionTunerSettings = {
   enabled: false,
   thresholdPercent: 75,
   customInstructions: "",
+  summaryModels: [],
   rearmMarginPercent: 5,
   notifyOnTrigger: true,
 };
@@ -66,6 +73,27 @@ function clampThreshold(n: number): number {
   return Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, n));
 }
 
+function asStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((v) => typeof v === "string" ? v.trim() : "")
+      .filter((v) => v.length > 0);
+  }
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+}
+
+function dedupeStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
 export function resolveCompactionTunerSettings(): CompactionTunerSettings {
   const raw = loadPiStackSettings();
   const block = (raw.compactionTuner ?? {}) as Record<string, unknown>;
@@ -73,10 +101,17 @@ export function resolveCompactionTunerSettings(): CompactionTunerSettings {
   const customInstructions = typeof block.customInstructions === "string"
     ? block.customInstructions
     : def.customInstructions;
+  const hasSummaryModelsKey = Object.prototype.hasOwnProperty.call(block, "summaryModels");
+  const explicitSummaryModels = asStringList(block.summaryModels);
+  const legacySummaryModel = asStringList(block.summaryModel);
+  const summaryModels = dedupeStrings(
+    hasSummaryModelsKey ? explicitSummaryModels : legacySummaryModel,
+  );
   return {
     enabled: asBoolean(block.enabled, def.enabled),
     thresholdPercent: clampThreshold(asNumber(block.thresholdPercent, def.thresholdPercent)),
     customInstructions,
+    summaryModels,
     rearmMarginPercent: Math.max(0, asNumber(block.rearmMarginPercent, def.rearmMarginPercent)),
     notifyOnTrigger: asBoolean(block.notifyOnTrigger, def.notifyOnTrigger),
   };
@@ -90,5 +125,6 @@ export function snapshotCompactionTunerSettings(s: CompactionTunerSettings): Rec
     rearmMarginPercent: s.rearmMarginPercent,
     notifyOnTrigger: s.notifyOnTrigger,
     hasCustomInstructions: s.customInstructions.length > 0,
+    summaryModels: s.summaryModels,
   };
 }

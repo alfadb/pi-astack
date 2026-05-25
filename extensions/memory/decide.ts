@@ -10,15 +10,21 @@
  * "how was this entry treated last 30 days?" — ADR 0026 §3.4. Counts are
  * surfaced raw; the LLM (not a threshold) judges weight.
  *
- * Still deferred to P1.B+:
- *   - Contradiction detection (§3.3)
- *   - Provisional staging exclusion (§3.2 ⚠️ warning)
- *   - Echo-chamber circuit breaker (§3.4 footer)
+ * P1.B (this commit): adds prompt-level contradiction detection (§3.3)
+ * using entry confidence/status metadata already passed into the brief.
+ *
+ * Echo-chamber breaker (§3.4 footer) is implemented as a minimal read-side
+ * advisory: five consecutive decisive self-reports in the recent activity
+ * window mark the entry as pending reconfirmation in the brief prompt.
+ *
+ * Provisional staging exclusion (§3.2) is enforced at retrieval time by
+ * memory_decide's `status: ["active"]` search filter.
  */
 
 import type { MemorySettings } from "./settings";
 import type { MemoryEntry } from "./types";
 import type { EntryActivityStats } from "../sediment/outcome-collector";
+import { sanitizeForMemory } from "../sediment/sanitizer";
 
 // ── Prompt ────────────────────────────────────────────────────────────────
 
@@ -45,12 +51,48 @@ function renderActivitySection(activity: EntryActivityStats[] | undefined, windo
     if (a.decisive_count > 0) parts.push(`decisive=${a.decisive_count}`);
     if (a.confirmatory_count > 0) parts.push(`confirmatory=${a.confirmatory_count}`);
     if (a.retrieved_unused_count > 0) parts.push(`retrieved_unused=${a.retrieved_unused_count}`);
+    if (a.decisive_streak > 0) parts.push(`decisive_streak=${a.decisive_streak}`);
+    if (a.possible_echo_chamber) parts.push("possible_echo_chamber=true");
     if (a.total_retrievals > 0) parts.push(`total_retrievals=${a.total_retrievals}`);
     const summary = parts.length > 0 ? parts.join(", ") : "no signals";
     const lastSeen = a.last_seen ? `, last_seen=${a.last_seen}` : "";
     return `- ${a.slug}: ${summary}${lastSeen}`;
   });
   return lines.join("\n");
+}
+
+/**
+ * Build the retrieval query used by memory_decide before synthesis.
+ *
+ * Important: the decision context alone often omits the words that matter
+ * for recall (e.g. context says "deployment target" while options contain
+ * "Vercel" / "Fly.io", or constraints mention "cron" / "monorepo").
+ * Include options and constraints in the natural-language query so the LLM
+ * retrieval stage can match memories across all decision inputs.
+ */
+export function buildDecisionSearchQuery(args: {
+  context: string;
+  options: string[];
+  constraints: string;
+}): string {
+  const context = (args.context || "").trim();
+  const options = (args.options || []).map((item) => item.trim()).filter(Boolean);
+  const constraints = (args.constraints || "").trim();
+
+  return [
+    "Decision support retrieval request.",
+    "Find memories about the user's documented preferences, prior decisions, tradeoffs, regrets, and constraints that could inform this choice.",
+    "Retrieve semantically related memories even when wording differs across Chinese/English or across product/library names.",
+    "",
+    "Decision context:",
+    context || "(not specified)",
+    "",
+    "Options under consideration:",
+    options.length > 0 ? options.map((option) => `- ${option}`).join("\n") : "(none explicitly listed)",
+    "",
+    "Constraints / requirements:",
+    constraints || "(none stated)",
+  ].join("\n").trim();
 }
 
 /**
@@ -62,15 +104,12 @@ function renderActivitySection(activity: EntryActivityStats[] | undefined, windo
  *
  * Still deferred:
  *   - Contradiction detection (§3.3)
- *   - Provisional staging guard (§3.2): only `status: active` pre-filter
- *     applies at the search layer; we don't yet inspect
- *     attribution_pending=true at this layer.
  */
 export function buildDecisionBriefPrompt(args: {
   context: string;
   options: string[];
   constraints: string;
-  entries: Array<{ slug: string; title: string; kind: string; compiledTruth: string }>;
+  entries: Array<{ slug: string; title: string; kind: string; compiledTruth: string; status?: string; confidence?: number; created?: string; updated?: string; timeline?: string[]; frontmatter?: Record<string, unknown> }>;
   activity?: EntryActivityStats[];
   activityWindowDays?: number;
 }): string {
@@ -85,12 +124,26 @@ export function buildDecisionBriefPrompt(args: {
         [
           `## ${e.slug} (${e.kind})`,
           `### ${e.title}`,
+          `metadata: status=${e.status ?? "unknown"} | confidence=${e.confidence ?? "unknown"}${e.updated ? ` | updated=${e.updated}` : ""}${e.created ? ` | created=${e.created}` : ""}`,
           e.compiledTruth,
+          e.timeline && e.timeline.length > 0 ? `\nRecent timeline:\n${e.timeline.slice(-3).join("\n")}` : "",
         ].join("\n"),
       ).join("\n\n---\n\n")
     : "(no relevant memories found)";
 
   const activityText = renderActivitySection(args.activity, windowDays);
+  const retrievalCaveat = args.activity?.some((a) => a.total_retrievals > 1)
+    ? "Note: total_retrievals counts tool invocations, not unique sessions; a long session with repeated searches can inflate it."
+    : "";
+  const activeEntries = args.entries.filter((e) => (e.status ?? "active") === "active");
+  const highConfidenceContradictionCandidates = activeEntries
+    .filter((e) => (e.confidence ?? 0) >= 7)
+    .map((e) => `- ${e.slug}: kind=${e.kind}, confidence=${e.confidence ?? "unknown"}, title=${e.title}`)
+    .join("\n") || "(none — no high-confidence active memories in this brief)";
+  const lowerConfidenceContradictionCandidates = activeEntries
+    .filter((e) => (e.confidence ?? 0) < 7)
+    .map((e) => `- ${e.slug}: kind=${e.kind}, confidence=${e.confidence ?? "unknown"}, title=${e.title}`)
+    .join("\n") || "(none)";
 
   return [
     "You are the second brain's decision advisor. You are speaking to the",
@@ -115,6 +168,7 @@ export function buildDecisionBriefPrompt(args: {
     "",
     `=== RECENT USAGE OF THESE ENTRIES (last ${windowDays} days, from outcome self-reports) ===`,
     activityText,
+    retrievalCaveat,
     "",
     "How to read RECENT USAGE counts (ADR 0026 §3.4):",
     "  - decisive   = LLM said \"without this entry I would have made a different decision\"",
@@ -122,19 +176,35 @@ export function buildDecisionBriefPrompt(args: {
     "  - retrieved_unused = LLM retrieved the entry but did not act on it",
     "  - total_retrievals = times the entry surfaced via search/get/decide tools",
     "  Use these as a SOFT signal:",
-    "    - many decisive recently → entry actively shapes behavior; treat as live preference",
+    "    - many decisive recently → assistant behavior has been shaped by this entry; this is NOT user reconfirmation",
+    "    - possible_echo_chamber=true → downgrade language to pending reconfirmation; do NOT call it a clear/current user preference unless the entry text itself explicitly says so",
     "    - many confirmatory but no decisive → entry agrees with user's independent reasoning; OK to cite",
     "    - many retrieved_unused → entry surfaces in search but LLM keeps rejecting it; suspect stale/wrong",
     "    - zero activity → entry is new OR cold; do NOT downweight to zero just because counts are zero",
     "  Do NOT apply hard thresholds (e.g. \"decisive_count<3 → ignore\"). Weighting is judgment, not arithmetic.",
+    "",
+    "=== CONTRADICTION CHECK INPUTS (ADR 0026 §3.3) ===",
+    "High-confidence active memories that may represent explicit preferences / constraints:",
+    highConfidenceContradictionCandidates,
+    "",
+    "Lower-confidence active memories (do not ignore, but cite uncertainty if used as a contradiction signal):",
+    lowerConfidenceContradictionCandidates,
+    "",
+    "Before recommending, compare OPTIONS + CONSTRAINTS against these memories.",
+    "A contradiction is a direct conflict with an explicit user preference, maxim, anti-pattern, or prior decision (confidence >= 7, status=active).",
+    "If an option conflicts, cite the memory slug and state the conflict. If the memory is merely related or weak, do not invent a contradiction.",
     "",
     "=== YOUR TASK ===",
     "Write a decision brief (≤500 tokens). Structure:",
     "",
     "1. RELEVANT PREFERENCES — what has the user explicitly stated about",
     "   this topic? Quote the specific memory entry when possible. If a",
-    "   memory looks high-decisive in RECENT USAGE, mark it as a strong",
-    "   live preference; if mostly retrieved_unused, flag it as suspect.",
+    "   memory looks high-decisive in RECENT USAGE, say it has shaped recent",
+    "   assistant decisions, but do not upgrade it to a user-confirmed live",
+    "   preference unless the memory itself records an explicit preference.",
+    "   If possible_echo_chamber=true, explicitly say: 'previously used often,",
+    "   not recently reaffirmed by the user' and avoid strong recommendation",
+    "   language. If mostly retrieved_unused, flag it as suspect.",
     "",
     "2. RELEVANT EXPERIENCES — what happened when the user made similar",
     "   choices before? Were there regrets, pivots, or confirmations?",
@@ -144,7 +214,12 @@ export function buildDecisionBriefPrompt(args: {
     "   long-term patterns? If evidence is too thin to recommend, say so",
     "   explicitly.",
     "",
-    "4. CAVEATS — what might you be missing? Are the memories stale",
+    "4. CONTRADICTION CHECK — do any options directly conflict with a",
+    "   high-confidence active memory above? If yes, cite the slug and state",
+    "   the conflict plainly. If no direct conflict, say 'No direct",
+    "   contradiction detected'.",
+    "",
+    "5. CAVEATS — what might you be missing? Are the memories stale",
     "   (last_seen is far back, or zero activity)? Could the user's",
     "   preferences have changed? Is this a different context than the",
     "   memories describe?",
@@ -185,6 +260,13 @@ export interface MemoryDecideResult {
   brief?: string;
   error?: string;
   entryCount: number;
+  /** Slugs of entries included in the decision brief prompt. Returned to
+   *  memory_decide's tool result so outcome-collector can record retrieval
+   *  counts mechanically, without asking the LLM to reconstruct which entries
+   *  were consulted. */
+  entrySlugs?: string[];
+  /** Stable per-call id for future decision_brief_id outcome linkage. */
+  decisionBriefId?: string;
 }
 
 /**
@@ -198,7 +280,7 @@ export async function runMemoryDecide(args: {
   context: string;
   options: string[];
   constraints: string;
-  searchResults: Array<{ slug: string; title: string; kind: string; compiledTruth: string }>;
+  searchResults: Array<{ slug: string; title: string; kind: string; compiledTruth: string; status?: string; confidence?: number; created?: string; updated?: string; timeline?: string[]; frontmatter?: Record<string, unknown> }>;
   /** ADR 0026 §3.4 outcome activity per slug, ordered to match searchResults. */
   activity?: EntryActivityStats[];
   /** Window for the activity stats label in the prompt. Default 30. */
@@ -209,11 +291,16 @@ export async function runMemoryDecide(args: {
 }): Promise<MemoryDecideResult> {
   const { context, options, constraints, searchResults, activity, activityWindowDays, settings, modelRegistry, signal } = args;
 
+  const entrySlugs = searchResults.map((entry) => entry.slug);
+  const decisionBriefId = `decision-brief-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
   if (!searchResults || searchResults.length === 0) {
     return {
       ok: true,
       brief: "No relevant memories found for this decision context.",
       entryCount: 0,
+      entrySlugs: [],
+      decisionBriefId,
     };
   }
 
@@ -221,7 +308,7 @@ export async function runMemoryDecide(args: {
   // P1 can switch to a dedicated decideModel.
   const modelRef = parseModelRef(settings.search.stage1Model);
   if (!modelRef) {
-    return { ok: false, error: `invalid memory.search.stage1Model: ${settings.search.stage1Model}`, entryCount: searchResults.length };
+    return { ok: false, error: `invalid memory.search.stage1Model: ${settings.search.stage1Model}`, entryCount: searchResults.length, entrySlugs, decisionBriefId };
   }
 
   const registry = modelRegistry as {
@@ -231,12 +318,12 @@ export async function runMemoryDecide(args: {
 
   const model = registry.find(modelRef.provider, modelRef.id);
   if (!model) {
-    return { ok: false, error: `memory_decide model not found: ${settings.search.stage1Model}`, entryCount: searchResults.length };
+    return { ok: false, error: `memory_decide model not found: ${settings.search.stage1Model}`, entryCount: searchResults.length, entrySlugs, decisionBriefId };
   }
 
   const auth = await registry.getApiKeyAndHeaders(model);
   if (!auth.ok || !auth.apiKey) {
-    return { ok: false, error: `memory_decide auth unavailable: ${auth.error || "missing api key"}`, entryCount: searchResults.length };
+    return { ok: false, error: `memory_decide auth unavailable: ${auth.error || "missing api key"}`, entryCount: searchResults.length, entrySlugs, decisionBriefId };
   }
 
   const prompt = buildDecisionBriefPrompt({
@@ -247,6 +334,10 @@ export async function runMemoryDecide(args: {
     activity,
     activityWindowDays,
   });
+  const sanitizedPrompt = sanitizeForMemory(prompt);
+  if (!sanitizedPrompt.ok) {
+    return { ok: false, error: sanitizedPrompt.error || "memory_decide prompt sanitize failed", entryCount: searchResults.length, entrySlugs, decisionBriefId };
+  }
 
   const piAi: {
     streamSimple(
@@ -258,13 +349,13 @@ export async function runMemoryDecide(args: {
 
   const stream = piAi.streamSimple(
     model,
-    { messages: [{ role: "user", content: [{ type: "text", text: prompt }] }] },
+    { messages: [{ role: "user", content: [{ type: "text", text: sanitizedPrompt.text ?? prompt }] }] },
     { apiKey: auth.apiKey, headers: auth.headers, signal, timeoutMs: 60_000, maxRetries: 1 },
   );
 
   const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
-    return { ok: false, error: finalMsg.errorMessage || finalMsg.stopReason || "memory_decide failed", entryCount: searchResults.length };
+    return { ok: false, error: finalMsg.errorMessage || finalMsg.stopReason || "memory_decide failed", entryCount: searchResults.length, entrySlugs, decisionBriefId };
   }
 
   const brief = (finalMsg.content ?? [])
@@ -274,8 +365,8 @@ export async function runMemoryDecide(args: {
     .trim();
 
   if (!brief) {
-    return { ok: false, error: "memory_decide returned empty text", entryCount: searchResults.length };
+    return { ok: false, error: "memory_decide returned empty text", entryCount: searchResults.length, entrySlugs, decisionBriefId };
   }
 
-  return { ok: true, brief, entryCount: searchResults.length };
+  return { ok: true, brief, entryCount: searchResults.length, entrySlugs, decisionBriefId };
 }

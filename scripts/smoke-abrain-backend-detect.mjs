@@ -450,6 +450,7 @@ const vaultWriterSrc = path.join(repoRoot, "extensions/abrain/vault-writer.ts");
 const vaultReaderSrc = path.join(repoRoot, "extensions/abrain/vault-reader.ts");
 const vaultBashSrc = path.join(repoRoot, "extensions/abrain/vault-bash.ts");
 const brainLayoutSrc = path.join(repoRoot, "extensions/abrain/brain-layout.ts");
+const ruleInjectorSrc = path.join(repoRoot, "extensions/abrain/rule-injector/index.ts");
 fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapSrc));
 fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
@@ -483,6 +484,10 @@ fs.copyFileSync(path.join(tmpDir, "vault-reader.cjs"), path.join(tmpDir, "vault-
 fs.copyFileSync(path.join(tmpDir, "brain-layout.cjs"), path.join(tmpDir, "brain-layout.js"));
 fs.copyFileSync(path.join(tmpDir, "git-sync.cjs"), path.join(tmpDir, "git-sync.js"));
 fs.copyFileSync(path.join(tmpDir, "redact.cjs"), path.join(tmpDir, "redact.js"));
+// ADR 0023-R5: abrain/index.ts imports ./rule-injector. Stage the leaf
+// module and its extensionless shim; relative imports are rewritten below
+// after _shared + memory helper modules are staged.
+fs.mkdirSync(path.join(tmpDir, "rule-injector"), { recursive: true });
 // ADR 0022 P2: abrain/index.ts activate() lazy-requires the prompt-user
 // subtree when toolRegistry.registerTool is present. Mirror the layout.
 const promptUserDir = path.join(tmpDir, "prompt-user");
@@ -501,6 +506,24 @@ const sharedTargetDir = path.join(tmpDir, "_shared");
 fs.mkdirSync(sharedTargetDir, { recursive: true });
 fs.writeFileSync(path.join(sharedTargetDir, "runtime.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/runtime.ts")));
 fs.copyFileSync(path.join(sharedTargetDir, "runtime.cjs"), path.join(sharedTargetDir, "runtime.js"));
+const memoryTargetDir = path.join(tmpDir, "memory");
+fs.mkdirSync(memoryTargetDir, { recursive: true });
+for (const m of ["parser", "utils", "settings"]) {
+  const cjsPath = path.join(memoryTargetDir, `${m}.cjs`);
+  fs.writeFileSync(cjsPath, transpileTsToCjs(path.join(repoRoot, "extensions/memory", `${m}.ts`)));
+  fs.copyFileSync(cjsPath, path.join(memoryTargetDir, `${m}.js`));
+}
+const footerStatusPath = path.join(sharedTargetDir, "footer-status.cjs");
+fs.writeFileSync(footerStatusPath, transpileTsToCjs(path.join(repoRoot, "extensions/_shared/footer-status.ts")));
+fs.copyFileSync(footerStatusPath, path.join(sharedTargetDir, "footer-status.js"));
+let ruleInjectorCompiled = transpileTsToCjs(ruleInjectorSrc)
+  .replace(/require\("\.\.\/\.\.\/_shared\/footer-status"\)/g, 'require("../_shared/footer-status.cjs")')
+  .replace(/require\("\.\.\/\.\.\/_shared\/runtime"\)/g, 'require("../_shared/runtime.cjs")')
+  .replace(/require\("\.\.\/\.\.\/memory\/parser"\)/g, 'require("../memory/parser.cjs")')
+  .replace(/require\("\.\.\/\.\.\/memory\/utils"\)/g, 'require("../memory/utils.cjs")');
+fs.writeFileSync(path.join(tmpDir, "rule-injector", "index.cjs"), ruleInjectorCompiled);
+fs.copyFileSync(path.join(tmpDir, "rule-injector", "index.cjs"), path.join(tmpDir, "rule-injector", "index.js"));
+fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), 'module.exports = require("./rule-injector/index.cjs");\n');
 
 const indexSrc = path.join(repoRoot, "extensions/abrain/index.ts");
 let indexCompiled = transpileTsToCjs(indexSrc);
@@ -515,6 +538,7 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\/vault-authorize"\)/g, 'require("./vault-authorize.cjs")')
+  .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector/index.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);

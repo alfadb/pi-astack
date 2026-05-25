@@ -118,8 +118,14 @@ Vendor dirs are git submodules. Treat them as read-only source material; port id
 │       ├── staging/
 │       ├── archive/
 │       ├── workflows/
+│       ├── rules/                    # ADR 0023-R5 read-path: project session-start rules
+│       │   ├── always/
+│       │   └── listed/
 │       └── vault/
 ├── knowledge/
+├── rules/                            # ADR 0023-R5 read-path: global session-start rules
+│   ├── always/
+│   └── listed/
 ├── vault/
 ├── .vault-identity/             # abrain-age-key (Tier 1 default, ADR 0019)
 │   ├── master.age               # 0600 — gitignored, never leaves the host without explicit scp
@@ -140,6 +146,7 @@ Notes:
 - `~/.abrain/projects/<id>/` is current project memory SOT.
 - `~/.abrain/knowledge/` is world/cross-project knowledge.
 - `~/.abrain/workflows/` is cross-project workflows.
+- `~/.abrain/rules/{always,listed}/` and `~/.abrain/projects/<id>/rules/{always,listed}/` are ADR 0023-R5 read-only injection sources. They are pushed into the main-session system prompt; automatic rule lifecycle writing is intentionally deferred.
 - `~/.abrain/.state/` is local runtime state, not memory truth.
 - Vault encrypted files are not ordinary memory entries.
 - `.vault-identity/master.age` is the abrain-age-key Tier 1 default introduced in ADR 0019 (no longer parasitic on `~/.ssh/id_*`). Cross-device: user manually `scp` the file with `chmod 0600`.
@@ -176,6 +183,7 @@ smoke-abrain-bootstrap.mjs
 smoke-abrain-git-sync.mjs
 smoke-abrain-i18n.mjs
 smoke-abrain-redact.mjs
+smoke-abrain-rule-injector.mjs
 smoke-abrain-secret-scope.mjs
 smoke-abrain-vault-bash.mjs
 smoke-abrain-vault-grant-isolation.mjs
@@ -199,7 +207,7 @@ smoke-vault-subpi-isolation.mjs
 smoke-vision.mjs
 ```
 
-Current count: **27** files, one per `package.json#scripts:smoke:*` entry. Drift history: 2026-05-19 ADR 0022 batch C 17 → 25 (+8: `grant-isolation`, `redact`, `compaction-tuner-prompt-user`, `dispatch-output-format`, `prompt-user`, `prompt-user-finalizer`, `prompt-user-option-list`, `prompt-user-subpi`); 2026-05-20 `persistent-input-history` 25 → 26; 2026-05-20 `compaction-tuner-vault-defer` 26 → 27 (ADR 0022 Batch B D7).
+Current count: **28** files, one per `package.json#scripts:smoke:*` entry. Drift history: 2026-05-19 ADR 0022 batch C 17 → 25 (+8: `grant-isolation`, `redact`, `compaction-tuner-prompt-user`, `dispatch-output-format`, `prompt-user`, `prompt-user-finalizer`, `prompt-user-option-list`, `prompt-user-subpi`); 2026-05-20 `persistent-input-history` 25 → 26; 2026-05-20 `compaction-tuner-vault-defer` 26 → 27 (ADR 0022 Batch B D7); 2026-05-25 `abrain-rule-injector` 27 → 28 (ADR 0023-R5 read path).
 
 See [reference/smoke-tests.md](./reference/smoke-tests.md).
 

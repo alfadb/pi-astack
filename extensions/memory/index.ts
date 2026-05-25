@@ -20,7 +20,7 @@ import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./ty
 import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
 import { llmSearchEntries } from "./llm-search";
-import { runMemoryDecide } from "./decide";
+import { buildDecisionSearchQuery, runMemoryDecide } from "./decide";
 import { readOutcomeLedger, summarizeEntryActivity } from "../sediment/outcome-collector";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";
@@ -31,6 +31,8 @@ import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuild
 import { formatMarkdownIndexRebuildReport, rebuildMarkdownIndex } from "./index-file";
 import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
 import { resolveActiveProject } from "../_shared/runtime";
+
+const MEMORY_FOOTNOTE_PROTOCOL_VERSION = "memory-footnote-v1";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tool result wrapper.
@@ -529,20 +531,45 @@ export default function (pi: ExtensionAPI) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
 
-      // Step 1: search for relevant memories
+      // Step 1: search for relevant memories. Include options and constraints
+      // in the retrieval query; the bare context often omits key recall terms
+      // (library names, deployment targets, hard requirements) that decide
+      // whether a memory is relevant.
+      const decisionSearchQuery = buildDecisionSearchQuery({
+        context: params.context,
+        options: params.options,
+        constraints: params.constraints,
+      });
       let searchCards: Array<{ slug: unknown }>;
       try {
         const result = await llmSearchEntries(
           entries,
-          { query: params.context, filters: { limit: 8, status: ["active"] } },
+          { query: decisionSearchQuery, filters: { limit: 8, status: ["active"] } },
           settings,
           ctx.modelRegistry,
           signal,
           ctx.cwd,
         );
-        searchCards = (result as any)?.ok === false ? [] : (result as Array<{ slug: unknown }> ?? []);
-      } catch {
-        searchCards = [];
+        if ((result as any)?.ok === false) {
+          const message = String((result as any).error ?? "memory_decide retrieval failed");
+          return wrapToolResult({
+            ok: false,
+            error: message,
+            entryCount: 0,
+            _meta: { entrySlugs: [], decisionBriefId: result && typeof (result as any).decisionBriefId === "string" ? (result as any).decisionBriefId : undefined },
+            hint: "memory_decide retrieval failed. Do not infer absence of relevant memories; fall back to memory_search only after fixing retrieval availability.",
+          });
+        }
+        searchCards = result as Array<{ slug: unknown }> ?? [];
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        return wrapToolResult({
+          ok: false,
+          error: message || "memory_decide retrieval failed",
+          entryCount: 0,
+          _meta: { entrySlugs: [], decisionBriefId: undefined },
+          hint: "memory_decide retrieval failed. Do not infer absence of relevant memories; fall back to memory_search only after fixing retrieval availability.",
+        });
       }
 
       // Step 2: load full entries from slugs
@@ -554,7 +581,13 @@ export default function (pi: ExtensionAPI) {
         slug: entry.slug,
         title: entry.title,
         kind: entry.kind,
+        status: entry.status,
+        confidence: entry.confidence,
+        created: entry.created,
+        updated: entry.updated,
         compiledTruth: entry.compiledTruth,
+        timeline: entry.timeline,
+        frontmatter: entry.frontmatter,
       }));
 
       // Step 2.5 (ADR 0026 §3.4 P1.A): outcome activity summary.
@@ -602,6 +635,12 @@ export default function (pi: ExtensionAPI) {
           ok: false,
           error: result.error,
           entryCount: result.entryCount,
+          _meta: {
+            // LLM-visible bookkeeping (wrapToolResult serializes payload to text),
+            // not a hidden side channel. Keep it minimal.
+            entrySlugs: result.entrySlugs ?? searchResults.map((r) => r.slug),
+            decisionBriefId: result.decisionBriefId,
+          },
           hint: "memory_decide LLM call failed. Fall back to memory_search + manual synthesis.",
         });
       }
@@ -610,6 +649,12 @@ export default function (pi: ExtensionAPI) {
         ok: true,
         brief: result.brief,
         entryCount: result.entryCount,
+        _meta: {
+          // LLM-visible bookkeeping (wrapToolResult serializes payload to text),
+          // not a hidden side channel. Keep it minimal.
+          entrySlugs: result.entrySlugs ?? searchResults.map((r) => r.slug),
+          decisionBriefId: result.decisionBriefId,
+        },
         hint: "This is a synthesized decision brief based on the user's documented history. The LLM should treat it as expert advice, not as a binding command.",
       });
     },
@@ -642,15 +687,20 @@ export default function (pi: ExtensionAPI) {
     const current = event.systemPrompt ?? "";
     if (current.includes(MEMORY_INJECT_MARKER)) return undefined;
     const block = `${MEMORY_INJECT_MARKER}
+<!-- protocol_version: ${MEMORY_FOOTNOTE_PROTOCOL_VERSION} -->
 ## memory-footnote：使用记忆条目的自我报告
 
 当你在回复过程中调用了 \`memory_search\` / \`memory_get\` /
-\`memory_decide\` 并实际使用了返回的记忆条目时，在回复最末尾
-附加一个隐藏 fenced block：
+\`memory_decide\` 并获得了记忆条目时，在回复最末尾为每条你实际
+纳入判断的条目附加一个 \`memory-footnote\` fenced block：用过就标
+\`decisive\` / \`confirmatory\`，检索到了但最终没用就标
+\`retrieved-unused\` 并解释原因。它允许用户感知第二大脑参与了判断，
+同时给 sediment outcome-ledger 提供归因信号：
 
 \`\`\`memory-footnote
 entry: <slug>
 used: decisive | confirmatory | retrieved-unused
+decision_brief_id: <如果来自 memory_decide 返回的 decisionBriefId，可选填>
 counterfactual: <如果这条记忆不在上下文里，你会做什么不同的决定？
   decisive=引用具体行为差异，confirmatory="相同决定"，
   retrieved-unused=解释为什么没用>
@@ -660,34 +710,27 @@ counterfactual: <如果这条记忆不在上下文里，你会做什么不同的
 - \`confirmatory\` = 你本来就会做这个决定，记忆只是印证
 - \`retrieved-unused\` = 你搜到了但没用，解释原因
 - 默认偏向 \`confirmatory\`：能说清 counterfactual 才标 \`decisive\`
-- 如果没实际使用任何记忆条目，不写 footnote
+- 如果某条已检索记忆进入了你的判断范围但没有被采用，写 \`retrieved-unused\`，不要静默省略
+- 只有当本轮没有任何记忆条目进入判断范围时，才不写 footnote
 
 这是给第二大脑追踪条目使用情况的内部信号，正常回复给用户，
 不用总结它。
 
-## 决策点优先调 memory_decide
+## memory_decide：高价值决策时可拉取第二大脑建议
 
-在遇到以下场景**之前**，先调一次 \`memory_decide(context=...)\`、
-让第二大脑给你一份决策参考，再推进：
+当你已经处在一个**反转成本不低**的决策点，且用户的历史偏好、
+过去踩坑或长期工作流可能改变判断时，可以调用
+\`memory_decide(context=...)\` 取得一份决策参考。
 
-- 技术选型："用 X 还是 Y" / "这个项目用什么框架/语言/库"
-- 架构决策：模块拆分、数据模型、接口设计、持久化选型
-- 工作流选择：CI/CD、部署方式、测试策略、分支策略
-- 工具选择：多个能达成同一目的的软件/脚手架中选一个
-- 你即将调 \`prompt_user\` 让用户决定选项之前
+典型适用：技术/框架/工具/架构/工作流选择，或即将让用户做会影响
+后续实现路径的选择。把它视为 Path B：由你判断需要时主动拉取，
+不是每个疑似决策点都必须调用，也不是自动打断流程。
 
-**不需要**调的场景（避免浪费 token）：
+通常不需要调用：执行类指令、纯信息查询、机械小改动、调试指定问题，
+或你已经调过 \`memory_search\` 并取得足够原始证据。
 
-- 执行类指令："帮我写个 README" / "跳过这个文件的 import" / 调试指定问题
-- 纯信息查询："这个函数的 API 是什么" / "看一下这个文件"
-- 任务中间的机械步骤：改一行代码、改一个变量名
-- 你已经调过 \`memory_search\` 拿到足够原始证据，不需要额外综合
-
-原则：**你即将为用户做一个反转成本不低的选择时，
-不要假设你记得用户的偏好**。memory_decide 的席主席是让你
-看到"用户过去 3 个月在同类决定上的取舍轨迹"，而不是仅仅服从
-你本轮上下文里最容易想到的选项。你仍是决定者，decision brief
-是一份参考意见，不是命令。
+原则：不要假设你记得用户的偏好；但也不要为了形式而调用。
+brief 是专家建议，不是命令。
 `;
     return { systemPrompt: current + "\n\n" + block };
   });

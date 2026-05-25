@@ -37,7 +37,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { STAGING_DIR } from "./staging-loader";
+import { stagingDir } from "./staging-loader";
 import type {
   MultiviewPendingEntry,
   MultiviewPendingFileOnDisk,
@@ -235,10 +235,11 @@ export function writeMultiviewPending(entry: MultiviewPendingEntry): string {
   }
 
   const capped = applyFieldCaps(entry);
-  fs.mkdirSync(STAGING_DIR, { recursive: true });
+  const dir = stagingDir();
+  fs.mkdirSync(dir, { recursive: true });
 
   const filename = buildFilename(capped);
-  const absPath = path.join(STAGING_DIR, filename);
+  const absPath = path.join(dir, filename);
   const file: MultiviewPendingFileOnDisk = {
     schema_version: MULTIVIEW_PENDING_SCHEMA_VERSION,
     entry: capped,
@@ -289,20 +290,21 @@ export function loadMultiviewPending(): MultiviewPendingLoadResult {
   const entries: MultiviewPendingEntry[] = [];
   let skippedCount = 0;
 
-  if (!fs.existsSync(STAGING_DIR)) {
+  const dir = stagingDir();
+  if (!fs.existsSync(dir)) {
     return { entries, totalFound: 0, skippedCount: 0 };
   }
 
   let files: string[];
   try {
-    files = fs.readdirSync(STAGING_DIR).filter((f) => f.endsWith(".json"));
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
   } catch {
     return { entries, totalFound: 0, skippedCount: 0 };
   }
 
   for (const file of files) {
     try {
-      const raw = fs.readFileSync(path.join(STAGING_DIR, file), "utf-8");
+      const raw = fs.readFileSync(path.join(dir, file), "utf-8");
       const parsed = JSON.parse(raw) as Partial<MultiviewPendingFileOnDisk>;
 
       // Schema version guard: skip unknown versions (forward compat
@@ -374,18 +376,19 @@ export function loadMultiviewPending(): MultiviewPendingLoadResult {
  * stronger contract is needed later, add a variant that throws.
  */
 export function deleteMultiviewPending(slug: string): boolean {
-  if (!fs.existsSync(STAGING_DIR)) return false;
+  const dir = stagingDir();
+  if (!fs.existsSync(dir)) return false;
   const suffix = `-${slug}.json`;
 
   try {
-    const files = fs.readdirSync(STAGING_DIR);
+    const files = fs.readdirSync(dir);
     const matches = files.filter((f) => f.endsWith(suffix));
     if (matches.length === 0) return false;
 
     let deletedAny = false;
     for (const f of matches) {
       try {
-        fs.unlinkSync(path.join(STAGING_DIR, f));
+        fs.unlinkSync(path.join(dir, f));
         deletedAny = true;
       } catch {
         // continue trying others (pathological dup case)
@@ -429,19 +432,20 @@ export function updateMultiviewPendingAttempts(
   newAttempts: number,
   lastAttemptIso: string,
 ): boolean {
-  if (!fs.existsSync(STAGING_DIR)) return false;
+  const dir = stagingDir();
+  if (!fs.existsSync(dir)) return false;
   const suffix = `-${slug}.json`;
 
   let matchedFile: string | null = null;
   try {
-    const files = fs.readdirSync(STAGING_DIR);
+    const files = fs.readdirSync(dir);
     matchedFile = files.find((f) => f.endsWith(suffix)) ?? null;
   } catch {
     return false;
   }
   if (!matchedFile) return false;
 
-  const absPath = path.join(STAGING_DIR, matchedFile);
+  const absPath = path.join(dir, matchedFile);
   let parsed: MultiviewPendingFileOnDisk;
   try {
     const raw = fs.readFileSync(absPath, "utf-8");
@@ -485,10 +489,11 @@ export function updateMultiviewPendingAttempts(
  * because count is monitoring / observability use, not gate-keeping.
  */
 export function countMultiviewPending(): number {
-  if (!fs.existsSync(STAGING_DIR)) return 0;
+  const dir = stagingDir();
+  if (!fs.existsSync(dir)) return 0;
   try {
     return fs
-      .readdirSync(STAGING_DIR)
+      .readdirSync(dir)
       .filter((f) => f.includes("-multiview-pending-") && f.endsWith(".json"))
       .length;
   } catch {

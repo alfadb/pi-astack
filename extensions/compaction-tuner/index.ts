@@ -14,7 +14,8 @@
  *     "thresholdPercent": 75,
  *     "rearmMarginPercent": 5,
  *     "notifyOnTrigger": true,
- *     "customInstructions": ""
+ *     "customInstructions": "",
+ *     "summaryModels": []
  *   }
  *
  * Runtime data:
@@ -25,7 +26,8 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { compact as runPiCompaction } from "@earendil-works/pi-coding-agent";
+import type { CompactionResult, ExtensionAPI, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 // ADR 0022 INV-K: cross-extension defer checks. Both imported from their
 // own leaf modules so smoke can exercise each in isolation. See
 // ./prompt-user-defer.ts and ./vault-defer.ts for the why.
@@ -61,6 +63,26 @@ interface CompactionTunerCtx {
     onComplete?(result?: unknown): void;
     onError?(error: Error): void;
   }): void;
+  modelRegistry?: {
+    find?(provider: string, modelId: string): unknown;
+    getApiKeyAndHeaders?(model: unknown): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }>;
+  };
+}
+
+interface ModelRef {
+  provider: string;
+  id: string;
+}
+
+interface CustomSummaryAttempt {
+  model: string;
+  provider?: string;
+  id?: string;
+  outcome: "completed" | "invalid_ref" | "not_found" | "auth_unavailable" | "missing_api_key" | "context_window_too_small" | "empty_summary" | "error";
+  elapsed_ms?: number;
+  error_message?: string;
+  context_window?: number | null;
+  prompt_tokens_estimate?: number;
 }
 
 /**
@@ -161,6 +183,166 @@ async function appendAudit(projectRoot: string, row: Record<string, unknown>): P
   await fs.appendFile(compactionTunerAuditPath(projectRoot), `${JSON.stringify(enriched)}\n`, "utf-8");
 }
 
+function parseModelRef(ref: string): ModelRef | undefined {
+  const trimmed = ref.trim();
+  const slash = trimmed.indexOf("/");
+  if (slash <= 0 || slash >= trimmed.length - 1) return undefined;
+  return {
+    provider: trimmed.slice(0, slash),
+    id: trimmed.slice(slash + 1),
+  };
+}
+
+function estimatePromptTokensForPreparation(preparation: SessionBeforeCompactEvent["preparation"]): number {
+  const messageChars = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages]
+    .reduce((sum, message) => sum + JSON.stringify(message).length, 0);
+  return Math.ceil((messageChars + (preparation.previousSummary?.length ?? 0)) / 3);
+}
+
+function compactErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
+async function runCustomCompactionSummary(
+  event: SessionBeforeCompactEvent,
+  ctx: CompactionTunerCtx,
+  settings: CompactionTunerSettings,
+  projectRoot: string,
+): Promise<{ compaction: CompactionResult } | undefined> {
+  if (settings.summaryModels.length === 0) return undefined;
+
+  const modelRegistry = ctx.modelRegistry;
+  if (!modelRegistry || typeof modelRegistry.find !== "function" || typeof modelRegistry.getApiKeyAndHeaders !== "function") {
+    await recordSimpleSkip(projectRoot, {
+      operation: "custom_summary",
+      outcome: "unavailable",
+      reason: "model_registry_unavailable",
+      summary_models: settings.summaryModels,
+    });
+    return undefined;
+  }
+
+  const promptTokensEstimate = estimatePromptTokensForPreparation(event.preparation);
+  const attempts: CustomSummaryAttempt[] = [];
+  const started = Date.now();
+
+  for (const ref of settings.summaryModels) {
+    const parsed = parseModelRef(ref);
+    if (!parsed) {
+      attempts.push({ model: ref, outcome: "invalid_ref" });
+      continue;
+    }
+
+    const model = modelRegistry.find(parsed.provider, parsed.id) as { provider?: string; id?: string; contextWindow?: number } | undefined;
+    if (!model) {
+      attempts.push({ model: ref, provider: parsed.provider, id: parsed.id, outcome: "not_found" });
+      continue;
+    }
+
+    const contextWindow = typeof model.contextWindow === "number" ? model.contextWindow : null;
+    if (contextWindow !== null && promptTokensEstimate > Math.floor(contextWindow * 0.92)) {
+      attempts.push({
+        model: ref,
+        provider: parsed.provider,
+        id: parsed.id,
+        outcome: "context_window_too_small",
+        context_window: contextWindow,
+        prompt_tokens_estimate: promptTokensEstimate,
+      });
+      continue;
+    }
+
+    const auth = await modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok) {
+      attempts.push({
+        model: ref,
+        provider: parsed.provider,
+        id: parsed.id,
+        outcome: "auth_unavailable",
+        error_message: compactErrorMessage(auth.error),
+      });
+      continue;
+    }
+    if (!auth.apiKey) {
+      attempts.push({ model: ref, provider: parsed.provider, id: parsed.id, outcome: "missing_api_key" });
+      continue;
+    }
+
+    const attemptStarted = Date.now();
+    try {
+      const compaction = await runPiCompaction(
+        event.preparation,
+        model as never,
+        auth.apiKey,
+        auth.headers,
+        (event.customInstructions ?? settings.customInstructions) || undefined,
+        event.signal,
+      );
+      if (!compaction.summary.trim()) {
+        attempts.push({
+          model: ref,
+          provider: parsed.provider,
+          id: parsed.id,
+          outcome: "empty_summary",
+          elapsed_ms: Date.now() - attemptStarted,
+          context_window: contextWindow,
+          prompt_tokens_estimate: promptTokensEstimate,
+        });
+        continue;
+      }
+      attempts.push({
+        model: ref,
+        provider: parsed.provider,
+        id: parsed.id,
+        outcome: "completed",
+        elapsed_ms: Date.now() - attemptStarted,
+        context_window: contextWindow,
+        prompt_tokens_estimate: promptTokensEstimate,
+      });
+      await recordSimpleSkip(projectRoot, {
+        operation: "custom_summary",
+        outcome: "completed",
+        summary_model: ref,
+        summary_model_provider: parsed.provider,
+        summary_model_id: parsed.id,
+        fallback_index: settings.summaryModels.indexOf(ref),
+        attempt_count: attempts.length,
+        attempts,
+        elapsed_ms: Date.now() - started,
+        tokens_before: event.preparation.tokensBefore,
+        prompt_tokens_estimate: promptTokensEstimate,
+        settings_snapshot: snapshotCompactionTunerSettings(settings),
+      });
+      return { compaction };
+    } catch (error) {
+      attempts.push({
+        model: ref,
+        provider: parsed.provider,
+        id: parsed.id,
+        outcome: "error",
+        error_message: compactErrorMessage(error),
+        elapsed_ms: Date.now() - attemptStarted,
+        context_window: contextWindow,
+        prompt_tokens_estimate: promptTokensEstimate,
+      });
+    }
+  }
+
+  await recordSimpleSkip(projectRoot, {
+    operation: "custom_summary",
+    outcome: "fallback_to_default",
+    reason: "all_summary_models_failed",
+    attempt_count: attempts.length,
+    attempts,
+    elapsed_ms: Date.now() - started,
+    tokens_before: event.preparation.tokensBefore,
+    prompt_tokens_estimate: promptTokensEstimate,
+    settings_snapshot: snapshotCompactionTunerSettings(settings),
+  });
+  return undefined;
+}
+
 function classifyDecision(
   percent: number | null,
   threshold: number,
@@ -184,6 +366,24 @@ export default function (pi: ExtensionAPI) {
   // in sub-pi — sub-agents have their own ephemeral sessions and
   // shouldn't trigger compaction of the parent's context.
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
+  pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: CompactionTunerCtx) => {
+    const settings = resolveCompactionTunerSettings();
+    if (!settings.enabled || settings.summaryModels.length === 0) return undefined;
+    const cwd = path.resolve(ctx.cwd || process.cwd());
+    try {
+      return await runCustomCompactionSummary(event, ctx, settings, cwd);
+    } catch (error) {
+      await recordSimpleSkip(cwd, {
+        operation: "custom_summary",
+        outcome: "fallback_to_default",
+        reason: "custom_summary_hook_threw",
+        error_message: compactErrorMessage(error),
+        settings_snapshot: snapshotCompactionTunerSettings(settings),
+      });
+      return undefined;
+    }
+  });
 
   pi.on("agent_end", async (_event: unknown, ctx: CompactionTunerCtx) => {
     // Capture ctx fields synchronously — pi may invalidate ctx during
@@ -530,6 +730,7 @@ export default function (pi: ExtensionAPI) {
           `rearmMarginPercent: ${settings.rearmMarginPercent}%`,
           `notifyOnTrigger: ${settings.notifyOnTrigger}`,
           `customInstructions: ${settings.customInstructions ? `(${settings.customInstructions.length} chars)` : "(empty)"}`,
+          `summaryModels: ${settings.summaryModels.length > 0 ? settings.summaryModels.join(", ") : "(default — main session model)"}`,
           "",
           `current usage: ${usage?.percent != null ? `${usage.percent.toFixed(1)}% (${usage.tokens}/${usage.contextWindow} tokens)` : "(unknown — no post-compaction usage yet)"}`,
           `model: ${ctx.model?.provider ?? "?"}/${ctx.model?.id ?? "?"}`,

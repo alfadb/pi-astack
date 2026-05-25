@@ -53,6 +53,7 @@ import {
   ensureAbrainStateGitignored,
   ensureBrainLayout,
 } from "./brain-layout";
+import activateRuleInjector from "./rule-injector";
 import {
   fetchAndFF, pushAsync, sync as gitSync, getStatus as getGitSyncStatus,
   formatSyncStatus, type AbrainSyncStatus,
@@ -203,7 +204,10 @@ interface CommandRegistry {
 }
 
 interface EventRegistry {
-  on?: (event: string, handler: (event: any, ctx: { ui?: VaultReleaseUi; signal?: AbortSignal }) => Promise<unknown> | unknown) => void;
+  on?: (
+    event: string,
+    handler: (event: any, ctx: { cwd?: string; ui?: VaultReleaseUi; signal?: AbortSignal }) => Promise<unknown> | unknown,
+  ) => void;
 }
 
 interface ToolRegistry {
@@ -1242,6 +1246,11 @@ export default function activate(pi: ExtensionAPI): void {
   // and surface results via pi's TUI instead of raw stderr. See the
   // comment block on runStartupAutoSync above for rationale.
 
+  // ADR 0023-R5: read-only rules injection. Loaded from abrain so it shares
+  // the same PI_ABRAIN_DISABLED sub-pi boundary and strict project binding.
+  // This registers /rule diagnostic pull commands but no rule write/veto UI.
+  activateRuleInjector(pi);
+
   const registry = pi as unknown as CommandRegistry;
   const toolRegistry = pi as unknown as ToolRegistry;
   const eventRegistry = pi as unknown as EventRegistry;
@@ -1880,7 +1889,7 @@ export default function activate(pi: ExtensionAPI): void {
 
   // /abrain command — project binding (ADR 0017 / B4.5) + git auto-sync (ADR 0020).
   registry.registerCommand("abrain", {
-    description: "Abrain control: /abrain bind [--project=<id>] | /abrain status | /abrain sync",
+    description: "Abrain control: /abrain bind [--project=<id>] | /abrain status | /abrain sync. Rules diagnostics live under /rule list|explain|reload.",
     getArgumentCompletions(prefix: string) {
       const items = ["bind ", "bind --project=", "status", "sync"];
       const filtered = items.filter((item) => item.startsWith(prefix));

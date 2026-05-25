@@ -225,6 +225,18 @@ export async function runCorrectionPipeline(
 ): Promise<CorrectionPipelineResult> {
   const start = Date.now();
 
+  if (!deps.modelRegistry || typeof deps.modelRegistry.find !== "function" || typeof deps.modelRegistry.getApiKeyAndHeaders !== "function") {
+    const modelRef = deps.settings.classifierModel || deps.settings.extractorModel;
+    return {
+      ok: false,
+      model: modelRef,
+      signal: null,
+      error: "model_registry_unavailable",
+      durationMs: Date.now() - start,
+      stagingWritten: false,
+    };
+  }
+
   // 1. Pack conversation window
   const packed = packClassifierWindow(branchEntries);
   const windowText = packedWindowToText(packed);
@@ -275,6 +287,13 @@ export async function runCorrectionPipeline(
     stagingContext: stagingCtx.entries,
     relatedEntries,
   });
+  const promptSanitize = sanitizeForMemory(prompt);
+  if (!promptSanitize.ok) {
+    return {
+      ok: false, model: modelRef, signal: null,
+      error: promptSanitize.error || "classifier prompt sanitize failed", durationMs: Date.now() - start, stagingWritten: false,
+    };
+  }
 
   let rawText = "";
   try {
@@ -288,7 +307,7 @@ export async function runCorrectionPipeline(
 
     const stream = piAi.streamSimple(
       model,
-      { messages: [{ role: "user", content: [{ type: "text", text: prompt }] }] },
+      { messages: [{ role: "user", content: [{ type: "text", text: promptSanitize.text ?? prompt }] }] },
       { apiKey: auth.apiKey, headers: auth.headers, signal: deps.signal, timeoutMs: deps.settings.classifierTimeoutMs, maxRetries: 0 },
     );
 

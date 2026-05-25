@@ -39,6 +39,7 @@ export function buildBranchTranscript(branchEntries: unknown[]): string {
 // <abrainHome>/.state/sediment/, not user-home-derived ~/.pi/.pi-astack/.
 // See _shared/runtime.ts userGlobalSedimentDir + ensureUserGlobalSidecarMigrated.
 import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
+import { getCurrentRuleInjectionNonce, stripCurrentRuleInjection } from "../abrain/rule-injector";
 
 function logExtractorMetrics(entry: {
   ts: string;
@@ -420,9 +421,14 @@ export async function runLlmExtractor(
 ): Promise<LlmExtractorResult> {
   const t0 = Date.now();
   const systemContext = loadSystemContext();
-  const effectiveWindowText = deps.branchEntries
+  const rawWindowText = deps.branchEntries
     ? buildBranchTranscript(deps.branchEntries)
     : windowText;
+  // ADR 0023-R5 INV-R1 layer 1: if the main-session injected rules
+  // section appears in transcript messages, strip ONLY the current
+  // session nonce before any extractor/classifier LLM sees it. Older or
+  // user-authored markers are preserved as ordinary evidence.
+  const effectiveWindowText = stripCurrentRuleInjection(rawWindowText, getCurrentRuleInjectionNonce());
   // Estimate tokens for metrics (rough: chars/4 for English, chars/2 for
   // mixed CJK; conservative estimate at chars/3)
   const estimatedTokens = deps.continuationMessages && Array.isArray(deps.continuationMessages)

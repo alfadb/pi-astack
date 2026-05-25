@@ -25,9 +25,15 @@ import type { StagingEntry, StagingFileOnDisk } from "./staging-types";
  * git-sync, so no cross-device replay race exists (see
  * multiview-staging-types.ts file header for the D2 discovery write-up).
  */
-export const STAGING_DIR = path.join(
-  os.homedir(), ".abrain", ".state", "sediment", "staging",
-);
+export function stagingDir(): string {
+  const abrainHome = process.env.ABRAIN_ROOT
+    ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+    : path.join(os.homedir(), ".abrain");
+  return path.join(abrainHome, ".state", "sediment", "staging");
+}
+
+/** Back-compat export for callers that only display the default path. */
+export const STAGING_DIR = stagingDir();
 
 const MAX_STAGING_ENTRIES = 10;  // K — token budget limits
 const STALE_DAYS = 30;
@@ -50,9 +56,10 @@ export function loadStagingContext(): StagingContext {
   const staleCutoff = now - STALE_DAYS * 24 * 60 * 60 * 1000;
 
   try {
-    if (!fs.existsSync(STAGING_DIR)) return { entries, count: 0, staleCount: 0 };
+    const dir = stagingDir();
+    if (!fs.existsSync(dir)) return { entries, count: 0, staleCount: 0 };
 
-    const files = fs.readdirSync(STAGING_DIR)
+    const files = fs.readdirSync(dir)
       .filter((f) => f.endsWith(".json"))
       .sort()  // alphabetical = chronological (ISO timestamps in filenames)
       .reverse(); // newest first
@@ -61,7 +68,7 @@ export function loadStagingContext(): StagingContext {
       if (entries.length >= MAX_STAGING_ENTRIES) break;
 
       try {
-        const raw = fs.readFileSync(path.join(STAGING_DIR, file), "utf-8");
+        const raw = fs.readFileSync(path.join(dir, file), "utf-8");
         const parsed: StagingFileOnDisk = JSON.parse(raw);
 
         if (!parsed.entry || !parsed.entry.attribution_pending) continue;
@@ -91,11 +98,12 @@ export function loadStagingContext(): StagingContext {
  */
 export function writeStagingEntry(entry: StagingEntry): void {
   try {
-    fs.mkdirSync(STAGING_DIR, { recursive: true });
+    const dir = stagingDir();
+    fs.mkdirSync(dir, { recursive: true });
     const filename = `${entry.created.replace(/[:.]/g, "-")}-${entry.slug}.json`;
     const file: StagingFileOnDisk = { schema_version: 1, entry };
     fs.writeFileSync(
-      path.join(STAGING_DIR, filename),
+      path.join(dir, filename),
       JSON.stringify(file, null, 2),
       "utf-8",
     );
@@ -109,8 +117,9 @@ export function writeStagingEntry(entry: StagingEntry): void {
  */
 export function stagingFileCount(): number {
   try {
-    if (!fs.existsSync(STAGING_DIR)) return 0;
-    return fs.readdirSync(STAGING_DIR).filter((f) => f.endsWith(".json")).length;
+    const dir = stagingDir();
+    if (!fs.existsSync(dir)) return 0;
+    return fs.readdirSync(dir).filter((f) => f.endsWith(".json")).length;
   } catch {
     return 0;
   }

@@ -266,6 +266,24 @@ export function abrainProjectVaultDir(abrainHome: string, projectId: string): st
   return path.join(abrainProjectDir(abrainHome, projectId), "vault");
 }
 
+// ── abrain rules zone (ADR 0023-R5 read-path) ─────────────────────
+// Global rules live under ~/.abrain/rules/{always,listed}; project rules
+// live under ~/.abrain/projects/<id>/rules/{always,listed}. The current
+// implementation is read-only injection; write/lifecycle is deferred until
+// ADR 0024/0025 feedback loops are stronger.
+export function abrainRulesDir(abrainHome: string): string {
+  return path.join(path.resolve(abrainHome), "rules");
+}
+export function abrainRulesTierDir(abrainHome: string, tier: "always" | "listed"): string {
+  return path.join(abrainRulesDir(abrainHome), tier);
+}
+export function abrainProjectRulesDir(abrainHome: string, projectId: string): string {
+  return path.join(abrainProjectDir(abrainHome, projectId), "rules");
+}
+export function abrainProjectRulesTierDir(abrainHome: string, projectId: string, tier: "always" | "listed"): string {
+  return path.join(abrainProjectRulesDir(abrainHome, projectId), tier);
+}
+
 // ── abrain workflows zone (B1: pipeline-shaped entries归宿) ──────
 // Top-level workflows/ holds cross-project workflows (e.g. run-when-reviewing-code);
 // projects/<id>/workflows/ holds project-specific ones (e.g. run-when-updating-claude-plugins).

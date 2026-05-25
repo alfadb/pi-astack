@@ -22,7 +22,10 @@
  *                      completed/failed). Updated per dispatch_*
  *                      tool call.
  *
- *   03  sediment       agent_end background extraction status. Updated
+ *   03  abrain-rules   session-start rule injection status. Set once at
+ *                      session_start; affects the next agent call.
+ *
+ *   04  sediment       agent_end background extraction status. Updated
  *                      per turn after the LLM returns.
  *
  * To add a new extension:
@@ -34,7 +37,8 @@
 export const FOOTER_STATUS_KEYS = {
   modelCurator: "01-model-curator",
   dispatch:     "02-dispatch",
-  sediment:     "03-sediment",
+  abrainRules:  "03-abrain-rules",
+  sediment:     "04-sediment",
 } as const;
 
 export type FooterStatusKey =

@@ -217,7 +217,7 @@ export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"
   outcomeSelfReport:
     "v0: memory-footnote protocol injected via memory extension's before_agent_start hook (extensions/memory/index.ts). Not a sediment-owned prompt file; this version tag tracks the protocol-level contract (entry/used/counterfactual fields, 3-option taxonomy).",
   aggregator:
-    "v0 placeholder — aggregator + Classifier Health Meta-Check (ADR §4.3) not yet implemented.",
+    "v0.1: deterministic advisory Classifier Health Meta-Check over recent correction_classifier audit traces (quote / alternative / concrete self-critique rates). Full cross-session aggregator prompt, trend detection, contradiction handling, and echo-chamber breaker remain P1+.",
   archiveReactivationReviewer:
     "v0 placeholder — archive-rollback reviewer prompt (ADR §4.6) not yet implemented.",
 };

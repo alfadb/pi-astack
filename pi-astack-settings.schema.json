@@ -156,9 +156,9 @@
 
         "extractorTimeoutMs": {
           "type": "number",
-          "default": 180000,
+          "default": 1200000,
           "minimum": 1000,
-          "description": "Timeout for LLM extractor model calls."
+          "description": "Timeout for LLM extractor model calls. Default 20 minutes because sediment runs fire-and-forget in the background; provider blips should surface as footer/audit state, not foreground blocking."
         },
 
         "extractorMaxRetries": {
@@ -166,6 +166,19 @@
           "default": 0,
           "minimum": 0,
           "description": "Max retries for LLM extractor calls. Default 0 to avoid repeated extraction costs on large windows."
+        },
+
+        "classifierModel": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4-flash",
+          "description": "Model used by the active-correction classifier (conversation window → CorrectionSignal). Cheap reading-comprehension task; default v4-flash."
+        },
+
+        "classifierTimeoutMs": {
+          "type": "number",
+          "default": 1200000,
+          "minimum": 5000,
+          "description": "Timeout for active-correction classifier model calls. Default matches extractorTimeoutMs so background provider latency does not create noisy false-fail audit rows."
         },
 
         "extractorMaxCandidates": {
@@ -190,9 +203,9 @@
 
         "curatorTimeoutMs": {
           "type": "number",
-          "default": 60000,
+          "default": 1200000,
           "minimum": 1000,
-          "description": "Timeout for curator model calls. Curator context is small (candidate + ≤5 neighbors); 60s is generous."
+          "description": "Timeout for curator model calls. Default 20 minutes for parity with background extractor/classifier calls."
         },
 
         "curatorMaxRetries": {
@@ -203,9 +216,9 @@
         },
 
         "autoLlmWriteEnabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Master switch for the LLM auto-write lane in the agent_end hook. When false (default), sediment runs only the deterministic explicit-marker extractor. When true, the hook directly invokes the LLM extractor + memory_search-powered curator on transcript windows where no MEMORY: block was found. There is no dry-run/readiness/rate/sampling/rolling gate; git history + audit are the rollback surface, while sensitive-info and storage-integrity checks remain hard gates."
+          "enum": [true, false, "staging-only", "staging", "true", "false"],
+          "default": true,
+          "description": "Tristate switch for ADR 0024/0025 sediment auto-write. true = full pipeline (classifier + extractor + curator + writer). \"staging-only\"/\"staging\" = classifier still observes and may write provisional staging, but durable auto-write is skipped. false = hard kill switch; classifier also stops. Runtime also accepts string \"true\"/\"false\" for backward-compatible config parsing."
         },
 
         "autoWriteRawAuditChars": {
@@ -213,6 +226,59 @@
           "default": 8000,
           "minimum": 0,
           "description": "Maximum raw LLM extractor output stored in each auto_write audit row. Unlike `extractorAuditRawChars` (preview-only, default 1000) this one is meant to be large enough for full forensic replay; only truncate when raw output exceeds the cap."
+        },
+
+        "skipContinuationSanitize": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, skip credential sanitization in the continuation-call path. Default false keeps sanitizer ON; only use true for air-gapped deployments where extractor provider cannot exfiltrate leaked keys."
+        },
+
+        "promptVersion": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0025 prompt/protocol version tags written into audit rows so classifier and multi-view quality can be grouped by prompt version.",
+          "properties": {
+            "activeCorrectionClassifier": { "type": "string", "default": "v1" },
+            "reasoningNormalizationPreamble": { "type": "string", "default": "v1" },
+            "multiViewPass1": { "type": "string", "default": "v1" },
+            "multiViewPass2": { "type": "string", "default": "v1" },
+            "outcomeSelfReport": { "type": "string", "default": "v0" },
+            "aggregator": { "type": "string", "default": "v0", "description": "v0 placeholder: aggregator + Classifier Health Meta-Check not implemented yet." },
+            "archiveReactivationReviewer": { "type": "string", "default": "v0", "description": "v0 placeholder: archive rollback / reactivation reviewer not implemented yet." }
+          }
+        },
+
+        "multiView": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0025 P0.5 multi-view reviewer settings. Reviewer should be a different provider family from the proposer/curator; current code relies on these defaults and does not enforce provider difference yet.",
+          "properties": {
+            "proposerProviders": {
+              "type": "array",
+              "default": [],
+              "items": { "type": "string" },
+              "description": "Reserved for future dynamic proposer selection. Empty means use curatorModel as proposer."
+            },
+            "reviewerProviders": {
+              "type": "array",
+              "default": ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4-mini"],
+              "items": { "type": "string" },
+              "description": "Ordered reviewer model refs used by multi-view Pass 1/Pass 2. Defaults are non-deepseek to diversify from the default curator."
+            },
+            "fallbackProviders": {
+              "type": "array",
+              "default": [],
+              "items": { "type": "string" },
+              "description": "Additional reviewer refs tried after reviewerProviders."
+            },
+            "costBudgetPerOpUsd": {
+              "type": "number",
+              "default": 0.05,
+              "minimum": 0,
+              "description": "Soft target budget per multi-view op. Field exists in settings; enforcement is deferred to the dynamic provider/rate-limit phase."
+            }
+          }
         }
       }
     },
@@ -261,7 +327,7 @@
 
     "compactionTuner": {
       "type": "object",
-      "description": "Trigger pi's compaction at a configurable percentage of contextWindow (extensions/compaction-tuner/). Solves the problem that pi's built-in `compaction.reserveTokens` is an absolute number, while user-stack models span 200k–1M+ contextWindow — a single number can't represent a fixed percentage uniformly. Hooks `agent_end`, reads `ctx.getContextUsage()`, and calls `ctx.compact()` once `percent >= thresholdPercent`. Pi's built-in threshold (default reserveTokens=16384, ~92% on 200k) remains as a last-resort safety net. Audit log: `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`.",
+      "description": "Trigger pi's compaction at a configurable percentage of contextWindow (extensions/compaction-tuner/). Solves the problem that pi's built-in `compaction.reserveTokens` is an absolute number, while user-stack models span 200k–1M+ contextWindow — a single number can't represent a fixed percentage uniformly. Hooks `agent_end`, reads `ctx.getContextUsage()`, and calls `ctx.compact()` once `percent >= thresholdPercent`. Optional `summaryModels` lets `session_before_compact` generate summaries with an ordered provider/model fallback list; empty default preserves pi core behavior, which uses the current main-session model. Pi's built-in threshold (default reserveTokens=16384, ~92% on 200k) remains as a last-resort safety net. Audit log: `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -297,6 +363,70 @@
           "type": "string",
           "default": "",
           "description": "Optional custom instructions passed through to pi's compaction LLM (`compact({customInstructions})`). Empty string = pass undefined and use pi's default summary prompt."
+        },
+
+        "summaryModels": {
+          "type": "array",
+          "default": [],
+          "items": { "type": "string" },
+          "description": "Optional ordered provider/model refs used by compaction-tuner's custom session_before_compact summarizer. Empty default means do not override: pi core summarizes with the current main-session model. Example opt-in: [\"anthropic/claude-sonnet-4-6\", \"deepseek/deepseek-v4-pro\"]. If all configured models fail, compaction falls back to pi core default summarization."
+        },
+
+        "summaryModel": {
+          "type": "string",
+          "default": "",
+          "description": "Deprecated single-model alias for summaryModels. Kept for transition only; prefer summaryModels for ordered fallback."
+        }
+      }
+    },
+
+    "ruleInjector": {
+      "type": "object",
+      "description": "ADR 0023-R5 read-only abrain rules injection. Scans ~/.abrain/rules/{always,listed} plus active-project rules and appends them to the main-session system prompt. This is a read path only: no rule write/promote/veto lifecycle UI.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable session-start rules scan + before_agent_start system-prompt injection. Sub-pi still disables via PI_ABRAIN_DISABLED=1."
+        },
+        "alwaysTokenCapPerScope": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 100,
+          "description": "Soft token budget per scope (global/project) for rules/always. Over-budget is injected in full with a warning; no user decision is requested."
+        },
+        "listedTokenCapPerScope": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 100,
+          "description": "Soft token budget per scope (global/project) for rules/listed. Over-budget is injected in full with a warning; no deterministic trim in R5."
+        },
+        "alwaysCountCapPerScope": {
+          "type": "number",
+          "default": 15,
+          "minimum": 1,
+          "description": "Soft count budget per scope for always rules. Exceeding it warns but still injects in full."
+        },
+        "listedCountCapPerScope": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "description": "Soft count budget per scope for listed rules. Exceeding it warns but still injects in full."
+        },
+        "maxAlwaysBodyChars": {
+          "type": "number",
+          "default": 300,
+          "minimum": 80,
+          "description": "Maximum injected body characters per always rule. Existing longer entries are truncated in prompt; writer enforcement is deferred to ADR 0023 write-path."
+        },
+        "maxListedHintChars": {
+          "type": "number",
+          "default": 80,
+          "minimum": 20,
+          "description": "Maximum injected hint characters per listed rule."
         }
       }
     },

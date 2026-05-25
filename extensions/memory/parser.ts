@@ -16,17 +16,21 @@ const IGNORE_DIRS = new Set([
 ]);
 
 // World-store extra ignores. The world store root is `~/.abrain/`, which
-// also contains `projects/` (per-project sediment writes) and `vault/`
-// (encrypted secrets). Both must be excluded from world scans:
+// also contains `projects/` (per-project sediment writes), `vault/`
+// (encrypted secrets), and `rules/` (ADR 0023-R5 session-start injected
+// rules). All must be excluded from normal world memory scans:
 //   - `projects/` entries are project-scoped knowledge owned by the
 //     active-project store, not world knowledge; including them would
 //     leak other projects into the curator neighbor pool.
 //   - `vault/` is encrypted/structured secret material, never markdown
 //     intended for memory_search.
+//   - `rules/` has a dedicated push-injection path. Leaving it in the
+//     pull-search corpus would duplicate rules as ordinary knowledge and
+//     could make memory_get(scoped listed slug) ambiguous.
 // listFilesWithRg already excludes these via --glob; the walker fallback
 // must mirror that behaviour or the safety contract regresses whenever
 // rg is missing/timeout/failed.
-const WORLD_EXTRA_IGNORE_DIRS = new Set(["projects", "vault"]);
+const WORLD_EXTRA_IGNORE_DIRS = new Set(["projects", "vault", "rules"]);
 
 // Project store STAGING exclusion (ADR 0021 invariant #7 + ADR 0014 §3.5
 // staging lifecycle): the Lane G router downgrades low-confidence about-me
@@ -657,12 +661,12 @@ export async function listFilesWithRg(
         "--glob", "!**/.state/**",
         "--glob", "!**/.index/**",
         "--glob", "!**/.git/**",
-        // World store root is ~/.abrain/ which contains projects/<id>/ —
-        // those are project-scoped entries, not world knowledge. Exclude
-        // them so other projects don't leak into the current project's
-        // curator neighbor pool.
+        // World store root is ~/.abrain/ which contains projects/<id>/,
+        // vault/, and ADR 0023 rules/. Exclude them from the ordinary
+        // memory_search corpus; rules use a dedicated push-injection path.
         "--glob", "!**/projects/**",
         "--glob", "!**/vault/**",
+        "--glob", "!**/rules/**",
         ...stagingGlobs.flatMap((g) => ["--glob", g]),
         root,
       ],
@@ -737,15 +741,19 @@ export async function scanStore(
   const rgFiles = await listFilesWithRg(store.root, signal, {
     excludeStaging: store.scope === "project",
   });
-  // World walker MUST exclude `projects/` and `vault/` to mirror the rg
-  // --glob exclusions. Without this, an `rg`-missing host would leak
-  // other projects' sediment writes and encrypted vault material into
-  // memory_search results. (gpt-5.5 audit, 2026-05-15)
+  // World walker MUST exclude `projects/`, `vault/`, and `rules/` to
+  // mirror the rg --glob exclusions. Without this, an `rg`-missing host
+  // would leak other projects' sediment writes, encrypted vault material,
+  // or dedicated push-injected rules into memory_search results.
+  // (gpt-5.5 audit, 2026-05-15; rules added by ADR 0023-R5)
   const extraIgnoreDirs = store.scope === "world" ? WORLD_EXTRA_IGNORE_DIRS : undefined;
   // Project walker MUST exclude observations/staging/* per ADR 0021
-  // invariant #7. World store needs no staging exclusion because
-  // staging entries live under projects/<id>/ which is already excluded
-  // by WORLD_EXTRA_IGNORE_DIRS above. (Lane G P0-B audit fix 2026-05-16)
+  // invariant #7. Project `rules/` remains in the project scan root only
+  // for exact debug reads if a future caller explicitly wants it; the R5
+  // injection path does not depend on memory_search.
+  // World store needs no staging exclusion because staging entries live
+  // under projects/<id>/ which is already excluded by WORLD_EXTRA_IGNORE_DIRS
+  // above. (Lane G P0-B audit fix 2026-05-16)
   const ignoreRelPaths = store.scope === "project" ? STAGING_IGNORE_REL_PATHS : undefined;
   const files = (rgFiles ?? await walkMarkdownFiles(store.root, settings.maxEntries, signal, { extraIgnoreDirs, ignoreRelPaths }))
     .filter((file) => path.basename(file) !== "_index.md")

@@ -76,7 +76,11 @@ function transpileExtensions(outRoot) {
         compilerOptions: {
           target: ts.ScriptTarget.ES2022,
           module: ts.ModuleKind.CommonJS,
-          moduleResolution: ts.ModuleResolutionKind.NodeNext,
+          // TS 6 + NodeNext preserves dynamic import() in CommonJS output,
+          // which Node then resolves as ESM and rejects extensionless
+          // imports like import("./graph"). The smoke runs CJS modules, so
+          // use classic NodeJs resolution to lower import() to require().
+          moduleResolution: ts.ModuleResolutionKind.NodeJs,
           esModuleInterop: true,
           skipLibCheck: true,
         },
@@ -101,6 +105,33 @@ function transpileExtensions(outRoot) {
     }
   }
 
+  // ADR 0023-R5: sediment imports the abrain rule-injector strip helper.
+  // The smoke historically staged only memory/sediment/compaction; stage
+  // this one abrain leaf module plus its parent index shim so relative
+  // `../abrain/rule-injector` imports resolve without pulling the full
+  // abrain vault stack into smoke:memory.
+  {
+    const srcPath = path.join(extRoot, "abrain", "rule-injector", "index.ts");
+    const outPath = path.join(outRoot, "abrain", "rule-injector", "index.js");
+    const transpiled = ts.transpileModule(fs.readFileSync(srcPath, "utf-8"), {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.CommonJS,
+        moduleResolution: ts.ModuleResolutionKind.NodeJs,
+        esModuleInterop: true,
+        skipLibCheck: true,
+      },
+    });
+    try {
+      new (require("node:vm").Script)(transpiled.outputText, { filename: srcPath });
+    } catch (err) {
+      throw new Error(`Strict parse of ${path.relative(repoRoot, srcPath)} failed: ${err && err.stack ? err.stack : err}`);
+    }
+    writeFile(outPath, transpiled.outputText);
+    writeFile(path.join(outRoot, "abrain", "rule-injector.js"), `module.exports = require("./rule-injector/index.js");\n`);
+    count++;
+  }
+
   // Minimal typebox subset for registerTool schemas.
   //
   // Keep this in sync with `Type.<Method>` usage across extensions/*/index.ts.
@@ -117,6 +148,16 @@ exports.Type = {
   Optional: (schema) => ({ ...schema, optional: true }),
   Any: (opts = {}) => ({ ...opts }),
 };
+`);
+
+  // Minimal pi-coding-agent subset for compaction-tuner custom summary hook
+  // smoke. The real package is ESM-only; these CJS smokes need a local stub.
+  writeFile(path.join(outRoot, "node_modules", "@earendil-works", "pi-coding-agent", "index.js"), `
+exports.compact = async (preparation, model) => ({
+  summary: 'stub compaction summary via ' + (model && model.id || 'unknown'),
+  firstKeptEntryId: preparation.firstKeptEntryId,
+  tokensBefore: preparation.tokensBefore,
+});
 `);
 
   // Minimal pi-ai subset for ADR 0015 memory_search LLM-path smoke. Dynamic
@@ -306,6 +347,7 @@ async function main() {
       assert(sedFirst.systemPrompt.includes("主会话只读不写"), "sediment injection missing core rule heading");
       assert(!sedFirst.systemPrompt.includes("gbrain"), "sediment injection must not mention retired gbrain tool");
       assert(!sedFirst.systemPrompt.includes(".pensieve/"), "sediment injection must not reference legacy .pensieve location");
+      assert(!sedFirst.systemPrompt.includes("/about-me") && !sedFirst.systemPrompt.includes("MEMORY-ABOUT-ME"), "sediment main-session prompt must not enumerate explicit brain-management entry names");
       const sedSecond = await sedimentHandlers[0]({ systemPrompt: sedFirst.systemPrompt });
       assert(sedSecond === undefined, "sediment injector must be idempotent (return undefined when marker already present)");
 
@@ -313,9 +355,135 @@ async function main() {
       assert(memFirst && typeof memFirst.systemPrompt === "string", "memory injector first call must return { systemPrompt }");
       assert(memFirst.systemPrompt.includes(memMarker), `memory injection missing marker: ${memFirst.systemPrompt.slice(-200)}`);
       assert(memFirst.systemPrompt.includes("memory-footnote"), "memory injection must include the protocol name 'memory-footnote'");
+      assert(memFirst.systemPrompt.includes("protocol_version: memory-footnote-v1"), "memory-footnote protocol injection must carry a version marker");
+      assert(!memFirst.systemPrompt.includes("隐藏 fenced block"), "memory-footnote prompt must not claim the visible block is hidden");
+      assert(memFirst.systemPrompt.includes("允许用户感知第二大脑"), "memory-footnote prompt should frame visible participation as positive feedback");
+      assert(memFirst.systemPrompt.includes("retrieved-unused") && memFirst.systemPrompt.includes("不要静默省略"), "memory-footnote prompt must capture retrieved-but-unused entries instead of positive-only self-reports");
       assert(memFirst.systemPrompt.includes("decisive") && memFirst.systemPrompt.includes("confirmatory") && memFirst.systemPrompt.includes("retrieved-unused"), "memory injection must enumerate the used taxonomy");
+      assert(memFirst.systemPrompt.includes("高价值决策时可拉取") && !memFirst.systemPrompt.includes("在遇到以下场景**之前**"), "memory_decide prompt must stay Path-B advisory, not pseudo Path-A mandatory trigger");
       const memSecond = await memoryHandlers[0]({ systemPrompt: memFirst.systemPrompt });
       assert(memSecond === undefined, "memory injector must be idempotent (return undefined when marker already present)");
+    }
+
+    // === classifier health meta-check ================================
+    // ADR 0024 §5.3 / ADR 0025 §4.3: advisory-only quality degradation
+    // detection over recent classifier reasoning traces.
+    {
+      const { summarizeClassifierHealth } = req("./sediment/health.js");
+      const healthRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-health-"));
+      const healthAudit = path.join(healthRoot, ".pi-astack", "sediment", "audit.jsonl");
+      writeFile(healthAudit, [
+        JSON.stringify({
+          operation: "correction_classifier",
+          signal: {
+            user_quote: "use pnpm here",
+            most_likely_error: "could be task-local because the quote only mentions this repo",
+            reasoning_trace: {
+              quote: 'User said "use pnpm here".',
+              alternatives: "Could be durable, task-local, or NOT-A-CORRECTION.",
+              self_critique: "If wrong, likely task-local because the quote says here.",
+            },
+          },
+        }),
+        JSON.stringify({ operation: "other_operation", signal: { reasoning_trace: { quote: "ignored" } } }),
+      ].join("\n") + "\n");
+      const healthy = summarizeClassifierHealth(healthRoot, { windowSize: 50, threshold: 0.4 });
+      assert(healthy.ok === true, `healthy classifier trace should pass advisory check: ${JSON.stringify(healthy)}`);
+      assert(healthy.sampleSize === 1, `classifier health should count only correction_classifier rows with traces: ${JSON.stringify(healthy)}`);
+      assert(healthy.quoteRate === 1 && healthy.alternativeRate === 1 && healthy.concreteSelfCritiqueRate === 1, `healthy classifier rates mismatch: ${JSON.stringify(healthy)}`);
+
+      writeFile(healthAudit, [
+        JSON.stringify({ operation: "correction_classifier", signal: { reasoning_trace: { summary: "Looks good." } } }),
+        JSON.stringify({ operation: "correction_classifier", signal: { reasoning_trace: { summary: "Probably fine." } } }),
+      ].join("\n") + "\n");
+      const degraded = summarizeClassifierHealth(healthRoot, { windowSize: 50, threshold: 0.4 });
+      assert(degraded.ok === false, `degraded classifier traces should produce advisory flags: ${JSON.stringify(degraded)}`);
+      assert(degraded.advisories.some((item) => item.includes("quote rate")), `degraded classifier health should flag quote rate: ${JSON.stringify(degraded)}`);
+      assert(degraded.advisories.some((item) => item.includes("alternative mention rate")), `degraded classifier health should flag alternative rate: ${JSON.stringify(degraded)}`);
+      assert(degraded.advisories.some((item) => item.includes("self-critique rate")), `degraded classifier health should flag self-critique rate: ${JSON.stringify(degraded)}`);
+
+      writeFile(healthAudit, [
+        JSON.stringify({ operation: "correction_classifier", signal: null }),
+        JSON.stringify({ operation: "correction_classifier", signal: { signal_found: true } }),
+      ].join("\n") + "\n");
+      const missingTrace = summarizeClassifierHealth(healthRoot, { windowSize: 50, threshold: 0.4 });
+      assert(missingTrace.ok === false, `classifier rows without reasoning_trace must be unhealthy, not suppressed: ${JSON.stringify(missingTrace)}`);
+      assert(missingTrace.classifierRowCount === 2 && missingTrace.sampleSize === 0, `missing-trace health counts mismatch: ${JSON.stringify(missingTrace)}`);
+      assert(missingTrace.advisories.some((item) => item.includes("No classifier reasoning traces")), `missing-trace health should explain parser/schema drift risk: ${JSON.stringify(missingTrace)}`);
+    }
+
+    // === correction classifier dispatch safety ========================
+    {
+      const { _dispatchCorrectionSignalForTests, _resetAutoWriteStateForTests } = req("./sediment/index.js");
+      _resetAutoWriteStateForTests();
+      const unknown = _dispatchCorrectionSignalForTests({ signal_found: true, confidence: 9, correction_intent: "unknown typed correction" });
+      assert(unknown.forwarded === null, `unknown/missing correction typing must not reach curator: ${JSON.stringify(unknown)}`);
+      assert(unknown.decision === "dropped_unknown_typing", `unknown typing should be audited as dropped_unknown_typing: ${JSON.stringify(unknown)}`);
+      const durable = _dispatchCorrectionSignalForTests({ signal_found: true, typing: "durable", confidence: 9, correction_intent: "durable correction" }, { sessionId: "smoke-session", currentCurator: true });
+      assert(durable.forwarded && durable.decision === "pending_multiview", `high-confidence durable correction should forward but require multiview audit: ${JSON.stringify(durable)}`);
+      const durableNoCurator = _dispatchCorrectionSignalForTests({ signal_found: true, typing: "durable", confidence: 9, correction_intent: "durable correction" }, { sessionId: "smoke-session", currentCurator: false });
+      assert(durableNoCurator.forwarded === null && durableNoCurator.decision === "stored_durable", `durable correction without a current curator should be stored, not falsely forwarded: ${JSON.stringify(durableNoCurator)}`);
+      const taskLocal = _dispatchCorrectionSignalForTests({ signal_found: true, typing: "task-local", confidence: 6, correction_intent: "use yarn only for this PR" }, { sessionId: "smoke-session", currentCurator: true });
+      assert(taskLocal.forwarded === null && taskLocal.decision === "stored_task_local", `task-local correction should stay audit-only and not current-curator forward: ${JSON.stringify(taskLocal)}`);
+      const debug = _dispatchCorrectionSignalForTests({ signal_found: true, typing: "debug", confidence: 6, correction_intent: "X is broken" }, { sessionId: "smoke-session", currentCurator: true });
+      assert(debug.forwarded === null && debug.decision === "dropped_debug", `debug correction must remain audit-only: ${JSON.stringify(debug)}`);
+      const none = _dispatchCorrectionSignalForTests({ signal_found: false, reasoning: "ordinary task instruction" }, { sessionId: "smoke-session", currentCurator: true });
+      assert(none.forwarded === null && none.decision === "no_signal", `signal_found=false should be no_signal: ${JSON.stringify(none)}`);
+    }
+
+    // === ADR 0025 sidecar staging respects ABRAIN_ROOT =================
+    {
+      const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-staging-"));
+      const oldAbrainRoot = process.env.ABRAIN_ROOT;
+      process.env.ABRAIN_ROOT = stagingRoot;
+      try {
+        const { writeStagingEntry, loadStagingContext, stagingFileCount, stagingDir } = req("./sediment/staging-loader.js");
+        const { writeMultiviewPending, loadMultiviewPending, countMultiviewPending, deleteMultiviewPending } = req("./sediment/multiview-staging-io.js");
+        const expectedDir = path.join(stagingRoot, ".state", "sediment", "staging");
+        assert(stagingDir() === expectedDir, `stagingDir should honor ABRAIN_ROOT: ${stagingDir()} vs ${expectedDir}`);
+        writeStagingEntry({
+          slug: "provisional-smoke",
+          status: "provisional",
+          kind: "provisional-correction",
+          created: new Date().toISOString(),
+          attribution_pending: true,
+          originating_device: "smoke",
+          hypothesis: "smoke provisional correction",
+          source_utterance: [{ quote: "以后用 pnpm", context: "smoke", captured_at: new Date().toISOString() }],
+          suggested_resolution_paths: ["smoke"],
+          correction_signal: { typing: "durable", confidence: 7, scope_description: "smoke", correction_intent: "new preference", most_likely_error_direction: "task-local" },
+          _provenance_warning: "smoke",
+        });
+        assert(stagingFileCount() === 1, `provisional staging count should use ABRAIN_ROOT dir`);
+        const ctx = loadStagingContext();
+        assert(ctx.entries.some((entry) => entry.slug === "provisional-smoke"), `loadStagingContext should see provisional entry under ABRAIN_ROOT: ${JSON.stringify(ctx)}`);
+        writeMultiviewPending({
+          slug: "multiview-pending-smoke",
+          kind: "multiview-pending",
+          created: new Date().toISOString(),
+          updated: new Date().toISOString(),
+          originating_device: "smoke",
+          multiview_state: "reviewer_unavailable",
+          retry_attempts: 0,
+          max_retry_attempts: 5,
+          next_retry_not_before_iso: new Date().toISOString(),
+          terminal_after_iso: new Date(Date.now() + 86_400_000).toISOString(),
+          trigger_reason: "create_high_confidence",
+          proposer_decision: { op: "create", rationale: "smoke" },
+          proposer_raw_text: "smoke",
+          candidate_snapshot: { title: "Smoke", kind: "fact", status: "active", confidence: 8, compiledTruth: "Smoke candidate." },
+          neighbor_slugs: [],
+          last_error: "smoke",
+        });
+        assert(countMultiviewPending() === 1, `multiview pending count should use ABRAIN_ROOT dir`);
+        const pending = loadMultiviewPending();
+        assert(pending.entries.length === 1 && pending.entries[0].slug === "multiview-pending-smoke", `loadMultiviewPending should see only multiview entry: ${JSON.stringify(pending)}`);
+        assert(loadStagingContext().entries.some((entry) => entry.slug === "provisional-smoke"), `provisional loader should ignore multiview co-tenant and keep provisional`);
+        assert(deleteMultiviewPending("multiview-pending-smoke") === true, `deleteMultiviewPending should delete from ABRAIN_ROOT dir`);
+      } finally {
+        if (oldAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+        else process.env.ABRAIN_ROOT = oldAbrainRoot;
+      }
     }
 
     // === sediment agent_end strict-binding hook glue ===
@@ -578,6 +746,7 @@ async function main() {
     writeFile(path.join(root, ".pensieve", "staging", "beta.md"), makeEntry({ title: "Beta Smell", kind: "smell", status: "provisional", confidence: 2 }));
 
     const search = tools.get("memory_search");
+    const decide = tools.get("memory_decide");
     const mockModelRegistry = {
       find(provider, id) {
         return {
@@ -600,6 +769,12 @@ async function main() {
     const missingRegistryPayload = JSON.parse(missingRegistryRaw.content[0].text);
     assert(String(missingRegistryPayload.error || "").includes("modelRegistry"), `missing-registry error should mention modelRegistry: ${JSON.stringify(missingRegistryPayload)}`);
     assert(String(missingRegistryPayload.hint || "").includes("does not degrade to grep"), `missing-registry hint should reject grep degradation: ${JSON.stringify(missingRegistryPayload)}`);
+
+    const decideMissingRegistryRaw = await decide.execute("smoke-decide-no-registry", decide.prepareArguments({ context: "choosing package manager", options: ["pnpm", "yarn"] }), new AbortController().signal, null, { cwd: root });
+    assert(decideMissingRegistryRaw.isError, `memory_decide retrieval failure must hard-error, not masquerade as no memories: ${JSON.stringify(decideMissingRegistryRaw)}`);
+    const decideMissingRegistryPayload = JSON.parse(decideMissingRegistryRaw.content[0].text);
+    assert(String(decideMissingRegistryPayload.error || "").includes("modelRegistry"), `memory_decide missing-registry error should mention modelRegistry: ${JSON.stringify(decideMissingRegistryPayload)}`);
+    assert(String(decideMissingRegistryPayload.hint || "").includes("Do not infer absence"), `memory_decide retrieval failure hint should warn against absence inference: ${JSON.stringify(decideMissingRegistryPayload)}`);
 
     // ADR 0015 smoke: default memory_search path should call the two-stage LLM
     // reranker when a modelRegistry is available, and return the same normalized
@@ -5886,8 +6061,8 @@ Body.
     //   3. buildDecisionBriefPrompt() injects the activity into the prompt
     //      under "RECENT USAGE OF THESE ENTRIES".
     {
-      const { readOutcomeLedger, summarizeEntryActivity } = req("./sediment/outcome-collector.js");
-      const { buildDecisionBriefPrompt } = req("./memory/decide.js");
+      const { collectOutcomes, readOutcomeLedger, summarizeEntryActivity, writeOutcomeLedger } = req("./sediment/outcome-collector.js");
+      const { buildDecisionBriefPrompt, buildDecisionSearchQuery } = req("./memory/decide.js");
 
       const ledgerAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-ledger-"));
       const savedAbrainRoot = process.env.ABRAIN_ROOT;
@@ -5922,9 +6097,11 @@ Body.
 
         // Summarize within the 30-day window for three slugs:
         //   prefer-pnpm   → 2 decisive + 1 confirmatory (in window), 0 retrieved-unused,
-        //                  total_retrievals = 1 + 3 + 1 + 1 = 6
+        //                  total_retrievals = 3 (tool-result only; footnote
+        //                  self-reports are counted in the usage buckets, not
+        //                  double-counted as tool retrievals)
         //                  (45-day-old row excluded)
-        //   ci-github-actions → 0 decisive, 0 confirmatory, 1 retrieved-unused, total=1
+        //   ci-github-actions → 0 decisive, 0 confirmatory, 1 retrieved-unused, total=0
         //   cold-slug-never-seen → all zeros
         const stats = summarizeEntryActivity(rows, ["prefer-pnpm", "ci-github-actions", "cold-slug-never-seen"], 30);
         assert(stats.length === 3, `summarizeEntryActivity should return one record per input slug, got ${stats.length}`);
@@ -5934,16 +6111,168 @@ Body.
         assert(pnpm.decisive_count === 2, `prefer-pnpm decisive_count should be 2 (45-day-old excluded), got ${pnpm.decisive_count}`);
         assert(pnpm.confirmatory_count === 1, `prefer-pnpm confirmatory_count should be 1, got ${pnpm.confirmatory_count}`);
         assert(pnpm.retrieved_unused_count === 0, `prefer-pnpm retrieved_unused_count should be 0, got ${pnpm.retrieved_unused_count}`);
-        assert(pnpm.total_retrievals === 6, `prefer-pnpm total_retrievals (1+3+1+1) should be 6, got ${pnpm.total_retrievals}`);
+        assert(pnpm.decisive_streak === 2, `prefer-pnpm decisive_streak should count the latest consecutive decisive tail, got ${pnpm.decisive_streak}`);
+        assert(pnpm.possible_echo_chamber === false, `prefer-pnpm should not trip echo breaker below streak threshold: ${JSON.stringify(pnpm)}`);
+        assert(pnpm.total_retrievals === 3, `prefer-pnpm total_retrievals should count tool-result rows only (3), got ${pnpm.total_retrievals}`);
         assert(typeof pnpm.last_seen === "string" && pnpm.last_seen.length > 10, `prefer-pnpm should have a last_seen timestamp`);
 
         const ciSlug = stats[1];
         assert(ciSlug.retrieved_unused_count === 1, `ci-github-actions retrieved_unused_count should be 1, got ${ciSlug.retrieved_unused_count}`);
         assert(ciSlug.decisive_count === 0, `ci-github-actions decisive_count should be 0`);
+        assert(ciSlug.total_retrievals === 0, `ci-github-actions total_retrievals should ignore footnote-only rows, got ${ciSlug.total_retrievals}`);
 
         const cold = stats[2];
         assert(cold.decisive_count === 0 && cold.confirmatory_count === 0 && cold.total_retrievals === 0, `cold slug should be all-zero, got ${JSON.stringify(cold)}`);
+        assert(cold.decisive_streak === 0 && cold.possible_echo_chamber === false, `cold slug should not trip echo breaker, got ${JSON.stringify(cold)}`);
         assert(cold.last_seen === undefined, `cold slug should have undefined last_seen`);
+
+        const echoRows = [6, 5, 4, 3, 2].map((offsetDays, i) => ({
+          ts: recent(offsetDays),
+          session_id: `echo-${i}`,
+          entry_slug: "echo-prone-entry",
+          source: "memory-footnote",
+          used: "decisive",
+          counterfactual: `decisive ${i}`,
+          retrieval_count: 1,
+        }));
+        const echoStats = summarizeEntryActivity(echoRows, ["echo-prone-entry"], 30)[0];
+        assert(echoStats.decisive_streak === 5, `echo-prone entry should have decisive_streak=5, got ${JSON.stringify(echoStats)}`);
+        assert(echoStats.possible_echo_chamber === true, `echo-prone entry should trip possible_echo_chamber, got ${JSON.stringify(echoStats)}`);
+        const interruptedEcho = summarizeEntryActivity([
+          ...echoRows,
+          { ts: recent(1), session_id: "echo-stop", entry_slug: "echo-prone-entry", source: "memory-footnote", used: "retrieved-unused", counterfactual: "not relevant now", retrieval_count: 1 },
+        ], ["echo-prone-entry"], 30)[0];
+        assert(interruptedEcho.decisive_streak === 0 && interruptedEcho.possible_echo_chamber === false, `non-decisive tail should reset echo streak, got ${JSON.stringify(interruptedEcho)}`);
+
+        // Verify collectOutcomes can attribute memory_decide tool results
+        // back to concrete entry slugs, including the structured
+        // decisionBriefId. This locks the ADR 0026 read→outcome feedback
+        // loop added after memory_decide started returning only brief text.
+        const decidedBranch = [
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "memory_decide",
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  brief: "Prefer pnpm.",
+                  _meta: {
+                    entrySlugs: ["prefer-pnpm", "ci-github-actions"],
+                    decisionBriefId: "decision-brief-smoke-1",
+                  },
+                }),
+              }],
+            },
+          },
+        ];
+        const decidedOutcomes = collectOutcomes(decidedBranch, "session-memory-decide-smoke");
+        assert(decidedOutcomes.dropped.length === 0, `memory_decide tool-result should not produce dropped footnotes: ${JSON.stringify(decidedOutcomes.dropped)}`);
+        assert(decidedOutcomes.rows.length === 2, `memory_decide should yield one tool-result row per unique slug, got ${JSON.stringify(decidedOutcomes.rows)}`);
+        for (const slug of ["prefer-pnpm", "ci-github-actions"]) {
+          const row = decidedOutcomes.rows.find((r) => r.entry_slug === slug);
+          assert(row, `missing memory_decide outcome row for ${slug}: ${JSON.stringify(decidedOutcomes.rows)}`);
+          assert(row.source === "tool-result", `memory_decide row source must be tool-result: ${JSON.stringify(row)}`);
+          assert(row.event_id === "decision:decision-brief-smoke-1", `memory_decide row must get stable decision event_id: ${JSON.stringify(row)}`);
+          assert(row.retrieval_count === 1, `memory_decide row should count one retrieval per unique slug per tool result, got ${JSON.stringify(row)}`);
+          assert(row.decision_brief_id === "decision-brief-smoke-1", `memory_decide row must preserve decision_brief_id: ${JSON.stringify(row)}`);
+        }
+
+        const footnoteBranch = [
+          {
+            type: "message",
+            message: {
+              role: "assistant",
+              content: "```memory-footnote\nentry: prefer-pnpm\nused: decisive\ndecision_brief_id: decision-brief-smoke-1\ncounterfactual: would have used yarn\n```",
+            },
+          },
+        ];
+        const footnoteOutcomes = collectOutcomes(footnoteBranch, "session-memory-decide-smoke");
+        assert(footnoteOutcomes.rows.length === 1, `decision footnote should yield one row: ${JSON.stringify(footnoteOutcomes)}`);
+        assert(footnoteOutcomes.rows[0].decision_brief_id === "decision-brief-smoke-1", `footnote row must preserve decision_brief_id: ${JSON.stringify(footnoteOutcomes.rows[0])}`);
+        assert(footnoteOutcomes.rows[0].event_id && footnoteOutcomes.rows[0].event_id.includes("decision-brief-smoke-1"), `footnote row should include stable event_id: ${JSON.stringify(footnoteOutcomes.rows[0])}`);
+
+        const shiftedFootnoteBranch = [
+          { type: "message", message: { role: "user", content: "unrelated earlier message inserted by branch rewrite" } },
+          footnoteBranch[0],
+        ];
+        const shiftedFootnoteOutcomes = collectOutcomes(shiftedFootnoteBranch, "session-memory-decide-smoke");
+        assert(shiftedFootnoteOutcomes.rows[0].event_id === footnoteOutcomes.rows[0].event_id, `decision footnote event_id must not drift when branch index shifts: before=${JSON.stringify(footnoteOutcomes.rows[0])} after=${JSON.stringify(shiftedFootnoteOutcomes.rows[0])}`);
+
+        const plainFootnoteBranch = [
+          { type: "message", message: { role: "assistant", content: "```memory-footnote\nentry: prefer-pnpm\nused: confirmatory\ncounterfactual: same decision\n```" } },
+        ];
+        const shiftedPlainFootnoteBranch = [
+          { type: "message", message: { role: "user", content: "unrelated earlier message inserted by branch rewrite" } },
+          plainFootnoteBranch[0],
+        ];
+        const plainFootnoteRows = collectOutcomes(plainFootnoteBranch, "session-plain-footnote-drift-smoke").rows;
+        const shiftedPlainFootnoteRows = collectOutcomes(shiftedPlainFootnoteBranch, "session-plain-footnote-drift-smoke").rows;
+        assert(plainFootnoteRows[0].event_id === shiftedPlainFootnoteRows[0].event_id, `plain footnote event_id must not drift when branch index shifts: before=${JSON.stringify(plainFootnoteRows[0])} after=${JSON.stringify(shiftedPlainFootnoteRows[0])}`);
+
+        const secretFootnoteRows = collectOutcomes([
+          { type: "message", message: { role: "assistant", content: "```memory-footnote\nentry: prefer-pnpm\nused: decisive\ncounterfactual: would use ghp_1234567890abcdefghijklmnopqrstuv\n```" } },
+        ], "session-secret-footnote-smoke").rows;
+        assert(secretFootnoteRows.length === 1, `secret footnote should still parse after sanitization: ${JSON.stringify(secretFootnoteRows)}`);
+        assert(!JSON.stringify(secretFootnoteRows).includes("ghp_1234567890abcdefghijklmnopqrstuv") && JSON.stringify(secretFootnoteRows).includes("[SECRET:github_token]"), `footnote counterfactual must be sanitized before ledger: ${JSON.stringify(secretFootnoteRows)}`);
+        const droppedSecret = collectOutcomes([
+          { type: "message", message: { role: "assistant", content: "```memory-footnote\nentry: <slug>\nused: decisive\ncounterfactual: ghp_1234567890abcdefghijklmnopqrstuv\n```" } },
+        ], "session-secret-footnote-drop-smoke").dropped;
+        assert(droppedSecret.length === 1 && !JSON.stringify(droppedSecret).includes("ghp_1234567890abcdefghijklmnopqrstuv") && JSON.stringify(droppedSecret).includes("[SECRET:github_token]"), `dropped footnote preview must be sanitized: ${JSON.stringify(droppedSecret)}`);
+
+        const searchBranch = [
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "memory_search",
+              content: [{ type: "text", text: JSON.stringify([{ slug: "prefer-pnpm" }]) }],
+            },
+          },
+        ];
+        const shiftedSearchBranch = [
+          { type: "message", message: { role: "user", content: "unrelated earlier message inserted by branch rewrite" } },
+          searchBranch[0],
+        ];
+        const searchRows = collectOutcomes(searchBranch, "session-search-index-drift-smoke").rows;
+        const shiftedSearchRows = collectOutcomes(shiftedSearchBranch, "session-search-index-drift-smoke").rows;
+        assert(searchRows[0].event_id === shiftedSearchRows[0].event_id, `tool-result fallback event_id must not drift when branch index shifts: before=${JSON.stringify(searchRows[0])} after=${JSON.stringify(shiftedSearchRows[0])}`);
+
+        // Live agent_end sees the full branch every turn. writeOutcomeLedger
+        // must durably dedupe so repeated full-branch scans only add new
+        // evidence, not earlier events again.
+        fs.writeFileSync(path.join(sedimentDir, "outcome-ledger.jsonl"), "");
+        writeOutcomeLedger(decidedOutcomes.rows, "/tmp/pi-astack-smoke-project");
+        const longerBranch = [
+          ...decidedBranch,
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "memory_get",
+              content: [{ type: "text", text: JSON.stringify({ slug: "cold-slug-never-seen" }) }],
+            },
+          },
+        ];
+        writeOutcomeLedger(collectOutcomes(longerBranch, "session-memory-decide-smoke").rows, "/tmp/pi-astack-smoke-project");
+        const dedupedRows = readOutcomeLedger().filter((r) => r.session_id === "session-memory-decide-smoke" && r.source === "tool-result");
+        assert(dedupedRows.length === 3, `writeOutcomeLedger should dedupe prior full-branch rows and add only the new event, got ${JSON.stringify(dedupedRows)}`);
+
+        // Verify memory_decide retrieval query includes all decision inputs,
+        // not only `context`. This guards ADR 0026 recall quality: option
+        // names and constraints are often the only strings that match prior
+        // memories.
+        const query = buildDecisionSearchQuery({
+          context: "choosing deployment target for a small Next.js app",
+          options: ["Vercel", "Fly.io"],
+          constraints: "must support cron jobs and monorepo deploys",
+        });
+        assert(/choosing deployment target/.test(query), `decision search query must include context; query was:\n${query}`);
+        assert(/Vercel/.test(query) && /Fly\.io/.test(query), `decision search query must include options; query was:\n${query}`);
+        assert(/cron jobs/.test(query) && /monorepo deploys/.test(query), `decision search query must include constraints; query was:\n${query}`);
+        assert(/Chinese\/English/.test(query), `decision search query should preserve cross-language retrieval instruction; query was:\n${query}`);
 
         // Verify prompt builder injects the section. We don't grade the
         // LLM output — we only assert the activity table renders into
@@ -5954,17 +6283,22 @@ Body.
           options: ["pnpm", "yarn"],
           constraints: "",
           entries: [
-            { slug: "prefer-pnpm", title: "Prefer pnpm", kind: "preference", compiledTruth: "User prefers pnpm." },
-            { slug: "ci-github-actions", title: "CI on Actions", kind: "decision", compiledTruth: "User uses GH Actions." },
-            { slug: "cold-slug-never-seen", title: "Cold", kind: "fact", compiledTruth: "Cold fact." },
+            { slug: "prefer-pnpm", title: "Prefer pnpm", kind: "preference", status: "active", confidence: 9, compiledTruth: "User prefers pnpm." },
+            { slug: "ci-github-actions", title: "CI on Actions", kind: "decision", status: "active", confidence: 7, compiledTruth: "User uses GH Actions." },
+            { slug: "cold-slug-never-seen", title: "Cold", kind: "fact", status: "active", confidence: 4, compiledTruth: "Cold fact." },
           ],
-          activity: stats,
+          activity: [...stats, echoStats],
           activityWindowDays: 30,
         });
         assert(/RECENT USAGE OF THESE ENTRIES/.test(prompt), `prompt must include RECENT USAGE section header`);
-        assert(/prefer-pnpm: decisive=2, confirmatory=1, total_retrievals=6/.test(prompt), `prompt should show prefer-pnpm counts in canonical format; prompt was:\n${prompt}`);
-        assert(/ci-github-actions: retrieved_unused=1, total_retrievals=1/.test(prompt), `prompt should show ci-github-actions counts; prompt was:\n${prompt}`);
+        assert(/prefer-pnpm: decisive=2, confirmatory=1, decisive_streak=2, total_retrievals=3/.test(prompt), `prompt should show prefer-pnpm counts in canonical format; prompt was:\n${prompt}`);
+        assert(/ci-github-actions: retrieved_unused=1/.test(prompt) && !/ci-github-actions:.*total_retrievals=1/.test(prompt), `prompt should show ci-github-actions footnote usage without fake retrieval count; prompt was:\n${prompt}`);
         assert(/cold-slug-never-seen: no signals/.test(prompt), `cold slug should be tagged 'no signals' in prompt`);
+        assert(/possible_echo_chamber=true/.test(prompt) && /pending reconfirmation/.test(prompt), `prompt must surface echo-chamber breaker and downgrade instruction; prompt was:\n${prompt}`);
+        assert(/total_retrievals counts tool invocations, not unique sessions/.test(prompt), `prompt must warn that total_retrievals can be inflated by repeated searches: ${prompt}`);
+        assert(/metadata: status=/.test(prompt) && /confidence=/.test(prompt), `prompt must expose memory status/confidence metadata to support uncertainty instructions: ${prompt}`);
+        assert(/CONTRADICTION CHECK INPUTS/.test(prompt) && /prefer-pnpm: kind=preference/.test(prompt), `prompt must expose high-confidence active memories for contradiction detection: ${prompt}`);
+        assert(/No direct\s+contradiction detected/.test(prompt), `prompt must require an explicit contradiction-check section: ${prompt}`);
         assert(/Do NOT apply hard thresholds/.test(prompt), `prompt must instruct LLM to weight by judgment not threshold (ADR 0024 §3 AI-Native)`);
 
         // All-zero activity path: prompt should still emit a clarifying
