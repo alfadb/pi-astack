@@ -98,6 +98,24 @@ import { abrainProjectDir, abrainSedimentStagingPath, resolveActiveProject } fro
  */
 const autoWriteInFlight = new Map<string, Promise<void>>();
 
+type DeferredStopReason = "agent_error" | "agent_aborted";
+
+interface DeferredStopState {
+  reason: DeferredStopReason;
+  sessionId: string;
+  lastEntryId?: string;
+  timestamp: string;
+}
+
+/**
+ * Per-process hint that the previous healthy-scope agent_end was
+ * deliberately deferred because the main agent ended unhealthy. The
+ * durable guarantee still comes from holding the on-disk checkpoint;
+ * this map is only for closing the user-visible/audit loop when the
+ * next healthy agent_end reprocesses and advances that checkpoint.
+ */
+const deferredStopBySession = new Map<string, DeferredStopState>();
+
 interface SessionCorrectionState {
   signals: CorrectionSignal[];
   updatedAt: number;
@@ -1014,13 +1032,28 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const abrainHome = resolveAbrainHomeForSediment();
 
       if (unhealthyStopReason) {
+        const lastBranchEntry = branch.length > 0 ? branch[branch.length - 1] : undefined;
+        const lastBranchEntryId = lastBranchEntry && typeof lastBranchEntry === "object" && "id" in lastBranchEntry
+          ? (lastBranchEntry as { id?: unknown }).id
+          : undefined;
+        const deferredAt = new Date().toISOString();
+        deferredStopBySession.set(sessionId, {
+          reason: unhealthyStopReason,
+          sessionId,
+          lastEntryId: typeof lastBranchEntryId === "string" ? lastBranchEntryId : undefined,
+          timestamp: deferredAt,
+        });
         await appendAudit(cwd, {
           operation: "skip",
           lane: "system",
           reason: unhealthyStopReason,
+          deferred: true,
+          recovery: "next_healthy_agent_end",
           session_id: sessionId,
           branch_size: branch.length,
           stop_reason: lastAssistant?.stopReason,
+          deferred_at: deferredAt,
+          deferred_last_entry_id: typeof lastBranchEntryId === "string" ? lastBranchEntryId : undefined,
           // Round 9 P1 (sonnet R9-4 fix): cap error_message at 500 chars
           // to avoid leaking provider-side error spew that may echo back
           // request body (which can contain pasted secrets) into
@@ -1033,13 +1066,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           checkpoint_advanced: false,
           stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
         });
-        const detail =
-          unhealthyStopReason === "agent_error"
-            ? "agent error"
-            : "agent aborted";
         // Error/abort means sediment intentionally skipped this turn and
-        // held the checkpoint for retry. Surface as ⚠️, not ✅ completed.
-        applySedimentStatus(setStatus, sessionId, "failed", detail);
+        // held the checkpoint for retry. Surface as ⚠️ with explicit
+        // deferral semantics, not ✅ completed and not a generic pipeline
+        // failure.
+        applySedimentStatus(setStatus, sessionId, "failed", formatDeferredStopStatusDetail(unhealthyStopReason));
         return;
       }
 
@@ -1109,6 +1140,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const entryBreakdown = countEntryTypes(window.entries);
 
       if ((window.skipReason && window.skipReason !== "window_too_small") || !window.lastEntryId) {
+        const pendingDeferred = deferredStopBySession.get(sessionId);
+        const checkpointAdvanced = !!window.lastEntryId;
         if (window.lastEntryId)
           await saveSessionCheckpoint(cwd, sessionId, {
             lastProcessedEntryId: window.lastEntryId,
@@ -1123,13 +1156,22 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           parser_version: PARSER_VERSION,
           settings_snapshot: settingsSnapshot,
           entry_breakdown: entryBreakdown,
+          recovered_deferred: checkpointAdvanced && !!pendingDeferred,
+          ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
           stage_ms: {
             window_build: tWindowBuilt - tStart,
             parse: 0,
             write_total: 0,
             total: Date.now() - tStart,
           },
-          checkpoint_advanced: !!window.lastEntryId,
+          checkpoint_advanced: checkpointAdvanced,
+        });
+        await recordDeferredRecoveryIfNeeded({
+          cwd,
+          sessionId,
+          window,
+          checkpointAdvanced,
+          lane: "window",
         });
         // Healthy no-op skip (no new entries). Mark completed so the
         // agent_start of the next prompt resets to idle.
@@ -1408,6 +1450,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                       // silent, leaving operators with no forensic trail
                       // for drain failures.
                       if (auto.kind === "wrote") {
+                        const pendingDeferred = deferredStopBySession.get(sessionId);
                         await appendAudit(cwd, {
                           operation: "auto_write",
                           lane: "auto_write",
@@ -1425,9 +1468,19 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           raw_text_truncated: auto.rawTextTruncated,
                           raw_text_redacted: auto.rawTextRedacted,
                           raw_text_redaction_reason: auto.rawTextRedactionReason,
+                          recovered_deferred: !!pendingDeferred,
+                          ...(pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                           checkpoint_advanced: true,
                           background_async: true,
                           drain: true,
+                        });
+                        await recordDeferredRecoveryIfNeeded({
+                          cwd,
+                          sessionId,
+                          window: win,
+                          checkpointAdvanced: true,
+                          lane: "auto_write",
+                          correlationId: corrId,
                         });
                         const compact = compactResultSummary(auto.results);
                         applySedimentStatus(
@@ -1594,6 +1647,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   lastProcessedEntryId: effectiveWindow.lastEntryId,
                 });
               }
+              const pendingDeferred = deferredStopBySession.get(sessionId);
               await appendAudit(cwd, {
                 operation: "skip",
                 lane: "auto_write",
@@ -1607,6 +1661,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 settings_snapshot: settingsSnapshot,
                 entry_breakdown: entryBreakdown,
                 correlation_id: shortCorrelationId,
+                recovered_deferred: checkpointAdvanced && !!pendingDeferred,
+                ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                 checkpoint_advanced: checkpointAdvanced,
                 classifier_only: true,
                 classifier_ok: classifierResult.ok,
@@ -1619,6 +1675,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   total: Date.now() - tStart,
                   background: true,
                 },
+              });
+              await recordDeferredRecoveryIfNeeded({
+                cwd,
+                sessionId,
+                window: effectiveWindow,
+                checkpointAdvanced,
+                lane: "auto_write",
+                correlationId: shortCorrelationId,
               });
               applySedimentStatus(
                 setStatus,
@@ -1721,6 +1785,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             const tAutoEnd = Date.now();
 
             if (auto.kind === "wrote") {
+              const pendingDeferred = deferredStopBySession.get(sessionId);
               await appendAudit(cwd, {
                 operation: "auto_write",
                 lane: "auto_write",
@@ -1753,6 +1818,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 raw_text_truncated: auto.rawTextTruncated,
                 raw_text_redacted: auto.rawTextRedacted,
                 raw_text_redaction_reason: auto.rawTextRedactionReason,
+                recovered_deferred: !!pendingDeferred,
+                ...(pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                 stage_ms: {
                   window_build: tWindowBuilt - tStart,
                   parse: tParseEnd - tParseStart,
@@ -1763,6 +1830,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 },
                 checkpoint_advanced: true,
                 background_async: true,
+              });
+              await recordDeferredRecoveryIfNeeded({
+                cwd,
+                sessionId,
+                window: effectiveWindow,
+                checkpointAdvanced: true,
+                lane: "auto_write",
+                correlationId: autoCorrelationId,
               });
               if (notify) {
                 try {
@@ -1818,6 +1893,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               return;
             }
 
+            const pendingDeferred = deferredStopBySession.get(sessionId);
             await appendAudit(cwd, {
               operation: "skip",
               lane: "auto_write",
@@ -1859,6 +1935,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 auto.kind === "llm_error" || auto.kind === "llm_skip"
                   ? auto.rawTextRedactionReason
                   : undefined,
+              recovered_deferred: !!pendingDeferred,
+              ...(pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
               stage_ms: {
                 window_build: tWindowBuilt - tStart,
                 parse: tParseEnd - tParseStart,
@@ -1869,6 +1947,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               },
               checkpoint_advanced: true,
               background_async: true,
+            });
+            await recordDeferredRecoveryIfNeeded({
+              cwd,
+              sessionId,
+              window: effectiveWindow,
+              checkpointAdvanced: true,
+              lane: "auto_write",
+              correlationId: autoCorrelationId,
             });
             // ineligible / llm_skip = healthy completion;
             // llm_error = failed (LLM call broke; user should know).
@@ -2136,6 +2222,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
       // ── Lane A audit row ────────────────────────────────────────
       if (drafts.length > 0 && explicitCorrelationId) {
+        const pendingDeferred = deferredStopBySession.get(sessionId);
         await appendAudit(cwd, {
           operation: "explicit_extract",
           lane: "explicit",
@@ -2146,6 +2233,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           settings_snapshot: settingsSnapshot,
           entry_breakdown: entryBreakdown,
           correlation_id: explicitCorrelationId,
+          recovered_deferred: combinedShouldAdvance && !!pendingDeferred,
+          ...(combinedShouldAdvance && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
           candidate_count: drafts.length,
           candidates: drafts.map((d, i) => ({
             candidate_id: candidateIdFor(explicitCorrelationId!, i),
@@ -2175,8 +2264,20 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         });
       }
 
+      if (drafts.length > 0 && explicitCorrelationId) {
+        await recordDeferredRecoveryIfNeeded({
+          cwd,
+          sessionId,
+          window: effectiveWindow,
+          checkpointAdvanced: combinedShouldAdvance,
+          lane: "explicit",
+          correlationId: explicitCorrelationId,
+        });
+      }
+
       // ── Lane G audit row ────────────────────────────────────────
       if (aboutMeDrafts.length > 0 && aboutMeCorrelationId) {
+        const pendingDeferred = deferredStopBySession.get(sessionId);
         await appendAudit(cwd, {
           operation: "about_me_extract",
           lane: "about_me",
@@ -2187,6 +2288,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           settings_snapshot: settingsSnapshot,
           entry_breakdown: entryBreakdown,
           correlation_id: aboutMeCorrelationId,
+          recovered_deferred: combinedShouldAdvance && !!pendingDeferred,
+          ...(combinedShouldAdvance && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
           candidate_count: aboutMeDrafts.length,
           candidates: aboutMeDrafts.map((d, i) => ({
             candidate_id: candidateIdFor(aboutMeCorrelationId!, i),
@@ -2218,6 +2321,17 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           },
           checkpoint_advanced: combinedShouldAdvance,
           lane_advance_decision: laneGShouldAdvance,
+        });
+      }
+
+      if (aboutMeDrafts.length > 0 && aboutMeCorrelationId) {
+        await recordDeferredRecoveryIfNeeded({
+          cwd,
+          sessionId,
+          window: effectiveWindow,
+          checkpointAdvanced: combinedShouldAdvance,
+          lane: "about_me",
+          correlationId: aboutMeCorrelationId,
         });
       }
 
@@ -2465,6 +2579,37 @@ function sanitizeAuditText(value: unknown, cap: number): string | undefined {
   const s = sanitizeForMemory(raw);
   const text = s.ok ? (s.text ?? raw) : `[redacted: ${s.error}]`;
   return cap > 0 ? text.slice(0, cap) : text;
+}
+
+function formatDeferredStopStatusDetail(reason: DeferredStopReason): string {
+  return reason === "agent_error"
+    ? "deferred — agent error; will retry after next healthy turn"
+    : "deferred — agent aborted; will retry after next healthy turn";
+}
+
+async function recordDeferredRecoveryIfNeeded(args: {
+  cwd: string;
+  sessionId: string;
+  window: RunWindow;
+  checkpointAdvanced: boolean;
+  lane: string;
+  correlationId?: string;
+}): Promise<void> {
+  const pending = deferredStopBySession.get(args.sessionId);
+  if (!pending || !args.checkpointAdvanced) return;
+
+  await appendAudit(args.cwd, {
+    operation: "deferred_recovered",
+    lane: args.lane,
+    session_id: args.sessionId,
+    previous_reason: pending.reason,
+    deferred_at: pending.timestamp,
+    deferred_last_entry_id: pending.lastEntryId,
+    recovered_last_entry_id: args.window.lastEntryId,
+    checkpoint_advanced: true,
+    ...(args.correlationId ? { correlation_id: args.correlationId } : {}),
+  });
+  deferredStopBySession.delete(args.sessionId);
 }
 
 /**
@@ -2883,6 +3028,7 @@ export function _resetAutoWriteStateForTests(): void {
   sedimentStatusBySession.clear();
   sessionAgentCycle.clear();
   sessionCorrectionWorkingSet.clear();
+  deferredStopBySession.clear();
   _resetWarnedApisForTests();
 }
 

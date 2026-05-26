@@ -158,6 +158,14 @@ exports.compact = async (preparation, model) => ({
   firstKeptEntryId: preparation.firstKeptEntryId,
   tokensBefore: preparation.tokensBefore,
 });
+class StubAgentSession {}
+StubAgentSession.prototype._buildRuntime = function () {};
+StubAgentSession.prototype._runAutoCompaction = function () {};
+StubAgentSession.prototype._emit = function () {};
+class StubInteractiveMode {}
+StubInteractiveMode.prototype.handleEvent = function () {};
+exports.AgentSession = StubAgentSession;
+exports.InteractiveMode = StubInteractiveMode;
 `);
 
   // Minimal pi-ai subset for ADR 0015 memory_search LLM-path smoke. Dynamic
@@ -596,12 +604,20 @@ async function main() {
         const boundSessionFile = path.join(hookRoot, "sessions", "bound.jsonl");
         writeFile(boundSessionFile, "{}\n");
         const boundStatuses = [];
+        const boundBranch = [
+          {
+            id: "b-user-1",
+            type: "message",
+            timestamp: "2026-05-12T10:00:00.000+08:00",
+            message: { role: "user", content: [{ type: "text", text: "hello" }] },
+          },
+        ];
         await agentEnd(
           { messages: [{ role: "assistant", stopReason: "aborted", errorMessage: "user aborted" }] },
           {
             cwd: path.join(boundRoot, "subdir"),
             sessionManager: {
-              getBranch: () => [{ role: "user", content: "hello" }],
+              getBranch: () => boundBranch,
               getSessionId: () => "hook-bound-session",
               getSessionFile: () => boundSessionFile,
             },
@@ -612,14 +628,45 @@ async function main() {
         const boundSubAudit = path.join(boundRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
         assert(fs.existsSync(boundAudit), `bound unhealthy audit must land at project root: ${boundAudit}`);
         assert(!fs.existsSync(boundSubAudit), `bound unhealthy audit must not land in launch subdir: ${boundSubAudit}`);
-        const boundRows = fs.readFileSync(boundAudit, "utf-8").trim().split("\n").map(JSON.parse);
+        let boundRows = fs.readFileSync(boundAudit, "utf-8").trim().split("\n").map(JSON.parse);
         const boundRow = boundRows.find((r) => r.reason === "agent_aborted");
         assert(boundRow, `bound unhealthy audit row missing: ${JSON.stringify(boundRows)}`);
         assert(boundRow.project_root === path.resolve(boundRoot), `bound audit project_root mismatch: ${boundRow.project_root}`);
-        assert(boundStatuses.some((msg) => /^⚠️\s+sediment: agent aborted/.test(String(msg))), `bound unhealthy stop footer must be warning/failed, not completed: ${JSON.stringify(boundStatuses)}`);
-        assert(!boundStatuses.some((msg) => /^✅\s+sediment: agent aborted/.test(String(msg))), `bound unhealthy stop footer must not show completed/✅: ${JSON.stringify(boundStatuses)}`);
+        assert(boundRow.deferred === true && boundRow.recovery === "next_healthy_agent_end", `bound unhealthy stop must be marked deferred/recoverable: ${JSON.stringify(boundRow)}`);
+        assert(boundRow.deferred_last_entry_id === "b-user-1", `bound deferred audit should record last branch entry id: ${JSON.stringify(boundRow)}`);
+        assert(boundStatuses.some((msg) => /^⚠️\s+sediment: deferred — agent aborted; will retry after next healthy turn/.test(String(msg))), `bound unhealthy stop footer must say deferred/retry, not generic failure: ${JSON.stringify(boundStatuses)}`);
+        assert(!boundStatuses.some((msg) => /^✅\s+sediment:/.test(String(msg))), `bound unhealthy stop footer must not show completed/✅: ${JSON.stringify(boundStatuses)}`);
         assert(boundRow.checkpoint_advanced === false, `bound unhealthy stop must not advance checkpoint`);
         assert(!fs.existsSync(path.join(boundRoot, ".pi-astack", "sediment", "checkpoint.json")), `bound unhealthy stop must not create checkpoint`);
+
+        boundBranch.push({
+          id: "b-user-2",
+          type: "message",
+          timestamp: "2026-05-12T10:01:00.000+08:00",
+          message: { role: "user", content: [{ type: "text", text: "A healthy follow-up turn that lets sediment advance the held checkpoint without writing memory." }] },
+        });
+        await agentEnd(
+          { messages: [{ role: "assistant", stopReason: "stop" }] },
+          {
+            cwd: path.join(boundRoot, "subdir"),
+            sessionManager: {
+              getBranch: () => boundBranch,
+              getSessionId: () => "hook-bound-session",
+              getSessionFile: () => boundSessionFile,
+            },
+            ui: { notify() {}, setStatus(_key, msg) { boundStatuses.push(msg); } },
+          },
+        );
+        await hookReq("./sediment/index.js")._waitForAutoWriteIdleForTests();
+        boundRows = fs.readFileSync(boundAudit, "utf-8").trim().split("\n").map(JSON.parse);
+        const recoveredRow = boundRows.find((r) => r.operation === "deferred_recovered");
+        assert(recoveredRow, `healthy follow-up must record deferred_recovered: ${JSON.stringify(boundRows)}`);
+        assert(recoveredRow.previous_reason === "agent_aborted", `deferred_recovered previous_reason mismatch: ${JSON.stringify(recoveredRow)}`);
+        assert(recoveredRow.recovered_last_entry_id === "b-user-2", `deferred_recovered should advance through healthy follow-up: ${JSON.stringify(recoveredRow)}`);
+        const recoveryCarrier = boundRows.find((r) => r.recovered_deferred === true);
+        assert(recoveryCarrier && recoveryCarrier.previous_deferred_reason === "agent_aborted", `primary healthy audit row must also flag recovered_deferred: ${JSON.stringify(boundRows)}`);
+        const boundCheckpoint = JSON.parse(fs.readFileSync(path.join(boundRoot, ".pi-astack", "sediment", "checkpoint.json"), "utf-8"));
+        assert(boundCheckpoint.sessions["hook-bound-session"]?.lastProcessedEntryId === "b-user-2", `healthy follow-up must advance checkpoint: ${JSON.stringify(boundCheckpoint)}`);
 
         const unboundRoot = path.join(hookRoot, "unbound-project");
         fs.mkdirSync(path.join(unboundRoot, "subdir"), { recursive: true });
