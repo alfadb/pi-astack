@@ -1,17 +1,18 @@
 /**
  * compaction-tuner extension for pi-astack.
  *
- * Triggers `ctx.compact()` when context usage crosses a configurable
- * percentage of the model's contextWindow. Solves the problem that pi's
- * built-in `reserveTokens` is an absolute number while user-stack models
- * span 200k → 1M+ contextWindows, making a single number unable to
- * represent a percentage threshold uniformly.
+ * Triggers compaction when context usage crosses a configurable effective
+ * threshold. Solves the problem that pi's built-in `reserveTokens` is an
+ * absolute number while user-stack models span 200k → 1M+ contextWindows,
+ * and some routes (notably GPT-5.5) have lower economic/safe budgets than
+ * their nominal API contextWindow.
  *
  * Configuration lives in `~/.pi/agent/pi-astack-settings.json`:
  *
  *   "compactionTuner": {
  *     "enabled": true,
  *     "thresholdPercent": 75,
+ *     "dynamicThreshold": { "enabled": true },
  *     "rearmMarginPercent": 5,
  *     "notifyOnTrigger": true,
  *     "customInstructions": "",
@@ -49,6 +50,7 @@ import {
   resolveCompactionTunerSettings,
   snapshotCompactionTunerSettings,
   type CompactionTunerSettings,
+  type DynamicThresholdSettings,
 } from "./settings";
 
 const AUDIT_VERSION = 1;
@@ -396,11 +398,16 @@ function applyTimedRearm(stateKey: string, nowMs: number): void {
   }
 }
 
-function clearBackoffIfBelowRearmFloor(stateKey: string, percent: number | null, settings: CompactionTunerSettings): void {
+function clearBackoffIfBelowRearmFloor(
+  stateKey: string,
+  percent: number | null,
+  thresholdPercent: number,
+  rearmMarginPercent: number,
+): void {
   if (
     failureCountBySession.has(stateKey) &&
     percent !== null &&
-    percent < settings.thresholdPercent - settings.rearmMarginPercent
+    percent < thresholdPercent - rearmMarginPercent
   ) {
     failureCountBySession.delete(stateKey);
     cooldownUntilBySession.delete(stateKey);
@@ -433,19 +440,111 @@ function recordFailedTriggerState(stateKey: string): { nextFailures: number; coo
   return { nextFailures, cooldownMs };
 }
 
+function modelRefKey(provider?: string, id?: string): string | undefined {
+  if (!provider || !id) return undefined;
+  return `${provider}/${id}`;
+}
+
+function readEffectiveContextBudget(
+  usage: TurnBoundaryCompactionUsage | undefined,
+  modelInfo: { provider?: string; id?: string; contextWindow?: number },
+  dynamic: DynamicThresholdSettings,
+): number | undefined {
+  const ref = modelRefKey(modelInfo.provider, modelInfo.id);
+  const override = ref ? dynamic.modelEffectiveContextBudgets[ref] : undefined;
+  const runtimeWindow = usage?.contextWindow ?? modelInfo.contextWindow;
+  if (override && Number.isFinite(override) && override > 0) {
+    return runtimeWindow && runtimeWindow > 0 ? Math.min(override, runtimeWindow) : override;
+  }
+  return runtimeWindow && Number.isFinite(runtimeWindow) && runtimeWindow > 0
+    ? runtimeWindow
+    : undefined;
+}
+
+function dynamicCapForBudget(budget: number, dynamic: DynamicThresholdSettings): number {
+  if (budget <= dynamic.smallWindowMaxTokens) return dynamic.smallWindowThresholdPercent;
+  if (budget <= dynamic.mediumWindowMaxTokens) return dynamic.mediumWindowThresholdPercent;
+  return dynamic.largeWindowThresholdPercent;
+}
+
+function computeEffectiveThreshold(
+  settings: CompactionTunerSettings,
+  usage: TurnBoundaryCompactionUsage | undefined,
+  modelInfo: { provider?: string; id?: string; contextWindow?: number },
+): { thresholdPercent: number; effectiveContextBudget?: number; reason: "configured" | "dynamic" } {
+  const configured = settings.thresholdPercent;
+  const dynamic = settings.dynamicThreshold;
+  if (!dynamic.enabled) {
+    return { thresholdPercent: configured, reason: "configured" };
+  }
+  const budget = readEffectiveContextBudget(usage, modelInfo, dynamic);
+  if (!budget) {
+    return { thresholdPercent: configured, reason: "configured" };
+  }
+  const classCap = dynamicCapForBudget(budget, dynamic);
+  const headroomCap = dynamic.minHeadroomTokens > 0 && budget > dynamic.minHeadroomTokens
+    ? Math.max(10, Math.min(95, Math.floor(((budget - dynamic.minHeadroomTokens) / budget) * 100)))
+    : 95;
+  return {
+    thresholdPercent: Math.min(configured, classCap, headroomCap),
+    effectiveContextBudget: budget,
+    reason: "dynamic",
+  };
+}
+
+function computeEffectiveRearmMargin(thresholdPercent: number, configuredRearmMarginPercent: number): number {
+  return Math.min(configuredRearmMarginPercent, Math.max(0, thresholdPercent - 1));
+}
+
+function computeCompactionDecisionMetrics(
+  settings: CompactionTunerSettings,
+  usage: TurnBoundaryCompactionUsage | undefined,
+  modelInfo: { provider?: string; id?: string; contextWindow?: number },
+): {
+  thresholdPercent: number;
+  rearmMarginPercent: number;
+  configuredRearmMarginPercent: number;
+  effectiveContextBudget?: number;
+  thresholdReason: "configured" | "dynamic";
+  percent: number | null;
+  rawPercent: number | null;
+} {
+  const threshold = computeEffectiveThreshold(settings, usage, modelInfo);
+  const rawPercent = usage?.percent ?? null;
+  const tokens = usage?.tokens;
+  const runtimeWindow = usage?.contextWindow ?? modelInfo.contextWindow;
+  const estimatedTokens = typeof tokens === "number" && Number.isFinite(tokens)
+    ? tokens
+    : rawPercent !== null && runtimeWindow && runtimeWindow > 0
+      ? (rawPercent / 100) * runtimeWindow
+      : undefined;
+  const percent = threshold.effectiveContextBudget && typeof estimatedTokens === "number" && Number.isFinite(estimatedTokens)
+    ? (estimatedTokens / threshold.effectiveContextBudget) * 100
+    : rawPercent;
+  return {
+    thresholdPercent: threshold.thresholdPercent,
+    rearmMarginPercent: computeEffectiveRearmMargin(threshold.thresholdPercent, settings.rearmMarginPercent),
+    configuredRearmMarginPercent: settings.rearmMarginPercent,
+    effectiveContextBudget: threshold.effectiveContextBudget,
+    thresholdReason: threshold.reason,
+    percent,
+    rawPercent,
+  };
+}
+
 function inspectCompactionTunerDecision(
   stateKey: string,
   percent: number | null,
-  settings: CompactionTunerSettings,
+  thresholdPercent: number,
+  rearmMarginPercent: number,
   nowMs: number,
 ):
   | { decision: "skip"; reason: string }
   | { decision: "rearm"; reason: string }
   | { decision: "trigger" } {
   applyTimedRearm(stateKey, nowMs);
-  clearBackoffIfBelowRearmFloor(stateKey, percent, settings);
   const wasArmed = armedBySession.get(stateKey) ?? true;
-  const decision = classifyDecision(percent, settings.thresholdPercent, wasArmed, settings.rearmMarginPercent);
+  const decision = classifyDecision(percent, thresholdPercent, wasArmed, rearmMarginPercent);
   if (decision.decision === "rearm") {
     armedBySession.set(stateKey, true);
     failureCountBySession.delete(stateKey);
@@ -510,9 +609,17 @@ export default function (pi: ExtensionAPI) {
       }
 
       const usage = typeof session.getContextUsage === "function" ? session.getContextUsage() : undefined;
-      const percent = usage?.percent ?? null;
       const stateKey = readStateKey(sessionId);
-      const decision = inspectCompactionTunerDecision(stateKey, percent, settings, Date.now());
+      const modelInfo = getSessionModelInfo(session);
+      const metrics = computeCompactionDecisionMetrics(settings, usage, modelInfo);
+      clearBackoffIfBelowRearmFloor(stateKey, metrics.percent, metrics.thresholdPercent, metrics.rearmMarginPercent);
+      const decision = inspectCompactionTunerDecision(
+        stateKey,
+        metrics.percent,
+        metrics.thresholdPercent,
+        metrics.rearmMarginPercent,
+        Date.now(),
+      );
       if (decision.decision === "rearm") {
         return { decision: "skip", reason: decision.reason, usage, sessionId };
       }
@@ -528,9 +635,14 @@ export default function (pi: ExtensionAPI) {
           decision: "skip",
           reason: gate.reason,
           session_id: sessionId,
-          usage_percent: percent,
+          usage_percent: metrics.percent,
+          raw_usage_percent: metrics.rawPercent,
           consecutive_failures: gate.failuresSoFar,
           ...(gate.reason === "in_error_cooldown" ? { cooldown_remaining_ms: gate.cooldownRemainingMs } : {}),
+          threshold_percent: metrics.thresholdPercent,
+          configured_threshold_percent: settings.thresholdPercent,
+          effective_context_budget: metrics.effectiveContextBudget ?? null,
+          threshold_reason: metrics.thresholdReason,
           settings_snapshot: snapshotCompactionTunerSettings(settings),
         });
         return { decision: "skip", reason: gate.reason, usage, sessionId };
@@ -543,7 +655,12 @@ export default function (pi: ExtensionAPI) {
           decision: "skip",
           reason: "prompt_user_pending",
           session_id: sessionId,
-          usage_percent: percent,
+          usage_percent: metrics.percent,
+          raw_usage_percent: metrics.rawPercent,
+          threshold_percent: metrics.thresholdPercent,
+          configured_threshold_percent: settings.thresholdPercent,
+          effective_context_budget: metrics.effectiveContextBudget ?? null,
+          threshold_reason: metrics.thresholdReason,
         });
         return { decision: "skip", reason: "prompt_user_pending", usage, sessionId };
       }
@@ -554,7 +671,12 @@ export default function (pi: ExtensionAPI) {
           decision: "skip",
           reason: "vault_dialog_pending",
           session_id: sessionId,
-          usage_percent: percent,
+          usage_percent: metrics.percent,
+          raw_usage_percent: metrics.rawPercent,
+          threshold_percent: metrics.thresholdPercent,
+          configured_threshold_percent: settings.thresholdPercent,
+          effective_context_budget: metrics.effectiveContextBudget ?? null,
+          threshold_reason: metrics.thresholdReason,
         });
         return { decision: "skip", reason: "vault_dialog_pending", usage, sessionId };
       }
@@ -570,27 +692,35 @@ export default function (pi: ExtensionAPI) {
       const stateKey = readStateKey(sessionId);
       const settings = resolveCompactionTunerSettings();
       const modelInfo = getSessionModelInfo(session);
-      const failedState = result ? undefined : recordFailedTriggerState(stateKey);
+      const metrics = computeCompactionDecisionMetrics(settings, usage, modelInfo);
       if (result) {
         recordSuccessfulTurnBoundaryTriggerState(stateKey);
+      } else {
+        // `_runAutoCompaction()` returns false for benign no-op cases
+        // (missing auth, no eligible messages, abort). Do not count those
+        // as provider failures/backoff, but keep the session disarmed until
+        // usage drops below the rearm floor so we do not hammer a no-op path
+        // on every turn-boundary check.
+        armedBySession.set(stateKey, /* armed */ false);
       }
       await appendAudit(cwd, {
         operation: "turn_boundary_trigger",
         outcome: result ? "completed" : "no_op",
         session_id: sessionId,
-        percent_at_trigger: usage.percent,
-        threshold_percent: settings.thresholdPercent,
-        rearm_margin_percent: settings.rearmMarginPercent,
+        percent_at_trigger: metrics.percent,
+        raw_percent_at_trigger: metrics.rawPercent,
+        threshold_percent: metrics.thresholdPercent,
+        configured_threshold_percent: settings.thresholdPercent,
+        effective_context_budget: metrics.effectiveContextBudget ?? null,
+        threshold_reason: metrics.thresholdReason,
+        rearm_margin_percent: metrics.rearmMarginPercent,
+        configured_rearm_margin_percent: metrics.configuredRearmMarginPercent,
         tokens_at_trigger: usage.tokens ?? null,
         context_window: usage.contextWindow ?? modelInfo.contextWindow ?? null,
         model_provider: modelInfo.provider ?? null,
         model_id: modelInfo.id ?? null,
         last_message_role: getLastAgentMessageRole(session) ?? null,
         elapsed_ms: elapsedMs,
-        ...(failedState ? {
-          consecutive_failures: failedState.nextFailures,
-          cooldown_remaining_ms: failedState.cooldownMs,
-        } : {}),
         settings_snapshot: snapshotCompactionTunerSettings(settings),
       });
     },
@@ -599,6 +729,7 @@ export default function (pi: ExtensionAPI) {
       const cwd = path.resolve(session._cwd || process.cwd());
       const settings = resolveCompactionTunerSettings();
       const modelInfo = getSessionModelInfo(session);
+      const metrics = computeCompactionDecisionMetrics(settings, usage, modelInfo);
       const stateKey = sessionId ? readStateKey(sessionId) : undefined;
       const failureState = stateKey
         ? recordFailedTriggerState(stateKey)
@@ -607,7 +738,7 @@ export default function (pi: ExtensionAPI) {
         console.warn(
           `compaction-tuner: ${MAX_CONSECUTIVE_FAILURES} consecutive turn-boundary compaction failures — ` +
           `auto-compaction disabled for this session until usage drops below ` +
-          `${settings.thresholdPercent - settings.rearmMarginPercent}%. ` +
+          `${metrics.thresholdPercent - metrics.rearmMarginPercent}%. ` +
           `Use '/compaction-tuner reset' to clear backoff and try again.`,
         );
       }
@@ -616,8 +747,12 @@ export default function (pi: ExtensionAPI) {
         outcome: "error",
         error_message: compactErrorMessageFromError(error),
         session_id: sessionId ?? null,
-        percent_at_trigger: usage?.percent ?? null,
-        threshold_percent: settings.thresholdPercent,
+        percent_at_trigger: metrics.percent,
+        raw_percent_at_trigger: metrics.rawPercent,
+        threshold_percent: metrics.thresholdPercent,
+        configured_threshold_percent: settings.thresholdPercent,
+        effective_context_budget: metrics.effectiveContextBudget ?? null,
+        threshold_reason: metrics.thresholdReason,
         tokens_at_trigger: usage?.tokens ?? null,
         context_window: usage?.contextWindow ?? modelInfo.contextWindow ?? null,
         model_provider: modelInfo.provider ?? null,
@@ -691,7 +826,8 @@ export default function (pi: ExtensionAPI) {
     const nowMs = Date.now();
     applyTimedRearm(stateKey, nowMs);
 
-    const percent = usage?.percent ?? null;
+    const metrics = computeCompactionDecisionMetrics(settings, usage, modelInfo);
+    const percent = metrics.percent;
 
     // Opportunistic backoff clear (P1-1 fix from 2026-05-21 review):
     // if percent dropped below the rearm floor, real context reduction
@@ -702,10 +838,10 @@ export default function (pi: ExtensionAPI) {
     // armed=true at the top of the handler, so classifyDecision's
     // "rearm" branch (which requires !armed) is unreachable, leaving
     // failureCount/cooldown stale to bias the next trigger's backoff.
-    clearBackoffIfBelowRearmFloor(stateKey, percent, settings);
+    clearBackoffIfBelowRearmFloor(stateKey, percent, metrics.thresholdPercent, metrics.rearmMarginPercent);
 
     const wasArmed = armedBySession.get(stateKey) ?? true;
-    const decision = classifyDecision(percent, settings.thresholdPercent, wasArmed, settings.rearmMarginPercent);
+    const decision = classifyDecision(percent, metrics.thresholdPercent, wasArmed, metrics.rearmMarginPercent);
 
     // Update arming state for "rearm" decisions before logging/short-circuiting.
     if (decision.decision === "rearm") {
@@ -750,8 +886,13 @@ export default function (pi: ExtensionAPI) {
         decision: "skip",
         reason: failureGate.reason,
         usage_percent: percent,
+        raw_usage_percent: metrics.rawPercent,
         consecutive_failures: failureGate.failuresSoFar,
         ...(failureGate.reason === "in_error_cooldown" ? { cooldown_remaining_ms: failureGate.cooldownRemainingMs } : {}),
+        threshold_percent: metrics.thresholdPercent,
+        configured_threshold_percent: settings.thresholdPercent,
+        effective_context_budget: metrics.effectiveContextBudget ?? null,
+        threshold_reason: metrics.thresholdReason,
       });
       return;
     }
@@ -777,6 +918,11 @@ export default function (pi: ExtensionAPI) {
         decision: "skip",
         reason: "prompt_user_pending",
         usage_percent: percent,
+        raw_usage_percent: metrics.rawPercent,
+        threshold_percent: metrics.thresholdPercent,
+        configured_threshold_percent: settings.thresholdPercent,
+        effective_context_budget: metrics.effectiveContextBudget ?? null,
+        threshold_reason: metrics.thresholdReason,
       });
       return;
     }
@@ -786,6 +932,11 @@ export default function (pi: ExtensionAPI) {
         decision: "skip",
         reason: "vault_dialog_pending",
         usage_percent: percent,
+        raw_usage_percent: metrics.rawPercent,
+        threshold_percent: metrics.thresholdPercent,
+        configured_threshold_percent: settings.thresholdPercent,
+        effective_context_budget: metrics.effectiveContextBudget ?? null,
+        threshold_reason: metrics.thresholdReason,
       });
       return;
     }
@@ -794,7 +945,7 @@ export default function (pi: ExtensionAPI) {
 
     if (hasUI && settings.notifyOnTrigger && notify) {
       notify(
-        `compaction-tuner: triggering compact at ${(percent ?? 0).toFixed(1)}% (threshold ${settings.thresholdPercent}%)`,
+        `compaction-tuner: triggering compact at ${(percent ?? 0).toFixed(1)}% (threshold ${metrics.thresholdPercent}%)`,
         "info",
       );
     }
@@ -829,8 +980,13 @@ export default function (pi: ExtensionAPI) {
             outcome: "completed",
             session_id: sessionId,
             percent_at_trigger: percent,
-            threshold_percent: settings.thresholdPercent,
-            rearm_margin_percent: settings.rearmMarginPercent,
+            raw_percent_at_trigger: metrics.rawPercent,
+            threshold_percent: metrics.thresholdPercent,
+            configured_threshold_percent: settings.thresholdPercent,
+            effective_context_budget: metrics.effectiveContextBudget ?? null,
+            threshold_reason: metrics.thresholdReason,
+            rearm_margin_percent: metrics.rearmMarginPercent,
+            configured_rearm_margin_percent: metrics.configuredRearmMarginPercent,
             tokens_at_trigger: usage?.tokens ?? null,
             context_window: usage?.contextWindow ?? modelInfo.contextWindow ?? null,
             model_provider: modelInfo.provider ?? null,
@@ -860,7 +1016,7 @@ export default function (pi: ExtensionAPI) {
             notify(
               `compaction-tuner: ${MAX_CONSECUTIVE_FAILURES} consecutive failures — ` +
               `auto-compaction disabled for this session until usage drops ` +
-              `below ${settings.thresholdPercent - settings.rearmMarginPercent}%. ` +
+              `below ${metrics.thresholdPercent - metrics.rearmMarginPercent}%. ` +
               `Use '/compaction-tuner reset' to clear backoff and try again.`,
               "warning",
             );
@@ -868,10 +1024,14 @@ export default function (pi: ExtensionAPI) {
           void recordOutcome({
             operation: "trigger",
             outcome: "error",
-            error_message: error.message,
+            error_message: compactErrorMessage(error),
             session_id: sessionId,
             percent_at_trigger: percent,
-            threshold_percent: settings.thresholdPercent,
+            raw_percent_at_trigger: metrics.rawPercent,
+            threshold_percent: metrics.thresholdPercent,
+            configured_threshold_percent: settings.thresholdPercent,
+            effective_context_budget: metrics.effectiveContextBudget ?? null,
+            threshold_reason: metrics.thresholdReason,
             tokens_at_trigger: usage?.tokens ?? null,
             context_window: usage?.contextWindow ?? modelInfo.contextWindow ?? null,
             model_provider: modelInfo.provider ?? null,
@@ -898,7 +1058,11 @@ export default function (pi: ExtensionAPI) {
         error_message: message,
         session_id: sessionId,
         percent_at_trigger: percent,
-        threshold_percent: settings.thresholdPercent,
+        raw_percent_at_trigger: metrics.rawPercent,
+        threshold_percent: metrics.thresholdPercent,
+        configured_threshold_percent: settings.thresholdPercent,
+        effective_context_budget: metrics.effectiveContextBudget ?? null,
+        threshold_reason: metrics.thresholdReason,
         elapsed_ms: Date.now() - ts,
         consecutive_failures: nextFailures,
         cooldown_remaining_ms: cooldownMs,
@@ -920,6 +1084,12 @@ export default function (pi: ExtensionAPI) {
       const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
 
       if (sub === "status") {
+        const modelInfo = {
+          provider: ctx.model?.provider,
+          id: ctx.model?.id,
+          contextWindow: ctx.model?.contextWindow,
+        };
+        const metrics = computeCompactionDecisionMetrics(settings, usage, modelInfo);
         // Surface per-session state so operators chasing "why isn't
         // compaction firing at 90%?" can see whether it's disarmed
         // (post-trigger awaiting rearm), in error backoff, or at
@@ -953,12 +1123,15 @@ export default function (pi: ExtensionAPI) {
           "",
           `enabled: ${settings.enabled}`,
           `thresholdPercent: ${settings.thresholdPercent}%`,
-          `rearmMarginPercent: ${settings.rearmMarginPercent}%`,
+          `effectiveThresholdPercent: ${metrics.thresholdPercent}%${metrics.effectiveContextBudget ? ` (budget ${metrics.effectiveContextBudget} tokens)` : ""}`,
+          `dynamicThreshold: ${settings.dynamicThreshold.enabled ? `enabled (${metrics.thresholdReason})` : "disabled"}`,
+          `rearmMarginPercent: ${metrics.rearmMarginPercent}%${metrics.rearmMarginPercent !== metrics.configuredRearmMarginPercent ? ` (configured ${metrics.configuredRearmMarginPercent}%)` : ""}`,
           `notifyOnTrigger: ${settings.notifyOnTrigger}`,
           `customInstructions: ${settings.customInstructions ? `(${settings.customInstructions.length} chars)` : "(empty)"}`,
           `summaryModels: ${settings.summaryModels.length > 0 ? settings.summaryModels.join(", ") : "(default — main session model)"}`,
           "",
-          `current usage: ${usage?.percent != null ? `${usage.percent.toFixed(1)}% (${usage.tokens}/${usage.contextWindow} tokens)` : "(unknown — no post-compaction usage yet)"}`,
+          `current usage: ${metrics.percent != null ? `${metrics.percent.toFixed(1)}% (${usage?.tokens}/${metrics.effectiveContextBudget ?? usage?.contextWindow} effective tokens)` : "(unknown — no post-compaction usage yet)"}`,
+          `raw usage: ${metrics.rawPercent != null ? `${metrics.rawPercent.toFixed(1)}% (${usage?.tokens}/${usage?.contextWindow} runtime tokens)` : "(unknown)"}`,
           `model: ${ctx.model?.provider ?? "?"}/${ctx.model?.id ?? "?"}`,
           "",
           `per-session state:${sessionLines.length === 0 ? " none (fresh process)" : ""}`,
@@ -1028,4 +1201,4 @@ export default function (pi: ExtensionAPI) {
 
 // Test-only exports: the smoke harness uses these directly to verify
 // decision logic without going through pi's runtime.
-export { classifyDecision, DEFAULT_COMPACTION_TUNER_SETTINGS };
+export { classifyDecision, computeEffectiveThreshold, DEFAULT_COMPACTION_TUNER_SETTINGS };

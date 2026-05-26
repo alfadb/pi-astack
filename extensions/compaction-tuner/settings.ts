@@ -8,20 +8,40 @@ const PI_STACK_SETTINGS_PATH = path.join(
 );
 
 /**
- * Compaction-tuner runs on every `agent_end`. When enabled, it reads
- * `ctx.getContextUsage()` and triggers `ctx.compact()` once the percent
- * of contextWindow consumed crosses `thresholdPercent`. We use pi's own
- * runtime API rather than mutating pi's `compaction.reserveTokens`
- * setting, because that setting is a runtime snapshot — pi reads it once
- * at startup and never reloads except on explicit `/reload`.
+ * Compaction-tuner checks both turn-boundary and `agent_end`. When
+ * enabled, it reads runtime usage and triggers compaction once consumed
+ * context crosses the effective threshold. The user-facing
+ * `thresholdPercent` remains a configurable upper bound; by default a
+ * dynamic layer lowers it for small/economic context budgets so a single
+ * tool-result batch still has headroom before the next provider request.
  *
  * Pi's built-in threshold (default reserveTokens=16384) still acts as a
- * last-resort safety net: at 1M-context our 75% trigger fires at 750k
- * while pi's safety net only fires at ~983k.
+ * last-resort safety net: at 1M-context our dynamic trigger fires around
+ * 70% while pi's safety net only fires at ~983k.
  */
+export interface DynamicThresholdSettings {
+  enabled: boolean;
+  /** Context windows <= this are treated as small/easy-to-overflow. */
+  smallWindowMaxTokens: number;
+  /** Max threshold for small/economic windows (e.g. 272k GPT-5.5 routes). */
+  smallWindowThresholdPercent: number;
+  /** Context windows <= this are treated as medium (e.g. 400k Copilot routes). */
+  mediumWindowMaxTokens: number;
+  /** Max threshold for medium windows. */
+  mediumWindowThresholdPercent: number;
+  /** Context windows <= this are treated as large 1M-class windows. */
+  largeWindowMaxTokens: number;
+  /** Max threshold for 1M-class windows. */
+  largeWindowThresholdPercent: number;
+  /** Absolute headroom floor; threshold is also capped by budget - this value. */
+  minHeadroomTokens: number;
+  /** Optional provider/model → effective budget overrides. */
+  modelEffectiveContextBudgets: Record<string, number>;
+}
+
 export interface CompactionTunerSettings {
   enabled: boolean;
-  /** Target context-usage percentage to trigger compaction (0-100). */
+  /** User-configured maximum context-usage percentage to trigger compaction (0-100). */
   thresholdPercent: number;
   /** Optional custom instructions passed to the compaction LLM. */
   customInstructions: string;
@@ -44,7 +64,26 @@ export interface CompactionTunerSettings {
    * always written regardless of this flag.
    */
   notifyOnTrigger: boolean;
+  /** Dynamic threshold policy layered under thresholdPercent. */
+  dynamicThreshold: DynamicThresholdSettings;
 }
+
+export const DEFAULT_DYNAMIC_THRESHOLD_SETTINGS: DynamicThresholdSettings = {
+  enabled: true,
+  smallWindowMaxTokens: 300_000,
+  smallWindowThresholdPercent: 60,
+  mediumWindowMaxTokens: 450_000,
+  mediumWindowThresholdPercent: 65,
+  largeWindowMaxTokens: 1_100_000,
+  largeWindowThresholdPercent: 70,
+  minHeadroomTokens: 64_000,
+  // OpenAI API GPT-5.5 is nominally 1.05M, but >272k input tokens is
+  // the expensive tier. Treat 272k as the default economic budget; users
+  // who want full-window mode can override this key to 1050000.
+  modelEffectiveContextBudgets: {
+    "openai/gpt-5.5": 272_000,
+  },
+};
 
 export const DEFAULT_COMPACTION_TUNER_SETTINGS: CompactionTunerSettings = {
   enabled: false,
@@ -53,6 +92,7 @@ export const DEFAULT_COMPACTION_TUNER_SETTINGS: CompactionTunerSettings = {
   summaryModels: [],
   rearmMarginPercent: 5,
   notifyOnTrigger: true,
+  dynamicThreshold: DEFAULT_DYNAMIC_THRESHOLD_SETTINGS,
 };
 
 const MIN_THRESHOLD = 10;
@@ -71,6 +111,74 @@ function loadPiStackSettings(): Record<string, unknown> {
 function clampThreshold(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_COMPACTION_TUNER_SETTINGS.thresholdPercent;
   return Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, n));
+}
+
+function clampThresholdWithFallback(n: number, fallback: number): number {
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(MAX_THRESHOLD, Math.max(MIN_THRESHOLD, n));
+}
+
+function asPositiveNumber(value: unknown, fallback: number): number {
+  const n = asNumber(value, fallback);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function asNonNegativeNumber(value: unknown, fallback: number): number {
+  const n = asNumber(value, fallback);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function asTokenBudgetMap(value: unknown, fallback: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = { ...fallback };
+  if (!isPlainObject(value)) return out;
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const key = rawKey.trim();
+    if (!key) continue;
+    const n = asNumber(rawValue, Number.NaN);
+    if (Number.isFinite(n) && n > 0) out[key] = n;
+  }
+  return out;
+}
+
+function resolveDynamicThresholdSettings(value: unknown): DynamicThresholdSettings {
+  const raw = isPlainObject(value) ? value : {};
+  const def = DEFAULT_DYNAMIC_THRESHOLD_SETTINGS;
+  const smallWindowMaxTokens = asPositiveNumber(raw.smallWindowMaxTokens, def.smallWindowMaxTokens);
+  const mediumWindowMaxTokens = Math.max(
+    smallWindowMaxTokens,
+    asPositiveNumber(raw.mediumWindowMaxTokens, def.mediumWindowMaxTokens),
+  );
+  const largeWindowMaxTokens = Math.max(
+    mediumWindowMaxTokens,
+    asPositiveNumber(raw.largeWindowMaxTokens, def.largeWindowMaxTokens),
+  );
+  return {
+    enabled: asBoolean(raw.enabled, def.enabled),
+    smallWindowMaxTokens,
+    smallWindowThresholdPercent: clampThresholdWithFallback(
+      asNumber(raw.smallWindowThresholdPercent, def.smallWindowThresholdPercent),
+      def.smallWindowThresholdPercent,
+    ),
+    mediumWindowMaxTokens,
+    mediumWindowThresholdPercent: clampThresholdWithFallback(
+      asNumber(raw.mediumWindowThresholdPercent, def.mediumWindowThresholdPercent),
+      def.mediumWindowThresholdPercent,
+    ),
+    largeWindowMaxTokens,
+    largeWindowThresholdPercent: clampThresholdWithFallback(
+      asNumber(raw.largeWindowThresholdPercent, def.largeWindowThresholdPercent),
+      def.largeWindowThresholdPercent,
+    ),
+    minHeadroomTokens: asNonNegativeNumber(raw.minHeadroomTokens, def.minHeadroomTokens),
+    modelEffectiveContextBudgets: asTokenBudgetMap(
+      raw.modelEffectiveContextBudgets,
+      isPlainObject(raw.modelEffectiveContextBudgets) ? {} : def.modelEffectiveContextBudgets,
+    ),
+  };
 }
 
 function asStringList(value: unknown): string[] {
@@ -112,8 +220,12 @@ export function resolveCompactionTunerSettings(): CompactionTunerSettings {
     thresholdPercent: clampThreshold(asNumber(block.thresholdPercent, def.thresholdPercent)),
     customInstructions,
     summaryModels,
-    rearmMarginPercent: Math.max(0, asNumber(block.rearmMarginPercent, def.rearmMarginPercent)),
+    rearmMarginPercent: Math.min(
+      90,
+      Math.max(0, asNumber(block.rearmMarginPercent, def.rearmMarginPercent)),
+    ),
     notifyOnTrigger: asBoolean(block.notifyOnTrigger, def.notifyOnTrigger),
+    dynamicThreshold: resolveDynamicThresholdSettings(block.dynamicThreshold),
   };
 }
 
@@ -126,5 +238,16 @@ export function snapshotCompactionTunerSettings(s: CompactionTunerSettings): Rec
     notifyOnTrigger: s.notifyOnTrigger,
     hasCustomInstructions: s.customInstructions.length > 0,
     summaryModels: s.summaryModels,
+    dynamicThreshold: {
+      enabled: s.dynamicThreshold.enabled,
+      smallWindowMaxTokens: s.dynamicThreshold.smallWindowMaxTokens,
+      smallWindowThresholdPercent: s.dynamicThreshold.smallWindowThresholdPercent,
+      mediumWindowMaxTokens: s.dynamicThreshold.mediumWindowMaxTokens,
+      mediumWindowThresholdPercent: s.dynamicThreshold.mediumWindowThresholdPercent,
+      largeWindowMaxTokens: s.dynamicThreshold.largeWindowMaxTokens,
+      largeWindowThresholdPercent: s.dynamicThreshold.largeWindowThresholdPercent,
+      minHeadroomTokens: s.dynamicThreshold.minHeadroomTokens,
+      modelEffectiveContextBudgets: s.dynamicThreshold.modelEffectiveContextBudgets,
+    },
   };
 }

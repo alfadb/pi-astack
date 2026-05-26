@@ -44,16 +44,12 @@
  *     a thin wrapper around the three state maps).
  */
 
-import { createRequire } from "node:module";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
-const require = createRequire(import.meta.url);
-const ts = require("typescript");
 
 const failures = [];
 let totalChecks = 0;
@@ -246,28 +242,75 @@ check("anchor: status displays default main-session model when summaryModels emp
   }
 });
 
+check("anchor: dynamic threshold defaults and audit fields are present", () => {
+  const settingsSrc = fs.readFileSync(
+    path.join(repoRoot, "extensions/compaction-tuner/settings.ts"),
+    "utf8",
+  );
+  if (!/dynamicThreshold:\s*DEFAULT_DYNAMIC_THRESHOLD_SETTINGS/.test(settingsSrc)) {
+    throw new Error("DEFAULT_COMPACTION_TUNER_SETTINGS must include dynamicThreshold defaults");
+  }
+  if (!/smallWindowThresholdPercent:\s*60/.test(settingsSrc)) {
+    throw new Error("smallWindowThresholdPercent default should be 60 for 272k-class windows");
+  }
+  if (!/mediumWindowThresholdPercent:\s*65/.test(settingsSrc)) {
+    throw new Error("mediumWindowThresholdPercent default should be 65 for 400k-class windows");
+  }
+  if (!/largeWindowThresholdPercent:\s*70/.test(settingsSrc)) {
+    throw new Error("largeWindowThresholdPercent default should be 70 for 1M-class windows");
+  }
+  if (!/minHeadroomTokens:\s*64_000/.test(settingsSrc)) {
+    throw new Error("minHeadroomTokens default should be 64_000");
+  }
+  if (!/"openai\/gpt-5\.5":\s*272_000/.test(settingsSrc)) {
+    throw new Error("OpenAI API gpt-5.5 should default to the 272k economic budget");
+  }
+  if (!/isPlainObject\(raw\.modelEffectiveContextBudgets\) \? \{\} : def\.modelEffectiveContextBudgets/.test(settingsSrc)) {
+    throw new Error("plain-object modelEffectiveContextBudgets should replace the default map, while invalid values preserve defaults");
+  }
+  if (!/Math\.min\(\s*90,[\s\S]*Math\.max\(0, asNumber\(block\.rearmMarginPercent/.test(settingsSrc)) {
+    throw new Error("rearmMarginPercent should clamp to [0, 90]");
+  }
+  if (!/computeEffectiveRearmMargin/.test(indexSrc)) {
+    throw new Error("effective rearm margin should be capped below the effective threshold");
+  }
+  const schemaSrc = fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf8");
+  if (!/"rearmMarginPercent"[\s\S]*"maximum": 90/.test(schemaSrc)) {
+    throw new Error("schema should cap rearmMarginPercent at 90");
+  }
+  if (!/computeEffectiveThreshold/.test(indexSrc)) {
+    throw new Error("computeEffectiveThreshold helper missing");
+  }
+  if (!/estimatedTokens/.test(indexSrc)) {
+    throw new Error("metric helper should estimate tokens from rawPercent when usage.tokens is absent");
+  }
+  if (!/outcome:\s*result \? "completed" : "no_op"/.test(indexSrc)) {
+    throw new Error("turn-boundary false return should be audited as no_op");
+  }
+  if (!/armedBySession\.set\(stateKey, \/\* armed \*\/ false\);/.test(indexSrc)) {
+    throw new Error("turn-boundary no_op should stay disarmed without counting as failure");
+  }
+  if (!/error_message:\s*compactErrorMessage\(error\)/.test(indexSrc)) {
+    throw new Error("agent_end onError should truncate audit error messages");
+  }
+  if (!/configured_threshold_percent/.test(indexSrc)) {
+    throw new Error("audit rows should include configured_threshold_percent");
+  }
+  if (!/effective_context_budget/.test(indexSrc)) {
+    throw new Error("audit rows should include effective_context_budget");
+  }
+});
+
 // ──────────────────────────────────────────────────────────────────
-// Pure-function tests for the exported `classifyDecision`.
+// Pure-function tests for `classifyDecision` and threshold math.
 // ──────────────────────────────────────────────────────────────────
 
 console.log("\nclassifyDecision (pure function, 5 branches):");
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-compaction-backoff-"));
-function transpile(srcPath) {
-  return ts.transpileModule(fs.readFileSync(srcPath, "utf8"), {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2022,
-      esModuleInterop: true,
-      moduleResolution: ts.ModuleResolutionKind.Bundler,
-    },
-  }).outputText;
-}
-
-// classifyDecision lives in index.ts but pulling the full module would
-// drag in pi runtime + memory/settings + _shared/runtime. We extract
-// just the function body using its source-text. The smoke catches
-// drift via source anchors above; we reimplement here for isolation.
+// classifyDecision and computeEffectiveThreshold live in index.ts, but
+// pulling the full module would drag in pi runtime + memory/settings +
+// _shared/runtime. The smoke catches drift via source anchors above; we
+// reimplement the small pure helpers here for isolation.
 function classifyDecision(percent, threshold, armed, rearmMargin) {
   if (percent === null) return { decision: "skip", reason: "no_usage_yet" };
   if (percent < threshold - rearmMargin && !armed) {
@@ -335,6 +378,139 @@ check("classifyDecision: percent strictly below floor && !armed → rearm (bound
   if (r.decision !== "rearm") {
     throw new Error(`got ${JSON.stringify(r)} (boundary off-by-one in rearm branch?)`);
   }
+});
+
+console.log("\ndynamic threshold helper:");
+
+function computeEffectiveThresholdForSmoke(settings, usage, modelInfo) {
+  const configured = settings.thresholdPercent;
+  const dynamic = settings.dynamicThreshold;
+  if (!dynamic.enabled) return { thresholdPercent: configured, reason: "configured" };
+  const ref = modelInfo.provider && modelInfo.id ? `${modelInfo.provider}/${modelInfo.id}` : undefined;
+  const override = ref ? dynamic.modelEffectiveContextBudgets[ref] : undefined;
+  const runtimeWindow = usage?.contextWindow ?? modelInfo.contextWindow;
+  const budget = override && Number.isFinite(override) && override > 0
+    ? runtimeWindow && runtimeWindow > 0 ? Math.min(override, runtimeWindow) : override
+    : runtimeWindow && Number.isFinite(runtimeWindow) && runtimeWindow > 0 ? runtimeWindow : undefined;
+  if (!budget) return { thresholdPercent: configured, reason: "configured" };
+  const classCap = budget <= dynamic.smallWindowMaxTokens
+    ? dynamic.smallWindowThresholdPercent
+    : budget <= dynamic.mediumWindowMaxTokens
+      ? dynamic.mediumWindowThresholdPercent
+      : dynamic.largeWindowThresholdPercent;
+  const headroomCap = dynamic.minHeadroomTokens > 0 && budget > dynamic.minHeadroomTokens
+    ? Math.max(10, Math.min(95, Math.floor(((budget - dynamic.minHeadroomTokens) / budget) * 100)))
+    : 95;
+  return {
+    thresholdPercent: Math.min(configured, classCap, headroomCap),
+    effectiveContextBudget: budget,
+    reason: "dynamic",
+  };
+}
+
+const dynamicDefaults = {
+  thresholdPercent: 75,
+  rearmMarginPercent: 5,
+  dynamicThreshold: {
+    enabled: true,
+    smallWindowMaxTokens: 300000,
+    smallWindowThresholdPercent: 60,
+    mediumWindowMaxTokens: 450000,
+    mediumWindowThresholdPercent: 65,
+    largeWindowMaxTokens: 1100000,
+    largeWindowThresholdPercent: 70,
+    minHeadroomTokens: 64000,
+    modelEffectiveContextBudgets: { "openai/gpt-5.5": 272000 },
+  },
+};
+
+check("dynamic threshold: 272k-class windows compact at 60%", () => {
+  const r = computeEffectiveThresholdForSmoke(dynamicDefaults, { contextWindow: 272000 }, { provider: "openai-codex", id: "gpt-5.5" });
+  if (r.thresholdPercent !== 60 || r.effectiveContextBudget !== 272000) {
+    throw new Error(`got ${JSON.stringify(r)}`);
+  }
+});
+
+check("dynamic threshold: OpenAI API gpt-5.5 uses 272k economic budget by default", () => {
+  const r = computeEffectiveThresholdForSmoke(dynamicDefaults, { contextWindow: 1050000 }, { provider: "openai", id: "gpt-5.5" });
+  if (r.thresholdPercent !== 60 || r.effectiveContextBudget !== 272000) {
+    throw new Error(`got ${JSON.stringify(r)}`);
+  }
+});
+
+check("dynamic threshold: 400k-class windows compact at 65%", () => {
+  const r = computeEffectiveThresholdForSmoke(dynamicDefaults, { contextWindow: 400000 }, { provider: "github-copilot", id: "gpt-5.5" });
+  if (r.thresholdPercent !== 65 || r.effectiveContextBudget !== 400000) {
+    throw new Error(`got ${JSON.stringify(r)}`);
+  }
+});
+
+check("dynamic threshold: 1M-class windows compact at 70%", () => {
+  const r = computeEffectiveThresholdForSmoke(dynamicDefaults, { contextWindow: 1050000 }, { provider: "anthropic", id: "claude-opus-4-7" });
+  if (r.thresholdPercent !== 70 || r.effectiveContextBudget !== 1050000) {
+    throw new Error(`got ${JSON.stringify(r)}`);
+  }
+});
+
+check("dynamic threshold: >large windows continue using the large-window cap", () => {
+  const r = computeEffectiveThresholdForSmoke(dynamicDefaults, { contextWindow: 2000000 }, { provider: "example", id: "two-million" });
+  if (r.thresholdPercent !== 70 || r.effectiveContextBudget !== 2000000) {
+    throw new Error(`got ${JSON.stringify(r)}`);
+  }
+});
+
+check("dynamic threshold: disabling dynamic restores configured threshold", () => {
+  const settings = {
+    ...dynamicDefaults,
+    dynamicThreshold: { ...dynamicDefaults.dynamicThreshold, enabled: false },
+  };
+  const r = computeEffectiveThresholdForSmoke(settings, { contextWindow: 272000 }, { provider: "openai-codex", id: "gpt-5.5" });
+  if (r.thresholdPercent !== 75 || r.reason !== "configured") {
+    throw new Error(`got ${JSON.stringify(r)}`);
+  }
+});
+
+check("dynamic threshold: tiny budgets do not collapse to the 10% floor when minHeadroom exceeds budget", () => {
+  const r = computeEffectiveThresholdForSmoke(dynamicDefaults, { contextWindow: 50000 }, { provider: "legacy", id: "tiny" });
+  if (r.thresholdPercent !== 60 || r.effectiveContextBudget !== 50000) {
+    throw new Error(`got ${JSON.stringify(r)}`);
+  }
+});
+
+function computeCompactionDecisionMetricsForSmoke(settings, usage, modelInfo) {
+  const threshold = computeEffectiveThresholdForSmoke(settings, usage, modelInfo);
+  const rawPercent = usage?.percent ?? null;
+  const runtimeWindow = usage?.contextWindow ?? modelInfo.contextWindow;
+  const tokens = usage?.tokens;
+  const estimatedTokens = typeof tokens === "number" && Number.isFinite(tokens)
+    ? tokens
+    : rawPercent !== null && runtimeWindow && runtimeWindow > 0
+      ? (rawPercent / 100) * runtimeWindow
+      : undefined;
+  const percent = threshold.effectiveContextBudget && typeof estimatedTokens === "number" && Number.isFinite(estimatedTokens)
+    ? (estimatedTokens / threshold.effectiveContextBudget) * 100
+    : rawPercent;
+  return { ...threshold, percent, rawPercent };
+}
+
+check("dynamic threshold: effective percent falls back through raw percent when tokens are absent", () => {
+  const r = computeCompactionDecisionMetricsForSmoke(
+    dynamicDefaults,
+    { contextWindow: 1050000, percent: 33.33333333333333 },
+    { provider: "openai", id: "gpt-5.5" },
+  );
+  if (Math.abs(r.percent - 128.67647058823528) > 0.001) {
+    throw new Error(`got ${JSON.stringify(r)}`);
+  }
+});
+
+function computeEffectiveRearmMarginForSmoke(thresholdPercent, configuredRearmMarginPercent) {
+  return Math.min(configuredRearmMarginPercent, Math.max(0, thresholdPercent - 1));
+}
+
+check("dynamic threshold: effective rearm margin stays below lowered threshold", () => {
+  const margin = computeEffectiveRearmMarginForSmoke(10, 90);
+  if (margin !== 9) throw new Error(`got ${margin}`);
 });
 
 // ──────────────────────────────────────────────────────────────────
@@ -578,9 +754,6 @@ check("onComplete wipes ALL session state (incl. armedBySession to prevent leak)
 // ──────────────────────────────────────────────────────────────────
 
 console.log(`\nTotal: ${totalChecks}  Passed: ${totalChecks - failures.length}  Failed: ${failures.length}`);
-
-// Best-effort cleanup
-try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* nop */ }
 
 if (failures.length) {
   console.log("\nFAILED — see assertion messages above.");

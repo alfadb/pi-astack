@@ -327,7 +327,7 @@
 
     "compactionTuner": {
       "type": "object",
-      "description": "Trigger pi's compaction at a configurable percentage of contextWindow (extensions/compaction-tuner/). Solves the problem that pi's built-in `compaction.reserveTokens` is an absolute number, while user-stack models span 200k–1M+ contextWindow — a single number can't represent a fixed percentage uniformly. Hooks `agent_end` as the idle fallback and installs guarded internal patches: `AgentSession._buildRuntime` → `agent.prepareNextTurn` so long tool-call chains can compact after toolResults are persisted but before the next provider request, and `InteractiveMode.handleEvent` so turn-boundary compaction_end is treated as `willContinue: true` and restores the Working loader. `agent_end` still calls public `ctx.compact()`; turn-boundary uses pi's internal `_runAutoCompaction(\"threshold\", true)` to avoid aborting the active run while keeping queued-input semantics safe. Optional `summaryModels` lets `session_before_compact` generate summaries with an ordered provider/model fallback list; empty default preserves pi core behavior, which uses the current main-session model. Pi's built-in threshold (default reserveTokens=16384, ~92% on 200k) remains as a last-resort safety net. Audit log: `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`.",
+      "description": "Trigger pi's compaction at an effective percentage of context budget (extensions/compaction-tuner/). Solves the problem that pi's built-in `compaction.reserveTokens` is an absolute number, while user-stack models span 200k–1M+ contextWindow — a single number can't represent safe headroom uniformly. `thresholdPercent` is a user-configured upper bound; `dynamicThreshold` lowers it by runtime contextWindow / effective model budget (defaults: 272k-class → 60%, 400k-class → 65%, 1M-class → 70%, with 64k min headroom). Hooks `agent_end` as the idle fallback and installs guarded internal patches: `AgentSession._buildRuntime` → `agent.prepareNextTurn` so long tool-call chains can compact after toolResults are persisted but before the next provider request, and `InteractiveMode.handleEvent` so turn-boundary compaction_end is treated as `willContinue: true` and restores the Working loader. `agent_end` still calls public `ctx.compact()`; turn-boundary uses pi's internal `_runAutoCompaction(\"threshold\", true)` to avoid aborting the active run while keeping queued-input semantics safe. Optional `summaryModels` lets `session_before_compact` generate summaries with an ordered provider/model fallback list; empty default preserves pi core behavior, which uses the current main-session model. Pi's built-in threshold (default reserveTokens=16384, ~92% on 200k) remains as a last-resort safety net. Audit log: `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -343,14 +343,96 @@
           "default": 75,
           "minimum": 10,
           "maximum": 95,
-          "description": "Target percent of contextWindow consumed at which to fire compaction. Clamped to [10, 95]. Re-evaluated each turn; changes apply immediately on the next turn-boundary or agent_end check with no restart needed."
+          "description": "Configured maximum percent of context budget consumed at which to fire compaction. Clamped to [10, 95]. When dynamicThreshold.enabled is true, the effective threshold is min(thresholdPercent, dynamic cap for the effective context budget, min-headroom cap). Re-evaluated each turn; changes apply immediately on the next turn-boundary or agent_end check with no restart needed."
+        },
+
+        "dynamicThreshold": {
+          "type": "object",
+          "default": {
+            "enabled": true,
+            "smallWindowMaxTokens": 300000,
+            "smallWindowThresholdPercent": 60,
+            "mediumWindowMaxTokens": 450000,
+            "mediumWindowThresholdPercent": 65,
+            "largeWindowMaxTokens": 1100000,
+            "largeWindowThresholdPercent": 70,
+            "minHeadroomTokens": 64000,
+            "modelEffectiveContextBudgets": {
+              "openai/gpt-5.5": 272000
+            }
+          },
+          "additionalProperties": false,
+          "description": "Optional dynamic threshold layer. Enabled by default: small/economic windows compact earlier so tool-call chains keep enough headroom before the next model request. `modelEffectiveContextBudgets` lets a provider/model use an economic or observed safe budget instead of its nominal contextWindow; default treats OpenAI API gpt-5.5 as 272k economic input budget, while users can override it to 1050000 for full-window mode.",
+          "properties": {
+            "_comment": { "type": "string" },
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable dynamic threshold caps. False restores legacy fixed thresholdPercent behavior."
+            },
+            "smallWindowMaxTokens": {
+              "type": "number",
+              "default": 300000,
+              "minimum": 1,
+              "description": "Effective budgets up to this value use smallWindowThresholdPercent. Covers 200k/272k-class routes."
+            },
+            "smallWindowThresholdPercent": {
+              "type": "number",
+              "default": 60,
+              "minimum": 10,
+              "maximum": 95,
+              "description": "Dynamic cap for small/economic windows. 60% of 272k leaves ~109k tokens of headroom."
+            },
+            "mediumWindowMaxTokens": {
+              "type": "number",
+              "default": 450000,
+              "minimum": 1,
+              "description": "Effective budgets up to this value use mediumWindowThresholdPercent. Covers ~400k Copilot-style routes."
+            },
+            "mediumWindowThresholdPercent": {
+              "type": "number",
+              "default": 65,
+              "minimum": 10,
+              "maximum": 95,
+              "description": "Dynamic cap for medium windows."
+            },
+            "largeWindowMaxTokens": {
+              "type": "number",
+              "default": 1100000,
+              "minimum": 1,
+              "description": "Effective budgets up to this value use largeWindowThresholdPercent. Covers 1M-class models."
+            },
+            "largeWindowThresholdPercent": {
+              "type": "number",
+              "default": 70,
+              "minimum": 10,
+              "maximum": 95,
+              "description": "Dynamic cap for 1M-class windows."
+            },
+            "minHeadroomTokens": {
+              "type": "number",
+              "default": 64000,
+              "minimum": 0,
+              "description": "Absolute headroom floor. Effective threshold is also capped so at least this many tokens remain, unless the class cap is already lower."
+            },
+            "modelEffectiveContextBudgets": {
+              "type": "object",
+              "default": { "openai/gpt-5.5": 272000 },
+              "additionalProperties": {
+                "type": "number",
+                "minimum": 1
+              },
+              "description": "Provider/model → effective token budget overrides, keyed as `provider/modelId`. The override is capped by the runtime contextWindow if that is smaller. Use for provider-specific safe limits or economic sweet spots. If this object is present, it replaces the built-in default map; set {} to remove the default OpenAI gpt-5.5 economic-budget override."
+            }
+          }
         },
 
         "rearmMarginPercent": {
           "type": "number",
           "default": 5,
           "minimum": 0,
-          "description": "Hysteresis margin (percentage points). After triggering at thresholdPercent, the trigger disarms until usage drops below `thresholdPercent - rearmMarginPercent`, then re-arms. Prevents repeated triggers while a long agent loop hovers near the boundary or while compaction is still finishing."
+          "maximum": 90,
+          "description": "Hysteresis margin (percentage points). After triggering at the effective threshold, the trigger disarms until usage drops below `effectiveThresholdPercent - rearmMarginPercent`, then re-arms. Clamped to [0, 90]. Prevents repeated triggers while a long agent loop hovers near the boundary or while compaction is still finishing."
         },
 
         "notifyOnTrigger": {
