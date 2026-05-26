@@ -407,12 +407,14 @@ check("trigger-path ORDERING anchor: defer checks before rearm consumption (OPUS
     path.join(repoRoot, "extensions/compaction-tuner/index.ts"),
     "utf8",
   );
-  const promptIdx = src.indexOf("isPendingPromptUserBlocking()");
-  const vaultIdx = src.indexOf("isPendingVaultDialogBlocking()");
+  const agentEndBlock = src.split('pi.on("agent_end"')[1];
+  if (!agentEndBlock) throw new Error("agent_end handler block not found");
+  const promptIdx = agentEndBlock.indexOf("isPendingPromptUserBlocking()");
+  const vaultIdx = agentEndBlock.indexOf("isPendingVaultDialogBlocking()");
   // Match the actual rearm-consumption statement, not other
   // armedBySession.set(...) sites (the error/rearm-on-failure branch
   // calls it with true, the consumption uses false).
-  const armedIdx = src.indexOf("armedBySession.set(stateKey, false)");
+  const armedIdx = agentEndBlock.search(/armedBySession\.set\(stateKey,\s*(?:\/\* armed \*\/\s*)?false\)/);
   if (promptIdx < 0 || vaultIdx < 0 || armedIdx < 0) {
     throw new Error(
       `trigger-path anchors missing: prompt=${promptIdx} vault=${vaultIdx} armed=${armedIdx}`,

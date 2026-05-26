@@ -327,7 +327,7 @@
 
     "compactionTuner": {
       "type": "object",
-      "description": "Trigger pi's compaction at a configurable percentage of contextWindow (extensions/compaction-tuner/). Solves the problem that pi's built-in `compaction.reserveTokens` is an absolute number, while user-stack models span 200k–1M+ contextWindow — a single number can't represent a fixed percentage uniformly. Hooks `agent_end`, reads `ctx.getContextUsage()`, and calls `ctx.compact()` once `percent >= thresholdPercent`. Optional `summaryModels` lets `session_before_compact` generate summaries with an ordered provider/model fallback list; empty default preserves pi core behavior, which uses the current main-session model. Pi's built-in threshold (default reserveTokens=16384, ~92% on 200k) remains as a last-resort safety net. Audit log: `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`.",
+      "description": "Trigger pi's compaction at a configurable percentage of contextWindow (extensions/compaction-tuner/). Solves the problem that pi's built-in `compaction.reserveTokens` is an absolute number, while user-stack models span 200k–1M+ contextWindow — a single number can't represent a fixed percentage uniformly. Hooks `agent_end` as the idle fallback and installs guarded internal patches: `AgentSession._buildRuntime` → `agent.prepareNextTurn` so long tool-call chains can compact after toolResults are persisted but before the next provider request, and `InteractiveMode.handleEvent` so turn-boundary compaction_end is treated as `willContinue: true` and restores the Working loader. `agent_end` still calls public `ctx.compact()`; turn-boundary uses pi's internal `_runAutoCompaction(\"threshold\", true)` to avoid aborting the active run while keeping queued-input semantics safe. Optional `summaryModels` lets `session_before_compact` generate summaries with an ordered provider/model fallback list; empty default preserves pi core behavior, which uses the current main-session model. Pi's built-in threshold (default reserveTokens=16384, ~92% on 200k) remains as a last-resort safety net. Audit log: `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -343,7 +343,7 @@
           "default": 75,
           "minimum": 10,
           "maximum": 95,
-          "description": "Target percent of contextWindow consumed at which to fire `ctx.compact()`. Clamped to [10, 95]. Re-evaluated each turn; changes apply immediately on next agent_end with no restart needed."
+          "description": "Target percent of contextWindow consumed at which to fire compaction. Clamped to [10, 95]. Re-evaluated each turn; changes apply immediately on the next turn-boundary or agent_end check with no restart needed."
         },
 
         "rearmMarginPercent": {

@@ -48,6 +48,7 @@
     "smoke:compaction-tuner-prompt-user": "node scripts/smoke-compaction-tuner-prompt-user.mjs",
     "smoke:compaction-tuner-vault-defer": "node scripts/smoke-compaction-tuner-vault-defer.mjs",
     "smoke:compaction-tuner-backoff": "node scripts/smoke-compaction-tuner-backoff.mjs",
+    "smoke:compaction-tuner-turn-boundary": "node scripts/smoke-compaction-tuner-turn-boundary.mjs",
     "smoke:persistent-input-history": "node scripts/smoke-persistent-input-history.mjs"
   },
   "pi": {

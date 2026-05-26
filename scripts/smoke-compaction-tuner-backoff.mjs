@@ -129,18 +129,20 @@ check("anchor: top-of-handler timed re-arm block present", () => {
   }
 });
 
-check("anchor: opportunistic clear (P1-1 fix) is present and before classifyDecision", () => {
-  const opportunisticIdx = indexSrc.indexOf("Opportunistic backoff clear");
-  const classifyIdx = indexSrc.indexOf("const decision = classifyDecision(");
+check("anchor: opportunistic clear (P1-1 fix) is present before agent_end classifyDecision", () => {
+  const agentEndBlock = indexSrc.split('pi.on("agent_end"')[1];
+  if (!agentEndBlock) throw new Error("agent_end handler block not found");
+  const opportunisticIdx = agentEndBlock.indexOf("Opportunistic backoff clear");
+  const classifyIdx = agentEndBlock.indexOf("const decision = classifyDecision(");
   if (opportunisticIdx < 0) {
-    throw new Error("Opportunistic backoff clear block missing");
+    throw new Error("Opportunistic backoff clear block missing from agent_end handler");
   }
   if (classifyIdx < 0) {
-    throw new Error("classifyDecision call site missing");
+    throw new Error("classifyDecision call site missing from agent_end handler");
   }
   if (opportunisticIdx > classifyIdx) {
     throw new Error(
-      "Opportunistic clear must come BEFORE classifyDecision — see P1-1 " +
+      "Opportunistic clear must come BEFORE classifyDecision in agent_end — see P1-1 " +
       "in review summary",
     );
   }
@@ -150,11 +152,13 @@ check("anchor: onComplete deletes armedBySession (DEEPSEEK P1-2)", () => {
   const onCompleteBlock = indexSrc.split("onComplete: () =>")[1];
   if (!onCompleteBlock) throw new Error("onComplete handler block not found");
   const onCompleteBody = onCompleteBlock.split(/\n {8}},/)[0];
-  if (!/armedBySession\.delete\(stateKey\)/.test(onCompleteBody)) {
+  if (!/recordSuccessfulTriggerState\(stateKey\)/.test(onCompleteBody)) {
     throw new Error(
-      "onComplete should delete armedBySession to prevent map accumulation " +
-      "in long-lived pi processes",
+      "onComplete should call recordSuccessfulTriggerState(stateKey) to delete armed/failure/cooldown state",
     );
+  }
+  if (!/function\s+recordSuccessfulTriggerState[\s\S]*armedBySession\.delete\(stateKey\)/.test(indexSrc)) {
+    throw new Error("recordSuccessfulTriggerState should delete armedBySession to prevent map accumulation");
   }
 });
 
@@ -208,6 +212,31 @@ check("anchor: summaryModels custom compaction hook exists and default stays emp
   }
   if (!/hasSummaryModelsKey\s*\?\s*explicitSummaryModels\s*:\s*legacySummaryModel/.test(settingsSrc)) {
     throw new Error("explicit summaryModels: [] must override deprecated summaryModel and preserve default main-session model");
+  }
+});
+
+check("anchor: turn-boundary compaction patch is installed via pi-internals", () => {
+  const internalsSrc = fs.readFileSync(
+    path.join(repoRoot, "extensions/_shared/pi-internals.ts"),
+    "utf8",
+  );
+  if (!/installTurnBoundaryCompactionPatch/.test(indexSrc)) {
+    throw new Error("compaction-tuner must install the turn-boundary patch");
+  }
+  if (!/AgentSession\._buildRuntime/.test(internalsSrc)) {
+    throw new Error("pi-internals patch must anchor on AgentSession._buildRuntime");
+  }
+  if (!/agent\.prepareNextTurn\s*=\s*async/.test(internalsSrc)) {
+    throw new Error("pi-internals must install an agent.prepareNextTurn wrapper");
+  }
+  if (!/_runAutoCompaction\("threshold",\s*true\)/.test(internalsSrc)) {
+    throw new Error("turn-boundary compaction must call _runAutoCompaction('threshold', true)");
+  }
+  if (!/lastMessageRole\s*!==\s*"toolResult"/.test(indexSrc)) {
+    throw new Error("turn-boundary trigger must only fire after toolResult is the last message");
+  }
+  if (!/operation:\s*"turn_boundary_trigger"/.test(indexSrc)) {
+    throw new Error("turn-boundary trigger audit rows are missing");
   }
 });
 

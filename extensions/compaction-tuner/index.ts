@@ -40,6 +40,11 @@ import {
   formatLocalIsoTimestamp,
 } from "../_shared/runtime";
 import {
+  installTurnBoundaryCompactionPatch,
+  type TurnBoundaryCompactionDecision,
+  type TurnBoundaryCompactionUsage,
+} from "../_shared/pi-internals";
+import {
   DEFAULT_COMPACTION_TUNER_SETTINGS,
   resolveCompactionTunerSettings,
   snapshotCompactionTunerSettings,
@@ -57,7 +62,7 @@ interface CompactionTunerCtx {
     getSessionId?(): string | undefined | null;
     getSessionFile?(): string | undefined | null;
   };
-  getContextUsage?(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
+  getContextUsage?(): TurnBoundaryCompactionUsage | undefined;
   compact?(options?: {
     customInstructions?: string;
     onComplete?(result?: unknown): void;
@@ -67,6 +72,19 @@ interface CompactionTunerCtx {
     find?(provider: string, modelId: string): unknown;
     getApiKeyAndHeaders?(model: unknown): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }>;
   };
+}
+
+interface CompactionTunerSessionLike {
+  agent?: {
+    state?: {
+      messages?: unknown[];
+      model?: { id?: string; provider?: string; contextWindow?: number };
+    };
+  };
+  sessionManager?: CompactionTunerCtx["sessionManager"];
+  getContextUsage?(): TurnBoundaryCompactionUsage | undefined;
+  model?: { id?: string; provider?: string; contextWindow?: number };
+  _cwd?: string;
 }
 
 interface ModelRef {
@@ -361,11 +379,264 @@ function classifyDecision(
   return { decision: "trigger" };
 }
 
+function readStateKey(sessionId: string): string {
+  return sessionId;
+}
+
+function applyTimedRearm(stateKey: string, nowMs: number): void {
+  const failuresSoFar = failureCountBySession.get(stateKey) ?? 0;
+  const cooldownUntil = cooldownUntilBySession.get(stateKey) ?? 0;
+  if (
+    armedBySession.get(stateKey) === false &&
+    failuresSoFar > 0 &&
+    failuresSoFar < MAX_CONSECUTIVE_FAILURES &&
+    nowMs >= cooldownUntil
+  ) {
+    armedBySession.set(stateKey, true);
+  }
+}
+
+function clearBackoffIfBelowRearmFloor(stateKey: string, percent: number | null, settings: CompactionTunerSettings): void {
+  if (
+    failureCountBySession.has(stateKey) &&
+    percent !== null &&
+    percent < settings.thresholdPercent - settings.rearmMarginPercent
+  ) {
+    failureCountBySession.delete(stateKey);
+    cooldownUntilBySession.delete(stateKey);
+  }
+}
+
+function recordSuccessfulTriggerState(stateKey: string): void {
+  armedBySession.delete(stateKey);
+  failureCountBySession.delete(stateKey);
+  cooldownUntilBySession.delete(stateKey);
+}
+
+function recordSuccessfulTurnBoundaryTriggerState(stateKey: string): void {
+  // A turn-boundary compaction can be followed by one more assistant turn in
+  // the same agent run. Keep the session disarmed until usage drops below the
+  // rearm floor so the agent_end fallback cannot immediately compact again.
+  armedBySession.set(stateKey, /* armed */ false);
+  failureCountBySession.delete(stateKey);
+  cooldownUntilBySession.delete(stateKey);
+}
+
+function recordFailedTriggerState(stateKey: string): { nextFailures: number; cooldownMs: number } {
+  const nextFailures = (failureCountBySession.get(stateKey) ?? 0) + 1;
+  failureCountBySession.set(stateKey, nextFailures);
+  const cooldownMs = Math.min(
+    ERROR_COOLDOWN_MAX_MS,
+    ERROR_COOLDOWN_BASE_MS * 2 ** (nextFailures - 1),
+  );
+  cooldownUntilBySession.set(stateKey, Date.now() + cooldownMs);
+  return { nextFailures, cooldownMs };
+}
+
+function inspectCompactionTunerDecision(
+  stateKey: string,
+  percent: number | null,
+  settings: CompactionTunerSettings,
+  nowMs: number,
+):
+  | { decision: "skip"; reason: string }
+  | { decision: "rearm"; reason: string }
+  | { decision: "trigger" } {
+  applyTimedRearm(stateKey, nowMs);
+  clearBackoffIfBelowRearmFloor(stateKey, percent, settings);
+  const wasArmed = armedBySession.get(stateKey) ?? true;
+  const decision = classifyDecision(percent, settings.thresholdPercent, wasArmed, settings.rearmMarginPercent);
+  if (decision.decision === "rearm") {
+    armedBySession.set(stateKey, true);
+    failureCountBySession.delete(stateKey);
+    cooldownUntilBySession.delete(stateKey);
+  }
+  return decision;
+}
+
+function getCompactionFailureGate(stateKey: string, nowMs: number):
+  | { ok: true }
+  | { ok: false; reason: "max_failures_reached"; failuresSoFar: number }
+  | { ok: false; reason: "in_error_cooldown"; failuresSoFar: number; cooldownRemainingMs: number } {
+  const failuresSoFar = failureCountBySession.get(stateKey) ?? 0;
+  const cooldownUntil = cooldownUntilBySession.get(stateKey) ?? 0;
+  if (failuresSoFar >= MAX_CONSECUTIVE_FAILURES) {
+    return { ok: false, reason: "max_failures_reached", failuresSoFar };
+  }
+  if (failuresSoFar > 0 && nowMs < cooldownUntil) {
+    return { ok: false, reason: "in_error_cooldown", failuresSoFar, cooldownRemainingMs: cooldownUntil - nowMs };
+  }
+  return { ok: true };
+}
+
+function compactErrorMessageFromError(error: Error): string {
+  return compactErrorMessage(error);
+}
+
+function getLastAgentMessageRole(session: CompactionTunerSessionLike): string | undefined {
+  const messages = session.agent?.state?.messages;
+  const last = Array.isArray(messages) ? messages[messages.length - 1] as { role?: unknown } | undefined : undefined;
+  return typeof last?.role === "string" ? last.role : undefined;
+}
+
+function getSessionModelInfo(session: CompactionTunerSessionLike): { provider?: string; id?: string; contextWindow?: number } {
+  const stateModel = session.agent?.state?.model;
+  return {
+    provider: session.model?.provider ?? stateModel?.provider,
+    id: session.model?.id ?? stateModel?.id,
+    contextWindow: session.model?.contextWindow ?? stateModel?.contextWindow,
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   // Sub-pi guard (2026-05-14 audit): compaction-tuner must not fire
   // in sub-pi — sub-agents have their own ephemeral sessions and
   // shouldn't trigger compaction of the parent's context.
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
+  installTurnBoundaryCompactionPatch("compaction-tuner", {
+    warn: (msg) => console.warn(msg),
+    shouldCompact: async (sessionUnknown: unknown): Promise<TurnBoundaryCompactionDecision> => {
+      const session = sessionUnknown as CompactionTunerSessionLike;
+      const settings = resolveCompactionTunerSettings();
+      if (!settings.enabled) return { decision: "skip", reason: "disabled" };
+
+      const sessionId = readSessionId(session.sessionManager);
+      if (!sessionId) return { decision: "skip", reason: "ephemeral_session" };
+
+      const lastMessageRole = getLastAgentMessageRole(session);
+      if (lastMessageRole !== "toolResult") {
+        return { decision: "skip", reason: "last_message_not_tool_result", sessionId };
+      }
+
+      const usage = typeof session.getContextUsage === "function" ? session.getContextUsage() : undefined;
+      const percent = usage?.percent ?? null;
+      const stateKey = readStateKey(sessionId);
+      const decision = inspectCompactionTunerDecision(stateKey, percent, settings, Date.now());
+      if (decision.decision === "rearm") {
+        return { decision: "skip", reason: decision.reason, usage, sessionId };
+      }
+      if (decision.decision === "skip") {
+        return { decision: "skip", reason: decision.reason, usage, sessionId };
+      }
+
+      const gate = getCompactionFailureGate(stateKey, Date.now());
+      if (!gate.ok) {
+        const cwd = path.resolve(session._cwd || process.cwd());
+        await recordSimpleSkip(cwd, {
+          operation: "turn_boundary_trigger",
+          decision: "skip",
+          reason: gate.reason,
+          session_id: sessionId,
+          usage_percent: percent,
+          consecutive_failures: gate.failuresSoFar,
+          ...(gate.reason === "in_error_cooldown" ? { cooldown_remaining_ms: gate.cooldownRemainingMs } : {}),
+          settings_snapshot: snapshotCompactionTunerSettings(settings),
+        });
+        return { decision: "skip", reason: gate.reason, usage, sessionId };
+      }
+
+      if (isPendingPromptUserBlocking()) {
+        const cwd = path.resolve(session._cwd || process.cwd());
+        await recordSimpleSkip(cwd, {
+          operation: "turn_boundary_trigger",
+          decision: "skip",
+          reason: "prompt_user_pending",
+          session_id: sessionId,
+          usage_percent: percent,
+        });
+        return { decision: "skip", reason: "prompt_user_pending", usage, sessionId };
+      }
+      if (isPendingVaultDialogBlocking()) {
+        const cwd = path.resolve(session._cwd || process.cwd());
+        await recordSimpleSkip(cwd, {
+          operation: "turn_boundary_trigger",
+          decision: "skip",
+          reason: "vault_dialog_pending",
+          session_id: sessionId,
+          usage_percent: percent,
+        });
+        return { decision: "skip", reason: "vault_dialog_pending", usage, sessionId };
+      }
+
+      armedBySession.set(stateKey, /* armed */ false);
+      return usage
+        ? { decision: "trigger", usage, sessionId }
+        : { decision: "skip", reason: "usage_unavailable", sessionId };
+    },
+    onComplete: async ({ session: sessionUnknown, usage, sessionId, elapsedMs, result }) => {
+      const session = sessionUnknown as CompactionTunerSessionLike;
+      const cwd = path.resolve(session._cwd || process.cwd());
+      const stateKey = readStateKey(sessionId);
+      const settings = resolveCompactionTunerSettings();
+      const modelInfo = getSessionModelInfo(session);
+      const failedState = result ? undefined : recordFailedTriggerState(stateKey);
+      if (result) {
+        recordSuccessfulTurnBoundaryTriggerState(stateKey);
+      }
+      await appendAudit(cwd, {
+        operation: "turn_boundary_trigger",
+        outcome: result ? "completed" : "no_op",
+        session_id: sessionId,
+        percent_at_trigger: usage.percent,
+        threshold_percent: settings.thresholdPercent,
+        rearm_margin_percent: settings.rearmMarginPercent,
+        tokens_at_trigger: usage.tokens ?? null,
+        context_window: usage.contextWindow ?? modelInfo.contextWindow ?? null,
+        model_provider: modelInfo.provider ?? null,
+        model_id: modelInfo.id ?? null,
+        last_message_role: getLastAgentMessageRole(session) ?? null,
+        elapsed_ms: elapsedMs,
+        ...(failedState ? {
+          consecutive_failures: failedState.nextFailures,
+          cooldown_remaining_ms: failedState.cooldownMs,
+        } : {}),
+        settings_snapshot: snapshotCompactionTunerSettings(settings),
+      });
+    },
+    onError: async ({ session: sessionUnknown, usage, sessionId, elapsedMs, error }) => {
+      const session = sessionUnknown as CompactionTunerSessionLike;
+      const cwd = path.resolve(session._cwd || process.cwd());
+      const settings = resolveCompactionTunerSettings();
+      const modelInfo = getSessionModelInfo(session);
+      const stateKey = sessionId ? readStateKey(sessionId) : undefined;
+      const failureState = stateKey
+        ? recordFailedTriggerState(stateKey)
+        : { nextFailures: 0, cooldownMs: 0 };
+      if (stateKey && failureState.nextFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.warn(
+          `compaction-tuner: ${MAX_CONSECUTIVE_FAILURES} consecutive turn-boundary compaction failures — ` +
+          `auto-compaction disabled for this session until usage drops below ` +
+          `${settings.thresholdPercent - settings.rearmMarginPercent}%. ` +
+          `Use '/compaction-tuner reset' to clear backoff and try again.`,
+        );
+      }
+      await appendAudit(cwd, {
+        operation: "turn_boundary_trigger",
+        outcome: "error",
+        error_message: compactErrorMessageFromError(error),
+        session_id: sessionId ?? null,
+        percent_at_trigger: usage?.percent ?? null,
+        threshold_percent: settings.thresholdPercent,
+        tokens_at_trigger: usage?.tokens ?? null,
+        context_window: usage?.contextWindow ?? modelInfo.contextWindow ?? null,
+        model_provider: modelInfo.provider ?? null,
+        model_id: modelInfo.id ?? null,
+        last_message_role: getLastAgentMessageRole(session) ?? null,
+        elapsed_ms: elapsedMs,
+        consecutive_failures: failureState.nextFailures,
+        cooldown_remaining_ms: failureState.cooldownMs,
+        settings_snapshot: snapshotCompactionTunerSettings(settings),
+      });
+    },
+    onUnavailable: (api) => {
+      void recordSimpleSkip(process.cwd(), {
+        operation: "turn_boundary_patch",
+        outcome: "unavailable",
+        api,
+      });
+    },
+  });
 
   pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: CompactionTunerCtx) => {
     const settings = resolveCompactionTunerSettings();
@@ -409,7 +680,7 @@ export default function (pi: ExtensionAPI) {
     if (!compact) return;
 
     // sessionId is guaranteed truthy past the ephemeral early-return.
-    const stateKey = sessionId;
+    const stateKey = readStateKey(sessionId);
 
     // Timed re-arm after error cooldown. If a previous trigger failed,
     // armed is stuck at false; the only paths out are (a) percent drops
@@ -417,19 +688,9 @@ export default function (pi: ExtensionAPI) {
     // cooldown elapses AND failures < MAX (this block). This gives a
     // truly transient provider error one fresh attempt without forming
     // a retry storm.
-    const failuresSoFar = failureCountBySession.get(stateKey) ?? 0;
-    const cooldownUntil = cooldownUntilBySession.get(stateKey) ?? 0;
     const nowMs = Date.now();
-    if (
-      armedBySession.get(stateKey) === false &&
-      failuresSoFar > 0 &&
-      failuresSoFar < MAX_CONSECUTIVE_FAILURES &&
-      nowMs >= cooldownUntil
-    ) {
-      armedBySession.set(stateKey, true);
-    }
+    applyTimedRearm(stateKey, nowMs);
 
-    const wasArmed = armedBySession.get(stateKey) ?? true;
     const percent = usage?.percent ?? null;
 
     // Opportunistic backoff clear (P1-1 fix from 2026-05-21 review):
@@ -441,15 +702,9 @@ export default function (pi: ExtensionAPI) {
     // armed=true at the top of the handler, so classifyDecision's
     // "rearm" branch (which requires !armed) is unreachable, leaving
     // failureCount/cooldown stale to bias the next trigger's backoff.
-    if (
-      failureCountBySession.has(stateKey) &&
-      percent !== null &&
-      percent < settings.thresholdPercent - settings.rearmMarginPercent
-    ) {
-      failureCountBySession.delete(stateKey);
-      cooldownUntilBySession.delete(stateKey);
-    }
+    clearBackoffIfBelowRearmFloor(stateKey, percent, settings);
 
+    const wasArmed = armedBySession.get(stateKey) ?? true;
     const decision = classifyDecision(percent, settings.thresholdPercent, wasArmed, settings.rearmMarginPercent);
 
     // Update arming state for "rearm" decisions before logging/short-circuiting.
@@ -488,33 +743,18 @@ export default function (pi: ExtensionAPI) {
     // makes the situation visible. See failureCountBySession header
     // comment for the 2026-05-18 incident that motivated this entire
     // backoff machinery.
-    if (failuresSoFar >= MAX_CONSECUTIVE_FAILURES) {
+    const failureGate = getCompactionFailureGate(stateKey, ts);
+    if (!failureGate.ok) {
       await recordSimpleSkip(cwd, {
         ts: new Date(ts).toISOString(),
         decision: "skip",
-        reason: "max_failures_reached",
+        reason: failureGate.reason,
         usage_percent: percent,
-        consecutive_failures: failuresSoFar,
+        consecutive_failures: failureGate.failuresSoFar,
+        ...(failureGate.reason === "in_error_cooldown" ? { cooldown_remaining_ms: failureGate.cooldownRemainingMs } : {}),
       });
       return;
     }
-    if (failuresSoFar > 0 && ts < cooldownUntil) {
-      await recordSimpleSkip(cwd, {
-        ts: new Date(ts).toISOString(),
-        decision: "skip",
-        reason: "in_error_cooldown",
-        usage_percent: percent,
-        consecutive_failures: failuresSoFar,
-        cooldown_remaining_ms: cooldownUntil - ts,
-      });
-      return;
-    }
-    // Note: `failuresSoFar` is captured before the opportunistic
-    // clear above, so it can be stale here. That's OK because
-    // opportunistic clear only fires when percent < floor, in which
-    // case classifyDecision returns "skip below_threshold" and we
-    // never reach this trigger block.
-
     // ADR 0022 INV-K: defer compaction while a user-facing overlay
     // (prompt_user dialog OR vault authorization dialog) is pending.
     // We check AFTER classifyDecision returned "trigger" but BEFORE
@@ -550,7 +790,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    armedBySession.set(stateKey, false);
+    armedBySession.set(stateKey, /* armed */ false);
 
     if (hasUI && settings.notifyOnTrigger && notify) {
       notify(
@@ -583,9 +823,7 @@ export default function (pi: ExtensionAPI) {
           // entries for long-lived pi processes (DEEPSEEK P1-2);
           // .get(stateKey) ?? true correctly defaults to armed on
           // the next agent_end.
-          armedBySession.delete(stateKey);
-          failureCountBySession.delete(stateKey);
-          cooldownUntilBySession.delete(stateKey);
+          recordSuccessfulTriggerState(stateKey);
           void recordOutcome({
             operation: "trigger",
             outcome: "completed",
@@ -612,13 +850,7 @@ export default function (pi: ExtensionAPI) {
           // grants one fresh attempt after cooldown IFF failures <
           // MAX. armedBySession stays at false (set just above when we
           // decided to trigger).
-          const nextFailures = (failureCountBySession.get(stateKey) ?? 0) + 1;
-          failureCountBySession.set(stateKey, nextFailures);
-          const cooldownMs = Math.min(
-            ERROR_COOLDOWN_MAX_MS,
-            ERROR_COOLDOWN_BASE_MS * 2 ** (nextFailures - 1),
-          );
-          cooldownUntilBySession.set(stateKey, Date.now() + cooldownMs);
+          const { nextFailures, cooldownMs } = recordFailedTriggerState(stateKey);
           // When MAX reached, the session is permanently disarmed
           // until percent drops below floor (impossible on an
           // overflowed context where compact is the only way to
@@ -659,13 +891,7 @@ export default function (pi: ExtensionAPI) {
       // backoff policy as onError) so a future pi change that drops
       // the IIFE wrapper doesn't silently bypass backoff.
       const message = err instanceof Error ? err.message : String(err);
-      const nextFailures = (failureCountBySession.get(stateKey) ?? 0) + 1;
-      failureCountBySession.set(stateKey, nextFailures);
-      const cooldownMs = Math.min(
-        ERROR_COOLDOWN_MAX_MS,
-        ERROR_COOLDOWN_BASE_MS * 2 ** (nextFailures - 1),
-      );
-      cooldownUntilBySession.set(stateKey, Date.now() + cooldownMs);
+      const { nextFailures, cooldownMs } = recordFailedTriggerState(stateKey);
       await recordOutcome({
         operation: "trigger",
         outcome: "sync_error",
