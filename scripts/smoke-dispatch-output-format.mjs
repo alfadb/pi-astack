@@ -114,6 +114,17 @@ fs.writeFileSync(
   `module.exports = { FOOTER_STATUS_KEYS: { dispatch: "dispatch" } };\n`,
 );
 
+// Stub `../_shared/pi-internals` — ADR 0027 PR-B added the
+// markSessionAsSubAgent import. formatResult doesn’t use it, but it’s
+// resolved at module load time. No-op stub keeps the loader happy.
+fs.writeFileSync(
+  path.join(sharedDir, "pi-internals.js"),
+  `module.exports = {
+  markSessionAsSubAgent: () => {},
+  isSubAgentSession: () => false,
+};\n`,
+);
+
 // Stub `@earendil-works/pi-coding-agent` — v3 in-process migration added
 // real (non-type) imports: createAgentSession, DefaultResourceLoader,
 // SessionManager, SettingsManager, getAgentDir. formatResult doesn't call

@@ -27,6 +27,7 @@
     "smoke:vision": "node scripts/smoke-vision.mjs",
     "smoke:imagine": "node scripts/smoke-imagine.mjs",
     "smoke:web-search": "node scripts/smoke-web-search.mjs",
+    "smoke:pi-internals-subagent": "node scripts/smoke-pi-internals-subagent.mjs",
     "smoke:paths": "node scripts/smoke-pi-astack-paths.mjs",
     "smoke:vault-subpi-isolation": "node scripts/smoke-vault-subpi-isolation.mjs",
     "smoke:abrain": "node scripts/smoke-abrain-backend-detect.mjs",

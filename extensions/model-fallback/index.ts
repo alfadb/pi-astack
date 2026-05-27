@@ -40,6 +40,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { isSubAgentSession } from "../_shared/pi-internals";
 import {
 	formatLocalIsoTimestamp,
 	legacyModelFallbackCanaryPath,
@@ -236,7 +237,12 @@ export default function (pi: ExtensionAPI) {
 	// message_end handler below adds the same prefix). The main-pi
 	// handler also manages resetState / canaryLog / isOnFallback gating
 	// which this lightweight handler intentionally does not touch.
-	pi.on("message_end", (event) => {
+	pi.on("message_end", (event, ctx?: any) => {
+		// ADR 0027 PR-B: sub-agent must not trigger fallback. Sub-agent
+		// errors should fail fast and surface to the dispatching parent
+		// rather than silently swap models mid-task.
+		if (isSubAgentSession(ctx)) return;
+
 		if (process.env.PI_ABRAIN_DISABLED !== "1") return; // skip in main pi — full handler below
 		if (event.message.role !== "assistant") return;
 		const msg = event.message as { stopReason?: string; errorMessage?: string };
@@ -263,6 +269,11 @@ export default function (pi: ExtensionAPI) {
 		const config = loadConfig();
 		if (config.fallbackModels?.length) {
 			pi.on("session_start", async (_event, ctx) => {
+				// ADR 0027 PR-B: skip pre-flight in sub-agent (parent already
+				// validated the model + sub-agent uses an explicit dispatched
+				// model, not the fallback chain).
+				if (isSubAgentSession(ctx)) return;
+
 				try {
 					const reg = ctx.modelRegistry;
 					if (!reg) return;
@@ -336,6 +347,9 @@ export default function (pi: ExtensionAPI) {
 	//      —— 必须在 agent_end 同步评估之前完成（详见文件头注释）。
 	// 保持 sync handler——不能加 async，否则 await listener 会意外延迟。
 	pi.on("message_end", (event, ctx: any) => {
+		// ADR 0027 PR-B: sub-agent must not trigger fallback chain switching.
+		if (isSubAgentSession(ctx)) return;
+
 		if (event.message.role !== "assistant") return;
 		const msg = event.message as { stopReason?: string; errorMessage?: string };
 
@@ -362,6 +376,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (event, ctx: any) => {
+		// ADR 0027 PR-B: sub-agent does not participate in main-session
+		// fallback state machine / canary logging. Fail-fast back to parent.
+		if (isSubAgentSession(ctx)) return;
+
 		// Resolve projectRoot once per agent_end — reused by every canaryLog
 		// call below (including the deferred setTimeout closure).
 		const projectRoot = path.resolve(ctx?.cwd || process.cwd());

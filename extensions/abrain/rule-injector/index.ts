@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FOOTER_STATUS_KEYS } from "../../_shared/footer-status";
+import { isSubAgentSession } from "../../_shared/pi-internals";
 import {
   abrainProjectDir,
   resolveActiveProject,
@@ -543,6 +544,11 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
   };
 
   if (typeof maybePi.on === "function") maybePi.on("session_start", async (_event, ctx) => {
+    // ADR 0027 PR-B: sub-agent has a dispatch-provided system prompt;
+    // injecting project rules would conflict + the footer/notify channel
+    // is main-session-only.
+    if (isSubAgentSession(ctx)) return;
+
     try {
       ensureRuleDirs(ABRAIN_HOME);
       cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings });
@@ -558,6 +564,11 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
   });
 
   if (typeof maybePi.on === "function") maybePi.on("before_agent_start", async (event, ctx) => {
+    // ADR 0027 PR-B: do NOT inject project rules into a sub-agent’s
+    // dispatch-crafted system prompt — would shadow the parent’s explicit
+    // task framing.
+    if (isSubAgentSession(ctx)) return undefined;
+
     const current = event.systemPrompt ?? "";
     if (current.includes(BEGIN_ABRAIN_RULES)) return undefined;
     if (!cachedRules || path.resolve(ctx?.cwd || process.cwd()) !== cachedRules.cwd) {

@@ -27,6 +27,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
+import { isSubAgentSession } from "../_shared/pi-internals";
 
 // ── pi-astack settings loader ──────────────────────────────
 // pi-astack uses its own settings file (not pi's settings.json) to keep our
@@ -277,6 +278,12 @@ export default function (pi: ExtensionAPI) {
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
   pi.on("session_start", async (_event, ctx) => {
+    // ADR 0027 PR-B (v3 in-process replacement for the env guard above):
+    // model-curator must NOT prune a sub-agent's model registry — dispatch
+    // explicitly chose the sub-agent's model, and the curator's whitelist
+    // is a main-session configuration concept.
+    if (isSubAgentSession(ctx)) return;
+
     // P2 fix (R6 audit): outer try/catch so model-curator startup
     // failure (network/auth/registry error) doesn't reject the hook
     // and silently disable all other session_start handlers.

@@ -12,7 +12,9 @@
  *   - No double-layer timeout (D-state hang protection)
  *   - No temp file writes for prompts
  *   - No input-history pollution (no second pi instance)
- *   - No PI_ABRAIN_DISABLED env passthrough
+ *   - No PI_ABRAIN_DISABLED env passthrough (v3+ uses isSubAgentSession
+ *     via WeakSet marker on the sub-agent's SessionManager — see
+ *     _shared/pi-internals.ts and ADR 0027 PR-B)
  *   - 1:1 tool loop (pi runtime handles it, same as v2)
  *   - JSON event stream via subscribe() (same observability as v2)
  *
@@ -36,6 +38,7 @@ import {
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
+import { markSessionAsSubAgent } from "../_shared/pi-internals";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -67,10 +70,23 @@ const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
  *  - read/bash/edit/write/grep/find/ls — pi SDK built-in base tools
  *    (must stay in sync with createCodingTools / createReadOnlyTools)
  *  - web_search/web_fetch — pi-astack web-search extension (ADR 0027
- *    PR-A: L2 worker read tools, exposed to sub-agents by default) */
+ *    PR-A: L2 worker read tools, exposed to sub-agents by default)
+ *  - memory_search/memory_get/memory_list/memory_neighbors/memory_decide —
+ *    pi-astack abrain extension (ADR 0027 PR-B: L2 workers grown on L1 hub
+ *    need brain read access for the symbiosis loop)
+ *  - vision — pi-astack vision extension (image analysis, read-only)
+ *
+ *  Deliberately NOT included (extension-loaded but kept out of sub-agents):
+ *  - vault_release: secret release, main-session-only (ADR 0014 §6)
+ *  - prompt_user: user interaction, sub-agent can't reach user
+ *  - imagine: image generation, expensive + main-session-only by design
+ *  - dispatch_agent/dispatch_parallel: nested dispatch forbidden (would
+ *    explode token cost + violate ADR 0027 C5 fail-fast invariant) */
 const KNOWN_TOOLS = new Set([
   "read", "bash", "edit", "write", "grep", "find", "ls",
   "web_search", "web_fetch",
+  "memory_search", "memory_get", "memory_list", "memory_neighbors", "memory_decide",
+  "vision",
 ]);
 
 // ── Footer status state machine ─────────────────────────────────
@@ -353,7 +369,15 @@ function getSharedInfra(): Promise<{
         cwd: process.cwd(),
         agentDir: getAgentDir(),
         settingsManager,
-        noExtensions: true,
+        // ADR 0027 PR-B: sub-agents load the full extension stack so they
+        // can read brain (memory_*), use web tools, etc. Main-session-only
+        // lifecycle handlers (sediment / compaction-tuner / model-fallback /
+        // persistent-input-history / model-curator / rule-injector) gate
+        // themselves OFF via isSubAgentSession(ctx) — the SessionManager
+        // passed to createAgentSession below is marked before use.
+        // (Previously noExtensions: true to enforce ADR 0014 §6, replaced
+        // by handler-level guards via pi-internals.ts WeakSet marker.)
+        noExtensions: false,
         noSkills: true,
         noPromptTemplates: true,
         noThemes: true,
@@ -506,6 +530,15 @@ async function runInProcess(
 
   const runPromise = (async (): Promise<AgentResult> => {
     try {
+      // ADR 0027 PR-B: mark this SessionManager as sub-agent so that
+      // lifecycle handlers in sediment / compaction-tuner / model-fallback /
+      // persistent-input-history / model-curator / abrain rule-injector
+      // can detect via isSubAgentSession(ctx) and skip main-session-only
+      // side effects. Must happen BEFORE createAgentSession() because pi
+      // fires session_start synchronously inside session construction.
+      const subAgentSm = SessionManager.inMemory(process.cwd());
+      markSessionAsSubAgent(subAgentSm);
+
       // Create session
       const result = await createAgentSession({
         model,
@@ -514,7 +547,7 @@ async function runInProcess(
         modelRegistry,
         settingsManager,
         resourceLoader,
-        sessionManager: SessionManager.inMemory(process.cwd()),
+        sessionManager: subAgentSm,
       });
       session = result.session;
 

@@ -73,6 +73,20 @@ function stageModuleTree(outRoot) {
     ["extensions/memory/utils.ts", "memory/utils.js"],
     ["extensions/memory/settings.ts", "memory/settings.js"],
   ];
+
+  // Stub `_shared/pi-internals` — ADR 0027 PR-B added the
+  // isSubAgentSession import in rule-injector. The stub returns false so
+  // existing rule-injection tests still see the main-session code path.
+  // (The actual sub-agent gating contract is verified by
+  // smoke:vault-subpi-isolation, not this test.)
+  writeFile(
+    path.join(outRoot, "_shared", "pi-internals.js"),
+    `module.exports = {
+  markSessionAsSubAgent: () => {},
+  isSubAgentSession: () => false,
+};\n`,
+  );
+
   for (const [src, dst] of files) {
     const out = transpile(path.join(repoRoot, src));
     // Strict parse catches template-literal regressions that transpileModule

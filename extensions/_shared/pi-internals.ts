@@ -580,3 +580,90 @@ export function warnOnceIfUnavailable(
     `This may happen after a pi upgrade. Related features will fall back to degraded mode.`,
   );
 }
+
+// ── Sub-agent session marker ─────────────────────────────────────────────
+//
+// ADR 0027 PR-B (Coupled Stigmergic Dual-Loop Agent System):
+//
+// dispatch_agent / dispatch_parallel spawn L2 worker AgentSessions in-process
+// (v3 model, ADR 0009). Per ADR 0027 C1' L1↔L2 symbiosis, sub-agents should
+// load the full extension stack so they can read brain (memory_*), use web
+// tools (web_search/web_fetch), etc. — they are workers grown on the L1 hub,
+// not isolated black boxes.
+//
+// BUT per ADR 0014 §6 + ADR 0025 INV-IMPLICIT-GROUND-TRUTH, several
+// main-session-only lifecycle handlers must NOT fire in sub-agent context:
+//
+//   - sediment.agent_end: sub-agent output is a tool product, not user
+//     conversation. Letting sediment extract from it pollutes the brain with
+//     LLM-reasoning artifacts instead of user implicit signal.
+//   - compaction-tuner.agent_end: tunes main-session compaction state from
+//     sub-agent token usage — scope error.
+//   - model-fallback.agent_end / .session_start: state-machine designed for
+//     main session, fires once per sub-agent and corrupts fallback chain.
+//   - persistent-input-history.session_start: loads user's input history
+//     into the sub-agent editor — not meaningful, ResourceLoader-heavy.
+//   - model-curator.session_start: applies provider whitelist; safe but
+//     redundant per sub-agent spawn.
+//   - abrain/rule-injector.session_start / .before_agent_start: injects
+//     project rules into system prompt; sub-agent has a dispatch-provided
+//     prompt, injection conflicts.
+//
+// In the v2 subprocess model these handlers gated on `PI_ABRAIN_DISABLED=1`,
+// which dispatch passed via env to the child process. v3 in-process can't
+// use env (shared with parent) so we need an explicit marker.
+//
+// Mechanism: dispatch calls `markSessionAsSubAgent(sm)` on the
+// SessionManager instance it passes to createAgentSession. Lifecycle handlers
+// receive a ctx where `ctx.sessionManager` is the SAME object identity
+// (verified via pi SDK source: ReadonlySessionManager is a Pick<> type alias,
+// not a wrapper; AgentSession + ExtensionRunner pass the ref through
+// unchanged — see core/agent-session.js:116 + core/extensions/runner.js:393).
+// Handlers do `if (isSubAgentSession(ctx)) return;` to opt out.
+//
+// Why WeakSet: ties marker lifetime to SessionManager instance — when the
+// sub-agent disposes (dispose() drops its ref), the SessionManager becomes
+// GC-eligible and falls out of the marker set automatically. No leak.
+//
+// Why not monkey-patch: pi-internals already monkey-patches
+// AgentSession.prototype._buildRuntime (turn-boundary compaction), and
+// patches add upgrade-fragility surface. WeakSet identity marking has zero
+// pi-internals coupling and stays correct across pi versions as long as
+// ExtensionContext.sessionManager remains a passthrough getter.
+
+const SUB_AGENT_SESSION_MANAGERS = new WeakSet<object>();
+
+/** Mark a SessionManager instance as belonging to a dispatch-spawned sub-agent.
+ *  Must be called BEFORE passing the SessionManager to createAgentSession,
+ *  so that any session_start handler triggered during session creation
+ *  already sees the mark.
+ *
+ *  Idempotent: re-marking the same instance is a no-op. */
+export function markSessionAsSubAgent(sessionManager: object): void {
+  if (sessionManager == null || typeof sessionManager !== "object") return;
+  SUB_AGENT_SESSION_MANAGERS.add(sessionManager);
+}
+
+/** Whether a lifecycle handler is currently running inside a dispatch-spawned
+ *  sub-agent session. Returns false in main session and in any session
+ *  pi-astack did not explicitly mark (the safe default — extensions only
+ *  opt out, never opt in).
+ *
+ *  Accepts any object with a `sessionManager` field (the ExtensionContext
+ *  shape). Returns false on missing/null sessionManager rather than throwing,
+ *  so handlers wrapping their entire body in this check stay robust against
+ *  pi calling them with unexpected ctx shapes. */
+export function isSubAgentSession(ctx: { sessionManager?: unknown } | undefined | null): boolean {
+  if (!ctx) return false;
+  const sm = ctx.sessionManager;
+  if (sm == null || typeof sm !== "object") return false;
+  return SUB_AGENT_SESSION_MANAGERS.has(sm);
+}
+
+/** Test-only: clear the marker set. Production code should never need this
+ *  because the WeakSet self-clears on GC. */
+export function _resetSubAgentMarkersForTests(): void {
+  // WeakSet has no .clear(); rely on the fact that callers also drop their
+  // SessionManager refs between tests, so GC handles it. This stub exists
+  // only to satisfy test-suite contract symmetry with _resetWarnedApisForTests. */
+}

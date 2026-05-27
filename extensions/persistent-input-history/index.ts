@@ -37,6 +37,7 @@
  */
 
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isSubAgentSession } from "../_shared/pi-internals";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import {
   appendFileSync,
@@ -541,6 +542,10 @@ export default function (pi: ExtensionAPI) {
   // ── input event: the ONLY place disk writes happen ─────────────
 
   pi.on("input", (_event, ctx) => {
+    // ADR 0027 PR-B: sub-agent has no interactive editor; sub-agent
+    // “inputs” are dispatch-provided prompts, not user-typed history.
+    if (isSubAgentSession(ctx)) return;
+
     // Only persist real user input — not RPC or extension-generated messages.
     if (_event.source !== "interactive") return;
 
@@ -577,6 +582,10 @@ export default function (pi: ExtensionAPI) {
   // ── session_start: install the editor ─────────────────────────
 
   pi.on("session_start", (_event, ctx) => {
+    // ADR 0027 PR-B: sub-agent has no TUI editor to install history into,
+    // and loading the parent's history file would be incorrect + wasteful.
+    if (isSubAgentSession(ctx)) return;
+
     try {
       if (!CAPABILITY.hasAddToHistory) {
         warnCapabilityOnce(ctx);

@@ -42,6 +42,7 @@ import {
 } from "../_shared/runtime";
 import {
   installTurnBoundaryCompactionPatch,
+  isSubAgentSession,
   type TurnBoundaryCompactionDecision,
   type TurnBoundaryCompactionUsage,
 } from "../_shared/pi-internals";
@@ -792,6 +793,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async (_event: unknown, ctx: CompactionTunerCtx) => {
+    // ADR 0027 PR-B: compaction-tuner observes main-session context
+    // pressure to adjust thresholds. Sub-agent sessions are in-memory
+    // ephemeral, have their own (different) model + budget, and shouldn’t
+    // feed their token usage into main-session compaction state.
+    if (isSubAgentSession(ctx)) return;
+
     // Capture ctx fields synchronously — pi may invalidate ctx during
     // async work (same pattern sediment uses).
     const cwd = path.resolve(ctx.cwd || process.cwd());

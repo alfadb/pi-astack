@@ -52,7 +52,7 @@ import { relevantEntriesForCurator } from "./curator";
 import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
-import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests } from "../_shared/pi-internals";
+import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { sanitizeForMemory } from "./sanitizer";
 
@@ -735,7 +735,11 @@ export default function (pi: ExtensionAPI) {
   // string-concat append — the only native API for system-prompt
   // injection per docs/extensions.md §before_agent_start).
   const SEDIMENT_INJECT_MARKER = "<!-- pi-astack/sediment: main-session read-only contract -->";
-  pi.on("before_agent_start", async (event: { systemPrompt?: string }) => {
+  pi.on("before_agent_start", async (event: { systemPrompt?: string }, ctx?: unknown) => {
+    // ADR 0027 PR-B: sub-agent should NOT trigger sediment’s sticky-rule
+    // surveillance — sub-agent system prompts are dispatch-generated, not
+    // user-authored, so there’s no “user sticky rule” signal to observe.
+    if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
     const settings = resolveSedimentSettings();
     if (!settings.enabled) return undefined;
     const current = event.systemPrompt ?? "";
@@ -780,6 +784,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         ui?: { setStatus?(extId: string, message?: string): void };
       },
     ) => {
+      // ADR 0027 PR-B: sub-agent has no sediment footer / no checkpoint
+      // to advance / no UI to attach to. Skip entirely.
+      if (isSubAgentSession(ctx)) return;
+
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
 
@@ -830,6 +838,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         ui?: { setStatus?(extId: string, message?: string): void };
       },
     ) => {
+      // ADR 0027 PR-B: sub-agent session has no sediment lifecycle to track.
+      if (isSubAgentSession(ctx)) return;
+
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
       const sessionId = readSessionId(ctx.sessionManager);
@@ -885,6 +896,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         };
       },
     ) => {
+      // ADR 0027 PR-B (critical): sub-agent output is a tool product, not
+      // user conversation. Letting sediment extract from it would pollute
+      // the brain with LLM-reasoning artifacts instead of user implicit
+      // ground truth signal (violates ADR 0025 INV-IMPLICIT-GROUND-TRUTH).
+      // This is the v3 in-process replacement for PI_ABRAIN_DISABLED env
+      // gate from the v2 subprocess model.
+      if (isSubAgentSession(ctx)) return;
+
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
 
