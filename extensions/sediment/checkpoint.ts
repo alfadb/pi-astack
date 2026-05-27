@@ -256,6 +256,66 @@ function truncateEntryText(entry: unknown, rendered: string, maxChars: number): 
   return rendered.slice(0, headChars) + marker + rendered.slice(rendered.length - tailChars);
 }
 
+/**
+ * Tool names whose `toolResult` content MUST be withheld from sediment
+ * extraction windows.
+ *
+ * # ADR 0027 PR-B+, R1 review P0-α
+ *
+ * dispatch_agent / dispatch_parallel produce L2 sub-agent reasoning text
+ * that flows back to the parent session as `toolResult` entries. PR-B
+ * already gates sediment's own `agent_end` handler INSIDE the sub-agent
+ * (so sediment doesn't fire on the sub-agent's session at all), but the
+ * PARENT session's `agent_end` still reads its own branch — including
+ * these tool_result entries — when building the extraction window.
+ *
+ * Without this withholding, the parent's extractor LLM would see
+ * sub-agent text like "Based on the user's preference for pnpm, ..."
+ * and extract "user prefers pnpm" as a sediment candidate. dispatch_parallel
+ * of N sub-agents → N× this pollution per turn. Worse: a sub-agent that
+ * uses memory_decide will read the brain, paraphrase, return that
+ * paraphrase via tool_result, and sediment would re-extract its own
+ * laundered output — a self-exciting loop the echo-chamber breaker
+ * (ADR 0026 §3.4) cannot detect because it watches entry usage, not
+ * entry creation.
+ *
+ * This withholds **just the content**, not the entry itself. Sediment
+ * still sees that a dispatch happened in this turn (entry id + timestamp
+ * + toolName preserved in the marker line), so trace/context is intact;
+ * only the sub-agent's reasoning text is replaced with an explicit
+ * "[withheld]" marker.
+ *
+ * # Why only these two tools
+ *
+ * Other tools' toolResult is FACTUAL data the user is working with:
+ *   - bash: command stdout/stderr (user's repo state)
+ *   - web_search / web_fetch: external page content
+ *   - memory_search / memory_get: brain content (already trusted)
+ *   - read / grep / find / ls: filesystem facts
+ *
+ * These are legitimate signals about the user's working context and
+ * SHOULD inform sediment learning. Only dispatch_agent/dispatch_parallel
+ * results are LLM-generated sub-agent reasoning, which is L2 worker
+ * artifact (not user implicit truth, per ADR 0024 INV-IMPLICIT-GROUND-TRUTH).
+ *
+ * # Defense layers
+ *
+ * This is the infra-layer cut. It's belt-and-suspenders with the
+ * extractor prompt (Lane C system prompt) which also tells the LLM not
+ * to extract from L2 artifacts — but prompt-layer instructions are
+ * advisory, this content withhold is structural. Lane A's deterministic
+ * `parseExplicitMemoryBlocks` (MEMORY:...END_MEMORY fence scan) operates
+ * on the same windowText, so a sub-agent emitting `MEMORY:` blocks in
+ * its output is also automatically blocked at this chokepoint.
+ */
+const L2_FANOUT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "dispatch_agent",
+  "dispatch_parallel",
+]);
+
+const L2_WITHHELD_MARKER =
+  "[L2 sub-agent output — content withheld from sediment per ADR 0027 PR-B+ R1 P0-α; sub-agent reasoning is not user implicit truth signal]";
+
 export function entryToText(entry: unknown): string {
   if (!entry || typeof entry !== "object") return "";
   const e = entry as Record<string, unknown>;
@@ -267,7 +327,13 @@ export function entryToText(entry: unknown): string {
     const msg = e.message as Record<string, unknown>;
     const role = typeof msg.role === "string" ? msg.role : "unknown";
     if (role === "toolResult") {
-      return `--- ENTRY ${id} ${timestamp} message/toolResult:${String(msg.toolName ?? "unknown")} ---\n${textFromContent(msg.content)}`;
+      const toolName = String(msg.toolName ?? "unknown");
+      // ADR 0027 PR-B+, R1 P0-α: withhold L2 sub-agent reasoning text
+      // from sediment extraction. See L2_FANOUT_TOOL_NAMES doc above.
+      if (L2_FANOUT_TOOL_NAMES.has(toolName)) {
+        return `--- ENTRY ${id} ${timestamp} message/toolResult:${toolName} ---\n${L2_WITHHELD_MARKER}`;
+      }
+      return `--- ENTRY ${id} ${timestamp} message/toolResult:${toolName} ---\n${textFromContent(msg.content)}`;
     }
     if (role === "bashExecution") {
       return `--- ENTRY ${id} ${timestamp} message/bashExecution ---\ncommand: ${String(msg.command ?? "")}\nexitCode: ${String(msg.exitCode ?? "")}\n${String(msg.output ?? "")}`;

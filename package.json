@@ -30,6 +30,7 @@
     "smoke:pi-internals-subagent": "node scripts/smoke-pi-internals-subagent.mjs",
     "smoke:causal-anchor": "node scripts/smoke-causal-anchor.mjs",
     "smoke:causal-anchor-retrofit": "node scripts/smoke-causal-anchor-retrofit.mjs",
+    "smoke:sediment-l2-withhold": "node scripts/smoke-sediment-l2-withhold.mjs",
     "smoke:paths": "node scripts/smoke-pi-astack-paths.mjs",
     "smoke:vault-subpi-isolation": "node scripts/smoke-vault-subpi-isolation.mjs",
     "smoke:abrain": "node scripts/smoke-abrain-backend-detect.mjs",
