@@ -44,6 +44,10 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as fsSync from "node:fs";
+import * as os from "node:os";
+import * as pathLib from "node:path";
+import * as crypto from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isSubAgentSession } from "./pi-internals";
 
@@ -313,7 +317,109 @@ export function spreadAnchor(anchor: CausalAnchor | undefined): Record<string, u
   };
   if (anchor.subturn !== undefined) out.subturn = anchor.subturn;
   if (anchor.sub_agent_label) out.sub_agent_label = anchor.sub_agent_label;
+  // ADR 0027 PR-B+ R1 P1-8: device_id disambiguates anchors across devices
+  // sharing the same ~/.abrain via ADR 0020 git-sync. Without this field,
+  // two devices producing identical (session_id=UUID, turn_id=0) rows
+  // would collide in cross-device jq joins. Adding device_id keeps the
+  // 3-tuple (device_id, session_id, turn_id) globally unique. Resolved
+  // lazily once per process; returns undefined-not-set if filesystem
+  // resolve fails (best-effort, never throws).
+  const did = getDeviceId();
+  if (did) out.device_id = did;
   return out;
+}
+
+// ── Device id (P1-8) ────────────────────────────────────────
+//
+// Resolves a stable per-device identifier persisted at
+// `~/.abrain/.state/device-id`. Generated on first call; subsequent
+// calls hit the in-memory cache.
+//
+// # Why not hostname / machine-id
+//
+//   - `os.hostname()` changes when user renames their machine, breaks
+//     audit join continuity
+//   - `/etc/machine-id` is Linux-only and root-readable assumption is
+//     fragile across platforms
+//   - PI-astack abrain home is the natural per-user / per-device scope:
+//     a fresh ~/.abrain on a new device is a new device by definition
+//
+// # Failure mode
+//
+// If the abrain home doesn't exist (very early startup, before any
+// pi-astack ext has touched the filesystem) OR if write permission is
+// denied (rare; user's own ~/.abrain), returns `undefined`. Spread is
+// safe; rows simply won't carry device_id this run.
+
+let _cachedDeviceId: string | null | undefined = undefined;
+
+function abrainStateDir(): string {
+  return pathLib.join(os.homedir(), ".abrain", ".state");
+}
+
+/** Return the stable device-id for this machine + user, or undefined if
+ *  the filesystem resolve fails. Cached after first successful call.
+ *  Result of `undefined` is also cached (don't retry filesystem on every
+ *  spreadAnchor invocation in this process). */
+export function getDeviceId(): string | undefined {
+  if (_cachedDeviceId !== undefined) return _cachedDeviceId ?? undefined;
+  try {
+    const stateDir = abrainStateDir();
+    const file = pathLib.join(stateDir, "device-id");
+    if (fsSync.existsSync(file)) {
+      const raw = fsSync.readFileSync(file, "utf-8").trim();
+      // Validate: just check it looks like an id (alnum + dash, 8-40 chars).
+      if (/^[A-Za-z0-9-]{8,64}$/.test(raw)) {
+        _cachedDeviceId = raw;
+        return raw;
+      }
+      // Corrupted file content: log once and treat as missing; do NOT
+      // auto-rewrite (could be a sync conflict that needs operator
+      // attention).
+      console.warn(
+        `pi-astack: device-id at ${file} has unexpected format; ignoring (rows won't carry device_id). Inspect and delete to regenerate.`,
+      );
+      _cachedDeviceId = null;
+      return undefined;
+    }
+    // Generate + persist
+    fsSync.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    const newId = crypto.randomUUID();
+    // Atomic write: tmp + rename, so concurrent processes can't observe a
+    // half-written file (one will win, the other reads the winner's value).
+    const tmpFile = pathLib.join(stateDir, `device-id.${process.pid}.tmp`);
+    fsSync.writeFileSync(tmpFile, newId + "\n", { mode: 0o600 });
+    try {
+      // rename is atomic on POSIX; on a race the other process's rename wins
+      // first, our subsequent rename overwrites. Either way the file ends up
+      // with A or B uniformly; we then read whichever landed (next call).
+      fsSync.renameSync(tmpFile, file);
+    } catch {
+      try { fsSync.unlinkSync(tmpFile); } catch {}
+    }
+    // Re-read the file to canonicalize (in case of cross-process race the
+    // file may now hold the OTHER process's id, not ours).
+    try {
+      const canonical = fsSync.readFileSync(file, "utf-8").trim();
+      if (/^[A-Za-z0-9-]{8,64}$/.test(canonical)) {
+        _cachedDeviceId = canonical;
+        return canonical;
+      }
+    } catch {}
+    _cachedDeviceId = newId;
+    return newId;
+  } catch (err) {
+    // Filesystem unavailable / permission denied — cache the failure to
+    // avoid retry loops; rows won't carry device_id this run.
+    _cachedDeviceId = null;
+    return undefined;
+  }
+}
+
+/** Test-only: clear the device-id cache so a subsequent call re-resolves
+ *  from disk. Production must not call. */
+export function _resetDeviceIdCacheForTests(): void {
+  _cachedDeviceId = undefined;
 }
 
 // ── Test-only ───────────────────────────────────────────────────────────
