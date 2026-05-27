@@ -58,13 +58,19 @@ const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
 
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
 
-/** Known tool names that pi SDK registers as built-in base tools.
- *  Used by validateTools to reject unknown tool names early — the SDK
- *  silently ignores unknown names, which would leave the sub-agent with
- *  zero tools and a confusing "I don't have access to tools" response.
- *  Must stay in sync with pi SDK's createCodingTools / createReadOnlyTools. */
+/** Known tool names accepted by validateTools — used to reject unknown
+ *  names early (SDK would silently ignore them, leaving the sub-agent
+ *  with zero tools and a confusing "I don't have access to tools"
+ *  response).
+ *
+ *  Members:
+ *  - read/bash/edit/write/grep/find/ls — pi SDK built-in base tools
+ *    (must stay in sync with createCodingTools / createReadOnlyTools)
+ *  - web_search/web_fetch — pi-astack web-search extension (ADR 0027
+ *    PR-A: L2 worker read tools, exposed to sub-agents by default) */
 const KNOWN_TOOLS = new Set([
   "read", "bash", "edit", "write", "grep", "find", "ls",
+  "web_search", "web_fetch",
 ]);
 
 // ── Footer status state machine ─────────────────────────────────
@@ -405,8 +411,10 @@ async function runInProcess(
     };
   }
 
-  // Build tool allowlist (default: read-only safe set)
-  const tools = (toolAllowlist || "read,grep,find,ls")
+  // Build tool allowlist (default: read-only safe set + web read tools
+  // per ADR 0027 PR-A — L2 worker should be able to read external
+  // environment, not just local files).
+  const tools = (toolAllowlist || "read,grep,find,ls,web_search,web_fetch")
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean);
@@ -761,14 +769,14 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_parallel.",
       "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_parallel which runs them in parallel (~30s).",
-      "Sub-agents CAN use read, grep, find, ls. Mutating tools require PI_MULTI_AGENT_ALLOW_MUTATING=1.",
+      "Sub-agents CAN use read, grep, find, ls, web_search, web_fetch. Mutating tools (bash, edit, write) require PI_MULTI_AGENT_ALLOW_MUTATING=1.",
       "The sub-agent is an independent AgentSession — its context does NOT count against your token budget.",
     ],
     parameters: Type.Object({
       model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
-      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls). Mutating tools (bash/edit/write) require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_parallel is always rejected." })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch). Mutating tools (bash/edit/write) require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
     }),
 
@@ -893,7 +901,7 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
-          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls)." })),
+          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch)." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 1800000 = 30min)" })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
@@ -1004,7 +1012,7 @@ export default function (pi: ExtensionAPI) {
             res = await runInProcess(
               t.model, t.thinking, t.prompt,
               signal, t.timeoutMs ?? timeoutMs, ctx.modelRegistry,
-              t.tools || "read,grep,find,ls",
+              t.tools || "read,grep,find,ls,web_search,web_fetch",
             );
           } catch (err: any) {
             // Outer safety-net catch — reachable for getSharedInfra() init

@@ -629,6 +629,43 @@
           ]
         }
       }
+    },
+
+    "webSearch": {
+      "type": "object",
+      "description": "Web search + fetch tools (extensions/web-search/). Registers two pi tools — web_search and web_fetch — backed by a pluggable WebSearchProvider abstraction. Built-in provider: Brave. Future providers (Google CSE / Kagi / Bing / Serper / Tavily / Jina Reader / SearXNG) plug in via registry.ts switch-case (V1) and a public registerWebSearchProvider() hook (V2). Per ADR 0027 PR-A: these tools are exposed to sub-agents by default so L2 workers can read external environment.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "provider": {
+          "type": "string",
+          "description": "Backend provider name. Built-in: 'brave'. V2 will accept names registered via registerWebSearchProvider(). Default: 'brave'.",
+          "enum": ["brave"],
+          "default": "brave"
+        },
+
+        "apiKeyEnv": {
+          "type": "string",
+          "description": "Env var name to read API key from. Default 'BRAVE_API_KEY' for zero-migration compat with the existing brave-search skill. When switching providers, set to that provider's expected key env name (e.g. 'KAGI_API_KEY').",
+          "default": "BRAVE_API_KEY"
+        },
+
+        "defaultCount": {
+          "type": "integer",
+          "description": "Default search result count when caller omits 'count'. Clamped to 1..20. Default: 5.",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 5
+        },
+
+        "timeout": {
+          "type": "integer",
+          "description": "Network timeout in ms for both search and fetch. Minimum 1000. Default: 15000.",
+          "minimum": 1000,
+          "default": 15000
+        }
+      }
     }
   }
 }
