@@ -15,6 +15,7 @@
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { isSubAgentSession } from "../_shared/pi-internals";
 import { asBoolean, asNumber, resolveSettings } from "./settings";
 import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./types";
 import { loadEntries } from "./parser";
@@ -683,9 +684,82 @@ export default function (pi: ExtensionAPI) {
   // before_agent_start injector (extensions/model-curator/index.ts:350)
   // and sediment's main-session-read-only injector.
   const MEMORY_INJECT_MARKER = "<!-- pi-astack/memory: memory-footnote protocol -->";
-  pi.on("before_agent_start", async (event: { systemPrompt?: string }) => {
+  const MEMORY_INJECT_MARKER_SUBAGENT = "<!-- pi-astack/memory: memory tools (sub-agent variant) -->";
+
+  // ADR 0027 PR-B+ R1 P1-2 (Route A' synthesis):
+  //
+  // T0 vote (Opus / GPT-5.5 / DeepSeek): split B/C/A. Consensus across all
+  // three: current state (prompt mentions memory_decide but default tool
+  // allowlist lacks it) is *actively misleading* the LLM and must be fixed.
+  //
+  // Route A' = pure A (open memory tools to sub-agent by default) MINUS
+  // the footnote attribution block in sub-agent context, because:
+  //   - P0-α (a11f3be) MASKS sub-agent toolResult content from sediment
+  //     extraction → the memory-footnote attribution sink is closed for
+  //     sub-agents. Asking sub-agent to write footnote blocks is asking
+  //     it to spend tokens generating signal into /dev/null.
+  //   - Opus's investment in attribution sink reality (vote B) is honored
+  //     by stripping the footnote section in sub-agent context.
+  //   - DeepSeek's PR-B alignment argument (vote A: sub-agent should be
+  //     able to read brain per ADR 0027 C1' L1→L2 symbiosis) is honored
+  //     by keeping memory tools available + memory_decide guidance.
+  //   - GPT-5.5's "prompt must reflect effective tool surface" invariant
+  //     (vote C) is honored partially: sub-agent's prompt now only carries
+  //     the consumption guidance (read + decide), not the
+  //     attribution-self-report block whose sink doesn't exist for them.
+  //
+  // See docs/audits/2026-05-27-adr-0024-0027-implementation-r1.md §P1-2
+  // for the three full reviewer texts.
+  pi.on("before_agent_start", async (event: { systemPrompt?: string }, ctx?: unknown) => {
     const current = event.systemPrompt ?? "";
-    if (current.includes(MEMORY_INJECT_MARKER)) return undefined;
+    // Idempotency: skip if either marker already present (main OR sub-agent
+    // variant). Prevents double-injection on lifecycle re-fire.
+    if (current.includes(MEMORY_INJECT_MARKER) || current.includes(MEMORY_INJECT_MARKER_SUBAGENT)) {
+      return undefined;
+    }
+
+    const isSubAgent = isSubAgentSession(ctx as { sessionManager?: unknown } | undefined | null);
+
+    if (isSubAgent) {
+      // Sub-agent variant: omit footnote attribution block (sink closed by
+      // P0-α). Keep memory_decide / memory_search consumption guidance so
+      // sub-agent knows when (and when NOT) to pull from brain.
+      const subBlock = `${MEMORY_INJECT_MARKER_SUBAGENT}
+<!-- protocol_version: ${MEMORY_FOOTNOTE_PROTOCOL_VERSION}-subagent -->
+## memory 工具：sub-agent 使用说明
+
+你现在是一个 sub-agent worker（由 dispatch_agent / dispatch_parallel 产生）。
+你可以用 \`memory_search\` / \`memory_get\` / \`memory_neighbors\` /
+\`memory_decide\` 拉取用户的长期记忆、偏好、架构决策、已知坑点。
+
+什么时候调：
+- 你的任务需要考虑用户的已有偏好（代码审查/选型/架构评价）时
+  → 先 \`memory_search\` 查相关偏好
+- 任务中遇到**反转成本不低**的决策点（技术/架构/工作流选择）
+  → \`memory_decide(context=...)\` 拉决策简报
+- 需要某个 entry 的完整内容（而不仅是 search snippet）→ \`memory_get\`
+
+什么时候不需要：
+- 执行类指令（读某个文件、grep某个模式）
+- 纯信息查询（这个 API 怎么用）
+- 机械小改动
+- 调试指定问题
+
+原则：
+- 不要为了形式而调 memory_*。你是被 dispatch 出来做一件具体事的。
+- \`memory_search\` 返回的 entry 是**参考资料**，不是 ground truth。
+  遇到与你看到的实际代码/状态冲突时，优先相信现场证据。
+- brief 是专家建议，不是命令。
+
+注：sub-agent 的回复会作为工具返回值回流父会话，但**不会被
+第二大脑作为用户信号学习**（P0-α sediment mask）。所以你**不需要**
+在回复末尾写 memory-footnote block — 没人消费那个信号。你只
+需要为你的 caller（父会话）交付任务结果。
+`;
+      return { systemPrompt: current + "\n\n" + subBlock };
+    }
+
+    // Main session: full protocol (read + decide + footnote attribution).
     const block = `${MEMORY_INJECT_MARKER}
 <!-- protocol_version: ${MEMORY_FOOTNOTE_PROTOCOL_VERSION} -->
 ## memory-footnote：使用记忆条目的自我报告

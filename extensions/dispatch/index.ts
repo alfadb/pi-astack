@@ -506,10 +506,32 @@ async function runInProcess(
     };
   }
 
-  // Build tool allowlist (default: read-only safe set + web read tools
-  // per ADR 0027 PR-A — L2 worker should be able to read external
-  // environment, not just local files).
-  const tools = (toolAllowlist || "read,grep,find,ls,web_search,web_fetch")
+  // Build tool allowlist.
+  //
+  // Default = read-only safe set + web read tools (ADR 0027 PR-A) + memory
+  // read/decide tools (ADR 0027 PR-B+ R1 P1-2 Route A' synthesis).
+  //
+  // Why memory_* in default:
+  //   - ADR 0027 C1' L1→L2 symbiosis: sub-agent worker should be able to
+  //     read user's long-term preferences / past lessons / architecture
+  //     decisions to ground its task. PR-B's noExtensions=false started
+  //     this; default allowlist now finishes it.
+  //   - DeepSeek T0 vote: "PR-B intentionally did NOT gate
+  //     memory.before_agent_start → design intent was sub-agent reads brain".
+  //   - P0-α (sediment masks sub-agent toolResult) closed the
+  //     self-exciting-loop risk; this default is now safe.
+  //
+  // Why NOT memory_list:
+  //   - memory_list is a broad-inventory/management tool, not targeted
+  //     retrieval. sub-agent workers don't need to enumerate the entire
+  //     brain; they need to look up specific things (memory_search) or
+  //     read a specific entry (memory_get) or fetch related ones
+  //     (memory_neighbors) or get a decision brief (memory_decide).
+  //   - DeepSeek + GPT-5.5 T0 votes both flagged memory_list as too wide.
+  //
+  // Caller can always override with explicit `tools=...`. memory_list is
+  // in KNOWN_TOOLS so callers wanting it can pass it explicitly.
+  const tools = (toolAllowlist || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide")
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean);
@@ -904,7 +926,7 @@ export default function (pi: ExtensionAPI) {
       model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
-      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch). Mutating tools (bash/edit/write) require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_parallel is always rejected." })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide). Mutating tools (bash/edit/write) require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
     }),
 
@@ -1071,7 +1093,7 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
-          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch)." })),
+          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide)." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 1800000 = 30min)" })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
@@ -1215,7 +1237,7 @@ export default function (pi: ExtensionAPI) {
             res = await runInProcess(
               t.model, t.thinking, prompt,
               signal, t.timeoutMs ?? timeoutMs, ctx.modelRegistry,
-              t.tools || "read,grep,find,ls,web_search,web_fetch",
+              t.tools || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide",
             );
           } catch (err: any) {
             // Outer safety-net catch — reachable for getSharedInfra() init
