@@ -25,6 +25,56 @@ import type { MemorySettings } from "./settings";
 import type { MemoryEntry } from "./types";
 import type { EntryActivityStats } from "../sediment/outcome-collector";
 import { sanitizeForMemory } from "../sediment/sanitizer";
+import { getCurrentAnchor } from "../_shared/causal-anchor";
+
+// ── ADR 0026 §5.1 decision_brief_id schema (R2 NEW-P1-B fix) ───────────────────
+//
+// ADR 0026 §5.1 promises that decision_brief_id has the structured form:
+//   `${session_id}|${turn_id}[.${subturn}]|${monotonic_seq}`
+// so outcome-ledger / dispatch audit / cross-layer jq joins can pull all
+// signals related to one brief without an extra lookup table.
+//
+// Prior to R2 fix, this was generated as `decision-brief-${timestamp}-
+// ${random}` — opaque, no anchor, no join-by-id-shape capability. R2
+// reviewers (Opus + GPT-5.5) both flagged this as an ADR-vs-code drift
+// introduced by the same batch that defined the schema.
+//
+// # Seq counter semantics
+//
+// Multiple `memory_decide` calls in the SAME turn (same session_id, same
+// turn_id, and same subturn-or-none) get monotonically increasing seq
+// 1..N. Different turns (or different sub-agent subturns) start at 1
+// again — the (session_id, turn_id[.subturn]) prefix already disambiguates,
+// so re-using small seqs is fine and produces shorter ids.
+//
+// # Fallback when anchor is unavailable
+//
+// If `getCurrentAnchor()` returns undefined (e.g., memory_decide is called
+// from a smoke test that hasn't bound the lifecycle), the legacy opaque
+// format is used and `_meta.anchor_missing = true` is set so downstream
+// readers can detect the join-key absence.
+
+const _briefSeqCounters = new Map<string, number>();
+
+function buildDecisionBriefId(): { id: string; anchorMissing: boolean } {
+  const anchor = getCurrentAnchor();
+  if (!anchor) {
+    return {
+      id: `decision-brief-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      anchorMissing: true,
+    };
+  }
+  const subturnSuffix = anchor.subturn !== undefined ? `.${anchor.subturn}` : "";
+  const key = `${anchor.session_id}|${anchor.turn_id}${subturnSuffix}`;
+  const next = (_briefSeqCounters.get(key) ?? 0) + 1;
+  _briefSeqCounters.set(key, next);
+  return { id: `${key}|${next}`, anchorMissing: false };
+}
+
+/** Test-only: reset the per-turn seq counter map. Production must not call. */
+export function _resetDecisionBriefSeqForTests(): void {
+  _briefSeqCounters.clear();
+}
 
 // ── Prompt ────────────────────────────────────────────────────────────────
 
@@ -292,7 +342,10 @@ export async function runMemoryDecide(args: {
   const { context, options, constraints, searchResults, activity, activityWindowDays, settings, modelRegistry, signal } = args;
 
   const entrySlugs = searchResults.map((entry) => entry.slug);
-  const decisionBriefId = `decision-brief-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  // ADR 0026 §5.1 schema (R2 NEW-P1-B): build deterministic anchored id.
+  // See buildDecisionBriefId() at module top for shape + fallback semantics.
+  const briefIdResult = buildDecisionBriefId();
+  const decisionBriefId = briefIdResult.id;
 
   if (!searchResults || searchResults.length === 0) {
     return {

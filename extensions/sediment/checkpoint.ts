@@ -308,12 +308,17 @@ function truncateEntryText(entry: unknown, rendered: string, maxChars: number): 
  * on the same windowText, so a sub-agent emitting `MEMORY:` blocks in
  * its output is also automatically blocked at this chokepoint.
  */
-const L2_FANOUT_TOOL_NAMES: ReadonlySet<string> = new Set([
+// Exported so context-packer (classifier input path) can share the SAME
+// allowlist + marker (ADR 0027 PR-B+ R2 NEW-P1-A: classifier was bypassing
+// this mask before because it renders toolResult independently via
+// extractTextContent rather than going through entryToText). Single
+// source-of-truth for what counts as an L2 fanout artifact.
+export const L2_FANOUT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "dispatch_agent",
   "dispatch_parallel",
 ]);
 
-const L2_WITHHELD_MARKER =
+export const L2_WITHHELD_MARKER =
   "[L2 sub-agent output — content withheld from sediment per ADR 0027 PR-B+ R1 P0-α; sub-agent reasoning is not user implicit truth signal]";
 
 export function entryToText(entry: unknown): string {

@@ -9,7 +9,7 @@
  * Target: ~30K tokens (~120K chars), ~50 most recent entries.
  */
 
-import { entryToText } from "./checkpoint";
+import { entryToText, L2_FANOUT_TOOL_NAMES, L2_WITHHELD_MARKER } from "./checkpoint";
 import { getCurrentRuleInjectionNonce, stripCurrentRuleInjection } from "../abrain/rule-injector";
 
 export interface ConversationTurn {
@@ -54,7 +54,20 @@ export function packClassifierWindow(branchEntries: unknown[]): PackedWindow {
     let text: string;
     if (role === "toolResult") {
       const toolName = typeof msg.toolName === "string" ? msg.toolName : "unknown";
-      const content = stripCurrentRules(extractTextContent(msg.content));
+      // ADR 0027 PR-B+ R2 NEW-P1-A fix: classifier input must apply the
+      // SAME L2 fanout withhold that entryToText() applies to the extractor
+      // input. Without this, sub-agent reasoning text ("Based on user's
+      // preference for X, ...") fed back as dispatch_agent / dispatch_parallel
+      // toolResult bypasses P0-α mask and reaches the active-correction
+      // classifier prompt, violating INV-IMPLICIT-GROUND-TRUTH on the
+      // classifier path (separate from but parallel to the P0-α extractor
+      // path). Single source of truth for the allowlist lives in checkpoint.ts.
+      let content: string;
+      if (L2_FANOUT_TOOL_NAMES.has(toolName)) {
+        content = L2_WITHHELD_MARKER;
+      } else {
+        content = stripCurrentRules(extractTextContent(msg.content));
+      }
       text = `[toolResult:${toolName}]\n${truncate(content, maxEntryChars)}`;
     } else if (role === "bashExecution") {
       const cmd = typeof msg.command === "string" ? msg.command : "";
