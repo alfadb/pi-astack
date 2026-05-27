@@ -25,6 +25,7 @@ import { summarizeClassifierHealth, type ClassifierHealthSummary } from "./healt
 import type { LedgerOutcomeRow } from "./outcome-collector";
 import { stagingDir, stagingFileCount } from "./staging-loader";
 import { countMultiviewPending } from "./multiview-staging-io";
+import { scanPerTurnCost, type PerTurnCostSummary } from "./per-turn-cost";
 
 type AggregatorSeverity = "info" | "warning" | "critical";
 type AdvisoryKind =
@@ -79,6 +80,14 @@ export interface AggregatorSummary {
     zero_result_count: number;
   };
   classifier_health?: ClassifierHealthSummary;
+  /** ADR 0027 PR-B+ R1 P1-12: per-turn token-spend rollup across all
+   *  anchor-bearing sidecars. Lets the operator answer "this user's
+   *  brain maintenance per turn burns how many tokens?" + "which turns
+   *  / which operation kind dominates spend?". Cost ($) not computed in
+   *  v1 — only token counts — because $/M-tokens varies by model and
+   *  provider; users can apply current pricing externally. See
+   *  per-turn-cost.ts for the data sources and op-kind taxonomy. */
+  per_turn_cost: PerTurnCostSummary;
   advisories: AggregatorAdvisory[];
 }
 
@@ -481,6 +490,9 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
   const staging = summarizeStaging(now);
   const search = summarizeSearch(options.projectRoot, cutoffMs, Math.max(1, Math.floor(options.searchMetricsRowLimit ?? DEFAULT_SEARCH_METRICS_ROW_LIMIT)));
   const classifierHealth = summarizeClassifierHealth(options.projectRoot);
+  // ADR 0027 PR-B+ R1 P1-12: per-turn token-spend rollup (additive;
+  // independent of other summaries; failure here is silent best-effort).
+  const perTurnCost = scanPerTurnCost({ projectRoot: options.projectRoot, cutoffMs });
 
   const base = {
     ts: formatLocalIsoTimestamp(now),
@@ -492,6 +504,7 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
     staging,
     search,
     classifier_health: classifierHealth,
+    per_turn_cost: perTurnCost,
   };
   const advisories = buildAdvisories(base);
   return {
