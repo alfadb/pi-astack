@@ -39,6 +39,17 @@ import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { markSessionAsSubAgent } from "../_shared/pi-internals";
+import {
+  bindLifecycle as bindCausalAnchorLifecycle,
+  getCurrentAnchor,
+  deriveSubAgentAnchor,
+  formatAnchorPromptBlock,
+  spreadAnchor,
+  type CausalAnchor,
+} from "../_shared/causal-anchor";
+import { dispatchAuditPath } from "../_shared/runtime";
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -88,6 +99,44 @@ const KNOWN_TOOLS = new Set([
   "memory_search", "memory_get", "memory_list", "memory_neighbors", "memory_decide",
   "vision",
 ]);
+
+// ── ADR 0027 C6a: dispatch audit log ────────────────────────────
+
+/** Audit row schema version. Increment when adding non-additive fields. */
+const DISPATCH_AUDIT_VERSION = 1;
+
+/** Append one row to `<projectRoot>/.pi-astack/dispatch/audit.jsonl`.
+ *  Best-effort: any failure (disk full / permission / fs error) is
+ *  swallowed so audit logging never breaks the dispatch path. The
+ *  `console.warn` is rate-limited by Node's once-per-event-loop dedup
+ *  in practice; if audit truly fails for every call there will be a
+ *  modest log spam but no functional impact (per C5 fail-degrade). */
+async function appendDispatchAudit(
+  projectRoot: string,
+  anchor: CausalAnchor | undefined,
+  event: Record<string, unknown>,
+): Promise<void> {
+  try {
+    const auditPath = dispatchAuditPath(projectRoot);
+    await mkdir(dirname(auditPath), { recursive: true });
+    const row = {
+      timestamp: new Date().toISOString(),
+      audit_version: DISPATCH_AUDIT_VERSION,
+      pid: process.pid,
+      ...spreadAnchor(anchor),
+      ...event,
+    };
+    await appendFile(auditPath, `${JSON.stringify(row)}\n`, "utf-8");
+  } catch (err) {
+    // Audit failure must not break dispatch. Log + continue.
+    try {
+      console.warn(
+        `pi-astack/dispatch: audit append failed (${(err as Error)?.message ?? "unknown"}); ` +
+        `dispatch continues, but trace chain for this row is missing.`,
+      );
+    } catch { /* truly best-effort */ }
+  }
+}
 
 // ── Footer status state machine ─────────────────────────────────
 
@@ -778,6 +827,18 @@ export default function (pi: ExtensionAPI) {
   // sub-process (not our concern, but belt-and-suspenders).
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
+  // ADR 0027 C6a: bind dispatch (canonical anchor owner) to lifecycle events
+  // so the main-session (session_id, turn_id) is tracked process-wide and
+  // available to every audit writer via getCurrentAnchor().
+  //
+  // Note: this activate function ALSO runs in the shared sub-agent loader
+  // (PR-B set noExtensions: false on _sharedInfraPromise). That means
+  // bindLifecycle registers handlers on TWO ExtensionRunners: main pi's,
+  // and the shared sub-agent loader's. Both handlers are guarded by
+  // isSubAgentSession(ctx) inside bindLifecycle so sub-agent session_start
+  // doesn't clobber the main-session anchor. See causal-anchor.ts doc.
+  bindCausalAnchorLifecycle(pi);
+
   // Footer status: reset to idle on session/agent boundaries.
   pi.on("session_start", async (_event: unknown, ctx: any) => {
     applyDispatchStatus(ctx, "idle");
@@ -793,9 +854,9 @@ export default function (pi: ExtensionAPI) {
     name: "dispatch_agent",
     label: "Dispatch Agent",
     description:
-      "Spawn a SINGLE sub-agent. For 2+ independent tasks, use dispatch_parallel instead " +
+      "Run a SINGLE sub-agent task in-process. For 2+ independent tasks, use dispatch_parallel instead " +
       "(calling dispatch_agent N times runs them serially, wasting wall-clock time). " +
-      "The sub-agent runs as an in-process AgentSession, capable of multi-turn " +
+      "The sub-agent is an independent in-process AgentSession (not a subprocess), capable of multi-turn " +
       "tool calling (read, grep, find, ls). Mutating tools (bash, edit, write) " +
       "are blocked by default.",
     promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?) — SINGLE task only",
@@ -862,10 +923,23 @@ export default function (pi: ExtensionAPI) {
       const startedAt = Date.now();
       applyDispatchStatus(ctx, "running", { running: 1, failed: 0, success: 0, total: 1 });
 
+      // ADR 0027 C6a: derive sub-agent anchor from main-session parent anchor.
+      // - parentAnchor may be undefined (e.g., dispatch_agent called before any
+      //   user turn — extremely rare but possible in test fixtures). In that
+      //   case subAnchor is also undefined; we still spawn the sub-agent but
+      //   trace chain for this row is broken (audit log records anchor absent).
+      // - The anchor block is prepended to the prompt so the sub-agent LLM
+      //   knows its position in the trace tree (per C6 "L2 must know its anchor").
+      const parentAnchor = getCurrentAnchor();
+      const subAnchor = deriveSubAgentAnchor(parentAnchor, "dispatch_agent");
+      const prompt = subAnchor
+        ? `${formatAnchorPromptBlock(subAnchor)}\n\n${params.prompt}`
+        : params.prompt;
+
       let result: AgentResult;
       try {
         result = await runInProcess(
-          params.model, params.thinking, params.prompt,
+          params.model, params.thinking, prompt,
           signal, timeoutMs, ctx.modelRegistry, params.tools || undefined,
         );
       } catch (err: any) {
@@ -893,6 +967,34 @@ export default function (pi: ExtensionAPI) {
         applyDispatchStatus(ctx, "completed", { running: 0, failed: 0, success: 1, total: 1 }, durationMs);
       }
 
+      // ADR 0027 C6a: dispatch audit row — cross-layer join key for tracing
+      // a user turn through L1 (sediment / abrain) and L2 (this row + any
+      // sub-agent self-traces). Best-effort: appendDispatchAudit swallows IO
+      // errors so audit failures never break the dispatch path.
+      void appendDispatchAudit(
+        ctx.cwd || process.cwd(),
+        subAnchor,
+        {
+          operation: "dispatch_agent",
+          model: params.model,
+          thinking: params.thinking,
+          tools: params.tools ?? null,
+          prompt_chars: typeof params.prompt === "string" ? params.prompt.length : 0,
+          duration_ms: durationMs,
+          result: result.error ? "fail" : "ok",
+          ...(result.failureType ? { failure_type: result.failureType } : {}),
+          ...(result.stopReason ? { stop_reason: result.stopReason } : {}),
+          output_chars: result.output?.length ?? 0,
+          ...(result.usage
+            ? {
+                tokens_in: result.usage.input,
+                tokens_out: result.usage.output,
+                cost: result.usage.cost,
+              }
+            : {}),
+        },
+      );
+
       const text = formatResult("dispatch", params.model, result);
       return {
         content: [{ type: "text" as const, text }],
@@ -901,6 +1003,7 @@ export default function (pi: ExtensionAPI) {
           model: params.model,
           durationMs,
           ok: !result.error,
+          ...(subAnchor ? { anchor: subAnchor } : {}),
           ...(result.error ? { error: result.error, failureType: result.failureType } : {}),
           ...(result.usage ? { usage: result.usage } : {}),
         },
@@ -1006,7 +1109,15 @@ export default function (pi: ExtensionAPI) {
       const dispatchStart = Date.now();
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+      // ADR 0027 C6a: capture parent anchor ONCE before worker fan-out so
+      // all N tasks share the same parent. Each task derives its own
+      // subturn inside the worker loop (deriveSubAgentAnchor maintains
+      // per-(session_id, turn_id) counter, so subturns are 1..N in call order).
+      const parentAnchor = getCurrentAnchor();
+      const projectRoot = ctx.cwd || process.cwd();
+
       const results: AgentResult[] = new Array(tasks.length);
+      const taskAnchors: Array<CausalAnchor | undefined> = new Array(tasks.length);
       let nextIdx = 0;
       let running = 0;
       let success = 0;
@@ -1026,6 +1137,13 @@ export default function (pi: ExtensionAPI) {
 
           running++;
           updateRunning();
+          // ADR 0027 C6a: derive this task's sub-agent anchor. Label
+          // includes task index so audit consumers can correlate to the
+          // tasks[] array position. subturn is auto-incremented inside
+          // deriveSubAgentAnchor and stable across retry loops.
+          const subAnchor = deriveSubAgentAnchor(parentAnchor, `dispatch_parallel[${i}]`);
+          taskAnchors[i] = subAnchor;
+          const taskStart = Date.now();
           let res: AgentResult;
           try {
             const toolCheck = validateTools(t.tools);
@@ -1040,10 +1158,28 @@ export default function (pi: ExtensionAPI) {
               running--;
               failed++;
               updateRunning();
+              // Audit even for rejected tasks — the rejection itself is
+              // part of the trace ("tried task X but tool allowlist refused").
+              void appendDispatchAudit(projectRoot, subAnchor, {
+                operation: "dispatch_parallel.task",
+                task_index: i,
+                task_count: total,
+                model: t.model,
+                thinking: t.thinking,
+                tools: t.tools ?? null,
+                prompt_chars: typeof t.prompt === "string" ? t.prompt.length : 0,
+                duration_ms: 0,
+                result: "fail",
+                failure_type: "tool_rejected",
+                output_chars: 0,
+              });
               continue;
             }
+            const prompt = subAnchor
+              ? `${formatAnchorPromptBlock(subAnchor)}\n\n${t.prompt}`
+              : t.prompt;
             res = await runInProcess(
-              t.model, t.thinking, t.prompt,
+              t.model, t.thinking, prompt,
               signal, t.timeoutMs ?? timeoutMs, ctx.modelRegistry,
               t.tools || "read,grep,find,ls,web_search,web_fetch",
             );
@@ -1065,6 +1201,31 @@ export default function (pi: ExtensionAPI) {
           if (res.error) failed++;
           else success++;
           updateRunning();
+
+          // ADR 0027 C6a: per-task audit row. Cross-layer consumers join
+          // on (session_id, turn_id, subturn) to reconstruct one
+          // dispatch_parallel invocation's full sub-agent fan-out.
+          void appendDispatchAudit(projectRoot, subAnchor, {
+            operation: "dispatch_parallel.task",
+            task_index: i,
+            task_count: total,
+            model: t.model,
+            thinking: t.thinking,
+            tools: t.tools ?? null,
+            prompt_chars: typeof t.prompt === "string" ? t.prompt.length : 0,
+            duration_ms: Date.now() - taskStart,
+            result: res.error ? "fail" : "ok",
+            ...(res.failureType ? { failure_type: res.failureType } : {}),
+            ...(res.stopReason ? { stop_reason: res.stopReason } : {}),
+            output_chars: res.output?.length ?? 0,
+            ...(res.usage
+              ? {
+                  tokens_in: res.usage.input,
+                  tokens_out: res.usage.output,
+                  cost: res.usage.cost,
+                }
+              : {}),
+          });
         }
       };
 

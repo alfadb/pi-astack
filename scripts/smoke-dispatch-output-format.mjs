@@ -125,6 +125,33 @@ fs.writeFileSync(
 };\n`,
 );
 
+// Stub `../_shared/causal-anchor` — ADR 0027 C6a added imports for
+// bindLifecycle / getCurrentAnchor / deriveSubAgentAnchor /
+// formatAnchorPromptBlock / spreadAnchor / CausalAnchor (type).
+// formatResult doesn’t use any of them, but they’re resolved at module
+// load time. No-op stub returns undefined anchor so spread is empty.
+fs.writeFileSync(
+  path.join(sharedDir, "causal-anchor.js"),
+  `module.exports = {
+  bindLifecycle: () => {},
+  getCurrentAnchor: () => undefined,
+  deriveSubAgentAnchor: () => undefined,
+  formatAnchorPromptBlock: () => "",
+  spreadAnchor: () => ({}),
+};\n`,
+);
+
+// Stub `../_shared/runtime` — C6a added dispatchAuditPath import.
+// formatResult doesn’t touch the audit path; stub returns a /tmp path so
+// any accidental write goes to a harmless location.
+fs.writeFileSync(
+  path.join(sharedDir, "runtime.js"),
+  `const path = require("node:path");
+module.exports = {
+  dispatchAuditPath: (root) => path.join(root, ".pi-astack", "dispatch", "audit.jsonl"),
+};\n`,
+);
+
 // Stub `@earendil-works/pi-coding-agent` — v3 in-process migration added
 // real (non-type) imports: createAgentSession, DefaultResourceLoader,
 // SessionManager, SettingsManager, getAgentDir. formatResult doesn't call

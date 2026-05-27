@@ -114,6 +114,19 @@ export function modelFallbackDir(projectRoot: string): string {
 export function modelFallbackCanaryPath(projectRoot: string): string {
   return path.join(modelFallbackDir(projectRoot), "canary.log");
 }
+
+/* -------- dispatch (ADR 0027 C6a) ------------------------------------- */
+
+/** Per-project dispatch audit dir. Holds audit.jsonl which records every
+ *  dispatch_agent / dispatch_parallel invocation with its causal anchor
+ *  (session_id, turn_id, subturn) plus result metadata. Used by ADR 0027
+ *  C6 cross-layer trace reconstruction. */
+export function dispatchDir(projectRoot: string): string {
+  return piAstackModuleDir(projectRoot, "dispatch");
+}
+export function dispatchAuditPath(projectRoot: string): string {
+  return path.join(dispatchDir(projectRoot), "audit.jsonl");
+}
 /** Legacy home-level location, used to be `~/.pi-extensions/model-fallback.log`. */
 export function legacyModelFallbackCanaryPath(home: string): string {
   return path.join(home, ".pi-extensions", "model-fallback.log");
