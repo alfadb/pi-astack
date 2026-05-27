@@ -2959,20 +2959,26 @@ function scheduleMultiviewReplay(args: {
             dispatcherError = e;
           }
 
-          await appendAudit(replayCwd, {
-            operation: "multi_view_replay_brain_write",
-            session_id: replaySessionId,
-            lane: "replay",
-            correlation_id: replayCorrelationId,
-            decision_op: decision.op,
-            decision,
-            candidate_title: candidate.title,
-            candidate_kind: candidate.kind,
-            result_count: results.length,
-            results: results.map(resultSummary),
-            writer_rejected: results.some((r) => r.status === "rejected"),
-            ...(dispatcherError ? { dispatcher_error: dispatcherError instanceof Error ? dispatcherError.message : String(dispatcherError) } : {}),
-          });
+          try {
+            await appendAudit(replayCwd, {
+              operation: "multi_view_replay_brain_write",
+              session_id: replaySessionId,
+              lane: "replay",
+              correlation_id: replayCorrelationId,
+              decision_op: decision.op,
+              decision,
+              candidate_title: candidate.title,
+              candidate_kind: candidate.kind,
+              result_count: results.length,
+              results: results.map(resultSummary),
+              writer_rejected: results.some((r) => r.status === "rejected"),
+              ...(dispatcherError ? { dispatcher_error: dispatcherError instanceof Error ? dispatcherError.message : String(dispatcherError) } : {}),
+            });
+          } catch {
+            // The dispatcher may already have applied a durable brain write.
+            // Keep this diagnostic row best-effort so audit failure cannot
+            // preserve staging and replay an already-applied mutation.
+          }
 
           if (dispatcherError) throw dispatcherError;
           const rejected = results.find((r) => r.status === "rejected");
@@ -3001,28 +3007,38 @@ function scheduleMultiviewReplay(args: {
         terminal_max_retries: replayResult.terminal_max_retries,
         terminal_stale: replayResult.terminal_stale,
         deferred_other_project: replayResult.deferred_other_project,
+        skipped_backoff: replayResult.skipped_backoff,
+        cleanup_pending: replayResult.cleanup_pending,
+        terminal_writer_max_retries: replayResult.terminal_writer_max_retries,
+        staging_delete_failed: replayResult.staging_delete_failed,
         errors: replayResult.errors,
         total_pending: replayResult.totalPending,
         durationMs: replayResult.durationMs,
       });
 
-      // Per-row audit so each entry's full context is traceable.
+      // Per-row audit so each entry's full context is traceable. Keep
+      // individual rows best-effort: staging state has already been
+      // finalized by replayMultiviewPending, so an audit append failure
+      // must not turn the lane into a false replay failure.
       for (const row of replayResult.auditRows) {
-        await appendAudit(replayCwd, {
-          operation: row.outcome === "error" ? "multi_view_replay_entry_error" : "multi_view_replay_entry",
-          session_id: replaySessionId,
-          lane: "replay",
-          slug: row.slug,
-          prior_state: row.prior_state,
-          prior_attempts: row.prior_attempts,
-          age_days: row.age_days,
-          outcome: row.outcome,
-          detail: row.detail,
-          new_state: row.new_state,
-          new_attempts: row.new_attempts,
-          new_decision: row.new_decision,
-          durationMs: row.durationMs,
-        });
+        try {
+          await appendAudit(replayCwd, {
+            operation: row.outcome === "error" ? "multi_view_replay_entry_error" : "multi_view_replay_entry",
+            session_id: replaySessionId,
+            lane: "replay",
+            slug: row.slug,
+            prior_state: row.prior_state,
+            prior_attempts: row.prior_attempts,
+            age_days: row.age_days,
+            outcome: row.outcome,
+            detail: row.detail,
+            new_state: row.new_state,
+            new_attempts: row.new_attempts,
+            new_writer_attempts: row.new_writer_attempts,
+            new_decision: row.new_decision,
+            durationMs: row.durationMs,
+          });
+        } catch { /* best-effort per-entry audit */ }
       }
     } catch (e: unknown) {
       // Any uncaught error in the replay framework itself (not

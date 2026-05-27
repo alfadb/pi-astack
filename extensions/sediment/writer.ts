@@ -916,6 +916,7 @@ export async function deleteProjectEntry(
   let lock: LockHandle | undefined;
   try {
     lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
+    const originalRaw = await fs.readFile(target, "utf-8");
     await fs.unlink(target);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
     const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "delete", gitCommitProjectId) : null;
@@ -928,6 +929,18 @@ export async function deleteProjectEntry(
         const rel = path.relative(abrainHome, target);
         execFileSync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
       } catch { /* best-effort */ }
+      try {
+        await atomicWrite(target, originalRaw);
+      } catch { /* best-effort rollback */ }
+      const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+        operation: "reject",
+        reason: "git_commit_failed",
+        target: `${targetPrefix}:${slug}`,
+        path: path.relative(auditRoot, target),
+        delete_mode: "hard",
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", gitCommit: git, auditPath, deleteMode: "hard", ...resultCtx };
     }
     const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "delete",
@@ -998,7 +1011,7 @@ export async function updateProjectEntry(
   // Helper: prepare merged markdown + lint, returning either ok result or
   // a rejected response. Used by both dry-run preview and locked RMW path.
   async function prepareMergedMarkdown(): Promise<
-    | { ok: true; target: string; merged: { markdown: string; sanitizedReplacements: string[] }; lintErrors: number; lintWarnings: number }
+    | { ok: true; target: string; originalRaw: string; merged: { markdown: string; sanitizedReplacements: string[] }; lintErrors: number; lintWarnings: number }
     | { ok: false; response: WriteProjectEntryResult }
   > {
     const target = await findProjectEntryFile(entryRoot, slug);
@@ -1050,7 +1063,7 @@ export async function updateProjectEntry(
       }));
       return { ok: false, response: { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath, ...resultCtx } };
     }
-    return { ok: true, target, merged, lintErrors, lintWarnings };
+    return { ok: true, target, originalRaw: raw, merged, lintErrors, lintWarnings };
   }
 
   // Dry-run path: lock-outside preview. Stale reads are acceptable here
@@ -1074,7 +1087,6 @@ export async function updateProjectEntry(
   let target = "";
   let lintErrors = 0;
   let lintWarnings = 0;
-  let mergedForCatch: { markdown: string; sanitizedReplacements: string[] } | undefined;
   try {
     lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
     // Re-do the find+read+merge+lint cycle INSIDE the lock to observe any
@@ -1084,7 +1096,6 @@ export async function updateProjectEntry(
     target = prepared.target;
     lintErrors = prepared.lintErrors;
     lintWarnings = prepared.lintWarnings;
-    mergedForCatch = prepared.merged;
     const merged = prepared.merged;
     await atomicWrite(target, merged.markdown);
     const operation = opts.auditOperation || "update";
@@ -1099,6 +1110,18 @@ export async function updateProjectEntry(
         const rel = path.relative(abrainHome, target);
         execFileSync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
       } catch { /* best-effort */ }
+      try {
+        await atomicWrite(target, prepared.originalRaw);
+      } catch { /* best-effort rollback */ }
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: "git_commit_failed",
+        target: `${targetPrefix}:${slug}`,
+        path: path.relative(auditRoot, target),
+        duration_ms: Date.now() - started,
+        ...(opts.auditExtras ?? {}),
+      }));
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
     }
     const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
       operation,

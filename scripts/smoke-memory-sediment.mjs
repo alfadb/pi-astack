@@ -549,15 +549,12 @@ async function main() {
           originating_device: "smoke",
           multiview_state: "reviewer_unavailable",
           retry_attempts: 0,
-          max_retry_attempts: 5,
-          next_retry_not_before_iso: new Date().toISOString(),
-          terminal_after_iso: new Date(Date.now() + 86_400_000).toISOString(),
           trigger_reason: "create_high_confidence",
           proposer_decision: { op: "create", rationale: "smoke" },
           proposer_raw_text: "smoke",
           candidate_snapshot: { title: "Smoke", kind: "fact", status: "active", confidence: 8, compiledTruth: "Smoke candidate." },
+          correction_signal: null,
           neighbor_slugs: [],
-          last_error: "smoke",
         });
         assert(countMultiviewPending() === 1, `multiview pending count should use ABRAIN_ROOT dir`);
         const pending = loadMultiviewPending();
@@ -576,16 +573,12 @@ async function main() {
           originating_device: "smoke",
           multiview_state: "reviewer_unavailable",
           retry_attempts: 0,
-          max_retry_attempts: 5,
-          next_retry_not_before_iso: new Date().toISOString(),
-          terminal_after_iso: new Date(Date.now() + 86_400_000).toISOString(),
           trigger_reason: "create_high_confidence",
           proposer_decision: { op: "create", rationale: "smoke" },
           proposer_raw_text: "smoke",
           candidate_snapshot: { title: "Smoke Origin", kind: "fact", status: "active", confidence: 8, compiledTruth: "Smoke origin candidate." },
           correction_signal: null,
           neighbor_slugs: [],
-          last_error: "smoke",
         });
         const originEntry = loadMultiviewPending().entries.find((entry) => entry.slug === "multiview-pending-origin-smoke");
         assert(originEntry && originEntry.origin_project_id === "origin-project" && originEntry.origin_project_root === "/tmp/origin-project-root", `multiview pending origin fields must round-trip: ${JSON.stringify(originEntry)}`);
@@ -2893,7 +2886,35 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         } catch (e) {
           gitFailThrew = /git_commit_failed/.test(String(e && e.message || e));
         }
-        assert(gitFailThrew, `update git failure must throw so replay keeps staging`);
+        assert(!gitFailThrew, `update git failure should now reject without throwing from dispatcher`);
+        const gitFailAfterUpdate = fs.readFileSync(gitFailExisting.path, "utf-8");
+        assert(/^confidence: 8$/m.test(gitFailAfterUpdate), `update git failure should roll back file content to original confidence:\n${gitFailAfterUpdate}`);
+
+        const gitFailDeleteSeed = await writeProjectEntry({
+          title: "Replay Dispatcher Git Fail Delete",
+          kind: "fact",
+          status: "active",
+          confidence: 7,
+          compiledTruth: "# Replay Dispatcher Git Fail Delete\n\nSeed without git commit so hard delete rollback can be exercised.",
+        }, {
+          projectRoot: aRoot,
+          abrainHome: gitFailTarget.abrainHome,
+          projectId: gitFailTarget.projectId,
+          settings: { ...a2Settings, gitCommit: false },
+          dryRun: false,
+        });
+        assert(gitFailDeleteSeed.status === "created" && fs.existsSync(gitFailDeleteSeed.path), `git fail delete seed should create: ${JSON.stringify(gitFailDeleteSeed)}`);
+        const gitFailDelete = await deleteProjectEntry(gitFailDeleteSeed.slug, {
+          projectRoot: aRoot,
+          abrainHome: gitFailTarget.abrainHome,
+          projectId: gitFailTarget.projectId,
+          settings: gitFailSettings,
+          dryRun: false,
+          mode: "hard",
+          reason: "git fail delete smoke",
+          sessionId: "smoke-replay",
+        });
+        assert(gitFailDelete.status === "rejected" && gitFailDelete.reason === "git_commit_failed" && fs.existsSync(gitFailDeleteSeed.path), `hard delete git failure should reject and restore file: ${JSON.stringify(gitFailDelete)}`);
 
         // Full replay loop regression: approved replay writes brain and
         // deletes staging only after writer success; writer throw keeps
@@ -3000,8 +3021,108 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
             writeApprovedToBrain: async () => { throw new Error("intentional writer failure"); },
           });
           assert(loopThrow.errors === 1 && loopThrow.succeeded === 0, `writer throw should be replay error: ${JSON.stringify(loopThrow)}`);
-          assert(loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-throw" && entry.retry_attempts === 0), `writer throw should keep original staging without consuming retry budget`);
-          assert(deleteMultiviewPending("multiview-pending-loop-throw") === true, `throw smoke cleanup failed`);
+          let throwEntry = loadMultiviewPending().entries.find((entry) => entry.slug === "multiview-pending-loop-throw");
+          assert(throwEntry && throwEntry.retry_attempts === 0 && throwEntry.writer_retry_attempts === 1 && /intentional writer failure/.test(throwEntry.last_writer_error || "") && !!throwEntry.next_retry_not_before_iso, `writer throw should keep original staging and record writer backoff without consuming reviewer budget: ${JSON.stringify(throwEntry)}`);
+          const loopBackoff = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => { throw new Error("backoff should skip before reviewer load"); },
+            writeApprovedToBrain: async () => { throw new Error("backoff should skip before writer"); },
+          });
+          assert(loopBackoff.skipped_backoff === 1 && loopBackoff.attempted === 0 && loopBackoff.errors === 0, `writer backoff should skip without LLM/write or budget: ${JSON.stringify(loopBackoff)}`);
+
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-owned-behind-backoff",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date(Date.now() + 1_000).toISOString(),
+            updated: new Date().toISOString(),
+            origin_project_id: aTarget.projectId,
+            origin_project_root: aRoot,
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "owned behind backoff proposer" },
+            proposer_raw_text: "owned behind backoff raw",
+            candidate_snapshot: { title: "Replay Loop Owned Behind Backoff", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Loop Owned Behind Backoff\n\nReady owned entry must not be starved by older backoff entries." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          globalThis.__A2_INVOCATIONS__ = 0;
+          globalThis.__A2_RESPONSES__ = [
+            JSON.stringify({ op: "create", scope: "project", confidence: 9, reasoning: "pass1 confirm create" }),
+            JSON.stringify({ verdict: "confirm_proposer", rationale: "pass2 confirms proposer" }),
+          ];
+          let ownedBehindBackoffWrote = false;
+          const ownedBehindBackoff = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { ownedBehindBackoffWrote = true; },
+          });
+          assert(ownedBehindBackoff.skipped_backoff === 1 && ownedBehindBackoff.succeeded === 1 && ownedBehindBackoff.attempted === 1 && ownedBehindBackoffWrote === true, `ready entry should process behind older backoff entry: ${JSON.stringify(ownedBehindBackoff)}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-owned-behind-backoff"), `owned behind backoff should delete after success`);
+
+          throwEntry = loadMultiviewPending().entries.find((entry) => entry.slug === "multiview-pending-loop-throw");
+          throwEntry.next_retry_not_before_iso = new Date(Date.now() - 1_000).toISOString();
+          writeMultiviewPending(throwEntry);
+          let writerOnlyLoadedNeighbors = false;
+          let writerOnlyWrote = false;
+          const writerOnlyRetry = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => { writerOnlyLoadedNeighbors = true; throw new Error("approved writer-only retry should skip reviewer load"); },
+            writeApprovedToBrain: async (decision) => { writerOnlyWrote = decision.op === "create"; },
+          });
+          assert(writerOnlyRetry.succeeded === 1 && writerOnlyWrote === true && writerOnlyLoadedNeighbors === false, `approved_decision should retry writer only without re-review: ${JSON.stringify(writerOnlyRetry)} loaded=${writerOnlyLoadedNeighbors} wrote=${writerOnlyWrote}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-throw"), `writer-only retry success should delete staging`);
+
+          globalThis.__A2_INVOCATIONS__ = 0;
+          globalThis.__A2_RESPONSES__ = [
+            JSON.stringify({ op: "create", scope: "project", confidence: 9, reasoning: "pass1 wants create but pass2 will fail" }),
+            "not json pass2",
+          ];
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-restaged",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            origin_project_id: aTarget.projectId,
+            origin_project_root: aRoot,
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "loop restaged proposer" },
+            proposer_raw_text: "loop restaged proposer raw",
+            candidate_snapshot: { title: "Replay Loop Restaged Smoke", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Loop Restaged Smoke\n\nReplay reviewer fails again so original staging attempt count should advance." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          const beforeRestagedSlugs = new Set(loadMultiviewPending().entries.map((entry) => entry.slug));
+          const loopRestaged = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { throw new Error("re_staged path should not write"); },
+          });
+          assert(loopRestaged.re_staged === 1 && loopRestaged.errors === 0 && loopRestaged.auditRows.some((row) => row.slug === "multiview-pending-loop-restaged" && row.outcome === "re_staged" && row.new_attempts === 1), `re_staged path should audit attempt bump: ${JSON.stringify(loopRestaged)}`);
+          const afterRestagedEntries = loadMultiviewPending().entries;
+          const restagedOriginal = afterRestagedEntries.find((entry) => entry.slug === "multiview-pending-loop-restaged");
+          assert(restagedOriginal && restagedOriginal.retry_attempts === 1, `re_staged path should bump original attempts: ${JSON.stringify(restagedOriginal)}`);
+          const newRestagedSlugs = afterRestagedEntries.map((entry) => entry.slug).filter((slug) => !beforeRestagedSlugs.has(slug));
+          assert(newRestagedSlugs.length === 0, `re_staged path should delete duplicate staging: ${JSON.stringify(newRestagedSlugs)}`);
+          assert(deleteMultiviewPending("multiview-pending-loop-restaged") === true, `re_staged smoke cleanup failed`);
 
           writeMultiviewPending({
             slug: "multiview-pending-loop-other-project",

@@ -66,7 +66,10 @@ import {
 import {
   deleteMultiviewPending,
   loadMultiviewPending,
+  markMultiviewPendingApprovedDecision,
+  markMultiviewPendingBrainWriteCompleted,
   updateMultiviewPendingAttempts,
+  updateMultiviewPendingWriterFailure,
 } from "./multiview-staging-io";
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -77,6 +80,9 @@ export type ReplayOutcome =
   | "terminal_max_retries"  // retry_attempts ≥ retryCapForState → deleted
   | "terminal_stale"        // age ≥ STALE_DAYS_MULTIVIEW_PENDING → deleted
   | "deferred_other_project"// current binding does not own this entry
+  | "skipped_backoff"       // next_retry_not_before_iso is still in future
+  | "cleanup_pending"       // brain write already happened; retry staging delete
+  | "terminal_writer_max_retries" // writer_retry_attempts exceeded cap
   | "error";                // unexpected exception in replay framework
 
 export interface ReplayAuditRow {
@@ -95,6 +101,8 @@ export interface ReplayAuditRow {
   new_state?: MultiviewPendingState;
   /** When outcome=re_staged, the new retry_attempts count. */
   new_attempts?: number;
+  /** When writer persistence retry accounting changed. */
+  new_writer_attempts?: number;
   durationMs: number;
 }
 
@@ -107,6 +115,10 @@ export interface ReplayBatchResult {
   terminal_max_retries: number;
   terminal_stale: number;
   deferred_other_project: number;
+  skipped_backoff: number;
+  cleanup_pending: number;
+  terminal_writer_max_retries: number;
+  staging_delete_failed: number;
   errors: number;
   /** Total entries on disk before this batch ran (for monitoring). */
   totalPending: number;
@@ -254,6 +266,85 @@ function originMismatchDetail(entry: MultiviewPendingEntry, deps: ReplayDeps): s
   return `origin binding mismatch; entry captured for project=${entry.origin_project_id ?? "unknown"} root=${entry.origin_project_root ?? "unknown"}, current project=${deps.currentProjectId ?? "unknown"} root=${deps.currentProjectRoot ?? "unknown"}. Staging kept for its owning project.`;
 }
 
+const MAX_WRITER_RETRY_ATTEMPTS = 24;
+
+type MultiviewReplayGlobal = typeof globalThis & {
+  __sediment_multiviewInMemoryWriterBackoff?: Map<string, string>;
+  __sediment_multiviewInMemoryBrainCompleted?: Map<string, string>;
+};
+
+const replayGlobal = globalThis as MultiviewReplayGlobal;
+const inMemoryWriterBackoff = replayGlobal.__sediment_multiviewInMemoryWriterBackoff ??= new Map<string, string>();
+const inMemoryBrainCompleted = replayGlobal.__sediment_multiviewInMemoryBrainCompleted ??= new Map<string, string>();
+
+function inMemoryKey(entry: MultiviewPendingEntry): string {
+  return `${entry.slug}:${entry.created}`;
+}
+
+function computeWriterBackoffIso(writerAttempts: number, nowMs = Date.now()): string {
+  // Persistence retries should not hot-loop on every agent_end. Keep the
+  // schedule short enough for dogfooding but exponential enough to avoid
+  // burning reviewer calls / audit rows while git or disk is wedged.
+  const minutes = Math.min(60, Math.max(1, 2 ** Math.max(0, writerAttempts - 1)));
+  return new Date(nowMs + minutes * 60_000).toISOString();
+}
+
+function backoffRemainingMs(entry: MultiviewPendingEntry, nowMs = Date.now()): number {
+  const iso = entry.next_retry_not_before_iso ?? inMemoryWriterBackoff.get(inMemoryKey(entry));
+  if (!iso) return 0;
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return 0;
+  return Math.max(0, ts - nowMs);
+}
+
+function isBackoffBlocked(entry: MultiviewPendingEntry): boolean {
+  // Backoff should not consume the per-agent_end replay budget. Do not
+  // block entries that need cleanup or writer-terminal collection.
+  if (entry.brain_write_completed_at_iso) return false;
+  if ((entry.writer_retry_attempts ?? 0) >= MAX_WRITER_RETRY_ATTEMPTS) return false;
+  return backoffRemainingMs(entry) > 0;
+}
+
+function deleteOriginalOrAudit(
+  entry: MultiviewPendingEntry,
+  audit: ReplayAuditRow,
+  result: ReplayBatchResult,
+  context: string,
+  entryStart: number,
+): boolean {
+  if (deleteMultiviewPending(entry.slug)) {
+    inMemoryWriterBackoff.delete(inMemoryKey(entry));
+    inMemoryBrainCompleted.delete(inMemoryKey(entry));
+    return true;
+  }
+  audit.outcome = "error";
+  audit.detail = `${context}; staging_delete_failed for slug=${entry.slug}. Staging may replay again; investigate fs permissions / concurrent process.`;
+  audit.durationMs = Date.now() - entryStart;
+  result.staging_delete_failed++;
+  result.errors++;
+  result.auditRows.push(audit);
+  return false;
+}
+
+function deleteDuplicateOrAudit(
+  entry: MultiviewPendingEntry,
+  slug: string,
+  audit: ReplayAuditRow,
+  result: ReplayBatchResult,
+  context: string,
+  entryStart: number,
+): boolean {
+  if (slug === entry.slug) return true;
+  if (deleteMultiviewPending(slug)) return true;
+  audit.outcome = "error";
+  audit.detail = `${context}; duplicate_staging_delete_failed for slug=${slug}. Original staging kept to avoid losing retry identity.`;
+  audit.durationMs = Date.now() - entryStart;
+  result.staging_delete_failed++;
+  result.errors++;
+  result.auditRows.push(audit);
+  return false;
+}
+
 // ── Main entry ──────────────────────────────────────────────────────────
 
 /**
@@ -275,6 +366,10 @@ export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBa
     terminal_max_retries: 0,
     terminal_stale: 0,
     deferred_other_project: 0,
+    skipped_backoff: 0,
+    cleanup_pending: 0,
+    terminal_writer_max_retries: 0,
+    staging_delete_failed: 0,
     errors: 0,
     totalPending: loaded.totalFound,
     auditRows: [],
@@ -300,7 +395,10 @@ export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBa
     ownedEntries.push(entry);
   }
 
-  const toReplay = ownedEntries.slice(0, MAX_REPLAY_PER_AGENT_END);
+  const readyEntries = ownedEntries.filter((entry) => !isBackoffBlocked(entry));
+  const backoffEntries = ownedEntries.length - readyEntries.length;
+  result.skipped_backoff += backoffEntries;
+  const toReplay = readyEntries.slice(0, MAX_REPLAY_PER_AGENT_END);
 
   for (const entry of toReplay) {
     if (deps.signal?.aborted) break;  // foreground turn cancellation
@@ -340,11 +438,64 @@ async function processOneEntry(
     return;
   }
 
-  // ── Terminal checks (cheap, no LLM cost) ──
+  // ── Writer-pending checks (cheap, no LLM cost) ──
+  // These precede reviewer retry/stale terminal checks: once A' has
+  // already approved a writer-actionable decision, replay must not let
+  // later reviewer-budget accounting turn that approval into a drop.
+
+  const inMemoryCompletedAt = inMemoryBrainCompleted.get(inMemoryKey(entry));
+  if (entry.brain_write_completed_at_iso || inMemoryCompletedAt) {
+    if (deleteMultiviewPending(entry.slug)) {
+      inMemoryWriterBackoff.delete(inMemoryKey(entry));
+      inMemoryBrainCompleted.delete(inMemoryKey(entry));
+      audit.outcome = "cleanup_pending";
+      audit.detail = `brain write already completed at ${entry.brain_write_completed_at_iso ?? inMemoryCompletedAt}; staging cleanup retried and succeeded`;
+      audit.durationMs = Date.now() - entryStart;
+      result.cleanup_pending++;
+      result.auditRows.push(audit);
+    } else {
+      audit.outcome = "error";
+      audit.detail = `brain write already completed at ${entry.brain_write_completed_at_iso ?? inMemoryCompletedAt}; staging cleanup retry failed for slug=${entry.slug}`;
+      audit.durationMs = Date.now() - entryStart;
+      result.cleanup_pending++;
+      result.staging_delete_failed++;
+      result.errors++;
+      result.auditRows.push(audit);
+    }
+    return;
+  }
+
+  if (entry.approved_decision && entry.approved_decision.op === "skip") {
+    if (!deleteOriginalOrAudit(entry, audit, result, `approved skip already recorded at ${entry.approved_at_iso ?? "unknown"}; staging delete failed`, entryStart)) return;
+    audit.outcome = "succeeded";
+    audit.new_decision = entry.approved_decision;
+    audit.detail = `approved skip already recorded at ${entry.approved_at_iso ?? "unknown"}; staging removed without re-review`;
+    audit.durationMs = Date.now() - entryStart;
+    result.succeeded++;
+    result.auditRows.push(audit);
+    return;
+  }
+
+  if (entry.approved_decision && entry.approved_decision.op !== "skip") {
+    if ((entry.writer_retry_attempts ?? 0) >= MAX_WRITER_RETRY_ATTEMPTS) {
+      if (!deleteOriginalOrAudit(entry, audit, result, `writer_retry_attempts=${entry.writer_retry_attempts ?? 0} >= cap=${MAX_WRITER_RETRY_ATTEMPTS}; terminal writer max-retries wanted to delete entry`, entryStart)) return;
+      audit.outcome = "terminal_writer_max_retries";
+      audit.detail = `writer_retry_attempts=${entry.writer_retry_attempts ?? 0} >= cap=${MAX_WRITER_RETRY_ATTEMPTS}; entry deleted after persistent writer failures (candidate effectively dropped)`;
+      audit.durationMs = Date.now() - entryStart;
+      result.terminal_writer_max_retries++;
+      result.auditRows.push(audit);
+      return;
+    }
+
+    await retryApprovedWriterOnly(entry, entry.approved_decision, audit, deps, result, entryStart);
+    return;
+  }
+
+  // ── Terminal checks for reviewer-pending entries (cheap, no LLM cost) ──
 
   const cap = retryCapForState(entry.multiview_state);
   if (entry.retry_attempts >= cap) {
-    deleteMultiviewPending(entry.slug);
+    if (!deleteOriginalOrAudit(entry, audit, result, `retry_attempts=${entry.retry_attempts} >= cap=${cap} for state=${entry.multiview_state}; terminal max-retries wanted to delete entry`, entryStart)) return;
     audit.outcome = "terminal_max_retries";
     audit.detail = `retry_attempts=${entry.retry_attempts} >= cap=${cap} for state=${entry.multiview_state}; entry deleted (candidate effectively dropped)`;
     audit.durationMs = Date.now() - entryStart;
@@ -355,7 +506,7 @@ async function processOneEntry(
 
   const ageDays = audit.age_days;
   if (ageDays >= STALE_DAYS_MULTIVIEW_PENDING) {
-    deleteMultiviewPending(entry.slug);
+    if (!deleteOriginalOrAudit(entry, audit, result, `age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; terminal stale wanted to delete entry`, entryStart)) return;
     audit.outcome = "terminal_stale";
     audit.detail = `age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry deleted (candidate effectively dropped)`;
     audit.durationMs = Date.now() - entryStart;
@@ -417,7 +568,7 @@ async function processOneEntry(
       // runMultiView wrote a new staging file we don't want — it duplicates
       // the candidate. Remove it so the next agent_end sees only the
       // ORIGINAL entry (still at retry_attempts=N, ready for a fresh try).
-      deleteMultiviewPending(mvResult.staged.slug);
+      if (!deleteDuplicateOrAudit(entry, mvResult.staged.slug, audit, result, "replay aborted by signal and duplicate staging cleanup failed", entryStart)) return;
     }
     audit.outcome = "error";
     audit.detail = `replay aborted by signal mid-flight; retry_attempts NOT incremented (cancellation is not reviewer instability)${mvResult.staged ? `; new staging ${mvResult.staged.slug} removed` : ""}`;
@@ -441,7 +592,7 @@ async function processOneEntry(
   // disappeared (the same trigger criteria that demanded review).
   // Safer to drop the candidate and audit than to silently write.
   if (!mvResult.triggered) {
-    deleteMultiviewPending(entry.slug);
+    if (!deleteOriginalOrAudit(entry, audit, result, `replay no longer triggers multi-view (A' guard); original trigger_reason=${entry.trigger_reason}; wanted to drop staging`, entryStart)) return;
     audit.outcome = "succeeded";
     audit.new_decision = { op: "skip", reason: "multiview_trigger_disappeared_on_replay", rationale: `Replay's shouldTriggerMultiView returned false (likely neighbor/candidate state changed since original staging). Candidate dropped without brain write to preserve A' constraint.` };
     audit.detail = `replay no longer triggers multi-view (A' guard); original trigger_reason=${entry.trigger_reason}; staging removed, no brain write.${vanishedDetail()}`;
@@ -469,7 +620,7 @@ async function processOneEntry(
     // isoTs differentiator changed). Delete that new file and
     // increment retry_attempts on the ORIGINAL slug — we keep the
     // original slug as the persistent identity for audit trail.
-    deleteMultiviewPending(mvResult.staged.slug);
+    if (!deleteDuplicateOrAudit(entry, mvResult.staged.slug, audit, result, `replay still staged (new state=${mvResult.staged.state}) and duplicate cleanup failed`, entryStart)) return;
 
     const newAttempts = entry.retry_attempts + 1;
     const updated = updateMultiviewPendingAttempts(
@@ -511,7 +662,7 @@ async function processOneEntry(
     // — all paths that would have been skip the first time). No brain
     // write needed; remove the staging entry only after the terminal
     // skip decision is known.
-    deleteMultiviewPending(entry.slug);
+    if (!deleteOriginalOrAudit(entry, audit, result, `replay decided op=skip(${finalDecision.reason ?? "no reason"}) but staging delete failed`, entryStart)) return;
     audit.outcome = "succeeded";
     audit.new_decision = finalDecision;
     audit.detail = `replay decided op=skip(${finalDecision.reason ?? "no reason"}); staging removed, no brain write.${vanishedDetail()}`;
@@ -526,13 +677,60 @@ async function processOneEntry(
   // Other metadata fields (triggerPhrases / sessionId / timelineNote)
   // are NOT in CandidateSnapshot — schema decision per R3 fix-up,
   // see draftFromSnapshot JSDoc above.
+  await retryApprovedWriterOnly(entry, finalDecision, audit, deps, result, entryStart, vanishedDetail());
+}
+
+async function retryApprovedWriterOnly(
+  entry: MultiviewPendingEntry,
+  finalDecision: CuratorDecision,
+  audit: ReplayAuditRow,
+  deps: ReplayDeps,
+  result: ReplayBatchResult,
+  entryStart: number,
+  extraDetail = "",
+): Promise<void> {
   try {
     const draft = draftFromSnapshot(entry, finalDecision);
-    await deps.writeApprovedToBrain(finalDecision, draft);
-    deleteMultiviewPending(entry.slug);
-    audit.outcome = "succeeded";
     audit.new_decision = finalDecision;
-    audit.detail = `replay decided op=${finalDecision.op}; brain write executed; staging removed. metadata_lost: triggerPhrases${draft.derivesFrom ? "" : ", derivesFrom"}, sessionId, timelineNote${vanishedDetail()}`;
+    const approvedAtIso = entry.approved_at_iso ?? new Date().toISOString();
+    if (!entry.approved_decision
+        && !markMultiviewPendingApprovedDecision(entry.slug, finalDecision, approvedAtIso)) {
+      const nextRetry = computeWriterBackoffIso((entry.writer_retry_attempts ?? 0) + 1);
+      inMemoryWriterBackoff.set(inMemoryKey(entry), nextRetry);
+      audit.outcome = "error";
+      audit.detail = `approved op=${finalDecision.op} but failed to persist approved_decision before writer call; staging kept for safe re-review after in-memory backoff until ${nextRetry}.${extraDetail}`;
+      audit.durationMs = Date.now() - entryStart;
+      result.errors++;
+      result.auditRows.push(audit);
+      return;
+    }
+
+    await deps.writeApprovedToBrain(finalDecision, draft);
+    const completedAtIso = new Date().toISOString();
+    if (!markMultiviewPendingBrainWriteCompleted(entry.slug, completedAtIso, finalDecision)) {
+      inMemoryBrainCompleted.set(inMemoryKey(entry), completedAtIso);
+      audit.outcome = "error";
+      audit.detail = `replay approved op=${finalDecision.op}; brain write executed but failed to persist brain_write_completed_at_iso before cleanup. In-memory cleanup marker set for this process; inspect staging fs immediately.${extraDetail}`;
+      audit.durationMs = Date.now() - entryStart;
+      result.staging_delete_failed++;
+      result.errors++;
+      result.auditRows.push(audit);
+      return;
+    }
+
+    if (!deleteMultiviewPending(entry.slug)) {
+      audit.outcome = "error";
+      audit.detail = `replay approved op=${finalDecision.op}; brain write executed but staging_delete_failed for slug=${entry.slug}. Marked brain_write_completed_at_iso=${completedAtIso}; future replay will retry cleanup only.${extraDetail}`;
+      audit.durationMs = Date.now() - entryStart;
+      result.staging_delete_failed++;
+      result.errors++;
+      result.auditRows.push(audit);
+      return;
+    }
+    inMemoryWriterBackoff.delete(inMemoryKey(entry));
+    inMemoryBrainCompleted.delete(inMemoryKey(entry));
+    audit.outcome = "succeeded";
+    audit.detail = `${entry.approved_decision ? "writer-only retry used prior approved" : "replay decided"} op=${finalDecision.op}; brain write executed; staging removed. metadata_lost: triggerPhrases${draft.derivesFrom ? "" : ", derivesFrom"}, sessionId, timelineNote${extraDetail}`;
     audit.durationMs = Date.now() - entryStart;
     result.succeeded++;
     result.auditRows.push(audit);
@@ -542,9 +740,22 @@ async function processOneEntry(
     // turning a transient writer rejection into silent approval loss.
     // A' was respected (reviewer agreed); the remaining risk is
     // persistence liveness, so preserving the candidate is preferable.
+    const message = e instanceof Error ? e.message : String(e);
+    const newWriterAttempts = (entry.writer_retry_attempts ?? 0) + 1;
+    const nowIso = new Date().toISOString();
+    const nextRetry = computeWriterBackoffIso(newWriterAttempts);
+    const updated = updateMultiviewPendingWriterFailure(
+      entry.slug,
+      newWriterAttempts,
+      message,
+      nextRetry,
+      nowIso,
+      finalDecision,
+    );
     audit.outcome = "error";
     audit.new_decision = finalDecision;
-    audit.detail = `replay decided op=${finalDecision.op} but writeApprovedToBrain threw: ${e instanceof Error ? e.message : String(e)}. Staging kept for retry; investigate writer logs if this persists.${vanishedDetail()}`;
+    audit.new_writer_attempts = updated ? newWriterAttempts : entry.writer_retry_attempts;
+    audit.detail = `approved op=${finalDecision.op} write failed: ${message}. Staging kept for writer-only retry; writer_attempts ${(entry.writer_retry_attempts ?? 0)}→${updated ? newWriterAttempts : "update_failed"}; next_retry_not_before=${updated ? nextRetry : "unchanged"}.${extraDetail}`;
     audit.durationMs = Date.now() - entryStart;
     result.errors++;
     result.auditRows.push(audit);

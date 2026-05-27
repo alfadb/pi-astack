@@ -276,12 +276,46 @@ export interface MultiviewPendingEntry {
   // ── Backlog control ──
 
   /**
-   * Number of replay attempts completed (not including the original
-   * trigger). Starts at 0 when staged. Design review D4.4A: terminal
-   * threshold = 5 attempts. Each agent_end increments at most once
-   * per entry.
+   * Number of reviewer-replay attempts completed (not including the
+   * original trigger). Starts at 0 when staged. Design review D4.4A:
+   * terminal threshold = 5 attempts. Each agent_end increments at most
+   * once per entry when the reviewer path still cannot reach a terminal
+   * verdict.
    */
   retry_attempts: number;
+
+  /**
+   * Reviewer-approved final decision waiting for persistence retry. Once
+   * set, replay MUST NOT re-run multi-view; it retries only the approved
+   * writer action so a transient git/disk failure cannot turn a prior A'
+   * approval into a later skip/re-stage/no-trigger drop.
+   */
+  approved_decision?: CuratorDecision;
+  approved_at_iso?: string;
+
+  /**
+   * Set after the approved writer action returned successfully but staging
+   * cleanup failed. Replay should retry only cleanup for such entries, not
+   * repeat the brain write.
+   */
+  brain_write_completed_at_iso?: string;
+
+  /**
+   * Number of persistence-layer retries after the reviewer approved a
+   * writer-actionable decision but the brain write / git commit / staging
+   * cleanup failed. Kept separate from retry_attempts so reviewer
+   * instability and writer instability have independent budgets.
+   */
+  writer_retry_attempts?: number;
+
+  /** Last persistence-layer failure, clipped by the IO helper. */
+  last_writer_error?: string;
+
+  /**
+   * Optional backoff gate for persistence-layer retry. When this is in the
+   * future, replay skips the entry without spending reviewer calls.
+   */
+  next_retry_not_before_iso?: string;
 
   /**
    * ISO timestamp of the most recent replay attempt (or original

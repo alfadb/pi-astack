@@ -401,6 +401,43 @@ export function deleteMultiviewPending(slug: string): boolean {
 }
 
 // ── Update (replay attempt accounting) ───────────────────────────────
+
+const WRITER_ERROR_CAP = 1000;
+
+function clipWriterError(message: string): string {
+  return message.length <= WRITER_ERROR_CAP ? message : message.slice(0, WRITER_ERROR_CAP) + "…[truncated]";
+}
+
+function loadPendingFileBySlug(slug: string): { absPath: string; parsed: MultiviewPendingFileOnDisk } | null {
+  const dir = stagingDir();
+  if (!fs.existsSync(dir)) return null;
+  const suffix = `-${slug}.json`;
+
+  let matchedFile: string | null = null;
+  try {
+    const files = fs.readdirSync(dir);
+    matchedFile = files.find((f) => f.endsWith(suffix)) ?? null;
+  } catch {
+    return null;
+  }
+  if (!matchedFile) return null;
+
+  const absPath = path.join(dir, matchedFile);
+  let parsed: MultiviewPendingFileOnDisk;
+  try {
+    const raw = fs.readFileSync(absPath, "utf-8");
+    parsed = JSON.parse(raw) as MultiviewPendingFileOnDisk;
+  } catch {
+    return null;
+  }
+
+  // Defensive: only update if the file is actually a multiview-pending
+  // entry of the current schema (don't accidentally mutate a
+  // colliding-named provisional-correction file).
+  if (parsed.schema_version !== MULTIVIEW_PENDING_SCHEMA_VERSION) return null;
+  if (!parsed.entry || parsed.entry.kind !== "multiview-pending") return null;
+  return { absPath, parsed };
+}
 //
 // batch 3c-i: replay needs to record "I attempted to retry this
 // staging entry on agent_end at time T" without changing the slug
@@ -432,40 +469,89 @@ export function updateMultiviewPendingAttempts(
   newAttempts: number,
   lastAttemptIso: string,
 ): boolean {
-  const dir = stagingDir();
-  if (!fs.existsSync(dir)) return false;
-  const suffix = `-${slug}.json`;
+  const loaded = loadPendingFileBySlug(slug);
+  if (!loaded) return false;
 
-  let matchedFile: string | null = null;
+  loaded.parsed.entry.retry_attempts = newAttempts;
+  loaded.parsed.entry.last_attempt_iso = lastAttemptIso;
+  loaded.parsed.entry.updated = lastAttemptIso;
+
   try {
-    const files = fs.readdirSync(dir);
-    matchedFile = files.find((f) => f.endsWith(suffix)) ?? null;
+    fs.writeFileSync(loaded.absPath, JSON.stringify(loaded.parsed, null, 2), "utf-8");
+    return true;
   } catch {
     return false;
   }
-  if (!matchedFile) return false;
+}
 
-  const absPath = path.join(dir, matchedFile);
-  let parsed: MultiviewPendingFileOnDisk;
+export function markMultiviewPendingApprovedDecision(
+  slug: string,
+  approvedDecision: MultiviewPendingEntry["approved_decision"],
+  approvedAtIso: string,
+): boolean {
+  const loaded = loadPendingFileBySlug(slug);
+  if (!loaded) return false;
+
+  loaded.parsed.entry.approved_decision = approvedDecision;
+  loaded.parsed.entry.approved_at_iso = loaded.parsed.entry.approved_at_iso ?? approvedAtIso;
+  loaded.parsed.entry.last_attempt_iso = approvedAtIso;
+  loaded.parsed.entry.updated = approvedAtIso;
+
   try {
-    const raw = fs.readFileSync(absPath, "utf-8");
-    parsed = JSON.parse(raw) as MultiviewPendingFileOnDisk;
+    fs.writeFileSync(loaded.absPath, JSON.stringify(loaded.parsed, null, 2), "utf-8");
+    return true;
   } catch {
     return false;
   }
+}
 
-  // Defensive: only update if the file is actually a multiview-pending
-  // entry of the current schema (don't accidentally mutate a
-  // colliding-named provisional-correction file).
-  if (parsed.schema_version !== MULTIVIEW_PENDING_SCHEMA_VERSION) return false;
-  if (!parsed.entry || parsed.entry.kind !== "multiview-pending") return false;
+export function updateMultiviewPendingWriterFailure(
+  slug: string,
+  newWriterAttempts: number,
+  lastWriterError: string,
+  nextRetryNotBeforeIso: string,
+  lastAttemptIso: string,
+  approvedDecision?: MultiviewPendingEntry["approved_decision"],
+): boolean {
+  const loaded = loadPendingFileBySlug(slug);
+  if (!loaded) return false;
 
-  parsed.entry.retry_attempts = newAttempts;
-  parsed.entry.last_attempt_iso = lastAttemptIso;
-  parsed.entry.updated = lastAttemptIso;
+  loaded.parsed.entry.writer_retry_attempts = newWriterAttempts;
+  loaded.parsed.entry.last_writer_error = clipWriterError(lastWriterError);
+  loaded.parsed.entry.next_retry_not_before_iso = nextRetryNotBeforeIso;
+  if (approvedDecision) {
+    loaded.parsed.entry.approved_decision = approvedDecision;
+    loaded.parsed.entry.approved_at_iso = loaded.parsed.entry.approved_at_iso ?? lastAttemptIso;
+  }
+  loaded.parsed.entry.last_attempt_iso = lastAttemptIso;
+  loaded.parsed.entry.updated = lastAttemptIso;
 
   try {
-    fs.writeFileSync(absPath, JSON.stringify(parsed, null, 2), "utf-8");
+    fs.writeFileSync(loaded.absPath, JSON.stringify(loaded.parsed, null, 2), "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function markMultiviewPendingBrainWriteCompleted(
+  slug: string,
+  completedAtIso: string,
+  approvedDecision?: MultiviewPendingEntry["approved_decision"],
+): boolean {
+  const loaded = loadPendingFileBySlug(slug);
+  if (!loaded) return false;
+
+  loaded.parsed.entry.brain_write_completed_at_iso = completedAtIso;
+  if (approvedDecision) {
+    loaded.parsed.entry.approved_decision = approvedDecision;
+    loaded.parsed.entry.approved_at_iso = loaded.parsed.entry.approved_at_iso ?? completedAtIso;
+  }
+  loaded.parsed.entry.last_attempt_iso = completedAtIso;
+  loaded.parsed.entry.updated = completedAtIso;
+
+  try {
+    fs.writeFileSync(loaded.absPath, JSON.stringify(loaded.parsed, null, 2), "utf-8");
     return true;
   } catch {
     return false;
