@@ -716,6 +716,31 @@ age_signal:                              # age signal 不是 TTL
 
 **跨设备 staging 同步**：设备 B classifier 看到 `originating_device != current_device` 且当前 context 无关 → prompt 引导默认 "wait for next session on originating device"，不强行在设备 B resolve。
 
+##### 4.1.5.1 R1 P1-11 补补：staging provisional resolve 触发的设计选择
+
+R1 review DeepSeek 指出：上述设计只写了 "resolve 是什么"（由 classifier 读 staging）和 "age-out 是什么"（30 天后走 reactivation prompt），但没写 **什么 lifecycle hook 触发 resolve 扫描** 这个具体机制。现状只依赖 classifier 在 §4.1.3 step 6 检查 `staging_context`——但这是**被动**检查（只在 classifier 可能处理当前会话时含貌某个 hypothesis时才调）。多数 staging 永远进不了这个检查 → 30 天 age-out 时批量扫上百条。
+
+这里记录三个 resolve 触发设计选择 + 默认推荐：
+
+**选择 1：隔 N 轮批扫（默认推荐）**
+- 每 N 轮（默认 N=20）的 `agent_end` 起 staging-resolver：选取需求检查的 staging entries（`attribution_pending: true` + `staging_loader` 未选中过），跨几条 batch 调 LLM resolve
+- 代价：resolve LLM 调用频率升 N 倍；但每次仅扫 N 条 × 1 LLM 调用，总成本可控
+- 优势：不依赖 classifier 被动发现机会；staging entry 被看到的期望时间从 N=30 天降为 N=N×轮平均间隔（多为 1-3 天）
+
+**选择 2：需求驱动（lazy resolve）**
+- 只在某个主会话轮次 classifier 说 "我看到 staging 里有可能相关的" 时 resolve 那些。表面是现状但主动量化 staging-loader 选中准别
+- 代价：依然依赖 classifier 能遇到相关上下文；不相关场景的 staging 永不会 resolve
+- 优势：resolve LLM 调用成本最低；与现代码套路一致
+
+**选择 3：主动扫描所有**
+- 每个 `agent_end` 都走 staging-loader 选取 + LLM resolve
+- 代价：LLM 成本爆炸（每轮都走 + staging 可能有 100+ 条需要评估）
+- 优势：resolve 延迟最低；但成本不可接受
+
+**默认选择 1**（批扫）：N=20 作为默认，可调。staging 被看到期望从 30 天 → 1-3 天。选择 2 作为 fallback（如果选择 1 未启用），选择 3 在高价值-明确质量信号 staging 上作为可选。
+
+**实现状态 (2026-05-27)**：staging-resolver 未实现。当前走选择 2 的 implicit 路径 (lazy resolve via classifier §4.1.3 step 6)。R1 P1-11 被重新分类为 P2-with-design-binding：resolve 触发路径已预先绑定，开工 staging-resolver 时默认选择 1。
+
 #### 4.1.6 跟两条 write lane 的接口
 
 新文件：
