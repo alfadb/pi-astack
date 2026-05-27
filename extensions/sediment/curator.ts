@@ -5,6 +5,7 @@ import { loadEntries } from "../memory/parser";
 import { llmSearchEntries } from "../memory/llm-search";
 import type { MemoryEntry } from "../memory/types";
 import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import type { DeleteMode, ProjectEntryDraft, ProjectEntryUpdateDraft } from "./writer";
@@ -26,7 +27,14 @@ function logCuratorMetrics(entry: {
     ensureUserGlobalSidecarMigrated();
     const dir = userGlobalSedimentDir();
     fs.mkdirSync(dir, { recursive: true });
-    const line = JSON.stringify(entry) + "\n";
+    // ADR 0027 C6b: cross-layer causal anchor. Same timing trade-off as
+    // extractor-metrics — long curator runs may straddle user turns and
+    // anchor reflects write time, not trigger time.
+    const enriched = {
+      ...spreadAnchor(getCurrentAnchor()),
+      ...entry,
+    };
+    const line = JSON.stringify(enriched) + "\n";
     fs.appendFileSync(path.join(dir, "curator-metrics.jsonl"), line, "utf-8");
   } catch {
     // metrics are best-effort; never throw

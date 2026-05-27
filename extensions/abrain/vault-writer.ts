@@ -22,6 +22,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 
 // ── types ───────────────────────────────────────────────────────
 
@@ -302,7 +303,16 @@ export async function appendVaultReadAudit(abrainHome: string, ev: VaultEvent): 
 async function appendVaultEvent(abrainHome: string, ev: VaultEvent): Promise<void> {
   const eventsPath = path.join(abrainHome, VAULT_EVENTS);
   fs.mkdirSync(path.dirname(eventsPath), { recursive: true, mode: 0o700 });
-  const line = JSON.stringify(ev) + "\n";
+  // ADR 0027 C6b: cross-layer causal anchor. Vault events fire from many
+  // entry points (vault_release tool, /secret command, bash $VAULT_<key>
+  // expansion). All run inside main-session ctx — anchor reflects the
+  // user turn that triggered the vault op, which is exactly the right
+  // grain for compliance/audit reconstruction.
+  const enriched = {
+    ...spreadAnchor(getCurrentAnchor()),
+    ...ev,
+  };
+  const line = JSON.stringify(enriched) + "\n";
   // append + fsync
   const fd = fs.openSync(eventsPath, "a", 0o600);
   try {

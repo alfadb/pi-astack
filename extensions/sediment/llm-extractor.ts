@@ -6,6 +6,7 @@ import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { entryToText } from "./checkpoint";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 
 // ── System context cache (loaded once, same across all extractor calls) ───
 let _cachedSystemContext: string | null = null;
@@ -57,7 +58,15 @@ function logExtractorMetrics(entry: {
     ensureUserGlobalSidecarMigrated();
     const dir = userGlobalSedimentDir();
     fs.mkdirSync(dir, { recursive: true });
-    const line = JSON.stringify(entry) + "\n";
+    // ADR 0027 C6b: cross-layer causal anchor. Note for long-running LLM
+    // extractor: write time may be AFTER user submitted next prompt —
+    // anchor would then reflect the next turn, not the trigger turn.
+    // Acceptable for metric rows (aggregate observable, not per-task join).
+    const enriched = {
+      ...spreadAnchor(getCurrentAnchor()),
+      ...entry,
+    };
+    const line = JSON.stringify(enriched) + "\n";
     fs.appendFileSync(path.join(dir, "extractor-metrics.jsonl"), line, "utf-8");
   } catch {
     // metrics are best-effort; never throw

@@ -135,6 +135,7 @@ const MERGE_ENV: NodeJS.ProcessEnv = {
  * reference (no drift, no shadow definition).
  */
 import { redactCredentials } from "./redact";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 export { redactCredentials };
 
 /**
@@ -320,9 +321,18 @@ async function audit(abrainHome: string, event: GitSyncEvent): Promise<void> {
   try {
     const stateDir = path.join(abrainHome, ".state");
     await fs.mkdir(stateDir, { recursive: true });
+    // ADR 0027 C6b: cross-layer causal anchor. git-sync writes may fire
+    // from sediment's commit path (within agent_end — anchor matches
+    // trigger turn) OR from pushAsync's deferred fire-and-forget (may
+    // straddle user turns). Acceptable for both: anchor at write time
+    // still enables (session_id, turn_id) join across L1 writers.
+    const enriched = {
+      ...spreadAnchor(getCurrentAnchor()),
+      ...event,
+    };
     await fs.appendFile(
       path.join(stateDir, "git-sync.jsonl"),
-      JSON.stringify(event) + "\n",
+      JSON.stringify(enriched) + "\n",
       "utf-8",
     );
   } catch {

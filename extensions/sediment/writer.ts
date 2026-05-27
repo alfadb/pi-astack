@@ -11,6 +11,7 @@ import { type EntryKind, type EntryStatus, ENTRY_KINDS, ENTRY_STATUSES, validate
 import { lintMarkdown } from "../memory/lint";
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
 import type { Jsonish } from "../memory/types";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 // `slugify` is the free-text-to-bare-slug normalizer. We deliberately
 // do NOT use `normalizeBareSlug` here, because that one is designed
 // for path/wikilink/id inputs (`[[X]]`, `project:foo:bar`,
@@ -741,8 +742,16 @@ export async function appendAudit(projectRoot: string, event: Record<string, unk
   // "v0-unknown"). The field tracks which prompt produced the classifier
   // reasoning trace so aggregator health checks can attribute quality
   // changes to specific prompt versions.
+  // ADR 0027 C6b: cross-layer causal anchor. Captured at write time —
+  // for handlers that fire synchronously inside agent_end (the common case)
+  // this matches the trigger turn. For long-running async writers (sub-tasks
+  // that complete after user has submitted next prompt), anchor may reflect
+  // the next turn instead. Caller-provided session_id in event takes
+  // precedence (spread order: anchor first, event last) so existing schema
+  // semantics survive. turn_id is anchor-sourced (callers don't set it).
   const enriched = {
     timestamp: formatLocalIsoTimestamp(),
+    ...spreadAnchor(getCurrentAnchor()),
     audit_version: AUDIT_SCHEMA_VERSION,
     pid: process.pid,
     project_root: path.resolve(projectRoot),

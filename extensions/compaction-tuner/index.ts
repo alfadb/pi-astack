@@ -46,6 +46,8 @@ import {
   type TurnBoundaryCompactionDecision,
   type TurnBoundaryCompactionUsage,
 } from "../_shared/pi-internals";
+// ADR 0027 C6b: cross-layer causal anchor for audit rows.
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import {
   DEFAULT_COMPACTION_TUNER_SETTINGS,
   resolveCompactionTunerSettings,
@@ -194,8 +196,12 @@ async function appendAudit(projectRoot: string, row: Record<string, unknown>): P
   // error_message from compact() failures — same exfil risk as sediment
   // audit.jsonl if accidentally git-committed.
   await ensureProjectGitignoredOnce(projectRoot);
+  // ADR 0027 C6b: cross-layer causal anchor. Inserted between header
+  // fields (timestamp/audit_version/pid/project_root) and caller's row so
+  // caller-provided fields take precedence if they happen to overlap.
   const enriched = {
     timestamp: formatLocalIsoTimestamp(new Date()),
+    ...spreadAnchor(getCurrentAnchor()),
     audit_version: AUDIT_VERSION,
     pid: process.pid,
     project_root: projectRoot,
