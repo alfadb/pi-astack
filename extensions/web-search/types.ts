@@ -22,13 +22,16 @@ export interface WebSearchProvider {
 export interface SearchOpts {
   /** Result count, 1..20. Default: settings.webSearch.defaultCount. */
   count?: number;
-  /** Brave-compatible freshness: 'pd' (day) / 'pw' (week) / 'pm' (month) /
-   *  'py' (year) / 'YYYY-MM-DDtoYYYY-MM-DD'. Other providers may map. */
+  /** Time-window filter. V1 accepts Brave-format tokens ('pd' / 'pw' /
+   *  'pm' / 'py' / 'YYYY-MM-DDtoYYYY-MM-DD'); other providers MAY map
+   *  these to their own format or accept additional formats. The format
+   *  is implementation-defined per provider. */
   freshness?: string;
   /** ISO 3166 alpha-2 country code (e.g. "US", "DE"). Default: "US". */
   country?: string;
-  /** Per-call timeout override (ms). Default: settings.webSearch.timeout. */
-  timeoutMs?: number;
+  /** Abort signal for cancellation. Combined with the provider's
+   *  internal timeout via AbortSignal.any. */
+  signal?: AbortSignal;
 }
 
 export interface SearchResult {
@@ -40,10 +43,14 @@ export interface SearchResult {
 }
 
 export interface FetchOpts {
-  /** Truncate returned content to this many bytes. Default: 50_000. */
+  /** Truncate returned content to this many bytes. Default: 50_000.
+   *  Also bounds the raw network read (provider may read up to
+   *  maxBytes * 4 bytes from the wire to leave room for HTML→markdown
+   *  shrinkage). */
   maxBytes?: number;
-  /** Per-call timeout override (ms). Default: settings.webSearch.timeout. */
-  timeoutMs?: number;
+  /** Abort signal for cancellation. Combined with the provider's
+   *  internal timeout via AbortSignal.any. */
+  signal?: AbortSignal;
 }
 
 export interface FetchResult {

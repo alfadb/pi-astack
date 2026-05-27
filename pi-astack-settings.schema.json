@@ -664,6 +664,12 @@
           "description": "Network timeout in ms for both search and fetch. Minimum 1000. Default: 15000.",
           "minimum": 1000,
           "default": 15000
+        },
+
+        "allowPrivateNetworks": {
+          "type": "boolean",
+          "description": "SSRF escape hatch. When true, web_fetch may access RFC1918 / loopback / link-local / cloud-metadata IPs (AWS 169.254.169.254 / GCP metadata / localhost / 10.x / 192.168.x / etc). Default: false. Enable ONLY on dev machines where you knowingly want sub-agents to reach local services (Ollama, dev mock servers); enabling this on shared / CI / production machines exposes a SSRF attack surface.",
+          "default": false
         }
       }
     }

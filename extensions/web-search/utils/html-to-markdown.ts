@@ -81,16 +81,22 @@ export function htmlToMarkdown(html: string): string {
     out = out.replace(re, (_m, t) => `\n\n${"#".repeat(i)} ${stripInline(String(t))}\n\n`);
   }
 
-  // 4. Links: <a href="X">Y</a> → [Y](X). Empty-text links dropped.
+  // 4. Inline code FIRST (before links): so `<a><code>fn</code></a>`
+  //    becomes `<a>`fn`</a>` and then `[`fn`](href)` after step 5.
+  //    Original order processed links first — stripInline ate the
+  //    inner `<code>` tag, producing `[fn](href)` without backticks.
+  //    Caught by ADR 0027 PR-A review (Opus). MDN / Rust std docs
+  //    heavy on `<a><code>...</code></a>` benefit directly.
+  out = out.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi,
+    (_m, t) => `\`${stripInline(String(t))}\``);
+
+  // 5. Links: <a href="X">Y</a> → [Y](X). Empty-text links dropped.
+  //    stripInline drops HTML tags but preserves backticks from step 4.
   out = out.replace(/<a\b[^>]*?href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
     (_m, href, text) => {
       const t = stripInline(String(text));
       return t ? `[${t}](${href})` : "";
     });
-
-  // 5. Inline code.
-  out = out.replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi,
-    (_m, t) => `\`${stripInline(String(t))}\``);
 
   // 6. Bold / em.
   out = out.replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi,

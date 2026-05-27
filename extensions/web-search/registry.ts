@@ -15,6 +15,10 @@ import type { WebSearchSettings } from "./settings";
  *   3. Document its settings in pi-astack-settings.schema.json under
  *      webSearch.provider enum + add provider-specific fields if needed
  */
+/** Built-in provider names. Mirror this when adding a new case to
+ *  createProvider() so the unknown-provider error stays accurate. */
+const BUILTIN_PROVIDERS = ["brave"] as const;
+
 export function createProvider(settings: WebSearchSettings): WebSearchProvider {
   switch (settings.provider) {
     case "brave":
@@ -22,12 +26,13 @@ export function createProvider(settings: WebSearchSettings): WebSearchProvider {
         apiKeyEnv: settings.apiKeyEnv,
         defaultCount: settings.defaultCount,
         timeoutMs: settings.timeout,
+        allowPrivateNetworks: settings.allowPrivateNetworks,
       });
     default:
       throw new Error(
         `web-search: unknown provider "${settings.provider}". ` +
-        `Built-in providers: brave. Set webSearch.provider in ` +
-        `~/.pi/agent/pi-astack-settings.json.`,
+        `Built-in providers: ${BUILTIN_PROVIDERS.join(", ")}. ` +
+        `Set webSearch.provider in ~/.pi/agent/pi-astack-settings.json.`,
       );
   }
 }
