@@ -774,6 +774,7 @@ export async function curateProjectDraft(
   draft: ProjectEntryDraft,
   deps: {
     projectRoot: string;
+    projectId?: string;
     sedimentSettings: SedimentSettings;
     memorySettings: MemorySettings;
     modelRegistry: ModelRegistryLike;
@@ -885,6 +886,8 @@ export async function curateProjectDraft(
       settings: deps.sedimentSettings,
       modelRegistry: deps.modelRegistry,
       signal: deps.signal,
+      originProjectId: deps.projectId,
+      originProjectRoot: deps.projectRoot,
     });
     // batch 3b: when staged, final_decision is guaranteed to be
     // op=skip(multiview_staged_for_replay) so the downstream caller

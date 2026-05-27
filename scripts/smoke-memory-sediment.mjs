@@ -105,6 +105,12 @@ function transpileExtensions(outRoot) {
     }
   }
 
+  const sedimentPromptsDir = path.join(outRoot, "sediment", "prompts");
+  fs.mkdirSync(sedimentPromptsDir, { recursive: true });
+  for (const file of fs.readdirSync(path.join(extRoot, "sediment", "prompts")).filter((f) => f.endsWith(".md"))) {
+    fs.copyFileSync(path.join(extRoot, "sediment", "prompts", file), path.join(sedimentPromptsDir, file));
+  }
+
   // ADR 0023-R5: sediment imports the abrain rule-injector strip helper.
   // The smoke historically staged only memory/sediment/compaction; stage
   // this one abrain leaf module plus its parent index shim so relative
@@ -240,6 +246,8 @@ async function main() {
     const { runDoctorLite, formatDoctorLiteReport } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow, writeAbrainAboutMe } = req("./sediment/writer.js");
+    const { executeCuratorDecisionToBrain } = req("./sediment/curator-decision-writer.js");
+    const { replayMultiviewPending } = req("./sediment/multiview-staging-replay.js");
     const { parseExplicitAboutMeBlocks, previewAboutMeExtraction } = req("./sediment/extractor.js");
     const { validateRouteDecision, applyStagingDowngrade, RouterError, LANE_G_ALLOWED_REGIONS, ROUTING_CONFIDENCE_THRESHOLD } = req("./sediment/about-me-router.js");
     // ADR 0021 G2 helpers (2026-05-20): parseAboutMeArgs / deriveAboutMeTitle /
@@ -556,6 +564,32 @@ async function main() {
         assert(pending.entries.length === 1 && pending.entries[0].slug === "multiview-pending-smoke", `loadMultiviewPending should see only multiview entry: ${JSON.stringify(pending)}`);
         assert(loadStagingContext().entries.some((entry) => entry.slug === "provisional-smoke"), `provisional loader should ignore multiview co-tenant and keep provisional`);
         assert(deleteMultiviewPending("multiview-pending-smoke") === true, `deleteMultiviewPending should delete from ABRAIN_ROOT dir`);
+
+        writeMultiviewPending({
+          slug: "multiview-pending-origin-smoke",
+          kind: "multiview-pending",
+          status: "provisional",
+          created: new Date().toISOString(),
+          updated: new Date().toISOString(),
+          origin_project_id: "origin-project",
+          origin_project_root: "/tmp/origin-project-root",
+          originating_device: "smoke",
+          multiview_state: "reviewer_unavailable",
+          retry_attempts: 0,
+          max_retry_attempts: 5,
+          next_retry_not_before_iso: new Date().toISOString(),
+          terminal_after_iso: new Date(Date.now() + 86_400_000).toISOString(),
+          trigger_reason: "create_high_confidence",
+          proposer_decision: { op: "create", rationale: "smoke" },
+          proposer_raw_text: "smoke",
+          candidate_snapshot: { title: "Smoke Origin", kind: "fact", status: "active", confidence: 8, compiledTruth: "Smoke origin candidate." },
+          correction_signal: null,
+          neighbor_slugs: [],
+          last_error: "smoke",
+        });
+        const originEntry = loadMultiviewPending().entries.find((entry) => entry.slug === "multiview-pending-origin-smoke");
+        assert(originEntry && originEntry.origin_project_id === "origin-project" && originEntry.origin_project_root === "/tmp/origin-project-root", `multiview pending origin fields must round-trip: ${JSON.stringify(originEntry)}`);
+        assert(deleteMultiviewPending("multiview-pending-origin-smoke") === true, `origin smoke entry should delete cleanly`);
       } finally {
         if (oldAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
         else process.env.ABRAIN_ROOT = oldAbrainRoot;
@@ -2701,6 +2735,343 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           rawOutcome.rawTextRedacted === true && rawOutcome.rawTextRedactionReason?.includes("credential:anthropic_api_key"),
           `raw_text redaction metadata must include reason, got: ${JSON.stringify(rawOutcome)}`,
         );
+      }
+
+      // === ADR 0025 multi-view replay writer dispatch ==================
+      // The replay lane used to stop at a writeApprovedToBrain stub that
+      // only audited candidate_lost:true. Pin the shared dispatcher so an
+      // approved replay decision performs the same op→writer mapping as
+      // the original auto-write path.
+      {
+        const replayCreate = await executeCuratorDecisionToBrain({
+          decision: { op: "create", rationale: "replay create smoke" },
+          draft: {
+            title: "Replay Dispatcher Create Smoke",
+            kind: "fact",
+            status: "active",
+            confidence: 8,
+            compiledTruth: "# Replay Dispatcher Create Smoke\n\nThe replay dispatcher writes approved create decisions to the brain.",
+          },
+          projectRoot: aRoot,
+          abrainHome: aTarget.abrainHome,
+          projectId: aTarget.projectId,
+          settings: a2Settings,
+          auditContext: { lane: "replay", sessionId: "smoke-replay", correlationId: "smoke-replay:create", candidateId: "smoke-replay:create:c1" },
+          sessionId: "smoke-replay",
+          createTimelineNote: "multi-view replay create smoke",
+        });
+        assert(replayCreate.length === 1 && replayCreate[0].status === "created", `replay dispatcher create should write brain: ${JSON.stringify(replayCreate)}`);
+        const replayCreateWritten = fs.readFileSync(replayCreate[0].path, "utf-8");
+        assert(/^- .* \| smoke-replay \| captured \| multi-view replay create smoke$/m.test(replayCreateWritten), `replay create timeline missing:\n${replayCreateWritten}`);
+
+        const replayUpdate = await executeCuratorDecisionToBrain({
+          decision: {
+            op: "update",
+            slug: replayCreate[0].slug,
+            patch: {
+              compiledTruth: "# Replay Dispatcher Create Smoke\n\nThe replay dispatcher also writes approved update decisions to the brain.",
+              confidence: 9,
+            },
+            rationale: "replay update smoke",
+          },
+          draft: {
+            title: "Replay Dispatcher Create Smoke",
+            kind: "fact",
+            status: "active",
+            confidence: 9,
+            compiledTruth: "unused candidate body for update",
+          },
+          projectRoot: aRoot,
+          abrainHome: aTarget.abrainHome,
+          projectId: aTarget.projectId,
+          settings: a2Settings,
+          auditContext: { lane: "replay", sessionId: "smoke-replay", correlationId: "smoke-replay:update", candidateId: "smoke-replay:update:c1" },
+          sessionId: "smoke-replay",
+          updateTimelineNote: "multi-view replay update smoke",
+        });
+        assert(replayUpdate.length === 1 && replayUpdate[0].status === "updated", `replay dispatcher update should write brain: ${JSON.stringify(replayUpdate)}`);
+        const replayUpdateWritten = fs.readFileSync(replayUpdate[0].path, "utf-8");
+        assert(replayUpdateWritten.includes("approved update decisions"), `replay update body missing:\n${replayUpdateWritten}`);
+        assert(/^confidence: 9$/m.test(replayUpdateWritten), `replay update confidence missing:\n${replayUpdateWritten}`);
+        assert(/^- .* \| smoke-replay \| updated \| multi-view replay update smoke$/m.test(replayUpdateWritten), `replay update timeline missing:\n${replayUpdateWritten}`);
+
+        const replaySkip = await executeCuratorDecisionToBrain({
+          decision: { op: "skip", reason: "replay_skip_smoke" },
+          draft: { title: "Replay Skip Smoke", kind: "fact", compiledTruth: "skip body" },
+          projectRoot: aRoot,
+          abrainHome: aTarget.abrainHome,
+          projectId: aTarget.projectId,
+          settings: a2Settings,
+          auditContext: { lane: "replay", sessionId: "smoke-replay", correlationId: "smoke-replay:skip", candidateId: "smoke-replay:skip:c1" },
+          sessionId: "smoke-replay",
+        });
+        assert(replaySkip.length === 1 && replaySkip[0].status === "skipped" && replaySkip[0].reason === "replay_skip_smoke", `replay dispatcher skip should not write brain: ${JSON.stringify(replaySkip)}`);
+
+        const worldCreate = await executeCuratorDecisionToBrain({
+          decision: { op: "create", scope: "world", rationale: "world replay create smoke" },
+          draft: {
+            title: "Replay Dispatcher World Smoke",
+            kind: "fact",
+            status: "active",
+            confidence: 8,
+            compiledTruth: "# Replay Dispatcher World Smoke\n\nWorld-scope replay writes and updates must preserve world frontmatter.",
+          },
+          projectRoot: aRoot,
+          abrainHome: aTarget.abrainHome,
+          projectId: aTarget.projectId,
+          settings: a2Settings,
+          auditContext: { lane: "replay", sessionId: "smoke-replay", correlationId: "smoke-replay:world-create", candidateId: "smoke-replay:world-create:c1" },
+          sessionId: "smoke-replay",
+          createTimelineNote: "multi-view replay world create smoke",
+        });
+        assert(worldCreate.length === 1 && worldCreate[0].status === "created", `replay dispatcher world create should write brain: ${JSON.stringify(worldCreate)}`);
+        let worldWritten = fs.readFileSync(worldCreate[0].path, "utf-8");
+        assert(/^id: world:replay-dispatcher-world-smoke$/m.test(worldWritten) && /^scope: world$/m.test(worldWritten) && !/^project_id:/m.test(worldWritten), `world create frontmatter mismatch:\n${worldWritten}`);
+
+        const worldUpdate = await executeCuratorDecisionToBrain({
+          decision: {
+            op: "update",
+            scope: "world",
+            slug: worldCreate[0].slug,
+            patch: { confidence: 9, compiledTruth: "# Replay Dispatcher World Smoke\n\nWorld-scope update kept this entry in knowledge/." },
+            rationale: "world replay update smoke",
+          },
+          draft: { title: "Replay Dispatcher World Smoke", kind: "fact", compiledTruth: "unused world update draft" },
+          projectRoot: aRoot,
+          abrainHome: aTarget.abrainHome,
+          projectId: aTarget.projectId,
+          settings: a2Settings,
+          auditContext: { lane: "replay", sessionId: "smoke-replay", correlationId: "smoke-replay:world-update", candidateId: "smoke-replay:world-update:c1" },
+          sessionId: "smoke-replay",
+          updateTimelineNote: "multi-view replay world update smoke",
+        });
+        assert(worldUpdate.length === 1 && worldUpdate[0].status === "updated", `replay dispatcher world update should write brain: ${JSON.stringify(worldUpdate)}`);
+        worldWritten = fs.readFileSync(worldUpdate[0].path, "utf-8");
+        assert(/^id: world:replay-dispatcher-world-smoke$/m.test(worldWritten) && /^scope: world$/m.test(worldWritten) && !/^project_id:/m.test(worldWritten), `world update must preserve world frontmatter:\n${worldWritten}`);
+        assert(/^confidence: 9$/m.test(worldWritten), `world update confidence missing:\n${worldWritten}`);
+
+        const gitFailTarget = setupAbrainTarget("a2-git-fail-fixture");
+        const gitFailSettings = { ...a2Settings, gitCommit: true };
+        const gitFailCreate = await executeCuratorDecisionToBrain({
+          decision: { op: "create", rationale: "git fail smoke" },
+          draft: { title: "Replay Dispatcher Git Fail Smoke", kind: "fact", status: "active", confidence: 8, compiledTruth: "# Replay Dispatcher Git Fail Smoke\n\nCreate should reject when git commit is required but abrainHome is not a git repo." },
+          projectRoot: aRoot,
+          abrainHome: gitFailTarget.abrainHome,
+          projectId: gitFailTarget.projectId,
+          settings: gitFailSettings,
+          auditContext: { lane: "replay", sessionId: "smoke-replay", correlationId: "smoke-replay:git-fail-create", candidateId: "smoke-replay:git-fail-create:c1" },
+          sessionId: "smoke-replay",
+        });
+        assert(gitFailCreate.length === 1 && gitFailCreate[0].status === "rejected" && gitFailCreate[0].reason === "git_commit_failed", `create git failure should reject: ${JSON.stringify(gitFailCreate)}`);
+
+        const gitFailExisting = await writeProjectEntry({
+          title: "Replay Dispatcher Git Fail Existing",
+          kind: "fact",
+          status: "active",
+          confidence: 8,
+          compiledTruth: "# Replay Dispatcher Git Fail Existing\n\nSeed without git commit so update can exercise dispatcher failure handling.",
+        }, {
+          projectRoot: aRoot,
+          abrainHome: gitFailTarget.abrainHome,
+          projectId: gitFailTarget.projectId,
+          settings: { ...a2Settings, gitCommit: false },
+          dryRun: false,
+        });
+        assert(gitFailExisting.status === "created", `git fail seed should create: ${JSON.stringify(gitFailExisting)}`);
+        let gitFailThrew = false;
+        try {
+          await executeCuratorDecisionToBrain({
+            decision: { op: "update", slug: gitFailExisting.slug, patch: { confidence: 9 }, rationale: "git fail update smoke" },
+            draft: { title: "Replay Dispatcher Git Fail Existing", kind: "fact", compiledTruth: "unused" },
+            projectRoot: aRoot,
+            abrainHome: gitFailTarget.abrainHome,
+            projectId: gitFailTarget.projectId,
+            settings: gitFailSettings,
+            auditContext: { lane: "replay", sessionId: "smoke-replay", correlationId: "smoke-replay:git-fail-update", candidateId: "smoke-replay:git-fail-update:c1" },
+            sessionId: "smoke-replay",
+          });
+        } catch (e) {
+          gitFailThrew = /git_commit_failed/.test(String(e && e.message || e));
+        }
+        assert(gitFailThrew, `update git failure must throw so replay keeps staging`);
+
+        // Full replay loop regression: approved replay writes brain and
+        // deletes staging only after writer success; writer throw keeps
+        // the original staging entry for retry; origin mismatch keeps the
+        // entry out of the current project.
+        const replayRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-replay-loop-"));
+        const oldReplayAbrainRoot = process.env.ABRAIN_ROOT;
+        process.env.ABRAIN_ROOT = replayRoot;
+        try {
+          const { writeMultiviewPending, loadMultiviewPending, deleteMultiviewPending } = req("./sediment/multiview-staging-io.js");
+          const replaySettings = JSON.parse(JSON.stringify(a2Settings));
+          replaySettings.multiView = {
+            proposerProviders: [],
+            reviewerProviders: ["mock/reviewer"],
+            fallbackProviders: [],
+            costBudgetPerOpUsd: 0.05,
+          };
+          const loopModelRegistry = {
+            find: () => ({ id: "mock-reviewer", contextWindow: 100000 }),
+            getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "sk-test-not-real", headers: {} }),
+          };
+
+          globalThis.__A2_INVOCATIONS__ = 0;
+          globalThis.__A2_RESPONSES__ = [
+            JSON.stringify({ op: "create", scope: "project", confidence: 9, reasoning: "pass1 confirm create" }),
+            JSON.stringify({ verdict: "confirm_proposer", rationale: "pass2 confirms proposer" }),
+          ];
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-success",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            origin_project_id: aTarget.projectId,
+            origin_project_root: aRoot,
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "loop success proposer" },
+            proposer_raw_text: "loop success proposer raw",
+            candidate_snapshot: { title: "Replay Loop Success Smoke", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Loop Success Smoke\n\nApproved replay loop writes this candidate." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          let wroteLoop = 0;
+          const loopSuccess = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async (decision, candidate) => {
+              wroteLoop++;
+              const written = await executeCuratorDecisionToBrain({
+                decision,
+                draft: candidate,
+                projectRoot: aRoot,
+                abrainHome: aTarget.abrainHome,
+                projectId: aTarget.projectId,
+                settings: a2Settings,
+                auditContext: { lane: "replay", sessionId: "smoke-replay-loop", correlationId: "smoke-replay-loop:success", candidateId: "smoke-replay-loop:success:c1" },
+                sessionId: "smoke-replay-loop",
+                createTimelineNote: "multi-view replay loop smoke",
+              });
+              const rejected = written.find((result) => result.status === "rejected");
+              if (rejected) throw new Error(rejected.reason || "writer rejected");
+            },
+          });
+          assert(loopSuccess.succeeded === 1 && loopSuccess.errors === 0 && wroteLoop === 1, `replay loop success should write once: ${JSON.stringify(loopSuccess)} wrote=${wroteLoop}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-success"), `successful replay should delete staging`);
+          const loopPath = path.join(aTarget.abrainHome, "projects", aTarget.projectId, "knowledge", "replay-loop-success-smoke.md");
+          assert(fs.existsSync(loopPath), `successful replay should create brain entry at ${loopPath}`);
+
+          globalThis.__A2_INVOCATIONS__ = 0;
+          globalThis.__A2_RESPONSES__ = [
+            JSON.stringify({ op: "create", scope: "project", confidence: 9, reasoning: "pass1 confirm create" }),
+            JSON.stringify({ verdict: "confirm_proposer", rationale: "pass2 confirms proposer" }),
+          ];
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-throw",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            origin_project_id: aTarget.projectId,
+            origin_project_root: aRoot,
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "loop throw proposer" },
+            proposer_raw_text: "loop throw proposer raw",
+            candidate_snapshot: { title: "Replay Loop Throw Smoke", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Loop Throw Smoke\n\nWriter throws so staging must remain." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          const loopThrow = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { throw new Error("intentional writer failure"); },
+          });
+          assert(loopThrow.errors === 1 && loopThrow.succeeded === 0, `writer throw should be replay error: ${JSON.stringify(loopThrow)}`);
+          assert(loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-throw" && entry.retry_attempts === 0), `writer throw should keep original staging without consuming retry budget`);
+          assert(deleteMultiviewPending("multiview-pending-loop-throw") === true, `throw smoke cleanup failed`);
+
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-other-project",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            origin_project_id: "other-project",
+            origin_project_root: "/tmp/other-project-root",
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "wrong project proposer" },
+            proposer_raw_text: "wrong project raw",
+            candidate_snapshot: { title: "Replay Loop Wrong Project", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Loop Wrong Project\n\nMust not write into current project." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          let mismatchWrote = false;
+          const mismatch = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { mismatchWrote = true; },
+          });
+          assert(mismatch.deferred_other_project === 1 && mismatch.errors === 0 && mismatch.auditRows.length === 0 && mismatchWrote === false, `origin mismatch should defer without write/error/per-entry audit spam: ${JSON.stringify(mismatch)} wrote=${mismatchWrote}`);
+          assert(loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-other-project"), `origin mismatch should keep staging for owning project`);
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-owned-behind-other-project",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date(Date.now() + 1_000).toISOString(),
+            updated: new Date().toISOString(),
+            origin_project_id: aTarget.projectId,
+            origin_project_root: aRoot,
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "owned behind mismatch proposer" },
+            proposer_raw_text: "owned behind mismatch raw",
+            candidate_snapshot: { title: "Replay Loop Owned Behind Mismatch", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Loop Owned Behind Mismatch\n\nOwned entry must not be starved by older other-project entries." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          globalThis.__A2_INVOCATIONS__ = 0;
+          globalThis.__A2_RESPONSES__ = [
+            JSON.stringify({ op: "create", scope: "project", confidence: 9, reasoning: "pass1 confirm create" }),
+            JSON.stringify({ verdict: "confirm_proposer", rationale: "pass2 confirms proposer" }),
+          ];
+          let ownedBehindWrote = false;
+          const ownedBehind = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { ownedBehindWrote = true; },
+          });
+          assert(ownedBehind.deferred_other_project === 1 && ownedBehind.succeeded === 1 && ownedBehindWrote === true, `owned entry should process behind other-project entry: ${JSON.stringify(ownedBehind)}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-owned-behind-other-project"), `owned behind mismatch should delete after success`);
+          assert(loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-other-project"), `other-project entry should remain after owned entry drains`);
+          assert(deleteMultiviewPending("multiview-pending-loop-other-project") === true, `origin mismatch smoke cleanup failed`);
+        } finally {
+          if (oldReplayAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+          else process.env.ABRAIN_ROOT = oldReplayAbrainRoot;
+        }
       }
 
       _resetAutoWriteStateForTests();

@@ -390,7 +390,7 @@ function buildAdvisories(summary: Omit<AggregatorSummary, "ok" | "advisories">):
     advisories.push({
       kind: "multiview_pending",
       severity: "warning",
-      message: `${summary.staging.multiview_pending} multi-view reviewer-approved/retryable candidates are pending replay; if this persists, the writeApprovedToBrain replay gap is still costing recall.`,
+      message: `${summary.staging.multiview_pending} multi-view reviewer-approved/retryable candidates are pending replay; if this persists, check replay writer errors, reviewer availability, or terminal retry/stale cleanup.`,
       evidence: { multiview_pending: summary.staging.multiview_pending },
     });
   }

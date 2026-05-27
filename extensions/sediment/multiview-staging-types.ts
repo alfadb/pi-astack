@@ -157,6 +157,17 @@ export interface MultiviewPendingEntry {
   updated?: string;
 
   /**
+   * Project binding that produced this pending candidate. The staging
+   * directory is user-global under one abrain home, so replay must not
+   * let a pending item from project A drain while the user is currently
+   * bound to project B. New entries always set these fields; legacy v1
+   * files without them are treated as local-backcompat and may be replayed
+   * under the current binding.
+   */
+  origin_project_id?: string;
+  origin_project_root?: string;
+
+  /**
    * Hostname of the device that captured this staging entry. Set from
    * `process.env.HOSTNAME ?? os.hostname() ?? "unknown"`.
    *

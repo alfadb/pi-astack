@@ -388,7 +388,7 @@ function mergeUpdateMarkdown(
   patch: ProjectEntryUpdateDraft,
   slug: string,
   projectId: string,
-  mergeOpts: {} = {},
+  mergeOpts: { scope?: "project" | "world" } = {},
 ): { markdown: string; validationDraft: ProjectEntryDraft; sanitizedReplacements: string[] } | { error: string } {
   const timestamp = nowIso();
   const { frontmatterText, body } = splitFrontmatter(raw);
@@ -468,13 +468,16 @@ function mergeUpdateMarkdown(
     }
   }
 
+  const scope = mergeOpts.scope ?? (frontmatter.scope === "world" ? "world" : "project");
   const nextFrontmatter: Record<string, Jsonish> = {
     ...frontmatter,
     // See buildMarkdown above: stay consistent with migrate-go's raw
     // `project:<projectId>:<slug>` form; never run projectId through slugify
-    // (would corrupt ids whose projectId uses uppercase or `_`/`.`).
-    id: frontmatter.id ?? `project:${projectId}:${slug}`,
-    scope: "project",
+    // (would corrupt ids whose projectId uses uppercase or `_`/`.`). World
+    // lifecycle updates must keep world identity instead of rewriting the
+    // file into project-scoped frontmatter.
+    id: scope === "world" ? `world:${slug}` : (frontmatter.id ?? `project:${projectId}:${slug}`),
+    scope,
     kind,
     status,
     confidence,
@@ -486,6 +489,11 @@ function mergeUpdateMarkdown(
   };
   for (const [key, value] of Object.entries(userPatch)) {
     if (value === undefined) delete nextFrontmatter[key];
+  }
+  if (scope === "world") {
+    delete nextFrontmatter.project_id;
+  } else {
+    nextFrontmatter.project_id = frontmatter.project_id ?? projectId;
   }
 
   // ADR 0025 §4.6 archive_at lifecycle management.
@@ -1016,7 +1024,7 @@ export async function updateProjectEntry(
       }));
       return { ok: false, response: { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx } };
     }
-    const merged = mergeUpdateMarkdown(raw, patch, slug, opts.projectId, {});
+    const merged = mergeUpdateMarkdown(raw, patch, slug, opts.projectId, { scope });
     if ("error" in merged) {
       const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
       const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {

@@ -38,6 +38,7 @@ import {
   type RunWindow,
 } from "./checkpoint";
 import { curateProjectDraft, type CuratorAudit } from "./curator";
+import { executeCuratorDecisionToBrain } from "./curator-decision-writer";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitAboutMeBlocks, parseExplicitMemoryBlocks, previewExtraction, type ExtractedAboutMeDraft } from "./extractor";
 import {
@@ -57,11 +58,6 @@ import { sanitizeForMemory } from "./sanitizer";
 
 import {
   appendAudit,
-  archiveProjectEntry,
-  deleteProjectEntry,
-  mergeProjectEntries,
-  supersedeProjectEntry,
-  updateProjectEntry,
   writeAbrainAboutMe,
   writeProjectEntry,
   type AboutMeDraft,
@@ -139,6 +135,7 @@ const sessionAgentCycle = new Map<string, { started: number; ended: number; drai
 const _G = globalThis as typeof globalThis & {
   __sediment_latestSetStatus?: ((msg?: string) => void) | undefined;
   __sediment_inflightCount?: number;
+  __sediment_multiViewReplayInFlight?: Map<string, Promise<void>>;
   /** sessionId of the CURRENT foreground session (updated by
    *  session_start / agent_start). Used by maybeSetIdleIfNoInflight
    *  to distinguish same-session bg completion (keep completed/failed
@@ -147,6 +144,8 @@ const _G = globalThis as typeof globalThis & {
   __sediment_currentSessionId?: string | undefined;
 };
 if (_G.__sediment_inflightCount === undefined) _G.__sediment_inflightCount = 0;
+if (!_G.__sediment_multiViewReplayInFlight) _G.__sediment_multiViewReplayInFlight = new Map<string, Promise<void>>();
+const multiViewReplayInFlight = _G.__sediment_multiViewReplayInFlight;
 
 /** Status key for ctx.ui.setStatus(). */
 const SEDIMENT_STATUS_KEY = FOOTER_STATUS_KEYS.sediment;
@@ -286,7 +285,7 @@ function applySedimentStatus(
  * prompt resets it to idle.
  */
 function maybeSetIdleIfNoInflight(bgSessionId: string | undefined): void {
-  if ((_G.__sediment_inflightCount ?? 0) > 0) return;
+  if ((_G.__sediment_inflightCount ?? 0) > 0 || multiViewReplayInFlight.size > 0) return;
   if (!_G.__sediment_latestSetStatus) return;
   // Same-session bg completion: keep the completed/failed indicator
   // visible. agent_start on the next prompt will reset to idle.
@@ -541,9 +540,9 @@ function safeAuditIdPart(value: string | undefined, fallback: string): string {
 }
 
 function makeCorrelationId(
-  lane: "explicit" | "auto_write" | "about_me",
+  lane: "explicit" | "auto_write" | "about_me" | "replay",
   sessionId: string,
-  window: RunWindow,
+  window: Pick<RunWindow, "lastEntryId">,
 ): string {
   return `${lane}-${safeAuditIdPart(sessionId, "session")}-${safeAuditIdPart(window.lastEntryId, "entry")}-${Date.now().toString(36)}`;
 }
@@ -805,7 +804,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       _G.__sediment_latestSetStatus = setStatus;
       _G.__sediment_currentSessionId = sessionId;
 
-      if ((_G.__sediment_inflightCount ?? 0) > 0) {
+      if ((_G.__sediment_inflightCount ?? 0) > 0 || multiViewReplayInFlight.size > 0) {
         // Inflight bg work from previous session — show running, NOT idle.
         applySedimentStatus(setStatus, sessionId, "running", "prev session");
       } else {
@@ -853,7 +852,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       _G.__sediment_currentSessionId = sessionId;
       // If bg work from a previous session is still inflight, keep
       // showing running instead of resetting to idle.
-      if ((_G.__sediment_inflightCount ?? 0) > 0) {
+      if ((_G.__sediment_inflightCount ?? 0) > 0 || multiViewReplayInFlight.size > 0) {
         applySedimentStatus(setStatus, sessionId, "running", "prev session");
       } else {
         applySedimentStatus(setStatus, sessionId, "idle");
@@ -1130,6 +1129,21 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             // Advisory-only; aggregator failures must never affect sediment.
           }
         })();
+      });
+
+      // Lane R: replay old multi-view staging backlog on every healthy,
+      // bound agent_end, independent of whether this turn also has an
+      // explicit marker or a natural-language auto-write window. The old
+      // implementation only scheduled replay after Lane A/G, so ordinary
+      // conversation turns could leave multiview-pending files undrained.
+      scheduleMultiviewReplay({
+        enabled: settings.autoLlmWriteEnabled !== false,
+        cwd,
+        sessionId,
+        settings,
+        modelRegistry,
+        abrainHome,
+        projectId,
       });
 
       const tStart = Date.now();
@@ -2365,123 +2379,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         }
       }
 
-      // ── Lane R: multi-view replay (fire-and-forget) ─────────────
-      //
-      // Batch 3c-ii: after main lanes finish, kick off retry of any
-      // multiview-pending staging entries (from runMultiView's 6
-      // transient-failure paths). Replay runs as fire-and-forget
-      // because reviewer LLM calls cost ~30s each and 3 entries =
-      // up to 3min — must not block agent_end.
-      //
-      // The kill-switch matches the classifier: when
-      // settings.autoLlmWriteEnabled === false, we do not run replay
-      // either (the user has explicitly opted out of sediment
-      // observation; respect that).
-      //
-      // v1 limit: writeApprovedToBrain stub does NOT actually write
-      // to brain (the curator's op dispatcher lives inline in this
-      // file and refactoring it for replay is deferred to a follow-up
-      // batch). The candidate is dropped + audited "would_write";
-      // staging cleanup + A' layer guarantee still hold, only the
-      // "replay successfully writes the brain decision" cherry on
-      // top is missing. Dogfooders will see clear audit rows.
-      if (classifierEnabled && cwd && sessionId) {
-        // Re-bind for the closure to avoid any subsequent scope mutation.
-        const replayCwd = cwd;
-        const replaySessionId = sessionId;
-        void (async () => {
-          try {
-            const memSettings = resolveMemorySettings();
-            const replayResult: ReplayBatchResult = await replayMultiviewPending({
-              settings,
-              modelRegistry: modelRegistry as Parameters<typeof replayMultiviewPending>[0]["modelRegistry"],
-              loadNeighborsBySlug: async (slugs: string[]) => {
-                if (slugs.length === 0) return [];
-                const all = await (await import("../memory/parser")).loadEntries(replayCwd, memSettings, undefined);
-                const filtered = relevantEntriesForCurator(all);
-                const slugSet = new Set(slugs);
-                return filtered.filter((e) => slugSet.has(e.slug));
-              },
-              writeApprovedToBrain: async (decision, candidate) => {
-                // v1 STUB. See block comment above. Audit row reflects
-                // that we would have executed `decision.op` on this
-                // candidate but did not in this phase. Throwing here
-                // would let replay treat this as a brain-write failure,
-                // which is misleading (the failure is in our scope, not
-                // the writer's). Returning normally lets replay record
-                // outcome=succeeded with the actual decision.
-                //
-                // `candidate_lost: true` flag added in batch 3c-ii.5 fix
-                // (deepseek review I4): even though replay outcome will
-                // be "succeeded", the candidate is genuinely lost —
-                // staging is removed (replay path's design) and no brain
-                // write happened (stub). Audit consumers grepping
-                // `candidate_lost: true` can quantify v1-stub-driven
-                // candidate loss separately from honest skip decisions.
-                appendAudit(replayCwd, {
-                  operation: "multi_view_replay_would_write",
-                  session_id: replaySessionId,
-                  lane: "replay",
-                  decision_op: decision.op,
-                  decision: decision,
-                  candidate_title: candidate.title,
-                  candidate_kind: candidate.kind,
-                  candidate_lost: true,
-                  note: "v1 stub: writer dispatch not implemented in batch 3c-ii; candidate dropped after audit. Follow-up batch will wire writer.",
-                });
-              },
-              signal: undefined,
-            });
-
-            // Audit the replay batch outcome.
-            appendAudit(replayCwd, {
-              operation: "multi_view_replay_batch",
-              session_id: replaySessionId,
-              lane: "replay",
-              attempted: replayResult.attempted,
-              succeeded: replayResult.succeeded,
-              re_staged: replayResult.re_staged,
-              terminal_max_retries: replayResult.terminal_max_retries,
-              terminal_stale: replayResult.terminal_stale,
-              errors: replayResult.errors,
-              total_pending: replayResult.totalPending,
-              durationMs: replayResult.durationMs,
-            });
-
-            // Per-row audit so each entry's full context is traceable.
-            for (const row of replayResult.auditRows) {
-              appendAudit(replayCwd, {
-                operation: "multi_view_replay_entry",
-                session_id: replaySessionId,
-                lane: "replay",
-                slug: row.slug,
-                prior_state: row.prior_state,
-                prior_attempts: row.prior_attempts,
-                age_days: row.age_days,
-                outcome: row.outcome,
-                detail: row.detail,
-                new_state: row.new_state,
-                new_attempts: row.new_attempts,
-                new_decision: row.new_decision,
-                durationMs: row.durationMs,
-              });
-            }
-          } catch (e: unknown) {
-            // Any uncaught error in the replay framework itself (not
-            // per-entry, those are caught inside processOneEntry). Audit
-            // and continue — replay is non-critical; main flow already
-            // succeeded.
-            try {
-              appendAudit(replayCwd, {
-                operation: "multi_view_replay_lane_error",
-                session_id: replaySessionId,
-                lane: "replay",
-                error: e instanceof Error ? e.message : String(e),
-              });
-            } catch { /* best-effort */ }
-          }
-        })();
-      }
 
       // ── Status: combined verdict ──────────────────────────────
       const allResultsStatusSummary = [
@@ -2816,6 +2713,7 @@ async function tryAutoWriteLane(args: {
         modelRegistry,
         signal: args.signal,
         correctionSignal: args.correctionSignal,
+        projectId,
       });
     } catch (e: any) {
       // F4 defense (2026-05-14): curateProjectDraft has internal try/catch
@@ -2839,152 +2737,24 @@ async function tryAutoWriteLane(args: {
       continue;
     }
     curatorAudits.push(curated.audit);
-    if (curated.decision.op === "skip") {
-      results.push({
-        slug: draft.title,
-        path: "",
-        status: "skipped",
-        reason: curated.decision.reason,
-        lane: "auto_write",
-        sessionId,
-        correlationId,
-        candidateId,
-      });
-      continue;
-    }
-    if (curated.decision.op === "update") {
-      results.push(
-        await updateProjectEntry(
-          curated.decision.slug,
-          {
-            ...curated.decision.patch,
-            sessionId,
-            timelineNote:
-              curated.decision.patch.timelineNote ||
-              curated.decision.rationale ||
-              "updated by sediment curator",
-          },
-          {
-            projectRoot: cwd,
-            abrainHome,
-            projectId,
-            scope: curated.decision.scope,
-            settings,
-            dryRun: false,
-            auditContext,
-          },
-        ),
-      );
-      continue;
-    }
-    if (curated.decision.op === "merge") {
-      results.push(
-        ...(await mergeProjectEntries(
-          curated.decision.target,
-          curated.decision.sources,
-          {
-            compiledTruth: curated.decision.compiledTruth,
-            timelineNote: curated.decision.timelineNote,
-            reason:
-              curated.decision.rationale ||
-              curated.decision.timelineNote ||
-              "merged by sediment curator",
-            sessionId,
-          },
-          {
-            projectRoot: cwd,
-            abrainHome,
-            projectId,
-            scope: curated.decision.scope,
-            settings,
-            dryRun: false,
-            auditContext,
-          },
-        )),
-      );
-      continue;
-    }
-    if (curated.decision.op === "archive") {
-      results.push(
-        await archiveProjectEntry(curated.decision.slug, {
-          projectRoot: cwd,
-          abrainHome,
-          projectId,
-          scope: curated.decision.scope,
-          settings,
-          dryRun: false,
-          reason:
-            curated.decision.reason ||
-            curated.decision.rationale ||
-            "archived by sediment curator",
-          sessionId,
-          auditContext,
-        }),
-      );
-      continue;
-    }
-    if (curated.decision.op === "supersede") {
-      results.push(
-        await supersedeProjectEntry(curated.decision.oldSlug, {
-          projectRoot: cwd,
-          abrainHome,
-          projectId,
-          scope: curated.decision.scope,
-          settings,
-          dryRun: false,
-          newSlug: curated.decision.newSlug,
-          reason:
-            curated.decision.reason ||
-            curated.decision.rationale ||
-            "superseded by sediment curator",
-          sessionId,
-          auditContext,
-        }),
-      );
-      continue;
-    }
-    if (curated.decision.op === "delete") {
-      results.push(
-        await deleteProjectEntry(curated.decision.slug, {
-          projectRoot: cwd,
-          abrainHome,
-          projectId,
-          scope: curated.decision.scope,
-          settings,
-          dryRun: false,
-          mode: curated.decision.mode,
-          reason:
-            curated.decision.reason ||
-            curated.decision.rationale ||
-            "deleted by sediment curator",
-          sessionId,
-          auditContext,
-        }),
-      );
-      continue;
-    }
-
     results.push(
-      await writeProjectEntry(
-        {
-          ...draft,
-          ...(curated.decision.op === "create" && curated.decision.derives_from?.length
-            ? { derivesFrom: curated.decision.derives_from }
-            : {}),
-          sessionId,
-          timelineNote:
-            draft.timelineNote || "captured from LLM auto-write extractor",
-        },
-        {
-          projectRoot: cwd,
-          abrainHome,
-          projectId,
-          scope: curated.decision.op === "create" ? (curated.decision.scope ?? "project") : "project",
-          settings,
-          dryRun: false,
-          auditContext,
-        },
-      ),
+      ...(await executeCuratorDecisionToBrain({
+        decision: curated.decision,
+        draft,
+        projectRoot: cwd,
+        abrainHome,
+        projectId,
+        settings,
+        dryRun: false,
+        auditContext,
+        sessionId,
+        createTimelineNote: "captured from LLM auto-write extractor",
+        updateTimelineNote: curated.decision.rationale || "updated by sediment curator",
+        mergeTimelineNote: curated.decision.rationale || "merged by sediment curator",
+        archiveReason: curated.decision.op === "archive" ? curated.decision.reason || curated.decision.rationale || "archived by sediment curator" : undefined,
+        supersedeReason: curated.decision.op === "supersede" ? curated.decision.reason || curated.decision.rationale || "superseded by sediment curator" : undefined,
+        deleteReason: curated.decision.op === "delete" ? curated.decision.reason || curated.decision.rationale || "deleted by sediment curator" : undefined,
+      })),
     );
   }
 
@@ -3025,6 +2795,7 @@ function snapshotSedimentSettings(
  */
 export function _resetAutoWriteStateForTests(): void {
   autoWriteInFlight.clear();
+  multiViewReplayInFlight.clear();
   sedimentStatusBySession.clear();
   sessionAgentCycle.clear();
   sessionCorrectionWorkingSet.clear();
@@ -3052,8 +2823,8 @@ export const _dispatchCorrectionSignalForTests = dispatchCorrectionSignal;
  * on audit rows produced asynchronously.
  */
 export async function _waitForAutoWriteIdleForTests(): Promise<void> {
-  while (autoWriteInFlight.size > 0) {
-    await Promise.allSettled([...autoWriteInFlight.values()]);
+  while (autoWriteInFlight.size > 0 || multiViewReplayInFlight.size > 0) {
+    await Promise.allSettled([...autoWriteInFlight.values(), ...multiViewReplayInFlight.values()]);
   }
 }
 
@@ -3115,6 +2886,166 @@ function readSessionId(
   } catch {
     return undefined;
   }
+}
+
+function scheduleMultiviewReplay(args: {
+  enabled: boolean;
+  cwd: string;
+  sessionId: string;
+  settings: ReturnType<typeof resolveSedimentSettings>;
+  modelRegistry: unknown;
+  abrainHome: string;
+  projectId: string;
+}): void {
+  if (!args.enabled || !args.cwd || !args.sessionId) return;
+
+  // Staging is user-global under one abrain home. Key in-flight replay by
+  // abrain+project binding rather than session so `/new` or two sessions
+  // cannot spend duplicate reviewer calls on the same staging files.
+  const replayCwd = args.cwd;
+  const replaySessionId = args.sessionId;
+  const replayKey = `${path.resolve(args.abrainHome)}:${args.projectId}:${path.resolve(replayCwd)}`;
+  if (multiViewReplayInFlight.has(replayKey)) return;
+
+  // Re-bind for the closure to avoid any subsequent scope mutation.
+  const { settings, modelRegistry, abrainHome, projectId } = args;
+
+  let replayPromise!: Promise<void>;
+  replayPromise = (async () => {
+    try {
+      const memSettings = resolveMemorySettings();
+      const replayResult: ReplayBatchResult = await replayMultiviewPending({
+        settings,
+        modelRegistry: modelRegistry as Parameters<typeof replayMultiviewPending>[0]["modelRegistry"],
+        currentProjectId: projectId,
+        currentProjectRoot: replayCwd,
+        loadNeighborsBySlug: async (slugs: string[]) => {
+          if (slugs.length === 0) return [];
+          const all = await (await import("../memory/parser")).loadEntries(replayCwd, memSettings, undefined);
+          const filtered = relevantEntriesForCurator(all);
+          const bySlug = new Map(filtered.map((entry) => [entry.slug, entry]));
+          return slugs.map((slug) => bySlug.get(slug)).filter((entry): entry is NonNullable<typeof entry> => !!entry);
+        },
+        writeApprovedToBrain: async (decision, candidate) => {
+          const replayCorrelationId = makeCorrelationId("replay", replaySessionId, {
+            lastEntryId: `multiview-replay-${candidate.title}`,
+          });
+          let results: WriteProjectEntryResult[] = [];
+          let dispatcherError: unknown;
+          try {
+            results = await executeCuratorDecisionToBrain({
+              decision,
+              draft: candidate,
+              projectRoot: replayCwd,
+              abrainHome,
+              projectId,
+              settings,
+              dryRun: false,
+              auditContext: {
+                lane: "replay",
+                sessionId: replaySessionId,
+                correlationId: replayCorrelationId,
+                candidateId: candidateIdFor(replayCorrelationId, 0),
+              },
+              sessionId: replaySessionId,
+              createTimelineNote: "captured from multi-view staging replay",
+              updateTimelineNote: decision.rationale || "updated by multi-view staging replay",
+              mergeTimelineNote: decision.rationale || "merged by multi-view staging replay",
+              archiveReason: decision.op === "archive" ? decision.reason || decision.rationale || "archived by multi-view staging replay" : undefined,
+              supersedeReason: decision.op === "supersede" ? decision.reason || decision.rationale || "superseded by multi-view staging replay" : undefined,
+              deleteReason: decision.op === "delete" ? decision.reason || decision.rationale || "deleted by multi-view staging replay" : undefined,
+            });
+          } catch (e: unknown) {
+            dispatcherError = e;
+          }
+
+          await appendAudit(replayCwd, {
+            operation: "multi_view_replay_brain_write",
+            session_id: replaySessionId,
+            lane: "replay",
+            correlation_id: replayCorrelationId,
+            decision_op: decision.op,
+            decision,
+            candidate_title: candidate.title,
+            candidate_kind: candidate.kind,
+            result_count: results.length,
+            results: results.map(resultSummary),
+            writer_rejected: results.some((r) => r.status === "rejected"),
+            ...(dispatcherError ? { dispatcher_error: dispatcherError instanceof Error ? dispatcherError.message : String(dispatcherError) } : {}),
+          });
+
+          if (dispatcherError) throw dispatcherError;
+          const rejected = results.find((r) => r.status === "rejected");
+          if (rejected) {
+            throw new Error(`multi-view replay writer rejected op=${decision.op}: ${rejected.reason || "unknown"}`);
+          }
+          const missingCommit = results.find((r) => settings.gitCommit === true
+            && r.status !== "skipped"
+            && r.status !== "dry_run"
+            && r.gitCommit === null);
+          if (missingCommit) {
+            throw new Error(`multi-view replay writer missing git commit op=${decision.op} status=${missingCommit.status} slug=${missingCommit.slug}`);
+          }
+        },
+        signal: undefined,
+      });
+
+      // Audit the replay batch outcome.
+      await appendAudit(replayCwd, {
+        operation: "multi_view_replay_batch",
+        session_id: replaySessionId,
+        lane: "replay",
+        attempted: replayResult.attempted,
+        succeeded: replayResult.succeeded,
+        re_staged: replayResult.re_staged,
+        terminal_max_retries: replayResult.terminal_max_retries,
+        terminal_stale: replayResult.terminal_stale,
+        deferred_other_project: replayResult.deferred_other_project,
+        errors: replayResult.errors,
+        total_pending: replayResult.totalPending,
+        durationMs: replayResult.durationMs,
+      });
+
+      // Per-row audit so each entry's full context is traceable.
+      for (const row of replayResult.auditRows) {
+        await appendAudit(replayCwd, {
+          operation: row.outcome === "error" ? "multi_view_replay_entry_error" : "multi_view_replay_entry",
+          session_id: replaySessionId,
+          lane: "replay",
+          slug: row.slug,
+          prior_state: row.prior_state,
+          prior_attempts: row.prior_attempts,
+          age_days: row.age_days,
+          outcome: row.outcome,
+          detail: row.detail,
+          new_state: row.new_state,
+          new_attempts: row.new_attempts,
+          new_decision: row.new_decision,
+          durationMs: row.durationMs,
+        });
+      }
+    } catch (e: unknown) {
+      // Any uncaught error in the replay framework itself (not
+      // per-entry, those are caught inside processOneEntry). Audit
+      // and continue — replay is non-critical; main flow already
+      // succeeded.
+      try {
+        await appendAudit(replayCwd, {
+          operation: "multi_view_replay_lane_error",
+          session_id: replaySessionId,
+          lane: "replay",
+          error: e instanceof Error ? e.message : String(e),
+        });
+      } catch { /* best-effort */ }
+    } finally {
+      if (multiViewReplayInFlight.get(replayKey) === replayPromise) {
+        multiViewReplayInFlight.delete(replayKey);
+      }
+      maybeSetIdleIfNoInflight(replaySessionId);
+    }
+  })();
+  multiViewReplayInFlight.set(replayKey, replayPromise);
+  replayPromise.catch(() => {});
 }
 
 // ===========================================================================

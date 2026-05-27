@@ -763,6 +763,8 @@ export type RunMultiViewArgs = {
   settings: SedimentSettings;
   modelRegistry: ModelRegistryLike;
   signal?: AbortSignal;
+  originProjectId?: string;
+  originProjectRoot?: string;
 };
 
 /** Project the candidate draft onto the staging-entry's snapshot
@@ -794,6 +796,7 @@ function buildPendingEntry(
   triggerReason: MultiViewTriggerReason,
   pass1Verdict: Pass1Verdict | undefined,
   pass2Verdict: Pass2Verdict | undefined,
+  origin?: { originProjectId?: string; originProjectRoot?: string },
 ): MultiviewPendingEntry {
   const nowIso = new Date().toISOString();
   const slug = generateMultiviewPendingSlug({
@@ -805,6 +808,8 @@ function buildPendingEntry(
     status: "provisional",
     kind: "multiview-pending",
     created: nowIso,
+    ...(origin?.originProjectId ? { origin_project_id: origin.originProjectId } : {}),
+    ...(origin?.originProjectRoot ? { origin_project_root: origin.originProjectRoot } : {}),
     originating_device: process.env.HOSTNAME ?? os.hostname() ?? "unknown",
     multiview_state: state,
     proposer_decision: args.proposerDecision,
@@ -836,8 +841,9 @@ function stageAndSkipDecision(
   pass2Verdict: Pass2Verdict | undefined,
   errorContext: string,
   overallStart: number,
+  origin?: { originProjectId?: string; originProjectRoot?: string },
 ): MultiViewResult {
-  const entry = buildPendingEntry(args, state, triggerReason, pass1Verdict, pass2Verdict);
+  const entry = buildPendingEntry(args, state, triggerReason, pass1Verdict, pass2Verdict, origin);
   const writtenPath = writeMultiviewPending(entry);
   return {
     triggered: true,
@@ -906,6 +912,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       undefined, undefined,
       "no reviewer model registered or auth unavailable",
       overallStart,
+      args,
     );
   }
 
@@ -937,6 +944,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       undefined, undefined,
       pass1Resp.error,
       overallStart,
+      args,
     );
   }
 
@@ -952,6 +960,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       undefined, undefined,
       `parsePass1 returned null; raw text length=${pass1Resp.text.length} (full text in multi-view-metrics.jsonl)`,
       overallStart,
+      args,
     );
   }
 
@@ -991,6 +1000,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       pass1, undefined,
       pass2Resp.error,
       overallStart,
+      args,
     );
   }
 
@@ -1002,6 +1012,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       pass1, undefined,
       `parsePass2 returned null; raw text length=${pass2Resp.text.length} (full text in multi-view-metrics.jsonl)`,
       overallStart,
+      args,
     );
   }
 
@@ -1037,6 +1048,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
         pass1, pass2,
         pass2.rationale ? `pass 2 deferred: ${pass2.rationale.slice(0, 200)}` : "pass 2 deferred without rationale",
         overallStart,
+        args,
       );
   }
 

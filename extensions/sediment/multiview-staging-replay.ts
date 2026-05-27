@@ -20,9 +20,10 @@
  *             audit-trail continuity.
  *           - Bump retry_attempts on the original entry in place.
  *      f. mvResult.staged absent → replay succeeded:
- *           - Delete original staging entry.
- *           - When final_decision.op !== "skip", invoke caller's
- *             writeApprovedToBrain (the actual brain write).
+ *           - final_decision.op === "skip" → delete original staging entry.
+ *           - final_decision.op !== "skip" → invoke caller's
+ *             writeApprovedToBrain (the actual brain write), then delete
+ *             original staging entry only after the writer succeeds.
  *
  * Audit row format: one ReplayAuditRow per entry processed, returned
  * as the `auditRows` field on ReplayBatchResult so the caller
@@ -34,7 +35,9 @@
  * writeApprovedToBrain inside the per-entry loop is CAUGHT and turned
  * into an `outcome: "error"` audit row. We never let one bad entry
  * abort the entire replay batch — the loop must process all attempted
- * entries even if some fail catastrophically. (Contrast with
+ * entries even if some fail catastrophically. Writer failures keep the
+ * original staging entry so the approved candidate can retry on a later
+ * agent_end instead of being lost after review. (Contrast with
  * runMultiView's own throw policy: there, A' layer must hold, so
  * propagation is correct. Here, we're already on the staging retry
  * path; an additional failure just means "try again next agent_end".)
@@ -44,6 +47,7 @@
  * multiview-staging-types.ts for the D2 discovery).
  */
 
+import * as path from "node:path";
 import type { MemoryEntry } from "../memory/types";
 import type { CuratorDecision } from "./curator";
 import type { ProjectEntryDraft } from "./writer";
@@ -72,6 +76,7 @@ export type ReplayOutcome =
   | "re_staged"             // mvResult still staged → original entry retry++ on disk
   | "terminal_max_retries"  // retry_attempts ≥ retryCapForState → deleted
   | "terminal_stale"        // age ≥ STALE_DAYS_MULTIVIEW_PENDING → deleted
+  | "deferred_other_project"// current binding does not own this entry
   | "error";                // unexpected exception in replay framework
 
 export interface ReplayAuditRow {
@@ -101,6 +106,7 @@ export interface ReplayBatchResult {
   re_staged: number;
   terminal_max_retries: number;
   terminal_stale: number;
+  deferred_other_project: number;
   errors: number;
   /** Total entries on disk before this batch ran (for monitoring). */
   totalPending: number;
@@ -111,6 +117,8 @@ export interface ReplayBatchResult {
 export interface ReplayDeps {
   settings: SedimentSettings;
   modelRegistry: ModelRegistryLike;
+  currentProjectId?: string;
+  currentProjectRoot?: string;
   /** Resolve neighbor slugs to current MemoryEntry contents. Slugs
    *  that no longer exist (archived/deleted/never-existed) should be
    *  omitted from the return value; replay will audit the diff.
@@ -139,7 +147,8 @@ export interface ReplayDeps {
    *  when decision.op === "skip" — the staging entry is just deleted
    *  (the candidate is effectively dropped after reviewer agreed to
    *  drop it). Should be the same writer the original sediment flow
-   *  would have used; caller passes the binding. */
+   *  would have used; caller passes the binding. If this throws, replay
+   *  keeps the original staging entry for retry. */
   writeApprovedToBrain: (
     decision: CuratorDecision,
     candidate: ProjectEntryDraft,
@@ -234,6 +243,17 @@ function startAuditRow(entry: MultiviewPendingEntry, t0: number): ReplayAuditRow
   };
 }
 
+function isOtherProjectEntry(entry: MultiviewPendingEntry, deps: ReplayDeps): boolean {
+  return !!(
+    (entry.origin_project_id && deps.currentProjectId && entry.origin_project_id !== deps.currentProjectId) ||
+    (entry.origin_project_root && deps.currentProjectRoot && path.resolve(entry.origin_project_root) !== path.resolve(deps.currentProjectRoot))
+  );
+}
+
+function originMismatchDetail(entry: MultiviewPendingEntry, deps: ReplayDeps): string {
+  return `origin binding mismatch; entry captured for project=${entry.origin_project_id ?? "unknown"} root=${entry.origin_project_root ?? "unknown"}, current project=${deps.currentProjectId ?? "unknown"} root=${deps.currentProjectRoot ?? "unknown"}. Staging kept for its owning project.`;
+}
+
 // ── Main entry ──────────────────────────────────────────────────────────
 
 /**
@@ -254,6 +274,7 @@ export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBa
     re_staged: 0,
     terminal_max_retries: 0,
     terminal_stale: 0,
+    deferred_other_project: 0,
     errors: 0,
     totalPending: loaded.totalFound,
     auditRows: [],
@@ -265,7 +286,21 @@ export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBa
     return result;
   }
 
-  const toReplay = loaded.entries.slice(0, MAX_REPLAY_PER_AGENT_END);
+  const ownedEntries: MultiviewPendingEntry[] = [];
+  for (const entry of loaded.entries) {
+    if (isOtherProjectEntry(entry, deps)) {
+      // Cross-project deferral is healthy operation, not an entry-level
+      // failure. Count it in the batch summary, but do NOT emit one
+      // per-entry audit row on every agent_end; staging is user-global
+      // and otherwise an idle project B session would append N rows per
+      // turn for project A's backlog.
+      result.deferred_other_project++;
+      continue;
+    }
+    ownedEntries.push(entry);
+  }
+
+  const toReplay = ownedEntries.slice(0, MAX_REPLAY_PER_AGENT_END);
 
   for (const entry of toReplay) {
     if (deps.signal?.aborted) break;  // foreground turn cancellation
@@ -290,6 +325,20 @@ async function processOneEntry(
 ): Promise<void> {
   const entryStart = Date.now();
   const audit = startAuditRow(entry, entryStart);
+
+  // ── Binding guard (cheap, no LLM cost) ──
+  // replayMultiviewPending pre-filters other-project entries before
+  // applying MAX_REPLAY_PER_AGENT_END. Keep the guard here as
+  // defense-in-depth for any direct processOneEntry reuse/refactor.
+
+  if (isOtherProjectEntry(entry, deps)) {
+    audit.outcome = "deferred_other_project";
+    audit.detail = originMismatchDetail(entry, deps);
+    audit.durationMs = Date.now() - entryStart;
+    result.deferred_other_project++;
+    result.auditRows.push(audit);
+    return;
+  }
 
   // ── Terminal checks (cheap, no LLM cost) ──
 
@@ -338,6 +387,8 @@ async function processOneEntry(
       settings: deps.settings,
       modelRegistry: deps.modelRegistry,
       signal: deps.signal,
+      originProjectId: entry.origin_project_id ?? deps.currentProjectId,
+      originProjectRoot: entry.origin_project_root ?? deps.currentProjectRoot,
     });
   } catch (e: unknown) {
     audit.outcome = "error";
@@ -454,17 +505,13 @@ async function processOneEntry(
 
   const finalDecision = mvResult.final_decision;
 
-  // Delete original staging FIRST — if brain write throws later, we
-  // don't want a duplicate staging entry to retry. The candidate is
-  // already past the A' gate (reviewer agreed), so dropping it now
-  // is acceptable.
-  deleteMultiviewPending(entry.slug);
-
   if (finalDecision.op === "skip") {
     // Reviewer ultimately decided skip on replay (e.g. confirm_pass1
     // not synthesizable, multi-view-rejected, deferred-without-staging
     // — all paths that would have been skip the first time). No brain
-    // write needed; staging file already removed.
+    // write needed; remove the staging entry only after the terminal
+    // skip decision is known.
+    deleteMultiviewPending(entry.slug);
     audit.outcome = "succeeded";
     audit.new_decision = finalDecision;
     audit.detail = `replay decided op=skip(${finalDecision.reason ?? "no reason"}); staging removed, no brain write.${vanishedDetail()}`;
@@ -482,6 +529,7 @@ async function processOneEntry(
   try {
     const draft = draftFromSnapshot(entry, finalDecision);
     await deps.writeApprovedToBrain(finalDecision, draft);
+    deleteMultiviewPending(entry.slug);
     audit.outcome = "succeeded";
     audit.new_decision = finalDecision;
     audit.detail = `replay decided op=${finalDecision.op}; brain write executed; staging removed. metadata_lost: triggerPhrases${draft.derivesFrom ? "" : ", derivesFrom"}, sessionId, timelineNote${vanishedDetail()}`;
@@ -489,14 +537,14 @@ async function processOneEntry(
     result.succeeded++;
     result.auditRows.push(audit);
   } catch (e: unknown) {
-    // Brain write failed AFTER we already removed staging. This is
-    // unrecoverable for THIS candidate (the staging entry is gone,
-    // the brain write didn't land). Audit loudly so the dogfooder
-    // can spot it; the candidate is lost, but A' was respected
-    // (reviewer agreed) — the loss is in the persistence layer.
+    // Brain write failed. Keep the original staging entry on disk so
+    // a later agent_end can retry the persistence step instead of
+    // turning a transient writer rejection into silent approval loss.
+    // A' was respected (reviewer agreed); the remaining risk is
+    // persistence liveness, so preserving the candidate is preferable.
     audit.outcome = "error";
     audit.new_decision = finalDecision;
-    audit.detail = `replay decided op=${finalDecision.op} but writeApprovedToBrain threw: ${e instanceof Error ? e.message : String(e)}. Staging already removed; candidate is LOST. Investigate writer logs.${vanishedDetail()}`;
+    audit.detail = `replay decided op=${finalDecision.op} but writeApprovedToBrain threw: ${e instanceof Error ? e.message : String(e)}. Staging kept for retry; investigate writer logs if this persists.${vanishedDetail()}`;
     audit.durationMs = Date.now() - entryStart;
     result.errors++;
     result.auditRows.push(audit);
