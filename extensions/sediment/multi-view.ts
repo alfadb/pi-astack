@@ -63,6 +63,12 @@ import {
   generateMultiviewPendingSlug,
   writeMultiviewPending,
 } from "./multiview-staging-io";
+import {
+  fingerprintCandidate,
+  lookupSkipCache,
+  writeSkipCacheEntry,
+  SKIP_CACHE_DEFAULT_TTL_MS,
+} from "./multi-view-skip-cache";
 import * as os from "node:os";
 import type { ModelRegistryLike } from "./llm-extractor";
 import { sanitizeForMemory } from "./sanitizer";
@@ -910,6 +916,35 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
     };
   }
 
+  // ADR 0027 PR-B+ R1 P1-9: skip-cache short-circuit. If this exact
+  // candidate shape (op + slug + compiledTruth prefix) was previously
+  // deemed unsynthesizable by multi-view within the TTL window, skip
+  // straight to the same outcome without burning reviewer API calls.
+  // See multi-view-skip-cache.ts for the dead-loop rationale.
+  //
+  // Only candidates that COULD be unsynthesizable get cache lookups;
+  // create/skip never produce unsynthesizable outcomes by construction
+  // (Pass 1 schema CAN synthesize them). For those, the cache will
+  // never hit (no entries written) but the lookup cost is one fs read
+  // (~negligible).
+  const fp = fingerprintCandidate(args.proposerDecision, args.candidate);
+  const cacheHit = lookupSkipCache(fp);
+  if (cacheHit.hit) {
+    return {
+      triggered: true,
+      trigger_reason: trigger.reason,
+      final_decision: {
+        op: "skip",
+        reason: "multiview_skip_cache_hit",
+        rationale:
+          `Same candidate shape (op=${cacheHit.entry.proposer_op}, fp=${fp.slice(0, 12)}…) was previously deemed unsynthesizable by multi-view ` +
+          `at ${cacheHit.entry.ts} (Pass 1 op=${cacheHit.entry.pass1_op}). ` +
+          `Skipping to avoid dead-loop cost; cache TTL=${Math.floor(SKIP_CACHE_DEFAULT_TTL_MS / 86400000)}d.`,
+      },
+      durationMs: Date.now() - overallStart,
+    };
+  }
+
   const reviewer = selectReviewerModel(args.settings, args.modelRegistry);
   if (!reviewer) {
     // batch 3b: stage instead of falling back to proposer direct-write.
@@ -1040,6 +1075,33 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
           reason: "multiview_pass1_op_not_synthesizable",
           rationale: `Pass 1 recommended op=${pass1.op} but reviewer schema did not include the rich payload (patch / compiled_truth / merge sources) required to safely execute that op. Defaulting to skip per P0.5 conservative path.`,
         };
+        // ADR 0027 PR-B+ R1 P1-9: cache this fingerprint so the next
+        // multi-view call with the SAME candidate shape short-circuits
+        // to skip without burning reviewer calls. See P1-9 doc on
+        // multi-view-skip-cache.ts for dead-loop rationale + TTL choice.
+        try {
+          const cacheFp = fingerprintCandidate(args.proposerDecision, args.candidate);
+          // Best-effort: capture proposer slug shape for diagnostics.
+          const proposerOp = args.proposerDecision.op;
+          let proposerSlug = "";
+          if ("slug" in args.proposerDecision && typeof args.proposerDecision.slug === "string") {
+            proposerSlug = args.proposerDecision.slug;
+          } else if ("target" in args.proposerDecision && typeof (args.proposerDecision as { target?: unknown }).target === "string") {
+            proposerSlug = (args.proposerDecision as { target: string }).target;
+          }
+          writeSkipCacheEntry({
+            fingerprint: cacheFp,
+            ts: new Date().toISOString(),
+            pass1_op: pass1.op,
+            pass1_reasoning_snippet: pass1.reasoning
+              ? pass1.reasoning.slice(0, 200)
+              : undefined,
+            proposer_op: proposerOp,
+            ...(proposerSlug ? { proposer_slug: proposerSlug } : {}),
+          });
+        } catch {
+          // best-effort; cache failure must not break multi-view
+        }
       }
       break;
     }
