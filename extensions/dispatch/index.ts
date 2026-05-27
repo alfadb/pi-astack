@@ -412,13 +412,25 @@ let _sharedInfraPromise: Promise<{
  *  true, `dispatch.activate(pi)` is being called from inside the shared
  *  sub-agent loader (via resourceLoader.reload below). In that runtime,
  *  every session_start fires for a sub-agent — the perfect probe site to
- *  verify SessionManager passthrough invariant. See pi-internals.ts. */
-let _activatingInSharedLoader = false;
+ *  verify SessionManager passthrough invariant. See pi-internals.ts.
+ *
+ *  R4 NEW-P0 fix: stored on globalThis singleton so the flag set by
+ *  main-pi's dispatch instance is visible to the shared-loader's dispatch
+ *  instance (different jiti, different module copies otherwise). */
+const _SHARED_LOADER_FLAG_KEY = Symbol.for("pi-astack/dispatch/activating-shared-loader/v1");
+
+function _setActivatingInSharedLoader(v: boolean): void {
+  (globalThis as Record<symbol, unknown>)[_SHARED_LOADER_FLAG_KEY] = v;
+}
+
+function _isActivatingInSharedLoaderInternal(): boolean {
+  return Boolean((globalThis as Record<symbol, unknown>)[_SHARED_LOADER_FLAG_KEY]);
+}
 
 /** Public for tests / diagnostics. Returns true during the brief window
  *  resourceLoader.reload() is initializing the shared sub-agent extensions. */
 export function _isActivatingInSharedLoader(): boolean {
-  return _activatingInSharedLoader;
+  return _isActivatingInSharedLoaderInternal();
 }
 
 function getSharedInfra(): Promise<{
@@ -447,14 +459,15 @@ function getSharedInfra(): Promise<{
         noContextFiles: true,
       });
       // ADR 0027 PR-B+ R1 P1-1: arm the boundary sentinel for activate() calls
-      // happening inside this reload. The flag is process-wide module state
-      // (same as _sharedInfraPromise) so activate() reads it correctly even
-      // across the async-load barrier.
-      _activatingInSharedLoader = true;
+      // happening inside this reload. The flag is process-wide globalThis
+      // singleton (R4 NEW-P0 fix) so the shared-loader's dispatch instance
+      // (DIFFERENT jiti module copy from main pi's dispatch) reads the same
+      // flag value.
+      _setActivatingInSharedLoader(true);
       try {
         await resourceLoader.reload();
       } finally {
-        _activatingInSharedLoader = false;
+        _setActivatingInSharedLoader(false);
       }
       return { settingsManager, resourceLoader };
     })();
@@ -880,7 +893,7 @@ export default function (pi: ExtensionAPI) {
   // assumption. Probe is one-shot per process. We do NOT install on the
   // main pi runtime because in main pi, session_start is for the main
   // session (not a sub-agent) and would always look unmarked.
-  if (_activatingInSharedLoader) {
+  if (_isActivatingInSharedLoaderInternal()) {
     bindSubAgentBoundarySentinel(pi);
   }
 

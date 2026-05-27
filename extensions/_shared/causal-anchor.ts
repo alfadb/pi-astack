@@ -65,17 +65,74 @@ export interface CausalAnchor {
 
 // ── Process-level state ─────────────────────────────────────────────────
 
-let _currentSessionId: string | undefined;
-/** User-level turn counter. -1 means "not yet bumped" (no before_agent_start
- *  has fired since session_start). First user prompt → 0. */
-let _currentTurnId = -1;
-/** Per-(session_id, turn_id) sub-agent sequence counter — keyed
- *  `${session_id}|${turn_id}`. Bumped each time `deriveSubAgentAnchor` is
- *  called within the same parent turn, so dispatch_parallel of N sub-agents
- *  produces subturn=1..N stably across retries (Map persists in-process). */
-const _subturnCounters = new Map<string, number>();
+// State below is stored on `globalThis[Symbol.for(...)]` so all extension
+// instances of this module — each loaded by a separate jiti instance with
+// moduleCache:false — share the SAME state. See R4 NEW-P0 fix doc below.
+//
+// ## Why globalThis singleton (R4 NEW-P0 critical)
+//
+// pi's extension loader creates a fresh `jiti` instance per extension
+// (`core/extensions/loader.js:265: createJiti(..., { moduleCache: false })`)
+// AND `moduleCache: false` ALSO disables jiti's nested-import cache: each
+// extension that imports `_shared/causal-anchor.ts` gets its OWN copy of
+// the module, including separate `currentSessionId`, `currentTurnId`,
+// `subturnCounters`, and `triggerAnchorALS` instances.
+//
+// Empirically verified (R4 jiti probe):
+//   - main pi loads dispatch via jiti1 → dispatch.causal-anchor instance A
+//   - main pi loads memory via jiti2 → memory.causal-anchor instance B
+//   - A.runWithTriggerAnchor(…) writes ALS in A only
+//   - B.getCurrentAnchor() reads ALS from B → sees nothing
+//
+// This breaks ALL cross-extension cross-cutting concerns: R3 sub-agent
+// anchor scope, P1-3 memory/llm-search anchor retrofit, even the live
+// anchor state read by any extension other than dispatch (only dispatch
+// calls bindLifecycle).
+//
+// Fix: store all shared state on `globalThis[Symbol.for("…")]`. Symbol.for()
+// gives a process-wide registry keyed by string — different module instances
+// calling `Symbol.for("same-key")` get the SAME symbol → SAME slot on
+// globalThis → SAME state object.
+//
+// ## Versioning
+//
+// The key includes `/v1` so a future state-shape change can bump the
+// version and old + new state can coexist briefly during rollouts.
 
-/**
+const _STATE_KEY = Symbol.for("pi-astack/causal-anchor/state/v1");
+
+type CausalAnchorState = {
+  currentSessionId: string | undefined;
+  /** -1 means "not yet bumped" (no before_agent_start has fired). First user prompt → 0. */
+  currentTurnId: number;
+  /** Per-(session_id, turn_id) sub-agent sequence counter, keyed `${session_id}|${turn_id}`.
+   *  dispatch_parallel of N tasks produces subturn=1..N stably. */
+  subturnCounters: Map<string, number>;
+  /** AsyncLocalStorage holder for runWithTriggerAnchor trigger-time snapshot.
+   *  Same ALS instance shared across all module imports → cross-extension
+   *  scope visibility (e.g., dispatch sets scope, sub-agent's memory_decide reads it). */
+  triggerAnchorALS: AsyncLocalStorage<{ anchor: CausalAnchor | undefined }>;
+};
+
+function _getState(): CausalAnchorState {
+  const g = globalThis as Record<symbol, unknown>;
+  let state = g[_STATE_KEY] as CausalAnchorState | undefined;
+  if (!state) {
+    state = {
+      currentSessionId: undefined,
+      currentTurnId: -1,
+      subturnCounters: new Map<string, number>(),
+      triggerAnchorALS: new AsyncLocalStorage<{ anchor: CausalAnchor | undefined }>(),
+    };
+    g[_STATE_KEY] = state;
+  }
+  return state;
+}
+
+/* ALS instance is part of the globalThis singleton (see _getState above).
+ * The doc block below preserves the R1 P0-β design rationale; the ALS
+ * itself lives on state.triggerAnchorALS so cross-extension scopes propagate.
+ *
  * ADR 0027 PR-B+ R1 P0-β — trigger-time anchor snapshot storage.
  *
  * # Problem this solves
@@ -123,7 +180,7 @@ const _subturnCounters = new Map<string, number>();
  *   - Multiple lifecycle handlers running concurrently: each
  *     `runWithTriggerAnchor` creates its own ALS context. ✓
  */
-const _triggerAnchorALS = new AsyncLocalStorage<{ anchor: CausalAnchor | undefined }>();
+// (legacy ALS variable removed; lives in state.triggerAnchorALS now)
 
 // ── Lifecycle binding ───────────────────────────────────────────────────
 
@@ -161,8 +218,9 @@ export function bindLifecycle(pi: ExtensionAPI): void {
     try {
       const sm = (ctx as { sessionManager?: { getSessionId?(): string | null | undefined } })?.sessionManager;
       const id = typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
-      _currentSessionId = id ?? undefined;
-      _currentTurnId = -1; // next before_agent_start will bump to 0
+      const state = _getState();
+      state.currentSessionId = id ?? undefined;
+      state.currentTurnId = -1; // next before_agent_start will bump to 0
     } catch {
       // Defensive: extension lifecycle must never throw.
     }
@@ -173,7 +231,7 @@ export function bindLifecycle(pi: ExtensionAPI): void {
     if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
 
     // Fired once per user prompt submission — perfect monotonic bump point.
-    _currentTurnId++;
+    _getState().currentTurnId++;
   });
 }
 
@@ -198,14 +256,15 @@ export function bindLifecycle(pi: ExtensionAPI): void {
  *  line with whatever they have (per C5 fail-degrade). spreadAnchor()
  *  handles undefined gracefully. */
 export function getCurrentAnchor(): CausalAnchor | undefined {
+  const state = _getState();
   // (1) trigger-time scope override (ALS) takes precedence
-  const scoped = _triggerAnchorALS.getStore();
+  const scoped = state.triggerAnchorALS.getStore();
   if (scoped) return scoped.anchor;
   // (2) live module state
-  if (!_currentSessionId || _currentTurnId < 0) return undefined;
+  if (!state.currentSessionId || state.currentTurnId < 0) return undefined;
   return {
-    session_id: _currentSessionId,
-    turn_id: _currentTurnId,
+    session_id: state.currentSessionId,
+    turn_id: state.currentTurnId,
   };
 }
 
@@ -234,7 +293,7 @@ export function runWithTriggerAnchor<T>(
   anchor: CausalAnchor | undefined,
   fn: () => T,
 ): T {
-  return _triggerAnchorALS.run({ anchor }, fn);
+  return _getState().triggerAnchorALS.run({ anchor }, fn);
 }
 
 /** Derive an anchor for a sub-agent dispatched from the current main turn.
@@ -252,9 +311,10 @@ export function deriveSubAgentAnchor(
   subAgentLabel?: string,
 ): CausalAnchor | undefined {
   if (!parent) return undefined;
+  const counters = _getState().subturnCounters;
   const key = `${parent.session_id}|${parent.turn_id}`;
-  const next = (_subturnCounters.get(key) ?? 0) + 1;
-  _subturnCounters.set(key, next);
+  const next = (counters.get(key) ?? 0) + 1;
+  counters.set(key, next);
   return {
     session_id: parent.session_id,
     turn_id: parent.turn_id,
@@ -426,9 +486,10 @@ export function _resetDeviceIdCacheForTests(): void {
 
 /** Test-only: reset all internal state. Production code MUST NOT call. */
 export function _resetCausalAnchorForTests(): void {
-  _currentSessionId = undefined;
-  _currentTurnId = -1;
-  _subturnCounters.clear();
+  const state = _getState();
+  state.currentSessionId = undefined;
+  state.currentTurnId = -1;
+  state.subturnCounters.clear();
   // ALS is per-async-context; no global reset needed. Any test that wants
   // to assert "no scope active" should just call getCurrentAnchor() outside
   // any runWithTriggerAnchor() block.
@@ -438,6 +499,7 @@ export function _resetCausalAnchorForTests(): void {
  *  Useful for unit tests that exercise derive/format helpers without
  *  spinning up a real ExtensionAPI. */
 export function _setCurrentAnchorForTests(sessionId: string | undefined, turnId: number): void {
-  _currentSessionId = sessionId;
-  _currentTurnId = turnId;
+  const state = _getState();
+  state.currentSessionId = sessionId;
+  state.currentTurnId = turnId;
 }

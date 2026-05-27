@@ -631,7 +631,57 @@ export function warnOnceIfUnavailable(
 // pi-internals coupling and stays correct across pi versions as long as
 // ExtensionContext.sessionManager remains a passthrough getter.
 
-const SUB_AGENT_SESSION_MANAGERS = new WeakSet<object>();
+// State below is stored on `globalThis[Symbol.for(...)]` so all extension
+// instances of this module — each loaded by a separate jiti instance with
+// moduleCache:false — share the SAME state.
+//
+// ## Why globalThis singleton (R4 NEW-P0 critical, same root cause as causal-anchor.ts)
+//
+// pi's extension loader creates a fresh `jiti` instance per extension and
+// `moduleCache: false` disables nested-import cache. Empirically (R4 jiti
+// probe), dispatch's pi-internals.ts is a DIFFERENT module instance from
+// sediment's pi-internals.ts. Without globalThis sharing:
+//   - dispatch.markSessionAsSubAgent(sm) writes to dispatch's WeakSet
+//   - sediment.isSubAgentSession(ctx) reads sediment's DIFFERENT WeakSet → empty
+//   - returns false → sediment.agent_end runs on sub-agent sessions →
+//     INV-IMPLICIT-GROUND-TRUTH violation (sub-agent output learned as user signal)
+//
+// In production the sediment violation was masked by the orthogonal
+// `if (!sessionId) return` ephemeral-session early-return (sub-agent uses
+// SessionManager.inMemory() which has no session id). But all OTHER
+// handlers (compaction-tuner, model-fallback, model-curator, persistent-
+// input-history, abrain rule-injector) rely on isSubAgentSession() ALONE
+// and have been silently firing in sub-agent contexts.
+//
+// Fix: state on globalThis so every module instance reads/writes the same
+// WeakSet + boundary probe state.
+
+const _SUB_AGENT_STATE_KEY = Symbol.for("pi-astack/pi-internals/sub-agent/v1");
+
+type SubAgentState = {
+  weakSet: WeakSet<object>;
+  boundaryProbeStatus: BoundaryProbeStatus;
+  boundaryProbeDiagnostic: {
+    observedSmType: string;
+    observedSmKeys: string[];
+    weakSetSize: "weak-set-opaque";
+    timestamp: string;
+  } | null;
+};
+
+function _getSubAgentState(): SubAgentState {
+  const g = globalThis as Record<symbol, unknown>;
+  let state = g[_SUB_AGENT_STATE_KEY] as SubAgentState | undefined;
+  if (!state) {
+    state = {
+      weakSet: new WeakSet<object>(),
+      boundaryProbeStatus: "untested",
+      boundaryProbeDiagnostic: null,
+    };
+    g[_SUB_AGENT_STATE_KEY] = state;
+  }
+  return state;
+}
 
 /** Mark a SessionManager instance as belonging to a dispatch-spawned sub-agent.
  *  Must be called BEFORE passing the SessionManager to createAgentSession,
@@ -641,7 +691,7 @@ const SUB_AGENT_SESSION_MANAGERS = new WeakSet<object>();
  *  Idempotent: re-marking the same instance is a no-op. */
 export function markSessionAsSubAgent(sessionManager: object): void {
   if (sessionManager == null || typeof sessionManager !== "object") return;
-  SUB_AGENT_SESSION_MANAGERS.add(sessionManager);
+  _getSubAgentState().weakSet.add(sessionManager);
 }
 
 /** Whether a lifecycle handler is currently running inside a dispatch-spawned
@@ -657,7 +707,7 @@ export function isSubAgentSession(ctx: { sessionManager?: unknown } | undefined 
   if (!ctx) return false;
   const sm = ctx.sessionManager;
   if (sm == null || typeof sm !== "object") return false;
-  return SUB_AGENT_SESSION_MANAGERS.has(sm);
+  return _getSubAgentState().weakSet.has(sm);
 }
 
 /** Test-only: clear the marker set. Production code should never need this
@@ -711,31 +761,25 @@ export function _resetSubAgentMarkersForTests(): void {
 // to prove the invariant. Subsequent spawns are no-op fast path.
 
 type BoundaryProbeStatus = "untested" | "ok" | "broken";
-let _boundaryProbeStatus: BoundaryProbeStatus = "untested";
-/** Last observed mismatch info (for diagnostic; null if no mismatch seen). */
-let _boundaryProbeDiagnostic: {
-  observedSmType: string;
-  observedSmKeys: string[];
-  weakSetSize: "weak-set-opaque";
-  timestamp: string;
-} | null = null;
 
 /** Current sentinel status. "untested" until first sub-agent session_start;
  *  "ok" once verified; "broken" if invariant violation detected. */
 export function getSubAgentBoundaryStatus(): BoundaryProbeStatus {
-  return _boundaryProbeStatus;
+  return _getSubAgentState().boundaryProbeStatus;
 }
 
 /** Diagnostic snapshot of a detected mismatch. null when sentinel is OK
  *  or hasn't yet observed any session_start in shared loader. */
-export function getSubAgentBoundaryDiagnostic(): typeof _boundaryProbeDiagnostic {
-  return _boundaryProbeDiagnostic ? { ..._boundaryProbeDiagnostic } : null;
+export function getSubAgentBoundaryDiagnostic(): SubAgentState["boundaryProbeDiagnostic"] {
+  const d = _getSubAgentState().boundaryProbeDiagnostic;
+  return d ? { ...d } : null;
 }
 
 /** Test-only: reset sentinel state. Production must not call. */
 export function _resetSubAgentBoundaryProbeForTests(): void {
-  _boundaryProbeStatus = "untested";
-  _boundaryProbeDiagnostic = null;
+  const state = _getSubAgentState();
+  state.boundaryProbeStatus = "untested";
+  state.boundaryProbeDiagnostic = null;
 }
 
 /**
@@ -758,7 +802,7 @@ export function bindSubAgentBoundarySentinel(
 
   pi.on("session_start", (_event: unknown, ctx: unknown) => {
     // Idempotency: once we've verified OR detected breakage, stop probing.
-    if (_boundaryProbeStatus !== "untested") return;
+    if (_getSubAgentState().boundaryProbeStatus !== "untested") return;
 
     const c = ctx as { sessionManager?: unknown } | undefined | null;
     const sm = c?.sessionManager;
@@ -768,18 +812,19 @@ export function bindSubAgentBoundarySentinel(
       return;
     }
 
+    const subAgentState = _getSubAgentState();
     if (isSubAgentSession(c)) {
       // ✓ The SM in ctx is identity-equal to one we marked. Passthrough
       // invariant holds. Sentinel passes — sticky from now on.
-      _boundaryProbeStatus = "ok";
+      subAgentState.boundaryProbeStatus = "ok";
       return;
     }
 
     // ✗ In the shared sub-agent loader, session_start is supposed to be
     // a sub-agent session. But the SM we see isn't in our WeakSet.
     // SessionManager passthrough invariant is broken.
-    _boundaryProbeStatus = "broken";
-    _boundaryProbeDiagnostic = {
+    subAgentState.boundaryProbeStatus = "broken";
+    subAgentState.boundaryProbeDiagnostic = {
       observedSmType: Object.prototype.toString.call(sm),
       observedSmKeys: (() => {
         try {
@@ -820,9 +865,9 @@ export function bindSubAgentBoundarySentinel(
       "  WeakSet section for the invariant documentation.\n" +
       "\n" +
       `  Observed SM diagnostic:\n` +
-      `    type:  ${_boundaryProbeDiagnostic.observedSmType}\n` +
-      `    keys:  ${JSON.stringify(_boundaryProbeDiagnostic.observedSmKeys)}\n` +
-      `    when:  ${_boundaryProbeDiagnostic.timestamp}\n` +
+      `    type:  ${_getSubAgentState().boundaryProbeDiagnostic?.observedSmType}\n` +
+      `    keys:  ${JSON.stringify(_getSubAgentState().boundaryProbeDiagnostic?.observedSmKeys)}\n` +
+      `    when:  ${_getSubAgentState().boundaryProbeDiagnostic?.timestamp}\n` +
       "\n" +
       "  Action: investigate pi SDK's ExtensionContext shape and adjust\n" +
       "  pi-internals.ts WeakSet marker mechanism.\n" +

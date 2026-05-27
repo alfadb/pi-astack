@@ -36,6 +36,7 @@
     "smoke:memory-subagent-prompt": "node scripts/smoke-memory-subagent-prompt.mjs",
     "smoke:causal-anchor-device-id": "node scripts/smoke-causal-anchor-device-id.mjs",
     "smoke:r2-newp1-fixes": "node scripts/smoke-r2-newp1-fixes.mjs",
+    "smoke:jiti-singleton": "node scripts/smoke-jiti-singleton.mjs",
     "smoke:paths": "node scripts/smoke-pi-astack-paths.mjs",
     "smoke:vault-subpi-isolation": "node scripts/smoke-vault-subpi-isolation.mjs",
     "smoke:abrain": "node scripts/smoke-abrain-backend-detect.mjs",
