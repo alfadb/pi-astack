@@ -38,7 +38,7 @@ import {
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
-import { markSessionAsSubAgent } from "../_shared/pi-internals";
+import { markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
 import {
   bindLifecycle as bindCausalAnchorLifecycle,
   getCurrentAnchor,
@@ -407,6 +407,19 @@ let _sharedInfraPromise: Promise<{
   resourceLoader: any;
 }> | undefined = undefined;
 
+/** ADR 0027 PR-B+ R1 P1-1 (sub-agent boundary sentinel): when this flag is
+ *  true, `dispatch.activate(pi)` is being called from inside the shared
+ *  sub-agent loader (via resourceLoader.reload below). In that runtime,
+ *  every session_start fires for a sub-agent — the perfect probe site to
+ *  verify SessionManager passthrough invariant. See pi-internals.ts. */
+let _activatingInSharedLoader = false;
+
+/** Public for tests / diagnostics. Returns true during the brief window
+ *  resourceLoader.reload() is initializing the shared sub-agent extensions. */
+export function _isActivatingInSharedLoader(): boolean {
+  return _activatingInSharedLoader;
+}
+
 function getSharedInfra(): Promise<{
   settingsManager: any;
   resourceLoader: any;
@@ -432,7 +445,16 @@ function getSharedInfra(): Promise<{
         noThemes: true,
         noContextFiles: true,
       });
-      await resourceLoader.reload();
+      // ADR 0027 PR-B+ R1 P1-1: arm the boundary sentinel for activate() calls
+      // happening inside this reload. The flag is process-wide module state
+      // (same as _sharedInfraPromise) so activate() reads it correctly even
+      // across the async-load barrier.
+      _activatingInSharedLoader = true;
+      try {
+        await resourceLoader.reload();
+      } finally {
+        _activatingInSharedLoader = false;
+      }
       return { settingsManager, resourceLoader };
     })();
     // P1 fix: don't cache failures. If init throws, clear the promise so
@@ -826,6 +848,18 @@ export default function (pi: ExtensionAPI) {
   // the edge case where dispatch tools are loaded in an intentional
   // sub-process (not our concern, but belt-and-suspenders).
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
+  // ADR 0027 PR-B+ R1 P1-1: if we're activating inside the shared
+  // sub-agent loader, install the SessionManager passthrough boundary
+  // sentinel. This pi.on("session_start") listener runs in the sub-agent
+  // runtime and will detect (loud-warn) if pi upgrade ever wraps
+  // SessionManager in a Proxy/facade, breaking the WeakSet identity
+  // assumption. Probe is one-shot per process. We do NOT install on the
+  // main pi runtime because in main pi, session_start is for the main
+  // session (not a sub-agent) and would always look unmarked.
+  if (_activatingInSharedLoader) {
+    bindSubAgentBoundarySentinel(pi);
+  }
 
   // ADR 0027 C6a: bind dispatch (canonical anchor owner) to lifecycle events
   // so the main-session (session_id, turn_id) is tracked process-wide and

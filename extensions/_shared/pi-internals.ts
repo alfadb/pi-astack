@@ -667,3 +667,168 @@ export function _resetSubAgentMarkersForTests(): void {
   // SessionManager refs between tests, so GC handles it. This stub exists
   // only to satisfy test-suite contract symmetry with _resetWarnedApisForTests. */
 }
+
+// ── Sub-agent passthrough boundary sentinel (ADR 0027 PR-B+ R1 P1-1) ──
+//
+// The WeakSet-based `isSubAgentSession(ctx)` defense (above) is grounded
+// in ONE critical invariant from pi's SDK:
+//
+//   ExtensionContext.sessionManager is a PASSTHROUGH reference — the
+//   exact same object identity that was passed to createAgentSession.
+//
+// If a future pi version wraps SessionManager in a Proxy / facade / Pick<>
+// adapter that returns a new object at the ExtensionContext boundary, then:
+//   1. dispatch calls markSessionAsSubAgent(sm) — sm goes into WeakSet
+//   2. createAgentSession spawns lifecycle handlers with
+//      ctx.sessionManager = wrapper(sm) — a DIFFERENT object
+//   3. handlers call isSubAgentSession(ctx) → WeakSet.has(wrapper(sm)) → false
+//   4. sediment / model-fallback / etc. run as if main session
+//   5. sub-agent reasoning gets learned as user implicit truth signal
+//      (violates ADR 0024 INV-IMPLICIT-GROUND-TRUTH and ADR 0027 PR-B)
+//
+// The failure mode is SILENT — nothing throws, audit rows look normal,
+// just the brain slowly absorbs sub-agent reasoning as user signal. R1
+// review (Opus, Step 5-3) called this "the most hidden time bomb".
+//
+// This sentinel detects the violation by registering a one-time probe on
+// the SHARED SUB-AGENT LOADER's pi.on("session_start"). In the shared
+// loader's runtime, EVERY session_start fires for a sub-agent (the loader
+// only spawns sub-agent AgentSessions). So:
+//
+//   - if isSubAgentSession(ctx) returns true at session_start, the
+//     passthrough invariant is VERIFIED for the runtime  → boundary OK
+//   - if isSubAgentSession(ctx) returns false at session_start, the
+//     invariant is VIOLATED  → loud alarm
+//
+// No race conditions: the shared loader is ONLY accessed via dispatch's
+// runInProcess, which marks the SM before calling createAgentSession.
+// Sub-agents do not spawn their own sub-agents (nested dispatch is
+// forbidden per ADR 0027), so session_start in shared loader is always
+// (markSessionAsSubAgent → createAgentSession → session_start) in that
+// order with no interleaving from other code paths.
+//
+// Sentinel fires ONCE per process — the first sub-agent spawn is enough
+// to prove the invariant. Subsequent spawns are no-op fast path.
+
+type BoundaryProbeStatus = "untested" | "ok" | "broken";
+let _boundaryProbeStatus: BoundaryProbeStatus = "untested";
+/** Last observed mismatch info (for diagnostic; null if no mismatch seen). */
+let _boundaryProbeDiagnostic: {
+  observedSmType: string;
+  observedSmKeys: string[];
+  weakSetSize: "weak-set-opaque";
+  timestamp: string;
+} | null = null;
+
+/** Current sentinel status. "untested" until first sub-agent session_start;
+ *  "ok" once verified; "broken" if invariant violation detected. */
+export function getSubAgentBoundaryStatus(): BoundaryProbeStatus {
+  return _boundaryProbeStatus;
+}
+
+/** Diagnostic snapshot of a detected mismatch. null when sentinel is OK
+ *  or hasn't yet observed any session_start in shared loader. */
+export function getSubAgentBoundaryDiagnostic(): typeof _boundaryProbeDiagnostic {
+  return _boundaryProbeDiagnostic ? { ..._boundaryProbeDiagnostic } : null;
+}
+
+/** Test-only: reset sentinel state. Production must not call. */
+export function _resetSubAgentBoundaryProbeForTests(): void {
+  _boundaryProbeStatus = "untested";
+  _boundaryProbeDiagnostic = null;
+}
+
+/**
+ * Bind the sub-agent boundary sentinel to a pi ExtensionAPI.
+ *
+ * MUST be called ONLY from inside the shared sub-agent loader's runtime
+ * (where dispatch sets `_activatingInSharedLoader=true` before reload).
+ * Calling from the main-pi runtime would falsely flag legitimate main
+ * session_start events as boundary violations.
+ *
+ * Idempotent: safe to call multiple times; the sentinel listener is
+ * one-shot and self-deregisters after the first verification.
+ */
+export function bindSubAgentBoundarySentinel(
+  pi: ExtensionAPI,
+  opts: { warn?: (msg: string) => void } = {},
+): void {
+  const warn = opts.warn ?? ((msg: string) => console.error(`pi-astack: ${msg}`));
+  if (process.env.PI_ASTACK_SUPPRESS_BOUNDARY_SENTINEL === "1") return;
+
+  pi.on("session_start", (_event: unknown, ctx: unknown) => {
+    // Idempotency: once we've verified OR detected breakage, stop probing.
+    if (_boundaryProbeStatus !== "untested") return;
+
+    const c = ctx as { sessionManager?: unknown } | undefined | null;
+    const sm = c?.sessionManager;
+    if (sm == null || typeof sm !== "object") {
+      // No SM at all — odd, but not a boundary failure per se. Wait for
+      // a more meaningful session_start.
+      return;
+    }
+
+    if (isSubAgentSession(c)) {
+      // ✓ The SM in ctx is identity-equal to one we marked. Passthrough
+      // invariant holds. Sentinel passes — sticky from now on.
+      _boundaryProbeStatus = "ok";
+      return;
+    }
+
+    // ✗ In the shared sub-agent loader, session_start is supposed to be
+    // a sub-agent session. But the SM we see isn't in our WeakSet.
+    // SessionManager passthrough invariant is broken.
+    _boundaryProbeStatus = "broken";
+    _boundaryProbeDiagnostic = {
+      observedSmType: Object.prototype.toString.call(sm),
+      observedSmKeys: (() => {
+        try {
+          return Object.keys(sm as object).slice(0, 10);
+        } catch {
+          return ["<unintrospectable>"];
+        }
+      })(),
+      weakSetSize: "weak-set-opaque",
+      timestamp: new Date().toISOString(),
+    };
+
+    warn(
+      "\n\u2554" + "\u2550".repeat(78) + "\u2557\n" +
+      "\u2551 \ud83d\udea8 PI-ASTACK CRITICAL: sub-agent boundary invariant VIOLATED                  \u2551\n" +
+      "\u255a" + "\u2550".repeat(78) + "\u255d\n" +
+      "\n" +
+      "  markSessionAsSubAgent(sm) was called for SessionManager identity A,\n" +
+      "  but the corresponding session_start event in the sub-agent runtime\n" +
+      "  fired with ctx.sessionManager = identity B — a DIFFERENT object.\n" +
+      "\n" +
+      "  Consequence: WeakSet-based isSubAgentSession(ctx) returns FALSE\n" +
+      "  inside sub-agent lifecycle handlers, so:\n" +
+      "    - sediment.agent_end will EXTRACT sub-agent reasoning as user implicit\n" +
+      "      truth (violates ADR 0024 / ADR 0025 INV-IMPLICIT-GROUND-TRUTH)\n" +
+      "    - compaction-tuner.agent_end will MIX sub-agent token usage into\n" +
+      "      main-session compaction state\n" +
+      "    - model-fallback / persistent-input-history / model-curator /\n" +
+      "      abrain rule-injector will execute their main-only side effects\n" +
+      "      INSIDE the sub-agent\n" +
+      "\n" +
+      "  Refs: ADR 0027 PR-B (sub-agent extension visibility), ADR 0014 §6\n" +
+      "        (extension boundary), pi-internals.ts WeakSet section.\n" +
+      "\n" +
+      "  Likely cause: pi was upgraded and now wraps SessionManager at the\n" +
+      "  ExtensionContext boundary (Proxy / facade / Pick<> adapter) instead\n" +
+      "  of passing the reference through unchanged. See pi-internals.ts\n" +
+      "  WeakSet section for the invariant documentation.\n" +
+      "\n" +
+      `  Observed SM diagnostic:\n` +
+      `    type:  ${_boundaryProbeDiagnostic.observedSmType}\n` +
+      `    keys:  ${JSON.stringify(_boundaryProbeDiagnostic.observedSmKeys)}\n` +
+      `    when:  ${_boundaryProbeDiagnostic.timestamp}\n` +
+      "\n" +
+      "  Action: investigate pi SDK's ExtensionContext shape and adjust\n" +
+      "  pi-internals.ts WeakSet marker mechanism.\n" +
+      "\n" +
+      "  This warning fires ONCE per process. To suppress (NOT recommended)\n" +
+      "  set PI_ASTACK_SUPPRESS_BOUNDARY_SENTINEL=1.\n"
+    );
+  });
+}
