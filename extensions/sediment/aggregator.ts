@@ -18,6 +18,7 @@ import {
   sedimentAuditPath,
   userGlobalSedimentDir,
 } from "../_shared/runtime";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import type { SedimentSettings } from "./settings";
 import { buildPromptVersionAudit } from "./settings";
 import { summarizeClassifierHealth, type ClassifierHealthSummary } from "./health";
@@ -459,7 +460,12 @@ export function writeAggregatorLedger(summary: AggregatorSummary): void {
     const existing = fs.existsSync(file)
       ? readJsonl<AggregatorSummary>(file, LEDGER_MAX_ROWS - 1, LEDGER_TAIL_READ_BYTES).rows
       : [];
-    const rows = [...existing, summary].slice(-LEDGER_MAX_ROWS);
+    // ADR 0027 PR-B+ R1 P1-3: aggregator runs inside sediment agent_end
+    // (scheduled via setImmediate from inside the ALS scope), so
+    // getCurrentAnchor() returns the trigger turn anchor. summary's own
+    // fields take precedence over anchor (spread order: anchor first).
+    const enrichedSummary = { ...spreadAnchor(getCurrentAnchor()), ...summary };
+    const rows = [...existing, enrichedSummary].slice(-LEDGER_MAX_ROWS);
     fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf-8");
   } catch {
     // advisory only — never throw into agent_end

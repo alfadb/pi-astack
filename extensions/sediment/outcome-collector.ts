@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "./sanitizer";
 
 interface OutcomeRow {
@@ -422,7 +423,13 @@ export function writeOutcomeLedger(
       const key = outcomeLedgerDedupKey(row);
       if (existing.has(key)) continue;
       existing.add(key);
-      lines.push(JSON.stringify({ ...row, project_root: projectRoot ?? "" }) + "\n");
+      // ADR 0027 PR-B+ R1 P1-3: attach causal anchor (session_id, turn_id)
+      // for cross-layer join. row.session_id (per-event) wins over anchor
+      // session_id when both present (spread order: anchor first). Caller
+      // runs inside sediment agent_end ALS scope (P0-β), so getCurrentAnchor()
+      // returns the trigger turn snapshot even when this writer completes
+      // after user submits next prompt.
+      lines.push(JSON.stringify({ ...spreadAnchor(getCurrentAnchor()), ...row, project_root: projectRoot ?? "" }) + "\n");
     }
     if (lines.length === 0) return;
     fs.appendFileSync(ledgerPath, lines.join(""), "utf-8");

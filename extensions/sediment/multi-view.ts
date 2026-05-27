@@ -50,6 +50,7 @@ import type { CuratorDecision } from "./curator";
 // workflow-utils.ts header comment for full rationale.
 import { isWorkflowNeighborEntry } from "./workflow-utils";
 import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import type { CorrectionSignal } from "./correction-pipeline";
 import type { ProjectEntryDraft } from "./writer";
 import type { SedimentSettings } from "./settings";
@@ -489,7 +490,12 @@ function logReviewerMetrics(entry: ReviewerMetricsEntry): void {
     ensureUserGlobalSidecarMigrated();
     const dir = userGlobalSedimentDir();
     fs.mkdirSync(dir, { recursive: true });
-    const line = JSON.stringify(entry) + "\n";
+    // ADR 0027 PR-B+ R1 P1-3: attach causal anchor for cross-layer join.
+    // multi-view runs inside sediment.agent_end (or replay path called
+    // from agent_end), inheriting the trigger turn snapshot via
+    // AsyncLocalStorage. Entry fields override anchor on collision.
+    const enriched = { ...spreadAnchor(getCurrentAnchor()), ...entry };
+    const line = JSON.stringify(enriched) + "\n";
     fs.appendFileSync(path.join(dir, "multi-view-metrics.jsonl"), line, "utf-8");
   } catch {
     // metrics are best-effort; never throw

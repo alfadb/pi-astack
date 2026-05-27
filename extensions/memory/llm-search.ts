@@ -5,6 +5,7 @@ import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
 import { clamp, compareTimestamps, normalizeBareSlug, stableUnique } from "./utils";
 import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared/runtime";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "../sediment/sanitizer";
 
 function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string): void {
@@ -23,7 +24,12 @@ function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string):
     const dir = path.dirname(file);
     const fsSync = require("node:fs") as typeof import("node:fs");
     if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fsSync.appendFileSync(file, JSON.stringify(entry) + "\n", "utf-8");
+    // ADR 0027 PR-B+ R1 P1-3: attach causal anchor for cross-layer join.
+    // memory_search is invoked during tool-call rounds in a user turn;
+    // anchor reflects the calling turn. Entry fields override anchor on
+    // collision (spread order: anchor first).
+    const enriched = { ...spreadAnchor(getCurrentAnchor()), ...entry };
+    fsSync.appendFileSync(file, JSON.stringify(enriched) + "\n", "utf-8");
     // Round 9 P0 (sonnet R9-5 fix): ensure .pi-astack/ is in project
     // .gitignore. logSearchMetrics is a path independent of appendAudit,
     // so the gate must also fire here. Best-effort.

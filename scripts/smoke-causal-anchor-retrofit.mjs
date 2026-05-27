@@ -86,6 +86,35 @@ const writers = [
     auditFile: "~/.abrain/.state/vault-events.jsonl",
     anchorWindow: /const enriched = \{[\s\S]{0,400}spreadAnchor\(getCurrentAnchor\(\)\)[\s\S]{0,400}\.\.\.ev,\s*\};/,
   },
+  // ── R1 P1-3 additions: previously-missing JSONL writers ──
+  {
+    file: "extensions/sediment/outcome-collector.ts",
+    label: "sediment outcome-ledger.jsonl (writeOutcomeLedger)",
+    auditFile: "~/.abrain/.state/sediment/outcome-ledger.jsonl",
+    // outcome-collector pushes into a `lines` array, not an `enriched` const.
+    // Match the inline JSON.stringify spread shape directly.
+    anchorWindow: /JSON\.stringify\(\{\s*\.\.\.spreadAnchor\(getCurrentAnchor\(\)\),\s*\.\.\.row,/,
+  },
+  {
+    file: "extensions/sediment/aggregator.ts",
+    label: "sediment aggregator-ledger.jsonl (writeAggregatorLedger)",
+    auditFile: "~/.abrain/.state/sediment/aggregator-ledger.jsonl",
+    // P1-3 added writer: anchor first, then ...summary. Trailing comma
+    // optional per formatter style.
+    anchorWindow: /const enrichedSummary = \{[\s\S]{0,300}spreadAnchor\(getCurrentAnchor\(\)\)[\s\S]{0,300}\.\.\.summary,?\s*\};/,
+  },
+  {
+    file: "extensions/memory/llm-search.ts",
+    label: "memory search-metrics.jsonl (logSearchMetrics)",
+    auditFile: ".pi-astack/memory/search-metrics.jsonl",
+    anchorWindow: /const enriched = \{[\s\S]{0,300}spreadAnchor\(getCurrentAnchor\(\)\)[\s\S]{0,300}\.\.\.entry,?\s*\};/,
+  },
+  {
+    file: "extensions/sediment/multi-view.ts",
+    label: "sediment multi-view-metrics.jsonl (logReviewerMetrics)",
+    auditFile: "~/.abrain/.state/sediment/multi-view-metrics.jsonl",
+    anchorWindow: /const enriched = \{[\s\S]{0,300}spreadAnchor\(getCurrentAnchor\(\)\)[\s\S]{0,300}\.\.\.entry,?\s*\};/,
+  },
 ];
 
 // dispatch is C6a, but verify for completeness — same invariant
