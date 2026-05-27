@@ -100,6 +100,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 | 记忆作用范围 | 预定义枚举字段（project/persona/device 三选一） | classifier 输出自然语言描述（"适用于当前 React 项目，可能扩展到所有前端项目；不确定是否跨设备"），下游 LLM 读这段文字自己判断 |
 | audit 数据可信度 | SHA256 哈希链 | 基础设施层（git + 文件系统）已经处理持久化；LLM 在异常情况（entry 数量突变、引用模式反常）下自己推理即可 |
 | writer 还原度 | 外部 writer 还原度 smoke 测试 | writer prompt 内化自我验证："写入 entry 前重读用户原话，自问还原度，不确定就先进 staging" |
+| multi-agent 协调与交付（ADR 0027 §C3'） | 认知层禁 — LLM 交付结果不走“准确率 ≥ X% 才接受”这类机械门（与 classifier 准确性同理）；best-of-N + voting 只作为下游 LLM 读取反差反思的输入 | **infra 层允许 structured**：`session-id + turn-id` 锚点必须 schema、retry counter / cost accounting / cancellation token / done-marker schema / heartbeat 都是机械 infra。C3' 明确拆分：认知层 prompt-native、infra 层 structured 不冲突 |
 
 ---
 

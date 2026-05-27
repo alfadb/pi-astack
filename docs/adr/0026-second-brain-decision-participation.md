@@ -304,6 +304,66 @@ memory_decide(context: "我在决定一件事", options?: ["A", "B"], constraint
 - 决策简报中 LLM 看了但没采纳 → outcome 写 RETRIEVED-UNUSED + 不采纳原因
 - 用户否了简报里的建议 → 触发 ADR 0025 §4.1 主动纠错识别（"不是这个" = correction signal）
 
+### 5.1 decision_brief_id schema + outcome ledger anchor field layout（R1 P1-7 补补）
+
+上面的反向嗂合不能只在纲领层描述。“采纳了”、“看了不采纳”这类信号要能跨 turn 跨 layer join，需要 explicit schema。本小节定义。
+
+#### decision_brief_id 形状
+
+每份 `memory_decide` 调用产出的决策简报在父层是一个事件，id 形状：
+
+```
+decision_brief_id = `${session_id}|${turn_id}${subturn ? `.${subturn}` : ""}|${monotonic_brief_seq_in_turn}`
+```
+
+- `session_id` / `turn_id` 来自 ADR 0027 §C6 anchor
+- `subturn` 只在 sub-agent 调 `memory_decide` 时出现（L2 worker 如果获得 `memory_decide` 能力且调用了，用 sub-agent 的 anchor）
+- `brief_seq_in_turn` 从 1 开始；同一 turn 多次调 `memory_decide` 递增。这个计数器跟踪“同 turn 里某条 entry 是第几份简报里被引用的”问题
+
+这个 id 在 `memory_decide` 返回值里作为 `decisionBriefId` 字段（现代码 §3.2 prompt template 已提及）。LLM 在 memory-footnote 里可以反向引用以关联 attribution。
+
+#### outcome-ledger 行 anchor 字段布局
+
+ADR 0025 §4.2.4 定义了 outcome-ledger 的基本字段。本 ADR R1 P1-7 补上与 C6 锚点的 join 字段安排：
+
+```jsonc
+{
+  // 原有字段（ADR 0025）
+  ts: "2026-05-27T16:23:04.123Z",
+  session_id: "019e…",
+  entry_slug: "prefer-pnpm",
+  source: "memory-footnote" | "tool-result",
+  // R1 P1-3 加（spread anchor 产生的字段）
+  turn_id: 47,                  // anchor.turn_id
+  subturn: 2,                   // 仅 sub-agent 调时出现
+  // R1 P1-7 加（决策丰产生信号时才出现）
+  decision_brief_id: "019e…|47|1",
+  used: "decisive" | "confirmatory" | "retrieved-unused",
+  counterfactual: "…",
+  // 原有字段 cont.
+  project_root: "…",
+}
+```
+
+#### Join 路径
+
+```
+# 合并一个 turn 的 L1/L2 outcome 信号
+jq 'select(.session_id == X and .turn_id == Y)' outcome-ledger.jsonl
+
+# 某条简报被使用的所有信号
+jq 'select(.decision_brief_id == "X|Y|N")' outcome-ledger.jsonl
+
+# 同 turn 同 entry 被多份简报引用的情况
+jq 'select(.session_id == X and .turn_id == Y and .entry_slug == "prefer-pnpm")' outcome-ledger.jsonl
+```
+
+#### 与 ADR 0027 §C6 的关系
+
+- `(session_id, turn_id)` 是 C6 必需的 join 键，outcome-ledger 现在透过 spreadAnchor 自动携带（实现于 R1 P1-3 commit `7dd224b`）
+- `decision_brief_id` 是 §3.4 "结果驱动推荐" 与 §4.1 路径 A 的归因链接头，aggregator 读此字段可以反查 “这次决策丰里包括哪些 entry、哪些被采纳、哪些被忽略”
+- 后续如果加入 ADR 0025 §4.4 multi-view 验证状态作为决策丰输入，`decision_brief_id` 纲领 outcome 行能反向追踪“哪些 verified entry 被引用了、采纳率多高”这种跨能力点的联合分析
+
 ---
 
 ## 6. 实施路径
