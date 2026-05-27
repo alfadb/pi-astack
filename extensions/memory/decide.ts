@@ -317,6 +317,11 @@ export interface MemoryDecideResult {
   entrySlugs?: string[];
   /** Stable per-call id for future decision_brief_id outcome linkage. */
   decisionBriefId?: string;
+  /** True when getCurrentAnchor() returned undefined and a legacy opaque
+   *  id was used (ADR 0026 §5.1 schema not satisfied for this brief).
+   *  Downstream readers can detect attribution-join breakage. Propagated
+   *  by R3 fix (GPT-5.5 finding): previously computed but discarded. */
+  anchorMissing?: boolean;
 }
 
 /**
@@ -342,10 +347,13 @@ export async function runMemoryDecide(args: {
   const { context, options, constraints, searchResults, activity, activityWindowDays, settings, modelRegistry, signal } = args;
 
   const entrySlugs = searchResults.map((entry) => entry.slug);
-  // ADR 0026 §5.1 schema (R2 NEW-P1-B): build deterministic anchored id.
-  // See buildDecisionBriefId() at module top for shape + fallback semantics.
+  // ADR 0026 §5.1 schema (R2 NEW-P1-B + R3 propagation fix): build
+  // deterministic anchored id. See buildDecisionBriefId() at module top
+  // for shape + fallback semantics. R3 (GPT-5.5): also propagate
+  // anchorMissing to every return shape so downstream can detect breakage.
   const briefIdResult = buildDecisionBriefId();
   const decisionBriefId = briefIdResult.id;
+  const anchorMissing = briefIdResult.anchorMissing;
 
   if (!searchResults || searchResults.length === 0) {
     return {
@@ -354,6 +362,7 @@ export async function runMemoryDecide(args: {
       entryCount: 0,
       entrySlugs: [],
       decisionBriefId,
+      ...(anchorMissing ? { anchorMissing: true } : {}),
     };
   }
 
@@ -361,7 +370,7 @@ export async function runMemoryDecide(args: {
   // P1 can switch to a dedicated decideModel.
   const modelRef = parseModelRef(settings.search.stage1Model);
   if (!modelRef) {
-    return { ok: false, error: `invalid memory.search.stage1Model: ${settings.search.stage1Model}`, entryCount: searchResults.length, entrySlugs, decisionBriefId };
+    return { ok: false, error: `invalid memory.search.stage1Model: ${settings.search.stage1Model}`, entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }
 
   const registry = modelRegistry as {
@@ -371,12 +380,12 @@ export async function runMemoryDecide(args: {
 
   const model = registry.find(modelRef.provider, modelRef.id);
   if (!model) {
-    return { ok: false, error: `memory_decide model not found: ${settings.search.stage1Model}`, entryCount: searchResults.length, entrySlugs, decisionBriefId };
+    return { ok: false, error: `memory_decide model not found: ${settings.search.stage1Model}`, entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }
 
   const auth = await registry.getApiKeyAndHeaders(model);
   if (!auth.ok || !auth.apiKey) {
-    return { ok: false, error: `memory_decide auth unavailable: ${auth.error || "missing api key"}`, entryCount: searchResults.length, entrySlugs, decisionBriefId };
+    return { ok: false, error: `memory_decide auth unavailable: ${auth.error || "missing api key"}`, entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }
 
   const prompt = buildDecisionBriefPrompt({
@@ -389,7 +398,7 @@ export async function runMemoryDecide(args: {
   });
   const sanitizedPrompt = sanitizeForMemory(prompt);
   if (!sanitizedPrompt.ok) {
-    return { ok: false, error: sanitizedPrompt.error || "memory_decide prompt sanitize failed", entryCount: searchResults.length, entrySlugs, decisionBriefId };
+    return { ok: false, error: sanitizedPrompt.error || "memory_decide prompt sanitize failed", entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }
 
   const piAi: {
@@ -408,7 +417,7 @@ export async function runMemoryDecide(args: {
 
   const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
-    return { ok: false, error: finalMsg.errorMessage || finalMsg.stopReason || "memory_decide failed", entryCount: searchResults.length, entrySlugs, decisionBriefId };
+    return { ok: false, error: finalMsg.errorMessage || finalMsg.stopReason || "memory_decide failed", entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }
 
   const brief = (finalMsg.content ?? [])
@@ -418,8 +427,8 @@ export async function runMemoryDecide(args: {
     .trim();
 
   if (!brief) {
-    return { ok: false, error: "memory_decide returned empty text", entryCount: searchResults.length, entrySlugs, decisionBriefId };
+    return { ok: false, error: "memory_decide returned empty text", entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }
 
-  return { ok: true, brief, entryCount: searchResults.length, entrySlugs, decisionBriefId };
+  return { ok: true, brief, entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
 }

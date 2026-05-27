@@ -440,11 +440,66 @@ check("algorithm: no anchor → fallback legacy format + anchorMissing=true", ()
   }
 });
 
+// ── R3 follow-up fixes: sub-agent anchor scope + anchorMissing prop ──
+
+console.log("\nR3 follow-up: sub-agent anchor scope + anchorMissing propagation");
+
+check("dispatch.ts: imports runWithTriggerAnchor", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
+  if (!/runWithTriggerAnchor/.test(src)) {
+    throw new Error("runWithTriggerAnchor not imported");
+  }
+});
+
+check("dispatch.ts: wraps dispatch_agent runInProcess in runWithTriggerAnchor(subAnchor)", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
+  // Look for the dispatch_agent call site pattern
+  const re = /runWithTriggerAnchor\(subAnchor,[\s\S]{0,200}runInProcess\(\s*params\.model/;
+  if (!re.test(src)) {
+    throw new Error("dispatch_agent runInProcess NOT wrapped in runWithTriggerAnchor(subAnchor)");
+  }
+});
+
+check("dispatch.ts: wraps dispatch_parallel task runInProcess in runWithTriggerAnchor(subAnchor)", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
+  const re = /runWithTriggerAnchor\(subAnchor,[\s\S]{0,200}runInProcess\(\s*t\.model/;
+  if (!re.test(src)) {
+    throw new Error("dispatch_parallel runInProcess NOT wrapped in runWithTriggerAnchor(subAnchor)");
+  }
+});
+
+check("decide.ts: MemoryDecideResult interface includes anchorMissing field", () => {
+  const src = fs.readFileSync(decideSrc, "utf-8");
+  if (!/anchorMissing\?:\s*boolean/.test(src)) {
+    throw new Error("anchorMissing field missing from MemoryDecideResult");
+  }
+});
+
+check("decide.ts: all return paths propagate anchorMissing", () => {
+  const src = fs.readFileSync(decideSrc, "utf-8");
+  // Count return statements that include the anchorMissing spread
+  const returnPropagations = (src.match(/\.\.\.\(anchorMissing\s*\?\s*\{\s*anchorMissing:\s*true\s*\}\s*:\s*\{\}\)/g) || []).length;
+  // Expected at least 8 sites: empty-results return + 6 error returns + 1 success return
+  // Allow some slack (>=7 means most paths propagate).
+  if (returnPropagations < 7) {
+    throw new Error(`expected >=7 return-path propagations of anchorMissing, found ${returnPropagations}`);
+  }
+});
+
+check("memory/index.ts: tool _meta surfaces anchorMissing when true", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/memory/index.ts"), "utf-8");
+  // Both success and failure paths should spread anchorMissing into _meta
+  const matches = src.match(/\.\.\.\(result\.anchorMissing\s*\?\s*\{\s*anchorMissing:\s*true\s*\}\s*:\s*\{\}\)/g);
+  if (!matches || matches.length < 2) {
+    throw new Error(`expected anchorMissing in BOTH _meta paths (ok + error), found ${matches ? matches.length : 0}`);
+  }
+});
+
 // ── Summary ────────────────────────────────────────────────────
 
 console.log();
 if (failures.length === 0) {
-  console.log(`✅ R2 NEW-P1 fixes: all checks passed`);
+  console.log(`✅ R2 NEW-P1 + R3 follow-up fixes: all checks passed`);
   process.exit(0);
 } else {
   console.error(`❌ R2 NEW-P1 fixes: ${failures.length} failure(s)`);

@@ -41,6 +41,7 @@ import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
 import {
   bindLifecycle as bindCausalAnchorLifecycle,
+  runWithTriggerAnchor,
   getCurrentAnchor,
   deriveSubAgentAnchor,
   formatAnchorPromptBlock,
@@ -994,9 +995,24 @@ export default function (pi: ExtensionAPI) {
 
       let result: AgentResult;
       try {
-        result = await runInProcess(
-          params.model, params.thinking, prompt,
-          signal, timeoutMs, ctx.modelRegistry, params.tools || undefined,
+        // ADR 0027 PR-B+ R3 fix (Opus + GPT-5.5): wrap sub-agent execution
+        // in runWithTriggerAnchor(subAnchor) so getCurrentAnchor() inside
+        // the sub-agent runtime (via shared loader's pi-astack extensions)
+        // returns the SUB-AGENT anchor (with subturn), not the main-session
+        // anchor. This makes:
+        //   - memory_decide produces ${sid}|${tid}.${subturn}|${seq}
+        //     decision_brief_id per ADR 0026 §5.1 (was: ${sid}|${tid}|${seq}
+        //     missing subturn before this fix)
+        //   - memory search-metrics rows carry subturn
+        //   - any anchor-aware audit writer in the sub-agent runtime
+        //     attributes to (session_id, turn_id, subturn) correctly
+        // ALS propagates through await chains and fire-and-forget
+        // promises created inside the sub-agent's tool callbacks.
+        result = await runWithTriggerAnchor(subAnchor, () =>
+          runInProcess(
+            params.model, params.thinking, prompt,
+            signal, timeoutMs, ctx.modelRegistry, params.tools || undefined,
+          ),
         );
       } catch (err: any) {
         // Outer safety-net catch — reachable when:
@@ -1234,10 +1250,20 @@ export default function (pi: ExtensionAPI) {
             const prompt = subAnchor
               ? `${formatAnchorPromptBlock(subAnchor)}\n\n${t.prompt}`
               : t.prompt;
-            res = await runInProcess(
-              t.model, t.thinking, prompt,
-              signal, t.timeoutMs ?? timeoutMs, ctx.modelRegistry,
-              t.tools || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide",
+            // ADR 0027 PR-B+ R3 fix: per-task subAnchor scope. Each
+            // dispatch_parallel task gets its own subturn via
+            // deriveSubAgentAnchor; runWithTriggerAnchor isolates this
+            // task's anchor from sibling tasks' anchors (ALS is per
+            // async-context, sibling fan-out tasks each get their own).
+            // Without this wrap, all N tasks' memory_decide calls would
+            // use the parent (main) anchor without distinguishing which
+            // task produced which brief.
+            res = await runWithTriggerAnchor(subAnchor, () =>
+              runInProcess(
+                t.model, t.thinking, prompt,
+                signal, t.timeoutMs ?? timeoutMs, ctx.modelRegistry,
+                t.tools || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide",
+              ),
             );
           } catch (err: any) {
             // Outer safety-net catch — reachable for getSharedInfra() init

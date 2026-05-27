@@ -641,6 +641,12 @@ export default function (pi: ExtensionAPI) {
             // not a hidden side channel. Keep it minimal.
             entrySlugs: result.entrySlugs ?? searchResults.map((r) => r.slug),
             decisionBriefId: result.decisionBriefId,
+            // R3 GPT-5.5: surface anchorMissing so downstream consumers
+            // (and the LLM reading the tool result) can detect that the
+            // ADR 0026 §5.1 anchored decision_brief_id schema is unmet
+            // for this call (e.g., lifecycle not bound, or memory_decide
+            // invoked before before_agent_start). Only emit when true.
+            ...(result.anchorMissing ? { anchorMissing: true } : {}),
           },
           hint: "memory_decide LLM call failed. Fall back to memory_search + manual synthesis.",
         });
@@ -655,6 +661,8 @@ export default function (pi: ExtensionAPI) {
           // not a hidden side channel. Keep it minimal.
           entrySlugs: result.entrySlugs ?? searchResults.map((r) => r.slug),
           decisionBriefId: result.decisionBriefId,
+          // R3 GPT-5.5: see above — surface anchorMissing only when true.
+          ...(result.anchorMissing ? { anchorMissing: true } : {}),
         },
         hint: "This is a synthesized decision brief based on the user's documented history. The LLM should treat it as expert advice, not as a binding command.",
       });
