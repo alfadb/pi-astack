@@ -58,10 +58,16 @@ function logExtractorMetrics(entry: {
     ensureUserGlobalSidecarMigrated();
     const dir = userGlobalSedimentDir();
     fs.mkdirSync(dir, { recursive: true });
-    // ADR 0027 C6b: cross-layer causal anchor. Note for long-running LLM
-    // extractor: write time may be AFTER user submitted next prompt —
-    // anchor would then reflect the next turn, not the trigger turn.
-    // Acceptable for metric rows (aggregate observable, not per-task join).
+    // ADR 0027 C6b: cross-layer causal anchor.
+    //
+    // P0-β fix (R1 review): caller (sediment agent_end handler) wraps
+    // its body in `runWithTriggerAnchor(getCurrentAnchor(), ...)` so the
+    // ALS-stored snapshot anchor propagates here via getCurrentAnchor()
+    // even when this fire-and-forget extractor completes AFTER the user
+    // has submitted the next prompt (and `_currentTurnId` has advanced).
+    // No code change needed at this call site — getCurrentAnchor() now
+    // returns the trigger-time snapshot when run inside a scope. See
+    // causal-anchor.ts P0-β docs.
     const enriched = {
       ...spreadAnchor(getCurrentAnchor()),
       ...entry,

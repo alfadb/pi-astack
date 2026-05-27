@@ -43,6 +43,7 @@
  * just diagnostic context, freely settable by dispatch callers.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isSubAgentSession } from "./pi-internals";
 
@@ -69,6 +70,56 @@ let _currentTurnId = -1;
  *  called within the same parent turn, so dispatch_parallel of N sub-agents
  *  produces subturn=1..N stably across retries (Map persists in-process). */
 const _subturnCounters = new Map<string, number>();
+
+/**
+ * ADR 0027 PR-B+ R1 P0-β — trigger-time anchor snapshot storage.
+ *
+ * # Problem this solves
+ *
+ * sediment's `agent_end` handler does ~60s of fire-and-forget LLM work
+ * (Lane C extractor, curator). The handler returns its promise to pi
+ * immediately, but the bg work continues. If the user submits the NEXT
+ * prompt before that bg work completes:
+ *   1. `before_agent_start` fires for turn N+1 → bumps `_currentTurnId`
+ *      from N to N+1
+ *   2. The still-running bg writer calls `getCurrentAnchor()` → returns
+ *      `{session_id, turn_id: N+1}` instead of the trigger-time `N`
+ *   3. Audit row for work TRIGGERED by turn N gets written with turn N+1's
+ *      anchor → cross-layer join key is WRONG
+ *
+ * R1 review (3-LLM consensus, P0-β) flagged this as making C6 join key
+ * "observability retrofit, not strict causal provenance".
+ *
+ * # Mechanism
+ *
+ * `AsyncLocalStorage` from `node:async_hooks` propagates per-async-context
+ * state through promise chains, including fire-and-forget promises created
+ * INSIDE a `.run()` scope (they capture the store at creation, not at
+ * consumption). Lifecycle handlers wrap their body in
+ * `runWithTriggerAnchor(getCurrentAnchor(), () => ...)`. All
+ * `getCurrentAnchor()` calls from inside that scope — even from a 60s-later
+ * background writer — see the SNAPSHOTTED anchor, not the live state.
+ *
+ * # Why a holder object
+ *
+ * `als.getStore()` returns the stored value OR `undefined` when no scope.
+ * To distinguish "scope active with no-anchor (undefined deliberately set)"
+ * from "no scope, fall back to live", we wrap in `{ anchor: ... }`. When
+ * `getStore()` returns a holder, scope is active (even if `anchor` itself
+ * is undefined). When `getStore()` returns undefined, no scope is active.
+ *
+ * # Edge cases
+ *
+ *   - Sub-agent dispatched FROM inside a scope: dispatch.execute reads
+ *     `getCurrentAnchor()` synchronously (still inside scope) → sub-agent
+ *     gets the trigger-time parent anchor. ✓
+ *   - Pi processing the NEXT user prompt: that's a NEW event from pi's
+ *     input loop, NOT an async resource spawned from sediment's scope.
+ *     ALS does NOT leak across event sources. ✓
+ *   - Multiple lifecycle handlers running concurrently: each
+ *     `runWithTriggerAnchor` creates its own ALS context. ✓
+ */
+const _triggerAnchorALS = new AsyncLocalStorage<{ anchor: CausalAnchor | undefined }>();
 
 // ── Lifecycle binding ───────────────────────────────────────────────────
 
@@ -124,20 +175,62 @@ export function bindLifecycle(pi: ExtensionAPI): void {
 
 // ── Read API ────────────────────────────────────────────────────────────
 
-/** Current main-session anchor. Returns undefined when:
- *  - bindLifecycle has not been called yet, OR
- *  - session_start hasn't fired (very early extension activate), OR
- *  - before_agent_start hasn't fired yet (between session_start and first user prompt)
+/** Current main-session anchor.
+ *
+ *  Resolution order (per ADR 0027 PR-B+ R1 P0-β):
+ *   1. If running inside `runWithTriggerAnchor(anchor, ...)` scope, return
+ *      that scope's snapshotted anchor (even if it's `undefined`). This
+ *      is the trigger-time guarantee for long-running async writers.
+ *   2. Otherwise, return the LIVE module-level `(session_id, turn_id)`.
+ *      Used for synchronous reads at trigger sites (e.g., dispatch.execute
+ *      reading the current parent anchor).
+ *
+ *  Returns undefined when (live path):
+ *   - bindLifecycle has not been called yet, OR
+ *   - session_start hasn't fired (very early extension activate), OR
+ *   - before_agent_start hasn't fired yet (between session_start and first user prompt)
  *
  *  Callers (audit writers) MUST NOT block on undefined — write the log
  *  line with whatever they have (per C5 fail-degrade). spreadAnchor()
  *  handles undefined gracefully. */
 export function getCurrentAnchor(): CausalAnchor | undefined {
+  // (1) trigger-time scope override (ALS) takes precedence
+  const scoped = _triggerAnchorALS.getStore();
+  if (scoped) return scoped.anchor;
+  // (2) live module state
   if (!_currentSessionId || _currentTurnId < 0) return undefined;
   return {
     session_id: _currentSessionId,
     turn_id: _currentTurnId,
   };
+}
+
+/** Run `fn` inside a trigger-anchor scope. All `getCurrentAnchor()` calls
+ *  inside the scope — including those from fire-and-forget promises
+ *  created during the scope's synchronous body — will return `anchor`
+ *  even after the live module-level turn counter advances.
+ *
+ *  Lifecycle handlers that trigger fire-and-forget audit writers (sediment
+ *  `agent_end`, compaction-tuner `agent_end`, etc.) MUST wrap their body
+ *  in this scope. Synchronous handlers don't need it (live anchor still
+ *  reflects trigger turn).
+ *
+ *  Example:
+ *
+ *      pi.on("agent_end", async (event, ctx) => {
+ *        if (isSubAgentSession(ctx)) return;
+ *        return runWithTriggerAnchor(getCurrentAnchor(), async () => {
+ *          // ... all bg work; every getCurrentAnchor() call inside this
+ *          //     closure sees the trigger-turn anchor, not later live state.
+ *          fireAndForgetBgWriter();  // also inherits scope ✓
+ *        });
+ *      });
+ */
+export function runWithTriggerAnchor<T>(
+  anchor: CausalAnchor | undefined,
+  fn: () => T,
+): T {
+  return _triggerAnchorALS.run({ anchor }, fn);
 }
 
 /** Derive an anchor for a sub-agent dispatched from the current main turn.
@@ -230,6 +323,9 @@ export function _resetCausalAnchorForTests(): void {
   _currentSessionId = undefined;
   _currentTurnId = -1;
   _subturnCounters.clear();
+  // ALS is per-async-context; no global reset needed. Any test that wants
+  // to assert "no scope active" should just call getCurrentAnchor() outside
+  // any runWithTriggerAnchor() block.
 }
 
 /** Test-only: directly set the current anchor (bypassing lifecycle events).

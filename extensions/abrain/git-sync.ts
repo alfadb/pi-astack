@@ -323,9 +323,13 @@ async function audit(abrainHome: string, event: GitSyncEvent): Promise<void> {
     await fs.mkdir(stateDir, { recursive: true });
     // ADR 0027 C6b: cross-layer causal anchor. git-sync writes may fire
     // from sediment's commit path (within agent_end — anchor matches
-    // trigger turn) OR from pushAsync's deferred fire-and-forget (may
-    // straddle user turns). Acceptable for both: anchor at write time
-    // still enables (session_id, turn_id) join across L1 writers.
+    // trigger turn) OR from pushAsync's deferred fire-and-forget. When
+    // the caller is inside a `runWithTriggerAnchor` scope (sediment
+    // agent_end), getCurrentAnchor() returns the trigger-time snapshot
+    // even from a fire-and-forget push that completes after the next
+    // turn (P0-β fix). For callers outside any scope (startup auto-sync),
+    // anchor is live state, which is correct since startup writes aren't
+    // tied to any user turn anyway.
     const enriched = {
       ...spreadAnchor(getCurrentAnchor()),
       ...event,

@@ -31,6 +31,7 @@
     "smoke:causal-anchor": "node scripts/smoke-causal-anchor.mjs",
     "smoke:causal-anchor-retrofit": "node scripts/smoke-causal-anchor-retrofit.mjs",
     "smoke:sediment-l2-withhold": "node scripts/smoke-sediment-l2-withhold.mjs",
+    "smoke:causal-anchor-trigger-snapshot": "node scripts/smoke-causal-anchor-trigger-snapshot.mjs",
     "smoke:paths": "node scripts/smoke-pi-astack-paths.mjs",
     "smoke:vault-subpi-isolation": "node scripts/smoke-vault-subpi-isolation.mjs",
     "smoke:abrain": "node scripts/smoke-abrain-backend-detect.mjs",

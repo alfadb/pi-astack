@@ -47,7 +47,7 @@ import {
   type TurnBoundaryCompactionUsage,
 } from "../_shared/pi-internals";
 // ADR 0027 C6b: cross-layer causal anchor for audit rows.
-import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { getCurrentAnchor, runWithTriggerAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import {
   DEFAULT_COMPACTION_TUNER_SETTINGS,
   resolveCompactionTunerSettings,
@@ -805,6 +805,13 @@ export default function (pi: ExtensionAPI) {
     // feed their token usage into main-session compaction state.
     if (isSubAgentSession(ctx)) return;
 
+    // ADR 0027 PR-B+ R1 P0-β: snapshot anchor at handler entry. The body
+    // fires off `void recordOutcome(...)` and other fire-and-forget audit
+    // writers that may run after the next user prompt has advanced
+    // `_currentTurnId`. Without this scope, late writes carry the wrong
+    // turn. See causal-anchor.ts P0-β docs.
+    return runWithTriggerAnchor(getCurrentAnchor(), async () => {
+
     // Capture ctx fields synchronously — pi may invalidate ctx during
     // async work (same pattern sediment uses).
     const cwd = path.resolve(ctx.cwd || process.cwd());
@@ -1082,6 +1089,8 @@ export default function (pi: ExtensionAPI) {
         settings_snapshot: snapshotCompactionTunerSettings(settings),
       });
     }
+
+    }); // end runWithTriggerAnchor — ADR 0027 PR-B+ R1 P0-β trigger-time scope
   });
 
   pi.registerCommand("compaction-tuner", {

@@ -27,9 +27,12 @@ function logCuratorMetrics(entry: {
     ensureUserGlobalSidecarMigrated();
     const dir = userGlobalSedimentDir();
     fs.mkdirSync(dir, { recursive: true });
-    // ADR 0027 C6b: cross-layer causal anchor. Same timing trade-off as
-    // extractor-metrics — long curator runs may straddle user turns and
-    // anchor reflects write time, not trigger time.
+    // ADR 0027 C6b: cross-layer causal anchor.
+    //
+    // P0-β fix (R1 review): caller (sediment agent_end handler) wraps
+    // its body in `runWithTriggerAnchor(...)` so this fire-and-forget
+    // curator's late writes see the trigger-time snapshot even after
+    // `_currentTurnId` advances. See causal-anchor.ts P0-β docs.
     const enriched = {
       ...spreadAnchor(getCurrentAnchor()),
       ...entry,

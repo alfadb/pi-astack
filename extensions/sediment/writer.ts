@@ -742,13 +742,19 @@ export async function appendAudit(projectRoot: string, event: Record<string, unk
   // "v0-unknown"). The field tracks which prompt produced the classifier
   // reasoning trace so aggregator health checks can attribute quality
   // changes to specific prompt versions.
-  // ADR 0027 C6b: cross-layer causal anchor. Captured at write time —
-  // for handlers that fire synchronously inside agent_end (the common case)
-  // this matches the trigger turn. For long-running async writers (sub-tasks
-  // that complete after user has submitted next prompt), anchor may reflect
-  // the next turn instead. Caller-provided session_id in event takes
-  // precedence (spread order: anchor first, event last) so existing schema
-  // semantics survive. turn_id is anchor-sourced (callers don't set it).
+  // ADR 0027 C6b: cross-layer causal anchor.
+  //
+  // P0-β fix (R1 review): lifecycle handlers (sediment / compaction-tuner
+  // agent_end) wrap their body in `runWithTriggerAnchor(...)` so this
+  // appendAudit — even when called from a fire-and-forget bg task that
+  // completes AFTER the user submits the next prompt — sees the
+  // trigger-time snapshot anchor, not the advanced live state.
+  // getCurrentAnchor() consults AsyncLocalStorage first, then falls back
+  // to live module state for sync callers outside any scope (e.g.,
+  // tool-handler-triggered writes that complete within the calling turn).
+  // Caller-provided session_id in event takes precedence (spread order:
+  // anchor first, event last) so existing schema semantics survive.
+  // turn_id is anchor-sourced (callers don't set it).
   const enriched = {
     timestamp: formatLocalIsoTimestamp(),
     ...spreadAnchor(getCurrentAnchor()),

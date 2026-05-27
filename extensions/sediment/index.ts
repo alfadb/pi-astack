@@ -53,6 +53,7 @@ import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
+import { getCurrentAnchor, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { sanitizeForMemory } from "./sanitizer";
 
@@ -903,6 +904,20 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // This is the v3 in-process replacement for PI_ABRAIN_DISABLED env
       // gate from the v2 subprocess model.
       if (isSubAgentSession(ctx)) return;
+
+      // ADR 0027 PR-B+ R1 P0-β: snapshot anchor at handler entry. The
+      // body below kicks off fire-and-forget bg work (Lane C extractor,
+      // curator, aggregator scheduler) that may run for ~60s and still
+      // call getCurrentAnchor() after the user submits the NEXT prompt.
+      // Without this scope, those late writes would carry turn N+1's
+      // anchor for work triggered by turn N — wrong join key.
+      // AsyncLocalStorage propagates the snapshot through await chains
+      // AND through fire-and-forget promises created inside this closure.
+      // ALL existing `return;` statements below return from the inner
+      // async fn; the outer handler returns the runWithTriggerAnchor
+      // promise which resolves to the inner result — same observable
+      // behavior.
+      return runWithTriggerAnchor(getCurrentAnchor(), async () => {
 
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
@@ -2419,6 +2434,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       } else {
         applySedimentStatus(setStatus, sessionId, "completed", compactCombined);
       }
+
+      }); // end runWithTriggerAnchor — ADR 0027 PR-B+ R1 P0-β trigger-time scope
     },
   );
 }
