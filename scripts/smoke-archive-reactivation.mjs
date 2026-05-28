@@ -789,6 +789,185 @@ check("R3 P3-2: decisions_summary surfaces guard_failed flag", () => {
   }
 });
 
+console.log("\nSection: R6 — concurrent-run lock (per-project advisory file lock)");
+
+check("R6: lock helpers exported (tryAcquire + release)", () => {
+  if (typeof arMod.tryAcquireArchiveReactivationLock !== "function") {
+    throw new Error("tryAcquireArchiveReactivationLock must be exported");
+  }
+  if (typeof arMod.releaseArchiveReactivationLock !== "function") {
+    throw new Error("releaseArchiveReactivationLock must be exported");
+  }
+  if (typeof arMod.archiveReactivationLockPath !== "function") {
+    throw new Error("archiveReactivationLockPath must be exported");
+  }
+});
+
+check("R6: lock file path is per-project + under .pi-astack/sediment/", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-lock-path-"));
+  const p = arMod.archiveReactivationLockPath(proj);
+  if (!p.includes(proj)) throw new Error("lock path must be rooted in projectRoot");
+  if (!p.endsWith(".pi-astack/sediment/archive-reactivation.lock")) {
+    throw new Error(`unexpected lock path tail: ${p}`);
+  }
+});
+
+check("R6: first acquire succeeds; second acquire (same instant) FAILS", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-lock-contend-"));
+  const now = new Date();
+  const r1 = arMod.tryAcquireArchiveReactivationLock(proj, now);
+  if (!r1.acquired) throw new Error("first acquire must succeed on a fresh project");
+  const r2 = arMod.tryAcquireArchiveReactivationLock(proj, now);
+  if (r2.acquired) throw new Error("second acquire must FAIL while lock is held (no concurrent run)");
+  if (!r2.existingClaim) throw new Error("failed acquire should expose existingClaim for debugging");
+  if (r2.existingClaim.pid !== process.pid) throw new Error("existingClaim.pid should be the holder");
+  arMod.releaseArchiveReactivationLock(proj);
+});
+
+check("R6: after release, next acquire succeeds", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-lock-release-"));
+  const now = new Date();
+  if (!arMod.tryAcquireArchiveReactivationLock(proj, now).acquired) throw new Error("first acquire failed");
+  arMod.releaseArchiveReactivationLock(proj);
+  if (!arMod.tryAcquireArchiveReactivationLock(proj, now).acquired) {
+    throw new Error("acquire after release must succeed");
+  }
+  arMod.releaseArchiveReactivationLock(proj);
+});
+
+check("R6: stale lock (older than 30 min) is stolen on next acquire", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-lock-stale-"));
+  const oldTime = new Date(Date.now() - 60 * 60 * 1000); // 1h ago
+  // Manually write a stale lock with a fake pid (1 is init, always exists,
+  // but on different host so PID check skipped).
+  const lockFile = arMod.archiveReactivationLockPath(proj);
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  fs.writeFileSync(lockFile, JSON.stringify({
+    pid: 999999,
+    host: "some-other-host-that-isnt-us",
+    started_at: oldTime.toISOString(),
+  }));
+  const r = arMod.tryAcquireArchiveReactivationLock(proj, new Date());
+  if (!r.acquired) throw new Error("stale lock (>30 min old) must be stealable");
+  if (!r.stoleFrom) throw new Error("steal must report stoleFrom for diagnostics");
+  if (r.stoleFrom.pid !== 999999) throw new Error("stoleFrom should show the original PID");
+  arMod.releaseArchiveReactivationLock(proj);
+});
+
+check("R6: same-host dead PID lock is stolen even if timestamp is fresh", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-lock-deadpid-"));
+  // Use a PID that almost certainly doesn't exist (max+1) but say it's
+  // on OUR host. With timestamp now, only the dead-PID detection can
+  // mark it stale.
+  const lockFile = arMod.archiveReactivationLockPath(proj);
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  fs.writeFileSync(lockFile, JSON.stringify({
+    pid: 2147483646, // near INT_MAX, won't exist
+    host: os.hostname(),
+    started_at: new Date().toISOString(),
+  }));
+  const r = arMod.tryAcquireArchiveReactivationLock(proj, new Date());
+  if (!r.acquired) {
+    throw new Error("same-host dead PID lock must be stealable even with fresh timestamp");
+  }
+  arMod.releaseArchiveReactivationLock(proj);
+});
+
+check("R6: malformed lock file is NOT blindly stolen (fail-closed)", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-lock-malformed-"));
+  const lockFile = arMod.archiveReactivationLockPath(proj);
+  fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+  fs.writeFileSync(lockFile, "this is not json");
+  const r = arMod.tryAcquireArchiveReactivationLock(proj, new Date());
+  if (r.acquired) {
+    throw new Error("malformed lock file must NOT be stealable (we can't prove it's stale)");
+  }
+});
+
+await checkAsync("R6: runArchiveReactivationIfDue returns skipped:concurrent_run when lock held", async () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-lock-run-"));
+  // Pre-hold the lock with our process pid.
+  const now = new Date();
+  if (!arMod.tryAcquireArchiveReactivationLock(proj, now).acquired) throw new Error("pre-hold failed");
+  try {
+    const r = await arMod.runArchiveReactivationIfDue({
+      projectRoot: proj,
+      archivedEntries: [{
+        slug: "x",
+        kind: "preference",
+        status: "archived",
+        confidence: 8,
+        scope: "project",
+        compiledTruth: "truth",
+        frontmatter: { archive_at: new Date().toISOString() },
+      }],
+      windowText: "user: hi",
+      settings: { aggregatorModel: "test/test", aggregatorTimeoutMs: 10_000, aggregatorMaxRetries: 0, autoLlmWriteEnabled: true },
+      modelRegistry: { find: () => ({}), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }) },
+      sessionId: "test",
+      minIntervalMs: 0,
+    });
+    if (r.skipped !== "concurrent_run") {
+      throw new Error(`expected skipped:concurrent_run; got skipped=${r.skipped} ok=${r.ok}`);
+    }
+  } finally {
+    arMod.releaseArchiveReactivationLock(proj);
+  }
+});
+
+await checkAsync("R6: concurrent_run skip does NOT advance last_run (debounce unaffected)", async () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-lock-debounce-"));
+  if (!arMod.tryAcquireArchiveReactivationLock(proj, new Date()).acquired) throw new Error("pre-hold failed");
+  try {
+    const lastRunFile = arMod.archiveReactivationLastRunPath(proj);
+    // Should not exist before.
+    if (fs.existsSync(lastRunFile)) throw new Error("last_run shouldn’t exist before run");
+    await arMod.runArchiveReactivationIfDue({
+      projectRoot: proj,
+      archivedEntries: [{
+        slug: "x", kind: "preference", status: "archived", confidence: 8, scope: "project",
+        compiledTruth: "truth", frontmatter: { archive_at: new Date().toISOString() },
+      }],
+      windowText: "x",
+      settings: { aggregatorModel: "test/test", aggregatorTimeoutMs: 10_000, aggregatorMaxRetries: 0, autoLlmWriteEnabled: true },
+      modelRegistry: { find: () => ({}), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }) },
+      sessionId: "test",
+      minIntervalMs: 0,
+    });
+    if (fs.existsSync(lastRunFile)) {
+      throw new Error("concurrent_run MUST NOT write last_run (otherwise loser’s debounce window gets consumed)");
+    }
+  } finally {
+    arMod.releaseArchiveReactivationLock(proj);
+  }
+});
+
+check("R6: source-level — lock acquired AFTER skip-checks (no waste contention)", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
+  // Lock acquire must come AFTER the model_registry_unavailable check
+  // — otherwise we'd hold a lock for runs that immediately bail.
+  const acquireIdx = src.search(/tryAcquireArchiveReactivationLock\(options\.projectRoot/);
+  const modelCheckIdx = src.search(/skipped:\s*"model_registry_unavailable"/);
+  const debouncedCheckIdx = src.search(/skipped:\s*"debounced"/);
+  if (acquireIdx < 0) throw new Error("acquire call missing in source");
+  if (modelCheckIdx < 0 || debouncedCheckIdx < 0) throw new Error("skip check markers missing");
+  if (acquireIdx < modelCheckIdx || acquireIdx < debouncedCheckIdx) {
+    throw new Error(
+      "acquire must come AFTER debounce and model_registry skip-checks (waste-contention guard)",
+    );
+  }
+});
+
+check("R6: source-level — release is in a finally block (every exit path)", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
+  // The finally block must mention releaseArchiveReactivationLock.
+  if (!/}\s*finally\s*\{[^}]*releaseArchiveReactivationLock\(options\.projectRoot\)/s.test(src)) {
+    throw new Error(
+      "release call must be in a finally block so every degraded/success/exception path releases the lock",
+    );
+  }
+});
+
 console.log("\nSection: R2 — auditOperation in correct slot (GPT P1, DeepSeek NIT-1)");
 
 check("R2 CRIT-2: auditOperation is in updateProjectEntry OPTIONS, not the patch", () => {

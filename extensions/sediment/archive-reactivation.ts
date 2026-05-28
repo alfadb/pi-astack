@@ -48,6 +48,7 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   ensureUserGlobalSidecarMigrated,
@@ -83,8 +84,9 @@ export interface ArchiveReactivationLlmOutput {
 export interface ArchiveReactivationResult {
   ok: boolean;
   /** When the reviewer skipped without invoking LLM (debounce, no
-   *  candidates, no model registry). */
-  skipped?: "debounced" | "no_candidates" | "model_registry_unavailable" | "auth_unavailable" | "model_not_found";
+   *  candidates, no model registry, or another pi instance currently
+   *  holds the per-project lock — concurrent_run). */
+  skipped?: "debounced" | "no_candidates" | "model_registry_unavailable" | "auth_unavailable" | "model_not_found" | "concurrent_run";
   /** Set on degraded fallback: LLM call or parse failed. */
   degraded?: boolean;
   degraded_reason?: string;
@@ -100,6 +102,20 @@ export interface ArchiveReactivationResult {
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────
+
+/** Per-project advisory file lock to prevent two pi instances attached
+ *  to the SAME project from running the reviewer concurrently.
+ *  Cross-project runs are independent (each project has its own lock).
+ *  Cross-device runs each maintain their own lock (gitignored), the
+ *  duplicate-cost acceptance documented in ADR 0020. */
+export function archiveReactivationLockPath(projectRoot: string): string {
+  return path.join(
+    path.resolve(projectRoot),
+    ".pi-astack",
+    "sediment",
+    "archive-reactivation.lock",
+  );
+}
 
 /** Per-project last-run timestamp file. Matches aggregator pattern. */
 export function archiveReactivationLastRunPath(projectRoot: string): string {
@@ -143,6 +159,145 @@ function writeLastRun(projectRoot: string, now: Date, status: "ok" | "degraded" 
     );
   } catch {
     // Best-effort; missing last_run only means next agent_end retries sooner.
+  }
+}
+
+// ── Advisory file lock (concurrent-run protection) ──────────────────
+
+/** Stale window. Generous — a healthy LLM call finishes in < 5 min;
+ *  30 min covers worst-case stuck-network without false-stealing
+ *  active runs. */
+const LOCK_STALE_MS = 30 * 60 * 1000;
+
+export interface ArchiveReactivationLockClaim {
+  pid: number;
+  host: string;
+  started_at: string;
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    // signal 0 = check existence/permission without actually signalling
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // ESRCH = no such process. EPERM = exists but the signaller can’t
+    // signal it (still alive, owned by another user). Anything else
+    // we treat as “unknown — don’t assume dead”.
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EPERM") return true;
+    if (code === "ESRCH") return false;
+    return true;
+  }
+}
+
+function parseLockClaim(raw: string): ArchiveReactivationLockClaim | null {
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    if (
+      typeof obj?.pid === "number" &&
+      typeof obj?.host === "string" &&
+      typeof obj?.started_at === "string"
+    ) {
+      return { pid: obj.pid, host: obj.host, started_at: obj.started_at };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function isStaleLock(claim: ArchiveReactivationLockClaim, now: Date): boolean {
+  const startedMs = Date.parse(claim.started_at);
+  if (!Number.isFinite(startedMs)) return true; // malformed timestamp → stale
+  if (now.getTime() - startedMs > LOCK_STALE_MS) return true;
+  // Same-host PID check: if the process is gone, the lock is stale
+  // regardless of timestamp. We only trust this signal on the same
+  // host — cross-host PIDs are meaningless.
+  if (claim.host === os.hostname() && !isProcessAlive(claim.pid)) return true;
+  return false;
+}
+
+/**
+ * Try to acquire the per-project archive-reactivation lock.
+ *
+ * Returns `{ acquired: true }` on success. On contention returns
+ * `{ acquired: false, existingClaim? }` and the caller MUST treat the
+ * run as skipped — critically, do NOT write last_run, because we
+ * don’t want to extend the 24h debounce just because another instance
+ * grabbed the lock first.
+ *
+ * Stale-lock policy: if the existing lock’s started_at is older than
+ * LOCK_STALE_MS, OR its PID is known-dead on the same host, we steal
+ * it. There’s a tiny TOCTOU window between read-stale and steal-write
+ * where two concurrent stealers could both succeed; in that case both
+ * will run and both will release, costing one extra LLM call. Bounded
+ * and acceptable.
+ *
+ * Exported for smoke coverage.
+ */
+export function tryAcquireArchiveReactivationLock(
+  projectRoot: string,
+  now: Date,
+): { acquired: boolean; existingClaim?: ArchiveReactivationLockClaim; stoleFrom?: ArchiveReactivationLockClaim } {
+  const file = archiveReactivationLockPath(projectRoot);
+  const claim: ArchiveReactivationLockClaim = {
+    pid: process.pid,
+    host: os.hostname(),
+    started_at: formatLocalIsoTimestamp(now),
+  };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  } catch {
+    // Can’t even create the directory. Fail closed.
+    return { acquired: false };
+  }
+  try {
+    fs.writeFileSync(file, JSON.stringify(claim, null, 2) + "\n", { flag: "wx" });
+    return { acquired: true };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+      // Unexpected IO error — fail closed rather than risk concurrent run.
+      return { acquired: false };
+    }
+    // Lock file exists. Inspect for staleness.
+    let existing: ArchiveReactivationLockClaim | null = null;
+    try {
+      existing = parseLockClaim(fs.readFileSync(file, "utf-8"));
+    } catch {
+      // Read failed; treat as unreadable.
+    }
+    if (!existing) {
+      // Malformed / unreadable lock file. Don’t blindly steal — we
+      // can’t prove it’s stale. Skip this run; a future run will
+      // succeed once the operator cleans up or the file ages out.
+      return { acquired: false };
+    }
+    if (isStaleLock(existing, now)) {
+      try {
+        // flag: 'w' = truncate-or-create. Bounded-cost TOCTOU.
+        fs.writeFileSync(file, JSON.stringify(claim, null, 2) + "\n", { flag: "w" });
+        return { acquired: true, stoleFrom: existing };
+      } catch {
+        return { acquired: false, existingClaim: existing };
+      }
+    }
+    return { acquired: false, existingClaim: existing };
+  }
+}
+
+/**
+ * Release the lock. Best-effort: missing file is fine (we already
+ * lost it via stale steal, or someone manually cleaned up).
+ *
+ * Exported for smoke coverage.
+ */
+export function releaseArchiveReactivationLock(projectRoot: string): void {
+  try {
+    fs.unlinkSync(archiveReactivationLockPath(projectRoot));
+  } catch {
+    // Best-effort.
   }
 }
 
@@ -577,6 +732,30 @@ export async function runArchiveReactivationIfDue(
     };
   }
 
+  // Concurrent-run protection (per-project advisory file lock).
+  // Two pi instances on the same project + same debounce window
+  // would otherwise both pass the readLastRunMs check and both fire
+  // the LLM. The lock acquires AFTER all skip-checks (so contention
+  // only happens for runs that would actually invoke the LLM) and
+  // BEFORE candidate selection / LLM call / writer mutations.
+  //
+  // Critical: on contention we return skipped:"concurrent_run"
+  // WITHOUT writing last_run. That way the losing instance’s
+  // 24h debounce is unaffected — it’s simply ceded this run to the
+  // winner, not consumed its own quota.
+  const lock = tryAcquireArchiveReactivationLock(options.projectRoot, now);
+  if (!lock.acquired) {
+    return {
+      ok: true,
+      skipped: "concurrent_run",
+      reviewed_count: 0,
+      decisions: [],
+      reactivated_slugs: [],
+      duration_ms: Date.now() - t0,
+    };
+  }
+
+  try {
   // Sanitize the conversation window once (the prompt template + entry
   // content is author-controlled).
   const sanitized = sanitizeForMemory(options.windowText);
@@ -793,4 +972,10 @@ export async function runArchiveReactivationIfDue(
     llm_model: model,
     duration_ms: Date.now() - t0,
   };
+  } finally {
+    // Always release the lock, even if some downstream IO threw
+    // synchronously (writer crash, sanitizer throw, etc.). The lock
+    // is per-project so missing-file on release is harmless.
+    releaseArchiveReactivationLock(options.projectRoot);
+  }
 }
