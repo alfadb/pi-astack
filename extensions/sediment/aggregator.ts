@@ -36,6 +36,85 @@ type AdvisoryKind =
   | "audit_error_rate"
   | "search_activity";
 
+/**
+ * Phase C.1.a (ADR 0025 §4.3 prompt-native v1 wiring):
+ *
+ * `STRUCTURAL_CONTEXT` is the hardcoded list of known-unimplemented
+ * capabilities whose absence causes structural mechanical advisories
+ * every run. The aggregator v1 LLM prompt (§2 item 4) consumes this
+ * list so the skeptical historian can demote recurring noise instead
+ * of re-discovering them. Maintenance contract per the v1 prompt
+ * "Staleness notice" (D4): when staging-resolver / archive-reactivation
+ * reviewer / P1.5 writer dispatch ship, the corresponding entry MUST
+ * be removed in the same commit, and Phase D regression should verify
+ * the related mechanical advisory shape has changed.
+ */
+export interface StructuralContextEntry {
+  /** Stable id matching prompt expectations. */
+  id: string;
+  /** What is unimplemented + ADR section anchor. */
+  description: string;
+  /** Which mechanical AdvisoryKind it causes. */
+  causes_advisory: AdvisoryKind;
+}
+
+export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
+  {
+    id: "staging-resolver-unimplemented",
+    description:
+      "ADR 0025 §4.1.5.1 staging-resolver NOT implemented — provisional staging entries are only consumed lazily by classifier step 6. Expect staging_backlog mechanical hit every run until staging-resolver ships.",
+    causes_advisory: "staging_backlog",
+  },
+  {
+    id: "archive-reactivation-reviewer-unimplemented",
+    description:
+      "ADR 0025 §4.6 archive-reactivation-reviewer prompt NOT implemented — archived entries cannot reactivate via prompt-driven review. Affects long-term archive churn signals; no mechanical advisory kind yet.",
+    causes_advisory: "outcome_entry",
+  },
+  {
+    id: "p15-writer-dispatch-stub",
+    description:
+      "ADR 0025 §4.4.6 multi-view replay writer dispatch is a v1 stub — reviewer-approved replays may not actually write to brain. Expect multiview_pending count fluctuation until P1.5 writer dispatch fully ships.",
+    causes_advisory: "multiview_pending",
+  },
+];
+
+/**
+ * Phase C.1.a: `RawDistributionSummary` provides the non-flagged
+ * population context required by ADR 0025 §4.3 consensus C9. Without
+ * it, the LLM only sees the 8 mechanical threshold hits and the
+ * thresholds act as an invisible attention filter. This summary tells
+ * the LLM "what does the FULL outcome distribution look like" so it
+ * can apply Step 4 reverse-anchor sweep on the silent majority.
+ */
+export interface RawDistributionSummary {
+  /** Total distinct slugs seen in the outcome window. */
+  total_slugs: number;
+  /** Slugs that did NOT trip any mechanical threshold. */
+  non_flagged_slugs: number;
+  /** Median / max / mean retrieved-unused counts across ALL slugs
+   *  (including flagged), so the LLM can read "is 11 actually high?" */
+  retrieved_unused_distribution: {
+    min: number;
+    median: number;
+    p75: number;
+    max: number;
+    mean: number;
+  };
+  /** Same for decisive counts. */
+  decisive_distribution: {
+    min: number;
+    median: number;
+    p75: number;
+    max: number;
+    mean: number;
+  };
+  /** How many slugs have at least one footnote in the window. */
+  slugs_with_any_footnote: number;
+  /** How many slugs have zero footnotes (retrieved only via tool-result). */
+  slugs_with_only_tool_result: number;
+}
+
 export interface AggregatorAdvisory {
   kind: AdvisoryKind;
   severity: AggregatorSeverity;
@@ -80,6 +159,17 @@ export interface AggregatorSummary {
     zero_result_count: number;
   };
   classifier_health?: ClassifierHealthSummary;
+  /** Phase C.1.a (ADR 0025 §4.3 v1 prompt input C9): raw distribution
+   *  of all slug counts so the LLM sees the population, not just the
+   *  threshold-tripped subset. Optional for backward compatibility:
+   *  v0.2 aggregator-ledger.jsonl rows do not have this field. */
+  raw_distribution?: RawDistributionSummary;
+  /** Phase C.1.a (ADR 0025 §4.3 v1 prompt input D4): hardcoded list of
+   *  known-unimplemented capabilities. Snapshot of STRUCTURAL_CONTEXT
+   *  at run time — makes the run self-describing (a future replay can
+   *  see what the LLM knew about structural noise sources). Optional
+   *  for backward compatibility. */
+  structural_context?: ReadonlyArray<StructuralContextEntry>;
   /** ADR 0027 PR-B+ R1 P1-12: per-turn token-spend rollup across all
    *  anchor-bearing sidecars. Lets the operator answer "this user's
    *  brain maintenance per turn burns how many tokens?" + "which turns
@@ -291,6 +381,84 @@ function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): Aggregat
   };
 }
 
+/**
+ * Phase C.1.a (ADR 0025 §4.3 v1 prompt input C9): compute the full
+ * non-flagged distribution shape across all outcome window slugs.
+ *
+ * Re-walks the outcome rows (instead of sharing state with
+ * `summarizeOutcomes`) to keep this function safe to add as an opt-in
+ * v1 enhancement without touching the v0.2 mechanical path. The extra
+ * pass is O(n) over outcome rows, identical complexity to
+ * `summarizeOutcomes` — cost is negligible at current scales
+ * (374 rows in Phase A baseline).
+ *
+ * `flaggedSlugs` is the set of slugs already surfaced via
+ * `summarizeOutcomes.high_unused` + `echo_chamber_candidates`; we
+ * compute non_flagged_slugs by subtracting that set from the universe.
+ */
+function buildRawDistributionSummary(
+  rows: LedgerOutcomeRow[],
+  cutoffMs: number,
+  flaggedSlugs: ReadonlySet<string>,
+): RawDistributionSummary {
+  const bySlug = new Map<string, { retrieved_unused: number; decisive: number; footnoteCount: number; toolResultCount: number }>();
+  for (const row of rows) {
+    if (!inWindow(row.ts, cutoffMs)) continue;
+    const slug = row.entry_slug;
+    if (!slug) continue;
+    const stats = bySlug.get(slug) ?? { retrieved_unused: 0, decisive: 0, footnoteCount: 0, toolResultCount: 0 };
+    if (row.source === "memory-footnote" && row.used) {
+      stats.footnoteCount++;
+      if (row.used === "retrieved-unused") stats.retrieved_unused++;
+      else if (row.used === "decisive") stats.decisive++;
+    } else if (row.source === "tool-result") {
+      stats.toolResultCount++;
+    }
+    bySlug.set(slug, stats);
+  }
+
+  const totalSlugs = bySlug.size;
+  let nonFlagged = 0;
+  let withFootnote = 0;
+  let toolResultOnly = 0;
+  const retrievedUnusedVals: number[] = [];
+  const decisiveVals: number[] = [];
+
+  for (const [slug, stats] of bySlug) {
+    if (!flaggedSlugs.has(slug)) nonFlagged++;
+    if (stats.footnoteCount > 0) withFootnote++;
+    else if (stats.toolResultCount > 0) toolResultOnly++;
+    retrievedUnusedVals.push(stats.retrieved_unused);
+    decisiveVals.push(stats.decisive);
+  }
+
+  return {
+    total_slugs: totalSlugs,
+    non_flagged_slugs: nonFlagged,
+    slugs_with_any_footnote: withFootnote,
+    slugs_with_only_tool_result: toolResultOnly,
+    retrieved_unused_distribution: computeDistribution(retrievedUnusedVals),
+    decisive_distribution: computeDistribution(decisiveVals),
+  };
+}
+
+function computeDistribution(values: number[]): RawDistributionSummary["retrieved_unused_distribution"] {
+  if (values.length === 0) return { min: 0, median: 0, p75: 0, max: 0, mean: 0 };
+  const sorted = values.slice().sort((a, b) => a - b);
+  const sum = sorted.reduce((acc, v) => acc + v, 0);
+  const pick = (q: number): number => {
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(q * sorted.length)));
+    return sorted[idx];
+  };
+  return {
+    min: sorted[0],
+    median: pick(0.5),
+    p75: pick(0.75),
+    max: sorted[sorted.length - 1],
+    mean: Math.round((sum / sorted.length) * 100) / 100,
+  };
+}
+
 function summarizeStaging(now: Date): AggregatorSummary["staging"] {
   let provisionalPending = 0;
   let provisionalStale = 0;
@@ -486,13 +654,25 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
   const windowDays = Math.max(1, Math.floor(options.windowDays ?? DEFAULT_WINDOW_DAYS));
   const cutoffMs = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
   const audit = summarizeAudit(options.projectRoot, cutoffMs, Math.max(1, Math.floor(options.auditRowLimit ?? DEFAULT_AUDIT_ROW_LIMIT)));
-  const outcome = summarizeOutcomes(readProjectOutcomeRows(options.projectRoot, Math.max(1, Math.floor(options.outcomeRowLimit ?? DEFAULT_OUTCOME_ROW_LIMIT))), cutoffMs);
+  const outcomeRows = readProjectOutcomeRows(options.projectRoot, Math.max(1, Math.floor(options.outcomeRowLimit ?? DEFAULT_OUTCOME_ROW_LIMIT)));
+  const outcome = summarizeOutcomes(outcomeRows, cutoffMs);
   const staging = summarizeStaging(now);
   const search = summarizeSearch(options.projectRoot, cutoffMs, Math.max(1, Math.floor(options.searchMetricsRowLimit ?? DEFAULT_SEARCH_METRICS_ROW_LIMIT)));
   const classifierHealth = summarizeClassifierHealth(options.projectRoot);
   // ADR 0027 PR-B+ R1 P1-12: per-turn token-spend rollup (additive;
   // independent of other summaries; failure here is silent best-effort).
   const perTurnCost = scanPerTurnCost({ projectRoot: options.projectRoot, cutoffMs });
+
+  // Phase C.1.a (ADR 0025 §4.3 v1 prompt input C9 + D4): compute the
+  // raw distribution shape across all outcome window slugs (not just
+  // the threshold-tripped subset), and snapshot the structural
+  // context list. Both fields are optional and additive — v0.2
+  // mechanical consumers ignore them, v1 LLM consumes them.
+  const flaggedSlugs = new Set<string>([
+    ...outcome.high_unused.map((e) => e.slug),
+    ...outcome.echo_chamber_candidates.map((e) => e.slug),
+  ]);
+  const rawDistribution = buildRawDistributionSummary(outcomeRows, cutoffMs, flaggedSlugs);
 
   const base = {
     ts: formatLocalIsoTimestamp(now),
@@ -504,6 +684,8 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
     staging,
     search,
     classifier_health: classifierHealth,
+    raw_distribution: rawDistribution,
+    structural_context: STRUCTURAL_CONTEXT,
     per_turn_cost: perTurnCost,
   };
   const advisories = buildAdvisories(base);
