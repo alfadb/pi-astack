@@ -481,16 +481,47 @@ async function main() {
         assert(summary.advisories.some((a) => a.kind === "classifier_health"), `aggregator should include classifier health advisory: ${JSON.stringify(summary.advisories)}`);
         assert(summary.advisories.some((a) => a.kind === "staging_backlog"), `aggregator should include staging advisory: ${JSON.stringify(summary.advisories)}`);
         assert(summary.advisories.some((a) => a.kind === "multiview_pending"), `aggregator should include multiview advisory: ${JSON.stringify(summary.advisories)}`);
-        const written = runAndWriteSedimentAggregator({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now, auditRowLimit: 50, searchMetricsRowLimit: 50 });
+        // Phase C cutover: runAndWriteSedimentAggregator is now async + accepts
+        // optional modelRegistry. Test without modelRegistry = v0.2-only path.
+        const written = await runAndWriteSedimentAggregator({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now, auditRowLimit: 50, searchMetricsRowLimit: 50 });
         assert(written.advisories.length === summary.advisories.length, "runAndWriteSedimentAggregator should return the same advisory summary shape");
+        assert(written.prompt_native === undefined, "v0.2-only path should not produce prompt_native");
+        assert(written.degraded_to_mechanical === undefined, "v0.2-only path should not be marked degraded (no LLM attempted)");
         const ledgerFile = aggregatorLedgerPath();
         const ledgerRows = fs.readFileSync(ledgerFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
         const lastLedger = ledgerRows[ledgerRows.length - 1];
         assert(lastLedger.prompt_version && lastLedger.prompt_version.aggregator, `aggregator ledger row should carry prompt_version: ${JSON.stringify(lastLedger)}`);
         assert(lastLedger.session_id === "agg-session", `aggregator ledger should preserve session id: ${JSON.stringify(lastLedger)}`);
-        const firstDue = runAndWriteSedimentAggregatorIfDue({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now, minIntervalMs: 60_000, auditRowLimit: 50, searchMetricsRowLimit: 50 });
-        const secondDue = runAndWriteSedimentAggregatorIfDue({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now: new Date(now.getTime() + 1_000), minIntervalMs: 60_000, auditRowLimit: 50, searchMetricsRowLimit: 50 });
-        assert(firstDue && secondDue === null, `aggregator due gate should run once then skip: first=${!!firstDue} second=${JSON.stringify(secondDue)}`);
+        // Phase C cutover: runAndWriteSedimentAggregatorIfDue is now async.
+        // P0-1 fix from 3-T0 round 2 review: must await both calls;
+        // pre-fix code did `firstDue && secondDue === null` against Promise objects
+        // (Promises are truthy → short-circuit → secondDue===null never evaluated
+        // → due-gate behavior silently untested).
+        const firstDue = await runAndWriteSedimentAggregatorIfDue({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now, minIntervalMs: 60_000, auditRowLimit: 50, searchMetricsRowLimit: 50 });
+        const secondDue = await runAndWriteSedimentAggregatorIfDue({ projectRoot: aggRoot, settings: DEFAULT_SEDIMENT_SETTINGS, sessionId: "agg-session", now: new Date(now.getTime() + 1_000), minIntervalMs: 60_000, auditRowLimit: 50, searchMetricsRowLimit: 50 });
+        assert(firstDue !== null, `aggregator due gate first call should run: got ${firstDue}`);
+        assert(secondDue === null, `aggregator due gate second call should skip: got ${JSON.stringify(secondDue)}`);
+        // Phase C cutover: test the degraded path with a failing modelRegistry mock.
+        // Placed LAST so it doesn't pollute the ledger assertions above
+        // (each runAndWriteSedimentAggregator appends a ledger row; the last
+        // row determines what "lastLedger" reads).
+        const failingRegistry = {
+          find: () => undefined,
+          getApiKeyAndHeaders: async () => ({ ok: false, error: "smoke mock no auth" }),
+        };
+        const writtenDegraded = await runAndWriteSedimentAggregator({
+          projectRoot: aggRoot,
+          settings: DEFAULT_SEDIMENT_SETTINGS,
+          sessionId: "agg-session-degraded",
+          now,
+          auditRowLimit: 50,
+          searchMetricsRowLimit: 50,
+          modelRegistry: failingRegistry,
+        });
+        assert(writtenDegraded.degraded_to_mechanical === true, `degraded path should set degraded_to_mechanical true, got ${JSON.stringify(writtenDegraded.degraded_to_mechanical)}`);
+        assert(writtenDegraded.prompt_native === undefined, "degraded path should not produce prompt_native");
+        assert(typeof writtenDegraded.degraded_reason === "string" && writtenDegraded.degraded_reason.length > 0, `degraded path should include degraded_reason: ${writtenDegraded.degraded_reason}`);
+        assert(writtenDegraded.advisories.length > 0 || written.advisories.length === 0, "degraded path should still produce mechanical advisories as fallback");
       } finally {
         if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
       }

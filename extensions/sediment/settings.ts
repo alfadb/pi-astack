@@ -54,6 +54,13 @@ export interface SedimentSettings {
    *  reasonable default. Empty/invalid → fall back to curatorModel. */
   aggregatorModel: string;
   aggregatorTimeoutMs: number;
+  /** ADR 0025 §4.3 Phase C.2 round-2 fix: transport-level retry count for
+   *  pi-ai HTTP transport retries (network blips). MUST NOT be used as
+   *  prompt-level retry to repair malformed JSON — that path is forbidden
+   *  by ADR 0024 §3 + v1 prompt §5 C6 (parse failure → degraded fallback,
+   *  never re-ask LLM to fix JSON). Default 1 = one transport retry for
+   *  HTTP blips. */
+  aggregatorMaxRetries: number;
   /**
    * Sediment auto-write tristate (ADR 0025 §5.3 P5.5 retreat-path requirement).
    *
@@ -158,6 +165,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // Generous timeout (10 min) since the aggregator is fire-and-forget bg.
   aggregatorModel: "deepseek/deepseek-v4-pro",
   aggregatorTimeoutMs: 600_000,
+  aggregatorMaxRetries: 1,
   // ADR 0025 §5.3 P5.5: default changed false → true 2026-05-24.
   //
   // Strict ADR §5.3 hard conditions (3 users × 4 weeks, false-positive rate
@@ -300,6 +308,7 @@ export function resolveSedimentSettings(): SedimentSettings {
       ? cfg.aggregatorModel.trim()
       : DEFAULT_SEDIMENT_SETTINGS.aggregatorModel,
     aggregatorTimeoutMs: Math.max(5_000, asNumber(cfg.aggregatorTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.aggregatorTimeoutMs)),
+    aggregatorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.aggregatorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.aggregatorMaxRetries))),
     autoLlmWriteEnabled: resolveAutoLlmWriteEnabled(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
     skipContinuationSanitize: asBoolean(cfg.skipContinuationSanitize, DEFAULT_SEDIMENT_SETTINGS.skipContinuationSanitize),

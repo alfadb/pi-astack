@@ -123,17 +123,12 @@ export interface AggregatorLlmResult {
 
 let _cachedPrompt: string | undefined;
 function promptPath(): string {
-  // Resolve relative to this compiled module so pi packaging variants work.
-  // __dirname is not available in ESM; fileURLToPath of import.meta.url is.
-  // jiti shims either way \u2014 fallback to a known absolute path if both fail.
-  try {
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    return path.join(here, "prompts", "aggregator-skeptical-historian-v1.md");
-  } catch {
-    // Final fallback: relative to repo layout. Only triggers in unusual
-    // packaging variants.
-    return path.join(process.cwd(), "extensions", "sediment", "prompts", "aggregator-skeptical-historian-v1.md");
-  }
+  // Resolve relative to this compiled module — match the pattern used by
+  // correction-pipeline.ts (also __dirname-based). pi loads extensions via
+  // jiti that transpiles to CJS, so __dirname is the portable choice.
+  // `import.meta.url` does NOT work under jiti CJS transpile (verified
+  // via smoke-memory-sediment.mjs ts.transpileModule strict-parse).
+  return path.join(__dirname, "prompts", "aggregator-skeptical-historian-v1.md");
 }
 
 export function loadAggregatorPrompt(): string {
@@ -251,7 +246,11 @@ async function invokeAggregatorLlm(
       headers: auth.headers,
       signal,
       timeoutMs: settings.aggregatorTimeoutMs ?? settings.curatorTimeoutMs,
-      maxRetries: 0,
+      // Phase C round-2 fix (GPT-5.5 P2-1): transport-level retries from
+      // settings.aggregatorMaxRetries (default 1). MUST stay scoped to HTTP
+      // transport blips — prompt-level JSON repair retries remain forbidden
+      // per v1 prompt §5 C6.
+      maxRetries: settings.aggregatorMaxRetries ?? 1,
     },
   );
   const finalMsg = await stream.result();

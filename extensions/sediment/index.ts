@@ -1150,14 +1150,44 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               sessionId,
               modelRegistry: modelRegistry as Parameters<typeof runAndWriteSedimentAggregatorIfDue>[0]["modelRegistry"],
             });
-            if (!summary || summary.advisories.length === 0) return;
+            if (!summary) return;
+            // Phase C round-2 review P1-1/P1-2/P1-3 fix: distinguish the three
+            // execution engines so audit consumers can disambiguate v1 success
+            // from v0.2 fallback and from no-model-registry skip. v1 prompt §6
+            // requires audit row gate to use promoted_advisories (NOT v0.2
+            // mechanical advisories). The promoted_kinds + degraded flag carry
+            // enough state for the next aggregator's prior_aggregator_summaries.
+            const promoted = summary.prompt_native?.promoted_advisories ?? [];
+            const llmAttempted = !!modelRegistry;
+            const aggregatorEngine = !llmAttempted
+              ? "mechanical_v0_2_no_model_registry"
+              : summary.degraded_to_mechanical
+                ? "mechanical_v0_2_degraded"
+                : "prompt_native_v1";
+            // Audit row gate (v1 prompt §6 contract): emit the aggregator_advisory
+            // row when EITHER v1 promoted_advisories non-empty (real LLM signal)
+            // OR mechanical advisories present AND we did NOT run a successful v1
+            // pass (i.e. degraded or no-registry — mechanical is the only signal
+            // we have, so it's the audit substrate for that run).
+            const v1Promoted = aggregatorEngine === "prompt_native_v1" && promoted.length > 0;
+            const mechanicalFallbackAudit = aggregatorEngine !== "prompt_native_v1" && summary.advisories.length > 0;
+            if (!v1Promoted && !mechanicalFallbackAudit) return;
             await appendAudit(cwd, {
               operation: "aggregator_advisory",
               lane: "diagnostic",
               session_id: sessionId,
               ok: summary.ok,
-              advisory_count: summary.advisories.length,
-              advisories: summary.advisories,
+              aggregator_engine: aggregatorEngine,
+              llm_attempted: llmAttempted,
+              degraded_to_mechanical: !!summary.degraded_to_mechanical,
+              ...(summary.degraded_reason ? { degraded_reason: summary.degraded_reason } : {}),
+              // Both lists shown for transparency; the gate above decided which
+              // is authoritative for this run.
+              promoted_advisory_count: promoted.length,
+              promoted_advisory_kinds: promoted.map((a) => a.kind),
+              mechanical_advisory_count: summary.advisories.length,
+              mechanical_advisory_kinds: summary.advisories.map((a) => a.kind),
+              advisories: aggregatorEngine === "prompt_native_v1" ? promoted : summary.advisories,
               staging: summary.staging,
               outcome: {
                 window_rows: summary.outcome.window_rows,
