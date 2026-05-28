@@ -89,6 +89,9 @@ export interface ArchiveReactivationResult {
   degraded?: boolean;
   degraded_reason?: string;
   reviewed_count: number;
+  /** R1 P1-A: number of archived entries that didn’t make it into
+   *  this batch (will surface in next round-robin run). */
+  deferred_count?: number;
   decisions: ArchiveReactivationEntryDecision[];
   reactivated_slugs: string[];
   llm_duration_ms?: number;
@@ -175,8 +178,57 @@ const MAX_ENTRY_TRUTH_CHARS = 1200;
 const MAX_WINDOW_CHARS = 8000;
 /** Cap total entries reviewed in one batched call. The reviewer can
  *  inspect ~N archived entries before context starts hurting attention.
- *  Excess entries roll into the next debounced run. */
+ *  Excess entries roll into the next debounced run via the round-robin
+ *  cursor below (R1 P1-A fix — plain DESC slice would starve tail). */
 const MAX_ENTRIES_PER_RUN = 20;
+
+/** Sidecar file recording the last archive_at timestamp each slug was
+ *  reviewed at. Used to round-robin candidate selection so that with
+ *  >20 archived entries no entry waits more than ceil(N/20) days for
+ *  review. Per-project so cross-project state stays isolated. */
+function reviewedAtPath(projectRoot: string): string {
+  return path.join(
+    path.resolve(projectRoot),
+    ".pi-astack",
+    "sediment",
+    "archive-reactivation-reviewed-at.json",
+  );
+}
+
+function readReviewedAtMap(projectRoot: string): Map<string, string> {
+  try {
+    const file = reviewedAtPath(projectRoot);
+    if (!fs.existsSync(file)) return new Map();
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    const out = new Map<string, string>();
+    for (const [k, v] of Object.entries(parsed ?? {})) {
+      if (typeof v === "string") out.set(k, v);
+    }
+    return out;
+  } catch {
+    return new Map();
+  }
+}
+
+function writeReviewedAtMap(projectRoot: string, map: Map<string, string>): void {
+  try {
+    const file = reviewedAtPath(projectRoot);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    // Cap map size: drop entries whose slug no longer exists is the
+    // caller’s job (cheap; we just write what was passed). 5000 cap
+    // is plenty headroom; if you hit it, archive churn is the bigger
+    // problem.
+    const obj: Record<string, string> = {};
+    let count = 0;
+    for (const [k, v] of map.entries()) {
+      obj[k] = v;
+      if (++count >= 5000) break;
+    }
+    fs.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n", "utf-8");
+  } catch {
+    // Sidecar is best-effort; missing it just resets round-robin.
+  }
+}
 
 function clip(text: string, cap: number): string {
   if (text.length <= cap) return text;
@@ -196,37 +248,98 @@ function entryArchiveAt(entry: MemoryEntry): string | undefined {
   return typeof raw === "string" ? raw : undefined;
 }
 
+/** Best-effort fallback timestamp for legacy archived entries that
+ *  predate ADR 0025 §4.6 (no `archive_at` field in frontmatter).
+ *  Walks: archive_at → frontmatter.updated → frontmatter.created.
+ *  Returns null when none parseable, in which case ageDays() degrades
+ *  to 0 (same default-conservative path the prompt already documents).
+ *
+ *  Fix for R1 P1-D (DeepSeek): without this fallback, legacy entries
+ *  permanently show age=0 in the reviewer prompt and can never be
+ *  recommended for hard_archive even when they’re truly stale. */
+function effectiveArchiveAt(entry: MemoryEntry): { value: string | undefined; source: "archive_at" | "updated" | "created" | "unknown" } {
+  const v = entryArchiveAt(entry);
+  if (v && Number.isFinite(Date.parse(v))) return { value: v, source: "archive_at" };
+  const fm = (entry.frontmatter ?? {}) as Record<string, unknown>;
+  const updated = typeof fm.updated === "string" ? fm.updated : undefined;
+  if (updated && Number.isFinite(Date.parse(updated))) return { value: updated, source: "updated" };
+  const created = typeof fm.created === "string" ? fm.created : undefined;
+  if (created && Number.isFinite(Date.parse(created))) return { value: created, source: "created" };
+  return { value: undefined, source: "unknown" };
+}
+
 interface PromptBuildResult {
   fullPrompt: string;
   reviewed: MemoryEntry[];
 }
 
-function buildReviewerPrompt(
+/**
+ * Round-robin candidate selection (R1 P1-A fix).
+ *
+ * With pure archive_at DESC + slice(0, MAX), once >MAX entries are
+ * archived the same 20 newest are reviewed every run and tail entries
+ * starve. We fix that by:
+ *
+ *   1. Loading per-slug last_reviewed_at sidecar.
+ *   2. Computing each candidate’s priority = max(archive_at age,
+ *      since_last_reviewed age). Entries never reviewed get +Infinity.
+ *   3. Picking the top MAX by priority — mixes recent archives
+ *      (caller’s preferred review path) with truly stale entries
+ *      (the hard_archive candidates the design exists to serve).
+ *
+ * Properties:
+ *   - With MAX entries, behavior is unchanged from before (all
+ *     reviewed every run).
+ *   - With 2×MAX, each entry reviewed every other run.
+ *   - With N×MAX, max wait = ceil(N) days at 24h debounce.
+ *   - Determinism: ties broken by archive_at DESC then slug ASC.
+ */
+function selectReviewCandidates(
   archivedEntries: MemoryEntry[],
+  reviewedAt: Map<string, string>,
+  now: Date,
+  cap: number,
+): MemoryEntry[] {
+  const nowMs = now.getTime();
+  type Scored = { entry: MemoryEntry; priorityMs: number; archiveMs: number };
+  const scored: Scored[] = archivedEntries.map((entry) => {
+    const eff = effectiveArchiveAt(entry);
+    const archiveMs = eff.value ? Date.parse(eff.value) : 0;
+    const lastReviewedStr = reviewedAt.get(entry.slug);
+    const lastReviewedMs = lastReviewedStr ? Date.parse(lastReviewedStr) : 0;
+    // Priority = whichever wait is longer: since-archive or since-last-review.
+    // Entries never reviewed: lastReviewedMs=0 → nowMs-0 wins for
+    // anything old enough; entries archived today + reviewed today
+    // get a small priority.
+    const sinceArchive = archiveMs > 0 ? nowMs - archiveMs : nowMs; // legacy = max wait
+    const sinceReview = lastReviewedMs > 0 ? nowMs - lastReviewedMs : nowMs;
+    return { entry, priorityMs: Math.max(sinceArchive, sinceReview), archiveMs };
+  });
+  scored.sort((a, b) => {
+    if (b.priorityMs !== a.priorityMs) return b.priorityMs - a.priorityMs;
+    if (b.archiveMs !== a.archiveMs) return b.archiveMs - a.archiveMs;
+    return a.entry.slug.localeCompare(b.entry.slug);
+  });
+  return scored.slice(0, cap).map((s) => s.entry);
+}
+
+function buildReviewerPrompt(
+  reviewed: MemoryEntry[],
   windowText: string,
   now: Date,
 ): PromptBuildResult {
-  // Order by archive_at descending (newest first) so the oldest entries
-  // — which are the candidates for hard_archive_recommended — appear
-  // last in the input. Tail-of-input placement is intentional: the
-  // reviewer is asked to default-conservative, and entries that look
-  // most relevant to the window (recent archives that the user may
-  // still be tracking) get prioritized attention.
-  const sorted = [...archivedEntries].sort((a, b) => {
-    const aMs = Date.parse(entryArchiveAt(a) ?? "") || 0;
-    const bMs = Date.parse(entryArchiveAt(b) ?? "") || 0;
-    return bMs - aMs;
-  });
-
-  const reviewed = sorted.slice(0, MAX_ENTRIES_PER_RUN);
-
   const inputBlocks = reviewed.map((entry) => {
-    const archiveAt = entryArchiveAt(entry);
-    const age = ageDays(archiveAt, now);
+    const eff = effectiveArchiveAt(entry);
+    const age = ageDays(eff.value, now);
+    const stampLabel = eff.source === "archive_at"
+      ? `archive_at: ${eff.value}`
+      : eff.source === "unknown"
+        ? "archive_at: (missing — treat age as 0)"
+        : `archive_at: (missing — fallback to frontmatter.${eff.source}: ${eff.value})`;
     return [
       `## ${entry.slug}`,
       `kind: ${entry.kind} | scope: ${entry.scope} | confidence: ${entry.confidence}`,
-      `archive_at: ${archiveAt ?? "(missing — treat age as 0)"}`,
+      stampLabel,
       `age_days_at_review: ${age}`,
       "compiledTruth:",
       clip(entry.compiledTruth ?? "", MAX_ENTRY_TRUTH_CHARS),
@@ -390,8 +503,11 @@ export interface RunArchiveReactivationOptions {
   sessionId?: string;
   /** When provided, the reviewer calls this to actually flip status
    *  for reactivate decisions. Not exported to caller via a writer
-   *  reference because circular import — caller injects the closure. */
-  reactivateEntry?: (slug: string, rationale: string) => Promise<{ ok: boolean; error?: string }>;
+   *  reference because circular import — caller injects the closure.
+   *  Signature carries `scope` so world-scoped entries route to
+   *  the correct sub-tree (R1 P1-B fix — prior signature defaulted
+   *  to project and silently failed for world entries). */
+  reactivateEntry?: (slug: string, scope: "project" | "world", rationale: string) => Promise<{ ok: boolean; error?: string }>;
   /** Minimum interval between runs (debounce). Default 24h. */
   minIntervalMs?: number;
   now?: Date;
@@ -442,11 +558,17 @@ export async function runArchiveReactivationIfDue(
   const sanitized = sanitizeForMemory(options.windowText);
   const windowText = sanitized.ok ? (sanitized.text ?? options.windowText) : `[redacted: ${sanitized.error}]`;
 
-  const { fullPrompt, reviewed } = buildReviewerPrompt(
+  // R1 P1-A fix: round-robin candidate selection with per-slug
+  // last_reviewed_at sidecar. Replaces plain archive_at DESC slice.
+  const reviewedAtMap = readReviewedAtMap(options.projectRoot);
+  const reviewed = selectReviewCandidates(
     options.archivedEntries,
-    windowText,
+    reviewedAtMap,
     now,
+    MAX_ENTRIES_PER_RUN,
   );
+  const deferredCount = Math.max(0, options.archivedEntries.length - reviewed.length);
+  const { fullPrompt } = buildReviewerPrompt(reviewed, windowText, now);
 
   // Run the LLM.
   let rawText: string;
@@ -518,13 +640,45 @@ export async function runArchiveReactivationIfDue(
     };
   });
 
+  // R1 P1-C fix: reactivate quote substring guard.
+  // Before applying a reactivate decision, verify the LLM’s
+  // archived_quote is a substring of the reviewed entry’s
+  // compiledTruth AND user_quote is a substring of the sanitized
+  // window. This is the safety valve against (a) prompt-injection
+  // sneaking through, (b) model hallucination of a bridge that
+  // doesn’t exist, and (c) format drift where the model emits
+  // {decision:"reactivate"} with no quotes at all. Failed guards
+  // downgrade to keep_archived and log guard_failed in the ledger.
+  const reviewedByslug = new Map(reviewed.map((e) => [e.slug, e] as const));
+  const guardedDecisions: ArchiveReactivationEntryDecision[] = completeDecisions.map((d) => {
+    if (d.decision !== "reactivate") return d;
+    const entry = reviewedByslug.get(d.slug);
+    const truth = (entry?.compiledTruth ?? "").trim();
+    const aq = (d.archived_quote ?? "").trim();
+    const uq = (d.user_quote ?? "").trim();
+    if (!aq || !uq) {
+      return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: empty_quote (had aq=${aq.length} uq=${uq.length}); original_rationale=${d.rationale.slice(0, 200)}` };
+    }
+    if (truth && !truth.includes(aq)) {
+      return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: archived_quote_not_substring; original_rationale=${d.rationale.slice(0, 200)}` };
+    }
+    if (!windowText.includes(uq)) {
+      return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: user_quote_not_substring; original_rationale=${d.rationale.slice(0, 200)}` };
+    }
+    return d;
+  });
+
   // Apply reactivate decisions.
   const reactivatedSlugs: string[] = [];
-  for (const d of completeDecisions) {
+  for (const d of guardedDecisions) {
     if (d.decision !== "reactivate") continue;
     if (!options.reactivateEntry) continue;
+    // R1 P1-B fix: pass scope so world-scoped entries reactivate
+    // against the correct store.
+    const entry = reviewedByslug.get(d.slug);
+    const scope: "project" | "world" = entry?.scope === "world" ? "world" : "project";
     try {
-      const r = await options.reactivateEntry(d.slug, d.rationale);
+      const r = await options.reactivateEntry(d.slug, scope, d.rationale);
       if (r.ok) reactivatedSlugs.push(d.slug);
       // Audit the application result on ledger.
       appendLedgerRow({
@@ -533,6 +687,7 @@ export async function runArchiveReactivationIfDue(
         ...(options.sessionId ? { session_id_local: options.sessionId } : {}),
         operation: "archive_reactivation_apply",
         slug: d.slug,
+        scope,
         ok: r.ok,
         ...(r.error ? { error: r.error } : {}),
       });
@@ -543,14 +698,17 @@ export async function runArchiveReactivationIfDue(
         ...(options.sessionId ? { session_id_local: options.sessionId } : {}),
         operation: "archive_reactivation_apply",
         slug: d.slug,
+        scope,
         ok: false,
         error: e instanceof Error ? e.message : String(e),
       });
     }
   }
 
-  // Write one ledger row per decision (independent of apply outcome).
-  for (const d of completeDecisions) {
+  // Write one ledger row per decision (post-guard, independent of
+  // apply outcome). Guard downgrades show up as `keep_archived` with
+  // rationale prefix `reactivate_guard_failed:` for easy `jq` filtering.
+  for (const d of guardedDecisions) {
     appendLedgerRow({
       ts: formatLocalIsoTimestamp(now),
       project_root: path.resolve(options.projectRoot),
@@ -563,11 +721,22 @@ export async function runArchiveReactivationIfDue(
     });
   }
 
+  // R1 P1-A fix: update per-slug reviewed_at sidecar so next run’s
+  // round-robin priorities reflect this batch. We mark reviewed slugs
+  // by their `now` timestamp; non-reviewed (deferred) slugs keep
+  // their prior value (or none, which is treated as +Infinity wait).
+  const nowIso = formatLocalIsoTimestamp(now);
+  for (const entry of reviewed) {
+    reviewedAtMap.set(entry.slug, nowIso);
+  }
+  writeReviewedAtMap(options.projectRoot, reviewedAtMap);
+
   writeLastRun(options.projectRoot, now, "ok");
   return {
     ok: true,
     reviewed_count: reviewed.length,
-    decisions: completeDecisions,
+    deferred_count: deferredCount,
+    decisions: guardedDecisions,
     reactivated_slugs: reactivatedSlugs,
     llm_duration_ms: llmDurationMs,
     llm_model: model,

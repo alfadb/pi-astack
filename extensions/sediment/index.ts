@@ -1267,13 +1267,18 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               modelRegistry: modelRegistry as Parameters<typeof runArchiveReactivationIfDue>[0]["modelRegistry"],
               sessionId,
               reactivateEntry: canMutate
-                ? async (slug: string, rationale: string) => {
+                ? async (slug: string, scope: "project" | "world", rationale: string) => {
                     try {
+                      // R1 P1-B fix: pass scope so world-scoped entries
+                      // reactivate against <abrainHome>/knowledge/ instead of
+                      // <abrainHome>/projects/<id>/.
                       const res = await updateProjectEntry(
                         slug,
                         {
                           status: "active",
-                          timelineNote: `reactivated by archive-reactivation-reviewer v1: ${rationale.slice(0, 200)}`,
+                          timelineAction: "reactivated",
+                          timelineNote: `archive-reactivation-reviewer v1: ${rationale.slice(0, 200)}`,
+                          auditOperation: "archive_reactivation_apply",
                           sessionId,
                         },
                         {
@@ -1281,6 +1286,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           abrainHome,
                           projectId,
                           settings,
+                          scope,
                           dryRun: false,
                         },
                       );

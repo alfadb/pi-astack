@@ -125,8 +125,16 @@ Rules:
   showing the live-use bridge. For `keep_archived` and
   `hard_archive_recommended`: empty string is acceptable when no
   in-window reference exists.
-- No prose outside the JSON. No fences other than ```json. The caller
-  parses strict JSON; parse failure triggers degraded_to_mechanical.
+- **Quote guard (HARD CONSTRAINT)**: the caller mechanically verifies
+  that `archived_quote` is a literal substring of compiledTruth AND
+  `user_quote` is a literal substring of the window. If either check
+  fails on a `reactivate` decision, the caller silently downgrades it
+  to `keep_archived` and logs `reactivate_guard_failed`. Paraphrasing,
+  ellipsis (`…`), or trailing punctuation that’s not in the source
+  will fail the guard. **Copy bytes; don’t reconstruct.**
+- Return raw JSON, no Markdown fences. (The caller tolerates a single
+  ```json fence for robustness, but raw is preferred.) Parse failure
+  triggers degraded_to_mechanical.
 
 ---
 
@@ -135,8 +143,15 @@ Rules:
 - **Input has zero archived entries**: return `{"decisions": []}`.
 - **Window is empty or pure tool output**: return all `keep_archived`
   (no signal possible).
-- **Entry has malformed archive_at**: treat age_days as 0 (recent).
-  Still review for live-use bridge; if uncertain, keep_archived.
+- **Entry has malformed archive_at**: the input block may show
+  `archive_at: (missing — fallback to frontmatter.updated: …)` or
+  `(missing — treat age as 0)`. The `age_days_at_review` field above
+  is the canonical signal; trust it. Legacy entries (pre-§4.6) with
+  no archive_at fall back to `frontmatter.updated` or `created`.
+- **Same compiledTruth phrase appears in window**: this is the
+  classic live-use bridge — use it as `user_quote` directly. If it
+  appears mid-sentence in the window, quote enough of the surrounding
+  bytes that the substring check finds it.
 - **Reasoning is shaky / your confidence is low**: prefer
   `keep_archived` (default-conservative bias).
 
