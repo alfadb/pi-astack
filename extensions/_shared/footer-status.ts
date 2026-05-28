@@ -15,6 +15,16 @@
  * Display order rationale — follows the event timeline so the footer
  * reads left-to-right as "environment → turn → end-of-turn":
  *
+ *   00  turn-progress  pre-agent-start visibility: shown between user
+ *                      submit and the moment pi's native Working
+ *                      spinner takes over. Updated as each
+ *                      before_agent_start handler runs so the user can
+ *                      see WHICH extension the turn is currently
+ *                      blocked on. Cleared on agent_start / agent_end.
+ *                      Sits at 00 so it sorts before everything else —
+ *                      it represents the earliest visible signal of
+ *                      "pi heard you, working on it".
+ *
  *   01  model-curator  environment readiness (which models are usable
  *                      in this session). Set once at session_start.
  *
@@ -35,6 +45,7 @@
  */
 
 export const FOOTER_STATUS_KEYS = {
+  turnProgress: "00-turn-progress",
   modelCurator: "01-model-curator",
   dispatch:     "02-dispatch",
   abrainRules:  "03-abrain-rules",
