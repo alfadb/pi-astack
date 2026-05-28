@@ -92,12 +92,19 @@ export interface TerminalStateFields {
   rollback_done?: boolean;
   /** ADR §C5 field for `cancelled`. */
   cancel_source?: CancelSource;
-  /** ADR §C5 field for `cancelled` and `degraded`. v1 read-only dispatch:
-   *  always `true` vacuously. */
+  /** ADR §C5 field for `cancelled` ONLY (per the normative table at the
+   *  top of this file). v1 read-only dispatch: always `true` vacuously
+   *  when present. NOT set on degraded (R7 Opus P1-B fix: previously
+   *  degraded carried it, contradicting the file's own strict-scope
+   *  declaration). NOT set on failed (R6 Opus P1-2 fix). */
   cleanup_done?: boolean;
   /** ADR §C5 field for `degraded` ONLY. Human-readable identifiers of the
    *  capability dimensions that were dropped. In v1 dispatch_parallel,
-   *  this lists the per-task labels (model strings) of failed tasks. */
+   *  this lists the per-task labels (model strings) of non-completed
+   *  tasks (failed AND cancelled — R7 NIT-2 fix: doc previously said
+   *  "failed tasks" but implementation includes cancelled too, which is
+   *  the correct degraded semantics: every non-completed sub-task is
+   *  a dropped capability dimension). */
   what_dropped?: string[];
   /** ADR §C5 field for `degraded` ONLY. One-line description of the
    *  fallback path taken (e.g., "use 2/3 reviewer quorum"). */
@@ -324,12 +331,18 @@ export function inferParallelTerminalState(
   }
 
   // Partial success: 0 < ok < n → degraded
+  //
+  // R7 P1 fix (Opus P1-B): degraded no longer carries `cleanup_done` per
+  // ADR §C5 strict scope (cleanup_done is on cancelled only). The
+  // operational truth is the same — the dispatch process did clean up
+  // — but that's tracked at the cancellation site, not on degraded.
+  // For degraded, `what_dropped` + `alt_path` are the ADR-mandated
+  // side-effect fields.
   const droppedLabels = notCompleted;
   return {
     terminal_state: "degraded",
     what_dropped: droppedLabels,
     alt_path: `use ${okCount}/${n} task results`,
-    cleanup_done: true,
     tasks_not_completed: notCompleted,
     resumable: false,
   };

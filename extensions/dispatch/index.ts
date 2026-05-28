@@ -1022,6 +1022,10 @@ export default function (pi: ExtensionAPI) {
         const rejectTsFields = buildTerminalStateFields(rejectResult);
         void appendDispatchAudit(ctx.cwd || process.cwd(), rejectAnchor, {
           operation: "dispatch_agent",
+          // R7 NIT fix (DeepSeek NIT-1): dispatch_parallel.task carries
+          // row_kind:"task"; dispatch_agent should match for symmetry so
+          // jq queries filtering by row_kind catch both.
+          row_kind: "task",
           model: params.model,
           thinking: params.thinking,
           tools: params.tools ?? null,
@@ -1132,6 +1136,8 @@ export default function (pi: ExtensionAPI) {
         subAnchor,
         {
           operation: "dispatch_agent",
+          // R7 NIT fix (DeepSeek NIT-1): symmetry with dispatch_parallel.task.
+          row_kind: "task",
           model: params.model,
           thinking: params.thinking,
           tools: params.tools ?? null,
@@ -1418,58 +1424,61 @@ export default function (pi: ExtensionAPI) {
       const totalWallMs = Date.now() - dispatchStart;
       const totalWall = (totalWallMs / 1000).toFixed(1);
 
-      // ADR 0027 §C5 v1 aggregate terminal_state. inferParallelTerminalState
-      // is deterministic on per-task results — no LLM (C3' infra layer).
-      // `degraded` arises when 0 < ok < N (some tasks succeeded, the consumer
-      // may still use the partial result via the multi-model audit pattern).
+      // ADR 0027 §C5 v1 R7 P1 fix (Opus P1-A + GPT-5.5 P1-1 unanimous):
+      // R6 only materialized hole slots inside taskSummaries (the input to
+      // inferParallelTerminalState). But `results[]` itself stayed sparse,
+      // so every OTHER downstream surface (details.tasks, markdown table,
+      // summary counters, legacy `result`, hasErrors, output rendering)
+      // saw the original holes and produced caller-visible contradictions:
+      //   - details.tasks[hole].ok was true (!undefined === true)
+      //   - details.tasks[hole].terminalState was "failed"
+      //     (yet aggregate said cancelled)
+      //   - legacy `result: "ok"` with terminal_state: "cancelled" on all-holes
+      //   - markdown table silently skipped holes — LLM saw "3 tasks" but
+      //     only 2 rows, the third invisible
       //
-      // R6 P1 fix (GPT-5.5 P1-1): `results` is `new Array(tasks.length)`. If
-      // the parent signal aborts mid fan-out, workers `return` before they
-      // claim further indices, leaving array slots as holes. `Array.prototype
-      // .map` skips holes — the original implementation only saw the tasks
-      // that actually ran, so aggregate could report `completed` when half
-      // the fan-out never even started. Build taskSummaries by iterating
-      // every declared task index, materializing absent slots as an
-      // explicit "aborted" task (cancelled in terminal_state).
-      const taskSummaries: TaskSummary[] = [];
-      for (let i = 0; i < tasks.length; i++) {
+      // R7 builds ONE dense materializedResults array and replaces every
+      // downstream `results[i]?...` pattern. Hole synthesis matches the
+      // shape used in taskSummaries (failureType: "aborted") so terminal_
+      // state classification is identical across all consumers.
+      const materializedResults: AgentResult[] = tasks.map((_t: any, i: number) => {
         const r = results[i];
-        const label = tasks[i]?.model ?? `task[${i}]`;
-        if (r) {
-          taskSummaries.push({ result: r, label });
-        } else {
-          // Slot is a hole — worker never claimed this index (parent abort,
-          // ctx.signal.aborted, or early-return before fan-out). Treat as
-          // cancelled-by-parent so aggregate doesn't silently elide it.
-          taskSummaries.push({
-            result: {
-              error: "task did not start (parent abort before worker claim)",
-              failureType: "aborted",
-            },
-            label,
-          });
-        }
-      }
+        if (r) return r;
+        return {
+          output: "",
+          error: "task did not start (parent abort before worker claim)",
+          failureType: "aborted",
+          durationMs: 0,
+        };
+      });
+
+      // taskSummaries now derives from the dense array — single source of
+      // truth, no duplicated hole-materialization logic.
+      const taskSummaries: TaskSummary[] = materializedResults.map((r, i) => ({
+        result: r,
+        label: tasks[i]?.model ?? `task[${i}]`,
+      }));
       // R6 P1 fix (GPT-5.5 P1-2): thread parent-abort context into aggregate.
-      // Per-task buildTerminalStateFields already uses signal.aborted to
-      // force cancel_source="user" when parent signal won the race against
-      // a per-task timeout. Aggregate now does the same so summary row and
-      // per-task rows cannot diverge on cancel_source.
       const aggregateTsFields = inferParallelTerminalState(taskSummaries, {
         cancelSource: signal.aborted ? "user" : undefined,
       });
       // R6 P2 fix (DeepSeek P2-3): footer state machine now surfaces
-      // cancelled distinctly from failed. Previously cancelled collapsed
-      // to failed, hiding from the user that the cancellation was their own
-      // abort vs a real failure.
+      // cancelled distinctly from failed.
       const finalState: DispatchState =
         aggregateTsFields.terminal_state === "completed" ? "completed"
         : aggregateTsFields.terminal_state === "degraded" ? "degraded"
         : aggregateTsFields.terminal_state === "cancelled" ? "cancelled"
         : "failed";
+
+      // R7 P1 fix: counters derive from materialized array, so holes are
+      // attributed (they count as failed-or-not-completed). Previously
+      // `success` and `failed` were incremented in the worker loop, which
+      // never ran for hole slots — task_count ≠ success + failed.
+      const successCount = materializedResults.filter((r) => !r.error).length;
+      const failedCount = materializedResults.filter((r) => !!r.error).length;
       applyDispatchStatus(
         ctx, finalState,
-        { running: 0, failed, success, total },
+        { running: 0, failed: failedCount, success: successCount, total },
         totalWallMs,
       );
 
@@ -1487,27 +1496,34 @@ export default function (pi: ExtensionAPI) {
       // R6 P2 (GPT-5.5 P2-1): add explicit row_kind so jq queries don't
       // confuse the aggregate row with a task row. Per-task rows carry
       // row_kind="task" (set below in the worker loop edit).
+      // R7 P1 fix: derive `result` from aggregate terminal_state so it can
+      // never disagree (e.g., all-holes → result was "ok" + terminal_state
+      // "cancelled" in R6). Mapping: completed → ok, everything else → fail
+      // (preserves backward-compat with legacy consumers reading binary
+      // ok/fail). Stronger semantics live in `terminal_state`.
+      const aggregateLegacyResult =
+        aggregateTsFields.terminal_state === "completed" ? "ok" : "fail";
       void appendDispatchAudit(projectRoot, aggregateAnchor, {
         operation: "dispatch_parallel.summary",
         row_kind: "aggregate",
         task_count: total,
-        success_count: success,
-        failed_count: failed,
+        // R7: counters now reflect materialized array (holes counted as
+        // failed). Previously this could leave failed_count=0 + holes,
+        // breaking task_count = success + failed invariant.
+        success_count: successCount,
+        failed_count: failedCount,
         duration_ms: totalWallMs,
-        serial_estimate_ms: results
-          .filter((r): r is AgentResult => r != null)
-          .reduce((s, r) => s + r.durationMs, 0),
-        max_single_ms: Math.max(
-          0,
-          ...results.filter((r): r is AgentResult => r != null).map((r) => r.durationMs),
-        ),
-        result: failed > 0 ? "fail" : "ok",
+        serial_estimate_ms: materializedResults.reduce((s, r) => s + r.durationMs, 0),
+        max_single_ms: Math.max(0, ...materializedResults.map((r) => r.durationMs)),
+        result: aggregateLegacyResult,
         ...aggregateTsFields,
       });
 
-      // Build summary
-      const serialEstimate = results.filter((r): r is AgentResult => r != null).reduce((s, r) => s + r.durationMs, 0);
-      const maxSingle = Math.max(0, ...results.filter((r): r is AgentResult => r != null).map((r) => r.durationMs));
+      // Build summary. R7 uses materializedResults so holes contribute
+      // durationMs:0 instead of being filtered out (which would have
+      // silently underestimated serial_estimate when the fan-out aborted).
+      const serialEstimate = materializedResults.reduce((s, r) => s + r.durationMs, 0);
+      const maxSingle = Math.max(0, ...materializedResults.map((r) => r.durationMs));
 
       const lines: string[] = [
         `## Dispatch Results (${tasks.length} tasks, ${totalWall}s total)`,
@@ -1523,22 +1539,29 @@ export default function (pi: ExtensionAPI) {
       lines.push(`| # | Model | Duration | Status |`);
       lines.push(`|---|-------|----------|--------|`);
 
-      for (let i = 0; i < results.length; i++) {
-        const r = results[i];
-        if (!r) continue;
+      // R7 P1 fix (DeepSeek P2-3): iterate materializedResults so hole
+      // tasks are NOT silently skipped from the table. A task that the
+      // parent aborted before worker-claim is shown as 🚫 cancelled with
+      // duration 0, so the caller LLM can see the full picture rather
+      // than wondering why a "3 tasks" header shows only 2 rows.
+      for (let i = 0; i < materializedResults.length; i++) {
+        const r = materializedResults[i];
         const dur = `${(r.durationMs / 1000).toFixed(1)}s`;
-        // P1 fix: surface failureType in summary table so the caller sees
-        // root cause at-a-glance across 16 parallel tasks without scrolling.
-        const status = r.error
-          ? `❌ ${r.failureType ?? "error"}`
-          : "✅";
+        const ts = inferTerminalState(r);
+        let status: string;
+        if (!r.error) {
+          status = "✅";
+        } else if (ts === "cancelled") {
+          status = `🚫 ${r.failureType ?? "cancelled"}`;
+        } else {
+          status = `❌ ${r.failureType ?? "error"}`;
+        }
         lines.push(`| ${i + 1} | ${tasks[i].model} | ${dur} | ${status} |`);
       }
       lines.push("");
 
-      for (let i = 0; i < results.length; i++) {
-        if (!results[i]) continue;
-        const r = results[i];
+      for (let i = 0; i < materializedResults.length; i++) {
+        const r = materializedResults[i];
         const dur = `${(r.durationMs / 1000).toFixed(1)}s`;
         const usageStr = r.usage
           ? ` ↑${r.usage.input} ↓${r.usage.output} $${r.usage.cost.toFixed(4)}`
@@ -1547,8 +1570,13 @@ export default function (pi: ExtensionAPI) {
         lines.push(`### ${i + 1}. ${tasks[i].model} (${dur}${usageStr ? ` — ${usageStr}` : ""})`);
 
         if (r.error) {
+          // R7: cancelled tasks render with 🚫 in the per-task detail
+          // section too, matching the table prefix. Without this, the
+          // table shows 🚫 but the detail shows ❌ — inconsistent.
+          const detailTs = inferTerminalState(r);
+          const prefix = detailTs === "cancelled" ? "🚫" : "❌";
           const failureTag = r.failureType ? ` [${r.failureType}]` : "";
-          lines.push(`❌${failureTag} ${r.error}`);
+          lines.push(`${prefix}${failureTag} ${r.error}`);
           // R2 P1-2 fix: render retry summary in error branch too.
           // dispatch_parallel previously only rendered retry info via
           // formatResult in dispatch_agent — parallel inlined its own
@@ -1574,14 +1602,20 @@ export default function (pi: ExtensionAPI) {
         lines.push("");
       }
 
-      const hasErrors = results.some((r) => r?.error);
+      // R7 P1 fix: hasErrors derives from aggregate terminal_state so the
+      // isError flag is consistent with all other surfaces. Previously
+      // `results.some(r => r?.error)` could be false when all slots were
+      // holes (no completed task at all) — isError would not fire even
+      // though the dispatch was effectively cancelled.
+      const hasErrors = aggregateTsFields.terminal_state !== "completed";
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
         details: {
           kind: "dispatch_parallel_summary",
           taskCount: tasks.length,
-          success,
-          failed,
+          // R7: counter consistency with audit row.
+          success: successCount,
+          failed: failedCount,
           totalWallMs,
           serialEstimateMs: serialEstimate,
           maxSingleMs: maxSingle,
@@ -1591,16 +1625,22 @@ export default function (pi: ExtensionAPI) {
           terminalState: aggregateTsFields.terminal_state,
           ...(aggregateTsFields.what_dropped ? { whatDropped: aggregateTsFields.what_dropped } : {}),
           ...(aggregateTsFields.alt_path ? { altPath: aggregateTsFields.alt_path } : {}),
-          tasks: tasks.map((t: any, i: number) => ({
-            model: t.model,
-            durationMs: results[i]?.durationMs ?? 0,
-            ok: !results[i]?.error,
-            ...(results[i]?.error ? { error: results[i].error, failureType: results[i].failureType } : {}),
-            ...(results[i]?.usage ? { usage: results[i].usage } : {}),
-            // Per-task terminal_state included so callers can see at-a-glance
-            // which tasks were cancelled vs failed.
-            terminalState: results[i] ? inferTerminalState(results[i]) : "failed",
-          })),
+          // R7 P1 fix (Opus P1-A + GPT-5.5 P1-1 + DeepSeek P2-1):
+          // details.tasks uses materializedResults so hole slots produce
+          // consistent (ok=false, terminalState=cancelled, failureType=
+          // aborted) entries instead of the previous contradictory
+          // (ok=true, terminalState=failed, no error) shape.
+          tasks: tasks.map((t: any, i: number) => {
+            const r = materializedResults[i];
+            return {
+              model: t.model,
+              durationMs: r.durationMs,
+              ok: !r.error,
+              ...(r.error ? { error: r.error, failureType: r.failureType } : {}),
+              ...(r.usage ? { usage: r.usage } : {}),
+              terminalState: inferTerminalState(r),
+            };
+          }),
         },
         ...(hasErrors ? { isError: true } : {}),
       };

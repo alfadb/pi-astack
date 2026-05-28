@@ -308,7 +308,7 @@ check("all 3 ok → completed (no tasks_not_completed)", () => {
   assertEq(r, { terminal_state: "completed", resumable: false });
 });
 
-check("2 ok / 1 failed → degraded with what_dropped + alt_path + tasks_not_completed", () => {
+check("2 ok / 1 failed → degraded with what_dropped + alt_path + tasks_not_completed (no cleanup_done per R7)", () => {
   const r = inferParallelTerminalState([
     { result: ok, label: "modelA" },
     { result: failed, label: "modelB" },
@@ -318,13 +318,12 @@ check("2 ok / 1 failed → degraded with what_dropped + alt_path + tasks_not_com
     terminal_state: "degraded",
     what_dropped: ["modelB"],
     alt_path: "use 2/3 task results",
-    cleanup_done: true,
     tasks_not_completed: ["modelB"],
     resumable: false,
   });
 });
 
-check("1 ok / 2 failed → degraded (1/3 is still some success)", () => {
+check("1 ok / 2 failed → degraded (1/3 is still some success; no cleanup_done)", () => {
   const r = inferParallelTerminalState([
     { result: failed, label: "modelA" },
     { result: ok, label: "modelB" },
@@ -334,7 +333,6 @@ check("1 ok / 2 failed → degraded (1/3 is still some success)", () => {
     terminal_state: "degraded",
     what_dropped: ["modelA", "modelC"],
     alt_path: "use 1/3 task results",
-    cleanup_done: true,
     tasks_not_completed: ["modelA", "modelC"],
     resumable: false,
   });
@@ -423,7 +421,7 @@ check("0 tasks (degenerate) → failed with reason", () => {
   }
 });
 
-check("partial cancelled + ok → degraded (cancelled tasks count as dropped)", () => {
+check("partial cancelled + ok → degraded (cancelled tasks count as dropped; no cleanup_done per R7)", () => {
   const r = inferParallelTerminalState([
     { result: ok, label: "modelA" },
     { result: cancelledTimeout, label: "modelB" },
@@ -432,7 +430,6 @@ check("partial cancelled + ok → degraded (cancelled tasks count as dropped)", 
     terminal_state: "degraded",
     what_dropped: ["modelB"],
     alt_path: "use 1/2 task results",
-    cleanup_done: true,
     tasks_not_completed: ["modelB"],
     resumable: false,
   });
@@ -523,7 +520,10 @@ check("ADR strict scope: cancelled never has reason or what_dropped or rollback_
   }
 });
 
-check("ADR strict scope: degraded has what_dropped + alt_path; never has reason or rollback_done", () => {
+check("ADR strict scope: degraded has what_dropped + alt_path; never has reason / rollback_done / cleanup_done", () => {
+  // R7 Opus P1-B fix: degraded no longer carries cleanup_done per ADR
+  // §C5 strict scope (cleanup_done is on cancelled only). Previous smoke
+  // locked the violation in; this version locks the corrected scope.
   const r = inferParallelTerminalState([
     { result: ok, label: "a" },
     { result: failed, label: "b" },
@@ -542,6 +542,9 @@ check("ADR strict scope: degraded has what_dropped + alt_path; never has reason 
   }
   if ("rollback_done" in r) {
     throw new Error(`degraded must not carry rollback_done (failed-only)`);
+  }
+  if ("cleanup_done" in r) {
+    throw new Error(`degraded must not carry cleanup_done (cancelled-only per ADR §C5 strict scope, R7 P1-B fix)`);
   }
 });
 

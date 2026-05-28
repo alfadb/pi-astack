@@ -213,17 +213,27 @@ check("aggregate inferParallelTerminalState receives cancelSource override", () 
 
 console.log("\nSection: results-array hole handling (R6 P1-1 fix)");
 
-check("taskSummaries iterates 0..tasks.length, materializing holes as aborted", () => {
+check("taskSummaries derives from materializedResults (R7: single source of truth)", () => {
   // R6 GPT-5.5 P1-1: results array is `new Array(tasks.length)` — holes
-  // appear when workers `return` early on abort. The fix builds
-  // taskSummaries via for-loop (NOT Array.map), explicitly materializing
-  // missing slots as failureType:"aborted".
+  // appear when workers `return` early on abort. R6 built taskSummaries
+  // via for-loop materializing holes. R7 unified this: holes are
+  // materialized ONCE into a dense `materializedResults` array, and
+  // taskSummaries derives from it via .map. The hole synthesis still
+  // exists (in the materializedResults construction); this smoke check
+  // is updated to lock the R7 shape (single source of truth) rather than
+  // the R6 shape (duplicated hole logic).
   const block = dispatchSrc.match(/taskSummaries[\s\S]{0,1500}?const aggregateTsFields/);
   if (!block) throw new Error("could not locate taskSummaries build block");
-  if (!/for\s*\(\s*let\s+i\s*=\s*0\s*;\s*i\s*<\s*tasks\.length/.test(block[0])) {
-    throw new Error("taskSummaries must be built via for-loop iterating tasks.length, not Array.map (which skips holes)");
+  if (!/taskSummaries:\s*TaskSummary\[\]\s*=\s*materializedResults\.map/.test(block[0])) {
+    throw new Error(
+      "R7 invariant: taskSummaries must derive from materializedResults.map, " +
+      "NOT a separate hole-materialization for-loop. The hole synthesis lives " +
+      "in materializedResults construction (single source of truth).",
+    );
   }
-  if (!/parent abort before worker claim/i.test(block[0])) {
+  // The hole materialization itself must still exist somewhere upstream
+  // (in materializedResults construction).
+  if (!/parent abort before worker claim/i.test(dispatchSrc)) {
     throw new Error(
       "missing the 'parent abort before worker claim' materialization branch; without it, " +
       "results holes would make aggregate undercount and possibly report completed when fan-out was aborted",
@@ -273,8 +283,11 @@ check("dispatch_agent details include terminalState", () => {
 });
 
 check("dispatch_parallel summary details include terminalState", () => {
+  // R7: the details block now embeds tasks: tasks.map(...) which is
+  // longer; bumped block window so the aggregate terminalState assertion
+  // is captured before the closer.
   const block = dispatchSrc.match(
-    /kind:\s*"dispatch_parallel_summary"[\s\S]{0,1500}?\},/,
+    /kind:\s*"dispatch_parallel_summary"[\s\S]{0,3000}?\}\s*,/,
   );
   if (!block) throw new Error("could not locate dispatch_parallel_summary details");
   if (!/terminalState:\s*aggregateTsFields\.terminal_state/.test(block[0])) {
@@ -282,11 +295,16 @@ check("dispatch_parallel summary details include terminalState", () => {
   }
 });
 
-check("per-task details include terminalState", () => {
-  // Per-task entry in the tasks: [] array of dispatch_parallel_summary
-  // should include terminalState: inferTerminalState(results[i])
-  if (!/terminalState:\s*results\[i\]\s*\?\s*inferTerminalState\(results\[i\]\)/.test(dispatchSrc)) {
-    throw new Error("per-task summary entry missing terminalState");
+check("per-task details include terminalState (R7: derived from materializedResults)", () => {
+  // R7 P1 fix changed the lookup pattern: const r = materializedResults[i];
+  // terminalState: inferTerminalState(r). The previous pattern
+  // `inferTerminalState(results[i])` is gone (deliberately) because
+  // results[i] could be undefined for holes.
+  if (!/terminalState:\s*inferTerminalState\(r\)/.test(dispatchSrc)) {
+    throw new Error(
+      "per-task details must call inferTerminalState(r) where r = materializedResults[i] (R7 P1-A fix). " +
+      "Previously used results[i] which yielded inconsistent state for holes.",
+    );
   }
 });
 
@@ -295,15 +313,20 @@ console.log("\nSection: backward compat");
 check("legacy result:\"ok\"|\"fail\" field retained on all audit rows", () => {
   // All audit write sites (dispatch_agent normal, dispatch_agent tool_rejected,
   // dispatch_parallel.task normal, dispatch_parallel.task tool_rejected,
-  // dispatch_parallel.summary) must still have a `result:` field.
+  // dispatch_parallel.summary) must still have a `result:` field for
+  // backward compat. R7 changed the aggregate row from
+  //   result: failed > 0 ? "fail" : "ok"
+  // to derive from terminal_state via aggregateLegacyResult identifier:
+  //   result: aggregateLegacyResult
+  // so the regex needs to allow that form too.
   const sites = dispatchSrc.match(
-    /operation:\s*"dispatch_(?:agent|parallel\.task|parallel\.summary)"[\s\S]{0,2000}?\}\s*\)\s*;/g,
+    /operation:\s*"dispatch_(?:agent|parallel\.task|parallel\.summary)"[\s\S]{0,3000}?\}\s*\)\s*;/g,
   );
   if (!sites || sites.length < 5) {
     throw new Error(`expected \u22655 audit write sites; got ${sites?.length ?? 0}`);
   }
   for (const block of sites) {
-    if (!/result:\s*(?:"|failed > 0|res\.error|result\.error)/.test(block)) {
+    if (!/result:\s*(?:"|res\.error|result\.error|aggregateLegacyResult\b)/.test(block)) {
       throw new Error(
         `audit block missing legacy result field (backward compat):\n${block.slice(0, 400)}...`,
       );
