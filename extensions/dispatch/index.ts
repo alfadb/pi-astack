@@ -49,6 +49,12 @@ import {
   type CausalAnchor,
 } from "../_shared/causal-anchor";
 import { dispatchAuditPath } from "../_shared/runtime";
+import {
+  buildTerminalStateFields,
+  inferParallelTerminalState,
+  inferTerminalState,
+  type TaskSummary,
+} from "./terminal-state";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -103,8 +109,18 @@ const KNOWN_TOOLS = new Set([
 
 // ── ADR 0027 C6a: dispatch audit log ────────────────────────────
 
-/** Audit row schema version. Increment when adding non-additive fields. */
-const DISPATCH_AUDIT_VERSION = 1;
+/** Audit row schema version. Increment when adding non-additive fields.
+ *
+ *  v1 → v2 (ADR 0027 §C5 v1, 2026-05-28): added `terminal_state` taxonomy
+ *  + per-state side-effect fields (cancel_source / cleanup_done /
+ *  rollback_done / what_dropped / alt_path / resumable). Legacy `result:
+ *  "ok"|"fail"` and `failure_type` are RETAINED for backward compatibility
+ *  with audit consumers that haven't been updated. `terminal_state` is
+ *  ADDITIVE — readers can pick either schema, but new analysis tooling
+ *  should prefer `terminal_state` because it distinguishes cancelled vs
+ *  failed and surfaces degraded outcomes that the old binary schema
+ *  collapses into "fail". */
+const DISPATCH_AUDIT_VERSION = 2;
 
 /** Append one row to `<projectRoot>/.pi-astack/dispatch/audit.jsonl`.
  *  Best-effort: any failure (disk full / permission / fs error) is
@@ -143,7 +159,10 @@ async function appendDispatchAudit(
 
 const DISPATCH_STATUS_KEY = FOOTER_STATUS_KEYS.dispatch;
 
-type DispatchState = "idle" | "running" | "completed" | "failed";
+/** Footer state machine state. v2 (2026-05-28) adds `degraded` to surface
+ *  dispatch_parallel partial-success outcomes (ADR 0027 §C5 aggregate).
+ *  Single-task dispatch_agent never enters `degraded` (no aggregate). */
+type DispatchState = "idle" | "running" | "completed" | "failed" | "degraded";
 
 interface DispatchCounts {
   running: number;
@@ -167,6 +186,7 @@ export function renderDispatchStatus(
     case "idle":      return "💤 dispatch idle";
     case "running":   return `📡 dispatch${c}`;
     case "completed": return `✅ dispatch${c}${dur}`;
+    case "degraded":  return `🟡 dispatch${c}${dur}`;
     case "failed":    return `⚠️  dispatch${c}${dur}`;
     default:          return `❓ dispatch (${state})${c}${dur}`;
   }
@@ -1060,10 +1080,19 @@ export default function (pi: ExtensionAPI) {
         applyDispatchStatus(ctx, "completed", { running: 0, failed: 0, success: 1, total: 1 }, durationMs);
       }
 
-      // ADR 0027 C6a: dispatch audit row — cross-layer join key for tracing
-      // a user turn through L1 (sediment / abrain) and L2 (this row + any
-      // sub-agent self-traces). Best-effort: appendDispatchAudit swallows IO
-      // errors so audit failures never break the dispatch path.
+      // ADR 0027 C6a + §C5 v1: dispatch audit row — cross-layer join key
+      // for tracing a user turn through L1 (sediment / abrain) and L2
+      // (this row + any sub-agent self-traces). v2 schema adds
+      // terminal_state + side-effect fields. cancelSource heuristic: if
+      // signal.aborted fired, prefer "user" (parent abort); the
+      // buildTerminalStateFields default would otherwise infer from
+      // failureType="timeout" → "timeout", missing the case where the
+      // parent signal fires before the timeout. Best-effort:
+      // appendDispatchAudit swallows IO errors so audit failures never
+      // break the dispatch path.
+      const tsFields = buildTerminalStateFields(result, {
+        cancelSource: signal.aborted ? "user" : undefined,
+      });
       void appendDispatchAudit(
         ctx.cwd || process.cwd(),
         subAnchor,
@@ -1075,6 +1104,7 @@ export default function (pi: ExtensionAPI) {
           prompt_chars: typeof params.prompt === "string" ? params.prompt.length : 0,
           duration_ms: durationMs,
           result: result.error ? "fail" : "ok",
+          ...tsFields,
           ...(result.failureType ? { failure_type: result.failureType } : {}),
           ...(result.stopReason ? { stop_reason: result.stopReason } : {}),
           output_chars: result.output?.length ?? 0,
@@ -1096,6 +1126,10 @@ export default function (pi: ExtensionAPI) {
           model: params.model,
           durationMs,
           ok: !result.error,
+          // ADR 0027 §C5 v1: surface terminal_state so the caller LLM can
+          // distinguish cancelled (timeout / user abort) from failed.
+          terminalState: tsFields.terminal_state,
+          ...(tsFields.cancel_source ? { cancelSource: tsFields.cancel_source } : {}),
           ...(subAnchor ? { anchor: subAnchor } : {}),
           ...(result.error ? { error: result.error, failureType: result.failureType } : {}),
           ...(result.usage ? { usage: result.usage } : {}),
@@ -1253,6 +1287,9 @@ export default function (pi: ExtensionAPI) {
               updateRunning();
               // Audit even for rejected tasks — the rejection itself is
               // part of the trace ("tried task X but tool allowlist refused").
+              // ADR 0027 §C5 v1: tool_rejected is a pre-flight failure →
+              // terminal_state = failed, with vacuous rollback/cleanup.
+              const rejectedTsFields = buildTerminalStateFields(res);
               void appendDispatchAudit(projectRoot, subAnchor, {
                 operation: "dispatch_parallel.task",
                 task_index: i,
@@ -1263,6 +1300,7 @@ export default function (pi: ExtensionAPI) {
                 prompt_chars: typeof t.prompt === "string" ? t.prompt.length : 0,
                 duration_ms: 0,
                 result: "fail",
+                ...rejectedTsFields,
                 failure_type: "tool_rejected",
                 output_chars: 0,
               });
@@ -1305,9 +1343,15 @@ export default function (pi: ExtensionAPI) {
           else success++;
           updateRunning();
 
-          // ADR 0027 C6a: per-task audit row. Cross-layer consumers join
-          // on (session_id, turn_id, subturn) to reconstruct one
-          // dispatch_parallel invocation's full sub-agent fan-out.
+          // ADR 0027 C6a + §C5 v1: per-task audit row. Cross-layer
+          // consumers join on (session_id, turn_id, subturn) to
+          // reconstruct one dispatch_parallel invocation's full sub-agent
+          // fan-out. v2 schema adds per-task terminal_state. Parent
+          // signal: distinguish parent abort ("user") from per-task
+          // timeout — same logic as dispatch_agent above.
+          const taskTsFields = buildTerminalStateFields(res, {
+            cancelSource: signal.aborted ? "user" : undefined,
+          });
           void appendDispatchAudit(projectRoot, subAnchor, {
             operation: "dispatch_parallel.task",
             task_index: i,
@@ -1318,6 +1362,7 @@ export default function (pi: ExtensionAPI) {
             prompt_chars: typeof t.prompt === "string" ? t.prompt.length : 0,
             duration_ms: Date.now() - taskStart,
             result: res.error ? "fail" : "ok",
+            ...taskTsFields,
             ...(res.failureType ? { failure_type: res.failureType } : {}),
             ...(res.stopReason ? { stop_reason: res.stopReason } : {}),
             output_chars: res.output?.length ?? 0,
@@ -1336,12 +1381,55 @@ export default function (pi: ExtensionAPI) {
       await Promise.allSettled(workers);
       const totalWallMs = Date.now() - dispatchStart;
       const totalWall = (totalWallMs / 1000).toFixed(1);
-      const finalState: DispatchState = failed > 0 ? "failed" : "completed";
+
+      // ADR 0027 §C5 v1 aggregate terminal_state. inferParallelTerminalState
+      // is deterministic on per-task results — no LLM (C3' infra layer).
+      // `degraded` arises when 0 < ok < N (some tasks succeeded, the consumer
+      // may still use the partial result via the multi-model audit pattern).
+      const taskSummaries: TaskSummary[] = results
+        .map((r, idx): TaskSummary | null =>
+          r ? { result: r, label: tasks[idx]?.model ?? `task[${idx}]` } : null,
+        )
+        .filter((x): x is TaskSummary => x !== null);
+      const aggregateTsFields = inferParallelTerminalState(taskSummaries);
+      const finalState: DispatchState =
+        aggregateTsFields.terminal_state === "completed" ? "completed"
+        : aggregateTsFields.terminal_state === "degraded" ? "degraded"
+        : aggregateTsFields.terminal_state === "cancelled" ? "failed"
+        : "failed";
       applyDispatchStatus(
         ctx, finalState,
         { running: 0, failed, success, total },
         totalWallMs,
       );
+
+      // ADR 0027 §C5 v1: aggregate dispatch_parallel.summary audit row.
+      // Prior to v1 only per-task rows existed, so cross-layer consumers had
+      // to re-aggregate failed/ok counts to know if the whole invocation
+      // succeeded. v1 emits a single summary row with the aggregate
+      // terminal_state (completed / degraded / failed / cancelled) so
+      // downstream readers can join the fan-out via (session_id, turn_id,
+      // subturn=0). subturn=0 is reserved for the aggregate row; per-task
+      // rows carry subturn=1..N.
+      const aggregateAnchor = parentAnchor
+        ? { ...parentAnchor, subturn: 0, sub_agent_label: "dispatch_parallel.summary" }
+        : undefined;
+      void appendDispatchAudit(projectRoot, aggregateAnchor, {
+        operation: "dispatch_parallel.summary",
+        task_count: total,
+        success_count: success,
+        failed_count: failed,
+        duration_ms: totalWallMs,
+        serial_estimate_ms: results
+          .filter((r): r is AgentResult => r != null)
+          .reduce((s, r) => s + r.durationMs, 0),
+        max_single_ms: Math.max(
+          0,
+          ...results.filter((r): r is AgentResult => r != null).map((r) => r.durationMs),
+        ),
+        result: failed > 0 ? "fail" : "ok",
+        ...aggregateTsFields,
+      });
 
       // Build summary
       const serialEstimate = results.filter((r): r is AgentResult => r != null).reduce((s, r) => s + r.durationMs, 0);
@@ -1423,12 +1511,21 @@ export default function (pi: ExtensionAPI) {
           totalWallMs,
           serialEstimateMs: serialEstimate,
           maxSingleMs: maxSingle,
+          // ADR 0027 §C5 v1: surface aggregate terminal_state to the
+          // caller LLM so it can read the dispatch outcome (degraded /
+          // failed) without re-aggregating per-task error fields.
+          terminalState: aggregateTsFields.terminal_state,
+          ...(aggregateTsFields.what_dropped ? { whatDropped: aggregateTsFields.what_dropped } : {}),
+          ...(aggregateTsFields.alt_path ? { altPath: aggregateTsFields.alt_path } : {}),
           tasks: tasks.map((t: any, i: number) => ({
             model: t.model,
             durationMs: results[i]?.durationMs ?? 0,
             ok: !results[i]?.error,
             ...(results[i]?.error ? { error: results[i].error, failureType: results[i].failureType } : {}),
             ...(results[i]?.usage ? { usage: results[i].usage } : {}),
+            // Per-task terminal_state included so callers can see at-a-glance
+            // which tasks were cancelled vs failed.
+            terminalState: results[i] ? inferTerminalState(results[i]) : "failed",
           })),
         },
         ...(hasErrors ? { isError: true } : {}),

@@ -28,6 +28,7 @@
     "smoke:imagine": "node scripts/smoke-imagine.mjs",
     "smoke:web-search": "node scripts/smoke-web-search.mjs",
     "smoke:pi-internals-subagent": "node scripts/smoke-pi-internals-subagent.mjs",
+    "smoke:c5-terminal-state": "node scripts/smoke-c5-terminal-state.mjs",
     "smoke:causal-anchor": "node scripts/smoke-causal-anchor.mjs",
     "smoke:causal-anchor-retrofit": "node scripts/smoke-causal-anchor-retrofit.mjs",
     "smoke:sediment-l2-withhold": "node scripts/smoke-sediment-l2-withhold.mjs",

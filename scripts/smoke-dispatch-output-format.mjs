@@ -84,6 +84,24 @@ const inputCompatOut = ts.transpileModule(fs.readFileSync(inputCompatSrc, "utf8"
 fs.writeFileSync(path.join(tmpDir, "input-compat.cjs"), inputCompatOut.outputText);
 fs.copyFileSync(path.join(tmpDir, "input-compat.cjs"), path.join(tmpDir, "input-compat.js"));
 
+// ADR 0027 §C5 v1: stage terminal-state.ts (real module, no external deps).
+// dispatch/index.ts imports buildTerminalStateFields/inferParallelTerminalState/
+// inferTerminalState at module-load time. The terminal-state.ts source
+// itself is dependency-free, so a plain transpile-and-copy mirrors how
+// input-compat.ts is staged above. Without this the smoke fails at
+// require(cjsPath) with "Cannot find module './terminal-state'".
+const tsmsSrc = path.join(repoRoot, "extensions/dispatch/terminal-state.ts");
+const tsmsOut = ts.transpileModule(fs.readFileSync(tsmsSrc, "utf8"), {
+  compilerOptions: {
+    module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2022,
+    esModuleInterop: true,
+    moduleResolution: ts.ModuleResolutionKind.NodeJs,
+  },
+});
+fs.writeFileSync(path.join(tmpDir, "terminal-state.cjs"), tsmsOut.outputText);
+fs.copyFileSync(path.join(tmpDir, "terminal-state.cjs"), path.join(tmpDir, "terminal-state.js"));
+
 // Stub `typebox` (dispatch/index.ts: `import { Type } from "typebox"`).
 // Also stub `../_shared/footer-status` which dispatch imports at module
 // load time. Both are needed because the file's default export
