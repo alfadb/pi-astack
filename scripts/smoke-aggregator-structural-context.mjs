@@ -99,29 +99,13 @@ const KNOWN_ENTRIES = {
       return true;
     },
   },
-  "archive-reactivation-reviewer-unimplemented": {
-    description: "ADR 0025 §4.6 archive-reactivation-reviewer prompt",
-    shouldBeAbsent: () => {
-      const promptPath = path.join(
-        repoRoot,
-        "extensions/sediment/prompts/archive-reactivation-reviewer-v1.md",
-      );
-      if (fs.existsSync(promptPath)) {
-        return "archive-reactivation-reviewer-v1.md exists — archive-reactivation may have shipped";
-      }
-      // Also check settings.ts for the prompt version key changing from
-      // "v0" placeholder to "v1" or later.
-      const settingsSrc = fs.readFileSync(
-        path.join(repoRoot, "extensions/sediment/settings.ts"),
-        "utf8",
-      );
-      const arrMatch = /archiveReactivationReviewer:\s*"([^"]+)"/.exec(settingsSrc);
-      if (arrMatch && arrMatch[1] !== "v0") {
-        return `settings.archiveReactivationReviewer bumped to "${arrMatch[1]}" — archive-reactivation may have shipped`;
-      }
-      return true;
-    },
-  },
+  // 2026-05-28 Stage 2 cleanup: "archive-reactivation-reviewer-unimplemented"
+  // removed from KNOWN_ENTRIES in the same commit that removed it from
+  // STRUCTURAL_CONTEXT. The reviewer shipped: prompt at
+  // extensions/sediment/prompts/archive-reactivation-reviewer-v1.md,
+  // module at extensions/sediment/archive-reactivation.ts,
+  // sediment/index.ts integrates it via scheduleAggregator, and
+  // promptVersion.archiveReactivationReviewer is bumped to "v1".
   // 2026-05-28 cleanup: "p15-writer-dispatch-stub" removed from
   // STRUCTURAL_CONTEXT in the same commit — writer dispatch was shipped
   // earlier than the ADR text reflected, so the entry was always stale.

@@ -67,12 +67,11 @@ export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
       "ADR 0025 §4.1.5.1 staging-resolver NOT implemented — provisional staging entries are only consumed lazily by classifier step 6. Expect staging_backlog mechanical hit every run until staging-resolver ships.",
     causes_advisory: "staging_backlog",
   },
-  {
-    id: "archive-reactivation-reviewer-unimplemented",
-    description:
-      "ADR 0025 §4.6 archive-reactivation-reviewer prompt NOT implemented — archived entries cannot reactivate via prompt-driven review. Affects long-term archive churn signals; no mechanical advisory kind yet.",
-    causes_advisory: "outcome_entry",
-  },
+  // NOTE 2026-05-28 Stage 2 (commit 9796bdd→...): archive-reactivation-
+  // reviewer-unimplemented entry REMOVED. ADR 0025 §4.6 reviewer landed in
+  // extensions/sediment/archive-reactivation.ts + prompts/archive-
+  // reactivation-reviewer-v1.md + sediment/index.ts agent_end
+  // integration. promptVersion.archiveReactivationReviewer = "v1".
   // NOTE 2026-05-28 round-3 cleanup: previously had a "p15-writer-dispatch-stub"
   // entry here, but the writer dispatch was actually shipped earlier (see
   // sediment/index.ts:3012-3041 — `writeApprovedToBrain` calls

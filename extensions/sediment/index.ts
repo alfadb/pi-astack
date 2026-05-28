@@ -33,6 +33,7 @@ import { buildPromptVersionAudit, resolveSedimentSettings, type SedimentSettings
 import {
   buildRunWindow,
   checkpointSummary,
+  entryToText,
   loadSessionCheckpoint,
   saveSessionCheckpoint,
   type RunWindow,
@@ -52,6 +53,7 @@ import { relevantEntriesForCurator } from "./curator";
 import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
+import { runArchiveReactivationIfDue } from "./archive-reactivation";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
 import { getCurrentAnchor, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
@@ -59,6 +61,7 @@ import { sanitizeForMemory } from "./sanitizer";
 
 import {
   appendAudit,
+  updateProjectEntry,
   writeAbrainAboutMe,
   writeProjectEntry,
   type AboutMeDraft,
@@ -1225,6 +1228,94 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         modelRegistry,
         abrainHome,
         projectId,
+      });
+
+      // ADR 0025 §4.6 archive-reactivation reviewer (Stage 2).
+      // Daily-debounced prompt-native review of archived entries: if a
+      // recently-archived entry's preference is showing up in the live
+      // conversation behavior, reactivate it. Fire-and-forget; never
+      // blocks main session. Reuses the same scheduleAggregator helper
+      // defined inline above (setImmediate when available).
+      scheduleAggregator(() => {
+        void (async () => {
+          try {
+            // Avoid running in staging-only mode (the reviewer's
+            // `reactivate` decision would call writer.updateProjectEntry,
+            // which is a durable write). When autoLlmWriteEnabled is
+            // "staging-only" or false, we still want the audit signal
+            // for diagnostics but no status flip — disable the
+            // reactivateEntry closure in those modes.
+            const canMutate = settings.autoLlmWriteEnabled === true;
+            const memSettings = resolveMemorySettings();
+            const allEntries = await (await import("../memory/parser"))
+              .loadEntries(cwd, memSettings, undefined);
+            const archived = allEntries.filter((e: { status: string }) => e.status === "archived");
+            // Build a compact window text from the most recent entries
+            // in branch. We use the SAME entryToText (with L2 mask) as
+            // the classifier path so the reviewer never sees sub-agent
+            // reasoning. ~50 most recent entries should be plenty.
+            const recent = branch.slice(-50);
+            const windowText = recent
+              .map((e: unknown) => entryToText(e))
+              .filter((s: string) => !!s)
+              .join("\n\n");
+            const result = await runArchiveReactivationIfDue({
+              projectRoot: cwd,
+              archivedEntries: archived,
+              windowText,
+              settings,
+              modelRegistry: modelRegistry as Parameters<typeof runArchiveReactivationIfDue>[0]["modelRegistry"],
+              sessionId,
+              reactivateEntry: canMutate
+                ? async (slug: string, rationale: string) => {
+                    try {
+                      const res = await updateProjectEntry(
+                        slug,
+                        {
+                          status: "active",
+                          timelineNote: `reactivated by archive-reactivation-reviewer v1: ${rationale.slice(0, 200)}`,
+                          sessionId,
+                        },
+                        {
+                          projectRoot: cwd,
+                          abrainHome,
+                          projectId,
+                          settings,
+                          dryRun: false,
+                        },
+                      );
+                      return { ok: res.status !== "rejected", error: res.reason };
+                    } catch (e: unknown) {
+                      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+                    }
+                  }
+                : undefined,
+            });
+            // Audit each meaningful result.
+            if (!result.skipped && (result.decisions.length > 0 || result.degraded)) {
+              await appendAudit(cwd, {
+                operation: "archive_reactivation",
+                lane: "diagnostic",
+                session_id: sessionId,
+                ok: result.ok,
+                reviewed_count: result.reviewed_count,
+                reactivated_slugs: result.reactivated_slugs,
+                decisions_summary: result.decisions.map((d) => ({
+                  slug: d.slug,
+                  decision: d.decision,
+                  age_days: d.age_days_approx,
+                })),
+                ...(result.degraded ? { degraded: true, degraded_reason: result.degraded_reason } : {}),
+                llm_model: result.llm_model,
+                llm_duration_ms: result.llm_duration_ms,
+                duration_ms: result.duration_ms,
+                prompt_version: buildPromptVersionAudit("archiveReactivationReviewer", settings),
+              });
+            }
+          } catch {
+            // Archive-reactivation is diagnostic; failure never affects sediment.
+          }
+        })();
       });
 
       const tStart = Date.now();
