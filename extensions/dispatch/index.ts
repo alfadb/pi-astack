@@ -263,8 +263,16 @@ function matchErrorCategory(msg: string | undefined): FailureType | undefined {
   ) return "rate_limit";
   // Context overflow
   if (/context.?length|prompt too long|context window|max.?tokens|token.?limit|context_length_exceeded/.test(m)) return "context_overflow";
-  // Network (Node ECONNRESET/ETIMEDOUT/ENOTFOUND/etc., plus undici fetch errors)
-  if (/econnreset|etimedout|enotfound|eai_again|econnrefused|fetch failed|network error|socket hang up|tls.*handshake/.test(m)) return "network";
+  // Network (Node ECONNRESET/ETIMEDOUT/ENOTFOUND/etc., plus undici fetch errors,
+  // plus upstream-gateway SSE-disconnect markers from sub2api / proxy gateways).
+  // The "upstream stream disconnected" / "stream_read_error" / "unexpected eof"
+  // family arrives in errorMessage when the SSE upstream (Anthropic / OpenAI edge)
+  // does HTTP/2 GOAWAY mid-stream; gateway wraps it as an SSE error frame. Once
+  // model-fallback prepends the RETRYABLE_PREFIX ("connection lost —") on the
+  // sub-agent path (Handler A, see model-fallback/index.ts I-6), pi auto-retries.
+  // After all retries exhaust we still want failureType="network" (transient)
+  // rather than fallback "agent_error" (generic) so the audit row is precise.
+  if (/econnreset|etimedout|enotfound|eai_again|econnrefused|fetch failed|network error|socket hang up|tls.*handshake|upstream.*disconnect|stream.?read.?error|unexpected eof|connection lost/.test(m)) return "network";
   // Server error (5xx, with NOT_TIME_UNIT guard) OR explicit server keywords.
   if (
     new RegExp(String.raw`\b5\d\d\b` + NOT_TIME_UNIT).test(m) ||

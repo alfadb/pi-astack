@@ -470,6 +470,34 @@ check("classifyError: ETIMEDOUT → network", () => {
   if (classifyError("connect ETIMEDOUT 1.2.3.4:443") !== "network") throw new Error("expected network");
 });
 
+// 2026-05-28: upstream gateway SSE error frames (sub2api wraps Anthropic /
+// OpenAI HTTP/2 GOAWAY EOF as `stream_read_error`). After model-fallback
+// prefixes "connection lost —" these would already be retryable inside pi;
+// these checks lock the *post-retry-exhaust* failureType so dispatch audit
+// rows are precise instead of generic 'agent_error'.
+check("classifyError: 'upstream stream disconnected' → network", () => {
+  if (classifyError("upstream stream disconnected: unexpected EOF") !== "network")
+    throw new Error("expected network for upstream gateway disconnect");
+});
+
+check("classifyError: 'stream_read_error' → network", () => {
+  if (classifyError('{"error":{"message":"...","type":"stream_read_error"}}') !== "network")
+    throw new Error("expected network for stream_read_error SSE frame");
+});
+
+check("classifyError: 'unexpected EOF' → network", () => {
+  if (classifyError("http2: unexpected EOF mid-stream") !== "network")
+    throw new Error("expected network for unexpected EOF");
+});
+
+check("classifyError: 'connection lost — ...' (model-fallback prefix) → network", () => {
+  // If sub-agent retry exhausts, the final errorMessage has the
+  // RETRYABLE_PREFIX. Make sure classifyError still picks 'network' so
+  // failureType is informative for the caller.
+  if (classifyError("connection lost — upstream stream disconnected") !== "network")
+    throw new Error("expected network for prefixed connection-lost");
+});
+
 check("classifyError: HTTP 503 → server_error", () => {
   if (classifyError("HTTP 503 Service Unavailable") !== "server_error") throw new Error("expected server_error");
 });

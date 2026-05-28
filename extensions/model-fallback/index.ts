@@ -33,6 +33,30 @@
  *
  * 扩展自动读取 pi settings.json#retry.maxRetries，对齐 give-up 节点。
  * 旧名 retry-stream-eof → retry-all-errors。
+ *
+ * 【sub-agent 政策（ADR 0027 PR-B + 2026-05-28 修复）】
+ * sub-agent（in-process via dispatch_agent / dispatch_parallel，由
+ * isSubAgentSession(ctx) 识别）以及老式 sub-pi（subprocess 设了
+ * PI_ABRAIN_DISABLED=1）的行为是：
+ *   ✓ 允许 prefix injection → pi 内置 retry 命中、单 model 重试 maxRetries 次
+ *   ✗ 不参与 fallback chain 切模型（caller 显式指定了 model，不能私自换）
+ *   ✗ 不参与 fallback state machine（consecutiveErrors / isOnFallback /
+ *     canaryLog / pre-flight check 全部跳过）
+ *
+ * 这条策略由用户 directive 锁定（2026-05-28）：
+ *   「sub_agent 要允许重试，不允许切换模型」
+ *
+ * 实现上由 Handler A（轻量 prefix-only handler）跑在 sub-agent 路径，
+ * Handler B（完整 main pi handler）+ agent_end fallback handler 都在
+ * sub-agent context 内 opt-out。
+ *
+ * 历史 regression（已修）：ADR 0027 PR-B 重构 sub-agent 为 in-process 后，
+ * Handler A 第一行误加了 `if (isSubAgentSession(ctx)) return;`，导致
+ * in-process sub-agent 既不切模型 **也不加 prefix**，pi 的 retry regex 漏判
+ * "upstream stream disconnected" / "stream_read_error" / "unexpected EOF" 等
+ * 错误 → sub-agent 单 model 也不 retry → dispatch_parallel 单 task 静默失败。
+ * 2026-05-28 修复：把 guard 反转为 "只 main pi return"，sub-agent 与
+ * legacy sub-pi 共享 prefix injection 路径。
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -215,35 +239,40 @@ function parseEntry(entry: string): { provider: string; id: string } | undefined
 
 export default function (pi: ExtensionAPI) {
 	// ═══════════════════════════════════════════════════════════════════
-	// Sub-pi retry prefix injection (message_end — runs in BOTH main pi
-	// AND sub-pi / dispatch_agent / dispatch_parallel).
+	// Handler A — lightweight retry prefix injection (message_end).
+	// Runs in:
+	//   - in-process sub-agent (isSubAgentSession(ctx) === true, ADR 0027 PR-B)
+	//   - legacy subprocess sub-pi (PI_ABRAIN_DISABLED === "1")
+	// Skipped in main pi — Handler B below covers main with full state machine.
 	// ═══════════════════════════════════════════════════════════════════
 	//
-	// In sub-pi, this is the ONLY model-fallback behavior: it adds the
-	// "connection lost — " prefix so pi's built-in retry regex can match
-	// provider-specific error messages that would otherwise be missed
-	// (e.g., anthropic "stream ended before message_stop" vs pi's regex
-	// expecting "ended without"). Pi's built-in retry is always active
-	// in sub-pi (reads settings.json#retry.maxRetries), but without this
-	// prefix injection some errors fail the regex check and skip retry
-	// entirely — making dispatch sub-agents less resilient than main
-	// session turns.
+	// What this handler does: ONLY adds the "connection lost — " prefix
+	// to errorMessage so pi's built-in retry regex (`connection.?lost`)
+	// matches provider-specific error strings that would otherwise be
+	// missed (e.g., anthropic "stream ended before message_stop", gateway
+	// "upstream stream disconnected: unexpected EOF" from sub2api SSE
+	// error frames, etc.). Pi's built-in retry is always active in
+	// sub-agent contexts (reads settings.json#retry.maxRetries, currently
+	// 9), but without this prefix injection some transient errors fail
+	// the regex check and skip retry entirely — making dispatch sub-agents
+	// silently die on transient network blips.
 	//
-	// Model switching is explicitly NOT done in sub-pi — the guard
-	// below blocks agent_end registration. The parent process handles
-	// fallback at its level.
+	// What this handler does NOT do (per user directive 2026-05-28
+	// "sub_agent 要允许重试，不允许切换模型"):
+	//   - NOT participate in fallback chain (model switching) — Handler B
+	//     + agent_end handler stay opt-out for sub-agent.
+	//   - NOT manage consecutiveErrors / isOnFallback / canaryLog / etc.
 	//
-	// In main pi, this handler fires first (idempotent — the full
-	// message_end handler below adds the same prefix). The main-pi
-	// handler also manages resetState / canaryLog / isOnFallback gating
-	// which this lightweight handler intentionally does not touch.
+	// In main pi, this handler returns early; Handler B (below) covers
+	// main with full state machine. Handler A and B both add the same
+	// prefix, and Handler B uses startsWith(RETRYABLE_PREFIX) guard, so
+	// the prefix is idempotent across handlers.
 	pi.on("message_end", (event, ctx?: any) => {
-		// ADR 0027 PR-B: sub-agent must not trigger fallback. Sub-agent
-		// errors should fail fast and surface to the dispatching parent
-		// rather than silently swap models mid-task.
-		if (isSubAgentSession(ctx)) return;
+		const isSub = isSubAgentSession(ctx);
+		const isLegacySubPi = process.env.PI_ABRAIN_DISABLED === "1";
+		// Main pi (neither sub-agent nor legacy sub-pi) → defer to Handler B.
+		if (!isSub && !isLegacySubPi) return;
 
-		if (process.env.PI_ABRAIN_DISABLED !== "1") return; // skip in main pi — full handler below
 		if (event.message.role !== "assistant") return;
 		const msg = event.message as { stopReason?: string; errorMessage?: string };
 		if (msg.stopReason !== "error" || !msg.errorMessage) return;

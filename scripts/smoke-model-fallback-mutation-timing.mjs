@@ -277,6 +277,104 @@ if (!piRoot) {
 }
 
 // ──────────────────────────────────────────────────────────────────
+// I-6: Handler A allows sub-agent (in-process + legacy sub-pi) to retry
+// ──────────────────────────────────────────────────────────────────
+
+console.log("\nI-6: Handler A retry policy for sub-agent / legacy sub-pi");
+
+// Locate Handler A precisely: the lightweight message_end handler that
+// runs in sub-agent contexts. It is the FIRST `pi.on("message_end", ...)`
+// in the file (Handler B is the second, full main-pi handler).
+const handlerAStart = mfSrc.indexOf('pi.on("message_end"');
+if (handlerAStart < 0) throw new Error('Handler A not located — no pi.on("message_end") found');
+const handlerBStart = mfSrc.indexOf('pi.on("message_end"', handlerAStart + 1);
+// PRECISE Handler A body bounds: from `pi.on(...` to the FIRST `});` that
+// closes the handler. Using indexOf(handlerBStart) is too wide — it would
+// include the `session_start` handler in between which legitimately uses
+// `if (isSubAgentSession(ctx)) return;` for its OWN opt-out.
+const handlerACloseIdx = mfSrc.indexOf("});", handlerAStart);
+if (handlerACloseIdx < 0) throw new Error("Handler A closing `});` not found");
+const handlerABody = mfSrc.slice(handlerAStart, handlerACloseIdx + 3);
+
+check("I-6: Handler A does NOT early-return on `if (isSubAgentSession(ctx)) return`", () => {
+  // The exact regression pattern. If a future maintainer re-introduces
+  // this as the first line of Handler A, sub-agent retry breaks silently.
+  const faultyPattern = /if\s*\(\s*isSubAgentSession\(ctx\)\s*\)\s*return\s*;/;
+  if (faultyPattern.test(handlerABody)) {
+    throw new Error(
+      "Handler A contains `if (isSubAgentSession(ctx)) return;` — this is the " +
+      "exact regression that disabled sub-agent retry pre-2026-05-28. Per user " +
+      "directive sub-agent MUST be allowed to retry (only model switching is " +
+      "disallowed; that's Handler B + agent_end's job). Use a combined guard " +
+      "like `if (!isSub && !isLegacySubPi) return;` so sub-agent falls through.",
+    );
+  }
+});
+
+check("I-6: Handler A guard treats sub-agent and legacy sub-pi symmetrically", () => {
+  // Expected guard shape: only main pi (neither sub-agent nor legacy
+  // sub-pi) early-returns. We check for both signals being inspected.
+  const hasSubCheck = /isSubAgentSession\(ctx\)/.test(handlerABody);
+  const hasLegacyCheck = /PI_ABRAIN_DISABLED/.test(handlerABody);
+  if (!hasSubCheck || !hasLegacyCheck) {
+    throw new Error(
+      `Handler A is missing required guard signals: ` +
+      `isSubAgentSession check=${hasSubCheck}, PI_ABRAIN_DISABLED check=${hasLegacyCheck}. ` +
+      `Handler A must inspect BOTH to correctly identify sub-agent contexts that should retry.`,
+    );
+  }
+  // Verify the combined-guard pattern: there should be a `return` gated
+  // on the NEGATION of both signals (i.e. main pi only).
+  const mainOnlyReturn =
+    /if\s*\(\s*!\s*isSub\b[\s\S]{0,80}!\s*isLegacySubPi[\s\S]{0,80}\)\s*return/.test(handlerABody) ||
+    /if\s*\(\s*!\s*isLegacySubPi[\s\S]{0,80}!\s*isSub\b[\s\S]{0,80}\)\s*return/.test(handlerABody);
+  if (!mainOnlyReturn) {
+    throw new Error(
+      "Handler A's guard does not match the expected 'main pi only return' shape: " +
+      "`if (!isSub && !isLegacySubPi) return;` (or equivalent reordering). " +
+      "This is the only safe shape — it lets sub-agent and legacy sub-pi both fall " +
+      "through to prefix injection while keeping main pi on Handler B's full path.",
+    );
+  }
+});
+
+check("I-6: Handler B retains sub-agent opt-out (no model switching)", () => {
+  // Handler B (the second message_end handler, runs ONLY in main pi)
+  // MUST still opt-out for sub-agent. If a future change accidentally
+  // lets Handler B run in sub-agent context, model switching could leak
+  // back — violating the user directive.
+  if (handlerBStart < 0) throw new Error("Handler B not located (no second message_end handler)");
+  const handlerBEnd = mfSrc.indexOf('pi.on("agent_end"', handlerBStart);
+  const handlerBBody = mfSrc.slice(handlerBStart, handlerBEnd > 0 ? handlerBEnd : handlerBStart + 8000);
+  const optOut = /if\s*\(\s*isSubAgentSession\(ctx\)\s*\)\s*return\s*;/.test(handlerBBody);
+  if (!optOut) {
+    throw new Error(
+      "Handler B (full main-pi handler) no longer opts out for sub-agent. This means " +
+      "sub-agent might enter the fallback state machine (consecutiveErrors / isOnFallback / " +
+      "canaryLog) which violates the user directive that sub-agent must NOT switch models.",
+    );
+  }
+});
+
+check("I-6: agent_end handler retains sub-agent opt-out (no model switching)", () => {
+  // The agent_end handler is where setModel() is called for fallback
+  // chain switching. Sub-agent MUST stay opt-out here — that's the
+  // "不允许切换模型" half of the directive.
+  const agentEndStart = mfSrc.indexOf('pi.on("agent_end"');
+  if (agentEndStart < 0) throw new Error('agent_end handler not located');
+  const agentEndBody = mfSrc.slice(agentEndStart, agentEndStart + 12000);
+  const optOut = /if\s*\(\s*isSubAgentSession\(ctx\)\s*\)\s*return\s*;/.test(agentEndBody);
+  if (!optOut) {
+    throw new Error(
+      "agent_end handler no longer opts out for sub-agent. Sub-agent must NEVER " +
+      "trigger fallback chain (setModel / sendMessage with new model) — that's the " +
+      "core of the user directive 'sub_agent 不允许切换模型'. " +
+      "Re-add `if (isSubAgentSession(ctx)) return;` near the top of agent_end.",
+    );
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────
 // Wrap-up
 // ──────────────────────────────────────────────────────────────────
 
