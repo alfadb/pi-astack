@@ -88,6 +88,68 @@ LLM 到达决策点 → 大脑主动提供情境化建议 →
 
 ## 3. 四个参与机制
 
+### 3.0 路径 A v2 → v3 设计（post §3.1 walk-back 的统辖）
+
+> **⚠️ 2026-05-28 新增**。本节在 §3.1 walked back 后补入，作为下文 §3.1-§3.4 / §5 / §7 部分论述的**当前实施统辖**。原 §3.x 中依赖 §3.1 schema 字段（`decision_type` / `whats_being_decided` / `options_on_table` / `constraints` / `is_decision_point`）或 brief-shape 形态的片段保留作历史 / 设计意图记录，**当前实施请以本节为准**。
+
+#### 3.0.1 实际数据流（v2 落地，8bce502）
+
+```
+user turn + recent history
+  ├─ query-rewriter LLM (deepseek-v4-flash)
+  │     in: history (≤4 turns) + current msg
+  │     out: { useful, query (200-800 char, multi-sentence) }
+  ├─ if useful=false → skip silent
+  ├─ llmSearchEntriesWithVerdict (stage1 + stage2 LLM rerank)
+  │     stage 2 prompt 输出 { relevance_verdict, picks }
+  ├─ if verdict=none → skip silent
+  └─ if has_relevant → inject 含 compiledTruth 的 raw entries 到 system prompt
+```
+
+#### 3.0.2 关键设计选择
+
+- ✅ 每轮跑 search，不作"决策点 vs 执行指令"二元区分（§3.1 walked back）
+- ✅ rewriter LLM 自己判断 useful=true/false（不依赖关键词预过滤 / regex，跨语言成立）
+- ✅ stage 2 LLM `relevance_verdict` 是 LLM-side strong cutoff（不是 score 阈值）
+- ✅ 失败全路径 silent skip（INV-INVISIBILITY）
+- ✅ sub-agent 不走路径 A（避免每个 dispatch 双倍成本；sub-agent 仍可以主动调 memory_decide / memory_search）
+- ✅ path A inject 使用独立 anchor `path_a_inject_id`（不是 `decisionBriefId`，详 §5.1）
+- ❌ 当前不走 brief synthesizer（§3.2 设计意图是 brief，实际 v2 是 raw entries + framing。GPT-5.5 P0 evaluation 推回 brief 形态，待 v3 决断）
+- ❌ 当前不消费 outcome-ledger（§3.4 设计意图包含 outcome 摘要 注入，实际 v2 未实施；待 v3 决断）
+
+#### 3.0.3 v3 路线图（3-T0 evaluation 2026-05-28 共识）
+
+**P0（近期）**
+- **候选 C**: stage 1 LLM 看 full body (不只 frontmatter)——直接消除"stage 1 frontmatter-only"受制因素。需要 ADR 0015 二阶段 rerank prompt cache 妄协 walkback (cost 不再是约束)。
+- **rewriter prompt 去旧成本偏置**: query-rewriter-v2.md 仍包含 "over-extraction is success" / "wasting stage-2 cost worse" 这类 v1 时代的 cost-saving framing，跟用户 directive "不计成本" 直接冒冲。
+
+**P1（中期）**
+- **候选 H (HyDE)**: rewriter 同时输出 `hypothetical_memory_summary`——用"如果这个 turn 有完美记忆，应该是什么形状"补偿 stage 1 语义 gap。
+- **候选 I (multi-query fan-out)**: rewriter 输出 1-3 个 angle 不同的 queries，并行 search，union + final stage 2 rerank。
+- **候选 brief synthesizer**: 多一次 LLM 把 picks 合成 brief（回到 §3.2 设计意图）。
+- **候选 outcome-ledger 读**: path A 注入时附 outcome 数据（兑现 §3.4 设计意图）。
+
+**P2（dogfood 起点）**
+- embedding pre-filter / stage 2 self-doubt / cross-provider stage 2 等待 ledger 数据决定。
+
+#### 3.0.4 不做（3-T0 一致否决）
+
+- regex prefilter / 5% LLM gate（§4.1.1 三选一全废）
+- 24h cached topic profile（TTL 违反 INV-IMPLICIT-GROUND-TRUTH 实时性；实际上是跨 ADR 0024 §6 #5 二阶 distill cache，加速偏差累积）
+- 单字段 trigger_phrases 不分 observed/predicted（writer LLM 预测被当 ground truth）
+- 召回 < N 触发 second pass（机械门，§3 红线）
+
+#### 3.0.5 与 §3.1-§3.4 原文的对应关系
+
+| 原节 | 原设计意图 | v2 实施状态 |
+|------|---------|--------------|
+| §3.1 决策点识别 | LLM 检测 is_decision_point + 输出结构化决策场景 | **废**。改为 rewriter LLM 判 useful，不产出 decision_type / options_on_table 等字段 |
+| §3.2 情境化回忆 | "决策参谋" brief 含综合建议 | **部分未实施**。v2 走 B1 (裸条目 + framing)，主 LLM 自己读裸条目。brief synthesizer 形态 v3 待定 |
+| §3.3 矛盾感知 | brief prompt 加一段检查 | **隐式承担**。v2 不走 brief 后，矛盾感知是主 LLM 读 inject raw entries 时自己判 |
+| §3.4 结果驱动推荐 | brief prompt 附 outcome 摘要 | **未实施**。v2 不消费 outcome-ledger。design gap，v3 候选 |
+
+---
+
 ### 3.1 决策点识别
 
 > **⚠️ 2026-05-28 walk back（路径 A 实现时用户层修订）**
@@ -149,6 +211,8 @@ LLM 到达决策点 → 大脑主动提供情境化建议 →
 
 ### 3.2 情境化回忆
 
+> **⚠️ 2026-05-28 v2 状态**：本节 prompt schema 依赖 §3.1 字段 (`decision_type` / `whats_being_decided` / `options_on_table` / `constraints`)，§3.1 walked back 后这些字段在 v2 实施中不存在。本节 brief synthesizer 形态也**未在 v2 落地**（v2 直接注入 raw entries，主 LLM 自读）。**实际实施以 §3.0 为准**。下文保留作设计意图 / brief synthesizer v3 候选参考。
+
 **目标**：不只是"搜到这几条"，而是"这几条对你当前的决定意味着什么"。
 
 在决策点触发后，跑一段 prompt（替代当前 LLM 手动调 memory_search 的场景）：
@@ -189,6 +253,8 @@ LLM 到达决策点 → 大脑主动提供情境化建议 →
 
 ### 3.3 矛盾感知
 
+> **⚠️ 2026-05-28 v2 状态**：本节原设计是“跟 §3.2 是同一次 LLM 调用”。v2 不走 brief synthesizer 后，**矛盾感知是主 LLM 在读 inject raw entries 时隐式承担**（没有专门 prompt）。如果 v3 升 brief synthesizer，本节 prompt 文本可直接复用。
+
 **目标**：大脑注意到 LLM 正在做的选择跟用户过去的明确偏好冲突时，主动提醒。
 
 这是 INV-ACTIVE-CORRECTION 在"用"侧的兑现——用户说了"以后用 pnpm"，大脑记住了。三个月后 LLM 在某个项目里建议用 yarn，大脑应该能感知到这个矛盾。
@@ -215,6 +281,8 @@ durable entry，conf ≥ 7）直接冲突？
 - 或者直接按项目需求用 yarn，把大脑的提醒当参考
 
 ### 3.4 结果驱动的推荐
+
+> **⚠️ 2026-05-28 v2 状态 (design gap)**：本节设计依赖"在 §3.2 决策简报 prompt 里附 outcome 摘要"。v2 不走 brief synthesizer 后，**outcome-ledger 未被 path A 消费**——当前 v2 inject 的 raw entries 不携 outcome 活跃度信息。以下设计意图 v3 待兑现（路径 B `memory_decide` tool 已兑现本节，实现于 ADR 0026 §4.2 + extensions/memory/decide.ts）。
 
 **目标**：用户过去的决策结果影响现在的建议。
 
