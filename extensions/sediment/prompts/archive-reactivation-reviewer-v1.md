@@ -132,11 +132,13 @@ Rules:
   to `keep_archived` and logs `reactivate_guard_failed`. Paraphrasing,
   ellipsis (`…`), or trailing punctuation that’s not in the source
   will fail the guard. **Copy bytes; don’t reconstruct.**
-- **Minimum quote length**: each quote must be at least 12 bytes
-  (~3 ASCII words / 4 CJK characters). One-char or one-word quotes
-  trivially substring-match anything and are rejected. If you can’t
-  find at least 12 bytes worth of verbatim live-use evidence, the
-  live-use bridge isn’t strong enough — emit `keep_archived` instead.
+- **Minimum quote length**: each quote must be at least 12 UTF-8 bytes
+  (=12 ASCII chars OR 4 CJK characters). The caller measures with
+  `Buffer.byteLength(quote, "utf8")`, so CJK passes at 4 chars and
+  ASCII passes at 12. One-char or one-word quotes trivially
+  substring-match anything and are rejected. If you can’t find at
+  least 12 bytes worth of verbatim live-use evidence, the live-use
+  bridge isn’t strong enough — emit `keep_archived` instead.
 - Return raw JSON, no Markdown fences. (The caller tolerates a single
   ```json fence for robustness, but raw is preferred.) Parse failure
   triggers degraded_to_mechanical.

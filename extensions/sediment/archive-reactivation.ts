@@ -612,6 +612,10 @@ export async function runArchiveReactivationIfDue(
       degraded: true,
       degraded_reason: `llm_call_failure: ${e instanceof Error ? e.message : String(e)}`,
       reviewed_count: reviewed.length,
+      // R4 GPT P2 fix: also surface deferred_count on degraded path
+      // so audit row’s archived_total correctly reflects batch pressure
+      // even when the LLM call fails.
+      deferred_count: deferredCount,
       decisions: [],
       reactivated_slugs: [],
       duration_ms: Date.now() - t0,
@@ -640,6 +644,8 @@ export async function runArchiveReactivationIfDue(
       degraded: true,
       degraded_reason: `parse_failure: ${e instanceof Error ? e.message : String(e)}`,
       reviewed_count: reviewed.length,
+      // R4 GPT P2 fix: also surface deferred_count on degraded path.
+      deferred_count: deferredCount,
       decisions: [],
       reactivated_slugs: [],
       llm_duration_ms: llmDurationMs,
@@ -676,13 +682,19 @@ export async function runArchiveReactivationIfDue(
   // {decision:"reactivate"} with no quotes at all. Failed guards
   // downgrade to keep_archived and log guard_failed in the ledger.
   //
-  // R3 hardening: minimum quote length. Without a floor, a model
-  // emitting `archived_quote: "."` + `user_quote: "the"` would
-  // trivially substring-match both texts, fully bypassing the guard.
-  // 12 bytes = roughly 3 ASCII words / 4 CJK characters — enough
-  // signal to ground a real bridge, short enough that a verbatim
-  // copy of a meaningful phrase passes.
-  const MIN_QUOTE_LEN = 12;
+  // R3 hardening + R4 nit (Opus + GPT-5.5): minimum quote length.
+  // Without a floor, a model emitting `archived_quote: "."` +
+  // `user_quote: "the"` would trivially substring-match both texts,
+  // fully bypassing the guard. 12 UTF-8 BYTES = roughly 3 ASCII words
+  // OR 4 CJK characters — enough signal to ground a real bridge,
+  // short enough that a verbatim copy of a meaningful phrase passes.
+  //
+  // R4 NIT fix: use Buffer.byteLength("utf8") rather than .length
+  // (UTF-16 code units). With .length, CJK quotes required 12 chars
+  // (~36 bytes), much stricter than the prompt promised. Now CJK
+  // can pass with 4 characters = 12 bytes as documented.
+  const MIN_QUOTE_BYTES = 12;
+  const qBytes = (s: string) => Buffer.byteLength(s, "utf8");
   const reviewedByslug = new Map(reviewed.map((e) => [e.slug, e] as const));
   const guardedDecisions: ArchiveReactivationEntryDecision[] = completeDecisions.map((d) => {
     if (d.decision !== "reactivate") return d;
@@ -691,10 +703,10 @@ export async function runArchiveReactivationIfDue(
     const aq = (d.archived_quote ?? "").trim();
     const uq = (d.user_quote ?? "").trim();
     if (!aq || !uq) {
-      return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: empty_quote (had aq=${aq.length} uq=${uq.length}); original_rationale=${d.rationale.slice(0, 200)}` };
+      return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: empty_quote (had aq=${qBytes(aq)}B uq=${qBytes(uq)}B); original_rationale=${d.rationale.slice(0, 200)}` };
     }
-    if (aq.length < MIN_QUOTE_LEN || uq.length < MIN_QUOTE_LEN) {
-      return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: quote_too_short (aq=${aq.length} uq=${uq.length}, min=${MIN_QUOTE_LEN}); original_rationale=${d.rationale.slice(0, 200)}` };
+    if (qBytes(aq) < MIN_QUOTE_BYTES || qBytes(uq) < MIN_QUOTE_BYTES) {
+      return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: quote_too_short (aq=${qBytes(aq)}B uq=${qBytes(uq)}B, min=${MIN_QUOTE_BYTES}B); original_rationale=${d.rationale.slice(0, 200)}` };
     }
     // R3 NIT-1 (Opus): tighten empty-compiledTruth path. If truth is
     // empty, no archived_quote can be a valid substring — reject.

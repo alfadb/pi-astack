@@ -695,21 +695,29 @@ check("P1-D behavior R2: malformed archive_at (truthy but unparseable) falls thr
 
 console.log("\nSection: R3 hardening — quote min-length guard (Opus P2-R3-1, GPT R2-RESIDUAL-2)");
 
-check("R3 P3-1: MIN_QUOTE_LEN constant exists with value >= 8", () => {
+check("R3 P3-1 + R4 NIT: MIN_QUOTE_BYTES constant exists with value >= 8", () => {
   const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
-  const m = /MIN_QUOTE_LEN\s*=\s*(\d+)/.exec(src);
-  if (!m) throw new Error("MIN_QUOTE_LEN constant must be defined for quote-length floor");
+  // R4 NIT fix: renamed MIN_QUOTE_LEN → MIN_QUOTE_BYTES; semantic
+  // now matches prompt (bytes via Buffer.byteLength), not UTF-16 .length.
+  const m = /MIN_QUOTE_BYTES\s*=\s*(\d+)/.exec(src);
+  if (!m) throw new Error("MIN_QUOTE_BYTES constant must be defined for quote-length floor");
   const v = Number(m[1]);
-  if (!(v >= 8)) throw new Error(`MIN_QUOTE_LEN=${v} too lax; recommend >=8 (target 12)`);
+  if (!(v >= 8)) throw new Error(`MIN_QUOTE_BYTES=${v} too lax; recommend >=8 (target 12)`);
 });
 
-check("R3 P3-1: guard rejects quote shorter than MIN_QUOTE_LEN", () => {
+check("R3 P3-1 + R4 NIT: guard uses Buffer.byteLength (UTF-8 bytes), not .length (UTF-16 code units)", () => {
   const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
   if (!/quote_too_short/.test(src)) {
     throw new Error("Source must contain 'quote_too_short' downgrade marker");
   }
-  if (!/aq\.length\s*<\s*MIN_QUOTE_LEN\s*\|\|\s*uq\.length\s*<\s*MIN_QUOTE_LEN/.test(src)) {
-    throw new Error("Guard must check aq.length AND uq.length against MIN_QUOTE_LEN");
+  // The guard must use Buffer.byteLength, not .length — otherwise
+  // CJK quotes are rejected at a 3× stricter threshold than
+  // documented in the prompt.
+  if (!/Buffer\.byteLength\(s,\s*"utf8"\)/.test(src)) {
+    throw new Error("Guard must use Buffer.byteLength(s, 'utf8') for byte-accurate measurement");
+  }
+  if (!/qBytes\(aq\)\s*<\s*MIN_QUOTE_BYTES\s*\|\|\s*qBytes\(uq\)\s*<\s*MIN_QUOTE_BYTES/.test(src)) {
+    throw new Error("Guard must check qBytes(aq) AND qBytes(uq) against MIN_QUOTE_BYTES");
   }
 });
 
@@ -726,7 +734,7 @@ check("R3 P3-1: empty-truth check removed bypass (Opus NIT-1)", () => {
   }
 });
 
-check("R3 P3-1: prompt declares MIN_QUOTE_LEN to reviewer", () => {
+check("R3 P3-1 + R4 NIT: prompt declares 12 UTF-8 bytes consistent with code", () => {
   const src = fs.readFileSync(
     path.join(repoRoot, "extensions/sediment/prompts/archive-reactivation-reviewer-v1.md"),
     "utf-8",
@@ -734,8 +742,28 @@ check("R3 P3-1: prompt declares MIN_QUOTE_LEN to reviewer", () => {
   if (!/Minimum quote length/i.test(src)) {
     throw new Error("Prompt §5 must declare a minimum quote length so the LLM doesn’t emit 1-char quotes");
   }
-  if (!/12 bytes/.test(src)) {
-    throw new Error("Prompt should mention concrete byte threshold (12 bytes) to align with code");
+  if (!/12 UTF-8 bytes/.test(src)) {
+    throw new Error("Prompt must say 'UTF-8 bytes' (not just 'bytes') to clarify CJK semantics after R4 byte-accurate fix");
+  }
+  if (!/Buffer\.byteLength/.test(src)) {
+    throw new Error("Prompt should reference Buffer.byteLength so reviewer knows the exact measurement");
+  }
+});
+
+check("R4 P2 fix (GPT): deferred_count surfaced on degraded paths", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
+  // Find all degraded-path returns and ensure they include deferred_count.
+  // Two return blocks marked by `degraded: true,` followed by `degraded_reason`.
+  const matches = [...src.matchAll(/degraded:\s*true,\s*\n\s*degraded_reason:[\s\S]{0,600}?duration_ms:/g)];
+  if (matches.length < 2) {
+    throw new Error(`Expected at least 2 degraded return blocks; found ${matches.length}`);
+  }
+  for (const m of matches) {
+    if (!/deferred_count:\s*deferredCount/.test(m[0])) {
+      throw new Error(
+        "Every degraded-path return must include `deferred_count: deferredCount` so audit row’s archived_total reflects true batch pressure even on failure",
+      );
+    }
   }
 });
 
