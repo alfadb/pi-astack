@@ -123,7 +123,15 @@
 
 > ADR 0024 的 L1 第二大脑哲学已经基本落地；ADR 0025/0026 的主要读写闭环已经进入可 dogfood 状态；ADR 0027 的 causal trace / sub-agent isolation 已经经过 R5 基线修复。
 >
-> **2026-05-28 补充**：ADR 0027 C5 Stage 1a (terminal_state) + Stage 1b (heartbeat) + ADR 0025 §4.6 archive-reactivation-reviewer (Stage 2) 三项能力已落地 (commit chain dab011b..89ff4ac，所有 stage 均经 3+ 轮盲审 unanimous GREEN)。现仅剩 staging-resolver (§4.1.5.1) 未落地为唯一的 STRUCTURAL_CONTEXT 未实现项。严格 full compliance 近一步；L1 第二大脑可 dogfood 范围明显扩大。
+> **2026-05-28 补充**：ADR 0027 C5 Stage 1a (terminal_state) + Stage 1b (heartbeat) + ADR 0025 §4.6 archive-reactivation-reviewer (Stage 2) 三项能力已落地 (commit chain dab011b..89ff4ac，所有 stage 均经 3+ 轮盲审 unanimous GREEN)。Stage 2.0.1 补充了 archive-reactivation 的 per-project 并发锁 (eaad84c)。Stage 2.0.2 补充了 R7 跨 stage 盲审发现的 owner-aware release + INV-INVISIBILITY notify + hard-kill 语义三项。现仅剩 staging-resolver (§4.1.5.1) 未落地为唯一的 STRUCTURAL_CONTEXT 未实现项。严格 full compliance 近一步；L1 第二大脑可 dogfood 范围明显扩大。
+>
+> **Stage 2.1 / 2.0.x defer 事项（R7 盲审发现后明确存档）**：
+>
+> - **CAS / expected-status guard (独立 P1)**。Stage 2.0.1 的 per-project lock 关闭的是“两 pi 实例同项目跨 reviewer race”窗口，**不是**“reviewer 跑 LLM 期间 curator/auto-write 在同一 slug 上发生 mutation”窗口。后者需要 writer.ts 层面的 `expected_status` / content hash CAS 实现，应同 Stage 3 staging-resolver 一起着手（后者也需同同 CAS 保护）。Stage 2.0.1 lock 与 CAS 是 disjoint concern，不能因为前者落地而降低后者优先级。
+> - **Sidecar / ledger GC 策略 (P2, R7 Opus)**。当前 4 个 sink 无 rotation：`.pi-astack/dispatch/audit.jsonl` (每次 dispatch + parallel 一行)、`~/.abrain/<...>/archive-reactivation-ledger.jsonl` (每 decision 一行)、`.pi-astack/dispatch/heartbeat/*.jsonl` (crash 后可能残留)、sediment audit.jsonl。一年量级会被 `du -sh` 问出来。建议 Stage 2.0.3 抽一个统一的 sidecar-gc helper。
+> - **heartbeat / terminal_state connective tissue (P1, R7 Opus)**。两个 stage 独立上线，audit row 里没有 `heartbeat_trace_path` 指向，上下游只能从 anchor 重建路径。Stage 1c （由 heartbeat 推导 terminal_state=cancelled）落地时 audit row v3 需加该字段或明确声明 derived-from-anchor 契约。
+> - **`_shared/process-singleton.md` 备忘录 (NIT, R7 Opus)**。三个子系统（heartbeat / archive-reactivation lock / dispatch shared-loader sentinel）都独立重复了 globalThis + Symbol key 模式 + R4 jiti 教训。在第四个 caller 出现前不抽象，但需在 `_shared/` 下沉淀一份命名约定 + R4 教训的备忘录。
+> - **后台 lane 全局 LLM semaphore (P2, R7 GPT-5.5)**。Daily boundary / backlog 场景下，aggregator + archive-reactivation + classifier + auto-write + multi-view replay 可同轮同时 fire。现阶段每 lane 有独立 debounce 足够，但未来交互密度提高后需一个统一 semaphore（推荐并发 2）。
 
 - 能不能继续 dogfood 主会话第二大脑：可以
 - 是否满足四份 ADR 的完整严格要求：还没有

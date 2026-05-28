@@ -1236,15 +1236,22 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // conversation behavior, reactivate it. Fire-and-forget; never
       // blocks main session. Reuses the same scheduleAggregator helper
       // defined inline above (setImmediate when available).
-      scheduleAggregator(() => {
+      //
+      // Settings semantics (R7 GPT-5.5 P2 fix):
+      //   autoLlmWriteEnabled === true          → review + mutate
+      //   autoLlmWriteEnabled === "staging-only" → review (LLM call) but don't flip status
+      //   autoLlmWriteEnabled === false         → hard kill: NO LLM tokens, NO scheduling.
+      // The settings.ts docstring promises “false = no LLM tokens spent
+      // on sediment”. Honor that for archive-reactivation too.
+      if (settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
         void (async () => {
           try {
-            // Avoid running in staging-only mode (the reviewer's
+            // Avoid mutation in staging-only mode (the reviewer's
             // `reactivate` decision would call writer.updateProjectEntry,
             // which is a durable write). When autoLlmWriteEnabled is
-            // "staging-only" or false, we still want the audit signal
-            // for diagnostics but no status flip — disable the
-            // reactivateEntry closure in those modes.
+            // "staging-only", we still want the audit signal for
+            // diagnostics but no status flip — disable the
+            // reactivateEntry closure in that mode.
             const canMutate = settings.autoLlmWriteEnabled === true;
             const memSettings = resolveMemorySettings();
             const allEntries = await (await import("../memory/parser"))
@@ -1336,6 +1343,36 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 duration_ms: result.duration_ms,
                 prompt_version: buildPromptVersionAudit("archiveReactivationReviewer", settings),
               });
+            }
+            // R7 Opus P1-2 fix: surface reactivations to the user.
+            //
+            // Previously the archive-reactivation.ts docstring promised
+            // “may surface in formatSedimentNotify like any other
+            // create/update” but the code path never actually pushed
+            // anything to ctx.ui.notify. INV-INVISIBILITY is “tell the
+            // user, don’t ask” — we were doing neither: a slug the user
+            // remembered as archived could silently come back active.
+            //
+            // We notify ONLY when reactivations actually happened (not
+            // every diagnostic run). Notify is best-effort; if the host
+            // dropped the ui handle (e.g. headless), we skip silently.
+            if (
+              !result.skipped &&
+              result.reactivated_slugs.length > 0 &&
+              ctx.ui?.notify
+            ) {
+              const lines: string[] = [
+                `Sediment archive-reactivation (bg): ${result.reactivated_slugs.length} entr${result.reactivated_slugs.length === 1 ? "y" : "ies"} reactivated`,
+              ];
+              for (const slug of result.reactivated_slugs) {
+                lines.push(`  ↑ [project] reactivated  ${slug}`);
+              }
+              try {
+                ctx.ui.notify(lines.join("\n"), "info");
+              } catch {
+                // Notify is best-effort; never let UI error kill the
+                // background lane.
+              }
             }
           } catch {
             // Archive-reactivation is diagnostic; failure never affects sediment.

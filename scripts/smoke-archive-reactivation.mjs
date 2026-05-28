@@ -961,10 +961,156 @@ check("R6: source-level — lock acquired AFTER skip-checks (no waste contention
 check("R6: source-level — release is in a finally block (every exit path)", () => {
   const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
   // The finally block must mention releaseArchiveReactivationLock.
-  if (!/}\s*finally\s*\{[^}]*releaseArchiveReactivationLock\(options\.projectRoot\)/s.test(src)) {
+  // R7 update: the call signature now takes (projectRoot, ownClaim?)
+  // so we match the call name + projectRoot without anchoring the
+  // close paren immediately after.
+  if (!/}\s*finally\s*\{[^}]*releaseArchiveReactivationLock\(options\.projectRoot/s.test(src)) {
     throw new Error(
       "release call must be in a finally block so every degraded/success/exception path releases the lock",
     );
+  }
+});
+
+console.log("\nSection: R7 — owner-aware lock release (GPT R7 P2 cross-stage finding)");
+
+check("R7: tryAcquire returns claim (with nonce) on success", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-r7-claim-"));
+  const r = arMod.tryAcquireArchiveReactivationLock(proj, new Date());
+  if (!r.acquired) throw new Error("acquire failed");
+  if (!r.claim) throw new Error("acquired but claim not returned (R7 contract)");
+  if (r.claim.pid !== process.pid) throw new Error("claim.pid should be current pid");
+  if (typeof r.claim.nonce !== "string" || r.claim.nonce.length < 6) {
+    throw new Error("claim must include random nonce for owner-aware release");
+  }
+  arMod.releaseArchiveReactivationLock(proj, r.claim);
+});
+
+check("R7 CRITICAL: woke-up-after-steal does NOT delete stealer’s lock", () => {
+  // The exact race GPT-5.5 raised:
+  //   1. A acquires.
+  //   2. A goes slow / hangs; lock ages past stale window.
+  //   3. B sees stale, steals, has its own (different) claim.
+  //   4. A wakes up and runs release(projectRoot, A.claim).
+  //   5. The release MUST NOT unlink B's lock.
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-r7-steal-"));
+  // Step 1: A acquires.
+  const a = arMod.tryAcquireArchiveReactivationLock(proj, new Date(Date.now() - 60 * 60 * 1000));
+  if (!a.acquired) throw new Error("A acquire failed");
+  // Manually backdate A's lock file on disk to look stale.
+  const lockFile = arMod.archiveReactivationLockPath(proj);
+  const aClaimRaw = fs.readFileSync(lockFile, "utf-8");
+  const aClaim = JSON.parse(aClaimRaw);
+  aClaim.started_at = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 1h ago
+  aClaim.host = "other-host"; // suppress same-host PID check
+  fs.writeFileSync(lockFile, JSON.stringify(aClaim));
+  // Step 3: B steals.
+  const b = arMod.tryAcquireArchiveReactivationLock(proj, new Date());
+  if (!b.acquired) throw new Error("B steal failed; check stale-lock logic");
+  if (!b.stoleFrom) throw new Error("B should report stoleFrom");
+  const bClaim = b.claim;
+  if (!bClaim) throw new Error("B claim missing");
+  // Step 4: A wakes up and tries to release using its OWN (now-stale) claim.
+  const aRelease = arMod.releaseArchiveReactivationLock(proj, a.claim);
+  if (aRelease.released) {
+    throw new Error("CRITICAL: A's release should NOT succeed after B stole the lock");
+  }
+  if (aRelease.reason !== "not_owner") {
+    throw new Error(`expected reason=not_owner; got ${aRelease.reason}`);
+  }
+  // B's lock must still be on disk.
+  if (!fs.existsSync(lockFile)) {
+    throw new Error("CRITICAL: A's release blindly unlinked B's lock");
+  }
+  const stillThere = JSON.parse(fs.readFileSync(lockFile, "utf-8"));
+  if (stillThere.nonce !== bClaim.nonce) {
+    throw new Error("lock file contents don’t match B’s claim after A's bad release");
+  }
+  // B's release works.
+  const bRelease = arMod.releaseArchiveReactivationLock(proj, bClaim);
+  if (!bRelease.released) throw new Error(`B release should succeed; got ${bRelease.reason}`);
+});
+
+check("R7: owner-aware release reports 'missing' when lock already gone", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-r7-missing-"));
+  const r = arMod.tryAcquireArchiveReactivationLock(proj, new Date());
+  if (!r.acquired) throw new Error("acquire failed");
+  // Manually delete to simulate external cleanup.
+  fs.unlinkSync(arMod.archiveReactivationLockPath(proj));
+  const release = arMod.releaseArchiveReactivationLock(proj, r.claim);
+  if (release.released) throw new Error("shouldn't report released when file already gone");
+  if (release.reason !== "missing") throw new Error(`expected reason=missing; got ${release.reason}`);
+});
+
+check("R7: legacy release (no claim) still works as unconditional unlink", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-r7-legacy-"));
+  const r = arMod.tryAcquireArchiveReactivationLock(proj, new Date());
+  if (!r.acquired) throw new Error("acquire failed");
+  // Legacy callers / smoke teardown can omit the claim.
+  const release = arMod.releaseArchiveReactivationLock(proj);
+  if (!release.released) throw new Error("legacy release should still unlink (backward compat)");
+});
+
+check("R7 source-level: runArchiveReactivationIfDue passes claim to release", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
+  // The finally block must call releaseArchiveReactivationLock(projectRoot, ownClaim).
+  if (!/releaseArchiveReactivationLock\(options\.projectRoot,\s*ownClaim\)/.test(src)) {
+    throw new Error(
+      "finally block must pass ownClaim to release for owner-aware behavior; otherwise R7 woke-up-after-steal bug returns",
+    );
+  }
+  // ownClaim must be captured from lock.claim.
+  if (!/const ownClaim = lock\.claim/.test(src)) {
+    throw new Error("main entry must capture ownClaim = lock.claim after successful acquire");
+  }
+});
+
+console.log("\nSection: R7 — autoLlmWriteEnabled === false is hard kill (GPT R7 P2-3)");
+
+check("R7: sediment/index.ts gates archive-reactivation behind autoLlmWriteEnabled !== false", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
+  // Find the archive-reactivation runArchiveReactivationIfDue call site,
+  // then walk backwards to verify the schedule call is guarded by an
+  // `autoLlmWriteEnabled !== false` check.
+  const callIdx = src.search(/runArchiveReactivationIfDue\(/);
+  if (callIdx < 0) throw new Error("could not locate runArchiveReactivationIfDue call");
+  // The guard should be within the preceding ~2000 chars (we have a
+  // big comment block + scheduleAggregator + async IIFE preamble).
+  const before = src.slice(Math.max(0, callIdx - 2500), callIdx);
+  // Specifically look for the guard right before the schedule call,
+  // distinct from the canMutate check (which is `=== true`).
+  if (!/if\s*\(\s*settings\.autoLlmWriteEnabled\s*!==\s*false\s*\)\s*scheduleAggregator/.test(before)) {
+    throw new Error(
+      "archive-reactivation scheduleAggregator must be guarded by `if (settings.autoLlmWriteEnabled !== false) scheduleAggregator(...)` so `false` mode is a true hard kill (no LLM tokens)",
+    );
+  }
+});
+
+console.log("\nSection: R7 — INV-INVISIBILITY notify (Opus R7 P1-2)");
+
+check("R7: sediment/index.ts calls ctx.ui.notify when reactivations happen", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
+  // Find the archive-reactivation closure's audit block.
+  const auditIdx = src.search(/operation:\s*"archive_reactivation",/);
+  if (auditIdx < 0) throw new Error("could not locate archive_reactivation audit call");
+  // Notify code should be within ~2000 chars after the audit call.
+  const body = src.slice(auditIdx, auditIdx + 3000);
+  if (!/ctx\.ui\?\.notify/.test(body)) {
+    throw new Error("archive-reactivation must call ctx.ui?.notify when reactivations happen (INV-INVISIBILITY: tell the user)");
+  }
+  if (!/result\.reactivated_slugs\.length\s*>\s*0/.test(body)) {
+    throw new Error("notify must be gated by reactivated_slugs.length > 0 (don't notify on every diagnostic run)");
+  }
+});
+
+check("R7: notify is best-effort (wrapped in try/catch so UI errors don't kill lane)", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
+  // Find the notify call.
+  const notifyIdx = src.search(/ctx\.ui\.notify\(\s*lines\.join/);
+  if (notifyIdx < 0) throw new Error("could not locate the lines.join notify call");
+  // Walk back ~400 chars to find a 'try {'.
+  const before = src.slice(Math.max(0, notifyIdx - 400), notifyIdx);
+  if (!/try\s*\{/.test(before)) {
+    throw new Error("notify call must be wrapped in try/catch (notify is best-effort, don't kill the bg lane)");
   }
 });
 

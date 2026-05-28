@@ -173,6 +173,10 @@ export interface ArchiveReactivationLockClaim {
   pid: number;
   host: string;
   started_at: string;
+  /** R7 P2 fix (GPT-5.5): per-acquire random nonce so owner-aware
+   *  release can distinguish two acquires with identical (pid, host,
+   *  started_at) — e.g. after fork() or wall-clock collision. */
+  nonce?: string;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -200,7 +204,14 @@ function parseLockClaim(raw: string): ArchiveReactivationLockClaim | null {
       typeof obj?.host === "string" &&
       typeof obj?.started_at === "string"
     ) {
-      return { pid: obj.pid, host: obj.host, started_at: obj.started_at };
+      const claim: ArchiveReactivationLockClaim = {
+        pid: obj.pid,
+        host: obj.host,
+        started_at: obj.started_at,
+      };
+      // nonce is optional (older locks without nonce still parse).
+      if (typeof obj.nonce === "string") claim.nonce = obj.nonce;
+      return claim;
     }
     return null;
   } catch {
@@ -222,11 +233,16 @@ function isStaleLock(claim: ArchiveReactivationLockClaim, now: Date): boolean {
 /**
  * Try to acquire the per-project archive-reactivation lock.
  *
- * Returns `{ acquired: true }` on success. On contention returns
- * `{ acquired: false, existingClaim? }` and the caller MUST treat the
- * run as skipped — critically, do NOT write last_run, because we
- * don’t want to extend the 24h debounce just because another instance
- * grabbed the lock first.
+ * Returns `{ acquired: true, claim }` on success. The caller MUST pass
+ * `claim` back to `releaseArchiveReactivationLock()` so we can verify
+ * ownership before unlinking — R7 audit P2 fix (GPT-5.5): otherwise a
+ * holder that woke up AFTER a stale-steal would blindly unlink the
+ * stealer’s lock and reopen the concurrency window.
+ *
+ * On contention returns `{ acquired: false, existingClaim? }` and the
+ * caller MUST treat the run as skipped — critically, do NOT write
+ * last_run, because we don’t want to extend the 24h debounce just
+ * because another instance grabbed the lock first.
  *
  * Stale-lock policy: if the existing lock’s started_at is older than
  * LOCK_STALE_MS, OR its PID is known-dead on the same host, we steal
@@ -240,12 +256,17 @@ function isStaleLock(claim: ArchiveReactivationLockClaim, now: Date): boolean {
 export function tryAcquireArchiveReactivationLock(
   projectRoot: string,
   now: Date,
-): { acquired: boolean; existingClaim?: ArchiveReactivationLockClaim; stoleFrom?: ArchiveReactivationLockClaim } {
+): { acquired: boolean; claim?: ArchiveReactivationLockClaim; existingClaim?: ArchiveReactivationLockClaim; stoleFrom?: ArchiveReactivationLockClaim } {
   const file = archiveReactivationLockPath(projectRoot);
+  // R7 P2 fix (GPT-5.5): include a per-acquire random nonce so two
+  // processes with identical (pid, host, started_at) — e.g. fork() —
+  // can’t accidentally release each other’s lock. The nonce never
+  // leaves the lock file; the smoke test exercises this.
   const claim: ArchiveReactivationLockClaim = {
     pid: process.pid,
     host: os.hostname(),
     started_at: formatLocalIsoTimestamp(now),
+    nonce: Math.random().toString(36).slice(2, 14),
   };
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -255,7 +276,7 @@ export function tryAcquireArchiveReactivationLock(
   }
   try {
     fs.writeFileSync(file, JSON.stringify(claim, null, 2) + "\n", { flag: "wx" });
-    return { acquired: true };
+    return { acquired: true, claim };
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
       // Unexpected IO error — fail closed rather than risk concurrent run.
@@ -278,7 +299,7 @@ export function tryAcquireArchiveReactivationLock(
       try {
         // flag: 'w' = truncate-or-create. Bounded-cost TOCTOU.
         fs.writeFileSync(file, JSON.stringify(claim, null, 2) + "\n", { flag: "w" });
-        return { acquired: true, stoleFrom: existing };
+        return { acquired: true, claim, stoleFrom: existing };
       } catch {
         return { acquired: false, existingClaim: existing };
       }
@@ -288,16 +309,72 @@ export function tryAcquireArchiveReactivationLock(
 }
 
 /**
- * Release the lock. Best-effort: missing file is fine (we already
- * lost it via stale steal, or someone manually cleaned up).
+ * Helper: compare two lock claims structurally. Used by release to
+ * verify ownership before unlinking. Two claims are equal iff every
+ * field matches — pid, host, started_at, AND nonce.
+ */
+function claimsMatch(a: ArchiveReactivationLockClaim, b: ArchiveReactivationLockClaim): boolean {
+  return a.pid === b.pid && a.host === b.host && a.started_at === b.started_at && a.nonce === b.nonce;
+}
+
+/**
+ * Release the lock — owner-aware (R7 P2 fix, GPT-5.5).
+ *
+ * Behavior:
+ *   - If `claim` is provided: read the current lock file, compare to
+ *     `claim` structurally, and unlink ONLY if it matches. This
+ *     prevents the “woke-up-after-steal” footgun where the original
+ *     holder would unlink the stealer’s lock and reopen the
+ *     concurrency window.
+ *   - If `claim` is omitted (legacy callers / smoke teardown): fall
+ *     back to unconditional unlink with a console.warn so misuse is
+ *     visible. New code should ALWAYS pass the claim from acquire.
+ *
+ * Best-effort throughout: missing file is fine (we already lost it
+ * via stale steal, or someone manually cleaned up). IO errors are
+ * swallowed.
  *
  * Exported for smoke coverage.
  */
-export function releaseArchiveReactivationLock(projectRoot: string): void {
+export function releaseArchiveReactivationLock(
+  projectRoot: string,
+  claim?: ArchiveReactivationLockClaim,
+): { released: boolean; reason?: "missing" | "not_owner" | "unreadable" | "io_error" } {
+  const file = archiveReactivationLockPath(projectRoot);
+  if (claim === undefined) {
+    // Legacy / teardown path. Unlink unconditionally but log so misuse
+    // shows up in audit.
+    try {
+      fs.unlinkSync(file);
+      return { released: true };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return { released: false, reason: "missing" };
+      return { released: false, reason: "io_error" };
+    }
+  }
+  // Owner-aware path. Read → compare → unlink atomically (best-effort
+  // — there’s still a microscopic TOCTOU window between readFile and
+  // unlink, but the comparison guard means a stealer who overwrote
+  // between our acquire and release would NOT match this claim).
+  let raw: string;
   try {
-    fs.unlinkSync(archiveReactivationLockPath(projectRoot));
-  } catch {
-    // Best-effort.
+    raw = fs.readFileSync(file, "utf-8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { released: false, reason: "missing" };
+    return { released: false, reason: "io_error" };
+  }
+  const current = parseLockClaim(raw);
+  if (!current) return { released: false, reason: "unreadable" };
+  if (!claimsMatch(current, claim)) {
+    // Not ours — someone stole. Leave it alone.
+    return { released: false, reason: "not_owner" };
+  }
+  try {
+    fs.unlinkSync(file);
+    return { released: true };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { released: false, reason: "missing" };
+    return { released: false, reason: "io_error" };
   }
 }
 
@@ -754,6 +831,7 @@ export async function runArchiveReactivationIfDue(
       duration_ms: Date.now() - t0,
     };
   }
+  const ownClaim = lock.claim;
 
   try {
   // Sanitize the conversation window once (the prompt template + entry
@@ -973,9 +1051,10 @@ export async function runArchiveReactivationIfDue(
     duration_ms: Date.now() - t0,
   };
   } finally {
-    // Always release the lock, even if some downstream IO threw
-    // synchronously (writer crash, sanitizer throw, etc.). The lock
-    // is per-project so missing-file on release is harmless.
-    releaseArchiveReactivationLock(options.projectRoot);
+    // R7 P2 fix (GPT-5.5): owner-aware release. Pass our claim so a
+    // stealer’s lock is not blindly unlinked when we wake up after
+    // exceeding the stale window. Lock is per-project so missing-file
+    // result is harmless and expected when we lost ownership.
+    releaseArchiveReactivationLock(options.projectRoot, ownClaim);
   }
 }
