@@ -553,6 +553,36 @@ export default function (pi: ExtensionAPI) {
     if (!trimmed) return;
     if (Buffer.byteLength(trimmed, "utf8") > MAX_ENTRY_BYTES) return;
 
+    // ── Dispatch-bleedthrough content sniff (P0 patch, 2026-05-28) ──
+    //
+    // Even when source === "interactive" and isSubAgentSession(ctx) is
+    // false, dispatch-originated prompts can still leak into the input
+    // event stream via two upstream-side defects:
+    //
+    //   1. pi's session.prompt(text) defaults source to "interactive"
+    //      (agent-session.js). dispatch v3 in-process calls this without
+    //      overriding source, so sub-agent prompts arrive here with
+    //      source === "interactive". When isSubAgentSession also fails
+    //      to detect the sub-agent SessionManager (e.g. input-event ctx
+    //      not covered by the boundary sentinel — see pi-internals.ts
+    //      §boundary-probe), the dispatch prompt body lands on disk.
+    //   2. Legacy dispatch (sub-process era) wrote prompts to
+    //      /tmp/pi-dispatch-XXX/dispatch-prompt.md and used pi's @file
+    //      expansion. pi expands @file BEFORE emitting the input event,
+    //      so the input event text was already the full md content.
+    //
+    // Audit of ~/.pi/agent/input-history/<...home-worker-.pi>.jsonl
+    // (2026-05-28) found 35 / 389 entries (~52% bytes) were these two
+    // shapes. They have identifiable prefixes and never collide with
+    // real user input. Reject them at this layer until upstream pi
+    // gains a source parameter for session.prompt() and the v3
+    // in-process sub-agent boundary is hardened to cover input events.
+    //
+    // This is a patch, not the fix. Remove once both upstream defects
+    // are resolved and verified via audit re-run.
+    if (trimmed.startsWith("<!-- pi-astack/causal-anchor")) return;
+    if (/^<file name="\/tmp\/pi-dispatch-/.test(trimmed)) return;
+
     const cwd = ctx.cwd;
     const file = historyFileFor(cwd);
 
