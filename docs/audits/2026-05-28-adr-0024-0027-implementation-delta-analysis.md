@@ -68,7 +68,7 @@
 |---|---|---|
 | P0 | ADR 0027 C5 + heartbeat 未实现 | L2 不能进入 mutating / production main path |
 | P1 | ADR 0025 staging-resolver 未实现 (§4.1.5.1) | provisional staging 无独立 resolve 闭环 |
-| P1 | ADR 0025 archive-reactivation-reviewer 未实现 (§4.6) | archived entry 不能 prompt-driven reactivate |
+| ~~P1~~ ✅ | ADR 0025 archive-reactivation-reviewer (§4.6) **已 ship 2026-05-28**：Stage 2 commit chain 16d6190→89ff4ac (5 rounds blind audit, R5 unanimous GREEN) |
 | P1 | P6 deprecation 未启动 (`/about-me` + fence) | 过渡期反模式仍在用户交互面 |
 | P1 | Path A 不消费 outcome-ledger / 不生成 brief | "参谋"能力在 Path A 上仍弱 |
 | P1/P2 | multi-view Pass1 rich op schema 不足 | update/merge/supersede/delete 可能 defer/skip 循环 |
@@ -111,7 +111,7 @@
 
 ## 5. 推进备选 (按工程量从小到大)
 
-1. **archive-reactivation-reviewer** (~小)：bounded, prompt + wire-up
+1. ~~**archive-reactivation-reviewer**~~ ✅ **已 ship**：Stage 2 完成 (2026-05-28, commit 16d6190..89ff4ac)
 2. **staging-resolver** (~中)：batch resolver + audit + aggregator feed
 3. **P6 soft deprecation** (~小)：deprecation copy + suppress from /help
 4. **Path A v3** (~中)：去 cost bias / stage1 full body / brief synthesizer / outcome consume
@@ -121,7 +121,9 @@
 
 ## 6. 最终判断
 
-> ADR 0024 的 L1 第二大脑哲学已经基本落地；ADR 0025/0026 的主要读写闭环已经进入可 dogfood 状态；ADR 0027 的 causal trace / sub-agent isolation 已经经过 R5 基线修复。但严格 full compliance 被 C5/heartbeat、staging-resolver、archive-reactivation-reviewer 三类未实现能力卡住。
+> ADR 0024 的 L1 第二大脑哲学已经基本落地；ADR 0025/0026 的主要读写闭环已经进入可 dogfood 状态；ADR 0027 的 causal trace / sub-agent isolation 已经经过 R5 基线修复。
+>
+> **2026-05-28 补充**：ADR 0027 C5 Stage 1a (terminal_state) + Stage 1b (heartbeat) + ADR 0025 §4.6 archive-reactivation-reviewer (Stage 2) 三项能力已落地 (commit chain dab011b..89ff4ac，所有 stage 均经 3+ 轮盲审 unanimous GREEN)。现仅剩 staging-resolver (§4.1.5.1) 未落地为唯一的 STRUCTURAL_CONTEXT 未实现项。严格 full compliance 近一步；L1 第二大脑可 dogfood 范围明显扩大。
 
 - 能不能继续 dogfood 主会话第二大脑：可以
 - 是否满足四份 ADR 的完整严格要求：还没有
