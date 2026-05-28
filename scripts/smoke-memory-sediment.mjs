@@ -522,6 +522,22 @@ async function main() {
         assert(writtenDegraded.prompt_native === undefined, "degraded path should not produce prompt_native");
         assert(typeof writtenDegraded.degraded_reason === "string" && writtenDegraded.degraded_reason.length > 0, `degraded path should include degraded_reason: ${writtenDegraded.degraded_reason}`);
         assert(writtenDegraded.advisories.length > 0 || written.advisories.length === 0, "degraded path should still produce mechanical advisories as fallback");
+        // Phase C round-3 review (Opus P2): source-anchor assertion locking
+        // the aggregator_engine three-state discriminator + degraded flags in
+        // the index.ts audit row. Without this assertion, a future refactor
+        // could silently drop the discriminator and degraded runs would again
+        // become indistinguishable from v0.2-only runs in audit.jsonl.
+        const indexSrc = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
+        const aggSection = indexSrc.slice(
+          indexSrc.indexOf("aggregatorEngine"),
+          indexSrc.indexOf("prompt_version: buildPromptVersionAudit(\"aggregator\""),
+        );
+        assert(aggSection.includes("\"prompt_native_v1\""), "audit row gate should reference prompt_native_v1 engine");
+        assert(aggSection.includes("\"mechanical_v0_2_degraded\""), "audit row gate should reference mechanical_v0_2_degraded engine");
+        assert(aggSection.includes("\"mechanical_v0_2_no_model_registry\""), "audit row gate should reference mechanical_v0_2_no_model_registry engine");
+        assert(aggSection.includes("aggregator_engine: aggregatorEngine"), "audit row body should emit aggregator_engine discriminator");
+        assert(aggSection.includes("llm_attempted: llmAttempted"), "audit row body should emit llm_attempted flag");
+        assert(aggSection.includes("degraded_to_mechanical: !!summary.degraded_to_mechanical"), "audit row body should emit degraded_to_mechanical coerced boolean");
       } finally {
         if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
       }
