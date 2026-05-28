@@ -49,6 +49,11 @@ export interface SedimentSettings {
   curatorModel: string;
   curatorTimeoutMs: number;
   curatorMaxRetries: number;
+  /** ADR 0025 §4.3 Phase C.2: model for the aggregator v1 skeptical-historian
+   *  LLM pass. Skeptical historian is a reasoning-heavy task; v4-pro is the
+   *  reasonable default. Empty/invalid → fall back to curatorModel. */
+  aggregatorModel: string;
+  aggregatorTimeoutMs: number;
   /**
    * Sediment auto-write tristate (ADR 0025 §5.3 P5.5 retreat-path requirement).
    *
@@ -147,6 +152,12 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // See extractorTimeoutMs rationale above.
   curatorTimeoutMs: 1_200_000,
   curatorMaxRetries: 1,
+  // Phase C.2 default: v4-pro for reasoning over the 8 feed input. The
+  // run happens at most every 24 hours (debounced by aggregator-last-run);
+  // cost is one v4-pro call (~$0.005-0.05 per run) which is negligible.
+  // Generous timeout (10 min) since the aggregator is fire-and-forget bg.
+  aggregatorModel: "deepseek/deepseek-v4-pro",
+  aggregatorTimeoutMs: 600_000,
   // ADR 0025 §5.3 P5.5: default changed false → true 2026-05-24.
   //
   // Strict ADR §5.3 hard conditions (3 users × 4 weeks, false-positive rate
@@ -176,7 +187,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     multiViewPass1: "v1",
     multiViewPass2: "v1",
     outcomeSelfReport: "v0",
-    aggregator: "v0.2",
+    aggregator: "v1",
     archiveReactivationReviewer: "v0",
   },
   multiView: {
@@ -217,7 +228,7 @@ export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"
   outcomeSelfReport:
     "v0: memory-footnote protocol injected via memory extension's before_agent_start hook (extensions/memory/index.ts). Not a sediment-owned prompt file; this version tag tracks the protocol-level contract (entry/used/counterfactual fields, 3-option taxonomy).",
   aggregator:
-    "v0.2: deterministic skeptical-historian MVP. agent_end reads audit.jsonl + outcome-ledger.jsonl + staging + memory search metrics + classifier health, emits advisory aggregator-ledger.jsonl and aggregator_advisory audit rows. No memory mutation, no user prompt, no write gate; prompt-native trend synthesis remains P1+.",
+    "v1: prompt-native skeptical-historian (ADR 0025 §4.3 + Phase A/B/C cutover 2026-05-28). 8 input feeds threaded from deterministic v0.2 base: mechanical_suspicion_signals (renamed advisories), raw_distribution_summary, outcome_counterfactual_excerpts, structural_context, prior_aggregator_summaries (last 8 runs), classifier_health_window with 7-day rolling trend delta, per_turn_cost_rollup, p15_watchdog_signals. LLM = settings.aggregatorModel (default deepseek/deepseek-v4-pro). Prompt forces case-FOR + case-AGAINST + falsifiability + sycophancy double-check + reverse-anchor against skeptical-bias swap. Output schema = INFRA serialization (parse failure → degraded_to_mechanical: true audit, never retry-LLM-to-fix-JSON, never user-facing surface per INV-INVISIBILITY). v0.2 mechanical path retained as fallback when modelRegistry absent or LLM call fails. See docs/audits/2026-05-28-aggregator-prompt-native-phase-a-baseline.md + extensions/sediment/prompts/aggregator-skeptical-historian-v1.md.",
   archiveReactivationReviewer:
     "v0 placeholder — archive-rollback reviewer prompt (ADR §4.6) not yet implemented.",
 };
@@ -285,6 +296,10 @@ export function resolveSedimentSettings(): SedimentSettings {
       : DEFAULT_SEDIMENT_SETTINGS.curatorModel,
     curatorTimeoutMs: Math.max(1_000, asNumber(cfg.curatorTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.curatorTimeoutMs)),
     curatorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.curatorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.curatorMaxRetries))),
+    aggregatorModel: typeof cfg.aggregatorModel === "string" && cfg.aggregatorModel.trim()
+      ? cfg.aggregatorModel.trim()
+      : DEFAULT_SEDIMENT_SETTINGS.aggregatorModel,
+    aggregatorTimeoutMs: Math.max(5_000, asNumber(cfg.aggregatorTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.aggregatorTimeoutMs)),
     autoLlmWriteEnabled: resolveAutoLlmWriteEnabled(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
     skipContinuationSanitize: asBoolean(cfg.skipContinuationSanitize, DEFAULT_SEDIMENT_SETTINGS.skipContinuationSanitize),

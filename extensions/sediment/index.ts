@@ -1137,7 +1137,19 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       scheduleAggregator(() => {
         void (async () => {
           try {
-            const summary = runAndWriteSedimentAggregatorIfDue({ projectRoot: cwd, settings, sessionId });
+            // Phase C.3 (ADR 0025 §4.3): pass modelRegistry so the v1
+            // LLM skeptical-historian pass runs after the deterministic
+            // v0.2 mechanical aggregation. modelRegistry may be undefined
+            // in ephemeral/dispatch contexts — the aggregator falls back
+            // to v0.2-only behavior in that case (backward-compatible).
+            // No ctx.signal here: aggregator is fire-and-forget bg, must
+            // not be aborted when the user continues the next turn.
+            const summary = await runAndWriteSedimentAggregatorIfDue({
+              projectRoot: cwd,
+              settings,
+              sessionId,
+              modelRegistry: modelRegistry as Parameters<typeof runAndWriteSedimentAggregatorIfDue>[0]["modelRegistry"],
+            });
             if (!summary || summary.advisories.length === 0) return;
             await appendAudit(cwd, {
               operation: "aggregator_advisory",

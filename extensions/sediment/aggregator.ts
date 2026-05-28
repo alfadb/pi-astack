@@ -26,6 +26,8 @@ import type { LedgerOutcomeRow } from "./outcome-collector";
 import { stagingDir, stagingFileCount } from "./staging-loader";
 import { countMultiviewPending } from "./multiview-staging-io";
 import { scanPerTurnCost, type PerTurnCostSummary } from "./per-turn-cost";
+import { runAggregatorLlmPass, type PromptNativeOutput } from "./aggregator-llm";
+import type { ModelRegistryLike } from "./llm-extractor";
 
 type AggregatorSeverity = "info" | "warning" | "critical";
 type AdvisoryKind =
@@ -281,6 +283,21 @@ export interface AggregatorSummary {
   /** Phase C.1.c (ADR 0025 §4.3 v1 prompt input C4 / Step 7): P1.5
    *  watchdog telemetry. Optional; absent on v0.2 ledger rows. */
   p15_watchdog_signals?: P15WatchdogSignals;
+  /** Phase C.2 (ADR 0025 §4.3 v1 LLM pass): the prompt-native output
+   *  emitted by the aggregator-skeptical-historian-v1 LLM call. Absent
+   *  when no modelRegistry was supplied (v0.2-only run) or when the
+   *  LLM call failed (see degraded_to_mechanical below). */
+  prompt_native?: PromptNativeOutput;
+  /** Phase C.2 fallback flag: true when the v1 LLM call was attempted
+   *  but failed (model resolution, auth, transport error, parse
+   *  failure). The mechanical advisories[] is still valid in this
+   *  case; downstream consumers MUST NOT surface degraded runs to
+   *  user-facing notifications (Phase A C2 + C8). */
+  degraded_to_mechanical?: boolean;
+  /** Phase C.2: when degraded_to_mechanical=true, the failure reason
+   *  string from AggregatorLlmResult.degraded_reason. Used by next
+   *  aggregator run's prior_aggregator_summaries scan. */
+  degraded_reason?: string;
   /** ADR 0027 PR-B+ R1 P1-12: per-turn token-spend rollup across all
    *  anchor-bearing sidecars. Lets the operator answer "this user's
    *  brain maintenance per turn burns how many tokens?" + "which turns
@@ -1098,24 +1115,74 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
   };
 }
 
-export function runAndWriteSedimentAggregator(options: RunAggregatorOptions): AggregatorSummary {
-  const summary = runSedimentAggregator(options);
-  writeAggregatorLedger({
-    ...summary,
-    prompt_version: buildPromptVersionAudit("aggregator", options.settings),
-  });
-  return summary;
+/**
+ * Phase C.2 RunAggregatorOptions extension: optional modelRegistry +
+ * abort signal enable the v1 LLM pass. When modelRegistry is absent,
+ * runAndWriteSedimentAggregator falls back to v0.2-only behavior
+ * (unchanged from pre-Phase-C). This keeps the function callable from
+ * code paths that don't have a registry handy.
+ */
+export interface RunAggregatorOptionsWithLlm extends RunAggregatorOptions {
+  modelRegistry?: ModelRegistryLike;
+  signal?: AbortSignal;
 }
 
-export function runAndWriteSedimentAggregatorIfDue(
-  options: RunAggregatorOptions & { minIntervalMs?: number },
-): AggregatorSummary | null {
+export async function runAndWriteSedimentAggregator(options: RunAggregatorOptionsWithLlm): Promise<AggregatorSummary> {
+  const summary = runSedimentAggregator(options);
+
+  // Phase C.2: invoke the v1 LLM pass when modelRegistry is supplied.
+  // No retry, no recovery — any failure flips degraded_to_mechanical
+  // and the run still writes a useful ledger row (mechanical advisories
+  // are still valid signal even when the LLM pass fails).
+  let promptNative: PromptNativeOutput | undefined;
+  let degraded = false;
+  let degradedReason: string | undefined;
+  if (options.modelRegistry) {
+    try {
+      const llmResult = await runAggregatorLlmPass(
+        summary,
+        options.settings,
+        options.modelRegistry,
+        options.signal,
+      );
+      if (llmResult.degraded) {
+        degraded = true;
+        degradedReason = llmResult.degraded_reason;
+      } else if (llmResult.prompt_native) {
+        promptNative = llmResult.prompt_native;
+      }
+    } catch (e) {
+      // Defensive: runAggregatorLlmPass already wraps errors, but if
+      // something escapes (e.g. import failure under jiti), keep the
+      // degraded marker and continue — do NOT throw, do NOT block
+      // the mechanical ledger write.
+      degraded = true;
+      degradedReason = `llm_pass_unexpected_exception: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
+
+  const enrichedSummary: AggregatorSummary = {
+    ...summary,
+    ...(promptNative ? { prompt_native: promptNative } : {}),
+    ...(degraded ? { degraded_to_mechanical: true, ...(degradedReason ? { degraded_reason: degradedReason } : {}) } : {}),
+  };
+
+  writeAggregatorLedger({
+    ...enrichedSummary,
+    prompt_version: buildPromptVersionAudit("aggregator", options.settings),
+  });
+  return enrichedSummary;
+}
+
+export async function runAndWriteSedimentAggregatorIfDue(
+  options: RunAggregatorOptionsWithLlm & { minIntervalMs?: number },
+): Promise<AggregatorSummary | null> {
   const now = options.now ?? new Date();
   const minIntervalMs = Math.max(0, Math.floor(options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS));
   const lastRunMs = readLastRun(options.projectRoot);
   if (lastRunMs !== null && now.getTime() - lastRunMs < minIntervalMs) return null;
   try {
-    const summary = runAndWriteSedimentAggregator({ ...options, now });
+    const summary = await runAndWriteSedimentAggregator({ ...options, now });
     writeLastRun(options.projectRoot, now, "ok");
     return summary;
   } catch (error) {
