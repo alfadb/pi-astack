@@ -1147,11 +1147,25 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             // to v0.2-only behavior in that case (backward-compatible).
             // No ctx.signal here: aggregator is fire-and-forget bg, must
             // not be aborted when the user continues the next turn.
+            //
+            // R8 P1 fix (Opus + GPT-5.5 + DeepSeek unanimous): when
+            // autoLlmWriteEnabled === false, settings.ts docstring
+            // promises "no LLM tokens spent on sediment in any
+            // agent_end". Other 4 lanes honor that (classifier,
+            // archive-reactivation, multi-view replay, auto-write); the
+            // aggregator silently violated it by always passing
+            // modelRegistry, which lets the v1 skeptical-historian LLM
+            // pass fire. We now drop the registry in `false` mode so
+            // aggregator degrades to v0.2 mechanical-only (still useful
+            // for diagnostic advisory, costs 0 LLM tokens).
+            const llmAllowed = settings.autoLlmWriteEnabled !== false;
             const summary = await runAndWriteSedimentAggregatorIfDue({
               projectRoot: cwd,
               settings,
               sessionId,
-              modelRegistry: modelRegistry as Parameters<typeof runAndWriteSedimentAggregatorIfDue>[0]["modelRegistry"],
+              modelRegistry: llmAllowed
+                ? (modelRegistry as Parameters<typeof runAndWriteSedimentAggregatorIfDue>[0]["modelRegistry"])
+                : undefined,
             });
             if (!summary) return;
             // Phase C round-2 review P1-1/P1-2/P1-3 fix: distinguish the three
@@ -1356,16 +1370,23 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             // We notify ONLY when reactivations actually happened (not
             // every diagnostic run). Notify is best-effort; if the host
             // dropped the ui handle (e.g. headless), we skip silently.
+            //
+            // R8 NIT fix (Opus): use reactivated_entries (with scope) so
+            // world entries get the correct [world:<id>] label — the
+            // R7 “[project]” hardcoding mis-labelled them.
+            const reactivatedEntries = result.reactivated_entries
+              ?? result.reactivated_slugs.map((slug) => ({ slug, scope: "project" as const }));
             if (
               !result.skipped &&
-              result.reactivated_slugs.length > 0 &&
+              reactivatedEntries.length > 0 &&
               ctx.ui?.notify
             ) {
               const lines: string[] = [
-                `Sediment archive-reactivation (bg): ${result.reactivated_slugs.length} entr${result.reactivated_slugs.length === 1 ? "y" : "ies"} reactivated`,
+                `Sediment archive-reactivation (bg): ${reactivatedEntries.length} entr${reactivatedEntries.length === 1 ? "y" : "ies"} reactivated`,
               ];
-              for (const slug of result.reactivated_slugs) {
-                lines.push(`  ↑ [project] reactivated  ${slug}`);
+              for (const re of reactivatedEntries) {
+                const scopeLabel = re.scope === "world" ? "world" : `project:${projectId}`;
+                lines.push(`  ↑ [${scopeLabel}] reactivated  ${re.slug}`);
               }
               try {
                 ctx.ui.notify(lines.join("\n"), "info");

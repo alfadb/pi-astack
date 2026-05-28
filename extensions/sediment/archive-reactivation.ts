@@ -95,7 +95,13 @@ export interface ArchiveReactivationResult {
    *  this batch (will surface in next round-robin run). */
   deferred_count?: number;
   decisions: ArchiveReactivationEntryDecision[];
+  /** Slugs that were actually flipped archived→active. Preserved for
+   *  backward compat with R1–R7 audit row consumers. */
   reactivated_slugs: string[];
+  /** R8 NIT (Opus): full {slug, scope} so callers can render notify
+   *  with correct scope (world entries previously got mis-labelled as
+   *  [project]). Same length and order as reactivated_slugs. */
+  reactivated_entries?: Array<{ slug: string; scope: "project" | "world" }>;
   llm_duration_ms?: number;
   llm_model?: string;
   duration_ms: number;
@@ -978,6 +984,7 @@ export async function runArchiveReactivationIfDue(
 
   // Apply reactivate decisions.
   const reactivatedSlugs: string[] = [];
+  const reactivatedEntries: Array<{ slug: string; scope: "project" | "world" }> = [];
   for (const d of guardedDecisions) {
     if (d.decision !== "reactivate") continue;
     if (!options.reactivateEntry) continue;
@@ -987,7 +994,10 @@ export async function runArchiveReactivationIfDue(
     const scope: "project" | "world" = entry?.scope === "world" ? "world" : "project";
     try {
       const r = await options.reactivateEntry(d.slug, scope, d.rationale);
-      if (r.ok) reactivatedSlugs.push(d.slug);
+      if (r.ok) {
+        reactivatedSlugs.push(d.slug);
+        reactivatedEntries.push({ slug: d.slug, scope });
+      }
       // Audit the application result on ledger.
       appendLedgerRow({
         ts: formatLocalIsoTimestamp(now),
@@ -1046,6 +1056,7 @@ export async function runArchiveReactivationIfDue(
     deferred_count: deferredCount,
     decisions: guardedDecisions,
     reactivated_slugs: reactivatedSlugs,
+    reactivated_entries: reactivatedEntries,
     llm_duration_ms: llmDurationMs,
     llm_model: model,
     duration_ms: Date.now() - t0,
@@ -1055,6 +1066,22 @@ export async function runArchiveReactivationIfDue(
     // stealer’s lock is not blindly unlinked when we wake up after
     // exceeding the stale window. Lock is per-project so missing-file
     // result is harmless and expected when we lost ownership.
-    releaseArchiveReactivationLock(options.projectRoot, ownClaim);
+    //
+    // R8 P2 fix (Opus): observe release outcome. `not_owner` is the
+    // ONLY runtime evidence that a stale-steal race fired — if we
+    // silently drop it, operators can’t calibrate the 30-min stale
+    // window. Record diagnostic ledger rows for not_owner / unreadable
+    // / io_error so this signal makes it to the user-global ledger.
+    const releaseResult = releaseArchiveReactivationLock(options.projectRoot, ownClaim);
+    if (releaseResult.reason && releaseResult.reason !== "missing") {
+      appendLedgerRow({
+        ts: formatLocalIsoTimestamp(now),
+        project_root: path.resolve(options.projectRoot),
+        ...(options.sessionId ? { session_id_local: options.sessionId } : {}),
+        operation: "archive_reactivation_lock_release_anomaly",
+        reason: releaseResult.reason,
+        held_claim: ownClaim,
+      });
+    }
   }
 }
