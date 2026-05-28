@@ -39,6 +39,43 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage2Thinking: "off",
 };
 
+// ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
+// relevant memories" route: every turn runs a rewriter LLM + a search
+// with LLM-side strong cutoff, injects when stage 2 says has_relevant.
+//
+// Defaults are tuned for an instrument-first dogfood phase (per the
+// 2026-05-28 user directive "directly implement B + LLM-side strong
+// cutoff, ship metrics simultaneously, decide at 2 weeks"):
+//   - enabled: true (P1 implementation; disable via settings if TTFT
+//     impact unacceptable during dogfood)
+//   - queryRewriterModel: v4-flash (cheapest viable; matches search
+//     stage 1 model so token cost stays predictable)
+//   - queryRewriterTimeoutMs: 15_000 (deepseek-flash p99 ~ 3s; pad for
+//     transient slowness without blocking the turn forever)
+//   - searchLimit: 5 (smaller than memory_decide's 8 because the
+//     injection text appears in every turn's system prompt; §6 #5
+//     bias accumulation risk)
+//   - injectMaxEntries: 5 (cap on what actually goes into the block;
+//     defensive against search returning more than searchLimit asks)
+//   - entryExcerptChars: 800 (per-entry compiled_truth truncation)
+export interface PathASettings {
+  enabled: boolean;
+  queryRewriterModel: string;
+  queryRewriterTimeoutMs: number;
+  searchLimit: number;
+  injectMaxEntries: number;
+  entryExcerptChars: number;
+}
+
+export const DEFAULT_PATH_A_SETTINGS: PathASettings = {
+  enabled: true,
+  queryRewriterModel: "deepseek/deepseek-v4-flash",
+  queryRewriterTimeoutMs: 15_000,
+  searchLimit: 5,
+  injectMaxEntries: 5,
+  entryExcerptChars: 800,
+};
+
 export interface MemorySettings {
   includeWorld: boolean;
   defaultLimit: number;
@@ -47,6 +84,7 @@ export interface MemorySettings {
   projectBoost: number;
   shortTermTtlDays: number;
   search: SearchSettings;
+  pathA: PathASettings;
 }
 
 export const DEFAULT_SETTINGS: MemorySettings = {
@@ -57,6 +95,7 @@ export const DEFAULT_SETTINGS: MemorySettings = {
   projectBoost: 1.5,
   shortTermTtlDays: 30,
   search: DEFAULT_SEARCH_SETTINGS,
+  pathA: DEFAULT_PATH_A_SETTINGS,
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -111,6 +150,18 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
   };
 }
 
+function resolvePathASettings(cfg: Record<string, unknown>): PathASettings {
+  const p = (cfg.pathA as Record<string, unknown>) ?? {};
+  return {
+    enabled: asBoolean(p.enabled, DEFAULT_PATH_A_SETTINGS.enabled),
+    queryRewriterModel: asString(p.queryRewriterModel, DEFAULT_PATH_A_SETTINGS.queryRewriterModel),
+    queryRewriterTimeoutMs: Math.max(1000, asNumber(p.queryRewriterTimeoutMs, DEFAULT_PATH_A_SETTINGS.queryRewriterTimeoutMs)),
+    searchLimit: Math.max(1, Math.min(20, asNumber(p.searchLimit, DEFAULT_PATH_A_SETTINGS.searchLimit))),
+    injectMaxEntries: Math.max(1, Math.min(20, asNumber(p.injectMaxEntries, DEFAULT_PATH_A_SETTINGS.injectMaxEntries))),
+    entryExcerptChars: Math.max(100, Math.min(4000, asNumber(p.entryExcerptChars, DEFAULT_PATH_A_SETTINGS.entryExcerptChars))),
+  };
+}
+
 export function resolveSettings(): MemorySettings {
   const root = loadPiStackSettings();
   const cfg = (root.memory as Record<string, unknown>) ?? {};
@@ -122,5 +173,6 @@ export function resolveSettings(): MemorySettings {
     projectBoost: Math.max(0.1, asNumber(cfg.projectBoost, DEFAULT_SETTINGS.projectBoost)),
     shortTermTtlDays: Math.max(1, asNumber(cfg.shortTermTtlDays, DEFAULT_SETTINGS.shortTermTtlDays)),
     search: resolveSearchSettings(cfg),
+    pathA: resolvePathASettings(cfg),
   };
 }

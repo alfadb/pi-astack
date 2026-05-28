@@ -22,6 +22,7 @@ import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
 import { llmSearchEntries } from "./llm-search";
 import { buildDecisionSearchQuery, runMemoryDecide } from "./decide";
+import { PATH_A_INJECT_MARKER } from "./memory-context-injector";
 import { readOutcomeLedger, summarizeEntryActivity } from "../sediment/outcome-collector";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";

@@ -337,8 +337,25 @@ function parseCandidatePicks(rawText: string): CandidatePick[] {
   });
 }
 
-function parseFinalPicks(rawText: string): FinalPick[] {
-  const payload = asArrayPayload(unwrapJsonText(rawText));
+/**
+ * Stage 2 LLM output: either the legacy bare array, or the new object
+ * shape with explicit relevance_verdict (2026-05-28, ADR 0026 §3.1
+ * walk-back). The object shape is required for path A's LLM-side strong
+ * cutoff: it lets the LLM explicitly say "no relevant memories" via
+ * verdict="none" rather than emitting a noisy top-N.
+ *
+ * Verdict semantics:
+ *   - has_relevant: LLM judged at least one entry directly addresses the query
+ *   - none: LLM judged no entry directly addresses the query
+ *   - unknown: parse fell back to legacy array shape; caller treats as
+ *     has_relevant when picks non-empty, none when empty (== legacy behavior)
+ */
+export interface FinalPicksWithVerdict {
+  verdict: "has_relevant" | "none" | "unknown";
+  picks: FinalPick[];
+}
+
+function collectPicksFromArray(payload: unknown[]): FinalPick[] {
   const out: FinalPick[] = [];
   for (const item of payload) {
     if (typeof item === "string") {
@@ -365,6 +382,33 @@ function parseFinalPicks(rawText: string): FinalPick[] {
     seen.add(pick.slug);
     return true;
   });
+}
+
+function parseFinalPicksWithVerdict(rawText: string): FinalPicksWithVerdict {
+  const parsed = unwrapJsonText(rawText);
+  // New object shape: { relevance_verdict, picks }
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    const obj = parsed as Record<string, unknown>;
+    const rawVerdict = obj.relevance_verdict ?? obj.verdict;
+    const verdict: FinalPicksWithVerdict["verdict"] =
+      rawVerdict === "has_relevant" || rawVerdict === "none" ? rawVerdict : "unknown";
+    const picksPayload = obj.picks ?? obj.entries ?? obj.results;
+    const picks = collectPicksFromArray(asArrayPayload(picksPayload));
+    // Reconcile: trust verdict when it disagrees with picks emptiness.
+    if (verdict === "none") return { verdict, picks: [] };
+    if (verdict === "has_relevant" && picks.length === 0) return { verdict: "none", picks: [] };
+    return { verdict, picks };
+  }
+  // Legacy bare-array shape: infer verdict from emptiness.
+  const arrPicks = collectPicksFromArray(asArrayPayload(parsed));
+  return {
+    verdict: arrPicks.length === 0 ? "none" : "unknown",
+    picks: arrPicks,
+  };
+}
+
+function parseFinalPicks(rawText: string): FinalPick[] {
+  return parseFinalPicksWithVerdict(rawText).picks;
 }
 
 function makeStage1Prompt(query: string, indexText: string, limit: number): string {
@@ -442,10 +486,18 @@ function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: numbe
   return [
     "You are pi-astack memory search final ranker.",
     "",
-    `Task: given a user query and ${candidates.length} candidate knowledge entries (full content), rank them by relevance and output the top ${limit}.`,
-    "Output JSON only: an array of objects [{\"slug\": string, \"score\": number, \"why\": string}]. Score is 0-10 relevance.",
+    `Task: given a user query and ${candidates.length} candidate knowledge entries (full content), decide whether ANY entry is directly relevant to the query. If yes, rank the top ${limit}.`,
+    "",
+    "Output strict JSON with this shape (no markdown fence):",
+    "{",
+    "  \"relevance_verdict\": \"has_relevant\" | \"none\",",
+    "  \"picks\": [{\"slug\": string, \"score\": number, \"why\": string}]",
+    "}",
+    "",
+    "Score is 0-10 relevance. If verdict is \"none\", picks MUST be []. If verdict is \"has_relevant\", picks MUST contain at least one entry.",
     "",
     "Hard rules:",
+    "- **Be conservative on relevance_verdict.** If entries are merely tangentially related, topically near-by, or share keywords but do NOT directly help with the query, output \"none\". Only output \"has_relevant\" when at least one entry would materially shift how a competent assistant answers this query.",
     "- Read each entry's compiled_truth AND timeline. Timeline may refine, supersede, or invalidate compiled_truth; reflect this in ranking.",
     "- Match Chinese/English/mixed intent semantically, not literally.",
     "- Prefer the most directly useful entry for the query over broad background entries.",
@@ -454,7 +506,6 @@ function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: numbe
     "- If an entry is obsolete/superseded by another candidate, rank the newer/superseding one higher.",
     "- In the why field, mention freshness/timeline evidence when it materially affects ranking.",
     "- Do not invent slugs. Return only slugs present in Candidates.",
-    "- If nothing is relevant, return [].",
     "",
     "Candidates:",
     "<<<MEMORY_SEARCH_CANDIDATES",
@@ -559,7 +610,8 @@ export async function llmSearchEntries(
     STAGE2_TIMEOUT_MS,
     settings.search.stage2Thinking,
   );
-  const stage2Picks = parseFinalPicks(stage2.rawText);
+  const parsedStage2 = parseFinalPicksWithVerdict(stage2.rawText);
+  const stage2Picks = parsedStage2.picks;
 
   // ── Cache metrics log ─────────────────────────────────────────
   // Write to project-scoped metrics file for analysis.
@@ -571,9 +623,105 @@ export async function llmSearchEntries(
     s1: s1 ? { in: s1.input, out: s1.output, ...(s1.cacheHit != null ? { hit: s1.cacheHit } : {}), ...(s1.cacheWrite != null ? { write: s1.cacheWrite } : {}) } : null,
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     results: stage2Picks.length,
+    verdict: parsedStage2.verdict,
   };
   logSearchMetrics(entry, projectRoot);
 
   if (stage2Picks.length === 0) return [];
   return rankFromStage2(entriesBySlug, stage2Picks, finalLimit);
+}
+
+/**
+ * Path-A variant: returns LLM relevance verdict + timing breakdown for
+ * instrumentation. Callers that need LLM-side strong cutoff (inject only
+ * when verdict=="has_relevant") should use this instead of llmSearchEntries.
+ * See ADR 0026 §3.1 walk-back (2026-05-28) for design rationale.
+ */
+export interface SearchVerdictResult {
+  hits: ReturnType<typeof resultCard>[];
+  relevance_verdict: "has_relevant" | "none" | "unknown";
+  query: string;
+  stage1DurationMs: number;
+  stage2DurationMs: number;
+  totalDurationMs: number;
+  stage2DebugSlice?: string;
+}
+
+export async function llmSearchEntriesWithVerdict(
+  entries: MemoryEntry[],
+  params: SearchParams,
+  settings: MemorySettings,
+  modelRegistryRaw: unknown,
+  signal?: AbortSignal,
+  projectRoot?: string,
+): Promise<SearchVerdictResult> {
+  const t0 = Date.now();
+  const rawQuery = String(params.query ?? "").trim();
+  if (!rawQuery) {
+    return { hits: [], relevance_verdict: "none", query: "", stage1DurationMs: 0, stage2DurationMs: 0, totalDurationMs: 0 };
+  }
+  const querySanitize = sanitizeForMemory(rawQuery);
+  const query = querySanitize.ok ? (querySanitize.text ?? rawQuery) : `[redacted: ${querySanitize.error}]`;
+  assertModelRegistry(modelRegistryRaw);
+  const modelRegistry = modelRegistryRaw;
+  const filters = params.filters ?? {};
+  const finalLimit = clamp(
+    Math.floor(filters.limit ?? settings.search.stage2Limit ?? settings.defaultLimit),
+    1, settings.maxLimit,
+  );
+  const candidateLimit = Math.max(finalLimit, Math.floor(settings.search.stage1Limit));
+  const corpus = filteredEntries(entries, filters);
+  if (corpus.length === 0) {
+    return { hits: [], relevance_verdict: "none", query, stage1DurationMs: 0, stage2DurationMs: 0, totalDurationMs: Date.now() - t0 };
+  }
+  const indexText = buildLlmIndexText(corpus);
+  const t1 = Date.now();
+  const stage1 = await callSearchModel(
+    settings.search.stage1Model,
+    makeStage1Prompt(query, indexText, candidateLimit),
+    modelRegistry, signal, STAGE1_TIMEOUT_MS, settings.search.stage1Thinking,
+  );
+  const stage1DurationMs = Date.now() - t1;
+  const stage1Picks = parseCandidatePicks(stage1.rawText).slice(0, candidateLimit);
+  if (stage1Picks.length === 0) {
+    return { hits: [], relevance_verdict: "none", query, stage1DurationMs, stage2DurationMs: 0, totalDurationMs: Date.now() - t0 };
+  }
+  const entriesBySlug = new Map(corpus.map((entry) => [entry.slug, entry]));
+  const candidateEntries = stableUnique(stage1Picks.map((pick) => pick.slug))
+    .map((slug) => entriesBySlug.get(slug))
+    .filter((entry): entry is MemoryEntry => !!entry);
+  if (candidateEntries.length === 0) {
+    return { hits: [], relevance_verdict: "none", query, stage1DurationMs, stage2DurationMs: 0, totalDurationMs: Date.now() - t0 };
+  }
+  const t2 = Date.now();
+  const stage2 = await callSearchModel(
+    settings.search.stage2Model,
+    makeStage2Prompt(query, candidateEntries, finalLimit),
+    modelRegistry, signal, STAGE2_TIMEOUT_MS, settings.search.stage2Thinking,
+  );
+  const stage2DurationMs = Date.now() - t2;
+  const parsedStage2 = parseFinalPicksWithVerdict(stage2.rawText);
+  const s1 = stage1.usage;
+  const s2 = stage2.usage;
+  logSearchMetrics({
+    ts: new Date().toISOString(),
+    query: query.slice(0, 80),
+    s1: s1 ? { in: s1.input, out: s1.output, ...(s1.cacheHit != null ? { hit: s1.cacheHit } : {}), ...(s1.cacheWrite != null ? { write: s1.cacheWrite } : {}) } : null,
+    s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
+    results: parsedStage2.picks.length,
+    verdict: parsedStage2.verdict,
+    via: "path-a",
+  }, projectRoot);
+  const hits = parsedStage2.picks.length === 0
+    ? []
+    : rankFromStage2(entriesBySlug, parsedStage2.picks, finalLimit);
+  return {
+    hits,
+    relevance_verdict: parsedStage2.verdict,
+    query,
+    stage1DurationMs,
+    stage2DurationMs,
+    totalDurationMs: Date.now() - t0,
+    stage2DebugSlice: (stage2.rawText || "").slice(0, 400),
+  };
 }

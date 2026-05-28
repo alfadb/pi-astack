@@ -625,6 +625,54 @@
               "description": "Reasoning level for Stage 2 full-content rerank. Default off because ranking is a relevance judgment task, not a logical reasoning task — reading the candidates and sorting by match quality doesn't benefit from chain-of-thought. Unsupported levels hard-error rather than silently clamping."
             }
           }
+        },
+
+        "pathA": {
+          "type": "object",
+          "description": "ADR 0026 §3.1 walk-back (2026-05-28) path A: always-on relevant-memory injection. Every turn runs a query-rewriter LLM + memory_search with LLM-side strong cutoff (Stage 2 'relevance_verdict' field). Injects when verdict='has_relevant', skips silently otherwise. Replaces the original decision-point detection design (regex prefilter / 5% LLM gate) which was retired due to cross-language infeasibility + expression openness. Sub-agents are excluded.",
+          "additionalProperties": false,
+          "properties": {
+            "_comment": { "type": "string" },
+
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Master switch for path A. When false, no rewriter / search / inject runs in before_agent_start; memory_decide tool (path B) is unaffected."
+            },
+            "queryRewriterModel": {
+              "type": "string",
+              "default": "deepseek/deepseek-v4-flash",
+              "minLength": 1,
+              "description": "Stage-1 rewriter: classifies whether the user message carries usable intent + condenses to a search query. Recommended a fast / cheap model (~$0.001 per call). Matches the search Stage 1 model so token cost stays predictable."
+            },
+            "queryRewriterTimeoutMs": {
+              "type": "number",
+              "default": 15000,
+              "minimum": 1000,
+              "description": "Rewriter LLM timeout. Sized to absorb transient provider slowness without blocking the turn forever. Rewriter failure does NOT propagate — path A silently skips and the main agent flow proceeds."
+            },
+            "searchLimit": {
+              "type": "number",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 20,
+              "description": "Top-N for path-A search (smaller than memory_decide's 8 because the injection appears in every turn's system prompt; ADR 0024 §6 #5 bias-accumulation concern)."
+            },
+            "injectMaxEntries": {
+              "type": "number",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 20,
+              "description": "Cap on how many entries actually go into the inject block; defensive against search returning more than searchLimit asks."
+            },
+            "entryExcerptChars": {
+              "type": "number",
+              "default": 800,
+              "minimum": 100,
+              "maximum": 4000,
+              "description": "Per-entry compiled_truth truncation. Longer than 800 starts to dominate system-prompt budget for every turn; shorter than ~400 loses the timeline / nuance that makes memories useful."
+            }
+          }
         }
       }
     },
