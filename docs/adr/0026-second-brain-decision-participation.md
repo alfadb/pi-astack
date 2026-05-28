@@ -90,6 +90,26 @@ LLM 到达决策点 → 大脑主动提供情境化建议 →
 
 ### 3.1 决策点识别
 
+> **⚠️ 2026-05-28 walk back（路径 A 实现时用户层修订）**
+>
+> 本节原立场“决策点 vs 执行指令”二元区分**作为 ADR 明示立场被 walked back**。实施时用户层质疑这条立场隐含的 assumption “二元区分可靠检测”在实操上不成立：
+>
+> 1. **regex prefilter 跨语言不可行**——18 条中英 regex 永远 cover 不到日/西/法/俄等语言 surface；pi 是用户日常工具，中英专用隐含约束不成立。
+> 2. **regex cover 不到表达开放性**——真实用户表达包括“这两个哪个香” / “听说 Bun 很猛” / “我看 Vue 现在好像也行” / 长背景 + “怎么办” 等隐式、模糊、多轮才浮现形态。
+> 3. **§4.1.1 选择 3 全 LLM 检测被§4.1 自己拒绝**（每轮 +1-3s TTFT "不可接受"）。三选中三个都不成立。
+>
+> **修订后的走法**：放弃“决策点 vs 执行指令”二元区分，改为 **每轮都跑 memory_search**，由 search Stage 2 LLM **prompt-native** 决定“有没有相关记忆”：LLM 输出 `relevance_verdict: none` 时不注入，输出 `has_relevant` 时注入。cutoff 本身是 LLM 认知判断，不是 score 阈值。Query 由轻量 LLM 重写最近几轮 + 本轮凝练而成。
+>
+> **价值制约其他几节怎么读**：
+>
+> - §3.2 "情境化回忆" 仍然成立：注入的 summary 仍由 LLM 生成，不是裸条目拼接。但“决策简报”这个 framing 转为更中性的“相关记忆 summary”，不预设用户是在决策。
+> - §3.3 "矛盾感知" / §3.4 "结果驱动推荐" 未受影响：Stage 2 LLM 在 has_relevant 时仍可以指出矛盾 / 读 outcome ledger。
+> - §4.1.1 三选一设计全部作废（regex prefilter / 预热 / 全 LLM 检测）。
+> - §4.2 路径 B (`memory_decide` tool) **不受影响**，这是独立的 LLM-拉式通道，仍然保留。
+> - §6 实施路径 / §6.1 新文件清单重废（代以下面的“2026-05-28 实施状态"补牙）。
+>
+> **下文原 §3.1 保留** 作为历史记录（ADR walk-back 不采取“删临期内容”的做法）。后续读者过§3.1 原文时应以本注解为准。
+
 **目标**：知道 LLM 什么时候在做决定，在那个时刻让大脑介入。
 
 不是每个对话轮都需要大脑参与。用户说 "帮我写个 README" 和用户说 "我这个项目应该用 React Router v6 还是 v7"——后者是决策点，大脑该介入；前者是执行指令，大脑不用多嘴。
@@ -226,6 +246,20 @@ outcome 数据影响的是**推荐的力度**——活跃条目 → 强推荐；
 
 ### 4.1 路径 A：决策简报（主路径，agent_turn 触发）
 
+> **⚠️ 2026-05-28 walk back**：下面的流程图依赖于 §3.1 "决策点检测"这个阶段，而 §3.1 本身已被 walked back（见该节顶部注解）。实际实现流程是：
+>
+> ```
+> before_agent_start hook
+>   ├─ query-rewriter LLM（轻量模型）：近 N 轮 + 本轮 → 收敛 query / 输出 no_useful_query
+>   ├─ if no_useful_query → 跳过（静默）
+>   ├─ memory_search（复用 llmSearchEntries）。Stage 2 prompt 加强 cutoff：
+>   │   输出 relevance_verdict = none | has_relevant
+>   ├─ if none → 跳过 inject（静默）
+>   └─ if has_relevant → 生成 summary 注入 system prompt 末尾
+> ```
+>
+> 下文原 §4.1 流程图 **作为历史记录保留**。
+
 上面对应 §3.1-§3.3。流程：
 
 ```
@@ -252,6 +286,14 @@ agent_turn hook @ before_agent_turn
 这不是"延迟可接受"——这是"延迟有代价，我们有限范围内承担"。
 
 ### 4.1.1 P1 路径 A 实现前的设计选择（R1 P1-10 补补）
+
+> **⚠️ 2026-05-28 walk back**：下面三选一设计选择都依赖 §3.1 “决策点 vs 执行指令二元区分”这个前提。该前提被 walked back 后，三个选择都作废：
+>
+> - 选择 1 regex 预过滤 → 跨语言不可行 + cover 不住表达开放性
+> - 选择 2 agent_end 预热 → 还是需要“预判下轮是不是决策点”，同样需要不可行的二元区分
+> - 选择 3 全 LLM 检测 → §4.1 自己拒绝了，且即使接受也仅是二元判断的量换
+>
+> 修订后的设计（§3.1 walk-back 注解中详述）不再需要决策点检测阶段。下文原 §4.1.1 保留为历史记录。
 
 R1 review DeepSeek 指出路径 A 未实现前需提前绑定 TTFT 缓解路径，避免实现后用户看到「创造倍变延迟」严重回退。这里记录三个公设计选择 + 默认推荐：
 
@@ -391,6 +433,15 @@ jq 'select(.session_id == X and .turn_id == Y and .entry_slug == "prefer-pnpm")'
 ## 6. 实施路径
 
 ### 6.1 新文件
+
+> **⚠️ 2026-05-28 walk back**：下面原计划的 `decision-detector.ts` / `decision-briefer.ts` 作废（§3.1 二元区分被 walked back）。实际新文件是：
+>
+> - `extensions/memory/query-rewriter.ts` (+`prompts/query-rewriter-v1.md`) — 轻量 LLM 重写最近几轮 + 本轮为 search query
+> - `extensions/memory/memory-context-injector.ts` (+`prompts/memory-summary-v1.md`) — 路径 A 主流程 注入 before_agent_start
+> - `extensions/memory/llm-search.ts` §stage2 prompt 修订加 `relevance_verdict` 字段（修现有文件，不是新文件）
+> - `.abrain/.state/memory/path-a-ledger.jsonl` — instrumentation ledger
+>
+> 下文原表保留作为历史记录。
 
 ```
 extensions/sediment/
