@@ -1307,17 +1307,28 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             });
             // Audit each meaningful result.
             if (!result.skipped && (result.decisions.length > 0 || result.degraded)) {
+              // R3 GPT R2-RESIDUAL-3 fix: surface deferred_count and
+              // archived_total in audit so operators can detect batch
+              // pressure / starvation risk from audit.jsonl alone
+              // (without having to read the per-project reviewedAt
+              // sidecar). archived_total = reviewed_count + deferred_count.
+              const deferredCount = result.deferred_count ?? 0;
               await appendAudit(cwd, {
                 operation: "archive_reactivation",
                 lane: "diagnostic",
                 session_id: sessionId,
                 ok: result.ok,
                 reviewed_count: result.reviewed_count,
+                deferred_count: deferredCount,
+                archived_total: result.reviewed_count + deferredCount,
                 reactivated_slugs: result.reactivated_slugs,
                 decisions_summary: result.decisions.map((d) => ({
                   slug: d.slug,
                   decision: d.decision,
                   age_days: d.age_days_approx,
+                  ...(d.rationale.startsWith("reactivate_guard_failed:")
+                    ? { guard_failed: true }
+                    : {}),
                 })),
                 ...(result.degraded ? { degraded: true, degraded_reason: result.degraded_reason } : {}),
                 llm_model: result.llm_model,

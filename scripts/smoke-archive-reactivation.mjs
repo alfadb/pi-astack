@@ -693,6 +693,74 @@ check("P1-D behavior R2: malformed archive_at (truthy but unparseable) falls thr
   if (eff.source !== "updated") throw new Error(`malformed archive_at must fall through; got source=${eff.source}`);
 });
 
+console.log("\nSection: R3 hardening — quote min-length guard (Opus P2-R3-1, GPT R2-RESIDUAL-2)");
+
+check("R3 P3-1: MIN_QUOTE_LEN constant exists with value >= 8", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
+  const m = /MIN_QUOTE_LEN\s*=\s*(\d+)/.exec(src);
+  if (!m) throw new Error("MIN_QUOTE_LEN constant must be defined for quote-length floor");
+  const v = Number(m[1]);
+  if (!(v >= 8)) throw new Error(`MIN_QUOTE_LEN=${v} too lax; recommend >=8 (target 12)`);
+});
+
+check("R3 P3-1: guard rejects quote shorter than MIN_QUOTE_LEN", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
+  if (!/quote_too_short/.test(src)) {
+    throw new Error("Source must contain 'quote_too_short' downgrade marker");
+  }
+  if (!/aq\.length\s*<\s*MIN_QUOTE_LEN\s*\|\|\s*uq\.length\s*<\s*MIN_QUOTE_LEN/.test(src)) {
+    throw new Error("Guard must check aq.length AND uq.length against MIN_QUOTE_LEN");
+  }
+});
+
+check("R3 P3-1: empty-truth check removed bypass (Opus NIT-1)", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
+  // The old check was `if (truth && !truth.includes(aq))` which let
+  // empty truth bypass. Now it should be unconditional:
+  // `if (!truth.includes(aq))`.
+  if (/if\s*\(\s*truth\s*&&\s*!truth\.includes\(aq\)/.test(src)) {
+    throw new Error("Empty-truth bypass not removed: `if (truth && !truth.includes(aq))` still present");
+  }
+  if (!/if\s*\(\s*!truth\.includes\(aq\)\s*\)/.test(src)) {
+    throw new Error("Expected unconditional `if (!truth.includes(aq))` after Opus NIT-1 fix");
+  }
+});
+
+check("R3 P3-1: prompt declares MIN_QUOTE_LEN to reviewer", () => {
+  const src = fs.readFileSync(
+    path.join(repoRoot, "extensions/sediment/prompts/archive-reactivation-reviewer-v1.md"),
+    "utf-8",
+  );
+  if (!/Minimum quote length/i.test(src)) {
+    throw new Error("Prompt §5 must declare a minimum quote length so the LLM doesn’t emit 1-char quotes");
+  }
+  if (!/12 bytes/.test(src)) {
+    throw new Error("Prompt should mention concrete byte threshold (12 bytes) to align with code");
+  }
+});
+
+console.log("\nSection: R3 — deferred_count + archived_total in audit row (GPT R2-RESIDUAL-3)");
+
+check("R3 P3-2: audit row includes deferred_count + archived_total", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
+  const auditCallIdx = src.search(/operation:\s*"archive_reactivation",/);
+  if (auditCallIdx < 0) throw new Error("could not locate archive_reactivation audit call");
+  const body = src.slice(auditCallIdx, auditCallIdx + 1500);
+  if (!/deferred_count:/.test(body)) {
+    throw new Error("audit row must include deferred_count so operators can detect batch starvation pressure");
+  }
+  if (!/archived_total:/.test(body)) {
+    throw new Error("audit row must include archived_total = reviewed_count + deferred_count");
+  }
+});
+
+check("R3 P3-2: decisions_summary surfaces guard_failed flag", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
+  if (!/guard_failed:\s*true/.test(src)) {
+    throw new Error("decisions_summary must annotate guard_failed:true for reactivate_guard_failed downgrades");
+  }
+});
+
 console.log("\nSection: R2 — auditOperation in correct slot (GPT P1, DeepSeek NIT-1)");
 
 check("R2 CRIT-2: auditOperation is in updateProjectEntry OPTIONS, not the patch", () => {

@@ -664,7 +664,9 @@ export async function runArchiveReactivationIfDue(
     };
   });
 
-  // R1 P1-C fix: reactivate quote substring guard.
+  // R1 P1-C fix + R3 hardening (Opus P2-R3-1 + GPT R2-RESIDUAL-2):
+  // reactivate quote substring guard.
+  //
   // Before applying a reactivate decision, verify the LLM’s
   // archived_quote is a substring of the reviewed entry’s
   // compiledTruth AND user_quote is a substring of the sanitized
@@ -673,6 +675,14 @@ export async function runArchiveReactivationIfDue(
   // doesn’t exist, and (c) format drift where the model emits
   // {decision:"reactivate"} with no quotes at all. Failed guards
   // downgrade to keep_archived and log guard_failed in the ledger.
+  //
+  // R3 hardening: minimum quote length. Without a floor, a model
+  // emitting `archived_quote: "."` + `user_quote: "the"` would
+  // trivially substring-match both texts, fully bypassing the guard.
+  // 12 bytes = roughly 3 ASCII words / 4 CJK characters — enough
+  // signal to ground a real bridge, short enough that a verbatim
+  // copy of a meaningful phrase passes.
+  const MIN_QUOTE_LEN = 12;
   const reviewedByslug = new Map(reviewed.map((e) => [e.slug, e] as const));
   const guardedDecisions: ArchiveReactivationEntryDecision[] = completeDecisions.map((d) => {
     if (d.decision !== "reactivate") return d;
@@ -683,7 +693,12 @@ export async function runArchiveReactivationIfDue(
     if (!aq || !uq) {
       return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: empty_quote (had aq=${aq.length} uq=${uq.length}); original_rationale=${d.rationale.slice(0, 200)}` };
     }
-    if (truth && !truth.includes(aq)) {
+    if (aq.length < MIN_QUOTE_LEN || uq.length < MIN_QUOTE_LEN) {
+      return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: quote_too_short (aq=${aq.length} uq=${uq.length}, min=${MIN_QUOTE_LEN}); original_rationale=${d.rationale.slice(0, 200)}` };
+    }
+    // R3 NIT-1 (Opus): tighten empty-compiledTruth path. If truth is
+    // empty, no archived_quote can be a valid substring — reject.
+    if (!truth.includes(aq)) {
       return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: archived_quote_not_substring; original_rationale=${d.rationale.slice(0, 200)}` };
     }
     if (!windowText.includes(uq)) {
