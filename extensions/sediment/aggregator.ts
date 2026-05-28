@@ -80,6 +80,52 @@ export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
 ];
 
 /**
+ * Phase C.1.b (ADR 0025 §4.3 v1 prompt input C5): outcome counterfactual
+ * excerpts. The v1 prompt distinguishes 'actively-applied spec streak'
+ * from 'echo chamber' by reading the `counterfactual` text on
+ * DECISIVE / CONFIRMATORY / RETRIEVED-UNUSED footnotes. Without these
+ * quotes, slug + streak counts cannot reveal whether a decisive_streak
+ * of 21 represents real spec application ('would have used X; instead
+ * used Y') or self-reinforcing recommendation ('would have made the
+ * same decision independently').
+ */
+export interface OutcomeCounterfactualExcerpt {
+  slug: string;
+  used: "decisive" | "confirmatory" | "retrieved-unused";
+  counterfactual: string;
+  ts: string;
+  /** Truncated marker if counterfactual exceeded the per-excerpt char cap. */
+  truncated?: boolean;
+}
+
+/**
+ * Phase C.1.b (ADR 0025 §4.3 v1 prompt input C3): summary of prior
+ * aggregator runs. The v1 prompt reads the most recent N runs as
+ * compact context so the skeptical historian can detect 'I have been
+ * flagging this same advisory every run with no acted-on changes —
+ * time to demote or re-evaluate'. Explicit license in the prompt for
+ * the current LLM to disagree with past runs (with cited new evidence).
+ */
+export interface PriorAggregatorRunSummary {
+  ts: string;
+  project_root: string;
+  /** Count of advisories by kind, from v0.2 mechanical path. */
+  advisory_kinds: Record<string, number>;
+  /** Total advisory count (sum of advisory_kinds). */
+  total_advisories: number;
+  /** If this row was a v1 prompt-native output: kinds the LLM promoted. */
+  promoted_kinds?: string[];
+  /** If this row was a v1 prompt-native output: kinds the LLM demoted. */
+  demoted_kinds?: string[];
+  /** If this row was a v1 prompt-native output: acknowledgment kinds carried over. */
+  acknowledgment_kinds?: string[];
+  /** If this row was a degraded fallback (LLM call failed): true. */
+  degraded_to_mechanical?: boolean;
+  /** classifier_health snapshot for trend reference. */
+  classifier_health?: { quote: number; alternative: number; self_critique: number; n: number };
+}
+
+/**
  * Phase C.1.a: `RawDistributionSummary` provides the non-flagged
  * population context required by ADR 0025 §4.3 consensus C9. Without
  * it, the LLM only sees the 8 mechanical threshold hits and the
@@ -170,6 +216,15 @@ export interface AggregatorSummary {
    *  see what the LLM knew about structural noise sources). Optional
    *  for backward compatibility. */
   structural_context?: ReadonlyArray<StructuralContextEntry>;
+  /** Phase C.1.b (ADR 0025 §4.3 v1 prompt input C5): outcome counterfactual
+   *  quotes for flagged + high-streak slugs. Optional; absent on v0.2
+   *  ledger rows. Cap on count and per-excerpt length keeps payload
+   *  bounded. */
+  outcome_counterfactual_excerpts?: OutcomeCounterfactualExcerpt[];
+  /** Phase C.1.b (ADR 0025 §4.3 v1 prompt input C3): compact summary
+   *  of the prior N aggregator runs (default N=8). Excludes the current
+   *  run. Optional; first run on a fresh project will have []. */
+  prior_aggregator_runs?: PriorAggregatorRunSummary[];
   /** ADR 0027 PR-B+ R1 P1-12: per-turn token-spend rollup across all
    *  anchor-bearing sidecars. Lets the operator answer "this user's
    *  brain maintenance per turn burns how many tokens?" + "which turns
@@ -459,6 +514,155 @@ function computeDistribution(values: number[]): RawDistributionSummary["retrieve
   };
 }
 
+/**
+ * Phase C.1.b (ADR 0025 §4.3 v1 prompt input C5): extract counterfactual
+ * excerpts for `flaggedSlugs` (high-unused + echo-chamber candidates).
+ * Returns at most `maxPerSlug` excerpts per slug, with counterfactual
+ * text truncated to `maxExcerptChars` to keep prompt payload bounded.
+ *
+ * Excerpt selection: prefer most recent rows, but include at least one
+ * of each `used` category (decisive / confirmatory / retrieved-unused)
+ * if available, so the LLM sees the mix of how this slug has been used.
+ */
+function extractOutcomeCounterfactualExcerpts(
+  rows: LedgerOutcomeRow[],
+  cutoffMs: number,
+  flaggedSlugs: ReadonlySet<string>,
+  maxPerSlug: number = 3,
+  maxExcerptChars: number = 600,
+): OutcomeCounterfactualExcerpt[] {
+  if (flaggedSlugs.size === 0) return [];
+  const bySlug = new Map<string, LedgerOutcomeRow[]>();
+  for (const row of rows) {
+    if (!inWindow(row.ts, cutoffMs)) continue;
+    if (!row.entry_slug || !flaggedSlugs.has(row.entry_slug)) continue;
+    if (row.source !== "memory-footnote") continue;
+    if (!row.used || !row.counterfactual) continue;
+    const arr = bySlug.get(row.entry_slug) ?? [];
+    arr.push(row);
+    bySlug.set(row.entry_slug, arr);
+  }
+
+  const out: OutcomeCounterfactualExcerpt[] = [];
+  for (const [slug, slugRows] of bySlug) {
+    // Sort newest-first for recency preference.
+    slugRows.sort((a, b) => (b.ts > a.ts ? 1 : b.ts < a.ts ? -1 : 0));
+    // Try to include at least one of each `used` category, then fill
+    // with most recent regardless of category.
+    const picked: LedgerOutcomeRow[] = [];
+    const seenCategories = new Set<string>();
+    for (const row of slugRows) {
+      if (picked.length >= maxPerSlug) break;
+      if (row.used && !seenCategories.has(row.used)) {
+        picked.push(row);
+        seenCategories.add(row.used);
+      }
+    }
+    for (const row of slugRows) {
+      if (picked.length >= maxPerSlug) break;
+      if (!picked.includes(row)) picked.push(row);
+    }
+    for (const row of picked) {
+      const text = row.counterfactual ?? "";
+      const truncated = text.length > maxExcerptChars;
+      out.push({
+        slug,
+        used: row.used as OutcomeCounterfactualExcerpt["used"],
+        counterfactual: truncated ? text.slice(0, maxExcerptChars) + "...[truncated]" : text,
+        ts: row.ts,
+        ...(truncated ? { truncated: true } : {}),
+      });
+    }
+  }
+  // Stable order: slug asc, then ts desc (recency-first within slug).
+  out.sort((a, b) =>
+    a.slug !== b.slug
+      ? a.slug.localeCompare(b.slug)
+      : (b.ts > a.ts ? 1 : b.ts < a.ts ? -1 : 0),
+  );
+  return out;
+}
+
+/**
+ * Phase C.1.b (ADR 0025 §4.3 v1 prompt input C3): read the most recent
+ * N aggregator-ledger rows EXCLUDING the current run, condense each
+ * into a `PriorAggregatorRunSummary`. Each summary is small (~10
+ * fields) so 8 rows fits comfortably in prompt context.
+ *
+ * Failure mode: on any I/O or parse error, returns []. The current
+ * v1 prompt explicitly handles empty prior_aggregator_runs as a
+ * legitimate 'first run' edge case (see prompt §2 Edge case section).
+ */
+function summarizePriorAggregatorRuns(count: number = 8): PriorAggregatorRunSummary[] {
+  try {
+    const file = aggregatorLedgerPath();
+    if (!fs.existsSync(file)) return [];
+    // Re-use the bounded JSONL tail read used by writeAggregatorLedger.
+    const { rows } = readJsonl<AggregatorSummary>(file, count, LEDGER_TAIL_READ_BYTES);
+    if (rows.length === 0) return [];
+    const out: PriorAggregatorRunSummary[] = [];
+    for (const row of rows) {
+      try {
+        const advisoryKinds: Record<string, number> = {};
+        if (Array.isArray(row.advisories)) {
+          for (const adv of row.advisories) {
+            const k = (adv as { kind?: string }).kind;
+            if (typeof k === "string") {
+              advisoryKinds[k] = (advisoryKinds[k] ?? 0) + 1;
+            }
+          }
+        }
+        const summary: PriorAggregatorRunSummary = {
+          ts: typeof row.ts === "string" ? row.ts : "",
+          project_root: typeof row.project_root === "string" ? row.project_root : "",
+          advisory_kinds: advisoryKinds,
+          total_advisories: Array.isArray(row.advisories) ? row.advisories.length : 0,
+        };
+        // v1 prompt-native output fields (forward-compat — not present
+        // in v0.2 rows but may be present in v1 rows once Phase C.2
+        // wiring lands).
+        const rowAny = row as unknown as Record<string, unknown>;
+        const pn = rowAny.prompt_native as Record<string, unknown> | undefined;
+        if (pn && typeof pn === "object") {
+          if (Array.isArray(pn.promoted_advisories)) {
+            summary.promoted_kinds = pn.promoted_advisories
+              .map((a) => (a as { kind?: string }).kind)
+              .filter((k): k is string => typeof k === "string");
+          }
+          if (Array.isArray(pn.demoted_signals)) {
+            summary.demoted_kinds = pn.demoted_signals
+              .map((a) => (a as { kind?: string }).kind)
+              .filter((k): k is string => typeof k === "string");
+          }
+          if (Array.isArray(pn.previous_acknowledgments)) {
+            summary.acknowledgment_kinds = pn.previous_acknowledgments
+              .map((a) => (a as { kind?: string }).kind)
+              .filter((k): k is string => typeof k === "string");
+          }
+        }
+        if (rowAny.degraded_to_mechanical === true) {
+          summary.degraded_to_mechanical = true;
+        }
+        if (row.classifier_health && row.classifier_health.ok) {
+          summary.classifier_health = {
+            quote: row.classifier_health.quoteRate,
+            alternative: row.classifier_health.alternativeRate,
+            self_critique: row.classifier_health.concreteSelfCritiqueRate,
+            n: row.classifier_health.sampleSize,
+          };
+        }
+        out.push(summary);
+      } catch {
+        // Skip corrupt rows; the bounded tail read may yield a partial
+        // first line on a fresh truncation.
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 function summarizeStaging(now: Date): AggregatorSummary["staging"] {
   let provisionalPending = 0;
   let provisionalStale = 0;
@@ -673,6 +877,15 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
     ...outcome.echo_chamber_candidates.map((e) => e.slug),
   ]);
   const rawDistribution = buildRawDistributionSummary(outcomeRows, cutoffMs, flaggedSlugs);
+  // Phase C.1.b: counterfactual excerpts for flagged slugs (C5).
+  const counterfactualExcerpts = extractOutcomeCounterfactualExcerpts(
+    outcomeRows,
+    cutoffMs,
+    flaggedSlugs,
+  );
+  // Phase C.1.b: prior aggregator runs (C3) — reads ledger; empty on
+  // first run, returns [] silently on any I/O failure.
+  const priorRuns = summarizePriorAggregatorRuns(8);
 
   const base = {
     ts: formatLocalIsoTimestamp(now),
@@ -686,6 +899,8 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
     classifier_health: classifierHealth,
     raw_distribution: rawDistribution,
     structural_context: STRUCTURAL_CONTEXT,
+    outcome_counterfactual_excerpts: counterfactualExcerpts,
+    prior_aggregator_runs: priorRuns,
     per_turn_cost: perTurnCost,
   };
   const advisories = buildAdvisories(base);
