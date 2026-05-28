@@ -101,6 +101,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 | audit 数据可信度 | SHA256 哈希链 | 基础设施层（git + 文件系统）已经处理持久化；LLM 在异常情况（entry 数量突变、引用模式反常）下自己推理即可 |
 | writer 还原度 | 外部 writer 还原度 smoke 测试 | writer prompt 内化自我验证："写入 entry 前重读用户原话，自问还原度，不确定就先进 staging" |
 | multi-agent 协调与交付（ADR 0027 §C3'） | 认知层禁 — LLM 交付结果不走“准确率 ≥ X% 才接受”这类机械门（与 classifier 准确性同理）；best-of-N + voting 只作为下游 LLM 读取反差反思的输入 | **infra 层允许 structured**：`session-id + turn-id` 锚点必须 schema、retry counter / cost accounting / cancellation token / done-marker schema / heartbeat 都是机械 infra。C3' 明确拆分：认知层 prompt-native、infra 层 structured 不冲突 |
+| retrieval pipeline relevance cutoff（ADR 0026 §3.1 walk-back 后，2026-05-28） | 认知层禁 — 不用 embedding cosine ≥ 0.7 阈值 / 召回 < N 触发 retry / regex keyword prefilter 等机械门 gate 是否走下一阶段 LLM 推理 | **LLM-side strong cutoff 是唯一合规形态**：stage 2 LLM 明确输出 `relevance_verdict = none / has_relevant`，caller 按 LLM 认知判断跳过 / inject。context budget / token cap / history turn count 等参数是 infra 层资源约束，跟 LLM 行为路径阈值是不同性质 |
 
 ---
 
@@ -237,6 +238,10 @@ For entries listed but not cited:
 
 ### 5.3 跨会话趋势观察
 
+> **实施状态 (2026-05-28)**：aggregator v0.2 (mechanical threshold-alerter) → v1 (prompt-native skeptical historian) 切换已完成。v1 prompt 见 `extensions/sediment/prompts/aggregator-skeptical-historian-v1.md` (533 行)。本节下文是 v1 设计骨架，实际 prompt 已覆盖：(a) skeptical historian + falsifiability + sycophancy self-check（本节原意）；(b) **补 prior 8 ledger runs 作 prior context**（避免重复发现同一 hypothesis）；(c) **7 天 rolling trend delta + significant_drop flag**（本节 classifier health 升级）；(d) **P1.5 multi-view watchdog signals**（跟 ADR 0025 §4.4.6 P0.5 限制对应）；(e) **structural context 注入**（未实现能力点的 ADR-anchored 解释）；(f) **counterfactual quotes / reverse-anchor / INV-INVISIBILITY 自检**；(g) 三态 `aggregator_engine: prompt_native_v1 | mechanical_v0_2_degraded | mechanical_v0_2_no_model_registry`。
+>
+> v0.2 mechanical path **保留为 degraded fallback** —— modelRegistry 缺失或 v1 LLM 失败时回退；ledger 写 `degraded_to_mechanical: true` 让下次 v1 读到此 signal。实现在 `extensions/sediment/aggregator-llm.ts` (410 行)。§4.3 详细设计点 R2 已解决 (调度 / 窗口大小 / cron 资源 / cutoff)；见 ADR 0025 §4.3.4 “R2 已解决” 区。
+
 **目标**：识别慢漂移偏好（比如 Yarn → pnpm 用了 6 周渐变），单次会话看不到。
 
 **关键设计**：定期任务（每天 / 每周 / 每月），**角色是"持怀疑态度的史官"，默认"没发现就是成功"**：
@@ -367,6 +372,9 @@ resolving evidence 顺序展开。
 | 早期推理质量参差 | prompt v0 阶段作者需要迭代数轮才能稳定。但 prompt 迭代成本远低于机械 schema 一旦定型的修改成本 |
 | LLM 推理失败的本底概率 | 所有 AI-Native 系统共担的背景风险。基座模型迭代会持续降低 |
 | 默认开启后用户察觉不到的偏差累积（`autoLlmWriteEnabled` default true 以后首次真正存在） | ADR 0025 §5.3 P5.5 指出：默认关闭时用户必须主动改 settings 才启动 —— 此时偏差累积的供给侧未启动，代价不存在。默认 true 后，用户不再需要元动作启动 sediment，但这意味着错沉淀会静默发生。对冲机制：§5.1 aggregator + §5.4 multi-view + ADR 0025 §3.2.B sanitizer + tristate `"staging-only"` 退路（中度关闭，剩下只启 classifier 与 staging、不进 durable 写入） |
+| 路径 A inject 噪音污染主 LLM 注意力（2026-05-28 路径 A v2 落地后新增） | ADR 0026 §3.1 walk-back 后每轮跑 search + inject。如果 stage 2 LLM verdict=has_relevant 但实际 entry 跟当前任务关联弱，主 LLM 读 system prompt 会多 1-2KB noise。缓解：多 LLM 串联 (rewriter / stage 1 / stage 2) 每环都有 silent-fail 通道；cutoff 是 LLM-side 不是 score 阈值；path-a-ledger 双周 dogfood 数据。代价是为了兑现 ADR 0024 §6 #5 偏差累积对冲机制中“第二大脑参与”该部分的接受代价 |
+| 路径 A 多 LLM 串联 misframe 累积（2026-05-28 新增） | rewriter 漏掉 history 关键信号 → stage 1 在错 query 上选 candidate → stage 2 在错候选集 rerank。缓解：rewriter v2 看 history + history dedup；跨阶段 ledger 单环输出可离线 diff（multi-view 思想应用到 retrieval pipeline）；path B (memory_decide) 独立兜底 |
+| 路径 A 召回受 sediment metadata 质量 cap（2026-05-28 新增） | Stage 1 看的是 frontmatter，entry body 决定性证据 Stage 1 看不到。已知漏召模式：用户用跟 entry 内容完全不同词汇 framing 检索。缓解：ADR 0026 §3.0.3 v3 候选 C (stage 1 全文 body)，需要 ADR 0015 二阶段 rerank prompt cache 妥协 walkback（cost 不再是 P0 约束） |
 
 ---
 

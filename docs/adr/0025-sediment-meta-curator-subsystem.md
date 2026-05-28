@@ -869,6 +869,17 @@ sediment 在 `agent_end` 从 response stream 提取 `memory-footnote` fenced blo
 
 ### 4.3 跨会话趋势观察（aggregator）
 
+> **实施状态 (2026-05-28)**：aggregator v0.2 → v1 (prompt-native skeptical historian) 切换已完成。
+>
+> - **调度**：agent_end + 24h debounce sentinel @ `~/.abrain/.state/sediment/aggregator-ledger.jsonl`。fire-and-forget 后台跑 (ctx.signal **NOT** 传入，避免 main turn 退出时 abort)。
+> - **v1 prompt 完整实现**：`extensions/sediment/prompts/aggregator-skeptical-historian-v1.md` (533 行)。本节下文 §4.3.2 “R2 展开”承诺已兑现。
+> - **骨架覆盖**：(a) skeptical historian + falsifiability + sycophancy self-check；(b) prior 8 ledger runs 作 prior context；(c) classifier health 7 天 rolling trend delta + significant_drop flag；(d) P1.5 multi-view watchdog signals；(e) STRUCTURAL_CONTEXT 注入（未实现能力点 ADR 锚点）；(f) counterfactual quotes / reverse-anchor / INV-INVISIBILITY 自检；(g) 三态 `aggregator_engine` 字段。
+> - **degraded fallback**：v0.2 mechanical path 保留，modelRegistry 缺失或 v1 LLM 失败时回退；ledger 写 `degraded_to_mechanical: true`。
+> - **实现文件**：`extensions/sediment/aggregator-llm.ts` (410 行) + `extensions/sediment/aggregator.ts` (修订 加 AggregatorSummary.aggregator_engine 字段)。
+> - **设置**：`aggregatorModel` (default deepseek/deepseek-v4-pro) / `aggregatorTimeoutMs` (default 600000) / `aggregatorMaxRetries` (default 1，transport 只 / NO prompt-level repair retry)。
+>
+> 本节下文 §4.3.1-§4.3.4 作为 v1 设计骨架 / 补补 保留作参考。
+
 #### 4.3.1 调度
 
 定时任务（不在 `agent_end` 跑），频率 daily / weekly / monthly 三层窗口。每层窗口跑一次独立 prompt。
@@ -891,14 +902,23 @@ sediment 在 `agent_end` 从 response stream 提取 `memory-footnote` fenced blo
 
 **光看静态阈值不够**——如果 quote rate 从 95% 慢慢跌到 85%，不会触发 <40% 但跌幅本身值得关注。追加一条趋势检测：任一维度 7 天移动平均下降 ≥ 10 个百分点时也写 advisory flag（"classifier reasoning quality trending down"）。这条也是 prompt 里让 aggregator LLM 自己算的——给最近 50 条 trace 里前 25 条和后 25 条各算一个均值，比较差值。不要搞机械阈值逻辑。
 
-#### 4.3.4 关键设计点（R2 必须解决）
+#### 4.3.4 关键设计点（R2 已解决 2026-05-28）
 
-- 调度机制：cron job / pi runtime scheduler / 启动时检测 last_aggregator_run？
-- 窗口大小：daily=24h / weekly=7d / monthly=30d 是否合适？
-- hypothesis → staging 接口：aggregator 找到 candidate hypothesis 后是不是写到 §4.1.5 同款 staging？
-- cron 资源消耗：每次跑扫多少 audit.jsonl + entry，token 成本估算
+- ~~调度机制~~ → **agent_end + 24h debounce sentinel** (scheduleAggregator in extensions/sediment/index.ts)
+- ~~窗口大小~~ → **daily/weekly/monthly 三层窗口由 v1 prompt 自己分析**，不在 infra 层预定 (避免机械切分)
+- ~~hypothesis → staging~~ → **v1 不写 staging，只 emit advisory**（跟 ADR 0024 §5.3 advisory not blocking 一致）
+- ~~cron 资源~~ → **fire-and-forget 后台跑，单次 ~30s + ~10K token** (dogfood 验证)
 
 ### 4.4 Multi-view verification
+
+> **实施状态 update (2026-05-28, post batch 6)**：§4.4.6 中记录的 batch 1-3 状态 (2026-05-24) 之后又有 4 个 commit cycle 落地，不拆另节如下：
+>
+> - `aggregator_engine` 三态字段晋升到 `AggregatorSummary` (顺手小活 #3, commit 974250a)
+> - `summarizePriorAggregatorRuns` 读 last 8 ledger rows 馈 v1 prompt (commit 5130811)
+> - `aggregatorModel` / `aggregatorTimeoutMs` / `aggregatorMaxRetries` settings + schema (commit 974250a)
+> - audit row 加 `aggregator_engine` 字段跟 P1-1 round-2 closure (commit d144e4c)
+> - `STRUCTURAL_CONTEXT` 静态注入 + staleness lint smoke (commit 974250a, drift 捡到 1 个 stale entry 当场删)
+> - **multi-view writer dispatch v1 stub 未升 v2** (仍是 §4.4.6 D v1 限制)——待 path A 受制因素 v3 路线同期处理
 
 #### 4.4.1 触发条件
 
@@ -1016,6 +1036,8 @@ T0 reviewer 同意上述 v1 限制不影响 A' 闭合 (Opus PASS、Sonnet re-ver
 ### 4.5 Classifier prompt 自身演进
 
 #### 4.5.1 诊断入口
+
+> **实施状态 (2026-05-28)**：`/abrain audit classifier [--limit=N]` 已 ship (commit 974250a, 顺手小活 #4)。实现于 `extensions/abrain/index.ts handleAbrainAudit`，输出最近 N 条 classifier audit row (compact 格式 含 typing / confidence / intent / user_quote / most_likely_error) + classifier health snapshot (含 7 天 rolling trend + significant_drop flag)。从 `/help` 推广文案 隐藏，符合 ADR 0024 §4.3 高级用户诊断入口处理。
 
 `/abrain audit classifier` 命令展示最近 N 条 classifier reasoning trace，标红 advisory flag。**只是诊断入口，不是用户日常工作流**。从 quickstart / `/help` 推广文案中抑制（同 ADR 0024 §4.3 高级用户诊断入口处理）。
 
