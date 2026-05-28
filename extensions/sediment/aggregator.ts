@@ -80,6 +80,59 @@ export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
 ];
 
 /**
+ * Phase C.1.c (ADR 0025 §4.3 v1 prompt input C4 / Step 7 + ADR 0025 §6):
+ * P1.5 watchdog signals — telemetry to evaluate whether the multi-view
+ * Pass 1 schema upgrade should be re-prioritized. ADR 0025 §6
+ * documents `>5/week` on `multiview_pass1_op_not_synthesizable` as the
+ * trigger condition; the v1 prompt does NOT treat that threshold as a
+ * hard rule, but uses these counts as evidence for the case-FOR side
+ * of its Step 7 reasoning.
+ *
+ * What we can derive from current telemetry (v0.2 data sources):
+ *   1. `multiview_pass1_op_not_synthesizable` skip-reason frequency
+ *      from audit.jsonl rows
+ *   2. `candidate_lost: true` occurrences in audit rows (signals where
+ *      the replay writer dispatch lost a reviewer-approved entry)
+ *   3. multi-view-metrics.jsonl pass1/pass2 ok-rate + cross-project
+ *      breakdown via device_id + per-project audit roll-up
+ *   4. multiview-pending staging files — oldest age + max retry count
+ *
+ * What we cannot derive (KNOWN GAP, deferred to ADR 0025 §4.4.6 P1.5
+ * landing):
+ *   5. Pass 1 op-type distribution (create / archive / update / merge /
+ *      supersede). Pass 1 schema does not currently record op type in
+ *      a structured field; rawText would need re-parsing.
+ *
+ * The KNOWN GAP is encoded in the returned summary as
+ * `pass1_op_type_breakdown_available: false`, so the v1 prompt knows
+ * not to use that dimension. Per the prompt's empty-feed edge case,
+ * the LLM treats absent dimensions as 'no signal', not 'signal == 0'.
+ */
+export interface P15WatchdogSignals {
+  /** From audit: count of skip rows with reason multiview_pass1_op_not_synthesizable. */
+  pass1_op_not_synthesizable_count: number;
+  /** From audit: count of rows with candidate_lost: true. */
+  candidate_lost_count: number;
+  /** From multi-view-metrics: total pass1 + pass2 calls, and ok-rate. */
+  multi_view_metrics: {
+    pass1_call_count: number;
+    pass2_call_count: number;
+    ok_rate: number;
+    /** Distinct device_ids seen — proxy for cross-project distribution. */
+    distinct_device_ids: number;
+  };
+  /** From multiview-pending staging files: oldest age + retry distribution. */
+  multiview_pending_queue: {
+    total: number;
+    oldest_age_days: number;
+    max_retry_attempts: number;
+  };
+  /** Known gap marker per ADR 0025 §4.4.6: Pass 1 op-type is not yet
+   *  surfaced in audit — v1 prompt treats this dimension as missing. */
+  pass1_op_type_breakdown_available: boolean;
+}
+
+/**
  * Phase C.1.b (ADR 0025 §4.3 v1 prompt input C5): outcome counterfactual
  * excerpts. The v1 prompt distinguishes 'actively-applied spec streak'
  * from 'echo chamber' by reading the `counterfactual` text on
@@ -225,6 +278,9 @@ export interface AggregatorSummary {
    *  of the prior N aggregator runs (default N=8). Excludes the current
    *  run. Optional; first run on a fresh project will have []. */
   prior_aggregator_runs?: PriorAggregatorRunSummary[];
+  /** Phase C.1.c (ADR 0025 §4.3 v1 prompt input C4 / Step 7): P1.5
+   *  watchdog telemetry. Optional; absent on v0.2 ledger rows. */
+  p15_watchdog_signals?: P15WatchdogSignals;
   /** ADR 0027 PR-B+ R1 P1-12: per-turn token-spend rollup across all
    *  anchor-bearing sidecars. Lets the operator answer "this user's
    *  brain maintenance per turn burns how many tokens?" + "which turns
@@ -663,6 +719,128 @@ function summarizePriorAggregatorRuns(count: number = 8): PriorAggregatorRunSumm
   }
 }
 
+/**
+ * Phase C.1.c (ADR 0025 §4.3 v1 prompt input C4 / Step 7): compute
+ * the P1.5 watchdog signals. Reads audit.jsonl + multi-view-metrics
+ * + multiview-pending staging files.
+ *
+ * All file I/O is best-effort — any failure yields zero counts so the
+ * returned summary stays well-formed for the v1 prompt's empty-feed
+ * handler.
+ */
+function scanP15WatchdogSignals(
+  projectRoot: string,
+  cutoffMs: number,
+  rowLimit: number,
+  now: Date,
+): P15WatchdogSignals {
+  // (1) + (2) from audit.jsonl
+  let pass1OpNotSynth = 0;
+  let candidateLost = 0;
+  try {
+    const { rows } = readJsonl<Record<string, unknown>>(
+      sedimentAuditPath(projectRoot),
+      rowLimit,
+      JSONL_TAIL_READ_BYTES,
+    );
+    for (const row of rows) {
+      if (!inWindow(rowTimestamp(row), cutoffMs)) continue;
+      // Skip-reason can live either at top-level outcome.skip_reason
+      // or in results[].detail.skip_reason. Inspect both shapes.
+      const outcome = row.outcome as Record<string, unknown> | undefined;
+      const topSkip = typeof outcome?.skip_reason === "string" ? (outcome.skip_reason as string) : "";
+      if (topSkip === "multiview_pass1_op_not_synthesizable") pass1OpNotSynth++;
+      else if (Array.isArray(row.results)) {
+        for (const r of row.results as Array<Record<string, unknown>>) {
+          const det = r.detail as Record<string, unknown> | undefined;
+          if (typeof det?.skip_reason === "string" && det.skip_reason === "multiview_pass1_op_not_synthesizable") {
+            pass1OpNotSynth++;
+            break;
+          }
+        }
+      }
+      // candidate_lost may appear at top-level or inside outcome.
+      const topLost = row.candidate_lost;
+      const outcomeLost = outcome?.candidate_lost;
+      if (topLost === true || outcomeLost === true) candidateLost++;
+    }
+  } catch {
+    // best-effort
+  }
+
+  // (3) from multi-view-metrics.jsonl (user-global sidecar).
+  let pass1Calls = 0;
+  let pass2Calls = 0;
+  let okCount = 0;
+  let totalCount = 0;
+  const deviceIds = new Set<string>();
+  try {
+    const metricsPath = path.join(userGlobalSedimentDir(), "multi-view-metrics.jsonl");
+    const { rows } = readJsonl<Record<string, unknown>>(metricsPath, rowLimit, JSONL_TAIL_READ_BYTES);
+    for (const row of rows) {
+      if (!inWindow(row.ts, cutoffMs)) continue;
+      totalCount++;
+      if (row.ok === true) okCount++;
+      const pass = typeof row.pass === "string" ? row.pass : "";
+      if (pass === "pass1") pass1Calls++;
+      else if (pass === "pass2") pass2Calls++;
+      const dev = typeof row.device_id === "string" ? row.device_id : "";
+      if (dev) deviceIds.add(dev);
+    }
+  } catch {
+    // best-effort
+  }
+  const okRate = totalCount > 0 ? okCount / totalCount : 0;
+
+  // (4) from multiview-pending staging files.
+  let pendingTotal = 0;
+  let oldestAgeDays = 0;
+  let maxRetry = 0;
+  try {
+    const dir = stagingDir();
+    if (fs.existsSync(dir)) {
+      for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".json") && f.includes("multiview-pending"))) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(path.join(dir, file), "utf-8"));
+          if (!parsed || typeof parsed !== "object") continue;
+          pendingTotal++;
+          const entry = (parsed as Record<string, unknown>).entry as Record<string, unknown> | undefined;
+          const createdMs = typeof entry?.created === "string" ? Date.parse(entry.created as string) : NaN;
+          if (Number.isFinite(createdMs)) {
+            const ageDays = (now.getTime() - createdMs) / (24 * 60 * 60 * 1000);
+            if (ageDays > oldestAgeDays) oldestAgeDays = ageDays;
+          }
+          const attempts = (entry?.retry_attempts as Record<string, number> | undefined) ?? {};
+          for (const v of Object.values(attempts)) {
+            if (typeof v === "number" && v > maxRetry) maxRetry = v;
+          }
+        } catch {
+          // skip corrupt staging file
+        }
+      }
+    }
+  } catch {
+    // best-effort
+  }
+
+  return {
+    pass1_op_not_synthesizable_count: pass1OpNotSynth,
+    candidate_lost_count: candidateLost,
+    multi_view_metrics: {
+      pass1_call_count: pass1Calls,
+      pass2_call_count: pass2Calls,
+      ok_rate: Math.round(okRate * 1000) / 1000,
+      distinct_device_ids: deviceIds.size,
+    },
+    multiview_pending_queue: {
+      total: pendingTotal,
+      oldest_age_days: Math.round(oldestAgeDays * 10) / 10,
+      max_retry_attempts: maxRetry,
+    },
+    pass1_op_type_breakdown_available: false,
+  };
+}
+
 function summarizeStaging(now: Date): AggregatorSummary["staging"] {
   let provisionalPending = 0;
   let provisionalStale = 0;
@@ -886,6 +1064,14 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
   // Phase C.1.b: prior aggregator runs (C3) — reads ledger; empty on
   // first run, returns [] silently on any I/O failure.
   const priorRuns = summarizePriorAggregatorRuns(8);
+  // Phase C.1.c: P1.5 watchdog telemetry (C4 / Step 7) — audit +
+  // multi-view-metrics + multiview-pending staging.
+  const p15Watchdog = scanP15WatchdogSignals(
+    options.projectRoot,
+    cutoffMs,
+    Math.max(1, Math.floor(options.auditRowLimit ?? DEFAULT_AUDIT_ROW_LIMIT)),
+    now,
+  );
 
   const base = {
     ts: formatLocalIsoTimestamp(now),
@@ -901,6 +1087,7 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
     structural_context: STRUCTURAL_CONTEXT,
     outcome_counterfactual_excerpts: counterfactualExcerpts,
     prior_aggregator_runs: priorRuns,
+    p15_watchdog_signals: p15Watchdog,
     per_turn_cost: perTurnCost,
   };
   const advisories = buildAdvisories(base);

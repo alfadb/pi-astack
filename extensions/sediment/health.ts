@@ -24,6 +24,30 @@ export interface ClassifierHealthSummary {
   concreteSelfCritiqueRate: number;
   threshold: number;
   advisories: string[];
+  /** Phase C.1.c (ADR 0025 §4.3.3 trend detection): rolling delta
+   *  comparing the most recent window vs an equally-sized prior window.
+   *  Absent when total available classifier rows < 2 × windowSize
+   *  (not enough data to split). v1 prompt reads this as input feed
+   *  6 (classifier_health_window) so the LLM can detect slow drift
+   *  (e.g. quoteRate 1.00 → 0.55 over 7 days) that static thresholds
+   *  miss. */
+  trend?: ClassifierHealthTrend;
+}
+
+export interface ClassifierHealthTrend {
+  /** Number of classifier rows in each half (current and prior). */
+  half_window: number;
+  /** Rates over the most recent half_window classifier rows. */
+  current: { quote: number; alternative: number; self_critique: number };
+  /** Rates over the prior half_window classifier rows (older). */
+  prior: { quote: number; alternative: number; self_critique: number };
+  /** current minus prior, per dimension. Positive = improving. */
+  delta: { quote: number; alternative: number; self_critique: number };
+  /** True if any delta <= -0.10 (≥1 dimension dropped ≥10pp).
+   *  The v1 prompt reads this as a hint but is NOT forced to act on
+   *  it — the LLM applies its own falsifiability + case-FOR/AGAINST
+   *  flow per the skeptical-historian protocol. */
+  significant_drop: boolean;
 }
 
 type ReasoningTrace = Record<string, unknown>;
@@ -131,6 +155,43 @@ export function summarizeClassifierHealth(
     if (concreteSelfCritiqueRate < threshold) advisories.push(`Classifier concrete self-critique rate below threshold: ${concreteSelfCritiqueRate.toFixed(2)} < ${threshold.toFixed(2)}.`);
   }
 
+  // Phase C.1.c: rolling trend detection. Read up to 2 × windowSize
+  // rows so we can split current half vs prior half and compute deltas
+  // per ADR 0025 §4.3.3 trend heuristic. Skipped when not enough rows
+  // (the v1 prompt's empty-feed edge case absorbs absence).
+  const trendRows = readAuditRows(projectRoot)
+    .filter((row) => row.operation === "correction_classifier")
+    .slice(-2 * windowSize);
+  let trend: ClassifierHealthTrend | undefined;
+  if (trendRows.length >= 2 * windowSize) {
+    const halfWindow = windowSize;
+    const recentHalf = trendRows.slice(-halfWindow);
+    const priorHalf = trendRows.slice(0, halfWindow);
+    const recentRates = computeRates(recentHalf);
+    const priorRates = computeRates(priorHalf);
+    const delta = {
+      quote: round2(recentRates.quote - priorRates.quote),
+      alternative: round2(recentRates.alternative - priorRates.alternative),
+      self_critique: round2(recentRates.self_critique - priorRates.self_critique),
+    };
+    trend = {
+      half_window: halfWindow,
+      current: {
+        quote: round2(recentRates.quote),
+        alternative: round2(recentRates.alternative),
+        self_critique: round2(recentRates.self_critique),
+      },
+      prior: {
+        quote: round2(priorRates.quote),
+        alternative: round2(priorRates.alternative),
+        self_critique: round2(priorRates.self_critique),
+      },
+      delta,
+      significant_drop:
+        delta.quote <= -0.10 || delta.alternative <= -0.10 || delta.self_critique <= -0.10,
+    };
+  }
+
   return {
     ok: advisories.length === 0,
     classifierRowCount,
@@ -141,5 +202,37 @@ export function summarizeClassifierHealth(
     concreteSelfCritiqueRate,
     threshold,
     advisories,
+    ...(trend ? { trend } : {}),
   };
+}
+
+/**
+ * Phase C.1.c helper: compute the three classifier-health rates over
+ * a slice of audit rows. Shared between the main window and the prior
+ * trend window so they apply identical parsing heuristics.
+ */
+function computeRates(
+  rows: Record<string, unknown>[],
+): { quote: number; alternative: number; self_critique: number } {
+  let quoteHits = 0;
+  let alternativeHits = 0;
+  let critiqueHits = 0;
+  let sampleSize = 0;
+  for (const row of rows) {
+    const trace = getTrace(row);
+    if (!trace) continue;
+    sampleSize++;
+    if (hasVerbatimQuote(row, trace)) quoteHits++;
+    if (hasAlternative(trace)) alternativeHits++;
+    if (hasConcreteSelfCritique(row, trace)) critiqueHits++;
+  }
+  return {
+    quote: rate(quoteHits, sampleSize),
+    alternative: rate(alternativeHits, sampleSize),
+    self_critique: rate(critiqueHits, sampleSize),
+  };
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }
