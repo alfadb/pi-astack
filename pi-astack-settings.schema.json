@@ -215,6 +215,26 @@
           "description": "Max retries for curator calls. Default 1 to recover from occasional JSON parse errors (highly structured output)."
         },
 
+        "aggregatorModel": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4-pro",
+          "description": "Model used by the aggregator v1 skeptical-historian LLM pass (ADR 0025 §4.3 Phase C, 2026-05-28). Reasoning-heavy task over 8 input feeds; v4-pro is the cheapest top-tier reasoning model and the default. Empty/invalid → falls back to curatorModel. Aggregator runs are debounced to ~24h so cost is negligible (~$0.005-0.05 per run)."
+        },
+
+        "aggregatorTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 5000,
+          "description": "Timeout for aggregator LLM calls. Default 10 minutes — generous because aggregator is fire-and-forget background work."
+        },
+
+        "aggregatorMaxRetries": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "description": "Transport-level retries for aggregator LLM (HTTP network blips). MUST NOT be used as prompt-level retry to repair malformed JSON — forbidden by ADR 0024 §3 + v1 prompt §5 C6 (parse failure → degraded fallback, never re-ask LLM)."
+        },
+
         "autoLlmWriteEnabled": {
           "enum": [true, false, "staging-only", "staging", "true", "false"],
           "default": true,
@@ -244,7 +264,7 @@
             "multiViewPass1": { "type": "string", "default": "v1" },
             "multiViewPass2": { "type": "string", "default": "v1" },
             "outcomeSelfReport": { "type": "string", "default": "v0" },
-            "aggregator": { "type": "string", "default": "v0.2", "description": "Aggregator prompt/protocol version. Current implementation is v0.2 deterministic advisory: reads audit/outcome/staging/search metrics and writes aggregator-ledger.jsonl; prompt-native trend synthesis remains future work." },
+            "aggregator": { "type": "string", "default": "v1", "description": "Aggregator prompt/protocol version. v1 (ADR 0025 §4.3 Phase C, 2026-05-28): prompt-native skeptical-historian LLM pass over 8 input feeds (mechanical_suspicion_signals, raw_distribution_summary, outcome_counterfactual_excerpts, structural_context, prior_aggregator_summaries, classifier_health_window with trend, per_turn_cost_rollup, p15_watchdog_signals). v0.2 deterministic mechanical path retained as automatic fallback when modelRegistry is absent or LLM call fails. See extensions/sediment/prompts/aggregator-skeptical-historian-v1.md." },
             "archiveReactivationReviewer": { "type": "string", "default": "v0", "description": "v0 placeholder: archive rollback / reactivation reviewer not implemented yet." }
           }
         },

@@ -73,12 +73,15 @@ export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
       "ADR 0025 §4.6 archive-reactivation-reviewer prompt NOT implemented — archived entries cannot reactivate via prompt-driven review. Affects long-term archive churn signals; no mechanical advisory kind yet.",
     causes_advisory: "outcome_entry",
   },
-  {
-    id: "p15-writer-dispatch-stub",
-    description:
-      "ADR 0025 §4.4.6 multi-view replay writer dispatch is a v1 stub — reviewer-approved replays may not actually write to brain. Expect multiview_pending count fluctuation until P1.5 writer dispatch fully ships.",
-    causes_advisory: "multiview_pending",
-  },
+  // NOTE 2026-05-28 round-3 cleanup: previously had a "p15-writer-dispatch-stub"
+  // entry here, but the writer dispatch was actually shipped earlier (see
+  // sediment/index.ts:3012-3041 — `writeApprovedToBrain` calls
+  // `executeCuratorDecisionToBrain`). The remaining P1.5 limitation is
+  // "Pass 1 schema cannot synthesize update/merge/supersede/delete rich
+  // payloads" which is encoded structurally as
+  // P15WatchdogSignals.pass1_op_type_breakdown_available=false, NOT as a
+  // structural_context entry. The smoke-aggregator-structural-context.mjs
+  // lint caught this drift on its first run — working as intended.
 ];
 
 /**
@@ -298,6 +301,14 @@ export interface AggregatorSummary {
    *  string from AggregatorLlmResult.degraded_reason. Used by next
    *  aggregator run's prior_aggregator_summaries scan. */
   degraded_reason?: string;
+  /** Phase C round-3 P3 fix (DeepSeek-pro): three-state discriminator
+   *  for the engine that actually produced this row. Was previously
+   *  only emitted into audit.jsonl by the index.ts caller; promoting
+   *  it into the AggregatorSummary itself lets downstream ledger
+   *  consumers (next-run `summarizePriorAggregatorRuns`) read engine
+   *  state directly instead of reverse-engineering from absence of
+   *  `prompt_native` + `degraded_to_mechanical`. */
+  aggregator_engine?: "prompt_native_v1" | "mechanical_v0_2_degraded" | "mechanical_v0_2_no_model_registry";
   /** ADR 0027 PR-B+ R1 P1-12: per-turn token-spend rollup across all
    *  anchor-bearing sidecars. Lets the operator answer "this user's
    *  brain maintenance per turn burns how many tokens?" + "which turns
@@ -1161,8 +1172,17 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
     }
   }
 
+  // Phase C round-3 P3: compute the engine discriminator at the SOURCE
+  // (where modelRegistry presence is authoritatively known) and attach
+  // to summary so downstream consumers don't have to reverse-engineer it.
+  const aggregatorEngine: AggregatorSummary["aggregator_engine"] = !options.modelRegistry
+    ? "mechanical_v0_2_no_model_registry"
+    : degraded
+      ? "mechanical_v0_2_degraded"
+      : "prompt_native_v1";
   const enrichedSummary: AggregatorSummary = {
     ...summary,
+    aggregator_engine: aggregatorEngine,
     ...(promptNative ? { prompt_native: promptNative } : {}),
     ...(degraded ? { degraded_to_mechanical: true, ...(degradedReason ? { degraded_reason: degradedReason } : {}) } : {}),
   };

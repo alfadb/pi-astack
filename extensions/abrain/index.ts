@@ -1887,11 +1887,19 @@ export default function activate(pi: ExtensionAPI): void {
 
   if (typeof registry.registerCommand !== "function") return;
 
-  // /abrain command — project binding (ADR 0017 / B4.5) + git auto-sync (ADR 0020).
+  // /abrain command — project binding (ADR 0017 / B4.5) + git auto-sync (ADR 0020)
+  // + classifier audit diagnostic (ADR 0025 §4.5 P4, 2026-05-28).
   registry.registerCommand("abrain", {
-    description: "Abrain control: /abrain bind [--project=<id>] | /abrain status | /abrain sync. Rules diagnostics live under /rule list|explain|reload.",
+    description: "Abrain control: /abrain bind [--project=<id>] | /abrain status | /abrain sync | /abrain audit classifier [--limit=N]. Rules diagnostics live under /rule list|explain|reload.",
     getArgumentCompletions(prefix: string) {
-      const items = ["bind ", "bind --project=", "status", "sync"];
+      const items = [
+        "bind ",
+        "bind --project=",
+        "status",
+        "sync",
+        "audit classifier",
+        "audit classifier --limit=",
+      ];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -2516,6 +2524,10 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     ui.notify(result.summary, result.ok ? "info" : "warning");
     return;
   }
+  if (sub === "audit") {
+    await handleAbrainAudit(tokens, ui, commandCwd);
+    return;
+  }
   if (sub === "bind") {
     const parsed = parseProjectFlag(tokens);
     if (parsed.errors.length > 0) {
@@ -2560,7 +2572,129 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     }
     return;
   }
-  ui.notify(`/abrain: unknown subcommand '${sub}'. available: bind / status / sync`, "warning");
+  ui.notify(`/abrain: unknown subcommand '${sub}'. available: bind / status / sync / audit classifier`, "warning");
+}
+
+/**
+ * /abrain audit — high-mode operator diagnostic entry per ADR 0024 §4.3
+ * (pull-based, not pushed). Currently supports the `classifier` sub-domain
+ * (ADR 0025 §4.5 Phase 4 / P4): show the most recent N
+ * correction_classifier audit rows with their reasoning-trace quality
+ * signals, so the operator can spot drift in classifier reasoning before
+ * the aggregator skeptical historian raises a trend advisory.
+ *
+ * Stays well inside ADR 0024 §2 INV-INVISIBILITY: this is a USER PULL,
+ * not a system PUSH. Output is informational only — no [Y/N], no "please
+ * review", no list of things-to-act-on.
+ */
+async function handleAbrainAudit(
+  tokens: string[],
+  ui: { notify(message: string, type?: string): void },
+  commandCwd: string,
+): Promise<void> {
+  const sub = tokens.shift();
+  if (sub !== "classifier") {
+    ui.notify(`/abrain audit: unknown sub-domain '${sub ?? "(empty)"}'. available: classifier`, "warning");
+    return;
+  }
+  let limit = 10;
+  for (const tok of tokens) {
+    const m = /^--limit=(\d+)$/.exec(tok);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (Number.isFinite(n) && n > 0) limit = Math.min(100, n);
+    }
+  }
+
+  // Read user-global sediment audit.jsonl. Per ADR 0024 §4.3 the
+  // diagnostic must read from where data actually lives (sidecar), not
+  // from a pre-aggregated UI buffer.
+  const auditPath = path.join(os.homedir(), ".abrain", ".state", "sediment", "audit.jsonl");
+  if (!fs.existsSync(auditPath)) {
+    ui.notify(`/abrain audit classifier: no audit.jsonl found at ${auditPath}. The sediment classifier has not run yet, or autoLlmWriteEnabled is false.`, "info");
+    return;
+  }
+  const rawRows: Array<Record<string, unknown>> = [];
+  try {
+    const lines = fs.readFileSync(auditPath, "utf-8").split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object" && (parsed as Record<string, unknown>).operation === "correction_classifier") {
+          rawRows.push(parsed as Record<string, unknown>);
+        }
+      } catch {
+        // corrupt row—ignore
+      }
+    }
+  } catch (e: any) {
+    ui.notify(`/abrain audit classifier: failed to read ${auditPath}: ${e?.message ?? String(e)}`, "warning");
+    return;
+  }
+
+  const recent = rawRows.slice(-limit);
+  const lines: string[] = [
+    `/abrain audit classifier — last ${recent.length} of ${rawRows.length} correction_classifier audit rows`,
+    "",
+  ];
+  if (recent.length === 0) {
+    lines.push("(no classifier rows recorded yet)");
+  } else {
+    for (const row of recent) {
+      const ts = typeof row.ts === "string" ? row.ts : (typeof row.timestamp === "string" ? row.timestamp : "?");
+      const signal = (row.signal && typeof row.signal === "object") ? row.signal as Record<string, unknown> : {};
+      const signalFound = signal.signal_found !== false && (signal.typing || signal.user_quote);
+      if (!signalFound) {
+        lines.push(`${ts}  signal_found=false  reasoning="${truncate(String((signal.reasoning ?? "") || ""), 60)}"`);
+        continue;
+      }
+      const typing = typeof signal.typing === "string" ? signal.typing : "?";
+      const confidence = typeof signal.confidence === "number" ? signal.confidence : "?";
+      const intent = typeof signal.correction_intent === "string" ? signal.correction_intent : "";
+      const quote = typeof signal.user_quote === "string" ? truncate(signal.user_quote, 60) : "";
+      const errorDir = typeof signal.most_likely_error === "string" ? truncate(signal.most_likely_error, 50) : "";
+      lines.push(`${ts}  typing=${typing} conf=${confidence}  intent="${intent}"  quote="${quote}"`);
+      if (errorDir) lines.push(`  most_likely_error="${errorDir}"`);
+    }
+  }
+
+  // Health summary using the same heuristic the aggregator uses (call into
+  // sediment/health.ts to avoid duplicating the parsing logic). Lazy-load
+  // so abrain extension doesn't hard-depend on sediment if sediment was
+  // ever removed independently.
+  try {
+    const healthMod = await import("../sediment/health");
+    if (typeof healthMod.summarizeClassifierHealth === "function") {
+      const health = healthMod.summarizeClassifierHealth(commandCwd, { windowSize: Math.max(50, limit) });
+      lines.push("");
+      lines.push(`Classifier health (window=${health.windowSize}, samples=${health.sampleSize}/${health.classifierRowCount}):`);
+      lines.push(`  quote_rate=${health.quoteRate.toFixed(2)}  alternative_rate=${health.alternativeRate.toFixed(2)}  self_critique_rate=${health.concreteSelfCritiqueRate.toFixed(2)}  threshold=${health.threshold.toFixed(2)}`);
+      if (health.trend) {
+        lines.push(`  trend (last ${health.trend.half_window} vs prior ${health.trend.half_window}):`);
+        lines.push(`    quote      delta=${health.trend.delta.quote >= 0 ? "+" : ""}${health.trend.delta.quote.toFixed(2)} (current=${health.trend.current.quote.toFixed(2)}, prior=${health.trend.prior.quote.toFixed(2)})`);
+        lines.push(`    alternative delta=${health.trend.delta.alternative >= 0 ? "+" : ""}${health.trend.delta.alternative.toFixed(2)} (current=${health.trend.current.alternative.toFixed(2)}, prior=${health.trend.prior.alternative.toFixed(2)})`);
+        lines.push(`    self_critique delta=${health.trend.delta.self_critique >= 0 ? "+" : ""}${health.trend.delta.self_critique.toFixed(2)} (current=${health.trend.current.self_critique.toFixed(2)}, prior=${health.trend.prior.self_critique.toFixed(2)})`);
+        if (health.trend.significant_drop) {
+          lines.push(`    significant_drop=TRUE — a dimension dropped ≥10pp`);
+        }
+      }
+      if (health.advisories.length > 0) {
+        lines.push("  advisories:");
+        for (const a of health.advisories) lines.push(`    - ${a}`);
+      }
+    }
+  } catch (e: any) {
+    lines.push(`  (health summary unavailable: ${e?.message ?? String(e)})`);
+  }
+
+  ui.notify(lines.join("\n"), "info");
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s.replace(/\s+/g, " ").trim();
+  return s.slice(0, n).replace(/\s+/g, " ").trim() + "…";
 }
 
 function handleStatus(ui: { notify(message: string, type?: string): void }): void {

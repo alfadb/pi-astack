@@ -30,7 +30,6 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { AggregatorSummary } from "./aggregator";
 import type { SedimentSettings } from "./settings";
 import type { ModelRegistryLike } from "./llm-extractor";

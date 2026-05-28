@@ -1159,11 +1159,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             // enough state for the next aggregator's prior_aggregator_summaries.
             const promoted = summary.prompt_native?.promoted_advisories ?? [];
             const llmAttempted = !!modelRegistry;
-            const aggregatorEngine = !llmAttempted
-              ? "mechanical_v0_2_no_model_registry"
-              : summary.degraded_to_mechanical
-                ? "mechanical_v0_2_degraded"
-                : "prompt_native_v1";
+            // Phase C round-3 P3: source-side discriminator on the
+            // AggregatorSummary itself. Fall back to local recompute if
+            // a future caller path produces a summary without this field.
+            const aggregatorEngine =
+              summary.aggregator_engine
+              ?? (!llmAttempted
+                ? "mechanical_v0_2_no_model_registry"
+                : summary.degraded_to_mechanical
+                  ? "mechanical_v0_2_degraded"
+                  : "prompt_native_v1");
             // Audit row gate (v1 prompt §6 contract): emit the aggregator_advisory
             // row when EITHER v1 promoted_advisories non-empty (real LLM signal)
             // OR mechanical advisories present AND we did NOT run a successful v1
