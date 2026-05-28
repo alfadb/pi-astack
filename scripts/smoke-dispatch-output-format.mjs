@@ -170,6 +170,21 @@ module.exports = {
 };\n`,
 );
 
+// Stub `../_shared/heartbeat` — Stage 1b added startHeartbeat import.
+// formatResult doesn’t touch the heartbeat lifecycle; stub returns a
+// no-op handle so any accidental call is harmless.
+fs.writeFileSync(
+  path.join(sharedDir, "heartbeat.js"),
+  `module.exports = {
+  startHeartbeat: () => ({
+    active: false,
+    beat: () => {},
+    stop: () => {},
+    tracePath: undefined,
+  }),
+};\n`,
+);
+
 // Stub `@earendil-works/pi-coding-agent` — v3 in-process migration added
 // real (non-type) imports: createAgentSession, DefaultResourceLoader,
 // SessionManager, SettingsManager, getAgentDir. formatResult doesn't call

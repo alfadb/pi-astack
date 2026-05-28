@@ -55,6 +55,7 @@ import {
   inferTerminalState,
   type TaskSummary,
 } from "./terminal-state";
+import { startHeartbeat, type HeartbeatHandle } from "../_shared/heartbeat";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -537,8 +538,24 @@ async function runInProcess(
   timeoutMs: number,
   modelRegistry: any,
   toolAllowlist?: string,
+  /** ADR 0027 §C2' v1 Stage 1b: anchor + projectRoot needed for the
+   *  independent heartbeat liveness channel. When undefined the
+   *  heartbeat handle is a no-op (fail-open) and runInProcess works
+   *  identically to pre-Stage-1b for callers that don't pass anchor. */
+  heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string },
 ): Promise<AgentResult> {
   const start = Date.now();
+
+  // ADR 0027 §C2' Stage 1b heartbeat. Start BEFORE createAgentSession
+  // (so caller can detect a session-construction hang) and stop on
+  // every terminal path (success / error / timeout / abort). The
+  // handle is a no-op when anchor / projectRoot is missing, so this
+  // is safe even on legacy call sites that don't pass heartbeatCtx.
+  const heartbeat: HeartbeatHandle = startHeartbeat({
+    anchor: heartbeatCtx?.anchor,
+    projectRoot: heartbeatCtx?.projectRoot ?? process.cwd(),
+    startedNote: `model=${modelStr}`,
+  });
 
   // Resolve model
   const model = resolveModel(modelStr, modelRegistry);
@@ -836,6 +853,12 @@ async function runInProcess(
   const result = await Promise.race([runPromise, timeoutPromise]);
   if (timeoutId) clearTimeout(timeoutId);
   settled = true;
+  // ADR 0027 §C2' Stage 1b: stop heartbeat on every terminal path.
+  // heartbeat.stop() is idempotent + best-effort, so calling it from
+  // the outer aggregation site is sufficient regardless of which
+  // promise (run or timeout) won the race. setTimeout-side timeout
+  // path resolves to AgentResult without throwing, so we land here.
+  heartbeat.stop();
   return result;
 }
 
@@ -1091,6 +1114,11 @@ export default function (pi: ExtensionAPI) {
           runInProcess(
             params.model, params.thinking, prompt,
             signal, timeoutMs, ctx.modelRegistry, params.tools || undefined,
+            // ADR 0027 §C2' Stage 1b heartbeat: thread anchor + cwd so
+            // runInProcess can write the liveness channel. subAnchor is
+            // the per-dispatch sub-agent anchor; ctx.cwd is the project
+            // root. Both are also used by C6 audit so no new state.
+            { anchor: subAnchor, projectRoot: ctx.cwd || process.cwd() },
           ),
         );
       } catch (err: any) {
@@ -1375,6 +1403,10 @@ export default function (pi: ExtensionAPI) {
                 t.model, t.thinking, prompt,
                 signal, t.timeoutMs ?? timeoutMs, ctx.modelRegistry,
                 t.tools || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide",
+                // Stage 1b heartbeat ctx. Per-task subAnchor (subturn
+                // 1..N) gives each task its own heartbeat file under
+                // .pi-astack/dispatch/heartbeat/.
+                { anchor: subAnchor, projectRoot },
               ),
             );
           } catch (err: any) {
