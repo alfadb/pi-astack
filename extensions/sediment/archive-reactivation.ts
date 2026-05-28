@@ -182,10 +182,12 @@ const MAX_WINDOW_CHARS = 8000;
  *  cursor below (R1 P1-A fix — plain DESC slice would starve tail). */
 const MAX_ENTRIES_PER_RUN = 20;
 
-/** Sidecar file recording the last archive_at timestamp each slug was
- *  reviewed at. Used to round-robin candidate selection so that with
- *  >20 archived entries no entry waits more than ceil(N/20) days for
- *  review. Per-project so cross-project state stays isolated. */
+/** Per-project sidecar file recording the LAST REVIEWED TIMESTAMP
+ *  (not archive_at) for each slug. Used by selectReviewCandidates to
+ *  enforce fair LRU round-robin across >20 archived entries.
+ *  Per-project so cross-project state stays isolated; intentionally
+ *  not gitsync’d (multi-device divergence is acceptable cost duplication,
+ *  see R2 DeepSeek P2-2 — decisions are idempotent). */
 function reviewedAtPath(projectRoot: string): string {
   return path.join(
     path.resolve(projectRoot),
@@ -210,20 +212,27 @@ function readReviewedAtMap(projectRoot: string): Map<string, string> {
   }
 }
 
+/** Sidecar size cap. At 24h debounce with 20 reviews per run + average
+ *  archive churn well under 100/year, 5000 is generous headroom. */
+const REVIEWED_AT_MAX_ENTRIES = 5000;
+
 function writeReviewedAtMap(projectRoot: string, map: Map<string, string>): void {
   try {
     const file = reviewedAtPath(projectRoot);
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    // Cap map size: drop entries whose slug no longer exists is the
-    // caller’s job (cheap; we just write what was passed). 5000 cap
-    // is plenty headroom; if you hit it, archive churn is the bigger
-    // problem.
-    const obj: Record<string, string> = {};
-    let count = 0;
-    for (const [k, v] of map.entries()) {
-      obj[k] = v;
-      if (++count >= 5000) break;
+    // R2 P2-1 fix (Opus): keep the NEWEST entries when truncating.
+    // Previously walked `map.entries()` and took the first 5000, but
+    // Map iteration is insertion order — freshly-reviewed slugs that
+    // were already in the map don’t reorder on `set()`. The old code
+    // would drop the most recently reviewed slugs once the map
+    // exceeded the cap, inverting the design intent. We now sort by
+    // timestamp DESC and keep the newest.
+    let entries = Array.from(map.entries());
+    if (entries.length > REVIEWED_AT_MAX_ENTRIES) {
+      entries.sort((a, b) => (Date.parse(b[1]) || 0) - (Date.parse(a[1]) || 0));
+      entries = entries.slice(0, REVIEWED_AT_MAX_ENTRIES);
     }
+    const obj: Record<string, string> = Object.fromEntries(entries);
     fs.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n", "utf-8");
   } catch {
     // Sidecar is best-effort; missing it just resets round-robin.
@@ -274,54 +283,69 @@ interface PromptBuildResult {
 }
 
 /**
- * Round-robin candidate selection (R1 P1-A fix).
+ * Round-robin candidate selection (R2 — R1 P1-A regression fix).
  *
- * With pure archive_at DESC + slice(0, MAX), once >MAX entries are
- * archived the same 20 newest are reviewed every run and tail entries
- * starve. We fix that by:
+ * R1 used `priority = max(sinceArchive, sinceReview)`. R2 audits
+ * (Opus + GPT-5.5) showed this is mathematically equivalent to plain
+ * `archive_at DESC` for any entry that has been reviewed at least
+ * once, because `sinceArchive` monotonically dominates `sinceReview`
+ * after first review (`sinceArchive` was already ≥ `sinceReview` at
+ * archival, and both grow at the same rate after). Starvation
+ * re-emerged after one round-robin cycle.
  *
- *   1. Loading per-slug last_reviewed_at sidecar.
- *   2. Computing each candidate’s priority = max(archive_at age,
- *      since_last_reviewed age). Entries never reviewed get +Infinity.
- *   3. Picking the top MAX by priority — mixes recent archives
- *      (caller’s preferred review path) with truly stale entries
- *      (the hard_archive candidates the design exists to serve).
+ * R2 formula: **`sinceReview` is the PRIMARY sort key.** Never-reviewed
+ * entries get `lastReviewedMs = 0` so `sinceReview = nowMs` — they
+ * win until they’ve been reviewed at least once. After that, the
+ * entry with the longest wait-since-review wins, regardless of
+ * archive age. This is the correct LRU semantics for fair review.
  *
- * Properties:
- *   - With MAX entries, behavior is unchanged from before (all
- *     reviewed every run).
- *   - With 2×MAX, each entry reviewed every other run.
- *   - With N×MAX, max wait = ceil(N) days at 24h debounce.
- *   - Determinism: ties broken by archive_at DESC then slug ASC.
+ * Tie-break: archive_at DESC (recent archives preferred when waits
+ * are equal), then slug ASC (deterministic).
+ *
+ * Properties (verified by behavioral smoke, NOT just source grep):
+ *   - With MAX entries: all reviewed every run.
+ *   - With 2×MAX: each entry reviewed every other run — union of
+ *     two consecutive batches = full archived set.
+ *   - With N×MAX (N≥2): max wait = ceil(N) runs.
+ *   - Exported for smoke coverage.
  */
-function selectReviewCandidates(
+export function selectReviewCandidates(
   archivedEntries: MemoryEntry[],
   reviewedAt: Map<string, string>,
   now: Date,
   cap: number,
 ): MemoryEntry[] {
   const nowMs = now.getTime();
-  type Scored = { entry: MemoryEntry; priorityMs: number; archiveMs: number };
+  type Scored = { entry: MemoryEntry; sinceReviewMs: number; archiveMs: number };
   const scored: Scored[] = archivedEntries.map((entry) => {
     const eff = effectiveArchiveAt(entry);
-    const archiveMs = eff.value ? Date.parse(eff.value) : 0;
+    const archiveRaw = eff.value ? Date.parse(eff.value) : 0;
+    // Clamp future-dated stamps: they shouldn’t produce negative
+    // wait. R2 NEW P2-4 (GPT-5.5): malformed `updated`/`created` in
+    // the future would otherwise yield negative sinceReview and
+    // demote the entry inappropriately.
+    const archiveMs = archiveRaw > 0 && archiveRaw <= nowMs ? archiveRaw : 0;
     const lastReviewedStr = reviewedAt.get(entry.slug);
-    const lastReviewedMs = lastReviewedStr ? Date.parse(lastReviewedStr) : 0;
-    // Priority = whichever wait is longer: since-archive or since-last-review.
-    // Entries never reviewed: lastReviewedMs=0 → nowMs-0 wins for
-    // anything old enough; entries archived today + reviewed today
-    // get a small priority.
-    const sinceArchive = archiveMs > 0 ? nowMs - archiveMs : nowMs; // legacy = max wait
-    const sinceReview = lastReviewedMs > 0 ? nowMs - lastReviewedMs : nowMs;
-    return { entry, priorityMs: Math.max(sinceArchive, sinceReview), archiveMs };
+    const lastReviewedRaw = lastReviewedStr ? Date.parse(lastReviewedStr) : 0;
+    const lastReviewedMs = lastReviewedRaw > 0 && lastReviewedRaw <= nowMs ? lastReviewedRaw : 0;
+    // Never-reviewed: 0 → nowMs (full positive). This makes
+    // never-reviewed entries strictly outrank all reviewed entries
+    // (whose sinceReview ≤ nowMs - 1ms at minimum), giving the
+    // LRU semantics the design requires.
+    const sinceReviewMs = nowMs - lastReviewedMs;
+    return { entry, sinceReviewMs, archiveMs };
   });
   scored.sort((a, b) => {
-    if (b.priorityMs !== a.priorityMs) return b.priorityMs - a.priorityMs;
+    if (b.sinceReviewMs !== a.sinceReviewMs) return b.sinceReviewMs - a.sinceReviewMs;
     if (b.archiveMs !== a.archiveMs) return b.archiveMs - a.archiveMs;
     return a.entry.slug.localeCompare(b.entry.slug);
   });
   return scored.slice(0, cap).map((s) => s.entry);
 }
+
+// Exported for smoke coverage — makes effectiveArchiveAt observable
+// without relying on the prompt text rendering.
+export { effectiveArchiveAt };
 
 function buildReviewerPrompt(
   reviewed: MemoryEntry[],

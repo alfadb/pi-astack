@@ -443,11 +443,13 @@ check("P1-B: sediment/index.ts reactivateEntry closure forwards scope to updateP
   if (!/async\s*\(slug:\s*string,\s*scope:\s*"project"\s*\|\s*"world",\s*rationale:\s*string\)/.test(idxSrc)) {
     throw new Error("sediment/index.ts reactivateEntry closure must accept (slug, scope, rationale)");
   }
-  // updateProjectEntry options must include scope.
+  // updateProjectEntry options must include scope. We scan a wider
+  // window now since R2 added more options entries (auditOperation
+  // moved here from the patch).
   const closureIdx = idxSrc.search(/reactivateEntry:\s*canMutate/);
   if (closureIdx < 0) throw new Error("could not locate reactivateEntry closure in sediment/index.ts");
-  const closureBody = idxSrc.slice(closureIdx, closureIdx + 1500);
-  if (!/scope,\s*\n/.test(closureBody)) {
+  const closureBody = idxSrc.slice(closureIdx, closureIdx + 2500);
+  if (!/^\s*scope,\s*$/m.test(closureBody)) {
     throw new Error("updateProjectEntry options must include `scope,` so world entries route correctly");
   }
 });
@@ -502,53 +504,214 @@ check("P1-D: prompt input block surfaces fallback source when archive_at missing
 // ── Functional behavioral test for round-robin and guard ──────────
 // We invoke the pure helpers directly through the loaded module to
 // prove behavior, not just structure.
-console.log("\nSection: R1 P1 behavioral tests");
+console.log("\nSection: R2 behavioral tests — selectReviewCandidates math (replaces R1 degenerate stubs)");
 
-await checkAsync("P1-A behavior: with N>MAX, never-reviewed entries get priority over freshly-reviewed", async () => {
-  // We test the user-visible effect through a single run by
-  // pre-populating the reviewedAt sidecar. Since invokeReviewer
-  // requires an LLM stub, we instead verify the priority math by
-  // calling runArchiveReactivationIfDue and inspecting that without
-  // any LLM call, no-LLM short-circuit fires; the round-robin path
-  // is exercised by writing a sidecar pre-state and verifying it
-  // gets read+written.
-  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "ar-roundrobin-"));
-  const sidecarFile = path.join(proj, ".pi-astack", "sediment", "archive-reactivation-reviewed-at.json");
-  // Verify the path helper resolves to the expected location.
-  const arSrc = arMod;
-  // Sidecar should not exist yet.
-  if (fs.existsSync(sidecarFile)) throw new Error("sidecar shouldn’t exist at start of test");
-  // No archived entries + minIntervalMs=0 → should hit no_candidates
-  // path WITHOUT writing the reviewedAt sidecar (nothing to mark).
-  const r = await arSrc.runArchiveReactivationIfDue({
-    projectRoot: proj,
-    archivedEntries: [],
-    windowText: "x",
-    settings: { aggregatorModel: "test/test", aggregatorTimeoutMs: 10_000, aggregatorMaxRetries: 0, autoLlmWriteEnabled: true },
-    modelRegistry: { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) },
-    sessionId: "test",
-    minIntervalMs: 0,
-  });
-  if (r.skipped !== "no_candidates") throw new Error(`expected no_candidates, got ${r.skipped}`);
-  // sidecar still shouldn’t exist (we didn’t do any actual work).
-  if (fs.existsSync(sidecarFile)) throw new Error("sidecar must NOT be written when no candidates were reviewed");
+// Helper: build N synthetic archived MemoryEntry stubs.
+function mkEntries(n, prefix = "e", archiveAtFn = (i) => new Date(2026, 0, 1, 0, 0, i).toISOString(), scope = "project") {
+  return Array.from({ length: n }, (_, i) => ({
+    slug: `${prefix}-${String(i).padStart(3, "0")}`,
+    kind: "preference",
+    status: "archived",
+    confidence: 8,
+    scope,
+    compiledTruth: `truth-${i}`,
+    frontmatter: { archive_at: archiveAtFn(i) },
+  }));
+}
+
+check("P1-A behavior R2: with 0 reviewed history, all 30 entries get +Inf wait → top 20 chosen deterministically", () => {
+  const entries = mkEntries(30);
+  const now = new Date("2026-06-01T00:00:00Z");
+  const reviewedAt = new Map();
+  const picked = arMod.selectReviewCandidates(entries, reviewedAt, now, 20);
+  if (picked.length !== 20) throw new Error(`expected 20 picked; got ${picked.length}`);
+  // All have lastReviewed=0 → sinceReview=nowMs (tied) → tiebreak
+  // archive_at DESC then slug ASC. mkEntries archives at
+  // 2026-01-01 + i seconds, so DESC means slug 029 first, 028 second...
+  // top 20 = slugs 010..029.
+  const pickedSlugs = picked.map(e => e.slug).sort();
+  const expected = Array.from({ length: 20 }, (_, k) => `e-${String(k + 10).padStart(3, "0")}`).sort();
+  if (JSON.stringify(pickedSlugs) !== JSON.stringify(expected)) {
+    throw new Error(`expected slugs [e-010..e-029], got [${pickedSlugs.slice(0, 5).join(",")}...]`);
+  }
 });
 
-await checkAsync("P1-A behavior: round-robin priority promotes legacy archive_at-missing entries", async () => {
-  // Direct-call selectReviewCandidates through the module (it’s
-  // exported indirectly via runArchiveReactivationIfDue; we reach
-  // it by constructing a minimal scenario where the LLM would have
-  // been invoked, then aborting before invocation by missing model
-  // registry. That doesn’t exercise selectReviewCandidates though
-  // because the model-unavailable check happens BEFORE candidate
-  // selection — so this assertion is degenerate. We rely on the
-  // source-level checks above + the full integration smoke planned
-  // for Stage 2.1 to lock behavior.
-  // For now: weakly assert the cap constant is still 20.
+check("P1-A behavior R2 (THE BIG ONE): N=40, two consecutive batches together cover ALL 40 entries (no starvation)", () => {
+  const entries = mkEntries(40);
+  const now1 = new Date("2026-06-01T00:00:00Z");
+  const reviewedAt = new Map();
+  // Batch 1: all unreviewed → top 20 by archive_at DESC, slug ASC.
+  const batch1 = arMod.selectReviewCandidates(entries, reviewedAt, now1, 20);
+  for (const e of batch1) reviewedAt.set(e.slug, now1.toISOString());
+  // 24h later, batch 2.
+  const now2 = new Date("2026-06-02T00:00:00Z");
+  const batch2 = arMod.selectReviewCandidates(entries, reviewedAt, now2, 20);
+  const union = new Set([...batch1.map(e => e.slug), ...batch2.map(e => e.slug)]);
+  if (union.size !== 40) {
+    const batch1Slugs = batch1.map(e => e.slug).sort();
+    const batch2Slugs = batch2.map(e => e.slug).sort();
+    throw new Error(
+      `R1 starvation regression: 2 batches must cover all 40 entries; got union=${union.size}.\n` +
+      `  batch1[0..3]=${batch1Slugs.slice(0, 3).join(",")} batch2[0..3]=${batch2Slugs.slice(0, 3).join(",")}`,
+    );
+  }
+});
+
+check("P1-A behavior R2: N=60, 3 consecutive batches together cover ALL 60 entries", () => {
+  const entries = mkEntries(60);
+  const reviewedAt = new Map();
+  const dates = [
+    new Date("2026-06-01T00:00:00Z"),
+    new Date("2026-06-02T00:00:00Z"),
+    new Date("2026-06-03T00:00:00Z"),
+  ];
+  const union = new Set();
+  for (const d of dates) {
+    const batch = arMod.selectReviewCandidates(entries, reviewedAt, d, 20);
+    if (batch.length !== 20) throw new Error(`expected 20 per batch, got ${batch.length}`);
+    for (const e of batch) {
+      union.add(e.slug);
+      reviewedAt.set(e.slug, d.toISOString());
+    }
+  }
+  if (union.size !== 60) {
+    throw new Error(`3 batches must cover all 60 entries; got ${union.size}`);
+  }
+});
+
+check("P1-A behavior R2: steady state — most-stale (longest sinceReview) wins, regardless of archive_at", () => {
+  // Construct a scenario where R1’s formula would fail but R2’s works.
+  // 5 entries archived 1000 days ago, reviewed yesterday.
+  // 5 entries archived 1 day ago, never reviewed.
+  // With MAX=5, the never-reviewed (1-day-old) entries MUST win because
+  // they have larger sinceReview (= nowMs, since lastReviewed=0).
+  // R1’s formula `max(sinceArchive, sinceReview)` would pick the 1000-day-old
+  // entries (sinceArchive dominates).
+  const now = new Date("2026-06-01T00:00:00Z");
+  const yesterday = new Date("2026-05-31T00:00:00Z").toISOString();
+  const oldArchived = mkEntries(5, "old", () => "2023-09-08T00:00:00Z");
+  const newArchived = mkEntries(5, "new", () => "2026-05-31T00:00:00Z");
+  const reviewedAt = new Map();
+  for (const e of oldArchived) reviewedAt.set(e.slug, yesterday);
+  // Never-reviewed entries should win.
+  const picked = arMod.selectReviewCandidates([...oldArchived, ...newArchived], reviewedAt, now, 5);
+  const allNew = picked.every(e => e.slug.startsWith("new-"));
+  if (!allNew) {
+    throw new Error(
+      `R2 LRU semantics violated: with 5 freshly-reviewed old archives + 5 never-reviewed new archives, ` +
+      `MAX=5 must pick the never-reviewed ones. Got [${picked.map(e => e.slug).join(",")}]`,
+    );
+  }
+});
+
+check("P1-A behavior R2: future-dated archive_at (corruption) clamps to 0, doesn't yield negative sinceReview", () => {
+  const now = new Date("2026-06-01T00:00:00Z");
+  const future = "2099-01-01T00:00:00Z";
+  // Mix one corrupted-future entry with one normal old never-reviewed entry.
+  const entries = [
+    { slug: "future", kind: "preference", status: "archived", confidence: 8, scope: "project", compiledTruth: "t1", frontmatter: { archive_at: future } },
+    { slug: "old", kind: "preference", status: "archived", confidence: 8, scope: "project", compiledTruth: "t2", frontmatter: { archive_at: "2025-01-01T00:00:00Z" } },
+  ];
+  // Both never-reviewed, so both get sinceReview=nowMs. tiebreak archive_at DESC.
+  // BUT future's archive_at is clamped to 0 (treated as legacy), so it loses
+  // the tiebreak.
+  const picked = arMod.selectReviewCandidates(entries, new Map(), now, 1);
+  if (picked[0]?.slug !== "old") {
+    throw new Error(`future-dated archive_at must be clamped (not allowed to win tiebreak); got first=${picked[0]?.slug}`);
+  }
+});
+
+check("P1-A behavior R2: writeReviewedAtMap keeps the NEWEST when over cap (Opus P2-1 fix)", () => {
+  // Simulate the cap by directly calling writeReviewedAtMap. We can’t
+  // import it (it’s file-private), so verify via a runArchiveReactivationIfDue
+  // pre-populate. But the simpler test: ensure the source-level cap +
+  // sort-DESC pattern is correct.
   const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/archive-reactivation.ts"), "utf-8");
-  const capMatch = /MAX_ENTRIES_PER_RUN\s*=\s*(\d+)/.exec(src);
-  if (!capMatch || Number(capMatch[1]) !== 20) {
-    throw new Error(`MAX_ENTRIES_PER_RUN must remain 20; got ${capMatch?.[1]}`);
+  if (!/REVIEWED_AT_MAX_ENTRIES\s*=\s*5000/.test(src)) {
+    throw new Error("REVIEWED_AT_MAX_ENTRIES constant must remain 5000");
+  }
+  // The writeReviewedAtMap function should sort DESC by timestamp
+  // before slicing.
+  const fnIdx = src.search(/function writeReviewedAtMap\(/);
+  if (fnIdx < 0) throw new Error("writeReviewedAtMap missing");
+  const fnBody = src.slice(fnIdx, fnIdx + 1500);
+  if (!/\.sort\(/.test(fnBody) || !/Date\.parse\(b\[1\]\)/.test(fnBody)) {
+    throw new Error("writeReviewedAtMap must sort timestamps DESC before truncating (otherwise keeps oldest)");
+  }
+  if (!/slice\(0,\s*REVIEWED_AT_MAX_ENTRIES\)/.test(fnBody)) {
+    throw new Error("writeReviewedAtMap must slice(0, CAP) after DESC sort");
+  }
+});
+
+console.log("\nSection: R2 behavioral tests — effectiveArchiveAt fallback");
+
+check("P1-D behavior R2: archive_at present → source=archive_at", () => {
+  const eff = arMod.effectiveArchiveAt({
+    slug: "x", kind: "preference", status: "archived", confidence: 8, scope: "project",
+    compiledTruth: "",
+    frontmatter: { archive_at: "2026-01-01T00:00:00Z", updated: "2026-03-01T00:00:00Z", created: "2025-01-01T00:00:00Z" },
+  });
+  if (eff.source !== "archive_at") throw new Error(`expected source=archive_at; got ${eff.source}`);
+  if (eff.value !== "2026-01-01T00:00:00Z") throw new Error(`expected the archive_at value; got ${eff.value}`);
+});
+
+check("P1-D behavior R2: archive_at missing, updated present → source=updated", () => {
+  const eff = arMod.effectiveArchiveAt({
+    slug: "x", kind: "preference", status: "archived", confidence: 8, scope: "project",
+    compiledTruth: "",
+    frontmatter: { updated: "2026-03-01T00:00:00Z", created: "2025-01-01T00:00:00Z" },
+  });
+  if (eff.source !== "updated") throw new Error(`expected source=updated; got ${eff.source}`);
+  if (eff.value !== "2026-03-01T00:00:00Z") throw new Error(`expected updated value; got ${eff.value}`);
+});
+
+check("P1-D behavior R2: archive_at missing, updated missing, created present → source=created", () => {
+  const eff = arMod.effectiveArchiveAt({
+    slug: "x", kind: "preference", status: "archived", confidence: 8, scope: "project",
+    compiledTruth: "",
+    frontmatter: { created: "2025-01-01T00:00:00Z" },
+  });
+  if (eff.source !== "created") throw new Error(`expected source=created; got ${eff.source}`);
+});
+
+check("P1-D behavior R2: all missing → source=unknown, value=undefined", () => {
+  const eff = arMod.effectiveArchiveAt({
+    slug: "x", kind: "preference", status: "archived", confidence: 8, scope: "project",
+    compiledTruth: "",
+    frontmatter: {},
+  });
+  if (eff.source !== "unknown") throw new Error(`expected source=unknown; got ${eff.source}`);
+  if (eff.value !== undefined) throw new Error(`expected value=undefined; got ${eff.value}`);
+});
+
+check("P1-D behavior R2: malformed archive_at (truthy but unparseable) falls through to updated", () => {
+  const eff = arMod.effectiveArchiveAt({
+    slug: "x", kind: "preference", status: "archived", confidence: 8, scope: "project",
+    compiledTruth: "",
+    frontmatter: { archive_at: "not-a-date", updated: "2026-03-01T00:00:00Z" },
+  });
+  if (eff.source !== "updated") throw new Error(`malformed archive_at must fall through; got source=${eff.source}`);
+});
+
+console.log("\nSection: R2 — auditOperation in correct slot (GPT P1, DeepSeek NIT-1)");
+
+check("R2 CRIT-2: auditOperation is in updateProjectEntry OPTIONS, not the patch", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
+  const closureIdx = src.search(/reactivateEntry:\s*canMutate/);
+  if (closureIdx < 0) throw new Error("could not locate reactivateEntry closure");
+  const closureBody = src.slice(closureIdx, closureIdx + 2500);
+  // Heuristic: find the updateProjectEntry call, split into draft + opts
+  // by counting braces. Simpler: ensure `auditOperation: "archive_reactivation_apply"`
+  // appears AFTER `scope,` (which we know is in the opts block).
+  const auditIdx = closureBody.search(/auditOperation:\s*"archive_reactivation_apply"/);
+  const scopeIdx = closureBody.search(/scope,\s*$/m);
+  if (auditIdx < 0) throw new Error("auditOperation = archive_reactivation_apply must be in the source");
+  if (scopeIdx < 0) throw new Error("scope, must be in the source (in opts)");
+  if (auditIdx < scopeIdx) {
+    throw new Error(
+      "auditOperation appears BEFORE `scope,` — still in the patch draft. R2 CRIT-2 fix not applied.\n" +
+      `auditOperation@${auditIdx} < scope@${scopeIdx}`,
+    );
   }
 });
 

@@ -1272,13 +1272,20 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                       // R1 P1-B fix: pass scope so world-scoped entries
                       // reactivate against <abrainHome>/knowledge/ instead of
                       // <abrainHome>/projects/<id>/.
+                      // R2 CRIT-2 fix (GPT-5.5 P1, DeepSeek NIT-1):
+                      // `auditOperation` belongs in the OPTIONS argument
+                      // (WriteProjectEntryOptions), NOT the patch draft
+                      // (ProjectEntryUpdateDraft has no such field).
+                      // Putting it in the draft made the audit row default
+                      // to operation="update", so `jq 'select(.operation
+                      // == "archive_reactivation_apply")'` against audit.jsonl
+                      // returned zero results.
                       const res = await updateProjectEntry(
                         slug,
                         {
                           status: "active",
                           timelineAction: "reactivated",
                           timelineNote: `archive-reactivation-reviewer v1: ${rationale.slice(0, 200)}`,
-                          auditOperation: "archive_reactivation_apply",
                           sessionId,
                         },
                         {
@@ -1288,6 +1295,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           settings,
                           scope,
                           dryRun: false,
+                          auditOperation: "archive_reactivation_apply",
                         },
                       );
                       return { ok: res.status !== "rejected", error: res.reason };
