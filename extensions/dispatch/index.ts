@@ -159,10 +159,12 @@ async function appendDispatchAudit(
 
 const DISPATCH_STATUS_KEY = FOOTER_STATUS_KEYS.dispatch;
 
-/** Footer state machine state. v2 (2026-05-28) adds `degraded` to surface
- *  dispatch_parallel partial-success outcomes (ADR 0027 §C5 aggregate).
- *  Single-task dispatch_agent never enters `degraded` (no aggregate). */
-type DispatchState = "idle" | "running" | "completed" | "failed" | "degraded";
+/** Footer state machine state. v2 (2026-05-28) adds `degraded` and
+ *  `cancelled` to surface ADR 0027 §C5 distinctions in the UI:
+ *    degraded  — dispatch_parallel partial-success (some tasks succeeded)
+ *    cancelled — task(s) externally terminated (user abort, timeout)
+ *  Single-task dispatch_agent never enters `degraded` (aggregate-only). */
+type DispatchState = "idle" | "running" | "completed" | "failed" | "degraded" | "cancelled";
 
 interface DispatchCounts {
   running: number;
@@ -187,6 +189,7 @@ export function renderDispatchStatus(
     case "running":   return `📡 dispatch${c}`;
     case "completed": return `✅ dispatch${c}${dur}`;
     case "degraded":  return `🟡 dispatch${c}${dur}`;
+    case "cancelled": return `🚫 dispatch${c}${dur}`;
     case "failed":    return `⚠️  dispatch${c}${dur}`;
     default:          return `❓ dispatch (${state})${c}${dur}`;
   }
@@ -1003,12 +1006,43 @@ export default function (pi: ExtensionAPI) {
     async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
       const toolCheck = validateTools(params.tools);
       if (!toolCheck.ok) {
+        // ADR 0027 §C5 v1 P1 fix (R6 GPT-5.5 P1-3): tool_rejected is a
+        // pre-flight failure. C5's "every L2 task has explicit terminal
+        // state" contract requires this row to be audited. Previously
+        // this path returned without writing audit, missing the row for
+        // dispatch_agent while dispatch_parallel.task did emit it. Add
+        // the audit row here so dispatch_agent has parity.
+        const rejectResult: AgentResult = {
+          output: "",
+          error: `tool_rejected: ${toolCheck.reason}`,
+          failureType: "tool_rejected",
+          durationMs: 0,
+        };
+        const rejectAnchor = deriveSubAgentAnchor(getCurrentAnchor(), "dispatch_agent");
+        const rejectTsFields = buildTerminalStateFields(rejectResult);
+        void appendDispatchAudit(ctx.cwd || process.cwd(), rejectAnchor, {
+          operation: "dispatch_agent",
+          model: params.model,
+          thinking: params.thinking,
+          tools: params.tools ?? null,
+          prompt_chars: typeof params.prompt === "string" ? params.prompt.length : 0,
+          duration_ms: 0,
+          result: "fail",
+          ...rejectTsFields,
+          failure_type: "tool_rejected",
+          output_chars: 0,
+        });
         return {
           content: [{ type: "text" as const, text: `❌ ${toolCheck.reason}` }],
           // pi SDK 0.75: AgentToolResult.details is required. Carry the
           // rejection reason as structured detail so UI / log consumers
           // can branch on `details.kind === "tool_rejected"`.
-          details: { kind: "tool_rejected", reason: toolCheck.reason },
+          details: {
+            kind: "tool_rejected",
+            reason: toolCheck.reason,
+            terminalState: rejectTsFields.terminal_state,
+            ...(rejectAnchor ? { anchor: rejectAnchor } : {}),
+          },
           // isError is a pi-SDK excess property (not in AgentToolResult<T>
           // strict type) but pi runtime honors it. Spread instead of
           // literal-property so the inferred return type tags it as
@@ -1292,6 +1326,7 @@ export default function (pi: ExtensionAPI) {
               const rejectedTsFields = buildTerminalStateFields(res);
               void appendDispatchAudit(projectRoot, subAnchor, {
                 operation: "dispatch_parallel.task",
+                row_kind: "task",
                 task_index: i,
                 task_count: total,
                 model: t.model,
@@ -1354,6 +1389,7 @@ export default function (pi: ExtensionAPI) {
           });
           void appendDispatchAudit(projectRoot, subAnchor, {
             operation: "dispatch_parallel.task",
+            row_kind: "task",
             task_index: i,
             task_count: total,
             model: t.model,
@@ -1386,16 +1422,50 @@ export default function (pi: ExtensionAPI) {
       // is deterministic on per-task results — no LLM (C3' infra layer).
       // `degraded` arises when 0 < ok < N (some tasks succeeded, the consumer
       // may still use the partial result via the multi-model audit pattern).
-      const taskSummaries: TaskSummary[] = results
-        .map((r, idx): TaskSummary | null =>
-          r ? { result: r, label: tasks[idx]?.model ?? `task[${idx}]` } : null,
-        )
-        .filter((x): x is TaskSummary => x !== null);
-      const aggregateTsFields = inferParallelTerminalState(taskSummaries);
+      //
+      // R6 P1 fix (GPT-5.5 P1-1): `results` is `new Array(tasks.length)`. If
+      // the parent signal aborts mid fan-out, workers `return` before they
+      // claim further indices, leaving array slots as holes. `Array.prototype
+      // .map` skips holes — the original implementation only saw the tasks
+      // that actually ran, so aggregate could report `completed` when half
+      // the fan-out never even started. Build taskSummaries by iterating
+      // every declared task index, materializing absent slots as an
+      // explicit "aborted" task (cancelled in terminal_state).
+      const taskSummaries: TaskSummary[] = [];
+      for (let i = 0; i < tasks.length; i++) {
+        const r = results[i];
+        const label = tasks[i]?.model ?? `task[${i}]`;
+        if (r) {
+          taskSummaries.push({ result: r, label });
+        } else {
+          // Slot is a hole — worker never claimed this index (parent abort,
+          // ctx.signal.aborted, or early-return before fan-out). Treat as
+          // cancelled-by-parent so aggregate doesn't silently elide it.
+          taskSummaries.push({
+            result: {
+              error: "task did not start (parent abort before worker claim)",
+              failureType: "aborted",
+            },
+            label,
+          });
+        }
+      }
+      // R6 P1 fix (GPT-5.5 P1-2): thread parent-abort context into aggregate.
+      // Per-task buildTerminalStateFields already uses signal.aborted to
+      // force cancel_source="user" when parent signal won the race against
+      // a per-task timeout. Aggregate now does the same so summary row and
+      // per-task rows cannot diverge on cancel_source.
+      const aggregateTsFields = inferParallelTerminalState(taskSummaries, {
+        cancelSource: signal.aborted ? "user" : undefined,
+      });
+      // R6 P2 fix (DeepSeek P2-3): footer state machine now surfaces
+      // cancelled distinctly from failed. Previously cancelled collapsed
+      // to failed, hiding from the user that the cancellation was their own
+      // abort vs a real failure.
       const finalState: DispatchState =
         aggregateTsFields.terminal_state === "completed" ? "completed"
         : aggregateTsFields.terminal_state === "degraded" ? "degraded"
-        : aggregateTsFields.terminal_state === "cancelled" ? "failed"
+        : aggregateTsFields.terminal_state === "cancelled" ? "cancelled"
         : "failed";
       applyDispatchStatus(
         ctx, finalState,
@@ -1414,8 +1484,12 @@ export default function (pi: ExtensionAPI) {
       const aggregateAnchor = parentAnchor
         ? { ...parentAnchor, subturn: 0, sub_agent_label: "dispatch_parallel.summary" }
         : undefined;
+      // R6 P2 (GPT-5.5 P2-1): add explicit row_kind so jq queries don't
+      // confuse the aggregate row with a task row. Per-task rows carry
+      // row_kind="task" (set below in the worker loop edit).
       void appendDispatchAudit(projectRoot, aggregateAnchor, {
         operation: "dispatch_parallel.summary",
+        row_kind: "aggregate",
         task_count: total,
         success_count: success,
         failed_count: failed,

@@ -10,16 +10,20 @@
  * Coverage:
  *   - inferTerminalState() correctly maps every FailureType to one of
  *     completed / failed / cancelled (never degraded for single task)
- *   - buildTerminalStateFields() produces the right side-effect fields
- *     for each terminal_state
+ *   - buildTerminalStateFields() produces ADR §C5 strict-scope fields:
+ *       completed → terminal_state + resumable only
+ *       failed    → terminal_state + reason + rollback_done + resumable
+ *       cancelled → terminal_state + cancel_source + cleanup_done + resumable
+ *       (degraded never produced single-task)
  *   - inferParallelTerminalState() aggregation rules:
  *       all ok                  → completed
- *       all cancelled           → cancelled (cancel_source preserved)
- *       partial (0<ok<N)        → degraded (what_dropped + alt_path)
- *       0 ok with any failed    → failed
- *       all failed              → failed
- *   - cancelSource override path
+ *       all cancelled           → cancelled (cancel_source resolved)
+ *       partial (0<ok<N)        → degraded (what_dropped + alt_path + tasks_not_completed)
+ *       0 ok with any failed    → failed (reason + tasks_not_completed)
+ *       all failed              → failed (reason + tasks_not_completed)
+ *   - cancelSource override path (ctx.cancelSource dominates heuristic)
  *   - empty input is degenerate failed
+ *   - parent-abort override: ctx.cancelSource="user" propagates to aggregate
  */
 
 import fs from "node:fs";
@@ -44,11 +48,34 @@ function check(name, fn) {
   }
 }
 
+/** Structural deep-equality — order-independent for plain objects/arrays.
+ *  Arrays are compared element-wise IN ORDER (intentional: tasks_not_completed
+ *  and what_dropped have task ordering semantics). Objects are compared as
+ *  unordered key sets. Primitives use === . */
+function structEq(a, b) {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return a === b;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!structEq(a[i], b[i])) return false;
+    return true;
+  }
+  if (typeof a !== "object") return false;
+  const ak = Object.keys(a).sort();
+  const bk = Object.keys(b).sort();
+  if (ak.length !== bk.length) return false;
+  for (let i = 0; i < ak.length; i++) if (ak[i] !== bk[i]) return false;
+  for (const k of ak) if (!structEq(a[k], b[k])) return false;
+  return true;
+}
+
 function assertEq(actual, expected, msg) {
-  const a = JSON.stringify(actual);
-  const e = JSON.stringify(expected);
-  if (a !== e) {
-    throw new Error(`${msg}\n        expected ${e}\n        got      ${a}`);
+  if (!structEq(actual, expected)) {
+    const a = JSON.stringify(actual);
+    const e = JSON.stringify(expected);
+    throw new Error(`${msg ?? "structural inequality"}\n        expected ${e}\n        got      ${a}`);
   }
 }
 
@@ -198,24 +225,39 @@ check("error without failureType → failed (default branch)", () => {
   );
 });
 
-console.log("\nSection: buildTerminalStateFields (single-task side effects)");
+console.log("\nSection: buildTerminalStateFields (ADR §C5 strict scope)");
 
-check("completed: only resumable:false", () => {
+check("completed: only terminal_state + resumable:false", () => {
   const f = buildTerminalStateFields({ output: "ok" });
   assertEq(f, { terminal_state: "completed", resumable: false });
 });
 
-check("failed: rollback_done + cleanup_done + resumable", () => {
-  const f = buildTerminalStateFields({ error: "x", failureType: "agent_error" });
+check("failed: terminal_state + reason + rollback_done + resumable (no cleanup_done)", () => {
+  const f = buildTerminalStateFields({ error: "boom", failureType: "agent_error" });
   assertEq(f, {
     terminal_state: "failed",
+    reason: "boom",
     rollback_done: true,
-    cleanup_done: true,
     resumable: false,
   });
+  // Verify cleanup_done is NOT present on failed (ADR strict scope)
+  if ("cleanup_done" in f) {
+    throw new Error(`failed must not carry cleanup_done (ADR §C5 strict scope); got ${JSON.stringify(f)}`);
+  }
 });
 
-check("cancelled (timeout failureType) → cancel_source=timeout", () => {
+check("failed: reason is clipped at 500 chars", () => {
+  const long = "x".repeat(600);
+  const f = buildTerminalStateFields({ error: long, failureType: "agent_error" });
+  if (typeof f.reason !== "string" || f.reason.length > 503) {
+    throw new Error(`reason should be clipped; got length ${f.reason?.length}`);
+  }
+  if (!f.reason.endsWith("...")) {
+    throw new Error(`clipped reason should end with '...'; got ${f.reason.slice(-10)}`);
+  }
+});
+
+check("cancelled (timeout failureType) → cancel_source=timeout + cleanup_done", () => {
   const f = buildTerminalStateFields({ error: "t", failureType: "timeout" });
   assertEq(f, {
     terminal_state: "cancelled",
@@ -225,7 +267,7 @@ check("cancelled (timeout failureType) → cancel_source=timeout", () => {
   });
 });
 
-check("cancelled (aborted failureType) → cancel_source=user", () => {
+check("cancelled (aborted failureType) → cancel_source=user + cleanup_done", () => {
   const f = buildTerminalStateFields({ error: "a", failureType: "aborted" });
   assertEq(f, {
     terminal_state: "cancelled",
@@ -257,7 +299,7 @@ const failed = { error: "boom", failureType: "agent_error" };
 const cancelledTimeout = { error: "t", failureType: "timeout" };
 const cancelledAbort = { error: "a", failureType: "aborted" };
 
-check("all 3 ok → completed", () => {
+check("all 3 ok → completed (no tasks_not_completed)", () => {
   const r = inferParallelTerminalState([
     { result: ok, label: "modelA" },
     { result: ok, label: "modelB" },
@@ -266,7 +308,7 @@ check("all 3 ok → completed", () => {
   assertEq(r, { terminal_state: "completed", resumable: false });
 });
 
-check("2 ok / 1 failed → degraded with what_dropped + alt_path", () => {
+check("2 ok / 1 failed → degraded with what_dropped + alt_path + tasks_not_completed", () => {
   const r = inferParallelTerminalState([
     { result: ok, label: "modelA" },
     { result: failed, label: "modelB" },
@@ -277,6 +319,7 @@ check("2 ok / 1 failed → degraded with what_dropped + alt_path", () => {
     what_dropped: ["modelB"],
     alt_path: "use 2/3 task results",
     cleanup_done: true,
+    tasks_not_completed: ["modelB"],
     resumable: false,
   });
 });
@@ -292,26 +335,39 @@ check("1 ok / 2 failed → degraded (1/3 is still some success)", () => {
     what_dropped: ["modelA", "modelC"],
     alt_path: "use 1/3 task results",
     cleanup_done: true,
+    tasks_not_completed: ["modelA", "modelC"],
     resumable: false,
   });
 });
 
-check("all 3 failed → failed", () => {
+check("all 3 failed → failed with reason + tasks_not_completed (no what_dropped, no cleanup_done)", () => {
   const r = inferParallelTerminalState([
     { result: failed, label: "modelA" },
     { result: failed, label: "modelB" },
     { result: failed, label: "modelC" },
   ]);
-  assertEq(r, {
-    terminal_state: "failed",
-    rollback_done: true,
-    cleanup_done: true,
-    what_dropped: ["modelA", "modelB", "modelC"],
-    resumable: false,
-  });
+  // Schema: failed must have terminal_state + reason + rollback_done +
+  // tasks_not_completed (aggregate ext) + resumable. NOT what_dropped
+  // (that's degraded-only per ADR strict scope). NOT cleanup_done.
+  if (r.terminal_state !== "failed") {
+    throw new Error(`expected failed, got ${r.terminal_state}`);
+  }
+  if (r.rollback_done !== true) {
+    throw new Error(`failed must have rollback_done:true`);
+  }
+  if (typeof r.reason !== "string" || !r.reason.includes("aggregate failed")) {
+    throw new Error(`failed must have aggregate reason; got ${r.reason}`);
+  }
+  if ("what_dropped" in r) {
+    throw new Error(`failed aggregate must NOT carry what_dropped (degraded-only per ADR)`);
+  }
+  if ("cleanup_done" in r) {
+    throw new Error(`failed aggregate must NOT carry cleanup_done (ADR strict scope)`);
+  }
+  assertEq(r.tasks_not_completed, ["modelA", "modelB", "modelC"]);
 });
 
-check("all cancelled (timeout) → cancelled, cancel_source=timeout", () => {
+check("all cancelled (timeout) → cancelled + cancel_source=timeout + tasks_not_completed", () => {
   const r = inferParallelTerminalState([
     { result: cancelledTimeout, label: "modelA" },
     { result: cancelledTimeout, label: "modelB" },
@@ -320,12 +376,12 @@ check("all cancelled (timeout) → cancelled, cancel_source=timeout", () => {
     terminal_state: "cancelled",
     cancel_source: "timeout",
     cleanup_done: true,
-    what_dropped: ["modelA", "modelB"],
+    tasks_not_completed: ["modelA", "modelB"],
     resumable: false,
   });
 });
 
-check("all cancelled (user abort) → cancelled, cancel_source=user", () => {
+check("all cancelled (user abort) → cancelled + cancel_source=user", () => {
   const r = inferParallelTerminalState([
     { result: cancelledAbort, label: "modelA" },
     { result: cancelledAbort, label: "modelB" },
@@ -334,40 +390,40 @@ check("all cancelled (user abort) → cancelled, cancel_source=user", () => {
     terminal_state: "cancelled",
     cancel_source: "user",
     cleanup_done: true,
-    what_dropped: ["modelA", "modelB"],
+    tasks_not_completed: ["modelA", "modelB"],
     resumable: false,
   });
 });
 
 check("0 ok, 1 failed + 1 cancelled → failed (conservative)", () => {
   // Conservative aggregate: any real failure dominates a cancellation.
-  // Protects against masking real failures behind a cancellation that
-  // happened to coincide.
   const r = inferParallelTerminalState([
     { result: failed, label: "modelA" },
     { result: cancelledTimeout, label: "modelB" },
   ]);
-  assertEq(r, {
-    terminal_state: "failed",
-    rollback_done: true,
-    cleanup_done: true,
-    what_dropped: ["modelA", "modelB"],
-    resumable: false,
-  });
+  if (r.terminal_state !== "failed") {
+    throw new Error(`expected failed (conservative), got ${r.terminal_state}`);
+  }
+  assertEq(r.tasks_not_completed, ["modelA", "modelB"]);
+  if (typeof r.reason !== "string") {
+    throw new Error(`expected failed aggregate to carry reason`);
+  }
 });
 
-check("0 tasks (degenerate) → failed", () => {
+check("0 tasks (degenerate) → failed with reason", () => {
   const r = inferParallelTerminalState([]);
-  assertEq(r, {
-    terminal_state: "failed",
-    rollback_done: true,
-    cleanup_done: true,
-    resumable: false,
-  });
+  if (r.terminal_state !== "failed") {
+    throw new Error(`expected failed for empty input`);
+  }
+  if (typeof r.reason !== "string" || !r.reason.includes("degenerate")) {
+    throw new Error(`expected degenerate reason; got ${r.reason}`);
+  }
+  if (r.rollback_done !== true) {
+    throw new Error(`expected rollback_done:true on degenerate failed`);
+  }
 });
 
 check("partial cancelled + ok → degraded (cancelled tasks count as dropped)", () => {
-  // 1 ok, 1 cancelled (not failed) — still partial success → degraded
   const r = inferParallelTerminalState([
     { result: ok, label: "modelA" },
     { result: cancelledTimeout, label: "modelB" },
@@ -377,14 +433,40 @@ check("partial cancelled + ok → degraded (cancelled tasks count as dropped)", 
     what_dropped: ["modelB"],
     alt_path: "use 1/2 task results",
     cleanup_done: true,
+    tasks_not_completed: ["modelB"],
     resumable: false,
   });
+});
+
+console.log("\nSection: aggregate cancelSource override (R6 P1-2 fix)");
+
+check("aggregate ctx.cancelSource=user overrides per-task heuristic", () => {
+  // Parent abort fires; per-task happens to all be timeout. Without
+  // override, aggregate would say cancel_source=timeout (heuristic).
+  // With override, cancel_source=user wins (parent-signal dominates).
+  const r = inferParallelTerminalState(
+    [
+      { result: cancelledTimeout, label: "modelA" },
+      { result: cancelledTimeout, label: "modelB" },
+    ],
+    { cancelSource: "user" },
+  );
+  assertEq(r.cancel_source, "user");
+});
+
+check("aggregate cancel_source=user when ANY task carries aborted (mixed)", () => {
+  // Mixed: one timeout, one user abort. No ctx override. Aggregate
+  // should prefer "user" because the user signal is the dominant cause.
+  const r = inferParallelTerminalState([
+    { result: cancelledTimeout, label: "modelA" },
+    { result: cancelledAbort, label: "modelB" },
+  ]);
+  assertEq(r.cancel_source, "user");
 });
 
 console.log("\nSection: schema invariants");
 
 check("v1 always sets resumable:false (never undefined or true)", () => {
-  // Spot-check all the variants
   const states = [
     buildTerminalStateFields({ output: "ok" }),
     buildTerminalStateFields({ error: "x", failureType: "agent_error" }),
@@ -400,36 +482,48 @@ check("v1 always sets resumable:false (never undefined or true)", () => {
   }
 });
 
-check("failed paths always carry rollback_done:true (v1 read-only dispatch)", () => {
+check("ADR strict scope: failed never has cleanup_done or what_dropped", () => {
   const failedStates = [
     buildTerminalStateFields({ error: "x", failureType: "agent_error" }),
     buildTerminalStateFields({ error: "x", failureType: "rate_limit" }),
     inferParallelTerminalState([{ result: failed, label: "x" }]),
+    inferParallelTerminalState([]),
   ];
   for (const s of failedStates) {
-    if (s.terminal_state === "failed" && s.rollback_done !== true) {
-      throw new Error(`failed state missing rollback_done:true: ${JSON.stringify(s)}`);
+    if (s.terminal_state !== "failed") continue;
+    if ("cleanup_done" in s) {
+      throw new Error(`failed must not carry cleanup_done: ${JSON.stringify(s)}`);
+    }
+    if ("what_dropped" in s) {
+      throw new Error(`failed must not carry what_dropped (degraded-only): ${JSON.stringify(s)}`);
     }
   }
 });
 
-check("cancelled paths always carry cancel_source", () => {
+check("ADR strict scope: cancelled never has reason or what_dropped or rollback_done", () => {
   const cancelledStates = [
     buildTerminalStateFields({ error: "t", failureType: "timeout" }),
     buildTerminalStateFields({ error: "a", failureType: "aborted" }),
-    inferParallelTerminalState([
-      { result: cancelledTimeout, label: "x" },
-    ]),
+    inferParallelTerminalState([{ result: cancelledTimeout, label: "x" }]),
   ];
   for (const s of cancelledStates) {
     if (s.terminal_state !== "cancelled") continue;
+    if ("reason" in s) {
+      throw new Error(`cancelled must not carry reason (ADR scope: failed-only): ${JSON.stringify(s)}`);
+    }
+    if ("what_dropped" in s) {
+      throw new Error(`cancelled must not carry what_dropped (degraded-only): ${JSON.stringify(s)}`);
+    }
+    if ("rollback_done" in s) {
+      throw new Error(`cancelled must not carry rollback_done (failed-only): ${JSON.stringify(s)}`);
+    }
     if (!s.cancel_source) {
-      throw new Error(`cancelled state missing cancel_source: ${JSON.stringify(s)}`);
+      throw new Error(`cancelled missing cancel_source: ${JSON.stringify(s)}`);
     }
   }
 });
 
-check("degraded paths always carry what_dropped + alt_path", () => {
+check("ADR strict scope: degraded has what_dropped + alt_path; never has reason or rollback_done", () => {
   const r = inferParallelTerminalState([
     { result: ok, label: "a" },
     { result: failed, label: "b" },
@@ -443,10 +537,29 @@ check("degraded paths always carry what_dropped + alt_path", () => {
   if (typeof r.alt_path !== "string" || r.alt_path.length === 0) {
     throw new Error(`degraded missing alt_path: ${JSON.stringify(r)}`);
   }
+  if ("reason" in r) {
+    throw new Error(`degraded must not carry reason (failed-only)`);
+  }
+  if ("rollback_done" in r) {
+    throw new Error(`degraded must not carry rollback_done (failed-only)`);
+  }
+});
+
+check("ADR aggregate ext: cancelled/failed/degraded all carry tasks_not_completed", () => {
+  const cases = [
+    inferParallelTerminalState([{ result: failed, label: "x" }, { result: failed, label: "y" }]),
+    inferParallelTerminalState([{ result: cancelledTimeout, label: "x" }]),
+    inferParallelTerminalState([{ result: ok, label: "a" }, { result: failed, label: "b" }]),
+  ];
+  for (const s of cases) {
+    if (!Array.isArray(s.tasks_not_completed)) {
+      throw new Error(`expected tasks_not_completed array; got ${JSON.stringify(s)}`);
+    }
+  }
 });
 
 if (failures.length > 0) {
   console.log(`\n❌ ${failures.length} failure(s)`);
   process.exit(1);
 }
-console.log(`\n✅ all ${process.stdout.columns ? "" : ""}smoke checks passed`);
+console.log(`\n✅ all smoke checks passed`);
