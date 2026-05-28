@@ -1094,6 +1094,15 @@ ADR 0024 §4.2 R7 加的 row "reasoning_trace 跨 prompt 版本兼容" 在这里
 
 ### 4.6 静默归档 + 回滚窗口
 
+> **实施状态 (2026-05-28)**：✅ **v1 已落地**（commit chain `16d6190..9f87b88`，5 轮内部 R1→R5 盲审 + 3 轮跨 stage R7→R9 盲审 + R10 push-前生产级审查 unanimous SHIP）。
+>
+> - prompt-native reviewer：`extensions/sediment/prompts/archive-reactivation-reviewer-v1.md`
+> - 主模块：`extensions/sediment/archive-reactivation.ts`（~1100 行）
+> - sediment agent_end 集成：`extensions/sediment/index.ts` archive-reactivation lane
+> - **已落地能力点**：3 决策（keep_archived / reactivate / hard_archive_recommended）、round-robin LRU 选择防 starvation、quote substring + 12 UTF-8 byte 门槛 guard、legacy archive_at fallback (§archive_at→frontmatter.updated→created)、scope routing (project + world)、per-project advisory file lock (PID+host+started_at+nonce)、owner-aware release、debounce 24h、concurrent_run skip 不消耗 debounce 配额、`autoLlmWriteEnabled === false` hard kill、`autoLlmWriteEnabled === "staging-only"` 仅诊断不 mutation、ctx.ui.notify 告知用户 (INV-INVISIBILITY)
+> - **已推迟项**：`hard_archive_recommended` 仅 audit-only，文件实际 `git rm` 推迟到 writer 侧 CAS 落地后实现（§4.6.3 描述的 N 天后“最后一次 reviewer prompt → reactivate / git rm” 闭环仅完成了“记录建议”一半）
+> - **跟进管理**：`docs/audits/2026-05-28-adr-0024-0027-implementation-delta-analysis.md`
+
 #### 4.6.1 N 天窗口的具体值
 
 建议 30 天，但需要 dogfood 验证。

@@ -667,7 +667,18 @@ export function parseArchiveReactivationOutput(
     const slug = typeof obj.slug === "string" ? obj.slug.trim() : "";
     if (!slug) continue;
     const decisionRaw = typeof obj.decision === "string" ? obj.decision : "";
-    const decision: ArchiveReactivationDecision = VALID_DECISIONS.has(decisionRaw as ArchiveReactivationDecision)
+    const isValid = VALID_DECISIONS.has(decisionRaw as ArchiveReactivationDecision);
+    if (!isValid && decisionRaw) {
+      // R10 DeepSeek NIT: surface drift between prompt evolution and
+      // VALID_DECISIONS. Without this warn, a model emitting a new
+      // (intended) decision type would be silently mapped to
+      // keep_archived and the maintainer might not notice for weeks.
+      // We DON'T fail — default-conservative behavior is preserved —
+      // we just leave a breadcrumb on stderr.
+      // eslint-disable-next-line no-console
+      console.warn(`[archive-reactivation] unknown decision type ${JSON.stringify(decisionRaw)} from LLM; defaulting to keep_archived. If this is an intentional new decision, add it to VALID_DECISIONS and bump promptVersion.archiveReactivationReviewer.`);
+    }
+    const decision: ArchiveReactivationDecision = isValid
       ? (decisionRaw as ArchiveReactivationDecision)
       : "keep_archived"; // default-conservative
     decisions.push({
@@ -971,8 +982,12 @@ export async function runArchiveReactivationIfDue(
     if (qBytes(aq) < MIN_QUOTE_BYTES || qBytes(uq) < MIN_QUOTE_BYTES) {
       return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: quote_too_short (aq=${qBytes(aq)}B uq=${qBytes(uq)}B, min=${MIN_QUOTE_BYTES}B); original_rationale=${d.rationale.slice(0, 200)}` };
     }
-    // R3 NIT-1 (Opus): tighten empty-compiledTruth path. If truth is
-    // empty, no archived_quote can be a valid substring — reject.
+    // archived_quote MUST be a literal substring of the entry’s
+    // compiledTruth. As a side-effect, an empty truth rejects every
+    // non-empty aq via the standard `"".includes(non-empty)` returning
+    // false — so the previous R1 guard (which had a `truth &&` short-
+    // circuit) had a hole where empty truth would silently bypass the
+    // check. The unconditional form below closes that (R3 NIT-1, Opus).
     if (!truth.includes(aq)) {
       return { ...d, decision: "keep_archived", rationale: `reactivate_guard_failed: archived_quote_not_substring; original_rationale=${d.rationale.slice(0, 200)}` };
     }
