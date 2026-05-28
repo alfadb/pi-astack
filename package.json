@@ -33,6 +33,7 @@
     "smoke:c5-hole-materialization": "node scripts/smoke-c5-hole-materialization.mjs",
     "smoke:c5-heartbeat": "node scripts/smoke-c5-heartbeat.mjs",
     "smoke:c5-heartbeat-dispatch-integration": "node scripts/smoke-c5-heartbeat-dispatch-integration.mjs",
+    "smoke:c5-heartbeat-lifecycle": "node scripts/smoke-c5-heartbeat-lifecycle.mjs",
     "smoke:causal-anchor": "node scripts/smoke-causal-anchor.mjs",
     "smoke:causal-anchor-retrofit": "node scripts/smoke-causal-anchor-retrofit.mjs",
     "smoke:sediment-l2-withhold": "node scripts/smoke-sediment-l2-withhold.mjs",

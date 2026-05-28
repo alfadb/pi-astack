@@ -557,6 +557,17 @@ async function runInProcess(
     startedNote: `model=${modelStr}`,
   });
 
+  // R8 P1 fix (Opus P0-A + GPT-5.5 P1-1 + DeepSeek P1-2 unanimous):
+  // wrap the entire body in try/finally so heartbeat.stop() fires on
+  // EVERY terminal path — including the early returns below
+  // (model_not_found, signal pre-aborted) and any throw from
+  // getSharedInfra / createAgentSession. Previous implementation only
+  // called stop() after Promise.race, so early returns leaked the
+  // setInterval timer + on-disk trace file + globalThis registry entry.
+  // heartbeat.stop() is idempotent + best-effort, so wrapping is
+  // mechanically safe.
+  try {
+
   // Resolve model
   const model = resolveModel(modelStr, modelRegistry);
   if (!model) {
@@ -853,13 +864,19 @@ async function runInProcess(
   const result = await Promise.race([runPromise, timeoutPromise]);
   if (timeoutId) clearTimeout(timeoutId);
   settled = true;
-  // ADR 0027 §C2' Stage 1b: stop heartbeat on every terminal path.
-  // heartbeat.stop() is idempotent + best-effort, so calling it from
-  // the outer aggregation site is sufficient regardless of which
-  // promise (run or timeout) won the race. setTimeout-side timeout
-  // path resolves to AgentResult without throwing, so we land here.
-  heartbeat.stop();
   return result;
+  } finally {
+    // ADR 0027 §C2' Stage 1b R8 P1 fix: heartbeat.stop() in finally
+    // closes the lifecycle on EVERY terminal path. Idempotent +
+    // best-effort — will never throw out of finally. Covers:
+    //   - normal Promise.race resolution (success / agent_error)
+    //   - timeout firing
+    //   - early return for model_not_found (3 unanimous P1)
+    //   - early return for pre-aborted signal
+    //   - getSharedInfra rejection (Opus P1-C)
+    //   - any unexpected throw from session/prompt path
+    heartbeat.stop();
+  }
 }
 
 // ── Result formatting ───────────────────────────────────────────

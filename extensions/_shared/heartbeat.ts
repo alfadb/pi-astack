@@ -63,11 +63,30 @@ import type { CausalAnchor } from "./causal-anchor";
 /** Fixed phase taxonomy (C3' infra: structured, not free-form). */
 export type HeartbeatPhase = "started" | "alive" | "stopping";
 
+/** Heartbeat schema version. Stage 1c consumers should branch on this to
+ *  tolerate future additive fields. Bump only when shape changes
+ *  non-additively. */
+export const HEARTBEAT_SCHEMA_VERSION = 1;
+
 /** One heartbeat trace line on disk. */
 export interface HeartbeatBeat {
   ts: string;
   phase: HeartbeatPhase;
   pid: number;
+  /** Schema version (R8 GPT-5.5 P2-1 / DeepSeek P2-1): lets Stage 1c
+   *  consumers branch on schema shape without inferring from absent
+   *  fields. Always equal to HEARTBEAT_SCHEMA_VERSION in v1. */
+  schema_version: number;
+  /** Monotonic per-handle beat counter (1 for started, then 2..N for
+   *  alive/stopping). Lets a consumer detect dropped beats from disk
+   *  flush failures or partial reads even when ts gap is normal. */
+  seq: number;
+  /** Interval the writer is configured to emit alive beats at, in
+   *  milliseconds. Set on the FIRST beat only (started); consumers cache
+   *  it for subsequent staleness math. Stage 1c uses this to compute
+   *  `expected_next_beat_at = last_ts + interval_ms` and detect missed
+   *  beats reliably without hardcoding the dispatch default. */
+  interval_ms?: number;
   /** Spread anchor fields: session_id, turn_id, subturn?, sub_agent_label?,
    *  device_id?. Always present in v1 (heartbeat is skipped when anchor
    *  is undefined; see startHeartbeat). */
@@ -173,16 +192,17 @@ const NO_OP_HANDLE: HeartbeatHandle = Object.freeze({
 
 const DEFAULT_INTERVAL_MS = 15_000;
 
-/** Append one beat synchronously. Best-effort: any IO error is swallowed
- *  so dispatch never blocks on heartbeat write failure. */
+/** Append one beat synchronously. Best-effort: any exception (IO error
+ *  AND any other failure mode) is swallowed so dispatch never blocks on
+ *  heartbeat write failure. The narrow read is "observability is
+ *  optional"; we'd rather lose a beat than break dispatch. */
 function appendBeat(filePath: string, beat: HeartbeatBeat): void {
   try {
     const line = JSON.stringify(beat) + "\n";
     fs.appendFileSync(filePath, line, { encoding: "utf-8" });
   } catch {
-    // IO failure (disk full, EACCES, etc.). Heartbeat is observability,
-    // never blocks dispatch. Caller side may simply infer cancelled if
-    // beats stop appearing.
+    // Any failure (IO error, serialization, etc.) swallowed. Heartbeat
+    // is pure observability; never blocks dispatch.
   }
 }
 
@@ -224,22 +244,37 @@ export function startHeartbeat(opts: HeartbeatOptions): HeartbeatHandle {
 
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let nextSeq = 1;
 
-  function writeOne(phase: HeartbeatPhase, note?: string): void {
-    if (stopped) return;
+  /** Write a beat. The `force` flag bypasses the `stopped` guard so
+   *  stop() can emit the terminal "stopping" beat even after setting
+   *  the guard (R8 unanimous P1 fix: previous stop() set stopped=true
+   *  BEFORE calling writeOne("stopping"), so the writeOne guard silently
+   *  swallowed the terminal beat; stage 1c consumers had no way to
+   *  distinguish clean stop from writer crash without cross-referencing
+   *  audit). */
+  function writeOne(phase: HeartbeatPhase, opts: { note?: string; force?: boolean } = {}): void {
+    if (stopped && !opts.force) return;
     const beat: HeartbeatBeat = {
       ts: new Date().toISOString(),
       phase,
       pid: process.pid,
+      schema_version: HEARTBEAT_SCHEMA_VERSION,
+      seq: nextSeq++,
+      // R8 P2-1 (GPT-5.5 + DeepSeek): expose interval on the started
+      // beat so consumers don't hardcode the dispatch default. Repeating
+      // it on every beat is wasted bytes but lets a consumer that only
+      // reads the last line still know the contract. v1 chose started-only.
+      ...(phase === "started" ? { interval_ms: intervalMs } : {}),
       ...spreadAnchor(anchor),
-      ...(note ? { note } : {}),
+      ...(opts.note ? { note: opts.note } : {}),
     };
     appendBeat(tracePath, beat);
   }
 
   // Initial "started" beat so consumers see the trace channel exists
   // immediately, not after the first interval tick.
-  writeOne("started", opts.startedNote);
+  writeOne("started", { note: opts.startedNote });
 
   timer = setInterval(() => writeOne("alive"), intervalMs);
   // Don't keep the Node process alive for heartbeat alone — when the
@@ -255,20 +290,23 @@ export function startHeartbeat(opts: HeartbeatOptions): HeartbeatHandle {
       return !stopped;
     },
     beat(phase: HeartbeatPhase, note?: string) {
-      writeOne(phase, note);
+      writeOne(phase, { note });
     },
     stop() {
       if (stopped) return;
+      // Write the terminal "stopping" beat BEFORE flipping the guard so
+      // it actually lands on disk (force:true is belt-and-suspenders).
+      writeOne("stopping", { force: true });
       stopped = true;
       if (timer) {
         clearInterval(timer);
         timer = undefined;
       }
-      writeOne("stopping");
       // Best-effort cleanup: delete the trace file so .pi-astack/
       // dispatch/heartbeat/ doesn't accumulate stale files over a
       // long-running dogfood session. If unlink fails the file
-      // remains as a historical record — acceptable.
+      // remains as a stale record — non-fatal, swept by an external
+      // gc if needed.
       try {
         fs.unlinkSync(tracePath);
       } catch {

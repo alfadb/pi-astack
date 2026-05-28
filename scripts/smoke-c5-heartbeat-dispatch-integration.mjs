@@ -71,28 +71,19 @@ check("runInProcess calls startHeartbeat BEFORE createAgentSession", () => {
   }
 });
 
-check("runInProcess calls heartbeat.stop() on Promise.race result", () => {
-  // The cleanest way to ensure stop() is called on every terminal path
-  // (success / error / timeout / abort) is to call it after Promise.race
-  // resolves. heartbeat.stop() is idempotent + best-effort. Widen the
-  // regex window to accommodate the explanatory comment block.
-  const raceIdx = dispatchSrc.search(/const result = await Promise\.race\(\[runPromise, timeoutPromise\]\);/);
-  if (raceIdx < 0) {
-    throw new Error("could not locate Promise.race aggregation site");
-  }
-  // Look ahead 1500 chars to find heartbeat.stop() before `return result`.
-  const window = dispatchSrc.slice(raceIdx, raceIdx + 1500);
-  if (!/heartbeat\.stop\(\)/.test(window)) {
+check("runInProcess calls heartbeat.stop() in a finally block (R8 P1 fix)", () => {
+  // R8 P1 unanimous fix (Opus P0-A + GPT-5.5 P1-1 + DeepSeek P1-2):
+  // moved heartbeat.stop() from inline-after-Promise.race into a
+  // finally block so it fires on early returns (model_not_found,
+  // pre-aborted signal), throws (getSharedInfra reject), AND normal
+  // completion. Lock the new pattern.
+  const finallyMatch = dispatchSrc.match(/\}\s*finally\s*\{[\s\S]{0,800}?heartbeat\.stop\(\)/);
+  if (!finallyMatch) {
     throw new Error(
-      "heartbeat.stop() must be called after Promise.race resolves so every " +
-      "terminal path (success/error/timeout/abort) cleans up the trace file",
+      "heartbeat.stop() must be in a finally block (R8 P1 unanimous fix). " +
+      "Pre-R8 placement after Promise.race skipped early-return paths and " +
+      "leaked timers + on-disk traces + globalThis registry entries.",
     );
-  }
-  // Sanity: must be before `return result`
-  const stopIdx = window.search(/heartbeat\.stop\(\)/);
-  const returnIdx = window.search(/return result;/);
-  if (stopIdx < 0 || returnIdx < 0 || stopIdx >= returnIdx) {
-    throw new Error("heartbeat.stop() must execute before `return result;`");
   }
 });
 

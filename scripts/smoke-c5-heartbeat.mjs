@@ -186,6 +186,33 @@ check("initial 'started' beat written synchronously", () => {
   if (beats[0].session_id !== "sess-1") throw new Error("missing session_id in beat");
   if (beats[0].turn_id !== 1) throw new Error("missing turn_id in beat");
   if (typeof beats[0].pid !== "number") throw new Error("pid not numeric");
+  // R8 schema additions (GPT-5.5 + DeepSeek P2-1):
+  if (beats[0].schema_version !== 1) throw new Error("missing schema_version=1");
+  if (beats[0].seq !== 1) throw new Error(`expected seq=1 on first beat; got ${beats[0].seq}`);
+  if (beats[0].interval_ms !== 60_000) {
+    throw new Error(`started beat must carry interval_ms (got ${beats[0].interval_ms})`);
+  }
+  h.stop();
+});
+
+check("alive/stopping beats do NOT carry interval_ms (started-only)", () => {
+  _resetHeartbeatRegistryForTests();
+  const anchor = { session_id: "sess-1b", turn_id: 1 };
+  const h = startHeartbeat({
+    anchor,
+    projectRoot: testRoot,
+    intervalMs: 60_000,
+  });
+  h.beat("alive");
+  // Stop writes the final 'stopping' beat then unlinks; capture beats before stop
+  // by reading via separate handle to a copy of the file.
+  // Easier: capture by reading first, then stop.
+  const before = readHeartbeatTrace(h.tracePath);
+  if (before.length !== 2) throw new Error(`expected 2 beats before stop; got ${before.length}`);
+  if ("interval_ms" in before[1]) {
+    throw new Error("alive beat must NOT carry interval_ms (started-only contract)");
+  }
+  if (before[1].seq !== 2) throw new Error(`alive beat seq must be 2; got ${before[1].seq}`);
   h.stop();
 });
 
@@ -238,6 +265,39 @@ check("stop() writes final 'stopping' beat AND unlinks trace file", () => {
     throw new Error("trace file should be unlinked after stop (cleanup)");
   }
   if (h.active) throw new Error("active should be false after stop");
+});
+
+check("R8 unanimous P1 fix: stop() actually writes 'stopping' beat to disk", () => {
+  // Pre-R8 bug (unanimous Opus P1-B + GPT-5.5 P1-2): stop() set
+  // stopped=true BEFORE calling writeOne(\"stopping\"), and writeOne's
+  // first line is `if (stopped) return`. So the stopping beat was
+  // silently dropped — the post-stop unlink hid the bug.
+  //
+  // R8 fix: stop() writes the terminal beat with force:true BEFORE
+  // flipping stopped. The beat MUST be visible in a snapshot of the
+  // file taken between the writeOne call and the unlinkSync — we
+  // simulate that by monkey-patching fs.unlinkSync to do nothing,
+  // running stop(), then reading the file.
+  _resetHeartbeatRegistryForTests();
+  const anchor = { session_id: "sess-stopping-test", turn_id: 99 };
+  const h = startHeartbeat({ anchor, projectRoot: testRoot, intervalMs: 60_000 });
+  const tracePath = h.tracePath;
+  const realUnlink = fs.unlinkSync;
+  let unlinkAttempts = 0;
+  fs.unlinkSync = function intercept() { unlinkAttempts++; };
+  try {
+    h.stop();
+  } finally {
+    fs.unlinkSync = realUnlink;
+  }
+  if (unlinkAttempts !== 1) throw new Error(`expected exactly 1 unlink attempt; got ${unlinkAttempts}`);
+  const beats = readHeartbeatTrace(tracePath);
+  const stopping = beats.filter((b) => b.phase === "stopping");
+  if (stopping.length !== 1) {
+    throw new Error(`expected exactly 1 'stopping' beat in trace; got ${stopping.length}. Pre-R8 bug.`);
+  }
+  // Cleanup the residue file manually.
+  try { realUnlink(tracePath); } catch {}
 });
 
 check("stop() is idempotent (no double-stopping beat, no exception)", () => {
