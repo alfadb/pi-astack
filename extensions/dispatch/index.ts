@@ -1112,11 +1112,23 @@ export default function (pi: ExtensionAPI) {
       }
 
       const durationMs = Date.now() - startedAt;
-      if (result.error) {
-        applyDispatchStatus(ctx, "failed", { running: 0, failed: 1, success: 0, total: 1 }, durationMs);
-      } else {
-        applyDispatchStatus(ctx, "completed", { running: 0, failed: 0, success: 1, total: 1 }, durationMs);
-      }
+      // R7.1 P2 fix (GPT-5.5 + DeepSeek unanimous): single-task footer
+      // must map terminal_state instead of collapsing cancelled into
+      // failed. dispatch_parallel.execute already does this (line
+      // ~1467); dispatch_agent was inconsistent. Stage 1b heartbeat
+      // will need this symmetry so a heartbeat-driven cancellation
+      // shows 🚫 not ⚠️ .
+      const singleTaskFinalState: DispatchState = !result.error
+        ? "completed"
+        : result.failureType === "aborted" || result.failureType === "timeout" || result.failureType === "timeout_partial"
+          ? "cancelled"
+          : "failed";
+      const isOk = !result.error;
+      applyDispatchStatus(
+        ctx, singleTaskFinalState,
+        { running: 0, failed: isOk ? 0 : 1, success: isOk ? 1 : 0, total: 1 },
+        durationMs,
+      );
 
       // ADR 0027 C6a + §C5 v1: dispatch audit row — cross-layer join key
       // for tracing a user turn through L1 (sediment / abrain) and L2

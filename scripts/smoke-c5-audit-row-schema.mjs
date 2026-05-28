@@ -270,6 +270,25 @@ check("finalState mapping preserves cancelled (does not collapse to failed)", ()
   }
 });
 
+check("single-task dispatch_agent footer also maps cancelled (R7.1 P2 fix)", () => {
+  // R7.1 GPT-5.5 + DeepSeek unanimous P2: dispatch_agent was previously
+  // `result.error ? "failed" : "completed"` — collapsing user-abort and
+  // timeout into ⚠️ failed despite the audit/details correctly showing
+  // terminal_state:"cancelled". Stage 1b heartbeat will rely on the
+  // single-task footer reading 🚫 so this symmetry must be locked.
+  if (!/singleTaskFinalState:\s*DispatchState/.test(dispatchSrc)) {
+    throw new Error(
+      "dispatch_agent footer must derive a DispatchState from terminal_state, " +
+      "not from result.error alone",
+    );
+  }
+  if (!/result\.failureType\s*===\s*"aborted"\s*\|\|\s*result\.failureType\s*===\s*"timeout"\s*\|\|\s*result\.failureType\s*===\s*"timeout_partial"\s*\n\s*\?\s*"cancelled"/.test(dispatchSrc)) {
+    throw new Error(
+      "dispatch_agent footer must map aborted/timeout/timeout_partial to cancelled",
+    );
+  }
+});
+
 console.log("\nSection: tool result details surface terminalState");
 
 check("dispatch_agent details include terminalState", () => {
