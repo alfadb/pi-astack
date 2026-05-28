@@ -225,12 +225,40 @@ check("rewriter accepts 5 args (msg, history, registry, settings, signal?)",
 // ────────────────────────────────────────────────────────────────
 console.log("\n[5] llm-search Stage 2 verdict parsing");
 const search = jiti(path.join(repoRoot, "extensions/memory/llm-search.ts"));
-// Note: parseFinalPicksWithVerdict is internal, but we test the API
-// surface: llmSearchEntries (legacy hits-only) AND verdict via
-// llmSearchEntriesWithVerdict are exported. Their internal parse path
-// is the same.
 check("llmSearchEntries exported", typeof search.llmSearchEntries === "function");
 check("llmSearchEntriesWithVerdict exported", typeof search.llmSearchEntriesWithVerdict === "function");
+
+// resultCard projection: lock that it intentionally does NOT include
+// compiledTruth (search tool API contract), which is why path-A injector
+// must hydrate via entry slug lookup. If a future refactor accidentally
+// adds compiledTruth to resultCard, that's a leak of full body to all
+// memory_search tool consumers — NOT what we want. This assertion locks
+// the contract.
+//
+// We can't directly export resultCard (it's private), so we test via the
+// behavior: spy that llmSearchEntries result shape, when normally returned
+// by mock pipeline, doesn't carry compiledTruth as a top-level field.
+// Since we can't run real search without LLM, we settle for source check.
+const llmSearchSource = fs.readFileSync(path.join(repoRoot, "extensions/memory/llm-search.ts"), "utf-8");
+check("resultCard intentionally omits compiledTruth (search tool contract)",
+  !/function resultCard[\s\S]*?compiledTruth/.test(llmSearchSource));
+
+// ────────────────────────────────────────────────────────────────
+console.log("\n[6] inject block must hydrate compiledTruth from entries (bug fix lock)");
+// GPT-5.5 3-T0 evaluation 2026-05-28 P0 bug: memory-context-injector
+// previously read h.compiledTruth ?? h.body ?? "" off resultCard, which
+// NEVER had compiledTruth. inject was emitting empty excerpts. Lock the
+// fix at source level: injector must call entriesBySlug.get() to hydrate.
+const injectorSource = fs.readFileSync(path.join(repoRoot, "extensions/memory/memory-context-injector.ts"), "utf-8");
+check("injector imports MemoryEntry from ./types (not ./entries) — bug 1 fix",
+  /import type \{ MemoryEntry \} from "\.\/types";/.test(injectorSource));
+check("injector hydrates hits via entriesBySlug.get() — bug 2 fix",
+  /entriesBySlug = new Map\(entries\.map\(/.test(injectorSource) &&
+  /fullEntry\.compiledTruth/.test(injectorSource));
+check("injector has skipped_hit_hydration_empty failure path (defense in depth)",
+  /skipped_hit_hydration_empty/.test(injectorSource));
+check("injector buildInjectBlock no longer reads h.body fallback (post-fix cleanup)",
+  !/h\.compiledTruth \?\? h\.body \?\? ""/.test(injectorSource));
 
 // ────────────────────────────────────────────────────────────────
 console.log("\n────");

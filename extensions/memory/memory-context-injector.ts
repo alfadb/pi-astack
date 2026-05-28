@@ -37,7 +37,7 @@ import type { QueryRewriteResult, ConversationTurn } from "./query-rewriter";
 import { loadEntries } from "./decide";
 import { llmSearchEntriesWithVerdict } from "./llm-search";
 import type { SearchVerdictResult } from "./llm-search";
-import type { MemoryEntry } from "./entries";
+import type { MemoryEntry } from "./types";
 import { resolveSettings } from "./settings";
 import type { MemorySettings, PathASettings } from "./settings";
 
@@ -188,13 +188,20 @@ function truncateMiddle(s: string, n: number): string {
   return s.slice(0, head) + "\n…[truncated]…\n" + s.slice(s.length - tail);
 }
 
+/**
+ * Hydrated hit shape — produced inside tryInjectRelevantMemoryContext
+ * by joining search.hits.slug → MemoryEntry.compiledTruth. NEVER comes
+ * directly from llmSearchEntriesWithVerdict (which returns resultCard
+ * projections lacking compiledTruth).
+ */
 interface HitLike {
   slug: string;
   title: string;
   kind: string;
   confidence: number | undefined;
-  compiledTruth?: string;
-  body?: string;
+  /** Required after hydration; falsy means hydration failed and the hit
+   *  should have been dropped to missingSlugs by the caller. */
+  compiledTruth: string;
 }
 
 function buildInjectBlock(
@@ -203,6 +210,10 @@ function buildInjectBlock(
   injectId: string,
 ): { block: string; selectedSlugs: string[]; chars: number } {
   const sliced = hits.slice(0, pathASettings.injectMaxEntries);
+  // Defensive: at this point compiledTruth must be a real string
+  // (callers hydrate via entriesBySlug lookup). Empty string here would
+  // mean an upstream bug — we still degrade gracefully.
+
   const lines: string[] = [
     PATH_A_INJECT_MARKER,
     `<!-- path_a_inject_id: ${injectId} -->`,
@@ -220,7 +231,7 @@ function buildInjectBlock(
   ];
   const slugs: string[] = [];
   for (const h of sliced) {
-    const truth = h.compiledTruth ?? h.body ?? "";
+    const truth = h.compiledTruth ?? "";
     const excerpt = truncateMiddle(truth, pathASettings.entryExcerptChars);
     const confStr = typeof h.confidence === "number" ? `, confidence=${h.confidence}` : "";
     lines.push(`### ${h.slug}  ·  ${h.title}  ·  [${h.kind}${confStr}]`);
@@ -383,15 +394,47 @@ export async function tryInjectRelevantMemoryContext(
       return { rowWritten: row };
     }
 
-    // Step 5: build inject block
-    const hitsForInject: HitLike[] = search.hits.map((h: { slug: string; title: string; kind: string; confidence?: number; compiledTruth?: string; body?: string }) => ({
-      slug: h.slug,
-      title: h.title,
-      kind: h.kind,
-      confidence: h.confidence,
-      compiledTruth: h.compiledTruth,
-      body: h.body,
-    }));
+    // Step 5: build inject block.
+    //
+    // BUG-FIX 2026-05-28 (GPT-5.5 3-T0 evaluation P0): search.hits comes
+    // from resultCard() which intentionally OMITS compiledTruth (the search
+    // tool API exposes only frontmatter-shaped projection for memory_search
+    // tool callers). For path-A inject we need the full compiledTruth — so
+    // we hydrate hits by looking up the original MemoryEntry from the
+    // entries[] array we already loaded above. Without this hydration, the
+    // inject block was emitting empty excerpt slots ("compiledTruth ?? body
+    // ?? '' = ''"), making path-A dogfood data worthless for inject quality
+    // evaluation.
+    const entriesBySlug = new Map(entries.map((e) => [e.slug, e]));
+    const hitsForInject: HitLike[] = [];
+    const missingSlugs: string[] = [];
+    for (const h of search.hits) {
+      const fullEntry = entriesBySlug.get((h as { slug: string }).slug);
+      if (!fullEntry) {
+        missingSlugs.push((h as { slug: string }).slug);
+        continue;
+      }
+      hitsForInject.push({
+        slug: fullEntry.slug,
+        title: fullEntry.title,
+        kind: fullEntry.kind,
+        confidence: fullEntry.confidence,
+        compiledTruth: fullEntry.compiledTruth,
+      });
+    }
+    if (hitsForInject.length === 0) {
+      // All hits failed slug → entry lookup (corpus drift between loadEntries
+      // and search return). Skip with diagnostic outcome rather than inject
+      // empty cards.
+      const row = {
+        ...rowBase,
+        outcome: "skipped_hit_hydration_empty",
+        error: `all ${search.hits.length} hits failed entry hydration (slugs: ${missingSlugs.join(",").slice(0, 200)})`,
+        total_duration_ms: Date.now() - t0,
+      };
+      appendLedgerRow(row);
+      return { rowWritten: row };
+    }
     const built = buildInjectBlock(hitsForInject, settings.pathA, injectId);
 
     const row = {
