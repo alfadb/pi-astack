@@ -350,7 +350,12 @@ async function main() {
       const sedimentHandlers = hookHandlers.sediment.get("before_agent_start") ?? [];
       const memoryHandlers = hookHandlers.memory.get("before_agent_start") ?? [];
       assert(sedimentHandlers.length === 1, `sediment must register exactly 1 before_agent_start handler, got ${sedimentHandlers.length}`);
-      assert(memoryHandlers.length === 1, `memory must register exactly 1 before_agent_start handler, got ${memoryHandlers.length}`);
+      // memory registers TWO handlers as of ADR 0026 path A implementation
+      // (2026-05-28): handler[0] = memory-footnote protocol injector,
+      // handler[1] = path-A relevant-memory context injector. They are kept
+      // as separate handlers because their idempotency markers are distinct
+      // and pi chains return values from all before_agent_start handlers.
+      assert(memoryHandlers.length === 2, `memory must register exactly 2 before_agent_start handlers (footnote + path-A), got ${memoryHandlers.length}`);
 
       // First call appends; second call must short-circuit on the marker.
       const sedMarker = "<!-- pi-astack/sediment: main-session read-only contract -->";
@@ -379,6 +384,37 @@ async function main() {
       assert(memFirst.systemPrompt.includes("高价值决策时可拉取") && !memFirst.systemPrompt.includes("在遇到以下场景**之前**"), "memory_decide prompt must stay Path-B advisory, not pseudo Path-A mandatory trigger");
       const memSecond = await memoryHandlers[0]({ systemPrompt: memFirst.systemPrompt });
       assert(memSecond === undefined, "memory injector must be idempotent (return undefined when marker already present)");
+
+      // === path-A handler contract (handler[1]) ===
+      // No modelRegistry / no sessionManager / empty prompt all yield
+      // undefined return. With prompt set + no modelRegistry, injector
+      // takes the skipped_no_model_registry path — still returns undefined
+      // (no block to inject). Path A never throws, never returns invalid
+      // shapes, and never bypasses INV-INVISIBILITY by surfacing errors.
+      const pathAHandler = memoryHandlers[1];
+      // Empty prompt → undefined (fast-path skip)
+      assert(
+        (await pathAHandler({ systemPrompt: seed, prompt: "" })) === undefined,
+        "path-A handler with empty prompt must return undefined (fast-path)",
+      );
+      // No prompt field at all → undefined
+      assert(
+        (await pathAHandler({ systemPrompt: seed })) === undefined,
+        "path-A handler with no prompt field must return undefined",
+      );
+      // Marker already present → undefined (idempotency)
+      const PATH_A_MARKER = "<!-- pi-astack/memory: path-a relevant memory context (ADR 0026 §3.1 walk-back, 2026-05-28) -->";
+      assert(
+        (await pathAHandler({ systemPrompt: seed + "\n" + PATH_A_MARKER, prompt: "随便什么" })) === undefined,
+        "path-A handler must respect its idempotency marker",
+      );
+      // With prompt + no modelRegistry → injector skips silently → undefined
+      // (no block, but call still completes without throw)
+      const pathAResult = await pathAHandler({ systemPrompt: seed, prompt: "用 React Router v6 还是 v7" }, {});
+      assert(
+        pathAResult === undefined,
+        "path-A handler without modelRegistry must skip silently and return undefined",
+      );
     }
 
     // === classifier health meta-check ================================

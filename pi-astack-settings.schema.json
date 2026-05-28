@@ -651,6 +651,20 @@
               "minimum": 1000,
               "description": "Rewriter LLM timeout. Sized to absorb transient provider slowness without blocking the turn forever. Rewriter failure does NOT propagate — path A silently skips and the main agent flow proceeds."
             },
+            "historyMaxTurns": {
+              "type": "number",
+              "default": 4,
+              "minimum": 0,
+              "maximum": 20,
+              "description": "v2 (2026-05-28, post §3.1 walk-back design refinement): the rewriter sees this many recent user/assistant turns as context. Critical for resolving sole-context messages (\"刚才那个\", \"继续\", \"好就用 X\") and for grounding the search query in the actual project/task framing. Set to 0 to revert to v1 single-message behavior (NOT recommended; user directive explicitly requires context-aware rewriting)."
+            },
+            "historyMaxCharsPerTurn": {
+              "type": "number",
+              "default": 2000,
+              "minimum": 100,
+              "maximum": 8000,
+              "description": "v2: per-turn cap in chars (middle-truncation) before history is embedded in rewriter prompt. Defends against one giant assistant reply or code paste blowing prompt budget."
+            },
             "searchLimit": {
               "type": "number",
               "default": 5,

@@ -817,4 +817,36 @@ brief 是专家建议，不是命令。
 `;
     return { systemPrompt: current + "\n\n" + block };
   });
+
+  // ── Path A: always-on relevant-memory injection ──────────────────
+  //
+  // ADR 0026 §3.1 walk-back (2026-05-28). Separate before_agent_start
+  // handler so the path-A idempotency marker is independent. pi chains
+  // systemPrompt return values from all handlers. Sub-agents excluded;
+  // they already get the sub-agent memory-tools block and would double
+  // path-A cost per dispatch.
+  pi.on("before_agent_start", async (event: { systemPrompt?: string; prompt?: string }, ctx?: unknown) => {
+    if (isSubAgentSession(ctx as { sessionManager?: unknown } | undefined | null)) {
+      return undefined;
+    }
+    const current = event.systemPrompt ?? "";
+    if (current.includes(PATH_A_INJECT_MARKER)) return undefined;
+    const userPrompt = typeof event.prompt === "string" ? event.prompt : "";
+    if (userPrompt.length === 0) return undefined;
+
+    const { tryInjectRelevantMemoryContext } = await import("./memory-context-injector");
+    try {
+      const r = await tryInjectRelevantMemoryContext(userPrompt, {
+        cwd: (ctx as { cwd?: string } | undefined)?.cwd,
+        modelRegistry: (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry,
+        sessionManager: (ctx as { sessionManager?: unknown } | undefined)?.sessionManager,
+      });
+      if (r.block) {
+        return { systemPrompt: current + "\n\n" + r.block };
+      }
+    } catch {
+      // belt-and-suspenders; injector already absorbs internal failures.
+    }
+    return undefined;
+  });
 }

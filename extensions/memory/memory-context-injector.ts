@@ -33,7 +33,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 
 import { rewriteUserMessageToSearchQuery } from "./query-rewriter";
-import type { QueryRewriteResult } from "./query-rewriter";
+import type { QueryRewriteResult, ConversationTurn } from "./query-rewriter";
 import { loadEntries } from "./decide";
 import { llmSearchEntriesWithVerdict } from "./llm-search";
 import type { SearchVerdictResult } from "./llm-search";
@@ -46,6 +46,83 @@ export const PATH_A_INJECT_MARKER = "<!-- pi-astack/memory: path-a relevant memo
 interface InjectorCtx {
   cwd?: string;
   modelRegistry?: unknown;
+  /** pi ExtensionContext.sessionManager (used to read recent conversation
+   *  history for context-aware rewriter v2). Type is intentionally loose
+   *  to avoid hard-coupling to pi SDK private type. */
+  sessionManager?: unknown;
+}
+
+/**
+ * Extract the last N user/assistant turns from pi SessionManager. Filters
+ * out tool / bashExecution / custom / summary entries — only conversational
+ * messages matter for rewriter v2 context.
+ *
+ * Excludes the very last user turn if it matches the current event.prompt
+ * (rewriter sees event.prompt separately as CURRENT USER MESSAGE; including
+ * it in history would duplicate).
+ *
+ * Best-effort: returns [] on any structural mismatch / missing API.
+ */
+function extractRecentConversationHistory(
+  sessionManager: unknown,
+  currentUserPrompt: string,
+  maxTurns: number,
+  maxCharsPerTurn: number,
+): ConversationTurn[] {
+  if (!sessionManager || typeof sessionManager !== "object") return [];
+  const sm = sessionManager as { buildSessionContext?: () => unknown };
+  if (typeof sm.buildSessionContext !== "function") return [];
+  let sessionCtx: unknown;
+  try {
+    sessionCtx = sm.buildSessionContext();
+  } catch {
+    return [];
+  }
+  if (!sessionCtx || typeof sessionCtx !== "object") return [];
+  const messages = (sessionCtx as { messages?: unknown }).messages;
+  if (!Array.isArray(messages)) return [];
+
+  const turns: ConversationTurn[] = [];
+  for (const m of messages) {
+    if (!m || typeof m !== "object") continue;
+    const role = (m as { role?: unknown }).role;
+    if (role !== "user" && role !== "assistant") continue;
+    const content = (m as { content?: unknown }).content;
+    let text = "";
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const part of content) {
+        if (!part || typeof part !== "object") continue;
+        const p = part as { type?: unknown; text?: unknown };
+        if (p.type === "text" && typeof p.text === "string") parts.push(p.text);
+      }
+      text = parts.join("\n");
+    }
+    text = text.trim();
+    if (!text) continue;
+    // Cap per-turn length (rewriter does its own cap too; defense in depth).
+    if (text.length > maxCharsPerTurn) {
+      const head = Math.floor(maxCharsPerTurn * 0.6);
+      const tail = maxCharsPerTurn - head - 20;
+      text = text.slice(0, head) + "\n…[truncated]…\n" + text.slice(text.length - tail);
+    }
+    turns.push({ role: role as "user" | "assistant", text });
+  }
+
+  // De-dup: if the LAST user turn in history matches currentUserPrompt,
+  // drop it (rewriter gets it as CURRENT USER MESSAGE).
+  if (turns.length > 0) {
+    const last = turns[turns.length - 1];
+    if (last.role === "user" && last.text.trim() === currentUserPrompt.trim()) {
+      turns.pop();
+    }
+  }
+
+  // Keep only the last N turns. We want most-recent context, not the
+  // whole session (rewriter input cost + most-recent-is-most-relevant).
+  return turns.slice(-maxTurns);
 }
 
 interface ModelRegistryLike {
@@ -61,6 +138,8 @@ interface PathALedgerRow {
    *  "skipped_no_entries" / "skipped_error" / "injected" */
   outcome: string;
   prompt_chars: number;
+  /** v2 (2026-05-28): how many history turns the rewriter actually saw. */
+  history_turn_count?: number;
   rewriter?: {
     useful: boolean;
     reason?: string;
@@ -190,6 +269,19 @@ export async function tryInjectRelevantMemoryContext(
 
   try {
     const settings = resolveSettings();
+
+    // Extract history EARLY (cheap; sync read off sessionManager) so even
+    // skipped-path ledger rows carry history_turn_count for dogfood
+    // analytics ("are short-but-context-rich turns being skipped because
+    // the rewriter never sees them?").
+    const earlyHistory = extractRecentConversationHistory(
+      ctx.sessionManager,
+      userPrompt,
+      settings.pathA.historyMaxTurns,
+      settings.pathA.historyMaxCharsPerTurn,
+    );
+    rowBase.history_turn_count = earlyHistory.length;
+
     if (!settings.pathA.enabled) {
       const row = { ...rowBase, outcome: "skipped_disabled", total_duration_ms: Date.now() - t0 };
       appendLedgerRow(row);
@@ -207,10 +299,21 @@ export async function tryInjectRelevantMemoryContext(
       return { rowWritten: row };
     }
 
-    // Step 1: rewriter
+    // Step 1: history is already extracted above for early ledger logging.
+    //
+    // User directive 2026-05-28 (post-§3.1-walk-back design refinement):
+    // “主会话调用 memory_search 时就要给足信息，包括上下文场景、
+    // 用户意图在内” — the rewriter must see history, not just the current
+    // isolated message. Sole-context messages (“刚才那个怎么办” /
+    // “继续” / “好就用 X”) get accurately interpreted instead of
+    // dropped as useful=false, and richer messages get framed with the
+    // actual project/task background.
+    const history = earlyHistory;
+
+    // Step 2: rewriter
     let rewriterResult: QueryRewriteResult;
     try {
-      rewriterResult = await rewriteUserMessageToSearchQuery(userPrompt, modelRegistry, settings.pathA, signal);
+      rewriterResult = await rewriteUserMessageToSearchQuery(userPrompt, history, modelRegistry, settings.pathA, signal);
     } catch (e) {
       const row = { ...rowBase, outcome: "skipped_error", error: e instanceof Error ? e.message : String(e), total_duration_ms: Date.now() - t0 };
       appendLedgerRow(row);
@@ -230,7 +333,7 @@ export async function tryInjectRelevantMemoryContext(
       return { rowWritten: row };
     }
 
-    // Step 2: load entries
+    // Step 3: load entries
     let entries: MemoryEntry[];
     try {
       entries = await loadEntries(ctx.cwd, settings, signal);
@@ -245,7 +348,7 @@ export async function tryInjectRelevantMemoryContext(
       return { rowWritten: row };
     }
 
-    // Step 3: search with LLM-side strong cutoff (verdict)
+    // Step 4: search with LLM-side strong cutoff (verdict)
     let search: SearchVerdictResult;
     try {
       search = await llmSearchEntriesWithVerdict(
@@ -280,7 +383,7 @@ export async function tryInjectRelevantMemoryContext(
       return { rowWritten: row };
     }
 
-    // Step 4: build inject block
+    // Step 5: build inject block
     const hitsForInject: HitLike[] = search.hits.map((h: { slug: string; title: string; kind: string; confidence?: number; compiledTruth?: string; body?: string }) => ({
       slug: h.slug,
       title: h.title,

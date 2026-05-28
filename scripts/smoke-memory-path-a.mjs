@@ -89,11 +89,17 @@ const rewriter = jiti(path.join(repoRoot, "extensions/memory/query-rewriter.ts")
   const r = rewriter.parseRewriterOutput("");
   check("empty → false", r.useful === false && r.reason === "empty_llm_output");
 }
-// long query gets capped
+// long query gets capped (v2 raised cap to 2000)
 {
-  const longQuery = "x".repeat(700);
+  const longQuery = "x".repeat(2500);
   const r = rewriter.parseRewriterOutput(`{"useful": true, "query": "${longQuery}"}`);
-  check("long query capped to ≤601", r.useful === true && r.query.length <= 601);
+  check("v2: long query capped to ≤2001", r.useful === true && r.query.length <= 2001);
+}
+// medium query (in v2 sweet spot) not truncated
+{
+  const midQuery = "x".repeat(500);
+  const r = rewriter.parseRewriterOutput(`{"useful": true, "query": "${midQuery}"}`);
+  check("v2: 500-char query not truncated", r.useful === true && r.query.length === 500);
 }
 // JSON with extra fields ignored
 {
@@ -101,7 +107,7 @@ const rewriter = jiti(path.join(repoRoot, "extensions/memory/query-rewriter.ts")
   check("extra fields ignored", r.useful === true && r.query === "select database");
 }
 
-// ────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────
 console.log("\n[2] settings.pathA defaults");
 const settings = jiti(path.join(repoRoot, "extensions/memory/settings.ts"));
 {
@@ -109,6 +115,8 @@ const settings = jiti(path.join(repoRoot, "extensions/memory/settings.ts"));
   check("pathA.enabled default true", r.pathA.enabled === true);
   check("pathA.queryRewriterModel default flash", r.pathA.queryRewriterModel === "deepseek/deepseek-v4-flash");
   check("pathA.queryRewriterTimeoutMs default 15000", r.pathA.queryRewriterTimeoutMs === 15000);
+  check("pathA.historyMaxTurns default 4", r.pathA.historyMaxTurns === 4);
+  check("pathA.historyMaxCharsPerTurn default 2000", r.pathA.historyMaxCharsPerTurn === 2000);
   check("pathA.searchLimit default 5", r.pathA.searchLimit === 5);
   check("pathA.injectMaxEntries default 5", r.pathA.injectMaxEntries === 5);
   check("pathA.entryExcerptChars default 800", r.pathA.entryExcerptChars === 800);
@@ -117,6 +125,23 @@ const settings = jiti(path.join(repoRoot, "extensions/memory/settings.ts"));
 // ────────────────────────────────────────────────────────────────
 console.log("\n[3] memory-context-injector outcomes (no-LLM paths)");
 const injector = jiti(path.join(repoRoot, "extensions/memory/memory-context-injector.ts"));
+
+// Build a fake SessionManager-shape for history extraction smoke (no real pi).
+const fakeSessionManager = {
+  buildSessionContext() {
+    return {
+      messages: [
+        { role: "user", content: "帮我看 sediment 这个模块的架构" },
+        { role: "assistant", content: [{ type: "text", text: "sediment 有 6 条能力点..." }] },
+        { role: "tool", content: "<irrelevant>" },  // should be filtered out
+        { role: "user", content: "改成异步行不行" },
+        { role: "assistant", content: [{ type: "text", text: "可以，但你要考虑..." }] },
+        // current-user duplicate (should be deduped):
+        { role: "user", content: "改成异步行不行" },
+      ],
+    };
+  },
+};
 
 // Redirect ABRAIN_HOME to a tmpdir so ledger doesn't pollute real user home.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-path-a-"));
@@ -130,11 +155,12 @@ try {
     check("skipped_no_model_registry outcome", r.rowWritten.outcome === "skipped_no_model_registry");
     check("no inject block returned", !r.block);
   }
-  // outcome: skipped_invalid_model_registry (ctx.modelRegistry is wrong shape)
+  // outcome: skipped_invalid_model_registry + history extraction wired
   {
-    const r = await injector.tryInjectRelevantMemoryContext("用 pnpm 还是 yarn?", {
+    const r = await injector.tryInjectRelevantMemoryContext("改成异步行不行", {
       cwd: tmpHome,
       modelRegistry: { wat: "no .find / .getApiKeyAndHeaders" },
+      sessionManager: fakeSessionManager,
     });
     check("skipped_invalid_model_registry outcome", r.rowWritten.outcome === "skipped_invalid_model_registry");
   }
@@ -145,13 +171,22 @@ try {
   if (ledgerExists) {
     const lines = fs.readFileSync(ledgerPath, "utf-8").split("\n").filter(l => l.trim());
     check("ledger has ≥2 rows", lines.length >= 2);
-    // Last row should be the invalid_model_registry one
     const lastRow = JSON.parse(lines[lines.length - 1]);
     check("ledger row schema (ts/outcome/inject_id)",
       typeof lastRow.ts === "string" &&
       typeof lastRow.outcome === "string" &&
       typeof lastRow.inject_id === "string" &&
       lastRow.inject_id.startsWith("path-a-"));
+    // The second row (sessionManager + history) should have history_turn_count.
+    // history has 4 user/assistant turns after filtering tool + deduping last user.
+    check("v2: ledger row carries history_turn_count",
+      typeof lastRow.history_turn_count === "number");
+    check("v2: history_turn_count > 0 with fake session",
+      lastRow.history_turn_count > 0);
+    // Filtered: tool role excluded; deduped: last 'user' matching current prompt excluded.
+    // So expected ≤ 5 (3 user + 2 assistant, last user deduped → 4 turns) capped to historyMaxTurns=4.
+    check("v2: history_turn_count ≤ historyMaxTurns=4",
+      lastRow.history_turn_count <= 4);
   }
 } finally {
   if (origHome === undefined) delete process.env.ABRAIN_HOME;
@@ -160,7 +195,35 @@ try {
 }
 
 // ────────────────────────────────────────────────────────────────
-console.log("\n[4] llm-search Stage 2 verdict parsing");
+console.log("\n[4] rewriter v2 signature: history is required positional arg");
+// Smoke that signature changed: 2nd positional is history array.
+// We don't actually call LLM here (no model registry needed for static
+// shape check). Just ensure the function expects 5 args.
+check("rewriter accepts 5 args (msg, history, registry, settings, signal?)",
+  rewriter.rewriteUserMessageToSearchQuery.length >= 4);
+// Empty history + empty message should fast-path with no LLM call.
+{
+  const r = await rewriter.rewriteUserMessageToSearchQuery("", [], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "deepseek/deepseek-v4-flash", queryRewriterTimeoutMs: 15000 });
+  check("empty msg + empty history → useful=false fast-path",
+    r.useful === false && r.reason === "empty_input");
+}
+// Very short msg + no history → fast-path skip
+{
+  const r = await rewriter.rewriteUserMessageToSearchQuery("ok", [], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "deepseek/deepseek-v4-flash", queryRewriterTimeoutMs: 15000 });
+  check("3-char msg + no history → useful=false",
+    r.useful === false && r.reason === "input_too_short_no_history");
+}
+// Short msg + WITH history → no fast-path skip (history may disambiguate)
+{
+  // Will fail at "model not found" because we give bogus registry, but the
+  // important thing is it didn't short-circuit at input length.
+  const r = await rewriter.rewriteUserMessageToSearchQuery("继续", [{role:"user",text:"用 pnpm 不是挑吗"},{role:"assistant",text:"是的..."}], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "deepseek/deepseek-v4-flash", queryRewriterTimeoutMs: 15000 });
+  check("short msg + history → not short-circuited",
+    r.useful === false && r.reason !== "input_too_short_no_history" && r.history_turn_count === 2);
+}
+
+// ────────────────────────────────────────────────────────────────
+console.log("\n[5] llm-search Stage 2 verdict parsing");
 const search = jiti(path.join(repoRoot, "extensions/memory/llm-search.ts"));
 // Note: parseFinalPicksWithVerdict is internal, but we test the API
 // surface: llmSearchEntries (legacy hits-only) AND verdict via

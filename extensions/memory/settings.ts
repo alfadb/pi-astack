@@ -62,6 +62,13 @@ export interface PathASettings {
   enabled: boolean;
   queryRewriterModel: string;
   queryRewriterTimeoutMs: number;
+  /** v2 (2026-05-28): how many prior user/assistant turns the rewriter
+   *  sees. 4 covers most context-resolution needs (“刚才那个” / “继续” /
+   *  “好就用 X”) without bloating prompt cost. */
+  historyMaxTurns: number;
+  /** Per-turn cap in chars before middle-truncation; defends against
+   *  one giant assistant reply or code paste blowing the prompt budget. */
+  historyMaxCharsPerTurn: number;
   searchLimit: number;
   injectMaxEntries: number;
   entryExcerptChars: number;
@@ -71,6 +78,8 @@ export const DEFAULT_PATH_A_SETTINGS: PathASettings = {
   enabled: true,
   queryRewriterModel: "deepseek/deepseek-v4-flash",
   queryRewriterTimeoutMs: 15_000,
+  historyMaxTurns: 4,
+  historyMaxCharsPerTurn: 2000,
   searchLimit: 5,
   injectMaxEntries: 5,
   entryExcerptChars: 800,
@@ -156,6 +165,8 @@ function resolvePathASettings(cfg: Record<string, unknown>): PathASettings {
     enabled: asBoolean(p.enabled, DEFAULT_PATH_A_SETTINGS.enabled),
     queryRewriterModel: asString(p.queryRewriterModel, DEFAULT_PATH_A_SETTINGS.queryRewriterModel),
     queryRewriterTimeoutMs: Math.max(1000, asNumber(p.queryRewriterTimeoutMs, DEFAULT_PATH_A_SETTINGS.queryRewriterTimeoutMs)),
+    historyMaxTurns: Math.max(0, Math.min(20, asNumber(p.historyMaxTurns, DEFAULT_PATH_A_SETTINGS.historyMaxTurns))),
+    historyMaxCharsPerTurn: Math.max(100, Math.min(8000, asNumber(p.historyMaxCharsPerTurn, DEFAULT_PATH_A_SETTINGS.historyMaxCharsPerTurn))),
     searchLimit: Math.max(1, Math.min(20, asNumber(p.searchLimit, DEFAULT_PATH_A_SETTINGS.searchLimit))),
     injectMaxEntries: Math.max(1, Math.min(20, asNumber(p.injectMaxEntries, DEFAULT_PATH_A_SETTINGS.injectMaxEntries))),
     entryExcerptChars: Math.max(100, Math.min(4000, asNumber(p.entryExcerptChars, DEFAULT_PATH_A_SETTINGS.entryExcerptChars))),
