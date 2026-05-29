@@ -82,13 +82,30 @@ console.log(`Found ${idsInSource.length} STRUCTURAL_CONTEXT entries: ${idsInSour
  * a string describing what was found (capability shipped, fail).
  */
 const KNOWN_ENTRIES = {
-  // 2026-05-29 Stage 3 cleanup: "staging-resolver-unimplemented" removed from
-  // KNOWN_ENTRIES in the same commit that removed it from STRUCTURAL_CONTEXT.
-  // The resolver shipped: extensions/sediment/staging-resolver.ts
-  // (runStagingResolverIfDue + staging-resolver-v1.md prompt), scheduled from
-  // sediment/index.ts agent_end. STRUCTURAL_CONTEXT is now empty; the
-  // "every id has a signature" / "no orphan signature" checks below both
-  // pass trivially on the empty set.
+  // 2026-05-29 Stage 3: the staging-RESOLVER shipped (non-destructive triage),
+  // but it does NOT delete provisional staging files — so the structural entry
+  // was RENAMED to "staging-backlog-deletion-unimplemented" (the remaining gap
+  // is the age-out DELETION sweep, not resolution). Its staleness signature
+  // therefore checks for a DELETER, not for the resolver module.
+  "staging-backlog-deletion-unimplemented": {
+    description: "ADR 0025 §4.1.5 mechanical age-out deletion sweep for provisional staging",
+    /** Returns true while no age-out sweep deletes provisional staging files.
+     *  Ships when staging-resolver.ts unlinks stale provisional-correction
+     *  entries (e.g. a sweepStaleStagingEntries / ageOut function). */
+    shouldBeAbsent: () => {
+      const resolverSrc = fs.readFileSync(
+        path.join(repoRoot, "extensions/sediment/staging-resolver.ts"),
+        "utf8",
+      );
+      // Match only a dedicated age-out/sweep function name — NOT the advisory
+      // lock's unlinkSync (releaseLock), which is unrelated to staging files.
+      const shipped = /\b(?:sweepStaleStagingEntries|ageOutStaging|deleteStaleStaging)\s*\(/.test(resolverSrc);
+      if (shipped) {
+        return "staging-resolver.ts appears to delete provisional staging files — age-out sweep may have shipped; remove this STRUCTURAL_CONTEXT entry.";
+      }
+      return true;
+    },
+  },
   // 2026-05-28 Stage 2 cleanup: "archive-reactivation-reviewer-unimplemented"
   // removed from KNOWN_ENTRIES in the same commit that removed it from
   // STRUCTURAL_CONTEXT. The reviewer shipped: prompt at

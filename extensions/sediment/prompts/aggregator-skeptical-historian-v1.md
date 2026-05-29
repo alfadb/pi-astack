@@ -70,6 +70,9 @@ You receive:
 
 4. **`structural_context`** — known-unimplemented capabilities that
    cause structural advisories every run:
+   - staging age-out DELETION not implemented → expect a `staging_backlog`
+     (file-count) hit every run. The staging-resolver triages provisional
+     entries (non-destructive) but nothing shrinks the on-disk backlog yet.
    - `multiview_pending` mechanical hit is structural until P1.5
      replay writer dispatch fully ships (see C4 watchdog list)
    When a `mechanical_suspicion_signal` matches a known structural
@@ -78,10 +81,9 @@ You receive:
    stale_count emerging).
    **Staleness notice** (D4 from Phase B review): the bullet list above
    MUST be updated by any commit that ships one of these capabilities.
-   When P1.5 writer
-   dispatch lands, remove the corresponding bullet and add a Phase D
-   regression check to confirm the related mechanical advisory shape
-   has changed.
+   When the staging age-out sweep / P1.5 writer dispatch lands, remove the
+   corresponding bullet and add a Phase D regression check to confirm the
+   related mechanical advisory shape has changed.
 
 5. **`prior_aggregator_summaries`** — compact summary of the most
    recent 8 aggregator runs (timestamps, advisory kinds + counts,
@@ -411,8 +413,9 @@ For Phase C wiring (`aggregator.ts` calling this prompt):
 **Example A — modal correct output (empty promoted)**
 
 Input had 3 `mechanical_suspicion_signals` (one staging_backlog, two
-high-unused on maxim entries). `structural_context` confirms
-staging-resolver still unimplemented. `outcome_counterfactual_excerpts`
+high-unused on maxim entries). `structural_context` confirms staging
+age-out DELETION still unimplemented (the resolver triages but doesn't
+shrink the backlog). `outcome_counterfactual_excerpts`
 shows both high-unused entries are maxims with RETRIEVED-UNUSED
 counterfactuals like "this maxim shaped my framing, I didn't cite it
 directly". `prior_aggregator_summaries` shows the same shape last 6

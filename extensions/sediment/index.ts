@@ -1251,14 +1251,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       });
 
       // ADR 0025 §4.1.5.1 staging-resolver (Stage 3, 2026-05-29).
-      // Debounced batch pass that actively works the provisional-correction
-      // staging backlog (retire noise / keep plausible) instead of letting
-      // it pile to the 30-day age-out. Fire-and-forget; never blocks main
-      // session. Gated like archive-reactivation: false → no LLM tokens, no
-      // scheduling. It only rewrites .state staging files (retire = flip
-      // attribution_pending + retain file), never durable entries, so it is
-      // safe under "staging-only" too (promotion-to-durable is deferred to a
-      // multi-view follow-up; the resolver only flags promote_candidate).
+      // Debounced batch pass that TRIAGES the provisional-correction staging
+      // backlog. NON-DESTRUCTIVE: it only annotates each entry's
+      // resolver_disposition (likely_noise / plausible / promote_candidate) +
+      // reviewed-at and NEVER flips attribution_pending or deletes files —
+      // retirement stays the job of the time-bounded age-out (deletion sweep
+      // is a deferred follow-up). Fire-and-forget; never blocks main session.
+      // Gated like archive-reactivation: false → no LLM tokens, no scheduling.
+      // It only rewrites .state staging files (never durable entries), so it
+      // is safe under "staging-only" too (promotion-to-durable is deferred to
+      // a multi-view follow-up; the resolver only flags promote_candidate).
       if (settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
         void (async () => {
           try {

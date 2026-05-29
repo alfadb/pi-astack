@@ -492,11 +492,14 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
   }
 
   try {
-    // 5. Invoke LLM.
-    const prompt = buildResolverPrompt(candidates, options.windowText ?? "", now);
+    // 5. Build prompt + invoke LLM. buildResolverPrompt() reads the prompt
+    // file from disk; a missing/unreadable prompt must DEGRADE, not throw out
+    // of this fire-and-forget bg fn (deepseek R1 P0). So it lives INSIDE the
+    // inner try whose catch writes last_run(degraded) + a ledger row.
     let rawText: string;
     let model: string;
     try {
+      const prompt = buildResolverPrompt(candidates, options.windowText ?? "", now);
       const inv = await invokeResolver(prompt, options.settings, options.modelRegistry, options.signal);
       if (inv.skipReason) {
         // model_not_found / auth_unavailable are persistent misconfigs: write

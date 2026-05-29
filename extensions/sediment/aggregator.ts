@@ -62,9 +62,16 @@ export interface StructuralContextEntry {
 
 export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
   {
-    id: "staging-resolver-unimplemented",
+    // 2026-05-29 Stage 3: the staging-RESOLVER shipped (non-destructive
+    // triage: annotate disposition / deprioritize / flag promote_candidate —
+    // see staging-resolver.ts). But it does NOT delete provisional staging
+    // files, so the staging_backlog (file-count) advisory is STILL expected
+    // every run until a time-bounded age-out SWEEP ships (deferred follow-up).
+    // Renamed from "staging-resolver-unimplemented" to reflect that the
+    // remaining gap is deletion, not resolution.
+    id: "staging-backlog-deletion-unimplemented",
     description:
-      "ADR 0025 §4.1.5.1 staging-resolver NOT implemented — provisional staging entries are only consumed lazily by classifier step 6. Expect staging_backlog mechanical hit every run until staging-resolver ships.",
+      "ADR 0025 §4.1.5 staging age-out DELETION not implemented — the staging-resolver triages provisional entries (non-destructive) but nothing shrinks the on-disk backlog yet, so expect a staging_backlog mechanical hit every run until a mechanical age-out sweep ships. Demote unless growth-rate/stale_count materially worsens.",
     causes_advisory: "staging_backlog",
   },
   // NOTE 2026-05-28 Stage 2 (commit 9796bdd→...): archive-reactivation-

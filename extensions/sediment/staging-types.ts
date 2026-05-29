@@ -4,8 +4,10 @@
  * Staging entries are unconfirmed classifier hypotheses. They live in
  * `~/.abrain/.state/sediment/staging/` and are NOT in the memory_search
  * corpus. The staging-loader reads them to provide context for future
- * classifier runs. They age out after 30 days or are resolved (promoted
- * to durable / attributed to existing entry / archived).
+ * classifier runs. The staging-resolver TRIAGES them non-destructively
+ * (annotates a disposition; never flips attribution_pending); they age out
+ * after 30 days. Resolution to a durable entry (promote / attribute) is a
+ * future multi-view path, not done in v1.
  */
 
 export interface StagingEntry {

@@ -194,7 +194,12 @@ console.log("\n[4] wiring locks");
   check("index schedules runStagingResolverIfDue", /runStagingResolverIfDue\(/.test(idx));
   check("index gates resolver on autoLlmWriteEnabled !== false", /autoLlmWriteEnabled !== false\) scheduleAggregator/.test(idx));
   const agg = fs.readFileSync(path.join(repoRoot, "extensions/sediment/aggregator.ts"), "utf-8");
-  check("aggregator STRUCTURAL_CONTEXT no longer lists staging-resolver", !/staging-resolver-unimplemented/.test(agg));
+  // Resolver shipped as non-destructive triage, so the OLD
+  // "staging-resolver-unimplemented" claim must be gone…
+  check("aggregator no longer claims the RESOLVER is unimplemented", !/id:\s*"staging-resolver-unimplemented"/.test(agg));
+  // …but the backlog-DELETION gap is real (resolver doesn't delete), so a
+  // renamed structural entry must remain until an age-out sweep ships.
+  check("aggregator still tracks the staging-backlog DELETION gap", /staging-backlog-deletion-unimplemented/.test(agg));
   const mod = fs.readFileSync(path.join(repoRoot, "extensions/sediment/staging-resolver.ts"), "utf-8");
   check("resolver never flips attribution_pending (non-destructive)", !/attribution_pending:\s*false/.test(mod));
 }
