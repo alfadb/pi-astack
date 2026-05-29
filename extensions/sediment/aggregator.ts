@@ -90,10 +90,12 @@ export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
   // sediment/index.ts:3012-3041 — `writeApprovedToBrain` calls
   // `executeCuratorDecisionToBrain`). The remaining P1.5 limitation is
   // "Pass 1 schema cannot synthesize update/merge/supersede/delete rich
-  // payloads" which is encoded structurally as
-  // P15WatchdogSignals.pass1_op_type_breakdown_available=false, NOT as a
-  // structural_context entry. The smoke-aggregator-structural-context.mjs
-  // lint caught this drift on its first run — working as intended.
+  // payloads" — a DELIBERATE belt-and-suspenders skip (ADR 0024 line 392),
+  // not a bug. Per the 2026-05-29 3-T0 design review (0/week dogfood) it is
+  // tracked via the now-populated P15WatchdogSignals.pass1_op_type_breakdown
+  // (available=true), NOT a structural_context entry. The
+  // smoke-aggregator-structural-context.mjs lint caught earlier drift on its
+  // first run — working as intended.
 ];
 
 /**
@@ -114,16 +116,24 @@ export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
  *      breakdown via device_id + per-project audit roll-up
  *   4. multiview-pending staging files — oldest age + max retry count
  *
- * What we cannot derive (KNOWN GAP, deferred to ADR 0025 §4.4.6 P1.5
- * landing):
- *   5. Pass 1 op-type distribution (create / archive / update / merge /
- *      supersede). Pass 1 schema does not currently record op type in
- *      a structured field; rawText would need re-parsing.
- *
- * The KNOWN GAP is encoded in the returned summary as
- * `pass1_op_type_breakdown_available: false`, so the v1 prompt knows
- * not to use that dimension. Per the prompt's empty-feed edge case,
- * the LLM treats absent dimensions as 'no signal', not 'signal == 0'.
+ * Pass 1 op-type distribution (item 5, 2026-05-29 — previously a KNOWN GAP):
+ *   5. Pass 1 op-type distribution for the not-synthesizable skips
+ *      (update / merge / supersede / delete vs create / archive / skip).
+ *      This IS available structurally after all — `buildMultiViewAudit`
+ *      records `multi_view.pass1.op` on every curator audit row
+ *      (curator.ts), so we can attribute each
+ *      `multiview_pass1_op_not_synthesizable` skip to the Pass 1 op that
+ *      caused it WITHOUT re-parsing rawText. The earlier "schema doesn't
+ *      record op" claim was overstated. We now surface it as
+ *      `pass1_op_type_breakdown` and flip `pass1_op_type_breakdown_available`
+ *      to true. This is INSTRUMENT-ONLY (3-T0 design review 2026-05-29,
+ *      unanimous): the dogfood baseline shows 0/week not-synthesizable over
+ *      30 days, well under the ADR 0025 §6 `>5/week` trigger, so we MEASURE
+ *      the op mix rather than build risky Pass-1 rich-payload synthesis
+ *      (which would add durable-memory corruption surface against zero real
+ *      load — an ADR 0024 §10 "don't build for imagined load" violation).
+ * Per the prompt's empty-feed edge case, the LLM treats an all-zero
+ * breakdown as 'no signal', not 'signal == 0'.
  */
 export interface P15WatchdogSignals {
   /** From audit: count of skip rows with reason multiview_pass1_op_not_synthesizable. */
@@ -144,8 +154,16 @@ export interface P15WatchdogSignals {
     oldest_age_days: number;
     max_retry_attempts: number;
   };
-  /** Known gap marker per ADR 0025 §4.4.6: Pass 1 op-type is not yet
-   *  surfaced in audit — v1 prompt treats this dimension as missing. */
+  /** Per-Pass1-op breakdown of `multiview_pass1_op_not_synthesizable` skips,
+   *  attributed via the structured `multi_view.pass1.op` field on each
+   *  curator audit row. Keys are the Pass 1 op that hit the dead-loop
+   *  ("update" | "merge" | "supersede" | "delete" | "unknown"). Empty map
+   *  when none fired in-window. This is the op-typed evidence the ADR 0025
+   *  §6 `>5/week` re-prioritization decision needs. */
+  pass1_op_type_breakdown: Record<string, number>;
+  /** 2026-05-29: now TRUE — op-type IS derivable from the structured
+   *  `multi_view.pass1.op` audit field (the earlier "not surfaced" gap was
+   *  overstated). The v1 prompt may now use pass1_op_type_breakdown. */
   pass1_op_type_breakdown_available: boolean;
 }
 
@@ -784,6 +802,12 @@ function scanP15WatchdogSignals(
   // (1) + (2) from audit.jsonl
   let pass1OpNotSynth = 0;
   let candidateLost = 0;
+  // (5, 2026-05-29) Per-Pass1-op breakdown of not-synthesizable skips,
+  // attributed from the structured `multi_view.pass1.op` field on each
+  // curator audit row (the authoritative shape that co-locates the skip
+  // reason with the Pass 1 op). Additive to the legacy count above, which
+  // scans the older outcome/results shapes.
+  const pass1OpBreakdown: Record<string, number> = {};
   try {
     const { rows } = readJsonl<Record<string, unknown>>(
       sedimentAuditPath(projectRoot),
@@ -810,6 +834,32 @@ function scanP15WatchdogSignals(
       const topLost = row.candidate_lost;
       const outcomeLost = outcome?.candidate_lost;
       if (topLost === true || outcomeLost === true) candidateLost++;
+
+      // (5) Op-typed breakdown from the structured curator audit array.
+      // Each CuratorAudit carries `decision` (with the skip reason) AND
+      // `multi_view.pass1.op` co-located, so we can attribute the dead-loop
+      // to its Pass 1 op without re-parsing free text. Per-candidate count.
+      //
+      // R1 review P1 (GPT-5.5, 2026-05-29): the legacy pass1OpNotSynth scan
+      // above reads outcome.skip_reason / results[].detail.skip_reason — the
+      // OLD audit shapes (e.g. multi_view_replay rows). Current auto-write
+      // rows surface the skip in curator[].decision.reason, which those scans
+      // MISS → the count (which drives the prompt's §6 >5/week trigger) would
+      // read 0 even with real dead-loops, defeating the instrument. So we
+      // increment pass1OpNotSynth here too. The two shapes are DISJOINT (a row
+      // is either old-shape or curator-shape, never both), so no double-count;
+      // the count is the union and >= the breakdown sum.
+      if (Array.isArray(row.curator)) {
+        for (const c of row.curator as Array<Record<string, unknown>>) {
+          const dec = c?.decision as Record<string, unknown> | undefined;
+          if (dec?.reason !== "multiview_pass1_op_not_synthesizable") continue;
+          pass1OpNotSynth++;
+          const mv = c?.multi_view as Record<string, unknown> | undefined;
+          const p1 = mv?.pass1 as Record<string, unknown> | undefined;
+          const op = typeof p1?.op === "string" && p1.op ? (p1.op as string) : "unknown";
+          pass1OpBreakdown[op] = (pass1OpBreakdown[op] ?? 0) + 1;
+        }
+      }
     }
   } catch {
     // best-effort
@@ -884,7 +934,8 @@ function scanP15WatchdogSignals(
       oldest_age_days: Math.round(oldestAgeDays * 10) / 10,
       max_retry_attempts: maxRetry,
     },
-    pass1_op_type_breakdown_available: false,
+    pass1_op_type_breakdown: pass1OpBreakdown,
+    pass1_op_type_breakdown_available: true,
   };
 }
 

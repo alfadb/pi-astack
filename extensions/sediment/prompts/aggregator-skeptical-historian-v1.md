@@ -283,14 +283,23 @@ signal:
   "could be a one-time spike (cite raw_distribution / prior runs);
   is the count concentrated in one project / one candidate slug?"
   Commit promotion only if case-FOR wins AND you can name a 2-week
-  falsifier (e.g. "should drop back below 3/week if spike").
+  falsifier (e.g. "should drop back below 3/week if spike"). Use
+  `pass1_op_type_breakdown` to SCOPE any escalation: the design review
+  ruling is update-only synthesis is the smallest safe first build and
+  `delete` must NEVER be synthesized, so a breakdown dominated by
+  `delete`/`merge` is a WEAKER case for building than one dominated by
+  `update` (the dangerous ops stay deferred regardless of frequency).
 - `candidate_lost: true` growing: same flow. Cite specific growth
   rate and counter-cases.
 - replay queue retries trending up: same flow.
-- Pass 1 op-type distribution stayed empty for update/merge/supersede
-  → that's *expected* (see ADR 0025 §4.4.6), NOT advisory. Note in
+- `pass1_op_type_breakdown` is now POPULATED (2026-05-29 instrument:
+  attributed from the structured `multi_view.pass1.op` audit field). An
+  EMPTY / all-zero breakdown means genuinely 0 dead-loops in-window (the
+  current 0/week reality) → NOT advisory. A NON-empty breakdown is the
+  op-typed evidence: weigh it via the first bullet's case-FOR/AGAINST
+  flow, scoped per the update-only / never-delete ruling. Note in
   `reasoning_quality_self_check.silence_audit` if you considered
-  flagging this and dropped it.
+  flagging an empty breakdown and dropped it.
 
 The ADR threshold is your **evidence**, not your **boss** (§1 + C1).
 
