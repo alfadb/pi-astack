@@ -108,6 +108,15 @@ export interface ProjectEntryUpdateDraft {
   title?: string;
   kind?: EntryKind;
   status?: EntryStatus;
+  /** CAS / compare-and-swap precondition (ADR 0027 C3' infra). When set, the
+   *  update is REJECTED (reason: status_precondition_failed) unless the
+   *  entry's CURRENT on-disk status equals this value. Undefined = no check
+   *  (backward-compatible: existing callers are unaffected). Needed by the
+   *  staging-resolver (provisional→active) and hard_archive (git rm only when
+   *  still archived) so a concurrent reactivate/update/delete cannot be
+   *  clobbered by a stale-status transition. The on-disk read happens inside
+   *  the sediment lock on the real RMW path, making this a true CAS. */
+  expected_status?: EntryStatus;
   confidence?: number;
   compiledTruth?: string;
   triggerPhrases?: string[];
@@ -870,7 +879,13 @@ export async function supersedeProjectEntry(
 
 export async function deleteProjectEntry(
   slugRaw: string,
-  opts: WriteProjectEntryOptions & { reason?: string; mode?: DeleteMode; sessionId?: string },
+  // `expected_status` is the CAS precondition (same semantics as
+  // ProjectEntryUpdateDraft.expected_status): when set, the delete is
+  // rejected (status_precondition_failed) unless the entry's current on-disk
+  // status matches. Honored for BOTH soft (→ updateProjectEntry) and hard
+  // (in-lock check before unlink) modes, so hard_archive can do an atomic
+  // "git rm only when still archived".
+  opts: WriteProjectEntryOptions & { reason?: string; mode?: DeleteMode; sessionId?: string; expected_status?: EntryStatus },
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
@@ -907,6 +922,7 @@ export async function deleteProjectEntry(
   if (mode === "soft") {
     const result = await updateProjectEntry(slug, {
       status: "archived",
+      expected_status: opts.expected_status,
       sessionId: opts.sessionId,
       timelineAction: "deleted",
       timelineNote: `soft delete: ${reason}`,
@@ -932,6 +948,28 @@ export async function deleteProjectEntry(
   try {
     lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
     const originalRaw = await fs.readFile(target, "utf-8");
+    // CAS / expected-status guard (ADR 0027 C3'): the read of originalRaw and
+    // the unlink below are both inside the sediment lock, so comparing the
+    // freshly-read on-disk status to opts.expected_status is a true
+    // compare-and-swap. This is what lets hard_archive `git rm` an entry ONLY
+    // while it is still archived — a concurrent reactivate flips status to
+    // active and the delete is rejected instead of destroying live state.
+    // Opt-in: undefined expected_status skips the check (backward-compatible).
+    if (opts.expected_status !== undefined) {
+      const actualStatusRaw = parseFrontmatter(splitFrontmatter(originalRaw).frontmatterText).status;
+      const actualStatus = typeof actualStatusRaw === "string" ? actualStatusRaw : null;
+      if (actualStatus !== opts.expected_status) {
+        const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+          operation: "reject",
+          reason: "status_precondition_failed",
+          target: `${targetPrefix}:${slug}`,
+          delete_mode: "hard",
+          detail: `expected status '${opts.expected_status}', found '${actualStatus ?? "(none)"}'`,
+          duration_ms: Date.now() - started,
+        }));
+        return { slug, path: target, status: "rejected", reason: "status_precondition_failed", auditPath, deleteMode: "hard", ...resultCtx };
+      }
+    }
     await fs.unlink(target);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
     const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "delete", gitCommitProjectId) : null;
@@ -1051,6 +1089,29 @@ export async function updateProjectEntry(
         duration_ms: Date.now() - started,
       }));
       return { ok: false, response: { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx } };
+    }
+    // CAS / expected-status guard (ADR 0027 C3' infra). Opt-in: only runs when
+    // a caller sets patch.expected_status. On the real RMW path this read of
+    // `raw` happens INSIDE the sediment lock (prepareMergedMarkdown is
+    // re-invoked post-acquireLock), so comparing the freshly-read on-disk
+    // status to the caller's expectation is a true compare-and-swap against
+    // concurrent archive / reactivate / update / delete. Mismatch → reject
+    // (terminal, see index.ts shouldAdvanceAfterResults) instead of
+    // clobbering newer state with a stale-status transition.
+    if (patch.expected_status !== undefined) {
+      const actualStatusRaw = parseFrontmatter(splitFrontmatter(raw).frontmatterText).status;
+      const actualStatus = typeof actualStatusRaw === "string" ? actualStatusRaw : null;
+      if (actualStatus !== patch.expected_status) {
+        const reason = "status_precondition_failed";
+        const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+          operation: "reject",
+          reason,
+          target: `${targetPrefix}:${slug}`,
+          detail: `expected status '${patch.expected_status}', found '${actualStatus ?? "(none)"}'`,
+          duration_ms: Date.now() - started,
+        }));
+        return { ok: false, response: { slug, path: target, status: "rejected", reason, auditPath, ...resultCtx } };
+      }
     }
     const merged = mergeUpdateMarkdown(raw, patch, slug, opts.projectId, { scope });
     if ("error" in merged) {

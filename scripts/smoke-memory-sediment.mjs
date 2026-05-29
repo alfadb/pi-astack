@@ -350,12 +350,22 @@ async function main() {
       const sedimentHandlers = hookHandlers.sediment.get("before_agent_start") ?? [];
       const memoryHandlers = hookHandlers.memory.get("before_agent_start") ?? [];
       assert(sedimentHandlers.length === 1, `sediment must register exactly 1 before_agent_start handler, got ${sedimentHandlers.length}`);
-      // memory registers TWO handlers as of ADR 0026 path A implementation
-      // (2026-05-28): handler[0] = memory-footnote protocol injector,
-      // handler[1] = path-A relevant-memory context injector. They are kept
-      // as separate handlers because their idempotency markers are distinct
-      // and pi chains return values from all before_agent_start handlers.
-      assert(memoryHandlers.length === 2, `memory must register exactly 2 before_agent_start handlers (footnote + path-A), got ${memoryHandlers.length}`);
+      // memory registers TWO INJECTOR handlers (ADR 0026 path A, 2026-05-28):
+      // the memory-footnote protocol injector, then the path-A relevant-memory
+      // context injector — kept separate because their idempotency markers
+      // differ and pi chains return values from all before_agent_start handlers.
+      // Stage 1 (2026-05-29): memory ALSO calls bindCausalAnchorLifecycle(pi)
+      // at activate top, which registers the causal-anchor turn-bump
+      // before_agent_start handler WHEN memory is the first extension to bind
+      // (this dispatch-less smoke). In production with dispatch loaded,
+      // bindLifecycle no-ops here (idempotent). Either way the two injector
+      // handlers are the LAST two registered, so locate them via slice(-2)
+      // rather than a fixed index that the optional bump prefix would shift.
+      assert(
+        memoryHandlers.length === 2 || memoryHandlers.length === 3,
+        `memory must register the 2 injector handlers (+ optional causal-anchor bump) = 2 or 3 before_agent_start handlers, got ${memoryHandlers.length}`,
+      );
+      const [footnoteHandler, pathAHandler] = memoryHandlers.slice(-2);
 
       // First call appends; second call must short-circuit on the marker.
       const sedMarker = "<!-- pi-astack/sediment: main-session read-only contract -->";
@@ -372,7 +382,7 @@ async function main() {
       const sedSecond = await sedimentHandlers[0]({ systemPrompt: sedFirst.systemPrompt });
       assert(sedSecond === undefined, "sediment injector must be idempotent (return undefined when marker already present)");
 
-      const memFirst = await memoryHandlers[0]({ systemPrompt: seed });
+      const memFirst = await footnoteHandler({ systemPrompt: seed });
       assert(memFirst && typeof memFirst.systemPrompt === "string", "memory injector first call must return { systemPrompt }");
       assert(memFirst.systemPrompt.includes(memMarker), `memory injection missing marker: ${memFirst.systemPrompt.slice(-200)}`);
       assert(memFirst.systemPrompt.includes("memory-footnote"), "memory injection must include the protocol name 'memory-footnote'");
@@ -382,7 +392,7 @@ async function main() {
       assert(memFirst.systemPrompt.includes("retrieved-unused") && memFirst.systemPrompt.includes("不要静默省略"), "memory-footnote prompt must capture retrieved-but-unused entries instead of positive-only self-reports");
       assert(memFirst.systemPrompt.includes("decisive") && memFirst.systemPrompt.includes("confirmatory") && memFirst.systemPrompt.includes("retrieved-unused"), "memory injection must enumerate the used taxonomy");
       assert(memFirst.systemPrompt.includes("高价值决策时可拉取") && !memFirst.systemPrompt.includes("在遇到以下场景**之前**"), "memory_decide prompt must stay Path-B advisory, not pseudo Path-A mandatory trigger");
-      const memSecond = await memoryHandlers[0]({ systemPrompt: memFirst.systemPrompt });
+      const memSecond = await footnoteHandler({ systemPrompt: memFirst.systemPrompt });
       assert(memSecond === undefined, "memory injector must be idempotent (return undefined when marker already present)");
 
       // === path-A handler contract (handler[1]) ===
@@ -391,7 +401,7 @@ async function main() {
       // takes the skipped_no_model_registry path — still returns undefined
       // (no block to inject). Path A never throws, never returns invalid
       // shapes, and never bypasses INV-INVISIBILITY by surfacing errors.
-      const pathAHandler = memoryHandlers[1];
+      // pathAHandler located above via memoryHandlers.slice(-2).
       // Empty prompt → undefined (fast-path skip)
       assert(
         (await pathAHandler({ systemPrompt: seed, prompt: "" })) === undefined,

@@ -396,6 +396,11 @@ function compactResultSummary(results: WriteProjectEntryResult[]): string {
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
   const terminalReasons = new Set([
     "duplicate_slug", "validation_error", "lint_error",
+    // CAS guard (ADR 0027 C3'): a status_precondition_failed means the entry
+    // changed under us; retrying the same expected_status transition cannot
+    // succeed without fresh intent, so treat it as terminal (advance the
+    // checkpoint) to avoid an unbounded retry loop.
+    "status_precondition_failed",
   ]);
   return results.every((result) => {
     if (result.status === "created" || result.status === "updated" || result.status === "merged" || result.status === "archived" || result.status === "superseded" || result.status === "deleted" || result.status === "skipped" || result.status === "dry_run") return true;
@@ -1305,6 +1310,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         slug,
                         {
                           status: "active",
+                          // CAS guard (Stage 2, 2026-05-29): the reviewer
+                          // decided to reactivate from an `archivedEntries`
+                          // snapshot taken BEFORE the LLM call. By apply time
+                          // fresher intent may have reactivated/superseded/
+                          // contested/deleted the entry. Require it to STILL be
+                          // archived; otherwise the write is rejected
+                          // (status_precondition_failed) instead of clobbering
+                          // the newer status back to active. A rejected race is
+                          // a benign no-op (surfaced via res.reason below).
+                          expected_status: "archived",
                           timelineAction: "reactivated",
                           timelineNote: `archive-reactivation-reviewer v1: ${rationale.slice(0, 200)}`,
                           sessionId,
