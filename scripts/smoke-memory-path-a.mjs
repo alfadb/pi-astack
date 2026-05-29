@@ -253,6 +253,14 @@ console.log("\n[6] inject block must hydrate compiledTruth from entries (bug fix
 const injectorSource = fs.readFileSync(path.join(repoRoot, "extensions/memory/memory-context-injector.ts"), "utf-8");
 check("injector imports MemoryEntry from ./types (not ./entries) — bug 1 fix",
   /import type \{ MemoryEntry \} from "\.\/types";/.test(injectorSource));
+// LIVE-CAUGHT REGRESSION (2026-05-29): loadEntries was imported from ./decide,
+// which does NOT export it (parser.ts does) → Path A errored at step 3
+// ("_decide.loadEntries is not a function") on every real turn. The no-LLM
+// smoke paths return BEFORE step 3 so this slipped. Lock the correct source.
+check("injector imports loadEntries from ./parser (./decide has no loadEntries)",
+  /import \{ loadEntries \} from "\.\/parser";/.test(injectorSource));
+check("injector does NOT import loadEntries from ./decide (live runtime bug)",
+  !/import \{ loadEntries \} from "\.\/decide";/.test(injectorSource));
 check("injector hydrates hits via entriesBySlug.get() — bug 2 fix",
   /entriesBySlug = new Map\(entries\.map\(/.test(injectorSource) &&
   /fullEntry\.compiledTruth/.test(injectorSource));
@@ -337,27 +345,34 @@ console.log("\n[8] prompt faithfulness: rewriter cost-bias stripped; aggregator 
 }
 
 // ────────────────────────────────────────────────────────────────
-console.log("\n[9] causal-anchor lifecycle hardening (idempotent bind + single turn-bump)");
+console.log("\n[9] causal-anchor: multi-binder + per-turn idempotent bump (LIVE anchor_missing fix)");
 {
   anchorMod._resetCausalAnchorForTests();
   // Fake pi capturing handlers per event name.
-  const handlers = { session_start: [], before_agent_start: [] };
+  const handlers = { session_start: [], before_agent_start: [], agent_end: [] };
   const fakePi = { on(evt, fn) { (handlers[evt] ||= []).push(fn); } };
-  // Two extensions (e.g. dispatch + memory) BOTH call bindLifecycle.
+  // Two extensions (e.g. dispatch + memory) BOTH call bindLifecycle. Unlike
+  // the old first-only guard, EVERY call now registers — so a consumer can
+  // register its own bump ahead of its reader. Double-counting is prevented
+  // at FIRE time by the per-turn flag, not at registration time.
   anchorMod.bindLifecycle(fakePi);
   anchorMod.bindLifecycle(fakePi);
-  check("idempotent: session_start handler registered exactly once", handlers.session_start.length === 1);
-  check("idempotent: before_agent_start turn-bump registered exactly once", handlers.before_agent_start.length === 1);
-  // Fire lifecycle. session_start → turn=-1; one before_agent_start → turn 0
-  // (NOT 2, which is what a double-registration bug would produce).
+  check("multi-binder: 2 binds register 2 before_agent_start bump handlers", handlers.before_agent_start.length === 2);
+  check("multi-binder: agent_end reset handler registered", handlers.agent_end.length === 2);
   const fakeCtx = { sessionManager: { getSessionId: () => "sess-lifecycle" } };
-  handlers.session_start[0](null, fakeCtx);
-  handlers.before_agent_start[0](null, fakeCtx);
+  handlers.session_start.forEach((h) => h(null, fakeCtx));
+  // One turn fires BOTH bump handlers; per-turn flag → only the first counts.
+  handlers.before_agent_start.forEach((h) => h(null, fakeCtx));
   const a = anchorMod.getCurrentAnchor();
-  check("single turn-bump → turn_id 0 on first prompt (no double-increment)",
+  check("per-turn idempotent: 2 bump handlers in one turn → turn_id 0 (not 2)",
     !!a && a.session_id === "sess-lifecycle" && a.turn_id === 0);
-  handlers.before_agent_start[0](null, fakeCtx);
-  check("second prompt → turn_id 1", anchorMod.getCurrentAnchor().turn_id === 1);
+  // Next turn: agent_end resets the flag, then before_agent_start → exactly +1.
+  handlers.agent_end.forEach((h) => h(null, fakeCtx));
+  handlers.before_agent_start.forEach((h) => h(null, fakeCtx));
+  check("next turn (after agent_end reset) → turn_id 1 (single bump)", anchorMod.getCurrentAnchor().turn_id === 1);
+  // Without an agent_end reset, re-firing before_agent_start must NOT bump.
+  handlers.before_agent_start.forEach((h) => h(null, fakeCtx));
+  check("same-turn re-fire (no agent_end) does NOT bump", anchorMod.getCurrentAnchor().turn_id === 1);
   anchorMod._resetCausalAnchorForTests();
 }
 
@@ -370,6 +385,58 @@ console.log("\n[9] causal-anchor lifecycle hardening (idempotent bind + single t
   const pathAIdx = memIdxSrc.indexOf("Path A: always-on relevant-memory injection");
   check("memory/index.ts binds causal-anchor lifecycle before Path A handler",
     bindIdx > 0 && pathAIdx > 0 && bindIdx < pathAIdx);
+}
+
+// ────────────────────────────────────────────────────────────────
+// [10] would have caught the LIVE anchor_missing bug. It loads the REAL
+// memory extension, simulates dispatch binding the anchor lifecycle FIRST
+// (the live condition that made memory's bind a no-op under the old
+// registration guard), then fires memory's before_agent_start handlers in
+// registration order and asserts the Path A ledger row carries the anchor.
+console.log("\n[10] LIVE end-to-end: dispatch-binds-first, memory Path A still resolves the anchor");
+{
+  anchorMod._resetCausalAnchorForTests();
+  const memMod = jiti(path.join(repoRoot, "extensions/memory/index.ts"));
+  const memoryExt = memMod.default ?? memMod;
+  // (a) dispatch binds the anchor lifecycle FIRST (separate pi).
+  const dispatchEvt = {};
+  anchorMod.bindLifecycle({ on(e, fn) { (dispatchEvt[e] ||= []).push(fn); } });
+  // (b) memory activates (separate pi); capture its handlers in reg order.
+  const memEvt = {};
+  const memPi = {
+    on(e, fn) { (memEvt[e] ||= []).push(fn); },
+    registerTool() {},
+    registerCommand() {},
+  };
+  const tmpH = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-e2e-anchor-"));
+  const prevR = process.env.ABRAIN_ROOT;
+  process.env.ABRAIN_ROOT = tmpH;
+  try {
+    memoryExt(memPi);
+    const ctx = { sessionManager: { getSessionId: () => "e2e-sess" }, modelRegistry: undefined, cwd: tmpH };
+    // session_start fires on all extensions.
+    (dispatchEvt.session_start || []).forEach((h) => h({}, ctx));
+    (memEvt.session_start || []).forEach((h) => h({}, ctx));
+    // Fire MEMORY's before_agent_start handlers in registration order — under
+    // the fix this is [memoryBump, footnote, pathA]; the OLD guard would have
+    // left memory with [footnote, pathA] (bump only on dispatch's pi) and the
+    // ledger row would be anchor_missing.
+    for (const h of (memEvt.before_agent_start || [])) {
+      await h({ systemPrompt: "", prompt: "用 pnpm 还是 yarn?" }, ctx);
+    }
+    const lp = path.join(tmpH, ".state", "memory", "path-a-ledger.jsonl");
+    const rows = fs.readFileSync(lp, "utf-8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+    const last = rows[rows.length - 1];
+    check("LIVE: Path A ledger row carries session_id (memory's own bump fired before its reader)",
+      last.session_id === "e2e-sess", JSON.stringify(last));
+    check("LIVE: Path A ledger row carries turn_id 0", last.turn_id === 0, JSON.stringify(last));
+    check("LIVE: Path A row is NOT anchor_missing (the bug)", last.anchor_missing === undefined, JSON.stringify(last));
+  } finally {
+    if (prevR === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = prevR;
+    anchorMod._resetCausalAnchorForTests();
+    try { fs.rmSync(tmpH, { recursive: true, force: true }); } catch {}
+  }
 }
 
 // ────────────────────────────────────────────────────────────────

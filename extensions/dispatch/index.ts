@@ -975,17 +975,17 @@ export default function (pi: ExtensionAPI) {
   // available to every audit writer via getCurrentAnchor().
   //
   // Note: this activate function ALSO runs in the shared sub-agent loader
-  // (PR-B set noExtensions: false on _sharedInfraPromise). bindLifecycle is
-  // now IDEMPOTENT (process-wide guard, 2026-05-29 canonical-owner harden):
-  // it registers the session_start / before_agent_start handlers EXACTLY
-  // ONCE on whichever ExtensionRunner calls first (always main pi in
-  // practice, since the shared loader is constructed lazily on first
-  // dispatch). The shared-loader call no-ops — harmless, because both
-  // handlers self-gate on isSubAgentSession(ctx) and sub-agent anchors are
-  // derived via deriveSubAgentAnchor + runWithTriggerAnchor, not lifecycle
-  // events. The memory extension also calls bindLifecycle at the top of its
-  // activate so the turn-bump is registered ahead of its Path A reader even
-  // when dispatch is absent. See causal-anchor.ts bindLifecycle doc.
+  // (PR-B set noExtensions: false on _sharedInfraPromise). bindLifecycle
+  // registers session_start / before_agent_start / agent_end handlers on
+  // EVERY call (it is NOT a first-only no-op — the old registration guard was
+  // removed 2026-05-29 because it caused the live anchor_missing bug). Calling
+  // it from multiple runners/extensions is safe: the before_agent_start bump
+  // is idempotent PER TURN (state.turnAlreadyBumped, reset on
+  // agent_end/session_start), so turn_id still advances exactly once per turn.
+  // All three handlers self-gate on isSubAgentSession(ctx), so the shared
+  // sub-agent loader's registrations never touch the main anchor; sub-agent
+  // anchors are derived via deriveSubAgentAnchor + runWithTriggerAnchor.
+  // See causal-anchor.ts bindLifecycle doc.
   bindCausalAnchorLifecycle(pi);
 
   // Footer status: reset to idle on session/agent boundaries.

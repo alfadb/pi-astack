@@ -112,13 +112,18 @@ type CausalAnchorState = {
    *  Same ALS instance shared across all module imports → cross-extension
    *  scope visibility (e.g., dispatch sets scope, sub-agent's memory_decide reads it). */
   triggerAnchorALS: AsyncLocalStorage<{ anchor: CausalAnchor | undefined }>;
-  /** Process-wide guard so bindLifecycle registers the session_start /
-   *  before_agent_start handlers EXACTLY ONCE, no matter how many
-   *  extensions call it. Without this, two callers (e.g. dispatch AND
-   *  memory) would each register a before_agent_start turn-bump handler
-   *  and currentTurnId would advance by 2 per user prompt — corrupting
-   *  the (session_id, turn_id) join key. See bindLifecycle docstring. */
-  lifecycleBound: boolean;
+  /** Per-turn idempotency flag for the before_agent_start bump. Set true
+   *  by the first bump handler that fires in a turn, reset to false on
+   *  agent_end / session_start. This lets MULTIPLE extensions register a
+   *  bump handler (so each anchor CONSUMER — e.g. memory's Path A injector —
+   *  can guarantee a bump runs before its own before_agent_start reader by
+   *  binding ahead of it on the same pi) WITHOUT double-incrementing
+   *  currentTurnId: only the first bump per turn counts. Replaces the old
+   *  registration-time `lifecycleBound` guard, which made a consumer's
+   *  bindLifecycle a no-op when dispatch bound first — leaving the bump on a
+   *  DIFFERENT pi that could fire AFTER the consumer (the live
+   *  anchor_missing-on-Path-A bug, 2026-05-29). */
+  turnAlreadyBumped: boolean;
 };
 
 function _getState(): CausalAnchorState {
@@ -130,7 +135,7 @@ function _getState(): CausalAnchorState {
       currentTurnId: -1,
       subturnCounters: new Map<string, number>(),
       triggerAnchorALS: new AsyncLocalStorage<{ anchor: CausalAnchor | undefined }>(),
-      lifecycleBound: false,
+      turnAlreadyBumped: false,
     };
     g[_STATE_KEY] = state;
   }
@@ -218,20 +223,24 @@ function _getState(): CausalAnchorState {
  *  Sub-agent anchors are explicitly derived via `deriveSubAgentAnchor`
  *  by dispatch BEFORE spawning, not by lifecycle events.
  *
- *  # Idempotency (ADR 0027 C6 — canonical-owner hardening, 2026-05-29)
+ *  # Multi-binder + per-turn idempotency (ADR 0027 C6, hardened 2026-05-29)
  *
- *  Safe to call from MULTIPLE extensions. The first call registers the
- *  handlers and flips `state.lifecycleBound`; subsequent calls are no-ops.
- *  This lets any anchor CONSUMER (e.g. the memory Path A injector) call
- *  bindLifecycle at the TOP of its own activate() to guarantee a turn-bump
- *  handler is registered before its own before_agent_start reader — so the
- *  stamped turn_id is correct regardless of cross-extension load order, and
- *  the anchor still works when dispatch is disabled. Registering twice would
- *  double-increment currentTurnId, which is exactly what the guard prevents. */
+ *  Safe to call from MULTIPLE extensions, and EVERY call registers handlers
+ *  (no registration-time no-op). Double-increment is prevented at FIRE time
+ *  by `state.turnAlreadyBumped`: the first before_agent_start bump handler to
+ *  fire in a turn increments currentTurnId and sets the flag; later bump
+ *  handlers in the same turn skip; agent_end / session_start reset the flag.
+ *
+ *  Why every caller registers (not first-only): an anchor CONSUMER that runs
+ *  inside before_agent_start (e.g. memory's Path A injector) must guarantee a
+ *  bump fires BEFORE its own read. The only way it can is to register its OWN
+ *  bump handler ahead of its reader on the SAME pi (handlers on one pi fire in
+ *  registration order). The old first-only guard defeated this: when dispatch
+ *  bound first, the consumer's bindLifecycle no-op'd and the bump lived on
+ *  dispatch's pi, which could fire AFTER the consumer's reader → the live
+ *  anchor_missing-on-Path-A bug. With per-turn idempotency, the consumer can
+ *  safely register its own ordered bump without inflating turn_id. */
 export function bindLifecycle(pi: ExtensionAPI): void {
-  const state = _getState();
-  if (state.lifecycleBound) return;
-  state.lifecycleBound = true;
   pi.on("session_start", (_event: unknown, ctx: unknown) => {
     // ADR 0027 PR-B: sub-agent session_start MUST NOT overwrite main-session
     // anchor. The sub-agent's anchor was already derived by dispatch.
@@ -243,6 +252,7 @@ export function bindLifecycle(pi: ExtensionAPI): void {
       const state = _getState();
       state.currentSessionId = id ?? undefined;
       state.currentTurnId = -1; // next before_agent_start will bump to 0
+      state.turnAlreadyBumped = false;
     } catch {
       // Defensive: extension lifecycle must never throw.
     }
@@ -252,8 +262,22 @@ export function bindLifecycle(pi: ExtensionAPI): void {
     // turn counter. Sub-agent runs are NOT user turns.
     if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
 
-    // Fired once per user prompt submission — perfect monotonic bump point.
-    _getState().currentTurnId++;
+    // Per-turn idempotent bump: only the FIRST bump handler to fire this turn
+    // increments. Lets multiple extensions register ordered bump handlers
+    // (so consumers can guarantee bump-before-read) without double-counting.
+    const state = _getState();
+    if (!state.turnAlreadyBumped) {
+      state.currentTurnId++;
+      state.turnAlreadyBumped = true;
+    }
+  });
+  pi.on("agent_end", (_event: unknown, ctx: unknown) => {
+    // Reset the per-turn bump flag so the NEXT turn's before_agent_start
+    // bumps again. agent_end fires once per turn (incl. error/abort), after
+    // the agent loop, so it is the reliable per-turn edge. Sub-agent agent_end
+    // must NOT touch the main flag.
+    if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
+    _getState().turnAlreadyBumped = false;
   });
 }
 
@@ -524,7 +548,7 @@ export function _resetCausalAnchorForTests(): void {
   state.currentSessionId = undefined;
   state.currentTurnId = -1;
   state.subturnCounters.clear();
-  state.lifecycleBound = false;
+  state.turnAlreadyBumped = false;
   // ALS is per-async-context; no global reset needed. Any test that wants
   // to assert "no scope active" should just call getCurrentAnchor() outside
   // any runWithTriggerAnchor() block.

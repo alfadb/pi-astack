@@ -354,13 +354,15 @@ async function main() {
       // the memory-footnote protocol injector, then the path-A relevant-memory
       // context injector — kept separate because their idempotency markers
       // differ and pi chains return values from all before_agent_start handlers.
-      // Stage 1 (2026-05-29): memory ALSO calls bindCausalAnchorLifecycle(pi)
-      // at activate top, which registers the causal-anchor turn-bump
-      // before_agent_start handler WHEN memory is the first extension to bind
-      // (this dispatch-less smoke). In production with dispatch loaded,
-      // bindLifecycle no-ops here (idempotent). Either way the two injector
-      // handlers are the LAST two registered, so locate them via slice(-2)
-      // rather than a fixed index that the optional bump prefix would shift.
+      // Stage 1 (2026-05-29, hardened): memory ALSO calls
+      // bindCausalAnchorLifecycle(pi) at activate top, which ALWAYS registers
+      // the causal-anchor turn-bump before_agent_start handler (bindLifecycle
+      // registers on every call — the old first-only registration guard was
+      // removed; idempotency is now per-turn at fire time). So in this
+      // dispatch-less smoke memory's before_agent_start handlers are
+      // [bump, footnote, pathA]. Either way the two injector handlers are the
+      // LAST two registered, so locate them via slice(-2) rather than a fixed
+      // index that the bump prefix would shift.
       assert(
         memoryHandlers.length === 2 || memoryHandlers.length === 3,
         `memory must register the 2 injector handlers (+ optional causal-anchor bump) = 2 or 3 before_agent_start handlers, got ${memoryHandlers.length}`,

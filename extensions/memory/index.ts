@@ -314,15 +314,20 @@ export default function (pi: ExtensionAPI) {
   // allowlist also blocks them).
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
-  // ADR 0027 C6 (canonical-owner hardening, 2026-05-29): bind the causal
-  // anchor lifecycle at the TOP of activate, BEFORE the Path A
-  // before_agent_start handler is registered below. bindLifecycle is
-  // idempotent (process-wide guard), so if dispatch already bound it this
-  // is a no-op; if dispatch is absent or loads later, this guarantees the
-  // turn-bump handler is registered ahead of Path A's reader — so the
-  // turn_id stamped on path-a-ledger.jsonl matches the same turn's
-  // outcome-ledger.jsonl row (ADR 0026 §5.1 join), independent of
-  // cross-extension load order.
+  // ADR 0027 C6 (2026-05-29, hardened after live anchor_missing bug): bind
+  // the causal anchor lifecycle at the TOP of activate, BEFORE the Path A
+  // before_agent_start handler registered below. This MUST run before Path A
+  // so memory's OWN turn-bump handler is registered ahead of its reader on
+  // THIS pi (handlers on one pi fire in registration order) — guaranteeing
+  // the bump fires before Path A reads getCurrentAnchor(), independent of
+  // cross-extension load order. bindLifecycle registers on EVERY call (NOT a
+  // first-only no-op): double-increment is prevented at fire time by the
+  // per-turn flag in causal-anchor.ts, not by skipping registration. (The
+  // old process-wide registration guard is what caused the live bug: when
+  // dispatch bound first, memory's bind no-op'd and the bump lived on
+  // dispatch's pi, firing AFTER Path A → anchor_missing.) So memory's
+  // path-a-ledger turn_id matches the same turn's outcome-ledger row
+  // (ADR 0026 §5.1 join). Do NOT re-introduce a registration guard.
   bindCausalAnchorLifecycle(pi);
 
   registerMemoryCommand(pi);

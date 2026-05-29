@@ -34,7 +34,7 @@ import { resolveUserGlobalAbrainHome } from "../_shared/runtime";
 
 import { rewriteUserMessageToSearchQuery } from "./query-rewriter";
 import type { QueryRewriteResult, ConversationTurn } from "./query-rewriter";
-import { loadEntries } from "./decide";
+import { loadEntries } from "./parser";
 import { llmSearchEntriesWithVerdict } from "./llm-search";
 import type { SearchVerdictResult } from "./llm-search";
 import type { MemoryEntry } from "./types";
@@ -302,9 +302,12 @@ export async function tryInjectRelevantMemoryContext(
   // ADR 0027 C6 / ADR 0026 §5.1: resolve the causal anchor once and stamp
   // it onto the base row. Every `{ ...rowBase, ... }` outcome below inherits
   // (session_id, turn_id[, subturn, device_id]) — the only key that joins
-  // path-a-ledger.jsonl to outcome-ledger.jsonl. before_agent_start has
-  // already bumped the turn counter (dispatch.bindLifecycle) by the time
-  // this injector runs, so the turn_id matches the same turn's outcome rows.
+  // path-a-ledger.jsonl to outcome-ledger.jsonl. The turn counter has already
+  // been bumped by the time this injector runs because memory/index.ts calls
+  // bindCausalAnchorLifecycle BEFORE registering this Path A handler, so
+  // memory's OWN before_agent_start bump (on the same pi) fires first — see
+  // the memory/index.ts comment. So turn_id matches the same turn's outcome
+  // rows. (Pre-2026-05-29 this relied on dispatch's bump and broke live.)
   const anchor = getCurrentAnchor();
   Object.assign(rowBase, spreadAnchor(anchor));
   if (!anchor) rowBase.anchor_missing = true;

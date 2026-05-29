@@ -164,7 +164,7 @@ check("initial getCurrentAnchor() returns undefined", () => {
   }
 });
 
-check("bindLifecycle registers session_start + before_agent_start", () => {
+check("bindLifecycle registers session_start + before_agent_start + agent_end", () => {
   _resetCausalAnchorForTests();
   const pi = makeFakePi();
   bindLifecycle(pi);
@@ -173,6 +173,34 @@ check("bindLifecycle registers session_start + before_agent_start", () => {
   }
   if (pi._handlerCount("before_agent_start") !== 1) {
     throw new Error("before_agent_start handler not registered");
+  }
+  // 2026-05-29: bindLifecycle now also registers an agent_end handler that
+  // resets the per-turn bump flag (replaces the old registration guard).
+  if (pi._handlerCount("agent_end") !== 1) {
+    throw new Error("agent_end (per-turn bump reset) handler not registered");
+  }
+});
+
+check("bindLifecycle is multi-binder safe: 2 calls register 2 bump handlers but per-turn bump is idempotent", () => {
+  _resetCausalAnchorForTests();
+  const pi = makeFakePi();
+  bindLifecycle(pi);
+  bindLifecycle(pi); // a second extension binding (e.g. dispatch + memory)
+  if (pi._handlerCount("before_agent_start") !== 2) {
+    throw new Error(`expected 2 bump handlers after 2 binds, got ${pi._handlerCount("before_agent_start")}`);
+  }
+  const sm = { getSessionId: () => "session-A" };
+  pi._fire("session_start", { type: "session_start" }, { sessionManager: sm });
+  // One turn fires BOTH bump handlers; per-turn flag → only the first counts.
+  pi._fire("before_agent_start", { type: "before_agent_start", prompt: "t0" }, { sessionManager: sm });
+  if (getCurrentAnchor()?.turn_id !== 0) {
+    throw new Error(`two bump handlers double-incremented: turn_id=${getCurrentAnchor()?.turn_id}, want 0`);
+  }
+  // Next turn after agent_end reset → exactly +1 (not +2).
+  pi._fire("agent_end", { type: "agent_end" }, { sessionManager: sm });
+  pi._fire("before_agent_start", { type: "before_agent_start", prompt: "t1" }, { sessionManager: sm });
+  if (getCurrentAnchor()?.turn_id !== 1) {
+    throw new Error(`turn_id=${getCurrentAnchor()?.turn_id}, want 1 (single bump per turn)`);
   }
 });
 
@@ -201,16 +229,23 @@ check("before_agent_start bumps turn_id to 0 after session_start", () => {
   if (anchor.turn_id !== 0) throw new Error(`turn_id=${anchor.turn_id}, want 0`);
 });
 
-check("subsequent before_agent_start monotonic-increments turn_id", () => {
+check("subsequent turns monotonic-increment turn_id (agent_end resets the per-turn bump flag)", () => {
   _resetCausalAnchorForTests();
   const pi = makeFakePi();
   bindLifecycle(pi);
   const sm = { getSessionId: () => "session-A" };
   pi._fire("session_start", { type: "session_start", reason: "startup" }, { sessionManager: sm });
   for (let want = 0; want <= 4; want++) {
+    // A turn = before_agent_start (bump) ... agent_end (reset). Per-turn
+    // idempotency means re-firing before_agent_start WITHOUT an agent_end in
+    // between is intentionally a no-op (same turn).
     pi._fire("before_agent_start", { type: "before_agent_start", prompt: `t${want}` }, { sessionManager: sm });
     const a = getCurrentAnchor();
     if (a?.turn_id !== want) throw new Error(`turn_id=${a?.turn_id}, want ${want}`);
+    // Re-firing before_agent_start in the SAME turn must NOT bump.
+    pi._fire("before_agent_start", { type: "before_agent_start", prompt: `t${want}-dup` }, { sessionManager: sm });
+    if (getCurrentAnchor()?.turn_id !== want) throw new Error(`same-turn re-fire bumped: ${getCurrentAnchor()?.turn_id}`);
+    pi._fire("agent_end", { type: "agent_end" }, { sessionManager: sm });
   }
 });
 
@@ -222,6 +257,7 @@ check("new session_start resets turn_id (different session)", () => {
   const smB = { getSessionId: () => "session-B" };
   pi._fire("session_start", { type: "session_start", reason: "startup" }, { sessionManager: smA });
   pi._fire("before_agent_start", { type: "before_agent_start", prompt: "1" }, { sessionManager: smA });
+  pi._fire("agent_end", { type: "agent_end" }, { sessionManager: smA });
   pi._fire("before_agent_start", { type: "before_agent_start", prompt: "2" }, { sessionManager: smA });
   // Now turn_id=1
   pi._fire("session_start", { type: "session_start", reason: "new" }, { sessionManager: smB });
