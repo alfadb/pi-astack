@@ -1,0 +1,16 @@
+{
+	"name": "browser-tools",
+	"version": "2.0.0",
+	"type": "module",
+	"description": "CDP browser tools backed by CloakBrowser stealth Chromium. Migrated from pi-skills into pi-astack.",
+	"license": "MIT",
+	"dependencies": {
+		"@mozilla/readability": "^0.6.0",
+		"cheerio": "^1.1.2",
+		"cloakbrowser": "^0.3.31",
+		"jsdom": "^27.0.1",
+		"puppeteer-core": "^23.11.1",
+		"turndown": "^7.2.2",
+		"turndown-plugin-gfm": "^1.0.2"
+	}
+}
