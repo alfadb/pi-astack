@@ -54,6 +54,7 @@ import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { runArchiveReactivationIfDue } from "./archive-reactivation";
+import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
 import { getCurrentAnchor, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
@@ -1247,6 +1248,54 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         modelRegistry,
         abrainHome,
         projectId,
+      });
+
+      // ADR 0025 §4.1.5.1 staging-resolver (Stage 3, 2026-05-29).
+      // Debounced batch pass that actively works the provisional-correction
+      // staging backlog (retire noise / keep plausible) instead of letting
+      // it pile to the 30-day age-out. Fire-and-forget; never blocks main
+      // session. Gated like archive-reactivation: false → no LLM tokens, no
+      // scheduling. It only rewrites .state staging files (retire = flip
+      // attribution_pending + retain file), never durable entries, so it is
+      // safe under "staging-only" too (promotion-to-durable is deferred to a
+      // multi-view follow-up; the resolver only flags promote_candidate).
+      if (settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
+        void (async () => {
+          try {
+            const recentForStaging = branch.slice(-50);
+            const stagingWindowText = recentForStaging
+              .map((e: unknown) => entryToText(e))
+              .filter((s: string) => !!s)
+              .join("\n\n");
+            const stagingResult = await runStagingResolverIfDue({
+              projectRoot: cwd,
+              windowText: stagingWindowText,
+              settings,
+              modelRegistry: modelRegistry as Parameters<typeof runStagingResolverIfDue>[0]["modelRegistry"],
+              sessionId,
+            });
+            if (!stagingResult.skipped && (stagingResult.likely_noise_slugs.length > 0 || stagingResult.promote_candidates.length > 0 || stagingResult.degraded)) {
+              await appendAudit(cwd, {
+                operation: "staging_resolve",
+                lane: "diagnostic",
+                session_id: sessionId,
+                ok: stagingResult.ok,
+                degraded: stagingResult.degraded ?? false,
+                reviewed_count: stagingResult.reviewed_count,
+                likely_noise_count: stagingResult.likely_noise_slugs.length,
+                plausible_count: stagingResult.plausible_count,
+                promote_candidate_count: stagingResult.promote_candidates.length,
+                likely_noise_slugs: stagingResult.likely_noise_slugs,
+                promote_candidates: stagingResult.promote_candidates,
+                model: stagingResult.model,
+                duration_ms: stagingResult.durationMs,
+                prompt_version: STAGING_RESOLVER_PROMPT_VERSION,
+              });
+            }
+          } catch {
+            /* fire-and-forget bg; never throw out of agent_end */
+          }
+        })();
       });
 
       // ADR 0025 §4.6 archive-reactivation reviewer (Stage 2).

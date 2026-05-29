@@ -46,6 +46,25 @@ export interface StagingEntry {
 
   /** Frontmatter: warning for downstream consumers */
   _provenance_warning: string;
+
+  // ── Resolver triage fields (set by staging-resolver, ADR 0025 §4.1.5.1) ──
+  // IMPORTANT (R1 opus P1): the resolver is NON-DESTRUCTIVE. It does NOT
+  // flip attribution_pending or remove a hypothesis from the learning loop —
+  // these are already-classified-durable signals, and terminal removal on a
+  // single LLM's judgement (while promotion is multi-view-gated) would be a
+  // backwards data-conservation asymmetry. Retirement stays the job of the
+  // time-bounded age-out (ADR 0025 §4.1.5 / §4.6 reviewer). The resolver only
+  // ANNOTATES a triage disposition + reviewed-at timestamp; selection then
+  // deprioritizes recently-reviewed entries so the resolver doesn't re-burn
+  // tokens on the same hypotheses every run.
+  /** When the resolver last reviewed this hypothesis (bounds re-review). */
+  resolver_reviewed_at?: string;
+  /** Resolver's triage call: "likely_noise" (deprioritized but still in the
+   *  loop and ageing normally), "plausible" (a real-looking durable signal
+   *  worth keeping), or "promote_candidate" (clearly durable + strong
+   *  attribution — kept pending for the future multi-view promotion path). */
+  resolver_disposition?: "likely_noise" | "plausible" | "promote_candidate";
+  resolver_rationale?: string;
 }
 
 export interface StagingFileOnDisk {

@@ -70,8 +70,6 @@ You receive:
 
 4. **`structural_context`** — known-unimplemented capabilities that
    cause structural advisories every run:
-   - staging-resolver (ADR 0025 §4.1.5.1) NOT implemented → expect
-     `staging_backlog` mechanical hit every run
    - `multiview_pending` mechanical hit is structural until P1.5
      replay writer dispatch fully ships (see C4 watchdog list)
    When a `mechanical_suspicion_signal` matches a known structural
@@ -80,7 +78,7 @@ You receive:
    stale_count emerging).
    **Staleness notice** (D4 from Phase B review): the bullet list above
    MUST be updated by any commit that ships one of these capabilities.
-   When staging-resolver / P1.5 writer
+   When P1.5 writer
    dispatch lands, remove the corresponding bullet and add a Phase D
    regression check to confirm the related mechanical advisory shape
    has changed.

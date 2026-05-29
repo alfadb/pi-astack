@@ -82,23 +82,13 @@ console.log(`Found ${idsInSource.length} STRUCTURAL_CONTEXT entries: ${idsInSour
  * a string describing what was found (capability shipped, fail).
  */
 const KNOWN_ENTRIES = {
-  "staging-resolver-unimplemented": {
-    description: "ADR 0025 §4.1.5.1 staging-resolver",
-    /** Returns true if staging-resolver is still unimplemented. */
-    shouldBeAbsent: () => {
-      const stagingLoaderSrc = fs.readFileSync(
-        path.join(repoRoot, "extensions/sediment/staging-loader.ts"),
-        "utf8",
-      );
-      // If a function named resolveProvisional / runStagingResolver /
-      // scheduleStagingResolver appears, staging-resolver is shipping.
-      const shipped = /\b(?:resolveProvisional|runStagingResolver|scheduleStagingResolver)\s*[(:=]/.test(stagingLoaderSrc);
-      if (shipped) {
-        return "staging-loader.ts now exports a resolver-shaped function — staging-resolver may have shipped";
-      }
-      return true;
-    },
-  },
+  // 2026-05-29 Stage 3 cleanup: "staging-resolver-unimplemented" removed from
+  // KNOWN_ENTRIES in the same commit that removed it from STRUCTURAL_CONTEXT.
+  // The resolver shipped: extensions/sediment/staging-resolver.ts
+  // (runStagingResolverIfDue + staging-resolver-v1.md prompt), scheduled from
+  // sediment/index.ts agent_end. STRUCTURAL_CONTEXT is now empty; the
+  // "every id has a signature" / "no orphan signature" checks below both
+  // pass trivially on the empty set.
   // 2026-05-28 Stage 2 cleanup: "archive-reactivation-reviewer-unimplemented"
   // removed from KNOWN_ENTRIES in the same commit that removed it from
   // STRUCTURAL_CONTEXT. The reviewer shipped: prompt at

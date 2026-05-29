@@ -36,7 +36,9 @@ export function stagingDir(): string {
 export const STAGING_DIR = stagingDir();
 
 const MAX_STAGING_ENTRIES = 10;  // K — token budget limits
-const STALE_DAYS = 30;
+/** Age beyond which a pending hypothesis is left to the age-out / archive
+ *  path. Exported so staging-resolver shares one definition (no drift). */
+export const STALE_DAYS = 30;
 
 export interface StagingContext {
   entries: StagingEntry[];
