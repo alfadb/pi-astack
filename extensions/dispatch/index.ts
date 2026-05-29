@@ -99,6 +99,8 @@ const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
  *  - vault_release: secret release, main-session-only (ADR 0014 §6)
  *  - prompt_user: user interaction, sub-agent can't reach user
  *  - imagine: image generation, expensive + main-session-only by design
+ *  - final_answer: main-session terminal wrapper from tool-contract;
+ *    exposing it would break dispatch result extraction semantics
  *  - dispatch_agent/dispatch_parallel: nested dispatch forbidden (would
  *    explode token cost + violate ADR 0027 C5 fail-fast invariant) */
 const KNOWN_TOOLS = new Set([

@@ -64,6 +64,33 @@
       }
     },
 
+    "toolContract": {
+      "type": "object",
+      "description": "Structured tool-call contract (extensions/tool-contract/). Registers a terminating `final_answer(summary)` tool and, when that tool is present in the provider payload, injects provider-native `tool_choice` (`required` for OpenAI Responses / Chat Completions, `{type:\"any\"}` for Anthropic Messages). This prevents turns from silently ending with plain-text pseudo-tool-call markup such as bare `<invoke>` instead of real tool calls. Mismatch detection only scans closed protocol tags, not natural-language intent. Sub-agents are disabled by default in v1 to avoid changing dispatch output extraction.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch. When false the extension factory returns early: no final_answer tool, no payload injection, and no mismatch warning hook. Env PI_ASTACK_DISABLE_TOOL_CONTRACT=1 wins over this setting."
+        },
+
+        "disableForSubAgent": {
+          "type": "boolean",
+          "default": true,
+          "description": "Skip tool_choice injection and mismatch warnings for dispatch-spawned sub-agent sessions. Default true for v1 because dispatch_agent/dispatch_parallel collect assistant text and should not be forced through final_answer until output extraction is explicitly adapted."
+        },
+
+        "checkMismatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Warn when an assistant message contains closed textual tool-call protocol markers (`<invoke>`, `<tool_call>`, `<function_calls>`, etc.) but no real toolCall block. This is a protocol-marker check only; it must not become a natural-language intent gate."
+        }
+      }
+    },
+
     "modelFallback": {
       "type": "object",
       "description": "Multi-model fallback chain with retry (extensions/model-fallback/). Asymmetric policy: the **initial** model gets pi's full retry budget before fallback kicks in (retry count auto-read from pi settings.json#retry.maxRetries, no separate config needed); **each fallback model** gets exactly 1 attempt — any error switches to the next configured model immediately. When all fallback models are tried and all fail, the extension stops. For claude-code parity (10 attempts, 1s-256s delays), set pi settings.json#retry.maxRetries=9 + retry.baseDelayMs=1000; the extension auto-aligns.",
