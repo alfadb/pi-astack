@@ -75,7 +75,8 @@
     "smoke:time-injector": "node scripts/smoke-time-injector.mjs"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.75.0 <1.0.0",
