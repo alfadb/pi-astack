@@ -60,7 +60,7 @@ interface CuratorDefaults {
 const DEFAULTS: CuratorDefaults = {
   providers: {
     anthropic: [
-      "claude-opus-4-7", "claude-opus-4-6",
+      "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
       "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
     ],
     openai: [
@@ -72,10 +72,12 @@ const DEFAULTS: CuratorDefaults = {
   },
 
   hints: {
+    "anthropic/claude-opus-4-8":
+      "Strongest reasoning + agentic coding (SWE-Bench Pro 69.2%); ~4× lower 'silent code bug' rate vs 4.7; same price as 4.7. Use for security audits, architecture critique, long-horizon agentic work.",
     "anthropic/claude-opus-4-7":
-      "Strongest reasoning; security audits, architecture critique. Highest cost.",
+      "Previous-gen opus (April 2026); close to 4-8 quality but more likely to let coding flaws pass unremarked. Same price tier as 4-8.",
     "anthropic/claude-opus-4-6":
-      "Previous-gen opus; close to 4-7 quality at lower cost.",
+      "Two-gen-back opus (Feb 2026); use only as fallback when 4-8/4-7 rate-limited or unavailable.",
     "anthropic/claude-sonnet-4-6":
       "Mid-tier, fast, cheap. Design review, refactor proposals.",
     "anthropic/claude-sonnet-4-5":
