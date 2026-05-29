@@ -17,7 +17,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { sanitizeForMemory } from "./sanitizer";
 import { packClassifierWindow, packedWindowToText, type PackedWindow } from "./context-packer";
-import { loadStagingContext, writeStagingEntry, stagingFileCount } from "./staging-loader";
+import { loadStagingContext, writeStagingEntry, stagingActiveFileCount } from "./staging-loader";
 import type { StagingEntry } from "./staging-types";
 import type { SedimentSettings } from "./settings";
 import type { ModelRegistryLike } from "./llm-extractor";
@@ -373,10 +373,13 @@ export async function runCorrectionPipeline(
     result.stagingWritten = true;
   }
 
-  // 7. Staging inflation advisory
-  const fileCount = stagingFileCount();
+  // 7. Staging inflation advisory — counts ACTIVE files only (Stage 4: exclude
+  // age-out soft-archived, which are already retired and only await the
+  // deferred Stage-5 hard-delete; counting them would fire this advisory
+  // perpetually as retired files accumulate, falsely implying over-production).
+  const fileCount = stagingActiveFileCount();
   if (fileCount > 50) {
-    result.stagingAdvisory = `staging dir has ${fileCount} files (>50). Classifier may be over-producing provisional hypotheses.`;
+    result.stagingAdvisory = `staging dir has ${fileCount} active files (>50). Classifier may be over-producing provisional hypotheses.`;
   }
 
   return result;

@@ -70,9 +70,14 @@ You receive:
 
 4. **`structural_context`** — known-unimplemented capabilities that
    cause structural advisories every run:
-   - staging age-out DELETION not implemented → expect a `staging_backlog`
-     (file-count) hit every run. The staging-resolver triages provisional
-     entries (non-destructive) but nothing shrinks the on-disk backlog yet.
+   - staging age-out SOFT-archive HAS shipped (the age-out reviewer retires
+     aged-out hypotheses via `lifecycle_state="soft_archived"`, which are
+     EXCLUDED from the ACTIVE `staging_backlog` counts). Only the mechanical
+     N-day HARD-DELETE (unlink) of soft-archived files remains unimplemented
+     (deferred: `.state` is git-ignored → unlink irreversible). So expect a
+     small STABLE `staging_backlog` driven by `soft_archived`
+     (retired-but-not-deleted) files, reported separately in the advisory.
+     Demote unless the ACTIVE (non-soft-archived) backlog or stale_count grows.
    - `multiview_pending` mechanical hit is structural until P1.5
      replay writer dispatch fully ships (see C4 watchdog list)
    When a `mechanical_suspicion_signal` matches a known structural
@@ -81,9 +86,9 @@ You receive:
    stale_count emerging).
    **Staleness notice** (D4 from Phase B review): the bullet list above
    MUST be updated by any commit that ships one of these capabilities.
-   When the staging age-out sweep / P1.5 writer dispatch lands, remove the
-   corresponding bullet and add a Phase D regression check to confirm the
-   related mechanical advisory shape has changed.
+   When the staging HARD-DELETE sweep (Stage 5) / P1.5 writer dispatch lands,
+   remove the corresponding bullet and add a Phase D regression check to
+   confirm the related mechanical advisory shape has changed.
 
 5. **`prior_aggregator_summaries`** — compact summary of the most
    recent 8 aggregator runs (timestamps, advisory kinds + counts,
@@ -414,8 +419,9 @@ For Phase C wiring (`aggregator.ts` calling this prompt):
 
 Input had 3 `mechanical_suspicion_signals` (one staging_backlog, two
 high-unused on maxim entries). `structural_context` confirms staging
-age-out DELETION still unimplemented (the resolver triages but doesn't
-shrink the backlog). `outcome_counterfactual_excerpts`
+age-out SOFT-archive shipped (retired entries are dropped from the active
+backlog); only the mechanical HARD-DELETE remains deferred, so a small stable
+retired backlog is expected. `outcome_counterfactual_excerpts`
 shows both high-unused entries are maxims with RETRIEVED-UNUSED
 counterfactuals like "this maxim shaped my framing, I didn't cite it
 directly". `prior_aggregator_summaries` shows the same shape last 6
@@ -424,10 +430,11 @@ runs, all previously demoted.
 Output: `promoted_advisories: []`, `demoted_signals: [3 items with
 1-sentence reasons]`, `previous_acknowledgments: [3 still_acknowledged]`,
 `reasoning_quality_self_check.silence_audit: [{candidate:
-"staging_backlog escalation", evidence_discounted: "total_files
+"staging_backlog escalation", evidence_discounted: "active backlog
 jumped from 25 → 33 over 3 days; multiview_pending=3",
 reason_dropped: "growth rate is within normal session-burst variance
-and oldest-age stayed within 30-day window. If staging crosses 50 OR
+and oldest-age stayed within 30-day window; soft_archived retired files
+are excluded from the active count. If ACTIVE staging crosses 50 OR
 oldest-age >20 days, would reverse."}]`,
 `reasoning_quality_self_check.promotion_audit: []` (empty: no
 promoted_advisories), `reasoning_quality_self_check.falsifiers_named_count:

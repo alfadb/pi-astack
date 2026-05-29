@@ -62,16 +62,22 @@ export interface StructuralContextEntry {
 
 export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
   {
-    // 2026-05-29 Stage 3: the staging-RESOLVER shipped (non-destructive
-    // triage: annotate disposition / deprioritize / flag promote_candidate —
-    // see staging-resolver.ts). But it does NOT delete provisional staging
-    // files, so the staging_backlog (file-count) advisory is STILL expected
-    // every run until a time-bounded age-out SWEEP ships (deferred follow-up).
-    // Renamed from "staging-resolver-unimplemented" to reflect that the
-    // remaining gap is deletion, not resolution.
-    id: "staging-backlog-deletion-unimplemented",
+    // 2026-05-29 Stage 4: the prompt-driven age-out REVIEWER shipped
+    // (extensions/sediment/staging-ageout.ts + prompts/staging-ageout-
+    // reviewer-v1.md). Aged-out (≥30d) provisional hypotheses now get a
+    // reviewer disposition: keep_aging / soft_archive (REVERSIBLE — retired
+    // from the active backlog, file retained) / promote_candidate (advisory).
+    // Soft-archived entries are excluded from loadStagingContext's staleCount,
+    // so the operational backlog (token cost + classifier-context bloat) is
+    // now drained. What remains UNIMPLEMENTED is the mechanical N-day-window →
+    // hard-delete (unlink) of soft-archived files — deferred (Stage 5) because
+    // staging lives in git-ignored `.state/`, so unlink is irreversible and
+    // must be gated on a recovery primitive. So a small, STABLE staging_backlog
+    // (file count of retired-but-not-yet-deleted entries) is still expected.
+    // Renamed from "staging-backlog-deletion-unimplemented".
+    id: "staging-hard-archive-unimplemented",
     description:
-      "ADR 0025 §4.1.5 staging age-out DELETION not implemented — the staging-resolver triages provisional entries (non-destructive) but nothing shrinks the on-disk backlog yet, so expect a staging_backlog mechanical hit every run until a mechanical age-out sweep ships. Demote unless growth-rate/stale_count materially worsens.",
+      "ADR 0025 §4.1.5 staging age-out SOFT-archive shipped (staging-ageout reviewer retires aged-out hypotheses reversibly + drops them from staleCount), but the mechanical N-day-window → hard-delete (unlink) of soft-archived files is NOT implemented (deferred: .state is git-ignored, unlink is irreversible). Expect a small STABLE staging_backlog from retired-but-not-deleted files; demote unless pending/unreviewed growth materially worsens.",
     causes_advisory: "staging_backlog",
   },
   // NOTE 2026-05-28 Stage 2 (commit 9796bdd→...): archive-reactivation-
@@ -261,6 +267,13 @@ export interface AggregatorSummary {
     provisional_pending: number;
     provisional_stale: number;
     multiview_pending: number;
+    /** Stage 4 (ADR 0025 §4.1.5 / §4.6.6): aged-out hypotheses retired by the
+     *  age-out reviewer (lifecycle_state==="soft_archived"). These are EXCLUDED
+     *  from provisional_pending / provisional_stale (the active backlog the
+     *  staging_backlog advisory fires on) — they are already handled and only
+     *  await the deferred mechanical hard-delete (Stage 5). Surfaced separately
+     *  for visibility into how much of total_files is retired-but-not-deleted. */
+    soft_archived: number;
   };
   search: {
     metrics_rows: number;
@@ -878,6 +891,7 @@ function scanP15WatchdogSignals(
 function summarizeStaging(now: Date): AggregatorSummary["staging"] {
   let provisionalPending = 0;
   let provisionalStale = 0;
+  let softArchived = 0;
   const staleCutoffMs = now.getTime() - 30 * 24 * 60 * 60 * 1000;
   try {
     const dir = stagingDir();
@@ -889,6 +903,16 @@ function summarizeStaging(now: Date): AggregatorSummary["staging"] {
           if (!entry || typeof entry !== "object") continue;
           const e = entry as Record<string, unknown>;
           if (e.kind !== "provisional-correction" || e.attribution_pending !== true) continue;
+          // Stage 4 (ADR 0025 §4.1.5 / §4.6.6): the age-out reviewer retires
+          // aged hypotheses by flipping lifecycle_state to "soft_archived"
+          // (it deliberately leaves attribution_pending=true as the honest
+          // "aged out unattributed" record). Those entries are ALREADY handled
+          // — count them separately and EXCLUDE them from the active
+          // provisional_pending / provisional_stale that drive the
+          // staging_backlog advisory, so soft-archiving actually DRAINS the
+          // advisory instead of it firing forever on retired entries. Only the
+          // deferred mechanical hard-delete (Stage 5) removes the files.
+          if (e.lifecycle_state === "soft_archived") { softArchived++; continue; }
           provisionalPending++;
           const createdMs = typeof e.created === "string" ? Date.parse(e.created) : NaN;
           if (Number.isFinite(createdMs) && createdMs < staleCutoffMs) provisionalStale++;
@@ -906,6 +930,7 @@ function summarizeStaging(now: Date): AggregatorSummary["staging"] {
     provisional_pending: provisionalPending,
     provisional_stale: provisionalStale,
     multiview_pending: countMultiviewPending(),
+    soft_archived: softArchived,
   };
 }
 
@@ -964,18 +989,26 @@ function buildAdvisories(summary: Omit<AggregatorSummary, "ok" | "advisories">):
   }
 
   const totalStaging = summary.staging.total_files;
-  if (totalStaging >= STAGING_CRITICAL_THRESHOLD || summary.staging.provisional_stale > 0) {
+  // Stage 4 (ADR 0025 §4.1.5 / §4.6.6): the threshold fires on the ACTIVE
+  // backlog (total minus soft_archived retired-but-not-deleted files), so that
+  // soft-archiving actually relieves file-count pressure. Retired files linger
+  // on disk only until the deferred mechanical hard-delete (Stage 5); a small
+  // stable `soft_archived` count is expected and must NOT keep escalating the
+  // advisory. total_files + soft_archived stay in evidence for visibility.
+  const activeStaging = Math.max(0, totalStaging - summary.staging.soft_archived);
+  const retiredNote = summary.staging.soft_archived > 0 ? ` (${summary.staging.soft_archived} soft-archived awaiting Stage-5 hard-delete)` : "";
+  if (activeStaging >= STAGING_CRITICAL_THRESHOLD || summary.staging.provisional_stale > 0) {
     advisories.push({
       kind: "staging_backlog",
-      severity: totalStaging >= STAGING_CRITICAL_THRESHOLD ? "critical" : "warning",
-      message: `Sediment staging backlog needs attention: ${totalStaging} files, ${summary.staging.provisional_stale} stale provisional corrections.`,
+      severity: activeStaging >= STAGING_CRITICAL_THRESHOLD ? "critical" : "warning",
+      message: `Sediment staging backlog needs attention: ${activeStaging} active files, ${summary.staging.provisional_stale} stale provisional corrections${retiredNote}.`,
       evidence: summary.staging,
     });
-  } else if (totalStaging >= STAGING_WARNING_THRESHOLD) {
+  } else if (activeStaging >= STAGING_WARNING_THRESHOLD) {
     advisories.push({
       kind: "staging_backlog",
       severity: "warning",
-      message: `Sediment staging backlog is growing (${totalStaging} files).`,
+      message: `Sediment staging backlog is growing (${activeStaging} active files)${retiredNote}.`,
       evidence: summary.staging,
     });
   }

@@ -1,42 +1,51 @@
 /**
- * staging-resolver — active batch resolution of provisional staging
- * hypotheses (ADR 0025 §4.1.5.1, "choice 1: batch scan").
+ * staging-ageout — prompt-driven age-out of provisional staging hypotheses
+ * (ADR 0025 §4.1.5 "30-day age-out" + §4.6.6 "shared reviewer discipline").
  *
- * The active-correction classifier parks durable-but-unattributable
- * hypotheses as `provisional-correction` staging entries
- * (`~/.abrain/.state/sediment/staging/*.json`). Before this module, those
- * entries were only *lazily* resolved — the classifier checked them as
- * context when a future utterance happened to be relevant (§4.1.3 step 6).
- * Most were never seen and piled up to the 30-day age-out, producing a
- * `staging_backlog` aggregator hit every run.
+ * # Where this sits in the staging lifecycle
  *
- * This module schedules a debounced batch pass from sediment `agent_end`:
- * it loads the pending hypotheses and asks an LLM resolver to TRIAGE each
- * one — `likely_noise` (deprioritize) vs `plausible` (keep) — and to flag
- * `promote_candidate` for clearly-durable ones.
+ *   pending ──resolver(<30d, non-destructive triage)──▶ resolver-triaged
+ *          └──────────────────────── age ≥ 30d ───────────────────────┐
+ *                                                                      ▼
+ *   [THIS MODULE] aged-out reviewer (≥30d, ~24h debounce) ── decision ─┤
+ *      ├ keep_aging        → re-review later (reversible, loses nothing)
+ *      ├ soft_archive      → lifecycle_state="soft_archived" + aged_out_at
+ *      │                     (REVERSIBLE: file retained, dropped from the
+ *      │                      active backlog; NEVER unlinked)
+ *      └ promote_candidate → advisory flag (ADVISORY ONLY — promotion to a
+ *                            durable entry MUST pass multi-view §4.4; the
+ *                            entry stays active + attribution_pending)
  *
- * NON-DESTRUCTIVE (R1 opus P1): the resolver NEVER removes a hypothesis from
- * the learning loop. These are already-classified-durable signals; terminally
- * discarding one on a single LLM's lone judgement — while promotion is
- * multi-view-gated — would be a backwards data-conservation asymmetry. So the
- * resolver only ANNOTATES the staging file (resolver_disposition +
- * resolver_reviewed_at + rationale) and leaves attribution_pending untouched.
- * Retirement stays the job of the time-bounded age-out (ADR 0025 §4.1.5 /
- * §4.6 reviewer), which is the user-accepted default the resolver does not
- * pre-empt. Selection deprioritizes recently-reviewed entries so the resolver
- * doesn't re-burn tokens on the same hypotheses every run.
+ * # Why soft-archive ONLY (no unlink) — the load-bearing constraint
  *
- * v1 scope: triage + promote-candidate flagging. Actual promotion of a
- * hypothesis to a durable entry MUST pass multi-view (ADR 0025 §4.4) and is
- * deferred to a follow-up; the resolver only sets the advisory flag and keeps
- * such entries pending so the existing classifier/multi-view path can promote
- * them. (Same "primitive first" staging as hard_archive.)
+ * Staging files live in `~/.abrain/.state/sediment/staging/`, which is
+ * git-IGNORED (`.abrain/.gitignore` line 2: `.state/`). So unlinking a staging
+ * file is IRREVERSIBLE — there is no `git rm` history to recover from. ADR
+ * §4.6's "hard-delete is fine because git history recovers it" rationale is
+ * load-bearing for DURABLE entries and simply does not hold here. Therefore
+ * Stage 4 only ever flips a lifecycle field; the mechanical N-day-window →
+ * hard-delete (unlink) is a deferred follow-up (Stage 5), to be gated on a
+ * recovery primitive (tombstone / trash dir / move-to-tracked-archive).
  *
- * Concurrency: staging lives under `.state/` (single-device, git-ignored,
- * not synced), so the only race is two local pi processes. A debounce +
- * minimal advisory lock bound that; triage is idempotent (re-annotating an
- * entry just rewrites the same disposition), and selection's re-review window
- * means a lost lock race at worst re-reviews a few entries once.
+ * # A-layer (§4.4) compliance — promotion is NOT done here
+ *
+ * A single LLM CANNOT promote a hypothesis to a durable entry. This reviewer
+ * only sets the `promote_candidate` advisory flag and leaves the entry active
+ * + attribution_pending so the existing multi-view path can pick it up. When
+ * multi-view is unavailable the entry stays staging-pending (debounced via
+ * aged_out_reviewed_at), never discarded — honoring the
+ * multi-view-reviewer-unavailable-fallback anti-pattern.
+ *
+ * # ADR 0027 C3' boundary
+ *   - INFRA: file IO (scan staging / atomic rewrite / write audit/ledger)
+ *   - COGNITIVE: the keep_aging / soft_archive / promote_candidate decision is
+ *     the LLM reviewer's. No mechanical TTL gate inside the cognitive layer —
+ *     age is a TRIGGER (cheap candidate filter), not the decision.
+ *
+ * Concurrency: staging is single-device (.state, not git-synced), so the only
+ * race is two local pi processes. A 24h debounce + advisory lock bound that;
+ * apply is idempotent (re-applying rewrites the same fields) and uses an
+ * atomic tmp+rename so a crash mid-write never corrupts a hypothesis file.
  */
 
 import * as fs from "node:fs";
@@ -48,21 +57,18 @@ import type { StagingEntry, StagingFileOnDisk } from "./staging-types";
 import { formatLocalIsoTimestamp, ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 
-export const STAGING_RESOLVER_PROMPT_VERSION = "v1";
+export const STAGING_AGEOUT_PROMPT_VERSION = "v1";
 
 // ── Tunables ──────────────────────────────────────────────────────────
-/** Default debounce: staging churns faster than archived entries, so a
- *  6h cadence keeps the backlog worked without per-turn LLM cost. */
-const DEFAULT_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
-/** Hypotheses triaged per run. Excess rolls into the next debounced run
- *  (oldest-first selection drains the tail). */
-const MAX_RESOLVE_PER_RUN = 15;
-/** Don't re-triage an entry the resolver already reviewed within this many
- *  days — bounds token cost and lets a triaged disposition stick. */
-const RE_REVIEW_DAYS = 7;
-/** Entries older than this are left for the age-out / archive path, not
- *  triaged here. Imported from staging-loader so the resolver and loader
- *  never disagree on what "stale" means (R1 NIT: single source of truth). */
+/** Aged-out entries are old + low-churn; a daily cadence matches the
+ *  archive-reactivation reviewer's cost envelope (~one LLM call/day). */
+const DEFAULT_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** Hypotheses reviewed per run (excess rolls into the next daily run via
+ *  oldest-first selection). */
+const MAX_AGEOUT_PER_RUN = 20;
+/** Don't re-review a kept-aging entry within this many days — bounds token
+ *  cost so a `keep_aging` verdict isn't re-litigated every single day. */
+const RE_REVIEW_DAYS = 14;
 const MAX_HYPOTHESIS_CHARS = 600;
 const MAX_QUOTE_CHARS = 400;
 const MAX_WINDOW_CHARS = 4000;
@@ -76,20 +82,19 @@ export interface ModelRegistryLike {
   getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
 }
 
-export type StagingResolverDecisionKind = "likely_noise" | "plausible";
+export type StagingAgeOutDecisionKind = "keep_aging" | "soft_archive" | "promote_candidate";
 
-export interface StagingResolverDecision {
+export interface StagingAgeOutDecision {
   slug: string;
-  decision: StagingResolverDecisionKind;
-  promote_candidate: boolean;
+  decision: StagingAgeOutDecisionKind;
   rationale: string;
 }
 
-export interface StagingResolverLlmOutput {
-  decisions: StagingResolverDecision[];
+export interface StagingAgeOutLlmOutput {
+  decisions: StagingAgeOutDecision[];
 }
 
-export interface StagingResolverResult {
+export interface StagingAgeOutResult {
   ok: boolean;
   skipped?:
     | "debounced"
@@ -100,39 +105,38 @@ export interface StagingResolverResult {
     | "concurrent_run";
   degraded?: boolean;
   reviewed_count: number;
-  /** Hypotheses triaged as likely-noise this run (deprioritized, NOT
-   *  removed from the loop). */
-  likely_noise_slugs: string[];
-  plausible_count: number;
+  /** Hypotheses retired (reversible soft-archive) this run. */
+  soft_archived_slugs: string[];
+  kept_aging_count: number;
   promote_candidates: string[];
   model?: string;
   durationMs: number;
   error?: string;
 }
 
-interface StagingCandidate {
+interface AgeOutCandidate {
   file: string; // absolute path
   entry: StagingEntry;
 }
 
 // ── Sidecar paths (per-project debounce + lock; user-global ledger) ─────
 
-export function stagingResolverLastRunPath(projectRoot: string): string {
-  return path.join(path.resolve(projectRoot), ".pi-astack", "sediment", "staging-resolver-last-run.json");
+export function stagingAgeOutLastRunPath(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), ".pi-astack", "sediment", "staging-ageout-last-run.json");
 }
 
-export function stagingResolverLockPath(projectRoot: string): string {
-  return path.join(path.resolve(projectRoot), ".pi-astack", "sediment", "staging-resolver.lock");
+export function stagingAgeOutLockPath(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), ".pi-astack", "sediment", "staging-ageout.lock");
 }
 
-export function stagingResolverLedgerPath(): string {
+export function stagingAgeOutLedgerPath(): string {
   ensureUserGlobalSidecarMigrated();
-  return path.join(userGlobalSedimentDir(), "staging-resolver-ledger.jsonl");
+  return path.join(userGlobalSedimentDir(), "staging-ageout-ledger.jsonl");
 }
 
 function readLastRunMs(projectRoot: string): number | null {
   try {
-    const file = stagingResolverLastRunPath(projectRoot);
+    const file = stagingAgeOutLastRunPath(projectRoot);
     if (!fs.existsSync(file)) return null;
     const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
     const ts = parsed?.last_run_ts;
@@ -146,7 +150,7 @@ function readLastRunMs(projectRoot: string): number | null {
 
 function writeLastRun(projectRoot: string, now: Date, status: "ok" | "degraded" | "skipped"): void {
   try {
-    const file = stagingResolverLastRunPath(projectRoot);
+    const file = stagingAgeOutLastRunPath(projectRoot);
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     fs.writeFileSync(file, JSON.stringify({ last_run_ts: formatLocalIsoTimestamp(now), status }, null, 2) + "\n", "utf-8");
   } catch {
@@ -156,7 +160,7 @@ function writeLastRun(projectRoot: string, now: Date, status: "ok" | "degraded" 
 
 function appendLedgerRow(row: Record<string, unknown>): void {
   try {
-    const file = stagingResolverLedgerPath();
+    const file = stagingAgeOutLedgerPath();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const enriched = { ...spreadAnchor(getCurrentAnchor()), ...row };
     fs.appendFileSync(file, JSON.stringify(enriched) + "\n", "utf-8");
@@ -165,12 +169,10 @@ function appendLedgerRow(row: Record<string, unknown>): void {
   }
 }
 
-// ── Minimal advisory lock ───────────────────────────────────────────────
+// ── Minimal advisory lock (own lock; independent of the resolver's) ─────
 
-/** Acquire a best-effort lock. Returns true on success. If a stale lock
- *  (older than LOCK_STALE_MS) is present it is reclaimed. */
 function tryAcquireLock(projectRoot: string, now: Date): boolean {
-  const file = stagingResolverLockPath(projectRoot);
+  const file = stagingAgeOutLockPath(projectRoot);
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   } catch {
@@ -181,7 +183,6 @@ function tryAcquireLock(projectRoot: string, now: Date): boolean {
     fs.writeFileSync(file, payload, { flag: "wx" });
     return true;
   } catch {
-    // Exists — check staleness.
     try {
       const st = fs.statSync(file);
       if (now.getTime() - st.mtimeMs > LOCK_STALE_MS) {
@@ -196,16 +197,18 @@ function tryAcquireLock(projectRoot: string, now: Date): boolean {
 }
 
 function releaseLock(projectRoot: string): void {
-  try { fs.unlinkSync(stagingResolverLockPath(projectRoot)); } catch { /* best-effort */ }
+  try { fs.unlinkSync(stagingAgeOutLockPath(projectRoot)); } catch { /* best-effort */ }
 }
 
 // ── Candidate scan ──────────────────────────────────────────────────────
 
-/** Load pending provisional-correction staging candidates (oldest first,
- *  capped). Skips stale (>30d) entries (those go to the age-out path) and
- *  already-resolved entries. Exported for smoke coverage. */
-export function selectStagingCandidates(now: Date = new Date(), max: number = MAX_RESOLVE_PER_RUN): StagingCandidate[] {
-  const out: StagingCandidate[] = [];
+/** Load aged-out provisional-correction candidates (oldest first, capped).
+ *  Selects entries that are: provisional-correction, attribution_pending,
+ *  AGED PAST STALE_DAYS (the inverse of the resolver, which skips these), NOT
+ *  already soft-archived, and NOT reviewed by the age-out reviewer within the
+ *  re-review window. Exported for smoke coverage. */
+export function selectAgeOutCandidates(now: Date = new Date(), max: number = MAX_AGEOUT_PER_RUN): AgeOutCandidate[] {
+  const out: AgeOutCandidate[] = [];
   const staleCutoff = now.getTime() - STALE_DAYS * 24 * 60 * 60 * 1000;
   const reReviewCutoff = now.getTime() - RE_REVIEW_DAYS * 24 * 60 * 60 * 1000;
   let dir: string;
@@ -217,7 +220,7 @@ export function selectStagingCandidates(now: Date = new Date(), max: number = MA
   }
   let files: string[];
   try {
-    files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort(); // chronological (ISO ts in name) → oldest first
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort(); // chronological → oldest first
   } catch {
     return out;
   }
@@ -229,19 +232,16 @@ export function selectStagingCandidates(now: Date = new Date(), max: number = MA
       const entry = parsed?.entry;
       if (!entry || entry.kind !== "provisional-correction") continue;
       if (entry.attribution_pending !== true) continue;
-      // Stage 4 (ADR 0025 §4.1.5 / §4.6.6): defensive — a soft-archived
-      // hypothesis has been retired by the age-out reviewer; the resolver
-      // must not re-triage it (it's already out of the active backlog).
-      // In practice soft_archived implies aged-out (≥30d) so the staleCutoff
-      // check below would also skip it, but this keeps the intent explicit.
+      // Already retired by a prior age-out run → leave it (Stage 5 will
+      // hard-delete). soft_archived is the orthogonal backlog axis.
       if (entry.lifecycle_state === "soft_archived") continue;
       const created = Date.parse(entry.created);
-      if (!Number.isFinite(created) || created < staleCutoff) continue;
-      // Deprioritize: skip entries the resolver already triaged recently so
-      // it doesn't re-burn tokens on the same hypotheses every run. They stay
-      // in the loop (attribution_pending untouched) and age out normally.
-      if (entry.resolver_reviewed_at) {
-        const reviewed = Date.parse(entry.resolver_reviewed_at);
+      // ONLY aged-out entries (≥ STALE_DAYS). Fresh ones are the resolver's.
+      if (!Number.isFinite(created) || created >= staleCutoff) continue;
+      // Re-review debounce: skip entries this reviewer saw recently so a
+      // keep_aging verdict isn't re-litigated every day.
+      if (entry.aged_out_reviewed_at) {
+        const reviewed = Date.parse(entry.aged_out_reviewed_at);
         if (Number.isFinite(reviewed) && reviewed >= reReviewCutoff) continue;
       }
       out.push({ file: abs, entry });
@@ -254,11 +254,11 @@ export function selectStagingCandidates(now: Date = new Date(), max: number = MA
 
 // ── Prompt assembly ──────────────────────────────────────────────────────
 
-const RESOLVER_PROMPT_FILENAME = "staging-resolver-v1.md";
+const AGEOUT_PROMPT_FILENAME = "staging-ageout-reviewer-v1.md";
 let _cachedPrompt: string | undefined;
-function loadResolverPrompt(): string {
+function loadAgeOutPrompt(): string {
   if (_cachedPrompt !== undefined) return _cachedPrompt;
-  _cachedPrompt = fs.readFileSync(path.join(__dirname, "prompts", RESOLVER_PROMPT_FILENAME), "utf-8");
+  _cachedPrompt = fs.readFileSync(path.join(__dirname, "prompts", AGEOUT_PROMPT_FILENAME), "utf-8");
   return _cachedPrompt;
 }
 
@@ -267,8 +267,8 @@ function clip(text: string, cap: number): string {
   return text.length <= cap ? text : text.slice(0, cap) + "…";
 }
 
-export function buildResolverPrompt(candidates: StagingCandidate[], windowText: string, now: Date = new Date()): string {
-  const lines: string[] = [loadResolverPrompt(), "", "## Pending hypotheses to triage", ""];
+export function buildAgeOutPrompt(candidates: AgeOutCandidate[], windowText: string, now: Date = new Date()): string {
+  const lines: string[] = [loadAgeOutPrompt(), "", "## Aged-out hypotheses to review", ""];
   const nowMs = now.getTime();
   for (const c of candidates) {
     const e = c.entry;
@@ -276,7 +276,8 @@ export function buildResolverPrompt(candidates: StagingCandidate[], windowText: 
       ? Math.max(0, Math.floor((nowMs - Date.parse(e.created)) / (24 * 60 * 60 * 1000)))
       : 0;
     const quote = e.source_utterance?.[0]?.quote ?? "";
-    lines.push(`### ${e.slug}  (age ~${ageDays}d, classifier confidence ${e.correction_signal?.confidence ?? "?"})`);
+    const prior = e.resolver_disposition ? `, resolver_disposition ${e.resolver_disposition}` : "";
+    lines.push(`### ${e.slug}  (age ~${ageDays}d, classifier confidence ${e.correction_signal?.confidence ?? "?"}${prior})`);
     lines.push(`hypothesis: ${clip(e.hypothesis ?? "", MAX_HYPOTHESIS_CHARS)}`);
     if (quote) lines.push(`user_quote: ${clip(quote, MAX_QUOTE_CHARS)}`);
     lines.push("");
@@ -287,7 +288,7 @@ export function buildResolverPrompt(candidates: StagingCandidate[], windowText: 
   return lines.join("\n");
 }
 
-// ── Output parsing (tolerant; default-conservative = keep) ───────────────
+// ── Output parsing (tolerant; default-conservative = keep_aging) ─────────
 
 function extractJsonBlock(rawText: string): string {
   const fence = /```(?:json)?\s*\n([\s\S]*?)\n```/i.exec(rawText);
@@ -298,24 +299,25 @@ function extractJsonBlock(rawText: string): string {
   return rawText.trim();
 }
 
-/** Parse resolver LLM output. Tolerant of extra fields. Unknown decision
- *  values default to `keep` (conservative). Throws only on unparseable
- *  JSON — caller treats throw as degraded → keep everything. Exported for
- *  smoke coverage. */
-export function parseStagingResolverOutput(rawText: string): StagingResolverLlmOutput {
+/** Parse age-out reviewer output. Tolerant of extra fields. Unknown decision
+ *  values default to `keep_aging` (conservative — nothing retired). Throws
+ *  only on unparseable JSON — caller treats throw as degraded → keep
+ *  everything aging. Exported for smoke coverage. */
+export function parseStagingAgeOutOutput(rawText: string): StagingAgeOutLlmOutput {
   const parsed = JSON.parse(extractJsonBlock(rawText)) as Record<string, unknown>;
   const decisionsRaw = Array.isArray(parsed.decisions) ? parsed.decisions : [];
-  const decisions: StagingResolverDecision[] = [];
+  const decisions: StagingAgeOutDecision[] = [];
   for (const item of decisionsRaw) {
     if (!item || typeof item !== "object") continue;
     const obj = item as Record<string, unknown>;
     const slug = typeof obj.slug === "string" ? obj.slug.trim() : "";
     if (!slug) continue;
-    const decision: StagingResolverDecisionKind = obj.decision === "likely_noise" ? "likely_noise" : "plausible";
+    const d = obj.decision;
+    const decision: StagingAgeOutDecisionKind =
+      d === "soft_archive" ? "soft_archive" : d === "promote_candidate" ? "promote_candidate" : "keep_aging";
     decisions.push({
       slug,
       decision,
-      promote_candidate: obj.promote_candidate === true,
       rationale: typeof obj.rationale === "string" ? obj.rationale.slice(0, 500) : "",
     });
   }
@@ -324,74 +326,73 @@ export function parseStagingResolverOutput(rawText: string): StagingResolverLlmO
 
 // ── Apply ────────────────────────────────────────────────────────────────
 
-/** Pure transform: annotate a pending entry with the resolver's triage
- *  disposition. NON-DESTRUCTIVE — attribution_pending is left untouched, so
- *  the hypothesis stays in the learning loop and ages out normally; only the
- *  triage metadata + reviewed-at timestamp are added. Exported for smoke
- *  coverage. */
-export function annotateEntry(
+/** Pure transform: stamp the age-out reviewer's disposition onto an entry.
+ *  REVERSIBLE — soft_archive only flips lifecycle_state + sets aged_out_at;
+ *  the file is never unlinked. attribution_pending is left UNTOUCHED (see
+ *  staging-types.ts). `updated` is deliberately NOT bumped — this is system
+ *  lifecycle, not fresh user activity. Exported for smoke coverage. */
+export function annotateAgeOut(
   entry: StagingEntry,
   now: Date,
-  disposition: NonNullable<StagingEntry["resolver_disposition"]>,
+  decision: StagingAgeOutDecisionKind,
   rationale: string,
 ): StagingEntry {
-  return {
+  const reviewedAt = formatLocalIsoTimestamp(now);
+  const next: StagingEntry = {
     ...entry,
-    // NOTE: we deliberately do NOT bump `updated` here (R2 opus/deepseek NIT):
-    // `resolver_reviewed_at` is the semantically meaningful triage timestamp,
-    // and bumping `updated` could look like fresh USER activity to any future
-    // recency consumer. Triage is system activity, not user activity.
-    resolver_reviewed_at: formatLocalIsoTimestamp(now),
-    resolver_disposition: disposition,
-    resolver_rationale: rationale.slice(0, 500),
+    aged_out_reviewed_at: reviewedAt,
+    aged_out_decision: decision,
+    aged_out_rationale: rationale.slice(0, 500),
+    aged_out_prompt_version: STAGING_AGEOUT_PROMPT_VERSION,
   };
+  if (decision === "soft_archive") {
+    next.lifecycle_state = "soft_archived";
+    next.aged_out_at = reviewedAt;
+  }
+  // keep_aging / promote_candidate: stay active (lifecycle_state untouched);
+  // promote_candidate is advisory only (multi-view §4.4 still gates promotion).
+  return next;
 }
 
-function writeStagingFile(file: string, entry: StagingEntry): void {
+/** Atomic write: tmp + rename so a crash mid-write never corrupts the file. */
+function writeStagingFileAtomic(file: string, entry: StagingEntry): void {
   const payload: StagingFileOnDisk = { schema_version: 1, entry };
-  fs.writeFileSync(file, JSON.stringify(payload, null, 2), "utf-8");
+  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf-8");
+  fs.renameSync(tmp, file);
 }
 
-export interface ApplyResult {
-  likelyNoise: string[];
+export interface AgeOutApplyResult {
+  softArchived: string[];
   promoteCandidates: string[];
-  plausible: number;
+  keptAging: number;
 }
 
-/** Apply resolver triage to the loaded candidates: annotate each with its
- *  disposition (likely_noise / plausible / promote_candidate) + reviewed-at,
- *  WITHOUT touching attribution_pending (non-destructive — see module/file
- *  docstrings). promote_candidate wins over the decision field (a promote
- *  candidate is always "plausible"-or-better and kept for the durable path).
- *  A failed write is skipped silently (next run re-reviews it). Exported for
- *  smoke coverage of the real on-disk path. */
-export function applyResolverDecisions(
-  candidates: StagingCandidate[],
-  output: StagingResolverLlmOutput,
+/** Apply the reviewer's decisions to the loaded candidates. Unlisted slugs
+ *  default to keep_aging. A failed write is skipped (next run re-reviews it).
+ *  Exported for smoke coverage of the real on-disk path. */
+export function applyAgeOutDecisions(
+  candidates: AgeOutCandidate[],
+  output: StagingAgeOutLlmOutput,
   now: Date,
-): ApplyResult {
+): AgeOutApplyResult {
   const decisionBySlug = new Map(output.decisions.map((d) => [d.slug, d]));
-  const likelyNoise: string[] = [];
+  const softArchived: string[] = [];
   const promoteCandidates: string[] = [];
-  let plausible = 0;
+  let keptAging = 0;
   for (const c of candidates) {
     const d = decisionBySlug.get(c.entry.slug);
-    const promote = d?.promote_candidate === true;
-    const disposition: NonNullable<StagingEntry["resolver_disposition"]> = promote
-      ? "promote_candidate"
-      : d?.decision === "likely_noise"
-        ? "likely_noise"
-        : "plausible";
+    const decision: StagingAgeOutDecisionKind = d?.decision ?? "keep_aging";
     try {
-      writeStagingFile(c.file, annotateEntry(c.entry, now, disposition, d?.rationale ?? ""));
+      writeStagingFileAtomic(c.file, annotateAgeOut(c.entry, now, decision, d?.rationale ?? ""));
     } catch {
-      continue; // write failed → leave un-annotated; next run re-reviews
+      continue; // write failed → leave as-is; next run re-reviews
     }
-    if (promote) promoteCandidates.push(c.entry.slug);
-    else if (disposition === "likely_noise") likelyNoise.push(c.entry.slug);
-    else plausible++;
+    if (decision === "soft_archive") softArchived.push(c.entry.slug);
+    else if (decision === "promote_candidate") promoteCandidates.push(c.entry.slug);
+    else keptAging++;
   }
-  return { likelyNoise, promoteCandidates, plausible };
+  return { softArchived, promoteCandidates, keptAging };
 }
 
 // ── LLM invocation ───────────────────────────────────────────────────────
@@ -403,12 +404,12 @@ function parseModelRef(spec: string | undefined): { provider: string; id: string
   return { provider: spec.slice(0, idx), id: spec.slice(idx + 1) };
 }
 
-async function invokeResolver(
+async function invokeReviewer(
   fullPrompt: string,
   settings: SedimentSettings,
   modelRegistry: ModelRegistryLike,
   signal?: AbortSignal,
-): Promise<{ rawText: string; model: string; skipReason?: StagingResolverResult["skipped"] }> {
+): Promise<{ rawText: string; model: string; skipReason?: StagingAgeOutResult["skipped"] }> {
   const modelSpec = settings.aggregatorModel || settings.curatorModel;
   const parsed = parseModelRef(modelSpec);
   if (!parsed) return { rawText: "", model: modelSpec, skipReason: "model_not_found" };
@@ -445,13 +446,13 @@ async function invokeResolver(
     .map((part) => part.text ?? "")
     .join("\n")
     .trim();
-  if (!rawText) throw new Error("staging-resolver returned empty text");
+  if (!rawText) throw new Error("staging-ageout reviewer returned empty text");
   return { rawText, model: modelSpec };
 }
 
 // ── Main entry ───────────────────────────────────────────────────────────
 
-export interface RunStagingResolverOptions {
+export interface RunStagingAgeOutOptions {
   projectRoot: string;
   windowText?: string;
   settings: SedimentSettings;
@@ -462,14 +463,14 @@ export interface RunStagingResolverOptions {
   now?: Date;
 }
 
-export async function runStagingResolverIfDue(options: RunStagingResolverOptions): Promise<StagingResolverResult> {
+export async function runStagingAgeOutIfDue(options: RunStagingAgeOutOptions): Promise<StagingAgeOutResult> {
   const t0 = Date.now();
   const now = options.now ?? new Date();
   const minIntervalMs = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
-  const base: Omit<StagingResolverResult, "ok" | "durationMs"> = {
+  const base: Omit<StagingAgeOutResult, "ok" | "durationMs"> = {
     reviewed_count: 0,
-    likely_noise_slugs: [],
-    plausible_count: 0,
+    soft_archived_slugs: [],
+    kept_aging_count: 0,
     promote_candidates: [],
   };
 
@@ -480,7 +481,7 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
   }
 
   // 2. Candidates.
-  const candidates = selectStagingCandidates(now);
+  const candidates = selectAgeOutCandidates(now);
   if (candidates.length === 0) {
     writeLastRun(options.projectRoot, now, "skipped");
     return { ok: true, skipped: "no_candidates", ...base, durationMs: Date.now() - t0 };
@@ -498,21 +499,17 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
   }
 
   try {
-    // 5. Build prompt + invoke LLM. buildResolverPrompt() reads the prompt
-    // file from disk; a missing/unreadable prompt must DEGRADE, not throw out
-    // of this fire-and-forget bg fn (deepseek R1 P0). So it lives INSIDE the
-    // inner try whose catch writes last_run(degraded) + a ledger row.
+    // 5. Build prompt + invoke LLM. loadAgeOutPrompt() reads the prompt file
+    // from disk; a missing/unreadable prompt must DEGRADE, not throw out of
+    // this fire-and-forget bg fn — so it lives INSIDE the inner try.
     let rawText: string;
     let model: string;
     try {
-      const prompt = buildResolverPrompt(candidates, options.windowText ?? "", now);
-      const inv = await invokeResolver(prompt, options.settings, options.modelRegistry, options.signal);
+      const prompt = buildAgeOutPrompt(candidates, options.windowText ?? "", now);
+      const inv = await invokeReviewer(prompt, options.settings, options.modelRegistry, options.signal);
       if (inv.skipReason) {
-        // model_not_found / auth_unavailable are persistent misconfigs: write
-        // last_run (debounce) + a breadcrumb so silent non-execution is
-        // detectable (R1 opus/gpt P2) without scanning every single turn.
         writeLastRun(options.projectRoot, now, "skipped");
-        appendLedgerRow({ op: "staging_resolve", ok: false, skipped: inv.skipReason, reviewed_count: candidates.length, model: inv.model, session_id: options.sessionId, prompt_version: STAGING_RESOLVER_PROMPT_VERSION });
+        appendLedgerRow({ op: "staging_ageout", ok: false, skipped: inv.skipReason, reviewed_count: candidates.length, model: inv.model, session_id: options.sessionId, prompt_version: STAGING_AGEOUT_PROMPT_VERSION });
         return { ok: true, skipped: inv.skipReason, ...base, reviewed_count: candidates.length, model: inv.model, durationMs: Date.now() - t0 };
       }
       rawText = inv.rawText;
@@ -520,42 +517,42 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
     } catch (e: unknown) {
       writeLastRun(options.projectRoot, now, "degraded");
       const error = e instanceof Error ? e.message : String(e);
-      appendLedgerRow({ op: "staging_resolve", ok: false, degraded: true, reviewed_count: candidates.length, error: error.slice(0, 500), session_id: options.sessionId, prompt_version: STAGING_RESOLVER_PROMPT_VERSION });
+      appendLedgerRow({ op: "staging_ageout", ok: false, degraded: true, reviewed_count: candidates.length, error: error.slice(0, 500), session_id: options.sessionId, prompt_version: STAGING_AGEOUT_PROMPT_VERSION });
       return { ok: false, degraded: true, ...base, reviewed_count: candidates.length, error: error.slice(0, 500), durationMs: Date.now() - t0 };
     }
 
-    // 6. Parse (degraded → keep everything).
-    let output: StagingResolverLlmOutput;
+    // 6. Parse (degraded → keep everything aging).
+    let output: StagingAgeOutLlmOutput;
     try {
-      output = parseStagingResolverOutput(rawText);
+      output = parseStagingAgeOutOutput(rawText);
     } catch {
       writeLastRun(options.projectRoot, now, "degraded");
-      appendLedgerRow({ op: "staging_resolve", ok: false, degraded: true, reviewed_count: candidates.length, error: "unparseable_llm_output", session_id: options.sessionId, prompt_version: STAGING_RESOLVER_PROMPT_VERSION });
+      appendLedgerRow({ op: "staging_ageout", ok: false, degraded: true, reviewed_count: candidates.length, error: "unparseable_llm_output", session_id: options.sessionId, prompt_version: STAGING_AGEOUT_PROMPT_VERSION });
       return { ok: false, degraded: true, ...base, reviewed_count: candidates.length, model, durationMs: Date.now() - t0 };
     }
 
-    // 7. Apply triage (non-destructive: annotate disposition; attribution_pending untouched).
-    const { likelyNoise, promoteCandidates, plausible } = applyResolverDecisions(candidates, output, now);
+    // 7. Apply (reversible: soft_archive flips lifecycle_state, never unlinks).
+    const { softArchived, promoteCandidates, keptAging } = applyAgeOutDecisions(candidates, output, now);
 
     writeLastRun(options.projectRoot, now, "ok");
     appendLedgerRow({
-      op: "staging_resolve",
+      op: "staging_ageout",
       ok: true,
       reviewed_count: candidates.length,
-      likely_noise_count: likelyNoise.length,
-      plausible_count: plausible,
+      soft_archived_count: softArchived.length,
+      kept_aging_count: keptAging,
       promote_candidate_count: promoteCandidates.length,
-      likely_noise_slugs: likelyNoise,
+      soft_archived_slugs: softArchived,
       promote_candidates: promoteCandidates,
       model,
       session_id: options.sessionId,
-      prompt_version: STAGING_RESOLVER_PROMPT_VERSION,
+      prompt_version: STAGING_AGEOUT_PROMPT_VERSION,
     });
     return {
       ok: true,
       reviewed_count: candidates.length,
-      likely_noise_slugs: likelyNoise,
-      plausible_count: plausible,
+      soft_archived_slugs: softArchived,
+      kept_aging_count: keptAging,
       promote_candidates: promoteCandidates,
       model,
       durationMs: Date.now() - t0,

@@ -75,6 +75,13 @@ export function loadStagingContext(): StagingContext {
 
         if (!parsed.entry || !parsed.entry.attribution_pending) continue;
 
+        // Stage 4 (ADR 0025 §4.1.5 / §4.6.6): soft-archived hypotheses are
+        // retired by the age-out reviewer. Drop them from BOTH the active
+        // context AND the staleCount — they have already been handled, so
+        // they must not keep inflating the staging_backlog advisory. The
+        // file stays on disk (reversible), it just stops being selected.
+        if (parsed.entry.lifecycle_state === "soft_archived") continue;
+
         const created = Date.parse(parsed.entry.created);
         if (!Number.isFinite(created)) continue;
 
@@ -115,7 +122,8 @@ export function writeStagingEntry(entry: StagingEntry): void {
 }
 
 /**
- * Count total staging files (for inflation monitoring).
+ * Count total staging files (for raw disk-footprint monitoring). Includes
+ * soft-archived (retired-but-not-deleted) files.
  */
 export function stagingFileCount(): number {
   try {
@@ -125,4 +133,34 @@ export function stagingFileCount(): number {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Count ACTIVE staging files, EXCLUDING age-out soft-archived ones (Stage 4,
+ * ADR 0025 §4.1.5 / §4.6.6). Use this for the classifier-over-production
+ * inflation monitor: a soft-archived hypothesis was already retired by the
+ * age-out reviewer and is only awaiting the deferred mechanical hard-delete
+ * (Stage 5), so it must NOT count as evidence the classifier is
+ * over-producing — otherwise the advisory fires perpetually as retired files
+ * accumulate.
+ */
+export function stagingActiveFileCount(): number {
+  let count = 0;
+  try {
+    const dir = stagingDir();
+    if (!fs.existsSync(dir)) return 0;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const parsed: StagingFileOnDisk = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
+        if (parsed?.entry?.lifecycle_state === "soft_archived") continue;
+      } catch {
+        // Corrupt file: count it (a real file on disk; conservative).
+      }
+      count++;
+    }
+  } catch {
+    return count;
+  }
+  return count;
 }

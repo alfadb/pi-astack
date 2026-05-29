@@ -82,26 +82,33 @@ console.log(`Found ${idsInSource.length} STRUCTURAL_CONTEXT entries: ${idsInSour
  * a string describing what was found (capability shipped, fail).
  */
 const KNOWN_ENTRIES = {
-  // 2026-05-29 Stage 3: the staging-RESOLVER shipped (non-destructive triage),
-  // but it does NOT delete provisional staging files — so the structural entry
-  // was RENAMED to "staging-backlog-deletion-unimplemented" (the remaining gap
-  // is the age-out DELETION sweep, not resolution). Its staleness signature
-  // therefore checks for a DELETER, not for the resolver module.
-  "staging-backlog-deletion-unimplemented": {
-    description: "ADR 0025 §4.1.5 mechanical age-out deletion sweep for provisional staging",
-    /** Returns true while no age-out sweep deletes provisional staging files.
-     *  Ships when staging-resolver.ts unlinks stale provisional-correction
-     *  entries (e.g. a sweepStaleStagingEntries / ageOut function). */
+  // 2026-05-29 Stage 4: the prompt-driven age-out REVIEWER shipped
+  // (staging-ageout.ts: soft_archive is REVERSIBLE — it flips lifecycle_state,
+  // never unlinks). The structural entry was RENAMED to
+  // "staging-hard-archive-unimplemented": the remaining gap is the mechanical
+  // N-day-window → hard-delete (unlink) of soft-archived files (Stage 5,
+  // deferred because .state is git-ignored → unlink irreversible). Its
+  // staleness signature therefore checks for a real staging-file UNLINK/
+  // hard-delete sweep, NOT for the (already-shipped) age-out reviewer.
+  "staging-hard-archive-unimplemented": {
+    description: "ADR 0025 §4.1.5 mechanical N-day hard-delete (unlink) of soft-archived staging files",
+    /** Returns true while NO module hard-deletes soft-archived staging files.
+     *  Ships when a dedicated Stage-5 sweep unlinks them after the N-day
+     *  window (e.g. hardDeleteSoftArchivedStaging / sweepRetiredStaging /
+     *  reapSoftArchivedStaging). The age-out reviewer itself only renames
+     *  (atomic tmp+rename write) + unlinks its own advisory lock / tmp file,
+     *  which must NOT count as the hard-delete shipping. */
     shouldBeAbsent: () => {
-      const resolverSrc = fs.readFileSync(
-        path.join(repoRoot, "extensions/sediment/staging-resolver.ts"),
-        "utf8",
-      );
-      // Match only a dedicated age-out/sweep function name — NOT the advisory
-      // lock's unlinkSync (releaseLock), which is unrelated to staging files.
-      const shipped = /\b(?:sweepStaleStagingEntries|ageOutStaging|deleteStaleStaging)\s*\(/.test(resolverSrc);
+      let src = "";
+      for (const rel of [
+        "extensions/sediment/staging-ageout.ts",
+        "extensions/sediment/staging-resolver.ts",
+      ]) {
+        try { src += fs.readFileSync(path.join(repoRoot, rel), "utf8") + "\n"; } catch { /* optional */ }
+      }
+      const shipped = /\b(?:hardDeleteSoftArchivedStaging|sweepRetiredStaging|reapSoftArchivedStaging|sweepStaleStagingEntries|deleteStaleStaging)\s*\(/.test(src);
       if (shipped) {
-        return "staging-resolver.ts appears to delete provisional staging files — age-out sweep may have shipped; remove this STRUCTURAL_CONTEXT entry.";
+        return "a staging hard-delete sweep appears to have shipped — the N-day-window unlink (Stage 5) may be implemented; remove/narrow this STRUCTURAL_CONTEXT entry.";
       }
       return true;
     },

@@ -351,12 +351,13 @@ check("aggregator.ts STRUCTURAL_CONTEXT removed archive-reactivation entry", () 
       "STRUCTURAL_CONTEXT must NOT contain archive-reactivation-reviewer-unimplemented anymore (Stage 2 shipped)",
     );
   }
-  // Stage 3 (2026-05-29): the resolver shipped, so the entry was renamed to
-  // "staging-backlog-deletion-unimplemented" (the remaining gap is deletion,
-  // not resolution). It MUST still be present until a mechanical age-out
-  // sweep ships (the resolver is non-destructive and doesn't shrink files).
-  if (!/id:\s*"staging-backlog-deletion-unimplemented"/.test(aggregatorSrc)) {
-    throw new Error("staging-backlog-deletion-unimplemented MUST still be present (age-out sweep not yet shipped)");
+  // Stage 4 (2026-05-29): the age-out REVIEWER shipped (reversible soft-
+  // archive), so the entry was renamed again to
+  // "staging-hard-archive-unimplemented" (the remaining gap is the mechanical
+  // N-day hard-delete/unlink of soft-archived files, deferred to Stage 5).
+  // It MUST still be present until that unlink sweep ships.
+  if (!/id:\s*"staging-hard-archive-unimplemented"/.test(aggregatorSrc)) {
+    throw new Error("staging-hard-archive-unimplemented MUST still be present (hard-delete sweep not yet shipped)");
   }
 });
 

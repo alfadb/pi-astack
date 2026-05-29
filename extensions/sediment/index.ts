@@ -55,6 +55,7 @@ import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { runArchiveReactivationIfDue } from "./archive-reactivation";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
+import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
 import { getCurrentAnchor, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
@@ -1292,6 +1293,57 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 model: stagingResult.model,
                 duration_ms: stagingResult.durationMs,
                 prompt_version: STAGING_RESOLVER_PROMPT_VERSION,
+              });
+            }
+          } catch {
+            /* fire-and-forget bg; never throw out of agent_end */
+          }
+        })();
+      });
+
+      // ADR 0025 §4.1.5 / §4.6.6 staging AGE-OUT reviewer (Stage 4, 2026-05-29).
+      // Daily-debounced prompt-native review of AGED-OUT (≥30d) provisional
+      // hypotheses — the tier the resolver explicitly skips. The reviewer
+      // gives each a disposition: keep_aging / soft_archive / promote_candidate.
+      // REVERSIBLE: soft_archive only flips lifecycle_state (drops the entry
+      // from the active backlog) — it NEVER unlinks (staging is git-ignored
+      // .state, so unlink is irreversible; the mechanical hard-delete window
+      // is a deferred Stage 5). promote_candidate is ADVISORY only (multi-view
+      // §4.4 still gates promotion). Only rewrites .state staging files (never
+      // durable entries), so it is safe under "staging-only" too. Gated like
+      // the resolver: false → no LLM tokens, no scheduling. Own 24h debounce /
+      // lock / ledger, independent of the resolver's 6h cadence.
+      if (settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
+        void (async () => {
+          try {
+            const recentForAgeOut = branch.slice(-50);
+            const ageOutWindowText = recentForAgeOut
+              .map((e: unknown) => entryToText(e))
+              .filter((s: string) => !!s)
+              .join("\n\n");
+            const ageOutResult = await runStagingAgeOutIfDue({
+              projectRoot: cwd,
+              windowText: ageOutWindowText,
+              settings,
+              modelRegistry: modelRegistry as Parameters<typeof runStagingAgeOutIfDue>[0]["modelRegistry"],
+              sessionId,
+            });
+            if (!ageOutResult.skipped && (ageOutResult.soft_archived_slugs.length > 0 || ageOutResult.promote_candidates.length > 0 || ageOutResult.degraded)) {
+              await appendAudit(cwd, {
+                operation: "staging_ageout",
+                lane: "diagnostic",
+                session_id: sessionId,
+                ok: ageOutResult.ok,
+                degraded: ageOutResult.degraded ?? false,
+                reviewed_count: ageOutResult.reviewed_count,
+                soft_archived_count: ageOutResult.soft_archived_slugs.length,
+                kept_aging_count: ageOutResult.kept_aging_count,
+                promote_candidate_count: ageOutResult.promote_candidates.length,
+                soft_archived_slugs: ageOutResult.soft_archived_slugs,
+                promote_candidates: ageOutResult.promote_candidates,
+                model: ageOutResult.model,
+                duration_ms: ageOutResult.durationMs,
+                prompt_version: STAGING_AGEOUT_PROMPT_VERSION,
               });
             }
           } catch {
