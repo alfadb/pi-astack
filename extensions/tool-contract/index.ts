@@ -1,5 +1,5 @@
-import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import { defineTool, getMarkdownTheme, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Box, Markdown, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isSubAgentSession } from "../_shared/pi-internals";
@@ -13,6 +13,18 @@ import { FORCE_DISABLED, resolveToolContractSettings } from "./settings";
 
 interface FinalAnswerDetails {
   summary: string;
+}
+
+class TopSpacer implements Component {
+  constructor(private readonly child: Component) {}
+
+  render(width: number): string[] {
+    return [" ".repeat(width), ...this.child.render(width)];
+  }
+
+  invalidate(): void {
+    this.child.invalidate();
+  }
 }
 
 const STATUS_KEY = FOOTER_STATUS_KEYS.toolContract;
@@ -50,9 +62,15 @@ const finalAnswerTool = defineTool({
     const details = result.details as FinalAnswerDetails | undefined;
     const text = details?.summary
       ?? (result.content[0]?.type === "text" ? result.content[0].text : "");
-    const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
-    box.addChild(new Text(text, 0, 0));
-    return box;
+    // Render the final answer through the Markdown component (headings, lists,
+    // code blocks, tables, inline styles) instead of a raw plain-text node, so
+    // it matches how normal assistant messages are displayed. Do not wrap it in
+    // a custom background card: final answers should read like normal assistant
+    // text, and the full-width color block is visually too heavy. Add exactly
+    // one top spacer line so the final-answer block does not visually stick to
+    // the preceding tool-call chrome; avoid Markdown paddingY because it would
+    // add a bottom spacer too.
+    return new TopSpacer(new Markdown(text, 0, 0, getMarkdownTheme()));
   },
 });
 
