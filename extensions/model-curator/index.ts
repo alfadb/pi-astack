@@ -73,7 +73,7 @@ const DEFAULTS: CuratorDefaults = {
 
   hints: {
     "anthropic/claude-opus-4-8":
-      "Strongest reasoning + agentic coding (SWE-Bench Pro 69.2%); ~4× lower 'silent code bug' rate vs 4.7; same price as 4.7. Use for security audits, architecture critique, long-horizon agentic work.",
+      "Strongest reasoning + agentic coding (SWE-bench Verified 88.6%, SWE-bench Pro 69.2%); ~4× lower 'silent code bug' rate vs 4.7 + proactively flags input/output uncertainty (good for audit/review subagents); defaults to high effort, supports xhigh/max for hard long-running tasks; regular $5/$25 same as 4.7, fast mode 3× cheaper ($10/$50, ~2.5× speed). Use for security audits, architecture critique, long-horizon agentic work.",
     "anthropic/claude-opus-4-7":
       "Previous-gen opus (April 2026); close to 4-8 quality but more likely to let coding flaws pass unremarked. Same price tier as 4-8.",
     "anthropic/claude-opus-4-6":
