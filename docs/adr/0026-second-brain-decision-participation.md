@@ -469,7 +469,23 @@ path_a_inject_id = `path-a-${ts.toString(36)}-${random8chars}`
 - 路径 A 在同 turn inject → path-a-ledger row 含 `path_a_inject_id`
 - 两 ledger 通过 (session_id, turn_id) join，但 anchor 字段不同
 
-**与 ADR 0027 §C6 关系**：path_a_inject_id 是 path A 独立间接 anchor，不依赖 C6 turn_id。spreadAnchor(undefined) 在 path-a-ledger 上是默认 — 路径 A 另外走自己 unique id。后期可考虑补 turn_id_pending 出递式 anchor，当前不需要。
+**与 ADR 0027 §C6 关系**：path_a_inject_id 是 path A 独立间接 anchor。
+
+> **Walk-back（2026-05-29，自治演进 Stage 1）**：上文"path-a-ledger 默认
+> 走 spreadAnchor(undefined)、turn_id 当前不需要"已被实施层 walk back。
+> path-a-ledger 现在每行都 stamp `spreadAnchor(getCurrentAnchor())`
+> （session_id + turn_id [+ subturn/device_id]），缺锚时显式标
+> `anchor_missing:true`（C5 fail-degrade，行仍写）。这样 ADR 0026 §5.1
+> 的 (session_id, turn_id) join 在 **path-a 侧也真正可实现**，不再只靠
+> path_a_inject_id 这条独立 id。
+>
+> 原 deferral 的顾虑是"path A 在 before_agent_start 跑、turn_id 尚未分配"。
+> 实现层用的是 causal-anchor 自己的 before_agent_start turn-bump（不是 pi 的
+> turn_start），且通过 canonical-owner 加固消除了 cross-extension handler
+> 顺序依赖：memory 扩展在 activate 顶部调用 **幂等的** `bindLifecycle(pi)`，
+> 保证 turn-bump handler 一定先于 Path A 的 reader 注册 —— 因此 Path A 读到
+> 的 turn_id 与同 turn 的 outcome-ledger 行一致，且 dispatch 缺席时锚点仍可用。
+> path_a_inject_id 继续保留为 inject 级别的细粒度 id。
 
 #### outcome-ledger 行 anchor 字段布局
 

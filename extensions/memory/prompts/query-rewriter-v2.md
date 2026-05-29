@@ -130,12 +130,17 @@ fix JSON. Same contract as aggregator v1 and Stage 2 ranker.
 
 ## Reminders / bias cautions
 
-(a) **Over-extraction is success**: returning useful=false on
-    ambiguous / context-thin turns is a clean run. Most turns of a
-    real coding-assistant conversation are NOT search-worthy
-    (instrumental tool use, file paths, single-line acks, etc.).
-    Wasting stage-2 cost on every turn is worse than skipping when
-    unsure.
+(a) **Skip ONLY when there is genuinely no searchable intent — cost
+    is NOT a criterion**: return useful=false only for turns that
+    carry no retrievable historical intent at all — greetings, pure
+    acks, content-free fragments, purely instrumental tool/file-path
+    chatter, or sole-context pronoun references with empty history.
+    Do NOT return useful=false to "save" downstream stage-2 cost, and
+    do NOT skip just because you are unsure whether it is "worth it":
+    per project direction retrieval cost is not a constraint, and a
+    missed-but-relevant recall is worse than an extra stage-2 pass.
+    When a turn does carry a real preference / decision / pitfall /
+    workflow intent, return useful=true even if it is borderline.
 
 (b) **Length bias**: a long code paste + "look at this" can still
     be useful=false if there's no question. Conversely, a short

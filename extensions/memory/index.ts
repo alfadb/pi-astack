@@ -16,6 +16,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { isSubAgentSession } from "../_shared/pi-internals";
+import { bindLifecycle as bindCausalAnchorLifecycle } from "../_shared/causal-anchor";
 import { asBoolean, asNumber, resolveSettings } from "./settings";
 import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./types";
 import { loadEntries } from "./parser";
@@ -312,6 +313,17 @@ export default function (pi: ExtensionAPI) {
   // memory_search/get/list/neighbors (though dispatch's --tools
   // allowlist also blocks them).
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
+  // ADR 0027 C6 (canonical-owner hardening, 2026-05-29): bind the causal
+  // anchor lifecycle at the TOP of activate, BEFORE the Path A
+  // before_agent_start handler is registered below. bindLifecycle is
+  // idempotent (process-wide guard), so if dispatch already bound it this
+  // is a no-op; if dispatch is absent or loads later, this guarantees the
+  // turn-bump handler is registered ahead of Path A's reader — so the
+  // turn_id stamped on path-a-ledger.jsonl matches the same turn's
+  // outcome-ledger.jsonl row (ADR 0026 §5.1 join), independent of
+  // cross-extension load order.
+  bindCausalAnchorLifecycle(pi);
 
   registerMemoryCommand(pi);
 

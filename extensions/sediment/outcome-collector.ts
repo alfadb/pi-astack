@@ -465,6 +465,13 @@ export function writeOutcomeLedger(
 export interface LedgerOutcomeRow extends OutcomeRow {
   /** Optional — added by writeOutcomeLedger at write time. */
   project_root?: string;
+  // ADR 0027 C6 causal anchor fields, attached by spreadAnchor() at write
+  // time (see writeOutcomeLedger). Declared here so typed consumers can read
+  // the (session_id inherited from OutcomeRow, turn_id) join key without a
+  // cast. session_id already lives on OutcomeRow.
+  turn_id?: number;
+  subturn?: number;
+  device_id?: string;
 }
 
 /**

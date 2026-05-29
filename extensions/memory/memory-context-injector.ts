@@ -30,7 +30,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
+import { resolveUserGlobalAbrainHome } from "../_shared/runtime";
 
 import { rewriteUserMessageToSearchQuery } from "./query-rewriter";
 import type { QueryRewriteResult, ConversationTurn } from "./query-rewriter";
@@ -40,6 +40,7 @@ import type { SearchVerdictResult } from "./llm-search";
 import type { MemoryEntry } from "./types";
 import { resolveSettings } from "./settings";
 import type { MemorySettings, PathASettings } from "./settings";
+import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 
 export const PATH_A_INJECT_MARKER = "<!-- pi-astack/memory: path-a relevant memory context (ADR 0026 §3.1 walk-back, 2026-05-28) -->";
 
@@ -161,6 +162,19 @@ interface PathALedgerRow {
   total_duration_ms: number;
   /** Set on terminal error path. */
   error?: string;
+  // ── ADR 0027 C6 causal anchor (ADR 0026 §5.1 cross-layer join) ──
+  // Stamped on EVERY row (skip paths included) so this ledger joins to
+  // outcome-ledger.jsonl via the (session_id, turn_id) key. Mirrors the
+  // anchor retrofit already on llm-search search-metrics + outcome-ledger.
+  session_id?: string;
+  turn_id?: number;
+  subturn?: number;
+  sub_agent_label?: string;
+  device_id?: string;
+  /** True when getCurrentAnchor() was undefined (pre-lifecycle). Per C5
+   *  fail-degrade we still write the row; this flag makes the missing
+   *  join key observable instead of silently absent. */
+  anchor_missing?: boolean;
 }
 
 function buildInjectId(): string {
@@ -168,7 +182,15 @@ function buildInjectId(): string {
 }
 
 function abrainHome(): string {
-  return process.env.ABRAIN_HOME || path.join(os.homedir(), ".abrain");
+  // ADR 0026 §5.1 co-location fix (2026-05-29): use the SAME canonical
+  // resolver as outcome-ledger (userGlobalSedimentDir →
+  // resolveUserGlobalAbrainHome → ABRAIN_ROOT || ~/.abrain) so
+  // path-a-ledger.jsonl and outcome-ledger.jsonl always live under the same
+  // abrain home and the (session_id, turn_id) join is realizable. Previously
+  // read ABRAIN_HOME, which NO other consumer honors — the canonical env is
+  // ABRAIN_ROOT (every other `ABRAIN_HOME` const in the repo actually reads
+  // process.env.ABRAIN_ROOT).
+  return resolveUserGlobalAbrainHome();
 }
 
 function appendLedgerRow(row: PathALedgerRow): void {
@@ -277,6 +299,15 @@ export async function tryInjectRelevantMemoryContext(
     prompt_chars: userPrompt?.length ?? 0,
     total_duration_ms: 0,
   };
+  // ADR 0027 C6 / ADR 0026 §5.1: resolve the causal anchor once and stamp
+  // it onto the base row. Every `{ ...rowBase, ... }` outcome below inherits
+  // (session_id, turn_id[, subturn, device_id]) — the only key that joins
+  // path-a-ledger.jsonl to outcome-ledger.jsonl. before_agent_start has
+  // already bumped the turn counter (dispatch.bindLifecycle) by the time
+  // this injector runs, so the turn_id matches the same turn's outcome rows.
+  const anchor = getCurrentAnchor();
+  Object.assign(rowBase, spreadAnchor(anchor));
+  if (!anchor) rowBase.anchor_missing = true;
 
   try {
     const settings = resolveSettings();

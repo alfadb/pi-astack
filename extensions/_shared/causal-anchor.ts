@@ -112,6 +112,13 @@ type CausalAnchorState = {
    *  Same ALS instance shared across all module imports → cross-extension
    *  scope visibility (e.g., dispatch sets scope, sub-agent's memory_decide reads it). */
   triggerAnchorALS: AsyncLocalStorage<{ anchor: CausalAnchor | undefined }>;
+  /** Process-wide guard so bindLifecycle registers the session_start /
+   *  before_agent_start handlers EXACTLY ONCE, no matter how many
+   *  extensions call it. Without this, two callers (e.g. dispatch AND
+   *  memory) would each register a before_agent_start turn-bump handler
+   *  and currentTurnId would advance by 2 per user prompt — corrupting
+   *  the (session_id, turn_id) join key. See bindLifecycle docstring. */
+  lifecycleBound: boolean;
 };
 
 function _getState(): CausalAnchorState {
@@ -123,6 +130,7 @@ function _getState(): CausalAnchorState {
       currentTurnId: -1,
       subturnCounters: new Map<string, number>(),
       triggerAnchorALS: new AsyncLocalStorage<{ anchor: CausalAnchor | undefined }>(),
+      lifecycleBound: false,
     };
     g[_STATE_KEY] = state;
   }
@@ -208,8 +216,22 @@ function _getState(): CausalAnchorState {
  *  context, preserving the main-session anchor as single source of truth.
  *
  *  Sub-agent anchors are explicitly derived via `deriveSubAgentAnchor`
- *  by dispatch BEFORE spawning, not by lifecycle events. */
+ *  by dispatch BEFORE spawning, not by lifecycle events.
+ *
+ *  # Idempotency (ADR 0027 C6 — canonical-owner hardening, 2026-05-29)
+ *
+ *  Safe to call from MULTIPLE extensions. The first call registers the
+ *  handlers and flips `state.lifecycleBound`; subsequent calls are no-ops.
+ *  This lets any anchor CONSUMER (e.g. the memory Path A injector) call
+ *  bindLifecycle at the TOP of its own activate() to guarantee a turn-bump
+ *  handler is registered before its own before_agent_start reader — so the
+ *  stamped turn_id is correct regardless of cross-extension load order, and
+ *  the anchor still works when dispatch is disabled. Registering twice would
+ *  double-increment currentTurnId, which is exactly what the guard prevents. */
 export function bindLifecycle(pi: ExtensionAPI): void {
+  const state = _getState();
+  if (state.lifecycleBound) return;
+  state.lifecycleBound = true;
   pi.on("session_start", (_event: unknown, ctx: unknown) => {
     // ADR 0027 PR-B: sub-agent session_start MUST NOT overwrite main-session
     // anchor. The sub-agent's anchor was already derived by dispatch.
@@ -414,7 +436,19 @@ export function spreadAnchor(anchor: CausalAnchor | undefined): Record<string, u
 let _cachedDeviceId: string | null | undefined = undefined;
 
 function abrainStateDir(): string {
-  return pathLib.join(os.homedir(), ".abrain", ".state");
+  // Resolve the canonical user-global abrain home INLINE. We intentionally do
+  // NOT import _shared/runtime: causal-anchor is a low-level module that the
+  // isolation smokes compile standalone (copied alone into /tmp), so it must
+  // stay dependency-free. This mirrors resolveUserGlobalAbrainHome() EXACTLY
+  // (ABRAIN_ROOT || ~/.abrain) so device-id co-locates with outcome-ledger /
+  // path-a-ledger under one abrain home, and tests pointing ABRAIN_ROOT at a
+  // tmp dir stay sandboxed instead of touching the real ~/.abrain. ABRAIN_HOME
+  // is deliberately NOT consulted (no other consumer honors it; the canonical
+  // env is ABRAIN_ROOT). device-id is per-abrain-home by design.
+  const home = process.env.ABRAIN_ROOT
+    ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+    : pathLib.join(os.homedir(), ".abrain");
+  return pathLib.join(home, ".state");
 }
 
 /** Return the stable device-id for this machine + user, or undefined if
@@ -490,6 +524,7 @@ export function _resetCausalAnchorForTests(): void {
   state.currentSessionId = undefined;
   state.currentTurnId = -1;
   state.subturnCounters.clear();
+  state.lifecycleBound = false;
   // ALS is per-async-context; no global reset needed. Any test that wants
   // to assert "no scope active" should just call getCurrentAnchor() outside
   // any runWithTriggerAnchor() block.

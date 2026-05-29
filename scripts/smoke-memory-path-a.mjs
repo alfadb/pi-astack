@@ -143,10 +143,11 @@ const fakeSessionManager = {
   },
 };
 
-// Redirect ABRAIN_HOME to a tmpdir so ledger doesn't pollute real user home.
+// Redirect ABRAIN_ROOT (the canonical abrain-home env) to a tmpdir so the
+// ledger doesn't pollute the real user home.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-path-a-"));
-const origHome = process.env.ABRAIN_HOME;
-process.env.ABRAIN_HOME = tmpHome;
+const origHome = process.env.ABRAIN_ROOT;
+process.env.ABRAIN_ROOT = tmpHome;
 
 try {
   // outcome: skipped_no_model_registry (ctx.modelRegistry undefined)
@@ -189,8 +190,8 @@ try {
       lastRow.history_turn_count <= 4);
   }
 } finally {
-  if (origHome === undefined) delete process.env.ABRAIN_HOME;
-  else process.env.ABRAIN_HOME = origHome;
+  if (origHome === undefined) delete process.env.ABRAIN_ROOT;
+  else process.env.ABRAIN_ROOT = origHome;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch {}
 }
 
@@ -259,6 +260,117 @@ check("injector has skipped_hit_hydration_empty failure path (defense in depth)"
   /skipped_hit_hydration_empty/.test(injectorSource));
 check("injector buildInjectBlock no longer reads h.body fallback (post-fix cleanup)",
   !/h\.compiledTruth \?\? h\.body \?\? ""/.test(injectorSource));
+
+// ────────────────────────────────────────────────────────────────
+console.log("\n[7] path-a-ledger carries ADR 0027 C6 causal anchor (ADR 0026 §5.1 join)");
+const anchorMod = jiti(path.join(repoRoot, "extensions/_shared/causal-anchor.ts"));
+{
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-path-a-anchor-"));
+  // A DIFFERENT dir wired to the legacy ABRAIN_HOME var — it MUST be ignored
+  // (canonical env is ABRAIN_ROOT). Proves the §5.1 co-location fix.
+  const tmpBogusHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-path-a-bogus-"));
+  const prevRoot = process.env.ABRAIN_ROOT;
+  const prevHome = process.env.ABRAIN_HOME;
+  process.env.ABRAIN_ROOT = tmpRoot;
+  process.env.ABRAIN_HOME = tmpBogusHome;
+  // device-id must resolve under the OVERRIDDEN abrain home, not real $HOME.
+  anchorMod._resetDeviceIdCacheForTests?.();
+  const tmpHome2 = tmpRoot;
+  try {
+    // Anchor SET (simulating a bound session mid-turn). State lives on a
+    // globalThis Symbol singleton, so the injector's own causal-anchor
+    // import reads the same state this smoke writes (jiti instances differ).
+    anchorMod._setCurrentAnchorForTests("smoke-session-xyz", 7);
+    const r = await injector.tryInjectRelevantMemoryContext("用 pnpm 还是 yarn?", { cwd: tmpHome2 });
+    check("anchored: row carries session_id from getCurrentAnchor()", r.rowWritten.session_id === "smoke-session-xyz");
+    check("anchored: row carries turn_id from getCurrentAnchor()", r.rowWritten.turn_id === 7);
+    check("anchored: anchor_missing NOT set when anchor present", r.rowWritten.anchor_missing === undefined);
+
+    // Anchor MISSING (pre-lifecycle): row still written, flagged (C5 fail-degrade).
+    anchorMod._resetCausalAnchorForTests();
+    const r2 = await injector.tryInjectRelevantMemoryContext("用 pnpm 还是 yarn?", { cwd: tmpHome2 });
+    check("unanchored: row sets anchor_missing=true", r2.rowWritten.anchor_missing === true);
+    check("unanchored: no session_id leaked", r2.rowWritten.session_id === undefined);
+    check("unanchored: no turn_id leaked", r2.rowWritten.turn_id === undefined);
+
+    // On-disk ledger reflects the anchored row → §5.1 join key realizable.
+    const lp = path.join(tmpHome2, ".state", "memory", "path-a-ledger.jsonl");
+    const rows = fs.readFileSync(lp, "utf-8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+    check("ledger has an anchored row with BOTH join keys (session_id+turn_id)",
+      rows.some((row) => row.session_id === "smoke-session-xyz" && row.turn_id === 7));
+    // §5.1 co-location (gpt-5.5 R2 P1): path-a-ledger AND device-id must both
+    // resolve under ABRAIN_ROOT (same home as outcome-ledger), NOT the legacy
+    // ABRAIN_HOME var, so the (session_id, turn_id) join surface stays under
+    // one abrain home.
+    check("device-id resolved under ABRAIN_ROOT, not real $HOME",
+      fs.existsSync(path.join(tmpRoot, ".state", "device-id")));
+    check("path-a-ledger lands under ABRAIN_ROOT (canonical home)",
+      fs.existsSync(path.join(tmpRoot, ".state", "memory", "path-a-ledger.jsonl")));
+    check("legacy ABRAIN_HOME is IGNORED (no ledger written under it)",
+      !fs.existsSync(path.join(tmpBogusHome, ".state", "memory", "path-a-ledger.jsonl")));
+  } finally {
+    anchorMod._resetDeviceIdCacheForTests?.();
+    anchorMod._resetCausalAnchorForTests();
+    if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = prevRoot;
+    if (prevHome === undefined) delete process.env.ABRAIN_HOME;
+    else process.env.ABRAIN_HOME = prevHome;
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(tmpBogusHome, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+console.log("\n[8] prompt faithfulness: rewriter cost-bias stripped; aggregator stale text dropped");
+{
+  const qrSrc = fs.readFileSync(path.join(repoRoot, "extensions/memory/prompts/query-rewriter-v2.md"), "utf-8");
+  check("rewriter: 'Over-extraction is success' cost-bias removed", !/Over-extraction is success/.test(qrSrc));
+  check("rewriter: 'Wasting stage-2 cost' skip-framing removed", !/Wasting stage-2 cost/.test(qrSrc));
+  check("rewriter: explicit cost-not-a-constraint direction present",
+    /cost\s+is NOT a criterion/i.test(qrSrc) || /retrieval cost is not a constraint/i.test(qrSrc));
+  check("rewriter: legitimate useful=false cases still documented",
+    /pure\s+acks?/i.test(qrSrc) && /no\s+(?:searchable|retrievable)\s+(?:historical\s+)?intent/i.test(qrSrc));
+
+  const aggSrc = fs.readFileSync(path.join(repoRoot, "extensions/sediment/prompts/aggregator-skeptical-historian-v1.md"), "utf-8");
+  check("aggregator: stale 'archive-reactivation reviewer ... NOT implemented' removed",
+    !/archive-reactivation reviewer \(ADR 0025 §4\.6\) NOT implemented/.test(aggSrc));
+}
+
+// ────────────────────────────────────────────────────────────────
+console.log("\n[9] causal-anchor lifecycle hardening (idempotent bind + single turn-bump)");
+{
+  anchorMod._resetCausalAnchorForTests();
+  // Fake pi capturing handlers per event name.
+  const handlers = { session_start: [], before_agent_start: [] };
+  const fakePi = { on(evt, fn) { (handlers[evt] ||= []).push(fn); } };
+  // Two extensions (e.g. dispatch + memory) BOTH call bindLifecycle.
+  anchorMod.bindLifecycle(fakePi);
+  anchorMod.bindLifecycle(fakePi);
+  check("idempotent: session_start handler registered exactly once", handlers.session_start.length === 1);
+  check("idempotent: before_agent_start turn-bump registered exactly once", handlers.before_agent_start.length === 1);
+  // Fire lifecycle. session_start → turn=-1; one before_agent_start → turn 0
+  // (NOT 2, which is what a double-registration bug would produce).
+  const fakeCtx = { sessionManager: { getSessionId: () => "sess-lifecycle" } };
+  handlers.session_start[0](null, fakeCtx);
+  handlers.before_agent_start[0](null, fakeCtx);
+  const a = anchorMod.getCurrentAnchor();
+  check("single turn-bump → turn_id 0 on first prompt (no double-increment)",
+    !!a && a.session_id === "sess-lifecycle" && a.turn_id === 0);
+  handlers.before_agent_start[0](null, fakeCtx);
+  check("second prompt → turn_id 1", anchorMod.getCurrentAnchor().turn_id === 1);
+  anchorMod._resetCausalAnchorForTests();
+}
+
+// Source-order contract: memory/index.ts must call bindLifecycle BEFORE
+// wiring the Path A before_agent_start handler, so the turn-bump fires ahead
+// of the Path A reader irrespective of cross-extension load order.
+{
+  const memIdxSrc = fs.readFileSync(path.join(repoRoot, "extensions/memory/index.ts"), "utf-8");
+  const bindIdx = memIdxSrc.indexOf("bindCausalAnchorLifecycle(pi)");
+  const pathAIdx = memIdxSrc.indexOf("Path A: always-on relevant-memory injection");
+  check("memory/index.ts binds causal-anchor lifecycle before Path A handler",
+    bindIdx > 0 && pathAIdx > 0 && bindIdx < pathAIdx);
+}
 
 // ────────────────────────────────────────────────────────────────
 console.log("\n────");
