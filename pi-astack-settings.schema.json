@@ -66,7 +66,7 @@
 
     "toolContract": {
       "type": "object",
-      "description": "Structured tool-call contract (extensions/tool-contract/). Registers a terminating `final_answer(summary)` tool and, when that tool is present in the provider payload, injects provider-native `tool_choice` (`required` for OpenAI Responses / Chat Completions, `{type:\"any\"}` for Anthropic Messages). This prevents turns from silently ending with plain-text pseudo-tool-call markup such as bare `<invoke>` instead of real tool calls. Mismatch detection only scans closed protocol tags, not natural-language intent. Sub-agents are disabled by default in v1 to avoid changing dispatch output extraction.",
+      "description": "Structured tool-call contract (extensions/tool-contract/). Registers a terminating `final_answer(summary)` tool and, when that tool is present in the provider payload, injects provider-native `tool_choice` (`required` for OpenAI Responses / Chat Completions, `{type:\"any\"}` for Anthropic Messages; `{type:\"auto\"}` for Anthropic when thinking is enabled because Anthropic rejects forced tool use with thinking). This prevents turns from silently ending with plain-text pseudo-tool-call markup such as bare `<invoke>` instead of real tool calls. Mismatch detection only scans closed protocol tags, not natural-language intent. Sub-agents are disabled by default in v1 to avoid changing dispatch output extraction.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },

@@ -4,7 +4,8 @@
  *
  * Locks the downstream final_answer + tool_choice contract:
  *   - OpenAI Responses / Chat Completions get tool_choice:"required"
- *   - Anthropic Messages gets tool_choice:{type:"any"}
+ *   - Anthropic Messages gets tool_choice:{type:"any"}; when Anthropic
+ *     thinking is enabled, it degrades to {type:"auto"} to avoid provider 400s
  *   - Injection only happens when final_answer is actually in the tools list
  *   - The mismatch detector only matches closed protocol tags, not
  *     natural-language intent keywords.
@@ -156,12 +157,22 @@ check("OpenAI Chat Completions / DeepSeek payload gets tool_choice required", ()
   if (result.payload.tool_choice !== "required") throw new Error(`wrong tool_choice: ${JSON.stringify(result.payload.tool_choice)}`);
 });
 
-check("Anthropic Messages payload gets tool_choice any", () => {
+check("Anthropic Messages payload gets tool_choice any when thinking is absent", () => {
   const result = payload.injectToolChoiceIntoPayload(anthropicPayload(), { modelApi: "anthropic-messages" });
   if (!result.injected) throw new Error(`not injected: ${JSON.stringify(result)}`);
   if (JSON.stringify(result.payload.tool_choice) !== JSON.stringify({ type: "any" })) {
     throw new Error(`wrong tool_choice: ${JSON.stringify(result.payload.tool_choice)}`);
   }
+});
+
+check("Anthropic Messages payload gets tool_choice auto when thinking is enabled", () => {
+  const p = anthropicPayload({ thinking: { type: "adaptive", display: "summarized" } });
+  const result = payload.injectToolChoiceIntoPayload(p, { modelApi: "anthropic-messages" });
+  if (!result.injected) throw new Error(`not injected: ${JSON.stringify(result)}`);
+  if (JSON.stringify(result.payload.tool_choice) !== JSON.stringify({ type: "auto" })) {
+    throw new Error(`wrong tool_choice: ${JSON.stringify(result.payload.tool_choice)}`);
+  }
+  if (result.reason !== "anthropic_thinking_auto") throw new Error(`wrong reason: ${result.reason}`);
 });
 
 check("provider is inferred from payload shape when model api is absent", () => {

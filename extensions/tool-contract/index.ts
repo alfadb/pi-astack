@@ -85,6 +85,7 @@ function modelApiFromCtx(ctx: unknown): unknown {
 
 function summarizeInjection(result: ToolChoiceInjectionResult): string | undefined {
   if (result.injected) {
+    if (result.reason === "anthropic_thinking_auto") return "contract:auto";
     return result.provider === "anthropic-messages" ? "contract:any" : "contract:required";
   }
   switch (result.reason) {

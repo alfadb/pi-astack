@@ -21,7 +21,8 @@ export interface ToolChoiceInjectionResult {
     | "not_object"
     | "no_tools"
     | "final_answer_not_available"
-    | "unsupported_provider";
+    | "unsupported_provider"
+    | "anthropic_thinking_auto";
 }
 
 export interface ProtocolMarkupMismatch {
@@ -126,6 +127,14 @@ export function inferToolContractProvider(
   return "unknown";
 }
 
+function hasAnthropicThinkingEnabled(payload: Record<string, unknown>): boolean {
+  const thinking = payload.thinking;
+  if (!isRecord(thinking)) return false;
+  // Unknown thinking objects are treated as enabled so we avoid Anthropic's
+  // 400: "Thinking may not be enabled when tool_choice forces tool use."
+  return thinking.type !== "disabled";
+}
+
 export function injectToolChoiceIntoPayload(
   payload: unknown,
   options: ToolChoiceInjectionOptions = {},
@@ -145,13 +154,15 @@ export function injectToolChoiceIntoPayload(
   }
 
   switch (provider) {
-    case "anthropic-messages":
+    case "anthropic-messages": {
+      const hasThinking = hasAnthropicThinkingEnabled(payload);
       return {
-        payload: { ...payload, tool_choice: { type: "any" } },
+        payload: { ...payload, tool_choice: { type: hasThinking ? "auto" : "any" } },
         provider,
         injected: true,
-        reason: "injected",
+        reason: hasThinking ? "anthropic_thinking_auto" : "injected",
       };
+    }
     case "openai-responses":
     case "openai-completions":
       return {
