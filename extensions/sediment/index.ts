@@ -126,6 +126,45 @@ interface SessionCorrectionState {
 const sessionCorrectionWorkingSet = new Map<string, SessionCorrectionState>();
 const MAX_SESSION_CORRECTIONS = 5;
 
+/**
+ * §4.1.4 session-local working set for TASK-LOCAL corrections.
+ *
+ * Distinct from sessionCorrectionWorkingSet (which buffers DURABLE
+ * signals for one-shot consumption by a later same-session curator).
+ * Task-local semantics per ADR 0025 §4.1.4:
+ *   - never persisted to durable sediment
+ *   - carried into EVERY subsequent agent_end curator context in the
+ *     same session (a standing working set, not one-shot)
+ *   - cleared when the session ends
+ *
+ * Therefore reads are NON-CONSUMING (deep-copy): the same task-local
+ * evidence must keep surfacing across multiple curator turns until the
+ * session ends. Stored in a reduced shape {intent, scope, quote} that
+ * carries the natural-language meaning WITHOUT the durable-routing
+ * primitives (slug / op / confidence) — task-local context must never
+ * look like an actionable durable target to the curator.
+ *
+ * Capacity: LRU on BOTH axes.
+ *   - MAX_TASK_LOCAL_SESSIONS sessions retained (oldest updatedAt evicted)
+ *   - MAX_TASK_LOCAL_ITEMS items per session (oldest evicted)
+ * We deliberately do NOT clear on session_start (review H2: a /resume
+ * re-enters an existing sessionId and must keep its working set). The
+ * LRU session cap bounds memory growth instead.
+ */
+interface TaskLocalWorkingItem {
+  intent: string;
+  scope: string;
+  quote: string;
+  at: number;
+}
+interface TaskLocalSessionState {
+  items: TaskLocalWorkingItem[];
+  updatedAt: number;
+}
+const sessionTaskLocalSet = new Map<string, TaskLocalSessionState>();
+const MAX_TASK_LOCAL_SESSIONS = 50;
+const MAX_TASK_LOCAL_ITEMS = 20;
+
 /** Track agent_start/end balance per session. When ended >= started,
  *  the main-session LLM is in agent_end state (finished, not working) —
  *  safe for bg drain. When started > ended, the LLM is working — drain
@@ -467,9 +506,68 @@ function takeSessionCorrectionForCurator(sessionId: string | undefined): Correct
   return signal ?? null;
 }
 
+/**
+ * §4.1.4 — record a task-local correction into the session working set.
+ *
+ * Reduced shape only: slug / op / confidence are intentionally dropped so
+ * the stored context can never be mistaken for an actionable durable
+ * target downstream. Dedup key = intent|scope|quote; a repeat refreshes
+ * recency (moved to front) without growing the set. LRU-capped on items
+ * per session AND on total session count (oldest-updated session evicted).
+ */
+function rememberTaskLocal(sessionId: string | undefined, signal: CorrectionSignal): void {
+  if (!sessionId) return;
+  const intent = (signal.correction_intent || "").trim();
+  const scope = (signal.scope_description || "").trim();
+  const quote = (signal.user_quote || "").trim();
+  // Require at least one non-empty natural-language field; an empty
+  // task-local item carries no working context and would just be noise.
+  if (!intent && !scope && !quote) return;
+
+  const state = sessionTaskLocalSet.get(sessionId) ?? { items: [], updatedAt: Date.now() };
+  // Structured dedup key (JSON.stringify, NOT pipe-join): a pipe inside any
+  // field would let two semantically distinct items collide on a delimiter-
+  // joined key and silently drop one (3-T0 review consensus P2).
+  const keyOf = (it: { intent: string; scope: string; quote: string }) =>
+    JSON.stringify([it.intent, it.scope, it.quote]);
+  const key = keyOf({ intent, scope, quote });
+  state.items = [
+    { intent, scope, quote, at: Date.now() },
+    ...state.items.filter((it) => keyOf(it) !== key),
+  ].slice(0, MAX_TASK_LOCAL_ITEMS);
+  state.updatedAt = Date.now();
+  sessionTaskLocalSet.set(sessionId, state);
+
+  // Session-axis LRU: evict oldest-updated sessions beyond the cap.
+  if (sessionTaskLocalSet.size > MAX_TASK_LOCAL_SESSIONS) {
+    const evictCount = sessionTaskLocalSet.size - MAX_TASK_LOCAL_SESSIONS;
+    const oldest = [...sessionTaskLocalSet.entries()]
+      .sort((a, b) => a[1].updatedAt - b[1].updatedAt)
+      .slice(0, evictCount);
+    for (const [sid] of oldest) sessionTaskLocalSet.delete(sid);
+  }
+}
+
+/**
+ * §4.1.4 — NON-CONSUMING read of the session's task-local working set.
+ *
+ * Returns a deep copy in the curator-facing shape (timestamps dropped) so
+ * the same evidence keeps surfacing on EVERY subsequent agent_end curator
+ * call within the session. Never mutates or removes items — only session
+ * end (or LRU eviction) clears them. Empty array when nothing is stored.
+ */
+function getTaskLocalForCurator(
+  sessionId: string | undefined,
+): { intent: string; scope: string; quote: string }[] {
+  if (!sessionId) return [];
+  const state = sessionTaskLocalSet.get(sessionId);
+  if (!state || state.items.length === 0) return [];
+  return state.items.map((it) => ({ intent: it.intent, scope: it.scope, quote: it.quote }));
+}
+
 function dispatchCorrectionSignal(
   signal: CorrectionSignal | null | undefined,
-  opts: { sessionId?: string; currentCurator?: boolean } = {},
+  opts: { sessionId?: string; currentCurator?: boolean; captureTaskLocal?: boolean } = {},
 ): {
   forwarded: CorrectionSignal | null;
   decision:
@@ -497,10 +595,15 @@ function dispatchCorrectionSignal(
         reason: "per ADR §4.1.4 debug signals only land in classifier audit, never curator advisory",
       };
     case "task-local":
+      if (opts.captureTaskLocal) {
+        rememberTaskLocal(opts.sessionId, signal);
+      }
       return {
         forwarded: null,
         decision: "stored_task_local",
-        reason: "task-local correction kept audit-only in this minimal closure; it is not injected into durable curator calls",
+        reason: opts.captureTaskLocal
+          ? "task-local correction recorded into the session working set (§4.1.4); injected as NON-DURABLE context into future same-session curator calls, never as a durable advisory"
+          : "task-local correction kept audit-only (no captureTaskLocal sink in this lane); never injected into durable curator calls",
       };
     case "durable":
       if (!opts.currentCurator) {
@@ -778,6 +881,25 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 `;
     return { systemPrompt: current + "\n\n" + block };
   });
+
+  // §4.1.4 lifecycle (3-T0 P1): clear THIS session's task-local working
+  // set when the session ends, for any reason (quit/reload/new/resume/
+  // fork). The session-axis LRU is the backstop for persistent-process
+  // modes where the module is not torn down; this handler makes "cleared
+  // at session end" literal rather than incidental, and stops task-local
+  // user quotes from lingering in process memory across unrelated
+  // sessions. delete() on an absent key is a safe no-op (sub-agents and
+  // task-local-free sessions never populate the set).
+  pi.on(
+    "session_shutdown",
+    (
+      _event: unknown,
+      ctx: { sessionManager?: { getSessionId?(): string | undefined | null } },
+    ) => {
+      const sessionId = readSessionId(ctx.sessionManager);
+      if (sessionId) sessionTaskLocalSet.delete(sessionId);
+    },
+  );
 
   // Footer state machine: session_start sets idle UNLESS bg work from
   // a previous session is still inflight (e.g. user did /new while
@@ -1708,7 +1830,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         classifierResult: Awaited<ReturnType<typeof runCorrectionPipeline>> | null | undefined,
         currentCurator: boolean,
       ): CorrectionSignal | null => {
-        const dispatch = dispatchCorrectionSignal(classifierResult?.signal ?? null, { sessionId, currentCurator });
+        const dispatch = dispatchCorrectionSignal(classifierResult?.signal ?? null, { sessionId, currentCurator, captureTaskLocal: true });
         writeCorrectionDispatchAudit(lane, correlationId, dispatch, classifierResult?.signal ?? null, classifierResult?.model);
         return dispatch.forwarded;
       };
@@ -3088,6 +3210,11 @@ async function tryAutoWriteLane(args: {
         modelRegistry,
         signal: args.signal,
         correctionSignal: args.correctionSignal,
+        // §4.1.4: non-consuming read of this session's task-local working
+        // set. Injected as NON-DURABLE context so the curator stays
+        // consistent with how the user steered THIS session, without
+        // ever treating a session-scoped instruction as durable.
+        taskLocalContext: getTaskLocalForCurator(sessionId),
         projectId,
       });
     } catch (e: any) {
@@ -3174,6 +3301,7 @@ export function _resetAutoWriteStateForTests(): void {
   sedimentStatusBySession.clear();
   sessionAgentCycle.clear();
   sessionCorrectionWorkingSet.clear();
+  sessionTaskLocalSet.clear();
   deferredStopBySession.clear();
   _resetWarnedApisForTests();
 }
@@ -3191,6 +3319,13 @@ export function _resetAutoWriteStateForTests(): void {
  */
 export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
 export const _dispatchCorrectionSignalForTests = dispatchCorrectionSignal;
+// §4.1.4 task-local working set test hooks.
+export const _rememberTaskLocalForTests = rememberTaskLocal;
+export const _getTaskLocalForCuratorForTests = getTaskLocalForCurator;
+export const _taskLocalCapsForTests = {
+  MAX_TASK_LOCAL_SESSIONS,
+  MAX_TASK_LOCAL_ITEMS,
+};
 
 /**
  * Test-only hook to await any background auto-write work to settle.

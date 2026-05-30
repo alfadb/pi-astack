@@ -602,10 +602,40 @@ export function buildCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEn
   return makeCuratorPrompt(draft, neighbors);
 }
 
+/**
+ * §4.1.4 session-local task-local working item, curator-facing shape.
+ *
+ * Reduced to natural-language fields only — NO slug / op / confidence —
+ * so the curator can never treat it as an actionable durable target. The
+ * producer (sediment index.ts) maps its internal LRU item onto this shape
+ * (dropping the timestamp) before passing it in.
+ */
+export interface TaskLocalContextItem {
+  intent: string;
+  scope: string;
+  quote: string;
+}
+
+/**
+ * Belt-and-suspenders guard: a task-local-typed signal must NEVER occupy
+ * the durable ACTIVE CORRECTION SIGNAL slot. dispatchCorrectionSignal
+ * already routes task-local away (forwarded:null), so in practice this
+ * slot is always durable-typed or null — but if any upstream lane
+ * regressed, this neutralizes the leak at the curator boundary instead of
+ * letting a session-scoped instruction drive a durable write/update.
+ */
+export function applyTaskLocalBeltFilter(
+  signal?: CorrectionSignal | null,
+): CorrectionSignal | null {
+  if (signal && signal.typing === "task-local") return null;
+  return signal ?? null;
+}
+
 function makeCuratorPrompt(
   draft: ProjectEntryDraft,
   neighbors: MemoryEntry[],
   correctionSignal?: CorrectionSignal | null,
+  taskLocalContext?: TaskLocalContextItem[] | null,
 ): string {
   const correctionBlock = correctionSignal?.signal_found
     ? [
@@ -638,8 +668,52 @@ function makeCuratorPrompt(
       ].filter(Boolean).join("\n")
     : "";
 
+  // 3-T0 P1-2: task-local fields are raw user/transcript text. Before
+  // interpolating into the prompt: (1) redact credentials/PII via
+  // sanitizeForMemory (the stored copy stays raw — same exposure as the
+  // transcript — but it must never be sent to the curator LLM verbatim),
+  // (2) neutralize any "===" run so a quote cannot forge the NON-DURABLE
+  // fence delimiter (prompt-injection escape), (3) cap length so a
+  // pathological quote cannot blow up the prompt.
+  const tlClean = (s: string): string =>
+    (sanitizeForMemory(s).text ?? s)
+      // collapse newlines first: otherwise a quote could inject extra lines
+      // INSIDE the block (e.g. a forged "21. intent: ..." item) even without
+      // escaping the fence (R2 opus P3 defense-in-depth).
+      .replace(/[\r\n]+/g, " ")
+      // neutralize any "===" run so a quote cannot forge the fence delimiter.
+      .replace(/={3,}/g, "═══")
+      .slice(0, 300);
+  const taskLocalBlock =
+    taskLocalContext && taskLocalContext.length > 0
+      ? [
+          "=== SESSION TASK-LOCAL WORKING SET (NON-DURABLE) ===",
+          "These are task-local corrections the user made earlier in THIS session.",
+          "They are NOT durable knowledge and MUST NOT be written as durable",
+          "entries, updates, merges, supersedes, or deletes. They are provided",
+          "ONLY as working context so your decision about the candidate below is",
+          "consistent with how the user has been steering THIS session.",
+          "If the candidate merely restates one of these task-local items, prefer",
+          "SKIP — a session-scoped instruction is not a durable memory.",
+          "",
+          ...taskLocalContext.slice(0, 20).map((it, i) => {
+            const parts = [
+              it.intent ? `intent: ${tlClean(it.intent)}` : "",
+              it.scope ? `scope: ${tlClean(it.scope)}` : "",
+              it.quote ? `user said: "${tlClean(it.quote)}"` : "",
+            ]
+              .filter(Boolean)
+              .join("  ·  ");
+            return `${i + 1}. ${parts}`;
+          }),
+          "=== END TASK-LOCAL WORKING SET ===",
+          "",
+        ].join("\n")
+      : "";
+
   return [
     correctionBlock,
+    taskLocalBlock,
     "You are pi-astack sediment curator.",
     "Your job is to maintain the current best knowledge state, not append duplicate notes.",
     "Decide whether the candidate should create a new memory, update/merge existing memories, archive/supersede/delete an existing memory, or be skipped.",
@@ -794,6 +868,11 @@ export async function curateProjectDraft(
      *  When present, injected into the curator prompt so update/merge
      *  decisions account for user corrections. */
     correctionSignal?: CorrectionSignal | null;
+    /** ADR 0025 §4.1.4: session-local task-local working set. Injected as
+     *  NON-DURABLE context into the curator prompt (never as a durable
+     *  advisory). Non-consuming — the same items surface every same-session
+     *  agent_end until the session ends. */
+    taskLocalContext?: TaskLocalContextItem[] | null;
   },
 ): Promise<CuratorOutcome> {
   const totalStart = Date.now();
@@ -867,7 +946,12 @@ export async function curateProjectDraft(
     proposerRawText = await callCuratorModel(
       deps.sedimentSettings,
       deps.modelRegistry,
-      makeCuratorPrompt(safeDraft, neighbors, deps.correctionSignal),
+      makeCuratorPrompt(
+        safeDraft,
+        neighbors,
+        applyTaskLocalBeltFilter(deps.correctionSignal),
+        deps.taskLocalContext ?? null,
+      ),
       deps.signal,
     );
     const proposerDecision = sanitizeDecisionStrings(parseDecision(proposerRawText, new Map(neighbors.map((entry) => [entry.slug, neighborLaneFor(entry)]))));
@@ -893,7 +977,7 @@ export async function curateProjectDraft(
       proposerRawText,
       candidate: safeDraft,
       neighbors,
-      correctionSignal: deps.correctionSignal ?? null,
+      correctionSignal: applyTaskLocalBeltFilter(deps.correctionSignal),
       settings: deps.sedimentSettings,
       modelRegistry: deps.modelRegistry,
       signal: deps.signal,
@@ -932,3 +1016,8 @@ export async function curateProjectDraft(
     };
   }
 }
+
+// §4.1.4 test hook: exposes the internal prompt builder so smoke can
+// assert the NON-DURABLE task-local block renders (and is absent when no
+// task-local context is supplied). Not part of the public API.
+export const _makeCuratorPromptForTests = makeCuratorPrompt;

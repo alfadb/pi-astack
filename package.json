@@ -78,7 +78,8 @@
     "smoke:time-injector": "node scripts/smoke-time-injector.mjs",
     "smoke:verify-after-edit": "node scripts/smoke-verify-after-edit.mjs",
     "smoke:tool-parallel-cap": "node scripts/smoke-tool-parallel-cap.mjs",
-    "smoke:edit-strip-empty": "node scripts/smoke-edit-strip-empty.mjs"
+    "smoke:edit-strip-empty": "node scripts/smoke-edit-strip-empty.mjs",
+    "smoke:task-local-working-set": "node scripts/smoke-task-local-working-set.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],
