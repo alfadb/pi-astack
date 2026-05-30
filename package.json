@@ -75,7 +75,8 @@
     "smoke:compaction-tuner-turn-boundary": "node scripts/smoke-compaction-tuner-turn-boundary.mjs",
     "smoke:tool-contract": "node scripts/smoke-tool-contract-payload.mjs",
     "smoke:persistent-input-history": "node scripts/smoke-persistent-input-history.mjs",
-    "smoke:time-injector": "node scripts/smoke-time-injector.mjs"
+    "smoke:time-injector": "node scripts/smoke-time-injector.mjs",
+    "smoke:verify-after-edit": "node scripts/smoke-verify-after-edit.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],
