@@ -69,15 +69,35 @@
  * writer default) is well under a typical 30-minute dispatch timeout while
  * being long enough that ordinary jitter never trips it.
  *
- * # NOT in this stage (deferred to Stage 1d)
+ * # Stage 1d (live in-process polling) is DEFERRED — do not reflexively build it
  *
- *   - Live polling integration: actually racing a poller against the
- *     dispatch timeoutMs to cancel a hung sub-agent EARLY. This module is
- *     the pure assessment foundation; wiring it into the dispatch runtime
- *     loop (and reconciling with the existing abort/timeout paths) is a
- *     separate, independently-reviewable change. Mirrors how Stage 1b
- *     shipped writer-only first.
- *   - audit row v3 `heartbeat_trace_path` enrichment.
+ * A 3-model blind DESIGN review (opus-4-8 / gpt-5.5 / deepseek-v4-pro,
+ * unanimous) concluded that wiring this consumer into the dispatch runtime
+ * IN-PROCESS adds ZERO hang-detection capability over the existing
+ * `runInProcess` Promise.race(timeoutMs). The truth table all three derived
+ * independently:
+ *   - async hang (stuck LLM await): event loop alive → timer keeps beating
+ *     → verdict stays alive; only timeoutMs catches it (status quo).
+ *   - synchronous wedge: the in-process poller is on the SAME frozen loop →
+ *     it can't run to observe.
+ *   - process death: the poller dies with the producer.
+ * The only column where staleness is observable is a CROSS-PROCESS reader,
+ * which does not exist (dispatch sub-agents share the parent process).
+ * Building it now would be ADR 0024 §10 "infra for imagined load".
+ *
+ * Concrete triggers that should gate building Stage 1d (and in what form):
+ *   1. A cross-process / multi-host L2 topology lands (dispatch spawns
+ *      child processes/workers, OR a supervisor reads traces it does not
+ *      itself produce) → then THIS consumer (as-is) gains real value for
+ *      the sync-wedge / process-death classes.
+ *   2. Dogfood shows REAL async-hang waste (sub-agents repeatedly burning
+ *      toward the 30-min timeoutMs stuck in LLM calls) AND timeout tuning
+ *      can't solve it → then build the PROGRESS-DRIVEN variant (dispatch
+ *      calls handle.beat() at token/tool-round milestones so staleness
+ *      means "no task progress"), NOT a poller against today's timer beats.
+ * Until one of these is observed, the consumer stays a tested foundation.
+ *
+ * Also out of scope: audit row v3 `heartbeat_trace_path` enrichment.
  */
 
 import {
