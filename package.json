@@ -76,7 +76,8 @@
     "smoke:tool-contract": "node scripts/smoke-tool-contract-payload.mjs",
     "smoke:persistent-input-history": "node scripts/smoke-persistent-input-history.mjs",
     "smoke:time-injector": "node scripts/smoke-time-injector.mjs",
-    "smoke:verify-after-edit": "node scripts/smoke-verify-after-edit.mjs"
+    "smoke:verify-after-edit": "node scripts/smoke-verify-after-edit.mjs",
+    "smoke:tool-parallel-cap": "node scripts/smoke-tool-parallel-cap.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],

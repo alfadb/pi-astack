@@ -1,0 +1,214 @@
+/**
+ * tool-parallel-cap — cap Anthropic Messages requests to **at most one
+ * tool_use per assistant message** for designated models (default:
+ * `claude-opus-4-8`).
+ *
+ * ## Why this extension
+ *
+ * Opus 4.8 routinely emits 10+ parallel tool_use blocks in a single
+ * assistant message during dogfood (e.g. opening multiple files, kicking
+ * off ad-hoc bash commands, and queuing edits all at once). The harness
+ * runs them concurrently which:
+ *   - amplifies the impact of any single failing tool call (one fails →
+ *     next-turn context is a tangle of partially-applied state)
+ *   - blocks the verify-after-edit feedback loop (parallel edits return
+ *     all at once; the model has no incentive to inspect each)
+ *   - magnifies the edit-batch atomic-rollback class of bugs because
+ *     multiple concurrent edits with overlapping oldText windows can
+ *     race in surprising ways
+ *
+ * The Anthropic Messages API exposes the protocol-level lever for this:
+ *   tool_choice: { type: "auto", disable_parallel_tool_use: true }
+ *
+ * Per Anthropic docs (release-notes/api), this caps each model turn at
+ * at most one tool_use. The model still chooses freely whether to use a
+ * tool (type: auto), but cannot emit two in the same message.
+ *
+ * ## Composability with tool-contract
+ *
+ * The sibling `tool-contract` extension also sets `tool_choice` on the
+ * payload (it forces `{ type: "any" | "auto" }` to make the model emit
+ * `final_answer`). Both run on `before_provider_request` and pi does not
+ * sort extension load order (fs.readdirSync is filesystem-native order,
+ * not alphabetical). We CANNOT assume who runs first.
+ *
+ * Mitigation in two places, both required for order-independence:
+ *   1. `tool-contract/payload.ts` is patched (in the same commit
+ *      introducing this extension) to PRESERVE pre-existing tool_choice
+ *      subfields when augmenting `type` — its spread is now
+ *      `{ ...existingTC, type: forced }` instead of `{ type: forced }`.
+ *      So if cap-parallel ran first, our `disable_parallel_tool_use:true`
+ *      survives tool-contract's augmentation.
+ *   2. This extension ALWAYS reads `payload.tool_choice` and spreads it
+ *      first, so if tool-contract ran before us, its `type: auto/any` is
+ *      preserved while we add our flag.
+ *
+ * Net result: order-independent. Whoever runs second sees and preserves
+ * what the first wrote, plus adds its own subfields.
+ *
+ * ## Sub-agent isolation
+ *
+ * Sub-agents (dispatch_parallel research workers, blind-review committees)
+ * are intentionally allowed parallel tool use — that is the whole point of
+ * dispatching them. `isSubAgentSession(ctx)` is the canonical guard.
+ *
+ * ## Configuration
+ *
+ * - Disable entirely: `PI_ASTACK_DISABLE_PARALLEL_CAP=1`
+ * - Override target model substrings (comma-separated):
+ *     `PI_ASTACK_PARALLEL_CAP_MODELS=claude-opus-4-8,claude-opus-4-9`
+ *   Default: `claude-opus-4-8`
+ * - Match is `.includes()` against `ctx.model.modelId` AND `payload.model`
+ *   — both are checked so a substring match in either side triggers.
+ *
+ * ## Why model-targeted (not blanket)
+ *
+ * Lesser models (haiku, sonnet, deepseek) and earlier opus revisions
+ * don't reliably hit the 10+ parallel pattern in observed dogfood. Capping
+ * them too would force unnecessary serialization. Targeting keeps the
+ * intervention narrow and reversible per-model via env.
+ */
+
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isSubAgentSession } from "../_shared/pi-internals";
+
+type Obj = Record<string, unknown>;
+
+function isObj(v: unknown): v is Obj {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+const DEFAULT_TARGETS = ["claude-opus-4-8"];
+
+function readTargetModelSubstrings(): string[] {
+  const env = process.env.PI_ASTACK_PARALLEL_CAP_MODELS;
+  if (!env) return DEFAULT_TARGETS;
+  const parts = env
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return parts.length > 0 ? parts : DEFAULT_TARGETS;
+}
+
+/**
+ * Detect whether the payload is Anthropic Messages-shaped.
+ *
+ * We deliberately keep this lightweight rather than reusing
+ * tool-contract's `inferToolContractProvider` — that one ships its own
+ * weight (provider precedence rules, tool-shape voting) and importing it
+ * would couple the two extensions even more.
+ *
+ * Heuristic:
+ *   - `messages` is an array (both Anthropic Messages and OpenAI Chat
+ *     Completions use this; we discriminate by presence of `system`)
+ *   - `system` is present (Anthropic-only at the top level; OpenAI Chat
+ *     Completions puts the system message INSIDE messages[])
+ *   - `model` is a string
+ *
+ * False negatives (Anthropic Messages without a system block) are safe
+ * — we just don't intervene. False positives (something else with
+ * `messages` + `system` + `model`) are extremely unlikely in pi's
+ * current provider set.
+ */
+export function isAnthropicMessagesShape(payload: unknown): payload is Obj & {
+  model: string;
+  messages: unknown[];
+} {
+  if (!isObj(payload)) return false;
+  if (typeof payload.model !== "string") return false;
+  if (!Array.isArray(payload.messages)) return false;
+  // Anthropic Messages top-level system is string OR array. OpenAI
+  // Chat Completions has NO top-level system (it goes into messages[]).
+  // OpenAI Responses uses `input` (array) instead of `messages`.
+  if (Array.isArray(payload.input)) return false;
+  // Presence of `system` is a positive Anthropic signal but not strictly
+  // required (some Anthropic requests omit it). Use it as a tie-breaker
+  // when both messages and input could be ambiguous.
+  return true;
+}
+
+/**
+ * Pure: decide whether this payload + model combo should be capped.
+ * Exported so smoke can exercise it without the runtime.
+ */
+export function shouldCapForPayload(
+  payload: unknown,
+  ctxModelId: string | undefined,
+  targets: string[],
+): boolean {
+  if (!isAnthropicMessagesShape(payload)) return false;
+
+  // Tools must be present; capping is moot if no tools are advertised.
+  const tools = (payload as Obj).tools;
+  if (!Array.isArray(tools) || tools.length === 0) return false;
+
+  // tool_choice: { type: "none" } → user explicitly disabled tools.
+  const tc = (payload as Obj).tool_choice;
+  if (isObj(tc) && tc.type === "none") return false;
+
+  // Model match: check both ctx.model.modelId and payload.model. Either
+  // substring hit triggers. Targets is a list (Set conversion overkill).
+  for (const t of targets) {
+    if (typeof ctxModelId === "string" && ctxModelId.includes(t)) return true;
+    if (payload.model.includes(t)) return true;
+  }
+  return false;
+}
+
+/**
+ * Pure: produce a new payload object with `disable_parallel_tool_use: true`
+ * merged into tool_choice. Preserves any existing tool_choice subfields
+ * (so this is safe to chain with tool-contract). Caller decides whether
+ * to call this based on `shouldCapForPayload`.
+ */
+export function applyParallelCap(payload: Obj): Obj {
+  const existing = isObj(payload.tool_choice) ? payload.tool_choice : undefined;
+  const existingType = typeof existing?.type === "string" ? existing.type : "auto";
+
+  return {
+    ...payload,
+    tool_choice: {
+      ...(existing ?? {}),
+      type: existingType,
+      disable_parallel_tool_use: true,
+    },
+  };
+}
+
+/** Extract ctx.model.modelId defensively. */
+function modelIdFromCtx(ctx: unknown): string | undefined {
+  const m = (ctx as { model?: { modelId?: unknown } } | undefined)?.model;
+  if (m && typeof m.modelId === "string") return m.modelId;
+  return undefined;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Extension entry point
+// ──────────────────────────────────────────────────────────────────────
+
+export default function (pi: ExtensionAPI) {
+  if (process.env.PI_ASTACK_DISABLE_PARALLEL_CAP === "1") return;
+
+  const targets = readTargetModelSubstrings();
+
+  pi.on("before_provider_request", (event, ctx) => {
+    if (isSubAgentSession(ctx)) return; // sub-agents need parallel tool use
+
+    const ctxModelId = modelIdFromCtx(ctx);
+    if (!shouldCapForPayload(event.payload, ctxModelId, targets)) return;
+
+    return applyParallelCap(event.payload as Obj);
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Test-only exports
+// ──────────────────────────────────────────────────────────────────────
+
+export const __TEST = {
+  DEFAULT_TARGETS,
+  readTargetModelSubstrings,
+  isAnthropicMessagesShape,
+  shouldCapForPayload,
+  applyParallelCap,
+};

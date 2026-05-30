@@ -156,8 +156,18 @@ export function injectToolChoiceIntoPayload(
   switch (provider) {
     case "anthropic-messages": {
       const hasThinking = hasAnthropicThinkingEnabled(payload);
+      // Composability: preserve any pre-existing tool_choice fields (e.g.
+      // `disable_parallel_tool_use: true` set by the tool-parallel-cap
+      // extension) by spreading them in BEFORE writing our `type`. This
+      // makes the injection order-independent across multiple hooks
+      // that mutate tool_choice subfields. The existing `type` (if any)
+      // is intentionally overwritten by our forced value.
+      const existingTC = isRecord(payload.tool_choice) ? payload.tool_choice : {};
       return {
-        payload: { ...payload, tool_choice: { type: hasThinking ? "auto" : "any" } },
+        payload: {
+          ...payload,
+          tool_choice: { ...existingTC, type: hasThinking ? "auto" : "any" },
+        },
         provider,
         injected: true,
         reason: hasThinking ? "anthropic_thinking_auto" : "injected",
