@@ -234,6 +234,23 @@ function formatPreparing(state: TurnProgressState): string {
   return accent("⏳ preparing…");
 }
 
+/** Honest terminal label for the HANDOFF window after the before_agent_start
+ *  chain completes but before agent_start fires.
+ *
+ *  Accuracy note (verified against pi-agent-core agent-loop.js): agent_start
+ *  is emitted at the START of the agent loop, BEFORE the provider request
+ *  (`emit(agent_start)` → … → runLoop/stream). turn-progress clears the
+ *  footer on agent_start. So this label covers the post-chain handoff
+ *  (append custom messages, apply system prompt, enter agent.prompt) — NOT
+ *  the provider time-to-first-token (the native Working spinner owns that,
+ *  after agent_start). Without this label the footer froze on the LAST
+ *  handler's extension name (e.g. the chain-tail time-injector),
+ *  misattributing the handoff window to an extension. */
+function formatAwaitingModel(state: TurnProgressState): string {
+  const accent = state.themeAccent ?? ((s: string) => s);
+  return accent("⏳ awaiting model…");
+}
+
 /** Cancel any pending stale-status timer. Called whenever agent_start /
  *  agent_end fires (normal completion path) or when a fresh `input`
  *  arrives (replaces the previous timer). */
@@ -396,6 +413,15 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
 
     let currentSystemPrompt = systemPrompt;
     const baseCtx = this.createContext();
+    // Sub-agent footer gate (3-T0 P2): the patch is process-wide and
+    // `captured` resolves to the MAIN session's setStatus. Without this,
+    // a dispatch-spawned sub-agent's before_agent_start chain would write
+    // to the MAIN footer — and the terminal "awaiting model…" would LINGER,
+    // since the sub-agent's own agent_start clear is itself
+    // isSubAgentSession-gated. Gate all footer WRITES (never handler
+    // execution) on main-session, honoring the module-wide invariant.
+    const shouldLabel =
+      !!captured && !isSubAgentSession(baseCtx as { sessionManager?: unknown });
     const ctx: Record<PropertyKey, unknown> = Object.defineProperties(
       {} as Record<PropertyKey, unknown>,
       Object.getOwnPropertyDescriptors(baseCtx),
@@ -408,14 +434,20 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
 
     const messages: unknown[] = [];
     let systemPromptModified = false;
+    // Track whether Layer B labeled at least one handler-bearing extension.
+    // Only then is there a stale ext-name to correct with the terminal
+    // "awaiting model…" status after the loop (zero-handler chains leave
+    // Layer A's preparing… banner untouched — no regression).
+    let anyHandlerLabeled = false;
 
     for (const ext of exts) {
       // Defensive hardening #2: optional chaining on ext.handlers.
       const handlers = ext.handlers?.get("before_agent_start");
       if (!handlers || handlers.length === 0) continue;
 
-      // INSTRUMENT: announce which extension is starting.
-      if (captured) {
+      // INSTRUMENT: announce which extension is starting (main session only).
+      if (shouldLabel) {
+        anyHandlerLabeled = true;
         const shortName = extractShortName(ext.path ?? "<unknown>");
         try {
           captured(STATUS_KEY, formatLine(state, shortName));
@@ -462,6 +494,27 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
             stack,
           });
         }
+      }
+    }
+
+    // turn-progress fix (footer freeze): the chain is done. Replace the
+    // last per-extension label with an honest terminal "awaiting model…"
+    // for the post-chain handoff window (NOT provider TTFT — see
+    // formatAwaitingModel's accuracy note), so that window is not
+    // misattributed to whichever extension ran last (e.g. the chain-tail
+    // time-injector). Gated on anyHandlerLabeled (⇒ shouldLabel was true,
+    // i.e. main session AND ≥1 ext labeled) so zero-handler chains and
+    // sub-agents keep their prior footer untouched. agent_start clears it.
+    //
+    // No yieldToEventLoop() here (unlike the per-ext label): the caller's
+    // next await (entering agent.prompt → agent loop) provides the tick
+    // that flushes this to the TUI. Adding a yield would inject latency
+    // into every turn's hot path for no benefit.
+    if (shouldLabel && anyHandlerLabeled) {
+      try {
+        captured(STATUS_KEY, formatAwaitingModel(state));
+      } catch {
+        // setStatus errors must not affect pi's loop.
       }
     }
 

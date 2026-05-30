@@ -370,8 +370,8 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
     JSON.stringify(patched.result?.messages) === JSON.stringify(baseline.result?.messages),
   );
   check(
-    "B7. setStatus invoked exactly once per ext-with-handlers",
-    patched.setStatusCalls.length === 2,
+    "B7. setStatus invoked once per ext-with-handlers + 1 terminal awaiting-model",
+    patched.setStatusCalls.length === 3,
   );
   check(
     "B7. setStatus uses 00-turn-progress key",
@@ -381,6 +381,11 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
     "B7. setStatus text contains extension short name",
     patched.setStatusCalls[0].text.includes("extA") &&
       patched.setStatusCalls[1].text.includes("extB"),
+  );
+  check(
+    "B7. terminal call is honest 'awaiting model' (not a frozen ext name)",
+    patched.setStatusCalls[2].text.includes("awaiting model") &&
+      !patched.setStatusCalls[2].text.includes("extB"),
   );
 }
 
@@ -397,7 +402,40 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
 
   check("B5. ext without handlers skipped (baseline)", baseline.result?.systemPrompt === "X|B");
   check("B5. ext without handlers skipped (patched)", patched.result?.systemPrompt === baseline.result?.systemPrompt);
-  check("B8. setStatus NOT called for ext without handlers", patched.setStatusCalls.length === 2);
+  check(
+    "B8. setStatus NOT called for ext without handlers (2 ext + 1 terminal, none=extEmpty)",
+    patched.setStatusCalls.length === 3 &&
+      !patched.setStatusCalls.some((c) => c.text.includes("extEmpty")),
+  );
+}
+
+// B14 — zero handler-bearing extensions → terminal awaiting-model NOT called
+// (the anyHandlerLabeled gate's false branch — Layer A's preparing… stands).
+{
+  resetState();
+  const exts = [
+    { path: "/e/x/index.ts", handlers: new Map() },
+    { path: "/e/y/index.ts", handlers: new Map([["agent_end", [async () => {}]]]) },
+  ];
+  const patched = await runPatched(exts);
+  check("B14. zero-handler chain → NO footer writes (terminal skipped)", patched.setStatusCalls.length === 0);
+  check("B14. zero-handler chain → result undefined (no mutations)", patched.result === undefined);
+}
+
+// B15 — sub-agent run: handlers STILL execute + mutate, but footer writes
+// (per-ext labels AND the terminal awaiting-model) are gated off so a
+// dispatch sub-agent never writes the MAIN session footer.
+{
+  resetState();
+  internalsMock.__setSubAgentMock(true);
+  const exts = [
+    { path: "/e/extA/index.ts", handlers: new Map([["before_agent_start", [async () => ({ systemPrompt: "X" })]]]) },
+    { path: "/e/extB/index.ts", handlers: new Map([["before_agent_start", [async (e) => ({ systemPrompt: `${e.systemPrompt}|B` })]]]) },
+  ];
+  const patched = await runPatched(exts);
+  internalsMock.__setSubAgentMock(false);
+  check("B15. sub-agent: handlers still run (systemPrompt mutated)", patched.result?.systemPrompt === "X|B");
+  check("B15. sub-agent: NO footer writes at all (per-ext + terminal gated)", patched.setStatusCalls.length === 0);
 }
 
 // B6
