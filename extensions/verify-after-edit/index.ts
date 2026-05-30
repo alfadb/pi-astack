@@ -65,11 +65,15 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import * as path from "node:path";
 
 const W_BEFORE = 3;
 const W_AFTER = 12;
 const MAX_LINE = 200;
+// Hot-path guard (3-T0 P2): never slurp a huge post-edit file into a UTF-8
+// string just to show a 16-line window. Above this size we emit a note.
+const MAX_VERIFY_BYTES = 5 * 1024 * 1024;
 
 const BEGIN_TAG = "<verified-on-disk>";
 const END_TAG = "</verified-on-disk>";
@@ -90,6 +94,23 @@ export async function buildVerificationBlock(
 
   if (fcl === undefined) {
     return wrap("NOTE: empty diff — file unchanged.");
+  }
+
+  // Size guard BEFORE reading: stat is O(1); a multi-MB post-edit file (or
+  // one another process grew) must not be slurped into a UTF-8 string for a
+  // 16-line window (3-T0 P2). Also catches ENOENT cheaply.
+  try {
+    const st = await stat(filePath);
+    if (st.size > MAX_VERIFY_BYTES) {
+      return wrap(
+        `file too large to window (${st.size} bytes > ${MAX_VERIFY_BYTES}); ` +
+          `edit succeeded, verification window skipped.`,
+      );
+    }
+  } catch (err: unknown) {
+    const code = (err as { code?: string }).code;
+    if (code === "ENOENT") return wrap(`file gone after edit: ${filePath}`);
+    // Other stat errors: fall through and let readFile surface the reason.
   }
 
   let raw: string;
@@ -135,22 +156,37 @@ export async function buildVerificationBlock(
 export default function (pi: ExtensionAPI) {
   if (process.env.PI_ASTACK_DISABLE_VERIFY_AFTER_EDIT === "1") return;
 
-  pi.on("tool_result", async (event) => {
+  pi.on("tool_result", async (event, ctx) => {
     if (event.toolName !== "edit") return;
     if (event.isError) return; // edit failed; nothing to verify
 
     const input = event.input as { path?: unknown } | undefined;
-    const filePath = typeof input?.path === "string" ? input.path : undefined;
-    if (!filePath) return; // defensive: missing path → skip
+    const rawPath = typeof input?.path === "string" ? input.path : undefined;
+    if (!rawPath) return; // defensive: missing path → skip
+
+    // 3-T0 P0/P1: the builtin edit tool resolves relative paths against the
+    // SESSION cwd (ctx.cwd), not process.cwd(). Reading input.path directly
+    // (Node resolves vs process.cwd()) would, when the two diverge, read a
+    // DIFFERENT file and present it as <verified-on-disk> truth — inverting
+    // this extension's purpose. Resolve against ctx.cwd exactly like the
+    // builtin (and like edit-strip-empty's execute override already does).
+    const cwd = typeof (ctx as { cwd?: unknown } | undefined)?.cwd === "string"
+      ? (ctx as { cwd: string }).cwd
+      : process.cwd();
+    const filePath = path.isAbsolute(rawPath) ? rawPath : path.resolve(cwd, rawPath);
 
     const details = event.details as { firstChangedLine?: number } | undefined;
     const fcl = typeof details?.firstChangedLine === "number" ? details.firstChangedLine : undefined;
 
     const block = await buildVerificationBlock(filePath, fcl);
 
+    // Defensive (3-T0 P2): event.content is typed as an array, but spreading
+    // a non-array (if some upstream handler replaced it) would corrupt the
+    // result. Guard before spreading.
+    const prior = Array.isArray(event.content) ? event.content : [];
     return {
       content: [
-        ...event.content, // preserve "Successfully replaced N block(s) in <path>."
+        ...prior, // preserve "Successfully replaced N block(s) in <path>."
         { type: "text" as const, text: block },
       ],
     };

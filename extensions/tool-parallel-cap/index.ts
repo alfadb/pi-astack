@@ -175,11 +175,33 @@ export function applyParallelCap(payload: Obj): Obj {
   };
 }
 
-/** Extract ctx.model.modelId defensively. */
+/**
+ * Extract the current model id defensively.
+ *
+ * 3-T0 P1: pi's Model type (pi-ai types.d.ts) exposes `id`, NOT `modelId`.
+ * The original code read `ctx.model.modelId` — a non-existent field — so
+ * ctx-side model matching was dead code (only payload.model matched). Read
+ * `id` first, keep `modelId` as a fallback in case a host wraps the model.
+ */
 function modelIdFromCtx(ctx: unknown): string | undefined {
-  const m = (ctx as { model?: { modelId?: unknown } } | undefined)?.model;
+  const m = (ctx as { model?: { id?: unknown; modelId?: unknown } } | undefined)?.model;
+  if (m && typeof m.id === "string") return m.id;
   if (m && typeof m.modelId === "string") return m.modelId;
   return undefined;
+}
+
+/**
+ * Extract the provider API discriminator (ctx.model.api), e.g.
+ * "anthropic-messages" / "openai-completions" / "openai-responses".
+ *
+ * 3-T0 P1/P2 (all three reviewers): payload-shape detection alone can
+ * false-positive on OpenAI Chat Completions (also has top-level messages[]),
+ * which would inject the Anthropic-only `disable_parallel_tool_use` into a
+ * non-Anthropic request. ctx.model.api is the authoritative provider gate.
+ */
+function modelApiFromCtx(ctx: unknown): string | undefined {
+  const api = (ctx as { model?: { api?: unknown } } | undefined)?.model?.api;
+  return typeof api === "string" ? api : undefined;
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -193,6 +215,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("before_provider_request", (event, ctx) => {
     if (isSubAgentSession(ctx)) return; // sub-agents need parallel tool use
+
+    // Authoritative provider gate (3-T0): only ever touch genuine Anthropic
+    // Messages requests. ctx.model.api is the discriminator. When it is
+    // present and NOT anthropic-messages, bail — this prevents injecting the
+    // Anthropic-only disable_parallel_tool_use into an OpenAI Chat
+    // Completions payload that merely shares the top-level messages[] shape.
+    // When ctx.model is absent (rare), fall through to payload-shape +
+    // model-substring gating below (still protected by the target match).
+    const api = modelApiFromCtx(ctx);
+    if (api !== undefined && api !== "anthropic-messages") return;
 
     const ctxModelId = modelIdFromCtx(ctx);
     if (!shouldCapForPayload(event.payload, ctxModelId, targets)) return;
@@ -211,4 +243,6 @@ export const __TEST = {
   isAnthropicMessagesShape,
   shouldCapForPayload,
   applyParallelCap,
+  modelIdFromCtx,
+  modelApiFromCtx,
 };

@@ -151,6 +151,19 @@ console.log("[8] Tag wrapping invariant");
   }
 }
 
+// ── 9. Large file → stat guard skips the read (3-T0 P2) ───────────
+console.log("[9] Large-file stat guard");
+{
+  // Write a >5MB file; buildVerificationBlock must NOT slurp it — it should
+  // emit a 'too large' note instead of a window.
+  const big = "a".repeat(6 * 1024 * 1024);
+  const p = writeFile("big.txt", big);
+  const out = await buildVerificationBlock(p, 1);
+  check("emits 'too large' note", out.includes("file too large to window"));
+  check("does NOT embed the file body", !out.includes("a".repeat(1000)));
+  check("still wrapped in tags", out.startsWith(BEGIN_TAG) && out.endsWith(END_TAG));
+}
+
 console.log("");
 console.log(`pass=${pass}, fail=${fail}`);
 if (fail > 0) {

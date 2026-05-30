@@ -45,6 +45,8 @@ const {
   applyParallelCap,
   readTargetModelSubstrings,
   DEFAULT_TARGETS,
+  modelIdFromCtx,
+  modelApiFromCtx,
 } = cap.__TEST;
 
 const { injectToolChoiceIntoPayload } = tcPayload;
@@ -181,6 +183,25 @@ console.log("[5] PI_ASTACK_PARALLEL_CAP_MODELS env override");
 console.log("[6] DEFAULT_TARGETS invariant");
 {
   check("DEFAULT_TARGETS is exactly [claude-opus-4-8]", DEFAULT_TARGETS.length === 1 && DEFAULT_TARGETS[0] === "claude-opus-4-8");
+}
+
+// ─── ctx extraction (3-T0 P1 dead-code + api gate) ──────────────────
+console.log("[7] modelIdFromCtx / modelApiFromCtx");
+{
+  // pi's Model exposes `id`, NOT `modelId`. The old code read modelId and
+  // silently got undefined → ctx-side matching was dead.
+  check("reads ctx.model.id (the real field)", modelIdFromCtx({ model: { id: "claude-opus-4-8" } }) === "claude-opus-4-8");
+  check("falls back to ctx.model.modelId if id absent", modelIdFromCtx({ model: { modelId: "x" } }) === "x");
+  check("prefers id over modelId", modelIdFromCtx({ model: { id: "a", modelId: "b" } }) === "a");
+  check("undefined when no model", modelIdFromCtx({}) === undefined);
+  check("undefined when ctx nullish", modelIdFromCtx(undefined) === undefined);
+
+  check("reads ctx.model.api", modelApiFromCtx({ model: { api: "anthropic-messages" } }) === "anthropic-messages");
+  check("api undefined when absent", modelApiFromCtx({ model: {} }) === undefined);
+  check("api undefined when ctx nullish", modelApiFromCtx(undefined) === undefined);
+  // The handler bails when api is present AND !== anthropic-messages; this
+  // documents the discriminator value an OpenAI request would carry.
+  check("openai-completions api is a non-anthropic value", modelApiFromCtx({ model: { api: "openai-completions" } }) === "openai-completions");
 }
 
 console.log("");
