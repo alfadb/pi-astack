@@ -918,7 +918,7 @@ sediment 在 `agent_end` 从 response stream 提取 `memory-footnote` fenced blo
 > - `aggregatorModel` / `aggregatorTimeoutMs` / `aggregatorMaxRetries` settings + schema (commit 974250a)
 > - audit row 加 `aggregator_engine` 字段跟 P1-1 round-2 closure (commit d144e4c)
 > - `STRUCTURAL_CONTEXT` 静态注入 + staleness lint smoke (commit 974250a, drift 捡到 1 个 stale entry 当场删)
-> - **multi-view writer dispatch v1 stub 未升 v2** (仍是 §4.4.6 D v1 限制)——待 path A 受制因素 v3 路线同期处理
+> - **multi-view writer dispatch v1 stub 未升 v2** (仍是 §4.4.6 D v1 限制)——待 path A 受制因素 v3 路线同期处理 → **✅ CLOSED (2026-05-27, commit 2b11184)**：op dispatcher 已抽为独立函数 `executeCuratorDecisionToBrain`（`extensions/sediment/curator-decision-writer.ts:39`），`writeApprovedToBrain`（`extensions/sediment/index.ts:3439`）以 `dryRun:false` 真实写脑。下文 §4.4.6 v1 限制中的对应两条同步关闭。
 
 #### 4.4.1 触发条件
 
@@ -1024,8 +1024,8 @@ batch 3 全系列 (commits `3718d91` → `1a6f6f7`, 11 commits) 实施§4.4.5 ·
 
 v1 限制 (P0.5 acceptable)：
 
-  - `writeApprovedToBrain` stub—— replay 决定 op!=skip 时 audit `multi_view_replay_would_write` + `candidate_lost: true` 但**不实际调 op dispatcher**。需抽 `sediment/index.ts:2280-2440` 里的 300 行 op dispatcher 为独立函数后接入，留下一 phase
-  - **原 turn vs replay 写脑不对称**（batch 6 T0 review 补记）：原 turn 走 `confirm_proposer` / `confirm_pass1` synthesizable 时 proposer / synthesized decision 会被常规写入脑 (curator 主路径)。但 staging 重审后走同样路径时，`writeApprovedToBrain` v1 stub 会抹去写脑动作。同一个 candidate 被 proposer 创建时 reviewer 同意则写，被 staging 重审时 reviewer 同意**仍不写**。A' 层不破（reviewer 跰了）但 INV-AUTONOMY “脑从自然对话学习” 出现隐性 gap。dogfood 用户 audit 里 grep `candidate_lost: true` 能陆续定量这个损失。
+  - `writeApprovedToBrain` stub—— replay 决定 op!=skip 时 audit `multi_view_replay_would_write` + `candidate_lost: true` 但**不实际调 op dispatcher**。需抽 `sediment/index.ts:2280-2440` 里的 300 行 op dispatcher 为独立函数后接入，留下一 phase → **✅ CLOSED (2026-05-27, commit 2b11184)**：dispatcher 已抽为 `executeCuratorDecisionToBrain`（`curator-decision-writer.ts:39`），`writeApprovedToBrain`（`index.ts:3439`）以 `dryRun:false` 真实写脑 + audit row `multi_view_replay_brain_write` + git-commit 校验 + writer-rejected 抛错（保留 staging 重试）。`candidate_lost:true` 不再由写路径 emit，仅保留为 aggregator watchdog 计数信号（`aggregator.ts:142`）。
+  - **原 turn vs replay 写脑不对称**（batch 6 T0 review 补记）：原 turn 走 `confirm_proposer` / `confirm_pass1` synthesizable 时 proposer / synthesized decision 会被常规写入脑 (curator 主路径)。但 staging 重审后走同样路径时，`writeApprovedToBrain` v1 stub 会抹去写脑动作。同一个 candidate 被 proposer 创建时 reviewer 同意则写，被 staging 重审时 reviewer 同意**仍不写**。A' 层不破（reviewer 跰了）但 INV-AUTONOMY “脑从自然对话学习” 出现隐性 gap。dogfood 用户 audit 里 grep `candidate_lost: true` 能陆续定量这个损失。 → **✅ CLOSED (2026-05-27, commit 2b11184)**：staging 重审与原 turn 现在走同一真实写脑路径，写脑对称性恢复，INV-AUTONOMY 隐性 gap 消除。
   - kill switch 复用 `classifierEnabled` (`settings.autoLlmWriteEnabled !== false`)—— v2 可加独立 `multiViewReplayEnabled`
   - `confirm_pass1_not_synthesizable` 依然 dead-loop 风险（candidate 下轮 extractor 可能重复产出）—— P3 加 candidate-identity throttle。本轮不拦截
 
