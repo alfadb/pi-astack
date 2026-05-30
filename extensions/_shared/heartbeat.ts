@@ -322,12 +322,23 @@ export function startHeartbeat(opts: HeartbeatOptions): HeartbeatHandle {
 
 // ── Read-side helpers (used by tests + Stage 1c consumer) ─────────────
 
+/** Sanity ceiling for a heartbeat trace read (3-T0 P2). A real trace is
+ *  ~120 beats × ~200 B ≈ 24 KB (15s interval over a 30-min dispatch, then
+ *  unlinked on stop). 1 MB (~5000 beats) is far beyond any legitimate
+ *  trace; above it we refuse the read rather than risk OOM on a writer-bug
+ *  / orphan-append / tampered file. */
+const MAX_TRACE_BYTES = 1024 * 1024;
+
 /** Read all beats from a heartbeat trace file. Returns [] when the file
- *  is missing or corrupt (per-line skip). Exposed for Stage 1c consumer
- *  code and for smoke tests. */
+ *  is missing, oversized, or corrupt (per-line skip). Exposed for Stage 1c
+ *  consumer code and for smoke tests. */
 export function readHeartbeatTrace(tracePath: string): HeartbeatBeat[] {
   let raw: string;
   try {
+    // Size guard BEFORE slurping: stat is O(1) and bounds the read so a
+    // pathologically large trace cannot OOM the consumer (or RangeError a
+    // downstream spread). Oversized → [] (treated as no parseable beats).
+    if (fs.statSync(tracePath).size > MAX_TRACE_BYTES) return [];
     raw = fs.readFileSync(tracePath, "utf-8");
   } catch {
     return [];
