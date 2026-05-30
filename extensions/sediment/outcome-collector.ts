@@ -72,7 +72,7 @@ function isValidSlug(s: string): boolean {
 /**
  * Strip scope prefixes (project:xxx:, world:, workflow:) to get bare slug.
  */
-function sanitizeSlug(raw: string): string {
+export function sanitizeSlug(raw: string): string {
   let slug = raw.replace(/^project:[^:]+:/, "");
   slug = slug.replace(/^(world|workflow):/, "");
   slug = slug.replace(/:/g, "-");
@@ -504,6 +504,32 @@ export function readOutcomeLedger(): LedgerOutcomeRow[] {
   } catch {
     return [];
   }
+}
+
+/** Normalize a project_root value for equality comparison (resolved abs path, or "" if absent). */
+export function normalizeProjectRoot(value: unknown): string {
+  return typeof value === "string" && value.trim() ? path.resolve(value) : "";
+}
+
+/**
+ * Read outcome-ledger rows for ONE project only. The ledger is user-global
+ * across ALL projects (readOutcomeLedger), so a same-named slug in another
+ * project would otherwise contaminate per-entry stats. P2.A / ADR 0026 §5.1
+ * (docs/notes/outcome-to-classifier-feedback-design.md §2.1): the
+ * active-correction classifier MUST read project-scoped rows only.
+ *
+ * Filters by project_root (written by writeOutcomeLedger from the bound
+ * project cwd). rowLimit caps the most-recent tail AFTER filtering. Empty
+ * on any failure or empty/unresolved projectRoot. This is the canonical
+ * shared reader; aggregator.ts keeps a perf-tuned tail-read local variant.
+ */
+export function readProjectOutcomeRows(projectRoot: string, rowLimit: number = 5000): LedgerOutcomeRow[] {
+  const normalized = normalizeProjectRoot(projectRoot);
+  if (!normalized) return [];
+  const filtered = readOutcomeLedger().filter(
+    (row) => normalizeProjectRoot(row.project_root) === normalized,
+  );
+  return rowLimit > 0 && filtered.length > rowLimit ? filtered.slice(-rowLimit) : filtered;
 }
 
 /**

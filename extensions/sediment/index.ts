@@ -50,7 +50,7 @@ import {
 import { runCorrectionPipeline, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
-import { collectOutcomes, writeOutcomeLedger } from "./outcome-collector";
+import { collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { runArchiveReactivationIfDue } from "./archive-reactivation";
@@ -1760,6 +1760,35 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   };
                 }).filter(e => e.slug) : []);
           } catch { /* search failure is non-fatal */ }
+          // P2.A (ADR 0025 §4.2.5): enrich related cards with PROJECT-SCOPED
+          // outcome track record so the classifier can discount low-trust entries.
+          // Constraints (3-T0 Round 1, docs/notes/outcome-to-classifier-feedback-
+          // design.md §7.1): project-filtered read only (never unscoped ledger),
+          // same sanitizeSlug both sides, attach only when real data, bounded read,
+          // best-effort silent-skip (INV-INVISIBILITY).
+          try {
+            const CLASSIFIER_OUTCOME_ROW_LIMIT = 5000; // single-user KB-scale ledger; bounds per-turn read
+            const cardBySlug = new Map<string, RelatedEntryCard>();
+            for (const e of relatedEntries) cardBySlug.set(sanitizeSlug(e.slug), e);
+            const slugs = [...cardBySlug.keys()].filter(Boolean);
+            if (slugs.length > 0) {
+              const rows = readProjectOutcomeRows(cwd, CLASSIFIER_OUTCOME_ROW_LIMIT);
+              for (const a of summarizeEntryActivity(rows, slugs, 30)) {
+                const hasData = !!a.last_seen || a.decisive_count > 0 || a.confirmatory_count > 0
+                  || a.retrieved_unused_count > 0 || a.total_retrievals > 0;
+                const card = cardBySlug.get(a.slug);
+                if (card && hasData) {
+                  card.outcome_activity = {
+                    decisive: a.decisive_count,
+                    confirmatory: a.confirmatory_count,
+                    retrieved_unused: a.retrieved_unused_count,
+                    possible_echo_chamber: a.possible_echo_chamber,
+                    last_seen: a.last_seen,
+                  };
+                }
+              }
+            }
+          } catch { /* outcome enrich best-effort; silent-skip */ }
           const cr = await runCorrectionPipeline(effectiveWindow.entries.length > 0 ? effectiveWindow.entries : branch, relatedEntries, {
             settings,
             modelRegistry: modelRegistry as Parameters<typeof runCorrectionPipeline>[2]["modelRegistry"],

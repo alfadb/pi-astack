@@ -208,6 +208,21 @@ Step 5 — NOW commit the final classification:
          - 9-10: user explicitly contradicted a specific previous behavior
            or stated "I used to X, now I Y" with no hedges.
 
+         Outcome track-record (only if a RELATED entry shows one): use it to
+         DISCOUNT an entry's apparent authority, NOT to inflate correction
+         confidence on its own.
+         - high retrieved-unused or ⚠️possible-echo-chamber on the target entry
+           → do not treat it as a clear / current preference; a correction
+           against it is more plausible, but you STILL need the user's current
+           words to conflict with the entry's content before raising confidence.
+         - high decisive + no echo-chamber → well-grounded; correcting it needs
+           stronger evidence. (Do NOT read this as "always trust it" — a decisive
+           streak can be assistant self-reinforcement, not user reconfirmation.)
+         - Bias caution: track-record is advisory, never ground truth. High
+           retrieved-unused may mean stale OR domain-specific-rare; echo-chamber
+           may mean sycophancy OR genuine repeated confirmation. Weigh it against
+           content match — never let it alone decide typing or confidence.
+
 Step 6 — Self-critique: "If I am wrong, the most likely error direction
          is ___ because ___". The 'because' clause MUST cite EITHER a
          step-3 disconfirmer OR a step-2 alternative case quote. Name a

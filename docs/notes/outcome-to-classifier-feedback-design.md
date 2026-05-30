@@ -1,7 +1,8 @@
 # outcome → classifier 复判反馈闭环 — P2 设计 + liveness 审计 (v2)
 
-**状态**: 设计稿 v2（2026-05-30）。**未实现**——implement 前的 liveness 审计 + 设计，按
-`adr-pipeline-liveness-checks-before-implementation` maxim 先定设计、不写代码。
+**状态**: **已实现 (2026-05-30)**。设计 v2 经 3-T0 Round-1 一致 SHIP 后落地，附 §8 实现记录。
+（原为 implement 前的 liveness 审计 + 设计，按
+`adr-pipeline-liveness-checks-before-implementation` maxim 先定设计、后写代码。）
 **v1→v2**: 经 2-model 盲审（gpt-5.5 REWORK / deepseek-v4-pro SHIP-WITH-FIXES）修正一个 BLOCKING
 （跨项目 slug 污染）+ echo-chamber 方向反了 + dead-loop 声明过强。见 §7 review log。
 **对应 ADR**: 0025 §4.2.5（outcome 依赖）+ §4.1（classifier confidence 评估）
@@ -198,3 +199,46 @@ gpt = **REWORK**，deepseek = **SHIP-WITH-FIXES**。两家**独立收敛**到同
 
 **残留**（implement 前可再过一眼，非 blocking）：windowDays bootstrap（§4-Q3）；P2.B 触发门槛量化
 （≥60d dogfood + false-positive < 5% 等）待 P2.B 独立设计定。
+
+### 7.1 多轮决策讨论（2026-05-30 Round 1，3-T0）
+
+用户授权「无法决定拉 3 家 T0 多轮讨论」。Round 1（opus-4-8 / gpt-5.5 / deepseek-v4-pro
+独立，340s）**三家一致 SHIP**（gpt 从 v1 的 REWORK 改判 SHIP；deepseek 维持 SHIP；opus 新判 SHIP）。
+无 verdict 分歧→ 未走 Round 2。结论：**现在实现 P2.A**。三家各钉一条互补的实现约束，合并为下面检查表。
+
+**implement pre-flight 检查表（三家 must-nail-down 合并）：**
+
+1. **（opus）slug 归一一致**：enrich 前用**同一份** `sanitizeSlug` 归一 related slug 与 ledger
+   `entry_slug` 再比对。实测：写侧 `entry_slug` 已 sanitize（`outcome-collector.ts:204/322`），llm-search
+   返回经 `normalizeBareSlug`（`llm-search.ts:321/327`）也是 bare——两侧**当前已同 namespace**，
+   所以这是防御性硬化（防 llm-search 日后改返 scoped slug 造成静默空转）。**伮§2.1 原称
+   「经 sanitizeSlug 去前缀」不准：related slug 是因 normalizeBareSlug 而 bare，非 sanitizeSlug。**
+   smoke 加一条 scoped-slug related entry 仍命中 bare ledger 行。
+2. **（gpt）只用 canonical bound project root**：classifier 路径禁用任何 unscoped `readOutcomeLedger()`；
+   只能用 `resolveActiveProject` 后的 projectRoot 调 `readProjectOutcomeRows`；未绑定/读败→不附
+   `outcome_activity`。prompt 别把「high decisive → well-grounded」写太硬（防 LLM 把助手自用史
+   误读为用户重新确认、固化 stale entry）。同 slug 双项目 smoke 锁死。
+3. **（deepseek）ROW_LIMIT 常量 + 防稀释红线**：wire 点定一个明确 `ROW_LIMIT`（per-turn 热路径
+   读，不能太大触磁盘、也不能太小截断有意义历史）并注释理据；`outcome_activity` **只在
+   last_seen 或任 count>0 时附加**，严禁对所有 slug 零值填充（否则 10 条全零 track-record
+   稀释真正有信号的条目）。
+
+## 8. 实现记录（2026-05-30）
+
+三家 must-nail-down 全部落实：
+- **共享读侧**：`outcome-collector.ts` 新增 export `normalizeProjectRoot` + `readProjectOutcomeRows`
+  + `sanitizeSlug`（canonical 共享版；aggregator 保留其 perf-tuned tail-read 本地变体，未动）。
+- **wire**：`index.ts:~1763` map 后 enrich——`readProjectOutcomeRows(cwd, 5000)` 项目过滤、
+  两侧 `sanitizeSlug` 归一、只在 last_seen/count>0 时附 `outcome_activity`、best-effort silent-skip。
+- **schema**：`RelatedEntryCard.outcome_activity?`（correction-pipeline.ts）。
+- **prompt**：relatedBlock 渲染 track-record 行 + 打折指引；classifier prompt Step 5 加方向
+  正确的打折指引 + bias caution（对齐 `decide.ts:230`）。
+- **smoke**：`scripts/smoke-outcome-classifier-enrich.mjs` 23/23（项目隔离 / 归一 / echo-chamber /
+  零值守卫 / 渲染 / 打折指引）。回归：task-local 41/0、aggregator 20/20 + 3/3、memory-sediment
+  加载 OK。
+
+**意外收获（pre-existing bug 修复）**：buildClassifierPrompt 的 relatedBlock 原来是
+`...args.relatedEntries.map(...).join("\n")`——末尾 `.join("\n")` 把条目拼成一个字符串，
+再被 `...spread` **逐字符打散**。意味着 RELATED MEMORY ENTRIES 一直以“每字一行”的乱码
+喂给 classifier（上方 stagingBlock 用的是正确的无末尾-join 写法）。本次顺手修复（去掉
+末尾 `.join("\n")`）——P2.A 的 track-record 不修这个也形同虚设。

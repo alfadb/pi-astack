@@ -59,6 +59,18 @@ export interface RelatedEntryCard {
   status?: string;
   /** ≤150 chars of compiled_truth for context */
   summary?: string;
+  /** P2.A (ADR 0025 §4.2.5): per-entry, PROJECT-SCOPED outcome track record.
+   *  Attached by the caller ONLY when the entry has real ledger data
+   *  (last_seen or any count > 0). Absent ⇒ classifier treats as no signal.
+   *  Used to DISCOUNT the entry's apparent authority, never to raise
+   *  correction confidence by itself (see classifier prompt guidance). */
+  outcome_activity?: {
+    decisive: number;
+    confirmatory: number;
+    retrieved_unused: number;
+    possible_echo_chamber: boolean;
+    last_seen?: string;
+  };
 }
 
 export interface CorrectionPipelineResult {
@@ -128,6 +140,16 @@ function buildClassifierPrompt(args: {
         "title/scope/summary overlaps the user's quoted words.",
         "A bare slug without content match is a weak hint — prefer null.",
         "",
+        "track-record (when present) = this entry's recent outcome history in THIS",
+        "project. Use it to DISCOUNT the entry's apparent authority, NOT to raise",
+        "correction confidence by itself:",
+        "  - high retrieved-unused, or ⚠️possible-echo-chamber → don't treat this",
+        "    entry as a clear current preference (it may be stale, or recent decisive",
+        "    marks may be assistant self-reinforcement, not user reconfirmation).",
+        "  - BUT a durable correction still requires the user's current words to",
+        "    conflict with the entry's content — track-record never replaces content match.",
+        "  - (none recorded) = no signal; judge normally.",
+        "",
         ...args.relatedEntries.map((e) =>
           [
             `- slug: ${e.slug}`,
@@ -135,8 +157,11 @@ function buildClassifierPrompt(args: {
             e.kind || e.status ? `  kind/status: ${[e.kind, e.status].filter(Boolean).join(" / ")}` : "",
             e.scope ? `  scope: ${e.scope}` : "",
             e.summary ? `  summary: ${e.summary}` : "",
+            e.outcome_activity
+              ? `  track-record: decisive×${e.outcome_activity.decisive} confirmatory×${e.outcome_activity.confirmatory} retrieved-unused×${e.outcome_activity.retrieved_unused}${e.outcome_activity.possible_echo_chamber ? " ⚠️possible-echo-chamber" : ""}${e.outcome_activity.last_seen ? ` last_seen=${e.outcome_activity.last_seen.slice(0, 10)}` : ""}`
+              : "  track-record: (none recorded)",
           ].filter(Boolean).join("\n")
-        ).join("\n"),
+        ),
       ].join("\n")
     : "=== RELATED MEMORY ENTRIES ===\n(none)";
 
@@ -156,6 +181,10 @@ function buildClassifierPrompt(args: {
     "Do NOT add or remove fields from the schema shown in the prompt.",
   ].join("\n");
 }
+
+/** Test-only: expose prompt assembly so smoke can assert the RELATED block
+ *  renders the P2.A track-record line + discount guidance. */
+export const _buildClassifierPromptForTests = buildClassifierPrompt;
 
 // ── Parsing ────────────────────────────────────────────────────────────
 
