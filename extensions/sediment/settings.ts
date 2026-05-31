@@ -159,7 +159,8 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // See extractorTimeoutMs rationale above.
   curatorTimeoutMs: 1_200_000,
   curatorMaxRetries: 1,
-  // Phase C.2 default: v4-pro for reasoning over the 8 feed input. The
+  // Phase C.2 default: v4-pro for reasoning over the 9 feed input
+  // (including L1 evolution_hypotheses self-state). The
   // run happens at most every 24 hours (debounced by aggregator-last-run);
   // cost is one v4-pro call (~$0.005-0.05 per run) which is negligible.
   // Generous timeout (10 min) since the aggregator is fire-and-forget bg.
@@ -195,7 +196,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     multiViewPass1: "v1",
     multiViewPass2: "v1",
     outcomeSelfReport: "v0",
-    aggregator: "v1",
+    aggregator: "v1.1",
     archiveReactivationReviewer: "v1",
   },
   multiView: {
@@ -236,7 +237,7 @@ export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"
   outcomeSelfReport:
     "v0: memory-footnote protocol injected via memory extension's before_agent_start hook (extensions/memory/index.ts). Not a sediment-owned prompt file; this version tag tracks the protocol-level contract (entry/used/counterfactual fields, 3-option taxonomy).",
   aggregator:
-    "v1: prompt-native skeptical-historian (ADR 0025 §4.3 + Phase A/B/C cutover 2026-05-28). 8 input feeds threaded from deterministic v0.2 base: mechanical_suspicion_signals (renamed advisories), raw_distribution_summary, outcome_counterfactual_excerpts, structural_context, prior_aggregator_summaries (last 8 runs), classifier_health_window with 7-day rolling trend delta, per_turn_cost_rollup, p15_watchdog_signals. LLM = settings.aggregatorModel (default deepseek/deepseek-v4-pro). Prompt forces case-FOR + case-AGAINST + falsifiability + sycophancy double-check + reverse-anchor against skeptical-bias swap. Output schema = INFRA serialization (parse failure → degraded_to_mechanical: true audit, never retry-LLM-to-fix-JSON, never user-facing surface per INV-INVISIBILITY). v0.2 mechanical path retained as fallback when modelRegistry absent or LLM call fails. See docs/audits/2026-05-28-aggregator-prompt-native-phase-a-baseline.md + extensions/sediment/prompts/aggregator-skeptical-historian-v1.md.",
+    "v1.1: prompt-native skeptical-historian (ADR 0025 §4.3 + Phase A/B/C cutover 2026-05-28; L1 evolution self-state wired 2026-05-31). 9 input feeds threaded from deterministic v0.2 base: mechanical_suspicion_signals (renamed advisories), raw_distribution_summary, outcome_counterfactual_excerpts, structural_context, prior_aggregator_summaries (last 8 runs), classifier_health_window with 7-day rolling trend delta, per_turn_cost_rollup, p15_watchdog_signals, evolution_hypotheses. LLM = settings.aggregatorModel (default deepseek/deepseek-v4-pro). Prompt forces case-FOR + case-AGAINST + falsifiability + sycophancy double-check + reverse-anchor against skeptical-bias swap + self-state reification check. Output schema = INFRA serialization (parse failure → degraded_to_mechanical: true audit, never retry-LLM-to-fix-JSON, never user-facing surface per INV-INVISIBILITY). Successful prompt-native outputs are distilled to evolution-ledger.jsonl as internal self-state only; this is not durable-memory authorization and must not trigger writer/archive/curator actions. v0.2 mechanical path retained as fallback when modelRegistry absent or LLM call fails. See docs/audits/2026-05-28-aggregator-prompt-native-phase-a-baseline.md + extensions/sediment/prompts/aggregator-skeptical-historian-v1.md.",
   archiveReactivationReviewer:
     "v1: prompt-native reactivation reviewer (ADR 0025 §4.6, Stage 2 2026-05-28). Batched daily-debounced review of archived entries via runArchiveReactivationIfDue() in extensions/sediment/archive-reactivation.ts. Three decisions: keep_archived | reactivate | hard_archive_recommended. Default-conservative bias (most runs produce zero reactivations). reactivate decisions flip status=archived→active via writer.updateProjectEntry; hard_archive_recommended logs only (actual git rm deferred to a future PR). Reuses aggregator's setImmediate scheduling + 24h debounce. Audit row: archive_reactivation operation in audit.jsonl + ledger row in archive-reactivation-ledger.jsonl. Prompt: extensions/sediment/prompts/archive-reactivation-reviewer-v1.md.",
 

@@ -138,7 +138,7 @@ check("buildAggregatorPromptInput projects only whitelisted feeds (no leaks)", (
   }
 });
 
-check("buildAggregatorPromptInput preserves all 8 declared feeds when present", () => {
+check("buildAggregatorPromptInput preserves all 9 declared feeds when present", () => {
   const fullSummary = {
     ...minimalSummary,
     raw_distribution: { total_slugs: 5 },
@@ -147,6 +147,7 @@ check("buildAggregatorPromptInput preserves all 8 declared feeds when present", 
     prior_aggregator_runs: [{ ts: "2026-05-27T00:00:00Z", project_root: "/p", advisory_kinds: {}, total_advisories: 0 }],
     classifier_health: { ok: true, quoteRate: 0.95, alternativeRate: 0.9, concreteSelfCritiqueRate: 0.92, sampleSize: 40, windowSize: 50, threshold: 0.4, advisories: [] },
     p15_watchdog_signals: { pass1_op_not_synthesizable_count: 0, candidate_lost_count: 0, multi_view_metrics: { pass1_call_count: 0, pass2_call_count: 0, ok_rate: 0, distinct_device_ids: 0 }, multiview_pending_queue: { total: 0, oldest_age_days: 0, max_retry_attempts: 0 }, pass1_op_type_breakdown: {}, pass1_op_type_breakdown_available: true },
+    evolution_hypotheses: { project_root: "/p", rows_considered: 1, matching_rows: 1, active_hypotheses: [{ key: "k::slug:s", kind: "k", slug: "s", status: "proposed", first_seen: "2026-05-27T00:00:00Z", last_seen: "2026-05-27T00:00:00Z", seen_count: 1, demoted_count: 0, acknowledgment_count: 0, withdrawn_count: 0 }], contested_hypotheses: [], withdrawn_hypotheses: [] },
   };
   const out = buildAggregatorPromptInput(fullSummary);
   const required = [
@@ -158,6 +159,7 @@ check("buildAggregatorPromptInput preserves all 8 declared feeds when present", 
     "classifier_health_window",
     "per_turn_cost_rollup",
     "p15_watchdog_signals",
+    "evolution_hypotheses",
   ];
   for (const feed of required) {
     if (!out.includes(feed)) {
@@ -182,8 +184,8 @@ const fullExampleOutput = {
     falsifier: "test falsifier",
     evidence_quotes: ["quote 1", "quote 2"],
   }],
-  demoted_signals: [{ kind: "demoted_test", slug: "d-slug", reason: "demote reason" }],
-  previous_acknowledgments: [{ kind: "ack_test", slug: "a-slug", status: "still_acknowledged", reason: "ack reason" }],
+  demoted_signals: [{ kind: "demoted_test", slug: "d-slug", key: "demoted_test::message:abc123abc123", reason: "demote reason" }],
+  previous_acknowledgments: [{ kind: "ack_test", slug: "a-slug", key: "ack_test::message:def456def456", status: "still_acknowledged", reason: "ack reason" }],
   trend_observations: [{ dimension: "quote", current: 0.55, baseline: 1.0, delta: -0.45, interpretation: "drop detected" }],
   reasoning_quality_self_check: {
     silence_audit: [{ candidate: "silenced_kind", evidence_discounted: "evidence", reason_dropped: "reason" }],
@@ -198,6 +200,8 @@ check("parseAggregatorOutput accepts bare JSON", () => {
   const r = parseAggregatorOutput(JSON.stringify(fullExampleOutput));
   if (r.promoted_advisories.length !== 1) throw new Error(`expected 1 promoted, got ${r.promoted_advisories.length}`);
   if (r.promoted_advisories[0].kind !== "test_kind") throw new Error("kind not preserved");
+  if (r.demoted_signals[0].key !== "demoted_test::message:abc123abc123") throw new Error("demoted key not preserved");
+  if (r.previous_acknowledgments[0].key !== "ack_test::message:def456def456") throw new Error("ack key not preserved");
   if (r.reasoning_quality_self_check.falsifiers_named_count !== 1) throw new Error("falsifiers count not preserved");
 });
 

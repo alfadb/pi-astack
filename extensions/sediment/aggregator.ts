@@ -27,6 +27,7 @@ import { stagingDir, stagingFileCount } from "./staging-loader";
 import { countMultiviewPending } from "./multiview-staging-io";
 import { scanPerTurnCost, type PerTurnCostSummary } from "./per-turn-cost";
 import { runAggregatorLlmPass, type PromptNativeOutput } from "./aggregator-llm";
+import { mergeEvolutionLedger, summarizeEvolutionLedger, type EvolutionLedgerSummary } from "./evolution-ledger";
 import type { ModelRegistryLike } from "./llm-extractor";
 
 type AggregatorSeverity = "info" | "warning" | "critical";
@@ -323,6 +324,10 @@ export interface AggregatorSummary {
   /** Phase C.1.c (ADR 0025 §4.3 v1 prompt input C4 / Step 7): P1.5
    *  watchdog telemetry. Optional; absent on v0.2 ledger rows. */
   p15_watchdog_signals?: P15WatchdogSignals;
+  /** L1 Evolution Loop v1: persistent self-state accumulated from prior
+   *  prompt-native aggregator outputs. This is INTERNAL sidecar state, not
+   *  durable memory authorization. Optional for backward compatibility. */
+  evolution_hypotheses?: EvolutionLedgerSummary;
   /** Phase C.2 (ADR 0025 §4.3 v1 LLM pass): the prompt-native output
    *  emitted by the aggregator-skeptical-historian-v1 LLM call. Absent
    *  when no modelRegistry was supplied (v0.2-only run) or when the
@@ -1190,6 +1195,11 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
     Math.max(1, Math.floor(options.auditRowLimit ?? DEFAULT_AUDIT_ROW_LIMIT)),
     now,
   );
+  // L1 Evolution Loop v1: feed the skeptical historian its own accumulated
+  // self-state from previous prompt-native runs. This is observation, not
+  // authorization: the aggregator may strengthen/weaken its beliefs in text,
+  // but no durable-memory mutation happens here.
+  const evolutionHypotheses = summarizeEvolutionLedger({ projectRoot: options.projectRoot });
 
   const base = {
     ts: formatLocalIsoTimestamp(now),
@@ -1206,6 +1216,7 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
     outcome_counterfactual_excerpts: counterfactualExcerpts,
     prior_aggregator_runs: priorRuns,
     p15_watchdog_signals: p15Watchdog,
+    evolution_hypotheses: evolutionHypotheses,
     per_turn_cost: perTurnCost,
   };
   const advisories = buildAdvisories(base);
@@ -1276,6 +1287,19 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
     ...(promptNative ? { prompt_native: promptNative } : {}),
     ...(degraded ? { degraded_to_mechanical: true, ...(degradedReason ? { degraded_reason: degradedReason } : {}) } : {}),
   };
+
+  // L1 Evolution Loop v1: persist successful prompt-native judgments into a
+  // dedicated internal self-state ledger. This is deliberately NOT a durable
+  // memory writer and NOT an advisory consumer: no markdown entry is created,
+  // archived, or demoted here. Degraded/no-registry runs still write the
+  // aggregator ledger but contribute no new evolution hypothesis.
+  if (aggregatorEngine === "prompt_native_v1" && promptNative) {
+    mergeEvolutionLedger({
+      projectRoot: options.projectRoot,
+      promptNative,
+      now: options.now,
+    });
+  }
 
   writeAggregatorLedger({
     ...enrichedSummary,

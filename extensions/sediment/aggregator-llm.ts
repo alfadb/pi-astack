@@ -7,9 +7,10 @@
  *
  * Flow:
  *   v0.2 mechanical AggregatorSummary is computed first by
- *   runSedimentAggregator() → contains 6 input feeds the v1 prompt
+ *   runSedimentAggregator() → contains 9 input feeds the v1 prompt
  *   needs (raw_distribution, structural_context, counterfactual
- *   excerpts, prior runs, classifier health w/ trend, p15 watchdog).
+ *   excerpts, prior runs, classifier health w/ trend, p15 watchdog,
+ *   and evolution_hypotheses self-state).
  *   This module serializes those feeds into prompt context, invokes
  *   the LLM, parses strict JSON output, and on any failure emits a
  *   `degraded_to_mechanical: true` row per Phase A consensus C2.
@@ -56,12 +57,16 @@ export interface PromotedAdvisory {
 export interface DemotedSignal {
   kind: string;
   slug?: string;
+  /** Evolution-ledger key; required by the prompt when demoting a slug-less evolution_hypothesis. */
+  key?: string;
   reason: string;
 }
 
 export interface AcknowledgmentEntry {
   kind: string;
   slug?: string;
+  /** Evolution-ledger key; required by the prompt when acknowledging a slug-less evolution_hypothesis. */
+  key?: string;
   status: "still_acknowledged" | "withdraw_acknowledgment" | "no_change";
   reason: string;
 }
@@ -154,7 +159,7 @@ export function loadAggregatorPrompt(): string {
  * and curator hygiene).
  */
 export function buildAggregatorPromptInput(summary: AggregatorSummary): string {
-  // Whitelist projection: pass only the 8 input feeds the v1 prompt
+  // Whitelist projection: pass only the 9 input feeds the v1 prompt
   // expects (plus minimal context fields). Avoid leaking unrelated
   // internal fields that may grow over time.
   const inputContext = {
@@ -178,6 +183,8 @@ export function buildAggregatorPromptInput(summary: AggregatorSummary): string {
     per_turn_cost_rollup: summary.per_turn_cost,
     // Feed 8: P1.5 watchdog signals (C4)
     p15_watchdog_signals: summary.p15_watchdog_signals ?? null,
+    // Feed 9: L1 evolution self-state from previous prompt-native runs.
+    evolution_hypotheses: summary.evolution_hypotheses ?? null,
     // Auxiliary observability (not strictly required by prompt, but
     // cheap to include for self-describing audit rows):
     aux_audit_rollup: summary.audit,
@@ -191,7 +198,7 @@ export function buildAggregatorPromptInput(summary: AggregatorSummary): string {
     "# INPUT FEED",
     "",
     "Below is the deterministic v0.2 aggregator summary for this run.",
-    "All 8 input feeds defined in the prompt \u00a72 are present (any may be",
+    "All 9 input feeds defined in the prompt \u00a72 are present (any may be",
     "empty or null \u2014 see prompt edge-case section for handling).",
     "",
     "```json",
@@ -304,11 +311,13 @@ export function parseAggregatorOutput(rawText: string): PromptNativeOutput {
   const demoted = asArray<Record<string, unknown>>(parsed.demoted_signals).map((a): DemotedSignal => ({
     kind: String(a.kind ?? "unknown"),
     ...(typeof a.slug === "string" ? { slug: a.slug } : {}),
+    ...(typeof a.key === "string" ? { key: a.key } : {}),
     reason: String(a.reason ?? ""),
   }));
   const acks = asArray<Record<string, unknown>>(parsed.previous_acknowledgments).map((a): AcknowledgmentEntry => ({
     kind: String(a.kind ?? "unknown"),
     ...(typeof a.slug === "string" ? { slug: a.slug } : {}),
+    ...(typeof a.key === "string" ? { key: a.key } : {}),
     status: (a.status === "still_acknowledged" || a.status === "withdraw_acknowledgment" || a.status === "no_change") ? a.status : "no_change",
     reason: String(a.reason ?? ""),
   }));
