@@ -24,22 +24,25 @@
  *     pi.on("input") is the EARLIEST extension hook in
  *     `AgentSession.prompt()` (the user-message path) — it fires before
  *     `_checkCompaction` and before `emitBeforeAgentStart`. We set a
- *     footer status here so the user gets immediate visual confirmation
- *     that pi heard them. A stale-status timer fallback guards against
- *     early-exit paths in prompt() (input handlers returning `handled`,
- *     missing model/key, compaction failures) where neither agent_start
- *     nor agent_end would fire to clear the status.
+ *     footer status AND a one-line pre-working widget here so the user
+ *     gets immediate visual confirmation that pi heard them. A stale
+ *     timer fallback guards against early-exit paths in prompt() (input
+ *     handlers returning `handled`, missing model/key, compaction
+ *     failures) where neither agent_start nor agent_end would fire to
+ *     clear the indicators.
  *
  *   Layer B  (light prototype monkey-patch)
  *     We patch `ExtensionRunner.prototype.emitBeforeAgentStart` so that
  *     each time the loop is about to invoke a per-extension handler, we
- *     update the footer status to show which extension is running. This
- *     turns the previously-invisible serial chain into a live progress
- *     readout like `⏳ memory`.
+ *     update the footer status and pre-working widget to show which
+ *     extension is running. This turns the previously-invisible serial
+ *     chain into a live progress readout like `⠋ memory` using the same
+ *     spinner frames as pi's native Working loader.
  *
  * Both layers degrade independently. If the patch fails to install (pi
  * upgrade changed the runner shape), Layer A still works and the user
- * sees a static `⏳ preparing…` until pi's own spinner takes over.
+ * sees an animated `preparing…` footer plus `Working… preparing turn`
+ * widget until pi's own spinner takes over.
  *
  * ## Why a monkey-patch is appropriate here
  *
@@ -71,23 +74,26 @@
  *     process restart is not required.
  *
  *   PI_ASTACK_TURN_PROGRESS_NO_PATCH=1
- *     Disables Layer B only; Layer A (preparing… banner) still works.
- *     /reload will restore the pristine prototype.
+ *     Disables Layer B only; Layer A (preparing… banner + widget) still
+ *     works. /reload will restore the pristine prototype.
  *
- * Both vars are read at activate() time. Changing them mid-session has
+ *   PI_ASTACK_TURN_PROGRESS_NO_WIDGET=1
+ *     Disables only the pre-working widget; footer status remains.
+ *
+ * These vars are read at activate() time. Changing them mid-session has
  * no effect until /reload.
  *
  * ## Sub-agent skip
  *
  * The `ExtensionRunner` prototype is process-wide, so the patch fires
  * inside dispatch-spawned sub-agents too. We don't unconditionally
- * suppress the patch (sub-agent has a no-op uiContext so setStatus
- * calls are harmless), but every lifecycle handler that captures
- * `ctx.ui.setStatus` into module state MUST gate on
- * `isSubAgentSession(ctx)` — otherwise a sub-agent's `input` hook
- * overwrites the main session's captured setStatus reference with the
- * sub-agent's no-op, killing Layer B's status updates for the duration
- * of the sub-agent run. This invariant is documented in
+ * suppress the patch (sub-agent has a no-op uiContext so setStatus /
+ * setWidget calls are harmless), but every lifecycle handler that
+ * captures `ctx.ui.setStatus` / `ctx.ui.setWidget` into module state
+ * MUST gate on `isSubAgentSession(ctx)` — otherwise a sub-agent's
+ * `input` hook overwrites the main session's captured UI references
+ * with the sub-agent's no-op, killing Layer B's updates for the
+ * duration of the sub-agent run. This invariant is documented in
  * `_shared/pi-internals.ts` under "Sub-agent session marker".
  *
  * ## Compatibility with non-pi runtimes
@@ -121,6 +127,13 @@ const TURN_PROGRESS_ORIGINAL_EMIT_BEFORE_AGENT_START = Symbol.for(
 const TURN_PROGRESS_STATE_KEY = Symbol.for("pi-astack.turn-progress.state/v1");
 
 const STATUS_KEY = FOOTER_STATUS_KEYS.turnProgress;
+const WIDGET_KEY = "turn-progress-pre-working";
+const WIDGET_PLACEMENT = "aboveEditor" as const;
+
+// Keep this in sync with @earendil-works/pi-tui's Loader defaults so the
+// pre-working indicator visually matches pi's native Working spinner.
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_INTERVAL_MS = 80;
 
 /**
  * Stale-status timeout. If a turn enters `input` but neither
@@ -132,11 +145,23 @@ const STATUS_KEY = FOOTER_STATUS_KEYS.turnProgress;
  *     no new agent_start fires until the current turn ends
  *   - _checkCompaction failure paths
  *
- * 30s is a soft heuristic — long enough that a slow memory rerank
- * won't trigger a false clear, short enough that a stuck status
- * doesn't sit for minutes.
+ * 120s is a conservative heuristic for the PRE-before_agent_start window
+ * only: long enough to cover slow pre-prompt compaction and queued-input
+ * while an existing turn is still streaming, but still bounded so true
+ * early-exit stale indicators do not linger forever.
+ *
+ * Once Layer B sees the first before_agent_start handler-bearing
+ * extension, it replaces this short timer with the long watchdog below.
+ * This is critical because Path A memory injection can legitimately run
+ * for 40–90s; the old 30s timer cleared the footer mid-injection,
+ * making users see "indicator disappeared but pi is still waiting".
  */
-const STALE_TIMEOUT_MS = 30_000;
+const STALE_TIMEOUT_MS = 120_000;
+
+/** Long watchdog used after the before_agent_start chain has definitely
+ *  begun. agent_start / agent_end are still the normal clear edges; this
+ *  only prevents a genuinely stuck chain from leaving a footer forever. */
+const BEFORE_AGENT_START_WATCHDOG_MS = 5 * 60_000;
 
 // ── Shared state on globalThis ──────────────────────────────────────
 //
@@ -147,16 +172,35 @@ const STALE_TIMEOUT_MS = 30_000;
 // across module instances.
 
 type SetStatusFn = (key: string, text: string | undefined) => void;
+type SetWidgetFn = (
+  key: string,
+  content: string[] | undefined,
+  options?: { placement?: "aboveEditor" | "belowEditor" },
+) => void;
 
 interface TurnProgressState {
   /** Captured setStatus arrow (bound to its UI instance). Layer B reads
    *  this; Layer A writes it on each `input` event from the MAIN session. */
   setStatus: SetStatusFn | undefined;
-  /** Captured theme.fg("accent", ...) for status text colouring. */
+  /** Captured setWidget arrow (bound to its UI instance) for the
+   *  non-footer pre-working row. */
+  setWidget: SetWidgetFn | undefined;
+  /** Captured theme.fg("accent", ...) for spinner colouring. */
   themeAccent: ((s: string) => string) | undefined;
+  /** Captured theme.fg("muted", ...) for Working/status text colouring. */
+  themeMuted: ((s: string) => string) | undefined;
+  /** Current raw footer label (without spinner frame), if visible. */
+  statusLabel: string | undefined;
+  /** Current raw widget label (without spinner frame / Working prefix), if visible. */
+  widgetLabel: string | undefined;
+  /** Shared spinner frame for footer + widget. */
+  spinnerFrameIndex: number;
+  /** Interval that animates the pre-working spinner. */
+  spinnerTimer: ReturnType<typeof setInterval> | undefined;
   /** True once installEmitPatch has succeeded on the runner prototype. */
   patched: boolean;
-  /** One-shot timer reference for the stale-status fallback (Layer A). */
+  /** Active status-clear timer: short preflight stale fallback before
+   *  Layer B starts, then a long watchdog while before_agent_start runs. */
   staleTimer: ReturnType<typeof setTimeout> | undefined;
   /** warnOnce dedup. */
   warned: Set<string>;
@@ -168,7 +212,13 @@ function getState(): TurnProgressState {
   if (!state) {
     state = {
       setStatus: undefined,
+      setWidget: undefined,
       themeAccent: undefined,
+      themeMuted: undefined,
+      statusLabel: undefined,
+      widgetLabel: undefined,
+      spinnerFrameIndex: 0,
+      spinnerTimer: undefined,
       patched: false,
       staleTimer: undefined,
       warned: new Set<string>(),
@@ -224,14 +274,36 @@ export function extractShortName(extPath: string): string {
   return shortName;
 }
 
-function formatLine(state: TurnProgressState, shortName: string): string {
+function formatSpinnerText(state: TurnProgressState, label: string): string {
   const accent = state.themeAccent ?? ((s: string) => s);
-  return accent(`⏳ ${shortName}`);
+  const muted = state.themeMuted ?? ((s: string) => s);
+  const frame = SPINNER_FRAMES[state.spinnerFrameIndex % SPINNER_FRAMES.length] ?? "";
+  const indicator = frame.length > 0 ? `${accent(frame)} ` : "";
+  return `${indicator}${muted(label)}`;
+}
+
+function formatLine(state: TurnProgressState, shortName: string): string {
+  return formatSpinnerText(state, shortName);
 }
 
 function formatPreparing(state: TurnProgressState): string {
-  const accent = state.themeAccent ?? ((s: string) => s);
-  return accent("⏳ preparing…");
+  return formatSpinnerText(state, "preparing…");
+}
+
+function formatWidget(state: TurnProgressState, label: string): string[] {
+  return [formatSpinnerText(state, `Working… ${label}`)];
+}
+
+function formatWidgetPreparing(state: TurnProgressState): string[] {
+  return formatWidget(state, "preparing turn");
+}
+
+function formatWidgetLine(state: TurnProgressState, shortName: string): string[] {
+  return formatWidget(state, shortName);
+}
+
+function formatWidgetAwaitingModel(state: TurnProgressState): string[] {
+  return formatWidget(state, "awaiting model…");
 }
 
 /** Honest terminal label for the HANDOFF window after the before_agent_start
@@ -247,8 +319,7 @@ function formatPreparing(state: TurnProgressState): string {
  *  handler's extension name (e.g. the chain-tail time-injector),
  *  misattributing the handoff window to an extension. */
 function formatAwaitingModel(state: TurnProgressState): string {
-  const accent = state.themeAccent ?? ((s: string) => s);
-  return accent("⏳ awaiting model…");
+  return formatSpinnerText(state, "awaiting model…");
 }
 
 /** Cancel any pending stale-status timer. Called whenever agent_start /
@@ -261,15 +332,117 @@ function clearStaleTimer(state: TurnProgressState): void {
   }
 }
 
-/** Clear the footer status using the most recently captured setStatus
- *  (which is bound to the main session's UI, never the sub-agent's). */
-function clearStatusIfCaptured(state: TurnProgressState): void {
+function armStatusClearTimer(state: TurnProgressState, timeoutMs: number): void {
+  clearStaleTimer(state);
+  state.staleTimer = setTimeout(() => {
+    state.staleTimer = undefined;
+    clearIndicatorsIfCaptured(state);
+  }, timeoutMs);
+  // Unref so this timer never holds the event loop open at exit.
+  // Not all runtimes implement .unref(), so guard.
+  const tref = state.staleTimer as unknown as { unref?: () => void };
+  if (typeof tref.unref === "function") tref.unref();
+}
+
+function setStatusIfCaptured(state: TurnProgressState, text: string | undefined): void {
   if (typeof state.setStatus !== "function") return;
   try {
-    state.setStatus(STATUS_KEY, undefined);
+    state.setStatus(STATUS_KEY, text);
   } catch {
     // best-effort
   }
+}
+
+function setWidgetIfCaptured(state: TurnProgressState, content: string[] | undefined): void {
+  if (typeof state.setWidget !== "function") return;
+  try {
+    state.setWidget(WIDGET_KEY, content, { placement: WIDGET_PLACEMENT });
+  } catch {
+    // best-effort
+  }
+}
+
+function hasVisibleIndicator(state: TurnProgressState): boolean {
+  return state.statusLabel !== undefined || state.widgetLabel !== undefined;
+}
+
+function refreshAnimatedIndicators(state: TurnProgressState): void {
+  if (state.statusLabel !== undefined) {
+    setStatusIfCaptured(state, formatSpinnerText(state, state.statusLabel));
+  }
+  if (state.widgetLabel !== undefined) {
+    setWidgetIfCaptured(state, formatWidget(state, state.widgetLabel));
+  }
+}
+
+function stopSpinnerTimer(state: TurnProgressState): void {
+  if (state.spinnerTimer !== undefined) {
+    clearInterval(state.spinnerTimer);
+    state.spinnerTimer = undefined;
+  }
+}
+
+function startSpinnerTimerIfNeeded(state: TurnProgressState): void {
+  if (state.spinnerTimer !== undefined || !hasVisibleIndicator(state)) return;
+  state.spinnerTimer = setInterval(() => {
+    if (!hasVisibleIndicator(state)) {
+      stopSpinnerTimer(state);
+      return;
+    }
+    state.spinnerFrameIndex = (state.spinnerFrameIndex + 1) % SPINNER_FRAMES.length;
+    refreshAnimatedIndicators(state);
+  }, SPINNER_INTERVAL_MS);
+  const tref = state.spinnerTimer as unknown as { unref?: () => void };
+  if (typeof tref.unref === "function") tref.unref();
+}
+
+function syncSpinnerTimer(state: TurnProgressState): void {
+  if (hasVisibleIndicator(state)) {
+    startSpinnerTimerIfNeeded(state);
+  } else {
+    stopSpinnerTimer(state);
+  }
+}
+
+function setStatusLabelIfCaptured(state: TurnProgressState, label: string | undefined): void {
+  const wasVisible = hasVisibleIndicator(state);
+  if (label !== undefined && typeof state.setStatus !== "function") {
+    state.statusLabel = undefined;
+    syncSpinnerTimer(state);
+    return;
+  }
+  state.statusLabel = label;
+  if (!wasVisible && label !== undefined) state.spinnerFrameIndex = 0;
+  setStatusIfCaptured(state, label === undefined ? undefined : formatSpinnerText(state, label));
+  syncSpinnerTimer(state);
+}
+
+function setWidgetLabelIfCaptured(state: TurnProgressState, label: string | undefined): void {
+  const wasVisible = hasVisibleIndicator(state);
+  if (label !== undefined && typeof state.setWidget !== "function") {
+    state.widgetLabel = undefined;
+    syncSpinnerTimer(state);
+    return;
+  }
+  state.widgetLabel = label;
+  if (!wasVisible && label !== undefined) state.spinnerFrameIndex = 0;
+  setWidgetIfCaptured(state, label === undefined ? undefined : formatWidget(state, label));
+  syncSpinnerTimer(state);
+}
+
+/** Clear the footer status using the most recently captured setStatus
+ *  (which is bound to the main session's UI, never the sub-agent's). */
+function clearStatusIfCaptured(state: TurnProgressState): void {
+  setStatusLabelIfCaptured(state, undefined);
+}
+
+function clearWidgetIfCaptured(state: TurnProgressState): void {
+  setWidgetLabelIfCaptured(state, undefined);
+}
+
+function clearIndicatorsIfCaptured(state: TurnProgressState): void {
+  clearStatusIfCaptured(state);
+  clearWidgetIfCaptured(state);
 }
 
 // ── Layer B: prototype patch ────────────────────────────────────────
@@ -381,9 +554,9 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
   ) {
     const exts = Array.isArray(this.extensions) ? this.extensions : undefined;
 
-    // Skip instrumentation if we don't have a captured main-session
-    // setStatus reference yet (first-ever turn before Layer A fires)
-    // or if we're inside a sub-agent runner (no real UI to update).
+    // Skip instrumentation if we don't have captured main-session UI
+    // references yet (first-ever turn before Layer A fires) or if
+    // we're inside a sub-agent runner (no real UI to update).
     // The pre-check on this.createContext / emitError mirrors the
     // contract pi's original requires; both the original AND the mirror
     // need them, so missing-affordance branches degrade to no-op
@@ -413,15 +586,16 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
 
     let currentSystemPrompt = systemPrompt;
     const baseCtx = this.createContext();
-    // Sub-agent footer gate (3-T0 P2): the patch is process-wide and
-    // `captured` resolves to the MAIN session's setStatus. Without this,
+    // Sub-agent UI gate (3-T0 P2): the patch is process-wide and
+    // captured UI functions resolve to the MAIN session. Without this,
     // a dispatch-spawned sub-agent's before_agent_start chain would write
-    // to the MAIN footer — and the terminal "awaiting model…" would LINGER,
-    // since the sub-agent's own agent_start clear is itself
-    // isSubAgentSession-gated. Gate all footer WRITES (never handler
+    // to the MAIN footer/widget — and the terminal "awaiting model…"
+    // would LINGER, since the sub-agent's own agent_start clear is itself
+    // isSubAgentSession-gated. Gate all UI WRITES (never handler
     // execution) on main-session, honoring the module-wide invariant.
     const shouldLabel =
-      !!captured && !isSubAgentSession(baseCtx as { sessionManager?: unknown });
+      (!!captured || typeof state.setWidget === "function") &&
+      !isSubAgentSession(baseCtx as { sessionManager?: unknown });
     const ctx: Record<PropertyKey, unknown> = Object.defineProperties(
       {} as Record<PropertyKey, unknown>,
       Object.getOwnPropertyDescriptors(baseCtx),
@@ -447,13 +621,18 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
 
       // INSTRUMENT: announce which extension is starting (main session only).
       if (shouldLabel) {
+        if (!anyHandlerLabeled) {
+          // P0 fix: Layer A's 120s stale fallback only belongs to the
+          // pre-before_agent_start window. Once we are about to run the
+          // first real handler, replace it with a long watchdog so slow
+          // but healthy Path A memory injection remains visible until
+          // agent_start clears the footer.
+          armStatusClearTimer(state, BEFORE_AGENT_START_WATCHDOG_MS);
+        }
         anyHandlerLabeled = true;
         const shortName = extractShortName(ext.path ?? "<unknown>");
-        try {
-          captured(STATUS_KEY, formatLine(state, shortName));
-        } catch {
-          // setStatus errors must not affect pi's loop.
-        }
+        setStatusLabelIfCaptured(state, shortName);
+        setWidgetLabelIfCaptured(state, shortName);
         // Yield once before the handler runs so the TUI flushes the
         // new status. Sub-millisecond cost; without it, fast-but-many
         // extensions render as a single flash at the end.
@@ -511,11 +690,8 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
     // that flushes this to the TUI. Adding a yield would inject latency
     // into every turn's hot path for no benefit.
     if (shouldLabel && anyHandlerLabeled) {
-      try {
-        captured(STATUS_KEY, formatAwaitingModel(state));
-      } catch {
-        // setStatus errors must not affect pi's loop.
-      }
+      setStatusLabelIfCaptured(state, "awaiting model…");
+      setWidgetLabelIfCaptured(state, "awaiting model…");
     }
 
     if (messages.length > 0 || systemPromptModified) {
@@ -572,6 +748,7 @@ export default function (pi: ExtensionAPI): void {
   // prototype now so /reload-with-var-set actually undoes the patch.
   const disableAll = process.env.PI_ASTACK_DISABLE_TURN_PROGRESS === "1";
   const disablePatch = disableAll || process.env.PI_ASTACK_TURN_PROGRESS_NO_PATCH === "1";
+  const disableWidget = disableAll || process.env.PI_ASTACK_TURN_PROGRESS_NO_WIDGET === "1";
 
   if (proto && disablePatch) {
     try {
@@ -587,11 +764,19 @@ export default function (pi: ExtensionAPI): void {
 
   if (disableAll) {
     // Layer A also clears any stale captured state so a re-enable later
-    // doesn't reuse a stale setStatus reference.
-    state.setStatus = undefined;
-    state.themeAccent = undefined;
+    // doesn't reuse stale main-session UI references.
     clearStaleTimer(state);
+    clearIndicatorsIfCaptured(state);
+    state.setStatus = undefined;
+    state.setWidget = undefined;
+    state.themeAccent = undefined;
+    state.themeMuted = undefined;
     return;
+  }
+
+  if (disableWidget) {
+    clearWidgetIfCaptured(state);
+    state.setWidget = undefined;
   }
 
   // Install Layer B unless explicitly disabled. ExtensionRunner is
@@ -618,10 +803,10 @@ export default function (pi: ExtensionAPI): void {
     }
   }
 
-  // Layer A: capture setStatus + theme, set preparing… banner, yield
-  // for TUI flush. Gated on:
+  // Layer A: capture setStatus + setWidget + theme, set preparing…
+  // banner and pre-working row, yield for TUI flush. Gated on:
   //   - not a sub-agent session (prevents overwriting main-session
-  //     captured setStatus with sub-agent's no-op);
+  //     captured UI refs with sub-agent's no-op);
   //   - input source is "interactive" (skips programmatic /extension
   //     submissions that don't represent a user pressing Enter).
   pi.on("input", async (event, ctx) => {
@@ -632,6 +817,7 @@ export default function (pi: ExtensionAPI): void {
     const ui = (ctx as {
       ui?: {
         setStatus?: SetStatusFn;
+        setWidget?: SetWidgetFn;
         theme?: { fg?: (color: string, text: string) => string };
       };
     }).ui;
@@ -643,34 +829,30 @@ export default function (pi: ExtensionAPI): void {
     // but a robustness gain.
     const boundSetStatus = ui.setStatus.bind(ui);
     state.setStatus = boundSetStatus;
+    if (!disableWidget && typeof ui.setWidget === "function") {
+      state.setWidget = ui.setWidget.bind(ui);
+    } else {
+      state.setWidget = undefined;
+    }
 
     const fg = ui.theme?.fg;
     if (typeof fg === "function") {
       const theme = ui.theme!;
       state.themeAccent = (s: string) => fg.call(theme, "accent", s);
+      state.themeMuted = (s: string) => fg.call(theme, "muted", s);
     } else {
       state.themeAccent = undefined;
+      state.themeMuted = undefined;
     }
 
-    try {
-      boundSetStatus(STATUS_KEY, formatPreparing(state));
-    } catch {
-      // best-effort
-    }
+    setStatusLabelIfCaptured(state, "preparing…");
+    setWidgetLabelIfCaptured(state, "preparing turn");
 
-    // Stale-status fallback: if neither agent_start nor agent_end
-    // clears within STALE_TIMEOUT_MS, clear ourselves. Covers early-
-    // exit paths in prompt() (handler returned `handled`, missing
-    // model/key, queued during streaming, compaction failures).
-    clearStaleTimer(state);
-    state.staleTimer = setTimeout(() => {
-      state.staleTimer = undefined;
-      clearStatusIfCaptured(state);
-    }, STALE_TIMEOUT_MS);
-    // Unref so this timer never holds the event loop open at exit.
-    // Not all runtimes implement .unref(), so guard.
-    const tref = state.staleTimer as unknown as { unref?: () => void };
-    if (typeof tref.unref === "function") tref.unref();
+    // Short stale-status fallback: if the prompt exits before Layer B
+    // enters before_agent_start, clear ourselves. Once Layer B sees the
+    // first handler-bearing extension, it replaces this with the long
+    // before_agent_start watchdog.
+    armStatusClearTimer(state, STALE_TIMEOUT_MS);
 
     // Critical: yield so the TUI render loop gets a chance to flush
     // the new status before downstream synchronous work
@@ -682,7 +864,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("agent_start", (_event, ctx) => {
     if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
     clearStaleTimer(state);
-    clearStatusIfCaptured(state);
+    clearIndicatorsIfCaptured(state);
   });
 
   // Belt-and-suspenders: agent_end clears too, in case agent_start
@@ -691,7 +873,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("agent_end", (_event, ctx) => {
     if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
     clearStaleTimer(state);
-    clearStatusIfCaptured(state);
+    clearIndicatorsIfCaptured(state);
   });
 }
 
@@ -705,7 +887,10 @@ export const __TEST = {
   ORIGINAL_MARKER: TURN_PROGRESS_ORIGINAL_EMIT_BEFORE_AGENT_START,
   STATE_KEY: TURN_PROGRESS_STATE_KEY,
   STATUS_KEY,
+  WIDGET_KEY,
   STALE_TIMEOUT_MS,
+  BEFORE_AGENT_START_WATCHDOG_MS,
+  SPINNER_INTERVAL_MS,
   installEmitPatch,
   restoreEmitPatch,
   getState,
