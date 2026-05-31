@@ -524,9 +524,14 @@ function getSharedInfra(): Promise<{
  * SECURITY (ADR 0014): v3 in-process dispatch does NOT provide the OS-level
  * process isolation that v2 subprocess spawn did. Sub-agents share the
  * parent's memory space, AuthStorage, and file system view. Mitigations:
- *   - `noExtensions: true` prevents extension tools (vault, etc.) from
- *     appearing in the sub-agent's tool list
- *   - `tools` allowlist restricts to read-only by default
+ *   - `tools` allowlist is EXCLUSIVE: createAgentSession exposes only the
+ *     listed tools, so extension-registered tools (vault_release,
+ *     prompt_user) are NOT callable even though noExtensions:false loads
+ *     the full extension stack. KNOWN_TOOLS also excludes them, so a caller
+ *     cannot request them via `tools=`. (Was noExtensions:true in v2;
+ *     replaced by allowlist + isSubAgentSession guards — see getSharedInfra
+ *     and scripts/smoke-dispatch-subagent-tool-allowlist.mjs.)
+ *   - default allowlist is read-only
  *   - `SessionManager.inMemory()` prevents session file writes
  *   - PI_MULTI_AGENT_ALLOW_MUTATING=1 gate still enforced
  * This is acceptable because typical dispatch usage calls remote LLM APIs

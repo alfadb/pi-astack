@@ -218,7 +218,7 @@ Hint: pass tasks as actual JSON array. Example:
 
 | 场景 | tools 默认 | 允许 |
 |---|---|---|
-| 主会话普通 `dispatch_agent(s)`（不传 tools） | `read,grep,find,ls` | 只读文件 / 搜索 / 列目录;LLM 推理 + 简单 ground-truth 验证 |
+| 主会话普通 `dispatch_agent(s)`（不传 tools） | `read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide` | 只读文件/搜索/列目录 + web 检索 + brain 只读（**2026-05-31 更正**：原表只列 `read,grep,find,ls`；ADR 0027 PR-B 后默认 allowlist 已扩入 web + memory 只读工具，让 sub-agent 能读 brain。以 `extensions/dispatch/index.ts` 默认 allowlist 字符串为准） |
 | 显式 readonly + memory | 显式传 `read,grep,find,ls,memory_search,memory_get,memory_list,memory_neighbors` | 加上 markdown memory facade |
 | vision / imagine | 单独 allow | 需要模型/图像场景时显式列出 |
 | mutating tools (`bash`/`edit`/`write`) | 默认拒绝 | 必须 `PI_MULTI_AGENT_ALLOW_MUTATING=1` env gate 才能进入 allowlist；嵌套 `dispatch_agent`/`dispatch_parallel` 任何时候都拒绝 |

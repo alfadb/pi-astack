@@ -138,6 +138,8 @@ P0d 时单独 ADR 决策。本 ADR 仅锁定 schema：`.vault-identity/master.ag
 2. **vault identity secret 永不进 git**：`/vault init` 时确保 `~/.abrain/.gitignore` 含 `.vault-identity/master.age` 行。
 3. **vault identity secret 永不出现在 argv 或 LLM context**：直接 fs read，无中间 echo / log / audit。
 4. **sub-pi 不读 vault identity**：`PI_ABRAIN_DISABLED=1` guard 在 `vault-reader.ts:loadMasterKey()` + `index.ts:activate()` 两层。
+
+   > **note (2026-05-31, v3 in-process)**：该 env guard 仍在代码中，但 **v3 下已无任何地方自动 set `PI_ABRAIN_DISABLED=1`**（v2 的 dispatch 子进程注入已移除）——它现在只是**手动 opt-out**。in-process `dispatch` sub-agent 不是子进程、不 set 该 env，abrain 照常 activate（`noExtensions:false`），此时 guard 对 sub-agent vacuous；「sub-agent 拿到 `bash` 后 spawn `pi`」这条子进程路径也**不被该 guard 自动保护**（子进程继承的 env 不含该 var）。dispatch sub-agent 的 **`vault_release` 工具**不可调用改由排他 `tools` allowlist 保证（详 ADR 0014 §不变量#6 walk-back）；注意这只挡工具、**不挡** sub-agent 用 `read` 按绝对路径读 `master.age` 密钥本身（同 §不变量#1 层2 residual surface，待独立决策加路径 denylist）。
 5. **`.vault-pubkey` 与 `.vault-identity/master.age.pub` 内容必须一致**：单层 keypair 设计，两个文件存放同一个 age public key（`.vault-pubkey` 是历史名，保留兼容；`.vault-identity/master.age.pub` 是新 SOT）。`/vault init` 同步写入。
 6. **不再生成 `.vault-master.age`**：abrain-age-key backend 下 master 直接是 identity secret，不需要中间一层加密文件。旧 backend (ssh-key / gpg-file) 仍然生成 `.vault-master.age`，互不影响。
 

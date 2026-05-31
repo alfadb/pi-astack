@@ -27,6 +27,7 @@
     "smoke:memory-path-a": "node scripts/smoke-memory-path-a.mjs",
     "smoke:dispatch": "node scripts/smoke-dispatch-input-compat.mjs",
     "smoke:dispatch-output-format": "node scripts/smoke-dispatch-output-format.mjs",
+    "smoke:dispatch-subagent-tool-allowlist": "node scripts/smoke-dispatch-subagent-tool-allowlist.mjs",
     "smoke:fallback-timing": "node scripts/smoke-model-fallback-mutation-timing.mjs",
     "smoke:vision": "node scripts/smoke-vision.mjs",
     "smoke:imagine": "node scripts/smoke-imagine.mjs",
