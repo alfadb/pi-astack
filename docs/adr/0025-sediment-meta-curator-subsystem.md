@@ -180,13 +180,14 @@ const BRAIN_ZONES = [
 | `/about-me` 命令让用户主动声明 | `/about-me` slash command 注册 @ `extensions/sediment/index.ts:2244-2246` |
 | 用户主动跑 `sediment self-improve` | 当前 `/abrain` 子命令含 `self-improve`，由用户主动跑 |
 
-**`autoLlmWriteEnabled` 默认 `false`** @ `extensions/sediment/settings.ts:54`：
+**`autoLlmWriteEnabled` 默认 `false`** @ `extensions/sediment/settings.ts:54` → **✅ CLOSED (2026-05-24, commit `2d1edff`)**：默认值已改为 `true`，live code @ `extensions/sediment/settings.ts:189`；`false` 与 `"staging-only"` 回滚路径仍保留。
 
 ```ts
 autoLlmWriteEnabled: false,  // ← Lane C 默认不跑
+// → ✅ CLOSED (2026-05-24, commit 2d1edff): default is now true @ extensions/sediment/settings.ts:189.
 ```
 
-这意味着：**ADR 0024 设想的 auto-write 现在默认不开。用户必须主动去 `~/.pi/agent/pi-astack-settings.json` 设 `sediment.autoLlmWriteEnabled: true` 才能让整个 ADR 0024 设想跑起来。** 本 ADR §5.3 列这个作为 R2+ 决策点（要不要改默认值）。
+这意味着：**ADR 0024 设想的 auto-write 现在默认不开。用户必须主动去 `~/.pi/agent/pi-astack-settings.json` 设 `sediment.autoLlmWriteEnabled: true` 才能让整个 ADR 0024 设想跑起来。** → **✅ CLOSED (2026-05-24, commit `2d1edff`)**：该默认关闭期已结束；当前默认开启，用户仍可通过 `sediment.autoLlmWriteEnabled: false` 或 `"staging-only"` 退回观察/关闭模式。 本 ADR §5.3 列这个作为 R2+ 决策点（要不要改默认值）。
 
 **这对本 ADR 的含义**：
 
@@ -216,14 +217,14 @@ autoLlmWriteEnabled: false,  // ← Lane C 默认不跑
 
 | 配套设施 | 现状 | 对本 ADR 的含义 |
 |---|---|---|
-| `promptVersion` 字段 | **没有** @ `settings.ts:27-77`、audit schema、`llm-extractor.ts:28-36` quality gate | §4.5 classifier prompt 演进需要从零加配套字段，工程量上调 |
+| `promptVersion` 字段 | **没有** @ `settings.ts:27-77`、audit schema、`llm-extractor.ts:28-36` quality gate → **✅ DONE (2026-05-23, commit `5f6bd37`)**：`promptVersion` substrate shipped @ `extensions/sediment/settings.ts:95-102` + defaults @ `settings.ts:192-199` | §4.5 classifier prompt 演进需要从零加配套字段，工程量上调 |
 | classifier 输出 zone/tier/op | **没有** — extractor 只产 `kind/status/confidence` @ `llm-extractor.ts:160-180` | §4.1 主动纠错 prompt 不是改现有版本，是从零写 |
-| multi-view 跨 provider 注册 | **没有** — extractor + curator 都是 deepseek 单 provider @ `settings.ts:63-69`（`deepseek/deepseek-v4-pro` + `deepseek/deepseek-v4-flash`） | §4.4 multi-view 需要跨 provider 的 model registry + fallback 名单 |
+| multi-view 跨 provider 注册 | **没有** — extractor + curator 都是 deepseek 单 provider @ `settings.ts:63-69`（`deepseek/deepseek-v4-pro` + `deepseek/deepseek-v4-flash`） → **✅ DONE (2026-05-24, commit `fec969e`)**：P0.5 cross-provider reviewer list shipped @ `extensions/sediment/settings.ts:108-114` / `settings.ts:201-212`; full dynamic provider selection remains P3/P3.5 scope | §4.4 multi-view 需要跨 provider 的 model registry + fallback 名单 |
 | evidence-first 6 步推理轨迹 | **没有** — curator prompt 是扭的 "选 7 op 之一" @ `curator.ts:497` | §4.1 / §4.4 prompt 是 0→1 新写不是现有版本改进 |
 | `outcome_history` 台账 | **没有** — entry frontmatter schema 是开放 `Record<string, Jsonish>` @ `types.ts:45` 但默认逻辑不理解新语义 | §4.2 outcome 台账走独立 sidecar 文件，不进 entry frontmatter |
 | staging-loader | **没有** — checkpoint @ `~/.abrain/.state/sediment/checkpoint.json` 是 per-session slot @ `checkpoint.ts:37-41`，跟 staging 语义无关 | §4.1.5 staging 时间戳基础设施完全独立 |
 
-**Settings 配置面** @ `settings.ts:27-77`：暴露 `enabled` / `gitCommit` / `extractorModel` / `curatorModel` / `extractor*Timeout` / `curator*Timeout` / `maxWindowChars` / `autoLlmWriteEnabled` / `autoWriteRawAuditChars` / `defaultConfidence` / `lockTimeoutMs`。**没有 `promptVersion` / `multiViewProviders` / `stagingMaxAge` 这些配套字段**。本 ADR §4 / §5 各能力点要加的 settings 字段需要同 PR 加进去。
+**Settings 配置面** @ `settings.ts:27-77`：暴露 `enabled` / `gitCommit` / `extractorModel` / `curatorModel` / `extractor*Timeout` / `curator*Timeout` / `maxWindowChars` / `autoLlmWriteEnabled` / `autoWriteRawAuditChars` / `defaultConfidence` / `lockTimeoutMs`。**没有 `promptVersion` / `multiViewProviders` / `stagingMaxAge` 这些配套字段** → **✅ PARTIAL DONE (2026-05-23/24, commits `5f6bd37` + `fec969e`)**：`promptVersion` 与 `multiView` settings 已落地；`stagingMaxAge` 仍为 `staging-loader.ts:41` 的 `STALE_DAYS = 30` 常量，未配置化。 本 ADR §4 / §5 各能力点要加的 settings 字段需要同 PR 加进去。
 
 ---
 
@@ -245,10 +246,10 @@ autoLlmWriteEnabled: false,  // ← Lane C 默认不跑
 |---|---|---|
 | 1. 主动纠错识别 | 0 — extractor prompt 没有 active correction 任务、没有 `CorrectionSignal` 输出 schema | **整条** |
 | 2. outcome self-report | 0 — `agent_end` handler 不注入 outcome prompt 给主会话 LLM、没有 `outcome_history` ledger | **整条** |
-| 3. 跨会话 aggregator | 0 — 没有 scheduler hook、没有 aggregator 文件、没有 daily/weekly/monthly cron | **整条** |
-| 4. multi-view verification | 0 — `curateProjectDraft` 单次 LLM 调用、没有 Pass 1 Blind + Pass 2 Reveal 拆分、extractor + curator 同 provider | **整条**（含 multi-provider 配套设施） |
-| 5. classifier prompt 演进 | 0 — 没有 `promptVersion` 字段、没有 `/abrain audit classifier` 诊断入口 | **整条** + 配套字段 |
-| 6. 静默归档 + 回滚 | △ — `status=archived` soft delete 已在 `archiveProjectEntry` @ `writer.ts:734`（thin wrapper over `updateProjectEntry`），但**没有 N 天窗口、没有 git rm 硬归档、没有反证检测 prompt、没有 reactivation reviewer** | 半条（soft delete 在，windowing + reasoning 全无） |
+| 3. 跨会话 aggregator | 0 — 没有 scheduler hook、没有 aggregator 文件、没有 daily/weekly/monthly cron → **✅ DONE v1 (2026-05-28, commit `906e5e4`)**：LLM aggregator wiring shipped; input-feed groundwork in `56bdb21`/`5130811`/`95110d5`, closure in `d144e4c`/`974250a` | **整条** |
+| 4. multi-view verification | 0 — `curateProjectDraft` 单次 LLM 调用、没有 Pass 1 Blind + Pass 2 Reveal 拆分、extractor + curator 同 provider → **✅ DONE P0.5 (2026-05-24, commit `fec969e`)**：Blind Pass 1 + Reveal Pass 2 + cross-family reviewer list shipped; replay write symmetry later closed by `2b11184` | **整条**（含 multi-provider 配套设施） |
+| 5. classifier prompt 演进 | 0 — 没有 `promptVersion` 字段、没有 `/abrain audit classifier` 诊断入口 → **✅ DONE v1 substrate/diagnostic (2026-05-23/28, commits `5f6bd37` + `974250a`)**：promptVersion settings/audit plus `/abrain audit classifier` health snapshot shipped | **整条** + 配套字段 |
+| 6. 静默归档 + 回滚 | △ — `status=archived` soft delete 已在 `archiveProjectEntry` @ `writer.ts:734`（thin wrapper over `updateProjectEntry`），但**没有 N 天窗口、没有 git rm 硬归档、没有反证检测 prompt、没有 reactivation reviewer** → **✅ DONE v1 / PARTIAL for hard delete (2026-05-28, commit chain `16d6190..9f87b88`)**：archive-reactivation reviewer v1 shipped with keep/reactivate/hard_archive_recommended; actual `git rm` remains deferred until writer-side CAS/expected-status guard lands | 半条（soft delete 在，windowing + reasoning 全无） |
 
 ### 2.3 §6 接受代价跟现状的兼容性
 
@@ -739,7 +740,7 @@ R1 review DeepSeek 指出：上述设计只写了 "resolve 是什么"（由 clas
 
 **默认选择 1**（批扫）：N=20 作为默认，可调。staging 被看到期望从 30 天 → 1-3 天。选择 2 作为 fallback（如果选择 1 未启用），选择 3 在高价值-明确质量信号 staging 上作为可选。
 
-**实现状态 (2026-05-27)**：staging-resolver 未实现。当前走选择 2 的 implicit 路径 (lazy resolve via classifier §4.1.3 step 6)。R1 P1-11 被重新分类为 P2-with-design-binding：resolve 触发路径已预先绑定，开工 staging-resolver 时默认选择 1。
+**实现状态 (2026-05-27)**：staging-resolver 未实现。→ **✅ CLOSED (2026-05-29, commit `9c518ba`)**：v1 批扫 triage shipped in `extensions/sediment/staging-resolver.ts`，走 24h debounce + advisory annotation；`promote_candidate` 仍不直达 durable（by-design deferred）。 当前走选择 2 的 implicit 路径 (lazy resolve via classifier §4.1.3 step 6)。R1 P1-11 被重新分类为 P2-with-design-binding：resolve 触发路径已预先绑定，开工 staging-resolver 时默认选择 1。
 
 #### 4.1.6 跟两条 write lane 的接口
 
@@ -1173,21 +1174,21 @@ ADR 0020 sync 处理 archive 中间状态：
 
 ### 5.1 基于 §1 现实的 phase 安排
 
-**重要：现状是 `autoLlmWriteEnabled` 默认 false，大多数用户没开 Lane C**。所以 phase 0 / 1 / 2 ship 在 default-off 下不影响大多数用户。这是天然的渐进 dogfood 安全网。
+**重要：现状是 `autoLlmWriteEnabled` 默认 false，大多数用户没开 Lane C** → **✅ CLOSED (2026-05-24, commit `2d1edff`)**：默认值已改 `true` @ `extensions/sediment/settings.ts:189`，同时保留 `false` / `"staging-only"` 退路。 所以 phase 0 / 1 / 2 ship 在 default-off 下不影响大多数用户。这是天然的渐进 dogfood 安全网。
 
 **⚠️ R10 三方审计三家一致要求：P1 开工前必须先验证 classifier prompt 在真实对话上的表现。** 这是硬性前置——不跑原型验证不准写 P1 代码。原型验证的要求：拿 50-60 条真实对话窗口（20 条明显该有 correction、20 条模糊、20 条明显不该有），用 §4.1.3 prompt 跑 3 个不同 model，人工 review：(a) 7 步顺序是否被遵守（step 2b 真的在站反面还是走形式？）(b) 误判率——该 null 却 produce signal / 该 durable 却判 task-local 的比例 (c) staging provisional 的创建率 vs resolve 率。原型通过标准：false positive rate < 20%（考虑到还没 multi-view 保护，这个门槛比 P5.5 的 15% 宽松），且 step-skipping 率（明显跳步或合并步的比例）< 15%。原型不过 → 回炉调 prompt 重跑 → 再不过 → 考虑拆 prompt（DeepSeek 建议的 Call 1 分类 + Call 2 staging resolution 两段式）。
 
 | Phase | 范围 | 工程量 | 阻塞前置 |
 |---|---|---|---|
-| **P0** | 只动配套基础：`promptVersion` 字段 + audit schema 扩展 + multi-provider settings 接口 + staging 目录创建 | 小 | 本 ADR ship |
+| **P0** | 只动配套基础：`promptVersion` 字段 + audit schema 扩展 + multi-provider settings 接口 + staging 目录创建 → **✅ DONE (2026-05-23, commit `5f6bd37`)** | 小 | 本 ADR ship |
 | **P1** | §4.1 主动纠错识别完整能力：correction-pipeline + classifier prompt + staging-loader + Lane A/C/G 三处挂载点 | 大 | P0 |
-| **P1.5** | §4.4 multi-view 最小版本：写死的 provider fallback 名单 + Pass 1/Pass 2 拆分；仅覆盖 §4.1 conf≥8 durable + 高置信 archive | 中-大（R9 audit 共识：跨 provider 配套涉及的文件多，"中" 偏乐观） | P1 |
+| **P1.5** | §4.4 multi-view 最小版本：写死的 provider fallback 名单 + Pass 1/Pass 2 拆分；仅覆盖 §4.1 conf≥8 durable + 高置信 archive → **✅ DONE P0.5/P1.5-min (2026-05-24, commit `fec969e`; replay write closure `2b11184` on 2026-05-27)** | 中-大（R9 audit 共识：跨 provider 配套涉及的文件多，"中" 偏乐观） | P1 |
 | **P2** | §4.2 outcome self-report（默认起点选方案 C，等 §5.2 ADR 0003 决策） | 中 | P1（要 classifier 消费 outcome 数据） |
-| **P3** | §4.3 aggregator + Classifier Health Meta-Check | 中-大 | P2（要 outcome 历史） |
+| **P3** | §4.3 aggregator + Classifier Health Meta-Check → **✅ DONE v1 (2026-05-28, commits `906e5e4` + `974250a`)** | 中-大 | P2（要 outcome 历史） |
 | **P3.5** | §4.4 multi-view full：dynamic provider 选择 + rate-limit + cost 预算 + DEFER 处理 | 大 | P1.5 dogfood |
-| **P4** | §4.5 classifier prompt 演进：诊断入口 `/abrain audit classifier` + iteration ritual | 小-中 | P1 数月 dogfood 后 |
-| **P5** | §4.6 静默归档 + 回滚窗口 | 中 | P1（要 classifier 识别 reactivation 信号） |
-| **P5.5** | `autoLlmWriteEnabled` 默认值改 true 决策（见 §5.3） | 极小（一行 settings）+ dogfood 数据支撑 | P1-P5 全部 ship 数月 dogfood |
+| **P4** | §4.5 classifier prompt 演进：诊断入口 `/abrain audit classifier` + iteration ritual → **✅ DONE diagnostic v1 (2026-05-28, commit `974250a`)** | 小-中 | P1 数月 dogfood 后 |
+| **P5** | §4.6 静默归档 + 回滚窗口 → **✅ DONE v1 / PARTIAL hard-delete (2026-05-28, commit chain `16d6190..9f87b88`)** | 中 | P1（要 classifier 识别 reactivation 信号） |
+| **P5.5** | `autoLlmWriteEnabled` 默认值改 true 决策（见 §5.3） → **✅ DONE (2026-05-24, commit `2d1edff`; live default @ `settings.ts:189`)** | 极小（一行 settings）+ dogfood 数据支撑 | P1-P5 全部 ship 数月 dogfood |
 | **P6** | 废弃 `/about-me` + `MEMORY-*:` 围栏这几个反模式（见 §5.4 同步反向 patch ADR 0024 §4.2） | 中（含迁移文案） | P5.5（ADR 0024 设想默认开启后才能动现有入口） |
 
 **并行轨**：P0 / P1 配套基础必须串行；P1.5 + P2 + P3 跨 phase 可并行；P4 + P5 可并行。**P5.5 / P6 是 ADR 0024 设想跑通之后才碰的**——不要在设想没真跑起来前去动现有入口。
