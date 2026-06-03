@@ -305,6 +305,47 @@ function uniqueUnsluggedEntryForKind(
   return candidates.length === 1 ? candidates[0] : undefined;
 }
 
+/**
+ * Identity convergence (dogfood-driven, 2026-06-03): a hypothesis often enters
+ * first as a slug-less `kind::message:<hash>` row (free-form advisory message,
+ * no stable slug), then a LATER run refers to the SAME belief by a stable slug.
+ * Without convergence those become two forked identities and the
+ * reinforced/contested/withdrawn lifecycle — the whole point of the loop — gets
+ * diluted across runs.
+ *
+ * When a slug appears for a kind whose only slug-less row is a SINGLE
+ * `kind::message:*` entry, re-key that row onto the slug identity and carry its
+ * accumulated counts + history forward. This is a quiet correctness merge, not
+ * a mechanical gate: it fires ONLY when exactly one unslugged row exists, so it
+ * never guesses between competing beliefs (multiple unslugged rows → no merge,
+ * the slug forks a fresh row and the next LLM reflection cycle reconciles). If
+ * the slug identity already exists, it is preferred and no merge happens.
+ *
+ * Residual risk (accepted as learning material, not gated): identity is keyed
+ * at project+kind granularity with no message/semantic similarity check, so a
+ * single accumulated slug-less row of a BROAD kind could be re-keyed onto an
+ * unrelated slug of that same kind. The prompt mitigates this upstream by
+ * telling the LLM to assign stable per-belief slugs; a wrong merge here is
+ * visible self-state the next reflection cycle can contest/withdraw.
+ */
+function adoptUnsluggedAlias(
+  map: Map<string, EvolutionLedgerEntry>,
+  projectRoot: string,
+  kind: string,
+  slug: string,
+): EvolutionLedgerEntry | undefined {
+  const slugKey = advisoryKey(kind, slug, undefined);
+  const slugCk = `${projectRoot}\u0000${slugKey}`;
+  if (map.has(slugCk)) return undefined;
+  const orphan = uniqueUnsluggedEntryForKind(map, projectRoot, kind);
+  if (!orphan) return undefined;
+  map.delete(`${projectRoot}\u0000${orphan.key}`);
+  orphan.key = slugKey;
+  orphan.slug = slug;
+  map.set(slugCk, orphan);
+  return orphan;
+}
+
 function entryForSignal(
   map: Map<string, EvolutionLedgerEntry>,
   projectRoot: string,
@@ -313,7 +354,10 @@ function entryForSignal(
   slug?: string,
   explicitKey?: unknown,
 ): EvolutionLedgerEntry {
-  if (slug) return entryFor(map, projectRoot, advisoryKey(kind, slug, undefined), kind, ts, slug);
+  if (slug) {
+    return adoptUnsluggedAlias(map, projectRoot, kind, slug)
+      ?? entryFor(map, projectRoot, advisoryKey(kind, slug, undefined), kind, ts, slug);
+  }
 
   const key = explicitAdvisoryKey(explicitKey, kind);
   if (key) return entryFor(map, projectRoot, key, kind, ts);
@@ -355,9 +399,11 @@ export function mergeEvolutionLedger(options: MergeEvolutionLedgerOptions): Merg
 
     for (const advisory of promoted) {
       const kind = normalizeKind(advisory.kind);
-      const key = advisoryKey(kind, advisory.slug, advisory.message);
       const slug = typeof advisory.slug === "string" && advisory.slug.trim() ? advisory.slug.trim() : undefined;
-      const entry = entryFor(map, projectRoot, key, kind, ts, slug);
+      const entry = slug
+        ? (adoptUnsluggedAlias(map, projectRoot, kind, slug)
+          ?? entryFor(map, projectRoot, advisoryKey(kind, slug, undefined), kind, ts, slug))
+        : entryFor(map, projectRoot, advisoryKey(kind, undefined, advisory.message), kind, ts);
       entry.last_seen = ts;
       entry.seen_count += 1;
       entry.last_severity = advisory.severity;

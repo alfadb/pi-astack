@@ -10,6 +10,9 @@
  *   - demoted_signal contests the hypothesis
  *   - withdraw_acknowledgment withdraws the hypothesis
  *   - keyed demotion/ack reconciles slug-less hypotheses without orphan rows
+ *   - a slug appearing after a single message-hash row converges to one
+ *     hypothesis (adoptUnsluggedAlias), but stays forked when ambiguous
+ *     and never merges a message-hash sibling once the slug row exists
  *   - corrupt JSONL rows are ignored, not fatal
  *   - summaries are project-scoped and bucketed active / contested / withdrawn
  *   - history tails stay bounded
@@ -340,6 +343,91 @@ check("history tail is bounded to the latest 8 events", () => {
   if (!row.history_tail[0].message.includes("event 2") || !row.history_tail[7].message.includes("event 9")) {
     throw new Error(`history tail should keep newest events 2..9, got ${JSON.stringify(row.history_tail)}`);
   }
+});
+
+check("slug appearing after a single message-hash row converges to one hypothesis", () => {
+  // First observation has no slug -> keyed by message hash.
+  mergeAt("2026-05-31T10:30:00.000Z", basePromptNative({
+    promoted_advisories: [{
+      kind: "identity converge",
+      severity: "warning",
+      message: "Recurring structural signal, first phrased one way",
+      reasoning: "First unslugged observation of a recurring belief.",
+      falsifier: "Stops recurring.",
+      evidence_quotes: [],
+    }],
+  }));
+  const seeded = readLedgerRows().filter((r) => r.kind === "identity_converge");
+  if (seeded.length !== 1 || seeded[0].slug) throw new Error(`expected one slug-less seed row, got ${JSON.stringify(seeded)}`);
+  if (!/^identity_converge::message:[0-9a-f]{12}$/.test(seeded[0].key)) throw new Error(`bad seed key: ${seeded[0].key}`);
+
+  // Later run refers to the SAME belief with a stable slug.
+  mergeAt("2026-05-31T10:31:00.000Z", basePromptNative({
+    promoted_advisories: [{
+      kind: "identity converge",
+      severity: "warning",
+      slug: "identity-converge-canonical",
+      message: "Same recurring structural signal, now with a stable slug",
+      reasoning: "Second observation, canonical slug assigned.",
+      falsifier: "Stops recurring.",
+      evidence_quotes: [],
+    }],
+  }));
+  const rows = readLedgerRows().filter((r) => r.kind === "identity_converge");
+  if (rows.length !== 1) throw new Error(`slug should merge into the single message-hash row, got ${rows.length}: ${JSON.stringify(rows)}`);
+  const row = rows[0];
+  if (row.key !== "identity_converge::slug:identity-converge-canonical") throw new Error(`row should be re-keyed onto slug identity, got ${row.key}`);
+  if (row.slug !== "identity-converge-canonical") throw new Error(`row should carry the slug, got ${JSON.stringify(row)}`);
+  if (row.seen_count !== 2 || row.status !== "reinforced") throw new Error(`accumulated counts should carry forward (seen=2 reinforced), got ${JSON.stringify(row)}`);
+  if (row.first_seen !== "2026-05-31T10:30:00.000Z") throw new Error(`first_seen should be preserved from the original observation, got ${row.first_seen}`);
+});
+
+check("slug does NOT auto-merge when multiple message-hash rows exist for the kind", () => {
+  // Two distinct slug-less observations -> two message-hash rows.
+  mergeAt("2026-05-31T10:32:00.000Z", basePromptNative({
+    promoted_advisories: [{ kind: "ambiguous merge", severity: "info", message: "First distinct unslugged belief", reasoning: "obs A", falsifier: "n/a", evidence_quotes: [] }],
+  }));
+  mergeAt("2026-05-31T10:33:00.000Z", basePromptNative({
+    promoted_advisories: [{ kind: "ambiguous merge", severity: "info", message: "Second distinct unslugged belief", reasoning: "obs B", falsifier: "n/a", evidence_quotes: [] }],
+  }));
+  const seeded = readLedgerRows().filter((r) => r.kind === "ambiguous_merge");
+  if (seeded.length !== 2) throw new Error(`expected two distinct message-hash rows, got ${seeded.length}`);
+
+  // A slug now appears -> ambiguous which belief it refers to -> must NOT guess-merge.
+  mergeAt("2026-05-31T10:34:00.000Z", basePromptNative({
+    promoted_advisories: [{ kind: "ambiguous merge", severity: "info", slug: "ambiguous-merge-slug", message: "A slug arrives but identity is ambiguous", reasoning: "obs C", falsifier: "n/a", evidence_quotes: [] }],
+  }));
+  const rows = readLedgerRows().filter((r) => r.kind === "ambiguous_merge");
+  if (rows.length !== 3) throw new Error(`ambiguous slug must fork a fresh row, not guess-merge; expected 3 rows, got ${rows.length}`);
+  const slugRow = rows.find((r) => r.slug === "ambiguous-merge-slug");
+  if (!slugRow || slugRow.seen_count !== 1 || slugRow.status !== "proposed") throw new Error(`fresh slug row should be proposed seen=1, got ${JSON.stringify(slugRow)}`);
+  const messageRows = rows.filter((r) => /^ambiguous_merge::message:/.test(r.key));
+  if (messageRows.length !== 2 || messageRows.some((r) => r.seen_count !== 1)) throw new Error(`both message-hash rows should remain untouched, got ${JSON.stringify(messageRows)}`);
+});
+
+check("existing slug row is preferred; a message-hash sibling is left untouched", () => {
+  // Establish a slug identity first.
+  mergeAt("2026-05-31T10:35:00.000Z", basePromptNative({
+    promoted_advisories: [{ kind: "coexist", severity: "info", slug: "coexist-canonical", message: "slug belief", reasoning: "obs slug", falsifier: "n/a", evidence_quotes: [] }],
+  }));
+  // Then a DISTINCT slug-less belief of the same kind — they must coexist.
+  mergeAt("2026-05-31T10:36:00.000Z", basePromptNative({
+    promoted_advisories: [{ kind: "coexist", severity: "info", message: "a different unslugged belief", reasoning: "obs msg", falsifier: "n/a", evidence_quotes: [] }],
+  }));
+  let rows = readLedgerRows().filter((r) => r.kind === "coexist");
+  if (rows.length !== 2) throw new Error(`slug row + message-hash row should coexist, got ${rows.length}`);
+
+  // Repeating the slug must hit the existing slug row via the map.has(slugCk)
+  // early-out, NOT adopt the lone message-hash sibling.
+  mergeAt("2026-05-31T10:37:00.000Z", basePromptNative({
+    promoted_advisories: [{ kind: "coexist", severity: "info", slug: "coexist-canonical", message: "slug belief again", reasoning: "obs slug 2", falsifier: "n/a", evidence_quotes: [] }],
+  }));
+  rows = readLedgerRows().filter((r) => r.kind === "coexist");
+  if (rows.length !== 2) throw new Error(`slug repeat must not absorb the message-hash sibling; expected 2 rows, got ${rows.length}`);
+  const slugRow = rows.find((r) => r.slug === "coexist-canonical");
+  const msgRow = rows.find((r) => /^coexist::message:/.test(r.key));
+  if (!slugRow || slugRow.seen_count !== 2) throw new Error(`slug row should accumulate to seen=2, got ${JSON.stringify(slugRow)}`);
+  if (!msgRow || msgRow.seen_count !== 1 || msgRow.slug) throw new Error(`message-hash sibling must stay untouched seen=1 slug-less, got ${JSON.stringify(msgRow)}`);
 });
 
 console.log("\nSource-level integration guards");

@@ -8,7 +8,7 @@
 |---|---|---|
 | `smoke:turn-progress` | `scripts/smoke-turn-progress.mjs` | turn-progress extension registration / status rendering basics |
 | `smoke:memory` | `scripts/smoke-memory-sediment.mjs` | memory facade + sediment integration regressions, including credential typed-redaction boundary |
-| `smoke:evolution-ledger` | `scripts/smoke-evolution-ledger.mjs` | L1 Sediment Evolution Loop v1 internal evolution-ledger lifecycle / scoping / degraded-run guard |
+| `smoke:evolution-ledger` | `scripts/smoke-evolution-ledger.mjs` | L1 Sediment Evolution Loop v1 internal evolution-ledger lifecycle / scoping / degraded-run guard / identity convergence (`adoptUnsluggedAlias`) |
 | `smoke:cas-guard` | `scripts/smoke-cas-guard.mjs` | writer-side CAS / expected-state guard regressions |
 | `smoke:staging-resolver` | `scripts/smoke-staging-resolver.mjs` | ADR 0025 §4.1.5.1 staging-resolver triage + advisory `promote_candidate` path |
 | `smoke:memory-path-a` | `scripts/smoke-memory-path-a.mjs` | ADR 0026 Path A always-on relevant-memory injection substrate |

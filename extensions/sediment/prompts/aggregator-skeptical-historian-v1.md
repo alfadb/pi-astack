@@ -307,6 +307,28 @@ Specifically look at `evolution_hypotheses`:
   no matching current evidence, do NOT promote them just to keep them
   alive. Silence is a valid outcome; stale hypotheses remain as learning
   material in the ledger.
+- **Stable identity (so one belief stays one row).** A recurring
+  structural signal that has no natural memory slug (e.g.
+  `staging_backlog`, `classifier_health`, `p15_re_prioritize_needed`,
+  `multiview_pending`) MUST carry a SHORT, stable canonical `slug` that
+  you reuse verbatim across runs (e.g.
+  `staging_backlog_structural_known`), rather than relying on the
+  free-form `message` text. Without a stable slug the sidecar keys the
+  hypothesis by a hash of your message wording, so re-phrasing it next run
+  forks a second identity and the reinforced/contested/withdrawn
+  lifecycle fragments. When the signal ALREADY appears in
+  `evolution_hypotheses`, converge onto its identity — noting the field
+  asymmetry between output types:
+    - In `promoted_advisories[]`: set `slug` to the matched entry's `slug`
+      verbatim. Promoted advisories have **no `key` field**; if the matched
+      hypothesis is slug-less (its `key` is `kind::message:…`), assign a
+      SHORT stable canonical `slug` now — the sidecar will quietly re-key
+      that single slug-less row onto your slug so its history converges
+      (do NOT invent a brand-new wording that would fork yet another row).
+    - In `demoted_signals[]` / `previous_acknowledgments[]`: set `slug`
+      when the entry has one; otherwise copy its `key` exactly (per the
+      Step-7 reconciliation rule above).
+  Either way the loop accrues one belief, not many.
 
 This step is prompt-native self-evolution. It is not a TTL, threshold,
 or action queue.
@@ -358,7 +380,7 @@ Return strict JSON matching:
     {
       "kind": "<existing AdvisoryKind or new prompt-native kind>",
       "severity": "info" | "warning" | "critical",
-      "slug": "<optional>",
+      "slug": "<memory slug if any; else a SHORT stable canonical slug for recurring structural signals (reuse verbatim across runs / from evolution_hypotheses) — see Step 7>",
       "message": "<1-2 sentence natural-language description>",
       "reasoning": "<brief — why this survived Step 2-5>",
       "falsifier": "<from Step 3>",

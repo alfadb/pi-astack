@@ -245,7 +245,7 @@
         "aggregatorModel": {
           "type": "string",
           "default": "deepseek/deepseek-v4-pro",
-          "description": "Model used by the aggregator v1 skeptical-historian LLM pass (ADR 0025 §4.3 Phase C, 2026-05-28; v1.1 L1 evolution self-state 2026-05-31). Reasoning-heavy task over 9 input feeds including evolution_hypotheses; v4-pro is the cheapest top-tier reasoning model and the default. Empty/invalid → falls back to curatorModel. Aggregator runs are debounced to ~24h so cost is negligible (~$0.005-0.05 per run)."
+          "description": "Model used by the aggregator v1 skeptical-historian LLM pass (ADR 0025 §4.3 Phase C, 2026-05-28; v1.1 L1 evolution self-state 2026-05-31; v1.2 identity convergence 2026-06-03). Reasoning-heavy task over 9 input feeds including evolution_hypotheses; v4-pro is the cheapest top-tier reasoning model and the default. Empty/invalid → falls back to curatorModel. Aggregator runs are debounced to ~24h so cost is negligible (~$0.005-0.05 per run)."
         },
 
         "aggregatorTimeoutMs": {
@@ -291,7 +291,7 @@
             "multiViewPass1": { "type": "string", "default": "v1" },
             "multiViewPass2": { "type": "string", "default": "v1" },
             "outcomeSelfReport": { "type": "string", "default": "v0" },
-            "aggregator": { "type": "string", "default": "v1.1", "description": "Aggregator prompt/protocol version. v1.1 (ADR 0025 §4.3 Phase C + L1 Evolution Loop v1, 2026-05-31): prompt-native skeptical-historian LLM pass over 9 input feeds (mechanical_suspicion_signals, raw_distribution_summary, outcome_counterfactual_excerpts, structural_context, prior_aggregator_summaries, classifier_health_window with trend, per_turn_cost_rollup, p15_watchdog_signals, evolution_hypotheses). v0.2 deterministic mechanical path retained as automatic fallback when modelRegistry is absent or LLM call fails. See extensions/sediment/prompts/aggregator-skeptical-historian-v1.md." },
+            "aggregator": { "type": "string", "default": "v1.2", "description": "Aggregator prompt/protocol version. v1.2 (identity convergence, 2026-06-03) adds Step-7 stable-identity discipline (recurring structural signals carry a stable canonical slug reused across runs / from evolution_hypotheses) plus the evolution-ledger sidecar adoptUnsluggedAlias re-key, so one belief stays one hypothesis row instead of forking message-hash identities. v1.1 (ADR 0025 §4.3 Phase C + L1 Evolution Loop v1, 2026-05-31): prompt-native skeptical-historian LLM pass over 9 input feeds (mechanical_suspicion_signals, raw_distribution_summary, outcome_counterfactual_excerpts, structural_context, prior_aggregator_summaries, classifier_health_window with trend, per_turn_cost_rollup, p15_watchdog_signals, evolution_hypotheses). v0.2 deterministic mechanical path retained as automatic fallback when modelRegistry is absent or LLM call fails. See extensions/sediment/prompts/aggregator-skeptical-historian-v1.md." },
             "archiveReactivationReviewer": { "type": "string", "default": "v1", "description": "Archive reactivation reviewer prompt/protocol version. v1 (ADR 0025 §4.6, Stage 2 2026-05-28): prompt-native daily-debounced archived-entry reviewer with keep_archived/reactivate/hard_archive_recommended decisions." }
           }
         },
