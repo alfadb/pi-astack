@@ -70,6 +70,38 @@ regresses its operational-hypothesis duty, split lifecycle judgment into a
 separate small lane then (ADR 0024 R5 — build on observed regression, not
 imagined coupling).
 
+## 0b. Implementation status + DEFERRAL decision (3-T0 sequencing, 2026-06-04)
+
+Shipped (read-only half): M1 telemetry sidecar (`entry-telemetry.ts`) + M2 read-only
+agent_end lane (committed `61864f9`/`32f73a8`, pushed). A 3-T0 panel (Opus-4-8 +
+GPT-5.5 + DeepSeek-v4-pro) unanimously decided the sequencing for the rest:
+
+- **M3 (read-only `entry_lifecycle_proposal` emission): BUILD NOW.** Zero durable
+  risk; it is the measurement instrument that turns accumulating telemetry into
+  an observable proposal stream for M4's eventual evidence-based 3-T0.
+- **M4+M5 (durable executor unit): DEFER.** Its loop-breaker thresholds +
+  §4.2 independent-evidence semantics can only be calibrated against a real
+  proposal distribution. Building now forces a synthetic-fixture 3-T0 — the
+  exact ADR 0024 R5 anti-pattern — on the ONLY unit that can silently erode the
+  durable corpus. Spend the one evidence-based 3-T0 on real evidence.
+
+**RESUME TRIGGER for M4+M5 (principled pause, not open-ended)** — build + 3-T0
+the executor when BOTH hold:
+  1. **≥ 30 days** of telemetry since M2 went live (≈ 2026-07-04), AND
+  2. **≥ 3 distinct entries** whose M3 read-only proposals clear the §4.2
+     INDEPENDENT-evidence bar (NOT `retrieved-unused`-only), preferably across
+     ≥ 2 projects, with **≥ 1 manually confirmable** as genuinely stale.
+
+  Fallback: if < 3 crossings at 30 days, extend to 60 days and accept ≥ 1 full-
+  §4.2 proposal. If still ~0 at 60 days, the pause is itself the finding — the
+  corpus may not need a durable executor at current scale; revisit the design
+  before building.
+
+  Measured baseline at decision time (DeepSeek, live sidecar): 527 cited slugs,
+  `retrieved_unused` mean 0.29 / max 3, latest aggregator `high_unused:[]` /
+  `echo_chamber_candidates:[]`, ZERO entries crossing §4.2 today. So the dry-run
+  counter starts at 0 and M3's job is to measure its arrival rate.
+
 ## 1. Why (the missing half of the self-correcting brain)
 
 We shipped the **L1 evolution loop** (aggregator v1.2 + `evolution-ledger.jsonl`):
@@ -120,15 +152,51 @@ A new git-ignored sidecar under `~/.abrain/.state/sediment/` (sibling of
 - If telemetry is ever needed on a result card, surface it through the
   `memory_search` card path (like `outcome_activity` already is), NOT frontmatter.
 
-### 3b. Lifecycle proposal — REUSE the aggregator's existing per-entry judgment
-The aggregator already groups outcome rows by `entry_slug` and produces per-entry
-`demoted_signals` (verified: `summarizeOutcomes` + `buildAdvisories` +
-`aggregator-llm.ts`). v3 adds ONE read-only output: when a `demoted_signal` also
-clears the §4 loop-breaker bar (independent evidence, not usage-only), the
-aggregator additionally emits an `entry_lifecycle_proposal` into a sidecar (NOT a
-durable write; the aggregator stays read-only). This is a new SINK for an
-existing judgment — no second corpus-wide LLM pass, no duplicated stats. Each
-proposal carries a falsifier and the independent-evidence citation.
+### 3b. Lifecycle proposal — from the AFFIRMATIVE channel (corrected 2026-06-04, M3-build verify)
+
+> ⚠ SEMANTIC CORRECTION. v3 (and both 3-T0 design rounds) said "emit the
+> proposal from `demoted_signals`." Building M3 revealed that is INVERTED.
+> `demoted_signals` is the EXONERATION channel: demoting a `mechanical_suspicion_
+> signal` of kind `outcome_entry` means "the suspicion that this entry is stale
+> is DISMISSED — the entry is healthy" (real data: `大臂… reason: 属健康的知识更
+> 新信号，非回声室`; in evolution-ledger it becomes `contested`, i.e. the
+> staleness HYPOTHESIS is weakened). Deriving an archive/contest proposal from
+> that channel would propose archiving exactly the entries the LLM just
+> EXONERATED — backwards.
+
+Corrected source: the proposal comes from the AFFIRMATIVE channel — a
+`promoted_advisory` of an entry kind (`outcome_entry` / echo-chamber / supersede
+candidate) where the LLM affirmatively judges the entry genuinely stale /
+superseded / echo-chamber AND attaches §4.2 INDEPENDENT evidence (explicit user
+correction, contradiction by a newer active/superseding entry, version/domain
+staleness in the entry text, reviewer content mismatch — NOT `retrieved-unused`
+alone). Mechanism: add an optional `lifecycle_proposal` to `PromotedAdvisory`
+(`{ op: "contest"|"archive"|"supersede", independent_evidence, falsifier }`); the
+aggregator writes any promoted advisory carrying it into a read-only
+`entry-lifecycle-proposals` sidecar. The aggregator stays read-only; no second
+corpus-wide pass. `demoted_signals` keep their existing exoneration meaning
+(→ evolution-ledger `contested`), UNCHANGED.
+
+Consequence (consistent with the §0b measured baseline): the aggregator today
+promotes ~zero entry advisories (`high_unused:[]`, `echo_chamber_candidates:[]`),
+so the proposal stream starts at ~0 — exactly the dry-run counter the §0b resume
+trigger watches. The affirmative+§4.2 bar is intentionally high.
+
+Panel-ratified refinements (3-T0 verification round, 2026-06-04 — all three
+confirmed the correction against code):
+- **Subtype, not kind ambiguity.** A promoted `outcome_entry` can be about
+  staleness OR echo-chamber, so the `lifecycle_proposal` carries an explicit
+  `reason: "affirm_stale" | "affirm_superseded" | "affirm_echo_chamber"` rather
+  than overloading `kind`. M3 only emits a proposal when the promoted advisory
+  affirmatively concludes the entry should change standing (passed Step-2
+  case-FOR/AGAINST), not merely "noteworthy".
+- **§8 Observation≠Authorization is binding on M3.** Prompt §8 + aggregator.ts
+  forbid any code reading the aggregator output from auto-triggering
+  writer/curator/archive/multi-view. So M3 ONLY appends to a read-only
+  `entry-lifecycle-proposals` sidecar; it performs NO durable action and does
+  NOT bridge to the writer. Only the deferred M4/M5 executor (behind its own
+  3-T0 + the §0b resume trigger) consumes proposals and acts, through the
+  explicit multi-view gate. M3 observes→proposes; it never authorizes.
 
 ### 3c. Gated executor (the ONLY durable-mutating lane; deterministic plumbing)
 A thin executor consumes pending `entry_lifecycle_proposal`s. It contains NO
