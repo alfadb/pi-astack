@@ -86,6 +86,7 @@ const ENTRY_TELEMETRY_MAX_ROWS = 4000;
 const ENTRY_TELEMETRY_TAIL_READ_BYTES = 4 * 1024 * 1024;
 const DEFAULT_WINDOW_DAYS = 30;
 const ECHO_CHAMBER_STREAK = 5;
+const ENTRY_TELEMETRY_MIN_INTERVAL_MS = 60 * 60 * 1000;
 
 export function entryTelemetryPath(): string {
   ensureUserGlobalSidecarMigrated();
@@ -271,6 +272,59 @@ export function mergeEntryTelemetry(options: MergeEntryTelemetryOptions): MergeE
       error: e instanceof Error ? e.message : String(e),
     };
   }
+}
+
+/**
+ * Project-local debounce marker (mirrors aggregator's last-run pattern). Lives
+ * under the project's `.pi-astack/sediment/`, NOT the user-global sidecar.
+ */
+export function entryTelemetryLastRunPath(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), ".pi-astack", "sediment", "entry-telemetry-last-run.json");
+}
+
+function readTelemetryLastRun(projectRoot: string): number | null {
+  try {
+    const file = entryTelemetryLastRunPath(projectRoot);
+    if (!fs.existsSync(file)) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown> | null;
+    const value = parsed && typeof parsed === "object" ? parsed.last_run_ts : undefined;
+    if (typeof value !== "string") return null;
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeTelemetryLastRun(projectRoot: string, now: Date, status: "ok" | "error"): void {
+  try {
+    const file = entryTelemetryLastRunPath(projectRoot);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, JSON.stringify({ last_run_ts: formatLocalIsoTimestamp(now), status }, null, 2) + "\n", "utf-8");
+  } catch {
+    // best-effort; failure only means a future turn may retry sooner
+  }
+}
+
+/**
+ * Debounced wrapper for the agent_end read-only telemetry lane. Returns null
+ * when called again within `minIntervalMs` of the last run (default 1h — shorter
+ * than the aggregator's 24h because telemetry should track usage more freshly,
+ * but debounced so a burst of turns does not re-scan the full ledger every turn).
+ * Fire-and-forget safe: all failures are swallowed into the result, never thrown.
+ */
+export function mergeEntryTelemetryIfDue(
+  options: MergeEntryTelemetryOptions & { minIntervalMs?: number },
+): MergeEntryTelemetryResult | null {
+  const projectRoot = normalizeProjectRoot(options.projectRoot);
+  if (!projectRoot) return null;
+  const now = options.now ?? new Date();
+  const minIntervalMs = Math.max(0, Math.floor(options.minIntervalMs ?? ENTRY_TELEMETRY_MIN_INTERVAL_MS));
+  const lastRunMs = readTelemetryLastRun(projectRoot);
+  if (lastRunMs !== null && now.getTime() - lastRunMs < minIntervalMs) return null;
+  const result = mergeEntryTelemetry({ ...options, now });
+  writeTelemetryLastRun(projectRoot, now, result.ok ? "ok" : "error");
+  return result;
 }
 
 /** Read telemetry rows, optionally scoped to one project. Read-only consumer API. */

@@ -53,6 +53,7 @@ import { relevantEntriesForCurator } from "./curator";
 import { collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
+import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
 import { runArchiveReactivationIfDue } from "./archive-reactivation";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
@@ -1257,6 +1258,22 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           }).catch(() => {});
         }
       }
+
+      // Outcome→Entry feedback edge, Tier-A read-only telemetry lane (3-T0
+      // sequencing decision 2026-06-04). Fire-and-forget like the aggregator;
+      // derives ONLY from the outcome-ledger flushed just above and writes a
+      // git-ignored sidecar. It NEVER touches durable memory (no writer /
+      // curator / multi-view imports — locked by smoke). Debounced ~1h inside
+      // mergeEntryTelemetryIfDue. Wired BEFORE the durable executor exists so
+      // that unit's later code 3-T0 reviews against REAL accumulated telemetry
+      // rather than synthetic fixtures. No LLM, so it runs in every mode.
+      const scheduleTelemetry = typeof setImmediate === "function"
+        ? setImmediate
+        : (fn: () => void) => setTimeout(fn, 0);
+      scheduleTelemetry(() => {
+        try { mergeEntryTelemetryIfDue({ projectRoot: cwd }); }
+        catch { /* advisory-only; telemetry failure never affects sediment */ }
+      });
 
       // ADR 0025 §4.3 skeptical-historian MVP: schedule deterministic
       // advisory aggregation over existing sidecars. setImmediate keeps the

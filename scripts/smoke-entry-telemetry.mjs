@@ -219,6 +219,17 @@ check("corrupt sidecar lines are tolerated and cleaned on next write", () => {
   }
 });
 
+check("mergeEntryTelemetryIfDue debounces within the interval, reruns past it", () => {
+  const projectC = path.join(tmpDir, "project-c");
+  stub.rowsByProject.set(path.resolve(projectC), [fnRow("gamma", "decisive", "2026-06-03T10:00:00Z", projectC)]);
+  const first = telemetry.mergeEntryTelemetryIfDue({ projectRoot: projectC, now: new Date("2026-06-04T13:00:00Z"), minIntervalMs: 3600000 });
+  if (!first || !first.ok || !first.written) throw new Error(`first IfDue should run: ${JSON.stringify(first)}`);
+  const second = telemetry.mergeEntryTelemetryIfDue({ projectRoot: projectC, now: new Date("2026-06-04T13:30:00Z"), minIntervalMs: 3600000 });
+  if (second !== null) throw new Error(`second IfDue within interval must be null (debounced), got ${JSON.stringify(second)}`);
+  const third = telemetry.mergeEntryTelemetryIfDue({ projectRoot: projectC, now: new Date("2026-06-04T14:30:00Z"), minIntervalMs: 3600000 });
+  if (!third || !third.written) throw new Error(`third IfDue past interval should run again: ${JSON.stringify(third)}`);
+});
+
 console.log("\nSource-level boundary guards");
 
 check("entry-telemetry never imports the durable writer / curator / multi-view", () => {
@@ -237,6 +248,19 @@ check("entry-telemetry stays internal: no markdown / durable-memory write surfac
   }
   // No fs write to a markdown file path (durable entries are *.md).
   if (/writeFileSync\([^)]*\.md/.test(src)) throw new Error("entry-telemetry.ts must not write any .md file");
+});
+
+check("index.ts wires the read-only telemetry lane and passes NO modelRegistry", () => {
+  const idx = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf8");
+  if (!/import\s*\{\s*mergeEntryTelemetryIfDue\s*\}\s*from\s*"\.\/entry-telemetry"/.test(idx)) {
+    throw new Error("index.ts must import mergeEntryTelemetryIfDue");
+  }
+  if (!idx.includes("mergeEntryTelemetryIfDue({ projectRoot: cwd })")) {
+    throw new Error("index.ts must schedule the read-only telemetry lane");
+  }
+  const block = idx.match(/scheduleTelemetry\(\(\) => \{[\s\S]*?\}\);/);
+  if (!block) throw new Error("telemetry lane schedule block not found in index.ts");
+  if (/modelRegistry/.test(block[0])) throw new Error("telemetry lane must NOT pass modelRegistry (read-only, no LLM)");
 });
 
 console.log(`\nTotal: ${total}  Passed: ${total - failures.length}  Failed: ${failures.length}`);
