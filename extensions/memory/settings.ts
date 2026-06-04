@@ -92,6 +92,10 @@ export interface MemorySettings {
   maxEntries: number;
   projectBoost: number;
   shortTermTtlDays: number;
+  /** memory_decide synthesis model. Empty string = reuse search.stage1Model
+   *  (backward-compatible). Set to decouple decision-brief quality from the
+   *  high-frequency stage1 coarse-recall model. */
+  decideModel: string;
   search: SearchSettings;
   pathA: PathASettings;
 }
@@ -103,6 +107,7 @@ export const DEFAULT_SETTINGS: MemorySettings = {
   maxEntries: 2_000,
   projectBoost: 1.5,
   shortTermTtlDays: 30,
+  decideModel: "",
   search: DEFAULT_SEARCH_SETTINGS,
   pathA: DEFAULT_PATH_A_SETTINGS,
 };
@@ -183,6 +188,7 @@ export function resolveSettings(): MemorySettings {
     maxEntries: Math.max(10, asNumber(cfg.maxEntries, DEFAULT_SETTINGS.maxEntries)),
     projectBoost: Math.max(0.1, asNumber(cfg.projectBoost, DEFAULT_SETTINGS.projectBoost)),
     shortTermTtlDays: Math.max(1, asNumber(cfg.shortTermTtlDays, DEFAULT_SETTINGS.shortTermTtlDays)),
+    decideModel: asString(cfg.decideModel, DEFAULT_SETTINGS.decideModel),
     search: resolveSearchSettings(cfg),
     pathA: resolvePathASettings(cfg),
   };

@@ -608,6 +608,12 @@
           "description": "Dry-run migration policy for legacy .pensieve/short-term/* entries: planned lifetime.expires_at = created + shortTermTtlDays. The read-only extension only reports this plan; it does not write files."
         },
 
+        "decideModel": {
+          "type": "string",
+          "default": "",
+          "description": "memory_decide synthesis model. Empty = reuse search.stage1Model (backward-compatible). Set to decouple decision-brief quality from the high-frequency stage1 coarse-recall model; memory_decide is low-frequency + quality-sensitive, so a stronger model here is cheap. decide.ts reads decideModel ?? stage1Model. e.g. github-copilot/gpt-5.5 (1x premium-req, negligible at low frequency)."
+        },
+
         "search": {
           "type": "object",
           "description": "LLM-driven memory_search settings (ADR 0015, Accepted 2026-05-10). Two-stage rerank: stage 1 selects candidates from enhanced _index.md, stage 2 reranks full content. Both stages default to deepseek-v4-flash + thinking=off — retrieval ranking does not benefit from reasoning mode. Override stage2Model for diverse failure modes or stronger cross-language semantic matching. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",

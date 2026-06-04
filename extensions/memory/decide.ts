@@ -366,11 +366,12 @@ export async function runMemoryDecide(args: {
     };
   }
 
-  // P0a uses the stage-1 model for synthesis (same as memory_search).
-  // P1 can switch to a dedicated decideModel.
-  const modelRef = parseModelRef(settings.search.stage1Model);
+  // memory_decide synthesis model: dedicated decideModel if set, else
+  // falls back to the stage-1 model (backward-compatible).
+  const decideModelRef = settings.decideModel || settings.search.stage1Model;
+  const modelRef = parseModelRef(decideModelRef);
   if (!modelRef) {
-    return { ok: false, error: `invalid memory.search.stage1Model: ${settings.search.stage1Model}`, entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
+    return { ok: false, error: `invalid memory.decideModel/stage1Model: ${decideModelRef}`, entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }
 
   const registry = modelRegistry as {
@@ -380,7 +381,7 @@ export async function runMemoryDecide(args: {
 
   const model = registry.find(modelRef.provider, modelRef.id);
   if (!model) {
-    return { ok: false, error: `memory_decide model not found: ${settings.search.stage1Model}`, entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
+    return { ok: false, error: `memory_decide model not found: ${decideModelRef}`, entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }
 
   const auth = await registry.getApiKeyAndHeaders(model);

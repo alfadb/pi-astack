@@ -111,7 +111,11 @@ const rewriter = jiti(path.join(repoRoot, "extensions/memory/query-rewriter.ts")
 console.log("\n[2] settings.pathA defaults");
 const settings = jiti(path.join(repoRoot, "extensions/memory/settings.ts"));
 {
-  const r = settings.resolveSettings();
+  // Assert the DEFAULT constants, not resolveSettings() — the latter reflects
+  // the LIVE project config, where queryRewriterModel is intentionally
+  // overridden to github-copilot/gpt-5-mini (and stage1 etc. may differ too).
+  // The defaults are the regression lock this section is meant to protect.
+  const r = { pathA: settings.DEFAULT_PATH_A_SETTINGS };
   check("pathA.enabled default true", r.pathA.enabled === true);
   check("pathA.queryRewriterModel default flash", r.pathA.queryRewriterModel === "deepseek/deepseek-v4-flash");
   check("pathA.queryRewriterTimeoutMs default 15000", r.pathA.queryRewriterTimeoutMs === 15000);
