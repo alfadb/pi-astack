@@ -23,6 +23,7 @@
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
     "smoke:evolution-ledger": "node scripts/smoke-evolution-ledger.mjs",
+    "smoke:entry-telemetry": "node scripts/smoke-entry-telemetry.mjs",
     "smoke:cas-guard": "node scripts/smoke-cas-guard.mjs",
     "smoke:staging-resolver": "node scripts/smoke-staging-resolver.mjs",
     "smoke:memory-path-a": "node scripts/smoke-memory-path-a.mjs",
