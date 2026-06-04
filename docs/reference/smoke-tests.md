@@ -2,7 +2,7 @@
 
 `package.json#scripts` 是 smoke test **live truth**。本文只是便于阅读的镜像；修改脚本时请同步本文。若本文与 `package.json` 冲突，以 `package.json` 为准。
 
-## Current scripts（2026-06-04, 65 total）
+## Current scripts（2026-06-04, 66 total）
 
 | npm script | File | Coverage |
 |---|---|---|
@@ -10,6 +10,7 @@
 | `smoke:memory` | `scripts/smoke-memory-sediment.mjs` | memory facade + sediment integration regressions, including credential typed-redaction boundary |
 | `smoke:evolution-ledger` | `scripts/smoke-evolution-ledger.mjs` | L1 Sediment Evolution Loop v1 internal evolution-ledger lifecycle / scoping / degraded-run guard / identity convergence (`adoptUnsluggedAlias`) |
 | `smoke:entry-telemetry` | `scripts/smoke-entry-telemetry.mjs` | Outcome→Entry feedback edge Tier-A telemetry sidecar: cumulative/rolling aggregation, hysteresis preservation, project scoping, sidecar-only boundary (never writes durable markdown) |
+| `smoke:entry-lifecycle-proposals` | `scripts/smoke-entry-lifecycle-proposals.mjs` | Outcome→Entry feedback edge M3 read-only proposal sink: proposals sourced from PROMOTED advisories only (not demoted/exoneration), status=pending, project scoping, §8 observation-only boundary (no writer/curator/multi-view) |
 | `smoke:cas-guard` | `scripts/smoke-cas-guard.mjs` | writer-side CAS / expected-state guard regressions |
 | `smoke:staging-resolver` | `scripts/smoke-staging-resolver.mjs` | ADR 0025 §4.1.5.1 staging-resolver triage + advisory `promote_candidate` path |
 | `smoke:memory-path-a` | `scripts/smoke-memory-path-a.mjs` | ADR 0026 Path A always-on relevant-memory injection substrate |

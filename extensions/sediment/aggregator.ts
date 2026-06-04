@@ -28,6 +28,7 @@ import { countMultiviewPending } from "./multiview-staging-io";
 import { scanPerTurnCost, type PerTurnCostSummary } from "./per-turn-cost";
 import { runAggregatorLlmPass, type PromptNativeOutput } from "./aggregator-llm";
 import { mergeEvolutionLedger, summarizeEvolutionLedger, type EvolutionLedgerSummary } from "./evolution-ledger";
+import { appendLifecycleProposals } from "./entry-lifecycle-proposals";
 import type { ModelRegistryLike } from "./llm-extractor";
 
 type AggregatorSeverity = "info" | "warning" | "critical";
@@ -1297,6 +1298,18 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
     mergeEvolutionLedger({
       projectRoot: options.projectRoot,
       promptNative,
+      now: options.now,
+    });
+    // Outcome→Entry feedback edge M3 (read-only): persist AFFIRMATIVE lifecycle
+    // proposals carried by promoted advisories into the proposal sidecar. This
+    // is observation only — NEVER a durable write, NEVER the writer/curator/
+    // archive/multi-view (prompt §8). The deferred, gated M4/M5 executor is the
+    // sole consumer. Source is promoted_advisories ONLY; demoted_signals are the
+    // exoneration channel and never yield a proposal (semantic correction,
+    // panel-ratified 2026-06-04).
+    appendLifecycleProposals({
+      projectRoot: options.projectRoot,
+      promoted: promptNative.promoted_advisories ?? [],
       now: options.now,
     });
   }

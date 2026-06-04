@@ -267,6 +267,36 @@ check("parseAggregatorOutput coerces non-string evidence_quotes to []", () => {
   }
 });
 
+// ── M3: lifecycle_proposal (Outcome→Entry feedback edge) ──────────────────
+check("parseAggregatorOutput preserves a valid lifecycle_proposal on a promoted advisory", () => {
+  const out = { promoted_advisories: [{
+    kind: "outcome_entry", severity: "warning", slug: "stale-entry", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: ["q"],
+    lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: "superseded by newer active entry X", falsifier: "if X is itself archived" },
+  }] };
+  const r = parseAggregatorOutput(JSON.stringify(out));
+  const lp = r.promoted_advisories[0].lifecycle_proposal;
+  if (!lp || lp.op !== "archive" || lp.reason !== "affirm_superseded") throw new Error(`lifecycle_proposal not preserved: ${JSON.stringify(lp)}`);
+  if (lp.independent_evidence !== "superseded by newer active entry X" || !lp.falsifier) throw new Error(`lifecycle_proposal fields lost: ${JSON.stringify(lp)}`);
+});
+
+check("parseAggregatorOutput DROPS a lifecycle_proposal missing §4.2 independent_evidence", () => {
+  const out = { promoted_advisories: [{
+    kind: "outcome_entry", severity: "warning", slug: "s", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: [],
+    lifecycle_proposal: { op: "archive", reason: "affirm_stale", independent_evidence: "   ", falsifier: "f" },
+  }] };
+  const r = parseAggregatorOutput(JSON.stringify(out));
+  if (r.promoted_advisories[0].lifecycle_proposal !== undefined) {
+    throw new Error("proposal without independent evidence must be dropped (no usage-only demotion)");
+  }
+});
+
+check("parseAggregatorOutput DROPS a lifecycle_proposal with an invalid op/reason enum", () => {
+  const badOp = { promoted_advisories: [{ kind: "outcome_entry", severity: "warning", slug: "s", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: [], lifecycle_proposal: { op: "delete", reason: "affirm_stale", independent_evidence: "e", falsifier: "f" } }] };
+  if (parseAggregatorOutput(JSON.stringify(badOp)).promoted_advisories[0].lifecycle_proposal !== undefined) throw new Error("invalid op must drop proposal (delete is never synthesizable)");
+  const badReason = { promoted_advisories: [{ kind: "outcome_entry", severity: "warning", slug: "s", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: [], lifecycle_proposal: { op: "archive", reason: "because_i_said_so", independent_evidence: "e", falsifier: "f" } }] };
+  if (parseAggregatorOutput(JSON.stringify(badReason)).promoted_advisories[0].lifecycle_proposal !== undefined) throw new Error("invalid reason must drop proposal");
+});
+
 check("parseAggregatorOutput coerces numeric trend values", () => {
   const out = { trend_observations: [{ dimension: "x", current: "0.55", baseline: "1.0", delta: -0.45, interpretation: "i" }] };
   const r = parseAggregatorOutput(JSON.stringify(out));

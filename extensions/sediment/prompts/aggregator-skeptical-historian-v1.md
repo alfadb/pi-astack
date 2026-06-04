@@ -384,7 +384,26 @@ Return strict JSON matching:
       "message": "<1-2 sentence natural-language description>",
       "reasoning": "<brief — why this survived Step 2-5>",
       "falsifier": "<from Step 3>",
-      "evidence_quotes": ["<verbatim quote(s) from input feed>"]
+      "evidence_quotes": ["<verbatim quote(s) from input feed>"],
+      "lifecycle_proposal": {
+        // OPTIONAL + RARE. Attach ONLY on an entry-level advisory (a real memory
+        // `slug`) when you AFFIRMATIVELY conclude the entry itself should change
+        // standing — not merely that its usage is noteworthy. This is the
+        // Outcome→Entry feedback edge: it is an OBSERVATION/PROPOSAL only, never
+        // an action (§8). It is recorded to a sidecar and reviewed later behind a
+        // gate; you are NOT archiving anything here.
+        // HARD GATE: omit unless you have §4.2-style INDEPENDENT evidence — an
+        // explicit user correction, contradiction by a newer active/superseding
+        // entry, version/domain staleness visible in the entry text, or a
+        // reviewer content mismatch. `retrieved-unused` alone is NEVER enough
+        // (that is healthy disuse → a demoted_signal, NOT a proposal). If your
+        // judgment is "this suspicion is unfounded / the entry is healthy", that
+        // belongs in demoted_signals, NOT here.
+        "op": "contest" | "archive" | "supersede",
+        "reason": "affirm_stale" | "affirm_superseded" | "affirm_echo_chamber",
+        "independent_evidence": "<verbatim quote / concrete §4.2 evidence — NOT a retrieved-unused count>",
+        "falsifier": "<what observation in the next window would retract this proposal>"
+      }
     }
   ],
   "demoted_signals": [

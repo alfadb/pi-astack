@@ -44,6 +44,22 @@ import { sanitizeForMemory } from "./sanitizer";
  * All fields are tolerant: missing arrays default to []; missing
  * scalars default to safe values.
  */
+/**
+ * Outcome→Entry feedback edge (M3). An AFFIRMATIVE proposal to change a durable
+ * entry's standing, attached to a PROMOTED entry advisory (the channel where the
+ * LLM upholds a staleness/echo suspicion). NEVER derived from demoted_signals
+ * (that channel EXONERATES). Observation only: the deferred, gated M4/M5 executor
+ * is the sole consumer; M3 never writes durable memory (prompt §8).
+ */
+export interface LifecycleProposal {
+  op: "contest" | "archive" | "supersede";
+  reason: "affirm_stale" | "affirm_superseded" | "affirm_echo_chamber";
+  /** §4.2 INDEPENDENT evidence (user correction / contradiction by a newer entry /
+   *  version-domain staleness / reviewer content mismatch) — NEVER retrieved-unused alone. */
+  independent_evidence: string;
+  falsifier: string;
+}
+
 export interface PromotedAdvisory {
   kind: string;
   severity: "info" | "warning" | "critical";
@@ -52,6 +68,10 @@ export interface PromotedAdvisory {
   reasoning: string;
   falsifier: string;
   evidence_quotes: string[];
+  /** Optional affirmative lifecycle proposal (M3). Present only when the LLM
+   *  affirmatively concludes the entry should change standing WITH §4.2
+   *  independent evidence. Consumed solely by the deferred gated executor. */
+  lifecycle_proposal?: LifecycleProposal;
 }
 
 export interface DemotedSignal {
@@ -299,15 +319,32 @@ export function parseAggregatorOutput(rawText: string): PromptNativeOutput {
   const parsed = JSON.parse(block) as Record<string, unknown>;
 
   const asArray = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
-  const promoted = asArray<Record<string, unknown>>(parsed.promoted_advisories).map((a): PromotedAdvisory => ({
-    kind: String(a.kind ?? "unknown"),
-    severity: (a.severity === "critical" || a.severity === "info") ? a.severity : "warning",
-    ...(typeof a.slug === "string" ? { slug: a.slug } : {}),
-    message: String(a.message ?? ""),
-    reasoning: String(a.reasoning ?? ""),
-    falsifier: String(a.falsifier ?? ""),
-    evidence_quotes: asArray<string>(a.evidence_quotes).filter((s): s is string => typeof s === "string"),
-  }));
+  // M3: validate the optional affirmative lifecycle proposal. Drop (return
+  // undefined) when malformed or when §4.2 evidence/falsifier are missing — a
+  // proposal without independent evidence must NOT survive (no usage-only demotion).
+  const parseLifecycleProposal = (v: unknown): LifecycleProposal | undefined => {
+    if (!v || typeof v !== "object") return undefined;
+    const p = v as Record<string, unknown>;
+    const op = p.op === "contest" || p.op === "archive" || p.op === "supersede" ? p.op : undefined;
+    const reason = p.reason === "affirm_stale" || p.reason === "affirm_superseded" || p.reason === "affirm_echo_chamber" ? p.reason : undefined;
+    const ev = typeof p.independent_evidence === "string" ? p.independent_evidence.trim() : "";
+    const fal = typeof p.falsifier === "string" ? p.falsifier.trim() : "";
+    if (!op || !reason || !ev || !fal) return undefined;
+    return { op, reason, independent_evidence: ev, falsifier: fal };
+  };
+  const promoted = asArray<Record<string, unknown>>(parsed.promoted_advisories).map((a): PromotedAdvisory => {
+    const proposal = parseLifecycleProposal(a.lifecycle_proposal);
+    return {
+      kind: String(a.kind ?? "unknown"),
+      severity: (a.severity === "critical" || a.severity === "info") ? a.severity : "warning",
+      ...(typeof a.slug === "string" ? { slug: a.slug } : {}),
+      message: String(a.message ?? ""),
+      reasoning: String(a.reasoning ?? ""),
+      falsifier: String(a.falsifier ?? ""),
+      evidence_quotes: asArray<string>(a.evidence_quotes).filter((s): s is string => typeof s === "string"),
+      ...(proposal ? { lifecycle_proposal: proposal } : {}),
+    };
+  });
   const demoted = asArray<Record<string, unknown>>(parsed.demoted_signals).map((a): DemotedSignal => ({
     kind: String(a.kind ?? "unknown"),
     ...(typeof a.slug === "string" ? { slug: a.slug } : {}),
