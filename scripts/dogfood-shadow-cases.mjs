@@ -123,6 +123,8 @@ for (const root of roots) {
   }
 }
 
+const bySlugMap = new Map(entries.map((e) => [e.slug, e]));
+
 // deterministic ordering
 const bySlug = (a, b) => a.slug.localeCompare(b.slug);
 const byUpdatedDesc = (a, b) => String(b.updated || b.created || "").localeCompare(String(a.updated || a.created || ""));
@@ -132,15 +134,34 @@ const cases = [];
 let n = 0;
 const mk = (type, e, query, extra) => ({ case_id: `time-shadow:${type}:${String(++n).padStart(3, "0")}`, type, seed_slug: e.slug, query, ...extra });
 
-// (a) maxim_protection
+// (a) maxim_protection — AVOID exact-title self-match (3-T0 2026-06-05: title
+// query => trivial #1 => circular). Prefer a trigger phrase that is NOT the
+// title; mark query_kind so analysis can drop weak (title) cases. NOTE: a truly
+// adversarial test also needs a FRESH non-maxim decoy competing in the same
+// candidate set + both present in Stage1 — the runner must verify opportunity
+// validity; deterministic paraphrase is weak, ideally LLM-generated.
 for (const e of entries.filter((e) => e.kind === "maxim" && e.confidence >= 8).sort(bySlug).slice(0, PER_TYPE)) {
-  const q = (e.trigger_phrases[0] || e.title);
-  cases.push(mk("maxim_protection", e, q, { expected_protected_slug: e.slug, should_time_matter: false }));
+  const trig = e.trigger_phrases.find((t) => t && t.toLowerCase() !== e.title.toLowerCase());
+  const q = trig || e.title;
+  cases.push(mk("maxim_protection", e, q, {
+    expected_protected_slug: e.slug, should_time_matter: false,
+    query_kind: trig ? "trigger" : "title-weak",
+  }));
 }
-// (b) supersession
-for (const e of entries.filter((e) => e.superseded_by.length > 0 || e.status === "superseded" || e.status === "deprecated").sort(bySlug).slice(0, PER_TYPE)) {
-  const fresh = e.superseded_by[0] ? bareSlugOf(e.superseded_by[0]) : undefined;
-  cases.push(mk("supersession", e, `关于「${e.title}」当前应该按哪个结论执行?`, { ...(fresh ? { expected_fresh_slug: fresh } : {}), should_time_matter: true }));
+// (b) supersession — query the CURRENT topic via the FRESH (superseding) entry,
+// NOT the stale title (3-T0: naming the stale entry makes title-match dominate).
+// Oracle: enhanced should rank expected_fresh_slug above expected_stale_slug.
+// Only emit when the fresh entry resolves AND exists in the store (so both can
+// reach Stage1; the runner must confirm both_in_candidates).
+for (const e of entries.filter((e) => e.superseded_by.length > 0).sort(bySlug).slice(0, PER_TYPE)) {
+  const freshSlug = bareSlugOf(e.superseded_by[0]);
+  const fresh = bySlugMap.get(freshSlug);
+  if (!fresh) continue; // unresolved supersedor -> not a clean value case
+  const topic = fresh.trigger_phrases.find((t) => t && t.toLowerCase() !== fresh.title.toLowerCase()) || fresh.title;
+  cases.push(mk("supersession", e, `${topic} —— 当前应该按哪个结论执行?`, {
+    expected_fresh_slug: freshSlug, expected_stale_slug: e.slug,
+    should_time_matter: true, requires_both_in_candidates: true,
+  }));
 }
 // (c) current_state
 for (const e of entries.filter((e) => (e.status === "active" || !e.status)).sort(byUpdatedDesc).slice(0, PER_TYPE)) {
