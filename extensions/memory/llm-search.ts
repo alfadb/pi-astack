@@ -675,7 +675,7 @@ export async function llmSearchEntries(
   // candidates so any final-rank diff is attributable to the time signals
   // alone. Opt-in (one extra Stage2 call) + best-effort.
   let shadow: Record<string, unknown> | undefined;
-  if (process.env.PI_ASTACK_MEMORY_TIME_SHADOW === "1") {
+  if (process.env.PI_ASTACK_MEMORY_TIME_SHADOW === "1" || settings.search.shadowTimeSignals) {
     try {
       const shadowNow = Date.now();
       const shadowStage2 = await callSearchModel(

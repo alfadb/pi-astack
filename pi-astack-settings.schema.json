@@ -661,6 +661,11 @@
               "type": "boolean",
               "default": false,
               "description": "P1 time-dimension decision signals (design note 2026-06-05). When true, Stage 2 candidate blocks gain frontmatter-derived fields (staleness_days, kind_durability_days, status_caution, lifecycle) plus guard rules telling the reranker to treat them as evidence, not exclusion (never sink a semantically direct entry on staleness alone; durable maxims are not age-downweighted). Default false keeps the live retrieval path byte-identical. Flip true only after env PI_ASTACK_MEMORY_TIME_SHADOW=1 retrieval-shadow shows no high-confidence-maxim demotion. Stage 1 recall is intentionally NOT touched (signals there would be silent reject at a hard gate)."
+            },
+            "shadowTimeSignals": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable retrieval-shadow without an env var or process restart (settings are read per memory_search call). When true, each explicit memory_search runs a second Stage2 with the opposite freshness setting on the same Stage1 candidates and logs baseline-vs-enhanced picks + rank_delta + any_high_confidence_maxim_demoted to .pi-astack/memory/search-metrics.jsonl. Equivalent to env PI_ASTACK_MEMORY_TIME_SHADOW=1. Keep freshnessSignals=false while shadowing so live=baseline and shadow=enhanced. Costs one extra Stage2 LLM call per explicit search; off by default."
             }
           }
         },
