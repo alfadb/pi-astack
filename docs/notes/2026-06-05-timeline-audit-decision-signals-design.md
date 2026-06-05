@@ -7,7 +7,7 @@
 > 检索期再按时间戳算新鲜度是**放错了层**:与 curation 已做的事重复,甚至与之竞争(两套"谁算数"标准)。
 > **时效性是写入侧职责,不是读取侧。**
 >
-> **保留**:`scripts/audit-usability-report.mjs`(通用 audit 活动诊断,对下面的新方向有用)+ 本 note(决策记录)+ §0.3 P0 实测数据。
+> **保留**:仅本 note(决策记录,P0 实测数据已内联在 §0.3)。探索期的 `scripts/audit-usability-report.mjs` 与 `docs/audits/` 快照已随收尾删除(git 历史可追)。
 >
 > **用户真实意图(下一步方向,尚未实现)**:不是改检索排序,而是让第二大脑**知道我最近在干什么**——
 > 全局层:时间分配到了哪些项目;项目层:在推进哪些需求。即一个"活动/注意力时间线"(写入侧观察 + 简报),
@@ -91,7 +91,7 @@
 - **git 历史在另一个 repo**:`gitCommit` 执行 `git -C abrainHome ...`(`writer.ts:662,682-688`),不是 projectRoot。要查 hard delete/历史必须读 **abrain repo** 的 git log 并按 project id 路径过滤。
 - **无界增长**:`appendAudit` 是裸 `fs.appendFile`,无 rotation。现有 `sediment/aggregator.ts` 之所以不炸是**只尾读**(`JSONL_TAIL_READ_BYTES=2MB`,`DEFAULT_AUDIT_ROW_LIMIT=500`,`readJsonl` 从 `stat.size-maxBytes` 起读,`aggregator.ts:383-413`)。
 
-### 0.3 P0 实测回填(2026-06-05,`scripts/audit-usability-report.mjs`,见 `docs/audits/2026-06-05-audit-jsonl-usability-p0.md`)
+### 0.3 P0 实测回填(2026-06-05,由已删除的 `audit-usability-report.mjs` 跑出;工具与快照已随收尾删除,git 历史可追)
 真实数据把上面盲审推断换成数字:
 - **完整性好**:project 4254 行 / abrain 107 行,corrupt=0、缺 timestamp=0。
 - **churn 可算**:project 208 churn 行(update/merge/supersede)、abrain 11——counts timing-invariant,鲁棒但偏稀疏(低样本)。
