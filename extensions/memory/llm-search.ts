@@ -453,58 +453,8 @@ function truncateMiddle(text: string, maxChars: number): string {
   ].join("");
 }
 
-// ── P1 time-dimension decision signals (Stage2-only, gated) ──────────────
-// Per docs/notes/2026-06-05-timeline-audit-decision-signals-design.md: these
-// are frontmatter-derived FIELDS (not score multipliers, not Stage1), fed to
-// the Stage2 reranker as EVIDENCE. No audit.jsonl dependency.
-const KIND_DURABILITY_DAYS: Record<string, number> = {
-  maxim: 90, decision: 60, "anti-pattern": 45, pattern: 45, fact: 30, preference: 30, smell: 14,
-};
-const STATUS_CAUTION: Record<string, string> = {
-  active: "none", provisional: "low", contested: "mid", deprecated: "high", archived: "high", superseded: "high",
-};
-function lastTimelineDate(timeline: string[]): string | undefined {
-  for (let i = timeline.length - 1; i >= 0; i--) {
-    const m = timeline[i].match(/^-\s*(\d{4}-\d{2}-\d{2}(?:T[\d:.+\-Z]+)?)/);
-    if (m) return m[1];
-  }
-  return undefined;
-}
-function lastTimelineAction(timeline: string[]): string | undefined {
-  for (let i = timeline.length - 1; i >= 0; i--) {
-    const parts = timeline[i].replace(/^-\s*/, "").split("|").map((s) => s.trim());
-    if (parts.length >= 3 && parts[2]) return parts[2];
-  }
-  return undefined;
-}
-function deriveTimeSignals(entry: MemoryEntry, now: number): string[] {
-  const lines: string[] = [];
-  let mostRecent: string | undefined;
-  for (const d of [entry.updated, entry.created, lastTimelineDate(entry.timeline)]) {
-    if (d && (!mostRecent || compareTimestamps(d, mostRecent) > 0)) mostRecent = d;
-  }
-  if (mostRecent) {
-    const ms = Date.parse(mostRecent);
-    if (Number.isFinite(ms)) lines.push(`staleness_days: ${Math.max(0, Math.round((now - ms) / 86_400_000))}`);
-  }
-  const durability = KIND_DURABILITY_DAYS[entry.kind];
-  if (durability != null) lines.push(`kind_durability_days: ${durability}`);
-  const caution = STATUS_CAUTION[entry.status];
-  if (caution) lines.push(`status_caution: ${caution}`);
-  const supersededBy = relationValues(entry.frontmatter.superseded_by);
-  const derivesFrom = relationValues(entry.frontmatter.derives_from);
-  const lastAction = lastTimelineAction(entry.timeline);
-  const bits: string[] = [];
-  if (supersededBy.length) bits.push(`superseded_by=${JSON.stringify(supersededBy.slice(0, 5))}`);
-  if (derivesFrom.length) bits.push(`derives_from=${derivesFrom.length}`);
-  if (lastAction) bits.push(`last_action=${lastAction}`);
-  if (bits.length) lines.push(`lifecycle: ${bits.join(" | ")}`);
-  return lines;
-}
-
-function entryForStage2(entry: MemoryEntry, opts?: { includeTimeSignals?: boolean; now?: number }): string {
+function entryForStage2(entry: MemoryEntry): string {
   const triggers = relationValues(entry.frontmatter.trigger_phrases);
-  const timeSignals = opts?.includeTimeSignals ? deriveTimeSignals(entry, opts?.now ?? Date.now()) : [];
   const pieces = [
     `## ${entry.slug}`,
     `title: ${entry.title}`,
@@ -513,7 +463,6 @@ function entryForStage2(entry: MemoryEntry, opts?: { includeTimeSignals?: boolea
     `confidence: ${entry.confidence}`,
     entry.created ? `created: ${entry.created}` : undefined,
     entry.updated ? `updated: ${entry.updated}` : undefined,
-    ...timeSignals,
     triggers.length ? `trigger_phrases: ${JSON.stringify(triggers)}` : undefined,
     entry.relatedSlugs.length ? `related_slugs: ${JSON.stringify(entry.relatedSlugs.slice(0, 20))}` : undefined,
     "",
@@ -529,9 +478,7 @@ function entryForStage2(entry: MemoryEntry, opts?: { includeTimeSignals?: boolea
   return truncateMiddle(pieces, MAX_STAGE2_ENTRY_CHARS);
 }
 
-function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: number, opts?: { includeTimeSignals?: boolean; now?: number }): string {
-  const includeTime = !!opts?.includeTimeSignals;
-  const now = opts?.now ?? Date.now();
+function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: number): string {
   // Instructions-first ordering for provider prompt caching (2026-05-11).
   // The instructions block is fixed across all Stage 2 calls (~1K tokens).
   // Candidates and query are variable, but the instruction prefix can still
@@ -556,17 +503,13 @@ function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: numbe
     "- Prefer the most directly useful entry for the query over broad background entries.",
     "- Use freshness when it matters: for current-state / implementation / next-step queries, prefer recently updated and non-superseded entries.",
     "- Do NOT rank newer entries above older high-confidence maxims/principles solely because they are newer.",
-    ...(includeTime ? [
-      "- The status_caution / staleness_days / kind_durability_days / lifecycle fields are EVIDENCE, not exclusion instructions. NEVER exclude or sink a semantically direct entry solely because status_caution or staleness is high.",
-      "- Apply staleness only to current-state / implementation / next-step queries. For durable maxims/principles (high kind_durability_days), do NOT downweight by age; confidence and durability dominate.",
-    ] : []),
     "- If an entry is obsolete/superseded by another candidate, rank the newer/superseding one higher.",
     "- In the why field, mention freshness/timeline evidence when it materially affects ranking.",
     "- Do not invent slugs. Return only slugs present in Candidates.",
     "",
     "Candidates:",
     "<<<MEMORY_SEARCH_CANDIDATES",
-    candidates.map((c) => entryForStage2(c, { includeTimeSignals: includeTime, now })).join("\n\n---\n\n"),
+    candidates.map(entryForStage2).join("\n\n---\n\n"),
     "MEMORY_SEARCH_CANDIDATES>>>",
     "",
     `Query: ${query}`,
@@ -661,7 +604,7 @@ export async function llmSearchEntries(
 
   const stage2 = await callSearchModel(
     settings.search.stage2Model,
-    makeStage2Prompt(query, candidateEntries, finalLimit, { includeTimeSignals: settings.search.freshnessSignals }),
+    makeStage2Prompt(query, candidateEntries, finalLimit),
     modelRegistry,
     signal,
     STAGE2_TIMEOUT_MS,
@@ -669,60 +612,6 @@ export async function llmSearchEntries(
   );
   const parsedStage2 = parseFinalPicksWithVerdict(stage2.rawText);
   const stage2Picks = parsedStage2.picks;
-
-  // ── env-gated retrieval-shadow (P1 validation, ADR-pending) ────
-  // Re-run Stage2 with the OPPOSITE freshness setting on the SAME Stage1
-  // candidates so any final-rank diff is attributable to the time signals
-  // alone. Opt-in (one extra Stage2 call) + best-effort.
-  let shadow: Record<string, unknown> | undefined;
-  if (process.env.PI_ASTACK_MEMORY_TIME_SHADOW === "1" || settings.search.shadowTimeSignals) {
-    try {
-      const shadowNow = Date.now();
-      const shadowStage2 = await callSearchModel(
-        settings.search.stage2Model,
-        makeStage2Prompt(query, candidateEntries, finalLimit, { includeTimeSignals: !settings.search.freshnessSignals, now: shadowNow }),
-        modelRegistry, signal, STAGE2_TIMEOUT_MS, settings.search.stage2Thinking,
-      );
-      const shadowParsed = parseFinalPicksWithVerdict(shadowStage2.rawText);
-      // primary (parsedStage2) used includeTimeSignals=freshnessSignals; shadow used the
-      // opposite. Map both onto baseline(no-signals) / enhanced(with-signals) so the
-      // diff isolates the time-signal effect regardless of the live flag value.
-      const on = settings.search.freshnessSignals;
-      const enhancedParsed = on ? parsedStage2 : shadowParsed;
-      const baselineParsed = on ? shadowParsed : parsedStage2;
-      const mkPicks = (picks: FinalPick[]) => picks.map((x, i) => ({ rank: i + 1, slug: x.slug, score: x.score, why: x.why }));
-      const enhancedPicks = mkPicks(enhancedParsed.picks);
-      const baselinePicks = mkPicks(baselineParsed.picks);
-      const rankOf = (picks: Array<{ rank: number; slug: string }>, slug: string) => picks.find((p) => p.slug === slug)?.rank ?? null;
-      const union = stableUnique([...baselinePicks, ...enhancedPicks].map((p) => p.slug));
-      // The ONE risk the P1 guard targets: a high-confidence maxim demoted/dropped
-      // once freshness signals are added. Flag it per-slug so dogfood can decide the flip.
-      const rankDelta = union.map((slug) => {
-        const b = rankOf(baselinePicks, slug);
-        const e = rankOf(enhancedPicks, slug);
-        const ce = entriesBySlug.get(slug);
-        const demoted = !!ce && ce.kind === "maxim" && ce.confidence >= 8
-          && (e === null ? b !== null : (b !== null && e > b));
-        return { slug, kind: ce?.kind, confidence: ce?.confidence, baseline_rank: b, enhanced_rank: e,
-          dropped: b !== null && e === null, added: b === null && e !== null, high_confidence_maxim_demoted: demoted };
-      });
-      shadow = {
-        mode: "stage2_time_signals",
-        baseline_verdict: baselineParsed.verdict,
-        enhanced_verdict: enhancedParsed.verdict,
-        baseline_picks: baselinePicks,
-        enhanced_picks: enhancedPicks,
-        candidates: candidateEntries.map((ce, i) => ({ slug: ce.slug, stage1_rank: i + 1, title: ce.title,
-          kind: ce.kind, status: ce.status, confidence: ce.confidence, created: ce.created, updated: ce.updated,
-          time_signals: deriveTimeSignals(ce, shadowNow) })),
-        rank_delta: rankDelta,
-        changed: JSON.stringify(baselinePicks.map((p) => p.slug)) !== JSON.stringify(enhancedPicks.map((p) => p.slug)),
-        any_high_confidence_maxim_demoted: rankDelta.some((r) => r.high_confidence_maxim_demoted),
-      };
-    } catch (err) {
-      shadow = { error: true, error_message: err instanceof Error ? err.message : String(err) };
-    }
-  }
 
   // ── Cache metrics log ─────────────────────────────────────────
   // Write to project-scoped metrics file for analysis.
@@ -735,10 +624,6 @@ export async function llmSearchEntries(
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     results: stage2Picks.length,
     verdict: parsedStage2.verdict,
-    s2_time_fields: settings.search.freshnessSignals,
-    candidate_slugs: candidateEntries.map((e) => e.slug),
-    final_slugs: stage2Picks.map((p) => p.slug),
-    ...(shadow ? { shadow } : {}),
   };
   logSearchMetrics(entry, projectRoot);
 
@@ -811,7 +696,7 @@ export async function llmSearchEntriesWithVerdict(
   const t2 = Date.now();
   const stage2 = await callSearchModel(
     settings.search.stage2Model,
-    makeStage2Prompt(query, candidateEntries, finalLimit, { includeTimeSignals: settings.search.freshnessSignals }),
+    makeStage2Prompt(query, candidateEntries, finalLimit),
     modelRegistry, signal, STAGE2_TIMEOUT_MS, settings.search.stage2Thinking,
   );
   const stage2DurationMs = Date.now() - t2;
@@ -825,7 +710,6 @@ export async function llmSearchEntriesWithVerdict(
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     results: parsedStage2.picks.length,
     verdict: parsedStage2.verdict,
-    s2_time_fields: settings.search.freshnessSignals,
     via: "path-a",
   }, projectRoot);
   const hits = parsedStage2.picks.length === 0

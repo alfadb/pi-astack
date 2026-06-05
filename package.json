@@ -21,7 +21,6 @@
   },
   "scripts": {
     "report:audit-usability": "node scripts/audit-usability-report.mjs --max-bytes 40000000 --window-days 400",
-    "dogfood:shadow-cases": "node scripts/dogfood-shadow-cases.mjs",
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
     "smoke:evolution-ledger": "node scripts/smoke-evolution-ledger.mjs",
