@@ -22,6 +22,10 @@ export interface SearchSettings {
   stage2Model: string;
   stage2Limit: number;
   stage2Thinking: ThinkingLevel;
+  /** P1 (time-signal design, docs/notes/2026-06-05-...): gate Stage2
+   *  freshness/lifecycle fields + guard rules. Default false; flip true
+   *  only after retrieval-shadow proves no high-confidence-maxim demotion. */
+  freshnessSignals: boolean;
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -37,6 +41,7 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage2Model: "deepseek/deepseek-v4-flash",
   stage2Limit: 10,
   stage2Thinking: "off",
+  freshnessSignals: false,
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -161,6 +166,7 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage2Model: asString(search.stage2Model, DEFAULT_SEARCH_SETTINGS.stage2Model),
     stage2Limit: Math.max(1, asNumber(search.stage2Limit, DEFAULT_SEARCH_SETTINGS.stage2Limit)),
     stage2Thinking: asThinkingLevel(search.stage2Thinking, DEFAULT_SEARCH_SETTINGS.stage2Thinking),
+    freshnessSignals: asBoolean(search.freshnessSignals, DEFAULT_SEARCH_SETTINGS.freshnessSignals),
   };
 }
 
