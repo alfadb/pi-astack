@@ -677,17 +677,51 @@ export async function llmSearchEntries(
   let shadow: Record<string, unknown> | undefined;
   if (process.env.PI_ASTACK_MEMORY_TIME_SHADOW === "1") {
     try {
+      const shadowNow = Date.now();
       const shadowStage2 = await callSearchModel(
         settings.search.stage2Model,
-        makeStage2Prompt(query, candidateEntries, finalLimit, { includeTimeSignals: !settings.search.freshnessSignals }),
+        makeStage2Prompt(query, candidateEntries, finalLimit, { includeTimeSignals: !settings.search.freshnessSignals, now: shadowNow }),
         modelRegistry, signal, STAGE2_TIMEOUT_MS, settings.search.stage2Thinking,
       );
-      const shadowSlugs = parseFinalPicksWithVerdict(shadowStage2.rawText).picks.map((p) => p.slug);
-      const primarySlugs = stage2Picks.map((p) => p.slug);
-      const enhanced = settings.search.freshnessSignals ? primarySlugs : shadowSlugs;
-      const baseline = settings.search.freshnessSignals ? shadowSlugs : primarySlugs;
-      shadow = { mode: "stage2_time_signals", baseline_final_slugs: baseline, enhanced_final_slugs: enhanced, changed: JSON.stringify(baseline) !== JSON.stringify(enhanced) };
-    } catch { shadow = { error: true }; }
+      const shadowParsed = parseFinalPicksWithVerdict(shadowStage2.rawText);
+      // primary (parsedStage2) used includeTimeSignals=freshnessSignals; shadow used the
+      // opposite. Map both onto baseline(no-signals) / enhanced(with-signals) so the
+      // diff isolates the time-signal effect regardless of the live flag value.
+      const on = settings.search.freshnessSignals;
+      const enhancedParsed = on ? parsedStage2 : shadowParsed;
+      const baselineParsed = on ? shadowParsed : parsedStage2;
+      const mkPicks = (picks: FinalPick[]) => picks.map((x, i) => ({ rank: i + 1, slug: x.slug, score: x.score, why: x.why }));
+      const enhancedPicks = mkPicks(enhancedParsed.picks);
+      const baselinePicks = mkPicks(baselineParsed.picks);
+      const rankOf = (picks: Array<{ rank: number; slug: string }>, slug: string) => picks.find((p) => p.slug === slug)?.rank ?? null;
+      const union = stableUnique([...baselinePicks, ...enhancedPicks].map((p) => p.slug));
+      // The ONE risk the P1 guard targets: a high-confidence maxim demoted/dropped
+      // once freshness signals are added. Flag it per-slug so dogfood can decide the flip.
+      const rankDelta = union.map((slug) => {
+        const b = rankOf(baselinePicks, slug);
+        const e = rankOf(enhancedPicks, slug);
+        const ce = entriesBySlug.get(slug);
+        const demoted = !!ce && ce.kind === "maxim" && ce.confidence >= 8
+          && (e === null ? b !== null : (b !== null && e > b));
+        return { slug, kind: ce?.kind, confidence: ce?.confidence, baseline_rank: b, enhanced_rank: e,
+          dropped: b !== null && e === null, added: b === null && e !== null, high_confidence_maxim_demoted: demoted };
+      });
+      shadow = {
+        mode: "stage2_time_signals",
+        baseline_verdict: baselineParsed.verdict,
+        enhanced_verdict: enhancedParsed.verdict,
+        baseline_picks: baselinePicks,
+        enhanced_picks: enhancedPicks,
+        candidates: candidateEntries.map((ce, i) => ({ slug: ce.slug, stage1_rank: i + 1, title: ce.title,
+          kind: ce.kind, status: ce.status, confidence: ce.confidence, created: ce.created, updated: ce.updated,
+          time_signals: deriveTimeSignals(ce, shadowNow) })),
+        rank_delta: rankDelta,
+        changed: JSON.stringify(baselinePicks.map((p) => p.slug)) !== JSON.stringify(enhancedPicks.map((p) => p.slug)),
+        any_high_confidence_maxim_demoted: rankDelta.some((r) => r.high_confidence_maxim_demoted),
+      };
+    } catch (err) {
+      shadow = { error: true, error_message: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   // ── Cache metrics log ─────────────────────────────────────────
