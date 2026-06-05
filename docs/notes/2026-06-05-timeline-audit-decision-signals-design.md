@@ -25,6 +25,20 @@
 | GPT-5.5 | abrain/world-lane 经 `appendAbrainAudit`(writer.ts:1625)**不 spread 因果锚**;git commit 在 `abrainHome` repo 非 projectRoot;reject 行 schema 异构;Stage1 注入非"一行改动"(贯穿多调用点);shadow full-turn replay 无 harness | §0 加 lane 缺口与 git repo 方向;§5 降级为 retrieval-shadow;§6 重划 MVP |
 | DeepSeek | 锚点 writer.ts:380 错(应 267/588);其余 13/14 锚点正确 | 附录已改 |
 
+## 实现进度(2026-06-05)
+
+| 阶段 | commit | 状态 |
+|---|---|---|
+| P0 audit 可用性工具 + 报告 | `8914865` | ✅ 已跑真实数据(见 §0.3) |
+| P1 frontmatter→Stage2 时间字段(gated 默认 off) | `f821129` | ✅ smoke 全绿 |
+| shadow 可检测 maxim demotion + schema freshnessSignals | `3598a54` | ✅ DeepSeek 代码审计无 bug |
+| dogfood opportunity-case 生成 | (本次) | ✅ `scripts/dogfood-shadow-cases.mjs` |
+| 跑 dogfood shadow + 决定翻 flag | — | ⏳ 待真实 LLM 批跑 |
+
+**已知缺口(本期文档化,不补)**:
+1. **path-A 注入热路径无 shadow 埋点**:只有显式 `memory_search`(`llmSearchEntries`)有 shadow 块;`llmSearchEntriesWithVerdict`(path-A 常驻注入)没有。→ dogfood 样本=显式搜索,不能据此推断 path-A 行为。补它要给注入热路径加一次 Stage2 调用(主会话延迟),留给 dogfood milestone 再定。
+2. **shadow 只测排序 diff,不测答案效用**:`any_high_confidence_maxim_demoted` 能做"安全否决";"价值放行"需配 opportunity denominator + 人工 oracle(见 `scripts/dogfood-shadow-cases.mjs` 产出的 `expected_*` 字段)。
+
 ---
 
 ## 0. 数据源现实(改方向的依据)
@@ -54,11 +68,19 @@
 ```
 
 盲审实测的**地基裂缝**(全部回查代码确认):
-- **abrain/world/workflow/about-me lane 经 `appendAbrainAudit`(`writer.ts:1625`),不调 `spreadAnchor`** → 这些行**没有 `turn_id`/因果锚**。因果锚只在 project-side 主路径可靠。
+- **abrain/world/workflow/about-me lane 经 `appendAbrainAudit`(`writer.ts:1625`),不调 `spreadAnchor`** → 这些行**没有 `turn_id`**;但 P0 实测 abrain mutation 行仍带 caller 供给的 `session_id`/`correlation_id`(各 ~87%)。即 turn 级归因不可用、session 级可用(非 anchor 保证)。〔§0.3 已用实测数订正盲审时"没有因果锚"的过度断言〕
 - **audit 会静默丢行**:成功路径先写 markdown/`gitCommit` 再 `await appendAudit` → entry 已落盘但 audit 行可能缺;诊断行多为 fire-and-forget `appendAudit(...).catch(()=>{})` → 静默丢。**audit 不是完整事件流。**
 - **operation `create` 非 `capture`**;`reactivated` 不是 operation(reactivation = `update` op + `archive_reactivation_apply` 旁路行)。
 - **git 历史在另一个 repo**:`gitCommit` 执行 `git -C abrainHome ...`(`writer.ts:662,682-688`),不是 projectRoot。要查 hard delete/历史必须读 **abrain repo** 的 git log 并按 project id 路径过滤。
 - **无界增长**:`appendAudit` 是裸 `fs.appendFile`,无 rotation。现有 `sediment/aggregator.ts` 之所以不炸是**只尾读**(`JSONL_TAIL_READ_BYTES=2MB`,`DEFAULT_AUDIT_ROW_LIMIT=500`,`readJsonl` 从 `stat.size-maxBytes` 起读,`aggregator.ts:383-413`)。
+
+### 0.3 P0 实测回填(2026-06-05,`scripts/audit-usability-report.mjs`,见 `docs/audits/2026-06-05-audit-jsonl-usability-p0.md`)
+真实数据把上面盲审推断换成数字:
+- **完整性好**:project 4254 行 / abrain 107 行,corrupt=0、缺 timestamp=0。
+- **churn 可算**:project 208 churn 行(update/merge/supersede)、abrain 11——counts timing-invariant,鲁棒但偏稀疏(低样本)。
+- **mutation 100% 可 join slug**,但 `target` 实测 **4 形态**:`project:<id>:<slug>` / **legacy 2-part `project:<slug>`(397 行,早于项目绑定)** / `world:<slug>` / path(`*.md`)+ 独立 `slug` 字段。slug-parser 必须覆盖全部,漏 legacy 2-part 会静默丢 ~40% 历史行。
+- **turn_id 是 recency-gated**:project mutation 全量仅 14.1%,但 2026-05-27(ADR 0027 C6)后 ≈100%;abrain 行 **0%**。→ 决策-turn 归因只在近期窗口可靠。
+- **session_id / correlation_id**:project mutation ~81%、abrain mutation ~87%(caller 供给,非 anchor 保证)。
 
 → **结论**:audit 数据源比 timeline 更正确,但远未到"可直接进检索热路径"。**先审计它,再用它。**
 
