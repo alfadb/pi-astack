@@ -425,7 +425,7 @@ resolving evidence 顺序展开。
 **评审快照**：
 - R1-R6 全程审计：[docs/audits/2026-05-21-adr-0024-multi-llm-r1-r6.md](../audits/2026-05-21-adr-0024-multi-llm-r1-r6.md)
 - R7 prompt-engineering-only 评审：[docs/audits/2026-05-22-adr-0024-r7-prompt-engineering-review.md](../audits/2026-05-22-adr-0024-r7-prompt-engineering-review.md)
-- R5 原版快照（R6 重整理前保留）：[docs/adr/archive/0024-r5-pre-r6-cleanup-snapshot.md](archive/0024-r5-pre-r6-cleanup-snapshot.md)
+- R5 原版（R6 重整理前）：见 git history（R6 是同日内部修订：机械门 → prompt engineering 双层 reframe）
 
 **已不再保留在主文档中**（演进过程已稳定，需要追溯请看 git history 或上述 audit）：
 - INV-R8 / INV-R9 / INV-R11 / INV-R12 / INV-R13 各种历史 invariant 编号

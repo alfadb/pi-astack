@@ -162,7 +162,7 @@ P0d 时单独 ADR 决策。本 ADR 仅锁定 schema：`.vault-identity/master.ag
 | `docs/current-state.md` §7 | backend 列表更新 |
 | `docs/roadmap.md` | passphrase-only reader tty channel 改为 P0d passphrase wrap for abrain-age-key |
 | `docs/reference/commands.md` | `/vault init` 默认 backend 说明 |
-| `docs/adr/INDEX.md` | 加 ADR 0019 入读取链 |
+| `docs/adr/README.md` | 加 ADR 0019 入读取链 |
 
 ## 后果
 

@@ -95,20 +95,30 @@
 
 ---
 
-## 9. 基础设施 ADR（pre-0024 依赖）
+## 9. 基础 / 历史 ADR（pre-0024，仍 active）
 
-只列 0024-0027 cite 的关键依赖：
+> 这些 ADR 早于第二大脑框架；核心仍有效但部分实现细节过时。**current 真相以代码 / [current-state.md](../current-state.md) 为准**，下表只给"读什么去哪查 + 怎么读"。
 
-| ADR | 主题 |
+| ADR | 定位 / 读法 |
 |-----|------|
+| [0001](./0001-pi-astack-as-personal-pi-workflow.md) | 项目定位 / 使用即开发 / vendor+端口层 / 硬纪律仍有效；记忆基础设施段以 current-state 为准 |
+| [0003](./0003-main-session-read-only.md) | 主会话只读 / sediment 单写仍核心；旧 bash regex / pg role / gbrain guard 实现已过时 |
+| [0006](./0006-component-consolidation.md) | 组件三分类（自有 / vendor / 迁入）仍有效；具体路径以 `UPSTREAM.md` 为准 |
+| [0009](./0009-multi-agent-as-base-capability.md) | dispatch 作为基础能力仍真；旧 `multi_dispatch` / templates 是历史设计 |
+| [0010](./0010-sediment-single-agent-with-lookup-tools.md) | 单 agent curator kernel 被 0016 继承；含三模型投票失败五根因（实证）；gbrain 技术细节过时 |
+| [0013](./0013-asymmetric-trust-three-lanes.md) | trust × blast radius 思想仍有效；Lane B/D 已废、Lane C 机械 gate 被 0016 删 |
 | [0014](./0014-abrain-as-personal-brain.md) | 七区 abrain 基础架构 + vault 授权机制 |
 | [0015](./0015-memory-search-llm-driven-retrieval.md) | memory_search LLM 两阶段 rerank |
 | [0016](./0016-sediment-as-llm-curator.md) | sediment LLM curator 哲学（0024 落地载体） |
 | [0017](./0017-project-binding-strict-mode.md) | 项目绑定 strict mode |
 | [0018](./0018-sediment-curator-defense-layers.md) | sediment curator 删机械护栏先例 |
-| [0020](./0020-abrain-auto-sync-to-remote.md) | abrain 跨设备同步 |
+| [0019](./0019-abrain-self-managed-vault-identity.md) | abrain 自管 age keypair vault identity |
+| [0020](./0020-abrain-auto-sync-to-remote.md) | abrain 跨设备同步（冲突不自动 merge） |
+| [0021](./0021-lane-g-identity-skills-habits-writer.md) | Lane G identity/skills/habits writer（G1 shipped） |
 | [0022](./0022-prompt-user-tool.md) | prompt_user 工具（任务相关决策） |
 | [0023](./0023-session-start-rule-injection.md) | rules 区 + 第二大脑心智模型 |
+
+> **已删除的 gbrain 时代 ADR**（0002 / 0004 / 0005 / 0007 / 0008 / 0011 / 0012 + 0024-r5 快照）：架构已迁至 markdown+git，叙事见 [../memory-architecture.md](../memory-architecture.md)，逐字原文见 git history。编号刻意不连续、不留 stub（降噪）。
 
 ---
 

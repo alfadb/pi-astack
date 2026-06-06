@@ -173,7 +173,7 @@ sed -n '1,140p' docs/reference/smoke-tests.md
 
 ## 9. 历史文档处理原则
 
-- ADR 保留设计推演与取代关系；先读 [adr/INDEX.md](./adr/INDEX.md)。
+- ADR 保留设计推演与取代关系；先读 [adr/README.md](./adr/README.md)。
 - 旧 monolith 原文移入 [archive/](./archive/)；不要把 archive 当 current spec。
 - 迁移目录只保留仍可执行的操作手册；已完成的 phase plan/checklist 移入 archive。
 

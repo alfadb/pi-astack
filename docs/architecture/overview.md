@@ -59,7 +59,7 @@ Storage
 | vault | `docs/architecture/vault.md` |
 | directory/runtime paths | `docs/directory-layout.md` |
 | commands/tools | `docs/reference/commands.md` |
-| ADR status | `docs/adr/INDEX.md` |
+| ADR status | `docs/adr/README.md` |
 | historical originals | `docs/archive/` |
 
 ## 5. 不再作为 current path 的旧概念
