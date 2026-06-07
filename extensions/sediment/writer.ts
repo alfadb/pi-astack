@@ -2064,7 +2064,9 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const projectId = draft.scope === "global" ? undefined : draft.scope.projectId;
   const sessionId = opts.auditContext?.sessionId ?? draft.sessionId;
   const resultCtx = { lane: "rules", sessionId, correlationId: opts.auditContext?.correlationId, candidateId: opts.auditContext?.candidateId };
-  const slug = (draft.slug && slugify(draft.slug)) || slugify(draft.title || "rule");
+  // Audit P2-1 (2026-06-07): final `|| "rule"` so an all-punctuation title
+  // (slugify -> "") cannot produce a degenerate `<tierDir>/.md` dotfile + empty-slug id.
+  const slug = (draft.slug && slugify(draft.slug)) || slugify(draft.title || "rule") || "rule";
 
   const audit = (event: Record<string, unknown>) =>
     appendAbrainAudit(abrainHome, "rules", { tier: draft.tier, scope: ruleScope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
@@ -2076,6 +2078,11 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   if (typeof draft.title !== "string" || !draft.title.trim()) return reject("validation_error_title");
   if (typeof draft.body !== "string" || draft.body.trim().length < 10) return reject("validation_error_body");
   if (draft.zone !== "rules") return reject("validation_error_zone");
+  // Audit P1-a (2026-06-07): validate tier even though the sole caller coerces it.
+  // writeAbrainRule is exported and its contract claims to validate; an unchecked
+  // tier flows into path.join(tierDir, draft.tier) (traversal) and the `tier:` YAML
+  // line. Defense-in-depth: reject anything outside the two known tiers.
+  if (draft.tier !== "always" && draft.tier !== "listed") return reject("validation_error_tier");
   if (ruleScope === "project" && !projectId) return reject("validation_error_project_id");
 
   const kindLint = lintRuleKind(draft.kind, draft.tier);

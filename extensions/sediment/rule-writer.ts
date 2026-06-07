@@ -98,8 +98,14 @@ export const HINT_HARD_REJECT_CODE_UNITS = 120;
 export function sanitizeRuleHint(raw: unknown): HintResult {
   if (typeof raw !== "string") return { ok: false, reason: "hint_not_a_string" };
   let s = raw;
-  // (2) control chars incl. \n \r \t and ANSI ESC (\x1B) -> reject (hint is single-line)
-  if (/[\u0000-\u001F]/.test(s)) return { ok: false, reason: "control_char" };
+  // (0) strip bidi override / zero-width FIRST. Audit P1-b (2026-06-07): doing
+  //     this AFTER the structural rejects let an attacker interleave a
+  //     zero-width char to evade them (`` `\u200B`` `` defeats the fence check,
+  //     `<!\u200B--` defeats the comment check). The hint rides into every
+  //     session's system prompt, so the strip must precede every structural test.
+  s = s.replace(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F\uFEFF]/g, "");
+  // (2) control chars incl. \n \r \t, ANSI ESC (\x1B), DEL + C1 -> reject (hint is single-line)
+  if (/[\u0000-\u001F\u007F-\u009F]/.test(s)) return { ok: false, reason: "control_char" };
   // (3) HTML comment + abrain section markers -> reject (injection-section breakout)
   if (/<!--|-->|BEGIN_ABRAIN_RULES|END_ABRAIN_RULES/.test(s)) return { ok: false, reason: "comment_or_section_marker" };
   // (5) code fence -> reject
@@ -110,8 +116,6 @@ export function sanitizeRuleHint(raw: unknown): HintResult {
   }
   // (4) strip markdown links / images
   s = s.replace(/!?\[[^\]]*\]\([^)]*\)/g, "");
-  // (7) strip bidi override / zero-width (ANSI ESC already rejected at step 2)
-  s = s.replace(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F\uFEFF]/g, "");
   s = s.trim();
   // (1) length: > 120 reject; else truncate to 80 + ellipsis
   if (s.length > HINT_HARD_REJECT_CODE_UNITS) return { ok: false, reason: "hint_too_long" };
@@ -209,14 +213,14 @@ export function buildRuleMarkdown(draft: RuleDraft, slug: string): string {
   fm.push(`kind: ${yamlScalar(draft.kind)}`);
   fm.push(`status: ${yamlScalar(status)}`);
   fm.push(`confidence: ${clampConfidence(draft.entryConfidence)}`);
-  fm.push(`tier: ${draft.tier}`);
+  fm.push(`tier: ${yamlScalar(draft.tier)}`);
   if (draft.hint) fm.push(`hint: ${yamlScalar(draft.hint)}`);
   fm.push(`body_hash: ${bodyHash}`);
   fm.push(...yamlList("trigger_phrases", draft.triggerPhrases ?? []));
   fm.push(...yamlList("tags", draft.tags ?? []));
   fm.push(...yamlList("derives_from", draft.derivesFrom ?? []));
   if (draft.promotedFrom) fm.push(`promoted_from: ${yamlScalar(draft.promotedFrom)}`);
-  if (draft.sourceBodyHash) fm.push(`source_body_hash: ${draft.sourceBodyHash}`);
+  if (draft.sourceBodyHash) fm.push(`source_body_hash: ${yamlScalar(draft.sourceBodyHash)}`);
   fm.push(`routing_reason: ${yamlScalar(draft.routingReason)}`);
   fm.push(`routing_confidence: ${clamp01(draft.routingConfidence)}`);
   fm.push(`created: ${yamlScalar(ts)}`);

@@ -59,7 +59,7 @@ await check("create: global always maxim lands at rules/always/<slug>.md with fr
   const fp = path.join(home, "rules", "always", "edit-not-sed.md");
   assert(fs.existsSync(fp), `file at ${fp}`);
   const md = fs.readFileSync(fp, "utf-8");
-  assert(md.includes("scope: global") && md.includes("tier: always") && md.includes("body_hash:"), "frontmatter shape");
+  assert(md.includes("scope: global") && md.includes('tier: "always"') && md.includes("body_hash:"), "frontmatter shape");
   assert(r.lane === "rules" && r.tier === "always" && r.ruleScope === "global", `result ctx: ${JSON.stringify(r)}`);
 });
 
@@ -97,6 +97,25 @@ await check("always body > 300 code units rejected", async () => {
     { ...baseDraft, title: "Too big", body: "x".repeat(301), tier: "always", scope: "global" },
     { abrainHome: home, settings: SETTINGS });
   assert(r.status === "rejected" && r.reason.startsWith("body_too_large"), `size reject: ${JSON.stringify(r)}`);
+});
+
+await check("audit P1-a: malformed tier rejected (no path-join traversal)", async () => {
+  const home = freshHome();
+  const r = await writeAbrainRule(
+    { ...baseDraft, title: "Evil tier", body: "tier traversal attempt body content", tier: "../../../../tmp/pwned", scope: "global" },
+    { abrainHome: home, settings: SETTINGS });
+  assert(r.status === "rejected" && r.reason === "validation_error_tier", `tier reject: ${JSON.stringify(r)}`);
+  assert(!fs.existsSync(path.join(home, "..", "..", "..", "..", "tmp", "pwned")), "no file escaped rulesBaseDir");
+});
+
+await check("audit P2-1: all-punctuation title falls back to slug 'rule' (no .md dotfile)", async () => {
+  const home = freshHome();
+  const r = await writeAbrainRule(
+    { ...baseDraft, title: "!!!", body: "all punctuation title body content ok", tier: "always", scope: "global" },
+    { abrainHome: home, settings: SETTINGS });
+  assert(r.status === "created" && r.slug === "rule", `slug fallback: ${JSON.stringify(r)}`);
+  assert(fs.existsSync(path.join(home, "rules", "always", "rule.md")), "rule.md (not .md dotfile)");
+  assert(!fs.existsSync(path.join(home, "rules", "always", ".md")), "no degenerate .md dotfile");
 });
 
 await check("INV-R3: budget over-cap rejected + suggests archive", async () => {

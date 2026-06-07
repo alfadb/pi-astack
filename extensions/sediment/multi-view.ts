@@ -78,6 +78,7 @@ import { sanitizeForMemory } from "./sanitizer";
 export type MultiViewTriggerReason =
   | "create_high_confidence"
   | "create_world_scope"
+  | "create_rules_zone"
   | "archive_high_conf_neighbor"
   | "archive_target_not_in_neighbors"
   | "supersede_op"
@@ -170,6 +171,10 @@ export function shouldTriggerMultiView(
   switch (decision.op) {
     case "create": {
       const confidence = candidate.confidence ?? 0;
+      // Audit F3 (2026-06-07, ADR 0023): a rules-zone create lands in EVERY future
+      // session's system prompt — higher blast radius than any knowledge create, so
+      // it must always get the 2-pass review regardless of candidate confidence.
+      if (decision.zone === "rules") return { triggered: true, reason: "create_rules_zone" };
       if (confidence >= 8) return { triggered: true, reason: "create_high_confidence" };
       if (decision.scope === "world") return { triggered: true, reason: "create_world_scope" };
       return { triggered: false };
