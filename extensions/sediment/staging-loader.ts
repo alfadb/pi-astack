@@ -105,7 +105,7 @@ export function loadStagingContext(): StagingContext {
 /**
  * Write a new staging entry to disk.
  */
-export function writeStagingEntry(entry: StagingEntry): void {
+export function writeStagingEntry(entry: StagingEntry): boolean {
   try {
     const dir = stagingDir();
     fs.mkdirSync(dir, { recursive: true });
@@ -116,8 +116,13 @@ export function writeStagingEntry(entry: StagingEntry): void {
       JSON.stringify(file, null, 2),
       "utf-8",
     );
+    return true;
   } catch {
-    // best-effort
+    // best-effort, but REPORT failure: callers that rely on staging as a
+    // no-loss safety net (correction-pipeline #1 / the short-window escalation)
+    // must HOLD their checkpoint when the net did not actually persist, instead
+    // of advancing past an un-staged + un-promoted signal (audit P0 2026-06-07).
+    return false;
   }
 }
 

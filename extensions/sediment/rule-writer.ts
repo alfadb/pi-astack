@@ -243,8 +243,12 @@ export function ruleBodySimilarity(a: string, b: string): number {
 }
 
 /** Default Jaccard threshold above which two rule bodies are 'the same rule
- *  restated'. 0.7 tolerates wording drift while not collapsing distinct rules. */
-export const RULE_DEDUP_SIMILARITY_THRESHOLD = 0.7;
+ *  restated'. Audit P1 (2026-06-07): 0.7 FALSE-MERGED short Chinese rules that
+ *  differ only in one salient token ('用 pnpm 管理...' vs '用 yarn 管理...' = Jaccard
+ *  0.75 — opposite tools, same boilerplate). Raised to 0.85: a false merge LOSES
+ *  a distinct rule's intent (worse), while a missed dedup only leaves a harmless
+ *  duplicate. Near-verbatim restatements still clear 0.85. */
+export const RULE_DEDUP_SIMILARITY_THRESHOLD = 0.85;
 
 /** Build the rule markdown (frontmatter + body + timeline). Assumes `draft.body`
  *  is already sanitized (writeAbrainRule runs sanitizeForMemory upstream) and

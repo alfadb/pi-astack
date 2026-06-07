@@ -389,15 +389,17 @@ export async function runCorrectionPipeline(
 
   // 6. Resolve durable + no-target signals.
   // #1 (T0 consensus 2026-06-07): a high-confidence USER-EXPRESSED durable create
-  // (the user literally stated a rule, with a verbatim quote, and there is no
-  // existing entry to UPDATE) is MAXIMALLY attributable. Parking it as an
-  // UNATTRIBUTABLE provisional hypothesis — then later re-deriving it from a lossy
-  // flattened prose string — is the bug. Suppress the staging write and tell the
-  // short-window lane to escalate this window into the full curator + multi-view
-  // path, which materializes the draft at FULL fidelity and may emit zone:rules.
-  if (shouldEscalateToCurator(signal)) {
-    result.escalateToCurator = true;
-  } else if (signal?.signal_found && signal.typing === "durable" && !signal.target_entry_slug) {
+  // ESCALATES to the full curator + multi-view lane so the short-window path can
+  // promote it at FULL fidelity (incl. zone:rules) instead of relying on a lossy
+  // flattened hypothesis. AUDIT P0 FOLLOW-UP (2026-06-07): the consensus also
+  // wanted to SUPPRESS the staging write for this class, but the curator path is
+  // NOT guaranteed to promote (extractor miss / curator skip / llm_error), so
+  // suppressing the only fallback risked SILENT LOSS — fatal in a second brain.
+  // We KEEP the staging write as a no-loss SAFETY NET; escalation is the
+  // high-fidelity primary path, staging is the fallback, and #2 write-time dedup
+  // stops the staged entry from later producing a duplicate rule.
+  if (shouldEscalateToCurator(signal)) result.escalateToCurator = true;
+  if (signal?.signal_found && signal.typing === "durable" && !signal.target_entry_slug) {
     const stagingEntry: StagingEntry = {
       slug: `provisional-${hash8(signal.user_quote ?? rawText)}`,
       status: "provisional",
@@ -427,8 +429,10 @@ export async function runCorrectionPipeline(
         "PROVISIONAL CLASSIFIER GUESS. Do NOT treat as ground truth. " +
         "The only valid use is to RESOLVE this guess (promote / attribute / refute) or let it age.",
     };
-    writeStagingEntry(stagingEntry);
-    result.stagingWritten = true;
+    // stagingWritten reflects ACTUAL IO success (audit P0 2026-06-07): the
+    // short-window escalation holds its checkpoint when the safety net did not
+    // persist, so this must not optimistically report true on a failed write.
+    result.stagingWritten = writeStagingEntry(stagingEntry);
   }
 
   // 7. Staging inflation advisory — counts ACTIVE files only (Stage 4: exclude

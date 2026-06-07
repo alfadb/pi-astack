@@ -2218,8 +2218,26 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   branchEntries: branch, sessionManager: sessMgr,
                   correctionSignal: escForwarded ?? classifierResult.signal ?? undefined,
                 });
-                // The full lane processed the window either way -> advance checkpoint.
-                await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: effectiveWindow.lastEntryId });
+                // No-loss invariant (audit P0, 2026-06-07, gpt-5.5 2 rounds): advance the
+                // checkpoint ONLY when the signal is safely CAPTURED — the curator persisted
+                // a rule (or it's a dedup hit, i.e. the rule already exists) OR the
+                // provisional staging safety net actually persisted on disk. Otherwise HOLD
+                // (retry next turn): a transient llm_error, or NOTHING captured AND staging
+                // IO failed, must not advance past a signal that is neither stored nor
+                // promoted. 'wrote' is NOT sufficient alone — the curator may have processed
+                // the window and skipped/rejected every result. The hold is bounded by the
+                // window scrolling past + (normally) the staging net.
+                const transient = auto.kind === "llm_error";
+                const captured = auto.kind === "wrote" && auto.results.some((r) =>
+                  r.status === "created" || r.status === "updated" || r.status === "merged" ||
+                  r.status === "superseded" || r.status === "archived" || r.status === "deleted" ||
+                  (r.reason ?? "").startsWith("semantic_duplicate"));
+                const safelyStaged = classifierResult.stagingWritten === true;
+                const advance = !transient && (captured || safelyStaged);
+                if (advance) {
+                  await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: effectiveWindow.lastEntryId });
+                  await recordDeferredRecoveryIfNeeded({ cwd, sessionId, window: effectiveWindow, checkpointAdvanced: true, lane: "auto_write", correlationId: shortCorrelationId });
+                }
                 if (auto.kind === "wrote") {
                   await appendAudit(cwd, {
                     operation: "auto_write", lane: "auto_write", session_id: sessionId, ...summary,
@@ -2227,20 +2245,20 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                     settings_snapshot: settingsSnapshot, entry_breakdown: entryBreakdown,
                     correlation_id: shortCorrelationId, escalated_from: "short_window_classifier_only",
                     candidate_count: auto.drafts.length, results: auto.results.map(resultSummary),
-                    curator: auto.curatorAudits, checkpoint_advanced: true, classifier_only: false, background_async: true,
+                    curator: auto.curatorAudits, checkpoint_advanced: advance, classifier_only: false, background_async: true,
                   });
                   const compact = compactResultSummary(auto.results);
                   applySedimentStatus(setStatus, sessionId, auto.results.some((r) => r.status === "rejected") ? "failed" : "completed", compact);
                   if (notify) { try { notify(formatSedimentNotify("rule escalation (bg)", auto.results, abrainHome), "info"); } catch {} }
                 } else {
                   await appendAudit(cwd, {
-                    operation: "skip", lane: "auto_write", reason: `escalation_${auto.kind}`, session_id: sessionId, ...summary,
+                    operation: "skip", lane: "auto_write", reason: `escalation_${auto.kind}${safelyStaged ? "" : "_unstaged"}`, session_id: sessionId, ...summary,
                     extractor: "active_correction_escalated", parser_version: PARSER_VERSION,
                     settings_snapshot: settingsSnapshot, entry_breakdown: entryBreakdown,
                     correlation_id: shortCorrelationId, escalated_from: "short_window_classifier_only",
-                    checkpoint_advanced: true, classifier_only: false, background_async: true,
+                    checkpoint_advanced: advance, classifier_only: false, background_async: true,
                   });
-                  applySedimentStatus(setStatus, sessionId, "completed", `escalation: ${auto.kind}`);
+                  applySedimentStatus(setStatus, sessionId, advance ? "completed" : "failed", `escalation ${auto.kind}; ${advance ? "staged as fallback" : "checkpoint held for retry"}`);
                 }
                 return;
               }
