@@ -2025,10 +2025,24 @@ async function acquireAbrainRuleLock(abrainHome: string, timeoutMs: number): Pro
 }
 
 function estimateRuleTokens(text: string): number {
-  // Approximate; the rules budget is a soft single-store bound, not a
-  // safety gate. On-disk content over-counts vs injected text (esp. listed,
-  // which injects only a hint) so this never UNDER-rejects.
-  return Math.ceil(text.length / 4);
+  // Approximate token count for the INV-R3 budget REJECT gate. A flat
+  // length/4 (Latin ~4 chars/token) UNDER-counts CJK 2-4x (audit round-2 P2) —
+  // user rules are frequently Chinese, so an under-count would falsely PASS a
+  // budget that is actually breached. CJK code points are counted at ~2
+  // tokens/char (conservative: over-estimating is the safe error for a cap),
+  // everything else stays at /4.
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    const isCjk =
+      (cp >= 0x3000 && cp <= 0x9fff) ||   // CJK symbols + kana + unified ideographs
+      (cp >= 0xac00 && cp <= 0xd7a3) ||   // Hangul syllables
+      (cp >= 0xf900 && cp <= 0xfaff) ||   // CJK compatibility ideographs
+      (cp >= 0x20000 && cp <= 0x2ffff);   // CJK unified ext-B..F (supplementary)
+    if (isCjk) cjk++; else other++;
+  }
+  return Math.ceil(cjk * 2 + other / 4);
 }
 
 /** INV-R3 budget: sum existing tier-dir token footprint + the new entry; over
@@ -2204,6 +2218,17 @@ export async function archiveAbrainRule(
     patched = `${patched.trimEnd()}\n- ${ts} | ${sessionId || "sediment"} | archived | ${reason.replace(/\n/g, " ")}\n`;
     await atomicWrite(found.path, patched);
     const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:archive") : null;
+    // Audit round-2 P0 (2026-06-07): git-failure rollback parity with
+    // writeAbrainRule. Without it a failed commit left the file status-patched
+    // + staged in the index and returned "archived" — the next successful
+    // sediment write would carry the dirty archive as a ghost commit.
+    if (git === null && opts.settings.gitCommit) {
+      const rel = path.relative(abrainHome, found.path);
+      try { await atomicWrite(found.path, raw); } catch { /* best-effort restore of pre-archive content */ }
+      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
+      const auditPath = await audit({ operation: "reject", op: "archive", reason: "git_commit_failed" });
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    }
     const auditPath = await audit({ operation: "archive", tier: found.tier, target: path.relative(abrainHome, found.path), git_commit: git, reason });
     return { slug, path: found.path, status: "archived", tier: found.tier, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
   } catch (e: unknown) {
@@ -2237,8 +2262,20 @@ export async function deleteAbrainRule(
   let lock: LockHandle | undefined;
   try {
     lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    // Audit round-2 P0 (2026-06-07): capture the original content BEFORE unlink so
+    // a git-commit failure can restore the file. Previously delete unlinked first,
+    // then on git failure returned "deleted" with the file already gone + the
+    // deletion staged — unrecoverable data loss + a ghost deletion in the next commit.
+    const originalRaw = await fs.readFile(found.path, "utf-8");
     await fs.unlink(found.path);
     const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:delete") : null;
+    if (git === null && opts.settings.gitCommit) {
+      const rel = path.relative(abrainHome, found.path);
+      try { await atomicWrite(found.path, originalRaw); } catch { /* best-effort restore of deleted file */ }
+      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
+      const auditPath = await audit({ operation: "reject", op: "delete", reason: "git_commit_failed" });
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    }
     const auditPath = await audit({ operation: "delete", tier: found.tier, target: path.relative(abrainHome, found.path), git_commit: git });
     return { slug, path: found.path, status: "deleted", tier: found.tier, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
   } catch (e: unknown) {

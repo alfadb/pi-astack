@@ -104,6 +104,14 @@ export function sanitizeRuleHint(raw: unknown): HintResult {
   //     `<!\u200B--` defeats the comment check). The hint rides into every
   //     session's system prompt, so the strip must precede every structural test.
   s = s.replace(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F\uFEFF]/g, "");
+  // (1) strip markdown links/images BEFORE the structural rejects too. Audit
+  //     round-2 P1 (2026-06-07): the strip running AFTER the checks let a link
+  //     placed INSIDE a forbidden token reassemble it post-strip — e.g.
+  //     `` ``[a](b)` `` passes the fence check (no ```), then the strip deletes
+  //     `[a](b)` leaving ```` ``` ````. This fires on benign content too
+  //     (ruleHintFallback derives hints from body lines with links + backticks).
+  //     Stripping first makes the checks see the reassembled string.
+  s = s.replace(/!?\[[^\]]*\]\([^)]*\)/g, "");
   // (2) control chars incl. \n \r \t, ANSI ESC (\x1B), DEL + C1 -> reject (hint is single-line)
   if (/[\u0000-\u001F\u007F-\u009F]/.test(s)) return { ok: false, reason: "control_char" };
   // (3) HTML comment + abrain section markers -> reject (injection-section breakout)
@@ -114,8 +122,6 @@ export function sanitizeRuleHint(raw: unknown): HintResult {
   if (/(^|\s)(system|assistant|developer)\s*:|ignore previous|run tool|调用工具/i.test(s)) {
     return { ok: false, reason: "role_pseudo_instruction" };
   }
-  // (4) strip markdown links / images
-  s = s.replace(/!?\[[^\]]*\]\([^)]*\)/g, "");
   s = s.trim();
   // (1) length: > 120 reject; else truncate to 80 + ellipsis
   if (s.length > HINT_HARD_REJECT_CODE_UNITS) return { ok: false, reason: "hint_too_long" };

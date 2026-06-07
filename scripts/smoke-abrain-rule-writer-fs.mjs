@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti/static";
 
@@ -196,6 +197,44 @@ await check("e2e: project rules-create routes to projects/<id>/rules + archive r
     projectRoot: home, abrainHome: home, projectId: "pi-global", settings: SETTINGS,
   });
   assert(res[0].status === "archived", `e2e archive routed to rule writer: ${JSON.stringify(res[0])}`);
+});
+
+// ── audit round-2 P0: archive/delete roll back on git-commit failure ────────
+function gitHomeWithFailingCommit() {
+  const home = freshHome();
+  execFileSync("git", ["-C", home, "init", "-q"]);
+  execFileSync("git", ["-C", home, "config", "user.email", "smoke@test"]);
+  execFileSync("git", ["-C", home, "config", "user.name", "smoke"]);
+  const hookDir = path.join(home, ".git", "hooks");
+  fs.mkdirSync(hookDir, { recursive: true });
+  fs.writeFileSync(path.join(hookDir, "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  return home;
+}
+const GIT_SETTINGS = { gitCommit: true, lockTimeoutMs: 5000 };
+
+await check("archive: git-commit failure rolls back (file stays active, status rejected)", async () => {
+  const home = gitHomeWithFailingCommit();
+  // seed without git so a file exists on disk
+  await writeAbrainRule({ ...baseDraft, title: "Rollback me", body: "this rule must survive a failed archive commit", tier: "listed", scope: "global", kind: "pattern" }, { abrainHome: home, settings: SETTINGS });
+  const fp = path.join(home, "rules", "listed", "rollback-me.md");
+  const before = fs.readFileSync(fp, "utf-8");
+  const r = await archiveAbrainRule("rollback-me", "global", undefined, { abrainHome: home, settings: GIT_SETTINGS, reason: "x" });
+  assert(r.status === "rejected" && r.reason === "git_commit_failed", `archive should reject on git fail: ${JSON.stringify(r)}`);
+  assert(fs.existsSync(fp), "file still present after rolled-back archive");
+  const after = fs.readFileSync(fp, "utf-8");
+  assert(!/status:\s*"?archived"?/.test(after), `status must be restored (not archived): ${after.split("\n").find((l) => l.startsWith("status"))}`);
+  assert(after === before, "content byte-identical to pre-archive");
+});
+
+await check("delete: git-commit failure restores the unlinked file (status rejected)", async () => {
+  const home = gitHomeWithFailingCommit();
+  await writeAbrainRule({ ...baseDraft, title: "Keep me", body: "this rule must survive a failed delete commit", tier: "listed", scope: "global", kind: "pattern" }, { abrainHome: home, settings: SETTINGS });
+  const fp = path.join(home, "rules", "listed", "keep-me.md");
+  const before = fs.readFileSync(fp, "utf-8");
+  const r = await deleteAbrainRule("keep-me", "global", undefined, { abrainHome: home, settings: GIT_SETTINGS });
+  assert(r.status === "rejected" && r.reason === "git_commit_failed", `delete should reject on git fail: ${JSON.stringify(r)}`);
+  assert(fs.existsSync(fp), "unlinked file restored after rolled-back delete");
+  assert(fs.readFileSync(fp, "utf-8") === before, "restored content byte-identical");
 });
 
 if (failures.length) {

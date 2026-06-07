@@ -126,6 +126,17 @@ check("sanitizeRuleHint: zero-width can NOT be interleaved to evade structural r
   assert(!rw.sanitizeRuleHint("a\u007Fb").ok, "DEL control char reject");
   assert(!rw.sanitizeRuleHint("a\u0085b").ok, "C1 (NEL) control char reject");
 });
+check("sanitizeRuleHint: a markdown link can NOT be used to reassemble a forbidden token (audit round-2 P1)", () => {
+  // the link strip runs BEFORE the structural rejects, so a link placed inside
+  // a fence/comment/role token no longer survives by post-strip reassembly.
+  assert(!rw.sanitizeRuleHint("a``[x](y)`b").ok, "link-reassembled fence must reject");
+  assert(!rw.sanitizeRuleHint("p <!-[x](y)- q").ok, "link-reassembled html comment open must reject");
+  assert(!rw.sanitizeRuleHint("BEGIN_ABRAIN[x](y)_RULES").ok, "link-reassembled section marker must reject");
+  assert(!rw.sanitizeRuleHint("system[x](y): do z").ok, "link-reassembled role pseudo must reject");
+  // a benign link is still stripped and the hint passes
+  const ok = rw.sanitizeRuleHint("see [docs](http://x) here");
+  assert(ok.ok && !ok.clean.includes("http") && !ok.clean.includes("]("), `benign link strip still ok: ${JSON.stringify(ok)}`);
+});
 
 // ── ruleHintFallback ────────────────────────────────────────────────────────
 check("ruleHintFallback: skips fence/heading, returns first real line stripped", () => {
