@@ -47,7 +47,8 @@ import {
   summarizeLlmExtractorResult,
   type LlmExtractorResult,
 } from "./llm-extractor";
-import { runCorrectionPipeline, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
+import { runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
+import { ruleBodySimilarity, normalizeRuleBodyTokens, RULE_DEDUP_SIMILARITY_THRESHOLD } from "./rule-writer";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
 import { collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug } from "./outcome-collector";
@@ -3155,6 +3156,42 @@ function sanitizeAndTruncateRawForAudit(
 }
 
 /**
+ * Build a thin rules CANDIDATE draft from a high-confidence durable
+ * user-EXPRESSED correction signal (design consensus 2026-06-07, 3xT0
+ * opus-4-8/gpt-5.5/deepseek-v4-pro). This does NOT bypass the curator: it only
+ * guarantees the durable rule reaches curateProjectDraft so the rules-trust
+ * taxonomy + create_rules_zone 2-pass review decide create-vs-skip and
+ * zone/tier/ruleScope, instead of the rule being silently dropped when the
+ * general extractor emits no draft for it (GAP B). The body LEADS with the
+ * VERBATIM user_quote (maximally attributable); scope_description is a classifier
+ * paraphrase used only as the candidate title/summary and as a fallback to pad a
+ * terse quote past writeAbrainRule's min-body gate. The curator decides
+ * zone/tier/ruleScope; kind stays the candidate kind ("preference" is valid for
+ * rules — rules inject by tier, not kind — and the curator does not re-judge it).
+ */
+function buildEscalationSeedDraft(signal: CorrectionSignal, sessionId: string): ProjectEntryDraft {
+  // typeof guards: parse should type these as strings, but a malformed signal
+  // must not throw on .trim() inside the background lane (audit P2).
+  const quote = (typeof signal.user_quote === "string" ? signal.user_quote : "").trim();
+  const scope = (typeof signal.scope_description === "string" ? signal.scope_description : "").trim();
+  // writeAbrainRule rejects a body < 10 code units (validation_error_body) and
+  // many durable rules are terse ("用 glab"). Lead with the verbatim directive;
+  // when it is too short to stand alone, append the classifier scope elaboration
+  // so the body is self-contained without sacrificing attribution (audit P1).
+  const compiledTruth = quote.length >= 10 ? quote : [quote, scope].filter(Boolean).join("\n\n");
+  return {
+    title: (scope || quote).slice(0, 200),
+    kind: "preference",
+    compiledTruth,
+    summary: scope || undefined,
+    status: "active",
+    confidence: signal.confidence,
+    sessionId,
+    timelineNote: "seeded from active-correction escalation (durable user-expressed rule)",
+  };
+}
+
+/**
  * Run the LLM auto-write lane end-to-end. The function performs all
  * gate checks, runs the LLM extractor when enabled, and applies
  * `previewExtraction` plus the curator loop so compliant candidates
@@ -3290,6 +3327,45 @@ async function tryAutoWriteLane(args: {
   const compliantDrafts: ProjectEntryDraft[] = fullDrafts.filter(
     (_, i) => schemaPreview.drafts[i]?.validationErrors.length === 0,
   );
+
+  // Rule-escalation seed (design consensus 2026-06-07, 3xT0). A high-confidence
+  // user-EXPRESSED durable CREATE signal must reach the curator EVEN WHEN the
+  // general extractor produced no draft covering it (GAP B) — otherwise the rule
+  // is silently dropped and only a provisional staging entry survives. Seeding at
+  // this single chokepoint (all three lane callers funnel through tryAutoWriteLane
+  // with the signal already forwarded) ALSO dissolves the window-size gating
+  // (GAP A) with no caller edits. Suppressed when an extractor draft already
+  // covers the same rule (cheap in-memory token-set Jaccard) to avoid a double
+  // curator call + self-dedup. The curator + create_rules_zone 2-pass review +
+  // write-time findSimilarRuleSlug dedup remain the gates (this never force-writes
+  // a rule; the curator can still skip).
+  const escSig = args.correctionSignal;
+  if (escSig && shouldEscalateToCurator(escSig)) {
+    const seedBody = (typeof escSig.user_quote === "string" ? escSig.user_quote : "").trim();
+    // Attribution guard (audit P1, refined by convergence audit 2026-06-07): only
+    // seed when the claimed verbatim quote is GROUNDED in this window via
+    // punctuation-insensitive token-subset containment (normalizeRuleBodyTokens
+    // drops markdown/punctuation + lowercases). A raw whitespace-only substring
+    // check false-rejected legitimate CJK rules on trivial fullwidth/ascii or
+    // markdown variance (the feature's target population); token containment
+    // tolerates that while still blocking a paraphrase/hallucination whose content
+    // tokens are absent from the window. Ungrounded -> provisional staging net.
+    const qTokens = normalizeRuleBodyTokens(seedBody);
+    const wTokens = normalizeRuleBodyTokens(window.text);
+    const grounded = qTokens.size > 0 && [...qTokens].every((t) => wTokens.has(t));
+    const alreadyCovered = compliantDrafts.some(
+      (d) => ruleBodySimilarity(seedBody, d.compiledTruth ?? "") >= RULE_DEDUP_SIMILARITY_THRESHOLD,
+    );
+    if (grounded && !alreadyCovered) {
+      const seed = buildEscalationSeedDraft(escSig, sessionId);
+      // Do not emit a draft writeAbrainRule would reject for an under-length body
+      // (validation_error_body, < 10 CU) — that would burn a curator call and, on
+      // the optimistic-advance long/drain lanes, risk advancing past an unwritten
+      // rule. When the body cannot be made valid, the provisional staging entry is
+      // the no-loss net (audit P1: gpt-5.5 + deepseek).
+      if (seed.compiledTruth.trim().length >= 10) compliantDrafts.push(seed);
+    }
+  }
 
   if (compliantDrafts.length === 0) {
     return {
