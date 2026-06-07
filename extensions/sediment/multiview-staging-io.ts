@@ -400,6 +400,49 @@ export function deleteMultiviewPending(slug: string): boolean {
   }
 }
 
+/**
+ * Soft-archive a multiview-pending entry instead of deleting it
+ * (mechanical-guard cleanup R3/B1, 2026-06-06). Used by the replay
+ * routine's terminal BUDGET/age/trigger-vanished paths so a candidate the
+ * LLM extracted but multi-view could not synthesize is PRESERVED for
+ * inspection rather than permanently lost. Reviewer-DECIDED skips
+ * (approved_decision.op==="skip" / replay op=skip) keep using
+ * deleteMultiviewPending — those received a real disposition.
+ *
+ * Mechanism: atomic rename into <STAGING_DIR>/abandoned/. The live-dir
+ * readers (loadMultiviewPending / countMultiviewPending / staging-loader
+ * loadStagingContext) all read STAGING_DIR with a flat, NON-recursive
+ * `readdirSync().filter(endsWith(".json"))`, so the `abandoned/` subdir is
+ * naturally excluded (a directory name does not end in ".json") and an
+ * archived entry is never re-picked-up. A failed move leaves the original
+ * intact so the caller can fall back to an audit-only row.
+ */
+export function archiveMultiviewPending(slug: string): boolean {
+  const dir = stagingDir();
+  if (!fs.existsSync(dir)) return false;
+  const suffix = `-${slug}.json`;
+  const abandonedDir = path.join(dir, "abandoned");
+
+  try {
+    const matches = fs.readdirSync(dir).filter((f) => f.endsWith(suffix));
+    if (matches.length === 0) return false;
+
+    let movedAny = false;
+    for (const f of matches) {
+      try {
+        fs.mkdirSync(abandonedDir, { recursive: true });
+        fs.renameSync(path.join(dir, f), path.join(abandonedDir, f));
+        movedAny = true;
+      } catch {
+        // continue trying others; a failed move leaves the original intact
+      }
+    }
+    return movedAny;
+  } catch {
+    return false;
+  }
+}
+
 // ── Update (replay attempt accounting) ───────────────────────────────
 
 const WRITER_ERROR_CAP = 1000;

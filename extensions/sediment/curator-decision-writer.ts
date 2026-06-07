@@ -6,9 +6,14 @@ import {
   supersedeProjectEntry,
   updateProjectEntry,
   writeProjectEntry,
+  writeAbrainRule,
+  archiveAbrainRule,
+  deleteAbrainRule,
+  findRuleFile,
   type ProjectEntryDraft,
   type WriteProjectEntryOptions,
   type WriteProjectEntryResult,
+  type WriteRuleResult,
   type WriterAuditContext,
 } from "./writer";
 import type { SedimentSettings } from "./settings";
@@ -76,6 +81,53 @@ export async function executeCuratorDecisionToBrain(args: {
       correlationId: auditContext?.correlationId,
       candidateId: auditContext?.candidateId,
     }];
+  }
+
+  // ADR 0023 W2: route rules-zone ops to the rule writers (writeAbrainRule /
+  // archiveAbrainRule / deleteAbrainRule) instead of the entries writer. CREATE
+  // is keyed on decision.zone==="rules"; lifecycle ops are keyed on whether the
+  // target slug resolves to an existing rule file (neighbor-lane routing). The
+  // WriteRuleResult is adapted to the shared WriteProjectEntryResult shape.
+  const ruleResult = (r: WriteRuleResult): WriteProjectEntryResult => ({
+    slug: r.slug, path: r.path, status: r.status, reason: r.reason, gitCommit: r.gitCommit,
+    auditPath: r.auditPath, lane: r.lane ?? auditContext?.lane, sessionId: r.sessionId ?? sessionId,
+    correlationId: r.correlationId, candidateId: r.candidateId,
+  });
+  const ruleOpts = { abrainHome, settings, dryRun, auditContext };
+  const resolveRuleLifecycleScope = (slug: string): "global" | "project" | null => {
+    if (findRuleFile(abrainHome, "global", undefined, slug)) return "global";
+    if (findRuleFile(abrainHome, "project", projectId, slug)) return "project";
+    return null;
+  };
+
+  if (decision.op === "create" && decision.zone === "rules") {
+    const r = await writeAbrainRule({
+      title: draft.title,
+      body: draft.compiledTruth,
+      zone: "rules",
+      tier: decision.tier ?? "listed",
+      scope: decision.ruleScope === "project" ? { projectId } : "global",
+      kind: draft.kind,
+      entryConfidence: typeof draft.confidence === "number" ? draft.confidence : 5,
+      routingConfidence: 0.8,
+      routingReason: decision.rationale ?? args.createTimelineNote ?? "promoted by sediment classifier",
+      triggerPhrases: draft.triggerPhrases,
+      derivesFrom: decision.derives_from,
+      status: draft.status,
+      sessionId,
+    }, ruleOpts);
+    return [ruleResult(r)];
+  }
+  if (decision.op === "archive" || decision.op === "delete") {
+    const ruleScope = resolveRuleLifecycleScope(decision.slug);
+    if (ruleScope) {
+      const pid = ruleScope === "project" ? projectId : undefined;
+      const reason = decision.reason || decision.rationale || (decision.op === "archive" ? args.archiveReason : args.deleteReason) || `${decision.op}d by sediment classifier`;
+      const r = decision.op === "archive"
+        ? await archiveAbrainRule(decision.slug, ruleScope, pid, { ...ruleOpts, reason })
+        : await deleteAbrainRule(decision.slug, ruleScope, pid, { ...ruleOpts, reason });
+      return [ruleResult(r)];
+    }
   }
 
   const writerOpts = (scope: "world" | undefined): WriteProjectEntryOptions => ({

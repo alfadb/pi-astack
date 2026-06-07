@@ -138,6 +138,25 @@ function transpileExtensions(outRoot) {
     count++;
   }
 
+  // ADR 0023 D5: sediment/rule-writer.ts imports ../abrain/redact (self-
+  // contained, only node:os). Stage it so sediment/writer.ts (which now
+  // imports rule-writer) resolves under smoke:memory's partial tree.
+  {
+    const srcPath = path.join(extRoot, "abrain", "redact.ts");
+    const outPath = path.join(outRoot, "abrain", "redact.js");
+    const transpiled = ts.transpileModule(fs.readFileSync(srcPath, "utf-8"), {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.CommonJS,
+        moduleResolution: ts.ModuleResolutionKind.NodeJs,
+        esModuleInterop: true,
+        skipLibCheck: true,
+      },
+    });
+    writeFile(outPath, transpiled.outputText);
+    count++;
+  }
+
   // Minimal typebox subset for registerTool schemas.
   //
   // Keep this in sync with `Type.<Method>` usage across extensions/*/index.ts.
@@ -617,7 +636,7 @@ async function main() {
       process.env.ABRAIN_ROOT = stagingRoot;
       try {
         const { writeStagingEntry, loadStagingContext, stagingFileCount, stagingDir } = req("./sediment/staging-loader.js");
-        const { writeMultiviewPending, loadMultiviewPending, countMultiviewPending, deleteMultiviewPending } = req("./sediment/multiview-staging-io.js");
+        const { writeMultiviewPending, loadMultiviewPending, countMultiviewPending, deleteMultiviewPending, archiveMultiviewPending } = req("./sediment/multiview-staging-io.js");
         const expectedDir = path.join(stagingRoot, ".state", "sediment", "staging");
         assert(stagingDir() === expectedDir, `stagingDir should honor ABRAIN_ROOT: ${stagingDir()} vs ${expectedDir}`);
         writeStagingEntry({
@@ -656,6 +675,34 @@ async function main() {
         assert(pending.entries.length === 1 && pending.entries[0].slug === "multiview-pending-smoke", `loadMultiviewPending should see only multiview entry: ${JSON.stringify(pending)}`);
         assert(loadStagingContext().entries.some((entry) => entry.slug === "provisional-smoke"), `provisional loader should ignore multiview co-tenant and keep provisional`);
         assert(deleteMultiviewPending("multiview-pending-smoke") === true, `deleteMultiviewPending should delete from ABRAIN_ROOT dir`);
+
+        // mechanical-guard cleanup R3/B1 (2026-06-06): archiveMultiviewPending
+        // soft-archives (atomic rename -> abandoned/ subdir) instead of
+        // deleting; the live loaders must skip the abandoned/ subdir so an
+        // archived entry is preserved but never re-picked-up.
+        writeMultiviewPending({
+          slug: "multiview-pending-archive-smoke",
+          kind: "multiview-pending",
+          created: new Date().toISOString(),
+          updated: new Date().toISOString(),
+          originating_device: "smoke",
+          multiview_state: "reviewer_unavailable",
+          retry_attempts: 0,
+          trigger_reason: "create_high_confidence",
+          proposer_decision: { op: "create", rationale: "smoke" },
+          proposer_raw_text: "smoke",
+          candidate_snapshot: { title: "Archive Smoke", kind: "fact", status: "active", confidence: 8, compiledTruth: "Archive smoke candidate." },
+          correction_signal: null,
+          neighbor_slugs: [],
+        });
+        assert(countMultiviewPending() === 1, `archive smoke: live count should be 1 before archive`);
+        assert(archiveMultiviewPending("multiview-pending-archive-smoke") === true, `archiveMultiviewPending should move the entry`);
+        assert(countMultiviewPending() === 0, `archive smoke: live count should be 0 after archive (abandoned/ excluded)`);
+        assert(!loadMultiviewPending().entries.some((e) => e.slug === "multiview-pending-archive-smoke"), `archived entry must not be re-picked-up by loadMultiviewPending`);
+        const abandonedDir = path.join(stagingDir(), "abandoned");
+        const archivedFiles = fs.existsSync(abandonedDir) ? fs.readdirSync(abandonedDir).filter((f) => f.endsWith("-multiview-pending-archive-smoke.json")) : [];
+        assert(archivedFiles.length === 1, `archived file must be preserved under abandoned/, got ${JSON.stringify(archivedFiles)}`);
+        assert(archiveMultiviewPending("multiview-pending-archive-smoke") === false, `second archive should be a no-op (already moved out of live dir)`);
 
         writeMultiviewPending({
           slug: "multiview-pending-origin-smoke",
@@ -1771,20 +1818,15 @@ END_MEMORY`;
         // update/merge/archive/supersede/delete schemas now include
         // "scope"?: "world" — was previously only on create.
         '"scope"?: "world"',
-        // 2026-05-15 audit fix: create scope binding directive
-        // (forbid leaking project-scope derives_from into world create,
-        // forbid inventing derivation slugs). Mirror in parseDecision
-        // hard-rejects; prompt must announce the constraint.
+        // 2026-05-15 audit fix: create scope binding directive. The
+        // invented-slug HARD CONSTRAINT is kept; the world-from-non-world
+        // derivation ban was REMOVED 2026-06-06 (mechanical-guard cleanup R1)
+        // and replaced with cross-scope auto-qualification guidance.
         "HARD CONSTRAINT (2026-05-15)",
         "every derives_from slug MUST be one of the neighbor slugs",
-        "every derives_from neighbor MUST also be world-scope",
-        // Round-3 prompt hardening after pi-global audit row 22:32:
-        // curator correctly saw a cross-project preference (scope:world)
-        // but incorrectly attached derives_from to a project-scope neighbor.
-        // The decoder now emits a typed reason code; the prompt should
-        // steer the LLM to omit derives_from up front.
-        "If the candidate is world-scope but the only related/upstream neighbors are project-scope or workflow-scope, OMIT derives_from",
-        "Correct output is {\"op\":\"create\", \"scope\":\"world\", \"rationale\":...} with no derives_from",
+        // R1/A1 (2026-06-06): cross-scope provenance is now allowed and
+        // auto-qualified; the prompt announces this instead of the old ban.
+        "auto-qualifies that edge to project:<id>:slug",
       ];
       for (const needle of curatorRequired) {
         assert(cp.includes(needle), `curator prompt missing required marker: ${JSON.stringify(needle)}`);
@@ -1834,32 +1876,51 @@ END_MEMORY`;
       assert(p({ op: "create", derives_from: ["project-fact-x"] }).op === "create", "project<-project ok");
       assert(p({ op: "create", derives_from: ["world-maxim-a"] }).op === "create", "project<-world ok (legit specialization)");
 
-      // world create may only derive from world
+      // world create may now derive from ANY scope (mechanical-guard cleanup
+      // R1/A1, 2026-06-06): the former world_create_from_non_world_source throw
+      // was removed. parseDecision keeps the edge BARE; qualifyCrossScopeEdges
+      // (asserted below) does the scoped-prefix rewrite at the curate layer.
       assert(p({ op: "create", scope: "world", derives_from: ["world-maxim-a"] }).scope === "world", "world<-world ok");
-      expectThrows({ op: "create", scope: "world", derives_from: ["project-fact-x"] }, "cannot derive from project-scope");
-      expectThrows({ op: "create", scope: "world", derives_from: ["world-maxim-a", "project-fact-x"] }, "project-fact-x");
+      {
+        const r = p({ op: "create", scope: "world", derives_from: ["project-fact-x"] });
+        assert(r.op === "create" && r.scope === "world", "world<-project now parses (no throw)");
+        assert(JSON.stringify(r.derives_from) === JSON.stringify(["project-fact-x"]), `parseDecision keeps derives_from bare, got ${JSON.stringify(r.derives_from)}`);
+      }
+      assert(p({ op: "create", scope: "world", derives_from: ["world-maxim-a", "project-fact-x"] }).op === "create", "world<-mixed now parses (no throw)");
 
       // hallucinated slugs rejected on both project and world create
       expectThrows({ op: "create", derives_from: ["invented-slug"] }, "not an allowed neighbor");
       expectThrows({ op: "create", scope: "world", derives_from: ["made-up"] }, "not an allowed neighbor");
 
-      // === round-3 reason-code coverage (2026-05-19, pi-global audit row 22:32) =====
-      // Pi-global audit row 22:32:00 captured curator picking
-      //   {op:"create", scope:"world", derives_from:["<project-scope neighbor>"]}
-      // for a candidate user preference. The world-from-non-world guard
-      // fired, but the audit row's reason was generic `curator_error`
-      // because the throw at create-derives_from was still plain Error.
-      // Round-3 typed it; smoke now pins:
-      expectCode(
-        { op: "create", scope: "world", derives_from: ["project-fact-x"] },
-        "world_create_from_non_world_source",
-        "world create from project-scope source",
-      );
-      expectCode(
-        { op: "create", scope: "world", derives_from: ["world-maxim-a", "project-fact-x"] },
-        "world_create_from_non_world_source",
-        "world create from mixed sources (project triggers)",
-      );
+      // === qualifyCrossScopeEdges: cross-scope provenance is QUALIFIED, not rejected =====
+      // (mechanical-guard cleanup R1, 2026-06-06) The former
+      // world_create_from_non_world_source guard is gone. A world create that
+      // derives from a project precursor is kept as honest provenance and the
+      // edge is qualified to project:<id>:slug at the curate layer.
+      {
+        const { qualifyCrossScopeEdges } = req("./sediment/curator.js");
+        const q = qualifyCrossScopeEdges(
+          p({ op: "create", scope: "world", derives_from: ["project-fact-x"] }),
+          neighbors,
+          "pi-global",
+        );
+        assert(JSON.stringify(q.derives_from) === JSON.stringify(["project:pi-global:project-fact-x"]),
+          `world<-project edge should be qualified to project:pi-global:project-fact-x, got ${JSON.stringify(q.derives_from)}`);
+        const q2 = qualifyCrossScopeEdges(
+          p({ op: "create", scope: "world", derives_from: ["world-maxim-a"] }),
+          neighbors,
+          "pi-global",
+        );
+        assert(JSON.stringify(q2.derives_from) === JSON.stringify(["world-maxim-a"]),
+          `world<-world edge should stay bare, got ${JSON.stringify(q2.derives_from)}`);
+        const q3 = qualifyCrossScopeEdges(
+          p({ op: "create", scope: "world", derives_from: ["project-fact-x"] }),
+          neighbors,
+          undefined,
+        );
+        assert(JSON.stringify(q3.derives_from) === JSON.stringify(["project-fact-x"]),
+          `projectId undefined -> project slug stays bare, got ${JSON.stringify(q3.derives_from)}`);
+      }
 
       // invented_neighbor_slug across every op that accepts a slug.
       expectCode(
@@ -1877,11 +1938,10 @@ END_MEMORY`;
         "invented_neighbor_slug",
         "merge target invented",
       );
-      // target = legit project neighbor (passes validateScope without
-      // scope:"world"); source = invented — trips invented_neighbor_slug
-      // BEFORE validateScope source loop. (If we used a world target
-      // here without scope:"world", scope_mismatch_project_on_world_neighbor
-      // would fire first on the target and we'd be testing the wrong code.)
+      // target = legit project neighbor; source = invented — trips
+      // invented_neighbor_slug BEFORE the scope loop. (Post-R2 the scope
+      // check auto-corrects instead of throwing, but invented_neighbor_slug
+      // still fires first, so this still pins the invented-source path.)
       expectCode(
         { op: "merge", target: "project-fact-x", sources: ["made-up"], compiled_truth: "x", timeline_note: "n" },
         "invented_neighbor_slug",
@@ -2099,31 +2159,42 @@ END_MEMORY`;
         "supersede-new",
       );
 
-      // 3c. scope-mismatch rejects also carry typed codes (regression
-      //     guard for the typed-error refactor — ensures we did not
-      //     accidentally widen workflow_lane_read_only to cover plain
-      //     scope mismatches).
+      // 3c. scope-mismatch is now AUTO-CORRECTED, not rejected (mechanical-
+      //     guard cleanup R2/A2, 2026-06-06): the neighbor's physical scope is
+      //     ground truth, so parseDecision threads effectiveScopeFor(slug) into
+      //     the op's scope. The former scope_mismatch_* throws are gone.
       const mixedNeighbors = new Map([
         ["world-only", "world"],
         ["project-only", "project"],
       ]);
       const pm = (obj) => parseDecision(JSON.stringify(obj), mixedNeighbors);
-      const expectCode = (obj, expectedCode, label) => {
-        let err = null;
-        try { pm(obj); } catch (e) { err = e; }
-        assert(err && err instanceof CuratorRejectError, `${label} should throw CuratorRejectError, got: ${err && err.constructor && err.constructor.name}`);
-        assert(err.code === expectedCode, `${label} code should be '${expectedCode}', got: '${err.code}'`);
-      };
-      expectCode(
-        { op: "update", scope: "world", slug: "project-only", patch: {}, timeline_note: "x" },
-        "scope_mismatch_world_on_non_world_neighbor",
-        "scope:world on project neighbor",
-      );
-      expectCode(
-        { op: "update", slug: "world-only", patch: {}, timeline_note: "x" },
-        "scope_mismatch_project_on_world_neighbor",
-        "omitted scope on world neighbor",
-      );
+      // curator declared scope:world on a PROJECT neighbor -> auto-corrected to
+      // project (scope omitted) so the writer routes to the project store.
+      {
+        const r = pm({ op: "update", scope: "world", slug: "project-only", patch: {}, timeline_note: "x" });
+        assert(r.op === "update" && r.scope === undefined, `scope:world on project neighbor should auto-correct to project (scope undefined), got ${JSON.stringify(r.scope)}`);
+      }
+      // curator omitted scope on a WORLD neighbor -> auto-corrected to world.
+      {
+        const r = pm({ op: "update", slug: "world-only", patch: {}, timeline_note: "x" });
+        assert(r.op === "update" && r.scope === "world", `omitted scope on world neighbor should auto-correct to world, got ${JSON.stringify(r.scope)}`);
+      }
+      // R2/F2 (2026-06-06): merge across mixed scopes is malformed (one store).
+      {
+        let mErr = null;
+        try { pm({ op: "merge", target: "world-only", sources: ["project-only"], compiled_truth: "x", timeline_note: "n" }); } catch (e) { mErr = e; }
+        assert(mErr instanceof CuratorRejectError && mErr.code === "malformed_curator_op",
+          `merge across mixed scopes should reject malformed_curator_op, got ${mErr && mErr.code}`);
+      }
+      // R1/R2 (2026-06-06): supersede on a world neighbor auto-corrects scope to
+      // world AND qualifies a cross-scope (project) newSlug edge.
+      {
+        const { qualifyCrossScopeEdges: qEdgesSup } = req("./sediment/curator.js");
+        const sup = pm({ op: "supersede", old_slug: "world-only", new_slug: "project-only", reason: "x" });
+        assert(sup.op === "supersede" && sup.scope === "world", `supersede on world neighbor should auto-correct scope to world, got ${JSON.stringify(sup.scope)}`);
+        const supQ = qEdgesSup(sup, mixedNeighbors, "pi-global");
+        assert(supQ.newSlug === "project:pi-global:project-only", `supersede cross-scope newSlug should qualify to project:pi-global:project-only, got ${JSON.stringify(supQ.newSlug)}`);
+      }
 
       // 4. op=skip is unaffected (workflow can be cited in skip rationale)
       const skipOk = pWf({ op: "skip", reason: "workflow already covers", rationale: "run-when-releasing Task 4 covers this" });
@@ -2135,12 +2206,17 @@ END_MEMORY`;
       assert(createOk.op === "create" && createOk.derives_from && createOk.derives_from[0] === "run-when-releasing",
         `create with derives_from:[workflow-slug] should pass: ${JSON.stringify(createOk)}`);
 
-      // 6. world create cannot derive from workflow (error message should
-      //    name 'workflow-scope', not 'project-scope', as before the fix)
-      let wcThrew = false; let wcMsg = "";
-      try { pWf({ op: "create", scope: "world", derives_from: ["run-when-releasing"] }); } catch (e) { wcThrew = true; wcMsg = e.message; }
-      assert(wcThrew, "world create with workflow derives_from should throw");
-      assert(wcMsg.includes("workflow-scope"), `world<-workflow error should mention workflow-scope, got: ${wcMsg}`);
+      // 6. world create CAN now derive from workflow (mechanical-guard cleanup
+      //    R1/A1, 2026-06-06): the former world_create_from_non_world_source
+      //    throw was removed. parseDecision keeps the edge bare;
+      //    qualifyCrossScopeEdges later rewrites it to workflow:<slug>.
+      const wcOk = pWf({ op: "create", scope: "world", derives_from: ["run-when-releasing"] });
+      assert(wcOk.op === "create" && wcOk.scope === "world" && wcOk.derives_from[0] === "run-when-releasing",
+        `world<-workflow create should now pass with bare edge: ${JSON.stringify(wcOk)}`);
+      const { qualifyCrossScopeEdges: qEdgesWf } = req("./sediment/curator.js");
+      const wcQ = qEdgesWf(wcOk, new Map([["run-when-releasing", "workflow"]]), "pi-global");
+      assert(wcQ.derives_from[0] === "workflow:run-when-releasing",
+        `world<-workflow edge should qualify to workflow:run-when-releasing, got ${JSON.stringify(wcQ.derives_from)}`);
     }
 
     // === end-to-end: workflow neighbor flows through parser → lane label ===

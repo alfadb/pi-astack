@@ -135,8 +135,8 @@ writeRule(
 );
 writeRule(
   path.join(projectDir, "rules", "listed", "low-conf.md"),
-  { title: "Low Conf", kind: "pattern", status: "active", confidence: 4, hint: "should not show" },
-  "# Low Conf\n\nshould not show",
+  { title: "Low Conf", kind: "pattern", status: "active", confidence: 4, hint: "low-confidence rule, shows with provisional label" },
+  "# Low Conf\n\nlow-confidence rule body",
 );
 
 const fakeBound = () => ({
@@ -164,12 +164,17 @@ check("ensureBrainLayout creates global rules tier directories", () => {
   if (!r.created.includes("rules")) throw new Error(`created list missing rules: ${JSON.stringify(r)}`);
 });
 
-check("scanRules reads global + strictly-bound project rules and filters low confidence", () => {
+check("scanRules reads global + strictly-bound project rules; low-confidence rules now inject (no floor) with a confidence label", () => {
   const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "abc123", resolveProject: fakeBound });
   if (cache.globalAlways.length !== 1) throw new Error(`globalAlways=${cache.globalAlways.length}`);
   if (cache.globalListed.length !== 1) throw new Error(`globalListed=${cache.globalListed.length}`);
   if (cache.projectAlways.length !== 1) throw new Error(`projectAlways=${cache.projectAlways.length}`);
-  if (cache.projectListed.length !== 0) throw new Error(`projectListed should filter low-conf, got ${cache.projectListed.length}`);
+  // mechanical-guard cleanup R4/C1 (2026-06-06): the confidence floor was
+  // removed; the conf-4 listed rule now injects (previously filtered to 0).
+  if (cache.projectListed.length !== 1) throw new Error(`projectListed should now include low-conf (floor removed), got ${cache.projectListed.length}`);
+  if (cache.projectListed[0].confidence !== 4) throw new Error(`projectListed[0] should be the conf-4 rule, got conf ${cache.projectListed[0].confidence}`);
+  const section = ruleInjector.composeRuleSection(cache);
+  if (!section.includes("[conf 4/10]")) throw new Error(`composed listed rule should carry a confidence label, got:\n${section}`);
   if (cache.activeProjectId !== projectId) throw new Error(`activeProjectId=${cache.activeProjectId}`);
 });
 
@@ -188,7 +193,7 @@ check("composeRuleInjection includes nonce, always body, and scoped listed slug"
   if (!text.includes("BEGIN_ABRAIN_RULES session=abc123")) throw new Error("missing nonce marker");
   if (!text.includes("修改文件必须用 edit/write")) throw new Error("missing global always body");
   if (!text.includes(`project:${projectId}:project-only`) && !text.includes("这个项目默认先补设计文档")) throw new Error("missing project rule context");
-  if (!text.includes("global:multi-audit — 三家 xhigh audit before ship")) throw new Error("missing listed scoped slug");
+  if (!text.includes("global:multi-audit [conf 8/10] — 三家 xhigh audit before ship")) throw new Error("missing listed scoped slug");
 });
 
 check("stripCurrentRuleInjection strips only current session nonce", () => {

@@ -360,6 +360,15 @@ function deriveAutoWriteScope(filePath: string | undefined, abrainHome: string):
   const rel = path.relative(abrainHome, filePath);
   if (rel.startsWith("..")) return "?";
   const parts = rel.split(path.sep);
+  // ADR 0023 INV-R8/R9: a rule write must be VISIBLY distinct from a normal
+  // knowledge/project write (it changes every future session). Detect the
+  // rules/{always,listed} segment at any depth FIRST, otherwise a project
+  // rule (projects/<id>/rules/...) would mislabel as a plain project write.
+  const rulesIdx = parts.indexOf("rules");
+  if (rulesIdx >= 0 && (parts[rulesIdx + 1] === "always" || parts[rulesIdx + 1] === "listed")) {
+    const owner = parts[0] === "projects" && parts[1] ? `project:${parts[1]}` : "global";
+    return `rules:${parts[rulesIdx + 1]}/${owner}`;
+  }
   if (parts[0] === "projects" && parts[1]) return `project:${parts[1]}`;
   if (parts[0] === "knowledge") return "world";
   if (parts[0] === "workflows") return "workflow";

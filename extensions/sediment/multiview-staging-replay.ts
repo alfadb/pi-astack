@@ -64,6 +64,7 @@ import {
   retryCapForState,
 } from "./multiview-staging-types";
 import {
+  archiveMultiviewPending,
   deleteMultiviewPending,
   loadMultiviewPending,
   markMultiviewPendingApprovedDecision,
@@ -326,6 +327,41 @@ function deleteOriginalOrAudit(
   return false;
 }
 
+/**
+ * Terminal soft-archive variant of deleteOriginalOrAudit
+ * (mechanical-guard cleanup R3/B1, 2026-06-06). Used ONLY by the
+ * mechanical-drop terminal paths (terminal_writer_max_retries,
+ * terminal_max_retries, terminal_stale, trigger_disappeared) where the
+ * candidate never received a real LLM disposition. SOFT-ARCHIVES (atomic
+ * rename -> abandoned/ subdir) instead of hard-deleting, so a candidate the
+ * system could not synthesize is preserved rather than permanently lost
+ * (the ADR 0024 §3 violation this fix removes). Reviewer-DECIDED skips
+ * (approved skip / replay op=skip) keep using deleteOriginalOrAudit — they
+ * got a real disposition, so deleting their staging row is not data loss.
+ * A failed move leaves the original intact and emits an audit error row
+ * (Staging may replay again) exactly like the delete path.
+ */
+function archiveTerminalOrAudit(
+  entry: MultiviewPendingEntry,
+  audit: ReplayAuditRow,
+  result: ReplayBatchResult,
+  context: string,
+  entryStart: number,
+): boolean {
+  if (archiveMultiviewPending(entry.slug)) {
+    inMemoryWriterBackoff.delete(inMemoryKey(entry));
+    inMemoryBrainCompleted.delete(inMemoryKey(entry));
+    return true;
+  }
+  audit.outcome = "error";
+  audit.detail = `${context}; staging_archive_failed for slug=${entry.slug}. Staging may replay again; investigate fs permissions / concurrent process.`;
+  audit.durationMs = Date.now() - entryStart;
+  result.staging_delete_failed++;
+  result.errors++;
+  result.auditRows.push(audit);
+  return false;
+}
+
 function deleteDuplicateOrAudit(
   entry: MultiviewPendingEntry,
   slug: string,
@@ -478,9 +514,9 @@ async function processOneEntry(
 
   if (entry.approved_decision && entry.approved_decision.op !== "skip") {
     if ((entry.writer_retry_attempts ?? 0) >= MAX_WRITER_RETRY_ATTEMPTS) {
-      if (!deleteOriginalOrAudit(entry, audit, result, `writer_retry_attempts=${entry.writer_retry_attempts ?? 0} >= cap=${MAX_WRITER_RETRY_ATTEMPTS}; terminal writer max-retries wanted to delete entry`, entryStart)) return;
+      if (!archiveTerminalOrAudit(entry, audit, result, `writer_retry_attempts=${entry.writer_retry_attempts ?? 0} >= cap=${MAX_WRITER_RETRY_ATTEMPTS}; terminal writer max-retries wanted to archive entry`, entryStart)) return;
       audit.outcome = "terminal_writer_max_retries";
-      audit.detail = `writer_retry_attempts=${entry.writer_retry_attempts ?? 0} >= cap=${MAX_WRITER_RETRY_ATTEMPTS}; entry deleted after persistent writer failures (candidate effectively dropped)`;
+      audit.detail = `writer_retry_attempts=${entry.writer_retry_attempts ?? 0} >= cap=${MAX_WRITER_RETRY_ATTEMPTS}; entry soft-archived to abandoned/ after persistent writer failures (candidate preserved, not re-picked-up)`;
       audit.durationMs = Date.now() - entryStart;
       result.terminal_writer_max_retries++;
       result.auditRows.push(audit);
@@ -495,9 +531,9 @@ async function processOneEntry(
 
   const cap = retryCapForState(entry.multiview_state);
   if (entry.retry_attempts >= cap) {
-    if (!deleteOriginalOrAudit(entry, audit, result, `retry_attempts=${entry.retry_attempts} >= cap=${cap} for state=${entry.multiview_state}; terminal max-retries wanted to delete entry`, entryStart)) return;
+    if (!archiveTerminalOrAudit(entry, audit, result, `retry_attempts=${entry.retry_attempts} >= cap=${cap} for state=${entry.multiview_state}; terminal max-retries wanted to archive entry`, entryStart)) return;
     audit.outcome = "terminal_max_retries";
-    audit.detail = `retry_attempts=${entry.retry_attempts} >= cap=${cap} for state=${entry.multiview_state}; entry deleted (candidate effectively dropped)`;
+    audit.detail = `retry_attempts=${entry.retry_attempts} >= cap=${cap} for state=${entry.multiview_state}; entry soft-archived to abandoned/ (candidate preserved, not re-picked-up)`;
     audit.durationMs = Date.now() - entryStart;
     result.terminal_max_retries++;
     result.auditRows.push(audit);
@@ -506,9 +542,9 @@ async function processOneEntry(
 
   const ageDays = audit.age_days;
   if (ageDays >= STALE_DAYS_MULTIVIEW_PENDING) {
-    if (!deleteOriginalOrAudit(entry, audit, result, `age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; terminal stale wanted to delete entry`, entryStart)) return;
+    if (!archiveTerminalOrAudit(entry, audit, result, `age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; terminal stale wanted to archive entry`, entryStart)) return;
     audit.outcome = "terminal_stale";
-    audit.detail = `age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry deleted (candidate effectively dropped)`;
+    audit.detail = `age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry soft-archived to abandoned/ (candidate preserved, not re-picked-up)`;
     audit.durationMs = Date.now() - entryStart;
     result.terminal_stale++;
     result.auditRows.push(audit);
@@ -592,7 +628,7 @@ async function processOneEntry(
   // disappeared (the same trigger criteria that demanded review).
   // Safer to drop the candidate and audit than to silently write.
   if (!mvResult.triggered) {
-    if (!deleteOriginalOrAudit(entry, audit, result, `replay no longer triggers multi-view (A' guard); original trigger_reason=${entry.trigger_reason}; wanted to drop staging`, entryStart)) return;
+    if (!archiveTerminalOrAudit(entry, audit, result, `replay no longer triggers multi-view (A' guard); original trigger_reason=${entry.trigger_reason}; wanted to archive staging`, entryStart)) return;
     audit.outcome = "succeeded";
     audit.new_decision = { op: "skip", reason: "multiview_trigger_disappeared_on_replay", rationale: `Replay's shouldTriggerMultiView returned false (likely neighbor/candidate state changed since original staging). Candidate dropped without brain write to preserve A' constraint.` };
     audit.detail = `replay no longer triggers multi-view (A' guard); original trigger_reason=${entry.trigger_reason}; staging removed, no brain write.${vanishedDetail()}`;

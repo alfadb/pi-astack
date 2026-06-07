@@ -70,6 +70,8 @@
     "smoke:abrain-i18n": "node scripts/smoke-abrain-i18n.mjs",
     "smoke:abrain-redact": "node scripts/smoke-abrain-redact.mjs",
     "smoke:abrain-rule-injector": "node scripts/smoke-abrain-rule-injector.mjs",
+    "smoke:abrain-rule-writer": "node scripts/smoke-abrain-rule-writer.mjs",
+    "smoke:abrain-rule-writer-fs": "node scripts/smoke-abrain-rule-writer-fs.mjs",
     "smoke:prompt-user": "node scripts/smoke-prompt-user.mjs",
     "smoke:prompt-user-finalizer": "node scripts/smoke-prompt-user-finalizer.mjs",
     "smoke:prompt-user-subpi": "node scripts/smoke-prompt-user-subpi.mjs",

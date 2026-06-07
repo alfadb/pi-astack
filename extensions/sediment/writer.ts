@@ -9,6 +9,15 @@ import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
+import {
+  type RuleDraft,
+  type RuleTier,
+  buildRuleMarkdown,
+  lintRuleKind,
+  lintRuleAlwaysSize,
+  sanitizeRuleHint,
+  ruleHintFallback,
+} from "./rule-writer";
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
 import type { Jsonish } from "../memory/types";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
@@ -1641,12 +1650,12 @@ async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<strin
   return appendAbrainAudit(abrainHome, "workflow", event);
 }
 
-async function gitCommitAbrain(abrainHome: string, filePath: string, slug: string): Promise<string | null> {
+async function gitCommitAbrain(abrainHome: string, filePath: string, slug: string, label = "workflow"): Promise<string | null> {
   try {
     const rel = path.relative(abrainHome, filePath);
     // Round 2 audit fix (opus m3): same `--` defense-in-depth as gitCommit.
     await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
-    await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `workflow: ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `${label}: ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     return stdout.trim() || null;
   } catch {
@@ -1949,6 +1958,286 @@ export async function writeAbrainWorkflow(
       projectId,
       ...resultCtx,
     };
+  } finally {
+    await lock?.release();
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Rules writer: writeAbrainRule + lifecycle (ADR 0023 D5)
+// ───────────────────────────────────────────────────────────────────────────────
+// Mirrors writeAbrainWorkflow substrate (sanitize / lint / dedupe / lock /
+// atomic write / git commit + orphan cleanup / audit). Rule-specific lints
+// (kind/size/hint/budget) live in ./rule-writer + lintRuleBudget below.
+// ui.notify (INV-R8/R9) is the DISPATCH layer's job (the writer has no ctx.ui);
+// the result carries op/slug/tier/scope so the caller can notify.
+
+export interface WriteRuleOptions {
+  abrainHome: string;
+  settings: SedimentSettings;
+  dryRun?: boolean;
+  auditContext?: WriterAuditContext;
+  /** Per-(scope,tier) token cap for the INV-R3 budget reject. */
+  budgetTokenCap?: number;
+}
+
+export interface WriteRuleResult {
+  slug: string;
+  path: string;
+  status: "created" | "archived" | "deleted" | "rejected" | "dry_run";
+  reason?: string;
+  tier?: RuleTier;
+  ruleScope?: "global" | "project";
+  projectId?: string;
+  lintErrors?: number;
+  lintWarnings?: number;
+  gitCommit?: string | null;
+  auditPath?: string;
+  sanitizedReplacements?: string[];
+  budgetTokens?: number;
+  budgetCap?: number;
+  suggestArchiveSlug?: string;
+  lane?: string;
+  sessionId?: string;
+  correlationId?: string;
+  candidateId?: string;
+}
+
+const DEFAULT_RULE_BUDGET_TOKENS: Record<RuleTier, number> = { always: 2500, listed: 8000 };
+
+function rulesBaseDir(abrainHome: string, scope: "global" | "project", projectId?: string): string {
+  return scope === "global"
+    ? path.join(abrainHome, "rules")
+    : path.join(abrainProjectDir(abrainHome, projectId!), "rules");
+}
+
+async function acquireAbrainRuleLock(abrainHome: string, timeoutMs: number): Promise<LockHandle> {
+  // Independent rules.lock (ADR 0023 D5.2): symmetric with workflow.lock /
+  // about-me.lock so a hang on one lane does not block the others.
+  const lockPath = path.join(abrainSedimentLocksDir(abrainHome), "rules.lock");
+  const handle = await acquireFileLock(lockPath, {
+    timeoutMs,
+    staleMs: SEDIMENT_LOCK_STEAL_AFTER_MS,
+    retryMs: 100,
+    label: "abrain rules",
+  });
+  return { release: handle.release };
+}
+
+function estimateRuleTokens(text: string): number {
+  // Approximate; the rules budget is a soft single-store bound, not a
+  // safety gate. On-disk content over-counts vs injected text (esp. listed,
+  // which injects only a hint) so this never UNDER-rejects.
+  return Math.ceil(text.length / 4);
+}
+
+/** INV-R3 budget: sum existing tier-dir token footprint + the new entry; over
+ *  cap → reject + suggest the oldest entry to archive (back-pressure loop). */
+async function lintRuleBudget(
+  tierDir: string,
+  addedMarkdown: string,
+  cap: number,
+): Promise<{ ok: boolean; tokens: number; suggestArchive?: string }> {
+  let existing = 0;
+  let oldestSlug: string | undefined;
+  let oldestMtime = Infinity;
+  try {
+    for (const f of await fs.readdir(tierDir)) {
+      if (!f.endsWith(".md") || f.startsWith("_")) continue;
+      const fp = path.join(tierDir, f);
+      try {
+        existing += estimateRuleTokens(await fs.readFile(fp, "utf-8"));
+        const st = await fs.stat(fp);
+        if (st.mtimeMs < oldestMtime) { oldestMtime = st.mtimeMs; oldestSlug = f.replace(/\.md$/, ""); }
+      } catch { /* skip unreadable file */ }
+    }
+  } catch { /* tier dir absent -> 0 existing */ }
+  const tokens = existing + estimateRuleTokens(addedMarkdown);
+  return tokens > cap ? { ok: false, tokens, suggestArchive: oldestSlug } : { ok: true, tokens };
+}
+
+/** ADR 0023 D5: create a rule in ~/.abrain/[projects/<id>/]rules/<tier>/. */
+export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions): Promise<WriteRuleResult> {
+  const started = Date.now();
+  const abrainHome = path.resolve(opts.abrainHome);
+  const ruleScope: "global" | "project" = draft.scope === "global" ? "global" : "project";
+  const projectId = draft.scope === "global" ? undefined : draft.scope.projectId;
+  const sessionId = opts.auditContext?.sessionId ?? draft.sessionId;
+  const resultCtx = { lane: "rules", sessionId, correlationId: opts.auditContext?.correlationId, candidateId: opts.auditContext?.candidateId };
+  const slug = (draft.slug && slugify(draft.slug)) || slugify(draft.title || "rule");
+
+  const audit = (event: Record<string, unknown>) =>
+    appendAbrainAudit(abrainHome, "rules", { tier: draft.tier, scope: ruleScope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
+  const reject = async (reason: string, extra: Partial<WriteRuleResult> = {}): Promise<WriteRuleResult> => {
+    const auditPath = await audit({ operation: "reject", reason });
+    return { slug, path: abrainHome, status: "rejected", reason, tier: draft.tier, ruleScope, projectId, auditPath, ...resultCtx, ...extra };
+  };
+
+  if (typeof draft.title !== "string" || !draft.title.trim()) return reject("validation_error_title");
+  if (typeof draft.body !== "string" || draft.body.trim().length < 10) return reject("validation_error_body");
+  if (draft.zone !== "rules") return reject("validation_error_zone");
+  if (ruleScope === "project" && !projectId) return reject("validation_error_project_id");
+
+  const kindLint = lintRuleKind(draft.kind, draft.tier);
+  if (!kindLint.ok) return reject(`kind_invalid: ${kindLint.reason}`);
+
+  const titleSan = sanitizeForMemory(draft.title);
+  const bodySan = sanitizeForMemory(draft.body);
+  const reasonSan = sanitizeForMemory(draft.routingReason || "");
+  const tagSans = (draft.tags ?? []).map((t) => sanitizeForMemory(t));
+  const failed = [titleSan, bodySan, reasonSan, ...tagSans].find((r) => !r.ok);
+  if (failed) return reject((failed as { ok: false; error: string }).error);
+  const safeBody = bodySan.text ?? draft.body;
+
+  const sizeLint = lintRuleAlwaysSize(safeBody, draft.tier);
+  if (!sizeLint.ok) return reject(`body_too_large: ${sizeLint.reason}`);
+
+  const hintRes = draft.hint ? sanitizeRuleHint(draft.hint) : null;
+  const cleanHint = hintRes && hintRes.ok ? hintRes.clean : (ruleHintFallback(safeBody) ?? undefined);
+
+  const safeDraft: RuleDraft = {
+    ...draft,
+    title: titleSan.text ?? draft.title,
+    body: safeBody,
+    routingReason: reasonSan.text ?? draft.routingReason,
+    tags: draft.tags ? tagSans.map((s, i) => s.text ?? draft.tags![i]) : draft.tags,
+    hint: cleanHint,
+  };
+  const markdown = buildRuleMarkdown(safeDraft, slug);
+
+  const lintIssues = lintMarkdown(markdown, "rule.md");
+  const lintErrors = lintIssues.filter((i) => i.severity === "error").length;
+  const lintWarnings = lintIssues.filter((i) => i.severity === "warning").length;
+  if (lintErrors > 0) return reject("lint_error", { lintErrors, lintWarnings });
+
+  const tierDir = path.join(rulesBaseDir(abrainHome, ruleScope, projectId), draft.tier);
+  const target = path.join(tierDir, `${slug}.md`);
+  const cap = opts.budgetTokenCap ?? DEFAULT_RULE_BUDGET_TOKENS[draft.tier];
+
+  const budget = await lintRuleBudget(tierDir, markdown, cap);
+  if (!budget.ok) return reject("budget_exceeded", { budgetTokens: budget.tokens, budgetCap: cap, suggestArchiveSlug: budget.suggestArchive });
+
+  if (fsSync.existsSync(target)) return reject("duplicate_slug");
+
+  const sanitizedReplacements = [...titleSan.replacements, ...bodySan.replacements, ...reasonSan.replacements];
+
+  if (opts.dryRun) {
+    const auditPath = await audit({ operation: "dry_run", target: path.relative(abrainHome, target), lint_warnings: lintWarnings, budget_tokens: budget.tokens });
+    return { slug, path: target, status: "dry_run", tier: draft.tier, ruleScope, projectId, lintWarnings, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, ...resultCtx };
+  }
+
+  let lock: LockHandle | undefined;
+  try {
+    await fs.mkdir(tierDir, { recursive: true, mode: 0o700 });
+    lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    if (fsSync.existsSync(target)) return reject("duplicate_slug_race");
+    await atomicWrite(target, markdown);
+    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, target, slug, "rules") : null;
+    if (git === null && opts.settings.gitCommit) {
+      const rel = path.relative(abrainHome, target);
+      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
+      try { await fs.unlink(target); } catch { /* may be gone */ }
+      const auditPath = await audit({ operation: "error", reason: "git_commit_failed_orphan_cleaned", target: path.relative(abrainHome, target) });
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", tier: draft.tier, ruleScope, projectId, auditPath, ...resultCtx };
+    }
+    const auditPath = await audit({ operation: "create", target: path.relative(abrainHome, target), lint_result: "pass", lint_warnings: lintWarnings, git_commit: git, budget_tokens: budget.tokens, routing_confidence: draft.routingConfidence, entry_confidence: draft.entryConfidence, routing_reason: safeDraft.routingReason });
+    return { slug, path: target, status: "created", tier: draft.tier, ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, ...resultCtx };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await audit({ operation: "error", reason: message, target: path.relative(abrainHome, target) });
+    return { slug, path: target, status: "rejected", reason: message, tier: draft.tier, ruleScope, projectId, auditPath, ...resultCtx };
+  } finally {
+    await lock?.release();
+  }
+}
+
+/** Locate a rule file by slug across both tiers under the given scope. */
+export function findRuleFile(abrainHome: string, scope: "global" | "project", projectId: string | undefined, slug: string): { tier: RuleTier; path: string } | undefined {
+  const base = rulesBaseDir(path.resolve(abrainHome), scope, projectId);
+  for (const tier of ["always", "listed"] as RuleTier[]) {
+    const fp = path.join(base, tier, `${slug}.md`);
+    if (fsSync.existsSync(fp)) return { tier, path: fp };
+  }
+  return undefined;
+}
+
+export interface MutateRuleOptions extends WriteRuleOptions {
+  reason?: string;
+}
+
+/** ADR 0023 D7 lifecycle: archive a rule (status -> archived). The
+ *  rule-injector skips status!==active, so an archived rule stops injecting
+ *  without being deleted (recoverable). */
+export async function archiveAbrainRule(
+  slug: string,
+  scope: "global" | "project",
+  projectId: string | undefined,
+  opts: MutateRuleOptions,
+): Promise<WriteRuleResult> {
+  const started = Date.now();
+  const abrainHome = path.resolve(opts.abrainHome);
+  const sessionId = opts.auditContext?.sessionId;
+  const resultCtx = { lane: "rules", sessionId, correlationId: opts.auditContext?.correlationId, candidateId: opts.auditContext?.candidateId };
+  const reason = opts.reason || "archived by sediment curator";
+  const audit = (event: Record<string, unknown>) => appendAbrainAudit(abrainHome, "rules", { scope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
+
+  const found = findRuleFile(abrainHome, scope, projectId, slug);
+  if (!found) {
+    const auditPath = await audit({ operation: "reject", op: "archive", reason: "entry_not_found" });
+    return { slug, path: abrainHome, status: "rejected", reason: "entry_not_found", ruleScope: scope, projectId, auditPath, ...resultCtx };
+  }
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    const ts = nowIso();
+    const raw = await fs.readFile(found.path, "utf-8");
+    let patched = raw.replace(/^status:.*$/m, `status: ${yamlString("archived")}`);
+    patched = patched.replace(/^updated:.*$/m, `updated: ${yamlString(ts)}`);
+    if (!/^status:/m.test(patched)) patched = patched.replace(/^---\n/, `---\nstatus: ${yamlString("archived")}\n`);
+    patched = `${patched.trimEnd()}\n- ${ts} | ${sessionId || "sediment"} | archived | ${reason.replace(/\n/g, " ")}\n`;
+    await atomicWrite(found.path, patched);
+    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:archive") : null;
+    const auditPath = await audit({ operation: "archive", tier: found.tier, target: path.relative(abrainHome, found.path), git_commit: git, reason });
+    return { slug, path: found.path, status: "archived", tier: found.tier, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await audit({ operation: "error", op: "archive", reason: message });
+    return { slug, path: found.path, status: "rejected", reason: message, tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+  } finally {
+    await lock?.release();
+  }
+}
+
+/** ADR 0023 D7 lifecycle: hard-delete a rule (rare; schema corruption / user
+ *  explicit removal). Prefer archive for normal retirement. */
+export async function deleteAbrainRule(
+  slug: string,
+  scope: "global" | "project",
+  projectId: string | undefined,
+  opts: MutateRuleOptions,
+): Promise<WriteRuleResult> {
+  const started = Date.now();
+  const abrainHome = path.resolve(opts.abrainHome);
+  const sessionId = opts.auditContext?.sessionId;
+  const resultCtx = { lane: "rules", sessionId, correlationId: opts.auditContext?.correlationId, candidateId: opts.auditContext?.candidateId };
+  const audit = (event: Record<string, unknown>) => appendAbrainAudit(abrainHome, "rules", { scope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
+
+  const found = findRuleFile(abrainHome, scope, projectId, slug);
+  if (!found) {
+    const auditPath = await audit({ operation: "reject", op: "delete", reason: "entry_not_found" });
+    return { slug, path: abrainHome, status: "rejected", reason: "entry_not_found", ruleScope: scope, projectId, auditPath, ...resultCtx };
+  }
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    await fs.unlink(found.path);
+    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:delete") : null;
+    const auditPath = await audit({ operation: "delete", tier: found.tier, target: path.relative(abrainHome, found.path), git_commit: git });
+    return { slug, path: found.path, status: "deleted", tier: found.tier, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await audit({ operation: "error", op: "delete", reason: message });
+    return { slug, path: found.path, status: "rejected", reason: message, tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
   } finally {
     await lock?.release();
   }

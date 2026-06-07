@@ -654,6 +654,7 @@ async function callReviewerModel(
 function synthesizeFromPass1(
   pass1: Pass1Verdict,
   neighbors: MemoryEntry[],
+  proposerDecision: CuratorDecision,
 ): CuratorDecision | null {
   // Helper: is this slug a workflow-lane neighbor? Destructive ops
   // on workflow lanes are writer-rejected.
@@ -695,12 +696,32 @@ function synthesizeFromPass1(
       };
     case "create": {
       // Reviewer can only override scope on create; everything else
-      // (title/kind/compiledTruth) comes from the candidate the
-      // writer already has. So we just emit a create with the
-      // reviewer's scope choice.
+      // (title/kind/compiledTruth) comes from the candidate the writer
+      // already has. We ALSO carry forward the proposer's (already
+      // cross-scope-qualified) derives_from so R1 provenance survives the
+      // confirm_pass1 override path, not just confirm_proposer
+      // (mechanical-guard cleanup R1 follow-up, 2026-06-06).
+      const proposerDerivesFrom =
+        proposerDecision.op === "create" && proposerDecision.derives_from && proposerDecision.derives_from.length > 0
+          ? proposerDecision.derives_from
+          : undefined;
+      // W0.1 (ADR 0023 write-path): carry the rules discriminant through
+      // confirm_pass1 so a rules create is NOT silently downgraded to a
+      // knowledge create. Rules use ruleScope, not the entries scope:world.
+      if (proposerDecision.op === "create" && proposerDecision.zone === "rules") {
+        return {
+          op: "create",
+          zone: "rules" as const,
+          tier: proposerDecision.tier,
+          ruleScope: proposerDecision.ruleScope,
+          ...(proposerDerivesFrom ? { derives_from: proposerDerivesFrom } : {}),
+          rationale: pass1.reasoning ?? "Pass 1 reviewer recommended create; Pass 2 confirmed.",
+        };
+      }
       return {
         op: "create",
         ...(pass1.scope === "world" ? { scope: "world" as const } : {}),
+        ...(proposerDerivesFrom ? { derives_from: proposerDerivesFrom } : {}),
         rationale: pass1.reasoning ?? "Pass 1 reviewer recommended create; Pass 2 confirmed.",
       };
     }
@@ -709,10 +730,16 @@ function synthesizeFromPass1(
       if (isWorkflowSlug(pass1.slug_target)) {
         return workflowLaneRefusal("archive", pass1.slug_target);
       }
+      // R2 follow-up (2026-06-06): the existing neighbor's physical scope is
+      // ground truth — auto-correct to it rather than trusting the reviewer's
+      // pass1.scope (which could route the writer to the wrong store →
+      // entry_not_found). Mirrors parseDecision's effectiveScopeFor.
+      const archiveTarget = neighbors.find((n) => n.slug === pass1.slug_target);
+      const archiveScope = archiveTarget?.scope === "world" ? ("world" as const) : undefined;
       return {
         op: "archive",
         slug: pass1.slug_target,
-        ...(pass1.scope === "world" ? { scope: "world" as const } : {}),
+        ...(archiveScope ? { scope: archiveScope } : {}),
         reason: "multiview_pass1_recommends_archive",
         rationale: pass1.reasoning ?? "Pass 1 reviewer recommended archive; Pass 2 confirmed.",
       };
@@ -1064,7 +1091,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       final_decision = args.proposerDecision;
       break;
     case "confirm_pass1": {
-      const synthesized = synthesizeFromPass1(pass1, args.neighbors);
+      const synthesized = synthesizeFromPass1(pass1, args.neighbors, args.proposerDecision);
       if (synthesized) {
         final_decision = synthesized;
       } else {

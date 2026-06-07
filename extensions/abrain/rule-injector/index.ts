@@ -229,7 +229,10 @@ function readRuleFile(
 
   const kind = scalarString(fm.kind) || scalarString(fm.type) || "maxim";
   const confidence = Math.min(10, Math.max(0, scalarNumber(fm.confidence) ?? 5));
-  if (confidence < (tier === "always" ? 8 : 7)) return {};
+  // Confidence floor removed 2026-06-06 (mechanical-guard cleanup R4/C1): a hard
+  // `confidence < N -> drop` gate silently excluded the curator-LLM's own
+  // confidence assessment from injection (ADR 0024 §3 violation). All active
+  // rules now inject WITH a confidence label so the reading LLM weighs them.
 
   const slug = slugify(path.basename(file, ".md"));
   if (!slug) return { warning: { level: "warning", message: `rules: skip ${path.basename(file)} (empty slug after normalization)`, file } };
@@ -291,23 +294,13 @@ function scanTierDir(
   return out;
 }
 
-function enforceBudget(
-  entries: RuleEntry[],
-  scopeLabel: string,
-  tier: RuleTier,
-  settings: RuleInjectorSettings,
-  warnings: RuleScanWarning[],
-): void {
-  const countCap = tier === "always" ? settings.alwaysCountCapPerScope : settings.listedCountCapPerScope;
-  const tokenCap = tier === "always" ? settings.alwaysTokenCapPerScope : settings.listedTokenCapPerScope;
-  const tokens = entries.reduce((sum, e) => sum + e.tokenEstimate, 0);
-  if (entries.length > countCap) {
-    warnings.push({ level: "warning", message: `rules/${tier}: ${scopeLabel} has ${entries.length}/${countCap} entries (over count cap; injected in full)` });
-  }
-  if (tokens > tokenCap) {
-    warnings.push({ level: "warning", message: `rules/${tier}: ${scopeLabel} uses ~${tokens}/${tokenCap} tokens (over budget; injected in full)` });
-  }
-}
+// enforceBudget removed 2026-06-06 (mechanical-guard cleanup D1): it only
+// emitted advisory "over cap; injected in full" warnings with ZERO behavioral
+// effect (no truncation, no demotion), which falsely implied an enforced cap
+// and contradicted the now-known reality that nothing is capped. Per ADR 0024
+// §3, any future budget shaping belongs in prompt-native aggregation, not a
+// misleading no-op warning. alwaysCountCapPerScope / alwaysTokenCapPerScope
+// remain in settings for potential future use but are not read here.
 
 export function scanRules(
   opts: {
@@ -349,13 +342,6 @@ export function scanRules(
     projectListed = scanTierDir(path.join(projectDir, "rules", "listed"), "listed", "project", settings, warnings, binding.activeProject.projectId);
   }
 
-  enforceBudget(globalAlways, "global", "always", settings, warnings);
-  enforceBudget(globalListed, "global", "listed", settings, warnings);
-  if (binding.activeProject) {
-    enforceBudget(projectAlways, `project:${binding.activeProject.projectId}`, "always", settings, warnings);
-    enforceBudget(projectListed, `project:${binding.activeProject.projectId}`, "listed", settings, warnings);
-  }
-
   return {
     nonce,
     abrainHome,
@@ -376,11 +362,15 @@ function hasAnyRules(cache: RuleScanCache): boolean {
 }
 
 function formatAlways(entries: RuleEntry[]): string[] {
-  return entries.map((e) => `- [${e.kind}] ${e.injectedText.replace(/^\[[^\]]+\]\s*/, "")}`);
+  return entries.map((e) => {
+    const body = e.injectedText.replace(/^\[[^\]]+\]\s*/, "");
+    const provisional = e.confidence < 8 ? " (provisional - verify)" : "";
+    return `- [${e.kind} | conf ${e.confidence}/10] ${body}${provisional}`;
+  });
 }
 
 function formatListed(entries: RuleEntry[]): string[] {
-  return entries.map((e) => `- ${e.scopedSlug} — ${e.hint}`);
+  return entries.map((e) => `- ${e.scopedSlug} [conf ${e.confidence}/10] — ${e.hint}`);
 }
 
 export function composeRuleSection(cache: RuleScanCache): string {
