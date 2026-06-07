@@ -92,6 +92,9 @@ export async function executeCuratorDecisionToBrain(args: {
     slug: r.slug, path: r.path, status: r.status, reason: r.reason, gitCommit: r.gitCommit,
     auditPath: r.auditPath, lane: r.lane ?? auditContext?.lane, sessionId: r.sessionId ?? sessionId,
     correlationId: r.correlationId, candidateId: r.candidateId,
+    // audit round-3 P3: carry lint + sanitization counts so the notify/audit
+    // summary (resultSummary) is complete for rules results too.
+    lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, sanitizedReplacements: r.sanitizedReplacements,
   });
   const ruleOpts = { abrainHome, settings, dryRun, auditContext };
   const resolveRuleLifecycleScope = (slug: string): "global" | "project" | null => {

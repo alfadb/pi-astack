@@ -2135,6 +2135,10 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const target = path.join(tierDir, `${slug}.md`);
   const cap = opts.budgetTokenCap ?? DEFAULT_RULE_BUDGET_TOKENS[draft.tier];
 
+  // Pre-lock budget = fast path (also feeds dryRun). The AUTHORITATIVE budget
+  // gate re-runs under the lock below (audit round-3 P2): without it two
+  // cross-process writers could both pass here then both write, breaching the
+  // INV-R3 cap. Same fast-path/under-lock pattern as the duplicate_slug check.
   const budget = await lintRuleBudget(tierDir, markdown, cap);
   if (!budget.ok) return reject("budget_exceeded", { budgetTokens: budget.tokens, budgetCap: cap, suggestArchiveSlug: budget.suggestArchive });
 
@@ -2152,6 +2156,8 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
     await fs.mkdir(tierDir, { recursive: true, mode: 0o700 });
     lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
     if (fsSync.existsSync(target)) return reject("duplicate_slug_race");
+    const budgetUnderLock = await lintRuleBudget(tierDir, markdown, cap);
+    if (!budgetUnderLock.ok) return reject("budget_exceeded", { budgetTokens: budgetUnderLock.tokens, budgetCap: cap, suggestArchiveSlug: budgetUnderLock.suggestArchive });
     await atomicWrite(target, markdown);
     const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, target, slug, "rules") : null;
     if (git === null && opts.settings.gitCommit) {
