@@ -7,7 +7,7 @@
  * a real temp abrain tree. gitCommit:false so no git repo is required.
  *
  * Covers: create (global always + project listed) → file + frontmatter;
- * duplicate reject; INV-R4 kind reject; always body-size reject; INV-R3 budget
+ * duplicate reject; INV-R4 kind reject; always over-size AUTO-DEMOTE->listed; INV-R3 budget
  * reject; dry_run; archive (status→archived); delete (unlink).
  */
 
@@ -92,12 +92,15 @@ await check("INV-R4: always-tier with kind=fact rejected", async () => {
   assert(r.status === "rejected" && r.reason.startsWith("kind_invalid"), `kind reject: ${JSON.stringify(r)}`);
 });
 
-await check("always body > 300 code units rejected", async () => {
+await check("always body > 300 AUTO-DEMOTES to listed (T0 panel 2026-06-07; not rejected, never lost)", async () => {
   const home = freshHome();
   const r = await writeAbrainRule(
     { ...baseDraft, title: "Too big", body: "x".repeat(301), tier: "always", scope: "global" },
     { abrainHome: home, settings: SETTINGS });
-  assert(r.status === "rejected" && r.reason.startsWith("body_too_large"), `size reject: ${JSON.stringify(r)}`);
+  assert(r.status === "created" && r.tier === "listed" && r.demotedFrom === "always", `should demote not reject: ${JSON.stringify(r)}`);
+  assert(fs.existsSync(path.join(home, "rules", "listed", "too-big.md")), "landed in listed/");
+  assert(!fs.existsSync(path.join(home, "rules", "always", "too-big.md")), "not in always/");
+  assert(fs.readFileSync(path.join(home, "rules", "listed", "too-big.md"), "utf-8").includes("x".repeat(301)), "full body preserved on disk (listed stores body, injects only a hint)");
 });
 
 await check("audit P1-a: malformed tier rejected (no path-join traversal)", async () => {

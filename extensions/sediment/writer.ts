@@ -1987,6 +1987,7 @@ export interface WriteRuleResult {
   status: "created" | "archived" | "deleted" | "rejected" | "dry_run";
   reason?: string;
   tier?: RuleTier;
+  demotedFrom?: RuleTier;
   ruleScope?: "global" | "project";
   projectId?: string;
   lintErrors?: number;
@@ -2082,11 +2083,18 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   // (slugify -> "") cannot produce a degenerate `<tierDir>/.md` dotfile + empty-slug id.
   const slug = (draft.slug && slugify(draft.slug)) || slugify(draft.title || "rule") || "rule";
 
+  // ADR 0023 (T0 panel 2026-06-07): an always-tier body over the size target is
+  // AUTO-DEMOTED to listed (full body kept on disk + a one-line hint injected),
+  // never rejected — losing a genuinely always-caliber rule is worse than tiering
+  // it down. effectiveTier is what actually gets WRITTEN; draft.tier is the ask.
+  let effectiveTier: RuleTier = draft.tier;
+  let demotedFromAlways = false;
+
   const audit = (event: Record<string, unknown>) =>
-    appendAbrainAudit(abrainHome, "rules", { tier: draft.tier, scope: ruleScope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
+    appendAbrainAudit(abrainHome, "rules", { tier: effectiveTier, ...(demotedFromAlways ? { demoted_from: "always" } : {}), scope: ruleScope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
   const reject = async (reason: string, extra: Partial<WriteRuleResult> = {}): Promise<WriteRuleResult> => {
     const auditPath = await audit({ operation: "reject", reason });
-    return { slug, path: abrainHome, status: "rejected", reason, tier: draft.tier, ruleScope, projectId, auditPath, ...resultCtx, ...extra };
+    return { slug, path: abrainHome, status: "rejected", reason, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx, ...extra };
   };
 
   if (typeof draft.title !== "string" || !draft.title.trim()) return reject("validation_error_title");
@@ -2111,13 +2119,21 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const safeBody = bodySan.text ?? draft.body;
 
   const sizeLint = lintRuleAlwaysSize(safeBody, draft.tier);
-  if (!sizeLint.ok) return reject(`body_too_large: ${sizeLint.reason}`);
+  if (!sizeLint.ok && draft.tier === "always") {
+    // panel verdict (C, 2026-06-07): DEMOTE always->listed, do NOT reject. The
+    // injector clamps always bodies at injection time anyway, so rejecting here
+    // only destroyed a genuinely always-caliber rule. listed has no per-rule size
+    // cap (only a one-line hint is injected; the full body is retrieved on demand).
+    effectiveTier = "listed";
+    demotedFromAlways = true;
+  }
 
   const hintRes = draft.hint ? sanitizeRuleHint(draft.hint) : null;
   const cleanHint = hintRes && hintRes.ok ? hintRes.clean : (ruleHintFallback(safeBody) ?? undefined);
 
   const safeDraft: RuleDraft = {
     ...draft,
+    tier: effectiveTier,
     title: titleSan.text ?? draft.title,
     body: safeBody,
     routingReason: reasonSan.text ?? draft.routingReason,
@@ -2131,9 +2147,9 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const lintWarnings = lintIssues.filter((i) => i.severity === "warning").length;
   if (lintErrors > 0) return reject("lint_error", { lintErrors, lintWarnings });
 
-  const tierDir = path.join(rulesBaseDir(abrainHome, ruleScope, projectId), draft.tier);
+  const tierDir = path.join(rulesBaseDir(abrainHome, ruleScope, projectId), effectiveTier);
   const target = path.join(tierDir, `${slug}.md`);
-  const cap = opts.budgetTokenCap ?? DEFAULT_RULE_BUDGET_TOKENS[draft.tier];
+  const cap = opts.budgetTokenCap ?? DEFAULT_RULE_BUDGET_TOKENS[effectiveTier];
 
   // Pre-lock budget = fast path (also feeds dryRun). The AUTHORITATIVE budget
   // gate re-runs under the lock below (audit round-3 P2): without it two
@@ -2148,7 +2164,7 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
 
   if (opts.dryRun) {
     const auditPath = await audit({ operation: "dry_run", target: path.relative(abrainHome, target), lint_warnings: lintWarnings, budget_tokens: budget.tokens });
-    return { slug, path: target, status: "dry_run", tier: draft.tier, ruleScope, projectId, lintWarnings, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, ...resultCtx };
+    return { slug, path: target, status: "dry_run", tier: effectiveTier, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintWarnings, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, ...resultCtx };
   }
 
   let lock: LockHandle | undefined;
@@ -2165,14 +2181,14 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
       try { await fs.unlink(target); } catch { /* may be gone */ }
       const auditPath = await audit({ operation: "error", reason: "git_commit_failed_orphan_cleaned", target: path.relative(abrainHome, target) });
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", tier: draft.tier, ruleScope, projectId, auditPath, ...resultCtx };
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
     }
     const auditPath = await audit({ operation: "create", target: path.relative(abrainHome, target), lint_result: "pass", lint_warnings: lintWarnings, git_commit: git, budget_tokens: budget.tokens, routing_confidence: draft.routingConfidence, entry_confidence: draft.entryConfidence, routing_reason: safeDraft.routingReason });
-    return { slug, path: target, status: "created", tier: draft.tier, ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, ...resultCtx };
+    return { slug, path: target, status: "created", tier: effectiveTier, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", reason: message, target: path.relative(abrainHome, target) });
-    return { slug, path: target, status: "rejected", reason: message, tier: draft.tier, ruleScope, projectId, auditPath, ...resultCtx };
+    return { slug, path: target, status: "rejected", reason: message, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
   } finally {
     await lock?.release();
   }

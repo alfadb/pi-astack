@@ -76,8 +76,16 @@ export function lintRuleKind(kind: string, tier: RuleTier): LintResult {
   return { ok: true };
 }
 
-/** always-tier compiled body must be ≤ 300 UTF-16 code units (D2 §134).
- *  listed-tier has no body-size cap (it injects only a hint, not the body). */
+/** always-tier body size THRESHOLD = 300 UTF-16 code units (D2 §134).
+ *  listed-tier has no body-size cap (it injects only a hint, not the body).
+ *
+ *  NOTE (T0 panel 2026-06-07): this is a DEMOTE threshold, not a reject gate.
+ *  `writeAbrainRule` auto-demotes an over-threshold always rule to listed rather
+ *  than rejecting it. It is INTENTIONALLY the same value as the rule-injector's
+ *  `maxAlwaysBodyChars` (default 300, the injection-time clamp), but they are NOW
+ *  complementary, not redundant: the writer demote means an over-size always rule
+ *  never lands as always, so the injector clamp only ever fires on always rules
+ *  written by NON-writer paths (manual edits / escape-hatch). */
 export const ALWAYS_BODY_MAX_CODE_UNITS = 300;
 export function lintRuleAlwaysSize(body: string, tier: RuleTier): LintResult {
   if (tier !== "always") return { ok: true };
@@ -125,7 +133,9 @@ export function sanitizeRuleHint(raw: unknown): HintResult {
   s = s.trim();
   // (1) length: > 120 reject; else truncate to 80 + ellipsis
   if (s.length > HINT_HARD_REJECT_CODE_UNITS) return { ok: false, reason: "hint_too_long" };
-  if (s.length > HINT_MAX_CODE_UNITS) s = `${s.slice(0, HINT_MAX_CODE_UNITS).trimEnd()}…`;
+  // .replace strips a trailing lone high-surrogate left when slice() cuts a
+  // pair (audit P2, 2026-06-07): avoids a cosmetic � glyph in the hint.
+  if (s.length > HINT_MAX_CODE_UNITS) s = `${s.slice(0, HINT_MAX_CODE_UNITS).replace(/[\uD800-\uDBFF]$/, "").trimEnd()}…`;
   // (8) credential redaction
   s = redactCredentials(s);
   if (!s.trim()) return { ok: false, reason: "empty_after_sanitize" };
@@ -151,7 +161,16 @@ export function ruleHintFallback(body: string): string | null {
       .replace(/^\*\*|\*\*$/g, "")      // bold wrappers
       .trim();
     if (!stripped) continue;
-    const res = sanitizeRuleHint(stripped);
+    // Audit P1 (2026-06-07): a DERIVED hint must TRUNCATE an over-long line, not
+    // skip it. sanitizeRuleHint hard-rejects > HINT_HARD_REJECT_CODE_UNITS, so the
+    // old code skipped a long substantive first line and landed on a short
+    // afterthought/footnote line — catastrophic for auto-demoted always rules
+    // (their bodies ARE long, so the first real line is usually > 120). Pre-clip
+    // the candidate so the hint comes from the rule's actual opening line.
+    const candidate = stripped.length > HINT_HARD_REJECT_CODE_UNITS
+      ? stripped.slice(0, HINT_HARD_REJECT_CODE_UNITS).replace(/[\uD800-\uDBFF]$/, "") // drop lone surrogate from a mid-pair cut
+      : stripped;
+    const res = sanitizeRuleHint(candidate);
     if (res.ok) return res.clean;
   }
   return null;

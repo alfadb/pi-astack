@@ -143,6 +143,10 @@ check("ruleHintFallback: skips fence/heading, returns first real line stripped",
   assert(rw.ruleHintFallback("# Title\n\nUse edit not sed.\n") === "Use edit not sed.", "skip heading");
   assert(rw.ruleHintFallback("```\ncode\n```\n# H\n- real line here") === "real line here", "skip fence+heading+list marker");
   assert(rw.ruleHintFallback("---\n\n\n") === null, "no usable line -> null");
+  // audit P1 (2026-06-07): a long first substantive line must be TRUNCATED into
+  // the hint, NOT skipped to land on a short later footnote line.
+  const longFirst = rw.ruleHintFallback("用 glab 管理 git.alfadb.cn 所有仓库操作及 CI/MR/release。".repeat(5) + "\n\n见 ADR 0042。");
+  assert(longFirst && longFirst.startsWith("用 glab") && longFirst.endsWith("…"), `long first line truncated not skipped to footnote: ${JSON.stringify(longFirst)}`);
 });
 
 // ── ruleEntryId ─────────────────────────────────────────────────────────────
