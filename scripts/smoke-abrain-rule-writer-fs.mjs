@@ -35,6 +35,7 @@ const writer = await jiti.import(`${repoRoot}/extensions/sediment/writer.ts`);
 const { writeAbrainRule, archiveAbrainRule, deleteAbrainRule, findRuleFile } = writer;
 const { parseDecision } = await jiti.import(`${repoRoot}/extensions/sediment/curator.ts`);
 const { executeCuratorDecisionToBrain } = await jiti.import(`${repoRoot}/extensions/sediment/curator-decision-writer.ts`);
+const { shouldEscalateToCurator } = await jiti.import(`${repoRoot}/extensions/sediment/correction-pipeline.ts`);
 
 const SETTINGS = { gitCommit: false, lockTimeoutMs: 5000 };
 function freshHome() {
@@ -120,6 +121,20 @@ await check("audit P2-1: all-punctuation title falls back to slug 'rule' (no .md
   assert(r.status === "created" && r.slug === "rule", `slug fallback: ${JSON.stringify(r)}`);
   assert(fs.existsSync(path.join(home, "rules", "always", "rule.md")), "rule.md (not .md dotfile)");
   assert(!fs.existsSync(path.join(home, "rules", "always", ".md")), "no degenerate .md dotfile");
+});
+
+await check("#2 dedup: a re-stated rule (near-identical body, different slug) is deduped, not duplicated", async () => {
+  const home = freshHome();
+  const opts = { abrainHome: home, settings: SETTINGS };
+  const a = await writeAbrainRule({ ...baseDraft, title: "Glab rule", body: "git.alfadb.cn 仓库一律用 glab 管理，禁用裸 git/curl API", tier: "listed", scope: "global", kind: "preference" }, opts);
+  assert(a.status === "created", `seed: ${JSON.stringify(a)}`);
+  // restated with reworded title + slug but same essence
+  const b = await writeAbrainRule({ ...baseDraft, title: "Use glab for git.alfadb.cn", body: "git.alfadb.cn 仓库一律用 glab 管理，禁用裸 git 和 curl API 调用", tier: "listed", scope: "global", kind: "preference" }, opts);
+  assert(b.status === "deduped" && b.dedupedAgainst === "glab-rule", `should dedup against glab-rule: ${JSON.stringify(b)}`);
+  assert(!fs.existsSync(path.join(home, "rules", "listed", "use-glab-for-git-alfadb-cn.md")), "no duplicate file written");
+  // a genuinely different rule is NOT deduped
+  const c = await writeAbrainRule({ ...baseDraft, title: "Gh rule", body: "github 仓库一律用 gh 工具管理", tier: "listed", scope: "global", kind: "preference" }, opts);
+  assert(c.status === "created", `distinct rule must create: ${JSON.stringify(c)}`);
 });
 
 await check("INV-R3: budget over-cap rejected + suggests archive", async () => {
@@ -238,6 +253,16 @@ await check("delete: git-commit failure restores the unlinked file (status rejec
   assert(r.status === "rejected" && r.reason === "git_commit_failed", `delete should reject on git fail: ${JSON.stringify(r)}`);
   assert(fs.existsSync(fp), "unlinked file restored after rolled-back delete");
   assert(fs.readFileSync(fp, "utf-8") === before, "restored content byte-identical");
+});
+
+// ── #1 escalate routing predicate (T0 consensus) ───────────────────────
+await check("#1 shouldEscalateToCurator: ONLY high-conf user-expressed durable CREATE escalates", async () => {
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "all git.alfadb.cn repos must use glab" }) === true, "user-stated create rule -> escalate");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 6, user_quote: "x" }) === false, "low confidence -> stage, not escalate");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "x", target_entry_slug: "existing" }) === false, "has update target -> not a create -> not escalate");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "   " }) === false, "no real user quote -> not user-expressed -> not escalate");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "task-local", confidence: 9, user_quote: "x" }) === false, "task-local -> not escalate");
+  assert(shouldEscalateToCurator({ signal_found: false }) === false && shouldEscalateToCurator(null) === false, "no signal -> not escalate");
 });
 
 if (failures.length) {

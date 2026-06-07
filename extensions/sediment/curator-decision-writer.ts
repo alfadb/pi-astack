@@ -89,7 +89,8 @@ export async function executeCuratorDecisionToBrain(args: {
   // target slug resolves to an existing rule file (neighbor-lane routing). The
   // WriteRuleResult is adapted to the shared WriteProjectEntryResult shape.
   const ruleResult = (r: WriteRuleResult): WriteProjectEntryResult => ({
-    slug: r.slug, path: r.path, status: r.status, reason: r.reason, gitCommit: r.gitCommit,
+    // a #2 semantic-dedup hit is a no-op write -> 'skipped' in the shared shape.
+    slug: r.slug, path: r.path, status: r.status === "deduped" ? "skipped" : r.status, reason: r.reason, gitCommit: r.gitCommit,
     auditPath: r.auditPath, lane: r.lane ?? auditContext?.lane, sessionId: r.sessionId ?? sessionId,
     correlationId: r.correlationId, candidateId: r.candidateId,
     // audit round-3 P3: carry lint + sanitization counts so the notify/audit

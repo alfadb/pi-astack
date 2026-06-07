@@ -2203,6 +2203,47 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             let checkpointAdvanced = false;
             try {
               const classifierResult = await correctionPromise.catch(() => ({ ok: false, signal: null } as const));
+              // #1 (T0 consensus 2026-06-07): a high-confidence user-EXPRESSED durable
+              // create signal ESCALATES this short window to the FULL curator + multi-view
+              // lane, so the rule promotes at full fidelity (incl. zone:rules) instead of
+              // being parked as a lossy provisional hypothesis. The curator stays the gate
+              // (re-applies the rules trust taxonomy + conservatism) and create_rules_zone
+              // forces 2-pass review, so a false escalation costs one extractor+curator
+              // call and the curator still skips. Fires only on a positive rare signal.
+              if (classifierResult.ok && classifierResult.escalateToCurator) {
+                const escForwarded = recordCorrectionDispatch("auto_write", shortCorrelationId, classifierResult, true);
+                const auto = await tryAutoWriteLane({
+                  cwd, sessionId, settings, window: effectiveWindow, modelRegistry,
+                  signal: undefined, correlationId: shortCorrelationId, abrainHome, projectId,
+                  branchEntries: branch, sessionManager: sessMgr,
+                  correctionSignal: escForwarded ?? classifierResult.signal ?? undefined,
+                });
+                // The full lane processed the window either way -> advance checkpoint.
+                await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: effectiveWindow.lastEntryId });
+                if (auto.kind === "wrote") {
+                  await appendAudit(cwd, {
+                    operation: "auto_write", lane: "auto_write", session_id: sessionId, ...summary,
+                    extractor: "active_correction_escalated", parser_version: PARSER_VERSION,
+                    settings_snapshot: settingsSnapshot, entry_breakdown: entryBreakdown,
+                    correlation_id: shortCorrelationId, escalated_from: "short_window_classifier_only",
+                    candidate_count: auto.drafts.length, results: auto.results.map(resultSummary),
+                    curator: auto.curatorAudits, checkpoint_advanced: true, classifier_only: false, background_async: true,
+                  });
+                  const compact = compactResultSummary(auto.results);
+                  applySedimentStatus(setStatus, sessionId, auto.results.some((r) => r.status === "rejected") ? "failed" : "completed", compact);
+                  if (notify) { try { notify(formatSedimentNotify("rule escalation (bg)", auto.results, abrainHome), "info"); } catch {} }
+                } else {
+                  await appendAudit(cwd, {
+                    operation: "skip", lane: "auto_write", reason: `escalation_${auto.kind}`, session_id: sessionId, ...summary,
+                    extractor: "active_correction_escalated", parser_version: PARSER_VERSION,
+                    settings_snapshot: settingsSnapshot, entry_breakdown: entryBreakdown,
+                    correlation_id: shortCorrelationId, escalated_from: "short_window_classifier_only",
+                    checkpoint_advanced: true, classifier_only: false, background_async: true,
+                  });
+                  applySedimentStatus(setStatus, sessionId, "completed", `escalation: ${auto.kind}`);
+                }
+                return;
+              }
               const forwarded = recordCorrectionDispatch("auto_write", shortCorrelationId, classifierResult, false);
               const signalFound = classifierResult.signal?.signal_found === true;
               checkpointAdvanced = !!(classifierResult.ok && classifierResult.signal && !signalFound);

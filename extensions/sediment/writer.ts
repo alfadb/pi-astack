@@ -17,6 +17,8 @@ import {
   lintRuleAlwaysSize,
   sanitizeRuleHint,
   ruleHintFallback,
+  ruleBodySimilarity,
+  RULE_DEDUP_SIMILARITY_THRESHOLD,
 } from "./rule-writer";
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
 import type { Jsonish } from "../memory/types";
@@ -1984,10 +1986,11 @@ export interface WriteRuleOptions {
 export interface WriteRuleResult {
   slug: string;
   path: string;
-  status: "created" | "archived" | "deleted" | "rejected" | "dry_run";
+  status: "created" | "archived" | "deleted" | "rejected" | "dry_run" | "deduped";
   reason?: string;
   tier?: RuleTier;
   demotedFrom?: RuleTier;
+  dedupedAgainst?: string;
   ruleScope?: "global" | "project";
   projectId?: string;
   lintErrors?: number;
@@ -2069,6 +2072,32 @@ async function lintRuleBudget(
   } catch { /* tier dir absent -> 0 existing */ }
   const tokens = existing + estimateRuleTokens(addedMarkdown);
   return tokens > cap ? { ok: false, tokens, suggestArchive: oldestSlug } : { ok: true, tokens };
+}
+
+/** #2 dedup scan (T0 consensus 2026-06-07): return the slug of an existing ACTIVE
+ *  rule in this scope whose body is a semantic near-match (Jaccard ≥ threshold) to
+ *  `body`, else undefined. Scans both tiers; skips the same-slug file (that case is
+ *  the exact duplicate_slug gate). A re-stated rule strengthens, never duplicates. */
+function findSimilarRuleSlug(abrainHome: string, scope: "global" | "project", projectId: string | undefined, body: string, excludeSlug: string): string | undefined {
+  const base = rulesBaseDir(abrainHome, scope, projectId);
+  for (const tier of ["always", "listed"] as RuleTier[]) {
+    const dir = path.join(base, tier);
+    let files: string[] = [];
+    try { files = fsSync.readdirSync(dir); } catch { continue; }
+    for (const f of files) {
+      if (!f.endsWith(".md") || f.startsWith("_")) continue;
+      const otherSlug = f.replace(/\.md$/, "");
+      if (otherSlug === excludeSlug) continue;
+      try {
+        const raw = fsSync.readFileSync(path.join(dir, f), "utf-8");
+        const { frontmatterText, body: otherBody } = splitFrontmatter(raw);
+        const status = parseFrontmatter(frontmatterText).status;
+        if (status && String(status) !== "active") continue;
+        if (ruleBodySimilarity(body, otherBody) >= RULE_DEDUP_SIMILARITY_THRESHOLD) return otherSlug;
+      } catch { /* skip unreadable file */ }
+    }
+  }
+  return undefined;
 }
 
 /** ADR 0023 D5: create a rule in ~/.abrain/[projects/<id>/]rules/<tier>/. */
@@ -2159,6 +2188,16 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   if (!budget.ok) return reject("budget_exceeded", { budgetTokens: budget.tokens, budgetCap: cap, suggestArchiveSlug: budget.suggestArchive });
 
   if (fsSync.existsSync(target)) return reject("duplicate_slug");
+
+  // #2 write-time semantic dedup (T0 consensus 2026-06-07): the glab rule was
+  // stated twice + had 2 staging entries; a re-statement must NOT create a near
+  // duplicate. If an active rule with a near-identical body already exists, skip
+  // the write (the existing rule already carries the intent).
+  const dedupSlug = findSimilarRuleSlug(abrainHome, ruleScope, projectId, safeBody, slug);
+  if (dedupSlug) {
+    const auditPath = await audit({ operation: "deduped", reason: "semantic_duplicate", against: dedupSlug });
+    return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${dedupSlug}`, dedupedAgainst: dedupSlug, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
+  }
 
   const sanitizedReplacements = [...titleSan.replacements, ...bodySan.replacements, ...reasonSan.replacements];
 

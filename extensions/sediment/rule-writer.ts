@@ -218,6 +218,34 @@ export function ruleBodyHash(body: string): string {
   return crypto.createHash("sha256").update(body, "utf-8").digest("hex");
 }
 
+/** #2 semantic dedup (T0 consensus 2026-06-07): normalize a rule body to a
+ *  comparable token set — drop headings/timeline/markdown markers, lowercase,
+ *  split on non-alphanumerics, keep tokens ≥ 2 chars. Used to detect a re-stated
+ *  rule (the glab rule was stated twice + had 2 staging entries) so promotion
+ *  STRENGTHENS an existing near-match rather than writing a duplicate. */
+export function normalizeRuleBodyTokens(body: string): Set<string> {
+  const text = body
+    .replace(/^##\s*Timeline[\s\S]*$/m, "") // drop the timeline section
+    .replace(/^#.*$/gm, "")                  // drop headings
+    .replace(/[`*_>#~\[\]()\-]/g, " ")        // drop markdown markers
+    .toLowerCase();
+  return new Set(text.split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 2));
+}
+
+/** Jaccard similarity (0..1) of two rule bodies' normalized token sets. */
+export function ruleBodySimilarity(a: string, b: string): number {
+  const sa = normalizeRuleBodyTokens(a);
+  const sb = normalizeRuleBodyTokens(b);
+  if (sa.size === 0 || sb.size === 0) return 0;
+  let inter = 0;
+  for (const t of sa) if (sb.has(t)) inter++;
+  return inter / (sa.size + sb.size - inter);
+}
+
+/** Default Jaccard threshold above which two rule bodies are 'the same rule
+ *  restated'. 0.7 tolerates wording drift while not collapsing distinct rules. */
+export const RULE_DEDUP_SIMILARITY_THRESHOLD = 0.7;
+
 /** Build the rule markdown (frontmatter + body + timeline). Assumes `draft.body`
  *  is already sanitized (writeAbrainRule runs sanitizeForMemory upstream) and
  *  `draft.hint`, when present, already passed sanitizeRuleHint. */

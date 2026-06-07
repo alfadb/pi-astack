@@ -24,6 +24,20 @@ import type { ModelRegistryLike } from "./llm-extractor";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
+/** #1 routing predicate (T0 consensus 2026-06-07): a high-confidence
+ *  USER-EXPRESSED durable CREATE signal — the user literally stated it (a
+ *  verbatim quote), typed durable, with no existing entry to UPDATE, at
+ *  confidence ≥ 8. This is MAXIMALLY attributable, so it escalates to the full
+ *  curator + multi-view lane (full-fidelity promotion, incl. zone:rules) instead
+ *  of being parked as an unattributable provisional-staging hypothesis. */
+export function shouldEscalateToCurator(signal: CorrectionSignal | null | undefined): boolean {
+  return !!signal?.signal_found
+    && signal.typing === "durable"
+    && !signal.target_entry_slug
+    && (signal.confidence ?? 0) >= 8
+    && (signal.user_quote ?? "").trim().length > 0;
+}
+
 export interface CorrectionSignal {
   signal_found: boolean;
   typing?: "durable" | "task-local" | "debug";
@@ -83,6 +97,12 @@ export interface CorrectionPipelineResult {
   stagingWritten: boolean;
   /** Staging inflation advisory */
   stagingAdvisory?: string;
+  /** #1 (T0 consensus 2026-06-07): a high-confidence USER-EXPRESSED durable
+   *  CREATE signal (no target entry to update) that should ESCALATE to the full
+   *  curator + multi-view lane for full-fidelity promotion (incl. zone:rules),
+   *  instead of being parked as a lossy provisional-staging hypothesis. The
+   *  short-window classifier-only lane reads this to upgrade the window. */
+  escalateToCurator?: boolean;
 }
 
 // ── Prompt ─────────────────────────────────────────────────────────────
@@ -367,8 +387,17 @@ export async function runCorrectionPipeline(
     stagingWritten: false,
   };
 
-  // 6. Resolve: write staging provisional if durable + no target
-  if (signal?.signal_found && signal.typing === "durable" && !signal.target_entry_slug) {
+  // 6. Resolve durable + no-target signals.
+  // #1 (T0 consensus 2026-06-07): a high-confidence USER-EXPRESSED durable create
+  // (the user literally stated a rule, with a verbatim quote, and there is no
+  // existing entry to UPDATE) is MAXIMALLY attributable. Parking it as an
+  // UNATTRIBUTABLE provisional hypothesis — then later re-deriving it from a lossy
+  // flattened prose string — is the bug. Suppress the staging write and tell the
+  // short-window lane to escalate this window into the full curator + multi-view
+  // path, which materializes the draft at FULL fidelity and may emit zone:rules.
+  if (shouldEscalateToCurator(signal)) {
+    result.escalateToCurator = true;
+  } else if (signal?.signal_found && signal.typing === "durable" && !signal.target_entry_slug) {
     const stagingEntry: StagingEntry = {
       slug: `provisional-${hash8(signal.user_quote ?? rawText)}`,
       status: "provisional",
