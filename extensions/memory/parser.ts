@@ -87,10 +87,15 @@ export function normalizeKind(raw: string): { kind: string; legacyKind?: string 
 export function normalizeStatus(raw: string | undefined): { status: string; legacyStatus?: string } {
   const trimmed = (raw || "").trim();
   if (!trimmed) return { status: "active" };
+  // AX-MATURITY (ADR 0028 v1.1 §12): `deprecated` FOLDS into `superseded`
+  // (both = "replaced, reference-only"). New writes should not use deprecated;
+  // existing deprecated entries read as superseded so the default search
+  // exclusion applies uniformly. Original preserved for diagnostics.
+  if (trimmed === "deprecated") return { status: "superseded", legacyStatus: "deprecated" };
   if (CANONICAL_STATUSES.has(trimmed)) return { status: trimmed };
-  // Unknown status → provisional (neutral; NOT subject to the default
-  // archived-exclusion in search.ts::entryMatchesFilters, so the entry
-  // still surfaces). Original preserved for diagnostics.
+  // Unknown status → provisional (neutral; visible — NOT subject to the default
+  // archived/superseded exclusion in search.ts::entryMatchesFilters, so a
+  // degraded entry still surfaces). Original preserved for diagnostics.
   return { status: "provisional", legacyStatus: trimmed };
 }
 

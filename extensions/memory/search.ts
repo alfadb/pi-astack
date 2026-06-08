@@ -12,8 +12,15 @@ export function entryMatchesFilters(entry: MemoryEntry, filters?: SearchFilters)
   if (filters?.status?.length) {
     const statuses = new Set(filters.status.map((s) => s.toLowerCase()));
     if (!statuses.has("all") && !statuses.has(entry.status.toLowerCase())) return false;
-  } else if (entry.status.toLowerCase() === "archived") {
-    return false;
+  } else {
+    // AX-MATURITY (ADR 0028 v1.1 §12): default search excludes both retired
+    // states. `archived` AND `superseded` are "replaced/retired, reference-only"
+    // and must NOT surface alongside active (the prior code excluded only
+    // archived, so superseded/deprecated entries rendered as if still live).
+    // `deprecated` folds to `superseded` at parse time (parser.normalizeStatus),
+    // so checking superseded covers it. `contested` + `provisional` stay visible.
+    const s = entry.status.toLowerCase();
+    if (s === "archived" || s === "superseded") return false;
   }
 
   return true;
