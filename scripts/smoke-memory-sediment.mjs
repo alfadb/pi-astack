@@ -2923,6 +2923,9 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           signal_found: true, typing: "durable", confidence: 9, correction_intent: "new preference",
           scope_description: "All git.alfadb.cn repos must use glab across all projects/sessions",
           user_quote: userQuote, target_entry_slug: null,
+          // ADR 0028 v1.1: the Tier-1 gate is now the deterministic AX-PROVENANCE
+          // class (set by correction-pipeline.deriveProvenance from turn.role).
+          provenance: "user-expressed",
         };
         const laneArgs = (sessionId, correctionSignal) => ({
           cwd: aRoot, sessionId, settings: a2Settings, window: mkWin(),
@@ -2962,14 +2965,15 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
 
         // (6) qualifying signal but user_quote NOT grounded in the window -> attribution guard blocks seed -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
-        const ungrounded = await _tryAutoWriteLaneForTests(laneArgs("smoke-seed-ungrounded", { signal_found: true, typing: "durable", confidence: 9, user_quote: "这条规则的引文根本不在窗口文本里 fabricated quote", scope_description: "x", target_entry_slug: null }));
-        assert(ungrounded.kind === "llm_skip", `a user_quote not grounded in the window must NOT seed (attribution guard), got: ${ungrounded.kind}`);
+        // (6) provenance != user-expressed (README/tool content-in-transcript trap) -> NOT Tier-1 -> no seed -> llm_skip
+        const ungrounded = await _tryAutoWriteLaneForTests(laneArgs("smoke-seed-ungrounded", { signal_found: true, typing: "durable", confidence: 9, user_quote: userQuote, scope_description: "x", target_entry_slug: null, provenance: "content-in-transcript" }));
+        assert(ungrounded.kind === "llm_skip", `a content-in-transcript (non user-expressed) directive must NOT seed a Tier-1 rule, got: ${ungrounded.kind}`);
 
         // (7) grounded but body too short to be a valid rule (quote<10, empty scope) -> not seeded (staging net) -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
         const tinyText = "--- ENTRY 1 r1 message/user ---\n用glab";
         const tinyWin = { entries: [{ type: "message", id: "r1", timestamp: "2026-06-07T00:00:01Z", message: { role: "user", content: [{ type: "text", text: tinyText }] } }], text: tinyText, chars: tinyText.length, totalBranchEntries: 1, candidateEntries: 1, includedEntries: 1, checkpointFound: false, lastEntryId: "r1" };
-        const tooShort = await _tryAutoWriteLaneForTests({ cwd: aRoot, sessionId: "smoke-seed-short", settings: a2Settings, window: tinyWin, modelRegistry: mockModelRegistry, signal: undefined, correlationId: "smoke-seed-short:auto", abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: "用glab", scope_description: "", target_entry_slug: null } });
+        const tooShort = await _tryAutoWriteLaneForTests({ cwd: aRoot, sessionId: "smoke-seed-short", settings: a2Settings, window: tinyWin, modelRegistry: mockModelRegistry, signal: undefined, correlationId: "smoke-seed-short:auto", abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: "用glab", scope_description: "", target_entry_slug: null, provenance: "user-expressed" } });
         assert(tooShort.kind === "llm_skip", `a grounded but <10-char body with no scope must NOT seed (writeAbrainRule would reject; staging is the net), got: ${tooShort.kind}`);
       }
 

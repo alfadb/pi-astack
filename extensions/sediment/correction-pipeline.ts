@@ -17,6 +17,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { sanitizeForMemory } from "./sanitizer";
 import { packClassifierWindow, packedWindowToText, type PackedWindow } from "./context-packer";
+import { type ProvenanceClass } from "./validation";
 import { loadStagingContext, writeStagingEntry, stagingActiveFileCount } from "./staging-loader";
 import type { StagingEntry } from "./staging-types";
 import type { SedimentSettings } from "./settings";
@@ -31,11 +32,16 @@ import type { ModelRegistryLike } from "./llm-extractor";
  *  curator + multi-view lane (full-fidelity promotion, incl. zone:rules) instead
  *  of being parked as an unattributable provisional-staging hypothesis. */
 export function shouldEscalateToCurator(signal: CorrectionSignal | null | undefined): boolean {
+  // Tier-1 predicate (ADR 0028 v1.1 R2'): a high-confidence USER-EXPRESSED
+  // durable CREATE. provenance==='user-expressed' is the DETERMINISTIC structural
+  // gate (verbatim quote grounded in a user-role turn, computed from turn.role) —
+  // it replaces the old fragile `user_quote.length > 0` heuristic and structurally
+  // blocks the README/tool 'always use Yarn' content-in-transcript trap.
   return !!signal?.signal_found
     && signal.typing === "durable"
     && !signal.target_entry_slug
     && (signal.confidence ?? 0) >= 8
-    && (signal.user_quote ?? "").trim().length > 0;
+    && signal.provenance === "user-expressed";
 }
 
 export interface CorrectionSignal {
@@ -59,6 +65,14 @@ export interface CorrectionSignal {
   /** Full 7-step reasoning trace from the classifier (ADR 0024 §5.1).
    *  Preserved for curator context injection and aggregator quality detection. */
   reasoning_trace?: Record<string, unknown>;
+  /** AX-PROVENANCE (ADR 0028 v1.1): which transcript role the verbatim user_quote
+   *  came from — derived DETERMINISTICALLY from packed turn.role, NOT from the LLM.
+   *  user_message = attested user directive; transcript_content = tool/file content
+   *  (e.g. a README "always use Yarn" — the content-in-transcript trap). */
+  quote_source?: "user_message" | "transcript_content" | "assistant" | "absent";
+  /** AX-PROVENANCE class (ground-truth strength). Tier-1 (deterministic rule
+   *  commit) is the predicate provenance==='user-expressed' ∧ directive ∧ durable. */
+  provenance?: ProvenanceClass;
 }
 
 /** Lightweight entry card for classifier target identification.
@@ -207,6 +221,39 @@ function buildClassifierPrompt(args: {
 export const _buildClassifierPromptForTests = buildClassifierPrompt;
 
 // ── Parsing ────────────────────────────────────────────────────────────
+
+/** Strip all whitespace for register-insensitive substring containment. */
+function normWsForProvenance(s: string): string {
+  return s.replace(/\s+/g, "");
+}
+
+/**
+ * AX-PROVENANCE (ADR 0028 v1.1 R2'): deterministically classify where the
+ * classifier's verbatim user_quote actually occurs in the packed window, by
+ * scanning turn.role — NO LLM judgment. This is the structural source gate that
+ * lets the Tier-1 deterministic rule path distinguish a user directive from
+ * README/tool content masquerading as one. user-role match wins over
+ * tool/assistant (the user saying it is the strongest signal).
+ */
+function deriveProvenance(
+  packed: PackedWindow,
+  userQuote: string | undefined,
+): { quote_source: NonNullable<CorrectionSignal["quote_source"]>; provenance: ProvenanceClass } {
+  const q = normWsForProvenance((userQuote ?? "").trim());
+  if (!q) return { quote_source: "absent", provenance: "assistant-observed" };
+  let inUser = false, inTranscript = false, inAssistant = false;
+  for (const t of packed.turns) {
+    if (!normWsForProvenance(t.text).includes(q)) continue;
+    const r = t.role.toLowerCase();
+    if (r === "user") inUser = true;
+    else if (r === "toolresult" || r === "bashexecution" || r === "tool" || r === "system") inTranscript = true;
+    else if (r === "assistant") inAssistant = true;
+  }
+  if (inUser) return { quote_source: "user_message", provenance: "user-expressed" };
+  if (inTranscript) return { quote_source: "transcript_content", provenance: "content-in-transcript" };
+  if (inAssistant) return { quote_source: "assistant", provenance: "assistant-observed" };
+  return { quote_source: "absent", provenance: "assistant-observed" };
+}
 
 function parseCorrectionSignal(raw: string): CorrectionSignal | null {
   // Try JSON fence (non-greedy, stops at first closing ```)
@@ -376,8 +423,14 @@ export async function runCorrectionPipeline(
     };
   }
 
-  // 5. Parse signal
+  // 5. Parse signal + stamp AX-PROVENANCE deterministically from the packed
+  // window's turn.role (R2' structural source gate; no LLM judgment).
   const signal = parseCorrectionSignal(rawText);
+  if (signal) {
+    const pv = deriveProvenance(packed, signal.user_quote);
+    signal.quote_source = pv.quote_source;
+    signal.provenance = pv.provenance;
+  }
 
   const result: CorrectionPipelineResult = {
     ok: true,

@@ -48,7 +48,7 @@ import {
   type LlmExtractorResult,
 } from "./llm-extractor";
 import { runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
-import { ruleBodySimilarity, normalizeRuleBodyTokens, RULE_DEDUP_SIMILARITY_THRESHOLD } from "./rule-writer";
+import { ruleBodySimilarity, RULE_DEDUP_SIMILARITY_THRESHOLD } from "./rule-writer";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
 import { collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug } from "./outcome-collector";
@@ -3342,21 +3342,18 @@ async function tryAutoWriteLane(args: {
   const escSig = args.correctionSignal;
   if (escSig && shouldEscalateToCurator(escSig)) {
     const seedBody = (typeof escSig.user_quote === "string" ? escSig.user_quote : "").trim();
-    // Attribution guard (audit P1, refined by convergence audit 2026-06-07): only
-    // seed when the claimed verbatim quote is GROUNDED in this window via
-    // punctuation-insensitive token-subset containment (normalizeRuleBodyTokens
-    // drops markdown/punctuation + lowercases). A raw whitespace-only substring
-    // check false-rejected legitimate CJK rules on trivial fullwidth/ascii or
-    // markdown variance (the feature's target population); token containment
-    // tolerates that while still blocking a paraphrase/hallucination whose content
-    // tokens are absent from the window. Ungrounded -> provisional staging net.
-    const qTokens = normalizeRuleBodyTokens(seedBody);
-    const wTokens = normalizeRuleBodyTokens(window.text);
-    const grounded = qTokens.size > 0 && [...qTokens].every((t) => wTokens.has(t));
+    // ADR 0028 v1.1: attribution grounding is now the DETERMINISTIC AX-PROVENANCE
+    // gate inside shouldEscalateToCurator (provenance==='user-expressed' means the
+    // verbatim quote was found in a USER-role turn, computed from turn.role in
+    // correction-pipeline.deriveProvenance). That structurally blocks the
+    // README/tool content-in-transcript trap, so the prior token-subset substring
+    // band-aid is removed. Remaining guards: dedup (don't double-curate a rule the
+    // extractor already covered) + min-body (writeAbrainRule rejects < 10 CU; fall
+    // back to the provisional staging net rather than emit a guaranteed-reject).
     const alreadyCovered = compliantDrafts.some(
       (d) => ruleBodySimilarity(seedBody, d.compiledTruth ?? "") >= RULE_DEDUP_SIMILARITY_THRESHOLD,
     );
-    if (grounded && !alreadyCovered) {
+    if (!alreadyCovered) {
       const seed = buildEscalationSeedDraft(escSig, sessionId);
       // Do not emit a draft writeAbrainRule would reject for an under-length body
       // (validation_error_body, < 10 CU) — that would burn a curator call and, on
