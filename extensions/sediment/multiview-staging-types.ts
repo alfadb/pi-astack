@@ -133,6 +133,10 @@ export interface CandidateSnapshot {
   status?: string;    // EntryStatus
   confidence?: number;
   summary?: string;
+  // AX-PROVENANCE (audit P1 2026-06-07): a Tier-1 user-expressed rule that goes
+  // through multi-view and is DEFERRED must keep its provenance across the
+  // staged replay, else the replayed rule defaults to assistant-observed.
+  provenance?: string; // ProvenanceClass, see ./validation
 }
 
 /**

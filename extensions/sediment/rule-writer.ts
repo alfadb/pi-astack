@@ -25,7 +25,7 @@
 import * as crypto from "node:crypto";
 
 import { redactCredentials } from "../abrain/redact";
-import { ENTRY_KINDS, ENTRY_STATUSES, type EntryKind, type EntryStatus, type ProvenanceClass } from "./validation";
+import { ENTRY_KINDS, ENTRY_STATUSES, PROVENANCE_CLASSES, type EntryKind, type EntryStatus, type ProvenanceClass } from "./validation";
 
 export type RuleTier = "always" | "listed";
 export type RuleScope = "global" | { projectId: string };
@@ -49,8 +49,9 @@ export interface RuleDraft {
   routingReason: string;
   sessionId?: string;
   // AX-PROVENANCE (ADR 0028 v1.1 §12): stored ground-truth-strength axis, set
-  // deterministically from the originating turn.role. Tier-1 rules are
-  // 'user-expressed'. Defaults to 'user-expressed' for rules when unset.
+  // deterministically from the originating turn.role. The Tier-1 path sets
+  // 'user-expressed' explicitly; buildRuleMarkdown defaults to 'assistant-observed'
+  // (conservative) when unset so an autonomous-curator rule is not mislabeled.
   provenance?: ProvenanceClass;
   // F-W2 provenance link (knowledge -> rules promotion reconciliation anchor)
   derivesFrom?: string[];
@@ -277,7 +278,9 @@ export function buildRuleMarkdown(draft: RuleDraft, slug: string): string {
   // (conservative) so a rule created by the autonomous curator/extractor is NOT
   // mislabeled user-expressed; the Tier-1 path sets provenance=user-expressed
   // explicitly (audit P1 2026-06-07).
-  fm.push(`provenance: ${yamlScalar(draft.provenance ?? "assistant-observed")}`);
+  const provenance: ProvenanceClass = draft.provenance && (PROVENANCE_CLASSES as readonly string[]).includes(draft.provenance)
+    ? draft.provenance : "assistant-observed";
+  fm.push(`provenance: ${yamlScalar(provenance)}`);
   fm.push(`confidence: ${clampConfidence(draft.entryConfidence)}`);
   fm.push(`tier: ${yamlScalar(draft.tier)}`);
   if (draft.hint) fm.push(`hint: ${yamlScalar(draft.hint)}`);

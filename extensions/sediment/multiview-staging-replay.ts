@@ -223,6 +223,9 @@ function draftFromSnapshot(
     ...(snap.status !== undefined && { status: snap.status as ProjectEntryDraft["status"] }),
     ...(snap.confidence !== undefined && { confidence: snap.confidence }),
     ...(snap.summary !== undefined && { summary: snap.summary }),
+    // AX-PROVENANCE: restore across replay so a deferred Tier-1 user-expressed
+    // rule is not silently relabeled assistant-observed on promotion (audit P1).
+    ...(snap.provenance !== undefined && { provenance: snap.provenance as ProjectEntryDraft["provenance"] }),
     ...(derivesFrom !== undefined && { derivesFrom }),
   };
 }

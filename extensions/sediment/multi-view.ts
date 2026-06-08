@@ -825,6 +825,8 @@ function snapshotCandidate(draft: ProjectEntryDraft): CandidateSnapshot {
     ...(draft.status !== undefined && { status: draft.status }),
     ...(draft.confidence !== undefined && { confidence: draft.confidence }),
     ...(draft.summary !== undefined && { summary: draft.summary }),
+    // AX-PROVENANCE: preserve across a deferred multi-view replay (audit P1).
+    ...(draft.provenance !== undefined && { provenance: draft.provenance }),
   };
 }
 
