@@ -447,6 +447,78 @@ function setFooterStatus(ctx: { ui?: { setStatus?(key: string, text: string | un
   }
 }
 
+// ── Real-time footer refresh ───────────────────────────────────────────
+// The footer is otherwise a session_start SNAPSHOT: a rule written
+// mid-session by the background sediment lane would not surface until
+// `/rule reload` or the next restart. We mirror sediment's globalThis
+// setStatus-capture pattern (survives pi's module teardown/reload) and
+// fs.watch the rules tier dirs so a write refreshes the footer live.
+interface RuleInjectorRealtimeGlobal {
+  __abrainRules_setFooter?: (msg: string) => void;
+  __abrainRules_watchers?: fs.FSWatcher[];
+  __abrainRules_debounce?: ReturnType<typeof setTimeout>;
+  __abrainRules_watchKey?: string;
+}
+const _RG = globalThis as unknown as RuleInjectorRealtimeGlobal;
+
+function footerText(cache: RuleScanCache | null): string {
+  if (!cache || !hasAnyRules(cache)) return "🧠 rules: none";
+  const counts = ruleCounts(cache);
+  const warn = cache.warnings.some((w) => w.level === "warning" || w.level === "error");
+  return `${warn ? "⚠️" : "🧠"} rules: ${counts.always} always, ${counts.listed} listed`;
+}
+
+/** Capture a KEY-bound setStatus into globalThis so the fs.watch callback
+ *  (which has no ctx) can push the footer. Mirrors sediment's pattern. */
+function captureRulesFooterSetter(
+  ctx: { ui?: { setStatus?(key: string, text: string | undefined): void } } | undefined,
+): void {
+  const setStatus = ctx?.ui?.setStatus;
+  if (!setStatus) return;
+  const bound = setStatus.bind(ctx!.ui);
+  _RG.__abrainRules_setFooter = (msg: string) => { try { bound(RULE_STATUS_KEY, msg); } catch { /* best-effort */ } };
+}
+
+/** Re-scan + push the footer via the captured setter. Best-effort. */
+export function refreshRulesFooterRealtime(cwd: string, settings: RuleInjectorSettings): void {
+  const setFooter = _RG.__abrainRules_setFooter;
+  if (!setFooter) return;
+  try {
+    cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd, settings });
+    setFooter(footerText(cachedRules));
+  } catch { /* best-effort */ }
+}
+
+/** Watch the rules tier dirs (leaf, non-recursive — rule files are flat
+ *  files in always/ and listed/) so a mid-session write refreshes the
+ *  footer in real time. Idempotent: re-keys + tears down prior watchers on
+ *  cwd/project change. persistent:false so it never blocks pi exit. */
+function setupRulesWatcher(cwd: string, settings: RuleInjectorSettings, activeProjectId: string | undefined): void {
+  const key = `${cwd}|${activeProjectId ?? ""}`;
+  if (_RG.__abrainRules_watchKey === key && (_RG.__abrainRules_watchers?.length ?? 0) > 0) return;
+  for (const w of _RG.__abrainRules_watchers ?? []) { try { w.close(); } catch { /* */ } }
+  _RG.__abrainRules_watchers = [];
+  _RG.__abrainRules_watchKey = key;
+  const dirs = [
+    path.join(ABRAIN_HOME, "rules", "always"),
+    path.join(ABRAIN_HOME, "rules", "listed"),
+    ...(activeProjectId ? [
+      path.join(ABRAIN_HOME, "projects", activeProjectId, "rules", "always"),
+      path.join(ABRAIN_HOME, "projects", activeProjectId, "rules", "listed"),
+    ] : []),
+  ];
+  for (const dir of dirs) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+      const w = fs.watch(dir, { persistent: false }, () => {
+        if (_RG.__abrainRules_debounce) clearTimeout(_RG.__abrainRules_debounce);
+        _RG.__abrainRules_debounce = setTimeout(() => refreshRulesFooterRealtime(cwd, settings), 300);
+      });
+      _RG.__abrainRules_watchers.push(w);
+    } catch { /* fs.watch unsupported / dir vanished — best-effort */ }
+  }
+}
+
 function notifyWarningsOnce(ctx: { ui?: { notify?(message: string, type?: NotifyType): void } } | undefined, cache: RuleScanCache): void {
   if (!ctx?.ui?.notify) return;
   const warnings = cache.warnings.filter((w) => w.level === "warning" || w.level === "error");
@@ -545,6 +617,11 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       ensureProjectRuleDirs(ABRAIN_HOME, cachedRules.activeProjectId);
       setFooterStatus(ctx, cachedRules);
       notifyWarningsOnce(ctx, cachedRules);
+      // Real-time footer: capture the setter + watch the rules dirs so a rule
+      // written mid-session by background sediment refreshes the footer live
+      // (no /rule reload or restart needed).
+      captureRulesFooterSetter(ctx);
+      setupRulesWatcher(ctx?.cwd || process.cwd(), settings, cachedRules.activeProjectId);
     } catch (e: unknown) {
       cachedRules = null;
       const msg = e instanceof Error ? e.message : String(e);
