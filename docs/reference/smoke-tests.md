@@ -2,12 +2,16 @@
 
 `package.json#scripts` 是 smoke test **live truth**。本文只是便于阅读的镜像；修改脚本时请同步本文。若本文与 `package.json` 冲突，以 `package.json` 为准。
 
-## Current scripts（2026-06-04, 66 total）
+## Current scripts（2026-06-08, 72 total）
 
 | npm script | File | Coverage |
 |---|---|---|
 | `smoke:turn-progress` | `scripts/smoke-turn-progress.mjs` | turn-progress extension registration / status rendering basics |
 | `smoke:memory` | `scripts/smoke-memory-sediment.mjs` | memory facade + sediment integration regressions, including credential typed-redaction boundary |
+| `smoke:derive-provenance` | `scripts/smoke-derive-provenance.mjs` | active-correction signal quote-source → provenance derivation, including sanitized user-message matching |
+| `smoke:rule-footer-realtime` | `scripts/smoke-rule-footer-realtime.mjs` | real-time rules footer refresh after rules directory changes |
+| `smoke:tier1-directive-defer` | `scripts/smoke-tier1-directive-defer-resolution.mjs` | ADR 0028 Tier-1 deterministic directive commit path when curator multi-view defers |
+| `smoke:pr1-adr0028` | `scripts/smoke-pr1-adr0028.mjs` | ADR 0028 PR1: rules-as-readonly-neighbors, observe-only Tier-1 shadow lane, and flag-off invariants |
 | `smoke:evolution-ledger` | `scripts/smoke-evolution-ledger.mjs` | L1 Sediment Evolution Loop v1 internal evolution-ledger lifecycle / scoping / degraded-run guard / identity convergence (`adoptUnsluggedAlias`) |
 | `smoke:entry-telemetry` | `scripts/smoke-entry-telemetry.mjs` | Outcome→Entry feedback edge Tier-A telemetry sidecar: cumulative/rolling aggregation, hysteresis preservation, project scoping, sidecar-only boundary (never writes durable markdown) |
 | `smoke:entry-lifecycle-proposals` | `scripts/smoke-entry-lifecycle-proposals.mjs` | Outcome→Entry feedback edge M3 read-only proposal sink: proposals sourced from PROMOTED advisories only (not demoted/exoneration), status=pending, project scoping, §8 observation-only boundary (no writer/curator/multi-view) |
@@ -56,6 +60,8 @@
 | `smoke:abrain-i18n` | `scripts/smoke-abrain-i18n.mjs` | abrain i18n strings |
 | `smoke:abrain-redact` | `scripts/smoke-abrain-redact.mjs` | abrain redactor unit coverage |
 | `smoke:abrain-rule-injector` | `scripts/smoke-abrain-rule-injector.mjs` | ADR 0023-R5 read-only rules injection: scan, strict binding, nonce strip, idempotency |
+| `smoke:abrain-rule-writer` | `scripts/smoke-abrain-rule-writer.mjs` | ADR 0023 rule-writer parser / frontmatter / budget invariants |
+| `smoke:abrain-rule-writer-fs` | `scripts/smoke-abrain-rule-writer-fs.mjs` | ADR 0023 rule writer filesystem orchestration, rollback, dedup, and curator escalation gate |
 | `smoke:prompt-user` | `scripts/smoke-prompt-user.mjs` | prompt_user manager + secret redaction + INV-A/B/C/D contracts |
 | `smoke:prompt-user-finalizer` | `scripts/smoke-prompt-user-finalizer.mjs` | prompt_user dialog teardown / disposer / secret wipe |
 | `smoke:prompt-user-subpi` | `scripts/smoke-prompt-user-subpi.mjs` | sub-agent prompt_user disabled |
@@ -81,6 +87,9 @@ npm run smoke:paths
 
 # Memory / sediment / second-brain changes
 npm run smoke:memory
+npm run smoke:derive-provenance
+npm run smoke:tier1-directive-defer
+npm run smoke:pr1-adr0028
 npm run smoke:evolution-ledger
 npm run smoke:memory-path-a
 npm run smoke:staging-resolver
@@ -97,6 +106,7 @@ npm run smoke:c5-heartbeat-dispatch-integration
 npm run smoke:abrain-vault-reader
 npm run smoke:abrain-vault-bash
 npm run smoke:abrain-vault-grant-isolation
+npm run smoke:abrain-rule-writer-fs
 npm run smoke:prompt-user
 npm run smoke:prompt-user-option-list
 ```

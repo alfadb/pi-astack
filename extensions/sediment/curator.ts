@@ -1,9 +1,10 @@
 import * as path from "node:path";
 import * as fs from "node:fs";
 import type { MemorySettings } from "../memory/settings";
-import { loadEntries } from "../memory/parser";
+import { loadEntries, tokenize } from "../memory/parser";
 import { llmSearchEntries } from "../memory/llm-search";
 import type { MemoryEntry } from "../memory/types";
+import { scanRules, type RuleEntry } from "../abrain/rule-injector";
 import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import type { SedimentSettings } from "./settings";
@@ -244,17 +245,67 @@ import { isWorkflowNeighborEntry } from "./workflow-utils";
  * this to reject write ops targeting workflow neighbors before they reach
  * the writer (which would silently reject with entry_not_found).
  */
-// TODO(ADR 0023 W0.2-neighbor): when rules entries become curator neighbors
-// (so the classifier can autonomously archive/update an existing rule), add a
-// "rules" lane here AND a detection branch in neighborLaneFor, so effectiveScopeFor
-// / qualifyCrossScopeEdges bypass the world/project scope machinery for rules
-// (same override pattern as workflow). Until then rules are never loaded as
-// neighbors, so the lane is absent by design.
-export type CuratorNeighborLane = "project" | "world" | "workflow";
+export type CuratorNeighborLane = "project" | "world" | "workflow" | "rules";
+
+export function isRuleNeighborEntry(entry: MemoryEntry): boolean {
+  return entry.frontmatter?.zone === "rules" || /(?:^|\/)rules\/(?:always|listed)\//.test(entry.sourcePath ?? "");
+}
 
 export function neighborLaneFor(entry: MemoryEntry): CuratorNeighborLane {
   if (isWorkflowNeighborEntry(entry)) return "workflow";
+  if (isRuleNeighborEntry(entry)) return "rules";
   return (entry.scope ?? "project") as CuratorNeighborLane;
+}
+
+function ruleEntryToMemoryEntry(rule: RuleEntry): MemoryEntry {
+  const textForTokens = `${rule.title}\n${rule.hint}\n${rule.body}\n${rule.injectedText}`;
+  const tokenCounts = new Map<string, number>();
+  for (const token of tokenize(textForTokens)) tokenCounts.set(token, (tokenCounts.get(token) ?? 0) + 1);
+  const frontmatter = {
+    zone: "rules",
+    tier: rule.tier,
+    rule_scope: rule.scope,
+    kind: rule.kind,
+    status: rule.status,
+    confidence: rule.confidence,
+    hint: rule.hint,
+    ...(rule.projectId ? { project_id: rule.projectId } : {}),
+  };
+  return {
+    slug: rule.slug,
+    id: rule.scopedSlug,
+    scope: rule.scope === "project" ? "project" : "world",
+    kind: rule.kind,
+    status: rule.status,
+    confidence: rule.confidence,
+    title: rule.title,
+    summary: rule.hint || rule.injectedText,
+    created: rule.created,
+    updated: rule.updated,
+    sourcePath: rule.sourcePath,
+    displayPath: rule.sourcePath,
+    storeRoot: path.dirname(rule.sourcePath),
+    frontmatter,
+    compiledTruth: rule.body || rule.injectedText,
+    timeline: [],
+    relatedSlugs: [],
+    relations: [],
+    tokenCounts,
+    tokenTotal: Math.max(1, Array.from(tokenCounts.values()).reduce((sum, n) => sum + n, 0)),
+  };
+}
+
+export function loadReadonlyRuleNeighborEntries(args: {
+  abrainHome: string;
+  cwd: string;
+}): MemoryEntry[] {
+  const cache = scanRules({ abrainHome: args.abrainHome, cwd: args.cwd });
+  return [
+    ...cache.globalAlways,
+    ...cache.globalListed,
+    ...cache.projectAlways,
+    ...cache.projectListed,
+  ].map(ruleEntryToMemoryEntry);
 }
 
 // Exported (2026-05-15) so smoke can pin the create-branch scope guard.
@@ -297,6 +348,12 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
       throw new CuratorRejectError(
         "workflow_lane_read_only",
         `curator op "${op}" targets workflow-lane neighbor "${slug}" — workflow entries are read-only references in the sediment auto-write path (they live in ~/.abrain/[projects/<id>/]workflows/ and are mutated only by writeAbrainWorkflow). Use op=skip (when the workflow already covers the candidate's claim) or op=create with derives_from:["${slug}"] (when the candidate is a separate downstream observation building on the workflow).`,
+      );
+    }
+    if (neighborScope === "rules") {
+      throw new CuratorRejectError(
+        "rules_lane_read_only",
+        `curator op "${op}" targets rules-lane neighbor "${slug}" — rules are read-only references in the sediment auto-write path for ADR 0028 PR1. Use op=skip when the existing rule already covers the candidate, or op=create with zone:"rules" only for a genuinely new rule.`,
       );
     }
     return neighborScope === "world" ? "world" : undefined;
@@ -603,9 +660,12 @@ function entryForPrompt(entry: MemoryEntry): string {
   // on them (the writer cannot reach workflows/ — see isWorkflowNeighborEntry
   // JSDoc + parseDecision::validateScope workflow branch).
   const isWorkflow = isWorkflowNeighborEntry(entry);
+  const isRule = isRuleNeighborEntry(entry);
   const scopeLine = isWorkflow
     ? `scope: workflow (READ-ONLY reference — sediment auto-write CANNOT modify workflow-lane entries; do not op=update/supersede/merge/archive/delete this slug, prefer op=skip or op=create with derives_from)`
-    : `scope: ${entry.scope ?? "project"}`;
+    : isRule
+      ? `scope: rules (READ-ONLY reference — sediment auto-write CANNOT modify existing rule entries in ADR 0028 PR1; do not op=update/supersede/merge/archive/delete this slug, prefer op=skip when covered or op=create zone:rules for a genuinely new rule)`
+      : `scope: ${entry.scope ?? "project"}`;
   return [
     `## ${entry.slug}`,
     scopeLine,
@@ -757,6 +817,11 @@ function makeCuratorPrompt(
         ].join("\n")
       : "";
 
+  const hasRuleNeighbors = neighbors.some(isRuleNeighborEntry);
+  const rulesLifecycleLine = hasRuleNeighbors
+    ? "- Retiring/editing an EXISTING rule ('撤销那条 rule' / 'X 不再适用' / '把 X 改成 Y'): existing rules may appear below as READ-ONLY neighbors for dedup awareness, but this implementation batch cannot mutate them. Do NOT target a rule slug with update/merge/archive/supersede/delete — the decoder will reject it. Prefer op=skip when the existing rule already covers the candidate, or op=create zone:rules only for a genuinely new rule."
+    : "- Retiring/editing an EXISTING rule ('撤销那条 rule' / 'X 不再适用' / '把 X 改成 Y'): rules are NOT yet loaded as curator neighbors (W0.2-neighbor pending), so you cannot target a rule slug for archive/update here — such a candidate → op=skip for now (rule retirement via the curator is not wired yet — W0.2-neighbor pending; the /rule channel is diagnostic-only [list/explain/reload], no veto/retire).";
+
   return [
     correctionBlock,
     taskLocalBlock,
@@ -791,7 +856,7 @@ function makeCuratorPrompt(
     "Rules anti-promote signals (CREATE-time skip):",
     "- One-shot task talk ('刚才决定'/'我们这次'/'本次'/'上次说过'/'赶时间') is NOT a rule — zone omitted / op=skip.",
     "- INV-R1: if the candidate is the assistant RECITING a rule already injected into this session's system prompt (you are quoting your own injected rules section), op=skip — never re-promote your own injected rules.",
-    "- Retiring/editing an EXISTING rule ('撤销那条 rule' / 'X 不再适用' / '把 X 改成 Y'): rules are NOT yet loaded as curator neighbors (W0.2-neighbor pending), so you cannot target a rule slug for archive/update here — such a candidate → op=skip for now (rule retirement via the curator is not wired yet — W0.2-neighbor pending; the /rule channel is diagnostic-only [list/explain/reload], no veto/retire).",
+    rulesLifecycleLine,
     "- {\"op\":\"update\", \"slug\": one_of_neighbors, \"scope\"?: \"world\", \"patch\": {\"title\"?: string, \"kind\"?: string, \"status\"?: string, \"confidence\"?: number, \"compiled_truth\"?: string, \"trigger_phrases\"?: string[]}, \"timeline_note\": string, \"rationale\": string}",
     "- {\"op\":\"merge\", \"target\": one_of_neighbors, \"scope\"?: \"world\", \"sources\": [one_or_more_neighbors], \"compiled_truth\": string, \"timeline_note\": string, \"rationale\": string}",
     "- {\"op\":\"skip\", \"reason\": string, \"rationale\": string}",
@@ -938,6 +1003,12 @@ export async function curateProjectDraft(
      *  advisory). Non-consuming — the same items surface every same-session
      *  agent_end until the session ends. */
     taskLocalContext?: TaskLocalContextItem[] | null;
+    /** ADR 0028 PR1: required only when rulesAsReadonlyNeighborsEnabled=true. */
+    abrainHome?: string;
+    /** ADR 0028 PR1: proposer-only diagnostic mode. Skips multi-view because
+     *  runMultiView can stage candidates on disk; callers use this only for
+     *  observe-only shadow audit rows, never for writer authorization. */
+    observeOnly?: boolean;
   },
 ): Promise<CuratorOutcome> {
   const totalStart = Date.now();
@@ -969,6 +1040,12 @@ export async function curateProjectDraft(
   let cards: any[];
   try {
     entries = relevantEntriesForCurator(await loadEntries(deps.projectRoot, deps.memorySettings, deps.signal));
+    if (deps.sedimentSettings.rulesAsReadonlyNeighborsEnabled && deps.abrainHome) {
+      entries = [
+        ...entries,
+        ...loadReadonlyRuleNeighborEntries({ abrainHome: deps.abrainHome, cwd: deps.projectRoot }),
+      ];
+    }
     cards = await llmSearchEntries(
       entries,
       { query: makeSearchPrompt(safeDraft), filters: { limit: 5, status: ["all"] } },
@@ -1031,6 +1108,18 @@ export async function curateProjectDraft(
       deps.projectId,
     );
     const decideMs = Date.now() - decideStart;
+
+    if (deps.observeOnly) {
+      const decision = sanitizeDecisionStrings(proposerDecision);
+      return {
+        decision,
+        audit: {
+          decision,
+          neighbors: neighborAudit,
+          stage_ms: { search: searchMs, decide: decideMs, total: Date.now() - totalStart },
+        },
+      };
+    }
 
     // ADR 0025 P0.5 multi-view verification. Runs ONLY for high-value
     // ops (see shouldTriggerMultiView). For low-value ops triggered=false

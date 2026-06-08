@@ -86,6 +86,15 @@ export interface SedimentSettings {
    *  Default: false (sanitize is ON by default). */
   skipContinuationSanitize: boolean;
 
+  /** ADR 0028 PR1: expose existing rules as read-only curator neighbors.
+   *  Default false so the legacy curator prompt/search surface is unchanged
+   *  until the read-only decoder guards are deliberately dogfooded. */
+  rulesAsReadonlyNeighborsEnabled: boolean;
+  /** ADR 0028 PR1: observe-only Tier-1 directive shadow path.
+   *  Default false; when true it may emit diagnostic audit rows but must not
+   *  write, consume signals, notify, update footer, or advance checkpoints. */
+  tier1ShadowEnabled: boolean;
+
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
    *  can track prompt changes without manual cross-reference.
@@ -190,6 +199,8 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoLlmWriteEnabled: true,
   autoWriteRawAuditChars: 8_000,
   skipContinuationSanitize: false,
+  rulesAsReadonlyNeighborsEnabled: false,
+  tier1ShadowEnabled: false,
   promptVersion: {
     activeCorrectionClassifier: "v1",
     reasoningNormalizationPreamble: "v1",
@@ -314,6 +325,8 @@ export function resolveSedimentSettings(): SedimentSettings {
     autoLlmWriteEnabled: resolveAutoLlmWriteEnabled(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
     skipContinuationSanitize: asBoolean(cfg.skipContinuationSanitize, DEFAULT_SEDIMENT_SETTINGS.skipContinuationSanitize),
+    rulesAsReadonlyNeighborsEnabled: asBoolean(cfg.rulesAsReadonlyNeighborsEnabled, DEFAULT_SEDIMENT_SETTINGS.rulesAsReadonlyNeighborsEnabled),
+    tier1ShadowEnabled: asBoolean(cfg.tier1ShadowEnabled, DEFAULT_SEDIMENT_SETTINGS.tier1ShadowEnabled),
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,

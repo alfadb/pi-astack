@@ -123,6 +123,7 @@ for (const file of [
 fs.mkdirSync(path.join(tmpDir, "_shared"), { recursive: true });
 fs.writeFileSync(path.join(tmpDir, "_shared", "runtime.cjs"), transpile(path.join(repoRoot, "extensions/_shared/runtime.ts")));
 fs.copyFileSync(path.join(tmpDir, "_shared", "runtime.cjs"), path.join(tmpDir, "_shared", "runtime.js"));
+fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
 
 const bootstrap = require(path.join(tmpDir, "bootstrap.cjs"));
 const keychain = require(path.join(tmpDir, "keychain.cjs"));
@@ -144,6 +145,7 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
+  .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector.js")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCompiled);
 const indexModule = require(path.join(tmpDir, "index.cjs"));

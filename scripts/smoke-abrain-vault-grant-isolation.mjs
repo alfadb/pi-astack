@@ -129,6 +129,7 @@ for (const file of ABRAIN_LEAF_FILES) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
+fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
 
 // Stage abrain/index.ts last so its require()s can resolve to the .cjs
 // siblings we just wrote.

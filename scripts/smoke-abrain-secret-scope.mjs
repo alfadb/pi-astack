@@ -65,6 +65,7 @@ for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "b
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
+fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
 
 let indexSrc = fs.readFileSync(path.join(repoRoot, "extensions/abrain/index.ts"), "utf8");
 const indexCjs = ts.transpileModule(indexSrc, {
@@ -85,6 +86,7 @@ const indexCjs = ts.transpileModule(indexSrc, {
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
+  .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector.js")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCjs);
 

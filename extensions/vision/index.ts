@@ -476,10 +476,9 @@ export default function (pi: ExtensionAPI) {
       },
     ): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
       const model = ctx.model as { provider: string; id: string; input?: string[] } | undefined;
-      const modelRegistry = ctx.modelRegistry as VisionDeps["modelRegistry"] | undefined;
       // P0 fix (2026-05-14 audit round 6): modelRegistry may be undefined in
       // some pi versions — return isError instead of crashing.
-      if (!modelRegistry) {
+      if (!ctx.modelRegistry) {
         return {
           content: [{
             type: "text" as const,
@@ -490,6 +489,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      const modelRegistry = ctx.modelRegistry as VisionDeps["modelRegistry"];
       const prefs = loadVisionPrefs();
 
       const result = await analyzeImage(params, {

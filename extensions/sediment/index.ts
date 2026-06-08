@@ -3283,6 +3283,84 @@ async function tryAutoWriteLane(args: {
     };
   }
 
+  const tier1ShadowSignal = args.correctionSignal;
+  if (settings.tier1ShadowEnabled && tier1ShadowSignal && shouldEscalateToCurator(tier1ShadowSignal)) {
+    const shadowStart = Date.now();
+    const shadowDraft = buildEscalationSeedDraft(tier1ShadowSignal, sessionId);
+    try {
+      if (shadowDraft.compiledTruth.trim().length >= 10) {
+        const shadow = await curateProjectDraft(shadowDraft, {
+          projectRoot: cwd,
+          sedimentSettings: settings,
+          memorySettings: resolveMemorySettings(),
+          modelRegistry,
+          signal: args.signal,
+          correctionSignal: tier1ShadowSignal,
+          taskLocalContext: getTaskLocalForCurator(sessionId),
+          projectId,
+          abrainHome,
+          observeOnly: true,
+        });
+        await appendAudit(cwd, {
+          operation: "tier1_shadow_decision",
+          lane: "auto_write",
+          session_id: sessionId,
+          ...checkpointSummary(window),
+          correlation_id: correlationId,
+          candidate_id: candidateIdFor(correlationId, -1),
+          candidate_title: sanitizeAuditText(shadowDraft.title, 500),
+          candidate_kind: shadowDraft.kind,
+          candidate_confidence: shadowDraft.confidence,
+          candidate_body_chars: shadowDraft.compiledTruth.length,
+          correction_signal: {
+            confidence: tier1ShadowSignal.confidence ?? null,
+            provenance: tier1ShadowSignal.provenance ?? null,
+            quote_source: tier1ShadowSignal.quote_source ?? null,
+            quote: (tier1ShadowSignal.user_quote ?? "").slice(0, 200),
+          },
+          decision: shadow.decision,
+          curator: shadow.audit,
+          observe_only: true,
+          wrote: false,
+          signal_consumed: false,
+          checkpoint_advanced: false,
+          durationMs: Date.now() - shadowStart,
+        });
+      } else {
+        await appendAudit(cwd, {
+          operation: "tier1_shadow_decision",
+          lane: "auto_write",
+          session_id: sessionId,
+          ...checkpointSummary(window),
+          correlation_id: correlationId,
+          candidate_id: candidateIdFor(correlationId, -1),
+          reason: "shadow_candidate_body_too_short",
+          observe_only: true,
+          wrote: false,
+          signal_consumed: false,
+          checkpoint_advanced: false,
+          durationMs: Date.now() - shadowStart,
+        });
+      }
+    } catch (e: any) {
+      await appendAudit(cwd, {
+        operation: "tier1_shadow_decision",
+        lane: "auto_write",
+        session_id: sessionId,
+        ...checkpointSummary(window),
+        correlation_id: correlationId,
+        candidate_id: candidateIdFor(correlationId, -1),
+        reason: "tier1_shadow_error",
+        error: sanitizeAuditText(e?.message ?? String(e), 500),
+        observe_only: true,
+        wrote: false,
+        signal_consumed: false,
+        checkpoint_advanced: false,
+        durationMs: Date.now() - shadowStart,
+      }).catch(() => {});
+    }
+  }
+
   // 1. Run extractor. It does not write or commit; it only runs the
   //    model and parses the MEMORY/SKIP response. The curator/writer
   //    stages below decide and persist lifecycle operations.
@@ -3427,6 +3505,7 @@ async function tryAutoWriteLane(args: {
         // ever treating a session-scoped instruction as durable.
         taskLocalContext: getTaskLocalForCurator(sessionId),
         projectId,
+        abrainHome,
       });
     } catch (e: any) {
       // F4 defense (2026-05-14): curateProjectDraft has internal try/catch
