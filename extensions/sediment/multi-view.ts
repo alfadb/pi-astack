@@ -51,7 +51,7 @@ import type { CuratorDecision } from "./curator";
 import { isWorkflowNeighborEntry } from "./workflow-utils";
 import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
-import type { CorrectionSignal } from "./correction-pipeline";
+import { shouldEscalateToCurator, type CorrectionSignal } from "./correction-pipeline";
 import type { ProjectEntryDraft } from "./writer";
 import type { SedimentSettings } from "./settings";
 import type {
@@ -1140,6 +1140,30 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       break;
     }
     case "defer":
+      // ADR 0028 Tier-1 (3×T0 unanimous 2026-06-08): a high-confidence
+      // user-expressed durable CREATE directive must NEVER sit in the
+      // probabilistic replay loop. defer→stage→replay can terminate in
+      // terminal_max_retries → abandoned/, SILENTLY dropping the user's own
+      // ground-truth directive (the exact silent-loss this subsystem exists
+      // to kill — observed live with the gh-rule on 2026-06-08, where Pass 1
+      // said scope=project, the curator said global, and Pass 2 deferred on
+      // the split). shouldEscalateToCurator is the SAME deterministic
+      // structural gate (provenance='user-expressed', read off a user-role
+      // turn) that admitted this candidate to multi-view, so reusing it here
+      // cannot widen the directive set. Committing the proposer decision is
+      // byte-identical to the confirm_proposer arm; the proposer's
+      // ruleScope/tier IS the scope encoded in the user's wording. A clash
+      // with an existing rule = the user changed their mind → a later curator
+      // supersede, never grounds to silently drop the latest ground truth.
+      // FOLLOW-UP (tracked, separate arm): a KNOWLEDGE-zone directive can
+      // still downscope world→project via confirm_pass1 (the pass1.scope line
+      // in synthesizeFromPass1); rules creates are already scope-safe (W0.1),
+      // so the live defer bug is fully closed here. Left for a focused
+      // confirm_pass1 pass to avoid scope-creep into an unrelated verdict arm.
+      if (shouldEscalateToCurator(args.correctionSignal)) {
+        final_decision = args.proposerDecision;
+        break;
+      }
       // batch 3b: DEFER no longer maps to op=skip(multiview_deferred).
       // It now stages for replay (§4.4.5 staging-pending tier finally
       // implemented). Pass 1 and Pass 2 verdicts are both preserved so
