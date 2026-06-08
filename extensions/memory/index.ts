@@ -37,6 +37,13 @@ import { resolveActiveProject } from "../_shared/runtime";
 
 const MEMORY_FOOTNOTE_PROTOCOL_VERSION = "memory-footnote-v1";
 
+// ADR 0026 cold-start fix (slug path-a-turn-0-cold-start-skips-all-memory-injection):
+// before_agent_start's ctx lacks modelRegistry on turn 0, which silently skipped
+// Path A injection on every session's FIRST user message (skipped_no_model_registry,
+// 100% turn-0 loss per the 2026-05-29/30 outcome-ledger). Cache the registry at
+// session_start (where it IS available, per model-curator) and fall back to it.
+let capturedModelRegistry: unknown;
+
 // ─────────────────────────────────────────────────────────────────────────
 // Tool result wrapper.
 //
@@ -842,6 +849,16 @@ brief 是专家建议，不是命令。
   // systemPrompt return values from all handlers. Sub-agents excluded;
   // they already get the sub-agent memory-tools block and would double
   // path-A cost per dispatch.
+  //
+  // Cold-start fix: capture modelRegistry at session_start so turn-0 Path A
+  // injection has a registry (before_agent_start ctx lacks it on the first
+  // message). Mirrors model-curator/index.ts. Sub-agent sessions are skipped so
+  // a sub-pi's pruned registry never overwrites the main session's.
+  pi.on("session_start", async (_event: unknown, ctx?: unknown) => {
+    if (isSubAgentSession(ctx as { sessionManager?: unknown } | undefined | null)) return;
+    const reg = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry;
+    if (reg) capturedModelRegistry = reg;
+  });
   pi.on("before_agent_start", async (event: { systemPrompt?: string; prompt?: string }, ctx?: unknown) => {
     if (isSubAgentSession(ctx as { sessionManager?: unknown } | undefined | null)) {
       return undefined;
@@ -855,7 +872,7 @@ brief 是专家建议，不是命令。
     try {
       const r = await tryInjectRelevantMemoryContext(userPrompt, {
         cwd: (ctx as { cwd?: string } | undefined)?.cwd,
-        modelRegistry: (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry,
+        modelRegistry: (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry ?? capturedModelRegistry,
         sessionManager: (ctx as { sessionManager?: unknown } | undefined)?.sessionManager,
       });
       if (r.block) {
