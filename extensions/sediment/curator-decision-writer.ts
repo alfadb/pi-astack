@@ -118,6 +118,10 @@ export async function executeCuratorDecisionToBrain(args: {
       triggerPhrases: draft.triggerPhrases,
       derivesFrom: decision.derives_from,
       status: draft.status,
+      // AX-PROVENANCE (audit P1 2026-06-07): carry the TRUE source from the draft
+      // (Tier-1 seed = user-expressed). Default to assistant-observed so an
+      // autonomous curator/extractor-created rule is NOT mislabeled user-expressed.
+      provenance: draft.provenance ?? "assistant-observed",
       sessionId,
     }, ruleOpts);
     return [ruleResult(r)];

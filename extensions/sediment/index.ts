@@ -1877,18 +1877,23 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           signal_target_slug: signal?.target_entry_slug ?? null,
           // AX-PROVENANCE (ADR 0028 v1.1): record the deterministic provenance.
           signal_provenance: signal?.provenance ?? null,
-          // R3' directive-recall observability: every USER-EXPRESSED durable
-          // directive leaves a trace with escalated=true/false, so the
-          // silent-non-promotion class (a user rule that does NOT reach the
-          // Tier-1 path) is OBSERVABLE in audit.jsonl instead of vanishing
-          // (the failure mode that left 'rules: none' unnoticed for weeks).
-          ...(signal?.signal_found && signal.typing === "durable" && signal.provenance === "user-expressed"
+          // R3' directive-recall observability (audit P2: broadened): every DURABLE
+          // directive-like signal leaves a trace with its derived provenance +
+          // escalated=true/false. Broadened beyond provenance==='user-expressed' so
+          // a user directive that was DEMOTED to assistant-observed (e.g. a
+          // quote-match miss) is STILL visible as 'not_user_expressed' instead of
+          // vanishing — the silent-non-promotion class that left 'rules: none'
+          // unnoticed for weeks must be observable in audit.jsonl.
+          ...(signal?.signal_found && signal.typing === "durable"
             ? { directive_recall: {
                 escalated: shouldEscalateToCurator(signal),
+                provenance: signal.provenance ?? null,
                 quote: (signal.user_quote ?? "").slice(0, 200),
                 reason: shouldEscalateToCurator(signal)
                   ? "escalated_to_tier1"
-                  : (signal.target_entry_slug ? "has_target_update" : `below_escalation_threshold_conf_${signal.confidence ?? 0}`),
+                  : signal.provenance !== "user-expressed"
+                    ? `not_user_expressed_${signal.provenance ?? "unknown"}`
+                    : (signal.target_entry_slug ? "has_target_update" : `below_escalation_threshold_conf_${signal.confidence ?? 0}`),
               } }
             : {}),
           ...(model ? { model } : {}),
@@ -3201,6 +3206,9 @@ function buildEscalationSeedDraft(signal: CorrectionSignal, sessionId: string): 
     compiledTruth,
     summary: scope || undefined,
     status: "active",
+    // Tier-1 seed: carry the deterministic provenance (user-expressed) so the
+    // rule frontmatter records the true source instead of a blanket default.
+    provenance: signal.provenance,
     confidence: signal.confidence,
     sessionId,
     timelineNote: "seeded from active-correction escalation (durable user-expressed rule)",

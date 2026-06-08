@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
-import { type EntryKind, type EntryStatus, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
+import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
 import {
   type RuleDraft,
@@ -71,6 +71,11 @@ export interface ProjectEntryDraft {
   compiledTruth: string;
   summary?: string;
   status?: EntryStatus;
+  // AX-PROVENANCE (ADR 0028 v1.1): ground-truth-strength axis carried from the
+  // detector to the writer so rule frontmatter records the TRUE source (Tier-1
+  // seed = user-expressed; extractor/curator = assistant-observed) rather than a
+  // blanket default. Optional; rule-writer falls back to assistant-observed.
+  provenance?: ProvenanceClass;
   confidence?: number;
   triggerPhrases?: string[];
   /** Slugs of upstream entries this entry derives from (set by curator CREATE op

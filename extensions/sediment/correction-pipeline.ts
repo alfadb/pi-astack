@@ -222,9 +222,18 @@ export const _buildClassifierPromptForTests = buildClassifierPrompt;
 
 // ── Parsing ────────────────────────────────────────────────────────────
 
-/** Strip all whitespace for register-insensitive substring containment. */
+/**
+ * Normalize text for register-insensitive provenance containment. CRITICAL
+ * (audit P1 2026-06-07): the classifier's user_quote is a quote of the
+ * SANITIZED window (IPs->[HOST], emails->[EMAIL], creds redacted), so the raw
+ * turn text must be sanitized the SAME way before the substring test — otherwise
+ * a user directive mentioning an IP/email never matches its own user turn and is
+ * silently demoted out of Tier-1. Also lowercase + strip whitespace to absorb
+ * casing/spacing drift in the LLM's "verbatim" quote.
+ */
 function normWsForProvenance(s: string): string {
-  return s.replace(/\s+/g, "");
+  const sanitized = sanitizeForMemory(s).text ?? s;
+  return sanitized.toLowerCase().replace(/\s+/g, "");
 }
 
 /**
@@ -235,7 +244,7 @@ function normWsForProvenance(s: string): string {
  * README/tool content masquerading as one. user-role match wins over
  * tool/assistant (the user saying it is the strongest signal).
  */
-function deriveProvenance(
+export function deriveProvenance(
   packed: PackedWindow,
   userQuote: string | undefined,
 ): { quote_source: NonNullable<CorrectionSignal["quote_source"]>; provenance: ProvenanceClass } {

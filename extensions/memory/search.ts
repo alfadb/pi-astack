@@ -10,7 +10,13 @@ export function entryMatchesFilters(entry: MemoryEntry, filters?: SearchFilters)
   }
 
   if (filters?.status?.length) {
-    const statuses = new Set(filters.status.map((s) => s.toLowerCase()));
+    // AX-MATURITY (ADR 0028 v1.1): `deprecated` folds to `superseded` at parse
+    // time, so a status:["deprecated"] filter must also fold or it would match
+    // ZERO entries (no read-model entry is ever `deprecated`). (audit P2.)
+    const statuses = new Set(filters.status.map((s) => {
+      const v = s.toLowerCase();
+      return v === "deprecated" ? "superseded" : v;
+    }));
     if (!statuses.has("all") && !statuses.has(entry.status.toLowerCase())) return false;
   } else {
     // AX-MATURITY (ADR 0028 v1.1 §12): default search excludes both retired

@@ -22,6 +22,7 @@
   "scripts": {
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
+    "smoke:derive-provenance": "node scripts/smoke-derive-provenance.mjs",
     "smoke:evolution-ledger": "node scripts/smoke-evolution-ledger.mjs",
     "smoke:entry-telemetry": "node scripts/smoke-entry-telemetry.mjs",
     "smoke:entry-lifecycle-proposals": "node scripts/smoke-entry-lifecycle-proposals.mjs",

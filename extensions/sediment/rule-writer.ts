@@ -273,9 +273,11 @@ export function buildRuleMarkdown(draft: RuleDraft, slug: string): string {
   if (idInfo.projectId) fm.push(`project_id: ${yamlScalar(idInfo.projectId)}`);
   fm.push(`kind: ${yamlScalar(draft.kind)}`);
   fm.push(`status: ${yamlScalar(status)}`);
-  // AX-PROVENANCE: rules are predominantly user-sourced behavior directives;
-  // default to user-expressed when the Tier-1 path did not set it explicitly.
-  fm.push(`provenance: ${yamlScalar(draft.provenance ?? "user-expressed")}`);
+  // AX-PROVENANCE: record the TRUE source. Default to assistant-observed
+  // (conservative) so a rule created by the autonomous curator/extractor is NOT
+  // mislabeled user-expressed; the Tier-1 path sets provenance=user-expressed
+  // explicitly (audit P1 2026-06-07).
+  fm.push(`provenance: ${yamlScalar(draft.provenance ?? "assistant-observed")}`);
   fm.push(`confidence: ${clampConfidence(draft.entryConfidence)}`);
   fm.push(`tier: ${yamlScalar(draft.tier)}`);
   if (draft.hint) fm.push(`hint: ${yamlScalar(draft.hint)}`);
