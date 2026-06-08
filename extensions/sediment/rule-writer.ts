@@ -25,7 +25,7 @@
 import * as crypto from "node:crypto";
 
 import { redactCredentials } from "../abrain/redact";
-import { ENTRY_KINDS, ENTRY_STATUSES, type EntryKind, type EntryStatus } from "./validation";
+import { ENTRY_KINDS, ENTRY_STATUSES, type EntryKind, type EntryStatus, type ProvenanceClass } from "./validation";
 
 export type RuleTier = "always" | "listed";
 export type RuleScope = "global" | { projectId: string };
@@ -48,6 +48,10 @@ export interface RuleDraft {
   slug?: string;
   routingReason: string;
   sessionId?: string;
+  // AX-PROVENANCE (ADR 0028 v1.1 §12): stored ground-truth-strength axis, set
+  // deterministically from the originating turn.role. Tier-1 rules are
+  // 'user-expressed'. Defaults to 'user-expressed' for rules when unset.
+  provenance?: ProvenanceClass;
   // F-W2 provenance link (knowledge -> rules promotion reconciliation anchor)
   derivesFrom?: string[];
   promotedFrom?: string;
@@ -269,6 +273,9 @@ export function buildRuleMarkdown(draft: RuleDraft, slug: string): string {
   if (idInfo.projectId) fm.push(`project_id: ${yamlScalar(idInfo.projectId)}`);
   fm.push(`kind: ${yamlScalar(draft.kind)}`);
   fm.push(`status: ${yamlScalar(status)}`);
+  // AX-PROVENANCE: rules are predominantly user-sourced behavior directives;
+  // default to user-expressed when the Tier-1 path did not set it explicitly.
+  fm.push(`provenance: ${yamlScalar(draft.provenance ?? "user-expressed")}`);
   fm.push(`confidence: ${clampConfidence(draft.entryConfidence)}`);
   fm.push(`tier: ${yamlScalar(draft.tier)}`);
   if (draft.hint) fm.push(`hint: ${yamlScalar(draft.hint)}`);
