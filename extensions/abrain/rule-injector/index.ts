@@ -474,7 +474,12 @@ function captureRulesFooterSetter(
   ctx: { ui?: { setStatus?(key: string, text: string | undefined): void } } | undefined,
 ): void {
   const setStatus = ctx?.ui?.setStatus;
-  if (!setStatus) return;
+  if (!setStatus) {
+    // Clear a stale setter from a previous session so the watch callback does
+    // not target a dead UI (audit P2).
+    _RG.__abrainRules_setFooter = undefined;
+    return;
+  }
   const bound = setStatus.bind(ctx!.ui);
   _RG.__abrainRules_setFooter = (msg: string) => { try { bound(RULE_STATUS_KEY, msg); } catch { /* best-effort */ } };
 }
@@ -497,6 +502,9 @@ function setupRulesWatcher(cwd: string, settings: RuleInjectorSettings, activePr
   const key = `${cwd}|${activeProjectId ?? ""}`;
   if (_RG.__abrainRules_watchKey === key && (_RG.__abrainRules_watchers?.length ?? 0) > 0) return;
   for (const w of _RG.__abrainRules_watchers ?? []) { try { w.close(); } catch { /* */ } }
+  // Cancel any queued debounce from the OLD key so it cannot later refresh the
+  // footer with stale (wrong-project) counts (audit P2).
+  if (_RG.__abrainRules_debounce) { clearTimeout(_RG.__abrainRules_debounce); _RG.__abrainRules_debounce = undefined; }
   _RG.__abrainRules_watchers = [];
   _RG.__abrainRules_watchKey = key;
   const dirs = [
@@ -514,6 +522,9 @@ function setupRulesWatcher(cwd: string, settings: RuleInjectorSettings, activePr
         if (_RG.__abrainRules_debounce) clearTimeout(_RG.__abrainRules_debounce);
         _RG.__abrainRules_debounce = setTimeout(() => refreshRulesFooterRealtime(cwd, settings), 300);
       });
+      // fs.watch emits async 'error' events that the surrounding try/catch does
+      // NOT catch; an unhandled one can crash the process (audit P1).
+      w.on("error", () => { try { w.close(); } catch { /* */ } });
       _RG.__abrainRules_watchers.push(w);
     } catch { /* fs.watch unsupported / dir vanished — best-effort */ }
   }
