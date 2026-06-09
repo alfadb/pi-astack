@@ -54,6 +54,7 @@ import {
   snapshotCompactionTunerSettings,
   type CompactionTunerSettings,
   type DynamicThresholdSettings,
+  type ModelCompactionPolicySettings,
 } from "./settings";
 
 const AUDIT_VERSION = 1;
@@ -199,12 +200,20 @@ async function appendAudit(projectRoot: string, row: Record<string, unknown>): P
   // ADR 0027 C6b: cross-layer causal anchor. Inserted between header
   // fields (timestamp/audit_version/pid/project_root) and caller's row so
   // caller-provided fields take precedence if they happen to overlap.
+  const policySource = row.policy_source ?? row.threshold_reason;
+  const policyKey = row.policy_key ?? (
+    policySource === "model_policy" && typeof row.model_provider === "string" && typeof row.model_id === "string"
+      ? `${row.model_provider}/${row.model_id}`
+      : undefined
+  );
   const enriched = {
     timestamp: formatLocalIsoTimestamp(new Date()),
     ...spreadAnchor(getCurrentAnchor()),
     audit_version: AUDIT_VERSION,
     pid: process.pid,
     project_root: projectRoot,
+    ...(policySource ? { policy_source: policySource } : {}),
+    ...(policyKey ? { policy_key: policyKey } : {}),
     ...row,
   };
   await fs.appendFile(compactionTunerAuditPath(projectRoot), `${JSON.stringify(enriched)}\n`, "utf-8");
@@ -452,14 +461,7 @@ function modelRefKey(provider?: string, id?: string): string | undefined {
   return `${provider}/${id}`;
 }
 
-function readEffectiveContextBudget(
-  usage: TurnBoundaryCompactionUsage | undefined,
-  modelInfo: { provider?: string; id?: string; contextWindow?: number },
-  dynamic: DynamicThresholdSettings,
-): number | undefined {
-  const ref = modelRefKey(modelInfo.provider, modelInfo.id);
-  const override = ref ? dynamic.modelEffectiveContextBudgets[ref] : undefined;
-  const runtimeWindow = usage?.contextWindow ?? modelInfo.contextWindow;
+function capByRuntimeWindow(override: number | undefined, runtimeWindow: number | undefined): number | undefined {
   if (override && Number.isFinite(override) && override > 0) {
     return runtimeWindow && runtimeWindow > 0 ? Math.min(override, runtimeWindow) : override;
   }
@@ -468,39 +470,75 @@ function readEffectiveContextBudget(
     : undefined;
 }
 
+function readEffectiveContextBudget(
+  usage: TurnBoundaryCompactionUsage | undefined,
+  modelInfo: { provider?: string; id?: string; contextWindow?: number },
+  dynamic: DynamicThresholdSettings,
+  policy?: ModelCompactionPolicySettings,
+): number | undefined {
+  const ref = modelRefKey(modelInfo.provider, modelInfo.id);
+  const override = policy?.effectiveContextBudget ?? (ref ? dynamic.modelEffectiveContextBudgets[ref] : undefined);
+  const runtimeWindow = usage?.contextWindow ?? modelInfo.contextWindow;
+  return capByRuntimeWindow(override, runtimeWindow);
+}
+
 function dynamicCapForBudget(budget: number, dynamic: DynamicThresholdSettings): number {
   if (budget <= dynamic.smallWindowMaxTokens) return dynamic.smallWindowThresholdPercent;
   if (budget <= dynamic.mediumWindowMaxTokens) return dynamic.mediumWindowThresholdPercent;
   return dynamic.largeWindowThresholdPercent;
 }
 
+function headroomCapForBudget(budget: number, minHeadroomTokens: number): number {
+  return minHeadroomTokens > 0 && budget > minHeadroomTokens
+    ? Math.max(10, Math.min(95, Math.floor(((budget - minHeadroomTokens) / budget) * 100)))
+    : 95;
+}
+
 function computeEffectiveThreshold(
   settings: CompactionTunerSettings,
   usage: TurnBoundaryCompactionUsage | undefined,
   modelInfo: { provider?: string; id?: string; contextWindow?: number },
-): { thresholdPercent: number; effectiveContextBudget?: number; reason: "configured" | "dynamic" } {
+): {
+  thresholdPercent: number;
+  effectiveContextBudget?: number;
+  policySource: "model_policy" | "dynamic" | "global";
+  policyKey?: string;
+} {
   const configured = settings.thresholdPercent;
   const dynamic = settings.dynamicThreshold;
+  const policyKey = modelRefKey(modelInfo.provider, modelInfo.id);
+  const policy = policyKey ? settings.modelPolicies[policyKey] : undefined;
+  if (policy) {
+    const budget = readEffectiveContextBudget(usage, modelInfo, dynamic, policy);
+    const policyThreshold = policy.thresholdPercent ?? configured;
+    const headroomCap = budget && policy.minHeadroomTokens !== undefined
+      ? headroomCapForBudget(budget, policy.minHeadroomTokens)
+      : 95;
+    return {
+      thresholdPercent: Math.min(policyThreshold, headroomCap),
+      effectiveContextBudget: budget,
+      policySource: "model_policy",
+      policyKey,
+    };
+  }
   if (!dynamic.enabled) {
-    return { thresholdPercent: configured, reason: "configured" };
+    return { thresholdPercent: configured, policySource: "global" };
   }
   const budget = readEffectiveContextBudget(usage, modelInfo, dynamic);
   if (!budget) {
-    return { thresholdPercent: configured, reason: "configured" };
+    return { thresholdPercent: configured, policySource: "global" };
   }
   const classCap = dynamicCapForBudget(budget, dynamic);
-  const headroomCap = dynamic.minHeadroomTokens > 0 && budget > dynamic.minHeadroomTokens
-    ? Math.max(10, Math.min(95, Math.floor(((budget - dynamic.minHeadroomTokens) / budget) * 100)))
-    : 95;
+  const headroomCap = headroomCapForBudget(budget, dynamic.minHeadroomTokens);
   return {
     thresholdPercent: Math.min(configured, classCap, headroomCap),
     effectiveContextBudget: budget,
-    reason: "dynamic",
+    policySource: "dynamic",
   };
 }
 
-function computeEffectiveRearmMargin(thresholdPercent: number, configuredRearmMarginPercent: number): number {
-  return Math.min(configuredRearmMarginPercent, Math.max(0, thresholdPercent - 1));
+function computeEffectiveRearmMargin(thresholdPercent: number, configuredRearmMarginPercent: number, policy?: ModelCompactionPolicySettings): number {
+  return Math.min(policy?.rearmMarginPercent ?? configuredRearmMarginPercent, Math.max(0, thresholdPercent - 1));
 }
 
 function computeCompactionDecisionMetrics(
@@ -512,11 +550,14 @@ function computeCompactionDecisionMetrics(
   rearmMarginPercent: number;
   configuredRearmMarginPercent: number;
   effectiveContextBudget?: number;
-  thresholdReason: "configured" | "dynamic";
+  thresholdReason: "model_policy" | "dynamic" | "global";
+  policySource: "model_policy" | "dynamic" | "global";
+  policyKey?: string;
   percent: number | null;
   rawPercent: number | null;
 } {
   const threshold = computeEffectiveThreshold(settings, usage, modelInfo);
+  const policy = threshold.policyKey ? settings.modelPolicies[threshold.policyKey] : undefined;
   const rawPercent = usage?.percent ?? null;
   const tokens = usage?.tokens;
   const runtimeWindow = usage?.contextWindow ?? modelInfo.contextWindow;
@@ -530,10 +571,12 @@ function computeCompactionDecisionMetrics(
     : rawPercent;
   return {
     thresholdPercent: threshold.thresholdPercent,
-    rearmMarginPercent: computeEffectiveRearmMargin(threshold.thresholdPercent, settings.rearmMarginPercent),
-    configuredRearmMarginPercent: settings.rearmMarginPercent,
+    rearmMarginPercent: computeEffectiveRearmMargin(threshold.thresholdPercent, settings.rearmMarginPercent, policy),
+    configuredRearmMarginPercent: policy?.rearmMarginPercent ?? settings.rearmMarginPercent,
     effectiveContextBudget: threshold.effectiveContextBudget,
-    thresholdReason: threshold.reason,
+    thresholdReason: threshold.policySource,
+    policySource: threshold.policySource,
+    policyKey: threshold.policyKey,
     percent,
     rawPercent,
   };

@@ -39,10 +39,23 @@ export interface DynamicThresholdSettings {
   modelEffectiveContextBudgets: Record<string, number>;
 }
 
+export interface ModelCompactionPolicySettings {
+  /** Optional provider/model-specific effective budget override. */
+  effectiveContextBudget?: number;
+  /** Optional provider/model-specific trigger percentage. */
+  thresholdPercent?: number;
+  /** Optional provider/model-specific absolute headroom floor. */
+  minHeadroomTokens?: number;
+  /** Optional provider/model-specific hysteresis margin. */
+  rearmMarginPercent?: number;
+}
+
 export interface CompactionTunerSettings {
   enabled: boolean;
   /** User-configured maximum context-usage percentage to trigger compaction (0-100). */
   thresholdPercent: number;
+  /** Optional provider/model → compaction policy overrides. */
+  modelPolicies: Record<string, ModelCompactionPolicySettings>;
   /** Optional custom instructions passed to the compaction LLM. */
   customInstructions: string;
   /**
@@ -88,6 +101,14 @@ export const DEFAULT_DYNAMIC_THRESHOLD_SETTINGS: DynamicThresholdSettings = {
 export const DEFAULT_COMPACTION_TUNER_SETTINGS: CompactionTunerSettings = {
   enabled: false,
   thresholdPercent: 75,
+  modelPolicies: {
+    "openai/gpt-5.5": {
+      effectiveContextBudget: 272_000,
+      thresholdPercent: 68,
+      minHeadroomTokens: 48_000,
+      rearmMarginPercent: 8,
+    },
+  },
   customInstructions: "",
   summaryModels: [],
   rearmMarginPercent: 5,
@@ -140,6 +161,36 @@ function asTokenBudgetMap(value: unknown, fallback: Record<string, number>): Rec
     if (!key) continue;
     const n = asNumber(rawValue, Number.NaN);
     if (Number.isFinite(n) && n > 0) out[key] = n;
+  }
+  return out;
+}
+
+function resolveModelPolicies(value: unknown, fallback: Record<string, ModelCompactionPolicySettings>): Record<string, ModelCompactionPolicySettings> {
+  const out: Record<string, ModelCompactionPolicySettings> = isPlainObject(value) ? {} : { ...fallback };
+  if (!isPlainObject(value)) return out;
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    const key = rawKey.trim();
+    if (!key || !isPlainObject(rawValue)) continue;
+    const policy: ModelCompactionPolicySettings = {};
+    const effectiveContextBudget = asNumber(rawValue.effectiveContextBudget, Number.NaN);
+    if (Number.isFinite(effectiveContextBudget) && effectiveContextBudget > 0) {
+      policy.effectiveContextBudget = effectiveContextBudget;
+    }
+    if (Object.prototype.hasOwnProperty.call(rawValue, "thresholdPercent")) {
+      policy.thresholdPercent = clampThresholdWithFallback(
+        asNumber(rawValue.thresholdPercent, Number.NaN),
+        DEFAULT_COMPACTION_TUNER_SETTINGS.thresholdPercent,
+      );
+    }
+    const minHeadroomTokens = asNumber(rawValue.minHeadroomTokens, Number.NaN);
+    if (Number.isFinite(minHeadroomTokens) && minHeadroomTokens >= 0) {
+      policy.minHeadroomTokens = minHeadroomTokens;
+    }
+    const rearmMarginPercent = asNumber(rawValue.rearmMarginPercent, Number.NaN);
+    if (Number.isFinite(rearmMarginPercent) && rearmMarginPercent >= 0) {
+      policy.rearmMarginPercent = Math.min(90, rearmMarginPercent);
+    }
+    out[key] = policy;
   }
   return out;
 }
@@ -218,6 +269,7 @@ export function resolveCompactionTunerSettings(): CompactionTunerSettings {
   return {
     enabled: asBoolean(block.enabled, def.enabled),
     thresholdPercent: clampThreshold(asNumber(block.thresholdPercent, def.thresholdPercent)),
+    modelPolicies: resolveModelPolicies(block.modelPolicies, def.modelPolicies),
     customInstructions,
     summaryModels,
     rearmMarginPercent: Math.min(
@@ -234,6 +286,7 @@ export function snapshotCompactionTunerSettings(s: CompactionTunerSettings): Rec
   return {
     enabled: s.enabled,
     thresholdPercent: s.thresholdPercent,
+    modelPolicies: s.modelPolicies,
     rearmMarginPercent: s.rearmMarginPercent,
     notifyOnTrigger: s.notifyOnTrigger,
     hasCustomInstructions: s.customInstructions.length > 0,

@@ -396,7 +396,48 @@
           "default": 75,
           "minimum": 10,
           "maximum": 95,
-          "description": "Configured maximum percent of context budget consumed at which to fire compaction. Clamped to [10, 95]. When dynamicThreshold.enabled is true, the effective threshold is min(thresholdPercent, dynamic cap for the effective context budget, min-headroom cap). Re-evaluated each turn; changes apply immediately on the next turn-boundary or agent_end check with no restart needed."
+          "description": "Configured maximum percent of context budget consumed at which to fire compaction. Clamped to [10, 95]. Provider/model entries in modelPolicies take highest priority; otherwise when dynamicThreshold.enabled is true, the effective threshold is min(thresholdPercent, dynamic cap for the effective context budget, min-headroom cap). Re-evaluated each turn; changes apply immediately on the next turn-boundary or agent_end check with no restart needed."
+        },
+
+        "modelPolicies": {
+          "type": "object",
+          "default": {
+            "openai/gpt-5.5": {
+              "effectiveContextBudget": 272000,
+              "thresholdPercent": 68,
+              "minHeadroomTokens": 48000,
+              "rearmMarginPercent": 8
+            }
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "effectiveContextBudget": {
+                "type": "number",
+                "minimum": 1,
+                "description": "Optional provider/model-specific effective token budget. Takes priority over dynamicThreshold.modelEffectiveContextBudgets and is capped by the runtime contextWindow if that is smaller."
+              },
+              "thresholdPercent": {
+                "type": "number",
+                "minimum": 10,
+                "maximum": 95,
+                "description": "Optional provider/model-specific trigger percentage. Takes priority over dynamicThreshold window caps for this provider/model."
+              },
+              "minHeadroomTokens": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Optional provider/model-specific absolute headroom floor. Caps thresholdPercent so at least this many tokens remain."
+              },
+              "rearmMarginPercent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 90,
+                "description": "Optional provider/model-specific hysteresis margin. Overrides the global rearmMarginPercent for this provider/model."
+              }
+            }
+          },
+          "description": "Provider/model → explicit compaction policy overrides, keyed as `provider/modelId`. These policies take priority over dynamicThreshold and global thresholdPercent. If this object is present, it replaces the built-in default map; set {} to remove default per-model policies."
         },
 
         "dynamicThreshold": {
