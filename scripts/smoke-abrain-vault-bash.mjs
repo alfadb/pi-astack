@@ -48,6 +48,12 @@ function transpile(srcPath) {
 }
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vault-bash-"));
+const sharedDir = path.join(path.dirname(tmpDir), "_shared");
+fs.mkdirSync(sharedDir, { recursive: true });
+fs.writeFileSync(
+  path.join(sharedDir, "causal-anchor.js"),
+  "exports.getCurrentAnchor = () => undefined;\nexports.spreadAnchor = () => ({});\n",
+);
 // ADR 0019: vault-reader.ts + keychain.ts now import from ./backend-detect.
 for (const file of ["backend-detect", "vault-bash", "vault-reader", "vault-writer", "keychain"]) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
@@ -135,13 +141,43 @@ await check("prepareVaultBashCommand rewrites command without plaintext in argv"
   if (result.record.grantKey !== "global:api-key") throw new Error(`bad grantKey: ${result.record.grantKey}`);
 });
 
-await check("writeVaultEnvFile creates 0600 env file with shell-escaped value", () => {
+await check("writeVaultEnvFile creates env file with shell-escaped value", () => {
   const stateDir = fs.mkdtempSync(path.join(tmpDir, "state-"));
   const file = bash.writeVaultEnvFile(stateDir, [{ varName: "VAULT_quote", value: "a'b" }]);
   const mode = fs.statSync(file).mode & 0o777;
-  if (mode !== 0o600) throw new Error(`expected 0600, got ${mode.toString(8)}`);
+  if (process.platform !== "win32" && mode !== 0o600) throw new Error(`expected 0600, got ${mode.toString(8)}`);
   const body = fs.readFileSync(file, "utf8");
   if (!body.includes("export VAULT_quote='a'\\''b'")) throw new Error(`unexpected env file body: ${body}`);
+});
+
+await check("classifyWindowsVaultBashProfile accepts non-Windows platforms", () => {
+  const profile = bash.classifyWindowsVaultBashProfile({ platform: "linux", shellPath: "" });
+  if (!profile.ok || profile.kind !== "non-windows") throw new Error(JSON.stringify(profile));
+});
+
+await check("classifyWindowsVaultBashProfile accepts Git Bash paths", () => {
+  const profile = bash.classifyWindowsVaultBashProfile({ platform: "win32", shellPath: "C:\\Program Files\\Git\\bin\\bash.exe", env: {} });
+  if (!profile.ok || profile.kind !== "git-bash") throw new Error(JSON.stringify(profile));
+});
+
+await check("classifyWindowsVaultBashProfile accepts MSYS2 profiles", () => {
+  const profile = bash.classifyWindowsVaultBashProfile({ platform: "win32", shellPath: "C:\\msys64\\usr\\bin\\bash.exe", env: { MSYSTEM: "MINGW64" } });
+  if (!profile.ok || profile.kind !== "msys2") throw new Error(JSON.stringify(profile));
+});
+
+await check("classifyWindowsVaultBashProfile blocks WSL bash", () => {
+  const profile = bash.classifyWindowsVaultBashProfile({ platform: "win32", shellPath: "C:\\Windows\\System32\\bash.exe", env: {} });
+  if (profile.ok || profile.kind !== "wsl" || !profile.reason.includes("WSL")) throw new Error(JSON.stringify(profile));
+});
+
+await check("classifyWindowsVaultBashProfile blocks Cygwin bash", () => {
+  const profile = bash.classifyWindowsVaultBashProfile({ platform: "win32", shellPath: "C:\\cygwin64\\bin\\bash.exe", env: {} });
+  if (profile.ok || profile.kind !== "cygwin" || !profile.reason.includes("Cygwin")) throw new Error(JSON.stringify(profile));
+});
+
+await check("classifyWindowsVaultBashProfile blocks unknown Windows bash", () => {
+  const profile = bash.classifyWindowsVaultBashProfile({ platform: "win32", shellPath: "", env: {} });
+  if (profile.ok || profile.kind !== "unknown" || !profile.reason.includes("Git Bash/MSYS2")) throw new Error(JSON.stringify(profile));
 });
 
 // ── boot-aware scope routing ────────────────────────────────────
@@ -202,9 +238,27 @@ await check("$VAULT_<key>: with no active project, queries global only", () => {
 });
 
 await check("prepareBootVaultBashCommand wires $PVAULT_* block reason end-to-end", async () => {
-  const result = await bash.prepareBootVaultBashCommand("echo $PVAULT_db", { abrainHome, stateDir: path.join(tmpDir, "state-block"), activeProjectId: null });
+  const result = await bash.prepareBootVaultBashCommand("echo $PVAULT_db", {
+    abrainHome,
+    stateDir: path.join(tmpDir, "state-block"),
+    activeProjectId: null,
+    shellPath: "C:\\Program Files\\Git\\bin\\bash.exe",
+    env: {},
+  });
   if (result.kind !== "block") throw new Error(`expected block, got ${result.kind}`);
   if (!result.reason.includes("active project")) throw new Error(`unexpected reason: ${result.reason}`);
+});
+
+await check("prepareBootVaultBashCommand blocks unsupported Windows shells before injection", async () => {
+  const result = await bash.prepareBootVaultBashCommand("echo $VAULT_github_token", {
+    abrainHome,
+    stateDir: path.join(tmpDir, "state-shell-block"),
+    activeProjectId: null,
+    shellPath: "C:\\Windows\\System32\\bash.exe",
+    env: {},
+  });
+  if (result.kind !== "block") throw new Error(`expected block, got ${result.kind}`);
+  if (!result.reason.includes("WSL")) throw new Error(`unexpected reason: ${result.reason}`);
 });
 
 await check("withheldVaultBashContent mentions key but not plaintext", () => {
@@ -341,7 +395,7 @@ await check("batch C: __abrainPromptUserGetPending is installed non-configurable
 // applied in smoke-abrain-vault-grant-isolation. A future edit that
 // silently drops a check(...) block now fails this smoke with
 // 'assertion count drift' rather than passing with reduced coverage.
-const EXPECTED_ASSERTIONS = 20;
+const EXPECTED_ASSERTIONS = 27;
 if (total !== EXPECTED_ASSERTIONS) {
   failures.push({
     name: "assertion count drift",

@@ -110,6 +110,57 @@ export function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+export interface WindowsVaultBashProfileInput {
+  platform?: NodeJS.Platform;
+  shellPath?: string;
+  env?: Record<string, string | undefined>;
+  uname?: string;
+}
+
+export type WindowsVaultBashProfile =
+  | { ok: true; kind: "git-bash" | "msys2" | "non-windows" }
+  | { ok: false; kind: "wsl" | "cygwin" | "unknown"; reason: string };
+
+export function classifyWindowsVaultBashProfile(input: WindowsVaultBashProfileInput = {}): WindowsVaultBashProfile {
+  const platform = input.platform ?? process.platform;
+  if (platform !== "win32") return { ok: true, kind: "non-windows" };
+
+  const env = input.env ?? process.env;
+  const shellPath = (input.shellPath ?? "").replace(/\\/g, "/").toLowerCase();
+  const uname = (input.uname ?? "").toLowerCase();
+  const msystem = (env.MSYSTEM ?? "").toLowerCase();
+
+  if (env.WSL_DISTRO_NAME || env.WSL_INTEROP || shellPath.includes("/windows/system32/bash.exe") || shellPath.includes("/microsoft/windowsapps/bash.exe")) {
+    return {
+      ok: false,
+      kind: "wsl",
+      reason: "vault bash injection on Windows requires Git Bash/MSYS2; WSL bash.exe is a separate Linux filesystem. Launch pi inside WSL, or set shellPath to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe).",
+    };
+  }
+
+  if (uname.startsWith("cygwin") || shellPath.includes("/cygwin")) {
+    return {
+      ok: false,
+      kind: "cygwin",
+      reason: "vault bash injection on Windows supports Git Bash/MSYS2 only; Cygwin bash is not supported. Set shellPath to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe).",
+    };
+  }
+
+  if (shellPath.includes("/git/bin/bash.exe") || shellPath.includes("/git/usr/bin/bash.exe") || uname.startsWith("mingw")) {
+    return { ok: true, kind: "git-bash" };
+  }
+
+  if (msystem || uname.startsWith("msys")) {
+    return { ok: true, kind: "msys2" };
+  }
+
+  return {
+    ok: false,
+    kind: "unknown",
+    reason: "vault bash injection on Windows requires Git Bash/MSYS2. Set shellPath to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe); PowerShell/cmd are launchers only, not command runtimes.",
+  };
+}
+
 export function vaultVarPrefix(varName: string): VaultVarPrefix | null {
   if (varName.startsWith("GVAULT_")) return "GVAULT_";
   if (varName.startsWith("PVAULT_")) return "PVAULT_";
@@ -211,6 +262,10 @@ export interface PrepareBootVaultBashOptions {
   stateDir: string;
   /** Active project id from the ADR 0014 §5.4 boot-time snapshot, or null if unbound. */
   activeProjectId: string | null;
+  /** Resolved pi bash executable. On win32 it must be Git Bash or MSYS2, never WSL/Cygwin. */
+  shellPath?: string;
+  env?: Record<string, string | undefined>;
+  uname?: string;
 }
 
 export function buildBootVaultBashDeps(opts: PrepareBootVaultBashOptions): VaultBashPrepareDeps {
@@ -243,6 +298,10 @@ export function buildBootVaultBashDeps(opts: PrepareBootVaultBashOptions): Vault
 }
 
 export async function prepareBootVaultBashCommand(command: string, opts: PrepareBootVaultBashOptions): Promise<VaultBashPrepareResult> {
+  if (vaultVarRefs(command).length > 0) {
+    const profile = classifyWindowsVaultBashProfile({ shellPath: opts.shellPath, env: opts.env, uname: opts.uname });
+    if (!profile.ok) return { kind: "block", reason: profile.reason };
+  }
   return prepareVaultBashCommand(command, buildBootVaultBashDeps(opts));
 }
 

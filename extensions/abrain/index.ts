@@ -174,6 +174,28 @@ function buildRealDeps(): DetectDeps {
   };
 }
 
+function resolveConfiguredBashShellPath(): string | undefined {
+  try {
+    // Lazy require keeps smoke fixtures that only load abrain exports from
+    // pulling pi's runtime API graph at module import time.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const codingAgent = require("@earendil-works/pi-coding-agent") as {
+      getAgentDir?: () => string;
+      getShellConfig?: (customShellPath?: string) => { shell: string; args: string[] };
+      SettingsManager?: {
+        create?: (cwd: string, agentDir?: string) => { getShellPath?: () => string | undefined };
+      };
+    };
+    const configured = codingAgent.SettingsManager
+      ?.create?.(process.cwd(), codingAgent.getAgentDir?.())
+      ?.getShellPath?.();
+    return codingAgent.getShellConfig?.(configured)?.shell ?? configured;
+  } catch (err) {
+    console.error(`[abrain] could not resolve pi bash shellPath for vault injection guard: ${(err as Error)?.message ?? err}`);
+    return undefined;
+  }
+}
+
 // ── Public API: pure status query (no side effects) ─────────────────────
 
 export interface VaultStatus {
@@ -1254,6 +1276,7 @@ export default function activate(pi: ExtensionAPI): void {
   const registry = pi as unknown as CommandRegistry;
   const toolRegistry = pi as unknown as ToolRegistry;
   const eventRegistry = pi as unknown as EventRegistry;
+  const vaultBashShellPath = resolveConfiguredBashShellPath();
 
   if (typeof eventRegistry.on === "function") {
     // Startup git sync trigger (Round 5 UX fix, 2026-05-17). We capture
@@ -1337,7 +1360,13 @@ export default function activate(pi: ExtensionAPI): void {
         if (event.toolName !== "bash") return;
         const command = String(event.input?.command ?? "");
         const activeProjectId = bootActiveProject?.activeProject?.projectId ?? null;
-        const prepared = await prepareBootVaultBashCommand(command, { abrainHome: ABRAIN_HOME, stateDir: STATE_DIR, activeProjectId });
+        const prepared = await prepareBootVaultBashCommand(command, {
+          abrainHome: ABRAIN_HOME,
+          stateDir: STATE_DIR,
+          activeProjectId,
+          shellPath: vaultBashShellPath,
+          env: process.env,
+        });
         if (prepared.kind === "none") return;
         if (prepared.kind === "block") {
           auditBashInjectBlock(command, prepared.reason);

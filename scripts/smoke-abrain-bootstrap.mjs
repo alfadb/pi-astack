@@ -37,6 +37,11 @@ const ts = require("typescript");
 
 const failures = [];
 let total = 0;
+function commandExists(cmd) {
+  const r = spawnSync(cmd, ["--version"], { stdio: "ignore" });
+  return !r.error || r.error.code !== "ENOENT";
+}
+const hasAgeCli = commandExists("age") && commandExists("age-keygen");
 function check(name, fn) {
   total++;
   try {
@@ -110,7 +115,9 @@ await check("createInstallTmpDir creates dir under .state/install/ with mode 070
   const stat = fs.statSync(dir);
   if (!stat.isDirectory()) throw new Error("not a directory");
   const mode = stat.mode & 0o777;
-  if (mode !== 0o700) throw new Error(`expected mode 0700, got 0${mode.toString(8)}`);
+  if (bootstrap.posixModeChecksEnabled(process.platform) && mode !== 0o700) {
+    throw new Error(`expected mode 0700, got 0${mode.toString(8)}`);
+  }
   if (!dir.startsWith(path.join(fakeAbrainHome, ".state", "install"))) {
     throw new Error(`unexpected parent: ${dir}`);
   }
@@ -135,6 +142,12 @@ await check("createInstallTmpDir refuses parent that escapes abrain home", () =>
   // unit-tested via review. This assertion just verifies no crash.
 });
 
+await check("posixModeChecksEnabled skips POSIX mode checks on win32 only", () => {
+  if (bootstrap.posixModeChecksEnabled("win32") !== false) throw new Error("win32 should skip POSIX mode checks");
+  if (bootstrap.posixModeChecksEnabled("linux") !== true) throw new Error("linux should keep POSIX mode checks");
+  if (bootstrap.posixModeChecksEnabled("darwin") !== true) throw new Error("darwin should keep POSIX mode checks");
+});
+
 // ═════════════════════════════════════════════════════════════════
 // 2. bootstrap.ts: generateMasterKey (real age-keygen)
 // ═════════════════════════════════════════════════════════════════
@@ -143,6 +156,7 @@ let keypairSecretPath = null;
 let keypairPublicKey = null;
 
 await check("generateMasterKey runs age-keygen and parses Public key from stderr", async () => {
+  if (!hasAgeCli) return;
   const installDir = bootstrap.createInstallTmpDir(fakeAbrainHome);
   try {
     const result = await bootstrap.generateMasterKey(installDir);
@@ -153,7 +167,7 @@ await check("generateMasterKey runs age-keygen and parses Public key from stderr
       throw new Error(`secret key file missing: ${result.secretKeyPath}`);
     }
     const secStat = fs.statSync(result.secretKeyPath);
-    if ((secStat.mode & 0o777) !== 0o600) {
+    if (bootstrap.posixModeChecksEnabled(process.platform) && (secStat.mode & 0o777) !== 0o600) {
       throw new Error(`secret key mode wrong: 0${(secStat.mode & 0o777).toString(8)}`);
     }
     const content = fs.readFileSync(result.secretKeyPath, "utf8");
@@ -168,6 +182,7 @@ await check("generateMasterKey runs age-keygen and parses Public key from stderr
 });
 
 await check("generateMasterKey rejects install dir with permissive mode", async () => {
+  if (!hasAgeCli || !bootstrap.posixModeChecksEnabled(process.platform)) return;
   const installDir = bootstrap.createInstallTmpDir(fakeAbrainHome);
   try {
     fs.chmodSync(installDir, 0o755); // make group/other-readable — should reject
@@ -398,9 +413,9 @@ await check("writeBackendFile + readBackendFile roundtrip with identity", () => 
   const read = keychain.readBackendFile(home);
   if (read.backend !== "ssh-key") throw new Error(`backend mismatch: ${read.backend}`);
   if (read.identity !== "/some/path/id_ed25519") throw new Error(`identity mismatch: ${read.identity}`);
-  // mode should be 0600
+  // mode should be 0600 on POSIX; Windows reports synthetic bits.
   const mode = fs.statSync(path.join(home, ".vault-backend")).mode & 0o777;
-  if (mode !== 0o600) throw new Error(`backend file mode wrong: 0${mode.toString(8)}`);
+  if (bootstrap.posixModeChecksEnabled(process.platform) && mode !== 0o600) throw new Error(`backend file mode wrong: 0${mode.toString(8)}`);
 });
 
 await check("writeBackendFile is atomic (tmp file vs final)", () => {
@@ -430,7 +445,7 @@ await check("writePubkeyFile + readPubkeyFile roundtrip with mode 0644", () => {
   const read = keychain.readPubkeyFile(home);
   if (read !== "age1xxxxxxxxxxxxxx") throw new Error(`pubkey mismatch: ${read}`);
   const mode = fs.statSync(path.join(home, ".vault-pubkey")).mode & 0o777;
-  if (mode !== 0o644) throw new Error(`pubkey mode wrong: 0${mode.toString(8)}`);
+  if (bootstrap.posixModeChecksEnabled(process.platform) && mode !== 0o644) throw new Error(`pubkey mode wrong: 0${mode.toString(8)}`);
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -442,6 +457,7 @@ await check("writePubkeyFile + readPubkeyFile roundtrip with mode 0644", () => {
 // with a real ssh public key, real `age -d -i` decrypt, byte-compare.
 
 await check("file backends chmod .vault-master.age to 0600 after encrypt (v1.4.1 dogfood fix)", async () => {
+  if (!hasAgeCli) return;
   // The dogfood discovery: age -o respects umask, so on container with umask=0002
   // the encrypted file lands as 0664 (group/world readable). Force 0600 in keychain.ts.
   // This smoke covers the ssh-key path; gpg-file and passphrase-only have identical
@@ -470,13 +486,16 @@ await check("file backends chmod .vault-master.age to 0600 after encrypt (v1.4.1
       process.umask(prevUmask);
     }
     const mode = fs.statSync(encryptedPath).mode & 0o777;
-    if (mode !== 0o600) throw new Error(`expected mode 0600, got 0${mode.toString(8)} (umask leak — chmod missing in encryptMasterKey)`);
+    if (bootstrap.posixModeChecksEnabled(process.platform) && mode !== 0o600) {
+      throw new Error(`expected mode 0600, got 0${mode.toString(8)} (umask leak — chmod missing in encryptMasterKey)`);
+    }
   } finally {
     await bootstrap.cleanupInstallDir(installDir);
   }
 });
 
 await check("★ ssh-key e2e: real age-keygen → age -R encrypt → age -d -i decrypt → byte-match", async () => {
+  if (!hasAgeCli) return;
   // (a) generate a temporary ssh ed25519 keypair (no passphrase for the test)
   const sshDir = fs.mkdtempSync(path.join(tmpDir, "ssh-"));
   const sshKey = path.join(sshDir, "id_ed25519");

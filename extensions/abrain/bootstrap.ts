@@ -131,6 +131,10 @@ export function createInstallTmpDir(abrainHome: string): string {
  * The secret key file is left at secretKeyPath. Caller is responsible for
  * shredding it via cleanupInstallDir before returning from /vault init.
  */
+export function posixModeChecksEnabled(platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== "win32";
+}
+
 export async function generateMasterKey(installTmpDir: string): Promise<KeyGenResult> {
   const secretKeyPath = path.join(installTmpDir, "master.age");
 
@@ -138,7 +142,7 @@ export async function generateMasterKey(installTmpDir: string): Promise<KeyGenRe
   const stat = fs.statSync(installTmpDir);
   if (!stat.isDirectory()) throw new Error(`install dir not a directory: ${installTmpDir}`);
   // mode bits: only check that it's at most 0700 (not group/other readable)
-  if ((stat.mode & 0o077) !== 0) {
+  if (posixModeChecksEnabled() && (stat.mode & 0o077) !== 0) {
     throw new Error(`install dir mode too permissive: ${(stat.mode & 0o777).toString(8)}; expected 0700`);
   }
 

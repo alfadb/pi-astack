@@ -81,6 +81,22 @@ pi-astack 的运行时配置不走 `piStack` namespace，也不依赖官方 sett
 }
 ```
 
+### Windows 支持边界
+
+Windows 上仅支持把 Git Bash/MSYS2 作为 pi 的命令运行时；PowerShell/cmd 只适合作为启动器，不能作为 `bash` tool 的 shell。推荐在 `~/.pi/agent/settings.json` 固定 Git Bash：
+
+```json
+{
+  "shellPath": "C:\\Program Files\\Git\\bin\\bash.exe"
+}
+```
+
+说明：
+
+- `vault` 的 `$VAULT_/$PVAULT_/$GVAULT_` bash 注入会拒绝 WSL `bash.exe` 和 Cygwin，避免 win32 Node 写入的 `C:\...` 临时 env 文件在另一套路径空间里不可读。
+- WSL 视作 Linux 环境：如需使用 WSL，请从 WSL 内安装并启动 pi，不要让 Windows 版 pi 调 Windows 的 WSL `bash.exe`。
+- Windows 不做 POSIX `0600/0700` mode bit 强校验；权限约束交给 Windows ACL，vault 文件仍由 age 加密保护。
+
 ### 初始化 abrain / vault / 项目绑定
 
 推荐从 pi 会话内完成：

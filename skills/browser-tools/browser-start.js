@@ -13,7 +13,10 @@
 // DETACHED so the browser survives after this process exits. Subsequent
 // browser-nav / browser-eval / ... invocations connect via puppeteer-core.
 
-import { spawn, execSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import puppeteer from "puppeteer-core";
 import { ensureBinary, getDefaultStealthArgs, binaryInfo } from "cloakbrowser";
 
@@ -32,7 +35,7 @@ if (help) {
 }
 
 const PORT = Number(process.env.BROWSER_TOOLS_PORT) || 9333;
-const PROFILE_DIR = `${process.env.HOME}/.cache/browser-tools`;
+const PROFILE_DIR = path.join(os.homedir(), ".cache", "browser-tools");
 const BROWSER_URL = `http://localhost:${PORT}`;
 
 // Already running? Reuse it.
@@ -44,13 +47,12 @@ try {
 } catch {}
 
 // Ensure profile dir; clear stale singleton locks so a new instance can start.
-execSync(`mkdir -p "${PROFILE_DIR}"`, { stdio: "ignore" });
-try {
-	execSync(
-		`rm -f "${PROFILE_DIR}/SingletonLock" "${PROFILE_DIR}/SingletonSocket" "${PROFILE_DIR}/SingletonCookie"`,
-		{ stdio: "ignore" },
-	);
-} catch {}
+fs.mkdirSync(PROFILE_DIR, { recursive: true });
+for (const name of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
+	try {
+		fs.rmSync(path.join(PROFILE_DIR, name), { force: true });
+	} catch {}
+}
 
 // Download the stealth Chromium binary on first run (~200MB, cached in ~/.cloakbrowser).
 const info = binaryInfo();
@@ -70,10 +72,9 @@ const args = [
 
 const env = { ...process.env };
 if (headed) {
-	// Render to the VNC X display. Chromium blocks WebGL on software GPUs under
-	// Xvfb/VNC unless we bypass the GPU blocklist (matches cloakbrowser's own
-	// headed-mode behavior).
-	env.DISPLAY = process.env.DISPLAY || ":1";
+	// Render to the VNC X display on POSIX. On Windows, headed mode uses the
+	// native desktop and DISPLAY is not meaningful.
+	if (process.platform !== "win32") env.DISPLAY = process.env.DISPLAY || ":1";
 	args.push("--ignore-gpu-blocklist");
 } else {
 	args.push("--headless=new");
@@ -99,6 +100,7 @@ if (!connected) {
 	process.exit(1);
 }
 
+const displayLabel = process.platform === "win32" ? "native desktop" : env.DISPLAY;
 console.log(
-	`✓ CloakBrowser started on :${PORT} (${headed ? `headed on ${env.DISPLAY}` : "headless"}, profile: ${PROFILE_DIR})`,
+	`✓ CloakBrowser started on :${PORT} (${headed ? `headed on ${displayLabel}` : "headless"}, profile: ${PROFILE_DIR})`,
 );
