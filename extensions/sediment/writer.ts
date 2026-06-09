@@ -1984,6 +1984,7 @@ export interface WriteRuleOptions {
   settings: SedimentSettings;
   dryRun?: boolean;
   auditContext?: WriterAuditContext;
+  exactDuplicateAsDedup?: boolean;
   /** Per-(scope,tier) token cap for the INV-R3 budget reject. */
   budgetTokenCap?: number;
 }
@@ -1991,7 +1992,7 @@ export interface WriteRuleOptions {
 export interface WriteRuleResult {
   slug: string;
   path: string;
-  status: "created" | "archived" | "deleted" | "rejected" | "dry_run" | "deduped";
+  status: "created" | "archived" | "deleted" | "updated" | "rejected" | "dry_run" | "deduped";
   reason?: string;
   tier?: RuleTier;
   demotedFrom?: RuleTier;
@@ -2083,6 +2084,18 @@ async function lintRuleBudget(
  *  rule in this scope whose body is a semantic near-match (Jaccard ≥ threshold) to
  *  `body`, else undefined. Scans both tiers; skips the same-slug file (that case is
  *  the exact duplicate_slug gate). A re-stated rule strengthens, never duplicates. */
+function similarActiveRuleAtPath(fp: string, body: string): boolean {
+  try {
+    const raw = fsSync.readFileSync(fp, "utf-8");
+    const { frontmatterText, body: otherBody } = splitFrontmatter(raw);
+    const status = parseFrontmatter(frontmatterText).status;
+    if (status && String(status) !== "active") return false;
+    return ruleBodySimilarity(body, otherBody) >= RULE_DEDUP_SIMILARITY_THRESHOLD;
+  } catch {
+    return false;
+  }
+}
+
 function findSimilarRuleSlug(abrainHome: string, scope: "global" | "project", projectId: string | undefined, body: string, excludeSlug: string): string | undefined {
   const base = rulesBaseDir(abrainHome, scope, projectId);
   for (const tier of ["always", "listed"] as RuleTier[]) {
@@ -2093,13 +2106,7 @@ function findSimilarRuleSlug(abrainHome: string, scope: "global" | "project", pr
       if (!f.endsWith(".md") || f.startsWith("_")) continue;
       const otherSlug = f.replace(/\.md$/, "");
       if (otherSlug === excludeSlug) continue;
-      try {
-        const raw = fsSync.readFileSync(path.join(dir, f), "utf-8");
-        const { frontmatterText, body: otherBody } = splitFrontmatter(raw);
-        const status = parseFrontmatter(frontmatterText).status;
-        if (status && String(status) !== "active") continue;
-        if (ruleBodySimilarity(body, otherBody) >= RULE_DEDUP_SIMILARITY_THRESHOLD) return otherSlug;
-      } catch { /* skip unreadable file */ }
+      if (similarActiveRuleAtPath(path.join(dir, f), body)) return otherSlug;
     }
   }
   return undefined;
@@ -2192,7 +2199,13 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const budget = await lintRuleBudget(tierDir, markdown, cap);
   if (!budget.ok) return reject("budget_exceeded", { budgetTokens: budget.tokens, budgetCap: cap, suggestArchiveSlug: budget.suggestArchive });
 
-  if (fsSync.existsSync(target)) return reject("duplicate_slug");
+  if (fsSync.existsSync(target)) {
+    if (opts.exactDuplicateAsDedup && similarActiveRuleAtPath(target, safeBody)) {
+      const auditPath = await audit({ operation: "deduped", reason: "semantic_duplicate", against: slug });
+      return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${slug}`, dedupedAgainst: slug, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
+    }
+    return reject("duplicate_slug");
+  }
 
   // #2 write-time semantic dedup (T0 consensus 2026-06-07): the glab rule was
   // stated twice + had 2 staging entries; a re-statement must NOT create a near
@@ -2215,7 +2228,13 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   try {
     await fs.mkdir(tierDir, { recursive: true, mode: 0o700 });
     lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
-    if (fsSync.existsSync(target)) return reject("duplicate_slug_race");
+    if (fsSync.existsSync(target)) {
+      if (opts.exactDuplicateAsDedup && similarActiveRuleAtPath(target, safeBody)) {
+        const auditPath = await audit({ operation: "deduped", reason: "semantic_duplicate", against: slug });
+        return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${slug}`, dedupedAgainst: slug, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
+      }
+      return reject("duplicate_slug_race");
+    }
     const budgetUnderLock = await lintRuleBudget(tierDir, markdown, cap);
     if (!budgetUnderLock.ok) return reject("budget_exceeded", { budgetTokens: budgetUnderLock.tokens, budgetCap: cap, suggestArchiveSlug: budgetUnderLock.suggestArchive });
     await atomicWrite(target, markdown);
@@ -2250,6 +2269,54 @@ export function findRuleFile(abrainHome: string, scope: "global" | "project", pr
 
 export interface MutateRuleOptions extends WriteRuleOptions {
   reason?: string;
+}
+
+/** ADR 0028 R4 lifecycle: mark a contradicted injected rule as contested. */
+export async function mutateRuleStatusContested(
+  slug: string,
+  scope: "global" | "project",
+  projectId: string | undefined,
+  opts: MutateRuleOptions,
+): Promise<WriteRuleResult> {
+  const started = Date.now();
+  const abrainHome = path.resolve(opts.abrainHome);
+  const sessionId = opts.auditContext?.sessionId;
+  const resultCtx = { lane: "rules", sessionId, correlationId: opts.auditContext?.correlationId, candidateId: opts.auditContext?.candidateId };
+  const reason = opts.reason || "contested by sediment outcome edge";
+  const audit = (event: Record<string, unknown>) => appendAbrainAudit(abrainHome, "rules", { scope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
+
+  const found = findRuleFile(abrainHome, scope, projectId, slug);
+  if (!found) {
+    const auditPath = await audit({ operation: "reject", op: "contest", reason: "entry_not_found" });
+    return { slug, path: abrainHome, status: "rejected", reason: "entry_not_found", ruleScope: scope, projectId, auditPath, ...resultCtx };
+  }
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    const ts = nowIso();
+    const raw = await fs.readFile(found.path, "utf-8");
+    let patched = raw.replace(/^status:.*$/m, `status: ${yamlString("contested")}`);
+    patched = patched.replace(/^updated:.*$/m, `updated: ${yamlString(ts)}`);
+    if (!/^status:/m.test(patched)) patched = patched.replace(/^---\n/, `---\nstatus: ${yamlString("contested")}\n`);
+    patched = `${patched.trimEnd()}\n- ${ts} | ${sessionId || "sediment"} | contested | ${reason.replace(/\n/g, " ")}\n`;
+    await atomicWrite(found.path, patched);
+    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:contest") : null;
+    if (git === null && opts.settings.gitCommit) {
+      const rel = path.relative(abrainHome, found.path);
+      try { await atomicWrite(found.path, raw); } catch { /* best-effort restore of pre-contest content */ }
+      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
+      const auditPath = await audit({ operation: "reject", op: "contest", reason: "git_commit_failed" });
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    }
+    const auditPath = await audit({ operation: "contest", tier: found.tier, target: path.relative(abrainHome, found.path), git_commit: git, reason });
+    return { slug, path: found.path, status: "updated", reason: "contested", tier: found.tier, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await audit({ operation: "error", op: "contest", reason: message });
+    return { slug, path: found.path, status: "rejected", reason: message, tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+  } finally {
+    await lock?.release();
+  }
 }
 
 /** ADR 0023 D7 lifecycle: archive a rule (status -> archived). The

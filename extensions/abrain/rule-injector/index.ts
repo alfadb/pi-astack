@@ -416,6 +416,10 @@ export function getCurrentRuleInjectionNonce(): string | undefined {
   return cachedRules?.nonce;
 }
 
+export function getCurrentInjectedRuleEntries(): RuleEntry[] {
+  return cachedRules ? allRules(cachedRules) : [];
+}
+
 export function refreshRuleCacheForTests(cache: RuleScanCache | null): void {
   if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
     throw new Error("refreshRuleCacheForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");

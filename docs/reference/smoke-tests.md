@@ -11,7 +11,7 @@
 | `smoke:derive-provenance` | `scripts/smoke-derive-provenance.mjs` | active-correction signal quote-source → provenance derivation, including sanitized user-message matching |
 | `smoke:rule-footer-realtime` | `scripts/smoke-rule-footer-realtime.mjs` | real-time rules footer refresh after rules directory changes |
 | `smoke:tier1-directive-defer` | `scripts/smoke-tier1-directive-defer-resolution.mjs` | ADR 0028 Tier-1 deterministic directive commit path when curator multi-view defers |
-| `smoke:pr1-adr0028` | `scripts/smoke-pr1-adr0028.mjs` | ADR 0028 PR1: rules-as-readonly-neighbors, observe-only Tier-1 shadow lane, and flag-off invariants |
+| `smoke:pr1-adr0028` | `scripts/smoke-pr1-adr0028.mjs` | ADR 0028 PR1: rules-as-readonly-neighbors, Tier-1 direct deterministic write, real `agent_end` checkpoint ordering, R4 outcome edge, R3 negative recall audit, and shadow-flag removal invariants |
 | `smoke:evolution-ledger` | `scripts/smoke-evolution-ledger.mjs` | L1 Sediment Evolution Loop v1 internal evolution-ledger lifecycle / scoping / degraded-run guard / identity convergence (`adoptUnsluggedAlias`) |
 | `smoke:entry-telemetry` | `scripts/smoke-entry-telemetry.mjs` | Outcome→Entry feedback edge Tier-A telemetry sidecar: cumulative/rolling aggregation, hysteresis preservation, project scoping, sidecar-only boundary (never writes durable markdown) |
 | `smoke:entry-lifecycle-proposals` | `scripts/smoke-entry-lifecycle-proposals.mjs` | Outcome→Entry feedback edge M3 read-only proposal sink: proposals sourced from PROMOTED advisories only (not demoted/exoneration), status=pending, project scoping, §8 observation-only boundary (no writer/curator/multi-view) |

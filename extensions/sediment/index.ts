@@ -48,10 +48,10 @@ import {
   type LlmExtractorResult,
 } from "./llm-extractor";
 import { runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
-import { ruleBodySimilarity, RULE_DEDUP_SIMILARITY_THRESHOLD } from "./rule-writer";
+import type { RuleDraft } from "./rule-writer";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
-import { collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug } from "./outcome-collector";
+import { collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug, type OutcomeRow } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
@@ -67,16 +67,20 @@ import {
   appendAudit,
   updateProjectEntry,
   writeAbrainAboutMe,
+  mutateRuleStatusContested,
+  writeAbrainRule,
   writeProjectEntry,
   type AboutMeDraft,
   type ProjectEntryDraft,
   type WriteAboutMeResult,
   type WriteProjectEntryResult,
+  type WriteRuleResult,
   type WriterAuditContext,
 } from "./writer";
 import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { abrainProjectDir, abrainSedimentStagingPath, resolveActiveProject } from "../_shared/runtime";
+import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 
 // ---------------------------------------------------------------
 // Phase 1.4 A2 / ADR 0016: in-process bg work tracking.
@@ -419,7 +423,7 @@ function statusGlyph(status: string): string {
  */
 function formatSedimentNotify(
   lane: string,
-  results: WriteProjectEntryResult[],
+  results: Array<WriteProjectEntryResult | WriteRuleResult>,
   abrainHome: string,
 ): string {
   const header = `Sediment ${lane}: ${results.length} entr${results.length === 1 ? "y" : "ies"}`;
@@ -435,14 +439,239 @@ function formatSedimentNotify(
 }
 
 /** Format write results: only non-zero counts, e.g. "3 created, 1 updated, 2 skipped". */
-function compactResultSummary(results: WriteProjectEntryResult[]): string {
+function compactResultSummary(results: Array<WriteProjectEntryResult | WriteRuleResult>): string {
   const c: Record<string, number> = {};
   for (const r of results) c[r.status] = (c[r.status] || 0) + 1;
   const parts: string[] = [];
-  for (const st of ["created", "updated", "merged", "archived", "superseded", "deleted", "skipped", "rejected"]) {
+  for (const st of ["created", "updated", "merged", "archived", "superseded", "deleted", "deduped", "dry_run", "skipped", "rejected"]) {
     if (c[st]) parts.push(`${c[st]} ${st}`);
   }
   return parts.join(", ") || "no changes";
+}
+
+function isCapturedTier1Result(result: WriteRuleResult): boolean {
+  return result.status === "created" || result.status === "deduped" || result.status === "dry_run";
+}
+
+interface DirectiveRecallCandidate {
+  entryId?: string;
+  quote: string;
+  reason: string;
+}
+
+function normalizeRecallText(value: string): string {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g, "")
+    .replace(/[`'"“”‘’]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .trim();
+}
+
+function recallCharGrams(value: string): Set<string> {
+  const normalized = normalizeRecallText(value);
+  if (!normalized) return new Set();
+  if (normalized.length <= 2) return new Set([normalized]);
+  const grams = new Set<string>();
+  for (let i = 0; i <= normalized.length - 2; i++) grams.add(normalized.slice(i, i + 2));
+  return grams;
+}
+
+function recallOverlapScore(a: string, b: string): number {
+  const left = normalizeRecallText(a);
+  const right = normalizeRecallText(b);
+  if (!left || !right) return 0;
+  const minLength = Math.min(left.length, right.length);
+  if (minLength >= 4 && (left.includes(right) || right.includes(left))) return 1;
+  const leftGrams = recallCharGrams(left);
+  const rightGrams = recallCharGrams(right);
+  const smaller = leftGrams.size <= rightGrams.size ? leftGrams : rightGrams;
+  const larger = leftGrams.size <= rightGrams.size ? rightGrams : leftGrams;
+  if (smaller.size === 0) return 0;
+  let intersection = 0;
+  for (const gram of smaller) if (larger.has(gram)) intersection++;
+  return intersection / smaller.size;
+}
+
+function isDirectiveLikeSentence(sentence: string): boolean {
+  const text = sentence.trim();
+  if (!text) return false;
+  if (/(必须|务必|一律|总是|始终|永远|不要|禁止|不能|不允许|只用|统一|优先|每次|以后都|所有[^。！？!?；;\n]{0,40}必须|全部[^。！？!?；;\n]{0,40}必须)/.test(text)) return true;
+  if (/^(用|使用|改用|优先用|只用|统一用|记住|记录|遵守|避免|别|不要|禁止)\s*[^\s。！？!?；;]{1,80}/.test(text)) return true;
+  if (/\b(always|never|must|should|shall|required|requires|require|do not|don't|dont|make sure|remember to)\b/i.test(text)) return true;
+  if (/^\s*(use|prefer|avoid|require|remember|never|always)\b/i.test(text)) return true;
+  return false;
+}
+
+function directiveSentencesFromUserText(text: string): string[] {
+  const withoutCode = text.replace(/```[\s\S]*?```/g, " ");
+  const parts: string[] = withoutCode.match(/[^\n。！？!?；;]+[。！？!?；;]?/g) ?? [];
+  return parts
+    .map((part) => part.replace(/^[-*•\s]+/, "").trim())
+    .filter((part) => part.length >= 2 && isDirectiveLikeSentence(part))
+    .slice(0, 8);
+}
+
+function userTextForDirectiveRecall(entry: unknown): { entryId?: string; text: string } | null {
+  if (!entry || typeof entry !== "object") return null;
+  const obj = entry as Record<string, unknown>;
+  if (obj.type !== "message" || !obj.message || typeof obj.message !== "object") return null;
+  const message = obj.message as Record<string, unknown>;
+  if (message.role !== "user") return null;
+  const rendered = entryToText(entry);
+  const firstNewline = rendered.indexOf("\n");
+  const text = firstNewline >= 0 ? rendered.slice(firstNewline + 1) : rendered;
+  return {
+    ...(typeof obj.id === "string" ? { entryId: obj.id } : {}),
+    text,
+  };
+}
+
+function hasCorrespondingInjectedRule(
+  quote: string,
+  rules: ReturnType<typeof getCurrentInjectedRuleEntries>,
+): boolean {
+  return rules.some((rule) => {
+    const ruleText = `${rule.title}\n${rule.body}\n${rule.injectedText}\n${rule.hint}`;
+    return recallOverlapScore(quote, ruleText) >= 0.72;
+  });
+}
+
+function hasCoveredDirectiveText(quote: string, coveredTexts: string[]): boolean {
+  return coveredTexts.some((text) => recallOverlapScore(quote, text) >= 0.72);
+}
+
+function detectDirectiveRecallCandidates(
+  entries: unknown[],
+  rules: ReturnType<typeof getCurrentInjectedRuleEntries> = getCurrentInjectedRuleEntries(),
+  coveredTexts: string[] = [],
+): DirectiveRecallCandidate[] {
+  const out: DirectiveRecallCandidate[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const user = userTextForDirectiveRecall(entry);
+    if (!user) continue;
+    for (const quote of directiveSentencesFromUserText(user.text)) {
+      const normalized = normalizeRecallText(quote);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      if (hasCoveredDirectiveText(quote, coveredTexts)) continue;
+      if (hasCorrespondingInjectedRule(quote, rules)) continue;
+      out.push({
+        ...(user.entryId ? { entryId: user.entryId } : {}),
+        quote,
+        reason: "user_role_imperative_without_corresponding_injected_rule",
+      });
+    }
+  }
+  return out;
+}
+
+async function auditDirectiveRecall(args: {
+  cwd: string;
+  sessionId: string;
+  window: RunWindow;
+  lane?: "diagnostic" | "auto_write" | "explicit" | "about_me" | "drain";
+  correlationId?: string;
+  coveredTexts?: string[];
+}): Promise<void> {
+  const injectedRules = getCurrentInjectedRuleEntries();
+  const candidates = detectDirectiveRecallCandidates(args.window.entries, injectedRules, args.coveredTexts ?? []);
+  if (candidates.length === 0) return;
+  await appendAudit(args.cwd, {
+    operation: "directive_recall_audit",
+    lane: args.lane ?? "diagnostic",
+    session_id: args.sessionId,
+    ...(args.correlationId ? { correlation_id: args.correlationId } : {}),
+    ...checkpointSummary(args.window),
+    source: "mechanical_user_imperative_scan",
+    keyed_on: "raw_user_role_transcript",
+    rule_cache_nonce: getCurrentRuleInjectionNonce() ?? null,
+    injected_rule_count: injectedRules.length,
+    missing_rule_count: candidates.length,
+    candidates: candidates.slice(0, 8).map((candidate) => ({
+      ...(candidate.entryId ? { entry_id: candidate.entryId } : {}),
+      quote: sanitizeAuditText(candidate.quote, 240),
+      reason: candidate.reason,
+    })),
+  });
+}
+
+function isRuleContradictionOutcome(row: OutcomeRow): boolean {
+  if (row.source !== "memory-footnote") return false;
+  if (row.used !== "retrieved-unused") return false;
+  const counterfactual = String(row.counterfactual ?? "").toLowerCase();
+  if (/(no\s+(contradiction|conflict)|not\s+(a\s+)?(contradiction|conflict|wrong|incorrect)|does\s+not\s+(contradict|conflict)|相同决定|没有矛盾|不矛盾|没有冲突|不冲突|并不矛盾|并不冲突)/i.test(counterfactual)) return false;
+  return /(contradict|conflict|wrong|incorrect|opposite|矛盾|冲突|相反|不对|错了|错误|不要这样|不能这样)/i.test(counterfactual);
+}
+
+function compoundRuleKey(entry: { slug: string; scope: "global" | "project"; projectId?: string }): string {
+  return `${entry.scope}:${entry.projectId ?? ""}:${entry.slug}`;
+}
+
+function uniquelyMatchInjectedRuleBySlug(
+  slug: string,
+  entries: ReturnType<typeof getCurrentInjectedRuleEntries>,
+): ReturnType<typeof getCurrentInjectedRuleEntries>[number] | undefined {
+  const normalized = sanitizeSlug(slug);
+  if (!normalized) return undefined;
+  const byCompound = new Map(entries.map((entry) => [compoundRuleKey(entry), entry]));
+  const projectMatch = slug.match(/^project:([^:]+):(.+)$/);
+  if (projectMatch) return byCompound.get(`project:${projectMatch[1]}:${sanitizeSlug(projectMatch[2])}`);
+  const globalMatch = slug.match(/^(global|world):(.+)$/);
+  if (globalMatch) return byCompound.get(`global::${sanitizeSlug(globalMatch[2])}`);
+
+  let match: ReturnType<typeof getCurrentInjectedRuleEntries>[number] | undefined;
+  for (const entry of entries) {
+    if (entry.slug !== normalized) continue;
+    if (match && compoundRuleKey(match) !== compoundRuleKey(entry)) return undefined;
+    match = entry;
+  }
+  return match;
+}
+
+async function applyRuleOutcomeEdge(args: {
+  cwd: string;
+  abrainHome: string;
+  settings: SedimentSettings;
+  sessionId: string;
+  rows: OutcomeRow[];
+}): Promise<void> {
+  const nonce = getCurrentRuleInjectionNonce();
+  const injected = getCurrentInjectedRuleEntries();
+  if (!nonce || injected.length === 0 || args.rows.length === 0) return;
+  for (const row of args.rows) {
+    if (!isRuleContradictionOutcome(row)) continue;
+    const entry = uniquelyMatchInjectedRuleBySlug(row.entry_slug, injected);
+    if (!entry) continue;
+    const result = await mutateRuleStatusContested(entry.slug, entry.scope, entry.projectId, {
+      abrainHome: args.abrainHome,
+      settings: args.settings,
+      auditContext: {
+        lane: "outcome_edge",
+        sessionId: args.sessionId,
+        correlationId: `outcome-edge:${args.sessionId}:${compoundRuleKey(entry)}`,
+        candidateId: row.event_id,
+      },
+      reason: `ADR 0028 R4 CONTRADICT from outcome edge${row.counterfactual ? `: ${String(row.counterfactual).slice(0, 160)}` : ""}`,
+    });
+    await appendAudit(args.cwd, {
+      operation: "rule_outcome_edge",
+      lane: "outcome_edge",
+      session_id: args.sessionId,
+      injection_nonce: nonce,
+      edge: "CONTRADICT",
+      rule_slug: entry.slug,
+      rule_scope: entry.scope,
+      ...(entry.projectId ? { project_id: entry.projectId } : {}),
+      outcome_source: row.source,
+      outcome_used: row.used,
+      outcome_event_id: row.event_id,
+      result: resultSummary(result),
+      status_mutation: result.status === "updated" && result.reason === "contested" ? "status_to_contested" : "not_applied",
+    }).catch(() => {});
+  }
 }
 
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
@@ -459,6 +688,12 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
     if (!result.reason) return false;
     return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
   });
+}
+
+function shouldAdvanceAfterAutoOutcome(auto: AutoWriteLaneOutcome): boolean {
+  if (auto.kind === "tier1_direct") return isCapturedTier1Result(auto.result);
+  if (auto.kind === "wrote") return shouldAdvanceAfterResults(auto.results);
+  return auto.kind !== "llm_error";
 }
 
 /**
@@ -680,21 +915,26 @@ function candidateIdFor(correlationId: string, index: number): string {
   return `${correlationId}:c${index + 1}`;
 }
 
-function resultSummary(result: WriteProjectEntryResult) {
+function resultSummary(result: WriteProjectEntryResult | WriteRuleResult) {
   return {
     status: result.status,
     slug: result.slug,
     reason: result.reason,
     path: result.path,
-    deleteMode: result.deleteMode,
+    deleteMode: "deleteMode" in result ? result.deleteMode : undefined,
     lintErrors: result.lintErrors,
     lintWarnings: result.lintWarnings,
-    validationErrors: result.validationErrors,
-    duplicate: result.duplicate,
+    validationErrors: "validationErrors" in result ? result.validationErrors : undefined,
+    duplicate: "duplicate" in result ? result.duplicate : undefined,
     sanitizedReplacements: result.sanitizedReplacements,
     gitCommit: result.gitCommit,
     correlation_id: result.correlationId,
     candidate_id: result.candidateId,
+    tier: "tier" in result ? result.tier : undefined,
+    demoted_from: "demotedFrom" in result ? result.demotedFrom : undefined,
+    deduped_against: "dedupedAgainst" in result ? result.dedupedAgainst : undefined,
+    rule_scope: "ruleScope" in result ? result.ruleScope : undefined,
+    project_id: "projectId" in result ? result.projectId : undefined,
   };
 }
 
@@ -1258,6 +1498,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         const outcome = collectOutcomes(branch, sessionId);
         if (outcome.rows.length > 0) {
           writeOutcomeLedger(outcome.rows, cwd);
+          applyRuleOutcomeEdge({ cwd, abrainHome, settings, sessionId, rows: outcome.rows }).catch(() => {});
         }
         if (outcome.dropped.length > 0) {
           appendAudit(cwd, {
@@ -1988,30 +2229,22 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               if (!latestCycle || latestCycle.started > latestCycle.ended) return;
               const win = buildRunWindow(branchNow, cp, settings);
               if (win.skipReason || !win.lastEntryId) return; // no backlog
-
-              // Save checkpoint and launch another cycle
-              saveSessionCheckpoint(cwd, sessionId, {
-                lastProcessedEntryId: win.lastEntryId,
-              })
-                .then(() => {
-                  const latestCycle = sessionAgentCycle.get(sessionId);
-                  if (!latestCycle || latestCycle.started > latestCycle.ended) return;
-                  applySedimentStatus(setStatus, sessionId, "running", "drain");
-                  const corrId = makeCorrelationId(
-                    "auto_write",
-                    sessionId,
-                    win,
-                  );
-                  // Forward-declare with definite-assignment assertion so
-                  // the IIFE body's `if (autoWriteInFlight.get(...) === bg)`
-                  // typechecks under TS strict. Runtime-safe: the closure
-                  // body cannot reach the comparison until after the
-                  // assignment one line below completes (async body runs
-                  // up to first await, which is the inner tryAutoWriteLane).
-                  let bg!: Promise<void>;
-                  bg = (async () => {
-                    try {
-                      const auto = await tryAutoWriteLane({
+              applySedimentStatus(setStatus, sessionId, "running", "drain");
+              const corrId = makeCorrelationId(
+                "auto_write",
+                sessionId,
+                win,
+              );
+              // Forward-declare with definite-assignment assertion so
+              // the IIFE body's `if (autoWriteInFlight.get(...) === bg)`
+              // typechecks under TS strict. Runtime-safe: the closure
+              // body cannot reach the comparison until after the
+              // assignment one line below completes (async body runs
+              // up to first await, which is the inner tryAutoWriteLane).
+              let bg!: Promise<void>;
+              bg = (async () => {
+                try {
+                  const auto = await tryAutoWriteLane({
                         cwd,
                         sessionId,
                         settings,
@@ -2028,6 +2261,20 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           return stored ? recordConsumedSessionCorrection("drain", corrId, stored) : null;
                         })(),
                       });
+                      const checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto);
+                      if (checkpointAdvanced && win.lastEntryId) {
+                        await saveSessionCheckpoint(cwd, sessionId, {
+                          lastProcessedEntryId: win.lastEntryId,
+                        });
+                      }
+                      await auditDirectiveRecall({
+                        cwd,
+                        sessionId,
+                        window: win,
+                        lane: "drain",
+                        correlationId: corrId,
+                        coveredTexts: auto.kind === "tier1_direct" ? [auto.draft.body] : [],
+                      }).catch(() => {});
                       // Round 8 P1 (sonnet R8 audit fix): drain loop now
                       // writes audit rows for ALL outcomes (wrote /
                       // ineligible / llm_skip / llm_error / threw),
@@ -2035,7 +2282,49 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                       // produced an audit row — every other outcome was
                       // silent, leaving operators with no forensic trail
                       // for drain failures.
-                      if (auto.kind === "wrote") {
+                      if (auto.kind === "tier1_direct") {
+                        const pendingDeferred = deferredStopBySession.get(sessionId);
+                        await appendAudit(cwd, {
+                          operation: "auto_write",
+                          lane: "auto_write",
+                          session_id: sessionId,
+                          ...checkpointSummary(win),
+                          extractor: "active_correction_direct",
+                          parser_version: PARSER_VERSION,
+                          settings_snapshot: settingsSnapshot,
+                          correlation_id: corrId,
+                          candidate_count: 1,
+                          candidates: [{
+                            candidate_id: candidateIdFor(corrId, -1),
+                            title: sanitizeAuditText(auto.draft.title, 500),
+                            kind: auto.draft.kind,
+                            confidence: auto.draft.entryConfidence,
+                            status: auto.draft.status,
+                            body_chars: auto.draft.body.length,
+                          }],
+                          results: [resultSummary(auto.result)],
+                          recovered_deferred: checkpointAdvanced && !!pendingDeferred,
+                          ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
+                          checkpoint_advanced: checkpointAdvanced,
+                          background_async: true,
+                          drain: true,
+                        });
+                        await recordDeferredRecoveryIfNeeded({
+                          cwd,
+                          sessionId,
+                          window: win,
+                          checkpointAdvanced,
+                          lane: "auto_write",
+                          correlationId: corrId,
+                        });
+                        const compact = compactResultSummary([auto.result]);
+                        applySedimentStatus(
+                          setStatus,
+                          sessionId,
+                          auto.result.status === "rejected" ? "failed" : "completed",
+                          compact,
+                        );
+                      } else if (auto.kind === "wrote") {
                         const pendingDeferred = deferredStopBySession.get(sessionId);
                         await appendAudit(cwd, {
                           operation: "auto_write",
@@ -2054,9 +2343,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           raw_text_truncated: auto.rawTextTruncated,
                           raw_text_redacted: auto.rawTextRedacted,
                           raw_text_redaction_reason: auto.rawTextRedactionReason,
-                          recovered_deferred: !!pendingDeferred,
-                          ...(pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
-                          checkpoint_advanced: true,
+                          recovered_deferred: checkpointAdvanced && !!pendingDeferred,
+                          ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
+                          checkpoint_advanced: checkpointAdvanced,
                           background_async: true,
                           drain: true,
                         });
@@ -2064,7 +2353,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           cwd,
                           sessionId,
                           window: win,
-                          checkpointAdvanced: true,
+                          checkpointAdvanced,
                           lane: "auto_write",
                           correlationId: corrId,
                         });
@@ -2089,6 +2378,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           settings_snapshot: settingsSnapshot,
                           correlation_id: corrId,
                           reason: auto.kind,
+                          checkpoint_advanced: checkpointAdvanced,
                           background_async: true,
                           drain: true,
                         }).catch(() => { /* best-effort: don't break drain on audit failure */ });
@@ -2131,26 +2421,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                       // session /new flips it back to idle).
                       maybeSetIdleIfNoInflight(sessionId);
                     }
-                  })();
-                  _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
-                  autoWriteInFlight.set(sessionId, bg);
-                  bg.catch(() => {});
-                })
-                .catch((err: unknown) => {
-                  // R8 P1 (deepseek): saveSessionCheckpoint failures used
-                  // to be silent. Surface as audit + status so drain
-                  // doesn't die invisibly when checkpoint disk is wedged.
-                  const message = err instanceof Error ? err.message : String(err);
-                  appendAudit(cwd, {
-                    operation: "skip",
-                    lane: "auto_write",
-                    session_id: sessionId,
-                    reason: "drain_checkpoint_save_failed",
-                    error: sanitizeAuditText(message, 200),
-                    drain: true,
-                  }).catch(() => {});
-                  applySedimentStatus(setStatus, sessionId, "failed", `cp_save: ${message.slice(0, 40)}`);
-                });
+              })();
+              _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
+              autoWriteInFlight.set(sessionId, bg);
+              bg.catch(() => {});
             })
             .catch((err: unknown) => {
               // R8 P1 (deepseek): loadSessionCheckpoint failures (corrupt
@@ -2224,7 +2498,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           shortBg = (async () => {
             let checkpointAdvanced = false;
             try {
-              const classifierResult = await correctionPromise.catch(() => ({ ok: false, signal: null } as const));
+              const classifierResult = await correctionPromise.catch(() => null);
               // #1 (T0 consensus 2026-06-07): a high-confidence user-EXPRESSED durable
               // create signal ESCALATES this short window to the FULL curator + multi-view
               // lane, so the rule promotes at full fidelity (incl. zone:rules) instead of
@@ -2232,7 +2506,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               // (re-applies the rules trust taxonomy + conservatism) and create_rules_zone
               // forces 2-pass review, so a false escalation costs one extractor+curator
               // call and the curator still skips. Fires only on a positive rare signal.
-              if (classifierResult.ok && classifierResult.escalateToCurator) {
+              if (classifierResult?.ok && classifierResult.escalateToCurator) {
                 const escForwarded = recordCorrectionDispatch("auto_write", shortCorrelationId, classifierResult, true);
                 const auto = await tryAutoWriteLane({
                   cwd, sessionId, settings, window: effectiveWindow, modelRegistry,
@@ -2250,17 +2524,39 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 // the window and skipped/rejected every result. The hold is bounded by the
                 // window scrolling past + (normally) the staging net.
                 const transient = auto.kind === "llm_error";
-                const captured = auto.kind === "wrote" && auto.results.some((r) =>
-                  r.status === "created" || r.status === "updated" || r.status === "merged" ||
-                  r.status === "superseded" || r.status === "archived" || r.status === "deleted" ||
-                  (r.reason ?? "").startsWith("semantic_duplicate"));
+                const captured = auto.kind === "tier1_direct"
+                  ? isCapturedTier1Result(auto.result)
+                  : auto.kind === "wrote" && auto.results.some((r) =>
+                    r.status === "created" || r.status === "updated" || r.status === "merged" ||
+                    r.status === "superseded" || r.status === "archived" || r.status === "deleted" ||
+                    (r.reason ?? "").startsWith("semantic_duplicate"));
                 const safelyStaged = classifierResult.stagingWritten === true;
                 const advance = !transient && (captured || safelyStaged);
                 if (advance) {
                   await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: effectiveWindow.lastEntryId });
                   await recordDeferredRecoveryIfNeeded({ cwd, sessionId, window: effectiveWindow, checkpointAdvanced: true, lane: "auto_write", correlationId: shortCorrelationId });
                 }
-                if (auto.kind === "wrote") {
+                await auditDirectiveRecall({
+                  cwd,
+                  sessionId,
+                  window: effectiveWindow,
+                  lane: "auto_write",
+                  correlationId: shortCorrelationId,
+                  coveredTexts: auto.kind === "tier1_direct" ? [auto.draft.body] : [],
+                }).catch(() => {});
+                if (auto.kind === "tier1_direct") {
+                  await appendAudit(cwd, {
+                    operation: "auto_write", lane: "auto_write", session_id: sessionId, ...summary,
+                    extractor: "active_correction_direct", parser_version: PARSER_VERSION,
+                    settings_snapshot: settingsSnapshot, entry_breakdown: entryBreakdown,
+                    correlation_id: shortCorrelationId, escalated_from: "short_window_classifier_only",
+                    candidate_count: 1, results: [resultSummary(auto.result)],
+                    checkpoint_advanced: advance, classifier_only: false, background_async: true,
+                  });
+                  const compact = compactResultSummary([auto.result]);
+                  applySedimentStatus(setStatus, sessionId, auto.result.status === "rejected" ? "failed" : "completed", compact);
+                  if (notify) { try { notify(formatSedimentNotify("Tier-1 rule (bg)", [auto.result], abrainHome), "info"); } catch {} }
+                } else if (auto.kind === "wrote") {
                   await appendAudit(cwd, {
                     operation: "auto_write", lane: "auto_write", session_id: sessionId, ...summary,
                     extractor: "active_correction_escalated", parser_version: PARSER_VERSION,
@@ -2285,8 +2581,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 return;
               }
               const forwarded = recordCorrectionDispatch("auto_write", shortCorrelationId, classifierResult, false);
-              const signalFound = classifierResult.signal?.signal_found === true;
-              checkpointAdvanced = !!(classifierResult.ok && classifierResult.signal && !signalFound);
+              const signalFound = classifierResult?.signal?.signal_found === true;
+              checkpointAdvanced = !!(classifierResult?.ok && classifierResult.signal && !signalFound);
               if (checkpointAdvanced) {
                 await saveSessionCheckpoint(cwd, sessionId, {
                   lastProcessedEntryId: effectiveWindow.lastEntryId,
@@ -2296,7 +2592,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               await appendAudit(cwd, {
                 operation: "skip",
                 lane: "auto_write",
-                reason: classifierResult.ok
+                reason: classifierResult?.ok
                   ? signalFound ? "window_too_small_classifier_signal_checkpoint_held" : checkpointAdvanced ? "window_too_small_classifier_no_signal" : "window_too_small_classifier_unparseable"
                   : "window_too_small_classifier_failed_or_unparseable",
                 session_id: sessionId,
@@ -2310,7 +2606,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                 checkpoint_advanced: checkpointAdvanced,
                 classifier_only: true,
-                classifier_ok: classifierResult.ok,
+                classifier_ok: classifierResult?.ok ?? false,
                 classifier_signal_found: signalFound,
                 correction_forwarded: !!forwarded,
                 stage_ms: {
@@ -2332,8 +2628,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               applySedimentStatus(
                 setStatus,
                 sessionId,
-                checkpointAdvanced ? "completed" : classifierResult.ok ? "completed" : "failed",
-                checkpointAdvanced ? "no correction; checkpoint advanced" : signalFound ? "correction found; checkpoint held" : classifierResult.ok ? "classifier unparseable; checkpoint held" : "classifier failed; checkpoint held",
+                checkpointAdvanced ? "completed" : classifierResult?.ok ? "completed" : "failed",
+                checkpointAdvanced ? "no correction; checkpoint advanced" : signalFound ? "correction found; checkpoint held" : classifierResult?.ok ? "classifier unparseable; checkpoint held" : "classifier failed; checkpoint held",
               );
             } catch (err: unknown) {
               const message = err instanceof Error ? err.message : String(err);
@@ -2374,11 +2670,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           return;
         }
 
-        // Optimistic checkpoint advance before launching bg work.
-        await saveSessionCheckpoint(cwd, sessionId, {
-          lastProcessedEntryId: effectiveWindow.lastEntryId,
-        });
-
         // Mark running BEFORE scheduling the bg promise so the footer
         // updates synchronously with agent_end. The bg promise will
         // transition to completed/failed in its finally block.
@@ -2396,6 +2687,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         // that comparison. `!` silences the spurious strict-mode warning.
         let bgPromise!: Promise<void>;
         bgPromise = (async () => {
+          let checkpointAdvanced = false;
           try {
             const auto = await tryAutoWriteLane({
               cwd,
@@ -2419,7 +2711,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               // to the right dispatch bucket.
               correctionSignal: await (async () => {
                 const classifierResult = correctionPromise
-                  ? await correctionPromise.catch(() => ({ ok: false, signal: null } as const))
+                  ? await correctionPromise.catch(() => null)
                   : null;
                 const forwarded = recordCorrectionDispatch("auto_write", autoCorrelationId, classifierResult, true);
                 if (forwarded) return forwarded;
@@ -2428,6 +2720,75 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               })(),
             });
             const tAutoEnd = Date.now();
+            checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto);
+            if (checkpointAdvanced && effectiveWindow.lastEntryId) {
+              await saveSessionCheckpoint(cwd, sessionId, {
+                lastProcessedEntryId: effectiveWindow.lastEntryId,
+              });
+            }
+            await auditDirectiveRecall({
+              cwd,
+              sessionId,
+              window: effectiveWindow,
+              lane: "auto_write",
+              correlationId: autoCorrelationId,
+              coveredTexts: auto.kind === "tier1_direct" ? [auto.draft.body] : [],
+            }).catch(() => {});
+
+            if (auto.kind === "tier1_direct") {
+              const pendingDeferred = deferredStopBySession.get(sessionId);
+              await appendAudit(cwd, {
+                operation: "auto_write",
+                lane: "auto_write",
+                session_id: sessionId,
+                ...summary,
+                extractor: "active_correction_direct",
+                parser_version: PARSER_VERSION,
+                settings_snapshot: settingsSnapshot,
+                entry_breakdown: entryBreakdown,
+                correlation_id: autoCorrelationId,
+                candidate_count: 1,
+                candidates: [{
+                  candidate_id: candidateIdFor(autoCorrelationId, -1),
+                  title: sanitizeAuditText(auto.draft.title, 500),
+                  kind: auto.draft.kind,
+                  confidence: auto.draft.entryConfidence,
+                  status: auto.draft.status,
+                  body_chars: auto.draft.body.length,
+                }],
+                results: [resultSummary(auto.result)],
+                recovered_deferred: checkpointAdvanced && !!pendingDeferred,
+                ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
+                stage_ms: {
+                  window_build: tWindowBuilt - tStart,
+                  parse: tParseEnd - tParseStart,
+                  write_total: tAutoEnd - auto.writeStart,
+                  total: Date.now() - tStart,
+                  background: true,
+                },
+                checkpoint_advanced: checkpointAdvanced,
+                background_async: true,
+              });
+              await recordDeferredRecoveryIfNeeded({
+                cwd,
+                sessionId,
+                window: effectiveWindow,
+                checkpointAdvanced,
+                lane: "auto_write",
+                correlationId: autoCorrelationId,
+              });
+              if (notify) {
+                try {
+                  notify(
+                    formatSedimentNotify("Tier-1 rule (bg)", [auto.result], abrainHome),
+                    "info",
+                  );
+                } catch {}
+              }
+              const compact = compactResultSummary([auto.result]);
+              applySedimentStatus(setStatus, sessionId, auto.result.status === "rejected" ? "failed" : "completed", compact);
+              return;
+            }
 
             if (auto.kind === "wrote") {
               const pendingDeferred = deferredStopBySession.get(sessionId);
@@ -2463,8 +2824,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 raw_text_truncated: auto.rawTextTruncated,
                 raw_text_redacted: auto.rawTextRedacted,
                 raw_text_redaction_reason: auto.rawTextRedactionReason,
-                recovered_deferred: !!pendingDeferred,
-                ...(pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
+                recovered_deferred: checkpointAdvanced && !!pendingDeferred,
+                ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                 stage_ms: {
                   window_build: tWindowBuilt - tStart,
                   parse: tParseEnd - tParseStart,
@@ -2473,14 +2834,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   total: Date.now() - tStart,
                   background: true,
                 },
-                checkpoint_advanced: true,
+                checkpoint_advanced: checkpointAdvanced,
                 background_async: true,
               });
               await recordDeferredRecoveryIfNeeded({
                 cwd,
                 sessionId,
                 window: effectiveWindow,
-                checkpointAdvanced: true,
+                checkpointAdvanced,
                 lane: "auto_write",
                 correlationId: autoCorrelationId,
               });
@@ -2580,8 +2941,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 auto.kind === "llm_error" || auto.kind === "llm_skip"
                   ? auto.rawTextRedactionReason
                   : undefined,
-              recovered_deferred: !!pendingDeferred,
-              ...(pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
+              recovered_deferred: checkpointAdvanced && !!pendingDeferred,
+              ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
               stage_ms: {
                 window_build: tWindowBuilt - tStart,
                 parse: tParseEnd - tParseStart,
@@ -2590,14 +2951,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 total: Date.now() - tStart,
                 background: true,
               },
-              checkpoint_advanced: true,
+              checkpoint_advanced: checkpointAdvanced,
               background_async: true,
             });
             await recordDeferredRecoveryIfNeeded({
               cwd,
               sessionId,
               window: effectiveWindow,
-              checkpointAdvanced: true,
+              checkpointAdvanced,
               lane: "auto_write",
               correlationId: autoCorrelationId,
             });
@@ -2643,7 +3004,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 correlation_id: autoCorrelationId,
                 // Sanitize before capping; provider error spew can echo request bodies.
                 error: sanitizeAuditText(err?.message ?? String(err), 500),
-                checkpoint_advanced: true,
+                checkpoint_advanced: checkpointAdvanced,
                 background_async: true,
               });
             } catch {}
@@ -3092,6 +3453,12 @@ type AutoWriteLaneOutcome =
       rawTextTruncated?: boolean;
       rawTextRedacted?: boolean;
       rawTextRedactionReason?: string;
+    }
+  | {
+      kind: "tier1_direct";
+      draft: RuleDraft;
+      result: WriteRuleResult;
+      writeStart: number;
     };
 
 function truncateRawForAudit(
@@ -3176,42 +3543,30 @@ function sanitizeAndTruncateRawForAudit(
   };
 }
 
-/**
- * Build a thin rules CANDIDATE draft from a high-confidence durable
- * user-EXPRESSED correction signal (design consensus 2026-06-07, 3xT0
- * opus-4-8/gpt-5.5/deepseek-v4-pro). This does NOT bypass the curator: it only
- * guarantees the durable rule reaches curateProjectDraft so the rules-trust
- * taxonomy + create_rules_zone 2-pass review decide create-vs-skip and
- * zone/tier/ruleScope, instead of the rule being silently dropped when the
- * general extractor emits no draft for it (GAP B). The body LEADS with the
- * VERBATIM user_quote (maximally attributable); scope_description is a classifier
- * paraphrase used only as the candidate title/summary and as a fallback to pad a
- * terse quote past writeAbrainRule's min-body gate. The curator decides
- * zone/tier/ruleScope; kind stays the candidate kind ("preference" is valid for
- * rules — rules inject by tier, not kind — and the curator does not re-judge it).
- */
-function buildEscalationSeedDraft(signal: CorrectionSignal, sessionId: string): ProjectEntryDraft {
-  // typeof guards: parse should type these as strings, but a malformed signal
-  // must not throw on .trim() inside the background lane (audit P2).
+function tier1RuleScope(signal: CorrectionSignal, projectId: string): RuleDraft["scope"] {
+  const text = `${signal.scope_description ?? ""}\n${signal.correction_intent ?? ""}\n${signal.user_quote ?? ""}`.toLowerCase();
+  if (/(本项目|当前项目|this project|current project|project-local|项目内)/i.test(text)) return { projectId };
+  return "global";
+}
+
+function buildTier1RuleDraft(signal: CorrectionSignal, sessionId: string, projectId: string): RuleDraft {
   const quote = (typeof signal.user_quote === "string" ? signal.user_quote : "").trim();
-  const scope = (typeof signal.scope_description === "string" ? signal.scope_description : "").trim();
-  // writeAbrainRule rejects a body < 10 code units (validation_error_body) and
-  // many durable rules are terse ("用 glab"). Lead with the verbatim directive;
-  // when it is too short to stand alone, append the classifier scope elaboration
-  // so the body is self-contained without sacrificing attribution (audit P1).
-  const compiledTruth = quote.length >= 10 ? quote : [quote, scope].filter(Boolean).join("\n\n");
+  const scopeDescription = (typeof signal.scope_description === "string" ? signal.scope_description : "").trim();
+  const body = quote.length >= 10 ? quote : [quote, scopeDescription].filter(Boolean).join("\n\n");
+  const title = (scopeDescription || quote || "Tier-1 user directive").slice(0, 200);
   return {
-    title: (scope || quote).slice(0, 200),
+    title,
+    body,
+    zone: "rules",
+    tier: "always",
+    scope: tier1RuleScope(signal, projectId),
     kind: "preference",
-    compiledTruth,
-    summary: scope || undefined,
+    entryConfidence: signal.confidence ?? 9,
+    routingConfidence: 1,
+    routingReason: "ADR 0028 Tier-1 direct path: durable user-expressed directive",
     status: "active",
-    // Tier-1 seed: carry the deterministic provenance (user-expressed) so the
-    // rule frontmatter records the true source instead of a blanket default.
-    provenance: signal.provenance,
-    confidence: signal.confidence,
     sessionId,
-    timelineNote: "seeded from active-correction escalation (durable user-expressed rule)",
+    provenance: signal.provenance ?? "user-expressed",
   };
 }
 
@@ -3272,6 +3627,47 @@ async function tryAutoWriteLane(args: {
     };
   }
 
+  const tier1Signal = args.correctionSignal;
+  if (tier1Signal && shouldEscalateToCurator(tier1Signal)) {
+    const writeStart = Date.now();
+    const draft = buildTier1RuleDraft(tier1Signal, sessionId, projectId);
+    const result = await writeAbrainRule(draft, {
+      abrainHome,
+      settings,
+      exactDuplicateAsDedup: true,
+      auditContext: {
+        lane: "auto_write",
+        sessionId,
+        correlationId,
+        candidateId: candidateIdFor(correlationId, -1),
+      },
+    });
+    await appendAudit(cwd, {
+      operation: "tier1_direct_write",
+      lane: "auto_write",
+      session_id: sessionId,
+      ...checkpointSummary(window),
+      correlation_id: correlationId,
+      candidate_id: candidateIdFor(correlationId, -1),
+      candidate_title: sanitizeAuditText(draft.title, 500),
+      candidate_kind: draft.kind,
+      candidate_confidence: draft.entryConfidence,
+      candidate_body_chars: draft.body.length,
+      correction_signal: {
+        confidence: tier1Signal.confidence ?? null,
+        provenance: tier1Signal.provenance ?? null,
+        quote_source: tier1Signal.quote_source ?? null,
+        quote: (tier1Signal.user_quote ?? "").slice(0, 200),
+      },
+      result: resultSummary(result),
+      deterministic_direct_path: true,
+      signal_consumed: result.status === "created" || result.status === "deduped" || result.status === "dry_run",
+      checkpoint_advanced: false,
+      durationMs: Date.now() - writeStart,
+    });
+    return { kind: "tier1_direct", draft, result, writeStart };
+  }
+
   if (
     !modelRegistry ||
     typeof modelRegistry.find !== "function" ||
@@ -3283,83 +3679,6 @@ async function tryAutoWriteLane(args: {
     };
   }
 
-  const tier1ShadowSignal = args.correctionSignal;
-  if (settings.tier1ShadowEnabled && tier1ShadowSignal && shouldEscalateToCurator(tier1ShadowSignal)) {
-    const shadowStart = Date.now();
-    const shadowDraft = buildEscalationSeedDraft(tier1ShadowSignal, sessionId);
-    try {
-      if (shadowDraft.compiledTruth.trim().length >= 10) {
-        const shadow = await curateProjectDraft(shadowDraft, {
-          projectRoot: cwd,
-          sedimentSettings: settings,
-          memorySettings: resolveMemorySettings(),
-          modelRegistry,
-          signal: args.signal,
-          correctionSignal: tier1ShadowSignal,
-          taskLocalContext: getTaskLocalForCurator(sessionId),
-          projectId,
-          abrainHome,
-          observeOnly: true,
-        });
-        await appendAudit(cwd, {
-          operation: "tier1_shadow_decision",
-          lane: "auto_write",
-          session_id: sessionId,
-          ...checkpointSummary(window),
-          correlation_id: correlationId,
-          candidate_id: candidateIdFor(correlationId, -1),
-          candidate_title: sanitizeAuditText(shadowDraft.title, 500),
-          candidate_kind: shadowDraft.kind,
-          candidate_confidence: shadowDraft.confidence,
-          candidate_body_chars: shadowDraft.compiledTruth.length,
-          correction_signal: {
-            confidence: tier1ShadowSignal.confidence ?? null,
-            provenance: tier1ShadowSignal.provenance ?? null,
-            quote_source: tier1ShadowSignal.quote_source ?? null,
-            quote: (tier1ShadowSignal.user_quote ?? "").slice(0, 200),
-          },
-          decision: shadow.decision,
-          curator: shadow.audit,
-          observe_only: true,
-          wrote: false,
-          signal_consumed: false,
-          checkpoint_advanced: false,
-          durationMs: Date.now() - shadowStart,
-        });
-      } else {
-        await appendAudit(cwd, {
-          operation: "tier1_shadow_decision",
-          lane: "auto_write",
-          session_id: sessionId,
-          ...checkpointSummary(window),
-          correlation_id: correlationId,
-          candidate_id: candidateIdFor(correlationId, -1),
-          reason: "shadow_candidate_body_too_short",
-          observe_only: true,
-          wrote: false,
-          signal_consumed: false,
-          checkpoint_advanced: false,
-          durationMs: Date.now() - shadowStart,
-        });
-      }
-    } catch (e: any) {
-      await appendAudit(cwd, {
-        operation: "tier1_shadow_decision",
-        lane: "auto_write",
-        session_id: sessionId,
-        ...checkpointSummary(window),
-        correlation_id: correlationId,
-        candidate_id: candidateIdFor(correlationId, -1),
-        reason: "tier1_shadow_error",
-        error: sanitizeAuditText(e?.message ?? String(e), 500),
-        observe_only: true,
-        wrote: false,
-        signal_consumed: false,
-        checkpoint_advanced: false,
-        durationMs: Date.now() - shadowStart,
-      }).catch(() => {});
-    }
-  }
 
   // 1. Run extractor. It does not write or commit; it only runs the
   //    model and parses the MEMORY/SKIP response. The curator/writer
@@ -3429,42 +3748,6 @@ async function tryAutoWriteLane(args: {
   const compliantDrafts: ProjectEntryDraft[] = fullDrafts.filter(
     (_, i) => schemaPreview.drafts[i]?.validationErrors.length === 0,
   );
-
-  // Rule-escalation seed (design consensus 2026-06-07, 3xT0). A high-confidence
-  // user-EXPRESSED durable CREATE signal must reach the curator EVEN WHEN the
-  // general extractor produced no draft covering it (GAP B) — otherwise the rule
-  // is silently dropped and only a provisional staging entry survives. Seeding at
-  // this single chokepoint (all three lane callers funnel through tryAutoWriteLane
-  // with the signal already forwarded) ALSO dissolves the window-size gating
-  // (GAP A) with no caller edits. Suppressed when an extractor draft already
-  // covers the same rule (cheap in-memory token-set Jaccard) to avoid a double
-  // curator call + self-dedup. The curator + create_rules_zone 2-pass review +
-  // write-time findSimilarRuleSlug dedup remain the gates (this never force-writes
-  // a rule; the curator can still skip).
-  const escSig = args.correctionSignal;
-  if (escSig && shouldEscalateToCurator(escSig)) {
-    const seedBody = (typeof escSig.user_quote === "string" ? escSig.user_quote : "").trim();
-    // ADR 0028 v1.1: attribution grounding is now the DETERMINISTIC AX-PROVENANCE
-    // gate inside shouldEscalateToCurator (provenance==='user-expressed' means the
-    // verbatim quote was found in a USER-role turn, computed from turn.role in
-    // correction-pipeline.deriveProvenance). That structurally blocks the
-    // README/tool content-in-transcript trap, so the prior token-subset substring
-    // band-aid is removed. Remaining guards: dedup (don't double-curate a rule the
-    // extractor already covered) + min-body (writeAbrainRule rejects < 10 CU; fall
-    // back to the provisional staging net rather than emit a guaranteed-reject).
-    const alreadyCovered = compliantDrafts.some(
-      (d) => ruleBodySimilarity(seedBody, d.compiledTruth ?? "") >= RULE_DEDUP_SIMILARITY_THRESHOLD,
-    );
-    if (!alreadyCovered) {
-      const seed = buildEscalationSeedDraft(escSig, sessionId);
-      // Do not emit a draft writeAbrainRule would reject for an under-length body
-      // (validation_error_body, < 10 CU) — that would burn a curator call and, on
-      // the optimistic-advance long/drain lanes, risk advancing past an unwritten
-      // rule. When the body cannot be made valid, the provisional staging entry is
-      // the no-loss net (audit P1: gpt-5.5 + deepseek).
-      if (seed.compiledTruth.trim().length >= 10) compliantDrafts.push(seed);
-    }
-  }
 
   if (compliantDrafts.length === 0) {
     return {
@@ -3608,6 +3891,12 @@ export function _resetAutoWriteStateForTests(): void {
  * model registry to lock the closure-arg threading invariant.
  */
 export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
+export const _detectDirectiveRecallCandidatesForTests = detectDirectiveRecallCandidates;
+export const _auditDirectiveRecallForTests = auditDirectiveRecall;
+export const _applyRuleOutcomeEdgeForTests = applyRuleOutcomeEdge;
+export function _refreshRuleCacheForOutcomeEdgeTests(args: Parameters<typeof scanRules>[0]): void {
+  refreshRuleCacheForTests(scanRules(args));
+}
 export const _dispatchCorrectionSignalForTests = dispatchCorrectionSignal;
 // §4.1.4 task-local working set test hooks.
 export const _rememberTaskLocalForTests = rememberTaskLocal;

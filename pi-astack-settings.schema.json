@@ -287,12 +287,6 @@
           "description": "ADR 0028 PR1 flag. When true, existing abrain rules are appended to curator neighbor context as read-only references for dedup/lifecycle awareness. Existing rules cannot be updated, archived, merged, superseded, or deleted through the sediment auto-write path."
         },
 
-        "tier1ShadowEnabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "ADR 0028 PR1 migration guard. When true, high-confidence user-expressed durable create directives also run an observe-only Tier-1 shadow curator pass that writes a diagnostic audit row only; it must not write entries, consume signals, notify, update footer status, or advance checkpoints."
-        },
-
         "promptVersion": {
           "type": "object",
           "additionalProperties": false,

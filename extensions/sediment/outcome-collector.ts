@@ -17,7 +17,7 @@ import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shar
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "./sanitizer";
 
-interface OutcomeRow {
+export interface OutcomeRow {
   ts: string;
   session_id: string;
   entry_slug: string;
