@@ -150,7 +150,12 @@ export function classifyWindowsVaultBashProfile(input: WindowsVaultBashProfileIn
     return { ok: true, kind: "git-bash" };
   }
 
-  if (msystem || uname.startsWith("msys")) {
+  const msys2Path =
+    shellPath.includes("/msys64/usr/bin/bash.exe") ||
+    shellPath.includes("/msys32/usr/bin/bash.exe") ||
+    shellPath.includes("/mingw64/bin/bash.exe") ||
+    shellPath.includes("/mingw32/bin/bash.exe");
+  if (msystem || uname.startsWith("msys") || msys2Path) {
     return { ok: true, kind: "msys2" };
   }
 
@@ -264,6 +269,7 @@ export interface PrepareBootVaultBashOptions {
   activeProjectId: string | null;
   /** Resolved pi bash executable. On win32 it must be Git Bash or MSYS2, never WSL/Cygwin. */
   shellPath?: string;
+  platform?: NodeJS.Platform;
   env?: Record<string, string | undefined>;
   uname?: string;
 }
@@ -299,7 +305,7 @@ export function buildBootVaultBashDeps(opts: PrepareBootVaultBashOptions): Vault
 
 export async function prepareBootVaultBashCommand(command: string, opts: PrepareBootVaultBashOptions): Promise<VaultBashPrepareResult> {
   if (vaultVarRefs(command).length > 0) {
-    const profile = classifyWindowsVaultBashProfile({ shellPath: opts.shellPath, env: opts.env, uname: opts.uname });
+    const profile = classifyWindowsVaultBashProfile({ platform: opts.platform, shellPath: opts.shellPath, env: opts.env, uname: opts.uname });
     if (!profile.ok) return { kind: "block", reason: profile.reason };
   }
   return prepareVaultBashCommand(command, buildBootVaultBashDeps(opts));

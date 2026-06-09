@@ -48,7 +48,9 @@ function transpile(srcPath) {
 }
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vault-bash-"));
-const sharedDir = path.join(path.dirname(tmpDir), "_shared");
+const moduleDir = path.join(tmpDir, "abrain");
+const sharedDir = path.join(tmpDir, "_shared");
+fs.mkdirSync(moduleDir, { recursive: true });
 fs.mkdirSync(sharedDir, { recursive: true });
 fs.writeFileSync(
   path.join(sharedDir, "causal-anchor.js"),
@@ -56,11 +58,11 @@ fs.writeFileSync(
 );
 // ADR 0019: vault-reader.ts + keychain.ts now import from ./backend-detect.
 for (const file of ["backend-detect", "vault-bash", "vault-reader", "vault-writer", "keychain"]) {
-  fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
-  fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
+  fs.writeFileSync(path.join(moduleDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
+  fs.copyFileSync(path.join(moduleDir, `${file}.cjs`), path.join(moduleDir, `${file}.js`));
 }
 
-const bash = require(path.join(tmpDir, "vault-bash.cjs"));
+const bash = require(path.join(moduleDir, "vault-bash.cjs"));
 
 console.log("abrain P0c.read — vault-backed bash helper");
 
@@ -165,6 +167,11 @@ await check("classifyWindowsVaultBashProfile accepts MSYS2 profiles", () => {
   if (!profile.ok || profile.kind !== "msys2") throw new Error(JSON.stringify(profile));
 });
 
+await check("classifyWindowsVaultBashProfile accepts MSYS2 path without parent env", () => {
+  const profile = bash.classifyWindowsVaultBashProfile({ platform: "win32", shellPath: "C:\\msys64\\usr\\bin\\bash.exe", env: {} });
+  if (!profile.ok || profile.kind !== "msys2") throw new Error(JSON.stringify(profile));
+});
+
 await check("classifyWindowsVaultBashProfile blocks WSL bash", () => {
   const profile = bash.classifyWindowsVaultBashProfile({ platform: "win32", shellPath: "C:\\Windows\\System32\\bash.exe", env: {} });
   if (profile.ok || profile.kind !== "wsl" || !profile.reason.includes("WSL")) throw new Error(JSON.stringify(profile));
@@ -255,6 +262,7 @@ await check("prepareBootVaultBashCommand blocks unsupported Windows shells befor
     stateDir: path.join(tmpDir, "state-shell-block"),
     activeProjectId: null,
     shellPath: "C:\\Windows\\System32\\bash.exe",
+    platform: "win32",
     env: {},
   });
   if (result.kind !== "block") throw new Error(`expected block, got ${result.kind}`);
@@ -395,7 +403,7 @@ await check("batch C: __abrainPromptUserGetPending is installed non-configurable
 // applied in smoke-abrain-vault-grant-isolation. A future edit that
 // silently drops a check(...) block now fails this smoke with
 // 'assertion count drift' rather than passing with reduced coverage.
-const EXPECTED_ASSERTIONS = 27;
+const EXPECTED_ASSERTIONS = 28;
 if (total !== EXPECTED_ASSERTIONS) {
   failures.push({
     name: "assertion count drift",

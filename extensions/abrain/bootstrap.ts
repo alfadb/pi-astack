@@ -121,6 +121,10 @@ export function createInstallTmpDir(abrainHome: string): string {
 
 // ── master key generation (inv1, step 1) ────────────────────────
 
+export function posixModeChecksEnabled(platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== "win32";
+}
+
 /**
  * Run `age-keygen -o <secretKeyPath>` and parse the public key from stderr.
  *
@@ -131,10 +135,6 @@ export function createInstallTmpDir(abrainHome: string): string {
  * The secret key file is left at secretKeyPath. Caller is responsible for
  * shredding it via cleanupInstallDir before returning from /vault init.
  */
-export function posixModeChecksEnabled(platform: NodeJS.Platform = process.platform): boolean {
-  return platform !== "win32";
-}
-
 export async function generateMasterKey(installTmpDir: string): Promise<KeyGenResult> {
   const secretKeyPath = path.join(installTmpDir, "master.age");
 

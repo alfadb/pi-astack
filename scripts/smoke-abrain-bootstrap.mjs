@@ -37,11 +37,27 @@ const ts = require("typescript");
 
 const failures = [];
 let total = 0;
+let skipped = 0;
+const SKIP = Symbol("skip");
 function commandExists(cmd) {
   const r = spawnSync(cmd, ["--version"], { stdio: "ignore" });
   return !r.error || r.error.code !== "ENOENT";
 }
 const hasAgeCli = commandExists("age") && commandExists("age-keygen");
+function skip(reason) {
+  return { [SKIP]: true, reason };
+}
+function isSkip(value) {
+  return Boolean(value && value[SKIP]);
+}
+function printOkOrSkip(name, result) {
+  if (isSkip(result)) {
+    skipped++;
+    console.log(`  skip  ${name}\n        ${result.reason}`);
+  } else {
+    console.log(`  ok    ${name}`);
+  }
+}
 function check(name, fn) {
   total++;
   try {
@@ -49,14 +65,14 @@ function check(name, fn) {
     if (r && typeof r.then === "function") {
       // async — caller wraps and awaits
       return r.then(
-        () => console.log(`  ok    ${name}`),
+        (result) => printOkOrSkip(name, result),
         (err) => {
           failures.push({ name, err });
           console.log(`  FAIL  ${name}\n        ${err.message}`);
         },
       );
     }
-    console.log(`  ok    ${name}`);
+    printOkOrSkip(name, r);
     return undefined;
   } catch (err) {
     failures.push({ name, err });
@@ -156,7 +172,7 @@ let keypairSecretPath = null;
 let keypairPublicKey = null;
 
 await check("generateMasterKey runs age-keygen and parses Public key from stderr", async () => {
-  if (!hasAgeCli) return;
+  if (!hasAgeCli) return skip("age and/or age-keygen not installed; real keygen coverage skipped");
   const installDir = bootstrap.createInstallTmpDir(fakeAbrainHome);
   try {
     const result = await bootstrap.generateMasterKey(installDir);
@@ -182,7 +198,8 @@ await check("generateMasterKey runs age-keygen and parses Public key from stderr
 });
 
 await check("generateMasterKey rejects install dir with permissive mode", async () => {
-  if (!hasAgeCli || !bootstrap.posixModeChecksEnabled(process.platform)) return;
+  if (!hasAgeCli) return skip("age and/or age-keygen not installed; real keygen coverage skipped");
+  if (!bootstrap.posixModeChecksEnabled(process.platform)) return skip("Windows reports synthetic POSIX mode bits; permissive-mode rejection is POSIX-only");
   const installDir = bootstrap.createInstallTmpDir(fakeAbrainHome);
   try {
     fs.chmodSync(installDir, 0o755); // make group/other-readable — should reject
@@ -457,7 +474,7 @@ await check("writePubkeyFile + readPubkeyFile roundtrip with mode 0644", () => {
 // with a real ssh public key, real `age -d -i` decrypt, byte-compare.
 
 await check("file backends chmod .vault-master.age to 0600 after encrypt (v1.4.1 dogfood fix)", async () => {
-  if (!hasAgeCli) return;
+  if (!hasAgeCli) return skip("age and/or age-keygen not installed; real encryption coverage skipped");
   // The dogfood discovery: age -o respects umask, so on container with umask=0002
   // the encrypted file lands as 0664 (group/world readable). Force 0600 in keychain.ts.
   // This smoke covers the ssh-key path; gpg-file and passphrase-only have identical
@@ -495,7 +512,7 @@ await check("file backends chmod .vault-master.age to 0600 after encrypt (v1.4.1
 });
 
 await check("★ ssh-key e2e: real age-keygen → age -R encrypt → age -d -i decrypt → byte-match", async () => {
-  if (!hasAgeCli) return;
+  if (!hasAgeCli) return skip("age and/or age-keygen not installed; real roundtrip coverage skipped");
   // (a) generate a temporary ssh ed25519 keypair (no passphrase for the test)
   const sshDir = fs.mkdtempSync(path.join(tmpDir, "ssh-"));
   const sshKey = path.join(sshDir, "id_ed25519");
@@ -574,8 +591,9 @@ await check("cleanup-empty-dir: cleanupInstallDir on empty dir succeeds with no 
 
 console.log("");
 if (failures.length === 0) {
-  console.log(`all ok — abrain P0b master key bootstrap holds (${total} assertions, ssh-key e2e roundtrip verified).`);
+  const verified = skipped === 0 ? "ssh-key e2e roundtrip verified" : `${skipped} skipped`;
+  console.log(`all ok — abrain P0b master key bootstrap holds (${total} assertions, ${verified}).`);
 } else {
-  console.log(`FAIL — ${failures.length} of ${total} assertions failed.`);
+  console.log(`FAIL — ${failures.length} of ${total} assertions failed (${skipped} skipped).`);
   process.exit(1);
 }
