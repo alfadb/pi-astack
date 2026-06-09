@@ -2,7 +2,7 @@
 
 `package.json#scripts` 是 smoke test **live truth**。本文只是便于阅读的镜像；修改脚本时请同步本文。若本文与 `package.json` 冲突，以 `package.json` 为准。
 
-## Current scripts（2026-06-08, 72 total）
+## Current scripts（2026-06-09, 73 total）
 
 | npm script | File | Coverage |
 |---|---|---|
@@ -21,6 +21,7 @@
 | `smoke:dispatch` | `scripts/smoke-dispatch-input-compat.mjs` | dispatch input compatibility |
 | `smoke:dispatch-output-format` | `scripts/smoke-dispatch-output-format.mjs` | dispatch sub-agent output formatting (no legacy truncation regression) |
 | `smoke:dispatch-subagent-tool-allowlist` | `scripts/smoke-dispatch-subagent-tool-allowlist.mjs` | in-process sub-agent tool allowlist boundary; vault/prompt tools excluded by default |
+| `smoke:dispatch-project-trust` | `scripts/smoke-dispatch-project-trust.mjs` | pi 0.79.0 Project Trust boundary for the shared sub-agent loader |
 | `smoke:fallback-timing` | `scripts/smoke-model-fallback-mutation-timing.mjs` | model-fallback mutation timing |
 | `smoke:vision` | `scripts/smoke-vision.mjs` | vision tool registration/schema/basic path |
 | `smoke:imagine` | `scripts/smoke-imagine.mjs` | imagine tool registration/schema/output path |
@@ -99,6 +100,7 @@ npm run smoke:archive-reactivation
 # Dispatch / L2 changes
 npm run smoke:dispatch
 npm run smoke:dispatch-subagent-tool-allowlist
+npm run smoke:dispatch-project-trust
 npm run smoke:c5-terminal-state
 npm run smoke:c5-heartbeat-dispatch-integration
 

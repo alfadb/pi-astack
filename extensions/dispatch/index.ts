@@ -473,17 +473,28 @@ function getSharedInfra(): Promise<{
 }> {
   if (!_sharedInfraPromise) {
     _sharedInfraPromise = (async () => {
-      const settingsManager = SettingsManager.create(process.cwd(), getAgentDir());
+      const settingsManager = (SettingsManager.create as (
+        cwd: string,
+        agentDir?: string,
+        options?: { projectTrusted?: boolean },
+      ) => any)(process.cwd(), getAgentDir(), { projectTrusted: false });
       const resourceLoader = new DefaultResourceLoader({
         cwd: process.cwd(),
         agentDir: getAgentDir(),
         settingsManager,
-        // ADR 0027 PR-B: sub-agents load the full extension stack so they
-        // can read brain (memory_*), use web tools, etc. Main-session-only
+        // ADR 0027 PR-B: sub-agents load the full GLOBAL extension stack so
+        // they can read brain (memory_*), use web tools, etc. Main-session-only
         // lifecycle handlers (sediment / compaction-tuner / model-fallback /
         // persistent-input-history / model-curator / rule-injector) gate
         // themselves OFF via isSubAgentSession(ctx) — the SessionManager
         // passed to createAgentSession below is marked before use.
+        //
+        // pi 0.79.0 Project Trust: keep the shared sub-agent loader explicitly
+        // untrusted for project-local inputs. There is currently no trustworthy
+        // bridge from the main session's per-cwd trust decision into this shared
+        // in-process loader, so it must load user/global extensions only. The
+        // SettingsManager.create call above passes { projectTrusted:false };
+        // noExtensions remains false to retain global pi-astack tools/prompts.
         // (Previously noExtensions: true to enforce ADR 0014 §6, replaced
         // by handler-level guards via pi-internals.ts WeakSet marker.)
         noExtensions: false,
