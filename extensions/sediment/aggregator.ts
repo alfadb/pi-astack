@@ -12,10 +12,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  acquireFileLock,
   ensureUserGlobalSidecarMigrated,
   formatLocalIsoTimestamp,
   memorySearchMetricsPath,
   sedimentAuditPath,
+  sedimentLocksDir,
   userGlobalSedimentDir,
 } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
@@ -386,6 +388,10 @@ const DEFAULT_OUTCOME_ROW_LIMIT = 2_000;
 const DEFAULT_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const LEDGER_MAX_ROWS = 1_000;
 const LEDGER_TAIL_READ_BYTES = 2 * 1024 * 1024;
+const PROJECT_LOCK_STALE_MS = 30 * 60 * 1000;
+const PROJECT_LOCK_TIMEOUT_MS = 250;
+const GLOBAL_LOCK_STALE_MS = 30 * 60 * 1000;
+const GLOBAL_LOCK_TIMEOUT_MS = 5_000;
 const JSONL_TAIL_READ_BYTES = 2 * 1024 * 1024;
 const HIGH_UNUSED_THRESHOLD = 3;
 const HIGH_UNUSED_MIN_RATIO = 0.6;
@@ -1126,20 +1132,58 @@ function readLastRun(projectRoot: string): number | null {
   }
 }
 
+function atomicWriteText(file: string, content: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  try {
+    fs.writeFileSync(tmp, content, "utf-8");
+    fs.renameSync(tmp, file);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* already renamed or never written */ }
+  }
+}
+
 function writeLastRun(projectRoot: string, now: Date, status: "ok" | "error"): void {
   try {
     const file = aggregatorLastRunPath(projectRoot);
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(file, JSON.stringify({ last_run_ts: formatLocalIsoTimestamp(now), status }, null, 2) + "\n", "utf-8");
+    atomicWriteText(file, JSON.stringify({ last_run_ts: formatLocalIsoTimestamp(now), status }, null, 2) + "\n");
   } catch {
     // best-effort; failure only means a future turn may retry sooner
   }
 }
 
-export function writeAggregatorLedger(summary: AggregatorSummary): void {
+function aggregatorProjectLockPath(projectRoot: string): string {
+  return path.join(sedimentLocksDir(projectRoot), "aggregator.lock");
+}
+
+function aggregatorGlobalLockPath(): string {
+  ensureUserGlobalSidecarMigrated();
+  return path.join(userGlobalSedimentDir(), "locks", "aggregator-ledger.lock");
+}
+
+async function tryAcquireAggregatorProjectLock(projectRoot: string) {
   try {
+    return await acquireFileLock(aggregatorProjectLockPath(projectRoot), {
+      timeoutMs: PROJECT_LOCK_TIMEOUT_MS,
+      staleMs: PROJECT_LOCK_STALE_MS,
+      retryMs: 50,
+      label: "aggregator",
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function writeAggregatorLedger(summary: AggregatorSummary): Promise<void> {
+  let lock: { release(): Promise<void> } | undefined;
+  try {
+    lock = await acquireFileLock(aggregatorGlobalLockPath(), {
+      timeoutMs: GLOBAL_LOCK_TIMEOUT_MS,
+      staleMs: GLOBAL_LOCK_STALE_MS,
+      retryMs: 50,
+      label: "aggregator-ledger",
+    });
     const file = aggregatorLedgerPath();
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const existing = fs.existsSync(file)
       ? readJsonl<AggregatorSummary>(file, LEDGER_MAX_ROWS - 1, LEDGER_TAIL_READ_BYTES).rows
       : [];
@@ -1149,9 +1193,11 @@ export function writeAggregatorLedger(summary: AggregatorSummary): void {
     // fields take precedence over anchor (spread order: anchor first).
     const enrichedSummary = { ...spreadAnchor(getCurrentAnchor()), ...summary };
     const rows = [...existing, enrichedSummary].slice(-LEDGER_MAX_ROWS);
-    fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf-8");
+    atomicWriteText(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
   } catch {
     // advisory only — never throw into agent_end
+  } finally {
+    await lock?.release();
   }
 }
 
@@ -1314,7 +1360,7 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
     });
   }
 
-  writeAggregatorLedger({
+  await writeAggregatorLedger({
     ...enrichedSummary,
     prompt_version: buildPromptVersionAudit("aggregator", options.settings),
   });
@@ -1328,12 +1374,18 @@ export async function runAndWriteSedimentAggregatorIfDue(
   const minIntervalMs = Math.max(0, Math.floor(options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS));
   const lastRunMs = readLastRun(options.projectRoot);
   if (lastRunMs !== null && now.getTime() - lastRunMs < minIntervalMs) return null;
+  const lock = await tryAcquireAggregatorProjectLock(options.projectRoot);
+  if (!lock) return null;
   try {
+    const lockedLastRunMs = readLastRun(options.projectRoot);
+    if (lockedLastRunMs !== null && now.getTime() - lockedLastRunMs < minIntervalMs) return null;
     const summary = await runAndWriteSedimentAggregator({ ...options, now });
     writeLastRun(options.projectRoot, now, "ok");
     return summary;
   } catch (error) {
     writeLastRun(options.projectRoot, now, "error");
     throw error;
+  } finally {
+    await lock.release();
   }
 }

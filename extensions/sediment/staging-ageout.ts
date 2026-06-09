@@ -171,33 +171,67 @@ function appendLedgerRow(row: Record<string, unknown>): void {
 
 // ── Minimal advisory lock (own lock; independent of the resolver's) ─────
 
-function tryAcquireLock(projectRoot: string, now: Date): boolean {
+interface StagingAgeOutLockClaim {
+  pid: number;
+  host: string;
+  started_at: string;
+  nonce: string;
+}
+
+function parseLockClaim(raw: string): StagingAgeOutLockClaim | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<StagingAgeOutLockClaim>;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (typeof parsed.pid !== "number" || typeof parsed.host !== "string" || typeof parsed.started_at !== "string" || typeof parsed.nonce !== "string") return null;
+    return { pid: parsed.pid, host: parsed.host, started_at: parsed.started_at, nonce: parsed.nonce };
+  } catch {
+    return null;
+  }
+}
+
+function claimsMatch(a: StagingAgeOutLockClaim, b: StagingAgeOutLockClaim): boolean {
+  return a.pid === b.pid && a.host === b.host && a.started_at === b.started_at && a.nonce === b.nonce;
+}
+
+function tryAcquireLock(projectRoot: string, now: Date): StagingAgeOutLockClaim | null {
   const file = stagingAgeOutLockPath(projectRoot);
+  const claim: StagingAgeOutLockClaim = {
+    pid: process.pid,
+    host: os.hostname(),
+    started_at: formatLocalIsoTimestamp(now),
+    nonce: Math.random().toString(36).slice(2, 14),
+  };
+  const payload = JSON.stringify(claim, null, 2) + "\n";
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   } catch {
-    return false;
+    return null;
   }
-  const payload = JSON.stringify({ pid: process.pid, host: os.hostname(), started_at: formatLocalIsoTimestamp(now) });
   try {
     fs.writeFileSync(file, payload, { flag: "wx" });
-    return true;
+    return claim;
   } catch {
     try {
       const st = fs.statSync(file);
       if (now.getTime() - st.mtimeMs > LOCK_STALE_MS) {
         try { fs.unlinkSync(file); } catch { /* race: someone else reclaimed */ }
-        try { fs.writeFileSync(file, payload, { flag: "wx" }); return true; } catch { return false; }
+        try { fs.writeFileSync(file, payload, { flag: "wx" }); return claim; } catch { return null; }
       }
     } catch {
       /* stat failed — treat as locked */
     }
-    return false;
+    return null;
   }
 }
 
-function releaseLock(projectRoot: string): void {
-  try { fs.unlinkSync(stagingAgeOutLockPath(projectRoot)); } catch { /* best-effort */ }
+function releaseLock(projectRoot: string, claim: StagingAgeOutLockClaim | null): void {
+  if (!claim) return;
+  try {
+    const file = stagingAgeOutLockPath(projectRoot);
+    const current = parseLockClaim(fs.readFileSync(file, "utf-8"));
+    if (!current || !claimsMatch(current, claim)) return;
+    fs.unlinkSync(file);
+  } catch { /* best-effort */ }
 }
 
 // ── Candidate scan ──────────────────────────────────────────────────────
@@ -494,7 +528,8 @@ export async function runStagingAgeOutIfDue(options: RunStagingAgeOutOptions): P
   }
 
   // 4. Lock (cede this run on contention; do NOT advance debounce).
-  if (!tryAcquireLock(options.projectRoot, now)) {
+  const lockClaim = tryAcquireLock(options.projectRoot, now);
+  if (!lockClaim) {
     return { ok: true, skipped: "concurrent_run", ...base, reviewed_count: candidates.length, durationMs: Date.now() - t0 };
   }
 
@@ -558,6 +593,6 @@ export async function runStagingAgeOutIfDue(options: RunStagingAgeOutOptions): P
       durationMs: Date.now() - t0,
     };
   } finally {
-    releaseLock(options.projectRoot);
+    releaseLock(options.projectRoot, lockClaim);
   }
 }

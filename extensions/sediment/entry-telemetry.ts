@@ -87,6 +87,7 @@ const ENTRY_TELEMETRY_TAIL_READ_BYTES = 4 * 1024 * 1024;
 const DEFAULT_WINDOW_DAYS = 30;
 const ECHO_CHAMBER_STREAK = 5;
 const ENTRY_TELEMETRY_MIN_INTERVAL_MS = 60 * 60 * 1000;
+const LOCK_STALE_MS = 30 * 60 * 1000;
 
 export function entryTelemetryPath(): string {
   ensureUserGlobalSidecarMigrated();
@@ -99,6 +100,104 @@ function normalizeProjectRoot(value: unknown): string {
 
 function compoundKey(projectRoot: string, slug: string): string {
   return `${projectRoot}\u0000${slug}`;
+}
+
+interface SyncLockClaim {
+  pid: number;
+  token: string;
+  created_at: string;
+}
+
+function makeLockClaim(): SyncLockClaim {
+  return {
+    pid: process.pid,
+    token: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`,
+    created_at: formatLocalIsoTimestamp(),
+  };
+}
+
+function parseLockClaim(raw: string): SyncLockClaim | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<SyncLockClaim>;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (typeof parsed.pid !== "number" || typeof parsed.token !== "string" || typeof parsed.created_at !== "string") return null;
+    return { pid: parsed.pid, token: parsed.token, created_at: parsed.created_at };
+  } catch {
+    return null;
+  }
+}
+
+function pidAppearsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+function tryAcquireSyncLock(file: string): SyncLockClaim | null {
+  const claim = makeLockClaim();
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, JSON.stringify(claim, null, 2) + "\n", { flag: "wx" });
+    return claim;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") return null;
+  }
+  try {
+    const st = fs.statSync(file);
+    if (Date.now() - st.mtimeMs <= LOCK_STALE_MS) return null;
+    const raw = fs.readFileSync(file, "utf-8");
+    const existing = parseLockClaim(raw);
+    if (existing && pidAppearsAlive(existing.pid)) return null;
+    const currentRaw = fs.readFileSync(file, "utf-8");
+    const current = parseLockClaim(currentRaw);
+    if (existing?.token) {
+      if (current?.token !== existing.token) return null;
+    } else if (currentRaw !== raw) {
+      return null;
+    }
+    const currentStat = fs.statSync(file);
+    if (Date.now() - currentStat.mtimeMs <= LOCK_STALE_MS) return null;
+    fs.unlinkSync(file);
+    fs.writeFileSync(file, JSON.stringify(claim, null, 2) + "\n", { flag: "wx" });
+    return claim;
+  } catch {
+    return null;
+  }
+}
+
+function releaseSyncLock(file: string, claim: SyncLockClaim | null): void {
+  if (!claim) return;
+  try {
+    const current = parseLockClaim(fs.readFileSync(file, "utf-8"));
+    if (current?.token !== claim.token) return;
+    fs.unlinkSync(file);
+  } catch {
+    // best-effort
+  }
+}
+
+function atomicWriteText(file: string, content: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  try {
+    fs.writeFileSync(tmp, content, "utf-8");
+    fs.renameSync(tmp, file);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* already renamed or never written */ }
+  }
+}
+
+function entryTelemetryGlobalLockPath(): string {
+  ensureUserGlobalSidecarMigrated();
+  return path.join(userGlobalSedimentDir(), "locks", "entry-telemetry.lock");
+}
+
+function entryTelemetryProjectLockPath(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), ".pi-astack", "sediment", "locks", "entry-telemetry.lock");
 }
 
 function readJsonlTail<T = Record<string, unknown>>(filePath: string, maxBytes = ENTRY_TELEMETRY_TAIL_READ_BYTES): T[] {
@@ -204,6 +303,11 @@ export function mergeEntryTelemetry(options: MergeEntryTelemetryOptions): MergeE
   if (!projectRoot) {
     return { ok: true, written: false, project_root: "", slugs_considered: 0, rows_written: readAllRows().length };
   }
+  const lockPath = entryTelemetryGlobalLockPath();
+  const lock = tryAcquireSyncLock(lockPath);
+  if (!lock) {
+    return { ok: false, written: false, project_root: projectRoot, slugs_considered: 0, rows_written: 0, error: "entry_telemetry_lock_contention" };
+  }
   try {
     // rowLimit=0 → readProjectOutcomeRows returns ALL retained rows for the
     // project (cumulative basis). The ledger's own retention is the bound.
@@ -258,9 +362,8 @@ export function mergeEntryTelemetry(options: MergeEntryTelemetryOptions): MergeE
       .slice(0, ENTRY_TELEMETRY_MAX_ROWS);
 
     const file = entryTelemetryPath();
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const enriched = allRows.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
-    fs.writeFileSync(file, enriched.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf-8");
+    atomicWriteText(file, enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
     return { ok: true, written: true, project_root: projectRoot, slugs_considered: slugs.length, rows_written: allRows.length };
   } catch (e) {
     return {
@@ -271,6 +374,8 @@ export function mergeEntryTelemetry(options: MergeEntryTelemetryOptions): MergeE
       rows_written: 0,
       error: e instanceof Error ? e.message : String(e),
     };
+  } finally {
+    releaseSyncLock(lockPath, lock);
   }
 }
 
@@ -299,8 +404,7 @@ function readTelemetryLastRun(projectRoot: string): number | null {
 function writeTelemetryLastRun(projectRoot: string, now: Date, status: "ok" | "error"): void {
   try {
     const file = entryTelemetryLastRunPath(projectRoot);
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(file, JSON.stringify({ last_run_ts: formatLocalIsoTimestamp(now), status }, null, 2) + "\n", "utf-8");
+    atomicWriteText(file, JSON.stringify({ last_run_ts: formatLocalIsoTimestamp(now), status }, null, 2) + "\n");
   } catch {
     // best-effort; failure only means a future turn may retry sooner
   }
@@ -322,9 +426,19 @@ export function mergeEntryTelemetryIfDue(
   const minIntervalMs = Math.max(0, Math.floor(options.minIntervalMs ?? ENTRY_TELEMETRY_MIN_INTERVAL_MS));
   const lastRunMs = readTelemetryLastRun(projectRoot);
   if (lastRunMs !== null && now.getTime() - lastRunMs < minIntervalMs) return null;
-  const result = mergeEntryTelemetry({ ...options, now });
-  writeTelemetryLastRun(projectRoot, now, result.ok ? "ok" : "error");
-  return result;
+  const lockPath = entryTelemetryProjectLockPath(projectRoot);
+  const lock = tryAcquireSyncLock(lockPath);
+  if (!lock) return null;
+  try {
+    const lockedLastRunMs = readTelemetryLastRun(projectRoot);
+    if (lockedLastRunMs !== null && now.getTime() - lockedLastRunMs < minIntervalMs) return null;
+    const result = mergeEntryTelemetry({ ...options, now });
+    if (result.error === "entry_telemetry_lock_contention") return null;
+    writeTelemetryLastRun(projectRoot, now, result.ok ? "ok" : "error");
+    return result;
+  } finally {
+    releaseSyncLock(lockPath, lock);
+  }
 }
 
 /** Read telemetry rows, optionally scoped to one project. Read-only consumer API. */

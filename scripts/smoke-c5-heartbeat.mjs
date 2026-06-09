@@ -116,6 +116,7 @@ const mod = loadCJS(
 const {
   startHeartbeat,
   heartbeatTracePath,
+  heartbeatTracePathsForAnchor,
   readHeartbeatTrace,
   _resetHeartbeatRegistryForTests,
 } = mod;
@@ -124,13 +125,13 @@ const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), "c5-heartbeat-root-"));
 
 console.log("Section: heartbeatTracePath");
 
-check("path follows ${session_id}_${turn_id}_${subturn}.jsonl pattern", () => {
+check("path follows ${session_id}_${turn_id}_${subturn}_${pid}.jsonl pattern", () => {
   const p = heartbeatTracePath(testRoot, {
     session_id: "sess-abc",
     turn_id: 5,
     subturn: 2,
   });
-  if (!p.endsWith(path.join(".pi-astack", "dispatch", "heartbeat", "sess-abc_5_2.jsonl"))) {
+  if (!p.endsWith(path.join(".pi-astack", "dispatch", "heartbeat", `sess-abc_5_2_${process.pid}.jsonl`))) {
     throw new Error(`unexpected path: ${p}`);
   }
 });
@@ -140,9 +141,18 @@ check("path defaults subturn to 0 when absent", () => {
     session_id: "sess-abc",
     turn_id: 5,
   });
-  if (!p.endsWith("sess-abc_5_0.jsonl")) {
-    throw new Error(`expected subturn=0 default; got ${p}`);
+  if (!p.endsWith(`sess-abc_5_0_${process.pid}.jsonl`)) {
+    throw new Error(`expected subturn=0 + pid suffix; got ${p}`);
   }
+});
+
+check("candidate paths include pid-suffixed path plus legacy fallback", () => {
+  const anchor = { session_id: "sess-candidates", turn_id: 8 };
+  const paths = heartbeatTracePathsForAnchor(testRoot, anchor);
+  const current = heartbeatTracePath(testRoot, anchor);
+  const legacy = path.join(testRoot, ".pi-astack", "dispatch", "heartbeat", "sess-candidates_8_0.jsonl");
+  if (paths[0] !== current) throw new Error(`current pid path should be first: ${JSON.stringify(paths)}`);
+  if (!paths.includes(legacy)) throw new Error(`legacy fallback missing: ${JSON.stringify(paths)}`);
 });
 
 console.log("\nSection: startHeartbeat fail-open paths");

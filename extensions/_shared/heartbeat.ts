@@ -20,8 +20,8 @@
  *   - Writer side only.
  *   - File-based liveness channel (file watcher / poll consumer is
  *     Stage 1c).
- *   - Path: `<projectRoot>/.pi-astack/dispatch/heartbeat/${session_id}_${turn_id}_${subturn}.jsonl`
- *     (R1 §4.3 sketch).
+ *   - Path: `<projectRoot>/.pi-astack/dispatch/heartbeat/${session_id}_${turn_id}_${subturn}_${pid}.jsonl`
+ *     (R1 §4.3 sketch + P2 multi-process disambiguation).
  *   - Each beat is one JSONL line carrying the anchor + ts + phase + pid.
  *   - Best-effort: any write failure is swallowed; dispatch never blocks
  *     on heartbeat IO (parity with appendDispatchAudit's fail-degrade).
@@ -160,25 +160,65 @@ function _getState(): HeartbeatState {
  *  when anchor is missing the join key components (session_id, turn_id)
  *  — heartbeat is skipped in that case (fail-open).
  *
- *  Filename format: `${session_id}_${turn_id}_${subturn}.jsonl`
+ *  Filename format: `${session_id}_${turn_id}_${subturn}_${pid}.jsonl`
  *  When `subturn` is undefined (main session dispatch_agent without a
- *  derived sub-anchor), it defaults to 0 in the filename so two
- *  unrelated dispatches in the same turn don't collide.
+ *  derived sub-anchor), it defaults to 0 in the filename. The `pid`
+ *  suffix prevents two pi processes that accidentally share an anchor
+ *  from appending to the same heartbeat trace.
  *
  *  Exported for tests + Stage 1c consumer code that needs to find
  *  heartbeat files for a given anchor. */
+function heartbeatTraceDir(projectRoot: string): string {
+  return path.join(projectRoot, ".pi-astack", "dispatch", "heartbeat");
+}
+
+function heartbeatTraceBaseName(anchor: CausalAnchor): string {
+  const subturn = anchor.subturn ?? 0;
+  return `${anchor.session_id}_${anchor.turn_id}_${subturn}`;
+}
+
+function heartbeatLegacyTracePath(projectRoot: string, anchor: CausalAnchor): string {
+  return path.join(heartbeatTraceDir(projectRoot), `${heartbeatTraceBaseName(anchor)}.jsonl`);
+}
+
 export function heartbeatTracePath(
   projectRoot: string,
   anchor: CausalAnchor,
+  ownerPid: number = process.pid,
 ): string {
-  const subturn = anchor.subturn ?? 0;
-  return path.join(
-    projectRoot,
-    ".pi-astack",
-    "dispatch",
-    "heartbeat",
-    `${anchor.session_id}_${anchor.turn_id}_${subturn}.jsonl`,
-  );
+  return path.join(heartbeatTraceDir(projectRoot), `${heartbeatTraceBaseName(anchor)}_${ownerPid}.jsonl`);
+}
+
+/** Candidate trace files for an anchor. New pid-suffixed paths come first;
+ *  the legacy unsuffixed path remains as a read-side fallback for traces
+ *  produced before the P2 multi-process disambiguation change. */
+export function heartbeatTracePathsForAnchor(
+  projectRoot: string,
+  anchor: CausalAnchor,
+): string[] {
+  const dir = heartbeatTraceDir(projectRoot);
+  const base = heartbeatTraceBaseName(anchor);
+  const currentPidPath = heartbeatTracePath(projectRoot, anchor);
+  const paths = [currentPidPath];
+  try {
+    const suffix = ".jsonl";
+    const prefix = `${base}_`;
+    const matching = fs.readdirSync(dir)
+      .filter((name) => name.startsWith(prefix) && name.endsWith(suffix))
+      .map((name) => path.join(dir, name))
+      .sort((a, b) => {
+        try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; }
+        catch { return a.localeCompare(b); }
+      });
+    for (const file of matching) {
+      if (!paths.includes(file)) paths.push(file);
+    }
+  } catch {
+    // Missing directory / unreadable heartbeat dir: fall through to legacy.
+  }
+  const legacy = heartbeatLegacyTracePath(projectRoot, anchor);
+  if (!paths.includes(legacy)) paths.push(legacy);
+  return paths;
 }
 
 // ── Writer ────────────────────────────────────────────────────────────

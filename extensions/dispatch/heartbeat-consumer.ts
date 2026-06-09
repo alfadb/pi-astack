@@ -103,6 +103,7 @@
 import {
   readHeartbeatTrace,
   heartbeatTracePath,
+  heartbeatTracePathsForAnchor,
   type HeartbeatBeat,
   type HeartbeatPhase,
 } from "../_shared/heartbeat";
@@ -283,6 +284,10 @@ export function assessLivenessForAnchor(
   anchor: CausalAnchor,
   opts?: AssessOptions,
 ): LivenessAssessment {
+  for (const tracePath of heartbeatTracePathsForAnchor(projectRoot, anchor)) {
+    const assessment = assessLivenessFromTrace(tracePath, opts);
+    if (assessment.verdict !== "unknown") return assessment;
+  }
   return assessLivenessFromTrace(heartbeatTracePath(projectRoot, anchor), opts);
 }
 
