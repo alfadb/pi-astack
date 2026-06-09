@@ -7,8 +7,8 @@
  * a real temp abrain tree. gitCommit:false so no git repo is required.
  *
  * Covers: create (global always + project listed) → file + frontmatter;
- * duplicate reject; INV-R4 kind reject; always over-size AUTO-DEMOTE->listed; INV-R3 budget
- * reject; dry_run; archive (status→archived); delete (unlink).
+ * duplicate reject; INV-R4 kind reject; always over-size AUTO-DEMOTE->listed; budget
+ * over-cap advisory telemetry; dry_run; archive (status→archived); delete (unlink).
  */
 
 import fs from "node:fs";
@@ -101,7 +101,7 @@ await check("always body > 300 AUTO-DEMOTES to listed (T0 panel 2026-06-07; not 
   assert(r.status === "created" && r.tier === "listed" && r.demotedFrom === "always", `should demote not reject: ${JSON.stringify(r)}`);
   assert(fs.existsSync(path.join(home, "rules", "listed", "too-big.md")), "landed in listed/");
   assert(!fs.existsSync(path.join(home, "rules", "always", "too-big.md")), "not in always/");
-  assert(fs.readFileSync(path.join(home, "rules", "listed", "too-big.md"), "utf-8").includes("x".repeat(301)), "full body preserved on disk (listed stores body, injects only a hint)");
+  assert(fs.readFileSync(path.join(home, "rules", "listed", "too-big.md"), "utf-8").includes("x".repeat(301)), "full body preserved on disk (listed injects catalog summary, reads body on demand)");
 });
 
 await check("audit P1-a: malformed tier rejected (no path-join traversal)", async () => {
@@ -137,15 +137,16 @@ await check("#2 dedup: a re-stated rule (near-identical body, different slug) is
   assert(c.status === "created", `distinct rule must create: ${JSON.stringify(c)}`);
 });
 
-await check("INV-R3: budget over-cap rejected + suggests archive", async () => {
+await check("budget over-cap is advisory telemetry, not a write rejection", async () => {
   const home = freshHome();
   const opts = { abrainHome: home, settings: SETTINGS };
   assert((await writeAbrainRule({ ...baseDraft, title: "First rule", body: "first durable rule body content", tier: "listed", scope: "global", kind: "pattern" }, opts)).status === "created", "seed rule");
   const r = await writeAbrainRule(
     { ...baseDraft, title: "Second rule", body: "second durable rule body content", tier: "listed", scope: "global", kind: "pattern" },
     { abrainHome: home, settings: SETTINGS, budgetTokenCap: 1 });
-  assert(r.status === "rejected" && r.reason === "budget_exceeded", `budget reject: ${JSON.stringify(r)}`);
-  assert(typeof r.budgetTokens === "number" && r.budgetCap === 1 && r.suggestArchiveSlug, `budget detail: ${JSON.stringify(r)}`);
+  assert(r.status === "created" && r.overSoftBudget === true, `budget advisory create: ${JSON.stringify(r)}`);
+  assert(typeof r.budgetTokens === "number" && r.budgetCap === 1, `budget detail: ${JSON.stringify(r)}`);
+  assert(fs.existsSync(path.join(home, "rules", "listed", "second-rule.md")), "over-budget rule still persisted");
 });
 
 await check("dry_run: no file written, status dry_run", async () => {

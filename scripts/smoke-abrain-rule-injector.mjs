@@ -120,22 +120,57 @@ const projectDir = path.join(abrainHome, "projects", projectId);
 
 writeRule(
   path.join(abrainHome, "rules", "always", "edit-write-only.md"),
-  { title: "Edit Write Only", kind: "anti-pattern", status: "active", confidence: 10 },
+  {
+    title: "Edit Write Only",
+    kind: "anti-pattern",
+    status: "active",
+    confidence: 10,
+    provenance: "user-expressed",
+    applies_when: "modifying files",
+    trigger_phrases: '["edit", "write", "sed -i"]',
+    must_do_summary: "Use edit/write for file modifications; never sed -i/tee/redirect-overwrite.",
+  },
   "# Edit Write Only\n\n修改文件必须用 edit/write，禁止 sed -i / tee / 重定向覆写。",
 );
 writeRule(
   path.join(abrainHome, "rules", "listed", "multi-audit.md"),
-  { title: "Multi Audit", kind: "pattern", status: "active", confidence: 8, hint: "三家 xhigh audit before ship" },
+  {
+    title: "Multi Audit",
+    kind: "pattern",
+    status: "active",
+    confidence: 8,
+    hint: "三家 xhigh audit before ship",
+    applies_when: "shipping large pi-astack designs",
+    trigger_phrases: '["ship", "large design", "audit"]',
+    must_do_summary: "Run multi-model xhigh audit before shipping large designs.",
+  },
   "# Multi Audit\n\npi-astack 大设计 ship 前跑多模型审计。",
 );
 writeRule(
   path.join(projectDir, "rules", "always", "project-only.md"),
-  { title: "Project Only", kind: "preference", status: "active", confidence: 9 },
+  {
+    title: "Project Only",
+    kind: "preference",
+    status: "active",
+    confidence: 9,
+    applies_when: "working inside the bound ruleproj project",
+    trigger_phrases: '["design", "code"]',
+    must_do_summary: "In this project, update design docs before writing code.",
+  },
   "# Project Only\n\n这个项目默认先补设计文档再写代码。",
 );
 writeRule(
   path.join(projectDir, "rules", "listed", "low-conf.md"),
-  { title: "Low Conf", kind: "pattern", status: "active", confidence: 4, hint: "low-confidence rule, shows with provisional label" },
+  {
+    title: "Low Conf",
+    kind: "pattern",
+    status: "active",
+    confidence: 4,
+    hint: "low-confidence rule, shows with provisional label",
+    applies_when: "testing low-confidence catalog rows",
+    trigger_phrases: '["low confidence"]',
+    must_do_summary: "Show low-confidence active rules with confidence metadata.",
+  },
   "# Low Conf\n\nlow-confidence rule body",
 );
 
@@ -174,7 +209,8 @@ check("scanRules reads global + strictly-bound project rules; low-confidence rul
   if (cache.projectListed.length !== 1) throw new Error(`projectListed should now include low-conf (floor removed), got ${cache.projectListed.length}`);
   if (cache.projectListed[0].confidence !== 4) throw new Error(`projectListed[0] should be the conf-4 rule, got conf ${cache.projectListed[0].confidence}`);
   const section = ruleInjector.composeRuleSection(cache);
-  if (!section.includes("[conf 4/10]")) throw new Error(`composed listed rule should carry a confidence label, got:\n${section}`);
+  if (!section.includes("confidence=4/10")) throw new Error(`composed listed rule should carry a confidence label, got:\n${section}`);
+  if (!section.includes("catalog_tokens:") || !section.includes("hidden_catalog_count: 0")) throw new Error(`missing catalog health fields:\n${section}`);
   if (cache.activeProjectId !== projectId) throw new Error(`activeProjectId=${cache.activeProjectId}`);
 });
 
@@ -187,13 +223,18 @@ check("scanRules does not cwd-guess project rules when strict binding is absent"
   if (cache.bindingReason !== "manifest_missing") throw new Error(`bindingReason=${cache.bindingReason}`);
 });
 
-check("composeRuleInjection includes nonce, always body, and scoped listed slug", () => {
+check("composeRuleInjection includes nonce and catalog rows, not full rule bodies", () => {
   const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "abc123", resolveProject: fakeBound });
   const text = ruleInjector.composeRuleInjection(cache);
   if (!text.includes("BEGIN_ABRAIN_RULES session=abc123")) throw new Error("missing nonce marker");
-  if (!text.includes("修改文件必须用 edit/write")) throw new Error("missing global always body");
-  if (!text.includes(`project:${projectId}:project-only`) && !text.includes("这个项目默认先补设计文档")) throw new Error("missing project rule context");
-  if (!text.includes("global:multi-audit [conf 8/10] — 三家 xhigh audit before ship")) throw new Error("missing listed scoped slug");
+  if (!text.includes("## Rules Catalog")) throw new Error("missing catalog header");
+  if (!text.includes("catalog_tokens:") || !text.includes("hidden_catalog_count: 0")) throw new Error("missing catalog health fields");
+  if (!text.includes("global:edit-write-only | title=Edit Write Only | scope=global | tier=always")) throw new Error("missing global catalog row");
+  if (!text.includes("provenance=user-expressed") || !text.includes("trigger_phrases=edit; write; sed -i")) throw new Error("missing row metadata");
+  if (!text.includes("must_do_summary=Use edit/write for file modifications")) throw new Error("missing actionable summary");
+  if (!text.includes(`project:${projectId}:project-only | title=Project Only | scope=project:${projectId} | tier=always`)) throw new Error("missing project catalog row");
+  if (!text.includes("global:multi-audit | title=Multi Audit | scope=global | tier=listed")) throw new Error("missing listed scoped slug");
+  if (text.includes("修改文件必须用 edit/write") || text.includes("这个项目默认先补设计文档")) throw new Error("full rule body leaked into catalog injection");
 });
 
 check("stripCurrentRuleInjection strips only current session nonce", () => {
@@ -201,9 +242,9 @@ check("stripCurrentRuleInjection strips only current session nonce", () => {
   const text = ruleInjector.composeRuleInjection(cache);
   const stripped = ruleInjector.stripCurrentRuleInjection(`before\n${text}\nafter`, "abc123");
   if (!stripped.includes("[ABRAIN_RULES_SECTION_REMOVED]")) throw new Error("missing removal marker");
-  if (stripped.includes("修改文件必须用 edit/write")) throw new Error("current nonce content not stripped");
+  if (stripped.includes("global:edit-write-only")) throw new Error("current nonce content not stripped");
   const preserved = ruleInjector.stripCurrentRuleInjection(text, "deadbeef");
-  if (!preserved.includes("修改文件必须用 edit/write")) throw new Error("wrong nonce should preserve content");
+  if (!preserved.includes("global:edit-write-only")) throw new Error("wrong nonce should preserve content");
 });
 
 await asyncCheck("extension registers append-only idempotent injector and diagnostic-only /rule command", async () => {

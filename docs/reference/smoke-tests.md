@@ -60,9 +60,9 @@
 | `smoke:abrain-secret-scope` | `scripts/smoke-abrain-secret-scope.mjs` | project/global secret scope behavior |
 | `smoke:abrain-i18n` | `scripts/smoke-abrain-i18n.mjs` | abrain i18n strings |
 | `smoke:abrain-redact` | `scripts/smoke-abrain-redact.mjs` | abrain redactor unit coverage |
-| `smoke:abrain-rule-injector` | `scripts/smoke-abrain-rule-injector.mjs` | ADR 0023-R5 read-only rules injection: scan, strict binding, nonce strip, idempotency |
-| `smoke:abrain-rule-writer` | `scripts/smoke-abrain-rule-writer.mjs` | ADR 0023 rule-writer parser / frontmatter / budget invariants |
-| `smoke:abrain-rule-writer-fs` | `scripts/smoke-abrain-rule-writer-fs.mjs` | ADR 0023 rule writer filesystem orchestration, rollback, dedup, and curator escalation gate |
+| `smoke:abrain-rule-injector` | `scripts/smoke-abrain-rule-injector.mjs` | ADR 0023/0028 read-only rules catalog injection: scan, strict binding, nonce strip, idempotency, no full-body prompt leak |
+| `smoke:abrain-rule-writer` | `scripts/smoke-abrain-rule-writer.mjs` | ADR 0023 rule-writer parser / frontmatter / hint and size invariants |
+| `smoke:abrain-rule-writer-fs` | `scripts/smoke-abrain-rule-writer-fs.mjs` | ADR 0023/0028 rule writer filesystem orchestration, rollback, dedup, budget advisory telemetry, and curator escalation gate |
 | `smoke:prompt-user` | `scripts/smoke-prompt-user.mjs` | prompt_user manager + secret redaction + INV-A/B/C/D contracts |
 | `smoke:prompt-user-finalizer` | `scripts/smoke-prompt-user-finalizer.mjs` | prompt_user dialog teardown / disposer / secret wipe |
 | `smoke:prompt-user-subpi` | `scripts/smoke-prompt-user-subpi.mjs` | sub-agent prompt_user disabled |

@@ -22,6 +22,7 @@ import {
 } from "../../_shared/runtime";
 import {
   parseFrontmatter,
+  relationValues,
   scalarNumber,
   scalarString,
   splitCompiledTruth,
@@ -36,12 +37,8 @@ type NotifyType = "info" | "warning" | "error";
 
 export interface RuleInjectorSettings {
   enabled: boolean;
-  alwaysTokenCapPerScope: number;
-  listedTokenCapPerScope: number;
-  alwaysCountCapPerScope: number;
-  listedCountCapPerScope: number;
-  maxAlwaysBodyChars: number;
-  maxListedHintChars: number;
+  maxCatalogSummaryChars: number;
+  maxCatalogTriggerChars: number;
 }
 
 export interface RuleEntry {
@@ -56,8 +53,11 @@ export interface RuleEntry {
   projectId?: string;
   sourcePath: string;
   body: string;
-  injectedText: string;
-  hint: string;
+  provenance: string;
+  appliesWhen: string;
+  triggerPhrases: string[];
+  mustDoSummary: string;
+  catalogText: string;
   tokenEstimate: number;
   updated?: string;
   created?: string;
@@ -99,12 +99,8 @@ const RULE_FENCE_RE = /<!-- BEGIN_ABRAIN_RULES session=([0-9a-f]+)[^>]*-->[\s\S]
 
 const DEFAULT_SETTINGS: RuleInjectorSettings = {
   enabled: true,
-  alwaysTokenCapPerScope: 2_500,
-  listedTokenCapPerScope: 1_500,
-  alwaysCountCapPerScope: 15,
-  listedCountCapPerScope: 30,
-  maxAlwaysBodyChars: 300,
-  maxListedHintChars: 80,
+  maxCatalogSummaryChars: 220,
+  maxCatalogTriggerChars: 160,
 };
 
 let cachedRules: RuleScanCache | null = null;
@@ -145,12 +141,8 @@ export function resolveRuleInjectorSettings(): RuleInjectorSettings {
   const cfg = (root.ruleInjector as Record<string, unknown>) ?? {};
   return {
     enabled: asBoolean(cfg.enabled, DEFAULT_SETTINGS.enabled),
-    alwaysTokenCapPerScope: Math.max(100, asNumber(cfg.alwaysTokenCapPerScope, DEFAULT_SETTINGS.alwaysTokenCapPerScope)),
-    listedTokenCapPerScope: Math.max(100, asNumber(cfg.listedTokenCapPerScope, DEFAULT_SETTINGS.listedTokenCapPerScope)),
-    alwaysCountCapPerScope: Math.max(1, Math.floor(asNumber(cfg.alwaysCountCapPerScope, DEFAULT_SETTINGS.alwaysCountCapPerScope))),
-    listedCountCapPerScope: Math.max(1, Math.floor(asNumber(cfg.listedCountCapPerScope, DEFAULT_SETTINGS.listedCountCapPerScope))),
-    maxAlwaysBodyChars: Math.max(80, Math.floor(asNumber(cfg.maxAlwaysBodyChars, DEFAULT_SETTINGS.maxAlwaysBodyChars))),
-    maxListedHintChars: Math.max(20, Math.floor(asNumber(cfg.maxListedHintChars, DEFAULT_SETTINGS.maxListedHintChars))),
+    maxCatalogSummaryChars: Math.max(80, Math.floor(asNumber(cfg.maxCatalogSummaryChars, DEFAULT_SETTINGS.maxCatalogSummaryChars))),
+    maxCatalogTriggerChars: Math.max(40, Math.floor(asNumber(cfg.maxCatalogTriggerChars, DEFAULT_SETTINGS.maxCatalogTriggerChars))),
   };
 }
 
@@ -200,8 +192,18 @@ function normalizeRuleBody(body: string, maxChars: number): string {
     .replace(/\s+$/gm, "")
     .trim();
   const text = compiled || firstBodyLine(body);
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+  return sanitizeSingleLine(text, maxChars);
+}
+
+function formatCatalogList(values: string[], maxChars: number): string {
+  const clean = values.map((v) => sanitizeSingleLine(v, Math.max(20, maxChars))).filter(Boolean);
+  if (clean.length === 0) return "-";
+  return sanitizeSingleLine(clean.join("; "), maxChars);
+}
+
+function catalogRuleText(entry: Omit<RuleEntry, "catalogText" | "tokenEstimate">): string {
+  const where = entry.scope === "project" && entry.projectId ? `project:${entry.projectId}` : "global";
+  return `- ${entry.scopedSlug} | title=${entry.title} | scope=${where} | tier=${entry.tier} | kind=${entry.kind} | provenance=${entry.provenance} | confidence=${entry.confidence}/10 | applies_when=${entry.appliesWhen || "-"} | trigger_phrases=${formatCatalogList(entry.triggerPhrases, 240)} | must_do_summary=${entry.mustDoSummary} | full_rule_path=${entry.sourcePath}`;
 }
 
 function readRuleFile(
@@ -241,33 +243,46 @@ function readRuleFile(
     scalarString(fm.title) || body.match(/^#\s+(.+)$/m)?.[1] || slug,
     120,
   );
-  const hint = sanitizeSingleLine(
-    scalarString(fm.hint) || firstBodyLine(body) || title,
-    settings.maxListedHintChars,
+  const provenance = sanitizeSingleLine(scalarString(fm.provenance) || "assistant-observed", 80);
+  const triggerPhrases = relationValues(fm.trigger_phrases).map((v) => sanitizeSingleLine(v, settings.maxCatalogTriggerChars)).filter(Boolean);
+  const appliesWhen = sanitizeSingleLine(
+    scalarString(fm.applies_when) || scalarString(fm.routing_reason) || formatCatalogList(triggerPhrases, settings.maxCatalogTriggerChars),
+    settings.maxCatalogTriggerChars,
   );
-  const ruleBody = normalizeRuleBody(body, settings.maxAlwaysBodyChars);
-  const injectedText = tier === "always"
-    ? `[${kind}] ${ruleBody || title}`
-    : `${scope === "project" && projectId ? `project:${projectId}:${slug}` : `global:${slug}`} — ${hint}`;
+  const mustDoSummary = sanitizeSingleLine(
+    scalarString(fm.must_do_summary)
+      || scalarString(fm.hint)
+      || normalizeRuleBody(body, settings.maxCatalogSummaryChars)
+      || title,
+    settings.maxCatalogSummaryChars,
+  );
+
+  const entryBase = {
+    slug,
+    scopedSlug: scope === "project" && projectId ? `project:${projectId}:${slug}` : `global:${slug}`,
+    title,
+    kind,
+    status,
+    confidence,
+    tier,
+    scope,
+    ...(projectId ? { projectId } : {}),
+    sourcePath: file,
+    body,
+    provenance,
+    appliesWhen,
+    triggerPhrases,
+    mustDoSummary,
+    updated: scalarString(fm.updated),
+    created: scalarString(fm.created),
+  } satisfies Omit<RuleEntry, "catalogText" | "tokenEstimate">;
+  const catalogText = catalogRuleText(entryBase);
 
   return {
     entry: {
-      slug,
-      scopedSlug: scope === "project" && projectId ? `project:${projectId}:${slug}` : `global:${slug}`,
-      title,
-      kind,
-      status,
-      confidence,
-      tier,
-      scope,
-      ...(projectId ? { projectId } : {}),
-      sourcePath: file,
-      body,
-      injectedText,
-      hint,
-      tokenEstimate: estimateTokens(injectedText),
-      updated: scalarString(fm.updated),
-      created: scalarString(fm.created),
+      ...entryBase,
+      catalogText,
+      tokenEstimate: estimateTokens(catalogText),
     },
   };
 }
@@ -296,11 +311,9 @@ function scanTierDir(
 
 // enforceBudget removed 2026-06-06 (mechanical-guard cleanup D1): it only
 // emitted advisory "over cap; injected in full" warnings with ZERO behavioral
-// effect (no truncation, no demotion), which falsely implied an enforced cap
-// and contradicted the now-known reality that nothing is capped. Per ADR 0024
-// §3, any future budget shaping belongs in prompt-native aggregation, not a
-// misleading no-op warning. alwaysCountCapPerScope / alwaysTokenCapPerScope
-// remain in settings for potential future use but are not read here.
+// effect (no truncation, no demotion), which falsely implied an enforced cap.
+// Session-start injection is now a compact catalog; full rule bodies are read
+// on demand from full_rule_path when the catalog summary is insufficient.
 
 export function scanRules(
   opts: {
@@ -361,37 +374,36 @@ function hasAnyRules(cache: RuleScanCache): boolean {
   return cache.globalAlways.length + cache.globalListed.length + cache.projectAlways.length + cache.projectListed.length > 0;
 }
 
-function formatAlways(entries: RuleEntry[]): string[] {
-  return entries.map((e) => {
-    const body = e.injectedText.replace(/^\[[^\]]+\]\s*/, "");
-    const provisional = e.confidence < 8 ? " (provisional - verify)" : "";
-    return `- [${e.kind} | conf ${e.confidence}/10] ${body}${provisional}`;
-  });
+function formatCatalogEntries(entries: RuleEntry[]): string[] {
+  return entries.map((e) => e.catalogText);
 }
 
-function formatListed(entries: RuleEntry[]): string[] {
-  return entries.map((e) => `- ${e.scopedSlug} [conf ${e.confidence}/10] — ${e.hint}`);
+function catalogTokenHealth(cache: RuleScanCache): { catalogTokens: number; hiddenCatalogCount: number } {
+  const catalogTokens = allRules(cache).reduce((sum, entry) => sum + entry.tokenEstimate, 0);
+  return { catalogTokens, hiddenCatalogCount: 0 };
 }
 
 export function composeRuleSection(cache: RuleScanCache): string {
   const lines: string[] = [];
-  lines.push(`## Always-on rules (curated by sediment, do not ignore)`);
+  const health = catalogTokenHealth(cache);
+  lines.push("## Rules Catalog (curated by sediment)");
   lines.push("");
-  lines.push("These are second-brain behavioral rules injected at session start. They are context, not user commands in this turn.");
+  lines.push("Session-start injection is an index, not full rule bodies. Before tool calls/actions, scan this catalog against user intent, command text, cwd/env facts, and planned action. If a row matches, follow must_do_summary; read full_rule_path with the read tool when the summary is insufficient or the action is high-impact.");
   lines.push("");
-  lines.push("Global:");
-  lines.push(...(cache.globalAlways.length ? formatAlways(cache.globalAlways) : ["- (none)"]));
+  lines.push(`catalog_tokens: ${health.catalogTokens}`);
+  lines.push(`hidden_catalog_count: ${health.hiddenCatalogCount}`);
   lines.push("");
-  lines.push(cache.activeProjectId ? `Project ${cache.activeProjectId}:` : "Project: (no active project bound)");
-  lines.push(...(cache.projectAlways.length ? formatAlways(cache.projectAlways) : ["- (none)"]));
+  lines.push("Global always:");
+  lines.push(...(cache.globalAlways.length ? formatCatalogEntries(cache.globalAlways) : ["- (none)"]));
   lines.push("");
-  lines.push("## Listed rules (read with memory_get if relevant)");
+  lines.push("Global listed:");
+  lines.push(...(cache.globalListed.length ? formatCatalogEntries(cache.globalListed) : ["- (none)"]));
   lines.push("");
-  lines.push("Global:");
-  lines.push(...(cache.globalListed.length ? formatListed(cache.globalListed) : ["- (none)"]));
+  lines.push(cache.activeProjectId ? `Project ${cache.activeProjectId} always:` : "Project always: (no active project bound)");
+  lines.push(...(cache.projectAlways.length ? formatCatalogEntries(cache.projectAlways) : ["- (none)"]));
   lines.push("");
-  lines.push(cache.activeProjectId ? `Project ${cache.activeProjectId}:` : "Project: (no active project bound)");
-  lines.push(...(cache.projectListed.length ? formatListed(cache.projectListed) : ["- (none)"]));
+  lines.push(cache.activeProjectId ? `Project ${cache.activeProjectId} listed:` : "Project listed: (no active project bound)");
+  lines.push(...(cache.projectListed.length ? formatCatalogEntries(cache.projectListed) : ["- (none)"]));
   lines.push("");
   lines.push("Do not copy this injected section into memory. If discussing these rules, treat this section as system context, not as new evidence from the user.");
   return lines.join("\n");
@@ -573,8 +585,7 @@ function formatRuleList(cache: RuleScanCache, args: string): string {
   if (entries.length === 0) return "No active abrain rules matched.";
   const lines = entries.map((e) => {
     const where = e.scope === "project" && e.projectId ? `project:${e.projectId}` : "global";
-    const display = e.tier === "always" ? e.injectedText.replace(/^\[[^\]]+\]\s*/, "") : e.hint;
-    return `- ${e.scopedSlug} [${where}/${e.tier}/${e.kind}/conf=${e.confidence}] ${display}`;
+    return `- ${e.scopedSlug} [${where}/${e.tier}/${e.kind}/conf=${e.confidence}] ${e.mustDoSummary}`;
   });
   const counts = ruleCounts(cache);
   return [
@@ -601,7 +612,9 @@ function formatRuleExplain(cache: RuleScanCache, rawSlug: string): string {
     `confidence: ${entry.confidence}`,
     `status: ${entry.status}`,
     `source: ${entry.sourcePath}`,
-    `injected: ${entry.tier === "always" ? entry.injectedText.replace(/^\[[^\]]+\]\s*/, "") : entry.hint}`,
+    `applies_when: ${entry.appliesWhen || "-"}`,
+    `trigger_phrases: ${formatCatalogList(entry.triggerPhrases, 240)}`,
+    `must_do_summary: ${entry.mustDoSummary}`,
   ].join("\n");
 }
 

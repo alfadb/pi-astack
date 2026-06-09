@@ -558,7 +558,7 @@
 
     "ruleInjector": {
       "type": "object",
-      "description": "ADR 0023-R5 read-only abrain rules injection. Scans ~/.abrain/rules/{always,listed} plus active-project rules and appends them to the main-session system prompt. This is a read path only: no rule write/promote/veto lifecycle UI.",
+      "description": "ADR 0023-R5/0028 read-only abrain rules catalog injection. Scans ~/.abrain/rules/{always,listed} plus active-project rules and appends compact catalog rows to the main-session system prompt; full rule bodies are read on demand from full_rule_path. This is a read path only: no rule write/promote/veto lifecycle UI.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -566,43 +566,19 @@
         "enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Enable session-start rules scan + before_agent_start system-prompt injection. Sub-pi still disables via PI_ABRAIN_DISABLED=1."
+          "description": "Enable session-start rules catalog scan + before_agent_start system-prompt injection. Sub-pi still disables via PI_ABRAIN_DISABLED=1."
         },
-        "alwaysTokenCapPerScope": {
+        "maxCatalogSummaryChars": {
           "type": "number",
-          "default": 2500,
-          "minimum": 100,
-          "description": "Soft token budget per scope (global/project) for rules/always. Over-budget is injected in full with a warning; no user decision is requested."
-        },
-        "listedTokenCapPerScope": {
-          "type": "number",
-          "default": 1500,
-          "minimum": 100,
-          "description": "Soft token budget per scope (global/project) for rules/listed. Over-budget is injected in full with a warning; no deterministic trim in R5."
-        },
-        "alwaysCountCapPerScope": {
-          "type": "number",
-          "default": 15,
-          "minimum": 1,
-          "description": "Soft count budget per scope for always rules. Exceeding it warns but still injects in full."
-        },
-        "listedCountCapPerScope": {
-          "type": "number",
-          "default": 30,
-          "minimum": 1,
-          "description": "Soft count budget per scope for listed rules. Exceeding it warns but still injects in full."
-        },
-        "maxAlwaysBodyChars": {
-          "type": "number",
-          "default": 300,
+          "default": 220,
           "minimum": 80,
-          "description": "Maximum injected body characters per always rule. Existing longer entries are truncated in prompt; writer enforcement is deferred to ADR 0023 write-path."
+          "description": "Maximum must_do_summary characters per injected catalog row. Full rule bodies remain on disk and are read via full_rule_path when needed."
         },
-        "maxListedHintChars": {
+        "maxCatalogTriggerChars": {
           "type": "number",
-          "default": 80,
-          "minimum": 20,
-          "description": "Maximum injected hint characters per listed rule."
+          "default": 160,
+          "minimum": 40,
+          "description": "Maximum applies_when / trigger_phrases characters per injected catalog row. This is formatting only, not a write or recall gate."
         }
       }
     },

@@ -533,7 +533,7 @@ function hasCorrespondingInjectedRule(
   rules: ReturnType<typeof getCurrentInjectedRuleEntries>,
 ): boolean {
   return rules.some((rule) => {
-    const ruleText = `${rule.title}\n${rule.body}\n${rule.injectedText}\n${rule.hint}`;
+    const ruleText = `${rule.title}\n${rule.body}\n${rule.mustDoSummary}\n${rule.appliesWhen}\n${rule.triggerPhrases.join("\n")}`;
     return recallOverlapScore(quote, ruleText) >= 0.72;
   });
 }

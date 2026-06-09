@@ -158,32 +158,31 @@ Project <id>:
 ...
 ```
 
-#### D2.2 Tier `listed` — list-only 注入
+#### D2.2 Tier `listed` — catalog row 注入
 
-**约束**：
-- 每条只注入 `<scoped_slug> — <one-line hint ≤ 80 code units>`
+**约束（ADR 0028 修订）**：
+- 每条注入 compact catalog row：`scoped_slug/title/scope/tier/provenance/confidence/applies_when/trigger_phrases/must_do_summary/full_rule_path`
 - `scoped_slug` 形式：`global:<slug>` / `project:<id>:<slug>`（R4 简化）
-- `hint` 来自 entry frontmatter，必须经 `sanitizeRuleHint` lint
+- `must_do_summary` 优先来自 entry frontmatter，其次使用 sanitized `hint` / body fallback；full body 保留在磁盘，必要时用 `read` 读取 `full_rule_path`
 - `kind` 不限（maxim/preference/anti-pattern/decision/pattern 都允许；fact/smell 不允许进 listed）
 
-**Hard cap（token-aware）**：
-- 主约束：`listed` 段实际注入 ≤ **1.5K tokens**
-- 次约束：全局 ≤ 30 条、项目级 ≤ 30 条
+**Rules catalog health（non-blocking advisory）**：
+- 注入段输出 `catalog_tokens` 与 `hidden_catalog_count`，用于观测 catalog 规模
+- 目录健康信号不裁剪、不拒写、不要求用户即时管理；用户表达的 Tier-1 规则必须先落盘
 
 **Scoped slug 注入路径（R4 简化）**：
 
-R3 草案曾用 `lintRuleSlugUnique` 在 global+active-project 合集内 enforce slug 唯一。**R4 删除该 lint**，listed 段注入直接用 scoped slug `global:<slug>` / `project:<id>:<slug>`，与七区 store priority dedup（first-wins）一致。`memory_get(slug)` 在 dispatch 时按 scope 优先级查找（与现有行为同），不需要新机制。
+R3 草案曾用 `lintRuleSlugUnique` 在 global+active-project 合集内 enforce slug 唯一。**R4 删除该 lint**，listed 段注入直接用 scoped slug `global:<slug>` / `project:<id>:<slug>`，与七区 store priority dedup（first-wins）一致。full body 不走 `memory_get`；rules/ 不在 memory facade 索引内，按 catalog row 的 `full_rule_path` 用 `read` 按需读取。
 
-#### D2.3 总预算
+#### D2.3 总预算 / catalog health
 
-| 段 | token cap | char cap (sanity check) |
+| 段 | 语义 | 行为 |
 |---|---|---|
-| always × 2 scope | ≤ 5K tokens | ≤ 15 × 300 × 2 = 9K code units |
-| listed × 2 scope | ≤ 3K tokens | ≤ 30 × 80 × 2 = 4.8K code units |
-| section headers + fence markers | ~50-80 tokens | ~200 char |
-| **合计 lower bound estimate** | **~8K tokens** | — |
+| always/listed × global/project | compact catalog rows | 全量注入 catalog row；不注入 full body |
+| `catalog_tokens` | health telemetry | 只观测，不作为 hard gate |
+| `hidden_catalog_count` | overflow/sentinel 预留 | 当前为 0；不静默隐藏规则 |
 
-注：lower bound 包含 fence/headers；AGENTS.md 仍由 pi 独立注入，不计入此预算（INV-R7 known trade-off）。
+注：AGENTS.md 仍由 pi 独立注入，不计入此 catalog health（INV-R7 known trade-off）。
 
 ### D3. 注入扩展：`extensions/abrain/rule-injector/`
 
@@ -205,8 +204,9 @@ extensions/abrain/rule-injector/
 - 通过 `bootActiveProject`（ADR 0017）拿 active projectId；扫 `~/.abrain/projects/<id>/rules/always/*.md` + `.../listed/*.md`
 - **active project 缺失或 strict binding 不一致时**：global rules 仍注入，project rules 段输出 `(no active project bound)`，**不**fallback 到 cwd-guess
 - 缓存在扩展闭包 `cachedRules`
-- 注入预算 enforce：
-  - 若超 token cap → **全量注入 + ui.notify warning + 不 trim**（R4 简化：第二大脑 eventual consistency 自然处理，让 LLM 看到完整列表 + 系统提示"超 cap"事实，用户在自然对话中处理 back-pressure → 下次 promote 时 writer 自然 reject 倒逼 archive）
+- catalog health telemetry：
+  - 输出 `catalog_tokens` / `hidden_catalog_count`，作为非阻塞观测信号
+  - 不按预算 trim、不拒写、不要求用户即时 archive；规则 full body 留在磁盘，按需通过 `full_rule_path` 读取
   - **不修改磁盘**
 
 #### D3.2 `before_agent_start` 行为（含 idempotency check）

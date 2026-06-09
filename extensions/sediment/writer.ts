@@ -1975,7 +1975,7 @@ export async function writeAbrainWorkflow(
 // ───────────────────────────────────────────────────────────────────────────────
 // Mirrors writeAbrainWorkflow substrate (sanitize / lint / dedupe / lock /
 // atomic write / git commit + orphan cleanup / audit). Rule-specific lints
-// (kind/size/hint/budget) live in ./rule-writer + lintRuleBudget below.
+// (kind/size/hint) live in ./rule-writer; budget telemetry is advisory below.
 // ui.notify (INV-R8/R9) is the DISPATCH layer's job (the writer has no ctx.ui);
 // the result carries op/slug/tier/scope so the caller can notify.
 
@@ -1985,7 +1985,7 @@ export interface WriteRuleOptions {
   dryRun?: boolean;
   auditContext?: WriterAuditContext;
   exactDuplicateAsDedup?: boolean;
-  /** Per-(scope,tier) token cap for the INV-R3 budget reject. */
+  /** Advisory per-(scope,tier) health cap. Over-budget never blocks writes. */
   budgetTokenCap?: number;
 }
 
@@ -2006,7 +2006,7 @@ export interface WriteRuleResult {
   sanitizedReplacements?: string[];
   budgetTokens?: number;
   budgetCap?: number;
-  suggestArchiveSlug?: string;
+  overSoftBudget?: boolean;
   lane?: string;
   sessionId?: string;
   correlationId?: string;
@@ -2035,12 +2035,9 @@ async function acquireAbrainRuleLock(abrainHome: string, timeoutMs: number): Pro
 }
 
 function estimateRuleTokens(text: string): number {
-  // Approximate token count for the INV-R3 budget REJECT gate. A flat
-  // length/4 (Latin ~4 chars/token) UNDER-counts CJK 2-4x (audit round-2 P2) —
-  // user rules are frequently Chinese, so an under-count would falsely PASS a
-  // budget that is actually breached. CJK code points are counted at ~2
-  // tokens/char (conservative: over-estimating is the safe error for a cap),
-  // everything else stays at /4.
+  // Approximate token count for non-blocking rules health telemetry. A flat
+  // length/4 (Latin ~4 chars/token) UNDER-counts CJK 2-4x (audit round-2 P2),
+  // so CJK code points are counted conservatively at ~2 tokens/char.
   let cjk = 0;
   let other = 0;
   for (const ch of text) {
@@ -2055,29 +2052,25 @@ function estimateRuleTokens(text: string): number {
   return Math.ceil(cjk * 2 + other / 4);
 }
 
-/** INV-R3 budget: sum existing tier-dir token footprint + the new entry; over
- *  cap → reject + suggest the oldest entry to archive (back-pressure loop). */
-async function lintRuleBudget(
+/** Rules budget health: sum existing tier-dir token footprint + the new entry.
+ *  Over-budget is advisory only; it never blocks persistence. */
+async function measureRuleBudget(
   tierDir: string,
   addedMarkdown: string,
   cap: number,
-): Promise<{ ok: boolean; tokens: number; suggestArchive?: string }> {
+): Promise<{ tokens: number; overSoftBudget: boolean }> {
   let existing = 0;
-  let oldestSlug: string | undefined;
-  let oldestMtime = Infinity;
   try {
     for (const f of await fs.readdir(tierDir)) {
       if (!f.endsWith(".md") || f.startsWith("_")) continue;
       const fp = path.join(tierDir, f);
       try {
         existing += estimateRuleTokens(await fs.readFile(fp, "utf-8"));
-        const st = await fs.stat(fp);
-        if (st.mtimeMs < oldestMtime) { oldestMtime = st.mtimeMs; oldestSlug = f.replace(/\.md$/, ""); }
       } catch { /* skip unreadable file */ }
     }
   } catch { /* tier dir absent -> 0 existing */ }
   const tokens = existing + estimateRuleTokens(addedMarkdown);
-  return tokens > cap ? { ok: false, tokens, suggestArchive: oldestSlug } : { ok: true, tokens };
+  return { tokens, overSoftBudget: tokens > cap };
 }
 
 /** #2 dedup scan (T0 consensus 2026-06-07): return the slug of an existing ACTIVE
@@ -2125,7 +2118,7 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const slug = (draft.slug && slugify(draft.slug)) || slugify(draft.title || "rule") || "rule";
 
   // ADR 0023 (T0 panel 2026-06-07): an always-tier body over the size target is
-  // AUTO-DEMOTED to listed (full body kept on disk + a one-line hint injected),
+  // AUTO-DEMOTED to listed (full body kept on disk + compact catalog summary),
   // never rejected — losing a genuinely always-caliber rule is worse than tiering
   // it down. effectiveTier is what actually gets WRITTEN; draft.tier is the ask.
   let effectiveTier: RuleTier = draft.tier;
@@ -2161,10 +2154,9 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
 
   const sizeLint = lintRuleAlwaysSize(safeBody, draft.tier);
   if (!sizeLint.ok && draft.tier === "always") {
-    // panel verdict (C, 2026-06-07): DEMOTE always->listed, do NOT reject. The
-    // injector clamps always bodies at injection time anyway, so rejecting here
-    // only destroyed a genuinely always-caliber rule. listed has no per-rule size
-    // cap (only a one-line hint is injected; the full body is retrieved on demand).
+    // panel verdict (C, 2026-06-07): DEMOTE always->listed, do NOT reject.
+    // With catalog injection, listed has no per-rule body-size cap: the compact
+    // summary is injected and the full body is retrieved on demand.
     effectiveTier = "listed";
     demotedFromAlways = true;
   }
@@ -2192,12 +2184,10 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const target = path.join(tierDir, `${slug}.md`);
   const cap = opts.budgetTokenCap ?? DEFAULT_RULE_BUDGET_TOKENS[effectiveTier];
 
-  // Pre-lock budget = fast path (also feeds dryRun). The AUTHORITATIVE budget
-  // gate re-runs under the lock below (audit round-3 P2): without it two
-  // cross-process writers could both pass here then both write, breaching the
-  // INV-R3 cap. Same fast-path/under-lock pattern as the duplicate_slug check.
-  const budget = await lintRuleBudget(tierDir, markdown, cap);
-  if (!budget.ok) return reject("budget_exceeded", { budgetTokens: budget.tokens, budgetCap: cap, suggestArchiveSlug: budget.suggestArchive });
+  // Budget is health telemetry only. It intentionally does NOT gate writes:
+  // rules injection is moving to catalog/on-demand form, so persistence must
+  // not be blocked by full-body prompt-budget pressure.
+  const budget = await measureRuleBudget(tierDir, markdown, cap);
 
   if (fsSync.existsSync(target)) {
     if (opts.exactDuplicateAsDedup && similarActiveRuleAtPath(target, safeBody)) {
@@ -2220,8 +2210,8 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const sanitizedReplacements = [...titleSan.replacements, ...bodySan.replacements, ...reasonSan.replacements];
 
   if (opts.dryRun) {
-    const auditPath = await audit({ operation: "dry_run", target: path.relative(abrainHome, target), lint_warnings: lintWarnings, budget_tokens: budget.tokens });
-    return { slug, path: target, status: "dry_run", tier: effectiveTier, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintWarnings, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, ...resultCtx };
+    const auditPath = await audit({ operation: "dry_run", target: path.relative(abrainHome, target), lint_warnings: lintWarnings, budget_tokens: budget.tokens, budget_cap: cap, over_soft_budget: budget.overSoftBudget });
+    return { slug, path: target, status: "dry_run", tier: effectiveTier, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintWarnings, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, overSoftBudget: budget.overSoftBudget, ...resultCtx };
   }
 
   let lock: LockHandle | undefined;
@@ -2235,8 +2225,6 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
       }
       return reject("duplicate_slug_race");
     }
-    const budgetUnderLock = await lintRuleBudget(tierDir, markdown, cap);
-    if (!budgetUnderLock.ok) return reject("budget_exceeded", { budgetTokens: budgetUnderLock.tokens, budgetCap: cap, suggestArchiveSlug: budgetUnderLock.suggestArchive });
     await atomicWrite(target, markdown);
     const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, target, slug, "rules") : null;
     if (git === null && opts.settings.gitCommit) {
@@ -2246,8 +2234,8 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
       const auditPath = await audit({ operation: "error", reason: "git_commit_failed_orphan_cleaned", target: path.relative(abrainHome, target) });
       return { slug, path: target, status: "rejected", reason: "git_commit_failed", tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
     }
-    const auditPath = await audit({ operation: "create", target: path.relative(abrainHome, target), lint_result: "pass", lint_warnings: lintWarnings, git_commit: git, budget_tokens: budget.tokens, routing_confidence: draft.routingConfidence, entry_confidence: draft.entryConfidence, routing_reason: safeDraft.routingReason });
-    return { slug, path: target, status: "created", tier: effectiveTier, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, ...resultCtx };
+    const auditPath = await audit({ operation: "create", target: path.relative(abrainHome, target), lint_result: "pass", lint_warnings: lintWarnings, git_commit: git, budget_tokens: budget.tokens, budget_cap: cap, over_soft_budget: budget.overSoftBudget, routing_confidence: draft.routingConfidence, entry_confidence: draft.entryConfidence, routing_reason: safeDraft.routingReason });
+    return { slug, path: target, status: "created", tier: effectiveTier, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, overSoftBudget: budget.overSoftBudget, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", reason: message, target: path.relative(abrainHome, target) });

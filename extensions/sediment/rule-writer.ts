@@ -4,19 +4,19 @@
  * This module holds the PURE, side-effect-free rule logic (draft type, hint
  * sanitize + fallback, kind/size lints, markdown build). The fs-bound
  * orchestration (`writeAbrainRule` + lifecycle writers, mirroring
- * `writeAbrainWorkflow`) and `lintRuleBudget` (reads the rules dir) live in
- * `writer.ts` and call into these helpers. Splitting the pure logic out keeps
- * the rule-specific contract unit-testable without a real abrain tree.
+ * `writeAbrainWorkflow`) and budget telemetry live in `writer.ts` and call
+ * into these helpers. Splitting the pure logic out keeps the rule-specific
+ * contract unit-testable without a real abrain tree.
  *
  * Invariants implemented here:
  *  - INV-R4 (kind 限制): `lintRuleKind` — always ∈ {maxim,preference,anti-pattern};
  *    listed rejects {fact,smell}.
  *  - lintRuleAlwaysSize: always-tier body ≤ 300 UTF-16 code units (D2 §134).
- *  - D5.1 `sanitizeRuleHint`: hint is injected into the system prompt every
- *    session, so it is a noise-promotion surface (NOT adversarial prompt
- *    injection — see ADR §1.4). Structural reject/strip rules below.
- *  - body_hash: D5.1 — frontmatter carries sha256(body) so the rule-injector
- *    can detect hint/body drift on compose.
+ *  - D5.1 `sanitizeRuleHint`: hint may surface as the catalog summary fallback
+ *    every session, so it remains a noise-promotion surface (NOT adversarial
+ *    prompt injection — see ADR §1.4). Structural reject/strip rules below.
+ *  - body_hash: D5.1 — frontmatter carries sha256(body) so downstream readers
+ *    can detect hint/body drift.
  *  - F-W2 provenance: `derives_from` / `promoted_from` / `source_body_hash`
  *    link a promoted rule back to its source knowledge entry (reconciliation
  *    anchor for the deferred region-move).
@@ -82,15 +82,13 @@ export function lintRuleKind(kind: string, tier: RuleTier): LintResult {
 }
 
 /** always-tier body size THRESHOLD = 300 UTF-16 code units (D2 §134).
- *  listed-tier has no body-size cap (it injects only a hint, not the body).
+ *  listed-tier has no body-size cap because full bodies are read on demand; the
+ *  session prompt only receives compact catalog rows.
  *
  *  NOTE (T0 panel 2026-06-07): this is a DEMOTE threshold, not a reject gate.
  *  `writeAbrainRule` auto-demotes an over-threshold always rule to listed rather
- *  than rejecting it. It is INTENTIONALLY the same value as the rule-injector's
- *  `maxAlwaysBodyChars` (default 300, the injection-time clamp), but they are NOW
- *  complementary, not redundant: the writer demote means an over-size always rule
- *  never lands as always, so the injector clamp only ever fires on always rules
- *  written by NON-writer paths (manual edits / escape-hatch). */
+ *  than rejecting it. With catalog injection, the threshold now preserves the
+ *  stronger always-tier signal as a compact imperative essence. */
 export const ALWAYS_BODY_MAX_CODE_UNITS = 300;
 export function lintRuleAlwaysSize(body: string, tier: RuleTier): LintResult {
   if (tier !== "always") return { ok: true };
@@ -105,17 +103,18 @@ export const HINT_MAX_CODE_UNITS = 80;
 export const HINT_HARD_REJECT_CODE_UNITS = 120;
 
 /** D5.1 sanitizeRuleHint. Order: structural rejects → strips → length →
- *  credential redaction. The hint rides into the system prompt every session,
- *  so the goal is preventing accidental NOISE promotion (a stray markdown/
- *  control sequence becoming a system instruction), not adversarial defense. */
+ *  credential redaction. The hint may become a catalog-row summary every
+ *  session, so the goal is preventing accidental NOISE promotion (a stray
+ *  markdown/control sequence becoming a system instruction), not adversarial
+ *  defense. */
 export function sanitizeRuleHint(raw: unknown): HintResult {
   if (typeof raw !== "string") return { ok: false, reason: "hint_not_a_string" };
   let s = raw;
   // (0) strip bidi override / zero-width FIRST. Audit P1-b (2026-06-07): doing
   //     this AFTER the structural rejects let an attacker interleave a
   //     zero-width char to evade them (`` `\u200B`` `` defeats the fence check,
-  //     `<!\u200B--` defeats the comment check). The hint rides into every
-  //     session's system prompt, so the strip must precede every structural test.
+  //     `<!\u200B--` defeats the comment check). The hint may surface in every
+  //     session's catalog, so the strip must precede every structural test.
   s = s.replace(/[\u202A-\u202E\u2066-\u2069\u200B-\u200F\uFEFF]/g, "");
   // (1) strip markdown links/images BEFORE the structural rejects too. Audit
   //     round-2 P1 (2026-06-07): the strip running AFTER the checks let a link
