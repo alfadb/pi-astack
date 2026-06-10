@@ -175,6 +175,7 @@ function buildRealDeps(): DetectDeps {
 }
 
 function resolveConfiguredBashShellPath(): string | undefined {
+  if (process.platform !== "win32") return undefined;
   try {
     // Lazy require keeps smoke fixtures that only load abrain exports from
     // pulling pi's runtime API graph at module import time.
