@@ -40,6 +40,7 @@
     "smoke:vision": "node scripts/smoke-vision.mjs",
     "smoke:imagine": "node scripts/smoke-imagine.mjs",
     "smoke:web-search": "node scripts/smoke-web-search.mjs",
+    "smoke:model-curator-live-reapply": "node scripts/smoke-model-curator-live-reapply.mjs",
     "smoke:pi-internals-subagent": "node scripts/smoke-pi-internals-subagent.mjs",
     "smoke:c5-terminal-state": "node scripts/smoke-c5-terminal-state.mjs",
     "smoke:c5-audit-row-schema": "node scripts/smoke-c5-audit-row-schema.mjs",

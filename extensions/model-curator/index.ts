@@ -250,29 +250,93 @@ function buildAvailableModelsBlock(
 
 // ── Extension entry ─────────────────────────────────────────────
 
+interface CuratorRegistryLike {
+  getAll(): Model<Api>[];
+  getAvailable?(): Model<Api>[];
+  getApiKeyAndHeaders(m: Model<Api>): Promise<{
+    ok: boolean; apiKey?: string; headers?: Record<string, string>;
+  }>;
+}
+
+interface CuratorCtxLike {
+  modelRegistry?: CuratorRegistryLike;
+  hasUI?: boolean;
+  ui?: {
+    setStatus?(key: string, text: string): void;
+    notify?(msg: string, level?: string): void;
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   // Sub-pi guard (2026-05-14 audit): model-curator must not modify
   // a sub-pi's model registry — it could remove the model the parent
   // dispatched the sub-agent with.
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
-  pi.on("session_start", async (_event, ctx) => {
-    // ADR 0027 PR-B (v3 in-process replacement for the env guard above):
-    // model-curator must NOT prune a sub-agent's model registry — dispatch
-    // explicitly chose the sub-agent's model, and the curator's whitelist
-    // is a main-session configuration concept.
-    if (isSubAgentSession(ctx)) return;
+  // ── Live re-apply state (3-T0 consensus 2026-06-10) ──────────────
+  // The whitelist used to be applied exactly once (session_start), so adding
+  // a model to pi-astack-settings.json required restarting pi before dispatch
+  // could see it (the hints table refreshed every turn but the registry
+  // didn't — a confusing split). We now track the settings file's mtime and
+  // which providers we actually registered: before_agent_start re-applies the
+  // whitelist when the file changed, and /curator-reload forces it manually.
+  let lastAppliedMtimeMs: number | null = null;
+  let appliedProviderNames: string[] = [];
+  // Original built-in catalog, captured on the FIRST application BEFORE any
+  // whitelist replaces provider model sets. Re-applies resolve keep-lists
+  // against this cache so we never unregister-then-re-register (which would
+  // expose raw built-ins during the auth await window and fail open if auth
+  // resolution failed mid-apply — T0 audit P0). registerProvider() is an
+  // upsert that REPLACES the provider's model set, so re-applying on top of
+  // an existing registration needs no prior unregister. NOTE: models.json
+  // edits are NOT picked up by re-apply (catalog cached at process start) —
+  // same as the pre-live-reapply behavior; they still need a pi restart.
+  let builtinCatalog: Model<Api>[] | null = null;
+  // Serialize concurrent applications (two sessions in one process, or
+  // /curator-reload racing before_agent_start) — T0 audit P0.
+  let applyInFlight: Promise<void> | null = null;
 
-    // P2 fix (R6 audit): outer try/catch so model-curator startup
-    // failure (network/auth/registry error) doesn't reject the hook
-    // and silently disable all other session_start handlers.
+  function settingsMtimeMs(): number | null {
     try {
+      return fs.statSync(PI_STACK_SETTINGS_PATH).mtimeMs;
+    } catch {
+      return null; // absent/unreadable → no re-apply signal; keep last config
+    }
+  }
+
+  function applyAllWhitelists(ctx: CuratorCtxLike): Promise<void> {
+    if (applyInFlight) return applyInFlight;
+    applyInFlight = doApplyAllWhitelists(ctx).finally(() => {
+      applyInFlight = null;
+    });
+    return applyInFlight;
+  }
+
+  async function doApplyAllWhitelists(ctx: CuratorCtxLike): Promise<void> {
     const reg = ctx.modelRegistry;
     if (!reg) return;
 
+    // Snapshot the mtime BEFORE reading config (T0 audit P0: a write landing
+    // during apply must NOT be absorbed by a post-apply fresh stat — the
+    // next turn's stat differs from this snapshot and re-triggers).
+    const mtimeSnapshot = settingsMtimeMs();
     const cfg = resolveConfig();
-    const allBuiltin = reg.getAll();
+
+    builtinCatalog ??= reg.getAll();
+    const allBuiltin = builtinCatalog;
+
+    // Providers we previously curated that are no longer in settings:
+    // unregister to restore raw passthrough (deliberate config removal;
+    // unregisterProvider is a no-op for never-registered names).
+    const cfgProviderNames = new Set(Object.keys(cfg.providers));
+    for (const name of appliedProviderNames) {
+      if (!cfgProviderNames.has(name)) {
+        try { pi.unregisterProvider(name); } catch { /* best-effort */ }
+      }
+    }
+
     const report: string[] = [];
+    const registered: string[] = [];
     let totalKept = 0;
     let totalMissing = 0;
 
@@ -283,6 +347,7 @@ export default function (pi: ExtensionAPI) {
 
       totalKept += kept;
       totalMissing += missing.length;
+      if (kept > 0) registered.push(providerName);
 
       if (missing.length > 0) {
         report.push(
@@ -300,12 +365,26 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    // Tracking = providers registered this round, plus providers whose
+    // PREVIOUS registration is still active in the registry (kept=0 this
+    // round, e.g. transient auth failure — their old whitelist remains; we
+    // intentionally did not unregister them, preserving last-good config).
+    const previouslyApplied = appliedProviderNames.filter(
+      (n) => cfgProviderNames.has(n) && !registered.includes(n),
+    );
+    appliedProviderNames = [...registered, ...previouslyApplied];
+    // Advance the mtime watermark even on partial failure — no per-turn
+    // auto-retry loops (avoids re-apply latency every turn while auth is
+    // down). /curator-reload is the manual retry path.
+    lastAppliedMtimeMs = mtimeSnapshot;
+
     if (ctx.hasUI) {
       try {
         // Total models actually available for dispatch — includes both
-        // curated (kept after whitelist) and raw providers (e.g. github-copilot,
-        // which model-curator passes through untouched). Falls back to getAll()
-        // if getAvailable isn't exposed by this pi version.
+        // curated (kept after whitelist) and raw providers (e.g. kimi-coding
+        // when uncurated, which model-curator passes through untouched).
+        // Falls back to getAll() if getAvailable isn't exposed by this pi
+        // version.
         let totalAvailable = totalKept;
         try {
           const list = reg.getAvailable ? reg.getAvailable() : reg.getAll();
@@ -315,7 +394,7 @@ export default function (pi: ExtensionAPI) {
         const status = totalMissing > 0
           ? `📋 ${totalAvailable} models (${totalKept}✓ ${totalMissing}!)`
           : `📋 ${totalAvailable} models`;
-        ctx.ui.setStatus(FOOTER_STATUS_KEYS.modelCurator, status);
+        ctx.ui?.setStatus?.(FOOTER_STATUS_KEYS.modelCurator, status);
       } catch { /* ignore */ }
     }
 
@@ -324,6 +403,20 @@ export default function (pi: ExtensionAPI) {
         console.error(line);
       }
     }
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    // ADR 0027 PR-B (v3 in-process replacement for the env guard above):
+    // model-curator must NOT prune a sub-agent's model registry — dispatch
+    // explicitly chose the sub-agent's model, and the curator's whitelist
+    // is a main-session configuration concept.
+    if (isSubAgentSession(ctx)) return;
+
+    // P2 fix (R6 audit): outer try/catch so model-curator startup
+    // failure (network/auth/registry error) doesn't reject the hook
+    // and silently disable all other session_start handlers.
+    try {
+      await applyAllWhitelists(ctx as CuratorCtxLike);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
       console.error(`[model-curator] session_start error (model whitelist failed, leaving registry as-is): ${message}`);
@@ -336,6 +429,23 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     const reg = ctx.modelRegistry;
     if (!reg) return undefined;
+
+    // Live re-apply (mtime-gated): if pi-astack-settings.json changed since
+    // the last whitelist application, re-apply BEFORE building the hints
+    // block so a newly added model is dispatchable this very turn — no
+    // restart. Guarded for sub-agents: their registry must not be re-pruned
+    // mid-dispatch (same invariant as the session_start guard).
+    if (!isSubAgentSession(ctx)) {
+      const m = settingsMtimeMs();
+      if (m !== null && m !== lastAppliedMtimeMs) {
+        try {
+          await applyAllWhitelists(ctx as CuratorCtxLike);
+        } catch (e: unknown) {
+          const message = e instanceof Error ? e.message : String(e);
+          console.error(`[model-curator] live re-apply failed (registry left as-is): ${message}`);
+        }
+      }
+    }
 
     const current = event.systemPrompt ?? "";
     if (current.includes(INJECT_MARKER)) return undefined;
@@ -351,4 +461,30 @@ export default function (pi: ExtensionAPI) {
       systemPrompt: current + "\n\n" + INJECT_MARKER + "\n" + block + "\n",
     };
   });
+
+  // ── /curator-reload: manual re-apply (feature-detected for older pi) ──
+  // The mtime gate above covers the normal edit→next-message flow; this
+  // command is the explicit fallback (e.g. clock-skewed mounts where mtime
+  // doesn't change, or to force a retry after a transient auth failure).
+  const maybeRegisterCommand = (pi as unknown as {
+    registerCommand?: (name: string, options: {
+      description?: string;
+      handler: (args: string, ctx: unknown) => Promise<void>;
+    }) => void;
+  }).registerCommand;
+  if (typeof maybeRegisterCommand === "function") {
+    maybeRegisterCommand.call(pi, "curator-reload", {
+      description: "Re-apply modelCurator whitelist/hints from pi-astack-settings.json (no restart needed)",
+      handler: async (_args: string, cmdCtx: unknown) => {
+        const c = cmdCtx as CuratorCtxLike;
+        try {
+          await applyAllWhitelists(c);
+          c.ui?.notify?.("model-curator: whitelist re-applied from settings", "info");
+        } catch (e: unknown) {
+          const message = e instanceof Error ? e.message : String(e);
+          c.ui?.notify?.(`model-curator reload failed: ${message}`, "error");
+        }
+      },
+    });
+  }
 }
