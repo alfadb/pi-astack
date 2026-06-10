@@ -530,7 +530,7 @@ END_MEMORY
 |---|---|
 | **INV-R1** (注入幂等性, 三层防御) | 见 §4.1 详述 |
 | **INV-R2** (strict binding 禁泄漏) | project rules 注入只能来自 `bootActiveProject` 解析到的 projectId 对应目录 |
-| **INV-R3** (budget hard cap, token-aware) | 写入超 token cap → writer reject + audit；session_start 超 cap → 全量注入 + ui.notify warning（**R4 简化**：不再 deterministic trim） |
+| **INV-R3** (budget hard cap, token-aware) | 写入超 token cap → writer reject + audit；session_start 超 cap → 全量注入 + ui.notify warning（**R4 简化**：不再 deterministic trim）（**2026-06-09 walk-back**（166924c rules-catalog 注入）：injector 侧 token 硬上限设置（`alwaysTokenCapPerScope` / `listedTokenCapPerScope` 等）已移除，改为 advisory telemetry（catalog 尾部 `catalog_tokens` / `hidden_catalog_count`）；"hard cap" 现仅指**写侧**：always-tier body ≤300 CU 的 writer demote/reject（`lintRuleAlwaysSize`）仍有效） |
 | **INV-R4** (kind 限制) | tier=always: `kind ∈ {maxim, preference, anti-pattern}`; tier=listed: 拒绝 `kind ∈ {fact, smell}` |
 | **INV-R5** (writer 单一, best-effort 三层) | 见 §4.5 详述 |
 | **INV-R6** (sub-pi 隔离, 单层 env-based + forward-looking note) | 见 §4.6 详述 |

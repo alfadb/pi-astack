@@ -108,7 +108,11 @@ export async function buildMarkdownIndex(
 ): Promise<{ root: string; content: string; entries: MemoryEntry[]; orphanSlugs: string[] }> {
   const root = await targetRoot(target);
   const entries = (await scanStore({ scope: inferScope(root), root, label: "index" }, cwd, settings, signal))
-    .filter((entry) => entry.status.toLowerCase() !== "archived");
+    // AX-MATURITY default visibility (ADR 0028 §12): superseded is retired
+    // history just like archived — keep the markdown index aligned with the
+    // memory_search default exclusion set (search.ts). deprecated already
+    // folds → superseded at the parser level.
+    .filter((entry) => entry.status.toLowerCase() !== "archived" && entry.status.toLowerCase() !== "superseded");
   const graph = await buildGraphSnapshot(root, settings, signal, cwd);
   const orphanSet = new Set(graph.stats.orphans);
   const stagingOrphans = entries
