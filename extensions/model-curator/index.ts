@@ -60,6 +60,7 @@ interface CuratorDefaults {
 const DEFAULTS: CuratorDefaults = {
   providers: {
     anthropic: [
+      "claude-fable-5",
       "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
       "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
     ],
@@ -81,6 +82,8 @@ const DEFAULTS: CuratorDefaults = {
   },
 
   hints: {
+    "anthropic/claude-fable-5":
+      "Mythos-class tier above Opus 4.8 — Anthropic's newest flagship (provisional: released 2026-06-09, no official system card yet). Reported agentic-coding leader (third-party SWE-Bench Pro ~80.3% vs Opus 4.8 69.2%, Terminal-Bench 2.1 88.0% — unverified); 1M context, 128K out; xhigh-only thinking (forceAdaptiveThinking, no high/medium/low). $10/$50 (2× Opus 4.8). CAVEAT: sensitive queries (cyber/bio-chem/distillation) blocked + rerouted to Opus 4.8 (~<5% sessions) — NOT an independent voice from Opus for security-audit/blind-review work. CAVEAT: benchmarks third-party/unofficial, treat as provisional until first-party numbers land. Verify sub2api route availability/pricing. Use for hardest long-horizon autonomous agentic coding + architecture critique.",
     "anthropic/claude-opus-4-8":
       "Strongest reasoning + agentic coding (SWE-bench Verified 88.6%, SWE-bench Pro 69.2%); ~4× lower 'silent code bug' rate vs 4.7 + proactively flags input/output uncertainty (good for audit/review subagents); defaults to high effort, supports xhigh/max; regular $5/$25 same as 4.7, fast mode $10/$50 (~2.5× speed, 3× cheaper than 4.7's $30/$150 fast). Use for security audits, architecture critique, long-horizon agentic work.",
     "anthropic/claude-opus-4-7":
