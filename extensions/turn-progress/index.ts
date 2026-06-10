@@ -258,13 +258,16 @@ function yieldToEventLoop(): Promise<void> {
  *
  *  Examples:
  *    /…/pi-astack/extensions/memory/index.ts   → "memory"
+ *    C:\\…\\pi-astack\\extensions\\memory\\index.ts → "memory"
  *    /…/pi-astack/extensions/abrain/index.ts   → "abrain"
  *    <inline:foo>                              → "<inline:foo>"
  */
 export function extractShortName(extPath: string): string {
   if (extPath.startsWith("<") && extPath.endsWith(">")) return extPath;
-  // Strip trailing slash, take the directory name above the file.
-  const trimmed = extPath.replace(/\/+$/, "");
+  // Normalize Windows separators, then strip trailing slash and take the
+  // directory name above the file.
+  const normalized = extPath.replace(/\\/g, "/");
+  const trimmed = normalized.replace(/\/+$/, "");
   const lastSlash = trimmed.lastIndexOf("/");
   if (lastSlash < 0) return trimmed || extPath;
   const beforeFile = trimmed.slice(0, lastSlash);

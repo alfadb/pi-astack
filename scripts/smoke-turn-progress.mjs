@@ -212,6 +212,11 @@ check(
     "model-curator",
 );
 check(
+  "A. extractShortName: Windows pi-astack layout (memory)",
+  extractShortName("C:\\Users\\alfadb\\.pi\\agent\\skills\\pi-astack\\extensions\\memory\\index.ts") ===
+    "memory",
+);
+check(
   "A. extractShortName: hypothetical nested (would be rule-injector)",
   extractShortName("/home/u/.pi/agent/skills/pi-astack/extensions/abrain/rule-injector/index.ts") ===
     "rule-injector",
