@@ -69,33 +69,52 @@ const DEFAULTS: CuratorDefaults = {
     deepseek: [
       "deepseek-v4-pro", "deepseek-v4-flash",
     ],
+    "github-copilot": [
+      "gpt-5.5", "gpt-5-mini",
+    ],
+    "minimax": [
+      "MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed",
+    ],
+    "kimi-coding": [
+      "kimi-k2-thinking", "kimi-for-coding",
+    ],
   },
 
   hints: {
     "anthropic/claude-opus-4-8":
-      "Strongest reasoning + agentic coding (SWE-bench Verified 88.6%, SWE-bench Pro 69.2%); ~4× lower 'silent code bug' rate vs 4.7 + proactively flags input/output uncertainty (good for audit/review subagents); defaults to high effort, supports xhigh/max for hard long-running tasks; regular $5/$25 same as 4.7, fast mode 3× cheaper ($10/$50, ~2.5× speed). Use for security audits, architecture critique, long-horizon agentic work.",
+      "Strongest reasoning + agentic coding (SWE-bench Verified 88.6%, SWE-bench Pro 69.2%); ~4× lower 'silent code bug' rate vs 4.7 + proactively flags input/output uncertainty (good for audit/review subagents); defaults to high effort, supports xhigh/max; regular $5/$25 same as 4.7, fast mode $10/$50 (~2.5× speed, 3× cheaper than 4.7's $30/$150 fast). Use for security audits, architecture critique, long-horizon agentic work.",
     "anthropic/claude-opus-4-7":
-      "Previous-gen opus (April 2026); close to 4-8 quality but more likely to let coding flaws pass unremarked. Same price tier as 4-8.",
+      "Previous-gen opus (April 2026); close to 4-8 quality but more likely to let coding flaws pass unremarked. Strong second voice for ensemble reviews. Same price tier as 4-8.",
     "anthropic/claude-opus-4-6":
       "Two-gen-back opus (Feb 2026); use only as fallback when 4-8/4-7 rate-limited or unavailable.",
     "anthropic/claude-sonnet-4-6":
-      "Mid-tier, fast, cheap. Design review, refactor proposals.",
+      "Mid-tier, faster + cheaper than opus. Design review, refactor proposals.",
     "anthropic/claude-sonnet-4-5":
-      "Previous-gen sonnet; slightly older training cutoff.",
+      "Previous-gen sonnet; cheap second voice or vision fallback in ensembles. Slightly older training cutoff.",
     "anthropic/claude-haiku-4-5":
       "Fastest + cheapest. Quick classification, short summaries.",
     "openai/gpt-5.5":
-      "Strong general-purpose reasoning + coding. Architecture, planning. Image input.",
+      "Strong general-purpose reasoning + coding. Architecture, planning. Image input. ($5/1M in)",
     "openai/gpt-5.4":
       "Previous-gen 5.x; cheaper fallback or second voice in ensemble.",
     "openai/gpt-5.4-mini":
-      "Small + fast. High-volume classification, regex extraction.",
+      "Small + fast. High-volume classification, regex extraction. ($0.75/1M in)",
     "openai/gpt-5.3-codex":
-      "Codex-tuned for code generation/edits; weaker on prose reasoning.",
+      "Codex-tuned for code generation/edits; weaker on prose reasoning — prefer gpt-5.5 or gpt-5.4 for prose-heavy critique or architecture.",
     "deepseek/deepseek-v4-pro":
-      "Strong structured analysis, huge context. Diff review, dependency audit. Cheapest top-tier.",
+      "Strong structured analysis, 1M context window. Diff review, dependency audit. Cheapest top-tier.",
     "deepseek/deepseek-v4-flash":
-      "Fast + very cheap. High-volume eval or when v4-pro is rate-limited.",
+      "Fast + very cheap ($0.14/1M in). High-volume eval or when v4-pro is rate-limited.",
+    "github-copilot/gpt-5.5":
+      "gpt-5.5 via Copilot raw API route; usage-based billing since 2026-06-01 (verify per-token cost). Spare OpenAI API budget / main-session overflow when Claude Max weekly limit is hit.",
+    "github-copilot/gpt-5-mini":
+      "Copilot-routed gpt-5-mini; fast + cheap. High-volume classification, short summaries. Real ctx ceiling ~128K (pi-declared 264K wrong on this route; models.json override corrects).",
+    "minimax/MiniMax-M3":
+      "Recent (2026-05) multimodal MoE, 1M context, ~$0.30/1M in. Cheap vision + huge-context reviews; non-US vendor voice for blind-review independence. Verify sub2api route pricing (some routes show $0.60).",
+    "kimi-coding/kimi-k2-thinking":
+      "Moonshot extended-thinking MoE, 256K context, native INT4 quantization. 5th independent vendor family (non-US/non-OpenAI/non-Anthropic/non-DeepSeek); INT4-native sparsity = decorrelated failure mode vs dense Opus/GPT and standard-MoE DeepSeek. Use as cross-vendor critique voice in 3-T0 blind-review trios when >3 independent voters needed. (~$0.45-0.68/M in via OpenRouter; verify sub2api route.)",
+    "minimax/MiniMax-M2.7":
+      "MiniMax MSA sparse-attn agent, 204K ctx, 10B active params, self-evolving agent capability. Architecturally distinct from M3 (MSA sparse-attn vs MoE); orthogonal failure surface to dense Opus/GPT and standard-MoE DeepSeek/K2. CAVEAT: same vendor as M3 → shared training/RLHF → don't pair M2.7+M3 as 'independent' blind-review voters. For time-boxed/blocking T0 reviews, use M2.7-highspeed variant (100 TPS, same arch). Treat 'Opus/GPT parity' claim as marketing. (~$0.30/M in via OpenRouter; verify sub2api route.)",
   },
 
   imageGen: {
