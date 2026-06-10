@@ -12,7 +12,11 @@
  *    counterfactual deducted), user-role restatements are the user-anchored
  *    MATCH source, the edge consumes only the per-turn ledger delta, and a
  *    MATCH never mutates rule status (ADR 0028 R4' asymmetry);
- * 5. R3 negative recall audits user-role imperatives without corresponding rules.
+ * 5. R3 negative recall audits user-role imperatives without corresponding rules;
+ * 6. R6' staging narrowing: Tier-1-eligible durable signals skip the
+ *    provisional-staging net whenever the deterministic direct lane is live
+ *    (autoLlmWriteEnabled === true); staging keeps firing in false/"staging-only"
+ *    modes where the direct lane never runs.
  */
 
 import fs from "node:fs";
@@ -114,6 +118,25 @@ function freshFixture(label = "pr1") {
   const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), `pi-astack-${label}-abrain-`));
   process.env.ABRAIN_ROOT = abrainHome;
   return { root, abrainHome, projectId: `${label}-project` };
+}
+
+/** Pre-seed every fire-and-forget "IfDue" side lane (aggregator, staging
+ *  resolver/ageout, archive-reactivation, entry-telemetry) as recently-run so
+ *  none of them races the classifier for the ORDERED pi-ai stub responses.
+ *  The race was latent in every real-agent_end check: the aggregator's
+ *  skeptical-historian LLM call sometimes consumed response[0] before the
+ *  classifier did, flipping the classifier's parsed signal per run. */
+function quietIfDueLanes(fx) {
+  const dir = path.join(fx.root, ".pi-astack", "sediment");
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = JSON.stringify({ last_run_ts: new Date().toISOString(), status: "ok" }, null, 2) + "\n";
+  for (const name of [
+    "aggregator-last-run.json",
+    "staging-resolver-last-run.json",
+    "staging-ageout-last-run.json",
+    "archive-reactivation-last-run.json",
+    "entry-telemetry-last-run.json",
+  ]) fs.writeFileSync(path.join(dir, name), stamp, "utf-8");
 }
 
 function ruleEdgeLedgerPath(fx) {
@@ -765,9 +788,9 @@ await check("S19: real agent_end direct Tier-1 path writes then checkpoints", as
   _resetAutoWriteStateForTests();
   const fx = freshFixture("pr1-s19");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  quietIfDueLanes(fx);
   const quote = "所有 GitHub 仓库必须使用 gh 工具管理。";
   resetPiAiStub([
-    "[]",
     JSON.stringify({ signal_found: true, typing: "durable", confidence: 9, user_quote: quote, scope_description: "GitHub repos use gh", target_entry_slug: null, provenance: "user-expressed", quote_source: "user_message" }),
   ]);
   const branch = [makeUserEntry("u1", quote)];
@@ -784,11 +807,88 @@ await check("S19: real agent_end direct Tier-1 path writes then checkpoints", as
   const classifier = rows.find((row) => row.operation === "correction_classifier");
   const direct = rows.find((row) => row.operation === "tier1_direct_write");
   const auto = rows.find((row) => row.operation === "auto_write" && row.extractor === "active_correction_direct");
-  assert(classifier?.ok === true && classifier?.staging_written === true, `real agent_end must run classifier/staging: ${JSON.stringify(rows)}`);
+  assert(classifier?.ok === true && classifier?.staging_written === false && classifier?.staging_suppressed_reason === "tier1_direct_lane", `R6': Tier-1 signal must suppress the staging net when the direct lane is live: ${JSON.stringify(rows)}`);
   assert(direct?.deterministic_direct_path === true && direct?.signal_consumed === true, `real agent_end must direct-write: ${JSON.stringify(rows)}`);
   assert(auto?.checkpoint_advanced === true && auto?.background_async === true, `real agent_end audit must advance after write: ${JSON.stringify(rows)}`);
   assert(!rows.some((row) => row.operation === "directive_recall_audit"), `same-turn direct write must suppress R3 missing audit: ${JSON.stringify(rows)}`);
-  assert(globalThis.__ADR0028_PR1_INVOCATIONS__ === 2, `direct path should only call pre-search + classifier, got ${globalThis.__ADR0028_PR1_INVOCATIONS__}`);
+  assert(globalThis.__ADR0028_PR1_INVOCATIONS__ === 1, `with IfDue lanes quieted the direct path spends exactly 1 LLM call (classifier; no extractor), got ${globalThis.__ADR0028_PR1_INVOCATIONS__}`);
+});
+
+await check("S20: R6' staging suppression requires live settings AND window ownership", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s20");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const correctionPipeline = await jiti.import(`${repoRoot}/extensions/sediment/correction-pipeline.ts`);
+  const quote = "所有 GitHub 仓库必须使用 gh 工具管理。";
+  const classifierJson = JSON.stringify({ signal_found: true, typing: "durable", confidence: 9, user_quote: quote, scope_description: "GitHub repos use gh", target_entry_slug: null, provenance: "user-expressed", quote_source: "user_message" });
+  const win = makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${quote}`);
+
+  // Degraded mode: the direct lane never runs, so the staging net MUST fire
+  // even when the caller owns the window.
+  resetPiAiStub([classifierJson]);
+  const stagingOnly = await correctionPipeline.runCorrectionPipeline(win.entries, [], {
+    settings: { ...baseSettings, autoLlmWriteEnabled: "staging-only" },
+    modelRegistry: makeModelRegistry(),
+    directLaneOwnsWindow: true,
+  });
+  assert(stagingOnly.ok === true && stagingOnly.escalateToCurator === true, `staging-only: Tier-1 predicate should still fire: ${JSON.stringify(stagingOnly)}`);
+  assert(stagingOnly.stagingWritten === true && !stagingOnly.stagingSuppressedReason, `staging-only mode must keep the staging net: ${JSON.stringify(stagingOnly)}`);
+
+  // Live settings but NOT window owner (explicit/about_me lane or in-flight
+  // turn): the directive would otherwise survive only in volatile memory —
+  // staging MUST keep firing (3-T0 P0 fix).
+  resetPiAiStub([classifierJson]);
+  const notOwner = await correctionPipeline.runCorrectionPipeline(win.entries, [], {
+    settings: { ...baseSettings, autoLlmWriteEnabled: true },
+    modelRegistry: makeModelRegistry(),
+  });
+  assert(notOwner.ok === true && notOwner.escalateToCurator === true, `non-owner: Tier-1 predicate should fire: ${JSON.stringify(notOwner)}`);
+  assert(notOwner.stagingWritten === true && !notOwner.stagingSuppressedReason, `live settings WITHOUT window ownership must keep the staging net: ${JSON.stringify(notOwner)}`);
+
+  // Live settings AND window owner: the same signal skips staging (R6').
+  resetPiAiStub([classifierJson]);
+  const live = await correctionPipeline.runCorrectionPipeline(win.entries, [], {
+    settings: { ...baseSettings, autoLlmWriteEnabled: true },
+    modelRegistry: makeModelRegistry(),
+    directLaneOwnsWindow: true,
+  });
+  assert(live.ok === true && live.escalateToCurator === true, `live: Tier-1 predicate should fire: ${JSON.stringify(live)}`);
+  assert(live.stagingWritten === false && live.stagingSuppressedReason === "tier1_direct_lane", `owned live direct lane must suppress the staging net: ${JSON.stringify(live)}`);
+});
+
+await check("S21: cross-turn mode flip parks a consumed Tier-1 signal in staging, never drops it", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s21");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const quote = "所有 GitHub 仓库必须使用 gh 工具管理。";
+  const outcome = await _tryAutoWriteLaneForTests({
+    cwd: fx.root,
+    sessionId: "mode-flip",
+    settings: { ...baseSettings, autoLlmWriteEnabled: "staging-only" },
+    window: makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${quote}`),
+    modelRegistry: null,
+    correlationId: "mode-flip:auto",
+    abrainHome: fx.abrainHome,
+    projectId: fx.projectId,
+    correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: quote, scope_description: "GitHub repos use gh", target_entry_slug: null, provenance: "user-expressed", quote_source: "user_message" },
+  });
+  assert(outcome.kind === "ineligible" && outcome.eligibility.reason === "auto_write_staging_only_mode", `staging-only must stay ineligible: ${JSON.stringify(outcome)}`);
+  const stagingDir = path.join(fx.abrainHome, ".state", "sediment", "staging");
+  const staged = fs.existsSync(stagingDir) ? fs.readdirSync(stagingDir).filter((f) => f.endsWith(".json")) : [];
+  assert(staged.length === 1, `consumed Tier-1 signal must be parked in staging: ${JSON.stringify(staged)}`);
+  assert(fs.readFileSync(path.join(stagingDir, staged[0]), "utf-8").includes(quote), "staged entry must carry the verbatim quote");
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  const capture = rows.find((row) => row.operation === "tier1_degraded_capture");
+  assert(capture?.mode === "staging-only" && capture?.staging_written === true, `degraded capture must be audited: ${JSON.stringify(rows)}`);
+});
+
+await check("S22: tier1 checkpoint advance — captured/terminal advance, transient holds", async () => {
+  const { _shouldAdvanceAfterAutoOutcomeForTests } = sedimentIndex;
+  const mk = (status, reason) => ({ kind: "tier1_direct", draft: {}, result: { status, ...(reason ? { reason } : {}) }, writeStart: 0 });
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("created")) === true, "captured create must advance");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("deduped")) === true, "dedup must advance");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "validation_error_body")) === true, "terminal deterministic reject must advance (R3' recall flag is the net)");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "git_commit_failed")) === false, "transient reject must HOLD the checkpoint");
 });
 
 if (failures.length) {

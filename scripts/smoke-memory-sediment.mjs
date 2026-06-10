@@ -2901,13 +2901,15 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         );
       }
 
-      // === Rule-escalation seed (GAP A+B fix, design consensus 2026-06-07) ===
-      // A high-confidence user-EXPRESSED durable CREATE signal must reach the
-      // curator EVEN WHEN the general extractor returns SKIP (no draft) and
-      // regardless of window size. Seeding inside tryAutoWriteLane turns a
-      // would-be 'llm_skip' (silent rule loss) into 'wrote' (curator evaluates
-      // the rule). Verifies: seed fires + VERBATIM body, gating predicate
-      // (typing/confidence/user_quote), and extractor-covers-it suppression.
+      // === Tier-1 direct lane (ADR 0028 R1'/R2'; supersedes the 2026-06-07
+      // escalation-seed design — dc5de52 removed the seed-bridge) ===
+      // A high-confidence user-EXPRESSED durable CREATE signal is owned by the
+      // classifier (disjoint authority): it commits DETERMINISTICALLY via the
+      // Tier-1 direct writer BEFORE any extractor/curator LLM call, so an
+      // extractor SKIP can no longer lose it. Verifies: direct write + VERBATIM
+      // body + zero extractor invocations, the structural gating predicate
+      // (typing/confidence/provenance/no-target), and the deterministic
+      // validation gate on degenerate bodies.
       {
         const { _tryAutoWriteLaneForTests } = req("./sediment/index.js");
         const userQuote = "所有 git.alfadb.cn 的 git 仓库必须使用 glab 工具管理，禁用裸 git/curl API";
@@ -2933,48 +2935,55 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, correctionSignal,
         });
 
-        // (1) qualifying signal + extractor SKIP -> seed fires -> 'wrote', verbatim body
+        // (1) qualifying signal + extractor would SKIP -> Tier-1 direct write,
+        //     verbatim body, ZERO extractor invocations (R1' disjoint authority)
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
-        const seeded = await _tryAutoWriteLaneForTests(laneArgs("smoke-seed-fire", qualifyingSignal));
-        assert(seeded.kind === "wrote", `escalation seed must turn extractor-SKIP into a curator run (wrote), got: ${seeded.kind}`);
-        assert(Array.isArray(seeded.drafts) && seeded.drafts.length === 1, `seed must inject exactly 1 draft, got: ${seeded.drafts && seeded.drafts.length}`);
-        assert(seeded.drafts[0].compiledTruth === userQuote, `seed body must be VERBATIM user_quote, got: ${seeded.drafts[0].compiledTruth}`);
-        assert(seeded.drafts[0].kind === "preference", `seed candidate kind should be 'preference', got: ${seeded.drafts[0].kind}`);
+        const direct = await _tryAutoWriteLaneForTests(laneArgs("smoke-tier1-fire", qualifyingSignal));
+        assert(direct.kind === "tier1_direct", `Tier-1 signal must take the deterministic direct lane, got: ${direct.kind}`);
+        assert(direct.result.status === "created" && direct.result.ruleScope === "global", `direct write should create a global rule, got: ${JSON.stringify(direct.result)}`);
+        assert(direct.draft.body === userQuote, `direct rule body must be VERBATIM user_quote, got: ${direct.draft.body}`);
+        assert(direct.draft.kind === "preference", `direct rule kind should be 'preference', got: ${direct.draft.kind}`);
+        assert(fs.readFileSync(direct.result.path, "utf-8").includes(userQuote), `rule file must contain the verbatim quote`);
+        assert(globalThis.__A2_INVOCATIONS__ === 0, `direct lane must not consult the extractor (0 LLM), got: ${globalThis.__A2_INVOCATIONS__}`);
 
-        // (2) non-qualifying (task-local, conf 6) -> no seed -> llm_skip
+        // (2) non-qualifying (task-local, conf 6) -> not Tier-1 -> extractor path -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
-        const taskLocal = await _tryAutoWriteLaneForTests(laneArgs("smoke-seed-tasklocal", { signal_found: true, typing: "task-local", confidence: 6, user_quote: userQuote, target_entry_slug: null }));
-        assert(taskLocal.kind === "llm_skip", `task-local signal must NOT seed (gated), got: ${taskLocal.kind}`);
+        const taskLocal = await _tryAutoWriteLaneForTests(laneArgs("smoke-tier1-tasklocal", { signal_found: true, typing: "task-local", confidence: 6, user_quote: userQuote, target_entry_slug: null }));
+        assert(taskLocal.kind === "llm_skip", `task-local signal must NOT take the direct lane, got: ${taskLocal.kind}`);
 
-        // (3) durable but EMPTY user_quote -> no seed -> llm_skip
+        // (3) durable but NO provenance (and empty quote) -> structural gate fails -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
-        const noQuote = await _tryAutoWriteLaneForTests(laneArgs("smoke-seed-noquote", { signal_found: true, typing: "durable", confidence: 9, user_quote: "", target_entry_slug: null }));
-        assert(noQuote.kind === "llm_skip", `durable signal without user_quote must NOT seed, got: ${noQuote.kind}`);
+        const noQuote = await _tryAutoWriteLaneForTests(laneArgs("smoke-tier1-noquote", { signal_found: true, typing: "durable", confidence: 9, user_quote: "", target_entry_slug: null }));
+        assert(noQuote.kind === "llm_skip", `durable signal without user-expressed provenance must NOT direct-write, got: ${noQuote.kind}`);
 
-        // (4) durable WITH target_entry_slug (an UPDATE, not a create) -> no seed -> llm_skip
+        // (4) durable WITH target_entry_slug (an UPDATE, not a create) -> not Tier-1 -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
-        const hasTarget = await _tryAutoWriteLaneForTests(laneArgs("smoke-seed-target", { signal_found: true, typing: "durable", confidence: 9, user_quote: userQuote, target_entry_slug: "some-existing-rule" }));
-        assert(hasTarget.kind === "llm_skip", `signal targeting an existing entry (update) must NOT seed a create, got: ${hasTarget.kind}`);
+        const hasTarget = await _tryAutoWriteLaneForTests(laneArgs("smoke-tier1-target", { signal_found: true, typing: "durable", confidence: 9, user_quote: userQuote, target_entry_slug: "some-existing-rule" }));
+        assert(hasTarget.kind === "llm_skip", `signal targeting an existing entry (update) must NOT direct-create, got: ${hasTarget.kind}`);
 
-        // (5) extractor already emits a draft COVERING the rule -> seed suppressed (1 draft, not 2)
+        // (5) disjoint authority (R1'): even when the extractor WOULD emit a
+        //     covering draft, the Tier-1 lane commits first and never consults it
         globalThis.__A2_INVOCATIONS__ = 0;
         globalThis.__A2_RESPONSES__ = [`MEMORY:\ntitle: glab rule\nkind: preference\nconfidence: 8\n---\n# glab rule\n\n${userQuote}\nEND_MEMORY`];
-        const covered = await _tryAutoWriteLaneForTests(laneArgs("smoke-seed-cover", qualifyingSignal));
-        assert(covered.kind === "wrote" && Array.isArray(covered.drafts) && covered.drafts.length === 1,
-          `an extractor draft covering the rule must SUPPRESS the seed (1 draft, not 2), got: ${covered.drafts && covered.drafts.length}`);
+        const covered = await _tryAutoWriteLaneForTests(laneArgs("smoke-tier1-cover", qualifyingSignal));
+        assert(covered.kind === "tier1_direct", `Tier-1 owns directive candidates regardless of extractor output, got: ${covered.kind}`);
+        assert(covered.result.status === "deduped" && (covered.result.reason ?? "").startsWith("semantic_duplicate"), `restated rule must dedup against (1)'s write, got: ${JSON.stringify(covered.result)}`);
+        assert(globalThis.__A2_INVOCATIONS__ === 0, `extractor must not be consulted on the direct lane, got: ${globalThis.__A2_INVOCATIONS__}`);
 
-        // (6) qualifying signal but user_quote NOT grounded in the window -> attribution guard blocks seed -> llm_skip
+        // (6) provenance != user-expressed (README/tool content-in-transcript trap) -> NOT Tier-1 -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
-        // (6) provenance != user-expressed (README/tool content-in-transcript trap) -> NOT Tier-1 -> no seed -> llm_skip
-        const ungrounded = await _tryAutoWriteLaneForTests(laneArgs("smoke-seed-ungrounded", { signal_found: true, typing: "durable", confidence: 9, user_quote: userQuote, scope_description: "x", target_entry_slug: null, provenance: "content-in-transcript" }));
-        assert(ungrounded.kind === "llm_skip", `a content-in-transcript (non user-expressed) directive must NOT seed a Tier-1 rule, got: ${ungrounded.kind}`);
+        const ungrounded = await _tryAutoWriteLaneForTests(laneArgs("smoke-tier1-ungrounded", { signal_found: true, typing: "durable", confidence: 9, user_quote: userQuote, scope_description: "x", target_entry_slug: null, provenance: "content-in-transcript" }));
+        assert(ungrounded.kind === "llm_skip", `a content-in-transcript (non user-expressed) directive must NOT direct-write a Tier-1 rule, got: ${ungrounded.kind}`);
 
-        // (7) grounded but body too short to be a valid rule (quote<10, empty scope) -> not seeded (staging net) -> llm_skip
+        // (7) degenerate body (quote<10 chars, empty scope) -> direct lane fires but
+        //     the DETERMINISTIC validation gate rejects (ADR 0028 §11: deterministic
+        //     safety gates may stop a Tier-1 write; with R6' there is no staging
+        //     net — the held checkpoint + R3' recall audit are the nets)
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
         const tinyText = "--- ENTRY 1 r1 message/user ---\n用glab";
         const tinyWin = { entries: [{ type: "message", id: "r1", timestamp: "2026-06-07T00:00:01Z", message: { role: "user", content: [{ type: "text", text: tinyText }] } }], text: tinyText, chars: tinyText.length, totalBranchEntries: 1, candidateEntries: 1, includedEntries: 1, checkpointFound: false, lastEntryId: "r1" };
-        const tooShort = await _tryAutoWriteLaneForTests({ cwd: aRoot, sessionId: "smoke-seed-short", settings: a2Settings, window: tinyWin, modelRegistry: mockModelRegistry, signal: undefined, correlationId: "smoke-seed-short:auto", abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: "用glab", scope_description: "", target_entry_slug: null, provenance: "user-expressed" } });
-        assert(tooShort.kind === "llm_skip", `a grounded but <10-char body with no scope must NOT seed (writeAbrainRule would reject; staging is the net), got: ${tooShort.kind}`);
+        const tooShort = await _tryAutoWriteLaneForTests({ cwd: aRoot, sessionId: "smoke-tier1-short", settings: a2Settings, window: tinyWin, modelRegistry: mockModelRegistry, signal: undefined, correlationId: "smoke-tier1-short:auto", abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: "用glab", scope_description: "", target_entry_slug: null, provenance: "user-expressed" } });
+        assert(tooShort.kind === "tier1_direct" && tooShort.result.status === "rejected" && tooShort.result.reason === "validation_error_body", `a <10-char body must be rejected by the deterministic validation gate, got: ${JSON.stringify({ kind: tooShort.kind, result: tooShort.result && { status: tooShort.result.status, reason: tooShort.result.reason } })}`);
       }
 
       // === ADR 0025 multi-view replay writer dispatch ==================

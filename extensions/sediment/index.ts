@@ -48,7 +48,8 @@ import {
   summarizeLlmExtractorResult,
   type LlmExtractorResult,
 } from "./llm-extractor";
-import { runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
+import { buildProvisionalStagingEntry, runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
+import { writeStagingEntry } from "./staging-loader";
 import type { RuleDraft } from "./rule-writer";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
@@ -454,6 +455,16 @@ function isCapturedTier1Result(result: WriteRuleResult): boolean {
   return result.status === "created" || result.status === "deduped" || result.status === "dry_run";
 }
 
+/** Terminal deterministic reject (validation_error_*): the same quote fails
+ *  identically on every retry, so HOLDing the checkpoint would burn one
+ *  classifier call per turn until the window scrolls past. Advance instead —
+ *  the R3' recall audit flags the uncovered directive in the same turn
+ *  (coveredTexts only include CAPTURED Tier-1 writes). Transient failures
+ *  (e.g. git_commit_failed) stay non-terminal → checkpoint HOLD + retry. */
+function isTerminalTier1Reject(result: WriteRuleResult): boolean {
+  return result.status === "rejected" && typeof result.reason === "string" && result.reason.startsWith("validation_error");
+}
+
 interface DirectiveRecallCandidate {
   entryId?: string;
   quote: string;
@@ -830,7 +841,7 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
 }
 
 function shouldAdvanceAfterAutoOutcome(auto: AutoWriteLaneOutcome): boolean {
-  if (auto.kind === "tier1_direct") return isCapturedTier1Result(auto.result);
+  if (auto.kind === "tier1_direct") return isCapturedTier1Result(auto.result) || isTerminalTier1Reject(auto.result);
   if (auto.kind === "wrote") return shouldAdvanceAfterResults(auto.results);
   return auto.kind !== "llm_error";
 }
@@ -2142,6 +2153,18 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // do not want sediment observing. `true` and `"staging-only"` both run the
       // classifier (staging-only writes provisional staging but skips curator/writer).
       const classifierEnabled = settings.autoLlmWriteEnabled !== false;
+      // R6' window ownership (3-T0 P0 fix, 2026-06-10): staging suppression is
+      // only safe when THIS window's lane will actually run the Tier-1 direct
+      // writer. explicit/about_me windows and in-flight turns only park the
+      // signal in the volatile working set — their staging net must keep
+      // firing. MUST be captured SYNCHRONOUSLY here, before the classifier
+      // closure's first await: by the time the closure resumes, this turn's
+      // own lane (shortBg/long bg) has already registered itself in
+      // autoWriteInFlight and would be self-detected as "in-flight". At this
+      // point the map still reflects the PREVIOUS turn's bg — the thing the
+      // conjunct is actually about. Benign TOCTOU vs the in-flight branch:
+      // both directions fail open (staging written + direct write dedups).
+      const directLaneOwnsWindow = classifierLane === "auto_write" && !autoWriteInFlight.has(sessionId);
       if (branch && classifierEnabled) {
         correctionPromise = (async () => {
           let relatedEntries: RelatedEntryCard[] = [];
@@ -2207,6 +2230,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             settings,
             modelRegistry: modelRegistry as Parameters<typeof runCorrectionPipeline>[2]["modelRegistry"],
             signal: undefined,
+            directLaneOwnsWindow,
           });
           // Log classifier result to audit — always, so failures are traceable.
           appendAudit(cwd, {
@@ -2221,6 +2245,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             prompt_version: buildPromptVersionAudit("activeCorrectionClassifier", settings),
             ...(cr.error ? { error: cr.error } : {}),
             ...(cr.stagingAdvisory ? { staging_advisory: cr.stagingAdvisory } : {}),
+            ...(cr.stagingSuppressedReason ? { staging_suppressed_reason: cr.stagingSuppressedReason } : {}),
           }).then(() => {
             const health = summarizeClassifierHealth(cwd);
             if (health.classifierRowCount === 0 || health.ok) return undefined;
@@ -2407,6 +2432,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           return stored ? recordConsumedSessionCorrection("drain", corrId, stored) : null;
                         })(),
                       });
+                      // Known residual (3-T0 review 2026-06-10, accepted): a
+                      // TRANSIENT tier1 reject in the main lane holds its
+                      // checkpoint, but this drain pass has no classifier of
+                      // its own — an extractor llm_skip here advances past the
+                      // held window with only the R3' recall flag as the net.
                       const checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto);
                       if (checkpointAdvanced && win.lastEntryId) {
                         await saveSessionCheckpoint(cwd, sessionId, {
@@ -2419,7 +2449,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         window: win,
                         lane: "drain",
                         correlationId: corrId,
-                        coveredTexts: auto.kind === "tier1_direct" ? [auto.draft.body] : [],
+                        // R3': only a CAPTURED write covers the directive (see
+                        // the short-lane call above).
+                        coveredTexts: auto.kind === "tier1_direct" && isCapturedTier1Result(auto.result) ? [auto.draft.body] : [],
                       }).catch(() => {});
                       // Round 8 P1 (sonnet R8 audit fix): drain loop now
                       // writes audit rows for ALL outcomes (wrote /
@@ -2676,8 +2708,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                     r.status === "created" || r.status === "updated" || r.status === "merged" ||
                     r.status === "superseded" || r.status === "archived" || r.status === "deleted" ||
                     (r.reason ?? "").startsWith("semantic_duplicate"));
+                const terminalReject = auto.kind === "tier1_direct" && isTerminalTier1Reject(auto.result);
                 const safelyStaged = classifierResult.stagingWritten === true;
-                const advance = !transient && (captured || safelyStaged);
+                const advance = !transient && (captured || terminalReject || safelyStaged);
                 if (advance) {
                   await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: effectiveWindow.lastEntryId });
                   await recordDeferredRecoveryIfNeeded({ cwd, sessionId, window: effectiveWindow, checkpointAdvanced: true, lane: "auto_write", correlationId: shortCorrelationId });
@@ -2688,7 +2721,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   window: effectiveWindow,
                   lane: "auto_write",
                   correlationId: shortCorrelationId,
-                  coveredTexts: auto.kind === "tier1_direct" ? [auto.draft.body] : [],
+                  // R3': only a CAPTURED write covers the directive. A rejected
+                  // tier1_direct must NOT suppress the recall flag — it is the
+                  // designed net for the terminal-reject advance above.
+                  coveredTexts: auto.kind === "tier1_direct" && isCapturedTier1Result(auto.result) ? [auto.draft.body] : [],
                 }).catch(() => {});
                 if (auto.kind === "tier1_direct") {
                   await appendAudit(cwd, {
@@ -3762,6 +3798,36 @@ async function tryAutoWriteLane(args: {
   //   - "staging-only" → skip tryAutoWriteLane but classifier+staging keep running
   //   - true           → run extractor / curator / writer (default since P5.5)
   if (settings.autoLlmWriteEnabled !== true) {
+    // Cross-turn mode-flip guard (3-T0 P1 fix, 2026-06-10): the caller may
+    // have already CONSUMED a Tier-1 working-set signal (drain/long lane
+    // splice it out before calling us). Returning ineligible would drop it
+    // silently — and shouldAdvanceAfterAutoOutcome(ineligible) advances the
+    // checkpoint past it. In "staging-only" mode staging is the legitimate
+    // capture path, so park it there; in `false` mode the user's kill switch
+    // wins, but the drop must be auditable, never silent.
+    const flippedSignal = args.correctionSignal;
+    if (flippedSignal && shouldEscalateToCurator(flippedSignal)) {
+      if (settings.autoLlmWriteEnabled === "staging-only") {
+        const staged = writeStagingEntry(buildProvisionalStagingEntry(flippedSignal, window.text));
+        await appendAudit(cwd, {
+          operation: "tier1_degraded_capture",
+          lane: "auto_write",
+          session_id: sessionId,
+          correlation_id: correlationId,
+          mode: "staging-only",
+          staging_written: staged,
+          quote: sanitizeAuditText(flippedSignal.user_quote ?? "", 200),
+        }).catch(() => {});
+      } else {
+        await appendAudit(cwd, {
+          operation: "tier1_signal_dropped_kill_switch",
+          lane: "auto_write",
+          session_id: sessionId,
+          correlation_id: correlationId,
+          quote: sanitizeAuditText(flippedSignal.user_quote ?? "", 200),
+        }).catch(() => {});
+      }
+    }
     return {
       kind: "ineligible",
       eligibility: {
@@ -4038,6 +4104,7 @@ export function _resetAutoWriteStateForTests(): void {
  */
 export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
 export const _detectDirectiveRecallCandidatesForTests = detectDirectiveRecallCandidates;
+export const _shouldAdvanceAfterAutoOutcomeForTests = shouldAdvanceAfterAutoOutcome;
 export const _auditDirectiveRecallForTests = auditDirectiveRecall;
 export const _applyRuleOutcomeEdgeForTests = applyRuleOutcomeEdge;
 export function _refreshRuleCacheForOutcomeEdgeTests(args: Parameters<typeof scanRules>[0]): void {

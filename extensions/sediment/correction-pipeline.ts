@@ -111,6 +111,10 @@ export interface CorrectionPipelineResult {
   stagingWritten: boolean;
   /** Staging inflation advisory */
   stagingAdvisory?: string;
+  /** ADR 0028 R6': set when the durable signal skipped the staging net because
+   *  the deterministic Tier-1 direct lane owns it (§8 drift-signal observability:
+   *  "staging 又开始堆积 durable 条目" needs its inverse visible too). */
+  stagingSuppressedReason?: "tier1_direct_lane";
   /** #1 (T0 consensus 2026-06-07): a high-confidence USER-EXPRESSED durable
    *  CREATE signal (no target entry to update) that should ESCALATE to the full
    *  curator + multi-view lane for full-fidelity promotion (incl. zone:rules),
@@ -319,6 +323,44 @@ function sanitizeAuditText(text: string | undefined, maxLen: number): string {
  * @param relatedEntries — entry cards (slug+title+scope+summary) from memory_search
  * @param deps
  */
+/** Provisional staging capture for a durable correction signal. R6': only
+ *  for signals the Tier-1 direct lane does NOT own this turn — genuinely
+ *  uncertain Tier-2 hypotheses, unattributable signals, explicit/about_me/
+ *  in-flight windows, and degraded-mode (staging-only) capture. Exported so
+ *  tryAutoWriteLane can reuse it when a consumed working-set signal hits the
+ *  tristate gate after a cross-turn mode flip. */
+export function buildProvisionalStagingEntry(signal: CorrectionSignal, seedText: string): StagingEntry {
+  return {
+    slug: `provisional-${hash8(signal.user_quote ?? seedText)}`,
+    status: "provisional",
+    kind: "provisional-correction",
+    created: new Date().toISOString(),
+    attribution_pending: true,
+    originating_device: process.env.HOSTNAME ?? "unknown",
+    hypothesis: signal.resolution_hypothesis ?? signal.scope_description ?? signal.correction_intent ?? "unknown correction signal",
+    source_utterance: [{
+      quote: signal.user_quote ?? "",
+      context: signal.surrounding_context ?? "",
+      captured_at: new Date().toISOString(),
+    }],
+    suggested_resolution_paths: [
+      "search-related-with-different-keywords",
+      "wait-for-next-utterance-with-stronger-attribution",
+      "reviewer-decide-via-archive-reactivation-prompt",
+    ],
+    correction_signal: {
+      typing: signal.typing ?? "durable",
+      confidence: signal.confidence ?? 5,
+      scope_description: signal.scope_description ?? "",
+      correction_intent: signal.correction_intent ?? "",
+      most_likely_error_direction: signal.most_likely_error ?? "",
+    },
+    _provenance_warning:
+      "PROVISIONAL CLASSIFIER GUESS. Do NOT treat as ground truth. " +
+      "The only valid use is to RESOLVE this guess (promote / attribute / refute) or let it age.",
+  };
+}
+
 export async function runCorrectionPipeline(
   branchEntries: unknown[],
   relatedEntries: RelatedEntryCard[],
@@ -326,6 +368,13 @@ export async function runCorrectionPipeline(
     settings: SedimentSettings;
     modelRegistry: ModelRegistryLike;
     signal?: AbortSignal;
+    /** R6' window-ownership attestation from the caller: true ONLY when THIS
+     *  window's processing lane will actually invoke the Tier-1 direct writer
+     *  this turn (auto_write short/long lane, not blocked by an in-flight bg
+     *  run). explicit/about_me windows and in-flight turns never run
+     *  tryAutoWriteLane — for them the staging net stays the deterministic
+     *  capture. Fail-open default: absent/false → staging keeps firing. */
+    directLaneOwnsWindow?: boolean;
   },
 ): Promise<CorrectionPipelineResult> {
   const start = Date.now();
@@ -450,51 +499,41 @@ export async function runCorrectionPipeline(
   };
 
   // 6. Resolve durable + no-target signals.
-  // #1 (T0 consensus 2026-06-07): a high-confidence USER-EXPRESSED durable create
-  // ESCALATES to the full curator + multi-view lane so the short-window path can
-  // promote it at FULL fidelity (incl. zone:rules) instead of relying on a lossy
-  // flattened hypothesis. AUDIT P0 FOLLOW-UP (2026-06-07): the consensus also
-  // wanted to SUPPRESS the staging write for this class, but the curator path is
-  // NOT guaranteed to promote (extractor miss / curator skip / llm_error), so
-  // suppressing the only fallback risked SILENT LOSS — fatal in a second brain.
-  // We KEEP the staging write as a no-loss SAFETY NET; escalation is the
-  // high-fidelity primary path, staging is the fallback, and #2 write-time dedup
-  // stops the staged entry from later producing a duplicate rule.
+  // ADR 0028 R6' staging narrowing (supersedes the 2026-06-07 "keep staging as
+  // Tier-1 safety net" deferral — its precondition is now met): staging is ONLY
+  // for genuinely uncertain Tier-2 hypotheses / unattributable signals. A
+  // Tier-1-eligible signal (user-expressed ∧ durable ∧ conf≥8, i.e.
+  // shouldEscalateToCurator) is owned by the DETERMINISTIC direct writer
+  // (dc5de52): it commits with 0 additional LLM after classifier detection, so
+  // the staging net it once needed is dead weight that re-opens B1 (durable
+  // entries accumulating in staging — an explicit §8 drift signal). No-loss
+  // still holds without it:
+  //   - direct write captured (created/deduped/dry_run) → checkpoint advances;
+  //   - terminal deterministic reject (validation_error_*) → checkpoint
+  //     advances + the R3' recall audit flags the uncovered directive (§11:
+  //     deterministic safety gates may stop a Tier-1 write);
+  //   - transient failure → checkpoint HOLDS and the signal re-classifies
+  //     next turn (bounded by window scroll).
+  // Suppression preconditions (3-T0 blind-review convergence, 2026-06-10):
+  //   1. autoLlmWriteEnabled === true — in "staging-only" mode the direct lane
+  //      never runs and staging IS the capture path; in false mode the
+  //      classifier itself is off upstream (hard kill switch — capturing
+  //      nothing is the user's stated intent).
+  //   2. deps.directLaneOwnsWindow — settings-level liveness is NOT window
+  //      ownership: explicit/about_me windows and in-flight turns never run
+  //      tryAutoWriteLane, so suppressing their staging would leave the
+  //      directive only in the volatile working set (the exact silent-loss
+  //      class ADR 0028 exists to kill).
   if (shouldEscalateToCurator(signal)) result.escalateToCurator = true;
-  if (signal?.signal_found && signal.typing === "durable" && !signal.target_entry_slug) {
-    const stagingEntry: StagingEntry = {
-      slug: `provisional-${hash8(signal.user_quote ?? rawText)}`,
-      status: "provisional",
-      kind: "provisional-correction",
-      created: new Date().toISOString(),
-      attribution_pending: true,
-      originating_device: process.env.HOSTNAME ?? "unknown",
-      hypothesis: signal.resolution_hypothesis ?? signal.scope_description ?? signal.correction_intent ?? "unknown correction signal",
-      source_utterance: [{
-        quote: signal.user_quote ?? "",
-        context: signal.surrounding_context ?? "",
-        captured_at: new Date().toISOString(),
-      }],
-      suggested_resolution_paths: [
-        "search-related-with-different-keywords",
-        "wait-for-next-utterance-with-stronger-attribution",
-        "reviewer-decide-via-archive-reactivation-prompt",
-      ],
-      correction_signal: {
-        typing: signal.typing ?? "durable",
-        confidence: signal.confidence ?? 5,
-        scope_description: signal.scope_description ?? "",
-        correction_intent: signal.correction_intent ?? "",
-        most_likely_error_direction: signal.most_likely_error ?? "",
-      },
-      _provenance_warning:
-        "PROVISIONAL CLASSIFIER GUESS. Do NOT treat as ground truth. " +
-        "The only valid use is to RESOLVE this guess (promote / attribute / refute) or let it age.",
-    };
+  const tier1DirectLaneLive = result.escalateToCurator === true
+    && deps.settings.autoLlmWriteEnabled === true
+    && deps.directLaneOwnsWindow === true;
+  if (tier1DirectLaneLive) result.stagingSuppressedReason = "tier1_direct_lane";
+  if (signal?.signal_found && signal.typing === "durable" && !signal.target_entry_slug && !tier1DirectLaneLive) {
     // stagingWritten reflects ACTUAL IO success (audit P0 2026-06-07): the
     // short-window escalation holds its checkpoint when the safety net did not
     // persist, so this must not optimistically report true on a failed write.
-    result.stagingWritten = writeStagingEntry(stagingEntry);
+    result.stagingWritten = writeStagingEntry(buildProvisionalStagingEntry(signal, rawText));
   }
 
   // 7. Staging inflation advisory — counts ACTIVE files only (Stage 4: exclude
