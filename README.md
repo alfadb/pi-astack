@@ -83,11 +83,19 @@ pi-astack 的运行时配置不走 `piStack` namespace，也不依赖官方 sett
 
 ### Windows 支持边界
 
-Windows 上仅支持把 Git Bash/MSYS2 作为 pi 的命令运行时；PowerShell/cmd 只适合作为启动器，不能作为 `bash` tool 的 shell。推荐在 `~/.pi/agent/settings.json` 固定 Git Bash：
+Windows 上仅支持把 Git Bash/MSYS2 作为 pi-astack vault bash 注入的命令运行时；PowerShell/cmd 只适合作为启动器，不能作为 `bash` tool 的 shell。默认使用 Git for Windows：
+
+```text
+C:\Program Files\Git\bin\bash.exe
+```
+
+只有 Git Bash/MSYS2 安装在其他位置时，才需要在 `~/.pi/agent/pi-astack-settings.json` 显式覆盖：
 
 ```json
 {
-  "shellPath": "C:\\Program Files\\Git\\bin\\bash.exe"
+  "abrain": {
+    "windowsVaultBashPath": "C:\\Program Files\\Git\\bin\\bash.exe"
+  }
 }
 ```
 

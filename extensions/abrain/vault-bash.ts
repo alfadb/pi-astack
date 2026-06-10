@@ -134,7 +134,7 @@ export function classifyWindowsVaultBashProfile(input: WindowsVaultBashProfileIn
     return {
       ok: false,
       kind: "wsl",
-      reason: "vault bash injection on Windows requires Git Bash/MSYS2; WSL bash.exe is a separate Linux filesystem. Launch pi inside WSL, or set shellPath to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe).",
+      reason: "vault bash injection on Windows requires Git Bash/MSYS2; WSL bash.exe is a separate Linux filesystem. Launch pi inside WSL, or set abrain.windowsVaultBashPath in pi-astack-settings.json to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe).",
     };
   }
 
@@ -142,7 +142,7 @@ export function classifyWindowsVaultBashProfile(input: WindowsVaultBashProfileIn
     return {
       ok: false,
       kind: "cygwin",
-      reason: "vault bash injection on Windows supports Git Bash/MSYS2 only; Cygwin bash is not supported. Set shellPath to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe).",
+      reason: "vault bash injection on Windows supports Git Bash/MSYS2 only; Cygwin bash is not supported. Set abrain.windowsVaultBashPath in pi-astack-settings.json to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe).",
     };
   }
 
@@ -162,7 +162,7 @@ export function classifyWindowsVaultBashProfile(input: WindowsVaultBashProfileIn
   return {
     ok: false,
     kind: "unknown",
-    reason: "vault bash injection on Windows requires Git Bash/MSYS2. Set shellPath to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe); PowerShell/cmd are launchers only, not command runtimes.",
+    reason: "vault bash injection on Windows requires Git Bash/MSYS2. Set abrain.windowsVaultBashPath in pi-astack-settings.json to Git Bash (C:\\Program Files\\Git\\bin\\bash.exe); PowerShell/cmd are launchers only, not command runtimes.",
   };
 }
 

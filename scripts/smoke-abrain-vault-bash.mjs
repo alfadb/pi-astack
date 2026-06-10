@@ -358,6 +358,30 @@ await check("post-audit P0 fix anchors: tool_result handler wires outcome.decisi
   }
 });
 
+await check("Windows vault bash path is owned by pi-astack settings, not pi core shellPath", () => {
+  const indexSrc = fs.readFileSync(path.join(repoRoot, "extensions", "abrain", "index.ts"), "utf8");
+  const anchors = [
+    'const PI_STACK_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");',
+    'const DEFAULT_WINDOWS_VAULT_BASH_PATH = "C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe";',
+    "const configured = abrain.windowsVaultBashPath;",
+  ];
+  for (const needle of anchors) {
+    if (!indexSrc.includes(needle)) {
+      throw new Error(
+        `regression: pi-astack-owned Windows vault bash setting anchor missing:\n  needle: ${JSON.stringify(needle)}`,
+      );
+    }
+  }
+  const forbidden = ["SettingsManager", "getShellConfig", "getShellPath"];
+  for (const needle of forbidden) {
+    if (indexSrc.includes(needle)) {
+      throw new Error(
+        `regression: abrain index.ts reads pi core shellPath again:\n  needle: ${JSON.stringify(needle)}`,
+      );
+    }
+  }
+});
+
 // ADR 0022 batch C (2026-05-19): grep anchor for non-configurable
 // globalThis hook (`__abrainPromptUserGetPending`). This is the
 // defense-in-depth follow-up to OPUS P1-3 round 2: published as a
@@ -403,7 +427,7 @@ await check("batch C: __abrainPromptUserGetPending is installed non-configurable
 // applied in smoke-abrain-vault-grant-isolation. A future edit that
 // silently drops a check(...) block now fails this smoke with
 // 'assertion count drift' rather than passing with reduced coverage.
-const EXPECTED_ASSERTIONS = 28;
+const EXPECTED_ASSERTIONS = 29;
 if (total !== EXPECTED_ASSERTIONS) {
   failures.push({
     name: "assertion count drift",

@@ -107,6 +107,8 @@ const VAULT_DISABLED_FLAG = path.join(STATE_DIR, "vault-disabled");
 // ── Sub-pi enforce constants ────────────────────────────────────────────
 
 const PI_ABRAIN_DISABLED = "PI_ABRAIN_DISABLED";
+const PI_STACK_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");
+const DEFAULT_WINDOWS_VAULT_BASH_PATH = "C:\\Program Files\\Git\\bin\\bash.exe";
 
 // ── Runtime helpers (the dependencies detectBackend needs) ──────────────
 
@@ -174,27 +176,27 @@ function buildRealDeps(): DetectDeps {
   };
 }
 
-function resolveConfiguredBashShellPath(): string | undefined {
-  if (process.platform !== "win32") return undefined;
+function loadPiStackSettings(): Record<string, unknown> {
   try {
-    // Lazy require keeps smoke fixtures that only load abrain exports from
-    // pulling pi's runtime API graph at module import time.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const codingAgent = require("@earendil-works/pi-coding-agent") as {
-      getAgentDir?: () => string;
-      getShellConfig?: (customShellPath?: string) => { shell: string; args: string[] };
-      SettingsManager?: {
-        create?: (cwd: string, agentDir?: string) => { getShellPath?: () => string | undefined };
-      };
-    };
-    const configured = codingAgent.SettingsManager
-      ?.create?.(process.cwd(), codingAgent.getAgentDir?.())
-      ?.getShellPath?.();
-    return codingAgent.getShellConfig?.(configured)?.shell ?? configured;
+    return JSON.parse(fs.readFileSync(PI_STACK_SETTINGS_PATH, "utf8"));
   } catch (err) {
-    console.error(`[abrain] could not resolve pi bash shellPath for vault injection guard: ${(err as Error)?.message ?? err}`);
-    return undefined;
+    if (err && typeof err === "object" && (err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`pi-astack: failed to parse ${PI_STACK_SETTINGS_PATH}: ${message}. Using defaults.`);
+    return {};
   }
+}
+
+function resolveWindowsVaultBashPath(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  const root = loadPiStackSettings();
+  const abrain = root.abrain && typeof root.abrain === "object"
+    ? root.abrain as Record<string, unknown>
+    : {};
+  const configured = abrain.windowsVaultBashPath;
+  return typeof configured === "string" && configured.trim()
+    ? configured.trim()
+    : DEFAULT_WINDOWS_VAULT_BASH_PATH;
 }
 
 // ── Public API: pure status query (no side effects) ─────────────────────
@@ -1277,7 +1279,7 @@ export default function activate(pi: ExtensionAPI): void {
   const registry = pi as unknown as CommandRegistry;
   const toolRegistry = pi as unknown as ToolRegistry;
   const eventRegistry = pi as unknown as EventRegistry;
-  const vaultBashShellPath = resolveConfiguredBashShellPath();
+  const vaultBashShellPath = resolveWindowsVaultBashPath();
 
   if (typeof eventRegistry.on === "function") {
     // Startup git sync trigger (Round 5 UX fix, 2026-05-17). We capture

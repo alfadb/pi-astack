@@ -15,6 +15,21 @@
       "description": "Free-form comment field. JSON has no native comments; use this (or any underscore-prefixed key) for inline documentation."
     },
 
+    "abrain": {
+      "type": "object",
+      "description": "Abrain / vault settings (extensions/abrain/). Handles strict project binding, vault release, and Windows vault-backed bash injection guard.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "windowsVaultBashPath": {
+          "type": "string",
+          "default": "C:\\Program Files\\Git\\bin\\bash.exe",
+          "description": "Windows-only override for vault-backed bash injection. Default is Git for Windows bash.exe. Set this only when using another supported Git Bash/MSYS2 path; WSL and Cygwin remain unsupported for Windows-hosted pi."
+        }
+      }
+    },
+
     "modelCurator": {
       "type": "object",
       "description": "Whitelist + capability hints for chat models. The curator filters pi-ai's hundreds of built-in model definitions to a curated keep-list per provider, then injects a markdown capability table into the main session system prompt on every turn.",
