@@ -94,6 +94,14 @@ async function generateImage(
   const reqBody: Record<string, unknown> = {
     model: params.model || "gpt-image-2",
     input: styledPrompt,
+    // 2026-06-10 fix: stream the response. Image generation regularly takes
+    // 60-180s; reverse proxies in front of the endpoint (observed: Caddy in
+    // front of sub2api with a 60s response timeout) kill the connection with
+    // 504 while the upstream generation completes successfully. With
+    // stream:true the headers + SSE events (incl. keepalives) flow
+    // immediately, so no intermediary idle/header timeout fires. The full
+    // image arrives in the final `response.completed` event.
+    stream: true,
   };
   if (params.size) reqBody.size = params.size;
   if (params.quality) reqBody.quality = params.quality;
@@ -123,7 +131,19 @@ async function generateImage(
     };
   }
 
-  const data = (await response.json()) as Record<string, unknown>;
+  // Streamed endpoints answer with text/event-stream; endpoints that ignore
+  // `stream` (or proxies that unwrap it) still answer with application/json.
+  // Support both: parse SSE for the terminal response.completed event, or
+  // fall back to plain JSON.
+  const contentType = response.headers.get("content-type") ?? "";
+  let data: Record<string, unknown>;
+  if (contentType.includes("text/event-stream")) {
+    const sse = await readSseTerminalResponse(response.body);
+    if (!sse.ok) return { ok: false, error: sse.error };
+    data = sse.response;
+  } else {
+    data = (await response.json()) as Record<string, unknown>;
+  }
 
   let imageBase64 = "";
   let actualSize: string | undefined;
@@ -169,6 +189,99 @@ async function generateImage(
     ...(opts.callerSupportsImages
       ? { imageBase64, mimeType: "image/png" as const }
       : {}),
+  };
+}
+
+// ── SSE parsing ─────────────────────────────────────────────────
+
+type SseTerminalResult =
+  | { ok: true; response: Record<string, unknown> }
+  | { ok: false; error: string };
+
+/**
+ * Read an OpenAI Responses API SSE stream to completion and return the
+ * terminal `response.completed` payload's `.response` object (same shape as
+ * the non-streaming JSON body). `response.failed` / `response.incomplete` /
+ * `error` events map to an error result. Intermediate events (partial
+ * images, keepalives, text deltas) are skipped — we only need the final
+ * image. AbortSignal propagation: the fetch signal already covers body
+ * reads, so no extra wiring is needed here.
+ */
+async function readSseTerminalResponse(
+  body: ReadableStream<Uint8Array> | null,
+): Promise<SseTerminalResult> {
+  if (!body) return { ok: false, error: "SSE response had no body" };
+
+  const decoder = new TextDecoder("utf-8", { fatal: false });
+  let buf = "";
+  let eventType = "";
+  let dataLines: string[] = [];
+  let completed: Record<string, unknown> | undefined;
+  let failure: string | undefined;
+  const seenTypes = new Set<string>();
+
+  const flushEvent = () => {
+    const t = eventType;
+    const dataStr = dataLines.join("\n");
+    eventType = "";
+    dataLines = [];
+    if (!t && !dataStr) return;
+    if (t) seenTypes.add(t);
+    if (
+      t !== "response.completed" &&
+      t !== "response.failed" &&
+      t !== "response.incomplete" &&
+      t !== "error"
+    ) {
+      return;
+    }
+    try {
+      const payload = JSON.parse(dataStr) as Record<string, unknown>;
+      if (t === "response.completed") {
+        completed = payload.response as Record<string, unknown>;
+      } else if (t === "error") {
+        failure = `SSE error event: ${dataStr.slice(0, 300)}`;
+      } else {
+        const resp = payload.response as Record<string, unknown> | undefined;
+        const err = (resp?.error ?? payload.error) as
+          | { message?: string }
+          | undefined;
+        failure = `SSE ${t}: ${err?.message ?? dataStr.slice(0, 300)}`;
+      }
+    } catch {
+      failure = failure ?? `SSE ${t} event had unparseable JSON data`;
+    }
+  };
+
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, idx).replace(/\r$/, "");
+        buf = buf.slice(idx + 1);
+        if (line === "") flushEvent();
+        else if (line.startsWith("event:")) eventType = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+        // comment lines (":keepalive") and unknown fields are ignored per SSE spec
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released */ }
+  }
+  buf += decoder.decode();
+  if (dataLines.length > 0 || eventType) flushEvent();
+
+  if (completed) return { ok: true, response: completed };
+  if (failure) return { ok: false, error: failure };
+  return {
+    ok: false,
+    error:
+      `SSE stream ended without response.completed. ` +
+      `Events seen: [${[...seenTypes].join(", ") || "none"}]`,
   };
 }
 
