@@ -25,6 +25,7 @@
  *   7. Audit row.
  */
 
+import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import { mkdir } from "node:fs/promises";
@@ -51,7 +52,7 @@ import { runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, 
 import type { RuleDraft } from "./rule-writer";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
-import { collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug, type OutcomeRow } from "./outcome-collector";
+import { appendRuleOutcomeEdgeRows, collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug, type OutcomeRow, type RuleOutcomeEdgeRow } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
@@ -528,26 +529,34 @@ function userTextForDirectiveRecall(entry: unknown): { entryId?: string; text: s
   };
 }
 
-function hasCorrespondingInjectedRule(
+function ruleInjectedText(rule: ReturnType<typeof getCurrentInjectedRuleEntries>[number]): string {
+  return `${rule.title}\n${rule.body}\n${rule.mustDoSummary}\n${rule.appliesWhen}\n${rule.triggerPhrases.join("\n")}`;
+}
+
+function findCorrespondingInjectedRule(
   quote: string,
   rules: ReturnType<typeof getCurrentInjectedRuleEntries>,
-): boolean {
-  return rules.some((rule) => {
-    const ruleText = `${rule.title}\n${rule.body}\n${rule.mustDoSummary}\n${rule.appliesWhen}\n${rule.triggerPhrases.join("\n")}`;
-    return recallOverlapScore(quote, ruleText) >= 0.72;
-  });
+): ReturnType<typeof getCurrentInjectedRuleEntries>[number] | undefined {
+  return rules.find((rule) => recallOverlapScore(quote, ruleInjectedText(rule)) >= 0.72);
 }
 
 function hasCoveredDirectiveText(quote: string, coveredTexts: string[]): boolean {
   return coveredTexts.some((text) => recallOverlapScore(quote, text) >= 0.72);
 }
 
+interface DirectiveRestatement {
+  entryId?: string;
+  quote: string;
+  rule: ReturnType<typeof getCurrentInjectedRuleEntries>[number];
+}
+
 function detectDirectiveRecallCandidates(
   entries: unknown[],
   rules: ReturnType<typeof getCurrentInjectedRuleEntries> = getCurrentInjectedRuleEntries(),
   coveredTexts: string[] = [],
-): DirectiveRecallCandidate[] {
-  const out: DirectiveRecallCandidate[] = [];
+): { missing: DirectiveRecallCandidate[]; restated: DirectiveRestatement[] } {
+  const missing: DirectiveRecallCandidate[] = [];
+  const restated: DirectiveRestatement[] = [];
   const seen = new Set<string>();
   for (const entry of entries) {
     const user = userTextForDirectiveRecall(entry);
@@ -556,16 +565,26 @@ function detectDirectiveRecallCandidates(
       const normalized = normalizeRecallText(quote);
       if (!normalized || seen.has(normalized)) continue;
       seen.add(normalized);
+      // Same-turn writes (coveredTexts) win: that utterance is the ORIGIN of
+      // a rule, not a reuse of an existing one — neither a recall gap nor a
+      // restatement MATCH.
       if (hasCoveredDirectiveText(quote, coveredTexts)) continue;
-      if (hasCorrespondingInjectedRule(quote, rules)) continue;
-      out.push({
+      const rule = findCorrespondingInjectedRule(quote, rules);
+      if (rule) {
+        // ADR 0028 R4' user-anchored MATCH: the user re-expressed a directive
+        // we already inject. The agent cannot author user turns, so this
+        // evidence is structurally immune to self-echo.
+        restated.push({ ...(user.entryId ? { entryId: user.entryId } : {}), quote, rule });
+        continue;
+      }
+      missing.push({
         ...(user.entryId ? { entryId: user.entryId } : {}),
         quote,
         reason: "user_role_imperative_without_corresponding_injected_rule",
       });
     }
   }
-  return out;
+  return { missing, restated };
 }
 
 async function auditDirectiveRecall(args: {
@@ -577,7 +596,40 @@ async function auditDirectiveRecall(args: {
   coveredTexts?: string[];
 }): Promise<void> {
   const injectedRules = getCurrentInjectedRuleEntries();
-  const candidates = detectDirectiveRecallCandidates(args.window.entries, injectedRules, args.coveredTexts ?? []);
+  const { missing: candidates, restated } = detectDirectiveRecallCandidates(args.window.entries, injectedRules, args.coveredTexts ?? []);
+  const nonce = getCurrentRuleInjectionNonce();
+  if (restated.length > 0 && nonce) {
+    const ts = new Date().toISOString();
+    const written = appendRuleOutcomeEdgeRows(restated.map((r) => ({
+      ts,
+      session_id: args.sessionId,
+      injection_nonce: nonce,
+      edge: "MATCH" as const,
+      rule_slug: r.rule.slug,
+      rule_scope: r.rule.scope,
+      ...(r.rule.projectId ? { project_id: r.rule.projectId } : {}),
+      rule_status: r.rule.status,
+      evidence_source: "user_directive_restatement" as const,
+      // Stable per-utterance id: same restatement re-scanned in the same
+      // session dedups; a fresh restatement in a later session is new evidence.
+      outcome_event_id: `restatement:${r.rule.slug}:${createHash("sha256").update(normalizeRecallText(r.quote)).digest("hex").slice(0, 16)}`,
+    })));
+    if (written.length > 0) {
+      await appendAudit(args.cwd, {
+        operation: "rule_outcome_edge",
+        lane: args.lane ?? "diagnostic",
+        session_id: args.sessionId,
+        injection_nonce: nonce,
+        edge: "MATCH",
+        evidence_source: "user_directive_restatement",
+        keyed_on: "raw_user_role_transcript",
+        match_applied: true,
+        status_mutation: "none",
+        restatements: written.slice(0, 8).map((row) => ({ rule_slug: row.rule_slug, rule_scope: row.rule_scope })),
+        quotes: restated.slice(0, 8).map((r) => sanitizeAuditText(r.quote, 240)),
+      }).catch(() => {});
+    }
+  }
   if (candidates.length === 0) return;
   await appendAudit(args.cwd, {
     operation: "directive_recall_audit",
@@ -604,6 +656,46 @@ function isRuleContradictionOutcome(row: OutcomeRow): boolean {
   const counterfactual = String(row.counterfactual ?? "").toLowerCase();
   if (/(no\s+(contradiction|conflict)|not\s+(a\s+)?(contradiction|conflict|wrong|incorrect)|does\s+not\s+(contradict|conflict)|相同决定|没有矛盾|不矛盾|没有冲突|不冲突|并不矛盾|并不冲突)/i.test(counterfactual)) return false;
   return /(contradict|conflict|wrong|incorrect|opposite|矛盾|冲突|相反|不对|错了|错误|不要这样|不能这样)/i.test(counterfactual);
+}
+
+/** ADR 0028 R4' MATCH candidate: footnote self-report only. Mechanical
+ *  tool-result retrieval of a currently injected rule is self-echo by
+ *  construction — the entry sits in the context window because we injected
+ *  it — so it never counts as confirmation (自回声扣除, first cut). */
+function isRuleMatchOutcome(row: OutcomeRow): boolean {
+  if (row.source !== "memory-footnote") return false;
+  return row.used === "decisive" || row.used === "confirmatory";
+}
+
+/** Protocol filler that claims sameness without specifics (the footnote
+ *  protocol's canonical confirmatory counterfactual is literally 「相同决定」).
+ *  A sameness claim with no independent reasoning carries zero evidence. */
+const MATCH_NO_DIFFERENCE_RE = /(相同决定|相同的决定|一样的决定|没有不同|没有区别|无不同|无区别|same\s+decision|no\s+difference|would\s+(have\s+)?(done|made|chosen)\s+the\s+same)/i;
+
+/** ADR 0028 R4' 自回声扣除, second cut — mechanical (no LLM). A MATCH may
+ *  not count the agent's own injected rule text — or behavior driven by it —
+ *  as independent confirmation:
+ *  - `decisive` on an INJECTED rule narrates how the injection changed the
+ *    agent's behavior. That is injection efficacy, not rule correctness; the
+ *    repo's own echo model already says so (decide.ts "NOT user
+ *    reconfirmation"; `possible_echo_chamber` is computed from decisive
+ *    streaks) → `injection_compliance`.
+ *  - An absent counterfactual carries no independent evidence at all.
+ *  - A counterfactual that parrots the injected rule text back is an echo.
+ *  - A bare "same decision" filler claims independence without evidence.
+ *  What survives: `confirmatory` with substantive independent reasoning —
+ *  the one self-report shape that asserts agreement reached without the rule.
+ *  Returns the deduction reason, or null when the MATCH survives. */
+function deductRuleMatchSelfEcho(
+  row: OutcomeRow,
+  rule: ReturnType<typeof getCurrentInjectedRuleEntries>[number],
+): string | null {
+  if (row.used === "decisive") return "injection_compliance";
+  const counterfactual = String(row.counterfactual ?? "").trim();
+  if (!counterfactual) return "missing_counterfactual";
+  if (recallOverlapScore(counterfactual, ruleInjectedText(rule)) >= 0.72) return "echo_of_injected_text";
+  if (MATCH_NO_DIFFERENCE_RE.test(counterfactual)) return "counterfactual_claims_no_difference";
+  return null;
 }
 
 function compoundRuleKey(entry: { slug: string; scope: "global" | "project"; projectId?: string }): string {
@@ -641,10 +733,52 @@ async function applyRuleOutcomeEdge(args: {
   const nonce = getCurrentRuleInjectionNonce();
   const injected = getCurrentInjectedRuleEntries();
   if (!nonce || injected.length === 0 || args.rows.length === 0) return;
+  const ledgerRows: RuleOutcomeEdgeRow[] = [];
   for (const row of args.rows) {
-    if (!isRuleContradictionOutcome(row)) continue;
+    const edge = isRuleContradictionOutcome(row) ? "CONTRADICT" : isRuleMatchOutcome(row) ? "MATCH" : null;
+    if (!edge) continue;
     const entry = uniquelyMatchInjectedRuleBySlug(row.entry_slug, injected);
     if (!entry) continue;
+    const baseLedgerRow = {
+      ts: new Date().toISOString(),
+      session_id: args.sessionId,
+      injection_nonce: nonce,
+      rule_slug: entry.slug,
+      rule_scope: entry.scope,
+      ...(entry.projectId ? { project_id: entry.projectId } : {}),
+      rule_status: entry.status,
+      ...(row.used ? { outcome_used: row.used } : {}),
+      ...(row.event_id ? { outcome_event_id: row.event_id } : {}),
+    };
+    if (edge === "MATCH") {
+      // R4' weak confirm — asymmetric by design: CONTRADICT acts immediately
+      // (strong demote below), a single MATCH never mutates status/authority.
+      // Surviving (echo-guarded) self-report MATCHes only accumulate as
+      // mechanical evidence in the rule-outcome-edge ledger; deducted
+      // candidates are audit-only. (The user-anchored restatement MATCH lives
+      // in auditDirectiveRecall — transcript-keyed, not footnote-keyed.)
+      const deductReason = deductRuleMatchSelfEcho(row, entry);
+      if (!deductReason) ledgerRows.push({ ...baseLedgerRow, edge: "MATCH", evidence_source: "self_report" });
+      await appendAudit(args.cwd, {
+        operation: "rule_outcome_edge",
+        lane: "outcome_edge",
+        session_id: args.sessionId,
+        injection_nonce: nonce,
+        edge: "MATCH",
+        evidence_source: "self_report",
+        rule_slug: entry.slug,
+        rule_scope: entry.scope,
+        ...(entry.projectId ? { project_id: entry.projectId } : {}),
+        rule_status: entry.status,
+        outcome_source: row.source,
+        outcome_used: row.used,
+        outcome_event_id: row.event_id,
+        match_applied: !deductReason,
+        ...(deductReason ? { deduct_reason: deductReason } : {}),
+        status_mutation: "none",
+      }).catch(() => {});
+      continue;
+    }
     const result = await mutateRuleStatusContested(entry.slug, entry.scope, entry.projectId, {
       abrainHome: args.abrainHome,
       settings: args.settings,
@@ -656,22 +790,27 @@ async function applyRuleOutcomeEdge(args: {
       },
       reason: `ADR 0028 R4 CONTRADICT from outcome edge${row.counterfactual ? `: ${String(row.counterfactual).slice(0, 160)}` : ""}`,
     });
+    const statusMutation = result.status === "updated" && result.reason === "contested" ? "status_to_contested" : "not_applied";
+    ledgerRows.push({ ...baseLedgerRow, edge: "CONTRADICT", evidence_source: "self_report", status_mutation: statusMutation });
     await appendAudit(args.cwd, {
       operation: "rule_outcome_edge",
       lane: "outcome_edge",
       session_id: args.sessionId,
       injection_nonce: nonce,
       edge: "CONTRADICT",
+      evidence_source: "self_report",
       rule_slug: entry.slug,
       rule_scope: entry.scope,
       ...(entry.projectId ? { project_id: entry.projectId } : {}),
+      rule_status: entry.status,
       outcome_source: row.source,
       outcome_used: row.used,
       outcome_event_id: row.event_id,
       result: resultSummary(result),
-      status_mutation: result.status === "updated" && result.reason === "contested" ? "status_to_contested" : "not_applied",
+      status_mutation: statusMutation,
     }).catch(() => {});
   }
+  if (ledgerRows.length > 0) appendRuleOutcomeEdgeRows(ledgerRows);
 }
 
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
@@ -1497,8 +1636,15 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       if (sessionId) {
         const outcome = collectOutcomes(branch, sessionId);
         if (outcome.rows.length > 0) {
-          writeOutcomeLedger(outcome.rows, cwd);
-          applyRuleOutcomeEdge({ cwd, abrainHome, settings, sessionId, rows: outcome.rows }).catch(() => {});
+          // R4' delta contract: the live path rescans the FULL session branch
+          // every turn; only rows the ledger writer actually appended this
+          // turn feed the rule outcome edge. Replaying historical footnotes
+          // would spam audit rows, re-run CONTRADICT demotes, and stamp old
+          // evidence with the current injection nonce.
+          const newRows = writeOutcomeLedger(outcome.rows, cwd);
+          if (newRows.length > 0) {
+            applyRuleOutcomeEdge({ cwd, abrainHome, settings, sessionId, rows: newRows }).catch(() => {});
+          }
         }
         if (outcome.dropped.length > 0) {
           appendAudit(cwd, {

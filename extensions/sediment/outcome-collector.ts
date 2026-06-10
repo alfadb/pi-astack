@@ -242,7 +242,9 @@ function parseMemoryFootnote(text: string): {
  * Combines mechanical retrieval tracking + self-report footnote parsing.
  *
  * Returns `{ rows, dropped }`:
- *   - `rows` → write to outcome-ledger.jsonl (clean self-report data)
+ *   - `rows` → write to outcome-ledger.jsonl (clean self-report data);
+ *     the writer returns ONLY the rows that were genuinely new this turn so
+ *     the R4' rule outcome edge consumes a delta, not the full-branch rescan
  *   - `dropped` → write to audit.jsonl as `outcome_footnote_parse_error`
  *     (per pattern `outcome-footnote-handling-principle-prefer-loss-over-guessing`)
  */
@@ -389,11 +391,16 @@ function outcomeLedgerDedupKey(row: Pick<OutcomeRow, "session_id" | "entry_slug"
  * durable ledger-level dedupe, the same earlier tool result / footnote would
  * be appended again on every later turn and poison ADR 0026 outcome weights.
  */
+/** Returns the rows that were actually appended this call (the delta). The
+ *  live agent_end path rescans the full session branch every turn, so feeding
+ *  anything but this delta downstream re-processes historical footnotes
+ *  every turn (audit spam, repeated CONTRADICT demotes, stale rows stamped
+ *  with the current injection nonce). */
 export function writeOutcomeLedger(
   rows: OutcomeRow[],
   projectRoot?: string,
-): void {
-  if (rows.length === 0) return;
+): OutcomeRow[] {
+  if (rows.length === 0) return [];
 
   try {
     ensureUserGlobalSidecarMigrated();
@@ -419,6 +426,7 @@ export function writeOutcomeLedger(
     }
 
     const lines: string[] = [];
+    const appended: OutcomeRow[] = [];
     for (const row of rows) {
       const key = outcomeLedgerDedupKey(row);
       if (existing.has(key)) continue;
@@ -430,11 +438,127 @@ export function writeOutcomeLedger(
       // returns the trigger turn snapshot even when this writer completes
       // after user submits next prompt.
       lines.push(JSON.stringify({ ...spreadAnchor(getCurrentAnchor()), ...row, project_root: projectRoot ?? "" }) + "\n");
+      appended.push(row);
     }
-    if (lines.length === 0) return;
+    if (lines.length === 0) return [];
     fs.appendFileSync(ledgerPath, lines.join(""), "utf-8");
+    return appended;
+  } catch {
+    // best-effort — a failed ledger write also reports zero delta so the
+    // outcome edge never acts on evidence that was not durably recorded.
+    return [];
+  }
+}
+
+// ── ADR 0028 R4' rule outcome edge ledger ────────────────────────────────
+//
+// Mechanical accumulation point for the injection→behavior feedback edge:
+// CONTRADICT rows record strong demotes (status→contested, applied by
+// sediment/index.ts), MATCH rows record echo-guarded weak confirmations
+// (no mutation — asymmetric by design, ADR 0028 §7).
+//
+// Evidence taxonomy (per-row `evidence_source`) — weight accordingly:
+//   - "user_directive_restatement": a user-role imperative in the raw
+//     transcript overlapped an already-injected rule. The agent cannot
+//     author user turns, so this evidence is structurally immune to
+//     self-echo. This is the user-anchored edge ADR 0028 §7 asks for.
+//   - "self_report": footnote-derived. Echo-prone by nature even after the
+//     mechanical deductions in sediment/index.ts (deducted candidates are
+//     audit-only and never land here); treat as weak corroboration, never
+//     as user reconfirmation.
+// CONTRADICT rows additionally carry `status_mutation` so consumers can
+// distinguish "evidence existed" from "strong demote actually applied".
+//
+// Dedup is deliberately conservative: the key excludes injection_nonce, so
+// the same utterance re-observed under a re-injection (mid-session rule
+// cache refresh) stays one piece of evidence, not two. Multi-instance note:
+// append uses a bounded tail read with no cross-process lock, so rare
+// duplicate rows are possible under concurrent writers — readers must
+// re-dedup by the same key.
+
+export interface RuleOutcomeEdgeRow {
+  ts: string;
+  session_id: string;
+  /** Rule-injector cache nonce — joins the edge to the exact injection (R4' join key). */
+  injection_nonce: string;
+  edge: "MATCH" | "CONTRADICT";
+  rule_slug: string;
+  rule_scope: "global" | "project";
+  project_id?: string;
+  /** Rule status observed at edge time (before any CONTRADICT mutation). */
+  rule_status?: string;
+  /** See evidence taxonomy in the section comment above. */
+  evidence_source: "self_report" | "user_directive_restatement";
+  /** CONTRADICT only: result of the strong-demote attempt. */
+  status_mutation?: string;
+  outcome_used?: string;
+  outcome_event_id?: string;
+}
+
+function ruleOutcomeEdgeDedupKey(row: Pick<RuleOutcomeEdgeRow, "session_id" | "edge" | "rule_scope" | "project_id" | "rule_slug" | "outcome_event_id" | "ts">): string {
+  return `${row.session_id}|${row.edge}|${row.rule_scope}:${row.project_id ?? ""}:${row.rule_slug}|${row.outcome_event_id ?? row.ts}`;
+}
+
+/** Bounded tail read so dedup cost stays O(tail) instead of O(file): the
+ *  delta-feeding contract upstream already prevents same-process rescans,
+ *  making this a safety net — it does not need full-history precision. */
+const EDGE_LEDGER_DEDUP_TAIL_BYTES = 512 * 1024;
+
+function readEdgeLedgerTailLines(ledgerPath: string): string[] {
+  const size = fs.statSync(ledgerPath).size;
+  if (size <= EDGE_LEDGER_DEDUP_TAIL_BYTES) return fs.readFileSync(ledgerPath, "utf-8").split("\n");
+  const fd = fs.openSync(ledgerPath, "r");
+  try {
+    const buf = Buffer.alloc(EDGE_LEDGER_DEDUP_TAIL_BYTES);
+    fs.readSync(fd, buf, 0, EDGE_LEDGER_DEDUP_TAIL_BYTES, size - EDGE_LEDGER_DEDUP_TAIL_BYTES);
+    const text = buf.toString("utf-8");
+    return text.slice(text.indexOf("\n") + 1).split("\n");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Returns the rows actually appended (the delta), so callers can gate their
+ *  own observability (e.g. audit rows) on "new evidence landed". */
+export function appendRuleOutcomeEdgeRows(rows: RuleOutcomeEdgeRow[]): RuleOutcomeEdgeRow[] {
+  if (rows.length === 0) return [];
+  try {
+    ensureUserGlobalSidecarMigrated();
+    const dir = userGlobalSedimentDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const ledgerPath = path.join(dir, "rule-outcome-edge.jsonl");
+    const existing = new Set<string>();
+    if (fs.existsSync(ledgerPath)) {
+      for (const line of readEdgeLedgerTailLines(ledgerPath)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const parsed = JSON.parse(trimmed) as Partial<RuleOutcomeEdgeRow>;
+          if (parsed && typeof parsed === "object" && typeof parsed.session_id === "string" && typeof parsed.rule_slug === "string" && typeof parsed.edge === "string") {
+            existing.add(ruleOutcomeEdgeDedupKey(parsed as RuleOutcomeEdgeRow));
+          }
+        } catch {
+          // Tolerate corrupt historical lines — same best-effort posture as
+          // readOutcomeLedger().
+        }
+      }
+    }
+    const lines: string[] = [];
+    const appended: RuleOutcomeEdgeRow[] = [];
+    for (const row of rows) {
+      const key = ruleOutcomeEdgeDedupKey(row);
+      if (existing.has(key)) continue;
+      existing.add(key);
+      // C6 causal anchor join, same as writeOutcomeLedger above.
+      lines.push(JSON.stringify({ ...spreadAnchor(getCurrentAnchor()), ...row }) + "\n");
+      appended.push(row);
+    }
+    if (lines.length === 0) return [];
+    fs.appendFileSync(ledgerPath, lines.join(""), "utf-8");
+    return appended;
   } catch {
     // best-effort
+    return [];
   }
 }
 

@@ -7,6 +7,11 @@
  * 2. Tier-1 user-expressed durable directives write deterministically before LLM;
  * 3. non-Tier-1 signals still fall through to the legacy extractor path;
  * 4. R4 outcome contradictions can contest an injected rule deterministically;
+ *    MATCH evidence lands in rule-outcome-edge.jsonl with mechanical self-echo
+ *    deduction (decisive=injection_compliance, filler/parrot/missing
+ *    counterfactual deducted), user-role restatements are the user-anchored
+ *    MATCH source, the edge consumes only the per-turn ledger delta, and a
+ *    MATCH never mutates rule status (ADR 0028 R4' asymmetry);
  * 5. R3 negative recall audits user-role imperatives without corresponding rules.
  */
 
@@ -111,6 +116,10 @@ function freshFixture(label = "pr1") {
   return { root, abrainHome, projectId: `${label}-project` };
 }
 
+function ruleEdgeLedgerPath(fx) {
+  return path.join(fx.abrainHome, ".state", "sediment", "rule-outcome-edge.jsonl");
+}
+
 function makeUserEntry(id, text) {
   return { type: "message", id, timestamp: "2026-06-08T00:00:00Z", message: { role: "user", content: [{ type: "text", text }] } };
 }
@@ -174,6 +183,7 @@ function resetPiAiStub(responses) {
 }
 
 const runtime = await jiti.import(`${repoRoot}/extensions/_shared/runtime.ts`);
+const outcomeCollector = await jiti.import(`${repoRoot}/extensions/sediment/outcome-collector.ts`);
 const curator = await jiti.import(`${repoRoot}/extensions/sediment/curator.ts`);
 const sedimentIndex = await jiti.import(`${repoRoot}/extensions/sediment/index.ts`);
 const writer = await jiti.import(`${repoRoot}/extensions/sediment/writer.ts`);
@@ -188,6 +198,7 @@ const {
   CuratorRejectError,
 } = curator;
 const { bindAbrainProject, sedimentAuditPath, sedimentCheckpointPath } = runtime;
+const { writeOutcomeLedger } = outcomeCollector;
 const { _applyRuleOutcomeEdgeForTests, _auditDirectiveRecallForTests, _refreshRuleCacheForOutcomeEdgeTests, _resetAutoWriteStateForTests, _tryAutoWriteLaneForTests, _waitForAutoWriteIdleForTests } = sedimentIndex;
 const { writeAbrainRule } = writer;
 const { DEFAULT_SEDIMENT_SETTINGS } = sedimentSettings;
@@ -483,9 +494,12 @@ await check("S15: R4 outcome edge contests contradicted injected rule", async ()
   const rows = readJsonl(sedimentAuditPath(fx.root));
   const edge = rows.find((row) => row.operation === "rule_outcome_edge");
   assert(edge?.edge === "CONTRADICT" && edge?.status_mutation === "status_to_contested", `R4 audit row wrong: ${JSON.stringify(rows)}`);
+  const ledger = readJsonl(ruleEdgeLedgerPath(fx));
+  assert(ledger.length === 1 && ledger[0].edge === "CONTRADICT" && ledger[0].rule_slug === "github-repos-use-gh" && ledger[0].injection_nonce === "abc123", `CONTRADICT must land in edge ledger: ${JSON.stringify(ledger)}`);
+  assert(ledger[0].status_mutation === "status_to_contested" && ledger[0].evidence_source === "self_report", `CONTRADICT ledger row must carry mutation result + evidence source: ${JSON.stringify(ledger)}`);
 });
 
-await check("S16: R4 outcome edge ignores non-contradictory footnotes", async () => {
+await check("S16: R4' protocol-filler confirmatory (相同决定) is deducted, not confirmed", async () => {
   _resetAutoWriteStateForTests();
   const fx = freshFixture("pr1-s16");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
@@ -511,9 +525,203 @@ await check("S16: R4 outcome edge ignores non-contradictory footnotes", async ()
     }],
   });
   const raw = fs.readFileSync(path.join(fx.abrainHome, "rules", "always", "github-repos-use-gh.md"), "utf-8");
-  assert(/status:\s*"?active"?/.test(raw), `non-contradictory outcome must leave rule active: ${raw}`);
+  assert(/status:\s*"?active"?/.test(raw), `MATCH path must leave rule active (no status mutation): ${raw}`);
   const rows = readJsonl(sedimentAuditPath(fx.root));
-  assert(!rows.some((row) => row.operation === "rule_outcome_edge"), `non-contradictory outcome must not write R4 audit row: ${JSON.stringify(rows)}`);
+  const edge = rows.find((row) => row.operation === "rule_outcome_edge");
+  assert(edge?.edge === "MATCH" && edge?.match_applied === false && edge?.deduct_reason === "counterfactual_claims_no_difference", `filler counterfactual must be deducted: ${JSON.stringify(rows)}`);
+  assert(readJsonl(ruleEdgeLedgerPath(fx)).length === 0, "deducted filler must NOT land in edge ledger");
+});
+
+await check("S16b: R4' self-echo deduction — parroted rule text never confirms", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s16b");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const body = "所有 GitHub 仓库必须使用 gh 工具管理。";
+  await writeAbrainRule(
+    { title: "GitHub repos use gh", body, kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { abrainHome: fx.abrainHome, settings: baseSettings },
+  );
+  _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "echo1" });
+  await _applyRuleOutcomeEdgeForTests({
+    cwd: fx.root,
+    abrainHome: fx.abrainHome,
+    settings: baseSettings,
+    sessionId: "r4-echo",
+    rows: [{
+      ts: new Date().toISOString(),
+      session_id: "r4-echo",
+      entry_slug: "github-repos-use-gh",
+      source: "memory-footnote",
+      event_id: "footnote:github-repos-use-gh:echo",
+      used: "confirmatory",
+      counterfactual: body,
+      retrieval_count: 1,
+    }],
+  });
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  const edge = rows.find((row) => row.operation === "rule_outcome_edge");
+  assert(edge?.edge === "MATCH" && edge?.match_applied === false && edge?.deduct_reason === "echo_of_injected_text", `echo must be deducted in audit: ${JSON.stringify(rows)}`);
+  const ledger = readJsonl(ruleEdgeLedgerPath(fx));
+  assert(ledger.length === 0, `deducted echo must NOT land in edge ledger: ${JSON.stringify(ledger)}`);
+});
+
+await check("S16c: R4' missing counterfactual carries no independent evidence", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s16c");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  await writeAbrainRule(
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { abrainHome: fx.abrainHome, settings: baseSettings },
+  );
+  _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "nocf1" });
+  await _applyRuleOutcomeEdgeForTests({
+    cwd: fx.root,
+    abrainHome: fx.abrainHome,
+    settings: baseSettings,
+    sessionId: "r4-nocf",
+    rows: [{
+      ts: new Date().toISOString(),
+      session_id: "r4-nocf",
+      entry_slug: "github-repos-use-gh",
+      source: "memory-footnote",
+      event_id: "footnote:github-repos-use-gh:nocf",
+      used: "confirmatory",
+      retrieval_count: 1,
+    }],
+  });
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  const edge = rows.find((row) => row.operation === "rule_outcome_edge");
+  assert(edge?.match_applied === false && edge?.deduct_reason === "missing_counterfactual", `missing counterfactual must be deducted: ${JSON.stringify(rows)}`);
+  assert(readJsonl(ruleEdgeLedgerPath(fx)).length === 0, "no-evidence MATCH must not land in edge ledger");
+});
+
+await check("S16d: R4' tool-result retrieval of injected rule is self-echo by construction", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s16d");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  await writeAbrainRule(
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { abrainHome: fx.abrainHome, settings: baseSettings },
+  );
+  _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "tool1" });
+  await _applyRuleOutcomeEdgeForTests({
+    cwd: fx.root,
+    abrainHome: fx.abrainHome,
+    settings: baseSettings,
+    sessionId: "r4-tool",
+    rows: [{
+      ts: new Date().toISOString(),
+      session_id: "r4-tool",
+      entry_slug: "github-repos-use-gh",
+      source: "tool-result",
+      event_id: "tool:github-repos-use-gh:1",
+      retrieval_count: 3,
+    }],
+  });
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  assert(!rows.some((row) => row.operation === "rule_outcome_edge"), `tool-result row must produce no edge at all: ${JSON.stringify(rows)}`);
+  assert(readJsonl(ruleEdgeLedgerPath(fx)).length === 0, "tool-result row must not land in edge ledger");
+});
+
+await check("S16e: R4' edge ledger dedups repeated agent_end scans by event_id", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s16e");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  await writeAbrainRule(
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { abrainHome: fx.abrainHome, settings: baseSettings },
+  );
+  _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "dedup1" });
+  const row = {
+    ts: new Date().toISOString(),
+    session_id: "r4-dedup",
+    entry_slug: "github-repos-use-gh",
+    source: "memory-footnote",
+    event_id: "footnote:github-repos-use-gh:dedup",
+    used: "confirmatory",
+    counterfactual: "即使没有这条规则我也会选 gh：仓库 CI 脚本全部基于 gh 实现，独立判断一致。",
+    retrieval_count: 1,
+  };
+  const callArgs = { cwd: fx.root, abrainHome: fx.abrainHome, settings: baseSettings, sessionId: "r4-dedup", rows: [row] };
+  await _applyRuleOutcomeEdgeForTests(callArgs);
+  await _applyRuleOutcomeEdgeForTests(callArgs);
+  const ledger = readJsonl(ruleEdgeLedgerPath(fx));
+  assert(ledger.length === 1 && ledger[0].edge === "MATCH" && ledger[0].evidence_source === "self_report", `substantive confirmatory must survive once: ${JSON.stringify(ledger)}`);
+});
+
+await check("S16f: R4' decisive on injected rule is injection compliance, not confirmation", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s16f");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  await writeAbrainRule(
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { abrainHome: fx.abrainHome, settings: baseSettings },
+  );
+  _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "compliance1" });
+  await _applyRuleOutcomeEdgeForTests({
+    cwd: fx.root,
+    abrainHome: fx.abrainHome,
+    settings: baseSettings,
+    sessionId: "r4-compliance",
+    rows: [{
+      ts: new Date().toISOString(),
+      session_id: "r4-compliance",
+      entry_slug: "github-repos-use-gh",
+      source: "memory-footnote",
+      event_id: "footnote:github-repos-use-gh:compliance",
+      used: "decisive",
+      counterfactual: "没有这条规则我会直接用 curl 调 REST API。",
+      retrieval_count: 1,
+    }],
+  });
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  const edge = rows.find((row) => row.operation === "rule_outcome_edge");
+  assert(edge?.match_applied === false && edge?.deduct_reason === "injection_compliance", `decisive must be deducted as injection compliance: ${JSON.stringify(rows)}`);
+  assert(readJsonl(ruleEdgeLedgerPath(fx)).length === 0, "injection compliance must not land in edge ledger");
+});
+
+await check("S16g: R4' user restatement of injected rule is the user-anchored MATCH", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s16g");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const quote = "所有 GitHub 仓库必须使用 gh 工具管理。";
+  await writeAbrainRule(
+    { title: "GitHub repos use gh", body: quote, kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { abrainHome: fx.abrainHome, settings: baseSettings },
+  );
+  _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "restate1" });
+  const callArgs = {
+    cwd: fx.root,
+    sessionId: "r4-restate",
+    window: makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${quote}`),
+  };
+  await _auditDirectiveRecallForTests(callArgs);
+  await _auditDirectiveRecallForTests(callArgs);
+  const ledger = readJsonl(ruleEdgeLedgerPath(fx));
+  assert(ledger.length === 1 && ledger[0].edge === "MATCH" && ledger[0].evidence_source === "user_directive_restatement" && ledger[0].rule_slug === "github-repos-use-gh", `restatement must land once in edge ledger: ${JSON.stringify(ledger)}`);
+  assert(ledger[0].outcome_event_id?.startsWith("restatement:github-repos-use-gh:"), `restatement event id wrong: ${JSON.stringify(ledger)}`);
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  const edges = rows.filter((row) => row.operation === "rule_outcome_edge");
+  assert(edges.length === 1 && edges[0].evidence_source === "user_directive_restatement" && edges[0].keyed_on === "raw_user_role_transcript", `restatement audit must appear exactly once (delta-gated): ${JSON.stringify(edges)}`);
+  assert(!rows.some((row) => row.operation === "directive_recall_audit"), `restated directive is not a recall gap: ${JSON.stringify(rows)}`);
+});
+
+await check("S16h: writeOutcomeLedger returns only the per-turn delta", async () => {
+  const fx = freshFixture("pr1-s16h");
+  const row = {
+    ts: new Date().toISOString(),
+    session_id: "delta-session",
+    entry_slug: "some-entry",
+    source: "memory-footnote",
+    event_id: "footnote:some-entry:delta",
+    used: "confirmatory",
+    counterfactual: "独立理由。",
+    retrieval_count: 1,
+  };
+  const first = writeOutcomeLedger([row], fx.root);
+  const second = writeOutcomeLedger([row], fx.root);
+  assert(Array.isArray(first) && first.length === 1, `first write must report 1 new row: ${JSON.stringify(first)}`);
+  assert(Array.isArray(second) && second.length === 0, `rescan must report 0 new rows: ${JSON.stringify(second)}`);
 });
 
 await check("S17: R3 negative recall audits missing user imperative rule", async () => {
