@@ -70,6 +70,8 @@ pi-astack 的运行时配置不走 `piStack` namespace，也不依赖官方 sett
 
 顶层 key 就是扩展名/模块名（例如 `sediment`、`memory`、`modelFallback`、`vision`、`modelCurator`）。schema 见 [pi-astack-settings.schema.json](./pi-astack-settings.schema.json)。
 
+> **`modelCurator` 单一数据源**：模型白名单（`providers`）与能力提示（`hints`）完全以本配置文件为准——扩展代码内不保留默认清单。未提供本文件时，model-curator 优雅降级（不做白名单、不注入能力表），而非塞入一份可能过时的硬编码清单。
+
 示例：
 
 ```json
