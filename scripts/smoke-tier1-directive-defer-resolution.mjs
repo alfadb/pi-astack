@@ -51,8 +51,14 @@ assert(shouldEscalateToCurator({ ...ghDirective, provenance: "assistant-observed
 // 3. content-in-transcript ('always use Yarn' README trap) stays staged.
 assert(shouldEscalateToCurator({ ...ghDirective, provenance: "content-in-transcript", quote_source: "transcript_content" }) === false, "content-in-transcript -> still staged");
 
-// 4. Below the Tier-1 confidence floor stays staged.
-assert(shouldEscalateToCurator({ ...ghDirective, confidence: 7 }) === false, "confidence 7 -> still staged");
+// 4. Below the Tier-1 confidence floor stays staged — for NON-directive
+//    signals (the conf≥8 fallback path; PR-2 O5 convergence).
+assert(shouldEscalateToCurator({ ...ghDirective, confidence: 7 }) === false, "confidence 7 non-directive -> still staged");
+
+// 4b. PR-2 (ADR 0028 R2' recall bias): is_directive=true EXEMPTS the
+//     confidence gate — the same signal at conf 7 commits when the
+//     classifier marked it an imperative directive.
+assert(shouldEscalateToCurator({ ...ghDirective, confidence: 7, is_directive: true }) === true, "confidence 7 directive -> Tier-1 (conf gate exempted)");
 
 // 5. Non-durable (task-local) stays staged.
 assert(shouldEscalateToCurator({ ...ghDirective, typing: "task-local" }) === false, "task-local -> still staged");

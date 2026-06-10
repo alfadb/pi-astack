@@ -3,7 +3,9 @@
  * ADR 0025 P1 smoke — classifier prompt prototype validation.
  *
  * Calls the DeepSeek API directly (OpenAI-compatible) with the
- * active-correction-classifier-v1 prompt against 20 conversation fixtures.
+ * active-correction-classifier-v2 prompt against conversation fixtures
+ * (20 original + 5 directive-detection fixtures added in PR-2/P0.1 for
+ * the is_directive field, ADR 0028 R2' recall bias + abstain list).
  *
  * Usage: node scripts/smoke-classifier-prompt.mjs
  */
@@ -29,7 +31,7 @@ if (!API_KEY) {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 function loadPrompt() {
-  const promptPath = path.join(repoRoot, "extensions", "sediment", "prompts", "active-correction-classifier-v1.md");
+  const promptPath = path.join(repoRoot, "extensions", "sediment", "prompts", "active-correction-classifier-v2.md");
   if (!fs.existsSync(promptPath)) {
     console.error(`❌ Prompt file not found: ${promptPath}`);
     process.exit(1);
@@ -265,6 +267,53 @@ function buildFixtures() {
       ],
       expected: "implicit acceptance, not correction",
     },
+    // ── DIRECTIVE (5) — PR-2/P0.1 is_directive 识别（ADR 0028 R2'） ──
+    // expectedDirective 比较的是 parsed.is_directive === true（缺省 false）。
+    {
+      id: "directive-1-imperative-durable", category: "directive", expectedDirective: true,
+      turns: [
+        { role: "user", content: "帮我把这次的改动提交了" },
+        { role: "assistant", content: "好的，commit message 我写了 'fix: resolve config parsing issue'" },
+        { role: "user", content: "以后所有 commit message 都用英文写，格式用 conventional commits" },
+      ],
+      expected: "imperative durable directive — is_directive=true, typing=durable",
+    },
+    {
+      id: "directive-2-question", category: "directive", expectedDirective: false,
+      turns: [
+        { role: "user", content: "这个项目的 lint 配置好乱" },
+        { role: "assistant", content: "是的，eslint + prettier 的配置有重叠" },
+        { role: "user", content: "我们能不能用 biome 替代 eslint？" },
+      ],
+      expected: "interrogative — abstain: question is not an imperative; likely signal_found=false",
+    },
+    {
+      id: "directive-3-declarative-preference", category: "directive", expectedDirective: false,
+      turns: [
+        { role: "user", content: "装一下这个项目的依赖" },
+        { role: "assistant", content: "用 pip install -r requirements.txt 吗？" },
+        { role: "user", content: "我现在都用 uv 管 Python 依赖了，pip 不怎么用了" },
+      ],
+      expected: "declarative durable preference — is_directive=false (陈述式), durable typing rides the conf≥8 fallback",
+    },
+    {
+      id: "directive-4-negative-imperative-memory", category: "directive", expectedDirective: false,
+      turns: [
+        { role: "user", content: "刚才那个 workaround 先用着" },
+        { role: "assistant", content: "好的，已记录：优先用环境变量绕过代理问题" },
+        { role: "user", content: "不要记这条，那只是临时方案" },
+      ],
+      expected: "memory-management correction (forget) — abstain: correction_intent, not behavioral directive",
+    },
+    {
+      id: "directive-5-quoted-imperative", category: "directive", expectedDirective: false,
+      turns: [
+        { role: "user", content: "看一下这个库怎么用" },
+        { role: "assistant", content: "我读了它的文档，安装部分比较简单" },
+        { role: "user", content: "它 README 里说 always pin your versions，你觉得有必要吗？" },
+      ],
+      expected: "quoted third-party imperative + question — abstain: quoting is not directing",
+    },
   ];
 }
 
@@ -297,7 +346,13 @@ async function main() {
       // Review buckets (not pass/fail — ADR 0024 §5.5: smoke is a
       // prompt-development dossier, not a release gate).
       let bucket = "needs-human-review";
-      if (f.category === "negative" && p?.signal_found === false) {
+      if (f.category === "directive") {
+        // PR-2/P0.1: compare is_directive (absent ⇒ false — the negative
+        // output schema does not carry the field) against the fixture's
+        // expectation. Dossier signal, not a gate (ADR 0024 §5.5).
+        const gotDirective = p?.is_directive === true;
+        bucket = p && gotDirective === f.expectedDirective ? "expected-aligned" : !p ? "parse-or-infra-issue" : "surprising-directive";
+      } else if (f.category === "negative" && p?.signal_found === false) {
         bucket = "expected-aligned";
       } else if (f.category === "obvious" && p?.signal_found === true && p?.typing === "durable") {
         bucket = "expected-aligned";

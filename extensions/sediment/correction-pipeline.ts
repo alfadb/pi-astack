@@ -25,23 +25,43 @@ import type { ModelRegistryLike } from "./llm-extractor";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
-/** #1 routing predicate (T0 consensus 2026-06-07): a high-confidence
- *  USER-EXPRESSED durable CREATE signal — the user literally stated it (a
- *  verbatim quote), typed durable, with no existing entry to UPDATE, at
- *  confidence ≥ 8. This is MAXIMALLY attributable, so it escalates to the full
- *  curator + multi-view lane (full-fidelity promotion, incl. zone:rules) instead
- *  of being parked as an unattributable provisional-staging hypothesis. */
-export function shouldEscalateToCurator(signal: CorrectionSignal | null | undefined): boolean {
-  // Tier-1 predicate (ADR 0028 v1.1 R2'): a high-confidence USER-EXPRESSED
-  // durable CREATE. provenance==='user-expressed' is the DETERMINISTIC structural
-  // gate (verbatim quote grounded in a user-role turn, computed from turn.role) —
-  // it replaces the old fragile `user_quote.length > 0` heuristic and structurally
-  // blocks the README/tool 'always use Yarn' content-in-transcript trap.
+/** Tier-1 routing predicate (ADR 0028 v1.1 R2', O5-converged form per
+ *  docs/audits/2026-06-10-goal-workflow-impl-plan.md PR-2):
+ *
+ *    signal_found ∧ typing=durable ∧ no update target
+ *    ∧ provenance==='user-expressed' ∧ (is_directive ∨ confidence ≥ 8)
+ *
+ *  provenance==='user-expressed' is the DETERMINISTIC structural gate
+ *  (verbatim quote grounded in a user-role turn, computed from turn.role) —
+ *  it replaces the old fragile `user_quote.length > 0` heuristic and
+ *  structurally blocks the README/tool 'always use Yarn'
+ *  content-in-transcript trap.
+ *
+ *  `is_directive` (recall-biased, classifier prompt v2) EXEMPTS the
+ *  confidence gate: a user-role imperative commits deterministically.
+ *  Over-promotion is bounded (R3' tell surface + cheap user veto + R4'
+ *  outcome edge); under-detection is SILENT loss — asymmetric cost,
+ *  asymmetric threshold (R2').
+ *
+ *  SUNSET NOTE (impl plan §O5): the `confidence >= 8` fallback for
+ *  NON-directive durable signals is a transitional deviation from R2''s
+ *  "iff" definition (migration safety for the pre-is_directive corpus).
+ *  Once recall/shadow audits show is_directive covers the conf≥8 cases,
+ *  remove the fallback and return to the ADR-literal predicate. */
+export function isTier1Directive(signal: CorrectionSignal | null | undefined): boolean {
   return !!signal?.signal_found
     && signal.typing === "durable"
     && !signal.target_entry_slug
-    && (signal.confidence ?? 0) >= 8
-    && signal.provenance === "user-expressed";
+    && signal.provenance === "user-expressed"
+    && (signal.is_directive === true || (signal.confidence ?? 0) >= 8);
+}
+
+/** #1 routing predicate — retained name for the dispatch call sites and
+ *  smokes; semantics now live in isTier1Directive() (PR-2 kept this as a
+ *  pure alias so the predicate has ONE definition; deepseek R1 A1 asked
+ *  for a separate canonical function instead of widening this one). */
+export function shouldEscalateToCurator(signal: CorrectionSignal | null | undefined): boolean {
+  return isTier1Directive(signal);
 }
 
 export interface CorrectionSignal {
@@ -73,6 +93,11 @@ export interface CorrectionSignal {
   /** AX-PROVENANCE class (ground-truth strength). Tier-1 (deterministic rule
    *  commit) is the predicate provenance==='user-expressed' ∧ directive ∧ durable. */
   provenance?: ProvenanceClass;
+  /** R2' (ADR 0028, classifier prompt v2): imperative/prescriptive mood
+   *  aimed at assistant behavior (祈使语气), RECALL-BIASED in the prompt.
+   *  Orthogonal to `typing` (mood vs time-scope). Exempts the confidence
+   *  gate in isTier1Directive(); see the sunset note there. */
+  is_directive?: boolean;
 }
 
 /** Lightweight entry card for classifier target identification.
@@ -135,7 +160,7 @@ function loadClassifierPrompt(): string {
   // Both files are cached on first call; bumping either's version requires
   // a process restart for the cache to refresh.
   const preamblePath = path.join(__dirname, "prompts", "reasoning-normalization-preamble-v1.md");
-  const taskPath = path.join(__dirname, "prompts", "active-correction-classifier-v1.md");
+  const taskPath = path.join(__dirname, "prompts", "active-correction-classifier-v2.md");
   const preamble = fs.readFileSync(preamblePath, "utf-8");
   const taskPrompt = fs.readFileSync(taskPath, "utf-8");
   _classifierPromptCache = `${preamble}\n\n---\n\n${taskPrompt}`;
@@ -287,6 +312,10 @@ function parseCorrectionSignal(raw: string): CorrectionSignal | null {
       most_likely_error: p.most_likely_error,
       target_entry_slug: p.target_entry_slug ?? null,
       resolution_hypothesis: p.resolution_hypothesis ?? null,
+      // R2' (prompt v2): boolean passthrough only — any non-boolean shape
+      // (string "true", number) stays undefined so the predicate's
+      // `is_directive === true` check fails closed to the conf≥8 fallback.
+      is_directive: typeof p.is_directive === "boolean" ? p.is_directive : undefined,
       reasoning: p.reasoning,
       // Preserve full reasoning trace for curator/aggregator (ADR 0024 §3.3).
       // No schema validation — whole trace is passed through for downstream LLMs to read.
@@ -351,6 +380,10 @@ export function buildProvisionalStagingEntry(signal: CorrectionSignal, seedText:
     correction_signal: {
       typing: signal.typing ?? "durable",
       confidence: signal.confidence ?? 5,
+      // PR-2 (gpt R1 N2): carried for shadow/recall forensics — a staged
+      // signal that WAS a directive but missed Tier-1 is exactly what the
+      // sunset audit needs to see.
+      is_directive: signal.is_directive ?? null,
       scope_description: signal.scope_description ?? "",
       correction_intent: signal.correction_intent ?? "",
       most_likely_error_direction: signal.most_likely_error ?? "",

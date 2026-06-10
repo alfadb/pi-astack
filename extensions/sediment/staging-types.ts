@@ -41,6 +41,11 @@ export interface StagingEntry {
   correction_signal?: {
     typing: string;
     confidence: number;
+    /** R2' is_directive (PR-2 2026-06-10): carried for shadow/recall
+     *  forensics — a staged signal that WAS a directive but missed Tier-1
+     *  is what the O5 sunset audit needs to see. null = classifier did
+     *  not emit the field (pre-v2 prompt or non-boolean shape). */
+    is_directive?: boolean | null;
     scope_description: string;
     correction_intent: string;
     most_likely_error_direction: string;

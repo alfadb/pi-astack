@@ -440,6 +440,44 @@ function formatSedimentNotify(
   return lines.join("\n");
 }
 
+/** P0.5 R3' tell contract (impl plan 2026-06-10, PR-2): fixed per-op
+ *  phrases for RULE writes — the recognizable visibility surface that
+ *  makes a mistaken Tier-1 write observable to the user (ADR 0028 R3'
+ *  "可见面让误写对用户可观察"). Used at single-result rule notify sites
+ *  (Tier-1 direct lanes + outcome-edge contest). Multi-result curator
+ *  lanes keep formatSedimentNotify's tabular form. */
+function formatRuleTell(result: WriteRuleResult, opts?: { lowConfidence?: boolean }): string {
+  const lc = opts?.lowConfidence ? " ⚠️ low confidence" : "";
+  switch (result.status) {
+    case "created": return `📌 new rule: ${result.slug}${lc}`;
+    case "updated":
+      return result.reason === "contested"
+        ? `⚠️ contested: ${result.slug}`
+        : `📝 updated rule: ${result.slug}${lc}`;
+    // (no "superseded" case: WriteRuleResult has no supersede status —
+    //  rule replacement lands as `updated`, covered above; the plan's
+    //  "🔄 replaced" phrase activates if/when a supersede op is added.)
+    case "deduped": return `♻️ already noted: ${result.dedupedAgainst ?? result.slug}`;
+    case "rejected":
+      // Terminal rejects (validation_error*) advance the checkpoint and the
+      // recall audit is the designed net — say so. Transient rejects (e.g.
+      // git_commit_failed) HOLD the checkpoint and retry next turn — the
+      // recall claim would be misleading there (opus PR-2 R1 N2).
+      return (result.reason ?? "").startsWith("validation_error")
+        ? `⚠️ rule rejected (${result.reason}); recall audit records uncovered directives`
+        : `⚠️ rule write failed (${result.reason ?? "unknown"}); held for retry next turn`;
+    default: return `rule ${result.status}: ${result.slug}`;
+  }
+}
+
+/** R2' low-confidence directive marker (O5 convergence, impl plan
+ *  2026-06-10): is_directive=true bypassed the confidence gate AND the
+ *  classifier itself rated conf ≤ 2 — the write still commits (recall
+ *  bias), but the tell carries a caution so the user can cheaply veto. */
+function isLowConfidenceDirective(signal: { is_directive?: boolean; confidence?: number } | null | undefined): boolean {
+  return signal?.is_directive === true && (signal.confidence ?? 10) <= 2;
+}
+
 /** Format write results: only non-zero counts, e.g. "3 created, 1 updated, 2 skipped". */
 function compactResultSummary(results: Array<WriteProjectEntryResult | WriteRuleResult>): string {
   const c: Record<string, number> = {};
@@ -740,6 +778,9 @@ async function applyRuleOutcomeEdge(args: {
   settings: SedimentSettings;
   sessionId: string;
   rows: OutcomeRow[];
+  /** P0.5 R3' tell contract: demoting a live rule to contested is a
+   *  high-stakes lifecycle mutation — surface it (tell-not-ask). */
+  notify?: ((message: string, type?: string) => void) | null;
 }): Promise<void> {
   const nonce = getCurrentRuleInjectionNonce();
   const injected = getCurrentInjectedRuleEntries();
@@ -802,6 +843,9 @@ async function applyRuleOutcomeEdge(args: {
       reason: `ADR 0028 R4 CONTRADICT from outcome edge${row.counterfactual ? `: ${String(row.counterfactual).slice(0, 160)}` : ""}`,
     });
     const statusMutation = result.status === "updated" && result.reason === "contested" ? "status_to_contested" : "not_applied";
+    if (statusMutation === "status_to_contested" && args.notify) {
+      try { args.notify(formatRuleTell(result), "warning"); } catch { /* tell is best-effort */ }
+    }
     ledgerRows.push({ ...baseLedgerRow, edge: "CONTRADICT", evidence_source: "self_report", status_mutation: statusMutation });
     await appendAudit(args.cwd, {
       operation: "rule_outcome_edge",
@@ -1654,7 +1698,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // evidence with the current injection nonce.
           const newRows = writeOutcomeLedger(outcome.rows, cwd);
           if (newRows.length > 0) {
-            applyRuleOutcomeEdge({ cwd, abrainHome, settings, sessionId, rows: newRows }).catch(() => {});
+            applyRuleOutcomeEdge({ cwd, abrainHome, settings, sessionId, rows: newRows, notify }).catch(() => {});
           }
         }
         if (outcome.dropped.length > 0) {
@@ -2737,7 +2781,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   });
                   const compact = compactResultSummary([auto.result]);
                   applySedimentStatus(setStatus, sessionId, auto.result.status === "rejected" ? "failed" : "completed", compact);
-                  if (notify) { try { notify(formatSedimentNotify("Tier-1 rule (bg)", [auto.result], abrainHome), "info"); } catch {} }
+                  if (notify) { try { notify(formatRuleTell(auto.result, { lowConfidence: isLowConfidenceDirective(auto.signal) }), "info"); } catch {} }
                 } else if (auto.kind === "wrote") {
                   await appendAudit(cwd, {
                     operation: "auto_write", lane: "auto_write", session_id: sessionId, ...summary,
@@ -2914,7 +2958,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               window: effectiveWindow,
               lane: "auto_write",
               correlationId: autoCorrelationId,
-              coveredTexts: auto.kind === "tier1_direct" ? [auto.draft.body] : [],
+              // R3' (PR-2 R1 gpt BLOCKING fix): only a CAPTURED write covers
+              // the directive — a rejected tier1_direct must NOT suppress the
+              // recall flag. Aligns the main bg lane with the short/drain
+              // lanes' isCapturedTier1Result gating.
+              coveredTexts: auto.kind === "tier1_direct" && isCapturedTier1Result(auto.result) ? [auto.draft.body] : [],
             }).catch(() => {});
 
             if (auto.kind === "tier1_direct") {
@@ -2962,7 +3010,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               if (notify) {
                 try {
                   notify(
-                    formatSedimentNotify("Tier-1 rule (bg)", [auto.result], abrainHome),
+                    formatRuleTell(auto.result, { lowConfidence: isLowConfidenceDirective(auto.signal) }),
                     "info",
                   );
                 } catch {}
@@ -3641,6 +3689,9 @@ type AutoWriteLaneOutcome =
       draft: RuleDraft;
       result: WriteRuleResult;
       writeStart: number;
+      /** The signal that drove the Tier-1 write — callers use
+       *  is_directive/confidence for the R2' low-confidence tell marker. */
+      signal: CorrectionSignal;
     };
 
 function truncateRawForAudit(
@@ -3869,6 +3920,10 @@ async function tryAutoWriteLane(args: {
         confidence: tier1Signal.confidence ?? null,
         provenance: tier1Signal.provenance ?? null,
         quote_source: tier1Signal.quote_source ?? null,
+        // PR-2: explicit in audit so the O5 sunset decision ("does
+        // is_directive cover the conf≥8 cases?") can be measured from
+        // tier1_direct_write rows instead of inferred.
+        is_directive: tier1Signal.is_directive ?? null,
         quote: (tier1Signal.user_quote ?? "").slice(0, 200),
       },
       result: resultSummary(result),
@@ -3877,7 +3932,7 @@ async function tryAutoWriteLane(args: {
       checkpoint_advanced: false,
       durationMs: Date.now() - writeStart,
     });
-    return { kind: "tier1_direct", draft, result, writeStart };
+    return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
   }
 
   if (

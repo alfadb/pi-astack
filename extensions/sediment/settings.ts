@@ -197,7 +197,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   skipContinuationSanitize: false,
   rulesAsReadonlyNeighborsEnabled: false,
   promptVersion: {
-    activeCorrectionClassifier: "v1",
+    activeCorrectionClassifier: "v2",
     reasoningNormalizationPreamble: "v1",
     multiViewPass1: "v1",
     multiViewPass2: "v1",
@@ -233,7 +233,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
  */
 export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"], string> = {
   activeCorrectionClassifier:
-    "v1: 7-step evidence-first reasoning (quote → cases → lean → disconfirmer → commit → self-critique → self-rating) + 10 bias cautions (post-hoc rationalization, sycophancy, anchoring, recency, provisional-as-fact, translation pitfalls, etc.) + staging_context anti-anchoring protocol. Prepended with reasoning-normalization-preamble v1.",
+    "v2 (2026-06-10, PR-2/P0.1 of goal-workflow impl plan): adds is_directive output field per ADR 0028 R2' — imperative/prescriptive mood orthogonal to typing, RECALL-BIASED for user-role imperatives (asymmetric cost: missed directive = silent loss; over-flag = bounded by R3' tell + R4' outcome), with explicit abstain list (questions / memory-management corrections / restating known rules / quoted third-party imperatives / delegation). Pairs with isTier1Directive(): is_directive exempts the conf≥8 gate (transitional fallback retained for non-directive durable signals — sunset note in correction-pipeline.ts). v1 base unchanged: 7-step evidence-first reasoning (quote → cases → lean → disconfirmer → commit → self-critique → self-rating) + 10 bias cautions + staging_context anti-anchoring protocol. Prepended with reasoning-normalization-preamble v1.",
   reasoningNormalizationPreamble:
     "v1: fixed 5-stage reasoning surface (quote → claim → alternative → uncertainty → resolving evidence) shared across classifier + multi-view pass-1/2 so cross-prompt comparison works.",
   multiViewPass1:
