@@ -112,6 +112,24 @@ fs.writeFileSync(
   path.join(tmpDir, "git-sync.cjs"),
   transpile(path.join(repoRoot, "extensions/abrain/git-sync.ts")),
 );
+// git-sync.ts also imports two `_shared` modules; the transpiled CJS
+// resolves `../_shared/<m>` relative to tmpDir → <os-tmp>/_shared. Bridge
+// BOTH explicitly so this smoke is self-sufficient on a clean machine
+// (before PR-1 it silently leaned on /tmp/_shared residue that other
+// smokes — e.g. smoke-dispatch-output-format — happened to leave behind):
+//   - causal-anchor:    minimal stub (anchor enrichment is not under test)
+//   - git-singleflight: REAL transpiled module (check 17's serialization
+//     now flows through it — a stub would fake the very behavior under test)
+const sharedBridgeDir = path.join(tmpDir, "..", "_shared");
+fs.mkdirSync(sharedBridgeDir, { recursive: true });
+fs.writeFileSync(
+  path.join(sharedBridgeDir, "causal-anchor.js"),
+  `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`,
+);
+fs.writeFileSync(
+  path.join(sharedBridgeDir, "git-singleflight.js"),
+  transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")),
+);
 const gitSync = require(path.join(tmpDir, "git-sync.cjs"));
 
 // ── Set up fake remote (bare repo) ─────────────────────────────────

@@ -75,6 +75,7 @@ import {
   validateAbrainProjectId,
   type ResolveActiveProjectResult,
 } from "../_shared/runtime";
+import { gitSingleFlight } from "../_shared/git-singleflight";
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
 // ADR 0022 P2: prompt_user LLM tool surface. Types only at top level;
 // runtime symbols are `require()`d inside `activate()` so any consumer
@@ -2572,16 +2573,26 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
         cwd: commandCwd,
         projectId: parsed.projectId,
       });
-      const projectCommit = autoCommitPaths(
-        result.projectRoot,
-        [".abrain-project.json"],
-        `chore: 绑定 abrain 项目 ${result.projectId}`,
-      );
-      const abrainCommit = autoCommitPaths(
-        ABRAIN_HOME,
-        [".gitignore", `projects/${result.projectId}/_project.json`],
-        `project: 添加 ${result.projectId}`,
-      );
+      // PR-1 R2 review fix (gpt-5.5 BLOCKING-1, 2026-06-10): autoCommitPaths
+      // is execFileSync (blocks the event loop while running), but a bg
+      // sediment commit / detached pushAsync / auto-merge SUBPROCESS spawned
+      // before this handler ran keeps executing in the kernel and can still
+      // contend the abrain `.git/index.lock`. Enqueue through the shared
+      // per-repo chain so we don't START until prior abrain git ops settled.
+      // autoCommitPaths keeps its sync signature (smoke-abrain-secret-scope
+      // exercises it directly); serialization lives at this call site.
+      const projectCommit = await gitSingleFlight(result.projectRoot, async () =>
+        autoCommitPaths(
+          result.projectRoot,
+          [".abrain-project.json"],
+          `chore: 绑定 abrain 项目 ${result.projectId}`,
+        ));
+      const abrainCommit = await gitSingleFlight(ABRAIN_HOME, async () =>
+        autoCommitPaths(
+          ABRAIN_HOME,
+          [".gitignore", `projects/${result.projectId}/_project.json`],
+          `project: 添加 ${result.projectId}`,
+        ));
       bootActiveProject = snapshotBootActiveProject(commandCwd);
       bootActiveProjectAt = Date.now();
       const commitWarning = autoCommitNeedsWarning(projectCommit) || autoCommitNeedsWarning(abrainCommit);

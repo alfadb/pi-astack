@@ -23,6 +23,7 @@ import {
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
 import type { Jsonish } from "../memory/types";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { gitSingleFlight } from "../_shared/git-singleflight";
 // `slugify` is the free-text-to-bare-slug normalizer. We deliberately
 // do NOT use `normalizeBareSlug` here, because that one is designed
 // for path/wikilink/id inputs (`[[X]]`, `project:foo:bar`,
@@ -676,6 +677,23 @@ async function atomicWrite(file: string, content: string) {
 }
 
 async function gitCommit(
+  abrainHome: string,
+  filePath: string,
+  slug: string,
+  op: string,
+  projectId?: string,
+): Promise<string | null> {
+  // PR-1 / P0.6a (ADR 0027 C2', 2026-06-10): serialize against git-sync's
+  // auto-merge/push AND the other writer-side commit helpers on the shared
+  // per-repo chain (_shared/git-singleflight) — closes the .git/index.lock
+  // race documented in abrain/git-sync.ts since 2026-05-17. The detached
+  // pushAsync fired at the end of the unlocked body is NOT awaited, so it
+  // chains BEHIND this op instead of self-deadlocking.
+  return gitSingleFlight(abrainHome, () =>
+    gitCommitUnlocked(abrainHome, filePath, slug, op, projectId));
+}
+
+async function gitCommitUnlocked(
   abrainHome: string,
   filePath: string,
   slug: string,
@@ -1658,6 +1676,12 @@ async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<strin
 }
 
 async function gitCommitAbrain(abrainHome: string, filePath: string, slug: string, label = "workflow"): Promise<string | null> {
+  // PR-1 / P0.6a: same shared-chain serialization as gitCommit above.
+  return gitSingleFlight(abrainHome, () =>
+    gitCommitAbrainUnlocked(abrainHome, filePath, slug, label));
+}
+
+async function gitCommitAbrainUnlocked(abrainHome: string, filePath: string, slug: string, label = "workflow"): Promise<string | null> {
   try {
     const rel = path.relative(abrainHome, filePath);
     // Round 2 audit fix (opus m3): same `--` defense-in-depth as gitCommit.
@@ -2620,6 +2644,17 @@ async function appendAbrainAboutMeAudit(abrainHome: string, event: Record<string
 }
 
 async function gitCommitAbrainAboutMe(
+  abrainHome: string,
+  filePath: string,
+  slug: string,
+  region: AboutMeRegion,
+): Promise<string | null> {
+  // PR-1 / P0.6a: same shared-chain serialization as gitCommit above.
+  return gitSingleFlight(abrainHome, () =>
+    gitCommitAbrainAboutMeUnlocked(abrainHome, filePath, slug, region));
+}
+
+async function gitCommitAbrainAboutMeUnlocked(
   abrainHome: string,
   filePath: string,
   slug: string,

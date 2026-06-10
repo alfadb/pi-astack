@@ -33,17 +33,19 @@
  *      This keeps users who run abrain locally without a remote unaffected.
  *
  *   4. Single-flight in-process: concurrent sediment commits in the SAME
- *      pi process would race on git's index lock; we serialize via an
- *      in-memory promise singleton. Cross-process protection (multiple pi
- *      instances) relies on git's own .git/index.lock — that's the
- *      fail-soft path (one wins, others audit-log a failed result).
- *      KNOWN GAP (2026-05-17, tracked as ADR 0020 followup): sediment's
- *      own `gitCommit()` in writer.ts does NOT route through this
- *      singleFlight, so it can still race the new auto-merge step on
- *      `.git/index.lock`. The current mitigation is the result-taxonomy
- *      fix (catch block correctly labels lock contention as `failed`
- *      rather than `conflict`); a structural fix requires exporting
- *      `singleFlight` and wiring sediment through it.
+ *      pi process would race on git's index lock; we serialize via the
+ *      cross-extension keyed chain in `_shared/git-singleflight.ts`
+ *      (globalThis singleton, so jiti moduleCache:false copies share ONE
+ *      chain). Cross-process protection (multiple pi instances) relies on
+ *      git's own .git/index.lock — that's the fail-soft path (one wins,
+ *      others audit-log a failed result).
+ *      KNOWN GAP CLOSED (2026-06-10, PR-1/P0.6a of the goal-workflow
+ *      impl plan; gap was open since 2026-05-17): sediment's writer-side
+ *      `gitCommit` / `gitCommitAbrain` / `gitCommitAbrainAboutMe` now
+ *      route through the SAME shared chain (keyed by resolved abrainHome),
+ *      so a sediment commit can no longer race the auto-merge/push here.
+ *      The earlier result-taxonomy mitigation (lock contention labelled
+ *      `failed`, not `conflict`) is retained as the cross-process net.
  *
  *   5. Argv contains zero secrets. We only pass branch names and standard
  *      git verbs; credentials come from the system git credential helper
@@ -136,6 +138,7 @@ const MERGE_ENV: NodeJS.ProcessEnv = {
  */
 import { redactCredentials } from "./redact";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { gitSingleFlight, _gitSingleFlightStats } from "../_shared/git-singleflight";
 export { redactCredentials };
 
 /**
@@ -220,44 +223,18 @@ export interface GitSyncOptions {
 
 // ── single-flight lock ──────────────────────────────────────────────
 //
-// Protects against concurrent in-process git ops racing on .git/index.lock.
-// Multiple sediment writes during one agent_end can call pushAsync nearly
-// simultaneously; without this lock the second push fails with "fatal:
-// Unable to create '.git/index.lock'" and we'd audit it as a spurious
-// failure even though the first push succeeded.
-// Round 2 audit fix (gpt #2 TOCTOU): the previous implementation used a
-// single `inflightOp` slot with `if (inflightOp) await inflightOp`. With
-// 3+ concurrent callers, two/three of them all awaited the same prior
-// promise; when it resolved, all microtasks ran `fn()` near-simultaneously
-// because there was no chaining — each call only saw the *prior* inflight,
-// not its own siblings. That TOCTOU reintroduced exactly the index.lock
-// contention we wanted to prevent (smoke test #13 happened to pass only
-// because it tested 2 concurrent callers against a fast local-bare push;
-// 3+ on a slower network would have exposed the race).
-//
-// Fix: maintain `tail` as a chained promise. Each new caller links its `fn`
-// onto `tail.then(fn, fn)` so it runs strictly after every prior fn settles
-// (we pass fn as BOTH onFulfilled and onRejected so a prior rejection
-// doesn't block the next caller). `tail` is advanced to a swallowed copy
-// of the new promise so the chain stays alive without poisoning downstream.
-const _initialTailSentinel: Promise<unknown> = Promise.resolve();
-let tail: Promise<unknown> = _initialTailSentinel;
-
-function singleFlight(
-  fn: () => Promise<GitSyncEvent>,
-): Promise<GitSyncEvent> {
-  const p = tail.then(fn, fn);
-  tail = p.then(
-    () => undefined,
-    () => undefined,
-  );
-  return p;
-}
+// PR-1 / P0.6a (2026-06-10): the private tail-chain that lived here moved
+// to `_shared/git-singleflight.ts` so sediment's writer-side commit
+// helpers serialize on the SAME chain (keyed by resolved repo root,
+// globalThis singleton across jiti module copies). The Round-2 TOCTOU
+// lesson — chain via `tail.then(fn, fn)`, never a single inflight slot —
+// is preserved verbatim in the shared implementation; see that module's
+// header for the full history.
 
 // Visible for tests. Returns `hasInflight: true` once at least one op has
-// flowed through the queue (tail has been replaced from the sentinel).
+// flowed through the shared chain in this process (any module copy).
 export function _queueDepth(): { hasInflight: boolean } {
-  return { hasInflight: tail !== _initialTailSentinel };
+  return { hasInflight: _gitSingleFlightStats().opsStarted > 0 };
 }
 
 // ── git helpers ─────────────────────────────────────────────────────
@@ -407,7 +384,7 @@ export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
     return event;
   }
 
-  return singleFlight(async () => {
+  return gitSingleFlight(opts.abrainHome, async () => {
     const event: GitSyncEvent = {
       ts: new Date().toISOString(),
       op: "push",
@@ -490,7 +467,7 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
     return event;
   }
 
-  return singleFlight(async () => {
+  return gitSingleFlight(opts.abrainHome, async () => {
     const event: GitSyncEvent = {
       ts: new Date().toISOString(),
       op: "fetch",

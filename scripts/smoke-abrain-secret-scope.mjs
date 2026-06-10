@@ -46,6 +46,13 @@ const sharedTarget = path.join(tmpDir, "_shared");
 fs.mkdirSync(sharedTarget, { recursive: true });
 fs.writeFileSync(path.join(sharedTarget, "runtime.cjs"), transpile(path.join(repoRoot, "extensions/_shared/runtime.ts")));
 fs.copyFileSync(path.join(sharedTarget, "runtime.cjs"), path.join(sharedTarget, "runtime.js"));
+// PR-1 (2026-06-10): git-sync.ts / index.ts now import two more _shared
+// modules. Bridge them INSIDE tmpDir (self-sufficient — do not lean on
+// <os-tmp>/_shared residue from other smokes): causal-anchor as a stub
+// (anchor enrichment not under test), git-singleflight as the REAL module
+// (lock routing is part of /abrain bind's commit path now).
+fs.writeFileSync(path.join(sharedTarget, "causal-anchor.cjs"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
+fs.writeFileSync(path.join(sharedTarget, "git-singleflight.cjs"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
 
 // ADR 0022 P1: "redact" added — git-sync.ts re-exports redactCredentials
 // from ./redact. The for-loop already writes both .cjs and .js aliases,
@@ -61,7 +68,9 @@ for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "b
   // (no-op when the pattern isn't present) and future-proofs new shared
   // imports.
   const compiled = transpile(path.join(repoRoot, "extensions/abrain", `${file}.ts`))
-    .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
+    .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
+    .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
+    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
@@ -87,7 +96,9 @@ const indexCjs = ts.transpileModule(indexSrc, {
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector.js")')
-  .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
+  .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
+  .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
+  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCjs);
 
 const indexModule = require(path.join(tmpDir, "index.cjs"));

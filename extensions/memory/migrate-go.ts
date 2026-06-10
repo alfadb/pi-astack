@@ -19,6 +19,7 @@ import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_F
 import { legacyPensieveSeedFor, legacyPensieveSeedPrunedReason } from "./legacy-seeds";
 import { clamp, normalizeBareSlug, prettyPath, titleFromSlug, throwIfAborted } from "./utils";
 import { collectGitAuthorTimes, type GitAuthorTimes } from "./git-times";
+import { gitSingleFlight } from "../_shared/git-singleflight";
 import {
   abrainProjectDir,
   abrainProjectWorkflowsDir,
@@ -276,6 +277,20 @@ interface GitCommitOutcome {
  * repo is the migration domain and `git add -A` is correct.
  */
 async function gitCommitAll(
+  cwd: string,
+  message: string,
+  pathspecs: string[] | null = null,
+): Promise<GitCommitOutcome> {
+  // PR-1 R2 review fix (gpt-5.5 BLOCKING-2, 2026-06-10): the migrate-in
+  // call site passes `abrainHome` and does `git add -A` there — it must
+  // not race an in-flight bg sediment commit / detached pushAsync /
+  // auto-merge on the abrain `.git/index.lock`. Route through the shared
+  // per-repo chain (keying the parent-repo call site too is harmless —
+  // distinct key, no contention).
+  return gitSingleFlight(cwd, () => gitCommitAllUnlocked(cwd, message, pathspecs));
+}
+
+async function gitCommitAllUnlocked(
   cwd: string,
   message: string,
   pathspecs: string[] | null = null,
