@@ -30,7 +30,10 @@ import {
 } from "../../memory/parser";
 import { slugify } from "../../memory/utils";
 
-export type RuleTier = "always" | "listed";
+/** ADR 0028 §12.3: the rules injection-budget axis is INJECT-MODE (values
+ *  always/listed), renamed away from "tier" to stop colliding with the GTIER
+ *  Tier-1/2 write-path predicate. Directory names embed the VALUES and stay. */
+export type RuleInjectMode = "always" | "listed";
 export type RuleScope = "global" | "project";
 
 type NotifyType = "info" | "warning" | "error";
@@ -48,7 +51,7 @@ export interface RuleEntry {
   kind: string;
   status: string;
   confidence: number;
-  tier: RuleTier;
+  injectMode: RuleInjectMode;
   scope: RuleScope;
   projectId?: string;
   sourcePath: string;
@@ -203,12 +206,12 @@ function formatCatalogList(values: string[], maxChars: number): string {
 
 function catalogRuleText(entry: Omit<RuleEntry, "catalogText" | "tokenEstimate">): string {
   const where = entry.scope === "project" && entry.projectId ? `project:${entry.projectId}` : "global";
-  return `- ${entry.scopedSlug} | title=${entry.title} | scope=${where} | tier=${entry.tier} | kind=${entry.kind} | provenance=${entry.provenance} | confidence=${entry.confidence}/10 | applies_when=${entry.appliesWhen || "-"} | trigger_phrases=${formatCatalogList(entry.triggerPhrases, 240)} | must_do_summary=${entry.mustDoSummary} | full_rule_path=${entry.sourcePath}`;
+  return `- ${entry.scopedSlug} | title=${entry.title} | scope=${where} | inject=${entry.injectMode} | kind=${entry.kind} | provenance=${entry.provenance} | confidence=${entry.confidence}/10 | applies_when=${entry.appliesWhen || "-"} | trigger_phrases=${formatCatalogList(entry.triggerPhrases, 240)} | must_do_summary=${entry.mustDoSummary} | full_rule_path=${entry.sourcePath}`;
 }
 
 function readRuleFile(
   file: string,
-  tier: RuleTier,
+  injectMode: RuleInjectMode,
   scope: RuleScope,
   settings: RuleInjectorSettings,
   projectId?: string,
@@ -264,7 +267,7 @@ function readRuleFile(
     kind,
     status,
     confidence,
-    tier,
+    injectMode,
     scope,
     ...(projectId ? { projectId } : {}),
     sourcePath: file,
@@ -287,9 +290,9 @@ function readRuleFile(
   };
 }
 
-function scanTierDir(
+function scanModeDir(
   dir: string,
-  tier: RuleTier,
+  injectMode: RuleInjectMode,
   scope: RuleScope,
   settings: RuleInjectorSettings,
   warnings: RuleScanWarning[],
@@ -298,7 +301,7 @@ function scanTierDir(
   const out: RuleEntry[] = [];
   for (const ent of readDirSorted(dir)) {
     if (!ent.isFile() || !ent.name.endsWith(".md") || ent.name === "_index.md") continue;
-    const parsed = readRuleFile(path.join(dir, ent.name), tier, scope, settings, projectId);
+    const parsed = readRuleFile(path.join(dir, ent.name), injectMode, scope, settings, projectId);
     if (parsed.warning) warnings.push(parsed.warning);
     if (parsed.entry) out.push(parsed.entry);
   }
@@ -344,15 +347,15 @@ export function scanRules(
   })();
 
   const activeProjectId = binding.activeProject?.projectId;
-  const globalAlways = scanTierDir(path.join(abrainHome, "rules", "always"), "always", "global", settings, warnings);
-  const globalListed = scanTierDir(path.join(abrainHome, "rules", "listed"), "listed", "global", settings, warnings);
+  const globalAlways = scanModeDir(path.join(abrainHome, "rules", "always"), "always", "global", settings, warnings);
+  const globalListed = scanModeDir(path.join(abrainHome, "rules", "listed"), "listed", "global", settings, warnings);
 
   let projectAlways: RuleEntry[] = [];
   let projectListed: RuleEntry[] = [];
   if (binding.activeProject) {
     const projectDir = abrainProjectDir(abrainHome, binding.activeProject.projectId);
-    projectAlways = scanTierDir(path.join(projectDir, "rules", "always"), "always", "project", settings, warnings, binding.activeProject.projectId);
-    projectListed = scanTierDir(path.join(projectDir, "rules", "listed"), "listed", "project", settings, warnings, binding.activeProject.projectId);
+    projectAlways = scanModeDir(path.join(projectDir, "rules", "always"), "always", "project", settings, warnings, binding.activeProject.projectId);
+    projectListed = scanModeDir(path.join(projectDir, "rules", "listed"), "listed", "project", settings, warnings, binding.activeProject.projectId);
   }
 
   return {
@@ -468,7 +471,7 @@ function setFooterStatus(ctx: { ui?: { setStatus?(key: string, text: string | un
 // mid-session by the background sediment lane would not surface until
 // `/rule reload` or the next restart. We mirror sediment's globalThis
 // setStatus-capture pattern (survives pi's module teardown/reload) and
-// fs.watch the rules tier dirs so a write refreshes the footer live.
+// fs.watch the rules inject-mode dirs so a write refreshes the footer live.
 interface RuleInjectorRealtimeGlobal {
   __abrainRules_setFooter?: (msg: string) => void;
   __abrainRules_watchers?: fs.FSWatcher[];
@@ -510,7 +513,7 @@ export function refreshRulesFooterRealtime(cwd: string, settings: RuleInjectorSe
   } catch { /* best-effort */ }
 }
 
-/** Watch the rules tier dirs (leaf, non-recursive — rule files are flat
+/** Watch the rules inject-mode dirs (leaf, non-recursive — rule files are flat
  *  files in always/ and listed/) so a mid-session write refreshes the
  *  footer in real time. Idempotent: re-keys + tears down prior watchers on
  *  cwd/project change. persistent:false so it never blocks pi exit. */
@@ -578,14 +581,16 @@ function allRules(cache: RuleScanCache): RuleEntry[] {
 
 function formatRuleList(cache: RuleScanCache, args: string): string {
   const scopeMatch = args.match(/--scope=(global|project)/);
-  const tierMatch = args.match(/--tier=(always|listed)/);
+  // §12.3 rename: --inject= is canonical; --tier= stays accepted as a legacy
+  // alias for human muscle memory (diagnostic CLI only).
+  const modeMatch = args.match(/--(?:inject|tier)=(always|listed)/);
   const scopeFilter = scopeMatch?.[1] as RuleScope | undefined;
-  const tierFilter = tierMatch?.[1] as RuleTier | undefined;
-  const entries = allRules(cache).filter((e) => (!scopeFilter || e.scope === scopeFilter) && (!tierFilter || e.tier === tierFilter));
+  const modeFilter = modeMatch?.[1] as RuleInjectMode | undefined;
+  const entries = allRules(cache).filter((e) => (!scopeFilter || e.scope === scopeFilter) && (!modeFilter || e.injectMode === modeFilter));
   if (entries.length === 0) return "No active abrain rules matched.";
   const lines = entries.map((e) => {
     const where = e.scope === "project" && e.projectId ? `project:${e.projectId}` : "global";
-    return `- ${e.scopedSlug} [${where}/${e.tier}/${e.kind}/conf=${e.confidence}] ${e.mustDoSummary}`;
+    return `- ${e.scopedSlug} [${where}/${e.injectMode}/${e.kind}/conf=${e.confidence}] ${e.mustDoSummary}`;
   });
   const counts = ruleCounts(cache);
   return [
@@ -607,7 +612,7 @@ function formatRuleExplain(cache: RuleScanCache, rawSlug: string): string {
     `${entry.scopedSlug}`,
     `title: ${entry.title}`,
     `scope: ${entry.scope}${entry.projectId ? ` (${entry.projectId})` : ""}`,
-    `tier: ${entry.tier}`,
+    `inject_mode: ${entry.injectMode}`,
     `kind: ${entry.kind}`,
     `confidence: ${entry.confidence}`,
     `status: ${entry.status}`,
@@ -679,9 +684,9 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
 
   if (typeof maybePi.registerCommand !== "function") return;
   maybePi.registerCommand("rule", {
-    description: "Abrain rules diagnostics: /rule list [--scope=global|project] [--tier=always|listed] | /rule explain <slug> | /rule reload",
+    description: "Abrain rules diagnostics: /rule list [--scope=global|project] [--inject=always|listed] | /rule explain <slug> | /rule reload",
     getArgumentCompletions(prefix: string) {
-      const items = ["list", "list --scope=global", "list --scope=project", "list --tier=always", "list --tier=listed", "explain ", "reload"];
+      const items = ["list", "list --scope=global", "list --scope=project", "list --inject=always", "list --inject=listed", "explain ", "reload"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },

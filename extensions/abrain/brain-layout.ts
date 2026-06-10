@@ -114,17 +114,18 @@ export function ensureBrainLayout(abrainHome: string): { created: string[]; warn
     }
   }
 
-  // ADR 0023-R5 read path: rules has two read-only injection tiers.
+  // ADR 0023-R5 read path: rules has two read-only injection modes (ADR 0028
+  // §12.3 renamed the axis away from "tier"; directory names embed the values).
   // Ensure subdirs even when a pre-existing `rules/` directory was created
-  // by hand or by an older build before tier directories existed.
+  // by hand or by an older build before the mode directories existed.
   const rulesDir = path.join(resolved, "rules");
   if (fs.existsSync(rulesDir)) {
-    for (const tier of ["always", "listed"] as const) {
-      const tierDir = path.join(rulesDir, tier);
+    for (const mode of ["always", "listed"] as const) {
+      const modeDir = path.join(rulesDir, mode);
       try {
-        if (!fs.existsSync(tierDir)) fs.mkdirSync(tierDir, { mode: 0o700 });
+        if (!fs.existsSync(modeDir)) fs.mkdirSync(modeDir, { mode: 0o700 });
       } catch (err: any) {
-        warnings.push(`rules/${tier}: mkdir failed: ${err.message}`);
+        warnings.push(`rules/${mode}: mkdir failed: ${err.message}`);
       }
     }
   }

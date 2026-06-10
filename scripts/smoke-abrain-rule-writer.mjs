@@ -77,7 +77,7 @@ check("lintRuleKind: listed rejects fact/smell, accepts decision/pattern/maxim",
   assert(!rw.lintRuleKind("fact", "listed").ok, "listed+fact reject");
   assert(!rw.lintRuleKind("smell", "listed").ok, "listed+smell reject");
 });
-check("lintRuleKind: unknown kind rejected for both tiers", () => {
+check("lintRuleKind: unknown kind rejected for both inject modes", () => {
   assert(!rw.lintRuleKind("bogus", "always").ok, "always+bogus reject");
   assert(!rw.lintRuleKind("bogus", "listed").ok, "listed+bogus reject");
 });
@@ -150,7 +150,7 @@ check("ruleHintFallback: skips fence/heading, returns first real line stripped",
 });
 
 // ── ruleEntryId ─────────────────────────────────────────────────────────────
-check("ruleEntryId: tier is part of id; global vs project forms", () => {
+check("ruleEntryId: inject mode is part of id; global vs project forms", () => {
   const g = rw.ruleEntryId("edit-not-sed", "always", "global");
   assert(g.id === "rule:global:always:edit-not-sed" && g.scope === "global" && !g.projectId, JSON.stringify(g));
   const p = rw.ruleEntryId("design-first", "listed", { projectId: "pi-global" });
@@ -161,11 +161,11 @@ check("ruleEntryId: tier is part of id; global vs project forms", () => {
 check("buildRuleMarkdown: global always frontmatter + body_hash + heading injection", () => {
   const md = rw.buildRuleMarkdown({
     title: "Edit not sed", body: "修改文件必须用 edit/write，禁止 sed -i。", zone: "rules",
-    tier: "always", scope: "global", kind: "maxim", entryConfidence: 9, routingConfidence: 0.9,
+    injectMode: "always", scope: "global", kind: "maxim", entryConfidence: 9, routingConfidence: 0.9,
     routingReason: "user said 永远", hint: "use edit/write, never sed",
   }, "edit-not-sed");
   assert(md.includes("scope: global"), "scope global");
-  assert(md.includes('tier: "always"'), "tier always (yamlScalar-quoted, audit P1-a)");
+  assert(md.includes('inject_mode: "always"'), "inject_mode always (yamlScalar-quoted, audit P1-a)");
   assert(md.includes('kind: "maxim"'), "kind maxim");
   assert(md.includes('id: "rule:global:always:edit-not-sed"'), "id form");
   assert(!md.includes("project_id:"), "no project_id for global");
@@ -178,21 +178,21 @@ check("buildRuleMarkdown: global always frontmatter + body_hash + heading inject
 check("buildRuleMarkdown: project listed + F-W2 provenance fields", () => {
   const md = rw.buildRuleMarkdown({
     title: "Design first", body: "# Design first\n\nthis project: 先写设计文档再写代码。", zone: "rules",
-    tier: "listed", scope: { projectId: "pi-global" }, kind: "decision", entryConfidence: 7, routingConfidence: 0.85,
+    injectMode: "listed", scope: { projectId: "pi-global" }, kind: "decision", entryConfidence: 7, routingConfidence: 0.85,
     routingReason: "user said this project always", derivesFrom: ["world:design-before-code"],
     promotedFrom: "design-before-code", sourceBodyHash: "abc123",
   }, "design-first");
   assert(md.includes("scope: project"), "scope project");
   assert(md.includes('project_id: "pi-global"'), "project_id present");
   assert(md.includes('id: "rule:project:pi-global:listed:design-first"'), "project id form");
-  assert(md.includes('tier: "listed"'), "tier listed (yamlScalar-quoted, audit P1-a)");
+  assert(md.includes('inject_mode: "listed"'), "inject_mode listed (yamlScalar-quoted, audit P1-a)");
   assert(md.includes('  - "world:design-before-code"'), "derives_from provenance edge");
   assert(md.includes('promoted_from: "design-before-code"'), "promoted_from");
   assert(md.includes('source_body_hash: "abc123"'), "source_body_hash (yamlScalar-quoted, audit P2-2)");
 });
 check("buildRuleMarkdown: bare --- in body is escaped (frontmatter break-out guard)", () => {
   const md = rw.buildRuleMarkdown({
-    title: "T", body: "# T\n\nline\n---\nmore", zone: "rules", tier: "listed", scope: "global",
+    title: "T", body: "# T\n\nline\n---\nmore", zone: "rules", injectMode: "listed", scope: "global",
     kind: "pattern", entryConfidence: 6, routingConfidence: 0.8, routingReason: "r",
   }, "t");
   const bodyPart = md.split("---\n").slice(3).join("---\n"); // after frontmatter close

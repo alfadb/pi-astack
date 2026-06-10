@@ -11,7 +11,7 @@
  * Invariants implemented here:
  *  - INV-R4 (kind 限制): `lintRuleKind` — always ∈ {maxim,preference,anti-pattern};
  *    listed rejects {fact,smell}.
- *  - lintRuleAlwaysSize: always-tier body ≤ 300 UTF-16 code units (D2 §134).
+ *  - lintRuleAlwaysSize: always-mode body ≤ 300 UTF-16 code units (D2 §134).
  *  - D5.1 `sanitizeRuleHint`: hint may surface as the catalog summary fallback
  *    every session, so it remains a noise-promotion surface (NOT adversarial
  *    prompt injection — see ADR §1.4). Structural reject/strip rules below.
@@ -27,7 +27,12 @@ import * as crypto from "node:crypto";
 import { redactCredentials } from "../abrain/redact";
 import { ENTRY_KINDS, ENTRY_STATUSES, PROVENANCE_CLASSES, type EntryKind, type EntryStatus, type ProvenanceClass } from "./validation";
 
-export type RuleTier = "always" | "listed";
+/** ADR 0028 §12.3: the rules-subsystem injection-budget axis is named
+ *  INJECT-MODE (values unchanged: always/listed), renamed away from "tier" so
+ *  it can no longer be confused with the ADR 0028 GTIER write-path predicate
+ *  (Tier-1/Tier-2). Directory names (`rules/always|listed/`) and the rule id
+ *  format (`rule:<scope>:<mode>:<slug>`) embed the VALUES and are unchanged. */
+export type RuleInjectMode = "always" | "listed";
 export type RuleScope = "global" | { projectId: string };
 
 /** ADR 0023 D5 RuleDraft (R4-simplified: no evidenceSource/evidenceQuote/
@@ -36,7 +41,7 @@ export interface RuleDraft {
   title: string;
   body: string;
   zone: "rules";
-  tier: RuleTier;
+  injectMode: RuleInjectMode;
   scope: RuleScope;
   kind: EntryKind;
   hint?: string;
@@ -65,36 +70,36 @@ export type HintResult = { ok: true; clean: string } | { ok: false; reason: stri
 const ALWAYS_KINDS: ReadonlySet<string> = new Set(["maxim", "preference", "anti-pattern"]);
 const LISTED_REJECT_KINDS: ReadonlySet<string> = new Set(["fact", "smell"]);
 
-/** INV-R4: tier=always requires kind ∈ {maxim,preference,anti-pattern};
- *  tier=listed rejects kind ∈ {fact,smell}. */
-export function lintRuleKind(kind: string, tier: RuleTier): LintResult {
+/** INV-R4: inject_mode=always requires kind ∈ {maxim,preference,anti-pattern};
+ *  inject_mode=listed rejects kind ∈ {fact,smell}. */
+export function lintRuleKind(kind: string, injectMode: RuleInjectMode): LintResult {
   if (!(ENTRY_KINDS as readonly string[]).includes(kind)) {
     return { ok: false, reason: `unknown kind "${kind}" (must be one of: ${ENTRY_KINDS.join(", ")})` };
   }
-  if (tier === "always") {
+  if (injectMode === "always") {
     if (!ALWAYS_KINDS.has(kind)) {
-      return { ok: false, reason: `always-tier rule requires kind ∈ {maxim, preference, anti-pattern}, got "${kind}"` };
+      return { ok: false, reason: `always-mode rule requires kind ∈ {maxim, preference, anti-pattern}, got "${kind}"` };
     }
   } else if (LISTED_REJECT_KINDS.has(kind)) {
-    return { ok: false, reason: `listed-tier rule rejects kind ∈ {fact, smell}, got "${kind}"` };
+    return { ok: false, reason: `listed-mode rule rejects kind ∈ {fact, smell}, got "${kind}"` };
   }
   return { ok: true };
 }
 
-/** always-tier body size THRESHOLD = 300 UTF-16 code units (D2 §134).
- *  listed-tier has no body-size cap because full bodies are read on demand; the
+/** always-mode body size THRESHOLD = 300 UTF-16 code units (D2 §134).
+ *  listed mode has no body-size cap because full bodies are read on demand; the
  *  session prompt only receives compact catalog rows.
  *
  *  NOTE (T0 panel 2026-06-07): this is a DEMOTE threshold, not a reject gate.
  *  `writeAbrainRule` auto-demotes an over-threshold always rule to listed rather
  *  than rejecting it. With catalog injection, the threshold now preserves the
- *  stronger always-tier signal as a compact imperative essence. */
+ *  stronger always-mode signal as a compact imperative essence. */
 export const ALWAYS_BODY_MAX_CODE_UNITS = 300;
-export function lintRuleAlwaysSize(body: string, tier: RuleTier): LintResult {
-  if (tier !== "always") return { ok: true };
+export function lintRuleAlwaysSize(body: string, injectMode: RuleInjectMode): LintResult {
+  if (injectMode !== "always") return { ok: true };
   const n = body.length; // UTF-16 code units; CJK counts 1 each (D2 note)
   if (n > ALWAYS_BODY_MAX_CODE_UNITS) {
-    return { ok: false, reason: `always-tier body is ${n} code units (> ${ALWAYS_BODY_MAX_CODE_UNITS}); demote to listed or shorten` };
+    return { ok: false, reason: `always-mode body is ${n} code units (> ${ALWAYS_BODY_MAX_CODE_UNITS}); demote to listed or shorten` };
   }
   return { ok: true };
 }
@@ -209,13 +214,15 @@ export interface RuleEntryId {
   projectId?: string;
 }
 
-/** Compute the canonical rule entry id. Tier is part of the id so the same
- *  slug can legitimately exist at both tiers during a promote/demote. */
-export function ruleEntryId(slug: string, tier: RuleTier, scope: RuleScope): RuleEntryId {
+/** Compute the canonical rule entry id. The inject mode is part of the id so
+ *  the same slug can legitimately exist at both modes during a promote/demote.
+ *  (Id format embeds the VALUE, e.g. `rule:global:always:<slug>` — stable
+ *  across the §12.3 axis rename.) */
+export function ruleEntryId(slug: string, injectMode: RuleInjectMode, scope: RuleScope): RuleEntryId {
   if (scope === "global") {
-    return { slug, id: `rule:global:${tier}:${slug}`, scope: "global" };
+    return { slug, id: `rule:global:${injectMode}:${slug}`, scope: "global" };
   }
-  return { slug, id: `rule:project:${scope.projectId}:${tier}:${slug}`, scope: "project", projectId: scope.projectId };
+  return { slug, id: `rule:project:${scope.projectId}:${injectMode}:${slug}`, scope: "project", projectId: scope.projectId };
 }
 
 export function ruleBodyHash(body: string): string {
@@ -263,7 +270,7 @@ export function buildRuleMarkdown(draft: RuleDraft, slug: string): string {
   if (!(ENTRY_STATUSES as readonly string[]).includes(status)) {
     throw new Error(`buildRuleMarkdown: invalid status "${status}"`);
   }
-  const idInfo = ruleEntryId(slug, draft.tier, draft.scope);
+  const idInfo = ruleEntryId(slug, draft.injectMode, draft.scope);
   const bodyHash = ruleBodyHash(draft.body);
 
   const fm: string[] = ["---"];
@@ -281,7 +288,10 @@ export function buildRuleMarkdown(draft: RuleDraft, slug: string): string {
     ? draft.provenance : "assistant-observed";
   fm.push(`provenance: ${yamlScalar(provenance)}`);
   fm.push(`confidence: ${clampConfidence(draft.entryConfidence)}`);
-  fm.push(`tier: ${yamlScalar(draft.tier)}`);
+  // ADR 0028 §12.3: frontmatter key renamed tier -> inject_mode. Reads are
+  // directory-derived (rules/always|listed/), so legacy files keeping a stale
+  // `tier:` line need no migration — the line is cosmetic and dies on rewrite.
+  fm.push(`inject_mode: ${yamlScalar(draft.injectMode)}`);
   if (draft.hint) fm.push(`hint: ${yamlScalar(draft.hint)}`);
   fm.push(`body_hash: ${bodyHash}`);
   fm.push(...yamlList("trigger_phrases", draft.triggerPhrases ?? []));

@@ -109,7 +109,9 @@ export async function executeCuratorDecisionToBrain(args: {
       title: draft.title,
       body: draft.compiledTruth,
       zone: "rules",
-      tier: decision.tier ?? "listed",
+      // §12.3 rename dual-read: persisted multiview-staging replay decisions
+      // written before the rename still carry the legacy `tier` key.
+      injectMode: decision.injectMode ?? (decision as { tier?: "always" | "listed" }).tier ?? "listed",
       scope: decision.ruleScope === "project" ? { projectId } : "global",
       kind: draft.kind,
       entryConfidence: typeof draft.confidence === "number" ? draft.confidence : 5,

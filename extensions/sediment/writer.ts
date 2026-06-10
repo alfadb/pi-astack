@@ -11,7 +11,7 @@ import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, EN
 import { lintMarkdown } from "../memory/lint";
 import {
   type RuleDraft,
-  type RuleTier,
+  type RuleInjectMode,
   buildRuleMarkdown,
   lintRuleKind,
   lintRuleAlwaysSize,
@@ -1977,7 +1977,7 @@ export async function writeAbrainWorkflow(
 // atomic write / git commit + orphan cleanup / audit). Rule-specific lints
 // (kind/size/hint) live in ./rule-writer; budget telemetry is advisory below.
 // ui.notify (INV-R8/R9) is the DISPATCH layer's job (the writer has no ctx.ui);
-// the result carries op/slug/tier/scope so the caller can notify.
+// the result carries op/slug/injectMode/scope so the caller can notify.
 
 export interface WriteRuleOptions {
   abrainHome: string;
@@ -1985,7 +1985,7 @@ export interface WriteRuleOptions {
   dryRun?: boolean;
   auditContext?: WriterAuditContext;
   exactDuplicateAsDedup?: boolean;
-  /** Advisory per-(scope,tier) health cap. Over-budget never blocks writes. */
+  /** Advisory per-(scope,inject_mode) health cap. Over-budget never blocks writes. */
   budgetTokenCap?: number;
 }
 
@@ -1994,8 +1994,10 @@ export interface WriteRuleResult {
   path: string;
   status: "created" | "archived" | "deleted" | "updated" | "rejected" | "dry_run" | "deduped";
   reason?: string;
-  tier?: RuleTier;
-  demotedFrom?: RuleTier;
+  /** ADR 0028 §12.3: rules injection-budget axis (values always/listed),
+   *  renamed from `tier` to stop colliding with the GTIER Tier-1/2 predicate. */
+  injectMode?: RuleInjectMode;
+  demotedFrom?: RuleInjectMode;
   dedupedAgainst?: string;
   ruleScope?: "global" | "project";
   projectId?: string;
@@ -2013,7 +2015,7 @@ export interface WriteRuleResult {
   candidateId?: string;
 }
 
-const DEFAULT_RULE_BUDGET_TOKENS: Record<RuleTier, number> = { always: 2500, listed: 8000 };
+const DEFAULT_RULE_BUDGET_TOKENS: Record<RuleInjectMode, number> = { always: 2500, listed: 8000 };
 
 function rulesBaseDir(abrainHome: string, scope: "global" | "project", projectId?: string): string {
   return scope === "global"
@@ -2052,30 +2054,30 @@ function estimateRuleTokens(text: string): number {
   return Math.ceil(cjk * 2 + other / 4);
 }
 
-/** Rules budget health: sum existing tier-dir token footprint + the new entry.
+/** Rules budget health: sum existing mode-dir token footprint + the new entry.
  *  Over-budget is advisory only; it never blocks persistence. */
 async function measureRuleBudget(
-  tierDir: string,
+  modeDir: string,
   addedMarkdown: string,
   cap: number,
 ): Promise<{ tokens: number; overSoftBudget: boolean }> {
   let existing = 0;
   try {
-    for (const f of await fs.readdir(tierDir)) {
+    for (const f of await fs.readdir(modeDir)) {
       if (!f.endsWith(".md") || f.startsWith("_")) continue;
-      const fp = path.join(tierDir, f);
+      const fp = path.join(modeDir, f);
       try {
         existing += estimateRuleTokens(await fs.readFile(fp, "utf-8"));
       } catch { /* skip unreadable file */ }
     }
-  } catch { /* tier dir absent -> 0 existing */ }
+  } catch { /* mode dir absent -> 0 existing */ }
   const tokens = existing + estimateRuleTokens(addedMarkdown);
   return { tokens, overSoftBudget: tokens > cap };
 }
 
 /** #2 dedup scan (T0 consensus 2026-06-07): return the slug of an existing ACTIVE
  *  rule in this scope whose body is a semantic near-match (Jaccard ≥ threshold) to
- *  `body`, else undefined. Scans both tiers; skips the same-slug file (that case is
+ *  `body`, else undefined. Scans both inject modes; skips the same-slug file (that case is
  *  the exact duplicate_slug gate). A re-stated rule strengthens, never duplicates. */
 function similarActiveRuleAtPath(fp: string, body: string): boolean {
   try {
@@ -2091,8 +2093,8 @@ function similarActiveRuleAtPath(fp: string, body: string): boolean {
 
 function findSimilarRuleSlug(abrainHome: string, scope: "global" | "project", projectId: string | undefined, body: string, excludeSlug: string): string | undefined {
   const base = rulesBaseDir(abrainHome, scope, projectId);
-  for (const tier of ["always", "listed"] as RuleTier[]) {
-    const dir = path.join(base, tier);
+  for (const mode of ["always", "listed"] as RuleInjectMode[]) {
+    const dir = path.join(base, mode);
     let files: string[] = [];
     try { files = fsSync.readdirSync(dir); } catch { continue; }
     for (const f of files) {
@@ -2105,7 +2107,7 @@ function findSimilarRuleSlug(abrainHome: string, scope: "global" | "project", pr
   return undefined;
 }
 
-/** ADR 0023 D5: create a rule in ~/.abrain/[projects/<id>/]rules/<tier>/. */
+/** ADR 0023 D5: create a rule in ~/.abrain/[projects/<id>/]rules/<inject_mode>/. */
 export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions): Promise<WriteRuleResult> {
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
@@ -2114,34 +2116,35 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const sessionId = opts.auditContext?.sessionId ?? draft.sessionId;
   const resultCtx = { lane: "rules", sessionId, correlationId: opts.auditContext?.correlationId, candidateId: opts.auditContext?.candidateId };
   // Audit P2-1 (2026-06-07): final `|| "rule"` so an all-punctuation title
-  // (slugify -> "") cannot produce a degenerate `<tierDir>/.md` dotfile + empty-slug id.
+  // (slugify -> "") cannot produce a degenerate `<modeDir>/.md` dotfile + empty-slug id.
   const slug = (draft.slug && slugify(draft.slug)) || slugify(draft.title || "rule") || "rule";
 
-  // ADR 0023 (T0 panel 2026-06-07): an always-tier body over the size target is
+  // ADR 0023 (T0 panel 2026-06-07): an always-mode body over the size target is
   // AUTO-DEMOTED to listed (full body kept on disk + compact catalog summary),
-  // never rejected — losing a genuinely always-caliber rule is worse than tiering
-  // it down. effectiveTier is what actually gets WRITTEN; draft.tier is the ask.
-  let effectiveTier: RuleTier = draft.tier;
+  // never rejected — losing a genuinely always-caliber rule is worse than demoting
+  // it. effectiveInjectMode is what actually gets WRITTEN; draft.injectMode is the ask.
+  let effectiveInjectMode: RuleInjectMode = draft.injectMode;
   let demotedFromAlways = false;
 
   const audit = (event: Record<string, unknown>) =>
-    appendAbrainAudit(abrainHome, "rules", { tier: effectiveTier, ...(demotedFromAlways ? { demoted_from: "always" } : {}), scope: ruleScope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
+    appendAbrainAudit(abrainHome, "rules", { inject_mode: effectiveInjectMode, ...(demotedFromAlways ? { demoted_from: "always" } : {}), scope: ruleScope, ...(projectId ? { project_id: projectId } : {}), slug, duration_ms: Date.now() - started, ...resultCtx, ...event });
   const reject = async (reason: string, extra: Partial<WriteRuleResult> = {}): Promise<WriteRuleResult> => {
     const auditPath = await audit({ operation: "reject", reason });
-    return { slug, path: abrainHome, status: "rejected", reason, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx, ...extra };
+    return { slug, path: abrainHome, status: "rejected", reason, injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx, ...extra };
   };
 
   if (typeof draft.title !== "string" || !draft.title.trim()) return reject("validation_error_title");
   if (typeof draft.body !== "string" || draft.body.trim().length < 10) return reject("validation_error_body");
   if (draft.zone !== "rules") return reject("validation_error_zone");
-  // Audit P1-a (2026-06-07): validate tier even though the sole caller coerces it.
-  // writeAbrainRule is exported and its contract claims to validate; an unchecked
-  // tier flows into path.join(tierDir, draft.tier) (traversal) and the `tier:` YAML
-  // line. Defense-in-depth: reject anything outside the two known tiers.
-  if (draft.tier !== "always" && draft.tier !== "listed") return reject("validation_error_tier");
+  // Audit P1-a (2026-06-07): validate inject_mode even though the sole caller
+  // coerces it. writeAbrainRule is exported and its contract claims to validate;
+  // an unchecked value flows into path.join(modeDir, draft.injectMode)
+  // (traversal) and the `inject_mode:` YAML line. Defense-in-depth: reject
+  // anything outside the two known modes.
+  if (draft.injectMode !== "always" && draft.injectMode !== "listed") return reject("validation_error_inject_mode");
   if (ruleScope === "project" && !projectId) return reject("validation_error_project_id");
 
-  const kindLint = lintRuleKind(draft.kind, draft.tier);
+  const kindLint = lintRuleKind(draft.kind, draft.injectMode);
   if (!kindLint.ok) return reject(`kind_invalid: ${kindLint.reason}`);
 
   const titleSan = sanitizeForMemory(draft.title);
@@ -2152,12 +2155,12 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   if (failed) return reject((failed as { ok: false; error: string }).error);
   const safeBody = bodySan.text ?? draft.body;
 
-  const sizeLint = lintRuleAlwaysSize(safeBody, draft.tier);
-  if (!sizeLint.ok && draft.tier === "always") {
+  const sizeLint = lintRuleAlwaysSize(safeBody, draft.injectMode);
+  if (!sizeLint.ok && draft.injectMode === "always") {
     // panel verdict (C, 2026-06-07): DEMOTE always->listed, do NOT reject.
     // With catalog injection, listed has no per-rule body-size cap: the compact
     // summary is injected and the full body is retrieved on demand.
-    effectiveTier = "listed";
+    effectiveInjectMode = "listed";
     demotedFromAlways = true;
   }
 
@@ -2166,7 +2169,7 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
 
   const safeDraft: RuleDraft = {
     ...draft,
-    tier: effectiveTier,
+    injectMode: effectiveInjectMode,
     title: titleSan.text ?? draft.title,
     body: safeBody,
     routingReason: reasonSan.text ?? draft.routingReason,
@@ -2180,19 +2183,19 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const lintWarnings = lintIssues.filter((i) => i.severity === "warning").length;
   if (lintErrors > 0) return reject("lint_error", { lintErrors, lintWarnings });
 
-  const tierDir = path.join(rulesBaseDir(abrainHome, ruleScope, projectId), effectiveTier);
-  const target = path.join(tierDir, `${slug}.md`);
-  const cap = opts.budgetTokenCap ?? DEFAULT_RULE_BUDGET_TOKENS[effectiveTier];
+  const modeDir = path.join(rulesBaseDir(abrainHome, ruleScope, projectId), effectiveInjectMode);
+  const target = path.join(modeDir, `${slug}.md`);
+  const cap = opts.budgetTokenCap ?? DEFAULT_RULE_BUDGET_TOKENS[effectiveInjectMode];
 
   // Budget is health telemetry only. It intentionally does NOT gate writes:
   // rules injection is moving to catalog/on-demand form, so persistence must
   // not be blocked by full-body prompt-budget pressure.
-  const budget = await measureRuleBudget(tierDir, markdown, cap);
+  const budget = await measureRuleBudget(modeDir, markdown, cap);
 
   if (fsSync.existsSync(target)) {
     if (opts.exactDuplicateAsDedup && similarActiveRuleAtPath(target, safeBody)) {
       const auditPath = await audit({ operation: "deduped", reason: "semantic_duplicate", against: slug });
-      return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${slug}`, dedupedAgainst: slug, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
+      return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${slug}`, dedupedAgainst: slug, injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
     }
     return reject("duplicate_slug");
   }
@@ -2204,24 +2207,24 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   const dedupSlug = findSimilarRuleSlug(abrainHome, ruleScope, projectId, safeBody, slug);
   if (dedupSlug) {
     const auditPath = await audit({ operation: "deduped", reason: "semantic_duplicate", against: dedupSlug });
-    return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${dedupSlug}`, dedupedAgainst: dedupSlug, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
+    return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${dedupSlug}`, dedupedAgainst: dedupSlug, injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
   }
 
   const sanitizedReplacements = [...titleSan.replacements, ...bodySan.replacements, ...reasonSan.replacements];
 
   if (opts.dryRun) {
     const auditPath = await audit({ operation: "dry_run", target: path.relative(abrainHome, target), lint_warnings: lintWarnings, budget_tokens: budget.tokens, budget_cap: cap, over_soft_budget: budget.overSoftBudget });
-    return { slug, path: target, status: "dry_run", tier: effectiveTier, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintWarnings, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, overSoftBudget: budget.overSoftBudget, ...resultCtx };
+    return { slug, path: target, status: "dry_run", injectMode: effectiveInjectMode, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintWarnings, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, overSoftBudget: budget.overSoftBudget, ...resultCtx };
   }
 
   let lock: LockHandle | undefined;
   try {
-    await fs.mkdir(tierDir, { recursive: true, mode: 0o700 });
+    await fs.mkdir(modeDir, { recursive: true, mode: 0o700 });
     lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
     if (fsSync.existsSync(target)) {
       if (opts.exactDuplicateAsDedup && similarActiveRuleAtPath(target, safeBody)) {
         const auditPath = await audit({ operation: "deduped", reason: "semantic_duplicate", against: slug });
-        return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${slug}`, dedupedAgainst: slug, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
+        return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${slug}`, dedupedAgainst: slug, injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
       }
       return reject("duplicate_slug_race");
     }
@@ -2232,25 +2235,25 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
       try { await fs.unlink(target); } catch { /* may be gone */ }
       const auditPath = await audit({ operation: "error", reason: "git_commit_failed_orphan_cleaned", target: path.relative(abrainHome, target) });
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
     }
     const auditPath = await audit({ operation: "create", target: path.relative(abrainHome, target), lint_result: "pass", lint_warnings: lintWarnings, git_commit: git, budget_tokens: budget.tokens, budget_cap: cap, over_soft_budget: budget.overSoftBudget, routing_confidence: draft.routingConfidence, entry_confidence: draft.entryConfidence, routing_reason: safeDraft.routingReason });
-    return { slug, path: target, status: "created", tier: effectiveTier, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, overSoftBudget: budget.overSoftBudget, ...resultCtx };
+    return { slug, path: target, status: "created", injectMode: effectiveInjectMode, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, overSoftBudget: budget.overSoftBudget, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", reason: message, target: path.relative(abrainHome, target) });
-    return { slug, path: target, status: "rejected", reason: message, tier: effectiveTier, ruleScope, projectId, auditPath, ...resultCtx };
+    return { slug, path: target, status: "rejected", reason: message, injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
   } finally {
     await lock?.release();
   }
 }
 
-/** Locate a rule file by slug across both tiers under the given scope. */
-export function findRuleFile(abrainHome: string, scope: "global" | "project", projectId: string | undefined, slug: string): { tier: RuleTier; path: string } | undefined {
+/** Locate a rule file by slug across both inject modes under the given scope. */
+export function findRuleFile(abrainHome: string, scope: "global" | "project", projectId: string | undefined, slug: string): { injectMode: RuleInjectMode; path: string } | undefined {
   const base = rulesBaseDir(path.resolve(abrainHome), scope, projectId);
-  for (const tier of ["always", "listed"] as RuleTier[]) {
-    const fp = path.join(base, tier, `${slug}.md`);
-    if (fsSync.existsSync(fp)) return { tier, path: fp };
+  for (const mode of ["always", "listed"] as RuleInjectMode[]) {
+    const fp = path.join(base, mode, `${slug}.md`);
+    if (fsSync.existsSync(fp)) return { injectMode: mode, path: fp };
   }
   return undefined;
 }
@@ -2294,14 +2297,14 @@ export async function mutateRuleStatusContested(
       try { await atomicWrite(found.path, raw); } catch { /* best-effort restore of pre-contest content */ }
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
       const auditPath = await audit({ operation: "reject", op: "contest", reason: "git_commit_failed" });
-      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
     }
-    const auditPath = await audit({ operation: "contest", tier: found.tier, target: path.relative(abrainHome, found.path), git_commit: git, reason });
-    return { slug, path: found.path, status: "updated", reason: "contested", tier: found.tier, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+    const auditPath = await audit({ operation: "contest", inject_mode: found.injectMode, target: path.relative(abrainHome, found.path), git_commit: git, reason });
+    return { slug, path: found.path, status: "updated", reason: "contested", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", op: "contest", reason: message });
-    return { slug, path: found.path, status: "rejected", reason: message, tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    return { slug, path: found.path, status: "rejected", reason: message, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
   } finally {
     await lock?.release();
   }
@@ -2348,14 +2351,14 @@ export async function archiveAbrainRule(
       try { await atomicWrite(found.path, raw); } catch { /* best-effort restore of pre-archive content */ }
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
       const auditPath = await audit({ operation: "reject", op: "archive", reason: "git_commit_failed" });
-      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
     }
-    const auditPath = await audit({ operation: "archive", tier: found.tier, target: path.relative(abrainHome, found.path), git_commit: git, reason });
-    return { slug, path: found.path, status: "archived", tier: found.tier, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+    const auditPath = await audit({ operation: "archive", inject_mode: found.injectMode, target: path.relative(abrainHome, found.path), git_commit: git, reason });
+    return { slug, path: found.path, status: "archived", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", op: "archive", reason: message });
-    return { slug, path: found.path, status: "rejected", reason: message, tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    return { slug, path: found.path, status: "rejected", reason: message, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
   } finally {
     await lock?.release();
   }
@@ -2395,14 +2398,14 @@ export async function deleteAbrainRule(
       try { await atomicWrite(found.path, originalRaw); } catch { /* best-effort restore of deleted file */ }
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
       const auditPath = await audit({ operation: "reject", op: "delete", reason: "git_commit_failed" });
-      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
     }
-    const auditPath = await audit({ operation: "delete", tier: found.tier, target: path.relative(abrainHome, found.path), git_commit: git });
-    return { slug, path: found.path, status: "deleted", tier: found.tier, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+    const auditPath = await audit({ operation: "delete", inject_mode: found.injectMode, target: path.relative(abrainHome, found.path), git_commit: git });
+    return { slug, path: found.path, status: "deleted", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", op: "delete", reason: message });
-    return { slug, path: found.path, status: "rejected", reason: message, tier: found.tier, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    return { slug, path: found.path, status: "rejected", reason: message, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
   } finally {
     await lock?.release();
   }

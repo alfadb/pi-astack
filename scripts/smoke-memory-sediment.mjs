@@ -3013,6 +3013,34 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         const replayCreateWritten = fs.readFileSync(replayCreate[0].path, "utf-8");
         assert(/^- .* \| smoke-replay \| captured \| multi-view replay create smoke$/m.test(replayCreateWritten), `replay create timeline missing:\n${replayCreateWritten}`);
 
+        // ADR 0028 §12.3 dual-read regression (3-T0 review P1): a PERSISTED
+        // multiview-staging decision written before the inject-mode rename
+        // reaches executeCuratorDecisionToBrain WITHOUT passing parseDecision
+        // (which would have normalized it). The writer-side fallback must read
+        // the legacy `tier` key — if it ever regresses to the `?? "listed"`
+        // default, an old staged ALWAYS rule would silently demote to listed.
+        const replayLegacyRule = await executeCuratorDecisionToBrain({
+          decision: { op: "create", zone: "rules", tier: "always", ruleScope: "global", rationale: "legacy-tier replay dual-read smoke" },
+          draft: {
+            title: "Legacy Tier Replay Rule",
+            kind: "preference",
+            status: "active",
+            confidence: 9,
+            compiledTruth: "所有 legacy replay 决策必须保持 inject-mode 双读兼容。",
+          },
+          projectRoot: aRoot,
+          abrainHome: aTarget.abrainHome,
+          projectId: aTarget.projectId,
+          settings: a2Settings,
+          auditContext: { lane: "replay", sessionId: "smoke-replay", correlationId: "smoke-replay:legacy-tier", candidateId: "smoke-replay:legacy-tier:c1" },
+          sessionId: "smoke-replay",
+          createTimelineNote: "legacy tier dual-read smoke",
+        });
+        assert(replayLegacyRule.length === 1 && replayLegacyRule[0].status === "created", `legacy-tier rules create should write: ${JSON.stringify(replayLegacyRule)}`);
+        const legacyRulePath = path.join(aTarget.abrainHome, "rules", "always", "legacy-tier-replay-rule.md");
+        assert(fs.existsSync(legacyRulePath), `legacy \`tier:"always"\` decision must land in rules/always (not demote to listed): ${replayLegacyRule[0].path}`);
+        assert(fs.readFileSync(legacyRulePath, "utf-8").includes('inject_mode: "always"'), "rewritten frontmatter must use the canonical inject_mode key");
+
         const replayUpdate = await executeCuratorDecisionToBrain({
           decision: {
             op: "update",

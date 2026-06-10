@@ -249,11 +249,11 @@ await check("S1: loadReadonlyRuleNeighborEntries scans global + active-project r
   const fx = freshFixture("pr1-s1");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   await writeAbrainRule(
-    { title: "Global Glab", body: "git.alfadb.cn 仓库必须使用 glab 管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 8, routingConfidence: 0.9, routingReason: "smoke", zone: "rules" },
+    { title: "Global Glab", body: "git.alfadb.cn 仓库必须使用 glab 管理。", kind: "preference", injectMode: "always", scope: "global", entryConfidence: 8, routingConfidence: 0.9, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   await writeAbrainRule(
-    { title: "Project Design First", body: "本项目每次先写设计再动代码。", kind: "decision", tier: "listed", scope: { projectId: fx.projectId }, entryConfidence: 7, routingConfidence: 0.9, routingReason: "smoke", zone: "rules" },
+    { title: "Project Design First", body: "本项目每次先写设计再动代码。", kind: "decision", injectMode: "listed", scope: { projectId: fx.projectId }, entryConfidence: 7, routingConfidence: 0.9, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
 
@@ -294,15 +294,15 @@ await check("S3: parseDecision hard-rejects lifecycle ops targeting rule neighbo
 });
 
 await check("S4: rules create remains allowed while existing-rule lifecycle is read-only", async () => {
-  const decision = parseDecision(JSON.stringify({ op: "create", zone: "rules", tier: "always", rule_scope: "global", rationale: "new rule" }), new Map([["global-glab", "rules"]]));
-  assert(decision.op === "create" && decision.zone === "rules" && decision.tier === "always" && decision.ruleScope === "global", `rules create should parse, got ${JSON.stringify(decision)}`);
+  const decision = parseDecision(JSON.stringify({ op: "create", zone: "rules", inject_mode: "always", rule_scope: "global", rationale: "new rule" }), new Map([["global-glab", "rules"]]));
+  assert(decision.op === "create" && decision.zone === "rules" && decision.injectMode === "always" && decision.ruleScope === "global", `rules create should parse, got ${JSON.stringify(decision)}`);
 });
 
 await check("S5: curator prompt labels rule neighbors as READ-ONLY", async () => {
   const fx = freshFixture("pr1-s5");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   await writeAbrainRule(
-    { title: "Global Glab", body: "git.alfadb.cn 仓库必须使用 glab 管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 8, routingConfidence: 0.9, routingReason: "smoke", zone: "rules" },
+    { title: "Global Glab", body: "git.alfadb.cn 仓库必须使用 glab 管理。", kind: "preference", injectMode: "always", scope: "global", entryConfidence: 8, routingConfidence: 0.9, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   const entries = loadReadonlyRuleNeighborEntries({ abrainHome: fx.abrainHome, cwd: fx.root });
@@ -403,7 +403,7 @@ await check("S11: Tier-1 direct dedups restated global rule", async () => {
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   const quote = "所有 GitHub 仓库必须使用 gh 工具管理。";
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: quote, kind: "preference", tier: "always", scope: "global", entryConfidence: 8, routingConfidence: 0.9, routingReason: "seed", zone: "rules" },
+    { title: "GitHub repos use gh", body: quote, kind: "preference", injectMode: "always", scope: "global", entryConfidence: 8, routingConfidence: 0.9, routingReason: "seed", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   resetPiAiStub(["SKIP"]);
@@ -492,7 +492,7 @@ await check("S15: R4 outcome edge contests contradicted injected rule", async ()
   const fx = freshFixture("pr1-s15");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "abc123" });
@@ -527,7 +527,7 @@ await check("S16: R4' protocol-filler confirmatory (相同决定) is deducted, n
   const fx = freshFixture("pr1-s16");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "def456" });
@@ -561,7 +561,7 @@ await check("S16b: R4' self-echo deduction — parroted rule text never confirms
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   const body = "所有 GitHub 仓库必须使用 gh 工具管理。";
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body, kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body, kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "echo1" });
@@ -593,7 +593,7 @@ await check("S16c: R4' missing counterfactual carries no independent evidence", 
   const fx = freshFixture("pr1-s16c");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "nocf1" });
@@ -623,7 +623,7 @@ await check("S16d: R4' tool-result retrieval of injected rule is self-echo by co
   const fx = freshFixture("pr1-s16d");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "tool1" });
@@ -651,7 +651,7 @@ await check("S16e: R4' edge ledger dedups repeated agent_end scans by event_id",
   const fx = freshFixture("pr1-s16e");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "dedup1" });
@@ -677,7 +677,7 @@ await check("S16f: R4' decisive on injected rule is injection compliance, not co
   const fx = freshFixture("pr1-s16f");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body: "所有 GitHub 仓库必须使用 gh 工具管理。", kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "compliance1" });
@@ -709,7 +709,7 @@ await check("S16g: R4' user restatement of injected rule is the user-anchored MA
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   const quote = "所有 GitHub 仓库必须使用 gh 工具管理。";
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: quote, kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body: quote, kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "restate1" });
@@ -771,7 +771,7 @@ await check("S18: R3 negative recall suppresses when corresponding rule exists",
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   const quote = "所有 GitHub 仓库必须使用 gh 工具管理。";
   await writeAbrainRule(
-    { title: "GitHub repos use gh", body: quote, kind: "preference", tier: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
+    { title: "GitHub repos use gh", body: quote, kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "smoke", zone: "rules" },
     { abrainHome: fx.abrainHome, settings: baseSettings },
   );
   _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "r3covered" });

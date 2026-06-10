@@ -52,7 +52,7 @@ kind: "preference"
 status: "active"
 provenance: "user-expressed"
 confidence: 8
-tier: "always"
+inject_mode: "always"
 body_hash: "deadbeef"
 created: "2026-06-08T00:00:00.000Z"
 updated: "2026-06-08T00:00:00.000Z"
@@ -65,9 +65,18 @@ All git.alfadb.cn repos must use glab.
 `;
 fs.writeFileSync(path.join(tmp, "rules/always/test-glab.md"), rule, "utf-8");
 
+// Deliberate legacy fossil (ADR 0028 §12.3): a pre-rename rule file whose
+// frontmatter still says `tier:` must keep counting — the read side derives
+// inject mode from the DIRECTORY and never reads this key.
+const legacyRule = rule
+  .replace('inject_mode: "always"', 'tier: "always"')
+  .replace('id: "rule:global:always:test-glab"', 'id: "rule:global:always:legacy-fossil"')
+  .replace('title: "use glab for git.alfadb.cn"', 'title: "legacy fossil frontmatter rule"');
+fs.writeFileSync(path.join(tmp, "rules/always/legacy-fossil.md"), legacyRule, "utf-8");
+
 captured = undefined;
 refreshRulesFooterRealtime(cwd, settings);
-assert(captured === "🧠 rules: 1 always, 0 listed", `after write -> live count, got ${JSON.stringify(captured)}`);
+assert(captured === "🧠 rules: 2 always, 0 listed", `after write -> live count (incl. legacy-frontmatter fossil), got ${JSON.stringify(captured)}`);
 
 // 3. no captured setter -> no throw (best-effort guard)
 delete globalThis.__abrainRules_setFooter;

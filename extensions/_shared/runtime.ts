@@ -287,14 +287,15 @@ export function abrainProjectVaultDir(abrainHome: string, projectId: string): st
 export function abrainRulesDir(abrainHome: string): string {
   return path.join(path.resolve(abrainHome), "rules");
 }
-export function abrainRulesTierDir(abrainHome: string, tier: "always" | "listed"): string {
-  return path.join(abrainRulesDir(abrainHome), tier);
+/** ADR 0028 §12.3 rename: "tier" → inject mode (values unchanged). */
+export function abrainRulesModeDir(abrainHome: string, injectMode: "always" | "listed"): string {
+  return path.join(abrainRulesDir(abrainHome), injectMode);
 }
 export function abrainProjectRulesDir(abrainHome: string, projectId: string): string {
   return path.join(abrainProjectDir(abrainHome, projectId), "rules");
 }
-export function abrainProjectRulesTierDir(abrainHome: string, projectId: string, tier: "always" | "listed"): string {
-  return path.join(abrainProjectRulesDir(abrainHome, projectId), tier);
+export function abrainProjectRulesModeDir(abrainHome: string, projectId: string, injectMode: "always" | "listed"): string {
+  return path.join(abrainProjectRulesDir(abrainHome, projectId), injectMode);
 }
 
 // ── abrain workflows zone (B1: pipeline-shaped entries归宿) ──────

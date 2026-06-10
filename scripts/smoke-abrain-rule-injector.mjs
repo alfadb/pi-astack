@@ -191,7 +191,7 @@ const fakeBound = () => ({
 });
 const fakeUnbound = () => ({ activeProject: null, reason: "manifest_missing", cwd: projectRoot });
 
-check("ensureBrainLayout creates global rules tier directories", () => {
+check("ensureBrainLayout creates global rules inject-mode directories", () => {
   const home = path.join(tmpRoot, "layout-home");
   const r = ensureBrainLayout(home);
   if (!fs.existsSync(path.join(home, "rules", "always"))) throw new Error("missing rules/always");
@@ -229,11 +229,11 @@ check("composeRuleInjection includes nonce and catalog rows, not full rule bodie
   if (!text.includes("BEGIN_ABRAIN_RULES session=abc123")) throw new Error("missing nonce marker");
   if (!text.includes("## Rules Catalog")) throw new Error("missing catalog header");
   if (!text.includes("catalog_tokens:") || !text.includes("hidden_catalog_count: 0")) throw new Error("missing catalog health fields");
-  if (!text.includes("global:edit-write-only | title=Edit Write Only | scope=global | tier=always")) throw new Error("missing global catalog row");
+  if (!text.includes("global:edit-write-only | title=Edit Write Only | scope=global | inject=always")) throw new Error("missing global catalog row");
   if (!text.includes("provenance=user-expressed") || !text.includes("trigger_phrases=edit; write; sed -i")) throw new Error("missing row metadata");
   if (!text.includes("must_do_summary=Use edit/write for file modifications")) throw new Error("missing actionable summary");
-  if (!text.includes(`project:${projectId}:project-only | title=Project Only | scope=project:${projectId} | tier=always`)) throw new Error("missing project catalog row");
-  if (!text.includes("global:multi-audit | title=Multi Audit | scope=global | tier=listed")) throw new Error("missing listed scoped slug");
+  if (!text.includes(`project:${projectId}:project-only | title=Project Only | scope=project:${projectId} | inject=always`)) throw new Error("missing project catalog row");
+  if (!text.includes("global:multi-audit | title=Multi Audit | scope=global | inject=listed")) throw new Error("missing listed scoped slug");
   if (text.includes("修改文件必须用 edit/write") || text.includes("这个项目默认先补设计文档")) throw new Error("full rule body leaked into catalog injection");
 });
 

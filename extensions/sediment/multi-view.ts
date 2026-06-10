@@ -717,7 +717,9 @@ function synthesizeFromPass1(
         return {
           op: "create",
           zone: "rules" as const,
-          tier: proposerDecision.tier,
+          // §12.3 rename dual-read: a replayed pass-1 decision persisted
+          // before the rename still carries the legacy `tier` key.
+          injectMode: proposerDecision.injectMode ?? (proposerDecision as { tier?: "always" | "listed" }).tier,
           ruleScope: proposerDecision.ruleScope,
           ...(proposerDerivesFrom ? { derives_from: proposerDerivesFrom } : {}),
           rationale: pass1.reasoning ?? "Pass 1 reviewer recommended create; Pass 2 confirmed.",
@@ -1152,7 +1154,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       // turn) that admitted this candidate to multi-view, so reusing it here
       // cannot widen the directive set. Committing the proposer decision is
       // byte-identical to the confirm_proposer arm; the proposer's
-      // ruleScope/tier IS the scope encoded in the user's wording. A clash
+      // ruleScope/injectMode IS the scope encoded in the user's wording. A clash
       // with an existing rule = the user changed their mind → a later curator
       // supersede, never grounds to silently drop the latest ground truth.
       // FOLLOW-UP (tracked, separate arm): a KNOWLEDGE-zone directive can
