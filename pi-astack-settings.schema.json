@@ -774,6 +774,34 @@
       }
     },
 
+    "goal": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "goal extension (impl-plan 2026-06-10 P1a): session-scoped objective set by the user via /goal, re-injected every turn as a compaction-drift guard. Inert until /goal set (C4' authorization). Auto-continue ships separately (PR-7) behind goal.autoContinue.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Kill switch for the whole extension (commands + injection + reconcile/GC)."
+        },
+        "gcMaxAgeDays": {
+          "type": "number",
+          "default": 14,
+          "description": "Stale materialized-view GC: .pi-astack/goal/<sessionId>.json files older than this (mtime) are removed at session_start; the current session's file is always kept."
+        },
+        "defaultMaxContinuations": {
+          "type": "number",
+          "default": 10,
+          "description": "Default budget.max_continuations stamped at /goal set (overridable per-goal via --max-continuations). Consumed by PR-7 auto-continue; recorded-only in P1a."
+        },
+        "defaultMaxWallMinutes": {
+          "type": "number",
+          "default": 120,
+          "description": "Default budget.max_wall_minutes stamped at /goal set (overridable via --max-minutes). Consumed by PR-7 auto-continue; recorded-only in P1a."
+        }
+      }
+    },
+
     "vision": {
       "type": "object",
       "description": "Vision tool model selection (extensions/vision/). Auto-selects the strongest vision-capable model from the registry, excluding the caller's own model.",

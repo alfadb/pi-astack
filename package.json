@@ -95,7 +95,8 @@
     "smoke:edit-strip-empty": "node scripts/smoke-edit-strip-empty.mjs",
     "smoke:task-local-working-set": "node scripts/smoke-task-local-working-set.mjs",
     "smoke:outcome-classifier-enrich": "node scripts/smoke-outcome-classifier-enrich.mjs",
-    "smoke:tier1-jaccard-adjudication": "node scripts/smoke-tier1-jaccard-adjudication.mjs"
+    "smoke:tier1-jaccard-adjudication": "node scripts/smoke-tier1-jaccard-adjudication.mjs",
+    "smoke:goal-state": "node scripts/smoke-goal-state.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],
