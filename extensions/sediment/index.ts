@@ -20,8 +20,14 @@
  *      standard write-side defenses (sensitive-info sanitizer, schema,
  *      lint, lock, atomic write, audit).
  *   6. Lane A advances checkpoint after terminal write outcomes. Lane C
- *      optimistically advances before bg work because auto-write is
- *      best-effort, not an authoritative replay queue.
+ *      advances only on SAFE-CAPTURE outcomes (PR-5 de-stale 2026-06-10 —
+ *      the pre-ADR-0028 "optimistically advances before bg work" behavior
+ *      is gone): main/drain lanes via shouldAdvanceAfterAutoOutcome, the
+ *      short classifier-only lane via the stricter positive-capture check
+ *      (hasPositiveWriteCapture, plus its tier1 terminal-reject /
+ *      safely-staged advance paths). Known accepted residual: the drain pass
+ *      has no classifier of its own (3-T0 2026-06-10; R3' recall flag is
+ *      the designed net).
  *   7. Audit row.
  */
 
@@ -491,6 +497,29 @@ function compactResultSummary(results: Array<WriteProjectEntryResult | WriteRule
 
 function isCapturedTier1Result(result: WriteRuleResult): boolean {
   return result.status === "created" || result.status === "deduped" || result.status === "dry_run";
+}
+
+/** PR-5/P0.4 (2026-06-10): positive-capture check for the SHORT
+ *  classifier-only lane. Intentionally STRICTER than
+ *  shouldAdvanceAfterResults (used via shouldAdvanceAfterAutoOutcome by
+ *  the main/drain lanes): the short lane HOLDS its window unless
+ *  something was actually persisted (write success or semantic-duplicate
+ *  hit) or the staging net captured it — an all-terminal-reject "wrote"
+ *  outcome does NOT advance here, because a short window has no
+ *  extractor re-pass behind it. Example of the signal-loss chain a blind
+ *  unification would create: curator rejects everything with
+ *  validation_error → shouldAdvanceAfterResults advances (terminal) →
+ *  short lane would scroll past the signal with nothing persisted and no
+ *  extractor to recover it. Do NOT unify the two predicates blindly
+ *  (impl-plan v2.1 P0.4: the difference is deliberate). Type note:
+ *  merged/superseded only occur on WriteProjectEntryResult; the wider
+ *  union accepts WriteRuleResult for forward reuse — harmless
+ *  fallthrough there. */
+function hasPositiveWriteCapture(results: Array<WriteProjectEntryResult | WriteRuleResult>): boolean {
+  return results.some((r) =>
+    r.status === "created" || r.status === "updated" || r.status === "merged" ||
+    r.status === "superseded" || r.status === "archived" || r.status === "deleted" ||
+    (r.reason ?? "").startsWith("semantic_duplicate"));
 }
 
 /** Terminal deterministic reject (validation_error_*): the same quote fails
@@ -2728,13 +2757,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             let checkpointAdvanced = false;
             try {
               const classifierResult = await correctionPromise.catch(() => null);
-              // #1 (T0 consensus 2026-06-07): a high-confidence user-EXPRESSED durable
-              // create signal ESCALATES this short window to the FULL curator + multi-view
-              // lane, so the rule promotes at full fidelity (incl. zone:rules) instead of
-              // being parked as a lossy provisional hypothesis. The curator stays the gate
-              // (re-applies the rules trust taxonomy + conservatism) and create_rules_zone
-              // forces 2-pass review, so a false escalation costs one extractor+curator
-              // call and the curator still skips. Fires only on a positive rare signal.
+              // #1 (T0 consensus 2026-06-07; de-staled PR-5 2026-06-10): a
+              // Tier-1-eligible signal (isTier1Directive) on a short window
+              // routes through tryAutoWriteLane where the TIER-1 DIRECT
+              // writer takes priority (ADR 0028 R1' — deterministic commit,
+              // no extractor/curator gate); non-Tier-1 escalations still
+              // fall through to the curator lane. The historical "escalates
+              // to FULL curator + multi-view" wording predated the
+              // tier1_direct lane. Audit keys keep the legacy
+              // `escalated_from`/`escalation_*` names for jsonl continuity
+              // (grep 2026-06-10: zero consumers depend on them).
               if (classifierResult?.ok && classifierResult.escalateToCurator) {
                 const escForwarded = recordCorrectionDispatch("auto_write", shortCorrelationId, classifierResult, true);
                 const auto = await tryAutoWriteLane({
@@ -2755,10 +2787,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 const transient = auto.kind === "llm_error";
                 const captured = auto.kind === "tier1_direct"
                   ? isCapturedTier1Result(auto.result)
-                  : auto.kind === "wrote" && auto.results.some((r) =>
-                    r.status === "created" || r.status === "updated" || r.status === "merged" ||
-                    r.status === "superseded" || r.status === "archived" || r.status === "deleted" ||
-                    (r.reason ?? "").startsWith("semantic_duplicate"));
+                  : auto.kind === "wrote" && hasPositiveWriteCapture(auto.results);
                 const terminalReject = auto.kind === "tier1_direct" && isTerminalTier1Reject(auto.result);
                 const safelyStaged = classifierResult.stagingWritten === true;
                 const advance = !transient && (captured || terminalReject || safelyStaged);
