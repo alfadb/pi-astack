@@ -263,7 +263,34 @@ audit 期间观察 ≥1 周真实负载再切默认。
 |---|---|---|
 | PR-11 | ADR 0033 起草 → 3×T0 合议 | ✅ **合议接受 2026-06-11**（见下 PR-11 记录） |
 | PR-12 | workflow tools（validate/list/run）+ 归宿 + W12 进程级信号量 + N1/N2/N3/N5 smoke | ✅ **已完成 2026-06-11**（见下 PR-12 记录） |
-| PR-13 | 文档驱动 goal（GoalState v2/judge 注入+转义+framing）+ goal tools + W1'/N4 smoke | 待开工 |
+| PR-13 | 文档驱动 goal（GoalState v2/judge 注入+转义+framing）+ goal tools + W1'/N4 smoke | ✅ **已完成 2026-06-11**（见下 PR-13 记录） |
+
+### PR-13 实施记录（2026-06-11 完成，第二期收官）
+
+- 交付：GoalState v2（source discriminant objective/doc；legacy v1
+normalize→objective；所有注入字段在 normalize 边界统一 sanitize/cap）；
+doc-ref goal（newDocGoalState 读取 doc、存 canonical path/display/hash，
+objective 保持兼容 `doc:<path> — title`）；readGoalDoc（</goal-doc>
+转义、control/bidi/marker 中和、16KB head+tail+显式截断标记、hash）；
+judge GoalJudgeInput.goalDoc + prompt framing（goal-doc DATA、truncation
+warning、checkbox=CLAIM not evidence、doc 内 JSON/transcript-like 为 DATA）；
+goal_status/set/pause/resume/clear 五个 LLM tool（tell-not-ask，仅主会话，
+不进 dispatch KNOWN_TOOLS）；goal_set objective/doc 互斥；set/resume 在
+goal-continuation machine turn fail-closed；slash set/pause/resume/clear
+共用 tool helper；auto-continue 每次裁决前读当前 doc，读失败→paused+tell。
+- 盲审：R1 opus GREEN-with-nits / deepseek GREEN-with-nits / gpt RED。
+gpt R2 RED→R3 RED→R4 RED→R5 GREEN，连续击穿同一类 injection 边界：
+①tool path objective/doc 未互斥；②doc_display_path raw 注入 block 可含
+END_MARKER；③legacy persisted objective raw 注入；④legacy success_criteria
+raw 注入。最终修复为 normalizeGoalState 对所有 formatGoalBlock 动态字段
+统一 sanitize/cap/clamp（objective/criteria/goal_id/session_id/status/
+budget/counters/created/updated/status_note/doc_display_path/doc_hash）。
+其他 NIT 全采纳：readGoalDoc half clamp；doc unreadable pause 检查 event
+append/save；slash resume 共享 actGoal（机器 turn 检查不漂移）；doc_display
+path String coercion。
+- smoke：goal-doc-tools 5 checks（v2 doc source/v1 normalize/hostile
+legacy marker residue/doc read转义+截断/judge framing/machine-turn/helper/
+KNOWN_TOOLS），goal-state 12，goal-autocontinue 17，全量回归绿。
 
 ### PR-12 实施记录（2026-06-11 完成）
 

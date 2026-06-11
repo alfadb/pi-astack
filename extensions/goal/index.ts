@@ -30,7 +30,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCurrentAnchor } from "../_shared/causal-anchor";
+import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { isSubAgentSession } from "../_shared/pi-internals";
+import { Type } from "typebox";
 import { runAutoContinueOnce } from "./continue";
 import { packGoalJudgeWindow, runGoalJudge } from "./judge";
 import {
@@ -38,11 +40,14 @@ import {
   applyGoalAction,
   formatGoalBlock,
   formatGoalStatus,
+  getGoalSource,
   gcStaleGoalFiles,
   GOAL_EVENT_TYPE,
   loadGoalFile,
+  newDocGoalState,
   newGoalState,
   parseGoalArgs,
+  readGoalDoc,
   removeGoalFile,
   replayGoalEvents,
   saveGoalFile,
@@ -110,6 +115,29 @@ function anchorTag(a: { session_id: string; turn_id: number; subturn?: number } 
 /** Mirror of sediment's readSessionId: id only counts when the session is
  *  PERSISTED (getSessionFile truthy) — ephemeral (-p/print) sessions have
  *  no event log to reconcile against, so goal state would be write-only. */
+function extractMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map((c) => c && typeof c === "object" && (c as { type?: string }).type === "text" ? String((c as { text?: unknown }).text ?? "") : "").join("");
+  return "";
+}
+
+export function isCurrentTurnGoalContinuation(sm: unknown): boolean {
+  try {
+    const branch = (sm as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const e = branch[i] as { type?: string; message?: { role?: string; content?: unknown } };
+      if (e?.type === "message" && e.message?.role === "user") return isGoalContinuationText(extractMessageText(e.message.content));
+    }
+    return true; // fail-closed for goal_set/resume authority creation
+  } catch {
+    return true;
+  }
+}
+
+function wrapText(text: string, details: unknown, isError = false) {
+  return { content: [{ type: "text" as const, text }], details, ...(isError ? { isError: true } : {}) };
+}
+
 function readSessionId(sm: unknown): string | undefined {
   const m = sm as { getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null } | undefined;
   if (!m || typeof m.getSessionId !== "function") return undefined;
@@ -140,6 +168,132 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
   };
+
+  const setGoal = async (args: { objective?: string; doc?: string; criteria?: string[]; maxContinuations?: number; maxMinutes?: number }, ctx: any) => {
+    const settings = resolveGoalSettings();
+    if (!settings.enabled) return { ok: false as const, error: "goal extension disabled", details: { kind: "goal_disabled" } };
+    const cwd = ctx.cwd ?? process.cwd();
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (!sessionId) return { ok: false as const, error: "goal requires a persisted session", details: { kind: "no_persisted_session" } };
+    if (isCurrentTurnGoalContinuation(ctx.sessionManager)) return { ok: false as const, error: "goal_set rejected in goal-continuation machine turn", details: { kind: "machine_turn_rejected" } };
+    if (args.doc && args.objective) return { ok: false as const, error: "goal_set accepts either objective or doc, not both", details: { kind: "invalid_args" } };
+    const current = loadGoalFile(cwd, sessionId);
+    let state: GoalState;
+    if (args.doc) {
+      const res = newDocGoalState({
+        sessionId, cwd, doc: args.doc, successCriteria: args.criteria ?? [],
+        maxContinuations: args.maxContinuations ?? settings.defaultMaxContinuations,
+        maxWallMinutes: args.maxMinutes ?? settings.defaultMaxWallMinutes,
+        anchor: anchorTag(getCurrentAnchor()),
+      });
+      if (!res.ok) return { ok: false as const, error: res.error, details: { kind: "doc_unreadable", doc: args.doc } };
+      state = res.state;
+    } else if (args.objective) {
+      state = newGoalState({
+        sessionId, objective: args.objective, successCriteria: args.criteria ?? [],
+        maxContinuations: args.maxContinuations ?? settings.defaultMaxContinuations,
+        maxWallMinutes: args.maxMinutes ?? settings.defaultMaxWallMinutes,
+        anchor: anchorTag(getCurrentAnchor()),
+      });
+    } else {
+      return { ok: false as const, error: "goal_set requires objective or doc", details: { kind: "invalid_args" } };
+    }
+    const eventOk = appendGoalEvent("set", state);
+    const saved = await saveGoalFile(cwd, state);
+    const replaced = current && (current.status === "active" || current.status === "paused")
+      ? ` (replaced previous: ${current.objective.slice(0, 60)})` : "";
+    const source = getGoalSource(state);
+    const text = saved
+      ? `🎯 goal set: ${state.objective}${replaced}${source.type === "doc" ? `\n  doc: ${source.doc_display_path}` : ""}`
+      : "goal event recorded but view file write FAILED (injection may lag until next transition)";
+    if (!eventOk) ctx.ui?.notify?.("goal event log append FAILED — this goal may not survive session fork/resume reconcile", "warning");
+    ctx.ui?.notify?.(text, saved ? "info" : "warning");
+    return { ok: true as const, text, state };
+  };
+
+  const actGoal = async (action: "pause" | "resume" | "clear", ctx: any) => {
+    const settings = resolveGoalSettings();
+    if (!settings.enabled) return { ok: false as const, error: "goal extension disabled", details: { kind: "goal_disabled" } };
+    const cwd = ctx.cwd ?? process.cwd();
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (!sessionId) return { ok: false as const, error: "goal requires a persisted session", details: { kind: "no_persisted_session" } };
+    if (action === "resume" && isCurrentTurnGoalContinuation(ctx.sessionManager)) return { ok: false as const, error: "goal_resume rejected in goal-continuation machine turn", details: { kind: "machine_turn_rejected" } };
+    const current = loadGoalFile(cwd, sessionId);
+    const res = applyGoalAction(current, action);
+    if (!res.ok) return { ok: false as const, error: res.error, details: { kind: "invalid_transition" } };
+    const evOk = appendGoalEvent(action, res.state);
+    if (!evOk) ctx.ui?.notify?.("goal event log append FAILED — transition may not survive fork/resume reconcile", "warning");
+    await saveGoalFile(cwd, res.state);
+    if (action === "clear") {
+      appendGoalOutcome(cwd, {
+        type: "goal_outcome", goal_id: res.state.goal_id, session_id: sessionId,
+        outcome: "abandoned", objective: res.state.objective.slice(0, 200),
+        continuations_used: res.state.counters.continuations_used, ts: new Date().toISOString(),
+      });
+    }
+    const verb = action === "clear" ? "abandoned" : res.state.status;
+    const text = `goal ${verb}: ${res.state.objective.slice(0, 80)}`;
+    ctx.ui?.notify?.(text, "info");
+    return { ok: true as const, text, state: res.state };
+  };
+
+  // ── ADR 0033 primary tool surface ─────────────────────────────
+  pi.registerTool({
+    name: "goal_status",
+    label: "Goal Status",
+    description: "Read the current session goal state. Read-only.",
+    promptSnippet: "goal_status() — read current goal status",
+    parameters: Type.Object({}),
+    prepareArguments() { return {}; },
+    async execute(_id, _params, _signal, _onUpdate, ctx: any) {
+      const sessionId = readSessionId(ctx.sessionManager);
+      const state = sessionId ? loadGoalFile(ctx.cwd ?? process.cwd(), sessionId) : null;
+      return wrapText(formatGoalStatus(state), { kind: "goal_status", state });
+    },
+  });
+
+  pi.registerTool({
+    name: "goal_set",
+    label: "Goal Set",
+    description: "Set or replace the current session goal from either objective text or a planning document path. Tell-not-ask.",
+    promptSnippet: "goal_set(objective?, doc?, criteria?, maxContinuations?, maxMinutes?) — set session goal",
+    parameters: Type.Object({
+      objective: Type.Optional(Type.String()),
+      doc: Type.Optional(Type.String()),
+      criteria: Type.Optional(Type.Array(Type.String())),
+      maxContinuations: Type.Optional(Type.Number()),
+      maxMinutes: Type.Optional(Type.Number()),
+    }),
+    prepareArguments(rawArgs) {
+      const a = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? rawArgs as Record<string, unknown> : {};
+      return {
+        ...(typeof a.objective === "string" ? { objective: a.objective } : {}),
+        ...(typeof a.doc === "string" ? { doc: a.doc } : {}),
+        ...(Array.isArray(a.criteria) ? { criteria: a.criteria.map(String) } : {}),
+        ...(typeof a.maxContinuations === "number" ? { maxContinuations: a.maxContinuations } : {}),
+        ...(typeof a.maxMinutes === "number" ? { maxMinutes: a.maxMinutes } : {}),
+      };
+    },
+    async execute(_id, params: any, _signal, _onUpdate, ctx: any) {
+      const r = await setGoal(params, ctx);
+      return r.ok ? wrapText(r.text, { kind: "goal_set", state: r.state }) : wrapText(`✗ goal_set: ${r.error}`, r.details, true);
+    },
+  });
+
+  for (const [toolName, action] of [["goal_pause", "pause"], ["goal_resume", "resume"], ["goal_clear", "clear"]] as const) {
+    pi.registerTool({
+      name: toolName,
+      label: toolName.replace("_", " "),
+      description: `${action} the current session goal. Tell-not-ask.`,
+      promptSnippet: `${toolName}() — ${action} current goal`,
+      parameters: Type.Object({}),
+      prepareArguments() { return {}; },
+      async execute(_id, _params, _signal, _onUpdate, ctx: any) {
+        const r = await actGoal(action, ctx);
+        return r.ok ? wrapText(r.text, { kind: toolName, state: r.state }) : wrapText(`✗ ${toolName}: ${r.error}`, r.details, true);
+      },
+    });
+  }
 
   pi.registerCommand("goal", {
     description:
@@ -173,54 +327,21 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (parsed.sub === "set") {
-        const state = newGoalState({
-          sessionId,
-          objective: parsed.objective,
-          successCriteria: parsed.criteria,
-          maxContinuations: parsed.maxContinuations ?? settings.defaultMaxContinuations,
-          maxWallMinutes: parsed.maxMinutes ?? settings.defaultMaxWallMinutes,
-          anchor: anchorTag(getCurrentAnchor()),
-        });
-        // Event BEFORE view (opus R1 N1): events are the source of truth;
-        // writing the derived view first opens a crash window where an OLDER
-        // event replays over a NEWER view at the next reconcile.
-        const eventOk = appendGoalEvent("set", state);
-        const saved = await saveGoalFile(cwd, state);
-        const replaced = current && (current.status === "active" || current.status === "paused")
-          ? ` (replaced previous: ${current.objective.slice(0, 60)})` : "";
-        if (!eventOk) notify("goal event log append FAILED — this goal may not survive session fork/resume reconcile", "warning");
-        notify(saved
-          ? `🎯 goal set: ${state.objective}${replaced} — injected every turn; /goal status to inspect`
-          : "goal event recorded but view file write FAILED (injection may lag until next transition)", saved ? "info" : "warning");
+        const r = await setGoal({ objective: parsed.objective || undefined, doc: parsed.doc, criteria: parsed.criteria, maxContinuations: parsed.maxContinuations, maxMinutes: parsed.maxMinutes }, ctx);
+        if (!r.ok) notify(`/goal set: ${r.error}`, "warning");
         return;
       }
-      // pause / resume / clear
-      const res = applyGoalAction(current, parsed.sub);
-      if (!res.ok) {
-        notify(`/goal ${parsed.sub}: ${res.error}`, "warning");
+      // pause / resume / clear — share tool helper so W1' machine-turn
+      // rejection for resume cannot drift between slash and tool paths.
+      const r = await actGoal(parsed.sub, ctx);
+      if (!r.ok) {
+        notify(`/goal ${parsed.sub}: ${r.error}`, "warning");
         return;
       }
-      const evOk = appendGoalEvent(parsed.sub, res.state); // event-first (opus R1 N1)
-      if (!evOk) notify("goal event log append FAILED — transition may not survive fork/resume reconcile", "warning");
-      await saveGoalFile(cwd, res.state);
-      // R4' (PR-7; closes opus PR-6 N4): user abandonment is a terminal
-      // outcome — ledger it like achieved/blocked so the goal loop's
-      // results stay observable.
-      if (parsed.sub === "clear") {
-        appendGoalOutcome(cwd, {
-          type: "goal_outcome", goal_id: res.state.goal_id, session_id: sessionId,
-          outcome: "abandoned", objective: res.state.objective.slice(0, 200),
-          continuations_used: res.state.counters.continuations_used, ts: new Date().toISOString(),
-        });
-      }
-      const verb = parsed.sub === "clear" ? "abandoned" : res.state.status;
-      notify(`goal ${verb}: ${res.state.objective.slice(0, 80)}`, "info");
-      // opus R1 N3 UX: resuming a goal whose wall clock is already exhausted
-      // will immediately re-pause at the next agent_end — say so up front.
       if (parsed.sub === "resume") {
-        const elapsedMin = (Date.now() - Date.parse(res.state.created)) / 60_000;
-        if (Number.isFinite(elapsedMin) && elapsedMin > res.state.budget.max_wall_minutes) {
-          notify(`⚠️ wall clock already exhausted (${Math.floor(elapsedMin)}min > ${res.state.budget.max_wall_minutes}min) — auto-continue will re-pause; use a fresh /goal set --max-minutes=N to reset`, "warning");
+        const elapsedMin = (Date.now() - Date.parse(r.state.created)) / 60_000;
+        if (Number.isFinite(elapsedMin) && elapsedMin > r.state.budget.max_wall_minutes) {
+          notify(`⚠️ wall clock already exhausted (${Math.floor(elapsedMin)}min > ${r.state.budget.max_wall_minutes}min) — auto-continue will re-pause; use a fresh /goal set --max-minutes=N to reset`, "warning");
         }
       }
     },
@@ -274,12 +395,28 @@ export default function (pi: ExtensionAPI) {
     autoContinueInFlight.add(sessionId);
     try {
       const branch = (ctx.sessionManager as unknown as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
+      const source = getGoalSource(state);
+      let goalDoc: { path: string; content: string; truncated?: boolean } | undefined;
+      if (source.type === "doc") {
+        const doc = readGoalDoc(source.doc_path);
+        if (!doc.ok) {
+          const paused = { ...state, status: "paused" as const, status_note: `goal doc unreadable: ${doc.error}`, updated: new Date().toISOString() };
+          const evOk = appendGoalEvent("pause", paused);
+          if (!evOk) try { ctx.ui?.notify?.("goal event log append FAILED — unreadable-doc pause may not survive reconcile", "warning" as never); } catch { /* noop */ }
+          const saved = await saveGoalFile(cwd, paused);
+          if (!saved) try { ctx.ui?.notify?.("goal view write FAILED — unreadable-doc pause may not be visible until retry", "warning" as never); } catch { /* noop */ }
+          try { ctx.ui?.notify?.(`goal paused: document unreadable (${doc.error})`, "warning" as never); } catch { /* noop */ }
+          return;
+        }
+        goalDoc = { path: source.doc_display_path, content: doc.text, ...(doc.truncated ? { truncated: true } : {}) };
+      }
       await runAutoContinueOnce({
         state,
         judge: () => runGoalJudge(
           {
             objective: state.objective,
             successCriteria: state.success_criteria,
+            ...(goalDoc ? { goalDoc } : {}),
             recentTranscript: packGoalJudgeWindow(branch),
             continuationsUsed: state.counters.continuations_used,
             maxContinuations: state.budget.max_continuations,

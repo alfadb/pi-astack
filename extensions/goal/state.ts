@@ -22,9 +22,9 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
-export const GOAL_SCHEMA_VERSION = 1 as const;
+export const GOAL_SCHEMA_VERSION = 2 as const;
 export const GOAL_EVENT_TYPE = "pi-goal-event";
 
 export type GoalStatus = "active" | "paused" | "achieved" | "abandoned";
@@ -39,13 +39,20 @@ export interface GoalCounters {
   continuations_used: number;
 }
 
+export type GoalSource =
+  | { type: "objective" }
+  | { type: "doc"; doc_path: string; doc_display_path: string; doc_hash: string };
+
 export interface GoalState {
   schema_version: typeof GOAL_SCHEMA_VERSION;
   /** Stable id; PR-7 stamps it into the `[pi-goal-continuation goal_id=...]`
    *  transcript prefix for provenance isolation. */
   goal_id: string;
   session_id: string;
+  /** Objective is kept for v1 compatibility and injection/status summaries. */
   objective: string;
+  /** ADR 0033 GoalState v2 discriminant. Missing on legacy v1 => objective. */
+  source: GoalSource;
   success_criteria: string[];
   status: GoalStatus;
   budget: GoalBudget;
@@ -88,6 +95,77 @@ export function newGoalId(): string {
   return `g-${randomBytes(4).toString("hex")}`;
 }
 
+export function sanitizeDocDisplayPath(text: string): string {
+  return sanitizeGoalText(text).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").slice(0, 500);
+}
+
+export function expandGoalDocPath(docArgRaw: string, cwd: string): { fp?: string; displayPath?: string; error?: string } {
+  const raw = docArgRaw.trim();
+  if (!raw) return { error: "empty doc path" };
+  const fp0 = raw === "~" ? osHomedirCompat() : raw.startsWith("~/") ? path.join(osHomedirCompat(), raw.slice(2)) : raw;
+  return { fp: path.isAbsolute(fp0) ? fp0 : path.resolve(cwd, fp0), displayPath: sanitizeDocDisplayPath(raw) };
+}
+
+function osHomedirCompat(): string {
+  // Avoid importing node:os into this pure-ish state module just for one call;
+  // HOME is set in every supported pi runtime. Fallback keeps tests stable.
+  return process.env.HOME || "/";
+}
+
+export function readGoalDoc(docPath: string, maxChars = 16_384): { ok: true; text: string; hash: string; truncated: boolean } | { ok: false; error: string } {
+  try {
+    const raw = fs.readFileSync(docPath, "utf-8");
+    const safe = sanitizeGoalText(raw).replace(/<\/goal-doc>/gi, "＜/goal-doc＞");
+    const hash = createHash("sha256").update(raw, "utf-8").digest("hex").slice(0, 16);
+    if (safe.length <= maxChars) return { ok: true, text: safe, hash, truncated: false };
+    const half = Math.max(1, Math.floor((Math.max(120, maxChars) - 120) / 2));
+    return {
+      ok: true,
+      hash,
+      truncated: true,
+      text: `${safe.slice(0, half)}\n\n[... goal document middle truncated; judge did NOT see omitted content ...]\n\n${safe.slice(-half)}`,
+    };
+  } catch (e: unknown) {
+    return { ok: false, error: (e instanceof Error ? e.message : String(e)).slice(0, 200) };
+  }
+}
+
+export function newDocGoalState(args: {
+  sessionId: string;
+  cwd: string;
+  doc: string;
+  successCriteria?: string[];
+  maxContinuations?: number;
+  maxWallMinutes?: number;
+  anchor?: string;
+  now?: Date;
+}): { ok: true; state: GoalState } | { ok: false; error: string } {
+  const resolved = expandGoalDocPath(args.doc, args.cwd);
+  if (!resolved.fp || resolved.error) return { ok: false, error: resolved.error ?? "invalid doc path" };
+  const doc = readGoalDoc(resolved.fp);
+  if (!doc.ok) return { ok: false, error: `cannot read goal doc ${resolved.fp}: ${doc.error}` };
+  const title = firstDocTitle(doc.text) ?? path.basename(resolved.fp);
+  return { ok: true, state: newGoalState({
+    sessionId: args.sessionId,
+    objective: `doc:${resolved.displayPath} — ${title}`,
+    successCriteria: args.successCriteria,
+    maxContinuations: args.maxContinuations,
+    maxWallMinutes: args.maxWallMinutes,
+    anchor: args.anchor,
+    now: args.now,
+    source: { type: "doc", doc_path: resolved.fp, doc_display_path: resolved.displayPath ?? args.doc, doc_hash: doc.hash },
+  }) };
+}
+
+function firstDocTitle(text: string): string | undefined {
+  const m = /^#\s+(.+)$/m.exec(text);
+  return m?.[1]?.trim().slice(0, 120) || undefined;
+}
+
+export function getGoalSource(state: GoalState): GoalSource {
+  return state.source ?? { type: "objective" };
+}
+
 export function newGoalState(args: {
   sessionId: string;
   objective: string;
@@ -96,6 +174,7 @@ export function newGoalState(args: {
   maxWallMinutes?: number;
   anchor?: string;
   now?: Date;
+  source?: GoalSource;
 }): GoalState {
   const ts = (args.now ?? new Date()).toISOString();
   return {
@@ -103,6 +182,7 @@ export function newGoalState(args: {
     goal_id: newGoalId(),
     session_id: args.sessionId,
     objective: sanitizeGoalText(args.objective).slice(0, MAX_OBJECTIVE_CHARS),
+    source: args.source ?? { type: "objective" },
     success_criteria: (args.successCriteria ?? [])
       .map((c) => sanitizeGoalText(c).slice(0, MAX_CRITERION_CHARS))
       .filter(Boolean)
@@ -160,7 +240,7 @@ function clampInt(v: number | undefined, min: number, max: number, fallback: num
 // ── command argument parsing ───────────────────────────────────────────
 
 export type ParsedGoalCommand =
-  | { sub: "set"; objective: string; criteria: string[]; maxContinuations?: number; maxMinutes?: number }
+  | { sub: "set"; objective: string; doc?: string; criteria: string[]; maxContinuations?: number; maxMinutes?: number }
   | { sub: "pause" | "resume" | "clear" | "status" }
   | { sub: "error"; error: string };
 
@@ -180,6 +260,7 @@ export function parseGoalArgs(raw: string): ParsedGoalCommand {
     return { sub: "error", error: `unknown subcommand "${sub}" (set|pause|resume|clear|status)` };
   }
   let objective = rest;
+  let doc: string | undefined;
   let criteria: string[] = [];
   let maxContinuations: number | undefined;
   let maxMinutes: number | undefined;
@@ -187,15 +268,17 @@ export function parseGoalArgs(raw: string): ParsedGoalCommand {
   // gpt R1 N2: an unknown `--trace-id=abc` inside the objective text must
   // survive verbatim, not be silently swallowed. Duplicate known flags are
   // last-wins (documented, not an error — gpt R1 N3).
-  objective = objective.replace(/--(criteria|max-continuations|max-minutes)=("([^"]*)"|(\S+))/g, (_all, key: string, _q, quoted: string | undefined, bare: string | undefined) => {
+  objective = objective.replace(/--(doc|criteria|max-continuations|max-minutes)=("([^"]*)"|(\S+))/g, (_all, key: string, _q, quoted: string | undefined, bare: string | undefined) => {
     const value = quoted ?? bare ?? "";
-    if (key === "criteria") criteria = value.split(";").map((s) => s.trim()).filter(Boolean);
+    if (key === "doc") doc = value.trim();
+    else if (key === "criteria") criteria = value.split(";").map((s) => s.trim()).filter(Boolean);
     else if (key === "max-continuations") maxContinuations = Number(value);
     else if (key === "max-minutes") maxMinutes = Number(value);
     return "";
   }).replace(/\s+/g, " ").trim();
-  if (!objective) return { sub: "error", error: "set requires an objective: /goal set <objective>" };
-  return { sub: "set", objective, criteria, ...(maxContinuations !== undefined ? { maxContinuations } : {}), ...(maxMinutes !== undefined ? { maxMinutes } : {}) };
+  if (doc && objective) return { sub: "error", error: "set accepts either objective text OR --doc=<path>, not both" };
+  if (!doc && !objective) return { sub: "error", error: "set requires an objective or --doc=<path>" };
+  return { sub: "set", objective: objective || "", ...(doc ? { doc } : {}), criteria, ...(maxContinuations !== undefined ? { maxContinuations } : {}), ...(maxMinutes !== undefined ? { maxMinutes } : {}) };
 }
 
 // ── materialized view (fs) ─────────────────────────────────────────────
@@ -211,14 +294,43 @@ export function goalFilePath(cwd: string, sessionId: string): string {
   return path.join(goalDir(cwd), `${safe}.json`);
 }
 
+export function normalizeGoalState(parsed: unknown): GoalState | null {
+  const p = parsed as Partial<GoalState> | null | undefined;
+  if (!p || typeof p.objective !== "string") return null;
+  const schemaVersion = (p as { schema_version?: number }).schema_version;
+  if (schemaVersion !== 1 && schemaVersion !== GOAL_SCHEMA_VERSION) return null;
+  const status: GoalStatus = p.status === "active" || p.status === "paused" || p.status === "achieved" || p.status === "abandoned" ? p.status : "paused";
+  const budget = p.budget && typeof p.budget === "object" ? p.budget as Partial<GoalBudget> : {};
+  const counters = p.counters && typeof p.counters === "object" ? p.counters as Partial<GoalCounters> : {};
+  return {
+    ...(p as GoalState),
+    schema_version: GOAL_SCHEMA_VERSION,
+    goal_id: sanitizeGoalText(String(p.goal_id ?? "g-unknown")).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80) || "g-unknown",
+    session_id: sanitizeGoalText(String(p.session_id ?? "")).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80),
+    objective: sanitizeGoalText(p.objective).slice(0, MAX_OBJECTIVE_CHARS),
+    source: p.source?.type === "doc"
+      ? { ...p.source, doc_display_path: sanitizeDocDisplayPath(String(p.source.doc_display_path ?? "")), doc_hash: String(p.source.doc_hash ?? "").replace(/[^a-fA-F0-9]/g, "").slice(0, 64) }
+      : { type: "objective" },
+    success_criteria: (Array.isArray(p.success_criteria) ? p.success_criteria : [])
+      .map((c) => sanitizeGoalText(String(c)).slice(0, MAX_CRITERION_CHARS))
+      .filter(Boolean)
+      .slice(0, MAX_CRITERIA),
+    status,
+    budget: {
+      max_continuations: clampInt(budget.max_continuations, 0, 100, DEFAULT_MAX_CONTINUATIONS),
+      max_wall_minutes: clampInt(budget.max_wall_minutes, 1, 24 * 60, DEFAULT_MAX_WALL_MINUTES),
+    },
+    counters: { continuations_used: clampInt(counters.continuations_used, 0, 10_000, 0) },
+    created: typeof p.created === "string" ? sanitizeGoalText(p.created).slice(0, 80) : new Date(0).toISOString(),
+    updated: typeof p.updated === "string" ? sanitizeGoalText(p.updated).slice(0, 80) : new Date(0).toISOString(),
+    ...(p.status_note ? { status_note: sanitizeGoalText(String(p.status_note)).slice(0, 300) } : {}),
+  } as GoalState;
+}
+
 export function loadGoalFile(cwd: string, sessionId: string): GoalState | null {
   try {
     const raw = fs.readFileSync(goalFilePath(cwd, sessionId), "utf-8");
-    const parsed = JSON.parse(raw) as GoalState;
-    if (parsed && parsed.schema_version === GOAL_SCHEMA_VERSION && typeof parsed.objective === "string") {
-      return parsed;
-    }
-    return null;
+    return normalizeGoalState(JSON.parse(raw));
   } catch {
     return null;
   }
@@ -308,10 +420,8 @@ export function replayGoalEvents(entries: unknown[]): GoalState | null {
   for (const e of entries) {
     const entry = e as { type?: string; customType?: string; data?: { state?: GoalState } };
     if (entry?.type !== "custom" || entry.customType !== GOAL_EVENT_TYPE) continue;
-    const s = entry.data?.state;
-    if (s && s.schema_version === GOAL_SCHEMA_VERSION && typeof s.objective === "string") {
-      latest = s;
-    }
+    const s = normalizeGoalState(entry.data?.state);
+    if (s) latest = s;
   }
   return latest;
 }
@@ -322,11 +432,16 @@ const BEGIN_MARKER = "<!-- pi-astack/goal: active goal (user-set via /goal, C4' 
 const END_MARKER = "<!-- /pi-astack/goal -->";
 
 export function formatGoalBlock(state: GoalState): string {
+  const source = getGoalSource(state);
   const lines = [
     BEGIN_MARKER,
     `## Active goal (goal_id=${state.goal_id})`,
     `Objective: ${state.objective}`,
   ];
+  if (source.type === "doc") {
+    lines.push(`Goal document: ${source.doc_display_path}`);
+    lines.push("Read/update that document when you need the full plan; this block is only the compact pointer.");
+  }
   if (state.success_criteria.length > 0) {
     lines.push("Success criteria:");
     for (const c of state.success_criteria) lines.push(`- ${c}`);
@@ -354,10 +469,12 @@ function escapeRegex(s: string): string {
 
 /** Human-facing /goal status text. */
 export function formatGoalStatus(state: GoalState | null): string {
-  if (!state) return "no goal set (use /goal set <objective>)";
+  if (!state) return "no goal set (use /goal set <objective> or goal_set doc/objective)";
+  const source = getGoalSource(state);
+  const src = source.type === "doc" ? ` | doc: ${source.doc_display_path}` : "";
   const crit = state.success_criteria.length ? ` | criteria: ${state.success_criteria.join("; ")}` : "";
   const note = state.status_note ? ` | note: ${state.status_note}` : "";
-  return `[${state.status}] ${state.objective}${crit} | continuations ${state.counters.continuations_used}/${state.budget.max_continuations} | wall cap ${state.budget.max_wall_minutes}min | id ${state.goal_id}${note}`;
+  return `[${state.status}] ${state.objective}${src}${crit} | continuations ${state.counters.continuations_used}/${state.budget.max_continuations} | wall cap ${state.budget.max_wall_minutes}min | id ${state.goal_id}${note}`;
 }
 
 export const __TEST = { BEGIN_MARKER, END_MARKER };

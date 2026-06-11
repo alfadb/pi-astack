@@ -98,13 +98,19 @@
     "smoke:tier1-jaccard-adjudication": "node scripts/smoke-tier1-jaccard-adjudication.mjs",
     "smoke:goal-state": "node scripts/smoke-goal-state.mjs",
     "smoke:goal-autocontinue": "node scripts/smoke-goal-autocontinue.mjs",
+    "smoke:goal-doc-tools": "node scripts/smoke-goal-doc-tools.mjs",
     "smoke:workflow-dsl": "node scripts/smoke-workflow-dsl.mjs",
     "smoke:workflow-executor": "node scripts/smoke-workflow-executor.mjs",
-    "smoke:workflow-tools": "node scripts/smoke-workflow-tools.mjs"
+    "smoke:workflow-tools": "node scripts/smoke-workflow-tools.mjs",
+    "smoke:model-curator-tiers": "node scripts/smoke-model-curator-tiers.mjs"
   },
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.75.0 <1.0.0",

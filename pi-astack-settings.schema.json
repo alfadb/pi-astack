@@ -75,6 +75,46 @@
               "gpt-image-2": "Latest OpenAI image generation model. Call `imagine(prompt: \"...\", size?, quality?, style?)` to generate images."
             }
           ]
+        },
+        "tiers": {
+          "type": "object",
+          "description": "REQUIRED. Authoritative model-tier roster. Drives the 'Tier roster' section the model-curator injects into the system prompt and any T0 dispatch planning. Keys are tier names (commonly 'flagship' / 'standard' / 'fast'); values are objects with `label`, optional `description`, and `models` (array of `provider/modelId`). Tiers are NOT runtime fallback chains; they are a capability ranking for LLM selection guidance. Business call points (memory, sediment, vision, workflow, goal, compaction, imagine) continue to read their own per-role model fields, NOT this roster. Selection rule: when adding T0 members, prefer cross-vendor + cross-architecture; do not count two Anthropic models as two independent voters.",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["models"],
+            "properties": {
+              "label": { "type": "string" },
+              "description": { "type": "string" },
+              "models": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "pattern": "^[a-z0-9_-]+/[A-Za-z0-9._-]+$" }
+              }
+            }
+          },
+          "examples": [
+            {
+              "flagship": {
+                "label": "T0 — cost-blind flagship reasoning",
+                "description": "Critical agentic dispatch surface. Cost is never a consideration.",
+                "models": [
+                  "anthropic/claude-fable-5",
+                  "anthropic/claude-opus-4-8",
+                  "openai/gpt-5.5",
+                  "deepseek/deepseek-v4-pro"
+                ]
+              },
+              "standard": {
+                "label": "T1 — standard tier",
+                "models": ["anthropic/claude-sonnet-4-6", "moonshotai/kimi-k2.6"]
+              },
+              "fast": {
+                "label": "T2 — fast / high-volume",
+                "models": ["anthropic/claude-haiku-4-5", "deepseek/deepseek-v4-flash"]
+              }
+            }
+          ]
         }
       }
     },

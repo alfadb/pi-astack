@@ -51,27 +51,35 @@ function loadPiStackSettings(): Record<string, unknown> {
 
 // ── Default keep-list + capability hints ────────────────────────
 
+export interface TierRoster {
+  label: string;
+  description?: string;
+  models: readonly string[];
+}
+
 interface CuratorDefaults {
   providers: Record<string, readonly string[]>;
   hints: Record<string, string>;
   imageGen: Record<string, string>;
+  tiers: Record<string, TierRoster>;
 }
 
 // Plan A (3-T0 consensus 2026-06-10): model strategy data (providers / hints /
-// imageGen) is single-sourced in pi-astack-settings.json — NOT duplicated here.
-// This constant previously held a ~68-line byte-for-byte mirror of settings.json,
-// forcing every model/hint change to be applied in two places and kept identical
-// (a recurring sync-gap hazard — e.g. github-copilot once silently missing from
-// DEFAULTS). It is now intentionally empty: resolveConfig() falls back to these
-// empties only when settings.json is absent, in which case the curator gracefully
-// no-ops (no whitelist, no hints, no injected block — see the size===0 guard in
-// buildAvailableModelsBlock) rather than serving a stale hardcoded catalog.
-// To configure models/hints, edit pi-astack-settings.json (schema:
+// imageGen / tiers) is single-sourced in pi-astack-settings.json — NOT
+// duplicated here. This constant previously held a ~68-line byte-for-byte
+// mirror of settings.json, forcing every model/hint change to be applied in
+// two places and kept identical (a recurring sync-gap hazard — e.g.
+// github-copilot once silently missing from DEFAULTS). It is now intentionally
+// empty: resolveConfig() returns these empties only when the corresponding
+// settings key is missing, in which case the curator fails closed (tiers are
+// REQUIRED and loadConfig() throws if absent).
+// To configure models/hints/tiers, edit pi-astack-settings.json (schema:
 // pi-astack-settings.schema.json). The pi-global repo always ships that file.
 const DEFAULTS: CuratorDefaults = {
   providers: {},
   hints: {},
   imageGen: {},
+  tiers: {},
 };
 
 // ── Config resolution ───────────────────────────────────────────
@@ -83,7 +91,49 @@ function resolveConfig(): CuratorDefaults {
     providers: (cfg.providers as CuratorDefaults["providers"]) ?? DEFAULTS.providers,
     hints: (cfg.hints as CuratorDefaults["hints"]) ?? DEFAULTS.hints,
     imageGen: (cfg.imageGen as CuratorDefaults["imageGen"]) ?? DEFAULTS.imageGen,
+    tiers: (cfg.tiers as CuratorDefaults["tiers"]) ?? DEFAULTS.tiers,
   };
+}
+
+class CuratorConfigError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "CuratorConfigError";
+  }
+}
+
+/**
+ * Tiers are REQUIRED. The tier roster is the single source of truth for
+ * model capability ranking injected into the system prompt. If `tiers` is
+ * missing, empty, or contains an empty model list, the curator must not
+ * silently fall back — it throws so the operator fixes the config before
+ * the next turn ships a misleading prompt.
+ */
+function loadTiersOrThrow(): Record<string, TierRoster> {
+  const cfg = resolveConfig();
+  const tiers = cfg.tiers;
+  if (!tiers || typeof tiers !== "object" || Array.isArray(tiers)) {
+    throw new CuratorConfigError(
+      `pi-astack model-curator: \`modelCurator.tiers\` missing from ${PI_STACK_SETTINGS_PATH}. ` +
+        `This is a REQUIRED field — add at least one tier (e.g. flagship/standard/fast) ` +
+        `with a non-empty models list. See pi-astack-settings.schema.json.`,
+    );
+  }
+  const entries = Object.entries(tiers);
+  if (entries.length === 0) {
+    throw new CuratorConfigError(
+      `pi-astack model-curator: \`modelCurator.tiers\` is empty in ${PI_STACK_SETTINGS_PATH}. ` +
+        `At least one tier (e.g. flagship/standard/fast) is required.`,
+    );
+  }
+  for (const [name, tier] of entries) {
+    if (!tier || !Array.isArray(tier.models) || tier.models.length === 0) {
+      throw new CuratorConfigError(
+        `pi-astack model-curator: tier "${name}" in \`modelCurator.tiers\` must have a non-empty \`models\` array.`,
+      );
+    }
+  }
+  return tiers;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -145,6 +195,7 @@ function buildAvailableModelsBlock(
   reg: { getAvailable(): Model<Api>[]; getAll(): Model<Api>[] },
   hints: Record<string, string>,
   curatedProviders: Set<string>,
+  tiers: Record<string, TierRoster>,
   imageGen?: Record<string, string>,
 ): string | null {
   // Plan A guard (3-T0 consensus 2026-06-10): when nothing is curated (no
@@ -184,6 +235,38 @@ function buildAvailableModelsBlock(
       "stacking the same family.",
     "",
   ];
+
+  // ── Tier roster (REQUIRED, fail-closed upstream via loadTiersOrThrow) ──
+  // The roster renders BEFORE the per-provider detail table so the LLM
+  // reads the capability ranking first, then the row-level details.
+  if (tiers && Object.keys(tiers).length > 0) {
+    lines.push("### Tier roster");
+    lines.push("");
+    lines.push(
+      "Authoritative capability ranking (single source of truth = " +
+        "`modelCurator.tiers` in pi-astack-settings.json). Tier membership is " +
+        "for LLM selection guidance and T0 dispatch planning — it is NOT a " +
+        "runtime fallback chain. Business call points (memory, sediment, " +
+        "vision, workflow, goal, compaction, imagine) read their own per-role " +
+        "model fields, NOT this roster.",
+    );
+    lines.push("");
+    for (const [tierName, tier] of Object.entries(tiers)) {
+      const label = tier.label?.trim() || tierName;
+      lines.push(`- **${tierName}** (${label}) — ${tier.models.map((m) => `\`${m}\``).join(", ")}`);
+    }
+    if (tiers.flagship) {
+      lines.push("");
+      lines.push(
+        "When dispatching flagship-tier models for blind review or " +
+          "architecture critique, prefer cross-vendor + cross-architecture " +
+          "picks; two models from the same vendor (e.g. fable-5 + opus-4-8) " +
+          "do NOT count as two independent voters. Always check the per-model " +
+          "hints below before dispatching — the tier roster is a rough guide.",
+      );
+    }
+    lines.push("");
+  }
 
   const providerOrder = ["anthropic", "openai", "deepseek"];
   const curatedFirst = [
@@ -322,6 +405,11 @@ export default function (pi: ExtensionAPI) {
     const mtimeSnapshot = settingsMtimeMs();
     const cfg = resolveConfig();
 
+    // Fail-closed: tiers are REQUIRED. Validate at apply time so a missing
+    // or empty `modelCurator.tiers` surfaces here (session_start / live
+    // re-apply) instead of producing a misleading prompt at the next turn.
+    loadTiersOrThrow();
+
     builtinCatalog ??= reg.getAll();
     const allBuiltin = builtinCatalog;
 
@@ -451,9 +539,10 @@ export default function (pi: ExtensionAPI) {
     if (current.includes(INJECT_MARKER)) return undefined;
 
     const cfg = resolveConfig();
+    const tiers = loadTiersOrThrow();
     const curatedProviders = new Set(Object.keys(cfg.providers));
     const block = buildAvailableModelsBlock(
-      reg, cfg.hints, curatedProviders, cfg.imageGen,
+      reg, cfg.hints, curatedProviders, tiers, cfg.imageGen,
     );
     if (!block) return undefined;
 
@@ -488,3 +577,13 @@ export default function (pi: ExtensionAPI) {
     });
   }
 }
+
+// ── Test-only exports (NOT used by the live extension) ───────────
+// These symbols are imported by scripts/smoke-model-curator-tiers.mjs via
+// jiti's `__TEST` channel. They re-export the same closures the live code
+// path uses, so smoke tests stay in sync with the real implementation.
+export const __TEST = {
+  resolveConfig,
+  loadTiersOrThrow,
+  buildAvailableModelsBlock,
+};
