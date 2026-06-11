@@ -78,6 +78,7 @@ import {
   mutateRuleStatusContested,
   writeAbrainRule,
   writeProjectEntry,
+  readRuleForAdjudication,
   type AboutMeDraft,
   type ProjectEntryDraft,
   type WriteAboutMeResult,
@@ -85,6 +86,7 @@ import {
   type WriteRuleResult,
   type WriterAuditContext,
 } from "./writer";
+import { resolveTier1JaccardHit, runTier1JaccardAdjudication } from "./tier1-adjudicator";
 import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { abrainProjectDir, abrainSedimentStagingPath, resolveActiveProject } from "../_shared/runtime";
@@ -496,7 +498,9 @@ function compactResultSummary(results: Array<WriteProjectEntryResult | WriteRule
 }
 
 function isCapturedTier1Result(result: WriteRuleResult): boolean {
-  return result.status === "created" || result.status === "deduped" || result.status === "dry_run";
+  // PR-4: "updated" = adjudication update/merge landed on the existing rule —
+  // the directive is persisted there, same capture class as created.
+  return result.status === "created" || result.status === "deduped" || result.status === "dry_run" || result.status === "updated";
 }
 
 /** PR-5/P0.4 (2026-06-10): positive-capture check for the SHORT
@@ -3930,17 +3934,79 @@ async function tryAutoWriteLane(args: {
   if (tier1Signal && shouldEscalateToCurator(tier1Signal)) {
     const writeStart = Date.now();
     const draft = buildTier1RuleDraft(tier1Signal, sessionId, projectId);
-    const result = await writeAbrainRule(draft, {
+    const adjudicationLaneOn = settings.tier1JaccardCuratorLane === true;
+    const tier1AuditContext: WriterAuditContext = {
+      lane: "auto_write",
+      sessionId,
+      correlationId,
+      candidateId: candidateIdFor(correlationId, -1),
+    };
+    // PR-4/P0.3 (O2 2026-06-10): with the lane ON, a cross-slug Jaccard hit
+    // comes back as "similar_found" (no write) and the curator adjudicates
+    // {update,merge,create}; with the lane OFF (default), the legacy
+    // autonomous dedup gate stays the sole writer (§9.4 migration guardrail).
+    let result = await writeAbrainRule(draft, {
       abrainHome,
       settings,
       exactDuplicateAsDedup: true,
-      auditContext: {
-        lane: "auto_write",
-        sessionId,
-        correlationId,
-        candidateId: candidateIdFor(correlationId, -1),
-      },
+      semanticDedup: adjudicationLaneOn ? "report" : "dedup",
+      auditContext: tier1AuditContext,
     });
+    let adjudication: Record<string, unknown> | undefined;
+    if (result.status === "similar_found") {
+      try {
+        const resolved = await resolveTier1JaccardHit({
+          draft, firstResult: result, settings,
+          modelRegistry: args.modelRegistry, abrainHome, auditContext: tier1AuditContext,
+        });
+        result = resolved.result;
+        adjudication = resolved.adjudication;
+      } catch (e: unknown) {
+        // Defense-in-depth: an unexpected throw must not leave the
+        // intermediate similar_found as the lane outcome — deterministic
+        // create per O2 failure policy.
+        result = await writeAbrainRule(draft, {
+          abrainHome, settings, exactDuplicateAsDedup: true,
+          semanticDedup: "off", auditContext: tier1AuditContext,
+        });
+        adjudication = { enabled: true, decision: "create", fallback: "adjudication_threw", error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 200) };
+      }
+    } else if (
+      !adjudicationLaneOn
+      && settings.tier1JaccardShadowAudit === true
+      && result.status === "deduped"
+      && result.dedupedAgainst
+      && result.dedupedAgainst !== result.slug
+    ) {
+      // §9.4 dual-path shadow audit (flag OFF): the legacy gate just consumed
+      // this directive as a cross-slug near-dup. Run the adjudicator READ-ONLY
+      // and record its would-be verdict, so the cutover decision ("does the
+      // curator lane improve on the autonomous gate?") is made from real
+      // dogfood data instead of intuition. Never writes; errors recorded.
+      const against = result.dedupedAgainst;
+      const existing = readRuleForAdjudication(abrainHome, result.ruleScope ?? "global", result.projectId, against);
+      const shadow = existing
+        ? await runTier1JaccardAdjudication(
+            { draftTitle: draft.title, draftBody: draft.body, existingSlug: against, existingTitle: existing.title, existingBody: existing.body },
+            { settings, modelRegistry: args.modelRegistry },
+          ).catch((e: unknown) => ({ ok: false as const, model: settings.curatorModel, error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 200), durationMs: 0 }))
+        : { ok: false as const, model: settings.curatorModel, error: "existing_rule_unreadable", durationMs: 0 };
+      await appendAudit(cwd, {
+        operation: "tier1_jaccard_shadow",
+        lane: "auto_write",
+        session_id: sessionId,
+        correlation_id: correlationId,
+        against,
+        legacy_outcome: "deduped",
+        shadow_ok: shadow.ok,
+        ...(shadow.ok && "decision" in shadow && shadow.decision
+          ? { would_decision: shadow.decision.decision, would_reason: shadow.decision.reason.slice(0, 300) }
+          : { shadow_error: ("error" in shadow ? shadow.error : undefined) ?? "unknown" }),
+        model: shadow.model,
+        adj_duration_ms: shadow.durationMs,
+        quote: sanitizeAuditText(tier1Signal.user_quote ?? "", 200),
+      }).catch(() => {});
+    }
     await appendAudit(cwd, {
       operation: "tier1_direct_write",
       lane: "auto_write",
@@ -3969,7 +4035,11 @@ async function tryAutoWriteLane(args: {
       },
       result: resultSummary(result),
       deterministic_direct_path: true,
-      signal_consumed: result.status === "created" || result.status === "deduped" || result.status === "dry_run",
+      // PR-4: adjudication trace (lane ON only) — decision/model/fallback.
+      ...(adjudication ? { jaccard_adjudication: adjudication } : {}),
+      // "updated" = adjudication update/merge persisted the directive on the
+      // existing rule (PR-4).
+      signal_consumed: result.status === "created" || result.status === "deduped" || result.status === "dry_run" || result.status === "updated",
       checkpoint_advanced: false,
       durationMs: Date.now() - writeStart,
     });

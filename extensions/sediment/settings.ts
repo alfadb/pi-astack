@@ -91,6 +91,27 @@ export interface SedimentSettings {
    *  until the read-only decoder guards are deliberately dogfooded. */
   rulesAsReadonlyNeighborsEnabled: boolean;
 
+  /** PR-4/P0.3 (ADR 0028 R5'/R2' 调和，O2 裁决 2026-06-10): Tier-1 直写
+   *  路径上 Jaccard 近重复命中时的处置。
+   *  - false（default，迁移护栏 §9.4）: 旧路径唯一写者（自主 dedup gate）
+   *    + 新路径只读 shadow audit（tier1_jaccard_shadow 行记录 adjudicator
+   *    的 would-be 裁决，不写盘）。
+   *  - true: Jaccard 命中 → curator LLM 裁决 {update, merge, create}
+   *    （禁 skip/stage）；adjudicator 不可用/解析失败 → 确定性 create。
+   *    同时 Tier-2 curator lane 的 rules-create 跳过自主 gate（邻居预
+   *    过滤已在 curator prompt 内，curator.ts:1056）。
+   *  旧 gate 代码保留为回滚路径至 shadow audit 通过后一个版本。 */
+  tier1JaccardCuratorLane: boolean;
+
+  /** PR-4 R1 N1 (opus) / N4 (deepseek): independent opt-out for the
+   *  flag-OFF shadow audit (the read-only adjudicator call on each Tier-1
+   *  cross-slug Jaccard hit). Default true — shadow data IS the §9.4
+   *  cutover evidence — but users on default settings can disable the LLM
+   *  cost/latency without enabling the behavior-changing lane.
+   *  SUNSET: remove together with the legacy gate one version after
+   *  tier1JaccardCuratorLane default-flips. */
+  tier1JaccardShadowAudit: boolean;
+
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
    *  can track prompt changes without manual cross-reference.
@@ -196,6 +217,8 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoWriteRawAuditChars: 8_000,
   skipContinuationSanitize: false,
   rulesAsReadonlyNeighborsEnabled: false,
+  tier1JaccardCuratorLane: false,
+  tier1JaccardShadowAudit: true,
   promptVersion: {
     activeCorrectionClassifier: "v2",
     reasoningNormalizationPreamble: "v1",
@@ -321,6 +344,8 @@ export function resolveSedimentSettings(): SedimentSettings {
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
     skipContinuationSanitize: asBoolean(cfg.skipContinuationSanitize, DEFAULT_SEDIMENT_SETTINGS.skipContinuationSanitize),
     rulesAsReadonlyNeighborsEnabled: asBoolean(cfg.rulesAsReadonlyNeighborsEnabled, DEFAULT_SEDIMENT_SETTINGS.rulesAsReadonlyNeighborsEnabled),
+    tier1JaccardCuratorLane: asBoolean(cfg.tier1JaccardCuratorLane, DEFAULT_SEDIMENT_SETTINGS.tier1JaccardCuratorLane),
+    tier1JaccardShadowAudit: asBoolean(cfg.tier1JaccardShadowAudit, DEFAULT_SEDIMENT_SETTINGS.tier1JaccardShadowAudit),
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,

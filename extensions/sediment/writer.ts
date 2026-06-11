@@ -18,6 +18,7 @@ import {
   sanitizeRuleHint,
   ruleHintFallback,
   ruleBodySimilarity,
+  ruleBodyHash,
   RULE_DEDUP_SIMILARITY_THRESHOLD,
 } from "./rule-writer";
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
@@ -2011,12 +2012,24 @@ export interface WriteRuleOptions {
   exactDuplicateAsDedup?: boolean;
   /** Advisory per-(scope,inject_mode) health cap. Over-budget never blocks writes. */
   budgetTokenCap?: number;
+  /** PR-4/P0.3 (O2 2026-06-10): cross-slug Jaccard near-dup policy.
+   *  - "dedup" (default): autonomous gate — return status:"deduped" (legacy
+   *    behavior, sole writer while tier1JaccardCuratorLane is off).
+   *  - "report": NO write — return status:"similar_found" + dedupedAgainst so
+   *    the Tier-1 caller can run the curator adjudication {update,merge,create}.
+   *  - "off": skip the cross-slug scan (post-adjudication create, or Tier-2
+   *    curator lane where rule neighbors were already in the prompt).
+   *  Same-slug gates (duplicate_slug / exactDuplicateAsDedup) are unaffected. */
+  semanticDedup?: "dedup" | "report" | "off";
 }
 
 export interface WriteRuleResult {
   slug: string;
   path: string;
-  status: "created" | "archived" | "deleted" | "updated" | "rejected" | "dry_run" | "deduped";
+  /** "similar_found" is an INTERMEDIATE status (semanticDedup:"report" only):
+   *  nothing was written; the caller must resolve it via adjudication. It never
+   *  reaches no-loss predicates / tells under the default settings. */
+  status: "created" | "archived" | "deleted" | "updated" | "rejected" | "dry_run" | "deduped" | "similar_found";
   reason?: string;
   /** ADR 0028 §12.3: rules injection-budget axis (values always/listed),
    *  renamed from `tier` to stop colliding with the GTIER Tier-1/2 predicate. */
@@ -2228,10 +2241,23 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
   // stated twice + had 2 staging entries; a re-statement must NOT create a near
   // duplicate. If an active rule with a near-identical body already exists, skip
   // the write (the existing rule already carries the intent).
-  const dedupSlug = findSimilarRuleSlug(abrainHome, ruleScope, projectId, safeBody, slug);
-  if (dedupSlug) {
-    const auditPath = await audit({ operation: "deduped", reason: "semantic_duplicate", against: dedupSlug });
-    return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${dedupSlug}`, dedupedAgainst: dedupSlug, injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
+  // PR-4/P0.3 调和 (O2 2026-06-10): the 06-07 consensus targeted exact/near-
+  // verbatim restatements; Jaccard ≥ 0.85 similar ≠ exact duplicate, so on the
+  // Tier-1 path this probabilistic gate is being migrated from an autonomous
+  // kill (R2' violation: it consumes a user directive) to a curator
+  // adjudication lane — "report" hands the hit back to the caller, "off"
+  // bypasses after adjudication. Default "dedup" stays the sole write path
+  // while sediment.tier1JaccardCuratorLane is off (§9.4 migration guardrail).
+  if (opts.semanticDedup !== "off") {
+    const dedupSlug = findSimilarRuleSlug(abrainHome, ruleScope, projectId, safeBody, slug);
+    if (dedupSlug) {
+      if (opts.semanticDedup === "report") {
+        const auditPath = await audit({ operation: "similar_found", reason: "semantic_similar", against: dedupSlug });
+        return { slug, path: abrainHome, status: "similar_found", reason: `semantic_similar:${dedupSlug}`, dedupedAgainst: dedupSlug, injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
+      }
+      const auditPath = await audit({ operation: "deduped", reason: "semantic_duplicate", against: dedupSlug });
+      return { slug, path: abrainHome, status: "deduped", reason: `semantic_duplicate:${dedupSlug}`, dedupedAgainst: dedupSlug, injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
+    }
   }
 
   const sanitizedReplacements = [...titleSan.replacements, ...bodySan.replacements, ...reasonSan.replacements];
@@ -2280,6 +2306,203 @@ export function findRuleFile(abrainHome: string, scope: "global" | "project", pr
     if (fsSync.existsSync(fp)) return { injectMode: mode, path: fp };
   }
   return undefined;
+}
+
+/** PR-4/P0.3: read an existing rule for the Tier-1 Jaccard adjudication
+ *  prompt — title/status from frontmatter, body WITHOUT the timeline section
+ *  (evidence lines would bloat the prompt and skew the merge output). */
+export function readRuleForAdjudication(
+  abrainHome: string,
+  scope: "global" | "project",
+  projectId: string | undefined,
+  slug: string,
+): { slug: string; path: string; injectMode: RuleInjectMode; title: string; status: string; body: string; bodyHash?: string } | undefined {
+  const found = findRuleFile(path.resolve(abrainHome), scope, projectId, slug);
+  if (!found) return undefined;
+  try {
+    const raw = fsSync.readFileSync(found.path, "utf-8");
+    const { frontmatterText, body } = splitFrontmatter(raw);
+    const fm = parseFrontmatter(frontmatterText);
+    const bodySansTimeline = body.replace(/^## Timeline[\s\S]*$/m, "").trim();
+    return {
+      slug,
+      path: found.path,
+      injectMode: found.injectMode,
+      title: typeof fm.title === "string" ? fm.title : slug,
+      status: typeof fm.status === "string" ? fm.status : "active",
+      body: bodySansTimeline,
+      // R1 N5 (opus): TOCTOU witness — the caller threads this back as
+      // expectedBodyHash so a concurrent body change between the unlocked
+      // read (prompt build) and the locked apply is detected, not clobbered.
+      bodyHash: typeof fm.body_hash === "string" ? fm.body_hash : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export interface Tier1RuleAdjudicationApply {
+  op: "update" | "merge";
+  /** The new directive quote — appended as timeline evidence. Line-level
+   *  dedup (O2: 同 quote 不重复 append 防膨胀): if the normalized quote
+   *  already appears anywhere in the file, the apply is an idempotent no-op
+   *  returning status "deduped" / reason evidence_duplicate. */
+  evidenceQuote: string;
+  /** merge only: replaces the rule BODY (frontmatter + timeline preserved,
+   *  body_hash recomputed). */
+  mergedBody?: string;
+  /** Adjudicator rationale, recorded in the timeline note. */
+  reason?: string;
+  /** merge only (R1 N5): the frontmatter body_hash the adjudicator's input
+   *  was read at. If the rule's body_hash changed by apply time (concurrent
+   *  writer), the merge is REJECTED with reason "concurrent_modification"
+   *  instead of last-write-wins clobbering — the caller's fallback then
+   *  lands the directive as a visible create. */
+  expectedBodyHash?: string;
+}
+
+/** PR-4/P0.3 (O2 2026-06-10): apply a curator adjudication verdict to an
+ *  existing rule after a Tier-1 Jaccard near-dup hit.
+ *  - update: the existing rule already carries the intent → refresh it
+ *    (timeline evidence line + `updated` timestamp). Existing body untouched.
+ *  - merge: the directive adds content → replace the body with the
+ *    adjudicator-merged text (sanitize + lint gates, body_hash recomputed),
+ *    plus timeline note.
+ *  Mirrors mutateRuleStatusContested's lock/atomicWrite/git-rollback shape. */
+export async function applyTier1RuleAdjudication(
+  target: { slug: string; scope: "global" | "project"; projectId?: string },
+  apply: Tier1RuleAdjudicationApply,
+  opts: WriteRuleOptions,
+): Promise<WriteRuleResult> {
+  const started = Date.now();
+  const abrainHome = path.resolve(opts.abrainHome);
+  const { slug, scope, projectId } = target;
+  const sessionId = opts.auditContext?.sessionId;
+  const resultCtx = { lane: "rules", sessionId, correlationId: opts.auditContext?.correlationId, candidateId: opts.auditContext?.candidateId };
+  const audit = (event: Record<string, unknown>) =>
+    appendAbrainAudit(abrainHome, "rules", { scope, ...(projectId ? { project_id: projectId } : {}), slug, op: `tier1_adjudication_${apply.op}`, duration_ms: Date.now() - started, ...resultCtx, ...event });
+
+  const found = findRuleFile(abrainHome, scope, projectId, slug);
+  if (!found) {
+    const auditPath = await audit({ operation: "reject", reason: "entry_not_found" });
+    return { slug, path: abrainHome, status: "rejected", reason: "entry_not_found", ruleScope: scope, projectId, auditPath, ...resultCtx };
+  }
+
+  const quoteSan = sanitizeForMemory(apply.evidenceQuote ?? "");
+  if (!quoteSan.ok) {
+    const auditPath = await audit({ operation: "reject", reason: quoteSan.error });
+    return { slug, path: found.path, status: "rejected", reason: quoteSan.error, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+  }
+  const evidenceLine = (quoteSan.text ?? "").replace(/\s+/g, " ").trim().slice(0, 500);
+  const reasonLine = (apply.reason ?? "tier1 jaccard adjudication").replace(/\s+/g, " ").trim().slice(0, 300);
+
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    const ts = nowIso();
+    const raw = await fs.readFile(found.path, "utf-8");
+
+    // Evidence line-level dedup: idempotent no-op when this quote is already
+    // carried (body or a previous evidence line) — collapse whitespace on both
+    // sides so wrapping differences don't defeat the check.
+    if (apply.op === "update" && evidenceLine && raw.replace(/\s+/g, " ").includes(evidenceLine)) {
+      const auditPath = await audit({ operation: "deduped", reason: "evidence_duplicate" });
+      return { slug, path: found.path, status: "deduped", reason: `evidence_duplicate:${slug}`, dedupedAgainst: slug, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    }
+
+    // Canonical frontmatter/body split (R1 N2 opus: no ad-hoc indexOf — an
+    // externally-edited body containing a bare "---" line must not corrupt
+    // the slice). Frontmatter patching is SCOPED to frontmatterText so a
+    // body line that happens to start with "updated:"/"body_hash:" is never
+    // mispatched (gpt R1 ②).
+    const { frontmatterText, body: fileBody } = splitFrontmatter(raw);
+    const tlIdx = fileBody.search(/^## Timeline$/m);
+    if (!frontmatterText || tlIdx < 0) {
+      const auditPath = await audit({ operation: "reject", reason: "malformed_rule_file" });
+      return { slug, path: found.path, status: "rejected", reason: "malformed_rule_file", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    }
+    let fmPatched = frontmatterText;
+    let bodyPatched = fileBody;
+    let mergeJaccardVsOld: number | undefined;
+
+    if (apply.op === "merge") {
+      const mergedRaw = (apply.mergedBody ?? "").trim();
+      if (mergedRaw.length < 10) {
+        const auditPath = await audit({ operation: "reject", reason: "validation_error_merged_body" });
+        return { slug, path: found.path, status: "rejected", reason: "validation_error_merged_body", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      }
+      const fm = parseFrontmatter(frontmatterText);
+      const currentHash = typeof fm.body_hash === "string" ? fm.body_hash : undefined;
+      // R1 N5 (opus): concurrent-modification witness — the body the
+      // adjudicator reasoned about must still be the body on disk.
+      if (apply.expectedBodyHash && currentHash && apply.expectedBodyHash !== currentHash) {
+        const auditPath = await audit({ operation: "reject", reason: "concurrent_modification" });
+        return { slug, path: found.path, status: "rejected", reason: "concurrent_modification", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      }
+      const bodySan = sanitizeForMemory(mergedRaw);
+      if (!bodySan.ok) {
+        const auditPath = await audit({ operation: "reject", reason: bodySan.error });
+        return { slug, path: found.path, status: "rejected", reason: bodySan.error, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      }
+      // Hash semantics note (R1 N3 opus): this hashes the SANITIZED+TRIMMED
+      // merged body, pre display transforms (heading injection) — the same
+      // value class buildRuleMarkdown hashes (draft.body as provided). A
+      // creation-time draft carrying un-trimmed whitespace would hash
+      // differently; accepted cosmetic divergence, and the merge-idempotency
+      // check below is self-consistent because it uses this same source.
+      const hashSource = (bodySan.text ?? mergedRaw).trim();
+      const newHash = ruleBodyHash(hashSource);
+      // R1 N4 (opus) / N1 (deepseek): merge idempotency — re-applying a merge
+      // that lands the same body (retry, user restatement re-adjudicated)
+      // must not rewrite the file or append another timeline note.
+      if (currentHash && newHash === currentHash) {
+        const auditPath = await audit({ operation: "deduped", reason: "body_unchanged" });
+        return { slug, path: found.path, status: "deduped", reason: `body_unchanged:${slug}`, dedupedAgainst: slug, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      }
+      let newBody = hashSource.replace(/^---$/gm, " ---");
+      if (!/^#\s+/m.test(newBody)) {
+        newBody = `# ${typeof fm.title === "string" ? fm.title : slug}\n\n${newBody}`;
+      }
+      // R1 N5 (deepseek): audit-only fidelity metric — Jaccard between the
+      // merged body and the old body segment. No gate (a legitimate merge
+      // may rewrite heavily; false-block → create is worse), but a dogfood
+      // distribution skewed low says the adjudicator REWRITES instead of
+      // merging and the lane strategy needs a second look before cutover.
+      const oldBodySegment = fileBody.slice(0, tlIdx);
+      mergeJaccardVsOld = Math.round(ruleBodySimilarity(oldBodySegment, hashSource) * 100) / 100;
+      bodyPatched = `\n${newBody}\n\n${fileBody.slice(tlIdx)}`;
+      fmPatched = fmPatched.replace(/^body_hash:.*$/m, `body_hash: ${newHash}`);
+      const lintErrors = lintMarkdown(`---\n${fmPatched}\n---\n${bodyPatched}`, "rule.md").filter((i) => i.severity === "error").length;
+      if (lintErrors > 0) {
+        const auditPath = await audit({ operation: "reject", reason: "lint_error" });
+        return { slug, path: found.path, status: "rejected", reason: "lint_error", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      }
+    }
+
+    fmPatched = fmPatched.replace(/^updated:.*$/m, `updated: ${yamlString(ts)}`);
+    let patched = `---\n${fmPatched}\n---\n${bodyPatched}`;
+    const noteKind = apply.op === "merge" ? "tier1-merge" : "tier1-evidence";
+    const note = apply.op === "merge" ? `${reasonLine}${evidenceLine ? ` — ${evidenceLine}` : ""}` : evidenceLine || reasonLine;
+    patched = `${patched.trimEnd()}\n- ${ts} | ${sessionId || "sediment"} | ${noteKind} | ${note}\n`;
+
+    await atomicWrite(found.path, patched);
+    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, `rules:${noteKind}`) : null;
+    if (git === null && opts.settings.gitCommit) {
+      const rel = path.relative(abrainHome, found.path);
+      try { await atomicWrite(found.path, raw); } catch { /* best-effort restore */ }
+      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
+      const auditPath = await audit({ operation: "reject", reason: "git_commit_failed" });
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+    }
+    const auditPath = await audit({ operation: apply.op === "merge" ? "merge" : "update", target: path.relative(abrainHome, found.path), git_commit: git, reason: reasonLine, ...(mergeJaccardVsOld !== undefined ? { merge_jaccard_vs_old: mergeJaccardVsOld } : {}) });
+    return { slug, path: found.path, status: "updated", reason: apply.op === "merge" ? "tier1_merged_body" : "tier1_evidence_appended", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await audit({ operation: "error", reason: message });
+    return { slug, path: found.path, status: "rejected", reason: message, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+  } finally {
+    await lock?.release();
+  }
 }
 
 export interface MutateRuleOptions extends WriteRuleOptions {

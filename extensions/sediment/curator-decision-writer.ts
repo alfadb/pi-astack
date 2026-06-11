@@ -90,14 +90,28 @@ export async function executeCuratorDecisionToBrain(args: {
   // WriteRuleResult is adapted to the shared WriteProjectEntryResult shape.
   const ruleResult = (r: WriteRuleResult): WriteProjectEntryResult => ({
     // a #2 semantic-dedup hit is a no-op write -> 'skipped' in the shared shape.
-    slug: r.slug, path: r.path, status: r.status === "deduped" ? "skipped" : r.status, reason: r.reason, gitCommit: r.gitCommit,
+    // "similar_found" is a Tier-1 report-mode intermediate (PR-4) that Tier-2
+    // never requests (semanticDedup here is only ever dedup|off) — defensive
+    // map to 'skipped' to keep the shared status union closed.
+    slug: r.slug, path: r.path, status: r.status === "deduped" || r.status === "similar_found" ? "skipped" : r.status, reason: r.reason, gitCommit: r.gitCommit,
     auditPath: r.auditPath, lane: r.lane ?? auditContext?.lane, sessionId: r.sessionId ?? sessionId,
     correlationId: r.correlationId, candidateId: r.candidateId,
     // audit round-3 P3: carry lint + sanitization counts so the notify/audit
     // summary (resultSummary) is complete for rules results too.
     lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, sanitizedReplacements: r.sanitizedReplacements,
   });
-  const ruleOpts = { abrainHome, settings, dryRun, auditContext };
+  // PR-4/P0.3 Tier-2 (O2 2026-06-10): with the adjudication lane ON, Jaccard
+  // demotes from autonomous write-time gate to curator neighbor pre-filter —
+  // the curator already saw existing rules as readonly neighbors and its
+  // create decision IS the adjudication. CONJUNCTION GUARD: the neighbor
+  // pre-filter only exists when rulesAsReadonlyNeighborsEnabled actually
+  // loaded rules into the curator prompt (curator.ts:1053-1058, default off);
+  // bypassing the gate without that substitute would regress the 2026-06-07
+  // glab near-dup incident. Lane OFF (default) keeps the legacy gate.
+  const tier2SemanticDedup: "dedup" | "off" =
+    settings.tier1JaccardCuratorLane === true && settings.rulesAsReadonlyNeighborsEnabled === true
+      ? "off" : "dedup";
+  const ruleOpts = { abrainHome, settings, dryRun, auditContext, semanticDedup: tier2SemanticDedup };
   const resolveRuleLifecycleScope = (slug: string): "global" | "project" | null => {
     if (findRuleFile(abrainHome, "global", undefined, slug)) return "global";
     if (findRuleFile(abrainHome, "project", projectId, slug)) return "project";
