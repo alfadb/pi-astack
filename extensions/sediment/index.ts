@@ -2344,6 +2344,13 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             ? { directive_recall: {
                 escalated: shouldEscalateToCurator(signal),
                 provenance: signal.provenance ?? null,
+                // PR-3 (opus R1 NIT-1): echo-subclass attribution for the
+                // walk-back hook — matched_roles=[user,assistant] means the
+                // user DID say it (cross-role demote, visible recall cost)
+                // vs [assistant] alone (correctly demoted, user never said
+                // it). Without this the two are indistinguishable in audit.
+                quote_multi_match: signal.quote_multi_match ?? null,
+                quote_matched_roles: signal.quote_matched_roles ?? null,
                 quote: (signal.user_quote ?? "").slice(0, 200),
                 reason: shouldEscalateToCurator(signal)
                   ? "escalated_to_tier1"
@@ -3924,6 +3931,11 @@ async function tryAutoWriteLane(args: {
         // is_directive cover the conf≥8 cases?") can be measured from
         // tier1_direct_write rows instead of inferred.
         is_directive: tier1Signal.is_directive ?? null,
+        // PR-3/P0.2: deterministic quote-match diagnostics (multi_match per
+        // impl-plan; same-user-role repeats reach here, cross-role already
+        // fail-closed out of Tier-1 upstream).
+        quote_multi_match: tier1Signal.quote_multi_match ?? null,
+        quote_matched_roles: tier1Signal.quote_matched_roles ?? null,
         quote: (tier1Signal.user_quote ?? "").slice(0, 200),
       },
       result: resultSummary(result),

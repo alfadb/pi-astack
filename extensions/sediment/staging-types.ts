@@ -46,6 +46,11 @@ export interface StagingEntry {
      *  is what the O5 sunset audit needs to see. null = classifier did
      *  not emit the field (pre-v2 prompt or non-boolean shape). */
     is_directive?: boolean | null;
+    /** PR-3/P0.2: deterministic quote-match diagnostics from
+     *  deriveProvenance — staged-file forensics for cross-role demotes
+     *  (echo-subclass attribution without consulting audit.jsonl). */
+    quote_multi_match?: boolean | null;
+    quote_matched_roles?: Array<"user" | "transcript" | "assistant"> | null;
     scope_description: string;
     correction_intent: string;
     most_likely_error_direction: string;

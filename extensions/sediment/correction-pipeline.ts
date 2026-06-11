@@ -98,6 +98,13 @@ export interface CorrectionSignal {
    *  Orthogonal to `typing` (mood vs time-scope). Exempts the confidence
    *  gate in isTier1Directive(); see the sunset note there. */
   is_directive?: boolean;
+  /** PR-3/P0.2 (ADR 0028 §6): deterministic quote-match diagnostics set by
+   *  deriveProvenance — NOT from the LLM. multi_match=true when the quote
+   *  matched >1 turn. matched_roles is ALWAYS set when the quote was found
+   *  (single-role included); multi-role → provenance was already
+   *  fail-closed out of user-expressed upstream (deepseek R1 N3). */
+  quote_multi_match?: boolean;
+  quote_matched_roles?: Array<"user" | "transcript" | "assistant">;
 }
 
 /** Lightweight entry card for classifier target identification.
@@ -266,30 +273,78 @@ function normWsForProvenance(s: string): string {
 }
 
 /**
- * AX-PROVENANCE (ADR 0028 v1.1 R2'): deterministically classify where the
- * classifier's verbatim user_quote actually occurs in the packed window, by
- * scanning turn.role — NO LLM judgment. This is the structural source gate that
- * lets the Tier-1 deterministic rule path distinguish a user directive from
- * README/tool content masquerading as one. user-role match wins over
- * tool/assistant (the user saying it is the strongest signal).
+ * AX-PROVENANCE (ADR 0028 v1.1 R2' + §6 unique-turn mapping; PR-3/P0.2
+ * 2026-06-10): deterministically classify where the classifier's verbatim
+ * user_quote actually occurs in the packed window, by scanning turn.role —
+ * NO LLM judgment. This is the structural source gate that lets the Tier-1
+ * deterministic rule path distinguish a user directive from README/tool
+ * content masquerading as one.
+ *
+ * UNIQUE-TURN MAPPING (supersedes the pre-PR-3 "user-role match wins"
+ * priority): a quote matching turns of DIFFERENT role classes is
+ * role-AMBIGUOUS → fail-closed OUT of user_message (ADR 0028 §6 "跨多
+ * turn 的 quote → fail-closed → Tier-2"). The demote target is
+ * deterministic: transcript beats assistant — content-in-transcript is
+ * the conservative sink for the README-trap class. A quote matching
+ * MULTIPLE turns of the SAME user role stays user_message: role
+ * derivation is unambiguous, and a repeated statement is a stronger
+ * signal, not a weaker one (impl-plan v2.1 收敛解释; multi_match=true
+ * surfaces it for audit).
+ *
+ * ACCEPTED RECALL COST (visible, not silent): an assistant ECHO of a
+ * user directive ("好的，以后用 pnpm") makes the quote match both roles
+ * → demoted to Tier-2 here; the R3' transcript-keyed recall audit still
+ * flags the uncovered user-role imperative in the same turn, so the
+ * loss surfaces as a recall flag rather than disappearing. Walk-back
+ * hook (impl-plan v2.1 P0.2): if recall flags cluster on this echo
+ * pattern in dogfood, revisit the cross-role rule.
+ *
+ * MATCHING SEMANTICS NOTE (deepseek R1 N1): containment is normalized
+ * SUBSTRING inclusion — a short quote can hit a longer turn with the
+ * opposite stance ("use pnpm" ⊂ "don't use pnpm"). Classifier quotes are
+ * usually long enough to make this rare, and the failure direction is
+ * fail-closed (extra demote), never a spurious Tier-1 promote.
  */
 export function deriveProvenance(
   packed: PackedWindow,
   userQuote: string | undefined,
-): { quote_source: NonNullable<CorrectionSignal["quote_source"]>; provenance: ProvenanceClass } {
+): {
+  quote_source: NonNullable<CorrectionSignal["quote_source"]>;
+  provenance: ProvenanceClass;
+  /** True when the quote matched MORE THAN ONE turn (any roles). */
+  multi_match?: boolean;
+  /** Role classes the quote matched, for audit forensics. */
+  matched_roles?: Array<"user" | "transcript" | "assistant">;
+} {
   const q = normWsForProvenance((userQuote ?? "").trim());
   if (!q) return { quote_source: "absent", provenance: "assistant-observed" };
-  let inUser = false, inTranscript = false, inAssistant = false;
+  let userHits = 0, transcriptHits = 0, assistantHits = 0;
   for (const t of packed.turns) {
     if (!normWsForProvenance(t.text).includes(q)) continue;
     const r = t.role.toLowerCase();
-    if (r === "user") inUser = true;
-    else if (r === "toolresult" || r === "bashexecution" || r === "tool" || r === "system") inTranscript = true;
-    else if (r === "assistant") inAssistant = true;
+    if (r === "user") userHits++;
+    else if (r === "toolresult" || r === "bashexecution" || r === "tool" || r === "system") transcriptHits++;
+    else if (r === "assistant") assistantHits++;
   }
-  if (inUser) return { quote_source: "user_message", provenance: "user-expressed" };
-  if (inTranscript) return { quote_source: "transcript_content", provenance: "content-in-transcript" };
-  if (inAssistant) return { quote_source: "assistant", provenance: "assistant-observed" };
+  const matchedRoles: Array<"user" | "transcript" | "assistant"> = [];
+  if (userHits > 0) matchedRoles.push("user");
+  if (transcriptHits > 0) matchedRoles.push("transcript");
+  if (assistantHits > 0) matchedRoles.push("assistant");
+  const totalHits = userHits + transcriptHits + assistantHits;
+  if (matchedRoles.length > 1) {
+    // Cross-role ambiguity → fail-closed out of user_message (§6).
+    return transcriptHits > 0
+      ? { quote_source: "transcript_content", provenance: "content-in-transcript", multi_match: true, matched_roles: matchedRoles }
+      : { quote_source: "assistant", provenance: "assistant-observed", multi_match: true, matched_roles: matchedRoles };
+  }
+  if (userHits > 0) {
+    return {
+      quote_source: "user_message", provenance: "user-expressed",
+      ...(totalHits > 1 ? { multi_match: true } : {}), matched_roles: matchedRoles,
+    };
+  }
+  if (transcriptHits > 0) return { quote_source: "transcript_content", provenance: "content-in-transcript", ...(totalHits > 1 ? { multi_match: true } : {}), matched_roles: matchedRoles };
+  if (assistantHits > 0) return { quote_source: "assistant", provenance: "assistant-observed", ...(totalHits > 1 ? { multi_match: true } : {}), matched_roles: matchedRoles };
   return { quote_source: "absent", provenance: "assistant-observed" };
 }
 
@@ -384,6 +439,10 @@ export function buildProvisionalStagingEntry(signal: CorrectionSignal, seedText:
       // signal that WAS a directive but missed Tier-1 is exactly what the
       // sunset audit needs to see.
       is_directive: signal.is_directive ?? null,
+      // PR-3 (gpt R1 N1): quote-match diagnostics survive into the staged
+      // file so Tier-2 demotion forensics don't depend on audit.jsonl alone.
+      quote_multi_match: signal.quote_multi_match ?? null,
+      quote_matched_roles: signal.quote_matched_roles ?? null,
       scope_description: signal.scope_description ?? "",
       correction_intent: signal.correction_intent ?? "",
       most_likely_error_direction: signal.most_likely_error ?? "",
@@ -521,6 +580,10 @@ export async function runCorrectionPipeline(
     const pv = deriveProvenance(packed, signal.user_quote);
     signal.quote_source = pv.quote_source;
     signal.provenance = pv.provenance;
+    // PR-3/P0.2: deterministic match diagnostics for audit (multi_match
+    // per impl-plan; matched_roles for cross-role fail-closed forensics).
+    signal.quote_multi_match = pv.multi_match;
+    signal.quote_matched_roles = pv.matched_roles;
   }
 
   const result: CorrectionPipelineResult = {

@@ -56,13 +56,64 @@ const turn = (role, text) => ({ role, text, timestamp: "2026-06-07T00:00:00Z" })
   assert(r.quote_source === "absent" && r.provenance === "assistant-observed", `absent -> assistant-observed, got ${JSON.stringify(r)}`);
 }
 
-// 5. same quote in BOTH a user turn and a tool turn -> user wins (the user saying it is the strongest)
+// 5. PR-3/P0.2 (ADR 0028 §6 unique-turn mapping — INVERTS the pre-PR-3
+//    "user wins" priority): same quote in BOTH a user turn and a tool turn
+//    is role-AMBIGUOUS -> fail-closed OUT of user_message, demoted to the
+//    conservative content-in-transcript sink, with multi_match diagnostics.
 {
   const r = deriveProvenance(win([
     turn("toolResult", "[toolResult:read] always use glab"),
     turn("user", "always use glab"),
   ]), "always use glab");
-  assert(r.provenance === "user-expressed", `user wins over tool, got ${JSON.stringify(r)}`);
+  assert(r.provenance === "content-in-transcript" && r.quote_source === "transcript_content", `cross-role user+tool -> fail-closed to content-in-transcript, got ${JSON.stringify(r)}`);
+  assert(r.multi_match === true && JSON.stringify(r.matched_roles) === JSON.stringify(["user", "transcript"]), `cross-role diagnostics recorded, got ${JSON.stringify(r)}`);
+}
+
+// 5b. PR-3: assistant ECHO of a user directive -> cross-role ambiguity ->
+//     fail-closed to assistant-observed (accepted recall cost; R3' recall
+//     audit is the visible net — see deriveProvenance header).
+{
+  const r = deriveProvenance(win([
+    turn("user", "以后用 pnpm"),
+    turn("assistant", "好的，以后用 pnpm，已记住"),
+  ]), "以后用 pnpm");
+  assert(r.provenance === "assistant-observed" && r.quote_source === "assistant" && r.multi_match === true, `user+assistant echo -> fail-closed to assistant-observed, got ${JSON.stringify(r)}`);
+  // deepseek R1 N2: matched_roles is the forensics key for the echo
+  // subclass ("why didn't my directive reach Tier-1") — lock it.
+  assert(JSON.stringify(r.matched_roles) === JSON.stringify(["user", "assistant"]), `echo matched_roles records both roles, got ${JSON.stringify(r)}`);
+}
+
+// 5e. opus R1 N2: assistant+tool WITHOUT user -> cross-role, transcript
+//     sink wins over assistant (locks the demote priority branch that 5d
+//     cannot isolate because 5d includes a user match).
+{
+  const r = deriveProvenance(win([
+    turn("toolResult", "[toolResult:read] always pin versions"),
+    turn("assistant", "per the README, always pin versions"),
+  ]), "always pin versions");
+  assert(r.provenance === "content-in-transcript" && r.quote_source === "transcript_content" && r.multi_match === true, `tool+assistant -> transcript sink, got ${JSON.stringify(r)}`);
+}
+
+// 5c. PR-3: quote in MULTIPLE user-role turns ONLY -> role-unambiguous ->
+//     stays user_message (repeated statement = stronger signal), with
+//     multi_match=true surfaced for audit.
+{
+  const r = deriveProvenance(win([
+    turn("user", "以后用 pnpm"),
+    turn("user", "再说一遍：以后用 pnpm"),
+  ]), "以后用 pnpm");
+  assert(r.provenance === "user-expressed" && r.quote_source === "user_message" && r.multi_match === true, `multi user-role -> user_message + multi_match, got ${JSON.stringify(r)}`);
+}
+
+// 5d. PR-3: all three role classes match -> transcript sink wins over
+//     assistant (deterministic demote priority).
+{
+  const r = deriveProvenance(win([
+    turn("user", "always pin versions"),
+    turn("toolResult", "[toolResult:read] README: always pin versions"),
+    turn("assistant", "the README says always pin versions"),
+  ]), "always pin versions");
+  assert(r.provenance === "content-in-transcript" && r.matched_roles.length === 3, `three-role match -> transcript sink, got ${JSON.stringify(r)}`);
 }
 
 // 6. SANITIZE-BASIS fix (audit P1): a user directive mentioning an IP. The
