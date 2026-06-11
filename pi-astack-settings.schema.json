@@ -817,6 +817,24 @@
       }
     },
 
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "workflow extension (ADR 0032 Part B, experimental channel). PR-9 ships /workflow dry-run (deterministic v1 DSL validation, works regardless of enabled); the PR-10 executor is hard-gated on enabled. Flipping either default = promotion = blocked on ADR 0030 evaluation harness (ADR 0032 §5).",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Experimental-channel master switch. Default off; dry-run validation works regardless."
+        },
+        "readOnly": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default), any stage declaring mutating:true (or listing mutating tools) FAILS dry-run — tools are never silently stripped. Mutating stages additionally require per-stage mutating:true in the DSL and PI_MULTI_AGENT_ALLOW_MUTATING=1 at runtime (W9 triple-explicit)."
+        }
+      }
+    },
+
     "vision": {
       "type": "object",
       "description": "Vision tool model selection (extensions/vision/). Auto-selects the strongest vision-capable model from the registry, excluding the caller's own model.",
