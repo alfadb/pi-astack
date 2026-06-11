@@ -283,6 +283,21 @@ export async function gcStaleGoalFiles(cwd: string, opts: { keepSessionId?: stri
   return removed;
 }
 
+/** R4' anti-write-only-loop (PR-7): append a goal outcome row to
+ *  .pi-astack/goal/outcome-ledger.jsonl. Best-effort sync append — callers
+ *  run in bg hooks where a throw would be swallowed anyway. The row shape
+ *  is goal-owned (NOT sediment's OutcomeRow); sediment may READ this file
+ *  in a future aggregator feed but never the reverse. */
+export function appendGoalOutcome(cwd: string, row: Record<string, unknown>): boolean {
+  try {
+    fs.mkdirSync(goalDir(cwd), { recursive: true });
+    fs.appendFileSync(path.join(goalDir(cwd), "outcome-ledger.jsonl"), `${JSON.stringify(row)}\n`, "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── event-source replay (fork/resume reconcile) ────────────────────────
 
 /** Replay pi-goal-event entries (event source) to the latest state.

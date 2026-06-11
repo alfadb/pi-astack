@@ -24,13 +24,17 @@
  * user sets a goal, so default-on adds zero behavior on its own).
  */
 
+import { createHash } from "node:crypto";
 import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCurrentAnchor } from "../_shared/causal-anchor";
 import { isSubAgentSession } from "../_shared/pi-internals";
+import { runAutoContinueOnce } from "./continue";
+import { packGoalJudgeWindow, runGoalJudge } from "./judge";
 import {
+  appendGoalOutcome,
   applyGoalAction,
   formatGoalBlock,
   formatGoalStatus,
@@ -57,6 +61,11 @@ interface GoalSettings {
   gcMaxAgeDays: number;
   defaultMaxContinuations: number;
   defaultMaxWallMinutes: number;
+  /** PR-7 kill switch — default OFF: the continuation loop only runs when
+   *  the user has BOTH set a goal (C4') and opted into auto-continue. */
+  autoContinue: boolean;
+  judgeModel: string;
+  judgeTimeoutMs: number;
 }
 
 const DEFAULTS: GoalSettings = {
@@ -64,6 +73,9 @@ const DEFAULTS: GoalSettings = {
   gcMaxAgeDays: 14,
   defaultMaxContinuations: 10,
   defaultMaxWallMinutes: 120,
+  autoContinue: false,
+  judgeModel: "deepseek/deepseek-v4-flash",
+  judgeTimeoutMs: 45_000,
 };
 
 function resolveGoalSettings(): GoalSettings {
@@ -79,6 +91,9 @@ function resolveGoalSettings(): GoalSettings {
     gcMaxAgeDays: num(cfg.gcMaxAgeDays, DEFAULTS.gcMaxAgeDays, 1, 365),
     defaultMaxContinuations: num(cfg.defaultMaxContinuations, DEFAULTS.defaultMaxContinuations, 0, 100),
     defaultMaxWallMinutes: num(cfg.defaultMaxWallMinutes, DEFAULTS.defaultMaxWallMinutes, 1, 24 * 60),
+    autoContinue: typeof cfg.autoContinue === "boolean" ? cfg.autoContinue : DEFAULTS.autoContinue,
+    judgeModel: typeof cfg.judgeModel === "string" && cfg.judgeModel.trim() ? cfg.judgeModel.trim() : DEFAULTS.judgeModel,
+    judgeTimeoutMs: num(cfg.judgeTimeoutMs, DEFAULTS.judgeTimeoutMs, 5_000, 300_000),
   };
 }
 
@@ -186,8 +201,26 @@ export default function (pi: ExtensionAPI) {
       const evOk = appendGoalEvent(parsed.sub, res.state); // event-first (opus R1 N1)
       if (!evOk) notify("goal event log append FAILED — transition may not survive fork/resume reconcile", "warning");
       await saveGoalFile(cwd, res.state);
+      // R4' (PR-7; closes opus PR-6 N4): user abandonment is a terminal
+      // outcome — ledger it like achieved/blocked so the goal loop's
+      // results stay observable.
+      if (parsed.sub === "clear") {
+        appendGoalOutcome(cwd, {
+          type: "goal_outcome", goal_id: res.state.goal_id, session_id: sessionId,
+          outcome: "abandoned", objective: res.state.objective.slice(0, 200),
+          continuations_used: res.state.counters.continuations_used, ts: new Date().toISOString(),
+        });
+      }
       const verb = parsed.sub === "clear" ? "abandoned" : res.state.status;
       notify(`goal ${verb}: ${res.state.objective.slice(0, 80)}`, "info");
+      // opus R1 N3 UX: resuming a goal whose wall clock is already exhausted
+      // will immediately re-pause at the next agent_end — say so up front.
+      if (parsed.sub === "resume") {
+        const elapsedMin = (Date.now() - Date.parse(res.state.created)) / 60_000;
+        if (Number.isFinite(elapsedMin) && elapsedMin > res.state.budget.max_wall_minutes) {
+          notify(`⚠️ wall clock already exhausted (${Math.floor(elapsedMin)}min > ${res.state.budget.max_wall_minutes}min) — auto-continue will re-pause; use a fresh /goal set --max-minutes=N to reset`, "warning");
+        }
+      }
     },
   });
 
@@ -218,6 +251,71 @@ export default function (pi: ExtensionAPI) {
     const block = formatGoalBlock(state);
     const next = `${stripGoalBlock(current).replace(/\n+$/, "")}\n\n${block}\n`;
     return { systemPrompt: next };
+  });
+
+  // ── PR-7 auto-continue (goal.autoContinue, default OFF) ──
+  // Re-entrancy shape: the continuation turn re-enters agent_end by
+  // design; the loop is bounded because the budget counter is
+  // PRE-DECREMENTED and persisted before each send (continue.ts). The
+  // in-flight set guards against overlapping agent_end emissions only.
+  const autoContinueInFlight = new Set<string>();
+  pi.on("agent_end", async (_event, ctx) => {
+    const settings = resolveGoalSettings();
+    if (!settings.enabled || !settings.autoContinue) return;
+    if (isSubAgentSession(ctx as never)) return;
+    const cwd = ctx.cwd ?? process.cwd();
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (!sessionId) return;
+    const state = loadGoalFile(cwd, sessionId);
+    if (!state || state.status !== "active") return;
+    if (autoContinueInFlight.has(sessionId)) return;
+    autoContinueInFlight.add(sessionId);
+    try {
+      const branch = (ctx.sessionManager as unknown as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
+      await runAutoContinueOnce({
+        state,
+        judge: () => runGoalJudge(
+          {
+            objective: state.objective,
+            successCriteria: state.success_criteria,
+            recentTranscript: packGoalJudgeWindow(branch),
+            continuationsUsed: state.counters.continuations_used,
+            maxContinuations: state.budget.max_continuations,
+          },
+          { judgeModel: settings.judgeModel, judgeTimeoutMs: settings.judgeTimeoutMs, modelRegistry: ctx.modelRegistry },
+        ),
+        sendContinuation: (message) => {
+          // §P1 hard-constraint 2b (gpt R1): DEDICATED event-layer ledger —
+          // a typed custom entry recording the SEND INTENT before dispatch,
+          // so the injected user message can be cross-checked against this
+          // trace (sendUserMessage is fire-and-forget; transport failures
+          // are invisible to us — budget already pre-spent, conservative
+          // direction, and this ledger row marks the intent either way).
+          try {
+            (pi as unknown as { appendEntry?: (t: string, d: unknown) => void }).appendEntry?.("pi-goal-continuation", {
+              goal_id: state.goal_id,
+              session_id: sessionId,
+              continuations_used: state.counters.continuations_used + 1,
+              message_hash: createHash("sha256").update(message, "utf-8").digest("hex").slice(0, 12),
+              ts: new Date().toISOString(),
+            });
+          } catch { /* ledger is best-effort */ }
+          // deliverAs:"followUp" per the runtime contract (official examples
+          // git-merge-and-resolve.ts / reload-runtime.ts both use it from
+          // event handlers): queued if anything is still executing, delivered
+          // immediately when idle. Never bare-call from agent_end.
+          (pi as unknown as { sendUserMessage(content: string, opts?: { deliverAs?: string }): void })
+            .sendUserMessage(message, { deliverAs: "followUp" });
+        },
+        notify: (msg, type) => { try { ctx.ui?.notify?.(msg, type as never); } catch { /* ui may be absent in print mode */ } },
+        appendEvent: appendGoalEvent,
+        saveState: (s) => saveGoalFile(cwd, s),
+        appendOutcome: (row) => { appendGoalOutcome(cwd, row as unknown as Record<string, unknown>); },
+      });
+    } catch { /* auto-continue is best-effort bg work; never break agent_end */ }
+    finally {
+      autoContinueInFlight.delete(sessionId);
+    }
   });
 
   // Fork/resume reconcile (events win) + stale view GC.

@@ -83,6 +83,28 @@ const turn = (role, text) => ({ role, text, timestamp: "2026-06-07T00:00:00Z" })
   assert(JSON.stringify(r.matched_roles) === JSON.stringify(["user", "assistant"]), `echo matched_roles records both roles, got ${JSON.stringify(r)}`);
 }
 
+// 5f. PR-7 provenance isolation: a goal continuation message rides the USER
+//     role but is machine-composed — the `[pi-goal-continuation]` prefix
+//     demotes it to the assistant-origin bucket (INV-IMPLICIT-GROUND-TRUTH).
+{
+  const r = deriveProvenance(win([
+    turn("user", "[pi-goal-continuation goal_id=g-ab12] 以后用 pnpm 跑完剩余 smoke"),
+  ]), "以后用 pnpm 跑完剩余 smoke");
+  assert(r.provenance === "assistant-observed" && r.quote_source === "assistant", `continuation-prefixed user turn -> assistant-observed, got ${JSON.stringify(r)}`);
+}
+
+// 5g. real user directive + continuation echo of it -> cross-role fail-closed
+//     (the REAL user turn still cannot be laundered INTO Tier-1 by the
+//     machine turn, and vice versa — demote direction only).
+{
+  const r = deriveProvenance(win([
+    turn("user", "以后用 pnpm"),
+    turn("user", "[pi-goal-continuation goal_id=g-ab12] 以后用 pnpm — 继续"),
+  ]), "以后用 pnpm");
+  assert(r.provenance === "assistant-observed" && r.multi_match === true, `user + continuation echo -> fail-closed, got ${JSON.stringify(r)}`);
+  assert(JSON.stringify(r.matched_roles) === JSON.stringify(["user", "assistant"]), `matched_roles records machine bucket, got ${JSON.stringify(r)}`);
+}
+
 // 5e. opus R1 N2: assistant+tool WITHOUT user -> cross-role, transcript
 //     sink wins over assistant (locks the demote priority branch that 5d
 //     cannot isolate because 5d includes a user match).

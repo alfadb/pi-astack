@@ -89,6 +89,7 @@ import {
 import { resolveTier1JaccardHit, runTier1JaccardAdjudication } from "./tier1-adjudicator";
 import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
+import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { abrainProjectDir, abrainSedimentStagingPath, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 
@@ -605,6 +606,12 @@ function userTextForDirectiveRecall(entry: unknown): { entryId?: string; text: s
   const rendered = entryToText(entry);
   const firstNewline = rendered.indexOf("\n");
   const text = firstNewline >= 0 ? rendered.slice(firstNewline + 1) : rendered;
+  // PR-7 (deepseek R1 N3): goal auto-continue messages ride the user role
+  // but are machine-composed and usually imperative ("run the smoke
+  // tests") — scanning them here would emit false
+  // user_role_imperative_without_corresponding_injected_rule recall flags.
+  // Same defense surface as deriveProvenance's prefix demote.
+  if (isGoalContinuationText(text)) return null;
   return {
     ...(typeof obj.id === "string" ? { entryId: obj.id } : {}),
     text,

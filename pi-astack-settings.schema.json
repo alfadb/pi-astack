@@ -798,6 +798,21 @@
           "type": "number",
           "default": 120,
           "description": "Default budget.max_wall_minutes stamped at /goal set (overridable via --max-minutes). Consumed by PR-7 auto-continue; recorded-only in P1a."
+        },
+        "autoContinue": {
+          "type": "boolean",
+          "default": false,
+          "description": "PR-7 kill switch. When true AND a goal is active, agent_end runs a fast LLM judge (achieved/blocked/continue); continue sends a `[pi-goal-continuation goal_id=...]` user message (budget PRE-decremented; sediment demotes the prefix out of user-expressed provenance). Exhaustion/blocked pause the goal with a notify."
+        },
+        "judgeModel": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4-flash",
+          "description": "provider/model for the auto-continue judge (classification-tier task)."
+        },
+        "judgeTimeoutMs": {
+          "type": "number",
+          "default": 45000,
+          "description": "Judge LLM call timeout (clamped 5000..300000)."
         }
       }
     },
