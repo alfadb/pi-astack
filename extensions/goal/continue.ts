@@ -148,7 +148,15 @@ export async function runAutoContinueOnce(deps: AutoContinueDeps): Promise<{ act
     updated: now.toISOString(),
   };
   const evOk = deps.appendEvent("continuation", next);
-  if (!evOk) deps.notify("goal continuation event append FAILED — reconcile may roll this back on next session start", "warning"); // gpt R2 nit
+  if (!evOk) {
+    // ADR 0032 W3 (gpt 合议 RC): the EVENT is the source of truth — if the
+    // pre-decrement could not reach the event log, the next session-start
+    // reconcile would REVERT the counter (branch replay lacks this
+    // continuation) and the budget could be re-spent across restarts,
+    // breaking bounded-loop. Fail-closed: no send.
+    deps.notify("goal auto-continue aborted: continuation event append failed (budget pre-decrement would not survive reconcile)", "warning");
+    return { action: "judge_failed", detail: "event_persist_failed" };
+  }
   const saved = await deps.saveState(next);
   if (!saved) {
     // The decremented budget could not be persisted → sending anyway would
