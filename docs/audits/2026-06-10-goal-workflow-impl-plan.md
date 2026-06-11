@@ -262,8 +262,31 @@ audit 期间观察 ≥1 周真实负载再切默认。
 | PR | 内容 | 状态 |
 |---|---|---|
 | PR-11 | ADR 0033 起草 → 3×T0 合议 | ✅ **合议接受 2026-06-11**（见下 PR-11 记录） |
-| PR-12 | workflow tools（validate/list/run）+ 归宿 + W12 进程级信号量 + N1/N2/N3/N5 smoke | 待开工 |
+| PR-12 | workflow tools（validate/list/run）+ 归宿 + W12 进程级信号量 + N1/N2/N3/N5 smoke | ✅ **已完成 2026-06-11**（见下 PR-12 记录） |
 | PR-13 | 文档驱动 goal（GoalState v2/judge 注入+转义+framing）+ goal tools + W1'/N4 smoke | 待开工 |
+
+### PR-12 实施记录（2026-06-11 完成）
+
+- 交付：workflow/index.ts 按 ADR 0033 重写为工具优先：注册
+workflow_validate/workflow_list/workflow_run 三个 LLM tool（tell-not-ask、
+无 --yes/无确认弹窗），slash `/workflow` 降级为直通道并共用 helper；
+runWorkflowCore 内置确定性校验机器门（enabled=false→workflow_disabled、
+validation_failed、execution_failed 全结构化 isError 路径），失败不裸抛；
+workflow_run thread AbortSignal 进 executeWorkflow。workflow_list 枚举
+`<projectRoot>/workflows/*.json` + `~/.abrain/workflows/*.{json,md}` +
+strict-bound project `~/.abrain/projects/<id>/workflows/*.{json,md}`，.md
+non-runnable/.json runnable，namespace 不折叠；示例移入 repo `workflows/`。
+executor.ts W12 从 per-run semaphore 升级进程级 globalThis singleton（N5），
+opts.semaphore 仅测试 seam。
+- 盲审：R1 opus GREEN-with-nits / deepseek 无输出但执行成功 / gpt RED。
+唯一 BLOCKING：executeWorkflow 启动异常裸抛，违 ADR 0033 §2.1 结构化
+错误契约——修为 runWorkflowCore try/catch → `{kind:"execution_failed"}`；
+gpt R2 GREEN-with-nits。NIT 采纳：safeNotify 防 notify 抛错、workflow_list
+用 strict-bound projectRoot（子目录 cwd 也能见项目 workflows）、abrainDirs
+resolve 后去重。未采纳/记录：slash debug path 的 runId 细节显示依赖
+start notify，可接受；行为级 runner 零调用 smoke 可后补。
+- smoke：workflow-tools 4 checks（list/~/disabled-source/executor sem seam），
+workflow-executor 19 checks，workflow-dsl 13 checks，全量回归绿。
 
 ### PR-11 实施记录（2026-06-11 完成，ADR 0033 合议接受）
 

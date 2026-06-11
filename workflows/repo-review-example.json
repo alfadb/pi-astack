@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "name": "repo-review-example",
+  "timeout_minutes": 30,
+  "stages": [
+    {
+      "id": "audit",
+      "kind": "parallel",
+      "on_fail": "degrade",
+      "children": [
+        {
+          "id": "audit-docs",
+          "kind": "agent",
+          "model": "deepseek/deepseek-v4-flash",
+          "thinking": "medium",
+          "prompt": "Read docs/adr/0033-natural-language-first-invocation-and-doc-driven-goal.md and list the N1-N5 invariants in one line each.",
+          "tools": ["read", "grep"]
+        },
+        {
+          "id": "audit-code",
+          "kind": "agent",
+          "model": "minimax/MiniMax-M3",
+          "thinking": "medium",
+          "prompt": "Read extensions/workflow/index.ts and summarize the workflow tool surface (validate/list/run) in one line each.",
+          "tools": ["read", "grep"]
+        }
+      ]
+    },
+    {
+      "id": "synthesize",
+      "kind": "agent",
+      "needs": ["audit"],
+      "on_fail": "abort",
+      "model": "deepseek/deepseek-v4-pro",
+      "thinking": "high",
+      "prompt": "Read the upstream output files listed in <workflow-upstream> and produce a 10-line cross-check: does the current workflow tool surface implement ADR 0033 N1-N3?",
+      "tools": ["read"]
+    }
+  ]
+}

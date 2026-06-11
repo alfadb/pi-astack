@@ -375,28 +375,33 @@ await check("gpt R1 B1: --yes parsing is quote-aware (quoted '--yes' is path dat
   assert(p.confirmed === false && p.malformed === true, "stray quote glued to flag → malformed");
 });
 
-await check("command-layer gates: no LLM-invokable tool; constants drift-locked", async () => {
+await check("ADR 0033 tool surface: workflow tools registered; sub-agents cannot request them; constants drift-locked", async () => {
   const src = fs.readFileSync(path.join(repoRoot, "extensions/workflow/index.ts"), "utf-8");
-  // §6 gate (c): execution surface is a COMMAND only — registering a tool
-  // would let the LLM auto-trigger workflows (§5 promotion item 3).
-  assert(!/registerTool\(/.test(src), "workflow extension must not register any LLM tool");
-  assert(/registerCommand\("workflow"/.test(src), "command surface present");
+  for (const tool of ["workflow_validate", "workflow_list", "workflow_run"]) {
+    assert(new RegExp(`name:\\s*[\"']${tool}[\"']`).test(src), `${tool} registered as LLM tool`);
+  }
+  assert(/registerCommand\("workflow"/.test(src), "slash command kept as direct/debug path");
+  const workflowRunToolBlock = src.match(/name:\s*["']workflow_run["'][\s\S]*?async execute\([\s\S]*?\n    },\n  \}\);/)?.[0] ?? "";
+  assert(workflowRunToolBlock && !/--yes/.test(workflowRunToolBlock), "workflow_run tool path has no --yes gate");
   assert(/Math\.min\(WORKFLOW_MAX_CONCURRENCY,\s*DISPATCH_MAX_CONCURRENCY\)/.test(src), "production call site clamps to both caps");
-  // literal-equality lock: dsl mirror === dispatch constant.
   const dispatchSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
+  const knownToolsBlock = dispatchSrc.match(/const KNOWN_TOOLS = new Set\(\[[\s\S]*?\]\);/)?.[0] ?? "";
+  assert(!/workflow_validate|workflow_list|workflow_run/.test(knownToolsBlock), "workflow tools are main-session only: not in dispatch KNOWN_TOOLS (N2)");
+  // literal-equality lock: dsl mirror === dispatch constant.
   const dm = /export const MAX_CONCURRENCY = (\d+);/.exec(dispatchSrc);
   assert(dm && Number(dm[1]) === D.WORKFLOW_MAX_CONCURRENCY, `dispatch MAX_CONCURRENCY (${dm?.[1]}) must equal dsl WORKFLOW_MAX_CONCURRENCY (${D.WORKFLOW_MAX_CONCURRENCY})`);
-  // gpt R2 N1: per-stage timeout default drift lock — dispatch's exported
-  // DEFAULT_TIMEOUT_MS must equal the executor's fallback mirror, and the
-  // production call site must thread it explicitly.
   const dt = /export const DEFAULT_TIMEOUT_MS = ([\d_]+);/.exec(dispatchSrc);
   const execSrc = fs.readFileSync(path.join(repoRoot, "extensions/workflow/executor.ts"), "utf-8");
   const et = /const DEFAULT_STAGE_TIMEOUT_MS = ([\d_]+);/.exec(execSrc);
   assert(dt && et && Number(dt[1].replace(/_/g, "")) === Number(et[1].replace(/_/g, "")), `timeout default drift: dispatch=${dt?.[1]} executor=${et?.[1]}`);
   assert(/perStageTimeoutMs:\s*DEFAULT_TIMEOUT_MS/.test(src), "production call site threads dispatch DEFAULT_TIMEOUT_MS");
-  // live dogfood fix lock: slash-command args are not shell-expanded — the
-  // loader must expand a leading ~ itself instead of resolving <cwd>/~/x.
   assert(/startsWith\("~\/"\)/.test(src) && /os\.homedir\(\)/.test(src), "loadWorkflowFile expands leading ~");
+});
+
+await check("ADR 0033 N5: production executor uses process-global workflow semaphore", async () => {
+  const execSrc = fs.readFileSync(path.join(repoRoot, "extensions/workflow/executor.ts"), "utf-8");
+  assert(/Symbol\.for\("pi-astack\/workflow\/global-semaphore\/v1"\)/.test(execSrc), "global semaphore key present");
+  assert(/const sem = opts\.semaphore \?\? globalWorkflowSemaphore\(maxConcurrency\)/.test(execSrc), "production uses global semaphore unless test seam injected");
 });
 
 await check("§8 API boundary: production runner uses dispatch's exported runInProcess (no copy)", async () => {

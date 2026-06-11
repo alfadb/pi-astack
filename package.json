@@ -99,7 +99,8 @@
     "smoke:goal-state": "node scripts/smoke-goal-state.mjs",
     "smoke:goal-autocontinue": "node scripts/smoke-goal-autocontinue.mjs",
     "smoke:workflow-dsl": "node scripts/smoke-workflow-dsl.mjs",
-    "smoke:workflow-executor": "node scripts/smoke-workflow-executor.mjs"
+    "smoke:workflow-executor": "node scripts/smoke-workflow-executor.mjs",
+    "smoke:workflow-tools": "node scripts/smoke-workflow-tools.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],

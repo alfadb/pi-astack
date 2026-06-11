@@ -148,6 +148,8 @@ export interface WorkflowRunOptions {
   audit?: (row: Record<string, unknown>) => void;
   io?: ExecutorIo;
   now?: () => number;
+  /** Test-only seam: production uses the process-global W12 semaphore. */
+  semaphore?: Semaphore;
 }
 
 // ── Internals ───────────────────────────────────────────────────
@@ -155,7 +157,7 @@ export interface WorkflowRunOptions {
 const SUMMARY_CHARS = 700;
 const DEFAULT_STAGE_TIMEOUT_MS = 1_800_000; // mirrors dispatch DEFAULT_TIMEOUT_MS
 
-interface Semaphore {
+export interface Semaphore {
   acquire(): Promise<void>;
   release(): void;
   /** introspection for W12 smoke */
@@ -183,6 +185,22 @@ export function makeSemaphore(n: number): Semaphore {
     },
     peakInUse: () => peak,
   };
+}
+
+const _WORKFLOW_SEMAPHORE_KEY = Symbol.for("pi-astack/workflow/global-semaphore/v1");
+
+function globalWorkflowSemaphore(n: number): Semaphore {
+  const g = globalThis as Record<symbol, unknown>;
+  const existing = g[_WORKFLOW_SEMAPHORE_KEY] as { n: number; sem: Semaphore } | undefined;
+  if (existing && existing.n === n) return existing.sem;
+  const sem = makeSemaphore(n);
+  g[_WORKFLOW_SEMAPHORE_KEY] = { n, sem };
+  return sem;
+}
+
+/** Test seam for smoke. Production code never calls this. */
+export function _resetWorkflowGlobalSemaphoreForTests(): void {
+  delete (globalThis as Record<symbol, unknown>)[_WORKFLOW_SEMAPHORE_KEY];
 }
 
 function stageFileName(id: string): string {
@@ -266,7 +284,9 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
 
   const startedAt = now();
   const deadline = startedAt + validation.summary!.timeoutMinutes * 60_000;
-  const sem = makeSemaphore(maxConcurrency);
+  // ADR 0033 N5: process-level global W12 semaphore shared by all concurrent
+  // workflow runs. Tests may inject a local semaphore for deterministic probes.
+  const sem = opts.semaphore ?? globalWorkflowSemaphore(maxConcurrency);
 
   // Run-scoped abort: external signal + deadline cut in-flight units.
   // A stage failure with on_fail!=degrade sets abortRequested (stop
