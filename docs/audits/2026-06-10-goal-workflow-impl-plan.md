@@ -269,13 +269,23 @@ LLM dossier 5 个 directive fixtures。
 - 盲审：R1 opus GREEN-with-nits / gpt RED / deepseek GREEN。gpt BLOCKING
 （主 bg lane coveredTexts 未按 isCapturedTier1Result 收窄，terminal
 reject 压制 recall flag）事实成立并修复（三 lane 对齐）；R2 gpt GREEN。
-- **已知未闭环**：LLM prompt dossier（smoke-classifier-prompt）因环境
-DEEPSEEK_API_KEY 失效（401）且 vault 无 key 未能实跑——dossier 非 release
-gate（ADR 0024 §5.5）且 conf≥8 fallback 使风险有界（模型不产出
-is_directive 时行为≡v1），但 **O5 sunset 决策前必须补跑**（opus N1，
-三家均认可接受）。其余已接受 NIT：curator 多结果 lane 保留 tabular
-形态（设计内切分）；dry_run 走 default 文案；负例输出 schema 不含
-is_directive（parse fail-closed 兑底，观察项）。
+- **LLM dossier 已补跑（2026-06-10 同日闭环）**：401 根因定位为
+  **base URL 配错而非 key 失效**——环境 DEEPSEEK_API_KEY 是 sub2api 网关
+  key（sk- + 64 hex），打官方 api.deepseek.com 必 401；正确用法
+  `DEEPSEEK_BASE_URL=https://sub2api.alfadb.cn`（smoke 自拼 /v1/...，
+  网络通路经无鉴权/带鉴权探针多次验证正常）。
+  **dossier 结果（25 fixtures，deepseek-chat）**：directive 类 **5/5
+  expected-aligned**——祈使→is_directive=true∧durable；疑问/引述他人
+  →signal_found=false；陈述式→is_directive=false∧durable conf=7（正确
+  落 conf fallback 阶梯下方→stage）；**"不要记这条"→is_directive=false
+  ∧task-local（abstain 清单生效，召回偏置未过触）**。保守姿态未动摇
+  （14 个 signal_found=false，ambiguous 类未被翻转）。obvious 类 4/5，
+  唤一例 obvious-4 为模型畲形 JSON（缺收尾花括号，1/25）——生产侧同样
+  fail→null→recall flag 兑底，符合 INFRA 序列化失败不重试哲学，不改。
+  O5 sunset 计量基线已建立。
+- 其余已接受 NIT：curator 多结果 lane 保留 tabular 形态（设计内切分）；
+  dry_run 走 default 文案；负例输出 schema 不含 is_directive（parse
+  fail-closed 兑底，观察项）。
 
 ### PR-1 实施记录（2026-06-10 完成）
 
