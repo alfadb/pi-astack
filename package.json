@@ -98,7 +98,8 @@
     "smoke:tier1-jaccard-adjudication": "node scripts/smoke-tier1-jaccard-adjudication.mjs",
     "smoke:goal-state": "node scripts/smoke-goal-state.mjs",
     "smoke:goal-autocontinue": "node scripts/smoke-goal-autocontinue.mjs",
-    "smoke:workflow-dsl": "node scripts/smoke-workflow-dsl.mjs"
+    "smoke:workflow-dsl": "node scripts/smoke-workflow-dsl.mjs",
+    "smoke:workflow-executor": "node scripts/smoke-workflow-executor.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],

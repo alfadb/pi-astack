@@ -75,8 +75,12 @@ function asRecord(args: unknown): Record<string, unknown> {
 }
 
 const MAX_PARALLEL = 16;
-const MAX_CONCURRENCY = 4;
-const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
+// PR-10 (ADR 0032 §8): MAX_CONCURRENCY / DEFAULT_TIMEOUT_MS exported as part
+// of the shared runner API surface — the workflow engine mirrors the same
+// global cap (W12) and per-unit timeout default instead of duplicating
+// literals that could drift.
+export const MAX_CONCURRENCY = 4;
+export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
 
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
 
@@ -218,7 +222,10 @@ interface ToolValidation {
   reason?: string;
 }
 
-function validateTools(toolsStr: string | undefined): ToolValidation {
+// PR-10 (ADR 0032 §8): exported — the workflow production runner routes its
+// per-stage tool allowlist through the SAME gate (nested-dispatch rejection +
+// PI_MULTI_AGENT_ALLOW_MUTATING env check inherit with the API, not by copy).
+export function validateTools(toolsStr: string | undefined): ToolValidation {
   if (!toolsStr) return { ok: true };
 
   const names = toolsStr.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
@@ -376,7 +383,7 @@ export function mergeAssistantTurn(
   return turnText.length > 0 ? turnText : prev;
 }
 
-interface AgentResult {
+export interface AgentResult {
   output: string;
   error?: string;
   /** Machine-readable failure category. Undefined on success. */
@@ -437,10 +444,26 @@ function resolveModel(
  * is safe. If a future SDK version adds mutable state to resourceLoader,
  * this cache must become per-session.
  */
-let _sharedInfraPromise: Promise<{
-  settingsManager: any;
-  resourceLoader: any;
-}> | undefined = undefined;
+// PR-10 (ADR 0032 §8): the shared-infra promise lives on a globalThis
+// Symbol.for slot, NOT a module-level variable. pi loads extensions via jiti
+// with moduleCache:false, so the workflow extension importing runInProcess
+// from this module gets its OWN module copy (heartbeat.ts R4 NEW-P0 lesson;
+// same pattern as _SHARED_LOADER_FLAG_KEY below) — a module-level cache here
+// would mean two resourceLoader.reload() passes and two shared sub-agent
+// extension stacks. The globalThis slot collapses all copies to one infra.
+const _SHARED_INFRA_KEY = Symbol.for("pi-astack/dispatch/shared-infra/v1");
+
+type SharedInfra = { settingsManager: any; resourceLoader: any };
+
+function _sharedInfraSlot(): { value?: Promise<SharedInfra> } {
+  const g = globalThis as Record<symbol, unknown>;
+  let slot = g[_SHARED_INFRA_KEY] as { value?: Promise<SharedInfra> } | undefined;
+  if (!slot) {
+    slot = {};
+    g[_SHARED_INFRA_KEY] = slot;
+  }
+  return slot;
+}
 
 /** ADR 0027 PR-B+ R1 P1-1 (sub-agent boundary sentinel): when this flag is
  *  true, `dispatch.activate(pi)` is being called from inside the shared
@@ -471,8 +494,9 @@ function getSharedInfra(): Promise<{
   settingsManager: any;
   resourceLoader: any;
 }> {
-  if (!_sharedInfraPromise) {
-    _sharedInfraPromise = (async () => {
+  const slot = _sharedInfraSlot();
+  if (!slot.value) {
+    slot.value = (async () => {
       const settingsManager = (SettingsManager.create as (
         cwd: string,
         agentDir?: string,
@@ -518,11 +542,12 @@ function getSharedInfra(): Promise<{
     })();
     // P1 fix: don't cache failures. If init throws, clear the promise so
     // the next dispatch call retries rather than permanently failing.
-    _sharedInfraPromise.catch(() => {
-      _sharedInfraPromise = undefined;
+    const created = slot.value;
+    created.catch(() => {
+      if (slot.value === created) slot.value = undefined;
     });
   }
-  return _sharedInfraPromise;
+  return slot.value;
 }
 
 /**
@@ -548,7 +573,7 @@ function getSharedInfra(): Promise<{
  * This is acceptable because typical dispatch usage calls remote LLM APIs
  * for analysis — sub-agents don't execute local code.
  */
-async function runInProcess(
+export async function runInProcess(
   modelStr: string,
   thinking: string,
   prompt: string,

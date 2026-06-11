@@ -28,10 +28,11 @@
 
 export const WORKFLOW_SCHEMA_VERSION = 1 as const;
 
-/** Keep in sync with extensions/dispatch/index.ts MAX_CONCURRENCY (=4).
- *  PR-10 imports the real constant once the shared runner API is
- *  extracted; duplicating the literal here keeps PR-9 free of a
- *  dependency on dispatch internals. */
+/** Mirrors extensions/dispatch/index.ts MAX_CONCURRENCY (=4). This module
+ *  stays dispatch-free so smoke can import it without the pi SDK; drift is
+ *  closed by (a) the production call site (workflow/index.ts) clamping to
+ *  min(WORKFLOW_MAX_CONCURRENCY, dispatch.MAX_CONCURRENCY) and (b) a
+ *  literal-equality lock in smoke-workflow-executor.mjs. */
 export const WORKFLOW_MAX_CONCURRENCY = 4;
 
 /** Read-only tool surface — mirrors dispatch's default sub-agent
@@ -338,6 +339,58 @@ export function validateWorkflow(doc: WorkflowDoc, opts: { readOnly: boolean }):
       timeoutMinutes,
     },
   };
+}
+
+/** gpt PR-10 R1 B1: quote-aware `/workflow run` argument parsing. Only a
+ *  TRAILING, UNQUOTED, standalone `--yes` token counts as the explicit-
+ *  invoke gate (§6 gate (c)); `--yes` inside a quoted path is path DATA —
+ *  a path like "foo --yes bar.json" must never silently confirm execution
+ *  or be rewritten to a different file. */
+export function parseWorkflowRunArgs(rest: string): { fileSpec: string; confirmed: boolean; malformed?: boolean } {
+  const trimmed = rest.trim();
+  // Quoted path, optionally followed by a trailing --yes OUTSIDE the quotes.
+  // gpt R3-1: the quoted CONTENT must be non-empty and quote-free — a
+  // greedy pair would otherwise accept ambiguous specs like
+  // `"a" --yes "b" --yes` as one confirmed path. v1 simply does not
+  // support quote characters inside workflow file paths.
+  const mq = /^(["'])([^"']+)\1(\s+--yes)?$/.exec(trimmed);
+  if (mq) return { fileSpec: `${mq[1]}${mq[2]}${mq[1]}`, confirmed: !!mq[3] };
+  // gpt R2 B1-R2 + R3-1: ANY other quote usage (unmatched leading quote,
+  // mid-string quote, mixed/multi quoting, empty quotes) is malformed for
+  // the confirm gate — fail-closed: never confirm, never rewrite. The
+  // caller surfaces a quote error instead.
+  if (/["']/.test(trimmed)) {
+    return { fileSpec: trimmed, confirmed: false, malformed: true };
+  }
+  // Quote-free: the flag counts only as the FINAL whitespace-separated token.
+  const m = /^([\s\S]*\S)\s+--yes$/.exec(trimmed);
+  if (m) return { fileSpec: m[1], confirmed: true };
+  return { fileSpec: trimmed, confirmed: false };
+}
+
+/** PR-10 (deepseek R1 OBS-2): per-stage effective execution surface — the
+ *  user must be able to audit which model/tools each stage will ACTUALLY
+ *  get before invoking. Defaults applied here mirror the executor's. */
+export function formatEffectiveStageLines(
+  doc: WorkflowDoc,
+  defaults: { model: string; thinking: string },
+): string[] {
+  const lines: string[] = [];
+  const fmt = (s: WorkflowStage, indent: string) => {
+    const model = s.model ?? `${defaults.model} (default)`;
+    const thinking = s.thinking ?? `${defaults.thinking} (default)`;
+    const tools = s.tools && s.tools.length > 0 ? s.tools.join(",") : "(default read-only set)";
+    lines.push(`${indent}${s.id}: model=${model} thinking=${thinking} tools=${tools}${s.mutating ? " ⚠MUTATING" : ""}`);
+  };
+  for (const s of doc.stages) {
+    if (s.kind === "parallel") {
+      lines.push(`  ${s.id}: parallel ×${s.children?.length ?? 0}`);
+      for (const c of s.children ?? []) fmt(c, "    ");
+    } else {
+      fmt(s, "  ");
+    }
+  }
+  return lines;
 }
 
 /** Human-readable dry-run report (gate (b) of §6: the user must SEE the

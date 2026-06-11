@@ -831,6 +831,16 @@
           "type": "boolean",
           "default": true,
           "description": "When true (default), any stage declaring mutating:true (or listing mutating tools) FAILS dry-run — tools are never silently stripped. Mutating stages additionally require per-stage mutating:true in the DSL and PI_MULTI_AGENT_ALLOW_MUTATING=1 at runtime (W9 triple-explicit)."
+        },
+        "defaultModel": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4-flash",
+          "description": "Model for stages that omit `model` (P3 cost layering, ADR 0032 §9: cheap tier for retrieval/execution stages; advisory-only — never used for correctness adjudication). provider/model format."
+        },
+        "defaultThinking": {
+          "type": "string",
+          "default": "medium",
+          "description": "Thinking level for stages that omit `thinking`."
         }
       }
     },
