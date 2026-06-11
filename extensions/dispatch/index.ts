@@ -1057,7 +1057,7 @@ export default function (pi: ExtensionAPI) {
       "The sub-agent is an independent AgentSession — its context does NOT count against your token budget.",
     ],
     parameters: Type.Object({
-      model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
+      model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide). Mutating tools (bash/edit/write) require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_parallel is always rejected." })),
@@ -1300,14 +1300,14 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
       "Use dispatch_parallel EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
-      "Example: dispatch_parallel([{model:'claude-opus-4-7', thinking:'high', prompt:'audit docs'}, {model:'gpt-5.5', thinking:'high', prompt:'audit code'}, {model:'deepseek-v4-pro', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together.",
+      "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together. Use different providers per task for cross-vendor blind reviews.",
       `Concurrency: up to ${MAX_PARALLEL} tasks accepted; ${MAX_CONCURRENCY} run at once, others queue. Choose models from DIFFERENT providers for diversity.`,
       "For reasoning-only tasks, omit tools (sub-agent uses built-in read/grep/find/ls).",
     ],
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({
-          model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
+          model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
           tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide)." })),

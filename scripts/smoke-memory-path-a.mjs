@@ -112,12 +112,11 @@ console.log("\n[2] settings.pathA defaults");
 const settings = jiti(path.join(repoRoot, "extensions/memory/settings.ts"));
 {
   // Assert the DEFAULT constants, not resolveSettings() — the latter reflects
-  // the LIVE project config, where queryRewriterModel is intentionally
-  // overridden to github-copilot/gpt-5-mini (and stage1 etc. may differ too).
-  // The defaults are the regression lock this section is meant to protect.
+  // the LIVE project config. Model refs must stay out of code defaults and be
+  // provided by pi-astack-settings.json.
   const r = { pathA: settings.DEFAULT_PATH_A_SETTINGS };
   check("pathA.enabled default true", r.pathA.enabled === true);
-  check("pathA.queryRewriterModel default flash", r.pathA.queryRewriterModel === "deepseek/deepseek-v4-flash");
+  check("pathA.queryRewriterModel default empty", r.pathA.queryRewriterModel === "");
   check("pathA.queryRewriterTimeoutMs default 15000", r.pathA.queryRewriterTimeoutMs === 15000);
   check("pathA.historyMaxTurns default 4", r.pathA.historyMaxTurns === 4);
   check("pathA.historyMaxCharsPerTurn default 2000", r.pathA.historyMaxCharsPerTurn === 2000);
@@ -208,13 +207,13 @@ check("rewriter accepts 5 args (msg, history, registry, settings, signal?)",
   rewriter.rewriteUserMessageToSearchQuery.length >= 4);
 // Empty history + empty message should fast-path with no LLM call.
 {
-  const r = await rewriter.rewriteUserMessageToSearchQuery("", [], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "deepseek/deepseek-v4-flash", queryRewriterTimeoutMs: 15000 });
+  const r = await rewriter.rewriteUserMessageToSearchQuery("", [], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "provider-a/model-a", queryRewriterTimeoutMs: 15000 });
   check("empty msg + empty history → useful=false fast-path",
     r.useful === false && r.reason === "empty_input");
 }
 // Very short msg + no history → fast-path skip
 {
-  const r = await rewriter.rewriteUserMessageToSearchQuery("ok", [], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "deepseek/deepseek-v4-flash", queryRewriterTimeoutMs: 15000 });
+  const r = await rewriter.rewriteUserMessageToSearchQuery("ok", [], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "provider-a/model-a", queryRewriterTimeoutMs: 15000 });
   check("3-char msg + no history → useful=false",
     r.useful === false && r.reason === "input_too_short_no_history");
 }
@@ -222,7 +221,7 @@ check("rewriter accepts 5 args (msg, history, registry, settings, signal?)",
 {
   // Will fail at "model not found" because we give bogus registry, but the
   // important thing is it didn't short-circuit at input length.
-  const r = await rewriter.rewriteUserMessageToSearchQuery("继续", [{role:"user",text:"用 pnpm 不是挑吗"},{role:"assistant",text:"是的..."}], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "deepseek/deepseek-v4-flash", queryRewriterTimeoutMs: 15000 });
+  const r = await rewriter.rewriteUserMessageToSearchQuery("继续", [{role:"user",text:"用 pnpm 不是挑吗"},{role:"assistant",text:"是的..."}], { find: () => null, getApiKeyAndHeaders: async () => ({ ok: false }) }, { queryRewriterModel: "provider-a/model-a", queryRewriterTimeoutMs: 15000 });
   check("short msg + history → not short-circuited",
     r.useful === false && r.reason !== "input_too_short_no_history" && r.history_turn_count === 2);
 }

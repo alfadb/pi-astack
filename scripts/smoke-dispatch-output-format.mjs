@@ -264,7 +264,7 @@ function makeResult(output, opts = {}) {
 
 check("short output (<500 chars) embedded verbatim", () => {
   const out = "Short single-line analysis output.";
-  const text = formatResult("dispatch", "openai/gpt-5.5", makeResult(out));
+  const text = formatResult("dispatch", "provider-a/model-a", makeResult(out));
   if (!text.includes(out)) {
     throw new Error(`short output missing from rendered text:\n${text}`);
   }
@@ -357,7 +357,7 @@ check("usage block renders ↑input ↓output $cost", () => {
   const out = "ok";
   const text = formatResult(
     "dispatch",
-    "openai/gpt-5.5",
+    "provider-a/model-a",
     makeResult(out, { usage: { input: 1234, output: 5678, total: 6912, cost: 0.12345 } }),
   );
   if (!/↑1234/.test(text)) throw new Error(`missing ↑input: ${text}`);
@@ -922,10 +922,10 @@ check("classifyError: known limitation — microsecond unit bypass", () => {
 check("header includes label, model, ✅, duration", () => {
   const text = formatResult(
     "dispatch",
-    "anthropic/claude-opus-4-7",
+    "provider-a/model-a",
     makeResult("body", { durationMs: 12345 }),
   );
-  if (!/## dispatch \(anthropic\/claude-opus-4-7\) ✅ 12\.3s/.test(text)) {
+  if (!/## dispatch \(provider-a\/model-a\) ✅ 12\.3s/.test(text)) {
     throw new Error(`header malformed:\n${text}`);
   }
 });

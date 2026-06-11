@@ -105,7 +105,7 @@ const payload = require(compiledPayload);
 
 function responsesPayload(extra = {}) {
   return {
-    model: "gpt-5.5",
+    model: "provider-a/model-a",
     input: [],
     stream: true,
     tools: [
@@ -118,7 +118,7 @@ function responsesPayload(extra = {}) {
 
 function completionsPayload(extra = {}) {
   return {
-    model: "deepseek-v4-pro",
+    model: "provider-b/model-b",
     messages: [],
     stream: true,
     tools: [
@@ -131,7 +131,7 @@ function completionsPayload(extra = {}) {
 
 function anthropicPayload(extra = {}) {
   return {
-    model: "claude-opus-4-8",
+    model: "provider-c/model-c",
     system: [{ type: "text", text: "sys" }],
     messages: [],
     stream: true,

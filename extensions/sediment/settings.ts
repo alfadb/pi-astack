@@ -155,7 +155,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // Prevents a single large tool output from dominating the window.
   // Head 25K + tail 5K preserved; middle truncated with marker.
   maxEntryChars: 30_000,
-  extractorModel: "deepseek/deepseek-v4-pro",
+  // No model hardcoded in code: pi-astack-settings.json is the single source
+  // of truth. Empty default + fail-closed at the modelRegistry call site.
+  extractorModel: "",
   // 2026-05-24: raised 180_000 → 1_200_000 (20 min) per user directive.
   // Rationale: sediment is fire-and-forget background; pi-ai underlying SDK
   // default is 10 min anyway (see pi-ai types.ts:121). Tight timeouts caused
@@ -167,30 +169,22 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // flipping to `⚠️ LLM err: ...` — acceptable per Lane C fire-and-forget.
   extractorTimeoutMs: 1_200_000,
   extractorMaxRetries: 0,
-  // Classifier is a reading-comprehension + classification task.
-  // v4-flash is fast ($0.14/M), cheap, and sufficient — no reasoning needed.
-  classifierModel: "deepseek/deepseek-v4-flash",
+  // Classifier: empty default. Configure in pi-astack-settings.json.
+  classifierModel: "",
   // 2026-05-24: raised 30_000 → 1_200_000 (20 min) per user directive.
   // See extractorTimeoutMs rationale above. classifier was the most frequent
   // false-fail offender (e.g. audit.jsonl 15:14 + 15:17 deepseek blip).
   classifierTimeoutMs: 1_200_000,
   extractorMaxCandidates: 5,
   extractorAuditRawChars: 1_000,
-  // 2026-05-11: curator split from extractorModel (3-model audit).
-  // Curator is a small-context entity-resolution task (candidate +
-  // ≤5 neighbors). v4-flash is sufficient; 1 retry to recover from JSON
-  // parse errors.
-  curatorModel: "deepseek/deepseek-v4-flash",
+  // Curator: empty default. Configure in pi-astack-settings.json.
+  curatorModel: "",
   // 2026-05-24: raised 60_000 → 1_200_000 (20 min) per user directive.
   // See extractorTimeoutMs rationale above.
   curatorTimeoutMs: 1_200_000,
   curatorMaxRetries: 1,
-  // Phase C.2 default: v4-pro for reasoning over the 9 feed input
-  // (including L1 evolution_hypotheses self-state). The
-  // run happens at most every 24 hours (debounced by aggregator-last-run);
-  // cost is one v4-pro call (~$0.005-0.05 per run) which is negligible.
-  // Generous timeout (10 min) since the aggregator is fire-and-forget bg.
-  aggregatorModel: "deepseek/deepseek-v4-pro",
+  // Aggregator: empty default. Configure in pi-astack-settings.json.
+  aggregatorModel: "",
   aggregatorTimeoutMs: 600_000,
   aggregatorMaxRetries: 1,
   // ADR 0025 §5.3 P5.5: default changed false → true 2026-05-24.
@@ -229,16 +223,12 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     archiveReactivationReviewer: "v1",
   },
   multiView: {
-    // P0.5 default reviewer list: cross-family from default curator
-    // (deepseek). Anthropic first (different RLHF training direction),
-    // OpenAI as fallback. Empty fallbackProviders[] leaves room for
-    // site-specific overrides via pi-astack-settings.json without
-    // losing the default primary reviewer pair.
+    // No reviewers hardcoded in code. Configure in
+    // pi-astack-settings.json → sediment.multiView.reviewerProviders.
+    // proposerProviders / fallbackProviders stay empty: this code is
+    // single-user and only the primary reviewer pair is used.
     proposerProviders: [],
-    reviewerProviders: [
-      "anthropic/claude-sonnet-4-6",
-      "openai/gpt-5.4-mini",
-    ],
+    reviewerProviders: [],
     fallbackProviders: [],
     costBudgetPerOpUsd: 0.05,
   },
@@ -260,13 +250,13 @@ export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"
   reasoningNormalizationPreamble:
     "v1: fixed 5-stage reasoning surface (quote → claim → alternative → uncertainty → resolving evidence) shared across classifier + multi-view pass-1/2 so cross-prompt comparison works.",
   multiViewPass1:
-    "v1: Blind reviewer pass. Independent op recommendation from a DIFFERENT-family model than the proposer (default reviewer = anthropic/claude-sonnet-4-6; proposer = deepseek). Outputs op + scope + slug_target + confidence + key_evidence_quote + strongest_objection_to_your_own_op + reasoning (≤200 words). Prepended with reasoning-normalization-preamble v1 so Pass 2 can compare surfaces apples-to-apples. Triggered for high-value ops only: create(conf≥8 or scope=world) / archive(high-conf neighbor) / supersede / merge / hard-delete / durable-correction(conf≥8).",
+    "v1: Blind reviewer pass. Independent op recommendation from a DIFFERENT-family model than the proposer (model refs come from settings.multiView.reviewerProviders; proposer comes from the active curator model). Outputs op + scope + slug_target + confidence + key_evidence_quote + strongest_objection_to_your_own_op + reasoning (≤200 words). Prepended with reasoning-normalization-preamble v1 so Pass 2 can compare surfaces apples-to-apples. Triggered for high-value ops only: create(conf≥8 or scope=world) / archive(high-conf neighbor) / supersede / merge / hard-delete / durable-correction(conf≥8).",
   multiViewPass2:
     "v1: Reveal reviewer pass. SAME reviewer model as Pass 1 (different API call). Sees its own Pass 1 + proposer decision + proposer raw reasoning. Emits verdict={confirm_proposer, confirm_pass1, defer} + anchor_bias_self_check + devils_advocate_objection (virtual third-reviewer layer, no extra API call). Defer → batch 3b stages candidate for replay at next agent_end (op=skip(multiview_staged_for_replay)), NOT the old skip(multiview_deferred) audit-only path.",
   outcomeSelfReport:
     "v0: memory-footnote protocol injected via memory extension's before_agent_start hook (extensions/memory/index.ts). Not a sediment-owned prompt file; this version tag tracks the protocol-level contract (entry/used/counterfactual fields, 3-option taxonomy).",
   aggregator:
-    "v1.3: prompt-native skeptical-historian (ADR 0025 §4.3 + Phase A/B/C cutover 2026-05-28; L1 evolution self-state wired 2026-05-31; identity convergence 2026-06-03; Outcome→Entry feedback M3 2026-06-04). v1.3 adds an OPTIONAL lifecycle_proposal on PROMOTED entry advisories (affirmative channel only — never demoted_signals, which EXONERATE; §4.2 independent evidence + falsifier required, retrieved-unused-alone rejected). It is distilled to a read-only entry-lifecycle-proposals.jsonl sidecar (prompt §8 observation-only): NEVER a durable write, NEVER writer/curator/archive/multi-view; the deferred gated executor is the sole consumer. 9 input feeds threaded from deterministic v0.2 base: mechanical_suspicion_signals (renamed advisories), raw_distribution_summary, outcome_counterfactual_excerpts, structural_context, prior_aggregator_summaries (last 8 runs), classifier_health_window with 7-day rolling trend delta, per_turn_cost_rollup, p15_watchdog_signals, evolution_hypotheses. LLM = settings.aggregatorModel (default deepseek/deepseek-v4-pro). Prompt forces case-FOR + case-AGAINST + falsifiability + sycophancy double-check + reverse-anchor against skeptical-bias swap + self-state reification check. v1.2 adds Step-7 stable-identity discipline: recurring structural signals (staging_backlog, classifier_health, p15_re_prioritize_needed, multiview_pending) MUST carry a SHORT stable canonical slug reused verbatim across runs (or the slug/key from a matching evolution_hypotheses entry), so the sidecar does not fork one belief into many message-hash identities; the evolution-ledger sidecar quietly re-keys a single slug-less message-hash row onto a stable slug when one appears (dogfood-driven, see evolution-ledger.ts adoptUnsluggedAlias). Output schema = INFRA serialization (parse failure → degraded_to_mechanical: true audit, never retry-LLM-to-fix-JSON, never user-facing surface per INV-INVISIBILITY). Successful prompt-native outputs are distilled to evolution-ledger.jsonl as internal self-state only; this is not durable-memory authorization and must not trigger writer/archive/curator actions. v0.2 mechanical path retained as fallback when modelRegistry absent or LLM call fails. See docs/audits/2026-05-28-aggregator-prompt-native-phase-a-baseline.md + extensions/sediment/prompts/aggregator-skeptical-historian-v1.md.",
+    "v1.3: prompt-native skeptical-historian (ADR 0025 §4.3 + Phase A/B/C cutover 2026-05-28; L1 evolution self-state wired 2026-05-31; identity convergence 2026-06-03; Outcome→Entry feedback M3 2026-06-04). v1.3 adds an OPTIONAL lifecycle_proposal on PROMOTED entry advisories (affirmative channel only — never demoted_signals, which EXONERATE; §4.2 independent evidence + falsifier required, retrieved-unused-alone rejected). It is distilled to a read-only entry-lifecycle-proposals.jsonl sidecar (prompt §8 observation-only): NEVER a durable write, NEVER writer/curator/archive/multi-view; the deferred gated executor is the sole consumer. 9 input feeds threaded from deterministic v0.2 base: mechanical_suspicion_signals (renamed advisories), raw_distribution_summary, outcome_counterfactual_excerpts, structural_context, prior_aggregator_summaries (last 8 runs), classifier_health_window with 7-day rolling trend delta, per_turn_cost_rollup, p15_watchdog_signals, evolution_hypotheses. LLM = settings.aggregatorModel (no model default in code). Prompt forces case-FOR + case-AGAINST + falsifiability + sycophancy double-check + reverse-anchor against skeptical-bias swap + self-state reification check. v1.2 adds Step-7 stable-identity discipline: recurring structural signals (staging_backlog, classifier_health, p15_re_prioritize_needed, multiview_pending) MUST carry a SHORT stable canonical slug reused verbatim across runs (or the slug/key from a matching evolution_hypotheses entry), so the sidecar does not fork one belief into many message-hash identities; the evolution-ledger sidecar quietly re-keys a single slug-less message-hash row onto a stable slug when one appears (dogfood-driven, see evolution-ledger.ts adoptUnsluggedAlias). Output schema = INFRA serialization (parse failure → degraded_to_mechanical: true audit, never retry-LLM-to-fix-JSON, never user-facing surface per INV-INVISIBILITY). Successful prompt-native outputs are distilled to evolution-ledger.jsonl as internal self-state only; this is not durable-memory authorization and must not trigger writer/archive/curator actions. v0.2 mechanical path retained as fallback when modelRegistry absent or LLM call fails. See docs/audits/2026-05-28-aggregator-prompt-native-phase-a-baseline.md + extensions/sediment/prompts/aggregator-skeptical-historian-v1.md.",
   archiveReactivationReviewer:
     "v1: prompt-native reactivation reviewer (ADR 0025 §4.6, Stage 2 2026-05-28). Batched daily-debounced review of archived entries via runArchiveReactivationIfDue() in extensions/sediment/archive-reactivation.ts. Three decisions: keep_archived | reactivate | hard_archive_recommended. Default-conservative bias (most runs produce zero reactivations). reactivate decisions flip status=archived→active via writer.updateProjectEntry; hard_archive_recommended logs only (actual git rm deferred to a future PR). Reuses aggregator's setImmediate scheduling + 24h debounce. Audit row: archive_reactivation operation in audit.jsonl + ledger row in archive-reactivation-ledger.jsonl. Prompt: extensions/sediment/prompts/archive-reactivation-reviewer-v1.md.",
 

@@ -185,10 +185,10 @@ console.log("\n  validateImagePath (security):");
 console.log("\n  scoreByPrefs (model selection):");
 
 const DEFAULT_VISION_PREFS = [
-  "openai/gpt-5.5",
-  "anthropic/claude-sonnet-4-5",
-  "anthropic/claude-opus-4-5",
-  "google/gemini-3-pro",
+  "provider-a/model-a",
+  "provider-b/model-b",
+  "provider-b/model-c",
+  "provider-c/model-d",
 ];
 
 function scoreByPrefs(m, prefs) {
@@ -205,13 +205,13 @@ function scoreByPrefs(m, prefs) {
 
 {
   // top preference gets score 0
-  const s1 = scoreByPrefs({ provider: "openai", id: "gpt-5.5" }, DEFAULT_VISION_PREFS);
-  if (s1 === 0) ok("top preference (gpt-5.5) gets score 0");
+  const s1 = scoreByPrefs({ provider: "provider-a", id: "model-a" }, DEFAULT_VISION_PREFS);
+  if (s1 === 0) ok("top preference gets score 0");
   else failMsg(`expected 0, got ${s1}`);
 
   // second preference gets score 1
-  const s2 = scoreByPrefs({ provider: "anthropic", id: "claude-sonnet-4-5-20250701" }, DEFAULT_VISION_PREFS);
-  if (s2 === 1) ok("sonnet-4-5 (version tolerant) gets score 1");
+  const s2 = scoreByPrefs({ provider: "provider-b", id: "model-b-20250701" }, DEFAULT_VISION_PREFS);
+  if (s2 === 1) ok("version-tolerant preference gets score 1");
   else failMsg(`expected 1, got ${s2}`);
 
   // unmatched model gets prefs.length
@@ -220,12 +220,12 @@ function scoreByPrefs(m, prefs) {
   else failMsg(`expected ${DEFAULT_VISION_PREFS.length}, got ${s3}`);
 
   // case-insensitive id match (id is lowercase-normalized inside scoreByPrefs)
-  const s4 = scoreByPrefs({ provider: "openai", id: "GPT-5.5" }, DEFAULT_VISION_PREFS);
+  const s4 = scoreByPrefs({ provider: "provider-a", id: "MODEL-A" }, DEFAULT_VISION_PREFS);
   if (s4 === 0) ok("case-insensitive id match");
   else failMsg(`expected 0, got ${s4}`);
 
   // exact provider check (provider names from registry are always lowercase)
-  const s5 = scoreByPrefs({ provider: "openai", id: "claude-sonnet-4-5" }, DEFAULT_VISION_PREFS);
+  const s5 = scoreByPrefs({ provider: "provider-a", id: "model-b" }, DEFAULT_VISION_PREFS);
   if (s5 === DEFAULT_VISION_PREFS.length) ok("provider mismatch → not matched");
   else failMsg(`expected ${DEFAULT_VISION_PREFS.length}, got ${s5}`);
 }

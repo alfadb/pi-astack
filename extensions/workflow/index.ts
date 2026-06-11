@@ -75,7 +75,9 @@ interface WorkflowSettings {
 const DEFAULTS: WorkflowSettings = {
   enabled: false,
   readOnly: true,
-  defaultModel: "deepseek/deepseek-v4-flash",
+  // No model hardcoded in code: pi-astack-settings.json is the single source
+  // of truth. Empty default → fail-closed at workflow stage run.
+  defaultModel: "",
   defaultThinking: "medium",
 };
 

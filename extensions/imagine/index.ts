@@ -17,6 +17,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
@@ -32,6 +33,31 @@ const OUTPUT_DIR = path.join(".pi-astack", "imagine");
 const ALLOWED_SIZES = ["1024x1024", "1792x1024", "1024x1792"] as const;
 const ALLOWED_QUALITIES = ["standard", "hd"] as const;
 const ALLOWED_STYLES = ["vivid", "natural"] as const;
+
+// ── Settings (read at call time, no model in code) ──────────────
+
+const PI_STACK_SETTINGS_PATH = path.join(
+  os.homedir(),
+  ".pi",
+  "agent",
+  "pi-astack-settings.json",
+);
+
+function loadImagineDefaultModel(): string {
+  // Configure in pi-astack-settings.json → imagine.defaultModel.
+  // Empty when missing → caller must pass `model` param.
+  try {
+    const raw = fsSync.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8");
+    const cfg = JSON.parse(raw) as Record<string, unknown> | null;
+    const imagine = cfg && typeof cfg === "object" && typeof (cfg as Record<string, unknown>).imagine === "object"
+      ? (cfg as Record<string, unknown>).imagine as Record<string, unknown>
+      : null;
+    const m = imagine && typeof imagine.defaultModel === "string" ? imagine.defaultModel.trim() : "";
+    return m;
+  } catch {
+    return "";
+  }
+}
 
 // ── Output path ─────────────────────────────────────────────────
 
@@ -92,7 +118,7 @@ async function generateImage(
     : params.prompt;
 
   const reqBody: Record<string, unknown> = {
-    model: params.model || "gpt-image-2",
+    model: params.model || loadImagineDefaultModel(),
     input: styledPrompt,
     // 2026-06-10 fix: stream the response. Image generation regularly takes
     // 60-180s; reverse proxies in front of the endpoint (observed: Caddy in
@@ -311,13 +337,13 @@ export default function (pi: ExtensionAPI) {
     name: "imagine",
     label: "AI Image Generation",
     description:
-      "Generate images using gpt-image-2 via the OpenAI Responses API. " +
+      "Generate images via the OpenAI Responses API. " +
       "Call when the user asks to create, generate, or draw an image. " +
       "Uses your existing openai provider API key and endpoint — no extra config.",
     promptSnippet: "imagine(prompt, size?, quality?, style?, model?)",
     promptGuidelines: [
       "Use imagine when the user asks for image generation, illustration, or visual creation.",
-      "Model defaults to gpt-image-2 (override via `model` param if you really need a different OpenAI image model). size / quality default to whatever the OpenAI Responses API picks unless you explicitly pass them; common values are size: 1024x1024 | 1792x1024 | 1024x1792, quality: standard | hd.",
+      "Default model is read from pi-astack-settings.json → imagine.defaultModel. Pass `model` param to override per call. size / quality default to whatever the OpenAI Responses API picks unless you explicitly pass them; common values are size: 1024x1024 | 1792x1024 | 1024x1792, quality: standard | hd.",
       "Uses your existing openai provider API key — no additional configuration needed.",
       "The tool saves the PNG to .pi-astack/imagine/ and returns it inline when the caller supports images.",
     ],
@@ -326,7 +352,7 @@ export default function (pi: ExtensionAPI) {
         description: "Image description/prompt — be detailed and specific",
       }),
       model: Type.Optional(Type.String({
-        description: "OpenAI image model id (defaults to gpt-image-2; pass another model id only if you need a non-default OpenAI image model)",
+        description: "OpenAI image model id. If omitted, the tool uses pi-astack-settings.json → imagine.defaultModel. If both are absent, the call fails closed.",
       })),
       size: Type.Optional(Type.String({
         description: "Image dimensions: 1024x1024, 1792x1024, or 1024x1792",
@@ -335,7 +361,7 @@ export default function (pi: ExtensionAPI) {
         description: "Quality level: standard or hd. OpenAI API default when omitted: standard.",
       })),
       style: Type.Optional(Type.String({
-        description: "Style hint injected as prompt suffix '[Style: vivid|natural]' (gpt-image-2 has no native style API parameter). vivid = hyper-real/dramatic, natural = realistic/subdued.",
+        description: "Style hint injected as prompt suffix '[Style: vivid|natural]'. vivid = hyper-real/dramatic, natural = realistic/subdued.",
       })),
     }),
 

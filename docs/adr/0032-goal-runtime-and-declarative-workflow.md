@@ -1,6 +1,10 @@
 # ADR 0032 - Goal 续行运行时 + 声明式 Workflow 编排（实验通道）
 
-- **状态**: **合议接受（2026-06-11）**。3×T0（Claude Opus 4-8 / GPT-5.5 /
+- **状态**: **合议接受（2026-06-11）**；**部分条款被
+  [ADR 0033](0033-natural-language-first-invocation-and-doc-driven-goal.md)
+  修订（2026-06-11 合议接受）**：W1→W1'、W7→W7'、§5 晋升机检四条、
+  §6 三闸（闸 c 废除，结构承重转 ADR 0003）、§5-M4 backlog 关闭。
+  读本 ADR 时以 0033 为准。3×T0（Claude Opus 4-8 / GPT-5.5 /
   DeepSeek v4-pro）一致 ACCEPT-with-required-changes，全部 required
   changes 已并入本版（§12 评审史）。
 - **触发**: ①deep-research 调研（2026-06-10：Claude Code dynamic
@@ -255,8 +259,9 @@ ADR 0030。
   裁决**（stage agent 自报或 judge 式 LLM 选择 on_fail 分支 = 运行时
   选择执行子图 = 软拓扑，破 W7/W8）。四向映射：通过=completed；同级
   重试=retry（≤max_retries，structured 计数）；降级=degraded（§7 语
-  义）；人工=cancelled + **prompt_user**（workflow 是用户显式启动的
-  前台流程，与 goal 的 bg hook 不同——这里弹结构化提问合法）。
+  义）；人工=cancelled + **prompt_user**（workflow 是用户在场会话中
+  LLM 启动的前台流程（ADR 0033 修订措辞），与 goal 的 bg hook 不同
+  ——这里弹结构化提问合法）。
 - **resume 前向兼容**：v1 不实现 resume，但 per-stage completion
   **必须落盘**（state layout 预留 resume 不破 schema）——stage 失败后
   修复再续是核心场景，不能锁死。

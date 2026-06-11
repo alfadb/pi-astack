@@ -1,14 +1,15 @@
 /**
  * tool-parallel-cap — cap Anthropic Messages requests to **at most one
- * tool_use per assistant message** for designated models (default:
- * `claude-opus-4-8`).
+ * tool_use per assistant message** for designated models. No model is
+ * hardcoded here; targets come from PI_ASTACK_PARALLEL_CAP_MODELS env
+ * (comma-separated provider/model id substrings). Empty list = no cap.
  *
  * ## Why this extension
  *
- * Opus 4.8 routinely emits 10+ parallel tool_use blocks in a single
- * assistant message during dogfood (e.g. opening multiple files, kicking
- * off ad-hoc bash commands, and queuing edits all at once). The harness
- * runs them concurrently which:
+ * Some Anthropic-family models routinely emit 10+ parallel tool_use blocks
+ * in a single assistant message during dogfood (e.g. opening multiple
+ * files, kicking off ad-hoc bash commands, and queuing edits all at once).
+ * The harness runs them concurrently which:
  *   - amplifies the impact of any single failing tool call (one fails →
  *     next-turn context is a tangle of partially-applied state)
  *   - blocks the verify-after-edit feedback loop (parallel edits return
@@ -56,16 +57,15 @@
  *
  * - Disable entirely: `PI_ASTACK_DISABLE_PARALLEL_CAP=1`
  * - Override target model substrings (comma-separated):
- *     `PI_ASTACK_PARALLEL_CAP_MODELS=claude-opus-4-8,claude-opus-4-9`
- *   Default: `claude-opus-4-8`
+ *     `PI_ASTACK_PARALLEL_CAP_MODELS=provider/model-a,provider/model-b`
+ *   Empty default (set in code) = no cap; set the env to opt in.
  * - Match is `.includes()` against `ctx.model.modelId` AND `payload.model`
  *   — both are checked so a substring match in either side triggers.
  *
  * ## Why model-targeted (not blanket)
  *
- * Lesser models (haiku, sonnet, deepseek) and earlier opus revisions
- * don't reliably hit the 10+ parallel pattern in observed dogfood. Capping
- * them too would force unnecessary serialization. Targeting keeps the
+ * Capping every model would force unnecessary serialization on models
+ * that don't reliably hit the 10+ parallel pattern. Targeting keeps the
  * intervention narrow and reversible per-model via env.
  */
 
@@ -78,7 +78,10 @@ function isObj(v: unknown): v is Obj {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
-const DEFAULT_TARGETS = ["claude-opus-4-8"];
+// No model hardcoded in code. Configure via
+// PI_ASTACK_PARALLEL_CAP_MODELS env (comma-separated provider/model id
+// substrings) or pi-astack-settings.json. Empty default = no cap applied.
+const DEFAULT_TARGETS: string[] = [];
 
 function readTargetModelSubstrings(): string[] {
   const env = process.env.PI_ASTACK_PARALLEL_CAP_MODELS;

@@ -218,7 +218,7 @@ try {
   // still has an aged candidate (the tmpRoot above was just drained by apply),
   // so the model-availability checks are reached (not short-circuited by
   // no_candidates).
-  const settings = { aggregatorModel: "deepseek/deepseek-v4-pro", curatorModel: "deepseek/deepseek-v4-pro", curatorTimeoutMs: 30000, autoLlmWriteEnabled: true };
+  const settings = { aggregatorModel: "provider-a/model-a", curatorModel: "provider-a/model-a", curatorTimeoutMs: 30000, autoLlmWriteEnabled: true };
   const skipRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-ageout-skip-"));
   process.env.ABRAIN_ROOT = skipRoot;
   writeStaging("provisional-skipcand", { created: new Date(Date.now() - 45 * DAY).toISOString() });

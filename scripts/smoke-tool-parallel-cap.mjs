@@ -68,19 +68,19 @@ console.log("[2] shouldCapForPayload");
 {
   const anthroTool = { name: "edit", input_schema: { type: "object" } };
   const base = {
-    model: "claude-opus-4-8",
+    model: "provider/model-a",
     messages: [{ role: "user", content: "hi" }],
     tools: [anthroTool],
   };
-  check("matching modelId via payload.model → true", shouldCapForPayload(base, undefined, ["claude-opus-4-8"]) === true);
-  check("matching modelId via ctx → true", shouldCapForPayload({ ...base, model: "other" }, "anthropic/claude-opus-4-8", ["claude-opus-4-8"]) === true);
-  check("no model match → false", shouldCapForPayload({ ...base, model: "haiku" }, "haiku", ["claude-opus-4-8"]) === false);
-  check("empty tools → false", shouldCapForPayload({ ...base, tools: [] }, undefined, ["claude-opus-4-8"]) === false);
-  check("missing tools → false", shouldCapForPayload({ model: base.model, messages: base.messages }, undefined, ["claude-opus-4-8"]) === false);
-  check("tool_choice none → false", shouldCapForPayload({ ...base, tool_choice: { type: "none" } }, undefined, ["claude-opus-4-8"]) === false);
-  check("tool_choice auto → true (we augment)", shouldCapForPayload({ ...base, tool_choice: { type: "auto" } }, undefined, ["claude-opus-4-8"]) === true);
-  check("tool_choice any → true (we augment)", shouldCapForPayload({ ...base, tool_choice: { type: "any" } }, undefined, ["claude-opus-4-8"]) === true);
-  check("multiple targets, last matches → true", shouldCapForPayload(base, undefined, ["claude-opus-4-9", "claude-opus-4-8"]) === true);
+  check("matching modelId via payload.model → true", shouldCapForPayload(base, undefined, ["model-a"]) === true);
+  check("matching modelId via ctx → true", shouldCapForPayload({ ...base, model: "other" }, "provider/model-a", ["model-a"]) === true);
+  check("no model match → false", shouldCapForPayload({ ...base, model: "model-b" }, "provider/model-b", ["model-a"]) === false);
+  check("empty tools → false", shouldCapForPayload({ ...base, tools: [] }, undefined, ["model-a"]) === false);
+  check("missing tools → false", shouldCapForPayload({ model: base.model, messages: base.messages }, undefined, ["model-a"]) === false);
+  check("tool_choice none → false", shouldCapForPayload({ ...base, tool_choice: { type: "none" } }, undefined, ["model-a"]) === false);
+  check("tool_choice auto → true (we augment)", shouldCapForPayload({ ...base, tool_choice: { type: "auto" } }, undefined, ["model-a"]) === true);
+  check("tool_choice any → true (we augment)", shouldCapForPayload({ ...base, tool_choice: { type: "any" } }, undefined, ["model-a"]) === true);
+  check("multiple targets, last matches → true", shouldCapForPayload(base, undefined, ["model-z", "model-a"]) === true);
 }
 
 // ─── pure mutation ──────────────────────────────────────────────────
@@ -120,7 +120,7 @@ console.log("[4] Composability with tool-contract (order-independent)");
 {
   const FINAL_ANSWER_TOOL_NAME = "final_answer";
   const baseAnthropic = {
-    model: "claude-opus-4-8",
+    model: "provider/model-a",
     messages: [{ role: "user", content: "do something" }],
     system: "you are pi",
     tools: [
@@ -164,15 +164,15 @@ console.log("[5] PI_ASTACK_PARALLEL_CAP_MODELS env override");
   try {
     delete process.env.PI_ASTACK_PARALLEL_CAP_MODELS;
     const defaults = readTargetModelSubstrings();
-    check("default = [claude-opus-4-8]", defaults.length === 1 && defaults[0] === "claude-opus-4-8");
+    check("default = []", defaults.length === 0);
 
-    process.env.PI_ASTACK_PARALLEL_CAP_MODELS = "claude-opus-4-8, claude-opus-4-9 ,foo";
+    process.env.PI_ASTACK_PARALLEL_CAP_MODELS = "provider/model-a, provider/model-b ,foo";
     const custom = readTargetModelSubstrings();
-    check("custom parses comma-separated", custom.length === 3 && custom[0] === "claude-opus-4-8" && custom[1] === "claude-opus-4-9" && custom[2] === "foo");
+    check("custom parses comma-separated", custom.length === 3 && custom[0] === "provider/model-a" && custom[1] === "provider/model-b" && custom[2] === "foo");
 
     process.env.PI_ASTACK_PARALLEL_CAP_MODELS = "   ";
     const empty = readTargetModelSubstrings();
-    check("whitespace-only falls back to defaults", empty.length === 1 && empty[0] === "claude-opus-4-8");
+    check("whitespace-only falls back to defaults", empty.length === 0);
   } finally {
     if (before === undefined) delete process.env.PI_ASTACK_PARALLEL_CAP_MODELS;
     else process.env.PI_ASTACK_PARALLEL_CAP_MODELS = before;
@@ -182,7 +182,7 @@ console.log("[5] PI_ASTACK_PARALLEL_CAP_MODELS env override");
 // ─── DEFAULT_TARGETS sanity ─────────────────────────────────────────
 console.log("[6] DEFAULT_TARGETS invariant");
 {
-  check("DEFAULT_TARGETS is exactly [claude-opus-4-8]", DEFAULT_TARGETS.length === 1 && DEFAULT_TARGETS[0] === "claude-opus-4-8");
+  check("DEFAULT_TARGETS is empty", DEFAULT_TARGETS.length === 0);
 }
 
 // ─── ctx extraction (3-T0 P1 dead-code + api gate) ──────────────────
@@ -190,7 +190,7 @@ console.log("[7] modelIdFromCtx / modelApiFromCtx");
 {
   // pi's Model exposes `id`, NOT `modelId`. The old code read modelId and
   // silently got undefined → ctx-side matching was dead.
-  check("reads ctx.model.id (the real field)", modelIdFromCtx({ model: { id: "claude-opus-4-8" } }) === "claude-opus-4-8");
+  check("reads ctx.model.id (the real field)", modelIdFromCtx({ model: { id: "provider/model-a" } }) === "provider/model-a");
   check("falls back to ctx.model.modelId if id absent", modelIdFromCtx({ model: { modelId: "x" } }) === "x");
   check("prefers id over modelId", modelIdFromCtx({ model: { id: "a", modelId: "b" } }) === "a");
   check("undefined when no model", modelIdFromCtx({}) === undefined);

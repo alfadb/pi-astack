@@ -25,16 +25,12 @@ export interface SearchSettings {
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
-  stage1Model: "deepseek/deepseek-v4-flash",
+  // No model hardcoded in code: pi-astack-settings.json is the single source
+  // of truth. Empty default + fail-closed at the modelRegistry call site.
+  stage1Model: "",
   stage1Limit: 50,
   stage1Thinking: "off",
-  // Stage 2 is a retrieval ranking task (reading comprehension + relevance
-  // judgment), NOT a reasoning task. Zero benefit from thinking mode — it
-  // only adds latency. DeepSeek v4-flash is fast ($0.14/M), cheap, and
-  // bilingual quality is sufficient for relevance ranking against markdown
-  // entries. Use v4-pro only when the operator needs stronger Chinese
-  // semantic matching at the cost of latency.
-  stage2Model: "deepseek/deepseek-v4-flash",
+  stage2Model: "",
   stage2Limit: 10,
   stage2Thinking: "off",
 };
@@ -43,21 +39,9 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
 // relevant memories" route: every turn runs a rewriter LLM + a search
 // with LLM-side strong cutoff, injects when stage 2 says has_relevant.
 //
-// Defaults are tuned for an instrument-first dogfood phase (per the
-// 2026-05-28 user directive "directly implement B + LLM-side strong
-// cutoff, ship metrics simultaneously, decide at 2 weeks"):
-//   - enabled: true (P1 implementation; disable via settings if TTFT
-//     impact unacceptable during dogfood)
-//   - queryRewriterModel: v4-flash (cheapest viable; matches search
-//     stage 1 model so token cost stays predictable)
-//   - queryRewriterTimeoutMs: 15_000 (deepseek-flash p99 ~ 3s; pad for
-//     transient slowness without blocking the turn forever)
-//   - searchLimit: 5 (smaller than memory_decide's 8 because the
-//     injection text appears in every turn's system prompt; §6 #5
-//     bias accumulation risk)
-//   - injectMaxEntries: 5 (cap on what actually goes into the block;
-//     defensive against search returning more than searchLimit asks)
-//   - entryExcerptChars: 800 (per-entry compiled_truth truncation)
+// queryRewriterModel is intentionally empty: configure in
+// pi-astack-settings.json → memory.pathA.queryRewriterModel. Code never
+// names a model.
 export interface PathASettings {
   enabled: boolean;
   queryRewriterModel: string;
@@ -76,7 +60,7 @@ export interface PathASettings {
 
 export const DEFAULT_PATH_A_SETTINGS: PathASettings = {
   enabled: true,
-  queryRewriterModel: "deepseek/deepseek-v4-flash",
+  queryRewriterModel: "",
   queryRewriterTimeoutMs: 15_000,
   historyMaxTurns: 4,
   historyMaxCharsPerTurn: 2000,
@@ -92,9 +76,9 @@ export interface MemorySettings {
   maxEntries: number;
   projectBoost: number;
   shortTermTtlDays: number;
-  /** memory_decide synthesis model. Empty string = reuse search.stage1Model
-   *  (backward-compatible). Set to decouple decision-brief quality from the
-   *  high-frequency stage1 coarse-recall model. */
+  /** memory_decide synthesis model. Empty string = reuse search.stage1Model.
+   *  Configure in pi-astack-settings.json → memory.decideModel; code never
+   *  names a model. */
   decideModel: string;
   search: SearchSettings;
   pathA: PathASettings;

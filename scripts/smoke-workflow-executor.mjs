@@ -86,7 +86,7 @@ const baseOpts = (runDir, runner, over = {}) => ({
   runDir,
   runner,
   readOnly: true,
-  defaultModel: "deepseek/deepseek-v4-flash",
+  defaultModel: "provider-a/model-a",
   defaultThinking: "medium",
   ...over,
 });

@@ -831,8 +831,8 @@ check("R7.3+opus-P1.5: secret type empty + Enter → no-op", () => {
   if (r.rawSecrets.s1 !== "a") throw new Error(`rawSecrets wrong: ${JSON.stringify(r.rawSecrets)}`);
 });
 
-check("R7.3+gpt-5.5: single+Other with whitespace-only text → no-op (trim check)", () => {
-  // gpt-5.5 review fix: pre-fix, a single space in Other would pass
+check("R7.3: single+Other with whitespace-only text → no-op (trim check)", () => {
+  // Review fix: pre-fix, a single space in Other would pass
   // the truthy check and submit [" "]. Now we use .trim() so whitespace
   // alone is treated as empty.
   const { root, getResolved } = buildWizard([

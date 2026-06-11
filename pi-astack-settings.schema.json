@@ -806,8 +806,8 @@
         },
         "judgeModel": {
           "type": "string",
-          "default": "deepseek/deepseek-v4-flash",
-          "description": "provider/model for the auto-continue judge (classification-tier task)."
+          "default": "",
+          "description": "provider/model for the auto-continue judge (classification-tier task). Empty default means fail-closed unless configured in pi-astack-settings.json."
         },
         "judgeTimeoutMs": {
           "type": "number",
@@ -834,13 +834,27 @@
         },
         "defaultModel": {
           "type": "string",
-          "default": "deepseek/deepseek-v4-flash",
-          "description": "Model for stages that omit `model` (P3 cost layering, ADR 0032 §9: cheap tier for retrieval/execution stages; advisory-only — never used for correctness adjudication). provider/model format."
+          "default": "",
+          "description": "Model for stages that omit `model` (P3 cost layering, ADR 0032 §9: cheap tier for retrieval/execution stages; advisory-only — never used for correctness adjudication). provider/model format. Empty default means fail-closed unless configured in pi-astack-settings.json."
         },
         "defaultThinking": {
           "type": "string",
           "default": "medium",
           "description": "Thinking level for stages that omit `thinking`."
+        }
+      }
+    },
+
+    "imagine": {
+      "type": "object",
+      "description": "Image generation tool settings (extensions/imagine/).",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+        "defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI Responses image-generation model id used when the imagine tool call omits `model`. Empty default means fail-closed unless configured in pi-astack-settings.json."
         }
       }
     },

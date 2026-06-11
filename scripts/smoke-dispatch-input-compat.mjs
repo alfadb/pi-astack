@@ -86,7 +86,7 @@ console.log("dispatch input-compat regression");
 // ── coerceTasksParam contract ────────────────────────────────────
 check("plain array passes through", () => {
   const r = coerceTasksParam([
-    { model: "openai/gpt-5.5", thinking: "high", prompt: "hi" },
+    { model: "provider-a/model-a", thinking: "high", prompt: "hi" },
   ]);
   if (!Array.isArray(r) || r.length !== 1) throw new Error(`got ${typeof r} len ${r?.length}`);
 });
@@ -97,7 +97,7 @@ check("single task object wraps to [task]", () => {
 });
 
 check("single-stringified array unwraps to array", () => {
-  const inner = [{ model: "openai/gpt-5.5", thinking: "high", prompt: "hi" }];
+  const inner = [{ model: "provider-a/model-a", thinking: "high", prompt: "hi" }];
   const r = coerceTasksParam(JSON.stringify(inner));
   if (!Array.isArray(r) || r.length !== 1) throw new Error(`got ${typeof r}`);
 });
@@ -107,7 +107,7 @@ check("BUG REPRO: broken-stringified array with unescaped inner quote returns []
   // a string that *looks* like a stringified JSON array but the inner prompt
   // has unescaped `"` characters that break outer JSON.parse mid-string.
   const broken =
-    '[\n  {\n    "model": "anthropic/claude-opus-4-7",\n    "prompt": "用户给了你"推翻一切"的权力"\n  }\n]';
+    '[\n  {\n    "model": "provider-a/model-a",\n    "prompt": "用户给了你"推翻一切"的权力"\n  }\n]';
   // sanity: confirm this really is malformed
   let parseFailed = false;
   try {
@@ -127,7 +127,7 @@ check("BUG REPRO: broken-stringified array with unescaped inner quote returns []
 });
 
 check("triple-stringified exceeds maxDepth=2 → returns []", () => {
-  const inner = [{ model: "openai/gpt-5.5", thinking: "high", prompt: "hi" }];
+  const inner = [{ model: "provider-a/model-a", thinking: "high", prompt: "hi" }];
   const triple = JSON.stringify(JSON.stringify(JSON.stringify(inner)));
   const r = coerceTasksParam(triple);
   if (!Array.isArray(r)) throw new Error(`returned ${typeof r}`);
@@ -166,7 +166,7 @@ function prepareArguments(args) {
 
 check("prepareArguments throws actionable error for broken-stringified payload", () => {
   const broken =
-    '[\n  {\n    "model": "anthropic/claude-opus-4-7",\n    "prompt": "用户给了你"推翻一切"的权力"\n  }\n]';
+    '[\n  {\n    "model": "provider-a/model-a",\n    "prompt": "用户给了你"推翻一切"的权力"\n  }\n]';
   let caught = null;
   try {
     prepareArguments({ tasks: broken });
@@ -182,10 +182,10 @@ check("prepareArguments throws actionable error for broken-stringified payload",
 
 check("prepareArguments accepts well-formed array (smoke)", () => {
   const r = prepareArguments({
-    tasks: [{ model: "openai/gpt-5.5", thinking: "high", prompt: "hi" }],
+    tasks: [{ model: "provider-a/model-a", thinking: "high", prompt: "hi" }],
   });
   if (r.tasks.length !== 1) throw new Error("did not preserve task");
-  if (r.tasks[0].model !== "openai/gpt-5.5") throw new Error("model lost");
+  if (r.tasks[0].model !== "provider-a/model-a") throw new Error("model lost");
 });
 
 // ── cleanup ──────────────────────────────────────────────────────

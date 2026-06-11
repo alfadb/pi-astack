@@ -90,25 +90,17 @@ export const DEFAULT_DYNAMIC_THRESHOLD_SETTINGS: DynamicThresholdSettings = {
   largeWindowMaxTokens: 1_100_000,
   largeWindowThresholdPercent: 70,
   minHeadroomTokens: 64_000,
-  // OpenAI API GPT-5.5 is nominally 1.05M, but >272k input tokens is
-  // the expensive tier. Treat 272k as the default economic budget; users
-  // who want full-window mode can override this key to 1050000.
-  modelEffectiveContextBudgets: {
-    "openai/gpt-5.5": 272_000,
-  },
+  // No model hardcoded in code. Configure per-model budgets in
+  // pi-astack-settings.json → compactionTuner.dynamicThreshold.modelEffectiveContextBudgets.
+  modelEffectiveContextBudgets: {},
 };
 
 export const DEFAULT_COMPACTION_TUNER_SETTINGS: CompactionTunerSettings = {
   enabled: false,
   thresholdPercent: 75,
-  modelPolicies: {
-    "openai/gpt-5.5": {
-      effectiveContextBudget: 272_000,
-      thresholdPercent: 68,
-      minHeadroomTokens: 48_000,
-      rearmMarginPercent: 8,
-    },
-  },
+  // No model hardcoded in code. Configure per-model compaction policy in
+  // pi-astack-settings.json → compactionTuner.modelPolicies.
+  modelPolicies: {},
   customInstructions: "",
   summaryModels: [],
   rearmMarginPercent: 5,

@@ -117,7 +117,7 @@ try {
     JSON.stringify(slugs) === JSON.stringify(["provisional-pending1", "provisional-pending2"]), JSON.stringify(slugs));
   check("candidates carry file path", cands.every((c) => typeof c.file === "string" && c.file.endsWith(".json")));
 
-  const settings = { aggregatorModel: "deepseek/deepseek-v4-pro", curatorModel: "deepseek/deepseek-v4-pro", curatorTimeoutMs: 30000, autoLlmWriteEnabled: true };
+  const settings = { aggregatorModel: "provider-a/model-a", curatorModel: "provider-a/model-a", curatorTimeoutMs: 30000, autoLlmWriteEnabled: true };
 
   const r1 = await resolver.runStagingResolverIfDue({ projectRoot, settings, now: new Date() });
   check("no modelRegistry → skipped=model_registry_unavailable", r1.skipped === "model_registry_unavailable", JSON.stringify(r1));

@@ -74,7 +74,9 @@ const DEFAULTS: GoalSettings = {
   defaultMaxContinuations: 10,
   defaultMaxWallMinutes: 120,
   autoContinue: false,
-  judgeModel: "deepseek/deepseek-v4-flash",
+  // No model hardcoded in code: pi-astack-settings.json is the single source
+  // of truth. Empty default → fail-closed at goal judge.
+  judgeModel: "",
   judgeTimeoutMs: 45_000,
 };
 

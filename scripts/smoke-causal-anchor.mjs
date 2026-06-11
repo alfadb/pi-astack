@@ -430,7 +430,7 @@ check("spread + extra fields → flat audit row (real usage shape)", () => {
     pid: 12345,
     ...spreadAnchor(sub),
     operation: "dispatch_agent",
-    model: "anthropic/claude-opus-4-7",
+    model: "provider-a/model-a",
     duration_ms: 1234,
     result: "ok",
   };

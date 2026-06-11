@@ -68,35 +68,23 @@ const EXT_MIME: Record<string, string> = {
 /**
  * Ordered preference list for vision model selection. Lower index = higher
  * priority. Substring match on model id (case-insensitive, tolerant of
- * version suffixes like "gpt-5.5-2026-07-15").
+ * provider-specific version-suffix conventions).
  *
  * Models not matching any preference still participate, ordered by
  * cost.input descending as a rough capability proxy.
  *
  * Override via top-level `vision.modelPreferences` in `~/.pi/agent/pi-astack-settings.json`.
  *
- * Aligned 2026-05-17 with model-curator keep-list: only entries whose
- * provider is currently registered (anthropic / openai / deepseek;
- * deepseek has no image-in so it's filtered at selection time anyway)
- * and whose model id is in the curator's keep-list survive substring
- * match. google/gemini-3-pro and older claude-{opus,sonnet}-4 / openai/gpt-5
- * were dropped because curator never registers them, so listing them here
- * was misleading dead-code. github-copilot models are NOT listed here
- * because scoreByPrefs does an exact `provider === pProv` match (not
- * substring) — so they fall into the unmatched bucket and get ranked
- * by cost.input descending as a soft fallback. Add explicit
- * `github-copilot/<id>` entries to pi-astack-settings.json `vision.modelPreferences`
- * if you want to promote a Copilot model.
+ * Substring match is on the model id only after a strict `provider === pProv`
+ * check (not provider substring), so the preference list must be written
+ * with the exact provider prefix the model is registered under. Models whose
+ * provider is not in the model-curator keep-list won't be selected even if
+ * listed here — keep this list in sync with the curator's providers/hints
+ * block in pi-astack-settings.json.
  */
-const DEFAULT_VISION_PREFS = [
-  "openai/gpt-5.5",
-  "anthropic/claude-sonnet-4-6",
-  "anthropic/claude-opus-4-7",
-  "anthropic/claude-opus-4-6",
-  "anthropic/claude-sonnet-4-5",
-  "openai/gpt-5.4",
-  "anthropic/claude-haiku-4-5",
-];
+// No model hardcoded in code: pi-astack-settings.json is the single source
+// of truth. Empty default → no vision dispatch until settings is configured.
+const DEFAULT_VISION_PREFS: string[] = [];
 
 // ── Types ───────────────────────────────────────────────────────
 
