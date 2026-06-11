@@ -418,6 +418,6 @@ export function formatDryRunReport(result: WorkflowValidationResult, opts: { rea
       : "  read-only: all stages");
   }
   for (const w of result.warnings) lines.push(`  ~ ${w}`);
-  if (!opts.enabled) lines.push("  note: workflow.enabled=false — execution channel disabled (validation only; PR-10 executor not yet shipped)");
+  if (!opts.enabled) lines.push("  note: workflow.enabled=false — execution channel disabled (set { \"workflow\": { \"enabled\": true } } in pi-astack-settings.json to allow /workflow run; ADR 0032 §5 experimental opt-in)");
   return lines.join("\n");
 }
