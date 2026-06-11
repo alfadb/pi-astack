@@ -104,9 +104,16 @@ function loadWorkflowFile(fileArgRaw: string, cwd: string, readOnly: boolean): {
   // gpt R1 N4: strip quotes only as a MATCHING pair.
   const trimmedArg = fileArgRaw.trim();
   const quoted = /^(["'])(.*)\1$/.exec(trimmedArg);
-  const fileArg = quoted ? quoted[2] : trimmedArg;
+  const fileArgRaw2 = quoted ? quoted[2] : trimmedArg;
   // gpt R3-2: empty argument after quote-strip must not resolve to cwd.
-  if (!fileArg.trim()) return { error: "empty file argument" };
+  if (!fileArgRaw2.trim()) return { error: "empty file argument" };
+  // Slash-command args are NOT shell-expanded — a literal leading ~ would
+  // otherwise resolve against cwd (live dogfood hit: "~/x" → <cwd>/~/x).
+  const fileArg = fileArgRaw2 === "~"
+    ? os.homedir()
+    : fileArgRaw2.startsWith("~/")
+      ? path.join(os.homedir(), fileArgRaw2.slice(2))
+      : fileArgRaw2;
   const fp = path.isAbsolute(fileArg) ? fileArg : path.resolve(cwd, fileArg);
   let raw: string;
   try {

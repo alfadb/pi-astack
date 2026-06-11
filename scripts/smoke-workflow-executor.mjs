@@ -394,6 +394,9 @@ await check("command-layer gates: no LLM-invokable tool; constants drift-locked"
   const et = /const DEFAULT_STAGE_TIMEOUT_MS = ([\d_]+);/.exec(execSrc);
   assert(dt && et && Number(dt[1].replace(/_/g, "")) === Number(et[1].replace(/_/g, "")), `timeout default drift: dispatch=${dt?.[1]} executor=${et?.[1]}`);
   assert(/perStageTimeoutMs:\s*DEFAULT_TIMEOUT_MS/.test(src), "production call site threads dispatch DEFAULT_TIMEOUT_MS");
+  // live dogfood fix lock: slash-command args are not shell-expanded — the
+  // loader must expand a leading ~ itself instead of resolving <cwd>/~/x.
+  assert(/startsWith\("~\/"\)/.test(src) && /os\.homedir\(\)/.test(src), "loadWorkflowFile expands leading ~");
 });
 
 await check("§8 API boundary: production runner uses dispatch's exported runInProcess (no copy)", async () => {
