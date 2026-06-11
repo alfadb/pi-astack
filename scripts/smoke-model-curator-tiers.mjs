@@ -142,13 +142,18 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
   } else {
     check("block contains '### Tier roster'", block.includes("### Tier roster"));
     check("block contains '**flagship**' roster entry", block.includes("**flagship**"));
+    check("block contains '**flagship_candidate**' roster entry when configured", !tiers.flagship_candidate || block.includes("**flagship_candidate**"));
     check("block contains '**standard**' roster entry", block.includes("**standard**"));
     check("block contains '**fast**' roster entry", block.includes("**fast**"));
     check("block contains at least one flagship model id", (tiers.flagship?.models ?? []).some((m) => block.includes(m)));
+    check("block contains candidate caveat when configured",
+      !tiers.flagship_candidate || block.includes("do NOT count these as primary T0 voters"));
     check("block contains the cross-vendor selection guidance",
-      block.includes("two models from the same vendor") || block.includes("two models from the same vendor"));
+      block.includes("two models from the same vendor"));
     check("roster is rendered BEFORE the per-provider table",
       block.indexOf("### Tier roster") < block.indexOf("### anthropic"));
+    check("flagship_candidate renders between flagship and standard when present",
+      !tiers.flagship_candidate || (block.indexOf("**flagship**") < block.indexOf("**flagship_candidate**") && block.indexOf("**flagship_candidate**") < block.indexOf("**standard**")));
     check("hints still render (regression: per-model table)",
       block.includes("| model | reasoning | image-in | $/1M in | hint |"));
   }

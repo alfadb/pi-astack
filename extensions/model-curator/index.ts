@@ -254,6 +254,13 @@ function buildAvailableModelsBlock(
     for (const [tierName, tier] of Object.entries(tiers)) {
       const label = tier.label?.trim() || tierName;
       lines.push(`- **${tierName}** (${label}) — ${tier.models.map((m) => `\`${m}\``).join(", ")}`);
+      if (tierName === "flagship_candidate") {
+        lines.push(
+          "  - Candidate caveat: do NOT count these as primary T0 voters in " +
+            "3-way blind audits; use them as supplementary 4–5 way " +
+            "architecture-diversity voices until their promotion gate closes.",
+        );
+      }
     }
     if (tiers.flagship) {
       lines.push("");
