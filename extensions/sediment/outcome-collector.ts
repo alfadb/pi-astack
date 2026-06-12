@@ -13,7 +13,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
+import { ensureUserGlobalSidecarMigrated, sedimentAuditPath, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "./sanitizer";
 
@@ -396,6 +396,26 @@ function outcomeLedgerDedupKey(row: Pick<OutcomeRow, "session_id" | "entry_slug"
  *  anything but this delta downstream re-processes historical footnotes
  *  every turn (audit spam, repeated CONTRADICT demotes, stale rows stamped
  *  with the current injection nonce). */
+function appendOutcomeLedgerFailureAudit(projectRoot: string | undefined, rows: OutcomeRow[], err: unknown): void {
+  if (!projectRoot) return;
+  try {
+    const auditPath = sedimentAuditPath(projectRoot);
+    fs.mkdirSync(path.dirname(auditPath), { recursive: true });
+    fs.appendFileSync(auditPath, JSON.stringify({
+      timestamp: new Date().toISOString(),
+      audit_version: 2,
+      pid: process.pid,
+      ...spreadAnchor(getCurrentAnchor()),
+      operation: "outcome_ledger_write_failed",
+      project_root: path.resolve(projectRoot),
+      attempted_rows: rows.length,
+      error: err instanceof Error ? err.message : String(err),
+    }) + "\n", "utf-8");
+  } catch {
+    // audit is best-effort; never make outcome collection fail closed.
+  }
+}
+
 export function writeOutcomeLedger(
   rows: OutcomeRow[],
   projectRoot?: string,
@@ -443,7 +463,8 @@ export function writeOutcomeLedger(
     if (lines.length === 0) return [];
     fs.appendFileSync(ledgerPath, lines.join(""), "utf-8");
     return appended;
-  } catch {
+  } catch (err) {
+    appendOutcomeLedgerFailureAudit(projectRoot, rows, err);
     // best-effort — a failed ledger write also reports zero delta so the
     // outcome edge never acts on evidence that was not durably recorded.
     return [];

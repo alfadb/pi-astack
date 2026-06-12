@@ -298,6 +298,14 @@ export interface MultiviewPendingEntry {
   approved_at_iso?: string;
 
   /**
+   * Set immediately BEFORE invoking the approved writer action. If replay later
+   * sees this without brain_write_completed_at_iso, the process may have crashed
+   * after a non-idempotent write. F12: replay may retry create (dedup-safe) but
+   * must not blindly re-run update/merge/archive/delete/supersede.
+   */
+  brain_write_intent_at_iso?: string;
+
+  /**
    * Set after the approved writer action returned successfully but staging
    * cleanup failed. Replay should retry only cleanup for such entries, not
    * repeat the brain write.

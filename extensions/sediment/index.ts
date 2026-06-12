@@ -54,8 +54,8 @@ import {
   summarizeLlmExtractorResult,
   type LlmExtractorResult,
 } from "./llm-extractor";
-import { buildProvisionalStagingEntry, runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
-import { writeStagingEntry } from "./staging-loader";
+import { buildProvisionalStagingEntry, buildProvisionalStagingSlug, runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
+import { removeStagingEntriesBySlug, writeStagingEntry } from "./staging-loader";
 import type { RuleDraft } from "./rule-writer";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
@@ -4443,6 +4443,9 @@ async function tryAutoWriteLane(args: {
         quote: sanitizeAuditText(tier1Signal.user_quote ?? "", 200),
       }).catch(() => {});
     }
+    const tier1StagingCleanup = (result.status === "created" || result.status === "updated")
+      ? removeStagingEntriesBySlug(buildProvisionalStagingSlug(tier1Signal, window.text))
+      : undefined;
     await appendAudit(cwd, {
       operation: "tier1_direct_write",
       lane: "auto_write",
@@ -4475,6 +4478,7 @@ async function tryAutoWriteLane(args: {
       },
       result: resultSummary(result),
       deterministic_direct_path: true,
+      ...(tier1StagingCleanup ? { tier1_staging_cleanup: tier1StagingCleanup } : {}),
       // PR-4: adjudication trace (lane ON only) — decision/model/fallback.
       ...(adjudication ? { jaccard_adjudication: adjudication } : {}),
       // "updated" = adjudication update/merge persisted the directive on the

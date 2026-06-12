@@ -126,6 +126,32 @@ export function writeStagingEntry(entry: StagingEntry): boolean {
   }
 }
 
+/** F11 (PR-C): remove provisional staging twins once a deterministic Tier-1
+ * direct write has durably captured the same user quote. Matching by slug is
+ * stable across process restarts because buildProvisionalStagingEntry and the
+ * tier1 cleanup path share buildProvisionalStagingSlug(). Best-effort: failed
+ * deletes are reported via counters but never roll back the brain write. */
+export function removeStagingEntriesBySlug(slug: string): { removed: number; failed: number } {
+  let removed = 0;
+  let failed = 0;
+  try {
+    const dir = stagingDir();
+    if (!fs.existsSync(dir)) return { removed, failed };
+    for (const file of fs.readdirSync(dir)) {
+      if (!file.endsWith(`-${slug}.json`)) continue;
+      try {
+        fs.unlinkSync(path.join(dir, file));
+        removed++;
+      } catch {
+        failed++;
+      }
+    }
+  } catch {
+    failed++;
+  }
+  return { removed, failed };
+}
+
 /**
  * Count total staging files (for raw disk-footprint monitoring). Includes
  * soft-archived (retired-but-not-deleted) files.

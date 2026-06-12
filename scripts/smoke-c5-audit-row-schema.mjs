@@ -19,7 +19,9 @@
  *   1. Reordering ...tsFields and failure_type so one stomps the other
  *   2. Dropping ...tsFields from one audit site but keeping in another
  *   3. aggregateAnchor.subturn=0 and sub_agent_label being refactored away
- *   4. audit_version: 2 bump being silently rolled back
+ *   4. audit_version: 3 bump being silently rolled back
+ *   5. PR-C heartbeat trace enrichment missing from v3 audit rows
+ *   6. PR-C per-file audit singleFlight chain missing from append path
  *
  * Each invariant is asserted by reading the file and grepping for the
  * exact code shape; refactors that change the shape MUST update this
@@ -55,9 +57,21 @@ const tsSrc = fs.readFileSync(
 
 console.log("Section: audit version bump");
 
-check("DISPATCH_AUDIT_VERSION = 2 (Stage 1a)", () => {
-  if (!/const DISPATCH_AUDIT_VERSION = 2;/.test(dispatchSrc)) {
-    throw new Error("expected DISPATCH_AUDIT_VERSION = 2; v1 was bumped to v2 for terminal_state schema");
+check("DISPATCH_AUDIT_VERSION = 3 (Stage 1c heartbeat enrichment)", () => {
+  if (!/const DISPATCH_AUDIT_VERSION = 3;/.test(dispatchSrc)) {
+    throw new Error("expected DISPATCH_AUDIT_VERSION = 3; v3 adds heartbeat_trace_path enrichment");
+  }
+});
+
+check("appendDispatchAudit serializes per-file writes through singleFlight", () => {
+  const expected = [
+    /Symbol\.for\("pi-astack\/dispatch\/audit-singleflight\/v1"\)/,
+    /const prior = chains\.get\(auditPath\) \?\? Promise\.resolve\(\)/,
+    /const next = prior\.catch\(\(\) => \{\}\)\.then\(async \(\) => \{/,
+    /if \(chains\.get\(auditPath\) === next\) chains\.delete\(auditPath\)/,
+  ];
+  for (const re of expected) {
+    if (!re.test(dispatchSrc)) throw new Error(`dispatch audit singleFlight invariant missing: ${re}`);
   }
 });
 
@@ -324,6 +338,35 @@ check("per-task details include terminalState (R7: derived from materializedResu
       "per-task details must call inferTerminalState(r) where r = materializedResults[i] (R7 P1-A fix). " +
       "Previously used results[i] which yielded inconsistent state for holes.",
     );
+  }
+});
+
+console.log("\nSection: heartbeat audit enrichment");
+
+check("dispatch imports and applies heartbeat consumer as audit-only enrichment", () => {
+  if (!/import \{ assessLivenessForAnchor \} from "\.\/heartbeat-consumer"/.test(dispatchSrc)) {
+    throw new Error("dispatch must import heartbeat consumer assessment helper");
+  }
+  if (!/return enrichHeartbeat\(result\)/.test(dispatchSrc)) {
+    throw new Error("runInProcess must enrich results with heartbeat trace/liveness before returning");
+  }
+  if (/terminalStateFromLiveness\(heartbeat_liveness\)/.test(dispatchSrc)) {
+    throw new Error("post-settlement heartbeat enrichment must be audit-only; do not mutate settled terminal state");
+  }
+});
+
+check("runtime audit rows carry heartbeat_trace_path when available", () => {
+  const agentRuntime = dispatchSrc.match(
+    /operation:\s*"dispatch_agent"[\s\S]{0,3000}?heartbeat_trace_path[\s\S]{0,800}?\}\s*,\s*\)\s*;/,
+  );
+  if (!agentRuntime) {
+    throw new Error("dispatch_agent runtime audit row missing heartbeat_trace_path enrichment");
+  }
+  const parallelRuntime = dispatchSrc.match(
+    /operation:\s*"dispatch_parallel\.task"[\s\S]{0,3000}?heartbeat_trace_path[\s\S]{0,800}?\}\s*\)\s*;/,
+  );
+  if (!parallelRuntime) {
+    throw new Error("dispatch_parallel.task runtime audit row missing heartbeat_trace_path enrichment");
   }
 });
 

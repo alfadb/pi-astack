@@ -59,6 +59,14 @@ const CANONICAL_STATUSES = new Set([
   "provisional", "active", "contested", "deprecated", "superseded", "archived",
 ]);
 
+// AX-PROVENANCE (ADR 0028 §12): read-side mirror of
+// sediment/validation.ts::PROVENANCE_CLASSES. Keep local to avoid a memory →
+// sediment dependency; legacy entries lacking the field default to
+// assistant-observed so the axis is always present in parsed MemoryEntry.
+const CANONICAL_PROVENANCE = new Set([
+  "user-expressed", "assistant-observed", "content-in-transcript",
+]);
+
 // Legacy alias folding. The `pipeline` and `knowledge` kinds existed in
 // pre-v7 pensieve entries and remain produced by inferKindFromPath as a
 // READ-ONLY fallback for entries without `frontmatter.kind`. They are
@@ -600,6 +608,10 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
   // confidence default uses the NORMALIZED kind so the heuristic remains
   // stable as new legacy aliases get folded.
   const confidence = Math.min(10, Math.max(0, scalarNumber(frontmatter.confidence) ?? defaultConfidence(kind)));
+  const provenanceRaw = scalarString(frontmatter.provenance);
+  const provenance = provenanceRaw && CANONICAL_PROVENANCE.has(provenanceRaw)
+    ? provenanceRaw
+    : "assistant-observed";
   const scopeRaw = scalarString(frontmatter.scope);
   const scope: Scope = scopeRaw === "world" || scopeRaw === "project" ? scopeRaw : store.scope;
   const summary = makeSummary(compiledTruth, title);
@@ -616,6 +628,7 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
     ...(kindNorm.legacyKind ? { legacyKind: kindNorm.legacyKind } : {}),
     ...(statusNorm.legacyStatus ? { legacyStatus: statusNorm.legacyStatus } : {}),
     confidence,
+    provenance,
     title,
     summary,
     created: scalarString(frontmatter.created),

@@ -69,6 +69,7 @@ import {
   loadMultiviewPending,
   markMultiviewPendingApprovedDecision,
   markMultiviewPendingBrainWriteCompleted,
+  markMultiviewPendingBrainWriteIntent,
   updateMultiviewPendingAttempts,
   updateMultiviewPendingWriterFailure,
 } from "./multiview-staging-io";
@@ -504,6 +505,31 @@ async function processOneEntry(
     return;
   }
 
+  if (entry.brain_write_intent_at_iso && entry.approved_decision && entry.approved_decision.op !== "create") {
+    // F12 (PR-C): intent without completed means a prior process may have
+    // crashed after invoking a NON-IDEMPOTENT writer action. create can be
+    // retried (body/slug dedup catches duplicates), but update/merge/archive/
+    // supersede/delete must not be blindly replayed.
+    const ageDays = audit.age_days;
+    if (ageDays >= STALE_DAYS_MULTIVIEW_PENDING) {
+      if (!archiveTerminalOrAudit(entry, audit, result, `ambiguous brain_write_intent_at_iso=${entry.brain_write_intent_at_iso} age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; terminal stale wanted to archive entry`, entryStart)) return;
+      audit.outcome = "terminal_stale";
+      audit.new_decision = entry.approved_decision;
+      audit.detail = `ambiguous brain_write_intent_at_iso=${entry.brain_write_intent_at_iso} exists without brain_write_completed_at_iso for non-idempotent op=${entry.approved_decision.op}; age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry soft-archived to abandoned/ for manual inspection (candidate preserved, not re-picked-up)`;
+      audit.durationMs = Date.now() - entryStart;
+      result.terminal_stale++;
+      result.auditRows.push(audit);
+      return;
+    }
+    audit.outcome = "error";
+    audit.new_decision = entry.approved_decision;
+    audit.detail = `brain_write_intent_at_iso=${entry.brain_write_intent_at_iso} exists without brain_write_completed_at_iso for non-idempotent op=${entry.approved_decision.op}; writer replay suppressed, manual inspection required`;
+    audit.durationMs = Date.now() - entryStart;
+    result.errors++;
+    result.auditRows.push(audit);
+    return;
+  }
+
   if (entry.approved_decision && entry.approved_decision.op === "skip") {
     if (!deleteOriginalOrAudit(entry, audit, result, `approved skip already recorded at ${entry.approved_at_iso ?? "unknown"}; staging delete failed`, entryStart)) return;
     audit.outcome = "succeeded";
@@ -515,7 +541,7 @@ async function processOneEntry(
     return;
   }
 
-  if (entry.approved_decision && entry.approved_decision.op !== "skip") {
+  if (entry.approved_decision) {
     if ((entry.writer_retry_attempts ?? 0) >= MAX_WRITER_RETRY_ATTEMPTS) {
       if (!archiveTerminalOrAudit(entry, audit, result, `writer_retry_attempts=${entry.writer_retry_attempts ?? 0} >= cap=${MAX_WRITER_RETRY_ATTEMPTS}; terminal writer max-retries wanted to archive entry`, entryStart)) return;
       audit.outcome = "terminal_writer_max_retries";
@@ -738,6 +764,19 @@ async function retryApprovedWriterOnly(
       inMemoryWriterBackoff.set(inMemoryKey(entry), nextRetry);
       audit.outcome = "error";
       audit.detail = `approved op=${finalDecision.op} but failed to persist approved_decision before writer call; staging kept for safe re-review after in-memory backoff until ${nextRetry}.${extraDetail}`;
+      audit.durationMs = Date.now() - entryStart;
+      result.errors++;
+      result.auditRows.push(audit);
+      return;
+    }
+
+    const intentAtIso = entry.brain_write_intent_at_iso ?? new Date().toISOString();
+    if (!entry.brain_write_intent_at_iso
+        && !markMultiviewPendingBrainWriteIntent(entry.slug, intentAtIso, finalDecision)) {
+      const nextRetry = computeWriterBackoffIso((entry.writer_retry_attempts ?? 0) + 1);
+      inMemoryWriterBackoff.set(inMemoryKey(entry), nextRetry);
+      audit.outcome = "error";
+      audit.detail = `approved op=${finalDecision.op} but failed to persist brain_write_intent_at_iso before writer call; staging kept for safe replay after in-memory backoff until ${nextRetry}.${extraDetail}`;
       audit.durationMs = Date.now() - entryStart;
       result.errors++;
       result.auditRows.push(audit);

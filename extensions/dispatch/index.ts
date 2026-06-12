@@ -56,6 +56,7 @@ import {
   type TaskSummary,
 } from "./terminal-state";
 import { startHeartbeat, type HeartbeatHandle } from "../_shared/heartbeat";
+import { assessLivenessForAnchor } from "./heartbeat-consumer";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -127,7 +128,19 @@ const KNOWN_TOOLS = new Set([
  *  should prefer `terminal_state` because it distinguishes cancelled vs
  *  failed and surfaces degraded outcomes that the old binary schema
  *  collapses into "fail". */
-const DISPATCH_AUDIT_VERSION = 2;
+const DISPATCH_AUDIT_VERSION = 3;
+
+const _DISPATCH_AUDIT_SINGLEFLIGHT_KEY = Symbol.for("pi-astack/dispatch/audit-singleflight/v1");
+
+function dispatchAuditChains(): Map<string, Promise<void>> {
+  const g = globalThis as Record<symbol, unknown>;
+  let chains = g[_DISPATCH_AUDIT_SINGLEFLIGHT_KEY] as Map<string, Promise<void>> | undefined;
+  if (!chains) {
+    chains = new Map();
+    g[_DISPATCH_AUDIT_SINGLEFLIGHT_KEY] = chains;
+  }
+  return chains;
+}
 
 /** Append one row to `<projectRoot>/.pi-astack/dispatch/audit.jsonl`.
  *  Best-effort: any failure (disk full / permission / fs error) is
@@ -140,8 +153,10 @@ async function appendDispatchAudit(
   anchor: CausalAnchor | undefined,
   event: Record<string, unknown>,
 ): Promise<void> {
-  try {
-    const auditPath = dispatchAuditPath(projectRoot);
+  const auditPath = dispatchAuditPath(projectRoot);
+  const chains = dispatchAuditChains();
+  const prior = chains.get(auditPath) ?? Promise.resolve();
+  const next = prior.catch(() => {}).then(async () => {
     await mkdir(dirname(auditPath), { recursive: true });
     const row = {
       timestamp: new Date().toISOString(),
@@ -151,6 +166,10 @@ async function appendDispatchAudit(
       ...event,
     };
     await appendFile(auditPath, `${JSON.stringify(row)}\n`, "utf-8");
+  });
+  chains.set(auditPath, next);
+  try {
+    await next;
   } catch (err) {
     // Audit failure must not break dispatch. Log + continue.
     try {
@@ -159,6 +178,8 @@ async function appendDispatchAudit(
         `dispatch continues, but trace chain for this row is missing.`,
       );
     } catch { /* truly best-effort */ }
+  } finally {
+    if (chains.get(auditPath) === next) chains.delete(auditPath);
   }
 }
 
@@ -396,6 +417,10 @@ export interface AgentResult {
     total: number;
     cost: number;
   };
+  /** Heartbeat trace path written for this sub-agent run, when anchor is available. */
+  heartbeat_trace_path?: string;
+  /** Stage 1c heartbeat consumer assessment captured at run settlement. */
+  heartbeat_liveness?: ReturnType<typeof assessLivenessForAnchor>;
   /** Retry history from pi's auto_retry_start / auto_retry_end events.
    *  Undefined when no retries occurred. Populated in-process via
    *  subscribe() — same semantics as v2 subprocess. */
@@ -594,11 +619,24 @@ export async function runInProcess(
   // every terminal path (success / error / timeout / abort). The
   // handle is a no-op when anchor / projectRoot is missing, so this
   // is safe even on legacy call sites that don't pass heartbeatCtx.
+  const heartbeatProjectRoot = heartbeatCtx?.projectRoot ?? process.cwd();
+  const heartbeatAnchor = heartbeatCtx?.anchor;
   const heartbeat: HeartbeatHandle = startHeartbeat({
-    anchor: heartbeatCtx?.anchor,
-    projectRoot: heartbeatCtx?.projectRoot ?? process.cwd(),
+    anchor: heartbeatAnchor,
+    projectRoot: heartbeatProjectRoot,
     startedNote: `model=${modelStr}`,
   });
+
+  const enrichHeartbeat = (result: AgentResult): AgentResult => {
+    const heartbeat_trace_path = heartbeat.tracePath;
+    if (!heartbeatAnchor || !heartbeat_trace_path) return result;
+    const heartbeat_liveness = assessLivenessForAnchor(heartbeatProjectRoot, heartbeatAnchor);
+    return {
+      ...result,
+      heartbeat_trace_path,
+      heartbeat_liveness,
+    };
+  };
 
   // R8 P1 fix (Opus P0-A + GPT-5.5 P1-1 + DeepSeek P1-2 unanimous):
   // wrap the entire body in try/finally so heartbeat.stop() fires on
@@ -907,7 +945,7 @@ export async function runInProcess(
   const result = await Promise.race([runPromise, timeoutPromise]);
   if (timeoutId) clearTimeout(timeoutId);
   settled = true;
-  return result;
+  return enrichHeartbeat(result);
   } finally {
     // ADR 0027 §C2' Stage 1b R8 P1 fix: heartbeat.stop() in finally
     // closes the lifecycle on EVERY terminal path. Idempotent +
@@ -1253,6 +1291,8 @@ export default function (pi: ExtensionAPI) {
           ...tsFields,
           ...(result.failureType ? { failure_type: result.failureType } : {}),
           ...(result.stopReason ? { stop_reason: result.stopReason } : {}),
+          ...(result.heartbeat_trace_path ? { heartbeat_trace_path: result.heartbeat_trace_path } : {}),
+          ...(result.heartbeat_liveness ? { heartbeat_liveness: result.heartbeat_liveness } : {}),
           output_chars: result.output?.length ?? 0,
           ...(result.usage
             ? {
@@ -1278,6 +1318,8 @@ export default function (pi: ExtensionAPI) {
           ...(tsFields.cancel_source ? { cancelSource: tsFields.cancel_source } : {}),
           ...(subAnchor ? { anchor: subAnchor } : {}),
           ...(result.error ? { error: result.error, failureType: result.failureType } : {}),
+          ...(result.heartbeat_trace_path ? { heartbeatTracePath: result.heartbeat_trace_path } : {}),
+          ...(result.heartbeat_liveness ? { heartbeatLiveness: result.heartbeat_liveness } : {}),
           ...(result.usage ? { usage: result.usage } : {}),
         },
         ...(result.error ? { isError: true } : {}),
@@ -1449,6 +1491,8 @@ export default function (pi: ExtensionAPI) {
                 result: "fail",
                 ...rejectedTsFields,
                 failure_type: "tool_rejected",
+                ...(res.heartbeat_trace_path ? { heartbeat_trace_path: res.heartbeat_trace_path } : {}),
+                ...(res.heartbeat_liveness ? { heartbeat_liveness: res.heartbeat_liveness } : {}),
                 output_chars: 0,
               });
               continue;
@@ -1517,6 +1561,8 @@ export default function (pi: ExtensionAPI) {
             ...taskTsFields,
             ...(res.failureType ? { failure_type: res.failureType } : {}),
             ...(res.stopReason ? { stop_reason: res.stopReason } : {}),
+            ...(res.heartbeat_trace_path ? { heartbeat_trace_path: res.heartbeat_trace_path } : {}),
+            ...(res.heartbeat_liveness ? { heartbeat_liveness: res.heartbeat_liveness } : {}),
             output_chars: res.output?.length ?? 0,
             ...(res.usage
               ? {

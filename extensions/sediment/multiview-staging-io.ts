@@ -548,6 +548,30 @@ export function markMultiviewPendingApprovedDecision(
   }
 }
 
+export function markMultiviewPendingBrainWriteIntent(
+  slug: string,
+  intentAtIso: string,
+  approvedDecision?: MultiviewPendingEntry["approved_decision"],
+): boolean {
+  const loaded = loadPendingFileBySlug(slug);
+  if (!loaded) return false;
+
+  loaded.parsed.entry.brain_write_intent_at_iso = loaded.parsed.entry.brain_write_intent_at_iso ?? intentAtIso;
+  if (approvedDecision) {
+    loaded.parsed.entry.approved_decision = approvedDecision;
+    loaded.parsed.entry.approved_at_iso = loaded.parsed.entry.approved_at_iso ?? intentAtIso;
+  }
+  loaded.parsed.entry.last_attempt_iso = intentAtIso;
+  loaded.parsed.entry.updated = intentAtIso;
+
+  try {
+    fs.writeFileSync(loaded.absPath, JSON.stringify(loaded.parsed, null, 2), "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function updateMultiviewPendingWriterFailure(
   slug: string,
   newWriterAttempts: number,
@@ -562,6 +586,7 @@ export function updateMultiviewPendingWriterFailure(
   loaded.parsed.entry.writer_retry_attempts = newWriterAttempts;
   loaded.parsed.entry.last_writer_error = clipWriterError(lastWriterError);
   loaded.parsed.entry.next_retry_not_before_iso = nextRetryNotBeforeIso;
+  delete loaded.parsed.entry.brain_write_intent_at_iso;
   if (approvedDecision) {
     loaded.parsed.entry.approved_decision = approvedDecision;
     loaded.parsed.entry.approved_at_iso = loaded.parsed.entry.approved_at_iso ?? lastAttemptIso;

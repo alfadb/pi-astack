@@ -22,7 +22,7 @@ import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./ty
 import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
 import { llmSearchEntries } from "./llm-search";
-import { buildDecisionSearchQuery, runMemoryDecide } from "./decide";
+import { buildDecisionSearchQuery, pruneDecisionBriefSeqCountersForSession, runMemoryDecide } from "./decide";
 import { PATH_A_INJECT_MARKER } from "./memory-context-injector";
 import { readOutcomeLedger, summarizeEntryActivity } from "../sediment/outcome-collector";
 import { formatLintReport, lintTarget } from "./lint";
@@ -854,8 +854,14 @@ brief 是专家建议，不是命令。
   // injection has a registry (before_agent_start ctx lacks it on the first
   // message). Mirrors model-curator/index.ts. Sub-agent sessions are skipped so
   // a sub-pi's pruned registry never overwrites the main session's.
-  pi.on("session_start", async (_event: unknown, ctx?: unknown) => {
+  pi.on("session_start", async (event: unknown, ctx?: unknown) => {
     if (isSubAgentSession(ctx as { sessionManager?: unknown } | undefined | null)) return;
+    const sessionId = typeof (event as { sessionId?: unknown } | undefined)?.sessionId === "string"
+      ? (event as { sessionId: string }).sessionId
+      : typeof (ctx as { sessionId?: unknown } | undefined)?.sessionId === "string"
+        ? (ctx as { sessionId: string }).sessionId
+        : undefined;
+    if (sessionId) pruneDecisionBriefSeqCountersForSession(sessionId);
     const reg = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry;
     if (reg) capturedModelRegistry = reg;
   });

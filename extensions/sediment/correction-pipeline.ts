@@ -421,6 +421,13 @@ function hash8(s: string): string {
   return crypto.createHash("sha256").update(s).digest("hex").slice(0, 8);
 }
 
+/** F11 (PR-C): deterministic slug shared by staging write and post-Tier-1
+ * cleanup. Keyed on the same quote/seed material as buildProvisionalStagingEntry
+ * so a later direct write can remove the older staging twin. */
+export function buildProvisionalStagingSlug(signal: Pick<CorrectionSignal, "user_quote">, seedText: string): string {
+  return `provisional-${hash8(signal.user_quote ?? seedText)}`;
+}
+
 function sanitizeAuditText(text: string | undefined, maxLen: number): string {
   if (!text) return "";
   return text.length <= maxLen ? text : text.slice(0, maxLen) + "...";
@@ -443,7 +450,7 @@ function sanitizeAuditText(text: string | undefined, maxLen: number): string {
  *  tristate gate after a cross-turn mode flip. */
 export function buildProvisionalStagingEntry(signal: CorrectionSignal, seedText: string): StagingEntry {
   return {
-    slug: `provisional-${hash8(signal.user_quote ?? seedText)}`,
+    slug: buildProvisionalStagingSlug(signal, seedText),
     status: "provisional",
     kind: "provisional-correction",
     created: new Date().toISOString(),

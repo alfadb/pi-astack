@@ -26,6 +26,7 @@
     "smoke:rule-footer-realtime": "node scripts/smoke-rule-footer-realtime.mjs",
     "smoke:tier1-directive-defer": "node scripts/smoke-tier1-directive-defer-resolution.mjs",
     "smoke:pr1-adr0028": "node scripts/smoke-pr1-adr0028.mjs",
+    "smoke:pr-c-hygiene": "node scripts/smoke-pr-c-hygiene.mjs",
     "smoke:evolution-ledger": "node scripts/smoke-evolution-ledger.mjs",
     "smoke:entry-telemetry": "node scripts/smoke-entry-telemetry.mjs",
     "smoke:entry-lifecycle-proposals": "node scripts/smoke-entry-lifecycle-proposals.mjs",

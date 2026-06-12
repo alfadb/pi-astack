@@ -71,6 +71,13 @@ function buildDecisionBriefId(): { id: string; anchorMissing: boolean } {
   return { id: `${key}|${next}`, anchorMissing: false };
 }
 
+export function pruneDecisionBriefSeqCountersForSession(sessionId: string): void {
+  const prefix = `${sessionId}|`;
+  for (const key of _briefSeqCounters.keys()) {
+    if (!key.startsWith(prefix)) _briefSeqCounters.delete(key);
+  }
+}
+
 /** Test-only: reset the per-turn seq counter map. Production must not call. */
 export function _resetDecisionBriefSeqForTests(): void {
   _briefSeqCounters.clear();

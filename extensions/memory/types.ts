@@ -35,6 +35,9 @@ export interface MemoryEntry {
   /** Original frontmatter status if it was non-canonical. */
   legacyStatus?: string;
   confidence: number;
+  /** AX-PROVENANCE (ADR 0028 §12): stored ground-truth-strength axis.
+   *  Defaults to assistant-observed for legacy entries lacking frontmatter. */
+  provenance: string;
   title: string;
   summary: string;
   created?: string;

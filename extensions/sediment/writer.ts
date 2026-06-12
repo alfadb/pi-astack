@@ -280,6 +280,10 @@ function buildMarkdown(draft: ProjectEntryDraft, scope: "project" | "world", pro
   const timestamp = nowIso();
   const status = draft.status ?? "provisional";
   const confidence = Math.min(10, Math.max(0, Math.round(draft.confidence ?? 3)));
+  // AX-PROVENANCE (ADR 0028 §12): persist the ground-truth-strength axis for
+  // project/world entries too. Legacy/missing callers default to
+  // assistant-observed; memory/parser.ts mirrors this fallback on read.
+  const provenance = draft.provenance ?? "assistant-observed";
   const slug = slugify(draft.title);
   const compiledTruth = normalizeCompiledTruth(draft.title, draft.compiledTruth);
   const timelineSession = draft.sessionId || "sediment";
@@ -303,6 +307,7 @@ function buildMarkdown(draft: ProjectEntryDraft, scope: "project" | "world", pro
     `kind: ${draft.kind}`,
     `status: ${status}`,
     `confidence: ${confidence}`,
+    `provenance: ${yamlString(provenance)}`,
     "schema_version: 1",
     `title: ${yamlString(draft.title)}`,
     `created: ${timestamp}`,
@@ -347,7 +352,7 @@ function frontmatterOrder(frontmatterText: string): string[] {
 
 function renderFrontmatter(frontmatter: Record<string, Jsonish>, originalOrder: string[]): string {
   const preferred = [
-    "id", "scope", "kind", "status", "confidence", "schema_version",
+    "id", "scope", "kind", "status", "confidence", "provenance", "schema_version",
     "title", "created", "updated",
     // ADR 0025 §4.6: keep archive_at adjacent to the other lifecycle
     // timestamps so a hand-reader can spot the archive epoch at a glance.
