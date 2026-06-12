@@ -1080,6 +1080,9 @@ async function main() {
     assert(llmSearchRes[0].rank_reason === "direct match", "memory_search LLM result should expose stage2 rank_reason");
     const piAiStub = req("@earendil-works/pi-ai");
     assert(JSON.stringify(piAiStub.__calls) === JSON.stringify(["memory-search-stage1", "memory-search-stage2"]), `memory_search should call stage1+stage2, got ${JSON.stringify(piAiStub.__calls)}`);
+    assert(piAiStub.__prompts[0].includes("surface:full_body_v3"), "Stage 1 prompt must advertise full-body v3 candidate surface");
+    assert(piAiStub.__prompts[0].includes("##### compiled_truth") && piAiStub.__prompts[0].includes("Dispatch prompt memory architecture facade."), "Stage 1 prompt must include entry compiled_truth body");
+    assert(piAiStub.__prompts[0].includes("##### timeline") && piAiStub.__prompts[0].includes("2026-05-08 | smoke | captured | ok"), "Stage 1 prompt must include entry timeline");
     // ADR 0015 D3 (2026-05-11 modification): Stage 2 reasoning lowered from
     // "high" to "off" — rerank is reading comprehension + relevance judgment,
     // not a reasoning task. settings.ts default was updated in commit 4b4432f
@@ -1118,6 +1121,8 @@ async function main() {
       String(lastMetric.query).includes("[SECRET:github_token]") && !String(lastMetric.query).includes(searchToken),
       `memory_search metrics query must redact raw token: ${JSON.stringify(lastMetric)}`,
     );
+    assert(lastMetric.stage1_surface === "full_body_v3", `memory_search metrics must record Stage 1 candidate surface for before/after comparison: ${JSON.stringify(lastMetric)}`);
+    assert(typeof lastMetric.verdict === "string", `memory_search metrics must record stage2 verdict: ${JSON.stringify(lastMetric)}`);
 
     const graph = await rebuildGraphIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "graph.json not written");

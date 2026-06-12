@@ -154,6 +154,7 @@ interface PathALedgerRow {
     stage1_ms: number;
     stage2_ms: number;
     total_ms: number;
+    stage1_surface?: string;
     hits_count: number;
     hit_slugs: string[];
   };
@@ -418,6 +419,7 @@ export async function tryInjectRelevantMemoryContext(
       stage1_ms: search.stage1DurationMs,
       stage2_ms: search.stage2DurationMs,
       total_ms: search.totalDurationMs,
+      stage1_surface: search.stage1CandidateSurface,
       hits_count: search.hits.length,
       hit_slugs: search.hits.map((h: { slug: string }) => h.slug),
     };

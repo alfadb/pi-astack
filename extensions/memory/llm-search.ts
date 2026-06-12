@@ -72,7 +72,9 @@ interface ModelLike {
 const STAGE1_TIMEOUT_MS = 120_000;
 const STAGE2_TIMEOUT_MS = 180_000;
 const STAGE_MAX_RETRIES = 1;
+const MAX_STAGE1_ENTRY_CHARS = 12_000;
 const MAX_STAGE2_ENTRY_CHARS = 12_000;
+const STAGE1_CANDIDATE_SURFACE = "full_body_v3";
 
 function parseModelRef(ref: string): { provider: string; id: string } | null {
   const slash = ref.indexOf("/");
@@ -223,11 +225,41 @@ function sortForIndex(a: MemoryEntry, b: MemoryEntry): number {
   return a.slug.localeCompare(b.slug);
 }
 
+function entryForStage1(entry: MemoryEntry): string {
+  const meta: string[] = [
+    `kind: ${entry.kind}`,
+    `status: ${entry.status}`,
+    `confidence: ${entry.confidence}`,
+  ];
+  const date = entryDate(entry);
+  if (date) meta.push(`updated: ${date}`);
+
+  const triggers = relationValues(entry.frontmatter.trigger_phrases)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const related = entry.relatedSlugs.slice(0, 8);
+  const summary = (entry.summary || "").replace(/\s+/g, " ").trim();
+  const pieces = [
+    `#### [[${entry.slug}]] — ${entry.title.replace(/\s+/g, " ").trim()}`,
+    `- ${meta.join(" | ")}`,
+    triggers.length > 0 ? `- trigger: ${JSON.stringify(triggers)}` : undefined,
+    related.length > 0 ? `- related: ${JSON.stringify(related)}` : undefined,
+    summary ? `- summary: ${summary}` : undefined,
+    "",
+    "##### compiled_truth",
+    entry.compiledTruth || "(empty)",
+    "",
+    "##### timeline",
+    entry.timeline.length ? entry.timeline.join("\n") : "(none)",
+  ].filter((x): x is string => x !== undefined).join("\n");
+  return truncateMiddle(pieces, MAX_STAGE1_ENTRY_CHARS);
+}
+
 function buildLlmIndexText(entries: MemoryEntry[]): string {
   const lines: string[] = [
     "# Memory Search Index",
     "",
-    `> Generated in-memory for ADR 0015 LLM stage-1 candidate selection | ${entries.length} entries`,
+    `> Generated in-memory for ADR 0015 LLM stage-1 candidate selection | ${entries.length} entries | surface:${STAGE1_CANDIDATE_SURFACE}`,
     "",
     "## Entries",
     "",
@@ -240,27 +272,7 @@ function buildLlmIndexText(entries: MemoryEntry[]): string {
       currentKind = label;
       lines.push(`### ${label}`, "");
     }
-
-    const meta: string[] = [
-      `kind: ${entry.kind}`,
-      `status: ${entry.status}`,
-      `confidence: ${entry.confidence}`,
-    ];
-    const date = entryDate(entry);
-    if (date) meta.push(`updated: ${date}`);
-
-    const triggers = relationValues(entry.frontmatter.trigger_phrases)
-      .map((t) => t.trim())
-      .filter(Boolean);
-    const related = entry.relatedSlugs.slice(0, 8);
-    const summary = (entry.summary || "").replace(/\s+/g, " ").trim();
-
-    lines.push(`#### [[${entry.slug}]] — ${entry.title.replace(/\s+/g, " ").trim()}`);
-    lines.push(`- ${meta.join(" | ")}`);
-    if (triggers.length > 0) lines.push(`- trigger: ${JSON.stringify(triggers)}`);
-    if (related.length > 0) lines.push(`- related: ${JSON.stringify(related)}`);
-    if (summary) lines.push(`- summary: ${summary}`);
-    lines.push("");
+    lines.push(entryForStage1(entry), "");
   }
 
   return lines.join("\n");
@@ -412,24 +424,25 @@ function parseFinalPicks(rawText: string): FinalPick[] {
 }
 
 function makeStage1Prompt(query: string, indexText: string, limit: number): string {
-  // Index-first ordering for LLM prompt caching (2026-05-11):
-  // the index (~tens of KB) rarely changes, so putting it before the
-  // query lets provider-side caching (DeepSeek context cache, Anthropic
-  // prompt cache) reuse the KV prefix across calls. Only the query
-  // suffix is processed fresh each time. Previously query was before
-  // index → cache never hit.
+  // Surface-first ordering for LLM prompt caching (2026-06-12):
+  // the full-body v3 candidate surface changes only when memory entries
+  // change, so putting it before the query still lets provider-side caching
+  // reuse the KV prefix across calls. F18 intentionally widens the old
+  // frontmatter-only index despite a larger prefix because recall accuracy
+  // is now higher priority than prompt-cache compactness.
   return [
     "You are pi-astack memory search candidate selector.",
     "",
-    "Task: given a user query and a markdown index of all knowledge entries, select entries that are most likely relevant.",
+    "Task: given a user query and a full-body candidate surface of all knowledge entries, select entries that are most likely relevant.",
     "Output JSON only: an array of objects [{\"slug\": string, \"reason\": string}]. No markdown wrapper.",
     "",
     "Hard rules:",
     "- The query is a natural-language retrieval prompt. Prefer the user's full intent over literal token overlap.",
     "- The query may be Chinese, English, or mixed. Match across languages semantically, not just literally (e.g. 沉淀 ≡ sediment, 自动写入 ≡ auto-write).",
-    "- Prefer entries whose title, summary, trigger_phrases, or related slugs match query intent.",
+    "- Read each entry's title, summary, trigger_phrases, related slugs, compiled_truth, and timeline before selecting candidates.",
+    "- Prefer entries whose body evidence (compiled_truth/timeline) matches query intent, even when frontmatter is sparse or generic.",
     "- Prefer recent and high-confidence entries over stale/low-confidence ones, all else equal.",
-    "- Do not invent slugs. Return only slugs present in the index.",
+    "- Do not invent slugs. Return only slugs present in the candidate surface.",
     "",
     "Index:",
     "<<<MEMORY_SEARCH_INDEX",
@@ -624,6 +637,7 @@ export async function llmSearchEntries(
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     results: stage2Picks.length,
     verdict: parsedStage2.verdict,
+    stage1_surface: STAGE1_CANDIDATE_SURFACE,
   };
   logSearchMetrics(entry, projectRoot);
 
@@ -644,6 +658,7 @@ export interface SearchVerdictResult {
   stage1DurationMs: number;
   stage2DurationMs: number;
   totalDurationMs: number;
+  stage1CandidateSurface: string;
   stage2DebugSlice?: string;
 }
 
@@ -658,7 +673,7 @@ export async function llmSearchEntriesWithVerdict(
   const t0 = Date.now();
   const rawQuery = String(params.query ?? "").trim();
   if (!rawQuery) {
-    return { hits: [], relevance_verdict: "none", query: "", stage1DurationMs: 0, stage2DurationMs: 0, totalDurationMs: 0 };
+    return { hits: [], relevance_verdict: "none", query: "", stage1DurationMs: 0, stage2DurationMs: 0, totalDurationMs: 0, stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE };
   }
   const querySanitize = sanitizeForMemory(rawQuery);
   const query = querySanitize.ok ? (querySanitize.text ?? rawQuery) : `[redacted: ${querySanitize.error}]`;
@@ -672,7 +687,7 @@ export async function llmSearchEntriesWithVerdict(
   const candidateLimit = Math.max(finalLimit, Math.floor(settings.search.stage1Limit));
   const corpus = filteredEntries(entries, filters);
   if (corpus.length === 0) {
-    return { hits: [], relevance_verdict: "none", query, stage1DurationMs: 0, stage2DurationMs: 0, totalDurationMs: Date.now() - t0 };
+    return { hits: [], relevance_verdict: "none", query, stage1DurationMs: 0, stage2DurationMs: 0, totalDurationMs: Date.now() - t0, stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE };
   }
   const indexText = buildLlmIndexText(corpus);
   const t1 = Date.now();
@@ -684,14 +699,14 @@ export async function llmSearchEntriesWithVerdict(
   const stage1DurationMs = Date.now() - t1;
   const stage1Picks = parseCandidatePicks(stage1.rawText).slice(0, candidateLimit);
   if (stage1Picks.length === 0) {
-    return { hits: [], relevance_verdict: "none", query, stage1DurationMs, stage2DurationMs: 0, totalDurationMs: Date.now() - t0 };
+    return { hits: [], relevance_verdict: "none", query, stage1DurationMs, stage2DurationMs: 0, totalDurationMs: Date.now() - t0, stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE };
   }
   const entriesBySlug = new Map(corpus.map((entry) => [entry.slug, entry]));
   const candidateEntries = stableUnique(stage1Picks.map((pick) => pick.slug))
     .map((slug) => entriesBySlug.get(slug))
     .filter((entry): entry is MemoryEntry => !!entry);
   if (candidateEntries.length === 0) {
-    return { hits: [], relevance_verdict: "none", query, stage1DurationMs, stage2DurationMs: 0, totalDurationMs: Date.now() - t0 };
+    return { hits: [], relevance_verdict: "none", query, stage1DurationMs, stage2DurationMs: 0, totalDurationMs: Date.now() - t0, stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE };
   }
   const t2 = Date.now();
   const stage2 = await callSearchModel(
@@ -710,6 +725,7 @@ export async function llmSearchEntriesWithVerdict(
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     results: parsedStage2.picks.length,
     verdict: parsedStage2.verdict,
+    stage1_surface: STAGE1_CANDIDATE_SURFACE,
     via: "path-a",
   }, projectRoot);
   const hits = parsedStage2.picks.length === 0
@@ -722,6 +738,7 @@ export async function llmSearchEntriesWithVerdict(
     stage1DurationMs,
     stage2DurationMs,
     totalDurationMs: Date.now() - t0,
+    stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE,
     stage2DebugSlice: (stage2.rawText || "").slice(0, 400),
   };
 }

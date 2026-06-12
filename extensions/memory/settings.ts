@@ -10,9 +10,9 @@ export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhi
 
 export interface SearchSettings {
   // ADR 0015 (memory_search LLM-driven retrieval, Accepted 2026-05-10).
-  // Two-stage rerank: stage 1 selects candidates from enhanced _index.md,
-  // stage 2 reranks full content. Defaults to deepseek family for in-China
-  // latency + reasoning + bilingual quality. Accuracy is a hard contract:
+  // Two-stage rerank: stage 1 selects candidates from full-body v3 candidate
+  // surface, stage 2 reranks selected full content. Defaults to deepseek
+  // family for in-China latency + reasoning + bilingual quality. Accuracy is a hard contract:
   // LLM failures hard-error; there is no grep degradation path.
   // DeepSeek v4 only supports off/high/xhigh; stage 1 must default to off
   // rather than minimal because pi-ai would otherwise clamp minimal to high.

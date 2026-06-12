@@ -246,6 +246,15 @@ check("llmSearchEntriesWithVerdict exported", typeof search.llmSearchEntriesWith
 const llmSearchSource = fs.readFileSync(path.join(repoRoot, "extensions/memory/llm-search.ts"), "utf-8");
 check("resultCard intentionally omits compiledTruth (search tool contract)",
   !/function resultCard[\s\S]*?compiledTruth/.test(llmSearchSource));
+check("Stage 1 candidate selector uses full-body v3 surface (F18)",
+  /STAGE1_CANDIDATE_SURFACE = "full_body_v3"/.test(llmSearchSource) &&
+  /function entryForStage1[\s\S]*?##### compiled_truth[\s\S]*?##### timeline/.test(llmSearchSource) &&
+  /surface:\$\{STAGE1_CANDIDATE_SURFACE\}/.test(llmSearchSource));
+check("Stage 1 prompt instructs reading compiled_truth and timeline (F18)",
+  /compiled_truth, and timeline before selecting candidates/.test(llmSearchSource) &&
+  /body evidence \(compiled_truth\/timeline\)/.test(llmSearchSource));
+check("search metrics record stage1_surface for before\/after comparison (F18)",
+  /stage1_surface: STAGE1_CANDIDATE_SURFACE/.test(llmSearchSource));
 
 // ────────────────────────────────────────────────────────────────
 console.log("\n[6] inject block must hydrate compiledTruth from entries (bug fix lock)");
@@ -271,6 +280,8 @@ check("injector has skipped_hit_hydration_empty failure path (defense in depth)"
   /skipped_hit_hydration_empty/.test(injectorSource));
 check("injector buildInjectBlock no longer reads h.body fallback (post-fix cleanup)",
   !/h\.compiledTruth \?\? h\.body \?\? ""/.test(injectorSource));
+check("path-A ledger search block records stage1_surface (F18 before/after comparison)",
+  /stage1_surface: search\.stage1CandidateSurface/.test(injectorSource));
 
 // ────────────────────────────────────────────────────────────────
 console.log("\n[7] path-a-ledger carries ADR 0027 C6 causal anchor (ADR 0026 §5.1 join)");

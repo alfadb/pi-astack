@@ -61,12 +61,10 @@ memory_search(query: string /* natural-language retrieval prompt */, filters?)
 
 ```
 Stage 0 (本地)：
-  build/read enhanced index（每 entry: slug + title + kind + status +
-  confidence + updated + summary + trigger_phrases，~150 token/entry，
-  全库 ~37k tokens）。Phase 1 实现为从已解析 entries **内存生成**同形态 index，避免物理 `_index.md` 过期；`/memory rebuild --index` 仍生成同形态 `_index.md` 作为人类/LLM 可浏览 artifact。
+  build/read enhanced candidate surface。2026-06-12 v3 walk-back 后，运行时 Stage 1 不再只看 frontmatter/enhanced `_index.md`；`extensions/memory/llm-search.ts` 从已解析 entries 内存生成 `surface:full_body_v3` 候选面，每 entry 包含 slug/title/kind/status/confidence/updated/summary/trigger_phrases/related_slugs/compiled_truth/timeline，并对单 entry 做中间截断上限保护。`/memory rebuild --index` 仍生成 frontmatter 型 `_index.md` 作为人类/LLM 可浏览 artifact，不再代表运行时 Stage 1 的完整输入面。
 
 Stage 1 (粗排，可配模型，默认 deepseek-v4-flash，thinking=off)：
-  输入: query + 全库 _index.md
+  输入: query + 全库 full-body candidate surface（`surface:full_body_v3`）
   输出: top-K 候选 slug + 简短理由（K 默认 50）
   目标: 高召回率。只要有候选，必须进入 Stage 2；不因候选数少而跳过精排。Stage 1 是 broad recall/classification，不开推理；DeepSeek v4 的 minimal/low/medium unsupported，会被 pi-ai clamp 到 high，因此默认必须是 off。
 
@@ -122,9 +120,9 @@ graceful degradation 原则（memory-architecture.md §3 第 8 条）**显式让
 
 ### D6. 不做 result-level 缓存
 
-同 5 分钟内重复 query **不复用前次的最终 stage 2 返回结果**（slug 列表 + score）。理由：sediment 高频写入，result cache 反而误导（刚写入的 entry 不在 cache 里，但它应该被召回）。每次重读 `_index.md`（~30k token I/O，ms 级）。
+同 5 分钟内重复 query **不复用前次的最终 stage 2 返回结果**（slug 列表 + score）。理由：sediment 高频写入，result cache 反而误导（刚写入的 entry 不在 cache 里，但它应该被召回）。运行时每次从已解析 entries 生成新的 `surface:full_body_v3` 候选面，因此刚写入的 entry 会立即进入 Stage 1 输入面。
 
-本决策仅关 result-level cache。provider-side prompt KV cache 是另一层，在 [D9](#d9-provider-side-prefix-kv-cache-主动优化) 中主动优化（不矛盾：同一份 `_index.md` 作为 prefix 可被 provider KV 复用，不影响“刚写入的 entry 被召回”语义）。
+本决策仅关 result-level cache。provider-side prompt KV cache 是另一层，在 [D9](#d9-provider-side-prefix-kv-cache-主动优化) 中主动优化（不矛盾：同一份候选面 token prefix 可被 provider KV 复用，不影响“刚写入的 entry 被召回”语义；候选面变化时 cache 自然失效）。
 
 ### D8. 新鲜度与时间精度
 
@@ -138,7 +136,7 @@ sediment 新写入的 `created` / `updated` / timeline 时间戳改为本地 ISO
 
 - ✅ **中英混合检索**：LLM 双语原生理解，"沉淀" ≡ "sediment"
 - ✅ **同义改述召回**：跨 entry 推理识别"实质同一洞察"（彻底解决 D6 自重复——见 D7）
-- ✅ **trigger_phrases / timeline 自动入参**：enhanced `_index.md` + stage 2 完整 entry 都包含；结果 card 返回 `rank_reason` + `timeline_tail` + `created/updated` 新鲜度信号
+- ✅ **trigger_phrases / timeline 自动入参**：Stage 1 `surface:full_body_v3` 与 Stage 2 完整 entry 都包含；结果 card 返回 `rank_reason` + `timeline_tail` + `created/updated` 新鲜度信号
 - ✅ **接口不变**：所有 memory_search caller 零改动
 - ✅ **可配置 + 默认合理**：默认 ds 家族符合 alfadb 主用场景；任何环境可切异构
 
@@ -146,6 +144,7 @@ sediment 新写入的 `created` / `updated` / timeline 时间戳改为本地 ISO
 
 - 🟡 **延迟 +15-20s/call**：alfadb 明示"不考虑"；Stage 2 不跳过
 - 🟡 **成本 ~$0.045/call**：alfadb 明示"不考虑"；1000 次 ≈ $45
+- 🟡 **Stage 1 prompt 体积显著增加**：F18 后每 entry 最多带 12k chars 正文/timeline，召回准确性优先于旧 prompt-cache 紧凑性；若 `stage1_surface` token 体积导致模型 context/timeout hard-error，再以 search-metrics/path-a-ledger 数据决定是否加总量预算或分片。
 - 🟡 **graceful degradation 不变量打破**：LLM 不可用时 hard error，不提供 grep 降级
 - 🟡 **单 family 失败**：deepseek 挂同时影响 sediment extractor + search；可通过 settings 异构化规避
 
@@ -155,24 +154,24 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 c
 
 ### D9. provider-side prefix KV cache 主动优化
 
-**决策**：Stage 1 / Stage 2 prompt 采用 **instructions-first / index-first ordering**，主动让支持 prefix-level KV cache 的 provider（Anthropic / OpenAI / DeepSeek 都支持不同程度）复用上一次 call 的前缀 tokens。
+**决策**：Stage 1 / Stage 2 prompt 采用 **instructions-first / index-first ordering**，主动让支持 prefix-level KV cache 的 provider（Anthropic / OpenAI / DeepSeek 都支持不同程度）复用上一次 call 的前缀 tokens。**2026-06-12 walk-back**：F18/ADR 0026 §3.0.3 候选 C 已落地，Stage 1 从 frontmatter 型 index 升级为 `surface:full_body_v3`，prefix 体积显著增大且 cache 命中收益可能下降；这是对旧“Stage 1 只看 `_index.md` 以优化 prompt cache”的显式撤回。当前优先级是召回准确性，cost/cache 不再是 P0 约束。
 
 **实现位置**：
-- Stage 1：`extensions/memory/llm-search.ts` `makeStage1Prompt`——instructions 块及 `_index.md` 放在 query 之前。
-- Stage 2：`extensions/memory/llm-search.ts` `makeStage2Prompt:389-418`——instructions 块（约 1K tokens）固定列首，candidates 和 query 可变但 prefix 仍可被缓存。Stage 1 对应 `makeStage1Prompt:322`。
+- Stage 1：`extensions/memory/llm-search.ts` `makeStage1Prompt`——instructions 块及 `surface:full_body_v3` candidate surface 放在 query 之前。
+- Stage 2：`extensions/memory/llm-search.ts` `makeStage2Prompt`——instructions 块固定列首，candidates 和 query 可变但 prefix 仍可被缓存。
 
 **与 D6 的关系**：
 - D6 关的是 **result cache**（“5 分钟内同 query 复用上次返回的 slug 列表”）——锁闭，避免 sediment 刚写入的条目不被召回。
 - D9 开的是 **prompt KV cache**（“provider 看到相同 prefix tokens 复用 attention KV”）——主动优化，减少 input token 计费与延迟。
-- 两者不矛盾：provider KV cache 复用的是 “token 序列的计算结果”而不是 “LLM 输出的 slug”；sediment 刚写入的 entry 会出现在新的 `_index.md` 里，LLM 还是会看到它并被召回。
+- 两者不矛盾：provider KV cache 复用的是 “token 序列的计算结果”而不是 “LLM 输出的 slug”；sediment 刚写入的 entry 会出现在新的 `surface:full_body_v3` 候选面里，LLM 还是会看到它并被召回。
 
 **可观测性**：cache hit/write tokens 被记到 D10 描述的 `search-metrics.jsonl`（`s1.hit / s1.write / s2.hit / s2.write`），供 alfadb 调优 stage1/2 model 选型时作依据。
 
 ### D10. search-metrics.jsonl 可观测性
 
-**决策**：每次 `memory_search` 调用追加一行 JSON 到 `<project>/.pi-astack/memory/search-metrics.jsonl`（`extensions/memory/llm-search.ts` `logSearchMetrics:9-18` + `extensions/_shared/runtime.ts` `memorySearchMetricsPath:80-82`）。
+**决策**：每次 `memory_search` 调用追加一行 JSON 到 `<project>/.pi-astack/memory/search-metrics.jsonl`（`extensions/memory/llm-search.ts` `logSearchMetrics` + `extensions/_shared/runtime.ts` `memorySearchMetricsPath`）。
 
-**状态**：experimental。schema 未冻结，以 `llm-search.ts` `logSearchMetrics` 实际写入字段为准。当前实现（`llm-search.ts:515-521`）：
+**状态**：experimental。schema 未冻结，以 `llm-search.ts` `logSearchMetrics` 实际写入字段为准。当前实现：
 
 ```jsonl
 {
@@ -180,7 +179,10 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 c
   "query":   "找关于 XXX 的 durable rule",     // 前 80 字符
   "s1":      { "in": <n>, "out": <n>, "hit"?: <n>, "write"?: <n> } | null,
   "s2":      { "in": <n>, "out": <n>, "hit"?: <n>, "write"?: <n> } | null,
-  "results": <n>                              // 最终返回 slug 数
+  "results": <n>,                             // 最终返回 slug 数
+  "verdict": "has_relevant" | "none" | "unknown",
+  "stage1_surface": "full_body_v3",
+  "via"?:    "path-a"
 }
 ```
 

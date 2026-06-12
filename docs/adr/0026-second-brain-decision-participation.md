@@ -120,7 +120,7 @@ user turn + recent history
 #### 3.0.3 v3 路线图（3-T0 evaluation 2026-05-28 共识）
 
 **P0（近期）**
-- **候选 C**: stage 1 LLM 看 full body (不只 frontmatter)——直接消除"stage 1 frontmatter-only"受制因素。需要 ADR 0015 二阶段 rerank prompt cache 妄协 walkback (cost 不再是约束)。
+- ~~**候选 C**: stage 1 LLM 看 full body (不只 frontmatter)——直接消除"stage 1 frontmatter-only"受制因素。需要 ADR 0015 二阶段 rerank prompt cache 妄协 walkback (cost 不再是约束)。~~ → **✅ DONE (2026-06-12, PR-E)**：`extensions/memory/llm-search.ts` 运行时 Stage 1 已改为 `surface:full_body_v3`，候选面包含 `compiled_truth` + `timeline`，并在 `search-metrics.jsonl` / `path-a-ledger.jsonl` 记录 `stage1_surface` 供前后对照。
 - ~~**rewriter prompt 去旧成本偏置**: query-rewriter-v2.md 仍包含 "over-extraction is success" / "wasting stage-2 cost worse" 这类 v1 时代的 cost-saving framing，跟用户 directive "不计成本" 直接冒冲。~~ → **✅ DONE (verified 2026-05-30)**：活跃加载的 query-rewriter-v2.md（`extensions/memory/query-rewriter.ts:68`）现写 "cost is NOT a criterion" / "Do NOT return useful=false to 'save' downstream stage-2 cost" / "retrieval cost is not a constraint"（`prompts/query-rewriter-v2.md:134-140`），与用户 directive 一致；旧 framing 仅残留在**未加载**的 v1（`query-rewriter-v1.md:65`）。本 P0 项可移出待办。
 
 **P1（中期）**
