@@ -139,6 +139,12 @@ export interface CorrectionPipelineResult {
   model: string;
   signal: CorrectionSignal | null;
   error?: string;
+  /** F1 (2026-06-12 audit fix plan PR-A1): classifier returned text that did
+   *  not parse as a CorrectionSignal JSON — a TRANSIENT failure class distinct
+   *  from "no signal". Carried into the correction_classifier audit row as
+   *  `parse_error: true` so a prompt/parse regression is observable instead of
+   *  silently zeroing recall (ADR 0028 B3-class silent loss). */
+  parseError?: boolean;
   durationMs: number;
   /** Whether a staging provisional was written */
   stagingWritten: boolean;
@@ -586,7 +592,21 @@ export async function runCorrectionPipeline(
   // 5. Parse signal + stamp AX-PROVENANCE deterministically from the packed
   // window's turn.role (R2' structural source gate; no LLM judgment).
   const signal = parseCorrectionSignal(rawText);
-  if (signal) {
+  if (!signal) {
+    // F1 (PR-A1): unparseable output is ok:false, NOT a no-signal success.
+    // The classifier prompt mandates strict JSON even for no-correction
+    // windows ({"signal_found": false, ...}), so a null parse is a genuine
+    // failure. ok:false routes every lane to its existing transient-failure
+    // handling (short lane: checkpoint HOLD + *_classifier_failed_or_
+    // unparseable reason; main lane: extractor still runs and the R3' recall
+    // audit keys on the raw transcript).
+    return {
+      ok: false, model: modelRef, signal: null, parseError: true,
+      error: `classifier_output_unparseable (raw_chars=${rawText.length})`,
+      durationMs: Date.now() - start, stagingWritten: false,
+    };
+  }
+  {
     const pv = deriveProvenance(packed, signal.user_quote);
     signal.quote_source = pv.quote_source;
     signal.provenance = pv.provenance;

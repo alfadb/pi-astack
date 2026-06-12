@@ -891,6 +891,88 @@ await check("S22: tier1 checkpoint advance — captured/terminal advance, transi
   assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "git_commit_failed")) === false, "transient reject must HOLD the checkpoint");
 });
 
+await check("S23: F2 — deterministic Tier-1 rejects are terminal (advance), transients HOLD", async () => {
+  // 2026-06-12 audit fix plan PR-A1 F2: duplicate_slug / lint_error /
+  // kind_invalid reproduce identically every retry — HOLDing them burned one
+  // classifier call per turn until the window scrolled (silent loss with only
+  // the recall flag as trace). Terminal set now aligned with
+  // shouldAdvanceAfterResults.
+  const { _shouldAdvanceAfterAutoOutcomeForTests } = sedimentIndex;
+  const mk = (status, reason) => ({ kind: "tier1_direct", draft: {}, result: { status, ...(reason ? { reason } : {}) }, writeStart: 0 });
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "duplicate_slug")) === true, "duplicate_slug must be terminal (advance)");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "duplicate_slug_race")) === true, "duplicate_slug_race must be terminal (advance)");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "lint_error")) === true, "lint_error must be terminal (advance)");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "kind_invalid: not-a-kind")) === true, "kind_invalid must be terminal (advance)");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "status_precondition_failed")) === true, "CAS precondition failure must be terminal (advance)");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "git_commit_failed")) === false, "git_commit_failed stays transient (HOLD)");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests(mk("rejected", "lock_timeout")) === false, "unknown/lock reasons stay transient (HOLD)");
+});
+
+await check("S24: F1 — unparseable classifier output is ok:false + parse_error, not a silent no-signal", async () => {
+  const correctionPipeline = await jiti.import(`${repoRoot}/extensions/sediment/correction-pipeline.ts`);
+  const { runCorrectionPipeline } = correctionPipeline;
+  const fx = freshFixture("pr1-s24");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const mockRegistry = {
+    find: (provider, id) => ({ provider, id }),
+    getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "smoke-key" }),
+  };
+  // Garbage (non-JSON) classifier output — the prompt mandates strict JSON
+  // even for no-correction windows, so this is a genuine parse failure.
+  resetPiAiStub(["TOTALLY NOT JSON — the model rambled instead of emitting the schema."]);
+  const garbage = await runCorrectionPipeline(
+    [makeUserEntry("u1", "以后所有仓库都用 gh 管理。")],
+    [],
+    { settings: { ...baseSettings, classifierModel: "mock/classifier" }, modelRegistry: mockRegistry },
+  );
+  assert(garbage.ok === false, `parse failure must be ok:false, got ${JSON.stringify(garbage)}`);
+  assert(garbage.parseError === true, `parse failure must set parseError, got ${JSON.stringify(garbage)}`);
+  assert(String(garbage.error || "").includes("classifier_output_unparseable"), `error must name the failure class, got ${garbage.error}`);
+  assert(garbage.signal === null && garbage.stagingWritten === false, "parse failure must not fabricate a signal or stage");
+  // Control: a valid no-signal JSON stays ok:true WITHOUT parseError.
+  resetPiAiStub(['```json\n{"signal_found": false, "reasoning": "no correction in window"}\n```']);
+  const noSignal = await runCorrectionPipeline(
+    [makeUserEntry("u1", "帮我看看这个函数。")],
+    [],
+    { settings: { ...baseSettings, classifierModel: "mock/classifier" }, modelRegistry: mockRegistry },
+  );
+  assert(noSignal.ok === true && noSignal.parseError === undefined, `valid no-signal must stay ok:true without parseError, got ${JSON.stringify(noSignal)}`);
+  assert(noSignal.signal?.signal_found === false, "valid no-signal must carry the parsed signal");
+});
+
+await check("S25: F3/F4 — recall-audit lane coverage + drain tell call sites are pinned in source", async () => {
+  // Static source pin (ADR 0025 §6.1 Tier-1 mechanical assertion): the F3/F4
+  // fixes are call-site additions inside the agent_end closure — not reachable
+  // from a cheap unit harness — so pin their presence structurally. If a
+  // refactor legitimately moves them, update the expected counts here.
+  const src = fs.readFileSync(path.join(repoRoot, "extensions", "sediment", "index.ts"), "utf-8");
+  const recallCalls = (src.match(/await auditDirectiveRecall\(\{/g) || []).length;
+  // 5 lanes: main bg + short escalation + short no-signal advance (F3a) +
+  // drain + explicit/about_me combined (F3b/c).
+  assert(recallCalls === 5, `expected 5 auditDirectiveRecall call sites (main/short-esc/short-no-signal/drain/explicit+about_me), got ${recallCalls}`);
+  // Count call sites (total occurrences minus the function definition); the
+  // main-bg site spreads the call across lines so a `notify(formatRuleTell(`
+  // joint regex would undercount.
+  const tellCalls = (src.match(/formatRuleTell\(/g) || []).length - 1;
+  // 4 tell surfaces: contested demote + short lane + main bg lane + drain (F4).
+  assert(tellCalls === 4, `expected 4 formatRuleTell call sites (contested/short/main/drain), got ${tellCalls}`);
+});
+
+await check("S26: F1 convergence — staging-only + classifier parse failure HOLDs the main-lane checkpoint", async () => {
+  // 3×T0 R1 gpt-5.5 BLOCKING fix: in staging-only mode an ineligible lane +
+  // parse failure means NOTHING ran over the window (no extractor / no Tier-1
+  // / no staging) — advancing would permanently skip it on a transient fault.
+  const { _holdForStagingOnlyParseFailureForTests } = sedimentIndex;
+  const ineligible = { kind: "ineligible", eligibility: { eligible: false, reason: "auto_write_staging_only_mode" } };
+  const parseFail = { ok: false, signal: null, parseError: true };
+  const stagingOnly = { ...baseSettings, autoLlmWriteEnabled: "staging-only" };
+  assert(_holdForStagingOnlyParseFailureForTests(ineligible, parseFail, stagingOnly) === true, "staging-only + parse failure + ineligible must HOLD");
+  assert(_holdForStagingOnlyParseFailureForTests(ineligible, parseFail, baseSettings) === false, "true mode must not hold (extractor + recall net applies)");
+  assert(_holdForStagingOnlyParseFailureForTests(ineligible, { ok: true, signal: { signal_found: false } }, stagingOnly) === false, "clean no-signal must not hold");
+  assert(_holdForStagingOnlyParseFailureForTests(ineligible, null, stagingOnly) === false, "absent classifier result must not hold");
+  assert(_holdForStagingOnlyParseFailureForTests({ kind: "wrote", results: [] }, parseFail, stagingOnly) === false, "non-ineligible outcomes keep their own advance semantics");
+});
+
 if (failures.length) {
   console.log(`\nFAIL — ${failures.length} of ${total} assertions failed.`);
   process.exit(1);

@@ -534,7 +534,24 @@ function hasPositiveWriteCapture(results: Array<WriteProjectEntryResult | WriteR
  *  (coveredTexts only include CAPTURED Tier-1 writes). Transient failures
  *  (e.g. git_commit_failed) stay non-terminal → checkpoint HOLD + retry. */
 function isTerminalTier1Reject(result: WriteRuleResult): boolean {
-  return result.status === "rejected" && typeof result.reason === "string" && result.reason.startsWith("validation_error");
+  if (result.status !== "rejected" || typeof result.reason !== "string") return false;
+  // F2 (2026-06-12 audit fix plan PR-A1): terminal set aligned with
+  // shouldAdvanceAfterResults' terminal reasons PLUS the rule-writer-specific
+  // deterministic rejects (kind_invalid / duplicate_slug_race / entry_not_found
+  // — different writers, different reason vocabularies; 3×T0 R1 Nit-A). The
+  // previous validation_error-only match left
+  // duplicate_slug / lint_error / kind_invalid rejects HOLDing the checkpoint,
+  // burning one classifier call per turn until the window scrolled past
+  // (deterministic rejects reproduce identically on every retry). Transient
+  // reasons (git_commit_failed / lock timeouts) stay non-terminal → HOLD+retry.
+  return result.reason.startsWith("validation_error")
+    || result.reason.startsWith("kind_invalid")
+    || result.reason === "lint_error"
+    || result.reason === "duplicate_slug"
+    || result.reason === "duplicate_slug_race"
+    || result.reason === "entry_not_found"
+    || result.reason === "status_precondition_failed"
+    || result.reason.startsWith("credential pattern detected");
 }
 
 interface DirectiveRecallCandidate {
@@ -929,6 +946,26 @@ function shouldAdvanceAfterAutoOutcome(auto: AutoWriteLaneOutcome): boolean {
   if (auto.kind === "wrote") return shouldAdvanceAfterResults(auto.results);
   return auto.kind !== "llm_error";
 }
+
+/** F1 convergence (PR-A1 3×T0 review 2026-06-12, gpt-5.5 BLOCKING): in
+ *  "staging-only" mode a classifier parse failure leaves NOTHING running over
+ *  the window — the lane returns `ineligible` (no extractor, no Tier-1
+ *  writer) and a null signal means no staging either, so advancing would
+ *  permanently skip a possibly directive-bearing window on a TRANSIENT
+ *  failure with only the recall flag as a trace. HOLD instead: the classifier
+ *  re-runs next turn, bounded by window growth/scroll (same exit as the short
+ *  lane's unparseable HOLD). In `true` mode the extractor still processes the
+ *  window, so the established extractor + R3' recall net applies — no hold. */
+function holdForStagingOnlyParseFailure(
+  auto: AutoWriteLaneOutcome,
+  classifierResult: { parseError?: boolean } | null | undefined,
+  settings: SedimentSettings,
+): boolean {
+  return settings.autoLlmWriteEnabled === "staging-only"
+    && classifierResult?.parseError === true
+    && auto.kind === "ineligible";
+}
+export const _holdForStagingOnlyParseFailureForTests = holdForStagingOnlyParseFailure;
 
 /**
  * Lane G analogue of `shouldAdvanceAfterResults` (ADR 0021 G2, 2026-05-20).
@@ -2327,6 +2364,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             duration_ms: cr.durationMs,
             staging_written: cr.stagingWritten,
             prompt_version: buildPromptVersionAudit("activeCorrectionClassifier", settings),
+            // F1 (PR-A1): surface parse failures as their own audit dimension so
+            // the aggregator / recall analysis can distinguish "classifier said
+            // no-signal" from "classifier output was garbage".
+            ...(cr.parseError ? { parse_error: true } : {}),
             ...(cr.error ? { error: cr.error } : {}),
             ...(cr.stagingAdvisory ? { staging_advisory: cr.stagingAdvisory } : {}),
             ...(cr.stagingSuppressedReason ? { staging_suppressed_reason: cr.stagingSuppressedReason } : {}),
@@ -2593,6 +2634,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           auto.result.status === "rejected" ? "failed" : "completed",
                           compact,
                         );
+                        // F4 (2026-06-12 audit fix plan PR-A1): R3' mandates the
+                        // tell surface on EVERY Tier-1 commit. The drain lane
+                        // consumes working-set directives from earlier turns —
+                        // exactly where the user least expects a rule write —
+                        // yet was the only tier1_direct site without the notify
+                        // (audit + a transient footer line do not constitute a
+                        // recognizable 📌 tell).
+                        if (notify) { try { notify(formatRuleTell(auto.result, { lowConfidence: isLowConfidenceDirective(auto.signal) }), "info"); } catch {} }
                       } else if (auto.kind === "wrote") {
                         const pendingDeferred = deferredStopBySession.get(sessionId);
                         await appendAudit(cwd, {
@@ -2860,6 +2909,15 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 await saveSessionCheckpoint(cwd, sessionId, {
                   lastProcessedEntryId: effectiveWindow.lastEntryId,
                 });
+                // F3a (PR-A1): the no-signal advance is the one short-lane exit
+                // that permanently skips the window. R3' demands the transcript-
+                // keyed recall scan run before it scrolls away — a classifier
+                // false-negative here was previously invisible (held/failed
+                // paths retry next turn and need no scan).
+                await auditDirectiveRecall({
+                  cwd, sessionId, window: effectiveWindow, lane: "auto_write",
+                  correlationId: shortCorrelationId, coveredTexts: [],
+                }).catch(() => {});
               }
               const pendingDeferred = deferredStopBySession.get(sessionId);
               await appendAudit(cwd, {
@@ -2962,6 +3020,12 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         bgPromise = (async () => {
           let checkpointAdvanced = false;
           try {
+            // Await the fire-and-forget classifier promise (started before lane
+            // branching) at lane scope — both the correctionSignal dispatch and
+            // the F1 staging-only HOLD predicate consume it.
+            const classifierResultMain = correctionPromise
+              ? await correctionPromise.catch(() => null)
+              : null;
             const auto = await tryAutoWriteLane({
               cwd,
               sessionId,
@@ -2982,18 +3046,19 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               // doesn't leak into the current curator's prompt. The decision goes
               // to audit so the aggregator can attribute future false-positive rates
               // to the right dispatch bucket.
-              correctionSignal: await (async () => {
-                const classifierResult = correctionPromise
-                  ? await correctionPromise.catch(() => null)
-                  : null;
-                const forwarded = recordCorrectionDispatch("auto_write", autoCorrelationId, classifierResult, true);
+              // F1 convergence (3×T0 R1): classifier outcome lifted to lane
+              // scope (classifierResultMain, awaited above) so the staging-only
+              // parse-failure HOLD below can see it.
+              correctionSignal: (() => {
+                const forwarded = recordCorrectionDispatch("auto_write", autoCorrelationId, classifierResultMain, true);
                 if (forwarded) return forwarded;
                 const stored = takeSessionCorrectionForCurator(sessionId);
                 return stored ? recordConsumedSessionCorrection("auto_write", autoCorrelationId, stored) : null;
               })(),
             });
             const tAutoEnd = Date.now();
-            checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto);
+            checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto)
+              && !holdForStagingOnlyParseFailure(auto, classifierResultMain, settings);
             if (checkpointAdvanced && effectiveWindow.lastEntryId) {
               await saveSessionCheckpoint(cwd, sessionId, {
                 lastProcessedEntryId: effectiveWindow.lastEntryId,
@@ -3405,6 +3470,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       //     needs and does not throw. This is exactly the P0-1 audit-fix
       //     surface that smoke pre-registered for G2 wire-up.
       const aboutMeResults: WriteAboutMeResult[] = [];
+      // F3b/c convergence (3×T0 R1, opus Nit-C): covered bodies are collected
+      // AT WRITE TIME — aboutMeResults is NOT index-aligned with aboutMeDrafts
+      // (invalid-region fences `continue` without pushing a result), so the
+      // recall-covered set must never be reconstructed by index after the fact.
+      const aboutMeCoveredBodies: string[] = [];
       let tAboutMeStart = 0;
       let tAboutMeEnd = 0;
       let aboutMeCorrelationId: string | undefined;
@@ -3464,14 +3534,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             correlationId: aboutMeCorrelationId,
             candidateId: candidateIdFor(aboutMeCorrelationId, candidateIndex++),
           };
-          aboutMeResults.push(
-            await writeAbrainAboutMe(draftDoc, {
-              abrainHome,
-              settings,
-              dryRun: false,
-              auditContext,
-            }),
-          );
+          const aboutMeWriteResult = await writeAbrainAboutMe(draftDoc, {
+            abrainHome,
+            settings,
+            dryRun: false,
+            auditContext,
+          });
+          aboutMeResults.push(aboutMeWriteResult);
+          if (aboutMeWriteResult.status === "created") {
+            aboutMeCoveredBodies.push(draftDoc.body || draftDoc.title);
+          }
         }
         tAboutMeEnd = Date.now();
         laneGShouldAdvance = shouldAdvanceAfterAboutMeResults(aboutMeResults);
@@ -3501,6 +3573,29 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         await saveSessionCheckpoint(cwd, sessionId, {
           lastProcessedEntryId: effectiveWindow.lastEntryId,
         });
+      }
+
+      // F3b/c (2026-06-12 audit fix plan PR-A1): explicit/about_me windows may
+      // carry user imperatives unrelated to the fences. R3' keys the recall
+      // audit on the raw transcript across ALL lanes — these two synchronous
+      // lanes previously never ran the scan (auditDirectiveRecall's lane type
+      // supported them but had zero call sites). Captured fence writes cover
+      // their own originating text (origin-of-rule, not a recall gap).
+      {
+        const recallCovered: string[] = [];
+        for (const [i, d] of drafts.entries()) {
+          const r = results[i];
+          if (r && (r.status === "created" || r.status === "updated" || r.status === "merged")) {
+            recallCovered.push(d.compiledTruth || d.title);
+          }
+        }
+        recallCovered.push(...aboutMeCoveredBodies);
+        await auditDirectiveRecall({
+          cwd, sessionId, window: effectiveWindow,
+          lane: drafts.length > 0 ? "explicit" : "about_me",
+          ...(explicitCorrelationId ?? aboutMeCorrelationId ? { correlationId: (explicitCorrelationId ?? aboutMeCorrelationId)! } : {}),
+          coveredTexts: recallCovered,
+        }).catch(() => {});
       }
 
       // ── Lane A audit row ────────────────────────────────────────
