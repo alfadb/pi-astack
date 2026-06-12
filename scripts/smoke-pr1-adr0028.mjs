@@ -1128,6 +1128,48 @@ await check("S30: PR-A3 — staging capture net extends to targeted Tier-1 in no
   assert(stagedWithTarget, "staged targeted directive must preserve target_entry_slug (NIT-1 attribution fidelity)");
 });
 
+await check("S31: PR-B1 — empty-reviewer advisory predicate + Jaccard shadow flip-readiness watchdog", async () => {
+  const { shouldWarnUnconfiguredReviewers } = sedimentIndex;
+  // Advisory predicate: live pipeline + empty reviewers → warn once.
+  assert(shouldWarnUnconfiguredReviewers({ ...baseSettings, autoLlmWriteEnabled: true, multiView: { ...baseSettings.multiView, reviewerProviders: [] } }) === true, "live + empty reviewers must warn");
+  assert(shouldWarnUnconfiguredReviewers({ ...baseSettings, autoLlmWriteEnabled: true, multiView: { ...baseSettings.multiView, reviewerProviders: ["a/x"] } }) === false, "configured reviewers must not warn");
+  assert(shouldWarnUnconfiguredReviewers({ ...baseSettings, autoLlmWriteEnabled: "staging-only", multiView: { ...baseSettings.multiView, reviewerProviders: [] } }) === false, "staging-only mode must not warn (pipeline not live)");
+  // Watchdog flip-readiness: feed tier1_jaccard_shadow rows into audit and scan.
+  const aggregator = await jiti.import(`${repoRoot}/extensions/sediment/aggregator.ts`);
+  const fx = freshFixture("pr1-s31");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const auditPath = sedimentAuditPath(fx.root);
+  fs.mkdirSync(path.dirname(auditPath), { recursive: true });
+  const ts = new Date().toISOString();
+  const oldTs = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const rows = [];
+  for (let i = 0; i < 49; i++) rows.push(JSON.stringify({ timestamp: ts, operation: "tier1_jaccard_shadow", shadow_ok: true, would_decision: "update" }));
+  rows.push(JSON.stringify({ timestamp: ts, operation: "tier1_jaccard_shadow", shadow_ok: true, would_decision: "create" }));
+  // 盲审收敛 (opus BUG-2 / gpt BLOCKING): error 行不得稀释份额或灌满样本门。
+  for (let i = 0; i < 60; i++) rows.push(JSON.stringify({ timestamp: ts, operation: "tier1_jaccard_shadow", shadow_ok: false, shadow_error: "adjudicator_failed" }));
+  // gpt #5: 窗口外旧行不计入证据。
+  for (let i = 0; i < 30; i++) rows.push(JSON.stringify({ timestamp: oldTs, operation: "tier1_jaccard_shadow", shadow_ok: true, would_decision: "create" }));
+  fs.writeFileSync(auditPath, rows.join("\n") + "\n", "utf-8");
+  const cutoffMs = Date.now() - 30 * 24 * 60 * 60 * 1000; // 生产同款 30 天窗口
+  const signals = aggregator._scanP15WatchdogSignalsForTests
+    ? aggregator._scanP15WatchdogSignalsForTests(fx.root, cutoffMs, 5000, new Date())
+    : null;
+  assert(signals, "watchdog scan test export must exist");
+  const shadow = signals.tier1_jaccard_shadow;
+  assert(shadow.total === 110, `expected 110 in-window shadow rows (50 adjudicated + 60 error; 30 old excluded), got ${shadow.total}`);
+  assert(shadow.adjudicated_total === 50, `adjudicated_total must exclude error + out-of-window rows, got ${shadow.adjudicated_total}`);
+  assert(shadow.shadow_error_count === 60, `shadow_error_count wrong: ${shadow.shadow_error_count}`);
+  assert(shadow.would_decision_breakdown.create === 1 && shadow.would_decision_breakdown.update === 49, `breakdown wrong: ${JSON.stringify(shadow.would_decision_breakdown)}`);
+  // 1/50 = 2% false-merge ≤ 5% ∧ adjudicated ≥ 50 → flip ready；60 条 error
+  // 行既不稀释份额也不计入样本门。
+  assert(shadow.false_merge_share === 0.02, `share must be computed over adjudicated rows only: ${shadow.false_merge_share}`);
+  assert(shadow.flip_ready === true, `flip_ready expected at 50 adjudicated / 2% create: ${JSON.stringify(shadow)}`);
+  // 反例：只有 error 行时绝不 flip_ready（旧算法给 share=0 且 ready=true）。
+  fs.writeFileSync(auditPath, Array.from({ length: 60 }, () => JSON.stringify({ timestamp: ts, operation: "tier1_jaccard_shadow", shadow_ok: false, shadow_error: "x" })).join("\n") + "\n", "utf-8");
+  const errOnly = aggregator._scanP15WatchdogSignalsForTests(fx.root, cutoffMs, 5000, new Date()).tier1_jaccard_shadow;
+  assert(errOnly.adjudicated_total === 0 && errOnly.flip_ready === false, `error-only window must never be flip_ready: ${JSON.stringify(errOnly)}`);
+});
+
 if (failures.length) {
   console.log(`\nFAIL — ${failures.length} of ${total} assertions failed.`);
   process.exit(1);

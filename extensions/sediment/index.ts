@@ -533,6 +533,28 @@ function hasPositiveWriteCapture(results: Array<WriteProjectEntryResult | WriteR
  *  the R3' recall audit flags the uncovered directive in the same turn
  *  (coveredTexts only include CAPTURED Tier-1 writes). Transient failures
  *  (e.g. git_commit_failed) stay non-terminal → checkpoint HOLD + retry. */
+/** PR-B1: empty-reviewer degradation predicate — exported for smoke.
+ *  True ⇔ the probabilistic pipeline is live (autoLlmWriteEnabled === true)
+ *  but no cross-provider reviewer is configured, so every multi-view-gated
+ *  high-value op silently degrades to reviewer_unavailable→staging/replay. */
+export function shouldWarnUnconfiguredReviewers(settings: SedimentSettings): boolean {
+  return settings.autoLlmWriteEnabled === true
+    && (settings.multiView?.reviewerProviders?.length ?? 0) === 0;
+}
+// Process-wide once-flag via globalThis Symbol — the sediment module can be
+// loaded by multiple jiti copies (main + sub-agent loader); a module-level
+// `let` would double-notify (gpt R1, heartbeat 先例 extensions/_shared/heartbeat.ts).
+const REVIEWER_ADVISORY_FLAG = Symbol.for("pi-astack.sediment.reviewerAdvisoryShown");
+function reviewerAdvisoryAlreadyShown(): boolean {
+  return (globalThis as Record<symbol, unknown>)[REVIEWER_ADVISORY_FLAG] === true;
+}
+function markReviewerAdvisoryShown(): void {
+  (globalThis as Record<symbol, unknown>)[REVIEWER_ADVISORY_FLAG] = true;
+}
+export function _resetReviewerAdvisoryForTests(): void {
+  delete (globalThis as Record<symbol, unknown>)[REVIEWER_ADVISORY_FLAG];
+}
+
 function isTerminalTier1Reject(result: WriteRuleResult): boolean {
   if (result.status !== "rejected" || typeof result.reason !== "string") return false;
   // F2 (2026-06-12 audit fix plan PR-A1): terminal set aligned with
@@ -1733,6 +1755,29 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // is no longer a sediment write substrate).
       const projectId = binding.activeProject.projectId;
       const abrainHome = resolveAbrainHomeForSediment();
+
+      // PR-B1 (2026-06-12 plan, reviewerProviders 复核降级项; 盲审收敛 BUG-1):
+      // an EMPTY multiView.reviewerProviders silently degrades every
+      // high-value op to reviewer_unavailable→staging/replay — cross-provider
+      // double review never actually happens. Tell ONCE per process（告诉不
+      // 要求，条件句而非祈使句）。位置在 ephemeral guard + project binding
+      // 之后：ephemeral/子代理进程不会误报，audit 落 canonical project root。
+      // 进程内单次用 globalThis singleton（jiti 多副本防双发，同 heartbeat）。
+      if (shouldWarnUnconfiguredReviewers(settings) && !reviewerAdvisoryAlreadyShown()) {
+        markReviewerAdvisoryShown();
+        appendAudit(cwd, {
+          operation: "multiview_reviewers_unconfigured",
+          lane: "diagnostic",
+          session_id: sessionId,
+          severity: "warning",
+          detail: "multiView.reviewerProviders is empty while autoLlmWriteEnabled=true — high-value ops degrade to reviewer_unavailable staging/replay; to enable cross-provider review, set sediment.multiView.reviewerProviders in pi-astack-settings.json",
+        }).catch(() => {});
+        if (notify) {
+          try {
+            notify("sediment: multiView.reviewerProviders 为空——高价值写入的跨厂商双审被降级为 staging 重审。如需启用，配置项见 pi-astack-settings.json 的 sediment.multiView.reviewerProviders。", "warning");
+          } catch { /* best-effort */ }
+        }
+      }
 
       if (unhealthyStopReason) {
         const lastBranchEntry = branch.length > 0 ? branch[branch.length - 1] : undefined;

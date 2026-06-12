@@ -79,6 +79,10 @@ import type { CuratorDecision } from "./curator";
 import type { ProjectEntryDraft } from "./writer";
 
 const CACHE_FILE = "multi-view-skip-cache.jsonl";
+// ADR 0024 §7.6 过渡态机械门注记 (PR-B1 2026-06-12): 成本/死循环兜底的 TTL 状态机，
+// 作用于 LLM 调度频率。移除条件：ADR 0025 §4.4.6 P1.5 Pass-1 schema 升级后
+// not-synthesizable 死循环消失（watchdog pass1_op_not_synthesizable_count
+// 持续为 0 一个季度）→ 可删本 cache。
 const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const COMPILED_TRUTH_FINGERPRINT_LEN = 512;
 const TAIL_READ_BYTES = 1 * 1024 * 1024; // 1MB; cache should never approach this

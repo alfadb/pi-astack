@@ -94,6 +94,10 @@ export function lintRuleKind(kind: string, injectMode: RuleInjectMode): LintResu
  *  `writeAbrainRule` auto-demotes an over-threshold always rule to listed rather
  *  than rejecting it. With catalog injection, the threshold now preserves the
  *  stronger always-mode signal as a compact imperative essence. */
+// ADR 0024 §7.6 边界注记 (PR-B1 2026-06-12, 盲审收敛 deepseek 5.3): 本阈值属
+// **infra 层注入预算约束**（仅 demote 注入模式 always→listed、不影响是否写入），
+// **不适用 §7.6 过渡态门的 flip 条件要求**。forward-looking：若未来 curator 获得
+// inject_mode 语义裁决能力（LLM 判断长规则是否值得 always），本阈值退为兜底。
 export const ALWAYS_BODY_MAX_CODE_UNITS = 300;
 export function lintRuleAlwaysSize(body: string, injectMode: RuleInjectMode): LintResult {
   if (injectMode !== "always") return { ok: true };

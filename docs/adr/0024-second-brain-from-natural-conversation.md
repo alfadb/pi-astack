@@ -391,6 +391,8 @@ resolving evidence 顺序展开。
 
    > **注：defense-in-depth (prompt + code belt-and-suspenders) 跟本条说的 "反复证伪后 walkback 兑底" 是两种 pattern**。multi-view P0.5 的 `workflowLaneRefusal` (代码拒绝 reviewer 在 workflow-lane neighbor 上的 archive/update 以化除按推荐) + `synthesizeFromPass1 返 null` (Pass 1 schema 缺 rich payload 时拒 update/merge/supersede/delete) 都是 belt-and-suspenders：prompt 已经含 HARD CONSTRAINT (`multi-view-pass1-blind-v1.md:60-83`)，代码兑底仅是 “万一 prompt 不听话” 的二道防线。本条 (1)轮数 / (2)证据 不适用于这种 pattern——兑底跟 prompt 同时上线。defense-in-depth 需满足：(a) prompt 仍是主路径 (b) 代码兑底只能拒绝 (c) 走明确 audit-flagged skip。multi-view.ts 中两个点都满足。
 
+   > **过渡态机械门条款（2026-06-12 增补，审计修复计划 PR-B1）**：除上述两种 pattern 外还存在第三种——**迁移/验证期的过渡态机械门**（如 Jaccard 自治 dedup 在 adjudicator lane flip 前的默认状态、conf≥8 过渡 fallback、死循环兜底 TTL cache）。这类**已按 §3.2 自检 justify 过的**迁移/验证/兜底门合法（本条款不是“机械门只要带条件就合法”的豁免——§3 的 prompt-first 自检仍是前置），但**新引入时必须同步声明可检验的 flip/移除条件与证据源**（如 shadow audit 累计 N 条且分歧率 ≤ X%、watchdog 计数持续为 0 一个周期），并接入 aggregator/audit 证据流让达标可被发现。**无条件的过渡态是走偏信号**：justify 很便宜、移除没有 deadline 会让例外逐步侵蚀 AI-Native 原则本体（2026-06-12 审计发现认知层已累计 4 个带 sunset 注但无 flip 条件的机械门，均已补条件）。flip/移除动作本身保持人在 loop（advisory 提示作者，不机械自翻）。
+
 7. **R6 删除的"准确率阈值 / 月度自动迭代 / 准确率 smoke" 在实战中被证明确实必需** → 重新引入但必须 framed 为"仅供参考的指标 / 迭代辅助"而非硬关卡
 
 **重要原则**：以上 walkback 必须基于真实实战数据，不是基于"想象中可能会"。**不试试无法判断这份设计是否可行**。

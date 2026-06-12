@@ -211,6 +211,13 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoWriteRawAuditChars: 8_000,
   skipContinuationSanitize: false,
   rulesAsReadonlyNeighborsEnabled: false,
+  // PR-B1 (F7, 2026-06-12 plan) FLIP CONDITION (落字, ADR 0024 §7.6 过渡态机械
+  // 门条款): 本默认值的翻转证据 = 观察窗口（aggregator 默认 30 天 / tail 行数
+  // 限）内 tier1_jaccard_shadow 被裁决行（adjudicated：create/update/merge，
+  // shadow_error 不计） ≥ 50 条 且 false-merge 份额 (would_decision=create) ≤ 5%。
+  // aggregator P1.5 watchdog 已
+  // 接 `tier1_jaccard_shadow.flip_ready` 证据流，达标时在 advisory 中提示作者
+  // 手动 flip（人在 loop，不机械自翻）。无条件的过渡态 = 走偏信号。
   tier1JaccardCuratorLane: false,
   tier1JaccardShadowAudit: true,
   promptVersion: {

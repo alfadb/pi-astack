@@ -169,6 +169,26 @@ export interface P15WatchdogSignals {
    *  `multi_view.pass1.op` audit field (the earlier "not surfaced" gap was
    *  overstated). The v1 prompt may now use pass1_op_type_breakdown. */
   pass1_op_type_breakdown_available: boolean;
+  /** PR-B1 (F7, 2026-06-12 plan): tier1JaccardCuratorLane flip-readiness
+   *  evidence from `tier1_jaccard_shadow` audit rows (§9.4 dual-path shadow
+   *  audit). FLIP CONDITION (落字): adjudicated_total ≥ 50（观察窗口内，
+   *  aggregator 默认 30 天 / tail 行数限内） ∧ false-merge share
+   *  (would_decision=create — the autonomous Jaccard gate would have
+   *  silently consumed a genuinely distinct directive) ≤ 5% → flip
+   *  tier1JaccardCuratorLane default to true. The v1 prompt surfaces
+   *  flip_ready as an ADVISORY for the author — never a mechanical flip. */
+  tier1_jaccard_shadow: {
+    /** All tier1_jaccard_shadow rows in window (incl. shadow_error). */
+    total: number;
+    /** Rows with a real adjudication (create/update/merge) — the ONLY rows
+     *  counted for false_merge_share and the ≥50 sample gate (opus BUG-2 /
+     *  gpt BLOCKING: error rows must not dilute the flip evidence). */
+    adjudicated_total: number;
+    shadow_error_count: number;
+    would_decision_breakdown: Record<string, number>;
+    false_merge_share: number;
+    flip_ready: boolean;
+  };
 }
 
 /**
@@ -820,6 +840,9 @@ function scanP15WatchdogSignals(
   // reason with the Pass 1 op). Additive to the legacy count above, which
   // scans the older outcome/results shapes.
   const pass1OpBreakdown: Record<string, number> = {};
+  // PR-B1 (F7): tier1_jaccard_shadow accumulator (flip-readiness evidence).
+  let shadowTotal = 0;
+  const shadowBreakdown: Record<string, number> = {};
   try {
     const { rows } = readJsonl<Record<string, unknown>>(
       sedimentAuditPath(projectRoot),
@@ -846,6 +869,13 @@ function scanP15WatchdogSignals(
       const topLost = row.candidate_lost;
       const outcomeLost = outcome?.candidate_lost;
       if (topLost === true || outcomeLost === true) candidateLost++;
+
+      // PR-B1 (F7): tier1 Jaccard shadow rows — flip-readiness evidence.
+      if (row.operation === "tier1_jaccard_shadow") {
+        shadowTotal++;
+        const wd = typeof row.would_decision === "string" && row.would_decision ? (row.would_decision as string) : (row.shadow_ok === false ? "shadow_error" : "unknown");
+        shadowBreakdown[wd] = (shadowBreakdown[wd] ?? 0) + 1;
+      }
 
       // (5) Op-typed breakdown from the structured curator audit array.
       // Each CuratorAudit carries `decision` (with the skip reason) AND
@@ -948,8 +978,25 @@ function scanP15WatchdogSignals(
     },
     pass1_op_type_breakdown: pass1OpBreakdown,
     pass1_op_type_breakdown_available: true,
+    tier1_jaccard_shadow: (() => {
+      // PR-B1 收敛 (opus BUG-2 / gpt BLOCKING): share 与 ≥50 门只对真正被
+      // 裁决过的行（create/update/merge）计——shadow_error/unknown 行进分母
+      // 会稀释 false-merge 份额并用“无效证据”灌满样本门，导致过早
+      // flip_ready（50 行全 error 时旧算法给 share=0 且 ready=true）。
+      const adjudicatedTotal = (shadowBreakdown["create"] ?? 0) + (shadowBreakdown["update"] ?? 0) + (shadowBreakdown["merge"] ?? 0);
+      const falseMergeShare = adjudicatedTotal > 0 ? (shadowBreakdown["create"] ?? 0) / adjudicatedTotal : 0;
+      return {
+        total: shadowTotal,
+        adjudicated_total: adjudicatedTotal,
+        shadow_error_count: shadowBreakdown["shadow_error"] ?? 0,
+        would_decision_breakdown: shadowBreakdown,
+        false_merge_share: Math.round(falseMergeShare * 1000) / 1000,
+        flip_ready: adjudicatedTotal >= 50 && falseMergeShare <= 0.05,
+      };
+    })(),
   };
 }
+export const _scanP15WatchdogSignalsForTests = scanP15WatchdogSignals;
 
 function summarizeStaging(now: Date): AggregatorSummary["staging"] {
   let provisionalPending = 0;

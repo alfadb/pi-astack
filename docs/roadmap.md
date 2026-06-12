@@ -165,6 +165,14 @@
 | Curator create-branch scope binding | `extensions/sediment/curator.ts::parseDecision` create 分支加两条硬约束：(a) 每个 `derives_from` slug 必须在 allowedSlugs 中（防幻觉 slug）；(b) 若 `scope:"world"`，每个 `derives_from` neighbor 必须也是 world-scope（防漏 project context 进 world store）。project create 仍可从 world 派生（合法 specialization）。（2026-05-15 audit round 2） |
 | Sediment update/merge unknown frontmatter preservation 覆盖 | `scripts/smoke-memory-sediment.mjs` 新增 “fm-preserve” 6 步 fixture：注入 unknown scalar/array、update body 无 patch / 有 patch 两路，验证 unknown 存活 + 保护 key 唯一 + parseEntry roundtrip。（2026-05-15 audit round 2） |
 
+## Pending flips（过渡态机械门，ADR 0024 §7.6 条款）
+
+| 门 | flip/移除条件 | 证据源 |
+|---|---|---|
+| `tier1JaccardCuratorLane: false`（Jaccard 自治 dedup 仍在 Tier-1 kill path） | 观察窗口（aggregator 30 天 / tail 行数限）内被裁决行（create/update/merge，error 不计）≥ 50 条 且 false-merge 份额（would_decision=create）≤ 5% → 翻默认 true | aggregator P1.5 watchdog `tier1_jaccard_shadow.flip_ready`（达标时 advisory 提示，人在 loop 手动 flip） |
+| `conf≥8` 非指令 durable 过渡 fallback（correction-pipeline isTier1Directive） | recall/shadow 审计显示 is_directive 覆盖全部 conf≥8 case → 移除 fallback 回 ADR 原文谓词 | tier1_direct_write audit 的 is_directive 维度（O5 sunset） |
+| multi-view skip-cache 7d TTL | P1.5 Pass-1 schema 升级后 not-synthesizable 计数持续为 0 一个季度 → 删 cache | watchdog `pass1_op_not_synthesizable_count` |
+
 ## Deferred exploration
 
 | Item | Current stance |
