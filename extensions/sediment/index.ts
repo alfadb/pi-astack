@@ -943,8 +943,21 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
 
 function shouldAdvanceAfterAutoOutcome(auto: AutoWriteLaneOutcome): boolean {
   if (auto.kind === "tier1_direct") return isCapturedTier1Result(auto.result) || isTerminalTier1Reject(auto.result);
+  // PR-A2 (F5): a tier1-prefixed outcome shares the window with the follow-up
+  // extractor pass — advance only when BOTH the directive write is settled
+  // (captured or terminal reject) AND the extractor outcome is advance-safe.
+  // A transient hold replays next turn; the repeated Tier-1 write dedups to a
+  // no-op (exact body-hash / slug dedup).
+  if (auto.tier1 && !(isCapturedTier1Result(auto.tier1.result) || isTerminalTier1Reject(auto.tier1.result))) return false;
   if (auto.kind === "wrote") return shouldAdvanceAfterResults(auto.results);
   return auto.kind !== "llm_error";
+}
+
+/** PR-A2 (F5): R3' covered-text extraction that sees BOTH outcome shapes —
+ *  pure tier1_direct (short lane) and tier1-prefixed follow-up (main/drain). */
+function tier1CoveredTexts(auto: AutoWriteLaneOutcome): string[] {
+  const tier1Info = auto.kind === "tier1_direct" ? auto : auto.tier1;
+  return tier1Info && isCapturedTier1Result(tier1Info.result) ? [tier1Info.draft.body] : [];
 }
 
 /** F1 convergence (PR-A1 3×T0 review 2026-06-12, gpt-5.5 BLOCKING): in
@@ -2559,6 +2572,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         projectId,
                         branchEntries: branchNow,
                         sessionManager: sessMgr,
+                        // PR-A2 (F5): drain windows are normal-sized — the
+                        // extractor follow-up applies here too.
+                        tier1ExtractorFollowUp: true,
                         correctionSignal: (() => {
                           const stored = takeSessionCorrectionForCurator(sessionId);
                           return stored ? recordConsumedSessionCorrection("drain", corrId, stored) : null;
@@ -2582,8 +2598,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         lane: "drain",
                         correlationId: corrId,
                         // R3': only a CAPTURED write covers the directive (see
-                        // the short-lane call above).
-                        coveredTexts: auto.kind === "tier1_direct" && isCapturedTier1Result(auto.result) ? [auto.draft.body] : [],
+                        // the short-lane call above). PR-A2: helper sees both
+                        // pure and tier1-prefixed outcome shapes.
+                        coveredTexts: tier1CoveredTexts(auto),
                       }).catch(() => {});
                       // Round 8 P1 (sonnet R8 audit fix): drain loop now
                       // writes audit rows for ALL outcomes (wrote /
@@ -2592,7 +2609,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                       // produced an audit row — every other outcome was
                       // silent, leaving operators with no forensic trail
                       // for drain failures.
-                      if (auto.kind === "tier1_direct") {
+                      // PR-A2 (F5): tier1 may arrive as the pure outcome or as
+                      // the `tier1` prefix on the follow-up extractor outcome.
+                      const drainTier1 = auto.kind === "tier1_direct" ? auto : auto.tier1;
+                      if (drainTier1) {
                         const pendingDeferred = deferredStopBySession.get(sessionId);
                         await appendAudit(cwd, {
                           operation: "auto_write",
@@ -2606,43 +2626,46 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           candidate_count: 1,
                           candidates: [{
                             candidate_id: candidateIdFor(corrId, -1),
-                            title: sanitizeAuditText(auto.draft.title, 500),
-                            kind: auto.draft.kind,
-                            confidence: auto.draft.entryConfidence,
-                            status: auto.draft.status,
-                            body_chars: auto.draft.body.length,
+                            title: sanitizeAuditText(drainTier1.draft.title, 500),
+                            kind: drainTier1.draft.kind,
+                            confidence: drainTier1.draft.entryConfidence,
+                            status: drainTier1.draft.status,
+                            body_chars: drainTier1.draft.body.length,
                           }],
-                          results: [resultSummary(auto.result)],
+                          results: [resultSummary(drainTier1.result)],
                           recovered_deferred: checkpointAdvanced && !!pendingDeferred,
                           ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                           checkpoint_advanced: checkpointAdvanced,
                           background_async: true,
                           drain: true,
+                          // PR-A2 过渡标记（计划 §PR-A2 承诺）。
+                          ...(auto.kind !== "tier1_direct" ? { tier1_preemption_removed: true } : {}),
                         });
-                        await recordDeferredRecoveryIfNeeded({
-                          cwd,
-                          sessionId,
-                          window: win,
-                          checkpointAdvanced,
-                          lane: "auto_write",
-                          correlationId: corrId,
-                        });
-                        const compact = compactResultSummary([auto.result]);
-                        applySedimentStatus(
-                          setStatus,
-                          sessionId,
-                          auto.result.status === "rejected" ? "failed" : "completed",
-                          compact,
-                        );
                         // F4 (2026-06-12 audit fix plan PR-A1): R3' mandates the
                         // tell surface on EVERY Tier-1 commit. The drain lane
                         // consumes working-set directives from earlier turns —
-                        // exactly where the user least expects a rule write —
-                        // yet was the only tier1_direct site without the notify
-                        // (audit + a transient footer line do not constitute a
-                        // recognizable 📌 tell).
-                        if (notify) { try { notify(formatRuleTell(auto.result, { lowConfidence: isLowConfidenceDirective(auto.signal) }), "info"); } catch {} }
-                      } else if (auto.kind === "wrote") {
+                        // exactly where the user least expects a rule write.
+                        if (notify) { try { notify(formatRuleTell(drainTier1.result, { lowConfidence: isLowConfidenceDirective(drainTier1.signal) }), "info"); } catch {} }
+                        if (auto.kind === "tier1_direct") {
+                          // Pure Tier-1 outcome (no follow-up ran): close out.
+                          await recordDeferredRecoveryIfNeeded({
+                            cwd,
+                            sessionId,
+                            window: win,
+                            checkpointAdvanced,
+                            lane: "auto_write",
+                            correlationId: corrId,
+                          });
+                          const compact = compactResultSummary([auto.result]);
+                          applySedimentStatus(
+                            setStatus,
+                            sessionId,
+                            auto.result.status === "rejected" ? "failed" : "completed",
+                            compact,
+                          );
+                        }
+                      }
+                      if (auto.kind === "wrote") {
                         const pendingDeferred = deferredStopBySession.get(sessionId);
                         await appendAudit(cwd, {
                           operation: "auto_write",
@@ -2682,10 +2705,12 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           "completed",
                           compact,
                         );
-                      } else {
+                      } else if (auto.kind !== "tier1_direct") {
                         // R8 P1-A fix: was silent. Now record skip with
                         // reason so drain-only failures (network blips,
                         // model unavailable) don't disappear from audit.
+                        // PR-A2: pure tier1_direct is excluded — it was fully
+                        // handled (audit/tell/status) in the drainTier1 block.
                         await appendAudit(cwd, {
                           operation: "skip",
                           lane: "auto_write",
@@ -2700,6 +2725,18 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           background_async: true,
                           drain: true,
                         }).catch(() => { /* best-effort: don't break drain on audit failure */ });
+                        // PR-A2 收敛 (opus NIT-1): tier1-prefixed llm_skip 现在
+                        // 是 drain 指令轮的常态出口——deferred-recovery 记账必须
+                        // 对齐 main 车道 skip 分支，否则 deferredStopBySession
+                        // marker 滞留，后续 audit 行重复报 recovered_deferred。
+                        await recordDeferredRecoveryIfNeeded({
+                          cwd,
+                          sessionId,
+                          window: win,
+                          checkpointAdvanced,
+                          lane: "auto_write",
+                          correlationId: corrId,
+                        });
                         applySedimentStatus(
                           setStatus,
                           sessionId,
@@ -3038,6 +3075,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               projectId,
               branchEntries: branch,
               sessionManager: sessMgr, // captured, not ctx.sessionManager (stale ctx risk)
+              // PR-A2 (F5): Tier-1 hit no longer preempts the window — the
+              // lane re-enters for the extractor pass (R1' disjoint authority).
+              tier1ExtractorFollowUp: true,
               // Await the fire-and-forget classifier promise (started before lane branching).
               // If classifier hasn't finished yet, wait for it; if it failed or wasn't
               // started, fall back to null signal (curator works without it).
@@ -3072,12 +3112,17 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               correlationId: autoCorrelationId,
               // R3' (PR-2 R1 gpt BLOCKING fix): only a CAPTURED write covers
               // the directive — a rejected tier1_direct must NOT suppress the
-              // recall flag. Aligns the main bg lane with the short/drain
-              // lanes' isCapturedTier1Result gating.
-              coveredTexts: auto.kind === "tier1_direct" && isCapturedTier1Result(auto.result) ? [auto.draft.body] : [],
+              // recall flag. PR-A2: helper sees both pure and tier1-prefixed
+              // outcome shapes.
+              coveredTexts: tier1CoveredTexts(auto),
             }).catch(() => {});
 
-            if (auto.kind === "tier1_direct") {
+            // PR-A2 (F5): the Tier-1 write may arrive as the pure outcome or
+            // as the `tier1` prefix on the follow-up extractor outcome. Audit
+            // + tell here; a prefixed outcome then continues through the
+            // wrote/skip handling below with its own audit/status.
+            const tier1Info = auto.kind === "tier1_direct" ? auto : auto.tier1;
+            if (tier1Info) {
               const pendingDeferred = deferredStopBySession.get(sessionId);
               await appendAudit(cwd, {
                 operation: "auto_write",
@@ -3092,44 +3137,50 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 candidate_count: 1,
                 candidates: [{
                   candidate_id: candidateIdFor(autoCorrelationId, -1),
-                  title: sanitizeAuditText(auto.draft.title, 500),
-                  kind: auto.draft.kind,
-                  confidence: auto.draft.entryConfidence,
-                  status: auto.draft.status,
-                  body_chars: auto.draft.body.length,
+                  title: sanitizeAuditText(tier1Info.draft.title, 500),
+                  kind: tier1Info.draft.kind,
+                  confidence: tier1Info.draft.entryConfidence,
+                  status: tier1Info.draft.status,
+                  body_chars: tier1Info.draft.body.length,
                 }],
-                results: [resultSummary(auto.result)],
+                results: [resultSummary(tier1Info.result)],
                 recovered_deferred: checkpointAdvanced && !!pendingDeferred,
                 ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                 stage_ms: {
                   window_build: tWindowBuilt - tStart,
                   parse: tParseEnd - tParseStart,
-                  write_total: tAutoEnd - auto.writeStart,
+                  write_total: tAutoEnd - tier1Info.writeStart,
                   total: Date.now() - tStart,
                   background: true,
                 },
                 checkpoint_advanced: checkpointAdvanced,
                 background_async: true,
-              });
-              await recordDeferredRecoveryIfNeeded({
-                cwd,
-                sessionId,
-                window: effectiveWindow,
-                checkpointAdvanced,
-                lane: "auto_write",
-                correlationId: autoCorrelationId,
+                // PR-A2 过渡标记（计划 §PR-A2 承诺）：标记本轮 Tier-1 命中
+                // 后 extractor 照常跑了，便于对照抢占取消前后的流量变化。
+                ...(auto.kind !== "tier1_direct" ? { tier1_preemption_removed: true } : {}),
               });
               if (notify) {
                 try {
                   notify(
-                    formatRuleTell(auto.result, { lowConfidence: isLowConfidenceDirective(auto.signal) }),
+                    formatRuleTell(tier1Info.result, { lowConfidence: isLowConfidenceDirective(tier1Info.signal) }),
                     "info",
                   );
                 } catch {}
               }
-              const compact = compactResultSummary([auto.result]);
-              applySedimentStatus(setStatus, sessionId, auto.result.status === "rejected" ? "failed" : "completed", compact);
-              return;
+              if (auto.kind === "tier1_direct") {
+                // Pure Tier-1 outcome (no follow-up ran): close out the lane.
+                await recordDeferredRecoveryIfNeeded({
+                  cwd,
+                  sessionId,
+                  window: effectiveWindow,
+                  checkpointAdvanced,
+                  lane: "auto_write",
+                  correlationId: autoCorrelationId,
+                });
+                const compact = compactResultSummary([auto.result]);
+                applySedimentStatus(setStatus, sessionId, auto.result.status === "rejected" ? "failed" : "completed", compact);
+                return;
+              }
             }
 
             if (auto.kind === "wrote") {
@@ -3256,8 +3307,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               session_id: sessionId,
               ...summary,
               extractor:
+                // PR-A2 收敛 (opus NIT-A): tier1-prefixed ineligible 意味着
+                // “extractor follow-up 不可用”（如 model_registry_unavailable
+                // 随 follow-up 返回），标 explicit_marker 会误导取证。
                 auto.kind === "ineligible"
-                  ? "explicit_marker"
+                  ? (auto.tier1 ? "llm_extractor" : "explicit_marker")
                   : "llm_extractor",
               parser_version: PARSER_VERSION,
               settings_snapshot: settingsSnapshot,
@@ -3266,7 +3320,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               eligibility:
                 auto.kind === "ineligible" ? auto.eligibility : undefined,
               llm:
-                auto.kind === "ineligible" ? undefined : auto.llmAuditSummary,
+                auto.kind === "llm_skip" || auto.kind === "llm_error" ? auto.llmAuditSummary : undefined,
               raw_text:
                 auto.kind === "llm_error" || auto.kind === "llm_skip"
                   ? auto.rawTextStored
@@ -3288,7 +3342,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               stage_ms: {
                 window_build: tWindowBuilt - tStart,
                 parse: tParseEnd - tParseStart,
-                llm_total: auto.kind === "ineligible" ? 0 : auto.llmDurationMs,
+                llm_total: auto.kind === "llm_skip" || auto.kind === "llm_error" ? auto.llmDurationMs : 0,
                 write_total: 0,
                 total: Date.now() - tStart,
                 background: true,
@@ -3786,6 +3840,23 @@ interface ModelRegistryLike {
   }>;
 }
 
+/** PR-A2 (F5, ADR 0028 R1'): Tier-1 direct-write info attached as a PREFIX to
+ *  the follow-up extractor outcome. R1' is disjoint AUTHORITY (classifier owns
+ *  directives, extractor owns inferred Tier-2 knowledge), NOT lane preemption
+ *  — when the caller opts in (tier1ExtractorFollowUp) the lane re-enters
+ *  itself with correctionSignal:null after the deterministic write, so
+ *  same-window Tier-2 candidates are no longer silently dropped. The outcome
+ *  kind is then the EXTRACTOR outcome; `tier1` carries the directive write
+ *  for caller-side audit/tell. kind === "tier1_direct" remains only for
+ *  callers that opt out (short classifier-only windows keep their
+ *  no-extractor budget semantics). */
+interface Tier1DirectInfo {
+  draft: RuleDraft;
+  result: WriteRuleResult;
+  writeStart: number;
+  signal: CorrectionSignal;
+}
+
 type AutoWriteLaneOutcome =
   | {
       kind: "ineligible";
@@ -3794,9 +3865,11 @@ type AutoWriteLaneOutcome =
         reason: string;
         detail?: Record<string, unknown>;
       };
+      tier1?: Tier1DirectInfo;
     }
   | {
       kind: "llm_skip";
+      tier1?: Tier1DirectInfo;
       llmAuditSummary: ReturnType<typeof summarizeLlmExtractorResult>;
       llmDurationMs: number;
       rawTextStored?: string;
@@ -3806,6 +3879,7 @@ type AutoWriteLaneOutcome =
     }
   | {
       kind: "llm_error";
+      tier1?: Tier1DirectInfo;
       llmAuditSummary: ReturnType<typeof summarizeLlmExtractorResult>;
       llmDurationMs: number;
       rawTextStored?: string;
@@ -3815,6 +3889,7 @@ type AutoWriteLaneOutcome =
     }
   | {
       kind: "wrote";
+      tier1?: Tier1DirectInfo;
       drafts: ProjectEntryDraft[];
       results: WriteProjectEntryResult[];
       curatorAudits?: CuratorAudit[];
@@ -3978,6 +4053,13 @@ async function tryAutoWriteLane(args: {
    *  instead of the pruned RunWindow. The fixed system prefix (AGENTS.md)
    *  + full transcript enables prompt caching across consecutive calls. */
   branchEntries?: unknown[];
+  /** PR-A2 (F5, ADR 0028 R1'): when true, a Tier-1 direct write re-enters the
+   *  lane (correctionSignal:null) so the extractor still processes the same
+   *  window; the Tier-1 info comes back as the `tier1` prefix on the
+   *  follow-up outcome. Main bg + drain lanes opt in; the short
+   *  classifier-only lane opts out (tiny windows deliberately skip the
+   *  extractor budget — 2026-06-10 3-T0 合议). */
+  tier1ExtractorFollowUp?: boolean;
   /** ADR 0025 P1: correction classifier result from the pre-lane run.
    *  Injected into curator context for better update/merge decisions.
    *  null when classifier didn't run (ephemeral session) or found no signal. */
@@ -4145,6 +4227,18 @@ async function tryAutoWriteLane(args: {
       checkpoint_advanced: false,
       durationMs: Date.now() - writeStart,
     });
+    // PR-A2 (F5, ADR 0028 R1'): a Tier-1 hit must NOT preempt the window.
+    // R1' is disjoint authority — the extractor still owns inferred Tier-2
+    // candidates in this same window. Re-enter the lane with
+    // correctionSignal:null so the normal eligibility + extractor + curator
+    // flow runs; same-sentence double-detection is absorbed by exact
+    // body-hash / curator semantic dedup (R1' 写序注).
+    if (args.tier1ExtractorFollowUp === true) {
+      const followUp = await tryAutoWriteLane({ ...args, correctionSignal: null, tier1ExtractorFollowUp: false });
+      if (followUp.kind !== "tier1_direct") {
+        return { ...followUp, tier1: { draft, result, writeStart, signal: tier1Signal } };
+      }
+    }
     return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
   }
 

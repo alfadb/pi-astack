@@ -811,7 +811,13 @@ await check("S19: real agent_end direct Tier-1 path writes then checkpoints", as
   assert(direct?.deterministic_direct_path === true && direct?.signal_consumed === true, `real agent_end must direct-write: ${JSON.stringify(rows)}`);
   assert(auto?.checkpoint_advanced === true && auto?.background_async === true, `real agent_end audit must advance after write: ${JSON.stringify(rows)}`);
   assert(!rows.some((row) => row.operation === "directive_recall_audit"), `same-turn direct write must suppress R3 missing audit: ${JSON.stringify(rows)}`);
-  assert(globalThis.__ADR0028_PR1_INVOCATIONS__ === 1, `with IfDue lanes quieted the direct path spends exactly 1 LLM call (classifier; no extractor), got ${globalThis.__ADR0028_PR1_INVOCATIONS__}`);
+  // PR-A2 (F5): the Tier-1 hit no longer preempts the window — the extractor
+  // follow-up runs over the same window (R1' disjoint authority), so the
+  // main lane now spends exactly 2 LLM calls: classifier + extractor (stub
+  // returns SKIP for call #2 → llm_skip outcome, advance still safe).
+  assert(globalThis.__ADR0028_PR1_INVOCATIONS__ === 2, `with IfDue lanes quieted the direct path spends exactly 2 LLM calls (classifier + extractor follow-up), got ${globalThis.__ADR0028_PR1_INVOCATIONS__}`);
+  const extractorSkip = rows.find((row) => row.operation === "skip" && row.reason === "llm_returned_skip");
+  assert(extractorSkip?.background_async === true, `extractor follow-up must leave its own audit row: ${JSON.stringify(rows)}`);
 });
 
 await check("S20: R6' staging suppression requires live settings AND window ownership", async () => {
@@ -971,6 +977,65 @@ await check("S26: F1 convergence — staging-only + classifier parse failure HOL
   assert(_holdForStagingOnlyParseFailureForTests(ineligible, { ok: true, signal: { signal_found: false } }, stagingOnly) === false, "clean no-signal must not hold");
   assert(_holdForStagingOnlyParseFailureForTests(ineligible, null, stagingOnly) === false, "absent classifier result must not hold");
   assert(_holdForStagingOnlyParseFailureForTests({ kind: "wrote", results: [] }, parseFail, stagingOnly) === false, "non-ineligible outcomes keep their own advance semantics");
+});
+
+await check("S27: PR-A2 — Tier-1 hit no longer preempts the window; extractor follow-up runs (R1' disjoint authority)", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s27");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const quote = "所有 GitHub 仓库必须使用 gh 工具管理。";
+  resetPiAiStub(["SKIP"]);
+  const outcome = await _tryAutoWriteLaneForTests({
+    cwd: fx.root,
+    sessionId: "followup",
+    settings: baseSettings,
+    window: makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${quote}\n另外这个项目的构建用了自定义 esbuild 插件。`),
+    modelRegistry: makeModelRegistry(),
+    correlationId: "followup:auto",
+    abrainHome: fx.abrainHome,
+    projectId: fx.projectId,
+    tier1ExtractorFollowUp: true,
+    correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: quote, scope_description: "GitHub repos use gh", target_entry_slug: null, provenance: "user-expressed", quote_source: "user_message", is_directive: true },
+  });
+  // The outcome is now the EXTRACTOR pass (stub returns SKIP → llm_skip),
+  // with the Tier-1 write attached as the `tier1` prefix.
+  assert(outcome.kind === "llm_skip", `extractor follow-up outcome expected (llm_skip), got ${outcome.kind}`);
+  assert(outcome.tier1?.result?.status === "created", `tier1 prefix must carry the directive write, got ${JSON.stringify(outcome.tier1?.result)}`);
+  // gpt-5.5 R1 nit: exact count pins "no classifier ran, exactly one
+  // extractor follow-up" — correctionSignal was passed directly.
+  assert(globalThis.__ADR0028_PR1_INVOCATIONS__ === 1, `extractor follow-up must run exactly once, got ${globalThis.__ADR0028_PR1_INVOCATIONS__} invocations`);
+  assert(fs.existsSync(path.join(fx.abrainHome, "rules", "always", "github-repos-use-gh.md")), "Tier-1 rule file must still be written");
+  // Opt-out path (short classifier-only lane semantics): no follow-up arg →
+  // pure tier1_direct, zero LLM calls.
+  _resetAutoWriteStateForTests();
+  const fx2 = freshFixture("pr1-s27b");
+  await bindAbrainProject({ abrainHome: fx2.abrainHome, cwd: fx2.root, projectId: fx2.projectId });
+  resetPiAiStub(["SKIP"]);
+  const pure = await _tryAutoWriteLaneForTests({
+    cwd: fx2.root,
+    sessionId: "followup-optout",
+    settings: baseSettings,
+    window: makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${quote}`),
+    modelRegistry: makeModelRegistry(),
+    correlationId: "followup-optout:auto",
+    abrainHome: fx2.abrainHome,
+    projectId: fx2.projectId,
+    correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: quote, scope_description: "GitHub repos use gh", target_entry_slug: null, provenance: "user-expressed", quote_source: "user_message", is_directive: true },
+  });
+  assert(pure.kind === "tier1_direct", `opt-out must stay pure tier1_direct, got ${pure.kind}`);
+  assert(globalThis.__ADR0028_PR1_INVOCATIONS__ === 0, `opt-out path must not burn the extractor, got ${globalThis.__ADR0028_PR1_INVOCATIONS__}`);
+});
+
+await check("S28: PR-A2 — combined advance semantics: BOTH tier1 and extractor outcome must be settle-safe", async () => {
+  const { _shouldAdvanceAfterAutoOutcomeForTests } = sedimentIndex;
+  const t1ok = { draft: {}, result: { status: "created" }, writeStart: 0, signal: {} };
+  const t1transient = { draft: {}, result: { status: "rejected", reason: "git_commit_failed" }, writeStart: 0, signal: {} };
+  const t1terminal = { draft: {}, result: { status: "rejected", reason: "duplicate_slug" }, writeStart: 0, signal: {} };
+  assert(_shouldAdvanceAfterAutoOutcomeForTests({ kind: "llm_skip", tier1: t1ok }) === true, "captured tier1 + llm_skip must advance");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests({ kind: "llm_error", tier1: t1ok }) === false, "captured tier1 + transient extractor error must HOLD");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests({ kind: "llm_skip", tier1: t1transient }) === false, "transient tier1 reject must HOLD even when extractor skipped");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests({ kind: "llm_skip", tier1: t1terminal }) === true, "terminal tier1 reject + llm_skip must advance (recall flag is the net)");
+  assert(_shouldAdvanceAfterAutoOutcomeForTests({ kind: "wrote", results: [{ status: "created" }], tier1: t1ok }) === true, "captured tier1 + captured extractor write must advance");
 });
 
 if (failures.length) {
