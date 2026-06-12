@@ -4,8 +4,8 @@
  * (ADR 0028 R5'/R2' 调和, O2 verdict 2026-06-10).
  *
  * fs-level (no LLM): exercises the writer-side mechanics —
- *   - legacy default: cross-slug Jaccard hit → status "deduped" (flag-off
- *     sole write path preserved);
+ *   - legacy writer default: cross-slug Jaccard hit → status "deduped"
+ *     when callers do not request the ADR 0028 adjudication lane;
  *   - semanticDedup:"report" → "similar_found" intermediate, nothing written;
  *   - semanticDedup:"off"    → create bypasses the cross-slug scan
  *     (same-slug duplicate_slug gate still enforced);
@@ -61,8 +61,10 @@ async function seedRule(home) {
 
 console.log("tier1 jaccard adjudication — PR-4/P0.3 (O2 2026-06-10)");
 
-// 1. Legacy default (no semanticDedup opt): cross-slug near-dup → deduped.
-await check("legacy default: cross-slug Jaccard hit -> deduped (flag-off path unchanged)", async () => {
+// 1. Writer default (no semanticDedup opt): cross-slug near-dup → deduped.
+// Production Tier-1 callers now request semanticDedup:"report" by default;
+// this preserves the lower-level writer rollback path only.
+await check("writer default: cross-slug Jaccard hit -> deduped (rollback path unchanged)", async () => {
   const home = freshHome();
   await seedRule(home);
   const r = await writeAbrainRule(

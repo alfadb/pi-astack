@@ -163,7 +163,7 @@ slug 同 namespace）。两个项目若有同名 slug（如 `prefer-pnpm-over-ya
 
 ## 5. Smoke 计划（盲审修正：去机械断言）
 
-扩 `scripts/smoke-classifier-prompt.mjs` + 新 `scripts/smoke-outcome-classifier-enrich.mjs`，断言：
+扩 live dossier `scripts/dossier-classifier-prompt.mjs` + 新 `scripts/smoke-outcome-classifier-enrich.mjs`，断言：
 - **项目过滤**：两个项目同 slug，本项目 classifier 只见本项目 outcome（防 §2.1 污染）；
 - **向后兼容**：ledger 空 / 读失败 → 不抛、cards 退化为无 outcome_activity、行为同当前实现；
 - **渲染**：有数据时 prompt 出现 track-record 行 + echo-chamber 标记；全零时 (none recorded)；

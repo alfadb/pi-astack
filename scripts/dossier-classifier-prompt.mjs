@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * ADR 0025 P1 smoke — classifier prompt prototype validation.
+ * ADR 0025 P1 live dossier — classifier prompt prototype validation.
  *
- * Calls the DeepSeek API directly (OpenAI-compatible) with the
- * active-correction-classifier-v2 prompt against conversation fixtures
+ * Calls the configured DeepSeek provider from agent/models.json
+ * (OpenAI-compatible) with the active-correction-classifier-v2 prompt against conversation fixtures
  * (20 original + 5 directive-detection fixtures added in PR-2/P0.1 for
  * the is_directive field, ADR 0028 R2' recall bias + abstain list).
  *
- * Usage: node scripts/smoke-classifier-prompt.mjs
+ * Usage: node scripts/dossier-classifier-prompt.mjs
  */
 
 import fs from "node:fs";
@@ -19,12 +19,48 @@ const repoRoot = path.resolve(__dirname, "..");
 
 // ── Config ────────────────────────────────────────────────────────────
 
-const API_KEY = process.env.DEEPSEEK_API_KEY;
-const BASE_URL = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com";
-const MODEL = "deepseek-chat";  // deepseek-v4-flash alias
+const agentDir = path.resolve(repoRoot, "../..");
+const modelsConfigPath = path.join(agentDir, "models.json");
+const settingsPath = path.join(agentDir, "pi-astack-settings.json");
+const modelsConfig = JSON.parse(fs.readFileSync(modelsConfigPath, "utf8"));
+const settingsConfig = fs.existsSync(settingsPath)
+  ? JSON.parse(fs.readFileSync(settingsPath, "utf8"))
+  : {};
+const deepseekProvider = modelsConfig?.providers?.deepseek;
+if (!deepseekProvider?.baseUrl || !deepseekProvider?.apiKey) {
+  console.error(`❌ providers.deepseek.baseUrl/apiKey missing in ${modelsConfigPath}`);
+  process.exit(1);
+}
+
+function resolveConfiguredApiKey(value) {
+  if (typeof value !== "string" || !value.trim()) return "";
+  if (!value.startsWith("$")) return value;
+  const envName = value.slice(1);
+  return process.env[envName] || "";
+}
+
+function chatCompletionsUrl(baseUrl) {
+  const clean = baseUrl.replace(/\/+$/, "");
+  return clean.endsWith("/v1") ? `${clean}/chat/completions` : `${clean}/v1/chat/completions`;
+}
+
+function configuredDeepSeekModel() {
+  const curatorModel = settingsConfig?.sediment?.curatorModel;
+  const curatorMatch = typeof curatorModel === "string" ? /^deepseek\/(.+)$/.exec(curatorModel) : null;
+  if (curatorMatch?.[1]) return curatorMatch[1];
+  const keepList = settingsConfig?.modelCurator?.providers?.deepseek;
+  if (Array.isArray(keepList) && typeof keepList[0] === "string" && keepList[0]) return keepList[0];
+  console.error(`❌ no DeepSeek model configured in ${settingsPath}`);
+  process.exit(1);
+}
+
+const API_KEY = resolveConfiguredApiKey(deepseekProvider.apiKey);
+const BASE_URL = deepseekProvider.baseUrl;
+const CHAT_COMPLETIONS_URL = chatCompletionsUrl(BASE_URL);
+const MODEL = process.env.DEEPSEEK_MODEL || configuredDeepSeekModel();
 
 if (!API_KEY) {
-  console.error("❌ DEEPSEEK_API_KEY not set");
+  console.error(`❌ configured DeepSeek apiKey ${deepseekProvider.apiKey} is not available in the environment`);
   process.exit(1);
 }
 
@@ -39,7 +75,7 @@ function loadPrompt() {
   return fs.readFileSync(promptPath, "utf-8");
 }
 
-async function callDeepSeek(systemPrompt, windowText, label) {
+async function callDeepSeek(systemPrompt, windowText) {
   const body = {
     model: MODEL,
     messages: [
@@ -47,11 +83,11 @@ async function callDeepSeek(systemPrompt, windowText, label) {
       { role: "user", content: `Transcript window:\n<<<PI_SEDIMENT_WINDOW\n${windowText}\nPI_SEDIMENT_WINDOW>>>` },
     ],
     temperature: 0.3,
-    max_tokens: 2000,
+    max_tokens: 8000,
     stream: false,
   };
 
-  const res = await fetch(`${BASE_URL}/v1/chat/completions`, {
+  const res = await fetch(CHAT_COMPLETIONS_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -67,7 +103,11 @@ async function callDeepSeek(systemPrompt, windowText, label) {
   }
 
   const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "";
+  const choice = data.choices?.[0];
+  if (choice?.finish_reason === "length") {
+    throw new Error("model_output_truncated: finish_reason=length");
+  }
+  return choice?.message?.content ?? "";
 }
 
 function parseClassifierOutput(raw) {
@@ -78,6 +118,13 @@ function parseClassifierOutput(raw) {
   } catch (e) {
     return { raw, parsed: null, parse_error: e.message };
   }
+}
+
+function writeResults(results) {
+  const outPath = path.join(repoRoot, "dossier-classifier-results.json");
+  fs.writeFileSync(outPath, JSON.stringify(results, null, 2));
+  console.log(`\n📄 Full reasoning traces: ${outPath}`);
+  console.log(`   ${results.length} fixtures run.`);
 }
 
 // ── Fixtures ───────────────────────────────────────────────────────────
@@ -320,8 +367,8 @@ function buildFixtures() {
 // ── Main ──────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log(`🔬 ADR 0025 P1 classifier smoke test`);
-  console.log(`   Model: ${MODEL} (via DeepSeek API)\n`);
+  console.log(`🔬 ADR 0025 P1 classifier live dossier`);
+  console.log(`   Model: ${MODEL} base=${BASE_URL}\n`);
 
   const prompt = loadPrompt();
   const fixtures = buildFixtures();
@@ -333,15 +380,15 @@ async function main() {
 
     try {
       process.stdout.write(`${label} ... `);
-      const raw = await callDeepSeek(prompt, windowText, label);
+      const raw = await callDeepSeek(prompt, windowText);
       const output = parseClassifierOutput(raw);
       output.id = f.id;
       output.category = f.category;
       output.expected = f.expected;
 
       const p = output.parsed;
-      const t = p?.typing ?? "parse error";
-      const c = p?.confidence ?? "?";
+      const t = p?.signal_found === false ? "none" : p?.typing ?? "parse error";
+      const c = p?.signal_found === false ? "n/a" : p?.confidence ?? "?";
 
       // Review buckets (not pass/fail — ADR 0024 §5.5: smoke is a
       // prompt-development dossier, not a release gate).
@@ -373,6 +420,11 @@ async function main() {
     } catch (e) {
       console.log(`❌ ${e.message}`);
       results.push({ id: f.id, category: f.category, error: e.message, review_bucket: "parse-or-infra-issue" });
+      if (/^HTTP\s+(?:401|403|429|5\d\d)\b/.test(e.message) || /Timeout|timed out|aborted|model_output_truncated/i.test(e.message)) {
+        writeResults(results);
+        console.error(`\n❌ Infra failure in live dossier (${e.message}); aborting instead of reporting a false-green prompt dossier.`);
+        process.exit(1);
+      }
     }
 
     // Rate limiting — DeepSeek free tier is 20 RPM
@@ -380,10 +432,7 @@ async function main() {
   }
 
   // ── Output ─────────────────────────────────────────────────────────
-  const outPath = path.join(repoRoot, "smoke-classifier-results.json");
-  fs.writeFileSync(outPath, JSON.stringify(results, null, 2));
-  console.log(`\n📄 Full reasoning traces: ${outPath}`);
-  console.log(`   ${results.length} fixtures run.`);
+  writeResults(results);
 
   // Review bucket summary (informational only — NOT a gate. ADR 0024 §5.5).
   const byBucket = {};

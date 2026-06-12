@@ -81,7 +81,13 @@ const MAX_PARALLEL = 16;
 // global cap (W12) and per-unit timeout default instead of duplicating
 // literals that could drift.
 export const MAX_CONCURRENCY = 4;
+export const MAX_PROVIDER_CONCURRENCY = 2;
 export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
+
+export function providerFromModel(model: string): string {
+  const provider = String(model ?? "").split("/")[0]?.trim();
+  return provider || "unknown";
+}
 
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
 
@@ -627,17 +633,6 @@ export async function runInProcess(
     startedNote: `model=${modelStr}`,
   });
 
-  const enrichHeartbeat = (result: AgentResult): AgentResult => {
-    const heartbeat_trace_path = heartbeat.tracePath;
-    if (!heartbeatAnchor || !heartbeat_trace_path) return result;
-    const heartbeat_liveness = assessLivenessForAnchor(heartbeatProjectRoot, heartbeatAnchor);
-    return {
-      ...result,
-      heartbeat_trace_path,
-      heartbeat_liveness,
-    };
-  };
-
   // R8 P1 fix (Opus P0-A + GPT-5.5 P1-1 + DeepSeek P1-2 unanimous):
   // wrap the entire body in try/finally so heartbeat.stop() fires on
   // EVERY terminal path — including the early returns below
@@ -648,6 +643,16 @@ export async function runInProcess(
   // heartbeat.stop() is idempotent + best-effort, so wrapping is
   // mechanically safe.
   try {
+  const enrichHeartbeat = (result: AgentResult): AgentResult => {
+    const heartbeat_trace_path = heartbeat.tracePath;
+    if (!heartbeatAnchor || !heartbeat_trace_path) return result;
+    const heartbeat_liveness = assessLivenessForAnchor(heartbeatProjectRoot, heartbeatAnchor);
+    return {
+      ...result,
+      heartbeat_trace_path,
+      heartbeat_liveness,
+    };
+  };
 
   // Resolve model
   const model = resolveModel(modelStr, modelRegistry);
@@ -1338,12 +1343,12 @@ export default function (pi: ExtensionAPI) {
       "Results are collected when ALL complete. This is the primary tool for " +
       "multi-model analysis — do NOT call dispatch_agent N times instead. " +
       "Mutating tools blocked by default. " +
-      `Up to ${MAX_PARALLEL} tasks per call; up to ${MAX_CONCURRENCY} run concurrently.`,
+      `Up to ${MAX_PARALLEL} tasks per call; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time.`,
     promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
       "Use dispatch_parallel EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
       "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together. Use different providers per task for cross-vendor blind reviews.",
-      `Concurrency: up to ${MAX_PARALLEL} tasks accepted; ${MAX_CONCURRENCY} run at once, others queue. Choose models from DIFFERENT providers for diversity.`,
+      `Concurrency: up to ${MAX_PARALLEL} tasks accepted; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time, while different providers can run together. Choose models from DIFFERENT providers for diversity.`,
       "For reasoning-only tasks, omit tools (sub-agent uses built-in read/grep/find/ls).",
     ],
     parameters: Type.Object({
@@ -1433,7 +1438,6 @@ export default function (pi: ExtensionAPI) {
 
       const results: AgentResult[] = new Array(tasks.length);
       const taskAnchors: Array<CausalAnchor | undefined> = new Array(tasks.length);
-      let nextIdx = 0;
       let running = 0;
       let success = 0;
       let failed = 0;
@@ -1443,11 +1447,32 @@ export default function (pi: ExtensionAPI) {
         applyDispatchStatus(ctx, "running", { running, failed, success, total });
       updateRunning();
 
+      const activeByProvider = new Map<string, number>();
+      const claimed = new Set<number>();
+      const providerOf = (i: number) => providerFromModel(tasks[i]?.model ?? "");
+      const claimNextTask = (): number | undefined => {
+        for (let i = 0; i < total; i++) {
+          if (claimed.has(i)) continue;
+          const provider = providerOf(i);
+          if ((activeByProvider.get(provider) ?? 0) >= MAX_PROVIDER_CONCURRENCY) continue;
+          claimed.add(i);
+          activeByProvider.set(provider, (activeByProvider.get(provider) ?? 0) + 1);
+          return i;
+        }
+        return undefined;
+      };
+      const releaseProvider = (i: number) => {
+        const provider = providerOf(i);
+        const next = Math.max(0, (activeByProvider.get(provider) ?? 0) - 1);
+        if (next === 0) activeByProvider.delete(provider);
+        else activeByProvider.set(provider, next);
+      };
+
       const worker = async () => {
         while (true) {
           if (signal.aborted || ctx.signal?.aborted) return;
-          const i = nextIdx++;
-          if (i >= total) return;
+          const i = claimNextTask();
+          if (i === undefined) return;
           const t = tasks[i];
 
           running++;
@@ -1470,6 +1495,7 @@ export default function (pi: ExtensionAPI) {
                 durationMs: 0,
               };
               results[i] = res;
+              releaseProvider(i);
               running--;
               failed++;
               updateRunning();
@@ -1533,6 +1559,7 @@ export default function (pi: ExtensionAPI) {
             };
           }
           results[i] = res;
+          releaseProvider(i);
           running--;
           if (res.error) failed++;
           else success++;
@@ -1575,7 +1602,7 @@ export default function (pi: ExtensionAPI) {
         }
       };
 
-      const workers = new Array(Math.min(MAX_CONCURRENCY, total)).fill(null).map(() => worker());
+      const workers = new Array(total).fill(null).map(() => worker());
       await Promise.allSettled(workers);
       const totalWallMs = Date.now() - dispatchStart;
       const totalWall = (totalWallMs / 1000).toFixed(1);

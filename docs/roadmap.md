@@ -169,8 +169,8 @@
 
 | 门 | flip/移除条件 | 证据源 |
 |---|---|---|
-| `tier1JaccardCuratorLane: false`（Jaccard 自治 dedup 仍在 Tier-1 kill path） | 观察窗口（aggregator 30 天 / tail 行数限）内被裁决行（create/update/merge，error 不计）≥ 50 条 且 false-merge 份额（would_decision=create）≤ 5% → 翻默认 true | aggregator P1.5 watchdog `tier1_jaccard_shadow.flip_ready`（达标时 advisory 提示，人在 loop 手动 flip） |
-| `conf≥8` 非指令 durable 过渡 fallback（correction-pipeline isTier1Directive） | recall/shadow 审计显示 is_directive 覆盖全部 conf≥8 case → 移除 fallback 回 ADR 原文谓词 | tier1_direct_write audit 的 is_directive 维度（O5 sunset） |
+| `tier1JaccardCuratorLane: false`（显式 rollback 时 Jaccard 自治 dedup 回到 Tier-1 kill path） | 已于 2026-06-12 翻默认 true；保留此项作为 rollback 再评估条件：观察窗口（aggregator 30 天 / tail 行数限）内被裁决行（create/update/merge，error 不计）≥ 50 条 且 false-merge 份额（would_decision=create）≤ 5% | aggregator P1.5 watchdog `tier1_jaccard_shadow.flip_ready`（仅用于 rollback evidence/advisory，不机械自翻） |
+| `conf≥8` 非指令 durable 过渡 fallback（correction-pipeline isTier1Directive，仅 no-target） | 审计窗口内 `tier1_direct_write` 中 `is_directive!==true && confidence>=8` 不再产生被用户纠正的 accepted corrections / recall misses → 移除 fallback 回 ADR 原文谓词 | `tier1_direct_write` audit 的 `is_directive` / `confidence` / correction outcome 维度（O5 sunset） |
 | multi-view skip-cache 7d TTL | P1.5 Pass-1 schema 升级后 not-synthesizable 计数持续为 0 一个季度 → 删 cache | watchdog `pass1_op_not_synthesizable_count` |
 
 ## Deferred exploration

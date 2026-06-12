@@ -63,8 +63,10 @@ assert(shouldEscalateToCurator({ ...ghDirective, confidence: 7, is_directive: tr
 // 5. Non-durable (task-local) stays staged.
 assert(shouldEscalateToCurator({ ...ghDirective, typing: "task-local" }) === false, "task-local -> still staged");
 
-// 6. A targeted UPDATE (has target_entry_slug) is not a CREATE directive.
-assert(shouldEscalateToCurator({ ...ghDirective, target_entry_slug: "some-entry" }) === false, "has target_entry_slug -> not a tier-1 create directive");
+// 6. A targeted NON-directive still stays on the curator path, but a
+//    targeted is_directive=true signal is Tier-1 after PR-A3.
+assert(shouldEscalateToCurator({ ...ghDirective, target_entry_slug: "some-entry" }) === false, "targeted non-directive -> curator path");
+assert(shouldEscalateToCurator({ ...ghDirective, target_entry_slug: "some-entry", confidence: 7, is_directive: true }) === true, "targeted directive -> Tier-1 (target only constrains the conf fallback)");
 
 // 7. No signal / null tolerated.
 assert(shouldEscalateToCurator({ ...ghDirective, signal_found: false }) === false, "signal_found=false -> false");

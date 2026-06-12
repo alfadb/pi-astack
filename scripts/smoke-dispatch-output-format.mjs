@@ -185,6 +185,16 @@ fs.writeFileSync(
 };\n`,
 );
 
+// Stub `./heartbeat-consumer` — Stage 1c added assessLivenessForAnchor
+// import. formatResult doesn't call it; dispatch module load only needs the
+// symbol to exist.
+fs.writeFileSync(
+  path.join(tmpDir, "heartbeat-consumer.js"),
+  `module.exports = {
+  assessLivenessForAnchor: () => ({ status: "unknown", reason: "stub" }),
+};\n`,
+);
+
 // Stub `@earendil-works/pi-coding-agent` — v3 in-process migration added
 // real (non-type) imports: createAgentSession, DefaultResourceLoader,
 // SessionManager, SettingsManager, getAgentDir. formatResult doesn't call

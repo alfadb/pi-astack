@@ -87,29 +87,25 @@ export interface SedimentSettings {
   skipContinuationSanitize: boolean;
 
   /** ADR 0028 PR1: expose existing rules as read-only curator neighbors.
-   *  Default false so the legacy curator prompt/search surface is unchanged
-   *  until the read-only decoder guards are deliberately dogfooded. */
+   *  Default true so curator semantic dedup has the rule context needed by
+   *  ADR 0028 R5'; false is an explicit rollback path. */
   rulesAsReadonlyNeighborsEnabled: boolean;
 
   /** PR-4/P0.3 (ADR 0028 R5'/R2' 调和，O2 裁决 2026-06-10): Tier-1 直写
    *  路径上 Jaccard 近重复命中时的处置。
-   *  - false（default，迁移护栏 §9.4）: 旧路径唯一写者（自主 dedup gate）
-   *    + 新路径只读 shadow audit（tier1_jaccard_shadow 行记录 adjudicator
-   *    的 would-be 裁决，不写盘）。
-   *  - true: Jaccard 命中 → curator LLM 裁决 {update, merge, create}
+   *  - true（default）: Jaccard 命中 → curator LLM 裁决 {update, merge, create}
    *    （禁 skip/stage）；adjudicator 不可用/解析失败 → 确定性 create。
    *    同时 Tier-2 curator lane 的 rules-create 跳过自主 gate（邻居预
    *    过滤已在 curator prompt 内，curator.ts:1056）。
-   *  旧 gate 代码保留为回滚路径至 shadow audit 通过后一个版本。 */
+   *  - false（rollback only）: 回到旧路径自主 dedup gate，并可配合
+   *    tier1JaccardShadowAudit 只读采样裁决。 */
   tier1JaccardCuratorLane: boolean;
 
-  /** PR-4 R1 N1 (opus) / N4 (deepseek): independent opt-out for the
-   *  flag-OFF shadow audit (the read-only adjudicator call on each Tier-1
-   *  cross-slug Jaccard hit). Default true — shadow data IS the §9.4
-   *  cutover evidence — but users on default settings can disable the LLM
-   *  cost/latency without enabling the behavior-changing lane.
-   *  SUNSET: remove together with the legacy gate one version after
-   *  tier1JaccardCuratorLane default-flips. */
+  /** PR-4 R1 N1 (opus) / N4 (deepseek): rollback-mode opt-in shadow audit
+   *  (the read-only adjudicator call on each Tier-1 cross-slug Jaccard hit).
+   *  Default false because the adjudication lane is now live by default; only
+   *  turn this on together with tier1JaccardCuratorLane=false when collecting
+   *  rollback evidence. */
   tier1JaccardShadowAudit: boolean;
 
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
@@ -210,16 +206,15 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoLlmWriteEnabled: true,
   autoWriteRawAuditChars: 8_000,
   skipContinuationSanitize: false,
-  rulesAsReadonlyNeighborsEnabled: false,
-  // PR-B1 (F7, 2026-06-12 plan) FLIP CONDITION (落字, ADR 0024 §7.6 过渡态机械
-  // 门条款): 本默认值的翻转证据 = 观察窗口（aggregator 默认 30 天 / tail 行数
-  // 限）内 tier1_jaccard_shadow 被裁决行（adjudicated：create/update/merge，
-  // shadow_error 不计） ≥ 50 条 且 false-merge 份额 (would_decision=create) ≤ 5%。
-  // aggregator P1.5 watchdog 已
-  // 接 `tier1_jaccard_shadow.flip_ready` 证据流，达标时在 advisory 中提示作者
-  // 手动 flip（人在 loop，不机械自翻）。无条件的过渡态 = 走偏信号。
-  tier1JaccardCuratorLane: false,
-  tier1JaccardShadowAudit: true,
+  rulesAsReadonlyNeighborsEnabled: true,
+  // ADR 0028 R5' cutover (2026-06-12): Jaccard is no longer an autonomous
+  // write-path gate by default. It only reports a near-duplicate candidate
+  // to the closed curator adjudicator ({update, merge, create}); exact slug /
+  // body-hash remain deterministic no-op infrastructure. Operators can set
+  // tier1JaccardCuratorLane:false as a rollback path, optionally with
+  // tier1JaccardShadowAudit:true to collect read-only comparison rows.
+  tier1JaccardCuratorLane: true,
+  tier1JaccardShadowAudit: false,
   promptVersion: {
     activeCorrectionClassifier: "v2",
     reasoningNormalizationPreamble: "v1",

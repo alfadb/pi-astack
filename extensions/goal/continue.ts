@@ -39,6 +39,7 @@ export type AutoContinueAction =
   | "judge_failed"
   | "achieved"
   | "blocked_paused"
+  | "stopped_before_send"
   | "continued";
 
 export interface GoalOutcomeRow {
@@ -59,6 +60,8 @@ export interface AutoContinueDeps {
   judge: () => Promise<GoalJudgeResult>;
   /** Sends the continuation user message (wraps pi.sendUserMessage). */
   sendContinuation: (message: string) => void | Promise<void>;
+  /** Last-chance gate after budget pre-decrement: lets /goal stop win before send. */
+  isStillActive?: (state: GoalState) => boolean | Promise<boolean>;
   notify: (msg: string, type?: string) => void;
   /** Event-first persistence pair (same contract as the /goal commands). */
   appendEvent: (action: string, state: GoalState) => boolean;
@@ -165,6 +168,10 @@ export async function runAutoContinueOnce(deps: AutoContinueDeps): Promise<{ act
     return { action: "judge_failed", detail: "budget_persist_failed" };
   }
   const instruction = d.next_step ?? "Continue working toward the goal; state ACHIEVED or BLOCKED explicitly when true.";
+  if (deps.isStillActive && !(await deps.isStillActive(next))) {
+    deps.notify("goal auto-continue stopped before queuing follow-up", "info");
+    return { action: "stopped_before_send", detail: "stopped_before_send" };
+  }
   await deps.sendContinuation(formatGoalContinuationMessage(state.goal_id, instruction));
   // "queued" wording (gpt R2): sendUserMessage is fire-and-forget — this
   // tell means "intent recorded + message queued", not "delivered".

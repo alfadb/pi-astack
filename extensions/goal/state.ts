@@ -199,7 +199,7 @@ export function newGoalState(args: {
   };
 }
 
-export type GoalAction = "pause" | "resume" | "clear";
+export type GoalAction = "pause" | "resume" | "clear" | "stop";
 
 /** Pure transition. Returns the next state or an error string; never throws.
  *  set is NOT here — it constructs a fresh state (newGoalState) and may
@@ -221,6 +221,9 @@ export function applyGoalAction(
     case "pause":
       if (state.status !== "active") return { ok: false, error: `cannot pause a ${state.status} goal` };
       return { ok: true, state: next("paused") };
+    case "stop":
+      if (state.status !== "active") return { ok: false, error: `cannot stop a ${state.status} goal` };
+      return { ok: true, state: { ...next("paused"), status_note: opts?.note ?? "stopped: auto-continue disabled after current turn" } };
     case "resume":
       if (state.status !== "paused") return { ok: false, error: `cannot resume a ${state.status} goal` };
       return { ok: true, state: next("active") };
@@ -241,7 +244,7 @@ function clampInt(v: number | undefined, min: number, max: number, fallback: num
 
 export type ParsedGoalCommand =
   | { sub: "set"; objective: string; doc?: string; criteria: string[]; maxContinuations?: number; maxMinutes?: number }
-  | { sub: "pause" | "resume" | "clear" | "status" }
+  | { sub: "pause" | "resume" | "clear" | "stop" | "status" }
   | { sub: "error"; error: string };
 
 /** Parse `/goal ...` arguments.
@@ -253,11 +256,11 @@ export function parseGoalArgs(raw: string): ParsedGoalCommand {
   const m = /^(\S+)([\s\S]*)$/.exec(trimmed);
   const sub = m ? m[1] : trimmed;
   const rest = m ? m[2].trim() : "";
-  if (sub === "pause" || sub === "resume" || sub === "clear") {
+  if (sub === "pause" || sub === "resume" || sub === "clear" || sub === "stop") {
     return { sub };
   }
   if (sub !== "set") {
-    return { sub: "error", error: `unknown subcommand "${sub}" (set|pause|resume|clear|status)` };
+    return { sub: "error", error: `unknown subcommand "${sub}" (set|pause|resume|stop|clear|status)` };
   }
   let objective = rest;
   let doc: string | undefined;

@@ -211,7 +211,7 @@ export default function (pi: ExtensionAPI) {
     return { ok: true as const, text, state };
   };
 
-  const actGoal = async (action: "pause" | "resume" | "clear", ctx: any) => {
+  const actGoal = async (action: "pause" | "resume" | "clear" | "stop", ctx: any) => {
     const settings = resolveGoalSettings();
     if (!settings.enabled) return { ok: false as const, error: "goal extension disabled", details: { kind: "goal_disabled" } };
     const cwd = ctx.cwd ?? process.cwd();
@@ -219,7 +219,7 @@ export default function (pi: ExtensionAPI) {
     if (!sessionId) return { ok: false as const, error: "goal requires a persisted session", details: { kind: "no_persisted_session" } };
     if (action === "resume" && isCurrentTurnGoalContinuation(ctx.sessionManager)) return { ok: false as const, error: "goal_resume rejected in goal-continuation machine turn", details: { kind: "machine_turn_rejected" } };
     const current = loadGoalFile(cwd, sessionId);
-    const res = applyGoalAction(current, action);
+    const res = applyGoalAction(current, action, action === "stop" ? { note: "stopped: auto-continue disabled after current turn" } : undefined);
     if (!res.ok) return { ok: false as const, error: res.error, details: { kind: "invalid_transition" } };
     const evOk = appendGoalEvent(action, res.state);
     if (!evOk) ctx.ui?.notify?.("goal event log append FAILED — transition may not survive fork/resume reconcile", "warning");
@@ -280,7 +280,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  for (const [toolName, action] of [["goal_pause", "pause"], ["goal_resume", "resume"], ["goal_clear", "clear"]] as const) {
+  for (const [toolName, action] of [["goal_pause", "pause"], ["goal_resume", "resume"], ["goal_stop", "stop"], ["goal_clear", "clear"]] as const) {
     pi.registerTool({
       name: toolName,
       label: toolName.replace("_", " "),
@@ -297,9 +297,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("goal", {
     description:
-      "Session goal: /goal set <objective> [--criteria=\"a;b\"] [--max-continuations=N] [--max-minutes=M] | pause | resume | clear | status. Active goal is re-injected every turn (compaction-drift guard). Auto-continue ships separately behind goal.autoContinue.",
+      "Session goal: /goal set <objective> [--criteria=\"a;b\"] [--max-continuations=N] [--max-minutes=M] | pause | resume | stop | clear | status. Active goal is re-injected every turn (compaction-drift guard). Auto-continue ships separately behind goal.autoContinue.",
     getArgumentCompletions(prefix: string) {
-      const items = ["set ", "pause", "resume", "clear", "status"];
+      const items = ["set ", "pause", "resume", "stop", "clear", "status"];
       const filtered = items.filter((i) => i.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -331,8 +331,8 @@ export default function (pi: ExtensionAPI) {
         if (!r.ok) notify(`/goal set: ${r.error}`, "warning");
         return;
       }
-      // pause / resume / clear — share tool helper so W1' machine-turn
-      // rejection for resume cannot drift between slash and tool paths.
+      // pause / resume / stop / clear — share tool helper so W1'
+      // machine-turn rejection for resume cannot drift between slash and tool paths.
       const r = await actGoal(parsed.sub, ctx);
       if (!r.ok) {
         notify(`/goal ${parsed.sub}: ${r.error}`, "warning");
@@ -391,6 +391,14 @@ export default function (pi: ExtensionAPI) {
     if (!sessionId) return;
     const state = loadGoalFile(cwd, sessionId);
     if (!state || state.status !== "active") return;
+    if (ctx.signal?.aborted) {
+      const stopped = { ...state, status: "paused" as const, status_note: "stopped: user abort/ESC", updated: new Date().toISOString() };
+      const evOk = appendGoalEvent("stop", stopped);
+      if (!evOk) try { ctx.ui?.notify?.("goal event log append FAILED — stop may not survive reconcile", "warning" as never); } catch { /* noop */ }
+      await saveGoalFile(cwd, stopped);
+      try { ctx.ui?.notify?.("goal stopped: user abort/ESC", "info" as never); } catch { /* noop */ }
+      return;
+    }
     if (autoContinueInFlight.has(sessionId)) return;
     autoContinueInFlight.add(sessionId);
     try {
@@ -445,6 +453,17 @@ export default function (pi: ExtensionAPI) {
           // immediately when idle. Never bare-call from agent_end.
           (pi as unknown as { sendUserMessage(content: string, opts?: { deliverAs?: string }): void })
             .sendUserMessage(message, { deliverAs: "followUp" });
+        },
+        isStillActive: async (next) => {
+          if (ctx.signal?.aborted) {
+            const stopped = { ...next, status: "paused" as const, status_note: "stopped: user abort/ESC", updated: new Date().toISOString() };
+            const evOk = appendGoalEvent("stop", stopped);
+            if (!evOk) try { ctx.ui?.notify?.("goal event log append FAILED — stop may not survive reconcile", "warning" as never); } catch { /* noop */ }
+            await saveGoalFile(cwd, stopped);
+            return false;
+          }
+          const latest = loadGoalFile(cwd, sessionId);
+          return !!latest && latest.goal_id === next.goal_id && latest.status === "active" && latest.counters.continuations_used === next.counters.continuations_used;
         },
         notify: (msg, type) => { try { ctx.ui?.notify?.(msg, type as never); } catch { /* ui may be absent in print mode */ } },
         appendEvent: appendGoalEvent,

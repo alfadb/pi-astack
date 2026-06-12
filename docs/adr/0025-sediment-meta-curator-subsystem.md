@@ -1007,12 +1007,7 @@ P0.5 使用 ` extensions/sediment/prompts/multi-view-pass{1-blind,2-reveal}-v1.m
 
 ##### C. §4.4.4 跨 provider 策略
 
-P0.5 默认 settings (extensions/sediment/settings.ts)：
-  - `reviewerProviders: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4-mini"]`
-  - `fallbackProviders: []`
-  - proposer 仍是单一 deepseek (curator 默认)
-
-静态名单在 selectReviewerModel 中顺序选择。P3 计划动态选择 + rate-limit 处理 + cost 预算  4.4 全部设计跟进。
+P0.5 初始默认 settings 曾在 `extensions/sediment/settings.ts` 内直接给出 reviewer 模型名单；2026-06-12 起源码默认改为 `reviewerProviders: []` / `fallbackProviders: []`，具体模型 ID 只放入 `pi-astack-settings.json`，避免业务模型路由散落在源码默认值中。新装环境为空时，runtime 会在 `autoLlmWriteEnabled === true` 时发一次 advisory/audit，避免 multi-view 静默空跑；已配置环境仍由 `selectReviewerModel` 按静态名单顺序选择。P3 计划动态选择 + rate-limit 处理 + cost 预算 4.4 全部设计跟进。
 
 ##### D. §4.4.5 关键设计点 — batch 3 重点修补
 

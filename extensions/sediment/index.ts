@@ -4377,10 +4377,10 @@ async function tryAutoWriteLane(args: {
       correlationId,
       candidateId: candidateIdFor(correlationId, -1),
     };
-    // PR-4/P0.3 (O2 2026-06-10): with the lane ON, a cross-slug Jaccard hit
-    // comes back as "similar_found" (no write) and the curator adjudicates
-    // {update,merge,create}; with the lane OFF (default), the legacy
-    // autonomous dedup gate stays the sole writer (§9.4 migration guardrail).
+    // PR-4/P0.3 (O2 2026-06-10): with the lane ON (default), a cross-slug
+    // Jaccard hit comes back as "similar_found" (no write) and the curator
+    // adjudicates {update,merge,create}; with the lane OFF (rollback only),
+    // the legacy autonomous dedup gate stays the sole writer.
     let result = await writeAbrainRule(draft, {
       abrainHome,
       settings,

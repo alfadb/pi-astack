@@ -164,10 +164,34 @@ await check("budget persist failure → no send (unbounded-loop guard)", async (
   assert(!log.includes("send"), "send suppressed when budget could not persist");
 });
 
+await check("/goal stop gate after budget persist → no send", async () => {
+  const st = makeState();
+  const log = [];
+  let saved = null;
+  const r = await C.runAutoContinueOnce({
+    state: st,
+    judge: async () => JUDGE_OK("continue"),
+    sendContinuation: () => { log.push("send"); },
+    isStillActive: async () => false,
+    notify: (m) => { log.push(`notify:${m}`); },
+    appendEvent: () => true,
+    saveState: async (s) => { saved = s; return true; },
+    appendOutcome: () => {},
+  });
+  assert(r.action === "stopped_before_send", `action=${r.action}`);
+  assert(saved && saved.counters.continuations_used === 1, "budget pre-decrement persisted before stop gate");
+  assert(!log.includes("send"), "send suppressed after stop gate");
+});
+
 await check("inactive goal → skipped (no judge, no writes)", async () => {
   const { deps, log } = harness(makeState({ status: "paused" }), JUDGE_OK("continue"));
   const r = await C.runAutoContinueOnce(deps);
   assert(r.action === "skipped_inactive" && log.length === 0, `action=${r.action} log=${log.join("|")}`);
+});
+
+await check("agent_end ESC gate persists stop before suppressing follow-up", async () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/goal/index.ts"), "utf-8");
+  assert(/if \(ctx\.signal\?\.aborted\) \{[\s\S]*status: "paused" as const[\s\S]*appendGoalEvent\("stop", stopped\)[\s\S]*await saveGoalFile\(cwd, stopped\)[\s\S]*return false;/.test(src), "isStillActive abort gate must persist paused stop before returning false");
 });
 
 // ── judge parse layer (C6) ─────────────────────────────────────────────

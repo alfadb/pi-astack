@@ -88,6 +88,12 @@ writeFile(path.join(smokeHome, ".pi", "agent", "pi-astack-settings.json"), JSON.
     autoWriteRawAuditChars: 1000,
     multiView: { proposerProviders: [], reviewerProviders: [], fallbackProviders: [] },
   },
+  memory: {
+    search: {
+      stage1Model: "mock/search-stage1",
+      stage2Model: "mock/search-stage2",
+    },
+  },
 }, null, 2));
 
 const failures = [];
@@ -311,15 +317,19 @@ await check("S5: curator prompt labels rule neighbors as READ-ONLY", async () =>
   assert(prompt.includes("Do NOT target a rule slug"), "prompt must warn curator not to mutate rule neighbors");
 });
 
-await check("S6: schema exposes rules flag and removes Tier-1 shadow flag", async () => {
+await check("S6: schema exposes ADR 0028-compliant Jaccard defaults and removes Tier-1 shadow flag", async () => {
   const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf-8"));
   const props = schema.properties?.sediment?.properties ?? {};
-  assert(props.rulesAsReadonlyNeighborsEnabled?.type === "boolean" && props.rulesAsReadonlyNeighborsEnabled?.default === false, "rulesAsReadonlyNeighborsEnabled schema missing/default wrong");
+  assert(props.rulesAsReadonlyNeighborsEnabled?.type === "boolean" && props.rulesAsReadonlyNeighborsEnabled?.default === true, "rulesAsReadonlyNeighborsEnabled schema missing/default wrong");
+  assert(props.tier1JaccardCuratorLane?.type === "boolean" && props.tier1JaccardCuratorLane?.default === true, "tier1JaccardCuratorLane schema missing/default wrong");
+  assert(props.tier1JaccardShadowAudit?.type === "boolean" && props.tier1JaccardShadowAudit?.default === false, "tier1JaccardShadowAudit schema missing/default wrong");
   assert(!Object.prototype.hasOwnProperty.call(props, "tier1ShadowEnabled"), "tier1ShadowEnabled schema flag must be removed");
 });
 
-await check("S7: settings resolver carries rules default and no shadow flag", async () => {
-  assert(DEFAULT_SEDIMENT_SETTINGS.rulesAsReadonlyNeighborsEnabled === false, "rulesAsReadonlyNeighborsEnabled default must be false");
+await check("S7: settings resolver carries ADR 0028-compliant Jaccard defaults and no shadow flag", async () => {
+  assert(DEFAULT_SEDIMENT_SETTINGS.rulesAsReadonlyNeighborsEnabled === true, "rulesAsReadonlyNeighborsEnabled default must be true");
+  assert(DEFAULT_SEDIMENT_SETTINGS.tier1JaccardCuratorLane === true, "tier1JaccardCuratorLane default must be true");
+  assert(DEFAULT_SEDIMENT_SETTINGS.tier1JaccardShadowAudit === false, "tier1JaccardShadowAudit default must be false");
   assert(!Object.prototype.hasOwnProperty.call(DEFAULT_SEDIMENT_SETTINGS, "tier1ShadowEnabled"), "tier1ShadowEnabled default must be removed");
 });
 
@@ -1066,9 +1076,12 @@ await check("S29: PR-A3 — targeted directive commits as rule; follow-up curato
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
   const quote = "以后所有项目用 bun 不用 pnpm。";
   const targetedSignal = { signal_found: true, typing: "durable", confidence: 7, is_directive: true, user_quote: quote, scope_description: "all projects use bun", target_entry_slug: "project-uses-pnpm", correction_intent: "supersede", provenance: "user-expressed", quote_source: "user_message" };
-  // Extractor emits a draft so the follow-up reaches the curator; curator skips.
+  // Extractor emits a draft, memory_search selects the just-created rule
+  // neighbor, and the follow-up reaches the curator; curator skips.
   resetPiAiStub([
     "MEMORY:\ntitle: 项目包管理器偏好\nkind: preference\nconfidence: 5\n---\n# 项目包管理器偏好\n\n用户现在用 bun。这条记录包管理器选择。\nEND_MEMORY",
+    '[{"slug":"all-projects-use-bun","reason":"new Tier-1 rule is the relevant neighbor"}]',
+    '{"relevance_verdict":"has_relevant","picks":[{"slug":"all-projects-use-bun","score":1,"why":"rule covers the directive"}]}',
     '{"op": "skip", "reason": "rule already covers it"}',
   ]);
   const outcome = await _tryAutoWriteLaneForTests({

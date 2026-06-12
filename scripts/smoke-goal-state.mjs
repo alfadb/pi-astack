@@ -51,6 +51,7 @@ await check("parseGoalArgs: subcommands + errors", async () => {
   assert(S.parseGoalArgs("status").sub === "status", "status");
   assert(S.parseGoalArgs("pause").sub === "pause", "pause");
   assert(S.parseGoalArgs("resume").sub === "resume", "resume");
+  assert(S.parseGoalArgs("stop").sub === "stop", "stop");
   assert(S.parseGoalArgs("clear").sub === "clear", "clear");
   assert(S.parseGoalArgs("frobnicate x").sub === "error", "unknown sub -> error");
   assert(S.parseGoalArgs("set").sub === "error", "set without objective -> error");
@@ -87,7 +88,12 @@ await check("status machine: set→pause→resume→clear; invalid transitions r
   assert(S.applyGoalAction(paused.state, "pause").ok === false, "double pause rejected");
   const resumed = S.applyGoalAction(paused.state, "resume");
   assert(resumed.ok && resumed.state.status === "active", "resume");
-  const cleared = S.applyGoalAction(resumed.state, "clear");
+  const stopped = S.applyGoalAction(resumed.state, "stop");
+  assert(stopped.ok && stopped.state.status === "paused" && stopped.state.status_note.startsWith("stopped:"), "stop -> paused with note");
+  assert(S.applyGoalAction(stopped.state, "stop").ok === false, "double stop rejected");
+  const resumedAfterStop = S.applyGoalAction(stopped.state, "resume");
+  assert(resumedAfterStop.ok && resumedAfterStop.state.status === "active", "resume after stop");
+  const cleared = S.applyGoalAction(resumedAfterStop.state, "clear");
   assert(cleared.ok && cleared.state.status === "abandoned", "clear -> abandoned");
   assert(S.applyGoalAction(cleared.state, "clear").ok === false, "clear terminal rejected");
   assert(S.applyGoalAction(cleared.state, "resume").ok === false, "resume abandoned rejected");

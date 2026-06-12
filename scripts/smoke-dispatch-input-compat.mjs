@@ -188,6 +188,16 @@ check("prepareArguments accepts well-formed array (smoke)", () => {
   if (r.tasks[0].model !== "provider-a/model-a") throw new Error("model lost");
 });
 
+check("dispatch_parallel concurrency is provider-scoped, not fixed global worker count", () => {
+  const dispatchSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
+  if (!/export const MAX_PROVIDER_CONCURRENCY = 2;/.test(dispatchSrc)) throw new Error("provider concurrency constant missing");
+  if (!/providerFromModel\(tasks\[i\]\?\.model/.test(dispatchSrc)) throw new Error("provider grouping missing");
+  if (!/activeByProvider\.get\(provider\)[\s\S]*MAX_PROVIDER_CONCURRENCY/.test(dispatchSrc)) throw new Error("same-provider cap not enforced");
+  if (!/const workers = new Array\(total\)/.test(dispatchSrc)) throw new Error("workers should cover all tasks so cross-provider fan-out is not globally capped");
+  if (/const workers = new Array\(Math\.min\(MAX_CONCURRENCY, total\)\)/.test(dispatchSrc)) throw new Error("old fixed global worker cap still present");
+  if (!/same-provider tasks run at most/.test(dispatchSrc)) throw new Error("tool guidance not updated to provider-scoped concurrency");
+});
+
 // ── cleanup ──────────────────────────────────────────────────────
 fs.rmSync(tmpDir, { recursive: true, force: true });
 

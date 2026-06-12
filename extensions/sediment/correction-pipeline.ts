@@ -27,10 +27,10 @@ import type { ModelRegistryLike } from "./llm-extractor";
 // ── Types ─────────────────────────────────────────────────────────────
 
 /** Tier-1 routing predicate (ADR 0028 v1.1 R2', O5-converged form per
- *  docs/audits/2026-06-10-goal-workflow-impl-plan.md PR-2):
+ *  docs/audits/2026-06-10-goal-workflow-impl-plan.md PR-2 + PR-A3):
  *
- *    signal_found ∧ typing=durable ∧ no update target
- *    ∧ provenance==='user-expressed' ∧ (is_directive ∨ confidence ≥ 8)
+ *    signal_found ∧ typing=durable ∧ provenance==='user-expressed'
+ *    ∧ (is_directive ∨ (confidence ≥ 8 ∧ no update target))
  *
  *  provenance==='user-expressed' is the DETERMINISTIC structural gate
  *  (verbatim quote grounded in a user-role turn, computed from turn.role) —
@@ -44,11 +44,13 @@ import type { ModelRegistryLike } from "./llm-extractor";
  *  outcome edge); under-detection is SILENT loss — asymmetric cost,
  *  asymmetric threshold (R2').
  *
- *  SUNSET NOTE (impl plan §O5): the `confidence >= 8` fallback for
- *  NON-directive durable signals is a transitional deviation from R2''s
- *  "iff" definition (migration safety for the pre-is_directive corpus).
- *  Once recall/shadow audits show is_directive covers the conf≥8 cases,
- *  remove the fallback and return to the ADR-literal predicate. */
+ *  SUNSET NOTE (impl plan §O5, F2 audit 2026-06-12): the `confidence >= 8`
+ *  fallback for NON-directive durable signals is a transitional deviation
+ *  from R2''s "iff" definition, retained only for no-target migration safety.
+ *  Its measurable removal condition is: over the audit review window,
+ *  tier1_direct_write rows with is_directive!==true and confidence>=8 no
+ *  longer produce accepted user corrections / recall misses. Then remove the
+ *  fallback and return to the ADR-literal predicate. */
 export function isTier1Directive(signal: CorrectionSignal | null | undefined): boolean {
   // PR-A3 (F6, 2026-06-12 计划附录A v1.1, 3×T0 APPROVE): `!target_entry_slug`
   // is no longer a global exclusion conjunct — a user-role imperative that the

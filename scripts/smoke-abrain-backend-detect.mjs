@@ -465,7 +465,11 @@ fs.writeFileSync(
   transpileTsToCjs(brainLayoutSrc).replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")'),
 );
 fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts")));
-fs.writeFileSync(path.join(tmpDir, "git-sync.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts")));
+fs.writeFileSync(
+  path.join(tmpDir, "git-sync.cjs"),
+  transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts"))
+    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")'),
+);
 // ADR 0022 P3b: index.ts imports ./vault-authorize for PromptDialog overlay
 // path. Stage the transpiled module alongside the other abrain helpers.
 fs.writeFileSync(
@@ -506,6 +510,8 @@ const sharedTargetDir = path.join(tmpDir, "_shared");
 fs.mkdirSync(sharedTargetDir, { recursive: true });
 fs.writeFileSync(path.join(sharedTargetDir, "runtime.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/runtime.ts")));
 fs.copyFileSync(path.join(sharedTargetDir, "runtime.cjs"), path.join(sharedTargetDir, "runtime.js"));
+fs.writeFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
+fs.copyFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), path.join(sharedTargetDir, "git-singleflight.js"));
 const memoryTargetDir = path.join(tmpDir, "memory");
 fs.mkdirSync(memoryTargetDir, { recursive: true });
 for (const m of ["parser", "utils", "settings"]) {
@@ -539,7 +545,8 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\/vault-authorize"\)/g, 'require("./vault-authorize.cjs")')
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector/index.cjs")')
-  .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
+  .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
+  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);
 const indexModule = require(indexFile);

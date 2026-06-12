@@ -338,20 +338,20 @@
 
         "rulesAsReadonlyNeighborsEnabled": {
           "type": "boolean",
-          "default": false,
-          "description": "ADR 0028 PR1 flag. When true, existing abrain rules are appended to curator neighbor context as read-only references for dedup/lifecycle awareness. Existing rules cannot be updated, archived, merged, superseded, or deleted through the sediment auto-write path."
+          "default": true,
+          "description": "ADR 0028 PR1 flag. When true, existing abrain rules are appended to curator neighbor context as read-only references for dedup/lifecycle awareness. Existing rules cannot be updated, archived, merged, superseded, or deleted through the sediment auto-write path. Default true provides the rule-neighbor context required for ADR 0028 R5' semantic dedup."
         },
 
         "tier1JaccardCuratorLane": {
           "type": "boolean",
-          "default": false,
-          "description": "PR-4/P0.3 (ADR 0028 R5'/R2' 调和). When true, a Tier-1 cross-slug Jaccard near-dup hit is adjudicated by a curator LLM ({update,merge,create}, no skip; failure → deterministic create) instead of the legacy autonomous dedup gate; also demotes the Tier-2 gate to curator neighbor pre-filter (requires rulesAsReadonlyNeighborsEnabled). Default false keeps the legacy gate as the sole writer (§9.4 migration guardrail)."
+          "default": true,
+          "description": "PR-4/P0.3 (ADR 0028 R5'/R2' 调和). When true, a Tier-1 cross-slug Jaccard near-dup hit is adjudicated by a curator LLM ({update,merge,create}, no skip; failure → deterministic create) instead of the legacy autonomous dedup gate; also demotes the Tier-2 gate to curator neighbor pre-filter (requires rulesAsReadonlyNeighborsEnabled). Set false only as an explicit rollback to the legacy autonomous gate."
         },
 
         "tier1JaccardShadowAudit": {
           "type": "boolean",
-          "default": true,
-          "description": "PR-4 §9.4 dual-path shadow: while tier1JaccardCuratorLane is false, each Tier-1 cross-slug Jaccard hit also runs the adjudicator READ-ONLY and records its would-be verdict (tier1_jaccard_shadow audit row). Set false to drop the extra LLM call/latency without enabling the lane. SUNSET: removed together with the legacy gate after cutover."
+          "default": false,
+          "description": "PR-4 rollback-mode shadow audit. When tier1JaccardCuratorLane is false, setting this true runs the adjudicator READ-ONLY for each Tier-1 cross-slug Jaccard hit and records its would-be verdict (tier1_jaccard_shadow audit row). Default false because the adjudication lane is live by default."
         },
 
         "promptVersion": {
@@ -382,9 +382,9 @@
             },
             "reviewerProviders": {
               "type": "array",
-              "default": ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4-mini"],
+              "default": [],
               "items": { "type": "string" },
-              "description": "Ordered reviewer model refs used by multi-view Pass 1/Pass 2. Defaults are non-deepseek to diversify from the default curator."
+              "description": "Ordered reviewer model refs used by multi-view Pass 1/Pass 2. Empty means no reviewer is configured; when autoLlmWriteEnabled is true the runtime emits a one-time advisory/audit instead of silently degrading. Put concrete model IDs in pi-astack-settings.json, not source defaults."
             },
             "fallbackProviders": {
               "type": "array",

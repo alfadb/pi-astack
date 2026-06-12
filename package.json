@@ -32,6 +32,7 @@
     "smoke:entry-lifecycle-proposals": "node scripts/smoke-entry-lifecycle-proposals.mjs",
     "smoke:cas-guard": "node scripts/smoke-cas-guard.mjs",
     "smoke:staging-resolver": "node scripts/smoke-staging-resolver.mjs",
+    "smoke:staging-ageout": "node scripts/smoke-staging-ageout.mjs",
     "smoke:memory-path-a": "node scripts/smoke-memory-path-a.mjs",
     "smoke:dispatch": "node scripts/smoke-dispatch-input-compat.mjs",
     "smoke:dispatch-output-format": "node scripts/smoke-dispatch-output-format.mjs",
@@ -97,6 +98,11 @@
     "smoke:empty-visible-output-retry": "node scripts/smoke-empty-visible-output-retry.mjs",
     "smoke:task-local-working-set": "node scripts/smoke-task-local-working-set.mjs",
     "smoke:outcome-classifier-enrich": "node scripts/smoke-outcome-classifier-enrich.mjs",
+    "smoke:script-registry-drift": "node scripts/smoke-script-registry-drift.mjs",
+    "smoke:adr-readme-anchors": "node scripts/smoke-adr-readme-anchors.mjs",
+    "smoke:aggregator-llm-parse": "node scripts/smoke-aggregator-llm-parse.mjs",
+    "smoke:aggregator-structural-context": "node scripts/smoke-aggregator-structural-context.mjs",
+    "smoke:p15-pass1-op-breakdown": "node scripts/smoke-p15-pass1-op-breakdown.mjs",
     "smoke:tier1-jaccard-adjudication": "node scripts/smoke-tier1-jaccard-adjudication.mjs",
     "smoke:goal-state": "node scripts/smoke-goal-state.mjs",
     "smoke:goal-autocontinue": "node scripts/smoke-goal-autocontinue.mjs",
@@ -104,7 +110,9 @@
     "smoke:workflow-dsl": "node scripts/smoke-workflow-dsl.mjs",
     "smoke:workflow-executor": "node scripts/smoke-workflow-executor.mjs",
     "smoke:workflow-tools": "node scripts/smoke-workflow-tools.mjs",
-    "smoke:model-curator-tiers": "node scripts/smoke-model-curator-tiers.mjs"
+    "smoke:model-curator-tiers": "node scripts/smoke-model-curator-tiers.mjs",
+    "dossier:classifier-prompt": "node scripts/dossier-classifier-prompt.mjs",
+    "dossier:tier1-adjudicator-prompt": "node scripts/dossier-tier1-adjudicator-prompt.mjs"
   },
   "pi": {
     "extensions": [

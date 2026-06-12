@@ -115,7 +115,8 @@ for (const file of [
   // the relative require uniformly; harmless no-op for files that don't
   // import _shared today.
   const compiled = transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`))
-    .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
+    .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
+    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
@@ -123,6 +124,8 @@ for (const file of [
 fs.mkdirSync(path.join(tmpDir, "_shared"), { recursive: true });
 fs.writeFileSync(path.join(tmpDir, "_shared", "runtime.cjs"), transpile(path.join(repoRoot, "extensions/_shared/runtime.ts")));
 fs.copyFileSync(path.join(tmpDir, "_shared", "runtime.cjs"), path.join(tmpDir, "_shared", "runtime.js"));
+fs.writeFileSync(path.join(tmpDir, "_shared", "git-singleflight.cjs"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
+fs.copyFileSync(path.join(tmpDir, "_shared", "git-singleflight.cjs"), path.join(tmpDir, "_shared", "git-singleflight.js"));
 fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
 
 const bootstrap = require(path.join(tmpDir, "bootstrap.cjs"));
@@ -146,7 +149,8 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector.js")')
-  .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
+  .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
+  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCompiled);
 const indexModule = require(path.join(tmpDir, "index.cjs"));
 
