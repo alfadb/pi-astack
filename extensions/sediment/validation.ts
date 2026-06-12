@@ -5,6 +5,9 @@ export const ENTRY_KINDS = [
 export const ENTRY_STATUSES = [
   "provisional", "active", "contested", "deprecated", "superseded", "archived",
 ] as const;
+// ADR 0028 §12 AX-MATURITY: `deprecated` is retained for backward-compatible
+// draft/frontmatter validation only. New write paths should emit `superseded`;
+// read paths fold legacy `deprecated` to `superseded` in memory/parser.ts.
 
 export type EntryKind = typeof ENTRY_KINDS[number];
 export type EntryStatus = typeof ENTRY_STATUSES[number];

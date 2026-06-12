@@ -384,8 +384,9 @@ function parseCorrectionSignal(raw: string): CorrectionSignal | null {
 
   try {
     const p = JSON.parse(body);
+    if (!p || typeof p !== "object" || typeof p.signal_found !== "boolean") return null;
     return {
-      signal_found: p.signal_found ?? false,
+      signal_found: p.signal_found,
       typing: p.typing,
       scope_description: p.scope_description,
       correction_intent: p.correction_intent,

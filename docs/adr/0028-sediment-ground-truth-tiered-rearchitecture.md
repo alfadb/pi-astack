@@ -216,7 +216,7 @@ staging **仅**留给 (a) 真正不确定的 Tier-2 假设 / 不可归属信号,
 R1'-R6' **全部不变**--它们本就挂在 AX-PROVENANCE 上(R2' 的 `quote_source=user_message` 就是 AX-PROVENANCE=user-expressed 的机械化)。本节只把"Tier 是主分区轴"的**措辞**校正为"Tier = AX-PROVENANCE 的计算谓词",并把 provenance 从 ephemeral(只活在 classifier 决策瞬间)改为**落盘**,使 R4' outcome-edge 的降级可审计(§8 "走偏信号"已要求这点)。
 
 ### 12.5 随手发现的真 bug(实现期修)
-`entryMatchesFilters`(extensions/memory/search.ts)默认仅排除 `archived` → `superseded`/`deprecated` 漏网,与 active 同等呈现("superseded 看起来仍 active")。按 AX-MATURITY 默认可见规则,需补默认排除 `superseded`(deprecated 已 folds)。
+`entryMatchesFilters`(extensions/memory/search.ts)默认仅排除 `archived` → `superseded`/`deprecated` 漏网,与 active 同等呈现("superseded 看起来仍 active")。按 AX-MATURITY 默认可见规则,需补默认排除 `superseded`(deprecated 已 folds)。注意: `provisional` / `contested` 默认可见不是漏网,而是 §12.2 本义——`provisional` 是未知/降级态中性 sink,`contested` 是 live-but-disputed 降级目标,调用方要隐藏它们必须显式传 `filters.status=active`。
 
 ### 12.6 三轮分层辩论评审史
 - R1:三家以不同棱镜(正交性/需求反推/死层与失效)独立判每轴,收敛 L-ZONE/L-TRUST/L-GTIER/L-STAGING/L-TIER 降级、L-SCOPE 保留、L-STATUS 过度枚举;分歧:kind 数量、provenance 是否落盘。

@@ -1,6 +1,6 @@
-# ADR 0025 v2 — Sediment Meta-Curator：让 sediment 演化为 ADR 0024 第二大脑
+# ADR 0025 v3 — Sediment Meta-Curator：让 sediment 演化为 ADR 0024 第二大脑
 
-- **状态**：v2 草稿（2026-05-22），等待用户 review 后覆盖 v1（R0/R1/R1.1/R1.2）。
+- **状态**：v3 consolidated baseline（2026-06-12）。v2 草稿已被实现批次消化；正文保留架构基线，实施漂移统一收编到 §0.1 快照与各能力点的“实施状态”段。
 - **目的**：[ADR 0024](0024-second-brain-from-natural-conversation.md) §5 六条能力点的具体落地设计。ADR 0024 说的是 "是什么 / 为什么"（含 4 条 invariant + AI-Native 原则 + 能力点骨架），本 ADR 说的是 "现状是什么 / 缺什么 / 怎么填"。
 - **范围**：sediment 扩展 + abrain (brain backend) + memory (retrieval facade) 三个 extension 一起看。具体改哪个文件 / 哪一段代码、哪些下游 ADR 要反向 patch，在 §4 / §5 落点。
 - **不在本 ADR 范围**：(a) 重申 ADR 0024 invariant / 哲学（重复就是 drift 风险）；(b) 跑 audit / 跑 dogfood / 实际 ship——这是后续 PR 的事。
@@ -8,6 +8,17 @@
 **v1 → v2 重写动机**：v1 R0 → R1.2 是补丁式叠加，§0.5 残留旧 "C." 标题、§8 两套 phase 表共存、§1 接口面是 markdown 脑补未对照过实际代码。v2 一次性整理：以 ADR 0024 为基准、以 sediment / abrain / memory 当前 23K 行 TS 真实代码为对照、扔掉 R8 P0-X / R1 / R1.1 / R1.2 patch 标记，重新组织。
 
 v1 内容保留在 git history（commits `bd16805` → `417730f`）；R8 audit 文档独立存活作 archive 决策 paper trail（不并入本 ADR）。
+
+## 0.1 v3 实施状态快照（2026-06-12）
+
+| 能力点 | 当前状态 | 代码锚点 |
+|---|---|---|
+| 主动纠错识别 | 已落地：classifier v2 + AX-PROVENANCE + Tier-1 direct / targeted directive 路径；`signal_found` 缺失已按 schema failure 处理，不再静默归零 | `extensions/sediment/correction-pipeline.ts` |
+| outcome self-report | 已落地：memory-footnote 协议 + outcome-ledger，失败写入有 audit；confirmatory/self-echo 去重由 R4' edge 处理 | `extensions/sediment/outcome-collector.ts` |
+| 跨会话 aggregator | 已落地：prompt-native skeptical historian v1 + degraded mechanical fallback + classifier health / multi-view watchdog | `extensions/sediment/aggregator-llm.ts` |
+| multi-view verification | 已落地：blind/reveal 双阶段、跨 provider reviewer、defer/replay、真实写脑与 abandoned 软归档；Tier-1 指令 defer 走确定性提交 | `extensions/sediment/multi-view.ts`, `extensions/sediment/multiview-staging-replay.ts` |
+| classifier prompt 演进 | 已落地：promptVersion substrate、`/abrain audit classifier` 诊断、v1/v2 prompt 并存兼容 | `extensions/sediment/settings.ts`, `extensions/abrain/index.ts` |
+| 静默归档 + 回滚窗口 | 已落地 v1：archive-reactivation reviewer、advisory lock、debounce、reactivate / hard_archive_recommended；实际 hard delete 仍按 writer-side CAS/expected-status 后续门控 | `extensions/sediment/archive-reactivation.ts` |
 
 ---
 
@@ -1216,7 +1227,7 @@ R2+ multi-LLM audit 必须 explicit 评估以下问题才能选项：
 
 P5.5 原设想的三条硬条件是为了“原作者不在看时防静默 durable 区污染”设计的。单用户仓里**用户 = 作者**，错沉淀表现为直接的 dogfood 挫败 —— 反馈环比三用户 dogfood 设想的紧得多。因此在该仓上以“用户授权 + 三态退路在位”为前提提前跳过三条硬条件。
 
-**仍待完成**：§4.1 T1-1 typing 路由部分完成（2026-05-24 commit `<dispatch-helper>`）：debug 不进 curator、task-local 不污染当前 curator、durable 保留 curator forward；session-local working set 未实现（task-local 从未来 curator 丢失）。现在 audit 能直接按 dispatch decision (`forwarded_to_curator`/`dropped_debug`/`dropped_task_local`/`dropped_unknown_typing`) 分 bucket 计算 false-positive 率，一旦积累一段时间可回头验证本次跳过硬条件的决策是否被数据证伪。
+**2026-06-12 状态更新**：§4.1 T1-1 typing 路由与 session-local working set 已落地：debug 不进 curator、task-local 不写 durable 区但进入同会话后续 curator context、durable 保留 curator forward。现在 audit 能直接按 dispatch decision (`forwarded_to_curator`/`dropped_debug`/`dropped_task_local`/`dropped_unknown_typing`) 分 bucket 计算 false-positive 率，一旦积累一段时间可回头验证本次跳过硬条件的决策是否被数据证伪。
 
 ---
 

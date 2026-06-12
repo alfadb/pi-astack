@@ -935,6 +935,27 @@ await check("S24: F1 — unparseable classifier output is ok:false + parse_error
   assert(garbage.parseError === true, `parse failure must set parseError, got ${JSON.stringify(garbage)}`);
   assert(String(garbage.error || "").includes("classifier_output_unparseable"), `error must name the failure class, got ${garbage.error}`);
   assert(garbage.signal === null && garbage.stagingWritten === false, "parse failure must not fabricate a signal or stage");
+  // Legal JSON without the required signal_found boolean is also a schema
+  // failure, not an implicit no-signal. This catches prompt key drift.
+  resetPiAiStub(['```json\n{"reasoning": "no correction in window"}\n```']);
+  const missingSignalFound = await runCorrectionPipeline(
+    [makeUserEntry("u1", "以后所有仓库都用 gh 管理。")],
+    [],
+    { settings: { ...baseSettings, classifierModel: "mock/classifier" }, modelRegistry: mockRegistry },
+  );
+  assert(missingSignalFound.ok === false, `missing signal_found must be ok:false, got ${JSON.stringify(missingSignalFound)}`);
+  assert(missingSignalFound.parseError === true, `missing signal_found must set parseError, got ${JSON.stringify(missingSignalFound)}`);
+  assert(String(missingSignalFound.error || "").includes("classifier_output_unparseable"), `missing signal_found must use parse failure class, got ${missingSignalFound.error}`);
+  assert(missingSignalFound.signal === null && missingSignalFound.stagingWritten === false, "missing signal_found must not fabricate a no-signal or stage");
+  resetPiAiStub(['```json\n{"signal_found": "false", "reasoning": "no correction in window"}\n```']);
+  const nonBooleanSignalFound = await runCorrectionPipeline(
+    [makeUserEntry("u1", "以后所有仓库都用 gh 管理。")],
+    [],
+    { settings: { ...baseSettings, classifierModel: "mock/classifier" }, modelRegistry: mockRegistry },
+  );
+  assert(nonBooleanSignalFound.ok === false, `non-boolean signal_found must be ok:false, got ${JSON.stringify(nonBooleanSignalFound)}`);
+  assert(nonBooleanSignalFound.parseError === true, `non-boolean signal_found must set parseError, got ${JSON.stringify(nonBooleanSignalFound)}`);
+  assert(nonBooleanSignalFound.signal === null && nonBooleanSignalFound.stagingWritten === false, "non-boolean signal_found must not fabricate a no-signal or stage");
   // Control: a valid no-signal JSON stays ok:true WITHOUT parseError.
   resetPiAiStub(['```json\n{"signal_found": false, "reasoning": "no correction in window"}\n```']);
   const noSignal = await runCorrectionPipeline(

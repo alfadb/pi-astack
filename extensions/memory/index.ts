@@ -356,9 +356,9 @@ export default function (pi: ExtensionAPI) {
       "Mixed-language retrieval prompts work: e.g. '找关于知识沉淀 extractor prompt 的 durable rule' can match both Chinese and English entries.",
       "Do not ask for a project/world/backend selector; the Facade merges and ranks results internally.",
       "Search results are summaries. Call memory_get(slug) when you need the full compiled truth or timeline.",
-      "Default results exclude archived entries; pass filters.status if the user explicitly asks for archived/deprecated history.",
+      "Default results exclude archived/superseded entries; legacy deprecated entries fold to superseded at parse time, so pass filters.status if the user explicitly asks for replaced/history entries.",
       "LLM search hard-errors if its configured model is unavailable; there is no grep degradation path because accuracy is the contract.",
-      "Valid kinds: maxim, decision, anti-pattern, pattern, fact, preference, smell. Valid statuses: active, archived, superseded, deprecated, provisional, contested.",
+      "Valid kinds: maxim, decision, anti-pattern, pattern, fact, preference, smell. Valid statuses: active, archived, superseded, provisional, contested.",
     ],
     parameters: Type.Object({
       query: Type.String({ description: "Natural-language retrieval prompt. State the full retrieval intent, including Chinese/English mixed terms, semantic context, and what kind of memory would be useful; ADR 0015 LLM retrieval interprets paraphrases and translates intent across languages." }),
