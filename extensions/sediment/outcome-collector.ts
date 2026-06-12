@@ -487,8 +487,13 @@ export interface RuleOutcomeEdgeRow {
   project_id?: string;
   /** Rule status observed at edge time (before any CONTRADICT mutation). */
   rule_status?: string;
-  /** See evidence taxonomy in the section comment above. */
-  evidence_source: "self_report" | "user_directive_restatement";
+  /** See evidence taxonomy in the section comment above.
+   *  PR-B2 (F8, 2026-06-12 plan): `user_directive_stance_flip` = transcript-
+   *  keyed user imperative with HIGH lexical overlap to an injected rule but
+   *  FLIPPED stance (negation/substitution on a shared object) — the
+   *  user-anchored CONTRADICT source ADR 0028 §7 envisioned (agent cannot
+   *  author user turns, so this is structurally immune to self-echo). */
+  evidence_source: "self_report" | "user_directive_restatement" | "user_directive_stance_flip";
   /** CONTRADICT only: result of the strong-demote attempt. */
   status_mutation?: string;
   outcome_used?: string;
@@ -518,6 +523,41 @@ function readEdgeLedgerTailLines(ledgerPath: string): string[] {
   }
 }
 
+function readExistingRuleOutcomeEdgeKeys(): Set<string> {
+  const existing = new Set<string>();
+  const ledgerPath = path.join(userGlobalSedimentDir(), "rule-outcome-edge.jsonl");
+  if (fs.existsSync(ledgerPath)) {
+    for (const line of readEdgeLedgerTailLines(ledgerPath)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as Partial<RuleOutcomeEdgeRow>;
+        if (parsed && typeof parsed === "object" && typeof parsed.session_id === "string" && typeof parsed.rule_slug === "string" && typeof parsed.edge === "string") {
+          existing.add(ruleOutcomeEdgeDedupKey(parsed as RuleOutcomeEdgeRow));
+        }
+      } catch {
+        // Tolerate corrupt historical lines — same best-effort posture as
+        // readOutcomeLedger().
+      }
+    }
+  }
+  return existing;
+}
+
+/** PR-B2 (F8) blind-review convergence: dedup PRE-CHECK so callers can run a
+ *  side-effecting action (strong demote) BEFORE appending its ledger row —
+ *  the row can then carry the action's outcome (`status_mutation`) without
+ *  burning the dedup key on a row that predates the action. Keeps the dedup
+ *  key derivation in this module (single source of truth). */
+export function hasRuleOutcomeEdgeRow(row: RuleOutcomeEdgeRow): boolean {
+  try {
+    ensureUserGlobalSidecarMigrated();
+    return readExistingRuleOutcomeEdgeKeys().has(ruleOutcomeEdgeDedupKey(row));
+  } catch {
+    return false;
+  }
+}
+
 /** Returns the rows actually appended (the delta), so callers can gate their
  *  own observability (e.g. audit rows) on "new evidence landed". */
 export function appendRuleOutcomeEdgeRows(rows: RuleOutcomeEdgeRow[]): RuleOutcomeEdgeRow[] {
@@ -527,22 +567,7 @@ export function appendRuleOutcomeEdgeRows(rows: RuleOutcomeEdgeRow[]): RuleOutco
     const dir = userGlobalSedimentDir();
     fs.mkdirSync(dir, { recursive: true });
     const ledgerPath = path.join(dir, "rule-outcome-edge.jsonl");
-    const existing = new Set<string>();
-    if (fs.existsSync(ledgerPath)) {
-      for (const line of readEdgeLedgerTailLines(ledgerPath)) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed) as Partial<RuleOutcomeEdgeRow>;
-          if (parsed && typeof parsed === "object" && typeof parsed.session_id === "string" && typeof parsed.rule_slug === "string" && typeof parsed.edge === "string") {
-            existing.add(ruleOutcomeEdgeDedupKey(parsed as RuleOutcomeEdgeRow));
-          }
-        } catch {
-          // Tolerate corrupt historical lines — same best-effort posture as
-          // readOutcomeLedger().
-        }
-      }
-    }
+    const existing = readExistingRuleOutcomeEdgeKeys();
     const lines: string[] = [];
     const appended: RuleOutcomeEdgeRow[] = [];
     for (const row of rows) {

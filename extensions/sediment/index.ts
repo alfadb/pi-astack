@@ -59,7 +59,7 @@ import { writeStagingEntry } from "./staging-loader";
 import type { RuleDraft } from "./rule-writer";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
-import { appendRuleOutcomeEdgeRows, collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug, type OutcomeRow, type RuleOutcomeEdgeRow } from "./outcome-collector";
+import { appendRuleOutcomeEdgeRows, hasRuleOutcomeEdgeRow, collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug, type OutcomeRow, type RuleOutcomeEdgeRow } from "./outcome-collector";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
@@ -617,6 +617,70 @@ function recallOverlapScore(a: string, b: string): number {
   return intersection / smaller.size;
 }
 
+// ── PR-B2 (F9, 2026-06-12 plan): mechanical stance detection ──
+// The 0.72 char-gram overlap can mark a REVERSAL as a restatement when the
+// sentence shares long boilerplate with the rule but flips one key token
+// (B5 pnpm/yarn archetype). Detection stays mechanical (R4' "尽量
+// mechanical") and deliberately NARROW for precision: stance objects are
+// ASCII-ish tool/library tokens (≥2 chars) captured after explicit
+// negation / endorsement markers; CJK-object segmentation is out of scope
+// (documented limitation — classifier 补位).
+// R1 convergence (fable BLOCKING-1 / gpt #1): the negation alternation must
+// cover the common Chinese/English negation surface — any negation phrasing
+// MISSING from this list whose tail is 用/使用/use would be re-captured by the
+// bare-用 endorsement pattern and INVERT the stance (reaffirmation → false
+// demote). Keep this list generous and the endorsement list conservative.
+const STANCE_NEGATION_OBJECT_RE = /(?:不要再?|不再|别再?|不准|不许|不得|不能再?|不允许再?|不应该?|不该|不可以?|不必再?|不需要再?|没必要再?|不使用|不用|严禁|杜绝|切忌|避免|勿|禁止再?|禁用|停止|停用|弃用|废弃|(?<![a-z])(?:don'?t|do\s+not|never|stop|avoid|no\s+longer|must\s+not|mustn'?t|should\s+not|shouldn'?t|cannot|can'?t|won'?t)\s+(?:ever\s+)?(?:use|using))\s*(?:用|使用)?\s*([A-Za-z][A-Za-z0-9_.\-]{1,40})/gi;
+// English markers need word boundaries (fable Major-3: bare `use` matches the
+// tail of "because"). Whitespace is `\s*` on both sides (deepseek F1: 中文用法
+// 常省略英文 token 前的空格；[A-Za-z] 首字符已防 CJK 泄漏).
+const STANCE_ENDORSE_OBJECT_RE = /(?:改用|换成|改成|切换到|统一用|只用|必须用|优先用|使用|用|(?<![a-z])(?:switch(?:ed)?\s+to|prefer|adopt|use))\s*([A-Za-z][A-Za-z0-9_.\-]{1,40})/gi;
+
+function extractStanceObjects(text: string): { endorsed: Set<string>; negated: Set<string> } {
+  // Smart apostrophes survive into the raw quote (normalizeRecallText only
+  // runs on the overlap path) — normalize so `don’t use` hits the negation
+  // branch instead of inverting via the bare `use` endorsement (fable B1).
+  const normalized = text.normalize("NFKC").replace(/[‘’]/g, "'");
+  // Sentence-final ASCII punctuation sticks to the token (`pnpm.`) because
+  // the directive splitter does not split on ASCII '.' — trim it (fable M4).
+  const cleanToken = (raw: string): string => raw.toLowerCase().replace(/[._\-]+$/, "");
+  const negated = new Set<string>();
+  const endorsed = new Set<string>();
+  for (const m of normalized.matchAll(STANCE_NEGATION_OBJECT_RE)) {
+    const token = cleanToken(m[1]);
+    if (token.length >= 2) negated.add(token);
+  }
+  for (const m of normalized.matchAll(STANCE_ENDORSE_OBJECT_RE)) {
+    const token = cleanToken(m[1]);
+    // Negation wins inside the same text: "不用 pnpm" also matches the bare
+    // 用-endorsement pattern; a token cannot be both in one utterance.
+    if (token.length >= 2 && !negated.has(token)) endorsed.add(token);
+  }
+  return { endorsed, negated };
+}
+
+/** True ⇔ the quote takes the OPPOSITE stance from the rule text on a shared
+ *  object: quote negates what the rule endorses, or endorses what the rule
+ *  negates. Symmetric-stance overlap (both endorse / both negate) is NOT a
+ *  flip. Empty extraction on either side → false (fail-open to MATCH; the
+ *  classifier remains the semantic authority).
+ *
+ *  Documented narrowness (R1 deepseek F2/F3, accepted): (1) pure
+ *  substitution with DISJOINT tokens ("统一用 yarn" vs rule "统一用 pnpm",
+ *  no negation of pnpm) is NOT detected — same-token cross-stance only;
+ *  (2) "不用" is ambiguous ("不用担心 pnpm 的兼容问题" → false negated-pnpm),
+ *  bounded by the ≥0.72 overlap gate upstream and by contested being
+ *  visible + reversible (ADR 0028 §12.2). */
+function directiveStanceFlipped(quote: string, ruleText: string): boolean {
+  const q = extractStanceObjects(quote);
+  if (q.endorsed.size === 0 && q.negated.size === 0) return false;
+  const r = extractStanceObjects(ruleText);
+  for (const t of q.negated) if (r.endorsed.has(t)) return true;
+  for (const t of q.endorsed) if (r.negated.has(t)) return true;
+  return false;
+}
+export const _directiveStanceFlippedForTests = directiveStanceFlipped;
+
 function isDirectiveLikeSentence(sentence: string): boolean {
   const text = sentence.trim();
   if (!text) return false;
@@ -682,9 +746,10 @@ function detectDirectiveRecallCandidates(
   entries: unknown[],
   rules: ReturnType<typeof getCurrentInjectedRuleEntries> = getCurrentInjectedRuleEntries(),
   coveredTexts: string[] = [],
-): { missing: DirectiveRecallCandidate[]; restated: DirectiveRestatement[] } {
+): { missing: DirectiveRecallCandidate[]; restated: DirectiveRestatement[]; contradicted: DirectiveRestatement[] } {
   const missing: DirectiveRecallCandidate[] = [];
   const restated: DirectiveRestatement[] = [];
+  const contradicted: DirectiveRestatement[] = [];
   const seen = new Set<string>();
   for (const entry of entries) {
     const user = userTextForDirectiveRecall(entry);
@@ -693,18 +758,37 @@ function detectDirectiveRecallCandidates(
       const normalized = normalizeRecallText(quote);
       if (!normalized || seen.has(normalized)) continue;
       seen.add(normalized);
-      // Same-turn writes (coveredTexts) win: that utterance is the ORIGIN of
-      // a rule, not a reuse of an existing one — neither a recall gap nor a
-      // restatement MATCH.
-      if (hasCoveredDirectiveText(quote, coveredTexts)) continue;
+      // Same-turn writes (coveredTexts) win for recall/MATCH purposes: that
+      // utterance is the ORIGIN of a rule, not a reuse of an existing one.
+      // R1 convergence (fable BLOCKING-2 / gpt #2): covered must NOT suppress
+      // the stance-flip CONTRADICT — in the primary B5 flow Tier-1 captures
+      // the reversal same-turn, and the STALE rule still needs its demote.
+      const covered = hasCoveredDirectiveText(quote, coveredTexts);
       const rule = findCorrespondingInjectedRule(quote, rules);
       if (rule) {
+        // PR-B2 (F9): high overlap + FLIPPED stance is a REVERSAL, not a
+        // restatement — it must not be counted as MATCH, must not suppress
+        // the recall flag (unless the same turn already wrote the covering
+        // rule), and becomes the user-anchored CONTRADICT evidence (F8).
+        if (directiveStanceFlipped(quote, ruleInjectedText(rule))) {
+          contradicted.push({ ...(user.entryId ? { entryId: user.entryId } : {}), quote, rule });
+          if (!covered) {
+            missing.push({
+              ...(user.entryId ? { entryId: user.entryId } : {}),
+              quote,
+              reason: "user_role_imperative_reverses_injected_rule",
+            });
+          }
+          continue;
+        }
+        if (covered) continue;
         // ADR 0028 R4' user-anchored MATCH: the user re-expressed a directive
         // we already inject. The agent cannot author user turns, so this
         // evidence is structurally immune to self-echo.
         restated.push({ ...(user.entryId ? { entryId: user.entryId } : {}), quote, rule });
         continue;
       }
+      if (covered) continue;
       missing.push({
         ...(user.entryId ? { entryId: user.entryId } : {}),
         quote,
@@ -712,7 +796,7 @@ function detectDirectiveRecallCandidates(
       });
     }
   }
-  return { missing, restated };
+  return { missing, restated, contradicted };
 }
 
 async function auditDirectiveRecall(args: {
@@ -722,10 +806,99 @@ async function auditDirectiveRecall(args: {
   lane?: "diagnostic" | "auto_write" | "explicit" | "about_me" | "drain";
   correlationId?: string;
   coveredTexts?: string[];
+  /** PR-B2 (F8): when provided, a user-anchored stance-flip CONTRADICT also
+   *  STRONG-DEMOTES the rule (status→contested + tell), mirroring the
+   *  self-report CONTRADICT path in applyRuleOutcomeEdge. Absent (diagnostic
+   *  callers / smokes that only probe recall) → contradiction is still
+   *  ledgered + audited, no mutation. */
+  demote?: { abrainHome: string; settings: SedimentSettings; notify?: (message: string, type: string) => void };
 }): Promise<void> {
   const injectedRules = getCurrentInjectedRuleEntries();
-  const { missing: candidates, restated } = detectDirectiveRecallCandidates(args.window.entries, injectedRules, args.coveredTexts ?? []);
+  const { missing: candidates, restated, contradicted } = detectDirectiveRecallCandidates(args.window.entries, injectedRules, args.coveredTexts ?? []);
   const nonce = getCurrentRuleInjectionNonce();
+  // PR-B2 (F8): user-anchored CONTRADICT — §7's "注入 R → 下一轮用户行为
+  // 矛盾 R" finally has a transcript-keyed mechanical source, symmetric to
+  // the restatement MATCH below. Asymmetric by design: CONTRADICT strong-
+  // demotes; 误报代价 = contested 仍可见可纠（ADR 0028 §12.2）。
+  if (contradicted.length > 0 && nonce) {
+    // R1 convergence (fable M5/M6, gpt #3, deepseek F4): per-candidate flow,
+    // dedup PRE-CHECK → demote → ledger row CARRYING status_mutation → audit
+    // with the demote result. No lossy slug-join, no ledger row that
+    // predates (and thus cannot record) its own demote. A throw between
+    // demote and append can re-demote on rescan — accepted corner: the
+    // mutation is idempotent on status and the tell is per-success.
+    const demotedThisCall = new Set<string>();
+    for (const c of contradicted) {
+      const eventId = `stance_flip:${c.rule.slug}:${createHash("sha256").update(normalizeRecallText(c.quote)).digest("hex").slice(0, 16)}`;
+      const baseRow = {
+        ts: new Date().toISOString(),
+        session_id: args.sessionId,
+        injection_nonce: nonce,
+        edge: "CONTRADICT" as const,
+        rule_slug: c.rule.slug,
+        rule_scope: c.rule.scope,
+        ...(c.rule.projectId ? { project_id: c.rule.projectId } : {}),
+        rule_status: c.rule.status,
+        evidence_source: "user_directive_stance_flip" as const,
+        // Stable per-utterance id: same reversal re-scanned in the same
+        // session dedups (no repeated demote attempts).
+        outcome_event_id: eventId,
+      };
+      // NOTE: a demote-less caller would burn this dedup key with
+      // not_applied and mask a later in-session demote for the same quote —
+      // theoretical today (all five production call sites pass `demote`;
+      // only smokes omit it), flagged here for future callers.
+      if (hasRuleOutcomeEdgeRow(baseRow)) continue;
+      let statusMutation = "not_applied";
+      let demoteResult: ReturnType<typeof resultSummary> | undefined;
+      // Don't demote twice for two distinct flip quotes against the same
+      // rule in one window, and don't re-demote an already-contested rule
+      // (the mutation rewrites unconditionally and would re-tell).
+      const ruleKey = compoundRuleKey(c.rule);
+      if (args.demote && c.rule.status === "contested") statusMutation = "already_contested";
+      else if (args.demote && demotedThisCall.has(ruleKey)) statusMutation = "already_demoted_this_window";
+      else if (args.demote) {
+        const result = await mutateRuleStatusContested(c.rule.slug, c.rule.scope, c.rule.projectId, {
+          abrainHome: args.demote.abrainHome,
+          settings: args.demote.settings,
+          auditContext: {
+            lane: "outcome_edge",
+            sessionId: args.sessionId,
+            correlationId: args.correlationId ?? `stance-flip:${args.sessionId}:${c.rule.slug}`,
+            candidateId: eventId,
+          },
+          reason: `ADR 0028 R4 CONTRADICT (user-anchored stance flip): ${c.quote.slice(0, 160)}`,
+        });
+        demoteResult = resultSummary(result);
+        statusMutation = result.status === "updated" && result.reason === "contested" ? "status_to_contested" : "not_applied";
+        if (statusMutation === "status_to_contested") {
+          demotedThisCall.add(ruleKey);
+          if (args.demote.notify) {
+            try { args.demote.notify(formatRuleTell(result), "warning"); } catch { /* tell is best-effort */ }
+          }
+        }
+      }
+      appendRuleOutcomeEdgeRows([{ ...baseRow, status_mutation: statusMutation }]);
+      await appendAudit(args.cwd, {
+        operation: "rule_outcome_edge",
+        lane: args.lane ?? "diagnostic",
+        session_id: args.sessionId,
+        injection_nonce: nonce,
+        edge: "CONTRADICT",
+        evidence_source: "user_directive_stance_flip",
+        keyed_on: "raw_user_role_transcript",
+        rule_slug: c.rule.slug,
+        rule_scope: c.rule.scope,
+        ...(c.rule.projectId ? { project_id: c.rule.projectId } : {}),
+        rule_status: c.rule.status,
+        outcome_event_id: eventId,
+        quote: sanitizeAuditText(c.quote, 240),
+        status_mutation: statusMutation,
+        ...(demoteResult ? { result: demoteResult } : {}),
+        demote_available: !!args.demote,
+      }).catch(() => {});
+    }
+  }
   if (restated.length > 0 && nonce) {
     const ts = new Date().toISOString();
     const written = appendRuleOutcomeEdgeRows(restated.map((r) => ({
@@ -2652,6 +2825,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         // the short-lane call above). PR-A2: helper sees both
                         // pure and tier1-prefixed outcome shapes.
                         coveredTexts: tier1CoveredTexts(auto),
+                        // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
+                        demote: { abrainHome, settings, notify },
                       }).catch(() => {});
                       // Round 8 P1 (sonnet R8 audit fix): drain loop now
                       // writes audit rows for ALL outcomes (wrote /
@@ -2958,6 +3133,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   // tier1_direct must NOT suppress the recall flag — it is the
                   // designed net for the terminal-reject advance above.
                   coveredTexts: auto.kind === "tier1_direct" && isCapturedTier1Result(auto.result) ? [auto.draft.body] : [],
+                  // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
+                  demote: { abrainHome, settings, notify },
                 }).catch(() => {});
                 if (auto.kind === "tier1_direct") {
                   await appendAudit(cwd, {
@@ -3010,6 +3187,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 await auditDirectiveRecall({
                   cwd, sessionId, window: effectiveWindow, lane: "auto_write",
                   correlationId: shortCorrelationId, coveredTexts: [],
+                  // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
+                  demote: { abrainHome, settings, notify },
                 }).catch(() => {});
               }
               const pendingDeferred = deferredStopBySession.get(sessionId);
@@ -3171,6 +3350,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               // recall flag. PR-A2: helper sees both pure and tier1-prefixed
               // outcome shapes.
               coveredTexts: tier1CoveredTexts(auto),
+              // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
+              demote: { abrainHome, settings, notify },
             }).catch(() => {});
 
             // PR-A2 (F5): the Tier-1 write may arrive as the pure outcome or
@@ -3712,6 +3893,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           lane: drafts.length > 0 ? "explicit" : "about_me",
           ...(explicitCorrelationId ?? aboutMeCorrelationId ? { correlationId: (explicitCorrelationId ?? aboutMeCorrelationId)! } : {}),
           coveredTexts: recallCovered,
+          // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
+          demote: { abrainHome, settings, notify },
         }).catch(() => {});
       }
 

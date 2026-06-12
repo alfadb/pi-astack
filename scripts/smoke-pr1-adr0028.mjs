@@ -960,8 +960,9 @@ await check("S25: F3/F4 — recall-audit lane coverage + drain tell call sites a
   // main-bg site spreads the call across lines so a `notify(formatRuleTell(`
   // joint regex would undercount.
   const tellCalls = (src.match(/formatRuleTell\(/g) || []).length - 1;
-  // 4 tell surfaces: contested demote + short lane + main bg lane + drain (F4).
-  assert(tellCalls === 4, `expected 4 formatRuleTell call sites (contested/short/main/drain), got ${tellCalls}`);
+  // 5 tell surfaces: self-report contested demote + short lane + main bg lane
+  // + drain (F4) + stance-flip contested demote (PR-B2 F8).
+  assert(tellCalls === 5, `expected 5 formatRuleTell call sites (contested/short/main/drain/stance-flip), got ${tellCalls}`);
 });
 
 await check("S26: F1 convergence — staging-only + classifier parse failure HOLDs the main-lane checkpoint", async () => {
@@ -1168,6 +1169,101 @@ await check("S31: PR-B1 — empty-reviewer advisory predicate + Jaccard shadow f
   fs.writeFileSync(auditPath, Array.from({ length: 60 }, () => JSON.stringify({ timestamp: ts, operation: "tier1_jaccard_shadow", shadow_ok: false, shadow_error: "x" })).join("\n") + "\n", "utf-8");
   const errOnly = aggregator._scanP15WatchdogSignalsForTests(fx.root, cutoffMs, 5000, new Date()).tier1_jaccard_shadow;
   assert(errOnly.adjudicated_total === 0 && errOnly.flip_ready === false, `error-only window must never be flip_ready: ${JSON.stringify(errOnly)}`);
+});
+
+await check("S32: PR-B2 — stance-flip reversal is CONTRADICT (user-anchored strong demote), not MATCH, and keeps the recall flag", async () => {
+  _resetAutoWriteStateForTests();
+  const { _directiveStanceFlippedForTests } = sedimentIndex;
+  // F9 unit: B5 pnpm/yarn archetype — high overlap, flipped key token.
+  assert(_directiveStanceFlippedForTests("以后所有项目统一用 bun 不用 pnpm 管理依赖。", "所有项目统一用 pnpm 管理依赖。") === true, "反转（不用 pnpm vs 用 pnpm）必须判 flip");
+  assert(_directiveStanceFlippedForTests("所有项目统一用 pnpm 管理依赖。", "所有项目统一用 pnpm 管理依赖。") === false, "纯复述不是 flip");
+  assert(_directiveStanceFlippedForTests("现在可以用 yarn 了。", "不要用 yarn。") === true, "解禁（用 yarn vs 不要用 yarn）必须判 flip");
+  assert(_directiveStanceFlippedForTests("这个函数怎么用？", "所有项目用 pnpm。") === false, "无 stance 对象的句子 fail-open 为非 flip");
+  // R1 盲审收敛（fable BLOCKING-1 / gpt #1）：否定表补齐后，重申不再被
+  // 裸「用」倒置为 endorsement → 不误判 flip。
+  assert(_directiveStanceFlippedForTests("对，避免用 yarn，统一用 pnpm。", "禁止用 yarn，统一用 pnpm。") === false, "重申（避免用 yarn vs 禁止用 yarn）不是 flip");
+  assert(_directiveStanceFlippedForTests("以后都不使用 pnpm。", "统一使用 pnpm。") === true, "不使用 必须进否定表");
+  assert(_directiveStanceFlippedForTests("don’t use yarn anymore", "use yarn for all projects") === true, "curly apostrophe don’t 必须命中否定支");
+  assert(_directiveStanceFlippedForTests("stop using pnpm.", "use pnpm everywhere") === true, "句尾 ASCII 句点不得粘在 token 上");
+  assert(_directiveStanceFlippedForTests("because pnpm is broken we pause CI", "never use pnpm") === false, "because 的 use 尾不是 endorsement（词边界）");
+  // R2 残留收敛（fable）：同义否定族——严禁/不应/不可/must not/shouldn't。
+  assert(_directiveStanceFlippedForTests("对，所有项目严禁使用 yarn，统一用 pnpm。", "所有项目禁止使用 yarn，统一用 pnpm。") === false, "重申（严禁 vs 禁止）不是 flip");
+  assert(_directiveStanceFlippedForTests("新代码不应该用 lodash。", "工具函数统一用 lodash。") === true, "不应该 必须进否定表");
+  assert(_directiveStanceFlippedForTests("you must not use yarn here", "use yarn for all projects") === true, "must not use 必须命中否定支");
+  assert(_directiveStanceFlippedForTests("we shouldn’t use yarn anymore", "use yarn for all projects") === true, "shouldn’t use 必须命中否定支");
+  // F8 e2e: reversal → CONTRADICT 强 demote + recall flag，不计 MATCH。
+  const fx = freshFixture("pr1-s32");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  // 长样板句（B5 形态）：共享样板必须占主导才能过 0.72 重叠门——这正是
+  // F9 的隐患场景：重叠够高但 stance 翻转。
+  const ruleBody = "所有项目统一用 pnpm 管理依赖，禁止混用包管理器，新项目初始化也统一走 pnpm 工作流模板。";
+  await writeAbrainRule(
+    // routingReason 复用正文句：scanRules 的 appliesWhen 回退到 routing_reason，
+    // 使 ruleInjectedText 的 gram 集与引文重叠达标（模拟真实 tier1 规则的
+    // applies_when 与正文同源形态）。
+    { title: "Use pnpm", body: ruleBody, kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "所有项目统一用 pnpm 管理依赖", zone: "rules" },
+    { abrainHome: fx.abrainHome, settings: baseSettings },
+  );
+  _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "stanceflip" });
+  // 单句（句号会被 directiveSentences 切分）且与 ruleInjectedText 的较小侧
+  // gram 覆盖 ≥0.72（实测 0.80）：复用样板 + 翻转关键 token。
+  const reversal = "所有项目统一用 bun 管理依赖，禁止混用包管理器，新项目初始化也统一走 bun 工作流模板，不用 pnpm";
+  await _auditDirectiveRecallForTests({
+    cwd: fx.root,
+    sessionId: "stance-flip",
+    window: makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${reversal}`),
+    demote: { abrainHome: fx.abrainHome, settings: baseSettings },
+  });
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  const contradictRow = rows.find((r) => r.operation === "rule_outcome_edge" && r.edge === "CONTRADICT" && r.evidence_source === "user_directive_stance_flip");
+  assert(contradictRow?.rule_slug === "use-pnpm" && contradictRow?.keyed_on === "raw_user_role_transcript", `需要 user-anchored CONTRADICT 行: ${JSON.stringify(rows.filter((r) => r.operation === "rule_outcome_edge"))}`);
+  assert(contradictRow?.status_mutation === "status_to_contested", `强 demote 必须生效: ${JSON.stringify(contradictRow)}`);
+  assert(!rows.some((r) => r.operation === "rule_outcome_edge" && r.edge === "MATCH"), "反转绝不记 MATCH");
+  const recall = rows.find((r) => r.operation === "directive_recall_audit");
+  assert(recall?.candidates?.[0]?.reason === "user_role_imperative_reverses_injected_rule", `反转必须保留 recall flag（新指令尚无覆盖规则）: ${JSON.stringify(recall)}`);
+  const ruleFile = fs.readFileSync(path.join(fx.abrainHome, "rules", "always", "use-pnpm.md"), "utf-8");
+  assert(/status:\s*contested/.test(ruleFile), `规则文件必须落 contested: ${ruleFile.slice(0, 200)}`);
+  // R1 收敛（fable M5 / gpt #3）：ledger 行本身必须携带 status_mutation（先
+  // demote 后落账），消费者不需要 audit 文件即可区分“证据存在”与“demote 已执行”。
+  const ledgerRows = readJsonl(ruleEdgeLedgerPath(fx)).filter((r) => r.evidence_source === "user_directive_stance_flip");
+  assert(ledgerRows.length === 1 && ledgerRows[0].status_mutation === "status_to_contested", `ledger 行必须携带 status_mutation: ${JSON.stringify(ledgerRows)}`);
+  // 同 session 重扫 dedup：不重复 demote/重复 ledger。
+  await _auditDirectiveRecallForTests({
+    cwd: fx.root,
+    sessionId: "stance-flip",
+    window: makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${reversal}`),
+    demote: { abrainHome: fx.abrainHome, settings: baseSettings },
+  });
+  const contradictRows = readJsonl(sedimentAuditPath(fx.root)).filter((r) => r.operation === "rule_outcome_edge" && r.edge === "CONTRADICT");
+  assert(contradictRows.length === 1, `同 session 重扫必须 dedup，得 ${contradictRows.length} 行`);
+});
+
+await check("S33: PR-B2 — same-turn covered reversal still demotes the stale rule (covered suppresses recall flag only)", async () => {
+  // R1 盲审收敛（fable BLOCKING-2 / gpt #2）：主路径 B5 形态——用户说反转指令，
+  // 同轮 tier1 已写新规则（coveredTexts 含该语句）。covered 只准压掩 recall
+  // flag 与 MATCH，不得压掩对旧规则的 CONTRADICT 强 demote。
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s33");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const ruleBody = "所有项目统一用 pnpm 管理依赖，禁止混用包管理器，新项目初始化也统一走 pnpm 工作流模板。";
+  await writeAbrainRule(
+    { title: "Use pnpm", body: ruleBody, kind: "preference", injectMode: "always", scope: "global", entryConfidence: 9, routingConfidence: 1, routingReason: "所有项目统一用 pnpm 管理依赖", zone: "rules" },
+    { abrainHome: fx.abrainHome, settings: baseSettings },
+  );
+  _refreshRuleCacheForOutcomeEdgeTests({ abrainHome: fx.abrainHome, cwd: fx.root, nonce: "coveredflip" });
+  const reversal = "所有项目统一用 bun 管理依赖，禁止混用包管理器，新项目初始化也统一走 bun 工作流模板，不用 pnpm";
+  await _auditDirectiveRecallForTests({
+    cwd: fx.root,
+    sessionId: "covered-flip",
+    window: makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${reversal}。`),
+    coveredTexts: [reversal],
+    demote: { abrainHome: fx.abrainHome, settings: baseSettings },
+  });
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  const contradictRow = rows.find((r) => r.operation === "rule_outcome_edge" && r.edge === "CONTRADICT" && r.evidence_source === "user_directive_stance_flip");
+  assert(contradictRow?.status_mutation === "status_to_contested", `covered 反转仍须强 demote 旧规则: ${JSON.stringify(rows.filter((r) => r.operation === "rule_outcome_edge"))}`);
+  assert(!rows.some((r) => r.operation === "directive_recall_audit"), "同轮已覆盖 → 不报 recall 缺口");
+  assert(!rows.some((r) => r.operation === "rule_outcome_edge" && r.edge === "MATCH"), "covered 反转绝不记 MATCH");
 });
 
 if (failures.length) {
