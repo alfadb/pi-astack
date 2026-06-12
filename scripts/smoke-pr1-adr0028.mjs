@@ -1038,6 +1038,96 @@ await check("S28: PR-A2 — combined advance semantics: BOTH tier1 and extractor
   assert(_shouldAdvanceAfterAutoOutcomeForTests({ kind: "wrote", results: [{ status: "created" }], tier1: t1ok }) === true, "captured tier1 + captured extractor write must advance");
 });
 
+await check("S29: PR-A3 — targeted directive commits as rule; follow-up curator gets the signal as context; no double commit", async () => {
+  _resetAutoWriteStateForTests();
+  const fx = freshFixture("pr1-s29");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const quote = "以后所有项目用 bun 不用 pnpm。";
+  const targetedSignal = { signal_found: true, typing: "durable", confidence: 7, is_directive: true, user_quote: quote, scope_description: "all projects use bun", target_entry_slug: "project-uses-pnpm", correction_intent: "supersede", provenance: "user-expressed", quote_source: "user_message" };
+  // Extractor emits a draft so the follow-up reaches the curator; curator skips.
+  resetPiAiStub([
+    "MEMORY:\ntitle: 项目包管理器偏好\nkind: preference\nconfidence: 5\n---\n# 项目包管理器偏好\n\n用户现在用 bun。这条记录包管理器选择。\nEND_MEMORY",
+    '{"op": "skip", "reason": "rule already covers it"}',
+  ]);
+  const outcome = await _tryAutoWriteLaneForTests({
+    cwd: fx.root,
+    sessionId: "targeted",
+    settings: baseSettings,
+    window: makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${quote}`),
+    modelRegistry: makeModelRegistry(),
+    correlationId: "targeted:auto",
+    abrainHome: fx.abrainHome,
+    projectId: fx.projectId,
+    tier1ExtractorFollowUp: true,
+    correctionSignal: targetedSignal,
+  });
+  // (a) targeted directive commits deterministically as a rule.
+  assert(outcome.tier1?.result?.status === "created", `targeted directive must direct-create a rule, got ${JSON.stringify(outcome.tier1?.result ?? outcome)}`);
+  // (b) follow-up curator received the correction signal as context.
+  const prompts = globalThis.__ADR0028_PR1_PROMPTS__ || [];
+  const curatorPrompt = prompts.find((p) => p.includes("=== ACTIVE CORRECTION SIGNAL ==="));
+  assert(curatorPrompt && curatorPrompt.includes(quote), `follow-up curator must see the correction context, prompts=${prompts.length}`);
+  // No double commit: exactly ONE tier1_direct_write audit row.
+  const rows = readJsonl(sedimentAuditPath(fx.root));
+  const directRows = rows.filter((row) => row.operation === "tier1_direct_write");
+  assert(directRows.length === 1, `follow-up re-entry must NOT produce a second tier1_direct_write, got ${directRows.length}`);
+  // (C4) targeted dimension lands in audit.
+  assert(directRows[0]?.correction_signal?.target_entry_slug === "project-uses-pnpm", `tier1_direct_write must carry the target dimension: ${JSON.stringify(directRows[0]?.correction_signal)}`);
+  // (e, opus NIT-2) curator skipped the targeted entry → outer auto_write row
+  // must surface target_entry_touched=false (the dual-expression drift probe).
+  // NOTE: the lane test hook doesn't run the caller-side audit block — assert
+  // via the outcome shape instead: follow-up wrote nothing touching the target.
+  const touched = outcome.kind === "wrote" && outcome.results.some((r) => r.slug === "project-uses-pnpm");
+  assert(touched === false, `curator skip must leave the targeted entry untouched: ${JSON.stringify(outcome.kind === "wrote" ? outcome.results : outcome.kind)}`);
+});
+
+await check("S30: PR-A3 — staging capture net extends to targeted Tier-1 in non-owning windows", async () => {
+  const correctionPipeline = await jiti.import(`${repoRoot}/extensions/sediment/correction-pipeline.ts`);
+  const fx = freshFixture("pr1-s30");
+  await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
+  const quote = "以后所有项目用 bun 不用 pnpm。";
+  const classifierJson = JSON.stringify({ signal_found: true, typing: "durable", confidence: 7, is_directive: true, user_quote: quote, scope_description: "all projects use bun", target_entry_slug: "project-uses-pnpm", provenance: "user-expressed", quote_source: "user_message" });
+  const win = makeRunWindow(`--- ENTRY 1 u1 message/user ---\n${quote}`);
+  const mockRegistry = { find: (p, i) => ({ p, i }), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k" }) };
+  // (f) non-owning window (no directLaneOwnsWindow): targeted Tier-1 gets the
+  // staging net — previously it survived only in the volatile working set.
+  resetPiAiStub([classifierJson]);
+  const notOwner = await correctionPipeline.runCorrectionPipeline(win.entries, [], {
+    settings: { ...baseSettings, classifierModel: "mock/classifier" }, modelRegistry: mockRegistry,
+  });
+  assert(notOwner.escalateToCurator === true, `targeted directive must be Tier-1: ${JSON.stringify(notOwner.signal)}`);
+  assert(notOwner.stagingWritten === true, `non-owning window must stage the targeted Tier-1 directive: ${JSON.stringify(notOwner)}`);
+  // Owning window: suppressed like no-target Tier-1.
+  resetPiAiStub([classifierJson]);
+  const owner = await correctionPipeline.runCorrectionPipeline(win.entries, [], {
+    settings: { ...baseSettings, classifierModel: "mock/classifier" }, modelRegistry: mockRegistry, directLaneOwnsWindow: true,
+  });
+  assert(owner.stagingWritten === false && owner.stagingSuppressedReason === "tier1_direct_lane", `owning window suppresses staging: ${JSON.stringify(owner)}`);
+  // Targeted NON-directive durable stays un-staged (attributed → curator path).
+  resetPiAiStub([JSON.stringify({ signal_found: true, typing: "durable", confidence: 9, user_quote: quote, scope_description: "x", target_entry_slug: "project-uses-pnpm", provenance: "user-expressed", quote_source: "user_message" })]);
+  const nonDirective = await correctionPipeline.runCorrectionPipeline(win.entries, [], {
+    settings: { ...baseSettings, classifierModel: "mock/classifier" }, modelRegistry: mockRegistry,
+  });
+  assert(nonDirective.escalateToCurator !== true, "targeted conf9 non-directive must NOT be Tier-1 (A.3.1 boundary)");
+  assert(nonDirective.stagingWritten === false, `targeted non-directive stays un-staged (curator advisory path): ${JSON.stringify(nonDirective)}`);
+  // (deepseek R1) staging-only mode: the direct lane never runs — staging is
+  // the ONLY capture path for targeted Tier-1 directives too.
+  resetPiAiStub([classifierJson]);
+  const stagingOnly = await correctionPipeline.runCorrectionPipeline(win.entries, [], {
+    settings: { ...baseSettings, autoLlmWriteEnabled: "staging-only", classifierModel: "mock/classifier" }, modelRegistry: mockRegistry, directLaneOwnsWindow: true,
+  });
+  assert(stagingOnly.escalateToCurator === true && stagingOnly.stagingWritten === true && !stagingOnly.stagingSuppressedReason, `staging-only mode must stage the targeted Tier-1 directive: ${JSON.stringify(stagingOnly)}`);
+  // (NIT-1) attribution fidelity: the staged file must carry target_entry_slug.
+  const stagingDir = path.join(fx.abrainHome, ".state", "sediment", "staging");
+  const stagedFiles = fs.existsSync(stagingDir) ? fs.readdirSync(stagingDir).filter((f) => f.endsWith(".json")) : [];
+  assert(stagedFiles.length > 0, "staging files must exist");
+  const stagedWithTarget = stagedFiles.some((f) => {
+    const doc = JSON.parse(fs.readFileSync(path.join(stagingDir, f), "utf-8"));
+    return doc?.entry?.correction_signal?.target_entry_slug === "project-uses-pnpm";
+  });
+  assert(stagedWithTarget, "staged targeted directive must preserve target_entry_slug (NIT-1 attribution fidelity)");
+});
+
 if (failures.length) {
   console.log(`\nFAIL — ${failures.length} of ${total} assertions failed.`);
   process.exit(1);

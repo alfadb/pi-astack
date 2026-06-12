@@ -1147,7 +1147,10 @@ function dispatchCorrectionSignal(
       return {
         forwarded: signal,
         decision: (signal.confidence ?? 0) >= 8 ? "pending_multiview" : "forwarded_to_curator",
-        reason: `durable typing${signal.confidence !== undefined ? ` (conf=${signal.confidence})` : ""} forwarded to curator advisory${(signal.confidence ?? 0) >= 8 ? "; multi-view must gate any resulting high-value write" : ""}`,
+        // PR-A3 (gpt R1 nit): when the signal is Tier-1-eligible the
+        // deterministic direct lane — not the curator advisory — owns the
+        // commit; enum values kept for audit continuity.
+        reason: `durable typing${signal.confidence !== undefined ? ` (conf=${signal.confidence})` : ""} forwarded to curator advisory${shouldEscalateToCurator(signal) ? "; Tier-1 direct lane owns the deterministic commit" : (signal.confidence ?? 0) >= 8 ? "; multi-view must gate any resulting high-value write" : ""}`,
       };
     default:
       // Unknown / missing typing indicates classifier schema drift or a
@@ -2477,7 +2480,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         const dispatch = {
           forwarded: signal,
           decision: (signal.confidence ?? 0) >= 8 ? "pending_multiview" as const : "forwarded_to_curator" as const,
-          reason: `consumed durable session-working-set correction${signal.confidence !== undefined ? ` (conf=${signal.confidence})` : ""}${(signal.confidence ?? 0) >= 8 ? "; multi-view must gate any resulting high-value write" : ""}`,
+          // PR-A3 (gpt design review): when the signal is Tier-1-eligible the
+          // deterministic direct lane — not multi-view — owns the commit; the
+          // legacy enum values are kept for audit continuity.
+          reason: `consumed durable session-working-set correction${signal.confidence !== undefined ? ` (conf=${signal.confidence})` : ""}${shouldEscalateToCurator(signal) ? "; Tier-1 direct lane owns the deterministic commit" : (signal.confidence ?? 0) >= 8 ? "; multi-view must gate any resulting high-value write" : ""}`,
         };
         writeCorrectionDispatchAudit(lane, correlationId, dispatch, signal, "session-working-set");
         return signal;
@@ -2633,6 +2639,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                             body_chars: drainTier1.draft.body.length,
                           }],
                           results: [resultSummary(drainTier1.result)],
+                          // PR-A3: targeted 维度（同 main 车道）。
+                          ...(drainTier1.signal.target_entry_slug ? {
+                            target_entry_slug: drainTier1.signal.target_entry_slug,
+                            target_entry_touched: auto.kind === "wrote" && auto.results.some((r) => r.slug === drainTier1.signal.target_entry_slug),
+                          } : {}),
                           recovered_deferred: checkpointAdvanced && !!pendingDeferred,
                           ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                           checkpoint_advanced: checkpointAdvanced,
@@ -3144,6 +3155,13 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   body_chars: tier1Info.draft.body.length,
                 }],
                 results: [resultSummary(tier1Info.result)],
+                // PR-A3 (deepseek #2 可观测性): targeted 指令维度 + follow-up 是否
+                // 触及了被指向的知识条目。持续 false = 双表达漂移信号，供
+                // aggregator 观察。
+                ...(tier1Info.signal.target_entry_slug ? {
+                  target_entry_slug: tier1Info.signal.target_entry_slug,
+                  target_entry_touched: auto.kind === "wrote" && auto.results.some((r) => r.slug === tier1Info.signal.target_entry_slug),
+                } : {}),
                 recovered_deferred: checkpointAdvanced && !!pendingDeferred,
                 ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
                 stage_ms: {
@@ -4060,6 +4078,12 @@ async function tryAutoWriteLane(args: {
    *  classifier-only lane opts out (tiny windows deliberately skip the
    *  extractor budget — 2026-06-10 3-T0 合议). */
   tier1ExtractorFollowUp?: boolean;
+  /** PR-A3 (F6): set by the follow-up re-entry AFTER the Tier-1 write already
+   *  committed — gates the tier1 block so the preserved correctionSignal can
+   *  flow to the curator as targeted-entry context WITHOUT a second
+   *  deterministic commit. The gate is the PRIMARY dedup; body-hash is the
+   *  backup. Never set by external callers. */
+  tier1AlreadyCommitted?: boolean;
   /** ADR 0025 P1: correction classifier result from the pre-lane run.
    *  Injected into curator context for better update/merge decisions.
    *  null when classifier didn't run (ephemeral session) or found no signal. */
@@ -4115,7 +4139,7 @@ async function tryAutoWriteLane(args: {
   }
 
   const tier1Signal = args.correctionSignal;
-  if (tier1Signal && shouldEscalateToCurator(tier1Signal)) {
+  if (tier1Signal && !args.tier1AlreadyCommitted && shouldEscalateToCurator(tier1Signal)) {
     const writeStart = Date.now();
     const draft = buildTier1RuleDraft(tier1Signal, sessionId, projectId);
     const adjudicationLaneOn = settings.tier1JaccardCuratorLane === true;
@@ -4215,6 +4239,10 @@ async function tryAutoWriteLane(args: {
         // fail-closed out of Tier-1 upstream).
         quote_multi_match: tier1Signal.quote_multi_match ?? null,
         quote_matched_roles: tier1Signal.quote_matched_roles ?? null,
+        // PR-A3 (opus C4): targeted-vs-no-target dimension — makes the
+        // widened predicate's rule-creation increment measurable for the O5
+        // sunset / F7 flip decisions.
+        target_entry_slug: tier1Signal.target_entry_slug ?? null,
         quote: (tier1Signal.user_quote ?? "").slice(0, 200),
       },
       result: resultSummary(result),
@@ -4234,7 +4262,12 @@ async function tryAutoWriteLane(args: {
     // flow runs; same-sentence double-detection is absorbed by exact
     // body-hash / curator semantic dedup (R1' 写序注).
     if (args.tier1ExtractorFollowUp === true) {
-      const followUp = await tryAutoWriteLane({ ...args, correctionSignal: null, tier1ExtractorFollowUp: false });
+      // PR-A3 (opus C1): the follow-up PRESERVES correctionSignal — the
+      // curator needs it as targeted-entry decay context (correction_intent /
+      // most_likely_error guide supersede-vs-skip on the stale entry). The
+      // tier1AlreadyCommitted gate prevents a second deterministic commit;
+      // body-hash dedup is the backup if this gate ever regresses.
+      const followUp = await tryAutoWriteLane({ ...args, tier1ExtractorFollowUp: false, tier1AlreadyCommitted: true });
       if (followUp.kind !== "tier1_direct") {
         return { ...followUp, tier1: { draft, result, writeStart, signal: tier1Signal } };
       }

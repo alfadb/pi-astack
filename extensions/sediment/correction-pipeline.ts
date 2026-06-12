@@ -50,11 +50,23 @@ import type { ModelRegistryLike } from "./llm-extractor";
  *  Once recall/shadow audits show is_directive covers the conf≥8 cases,
  *  remove the fallback and return to the ADR-literal predicate. */
 export function isTier1Directive(signal: CorrectionSignal | null | undefined): boolean {
+  // PR-A3 (F6, 2026-06-12 计划附录A v1.1, 3×T0 APPROVE): `!target_entry_slug`
+  // is no longer a global exclusion conjunct — a user-role imperative that the
+  // classifier attributed to an existing KNOWLEDGE entry (rules are excluded
+  // from the search corpus, so target can never be a rule) is still a Tier-1
+  // directive: the directive itself commits deterministically as a rule
+  // (near-dup with existing rules handled by the Jaccard gate/adjudicator),
+  // while the targeted entry's lifecycle stays with the Tier-2 curator (it
+  // receives the signal as context via the PR-A2 follow-up).
+  // The conf≥8 transitional fallback KEEPS `!target`: a high-confidence
+  // NON-directive durable signal with a target is typically a memory-
+  // management correction ("你怎么记成 Y 了") whose correct destination is a
+  // curator entry fix, not a new rule (附录A A.3.1).
   return !!signal?.signal_found
     && signal.typing === "durable"
-    && !signal.target_entry_slug
     && signal.provenance === "user-expressed"
-    && (signal.is_directive === true || (signal.confidence ?? 0) >= 8);
+    && (signal.is_directive === true
+      || ((signal.confidence ?? 0) >= 8 && !signal.target_entry_slug));
 }
 
 /** #1 routing predicate — retained name for the dispatch call sites and
@@ -459,6 +471,9 @@ export function buildProvisionalStagingEntry(signal: CorrectionSignal, seedText:
       // file so Tier-2 demotion forensics don't depend on audit.jsonl alone.
       quote_multi_match: signal.quote_multi_match ?? null,
       quote_matched_roles: signal.quote_matched_roles ?? null,
+      // PR-A3 (NIT-1): 归属保真——targeted Tier-1 指令进 staging 时不丢
+      // classifier 已完成的 target 归属。
+      target_entry_slug: signal.target_entry_slug ?? null,
       scope_description: signal.scope_description ?? "",
       correction_intent: signal.correction_intent ?? "",
       most_likely_error_direction: signal.most_likely_error ?? "",
@@ -655,7 +670,15 @@ export async function runCorrectionPipeline(
     && deps.settings.autoLlmWriteEnabled === true
     && deps.directLaneOwnsWindow === true;
   if (tier1DirectLaneLive) result.stagingSuppressedReason = "tier1_direct_lane";
-  if (signal?.signal_found && signal.typing === "durable" && !signal.target_entry_slug && !tier1DirectLaneLive) {
+  // PR-A3 (gpt design-review must-fix): targeted Tier-1 directives share the
+  // staging capture net with no-target ones — in non-owning windows (explicit/
+  // about_me/in-flight) they previously survived only in the volatile working
+  // set. Non-Tier-1 targeted durable signals stay un-staged (attributed →
+  // curator advisory path, unchanged). (NIT-3: reuse the escalate flag instead
+  // of recomputing the predicate.)
+  if (signal?.signal_found && signal.typing === "durable"
+    && (!signal.target_entry_slug || result.escalateToCurator === true)
+    && !tier1DirectLaneLive) {
     // stagingWritten reflects ACTUAL IO success (audit P0 2026-06-07): the
     // short-window escalation holds its checkpoint when the safety net did not
     // persist, so this must not optimistically report true on a failed write.

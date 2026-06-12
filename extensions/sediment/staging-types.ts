@@ -51,6 +51,10 @@ export interface StagingEntry {
      *  (echo-subclass attribution without consulting audit.jsonl). */
     quote_multi_match?: boolean | null;
     quote_matched_roles?: Array<"user" | "transcript" | "assistant"> | null;
+    /** PR-A3 (2026-06-12 盲审 NIT-1, opus+deepseek 同报): targeted Tier-1
+     *  指令首次可进 staging（非 owning 窗口捕获网）——classifier 已完成的
+     *  归属必须随文件保真，resolver/后续重分类不应被迫重新 search 归因。 */
+    target_entry_slug?: string | null;
     scope_description: string;
     correction_intent: string;
     most_likely_error_direction: string;
