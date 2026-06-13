@@ -553,7 +553,7 @@ rsync -av --delete ~/.abrain/ user@deviceB:.abrain/
 
 ## 7. 与 Lane V 同步语义的衔接
 
-详见 [brain-redesign-spec.md §6.4.0](../brain-redesign-spec.md#640-vault-写入的执行者与同步语义)。简言之（v1.2 修正，Round 4 N1）：
+详见 [brain-redesign-spec.md](../brain-redesign-spec.md)。简言之（v1.2 修正，Round 4 N1）：
 
 - `/secret` 命令由 **main pi 进程内同步调用 vaultWriter library** 处理（不走 sediment IPC / 不走 agent_end 异步）。vaultWriter 是 `extensions/abrain/vault-writer.ts`，复用 sediment 的 validation/audit substrate 思路但代码共享不是进程共享。避免 daemon / socket / peer credential 三层新工程面
 - 当前 P0c.write 落盘步骤：flock(vault 目录) → age encrypt(plaintext, `~/.abrain/.vault-pubkey`) → atomic rename 到 `vault/<key>.md.age` → append `_meta/<key>.md` + fsync → append `vault-events.jsonl` + fsync → unflock

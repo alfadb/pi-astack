@@ -49,8 +49,8 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 |------|--------|-----|
 | **AI-Native** | 防出错主路径必须是 prompt 工程，不能是机械护栏。机械工程做兜底 / infra，不做 LLM 行为层主路径 | [ADR 0024 §3](./0024-second-brain-from-natural-conversation.md#3-核心设计哲学ai-native-原则) |
 | **机械 vs AI-Native 对照表** | 6 个典型对照（classifier 准确性 / 模糊归属 / 作用范围 / audit 可信度 / writer 还原度 / multi-agent 协调 / retrieval cutoff） | [ADR 0024 §3.3](./0024-second-brain-from-natural-conversation.md#33-几个典型的机械-vs-ai-native对照) |
-| **L1 / L2 双 invariant 分层治理** | 认知执行环 (L1) ↔ 任务协作环 (L2) 各自 invariant 不可统一，stigmergic trace 互嵌共生 | [ADR 0027 §C1'](./0027-coupled-stigmergic-dual-loop-agent-system.md#c1-双-invariant-治理-互嵌共生非正交) |
-| **认知层 prompt-native / infra 层 structured** | §3 AI-Native 只约束认知层，infra 层 (audit / state machine / heartbeat / anchor) 允许 structured | [ADR 0027 §C3'](./0027-coupled-stigmergic-dual-loop-agent-system.md#c3-认知层-prompt-native--infra-层-structured) |
+| **L1 / L2 双 invariant 分层治理** | 认知执行环 (L1) ↔ 任务协作环 (L2) 各自 invariant 不可统一，stigmergic trace 互嵌共生 | [ADR 0027 §C1'](./0027-coupled-stigmergic-dual-loop-agent-system.md#c1--双-invariant-治理--互嵌共生非正交) |
+| **认知层 prompt-native / infra 层 structured** | §3 AI-Native 只约束认知层，infra 层 (audit / state machine / heartbeat / anchor) 允许 structured | [ADR 0027 §C3'](./0027-coupled-stigmergic-dual-loop-agent-system.md#c3--认知层-prompt-native--infra-层-structured) |
 | **session-id + turn-id causal anchor** | 跨 L1/L2 因果链的物理基础；所有 dispatch / audit 强制注入 | [ADR 0027 §C6](./0027-coupled-stigmergic-dual-loop-agent-system.md#c6新--跨-l1l2-causal-trace-共享-session-id--turn-id-锚点) |
 
 ---
@@ -157,7 +157,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 **新协作者上手**：按 §1 → §2 → §3 → §5 → §6 → §7 顺序读 anchor。约 30 min 拿到全 design space map。
 
 **做设计选择前**：
-- 想清楚是认知层还是 infra 层 ([§C3'](./0027-coupled-stigmergic-dual-loop-agent-system.md#c3-认知层-prompt-native--infra-层-structured))
+- 想清楚是认知层还是 infra 层 ([§C3'](./0027-coupled-stigmergic-dual-loop-agent-system.md#c3--认知层-prompt-native--infra-层-structured))
 - 检查是否违反 4 invariants ([§2](#2-四条核心不变量hard-invariant不可破))
 - 检查是否在 ADR 0024 §3.3 对照表的禁止机械路径 ([§3](#3-核心设计原则))
 - 看走偏信号是否被触发 ([§7](#7-接受的代价--走偏信号))

@@ -71,14 +71,14 @@ ADR 0013 的 Lane B（manual promote project→world）和 Lane D（auto-promote
 | **V** vault declare | `/secret <key>` 等系列命令（**同步**：user slash → main pi 进程内 vaultWriter library 同步调用 → 加密落盘 → 立即可用。**不走 sediment IPC**（v1.2 修订 N1） | 全局或项目级 vault | 最高 | 🆕 |
 | ~~B promote~~ / ~~D auto-promote~~ | — | — | — | ⛔ 失去意义（abrain 内部无 promote） |
 
-> Lane G 的目标在 identity / habits / skills 三区中按内容路由（deterministic router 见 [spec §3.5](../brain-redesign-spec.md#35-deterministic-router)），不是 Lane 与目录的硬绑定。Lane G 保证 trust=高，目录由内容路由。**低置信样本（`routing_confidence < 0.6`）进 §3.5 staging review queue——不直接落 identity/habits**（v1.3 补，Round 5 Opus NP1-2：三区不是唯一出口，staging 是第四出口）。
+> Lane G 的目标在 identity / habits / skills 三区中按内容路由（deterministic router 见 [spec](../brain-redesign-spec.md)），不是 Lane 与目录的硬绑定。Lane G 保证 trust=高，目录由内容路由。**低置信样本（`routing_confidence < 0.6`）进 §3.5 staging review queue——不直接落 identity/habits**（v1.3 补，Round 5 Opus NP1-2：三区不是唯一出口，staging 是第四出口）。
 
 ### D4. Vault 双层架构
 
 - **全局 vault** `~/.abrain/vault/`：跨项目通用秘密（github-token、API keys、ssh-key、私人事项）
 - **项目级 vault** `~/.abrain/projects/<id>/vault/`：仅与某项目相关（prod-db-password 等）
 - **加密**：age 单文件，单一 master key（全局与所有项目共享，避免管理 N+1 把 key）
-- **解锁**（v1.4 重写）：依赖**用户已有的便携加密 identity** —— ssh-key (Tier 1 primary) / gpg-file (Tier 1) / passphrase (Tier 1 fallback) 三者覆盖几乎所有 dev 用户。OS keychain (macOS / secret-service / pass) 降为 Tier 2 optimization（有则用，没有也正常运行）。**容器场景**（alfadb 主开发环境）从 v1.3 的 "不支持 vault" 升 为 first-class（ssh-key 路径 OOTB 工作）。auto-unlock 等价物：ssh-agent / gpg-agent cache TTL。详 [vault-bootstrap.md §1](../migration/vault-bootstrap.md#1-平台支持矩阵v14-重写)。
+- **解锁**（v1.4 重写）：依赖**用户已有的便携加密 identity** —— ssh-key (Tier 1 primary) / gpg-file (Tier 1) / passphrase (Tier 1 fallback) 三者覆盖几乎所有 dev 用户。OS keychain (macOS / secret-service / pass) 降为 Tier 2 optimization（有则用，没有也正常运行）。**容器场景**（alfadb 主开发环境）从 v1.3 的 "不支持 vault" 升 为 first-class（ssh-key 路径 OOTB 工作）。auto-unlock 等价物：ssh-agent / gpg-agent cache TTL。详 [vault-bootstrap.md](../migration/vault-bootstrap.md)。
 - **明文不进 LLM context**（默认）：需 `vault_release` 工具调用 + TUI 授权（once/session/no/deny+remember 四档）
 - **bash 注入**：`$VAULT_<key>` 解析顺序为 active project's vault → global vault；项目级覆盖全局
 - **stdout/stderr redaction**：主进程在 bash 结果回流前做 best-effort 字面 match 替换为 `<vault:<scope>:<key>>`
@@ -116,7 +116,7 @@ ADR 0013 的 Lane B（manual promote project→world）和 Lane D（auto-promote
 3. **Facade 不暴露 scope/backend/source_path** 给 LLM ranking surface：`memory_search(query)` 签名无多余形参（`scope` 不存在于 schema）。例外：`memory_get(slug)` 是 exact lookup/debug view，可返回 scope/source_path 供调试——不是 LLM 选后端的机制。
 4. **跨 project vault 不互见**：active project（**boot-time snapshot**，详 spec §5.4）的 vault + 全局 vault 进 LLM context；其他 project 的 vault 连元数据都不暴露。会话中 bash `cd` 不改变 active project。
 5. **vault 明文进 LLM context 必须 user-explicit 授权**：`vault_release` 工具调用 + TUI 弹框确认；best-effort redaction（不是绝对保证）但默认排除是硬不变量。**补充**：引用了 `$VAULT_*` env 的 bash 命令 stdout/stderr **默认不回流 LLM**，需用户 once-授权（详 spec §6.5.1）——这是 LLM 主动 exfiltration 的机制性防御，不仅依赖 redaction 过滤器。
-6. **sub-pi 默认看不到任何 vault**：父 pi 已有授权不传给子 pi。**三层机制性 enforcement**（v1.2 强化，Round 4 GPT P0-N2）：(a) `dispatch_agents` 的 spawn 调用强制 `env: { ...process.env, PI_ABRAIN_DISABLED: "1" }`，顺序保证不能被上层 `export PI_ABRAIN_DISABLED=0` 覆盖；(b) abrain extension 启动第一行 `if (process.env.PI_ABRAIN_DISABLED === "1") return;`，不注册 tool / 不订阅事件 / 不加载 vault metadata；(c) `smoke:vault-subpi-isolation` 验证父 vault unlocked 时子 pi `vault status` 返回 locked。详 [vault-bootstrap.md §5](../migration/vault-bootstrap.md#5-每个-pi-进程启动时的-unlock-check)。
+6. **sub-pi 默认看不到任何 vault**：父 pi 已有授权不传给子 pi。**三层机制性 enforcement**（v1.2 强化，Round 4 GPT P0-N2）：(a) `dispatch_agents` 的 spawn 调用强制 `env: { ...process.env, PI_ABRAIN_DISABLED: "1" }`，顺序保证不能被上层 `export PI_ABRAIN_DISABLED=0` 覆盖；(b) abrain extension 启动第一行 `if (process.env.PI_ABRAIN_DISABLED === "1") return;`，不注册 tool / 不订阅事件 / 不加载 vault metadata；(c) `smoke:vault-subpi-isolation` 验证父 vault unlocked 时子 pi `vault status` 返回 locked。详 [vault-bootstrap.md](../migration/vault-bootstrap.md)。
 
    > **walk-back (2026-05-31, ADR 0027 PR-B v3 in-process)**：上述 (a) 子进程 spawn 注入 `PI_ABRAIN_DISABLED=1` 在 in-process `dispatch` 下**已非主路径**——sub-agent 不再是子进程、不 set 该 env，abrain 在共享 sub-agent loader 里照常 activate（`getSharedInfra` 用 `noExtensions:false`）并注册 `vault_release`。vault 对 dispatch sub-agent 的隔离现由**排他 `tools` allowlist** 保证：`vault_release`/`prompt_user` 不在 `KNOWN_TOOLS`（`validateTools` 拒绝调用方请求）、也不在默认 allowlist，`createAgentSession({tools})` 只暴露列出的工具，故 extension 注册的 `vault_release`/`prompt_user` **工具**在 sub-agent 内不可调用（SDK `agent-session.js` 用 `allowedToolNames` 硬过滤注册表，3-T0 盲审已核 pi 0.75.x 源码）。**范围限定**：这只保证两个**工具**不可调用，**不等于** vault 文件系统隔离——默认带 `read`/`grep` 的 sub-agent 仍能用绝对路径读 `~/.abrain/.vault-identity/master.age` 等密文/密钥（0600 只挡其他 OS 用户、不挡同用户同进程）。这是 ADR §不变量#1 层2 早已记录的 residual surface，本次未关闭；如需关闭须给 read/grep/find/ls 加 vault 路径 denylist（待独立决策）。(b) `PI_ABRAIN_DISABLED` env guard 仍在代码中，但 **v3 下已无任何地方自动 set 它**（v2 的 dispatch 子进程注入已移除）——它现在只是**手动 opt-out**，对「sub-agent 拿到 `bash` 后 spawn `pi`」这条 §不变量#1 层2 路径**并不自动生效**（子进程继承的 env 不含该 var）；该路径目前仅由「`bash` 非默认 + `PI_MULTI_AGENT_ALLOW_MUTATING` env gate」约束。新增 `smoke:dispatch-subagent-tool-allowlist` 断言工具排他性（旧 `smoke:vault-subpi-isolation` 只验 WeakSet + handler guard）。
 7. **七区目录互斥**：identity/habits/skills/workflows/projects/knowledge/vault **七个目录**互斥（单条 entry 物理上只在一处），**但** habits/skills 等概念在全局与项目级有镜像目录（`habits/` 与 `projects/<id>/habits/` 并存），由 sediment 按 scope of generalization 决定写哪层。边界路由由 deterministic router 规范（§审计扩展 + spec §3.5）决定，不是 LLM-facing 选择。**`rules/` 是独立第 8 类**（[ADR 0023](0023-session-start-rule-injection.md)，2026-06-07 R1 patch）：它不是 entries 概念域的一员，不与上述七区互斥语义混淆——一条 rule 与其 knowledge/project 源条目可并存（`derives_from`/`promoted_from` 记 provenance），因为 rule 是 session-start 注入的 PUSH 副本，源条目仍走 pull-on-demand 检索，两者用途正交。
@@ -263,7 +263,7 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 
 | Q | 问题 | 当前答案 |
 |---|---|---|
-| Q1 | identity vs habits 边界（Q-A） | **trust 与目录路由分离**。Lane G 保证 trust=高，Lane C 保证 trust=中；identity / habits / skills 三区由 sediment 按 aboutness 分类路由（**不是 Lane↔目录硬绑定**）。habits 接受 Lane C 主写也接受 Lane G 校正；identity 通常 Lane G，sediment 跨多 session 稳定观察才能补充（高门槛）。具体路由规范见 [spec §3.5 deterministic router](../brain-redesign-spec.md#35-deterministic-router) |
+| Q1 | identity vs habits 边界（Q-A） | **trust 与目录路由分离**。Lane G 保证 trust=高，Lane C 保证 trust=中；identity / habits / skills 三区由 sediment 按 aboutness 分类路由（**不是 Lane↔目录硬绑定**）。habits 接受 Lane C 主写也接受 Lane G 校正；identity 通常 Lane G，sediment 跨多 session 稳定观察才能补充（高门槛）。具体路由规范见 [spec](../brain-redesign-spec.md) |
 | Q2 | workflows MVP 写入策略（Q-B） | 保留目录占位，MVP 不主动 sediment 写；等用户主动声明再开始填 |
 | Q3 | 团队协作 fallback（Q-C） | MVP 不实现 export 命令；等真有协作需求再加 `pi project export` |
 | Q4 | vault key 命名规范（Q-D） | 自由形式，推荐 `<env>-<service>-<purpose>`，不强制 |
