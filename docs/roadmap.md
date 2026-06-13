@@ -4,6 +4,15 @@
 
 ADR 只记录架构决策和取舍，不承载实施流水账。已 ship 的当前事实写入 [`docs/current-state.md`](./current-state.md)；未完成计划写入本文；多轮审计和 commit 级时间线写入 `docs/audits/` 或保留在 git history。
 
+## 文档体系 Phase 2（共识层重构后续）
+
+Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-changelog`，见 [`docs/README.md`](./README.md)）。Phase 2 待办：
+
+- 按“方向头部留共识、机制正文归 abrain”劈分现有 23 份 ADR：方向/不变量抽进 `direction.md`/`requirements.md`，机制正文归 abrain（sediment 写）或归档（见 `README.md` §7 劈分表）。
+- `current-state.md` / `architecture/*` 中复述代码的部分收敛为“代码派生”；只留方向/契约。
+- 给 abrain 补技术细节本体（调用链/模块图/机制 rationale）+ “细节触碰方向→升级”标注能力 + 按需渲染 rationale 供人类审计（承重墙，见 `README.md` §4）。
+- 加 `docs-doctor` P0 检查：链接/锉点解析、frontmatter 必填、canonical 正文禁裸 commit hash、`canonical_for` 唯一性、扩展清单 == `ls extensions/`。
+
 > **2026-05-15 同步**：roadmap 上一版有几条 debt 已经在 2026-05-14 R5/R6 audit 中落地（dispatch temp prompt uniqueness、vault read/bash fail-closed、writer git rollback、migrate-go frontmatter preservation、Vault P1 active project resolver），本次清理移出 backlog，列入下方 **§ "已落地的旧 backlog（不要再当 debt）"** 防止再被当成未完成项。
 >
 > **2026-05-15 PM 补充**：multi-LLM audit (round 1+2) 同日关闭三项 backlog：**Curator scope binding (create 分支)**、**sediment update/merge unknown frontmatter preservation 系统化测试**、**memory parser kind/status 枚举 enforcement**（该项本次初检才发现，同日修复）。均进§"已落地不变量"。

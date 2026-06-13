@@ -8,13 +8,13 @@ pi-astack 当前是一个 **local pi package**：提供 17 个 runtime extension
 
 ### 1.1 2026-06-10 增量（自 2026-05-31 基线）
 
-- **ADR 0028 v1.1 落地（sediment ground-truth 分层重构）**：Tier-1 直写路径已从 shadow lane（cbfdcfc）cutover 为生产路径（dc5de52，seed-bridge/shadow flag 已删）；AX-PROVENANCE 确定性派生 + frontmatter 落盘；AX-MATURITY 默认排除 {archived, superseded}；R3' 召回审计（键于原始转录）+ 实时 rules footer；R4' outcome edge 双半环（CONTRADICT→contested 强 demote + echo-guarded MATCH 弱确认入 `rule-outcome-edge.jsonl`，含自回声扣除与用户复述锚，5a9f958）；R6' staging 收窄（Tier-1-owned 窗口跳过 staging 网，window-ownership + 降级模式双门控，72f0d07）。§12.3 INJECT-MODE 改名已完成（2026-06-10：`injectMode`/`inject_mode`/catalog `inject=`，旧 `tier` 键双读兼容，目录名与 rule id 不变）——ADR 0028 全部条款落地。
-- **rules 注入改 catalog 形态**（166924c）：listed 规则注入完整 catalog 行（applies_when/trigger_phrases/must_do_summary/full_rule_path）；硬 token cap 设置移除，改 advisory telemetry（`catalog_tokens`/`hidden_catalog_count`）。
+- **ADR 0028 v1.1 落地（sediment ground-truth 分层重构）**：Tier-1 直写路径已从 shadow lane cutover 为生产路径（seed-bridge/shadow flag 已删）；AX-PROVENANCE 确定性派生 + frontmatter 落盘；AX-MATURITY 默认排除 {archived, superseded}；R3' 召回审计（键于原始转录）+ 实时 rules footer；R4' outcome edge 双半环（CONTRADICT→contested 强 demote + echo-guarded MATCH 弱确认入 `rule-outcome-edge.jsonl`，含自回声扣除与用户复述锚）；R6' staging 收窄（Tier-1-owned 窗口跳过 staging 网，window-ownership + 降级模式双门控）。§12.3 INJECT-MODE 改名已完成（2026-06-10：`injectMode`/`inject_mode`/catalog `inject=`，旧 `tier` 键双读兼容，目录名与 rule id 不变）——ADR 0028 全部条款落地。
+- **rules 注入改 catalog 形态**：listed 规则注入完整 catalog 行（applies_when/trigger_phrases/must_do_summary/full_rule_path）；硬 token cap 设置移除，改 advisory telemetry（`catalog_tokens`/`hidden_catalog_count`）。
 - **Windows 支持**：Git Bash/MSYS2 vault 注入（WSL/Cygwin 拒绝）+ 自有 `abrain.windowsVaultBashPath` 设置；turn-progress 路径缩短；win32-only shell 解析。
 - **model-curator**：Plan A 单一数据源（settings.json）+ live re-apply（mtime 检测，免重启）+ `/curator-reload`。
-- **多实例并发**：heartbeat pid 后缀隔离 + aggregator/entry-telemetry/staging-* 文件锁（1e83786）；dispatch 对 pi 0.79 显式 `projectTrusted: false`。
-- **per-model compaction policies**（52af744）。
-- smoke 套件 **74 个**，2026-06-10 首次全绿（74/74，含修复 S19 潜在 mock 竞态与 dc5de52 后的过期 escalation-seed 断言）。
+- **多实例并发**：heartbeat pid 后缀隔离 + aggregator/entry-telemetry/staging-* 文件锁；dispatch 对 pi 0.79 显式 `projectTrusted: false`。
+- **per-model compaction policies**。
+- smoke 套件 **74 个**，2026-06-10 首次全绿（74/74，含修复 S19 潜在 mock 竞态与 cutover 后的过期 escalation-seed 断言）。
 
 ## 2. 当前实现清单
 

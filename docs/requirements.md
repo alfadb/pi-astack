@@ -1,0 +1,51 @@
+# Requirements — 行为需求
+
+> 人类拥有（agent 起草，人类签字）。每条需求有稳定 `REQ-ID`；`feature-changelog.md` 引用这些 ID。
+> 需求 = "产品/行为上必须成立的什么"，不是"怎么实现"（实现是 abrain + 代码）。
+> 这是种子集，随项目演进增补；改需求走 `feature-changelog.md` 升级流程。
+
+格式：每条含 `status`（active/superseded）、`priority`、`applies_to`、`human_intent`（人类意图）、`agent_obligation`（agent 义务）、`acceptance`（验收）、`forbidden`（禁止项）。
+
+---
+
+## REQ-001 — 自然对话是学习与纠错的唯一通道
+- status: active · priority: P0 · applies_to: memory, sediment, agent-behavior
+- human_intent: 用户不手动维护大脑。
+- agent_obligation: 设计与实现必须保留"从自然对话学习/纠错"，不得引入维护性元工作。
+- acceptance: 用户能在普通任务对话里教/纠正大脑；用户一个月不看任何元 UI，大脑仍越来越准。
+- forbidden: 审批/裁决/投票队列、定期审查、手动同步、批准学习结果的弹窗。
+
+## REQ-002 — 运行状态可见、管理负担隐身
+- status: active · priority: P0 · applies_to: sediment, abrain, ui
+- human_intent: 用户能感知大脑在工作，但不被要求为它做事。
+- agent_obligation: 区分"告诉"(合法) vs "要求用户做事"(禁止)。
+- acceptance: footer/notify/audit/`/abrain status` 正常显示；无任何"要求用户为大脑做事"的入口。
+- forbidden: 把运行状态指示当成 INV-INVISIBILITY 违反而删除。
+
+## REQ-003 — 防出错主路径是 prompt 工程
+- status: active · priority: P0 · applies_to: sediment, memory, classifier, multi-view
+- human_intent: LLM 行为层靠 prompt 而非机械门防错（机械只做 infra/兜底）。
+- agent_obligation: 提机械门前先做 §3.2 自检；新增过渡态机械门必须声明 flip/移除条件。
+- acceptance: 新能力点的防错设计能说清 prompt-first；机械门均有 justify + 移除条件。
+- forbidden: 用 schema 拦截 / 阈值 / 测试阻断作为 LLM 行为层主防线。
+
+## REQ-004 — 显式用户指令是被见证的 ground truth
+- status: active · priority: P0 · applies_to: sediment(Tier-1), rules
+- human_intent: 用户明确说的规则/指令不能被 LLM 静默丢弃。
+- agent_obligation: 显式用户指令走确定性提交路径，对用户可见，不进概率管线被 skip/stage。
+- acceptance: 用户显式全局/项目规则可见、可追溯、不丢。
+- forbidden: 把显式用户指令当成与 LLM 推断同级的可丢弃信号。
+
+## REQ-005 — 主会话对记忆只读
+- status: active · priority: P0 · applies_to: main-session, sediment
+- human_intent: 主会话不直接写大脑，避免 prompt injection 污染记忆。
+- agent_obligation: 记忆写入只经 sediment sidecar；主会话不注册 memory_write。
+- acceptance: 主会话无直接写 brain entry 的路径。
+- forbidden: 给主会话开 memory 写工具（vault_release 授权数据流出是另一回事，合法）。
+
+## REQ-006 — 文档不镜像代码事实
+- status: active · priority: P1 · applies_to: docs
+- human_intent: docs 只装方向/意图，不手抄实现状态（镜像必漂移）。
+- agent_obligation: 当前行为/计数/清单交给代码 + `memory_search`，docs 不复述。
+- acceptance: docs 内无扩展计数、文件清单、commit 流水等可被 `grep`/`ls` 替代的内容。
+- forbidden: 在 docs 里维护"当前 N 个扩展"这类代码镜像。

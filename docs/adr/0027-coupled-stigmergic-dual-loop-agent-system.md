@@ -1,7 +1,7 @@
 # ADR 0027 — Coupled Stigmergic Dual-Loop Agent System (CSDLAS)
 
 - **状态**：**v0.2 baseline（2026-05-27）**。三家跨 provider T0 reviewer（Claude Opus 4-7 / GPT-5.5 / DeepSeek v4-pro）三轮辩论后合议接受（详 §11）。两家 ACCEPT-with-reservations、一家 ACCEPT，三家保留意见已收录到 §11.4。
-- **依赖**：[ADR 0009](0009-multi-agent-dispatch.md)（multi-agent dispatch 底座）、[ADR 0024](0024-second-brain-from-natural-conversation.md)（第二大脑哲学 + 四 invariant + AI-Native 原则）、[ADR 0025](0025-sediment-meta-curator-subsystem.md)（sediment 写侧落地）、[ADR 0026](0026-second-brain-decision-participation.md)（第二大脑参与任务执行）。
+- **依赖**：[ADR 0009](0009-multi-agent-as-base-capability.md)（multi-agent dispatch 底座）、[ADR 0024](0024-second-brain-from-natural-conversation.md)（第二大脑哲学 + 四 invariant + AI-Native 原则）、[ADR 0025](0025-sediment-meta-curator-subsystem.md)（sediment 写侧落地）、[ADR 0026](0026-second-brain-decision-participation.md)（第二大脑参与任务执行）。
 - **对偶**：ADR 0024 定**哲学不变量**（什么是合法的认知边界），本 ADR 定**拓扑不变量**（什么是合法的 multi-agent 协作边界）。ADR 0025/0026 是 L1 沉淀 + L2 决策的具体落地，本 ADR 是覆盖两者的横切架构总结。
 - **范围**：CSDLAS 是 pi 内 multi-agent 系统的总框架。不直接定义任何具体能力点的实现；具体能力推到 ADR 0028（IDE/host 边界）/ ADR 0029（跨 provider 治理）/ ADR 0030（hub baseline + evaluation harness）。
 
