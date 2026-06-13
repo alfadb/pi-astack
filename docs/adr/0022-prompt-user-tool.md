@@ -1,5 +1,7 @@
 # ADR 0022 — `prompt_user` LLM-facing 同步问答工具（与 `vault_release` 共享 PromptDialog substrate，独立语义）
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：prompt_user/vault_release 边界已上提 `REQ-008`，以那里为 canonical。以下机制正文（含 §10 R1-R4 多模型设计轨 / §D6.1 redaction 边界图 / §5 INV-A..N 活契约表 等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删（INV-A..N 是 code-enforced 活契约，原地保留避免断契约）。
+
 - **状态**：Accepted (R4 P0 收敛 2026-05-17)。R3 综合稿 → R4 multi-LLM P0 审计 (opus-4-7 / gpt-5.5 / deepseek-v4-pro 并行) → P0 收敛轨迹 3 → 0（GPT 找 P0×3 / DEEPSEEK 找 P0×2 / OPUS P0=0）→ 本版本应用全部 R4 修补包。详见文末 §"R1-R4 multi-LLM design discussion trail"。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md) §6（sub-pi 三层 guard、单一沉淀者、layer 1 不变量、invariant #5 vault 明文授权）、[ADR 0016](0016-sediment-as-llm-curator.md)（prompt 引导 > 机械门控；sediment 是唯一 brain writer）、[ADR 0018](0018-sediment-curator-defense-layers.md)（curator defense 边界；不退化 trigger phrase / body preservation）、[ADR 0019](0019-abrain-self-managed-vault-identity.md)（vault identity 边界、fail-closed）、[ADR 0020](0020-abrain-auto-sync-to-remote.md) §invariant 7（`redactCredentials` 已 codified）、[ADR 0021](0021-lane-g-identity-skills-habits-writer.md) §D4（Lane G G2 `/about-me` 与本 ADR 的关系）
 - **扩展**：现有 `vault_release` / `authorizeVaultRelease` / `releaseSessionGrants` substrate；不替换、不重命名，仅共享 PromptDialog UI overlay 组件与一组提升后的 redaction primitives

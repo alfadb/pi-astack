@@ -1,5 +1,7 @@
 # ADR 0032 - Goal 续行运行时 + 声明式 Workflow 编排（实验通道）
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：W1-W13 自治边界（须用户授权/有界/可见/结构持否决）已上提 `INV-TELL-NOT-ASK` / `INV-COST-NOT-A-GATE` / `INV-AUTONOMY`（部分被 0033 修订），以那里为 canonical。以下机制正文（含 §6 H5 判别 / §4 provenance 隔离等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 - **状态**: **合议接受（2026-06-11）**；**部分条款被 [ADR 0033](0033-natural-language-first-invocation-and-doc-driven-goal.md) 修订（2026-06-11 合议接受）**：W1→W1'、W7→W7'、§5 晋升机检四条、 §6 三闸（闸 c 废除，结构承重转 ADR 0003）、§5-M4 backlog 关闭。读本 ADR 时以 0033 为准。3×T0（Claude Opus 4-8 / GPT-5.5 / DeepSeek v4-pro）一致 ACCEPT-with-required-changes，全部 required changes 已并入本版（§12 评审史）。
 - **触发**: ①deep-research 调研（2026-06-10：Claude Code dynamic workflows / Codex `/goal` / token-saver-loop）确认"目标持持 + 有界自治续行 + 声明式多步编排"是本仓库能力缺口；②impl-plan O3 裁决：workflow 引擎**必须先 ADR 后实现**；③goal extension（P1a/P1b）已按计划先行落地 （PR-6 `3e4f5c1` / PR-7 `9ff57ef`，各经 3×T0 盲审收敛）——本 ADR Part A 将其运行时语义 **ratify 为规范**，Part B 为 workflow 引擎（PR-9/10）定边界与不变式。
 - **依赖**: [ADR 0003](0003-main-session-read-only.md)（主会话只读）、 [ADR 0009](0009-multi-agent-as-base-capability.md)（dispatch 基座）、 [ADR 0024](0024-second-brain-from-natural-conversation.md)（四 invariant + AI-Native 原则）、 [ADR 0027](0027-coupled-stigmergic-dual-loop-agent-system.md) （C1'-C6 + H5 hub 假说 gate）、 [ADR 0028](0028-sediment-ground-truth-tiered-rearchitecture.md) （GTIER / provenance 结构源门）。

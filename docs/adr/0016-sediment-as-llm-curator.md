@@ -1,5 +1,7 @@
 # ADR 0016 — Sediment 从 gate-heavy extractor 转向 LLM curator
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的方向（重门→LLM curator = AI-Native 价值）已上提 `REQ-003` + `direction.md` §2 AI-Native，以那里为 canonical。以下机制正文（含 gate-by-gate 删除理据）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 - **状态**: Accepted（2026-05-10）。**2026-05-13 [ADR 0018](0018-sediment-curator-defense-layers.md) 补充并随后修订**：curator "update over create" 原则在 LLM 实践中需要防御；当前保留 curator prompt update-vs-create discipline + writer trigger_phrases UNION；body_shrink/body_section_loss 机械门控及对应 smoke fixtures 已于 ADR 0018 revert (`ee1c809`) 移除。**2026-05-15 修订**：credential/secret sanitizer 从“pattern 命中整轮 fail-closed”调整为“typed redaction + continue”；raw secret 仍不得进入 LLM/audit/memory。详见 ADR 0018 头部决策摘要。
 - **日期**: 2026-05-10
 - **决策者**: alfadb

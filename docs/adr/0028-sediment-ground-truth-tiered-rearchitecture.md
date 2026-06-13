@@ -1,5 +1,7 @@
 # ADR 0028 - Sediment Ground-Truth-Tiered Rearchitecture
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：R1'-R6' 规范脚已上提 `INV-GROUND-TRUTH-TIERED`（含 provenance 门控）+ `REQ-004`，以那里为 canonical。以下机制正文（含 §2 根因 bug-chain / §10 debate 等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 - **状态**:**v1.1 合议接受(2026-06-07)**。三家跨 provider T0 reviewer(Claude Opus 4-8 / GPT-5.5 / DeepSeek v4-pro)经 **3 轮辩论全票签署** 条款 R1'-R6'(详 §10)。v1.1 增补:另一轮 **3 轮全票** 的「全局分层」辩论产出 **统一最小分层模型**(§12),并据此校正了 §1 对 Tier 的措辞。无保留意见悬置。
 - **触发**:一次实地 E2E(排查 TUI 底栏 `rules: none` 长期为 0)暴露用户显式全局规则被静默丢失数周。连续 5 个补丁(escalation / seed-bridge / no-loss invariant / 0.85 dedup / 归属守卫)修好了表象,但三家 T0 独立判定这些补丁是某个**根因的症状**,要求 stop-and-rearchitect。
 - **依赖**:[ADR 0023](0023-session-start-rule-injection.md)(rules 注入 + 写路径)、[ADR 0024](0024-second-brain-from-natural-conversation.md)(第二大脑哲学 + 四 invariant + AI-Native 原则)、[ADR 0025](0025-sediment-meta-curator-subsystem.md)(sediment 写侧落地)、[ADR 0027](0027-coupled-stigmergic-dual-loop-agent-system.md)(L1/L2 双环拓扑)。

@@ -1,5 +1,7 @@
 # ADR 0001 — pi-astack 作为 alfadb 为 pi 打造的个人工作流仓
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的治理纪律（vendor read-only / 单向依赖 / 使用即开发）已上提 `direction.md`，以那里为 canonical。以下机制正文**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 > ⚠️ PARTIALLY HISTORICAL：本文保留项目定位、使用即开发、vendor+端口层和硬纪律；记忆基础设施实现细节以 [../current-state.md](../current-state.md) 与 [README.md](./README.md) 为准。
 
 - **状态**: Accepted。**记忆基础设施部分已过时**——gbrain 唯一存储被 [memory-architecture.md](../memory-architecture.md) 取代（2026-05-07），改为纯 markdown+git 架构。项目定位、vendor+端口层模式、使用即开发工作流、硬纪律均不变。

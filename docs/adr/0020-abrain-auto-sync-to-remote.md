@@ -1,5 +1,7 @@
 # ADR 0020 — Abrain auto-sync to remote (sediment-driven push + startup ff-pull)
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的决策已上提 `INV-SYNC-DETERMINISTIC-MERGE`，以那里为 canonical。以下机制正文（含 Alt A-F / why-not-LLM-merge / 4 轮审计等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 - **Status**: Accepted (revised 2026-05-17 — divergence path now auto-merges; subsequently hardened through 4 audit rounds, see [Revision: 2026-05-17 — auto-merge on divergence](#revision-2026-05-17--auto-merge-on-divergence) below)
 - **Date**: 2026-05-15, revised 2026-05-17 (Rounds 1–4 audit cycle, all on the same date)
 - **Supersedes**: none. Extends [ADR 0014](./0014-abrain-as-personal-brain.md) §B5 (abrain as cross-project knowledge substrate) and [ADR 0017](./0017-project-binding-strict-mode.md) for the cross-device sync gap that ADR 0017's strict binding implicitly assumed someone else would solve.

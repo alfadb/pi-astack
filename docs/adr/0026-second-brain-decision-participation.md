@@ -1,5 +1,7 @@
 # ADR 0026 — 第二大脑参与任务执行
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：§3.1 walk-back 已记入 `feature-changelog.md`，检索参与方向见 `direction.md`，以那里为 canonical。以下机制正文（含 README 引用的四锦点节，标题勿改）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 - **状态**：R0 草案 v2（2026-05-22 用户方向校正后重写）。v1 被用户指出方向偏了—— v1 写的是"推送系统"（什么时候推、推什么、推多少），但用户要的是"参与系统"（大脑在决策时跟 LLM 一起想、一起判断）。
 - **基准**：[ADR 0024](0024-second-brain-from-natural-conversation.md) 的四条 invariant + AI-Native 原则。
 - **对偶**：[ADR 0025](0025-sediment-meta-curator-subsystem.md) 负责"怎么写对"（六个写侧能力），本 ADR 负责"怎么在任务里用出来"。

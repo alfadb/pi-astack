@@ -1,5 +1,7 @@
 # ADR 0013 — Asymmetric Trust 三段式（LLM / explicit / promotion）
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的 trust × 影响半径原则已上提 `direction.md` §1（信任×影响半径），以那里为 canonical。以下机制正文（含 Lane D gate / Q-table 等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 > ⚠️ PARTIALLY HISTORICAL：trust × blast radius 思想仍有效；Lane B/D promotion 和 Lane C 旧机械 gates 已被 ADR 0014/0016 取代，主体中的相关实现计划仅作历史参考。
 
 - **状态**: **Accepted (partially superseded by [ADR 0014](0014-abrain-as-personal-brain.md) §D3 + [ADR 0016](0016-sediment-as-llm-curator.md))**。2026-05-08 原状态 "Accepted"，2026-05-11 反映 supersede 范围明确化。

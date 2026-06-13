@@ -1,5 +1,7 @@
 # ADR 0009 - multi-agent 作为基础能力,调用模式作为模板参考
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的方向立场（dispatch 是基座能力、非固定策略工厂；反约束 LLM）见 `direction.md`，以那里为 canonical。以下机制正文**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 > ⚠️ PARTIALLY HISTORICAL：原则“dispatch 是基础能力”仍有效；旧 `dispatch_agents`、`multi_dispatch`、`extensions/multi-agent/`、templates cookbook 细节只作为历史设计动机。
 
 - **状态**: Accepted (revised 2026-05-11)

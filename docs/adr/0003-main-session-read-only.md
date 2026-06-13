@@ -1,5 +1,7 @@
 # ADR 0003 — 主会话只读，sediment 单写
 
+> 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的决策已上提 `INV-MAIN-SESSION-READ-ONLY` + `REQ-005`，以那里为 canonical。以下机制正文**待 sediment 入 abrain 后归档**，之前保留可读、勿删。
+
 > ⚠️ PARTIALLY HISTORICAL：核心原则“主会话只读 / sediment 单写”仍是 current invariant；旧 gbrain CLI、postgres role、bash regex guard 实现只作为历史参考。
 
 - **状态**: Accepted。**Guard 实现已过时**（2026-05-07）— memory-architecture.md §6.1 定义了新的读工具 `memory_search/get/list/neighbors` 替代 `gbrain_search/get/query`。Guard 的拦截目标从 gbrain CLI/bash 变为 memory write tools（仅 sediment 可见）。读写分离核心原则不变。
