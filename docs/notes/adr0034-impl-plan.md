@@ -62,7 +62,8 @@
 - [x] sanitizer 接线（⑩ secret 边界：sanitize 失败 withhold）+ git reset --hard pre-SHA 回滚 + index rebuild + ingest_adr 审计
 - [x] decomposer **注入可测**（生产接 LLM 分解 prompt；smoke 注入 stub）——认知层走 prompt，无机械准确率门
 - [x] `smoke:adr-ingest` 40 assertions（sandbox 临时 abrain git repo，不动真实 abrain；dry-run 不写 / go / 红线 skip / secret 脱敏 / withhold / 回滚删部分写入）
-- [ ] （Phase 4 prep）CLI 命令 `/memory ingest-adr` + 生产 LLM decomposer prompt 接线——真实写入需用户 go/no-go（G2）
+- [x] （Phase 4 prep）decomposer 核心 `extensions/memory/adr-decomposer.ts`：分解 prompt（AI-Native，要求拆分 + coverage self-report + 红线 escalation）+ `parseDecomposerResponse`（总函数，解 JSON→AdrSource）+ `decomposeAdr`（注入 llmCall）；`smoke:adr-decomposer` 22 assertions
+- [ ] （Phase 4 prep 剩）live 命令注册 `/memory ingest-adr` + 接 ctx.modelRegistry 的生产 llmCall（薄集成，需 pi runtime）——真实写入需用户 go/no-go（G2）
 
 ## Phase 3 — rationale 渲染路径（代码 + smoke）
 

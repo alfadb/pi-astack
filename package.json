@@ -25,6 +25,7 @@
     "smoke:direction-impact": "node scripts/smoke-direction-impact.mjs",
     "smoke:adr-ingest": "node scripts/smoke-adr-ingest.mjs",
     "smoke:rationale": "node scripts/smoke-rationale.mjs",
+    "smoke:adr-decomposer": "node scripts/smoke-adr-decomposer.mjs",
     "smoke:derive-provenance": "node scripts/smoke-derive-provenance.mjs",
     "smoke:rule-footer-realtime": "node scripts/smoke-rule-footer-realtime.mjs",
     "smoke:tier1-directive-defer": "node scripts/smoke-tier1-directive-defer-resolution.mjs",
