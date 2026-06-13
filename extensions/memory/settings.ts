@@ -39,9 +39,16 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage2Model: "",
   stage2Limit: 10,
   stage2Thinking: "off",
-  stage0Enabled: false,
-  stage0PoolLimit: 200,
-  stage0MaxCandidates: 300,
+  // ADR 0035 P5: stage0 默认开(full_body_v3 退役为 flag-off kill-switch +
+  // oracle baseline)。P4 强 baseline(deepseek-v4-pro)21-query oracle coverage
+  // 95.1% ≥ 95% 转产硬门。设 false 可紧急回退全库 full-body。
+  stage0Enabled: true,
+  // P5 离线 oracle tuning 收敛值: poolLimit 300 给 dense 充足语义召回配额
+  // (P4 的 200 使部分中文/概念 query 的 baseline picks 落 dense top200 外,
+  // coverage 94-95% 临界波动); maxCand 400 硬上限(dense 300+sparse 100, 仍
+  // 远<全库 降本 2.8×); sparse 字段权重 3:1(高信号/body)防 body 命中挤占 dense。
+  stage0PoolLimit: 300,
+  stage0MaxCandidates: 400,
   stage0InsufficientPoolK: 5,
   stage0EmbedTimeoutMs: 10_000,
 };

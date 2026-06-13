@@ -75,6 +75,8 @@ const STAGE2_TIMEOUT_MS = 180_000;
 const STAGE_MAX_RETRIES = 1;
 const MAX_STAGE1_ENTRY_CHARS = 12_000;
 const MAX_STAGE2_ENTRY_CHARS = 12_000;
+// ADR 0035 P5: full_body_v3 退役为 flag-off kill-switch + oracle baseline surface;
+// stage0(STAGE0_SURFACE)是默认生产面(DEFAULT_SEARCH_SETTINGS.stage0Enabled=true)。
 const STAGE1_CANDIDATE_SURFACE = "full_body_v3";
 
 function parseModelRef(ref: string): { provider: string; id: string } | null {
