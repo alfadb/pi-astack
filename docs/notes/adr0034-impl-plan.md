@@ -1,0 +1,94 @@
+# ADR 0034 实施计划（living plan — abrain mechanism-ingest + direction_impact + rationale 渲染）
+
+> 本文是 goal 的 living planning document（per goal-doc pattern）。每阶段推进就地更新勾选。
+> ADR 源：[`docs/adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md`](../adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md)（**Accepted** 2026-06-13，3×T0 一致 RATIFY WITH REVISIONS，修订集已并入）。
+
+## 目标
+
+实现 ADR 0034 定义的三块 abrain/sediment 侧能力，解锁 Phase-2 的"物理瘦身/归档"与 `README.md` §4 承重墙（按需渲染 rationale）：
+
+1. **source-aware ingest lane**：按清单把 ADR 机制正文**分解**为多条 typed entry（一份 ADR ≠ 一条），带 `derives_from = 源路径#标题@SHA` + provenance + timeline；`--dry-run` 出 manifest → `--go`。
+2. **`direction_impact` 注解**：entry schema 新增"触碰哪条 INV/REQ + relation + escalation"结构字段，`narrows/weakens/conflicts` 强制 `escalation=required` 且产人类可读提案（承重墙返回路径的结构化落点）。
+3. **rationale 渲染路径**：按 query/slug 渲染审计用 rationale（短答 / 为何设计 / 被拒方案 / direction_impact / 证据 / 置信缺口）；**记忆缺失时显式报"无此 rationale"，绝不幻觉**。
+
+## 门控原则（硬约束，贯穿全程）
+
+- **G1 ratify-first**：ADR 0034 现为 Proposed。按项目一贯协议，**实现前先跨厂商 T0 评审收敛 → Accepted**（或按反馈修订再 ratify）。未 ratify 不进 Phase 1 编码。
+- **G2 主会话不能写 abrain memory entry**（ADR 0003）：主会话**可写 ingest lane 的代码**（extensions/sediment|memory，是普通软件开发）；但**真正写入 `~/.abrain/`** 必须经 sediment lane 这条合法写路径，由用户显式发起（镜像 `/memory migrate --go`）。Phase 1-3 全程用 sandbox fixture + dry-run 验证，**不动真实 ~/.abrain**；真实 production ingest 是 Phase 4 单独 go/no-go。
+- **G3 决策点 T0 门控**：每个有设计自由度的决策点（schema 落点、lane pipeline、渲染集成方式）先拉跨厂商 T0 收敛再落地，镜像 Phase-2 协议。
+- **G4 每阶段 smoke 双向锁定**：新行为配 smoke + negative test（删 assertion 能 fail-fast），镜像现有 `smoke:memory` / `smoke:memory-sediment` 纪律。
+
+## Phase 0 — Ratify ADR 0034（跨厂商 T0，纯设计，无代码）
+
+**做法**：3×T0 盲审 ADR 0034 设计 + 交叉辩论收敛。审题：
+
+- 三能力分解是否完备/正交？是否有第 4 块隐性缺口？
+- `direction_impact` **schema 落点**：frontmatter（利查询，schema 改动）vs body 段过渡 vs 二者混合——哪个先落？（§5 张力）
+- ingest lane 能否**建在现有 `writer.ts` 上**，而非硬等 ADR 0025 稳态 curator 管线？（注：ADR 0025 实为 status=accepted）解耦边界在哪？
+- 一次性迁移 ingest vs INV-IMPLICIT-GROUND-TRUTH 的"显式有界例外"论证是否站得住？provenance 标记 + Tier-2 入库是否足够隔离？
+- 分解粒度由 curator 判断的失控风险（走偏信号 #1 整篇 dump）——dry-run manifest 是否足以兜底？
+- acceptance ⑨（archive-safe）与 §3 时序（archive 可先于 ingest）是否自洽？
+
+**产出**：T0 收敛结论 → ADR 0034 改 `Accepted`（或带修订项再 ratify）；记录决策到 feature-changelog；更新本 plan 的 Phase 1-4 设计参数。
+
+- [x] 3×T0 盲审 dispatch（opus-4-8 / gpt-5.5 / deepseek-v4-pro）
+- [x] 收敛：**三路一致 RATIFY WITH REVISIONS**（无 NEEDS REWORK；仅 §3↔⑨ 时序 severity 上 GPT=P0 / opus+ds=P1，修法一致，无需第 2 轮）
+- [x] ADR 0034 → **Accepted**（9 处修订已并入）+ feature-changelog 记录
+- [x] 锁定 Phase 1-4 设计参数（见下）
+
+**收敛的修订集（已入 ADR）**：(1) §3 时序拆“保 SHA+收残桩可先” vs“物理删 prose 须在 ingest+渲染验证后” + ⑨ 加验证步；(2) direction_impact = **flat frontmatter**（非嵌套/非 body-only）；(3) provenance 用 AX-PROVENANCE 枚举 assistant-observed/content-in-transcript（`migrated-from-mechanism-docs` 降为 timeline marker）；(4) ADR 0025=accepted，仅复用 sanitizer+writer；(5) dry-run 加 coverage/stats；(6) git reset --hard pre-SHA 回滚；(7) 禁写 rules zone；(8) 渲染带 pinned SHA；(9) staleness re-sync 归后续 ADR。
+
+## Phase 1 — `direction_impact` schema（代码 + smoke；最小、基础）
+
+**做法**：按 Phase 0 落点，给 memory entry schema 加 `direction_impact` 结构（`ref` + `relation ∈ {supports,depends_on,touches,narrows,weakens,conflicts}` + `escalation ∈ {none,required,proposed,accepted,rejected}` + `proposal_ref`）。改 `extensions/memory/parser.ts`（解析）、`extensions/sediment/validation.ts`（枚举校验）、`extensions/memory/doctor.ts`（`weakens/conflicts` 必须 `escalation≠none` 的 lint）。`PROTECTED_FRONTMATTER_KEYS` 视情况纳入。
+
+**acceptance**：⑥direction_impact 可查；⑦escalation 浮现而非静默接受（doctor 红线）。
+
+- [x] schema 落点已定（Phase 0）：**flat frontmatter 编码**（非嵌套 map：`parser.ts:254` 跳缩进行；非 body-only：违反 ⑥ 可查）；direction_impact 非 `sediment/writer.ts:478` PROTECTED_FRONTMATTER_KEYS 故透传
+- [ ] parser/validation/doctor 改 + smoke + negative test
+- [ ] `weakens/conflicts → escalation=required` lint 红线（doctor.ts）
+
+## Phase 2 — source-aware ingest lane（代码 + smoke）
+
+**做法**：新 lane（建议 `extensions/memory/ingest-adr.ts`，复用 `migrate-go.ts` 的 index rebuild / git rollback / sanitizer / strict-binding 模式）。输入：ADR 清单 + 章节 split 标记 + 源 SHA。`--dry-run` 出 manifest（每条：compiled truth/kind/scope/status/confidence/derives_from/timeline）→ 确认 → `--go`。**分解**而非整篇 dump；每条 `derives_from = path#heading@SHA`；provenance 标 `migrated-from-mechanism-docs`，入 **Tier-2**。
+
+**acceptance**：①无主会话直写；②dry-run；③每条有 derives_from；④分解无整篇 dump；⑤kind/status 合法；⑩secret 边界（走 sanitizer）。
+
+- [ ] lane 脚手架（dry-run manifest → go）
+- [ ] 分解 prompt（AI-Native 认知层，不加机械准确率门）
+- [ ] provenance/Tier-2/sanitizer/strict-binding 接线
+- [ ] smoke（sandbox fixture，不动真实 abrain）+ negative test
+
+## Phase 3 — rationale 渲染路径（代码 + smoke）
+
+**做法**：扩 `extensions/memory/decide.ts` 或新渲染路径，按 query/slug 输出审计 rationale（短答 / 为何设计 / 被拒方案 / direction_impact / 证据[slug + ADR#标题@SHA + 代码符号] / 置信缺口）。**硬约束**：记忆缺失输出"abrain 无此 rationale；仅 git/docs/代码证据"，绝不幻觉。
+
+**acceptance**：⑧渲染缺失显式报缺失（绝不幻觉）。
+
+- [ ] 渲染路径 + missing-not-hallucinated 约束
+- [ ] smoke（缺失场景必须报缺失，negative test：构造缺失 fixture 验证不幻觉）
+
+## Phase 4 — production ingest + archive 解锁（go/no-go 门控；触碰 G2）
+
+**做法**：能力全绿后，用户显式发起对真实 12 SLIM + 7 ARCHIVE ADR 的 ingest（经 sediment lane 合法写路径）。验证 rationale 经 abrain 可得（satisfies acceptance ⑨）后，才物理瘦身/归档 mark-in-place 的机制正文，ADR 收成方向残桩。
+
+**acceptance**：⑨archive-safe（ingest 后 rationale 可得才允许物理移走 prose）。
+
+- [ ] 能力全绿（Phase 1-3 smoke pass）
+- [ ] **用户显式 go/no-go**（真实 abrain 写入，G2 边界）
+- [ ] production ingest（dry-run review → go）
+- [ ] rationale 可得验证 → 物理瘦身 ADR 机制 prose → 收方向残桩
+- [ ] Phase-2 "整体完成" 达成
+
+## 不变量（ADR 0034 §4，全程守）
+
+- INV-MAIN-SESSION-READ-ONLY：durable 写经 sediment lane，不给主会话开 ingest 写工具
+- AI-Native：分解 / direction_impact 分类 / 渲染都是认知层，走 prompt，不加机械准确率阻断门；manifest/provenance/审计/schema 是 infra 层走 structured
+- provenance 门控：ADR 机制是 assistant/file provenance → 一律 Tier-2，永不冒充 Tier-1 用户指令
+- secret 边界：复用 sediment sanitizer；sub-pi 不作 writer
+
+## 边界 / 非目标
+
+- 不在主会话直写 ~/.abrain（Phase 1-3 全 sandbox/dry-run）
+- 渲染 prompt 的具体措辞、schema 字段最终形态由实现按 AI-Native 权衡（ADR 0034 §7 划为实现细节）
+- 不硬等 ADR 0025 稳态 curator 管线：ADR 0025 status=accepted，本 ADR 仅复用其 sanitizer + writer 基建（Phase 0 裁定）；ingest lane 不 import curator.ts/multi-view.ts/staging-*。

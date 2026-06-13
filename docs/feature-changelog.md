@@ -11,6 +11,22 @@ status: active
 
 ---
 
+## 2026-06-13 — accepted — ADR 0034 ratify：abrain mechanism-ingest keystone 进入实现阶段
+
+### 变更
+ADR 0034（Phase-2 keystone：abrain mechanism-ingest lane + direction_impact 注解 + rationale 渲染）经 3×T0 跨厂商盲审（opus-4-8 / gpt-5.5 / deepseek-v4-pro）**一致 RATIFY WITH REVISIONS**，Proposed → **Accepted**，9 处修订已并入。同时立实现 goal（`docs/notes/adr0034-impl-plan.md`）分 4 阶段推进。
+
+### 原因
+ADR 0034 是 Phase-2 “物理瘦身/归档 + 承重墙渲染”的唯一阻塞能力。本项目协议：未 ratify 的 ADR 不进实现；故先 T0 评审收敛再编码。
+
+### 需求影响（收敛的修订集）
+(1) §3 时序拆“保 SHA + 收方向残桩可先于 ingest” vs“物理删 in-place prose 必须在 ingest + 渲染验证之后”，acceptance ⑨ 加三步验证；(2) direction_impact 首落 = **flat frontmatter**（非嵌套/非 body-only，因 parser 跳缩进行 + 违反可查）；(3) provenance 用 AX-PROVENANCE 枚举 assistant-observed/content-in-transcript（机械确保非 Tier-1），migrated-from-mechanism-docs 降为 timeline marker；(4) 依赖收窄：ADR 0025=accepted，仅复用 sanitizer+writer 基建不依赖稳态 curator 管线；(5) dry-run manifest 加 coverage/stats；(6) git reset --hard pre-SHA 回滚；(7) ingest 禁写 rules zone / inject_mode；(8) 渲染带出 pinned SHA 使源漂移可检；(9) staleness re-sync 归后续 ADR。
+
+### 非目标
+schema 字段最终形态 / lane pipeline / 渲染 prompt 措辞为实现细节（代码 + abrain），不写进 ADR。主会话只写代码，真实写入 ~/.abrain 是 Phase 4 经 sediment lane 单独 go/no-go。
+
+---
+
 ## 2026-06-13 — accepted — roadmap.md strip：roadmap 回归 backlog 本职（STRICT-green 收尾）
 
 ### 变更
