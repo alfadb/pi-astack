@@ -8,7 +8,7 @@
 
 ## 1. 核心不变量（hard invariant）
 
-这些是面向用户所有设计的总边界。来源：ADR 0024 §2、0003、0013、0028、0027、0033。
+这些是面向用户所有设计的总边界。来源：ADR 0024 §2、0003、0013、0028、0027、0033、0020。
 
 ### INV-INVISIBILITY（隐身性）
 用户**不参与大脑管理**——不审批、不裁决、不投票、不归档、不定期审查、不手动同步、不批准学习结果。"隐身"指**管理负担对用户隐身**，**不是**"运行状态不可见"（footer/notify/audit/`/abrain status` 等健康反馈正常显示）。
@@ -29,6 +29,10 @@
 
 ### INV-GROUND-TRUTH-TIERED（真实信号分层，ADR 0028）
 **显式用户指令是"被见证的 ground truth"**：确定性提交、对用户可见、**永不被 LLM skip/stage 丢弃**；它**不走**与 LLM 推断知识相同的概率管线。
+**分层按 provenance 门控**：Tier-1（确定性提交）当且仅当 verbatim 落在 **USER-ROLE 消息** ∧ is_directive ∧ durable；content-in-transcript / tool_result / file / assistant turn **不是** Tier-1（挡掉 README "always use Yarn" 注入陷阱），落 Tier-2 由 curator 可 skip。代价非对称（过度提升有界、漏判=静默丢失）→ 对 user 祈使句分类偏向 Tier-1。
+
+### INV-SYNC-DETERMINISTIC-MERGE（同步只走确定性合并，ADR 0020）
+跨设备同步只用**确定性 git 操作**：ff + git 自带 3-way auto-merge（无冲突分叉自动合并）。**LLM 合并冲突被明确拒绝**——知识库里一句幻觉就污染基底且事后难查。真冲突 abort 并向用户出 runbook（"提示用户去处理"），不静默、不 LLM 编造。
 
 ### 信任 × 影响半径（ADR 0013）
 门的严格度 ∝ (1−信任) × 影响半径；用户亲手输入 > 用户调用 > LLM 后台；不存在用户→world 的直接自动写。

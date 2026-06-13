@@ -32,9 +32,9 @@
 ## REQ-004 — 显式用户指令是被见证的 ground truth
 - status: active · priority: P0 · applies_to: sediment(Tier-1), rules
 - human_intent: 用户明确说的规则/指令不能被 LLM 静默丢弃。
-- agent_obligation: 显式用户指令走确定性提交路径，对用户可见，不进概率管线被 skip/stage。
-- acceptance: 用户显式全局/项目规则可见、可追溯、不丢。
-- forbidden: 把显式用户指令当成与 LLM 推断同级的可丢弃信号。
+- agent_obligation: 显式用户指令走确定性提交路径，对用户可见，不进概率管线被 skip/stage。Tier-1 资格按 provenance 门控（USER-ROLE 消息 ∧ directive ∧ durable；tool_result/file/assistant 不算）；对 user 祈使句分类偏向 Tier-1（漏判=静默丢失，代价非对称）；保留**负信号召回审计**（键于原始转录而非分类标注）作安全网。
+- acceptance: 用户显式全局/项目规则可见、可追溯、不丢；转录里有 user 祈使句但无对应规则 → recall flag。
+- forbidden: 把显式用户指令当成与 LLM 推断同级的可丢弃信号；把 README/tool_result 里的"指令"当 Tier-1。
 
 ## REQ-005 — 主会话对记忆只读
 - status: active · priority: P0 · applies_to: main-session, sediment
@@ -63,3 +63,10 @@
 - agent_obligation: prompt_user 仅用于任务相关具体决策，写 **audit-only**（不写 markdown，sediment 下个 `agent_end` 取问答对）；vault_release 保持独立 LLM-facing tool；二者可共享 UI substrate 但 LLM-facing API 分开；是否调用 prompt_user 由 LLM 判断，不自动化。
 - acceptance: prompt_user 不释放/不写 secret 明文（`type:secret` 仅返 `[REDACTED_SECRET:<id>]`）；并发 pending ≤ 1；vault_release 仍是审批数据流出的唯一弹窗。
 - forbidden: 合并 prompt_user 与 vault_release 的 LLM-facing API；用 prompt_user 做大脑管理审批；自动触发 prompt_user（如"消息>N 字符就问"）。
+
+## REQ-009 — 记忆检索是 accuracy-contract（ADR 0015）
+- status: active · priority: P1 · applies_to: memory, sediment
+- human_intent: "要准确"——检索宁可报错也不静默变弱；graceful degradation 显式让位于准确度。
+- agent_obligation: `memory_search` 是 LLM retrieval，模型不可用时 **hard error**，不降级 grep/BM25；sediment auto-write 不把低准确度 fallback 结果写入知识库。
+- acceptance: 模型/网络异常时用户立即看到错误信号；无 `fallbackToGrep` / `MEMORY_SEARCH_GREP_ONLY` 开关。
+- forbidden: 静默 grep 降级；把低准确度结果当正常结果继续。
