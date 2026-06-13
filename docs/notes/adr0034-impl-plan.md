@@ -84,9 +84,9 @@
 
 - [x] 能力全绿（Phase 1-3 smoke pass：direction-impact 32 + adr-ingest 40 + rationale 29 = 101 assertions，smoke:memory 回归绿）
 - [x] **用户显式 go/no-go**（2026-06-13 授权全量 + 物理瘦身 + 分批）；migration runner `scripts/run-adr-ingest.mjs` + verifier `scripts/verify-rationale.mjs`（经真实 sanitizer + lane 写真实 ~/.abrain，git 可回滚）
-- [~] production ingest（分批：decompose via dispatch → dry-run 自查 → --go → verify）：**已完 10 个 SLIM**（0026/0001/0003/0009/0013/0016/0032/0017/0020/0028 = 135 entries，pi-global 911→1018）；剩 2 SLIM（0022/0023 大文件）+ 7 ARCHIVE。slim 格式用户已确认；ARCHIVE superseded（0006/0019）只标 archived 不 ingest。
-- [~] rationale 可得验证 → 物理瘦身 → 方向残桩：**0026 ✅**（renderRationale found=true + pinned SHA；402→~25 行，原文 git @627de33）；其余随批。
-- [ ] Phase-2 "整体完成" 达成（全 19 ADR ingest + slim 完）
+- [x] production ingest（分批：decompose via dispatch → dry-run 自查 → --go → verify）：**全 17 个 ingest ADR 完成**（12 SLIM = 0026/0001/0003/0009/0013/0016/0032/0017/0020/0028/0022/0023 + 5 机制存档 = 0010/0015/0018/0021/0025）；pi-global 911→1167（+256 entries，6 批 abrain commit 链可回滚）；superseded（0006/0019）按 SUPERSEDED 变体只标 archived 不 ingest。
+- [x] rationale 可得验证 → 物理瘦身 → 方向残桩：**全 17 ADR ✅**（每个经 verify-rationale found=true + pinned `source_ref` SHA 后才 slim；含 0025 conf<8 红线 escalation 可得）；原 prose git @627de33；STRICT docs-doctor 全程绿（0025 保留 6 个 README 入链 §4.x 锚点）。
+- [x] Phase-2 "整体完成" 达成（全 19 机制 ADR：12 SLIM + 7 ARCHIVE 处置完毕）
 
 ## 不变量（ADR 0034 §4，全程守）
 
