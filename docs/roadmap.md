@@ -2,6 +2,8 @@
 
 本文只列 current design vision 中仍未完成或有意 deferred 的项。历史 phase checklist 已归档，不再作为路线图。
 
+ADR 只记录架构决策和取舍，不承载实施流水账。已 ship 的当前事实写入 [`docs/current-state.md`](./current-state.md)；未完成计划写入本文；多轮审计和 commit 级时间线写入 `docs/audits/` 或保留在 git history。
+
 > **2026-05-15 同步**：roadmap 上一版有几条 debt 已经在 2026-05-14 R5/R6 audit 中落地（dispatch temp prompt uniqueness、vault read/bash fail-closed、writer git rollback、migrate-go frontmatter preservation、Vault P1 active project resolver），本次清理移出 backlog，列入下方 **§ "已落地的旧 backlog（不要再当 debt）"** 防止再被当成未完成项。
 >
 > **2026-05-15 PM 补充**：multi-LLM audit (round 1+2) 同日关闭三项 backlog：**Curator scope binding (create 分支)**、**sediment update/merge unknown frontmatter preservation 系统化测试**、**memory parser kind/status 枚举 enforcement**（该项本次初检才发现，同日修复）。均进§"已落地不变量"。

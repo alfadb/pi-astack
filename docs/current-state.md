@@ -183,7 +183,9 @@ sed -n '1,140p' docs/reference/smoke-tests.md
 
 ## 9. 历史文档处理原则
 
-- ADR 保留设计推演与取代关系；先读 [adr/README.md](./adr/README.md)。
+- ADR 保留架构决策、上下文、取舍、后果和 supersede/walk-back 关系；先读 [adr/README.md](./adr/README.md)。
+- ADR 不记录实施流水、完成状态快照或 commit timeline；这些属于本文、[roadmap.md](./roadmap.md)、`docs/audits/` 或 git history。
+- 本文只描述已经 ship 并可验证的当前实现事实；设计但未实现的能力进入 [roadmap.md](./roadmap.md)。
 - 旧 monolith 原文移入 [archive/](./archive/)；不要把 archive 当 current spec。
 - 迁移目录只保留仍可执行的操作手册；已完成的 phase plan/checklist 移入 archive。
 

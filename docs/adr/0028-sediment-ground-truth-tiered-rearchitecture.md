@@ -207,7 +207,7 @@ staging **仅**留给 (a) 真正不确定的 Tier-2 假设 / 不可归属信号,
 
 ### 12.3 降级为子系统概念(不是全局 per-entry 层)
 - **ZONE** = 文件系统**写路由 + 可见性**约定(identity/skills/habits/knowledge/rules/vault/workflows);`MemoryEntry` **无 zone 字段**,memory_search 从不读它。保留为目录组织,不再称"层"。
-- **INJECT-MODE** {always, listed, none} = **rules 子系统**注入预算（rule-injector 读）,**改名脱离 "tier"** 以免与本 ADR Tier-1/2 冲突;仅作用于 rules zone。（实现注 2026-06-10：改名已落地——代码 `RuleInjectMode`/`injectMode`、frontmatter/audit `inject_mode`、catalog 行 `inject=`、curator op `inject_mode`，旧 `tier` 键双读兼容；枚举只实现 {always, listed}，"none" = 非 rules zone（不注入），不作为存储值。）
+- **INJECT-MODE** {always, listed, none} = **rules 子系统**注入预算（rule-injector 读）,**改名脱离 "tier"** 以免与本 ADR Tier-1/2 冲突;仅作用于 rules zone。存储与审计字段应使用 `inject_mode`;旧 `tier` 键只能作为迁移期双读兼容。`none` 表示非 rules zone 不注入，不应作为持久化存储值。
 - **STAGING** = 瞬时 triage/replay **队列机制**(file-path 排除 + multi-view defer-replay);其 trust 含义 = AX-PROVENANCE + AX-MATURITY,不是独立轴。
 - **GTIER(Tier-1/Tier-2)** = 写路径 **router 计算谓词** = `AX-PROVENANCE=user-expressed ∧ is_directive ∧ durable`;**不落盘**(写完即不可区分,这正是"确定性提交"的意义)。
 - **L-TRUST 枚举删除**:零代码读;被 AX-PROVENANCE 的确定性 `turn.role` 派生取代。

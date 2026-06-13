@@ -12,7 +12,7 @@
 
 具体怎么实现推迟到 ADR 0025，本文档只定边界和哲学。
 
-*补说 (2026-05-24)：本段原写 "用户不应该感受到管理大脑这件事"。"感受到《管理大脑》" 是二义措辞——严格含义是 "感受到管理负担"，字面含义是 "感受到大脑被管理 / 大脑在运转"。后者被误读后产生了 commits f3555e8 / 16cb6f0 误删 footer + notify 事故。重写以同时锚定两个方向，堆堆堆 以后的读者不再踩同一个坑。*
+*补说：本段原写 "用户不应该感受到管理大脑这件事"。"感受到《管理大脑》" 是二义措辞——严格含义是 "感受到管理负担"，字面含义是 "感受到大脑被管理 / 大脑在运转"。后者容易被误读为必须隐藏 footer + notify；本 ADR 将两者拆开，避免后续读者踩同一个坑。*
 
 ---
 
@@ -45,7 +45,7 @@
 
 换句话：**审批数据流动 = 合法，审批大脑学习结果 = 元工作 = 反模式**。实现上 vault_release 是 LLM-facing tool（用户可能是间接触发者），但这不影响边界判定——区别在"审批什么"而不是"谁 trigger"。
 
-**2026-05-24 历史记录**:本 invariant 最初的措辞 "大脑内部所有生命周期事件默认完全静默" 被实现误读为"必须删 footer 状态机 + Lane C notify"（commits f3555e8 / 16cb6f0）。事后澄清:"静默"原意是"用户不需要做事",不是"大脑不能告诉用户做了什么"。代码恢复 + 本 §2 措辞重写以彻底防止同类误读。
+**误读防御**：本 invariant 最初的措辞 "大脑内部所有生命周期事件默认完全静默" 容易被误读为"必须删 footer 状态机 + Lane C notify"。本 ADR 明确澄清："静默"原意是"用户不需要做事"，不是"大脑不能告诉用户做了什么"。
 
 ### INV-AUTONOMY（自治性）
 
@@ -121,7 +121,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 
 ### 4.2 这些都不行（必须删除或避免）
 
-**误读事件记录**（2026-05-24）：本表原首行原列为 "系统弹窗 《我学到了 X》——违反隐身"。该条被误读为 "系统不能告诉用户大脑做了什么",导致 commit f3555e8 / 16cb6f0 误删 footer + Lane C notify。事后澄清:**告诉 ≠ 要求**。原 "弹窗《我学到了 X》" 不一定违反隐身——**违反的关键是后跟着的 《要保存吗? [Y/N]》**。下面是重列后的表体。
+**误读防御**：本表原首行原列为 "系统弹窗《我学到了 X》——违反隐身"。该条容易被误读为 "系统不能告诉用户大脑做了什么"。本 ADR 明确澄清：**告诉 ≠ 要求**。原 "弹窗《我学到了 X》" 不一定违反隐身——**违反的关键是后跟着的《要保存吗? [Y/N]》**。下面是重列后的表体。
 
 | 反模式 | 为什么不行 |
 |---|---|
@@ -145,7 +145,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 - `notify` Lane C failure / Lane G retry advisory 等环境状态变化 ——告诉,不要求做事
 - 学习周报纯展示 "本周学了 5 条" 不要求用户点任何按钮 ——告诉,不要求做事
 - `/abrain status` / `/sediment` / audit.jsonl 查询入口 ——用户主动拉,不是系统推
-- `git log` 里出现 `chore(abrain): create skill-pnpm-preference` commit ——持久化事件流让用户事后可查
+- 版本历史里能看到大脑写入事件 ——持久化事件流让用户事后可查
 - LLM 在自然对话中表达 "根据你之前的 X / Y 偏好,推荐 Z" ——告诉 LLM 层面的大脑参与表达（详 ADR 0026 §4.3）
 - 上面这些全部是 INV-INVISIBILITY 边界内的合法反馈信号,要求正常运行,不要被误删。
 
@@ -173,7 +173,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 
 ### 5.1 主动纠错识别
 
-**目标**：稳定识别用户在任务里冒出来的主动纠错，分清三种语义。这是整份设计能跑起来的前置能力——其他五条能力在这条 ship 之前都是空声明。
+**目标**：稳定识别用户在任务里冒出来的主动纠错，分清三种语义。这是整份设计的前置能力；其他五条能力都依赖它提供可靠的纠错信号。
 
 **关键 prompt skeleton**（强制顺序，不许打乱）：
 
@@ -238,9 +238,7 @@ For entries listed but not cited:
 
 ### 5.3 跨会话趋势观察
 
-> **实施状态 (2026-05-28)**：aggregator v0.2 (mechanical threshold-alerter) → v1 (prompt-native skeptical historian) 切换已完成。v1 prompt 见 `extensions/sediment/prompts/aggregator-skeptical-historian-v1.md` (533 行)。本节下文是 v1 设计骨架，实际 prompt 已覆盖：(a) skeptical historian + falsifiability + sycophancy self-check（本节原意）；(b) **补 prior 8 ledger runs 作 prior context**（避免重复发现同一 hypothesis）；(c) **7 天 rolling trend delta + significant_drop flag**（本节 classifier health 升级）；(d) **P1.5 multi-view watchdog signals**（跟 ADR 0025 §4.4.6 P0.5 限制对应）；(e) **structural context 注入**（未实现能力点的 ADR-anchored 解释）；(f) **counterfactual quotes / reverse-anchor / INV-INVISIBILITY 自检**；(g) 三态 `aggregator_engine: prompt_native_v1 | mechanical_v0_2_degraded | mechanical_v0_2_no_model_registry`。
->
-> v0.2 mechanical path **保留为 degraded fallback** —— modelRegistry 缺失或 v1 LLM 失败时回退；ledger 写 `degraded_to_mechanical: true` 让下次 v1 读到此 signal。实现在 `extensions/sediment/aggregator-llm.ts` (410 行)。§4.3 详细设计点 R2 已解决 (调度 / 窗口大小 / cron 资源 / cutoff)；见 ADR 0025 §4.3.4 “R2 已解决” 区。
+> 当前实现状态不写入本 ADR；以 `docs/current-state.md` 的 sediment 章节、`docs/roadmap.md` 的 backlog 和 `docs/audits/` 的审计记录为准。本节只保留 aggregator 的设计职责与约束。
 
 **目标**：识别慢漂移偏好（比如 Yarn → pnpm 用了 6 周渐变），单次会话看不到。
 
@@ -340,7 +338,7 @@ resolving evidence 顺序展开。
 
 ### 5.6 自治归档 + 回滚窗口
 
-*标题澄清 (2026-05-24)：原标题 "静默归档" 跟 §2 原误读源措辞 "默认完全静默" 同词，是误读地雷。本节 "静默" 原意是 "归档不询问用户审批" —— 跟 INV-INVISIBILITY 一致 ✓。**不是**"归档不能让用户看到":归档仍写 audit.jsonl + git commit message + footer上可能出现 ·✅ sediment: 1 archived· 反馈。改叫"自治归档"以区别于误读词。*
+*标题澄清：原标题 "静默归档" 跟 §2 原误读源措辞 "默认完全静默" 同词，是误读地雷。本节 "静默" 原意是 "归档不询问用户审批" —— 跟 INV-INVISIBILITY 一致。**不是**"归档不能让用户看到"：归档仍写 audit.jsonl、版本历史与 footer 反馈。改叫"自治归档"以区别于误读词。*
 
 **目标**：sediment 自动归档错了不要造成永久损失。
 
@@ -367,14 +365,14 @@ resolving evidence 顺序展开。
 | 错沉淀**内容**察觉不到 | 用户能看到大脑在写（footer / notify）但 INV-INVISIBILITY 不要求用户审阅每条 entry。不刺激用户 push back 的场景（"pnpm 恰好能用"类）会沉积一层低度假信心。**不同于原"察觉不到"**: 2026-05-24 INV 重写后,大脑会主动告诉用户写发生了什么（X created/updated/archived）,但不会要求用户检阅每条内容——偏差由此。对冲靠 ADR 0025 §4.3 Classifier Health Meta-Check + §5.3 aggregator。 |
 | 主动纠错疲劳 | 用户对同一 entry 错了 3 次纠正 3 次后第 4 次可能不再纠正 → 系统误读为"已经对了"。设计上靠 N=2 次重复就升级 durable 缓解 |
 | Multi-view 翻倍调用成本 | 每个高价值操作双倍 token。INV-AUTONOMY 的必要代价 |
-| Multi-view 失败 → staging 重审 (P0.5 实施) | reviewer 不可用 / pass call failed / parse 失败 / DEFER 都走 staging-pending 队列。这里代价三个：(1) candidate 在 staging 期间不进入脑——迟到最多 14 天者丢。(2) 每次 agent_end 起多 3 条重审×2 reviewer call 成本×N 设备 (单设备本地，.state/ gitignored)。(3) v1 stub: replay 决定 op!=skip 时 candidate 丢失 (writer dispatcher 未接入、留后续 phase)。这些代价 < silent fall back to proposer (破 §3 A' 层)，是 INV-AUTONOMY 与 A' 硬约束双重下的最低费选择。实施详见 ADR 0025 §4.4.6 |
-| `confirm_pass1_not_synthesizable` dead-loop 冲击 (P0.5 接受) | Pass 1 schema 仅能生成 create / archive / skip 的 rich payload；update / merge / supersede / delete 需要的补丁 / source / mode 字段不在 schema 中。同 candidate 下次 turn 仍可能被 classifier 重复提取，进入 multi-view 后 Pass 1 仍返 update 类 op，仍被 `synthesizeFromPass1` 拒 → op=skip(multiview_pass1_op_not_synthesizable)，不进 staging (D5.5A: staging 会多 dead-loop)。代价是同 candidate 反复烧 ~$0.005-0.02/周期的 reviewer API call。移除条件：ADR 0025 §4.4.6 P1.5 Pass 1 schema 升级后不再发生。dogfood 在 audit.jsonl grep `multiview_pass1_op_not_synthesizable` >5/week 时提前启动 P1.5 |
+| Multi-view 失败 → staging 重审 | reviewer 不可用 / pass call failed / parse 失败 / DEFER 都应走 staging-pending 队列。代价包括：candidate 在 staging 期间不进入脑、重审会增加跨 provider 调用成本、replay 降级路径必须避免丢失 reviewer-approved candidate。这些代价 < silent fall back to proposer（破 §3 A' 层），是 INV-AUTONOMY 与 A' 硬约束双重下的最低费选择。约束详见 ADR 0025 §4.4.6 |
+| `confirm_pass1_not_synthesizable` dead-loop 冲击 | Pass 1 schema 若只允许 create / archive / skip 的 rich payload，update / merge / supersede / delete 缺补丁 / source / mode 字段时必须拒绝合成，避免把 reviewer 输出伪装成可执行操作。代价是同一 candidate 可能在后续轮次重复进入 reviewer，持续消耗调用成本。缓解条件是升级 Pass 1 schema 使相关 op 可被安全合成；触发信号是 audit 中 `multiview_pass1_op_not_synthesizable` 持续升高。 |
 | 早期推理质量参差 | prompt v0 阶段作者需要迭代数轮才能稳定。但 prompt 迭代成本远低于机械 schema 一旦定型的修改成本 |
 | LLM 推理失败的本底概率 | 所有 AI-Native 系统共担的背景风险。基座模型迭代会持续降低 |
 | 默认开启后用户察觉不到的偏差累积（`autoLlmWriteEnabled` default true 以后首次真正存在） | ADR 0025 §5.3 P5.5 指出：默认关闭时用户必须主动改 settings 才启动 —— 此时偏差累积的供给侧未启动，代价不存在。默认 true 后，用户不再需要元动作启动 sediment，但这意味着错沉淀会静默发生。对冲机制：§5.1 aggregator + §5.4 multi-view + ADR 0025 §3.2.B sanitizer + tristate `"staging-only"` 退路（中度关闭，剩下只启 classifier 与 staging、不进 durable 写入） |
-| 路径 A inject 噪音污染主 LLM 注意力（2026-05-28 路径 A v2 落地后新增） | ADR 0026 §3.1 walk-back 后每轮跑 search + inject。如果 stage 2 LLM verdict=has_relevant 但实际 entry 跟当前任务关联弱，主 LLM 读 system prompt 会多 1-2KB noise。缓解：多 LLM 串联 (rewriter / stage 1 / stage 2) 每环都有 silent-fail 通道；cutoff 是 LLM-side 不是 score 阈值；path-a-ledger 双周 dogfood 数据。代价是为了兑现 ADR 0024 §6 #5 偏差累积对冲机制中“第二大脑参与”该部分的接受代价 |
-| 路径 A 多 LLM 串联 misframe 累积（2026-05-28 新增） | rewriter 漏掉 history 关键信号 → stage 1 在错 query 上选 candidate → stage 2 在错候选集 rerank。缓解：rewriter v2 看 history + history dedup；跨阶段 ledger 单环输出可离线 diff（multi-view 思想应用到 retrieval pipeline）；path B (memory_decide) 独立兜底 |
-| 路径 A 召回受 sediment metadata 质量 cap（2026-05-28 新增） | Stage 1 看的是 frontmatter，entry body 决定性证据 Stage 1 看不到。已知漏召模式：用户用跟 entry 内容完全不同词汇 framing 检索。缓解：ADR 0026 §3.0.3 v3 候选 C (stage 1 全文 body)，需要 ADR 0015 二阶段 rerank prompt cache 妥协 walkback（cost 不再是 P0 约束） |
+| 路径 A inject 噪音污染主 LLM 注意力 | ADR 0026 §3.1 walk-back 后，相关记忆检索参与任务。如果 stage 2 LLM verdict=has_relevant 但实际 entry 跟当前任务关联弱，主 LLM 读 system prompt 会多 1-2KB noise。缓解：多 LLM 串联（rewriter / stage 1 / stage 2）每环都有 silent-fail 通道；cutoff 是 LLM-side 不是 score 阈值；path-a-ledger 提供 dogfood 证据。代价是为了兑现 ADR 0024 §6 #5 偏差累积对冲机制中“第二大脑参与”该部分的接受代价 |
+| 路径 A 多 LLM 串联 misframe 累积 | rewriter 漏掉 history 关键信号 → stage 1 在错 query 上选 candidate → stage 2 在错候选集 rerank。缓解：rewriter 读取必要 history 并做 history dedup；跨阶段 ledger 单环输出可离线 diff（multi-view 思想应用到 retrieval pipeline）；path B（memory_decide）独立兜底 |
+| 路径 A 召回受 sediment metadata 质量 cap | Stage 1 若只看 frontmatter，entry body 的决定性证据 Stage 1 看不到。已知漏召模式：用户用跟 entry 内容完全不同词汇 framing 检索。缓解：ADR 0026 §3.0.3 候选 C（stage 1 全文 body），并接受 ADR 0015 二阶段 rerank prompt cache 的成本取舍。 |
 
 ---
 
@@ -389,7 +387,7 @@ resolving evidence 顺序展开。
 5. **classifier 推理质量持续退化** → §5.3 advisory flag 任一维度（quote rate / alternative rate / concrete self-critique rate）持续低于 40% 或下降 ≥15 个百分点，且改 prompt 数轮无改善 → 该能力点降级为 staging-only 或拆到独立 ADR
 6. **AI-Native 原则在某个能力点反复证伪**（多轮 prompt 迭代仍无法达到 baseline）→ 该能力点单独允许机械兜底（需显式说明 (1) prompt-first 已尝试的轮次 (2) 仍然系统性失败的推理证据 (3) 兜底的局部范围 (4) 未来移除兜底的条件），**不全盘 walkback 原则**
 
-   > **注：defense-in-depth (prompt + code belt-and-suspenders) 跟本条说的 "反复证伪后 walkback 兑底" 是两种 pattern**。multi-view P0.5 的 `workflowLaneRefusal` (代码拒绝 reviewer 在 workflow-lane neighbor 上的 archive/update 以化除按推荐) + `synthesizeFromPass1 返 null` (Pass 1 schema 缺 rich payload 时拒 update/merge/supersede/delete) 都是 belt-and-suspenders：prompt 已经含 HARD CONSTRAINT (`multi-view-pass1-blind-v1.md:60-83`)，代码兑底仅是 “万一 prompt 不听话” 的二道防线。本条 (1)轮数 / (2)证据 不适用于这种 pattern——兑底跟 prompt 同时上线。defense-in-depth 需满足：(a) prompt 仍是主路径 (b) 代码兑底只能拒绝 (c) 走明确 audit-flagged skip。multi-view.ts 中两个点都满足。
+   > **注：defense-in-depth (prompt + code belt-and-suspenders) 跟本条说的 "反复证伪后 walkback 兑底" 是两种 pattern**。multi-view 的 `workflowLaneRefusal` (代码拒绝 reviewer 在 workflow-lane neighbor 上的 archive/update 以化除按推荐) + `synthesizeFromPass1 返 null` (Pass 1 schema 缺 rich payload 时拒 update/merge/supersede/delete) 都是 belt-and-suspenders：prompt 已经含 HARD CONSTRAINT (`multi-view-pass1-blind-v1.md:60-83`)，代码兑底仅是 “万一 prompt 不听话” 的二道防线。本条 (1)轮数 / (2)证据 不适用于这种 pattern——兑底跟 prompt 同步具备。defense-in-depth 需满足：(a) prompt 仍是主路径 (b) 代码兑底只能拒绝 (c) 走明确 audit-flagged skip。multi-view.ts 中两个点都满足。
 
    > **过渡态机械门条款（2026-06-12 增补，审计修复计划 PR-B1）**：除上述两种 pattern 外还存在第三种——**迁移/验证期的过渡态机械门**（如 Jaccard 自治 dedup 在 adjudicator lane 默认翻转前的显式 rollback 路径、conf≥8 过渡 fallback、死循环兜底 TTL cache）。这类**已按 §3.2 自检 justify 过的**迁移/验证/兜底门合法（本条款不是“机械门只要带条件就合法”的豁免——§3 的 prompt-first 自检仍是前置），但**新引入时必须同步声明可检验的 flip/移除条件与证据源**（如 shadow audit 累计 N 条且分歧率 ≤ X%、watchdog 计数持续为 0 一个周期），并接入 aggregator/audit 证据流让达标可被发现。**无条件的过渡态是走偏信号**：justify 很便宜、移除没有 deadline 会让例外逐步侵蚀 AI-Native 原则本体（2026-06-12 审计发现认知层已累计 4 个带 sunset 注但无 flip 条件的机械门，均已补条件）。flip/移除动作本身保持人在 loop（advisory 提示作者，不机械自翻）。
 
@@ -403,7 +401,7 @@ resolving evidence 顺序展开。
 
 ## 8. 这份文档不是什么（防止后续套错框架）
 
-- **不是** "大脑运行状态对用户不可见"——**恭喜反了**。这正是 2026-05-24 commits f3555e8 / 16cb6f0 错误实现的方向（已修正）：运行状态指示（footer / notify / audit）**应该正常运行让用户明确感知大脑在工作**。隐身 = 用户不参与管理，**不** = 大脑不能告诉用户它做了什么。
+- **不是** "大脑运行状态对用户不可见"——这正是本 ADR 要防止的误读方向：运行状态指示（footer / notify / audit）**应该正常运行让用户明确感知大脑在工作**。隐身 = 用户不参与管理，**不** = 大脑不能告诉用户它做了什么。
 - **不是** "大脑对用户完全透明不可问"——用户主动问大脑 OK，查询入口 (`/abrain status` / `/rule list`) 对所有用户开放
 - **不是** "禁止所有 ui.notify"——vault / 任务相关错误 / **大脑生命周期事件完成反馈** 均可通知。禁止的是 notify 后跟"要求用户点选项"
 - **不是** "禁止 prompt_user"——任务相关具体决策仍是合法用途（ADR 0022）；只禁止"用 prompt_user 询问 sediment 生命周期决策"（要求用户裁决、批准、选项词表）
@@ -434,7 +432,7 @@ resolving evidence 顺序展开。
 **已不再保留在主文档中**（演进过程已稳定，需要追溯请看 git history 或上述 audit）：
 - INV-R8 / INV-R9 / INV-R11 / INV-R12 / INV-R13 各种历史 invariant 编号
 - 反向 patch 历史 ADR 列表（ADR 0023 / 0021 / 0017 / 0016 / 0020 各 patch 项）—— R0 阶段已经一次性 patch 完
-- R2-R6 实施阶段详细 LOC 估算 + phase 路线图—— 实际按真实 dogfood 反馈逐步 ship
+- R2-R6 早期 LOC 估算 + phase 路线图——实际演进以真实 dogfood 反馈和当前 roadmap 为准
 
 ---
 

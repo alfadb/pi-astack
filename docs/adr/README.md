@@ -6,6 +6,18 @@
 
 ---
 
+## 0. ADR 写作纪律
+
+ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、被取代/修订关系；它不是 changelog、current-state 镜像、实施进度表或 commit timeline。
+
+- **当前实现真相**写在 [`docs/current-state.md`](../current-state.md)，且必须只描述已经 ship 并可验证的代码状态。
+- **未完成计划 / backlog / deferred work**写在 [`docs/roadmap.md`](../roadmap.md)，不要散落到 ADR 正文里。
+- **审计记录 / 多轮评审 / commit 级实施流水**写在 `docs/audits/` 或 git history；ADR 只保留会影响决策有效性的证据摘要与链接。
+- **允许的 ADR 修订**是设计立场改变、walk-back、supersede、accepted baseline 更新；修订时改“决策本身”，不要追加 `✅ DONE`、`CLOSED`、实现状态快照、commit-by-commit 列表。
+- **实现与 ADR 不一致**时，先判断是实现 drift 还是设计已改变：drift 修代码/`current-state`；设计改变才修 ADR，并把实现状态放回 `current-state` / `roadmap`。
+
+---
+
 ## 1. 一句话总愿景
 
 > 用户跟 pi 自然对话，大脑在背后自动学习、自动纠错、自动演进。用户不应
@@ -114,7 +126,7 @@
 | [0018](./0018-sediment-curator-defense-layers.md) | sediment curator 删机械护栏先例 |
 | [0019](./0019-abrain-self-managed-vault-identity.md) | abrain 自管 age keypair vault identity |
 | [0020](./0020-abrain-auto-sync-to-remote.md) | abrain 跨设备同步（冲突不自动 merge） |
-| [0021](./0021-lane-g-identity-skills-habits-writer.md) | Lane G identity/skills/habits writer（G1 shipped） |
+| [0021](./0021-lane-g-identity-skills-habits-writer.md) | Lane G identity/skills/habits writer 设计基线；当前实现见 `current-state.md` |
 | [0022](./0022-prompt-user-tool.md) | prompt_user 工具（任务相关决策） |
 | [0023](./0023-session-start-rule-injection.md) | rules 区 + 第二大脑心智模型 |
 
@@ -122,20 +134,15 @@
 
 ---
 
-## 10. 演进时序
+## 10. 决策时序
 
 - **2026-05-22** ADR 0024 第二大脑总框架 v1 accepted（R7 完成，AI-Native 升格为显式约束）
 - **2026-05-24** ADR 0025 sediment meta-curator v2.1 accepted（R3 完成，六能力点设计完整）
 - **2026-05-24** ADR 0027 Coupled Stigmergic Dual-Loop v0.2 accepted（R3 完成，L1/L2 双 invariant + C6 anchor）
 - **2026-05-27** ADR 0026 决策参与 v1 accepted（R1 完成，路径 A/B 互补）
-- **2026-05-28** ADR 0026 §3.1 walk-back（决策点二元区分被实施层质疑废止；路径 A v2 / v3 设计统辖在 §3.0）
-- **2026-05-28** ADR 0024-0026 cross-ADR drift sweep（aggregator v1 / `/abrain audit classifier` ship 状态同步 + path A 接受代价 + retrieval cutoff 新行）
+- **2026-05-28** ADR 0026 §3.1 walk-back（放弃“决策点 vs 执行指令”二元区分，改由相关记忆检索参与任务）
 
-最近 commits ：
-
-```
-git log --oneline docs/adr/
-```
+实施时间线请看 [`docs/current-state.md`](../current-state.md)、`docs/audits/` 与 git history，不写进 ADR 导览。
 
 ---
 
@@ -149,9 +156,9 @@ git log --oneline docs/adr/
 - 检查是否在 ADR 0024 §3.3 对照表的禁止机械路径 ([§3](#3-核心设计原则))
 - 看走偏信号是否被触发 ([§7](#7-接受的代价--走偏信号))
 
-**实施 vs ADR 文本不一致**：以 ADR 为准，不一致 = drift，需修订 ADR 或更正实施。如果是有意 walk-back，添加 ADR walk-back 注解（参 ADR 0026 §3.1 walk-back 示例）。
+**实施 vs ADR 文本不一致**：以 ADR 为设计基准，以 `docs/current-state.md` 为实现真相。二者不一致时，先判断是实现 drift 还是设计已改变；不要用 ADR 正文追流水账式实现状态。
 
-**本文件维护规则**：ADR 编号 / 章节结构 / 新增能力点 / walk-back 发生时同步本文件 anchor。**不复述 ADR 内容**——发现本文件出现原创设计声明 = bug。
+**本文件维护规则**：ADR 编号 / 章节结构 / 新增能力点 / walk-back 发生时同步本文件 anchor。**不复述 ADR 内容，不记录实施进度**——发现本文件出现原创设计声明或 changelog = bug。
 
 ---
 
