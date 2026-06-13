@@ -87,6 +87,8 @@
 
 ## 3. Spun-out ADR（abrain 侧，主会话不可执行，独立立项 — Kimi 主笔）
 
+> ✅ **已落为 [ADR 0034](../adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md)（Proposed）**。下面是原始 handoff 契约，已被 0034 正式化。
+
 **标题**：ADR — abrain mechanism-ingest + direction-impact annotation + rationale rendering。
 
 **三块缺口**：(i) source-aware sediment ingest lane（现有 /memory migrate 只迁 .pensieve；Lane A 显式 MEMORY 不适合源文件批量；一份 ADR 应**分解**为多条 decision/pattern/anti-pattern/fact/smell/maxim 短 entry，带 derives_from=路径#标题@SHA）；(ii) `direction_impact` 注解（entry 上记触碰了哪条 INV/REQ + supports|depends_on|touches|narrows|weakens|conflicts + escalation 状态）；(iii) rationale 渲染路径（按 query/slug 渲"为何这样设计/被拒方案/证据/置信缺口"，**缺失必须报缺失不可幻觉**）。

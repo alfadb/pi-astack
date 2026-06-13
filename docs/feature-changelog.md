@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-06-13 — proposed — spun-out keystone：ADR 0034 abrain mechanism-ingest + rationale 渲染
+
+### 变更
+新增 [ADR 0034](adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md)（Proposed）：定义 sediment 侧三能力——source-aware ingest lane（把 ADR 机制分解为 typed entry 入 abrain）、`direction_impact` 结构注解（触碰 INV/REQ → 升级，不静默）、rationale 渲染（缺失必报缺失不幻觉）。
+
+### 原因
+Phase-2 把 23 份 ADR 方向上提、机制 mark-in-place，但主会话不能写 abrain（ADR 0003）；机制物理迁入 abrain + `README.md` §4 按需渲染 rationale 承重墙都 block 在这个能力上。它是 Phase-2 的 keystone。
+
+### 需求影响
+Phase-2 “整体完成”不早于 0034 落地 + 渲染验证；在此前承重墙靠 ADR 机制 in-place 可读兜底。
+
+### 非目标
+未实现；不含 memory schema 字段/sediment pipeline/渲染 prompt 的具体实现（→ 代码 + abrain）。
+
+### 关联
+handoff 契约源于跨厂商 T0（Kimi 主笔），记于 `notes/phase2-adr-split-plan.md` §3。
+
+---
+
 ## 2026-06-13 — accepted — Phase 2 抽取：方向不变量/需求上升为共识层一等公民
 
 ### 变更

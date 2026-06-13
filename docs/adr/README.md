@@ -102,6 +102,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | 0028 | IDE / host 边界 | pi 引入除 CLI/TUI 外的第二个 host |
 | 0029 | 跨 provider 治理 | 单设备 dogfood → 团队/企业场景，或 multi-view 真正接入跨 provider |
 | 0030 | **L2 hub baseline + evaluation harness（blocking gate）** | L2 swarm 上生产之前必须完成 |
+| [0034](./0034-abrain-mechanism-ingest-and-rationale-rendering.md) | **abrain mechanism-ingest + direction_impact + rationale 渲染（Phase-2 keystone）** | Proposed；解锁 ADR 机制物理瘦身/归档 + `README.md` §4 承重墙渲染；主会话不可执行，由 sediment 侧落地 |
 
 → [ADR 0027 §6](./0027-coupled-stigmergic-dual-loop-agent-system.md#6-推到独立子-adr-的能力点)
 
