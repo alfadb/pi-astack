@@ -24,6 +24,7 @@
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
     "smoke:embedding": "node scripts/smoke-memory-embedding.mjs",
     "smoke:stage0-pool": "node scripts/smoke-stage0-candidate-pool.mjs",
+    "oracle:stage0": "node scripts/oracle-stage0-replay.mjs",
     "smoke:direction-impact": "node scripts/smoke-direction-impact.mjs",
     "smoke:adr-ingest": "node scripts/smoke-adr-ingest.mjs",
     "smoke:rationale": "node scripts/smoke-rationale.mjs",
