@@ -26,19 +26,7 @@
 
 ## 1. 代码现实：当前只有一个"翻记忆"的动作
 
-现有 LLM 跟大脑的互动方式就一种：
-
-```
-LLM 正在做任务
-  → LLM 自己觉得"可能需要查一下大脑"
-  → 调 memory_search("用户偏好包管理工具")
-  → 拿回 3-5 条摘要（slug + 几行描述）
-  → 如果某条看起来有用，再调 memory_get(slug) 拿全文
-  → 把内容融进自己的推理中
-  → 继续做任务
-```
-
-工具注册 @ `extensions/memory/index.ts:296`，描述是 "Use memory_search before planning, designing, reviewing code, or making project-specific decisions"。
+现有 LLM 跟大脑的互动只有一种：LLM 自己想起来调 `memory_search` → 拿回 3-5 条摘要 → 必要时 `memory_get` 取全文 → 融进推理。工具注册 @ `extensions/memory/index.ts`，描述建议在 planning / design / review 时搜。
 
 **核心特征**：
 
@@ -55,24 +43,11 @@ LLM 正在做任务
 
 ## 2. "推送记忆"和"参与决策"的区别
 
-我 v1 写的本质是**推送系统**：
-
-```
-大脑观察上下文 → 判断"该推了" → 选几条 → 控制剂量 → 塞给 LLM
-```
+我 v1 写的本质是**推送系统**（大脑观察上下文 → 判断"该推了" → 选几条 → 控制剂量 → 塞给 LLM）。
 
 问题：LLM 拿到的是**原始记忆**。它还得自己理解为啥这条现在相关、跟其他条目有没有冲突、过去的 outcome 是好是坏。大脑做完了第一步（"找出来"）就把所有推理负担扔给 LLM 了。
 
-用户要的是**参与系统**：
-
-```
-LLM 到达决策点 → 大脑主动提供情境化建议 →
-"你当前在 X 场景下做 Y 决定。基于你过去的选择：
- - A 条目说你偏好 Z 方案，过去 12 个项目用了 Z
- - B 条目说你试过 W 方案，两周后改回来了
- - C 条目是跟你当前项目同类型的，用了 Z + 这个配置
- 综合来看，建议 Z。但如果你这次有特殊原因想用 W，注意上次的问题是..."
-```
+用户要的是**参与系统**：LLM 到达决策点 → 大脑主动给情境化建议（基于过去选择列出相关条目 + outcome + 综合建议，并提示矛盾），而不是丢原始记忆让 LLM 自己消化。
 
 区别在哪：
 
@@ -169,139 +144,30 @@ user turn + recent history
 >
 > **下文原 §3.1 保留** 作为被取代的设计意图。后续读者过 §3.1 原文时应以本注解为准。
 
-**目标**：知道 LLM 什么时候在做决定，在那个时刻让大脑介入。
-
-不是每个对话轮都需要大脑参与。用户说 "帮我写个 README" 和用户说 "我这个项目应该用 React Router v6 还是 v7"——后者是决策点，大脑该介入；前者是执行指令，大脑不用多嘴。
-
-识别走一段轻量 prompt，在 `agent_turn` 时跑（每轮 LLM 收到用户消息后、调工具前）：
-
-```
-你是决策点观察者。下面是用户刚发的消息 + 最近几轮对话。
-
-判断：用户当前是否处于一个**需要做选择的时刻**？
-- 技术选型？"用 X 还是 Y" / "这个项目用什么框架"
-- 架构决策？"怎么设计这个模块" / "数据库选哪个"
-- 工作流选择？"CI 用什么" / "怎么部署"
-- 工具/库选择？"用哪个库" / "哪个方案更好"
-
-如果是决策点，输出：
-{
-  "is_decision_point": true,
-  "decision_type": "tech-choice | architecture | workflow | tool-choice",
-  "whats_being_decided": "1 句话描述",
-  "options_on_table": ["显式提到的选项 + 隐式可能的选项"],
-  "constraints": ["时间 / 兼容性 / 团队 / 其他约束"]
-}
-
-如果不是决策点，输出：
-{
-  "is_decision_point": false
-}
-```
-
-**不是每个 agent_turn 都跑**——只在以下条件触发：
-- 用户消息含选择类关键词（"选哪个 / 用 X 还是 Y / 怎么选 / 推荐 / 建议"）
-- 或者 LLM 上轮回复中提出了选项让用户选
-- 或者 LLM 即将调 `prompt_user` 问用户决策
-
-**当检测到决策点** → 触发 §3.2 情境化回忆。
+（原文为被取代的设计意图：二元决策点检测 prompt + 触发条件。规范裁定见 §3.0；逐字原文见 git history。）
 
 ### 3.2 情境化回忆
 
 > 本节 prompt schema 依赖 §3.1 字段 (`decision_type` / `whats_being_decided` / `options_on_table` / `constraints`)；§3.1 walked back 后，这些字段不再是路径 A 最小形态前提。本节保留作 brief synthesizer v3 候选参考；规范性裁定以 §3.0 为准。
 
-**目标**：不只是"搜到这几条"，而是"这几条对你当前的决定意味着什么"。
+brief synthesizer 是 v3 候选；路径 A v2 走裸 entry + framing，让主 LLM 自读（规范裁定见 §3.0）。保留两条仍然有效的约束：
 
-在决策点触发后，跑一段 prompt（替代当前 LLM 手动调 memory_search 的场景）：
+- **provisional staging 条目（`attribution_pending=true`）不准进任何"用"侧决策**：它是分类器未确认猜测，不是用户事实；当 confirmed preference 推给 LLM 会让大脑"自己编偏好再自己信"。仅等 0025 staging resolution 确认/废弃。
+- **brief 形态用自然语言而非 JSON**：JSON 迫使拆字段，丢失跨条目综合判断（"偏好 pnpm" + "试 yarn 后改回" 放一起才看出是"试错后确认的偏好"）。
 
-```
-你是第二大脑的决策参谋。用户正在做一个决定：
-
-【当前决策】
-- 类型：{decision_type}
-- 在决定什么：{whats_being_decided}
-- 摆在台面上的选项：{options_on_table}
-- 约束：{constraints}
-
-【你找到的相关记忆】
-{llmSearchEntries 召回的前 8 条，含全文}
-
-基于这些记忆，写一份**决策简报**。不是简单列举条目——
-每一条告诉我"这对当前的决定有什么含义"。
-
-简报结构：
-1. 相关偏好（用户过去明确说了什么）→ 对当前决定的影响
-2. 相关经验（用户过去做了类似选择后发生了什么）→ 是顺利还是后悔了
-3. 矛盾提醒（如果当前选项跟用户过去的某个明确偏好冲突）→ 指出来
-4. 综合建议（不是替 LLM 做决定，是给出"基于你所知的用户历史，
-   哪个选项最符合用户的长期偏好"——如果证据不足就说证据不足）
-
-你的输出是给主 LLM 看的内部参考，不是给用户看的。保持简洁——
-控制在 500 tokens 内。
-```
-
-**输出是一段自然语言简报**，不是 JSON schema。主 LLM 拿到后像读一段"专家意见"一样融进自己的推理。
-
-**⚠️ 什么不该出现在简报里**：provisional staging 条目（attribution_pending=true）**不准**进决策简报。provisional 是分类器的未确认猜测——不是用户事实。如果一条 provisional 说"用户可能偏好 X"而决策简报把它当 confirmed preference 推荐给 LLM，LLM 采纳后用户说"我没说过这个"——这就是大脑自己编了条偏好然后自己信了。provisional 的唯一用途是等 0025 的 staging resolution 流程确认或废弃——**在确认前不参与任何"用"侧的决策**。
-
-**为什么直接给自然语言而不是 JSON**：JSON 迫使 LLM 把判断拆成字段，容易丢失跨条目的综合判断。"用户偏好 pnpm"和"用户试 yarn 后改回来"这两条放一起才能看出"用户不是一般偏好 pnpm，是试过 yarn 不好用之后确认的偏好"。JSON schema 很难表达这种跨条目的综合判断。
-
-**跟当前 memory_search 的关系**：不是取代。当前 LLM 自己调 memory_search 的场景仍然保留——很多场景不需要决策简报（比如"这个函数的 API 是什么"），LLM 自己搜就够。决策简报只在**检测到决策点时**触发，作为附加的参谋输入。
+（原 brief synthesizer prompt 见 git history。）
 
 ### 3.3 矛盾感知
 
 > 本节原设计是“跟 §3.2 是同一次 LLM 调用”。当路径 A 不走 brief synthesizer 时，矛盾感知由主 LLM 在读 inject raw entries 时隐式承担；如果后续升级 brief synthesizer，本节 prompt 文本可直接复用。
 
-**目标**：大脑注意到 LLM 正在做的选择跟用户过去的明确偏好冲突时，主动提醒。
-
-这是 INV-ACTIVE-CORRECTION 在"用"侧的兑现——用户说了"以后用 pnpm"，大脑记住了。三个月后 LLM 在某个项目里建议用 yarn，大脑应该能感知到这个矛盾。
-
-**实现**：矛盾感知跟 §3.2 情境化回忆是**同一次 LLM 调用**——在生成决策简报时，prompt 里加一段：
-
-```
-特别检查：即将选择的方案是否跟用户过去的某个【明确偏好】（高置信
-durable entry，conf ≥ 7）直接冲突？
-
-如果冲突：
-- 指出冲突的具体条目（quote 原文）
-- 判断可能的场景：用户可能改主意了 / 这个项目有特殊原因 /
-  这个偏好不适用当前场景 / LLM 忘了
-- 建议：提醒 LLM 这条偏好的存在，但不要强推——LLM 可以根据
-  当前对话上下文判断用户是否真的改了主意
-
-如果没冲突：跳过。
-```
-
-**为什么不是硬拦截**：大脑不知道用户是不是改主意了——用户可能三个月前说"用 pnpm"，但当前项目跟团队统一用 yarn，这个决策是合理的。大脑应该**提醒**，不是**阻止**。提醒了之后 LLM 可以：
-- 按大脑的建议改用 pnpm
-- 或者跟用户确认："我记得你之前偏好 pnpm，但这个项目用 yarn——是改偏好了还是项目特殊？"（INV-INVISIBILITY 不禁止 —— 这是任务决策确认，不是大脑管理）
-- 或者直接按项目需求用 yarn，把大脑的提醒当参考
+**决策（不受 §3.1 walk-back 影响）**：矛盾感知是 INV-ACTIVE-CORRECTION 在"用"侧的兑现——记住的明确偏好（高置信 durable）与当前选择冲突时，大脑**提醒而不阻止**。路径 A v2 由主 LLM 读 inject 的 raw entries 时隐式承担；升级 brief synthesizer 后可由 prompt 显式处理（原 prompt 见 git history）。不硬拦截的理由：大脑无法判断用户是否改主意，提醒后 LLM 可改用、可跟用户确认、也可按项目需求覆盖。
 
 ### 3.4 结果驱动的推荐
 
 > 本节设计依赖“在 §3.2 决策简报 prompt 里附 outcome 摘要”。当路径 A 不走 brief synthesizer 时，raw entries 不携 outcome 活跃度信息；因此 outcome-ledger 消费是 brief synthesizer / `memory_decide` 形态的设计要求。
 
-**目标**：用户过去的决策结果影响现在的建议。
-
-ADR 0025 §4.2 outcome self-report 收集了"某条记忆被用了、用得好不好"。这个数据不应该只存着，应该在决策时发挥作用。
-
-**具体怎么用**：
-
-在 §3.2 决策简报的 prompt 里，附加一个 outcome 摘要：
-
-```
-【相关条目的使用记录】
-- "用户偏好 pnpm"：过去 30 天被 DECISIVE 使用 23 次，从未被 RETRIEVED-UNUSED
-  → 高度活跃，用户的偏好没有动摇
-- "项目 X 用 React Router v6"：3 个月前被 DECISIVE 使用 2 次，最近 2 个月没被引用
-  → 可能项目完成或不再相关，建议作为参考而非硬约束
-- "CI 用 GitHub Actions"：被 RETRIEVED-UNUSED 3 次（LLM 搜到了但觉得不相关没采用）
-  → 用户可能迁移了 CI 工具，降权
-```
-
-outcome 数据影响的是**推荐的力度**——活跃条目 → 强推荐；冷条目 → 弱参考；被否过的条目 → 提醒但不推荐。
-
-**具体机制**：outcome-ledger（ADR 0025 §4.2.4）里存了每条 outcome 的 timestamp + used 字段。§3.2 调之前扫一次 ledger，算出每条相关条目的近 30 天活跃度和 outcome 倾向，写进决策简报 prompt 的 context 里。这个计算是 Infra 行为（读文件、统计数字），不需要 LLM 推理。
+**决策**：用户过去的决策结果影响现在建议的**力度**——活跃条目强推荐、冷条目弱参考、被否过的提醒但不推荐。数据源是 outcome-ledger（ADR 0025 §4.2.4）的 timestamp + used 字段；近 30 天活跃度/倾向统计是 Infra 行为（读文件统计，不需 LLM）。outcome-ledger 消费是 brief synthesizer / `memory_decide` 形态的设计要求，不是路径 A v2 最小前提（原 outcome 摘要 prompt 见 git history）。
 
 **⚠️ 防止回声室**：大脑推荐 A → LLM 采纳 → outcome 记 DECISIVE → 下次大脑更强推 A → LLM 更倾向采纳 A → 循环。这个正反馈会让大脑把自己的推荐当成"用户确认过的偏好"，而实际上用户只是没反对。断路器：同一条目连续 5 次被 DECISIVE 使用且期间用户没有产生任何主动纠错信号（说明用户没反对但也没主动确认）→ aggregator（0025 §4.3）自动把这条标记为"pending reconfirmation"——下次决策简报里不再推荐为"明确偏好"，降级为"之前你经常用，但最近没有明确确认过"。这个降级不是归档、不是删除——只是让大脑的推荐语气从"你应该"变成"你之前好像"。
 
@@ -311,35 +177,9 @@ outcome 数据影响的是**推荐的力度**——活跃条目 → 强推荐；
 
 ### 4.1 路径 A：决策简报（主路径，agent_turn 触发）
 
-> 下面的流程图依赖于 §3.1 “决策点检测”这个阶段，而 §3.1 本身已被 walked back（见该节顶部注解）。路径 A 的统辖流程是：
->
-> ```
-> before_agent_start hook
->   ├─ query-rewriter LLM（轻量模型）：近 N 轮 + 本轮 → 收敛 query / 输出 no_useful_query
->   ├─ if no_useful_query → 跳过（静默）
->   ├─ memory_search（复用 llmSearchEntries）。Stage 2 prompt 加强 cutoff：
->   │   输出 relevance_verdict = none | has_relevant
->   ├─ if none → 跳过 inject（静默）
->   └─ if has_relevant → 生成 summary 注入 system prompt 末尾
-> ```
->
-> 下文原 §4.1 流程图 **作为历史记录保留**。
+> 路径 A 的统辖流程见 §3.0.1（before_agent_start → rewriter 判 useful → memory_search + Stage 2 verdict cutoff → silent skip 或 inject）。原依赖 §3.1 决策点检测的 agent_turn 流程已 walked back。
 
-上面对应 §3.1-§3.3。流程：
-
-```
-agent_turn hook @ before_agent_turn
-  ├─ [决策点检测] 用户消息含选择关键词？→ 跑 §3.1 prompt
-  ├─ is_decision_point == true？
-  │   ├─ [召回] llmSearchEntries(决策上下文) → 前 8 条
-  │   ├─ [outcome 摘要] 读 outcome-ledger → 近 30 天活跃度统计
-  │   ├─ [决策简报] 跑 §3.2 prompt（含 §3.3 矛盾检测 + §3.4 outcome 数据）
-  │   └─ 输出 decision_brief（≤500 token 自然语言段落）
-  │       注入到 system prompt 或作为额外的 context 项给主 LLM
-  └─ is_decision_point == false → 跳过
-```
-
-**注入方式**：决策简报放在本轮 system prompt 末尾。
+**注入方式**：决策简报放在本轮 system prompt 末尾（统辖流程见 §3.0.1）。
 
 **⚠️ 延迟不是"可接受"——得说清楚代价**：R10 审计指出，在 `agent_turn` 里加决策点检测 + 简报生成会让 LLM 首 token 时间（TTFT）从 1-2s 涨到 3-5s。对用户来说，"LLM 开始回复"慢了一倍多。这不是小代价——在 20% 的轮次上三倍延迟，用户会感觉"这个 AI 怎么卡了一下"。
 
@@ -360,38 +200,13 @@ agent_turn hook @ before_agent_turn
 >
 > 修订后的设计（§3.1 walk-back 注解中详述）不再需要决策点检测阶段。下文原 §4.1.1 保留为历史记录。
 
-R1 review DeepSeek 指出路径 A 未实现前需提前绑定 TTFT 缓解路径，避免实现后用户看到「创造倍变延迟」严重回退。这里记录三个公设计选择 + 默认推荐：
-
-**选择 1：超轻量 regex 预过滤（默认推荐）**
-- LLM 检测决策点在 5% 轮次运行，剩下 95% 走 regex 预检（“选择”「怎么选」「A 还是 B」等关键词）
-- regex 命中才启 LLM 检测。未命中 → 不走路径 A，TTFT 不受影响
-- 代价：regex 可能漏检某些隐式决策点，但那些交由路径 B 补付
-
-**选择 2：上一轮 `agent_end` 预热**
-- 上一轮结束后预计本轮输入可能是决策点（上轮 LLM 输出中含选项），在 `agent_end` 后后台生成决策简报，本轮用户输入时 cache 已热
-- 代价：预热中率需改善；未命中的轮次预热成本浪费
-- 依赖点：预热 cache TTL 与轮间间隔匹配
-
-**选择 3：全 LLM 检测（原始设计）**
-- 每轮输入都跑决策点 LLM 检测，检到则跑简报，未检到则不跑
-- 代价：TTFT 增 3-5s 在 100% 轮次（不可接受）
-
-**默认选择 1**（regex 预过滤）：P1 实现路径 A 的首价设计。选择 2 可以为 P2 补加。选择 3 被明确拒绝。
-
-**设计裁定**：路径 A 不再依赖上述三个选择。TTFT 缓解应由 §3.0 的 silent-skip 搜索链路承担：轻量 rewriter 判 `useful=false` 时直接跳过，Stage 2 判 `relevance_verdict=none` 时不注入。
+**设计裁定**：原三个 TTFT 缓解选择（regex 预过滤 / agent_end 预热 / 全 LLM 检测）都依赖被 walked back 的二元决策点区分，已作废（理由见 §3.0.4 / §3.1）。路径 A 的 TTFT 缓解改由 §3.0 silent-skip 搜索链路承担：rewriter 判 `useful=false` 直接跳过、Stage 2 判 `relevance_verdict=none` 不注入。
 
 ### 4.2 路径 B：即时深潜（辅助路径，LLM 主动调）
 
 有些决策是 LLM 在推理过程中才意识到的——不是用户直接问"用 X 还是 Y"，而是 LLM 发现"等等，这里有三个可能的实现方式，我得选一个"。这种决策点在 §3.1 的检测 prompt 里不一定能预先抓到。
 
-**给 LLM 一个新工具 `memory_decide`**：
-
-```
-memory_decide(context: "我在决定一件事", options?: ["A", "B"], constraints?: "约束")
-
-返回：一份决策简报（≤500 token），格式跟路径 A 相同。
-不同点：这个简报是 LLM 主动要的，不是大脑推到它面前的。
-```
+**给 LLM 一个新工具 `memory_decide(context, options?, constraints?)`**：返回一份 ≤500 token 决策简报，格式同路径 A；区别是 LLM 主动要的，不是大脑推的。
 
 **跟路径 A 的关系**：
 - 路径 A：大脑**推**（检测到决策点 → 主动给简报）
@@ -474,37 +289,11 @@ path_a_inject_id = `path-a-${ts.toString(36)}-${random8chars}`
 
 ADR 0025 §4.2.4 定义了 outcome-ledger 的基本字段。本 ADR R1 P1-7 补上与 C6 锚点的 join 字段安排：
 
-```jsonc
-{
-  // 原有字段（ADR 0025）
-  ts: "2026-05-27T16:23:04.123Z",
-  session_id: "019e…",
-  entry_slug: "prefer-pnpm",
-  source: "memory-footnote" | "tool-result",
-  // R1 P1-3 加（spread anchor 产生的字段）
-  turn_id: 47,                  // anchor.turn_id
-  subturn: 2,                   // 仅 sub-agent 调时出现
-  // R1 P1-7 加（决策丰产生信号时才出现）
-  decision_brief_id: "019e…|47|1",
-  used: "decisive" | "confirmatory" | "retrieved-unused",
-  counterfactual: "…",
-  // 原有字段 cont.
-  project_root: "…",
-}
-```
+基础字段 ts / session_id / entry_slug / source / project_root 上，本 ADR 补 C6 join 字段：`turn_id`（anchor.turn_id）、`subturn`（仅 sub-agent 调时）、`decision_brief_id`、`used`、`counterfactual`（决策简报产生信号时才出现）。
 
 #### Join 路径
 
-```
-# 合并一个 turn 的 L1/L2 outcome 信号
-jq 'select(.session_id == X and .turn_id == Y)' outcome-ledger.jsonl
-
-# 某条简报被使用的所有信号
-jq 'select(.decision_brief_id == "X|Y|N")' outcome-ledger.jsonl
-
-# 同 turn 同 entry 被多份简报引用的情况
-jq 'select(.session_id == X and .turn_id == Y and .entry_slug == "prefer-pnpm")' outcome-ledger.jsonl
-```
+`outcome-ledger.jsonl` 按 `(session_id, turn_id)` 合并一个 turn 的 L1/L2 信号、按 `decision_brief_id` 取某份简报被使用的全部信号、按 `(session_id, turn_id, entry_slug)` 查同 turn 同 entry 多份简报引用。
 
 #### 与 ADR 0027 §C6 的关系
 
@@ -527,14 +316,7 @@ jq 'select(.session_id == X and .turn_id == Y and .entry_slug == "prefer-pnpm")'
 >
 > 下文原表保留作为历史记录。
 
-```
-extensions/sediment/
-├── decision-detector.ts          ← §3.1 决策点检测 prompt + logic
-├── decision-briefer.ts           ← §3.2 情境化回忆 prompt（含 §3.3 矛盾检测）
-├── memory-decide-tool.ts         ← §4.2 memory_decide 工具注册
-└── prompts/
-    └── decision-brief-v1.md
-```
+新文件：`decision-briefer.ts`（§3.2 情境化回忆 + §3.3 矛盾检测）、`memory-decide-tool.ts`（§4.2 工具注册）+ `prompts/decision-brief-v1.md`。注：§3.1 二元决策点检测已被 §3.0 取代，`decision-detector.ts` 不再是路径 A v2 前提。
 
 ### 6.2 改动现有文件
 
@@ -554,13 +336,9 @@ extensions/sediment/
 
 **第 2 层（P1，等 0025 有数据后）**：完整版决策简报（含 outcome 摘要 + 矛盾检测）。在 0025 P1 能力具备且积累 1-2 个月的 outcome 数据后启动。
 
-| Phase | 范围 | 依赖 | 工程量 |
-|---|---|---|---|
-| **P0** | `memory_decide` 工具（路径 B，LLM 主动调）——最小可用版本。prompt 是 §3.2 的精简版（不含 outcome 数据、不含矛盾检测） | ADR 0025 P0（promptVersion / audit） | 小 |
-| **P1** | 决策点检测（§3.1）+ 决策简报自动注入（路径 A）——完整版 prompt（含 §3.3 矛盾检测 + §3.4 outcome 摘要） | P0 + ADR 0025 P1（主动纠错 classifier 产出 correction_signal）+ ADR 0025 P2（outcome 数据可用） | 中 |
-| **P2** | 简报采纳/拒绝 → 反馈到 outcome-ledger（本 ADR §5 反向喂 0025） | P1 + ADR 0025 P2 outcome-ledger 写接口稳定 | 小 |
+Phase：P0 = `memory_decide` 工具最小版（路径 B，依赖 ADR 0025 P0）；P1 = 决策点检测 + 路径 A 自动注入完整版（依赖 ADR 0025 P1 主动纠错 + P2 outcome）；P2 = 简报采纳/拒绝反馈回 outcome-ledger（§5 反向喂 0025）。工程量/依赖详见 [`../roadmap.md`](../roadmap.md)。
 
-**关键**：P0 不需要等 ADR 0025 的上游能力。`memory_decide` 工具是自包含的：拿当前决策上下文 + 召回的条目 → 产决策简报。LLM 可以直接使用。
+**关键**：P0 不需要等 ADR 0025 的上游能力——`memory_decide` 是自包含的（当前决策上下文 + 召回条目 → 决策简报），LLM 可直接用。
 
 P1 需要等 ADR 0025 P1（主动纠错）和 P2（outcome），因为矛盾检测靠 active correction 的 durable entry，outcome 摘要靠 outcome-ledger。但这两个阻塞不严重——P0 已经提供了最小可用的"大脑参与决策"体验。
 

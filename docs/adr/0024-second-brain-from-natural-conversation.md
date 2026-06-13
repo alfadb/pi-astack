@@ -175,30 +175,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 
 **目标**：稳定识别用户在任务里冒出来的主动纠错，分清三种语义。这是整份设计的前置能力；其他五条能力都依赖它提供可靠的纠错信号。
 
-**关键 prompt skeleton**（强制顺序，不许打乱）：
-
-```
-Step 1 — Quote the user's exact words (no paraphrasing). Include ≥3
-         lines of surrounding context (what was said before and after).
-
-Step 2 — For EACH of {durable, task-local, debug}, write the strongest
-         1-sentence case FOR it, using only step-1 quotes.
-         You MUST give all three a real case — not a strawman.
-
-Step 3 — For the reading you currently lean toward, find the single
-         observation in this transcript that would most undermine it.
-         If you cannot find one, say so — that itself is a signal your
-         lean may be premature.
-
-Step 4 — If step 3 produced a real disconfirmer, downgrade by one tier
-         (durable → task-local; task-local → debug).
-
-Step 5 — NOW commit: typing + natural-language scope description + confidence.
-
-Step 6 — Self-critique: "If I am wrong, the most likely error direction
-         is ___ because ___" (must reference a concrete step-1 quote,
-         not generic phrases like 'context might be different').
-```
+**关键 prompt 设计要点**（强制顺序 quote→三读→证伪→降级→commit→自批）——逐字 prompt 与机制见 ADR 0025 §4.1，规范源 `extensions/sediment/prompts/active-correction-classifier-v2.md`。
 
 **为什么这样设计**：默认让 AI 解释推理过程时，它容易先下结论再倒回来编理由（事后找补），看起来推理很完整其实是事后找补。上面的顺序卡死让 LLM 必须先列证据再下结论。Step 6 anchored 到具体引用防止万能套话。
 
@@ -210,27 +187,7 @@ Step 6 — Self-critique: "If I am wrong, the most likely error direction
 
 **关键设计**：**不要让事后的 curator 旁观猜测**——curator 看到 entry 出现在 context 里就会倾向报告"用上了"，因为没有反事实 baseline 可对照。真正知道自己用没用上的是**当时正在干活那个 LLM 本人**。
 
-在 agent_end 时，注入 outcome self-report prompt 给原始会话 LLM：
-
-```
-For EACH entry that was in your injected context (always/listed rules,
-or memory_search results you retrieved):
-
-For entries you consciously used:
-  Q1: Did this entry influence a SPECIFIC decision or action you took?
-      If YES: which decision? Quote the action/output where it mattered.
-
-  Q2 (counterfactual): If this entry had NOT been in your context,
-      would you have made a DIFFERENT decision?
-      If YES: what would you have done differently?
-      If NO: "this entry was consistent with my independent reasoning
-             but did not change my behavior" → mark as CONFIRMATORY,
-             not DECISIVE.
-
-For entries listed but not cited:
-  Q3: Why did you not use this entry? Irrelevant, forgotten, or
-      overridden by other context?
-```
+在 agent_end 注入 outcome self-report prompt 给原始会话 LLM（Q1 是否影响具体决策 / Q2 counterfactual / Q3 未用原因）——逐字 prompt 与机制见 ADR 0025 §4.2（默认走 `memory-footnote` 协议）。
 
 只有当 LLM 能具体说出 counterfactual（"如果这条不在我会做 X，但有了它我做了 Y"）才能 claim DECISIVE 影响。说不出来默认是 CONFIRMATORY（顺路一致，没真起作用）或 RETRIEVED-UNUSED（被召回但没用）。
 
@@ -242,42 +199,7 @@ For entries listed but not cited:
 
 **目标**：识别慢漂移偏好（比如 Yarn → pnpm 用了 6 周渐变），单次会话看不到。
 
-**关键设计**：定期任务（每天 / 每周 / 每月），**角色是"持怀疑态度的史官"，默认"没发现就是成功"**：
-
-```
-You are a skeptical historian of the user's work patterns.
-You are NOT rewarded for finding a hypothesis.
-Most runs should produce NO candidate hypothesis.
-Output "no candidate, no action — timeline within normal variance" is
-a SUCCESSFUL run, not a lazy one.
-
-Before proposing ANY hypothesis H:
-  (1) Write a paragraph "Reasons NOT to change the brain":
-      - Could this be normal task distribution noise?
-      - Could this be caused by an existing sediment entry shaping
-        the assistant's behavior (回声室)?
-      - Did the user merely accept a workable default without expressing
-        preference?
-      - Could the evidence be domain-local rather than durable?
-
-  (2) Falsifiability: name one specific future observation that would
-      falsify H within ~2 weeks. If you cannot, discard.
-
-  (3) Sycophancy self-check: "Would I still propose this if nobody
-      praised me for finding a pattern?" If no → discard.
-```
-
-**附加：质量退化检测**。每次跑完正常工作后，aggregator 末尾追加：
-
-```
-Review last 50 classifier reasoning traces. Compute:
-  - quote rate (含 verbatim quote 的比例)
-  - alternative mention rate
-  - concrete self-critique rate (不是 generic boilerplate)
-
-If any rate < 40%, append an advisory: "Classifier reasoning quality
-has declined in dimension X. Author should review prompt."
-```
+**关键设计**：定期任务（每天 / 每周 / 每月），**角色是"持怀疑态度的史官"，默认"没发现就是成功"**：提出假设前必先写"不改大脑的理由"（噪声/回声室/虚受/domain-local）+ falsifiability + sycophancy 自检。附加质量退化检测（quote / alternative / self-critique rate < 40% → advisory）。逐字 prompt 与机制见 ADR 0025 §4.3，规范源 `extensions/sediment/prompts/aggregator-skeptical-historian-v1.md`。
 
 这是 advisory flag，**不是阻断关卡**——只是留个"老板该回来看一眼了"的提示。作者三个月不管系统时，系统能自我感知退化并留下 warning。
 
@@ -287,38 +209,11 @@ has declined in dimension X. Author should review prompt."
 
 **触发条件**：置信度 ≥ 8 的创建 / 提升到 always 层 / 归档高置信 entry / 跨区迁移。
 
-**关键设计**：必须**真的拆成两次独立 API 调用**——
-
-```
-Pass 1 (Blind — reviewer 完全不看 proposer reasoning):
-  Context: 原始 session evidence (candidate entry, neighbor entries,
-           session transcript excerpt)
-  Output:
-    a) 你独立推荐的 op (create/update/merge/...)
-    b) 你的 confidence (0-10)
-    c) 单条最关键的证据（quote 出来）
-    d) 你自己推荐的最强反对论据
-
-Pass 2 (After Pass 1 committed, SEPARATE API call):
-  Context: + proposer's recommendation + proposer's reasoning trace
-           + 你刚才 Pass 1 的输出
-  Output:
-    e) 同意 / 不同意 / 部分同意
-    f) 如果不同意：找出你和 proposer 推理的具体分歧点，两边各引一句
-    g) "你是否被 proposer 的 framing 拉动了？这种拉力本身是 anchor bias
-       信号——只有当 proposer 真的指出了你 Pass 1 漏掉的具体证据时
-       才修正你的判断"
-    h) 最终：CONFIRM proposer op / CONFIRM your Pass 1 op / DEFER
-```
+**关键设计**：必须**真的拆成两次独立 API 调用**——Pass 1 blind（reviewer 不看 proposer reasoning，独立出 op/confidence/关键证据/最强反对）；Pass 2 reveal（独立调用，看 proposer 后判 anchor bias → CONFIRM / DEFER）。逐字 prompt 与机制见 ADR 0025 §4.4，规范源 `extensions/sediment/prompts/multi-view-pass1-blind-v1.md` + `multi-view-pass2-reveal-v1.md`。
 
 **为什么必须两次调用**：一次调用里假装"先 blind 再 reveal" 不可信——LLM 会先瞥到 Pass 2 内容再写 Pass 1。§6 已经接受 multi-view 翻倍成本，所以两次调用工程上没问题。
 
-**附加约束**：reviewer + proposer 应该用**不同 provider 的模型**（不是同 family 不同 prompt）。但跨基座的推理风格本来就不一样（Claude 偏哲学绕弯 / GPT 偏列条目 / DeepSeek 偏直接简短），所有 prompt 头部固定一段约定形式：
-
-```
-你的推理必须按 quote → claim → alternative → uncertainty →
-resolving evidence 顺序展开。
-```
+**附加约束**：reviewer + proposer 应该用**不同 provider 的模型**（不是同 family 不同 prompt）。但跨基座的推理风格本来就不一样（Claude 偏哲学绕弯 / GPT 偏列条目 / DeepSeek 偏直接简短），所有 prompt 头部固定一段 reasoning normalization 约定形式（quote → claim → alternative → uncertainty → resolving evidence，规范源 `extensions/sediment/prompts/reasoning-normalization-preamble-v1.md`）。
 
 约定形式但不做 schema 校验——不同基座写出来风格仍有差异，但回到约定结构让 reviewer 在 Pass 2 比对时有可对比的骨架。
 
