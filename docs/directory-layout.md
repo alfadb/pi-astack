@@ -1,219 +1,41 @@
-# Directory Layout — current reference（2026-05-15）
+# Directory Layout — derivation pointers + 布局边界
 
-> 原含 pre-B5 说明的长版已归档到 [archive/directory-layout-pre-2026-05-15.md](./archive/directory-layout-pre-2026-05-15.md)。本文只描述当前实际布局。
+> **薄指针页**（Phase-2 去代码镜像后）：不再镜像文件树/扩展清单/smoke 列表/计数——那些用命令派生。本文只留**布局方向边界与依赖契约**。
+> pre-B5 长版已归档：[archive/directory-layout-pre-2026-05-15.md](./archive/directory-layout-pre-2026-05-15.md)。
 
-## 1. Repository layout
+## 1. 派生入口（不在此镜像）
 
-```text
-pi-astack/
-├── README.md
-├── UPSTREAM.md
-├── package.json
-├── pi-astack-settings.schema.json
-├── .gitmodules
-├── vendor/
-│   ├── gstack/                    # read-only submodule: garrytan/gstack methodology reference
-│   └── pensieve/                  # read-only submodule: kingkongshot/Pensieve methodology reference
-├── extensions/
-│   ├── _shared/
-│   ├── abrain/
-│   ├── compaction-tuner/
-│   ├── dispatch/
-│   ├── imagine/
-│   ├── memory/
-│   ├── model-curator/
-│   ├── model-fallback/
-│   ├── persistent-input-history/
-│   ├── sediment/
-│   └── vision/
-├── scripts/
-│   └── smoke-*.mjs
-└── docs/
-    ├── current-state.md
-    ├── memory-architecture.md          # current summary / pointer
-    ├── brain-redesign-spec.md          # current summary / pointer
-    ├── directory-layout.md             # this file
-    ├── architecture/
-    ├── reference/
-    ├── migration/
-    ├── adr/
-    ├── audits/
-    └── archive/
-```
-
-Planned but not present as current repo directories: `skills/`, `prompts/`, `defaults/`, `extensions/browse/`. `vendor/` exists, but is read-only methodology/reference material, not runtime package surface.
-
-## 2. Vendor references
-
-| Directory | Upstream | Purpose |
-|---|---|---|
-| `vendor/gstack/` | `https://github.com/garrytan/gstack.git` | gstack / claude-code workflow methodology reference. |
-| `vendor/pensieve/` | `https://github.com/kingkongshot/Pensieve.git` | Pensieve memory/workflow methodology reference. |
-
-Vendor dirs are git submodules. Treat them as read-only source material; port ideas into owned pi-astack paths instead of editing vendor files.
-
-## 3. Extensions
-
-| Directory | Purpose |
+| 想知道 | 派生命令 / 来源 |
 |---|---|
-| `extensions/dispatch/` | `dispatch_agent` / `dispatch_parallel` subprocess multi-agent tools. |
-| `extensions/memory/` | read-only memory facade, LLM search, lint/doctor/migrate commands. |
-| `extensions/sediment/` | explicit/auto sediment pipeline and writer substrate. |
-| `extensions/abrain/` | seven-zone layout, project binding, vault. |
-| `extensions/vision/` | image analysis fallback tool. |
-| `extensions/imagine/` | image generation tool. |
-| `extensions/model-curator/` | model whitelist + capability prompt injection. |
-| `extensions/model-fallback/` | retry/fallback chain after model errors. |
-| `extensions/compaction-tuner/` | context percent compaction trigger. |
-| `extensions/persistent-input-history/` | persist editor ↑/↓ history across pi restarts, per-cwd; absorbs renderInitialMessages replay; `/history-compact` + `/history-status` commands. |
-| `extensions/_shared/` | shared runtime infrastructure (NOT a pi-loaded extension; library imported by all others). Key exports in `runtime.ts`: `resolveActiveProject` (strict three-file binding resolver — the actual home of the "Vault P1 active project resolver" called by abrain/memory/sediment/dispatch), `bindAbrainProject`, `abrainProjectDir`, `acquireFileLock`/`withFileLock`, `ensureSedimentLegacyMigrated`, `ensureProjectGitignoredOnce`; `footer-status.ts` holds the cross-extension footer key registry. |
+| 仓库目录结构 | `find . -maxdepth 2 -type d \| sort`、`.gitmodules` |
+| 有哪些扩展 | `find extensions -maxdepth 1 -type d \| sort` |
+| 有哪些 smoke | `npm pkg get scripts`；可读镜像 [reference/smoke-tests.md](./reference/smoke-tests.md) |
+| abrain 实际布局 | `find ~/.abrain -maxdepth 3 -type d \| sort`、`/abrain status` |
+| settings key | `pi-astack-settings.schema.json` |
 
-## 4. Runtime paths
+## 2. Vendor（契约）
 
-### 4.1 Project-local runtime artifacts
+vendor 清单见 `.gitmodules`（read-only submodules：方法论参考）。**契约**：vendor 是 read-only source material，不属于 runtime package surface；把想法 port 进自有 pi-astack 路径，不直接改 vendor 文件。
 
-```text
-<projectRoot>/.pi-astack/
-├── sediment/
-│   ├── audit.jsonl
-│   ├── checkpoint.json
-│   └── locks/                 # checkpoint/session locks; entry write lock is in ~/.abrain/.state/sediment/locks/
-├── memory/
-│   ├── migration-report.md
-│   └── search-metrics.jsonl
-├── model-fallback/
-│   └── canary.log
-├── compaction-tuner/
-│   └── audit.jsonl
-└── imagine/
-    └── image-<timestamp>-<hex>.png
-```
+## 3. `_shared/`（依赖边界契约）
 
-`.pi-astack/` 是 runtime state/log/output，应该 gitignored。sediment project-scope audit 与 checkpoint/locks 仍保留在 project side，因为它们记录本项目 session/window/candidate 事件；跨项目 entry write lock 在 abrain side。
+`extensions/_shared/` **不是 pi 加载的扩展**，而是被其它扩展 import 的库。严格三件套绑定 resolver（`resolveActiveProject`）等跨扩展基础设施住在这里，被 abrain/memory/sediment/dispatch 共用。具体导出以 `extensions/_shared/runtime.ts` 为准。
 
-### 4.1a User-level runtime artifacts (cwd-keyed, not project-keyed)
+## 4. Runtime 路径方向边界（契约，非镜像）
 
-```text
-~/.pi/agent/input-history/
-├── .notified                              # marker: privacy notice already shown for this machine
-└── <sha1(cwd)[0..8]>--<slug>.jsonl       # one file per cwd; chmod 0600 best-effort
-```
-
-`persistent-input-history` deliberately lives at the **user level**, not under `<projectRoot>/.pi-astack/`, because the buffer is keyed by **cwd, not project**: the same project at different sub-cwds should get independent buffers (monorepo packages, scratch dirs), and starting pi outside any project should still get history. Should be gitignored at the user dotfiles repo level (e.g. `~/.pi/.gitignore`).
-
-### 4.2 Abrain repository
-
-```text
-~/.abrain/
-├── identity/                    # Lane G — writer not implemented (mkdir placeholder only)
-├── skills/                      # Lane G — writer not implemented
-├── habits/                      # Lane G — writer not implemented
-├── workflows/
-├── projects/
-│   └── <projectId>/
-│       ├── _project.json
-│       ├── maxims/
-│       ├── decisions/
-│       ├── knowledge/
-│       ├── staging/
-│       ├── archive/
-│       ├── workflows/
-│       ├── rules/                    # ADR 0023-R5 read-path: project session-start rules
-│       │   ├── always/
-│       │   └── listed/
-│       └── vault/
-├── knowledge/
-├── rules/                            # ADR 0023-R5 read-path: global session-start rules
-│   ├── always/
-│   └── listed/
-├── vault/
-├── .vault-identity/             # abrain-age-key (Tier 1 default, ADR 0019)
-│   ├── master.age               # 0600 — gitignored, never leaves the host without explicit scp
-│   └── master.age.pub           # 0644 — committed; same content mirrored to .vault-pubkey below
-├── .vault-pubkey                # mirrors .vault-identity/master.age.pub for vault-writer compat
-├── .vault-master.age            # Tier 3 backends ONLY (ssh-key/gpg-file/passphrase-only); abrain-age-key does NOT create this
-└── .state/
-    ├── projects/
-    │   └── local-map.json
-    ├── sediment/
-    │   ├── audit.jsonl
-    │   └── locks/
-    └── vault-events.jsonl
-```
-
-Notes:
-
-- `~/.abrain/projects/<id>/` is current project memory SOT.
-- `~/.abrain/knowledge/` is world/cross-project knowledge.
-- `~/.abrain/workflows/` is cross-project workflows.
-- `~/.abrain/rules/{always,listed}/` and `~/.abrain/projects/<id>/rules/{always,listed}/` are ADR 0023-R5 read-only injection sources. They are pushed into the main-session system prompt; automatic rule lifecycle writing is intentionally deferred.
-- `~/.abrain/.state/` is local runtime state, not memory truth.
-- Vault encrypted files are not ordinary memory entries.
-- `.vault-identity/master.age` is the abrain-age-key Tier 1 default introduced in ADR 0019 (no longer parasitic on `~/.ssh/id_*`). Cross-device: user manually `scp` the file with `chmod 0600`.
-- Identity/skills/habits directories are mkdir-only stubs until Lane G writer lands (see roadmap).
-
-### 4.3 Legacy `.pensieve/`
-
-```text
-<projectRoot>/.pensieve/
-```
-
-Current role: legacy read-only migration source. It may be read by memory facade before migration, and consumed by `/memory migrate --go`; sediment writer no longer creates or writes it.
+- `<projectRoot>/.pi-astack/`：runtime state/log/output，**应 gitignored，不是 memory SOT**。project-scope audit + checkpoint/session locks 留 project 侧（记录本项目 session/window 事件）；跨项目 entry write lock 在 abrain 侧。
+- `~/.pi/agent/input-history/`：`persistent-input-history` 刻意住**用户级**而非 `<projectRoot>/.pi-astack/`，因为缓冲按 **cwd 而非 project** 键控——同一项目不同子 cwd 应得独立缓冲（monorepo / scratch），项目外启动 pi 也要有历史。应在用户 dotfiles 层 gitignore。
+- `~/.abrain/`：七区拓扑见 [architecture/abrain.md](./architecture/abrain.md)；`.state/` 是本地 runtime state **不是 memory truth**；vault 加密文件**不是普通 memory entry**。
+- `~/.abrain/rules/{always,listed}/` 与 `~/.abrain/projects/<id>/rules/{always,listed}/`：ADR 0023-R5 **只读**注入源，push 进主会话 system prompt；**自动 rule lifecycle 写入有意 defer**。
+- `~/.abrain/.vault-identity/master.age`：abrain-age-key Tier 1 默认（ADR 0019），0600 + gitignored，不随 git 离开主机（跨设备手动 `scp` + `chmod 0600`）；`.vault-master.age` 仅 Tier 3 backend 用。identity/skills/habits 在 Lane G writer 落地前是 mkdir-only stub。
 
 ## 5. Settings
 
-```text
-~/.pi/agent/pi-astack-settings.json
-```
+`~/.pi/agent/pi-astack-settings.json`，schema 见 [../pi-astack-settings.schema.json](../pi-astack-settings.schema.json)。**契约**：用顶层 module key（`sediment`/`memory`/`modelFallback`/`modelCurator`/`vision`...），不包在 `piStack` 下。
 
-Schema: [../pi-astack-settings.schema.json](../pi-astack-settings.schema.json).
+## 6. Dependency boundary（契约）
 
-The settings file uses top-level module keys (`sediment`, `memory`, `modelFallback`, `modelCurator`, `vision`, ...). It is not wrapped under `piStack`.
-
-## 6. Smoke scripts
-
-Live source: `package.json#scripts`.
-
-Current files under `scripts/`:
-
-```text
-smoke-abrain-active-project.mjs
-smoke-abrain-backend-detect.mjs
-smoke-abrain-bootstrap.mjs
-smoke-abrain-git-sync.mjs
-smoke-abrain-i18n.mjs
-smoke-abrain-redact.mjs
-smoke-abrain-rule-injector.mjs
-smoke-abrain-secret-scope.mjs
-smoke-abrain-vault-bash.mjs
-smoke-abrain-vault-grant-isolation.mjs
-smoke-abrain-vault-identity.mjs
-smoke-abrain-vault-reader.mjs
-smoke-abrain-vault-writer.mjs
-smoke-compaction-tuner-prompt-user.mjs
-smoke-compaction-tuner-vault-defer.mjs
-smoke-dispatch-input-compat.mjs
-smoke-dispatch-output-format.mjs
-smoke-imagine.mjs
-smoke-memory-sediment.mjs
-smoke-model-fallback-mutation-timing.mjs
-smoke-persistent-input-history.mjs
-smoke-pi-astack-paths.mjs
-smoke-prompt-user-finalizer.mjs
-smoke-prompt-user.mjs
-smoke-prompt-user-option-list.mjs
-smoke-prompt-user-subpi.mjs
-smoke-vault-subpi-isolation.mjs
-smoke-vision.mjs
-```
-
-Current count: **28** files, one per `package.json#scripts:smoke:*` entry. Drift history: 2026-05-19 ADR 0022 batch C 17 → 25 (+8: `grant-isolation`, `redact`, `compaction-tuner-prompt-user`, `dispatch-output-format`, `prompt-user`, `prompt-user-finalizer`, `prompt-user-option-list`, `prompt-user-subpi`); 2026-05-20 `persistent-input-history` 25 → 26; 2026-05-20 `compaction-tuner-vault-defer` 26 → 27 (ADR 0022 Batch B D7); 2026-05-25 `abrain-rule-injector` 27 → 28 (ADR 0023-R5 read path).
-
-See [reference/smoke-tests.md](./reference/smoke-tests.md).
-
-## 7. Dependency boundary
-
-- `extensions/_shared/` may be imported by extensions.
-- Feature extensions should avoid importing each other unless explicitly designed; shared helpers go to `_shared`.
-- Storage topology should stay behind runtime/path helpers and memory facade; LLM prompts should not depend on concrete paths except for user-facing docs.
-- Archive docs are historical records and must not be used as implementation guidance.
+- `extensions/_shared/` 可被扩展 import。
+- 功能扩展之间不应互相 import（除非显式设计）；共享 helper 进 `_shared`。
+- 存储拓扑应藏在 runtime/path helper 与 memory facade 之后；LLM prompt 不应依赖具体路径（面向用户的 docs 除外）。
+- archive docs 是历史记录，不得当实现指导。
