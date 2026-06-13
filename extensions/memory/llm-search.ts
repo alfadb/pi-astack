@@ -312,6 +312,18 @@ function unwrapJsonText(rawText: string): unknown {
     }
   }
 
+  // 截断/噪声容错: 提取所有顶层完整 {...} 对象(stage1/2 picks 无嵌套 {}),
+  // LLM 输出超 maxTokens 被 cut 时不让一次截断丢掉整个候选集。比逐字符
+  // depth 计数鲁棒(不受 reason 内引号干扰)。生产鲁棒性 + oracle 大 corpus baseline。
+  const objMatches = raw.match(/\{[^{}]*\}/g);
+  if (objMatches) {
+    const picks: unknown[] = [];
+    for (const o of objMatches) {
+      try { picks.push(JSON.parse(o)); } catch { /* skip malformed */ }
+    }
+    if (picks.length > 0) return picks;
+  }
+
   throw new Error(`LLM did not return parseable JSON: ${raw.slice(0, 300)}`);
 }
 

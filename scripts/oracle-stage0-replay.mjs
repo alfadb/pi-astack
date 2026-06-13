@@ -74,6 +74,7 @@ for (const f of walkMd(kdir)) { const e = await parseEntry(f, { scope: "world", 
 const queries = process.argv.slice(2).length
   ? process.argv.slice(2)
   : [
+      // 中文 技术/概念/markdown
       "stage1 候选检索改成 embedding 向量",
       "T0 模型选型不看价格只看能力",
       "sediment 写入路径 content-hash 增量",
@@ -81,6 +82,22 @@ const queries = process.argv.slice(2).length
       "scope filter 必须在 topN 之前执行",
       "第二大脑自我演化不靠外部压库降本",
       "prompt_user 超时后怎么裁决方向",
+      "doubao embedding 召回验证实验语料",
+      "全局索引 prune 跨 project 数据丢失",
+      "reconcile 在 agent_end 后台增量 embed",
+      "熔断 provider 宕机 sparse 兜底禁全库",
+      // 英文 / code(函数名/符号/标识符)
+      "buildLlmIndexText full body candidate surface",
+      "selectStage0Pool hybrid dense sparse fusion",
+      "ModelRegistry getApiKeyAndHeaders auth resolution",
+      "vault release scope project global secret",
+      "git singleflight lock index race condition",
+      "content-hash keyed invalidation embedding model version stamp",
+      // config / 设置 / 概念
+      "models.json provider baseUrl embedding endpoint",
+      "ADR 0035 sublinear retrieval architecture decision",
+      "memory search two stage rerank verdict none",
+      "dispatch parallel T0 cross-vendor blind review",
     ];
 
 // stage1Model(minimax/MiniMax-M3)由 model-curator 动态注册, 脚本 registry 不含;
@@ -99,9 +116,13 @@ const jaccard = (a, b) => {
   return uni === 0 ? 1 : inter / uni;
 };
 
-console.log(`oracle-stage0-replay (HTTP=live) | corpus=${corpus.length} (pi-global+world) | queries=${queries.length}\n`);
+// 分批(避免单次 bash 超时): ORACLE_OFFSET / ORACLE_LIMIT 切子集
+const _off = Number(process.env.ORACLE_OFFSET || 0);
+const _lim = Number(process.env.ORACLE_LIMIT || queries.length);
+const runQueries = queries.slice(_off, _off + _lim);
+console.log(`oracle-stage0-replay (HTTP=live) | corpus=${corpus.length} (pi-global+world) | queries=${runQueries.length}/${queries.length} (offset ${_off})\n`);
 const cov = [], par = [];
-for (const q of queries) {
+for (const q of runQueries) {
   const baseline = await llmSearchEntriesWithVerdict(corpus, { query: q }, offSettings, registry);
   const stage0 = await llmSearchEntriesWithVerdict(corpus, { query: q }, onSettings, registry);
   const pool = await selectStage0Pool(q, corpus, onSettings, registry, {});
