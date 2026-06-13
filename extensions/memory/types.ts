@@ -1,3 +1,5 @@
+import type { DirectionImpact } from "./direction-impact";
+
 export type Scope = "project" | "world";
 
 export type Jsonish = string | number | boolean | null | Jsonish[] | { [k: string]: Jsonish };
@@ -50,6 +52,10 @@ export interface MemoryEntry {
   timeline: string[];
   relatedSlugs: string[];
   relations: RelationEdge[];
+  /** ADR 0034 §2.2 direction_impact: parsed + validated touches on consensus
+   *  invariants/requirements. Absent when frontmatter has none. Invalid rows
+   *  are dropped here (surfaced by lint/doctor), so this only holds valid ones. */
+  directionImpact?: DirectionImpact[];
   tokenCounts: Map<string, number>;
   tokenTotal: number;
 }

@@ -12,6 +12,7 @@ import {
   walkMarkdownFiles,
 } from "./parser";
 import { compareTimestamps, prettyPath, throwIfAborted } from "./utils";
+import { parseDirectionImpact } from "./direction-impact";
 
 export type LintSeverity = "error" | "warning";
 
@@ -83,6 +84,22 @@ export function lintMarkdown(raw: string, file?: string): LintIssue[] {
       message: "frontmatter confidence must be a number between 0 and 10",
       line: 1,
     }, file);
+  }
+
+  // D1 direction-impact (ADR 0034 §2.2): validate direction_impact rows. The
+  // 红线 — narrows/weakens/conflicts must be escalated, never silently accepted
+  // (escalation != "none") — surfaces here as a lint error so doctor catches a
+  // 承重墙 violation in stored entries (acceptance ⑦).
+  if (frontmatter.direction_impact !== undefined) {
+    const { issues: diIssues } = parseDirectionImpact(frontmatter.direction_impact);
+    for (const di of diIssues) {
+      pushIssue(issues, {
+        rule: "D1 direction-impact",
+        severity: di.severity,
+        message: `${di.message} [${di.raw}]`,
+        line: 1,
+      }, file);
+    }
   }
 
   const { timeline, h2 } = findTimelineHeadings(lines);

@@ -22,6 +22,7 @@
   "scripts": {
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
+    "smoke:direction-impact": "node scripts/smoke-direction-impact.mjs",
     "smoke:derive-provenance": "node scripts/smoke-derive-provenance.mjs",
     "smoke:rule-footer-realtime": "node scripts/smoke-rule-footer-realtime.mjs",
     "smoke:tier1-directive-defer": "node scripts/smoke-tier1-directive-defer-resolution.mjs",

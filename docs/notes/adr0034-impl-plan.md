@@ -45,8 +45,11 @@
 **acceptance**：⑥direction_impact 可查；⑦escalation 浮现而非静默接受（doctor 红线）。
 
 - [x] schema 落点已定（Phase 0）：**flat frontmatter 编码**（非嵌套 map：`parser.ts:254` 跳缩进行；非 body-only：违反 ⑥ 可查）；direction_impact 非 `sediment/writer.ts:478` PROTECTED_FRONTMATTER_KEYS 故透传
-- [ ] parser/validation/doctor 改 + smoke + negative test
-- [ ] `weakens/conflicts → escalation=required` lint 红线（doctor.ts）
+- [x] leaf 模块 `extensions/memory/direction-impact.ts`（parseDirectionImpact，总函数/不抛；pipe 编码 `<relation> | <ref> | <escalation>[ | <proposal>]`）
+- [x] parser 填 `MemoryEntry.directionImpact`（可查 ⑥）+ types 加字段
+- [x] 读侧 lint.ts `D1 direction-impact`（doctor 经 lintTarget 捕获）+ 写侧 sediment/validation.ts validateProjectEntryDraft
+- [x] `narrows/weakens/conflicts → escalation≠none` 红线（读写两侧同一总函数，不漂移）
+- [x] `smoke:direction-impact` 32 assertions（双向 negative：红线违反必出 error）+ smoke:memory 回归绿
 
 ## Phase 2 — source-aware ingest lane（代码 + smoke）
 

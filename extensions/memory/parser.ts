@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type { MemorySettings } from "./settings";
 import type { Jsonish, MemoryEntry, RelationEdge, RelationScope, StoreRef, Scope } from "./types";
 import { compareTimestamps, normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
+import { parseDirectionImpact } from "./direction-impact";
 import { resolveActiveProject, abrainProjectDir } from "../_shared/runtime";
 
 const execFileAsync = promisify(execFile);
@@ -616,6 +617,10 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
   const scope: Scope = scopeRaw === "world" || scopeRaw === "project" ? scopeRaw : store.scope;
   const summary = makeSummary(compiledTruth, title);
   const relations = extractRelations(frontmatter, body);
+  // ADR 0034 §2.2: parse + validate direction_impact. Invalid rows are dropped
+  // here (and surfaced separately by lint/doctor); the entry only carries valid
+  // ones so downstream queryability (acceptance ⑥) sees a clean structured list.
+  const directionImpact = parseDirectionImpact(frontmatter.direction_impact).impacts;
   const relatedSlugs = stableUnique(relations.map((edge) => edge.to)).slice(0, 20);
   const tokens = tokenize(`${title}\n${slug}\n${compiledTruth}`);
 
@@ -641,6 +646,7 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
     timeline,
     relatedSlugs,
     relations,
+    ...(directionImpact.length ? { directionImpact } : {}),
     tokenCounts: tokenCounts(tokens),
     tokenTotal: Math.max(1, tokens.length),
   };

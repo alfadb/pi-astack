@@ -1,3 +1,6 @@
+import type { Jsonish } from "../memory/types";
+import { parseDirectionImpact } from "../memory/direction-impact";
+
 export const ENTRY_KINDS = [
   "maxim", "decision", "anti-pattern", "pattern", "fact", "preference", "smell",
 ] as const;
@@ -36,6 +39,10 @@ export interface DraftLike {
   compiledTruth?: unknown;
   status?: unknown;
   confidence?: unknown;
+  /** ADR 0034 §2.2: optional flat-frontmatter direction_impact rows
+   *  (string | string[]). Validated write-side so an ingest/sediment draft
+   *  cannot persist an unescalated narrows/weakens/conflicts (承重墙 红线). */
+  directionImpact?: unknown;
 }
 
 /**
@@ -69,6 +76,15 @@ export function validateProjectEntryDraft(draft: DraftLike): DraftValidationIssu
     const n = typeof draft.confidence === "number" ? draft.confidence : Number(draft.confidence);
     if (!Number.isFinite(n) || n < 0 || n > 10) {
       issues.push({ field: "confidence", message: "confidence must be a number between 0 and 10" });
+    }
+  }
+
+  // ADR 0034 §2.2: validate direction_impact rows if present. Reuses the same
+  // total parser as read-side lint so write/read enforcement cannot drift.
+  if (draft.directionImpact !== undefined && draft.directionImpact !== null) {
+    const { issues: diIssues } = parseDirectionImpact(draft.directionImpact as Jsonish);
+    for (const di of diIssues) {
+      issues.push({ field: "direction_impact", message: `${di.message} [${di.raw}]` });
     }
   }
 
