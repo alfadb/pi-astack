@@ -34,8 +34,8 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 
 | Phase | Intent | 盲审硬约束 |
 |---|---|---|
-| P1 embedding 基建 | 向量索引模块(abrain `.state`,content-hash keyed 失效 + embedding-model 版本戳);embed 封装(batch≤10 + TPM 限流 + 重试);纯 JS 余弦 top-N;全库初始 embed(2215 限流分批) | content-hash 失效(metadata-only 不 re-embed);版本戳跨模型禁混用 |
-| P2 写入路径增量 embed(sediment 侧,ADR 0003) | curator 写 entry 时 content-hash 比对→变才 embed;dirty-manifest 原子落盘;search union dirty + mtime 扫描 | freshness 原子协议:新写入下次 search 立即可召回 |
+| P1 embedding 基建 ✅ | 向量索引模块(abrain `.state`,content-hash keyed 失效 + embedding-model 版本戳);embed 封装(batch≤10 + TPM 限流 + 重试);纯 JS 余弦 top-N + scope-filter-before-topN;全库初始 embed(实测 2350 向量,12 project + world)。已 ship(`embedding.ts` + smoke) | content-hash 失效(metadata-only 不 re-embed);版本戳跨模型禁混用;索引不入 git;scope 按物理位置 |
+| P2 写入路径增量 embed(sediment 侧,ADR 0003)✅ | **方向 B(P2 盲审改,ADR §46)**:freshness 改 search-time content-hash diff(`staleOrMissingSlugs`:内存 entries vs 索引,未索引+陈旧 bounded-union),**无 dirty-manifest**(deferred 到物理分区);reconcile = agent_end `tryAutoWriteLane` 写后 best-effort `reconcileEmbeddings`(content-hash gated + scope-safe prune + 文件锁串行 RMW);修 4 高危 bug(全局 prune 删他 project / 无锁 / coverage 只看 slug / hard-delete 残留)。已 ship(`embedding.ts` + `sediment/index.ts` + smoke 16/16) | freshness:search-time diff 天然覆盖手工编辑/git pull/crash;reconcile 失败不阻塞 sediment,search bounded-union 兜底,禁回退全库 |
 | P3 stage1 改造 | `buildLlmIndexText` 接收 stage0 top-N(接口近零改);hybrid(dense + trigger/slug sparse 融合);`verdict=none/insufficient_pool` 回退分支新增(当前代码未预埋) | 安全网双触发(verdict=none + 候选不足信号 + best-rank 探针);provider 熔断(陈旧向量继续,禁回退全库 O(N));fallback 限流 |
 | P4 A/B 灰度 + 转产硬门 | `search-metrics.jsonl` 增 stage0 字段(候选池命中/回退率/best-rank/dirty-size/embed 延迟);**full-body picks 端到端 oracle 逐 query 对照** | **转产硬门**:端到端召回不掉方可切换;related-recall 因正偏不可单独作转产依据 |
 | P5 切换 + 旧 surface 下线 | `full_body_v3` surface 退役;N/hybrid 权重 A/B 收敛定值 | 走偏信号监控(top-100<95% / verdict=none 率升 / 召回回归)回看决策 |

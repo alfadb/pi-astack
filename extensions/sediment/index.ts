@@ -69,6 +69,8 @@ import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
 import { getCurrentAnchor, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
+import { loadEntries } from "../memory/parser";
+import { reconcileEmbeddings, resolveEmbeddingProviderConfig, vectorIndexPath } from "../memory/embedding";
 import { sanitizeForMemory } from "./sanitizer";
 
 import {
@@ -4670,6 +4672,33 @@ async function tryAutoWriteLane(args: {
         deleteReason: curated.decision.op === "delete" ? curated.decision.reason || curated.decision.rationale || "deleted by sediment curator" : undefined,
       })),
     );
+  }
+
+  // ADR 0035 P2 (方向 B): reconcile vectors for entries written this turn.
+  // Best-effort — embedding provider failure must NEVER block sediment. The
+  // search-time staleOrMissing bounded-union (memory/embedding) is the freshness
+  // backstop, so a failed/skipped reconcile only means the entry rides the
+  // fallback path one extra search. Gated on embedding being configured
+  // (provider+model set; DEFAULT is empty = disabled). content-hash gated +
+  // scope-safe prune inside reconcileEmbeddings.
+  const wroteVectorRelevant = results.some((r) =>
+    r.status === "created" || r.status === "updated" || r.status === "merged"
+    || r.status === "archived" || r.status === "superseded" || r.status === "deleted");
+  if (wroteVectorRelevant && modelRegistry) {
+    try {
+      const memSettings = resolveMemorySettings();
+      const emb = memSettings.embedding;
+      if (emb.provider && emb.model) {
+        const cfg = await resolveEmbeddingProviderConfig(
+          modelRegistry as Parameters<typeof resolveEmbeddingProviderConfig>[0],
+          emb,
+        );
+        const corpus = await loadEntries(cwd, memSettings, args.signal);
+        await reconcileEmbeddings(corpus, cfg, vectorIndexPath());
+      }
+    } catch {
+      /* swallow: search-time bounded-union covers un-reconciled entries */
+    }
   }
 
   return {
