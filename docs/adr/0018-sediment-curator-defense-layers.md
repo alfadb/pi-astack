@@ -1,6 +1,6 @@
 # ADR 0018 — Sediment Curator Defense Layers（沉积器 curator 三层防御）
 
-> 🗄️ **ARCHIVE-CLASS · 机制存档 / PENDING-INGEST（Phase-2，3×T0 mark-in-place）**：本 ADR 是 **AI-Native 原则的经验证据链**（commit 521405b/2e8924d 两次数据丢失 + 机械门控撤回），被 0016/0021/0022/0023/0024 引用；删除=重新引入已修 bug 的风险。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，**勿移勿删**。
+> 🗄️ **ARCHIVE-CLASS · 机制存档 / PENDING-INGEST（Phase-2，3×T0 mark-in-place）**：本 ADR 是 **AI-Native 原则的经验证据链**（两次 curator data-loss P0 + 机械门控撤回，详正文），被 0016/0021/0022/0023/0024 引用；删除=重新引入已修 bug 的风险。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，**勿移勿删**。
 
 - **状态**：Accepted（2026-05-13），**已实施后部分 revert**。Layer 1（curator prompt 约束）与 Layer 2 trigger_phrases UNION 保留；Layer 2 的 body_shrink / body_section_loss 机械门控于 `ee1c809` 按设计移除（信任 LLM 自进化哲学，见 world maxim `prefer-prompt-engineering-over-mechanical-guards`）；Layer 3 对应 smoke fixtures 同步移除。实施时间线：`07e4a3e`（三层落地）→ `3c604c8`（清理）→ `ee1c809`（revert 机械门控）。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md) §"B5 sediment writer cutover"、[ADR 0016](0016-sediment-as-llm-curator.md) §"curator workflow"、[ADR 0017](0017-project-binding-strict-mode.md) §"sediment strict write guard"。
