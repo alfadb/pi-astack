@@ -285,7 +285,7 @@ export class VectorIndex {
   topN(
     queryVec: number[],
     n: number,
-    opts?: { scopes?: Set<string>; exclude?: Set<string> },
+    opts?: { scopes?: Set<string>; exclude?: Set<string>; allowSlugs?: Set<string> },
   ): Array<{ slug: string; score: number }> {
     this.ensureNorm();
     const q = Float32Array.from(queryVec);
@@ -296,6 +296,9 @@ export class VectorIndex {
     const sims: Array<{ slug: string; score: number }> = [];
     for (const [slug, rec] of this.normCache!) {
       if (opts?.exclude?.has(slug)) continue;
+      // ADR 0035 P3 (修订 2): allowSlugs(corpus 已 scope+filter 正确全集)before-topN
+      // ——比 scopeTagOf 反推更精确,且索引无 status/kind 时这是唯一正确的 filter 前置。
+      if (opts?.allowSlugs && !opts.allowSlugs.has(slug)) continue;
       if (opts?.scopes && !opts.scopes.has(rec.scope)) continue; // before-topN
       const v = rec.v;
       let d = 0;
@@ -341,9 +344,9 @@ export function staleOrMissingSlugs(index: VectorIndex, entries: MemoryEntry[]):
 export function selectStage0(
   index: VectorIndex,
   queryVec: number[],
-  opts: { topN: number; scopes?: Set<string>; freshFallbackSlugs?: string[]; maxFallback?: number },
+  opts: { topN: number; scopes?: Set<string>; allowSlugs?: Set<string>; freshFallbackSlugs?: string[]; maxFallback?: number },
 ): Stage0Result {
-  const candidates = index.topN(queryVec, opts.topN, { scopes: opts.scopes });
+  const candidates = index.topN(queryVec, opts.topN, { scopes: opts.scopes, allowSlugs: opts.allowSlugs });
   let fallback: string[] = [];
   const missing = opts.freshFallbackSlugs?.length ?? 0;
   if (missing) {

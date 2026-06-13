@@ -4,6 +4,7 @@ import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
 import { clamp, compareTimestamps, normalizeBareSlug, stableUnique } from "./utils";
+import { embedTexts, resolveEmbeddingProviderConfig, staleOrMissingSlugs, VectorIndex, vectorIndexPath, type EmbeddingProviderConfig } from "./embedding";
 import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "../sediment/sanitizer";
@@ -566,6 +567,248 @@ function filteredEntries(entries: MemoryEntry[], filters: SearchFilters | undefi
   return entries.filter((entry) => entryMatchesFilters(entry, filters));
 }
 
+// ─── ADR 0035 P3: stage0 embedding 候选检索 + 双阶段内核(folded) ───
+// flag off → candidateEntries = 全 corpus(完全等同现状 full_body_v3);
+// flag on → stage0 hybrid(dense+sparse+stale, 硬上限)喂 stage1。
+const STAGE0_SURFACE = "stage0_hybrid_v1";
+
+function byUpdatedDesc(a: MemoryEntry, b: MemoryEntry): number {
+  return compareTimestamps(b.updated ?? b.created ?? "", a.updated ?? a.created ?? "");
+}
+
+/** Sparse 精确匹配: query terms 命中 slug/title/trigger_phrases/compiledTruth/
+ *  timeline(含 body —— ADR 编号/函数名/错误码常在正文不在标题, 修订 3)。
+ *  纯 in-memory 子串, 零 I/O。按命中 term 数降序。 */
+function sparseMatchSlugs(query: string, corpus: MemoryEntry[]): string[] {
+  const terms = [...new Set((query.toLowerCase().match(/[a-z0-9][a-z0-9_./-]{2,}/g) ?? []))]
+    .filter((t) => t.length >= 3);
+  if (terms.length === 0) return [];
+  const scored: Array<{ slug: string; score: number }> = [];
+  for (const e of corpus) {
+    const hay = [
+      e.slug, e.title,
+      relationValues(e.frontmatter.trigger_phrases).join(" "),
+      e.compiledTruth, e.timeline.join(" "),
+    ].join(" \n ").toLowerCase();
+    let score = 0;
+    for (const t of terms) if (hay.includes(t)) score++;
+    if (score > 0) scored.push({ slug: e.slug, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((s) => s.slug);
+}
+
+interface Stage0Pool {
+  candidateEntries: MemoryEntry[];
+  mode: "hybrid" | "sparse_fallback";
+  denseCount: number;
+  sparseCount: number;
+  staleCount: number;
+  embedMs: number;
+}
+
+/** stage0 hybrid 候选选择 + provider 熔断。返回 null = 不适用 stage0(provider
+ *  未配置 或 非-active-status 查询的 dense 盲区), 调用方回退全 corpus 喂 stage1
+ *  (罕见+条目少, 可接受 — 修订 7)。query embed 失败 → 熔断 sparse-only(禁全库
+ *  full-body — 修订 5), 短超时 + 不重试。 */
+export async function selectStage0Pool(
+  query: string,
+  corpus: MemoryEntry[],
+  settings: MemorySettings,
+  modelRegistry: ModelRegistryLike,
+  filters: SearchFilters,
+): Promise<Stage0Pool | null> {
+  const emb = settings.embedding;
+  if (!emb.provider || !emb.model) return null; // 未配置 → 全 corpus
+  // 非-active-status 查询: 索引只 embed active, dense 恒空 → 回退全 corpus
+  const sf = filters.status;
+  const wantsNonActive = sf !== undefined
+    && (Array.isArray(sf) ? sf.some((s) => s !== "active") : sf !== "active");
+  if (wantsNonActive) return null;
+
+  const entriesBySlug = new Map(corpus.map((e) => [e.slug, e]));
+  const allowSlugs = new Set(corpus.map((e) => e.slug));
+  const poolLimit = settings.search.stage0PoolLimit;
+  const maxCand = settings.search.stage0MaxCandidates;
+
+  const idx = new VectorIndex(vectorIndexPath(), emb.model, emb.dim).load();
+  let denseSlugs: string[] = [];
+  let mode: Stage0Pool["mode"] = "hybrid";
+  let embedMs = 0;
+  try {
+    const cfg = await resolveEmbeddingProviderConfig(modelRegistry, emb);
+    // 短超时 + 不重试: query embed 失败即开闸熔断, 别叠 60s entry 超时×maxRetries(修订 5)
+    const qcfg: EmbeddingProviderConfig = { ...cfg, timeoutMs: settings.search.stage0EmbedTimeoutMs, maxRetries: 0 };
+    const t = Date.now();
+    const [qv] = await embedTexts([query], qcfg);
+    embedMs = Date.now() - t;
+    denseSlugs = idx.topN(qv, poolLimit, { allowSlugs }).map((h) => h.slug);
+  } catch {
+    mode = "sparse_fallback"; // 熔断: dense 不可用 → sparse-only(禁全库)
+  }
+
+  const sparseSlugs = sparseMatchSlugs(query, corpus);
+  const staleSlugs = staleOrMissingSlugs(idx, corpus); // search-time freshness(未索引/陈旧)
+
+  // union + 硬上限(dense 分 → sparse 精确 → bounded stale 逐出, 修订 4)
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  const take = (slugs: string[], cap: number) => {
+    for (const s of slugs) {
+      if (ordered.length >= cap) break;
+      if (seen.has(s) || !entriesBySlug.has(s)) continue;
+      seen.add(s); ordered.push(s);
+    }
+  };
+  take(denseSlugs, maxCand);
+  take(sparseSlugs, maxCand);
+  take(staleSlugs, Math.min(maxCand, ordered.length + Math.ceil(maxCand * 0.2))); // stale bounded
+
+  // 熔断且 sparse 空 → 有界 recency 采样(禁全库 full-body, 修订 5)
+  if (mode === "sparse_fallback" && ordered.length === 0) {
+    for (const e of corpus.slice().sort(byUpdatedDesc).slice(0, poolLimit)) ordered.push(e.slug);
+  }
+
+  return {
+    candidateEntries: ordered.map((s) => entriesBySlug.get(s)).filter((e): e is MemoryEntry => !!e),
+    mode, denseCount: denseSlugs.length, sparseCount: sparseSlugs.length, staleCount: staleSlugs.length, embedMs,
+  };
+}
+
+interface TwoStageResult {
+  hits: ReturnType<typeof resultCard>[];
+  verdict: "has_relevant" | "none" | "unknown";
+  stage1Ms: number;
+  stage2Ms: number;
+  stage1Usage?: ModelCallResult["usage"];
+  stage2Usage?: ModelCallResult["usage"];
+  picksCount: number;
+}
+
+/** 双阶段内核(folded): candidateEntries 喂 buildLlmIndexText(stage0 已缩 or 全
+ *  corpus), stage1 LLM 选候选 → stage2 LLM 精排 + verdict。两个 export 函数共享。 */
+async function runTwoStageSearch(
+  query: string,
+  candidateEntries: MemoryEntry[],
+  settings: MemorySettings,
+  modelRegistry: ModelRegistryLike,
+  signal: AbortSignal | undefined,
+  finalLimit: number,
+  candidateLimit: number,
+): Promise<TwoStageResult> {
+  if (candidateEntries.length === 0) {
+    return { hits: [], verdict: "none", stage1Ms: 0, stage2Ms: 0, picksCount: 0 };
+  }
+  const indexText = buildLlmIndexText(candidateEntries);
+  const t1 = Date.now();
+  const stage1 = await callSearchModel(
+    settings.search.stage1Model, makeStage1Prompt(query, indexText, candidateLimit),
+    modelRegistry, signal, STAGE1_TIMEOUT_MS, settings.search.stage1Thinking,
+  );
+  const stage1Ms = Date.now() - t1;
+  const stage1Picks = parseCandidatePicks(stage1.rawText).slice(0, candidateLimit);
+  const entriesBySlug = new Map(candidateEntries.map((e) => [e.slug, e]));
+  const candidates = stableUnique(stage1Picks.map((p) => p.slug))
+    .map((slug) => entriesBySlug.get(slug))
+    .filter((e): e is MemoryEntry => !!e);
+  if (candidates.length === 0) {
+    return { hits: [], verdict: "none", stage1Ms, stage2Ms: 0, stage1Usage: stage1.usage, picksCount: 0 };
+  }
+  const t2 = Date.now();
+  const stage2 = await callSearchModel(
+    settings.search.stage2Model, makeStage2Prompt(query, candidates, finalLimit),
+    modelRegistry, signal, STAGE2_TIMEOUT_MS, settings.search.stage2Thinking,
+  );
+  const stage2Ms = Date.now() - t2;
+  const parsed = parseFinalPicksWithVerdict(stage2.rawText);
+  const hits = parsed.picks.length === 0 ? [] : rankFromStage2(entriesBySlug, parsed.picks, finalLimit);
+  return {
+    hits, verdict: parsed.verdict, stage1Ms, stage2Ms,
+    stage1Usage: stage1.usage, stage2Usage: stage2.usage, picksCount: parsed.picks.length,
+  };
+}
+
+interface ExecSearchResult {
+  hits: ReturnType<typeof resultCard>[];
+  verdict: "has_relevant" | "none" | "unknown";
+  stage1Ms: number;
+  stage2Ms: number;
+  surface: string;
+}
+
+/** 统一内核: stage0 候选 → 双阶段 → 安全网双触发 → metrics。两个 export 函数薄包装。 */
+async function executeSearch(
+  entries: MemoryEntry[],
+  params: SearchParams,
+  settings: MemorySettings,
+  modelRegistryRaw: unknown,
+  signal: AbortSignal | undefined,
+  projectRoot: string | undefined,
+): Promise<ExecSearchResult> {
+  const rawQuery = String(params.query ?? "").trim();
+  if (!rawQuery) return { hits: [], verdict: "none", stage1Ms: 0, stage2Ms: 0, surface: "none" };
+  // Sanitize before both prompt and 80-char metrics truncation.
+  const querySanitize = sanitizeForMemory(rawQuery);
+  const query = querySanitize.ok ? (querySanitize.text ?? rawQuery) : `[redacted: ${querySanitize.error}]`;
+  assertModelRegistry(modelRegistryRaw);
+  const modelRegistry = modelRegistryRaw;
+  const filters = params.filters ?? {};
+  const finalLimit = clamp(
+    Math.floor(filters.limit ?? settings.search.stage2Limit ?? settings.defaultLimit),
+    1, settings.maxLimit,
+  );
+  const candidateLimit = Math.max(finalLimit, Math.floor(settings.search.stage1Limit));
+  const corpus = filteredEntries(entries, filters);
+  if (corpus.length === 0) return { hits: [], verdict: "none", stage1Ms: 0, stage2Ms: 0, surface: "empty" };
+
+  // stage0 候选选择(P3) or 全 corpus(flag off / 未配置 / 非active)
+  let candidateEntries = corpus;
+  let surface = STAGE1_CANDIDATE_SURFACE; // full_body_v3 (flag off / fallback)
+  let pool: Stage0Pool | null = null;
+  if (settings.search.stage0Enabled) {
+    pool = await selectStage0Pool(query, corpus, settings, modelRegistry, filters);
+    if (pool) {
+      candidateEntries = pool.candidateEntries;
+      surface = STAGE0_SURFACE;
+    }
+  }
+
+  let result = await runTwoStageSearch(query, candidateEntries, settings, modelRegistry, signal, finalLimit, candidateLimit);
+
+  // 安全网双触发(修订 6): verdict=none OR pool<K → 一次有界扩召(topN×3 上限 400),
+  // 仍 none 返回 none(不全库)。insufficient_pool 用结构信号 pool<K, 非绝对 cosine 门。
+  let expanded = false;
+  const poolTooSmall = !!pool && pool.mode === "hybrid" && candidateEntries.length < settings.search.stage0InsufficientPoolK;
+  if (pool && pool.mode === "hybrid" && (result.verdict === "none" || poolTooSmall)) {
+    const expandedPoolLimit = Math.min(settings.search.stage0PoolLimit * 3, 400);
+    const expSettings: MemorySettings = { ...settings, search: { ...settings.search, stage0PoolLimit: expandedPoolLimit } };
+    const exp = await selectStage0Pool(query, corpus, expSettings, modelRegistry, filters);
+    if (exp && exp.candidateEntries.length > candidateEntries.length) {
+      const retry = await runTwoStageSearch(query, exp.candidateEntries, settings, modelRegistry, signal, finalLimit, candidateLimit);
+      if (retry.verdict === "has_relevant" || retry.hits.length > result.hits.length) {
+        result = retry; pool = exp; candidateEntries = exp.candidateEntries; expanded = true;
+      }
+    }
+  }
+
+  const s1 = result.stage1Usage;
+  const s2 = result.stage2Usage;
+  logSearchMetrics({
+    ts: new Date().toISOString(),
+    query: query.slice(0, 80),
+    s1: s1 ? { in: s1.input, out: s1.output, ...(s1.cacheHit != null ? { hit: s1.cacheHit } : {}), ...(s1.cacheWrite != null ? { write: s1.cacheWrite } : {}) } : null,
+    s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
+    results: result.hits.length,
+    verdict: result.verdict,
+    stage1_surface: surface,
+    stage1_ms: result.stage1Ms,
+    stage2_ms: result.stage2Ms,
+    ...(pool ? { stage0_mode: pool.mode, stage0_pool: candidateEntries.length, stage0_dense: pool.denseCount, stage0_sparse: pool.sparseCount, stage0_stale: pool.staleCount, stage0_embed_ms: pool.embedMs, stage0_expanded: expanded, corpus_size: corpus.length } : {}),
+  }, projectRoot);
+
+  return { hits: result.hits, verdict: result.verdict, stage1Ms: result.stage1Ms, stage2Ms: result.stage2Ms, surface };
+}
+
 export async function llmSearchEntries(
   entries: MemoryEntry[],
   params: SearchParams,
@@ -574,75 +817,7 @@ export async function llmSearchEntries(
   signal?: AbortSignal,
   projectRoot?: string,
 ) {
-  const rawQuery = String(params.query ?? "").trim();
-  if (!rawQuery) return [];
-  // memory_search sends the query to an LLM reranker and persists a metrics
-  // row. Sanitize before both the prompt and the 80-char metrics truncation;
-  // truncating first can leave a partial credential that no longer matches.
-  const querySanitize = sanitizeForMemory(rawQuery);
-  const query = querySanitize.ok ? (querySanitize.text ?? rawQuery) : `[redacted: ${querySanitize.error}]`;
-
-  assertModelRegistry(modelRegistryRaw);
-  const modelRegistry = modelRegistryRaw;
-
-  const filters = params.filters ?? {};
-  const finalLimit = clamp(
-    Math.floor(filters.limit ?? settings.search.stage2Limit ?? settings.defaultLimit),
-    1,
-    settings.maxLimit,
-  );
-  const candidateLimit = Math.max(finalLimit, Math.floor(settings.search.stage1Limit));
-
-  const corpus = filteredEntries(entries, filters);
-  if (corpus.length === 0) return [];
-
-  const indexText = buildLlmIndexText(corpus);
-  const stage1 = await callSearchModel(
-    settings.search.stage1Model,
-    makeStage1Prompt(query, indexText, candidateLimit),
-    modelRegistry,
-    signal,
-    STAGE1_TIMEOUT_MS,
-    settings.search.stage1Thinking,
-  );
-  const stage1Picks = parseCandidatePicks(stage1.rawText).slice(0, candidateLimit);
-  if (stage1Picks.length === 0) return [];
-
-  const entriesBySlug = new Map(corpus.map((entry) => [entry.slug, entry]));
-  const candidateEntries = stableUnique(stage1Picks.map((pick) => pick.slug))
-    .map((slug) => entriesBySlug.get(slug))
-    .filter((entry): entry is MemoryEntry => !!entry);
-
-  if (candidateEntries.length === 0) return [];
-
-  const stage2 = await callSearchModel(
-    settings.search.stage2Model,
-    makeStage2Prompt(query, candidateEntries, finalLimit),
-    modelRegistry,
-    signal,
-    STAGE2_TIMEOUT_MS,
-    settings.search.stage2Thinking,
-  );
-  const parsedStage2 = parseFinalPicksWithVerdict(stage2.rawText);
-  const stage2Picks = parsedStage2.picks;
-
-  // ── Cache metrics log ─────────────────────────────────────────
-  // Write to project-scoped metrics file for analysis.
-  const s1 = stage1.usage;
-  const s2 = stage2.usage;
-  const entry = {
-    ts: new Date().toISOString(),
-    query: query.slice(0, 80),
-    s1: s1 ? { in: s1.input, out: s1.output, ...(s1.cacheHit != null ? { hit: s1.cacheHit } : {}), ...(s1.cacheWrite != null ? { write: s1.cacheWrite } : {}) } : null,
-    s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
-    results: stage2Picks.length,
-    verdict: parsedStage2.verdict,
-    stage1_surface: STAGE1_CANDIDATE_SURFACE,
-  };
-  logSearchMetrics(entry, projectRoot);
-
-  if (stage2Picks.length === 0) return [];
-  return rankFromStage2(entriesBySlug, stage2Picks, finalLimit);
+  return (await executeSearch(entries, params, settings, modelRegistryRaw, signal, projectRoot)).hits;
 }
 
 /**
@@ -672,73 +847,16 @@ export async function llmSearchEntriesWithVerdict(
 ): Promise<SearchVerdictResult> {
   const t0 = Date.now();
   const rawQuery = String(params.query ?? "").trim();
-  if (!rawQuery) {
-    return { hits: [], relevance_verdict: "none", query: "", stage1DurationMs: 0, stage2DurationMs: 0, totalDurationMs: 0, stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE };
-  }
-  const querySanitize = sanitizeForMemory(rawQuery);
-  const query = querySanitize.ok ? (querySanitize.text ?? rawQuery) : `[redacted: ${querySanitize.error}]`;
-  assertModelRegistry(modelRegistryRaw);
-  const modelRegistry = modelRegistryRaw;
-  const filters = params.filters ?? {};
-  const finalLimit = clamp(
-    Math.floor(filters.limit ?? settings.search.stage2Limit ?? settings.defaultLimit),
-    1, settings.maxLimit,
-  );
-  const candidateLimit = Math.max(finalLimit, Math.floor(settings.search.stage1Limit));
-  const corpus = filteredEntries(entries, filters);
-  if (corpus.length === 0) {
-    return { hits: [], relevance_verdict: "none", query, stage1DurationMs: 0, stage2DurationMs: 0, totalDurationMs: Date.now() - t0, stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE };
-  }
-  const indexText = buildLlmIndexText(corpus);
-  const t1 = Date.now();
-  const stage1 = await callSearchModel(
-    settings.search.stage1Model,
-    makeStage1Prompt(query, indexText, candidateLimit),
-    modelRegistry, signal, STAGE1_TIMEOUT_MS, settings.search.stage1Thinking,
-  );
-  const stage1DurationMs = Date.now() - t1;
-  const stage1Picks = parseCandidatePicks(stage1.rawText).slice(0, candidateLimit);
-  if (stage1Picks.length === 0) {
-    return { hits: [], relevance_verdict: "none", query, stage1DurationMs, stage2DurationMs: 0, totalDurationMs: Date.now() - t0, stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE };
-  }
-  const entriesBySlug = new Map(corpus.map((entry) => [entry.slug, entry]));
-  const candidateEntries = stableUnique(stage1Picks.map((pick) => pick.slug))
-    .map((slug) => entriesBySlug.get(slug))
-    .filter((entry): entry is MemoryEntry => !!entry);
-  if (candidateEntries.length === 0) {
-    return { hits: [], relevance_verdict: "none", query, stage1DurationMs, stage2DurationMs: 0, totalDurationMs: Date.now() - t0, stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE };
-  }
-  const t2 = Date.now();
-  const stage2 = await callSearchModel(
-    settings.search.stage2Model,
-    makeStage2Prompt(query, candidateEntries, finalLimit),
-    modelRegistry, signal, STAGE2_TIMEOUT_MS, settings.search.stage2Thinking,
-  );
-  const stage2DurationMs = Date.now() - t2;
-  const parsedStage2 = parseFinalPicksWithVerdict(stage2.rawText);
-  const s1 = stage1.usage;
-  const s2 = stage2.usage;
-  logSearchMetrics({
-    ts: new Date().toISOString(),
-    query: query.slice(0, 80),
-    s1: s1 ? { in: s1.input, out: s1.output, ...(s1.cacheHit != null ? { hit: s1.cacheHit } : {}), ...(s1.cacheWrite != null ? { write: s1.cacheWrite } : {}) } : null,
-    s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
-    results: parsedStage2.picks.length,
-    verdict: parsedStage2.verdict,
-    stage1_surface: STAGE1_CANDIDATE_SURFACE,
-    via: "path-a",
-  }, projectRoot);
-  const hits = parsedStage2.picks.length === 0
-    ? []
-    : rankFromStage2(entriesBySlug, parsedStage2.picks, finalLimit);
+  const qs = sanitizeForMemory(rawQuery);
+  const query = rawQuery ? (qs.ok ? (qs.text ?? rawQuery) : `[redacted: ${qs.error}]`) : "";
+  const r = await executeSearch(entries, params, settings, modelRegistryRaw, signal, projectRoot);
   return {
-    hits,
-    relevance_verdict: parsedStage2.verdict,
+    hits: r.hits,
+    relevance_verdict: r.verdict,
     query,
-    stage1DurationMs,
-    stage2DurationMs,
+    stage1DurationMs: r.stage1Ms,
+    stage2DurationMs: r.stage2Ms,
     totalDurationMs: Date.now() - t0,
-    stage1CandidateSurface: STAGE1_CANDIDATE_SURFACE,
-    stage2DebugSlice: (stage2.rawText || "").slice(0, 400),
+    stage1CandidateSurface: r.surface,
   };
 }

@@ -22,6 +22,12 @@ export interface SearchSettings {
   stage2Model: string;
   stage2Limit: number;
   stage2Thinking: ThinkingLevel;
+  // ADR 0035 P3: stage0 embedding 候选检索(dark-launch, 默认 off=full-body 全库)。
+  stage0Enabled: boolean;
+  stage0PoolLimit: number;          // dense topN 候选数(~100)
+  stage0MaxCandidates: number;      // hybrid union 候选面硬上限(~300, 成本旋钮)
+  stage0InsufficientPoolK: number;  // 候选池 < K 触发安全网有界扩召(~5)
+  stage0EmbedTimeoutMs: number;     // query embed 短超时(~10s; 失败即熔断 sparse)
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -33,6 +39,11 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage2Model: "",
   stage2Limit: 10,
   stage2Thinking: "off",
+  stage0Enabled: false,
+  stage0PoolLimit: 100,
+  stage0MaxCandidates: 300,
+  stage0InsufficientPoolK: 5,
+  stage0EmbedTimeoutMs: 10_000,
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -172,6 +183,11 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage2Model: asString(search.stage2Model, DEFAULT_SEARCH_SETTINGS.stage2Model),
     stage2Limit: Math.max(1, asNumber(search.stage2Limit, DEFAULT_SEARCH_SETTINGS.stage2Limit)),
     stage2Thinking: asThinkingLevel(search.stage2Thinking, DEFAULT_SEARCH_SETTINGS.stage2Thinking),
+    stage0Enabled: asBoolean(search.stage0Enabled, DEFAULT_SEARCH_SETTINGS.stage0Enabled),
+    stage0PoolLimit: Math.max(1, asNumber(search.stage0PoolLimit, DEFAULT_SEARCH_SETTINGS.stage0PoolLimit)),
+    stage0MaxCandidates: Math.max(1, asNumber(search.stage0MaxCandidates, DEFAULT_SEARCH_SETTINGS.stage0MaxCandidates)),
+    stage0InsufficientPoolK: Math.max(0, asNumber(search.stage0InsufficientPoolK, DEFAULT_SEARCH_SETTINGS.stage0InsufficientPoolK)),
+    stage0EmbedTimeoutMs: Math.max(1000, asNumber(search.stage0EmbedTimeoutMs, DEFAULT_SEARCH_SETTINGS.stage0EmbedTimeoutMs)),
   };
 }
 
