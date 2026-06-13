@@ -97,7 +97,7 @@
 
 ## 4. docs-doctor 当前 worklist（迁移期 WARN，逐步清零 / 收尾 STRICT 升 ERROR）
 
-> **进度（本轮）**：✅ frontmatter 已铺 45 文档；✅ 8 条真断锦已修；✅ docs-doctor 已精化（REQ-006 no-hash/no-count 的 STRICT 提升只针对 consensus 面，ADR pending-ingest 机制正文的 commit 证据为 advisory）。⏳ **STRICT-green 唯一剩余 = roadmap.md strip**：19 个 consensus-面 hash 集中在 roadmap “同步” ship-status 块 + ADR 0022 housekeeping 表（roadmap 80% 是 ship-status，按治理应移 feature-changelog/current-state/audits/git，只留真 backlog）。下面 worklist 为原始记录。
+> **进度（本轮）**：✅ frontmatter 已铺 45 文档；✅ 8 条真断锦已修；✅ docs-doctor 已精化（REQ-006 no-hash/no-count 的 STRICT 提升只针对 consensus 面，ADR pending-ingest 机制正文的 commit 证据为 advisory）。✅ **roadmap.md strip 完成**：删“同步” ship-status 块 + 整个 ADR 0022 housekeeping batch 章 + 3 行 ADR-0022 ship-status debt（203→92 行），只留真 backlog（P0/P1 / 架构 debt 4 行 / 不变量守护 / pending flips / deferred / maxim）。**`STRICT=1 npm run docs:doctor` = GREEN（零 ERROR）**——Phase-2 doc 侧收尾。下面 worklist 为原始记录。
 - **commit hash 残留**（REQ-006）：current-state.md §198-203、roadmap.md 多处、0032 §158 → 任务 B / 抽取时清。
 - **8 条真断锚**（非 slugger 误报，已验证）：adr/README.md→0027 `#c1-双-invariant...`/`#c3-认知层...`（手工清理过的锚点丢了 `—`/`+`/`/` 产生的双连字符）、0026/0024/0025 部分；0014→brain-redesign-spec `#35-deterministic-router`/`#640-vault-执行者`（标题已不存在）；vault-bootstrap 锚点。→ §5 重指锚点 + 抽取改 0027 标题时一并修。
 - **frontmatter 缺失**：全量（迁移期 advisory）→ 抽取/瘦身时按极简 frontmatter（doc_type/status[+canonical_for]）补，再 STRICT 升级。

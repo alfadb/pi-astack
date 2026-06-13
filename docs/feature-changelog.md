@@ -11,6 +11,22 @@ status: active
 
 ---
 
+## 2026-06-13 — accepted — roadmap.md strip：roadmap 回归 backlog 本职（STRICT-green 收尾）
+
+### 变更
+`roadmap.md` 删掉所有 ship-status（“同步” 变更块 + 整个 ADR 0022 housekeeping batch 章 + 3 行 ADR-0022 ship-status debt，203→92 行），只留真 backlog（P0/P1 / 架构 debt / 不变量守护 / pending flips / deferred / maxim）。
+
+### 原因
+REQ-006 + 文档治理：roadmap 只装未完成/计划；ship-status 属 current-state/feature-changelog/audits/git。原 roadmap 80% 是带 commit hash 的 ship-status，违反 REQ-006。
+
+### 需求影响
+`STRICT=1 npm run docs:doctor` 达成 **GREEN（零 ERROR）**——Phase-2 doc 侧收尾。残余 advisory 均为 ADR pending-ingest 机制正文的 commit 证据（待 ADR 0034 ingest 后清）。
+
+### 非目标
+ADR 0022 的实施流水/audit 轨迹不是删除，是移出 roadmap；原文保留在 git history / `docs/audits/`。
+
+---
+
 ## 2026-06-13 — proposed — spun-out keystone：ADR 0034 abrain mechanism-ingest + rationale 渲染
 
 ### 变更
