@@ -57,10 +57,12 @@
 
 **acceptance**：①无主会话直写；②dry-run；③每条有 derives_from；④分解无整篇 dump；⑤kind/status 合法；⑩secret 边界（走 sanitizer）。
 
-- [ ] lane 脚手架（dry-run manifest → go）
-- [ ] 分解 prompt（AI-Native 认知层，不加机械准确率门）
-- [ ] provenance/Tier-2/sanitizer/strict-binding 接线
-- [ ] smoke（sandbox fixture，不动真实 abrain）+ negative test
+- [x] lane 核心 `extensions/memory/ingest-adr.ts`：`planIngest`（纯，出 manifest + coverage + 分解 stats/flags）+ `buildIngestEntryMarkdown` + `runAdrIngest`（dry-run/go）
+- [x] provenance=content-in-transcript（AX 枚举，机械非 Tier-1）+ timeline marker migrated-from-mechanism-docs + **source_ref 存 path#heading@SHA**（避开 derives_from 图链冲突）+ strict-binding（projectDir 必存，不靠 --project）
+- [x] sanitizer 接线（⑩ secret 边界：sanitize 失败 withhold）+ git reset --hard pre-SHA 回滚 + index rebuild + ingest_adr 审计
+- [x] decomposer **注入可测**（生产接 LLM 分解 prompt；smoke 注入 stub）——认知层走 prompt，无机械准确率门
+- [x] `smoke:adr-ingest` 40 assertions（sandbox 临时 abrain git repo，不动真实 abrain；dry-run 不写 / go / 红线 skip / secret 脱敏 / withhold / 回滚删部分写入）
+- [ ] （Phase 4 prep）CLI 命令 `/memory ingest-adr` + 生产 LLM decomposer prompt 接线——真实写入需用户 go/no-go（G2）
 
 ## Phase 3 — rationale 渲染路径（代码 + smoke）
 
