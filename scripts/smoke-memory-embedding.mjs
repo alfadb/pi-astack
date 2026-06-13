@@ -75,10 +75,11 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-emb-"));
 const runtimeStub = {
   abrainStateDir: (home) => path.join(home, ".state"),
   resolveUserGlobalAbrainHome: () => tmpDir,
+  acquireFileLock: async () => ({ release: async () => {} }),
 };
 const embTsPath = path.join(repoRoot, "extensions", "memory", "embedding.ts");
 const mod = loadCJS(transpile(embTsPath), embTsPath, new Map([["../_shared/runtime", runtimeStub]]));
-const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath, selectStage0, scopeTagOf } = mod;
+const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath, selectStage0, scopeTagOf, staleOrMissingSlugs, reconcileEmbeddings } = mod;
 
 // ── config from env + models.json ────────────────────────────────────────
 const key = process.env.SUB2API_API_KEY_EMBEDDING;
@@ -241,17 +242,61 @@ await check("12. scope-filter-before-topN: 只召回 in-scope [HTTP]", async () 
   assert(!paWorld.some((r) => r.slug === "git-push"), "project:pb 在 {pa,world} 下仍排除");
 });
 
-await check("13. bounded cold-start fallback: 不全库 union [HTTP]", async () => {
+await check("13. bounded freshness fallback: 不全库 union [HTTP]", async () => {
   if (!HAVE_HTTP) return;
   const idx = new VectorIndex(idxPath, cfg.model, cfg.dim).load();
   const [qv] = await embedTexts(["测试 query"], cfg);
-  const indexed = Object.keys(JSON.parse(fs.readFileSync(idxPath, "utf8")).entries);
-  const active = [...indexed, "ghost1", "ghost2", "ghost3", "ghost4"]; // 4 个未索引
-  const r = selectStage0(idx, qv, { topN: 5, activeSlugs: active, maxFallback: 2 });
-  assert(r.coverage.missing === 4, `detect 4 missing, got ${r.coverage.missing}`);
+  const fresh = ["ghost1", "ghost2", "ghost3", "ghost4"]; // 4 个未索引/陈旧
+  const r = selectStage0(idx, qv, { topN: 5, freshFallbackSlugs: fresh, maxFallback: 2 });
+  assert(r.coverage.missing === 4, `report 4 fresh, got ${r.coverage.missing}`);
   assert(r.fallback.length === 2, `fallback 必须有界到 maxFallback=2, got ${r.fallback.length}`);
-  assert(r.fallback.every((s) => s.startsWith("ghost")), "fallback 应是未索引 slug");
+  assert(r.fallback.every((s) => s.startsWith("ghost")), "fallback 应是 fresh slug");
   assert(r.candidates.length <= 5, "candidates 受 topN 限");
+});
+
+await check("14. P2 reconcile embed-on-write + staleOrMissing 检测(方向 B)[HTTP]", async () => {
+  if (!HAVE_HTTP) return;
+  const p = path.join(tmpDir, "p2.json");
+  const A = E("p2-a", "标题A", "内容A 关于 git 提交流程");
+  const B = E("p2-b", "标题B", "内容B 关于 embedding 向量检索");
+  const r = await reconcileEmbeddings([A, B], cfg, p);
+  assert(r.embedded === 2, `reconcile 初次 embed 2, got ${r.embedded}`);
+  const idx = new VectorIndex(p, cfg.model, cfg.dim).load();
+  const C = E("p2-c", "标题C", "内容C 全新条目");
+  assert(JSON.stringify(staleOrMissingSlugs(idx, [A, B, C])) === '["p2-c"]', "只 C 未索引");
+  const A2 = E("p2-a", "标题A", "内容A 彻底改写过了");
+  const stale = staleOrMissingSlugs(idx, [A2, B]);
+  assert(stale.includes("p2-a") && !stale.includes("p2-b"), "改写 A 陈旧, B 不变");
+  const r2 = await reconcileEmbeddings([A2, B], cfg, p);
+  assert(r2.embedded === 1 && r2.skipped === 1, `只 A2 重 embed, got embedded=${r2.embedded} skipped=${r2.skipped}`);
+});
+
+await check("15. P2 scope-aware prune: reconcile 不删其他 scope 向量(bug1)[HTTP]", async () => {
+  if (!HAVE_HTTP) return;
+  const p = path.join(tmpDir, "p2-scope.json");
+  const a1 = E("s-a1", "t", "内容1", "project", "pa");
+  const a2 = E("s-a2", "t", "内容2", "project", "pa");
+  const b1 = E("s-b1", "t", "内容3", "project", "pb");
+  await reconcileEmbeddings([a1, a2, b1], cfg, p);
+  assert(new VectorIndex(p, cfg.model, cfg.dim).load().size() === 3, "初始 3 向量");
+  // reconcile 只传 pa scope(a1 删, 剩 a2): 只 prune pa 内 a1, 保留 pb 的 b1
+  await reconcileEmbeddings([a2], cfg, p);
+  const slugs = Object.keys(JSON.parse(fs.readFileSync(p, "utf8")).entries).sort();
+  assert(JSON.stringify(slugs) === '["s-a2","s-b1"]', `prune pa 的 a1 但保留 pb 的 b1, got ${JSON.stringify(slugs)}`);
+});
+
+await check("16. P2 search union: 未索引 entry 经 freshFallback 进候选(方向 B)[HTTP]", async () => {
+  if (!HAVE_HTTP) return;
+  const p = path.join(tmpDir, "p2-union.json");
+  const A = E("u-a", "标题A", "内容A git 子模块提交顺序");
+  await reconcileEmbeddings([A], cfg, p);
+  const idx = new VectorIndex(p, cfg.model, cfg.dim).load();
+  const B = E("u-b", "标题B", "内容B 全新刚写入还没 embed");
+  const fresh = staleOrMissingSlugs(idx, [A, B]);
+  assert(JSON.stringify(fresh) === '["u-b"]', `只 u-b 未索引, got ${JSON.stringify(fresh)}`);
+  const [qv] = await embedTexts(["全新内容"], cfg);
+  const s0 = selectStage0(idx, qv, { topN: 5, freshFallbackSlugs: fresh, maxFallback: 5 });
+  assert(s0.fallback.includes("u-b"), "未索引 u-b 应经 fallback union 进候选(下次 search 立即可召回)");
 });
 
 // cleanup

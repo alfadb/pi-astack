@@ -20,7 +20,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { abrainStateDir, resolveUserGlobalAbrainHome } from "../_shared/runtime";
+import { abrainStateDir, acquireFileLock, resolveUserGlobalAbrainHome } from "../_shared/runtime";
 import type { MemoryEntry } from "./types";
 import type { EmbeddingSettings } from "./settings";
 
@@ -239,14 +239,18 @@ export class VectorIndex {
     return { indexed: activeSlugs.length - missing.length, missing };
   }
 
-  /** Drop vectors whose slug is no longer an active entry. Returns count. */
-  prune(validSlugs: Set<string>): number {
+  /** Drop vectors whose slug is no longer an active entry. When `scopes` is
+   *  given, prune ONLY slugs whose scope is in that set — reconcile passes the
+   *  current session's scopes so a project-scoped reconcile never deletes other
+   *  projects' vectors (ADR 0035 §7 bug1) while still clearing the current
+   *  scope's hard-deleted entries (bug4). Returns count. */
+  prune(validSlugs: Set<string>, scopes?: Set<string>): number {
     let n = 0;
-    for (const slug of Object.keys(this.data.entries)) {
-      if (!validSlugs.has(slug)) {
-        delete this.data.entries[slug];
-        n++;
-      }
+    for (const [slug, rec] of Object.entries(this.data.entries)) {
+      if (validSlugs.has(slug)) continue;
+      if (scopes && !scopes.has(rec.scope)) continue; // out-of-scope vector untouched
+      delete this.data.entries[slug];
+      n++;
     }
     if (n) this.normCache = null;
     return n;
@@ -310,27 +314,41 @@ export function vectorIndexPath(): string {
 
 export interface Stage0Result {
   candidates: Array<{ slug: string; score: number }>;
-  fallback: string[]; // bounded cold-start slugs (not yet indexed, no vector)
+  fallback: string[]; // bounded fresh/missing slugs (no fresh vector → blind-union)
   coverage: { ranked: number; missing: number };
 }
 
-/** Stage0 候选选择:scope-filtered topN + 冷启动有界 fallback(ADR 0035 §4)。
- *  索引空/部分时,in-scope 但未索引的 active slugs 取有界子集
- *  (≤maxFallback)供调用方 union 进候选——**绝不全库 union**(冷启动窗口
- *  禁回退 O(库) full-body)。activeSlugs 应由调用方按 scope 过滤后传入。 */
+/** Search-time freshness diff (ADR 0035 §4 方向 B): the slugs among `entries`
+ *  that are MISSING from the index OR whose content-hash no longer matches
+ *  (vector stale after an edit). These must be bounded-unioned into the
+ *  candidate pool, else a freshly written/edited entry ranks by its OLD vector
+ *  (or not at all) and silently drops out of top-N — the coverage()-only bug
+ *  (ADR 0035 §7 bug3). `entries` should already be scope-filtered by the
+ *  caller. Zero persisted manifest: diffed in-memory on every search against
+ *  the entries loadEntries already holds. */
+export function staleOrMissingSlugs(index: VectorIndex, entries: MemoryEntry[]): string[] {
+  const out: string[] = [];
+  for (const e of entries) {
+    if (!index.isFresh(e.slug, contentHashOf(e))) out.push(e.slug);
+  }
+  return out;
+}
+
+/** Stage0 候选选择:scope-filtered topN + 有界 freshness fallback(ADR 0035 §4
+ *  方向 B)。`freshFallbackSlugs`(由 staleOrMissingSlugs 算出,含未索引 + 向量
+ *  陈旧两类,已 scope-filtered)取有界子集(≤maxFallback)供调用方 union 进
+ *  候选——**绝不全库 union**(冷启动/故障窗口禁回退 O(库) full-body)。 */
 export function selectStage0(
   index: VectorIndex,
   queryVec: number[],
-  opts: { topN: number; scopes?: Set<string>; activeSlugs?: string[]; maxFallback?: number },
+  opts: { topN: number; scopes?: Set<string>; freshFallbackSlugs?: string[]; maxFallback?: number },
 ): Stage0Result {
   const candidates = index.topN(queryVec, opts.topN, { scopes: opts.scopes });
   let fallback: string[] = [];
-  let missing = 0;
-  if (opts.activeSlugs && opts.activeSlugs.length) {
-    const cov = index.coverage(opts.activeSlugs);
-    missing = cov.missing.length;
+  const missing = opts.freshFallbackSlugs?.length ?? 0;
+  if (missing) {
     const cap = Math.max(0, opts.maxFallback ?? 0);
-    fallback = cov.missing.slice(0, cap); // BOUNDED — never the whole vault
+    fallback = opts.freshFallbackSlugs!.slice(0, cap); // BOUNDED — never the whole vault
   }
   return { candidates, fallback, coverage: { ranked: candidates.length, missing } };
 }
@@ -390,7 +408,7 @@ export async function buildCorpusEmbeddings(
   entries: MemoryEntry[],
   cfg: EmbeddingProviderConfig,
   indexPath: string,
-  opts?: { maxChars?: number; saveEvery?: number; onProgress?: (done: number, todo: number) => void },
+  opts?: { maxChars?: number; saveEvery?: number; onProgress?: (done: number, todo: number) => void; pruneScopes?: Set<string>; skipPrune?: boolean },
 ): Promise<CorpusBuildResult> {
   const maxChars = opts?.maxChars ?? 3500;
   const saveEvery = opts?.saveEvery ?? cfg.batchSize * 10;
@@ -398,7 +416,9 @@ export async function buildCorpusEmbeddings(
 
   const active = entries.filter((e) => e.status === "active");
   const validSlugs = new Set(active.map((e) => e.slug));
-  const pruned = idx.prune(validSlugs);
+  // reconcile(部分库)传 pruneScopes:只 prune 当前 scope 内的 stale slug,绝不
+  // 删其他 project 向量(ADR 0035 §7 bug1);全库 init 不传 → prune 全部 stale。
+  const pruned = opts?.skipPrune ? 0 : idx.prune(validSlugs, opts?.pruneScopes);
 
   // content-hash gate: only embed changed/missing
   const hashes = new Map<string, string>();
@@ -426,4 +446,37 @@ export async function buildCorpusEmbeddings(
   idx.save();
 
   return { total: active.length, embedded, skipped: active.length - todo.length, pruned };
+}
+
+export function indexLockPath(): string {
+  return path.join(abrainStateDir(resolveUserGlobalAbrainHome()), "memory", ".embeddings.lock");
+}
+
+/** Reconcile vectors for the entries loaded this agent_end (ADR 0035 P2 方向 B).
+ *  Scope-safe: prunes ONLY within the scopes present in `entries`(不删其他
+ *  project 向量 = bug1) + serializes the index read-modify-write under a file
+ *  lock(多 session/设备并发 = bug2)。content-hash gated 增量 embed;调用方
+ *  必须 swallow 错误,使 provider 故障永不阻塞 sediment 写入。 */
+export async function reconcileEmbeddings(
+  entries: MemoryEntry[],
+  cfg: EmbeddingProviderConfig,
+  indexPath: string,
+  opts?: { maxChars?: number; onProgress?: (done: number, todo: number) => void; lockTimeoutMs?: number },
+): Promise<CorpusBuildResult> {
+  const scopes = new Set(entries.filter((e) => e.status === "active").map(scopeTagOf));
+  const lock = await acquireFileLock(indexLockPath(), {
+    timeoutMs: opts?.lockTimeoutMs ?? 30_000,
+    staleMs: 60_000,
+    retryMs: 100,
+    label: "embedding-index",
+  });
+  try {
+    return await buildCorpusEmbeddings(entries, cfg, indexPath, {
+      maxChars: opts?.maxChars,
+      onProgress: opts?.onProgress,
+      pruneScopes: scopes,
+    });
+  } finally {
+    await lock.release();
+  }
 }
