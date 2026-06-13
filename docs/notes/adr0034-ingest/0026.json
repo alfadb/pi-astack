@@ -1,0 +1,155 @@
+{
+  "processed": [
+    "§3.0.1 设计数据流",
+    "§3.0.2 关键设计选择",
+    "§3.0.3 v3 候选路线",
+    "§3.0.4 不做（3-T0 一致否决）",
+    "§3.1 决策点识别",
+    "§3.2 情境化回忆",
+    "§3.3 矛盾感知",
+    "§3.4 结果驱动的推荐",
+    "§4.1 路径 A",
+    "§4.2 路径 B",
+    "§4.3 INV-INVISIBILITY 怎么保证",
+    "§5.1 decision_brief_id schema + outcome ledger anchor field layout",
+    "§6.3 Phase 安排",
+    "§7.3 §4.2 反模式"
+  ],
+  "skipped": [
+    {"heading": "§0 起草说明", "reason": "scope/meta declaration; no mechanism content to decompose"},
+    {"heading": "§1 代码现实", "reason": "descriptive window on current state; not a durable mechanism decision"},
+    {"heading": "§2 推送记忆和参与决策的区别", "reason": "conceptual framing and comparison table; mechanism decisions begin in §3"},
+    {"heading": "§3.0.5 与 §3.1-§3.4 原文的对应关系", "reason": "meta-reference mapping table; no independent mechanism content beyond what §3.0 already covers"},
+    {"heading": "§4.1.1 P1 路径 A 实现前的设计选择", "reason": "walked-back content; rejected designs already captured under §3.0.4 anti-pattern entry"},
+    {"heading": "§5 跟 ADR 0025 的咬合", "reason": "cross-ADR interlock metadata table; schema-level decisions captured under §5.1"},
+    {"heading": "§6.1 新文件", "reason": "implementation logistics and file boundaries; key rationale captured under §6.3 bootstrap entry"},
+    {"heading": "§6.2 改动现有文件", "reason": "implementation logistics; tabular plan not durable mechanism knowledge"},
+    {"heading": "§6.4 反向 patch", "reason": "cross-ADR patch logistics; not a self-contained mechanism decision"},
+    {"heading": "§7.1 Invariant 边界", "reason": "compliance checklist; pure restatement of direction.md invariants"},
+    {"heading": "§7.2 AI-Native 原则", "reason": "compliance checklist; pure restatement of direction.md principles"},
+    {"heading": "§7.4 接受代价", "reason": "cost acceptance restatement; already lives in direction.md §3"},
+    {"heading": "§8 相关记忆", "reason": "cross-reference list; not a mechanism entry"}
+  ],
+  "drafts": [
+    {
+      "slug": "walked-back-binary-decision-detection",
+      "title": "Binary decision-point detection walked back",
+      "kind": "decision",
+      "status": "active",
+      "confidence": 8,
+      "compiledTruth": "Binary 'decision point vs execution instruction' detection was walked back after user identified three fatal assumptions: (1) regex prefilter infeasible cross-language — 18 Chinese/English regex patterns cannot cover Japanese, Spanish, French, Russian surface forms in a daily-use tool; (2) regex cannot cover expression openness — real user expressions include implicit, ambiguous, multi-turn-emergent forms (e.g. '这两个哪个香', long background + '怎么办'); (3) full-LLM detection per turn adds 1-3s TTFT already rejected as unacceptable in §4.1. Replacement: every turn runs memory_search; a lightweight rewriter LLM judges useful=true/false; Stage 2 LLM produces relevance_verdict as cognitive cutoff. The binary gate is removed entirely — not softened, not thresholded.",
+      "sourceHeading": "§3.1 决策点识别",
+      "directionImpact": []
+    },
+    {
+      "slug": "path-a-silent-skip-pipeline",
+      "title": "Path A pipeline: rewriter to search to verdict cutoff to silent skip",
+      "kind": "pattern",
+      "status": "active",
+      "confidence": 8,
+      "compiledTruth": "Path A (push) pipeline: user turn + recent history (≤4 turns) → rewriter LLM (deepseek-v4-flash) outputs {useful, query (200-800 char multi-sentence)}. If useful=false → silent skip. If useful=true → llmSearchEntriesWithVerdict runs Stage 1 candidate select + Stage 2 LLM rerank outputting {relevance_verdict, picks}. Stage 2 relevance_verdict is an LLM-side cognitive judgment (none/has_relevant), NOT a score threshold. If verdict=none → silent skip. If has_relevant → inject raw entries with compiledTruth into system prompt. All failure paths are silent — no error surfaced to user, no fallback to degraded retrieval, fully compliant with INV-INVISIBILITY. This pipeline replaces the abandoned binary decision-point detector entirely.",
+      "sourceHeading": "§3.0.1 设计数据流",
+      "directionImpact": ["supports | direction.md#INV-INVISIBILITY | none"]
+    },
+    {
+      "slug": "subagent-exempt-from-path-a",
+      "title": "Sub-agents do not go through Path A",
+      "kind": "decision",
+      "status": "active",
+      "confidence": 7,
+      "compiledTruth": "Sub-agents (L2 workers spawned by dispatch_agent / dispatch_parallel) do NOT go through Path A. Running the full rewriter → search → verdict pipeline for every sub-agent dispatch would double per-dispatch cost. Sub-agents remain capable: they can actively call memory_decide (Path B pull) or memory_search as needed. This is an explicit exclusion — the Path A before_agent_start hook applies only to the main L1 session agent, not to dispatched workers.",
+      "sourceHeading": "§3.0.2 关键设计选择",
+      "directionImpact": []
+    },
+    {
+      "slug": "path-a-inject-id-independent-anchor",
+      "title": "path_a_inject_id is an independent anchor because it runs before turn_id exists",
+      "kind": "fact",
+      "status": "active",
+      "confidence": 8,
+      "compiledTruth": "Path A injection uses the independent anchor path_a_inject_id (format: path-a-${ts.toString(36)}-${random8chars}), NOT decision_brief_id (which belongs to Path B memory_decide tool). The reason is temporal: Path A's before_agent_start hook runs before turn_id is assigned by the turn_start event. Generating a turn_id-scoped anchor at that point would create an anchor misalignment. Path A inject events write to a dedicated path-a-ledger (path-a-ledger.jsonl) with path_a_inject_id. Downstream, Path A and Path B ledgers join on (session_id, turn_id) rather than sharing an anchor field. Path A ledger rows should also stamp the current causal anchor (session_id + turn_id) post-hoc; if anchor is missing, rows are still written with anchor_missing:true for C5 fail/degrade observability.",
+      "sourceHeading": "§5.1 decision_brief_id schema + outcome ledger anchor field layout",
+      "directionImpact": []
+    },
+    {
+      "slug": "decision-brief-natural-language-not-json",
+      "title": "Decision brief uses natural language, not JSON",
+      "kind": "decision",
+      "status": "active",
+      "confidence": 8,
+      "compiledTruth": "Decision briefs (both Path A inject and Path B memory_decide output) use natural language, not JSON. JSON forces field-level decomposition ('preference', 'outcome', 'contradiction' as separate keys) which destroys cross-entry synthetic judgment — for example, 'prefers pnpm' + 'tried yarn and switched back after two weeks' only together reveal a 'confirmed-after-failure preference', a synthesis that JSON field separation would not capture. This aligns with the prompt-engineering-over-mechanical-guards maxim and REQ-003 (primary defense path is prompt, not schema). The brief synthesizer (v3 candidate) will follow the same natural-language shape.",
+      "sourceHeading": "§3.2 情境化回忆",
+      "directionImpact": ["supports | requirements.md#REQ-003 | none"]
+    },
+    {
+      "slug": "provisional-staging-excluded-from-use-side",
+      "title": "Provisional staging entries must not feed use-side decisions",
+      "kind": "maxim",
+      "status": "active",
+      "confidence": 9,
+      "compiledTruth": "Any memory entry with attribution_pending=true (provisional staging — classifier-unconfirmed guesses, not user facts) must NOT appear in decision briefs, memory_decide results, or Path A inject. Allowing unconfirmed guesses into use-side decisions would create a self-reinforcing loop: the brain invents a preference, feeds it to the LLM as if confirmed, the LLM acts on it, and the brain later treats that action as 'confirmation'. Provisional entries are quarantined until ADR 0025 staging resolution either confirms or discards them. This is a hard boundary between the 'write' and 'use' sides — no gray area.",
+      "sourceHeading": "§3.2 情境化回忆",
+      "directionImpact": ["supports | direction.md#INV-IMPLICIT-GROUND-TRUTH | none"]
+    },
+    {
+      "slug": "contradiction-awareness-reminds-not-blocks",
+      "title": "Contradiction awareness reminds, never blocks",
+      "kind": "maxim",
+      "status": "active",
+      "confidence": 9,
+      "compiledTruth": "When stored high-confidence durable preferences conflict with a current choice, the brain reminds but never blocks. The brain cannot know whether the user changed their mind — active preferences may have been superseded by a decision not yet sedimented. Blocking the LLM from proceeding would be the brain 'deciding for the user', violating INV-AUTONOMY and INV-ACTIVE-CORRECTION (which requires that user corrections flow naturally, not be preempted by mechanical gates). The reminder gives the LLM options: it can adopt the preference, override with explanation, confirm with the user, or follow project-specific requirements. This is INV-ACTIVE-CORRECTION's 'use'-side realization: remembered explicit preferences surface as advisory context, not enforcement.",
+      "sourceHeading": "§3.3 矛盾感知",
+      "directionImpact": ["supports | direction.md#INV-ACTIVE-CORRECTION | none"]
+    },
+    {
+      "slug": "echo-chamber-5x-decisive-circuit-breaker",
+      "title": "5x DECISIVE without user correction triggers pending reconfirmation",
+      "kind": "pattern",
+      "status": "active",
+      "confidence": 8,
+      "compiledTruth": "A positive-feedback echo chamber risk exists: brain recommends A → LLM adopts → outcome logged as DECISIVE → brain recommends A more strongly next time → LLM more likely to adopt → cycle. The circuit breaker: when the same entry has been used DECISIVE 5 consecutive times without any user-initiated correction signal in between (meaning the user never objected, but also never actively confirmed), the aggregator (ADR 0025 §4.3) automatically marks the entry as 'pending reconfirmation'. In subsequent decision briefs, the entry is no longer presented as a 'confirmed preference' — its recommendation tone downgrades from '你应该' (you should) to '你之前好像' (you seemed to). This is NOT archiving or deletion — it is a temporary tonal downgrade, reversible by user explicit re-confirmation. The threshold of 5 is an initial value, subject to adjustment based on observed false-positive rates.",
+      "sourceHeading": "§3.4 结果驱动的推荐",
+      "directionImpact": ["supports | direction.md#INV-IMPLICIT-GROUND-TRUTH | none"]
+    },
+    {
+      "slug": "push-path-a-vs-pull-path-b-duality",
+      "title": "Path A push and Path B pull are complementary",
+      "kind": "pattern",
+      "status": "active",
+      "confidence": 8,
+      "compiledTruth": "Two complementary decision-participation channels coexist: Path A (push) — brain detects relevance via the rewriter→search→verdict pipeline in before_agent_start and injects relevant entries; Path B (pull) — LLM actively calls the memory_decide(context, options?, constraints?) tool when it discovers a decision point during reasoning. Path A covers decision contexts visible from the user message surface; Path B covers implicit decision points the LLM discovers mid-reasoning (e.g. 'there are three possible implementations here, I need to choose one'). Both use the same underlying memory retrieval, but Path B returns a ≤500-token brief synthesized for the specific decision context. The push channel has TTFT cost (search latency before response starts); the pull channel has zero TTFT cost until the LLM chooses to invoke it.",
+      "sourceHeading": "§4.2 路径 B",
+      "directionImpact": []
+    },
+    {
+      "slug": "brief-system-prompt-inject-not-user-render",
+      "title": "Decision brief injected into system prompt, not rendered to user",
+      "kind": "decision",
+      "status": "active",
+      "confidence": 8,
+      "compiledTruth": "Decision brief raw text is injected at the end of the system prompt and is NOT double-rendered to the user interface. This is a product-layer design choice for this specific artifact, not a restatement of INV-INVISIBILITY (which governs management burden, not operational-state visibility). The rationale: the brief is internal LLM reasoning assistance; showing raw brief text to the user would create confusion when the LLM disagrees with the brief's recommendation. However, the LLM is ENCOURAGED to voluntarily surface brain participation in natural language: '基于你之前对 X 的偏好，推荐 Z' (based on your prior X preference, recommend Z). This gives users legitimate feedback that the brain participated while keeping the raw brief internal. This does not affect sediment/abrain operational status indicators (footer/notify/audit), which operate normally per ADR 0024 §2.",
+      "sourceHeading": "§4.3 INV-INVISIBILITY 怎么保证",
+      "directionImpact": ["supports | direction.md#INV-INVISIBILITY | none"]
+    },
+    {
+      "slug": "bootstrap-deadlock-p0a-independent-layer",
+      "title": "Bootstrap deadlock resolved by P0a independent minimal layer",
+      "kind": "decision",
+      "status": "active",
+      "confidence": 8,
+      "compiledTruth": "ADR 0026's value depends on ADR 0025's output (durable entries + outcome data), but ADR 0025's output depends on autoLlmWriteEnabled=true, which in turn waits for ADR 0025 P1-P5 capability verification. This chicken-and-egg deadlock is resolved by splitting 0026 into two layers: P0a (independent minimal layer) delivers the memory_decide tool skeleton — tool registration + ~50-line simplified brief prompt wrapping memory_search results, with zero dependency on outcome data, contradiction detection, or provisional staging. It works with existing manually-fenced memories and legacy .pensieve/ data. Users get 'brain participation' before autoLlmWriteEnabled is turned on. P1 (full layer) adds outcome summaries + contradiction detection after ADR 0025 has accumulated 1-2 months of outcome data. P0a is self-contained; P1 blocks on 0025 data availability.",
+      "sourceHeading": "§6.3 Phase 安排",
+      "directionImpact": []
+    },
+    {
+      "slug": "anti-pattern-three-rejected-mechanical-approaches",
+      "title": "Three mechanical approaches unanimously rejected by 3-T0 audit",
+      "kind": "anti-pattern",
+      "status": "active",
+      "confidence": 9,
+      "compiledTruth": "Three approaches were rejected by unanimous 3-T0 cross-vendor audit: (1) Regex prefilter for decision-point detection — 18 Chinese/English regex patterns permanently cannot cover Japanese, Spanish, French, Russian surface forms, and regex cannot capture expression-open implicit/ambiguous/multi-turn-emergent decision signals. (2) 24-hour cached topic profile with TTL — violates INV-IMPLICIT-GROUND-TRUTH's real-timeness requirement; effectively an ADR 0024 §6 #5 second-order distill cache that accelerates bias accumulation by treating stale classifications as current truth. (3) Recall-below-N triggering a mechanical second pass — this is a score-threshold gate on LLM behavior layer, violating the AI-Native principle (REQ-003: primary defense path must be prompt, not mechanical gate). All three share the same root failure: attempting to solve LLM-cognitive problems with mechanical guardrails instead of prompt engineering.",
+      "sourceHeading": "§3.0.4 不做（3-T0 一致否决）",
+      "directionImpact": ["supports | direction.md#INV-IMPLICIT-GROUND-TRUTH | none", "supports | requirements.md#REQ-003 | none"]
+    }
+  ]
+}

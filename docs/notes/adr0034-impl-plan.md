@@ -83,10 +83,10 @@
 **acceptance**：⑨archive-safe（ingest 后 rationale 可得才允许物理移走 prose）。
 
 - [x] 能力全绿（Phase 1-3 smoke pass：direction-impact 32 + adr-ingest 40 + rationale 29 = 101 assertions，smoke:memory 回归绿）
-- [ ] **用户显式 go/no-go**（真实 abrain 写入，G2 边界）+ （Phase 4 prep）CLI 命令 + 生产 LLM decomposer prompt
-- [ ] production ingest（dry-run review → go）
-- [ ] rationale 可得验证 → 物理瘦身 ADR 机制 prose → 收方向残桩
-- [ ] Phase-2 "整体完成" 达成
+- [x] **用户显式 go/no-go**（2026-06-13 授权全量 + 物理瘦身 + 分批）；migration runner `scripts/run-adr-ingest.mjs` + verifier `scripts/verify-rationale.mjs`（经真实 sanitizer + lane 写真实 ~/.abrain，git 可回滚）
+- [~] production ingest（分批：decompose via dispatch → dry-run 自查 → --go → verify）：**pilot 0026 ✅**（12 entries 入 pi-global，911→923，abrain 438fe9f→08afdff）；剩 11 SLIM + 7 ARCHIVE。slim 格式用户已确认；ARCHIVE superseded（0006/0019）只标 archived 不 ingest。
+- [~] rationale 可得验证 → 物理瘦身 → 方向残桩：**0026 ✅**（renderRationale found=true + pinned SHA；402→~25 行，原文 git @627de33）；其余随批。
+- [ ] Phase-2 "整体完成" 达成（全 19 ADR ingest + slim 完）
 
 ## 不变量（ADR 0034 §4，全程守）
 

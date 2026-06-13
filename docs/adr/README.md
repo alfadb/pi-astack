@@ -81,9 +81,9 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 
 | 路径 | 触发方式 | 详细设计 |
 |------|---------|---------|
-| **路径 A — always-on inject** | 大脑推（每轮 before_agent_start 自动跑） | [ADR 0026 §3.0](./0026-second-brain-decision-participation.md#30-路径-a-v2--v3-设计post-31-walk-back-的统辖) **(v2/v3 统辖节)** |
-| **路径 B — memory_decide tool** | LLM 拉（自己意识到决策时调用） | [ADR 0026 §4.2](./0026-second-brain-decision-participation.md#42-路径-b即时深潜辅助路径llm-主动调) |
-| 决策点 → outcome ledger anchor join | [ADR 0026 §5.1](./0026-second-brain-decision-participation.md#51-decision_brief_id-schema--outcome-ledger-anchor-field-layoutr1-p1-7-补补) |
+| **路径 A — always-on inject** | 大脑推（每轮 before_agent_start 自动跑） | [ADR 0026](./0026-second-brain-decision-participation.md) → abrain `path-a-silent-skip-pipeline` |
+| **路径 B — memory_decide tool** | LLM 拉（自己意识到决策时调用） | [ADR 0026](./0026-second-brain-decision-participation.md) → abrain `push-path-a-vs-pull-path-b-duality` |
+| 决策点 → outcome ledger anchor join | [ADR 0026](./0026-second-brain-decision-participation.md) → abrain `path-a-inject-id-independent-anchor` |
 
 ---
 
@@ -91,7 +91,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 
 **显式接受的代价**（不接受 = 不接受设计）：
 → [ADR 0024 §6](./0024-second-brain-from-natural-conversation.md#6-明确接受的代价)
-→ [ADR 0026 §7.4](./0026-second-brain-decision-participation.md#74-接受代价新增)
+→ [ADR 0026](./0026-second-brain-decision-participation.md)（决策简报误导代价 → abrain 机制条目）
 → [ADR 0027 §8](./0027-coupled-stigmergic-dual-loop-agent-system.md#8-明确接受的代价)
 
 **走偏信号**（什么时候需要回头审视基线）：
