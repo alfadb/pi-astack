@@ -11,19 +11,9 @@ sediment 是 pi-astack 的唯一 dedicated memory writer。主会话不会获得
 
 ## 2. Pipeline
 
-```text
-agent_end
-  ├── checkpoint / run-window
-  ├── explicit MEMORY extractor（fence-aware）
-  ├── sanitizer（typed redaction before any LLM/audit/write boundary）
-  ├── if no explicit block and autoLlmWriteEnabled:
-  │     └── LLM extractor（redacted transcript → candidates）
-  ├── memory_search lookup（ADR 0015；query 先 redaction）
-  ├── curator LLM（create/update/merge/archive/supersede/delete/skip）
-  ├── writer validation / lint / lock / atomic write
-  ├── audit JSONL
-  └── best-effort git commit
-```
+**阶段契约**（顺序语义）：`agent_end` → checkpoint/run-window → explicit `MEMORY:` extractor（fence-aware）→ **sanitizer（任何 LLM/audit/write 边界前的 typed redaction）** → （无显式 block 且 `autoLlmWriteEnabled` 时）LLM extractor → `memory_search` lookup（query 先 redaction）→ curator → writer validate/lint/lock/atomic write → audit → best-effort git commit。
+
+> 机制实现以代码为准：`extensions/sediment/pipeline.ts`（入口）、`writer.ts`（落盘路由）。
 
 ## 3. Curator operation set
 
@@ -49,40 +39,21 @@ ADR 0016 后，curator 是主要语义判断者。旧的 readiness/rate/sampling
 
 B5 cutover 后，sediment 不再写 `<project>/.pensieve/`。
 
-| scope/lane | Target | Audit |
-|---|---|---|
-| project entry | `~/.abrain/projects/<projectId>/<kindDir>/<slug>.md` | `<projectRoot>/.pi-astack/sediment/audit.jsonl` |
-| world entry | `~/.abrain/knowledge/<slug>.md` | `~/.abrain/.state/sediment/audit.jsonl` |
-| cross-project workflow | `~/.abrain/workflows/<slug>.md` | `~/.abrain/.state/sediment/audit.jsonl` |
-| project workflow | `~/.abrain/projects/<projectId>/workflows/<slug>.md` | `~/.abrain/.state/sediment/audit.jsonl` |
+**拓扑契约**：project entry → `projects/<id>/`，world entry → `knowledge/`（flat），workflow → `workflows/`或 `projects/<id>/workflows/`。**audit 分两处**：project 侧 `<projectRoot>/.pi-astack/sediment/audit.jsonl`，abrain/world/workflow 侧 `~/.abrain/.state/sediment/audit.jsonl`。
 
-### 4.1 Project kind directory mapping
-
-| kind | Directory |
-|---|---|
-| `maxim` | `maxims/` |
-| `decision` | `decisions/` |
-| `smell` | `staging/` |
-| `anti-pattern` / `pattern` / `fact` / `preference` | `knowledge/` |
-| any archived entry | `archive/` |
-
-World knowledge is flat under `~/.abrain/knowledge/`.
+> 具体落盘路径与 kind→目录映射（maxims/decisions/staging/knowledge/archive 等）以代码为准：`extensions/sediment/{writer,kind-router}.ts`。
 
 ## 5. Locks and runtime state
 
-- Entry write lock：`~/.abrain/.state/sediment/locks/sediment.lock`。
-- Project checkpoint：`<projectRoot>/.pi-astack/sediment/checkpoint.json`。
-- Project checkpoint/session locks：`<projectRoot>/.pi-astack/sediment/locks/`。
-- Project audit：`<projectRoot>/.pi-astack/sediment/audit.jsonl`。
-- Abrain/world/workflow audit：`~/.abrain/.state/sediment/audit.jsonl`。
+**契约**：entry 写锁在 abrain 侧（多项目并发写同一 `~/.abrain` git repo）；checkpoint 锁留在 project 侧（只保护本项目 session 状态）。
 
-Entry 写锁在 abrain 侧，是因为多个项目会并发写同一个 `~/.abrain` git repo；checkpoint 锁留在 project side，因为它只保护本项目 session 状态。
+> 具体 lock/checkpoint/audit 文件路径以代码为准：`extensions/sediment/lock.ts`。
 
 ## 6. Git behavior
 
 sediment 的 markdown write 是 source-of-truth；git commit 是 best-effort audit trail：
 
-- 成功：提交到 `~/.abrain`，commit message 类似 `sediment: update <slug> (project:<id>)` 或 `(world)`。
+- 成功：提交到 `~/.abrain`，commit message 标注 slug + scope。
 - 失败：不会回滚已写 markdown；会尽力清理 git index，避免下次 commit 携带 ghost changes。
 - 读者应以文件内容 + audit 为准，git 作为回滚/审计网。
 

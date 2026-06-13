@@ -30,15 +30,10 @@ LLM surface
   ├── vision / imagine
   └── slash commands (human-only maintenance)
 
-Extensions
-  ├── memory facade       — read-only retrieval + migration/doctor commands
-  ├── sediment sidecar    — only dedicated writer
-  ├── abrain              — layout, binding, vault
-  ├── dispatch            — subprocess multi-agent
-  ├── vision/imagine      — visual tools
-  ├── model-curator       — model capability prompt
-  ├── model-fallback      — retry/fallback after errors
-  └── compaction-tuner    — context percent compaction
+Extensions  — 清单见 `extensions/`（`find extensions -maxdepth 1 -type d`）
+  ├── memory   — read-only retrieval facade
+  └── sediment — only dedicated writer
+  （其余扩展与角色以代码为准，不在此镜像）
 
 Storage
   ├── ~/.abrain/          — personal brain git repo
@@ -72,15 +67,8 @@ Storage
 - **mechanical readiness/rate/sampling gates**：ADR 0016 删除；只保留 sanitizer/存储完整性等 safety boundary。sanitizer 当前语义是 typed redaction + continue，而不是 secret pattern 命中即整轮拒绝。
 - **主会话直接写长期记忆**：违背 ADR 0003 的核心不变量。
 
-## 6. Roadmap（设计愿景中仍未完成）
+## 6. Roadmap 与设计取舍
 
-| 项 | 意图 | 状态 |
-|---|---|---|
-| Lane G / about-me | 将用户身份、偏好、习惯、技能沉淀到 `identity/skills/habits/` | pending |
-| Vault P0d/P1 | masked wizard、`.env` import、backend migration UX | pending |
-| Cross-device abrain sync UX | 多机同步策略与冲突可见性 | deferred，等真实反馈 |
-| Graph incremental rebuild | graph/index 派生物的增量更新与 staleness | backlog |
-| qmd optional acceleration | 可选诊断/加速层，不作为 `memory_search` fallback | backlog |
-| schema/version compatibility | frontmatter、binding、audit schema 的前向兼容策略 | backlog |
+未完成项（Lane G / vault P0d / 跨设备同步 UX / graph 增量重建 / schema 兼容等）见 `docs/roadmap.md`（backlog 单一来源）。
 
 设计取舍：除 credential/secret 泄漏这类不可逆风险外，优先优化 prompt/curator 行为，而不是增加 silent mechanical reject gate。credential/secret 边界也优先 redact plaintext 并保留可沉淀上下文；只有不可恢复的 sanitizer/storage 错误才 fail closed。silent reject 会制造“死条目”，违背 sediment 自进化前提。

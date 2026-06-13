@@ -21,9 +21,9 @@ Project vault scope uses ADR 0017 active project binding. Other projects' vaults
 
 ## 3. Backend detection (ADR 0019)
 
-`/vault init` chooses a backend. The chain (`extensions/abrain/backend-detect.ts:detectBackend`) is reorganized around **abrain-managed identity** so cross-device behavior is consistent:
+`/vault init` chooses a backend. The chain is reorganized around **abrain-managed identity** so cross-device behavior is consistent (实现以代码为准：`extensions/abrain/backend-detect.ts`)：
 
-1. `SECRETS_BACKEND` env override (invalid values are silently ignored and detection continues; see `extensions/abrain/backend-detect.ts:161-174`).
+1. `SECRETS_BACKEND` env override (invalid values are silently ignored and detection continues).
 
 **Tier 1 default — abrain self-managed:**
 
@@ -95,13 +95,13 @@ Current policy:
 
 - Injected run output is default-withheld when needed.
 - User authorization is required before releasing potentially secret-bearing output.
-- Released output undergoes literal redaction of known plaintext values **in text parts only**. `extensions/abrain/vault-bash.ts:217-225` `redactVaultBashContent` iterates `Array<{type: "text", text: string}>` entries; non-text parts (e.g. future inline `image` blobs) pass through unredacted. The bash tool currently only emits text parts, so this is a known shape constraint, not an active leak. If future tool output schemas add non-text parts, the redaction loop must be extended.
+- Released output undergoes literal redaction of known plaintext values **in text parts only**. `redactVaultBashContent` 只对 text part（`Array<{type:"text"}>`）做 redaction；非 text part（如未来 inline `image`）pass through unredacted。bash tool 当前只出 text part，这是已知 shape constraint 而非活泄漏；未来加非-text part 时 redaction loop 必须扩展。
 - Per-row audit `command_preview` captures the **LLM-original** command text (before vault env injection is prepended). It is guaranteed not to contain vault-decrypted plaintext (rewrite runs after preview is captured), but it can still contain any secret-shaped string the LLM itself hard-coded into argv. This is a documented hygiene limit, not a vault leak.
 - On failure to safely authorize/redact, the desired direction is fail-closed; tool_call inject errors return `block:true`, tool_result authorization/redaction throws withhold output and audit `bash_inject_block` / `bash_output_withhold` (2026-05-14 R6 audit fix).
 
 ### `$VAULT_<key>` suffix matching
 
-`extensions/abrain/vault-bash.ts:97-104` `keyCandidatesFromVaultVar` expands a single `$VAULT_<suffix>` reference to up to four lookup candidates and picks the first present `.md.age`:
+`keyCandidatesFromVaultVar`（`extensions/abrain/vault-bash.ts`）expands a single `$VAULT_<suffix>` reference to up to four lookup candidates and picks the first present `.md.age`:
 
 1. raw suffix as written
 2. underscores `_` → dashes `-`
@@ -122,24 +122,8 @@ Dispatch sub-agents run independent pi processes. By default they receive `PI_AB
 - Metadata may be visible; values are not.
 - Read-path actions are audited.
 
-## 8. Current shipped vs pending
+## 8. Related
 
-| Capability | Status |
-|---|---|
-| `/vault status/init` | shipped |
-| `/secret set/list/forget` | shipped |
-| global + project scopes | shipped |
-| `vault_release` | shipped |
-| bash env injection | shipped |
-| output withheld + redaction | shipped |
-| startup reconcile/cleanup | shipped |
-| `abrain-age-key` backend (ADR 0019, Tier 1 default) | shipped |
-| `ssh-key` / `gpg-file` backends (Tier 3 explicit-only) | shipped, deprecated for new users (`/vault status` shows deprecation notice; reader stays fail-soft) |
-| `passphrase-only` backend init | shipped (init writes file); **unlock unimplemented** (reader needs tty pass-through, roadmap P0d) |
-| Cross-device identity transport | manual (user `scp ~/.abrain/.vault-identity/master.age` between devices); P0d will add passphrase wrap so identity can enter git |
-| Cross-device knowledge + encrypted vault sync | shipped via [ADR 0020](../adr/0020-abrain-auto-sync-to-remote.md): sediment commit → background `git push origin HEAD:main`; pi startup → background `git fetch + merge --ff-only`. `vault/<scope>/*.md.age` (encrypted secrets) and `.vault-identity/master.age.pub` ride this transport. Identity secret stays gitignored. |
-| masked TUI wizard | pending (roadmap P0d) |
-| `.env` import | pending (roadmap P0d) |
-| backend migration wizard | pending (roadmap P0d) |
+> shipped/pending 明细（各 backend、跨设备身份辐送、P0d masked wizard / `.env` import / backend migration 等）以代码 + `docs/roadmap.md` 为准，不在此镜像。跨设备加密 vault 同步走 ADR 0020 transport（`vault/<scope>/*.md.age` + `.vault-identity/master.age.pub` 随车，identity secret 保持 gitignored）。
 
 Operational runbook: [../migration/vault-bootstrap.md](../migration/vault-bootstrap.md). Historical decision: [../adr/0014-abrain-as-personal-brain.md](../adr/0014-abrain-as-personal-brain.md).

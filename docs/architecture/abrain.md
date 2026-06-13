@@ -19,17 +19,7 @@
 └── vault/       # encrypted global secrets
 ```
 
-Current implementation status:
-
-| Zone | Writer/read support | Status |
-|---|---|---|
-| `projects/` | sediment project writer + memory read | shipped |
-| `knowledge/` | sediment world writer + memory read | shipped |
-| `workflows/` | workflow writer for pipeline-shaped entries | shipped |
-| `vault/` | `/vault`、`/secret`、`vault_release`、bash injection | shipped |
-| `identity/` | Lane G planned | pending |
-| `skills/` | Lane G planned | pending |
-| `habits/` | Lane G planned | pending |
+> 各区的 writer/read 落地状态以代码 + `docs/roadmap.md` 为准（identity/skills/habits 由 Lane G 推进，见 roadmap）。本文只定义七区**拓扑契约**，不镜像 shipped/pending 明细。
 
 ## 3. Project strict binding
 
@@ -95,11 +85,8 @@ Old project memory lived in `<project>/.pensieve/`. Current state:
 5. Derived artifacts (`_index.md`, `graph.json`) can be rebuilt.
 6. Migration is forward-only per repo; rollback uses git/pre-migration SHA, not symlink split-brain.
 
-## 8. Current roadmap
+## 8. Related
 
-- Implement Lane G (`/about-me`, identity/skills/habits writer).
-- Improve cross-device sync UX after real multi-machine feedback.
-- Evolve schema/audit/binding version handling.
-- Keep archive/ADR history out of current operational docs.
+> Roadmap/未完成项（Lane G、跨设备同步 UX、schema 版本兼容等）见 `docs/roadmap.md`。
 
 Related: [vault.md](./vault.md), [memory.md](./memory.md), [../migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md), [../adr/0014-abrain-as-personal-brain.md](../adr/0014-abrain-as-personal-brain.md), [../adr/0017-project-binding-strict-mode.md](../adr/0017-project-binding-strict-mode.md).
