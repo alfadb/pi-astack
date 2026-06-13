@@ -88,6 +88,10 @@
 - [x] rationale 可得验证 → 物理瘦身 → 方向残桩：**全 17 ADR ✅**（每个经 verify-rationale found=true + pinned `source_ref` SHA 后才 slim；含 0025 conf<8 红线 escalation 可得）；原 prose git @627de33；STRICT docs-doctor 全程绿（0025 保留 6 个 README 入链 §4.x 锚点）。
 - [x] Phase-2 "整体完成" 达成（全 19 机制 ADR：12 SLIM + 7 ARCHIVE 处置完毕）
 
+### 机制 prose 基线（权威记录 · 各 ADR slim banner 指向此处）
+
+全 17 个 ingest ADR（12 SLIM + 5 机制存档）slim 前的完整机制 prose 基线 = pi-astack git `627de33`。恢复任一 ADR 原文：`git show 627de33:docs/adr/<file>.md`。abrain 各机制 entry 的 `source_ref` 同样 pin 在该 SHA。此处是 notes/（REQ-006 豁免）的单一权威记录，canonical docs（ADR banner / feature-changelog）不再内联裸 hash。
+
 ## 不变量（ADR 0034 §4，全程守）
 
 - INV-MAIN-SESSION-READ-ONLY：durable 写经 sediment lane，不给主会话开 ingest 写工具

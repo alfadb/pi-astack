@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0009 — multi-agent 作为基础能力，调用模式作为模板参考
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **14 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)。原机制 prose 见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **14 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)。原机制 prose 见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（revised 2026-05-11，alfadb）。旧 `dispatch_agents` / `multi_dispatch` / `extensions/multi-agent/` / templates cookbook 细节只作历史设计动机。
 

@@ -5,7 +5,7 @@ status: archived
 
 # ADR 0025 v3 — Sediment Meta-Curator：让 sediment 演化为 ADR 0024 第二大脑
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33，本 ADR 归档**：本 ADR 是 ADR 0024 §5 六能力点的机制对偶（含被 0027/0028 引用的独立决策：A'/B'/C' 约束分层、放宽 ADR 0003 主会话只读、conf<8 盲区）。机制 rationale 已由 ADR 0034 ingest lane 分解为 **36 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。其中触碰方向承重墙的 escalation 已浮现：`conf-below-eight-multi-view-bypass-blast-radius`（narrows INV-ACTIVE-CORRECTION，required）/ `adr-0003-three-conflict-points-resolution-options`（conflicts INV-MAIN-SESSION-READ-ONLY + REQ-005，proposed）。原机制 prose（704 行）见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global），本 ADR 归档**：本 ADR 是 ADR 0024 §5 六能力点的机制对偶（含被 0027/0028 引用的独立决策：A'/B'/C' 约束分层、放宽 ADR 0003 主会话只读、conf<8 盲区）。机制 rationale 已由 ADR 0034 ingest lane 分解为 **36 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。其中触碰方向承重墙的 escalation 已浮现：`conf-below-eight-multi-view-bypass-blast-radius`（narrows INV-ACTIVE-CORRECTION，required）/ `adr-0003-three-conflict-points-resolution-options`（conflicts INV-MAIN-SESSION-READ-ONLY + REQ-005，proposed）。原机制 prose（704 行）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 ## 现状与约束沉淀（已入 abrain，逐条 slug）
 

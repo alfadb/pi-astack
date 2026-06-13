@@ -5,7 +5,7 @@ status: archived
 
 # ADR 0015 — memory_search 升级为双阶段 LLM-driven retrieval
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33，本 ADR 归档**：双阶段 rerank 机制 rationale 已由 ADR 0034 ingest lane 分解为 **23 条 typed entry** 存入第二大脑。「accuracy-is-contract / 无 grep 降级」方向立场见 [`requirements.md`](../requirements.md)（`REQ-009`）。逐条 rationale 经 `renderRationale` 可得。原机制 prose（224 行）见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global），本 ADR 归档**：双阶段 rerank 机制 rationale 已由 ADR 0034 ingest lane 分解为 **23 条 typed entry** 存入第二大脑。「accuracy-is-contract / 无 grep 降级」方向立场见 [`requirements.md`](../requirements.md)（`REQ-009`）。逐条 rationale 经 `renderRationale` 可得。原机制 prose（224 行）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 ## 方向沉淀（已入 abrain，逐条 slug）
 

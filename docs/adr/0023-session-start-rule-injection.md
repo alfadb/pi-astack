@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0023 — Session-start rule injection：abrain 第 8 区 `rules/` + 双 tier 注入 + sediment 全自动 lifecycle
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **17 条 typed entry** 存入第二大脑（含 INV-R1..R10 活契约理据），逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-004`）+ [`direction.md`](../direction.md)（`INV-GROUND-TRUTH-TIERED`）。原机制 prose（825 行，含 §1.4 威胁模型 / §11 演化史 / INV-R1..R10）见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **17 条 typed entry** 存入第二大脑（含 INV-R1..R10 活契约理据），逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-004`）+ [`direction.md`](../direction.md)（`INV-GROUND-TRUTH-TIERED`）。原机制 prose（825 行，含 §1.4 威胁模型 / §11 演化史 / INV-R1..R10）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（R5；部分被 ADR 0024/0028 修订）。
 

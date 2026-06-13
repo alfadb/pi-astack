@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0022 — `prompt_user` LLM-facing 同步问答工具（与 `vault_release` 共享 PromptDialog substrate，独立语义）
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **21 条 typed entry** 存入第二大脑（含 INV-A..N code-enforced 活契约的设计理据），逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-008`）。原机制 prose（1079 行，含 §10 R1-R4 设计轨 / §D6 redaction 边界 / §5 INV 活契约表）见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **21 条 typed entry** 存入第二大脑（含 INV-A..N code-enforced 活契约的设计理据），逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-008`）。原机制 prose（1079 行，含 §10 R1-R4 设计轨 / §D6 redaction 边界 / §5 INV 活契约表）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（R7.2）。INV-A..N 由代码强制执行——契约语义在 smoke + 实现中持续守护，本残桩仅去机制 prose。
 

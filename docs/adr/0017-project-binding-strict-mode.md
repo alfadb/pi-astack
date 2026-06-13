@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0017 — Project Binding Strict Mode（项目身份绑定严格模式）
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **9 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-007`）。原机制 prose 见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **9 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-007`）。原机制 prose 见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted。
 

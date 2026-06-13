@@ -5,7 +5,7 @@ status: archived
 
 # ADR 0018 — Sediment Curator Defense Layers（沉积器 curator 三层防御）
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33，本 ADR 归档**：本 ADR 是「试机械门→退回信任 LLM curator」的**先例记录**，含两次 P0 数据丢失实证（commit 521405b / 2e8924d）。机制 rationale 已由 ADR 0034 ingest lane 分解为 **18 条 typed entry** 存入第二大脑——AI-Native 经验链（`retreat-to-trusting-llm-curator-self-evolution` 等）逐条 rationale 经 `renderRationale` 可得，支撑 [`requirements.md`](../requirements.md)（`REQ-003`）。原机制 prose（302 行）见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global），本 ADR 归档**：本 ADR 是「试机械门→退回信任 LLM curator」的**先例记录**，含两次 P0 数据丢失实证（commit 详见 abrain 实证条目 `curator-trigger-phrases-wholesale-replace-p0` / `curator-load-bearing-section-overwrite-p0`）。机制 rationale 已由 ADR 0034 ingest lane 分解为 **18 条 typed entry** 存入第二大脑——AI-Native 经验链（`retreat-to-trusting-llm-curator-self-evolution` 等）逐条 rationale 经 `renderRationale` 可得，支撑 [`requirements.md`](../requirements.md)（`REQ-003`）。原机制 prose（302 行）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 ## 方向沉淀（已入 abrain，逐条 slug）
 

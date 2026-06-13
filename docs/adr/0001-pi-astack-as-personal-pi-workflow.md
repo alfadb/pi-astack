@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0001 — pi-astack 作为 alfadb 为 pi 打造的个人工作流仓
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **12 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md) / [`requirements.md`](../requirements.md)。原机制 prose 见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **12 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md) / [`requirements.md`](../requirements.md)。原机制 prose 见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（2026-05-05，alfadb）。记忆基础设施部分已过时（gbrain → markdown+git，见 [`memory-architecture.md`](../memory-architecture.md)）；项目定位 / vendor+端口层 / 使用即开发 / 硬纪律均不变。
 

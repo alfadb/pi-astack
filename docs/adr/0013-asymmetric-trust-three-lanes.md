@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0013 — Asymmetric Trust 三段式（LLM / explicit / promotion）
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）@627de33**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **8 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md) §1（信任×影响半径）。原机制 prose 见 git `@627de33`。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **8 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md) §1（信任×影响半径）。原机制 prose 见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（Lane B 已 superseded by ADR 0014；Lane C 由 ADR 0016 curator 重写）。
 
