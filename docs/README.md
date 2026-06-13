@@ -97,17 +97,13 @@ abrain 不可读 ⇒ 它的上千个"细节"决定里，某些累积起来可能
 
 ---
 
-## 7. 现有文档迁移计划
+## 7. 文档体系迁移：状态（Phase 1–2 已完成）
 
-**Phase 1（本次，已做）**：建共识层 `README` + `vision` + `direction` + `requirements` + `feature-changelog`；修已验证缺陷（ADR 0027→0009 断链、current-state commit hash）。
+**Phase 1（已完成）**：建共识层 `README` + `vision` + `direction` + `requirements` + `feature-changelog`；修已验证缺陷（ADR 0027→0009 断链、current-state commit hash）。
 
-**Phase 2（待办，见 `roadmap.md`）**：按"方向头部留共识、机制正文归 abrain"劈分现有 23 份 ADR 与 `architecture/*`；把当前实现状态从 `current-state.md` 收敛为"代码派生"；给 abrain 补技术细节本体 + 升级标注能力。23 份 ADR 多为"双模"（不变量头部稳定、机制正文已部分过时），劈分线：
+**Phase 2（已完成，详 `roadmap.md` / `feature-changelog.md`）**：23 份 ADR 的方向上提为共识层一等公民——`direction.md` 12 条不变量 + `requirements.md` `REQ-001..009`；`current-state.md` / `architecture/*` 去代码镜像、只留契约；frontmatter + `docs-doctor` 守卫落地。机制侧由 [ADR 0034](adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md) 的 source-aware ingest lane 收口：全 19 份机制 ADR 处置完毕（12 SLIM + 5 机制存档 ingest 入 `~/.abrain/projects/pi-global/` ≈ 256 条 typed entry，2 superseded 只标 archived），ADR 物理瘦身为方向残桩，机制 rationale 经 `renderRationale` 按需渲染（带 pinned `source_ref` SHA）——§4「按需渲染 rationale」承重墙兑现。
 
-| 倾向留共识（方向/不变量）| 倾向归 abrain（机制/实现）|
-|---|---|
-| 0003 主会话只读、0013 信任分层原则、0014 第二大脑定位、0024 §2/§3/§6/§7、0028 ground-truth 主轴、0027 拓扑论断、0017 strict-binding、0022 prompt_user 契约、0020 sync 不幻觉合并 | 0010、0015、0016、0018、0021、0023、0025 全文、0026 机制、0028 tier 谓词机制、各 ADR 的 prompt/schema/file:line 正文 |
-
-迁移按"方向"逐条抽进 `direction.md`/`requirements.md`，机制正文留给 abrain（sediment 写）或归档；**不在本次一次性物理删除**。
+**唯一已知残留缺口**：pinned `source_ref` SHA 的 **staleness re-sync**（ADR 0034 ratify 显式 defer，待 dogfood 出现首例 stale 后带证据起草新 ADR）。
 
 ---
 

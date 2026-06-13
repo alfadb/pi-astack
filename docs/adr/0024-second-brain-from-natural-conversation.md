@@ -142,7 +142,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 | **用 fixture 准确率当作发布拦截关卡** | 违反 AI-Native 原则 |
 | **用预定义枚举字段替代 LLM 自然语言推理** | 违反 AI-Native 原则 |
 
-**明确排除不是反模式的**（昤于 f3555e8 误删事件记录）:
+**明确排除不是反模式的**（源于一次 sediment footer 文案误删事件的教训记录）:
 
 - `notify("Sediment auto-write (bg): 3 entries", "info")` ——告诉,不要求做事
 - footer `✅ sediment: 3 created` / `📝 sediment: extracting` ——告诉,不要求做事
