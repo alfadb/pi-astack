@@ -69,6 +69,31 @@ export const DEFAULT_PATH_A_SETTINGS: PathASettings = {
   entryExcerptChars: 800,
 };
 
+// ADR 0035 P1: stage0 embedding 候选检索配置。provider 指向 models.json
+// 里的 provider key(如 "embedding"),code 不硬编码 model;空 provider/model
+// = fail-closed(buildCorpusEmbeddings 会报错)。
+export interface EmbeddingSettings {
+  provider: string;
+  model: string;
+  dim: number;
+  batchSize: number;          // doubao hard cap = 10
+  tpmLimit: number;           // 方舟 Coding Plan 600K tokens/min
+  timeoutMs: number;
+  maxRetries: number;
+  entryEmbedMaxChars: number;  // single-vector 截断(多向量 deferred, ADR 0035 §7)
+}
+
+export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
+  provider: "",
+  model: "",
+  dim: 2048,
+  batchSize: 10,
+  tpmLimit: 600_000,
+  timeoutMs: 60_000,
+  maxRetries: 3,
+  entryEmbedMaxChars: 3500,
+};
+
 export interface MemorySettings {
   includeWorld: boolean;
   defaultLimit: number;
@@ -82,6 +107,7 @@ export interface MemorySettings {
   decideModel: string;
   search: SearchSettings;
   pathA: PathASettings;
+  embedding: EmbeddingSettings;
 }
 
 export const DEFAULT_SETTINGS: MemorySettings = {
@@ -94,6 +120,7 @@ export const DEFAULT_SETTINGS: MemorySettings = {
   decideModel: "",
   search: DEFAULT_SEARCH_SETTINGS,
   pathA: DEFAULT_PATH_A_SETTINGS,
+  embedding: DEFAULT_EMBEDDING_SETTINGS,
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -148,6 +175,20 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
   };
 }
 
+function resolveEmbeddingSettings(cfg: Record<string, unknown>): EmbeddingSettings {
+  const e = (cfg.embedding as Record<string, unknown>) ?? {};
+  return {
+    provider: asString(e.provider, DEFAULT_EMBEDDING_SETTINGS.provider),
+    model: asString(e.model, DEFAULT_EMBEDDING_SETTINGS.model),
+    dim: Math.max(1, asNumber(e.dim, DEFAULT_EMBEDDING_SETTINGS.dim)),
+    batchSize: Math.max(1, Math.min(10, asNumber(e.batchSize, DEFAULT_EMBEDDING_SETTINGS.batchSize))),
+    tpmLimit: Math.max(1000, asNumber(e.tpmLimit, DEFAULT_EMBEDDING_SETTINGS.tpmLimit)),
+    timeoutMs: Math.max(1000, asNumber(e.timeoutMs, DEFAULT_EMBEDDING_SETTINGS.timeoutMs)),
+    maxRetries: Math.max(0, Math.min(10, asNumber(e.maxRetries, DEFAULT_EMBEDDING_SETTINGS.maxRetries))),
+    entryEmbedMaxChars: Math.max(200, asNumber(e.entryEmbedMaxChars, DEFAULT_EMBEDDING_SETTINGS.entryEmbedMaxChars)),
+  };
+}
+
 function resolvePathASettings(cfg: Record<string, unknown>): PathASettings {
   const p = (cfg.pathA as Record<string, unknown>) ?? {};
   return {
@@ -175,5 +216,6 @@ export function resolveSettings(): MemorySettings {
     decideModel: asString(cfg.decideModel, DEFAULT_SETTINGS.decideModel),
     search: resolveSearchSettings(cfg),
     pathA: resolvePathASettings(cfg),
+    embedding: resolveEmbeddingSettings(cfg),
   };
 }

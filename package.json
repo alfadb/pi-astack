@@ -22,6 +22,7 @@
   "scripts": {
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
+    "smoke:embedding": "node scripts/smoke-memory-embedding.mjs",
     "smoke:direction-impact": "node scripts/smoke-direction-impact.mjs",
     "smoke:adr-ingest": "node scripts/smoke-adr-ingest.mjs",
     "smoke:rationale": "node scripts/smoke-rationale.mjs",

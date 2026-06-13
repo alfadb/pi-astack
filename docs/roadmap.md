@@ -26,6 +26,22 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 | Tier 3 legacy backends reader UX | `ssh-key` / `gpg-file` / `passphrase-only` 在 ADR 0019 后是 explicit-only。`passphrase-only` reader 仍不能解锁（同一 tty pass-through 问题）。 | 上项 abrain-age-key passphrase wrap 落地后该 gap 自动关闭（同一 unwrap 路径）；在那之前 `/vault status` 仍会在旧 backend init 后显示 deprecation 提示。 |
 | Abrain auto-sync UX P0e | [ADR 0020](./adr/0020-abrain-auto-sync-to-remote.md) 已 ship 的 baseline（后台 push + 启动 ff-fetch + `/abrain sync` / `/abrain status`）上还差几个 UX 增强点。 | TUI footer 提示 `ahead > 0` 超 5 分钟；周期性 fetch（e.g. 每 15 min）；conflict suggestion logging（量化 LLM auto-merge 不做的代价）。全部是 deferred YAGNI，等真实 usage signal 再推进。 |
 
+## ADR 0035 — memory stage1 embedding 候选检索实施
+
+[ADR 0035](./adr/0035-memory-stage1-embedding-candidate-retrieval.md)(Accepted;3×T0 跨厂商盲审 opus-4-8/gpt-5.5/deepseek-v4-pro 一致 RATIFY WITH REVISIONS,修订集已并入)的分阶段实施。stage1 候选面从 full-body 全库海选改为 embedding 向量检索 + LLM 精选小候选集,成本从 O(库×频率) 降为 O(N);supersede ADR 0015 的 stage1 候选面决策,保留其双阶段框架 + result-cache 禁令 + freshness 契约。
+
+**Phase 0 前置确认(已完成)**:embedding provider `doubao-embedding-vision` @ sub2api 网关(`/v1/embeddings`,dim 2048,batch≤10)配通实测;走方舟 Coding Plan 订阅额度(cost=0,非 metered);ToS 核实——embedding 为 Coding Plan 官方功能(2026-03-31 上线,RAG/agent-memory/OpenViking 用途),无违约风险;约束 TPM 600K/min(全库 embed 限流分批 ~4min)+ 按调用次数消耗套餐额度。召回实测 related-recall top-100=98%(ground truth 用 derives_from/related,有正偏,见 ADR §3)。
+
+| Phase | Intent | 盲审硬约束 |
+|---|---|---|
+| P1 embedding 基建 | 向量索引模块(abrain `.state`,content-hash keyed 失效 + embedding-model 版本戳);embed 封装(batch≤10 + TPM 限流 + 重试);纯 JS 余弦 top-N;全库初始 embed(2215 限流分批) | content-hash 失效(metadata-only 不 re-embed);版本戳跨模型禁混用 |
+| P2 写入路径增量 embed(sediment 侧,ADR 0003) | curator 写 entry 时 content-hash 比对→变才 embed;dirty-manifest 原子落盘;search union dirty + mtime 扫描 | freshness 原子协议:新写入下次 search 立即可召回 |
+| P3 stage1 改造 | `buildLlmIndexText` 接收 stage0 top-N(接口近零改);hybrid(dense + trigger/slug sparse 融合);`verdict=none/insufficient_pool` 回退分支新增(当前代码未预埋) | 安全网双触发(verdict=none + 候选不足信号 + best-rank 探针);provider 熔断(陈旧向量继续,禁回退全库 O(N));fallback 限流 |
+| P4 A/B 灰度 + 转产硬门 | `search-metrics.jsonl` 增 stage0 字段(候选池命中/回退率/best-rank/dirty-size/embed 延迟);**full-body picks 端到端 oracle 逐 query 对照** | **转产硬门**:端到端召回不掉方可切换;related-recall 因正偏不可单独作转产依据 |
+| P5 切换 + 旧 surface 下线 | `full_body_v3` surface 退役;N/hybrid 权重 A/B 收敛定值 | 走偏信号监控(top-100<95% / verdict=none 率升 / 召回回归)回看决策 |
+
+**待定参数**(灰度收敛):候选集 N(初始 100);hybrid 权重 + sparse 字段集;向量存储格式(JSON 单文件 vs JSONL 增量 vs abrain-state sqlite,含 >5000 迁移);单向量 vs 多向量(解决实验 `[:3500]` 截断盲区);embedding provider 长期选型(doubao 现成首选,备选恢复 Bailian text-embedding-v4 / 启用 Gemini)。
+
 ## Architecture debt
 
 | Item | Intent |
