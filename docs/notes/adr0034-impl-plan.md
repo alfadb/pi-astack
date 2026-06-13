@@ -84,7 +84,7 @@
 
 - [x] 能力全绿（Phase 1-3 smoke pass：direction-impact 32 + adr-ingest 40 + rationale 29 = 101 assertions，smoke:memory 回归绿）
 - [x] **用户显式 go/no-go**（2026-06-13 授权全量 + 物理瘦身 + 分批）；migration runner `scripts/run-adr-ingest.mjs` + verifier `scripts/verify-rationale.mjs`（经真实 sanitizer + lane 写真实 ~/.abrain，git 可回滚）
-- [~] production ingest（分批：decompose via dispatch → dry-run 自查 → --go → verify）：**pilot 0026 ✅**（12 entries 入 pi-global，911→923，abrain 438fe9f→08afdff）；剩 11 SLIM + 7 ARCHIVE。slim 格式用户已确认；ARCHIVE superseded（0006/0019）只标 archived 不 ingest。
+- [~] production ingest（分批：decompose via dispatch → dry-run 自查 → --go → verify）：**已完 4 个 SLIM**（0026 ✅ 12 / 0001 ✅ 12 / 0003 ✅ 9 / 0009 ✅ 14 = 47 entries，pi-global 911→959）；剩 8 SLIM（0013/0016/0017/0020/0022/0023/0028/0032）+ 7 ARCHIVE。slim 格式用户已确认；ARCHIVE superseded（0006/0019）只标 archived 不 ingest。
 - [~] rationale 可得验证 → 物理瘦身 → 方向残桩：**0026 ✅**（renderRationale found=true + pinned SHA；402→~25 行，原文 git @627de33）；其余随批。
 - [ ] Phase-2 "整体完成" 达成（全 19 ADR ingest + slim 完）
 
