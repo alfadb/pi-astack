@@ -49,3 +49,17 @@
 - agent_obligation: 当前行为/计数/清单交给代码 + `memory_search`，docs 不复述。
 - acceptance: docs 内无扩展计数、文件清单、commit 流水等可被 `grep`/`ls` 替代的内容。
 - forbidden: 在 docs 里维护"当前 N 个扩展"这类代码镜像。
+
+## REQ-007 — 项目身份绑定严格模式（ADR 0017）
+- status: active · priority: P1 · applies_to: abrain, sediment, vault, project-binding
+- human_intent: 大脑知识绑定到正确的项目身份，不被路径/remote 漂移污染。
+- agent_obligation: project id 是**唯一身份**（path / git remote 都不是身份）；未绑定活动项目时拒绝 project-scoped 写；migration 命令不兼任"决定项目身份"。
+- acceptance: 未绑定时 sediment/vault 的 project-scoped 写被拒；`/abrain bind` 是唯一身份入口；typo 的 `--project` 不被静默接受为新身份。
+- forbidden: 用 cwd 前缀 / git remote 推断项目身份；migration 命令顺手创建项目身份。
+
+## REQ-008 — prompt_user 与 vault_release 语义边界分离（ADR 0022）
+- status: active · priority: P1 · applies_to: prompt_user, vault_release, sediment, audit
+- human_intent: "等用户决策"与"释放敏感数据并授权"是两种语义，不能混；用户不为大脑管理被弹窗。
+- agent_obligation: prompt_user 仅用于任务相关具体决策，写 **audit-only**（不写 markdown，sediment 下个 `agent_end` 取问答对）；vault_release 保持独立 LLM-facing tool；二者可共享 UI substrate 但 LLM-facing API 分开；是否调用 prompt_user 由 LLM 判断，不自动化。
+- acceptance: prompt_user 不释放/不写 secret 明文（`type:secret` 仅返 `[REDACTED_SECRET:<id>]`）；并发 pending ≤ 1；vault_release 仍是审批数据流出的唯一弹窗。
+- forbidden: 合并 prompt_user 与 vault_release 的 LLM-facing API；用 prompt_user 做大脑管理审批；自动触发 prompt_user（如"消息>N 字符就问"）。

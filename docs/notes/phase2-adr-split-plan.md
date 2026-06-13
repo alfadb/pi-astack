@@ -57,6 +57,7 @@
 
 0. **[DONE] docs-doctor 守卫先行**（本轮已落）。先在迁移前的树上跑绿基线，之后每步对照。
 1. **抽取（纯加法，不破任何东西）**：把 KEEP/SLIM/EXTRACT 各 ADR 的方向抽进 direction.md + requirements.md + feature-changelog.md，对现有内容**去重不复制**，set `canonical_for`。显式补已知缺口：0027 C1'/C3'/C4'(/C6)、0033 tell-not-ask/cost-not-gate/git-recovery、0015 no-grep-fallback、0017 binding-identity、0028 R1'-R6'、0020 no-hallucinated-merge、0022 prompt_user 边界、0013 trust×blast、0026 walk-back。
+   - **进度**：✅ 0027(C1'/C3'/C4')、0033(tell-not-ask/cost/git/走偏#8) → direction.md；✅ 0017→REQ-007、0022→REQ-008、0026 walk-back→feature-changelog。⬜ 待抽：0028 R1'-R6' 增量、0020 no-hallucinated-merge、0013 trust×blast（部分已在信任×半径）、0015 no-grep-fallback。frontmatter/canonical_for 未铺（随极简 frontmatter 批量上）。
 2. **瘦身（原地）**：12 份 SLIM 的机制正文换成残桩（编号+标题+决策一句+指向 REQ-ID/INV-* 与"机制：git 历史 / abrain INGEST-QUEUE"）。文件路径不动→所有"ADR NNNN"编号引用仍解析。
 3. **patch 入链引用者 → 再 archive（7 份）**，叶子先于中枢：0025(仅 README §5 引)→0018(0022/0023)→0019(0020/0022)→0021(0022/0023)→0010(0014/0016)→0006/0015。移动到 `docs/archive/adr/`，旧路径留一行重定向桩。
 4. **剥代码镜像（任务 B）**：current-state.md + architecture/* + 0014 commit-status 头→收敛为"代码派生"。docs-doctor 的 no-bare-hash + 扩展计数 检查把关。
