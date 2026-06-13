@@ -59,11 +59,27 @@
 1. **抽取（纯加法，不破任何东西）**：把 KEEP/SLIM/EXTRACT 各 ADR 的方向抽进 direction.md + requirements.md + feature-changelog.md，对现有内容**去重不复制**，set `canonical_for`。显式补已知缺口：0027 C1'/C3'/C4'(/C6)、0033 tell-not-ask/cost-not-gate/git-recovery、0015 no-grep-fallback、0017 binding-identity、0028 R1'-R6'、0020 no-hallucinated-merge、0022 prompt_user 边界、0013 trust×blast、0026 walk-back。
    - **进度**：✅ 0027(C1'/C3'/C4')、0033(tell-not-ask/cost/git/走偏#8) → direction.md；✅ 0017→REQ-007、0022→REQ-008、0026 walk-back→feature-changelog。⬜ 待抽：0028 R1'-R6' 增量、0020 no-hallucinated-merge、0013 trust×blast（部分已在信任×半径）、0015 no-grep-fallback。frontmatter/canonical_for 未铺（随极简 frontmatter 批量上）。
 2. **瘦身（原地）**：12 份 SLIM 的机制正文换成残桩（编号+标题+决策一句+指向 REQ-ID/INV-* 与"机制：git 历史 / abrain INGEST-QUEUE"）。文件路径不动→所有"ADR NNNN"编号引用仍解析。
-3. **patch 入链引用者 → 再 archive（7 份）**，叶子先于中枢：0025(仅 README §5 引)→0018(0022/0023)→0019(0020/0022)→0021(0022/0023)→0010(0014/0016)→0006/0015。移动到 `docs/archive/adr/`，旧路径留一行重定向桩。
+3. **patch 入链引用者 → 再 archive（7 份）**，叶子先于中枢：**0025（✅修正：不是"仅 README §5 引"——还被 0027(KEEP)/0028(SLIM)/0026(SLIM) 引，archive 前必先 patch 这三处 + README）**→0018(0022/0023)→0019(0020/0022)→0021(0022/0023)→0010(0014/0016)→0006/0015。移动到 `docs/archive/adr/`，旧路径留一行重定向桩。
 4. **剥代码镜像（任务 B）**：current-state.md + architecture/* + 0014 commit-status 头→收敛为"代码派生"。docs-doctor 的 no-bare-hash + 扩展计数 检查把关。
    - **D-B 解**：current-state §2.1 扩展表保留「名字+surface+shipped/not 二态」，删实现声明/计数/commit；不要裸删导致一眼地图消失。
 5. **重指 adr/README.md 锚点中枢**（§9/§10 表 + 所有 archived 锚点→archive 路径）。
 6. **收尾**：STRICT=1 跑 docs-doctor 须绿；写 feature-changelog Phase-2 条目；建 `docs/archive/adr/INGEST-QUEUE.md` 供 sediment。
+
+## 2.5 Strip manifest（current-state + architecture/* + directory-layout，3×T0 收敛——逐文件执行依据）
+
+**总则**：逐块 CUT（纯代码镜像：计数/文件清单/commit/file:line/shipped-pending 表） / KEEP（方向/契约/不变量/取舍） / CONVERT（需要的操作地图→派生指针）。标准指针句式（GPT）：「Derived fact — not mirrored here. Canonical: <source>. Derive: <cmd>. Rationale: <ADR/REQ> 或 memory_search("...")。」
+
+**current-state.md（存活为薄指针页，不删——删会断链）**：KEEP §4 绑定契约 + §9 文档治理 + 标题入口句；CUT §1.1 增量、§10 prompt_user ship-status及§198-203 hash；其余 CONVERT（§2.1 扩展表→名字+surface+shipped 二态一眼地图，Opus 已给替换文；§5/§6/§7 保留契约不变量（no-grep-fallback/single-writer/redaction 不可逆/vault_release 授权/可移植身份取舍），删 file:line 与 ship 明细）。
+
+**architecture/*（DeepSeek 逐块表）**：overview §6 roadmap 表 CUT、§3 extensions 树 CONVERT，其余多 KEEP；abrain §2 zone 状态表/§8 roadmap CUT、六区拓扑+§7 六不变量+§6 git 边界 KEEP；memory §3 schema/§4 两段 rerank CUT/CONVERT、五核心契约+no-grep+status 语义 KEEP；sediment §2 pipeline 图/§4 路径表/§5 lock CUT/CONVERT、唯一写入者+secret 边界+sub-pi KEEP；vault §3 file:line/§8 shipped-pending 表 CUT、fail-closed/授权/注入契约/4-candidate 顺序 KEEP。
+
+**强制 CONVERT 指针（C1-C10，防 ingest gap 期操作知识失联）**：memory/schema.ts、sediment/{pipeline,writer,kind-router,lock}.ts、abrain/{backend-detect,zone-registry}.ts、vault-bash.ts、UPSTREAM.md、roadmap.md。
+
+**directory-layout.md（GPT）**：所有文件树/扩展清单/smoke 计数 CUT→`find extensions -maxdepth 1`/`npm pkg get scripts`/`find ~/.abrain`；KEEP 仅依赖边界规则 + vendor read-only + cwd-keyed history 方向。
+
+**docs-doctor 漏检（GPT）**：shipped/pending 表、`file.ts:<line>`/`~L<line>`、assertion/smoke 计数、fenced 块内文件树 — 本 pass 手工 strip；可选扩 migration-WARN 检查（不全禁 fenced 图避免误报）。strip 后 purge 裸 hash → `STRICT=1` 升 ERROR。
+
+**待人类偏好（DeepSeek U4）**：vault.md §2 路径列是保留为"canonical layout"（路径是 gitignore/0600 安全契约的一部分）还是转叙事句去路径——倾向 KEEP-as-canonical（路径本身是安全面契约）。
 
 ## 3. Spun-out ADR（abrain 侧，主会话不可执行，独立立项 — Kimi 主笔）
 

@@ -1,249 +1,136 @@
-# Current State — pi-astack（2026-06-10）
+# Current State — pi-astack
 
-本文是 pi-astack 的当前事实入口。旧路线图、迁移 checklist、历史 ADR 原文可能保留在 `docs/archive/` 或 `docs/adr/` 中，但只要和本文冲突，以本文与 `extensions/` 实现为准。
+> **薄指针页**（Phase-2 去代码镜像后）：本文只保留**跨实现稳定的契约/方向/导航**，不再镜像实现清单、计数、commit、file:line、shipped/pending 明细——那些以代码为准、用命令派生（REQ-006）。
+> 与 `extensions/` 实现冲突时，以代码为准；旧路线图/历史 ADR 原文在 `docs/archive/`、`docs/adr/`。
+
+派生事实的标准入口（不在本文镜像）：
+
+- **有哪些扩展/工具**：`find extensions -maxdepth 1 -type d | sort`、各扩展 `registerTool` / `registerCommand`；`UPSTREAM.md`。
+- **smoke 列表**：`npm pkg get scripts`（live truth），可读镜像见 `docs/reference/smoke-tests.md`。
+- **设计理由/历史**：相关 ADR（见 `docs/adr/README.md`）或 `memory_search("...")`。
+- **未实现/计划**：`docs/roadmap.md`。
 
 ## 1. 一句话状态
 
-pi-astack 当前是一个 **local pi package**：提供 17 个 runtime extensions、14 个 pi-astack LLM-facing tools（不含 pi builtin tools；`vault_release` / `prompt_user` / `memory_*` / `dispatch_*` / `vision` / `imagine` / `web_*` / `final_answer`）、若干 human slash commands，以及基于 `~/.abrain/` 的 markdown+git 记忆/数字孪生系统。
+pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 markdown+git 记忆/数字孪生系统：提供一组 runtime extensions、一组 pi-astack LLM-facing tools（`vault_release` / `prompt_user` / `memory_*` / `dispatch_*` / `vision` / `imagine` / `web_*` / `final_answer`，不含 pi builtin tools）、若干 human slash commands。
 
-### 1.1 2026-06-10 增量（自 2026-05-31 基线）
+> 扩展与工具的当下**计数**以 `ls extensions/` + 各扩展 `registerTool` 为准，不在此镜像。
 
-- **ADR 0028 v1.1 落地（sediment ground-truth 分层重构）**：Tier-1 直写路径已从 shadow lane cutover 为生产路径（seed-bridge/shadow flag 已删）；AX-PROVENANCE 确定性派生 + frontmatter 落盘；AX-MATURITY 默认排除 {archived, superseded}；R3' 召回审计（键于原始转录）+ 实时 rules footer；R4' outcome edge 双半环（CONTRADICT→contested 强 demote + echo-guarded MATCH 弱确认入 `rule-outcome-edge.jsonl`，含自回声扣除与用户复述锚）；R6' staging 收窄（Tier-1-owned 窗口跳过 staging 网，window-ownership + 降级模式双门控）。§12.3 INJECT-MODE 改名已完成（2026-06-10：`injectMode`/`inject_mode`/catalog `inject=`，旧 `tier` 键双读兼容，目录名与 rule id 不变）——ADR 0028 全部条款落地。
-- **rules 注入改 catalog 形态**：listed 规则注入完整 catalog 行（applies_when/trigger_phrases/must_do_summary/full_rule_path）；硬 token cap 设置移除，改 advisory telemetry（`catalog_tokens`/`hidden_catalog_count`）。
-- **Windows 支持**：Git Bash/MSYS2 vault 注入（WSL/Cygwin 拒绝）+ 自有 `abrain.windowsVaultBashPath` 设置；turn-progress 路径缩短；win32-only shell 解析。
-- **model-curator**：Plan A 单一数据源（settings.json）+ live re-apply（mtime 检测，免重启）+ `/curator-reload`。
-- **多实例并发**：heartbeat pid 后缀隔离 + aggregator/entry-telemetry/staging-* 文件锁；dispatch 对 pi 0.79 显式 `projectTrusted: false`。
-- **per-model compaction policies**。
-- smoke 套件 **74 个**，2026-06-10 首次全绿（74/74，含修复 S19 潜在 mock 竞态与 cutover 后的过期 escalation-seed 断言）。
+## 2. 扩展与 vendor
 
-## 2. 当前实现清单
+### 2.1 Runtime extensions（一眼地图：名字 + surface 契约 + 是否 ship）
 
-### 2.1 Runtime extensions
+> 实现细节、commit、版本史、INV 覆盖、计数均不在此——以 `ls extensions/`、各扩展源码、`memory_search` 与 `docs/architecture/*` 为准。surface 名是 LLM/human 契约面。
 
-| 扩展 | 主要 surface | 状态 |
+| 扩展 | surface（LLM tool / slash / hook） | shipped |
 |---|---|---|
-| `extensions/abrain/` | `vault_release`；**`prompt_user`**；`/abrain`、`/vault`、`/secret` | shipped；七区 layout、strict binding、vault P0a-P0c；`prompt_user` 2026-05-17 ship，vault UI 主路径 2026-05-18 迁到共享 PromptDialog substrate；详 §7 / §10。 |
-| `extensions/compaction-tuner/` | `/compaction-tuner ...` | shipped；按 context 百分比触发 compaction。INV-K (ADR 0022 P3a) — 检测到待决 `prompt_user` / vault 对话时推迟本轮 compaction。 |
-| `extensions/dispatch/` | `dispatch_agent`、`dispatch_parallel` | shipped；v3 in-process `AgentSession` 子代理；2+ 并行任务必须用 `dispatch_parallel`；默认 allowlist 含 memory/web read tools；嵌套 dispatch 拒绝，mutating tools 需 `PI_MULTI_AGENT_ALLOW_MUTATING=1`；ADR 0027 C5 `terminal_state` audit v2 + heartbeat writer/consumer 已 ship。 |
-| `extensions/edit-strip-empty/` | 内置 `edit` wrapper | shipped；静默丢弃空 edits，只把非空 edits 交给 builtin `edit`，避免空替换块触发无效 edit。 |
-| `extensions/imagine/` | `imagine(...)` | shipped；OpenAI Responses API 生图。 |
-| `extensions/memory/` | `memory_search`、`memory_get`、`memory_list`、`memory_neighbors`、`memory_decide`；`/memory ...` | shipped；只读 facade；ADR 0015 LLM retrieval；legacy `.pensieve/` dual-read；ADR 0026 `memory_decide` 决策简报 surface 已注册。 |
-| `extensions/model-curator/` | 模型能力表注入 | shipped；curated/raw model snapshot。 |
-| `extensions/model-fallback/` | error hooks | shipped；初始模型重试耗尽后 fallback。 |
-| `extensions/persistent-input-history/` | `setEditorComponent` 子类；`/history-compact`、`/history-status` | shipped；按 cwd 持久化 ↑/↓ 输入历史到 `~/.pi/agent/input-history/<sha1(cwd)>--<slug>.jsonl`。默认 `enabled: true`（纯数据持久化，无 LLM 路径副作用）。**2026-05-20 SDK-drift defense**：依赖三条未文档化的 pi-tui 内部 API（`Editor.history` instance field / `addToHistory` prototype method / `populateHistory` 同步时序），已加 capability + semver probe：缺 `addToHistory` → error notify + 不安装编辑器；`history` field 不可达 → one-shot warning notify + preload 退化；pi 版本 ∈ 0.75.x–0.99.x 范围外 → warning notify。escape hatch：`PI_ASTACK_DISABLE_PERSISTENT_INPUT_HISTORY=1`。 |
-| `extensions/sediment/` | `agent_end` hook；`/sediment status/dedupe`；background lanes | shipped；唯一 dedicated writer；`autoLlmWriteEnabled` default true；prompt-native aggregator v1.3（Step-7 稳定身份 + identity convergence + Outcome→Entry feedback M3 lifecycle_proposal 只读 sink）、L1 Evolution Loop v1（`evolution-ledger.ts` internal self-state）、Outcome→Entry telemetry sidecar + lifecycle-proposals（只读，executor 未建/defer）、multi-view P0.5、staging-resolver v1 triage、archive-reactivation v1 都已接入。`promote_candidate` 仍是 advisory，不能绕过 multi-view / curator 直接升 durable。 |
-| `extensions/time-injector/` | system prompt time block | shipped；每轮注入分钟级本地时间 + timezone；主会话与 sub-agent 都可见；末尾追加以减少 prompt cache 破坏。 |
-| `extensions/tool-contract/` | `final_answer(...)`；provider payload hook；protocol-mismatch warning | shipped；要求最终答复走 `final_answer` tool；兼容 provider tool_choice 差异；检测伪 tool-call 文本。 |
-| `extensions/tool-parallel-cap/` | Anthropic request payload hook | shipped；默认对 `claude-opus-4-8` 主会话加 `disable_parallel_tool_use:true`；sub-agent 跳过，避免破坏 dispatch 并行价值。 |
-| `extensions/turn-progress/` | footer status + pre-working widget | shipped；在 `before_agent_start` 串行 hook 链前后显示准备进度，降低“按回车后像卡住”的 UX gap。 |
-| `extensions/verify-after-edit/` | `edit` tool_result verifier | shipped；成功 `edit` 后自动追加 `<verified-on-disk>` 窗口，下一轮上下文直接看到磁盘真相。 |
-| `extensions/vision/` | `vision(...)` | shipped；图片分析 fallback。 |
-| `extensions/web-search/` | `web_search(...)`、`web_fetch(...)` | shipped；可配置 web backend（默认 Brave）；`web_fetch` 包 `<untrusted_external_content>` trust-boundary；sub-agent default allowlist 可用。 |
+| `abrain/` | `vault_release`、`prompt_user`；`/abrain`、`/vault`、`/secret` | ✓ |
+| `compaction-tuner/` | `/compaction-tuner` | ✓ |
+| `dispatch/` | `dispatch_agent`、`dispatch_parallel` | ✓ |
+| `edit-strip-empty/` | `edit` wrapper | ✓ |
+| `imagine/` | `imagine` | ✓ |
+| `memory/` | `memory_search/get/list/neighbors/decide`；`/memory` | ✓ |
+| `model-curator/` | model snapshot 注入；`/curator-reload` | ✓ |
+| `model-fallback/` | error hooks | ✓ |
+| `persistent-input-history/` | editor 子类；`/history-compact`、`/history-status` | ✓ |
+| `sediment/` | `agent_end` hook；`/sediment`；background lanes | ✓ |
+| `time-injector/` | system-prompt time block | ✓ |
+| `tool-contract/` | `final_answer`；provider payload hook | ✓ |
+| `tool-parallel-cap/` | Anthropic payload hook | ✓ |
+| `turn-progress/` | footer / pre-working widget | ✓ |
+| `verify-after-edit/` | `edit` tool_result verifier | ✓ |
+| `vision/` | `vision` | ✓ |
+| `web-search/` | `web_search`、`web_fetch` | ✓ |
 
 ### 2.2 Vendor methodology references
 
-| Path | Upstream | 状态 |
-|---|---|---|
-| `vendor/gstack/` | `https://github.com/garrytan/gstack.git` | read-only submodule；gstack / claude-code workflow methodology reference。 |
-| `vendor/pensieve/` | `https://github.com/kingkongshot/Pensieve.git` | read-only submodule；Pensieve memory/workflow methodology reference。 |
+vendor 清单见 `.gitmodules` / `UPSTREAM.md`（read-only submodules：方法论参考）。
 
-Vendor 不属于 runtime surface；不要从 vendor 直接加载 pi 扩展，也不要在 vendor 内直接改端口层代码。
+**契约（不变量）**：vendor 不属于 runtime surface；不从 vendor 直接加载 pi 扩展，也不在 vendor 内改端口层代码（vendor read-only + 单向依赖，ADR 0001/0006）。
 
-## 3. 记忆与 abrain 状态
+## 3. 记忆与 abrain（契约/拓扑）
 
-| 主题 | 当前事实 |
+| 主题 | 契约 |
 |---|---|
 | Source of truth | markdown 文件 + git history。 |
-| gbrain | 已退场；只保留 timeline/graph 方法论影响。 |
-| `.pensieve/` | legacy 只读迁移源；sediment 不再写入。 |
+| 七区拓扑 | `identity/ skills/ habits/ workflows/ projects/ knowledge/ vault/`。 |
 | 项目写入 | `~/.abrain/projects/<projectId>/...`。 |
 | 世界知识 | `~/.abrain/knowledge/<slug>.md`。 |
 | workflows | `~/.abrain/workflows/` 或 `~/.abrain/projects/<id>/workflows/`。 |
-| 七区 | `identity/ skills/ habits/ workflows/ projects/ knowledge/ vault/`。 |
-| 已有 writer 覆盖 | `projects/`、`knowledge/`、`workflows/`、`vault/`。 |
-| Lane G writer G1+G2 ✅ shipped | `identity/` / `skills/` / `habits/` 三区 writeAbrainAboutMe + parseExplicitAboutMeBlocks fence + validateRouteDecision（G1 2026-05-16）；**`/about-me` slash + agent_end 双-lane wire-up（G2 2026-05-20）**：slash 用 `pi.sendUserMessage` 注入 MEMORY-ABOUT-ME fence，下一 agent_end 同步走 `writeAbrainAboutMe`；Lane A、Lane G 在同一 parse 阶段后独立写，共用 checkpoint 互锁（`combinedShouldAdvance = laneA && laneG`）。端到端：G3 LLM classifier、G4 review-staging、G5 region-aware ranking hint仍在 backlog。详 [ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)。 |
-| 跨设备同步 | [ADR 0020](./adr/0020-abrain-auto-sync-to-remote.md)：sediment commit 后后台 `git push origin HEAD:main`；pi 启动 `git fetch + merge --ff-only`。冲突 ff 不可能 → `/abrain status` 提示 + `/abrain sync` 产出运行本。LLM 自动解冲突被明确拒绝（知识库幻觉风险）。 |
+| `.pensieve/` | legacy 只读迁移源；sediment 不再写入。 |
+| 跨设备同步 | sediment commit 后后台 push、启动 `fetch + merge --ff-only`；**冲突时 LLM 自动解冲突被明确拒绝（知识库幻觉风险）**，确定性 ff/审计后 auto-merge 允许（ADR 0020）。 |
 
-## 4. Project binding strict mode
+> 各区 writer 覆盖状态、Lane G 进度等以代码 + `docs/roadmap.md` 为准。
 
-Project-scoped memory/vault 权限不再从 cwd、git remote 或旧 `.gbrain-source` 推断。当前必须有三件套一致：
+## 4. Project binding strict mode（契约）
+
+Project-scoped memory/vault 权限不从 cwd、git remote 或旧 `.gbrain-source` 推断（REQ-007）。必须三件套一致：
 
 1. 项目仓内：`<project>/.abrain-project.json`
 2. abrain 仓内：`~/.abrain/projects/<id>/_project.json`
 3. host-local 映射：`~/.abrain/.state/projects/local-map.json`
-
-推荐操作：
 
 ```text
 /abrain bind --project=<id>
 /abrain status
 ```
 
-active project 是 pi 启动时/会话绑定时的快照；在 shell 中 `cd` 不会自动切换 project scope。
+active project 是 pi 启动/会话绑定时的快照；shell 中 `cd` 不会自动切换 project scope。
 
-## 5. Memory read path
+## 5. Memory read path（契约）
 
-LLM 只使用：
+LLM 只用：`memory_search` / `memory_get` / `memory_list` / `memory_neighbors` / `memory_decide`（只读 facade）。
 
-- `memory_search(query, filters?)`
-- `memory_get(slug, options?)`
-- `memory_list(filters?)`
-- `memory_neighbors(slug, options?)`
-- `memory_decide(context, options?, constraints?)`
+`memory_search` 语义契约：
 
-`memory_search` 当前语义：
+- 查 active project store、legacy `.pensieve/`（仅存在时只读接入）、world store；world 扫描整个 `~/.abrain/`，只排除 `projects/**` 与 `vault/**`（故 `knowledge/`、`workflows/` 下带 frontmatter 的 md 可检索）。
+- 两阶段 LLM rerank（候选选择 + full-content rerank）。
+- 默认排除 `status=archived`；**`superseded`/`deprecated` 仍进默认结果**（active-only 需显式 `filters.status=active`）。
+- 返回 normalized cards，**不暴露 backend/source_path/scope**（`memory_get` exact lookup 作 debug 才暴露）。
+- **LLM search model 不可用时 hard error；没有 grep/BM25 fallback**（accuracy-is-contract，ADR 0015）。
 
-- 查询 active project abrain store、legacy `<cwd>/.pensieve/`（仅在存在时只读接入，不再写入）和 world store。
-- World store 扫描范围是整个 `~/.abrain/`，只排除 `projects/**` 与 `vault/**`；因此 `knowledge/`、`workflows/` 下有 frontmatter 的 md 都可检索（`extensions/memory/parser.ts:72-74,526-538`）。
-- 两阶段 LLM rerank：候选选择 + full-content rerank。
-- 默认排除 `status=archived`（`search.ts:12-16`）；**`superseded`/`deprecated` 仍然会进入默认结果**，需要 active-only 可显式 `filters.status=active`。
-- 返回 normalized cards，字段：`slug/title/summary/score/kind/status/confidence/created/updated/rank_reason/timeline_tail/related_slugs`；不暴露 backend/source_path/scope（`memory_get` exact lookup 作为 debug 接口可暴露）。
-- LLM search model 不可用时 hard error（包装为 `isError` tool result）；没有 grep/BM25 fallback。
+`memory_decide` 语义契约：面向高价值决策点，内部先检索再合成 ≤500 token decision brief；result 暴露 `decisionBriefId`/`entrySlugs` 供 memory-footnote / outcome-ledger 归因；失败不等于"无相关记忆"，应修检索/模型可用性或退回 `memory_search` + 手工综合。
 
-`memory_decide` 当前语义：
+## 6. Sediment write path（契约）
 
-- 面向高价值决策点（技术/框架/架构/工作流选择），内部先检索长期记忆再合成 ≤500 token 的 decision brief。
-- tool result 暴露 `decisionBriefId` / `entrySlugs` 等归因字段，供 memory-footnote / outcome-ledger 记录“哪些记忆参与了决策”。
-- `memory_decide` 失败不表示“没有相关记忆”；调用方应修复检索/模型可用性，或退回 `memory_search` + 手工综合。
+sediment 是**唯一 dedicated writer**（主会话不直接写记忆，REQ-005）。稳定契约：
 
-## 6. Sediment write path
+- 写入前 sanitizer 把 credential/secret-like 串替换为 `[SECRET:<type>]`，不因 pattern 命中阻断整轮；LLM extractor 只收 redacted transcript，被要求保留 typed placeholder、**不得还原 raw secret**（redaction 不可逆）。
+- curator 决定 `create/update/merge/archive/supersede/delete/skip`；writer 上锁、lint、atomic write、append audit、best-effort git commit；audit raw/error/candidate title 均存 redacted form。
+- git commit 失败时回滚刚写入文件，避免孤儿 staged changes。
 
-sediment 是唯一 dedicated writer：
+> pipeline 步骤、写入路径表、锁路径以代码（`extensions/sediment/{pipeline,writer,kind-router,lock}.ts`）为准。
 
-1. `agent_end` 读取 session window。
-2. 先解析显式 `MEMORY: ... END_MEMORY` blocks。
-3. 在进入 LLM / audit / writer 前运行 sanitizer：credential/secret-like strings 被替换为 `[SECRET:<type>]`，不再因 pattern 命中阻断整轮。
-4. 没有显式 block 且 `autoLlmWriteEnabled=true` 时，LLM extractor 只接收 redacted transcript，并在 prompt 中被要求保留 typed placeholders、不得还原 raw secret。
-5. curator 通过已 redacted 的 `memory_search` query 找邻居并决定 `create/update/merge/archive/supersede/delete/skip`。
-6. writer 上锁、lint、atomic write、append audit、best-effort git commit；audit raw text / error / candidates[].title 均存 redacted form（candidates.title 的 sanitizer 覆盖于 2026-05-15 补，之前 explicit/auto-write 两条 lane 的 audit candidates 数组中 title 未走 sanitizer）。
-7. git commit 失败时 writer 会 `git reset HEAD -- <rel>` 并 `unlink` 刚刚写入的文件，避免孤儿 staged changes（2026-05-14 R5/R6 audit 落实）。
+## 7. Vault（契约）
 
-当前路径：
+Backend：abrain 自管 age keypair 为 Tier 1 默认；ssh-key / gpg-file / passphrase-only 降为 Tier 3 explicit-only（ADR 0019）。**取舍**：不复用系统 ssh key，换可移植、跨设备无系统级耦合的专属身份。
 
-| scope | 条目路径 | audit 路径 |
-|---|---|---|
-| project | `~/.abrain/projects/<id>/<kindDir>/<slug>.md` | `<projectRoot>/.pi-astack/sediment/audit.jsonl` |
-| world | `~/.abrain/knowledge/<slug>.md` | `~/.abrain/.state/sediment/audit.jsonl` |
-| workflow | `~/.abrain/workflows/` 或 `~/.abrain/projects/<id>/workflows/` | `~/.abrain/.state/sediment/audit.jsonl` |
+稳定契约面：
 
-Entry 写锁统一在 `~/.abrain/.state/sediment/locks/`，因为多个项目会写同一个 abrain git repo；project checkpoint/session locks 仍在 `<projectRoot>/.pi-astack/sediment/locks/`。
+- `/vault status`、`/vault init [--backend=]`、`/secret set/list/forget`（global/project scope）。
+- `vault_release(key, scope?, reason?)`：plaintext 进 LLM 前要求用户授权（prompt 翻译为用户语言）。
+- bash 注入：`$VAULT_<key>`（project→global fallback）、`$PVAULT_<key>`（project-only）、`$GVAULT_<key>`（global-only）；bash 输出默认 withheld，授权后 release 并对 plaintext 做 literal redaction。
+- sub-pi 默认无 vault 工具/权限（三层 guard）。
 
-## 7. Vault 状态
+> backend 检测链、各 backend 文件布局、`.vault-identity/` 路径、deprecated backend UX、未实现项（P0d passphrase wrap 等）以代码（`extensions/abrain/backend-detect.ts`）+ `docs/roadmap.md` 为准。
 
-Backend 架构按 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md)：abrain 自管 age keypair 为 Tier 1 默认，ssh-key / gpg-file / passphrase-only 降为 Tier 3 explicit-only。
+## 8. 测试入口（契约）
 
-已实现：
-
-- `/vault status`
-- `/vault init [--backend=<backend>]` — 不传 flag 默认走 `abrain-age-key`（`age-keygen` 生成专属 keypair，不复用系统 ssh key）。明示 `--backend=ssh-key/gpg-file/passphrase-only` 仍可用，但 stderr warning 提示跨设备负担。
-- `/secret set/list/forget`（global/project scope，默认 active project）
-- `vault_release(key, scope?, reason?)`（plaintext 进入 LLM 前要求用户授权；prompt 经当前 session model 翻译为用户语言）
-- `$VAULT_<key>`：project → global fallback
-- `$PVAULT_<key>`：project-only
-- `$GVAULT_<key>`：global-only
-- bash 输出默认 withheld，授权后 release，并对 plaintext 做 literal redaction（仅覆盖 text part）
-- tool_call inject 错误 `block:true`；tool_result authorization/redaction throw 全 withhold + audit `bash_inject_block`/`bash_output_withhold`（2026-05-14 R6 audit fix）
-- sub-pi 默认无 vault 工具/权限（三层：dispatch spawn env override + abrain extension activate guard + vault-reader 二次 guard）
-
-**abrain-age-key 路径详情**（ADR 0019）：
-
-- `~/.abrain/.vault-identity/master.age`：abrain 专属私钥、0600、**gitignore**。2026-05-15 后不再寄生 `~/.ssh/id_*`。
-- `~/.abrain/.vault-identity/master.age.pub`：公钥，进 git。
-- `~/.abrain/.vault-pubkey`：与 `master.age.pub` 同内容，保留以兼容 vault-writer（ADR 0019 invariant 6）。
-- `~/.abrain/.vault-master.age`：**abrain-age-key 不生成此文件**（单层 keypair）；仅 Tier 3 backend 使用。
-- 跨设备同步：用户手动 `scp ~/.abrain/.vault-identity/master.age …` + `chmod 0600`。误操作失败时 reader 报 actionable error（含 `scp` / `chmod 0600` 提示）而不是 silent "vault locked"。
-
-**旧 backend 用户**（如果 `.vault-backend` 是 `ssh-key`/`gpg-file`/`passphrase-only`）：
-
-- `ssh-key` 与 `gpg-file`：reader 仍 fail-soft 正常解锁（分别调 `ssh-keygen`/`gpg --decrypt`）。
-- `passphrase-only`：**reader 已知不能解锁** — `vault-reader.ts::defaultExec` 为避免子进程 prompt 坏 main pi，在未显式传 `input` 时把 `stdio[0]` 设为 `ignore`，age scrypt 拿不到 tty 输入 → 30s 后超时 SIGKILL。该 gap 在 ADR 0019 + roadmap “Tier 3 legacy backends reader UX” 中已记录，**需等 P0d `abrain-age-key` passphrase wrap 落地后一并关闭**（同一 unwrap 路径）。
-
-在所有三种旧 backend 上，`/vault status` 都会显示 `⚠ DEPRECATED backend (ADR 0019)` + 重 init 指令（`backend-detect.ts::formatBackendDeprecation` ~L346）。
-
-未实现/roadmap：
-
-- P0d：`abrain-age-key` identity passphrase wrap（让 `.vault-identity/master.age` 可进 git，跨设备仅 `git clone abrain` + 输一次 passphrase）、masked input、`.env` import、`/vault migrate-backend` wizard。技术依赖选型（`age-encryption` JS lib vs `node-pty`）未定。
-- Lane G G3–G5：G3 aboutness LLM classifier、G4 `review-staging` slash + 30-day TTL、G5 region-aware ranking hint。G1 writer/extractor/router ✅ shipped 2026-05-16；G2 `/about-me` slash + agent_end 双-lane wire-up ✅ shipped 2026-05-20。详 [ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)。
-
-## 8. 当前测试入口
-
-`package.json#scripts` 是 smoke 列表 live truth；`docs/reference/smoke-tests.md` 是便于阅读的镜像。当前 **74 个**（2026-06-10），覆盖 memory/sediment、L1 evolution-ledger、Outcome→Entry telemetry sidecar + lifecycle-proposals、dispatch C5/heartbeat、web-search、tool-contract、time/turn-progress、verify-after-edit、edit-strip-empty、CAS/staging/archive-reactivation 等路径。
-
-常用入口：
+`package.json#scripts` 是 smoke 列表 **live truth**；`docs/reference/smoke-tests.md` 是可读镜像；冲突以 `package.json` 为准。
 
 ```bash
-# 最小文档/路径 sanity
-npm run smoke:paths
-
-# 完整列表与推荐子集
-sed -n '1,140p' docs/reference/smoke-tests.md
+npm run smoke:paths                       # 最小路径 sanity
+sed -n '1,140p' docs/reference/smoke-tests.md   # 完整列表与推荐子集
 ```
 
-74/74 全绿为 ship 门槛（2026-06-10 起实现）；如本文与 `package.json` 或 `docs/reference/smoke-tests.md` 冲突，以 `package.json` 为准。
+## 9. 历史文档处理原则（治理契约）
 
-## 9. 历史文档处理原则
-
-- ADR 保留架构决策、上下文、取舍、后果和 supersede/walk-back 关系；先读 [adr/README.md](./adr/README.md)。
-- ADR 不记录实施流水、完成状态快照或 commit timeline；这些属于本文、[roadmap.md](./roadmap.md)、`docs/audits/` 或 git history。
-- 本文只描述已经 ship 并可验证的当前实现事实；设计但未实现的能力进入 [roadmap.md](./roadmap.md)。
+- ADR 保留架构决策、上下文、取舍、后果、supersede/walk-back 关系；先读 [adr/README.md](./adr/README.md)。
+- ADR **不**记录实施流水、完成状态快照、commit timeline；这些属于本文、[roadmap.md](./roadmap.md)、`docs/audits/` 或 git history。
+- 本文只描述**契约/方向/导航**，不镜像实现清单/计数/状态（REQ-006）。
 - 旧 monolith 原文移入 [archive/](./archive/)；不要把 archive 当 current spec。
 - 迁移目录只保留仍可执行的操作手册；已完成的 phase plan/checklist 移入 archive。
 
-## 10. `prompt_user` 状态（ADR 0022）
+## 10. `prompt_user`
 
-LLM-facing 同步问答工具，与 `vault_release` 共享 `<PromptDialog>` overlay substrate但 LLM tool / grant 状态 / audit lane / tool name 独立。解决主会话需要用户决策时 sediment 拿到残缺 turn 的问题。
-
-### 已 ship（P1 + P2 + P3a + P2-fix + P3b + P3b-post-audit + P3c-lightweight）
-
-> **2026-05-18 closing milestone**: 这一轮合计 5 个 commit（8abb48b P3b / 6ae5771 post-audit / + P3c 轻量路径 + P2 backlog 入档）后，**ADR 0022 的所有 P0/P1 stage 完全 ship**。后续 P4 以及 P3b post-audit 留下的 10 项 P2 进入 housekeeping 阶段（详见 [roadmap.md](./roadmap.md) `Architecture debt` 表）。
-
-- **P1**：`redactCredentials` 提升到 `abrain/redact.ts`；新增 `redactSecretAnswer` / `lengthBucket` / `redactPromptParams` / `sanitizePathLike`；`prompt-user/types.ts` 纯类型骨架。¨commit `0e937f7`。
-- **P2**：完整 LLM 工具表面¨`prompt-user/{schema,manager,service,handler,ui/PromptDialog}.ts`；abrain/index.ts 注册 `prompt_user` tool + session_shutdown finalizer + globalThis pending hook。commit `b9565c2`。
-- **P3a**：`compaction-tuner/prompt-user-defer.ts` 叶模块 + INV-K guard 在 trigger 路径。`getPendingPromptCount > 0` 时跳过本轮 compaction 并 audit，rearm state 不消耗。commit `29439cb`。
-- **P2-fix**：多-LLM review（OPUS + DEEPSEEK xhigh）找出的 7 个 P1 修补¨`hasControlChars` 拒 \t\n\r / `redactCredentials` 扩到任意 scheme / `redactPromptParams` 下沉到 service 入口 / 加 `sanitizePathLike` / narrow terminal reject / chained fallback multi 多次 confirm / INV-I 发 audit。commit `8676c5f`。
-- **P3b** (2026-05-18 上午)：`authorizeVaultRelease` / `authorizeVaultBashOutput` 主路径迁到 PromptDialog overlay（variant `vault_release` / `bash_output_release`）。新增 `extensions/abrain/vault-authorize.ts` thin wrapper，不走 `service.askPromptUser`（不共享 prompt_user 的 concurrent gate / audit lane / grant 状态，INV-D/E 边界）。`PromptDialog` 扩 `allowOther` flag：variant != "question" 时关闭 Other 选项（vault 决策不允许自由逃逸）；同时隐藏 `(N/M)` progress，提示改为 `enter authorize • esc deny`。`ui.select` 保留为 fallback。`smoke:abrain-vault-reader` 6 → 14 assertion。
-- **P3b post-audit fix** (2026-05-18 下午)：OPUS+GPT-5.5+DEEPSEEK 三路并行 xhigh audit 产出 **0 P0 / 6 共识 P1**，全部 ship：
-  - **#1** pre-aborted signal early-return不再调 `ui.custom`（OPUS+GPT-5.5：stale overlay UX bug）
-  - **#2** mid-dialog abort 主动 `done(null)` teardown overlay（OPUS：dialog stays on screen after caller settled）
-  - **#3** **vault 独立 concurrent gate** — pi parallel tool mode 下两个 `vault_release` 同时发会开两个 dialog 串话授权，现在第二个返回 `dialog_error`（OPUS）
-  - **#4** vault variant 入口 shape invariant（`choices.length >= 2`）防 buggy caller 渲染锁死 UI（GPT-5.5）
-  - **#5** `signal` narrow type check（`typeof signal.addEventListener === 'function'`）防 fake AbortSignal 抛 TypeError（OPUS P2 升级为安全边界 P1）
-  - **#6** INV-E refinement— module-level `__vaultDialogInFlight` lock 是 **concurrency state**，**不是** grant state；smoke 明确区分两者边界
-  - `smoke:abrain-vault-reader` 14 → 21 assertion (+7）。P2 （applyChoice 复制 / startup telemetry / 真实 PromptDialog render smoke / vault enum localization / `__authorizeVault*ForTests` exports 的 grant isolation smoke）推迟。
-
-### 不变量覆盖（11 / 11 — P3b 后 INV-E 可验证；R8 后 INV-C 在所有 cancel 路径上均验证）
-
-> **2026-05-18 R8 同步**：T0 xhigh GPT-5.5 #4 报告 coverage table 与代码漂移— row A 原写 `cols < 60 三层 reject` 但 R6 已删 narrow terminal reject（R6§2026-05-17 inline editor 走后 Text 自动 wrap，40-col 不拒）。已同步到 actual state。
-
-| INV | 覆盖路径 | smoke |
-|---|---|---|
-| A | sub-pi 3 层（PI_ABRAIN_DISABLED env / activate early-return / handler subagent reject）+ hasUI=false reject；narrow terminal 不再 reject（R6 2026-05-17 删） | `smoke:prompt-user`, `smoke:prompt-user-subpi` |
-| B | 4 个 cancel 源全部 wire （timeout / signal / cancelAll / done） | `smoke:prompt-user-finalizer` |
-| C | secret raw 不跨 PromptDialog 闭包；placeholder + lengthBucket 走 audit；R8 后所有 cancel 路径（timeout / signal / cancelAllPending）均调 `__wipeSecrets` + `done(null)` teardown | `smoke:prompt-user` (R8 +3 disposer assertion) |
-| D | 4 字段 (reason/header/question/option.label) × (redactCredentials + sanitizePathLike) | `smoke:prompt-user`, `smoke:abrain-redact` |
-| **E** | `vault-authorize.ts` 零 grant state（dialog lock 是 concurrency state不是 grant state，P3b-post-audit fix #6 明确边界）；dialog substrate 不持 grant。连续 vault_release 不串话；vault variant 不含 Other；concurrent vault dialog 被拒 | **`smoke:abrain-vault-reader` (P3b + post-audit 合计 +15 assertion)** |
-| F | 只写 audit jsonl，不写 markdown | `smoke:prompt-user` fs.readdirSync 验证 |
-| G | schema 拒绝 `scope`/`key`/`vault`/`secret_key` 令牌；vault 内部 caller bypass schema (直接调 buildPromptDialog) | `smoke:prompt-user` |
-| H | answers 永远 `Record<string, string[]>` | `smoke:prompt-user` |
-| I | concurrent ≤ 1 + 独特 detail + audit；vault 走独立 gate不占用 prompt_user concurrent 名额 | `smoke:prompt-user` |
-| J | `redactCredentials` 单一定义点 + import 双路径 `===` | `smoke:abrain-redact` |
-| K | compaction-tuner 检测到 pending 时跳过 + audit，不消耗 rearm | `smoke:compaction-tuner-prompt-user` |
-
-INV-E 的端到端实现另一半（`index.ts` 内 grant 状态在 dialog session 中不被串话）现在由 **`smoke:abrain-vault-grant-isolation`** (Batch A 子组 2 ～ Batch A 子组 2 第三轮 post-audit, 23 assertion) 端到端覆盖：grant cross-key isolation、deny+remember cross-key no-pollution、PromptDialog substrate 零 module-level state、UI substrate 全 5 路径 (overlay/select/confirm/cached/none) 的 ui_path stamp、fail-closed envelope on ui.select/confirm throw、handler E2E 驱动的 release/withhold/non-bash/unknown-toolCallId/outer-envelope 五路径。原文提到的 `smoke:abrain-vault-bash` + `smoke:prompt-user` 仍作为辅助覆盖与源代码 grep-anchor 防线保留。
-
-### 已 ship - P3c 轻量路径 (2026-05-18 晚间)
-
-- **P3c-lightweight**：扩 `extensions/sediment/llm-extractor.ts` trust boundary 段加 prompt_user exception（18 行 prompt + 2 个正例 + 1 个反例 + 1 句 sanitizer defense-in-depth）。`message/toolResult:prompt_user` 开头的 entry 被明确标为 USER-ATTESTED，与普通 `role=toolResult` 区分；curator 可将基于 prompt_user 答案的候选沉淀为 `preference` / `decision`，不需 assistant 重新 establish substance。`smoke:memory` extractor-prompt assertion 加 8 个 anchor needle 锁住 exception block，**negative test 验证**：删任何一个 anchor 都会 fail-fast。**原重量 P3c（≈80 LOC 独立 audit consumer）仍保留在 deferred YAGNI**，等出现「curator 误判 prompt_user 答案」的实际案例再启动。
-
-### 未实现（deferred）
-
-- **P3c-heavyweight**（原重量路径，调整为 YAGNI）：sediment evidence assembly 读本 turn `lane:"prompt_user"` audit 行，输出独立 user-attested signal 段注入 curator prompt。轻量路径 ship 后该多事。
-- **P4**：`type:multi` 真正多选 toggle UI（现 P0 退化为单选）；caller-side raw secret consumer API；defer/resume API（需 pi 核心支持）。
-- **P3b post-audit P2 backlog**（10 项）：applyChoice 复制 · cachedVaultDialogBuilder=null 静默退化 telemetry 缺失 · `__authorizeVault*ForTests` grant isolation E2E smoke · `ui.select` fallback 路径无 smoke · 真实 PromptDialog vault variant 渲染 smoke · vault enum 本地化 vs 审计稳定性 tension · INV-D ui_path 元数据 · unknown choice 该返 `dialog_error` 调论 · 40 列 hint wrap · vault OptionList 小重构。详 [roadmap.md](./roadmap.md) `Architecture debt`。
-
-### 多-LLM 审计轨迹
-
-- ADR 本体：R1 独立提案 → R2 交叉审计 → R3 综合 → R4 P0 收敛 3→0。
-- P2 实施：1 轮 P1 audit（OPUS + DEEPSEEK；GPT-5.5 执行失败）¨P0 共识 0，7 个 P1 全部 ship-with-smoke。
-- P3b ship + post-audit fix （2026-05-18）：3-way parallel xhigh audit（opus-4-7 / gpt-5.5 / deepseek-v4-pro）产出 0 P0 / 6 共识 P1 全部 ship-with-smoke。这轮 audit 发现的最大问题是 pi 默认 parallel tool mode 下 vault 需要独立 concurrent gate（原设计考虑了 prompt_user INV-I，但 vault 走独立 path 后丢了同类保护）。P2 项推迟为下一轮 housekeeping。
-- P3c-lightweight ship（2026-05-18 晚间）：不走 multi-LLM audit¨¨10 LOC prompt 修改不值得，negative test 已证明 assertion 生效。后续 dogfood 与实际 usage signal 评估足够。
+已 ship；LLM 契约 + 信任/隐私边界见 [ADR 0022](./adr/0022-prompt-user-tool.md) / `requirements.md` REQ-008；INV 覆盖与 smoke 以 `package.json` + ADR 0022 为准。

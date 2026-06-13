@@ -17,7 +17,7 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 >
 > **2026-05-15 PM 补充**：multi-LLM audit (round 1+2) 同日关闭三项 backlog：**Curator scope binding (create 分支)**、**sediment update/merge unknown frontmatter preservation 系统化测试**、**memory parser kind/status 枚举 enforcement**（该项本次初检才发现，同日修复）。均进§"已落地不变量"。
 >
-> **2026-05-17 同步**：ADR 0022 (`prompt_user` LLM-facing 同步问答工具) P1 + P2 + P3a + P2-fix 完成。LLM 现在可以调 `prompt_user(...)` 暂停 turn 问用户问题，解决 sediment 拿到残缺 turn 的问题。详 [ADR 0022](./adr/0022-prompt-user-tool.md) §4 与 [current-state §10](./current-state.md#10-prompt_user-状态adr-0022)。R4 multi-LLM ADR audit + 1 轮 implementation P1 audit (OPUS + DEEPSEEK xhigh)，P0 共识 0，7 个 P1 全部 ship-with-smoke。P3b/P3c 进入 backlog（下表）。
+> **2026-05-17 同步**：ADR 0022 (`prompt_user` LLM-facing 同步问答工具) P1 + P2 + P3a + P2-fix 完成。LLM 现在可以调 `prompt_user(...)` 暂停 turn 问用户问题，解决 sediment 拿到残缺 turn 的问题。详 [ADR 0022](./adr/0022-prompt-user-tool.md) §4 与 [current-state §10](./current-state.md#10-prompt_user)。R4 multi-LLM ADR audit + 1 轮 implementation P1 audit (OPUS + DEEPSEEK xhigh)，P0 共识 0，7 个 P1 全部 ship-with-smoke。P3b/P3c 进入 backlog（下表）。
 >
 > **2026-05-18 同步**：**ADR 0022 P3b shipped + post-audit fix shipped**。
 >
