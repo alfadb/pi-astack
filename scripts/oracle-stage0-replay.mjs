@@ -77,6 +77,10 @@ const queries = process.argv.slice(2).length
       "stage1 候选检索改成 embedding 向量",
       "T0 模型选型不看价格只看能力",
       "sediment 写入路径 content-hash 增量",
+      "向量索引是否应该 git 跟踪",
+      "scope filter 必须在 topN 之前执行",
+      "第二大脑自我演化不靠外部压库降本",
+      "prompt_user 超时后怎么裁决方向",
     ];
 
 // stage1Model(minimax/MiniMax-M3)由 model-curator 动态注册, 脚本 registry 不含;

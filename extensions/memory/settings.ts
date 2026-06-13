@@ -40,7 +40,7 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage2Limit: 10,
   stage2Thinking: "off",
   stage0Enabled: false,
-  stage0PoolLimit: 100,
+  stage0PoolLimit: 200,
   stage0MaxCandidates: 300,
   stage0InsufficientPoolK: 5,
   stage0EmbedTimeoutMs: 10_000,

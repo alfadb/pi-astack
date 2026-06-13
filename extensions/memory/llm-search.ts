@@ -585,13 +585,16 @@ function sparseMatchSlugs(query: string, corpus: MemoryEntry[]): string[] {
   if (terms.length === 0) return [];
   const scored: Array<{ slug: string; score: number }> = [];
   for (const e of corpus) {
-    const hay = [
-      e.slug, e.title,
-      relationValues(e.frontmatter.trigger_phrases).join(" "),
-      e.compiledTruth, e.timeline.join(" "),
-    ].join(" \n ").toLowerCase();
+    // 字段权重(P4 修复 coverage gap): sparse 扫 body 会命中爆炸(body 含很多词),
+    // body-only 低信号命中会挤占 maxCandidates 把 dense 振出池。高信号字段
+    // (slug/title/trigger)命中 ×3, body(compiledTruth/timeline)命中 ×1。
+    const high = [e.slug, e.title, relationValues(e.frontmatter.trigger_phrases).join(" ")].join(" \n ").toLowerCase();
+    const body = [e.compiledTruth, e.timeline.join(" ")].join(" \n ").toLowerCase();
     let score = 0;
-    for (const t of terms) if (hay.includes(t)) score++;
+    for (const t of terms) {
+      if (high.includes(t)) score += 3;
+      else if (body.includes(t)) score += 1;
+    }
     if (score > 0) scored.push({ slug: e.slug, score });
   }
   scored.sort((a, b) => b.score - a.score);
@@ -601,6 +604,7 @@ function sparseMatchSlugs(query: string, corpus: MemoryEntry[]): string[] {
 interface Stage0Pool {
   candidateEntries: MemoryEntry[];
   mode: "hybrid" | "sparse_fallback";
+  denseSlugs: string[];   // 有序(cosine 降序), 供 metrics best-dense-rank 探针
   denseCount: number;
   sparseCount: number;
   staleCount: number;
@@ -671,7 +675,7 @@ export async function selectStage0Pool(
 
   return {
     candidateEntries: ordered.map((s) => entriesBySlug.get(s)).filter((e): e is MemoryEntry => !!e),
-    mode, denseCount: denseSlugs.length, sparseCount: sparseSlugs.length, staleCount: staleSlugs.length, embedMs,
+    mode, denseSlugs, denseCount: denseSlugs.length, sparseCount: sparseSlugs.length, staleCount: staleSlugs.length, embedMs,
   };
 }
 
@@ -793,6 +797,17 @@ async function executeSearch(
 
   const s1 = result.stage1Usage;
   const s2 = result.stage2Usage;
+  // stage0 观测探针(ADR §7 success criteria): best-dense-rank(最终 hits 在 dense
+  // 排名最小值, 反映 dense 召回质量; -1=hits 均不在 dense)、pool-hit-rate(hits
+  // 命中 dense 占比)、fallback(熔断)、dirty-size(stale)、embed-latency。
+  let bestDenseRank = -1, picksInDense = 0;
+  if (pool) {
+    const denseRank = new Map(pool.denseSlugs.map((s, i) => [s, i] as const));
+    for (const h of result.hits) {
+      const r = denseRank.get(h.slug);
+      if (r !== undefined) { picksInDense++; if (bestDenseRank < 0 || r < bestDenseRank) bestDenseRank = r; }
+    }
+  }
   logSearchMetrics({
     ts: new Date().toISOString(),
     query: query.slice(0, 80),
@@ -803,7 +818,20 @@ async function executeSearch(
     stage1_surface: surface,
     stage1_ms: result.stage1Ms,
     stage2_ms: result.stage2Ms,
-    ...(pool ? { stage0_mode: pool.mode, stage0_pool: candidateEntries.length, stage0_dense: pool.denseCount, stage0_sparse: pool.sparseCount, stage0_stale: pool.staleCount, stage0_embed_ms: pool.embedMs, stage0_expanded: expanded, corpus_size: corpus.length } : {}),
+    ...(pool ? {
+      stage0_mode: pool.mode,
+      stage0_fallback: pool.mode === "sparse_fallback",
+      stage0_pool: candidateEntries.length,
+      stage0_dense: pool.denseCount,
+      stage0_sparse: pool.sparseCount,
+      stage0_stale: pool.staleCount,
+      stage0_pool_hit: result.hits.length ? picksInDense / result.hits.length : null,
+      stage0_picks_in_dense: picksInDense,
+      stage0_best_dense_rank: bestDenseRank,
+      stage0_embed_ms: pool.embedMs,
+      stage0_expanded: expanded,
+      corpus_size: corpus.length,
+    } : {}),
   }, projectRoot);
 
   return { hits: result.hits, verdict: result.verdict, stage1Ms: result.stage1Ms, stage2Ms: result.stage2Ms, surface };
