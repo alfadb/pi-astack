@@ -171,7 +171,7 @@ status: accepted
 
 - **评审（2026-06-11，3×T0 xhigh 各 1 轮）**：
   - **Claude Opus 4-8**（0032 三闸 RC 原作者）：ACCEPT-with-required-changes。RC1 机器 turn 拒 workflow_run 重建闸门倒挂→放行（拒绝面收缩为 set/resume，权威创建≠有界执行）；RC2 doc 自勾回声 → judge framing 延伸到 doc；RC3 W7 被掏空未重述→W7'；RC4 N1 与保留的 prompt_user 规范自相矛盾→区分"调用确认弹窗（禁）"与 "真不可逆规范（留）"；RC5 16KB head-preserving 会丢尾部验收标准 →head+tail+显式标记，删 W5 类比；RC6 ADR 0003 主会话只读是替代闸(c) 的结构承重墙→写入论证链。核对确认：H5 边界精确化属实、dispatch_parallel 归谬成立、doc_hash 审计锚取舍正确。M1 关闭 0032 §5-M4 backlog；M2 W6 措辞；M3 zone 类目注记；M4 W1' 继承终态 smoke。
-  - **GPT-5.5**：ACCEPT-with-required-changes。RC1 工具契约补齐 （8 tool/参数/返回/错误码）；RC2 机器 turn 判定实现注记（共享 helper import + fail-closed + smoke）；RC3 晋升机检谓词化（第 2/ 3 条枚举触发项）；RC4 GoalState v2 schema 迁移 + 截断策略修正；RC5 zone 双 lane 澄清（writeAbrainWorkflow 是 .md lane；.json 独立 lane；namespace 限定 + 同名不折叠）；RC6 边界行为 （workflow_disabled 结构化拒绝/并发口径→N5/signal 线程化）。M1 双通道共用 helpers；M2 workflow_list 带 settings；M3 doc canonical path。
+  - **GPT-5.5**：ACCEPT-with-required-changes。RC1 工具契约补齐（goal/workflow 全工具集：参数/返回/错误码）；RC2 机器 turn 判定实现注记（共享 helper import + fail-closed + smoke）；RC3 晋升机检谓词化（第 2/ 3 条枚举触发项）；RC4 GoalState v2 schema 迁移 + 截断策略修正；RC5 zone 双 lane 澄清（writeAbrainWorkflow 是 .md lane；.json 独立 lane；namespace 限定 + 同名不折叠）；RC6 边界行为 （workflow_disabled 结构化拒绝/并发口径→N5/signal 线程化）。M1 双通道共用 helpers；M2 workflow_list 带 settings；M3 doc canonical path。
   - **DeepSeek v4-pro**：ACCEPT-with-required-changes。RC1 机器 turn 非对称必须显式裁决（与 opus RC1 收敛，采放行向）；RC2 `</goal-doc>` 转义裸露→显式转义规范 + doc 内 JSON 为 DATA 声明；RC3 checkbox 自确认回声→来源可信度 framing + 走偏信号。M1 W4 认知独立性弱化诚实标注；M2 W7' 显式化（与 opus RC3 收敛）；M3 重复调用自然边界枚举；M4 截断标记（与 opus RC5 收敛）。
   - 全部 required changes 已并入本版；无保留意见悬置。
 - 哲学前提（用户四连裁决）由 principal 直接给定，合议范围为自洽性/ 实现性/漏洞闭合，不重议哲学——三家均在此前提下完成审查。

@@ -9,9 +9,9 @@ status: active
 
 ## 文档体系 Phase 2（共识层重构）
 
-Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-changelog`，见 [`docs/README.md`](./README.md)）。Phase 2 doc 侧已基本完成：23 份 ADR 方向上提 `direction.md`（12 不变量）/`requirements.md`（REQ-001..009）；`current-state.md`/`architecture/*` 去代码镜像只留契约；23 份 ADR `mark-in-place` 标 pending-ingest（4 KEEP / 12 SLIM / 7 ARCHIVE）；frontmatter + `docs-doctor` 守卫落地。
+Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-changelog`，见 [`docs/README.md`](./README.md)）。Phase 2 **整体完成**：23 份 ADR 方向上提 `direction.md`（12 不变量）/`requirements.md`（REQ-001..009）；`current-state.md`/`architecture/*` 去代码镜像只留契约；frontmatter + `docs-doctor` 守卫落地。
 
-**剩余（block 整体完成）**：abrain 侧物理 ingest/瘦身 = [ADR 0034](./adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md) 实现（机制分解入 abrain + `direction_impact` 注解 + 承重墙按需渲染 rationale，见 `README.md` §4）。落地前 ADR 机制正文 in-place 可读兜底。
+**abrain 侧物理 ingest/瘦身已收官**（[ADR 0034](./adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md) 实现）：全 19 份机制 ADR 处置完毕（12 SLIM + 5 机制存档 ingest 入 pi-global = 256 entries + 2 superseded 只标 archived），机制分解入 abrain + `direction_impact` 注解 + 承重墙按需渲染 rationale（带 pinned `source_ref` SHA，见 `README.md` §4）；原机制 prose 由各 ADR slim banner 标注的 git 基线保留。后续唯一已知缺口：pinned SHA 的 **staleness re-sync**（0034 ratify 显式 defer，待 dogfood 出现首例 stale 后带证据起草）。
 
 ## P0/P1 product backlog
 
