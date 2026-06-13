@@ -1,5 +1,7 @@
 # ADR 0010 — sediment 单 agent + lookup tools 写入策略（v6.6，v6.8 仍用）
 
+> 🗄️ **ARCHIVE-CLASS · 机制存档 / PENDING-INGEST（Phase-2，3×T0 mark-in-place）**：单 agent 内核已演化为 0016 LLM curator；但正文的“3-model 投票失败 5 根因”是**不可代替经验证据**（待 ingest 分解入库）。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿移勿删。
+
 > ⚠️ EVOLVED / PARTIALLY HISTORICAL：单 agent + lookup kernel 被 ADR 0016/0015 继承；`SKIP_DUPLICATE`、`## GBRAIN`、`runGbrainAgent`、`gbrain put` 等 protocol 只作为历史快照。
 
 - **状态**: Accepted (evolved 2026-05-10)。单-agent 内核保留并由 [ADR 0016](0016-sediment-as-llm-curator.md) 继承为 LLM curator；lookup-tools loop 内核由 [ADR 0015](0015-memory-search-llm-driven-retrieval.md) D7 落地为 curator dedup（create 前调 `memory_search` 识别语义近邻）；SKIP_DUPLICATE / ## GBRAIN 终结符已退役，SKIP 保留为 extractor→sediment runner 空结果信号（no candidate to write）；写入 substrate 从 `gbrain put` 转为 sediment 内部 writer（create/update/merge/archive/supersede/delete/skip），不暴露 LLM-facing 写工具。

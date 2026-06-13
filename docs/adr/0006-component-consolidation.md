@@ -1,5 +1,7 @@
 # ADR 0006 — 组件合并清单
 
+> 🗄️ **ARCHIVE-CLASS · SUPERSEDED（Phase-2，3×T0 mark-in-place）**：组件清单/路径已过时，三类上游关系已入 `UPSTREAM.md`；当前真相以 `UPSTREAM.md` / `directory-layout.md` / 代码为准，勿据本正文判断当前实现。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿删。
+
 > ⚠️ PARTIALLY HISTORICAL：A/B/C 上游关系与组件合并思想仍有效；具体目录、扩展清单和 gbrain/sediment 路径以 [../directory-layout.md](../directory-layout.md) 与 [../../UPSTREAM.md](../../UPSTREAM.md) 为准。2026-05-15 起 current vendor 参考源为 `vendor/gstack/` 与 `vendor/pensieve/` 两个 read-only submodules；正文中“vendor/pensieve 不建”等旧结论仅作历史记录。
 
 - **状态**: Accepted。**sediment/gbrain 相关描述已过时**（2026-05-07）— 组件合并清单中的 gbrain/cache/pending queue 等描述基于旧架构。新架构（[memory-architecture.md](../memory-architecture.md)）下 sediment 组件需重新设计，但扩展/skills/prompts 的归并清单不变。

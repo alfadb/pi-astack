@@ -1,5 +1,7 @@
 # ADR 0025 v3 — Sediment Meta-Curator：让 sediment 演化为 ADR 0024 第二大脑
 
+> 🗄️ **ARCHIVE-CLASS · 机制存档（Phase-2，3×T0 mark-in-place；DeepSeek/Opus 标为错分类，实为 SLIM-class 活跃设计）**：0024 六能力的活跃机制设计，被 0027(KEEP)/0028/0026 引用；含 0024 无的独立决策（§3.1/3.2 约束分层、§3.2.A 放宽 0003 三选项、§4.1.4 conf<8 盲区）。README §5 深锦指向其子节，**标题勿改**。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿移勿删。
+
 - **状态**：v3 consolidated baseline（2026-06-12）。本文是 ADR 0024 六能力点的架构决策记录，不再承载实施状态快照或 commit timeline。
 - **目的**：[ADR 0024](0024-second-brain-from-natural-conversation.md) §5 六条能力点的具体落地设计。ADR 0024 说的是 "是什么 / 为什么"（含 4 条 invariant + AI-Native 原则 + 能力点骨架），本 ADR 说的是这些能力点的机制边界、取舍与约束。
 - **范围**：sediment 扩展 + abrain (brain backend) + memory (retrieval facade) 三个 extension 的架构边界。文件级实现真相以 [`../current-state.md`](../current-state.md) 与代码为准；未完成计划以 [`../roadmap.md`](../roadmap.md) 为准。

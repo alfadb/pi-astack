@@ -62,7 +62,8 @@
    - **不可代替 rationale（DeepSeek，原地保留零风险）**：0022(§10 R1-R4 trail/§D6.1 redaction 边界图/INV-A..N)、0023(§1.4 威胁模型/§11 演化史)、0016(gate-by-gate 删除理据)、0020(Alt A-F + why-not-LLM-merge + 4 轮审计)、0028(§2 根因 bug-chain/§10 debate)、0032(§6 H5 判别/§4 provenance 隔离)、0013(Lane D gate + Q-table)。
    - **0018 重评（DeepSeek Dissent 3）**：现 EXTRACT-then-ARCHIVE，但持 AI-Native 经验证据链（commit 521405b/2e8924d 数据丢失）；archive 阶段重评是否改 in-place mark。
    - **锦点（GPT）**：仅 0017 `#sediment-strict-write-guard`（0014 引）与 0026 四锦点（README 引）有入链 #anchor；Model B 标题不动→零断锦点。frontmatter 未铺期勿让 stub 指不存在的 archive 路径。
-3. **patch 入链引用者 → 再 archive（7 份）**，叶子先于中枢：**0025（✅修正：不是"仅 README §5 引"——还被 0027(KEEP)/0028(SLIM)/0026(SLIM) 引，archive 前必先 patch 这三处 + README）**→0018(0022/0023)→0019(0020/0022)→0021(0022/0023)→0010(0014/0016)→0006/0015。移动到 `docs/archive/adr/`，旧路径留一行重定向桩。
+3. **ARCHIVE 类 7 份：mark-in-place，不 move——3×T0 近一致裁决）**：Opus（从 A 反转）/DeepSeek/GPT 一致 mark-in-place。GPT 量化 move 成本=44 处 repatch + 0025 六个带锦 hub 链；mark 成本=0。**两变体**：SUPERSEDED（真过时/代码可复现：0006、0019）vs 机制存档/PENDING-INGEST（载不可代替 rationale 或仍活跃：0010、0015、0018、0021、0025）。原路径/标题不动 → 零断锦/零 patch/无重定向桩。物理移动到 `docs/archive/adr/` 推迟到 abrain ingest lane 落地。
+   - **reclass 发现（Opus Dissent 2 + DeepSeek Dissent A/B）**：0025（及 0021）被错分类——是被 0027(KEEP)/0028 引用的**活跃设计**（§3.1/3.2 约束分层、§3.2.A 放宽 0003 三选项、§4.1.4 conf<8 盲区等 0024 无的独立决策），读起来像 SLIM-12。因处置统一为 mark-in-place，bucket 标签已无关执行，给机制存档 marker 即可。
 4. **剥代码镜像（任务 B）**：current-state.md + architecture/* + 0014 commit-status 头→收敛为"代码派生"。docs-doctor 的 no-bare-hash + 扩展计数 检查把关。
    - **D-B 解**：current-state §2.1 扩展表保留「名字+surface+shipped/not 二态」，删实现声明/计数/commit；不要裸删导致一眼地图消失。
 5. **重指 adr/README.md 锚点中枢**（§9/§10 表 + 所有 archived 锚点→archive 路径）。

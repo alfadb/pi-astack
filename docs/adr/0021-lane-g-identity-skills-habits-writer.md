@@ -1,5 +1,7 @@
 # ADR 0021 — Lane G writer：`identity/skills/habits` 三区落地
 
+> 🗄️ **ARCHIVE-CLASS · 机制存档（Phase-2，3×T0 mark-in-place）**：G1/G2 已 shipped 的**当前**设计（非历史，偏 0025 同类被误分类）；writer/fence/router 机制 + 七区 invariant 仍 enforced。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿移勿删。
+
 - **状态**：Accepted（2026-05-15）；**G1 ✅ shipped 2026-05-16**（commit `63bb9da`）；**G2 ✅ shipped 2026-05-20**（`/about-me` slash + agent_end 双 lane wire-up）；G3–G5 backlog。G1 经 4 轮 multi-LLM audit（opus-4-7 / opus-4-6 / gpt-5.5 / sonnet-4-6 / deepseek-v4-pro 多厂交叉验证），P0 收敛轨迹 2 → 1 → 1 → 0。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md)（§3.3 + §3.5 deterministic router 是本 ADR 的设计前置）、[ADR 0013](0013-asymmetric-trust-three-lanes.md)（trust lane 框架）、[ADR 0016](0016-sediment-as-llm-curator.md)（sediment-as-curator 架构，本 ADR 复用其 writer/sanitizer/lock substrate）、[ADR 0018](0018-sediment-curator-defense-layers.md)（writer 防御层 trigger_phrases UNION、body-preservation）
 - **被引用**：G1 ship 后反向更新：ADR 0014 实施现状表的 Lane G 行从 "待实施" 改为“G1 ✅ shipped 2026-05-16”；docs/current-state.md、docs/roadmap.md、docs/brain-redesign-spec.md 同步。

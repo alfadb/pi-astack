@@ -1,5 +1,7 @@
 # ADR 0015 — memory_search 升级为双阶段 LLM-driven retrieval
 
+> 🗄️ **ARCHIVE-CLASS · 机制存档（Phase-2，3×T0 mark-in-place）**：no-grep-fallback / accuracy-is-contract 已上提 `REQ-009`；D3/D9 等经验设计约束是代码无法自述的不可代替 rationale，且仍治理当前代码。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿移勿删。
+
 - **状态**：Accepted（2026-05-10；Phase 0/1 已实现；Phase 2 被 [ADR 0016](0016-sediment-as-llm-curator.md) 扩展；2026-05-11 修正 D3：Stage 2 默认从 v4-pro+thinking=high 降为 v4-flash+thinking=off，因精排是相关性判断非逻辑推理任务）
 - **日期**：2026-05-10
 - **决策者**：alfadb
