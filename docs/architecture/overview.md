@@ -1,3 +1,8 @@
+---
+doc_type: architecture
+status: active
+---
+
 # Architecture Overview — 演进与当前设计愿景
 
 ## 1. 设计愿景

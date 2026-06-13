@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0010 — sediment 单 agent + lookup tools 写入策略（v6.6，v6.8 仍用）
 
 > 🗄️ **ARCHIVE-CLASS · 机制存档 / PENDING-INGEST（Phase-2，3×T0 mark-in-place）**：单 agent 内核已演化为 0016 LLM curator；但正文的“3-model 投票失败 5 根因”是**不可代替经验证据**（待 ingest 分解入库）。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿移勿删。

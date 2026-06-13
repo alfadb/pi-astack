@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0026 — 第二大脑参与任务执行
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：§3.1 walk-back 已记入 `feature-changelog.md`，检索参与方向见 `direction.md`，以那里为 canonical。以下机制正文（含 README 引用的四锦点节，标题勿改）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

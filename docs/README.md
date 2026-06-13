@@ -1,3 +1,8 @@
+---
+doc_type: consensus
+status: active
+---
+
 # pi-astack 文档体系 — 人类 ↔ abrain 的共识基础
 
 > **这份 README 是文档体系的总章程（charter）。agent 在任何涉及本项目方向/需求/设计的任务开始时先读它。**

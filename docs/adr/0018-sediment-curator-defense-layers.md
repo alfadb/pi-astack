@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0018 — Sediment Curator Defense Layers（沉积器 curator 三层防御）
 
 > 🗄️ **ARCHIVE-CLASS · 机制存档 / PENDING-INGEST（Phase-2，3×T0 mark-in-place）**：本 ADR 是 **AI-Native 原则的经验证据链**（两次 curator data-loss P0 + 机械门控撤回，详正文），被 0016/0021/0022/0023/0024 引用；删除=重新引入已修 bug 的风险。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，**勿移勿删**。

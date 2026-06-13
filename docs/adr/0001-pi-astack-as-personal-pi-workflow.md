@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0001 — pi-astack 作为 alfadb 为 pi 打造的个人工作流仓
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的治理纪律（vendor read-only / 单向依赖 / 使用即开发）已上提 `direction.md`，以那里为 canonical。以下机制正文**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

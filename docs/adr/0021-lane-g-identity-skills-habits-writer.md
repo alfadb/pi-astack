@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0021 — Lane G writer：`identity/skills/habits` 三区落地
 
 > 🗄️ **ARCHIVE-CLASS · 机制存档（Phase-2，3×T0 mark-in-place）**：G1/G2 已 shipped 的**当前**设计（非历史，偏 0025 同类被误分类）；writer/fence/router 机制 + 七区 invariant 仍 enforced。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿移勿删。

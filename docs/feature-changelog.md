@@ -1,3 +1,8 @@
+---
+doc_type: consensus
+status: active
+---
+
 # Feature / Requirement Change Log
 
 > **功能/需求级**变更记录——不是代码变更/commit 流水。人类拥有，agent 代起草，人类签字。

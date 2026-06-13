@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0033 - 自然语言优先的调用面 + 文档驱动 goal（修订 ADR 0032 权威闸）
 
 - **状态**: **合议接受（2026-06-11）**。3×T0（Claude Opus 4-8 / GPT-5.5 / DeepSeek v4-pro，xhigh）一致 ACCEPT-with-required-changes，全部 required changes 已并入本版（§9 评审史）。

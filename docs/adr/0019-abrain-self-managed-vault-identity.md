@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: superseded
+---
+
 # ADR 0019 - abrain self-managed vault identity
 
 > 🗄️ **ARCHIVE-CLASS · SUPERSEDED（Phase-2，3×T0 mark-in-place）**：age/Tier-1/`.vault-backend` 机制是代码正确性（`extensions/abrain/backend-detect.ts` 等）；可移植身份取舍（不寄生系统 ssh key）可一句提炼，当前真相以代码为准。机制正文（含 3 根因 + invariant 表）原地保留可读、物理归档延后至 abrain ingest lane 落地，勿删。

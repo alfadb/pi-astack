@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0032 - Goal 续行运行时 + 声明式 Workflow 编排（实验通道）
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：W1-W13 自治边界（须用户授权/有界/可见/结构持否决）已上提 `INV-TELL-NOT-ASK` / `INV-COST-NOT-A-GATE` / `INV-AUTONOMY`（部分被 0033 修订），以那里为 canonical。以下机制正文（含 §6 H5 判别 / §4 provenance 隔离等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

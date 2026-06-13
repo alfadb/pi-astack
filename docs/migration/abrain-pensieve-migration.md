@@ -1,3 +1,8 @@
+---
+doc_type: migration
+status: active
+---
+
 # Migration — `.pensieve/` → `~/.abrain/projects/<id>/`
 
 > **状态**：ACTIVE RUNBOOK（2026-05-15）——B4 `/memory migrate --go`、B4.5 strict binding、B5 sediment writer cutover 均已 ship。本文只描述 legacy `.pensieve/` 历史数据迁入 `~/.abrain/projects/<id>/` 的 per-repo 操作；sediment 新写入已经不触碰 `.pensieve/`。

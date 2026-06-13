@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0014 — Abrain Personal Brain Redesign（重定位 ~/.abrain 为 alfadb 数字孪生）
 
 - **状态**：Accepted（2026-05-09）。**vault 子系统 P0a / P0b / P0c.write / P0c.read + P1 全部已 ship**（2026-05-09 → 2026-05-11）；**B1 workflows lane writer / B3+B7 per-file substrate 剥离 / B4 per-repo 迁移执行器 / B4.5 Project Binding Strict Mode 全部已 ship**（2026-05-12，commits `b6a4a49` / `b33f0e4` / `cc40792`→`a819302`→`37f03a6`→`122c0b2`；B4.5 详 [ADR 0017](0017-project-binding-strict-mode.md)：`.abrain-project.json` + `projects/<id>/_project.json` + `.state/projects/local-map.json`；迁移 `--project` 参数已拒绝）；**sediment 写入锁 stale-lock reclaim + writeAbrainWorkflow TOCTOU re-check 已修**（commits `54835cd` / `4993d77`）；**B5 sediment writer cutover 2026-05-13 已 ship**：sediment 6 函数（write/update/archive/delete/merge/supersede）全切 `<abrainHome>/projects/<projectId>/`，lock 切到 `<abrainHome>/.state/sediment/locks/`，`MIGRATED_TO_ABRAIN` guard 与所有 `.pensieve/` 写路径完全删除（详 [ADR 0017 §B5](0017-project-binding-strict-mode.md#sediment-strict-write-guard)）。**B5 后 48 小时为 curator P0 data-loss 加三层防御**（prompt update-vs-create discipline + writer body_shrink/body_section_loss/trigger_phrases UNION + smoke invariant lock，详 [ADR 0018](0018-sediment-curator-defense-layers.md)）。详见下文「实施现状」表与 [migration/abrain-pensieve-migration.md §6](../migration/abrain-pensieve-migration.md#6-adr-0014-状态推进路径)。**待实施**：P0d（全 TUI onboarding wizard / mask input / `.env` import）+ Lane G writer（identity / skills / habits + `/about-me` command）。B5 sediment writer cutover 已于 2026-05-13 ship。**Lane G 详细实施 ADR 已出**：[ADR 0021](0021-lane-g-identity-skills-habits-writer.md)（2026-05-15 PM）拆出 G1-G5 五个 phase，G1（writer + fence extractor + router enforcer + smoke） 与本 ADR 包接。

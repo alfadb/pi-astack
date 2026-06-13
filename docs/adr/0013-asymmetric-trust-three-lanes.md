@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0013 — Asymmetric Trust 三段式（LLM / explicit / promotion）
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的 trust × 影响半径原则已上提 `direction.md` §1（信任×影响半径），以那里为 canonical。以下机制正文（含 Lane D gate / Q-table 等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

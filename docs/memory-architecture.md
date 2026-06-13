@@ -1,3 +1,8 @@
+---
+doc_type: architecture
+status: active
+---
+
 # Memory Architecture（current summary）
 
 > 本文件曾是 v7 monolith 设计规范。为避免旧 `.pensieve/`/gbrain/grep fallback/phase checklist 与现状混淆，原文已归档到 [archive/memory-architecture-v7-original.md](./archive/memory-architecture-v7-original.md)。

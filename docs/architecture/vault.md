@@ -1,3 +1,8 @@
+---
+doc_type: architecture
+status: active
+---
+
 # Vault Architecture — current spec
 
 ## 1. Goal

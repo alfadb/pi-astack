@@ -1,3 +1,8 @@
+---
+doc_type: consensus
+status: active
+---
+
 # Vision — pi-astack
 
 > 人类拥有。agent 可起草，人类签字。这是项目的"为什么存在 + 要成为什么"，是最慢漂移、最高人类价值的一层。

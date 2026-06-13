@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0020 — Abrain auto-sync to remote (sediment-driven push + startup ff-pull)
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的决策已上提 `INV-SYNC-DETERMINISTIC-MERGE`，以那里为 canonical。以下机制正文（含 Alt A-F / why-not-LLM-merge / 4 轮审计等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

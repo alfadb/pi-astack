@@ -1,3 +1,9 @@
+---
+doc_type: consensus
+status: active
+canonical_for: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009
+---
+
 # Requirements — 行为需求
 
 > 人类拥有（agent 起草，人类签字）。每条需求有稳定 `REQ-ID`；`feature-changelog.md` 引用这些 ID。

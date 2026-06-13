@@ -1,3 +1,8 @@
+---
+doc_type: reference
+status: active
+---
+
 # Smoke Tests Reference
 
 `package.json#scripts` 是 smoke test **live truth**。本文只是便于阅读的镜像；修改脚本时请同步本文。若本文与 `package.json` 冲突，以 `package.json` 为准。

@@ -1,3 +1,9 @@
+---
+doc_type: consensus
+status: active
+canonical_for: INV-INVISIBILITY, INV-AUTONOMY, INV-IMPLICIT-GROUND-TRUTH, INV-ACTIVE-CORRECTION, INV-MAIN-SESSION-READ-ONLY, INV-GROUND-TRUTH-TIERED, INV-DUAL-INVARIANT, INV-USER-NOT-WORKER, INV-TELL-NOT-ASK, INV-COST-NOT-A-GATE, INV-GIT-IS-RECOVERY, INV-SYNC-DETERMINISTIC-MERGE
+---
+
 # Direction — 不变量 / 取舍 / 走偏信号（承重墙）
 
 > 人类把控的技术大方向。**abrain 不可读 ⇒ 这是人类随时比对、否决方向漂移的可读面。**

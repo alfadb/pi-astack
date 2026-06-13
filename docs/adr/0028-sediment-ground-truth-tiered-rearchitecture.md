@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0028 - Sediment Ground-Truth-Tiered Rearchitecture
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：R1'-R6' 规范脚已上提 `INV-GROUND-TRUTH-TIERED`（含 provenance 门控）+ `REQ-004`，以那里为 canonical。以下机制正文（含 §2 根因 bug-chain / §10 debate 等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

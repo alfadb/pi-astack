@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0017 — Project Binding Strict Mode（项目身份绑定严格模式）
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的绑定契约已上提 `REQ-007`，以那里为 canonical。以下机制正文（含 `#sediment-strict-write-guard` 锦点，0014 引，标题勿改）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

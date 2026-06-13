@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0022 — `prompt_user` LLM-facing 同步问答工具（与 `vault_release` 共享 PromptDialog substrate，独立语义）
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：prompt_user/vault_release 边界已上提 `REQ-008`，以那里为 canonical。以下机制正文（含 §10 R1-R4 多模型设计轨 / §D6.1 redaction 边界图 / §5 INV-A..N 活契约表 等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删（INV-A..N 是 code-enforced 活契约，原地保留避免断契约）。

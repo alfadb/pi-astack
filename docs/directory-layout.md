@@ -1,3 +1,8 @@
+---
+doc_type: reference
+status: active
+---
+
 # Directory Layout — derivation pointers + 布局边界
 
 > **薄指针页**（Phase-2 去代码镜像后）：不再镜像文件树/扩展清单/smoke 列表/计数——那些用命令派生。本文只留**布局方向边界与依赖契约**。

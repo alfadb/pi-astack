@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0023 — Session-start rule injection：abrain 第 8 区 `rules/` + 双 tier 注入 + sediment 全自动 lifecycle
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：“显式规则必须被看见 / always 需 push”已上提 `REQ-004` + `INV-GROUND-TRUTH-TIERED`，以那里为 canonical。以下机制正文（含 §1.4 第二大脑威胁模型 / §11 演化史 / INV-R1..R10 活契约 等不可代替 rationale）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

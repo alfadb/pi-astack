@@ -1,3 +1,8 @@
+---
+doc_type: migration
+status: active
+---
+
 # Migration — Vault Bootstrap（age 加密 + abrain self-managed identity）
 
 > **状态**：ACTIVE RUNBOOK（2026-05-15 v1.5）——P0a-P0c shipped；P0d（wizard / `.env` import / backend migration UX / abrain-age-key passphrase wrap）待实施。

@@ -1,3 +1,8 @@
+---
+doc_type: migration
+status: active
+---
+
 # Migration docs
 
 当前只保留仍可执行/仍需参考的迁移操作手册。

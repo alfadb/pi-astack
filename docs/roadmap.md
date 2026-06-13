@@ -1,3 +1,8 @@
+---
+doc_type: consensus
+status: active
+---
+
 # Roadmap / Backlog
 
 本文只列 current design vision 中仍未完成或有意 deferred 的项。历史 phase checklist 已归档，不再作为路线图。

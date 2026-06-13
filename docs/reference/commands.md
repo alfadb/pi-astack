@@ -1,3 +1,8 @@
+---
+doc_type: reference
+status: active
+---
+
 # Commands and Tools Reference
 
 ## 1. LLM-facing tools

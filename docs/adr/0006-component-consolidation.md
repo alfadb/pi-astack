@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: superseded
+---
+
 # ADR 0006 — 组件合并清单
 
 > 🗄️ **ARCHIVE-CLASS · SUPERSEDED（Phase-2，3×T0 mark-in-place）**：组件清单/路径已过时，三类上游关系已入 `UPSTREAM.md`；当前真相以 `UPSTREAM.md` / `directory-layout.md` / 代码为准，勿据本正文判断当前实现。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿删。

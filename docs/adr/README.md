@@ -1,3 +1,8 @@
+---
+doc_type: reference
+status: active
+---
+
 # pi-astack ADR 设计基线导览
 
 > **指路牌不是镜子**。本文件**不复述** ADR 内容，**零原创**——只列锚点 +

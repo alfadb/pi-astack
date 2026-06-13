@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0025 v3 — Sediment Meta-Curator：让 sediment 演化为 ADR 0024 第二大脑
 
 > 🗄️ **ARCHIVE-CLASS · 机制存档（Phase-2，3×T0 mark-in-place；DeepSeek/Opus 标为错分类，实为 SLIM-class 活跃设计）**：0024 六能力的活跃机制设计，被 0027(KEEP)/0028/0026 引用；含 0024 无的独立决策（§3.1/3.2 约束分层、§3.2.A 放宽 0003 三选项、§4.1.4 conf<8 盲区）。README §5 深锦指向其子节，**标题勿改**。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿移勿删。

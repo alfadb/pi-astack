@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0016 — Sediment 从 gate-heavy extractor 转向 LLM curator
 
 > 📐 **方向已上提承重墙（Phase-2 SLIM，3×T0 Model B）**：本 ADR 的方向（重门→LLM curator = AI-Native 价值）已上提 `REQ-003` + `direction.md` §2 AI-Native，以那里为 canonical。以下机制正文（含 gate-by-gate 删除理据）**待 sediment 入 abrain 后归档**，之前保留可读、勿删。

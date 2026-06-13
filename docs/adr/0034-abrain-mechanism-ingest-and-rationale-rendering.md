@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: proposed
+---
+
 # ADR 0034 — abrain mechanism-ingest + direction-impact 注解 + rationale 渲染（spun-out keystone）
 
 - **状态**：Proposed（设计基线；未实现）。

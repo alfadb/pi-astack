@@ -1,3 +1,8 @@
+---
+doc_type: consensus
+status: active
+---
+
 # Current State — pi-astack
 
 > **薄指针页**（Phase-2 去代码镜像后）：本文只保留**跨实现稳定的契约/方向/导航**，不再镜像实现清单、计数、commit、file:line、shipped/pending 明细——那些以代码为准、用命令派生（REQ-006）。

@@ -1,3 +1,8 @@
+---
+doc_type: architecture
+status: active
+---
+
 # Abrain Architecture — current spec
 
 ## 1. Re-scope

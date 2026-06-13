@@ -1,3 +1,8 @@
+---
+doc_type: architecture
+status: active
+---
+
 # Brain Redesign Spec（current summary）
 
 > 原 `brain-redesign-spec.md` v1.5 已归档到 [archive/brain-redesign-spec-v1.5-original.md](./archive/brain-redesign-spec-v1.5-original.md)。本文只保留当前设计愿景与已实现状态；详细 current spec 见 [architecture/abrain.md](./architecture/abrain.md) 与 [architecture/vault.md](./architecture/vault.md)。

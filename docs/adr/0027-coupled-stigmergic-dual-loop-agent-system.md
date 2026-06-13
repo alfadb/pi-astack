@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0027 — Coupled Stigmergic Dual-Loop Agent System (CSDLAS)
 
 - **状态**：**v0.2 baseline（2026-05-27）**。三家跨 provider T0 reviewer（Claude Opus 4-7 / GPT-5.5 / DeepSeek v4-pro）三轮辩论后合议接受（详 §11）。两家 ACCEPT-with-reservations、一家 ACCEPT，三家保留意见已收录到 §11.4。

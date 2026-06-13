@@ -1,3 +1,8 @@
+---
+doc_type: architecture
+status: active
+---
+
 # Sediment Architecture — current spec
 
 ## 1. Role
