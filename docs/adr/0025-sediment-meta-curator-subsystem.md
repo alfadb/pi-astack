@@ -597,7 +597,7 @@ ADR 0020 sync 处理 archive 中间状态：
 
 `autoLlmWriteEnabled` 必须有 `false` 与 `"staging-only"` 两条退路：前者回到无自动写入，后者保留 classifier / staging 观测但禁止 durable mutation。默认开启是产品决策点，不应移除这两条退路。
 
-P1 前需用真实对话原型验证 classifier prompt（false-positive < 20%、step-skipping < 15%；不过则回炉或拆为“分类 + staging resolution”两段式）。分阶段 phase 顺序（P0 配套基础 → P1 主动纠错 → P1.5/P3.5 multi-view → P2 outcome → P3 aggregator → P4 prompt 演进 → P5 归档回滚 → P5.5 默认开启 → P6 废弃反模式）及其工程量 / 前置依赖见 [`../roadmap.md`](../roadmap.md)。**P5.5 / P6 必须在 ADR 0024 设想经 dogfood 跑通后才碰**，不在设想未真跑起来前动现有入口。
+P1 前需用真实对话原型验证 classifier prompt（false-positive < 20%、step-skipping < 15%；不过则回炉或拆为“分类 + staging resolution”两段式）。分阶段 phase 顺序（P0 配套基础 → P1 主动纠错 → P1.5/P3.5 multi-view → P2 outcome → P3 aggregator → P4 prompt 演进 → P5 归档回滚 → P5.5 默认开启 → P6 废弃反模式）；**并行轨**：P0/P1 配套基础串行，P1.5+P2+P3 可并行，P4+P5 可并行；工程量估算与 backlog 见 [`../roadmap.md`](../roadmap.md)。**P5.5 / P6 必须在 ADR 0024 设想经 dogfood 跑通后才碰**，不在设想未真跑起来前动现有入口。
 
 ### 5.2 §3.2.A ADR 0003 三选项决策点（R2+ 必答）
 
@@ -614,7 +614,7 @@ R2+ multi-LLM audit 必须 explicit 评估以下问题才能选项：
 
 默认开启前必须保留三态退路：`true`、`false`、`"staging-only"`。单用户项目可以用“用户授权 + 三态退路在位 + 直接 dogfood 反馈”提前承担风险；多用户项目仍必须按下面门槛评估。
 
-**决策**：P5.5 时默认值改为 true（允许 `"rollout"` 渐进灰度过渡），但必须保留 `false`（立即关整条 auto-write）与 `"staging-only"`（classifier/staging 正常跑、不出 durable 写）两个回滚开关。单用户项目可用“用户授权 + 三态退路在位 + 直接 dogfood”提前承担风险；多用户项目必须过 dogfood 门槛（false-positive < 15%、无误行为投诉、staging 月新增<50 且 resolve 率>30%；具体阈值与 dogfood 计划见 [`../roadmap.md`](../roadmap.md)）。
+**决策**：P5.5 时默认值改为 true（允许 `"rollout"` 渐进灰度过渡），但必须保留 `false`（立即关整条 auto-write）与 `"staging-only"`（classifier/staging 正常跑、不出 durable 写）两个回滚开关。单用户项目可用“用户授权 + 三态退路在位 + 直接 dogfood”提前承担风险；多用户项目必须过 dogfood 门槛（样本至少 3 用户 × 4 周；false-positive < 15%、无误行为投诉、staging 月新增<50 且 resolve 率>30%）。
 
 **反向 patch**：ADR 0024 §6 需明确承认 "默认开启后用户察觉不到的偏差累积是首次真正存在的代价"（与 §2.3 评估一致）。
 
@@ -652,7 +652,7 @@ R2+ multi-LLM audit 必须 explicit 评估以下问题才能选项：
 
 **治理决策**：每个 Phase 发布前必须过一遍边界自检；任何 ✗ 触碰 → 该 Phase 不能发布，必须先回 ADR 0024 调 invariant。这是发布门禁（同 ADR 0027 C5 blocking gate 性质），不是表面检查。
 
-自检覆盖八个维度（逐条 checklist 为操作性附录，不占 ADR 正文）：
+自检覆盖八个维度（逐条 checklist 由所引 ADR 0024 §2 invariant / §3 AI-Native / §4.2 反模式 / §6 代价与本 ADR §2.3 / §5.4 构成，不在正文重复）：
 
 1. **Invariant 边界**：INV-INVISIBILITY / AUTONOMY / IMPLICIT-GROUND-TRUTH / ACTIVE-CORRECTION 各条不被违反（纯告诉 footer/notify 合法；任何 sediment 生命周期的 `prompt_user`/审批弹窗/诱导收集反馈 ✗；LLM 解释不得升为 ground truth）。
 2. **AI-Native 3 态**：PE-form ✓ / Infra 机械 ✓ / Mech-on-LLM ✗（违反需按 §3.2 自检 justify）。
