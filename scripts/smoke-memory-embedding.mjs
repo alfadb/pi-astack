@@ -78,7 +78,7 @@ const runtimeStub = {
 };
 const embTsPath = path.join(repoRoot, "extensions", "memory", "embedding.ts");
 const mod = loadCJS(transpile(embTsPath), embTsPath, new Map([["../_shared/runtime", runtimeStub]]));
-const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath } = mod;
+const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath, selectStage0, scopeTagOf } = mod;
 
 // ── config from env + models.json ────────────────────────────────────────
 const key = process.env.SUB2API_API_KEY_EMBEDDING;
@@ -100,21 +100,25 @@ const cfg = {
 };
 
 // ── fixture: 12 中英混合 fake entries(不同主题,可测区分度) ────────────────
-function E(slug, title, body) {
-  return { slug, status: "active", title, summary: "", compiledTruth: body, timeline: [], relatedSlugs: [] };
+function E(slug, title, body, scope = "project", pid = "pa") {
+  const id = scope === "world" ? `world:${slug}` : `project:${pid}:${slug}`;
+  return {
+    slug, id, scope, status: "active", title, summary: "", compiledTruth: body,
+    timeline: [], relatedSlugs: [], frontmatter: scope === "world" ? {} : { project_id: pid },
+  };
 }
 const entries = [
   E("emb-cost", "stage1 full-body 全库海选成本回归", "stage1 把全库 entry 全文喂 flash,成本 O(库×频率),单日 ¥50。"),
   E("emb-recall", "embedding 向量召回 related-recall 实测", "doubao top-100 related-recall 98%,可替代 full-body stage1 候选面。"),
-  E("git-push", "提交推送子模块顺序", "含 submodule 的仓库 push 前先 fetch,子模块先于父仓库提交。"),
+  E("git-push", "提交推送子模块顺序", "含 submodule 的仓库 push 前先 fetch,子模块先于父仓库提交。", "project", "pb"),
   E("vault-secret", "vault fail-closed 不引入明文 fallback", "secret 释放走 vault_release,bash 用 $VAULT_ 注入,绝不明文进 context。"),
   E("tmux-pane", "tmux 主 pane 绝不关闭", "所有 split/new-window 后必须 select-pane 切回主 pane。"),
   E("model-t0", "T0 选型不看价格只看能力", "T0 cross-vendor blind review,价格永不纳入考量,可用性是前提。"),
-  E("doc-adr", "ADR 只记决策不是 changelog", "ADR 记决策/取舍/后果/supersede;实施进度写 roadmap,不进 ADR 正文。"),
+  E("doc-adr", "ADR 只记决策不是 changelog", "ADR 记决策/取舍/后果/supersede;实施进度写 roadmap,不进 ADR 正文。", "world"),
   E("freshness", "sediment 写入要立即可召回", "新建/更新 entry 下次 search 立即可召回,不能 result cache。"),
   E("zero-dep", "pi-astack 零 npm 运行时依赖", "不引入 faiss/chroma 等 native 库,纯 JS + provider HTTP API。"),
   E("cjk-embed", "中英混合语料词法检索失效", "连续中文成单 token,跨语言同义改写无法靠词法召回,需语义向量。"),
-  E("self-evolve", "第二大脑自我演化不外部压库", "知识库由 sediment 自主 update/merge/split/archive,不靠归档降本。"),
+  E("self-evolve", "第二大脑自我演化不外部压库", "知识库由 sediment 自主 update/merge/split/archive,不靠归档降本。", "world"),
   E("safety-net", "安全网双触发防静默掉召", "verdict=none + 候选池不足信号 + best-rank 探针,provider 熔断禁回退全库。"),
 ];
 
@@ -203,6 +207,51 @@ await check("9. content-hash 稳定性(纯本地)", async () => {
 await check("10. embeddingInputOf 截断到 maxChars(纯本地)", async () => {
   const e = E("long", "t", "x".repeat(9000));
   assert(embeddingInputOf(e, 3500).length === 3500, "should cap at maxChars");
+});
+
+await check("11. scope-tag(storeRoot 优先) + setScope 刷新(纯本地)", async () => {
+  assert(scopeTagOf(E("a", "t", "b", "world")) === "world", "world tag");
+  assert(scopeTagOf(E("a", "t", "b", "project", "kihh")) === "project:kihh", "project tag from project_id fallback");
+  // storeRoot(物理位置)优先于 frontmatter/id——修复实测的 8/2352 异常 scope
+  const withRoot = { ...E("a", "t", "b", "project", "wrong-pid"), storeRoot: "/home/u/.abrain/projects/pi-global", id: "project:bad:a" };
+  assert(scopeTagOf(withRoot) === "project:pi-global", `storeRoot 应优先, got ${scopeTagOf(withRoot)}`);
+  // 物理在 knowledge/ 但 frontmatter.scope=project(数据不一致)→ 按物理位置归 world
+  const inKnowledge = { ...E("k", "t", "b", "project", ""), storeRoot: "/home/u/.abrain/knowledge", id: "project:k" };
+  assert(scopeTagOf(inKnowledge) === "world", `knowledge/ 物理位置应归 world, got ${scopeTagOf(inKnowledge)}`);
+  // setScope 刷新已索引 entry 的 scope(不动 vec), 不存在则 no-op
+  const idx = new VectorIndex(path.join(tmpDir, "scope-test.json"), cfg.model, cfg.dim);
+  idx.upsert("s1", "h1", [1, 2, 3], "project:old");
+  idx.setScope("s1", "project:new");
+  idx.setScope("ghost", "project:x"); // no-op, 不报错
+  assert(idx.topN([1, 2, 3], 5, { scopes: new Set(["project:new"]) }).some((t) => t.slug === "s1"), "setScope 后按新 scope 可召回");
+  assert(!idx.topN([1, 2, 3], 5, { scopes: new Set(["project:old"]) }).some((t) => t.slug === "s1"), "旧 scope 不再匹配");
+});
+
+await check("12. scope-filter-before-topN: 只召回 in-scope [HTTP]", async () => {
+  if (!HAVE_HTTP) return;
+  // 索引为 check 7 后状态(11 条): git-push=project:pb, doc-adr/self-evolve=world, 其余 project:pa
+  const idx = new VectorIndex(idxPath, cfg.model, cfg.dim).load();
+  const [qv] = await embedTexts(["提交推送 git 子模块"], cfg);
+  const paOnly = idx.topN(qv, 20, { scopes: new Set(["project:pa"]) });
+  assert(paOnly.length > 0, "pa scope should return results");
+  assert(!paOnly.some((r) => r.slug === "git-push"), "project:pb 条目不得出现在 project:pa scope");
+  assert(!paOnly.some((r) => r.slug === "doc-adr" || r.slug === "self-evolve"), "world 条目不得出现在仅 pa scope");
+  const paWorld = idx.topN(qv, 20, { scopes: new Set(["project:pa", "world"]) });
+  assert(paWorld.some((r) => r.slug === "doc-adr" || r.slug === "self-evolve"), "含 world scope 时 world 条目应可召回");
+  assert(!paWorld.some((r) => r.slug === "git-push"), "project:pb 在 {pa,world} 下仍排除");
+});
+
+await check("13. bounded cold-start fallback: 不全库 union [HTTP]", async () => {
+  if (!HAVE_HTTP) return;
+  const idx = new VectorIndex(idxPath, cfg.model, cfg.dim).load();
+  const [qv] = await embedTexts(["测试 query"], cfg);
+  const indexed = Object.keys(JSON.parse(fs.readFileSync(idxPath, "utf8")).entries);
+  const active = [...indexed, "ghost1", "ghost2", "ghost3", "ghost4"]; // 4 个未索引
+  const r = selectStage0(idx, qv, { topN: 5, activeSlugs: active, maxFallback: 2 });
+  assert(r.coverage.missing === 4, `detect 4 missing, got ${r.coverage.missing}`);
+  assert(r.fallback.length === 2, `fallback 必须有界到 maxFallback=2, got ${r.fallback.length}`);
+  assert(r.fallback.every((s) => s.startsWith("ghost")), "fallback 应是未索引 slug");
+  assert(r.candidates.length <= 5, "candidates 受 topN 限");
 });
 
 // cleanup

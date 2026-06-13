@@ -151,7 +151,27 @@ interface IndexFile {
   version: number;
   model: string;
   dim: number;
-  entries: Record<string, { hash: string; vec: number[] }>;
+  entries: Record<string, { hash: string; vec: number[]; scope: string }>;
+}
+
+/** Scope tag for filter-before-topN. world → "world"; project → "project:<id>".
+ *  ADR 0035 §7: scope filter MUST be before topN(扫描时跳过 out-of-scope),
+ *  禁 after-topN(正确条目被无关 scope 挤出 top-N 则损 recall)。 */
+export function scopeTagOf(e: MemoryEntry): string {
+  // 物理位置是 scope 真相,覆盖 frontmatter.scope/id 的不一致:
+  //   knowledge/ 目录 → world(跨项目共享);projects/<id>/ → project:<id>。
+  // 实测 knowledge/ 下 8 条 frontmatter.scope=project(project_id 空)的不一致
+  // entry,按物理位置归 world;project entry 的 id/project_id 缺失时也回退
+  // storeRoot 目录名(实测 8/2352 落到 slug 片段)。
+  const base = e.storeRoot ? path.basename(e.storeRoot) : "";
+  if (base === "knowledge") return "world";
+  if (e.scope === "world") return "world";
+  const pid =
+    base ||
+    (typeof e.frontmatter?.project_id === "string" && e.frontmatter.project_id) ||
+    e.id?.split(":")[1] ||
+    "unknown";
+  return `project:${pid}`;
 }
 
 function atomicWriteJson(file: string, data: unknown): void {
@@ -164,7 +184,7 @@ function atomicWriteJson(file: string, data: unknown): void {
 
 export class VectorIndex {
   private data: IndexFile;
-  private normCache: Map<string, Float32Array> | null = null;
+  private normCache: Map<string, { v: Float32Array; scope: string }> | null = null;
 
   constructor(
     public readonly path: string,
@@ -194,9 +214,29 @@ export class VectorIndex {
     return this.data.entries[slug]?.hash === hash;
   }
 
-  upsert(slug: string, hash: string, vec: number[]): void {
-    this.data.entries[slug] = { hash, vec };
+  upsert(slug: string, hash: string, vec: number[], scope: string): void {
+    this.data.entries[slug] = { hash, vec, scope };
     this.normCache = null;
+  }
+
+  /** Refresh scope tag without touching the vector. scope = position metadata
+   *  (project dir), independent of content-hash — must update on project
+   *  rename/move even when content unchanged. No-op if slug not indexed. */
+  setScope(slug: string, scope: string): void {
+    const rec = this.data.entries[slug];
+    if (rec && rec.scope !== scope) {
+      rec.scope = scope;
+      this.normCache = null;
+    }
+  }
+
+  /** Coverage of an active-slug set: indexed vs missing. Lets the search
+   *  layer build a BOUNDED cold-start fallback (ADR 0035 §4) instead of an
+   *  O(库) full-body union. */
+  coverage(activeSlugs: string[]): { indexed: number; missing: string[] } {
+    const missing: string[] = [];
+    for (const s of activeSlugs) if (!this.data.entries[s]) missing.push(s);
+    return { indexed: activeSlugs.length - missing.length, missing };
   }
 
   /** Drop vectors whose slug is no longer an active entry. Returns count. */
@@ -222,20 +262,27 @@ export class VectorIndex {
 
   private ensureNorm(): void {
     if (this.normCache) return;
-    const cache = new Map<string, Float32Array>();
+    const cache = new Map<string, { v: Float32Array; scope: string }>();
     for (const [slug, rec] of Object.entries(this.data.entries)) {
       const v = Float32Array.from(rec.vec);
       let n = 0;
       for (let i = 0; i < v.length; i++) n += v[i] * v[i];
       n = Math.sqrt(n) || 1;
       for (let i = 0; i < v.length; i++) v[i] /= n;
-      cache.set(slug, v);
+      cache.set(slug, { v, scope: rec.scope });
     }
     this.normCache = cache;
   }
 
-  /** Cosine top-N. Pure JS linear scan (ADR 0035: fine to ~5万 entries). */
-  topN(queryVec: number[], n: number, exclude?: Set<string>): Array<{ slug: string; score: number }> {
+  /** Cosine top-N with scope-filter-BEFORE-topN (ADR 0035 §7). When
+   *  opts.scopes is set, out-of-scope vectors are skipped DURING the scan
+   *  (not after ranking) so in-scope recall is never diluted. Pure JS
+   *  linear scan (fine to ~5万 entries). */
+  topN(
+    queryVec: number[],
+    n: number,
+    opts?: { scopes?: Set<string>; exclude?: Set<string> },
+  ): Array<{ slug: string; score: number }> {
     this.ensureNorm();
     const q = Float32Array.from(queryVec);
     let qn = 0;
@@ -243,8 +290,10 @@ export class VectorIndex {
     qn = Math.sqrt(qn) || 1;
     for (let i = 0; i < q.length; i++) q[i] /= qn;
     const sims: Array<{ slug: string; score: number }> = [];
-    for (const [slug, v] of this.normCache!) {
-      if (exclude?.has(slug)) continue;
+    for (const [slug, rec] of this.normCache!) {
+      if (opts?.exclude?.has(slug)) continue;
+      if (opts?.scopes && !opts.scopes.has(rec.scope)) continue; // before-topN
+      const v = rec.v;
       let d = 0;
       const L = Math.min(v.length, q.length);
       for (let i = 0; i < L; i++) d += v[i] * q[i];
@@ -257,6 +306,33 @@ export class VectorIndex {
 
 export function vectorIndexPath(): string {
   return path.join(abrainStateDir(resolveUserGlobalAbrainHome()), "memory", "embeddings.json");
+}
+
+export interface Stage0Result {
+  candidates: Array<{ slug: string; score: number }>;
+  fallback: string[]; // bounded cold-start slugs (not yet indexed, no vector)
+  coverage: { ranked: number; missing: number };
+}
+
+/** Stage0 候选选择:scope-filtered topN + 冷启动有界 fallback(ADR 0035 §4)。
+ *  索引空/部分时,in-scope 但未索引的 active slugs 取有界子集
+ *  (≤maxFallback)供调用方 union 进候选——**绝不全库 union**(冷启动窗口
+ *  禁回退 O(库) full-body)。activeSlugs 应由调用方按 scope 过滤后传入。 */
+export function selectStage0(
+  index: VectorIndex,
+  queryVec: number[],
+  opts: { topN: number; scopes?: Set<string>; activeSlugs?: string[]; maxFallback?: number },
+): Stage0Result {
+  const candidates = index.topN(queryVec, opts.topN, { scopes: opts.scopes });
+  let fallback: string[] = [];
+  let missing = 0;
+  if (opts.activeSlugs && opts.activeSlugs.length) {
+    const cov = index.coverage(opts.activeSlugs);
+    missing = cov.missing.length;
+    const cap = Math.max(0, opts.maxFallback ?? 0);
+    fallback = cov.missing.slice(0, cap); // BOUNDED — never the whole vault
+  }
+  return { candidates, fallback, coverage: { ranked: candidates.length, missing } };
 }
 
 // ── provider config resolution (modelRegistry + settings + models.json) ──
@@ -337,12 +413,16 @@ export async function buildCorpusEmbeddings(
   await embedTexts(texts, cfg, (startIdx, vectors) => {
     for (let j = 0; j < vectors.length; j++) {
       const e = todo[startIdx + j];
-      idx.upsert(e.slug, hashes.get(e.slug)!, vectors[j]);
+      idx.upsert(e.slug, hashes.get(e.slug)!, vectors[j], scopeTagOf(e));
     }
     embedded += vectors.length;
     if (embedded % saveEvery < vectors.length) idx.save();
     opts?.onProgress?.(embedded, todo.length);
   });
+  // refresh scope tags for ALL active (incl. content-hash-skipped): scope is
+  // position metadata (project dir), independent of content-hash — must reflect
+  // current location even when content unchanged (ADR 0035 §4).
+  for (const e of active) idx.setScope(e.slug, scopeTagOf(e));
   idx.save();
 
   return { total: active.length, embedded, skipped: active.length - todo.length, pruned };
