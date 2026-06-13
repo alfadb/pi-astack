@@ -37,9 +37,13 @@ const CANONICAL_SUBDIRS = ["adr", "architecture", "reference", "migration"];
 const EXCLUDED_SUBDIRS = new Set(["archive", "audits", "notes"]);
 
 const errors = [];
-const warns = [];
+const warns = [];        // strictable: promoted to ERROR under STRICT=1
+const softWarns = [];    // advisory ALWAYS (never promoted) — e.g. REQ-006 hash/count
+                         // inside non-consensus docs (ADR pending-ingest mechanism
+                         // bodies legitimately cite commit evidence per adr/README §0).
 const err = (file, msg) => errors.push(`${rel(file)}: ${msg}`);
 const warn = (file, msg) => warns.push(`${rel(file)}: ${msg}`);
+const softWarn = (file, msg) => softWarns.push(`${rel(file)}: ${msg}`);
 const rel = (p) => path.relative(repoRoot, p);
 
 function listCanonicalDocs() {
@@ -152,6 +156,10 @@ for (const file of listCanonicalDocs()) {
   const fm = parseFrontmatter(raw);
   const prose = stripCodeFences(raw);
   const dir = path.dirname(file);
+  // REQ-006 (no bare hash / no hardcoded count) is a CONSENSUS-surface rule.
+  // Non-consensus docs (adr/architecture/reference/migration) may cite commit
+  // evidence / code facts; their hash/count findings stay advisory even under STRICT.
+  const req006 = fm && fm.doc_type === "consensus" ? warn : softWarn;
 
   // frontmatter presence (WARN advisory during migration)
   if (!fm) {
@@ -195,22 +203,22 @@ for (const file of listCanonicalDocs()) {
     }
   }
 
-  // bare commit hashes (WARN, REQ-006) — prose only
+  // bare commit hashes (REQ-006) — prose only; strictable only on consensus docs
   COMMIT_RE.lastIndex = 0;
   while ((m = COMMIT_RE.exec(prose))) {
-    warn(file, `bare commit hash "${m[0]}" at line ${lineOf(prose, m.index)} (REQ-006: docs are not a commit log)`);
+    req006(file, `bare commit hash "${m[0]}" at line ${lineOf(prose, m.index)} (REQ-006: docs are not a commit log)`);
   }
 
-  // hardcoded extension/tool counts (WARN, code-mirror smell)
+  // hardcoded extension/tool counts (code-mirror smell) — strictable only on consensus docs
   EXT_COUNT_RE.lastIndex = 0;
   while ((m = EXT_COUNT_RE.exec(prose))) {
-    warn(file, `hardcoded count "${m[0].trim()}" at line ${lineOf(prose, m.index)} (code-mirror smell — derive from ls extensions/)`);
+    req006(file, `hardcoded count "${m[0].trim()}" at line ${lineOf(prose, m.index)} (code-mirror smell — derive from ls extensions/)`);
   }
 }
 
 // --- report ----------------------------------------------------------------
 const promotedErrors = STRICT ? [...errors, ...warns] : errors;
-const remainingWarns = STRICT ? [] : warns;
+const remainingWarns = STRICT ? [...softWarns] : [...warns, ...softWarns];
 
 console.log(`docs-doctor — canonical scope: docs/*.md + ${CANONICAL_SUBDIRS.join("/")}/ (excl ${[...EXCLUDED_SUBDIRS].join(",")})`);
 console.log(`STRICT=${STRICT ? "1 (warns promoted to errors)" : "0 (migration window)"}\n`);
