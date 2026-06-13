@@ -11,6 +11,25 @@ status: active
 
 ---
 
+## 2026-06-13 — accepted — ADR 0034 Phase 1-3 实现：direction_impact + ingest lane + rationale 渲染（能力全绿）
+
+### 变更
+ADR 0034 三块能力的代码实现落地（均为主会话可执行的代码，未写真实 ~/.abrain）：
+- **Phase 1 direction_impact schema**：`extensions/memory/direction-impact.ts`（flat frontmatter pipe 编码）+ parser 填 `MemoryEntry.directionImpact`（可查）+ 读侧 lint `D1` + 写侧 validation；narrows/weakens/conflicts→escalation≠none 红线。
+- **Phase 2 source-aware ingest lane**：`extensions/memory/ingest-adr.ts`（planIngest 纯函数 + dry-run/go + provenance=content-in-transcript + source_ref 存 path#heading@SHA + git reset --hard 回滚 + sanitizer 边界 + 审计；decomposer 注入可测）。
+- **Phase 3 rationale 渲染**：`extensions/memory/rationale.ts`（只格式化存储数据，missing-not-hallucinated 硬约束，带 pinned SHA）。
+
+### 原因
+Phase 0 ratify 后按 impl-plan 分阶段推进；三能力是 Phase-2 物理瘦身 + 承重墙渲染的前置。
+
+### 需求影响
+acceptance ①-⑧ + ⑩ 由代码 + smoke 覆盖：smoke:direction-impact 32 + smoke:adr-ingest 40 + smoke:rationale 29 = 101 assertions（均双向 negative），smoke:memory 回归绿。全程守 ADR 0034 §4 四不变量 + G2（主会话只写代码，sandbox/dry-run，不动真实 abrain）。
+
+### 非目标 / 剩余
+Phase 4（需用户 go/no-go，G2）：CLI `/memory ingest-adr` 命令 + 生产 LLM decomposer prompt 接线 + 对真实 12 SLIM/7 ARCHIVE ADR 的 production ingest + 验证 rationale 可得后物理瘦身（acceptance ⑨）。
+
+---
+
 ## 2026-06-13 — accepted — ADR 0034 ratify：abrain mechanism-ingest keystone 进入实现阶段
 
 ### 变更

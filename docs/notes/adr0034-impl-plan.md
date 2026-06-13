@@ -70,8 +70,10 @@
 
 **acceptance**：⑧渲染缺失显式报缺失（绝不幻觉）。
 
-- [ ] 渲染路径 + missing-not-hallucinated 约束
-- [ ] smoke（缺失场景必须报缺失，negative test：构造缺失 fixture 验证不幻觉）
+- [x] 渲染路径 `extensions/memory/rationale.ts`：`renderRationaleFromEntry`（纯，只格式化存储数据）+ `renderRationale`（async，注入 resolver）+ `formatRationale`
+- [x] **missing-not-hallucinated 硬约束**：entry=null/resolver 抛/resolver 返 null → found=false + 显式“Do NOT fabricate…” fallback；未记录的节（被拒方案/source_ref）报 honest gap 不发明
+- [x] 渲染带 pinned source_ref SHA（修订 #8）+ grounding（渲染文本是 body 子串，assert 验证）
+- [x] `smoke:rationale` 29 assertions（缺失必报缺失 + 不幻觉 + pinned SHA 浮现 + honest gaps + async resolver）
 
 ## Phase 4 — production ingest + archive 解锁（go/no-go 门控；触碰 G2）
 
@@ -79,8 +81,8 @@
 
 **acceptance**：⑨archive-safe（ingest 后 rationale 可得才允许物理移走 prose）。
 
-- [ ] 能力全绿（Phase 1-3 smoke pass）
-- [ ] **用户显式 go/no-go**（真实 abrain 写入，G2 边界）
+- [x] 能力全绿（Phase 1-3 smoke pass：direction-impact 32 + adr-ingest 40 + rationale 29 = 101 assertions，smoke:memory 回归绿）
+- [ ] **用户显式 go/no-go**（真实 abrain 写入，G2 边界）+ （Phase 4 prep）CLI 命令 + 生产 LLM decomposer prompt
 - [ ] production ingest（dry-run review → go）
 - [ ] rationale 可得验证 → 物理瘦身 ADR 机制 prose → 收方向残桩
 - [ ] Phase-2 "整体完成" 达成
