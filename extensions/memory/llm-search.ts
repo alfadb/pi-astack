@@ -102,7 +102,7 @@ function supportsThinkingLevel(model: unknown, level: ThinkingLevel): boolean {
   return true;
 }
 
-async function callSearchModel(
+export async function callSearchModel(
   modelRef: string,
   prompt: string,
   modelRegistry: ModelRegistryLike,
