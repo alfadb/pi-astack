@@ -29,6 +29,7 @@ export interface SearchSettings {
   stage0InsufficientPoolK: number;  // 候选池 < K 触发安全网有界扩召(~5)
   stage0EmbedTimeoutMs: number;     // query embed 短超时(~10s; 失败即熔断 sparse)
   stage0StaleFloorRatio: number;    // P6: stale/missing 保底预算占 maxCand 比例(freshness 不变量)
+  stage1CompactSurface: boolean;    // P8: stage1 用紧凑 surface(meta+summary, 无 compiledTruth/timeline)做粗筛
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -58,6 +59,11 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // 的 stale 仍可补到 maxCand(不独立砸一刀, deepseek 反对 20% 上限的点)。
   // 0.1 × 400 = 40 槽: 正常 stale ≤几条全进, 冷启动/provider 宕机时限其不挤爆 relevance。
   stage0StaleFloorRatio: 0.1,
+  // P8(dark-launch, 默认 off): stage1 surface 紧凑化。stage0 已缩候选数(库→400),
+  // 但 stage1 仍喚 full-body(compiledTruth+timeline ~810 token/entry ×400=324K, cache
+  // 命中 0.2%)。dense 已语义召回→候选都相关, stage1 只需粗筛 top, 用
+  // meta+title+trigger+summary(~150 token/entry)足够; 完整 body 留 stage2 精排。
+  stage1CompactSurface: false,
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -203,6 +209,7 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage0InsufficientPoolK: Math.max(0, asNumber(search.stage0InsufficientPoolK, DEFAULT_SEARCH_SETTINGS.stage0InsufficientPoolK)),
     stage0EmbedTimeoutMs: Math.max(1000, asNumber(search.stage0EmbedTimeoutMs, DEFAULT_SEARCH_SETTINGS.stage0EmbedTimeoutMs)),
     stage0StaleFloorRatio: Math.min(1, Math.max(0, asNumber(search.stage0StaleFloorRatio, DEFAULT_SEARCH_SETTINGS.stage0StaleFloorRatio))),
+    stage1CompactSurface: asBoolean(search.stage1CompactSurface, DEFAULT_SEARCH_SETTINGS.stage1CompactSurface),
   };
 }
 

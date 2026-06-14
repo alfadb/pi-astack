@@ -25,6 +25,7 @@
     "smoke:embedding": "node scripts/smoke-memory-embedding.mjs",
     "smoke:stage0-pool": "node scripts/smoke-stage0-candidate-pool.mjs",
     "oracle:stage0": "node scripts/oracle-stage0-replay.mjs",
+    "oracle:compact-surface": "node scripts/oracle-compact-surface.mjs",
     "smoke:stage0-metrics": "node scripts/smoke-stage0-metrics.mjs",
     "smoke:stage0-freshness": "node scripts/smoke-stage0-freshness.mjs",
     "smoke:stage0-nonactive": "node scripts/smoke-stage0-nonactive.mjs",

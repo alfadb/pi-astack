@@ -228,7 +228,7 @@ function sortForIndex(a: MemoryEntry, b: MemoryEntry): number {
   return a.slug.localeCompare(b.slug);
 }
 
-function entryForStage1(entry: MemoryEntry): string {
+function entryForStage1(entry: MemoryEntry, compact = false): string {
   const meta: string[] = [
     `kind: ${entry.kind}`,
     `status: ${entry.status}`,
@@ -248,21 +248,25 @@ function entryForStage1(entry: MemoryEntry): string {
     triggers.length > 0 ? `- trigger: ${JSON.stringify(triggers)}` : undefined,
     related.length > 0 ? `- related: ${JSON.stringify(related)}` : undefined,
     summary ? `- summary: ${summary}` : undefined,
-    "",
-    "##### compiled_truth",
-    entry.compiledTruth || "(empty)",
-    "",
-    "##### timeline",
-    entry.timeline.length ? entry.timeline.join("\n") : "(none)",
+    // P8: 紧凑模式只留 meta+title+trigger+related+summary 做粗筛; 完整
+    // compiledTruth+timeline(大头)留给 stage2 精排。dense 已保证候选相关性。
+    ...(compact ? [] : [
+      "",
+      "##### compiled_truth",
+      entry.compiledTruth || "(empty)",
+      "",
+      "##### timeline",
+      entry.timeline.length ? entry.timeline.join("\n") : "(none)",
+    ]),
   ].filter((x): x is string => x !== undefined).join("\n");
   return truncateMiddle(pieces, MAX_STAGE1_ENTRY_CHARS);
 }
 
-function buildLlmIndexText(entries: MemoryEntry[]): string {
+function buildLlmIndexText(entries: MemoryEntry[], compact = false): string {
   const lines: string[] = [
     "# Memory Search Index",
     "",
-    `> Generated in-memory for ADR 0015 LLM stage-1 candidate selection | ${entries.length} entries | surface:${STAGE1_CANDIDATE_SURFACE}`,
+    `> Generated in-memory for ADR 0015 LLM stage-1 candidate selection | ${entries.length} entries | surface:${compact ? "stage1_compact_v1" : STAGE1_CANDIDATE_SURFACE}`,
     "",
     "## Entries",
     "",
@@ -275,7 +279,7 @@ function buildLlmIndexText(entries: MemoryEntry[]): string {
       currentKind = label;
       lines.push(`### ${label}`, "");
     }
-    lines.push(entryForStage1(entry), "");
+    lines.push(entryForStage1(entry, compact), "");
   }
 
   return lines.join("\n");
@@ -438,7 +442,7 @@ function parseFinalPicks(rawText: string): FinalPick[] {
   return parseFinalPicksWithVerdict(rawText).picks;
 }
 
-function makeStage1Prompt(query: string, indexText: string, limit: number): string {
+function makeStage1Prompt(query: string, indexText: string, limit: number, compact = false): string {
   // Surface-first ordering for LLM prompt caching (2026-06-12):
   // the full-body v3 candidate surface changes only when memory entries
   // change, so putting it before the query still lets provider-side caching
@@ -448,14 +452,20 @@ function makeStage1Prompt(query: string, indexText: string, limit: number): stri
   return [
     "You are pi-astack memory search candidate selector.",
     "",
-    "Task: given a user query and a full-body candidate surface of all knowledge entries, select entries that are most likely relevant.",
+    compact
+      ? "Task: given a user query and a COMPACT candidate surface (metadata + title + trigger_phrases + summary; full body deferred to the next ranking stage) of pre-filtered candidate entries, select entries that are most likely relevant."
+      : "Task: given a user query and a full-body candidate surface of all knowledge entries, select entries that are most likely relevant.",
     "Output JSON only: an array of objects [{\"slug\": string, \"reason\": string}]. No markdown wrapper.",
     "",
     "Hard rules:",
     "- The query is a natural-language retrieval prompt. Prefer the user's full intent over literal token overlap.",
     "- The query may be Chinese, English, or mixed. Match across languages semantically, not just literally (e.g. 沉淀 ≡ sediment, 自动写入 ≡ auto-write).",
-    "- Read each entry's title, summary, trigger_phrases, related slugs, compiled_truth, and timeline before selecting candidates.",
-    "- Prefer entries whose body evidence (compiled_truth/timeline) matches query intent, even when frontmatter is sparse or generic.",
+    compact
+      ? "- Read each entry's title, summary, trigger_phrases, and related slugs. (compiled_truth/timeline are intentionally NOT in this compact surface — judge relevance from summary/title/trigger; the full body is re-read in the next ranking stage.)"
+      : "- Read each entry's title, summary, trigger_phrases, related slugs, compiled_truth, and timeline before selecting candidates.",
+    compact
+      ? "- Candidates are already semantically pre-filtered; prefer entries whose summary/title/trigger match query intent, and be inclusive — borderline entries are refined (with full body) in the next stage, so when unsure include rather than drop."
+      : "- Prefer entries whose body evidence (compiled_truth/timeline) matches query intent, even when frontmatter is sparse or generic.",
     "- Prefer recent and high-confidence entries over stale/low-confidence ones, all else equal.",
     "- Do not invent slugs. Return only slugs present in the candidate surface.",
     "",
@@ -737,10 +747,10 @@ async function runTwoStageSearch(
   if (candidateEntries.length === 0) {
     return { hits: [], verdict: "none", stage1Ms: 0, stage2Ms: 0, picksCount: 0 };
   }
-  const indexText = buildLlmIndexText(candidateEntries);
+  const indexText = buildLlmIndexText(candidateEntries, settings.search.stage1CompactSurface);
   const t1 = Date.now();
   const stage1 = await callSearchModel(
-    settings.search.stage1Model, makeStage1Prompt(query, indexText, candidateLimit),
+    settings.search.stage1Model, makeStage1Prompt(query, indexText, candidateLimit, settings.search.stage1CompactSurface),
     modelRegistry, signal, STAGE1_TIMEOUT_MS, settings.search.stage1Thinking,
   );
   const stage1Ms = Date.now() - t1;
