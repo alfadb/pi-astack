@@ -21,3 +21,8 @@ smoke-classifier-results.json
 # 正文不入代码仓)+ 跨厂商标注原始投票文件。最终金标 + 投票计数已在
 # scripts/goldset.json(committed), 故工作目录 gitignore。
 scripts/.goldset/
+
+# ADR 0036 P4 多向量 eval 的 scratch 输入/输出(LLM 生成 query / 长 entry 尾部 dump,
+# 可经 oracle-multivector-eval.mjs DUMP_TAILS + dispatch 重建; 方法论在 ADR §10)。
+scripts/.mv-tails.json
+scripts/.mv-q-*.json

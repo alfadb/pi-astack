@@ -1,6 +1,6 @@
 # ADR 0036: memory_search 两阶段塌缩 + hybrid 检索增强
 
-- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。代码 DEFAULT 仍 false; P3 BM25/P4/P5 仍 dark。
+- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。P4 多向量已实现+验证(dark, flag off, §10), 2×T0 评审 = keep-dark now is correct(§10.5)。证据: tail-fact paraphrase query recall@10 63→93(条件性), topical gold 无变化无挤出; flip 待 5 条件(尤其 dedup 分理)。代码 DEFAULT 均仍 false; P3 BM25/P5 仍 dark。
 - Date: 2026-06-14
 - Supersedes-direction: 承接 ADR 0035(stage0 embedding 候选检索); 本 ADR 修订 stage1 的存废
 
@@ -45,7 +45,7 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 | P1 实证(本提交) | `stage1Skip` flag + oracle ablation | 初步: 差 5 点/降 91% ✅ |
 | P2 金标集 | 从 search-metrics.jsonl 采样真实 query + 人工标注正确 entry(跨过 ground-truth 正偏) | 转产硬门 |
 | P3 BM25 复活 | char n-gram BM25 替换 sparseMatchSlugs + RRF 融合 | 中文/符号 recall↑ |
-| P4 多向量 | head/tail 双向量解截断 | 长 entry dense 可信 |
+| P4 多向量(实现, 见 §10) | chunk 多 sub-vector + max-sim 解 3500 截断 | ✅ paraphrase 尾部 recall@10 +30pt / @50 +12pt, 无短文回归 → dark, 待 flip |
 | P5 路由 | query 路由 + sediment dedup 走 dense-only | 治成本主体 |
 | P6 切换(本次, 见 §8) | 跨厂商投票金标(16q × 4 T0)recall@gold + ablation-16 | ✅ two-stage recall@gold ≥ three; ablation 扰动 ≤ LLM 自噪声 → 提案转正待评审 |
 
@@ -152,3 +152,47 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 - M3 作为唯一 stage2 排序器的绝对质量未离线验(脚本 registry 跑不了 M3); 但这是 flip 前已存在的属性(非 flip 引入, flip 不改 stage2)。M3 在开放式标注任务的凑满倾向(选 50-95/80)提示: 应监控 stage2 排序质量, 必要时把生产 stage2 换回 v4-pro(settings 可改, 已有 ROLLBACK TRIGGER 记在 settings _comment)。
 - 统计严谨: 仍 16q 单跑无 CI; 后续可扩 21-30q × 多重跑补 CI(§6 原门), 但两组 oracle 同向 + ablation 噪声量级已足以支撑 flag-reversible 转产。
 - gold ⋂ stage0 top-80: 本 eval 证“stage1 删除在 stage0 已找到的前提下不损 recall”, 非端到端召回; 端到端召回是 stage0/多向量(P4)的话题。
+
+## 10. P4 多向量解 3500 截断(实现 + 验证, dark-launch)
+
+### 10.1 问题(被 P6 放大)
+
+每 entry 单向量, embed 前 `contentBasis` 被 `entryEmbedMaxChars=3500` 截断。实测生产库: **139 条(12.1%)超 3500 字**, 共 ~500K 字尾部(timeline/正文 tail)从未进入 dense 向量(p99=14322, max=33221)。P6 删 stage1 后, 这些尾部内容再没有 stage1 LLM 读 full-body 救场 → 截断盲区直接损产召回。
+
+### 10.2 方案
+
+- **多向量**: 长 entry 切成 ≤`multiVectorMaxChunks`(默 4)个 `entryEmbedMaxChars` 段, 每段一个 sub-vector(`embeddingInputsOf`); 首段之外前缀 title 做主题锚定。短 entry(≤maxChars)仅 1 段 = 单向量, 零额外成本。
+- **打分**: `VectorIndex.topN` entry 分数 = 各 sub-vector 与 query 的**最大余弦**(late-interaction max-sim)。
+- **索引格式**: `entries[slug].vec` → `vecs: number[][]` + `scheme`("s"|"m"), version 1→2; `load()` migrate-on-read(v1 `{vec}` → `{vecs:[vec], scheme:"s"}`)——flag-off 零 re-embed(no-op)。
+- **新鲜度**: scheme 进 freshness key(`isFresh(slug, hash, scheme?)`), `contentHashOf` 不变 → toggle multiVector 会让旧 scheme entry 被 reconcile/重嵌重新嵌为多向量, 但 flag-off 时迁移记录默认 "s" 不误报 stale。
+- **flag**: `memory.embedding.multiVector`(默 false)+ `multiVectorMaxChunks`(默 4)。dark-launch。
+
+### 10.3 实证(`scripts/oracle-multivector-eval.mjs`, 真实 corpus 双索引)
+
+尾部检索: 对长 entry 的**被截断尾部**作 query, 看该 entry 的排名。两个探针:
+
+| 探针 | 场景 | single recall@10 | multi recall@10 | single recall@50 | multi recall@50 | single MRR | multi MRR |
+|---|---|---|---|---|---|---|---|
+| verbatim 整尾段 (n=106) | 竞争弱(自检索) | 100% | 100% | 100% | 100% | 0.910 | 1.000 |
+| **LLM paraphrase 尾部事实 (n=40)** | 全库竞争 + 语义重述 | **63%** | **93%** | **88%** | **100%** | **0.435** | **0.727** |
+
+- verbatim 自检索**低估**了盲区(竞争弱 + 词汇重叠 → 头向量也能拉回)。现实探针(LLM paraphrase 尾部事实 + 全库竞争)才是真实场景: single-vector **完全丢失 12% 尾部事实 query 出 top-50 窗口**(如 vault 文档/risk-gap-analysis: single >50 → multi #1/#5), P6 后无 stage1 救场 → 永久漏召。multi 补齐 100%。
+- **无回归**: 短 entry(≤maxChars)single==multi 排名 40/40 一致(多向量=单 chunk)。
+- **位移探针(opus 评审条件 1, P6 真实 gold 16 query)**: max-sim 让长 entry 取 4 个 cosine 的 max(vs 短 entry 1 个), 有序偏差可能把真短-entry 答案挤出 top-50。实测: 短 gold entry(n=136)recall@50 single=multi=89%, 全部 gold(n=143)89%=89%, **0 条 gold 被 multi 挤出**。→ 无 crowding 损害。
+- **诚实幅度(opus 评审条件 4)**: +30pt 是**条件性**增益(query 恰好问尾部事实 + 命中长 entry)。在 topical 的 P6 gold 上 multi=single(0 提升)。聚合生产 lift = 30pt × P(tail-fact query 占比), 该基率未测, 估计较小(若 10-20% 则 ~3-6pt)。eval n=40 单跑无 CI, 低于 §6 原门(21-30q×多跑+CI)——方向可信, 幅度是欠功率上界。
+- 成本: 多向量只给 12% 长 entry 加 sub-vector(1152 entry → 1352 sub-vector, +17%); embedding 方舟 Coding Plan ≈0; topN 每 slug max over ≤4 subvec, 扫描开销可忽。
+
+### 10.4 转产路径(keep-dark; flip 待 5 条件 + 人类绿灯)
+
+本次已落: 实现 + 验证 + ADR, flag off(零生产影响)。smoke-memory-embedding 16/16 + smoke-stale-floor-window 11/11 + 位移探针过。flip 前须过(2×T0 评审条件):
+
+1. **dedup 分理(载重, = §9.1 条件 2 同类)**: sediment 去重走同一共享 dense 索引, multi-vector 后 max-sim 会让“共享一个 boilerplate/尾段 chunk”的两条浮上为去重候选 → false-merge(corpus corruption, 比漏召严重)。注: 单靠 multiVector=false flag-pin 不够(全局索引已是多向量, topN 恒 max-sim; flag 只控 embed-time/scheme)——需**独立 dedup 索引或 dedup 专用聚合(如只用 chunk[0]/mean)**, 或 flip 前跑 all-status 近重 false-merge eval。
+2. **原子重嵌(非 percentage rollout)**: 全局单索引文件 → §9.1 条件 4 的 staged/percentage rollout 不适用。唯一安全 staging = shadow-index build → validate → atomic swap。flag-flip + `embed-corpus-init` 必须**一个协调 op**(先 rebuild 后 flip 会让新 m-vector 被 scheme "s" 误标 stale; 先 flip 后 rebuild 会有过渡期混合-scheme 窗口)。
+3. **统计 power-up(条件 4)**: 按条件性口径说明增益(非聚合生产 recall), 补 21-30q×多跑+CI 达 §6 原门再声明幅度。
+4. **title-prefix ablation(条件 5, 低 stakes)**: 首段之外的 chunk 前缀 title 可能把 sub-vector 拉回 title 主题区、稀释 distinctive-tail 信号; flip 前跑 no-prefix 对照确认净正向。
+5. **人类绿灯**: 重嵌是对 ~/.abrain 全局状态的操作 + 动 dense 底座(影响所有 memory_search), 由人类拍板。
+
+### 10.5 2×T0 评审(本次)
+
+- `deepseek-v4-pro`: **VERDICT SOUND** — 6 项逐一 trace 干净(v1→v2 migrate flag-off no-op; 跨-batch chunk 归并无 bug; max-sim 单向量等同旧行为; scheme-mismatch flood 被 take() caps 界住, 搜索仍可用; 成本有界; eval 对 dark-launch 公平)。
+- `claude-opus-4-8`: **VERDICT GO-WITH-CONDITIONS, keep-dark now 正确** — 上述 5 条件。条件 1(crowding)本次已用位移探针驳正(0 挤出); 条件 2(dedup)是真 flip-blocker, 已记入 10.4。

@@ -4,7 +4,7 @@ import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
 import { clamp, compareTimestamps, normalizeBareSlug, stableUnique } from "./utils";
-import { embedTexts, resolveEmbeddingProviderConfig, staleOrMissingSlugs, VectorIndex, vectorIndexPath, type EmbeddingProviderConfig } from "./embedding";
+import { embedSchemeTag, embedTexts, resolveEmbeddingProviderConfig, staleOrMissingSlugs, VectorIndex, vectorIndexPath, type EmbeddingProviderConfig } from "./embedding";
 import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "../sediment/sanitizer";
@@ -763,7 +763,10 @@ export async function selectStage0Pool(
   const indexableForStale = corpus.filter(
     (e) => e.status === "active" && (e.frontmatter as Record<string, unknown> | undefined)?.zone !== "rules",
   );
-  const staleSlugs = staleOrMissingSlugs(idx, indexableForStale); // search-time freshness(仅可索引集)
+  // ADR 0036 P4: 传 scheme → multiVector toggle 后旧 scheme 的 entry 被认为 stale,
+  // 进 freshness floor 重嵌(与全库 rebuild 互补)。flag-off 时 scheme="s", 迁移后
+  // 的 v1 记录默认 "s" → 不误报 stale。
+  const staleSlugs = staleOrMissingSlugs(idx, indexableForStale, embedSchemeTag(emb.multiVector)); // search-time freshness(仅可索引集)
 
   // union + 硬上限 —— window-aware 排序(见 orderStage0Candidates, §9.1 条件 3)。
   // windowSize = two-stage 候选窗口(candidateLimit = max(stage2Limit, stage1Limit))。

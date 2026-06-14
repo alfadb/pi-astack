@@ -52,6 +52,7 @@ Module._resolveFilename = function (request, parent, ...rest) {
 const extDir = path.join(repoRoot, "extensions");
 const parser = require(path.join(extDir, "memory", "parser.ts"));
 const emb = require(path.join(extDir, "memory", "embedding.ts"));
+const settingsMod = require(path.join(extDir, "memory", "settings.ts"));
 
 const ABRAIN = process.env.ABRAIN_ROOT
   ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
@@ -98,7 +99,13 @@ const key = process.env.SUB2API_API_KEY_EMBEDDING;
 if (!key) { console.error("missing SUB2API_API_KEY_EMBEDDING"); process.exit(1); }
 const mj = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "models.json"), "utf8"));
 const baseUrl = mj.providers.embedding.baseUrl;
-const cfg = { baseUrl, apiKey: key, model: "doubao-embedding-vision", dim: 2048, batchSize: 10, tpmLimit: 600_000, timeoutMs: 60_000, maxRetries: 3 };
+// ADR 0036 P4: 多向量从生产 settings 读(env MULTI_VECTOR 可覆写)。设 multiVector=true
+// + 跨 init 会把全库重嵌为多向量(长 entry 出多 sub-vector); flag off 与现状一致。
+const embS = settingsMod.resolveSettings().embedding;
+const multiVector = process.env.MULTI_VECTOR != null ? process.env.MULTI_VECTOR === "1" : embS.multiVector;
+const multiVectorMaxChunks = Number(process.env.MULTI_VECTOR_MAX_CHUNKS || embS.multiVectorMaxChunks);
+const cfg = { baseUrl, apiKey: key, model: "doubao-embedding-vision", dim: 2048, batchSize: 10, tpmLimit: 600_000, timeoutMs: 60_000, maxRetries: 3, multiVector, multiVectorMaxChunks };
+console.log(`multiVector=${multiVector} maxChunks=${multiVectorMaxChunks}`);
 
 const idxPath = emb.vectorIndexPath();
 console.log(`index → ${idxPath}`);

@@ -35,6 +35,8 @@ export interface EmbeddingProviderConfig {
   tpmLimit: number;                      // 600000 tokens/min (方舟 Coding Plan)
   timeoutMs: number;
   maxRetries: number;
+  multiVector: boolean;                  // ADR 0036 P4: 多向量解 3500 截断(默认 off)
+  multiVectorMaxChunks: number;          // 每 entry 最多 sub-vector 数(成本上限)
 }
 
 interface ModelRegistryLike {
@@ -62,11 +64,38 @@ export function contentHashOf(e: MemoryEntry): string {
   return crypto.createHash("sha256").update(contentBasis(e), "utf8").digest("hex").slice(0, 16);
 }
 
+/** Scheme tag for the freshness key: "s"=single-vector, "m"=multi-vector.
+ *  Folding it into isFresh lets toggling multiVector re-embed on next
+ *  reconcile/rebuild WITHOUT changing contentHashOf, so flag-off stays a
+ *  no-op (migrated v1 records default scheme "s" → fresh under single). */
+export function embedSchemeTag(multiVector: boolean): "s" | "m" {
+  return multiVector ? "m" : "s";
+}
+
 export function embeddingInputOf(e: MemoryEntry, maxChars: number): string {
-  // P1 single-vector. ADR 0035 §7 flags single-vs-multi-vector (truncation
-  // blind spot) as deferred — for now cap at maxChars; long-tail timeline
-  // beyond the cap is a known, documented limitation.
   return contentBasis(e).slice(0, maxChars);
+}
+
+/** ADR 0036 P4 多向量: 把 contentBasis 切成 ≤maxChunks 个 maxChars 段, 每段一个
+ *  sub-vector, 解 3500 截断盲区(尾部 timeline/正文也进入 dense)。短 entry
+ *  (≤maxChars)仅 1 段 = 单向量, flag-off/短文零额外成本。首段之外每段前缀 title
+ *  做主题锚定(尾段脱离标题会嵌到泛化点, 锚回主题提升对话题 query 的 max-sim)。 */
+export function embeddingInputsOf(
+  e: MemoryEntry,
+  maxChars: number,
+  opts: { multiVector: boolean; maxChunks: number },
+): string[] {
+  const basis = contentBasis(e);
+  if (!opts.multiVector || basis.length <= maxChars) return [basis.slice(0, maxChars)];
+  const title = (e.title || "").replace(/\s+/g, " ").trim();
+  const prefix = title ? `${title}\n` : "";
+  const maxChunks = Math.max(1, opts.maxChunks);
+  const chunks: string[] = [];
+  for (let pos = 0; pos < basis.length && chunks.length < maxChunks; pos += maxChars) {
+    const seg = basis.slice(pos, pos + maxChars);
+    chunks.push(chunks.length === 0 ? seg : `${prefix}${seg}`.slice(0, maxChars));
+  }
+  return chunks;
 }
 
 // ── TPM throttle: rolling 1-minute token window ──────────────────────────
@@ -151,7 +180,9 @@ interface IndexFile {
   version: number;
   model: string;
   dim: number;
-  entries: Record<string, { hash: string; vec: number[]; scope: string }>;
+  // ADR 0036 P4: vecs = 1..maxChunks 个 sub-vector(多向量); scheme = "s"|"m"
+  // (freshness key, toggle 时 re-embed)。v1({vec})由 load() migrate-on-read。
+  entries: Record<string, { hash: string; vecs: number[][]; scope: string; scheme: string }>;
 }
 
 /** Scope tag for filter-before-topN. world → "world"; project → "project:<id>".
@@ -184,14 +215,14 @@ function atomicWriteJson(file: string, data: unknown): void {
 
 export class VectorIndex {
   private data: IndexFile;
-  private normCache: Map<string, { v: Float32Array; scope: string }> | null = null;
+  private normCache: Map<string, { vs: Float32Array[]; scope: string }> | null = null;
 
   constructor(
     public readonly path: string,
     public readonly model: string,
     public readonly dim: number,
   ) {
-    this.data = { version: 1, model, dim, entries: {} };
+    this.data = { version: 2, model, dim, entries: {} };
   }
 
   /** Load from disk. Model/dim mismatch → discard (force rebuild): this is
@@ -199,9 +230,17 @@ export class VectorIndex {
    *  models (盲审修订). Missing/corrupt → empty index. */
   load(): this {
     try {
-      const raw = JSON.parse(fs.readFileSync(this.path, "utf8")) as IndexFile;
+      const raw = JSON.parse(fs.readFileSync(this.path, "utf8")) as { model?: string; dim?: number; entries?: Record<string, { hash: string; vec?: number[]; vecs?: number[][]; scope: string; scheme?: string }> };
       if (raw && raw.model === this.model && raw.dim === this.dim && raw.entries) {
-        this.data = raw;
+        // migrate-on-read: v1 {vec} → v2 {vecs:[vec], scheme:"s"}; 单向量视为
+        // scheme "s" → flag-off 下与当前单向量 scheme 一致, 零 re-embed(no-op)。
+        const entries: IndexFile["entries"] = {};
+        for (const [slug, rec] of Object.entries(raw.entries)) {
+          const vecs = Array.isArray(rec.vecs) ? rec.vecs : (Array.isArray(rec.vec) ? [rec.vec] : []);
+          if (vecs.length === 0) continue; // drop malformed
+          entries[slug] = { hash: rec.hash, vecs, scope: rec.scope, scheme: rec.scheme ?? "s" };
+        }
+        this.data = { version: 2, model: this.model, dim: this.dim, entries };
       }
     } catch {
       /* missing or corrupt → keep empty */
@@ -210,12 +249,17 @@ export class VectorIndex {
     return this;
   }
 
-  isFresh(slug: string, hash: string): boolean {
-    return this.data.entries[slug]?.hash === hash;
+  /** Fresh iff content-hash matches AND (scheme unspecified OR matches). The
+   *  scheme guard makes a single↔multi toggle re-embed without touching
+   *  contentHashOf (ADR 0036 P4). */
+  isFresh(slug: string, hash: string, scheme?: string): boolean {
+    const rec = this.data.entries[slug];
+    if (!rec || rec.hash !== hash) return false;
+    return scheme === undefined || rec.scheme === scheme;
   }
 
-  upsert(slug: string, hash: string, vec: number[], scope: string): void {
-    this.data.entries[slug] = { hash, vec, scope };
+  upsert(slug: string, hash: string, vecs: number[][], scope: string, scheme: string): void {
+    this.data.entries[slug] = { hash, vecs, scope, scheme };
     this.normCache = null;
   }
 
@@ -266,14 +310,18 @@ export class VectorIndex {
 
   private ensureNorm(): void {
     if (this.normCache) return;
-    const cache = new Map<string, { v: Float32Array; scope: string }>();
+    const cache = new Map<string, { vs: Float32Array[]; scope: string }>();
     for (const [slug, rec] of Object.entries(this.data.entries)) {
-      const v = Float32Array.from(rec.vec);
-      let n = 0;
-      for (let i = 0; i < v.length; i++) n += v[i] * v[i];
-      n = Math.sqrt(n) || 1;
-      for (let i = 0; i < v.length; i++) v[i] /= n;
-      cache.set(slug, { v, scope: rec.scope });
+      const vs: Float32Array[] = [];
+      for (const raw of rec.vecs) {
+        const v = Float32Array.from(raw);
+        let n = 0;
+        for (let i = 0; i < v.length; i++) n += v[i] * v[i];
+        n = Math.sqrt(n) || 1;
+        for (let i = 0; i < v.length; i++) v[i] /= n;
+        vs.push(v);
+      }
+      if (vs.length) cache.set(slug, { vs, scope: rec.scope });
     }
     this.normCache = cache;
   }
@@ -300,11 +348,16 @@ export class VectorIndex {
       // ——比 scopeTagOf 反推更精确,且索引无 status/kind 时这是唯一正确的 filter 前置。
       if (opts?.allowSlugs && !opts.allowSlugs.has(slug)) continue;
       if (opts?.scopes && !opts.scopes.has(rec.scope)) continue; // before-topN
-      const v = rec.v;
-      let d = 0;
-      const L = Math.min(v.length, q.length);
-      for (let i = 0; i < L; i++) d += v[i] * q[i];
-      sims.push({ slug, score: d });
+      // ADR 0036 P4 多向量: entry 分数 = 各 sub-vector 与 query 的最大余弦
+      // (late-interaction max-sim)。短 entry 仅 1 个 sub-vector, 等同单向量。
+      let best = -Infinity;
+      for (const v of rec.vs) {
+        let d = 0;
+        const L = Math.min(v.length, q.length);
+        for (let i = 0; i < L; i++) d += v[i] * q[i];
+        if (d > best) best = d;
+      }
+      sims.push({ slug, score: best });
     }
     sims.sort((a, b) => b.score - a.score);
     return sims.slice(0, n);
@@ -329,10 +382,10 @@ export interface Stage0Result {
  *  (ADR 0035 §7 bug3). `entries` should already be scope-filtered by the
  *  caller. Zero persisted manifest: diffed in-memory on every search against
  *  the entries loadEntries already holds. */
-export function staleOrMissingSlugs(index: VectorIndex, entries: MemoryEntry[]): string[] {
+export function staleOrMissingSlugs(index: VectorIndex, entries: MemoryEntry[], scheme?: string): string[] {
   const out: string[] = [];
   for (const e of entries) {
-    if (!index.isFresh(e.slug, contentHashOf(e))) out.push(e.slug);
+    if (!index.isFresh(e.slug, contentHashOf(e), scheme)) out.push(e.slug);
   }
   return out;
 }
@@ -396,6 +449,8 @@ export async function resolveEmbeddingProviderConfig(
     tpmLimit: s.tpmLimit,
     timeoutMs: s.timeoutMs,
     maxRetries: s.maxRetries,
+    multiVector: s.multiVector,
+    multiVectorMaxChunks: s.multiVectorMaxChunks,
   };
 }
 
@@ -423,24 +478,42 @@ export async function buildCorpusEmbeddings(
   // 删其他 project 向量(ADR 0035 §7 bug1);全库 init 不传 → prune 全部 stale。
   const pruned = opts?.skipPrune ? 0 : idx.prune(validSlugs, opts?.pruneScopes);
 
-  // content-hash gate: only embed changed/missing
+  // content-hash + scheme gate: only embed changed/missing/scheme-flipped(ADR 0036 P4)
+  const currentScheme = embedSchemeTag(cfg.multiVector);
   const hashes = new Map<string, string>();
   const todo = active.filter((e) => {
     const h = contentHashOf(e);
     hashes.set(e.slug, h);
-    return !idx.isFresh(e.slug, h);
+    return !idx.isFresh(e.slug, h, currentScheme);
   });
 
-  const texts = todo.map((e) => embeddingInputOf(e, maxChars));
+  // ADR 0036 P4: 每 entry → 1..maxChunks 个 chunk, 扁平 embed 后按 owner 归并;
+  // chunk 跨 batch 边界用 pending 累积, entry 全部 chunk 到齐才 upsert(增量持久化)。
+  const chunkTexts: string[] = [];
+  const chunkOwner: number[] = [];
+  const chunkCount: number[] = [];
+  for (let i = 0; i < todo.length; i++) {
+    const ins = embeddingInputsOf(todo[i], maxChars, { multiVector: cfg.multiVector, maxChunks: cfg.multiVectorMaxChunks });
+    chunkCount.push(ins.length);
+    for (const t of ins) { chunkTexts.push(t); chunkOwner.push(i); }
+  }
   let embedded = 0;
-  await embedTexts(texts, cfg, (startIdx, vectors) => {
+  const pending = new Map<number, number[][]>();
+  await embedTexts(chunkTexts, cfg, (startIdx, vectors) => {
     for (let j = 0; j < vectors.length; j++) {
-      const e = todo[startIdx + j];
-      idx.upsert(e.slug, hashes.get(e.slug)!, vectors[j], scopeTagOf(e));
+      const owner = chunkOwner[startIdx + j];
+      const arr = pending.get(owner) ?? [];
+      arr.push(vectors[j]);
+      pending.set(owner, arr);
+      if (arr.length === chunkCount[owner]) {
+        const e = todo[owner];
+        idx.upsert(e.slug, hashes.get(e.slug)!, arr, scopeTagOf(e), currentScheme);
+        pending.delete(owner);
+        embedded++;
+        if (embedded % saveEvery === 0) idx.save();
+        opts?.onProgress?.(embedded, todo.length);
+      }
     }
-    embedded += vectors.length;
-    if (embedded % saveEvery < vectors.length) idx.save();
-    opts?.onProgress?.(embedded, todo.length);
   });
   // refresh scope tags for ALL active (incl. content-hash-skipped): scope is
   // position metadata (project dir), independent of content-hash — must reflect

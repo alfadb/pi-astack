@@ -98,6 +98,8 @@ const cfg = {
   tpmLimit: 600_000,
   timeoutMs: 60_000,
   maxRetries: 3,
+  multiVector: false,
+  multiVectorMaxChunks: 4,
 };
 
 // ── fixture: 12 中英混合 fake entries(不同主题,可测区分度) ────────────────
@@ -187,7 +189,7 @@ await check("8. 版本戳: 换 model 名 load → 空索引(强制重建)", asyn
   // 纯本地,不需 HTTP — 但需要索引文件存在(HTTP 用例已建);否则构造一个
   if (!fs.existsSync(idxPath)) {
     const idx0 = new VectorIndex(idxPath, cfg.model, cfg.dim);
-    idx0.upsert("x", "h", [1, 2, 3]);
+    idx0.upsert("x", "h", [[1, 2, 3]], "world", "s");
     idx0.save();
   }
   const wrong = new VectorIndex(idxPath, "different-embedding-model", cfg.dim).load();
@@ -221,7 +223,7 @@ await check("11. scope-tag(storeRoot 优先) + setScope 刷新(纯本地)", asyn
   assert(scopeTagOf(inKnowledge) === "world", `knowledge/ 物理位置应归 world, got ${scopeTagOf(inKnowledge)}`);
   // setScope 刷新已索引 entry 的 scope(不动 vec), 不存在则 no-op
   const idx = new VectorIndex(path.join(tmpDir, "scope-test.json"), cfg.model, cfg.dim);
-  idx.upsert("s1", "h1", [1, 2, 3], "project:old");
+  idx.upsert("s1", "h1", [[1, 2, 3]], "project:old", "s");
   idx.setScope("s1", "project:new");
   idx.setScope("ghost", "project:x"); // no-op, 不报错
   assert(idx.topN([1, 2, 3], 5, { scopes: new Set(["project:new"]) }).some((t) => t.slug === "s1"), "setScope 后按新 scope 可召回");

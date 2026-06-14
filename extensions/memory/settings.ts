@@ -122,7 +122,9 @@ export interface EmbeddingSettings {
   tpmLimit: number;           // 方舟 Coding Plan 600K tokens/min
   timeoutMs: number;
   maxRetries: number;
-  entryEmbedMaxChars: number;  // single-vector 截断(多向量 deferred, ADR 0035 §7)
+  entryEmbedMaxChars: number;  // 每 sub-vector 截断(单向量=全 entry; 多向量=每 chunk)
+  multiVector: boolean;            // ADR 0036 P4: 多向量解 3500 截断(默认 off, dark-launch)
+  multiVectorMaxChunks: number;    // 每 entry 最多 sub-vector 数(成本上限)
 }
 
 export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
@@ -134,6 +136,8 @@ export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
   timeoutMs: 60_000,
   maxRetries: 3,
   entryEmbedMaxChars: 3500,
+  multiVector: false,
+  multiVectorMaxChunks: 4,
 };
 
 export interface MemorySettings {
@@ -237,6 +241,8 @@ function resolveEmbeddingSettings(cfg: Record<string, unknown>): EmbeddingSettin
     timeoutMs: Math.max(1000, asNumber(e.timeoutMs, DEFAULT_EMBEDDING_SETTINGS.timeoutMs)),
     maxRetries: Math.max(0, Math.min(10, asNumber(e.maxRetries, DEFAULT_EMBEDDING_SETTINGS.maxRetries))),
     entryEmbedMaxChars: Math.max(200, asNumber(e.entryEmbedMaxChars, DEFAULT_EMBEDDING_SETTINGS.entryEmbedMaxChars)),
+    multiVector: asBoolean(e.multiVector, DEFAULT_EMBEDDING_SETTINGS.multiVector),
+    multiVectorMaxChunks: Math.max(1, Math.min(16, asNumber(e.multiVectorMaxChunks, DEFAULT_EMBEDDING_SETTINGS.multiVectorMaxChunks))),
   };
 }
 
