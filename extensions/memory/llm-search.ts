@@ -747,7 +747,10 @@ export async function selectStage0Pool(
     const t = Date.now();
     const [qv] = await embedTexts([query], qcfg);
     embedMs = Date.now() - t;
-    denseSlugs = idx.topN(qv, poolLimit, { allowSlugs }).map((h) => h.slug);
+    // ADR 0036 P4 条件1: dedup 路径(profile 钉 dedupChunk0Aggregation)只用 chunk0 聚合,
+    // 避免 multiVector max-sim 让共享尾段 chunk 的 distinct entry 浮上为 false-merge 候选。
+    const agg = settings.search.dedupChunk0Aggregation ? "chunk0" : undefined;
+    denseSlugs = idx.topN(qv, poolLimit, { allowSlugs, agg }).map((h) => h.slug);
   } catch {
     mode = "sparse_fallback"; // 熔断: dense 不可用 → sparse-only(禁全库)
   }

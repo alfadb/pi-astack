@@ -52,10 +52,11 @@ const R = (name, settings = base, callerFilters) => resolveProfileExecution(SEAR
   ok(JSON.stringify(r.filters.status) === JSON.stringify(["all"]) && r.filters.limit === 5, "sedimentDedup: status:[all] limit:5");
   ok(r.search.stage1Skip === false, "sedimentDedup: stage1Skip 强制 false");
   ok(r.search.sparseBM25 === false, "sedimentDedup: sparseBM25 强制 false");
-  // 关键: 即便全局 flip 为 true, dedup profile 仍钉死 false(泄漏防护)
-  const allOn = { ...base, search: { ...base.search, stage1Skip: true, sparseBM25: true } };
+  ok(r.search.dedupChunk0Aggregation === true, "sedimentDedup: dedupChunk0Aggregation 强制 true(ADR 0036 P4 条件1 dedup 分离)");
+  // 关键: 即便全局 flip 为 true/dedupChunk0 为 false, dedup profile 仍钉死(泄漏防护)
+  const allOn = { ...base, search: { ...base.search, stage1Skip: true, sparseBM25: true, dedupChunk0Aggregation: false } };
   const r2 = R("sedimentDedup", allOn);
-  ok(r2.search.stage1Skip === false && r2.search.sparseBM25 === false, "sedimentDedup: 全局 true 时仍强制 false —— 全局 flag 漏不进去(ADR 0037 核心保证)");
+  ok(r2.search.stage1Skip === false && r2.search.sparseBM25 === false && r2.search.dedupChunk0Aggregation === true, "sedimentDedup: 全局 flip 时仍钉 stage1Skip=false/sparseBM25=false/dedupChunk0=true —— 全局 flag 漏不进去(ADR 0037 核心保证)");
   ok(r.returnVerdict === false, "sedimentDedup: returnVerdict false");
 }
 // correctionSearch: status:[active], limit:10

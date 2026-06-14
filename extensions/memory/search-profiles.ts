@@ -44,9 +44,11 @@ export const SEARCH_PROFILES: Record<SearchProfileName, SearchProfile> = {
   // rewriter 在调用方(memory-context-injector), 不在 profile。
   pathAInject: { name: "pathAInject", filtersMode: "fixed", status: ["active"], limit: (s) => s.pathA.searchLimit, returnVerdict: true },
   // sediment 去重: status:[all], limit:5。ADR 0036 §9.1 条件2 + §11: 此脆弱路径 pin
-  // stage1Skip=false + sparseBM25=false(近重质量未验, 不随全局 flag 漂移)。near-dup
+  // stage1Skip=false + sparseBM25=false(近重质量未验, 不随全局 flag 漂移)。另 pin
+  // dedupChunk0Aggregation=true(ADR 0036 P4 条件1): multiVector flip 后 dedup 只用 chunk0
+  // head 聚合, 不让共享尾段 chunk 的 distinct entry 浮上为近重候选(实测 -74% 新增邻居)。near-dup
   // 判定与 relevantEntriesForCurator/readonly-rule-neighbors 入参由调用方控(preloadedEntries)。
-  sedimentDedup: { name: "sedimentDedup", filtersMode: "fixed", status: ["all"], limit: () => 5, searchOverrides: () => ({ stage1Skip: false, sparseBM25: false }), returnVerdict: false },
+  sedimentDedup: { name: "sedimentDedup", filtersMode: "fixed", status: ["all"], limit: () => 5, searchOverrides: () => ({ stage1Skip: false, sparseBM25: false, dedupChunk0Aggregation: true }), returnVerdict: false },
   // sediment 纠错: status:[active], limit:10。
   correctionSearch: { name: "correctionSearch", filtersMode: "fixed", status: ["active"], limit: () => 10, returnVerdict: false },
 };

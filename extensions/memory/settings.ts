@@ -33,6 +33,7 @@ export interface SearchSettings {
   stage1Skip: boolean;              // ADR 0036: 跳过 stage1 LLM, stage0 top-K 直出 stage2(两阶段塔缩)
   sparseBM25: boolean;             // ADR 0036: sparse 用 char n-gram BM25(补中文/符号)替朴素子串
   queryRouting: boolean;           // ADR 0036 P5: toolSearch 精确直查路由(query 恰为 slug 或 ADR 编号 → 直接命中跳 LLM)
+  dedupChunk0Aggregation: boolean; // ADR 0036 P4 条件1: dedup 路径 topN 只用 chunk0(head)向量, 避免 multiVector max-sim 的 false-merge 注入
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -83,6 +84,11 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // 正常检索 —— 精确直查是“锦上添花快路径”, 永不抑制召回。语义/符号 query 路由偏置
   // (sparse-first/dense-first)留待 stage0 RRF 权重调参, 不在此 flag 内。
   queryRouting: false,
+  // ADR 0036 P4 条件1(dedup 分离): 默认 false(maxsim)。sedimentDedup profile 钉 true
+  // —— multiVector flip 后 dedup 用 chunk0(head)聚合, 不让共享尾段 chunk 的 distinct entry
+  // 浮上为近重候选(实测 multiVector 下 235→62 新增邻居, -74%)。multiVector off 时
+  // 仅 1 chunk, chunk0==maxsim(no-op)。
+  dedupChunk0Aggregation: false,
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -236,6 +242,7 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage1Skip: asBoolean(search.stage1Skip, DEFAULT_SEARCH_SETTINGS.stage1Skip),
     sparseBM25: asBoolean(search.sparseBM25, DEFAULT_SEARCH_SETTINGS.sparseBM25),
     queryRouting: asBoolean(search.queryRouting, DEFAULT_SEARCH_SETTINGS.queryRouting),
+    dedupChunk0Aggregation: asBoolean(search.dedupChunk0Aggregation, DEFAULT_SEARCH_SETTINGS.dedupChunk0Aggregation),
   };
 }
 

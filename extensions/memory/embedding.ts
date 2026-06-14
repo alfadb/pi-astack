@@ -333,7 +333,7 @@ export class VectorIndex {
   topN(
     queryVec: number[],
     n: number,
-    opts?: { scopes?: Set<string>; exclude?: Set<string>; allowSlugs?: Set<string> },
+    opts?: { scopes?: Set<string>; exclude?: Set<string>; allowSlugs?: Set<string>; agg?: "maxsim" | "chunk0" },
   ): Array<{ slug: string; score: number }> {
     this.ensureNorm();
     const q = Float32Array.from(queryVec);
@@ -350,8 +350,13 @@ export class VectorIndex {
       if (opts?.scopes && !opts.scopes.has(rec.scope)) continue; // before-topN
       // ADR 0036 P4 多向量: entry 分数 = 各 sub-vector 与 query 的最大余弦
       // (late-interaction max-sim)。短 entry 仅 1 个 sub-vector, 等同单向量。
+      // ADR 0036 P4 条件1(dedup 分离): agg="chunk0" 只用首段(head)向量 —— dedup 路径
+      // 专用, 避免 max-sim 让共享 boilerplate/尾段 chunk 的 distinct entry 浮上为近重候选
+      // (false-merge 注入, 实测 235→62 新增邻居 -74%)。multiVector off 时仅 1 chunk, 与
+      // maxsim 等价(no-op)。
+      const vlist = opts?.agg === "chunk0" ? rec.vs.slice(0, 1) : rec.vs;
       let best = -Infinity;
-      for (const v of rec.vs) {
+      for (const v of vlist) {
         let d = 0;
         const L = Math.min(v.length, q.length);
         for (let i = 0; i < L; i++) d += v[i] * q[i];
