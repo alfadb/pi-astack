@@ -51,16 +51,9 @@ const mk = (skip) => ({ ...baseSettings, search: { ...baseSettings.search, stage
 const SKIP = process.env.ORACLE_SKIP !== "0";
 const threeS = mk(false), cmpS = mk(SKIP);
 
-const queries = [
-  "stage1 候选检索改成 embedding 向量",
-  "sediment 写入路径 content-hash 增量",
-  "scope filter 必须在 topN 之前执行",
-  "全局索引 prune 跨 project 数据丢失",
-  "git singleflight lock index race condition",
-  "ModelRegistry getApiKeyAndHeaders auth resolution",
-  "ADR 0035 sublinear retrieval architecture decision",
-  "dispatch parallel T0 cross-vendor blind review",
-];
+// ADR 0036 P6: 共享 16-query 金标集(与 oracle-goldset.mjs 同源, 确认 5 点差距在更大样本稳定)
+const QUERIES_PATH = path.join(__dirname, "goldset-queries.json");
+const queries = JSON.parse(fs.readFileSync(QUERIES_PATH, "utf8")).map((q) => q.query);
 const _off = Number(process.env.ORACLE_OFFSET || 0), _lim = Number(process.env.ORACLE_LIMIT || queries.length);
 const runQ = queries.slice(_off, _off + _lim);
 const jacc = (a, b) => { const A = new Set(a), B = new Set(b); const i = [...A].filter((x) => B.has(x)).length; const u = new Set([...a, ...b]).size; return u === 0 ? 1 : i / u; };

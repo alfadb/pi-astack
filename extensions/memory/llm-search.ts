@@ -885,6 +885,10 @@ async function executeSearch(
 
   // 安全网双触发(修订 6): verdict=none OR pool<K → 一次有界扩召(topN×3 上限 400),
   // 仍 none 返回 none(不全库)。insufficient_pool 用结构信号 pool<K, 非绝对 cosine 门。
+  // ADR 0036 §4(P6 3×T0 评审条件 1, 兑现安全网契约): 扩召 retry **强制 stage1Skip=false**,
+  // 让 stage1 LLM 在扩召池上救场。stage1Skip=true(两阶段塌缩)转产后, 这是 stage1 降级为
+  // 低频 fallback(非删除)的落点 —— 仅 verdict=none/pool<K 触发, blast radius 小。
+  // stage1Skip=false(现默认)时此覆写无行为变化(primary 已走 stage1)。
   let expanded = false;
   const poolTooSmall = !!pool && pool.mode === "hybrid" && candidateEntries.length < settings.search.stage0InsufficientPoolK;
   if (pool && pool.mode === "hybrid" && (result.verdict === "none" || poolTooSmall)) {
@@ -892,7 +896,8 @@ async function executeSearch(
     const expSettings: MemorySettings = { ...settings, search: { ...settings.search, stage0PoolLimit: expandedPoolLimit } };
     const exp = await selectStage0Pool(query, corpus, expSettings, modelRegistry, filters);
     if (exp && exp.candidateEntries.length > candidateEntries.length) {
-      const retry = await runTwoStageSearch(query, exp.candidateEntries, settings, modelRegistry, signal, finalLimit, candidateLimit);
+      const retrySettings: MemorySettings = { ...settings, search: { ...settings.search, stage1Skip: false } };
+      const retry = await runTwoStageSearch(query, exp.candidateEntries, retrySettings, modelRegistry, signal, finalLimit, candidateLimit);
       if (retry.verdict === "has_relevant" || retry.hits.length > result.hits.length) {
         result = retry; pool = exp; candidateEntries = exp.candidateEntries; expanded = true;
       }

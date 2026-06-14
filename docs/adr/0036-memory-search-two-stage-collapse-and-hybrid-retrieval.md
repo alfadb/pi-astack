@@ -1,6 +1,6 @@
 # ADR 0036: memory_search 两阶段塌缩 + hybrid 检索增强
 
-- Status: Proposed (探索中, dark-launch flag off)
+- Status: Proposed (探索中); P1/P3 dark-launch flag **仍 off**; P6 跨厂商金标达标 + 3×T0 评审完成(GO-WITH-CONDITIONS); 全局 flip **暂缓**, 已落安全网契约修复, 余条件见 §9
 - Date: 2026-06-14
 - Supersedes-direction: 承接 ADR 0035(stage0 embedding 候选检索); 本 ADR 修订 stage1 的存废
 
@@ -47,7 +47,7 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 | P3 BM25 复活 | char n-gram BM25 替换 sparseMatchSlugs + RRF 融合 | 中文/符号 recall↑ |
 | P4 多向量 | head/tail 双向量解截断 | 长 entry dense 可信 |
 | P5 路由 | query 路由 + sediment dedup 走 dense-only | 治成本主体 |
-| P6 切换 | 金标集 + 21-30 query×3 验证 → 删 stage1 转正 | coverage 接近随机基线 |
+| P6 切换(本次, 见 §8) | 跨厂商投票金标(16q × 4 T0)recall@gold + ablation-16 | ✅ two-stage recall@gold ≥ three; ablation 扰动 ≤ LLM 自噪声 → 提案转正待评审 |
 
 ## 6. 盲区与风险(5×T0 共识)
 
@@ -63,3 +63,66 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 - agentic grep: 降级为符号/精确路由的一个通道, 不能主召回(中文语义弱 + 多轮不可控)
 - full-body 全量 LLM: 仅 oracle/kill-switch
 - P8 紧凑 surface: 绕路(在错的层面省钱), 被两阶段塌缩取代
+
+## 8. P6 转产金标验证(本次): 跨厂商投票金标 + recall@gold
+
+承接 §6 盲区(ground-truth 循环自证): §3 的 oracle(LLM-vs-LLM)与 derives_from/related 都有系统正偏, 不构成转产硬门。本次建立独立金标 —— 不靠 sediment 建立的关联, 而是跨厂商 T0 读 query+entry 内容投票判定相关性 —— 在其上比较 two-stage(删 stage1)与 three-stage 的 recall@gold。工具: `scripts/oracle-goldset.mjs`(material/aggregate/eval 三模式)+ `scripts/goldset-queries.json`(16 query, 中文/英文/code 符号/概念混合)。
+
+### 8.1 金标构建(跨过循环自证)
+
+- 16 query × 每 query stage0 宽候选池 POOL_LIMIT=80(宽于 two-stage 候选窗口 candidateLimit=50, 避免“金标候选池 == 被评估池”的循环)。
+- 标注**不在脚本里调 model**(上一轮证伪: sub2api SPA-200 网关陷阱 + 各 provider auth 差异 → 裸 fetch / callSearchModel 标注全 0 票)。正确路径 = 主会话 `dispatch_parallel` 派跨厂商 T0, 每个 model 用 read 工具读其 batch 的 compact query 文件, 输出 `{id:[slug...]}`, 主会话聚合。
+- **4 个主力跨厂商 T0 投票**: `claude-opus-4-8`(Anthropic) / `gpt-5.5`(OpenAI) / `deepseek-v4-pro`(DeepSeek) / `kimi-k2.6`(Moonshot)。阈值 ≥2/4 共识 = gold。
+- **MiniMax-M3 排除**: 实测每 query 选 50-95/80 候选(几乎全池), 是 memory 警告的“弱模型凑满 quota”失败模式 + 模型 roster 明确标 MiniMax-M3 为 T0-candidate(非主力投票者)。一个“几乎全选”的投票者无区分度, 计入会把有效阈值降到“≥1 主力 + M3”污染金标, 故剔除。
+- 结果: 16 query 全部非空金标(每 query 1-31, 共 143 gold slug)。广义主题(q6 T0 盲审=31, q11 dispatch parallel=27)自然金标多; 精确主题(q4 git 跟踪=1, q2/q9/q13=2)金标少。
+
+### 8.2 recall@gold 评估(oracle = deepseek-v4-pro, 两臂同模型 → 模型偏差在 two-vs-three 差值中抵消)
+
+| 指标(16 query 平均) | 值 |
+|---|---|
+| stage0 coverage@gold(窗口 top-50) | 90.2% |
+| **three-stage recall@gold** | **53.7%** |
+| **two-stage recall@gold(删 stage1)** | **58.3%** |
+
+- two-stage recall@gold(58.3%)**≥** three-stage(53.7%), 高 4.6 点, 在 LLM 随机性内。删 stage1 不丢真 recall, 略有提升(stage1 LLM 偶尔把 dense-top 候选筛掉, 而 two-stage 直接把 dense top-50 喂 stage2 精排)。
+- 逐 query: 13/16 two ≥ three 或持平; q10(62% vs 38%)、q12(86% vs 57%)显著利好 two; three 占优仅 q11(33% vs 26%)且差距小。q1/q9/q14 两臂同为 0%(stage2 精排行为, 与 stage1 无关 —— coverage@gold 窗口含金标但 stage2 top-10 未选中, 两臂等同)。
+- 注: 广义金标(>10)下 recall@gold 受 stage2 top-10 上限压制(31 金标最多召回 10/31=32%), 故绝对值偏低对两臂对称, 关键是 two-vs-three 差值。
+
+### 8.3 ablation-16 确认(LLM-vs-LLM 一致性, 把 §3 的 8-query 扩到 16)
+
+| 对照(16 query) | coverage(three⊆cmp) | jaccard |
+|---|---|---|
+| three-vs-**TWO**(删 stage1) | 82.5% | 58.1% |
+| three-vs-three(随机性基线) | 77.7% | 57.2% |
+
+- 删 stage1 的扰动(three-vs-two)**不超过**(实际略低于)LLM 三阶段自身两次随机跑的扰动(three-vs-three 基线): coverage 82.5% > 77.7%, jaccard 58.1% ≈ 57.2%。
+- §3 在 8 query 时 two-vs-three 比基线低 5 点; 扩到 16 query 后差值符号**翻转**(two 反高于基线)。差值符号不稳定本身就是“差异在噪声量级”的判据 —— stage1 的边际贡献淹没在 LLM 非确定性里。
+
+### 8.4 转产判据达标 + 提案
+
+- 判据(§5 P6 门): two-stage recall@gold ≈ three-stage, 且金标跨厂商投票(非单模型凑满, 非 derives_from)。**达标**(two 58.3% ≥ three 53.7%; 4 厂商 ≥2/4 共识)。
+- 提案: `DEFAULT_SEARCH_SETTINGS.stage1Skip` 由 `false` 转 `true`(两阶段塌缩转产, 省 ~91% LLM token)。stage1 代码保留为 flag-off kill-switch + 安全网底座, 不删除。
+- **安全网契约已修复(本次, 3×T0 条件 1)**: 原 `executeSearch` 安全网只“扩 stage0 池后同设置重跑”, 与 §4“verdict=none / pool<K 回退 stage1 LLM 救场”矛盾。已改: 扩召 retry 强制 `stage1Skip=false`(`llm-search.ts` 安全网块), stage1 LLM 在扩召池上救场。stage1Skip=false(现默认)无行为变化; 转产 true 后这是 stage1 降级为低频 fallback(非删除)的落点。
+- 未做(超出 stage1 转产范围, 各自独立 flag/门): P3 BM25(sparseBM25, smoke 已验中文 0→159)、P4 多向量、P5 query 路由 + sediment dedup dense-only 仍 dark, 不随 P6 一起转。
+
+## 9. 3×T0 评审共识(本次)+ 转产门修订
+
+3×跨厂商 T0 盲审(`claude-opus-4-8` / `gpt-5.5` / `kimi-k2.6`, 各自读 ADR+脚本+代码) —— **三家一致 GO-WITH-CONDITIONS, 无人背书今日盲 flip 全局默认**。共识: 论点(stage1 边际 recall ≈ 0, derives_from 循环已真正跳出)成立, 但全局 flip 过早, 须先过下列门。
+
+### 9.1 阶性门(flip 前必过)
+
+- **条件 1 —— 安全网契约(三家一致)**: 已修(§8.4 + `llm-search.ts` 安全网 retry 强制 stage1Skip=false)。✅
+- **条件 2 —— sediment dedup 不能随车(opus 最强)**: flip `DEFAULT_SEARCH_SETTINGS.stage1Skip` 会连带翻转 sediment curator 去重路径(`curator.ts` `llmSearchEntries(..., status:["all"], limit:5)`, 共用 `resolveSettings()` 无每-caller 覆写)。金标是 active-only 检索查询, 未评估 all-status 近重检测; §6 标 dedup 为最脆弱路径(false-merge → corpus corruption, 比漏召严重)。要求: 给 curator 路径 pin `stage1Skip=false`(或每-caller 覆写), 不让 search-recall 结论静默改 dedup。
+- **条件 3 —— stale-floor 序制混淆(kimi 尖锐)**: `selectStage0Pool` 把 stale/missing floor(上限 `ceil(maxCand×0.1)=40`)排在候选首; `stage1Skip` 直取 `slice(0, candidateLimit=50)` → 陈旧重索引状态下 stage2 可能看到 ~40 stale + ~10 dense。本次 eval 用 fresh 索引(~0 stale)未触发; 生产 stale-heavy(如批量迁移)会让 floor 挤出 dense top-K。three-stage 由 stage1 看全池(≤0400)免疫。要求: stage1Skip 切片前 dense-relevance 优先重排(仍保 freshness floor 进窗口), 或限 floor 在窗口占比, 重评。
+- **条件 4 —— 残余循环 + 统计严谨(opus/gpt/kimi)**: (a) eval oracle(deepseek-v4-pro)也是标注员 → 重跑 eval 用扣出的 held-out oracle(绝对值去偏, 但 two-vs-three 差值本就同模型抵消, 该项不影响结论方向); (b) gold ⋂ stage0 top-80 → coverage@gold=90% 部分重言, 仅证“stage1 删除在 stage0 已找到的前提下”非端到端; (c) 16q 单跑无 CI < §6 自定 21-30q×3+CI 门 → flip 改为可监控 staged rollout(监 `verdict=none` 率 + `stage0_pool_hit`, 可一键 flag→false 回滚)。
+- **条件 5 —— stage1Model ≠ stage2Model(opus)**: eval 两阶段同用 v4-pro, 最利于“stage1 决人”(stage1 预选 = stage2 本就会选)。生产若 stage1Model≠stage2Model, 该 eval 不代表。flip 前须着明生产型号配置并重确认。
+
+### 9.2 金标公论: MiniMax 排除不能污染 gold(解析证明, 免重跑)
+
+评审条件“M3 inclusion sensitivity”可解析结: M3 每 query 选近全池(非区分性)。若以多数阈 ≥3/5 纳入 M3, 则 gold = {≥2 真投票 **且** M3 也投} ⊆ {≥2 真投票} = 现 ≥2/4 gold —— M3 只能**修剪**(去掉 M3 恰好未投的少数 ≥2/4 slug)而**永不增加**假 gold。所以排除 M3 不是在掩盖污染; 反之若以低阈 ≥2/5 纳入, M3 会把“1 真投票 + M3”括进 gold(污染), 这正是改用 4 真投票者 ≥2/4 的原因。结论对 M3 纳入(多数阈)鲁棒。
+
+### 9.3 修订后的 P6 转产路径
+
+1. 本次已落: 安全网契约修复(条件 1)、金标集+eval 工具化(`oracle-goldset.mjs` material/aggregate/eval)、ADR 证据+评审存档。flag 仍 off。
+2. flip 前补(条件 2/3/5): curator dedup 路径 pin stage1Skip=false; stage1Skip 切片 dense 优先重排; 着明生产 stage1/stage2 型号。
+3. flip 时(条件 4): 转为 staged rollout(非一次性全局), 监控 verdict=none 率/pool_hit, 保留 flag-off kill-switch 及即时回滚。

@@ -1,0 +1,501 @@
+{
+  "stage1 候选检索改成 embedding 向量": {
+    "gold": [
+      "doubao-embedding-vision-passes-second-brain-recall-validation",
+      "doubao-embedding-vision-via-volcengine-coding-plan-is-the-operational-embedding-choice-for-second-br",
+      "doubao-embedding-vision-validation-on-real-second-brain-corpus",
+      "doubao-embedding-vision-is-the-only-currently-reachable-embedding-upstream-on-sub2api",
+      "doubao-embedding-vision-via-sub2api-hard-cap-is-batch-10",
+      "sub2api-gateway-requires-v1-prefix-for-embeddings-endpoint",
+      "pi-models-json-has-no-native-embedding-api-type",
+      "register-embedding-providers-in-models-json-without-adding-them-to-modelcurator-tiers",
+      "memory-stage1-full-body-surface-dominates-flash-cost",
+      "vector-index-for-memory-retrieval-should-not-be-git-tracked",
+      "全局向量索引必须-scope-filtered-prune-否则跨-project-reconcile-互相删除",
+      "scope-filter-must-run-before-topn-selection-not-after",
+      "stale-freshness-signals-must-match-the-reconcile-embed-set",
+      "stage0-candidate-pool-needs-stale-floor-to-preserve-freshness-invariant",
+      "sublinear-retrieval-architecture-is-required-when-knowledge-base-self-evolves",
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination",
+      "sparse-keyword-scoring-needs-field-weighting-to-not-crowd-out-dense-recall-in-hybrid-retrieval",
+      "search-time-content-hash-diff-strictly-dominates-dirty-manifest-for-freshness-when-search-loads-full",
+      "related-slug-recall-is-a-positively-biased-proxy-for-end-to-end-query-recall"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "doubao-embedding-vision-passes-second-brain-recall-validation": 4,
+      "doubao-embedding-vision-via-volcengine-coding-plan-is-the-operational-embedding-choice-for-second-br": 4,
+      "doubao-embedding-vision-validation-on-real-second-brain-corpus": 4,
+      "doubao-embedding-vision-is-the-only-currently-reachable-embedding-upstream-on-sub2api": 4,
+      "doubao-embedding-vision-via-sub2api-hard-cap-is-batch-10": 4,
+      "sub2api-gateway-requires-v1-prefix-for-embeddings-endpoint": 4,
+      "pi-models-json-has-no-native-embedding-api-type": 4,
+      "register-embedding-providers-in-models-json-without-adding-them-to-modelcurator-tiers": 4,
+      "memory-stage1-full-body-surface-dominates-flash-cost": 3,
+      "vector-index-for-memory-retrieval-should-not-be-git-tracked": 3,
+      "全局向量索引必须-scope-filtered-prune-否则跨-project-reconcile-互相删除": 3,
+      "scope-filter-must-run-before-topn-selection-not-after": 3,
+      "stale-freshness-signals-must-match-the-reconcile-embed-set": 3,
+      "stage0-candidate-pool-needs-stale-floor-to-preserve-freshness-invariant": 3,
+      "sublinear-retrieval-architecture-is-required-when-knowledge-base-self-evolves": 2,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination": 2,
+      "sparse-keyword-scoring-needs-field-weighting-to-not-crowd-out-dense-recall-in-hybrid-retrieval": 2,
+      "search-time-content-hash-diff-strictly-dominates-dirty-manifest-for-freshness-when-search-loads-full": 2,
+      "related-slug-recall-is-a-positively-biased-proxy-for-end-to-end-query-recall": 2,
+      "stage1-candidate-surface-compactness-trades-recall-for-tokens-on-weak-models": 1,
+      "patching-grep-cannot-solve-semantic-equivalence": 1,
+      "whole-vault-llm-recall-does-not-scale": 1,
+      "stage1-uses-full-body-candidate-surface": 1,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-pollution": 1,
+      "2026-05-01-pi-embedding-fallback-keyword-search": 1,
+      "china-embedding-api-landscape-no-3-large": 1
+    }
+  },
+  "sediment 写入路径 content-hash 增量去重": {
+    "gold": [
+      "jaccard-is-only-a-dedup-prefilter",
+      "outcome-ledger-event-id-dedup-architecture",
+      "classifier-and-extractor-have-disjoint-authority",
+      "single-agent-lookup-beats-multi-voter-sediment"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "jaccard-is-only-a-dedup-prefilter": 4,
+      "outcome-ledger-event-id-dedup-architecture": 4,
+      "classifier-and-extractor-have-disjoint-authority": 2,
+      "single-agent-lookup-beats-multi-voter-sediment": 2,
+      "search-time-content-hash-diff-strictly-dominates-dirty-manifest-for-freshness-when-search-loads-full": 1,
+      "adr-0035-search-time-hash-diff-replaces-dirty-manifest-when-search-loads-all-entries": 1,
+      "sediment-checkpoint-only-on-terminal-success": 1,
+      "sediment-dedupe-should-evolve-knowledge-not-only-reject": 1,
+      "blind-quorum-dedup-writes-duplicates": 1,
+      "search-quality-controls-sediment-dedup-quality": 1,
+      "memory-search-is-sediment-lookup-kernel": 1,
+      "curator-memory-search-before-create": 1,
+      "sediment-curator-dedup-search-bypasses-stage0-optimization": 1,
+      "adr-0028-invariants-partially-satisfied-only-under-non-default-flags": 1
+    }
+  },
+  "scope filter 必须在 topN 之前执行": {
+    "gold": [
+      "scope-filter-must-run-before-topn-selection-not-after",
+      "vector-index-store-root-basename-is-more-reliable-than-frontmatter-for-scope-tagging"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "scope-filter-must-run-before-topn-selection-not-after": 4,
+      "vector-index-store-root-basename-is-more-reliable-than-frontmatter-for-scope-tagging": 4,
+      "全局向量索引必须-scope-filtered-prune-否则跨-project-reconcile-互相删除": 1
+    }
+  },
+  "全局索引 prune 跨 project 数据丢失": {
+    "gold": [
+      "全局向量索引必须-scope-filtered-prune-否则跨-project-reconcile-互相删除",
+      "vector-index-store-root-basename-is-more-reliable-than-frontmatter-for-scope-tagging"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "全局向量索引必须-scope-filtered-prune-否则跨-project-reconcile-互相删除": 4,
+      "vector-index-store-root-basename-is-more-reliable-than-frontmatter-for-scope-tagging": 2,
+      "scope-filter-must-run-before-topn-selection-not-after": 1,
+      "vector-index-for-memory-retrieval-should-not-be-git-tracked": 1,
+      "stale-freshness-signals-must-match-the-reconcile-embed-set": 1
+    }
+  },
+  "向量索引是否应该 git 跟踪": {
+    "gold": [
+      "vector-index-for-memory-retrieval-should-not-be-git-tracked"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "vector-index-for-memory-retrieval-should-not-be-git-tracked": 4,
+      "2026-05-07-world-knowledge-markdown-git-canonical-gbrain-index": 1,
+      "karpathy-llm-wiki-architecture-comparison": 1,
+      "local-map-machine-auth-not-git-tracked": 1,
+      "gitignore-for-pi-astack-runtime-state": 1,
+      "全局向量索引必须-scope-filtered-prune-否则跨-project-reconcile-互相删除": 1,
+      "search-time-content-hash-diff-strictly-dominates-dirty-manifest-for-freshness-when-search-loads-full": 1,
+      "adr-0035-search-time-hash-diff-replaces-dirty-manifest-when-search-loads-all-entries": 1
+    }
+  },
+  "sediment 去重每轮全库 full_body 成本": {
+    "gold": [
+      "sediment-curator-dedupe-search-bypassed-adr-0035-stage0-optimization",
+      "sediment-curator-dedup-search-bypasses-stage0-optimization",
+      "memory-stage1-full-body-surface-dominates-flash-cost",
+      "stage1-cost-attribution-requires-cache-hit-rate-not-just-token-volume",
+      "pi-astack-flash-cost-lives-in-rewriter-and-curator-not-stage1-or-classifier",
+      "full-body-stage1-prioritizes-recall-over-cache-compactness"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "sediment-curator-dedupe-search-bypassed-adr-0035-stage0-optimization": 4,
+      "sediment-curator-dedup-search-bypasses-stage0-optimization": 4,
+      "memory-stage1-full-body-surface-dominates-flash-cost": 4,
+      "stage1-cost-attribution-requires-cache-hit-rate-not-just-token-volume": 4,
+      "pi-astack-flash-cost-lives-in-rewriter-and-curator-not-stage1-or-classifier": 3,
+      "full-body-stage1-prioritizes-recall-over-cache-compactness": 2
+    }
+  },
+  "T0 盲审必须跨厂商多模型投票": {
+    "gold": [
+      "three-t-zero-blind-review-protocol-for-architecture-decisions",
+      "three-tier-iterative-blind-audit-pipeline",
+      "three-model-blind-review-protocol",
+      "multi-llm-audit-as-standard-workflow",
+      "three-way-t0-review-pattern-for-high-risk-state-machine-refactors",
+      "t0-capability-axis-architecture-over-vendor",
+      "reviewer-model-family-diversity",
+      "cross-provider-parallelism-reduces-rate-limit-coupling",
+      "multi-llm-review-convergence",
+      "multi-model-review-increases-detection-of-latent-concurrency-gaps",
+      "minimax-m3-should-be-t0-candidate-not-primary-t0",
+      "three-model-t0-review-pipeline-for-sediment-fixes",
+      "three-model-t0-audit-per-round-consistently-finds-p0-invariant",
+      "t0-term-definition-as-flagship-tier-0-model-combo",
+      "two-model-cross-vendor-review-suffices-for-narrow-reversible-dogfood-driven-fixes",
+      "adr-0024-r7-review-multi-view-verification-requires-blind-first-reviewer-protocol-with-two-api-calls",
+      "pull-cross-vendor-t0-round-when-execution-step-conflicts-with-stated-invariant",
+      "adr-review-practice-uses-cross-model-multi-round-dispatch-pattern",
+      "shared-vote-prompt-breaks-model-independence",
+      "3-way-audit-roi-inflection-point",
+      "three-t0-design-review-for-stage-go-nogo-decisions",
+      "pi-astack-cross-model-parallel-review-workflow",
+      "anti-pattern-three-rejected-mechanical-approaches",
+      "devil-advocate-virtual-reviewer-rlhf-mitigation",
+      "glm-5-1-should-remain-standard-tier-not-t0",
+      "three-t-zero-blind-review-for-deterministic-auditor-prescribed-fixes",
+      "deterministic-fix-rounds-bypass-three-t0-review",
+      "multi-model-cross-file-audit-discovers-true-p0-every-round-read-only-single-file-audit-cannot",
+      "multi-round-multi-llm-cross-review-catches-deeper-architecture-bugs",
+      "external-multi-model-audit-catches-self-review-blind-spot",
+      "multi-round-blind-audit-prevents-audit-fatigue"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "three-t-zero-blind-review-protocol-for-architecture-decisions": 4,
+      "three-tier-iterative-blind-audit-pipeline": 4,
+      "three-model-blind-review-protocol": 4,
+      "multi-llm-audit-as-standard-workflow": 4,
+      "three-way-t0-review-pattern-for-high-risk-state-machine-refactors": 4,
+      "t0-capability-axis-architecture-over-vendor": 4,
+      "reviewer-model-family-diversity": 4,
+      "cross-provider-parallelism-reduces-rate-limit-coupling": 4,
+      "multi-llm-review-convergence": 4,
+      "multi-model-review-increases-detection-of-latent-concurrency-gaps": 4,
+      "minimax-m3-should-be-t0-candidate-not-primary-t0": 4,
+      "three-model-t0-review-pipeline-for-sediment-fixes": 3,
+      "three-model-t0-audit-per-round-consistently-finds-p0-invariant": 3,
+      "t0-term-definition-as-flagship-tier-0-model-combo": 3,
+      "two-model-cross-vendor-review-suffices-for-narrow-reversible-dogfood-driven-fixes": 3,
+      "adr-0024-r7-review-multi-view-verification-requires-blind-first-reviewer-protocol-with-two-api-calls": 3,
+      "pull-cross-vendor-t0-round-when-execution-step-conflicts-with-stated-invariant": 3,
+      "adr-review-practice-uses-cross-model-multi-round-dispatch-pattern": 3,
+      "shared-vote-prompt-breaks-model-independence": 3,
+      "3-way-audit-roi-inflection-point": 3,
+      "three-t0-design-review-for-stage-go-nogo-decisions": 3,
+      "pi-astack-cross-model-parallel-review-workflow": 3,
+      "anti-pattern-three-rejected-mechanical-approaches": 2,
+      "devil-advocate-virtual-reviewer-rlhf-mitigation": 2,
+      "glm-5-1-should-remain-standard-tier-not-t0": 2,
+      "three-t-zero-blind-review-for-deterministic-auditor-prescribed-fixes": 2,
+      "deterministic-fix-rounds-bypass-three-t0-review": 2,
+      "multi-model-cross-file-audit-discovers-true-p0-every-round-read-only-single-file-audit-cannot": 2,
+      "multi-round-multi-llm-cross-review-catches-deeper-architecture-bugs": 2,
+      "external-multi-model-audit-catches-self-review-blind-spot": 2,
+      "multi-round-blind-audit-prevents-audit-fatigue": 2,
+      "r10-cross-model-audit-definitions-and-liveness-blind-spots-for-adrs-0025-0026": 1,
+      "adr-slimming-verification-requires-diff-plus-cross-vendor-t0-audit": 1,
+      "multi-llm-review-exposes-five-actionable-design-flaws-in-intent-classification-architecture": 1,
+      "adr-0022-closing-milestone-t0-xhigh-audit-results": 1,
+      "t0-billing-blind-capability-principle": 1,
+      "t0-roster-should-be-structured-under-model-curator-tiers": 1,
+      "m3-cannot-replace-v4-pro-at-fallback-or-t0-primary-roles": 1,
+      "model-curator-tiers-required-structured-roster": 1,
+      "self-check-filter-for-multi-llm-document-review": 1,
+      "turn-boundary-compaction-review-round-triggered-by-monkey-patch-risk": 1,
+      "mechanical-guard-cleanup-via-three-tier-audit-and-blind-review": 1,
+      "layer-f-self-check-is-the-standard-multi-llm-audit-pipeline-framing-for-ai-native-capability-reviews": 1,
+      "multi-llm-review-framing-bias-calibration-24pp-systematic-downward-error": 1,
+      "t0-archival-when-vendor-suspends-access": 1
+    }
+  },
+  "freshness 不变量 新写 entry 立即可召回": {
+    "gold": [
+      "fresh-search-surface-preserves-new-entry-recall",
+      "result-cache-breaks-memory-freshness",
+      "kv-cache-is-not-result-cache",
+      "stage0-candidate-pool-needs-stale-floor-to-preserve-freshness-invariant",
+      "search-time-content-hash-diff-strictly-dominates-dirty-manifest-for-freshness-when-search-loads-full",
+      "adr-0035-search-time-hash-diff-replaces-dirty-manifest-when-search-loads-all-entries",
+      "stale-freshness-signals-must-match-the-reconcile-embed-set"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "fresh-search-surface-preserves-new-entry-recall": 4,
+      "result-cache-breaks-memory-freshness": 4,
+      "kv-cache-is-not-result-cache": 4,
+      "stage0-candidate-pool-needs-stale-floor-to-preserve-freshness-invariant": 4,
+      "search-time-content-hash-diff-strictly-dominates-dirty-manifest-for-freshness-when-search-loads-full": 4,
+      "adr-0035-search-time-hash-diff-replaces-dirty-manifest-when-search-loads-all-entries": 4,
+      "stale-freshness-signals-must-match-the-reconcile-embed-set": 4,
+      "freshness-as-retrieval-signal-is-wrong-layer": 1,
+      "kind-aware-timeline-freshness-as-field-not-score-multiplier": 1,
+      "memory-timestamps-need-local-datetime-precision": 1,
+      "search-results-show-freshness-not-full-timeline": 1,
+      "knowledge-base-self-evolving": 1,
+      "time-signals-must-not-enter-stage1-recall-gate": 1,
+      "full-body-stage1-prioritizes-recall-over-cache-compactness": 1
+    }
+  },
+  "git singleflight lock index race condition": {
+    "gold": [
+      "git-index-lock-serialization-across-pi-astack-extensions",
+      "git-sync-singleflight-index-lock-gap",
+      "single-flight-promise-queue"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "git-index-lock-serialization-across-pi-astack-extensions": 4,
+      "git-sync-singleflight-index-lock-gap": 4,
+      "single-flight-promise-queue": 4,
+      "abrain-auto-sync-to-remote-design-adr-0020": 1,
+      "adr-0020-auto-sync-verified-in-production": 1,
+      "merge-head-preflight-must-run-regardless-of-behind-count": 1
+    }
+  },
+  "ModelRegistry getApiKeyAndHeaders auth resolution": {
+    "gold": [
+      "github-copilot-streamsimple-path-verified-working-for-non-dispatch-calls",
+      "path-a-turn-0-cold-start-skips-all-memory-injection-due-to-missing-modelregistry"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "github-copilot-streamsimple-path-verified-working-for-non-dispatch-calls": 4,
+      "path-a-turn-0-cold-start-skips-all-memory-injection-due-to-missing-modelregistry": 2,
+      "sub2api-gateway-key-format-vs-official-provider-key-format": 1,
+      "model-curator-live-apply-avoids-unregister-first": 1
+    }
+  },
+  "ADR 0035 sublinear retrieval architecture decision": {
+    "gold": [
+      "sublinear-retrieval-architecture-is-required-when-knowledge-base-self-evolves",
+      "whole-vault-llm-recall-does-not-scale",
+      "doubao-embedding-vision-via-volcengine-coding-plan-is-the-operational-embedding-choice-for-second-br",
+      "vector-index-for-memory-retrieval-should-not-be-git-tracked",
+      "全局向量索引必须-scope-filtered-prune-否则跨-project-reconcile-互相删除",
+      "sparse-keyword-scoring-needs-field-weighting-to-not-crowd-out-dense-recall-in-hybrid-retrieval",
+      "sediment-curator-dedupe-search-bypassed-adr-0035-stage0-optimization",
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-pollution",
+      "stage1-candidate-surface-compactness-trades-recall-for-tokens-on-weak-models",
+      "two-stage-search-separates-recall-from-precision",
+      "doubao-embedding-vision-validation-on-real-second-brain-corpus",
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination",
+      "related-slug-recall-is-a-positively-biased-proxy-for-end-to-end-query-recall"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "sublinear-retrieval-architecture-is-required-when-knowledge-base-self-evolves": 4,
+      "whole-vault-llm-recall-does-not-scale": 4,
+      "doubao-embedding-vision-via-volcengine-coding-plan-is-the-operational-embedding-choice-for-second-br": 4,
+      "vector-index-for-memory-retrieval-should-not-be-git-tracked": 4,
+      "全局向量索引必须-scope-filtered-prune-否则跨-project-reconcile-互相删除": 4,
+      "sparse-keyword-scoring-needs-field-weighting-to-not-crowd-out-dense-recall-in-hybrid-retrieval": 3,
+      "sediment-curator-dedupe-search-bypassed-adr-0035-stage0-optimization": 3,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-pollution": 3,
+      "stage1-candidate-surface-compactness-trades-recall-for-tokens-on-weak-models": 3,
+      "two-stage-search-separates-recall-from-precision": 2,
+      "doubao-embedding-vision-validation-on-real-second-brain-corpus": 2,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination": 2,
+      "related-slug-recall-is-a-positively-biased-proxy-for-end-to-end-query-recall": 2,
+      "literal-token-search-fails-mixed-language-memory": 1,
+      "patching-grep-cannot-solve-semantic-equivalence": 1,
+      "scope-filter-must-run-before-topn-selection-not-after": 1
+    }
+  },
+  "dispatch parallel cross-vendor blind review": {
+    "gold": [
+      "pi-astack-cross-model-parallel-review-workflow",
+      "adr-review-practice-uses-cross-model-multi-round-dispatch-pattern",
+      "three-t-zero-blind-review-protocol-for-architecture-decisions",
+      "cross-provider-parallelism-reduces-rate-limit-coupling",
+      "three-tier-iterative-blind-audit-pipeline",
+      "three-model-blind-review-protocol",
+      "two-model-cross-vendor-review-suffices-for-narrow-reversible-dogfood-driven-fixes",
+      "multi-model-review-increases-detection-of-latent-concurrency-gaps",
+      "adr-0022-d7-audit-parallel-dispatch-pattern",
+      "reviewer-model-family-diversity",
+      "multi-round-blind-audit-prevents-audit-fatigue",
+      "multi-llm-review-convergence",
+      "t0-capability-axis-architecture-over-vendor",
+      "three-model-t0-audit-per-round-consistently-finds-p0-invariant",
+      "three-way-t0-review-pattern-for-high-risk-state-machine-refactors",
+      "multi-llm-audit-as-standard-workflow",
+      "adr-slimming-verification-requires-diff-plus-cross-vendor-t0-audit",
+      "adr-0024-r7-review-multi-view-verification-requires-blind-first-reviewer-protocol-with-two-api-calls",
+      "multi-model-cross-file-audit-discovers-true-p0-every-round-read-only-single-file-audit-cannot",
+      "multi-round-multi-llm-cross-review-catches-deeper-architecture-bugs",
+      "autonomous-evolution-blind-review-pipeline",
+      "three-model-t0-review-pipeline-for-sediment-fixes",
+      "pull-cross-vendor-t0-round-when-execution-step-conflicts-with-stated-invariant",
+      "multi-view-t0-review-dispatch-sub-agent-retry-regression",
+      "three-t0-design-review-for-stage-go-nogo-decisions",
+      "memory-architecture-second-round-three-model-double-blind-2026-05-07",
+      "three-t-zero-blind-review-for-deterministic-auditor-prescribed-fixes"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "pi-astack-cross-model-parallel-review-workflow": 4,
+      "adr-review-practice-uses-cross-model-multi-round-dispatch-pattern": 4,
+      "three-t-zero-blind-review-protocol-for-architecture-decisions": 4,
+      "cross-provider-parallelism-reduces-rate-limit-coupling": 4,
+      "three-tier-iterative-blind-audit-pipeline": 4,
+      "three-model-blind-review-protocol": 4,
+      "two-model-cross-vendor-review-suffices-for-narrow-reversible-dogfood-driven-fixes": 4,
+      "multi-model-review-increases-detection-of-latent-concurrency-gaps": 4,
+      "adr-0022-d7-audit-parallel-dispatch-pattern": 4,
+      "reviewer-model-family-diversity": 4,
+      "multi-round-blind-audit-prevents-audit-fatigue": 4,
+      "multi-llm-review-convergence": 4,
+      "t0-capability-axis-architecture-over-vendor": 4,
+      "three-model-t0-audit-per-round-consistently-finds-p0-invariant": 4,
+      "three-way-t0-review-pattern-for-high-risk-state-machine-refactors": 3,
+      "multi-llm-audit-as-standard-workflow": 3,
+      "adr-slimming-verification-requires-diff-plus-cross-vendor-t0-audit": 3,
+      "adr-0024-r7-review-multi-view-verification-requires-blind-first-reviewer-protocol-with-two-api-calls": 3,
+      "multi-model-cross-file-audit-discovers-true-p0-every-round-read-only-single-file-audit-cannot": 3,
+      "multi-round-multi-llm-cross-review-catches-deeper-architecture-bugs": 2,
+      "autonomous-evolution-blind-review-pipeline": 2,
+      "three-model-t0-review-pipeline-for-sediment-fixes": 2,
+      "pull-cross-vendor-t0-round-when-execution-step-conflicts-with-stated-invariant": 2,
+      "multi-view-t0-review-dispatch-sub-agent-retry-regression": 2,
+      "three-t0-design-review-for-stage-go-nogo-decisions": 2,
+      "memory-architecture-second-round-three-model-double-blind-2026-05-07": 2,
+      "three-t-zero-blind-review-for-deterministic-auditor-prescribed-fixes": 2,
+      "dispatch-parallelism-is-network-concurrency": 1,
+      "adr-0022-closing-milestone-t0-xhigh-audit-results": 1,
+      "self-check-filter-for-multi-llm-document-review": 1,
+      "devil-advocate-virtual-reviewer-rlhf-mitigation": 1,
+      "multi-llm-review-exposes-five-actionable-design-flaws-in-intent-classification-architecture": 1,
+      "r10-cross-model-audit-definitions-and-liveness-blind-spots-for-adrs-0025-0026": 1,
+      "multi-agent-review-必须结合真实运行验证": 1,
+      "multi-llm-review-framing-bias-calibration-24pp-systematic-downward-error": 1,
+      "mechanical-guard-cleanup-via-three-tier-audit-and-blind-review": 1,
+      "multi-round-independent-t0-audits-catch-claimed-but-missing-changes": 1,
+      "minimax-m3-should-be-t0-candidate-not-primary-t0": 1,
+      "three-model-audit-finds-lifecycle-routing-gap": 1,
+      "external-multi-model-audit-catches-self-review-blind-spot": 1,
+      "turn-boundary-compaction-review-round-triggered-by-monkey-patch-risk": 1
+    }
+  },
+  "BM25 char n-gram CJK bigram sparse keyword retrieval": {
+    "gold": [
+      "literal-token-search-fails-mixed-language-memory",
+      "patching-grep-cannot-solve-semantic-equivalence",
+      "sparse-keyword-scoring-needs-field-weighting-to-not-crowd-out-dense-recall-in-hybrid-retrieval",
+      "gbrain-fts-english-config-cjk-discard",
+      "gbrain-mixed-search-chinese-tsvector-gap",
+      "legacy-search-was-token-tfidf-plus-boosts",
+      "2026-05-01-pi-embedding-fallback-keyword-search"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "literal-token-search-fails-mixed-language-memory": 4,
+      "patching-grep-cannot-solve-semantic-equivalence": 4,
+      "sparse-keyword-scoring-needs-field-weighting-to-not-crowd-out-dense-recall-in-hybrid-retrieval": 4,
+      "gbrain-fts-english-config-cjk-discard": 4,
+      "gbrain-mixed-search-chinese-tsvector-gap": 4,
+      "legacy-search-was-token-tfidf-plus-boosts": 4,
+      "2026-05-01-pi-embedding-fallback-keyword-search": 3
+    }
+  },
+  "oracle baseline must use strong model not weak noise": {
+    "gold": [
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-pollution",
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-pollution": 4,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination": 4,
+      "stage1-candidate-surface-compactness-trades-recall-for-tokens-on-weak-models": 1,
+      "related-slug-recall-is-a-positively-biased-proxy-for-end-to-end-query-recall": 1
+    }
+  },
+  "为什么 stage1 LLM 层冗余 redundant 该删": {
+    "gold": [
+      "memory-stage1-full-body-surface-dominates-flash-cost",
+      "whole-vault-llm-recall-does-not-scale",
+      "sublinear-retrieval-architecture-is-required-when-knowledge-base-self-evolves",
+      "sediment-curator-dedupe-search-bypassed-adr-0035-stage0-optimization",
+      "stage1-uses-full-body-candidate-surface",
+      "stage1-candidate-surface-compactness-trades-recall-for-tokens-on-weak-models",
+      "sediment-curator-dedup-search-bypasses-stage0-optimization",
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination",
+      "time-signals-must-not-enter-stage1-recall-gate"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "memory-stage1-full-body-surface-dominates-flash-cost": 4,
+      "whole-vault-llm-recall-does-not-scale": 4,
+      "sublinear-retrieval-architecture-is-required-when-knowledge-base-self-evolves": 4,
+      "sediment-curator-dedupe-search-bypassed-adr-0035-stage0-optimization": 3,
+      "stage1-uses-full-body-candidate-surface": 3,
+      "stage1-candidate-surface-compactness-trades-recall-for-tokens-on-weak-models": 3,
+      "sediment-curator-dedup-search-bypasses-stage0-optimization": 3,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination": 3,
+      "time-signals-must-not-enter-stage1-recall-gate": 2,
+      "stage1-cost-attribution-requires-cache-hit-rate-not-just-token-volume": 1,
+      "full-body-stage1-prioritizes-recall-over-cache-compactness": 1,
+      "two-stage-search-separates-recall-from-precision": 1,
+      "adr-0015-memory-search-has-no-grep-degradation-path": 1,
+      "doubao-embedding-vision-passes-second-brain-recall-validation": 1,
+      "doubao-embedding-vision-via-volcengine-coding-plan-is-the-operational-embedding-choice-for-second-br": 1,
+      "doubao-embedding-vision-validation-on-real-second-brain-corpus": 1,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-pollution": 1
+    }
+  },
+  "doubao embedding vision 方舟 Coding Plan 召回验证": {
+    "gold": [
+      "doubao-embedding-vision-validation-on-real-second-brain-corpus",
+      "doubao-embedding-vision-passes-second-brain-recall-validation",
+      "doubao-embedding-vision-via-volcengine-coding-plan-is-the-operational-embedding-choice-for-second-br",
+      "related-slug-recall-is-a-positively-biased-proxy-for-end-to-end-query-recall",
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination",
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-pollution",
+      "doubao-embedding-vision-is-the-only-currently-reachable-embedding-upstream-on-sub2api",
+      "doubao-embedding-vision-via-sub2api-hard-cap-is-batch-10"
+    ],
+    "annotators": 4,
+    "threshold": 2,
+    "votes": {
+      "doubao-embedding-vision-validation-on-real-second-brain-corpus": 4,
+      "doubao-embedding-vision-passes-second-brain-recall-validation": 4,
+      "doubao-embedding-vision-via-volcengine-coding-plan-is-the-operational-embedding-choice-for-second-br": 4,
+      "related-slug-recall-is-a-positively-biased-proxy-for-end-to-end-query-recall": 4,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-contamination": 3,
+      "oracle-baseline-must-use-strong-model-to-avoid-noise-pollution": 2,
+      "doubao-embedding-vision-is-the-only-currently-reachable-embedding-upstream-on-sub2api": 2,
+      "doubao-embedding-vision-via-sub2api-hard-cap-is-batch-10": 2,
+      "doubao-volcengine-ark-integration-via-models-json": 1,
+      "sub2api-gateway-requires-v1-prefix-for-embeddings-endpoint": 1,
+      "vector-index-for-memory-retrieval-should-not-be-git-tracked": 1,
+      "china-embedding-api-landscape-no-3-large": 1
+    }
+  }
+}

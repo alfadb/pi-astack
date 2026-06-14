@@ -1,0 +1,18 @@
+[
+  { "id": "q0",  "query": "stage1 候选检索改成 embedding 向量" },
+  { "id": "q1",  "query": "sediment 写入路径 content-hash 增量去重" },
+  { "id": "q2",  "query": "scope filter 必须在 topN 之前执行" },
+  { "id": "q3",  "query": "全局索引 prune 跨 project 数据丢失" },
+  { "id": "q4",  "query": "向量索引是否应该 git 跟踪" },
+  { "id": "q5",  "query": "sediment 去重每轮全库 full_body 成本" },
+  { "id": "q6",  "query": "T0 盲审必须跨厂商多模型投票" },
+  { "id": "q7",  "query": "freshness 不变量 新写 entry 立即可召回" },
+  { "id": "q8",  "query": "git singleflight lock index race condition" },
+  { "id": "q9",  "query": "ModelRegistry getApiKeyAndHeaders auth resolution" },
+  { "id": "q10", "query": "ADR 0035 sublinear retrieval architecture decision" },
+  { "id": "q11", "query": "dispatch parallel cross-vendor blind review" },
+  { "id": "q12", "query": "BM25 char n-gram CJK bigram sparse keyword retrieval" },
+  { "id": "q13", "query": "oracle baseline must use strong model not weak noise" },
+  { "id": "q14", "query": "为什么 stage1 LLM 层冗余 redundant 该删" },
+  { "id": "q15", "query": "doubao embedding vision 方舟 Coding Plan 召回验证" }
+]

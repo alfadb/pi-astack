@@ -16,3 +16,8 @@ package-lock.json
 
 # classifier smoke test artifacts (contains raw LLM output)
 smoke-classifier-results.json
+
+# ADR 0036 金标工作目录: 每-query 候选材料(MODE=material 可重建, 嵌入大量 corpus
+# 正文不入代码仓)+ 跨厂商标注原始投票文件。最终金标 + 投票计数已在
+# scripts/goldset.json(committed), 故工作目录 gitignore。
+scripts/.goldset/
