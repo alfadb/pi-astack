@@ -8,6 +8,7 @@ import { embedSchemeTag, embedTexts, resolveEmbeddingProviderConfig, staleOrMiss
 import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "../sediment/sanitizer";
+import { SEARCH_PROFILES, resolveProfileExecution, type SearchProfileName } from "./search-profiles";
 
 function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string): void {
   if (!projectRoot) return;
@@ -1019,4 +1020,27 @@ export async function llmSearchEntriesWithVerdict(
     totalDurationMs: Date.now() - t0,
     stage1CandidateSurface: r.surface,
   };
+}
+
+/**
+ * ADR 0037: 检索 Facade 单入口。按 profile 应用策略(settings 覆写 + filters + 内核包装)
+ * 再调内核。entries 由调用方传入(保留 entries-arg identity: dedup 的 rule-neighbor 增强集、
+ * correction 的动态加载集都由调用方控)。callerFilters 仅 toolSearch(caller-overridable)用。
+ * 迁移完成后 llmSearchEntries/llmSearchEntriesWithVerdict/executeSearch 将私有化, 本函数单导出。
+ */
+export async function runMemorySearch(
+  profileName: SearchProfileName,
+  query: string,
+  entries: MemoryEntry[],
+  settings: MemorySettings,
+  modelRegistry: unknown,
+  opts?: { signal?: AbortSignal; projectRoot?: string; callerFilters?: SearchFilters },
+): Promise<SearchVerdictResult | ReturnType<typeof resultCard>[]> {
+  const profile = SEARCH_PROFILES[profileName];
+  const { search, filters, returnVerdict } = resolveProfileExecution(profile, settings, opts?.callerFilters);
+  const effSettings: MemorySettings = { ...settings, search };
+  const params: SearchParams = { query, filters };
+  return returnVerdict
+    ? llmSearchEntriesWithVerdict(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot)
+    : llmSearchEntries(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot);
 }
