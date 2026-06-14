@@ -43,12 +43,16 @@ export const SEARCH_PROFILES: Record<SearchProfileName, SearchProfile> = {
   // path-A before_agent_start 注入: status:[active], limit=PathASettings.searchLimit, 走 verdict。
   // rewriter 在调用方(memory-context-injector), 不在 profile。
   pathAInject: { name: "pathAInject", filtersMode: "fixed", status: ["active"], limit: (s) => s.pathA.searchLimit, returnVerdict: true },
-  // sediment 去重: status:[all], limit:5。ADR 0036 §9.1 条件2 + §11: 此脆弱路径 pin
-  // stage1Skip=false + sparseBM25=false(近重质量未验, 不随全局 flag 漂移)。另 pin
-  // dedupChunk0Aggregation=true(ADR 0036 P4 条件1): multiVector flip 后 dedup 只用 chunk0
-  // head 聚合, 不让共享尾段 chunk 的 distinct entry 浮上为近重候选(实测 -74% 新增邻居)。near-dup
-  // 判定与 relevantEntriesForCurator/readonly-rule-neighbors 入参由调用方控(preloadedEntries)。
-  sedimentDedup: { name: "sedimentDedup", filtersMode: "fixed", status: ["all"], limit: () => 5, searchOverrides: () => ({ stage1Skip: false, sparseBM25: false, dedupChunk0Aggregation: true }), returnVerdict: false },
+  // sediment 去重: status:[all], limit:5。
+  // ADR 0036 P5b(已验证, near-dup 金标 + 真实检索 oracle-dedup-p5b 10/10): stage1Skip/sparseBM25
+  // 的临时 pin(=false)已解除 —— dense-only(两阶段+BM25)与三阶段在 dedup 候选上逐对等价
+  // (merge-recall@5 100%=100%, distinct-intrusion@5 100%=100%; 合并判定由 curator-LLM 最终把关)。
+  // 故 dedup 现**继承全局 stage1Skip/sparseBM25**(跟读路径同栈 + 随其 kill-switch 回滚)。
+  // 仅留 dedupChunk0Aggregation=true 为 dedup 专用 pin(ADR 0036 P4 条件1): multiVector flip 后
+  // dedup 只用 chunk0 head 聚合, 不让共享尾段 chunk 的 distinct entry 浮上为近重候选(实测 -74%
+  // 新增邻居)—— 全局无此 flag 的对应物, 故钉死不随全局漂。near-dup 判定与
+  // relevantEntriesForCurator/readonly-rule-neighbors 入参由调用方控(preloadedEntries)。
+  sedimentDedup: { name: "sedimentDedup", filtersMode: "fixed", status: ["all"], limit: () => 5, searchOverrides: () => ({ dedupChunk0Aggregation: true }), returnVerdict: false },
   // sediment 纠错: status:[active], limit:10。
   correctionSearch: { name: "correctionSearch", filtersMode: "fixed", status: ["active"], limit: () => 10, returnVerdict: false },
 };

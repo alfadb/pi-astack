@@ -1,6 +1,6 @@
 # ADR 0036: memory_search 两阶段塌缩 + hybrid 检索增强
 
-- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。P4 多向量已实现+验证(dark, flag off, §10), 2×T0 评审 = keep-dark now is correct(§10.5)。**P3 BM25 已转产**(§11, sparseBM25=true 读路径; dedup pin false)。**P5a query 路由已实现**(dark-launch, `search.queryRouting` 默认 false; toolSearch 精确 slug/ADR 编号直查跳 LLM; deterministic smoke-query-routing 验证仅 flag-on+toolSearch 短路, 默认行为不变)。代码 DEFAULT 均仍 false; P4 multiVector 仍 dark。**P5b sediment dedup dense-only 未实现 —— 脆弱 false-merge 路径, gated on all-status 近重金标集(与 P4 dedup 分离同门, 见 §6/§10.4)。**
+- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。P4 多向量已实现+验证(dark, flag off, §10), 2×T0 评审 = keep-dark now is correct(§10.5)。**P3 BM25 已转产**(§11, sparseBM25=true 读路径; dedup pin false)。**P5a query 路由已实现**(dark-launch, `search.queryRouting` 默认 false; toolSearch 精确 slug/ADR 编号直查跳 LLM; deterministic smoke-query-routing 验证仅 flag-on+toolSearch 短路, 默认行为不变)。代码 DEFAULT 均仍 false。**P5b sediment dedup dense-only 已实现**(3×T0 近重金标 60 对 + 真实检索 oracle-dedup-p5b 10/10 验证 dense-only 与三阶段 dedup 候选逐对等价): 解除 sedimentDedup 的 stage1Skip/sparseBM25 临时 pin, dedup 现跟读栈(两阶段+BM25)。**P4 dedup 分离(条件1)已实现**(chunk0 聚合, multiVector flip 后生效); **multiVector flip 待原子重嵌执行**(§10.4 条件2)。
 - Date: 2026-06-14
 - Supersedes-direction: 承接 ADR 0035(stage0 embedding 候选检索); 本 ADR 修订 stage1 的存废
 
@@ -47,7 +47,8 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 | P3 BM25 复活(**已转产**, §11) | char n-gram BM25(CJK bigram+IDF+高信号字段×3)替 sparseMatchSlugs | ✅ 中文 0→159, 英文不退; 读路径 on, dedup pin off |
 | P4 多向量(实现, 见 §10) | chunk 多 sub-vector + max-sim 解 3500 截断 | ✅ paraphrase 尾部 recall@10 +30pt / @50 +12pt, 无短文回归 → dark, 待 flip |
 | P5a 路由(**已实现**) | query 路由: toolSearch 精确 slug/ADR 编号直查跳 LLM | dark-launch (`queryRouting` off); smoke 验证默认行为不变 |
-| P5b dedup dense-only | sediment dedup 走 dense top-K → LLM 只判 merge | **gated**: 脆弱 false-merge 路径, 需 all-status 近重金标验证(同 P4 dedup 分离)|
+| P5b dedup dense-only(**已实现**) | dedup 解 stage1Skip/sparseBM25 pin, 跟读栈 | 近重金标 60 对 + oracle-dedup-p5b 10/10: dense-only ≡ 三阶段(intrusion@5/recall@5 逐对等); curator-LLM 是最终合并门 |
+| P4 条件1 dedup 分离(**已实现**) | dedup topN 用 chunk0 head 聚合 | delta 探针: multi-maxsim 235 新邻居→62(chunk0, -74%); mean 368 弃用 |
 | P6 切换(本次, 见 §8) | 跨厂商投票金标(16q × 4 T0)recall@gold + ablation-16 | ✅ two-stage recall@gold ≥ three; ablation 扰动 ≤ LLM 自噪声 → 提案转正待评审 |
 
 ## 6. 盲区与风险(5×T0 共识)

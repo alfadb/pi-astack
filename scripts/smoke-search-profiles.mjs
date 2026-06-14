@@ -2,8 +2,8 @@
 /**
  * ADR 0037 P1 等价门(deterministic, 免 LLM): 断言 5 个 SearchProfile 经
  * resolveProfileExecution 解析出的 (search settings, filters, returnVerdict) 与迁移前
- * 5 个调用方手搓的策略**逐项一致**。核心是 sedimentDedup 的泄漏防护: 即便全局
- * stage1Skip/sparseBM25=true, dedup profile 也强制二者 false。
+ * 5 个调用方手搓的策略**逐项一致**。sedimentDedup: P5b 验证后 stage1Skip/sparseBM25 继承
+ * 全局(跟读栈), 仅 dedupChunk0Aggregation=true 为 dedup 专用 pin(全局 flag 漏不进)。
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
@@ -50,13 +50,16 @@ const R = (name, settings = base, callerFilters) => resolveProfileExecution(SEAR
 {
   const r = R("sedimentDedup");
   ok(JSON.stringify(r.filters.status) === JSON.stringify(["all"]) && r.filters.limit === 5, "sedimentDedup: status:[all] limit:5");
-  ok(r.search.stage1Skip === false, "sedimentDedup: stage1Skip 强制 false");
-  ok(r.search.sparseBM25 === false, "sedimentDedup: sparseBM25 强制 false");
-  ok(r.search.dedupChunk0Aggregation === true, "sedimentDedup: dedupChunk0Aggregation 强制 true(ADR 0036 P4 条件1 dedup 分离)");
-  // 关键: 即便全局 flip 为 true/dedupChunk0 为 false, dedup profile 仍钉死(泄漏防护)
-  const allOn = { ...base, search: { ...base.search, stage1Skip: true, sparseBM25: true, dedupChunk0Aggregation: false } };
-  const r2 = R("sedimentDedup", allOn);
-  ok(r2.search.stage1Skip === false && r2.search.sparseBM25 === false && r2.search.dedupChunk0Aggregation === true, "sedimentDedup: 全局 flip 时仍钉 stage1Skip=false/sparseBM25=false/dedupChunk0=true —— 全局 flag 漏不进去(ADR 0037 核心保证)");
+  ok(r.search.stage1Skip === base.search.stage1Skip, "sedimentDedup: stage1Skip 继承全局(P5b 验证后跟读栈)");
+  ok(r.search.sparseBM25 === base.search.sparseBM25, "sedimentDedup: sparseBM25 继承全局");
+  ok(r.search.dedupChunk0Aggregation === true, "sedimentDedup: dedupChunk0Aggregation 强制 true(ADR 0036 P4 条件1 dedup 专用 pin)");
+  // 关键泄漏防护: 全局开/关 dedupChunk0Aggregation, dedup 仍钉 true; 同时 stage1Skip/sparseBM25 跟随全局
+  const gOff = { ...base, search: { ...base.search, stage1Skip: false, sparseBM25: false, dedupChunk0Aggregation: false } };
+  const r2 = R("sedimentDedup", gOff);
+  ok(r2.search.dedupChunk0Aggregation === true && r2.search.stage1Skip === false && r2.search.sparseBM25 === false, "sedimentDedup: 全局关时 chunk0 仍钉 true(漏不进), stage1Skip/sparseBM25 跟随全局 false");
+  const gOn = { ...base, search: { ...base.search, stage1Skip: true, sparseBM25: true, dedupChunk0Aggregation: false } };
+  const r3 = R("sedimentDedup", gOn);
+  ok(r3.search.dedupChunk0Aggregation === true && r3.search.stage1Skip === true && r3.search.sparseBM25 === true, "sedimentDedup: 全局开时 chunk0 仍钉 true, stage1Skip/sparseBM25 跟随全局 true(ADR 0037 dedup 专用 pin 核心保证)");
   ok(r.returnVerdict === false, "sedimentDedup: returnVerdict false");
 }
 // correctionSearch: status:[active], limit:10
