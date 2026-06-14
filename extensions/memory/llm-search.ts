@@ -638,11 +638,11 @@ export async function selectStage0Pool(
 ): Promise<Stage0Pool | null> {
   const emb = settings.embedding;
   if (!emb.provider || !emb.model) return null; // 未配置 → 全 corpus
-  // 非-active-status 查询: 索引只 embed active, dense 恒空 → 回退全 corpus
-  const sf = filters.status;
-  const wantsNonActive = sf !== undefined
-    && (Array.isArray(sf) ? sf.some((s) => s !== "active") : sf !== "active");
-  if (wantsNonActive) return null;
+  // P7(4×T0 设计 review): 非-active-status 查询(如 sediment curator 去重
+  // status:["all"])不再回退全库 full_body —— 走 hybrid 缩候选: dense 在 active
+  // 索引(非 active 不在索引、自然不返回, 无害) + sparse 扫全 corpus(含非 active,
+  // 非 active 唯一召回通道) + stale(仅可索引集, 见下)。原 wantsNonActive→null 是
+  // ADR §7 修订 7 “非 active 查询罕见可接受”的错误假设——sediment 去重是每轮高频+大库。
 
   const entriesBySlug = new Map(corpus.map((e) => [e.slug, e]));
   const allowSlugs = new Set(corpus.map((e) => e.slug));
@@ -666,7 +666,16 @@ export async function selectStage0Pool(
   }
 
   const sparseSlugs = sparseMatchSlugs(query, corpus);
-  const staleSlugs = staleOrMissingSlugs(idx, corpus); // search-time freshness(未索引/陈旧)
+  // P7(4×T0 共识, load-bearing fix): stale 只算“reconcile 会 embed 的集合”。
+  // staleOrMissingSlugs 原对全 corpus 算 → status:["all"] 查询时所有非 active +
+  // readonly rule neighbors(zone:rules, 不经 loadEntries 永不被 reconcile embed)
+  // 都因 !isFresh 被标 stale → 塞爆候选池且永久 stale。只对可索引集算:
+  // status==="active" 且 非 zone:rules(与 buildCorpusEmbeddings 的 embed 集一致)。
+  // 非 active 是“故意不索引”非“陈旧”, freshness 不变量不适用于它们。
+  const indexableForStale = corpus.filter(
+    (e) => e.status === "active" && (e.frontmatter as Record<string, unknown> | undefined)?.zone !== "rules",
+  );
+  const staleSlugs = staleOrMissingSlugs(idx, indexableForStale); // search-time freshness(仅可索引集)
 
   // union + 硬上限(dense 分 → sparse 精确 → bounded stale 逐出, 修订 4)
   const seen = new Set<string>();
