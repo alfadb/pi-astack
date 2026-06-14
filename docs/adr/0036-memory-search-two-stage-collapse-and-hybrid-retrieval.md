@@ -1,6 +1,6 @@
 # ADR 0036: memory_search 两阶段塌缩 + hybrid 检索增强
 
-- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。P4 多向量已实现+验证(dark, flag off, §10), 2×T0 评审 = keep-dark now is correct(§10.5)。证据: tail-fact paraphrase query recall@10 63→93(条件性), topical gold 无变化无挤出; flip 待 5 条件(尤其 dedup 分理)。代码 DEFAULT 均仍 false; P3 BM25/P5 仍 dark。
+- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。P4 多向量已实现+验证(dark, flag off, §10), 2×T0 评审 = keep-dark now is correct(§10.5)。**P3 BM25 已转产**(§11, sparseBM25=true 读路径; dedup pin false)。代码 DEFAULT 均仍 false; P4 multiVector 仍 dark, P5 待做。
 - Date: 2026-06-14
 - Supersedes-direction: 承接 ADR 0035(stage0 embedding 候选检索); 本 ADR 修订 stage1 的存废
 
@@ -44,7 +44,7 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 |---|---|---|
 | P1 实证(本提交) | `stage1Skip` flag + oracle ablation | 初步: 差 5 点/降 91% ✅ |
 | P2 金标集 | 从 search-metrics.jsonl 采样真实 query + 人工标注正确 entry(跨过 ground-truth 正偏) | 转产硬门 |
-| P3 BM25 复活 | char n-gram BM25 替换 sparseMatchSlugs + RRF 融合 | 中文/符号 recall↑ |
+| P3 BM25 复活(**已转产**, §11) | char n-gram BM25(CJK bigram+IDF+高信号字段×3)替 sparseMatchSlugs | ✅ 中文 0→159, 英文不退; 读路径 on, dedup pin off |
 | P4 多向量(实现, 见 §10) | chunk 多 sub-vector + max-sim 解 3500 截断 | ✅ paraphrase 尾部 recall@10 +30pt / @50 +12pt, 无短文回归 → dark, 待 flip |
 | P5 路由 | query 路由 + sediment dedup 走 dense-only | 治成本主体 |
 | P6 切换(本次, 见 §8) | 跨厂商投票金标(16q × 4 T0)recall@gold + ablation-16 | ✅ two-stage recall@gold ≥ three; ablation 扰动 ≤ LLM 自噪声 → 提案转正待评审 |
@@ -196,3 +196,13 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 
 - `deepseek-v4-pro`: **VERDICT SOUND** — 6 项逐一 trace 干净(v1→v2 migrate flag-off no-op; 跨-batch chunk 归并无 bug; max-sim 单向量等同旧行为; scheme-mismatch flood 被 take() caps 界住, 搜索仍可用; 成本有界; eval 对 dark-launch 公平)。
 - `claude-opus-4-8`: **VERDICT GO-WITH-CONDITIONS, keep-dark now 正确** — 上述 5 条件。条件 1(crowding)本次已用位移探针驳正(0 挤出); 条件 2(dedup)是真 flip-blocker, 已记入 10.4。
+
+## 11. P3 BM25 复活转产(本次, 3×T0 执行面板决定)
+
+stage0 hybrid 的 sparse 臂从朴素子串 `sparseMatchSlugs`(无 IDF, 中文几乎零匹配)换成 char n-gram BM25 `sparseMatchSlugsBM25`(ASCII 标识符 + CJK bigram + IDF + slug/title/trigger 高信号字段×3)。
+
+- 转产方式: `pi-astack-settings.json` memory.search.sparseBM25=true(kill-switch, 可一键回滚); 代码 DEFAULT 仍 false。
+- 证据(`scripts/smoke-sparse-bm25.mjs`): 纯中文 query 旧 substring 召回 **0 → BM25 159**(4 query 合计); 英文/符号不退化(git/ModelRegistry/stage0 等均有召回)。
+- **纪律(镜像 stage1Skip pin)**: curator dedup 路径 pin `sparseBM25=false` —— BM25 只上读路径(memory_search/path-A/decide/correction), 不进脆弱的 all-status 去重(近重质量未验, 保持候选集与转产前一致, 不引入新 false-merge 面)。
+- 3×T0 执行面板(opus/gpt-5.5/v4-pro)裁定排序: 这个 ready+reversible 的读路径召回修复先于 ADR 0037 重构 ship(2:1, deepseek 主张 0037 先但认同返工成本 trivial)。dedup pin 与 stage1Skip pin 都待 ADR 0037 profile registry 平移进 sedimentDedup profile。
+- ROLLBACK: settings 里 sparseBM25=false(即时)。

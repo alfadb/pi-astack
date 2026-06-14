@@ -1062,9 +1062,13 @@ export async function curateProjectDraft(
     // active-status 检索, 未验 all-status 去重。故此路径 **pin stage1Skip=false**
     // (始终走三阶段 stage1), 不让全局 stage1Skip 转产连带翻转未验证的去重 —— 直到
     // dedup 有自己的近重金标验证。
+    // ADR 0036 P3 BM25 转产同理(3×T0 执行评审一致): sparseBM25 只在读路径
+    // (memory_search/path-A/decide/correction)smoke 验过(中文 0→159); 去重近重质量
+    // 未验, 故此路径 **pin sparseBM25=false** 保持 dedup 候选集与转产前一致, 不引入
+    // 新 false-merge 面。两个 pin 都待 ADR 0037 profile registry 平移进 sedimentDedup profile。
     const dedupSettings = {
       ...deps.memorySettings,
-      search: { ...deps.memorySettings.search, stage1Skip: false },
+      search: { ...deps.memorySettings.search, stage1Skip: false, sparseBM25: false },
     };
     cards = await llmSearchEntries(
       entries,
