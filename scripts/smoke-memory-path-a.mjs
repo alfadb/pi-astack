@@ -246,17 +246,23 @@ check("裸 wrapper 不再 export(私有内核)", search.llmSearchEntries === und
 // by mock pipeline, doesn't carry compiledTruth as a top-level field.
 // Since we can't run real search without LLM, we settle for source check.
 const llmSearchSource = fs.readFileSync(path.join(repoRoot, "extensions/memory/llm-search.ts"), "utf-8");
+// ADR 0035/0036: compiledTruth 出现在 resultCard 之后多处(sparse/stage2 函数),
+// 原 greedy 正则 /function resultCard[\s\S]*?compiledTruth/ 会误匹配后文 → 限定到
+// resultCard 函数体内判定(首个行首 `}` = 函数闭合; return 对象以 `  };` 缩进闭合)。
+const resultCardBody = (llmSearchSource.match(/function resultCard\([\s\S]*?\n\}/) || [""])[0];
 check("resultCard intentionally omits compiledTruth (search tool contract)",
-  !/function resultCard[\s\S]*?compiledTruth/.test(llmSearchSource));
+  resultCardBody.length > 0 && !/compiledTruth/.test(resultCardBody));
 check("Stage 1 candidate selector uses full-body v3 surface (F18)",
   /STAGE1_CANDIDATE_SURFACE = "full_body_v3"/.test(llmSearchSource) &&
   /function entryForStage1[\s\S]*?##### compiled_truth[\s\S]*?##### timeline/.test(llmSearchSource) &&
-  /surface:\$\{STAGE1_CANDIDATE_SURFACE\}/.test(llmSearchSource));
+  // P8/ADR 0035: surface 行现为 compact 三元 `surface:${compact ? "stage1_compact_v1" : STAGE1_CANDIDATE_SURFACE}`
+  /surface:\$\{[^}]*STAGE1_CANDIDATE_SURFACE\}/.test(llmSearchSource));
 check("Stage 1 prompt instructs reading compiled_truth and timeline (F18)",
   /compiled_truth, and timeline before selecting candidates/.test(llmSearchSource) &&
   /body evidence \(compiled_truth\/timeline\)/.test(llmSearchSource));
 check("search metrics record stage1_surface for before\/after comparison (F18)",
-  /stage1_surface: STAGE1_CANDIDATE_SURFACE/.test(llmSearchSource));
+  // ADR 0035: 记录的是 surface 变量(stage0_hybrid_v1 / full_body_v3 / compact), 非常量
+  /stage1_surface: surface/.test(llmSearchSource));
 
 // ────────────────────────────────────────────────────────────────
 console.log("\n[6] inject block must hydrate compiledTruth from entries (bug fix lock)");

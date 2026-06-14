@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { makeOracleRegistry } from "./_oracle-registry.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -28,30 +28,13 @@ const { llmSearchEntriesWithVerdict } = (await jiti.import(path.join(repoRoot, "
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 
-const realRegistry = ModelRegistry.create(AuthStorage.create(), MODELS_JSON);
-const MODELS = JSON.parse(fs.readFileSync(MODELS_JSON, "utf8"));
-// ADR: 从 models.json 的 providers.<p>.{baseUrl,apiKey} 解析(apiKey 是 $ENV ref) ——
-// realRegistry/AuthStorage 不展开 models.json 的 $ENV apiKey(仅 deepseek/anthropic 在
-// AuthStorage), 故 chat provider 会 401。这里自己注入 baseUrl+apiKey(与 embedding stub 同路)。
-const resolveKey = (provider) => { const ref = MODELS.providers?.[provider]?.apiKey || ""; return ref.startsWith("$") ? (process.env[ref.slice(1)] || "") : ref; };
-const EMBED_KEY = process.env.SUB2API_API_KEY_EMBEDDING;
-const EMBED_BASE = MODELS.providers?.embedding?.baseUrl;
+// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey($ENV ref)(见 _oracle-registry.mjs)
+const { registry, resolveKey, embedKey: EMBED_KEY } = makeOracleRegistry(MODELS_JSON);
 if (!EMBED_KEY) { console.log("SKIP — no SUB2API_API_KEY_EMBEDDING"); process.exit(0); }
 
 const base = resolveSettings();
 const MODEL = process.env.ORACLE_MODEL || base.search.stage2Model || "deepseek/deepseek-v4-pro";
-const CHAT_PROVIDER = MODEL.split("/")[0];
-const CHAT_KEY = resolveKey(CHAT_PROVIDER);
-if (!CHAT_KEY) { console.log(`SKIP — no apiKey for ${CHAT_PROVIDER} in models.json/env`); process.exit(0); }
-const registry = {
-  find: (p, id) => (p === "embedding" ? { __embed: true, provider: p, id, baseUrl: EMBED_BASE } : realRegistry.find(p, id)),
-  getApiKeyAndHeaders: async (m) => {
-    if (m && m.__embed) return { ok: true, apiKey: EMBED_KEY };
-    const prov = (m && (m.provider || m.providerId)) || CHAT_PROVIDER;
-    const key = resolveKey(prov) || CHAT_KEY;
-    return key ? { ok: true, apiKey: key, headers: {} } : realRegistry.getApiKeyAndHeaders(m);
-  },
-};
+if (!resolveKey(MODEL.split("/")[0])) { console.log(`SKIP — no apiKey for ${MODEL.split("/")[0]} in models.json/env`); process.exit(0); }
 // 三阶段(当前 dedup pin) vs dense-only(P5b 拟翻转)。两臂都用同一 dedup 模型, 控变量。
 const cfgThree = { ...base, search: { ...base.search, stage0Enabled: true, stage1Model: MODEL, stage2Model: MODEL, stage1Skip: false, sparseBM25: false, dedupChunk0Aggregation: false } };
 const cfgDense = { ...base, search: { ...base.search, stage0Enabled: true, stage1Model: MODEL, stage2Model: MODEL, stage1Skip: true, sparseBM25: true, dedupChunk0Aggregation: false } };

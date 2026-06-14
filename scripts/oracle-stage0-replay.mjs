@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { makeOracleRegistry } from "./_oracle-registry.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -37,13 +37,8 @@ const MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "models.json");
 // model-curator 动态注册(脚本 registry 不含), 故 embedding 走 sub2api stub
 // (同 smoke-stage0-pool) —— 否则 query embed 失败会熔断成 sparse_fallback,
 // 测不到真实 dense hybrid。
-const realRegistry = ModelRegistry.create(AuthStorage.create(), MODELS_JSON);
-const EMBED_KEY = process.env.SUB2API_API_KEY_EMBEDDING;
-const EMBED_BASE = (() => { try { return JSON.parse(fs.readFileSync(MODELS_JSON, "utf8")).providers?.embedding?.baseUrl; } catch { return undefined; } })();
-const registry = {
-  find: (p, id) => (p === "embedding" ? { __embed: true, provider: p, id, baseUrl: EMBED_BASE } : realRegistry.find(p, id)),
-  getApiKeyAndHeaders: async (m) => (m && m.__embed ? { ok: true, apiKey: EMBED_KEY } : realRegistry.getApiKeyAndHeaders(m)),
-};
+// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey($ENV ref), 任何已配 key 的 provider 都能跑(见 _oracle-registry.mjs)
+const { registry, embedKey: EMBED_KEY } = makeOracleRegistry(MODELS_JSON);
 if (!EMBED_KEY) { console.log("oracle: SKIP — no SUB2API_API_KEY_EMBEDDING(dense 会熔断)"); process.exit(0); }
 
 const baseSettings = resolveSettings();

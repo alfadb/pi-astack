@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { makeOracleRegistry } from "./_oracle-registry.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -28,13 +28,8 @@ const { llmSearchEntriesWithVerdict } = (await jiti.import(path.join(repoRoot, "
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 
-const realRegistry = ModelRegistry.create(AuthStorage.create(), MODELS_JSON);
-const EMBED_KEY = process.env.SUB2API_API_KEY_EMBEDDING;
-const EMBED_BASE = (() => { try { return JSON.parse(fs.readFileSync(MODELS_JSON, "utf8")).providers?.embedding?.baseUrl; } catch { return undefined; } })();
-const registry = {
-  find: (p, id) => (p === "embedding" ? { __embed: true, provider: p, id, baseUrl: EMBED_BASE } : realRegistry.find(p, id)),
-  getApiKeyAndHeaders: async (m) => (m && m.__embed ? { ok: true, apiKey: EMBED_KEY } : realRegistry.getApiKeyAndHeaders(m)),
-};
+// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey($ENV ref), 任何已配 key 的 provider 都能跑(见 _oracle-registry.mjs)
+const { registry, embedKey: EMBED_KEY } = makeOracleRegistry(MODELS_JSON);
 if (!EMBED_KEY) { console.log("SKIP — no SUB2API_API_KEY_EMBEDDING"); process.exit(0); }
 
 const baseSettings = resolveSettings();
