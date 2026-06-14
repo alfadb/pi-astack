@@ -32,6 +32,7 @@ export interface SearchSettings {
   stage1CompactSurface: boolean;    // P8: stage1 用紧凑 surface(meta+summary, 无 compiledTruth/timeline)做粗筛
   stage1Skip: boolean;              // ADR 0036: 跳过 stage1 LLM, stage0 top-K 直出 stage2(两阶段塔缩)
   sparseBM25: boolean;             // ADR 0036: sparse 用 char n-gram BM25(补中文/符号)替朴素子串
+  queryRouting: boolean;           // ADR 0036 P5: toolSearch 精确直查路由(query 恰为 slug 或 ADR 编号 → 直接命中跳 LLM)
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -75,6 +76,13 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // 的 sparse 通道完全失效。BM25(ASCII 标识符 + CJK bigram + IDF 加权 + 字段
   // 权重)补 dense 的中文/精确符号/短 query 盲区, 与 dense RRF 融合。
   sparseBM25: false,
+  // ADR 0036 P5(dark-launch, 默认 off): toolSearch 精确查找路由。query 经规则 regex
+  // (非 LLM)判定: 恰等于某 entry 的 slug, 或匹配 `ADR NNNN`/`adr-NNNN` 且唯一命中
+  // adr-NNNN-* slug 时, 直接返回该 entry 跳过两次 LLM 调用(省成本+延迟)。仅 toolSearch
+  // 适用(path-A/decide/dedup/correction 的 query 永不是裸 slug)。无匹配则 fall-through
+  // 正常检索 —— 精确直查是“锦上添花快路径”, 永不抑制召回。语义/符号 query 路由偏置
+  // (sparse-first/dense-first)留待 stage0 RRF 权重调参, 不在此 flag 内。
+  queryRouting: false,
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -227,6 +235,7 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage1CompactSurface: asBoolean(search.stage1CompactSurface, DEFAULT_SEARCH_SETTINGS.stage1CompactSurface),
     stage1Skip: asBoolean(search.stage1Skip, DEFAULT_SEARCH_SETTINGS.stage1Skip),
     sparseBM25: asBoolean(search.sparseBM25, DEFAULT_SEARCH_SETTINGS.sparseBM25),
+    queryRouting: asBoolean(search.queryRouting, DEFAULT_SEARCH_SETTINGS.queryRouting),
   };
 }
 

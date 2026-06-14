@@ -1030,6 +1030,33 @@ async function llmSearchEntriesWithVerdict(
  * correction 的动态加载集都由调用方控)。callerFilters 仅 toolSearch(caller-overridable)用。
  * 迁移完成后 llmSearchEntries/llmSearchEntriesWithVerdict/executeSearch 将私有化, 本函数单导出。
  */
+/**
+ * ADR 0036 P5 query routing (dark-launch, settings.search.queryRouting).
+ * 纯规则(无 LLM)精确直查: query 整体恰为某 entry 的 slug, 或匹配 ADR 编号且唯一
+ * 命中 adr-NNNN-* slug → 返回该 entry。无匹配返回 null → 调用方走正常检索。
+ * **永不抑制召回**: 仅在 100% 确定(精确 slug / 唯一 ADR 命中)时短路, 否则 fall-through。
+ * 导出供 deterministic smoke 验证路由决策(无需 LLM)。
+ */
+export function routeExactLookup(query: string, entries: MemoryEntry[]): MemoryEntry | null {
+  const q = (query ?? "").trim();
+  if (!q) return null;
+  // 1) 整体恰为某 slug(大小写不敏感)
+  const ql = q.toLowerCase();
+  const bySlug = entries.find((e) => String(e.slug).toLowerCase() === ql);
+  if (bySlug) return bySlug;
+  // 2) ADR 编号: "ADR 0035" / "adr-0035" / "adr 35" → adr-NNNN-* 唯一命中
+  const m = /^adr[-\s]?(\d{1,4})$/i.exec(q);
+  if (m) {
+    const prefix = `adr-${m[1].padStart(4, "0")}`;
+    const matches = entries.filter((e) => {
+      const s = String(e.slug).toLowerCase();
+      return s === prefix || s.startsWith(`${prefix}-`);
+    });
+    if (matches.length === 1) return matches[0];
+  }
+  return null;
+}
+
 export async function runMemorySearch(
   profileName: SearchProfileName,
   query: string,
@@ -1042,6 +1069,12 @@ export async function runMemorySearch(
   const { search, filters, returnVerdict } = resolveProfileExecution(profile, settings, opts?.callerFilters);
   const effSettings: MemorySettings = { ...settings, search };
   const params: SearchParams = { query, filters };
+  // ADR 0036 P5: toolSearch 精确直查路由(dark-launch)。命中即短路跳两次 LLM; 否则 fall-through。
+  // 仅 toolSearch 适用: path-A/decide/dedup/correction 的 query 永不是裸 slug/ADR 编号。
+  if (profileName === "toolSearch" && search.queryRouting) {
+    const routed = routeExactLookup(query, entries);
+    if (routed) return [resultCard(routed, 1, "exact-route (ADR 0036 P5: slug/ADR 精确直查跳 LLM)")];
+  }
   return returnVerdict
     ? llmSearchEntriesWithVerdict(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot)
     : llmSearchEntries(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot);
