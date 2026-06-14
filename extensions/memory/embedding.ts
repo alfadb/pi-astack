@@ -37,6 +37,7 @@ export interface EmbeddingProviderConfig {
   maxRetries: number;
   multiVector: boolean;                  // ADR 0036 P4: 多向量解 3500 截断(默认 off)
   multiVectorMaxChunks: number;          // 每 entry 最多 sub-vector 数(成本上限)
+  multiVectorTitlePrefix?: boolean;      // ADR 0036 P4 条件4: 首段外 chunk 是否前缀 title(默认 true; ablation 用)
 }
 
 interface ModelRegistryLike {
@@ -83,11 +84,12 @@ export function embeddingInputOf(e: MemoryEntry, maxChars: number): string {
 export function embeddingInputsOf(
   e: MemoryEntry,
   maxChars: number,
-  opts: { multiVector: boolean; maxChunks: number },
+  opts: { multiVector: boolean; maxChunks: number; titlePrefix?: boolean },
 ): string[] {
   const basis = contentBasis(e);
   if (!opts.multiVector || basis.length <= maxChars) return [basis.slice(0, maxChars)];
-  const title = (e.title || "").replace(/\s+/g, " ").trim();
+  // ADR 0036 P4 条件4(title-prefix ablation): titlePrefix=false 关闭首段外 chunk 的 title 前缀。
+  const title = (opts.titlePrefix === false ? "" : (e.title || "")).replace(/\s+/g, " ").trim();
   const prefix = title ? `${title}\n` : "";
   const maxChunks = Math.max(1, opts.maxChunks);
   const chunks: string[] = [];
@@ -498,7 +500,7 @@ export async function buildCorpusEmbeddings(
   const chunkOwner: number[] = [];
   const chunkCount: number[] = [];
   for (let i = 0; i < todo.length; i++) {
-    const ins = embeddingInputsOf(todo[i], maxChars, { multiVector: cfg.multiVector, maxChunks: cfg.multiVectorMaxChunks });
+    const ins = embeddingInputsOf(todo[i], maxChars, { multiVector: cfg.multiVector, maxChunks: cfg.multiVectorMaxChunks, titlePrefix: cfg.multiVectorTitlePrefix !== false });
     chunkCount.push(ins.length);
     for (const t of ins) { chunkTexts.push(t); chunkOwner.push(i); }
   }

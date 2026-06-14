@@ -107,7 +107,8 @@ const multiVectorMaxChunks = Number(process.env.MULTI_VECTOR_MAX_CHUNKS || embS.
 const cfg = { baseUrl, apiKey: key, model: "doubao-embedding-vision", dim: 2048, batchSize: 10, tpmLimit: 600_000, timeoutMs: 60_000, maxRetries: 3, multiVector, multiVectorMaxChunks };
 console.log(`multiVector=${multiVector} maxChunks=${multiVectorMaxChunks}`);
 
-const idxPath = emb.vectorIndexPath();
+// ADR 0036 P4 条件2(原子 swap): OUT_PATH 可写 shadow 路径(不碰生产索引), 建好 validate 后原子 mv。
+const idxPath = process.env.OUT_PATH || emb.vectorIndexPath();
 console.log(`index → ${idxPath}`);
 const t0 = Date.now();
 const r = await emb.buildCorpusEmbeddings(active, cfg, idxPath, {

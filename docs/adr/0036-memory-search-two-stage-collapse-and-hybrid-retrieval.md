@@ -1,6 +1,6 @@
 # ADR 0036: memory_search 两阶段塌缩 + hybrid 检索增强
 
-- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。P4 多向量已实现+验证(dark, flag off, §10), 2×T0 评审 = keep-dark now is correct(§10.5)。**P3 BM25 已转产**(§11, sparseBM25=true 读路径; dedup pin false)。**P5a query 路由已实现**(dark-launch, `search.queryRouting` 默认 false; toolSearch 精确 slug/ADR 编号直查跳 LLM; deterministic smoke-query-routing 验证仅 flag-on+toolSearch 短路, 默认行为不变)。代码 DEFAULT 均仍 false。**P5b sediment dedup dense-only 已实现**(3×T0 近重金标 60 对 + 真实检索 oracle-dedup-p5b 10/10 验证 dense-only 与三阶段 dedup 候选逐对等价): 解除 sedimentDedup 的 stage1Skip/sparseBM25 临时 pin, dedup 现跟读栈(两阶段+BM25)。**P4 dedup 分离(条件1)已实现**(chunk0 聚合, multiVector flip 后生效); **multiVector flip 待原子重嵌执行**(§10.4 条件2)。
+- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。**P4 多向量已转产**(flip 2026-06-14, §10.6; `multiVector=true` 全局重嵌 2368 entry→2731 sub-vector + dedup chunk0 分离), 5 条件逐一过 + 人类绿灯。**P3 BM25 已转产**(§11, sparseBM25=true 读路径; dedup pin false)。**P5a query 路由已实现**(dark-launch, `search.queryRouting` 默认 false; toolSearch 精确 slug/ADR 编号直查跳 LLM; deterministic smoke-query-routing 验证仅 flag-on+toolSearch 短路, 默认行为不变)。代码 DEFAULT 均仍 false。**P5b sediment dedup dense-only 已实现**(3×T0 近重金标 60 对 + 真实检索 oracle-dedup-p5b 10/10 验证 dense-only 与三阶段 dedup 候选逐对等价): 解除 sedimentDedup 的 stage1Skip/sparseBM25 临时 pin, dedup 现跟读栈(两阶段+BM25)。**P4 dedup 分离(条件1)已实现**(chunk0 聚合, multiVector flip 后生效); **multiVector flip 待原子重嵌执行**(§10.4 条件2)。
 - Date: 2026-06-14
 - Supersedes-direction: 承接 ADR 0035(stage0 embedding 候选检索); 本 ADR 修订 stage1 的存废
 
@@ -155,7 +155,7 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 - 统计严谨: 仍 16q 单跑无 CI; 后续可扩 21-30q × 多重跑补 CI(§6 原门), 但两组 oracle 同向 + ablation 噪声量级已足以支撑 flag-reversible 转产。
 - gold ⋂ stage0 top-80: 本 eval 证“stage1 删除在 stage0 已找到的前提下不损 recall”, 非端到端召回; 端到端召回是 stage0/多向量(P4)的话题。
 
-## 10. P4 多向量解 3500 截断(实现 + 验证, dark-launch)
+## 10. P4 多向量解 3500 截断(已转产 flip 2026-06-14; §10.6)
 
 ### 10.1 问题(被 P6 放大)
 
@@ -184,7 +184,7 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 - **诚实幅度(opus 评审条件 4)**: +30pt 是**条件性**增益(query 恰好问尾部事实 + 命中长 entry)。在 topical 的 P6 gold 上 multi=single(0 提升)。聚合生产 lift = 30pt × P(tail-fact query 占比), 该基率未测, 估计较小(若 10-20% 则 ~3-6pt)。eval n=40 单跑无 CI, 低于 §6 原门(21-30q×多跑+CI)——方向可信, 幅度是欠功率上界。
 - 成本: 多向量只给 12% 长 entry 加 sub-vector(1152 entry → 1352 sub-vector, +17%); embedding 方舟 Coding Plan ≈0; topN 每 slug max over ≤4 subvec, 扫描开销可忽。
 
-### 10.4 转产路径(keep-dark; flip 待 5 条件 + 人类绿灯)
+### 10.4 转产路径(5 条件已逐一过 + 人类绿灯; flip 已执行, 见 §10.6)
 
 本次已落: 实现 + 验证 + ADR, flag off(零生产影响)。smoke-memory-embedding 16/16 + smoke-stale-floor-window 11/11 + 位移探针过。flip 前须过(2×T0 评审条件):
 
@@ -198,6 +198,18 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 
 - `deepseek-v4-pro`: **VERDICT SOUND** — 6 项逐一 trace 干净(v1→v2 migrate flag-off no-op; 跨-batch chunk 归并无 bug; max-sim 单向量等同旧行为; scheme-mismatch flood 被 take() caps 界住, 搜索仍可用; 成本有界; eval 对 dark-launch 公平)。
 - `claude-opus-4-8`: **VERDICT GO-WITH-CONDITIONS, keep-dark now 正确** — 上述 5 条件。条件 1(crowding)本次已用位移探针驳正(0 挤出); 条件 2(dedup)是真 flip-blocker, 已记入 10.4。
+
+### 10.6 flip 执行记录(2026-06-14, 人类绿灯)
+
+5 条件逐一闭合后执行原子重嵌 + flag flip:
+
+1. **dedup 分离(条件1, 载重)**: ✅ chunk0 head 聚合(`VectorIndex.topN agg="chunk0"` + sedimentDedup profile pin `dedupChunk0Aggregation=true`)。3×T0 近重金标(60 对)+ delta 探针实测: multi-maxsim 给 29.5% entry 引入新增 dedup 邻居(235 对/600, 多为共享尾段 chunk 的 distinct entry = false-merge 注入); chunk0 聚合把新增降到 62(-74%, 残差为 chunker 边界噪声), mean 更差(368)故弃。dedup 候选恢复转产前单向量行为。
+2. **原子重嵌(条件2)**: ✅ `MULTI_VECTOR=1 OUT_PATH=shadow embed-corpus-init` 建全库 shadow(2368 entry → 2731 sub-vector, 285 多 chunk, scheme m), validate slug 全集匹配后 same-dir 原子 rename swap; 旧单向量索引备份 `.bak` 可秒回滚。settings `memory.embedding.multiVector=true`(显式 kill-switch, 非 code DEFAULT)。
+3. **统计 power-up(条件3)**: ✅ 40 paraphrase-tail query: multi recall@10 93% vs single 65%, @50 100% vs 88%, MRR 0.73 vs 0.44(Wilson CI 不重叠)。诚实口径: 这是**条件性**增益(query 恰问尾部事实 + 命中长 entry), 非聚合生产 recall。
+4. **title-prefix ablation(条件4, 低 stakes)**: ✅ with-prefix vs no-prefix(40 query): recall@1 60% vs 50%, MRR 0.727 vs 0.673, @10/@50 持平 → 前缀净正向(锚回主题不稀释 distinctive-tail), 保留默认 true。
+5. **人类绿灯**: ✅ 用户显式授权执行 flip。
+
+**post-flip 验证**: 生产多向量索引 live topN 正常(max-sim over sub-vectors, 返回主题相关); smoke-memory-embedding 16/16、smoke-search-profiles(dedup chunk0 pin)、smoke-query-routing、smoke-stale-floor-window 全过。回滚路径: settings multiVector=false + `mv embeddings.json.bak embeddings.json`(或重嵌)。
 
 ## 11. P3 BM25 复活转产(本次, 3×T0 执行面板决定)
 
