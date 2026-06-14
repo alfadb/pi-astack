@@ -31,6 +31,7 @@ export interface SearchSettings {
   stage0StaleFloorRatio: number;    // P6: stale/missing 保底预算占 maxCand 比例(freshness 不变量)
   stage1CompactSurface: boolean;    // P8: stage1 用紧凑 surface(meta+summary, 无 compiledTruth/timeline)做粗筛
   stage1Skip: boolean;              // ADR 0036: 跳过 stage1 LLM, stage0 top-K 直出 stage2(两阶段塔缩)
+  sparseBM25: boolean;             // ADR 0036: sparse 用 char n-gram BM25(补中文/符号)替朴素子串
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -69,6 +70,11 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // 跳过 stage1 LLM 粗筛(5×T0 共识: stage1 与 dense 排序冲退), stage0 top-K
   // 直接喚 stage2 full-body 精排。省掉 stage1 的 ~324K token(~9× 降本)。
   stage1Skip: false,
+  // ADR 0036(dark-launch, 默认 off): sparse 用 char n-gram BM25 替朴素子串。
+  // 现 sparseMatchSlugs 的 term regex /[a-z0-9].../ 对中文零匹配 —— 中文 query
+  // 的 sparse 通道完全失效。BM25(ASCII 标识符 + CJK bigram + IDF 加权 + 字段
+  // 权重)补 dense 的中文/精确符号/短 query 盲区, 与 dense RRF 融合。
+  sparseBM25: false,
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -216,6 +222,7 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage0StaleFloorRatio: Math.min(1, Math.max(0, asNumber(search.stage0StaleFloorRatio, DEFAULT_SEARCH_SETTINGS.stage0StaleFloorRatio))),
     stage1CompactSurface: asBoolean(search.stage1CompactSurface, DEFAULT_SEARCH_SETTINGS.stage1CompactSurface),
     stage1Skip: asBoolean(search.stage1Skip, DEFAULT_SEARCH_SETTINGS.stage1Skip),
+    sparseBM25: asBoolean(search.sparseBM25, DEFAULT_SEARCH_SETTINGS.sparseBM25),
   };
 }
 

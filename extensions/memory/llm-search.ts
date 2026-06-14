@@ -603,7 +603,54 @@ function byUpdatedDesc(a: MemoryEntry, b: MemoryEntry): number {
 /** Sparse 精确匹配: query terms 命中 slug/title/trigger_phrases/compiledTruth/
  *  timeline(含 body —— ADR 编号/函数名/错误码常在正文不在标题, 修订 3)。
  *  纯 in-memory 子串, 零 I/O。按命中 term 数降序。 */
-function sparseMatchSlugs(query: string, corpus: MemoryEntry[]): string[] {
+// ADR 0036: char n-gram tokenizer — ASCII 标识符/符号 + CJK bigram, 解中文
+// sparse 盲区(旧 regex /[a-z0-9].../ 对中文零匹配)。纯 JS 零依赖。
+function sparseTokens(text: string): string[] {
+  const lower = text.toLowerCase();
+  const out: string[] = [];
+  for (const m of lower.matchAll(/[a-z0-9][a-z0-9_./-]{1,}/g)) out.push(m[0]);
+  for (const run of lower.match(/[\u4e00-\u9fff]+/g) ?? []) {
+    if (run.length === 1) { out.push(run); continue; }
+    for (let i = 0; i < run.length - 1; i++) out.push(run.slice(i, i + 2)); // CJK bigram
+  }
+  return out;
+}
+
+// ADR 0036: BM25 char-ngram sparse — IDF 加权 + 高信号字段(slug/title/trigger)
+// ×3, 替朴素子串(无 IDF + 中文零匹配)。与 dense 交由 selectStage0Pool union。
+export function sparseMatchSlugsBM25(query: string, corpus: MemoryEntry[]): string[] {
+  const qTokens = [...new Set(sparseTokens(query))];
+  if (qTokens.length === 0) return [];
+  const df = new Map<string, number>();
+  const docs = corpus.map((e) => {
+    const high = sparseTokens([e.slug, e.title, relationValues(e.frontmatter.trigger_phrases).join(" ")].join(" "));
+    const body = sparseTokens([e.compiledTruth, e.timeline.join(" ")].join(" "));
+    const highTf = new Map<string, number>(); for (const t of high) highTf.set(t, (highTf.get(t) ?? 0) + 1);
+    const bodyTf = new Map<string, number>(); for (const t of body) bodyTf.set(t, (bodyTf.get(t) ?? 0) + 1);
+    for (const t of new Set([...highTf.keys(), ...bodyTf.keys()])) df.set(t, (df.get(t) ?? 0) + 1);
+    return { highTf, bodyTf, dl: high.length + body.length };
+  });
+  const N = Math.max(1, corpus.length);
+  const avgdl = docs.reduce((s, d) => s + d.dl, 0) / N;
+  const k1 = 1.2, b = 0.75;
+  const scored: Array<{ slug: string; score: number }> = [];
+  for (let i = 0; i < corpus.length; i++) {
+    const { highTf, bodyTf, dl } = docs[i];
+    let score = 0;
+    for (const t of qTokens) {
+      const tf = (highTf.get(t) ?? 0) * 3 + (bodyTf.get(t) ?? 0); // 高信号字段 ×3
+      if (tf === 0) continue;
+      const dft = df.get(t) ?? 0;
+      const idf = Math.log(1 + (N - dft + 0.5) / (dft + 0.5));
+      score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / Math.max(1, avgdl)));
+    }
+    if (score > 0) scored.push({ slug: corpus[i].slug, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((s) => s.slug);
+}
+
+export function sparseMatchSlugs(query: string, corpus: MemoryEntry[]): string[] {
   const terms = [...new Set((query.toLowerCase().match(/[a-z0-9][a-z0-9_./-]{2,}/g) ?? []))]
     .filter((t) => t.length >= 3);
   if (terms.length === 0) return [];
@@ -675,7 +722,9 @@ export async function selectStage0Pool(
     mode = "sparse_fallback"; // 熔断: dense 不可用 → sparse-only(禁全库)
   }
 
-  const sparseSlugs = sparseMatchSlugs(query, corpus);
+  const sparseSlugs = settings.search.sparseBM25
+    ? sparseMatchSlugsBM25(query, corpus)
+    : sparseMatchSlugs(query, corpus);
   // P7(4×T0 共识, load-bearing fix): stale 只算“reconcile 会 embed 的集合”。
   // staleOrMissingSlugs 原对全 corpus 算 → status:["all"] 查询时所有非 active +
   // readonly rule neighbors(zone:rules, 不经 loadEntries 永不被 reconcile embed)
