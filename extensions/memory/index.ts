@@ -21,7 +21,7 @@ import { asBoolean, asNumber, resolveSettings } from "./settings";
 import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./types";
 import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
-import { llmSearchEntries } from "./llm-search";
+import { runMemorySearch } from "./llm-search";
 import { buildDecisionSearchQuery, pruneDecisionBriefSeqCountersForSession, runMemoryDecide } from "./decide";
 import { PATH_A_INJECT_MARKER } from "./memory-context-injector";
 import { readOutcomeLedger, summarizeEntryActivity } from "../sediment/outcome-collector";
@@ -377,7 +377,8 @@ export default function (pi: ExtensionAPI) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
       try {
-        return wrapToolResult(await llmSearchEntries(entries, params, settings, ctx.modelRegistry, signal, ctx.cwd));
+        // ADR 0037: toolSearch profile(caller-overridable filters = LLM 给的 normalizeSearchFilters)
+        return wrapToolResult(await runMemorySearch("toolSearch", params.query, entries, settings, ctx.modelRegistry, { signal, projectRoot: ctx.cwd, callerFilters: params.filters }));
       } catch (err: unknown) {
         return wrapToolResult({
           ok: false,
@@ -568,14 +569,9 @@ export default function (pi: ExtensionAPI) {
       });
       let searchCards: Array<{ slug: unknown }>;
       try {
-        const result = await llmSearchEntries(
-          entries,
-          { query: decisionSearchQuery, filters: { limit: 8, status: ["active"] } },
-          settings,
-          ctx.modelRegistry,
-          signal,
-          ctx.cwd,
-        );
+        // ADR 0037: decideSearch profile(status:[active], limit:8; search 用 stage1Model;
+        // 合成走 decideModel 在下方 handler, 与 search 解耦)
+        const result = await runMemorySearch("decideSearch", decisionSearchQuery, entries, settings, ctx.modelRegistry, { signal, projectRoot: ctx.cwd });
         if ((result as any)?.ok === false) {
           const message = String((result as any).error ?? "memory_decide retrieval failed");
           return wrapToolResult({

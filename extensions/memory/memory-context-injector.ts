@@ -35,7 +35,7 @@ import { resolveUserGlobalAbrainHome } from "../_shared/runtime";
 import { rewriteUserMessageToSearchQuery } from "./query-rewriter";
 import type { QueryRewriteResult, ConversationTurn } from "./query-rewriter";
 import { loadEntries } from "./parser";
-import { llmSearchEntriesWithVerdict } from "./llm-search";
+import { runMemorySearch } from "./llm-search";
 import type { SearchVerdictResult } from "./llm-search";
 import type { MemoryEntry } from "./types";
 import { resolveSettings } from "./settings";
@@ -397,17 +397,8 @@ export async function tryInjectRelevantMemoryContext(
     // Step 4: search with LLM-side strong cutoff (verdict)
     let search: SearchVerdictResult;
     try {
-      search = await llmSearchEntriesWithVerdict(
-        entries,
-        {
-          query: rewriterResult.query,
-          filters: { limit: settings.pathA.searchLimit, status: ["active"] },
-        },
-        settings,
-        modelRegistry,
-        signal,
-        ctx.cwd,
-      );
+      // ADR 0037: pathAInject profile(status:[active], limit=pathA.searchLimit resolver, returnVerdict)
+      search = await runMemorySearch("pathAInject", rewriterResult.query, entries, settings, modelRegistry, { signal, projectRoot: ctx.cwd }) as SearchVerdictResult;
     } catch (e) {
       const row = { ...rowBase, outcome: "skipped_error", error: `search: ${e instanceof Error ? e.message : String(e)}`, total_duration_ms: Date.now() - t0 };
       appendLedgerRow(row);

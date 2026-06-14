@@ -2529,13 +2529,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             const memSettings = resolveMemorySettings();
             const searchQuery = effectiveWindow.text.slice(-2000);
             const loadedEntries = await (await import("../memory/parser")).loadEntries(cwd, memSettings, undefined);
-            const memResult = await (await import("../memory/llm-search")).llmSearchEntries(
+            // ADR 0037: correctionSearch profile(status:[active], limit:10)
+            const memResult = await (await import("../memory/llm-search")).runMemorySearch(
+              "correctionSearch",
+              `Find memory entries related to: ${searchQuery.slice(-500)}`,
               loadedEntries,
-              { query: `Find memory entries related to: ${searchQuery.slice(-500)}`, filters: { limit: 10, status: ["active"] } },
               memSettings,
               modelRegistry,
-              undefined,
-              cwd,
+              { projectRoot: cwd },
             ) as Array<{ slug: unknown; title?: unknown; summary?: unknown; kind?: unknown; status?: unknown; scope?: unknown; compiled_truth?: unknown }>;
             const bySlug = new Map(loadedEntries.map((entry: any) => [String(entry.slug), entry]));
             relatedEntries = (memResult && !(memResult as any).ok)
