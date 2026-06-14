@@ -678,9 +678,20 @@ export async function selectStage0Pool(
       seen.add(s); ordered.push(s);
     }
   };
-  take(denseSlugs, maxCand);
-  take(sparseSlugs, maxCand);
-  take(staleSlugs, Math.min(maxCand, ordered.length + Math.ceil(maxCand * 0.2))); // stale bounded
+  // P6(4×T0 REVISE-B 共识): stale/missing 保底 floor 先占, 不可被 dense/sparse
+  // 填满 maxCand 挤出 —— 兑现 ADR §4 freshness 不变量(新写 entry 下次
+  // search 立即可召回)。按 updated desc 取最近变更优先进 floor; floor 是下限,
+  // 步骤(4)剩余 stale 仍补到 maxCand(不设 20% 独立上限, deepseek 反对点)。
+  const staleFloor = Math.ceil(maxCand * settings.search.stage0StaleFloorRatio);
+  const staleByRecency = staleSlugs
+    .map((s) => entriesBySlug.get(s))
+    .filter((e): e is MemoryEntry => !!e)
+    .sort(byUpdatedDesc)
+    .map((e) => e.slug);
+  take(staleByRecency, staleFloor); // (1) stale floor 保底(freshness 硬保证)
+  take(denseSlugs, maxCand);        // (2) dense relevance 大头
+  take(sparseSlugs, maxCand);       // (3) sparse 精确补
+  take(staleSlugs, maxCand);        // (4) 剩余 stale 补到 maxCand(无独立上限)
 
   // 熔断且 sparse 空 → 有界 recency 采样(禁全库 full-body, 修订 5)
   if (mode === "sparse_fallback" && ordered.length === 0) {

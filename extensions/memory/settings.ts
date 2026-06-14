@@ -28,6 +28,7 @@ export interface SearchSettings {
   stage0MaxCandidates: number;      // hybrid union 候选面硬上限(~300, 成本旋钮)
   stage0InsufficientPoolK: number;  // 候选池 < K 触发安全网有界扩召(~5)
   stage0EmbedTimeoutMs: number;     // query embed 短超时(~10s; 失败即熔断 sparse)
+  stage0StaleFloorRatio: number;    // P6: stale/missing 保底预算占 maxCand 比例(freshness 不变量)
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -51,6 +52,12 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage0MaxCandidates: 400,
   stage0InsufficientPoolK: 5,
   stage0EmbedTimeoutMs: 10_000,
+  // P6(4×T0 REVISE-B 共识): stale/missing(刚写/改写未索引) 保底预算 floor,
+  // 不可被 dense/sparse 填满 maxCand 挤出 —— 兑现 ADR §4 freshness 不变量
+  // (“新写 entry 下次 search 立即可召回”)。floor 是下限不是上限: 超 floor
+  // 的 stale 仍可补到 maxCand(不独立砸一刀, deepseek 反对 20% 上限的点)。
+  // 0.1 × 400 = 40 槽: 正常 stale ≤几条全进, 冷启动/provider 宕机时限其不挤爆 relevance。
+  stage0StaleFloorRatio: 0.1,
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -195,6 +202,7 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage0MaxCandidates: Math.max(1, asNumber(search.stage0MaxCandidates, DEFAULT_SEARCH_SETTINGS.stage0MaxCandidates)),
     stage0InsufficientPoolK: Math.max(0, asNumber(search.stage0InsufficientPoolK, DEFAULT_SEARCH_SETTINGS.stage0InsufficientPoolK)),
     stage0EmbedTimeoutMs: Math.max(1000, asNumber(search.stage0EmbedTimeoutMs, DEFAULT_SEARCH_SETTINGS.stage0EmbedTimeoutMs)),
+    stage0StaleFloorRatio: Math.min(1, Math.max(0, asNumber(search.stage0StaleFloorRatio, DEFAULT_SEARCH_SETTINGS.stage0StaleFloorRatio))),
   };
 }
 
