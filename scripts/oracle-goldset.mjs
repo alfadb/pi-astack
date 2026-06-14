@@ -42,7 +42,8 @@ const VOTE_MIN = 2;
 const QUERIES = JSON.parse(fs.readFileSync(QUERIES_PATH, "utf8"));
 
 const llm = await jiti.import(path.join(repoRoot, "extensions/memory/llm-search.ts"));
-const { llmSearchEntriesWithVerdict, selectStage0Pool } = llm;
+const { selectStage0Pool } = llm;
+const { llmSearchEntriesWithVerdict } = llm.__oracleKernel; // ADR 0037: 经 __oracleKernel 拿私有 wrapper
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 

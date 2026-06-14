@@ -27,7 +27,8 @@ const jiti = createJiti(import.meta.url);
 const llm = await jiti.import(path.join(repoRoot, "extensions/memory/llm-search.ts"));
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
-const { llmSearchEntriesWithVerdict, selectStage0Pool } = llm;
+const { selectStage0Pool } = llm;
+const { llmSearchEntriesWithVerdict } = llm.__oracleKernel; // ADR 0037: 经 __oracleKernel 拿私有 wrapper
 
 const ABRAIN = path.join(os.homedir(), ".abrain");
 const MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "models.json");

@@ -6,6 +6,7 @@
  * stage1Skip/sparseBM25=true, dedup profile 也强制二者 false。
  */
 import { createJiti } from "jiti";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -65,6 +66,26 @@ const R = (name, settings = base, callerFilters) => resolveProfileExecution(SEAR
 }
 // 全 profile 都在 registry
 ok(["toolSearch","decideSearch","pathAInject","sedimentDedup","correctionSearch"].every((n) => SEARCH_PROFILES[n]?.name === n), "5 profile 全部注册");
+
+// ADR 0037 强制 grep-guard: 生产代码(extensions/, 除内核 llm-search.ts)禁止直接调
+// 裸 wrapper 或引用 __oracleKernel —— 生产唯一入口是 runMemorySearch(profile, ...)。
+// 区分调用(name + "(") 与注释提及(name + 空格/无括号): 只拦调用形式。
+{
+  const extRoot = path.join(__dirname, "..", "extensions");
+  const walkTs = (d) => { const o = []; for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) o.push(...walkTs(p)); else if (e.name.endsWith(".ts")) o.push(p); } return o; };
+  const callRe = /(?<![\w.])(llmSearchEntries|llmSearchEntriesWithVerdict)\(|__oracleKernel/;
+  const offenders = [];
+  for (const f of walkTs(extRoot)) {
+    if (f.endsWith(`${path.sep}memory${path.sep}llm-search.ts`)) continue; // 内核自身
+    const lines = fs.readFileSync(f, "utf8").split("\n");
+    lines.forEach((ln, i) => {
+      const t = ln.trim();
+      if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return; // 跳注释行
+      if (callRe.test(ln)) offenders.push(`${path.relative(extRoot, f)}:${i + 1}`);
+    });
+  }
+  ok(offenders.length === 0, `enforcement: extensions/ 无裸 wrapper 调用/·__oracleKernel 引用${offenders.length ? " — OFFENDERS: " + offenders.join(", ") : ""}`);
+}
 
 console.log(fails === 0 ? "\n✅ ALL PASS — 5 profile 等价于迁移前手搓策略; dedup 泄漏防护成立" : `\n❌ ${fails} FAIL`);
 process.exit(fails === 0 ? 0 : 1);

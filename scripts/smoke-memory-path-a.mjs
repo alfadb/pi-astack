@@ -229,8 +229,10 @@ check("rewriter accepts 5 args (msg, history, registry, settings, signal?)",
 // ────────────────────────────────────────────────────────────────
 console.log("\n[5] llm-search Stage 2 verdict parsing");
 const search = jiti(path.join(repoRoot, "extensions/memory/llm-search.ts"));
-check("llmSearchEntries exported", typeof search.llmSearchEntries === "function");
-check("llmSearchEntriesWithVerdict exported", typeof search.llmSearchEntriesWithVerdict === "function");
+// ADR 0037: 生产唯一入口 runMemorySearch; 裸 wrapper 已私有化, 仅经 __oracleKernel 测试暴露
+check("runMemorySearch exported (生产唯一入口)", typeof search.runMemorySearch === "function");
+check("__oracleKernel test export 可用", typeof search.__oracleKernel?.llmSearchEntriesWithVerdict === "function" && typeof search.__oracleKernel?.llmSearchEntries === "function");
+check("裸 wrapper 不再 export(私有内核)", search.llmSearchEntries === undefined && search.llmSearchEntriesWithVerdict === undefined);
 
 // resultCard projection: lock that it intentionally does NOT include
 // compiledTruth (search tool API contract), which is why path-A injector

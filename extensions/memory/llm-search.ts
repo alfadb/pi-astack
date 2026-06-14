@@ -970,7 +970,9 @@ async function executeSearch(
   return { hits: result.hits, verdict: result.verdict, stage1Ms: result.stage1Ms, stage2Ms: result.stage2Ms, surface };
 }
 
-export async function llmSearchEntries(
+// ADR 0037: 私有内核 wrapper —— 生产唯一入口是 runMemorySearch(profile, ...)。
+// 不再 export(防第 6 个调用方手搓 policy); oracle/smoke 脚本经文底 __oracleKernel 用。
+async function llmSearchEntries(
   entries: MemoryEntry[],
   params: SearchParams,
   settings: MemorySettings,
@@ -998,7 +1000,7 @@ export interface SearchVerdictResult {
   stage2DebugSlice?: string;
 }
 
-export async function llmSearchEntriesWithVerdict(
+async function llmSearchEntriesWithVerdict(
   entries: MemoryEntry[],
   params: SearchParams,
   settings: MemorySettings,
@@ -1044,3 +1046,11 @@ export async function runMemorySearch(
     ? llmSearchEntriesWithVerdict(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot)
     : llmSearchEntries(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot);
 }
+
+/**
+ * TEST/ORACLE ONLY — 直接暴露内核 wrapper 给 scripts/ 下的 oracle/smoke。它们需要用
+ * 自定义 settings 做 stage1Skip ablation 等**内核级实验**(非“角色”语义, 不适用 profile)。
+ * **生产代码(extensions/)禁止引用本导出** —— 生产唯一入口是 runMemorySearch(profile, ...)。
+ * grep-guard(scripts/smoke-search-profiles.mjs)断言 extensions/ 不引用 __oracleKernel/裸 wrapper。
+ */
+export const __oracleKernel = { llmSearchEntries, llmSearchEntriesWithVerdict };

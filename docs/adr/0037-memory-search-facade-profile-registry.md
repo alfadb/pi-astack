@@ -1,6 +1,6 @@
 # ADR 0037: memory search Facade — 检索策略 profile registry
 
-- Status: Proposed — 3×T0 设计评审完成(三家一致 GO-WITH-REVISIONS, 无 reject); 修订已并入(§3.1/§9); 待人类绿灯后实现
+- Status: **Accepted (P1-P3 已实现)** — 3×T0 设计评审 GO-WITH-REVISIONS 修订已并入(§3.1/§9); runMemorySearch 单入口 + 5 profile + 私有内核(__oracleKernel test-export)+ grep-guard 已落, 5 调用方全迁, dedup pin 平移进 sedimentDedup profile; 等价 smoke 19/19 + enforcement guard 过。P4(多向量)今 dark; loadEntries 复用(P4 可选)未做。
 - Date: 2026-06-14
 - Relates-to: ADR 0015(LLM 检索)、ADR 0035(stage0 候选)、ADR 0036(两阶段塌缩 + 多向量); 本 ADR 不改检索算法, 只收口"调用方策略层"
 
@@ -76,6 +76,8 @@ interface SearchProfile {
 | P2 | 迁移 1 个**可逆读路径**(`correctionSearch` 或 `toolSearch`)先验证 facade+gate(输出错可见、不毁数据) | 该路径行为等价 + 单入口为唯一通路 |
 | P3 | 迁移其余读路径 + **最后**迁 `sedimentDedup`(把已存在的 `stage1Skip=false` pin **平移**进 profile) | dedup 行为等价 + 全局 flag 结构性不漏进; 待 all-status 近重金标(ADR 0036 §10.4)再放宽 |
 | P4 | (可选)单 turn loadEntries 复用 | 解析次数下降, recall 不变 |
+
+**执行结果(本次)**: P1(search-profiles.ts + runMemorySearch + smoke-search-profiles 19/19)、P2/P3(5 调用方迁 runMemorySearch; curator 手搓 dedupSettings 删除, pin 进 profile; llmSearchEntries/WithVerdict un-export 为私有, 仅 `__oracleKernel` test-export 给 4 个 oracle/smoke; smoke-search-profiles grep-guard 断言 extensions/ 无裸 wrapper 调用)均完成。executeSearch 本就私有。核心保证已单测: 全局 stage1Skip/sparseBM25=true 时 sedimentDedup profile 仍强制 false(flag 漏不进)。P4 loadEntries 复用列为可选未做。
 
 **排序修订(3×T0 分歧裁决)**: opus 指 dedup-first 是**最危险**(false-merge 不可逆 + all-status 路径无金标验证), deepseek 指 dedup policy **最简单可无损迁**。裁决: dedup 的 `stage1Skip=false` pin **今天已存在**(curator.ts dedupSettings), 故**无紧迫性先迁**; 先在**可逆**路径证 facade+gate, 最后平移 dedup pin 进 profile —— 既不牺牲 dedup 是最高价值目标, 又尊重不可逆性(opus)。
 

@@ -22,7 +22,7 @@ const ABRAIN = path.join(os.homedir(), ".abrain");
 const EMBED_KEY = process.env.SUB2API_API_KEY_EMBEDDING;
 if (!EMBED_KEY) { console.log("SKIP: no SUB2API_API_KEY_EMBEDDING"); process.exit(0); }
 
-const { llmSearchEntriesWithVerdict } = await jiti.import(path.join(repoRoot, "extensions/memory/llm-search.ts"));
+const { llmSearchEntriesWithVerdict } = (await jiti.import(path.join(repoRoot, "extensions/memory/llm-search.ts"))).__oracleKernel; // ADR 0037: 经 __oracleKernel 拿私有 wrapper
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 const { memorySearchMetricsPath } = await jiti.import(path.join(repoRoot, "extensions/_shared/runtime.ts"));
