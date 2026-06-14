@@ -135,13 +135,18 @@ async function evalAgainstGold() {
   if (!EMBED_KEY) { console.log("FATAL — no SUB2API_API_KEY_EMBEDDING(eval 需 embedding)"); process.exit(1); }
   if (!fs.existsSync(GOLDSET_PATH)) { console.log(`FATAL — ${GOLDSET_PATH} 不存在(先 material → dispatch → aggregate)`); process.exit(1); }
   const gold = JSON.parse(fs.readFileSync(GOLDSET_PATH, "utf8"));
-  const ORACLE_MODEL = process.env.ORACLE_MODEL || "deepseek/deepseek-v4-pro";
-  const mk = (skip) => ({ ...baseSettings, search: { ...baseSettings.search, stage0Enabled: true, stage1Model: ORACLE_MODEL, stage2Model: ORACLE_MODEL, stage1Skip: skip } });
+  // ADR 0036 §9.1 条件 5(opus): 默认用**生产型号**(resolveSettings: stage1=v4-flash,
+  // stage2=M3)表征真正被 flip 的管道; 且 v4-flash/M3 都不是 4-voter gold 标注员
+  // (annotator 是 v4-PRO, M3 被排除) → 同时兑现条件 4a held-out oracle。
+  // ORACLE_MODEL 覆写两阶段(向后兼容 v4-pro 同模型跑); STAGE1_MODEL/STAGE2_MODEL 分别覆写。
+  const s1Model = process.env.STAGE1_MODEL || process.env.ORACLE_MODEL || baseSettings.search.stage1Model;
+  const s2Model = process.env.STAGE2_MODEL || process.env.ORACLE_MODEL || baseSettings.search.stage2Model;
+  const mk = (skip) => ({ ...baseSettings, search: { ...baseSettings.search, stage0Enabled: true, stage1Model: s1Model, stage2Model: s2Model, stage1Skip: skip } });
   // candidateLimit = max(stage2Limit, stage1Limit) = two-stage 实际看到的 stage0 候选窗口
   const candidateLimit = Math.max(baseSettings.search.stage2Limit, baseSettings.search.stage1Limit);
   const recall = (hits, g) => (g.length === 0 ? null : hits.filter((s) => g.includes(s)).length / g.length);
   const rThree = [], rTwo = [], covWin = [];
-  console.log(`eval | oracle=${ORACLE_MODEL} | corpus=${corpus.length} | candidateLimit(two-stage 窗口)=${candidateLimit}\n`);
+  console.log(`eval | stage1=${s1Model} stage2=${s2Model} | corpus=${corpus.length} | candidateLimit(two-stage 窗口)=${candidateLimit}\n`);
   for (const { query } of QUERIES) {
     const g = gold[query]?.gold ?? [];
     if (g.length === 0) { console.log(`  Q: ${query.slice(0, 40)}… — gold 空, 跳过`); continue; }

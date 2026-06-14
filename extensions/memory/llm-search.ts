@@ -672,6 +672,35 @@ export function sparseMatchSlugs(query: string, corpus: MemoryEntry[]): string[]
   return scored.map((s) => s.slug);
 }
 
+// ADR 0036 §9.1 条件 3: stage0 候选 union 排序(纯函数, 可单测)。window-aware:
+// dense 领跑窗口(windowSize - floorReserveInWindow), 再把最近变更 stale 填进窗口尾
+// 预留(仍在 top-windowSize → 新写 entry 必进窗口, freshness 不变量), 之后
+// dense/sparse/剩余 stale 填到 maxCand 供 three-stage(stage1 看全池, 顺序无关)。
+// stage1Skip 直取 slice(0, candidateLimit) 时窗口由 dense 主导, stale-heavy 不再挤出 dense top-K。
+export function orderStage0Candidates(
+  denseSlugs: string[],
+  sparseSlugs: string[],
+  staleByRecency: string[],
+  staleSlugs: string[],
+  opts: { allow: (s: string) => boolean; windowSize: number; floorReserveInWindow: number; maxCand: number },
+): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  const take = (slugs: string[], cap: number) => {
+    for (const s of slugs) {
+      if (ordered.length >= cap) break;
+      if (seen.has(s) || !opts.allow(s)) continue;
+      seen.add(s); ordered.push(s);
+    }
+  };
+  take(denseSlugs, Math.max(0, opts.windowSize - opts.floorReserveInWindow)); // (1) dense 领跑窗口
+  take(staleByRecency, opts.windowSize);  // (2) 最近变更 stale 填窗口尾预留(freshness 进窗口)
+  take(denseSlugs, opts.maxCand);         // (3) dense 大头(窗口外)
+  take(sparseSlugs, opts.maxCand);        // (4) sparse 精确补
+  take(staleSlugs, opts.maxCand);         // (5) 剩余 stale 补到 maxCand(three-stage freshness)
+  return ordered;
+}
+
 interface Stage0Pool {
   candidateEntries: MemoryEntry[];
   mode: "hybrid" | "sparse_fallback";
@@ -736,30 +765,21 @@ export async function selectStage0Pool(
   );
   const staleSlugs = staleOrMissingSlugs(idx, indexableForStale); // search-time freshness(仅可索引集)
 
-  // union + 硬上限(dense 分 → sparse 精确 → bounded stale 逐出, 修订 4)
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  const take = (slugs: string[], cap: number) => {
-    for (const s of slugs) {
-      if (ordered.length >= cap) break;
-      if (seen.has(s) || !entriesBySlug.has(s)) continue;
-      seen.add(s); ordered.push(s);
-    }
-  };
-  // P6(4×T0 REVISE-B 共识): stale/missing 保底 floor 先占, 不可被 dense/sparse
-  // 填满 maxCand 挤出 —— 兑现 ADR §4 freshness 不变量(新写 entry 下次
-  // search 立即可召回)。按 updated desc 取最近变更优先进 floor; floor 是下限,
-  // 步骤(4)剩余 stale 仍补到 maxCand(不设 20% 独立上限, deepseek 反对点)。
-  const staleFloor = Math.ceil(maxCand * settings.search.stage0StaleFloorRatio);
+  // union + 硬上限 —— window-aware 排序(见 orderStage0Candidates, §9.1 条件 3)。
+  // windowSize = two-stage 候选窗口(candidateLimit = max(stage2Limit, stage1Limit))。
+  // fresh 索引(stale≈0)下窗口自然全 dense(与 P6 eval 现状一致)。
+  const windowSize = Math.max(settings.search.stage2Limit, settings.search.stage1Limit);
   const staleByRecency = staleSlugs
     .map((s) => entriesBySlug.get(s))
     .filter((e): e is MemoryEntry => !!e)
     .sort(byUpdatedDesc)
     .map((e) => e.slug);
-  take(staleByRecency, staleFloor); // (1) stale floor 保底(freshness 硬保证)
-  take(denseSlugs, maxCand);        // (2) dense relevance 大头
-  take(sparseSlugs, maxCand);       // (3) sparse 精确补
-  take(staleSlugs, maxCand);        // (4) 剩余 stale 补到 maxCand(无独立上限)
+  const ordered = orderStage0Candidates(denseSlugs, sparseSlugs, staleByRecency, staleSlugs, {
+    allow: (s) => entriesBySlug.has(s),
+    windowSize,
+    floorReserveInWindow: Math.ceil(windowSize * settings.search.stage0StaleFloorRatio),
+    maxCand,
+  });
 
   // 熔断且 sparse 空 → 有界 recency 采样(禁全库 full-body, 修订 5)
   if (mode === "sparse_fallback" && ordered.length === 0) {

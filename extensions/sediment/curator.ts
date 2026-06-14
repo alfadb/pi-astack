@@ -1056,10 +1056,20 @@ export async function curateProjectDraft(
         ...loadReadonlyRuleNeighborEntries({ abrainHome: deps.abrainHome, cwd: deps.projectRoot }),
       ];
     }
+    // ADR 0036 §9.1 条件 2(3×T0 评审, opus 最强): sediment 去重是
+    // memory_search 最脆弱路径(false-merge → corpus corruption, 比漏召严重),
+    // 且评价语义是“近重检测”≠ search recall(ADR §2)。P6 跨厂商金标只验了
+    // active-status 检索, 未验 all-status 去重。故此路径 **pin stage1Skip=false**
+    // (始终走三阶段 stage1), 不让全局 stage1Skip 转产连带翻转未验证的去重 —— 直到
+    // dedup 有自己的近重金标验证。
+    const dedupSettings = {
+      ...deps.memorySettings,
+      search: { ...deps.memorySettings.search, stage1Skip: false },
+    };
     cards = await llmSearchEntries(
       entries,
       { query: makeSearchPrompt(safeDraft), filters: { limit: 5, status: ["all"] } },
-      deps.memorySettings,
+      dedupSettings,
       deps.modelRegistry,
       deps.signal,
       deps.projectRoot,

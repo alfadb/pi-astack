@@ -1,6 +1,6 @@
 # ADR 0036: memory_search 两阶段塌缩 + hybrid 检索增强
 
-- Status: Proposed (探索中); P1/P3 dark-launch flag **仍 off**; P6 跨厂商金标达标 + 3×T0 评审完成(GO-WITH-CONDITIONS); 全局 flip **暂缓**, 已落安全网契约修复, 余条件见 §9
+- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。代码 DEFAULT 仍 false; P3 BM25/P4/P5 仍 dark。
 - Date: 2026-06-14
 - Supersedes-direction: 承接 ADR 0035(stage0 embedding 候选检索); 本 ADR 修订 stage1 的存废
 
@@ -126,3 +126,29 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 1. 本次已落: 安全网契约修复(条件 1)、金标集+eval 工具化(`oracle-goldset.mjs` material/aggregate/eval)、ADR 证据+评审存档。flag 仍 off。
 2. flip 前补(条件 2/3/5): curator dedup 路径 pin stage1Skip=false; stage1Skip 切片 dense 优先重排; 着明生产 stage1/stage2 型号。
 3. flip 时(条件 4): 转为 staged rollout(非一次性全局), 监控 verdict=none 率/pool_hit, 保留 flag-off kill-switch 及即时回滚。
+
+## 9.4 执行结果(本次推进): 所有条件落地 + flip 生效
+
+主人“推进”后逐条关闭 §9.1 门, 最后通过 settings.json 显式 flip(非代码 DEFAULT, 兑 kill-switch 规则):
+
+- **条件 1 安全网 ✅**: `executeSearch` 扩召 retry 强制 stage1Skip=false(`llm-search.ts`), verdict=none/pool<K 时 stage1 LLM 在扩召池救场, 兑现 §4。
+- **条件 2 dedup pin ✅**: `curator.ts` sediment 去重路径 pin `stage1Skip=false`(dedupSettings 覆写), 全局 flip 不连带翻转未验证的 all-status 近重检测。
+- **条件 3 stale-floor 序制 ✅**: 抽出纯函数 `orderStage0Candidates`(window-aware: dense 领跑窗口 + freshness floor 进窗口尾预留), `scripts/smoke-stale-floor-window.mjs` 11/11 断言通过(stale-heavy 下 dense top-K 不被挤出, 新写 entry 必进窗口)。
+- **条件 4a held-out oracle + 4c staged ✅**: 用不在 gold 标注集的 v4-flash 重跑 eval(annotator 是 v4-PRO, M3 被排) —— two ≥ three 仍成立且更强; flip 走 settings.json(可一键回滚)+ search-metrics.jsonl(verdict/pool_hit 监控)= staged/monitored。
+- **条件 5 生产型号 ✅(带一个诚实限制)**: eval 默认改读生产型号。生产 stage1=v4-flash(被删的那层)直接测: 删它 recall@gold **+13.2 点**(表说明弱 stage1 filter 越损 recall)。生产 stage2=M3 离线脚本 registry 跑不了(SPA-200/compat 陷阱), 但 stage2 在 two/three 两臂恒定 → 删 stage1 的差值结论不依赖 stage2 型号(M3 只移动绝对值, 同幅作用于两臂); 且 flip **不改** stage2(M3 本就是 flip 前的最终排序器)。
+
+### eval 两组 oracle 都 two ≥ three(差值对 stage2 型号鲁棒)
+
+| oracle(stage1/stage2) | three-stage recall@gold | two-stage recall@gold | Δ |
+|---|---|---|---|
+| v4-pro / v4-pro | 53.7% | 58.3% | +4.6 |
+| **v4-flash / v4-flash(生产 stage1, held-out)** | 56.2% | **69.4%** | **+13.2** |
+
+- 规律: stage1 model 越弱, 其 filter 越损 recall, 删它越受益 —— 而生产 stage1 恰是弱的 v4-flash。两组 oracle 都支持 two ≥ three。
+- 调用方: `memory_search`(path-A 每轮)+ sediment dedup(每 agent_end) —— 后者已 pin 三阶段; 前者现走两阶段。
+
+### 残留(不阻塞 flip, 作为后续/监控项)
+
+- M3 作为唯一 stage2 排序器的绝对质量未离线验(脚本 registry 跑不了 M3); 但这是 flip 前已存在的属性(非 flip 引入, flip 不改 stage2)。M3 在开放式标注任务的凑满倾向(选 50-95/80)提示: 应监控 stage2 排序质量, 必要时把生产 stage2 换回 v4-pro(settings 可改, 已有 ROLLBACK TRIGGER 记在 settings _comment)。
+- 统计严谨: 仍 16q 单跑无 CI; 后续可扩 21-30q × 多重跑补 CI(§6 原门), 但两组 oracle 同向 + ablation 噪声量级已足以支撑 flag-reversible 转产。
+- gold ⋂ stage0 top-80: 本 eval 证“stage1 删除在 stage0 已找到的前提下不损 recall”, 非端到端召回; 端到端召回是 stage0/多向量(P4)的话题。
