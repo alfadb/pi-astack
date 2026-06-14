@@ -30,6 +30,7 @@ export interface SearchSettings {
   stage0EmbedTimeoutMs: number;     // query embed 短超时(~10s; 失败即熔断 sparse)
   stage0StaleFloorRatio: number;    // P6: stale/missing 保底预算占 maxCand 比例(freshness 不变量)
   stage1CompactSurface: boolean;    // P8: stage1 用紧凑 surface(meta+summary, 无 compiledTruth/timeline)做粗筛
+  stage1Skip: boolean;              // ADR 0036: 跳过 stage1 LLM, stage0 top-K 直出 stage2(两阶段塔缩)
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -64,6 +65,10 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // 命中 0.2%)。dense 已语义召回→候选都相关, stage1 只需粗筛 top, 用
   // meta+title+trigger+summary(~150 token/entry)足够; 完整 body 留 stage2 精排。
   stage1CompactSurface: false,
+  // ADR 0036(dark-launch, 默认 off): 两阶段塔缩 —— stage0 dense 已排序,
+  // 跳过 stage1 LLM 粗筛(5×T0 共识: stage1 与 dense 排序冲退), stage0 top-K
+  // 直接喚 stage2 full-body 精排。省掉 stage1 的 ~324K token(~9× 降本)。
+  stage1Skip: false,
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -210,6 +215,7 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage0EmbedTimeoutMs: Math.max(1000, asNumber(search.stage0EmbedTimeoutMs, DEFAULT_SEARCH_SETTINGS.stage0EmbedTimeoutMs)),
     stage0StaleFloorRatio: Math.min(1, Math.max(0, asNumber(search.stage0StaleFloorRatio, DEFAULT_SEARCH_SETTINGS.stage0StaleFloorRatio))),
     stage1CompactSurface: asBoolean(search.stage1CompactSurface, DEFAULT_SEARCH_SETTINGS.stage1CompactSurface),
+    stage1Skip: asBoolean(search.stage1Skip, DEFAULT_SEARCH_SETTINGS.stage1Skip),
   };
 }
 

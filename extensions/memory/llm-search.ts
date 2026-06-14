@@ -747,20 +747,31 @@ async function runTwoStageSearch(
   if (candidateEntries.length === 0) {
     return { hits: [], verdict: "none", stage1Ms: 0, stage2Ms: 0, picksCount: 0 };
   }
-  const indexText = buildLlmIndexText(candidateEntries, settings.search.stage1CompactSurface);
-  const t1 = Date.now();
-  const stage1 = await callSearchModel(
-    settings.search.stage1Model, makeStage1Prompt(query, indexText, candidateLimit, settings.search.stage1CompactSurface),
-    modelRegistry, signal, STAGE1_TIMEOUT_MS, settings.search.stage1Thinking,
-  );
-  const stage1Ms = Date.now() - t1;
-  const stage1Picks = parseCandidatePicks(stage1.rawText).slice(0, candidateLimit);
   const entriesBySlug = new Map(candidateEntries.map((e) => [e.slug, e]));
-  const candidates = stableUnique(stage1Picks.map((p) => p.slug))
-    .map((slug) => entriesBySlug.get(slug))
-    .filter((e): e is MemoryEntry => !!e);
+  let candidates: MemoryEntry[];
+  let stage1Ms = 0;
+  let stage1Usage: ModelCallResult["usage"] | undefined;
+  if (settings.search.stage1Skip) {
+    // ADR 0036 两阶段塔缩(5×T0 共识): stage0 已按 dense 排序, stage1 LLM 从
+    // 候选选 top-K 与 dense 排序高度冲退。跳过 stage1, 直取 stage0 top-K 喚 stage2
+    // 精排(省 ~324K token)。candidates 顺序 = stage0 ordered(floor→dense→sparse→stale)。
+    candidates = candidateEntries.slice(0, candidateLimit);
+  } else {
+    const indexText = buildLlmIndexText(candidateEntries, settings.search.stage1CompactSurface);
+    const t1 = Date.now();
+    const stage1 = await callSearchModel(
+      settings.search.stage1Model, makeStage1Prompt(query, indexText, candidateLimit, settings.search.stage1CompactSurface),
+      modelRegistry, signal, STAGE1_TIMEOUT_MS, settings.search.stage1Thinking,
+    );
+    stage1Ms = Date.now() - t1;
+    stage1Usage = stage1.usage;
+    const stage1Picks = parseCandidatePicks(stage1.rawText).slice(0, candidateLimit);
+    candidates = stableUnique(stage1Picks.map((p) => p.slug))
+      .map((slug) => entriesBySlug.get(slug))
+      .filter((e): e is MemoryEntry => !!e);
+  }
   if (candidates.length === 0) {
-    return { hits: [], verdict: "none", stage1Ms, stage2Ms: 0, stage1Usage: stage1.usage, picksCount: 0 };
+    return { hits: [], verdict: "none", stage1Ms, stage2Ms: 0, stage1Usage, picksCount: 0 };
   }
   const t2 = Date.now();
   const stage2 = await callSearchModel(
@@ -772,7 +783,7 @@ async function runTwoStageSearch(
   const hits = parsed.picks.length === 0 ? [] : rankFromStage2(entriesBySlug, parsed.picks, finalLimit);
   return {
     hits, verdict: parsed.verdict, stage1Ms, stage2Ms,
-    stage1Usage: stage1.usage, stage2Usage: stage2.usage, picksCount: parsed.picks.length,
+    stage1Usage, stage2Usage: stage2.usage, picksCount: parsed.picks.length,
   };
 }
 
