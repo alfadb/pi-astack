@@ -97,13 +97,15 @@ abrain 不可读 ⇒ 它的上千个"细节"决定里，某些累积起来可能
 
 ---
 
-## 7. 文档体系迁移：状态（Phase 1–2 已完成）
+## 7. 文档体系迁移：状态
 
 **Phase 1（已完成）**：建共识层 `README` + `vision` + `direction` + `requirements` + `feature-changelog`；修已验证缺陷（ADR 0027→0009 断链、current-state commit hash）。
 
-**Phase 2（已完成，详 `roadmap.md` / `feature-changelog.md`）**：23 份 ADR 的方向上提为共识层一等公民——`direction.md` 12 条不变量 + `requirements.md` `REQ-001..009`；`current-state.md` / `architecture/*` 去代码镜像、只留契约；frontmatter + `docs-doctor` 守卫落地。机制侧由 [ADR 0034](adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md) 的 source-aware ingest lane 收口：全 19 份机制 ADR 处置完毕（12 SLIM + 5 机制存档 ingest 入 `~/.abrain/projects/pi-global/` ≈ 256 条 typed entry，2 superseded 只标 archived），ADR 物理瘦身为方向残桩，机制 rationale 经 `renderRationale` 按需渲染（带 pinned `source_ref` SHA）——§4「按需渲染 rationale」承重墙兑现。
+**Phase 2（存量语料已完成，详 `roadmap.md` / `feature-changelog.md`）**：存量 ADR 的方向上提为共识层一等公民——hard invariant 全部集中在 `direction.md`、行为需求集中在 `requirements.md`（具体条目以两文件现状为准，不在此镜像计数）；`current-state.md` / `architecture/*` 去代码镜像、只留契约；frontmatter + `docs-doctor` 守卫落地。机制侧由 [ADR 0034](adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md) 的 source-aware ingest lane 收口：存量机制 ADR 已分解为 typed entry 入 `~/.abrain/projects/pi-global/`（计数由 `ls` 派生，不在此镜像），ADR 物理瘦身为方向残桩，机制 rationale 经 `renderRationale` 按需渲染（带 pinned `source_ref` SHA）——§4「按需渲染 rationale」承重墙兑现。
 
-**唯一已知残留缺口**：pinned `source_ref` SHA 的 **staleness re-sync**（ADR 0034 ratify 显式 defer，待 dogfood 出现首例 stale 后带证据起草新 ADR）。
+**稳态**：迁移收口后新增的机制 ADR（如 0035/0036/0037 的 memory 检索栈）按同一两库模型办——先成文为完整 ADR，再走 slim + ingest lane 沉入 abrain，属正常生命周期而非 Phase-2 缺陷。
+
+**已知残留缺口**：① pinned `source_ref` SHA 的 **staleness re-sync**（ADR 0034 ratify 显式 defer，待 dogfood 出现首例 stale 后带证据起草新 ADR）；② 收口后新增机制 ADR（0035/0036/0037）的 slim + ingest 尚未执行（须经 sediment lane go/no-go，主会话不写 abrain，见 `roadmap.md`）。
 
 ---
 

@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0036: memory_search 两阶段塌缩 + hybrid 检索增强
 
 - Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。**P4 多向量已转产**(flip 2026-06-14, §10.6; `multiVector=true` 全局重嵌 2368 entry→2731 sub-vector + dedup chunk0 分离), 5 条件逐一过 + 人类绿灯。**P3 BM25 已转产**(§11, sparseBM25=true 读路径; dedup pin false)。**P5a query 路由已实现**(dark-launch, `search.queryRouting` 默认 false; toolSearch 精确 slug/ADR 编号直查跳 LLM; deterministic smoke-query-routing 验证仅 flag-on+toolSearch 短路, 默认行为不变)。代码 DEFAULT 均仍 false。**P5b sediment dedup dense-only 已实现**(3×T0 近重金标 60 对 + 真实检索 oracle-dedup-p5b 10/10 验证 dense-only 与三阶段 dedup 候选逐对等价): 解除 sedimentDedup 的 stage1Skip/sparseBM25 临时 pin, dedup 现跟读栈(两阶段+BM25)。**P4 dedup 分离(条件1)已实现**(chunk0 聚合, multiVector flip 后生效); **multiVector flip 待原子重嵌执行**(§10.4 条件2)。

@@ -1,3 +1,8 @@
+---
+doc_type: adr
+status: accepted
+---
+
 # ADR 0037: memory search Facade — 检索策略 profile registry
 
 - Status: **Accepted (P1-P3 已实现)** — 3×T0 设计评审 GO-WITH-REVISIONS 修订已并入(§3.1/§9); runMemorySearch 单入口 + 5 profile + 私有内核(__oracleKernel test-export)+ grep-guard 已落, 5 调用方全迁, dedup pin 平移进 sedimentDedup profile; 等价 smoke 19/19 + enforcement guard 过。P4(多向量)今 dark; loadEntries 复用(P4 可选)未做。
