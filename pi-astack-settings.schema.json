@@ -706,7 +706,7 @@
 
         "search": {
           "type": "object",
-          "description": "LLM-driven memory_search settings (ADR 0015, Accepted 2026-05-10). Two-stage rerank: stage 1 selects candidates from enhanced _index.md, stage 2 reranks full content. Both stages default to deepseek-v4-flash + thinking=off — retrieval ranking does not benefit from reasoning mode. Override stage2Model for diverse failure modes or stronger cross-language semantic matching. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
+          "description": "LLM-driven memory_search settings (ADR 0015 two-stage rerank, extended by ADR 0035 stage0 embedding retrieval + ADR 0036 two-stage collapse). Current pipeline: stage0 = embedding dense (doubao) ∪ sparse (BM25) RRF candidate pool (stage0Enabled, default on); stage1 = LLM coarse candidate selection (skippable via stage1Skip); stage2 = LLM full-content rerank (final ranker). The stageN model/limit/thinking fields configure the LLM stages; the stage0* fields configure embedding retrieval. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
           "additionalProperties": false,
           "properties": {
             "_comment": { "type": "string" },
@@ -746,6 +746,85 @@
               "default": "off",
               "enum": ["off", "minimal", "low", "medium", "high", "xhigh"],
               "description": "Reasoning level for Stage 2 full-content rerank. Default off because ranking is a relevance judgment task, not a logical reasoning task — reading the candidates and sorting by match quality doesn't benefit from chain-of-thought. Unsupported levels hard-error rather than silently clamping."
+            },
+
+            "stage0Enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "ADR 0035 P5 (转产): enable stage0 embedding+sparse candidate retrieval as the default production recall surface. Dense (doubao) ∪ sparse (BM25) fused via RRF into a bounded candidate pool, replacing full-corpus full-body fan-out. Set false to emergency-rollback to full-corpus full-body (kill-switch)."
+            },
+            "stage0PoolLimit": {
+              "type": "number",
+              "default": 300,
+              "minimum": 1,
+              "description": "Dense topN candidate quota. P5 oracle-tuned to 300 to give semantic recall enough headroom (200 dropped some zh/concept queries' baseline picks below dense top-200)."
+            },
+            "stage0MaxCandidates": {
+              "type": "number",
+              "default": 400,
+              "minimum": 1,
+              "description": "Hard cap on the hybrid (dense ∪ sparse) candidate union — the primary cost knob. 400 (dense 300 + sparse 100) stays far below full-corpus while preserving coverage."
+            },
+            "stage0InsufficientPoolK": {
+              "type": "number",
+              "default": 5,
+              "minimum": 0,
+              "description": "Safety-net threshold: when the candidate pool is smaller than K, trigger a bounded recall expansion (honors ADR §4 fallback)."
+            },
+            "stage0EmbedTimeoutMs": {
+              "type": "number",
+              "default": 10000,
+              "minimum": 1000,
+              "description": "Short timeout for query embedding. On failure the dense arm is circuit-broken to sparse-only (BM25) rather than blocking search."
+            },
+            "stage0StaleFloorRatio": {
+              "type": "number",
+              "default": 0.1,
+              "minimum": 0,
+              "maximum": 1,
+              "description": "ADR 0035 P6 freshness invariant: floor budget (as a fraction of stage0MaxCandidates) reserved for stale/missing (just-written, not-yet-indexed) entries so they cannot be crowded out of the candidate pool by dense/sparse hits. A lower bound, not a cap."
+            },
+            "stage1CompactSurface": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0035 P8 (dark-launch): feed stage1 LLM a compact surface (meta+title+trigger+summary, ~150 tok/entry) for coarse filtering instead of full body (compiledTruth+timeline), leaving full body to stage2. Reduces stage1 token cost; off by default."
+            },
+            "stage1Skip": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0036 runtime kill-switch: skip the stage1 LLM candidate-selection layer entirely — stage0 dense top-K feeds stage2 rerank directly (two-stage collapse). Code DEFAULT stays false; settings flips it true (current production). Safety-net retry forces stage1 back on verdict=none / pool<K. Set false here to instant-rollback if recall regresses."
+            },
+            "sparseBM25": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0036: use char-ngram BM25 (ASCII identifier + CJK bigram + IDF + high-signal-field x3) for the stage0 sparse arm instead of naive substring matching (which returns zero matches for Chinese queries). Read paths only (search/path-A/decide/correction); curator dedup pins this false. Code DEFAULT false; settings flips it true (current production)."
+            },
+            "queryRouting": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0036 P5 (dark-launch): exact-lookup fast path for toolSearch. When the query exactly equals an entry slug, or matches `ADR NNNN`/`adr-NNNN` with a unique hit, return that entry directly and skip both LLM calls. No match falls through to normal retrieval — never suppresses recall. toolSearch only."
+            },
+            "dedupChunk0Aggregation": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0036 P4 condition 1 (dedup path): aggregate topN by chunk0 (head) vector instead of multiVector max-sim, so distinct entries sharing tail chunks don't surface as false near-duplicate neighbors. Default false (max-sim); sedimentDedup profile pins true. No-op when multiVector is off."
+            },
+            "autoReconcile": {
+              "type": "boolean",
+              "default": true,
+              "description": "ADR 0036 §10.6: at search time, run a bounded bidirectional (stale-add ∪ orphan-prune) background incremental reconcile so new-device / git-pull / archive-delete / read-only sessions self-converge the embedding index. Steady-state predicate (stale+orphan < min) makes this a zero-cost no-op when the index is fresh. Explicit kill-switch: set false to disable."
+            },
+            "autoReconcileCooldownMs": {
+              "type": "number",
+              "default": 300000,
+              "minimum": 0,
+              "description": "Minimum interval between two automatic reconciles (debounce on top of single-flight)."
+            },
+            "autoReconcileMinBacklog": {
+              "type": "number",
+              "default": 3,
+              "minimum": 1,
+              "description": "On a non-empty index, only trigger reconcile when stale+orphan reaches this backlog; smaller changes use the search-time bounded fallback instead of firing a full reconcile."
             }
           }
         },
@@ -808,6 +887,114 @@
               "minimum": 100,
               "maximum": 4000,
               "description": "Per-entry compiled_truth truncation. Longer than 800 starts to dominate system-prompt budget for every turn; shorter than ~400 loses the timeline / nuance that makes memories useful."
+            }
+          }
+        },
+
+        "embedding": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0035 P1: stage0 embedding candidate-retrieval config. `provider` points at a models.json provider key (e.g. \"embedding\"); code never hardcodes a model. Empty provider/model = fail-closed (corpus embedding build errors out).",
+          "properties": {
+            "_comment": { "type": "string" },
+            "provider": {
+              "type": "string",
+              "default": "",
+              "description": "models.json provider key supplying the embedding model (e.g. \"embedding\"). Empty = fail-closed."
+            },
+            "model": {
+              "type": "string",
+              "default": "",
+              "description": "Embedding model id under the provider (e.g. \"doubao-embedding-vision\"). Empty = fail-closed."
+            },
+            "dim": {
+              "type": "number",
+              "default": 2048,
+              "minimum": 1,
+              "description": "Embedding vector dimensionality. Must match the provider model's output dim (doubao-embedding-vision = 2048)."
+            },
+            "batchSize": {
+              "type": "number",
+              "default": 10,
+              "minimum": 1,
+              "description": "Texts per embed request. doubao hard cap = 10."
+            },
+            "tpmLimit": {
+              "type": "number",
+              "default": 600000,
+              "minimum": 1,
+              "description": "Tokens-per-minute budget for embed calls (Volc Ark Coding Plan = 600K tpm)."
+            },
+            "timeoutMs": {
+              "type": "number",
+              "default": 60000,
+              "minimum": 1000,
+              "description": "Per embed-request timeout (corpus build)."
+            },
+            "maxRetries": {
+              "type": "number",
+              "default": 3,
+              "minimum": 0,
+              "description": "Retry count for transient embed failures."
+            },
+            "entryEmbedMaxChars": {
+              "type": "number",
+              "default": 3500,
+              "minimum": 1,
+              "description": "Per sub-vector truncation (single-vector = whole entry; multiVector = per chunk)."
+            },
+            "multiVector": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0036 P4: split entries beyond entryEmbedMaxChars into multiple sub-vectors (max-sim retrieval) to defeat truncation. Dark-launch; off by default in code."
+            },
+            "multiVectorMaxChunks": {
+              "type": "number",
+              "default": 4,
+              "minimum": 1,
+              "description": "Max sub-vectors per entry (cost ceiling) when multiVector is on."
+            }
+          }
+        },
+
+        "forgetting": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0031 Phase 0+ forgetting-autonomy subsystem. Anti-runaway ceilings (daily demote cap / corpus floor) are build-time welded structural floors, NOT settings-tunable (INV-REVERSIBLE-AUTONOMY: zero tunable forgetting policy). All flags default false (safe baseline) and are explicit runtime kill-switches.",
+          "properties": {
+            "_comment": { "type": "string" },
+            "instrumentation": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0031 Phase 0: read-side usage instrumentation (retrieval-hit + citation). Zero behavior change, pure observation; off = instrumentation short-circuits and writes nothing."
+            },
+            "demoteShadow": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0031 Phase 3 skeleton: dry-run/shadow demote executor. On = compute a demote plan from pending archive proposals + hysteresis + resurrection and write a shadow audit; NEVER mutates. Real demote awaits data-gate + cross-vendor graduation-gate."
+            },
+            "demoteMaxBatch": {
+              "type": "number",
+              "default": 5,
+              "minimum": 1,
+              "description": "Per-batch dry-run demote cap (cascade guard)."
+            },
+            "resurrectionBackoffRate": {
+              "type": "number",
+              "default": 0.5,
+              "minimum": 0,
+              "maximum": 1,
+              "description": "When recent resurrection rate >= this (or trend accelerating), auto-backoff: skip the whole batch."
+            },
+            "decayShadow": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0031 Phase 1B: aggregator decay shadow-assessment. Off = aggregator prompt omits the decay section, parses no entry_decay_assessments, writes no decay-shadow.jsonl (byte-for-byte zero behavior change). On = write shadow + run §4.2 regression-invariant audit."
+            },
+            "autoDemote": {
+              "type": "boolean",
+              "default": false,
+              "description": "ADR 0031 Phase 3 real-demote master switch (runtime kill-switch). Off (with demoteShadow on) = executor only dry-runs, zero mutation. On = real active->archived via §4.2 evidence-gated proposal + CAS + resurrection backoff + build-time circuit breaker + hysteresis; archived full text stays on disk (revivable, no git rm)."
             }
           }
         }
