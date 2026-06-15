@@ -83,24 +83,30 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 | `conf≥8` 非指令 durable 过渡 fallback（correction-pipeline isTier1Directive，仅 no-target） | 审计窗口内 `tier1_direct_write` 中 `is_directive!==true && confidence>=8` 不再产生被用户纠正的 accepted corrections / recall misses → 移除 fallback 回 ADR 原文谓词 | `tier1_direct_write` audit 的 `is_directive` / `confidence` / correction outcome 维度（O5 sunset） |
 | multi-view skip-cache 7d TTL | P1.5 Pass-1 schema 升级后 not-synthesizable 计数持续为 0 一个季度 → 删 cache | watchdog `pass1_op_not_synthesizable_count` |
 
-## ADR 0031 — 自治自标定遗忘实施(埋点优先,dark-launch)
+## ADR 0031 — 自治自标定遗忘实施(复用既有 meta-curator infra,dark-launch)
 
-设计见 [ADR 0031](./adr/0031-autonomous-self-calibrating-forgetting.md)。原则:**先补标定数据(Lane G 当年缺的那块),再上可逆 demote;auto-destroy 永远 supersession-gated + 必留大脑可复活 tombstone;disuse 永不触发物理删除**。分阶段,全程 dark-launch flag 守卫、默认 off:
+设计见 [ADR 0031](./adr/0031-autonomous-self-calibrating-forgetting.md)(accepted)。原则:**先补标定数据(Lane G 当年缺的那块),再上可逆 demote;自治遗忘终点是 `archived`(全文留盘 = 复活面),本 ADR 范围内无自治物理删除;disuse 永不触发降级,真值变化(supersession/contradiction)才是安全驱动**。全程 dark-launch flag 守卫、默认 off。
 
-**Phase 0 — instrumentation(零行为变化,只埋点观测 N 周)**。埋点写 `.state` 侧指标,不污染 entry frontmatter 的语义内容:
+**架构基线(2×T0 gap 分析 2026-06-15):ADR 0031 不是新管线,是 ADR 0024/0025 meta-curator 生命周期的安全硬化层。强制复用,不重建**:
+- 复活通道 = `archive-reactivation.ts`(已 LLM:keep_archived/reactivate/hard_archive_recommended + ledger)。
+- 防振荡 hysteresis = `entry-telemetry.ts` 已 carry 的 `last_proposed_at`/`proposal_cooldown_until`/`holdout_until`(注释明言留给 “the gated executor (a later module)”)。
+- 提议管线 = `entry-lifecycle-proposals.ts`(pending 观察,非授权队列)。
+- 写路径 = `curator-decision-writer.ts` 的 archive op(已有 git lock + rollback)。
+- 用量信号 = `usage-metrics.json`(读侧,本会话已建)+ `entry-telemetry.jsonl`(footnote/outcome 侧)——bridge 两者,不建第三套。
+- **decay 判断按 AI-Native 扩展 `aggregator` 的 prompt-native historian**(已是「读运行状态→判断→pending lifecycle proposal」,且已含「retrieved-unused 单独不足以产生 proposal」= ADR 0031 §4 真值驱动),**不另建并行 deterministic scorer**(deepseek 方案否决:机械衰减公式判断「是否遗忘」违反 direction.md §2 AI-Native + ADR 0031 §2.2 prompt-native)。
 
-- `last_retrieval_hit_at` / `retrieval_hit_count`:该 entry 进 stage0 候选 / 被 `topN` 命中。
-- `last_cited_at` / `cited_count`:被 agent **最终采用**(进 path-A inject 块 / decide brief / 实际进 prompt)——「被用」≠「被检索」(承接 roadmap `last_cited_at`)。
-- `superseded_by` / `contradicted_by` 事件:真值变化信号,安全降级的**主**驱动。
-- demote / resurrection 事件流(active↔archived,带触发信号快照)。
+**Phase 0 — instrumentation(零行为变化)**:
+- ✅ 读侧 `retrieval_hit` / `cited`(`extensions/memory/usage-telemetry.ts` + 3 埋点;flag `memory.forgetting.instrumentation`,本会话已 ship)。
+- resurrection 事件流已由 `archive-reactivation-ledger.jsonl` 覆盖(不新建)。
+- 待补:supersede/contradict 信号喂进 aggregator 视图(真值变化驱动);demote 事件流 Phase 3 才需要。
 
-目的:积累 Lane G 当年缺的衰减标定数据;此阶段**不做任何 demote/delete**。
+**Phase 1 — would_demote 影子标记(只标不动)**:扩展 aggregator/lifecycle-proposal 消费 `usage-metrics.json` + `entry-telemetry` + supersede 信号,让 proposal 携带 `decay_score` / `would_demote` 影子字段(prompt-native);+ 影子回归(最近 N 真实 query 跑 corpus vs corpus−would_demote,量 decide brief 质量是否退)。**无 `would_delete`、无 tombstone-extra-fields、无 `git rm`**——`archived` 全文留盘即 tombstone(ADR 0031 §2.1 archived 地板)。
 
-**Phase 1 — 可逆基座 + 影子标记(仍不真动)**:tombstone / 大脑可复活影子(`slug`/`kind`/`hash`/`successor`/`digest`/`reactivation_hint`)使「物理回收」也对大脑可逆;decay-scorer 输出 `would_demote` / `would_delete` 影子标记 + 衰减分,**只标不动**;影子回归用最近 N 个真实 query / decide brief 跑 (corpus) vs (corpus − would-demote 集),量 brief 质量是否下降。
+**Phase 2 — resurrection 稳态自标定(观测闭环)**:`resurrection-rate-monitor`(从 `archive-reactivation-ledger.jsonl` 算 rate + 趋势)→ 喂 aggregator 的 prompt-native 自调(更保守/更积极),噪声/近重信号复用 `entry-telemetry` echo_chamber + aggregator high_unused;自审闸 = resurrection rate 超阈值自动回退衰减强度。**低 resurrection rate 不当「安全」证明**(§2.2 非对称盲区)。
 
-**Phase 2 — resurrection 稳态自标定(观测闭环)**:resurrection rate 做反馈(复活频繁→自动调慢、噪声/近重涨→调快);kind 权重 / 窗口由大脑自学(prompt-native,非硬编码人类策略);自审闸 = resurrection rate 超阈值自动回退衰减系数。
+**Phase 3 — gated demote executor(可逆,flag off)**:新建 agent_end debounced executor,只消费 pending `op=archive` proposal + decay 上下文 + `entry-telemetry` hysteresis(cooldown/holdout/CAS)→ 执行 `active→archived`(复用 `archiveProjectEntry`);每批速率上限 + demote 后监控 resurrection rate 自动回退;独立 audit lane(`lane:"forgetting"`)。**物理删除(`git rm`)不在本 ADR 授权**——若将来需要,另起 supersession-gated 专门设计(独立论证持久性/灾备)。数据不足前不开;decay prompt 可能需 T0 review 再 flip。
 
-**Phase 3 — 开启自治 demote(可逆),destroy 仍 gated**:`active→archived` 自治 demote 上线(可逆,误判靠 resurrection 自愈);auto `git rm` 仅 **supersession-gated**(有 active 稳定 successor)+ 必留 tombstone;结构护栏(非策略)= 可逆基座 + tombstone + resurrection 自回退 + 每批 demote 速率上限(防单次模型偏差级联)。数据不足前不开 Phase 3。
+**最小新写件**(gap 分析裁定,复用优先):`resurrection-rate-monitor`(纯确定性)+ `forgetting-executor`(gated)+ `demote-audit`(ledger)+ aggregator/proposal 的 `decay_score`/`would_demote` 字段扩展 + 影子回归 harness。**不新建**:reactivation 通道、tombstone 存储、hysteresis 存储、writer 路径、噪声检测、第三套 telemetry、`git rm`。
 
 ## Deferred exploration
 
