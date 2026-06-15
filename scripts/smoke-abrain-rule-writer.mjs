@@ -50,6 +50,9 @@ const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-rule-writer-"))
 const files = [
   ["extensions/sediment/rule-writer.ts", "sediment/rule-writer.js"],
   ["extensions/sediment/validation.ts", "sediment/validation.js"],
+  // ADR 0034 P1: validation.ts now imports ../memory/direction-impact
+  // (parseDirectionImpact). Stage it so the transpiled require resolves.
+  ["extensions/memory/direction-impact.ts", "memory/direction-impact.js"],
   ["extensions/abrain/redact.ts", "abrain/redact.js"],
 ];
 for (const [src, dst] of files) {

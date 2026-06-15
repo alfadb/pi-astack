@@ -116,7 +116,11 @@ for (const file of [
   // import _shared today.
   const compiled = transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`))
     .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
-    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
+    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+    // ADR 0027 causal-anchor: git-sync.ts + vault-writer.ts now import
+    // `../_shared/causal-anchor`. Rewrite uniformly; harmless no-op for files
+    // that don't import it today.
+    .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")');
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
@@ -126,6 +130,13 @@ fs.writeFileSync(path.join(tmpDir, "_shared", "runtime.cjs"), transpile(path.joi
 fs.copyFileSync(path.join(tmpDir, "_shared", "runtime.cjs"), path.join(tmpDir, "_shared", "runtime.js"));
 fs.writeFileSync(path.join(tmpDir, "_shared", "git-singleflight.cjs"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
 fs.copyFileSync(path.join(tmpDir, "_shared", "git-singleflight.cjs"), path.join(tmpDir, "_shared", "git-singleflight.js"));
+// ADR 0027 causal-anchor: vault-writer.ts + git-sync.ts import ../_shared/causal-anchor.
+// Stage the real module (its require("./pi-internals") resolves to the stub below)
+// plus a pi-internals stub so isSubAgentSession resolves without pulling the full pi runtime.
+fs.writeFileSync(path.join(tmpDir, "_shared", "pi-internals.cjs"), "module.exports = { isSubAgentSession: () => false };\n");
+fs.copyFileSync(path.join(tmpDir, "_shared", "pi-internals.cjs"), path.join(tmpDir, "_shared", "pi-internals.js"));
+fs.writeFileSync(path.join(tmpDir, "_shared", "causal-anchor.cjs"), transpile(path.join(repoRoot, "extensions/_shared/causal-anchor.ts")));
+fs.copyFileSync(path.join(tmpDir, "_shared", "causal-anchor.cjs"), path.join(tmpDir, "_shared", "causal-anchor.js"));
 fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
 
 const bootstrap = require(path.join(tmpDir, "bootstrap.cjs"));

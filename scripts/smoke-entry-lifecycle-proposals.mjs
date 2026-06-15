@@ -72,11 +72,20 @@ const causalAnchorStub = {
   getCurrentAnchor: () => ({ session_id: "smoke", turn_id: 0 }),
   spreadAnchor: (a) => (a ? { session_id: a.session_id, turn_id: a.turn_id } : {}),
 };
+// entry-lifecycle-proposals.ts persists via ../_shared/sync-file-lock
+// (withFileLock + atomicWriteText). Stub with real-equivalent behaviour:
+// withFileLock runs fn inline and returns { ok, value }; atomicWriteText
+// writes the file so readLifecycleProposals can read it back.
+const syncFileLockStub = {
+  withFileLock: (_lockPath, fn) => ({ ok: true, value: fn() }),
+  atomicWriteText: (file, content) => fs.writeFileSync(file, content),
+};
 
 const modulePath = path.join(repoRoot, "extensions/sediment/entry-lifecycle-proposals.ts");
 const mod = loadCJS(transpile(modulePath), path.join(tmpDir, "entry-lifecycle-proposals.cjs"), new Map([
   ["../_shared/runtime", runtimeStub],
   ["../_shared/causal-anchor", causalAnchorStub],
+  ["../_shared/sync-file-lock", syncFileLockStub],
 ]));
 const { entryLifecycleProposalsPath, appendLifecycleProposals, readLifecycleProposals } = mod;
 

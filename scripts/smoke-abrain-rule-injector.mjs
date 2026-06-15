@@ -70,6 +70,9 @@ function stageModuleTree(outRoot) {
     ["extensions/_shared/footer-status.ts", "_shared/footer-status.js"],
     ["extensions/_shared/runtime.ts", "_shared/runtime.js"],
     ["extensions/memory/parser.ts", "memory/parser.js"],
+    // ADR 0034 P1: parser.ts now imports ./direction-impact
+    // (parseDirectionImpact). Stage it so the transpiled require resolves.
+    ["extensions/memory/direction-impact.ts", "memory/direction-impact.js"],
     ["extensions/memory/utils.ts", "memory/utils.js"],
     ["extensions/memory/settings.ts", "memory/settings.js"],
   ];

@@ -1069,6 +1069,29 @@ async function main() {
     // ADR 0015 smoke: default memory_search path should call the two-stage LLM
     // reranker when a modelRegistry is available, and return the same normalized
     // ToolResult envelope shape.
+    // ADR 0036 decoupling: the stage1+stage2 assertions below were authored
+    // against the two-stage-LLM contract (stage1Skip=false). Production flipped
+    // stage1Skip=true via the settings.json kill-switch, and memory/settings.ts
+    // reads the live ~/.pi/agent/pi-astack-settings.json (os.homedir-pinned at
+    // module load, no env override) — so without pinning here these assertions
+    // would silently track the mutable kill-switch. memSettings is the SAME
+    // cached module object index.ts imported, so overwriting resolveSettings
+    // takes effect inside the search tool (CJS shared exports). Pin stage1Skip
+    // explicitly to keep the test deterministic and independent of the live flag.
+    const memSettings = req("./memory/settings.js");
+    const origResolveSettings = memSettings.resolveSettings;
+    const pinStage1Skip = (skip) => {
+      memSettings.resolveSettings = () => {
+        const base = origResolveSettings();
+        // Deterministic search profile for the LLM-rerank assertions below:
+        // stage0 OFF (candidate surface = full_body_v3, matching the authored
+        // stage1/stage2 metrics + prompt assertions; stage0 hybrid pooling is
+        // covered by smoke:stage0-* ) and stage1Skip per the test path. Both are
+        // pinned so this section is independent of the live settings.json flips.
+        return { ...base, search: { ...base.search, stage0Enabled: false, stage1Skip: skip } };
+      };
+    };
+    pinStage1Skip(false);
     const llmSearchRaw = await search.execute("smoke-llm", search.prepareArguments({ query: "找关于 dispatch facade 的 memory entry", limit: 2 }), new AbortController().signal, null, { cwd: root, modelRegistry: mockModelRegistry });
     assert(!llmSearchRaw.isError, `memory_search LLM path returned isError envelope: ${JSON.stringify(llmSearchRaw)}`);
     assert(Array.isArray(llmSearchRaw?.content) && llmSearchRaw.content[0]?.type === "text", "memory_search envelope shape regressed (expected { content: [{type:'text', text}] })");
@@ -1103,6 +1126,25 @@ async function main() {
       piAiStub.__configs[0]?.reasoning === undefined && piAiStub.__configs[1]?.reasoning === undefined,
       `memory_search thinking config mismatch (expected both stages to OMIT reasoning field when settings.stage*Thinking is "off" per 2026-05-24 fix): ${JSON.stringify(piAiStub.__configs)}`,
     );
+
+    // ADR 0036 two-stage collapse: with stage1Skip=true (production default via
+    // the settings.json kill-switch) stage1 LLM is skipped and stage0 top-K feeds
+    // stage2 directly — exactly ONE LLM call (stage2), no full-body candidate
+    // surface. Verify the inverse of the assertions above in an isolated block,
+    // restoring stub arrays + pin afterwards so downstream tests are unaffected.
+    {
+      const savedCalls = piAiStub.__calls, savedPrompts = piAiStub.__prompts, savedConfigs = piAiStub.__configs;
+      piAiStub.__calls = []; piAiStub.__prompts = []; piAiStub.__configs = [];
+      pinStage1Skip(true);
+      const collapseRaw = await search.execute("smoke-collapse", search.prepareArguments({ query: "找关于 dispatch facade 的 memory entry", limit: 2 }), new AbortController().signal, null, { cwd: root, modelRegistry: mockModelRegistry });
+      assert(!collapseRaw.isError, `stage1Skip=true path returned isError envelope: ${JSON.stringify(collapseRaw)}`);
+      assert(JSON.stringify(piAiStub.__calls) === JSON.stringify(["memory-search-stage2"]), `stage1Skip=true must collapse to stage2-only, got ${JSON.stringify(piAiStub.__calls)}`);
+      assert(!piAiStub.__prompts.some((p) => p.includes("surface:full_body_v3")), "stage1Skip=true must not emit the stage1 full-body candidate surface");
+      const collapseRes = JSON.parse(collapseRaw.content[0].text);
+      assert(Array.isArray(collapseRes) && collapseRes[0]?.slug === "alpha", `stage1Skip=true result should still rank alpha first: ${JSON.stringify(collapseRes)}`);
+      pinStage1Skip(false);
+      piAiStub.__calls = savedCalls; piAiStub.__prompts = savedPrompts; piAiStub.__configs = savedConfigs;
+    }
 
     // Metrics logs must store the sanitized query, not raw credential-like
     // text pasted into memory_search.

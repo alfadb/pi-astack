@@ -514,7 +514,9 @@ fs.writeFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), transpileTs
 fs.copyFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), path.join(sharedTargetDir, "git-singleflight.js"));
 const memoryTargetDir = path.join(tmpDir, "memory");
 fs.mkdirSync(memoryTargetDir, { recursive: true });
-for (const m of ["parser", "utils", "settings"]) {
+// ADR 0034 P1: parser.ts now imports ./direction-impact (parseDirectionImpact).
+// Stage it alongside the other memory helpers so the transpiled require resolves.
+for (const m of ["parser", "utils", "settings", "direction-impact"]) {
   const cjsPath = path.join(memoryTargetDir, `${m}.cjs`);
   fs.writeFileSync(cjsPath, transpileTsToCjs(path.join(repoRoot, "extensions/memory", `${m}.ts`)));
   fs.copyFileSync(cjsPath, path.join(memoryTargetDir, `${m}.js`));

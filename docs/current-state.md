@@ -33,6 +33,8 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 markdown+git 
 | `compaction-tuner/` | `/compaction-tuner` | ✓ |
 | `dispatch/` | `dispatch_agent`、`dispatch_parallel` | ✓ |
 | `edit-strip-empty/` | `edit` wrapper | ✓ |
+| `empty-visible-output-retry/` | `message_end` 空可见输出重试 hook | ✓ |
+| `goal/` | `goal_status/set/pause/resume/stop/clear`；`/goal` | ✓ |
 | `imagine/` | `imagine` | ✓ |
 | `memory/` | `memory_search/get/list/neighbors/decide`；`/memory` | ✓ |
 | `model-curator/` | model snapshot 注入；`/curator-reload` | ✓ |
@@ -46,6 +48,7 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 markdown+git 
 | `verify-after-edit/` | `edit` tool_result verifier | ✓ |
 | `vision/` | `vision` | ✓ |
 | `web-search/` | `web_search`、`web_fetch` | ✓ |
+| `workflow/` | `workflow_validate/list/run`；`/workflow` | ✓ |
 
 ### 2.2 Vendor methodology references
 
