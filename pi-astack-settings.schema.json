@@ -935,9 +935,15 @@
           "default": "brave"
         },
 
+        "apiKey": {
+          "type": "string",
+          "description": "Direct API key value, resolved with pi's config-value semantics: '!command' runs a shell command and uses its stdout (e.g. \"!jq -r --arg k brave '.[$k]' $HOME/.pi/secrets.json\"); '$VAR' / '${VAR}' interpolate env vars; anything else is a literal. Takes priority over apiKeyEnv, letting the key live in a single secrets file instead of an environment variable. Empty/unset falls back to apiKeyEnv. Default: '' (unset).",
+          "default": ""
+        },
+
         "apiKeyEnv": {
           "type": "string",
-          "description": "Env var name to read API key from. Default 'BRAVE_API_KEY' for zero-migration compat with the existing brave-search skill. When switching providers, set to that provider's expected key env name (e.g. 'KAGI_API_KEY').",
+          "description": "Env var name to read API key from. Default 'BRAVE_API_KEY' for zero-migration compat with the existing brave-search skill. When switching providers, set to that provider's expected key env name (e.g. 'KAGI_API_KEY'). Used only when apiKey is unset.",
           "default": "BRAVE_API_KEY"
         },
 

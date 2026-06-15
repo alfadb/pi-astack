@@ -47,7 +47,7 @@ const { llmSearchEntriesWithVerdict } = llm.__oracleKernel; // ADR 0037: 经 __o
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 
-// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey($ENV ref), 任何已配 key 的 provider 都能跑(见 _oracle-registry.mjs)
+// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey(!command 从 secrets.json), 任何已配 key 的 provider 都能跑(见 _oracle-registry.mjs)
 const { registry, embedKey: EMBED_KEY } = makeOracleRegistry(MODELS_JSON);
 
 const baseSettings = resolveSettings();
@@ -61,7 +61,7 @@ const bySlug = new Map(corpus.map((e) => [e.slug, e]));
 
 // ─────────────────────────── MODE=material ───────────────────────────
 async function buildMaterial() {
-  if (!EMBED_KEY) { console.log("FATAL — no SUB2API_API_KEY_EMBEDDING(material 需 embedding 建池)"); process.exit(1); }
+  if (!EMBED_KEY) { console.log("FATAL — no embedding key in ~/.pi/secrets.json(material 需 embedding 建池)"); process.exit(1); }
   fs.mkdirSync(GOLD_DIR, { recursive: true });
   const poolSettings = { ...baseSettings, search: { ...baseSettings.search, stage0Enabled: true, stage0PoolLimit: POOL_LIMIT, stage0MaxCandidates: POOL_LIMIT } };
   // 每 query 一个 compact 文件(单文件 <50KB, sub-agent 一次 read 读全, 不撞 read 截断)。
@@ -128,7 +128,7 @@ function aggregateVotes() {
 
 // ───────────────────────────── MODE=eval ─────────────────────────────
 async function evalAgainstGold() {
-  if (!EMBED_KEY) { console.log("FATAL — no SUB2API_API_KEY_EMBEDDING(eval 需 embedding)"); process.exit(1); }
+  if (!EMBED_KEY) { console.log("FATAL — no embedding key in ~/.pi/secrets.json(eval 需 embedding)"); process.exit(1); }
   if (!fs.existsSync(GOLDSET_PATH)) { console.log(`FATAL — ${GOLDSET_PATH} 不存在(先 material → dispatch → aggregate)`); process.exit(1); }
   const gold = JSON.parse(fs.readFileSync(GOLDSET_PATH, "utf8"));
   // ADR 0036 §9.1 条件 5(opus): 默认用**生产型号**(resolveSettings: stage1=v4-flash,

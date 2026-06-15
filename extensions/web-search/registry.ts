@@ -23,6 +23,7 @@ export function createProvider(settings: WebSearchSettings): WebSearchProvider {
   switch (settings.provider) {
     case "brave":
       return new BraveProvider({
+        apiKey: settings.apiKey,
         apiKeyEnv: settings.apiKeyEnv,
         defaultCount: settings.defaultCount,
         timeoutMs: settings.timeout,

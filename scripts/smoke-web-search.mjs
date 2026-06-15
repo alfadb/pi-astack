@@ -113,8 +113,8 @@ if (/this\.opts\.apiKeyEnv/.test(braveSrc) && /process\.env\[/.test(braveSrc)) {
   ok("API key read from configurable env var (not hardcoded BRAVE_API_KEY)");
 } else failMsg("API key handling does NOT use settings.apiKeyEnv");
 
-if (/env var not set/.test(braveSrc) && /api-dashboard\.search\.brave\.com/.test(braveSrc)) {
-  ok("missing-key error message points to Brave dashboard for signup");
+if (/api-dashboard\.search\.brave\.com/.test(braveSrc) && /webSearch\.apiKey/.test(braveSrc)) {
+  ok("missing-key error message points to webSearch.apiKey + Brave dashboard");
 } else failMsg("missing-key error message not helpful");
 
 // PR-A review fix A1: routes web_fetch through safeFetch (SSRF guard).

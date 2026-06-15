@@ -10,10 +10,19 @@ export interface WebSearchSettings {
   /** Backend provider name. Built-in: "brave". V2 will accept names
    *  registered via registerWebSearchProvider(). Default: "brave". */
   provider: string;
+  /** Direct API key value, resolved with pi's config-value semantics:
+   *  "!command" runs a shell command and uses its stdout (e.g.
+   *  "!jq -r --arg k brave '.[$k]' $HOME/.pi/secrets.json"); "$VAR" /
+   *  "${VAR}" interpolate env vars; anything else is a literal. Takes
+   *  priority over apiKeyEnv. Lets the key live in a single secrets
+   *  file instead of an environment variable. Empty/unset → fall back
+   *  to apiKeyEnv. Default: "" (unset). */
+  apiKey: string;
   /** Env var name to read API key from. Default: "BRAVE_API_KEY" — same
    *  as the existing brave-search skill, so users with ~/.profile setup
    *  need zero migration. When switching providers, set this to that
-   *  provider's expected key env name (e.g. "KAGI_API_KEY"). */
+   *  provider's expected key env name (e.g. "KAGI_API_KEY"). Used only
+   *  when apiKey is unset. */
   apiKeyEnv: string;
   /** Default search result count when caller omits `count`. 1..20.
    *  Default: 5. */
@@ -29,6 +38,7 @@ export interface WebSearchSettings {
 
 const DEFAULTS: WebSearchSettings = {
   provider: "brave",
+  apiKey: "",
   apiKeyEnv: "BRAVE_API_KEY",
   defaultCount: 5,
   timeout: 15_000,
@@ -85,6 +95,7 @@ export function loadWebSearchSettings(): WebSearchSettings {
 
   return {
     provider: asString(sec.provider, DEFAULTS.provider),
+    apiKey: asString(sec.apiKey, DEFAULTS.apiKey),
     apiKeyEnv: asString(sec.apiKeyEnv, DEFAULTS.apiKeyEnv),
     defaultCount: Math.max(
       1,

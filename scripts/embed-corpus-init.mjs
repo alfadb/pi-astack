@@ -8,9 +8,10 @@
  * 然后 buildCorpusEmbeddings 写生产索引 ~/.abrain/.state/memory/embeddings.json
  * (全局单文件 + per-entry scope tag, ADR 0035 §7 P1 决策)。
  *
- * 需要 env SUB2API_API_KEY_EMBEDDING。幂等:content-hash 增量,重跑只 embed 变化的。
+ * 需要 ~/.pi/secrets.json 的 embedding key。幂等:content-hash 增量,重跑只 embed 变化的。
  */
 import fs from "node:fs";
+import { secret } from "./_secrets.mjs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -96,8 +97,8 @@ const scopeCount = {};
 for (const e of active) scopeCount[emb.scopeTagOf(e)] = (scopeCount[emb.scopeTagOf(e)] || 0) + 1;
 console.log(`parsed ${entries.length} entries, ${active.length} active across ${Object.keys(scopeCount).length} scopes`);
 
-const key = process.env.SUB2API_API_KEY_EMBEDDING;
-if (!key) { console.error("missing SUB2API_API_KEY_EMBEDDING"); process.exit(1); }
+const key = secret("embedding");
+if (!key) { console.error("missing embedding key in ~/.pi/secrets.json"); process.exit(1); }
 const mj = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "models.json"), "utf8"));
 const baseUrl = mj.providers.embedding.baseUrl;
 // ADR 0036 P4: 多向量从生产 settings 读(env MULTI_VECTOR 可覆写)。设 multiVector=true

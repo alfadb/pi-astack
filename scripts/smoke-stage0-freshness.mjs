@@ -16,6 +16,7 @@
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
+import { secret } from "./_secrets.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,8 +28,8 @@ const jiti = createJiti(import.meta.url);
 const ABRAIN = path.join(os.homedir(), ".abrain");
 const MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "models.json");
 
-const EMBED_KEY = process.env.SUB2API_API_KEY_EMBEDDING;
-if (!EMBED_KEY) { console.log("SKIP — no SUB2API_API_KEY_EMBEDDING"); process.exit(0); }
+const EMBED_KEY = secret("embedding");
+if (!EMBED_KEY) { console.log("SKIP — no embedding key in ~/.pi/secrets.json"); process.exit(0); }
 
 const { selectStage0Pool } = await jiti.import(path.join(repoRoot, "extensions/memory/llm-search.ts"));
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));

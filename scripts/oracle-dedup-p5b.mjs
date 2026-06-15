@@ -9,7 +9,7 @@
  *   - distinct 对 intrusion@5: dense-only ≤ 三阶段(不引入更多 false-merge 面)
  *   - merge   对 recall@5:    dense-only ≥ 三阶段(真近重不漏召)
  *
- * 需要 SUB2API_API_KEY_EMBEDDING + 生产模型配置。
+ * 需要 ~/.pi/secrets.json 的 embedding key + 生产模型配置。
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
@@ -28,9 +28,9 @@ const { llmSearchEntriesWithVerdict } = (await jiti.import(path.join(repoRoot, "
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 
-// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey($ENV ref)(见 _oracle-registry.mjs)
+// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey(!command 从 secrets.json)(见 _oracle-registry.mjs)
 const { registry, resolveKey, embedKey: EMBED_KEY } = makeOracleRegistry(MODELS_JSON);
-if (!EMBED_KEY) { console.log("SKIP — no SUB2API_API_KEY_EMBEDDING"); process.exit(0); }
+if (!EMBED_KEY) { console.log("SKIP — no embedding key in ~/.pi/secrets.json"); process.exit(0); }
 
 const base = resolveSettings();
 const MODEL = process.env.ORACLE_MODEL || base.search.stage2Model || "deepseek/deepseek-v4-pro";

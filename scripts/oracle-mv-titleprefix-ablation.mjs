@@ -3,10 +3,11 @@
  * ADR 0036 P4 条件4(低 stakes ablation): 首段外 chunk 前缀 title 是否净正向。
  * 担心: prefix 把尾段 sub-vector 拉回 title 主题区、稀释 distinctive-tail 信号。
  * 建 no-prefix multi 索引 vs with-prefix multi(现状)在 40 paraphrase-tail query 上比 recall。
- * 复用 scratch dir; 需 SUB2API_API_KEY_EMBEDDING。
+ * 复用 scratch dir; 需 ~/.pi/secrets.json 的 embedding key。
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
+import { secret } from "./_secrets.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,8 +21,8 @@ const emb = await jiti.import(path.join(repoRoot, "extensions/memory/embedding.t
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { buildCorpusEmbeddings, VectorIndex, embedTexts } = emb;
 
-const KEY = process.env.SUB2API_API_KEY_EMBEDDING;
-if (!KEY) { console.log("SKIP — no SUB2API_API_KEY_EMBEDDING"); process.exit(0); }
+const KEY = secret("embedding");
+if (!KEY) { console.log("SKIP — no embedding key in ~/.pi/secrets.json"); process.exit(0); }
 const baseUrl = JSON.parse(fs.readFileSync(MODELS_JSON, "utf8")).providers.embedding.baseUrl;
 const MAXCHARS = 3500, MAXCHUNKS = 4, TOPN = 50;
 const cfgBase = { baseUrl, apiKey: KEY, model: "doubao-embedding-vision", dim: 2048, batchSize: 10, tpmLimit: 600_000, timeoutMs: 60_000, maxRetries: 3 };

@@ -12,6 +12,7 @@
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
+import { secret } from "./_secrets.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,13 +29,13 @@ const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 
 const realRegistry = ModelRegistry.create(AuthStorage.create(), MODELS_JSON);
-const EMBED_KEY = process.env.SUB2API_API_KEY_EMBEDDING;
+const EMBED_KEY = secret("embedding");
 const EMBED_BASE = (() => { try { return JSON.parse(fs.readFileSync(MODELS_JSON, "utf8")).providers?.embedding?.baseUrl; } catch { return undefined; } })();
 const registry = {
   find: (p, id) => (p === "embedding" ? { __embed: true, provider: p, id, baseUrl: EMBED_BASE } : realRegistry.find(p, id)),
   getApiKeyAndHeaders: async (m) => (m && m.__embed ? { ok: true, apiKey: EMBED_KEY } : realRegistry.getApiKeyAndHeaders(m)),
 };
-if (!EMBED_KEY) { console.log("SKIP — no SUB2API_API_KEY_EMBEDDING"); process.exit(0); }
+if (!EMBED_KEY) { console.log("SKIP — no embedding key in ~/.pi/secrets.json"); process.exit(0); }
 
 const baseSettings = resolveSettings();
 function walkMd(dir) { const o = []; if (!fs.existsSync(dir)) return o; for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) o.push(...walkMd(p)); else if (e.name.endsWith(".md") && !e.name.startsWith("_")) o.push(p); } return o; }

@@ -7,10 +7,11 @@
  * (parseEntry 遍历)+ 真实索引(.state/memory/embeddings.json, 2350 向量)+ 真实
  * query embed(stub modelRegistry 注入 sub2api key/baseUrl)。
  *
- * 需要 env SUB2API_API_KEY_EMBEDDING(无则 SKIP)。
+ * 需要 ~/.pi/secrets.json 的 embedding key(无则 SKIP)。
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
+import { secret } from "./_secrets.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,8 +20,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const jiti = createJiti(import.meta.url);
 
-const KEY = process.env.SUB2API_API_KEY_EMBEDDING;
-if (!KEY) { console.log("smoke-stage0-candidate-pool: SKIP (no SUB2API_API_KEY_EMBEDDING)"); process.exit(0); }
+const KEY = secret("embedding");
+if (!KEY) { console.log("smoke-stage0-candidate-pool: SKIP (no embedding key in ~/.pi/secrets.json)"); process.exit(0); }
 
 const { selectStage0Pool } = await jiti.import(path.join(repoRoot, "extensions/memory/llm-search.ts"));
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));

@@ -12,10 +12,11 @@
  *   QUERY_FILE=f   : 读 [{slug, query}] 在两套索引上比对 target entry 排名(全库
  *                    1152 竞争 + 语义 paraphrase → 盲区的真实探针)。
  *
- * 需要 SUB2API_API_KEY_EMBEDDING。不碰生产索引。
+ * 需要 ~/.pi/secrets.json 的 embedding key。不碰生产索引。
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
+import { secret } from "./_secrets.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,8 +31,8 @@ const emb = await jiti.import(path.join(repoRoot, "extensions/memory/embedding.t
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { buildCorpusEmbeddings, VectorIndex, embedTexts } = emb;
 
-const KEY = process.env.SUB2API_API_KEY_EMBEDDING;
-if (!KEY) { console.log("SKIP — no SUB2API_API_KEY_EMBEDDING"); process.exit(0); }
+const KEY = secret("embedding");
+if (!KEY) { console.log("SKIP — no embedding key in ~/.pi/secrets.json"); process.exit(0); }
 const baseUrl = JSON.parse(fs.readFileSync(MODELS_JSON, "utf8")).providers.embedding.baseUrl;
 
 const MAXCHARS = Number(process.env.MAXCHARS || 3500);

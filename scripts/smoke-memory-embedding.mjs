@@ -10,11 +10,12 @@
  *   5. prune: 移除的 slug 被丢弃
  *   6. 版本戳: 换 model 名 load → 空索引(强制重建,禁跨模型混用)
  *
- * 需要 env SUB2API_API_KEY_EMBEDDING + ~/.pi/agent/models.json providers.embedding.baseUrl。
+ * 需要 ~/.pi/secrets.json 的 embedding key + ~/.pi/agent/models.json providers.embedding.baseUrl。
  * 缺 key 时 SKIP HTTP 用例,仍跑纯本地用例(2/5/6 的索引逻辑)。
  */
 
 import fs from "node:fs";
+import { secret } from "./_secrets.mjs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -81,8 +82,8 @@ const embTsPath = path.join(repoRoot, "extensions", "memory", "embedding.ts");
 const mod = loadCJS(transpile(embTsPath), embTsPath, new Map([["../_shared/runtime", runtimeStub]]));
 const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath, selectStage0, scopeTagOf, staleOrMissingSlugs, reconcileEmbeddings } = mod;
 
-// ── config from env + models.json ────────────────────────────────────────
-const key = process.env.SUB2API_API_KEY_EMBEDDING;
+// ── config from secrets.json + models.json ────────────────────────────────────────
+const key = secret("embedding");
 let baseUrl;
 try {
   const mj = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "models.json"), "utf8"));

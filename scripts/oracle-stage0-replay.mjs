@@ -37,9 +37,9 @@ const MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "models.json");
 // model-curator 动态注册(脚本 registry 不含), 故 embedding 走 sub2api stub
 // (同 smoke-stage0-pool) —— 否则 query embed 失败会熔断成 sparse_fallback,
 // 测不到真实 dense hybrid。
-// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey($ENV ref), 任何已配 key 的 provider 都能跑(见 _oracle-registry.mjs)
+// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey(!command 从 secrets.json), 任何已配 key 的 provider 都能跑(见 _oracle-registry.mjs)
 const { registry, embedKey: EMBED_KEY } = makeOracleRegistry(MODELS_JSON);
-if (!EMBED_KEY) { console.log("oracle: SKIP — no SUB2API_API_KEY_EMBEDDING(dense 会熔断)"); process.exit(0); }
+if (!EMBED_KEY) { console.log("oracle: SKIP — no embedding key in ~/.pi/secrets.json(dense 会熔断)"); process.exit(0); }
 
 const baseSettings = resolveSettings();
 if (!baseSettings.search.stage1Model || !baseSettings.search.stage2Model) {

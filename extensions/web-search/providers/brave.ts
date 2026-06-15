@@ -6,6 +6,7 @@ import type {
   FetchResult,
 } from "../types";
 import { htmlToMarkdown, extractTitle, truncateBytes } from "../utils/html-to-markdown";
+import { resolveSecret } from "../utils/secret";
 import {
   assertUrlSafe,
   safeFetch,
@@ -43,6 +44,7 @@ export class BraveProvider implements WebSearchProvider {
 
   constructor(
     private readonly opts: {
+      apiKey?: string;
       apiKeyEnv: string;
       defaultCount: number;
       timeoutMs: number;
@@ -51,14 +53,26 @@ export class BraveProvider implements WebSearchProvider {
   ) {}
 
   private getApiKey(): string {
+    // Priority 1: webSearch.apiKey ("!command" / "$ENV" / literal) — lets
+    // the key live in a single secrets file instead of an env var.
+    if (this.opts.apiKey) {
+      const resolved = resolveSecret(this.opts.apiKey);
+      if (resolved) return resolved;
+      throw new Error(
+        `web-search/brave: webSearch.apiKey is set but resolved empty ` +
+        `(command produced no output, or referenced env var is missing): ` +
+        `${this.opts.apiKey}`,
+      );
+    }
+    // Priority 2: legacy env var (name from webSearch.apiKeyEnv).
     const key = process.env[this.opts.apiKeyEnv];
     if (!key) {
       throw new Error(
-        `web-search/brave: ${this.opts.apiKeyEnv} env var not set. ` +
+        `web-search/brave: no API key. Set webSearch.apiKey (e.g. ` +
+        `"!jq -r --arg k brave '.[$k]' $HOME/.pi/secrets.json") or the ` +
+        `${this.opts.apiKeyEnv} env var in ~/.pi/agent/pi-astack-settings.json. ` +
         `Get a free Brave Search API key at ` +
-        `https://api-dashboard.search.brave.com/app/keys, then either ` +
-        `set the env var or switch webSearch.provider in ` +
-        `~/.pi/agent/pi-astack-settings.json.`,
+        `https://api-dashboard.search.brave.com/app/keys.`,
       );
     }
     return key;
