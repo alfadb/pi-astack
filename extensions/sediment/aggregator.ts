@@ -1356,8 +1356,8 @@ function buildDecayShadowContext(projectRoot: string): unknown | undefined {
     const ranked = [...rows]
       .sort((a, b) => (b.window_retrieved_unused - a.window_retrieved_unused) || (a.citation_count - b.citation_count))
       .slice(0, 50);
-    // ADR 0031 Phase 2 闭环: 喜 resurrection rate → 让 decay 判断自调保守度。
-    const rr = resurrectionRateReport(30);
+    // ADR 0031 Phase 2 闭环: 据 resurrection rate(per-project, 防跨项目污染)→ 让 decay 判断自调保守度。
+    const rr = resurrectionRateReport(30, new Date(), projectRoot);
     return {
       window_basis_days: ranked[0]?.window_days ?? 30,
       note: "usage signals only — disuse is WEAK context, never a would_demote driver (ADR 0031 §4)",

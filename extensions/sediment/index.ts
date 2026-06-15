@@ -2093,7 +2093,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                     },
                   );
                   const okk = res.status !== "rejected";
-                  return { ok: okk, status: okk ? "archived" : "active", error: res.reason };
+                  // rejected=true → CAS 预条件未过(条目非 active: 已 archived 或已复活)→
+                  // executor 放弃重试(标 executed), 防孤儿 pending 重放 demote 已复活条目。
+                  return { ok: okk, status: okk ? "archived" : "active", error: res.reason, rejected: !okk };
                 } catch (e) {
                   return { ok: false, error: e instanceof Error ? e.message : String(e) };
                 }

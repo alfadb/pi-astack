@@ -127,7 +127,12 @@ export interface CircuitBreakerStatus { tripped: boolean; reason?: "daily_cap" |
 function evalCircuitBreaker(nowMs: number, activeCorpusSize: number | undefined, plannedCount: number): CircuitBreakerStatus {
   const demoted24h = countDemotesLast24h(nowMs);
   if (demoted24h + plannedCount > DEMOTE_MAX_PER_DAY) return { tripped: true, reason: "daily_cap", demoted_last_24h: demoted24h };
-  if (typeof activeCorpusSize === "number" && activeCorpusSize <= MIN_ACTIVE_CORPUS_FLOOR) return { tripped: true, reason: "corpus_floor", demoted_last_24h: demoted24h };
+  // corpus floor: **fail-closed**(activeCorpusSize 不可知 —— loadEntries 失败 —— 视同跌破地板,
+  // deepseek P1)+ 计入本批 plannedCount(active - planned < floor → 跳, 防一批抽到地板以下,
+  // gpt+opus P1/P2)。
+  if (typeof activeCorpusSize !== "number" || activeCorpusSize - plannedCount < MIN_ACTIVE_CORPUS_FLOOR) {
+    return { tripped: true, reason: "corpus_floor", demoted_last_24h: demoted24h };
+  }
   return { tripped: false, demoted_last_24h: demoted24h };
 }
 
@@ -149,7 +154,7 @@ function appendDemoteLedger(projectRoot: string, target: DemoteDecision, now: Da
   } catch { /* best-effort */ }
 }
 
-function appendRealAudit(projectRoot: string, plan: DemotePlan, demoted: string[], failed: { slug: string; error: string }[], breaker: CircuitBreakerStatus, now: Date): void {
+function appendRealAudit(projectRoot: string, plan: DemotePlan, demoted: string[], failed: { slug: string; error: string }[], abandoned: string[], breaker: CircuitBreakerStatus, now: Date): void {
   try {
     const file = forgettingDryRunAuditPath();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -161,7 +166,9 @@ function appendRealAudit(projectRoot: string, plan: DemotePlan, demoted: string[
       planned_count: plan.demote.length,
       demoted_count: demoted.length,
       failed_count: failed.length,
+      abandoned_count: abandoned.length,
       demoted_slugs: demoted,
+      abandoned_slugs: abandoned,
       failed,
       resurrection_backoff: plan.resurrection_backoff,
       circuit_breaker: breaker,
@@ -217,7 +224,7 @@ export function runForgettingExecutorDryRun(
       if (t) hysteresisBySlug[p.slug] = { proposal_cooldown_until: t.proposal_cooldown_until, holdout_until: t.holdout_until };
     }
 
-    const rr = resurrectionRateReport(30, now);
+    const rr = resurrectionRateReport(30, now, projectRoot);
     const plan = selectDemoteTargets({
       proposals,
       hysteresisBySlug,
@@ -235,7 +242,7 @@ export function runForgettingExecutorDryRun(
 
 /** 注入式真实归档(executor 不 import writer —— orchestrator 提供, 内部 archiveProjectEntry
  *  + expected_status:"active" CAS + dryRun:false)。返回 status 反映落地后状态。 */
-export type ArchiveEntryFn = (target: DemoteDecision) => Promise<{ ok: boolean; status?: string; error?: string }>;
+export type ArchiveEntryFn = (target: DemoteDecision) => Promise<{ ok: boolean; status?: string; error?: string; rejected?: boolean }>;
 
 export interface ForgettingExecutorRealResult {
   ok: boolean;
@@ -245,6 +252,7 @@ export interface ForgettingExecutorRealResult {
   plan?: DemotePlan;
   demoted?: string[];
   failed?: { slug: string; error: string }[];
+  abandoned?: string[]; // CAS reject(条目非 active)→ 放弃重试的 proposal
   circuit_breaker?: CircuitBreakerStatus;
 }
 
@@ -271,7 +279,7 @@ export async function runForgettingExecutor(
       if (t) hysteresisBySlug[p.slug] = { proposal_cooldown_until: t.proposal_cooldown_until, holdout_until: t.holdout_until };
     }
 
-    const rr = resurrectionRateReport(30, now);
+    const rr = resurrectionRateReport(30, now, projectRoot);
     const plan = selectDemoteTargets({
       proposals,
       hysteresisBySlug,
@@ -289,31 +297,41 @@ export async function runForgettingExecutor(
 
     const breaker = evalCircuitBreaker(now.getTime(), deps.activeCorpusSize, plan.demote.length);
     if (breaker.tripped) {
-      appendRealAudit(projectRoot, plan, [], [], breaker, now);
+      appendRealAudit(projectRoot, plan, [], [], [], breaker, now);
       return { ok: true, enabled: true, dry_run: true, reason: `circuit_breaker_${breaker.reason}`, plan, circuit_breaker: breaker };
     }
 
     const demoted: string[] = [];
     const failed: { slug: string; error: string }[] = [];
+    const abandoned: string[] = [];
+    const cooldownIso = formatLocalIsoTimestamp(new Date(now.getTime() + DEMOTE_COOLDOWN_MS));
+    const nowIso = formatLocalIsoTimestamp(now);
     for (const target of plan.demote) {
       try {
+        // P1(gpt+deepseek): cooldown-first —— 先落 30d 冷却(保守防振荡), 即使 archive 失败
+        // 也不会下轮立刻重提;如果被复活 → 下轮 cooldown 未过 → selectDemoteTargets skip。
+        const hys = setEntryHysteresis(projectRoot, target.slug, { proposal_cooldown_until: cooldownIso, last_proposed_at: nowIso });
         const r = await deps.archiveEntry!(target);
         if (r.ok && (r.status === "archived" || r.status === undefined)) {
-          markProposalsExecuted(projectRoot, [target.slug]);
-          const cooldownIso = formatLocalIsoTimestamp(new Date(now.getTime() + DEMOTE_COOLDOWN_MS));
-          setEntryHysteresis(projectRoot, target.slug, { proposal_cooldown_until: cooldownIso, last_proposed_at: formatLocalIsoTimestamp(now) });
+          const mark = markProposalsExecuted(projectRoot, [target.slug]); // P1: 检查返回值
           appendDemoteLedger(projectRoot, target, now);
           demoted.push(target.slug);
+          if (!mark.ok || !hys.ok) failed.push({ slug: target.slug, error: `demoted_but_bookkeeping_degraded(mark=${mark.ok},hys=${hys.ok})` });
+        } else if (r.rejected) {
+          // CAS reject(条目非 active: 已 archived 或已复活)→ 放弃该 proposal(标 executed 停重试),
+          // 防孤儿 pending 在条目被复活后再次 demote(deepseek 6.2 + gpt P0 stale-replay)。
+          markProposalsExecuted(projectRoot, [target.slug]);
+          abandoned.push(target.slug);
         } else {
-          // CAS reject(status≠active, 如已被复活)或 callback 失败 → 留 pending, 仅记 audit。
-          failed.push({ slug: target.slug, error: r.error ?? `archive_rejected(status=${r.status})` });
+          // 瞬时失败(callback 抛错/IO)→ 留 pending 下轮重试(cooldown 已挡 30d, 不会立即)。
+          failed.push({ slug: target.slug, error: r.error ?? "archive_failed" });
         }
       } catch (e) {
         failed.push({ slug: target.slug, error: e instanceof Error ? e.message : String(e) });
       }
     }
-    appendRealAudit(projectRoot, plan, demoted, failed, breaker, now);
-    return { ok: true, enabled: true, dry_run: false, plan, demoted, failed, circuit_breaker: breaker };
+    appendRealAudit(projectRoot, plan, demoted, failed, abandoned, breaker, now);
+    return { ok: true, enabled: true, dry_run: false, plan, demoted, failed, abandoned, circuit_breaker: breaker };
   } catch (e) {
     return { ok: false, enabled: true, dry_run: true, reason: e instanceof Error ? e.message : String(e) };
   }

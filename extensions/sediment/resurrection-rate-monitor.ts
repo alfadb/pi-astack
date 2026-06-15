@@ -13,6 +13,7 @@
 // 「测不到」而非「没问题」。本监控只报告数值;保守解读留给消费方,安全靠
 // §2.1 可逆地板,不靠本指标收敛。
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { archiveReactivationLedgerPath } from "./archive-reactivation";
 
 export interface ReactivationLedgerRow {
@@ -75,10 +76,12 @@ export function readReactivationLedgerTail(maxBytes = TAIL_BYTES): ReactivationL
   }
 }
 
-function windowStat(rows: ReactivationLedgerRow[], from: number, to: number, windowDays: number): ResurrectionWindowStat {
+function windowStat(rows: ReactivationLedgerRow[], from: number, to: number, windowDays: number, projectRoot?: string): ResurrectionWindowStat {
   let reviewed = 0, reactivated = 0, kept = 0, hard = 0;
   for (const r of rows) {
     if (r.operation !== "archive_reactivation_decision" || typeof r.ts !== "string") continue;
+    // deepseek P0: per-project 过滤 —— 防跨项目污染(项目 A 复活率抑制项目 B 的 demote)。
+    if (projectRoot && (typeof r.project_root !== "string" || path.resolve(r.project_root) !== projectRoot)) continue;
     const t = Date.parse(r.ts);
     if (!Number.isFinite(t) || t < from || t >= to) continue;
     reviewed++;
@@ -96,11 +99,13 @@ function windowStat(rows: ReactivationLedgerRow[], from: number, to: number, win
   };
 }
 
-/** 纯函数: rows + now + windowDays → 双窗口统计 + 趋势(免 IO, 可单测)。 */
-export function computeResurrectionRate(rows: ReactivationLedgerRow[], nowMs: number, windowDays: number): ResurrectionRateReport {
+/** 纯函数: rows + now + windowDays → 双窗口统计 + 趋势(免 IO, 可单测)。
+ *  projectRoot 给定 → 仅统计该项目的复活决策(per-project, deepseek P0);缺省 → 全局。 */
+export function computeResurrectionRate(rows: ReactivationLedgerRow[], nowMs: number, windowDays: number, projectRoot?: string): ResurrectionRateReport {
   const winMs = Math.max(1, windowDays) * DAY_MS;
-  const recent = windowStat(rows, nowMs - winMs, nowMs, windowDays);
-  const prior = windowStat(rows, nowMs - 2 * winMs, nowMs - winMs, windowDays);
+  const pr = projectRoot ? path.resolve(projectRoot) : undefined;
+  const recent = windowStat(rows, nowMs - winMs, nowMs, windowDays, pr);
+  const prior = windowStat(rows, nowMs - 2 * winMs, nowMs - winMs, windowDays, pr);
   const rate_delta = recent.resurrection_rate - prior.resurrection_rate;
   let trend: ResurrectionRateReport["trend"];
   if (recent.reviewed < MIN_REVIEWED_FOR_TREND || prior.reviewed < MIN_REVIEWED_FOR_TREND) {
@@ -120,7 +125,8 @@ export function computeResurrectionRate(rows: ReactivationLedgerRow[], nowMs: nu
   };
 }
 
-/** 生产读 API: 从 ledger 计算当前 resurrection rate 报告。 */
-export function resurrectionRateReport(windowDays = 30, now = new Date()): ResurrectionRateReport {
-  return computeResurrectionRate(readReactivationLedgerTail(), now.getTime(), windowDays);
+/** 生产读 API: 从 ledger 计算当前 resurrection rate 报告。
+ *  projectRoot 给定 → per-project(executor 应总传, 防跨项目污染)。 */
+export function resurrectionRateReport(windowDays = 30, now = new Date(), projectRoot?: string): ResurrectionRateReport {
+  return computeResurrectionRate(readReactivationLedgerTail(), now.getTime(), windowDays, projectRoot);
 }
