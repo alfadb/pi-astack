@@ -869,11 +869,14 @@ export async function mergeProjectEntries(
 
 export async function archiveProjectEntry(
   slugRaw: string,
-  opts: WriteProjectEntryOptions & { reason?: string; sessionId?: string },
+  opts: WriteProjectEntryOptions & { reason?: string; sessionId?: string; expected_status?: EntryStatus },
 ): Promise<WriteProjectEntryResult> {
   const reason = opts.reason || "archived by sediment curator";
   const result = await updateProjectEntry(slugRaw, {
     status: "archived",
+    // ADR 0031 P1-1: CAS —— 仅当当前 status 仍为 expected(executor 传 "active")才归档,
+    // 防把用户刚复活的条目再打回 archived(侵蚀 §2.1 复活安全网)。
+    ...(opts.expected_status ? { expected_status: opts.expected_status } : {}),
     sessionId: opts.sessionId,
     timelineAction: "archived",
     timelineNote: reason,

@@ -31,6 +31,7 @@ import {
   userGlobalSedimentDir,
 } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { withFileLock, atomicWriteText } from "../_shared/sync-file-lock";
 import type { LifecycleProposal, PromotedAdvisory } from "./aggregator-llm";
 
 export interface EntryLifecycleProposalRow {
@@ -45,8 +46,10 @@ export interface EntryLifecycleProposalRow {
   independent_evidence: string;
   falsifier: string;
   message?: string;
-  /** M3 always emits "pending"; only the deferred gated executor transitions it. */
-  status: "pending";
+  /** M3 always emits "pending"; the gated executor(ADR 0031 Phase 3)transitions it to
+   *  "executed"(active→archived 完成)或 "failed"。normalizeRow 保留磁盘状态(不再硬编码
+   *  pending)—— 否则 executed 标记读不回 → 同 proposal 每轮重复执行(opus M4/M5 P0-1)。 */
+  status: "pending" | "executed" | "failed";
 }
 
 export interface AppendLifecycleProposalsOptions {
@@ -124,7 +127,8 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
     independent_evidence: typeof r.independent_evidence === "string" ? r.independent_evidence : "",
     falsifier: typeof r.falsifier === "string" ? r.falsifier : "",
     ...(typeof r.message === "string" ? { message: r.message } : {}),
-    status: "pending",
+    // P0-1: 保留磁盘状态;未知值才 fallback pending。
+    status: (r.status === "executed" || r.status === "failed") ? r.status : "pending",
   };
 }
 
@@ -142,37 +146,40 @@ export function appendLifecycleProposals(options: AppendLifecycleProposalsOption
   // are not passed in here by contract; proposals never come from exoneration.
   const carrying = promoted.filter((a) => a && a.lifecycle_proposal);
   try {
-    const existing = readJsonlTail<unknown>(entryLifecycleProposalsPath())
-      .map(normalizeRow)
-      .filter((r): r is EntryLifecycleProposalRow => r !== null);
-
     if (!projectRoot || carrying.length === 0) {
+      const existing = readJsonlTail<unknown>(entryLifecycleProposalsPath())
+        .map(normalizeRow)
+        .filter((r): r is EntryLifecycleProposalRow => r !== null);
       return { ok: true, written: false, proposals_appended: 0, rows_total: existing.length };
     }
-
-    const newRows: EntryLifecycleProposalRow[] = carrying.map((a) => {
-      const p = a.lifecycle_proposal as LifecycleProposal;
-      return {
-        schema_version: 1,
-        ts,
-        project_root: projectRoot,
-        ...(typeof a.slug === "string" && a.slug ? { slug: a.slug } : {}),
-        kind: a.kind,
-        op: p.op,
-        reason: p.reason,
-        independent_evidence: clip(p.independent_evidence),
-        falsifier: clip(p.falsifier),
-        ...(a.message ? { message: clip(a.message) } : {}),
-        status: "pending" as const,
-      };
+    // P0-3: 整文件 RMW 上锁(与 markProposalsExecuted 共一把锁),防与 executor 翻 status 竞写。
+    const locked = withFileLock(entryLifecycleProposalsLockPath(), () => {
+      const existing = readJsonlTail<unknown>(entryLifecycleProposalsPath())
+        .map(normalizeRow)
+        .filter((r): r is EntryLifecycleProposalRow => r !== null);
+      const newRows: EntryLifecycleProposalRow[] = carrying.map((a) => {
+        const p = a.lifecycle_proposal as LifecycleProposal;
+        return {
+          schema_version: 1,
+          ts,
+          project_root: projectRoot,
+          ...(typeof a.slug === "string" && a.slug ? { slug: a.slug } : {}),
+          kind: a.kind,
+          op: p.op,
+          reason: p.reason,
+          independent_evidence: clip(p.independent_evidence),
+          falsifier: clip(p.falsifier),
+          ...(a.message ? { message: clip(a.message) } : {}),
+          status: "pending" as const,
+        };
+      });
+      const allRows = [...existing, ...newRows].slice(-PROPOSALS_MAX_ROWS);
+      const enriched = allRows.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
+      atomicWriteText(entryLifecycleProposalsPath(), enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
+      return { proposals_appended: newRows.length, rows_total: allRows.length };
     });
-
-    const allRows = [...existing, ...newRows].slice(-PROPOSALS_MAX_ROWS);
-    const file = entryLifecycleProposalsPath();
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const enriched = allRows.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
-    fs.writeFileSync(file, enriched.map((row) => JSON.stringify(row)).join("\n") + "\n", "utf-8");
-    return { ok: true, written: true, proposals_appended: newRows.length, rows_total: allRows.length };
+    if (!locked.ok) return { ok: false, written: false, proposals_appended: 0, rows_total: 0, error: "proposal_lock_contention" };
+    return { ok: true, written: true, proposals_appended: locked.value.proposals_appended, rows_total: locked.value.rows_total };
   } catch (e) {
     return {
       ok: false,
@@ -192,4 +199,42 @@ export function readLifecycleProposals(projectRoot?: string): EntryLifecycleProp
   if (!projectRoot) return rows;
   const normalized = normalizeProjectRoot(projectRoot);
   return rows.filter((r) => r.project_root === normalized);
+}
+
+function entryLifecycleProposalsLockPath(): string {
+  ensureUserGlobalSidecarMigrated();
+  return path.join(userGlobalSedimentDir(), "locks", "entry-lifecycle-proposals.lock");
+}
+
+/** ADR 0031 Phase 3(M4/M5 executor 专用): 把指定 slug 的 pending op=archive proposal
+ *  翻成 executed/failed(幂等: 已非 pending 的不动)。与 appendLifecycleProposals 共锁串行
+ *  (opus M4/M5 P0-1+P0-3)。拿不到锁 → ok:false(调用方下轮重试)。 */
+export function markProposalsExecuted(
+  projectRoot: string,
+  slugs: string[],
+  status: "executed" | "failed" = "executed",
+): { ok: boolean; updated: number; error?: string } {
+  const pr = normalizeProjectRoot(projectRoot);
+  const slugSet = new Set((Array.isArray(slugs) ? slugs : []).filter((s): s is string => typeof s === "string" && s.length > 0));
+  if (!pr || slugSet.size === 0) return { ok: true, updated: 0 };
+  const locked = withFileLock(entryLifecycleProposalsLockPath(), () => {
+    const rows = readJsonlTail<unknown>(entryLifecycleProposalsPath())
+      .map(normalizeRow)
+      .filter((r): r is EntryLifecycleProposalRow => r !== null);
+    let updated = 0;
+    const next = rows.map((r) => {
+      if (r.project_root === pr && r.op === "archive" && r.status === "pending" && r.slug && slugSet.has(r.slug)) {
+        updated++;
+        return { ...r, status };
+      }
+      return r;
+    });
+    if (updated > 0) {
+      const enriched = next.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
+      atomicWriteText(entryLifecycleProposalsPath(), enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    }
+    return updated;
+  });
+  if (!locked.ok) return { ok: false, updated: 0, error: "proposal_lock_contention" };
+  return { ok: true, updated: locked.value };
 }

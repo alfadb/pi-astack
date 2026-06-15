@@ -455,3 +455,50 @@ export function getEntryTelemetry(projectRoot: string, slug: string): EntryTelem
   if (!normalized || !slug) return undefined;
   return readAllRows().find((r) => r.project_root === normalized && r.slug === slug);
 }
+
+/** ADR 0031 Phase 3(M4/M5 executor 专用): 写 per-entry hysteresis(cooldown/holdout/
+ *  last_proposed_at)防振荡。**复用本文件全局锁 + RMW**(opus M4/M5 P0-2: 与
+ *  mergeEntryTelemetry 共一把锁, 否则 cooldown 被 carry 旧值覆盖 = lost-update → 振荡)。
+ *  只改 executor-owned 三字段, preserve 其余 derived。row 不存 → 建 minimal。 */
+export function setEntryHysteresis(
+  projectRoot: string,
+  slug: string,
+  fields: { proposal_cooldown_until?: string; holdout_until?: string; last_proposed_at?: string },
+  now: Date = new Date(),
+): { ok: boolean; error?: string } {
+  const pr = normalizeProjectRoot(projectRoot);
+  if (!pr || !slug) return { ok: true };
+  const lockPath = entryTelemetryGlobalLockPath();
+  const lock = tryAcquireSyncLock(lockPath);
+  if (!lock) return { ok: false, error: "entry_telemetry_lock_contention" };
+  try {
+    const existing = new Map<string, EntryTelemetryRow>();
+    for (const row of readAllRows()) existing.set(compoundKey(row.project_root, row.slug), row);
+    const ck = compoundKey(pr, slug);
+    const prev = existing.get(ck);
+    const ts = formatLocalIsoTimestamp(now);
+    const next: EntryTelemetryRow = prev ? { ...prev } : {
+      schema_version: 1, project_root: pr, slug,
+      citation_count: 0, total_retrievals: 0, window_days: DEFAULT_WINDOW_DAYS,
+      window_decisive: 0, window_confirmatory: 0, window_retrieved_unused: 0,
+      window_decisive_streak: 0, window_total_retrievals: 0, possible_echo_chamber: false,
+      updated_at: ts,
+    };
+    if (fields.proposal_cooldown_until !== undefined) next.proposal_cooldown_until = fields.proposal_cooldown_until;
+    if (fields.holdout_until !== undefined) next.holdout_until = fields.holdout_until;
+    if (fields.last_proposed_at !== undefined) next.last_proposed_at = fields.last_proposed_at;
+    next.updated_at = ts;
+    existing.set(ck, next);
+    const allRows = [...existing.values()]
+      .sort((a, b) => (b.updated_at > a.updated_at ? 1 : b.updated_at < a.updated_at ? -1 : compoundKey(a.project_root, a.slug).localeCompare(compoundKey(b.project_root, b.slug))))
+      .slice(0, ENTRY_TELEMETRY_MAX_ROWS);
+    const file = entryTelemetryPath();
+    const enriched = allRows.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
+    atomicWriteText(file, enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    releaseSyncLock(lockPath, lock);
+  }
+}
