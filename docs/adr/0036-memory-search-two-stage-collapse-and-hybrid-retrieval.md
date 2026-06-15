@@ -211,6 +211,19 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 
 **post-flip 验证**: 生产多向量索引 live topN 正常(max-sim over sub-vectors, 返回主题相关); smoke-memory-embedding 16/16、smoke-search-profiles(dedup chunk0 pin)、smoke-query-routing、smoke-stale-floor-window 全过。回滚路径: settings multiVector=false + `mv embeddings.json.bak embeddings.json`(或重嵌)。
 
+### 10.7 索引自收敛(search-time 双向 auto-reconcile, 兼补 ADR 0035 §79a/§49)
+
+**缺口**: reconcile(写向量索引)之前唯一 runtime 触发点是 sediment 写盘。故 git-pull 拉进的新/改/archive/delete、新设备空索引、纯读会话 —— 都不重建, dense 静默退化(新设备甚至无 dense)。multiVector 转产抬高了这些窗口的退化代价。
+
+**方案**(`extensions/memory/auto-reconcile.ts`): search 路径(数据已加载, 纯 set 运算免费)检测**双向** backlog —— ADD = `staleOrMissingSlugs`(content-hash diff, 对手改/git-pull robust); PRUNE = `VectorIndex.countOrphans`(索引内 in-scope 但已非 active 的孤儿 = archived/deleted)。空索引 或 backlog≥阈值 → fire 一个 **detached / single-flight / cooldown** 的后台 reconcile(同一调用 add+prune 一起做)。全程非阻塞: 本轮仍走 bounded fallback, 下轮受益。一举收敛 add/update·archive·delete·git-pull·新设备·纯读会话 **六种场景**。
+
+**不用 git commit-id 做检测**: ADR 0035 §46 故意用 content-hash 取代 manifest/watermark —— content-hash 能抓到 commit-id 抓不到的未提交手改/crash; 孤儿检测靠 scope-bounded set-diff。commit-id 在两个方向都多余。
+
+- 门: `search.autoReconcile`(默认 true, pi-astack-settings.json 显式 kill-switch)+ `autoReconcileCooldownMs`(5min)+ `autoReconcileMinBacklog`(3; ≤2 条走 bounded fallback)。`hasProjectRoot` gate 排除 oracle/scratch(不动生产索引)。
+- §75(4) 硬化: `buildCorpusEmbeddings` 的 prune 落盘与 embed 解耦(prune 后立即 save)—— delete/archive 孤儿在 embedding provider 宕机时也能清。
+- 可观测: `.state/memory/index-meta.json`(updatedAt + active/embedded/pruned + scheme)。
+- 验证: `smoke-auto-reconcile`(决策 16 case)+ `smoke-memory-embedding`(countOrphans/prune-save)+ live selectStage0Pool 信号计算; fire→reconcile 链复用已证 sediment-reconcile 同调用。
+
 ## 11. P3 BM25 复活转产(本次, 3×T0 执行面板决定)
 
 stage0 hybrid 的 sparse 臂从朴素子串 `sparseMatchSlugs`(无 IDF, 中文几乎零匹配)换成 char n-gram BM25 `sparseMatchSlugsBM25`(ASCII 标识符 + CJK bigram + IDF + slug/title/trigger 高信号字段×3)。

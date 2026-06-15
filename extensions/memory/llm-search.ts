@@ -4,7 +4,8 @@ import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
 import { clamp, compareTimestamps, normalizeBareSlug, stableUnique } from "./utils";
-import { embedSchemeTag, embedTexts, resolveEmbeddingProviderConfig, staleOrMissingSlugs, VectorIndex, vectorIndexPath, type EmbeddingProviderConfig } from "./embedding";
+import { embedSchemeTag, embedTexts, resolveEmbeddingProviderConfig, scopeTagOf, staleOrMissingSlugs, VectorIndex, vectorIndexPath, type EmbeddingProviderConfig } from "./embedding";
+import { maybeAutoReconcile, type ReconcileSignal } from "./auto-reconcile";
 import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "../sediment/sanitizer";
@@ -709,6 +710,7 @@ interface Stage0Pool {
   denseCount: number;
   sparseCount: number;
   staleCount: number;
+  reconcileSignal: ReconcileSignal;   // ADR 0036 §10.6: 双向 auto-reconcile 触发信号(add∪prune)
   embedMs: number;
 }
 
@@ -793,9 +795,21 @@ export async function selectStage0Pool(
     for (const e of corpus.slice().sort(byUpdatedDesc).slice(0, poolLimit)) ordered.push(e.slug);
   }
 
+  // ADR 0036 §10.6: 双向 auto-reconcile 信号(数据均已加载, 纯 set 运算)。
+  // ADD = staleSlugs(content-hash 缺失/陈旧); PRUNE = 索引内 in-scope 但已非 active 的孤儿。
+  const activeSlugsSet = new Set(indexableForStale.map((e) => e.slug));
+  const loadedScopes = new Set(indexableForStale.map((e) => scopeTagOf(e)));
+  const reconcileSignal: ReconcileSignal = {
+    indexEmpty: idx.size() === 0,
+    staleCount: staleSlugs.length,
+    orphanCount: idx.countOrphans(activeSlugsSet, loadedScopes),
+    activeCount: activeSlugsSet.size,
+  };
+
   return {
     candidateEntries: ordered.map((s) => entriesBySlug.get(s)).filter((e): e is MemoryEntry => !!e),
     mode, denseSlugs, denseCount: denseSlugs.length, sparseCount: sparseSlugs.length, staleCount: staleSlugs.length, embedMs,
+    reconcileSignal,
   };
 }
 
@@ -905,6 +919,10 @@ async function executeSearch(
     if (pool) {
       candidateEntries = pool.candidateEntries;
       surface = STAGE0_SURFACE;
+      // ADR 0036 §10.6: fire-and-forget 双向后台 reconcile(single-flight + cooldown +
+      // 仅空索引/超 backlog 才触)。非阻塞: 本轮仍走 bounded fallback, 下轮受益。
+      // projectRoot 未传(oracle/scratch)时在决策函数内被 gated 掉, 不动生产索引。
+      maybeAutoReconcile(projectRoot, settings, modelRegistry, pool.reconcileSignal);
     }
   }
 

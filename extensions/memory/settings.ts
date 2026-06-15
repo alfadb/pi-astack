@@ -34,6 +34,9 @@ export interface SearchSettings {
   sparseBM25: boolean;             // ADR 0036: sparse 用 char n-gram BM25(补中文/符号)替朴素子串
   queryRouting: boolean;           // ADR 0036 P5: toolSearch 精确直查路由(query 恰为 slug 或 ADR 编号 → 直接命中跳 LLM)
   dedupChunk0Aggregation: boolean; // ADR 0036 P4 条件1: dedup 路径 topN 只用 chunk0(head)向量, 避免 multiVector max-sim 的 false-merge 注入
+  autoReconcile: boolean;          // ADR 0036 §10.6: search 时双向(stale-add ∪ orphan-prune)后台增量 reconcile(新设备/git-pull/archive/delete/纯读会话自收敛)
+  autoReconcileCooldownMs: number; // 两次自动 reconcile 最小间隔(single-flight 之外的防抖)
+  autoReconcileMinBacklog: number; // 非空索引时: stale+orphan 达此才触发(小变动走 search-time bounded fallback)
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -89,6 +92,12 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // 浮上为近重候选(实测 multiVector 下 235→62 新增邻居, -74%)。multiVector off 时
   // 仅 1 chunk, chunk0==maxsim(no-op)。
   dedupChunk0Aggregation: false,
+  // ADR 0036 §10.6: 默认开 —— 补“git-pull/新设备/纯读会话不重建”的缺口(原只 sediment 写触发)。
+  // 稳态(索引新)时谓词(stale+orphan<min)不触发, 零开销; 空索引/高 backlog 才 fire 后台重建。
+  // 显式 kill-switch 也在 pi-astack-settings.json(应急可置 false)。
+  autoReconcile: true,
+  autoReconcileCooldownMs: 300_000, // 5min
+  autoReconcileMinBacklog: 3,        // ≤2 条 stale/orphan 走 bounded fallback, 不为小变动炸 reconcile
 };
 
 // ADR 0026 §3.1 walk-back (2026-05-28). Path A is the "always inject
@@ -243,6 +252,9 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     sparseBM25: asBoolean(search.sparseBM25, DEFAULT_SEARCH_SETTINGS.sparseBM25),
     queryRouting: asBoolean(search.queryRouting, DEFAULT_SEARCH_SETTINGS.queryRouting),
     dedupChunk0Aggregation: asBoolean(search.dedupChunk0Aggregation, DEFAULT_SEARCH_SETTINGS.dedupChunk0Aggregation),
+    autoReconcile: asBoolean(search.autoReconcile, DEFAULT_SEARCH_SETTINGS.autoReconcile),
+    autoReconcileCooldownMs: Math.max(0, asNumber(search.autoReconcileCooldownMs, DEFAULT_SEARCH_SETTINGS.autoReconcileCooldownMs)),
+    autoReconcileMinBacklog: Math.max(1, asNumber(search.autoReconcileMinBacklog, DEFAULT_SEARCH_SETTINGS.autoReconcileMinBacklog)),
   };
 }
 

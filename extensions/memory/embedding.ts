@@ -302,6 +302,18 @@ export class VectorIndex {
     return n;
   }
 
+  /** ADR 0036 §10.6 auto-reconcile prune 信号: 数“scope 在本次范围内, 但 slug 不再是
+   *  active entry”的索引向量(= archived/deleted 遗留的孤儿)。纯只读, prune() 的
+   *  计数镜像 —— 驱动 search-time 双向 reconcile 触发判据的 PRUNE 方向。 */
+  countOrphans(validSlugs: Set<string>, scopes: Set<string>): number {
+    let n = 0;
+    for (const [slug, rec] of Object.entries(this.data.entries)) {
+      if (!scopes.has(rec.scope)) continue;
+      if (!validSlugs.has(slug)) n++;
+    }
+    return n;
+  }
+
   size(): number {
     return Object.keys(this.data.entries).length;
   }
@@ -484,6 +496,10 @@ export async function buildCorpusEmbeddings(
   // reconcile(部分库)传 pruneScopes:只 prune 当前 scope 内的 stale slug,绝不
   // 删其他 project 向量(ADR 0035 §7 bug1);全库 init 不传 → prune 全部 stale。
   const pruned = opts?.skipPrune ? 0 : idx.prune(validSlugs, opts?.pruneScopes);
+  // ADR 0035 §75(4): prune 落盘与 embed 成功解耦 —— prune 是纯本地操作, delete/archive
+  // 的孤儿向量必须能清掉哪怕 embedding provider 宕机(否则整个 reconcile 报错
+  // 被 swallow, prune 丢失, 孤儿泄漏到下次成功 embed)。仅有 prune 时存一次(原子写)。
+  if (pruned > 0) idx.save();
 
   // content-hash + scheme gate: only embed changed/missing/scheme-flipped(ADR 0036 P4)
   const currentScheme = embedSchemeTag(cfg.multiVector);
@@ -535,6 +551,26 @@ export function indexLockPath(): string {
   return path.join(abrainStateDir(resolveUserGlobalAbrainHome()), "memory", ".embeddings.lock");
 }
 
+/** ADR 0036 §10.6: 索引可观测元数据(“我的索引多新/上次何时重建”)。不参与检测
+ *  (检测走 content-hash + orphan set-diff); 纯运维查阅用。 */
+export function indexMetaPath(): string {
+  return path.join(abrainStateDir(resolveUserGlobalAbrainHome()), "memory", "index-meta.json");
+}
+
+function writeIndexMeta(cfg: EmbeddingProviderConfig, result: CorpusBuildResult): void {
+  try {
+    atomicWriteJson(indexMetaPath(), {
+      updatedAt: new Date().toISOString(),
+      activeEntries: result.total,
+      embedded: result.embedded,
+      skipped: result.skipped,
+      pruned: result.pruned,
+      scheme: embedSchemeTag(cfg.multiVector),
+      multiVectorMaxChunks: cfg.multiVectorMaxChunks,
+    });
+  } catch { /* best-effort observability */ }
+}
+
 /** Reconcile vectors for the entries loaded this agent_end (ADR 0035 P2 方向 B).
  *  Scope-safe: prunes ONLY within the scopes present in `entries`(不删其他
  *  project 向量 = bug1) + serializes the index read-modify-write under a file
@@ -554,11 +590,13 @@ export async function reconcileEmbeddings(
     label: "embedding-index",
   });
   try {
-    return await buildCorpusEmbeddings(entries, cfg, indexPath, {
+    const result = await buildCorpusEmbeddings(entries, cfg, indexPath, {
       maxChars: opts?.maxChars,
       onProgress: opts?.onProgress,
       pruneScopes: scopes,
     });
+    writeIndexMeta(cfg, result);
+    return result;
   } finally {
     await lock.release();
   }
