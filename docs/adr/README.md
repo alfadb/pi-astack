@@ -147,7 +147,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 - **2026-05-24** ADR 0027 Coupled Stigmergic Dual-Loop v0.2 accepted（R3 完成，L1/L2 双 invariant + C6 anchor）
 - **2026-05-27** ADR 0026 决策参与 v1 accepted（R1 完成，路径 A/B 互补）
 - **2026-05-28** ADR 0026 §3.1 walk-back（放弃“决策点 vs 执行指令”二元区分，改由相关记忆检索参与任务）
-- **2026-06-15** ADR 0031 完全自治自标定遗忘 proposed（5×T0 盲议；人类设零遗忘策略 + INV-REVERSIBLE-AUTONOMY 可逆基座）
+- **2026-06-15** ADR 0031 完全自治自标定遗忘 **accepted**（5×T0 设计盲议 + 3×T0 文本盲审 R2 收敛 P0=0；人类设零可调策略 + INV-REVERSIBLE-AUTONOMY 可逆地板）
 
 实施时间线请看 [`docs/current-state.md`](../current-state.md)、`docs/audits/` 与 git history，不写进 ADR 导览。
 
