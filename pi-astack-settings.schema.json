@@ -1155,6 +1155,42 @@
           "default": false
         }
       }
+    },
+    "context7": {
+      "type": "object",
+      "description": "Context7 library-docs tools (extensions/context7/). Registers two pi tools — context7_resolve and context7_docs — over Context7's public REST API (Upstash), injecting up-to-date, version-specific library documentation + code examples so the LLM stops hallucinating stale APIs. pi ships no native MCP (docs/usage.md:303), so this is a thin HTTP wrapper, structurally a sibling of webSearch. Added to dispatch KNOWN_TOOLS (sub-agents can opt in via tools=...) but kept out of the default sub-agent allowlist.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Master enable flag. When false the extension registers no tools. Explicit runtime kill-switch — present in settings.json by policy rather than relying on the code default. Code default is true so projects consuming pi-astack without a context7 section still get the tools.",
+          "default": true
+        },
+        "baseUrl": {
+          "type": "string",
+          "description": "Context7 REST API base (no trailing slash). Override for self-hosted / enterprise endpoints; mirrors the MCP server's CONTEXT7_API_URL. Default: 'https://context7.com/api'.",
+          "default": "https://context7.com/api"
+        },
+        "apiKey": {
+          "type": "string",
+          "description": "Context7 API key, resolved with pi's config-value semantics: '!command' runs a shell command and uses its stdout (e.g. \"!jq -r --arg k context7 '.[$k] // empty' $HOME/.pi/secrets.json\"); '$VAR' / '${VAR}' interpolate env vars; anything else is a literal. Takes priority over apiKeyEnv. Context7 keys start with 'ctx7sk'. Empty/unset falls back to apiKeyEnv. Default: '' (unset).",
+          "default": ""
+        },
+        "apiKeyEnv": {
+          "type": "string",
+          "description": "Env var name to read the API key from when apiKey is unset. Default: 'CONTEXT7_API_KEY'.",
+          "default": "CONTEXT7_API_KEY"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Network timeout in ms for resolve + docs calls. Docs reranking can be slower than search. Minimum 1000. Default: 20000.",
+          "minimum": 1000,
+          "default": 20000
+        }
+      }
     }
   }
 }

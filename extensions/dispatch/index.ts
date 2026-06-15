@@ -105,6 +105,10 @@ const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
  *    pi-astack abrain extension (ADR 0027 PR-B: L2 workers grown on L1 hub
  *    need brain read access for the symbiosis loop)
  *  - vision — pi-astack vision extension (image analysis, read-only)
+ *  - context7_resolve/context7_docs — pi-astack context7 extension
+ *    (up-to-date library docs). In KNOWN_TOOLS so sub-agents CAN opt in
+ *    via explicit tools=..., but kept OUT of the default allowlist below
+ *    (same gating as memory_list — narrow, opt-in capability)
  *
  *  Deliberately NOT included (extension-loaded but kept out of sub-agents):
  *  - vault_release: secret release, main-session-only (ADR 0014 §6)
@@ -119,6 +123,7 @@ const KNOWN_TOOLS = new Set([
   "web_search", "web_fetch",
   "memory_search", "memory_get", "memory_list", "memory_neighbors", "memory_decide",
   "vision",
+  "context7_resolve", "context7_docs",
 ]);
 
 // ── ADR 0027 C6a: dispatch audit log ────────────────────────────
