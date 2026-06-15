@@ -43,6 +43,15 @@ For each assessed entry emit one object in `entry_decay_assessments[]`:
   (`window_retrieved_unused`, `decisive_streak`, `last_cited_at`) — context, not driver.
 - `falsifier`: what observation would prove this assessment wrong.
 
+## Resurrection feedback (self-calibration)
+
+The input may include a `resurrection_context` (recent reactivation rate + trend).
+If recent reactivations are **accelerating** or the rate is **high**, prior decay
+was too aggressive — entries that were demoted are being pulled back. In that case,
+lower `decay_score` across the board and raise your bar for `would_demote`. A LOW
+reactivation rate is **inconclusive**, never proof that aggressive decay is safe
+(rare-recurrence entries are by definition not in the reactivation window).
+
 ## Correlated-blindness self-check (run before emitting)
 
 For each entry where you set both an `archive` `lifecycle_proposal` AND a high

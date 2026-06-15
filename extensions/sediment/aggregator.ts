@@ -34,6 +34,7 @@ import { appendLifecycleProposals } from "./entry-lifecycle-proposals";
 import { writeDecayShadow, auditDecayAssessments } from "./decay-shadow";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { readEntryTelemetry } from "./entry-telemetry";
+import { resurrectionRateReport } from "./resurrection-rate-monitor";
 import type { ModelRegistryLike } from "./llm-extractor";
 
 type AggregatorSeverity = "info" | "warning" | "critical";
@@ -1355,9 +1356,17 @@ function buildDecayShadowContext(projectRoot: string): unknown | undefined {
     const ranked = [...rows]
       .sort((a, b) => (b.window_retrieved_unused - a.window_retrieved_unused) || (a.citation_count - b.citation_count))
       .slice(0, 50);
+    // ADR 0031 Phase 2 闭环: 喜 resurrection rate → 让 decay 判断自调保守度。
+    const rr = resurrectionRateReport(30);
     return {
       window_basis_days: ranked[0]?.window_days ?? 30,
       note: "usage signals only — disuse is WEAK context, never a would_demote driver (ADR 0031 §4)",
+      resurrection_context: {
+        recent_rate: rr.recent.resurrection_rate,
+        trend: rr.trend,
+        recent_reviewed: rr.recent.reviewed,
+        hint: "high/accelerating reactivation = prior decay too aggressive → be MORE conservative",
+      },
       entries: ranked.map((t) => ({
         slug: t.slug,
         window_retrieved_unused: t.window_retrieved_unused,
