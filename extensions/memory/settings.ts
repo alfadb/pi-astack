@@ -178,6 +178,10 @@ export interface ForgettingSettings {
   demoteMaxBatch: number;
   /** resurrection recent rate ≥ 此值(或趋势 accelerating)→ 自动 backoff(本批全 skip)。 */
   resurrectionBackoffRate: number;
+  /** ADR 0031 Phase 1B: aggregator decay 影子评估开关(默认 false)。
+   *  off = aggregator prompt 不含 decay 段、不解析 entry_decay_assessments、不写
+   *  decay-shadow.jsonl —— 逐字节零行为变化。on = 写影子 + 跑 §4.2 回归不变量审计。 */
+  decayShadow: boolean;
 }
 
 export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
@@ -185,6 +189,7 @@ export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
   demoteShadow: false,
   demoteMaxBatch: 5,
   resurrectionBackoffRate: 0.5,
+  decayShadow: false,
 };
 
 export interface MemorySettings {
@@ -321,6 +326,7 @@ function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSett
     demoteShadow: asBoolean(f.demoteShadow, DEFAULT_FORGETTING_SETTINGS.demoteShadow),
     demoteMaxBatch: Math.max(0, asNumber(f.demoteMaxBatch, DEFAULT_FORGETTING_SETTINGS.demoteMaxBatch)),
     resurrectionBackoffRate: Math.min(1, Math.max(0, asNumber(f.resurrectionBackoffRate, DEFAULT_FORGETTING_SETTINGS.resurrectionBackoffRate))),
+    decayShadow: asBoolean(f.decayShadow, DEFAULT_FORGETTING_SETTINGS.decayShadow),
   };
 }
 

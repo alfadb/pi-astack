@@ -125,6 +125,10 @@ export interface PromptNativeOutput {
     disagreements_with_prior_runs: number;
     would_propose_if_no_praise: boolean;
   };
+  /** ADR 0031 Phase 1B(decay shadow, optional)。正交于 promoted/demoted 的独立
+   *  decay 评估列表;**保留 raw**(不规范化/不强制 §4.2)供下游 audit 捕获 prompt
+   *  违规, normalize 在 writeDecayShadow 写时做。prompt 未产出(decayShadow off)时缺失。 */
+  entry_decay_assessments?: Record<string, unknown>[];
 }
 
 /**
@@ -384,12 +388,16 @@ export function parseAggregatorOutput(rawText: string): PromptNativeOutput {
     would_propose_if_no_praise: rqsc.would_propose_if_no_praise === true,
   };
 
+  // ADR 0031 Phase 1B: 容忍解析正交 decay 评估(保留 raw 供 audit;缺失 → 字段省略)。
+  const entry_decay_assessments = asArray<Record<string, unknown>>(parsed.entry_decay_assessments);
+
   return {
     promoted_advisories: promoted,
     demoted_signals: demoted,
     previous_acknowledgments: acks,
     trend_observations: trends,
     reasoning_quality_self_check,
+    ...(entry_decay_assessments.length ? { entry_decay_assessments } : {}),
   };
 }
 

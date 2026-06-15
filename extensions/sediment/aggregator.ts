@@ -31,6 +31,8 @@ import { scanPerTurnCost, type PerTurnCostSummary } from "./per-turn-cost";
 import { runAggregatorLlmPass, type PromptNativeOutput } from "./aggregator-llm";
 import { mergeEvolutionLedger, summarizeEvolutionLedger, type EvolutionLedgerSummary } from "./evolution-ledger";
 import { appendLifecycleProposals } from "./entry-lifecycle-proposals";
+import { writeDecayShadow, auditDecayAssessments } from "./decay-shadow";
+import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import type { ModelRegistryLike } from "./llm-extractor";
 
 type AggregatorSeverity = "info" | "warning" | "critical";
@@ -356,6 +358,16 @@ export interface AggregatorSummary {
    *  when no modelRegistry was supplied (v0.2-only run) or when the
    *  LLM call failed (see degraded_to_mechanical below). */
   prompt_native?: PromptNativeOutput;
+  /** ADR 0031 Phase 1B: decay 影子审计 rollup(仅 decayShadow on + LLM 产出 assessments 时)。
+   *  would_demote_usage_only_count 是 §4.2 可复现回归钩子(必须恒 0)。 */
+  decay_shadow?: {
+    assessments: number;
+    written: number;
+    would_demote_count: number;
+    would_demote_usage_only_count: number;
+    invalid_score_count: number;
+    regression_ok: boolean;
+  };
   /** Phase C.2 fallback flag: true when the v1 LLM call was attempted
    *  but failed (model resolution, auth, transport error, parse
    *  failure). The mechanical advisories[] is still valid in this
@@ -1405,6 +1417,23 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
       promoted: promptNative.promoted_advisories ?? [],
       now: options.now,
     });
+
+    // ADR 0031 Phase 1B(shadow, gated by forgetting.decayShadow, 默认 off): 把 LLM 给的
+    // 正交 entry_decay_assessments[](1B-ii prompt 产出)写独立 decay-shadow.jsonl + 跑 §4.2
+    // 回归不变量审计(would_demote_usage_only_count 必须 0)。decayShadow off(生产默认)且
+    // prompt 未产出该字段 → 完全短路 → aggregator 逐字节零行为变化。
+    if (resolveMemorySettings().forgetting?.decayShadow && Array.isArray(promptNative.entry_decay_assessments) && promptNative.entry_decay_assessments.length > 0) {
+      const decayAudit = auditDecayAssessments(promptNative.entry_decay_assessments);
+      const written = writeDecayShadow(options.projectRoot, promptNative.entry_decay_assessments, options.now);
+      enrichedSummary.decay_shadow = {
+        assessments: promptNative.entry_decay_assessments.length,
+        written,
+        would_demote_count: decayAudit.would_demote_count,
+        would_demote_usage_only_count: decayAudit.would_demote_usage_only_count,
+        invalid_score_count: decayAudit.invalid_score_count,
+        regression_ok: decayAudit.ok,
+      };
+    }
   }
 
   await writeAggregatorLedger({

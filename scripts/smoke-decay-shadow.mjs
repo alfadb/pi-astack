@@ -17,6 +17,7 @@ process.env.ABRAIN_ROOT = tmp; // sandbox: decayShadowPath → tmp/.state/sedime
 const jiti = createJiti(import.meta.url);
 const { normalizeAssessment, auditDecayAssessments, deterministicDecayBaseline, reconcileDecayShadow, writeDecayShadow, decayShadowPath } =
   await jiti.import(path.join(__dirname, "..", "extensions/sediment/decay-shadow.ts"));
+const { parseAggregatorOutput } = await jiti.import(path.join(__dirname, "..", "extensions/sediment/aggregator-llm.ts"));
 
 let fails = 0;
 const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"}: ${m}`); if (!c) fails++; };
@@ -91,6 +92,19 @@ ok(normalizeAssessment({ slug: "", decay_score: 0.5 }) === null, "无 slug → n
   ok(n === 1, "写 1 行(无 slug 的被丢)");
   const rows = fs.readFileSync(file, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
   ok(rows.length === 1 && rows[0].slug === "a" && rows[0].status === "shadow", "落盘行正确 + status=shadow");
+}
+
+// ── parseAggregatorOutput: entry_decay_assessments 容忍解析 + raw 保留(1B-i 接线)──
+{
+  const withDecay = parseAggregatorOutput(JSON.stringify({
+    promoted_advisories: [], demoted_signals: [],
+    entry_decay_assessments: [{ slug: "a", decay_score: 0.8, would_demote: true, demote_evidence_type: "superseded_by" }],
+  }));
+  ok(Array.isArray(withDecay.entry_decay_assessments) && withDecay.entry_decay_assessments.length === 1, "parser: entry_decay_assessments 解析");
+  ok(withDecay.entry_decay_assessments[0].would_demote === true && withDecay.entry_decay_assessments[0].demote_evidence_type === "superseded_by", "parser: raw 保留(供 audit 捕获违规)");
+  const without = parseAggregatorOutput(JSON.stringify({ promoted_advisories: [], demoted_signals: [] }));
+  ok(without.entry_decay_assessments === undefined, "parser: 无 decay → 字段缺失(零行为变化)");
+  ok(Array.isArray(without.promoted_advisories), "parser: 现有字段不受影响");
 }
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
