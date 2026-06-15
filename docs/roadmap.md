@@ -83,6 +83,25 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 | `conf≥8` 非指令 durable 过渡 fallback（correction-pipeline isTier1Directive，仅 no-target） | 审计窗口内 `tier1_direct_write` 中 `is_directive!==true && confidence>=8` 不再产生被用户纠正的 accepted corrections / recall misses → 移除 fallback 回 ADR 原文谓词 | `tier1_direct_write` audit 的 `is_directive` / `confidence` / correction outcome 维度（O5 sunset） |
 | multi-view skip-cache 7d TTL | P1.5 Pass-1 schema 升级后 not-synthesizable 计数持续为 0 一个季度 → 删 cache | watchdog `pass1_op_not_synthesizable_count` |
 
+## ADR 0031 — 自治自标定遗忘实施(埋点优先,dark-launch)
+
+设计见 [ADR 0031](./adr/0031-autonomous-self-calibrating-forgetting.md)。原则:**先补标定数据(Lane G 当年缺的那块),再上可逆 demote;auto-destroy 永远 supersession-gated + 必留大脑可复活 tombstone;disuse 永不触发物理删除**。分阶段,全程 dark-launch flag 守卫、默认 off:
+
+**Phase 0 — instrumentation(零行为变化,只埋点观测 N 周)**。埋点写 `.state` 侧指标,不污染 entry frontmatter 的语义内容:
+
+- `last_retrieval_hit_at` / `retrieval_hit_count`:该 entry 进 stage0 候选 / 被 `topN` 命中。
+- `last_cited_at` / `cited_count`:被 agent **最终采用**(进 path-A inject 块 / decide brief / 实际进 prompt)——「被用」≠「被检索」(承接 roadmap `last_cited_at`)。
+- `superseded_by` / `contradicted_by` 事件:真值变化信号,安全降级的**主**驱动。
+- demote / resurrection 事件流(active↔archived,带触发信号快照)。
+
+目的:积累 Lane G 当年缺的衰减标定数据;此阶段**不做任何 demote/delete**。
+
+**Phase 1 — 可逆基座 + 影子标记(仍不真动)**:tombstone / 大脑可复活影子(`slug`/`kind`/`hash`/`successor`/`digest`/`reactivation_hint`)使「物理回收」也对大脑可逆;decay-scorer 输出 `would_demote` / `would_delete` 影子标记 + 衰减分,**只标不动**;影子回归用最近 N 个真实 query / decide brief 跑 (corpus) vs (corpus − would-demote 集),量 brief 质量是否下降。
+
+**Phase 2 — resurrection 稳态自标定(观测闭环)**:resurrection rate 做反馈(复活频繁→自动调慢、噪声/近重涨→调快);kind 权重 / 窗口由大脑自学(prompt-native,非硬编码人类策略);自审闸 = resurrection rate 超阈值自动回退衰减系数。
+
+**Phase 3 — 开启自治 demote(可逆),destroy 仍 gated**:`active→archived` 自治 demote 上线(可逆,误判靠 resurrection 自愈);auto `git rm` 仅 **supersession-gated**(有 active 稳定 successor)+ 必留 tombstone;结构护栏(非策略)= 可逆基座 + tombstone + resurrection 自回退 + 每批 demote 速率上限(防单次模型偏差级联)。数据不足前不开 Phase 3。
+
 ## Deferred exploration
 
 | Item | Current stance |

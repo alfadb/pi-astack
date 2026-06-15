@@ -73,7 +73,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | 跨会话趋势观察 (aggregator) | [ADR 0024 §5.3](./0024-second-brain-from-natural-conversation.md#53-跨会话趋势观察) | [ADR 0025 §4.3](./0025-sediment-meta-curator-subsystem.md#43-跨会话趋势观察aggregator) |
 | 双 AI 互审 (multi-view) | [ADR 0024 §5.4](./0024-second-brain-from-natural-conversation.md#54-双-ai-互相审查multi-view-verification) | [ADR 0025 §4.4](./0025-sediment-meta-curator-subsystem.md#44-multi-view-verification) |
 | Classifier prompt 自身演进 | [ADR 0024 §5.5](./0024-second-brain-from-natural-conversation.md#55-classifier-prompt-自身的演进) | [ADR 0025 §4.5](./0025-sediment-meta-curator-subsystem.md#45-classifier-prompt-自身演进) |
-| 自治归档 + 回滚窗口 | [ADR 0024 §5.6](./0024-second-brain-from-natural-conversation.md#56-自治归档--回滚窗口) | [ADR 0025 §4.6](./0025-sediment-meta-curator-subsystem.md#46-静默归档--回滚窗口) |
+| 自治归档 + 回滚窗口 | [ADR 0024 §5.6](./0024-second-brain-from-natural-conversation.md#56-自治归档--回滚窗口) | [ADR 0025 §4.6](./0025-sediment-meta-curator-subsystem.md#46-静默归档--回滚窗口) → 演进 [ADR 0031](./0031-autonomous-self-calibrating-forgetting.md)(完全自治自标定遗忘 + 可逆基座) |
 
 ---
 
@@ -147,6 +147,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 - **2026-05-24** ADR 0027 Coupled Stigmergic Dual-Loop v0.2 accepted（R3 完成，L1/L2 双 invariant + C6 anchor）
 - **2026-05-27** ADR 0026 决策参与 v1 accepted（R1 完成，路径 A/B 互补）
 - **2026-05-28** ADR 0026 §3.1 walk-back（放弃“决策点 vs 执行指令”二元区分，改由相关记忆检索参与任务）
+- **2026-06-15** ADR 0031 完全自治自标定遗忘 proposed（5×T0 盲议；人类设零遗忘策略 + INV-REVERSIBLE-AUTONOMY 可逆基座）
 
 实施时间线请看 [`docs/current-state.md`](../current-state.md)、`docs/audits/` 与 git history，不写进 ADR 导览。
 
