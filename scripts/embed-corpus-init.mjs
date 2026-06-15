@@ -53,6 +53,7 @@ const extDir = path.join(repoRoot, "extensions");
 const parser = require(path.join(extDir, "memory", "parser.ts"));
 const emb = require(path.join(extDir, "memory", "embedding.ts"));
 const settingsMod = require(path.join(extDir, "memory", "settings.ts"));
+const runtime = require(path.join(extDir, "_shared", "runtime.ts"));
 
 const ABRAIN = process.env.ABRAIN_ROOT
   ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
@@ -110,11 +111,23 @@ console.log(`multiVector=${multiVector} maxChunks=${multiVectorMaxChunks}`);
 // ADR 0036 P4 条件2(原子 swap): OUT_PATH 可写 shadow 路径(不碰生产索引), 建好 validate 后原子 mv。
 const idxPath = process.env.OUT_PATH || emb.vectorIndexPath();
 console.log(`index → ${idxPath}`);
+// 并发安全: 写生产索引时取与在线 session reconcile 同一把全局锁(indexLockPath),
+// 避免与 search-time / sediment 触发的 reconcile 互相覆盖(last-writer-wins 丢更新)
+// 或在全量 prune 时删掉并发 session 刚写入的向量。OUT_PATH shadow 路径不碰生产, 免锁。
+// 持锁期间 init 进程持续存活, 受 acquireFileLock 的 pid-liveness 保护不会被误抓(staleMs)。
+const lock = process.env.OUT_PATH
+  ? null
+  : await runtime.acquireFileLock(emb.indexLockPath(), { timeoutMs: 60_000, staleMs: 60_000, retryMs: 200, label: "embedding-index" });
 const t0 = Date.now();
-const r = await emb.buildCorpusEmbeddings(active, cfg, idxPath, {
-  maxChars: 3500,
-  onProgress: (done, todo) => { if (done % 200 < 10 || done === todo) console.log(`  embedded ${done}/${todo} (${((Date.now() - t0) / 1000).toFixed(0)}s)`); },
-});
+let r;
+try {
+  r = await emb.buildCorpusEmbeddings(active, cfg, idxPath, {
+    maxChars: 3500,
+    onProgress: (done, todo) => { if (done % 200 < 10 || done === todo) console.log(`  embedded ${done}/${todo} (${((Date.now() - t0) / 1000).toFixed(0)}s)`); },
+  });
+} finally {
+  if (lock) await lock.release();
+}
 console.log(`\ndone in ${((Date.now() - t0) / 1000).toFixed(0)}s:`, JSON.stringify(r));
 const idxData = JSON.parse(fs.readFileSync(idxPath, "utf8"));
 const byScope = {};

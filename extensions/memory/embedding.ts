@@ -267,13 +267,16 @@ export class VectorIndex {
 
   /** Refresh scope tag without touching the vector. scope = position metadata
    *  (project dir), independent of content-hash — must update on project
-   *  rename/move even when content unchanged. No-op if slug not indexed. */
-  setScope(slug: string, scope: string): void {
+   *  rename/move even when content unchanged. No-op if slug not indexed.
+   *  Returns true iff the tag actually changed (drives no-op save skipping). */
+  setScope(slug: string, scope: string): boolean {
     const rec = this.data.entries[slug];
     if (rec && rec.scope !== scope) {
       rec.scope = scope;
       this.normCache = null;
+      return true;
     }
+    return false;
   }
 
   /** Coverage of an active-slug set: indexed vs missing. Lets the search
@@ -541,8 +544,13 @@ export async function buildCorpusEmbeddings(
   // refresh scope tags for ALL active (incl. content-hash-skipped): scope is
   // position metadata (project dir), independent of content-hash — must reflect
   // current location even when content unchanged (ADR 0035 §4).
-  for (const e of active) idx.setScope(e.slug, scopeTagOf(e));
-  idx.save();
+  let scopeChanged = false;
+  for (const e of active) scopeChanged = idx.setScope(e.slug, scopeTagOf(e)) || scopeChanged;
+  // no-op reconcile 跳过全量回写: embed=0 且无 scope 变更时, 内存索引与磁盘已一致
+  // (prune>0 已在前面单独原子落盘)。否则每次 reconcile 都无条件重写整份(已达 ~93MB)
+  // 索引文件 —— 并行项目被全局锁串行后, 这会消除背靠背 no-op reconcile 的重复全量回写。
+  // load() 的 v1→v2 migrate-on-read 是幂等内存操作, 不落盘也不丢数据(下次 load 重做)。
+  if (embedded > 0 || scopeChanged) idx.save();
 
   return { total: active.length, embedded, skipped: active.length - todo.length, pruned };
 }
