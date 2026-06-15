@@ -169,10 +169,22 @@ export interface ForgettingSettings {
    *  零行为变化、纯观测; off = 埋点完全短路不写文件。
    *  作为 runtime kill-switch 显式落 pi-astack-settings.json(code 默认 false 为安全基线)。 */
   instrumentation: boolean;
+  /** ADR 0031 Phase 3 skeleton: dry-run/shadow demote executor 开关(默认 false)。
+   *  on = 跑 dry-run(读 pending archive proposal + hysteresis + resurrection → 算 demote
+   *  plan + 写 shadow audit),**绝不 mutate**(skeleton 无 mutation 路径;真实 demote
+   *  待 data-gate + 跨厂商去相关 graduation-gate)。 */
+  demoteShadow: boolean;
+  /** 每批 dry-run demote 上限(级联防护)。 */
+  demoteMaxBatch: number;
+  /** resurrection recent rate ≥ 此值(或趋势 accelerating)→ 自动 backoff(本批全 skip)。 */
+  resurrectionBackoffRate: number;
 }
 
 export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
   instrumentation: false,
+  demoteShadow: false,
+  demoteMaxBatch: 5,
+  resurrectionBackoffRate: 0.5,
 };
 
 export interface MemorySettings {
@@ -306,6 +318,9 @@ function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSett
   const f = (cfg.forgetting as Record<string, unknown>) ?? {};
   return {
     instrumentation: asBoolean(f.instrumentation, DEFAULT_FORGETTING_SETTINGS.instrumentation),
+    demoteShadow: asBoolean(f.demoteShadow, DEFAULT_FORGETTING_SETTINGS.demoteShadow),
+    demoteMaxBatch: Math.max(0, asNumber(f.demoteMaxBatch, DEFAULT_FORGETTING_SETTINGS.demoteMaxBatch)),
+    resurrectionBackoffRate: Math.min(1, Math.max(0, asNumber(f.resurrectionBackoffRate, DEFAULT_FORGETTING_SETTINGS.resurrectionBackoffRate))),
   };
 }
 
