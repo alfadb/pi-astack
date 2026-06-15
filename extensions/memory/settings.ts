@@ -182,6 +182,12 @@ export interface ForgettingSettings {
    *  off = aggregator prompt 不含 decay 段、不解析 entry_decay_assessments、不写
    *  decay-shadow.jsonl —— 逐字节零行为变化。on = 写影子 + 跑 §4.2 回归不变量审计。 */
   decayShadow: boolean;
+  /** ADR 0031 Phase 3 real demote 总开关(默认 false; runtime kill-switch)。
+   *  off(且 demoteShadow on)= executor 只 dry-run, 零 mutation。on = 真实 active→archived
+   *  (经 §4.2 证据门控 proposal + CAS + resurrection backoff + 构建时反失控断路器 + hysteresis;
+   *  archived 全文留盘可复活, 无 git rm)。反失控上限(每日累计/语料下限)是构建时焊死的
+   *  结构地板, 非 settings 可调(INV-REVERSIBLE-AUTONOMY:零可调遗忘策略)。 */
+  autoDemote: boolean;
 }
 
 export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
@@ -190,6 +196,7 @@ export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
   demoteMaxBatch: 5,
   resurrectionBackoffRate: 0.5,
   decayShadow: false,
+  autoDemote: false,
 };
 
 export interface MemorySettings {
@@ -327,6 +334,7 @@ function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSett
     demoteMaxBatch: Math.max(0, asNumber(f.demoteMaxBatch, DEFAULT_FORGETTING_SETTINGS.demoteMaxBatch)),
     resurrectionBackoffRate: Math.min(1, Math.max(0, asNumber(f.resurrectionBackoffRate, DEFAULT_FORGETTING_SETTINGS.resurrectionBackoffRate))),
     decayShadow: asBoolean(f.decayShadow, DEFAULT_FORGETTING_SETTINGS.decayShadow),
+    autoDemote: asBoolean(f.autoDemote, DEFAULT_FORGETTING_SETTINGS.autoDemote),
   };
 }
 

@@ -36,6 +36,7 @@
     "smoke:resurrection-rate-monitor": "node scripts/smoke-resurrection-rate-monitor.mjs",
     "smoke:forgetting-executor": "node scripts/smoke-forgetting-executor.mjs",
     "smoke:forgetting-mutation-primitives": "node scripts/smoke-forgetting-mutation-primitives.mjs",
+    "smoke:forgetting-executor-real": "node scripts/smoke-forgetting-executor-real.mjs",
     "smoke:decay-shadow": "node scripts/smoke-decay-shadow.mjs",
     "oracle:goldset": "node scripts/oracle-goldset.mjs",
     "oracle:dedup-neardup": "node scripts/oracle-dedup-neardup.mjs",
