@@ -7,9 +7,11 @@
  * Markdown + git remain the source of truth.
  *
  * LLM-facing tools (memory_search/get/list/neighbors) are strictly read-only.
- * `/memory rebuild --graph|--index` slash commands write derived indexes;
- * `/memory migrate --go` performs one-shot B4 migration. Neither path writes
- * canonical knowledge entries — that is sediment's exclusive role.
+ * `/memory migrate --go` performs one-shot B4 migration; it does not write
+ * canonical knowledge entries — that is sediment's exclusive role. (The
+ * `/memory rebuild` slash was retired 2026-06-15 as an unused brain-management
+ * surface; derived graph/index are rebuilt internally by migrate/ingest and by
+ * search-time auto-reconcile, not by a user command.)
  */
 
 import * as path from "node:path";
@@ -31,8 +33,7 @@ import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "
 import { formatMigrationGoSummary, runMigrationGo } from "./migrate-go";
 import * as os from "node:os";
 import { formatDoctorLiteReport, runDoctorLite } from "./doctor";
-import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuildGraphIndex } from "./graph";
-import { formatMarkdownIndexRebuildReport, rebuildMarkdownIndex } from "./index-file";
+import { checkBacklinks, formatBacklinkReport } from "./graph";
 import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
 import { resolveActiveProject } from "../_shared/runtime";
 
@@ -122,7 +123,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("memory", {
-    description: "Memory maintenance commands: /memory lint [path], /memory migrate [--dry-run|--go] [--report] [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path], /memory doctor-lite [path]. B4.5: run /abrain bind first; --project is rejected.",
+    description: "Memory maintenance commands: /memory lint [path], /memory migrate [--dry-run|--go] [--report] [path], /memory check-backlinks [path], /memory doctor-lite [path]. B4.5: run /abrain bind first; --project is rejected.",
     getArgumentCompletions(prefix: string) {
       const items = [
         "lint", "lint .pensieve",
@@ -130,9 +131,6 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         "migrate --go", "migrate --go .pensieve",
         "doctor-lite", "doctor-lite .pensieve",
         "check-backlinks", "check-backlinks .pensieve",
-        "rebuild --graph", "rebuild --graph .pensieve",
-        "rebuild --index", "rebuild --index .pensieve",
-        "rebuild --graph --index", "rebuild --graph --index .pensieve",
       ];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
@@ -281,32 +279,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         return;
       }
 
-      if (subcommand === "rebuild") {
-        const graphFlag = rest.includes("--graph");
-        const indexFlag = rest.includes("--index");
-        if (!graphFlag && !indexFlag) {
-          ctx.ui.notify("Usage: /memory rebuild --graph|--index [path]", "warning");
-          return;
-        }
-        const targetParts = rest.filter((part) => part !== "--graph" && part !== "--index");
-        const targetArg = targetParts.join(" ").trim();
-        const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
-        const messages: string[] = [];
-        let severity: "info" | "warning" = "info";
-        if (graphFlag) {
-          const report = await rebuildGraphIndex(target, settings, undefined, cwd);
-          messages.push(formatGraphRebuildReport(report));
-          if (report.deadLinkCount > 0) severity = "warning";
-        }
-        if (indexFlag) {
-          const report = await rebuildMarkdownIndex(target, settings, undefined, cwd);
-          messages.push(formatMarkdownIndexRebuildReport(report));
-        }
-        ctx.ui.notify(messages.join("\n\n"), severity);
-        return;
-      }
-
-      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate [--dry-run|--go] [--report] [path] OR /memory doctor-lite [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]. Run /abrain bind --project=<id> before migrate.", "warning");
+      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate [--dry-run|--go] [--report] [path] OR /memory doctor-lite [path] OR /memory check-backlinks [path]. Run /abrain bind --project=<id> before migrate.", "warning");
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         ctx.ui.notify(`/memory ${subcommand} failed: ${message}`, "error");

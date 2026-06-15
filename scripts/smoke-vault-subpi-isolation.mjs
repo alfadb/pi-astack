@@ -101,6 +101,10 @@ const guarded = [
    "no rule footer/notify in sub-agent UI"],
   ["extensions/abrain/rule-injector/index.ts", "before_agent_start",
    "must NOT inject project rules into sub-agent's dispatch-crafted system prompt"],
+  ["extensions/abrain/index.ts", "tool_call",
+   "sub-agent bash must NOT get parent vault $VAULT_/$PVAULT_/$GVAULT_ injection (v3 in-process; PI_ABRAIN_DISABLED never flips, ADR 0014 \u00a76 F3 fix)"],
+  ["extensions/abrain/index.ts", "tool_result",
+   "sub-agent bash output must NOT reach abrain vault authorization / redaction"],
 ];
 
 for (const [relPath, event, why] of guarded) {
@@ -110,13 +114,15 @@ for (const [relPath, event, why] of guarded) {
   // return appears.
   //
   // Regex notes:
-  //   - Case-insensitive (`i` flag) so we match both `pi.on(` and
-  //     `maybePi.on(` (rule-injector dynamically type-checks via maybePi).
+  //   - Object alternation matches `pi.on(`, `maybePi.on(` (rule-injector
+  //     dynamically type-checks via maybePi) and `eventRegistry.on(` (abrain
+  //     registers vault bash handlers on the resolved eventRegistry).
+  //   - Case-insensitive (`i` flag) is retained for the legacy maybePi path.
   //   - `{0,1500}` window covers sediment's huge multi-line ctx type
   //     declarations (event + ctx with nested method signatures often
   //     exceeds 700 chars between `pi.on(` and `) => {`).
   const handlerRe = new RegExp(
-    `pi\\.on\\s*\\(\\s*["']${event}["'][\\s\\S]{0,1500}?\\)\\s*=>\\s*\\{`,
+    `(?:pi|maybePi|eventRegistry)\\.on\\s*\\(\\s*["']${event}["'][\\s\\S]{0,1500}?\\)\\s*=>\\s*\\{`,
     "gi",
   );
   let m;

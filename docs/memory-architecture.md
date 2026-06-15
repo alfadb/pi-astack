@@ -23,7 +23,7 @@ status: active
 4. **sediment 单写**：create/update/merge/archive/supersede/delete/skip 由 sidecar writer 落盘。
 5. **`memory_search` 使用 ADR 0015 LLM-driven retrieval**；失败 hard error，不降级到 grep/BM25。
 6. **entry 格式**：frontmatter v1 + compiled truth + `## Timeline`。
-7. **graph/index 是派生物**，可以通过 `/memory rebuild --graph` / `/memory rebuild --index` 重建。
+7. **graph/index 是派生物**，由 migrate/ingest + 检索时 auto-reconcile 内部重建（`/memory rebuild` 用户命令已于 2026-06-15 退役）。
 
 ## 不再属于 current spec 的旧内容
 

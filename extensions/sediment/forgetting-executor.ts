@@ -1,4 +1,7 @@
-// ADR 0031 Phase 3(skeleton)— gated forgetting executor(dry-run / read-only)。
+// ADR 0031 Phase 3 — gated forgetting executor(dry-run + real demote 两模式)。
+// 注:此件含**真实** active→archived 编排路径(非 skeleton/非只读)——运行模式
+// 由 settings flag 决定(见下两模式说明);真实 demote 仅在 autoDemote && autoLlmWriteEnabled
+// && orchestrator 注入 archiveEntry 时发生,否则退化 dry-run。
 //
 // 消费**既有** pending `op=archive` lifecycle proposal(`entry-lifecycle-proposals.ts`,
 // 已是 §4.2 独立证据门控的 affirmative 通道 —— disuse-only 永不进入,故 executor

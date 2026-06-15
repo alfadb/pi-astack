@@ -31,6 +31,7 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 markdown+git 
 |---|---|---|
 | `abrain/` | `vault_release`、`prompt_user`；`/abrain`、`/vault`、`/secret` | ✓ |
 | `compaction-tuner/` | `/compaction-tuner` | ✓ |
+| `context7/` | `context7_resolve`、`context7_docs` | ✓ |
 | `dispatch/` | `dispatch_agent`、`dispatch_parallel` | ✓ |
 | `edit-strip-empty/` | `edit` wrapper | ✓ |
 | `empty-visible-output-retry/` | `message_end` 空可见输出重试 hook | ✓ |

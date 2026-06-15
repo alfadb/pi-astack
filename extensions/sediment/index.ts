@@ -1559,7 +1559,9 @@ export default function (pi: ExtensionAPI) {
   verifyPiInternals({ pi });
 
   registerSedimentCommand(pi);
-  registerAboutMeCommand(pi);
+  // /about-me slash retired 2026-06-15 (unused brain-management surface,
+  // INV-TELL-NOT-ASK). The natural path stays: the LLM emits MEMORY-ABOUT-ME
+  // fences and sediment writes them at agent_end via parseExplicitAboutMeBlocks.
 
   // ── System-prompt injection: main-session read-only contract ──
   //
@@ -5185,181 +5187,10 @@ export function buildAboutMeFence(opts: {
   ].join("\n");
 }
 
-function registerAboutMeCommand(pi: ExtensionAPI): void {
-  const maybePi = pi as unknown as {
-    registerCommand?: (
-      name: string,
-      options: {
-        description?: string;
-        getArgumentCompletions?: (
-          prefix: string,
-        ) => Array<{ value: string; label: string }> | null;
-        handler: (
-          args: string,
-          ctx: {
-            cwd?: string;
-            ui: {
-              notify(message: string, type?: string): void;
-              select?: (
-                title: string,
-                items: string[],
-                opts?: { signal?: AbortSignal },
-              ) => Promise<string | undefined>;
-              input?: (
-                prompt: string,
-                opts?: { signal?: AbortSignal },
-              ) => Promise<string | undefined>;
-            };
-            isIdle?(): boolean;
-            waitForIdle?(): Promise<void>;
-            signal?: AbortSignal;
-          },
-        ) => Promise<void> | void;
-      },
-    ) => void;
-    sendUserMessage?: (
-      content: string,
-      options?: { deliverAs?: "steer" | "followUp" },
-    ) => void | Promise<void>;
-  };
-  if (typeof maybePi.registerCommand !== "function") return;
-
-  const VALID_REGIONS = ["identity", "skills", "habits"] as const;
-  const FLAGS = [
-    "--region=identity",
-    "--region=skills",
-    "--region=habits",
-    "--title=",
-  ];
-
-  maybePi.registerCommand("about-me", {
-    description:
-      "Advanced transition/diagnostic entry: /about-me [--region=identity|skills|habits] [--title=\"...\"] <body>. Injects a MEMORY-ABOUT-ME fence into the transcript; sediment writes to ~/.abrain/<region>/ on the next agent_end (ADR 0021 G2). Prefer natural conversation + background sediment for normal use. Empty body opens interactive prompts.",
-    getArgumentCompletions(prefix: string) {
-      const filtered = FLAGS.filter((item) => item.startsWith(prefix));
-      return filtered.length
-        ? filtered.map((value) => ({ value, label: value }))
-        : null;
-    },
-    async handler(args, ctx) {
-      const parsed = parseAboutMeArgs(args || "");
-      let region = parsed.region?.toLowerCase();
-      let title = parsed.title;
-      let body = parsed.body;
-
-      // Empty body + no region → interactive prompt for both.
-      // Empty body + region supplied (e.g. `/about-me --region=skills`)
-      // → only prompt for body.
-      if (!body) {
-        if (!region) {
-          if (typeof ctx.ui.select !== "function") {
-            ctx.ui.notify(
-              "/about-me requires an interactive UI. Provide body inline: /about-me [--region=identity|skills|habits] <text>",
-              "warning",
-            );
-            return;
-          }
-          const picked = await ctx.ui.select(
-            "Which about-me region?",
-            VALID_REGIONS as unknown as string[],
-            { signal: ctx.signal },
-          );
-          if (!picked) {
-            ctx.ui.notify("/about-me cancelled", "info");
-            return;
-          }
-          region = picked.toLowerCase();
-        }
-        if (typeof ctx.ui.input !== "function") {
-          ctx.ui.notify(
-            "/about-me requires an interactive UI. Provide body inline: /about-me [--region=...] <text>",
-            "warning",
-          );
-          return;
-        }
-        const text = await ctx.ui.input(
-          "Your about-me statement (≥ 20 chars):",
-          { signal: ctx.signal },
-        );
-        if (!text || !text.trim()) {
-          ctx.ui.notify("/about-me cancelled", "info");
-          return;
-        }
-        body = text.trim();
-      }
-
-      // Default region when body inline + no --region flag.
-      if (!region) region = "identity";
-      if (!(VALID_REGIONS as readonly string[]).includes(region)) {
-        ctx.ui.notify(
-          `/about-me --region must be one of ${VALID_REGIONS.join(", ")}; got '${region}'`,
-          "warning",
-        );
-        return;
-      }
-
-      // Writer requires body ≥ 20 chars. Fail fast in the slash so the
-      // user gets a clear error rather than waiting for sediment to
-      // reject the fence with `validation_error` next turn.
-      if (body.length < 20) {
-        ctx.ui.notify(
-          `/about-me body must be at least 20 characters (got ${body.length}). Tip: full sentences make better memory entries.`,
-          "warning",
-        );
-        return;
-      }
-      // Cap the fence body to keep one /about-me from dominating the
-      // run window. Writer accepts much larger bodies, but a 4KB fence
-      // is plenty for an identity / skills / habits declaration; longer
-      // entries belong in markdown edits via memory tools.
-      const MAX_BODY = 4000;
-      if (body.length > MAX_BODY) {
-        ctx.ui.notify(
-          `/about-me body must be ≤ ${MAX_BODY} characters (got ${body.length}). Split into multiple /about-me declarations or edit the markdown directly.`,
-          "warning",
-        );
-        return;
-      }
-
-      title = (title && title.trim()) || deriveAboutMeTitle(body);
-      const fence = buildAboutMeFence({ title, region, body });
-
-      // pi.sendUserMessage triggers an LLM turn whose agent_end will
-      // pick the fence up via parseExplicitAboutMeBlocks. ADR 0021 D4 +
-      // inv #3: slash must NOT call the writer directly.
-      if (typeof maybePi.sendUserMessage !== "function") {
-        ctx.ui.notify(
-          "/about-me failed: pi.sendUserMessage is not available in this pi runtime. Paste the MEMORY-ABOUT-ME fence into your next message manually.",
-          "error",
-        );
-        return;
-      }
-
-      // waitForIdle is the recommended safety hook before sendUserMessage
-      // in non-streaming mode (pi extensions.md). Best-effort: older pi
-      // versions may not expose it.
-      try {
-        const maybeWait = (ctx as { waitForIdle?: () => Promise<void> })
-          .waitForIdle;
-        if (typeof maybeWait === "function") {
-          await maybeWait.call(ctx);
-        }
-      } catch {
-        /* best-effort */
-      }
-
-      try {
-        await maybePi.sendUserMessage(fence);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        ctx.ui.notify(`/about-me sendUserMessage failed: ${message}`, "error");
-        return;
-      }
-
-      ctx.ui.notify(
-        `/about-me [${region}] submitted (title="${title.slice(0, 60)}${title.length > 60 ? "…" : ""}"). Sediment will write to ~/.abrain/${region}/ after this turn finishes.`,
-        "info",
-      );
-    },
-  });
-}
+// /about-me slash command retired 2026-06-15 (INV-TELL-NOT-ASK: unused
+// user-facing brain-management surface with interactive ui.select/ui.input
+// prompts). The natural learning path is unchanged: the LLM emits
+// MEMORY-ABOUT-ME fences and sediment writes them at agent_end via
+// parseExplicitAboutMeBlocks. The fence helpers (parseAboutMeArgs /
+// deriveAboutMeTitle / buildAboutMeFence) remain exported as the canonical
+// fence-format spec + parser-roundtrip smoke fixtures.

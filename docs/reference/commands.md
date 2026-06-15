@@ -44,8 +44,6 @@ These tools may be visible to the assistant depending on pi settings and sub-pi 
 /memory lint [target]
 /memory doctor-lite [target]
 /memory check-backlinks [target]
-/memory rebuild --index
-/memory rebuild --graph
 ```
 
 Notes:
@@ -133,7 +131,6 @@ These commands exist for migration, diagnostics, or compatibility. They are not 
 
 | Command | Status |
 |---|---|
-| `/about-me` | Implemented Lane G transition/diagnostic entry. It injects a structured about-me block and lets sediment write after `agent_end`; do not promote it as the ordinary way to teach the brain. |
 | Explicit memory fences | Lane A/G compatibility path for migration/debugging only. Do not promote as normal workflow; natural conversation plus background sediment is the default path. |
 
 ## 6. Pending / not current commands
@@ -145,7 +142,7 @@ The following names may appear in archived docs but are not current command surf
 | `pi memory migrate ...` | Use slash `/memory migrate ...` in pi session. |
 | `/memory migrate --project=<id>` | Deprecated/rejected; use `/abrain bind --project=<id>` first. |
 | `pi project switch <id>` | Not a current pi-astack command. |
-| `pi brain rebuild-index` | Use `/memory rebuild --index`. |
+| `pi brain rebuild-index` / `/memory rebuild` | Not a command; the `/memory rebuild` slash was retired 2026-06-15. graph/index are rebuilt internally by migrate/ingest + search-time auto-reconcile. |
 | `pi brain review-staging` | Roadmap idea, not implemented. |
 | `/vault import-env` / `/vault migrate-backend` | Vault P0d/P1 roadmap, not implemented. |
 | `/sediment migrate-one` / `/sediment migration-backups` | Removed with per-file migration substrate. |

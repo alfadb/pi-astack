@@ -48,8 +48,6 @@ identity/  skills/  habits/  workflows/  projects/  knowledge/  vault/
 /abrain status
 /memory migrate --dry-run
 /memory migrate --go
-/memory rebuild --index
-/memory rebuild --graph
 ```
 
 不要使用旧文档中的 raw bash migration 作为推荐路径；它只适合灾备/手工修复。标准迁移入口是 `/memory migrate`。

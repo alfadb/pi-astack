@@ -76,6 +76,7 @@ import {
   type ResolveActiveProjectResult,
 } from "../_shared/runtime";
 import { gitSingleFlight } from "../_shared/git-singleflight";
+import { isSubAgentSession } from "../_shared/pi-internals";
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
 // ADR 0022 P2: prompt_user LLM tool surface. Types only at top level;
 // runtime symbols are `require()`d inside `activate()` so any consumer
@@ -1355,6 +1356,15 @@ export default function activate(pi: ExtensionAPI): void {
     });
 
     eventRegistry.on("tool_call", async (event, ctx) => {
+      // Sub-pi isolation (ADR 0014 §6 layer (b), v3 in-process): a
+      // dispatch-spawned sub-agent must have ZERO vault reach. v2 enforced
+      // this via PI_ABRAIN_DISABLED=1 in the spawn env; v3 runs in-process so
+      // that env never flips. Self-gate here (same pattern as sediment /
+      // model-fallback / rule-injector) so the parent's $VAULT_/$PVAULT_/
+      // $GVAULT_ secrets are never injected into a sub-agent's bash. Behaviour
+      // matches the old "abrain not registered" path: $VAULT_* stays an unset
+      // shell var (expands empty). Guarded by smoke:vault-subpi-isolation.
+      if (isSubAgentSession(ctx as unknown as { sessionManager?: unknown })) return;
       // ── Vault bash injection guard ───────────────────────────
       // Outer try/catch: if prepareBootVaultBashCommand throws for any
       // unexpected reason (malformed command, env-file write failure,
@@ -1402,9 +1412,12 @@ export default function activate(pi: ExtensionAPI): void {
     // module-level `processVaultBashToolResult` so smoke can drive it
     // end-to-end via __handleVaultBashToolResultForTests. Runtime
     // behavior is byte-identical — listener now is a thin delegator.
-    eventRegistry.on("tool_result", async (event, ctx) =>
-      processVaultBashToolResult(event as any, ctx as any),
-    );
+    eventRegistry.on("tool_result", async (event, ctx) => {
+      // Sub-pi isolation: mirror the tool_call guard so a sub-agent's bash
+      // output never reaches abrain's vault authorization / redaction path.
+      if (isSubAgentSession(ctx as unknown as { sessionManager?: unknown })) return;
+      return processVaultBashToolResult(event as any, ctx as any);
+    });
 
     // P2 fix (R6 audit): session_shutdown cleanup for orphaned vault bash runs.
     // vaultBashRuns and env files are normally cleaned in tool_result, but

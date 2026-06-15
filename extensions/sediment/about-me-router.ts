@@ -45,8 +45,20 @@ export class RouterError extends Error {
   }
 }
 
-/** Default staging threshold per ADR 0014 §3.5 v1.2 (configurable later
- * via ~/.abrain/.state/facade-config.yaml in G4). */
+/** Routing-confidence floor for the (future) G3 LLM region classifier path.
+ *
+ * AI-Native flip/removal condition (REQ-003 / direction.md §2 — transition-state
+ * mechanical gate must declare its removal condition):
+ *   - This floor applies ONLY to the G3 path where an LLM classifier emits
+ *     region + routing_confidence for fences that OMIT an explicit region.
+ *   - In G1/G2 the fence carries a user-attested `region:` header → confidence
+ *     defaults to 1.0, so this floor never fires on the current (shipped) path.
+ *   - REMOVE this constant (route region selection entirely through the
+ *     classifier's own prompt-level self-assessment) once the G3 classifier
+ *     ships AND its downstream-grounded region accuracy is validated. Until
+ *     then it stays as the documented transition guard, NOT a permanent gate.
+ * Default per ADR 0014 §3.5 v1.2 (was "configurable later via
+ * ~/.abrain/.state/facade-config.yaml in G4"). */
 export const ROUTING_CONFIDENCE_THRESHOLD = 0.6;
 
 /** Lane allowlist per ADR 0014 §3.5 Stage 1.  Hard-coded to defeat any
