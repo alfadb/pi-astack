@@ -64,6 +64,7 @@ import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
 import { runArchiveReactivationIfDue } from "./archive-reactivation";
+import { runForgettingExecutorDryRun } from "./forgetting-executor";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
@@ -2039,6 +2040,21 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         try { mergeEntryTelemetryIfDue({ projectRoot: cwd }); }
         catch { /* advisory-only; telemetry failure never affects sediment */ }
       });
+
+      // ADR 0031 Phase 3(skeleton, gated): forgetting executor DRY-RUN。读 pending
+      // archive proposal + entry-telemetry hysteresis + resurrection rate → 算 demote
+      // plan + 写 shadow audit。**绝不 mutate durable memory**(不 import writer/archive)。
+      // demoteShadow 默认 false → 连调度都不发生(零开销 + 零行为变化)。fire-and-forget。
+      const memForgettingSettings = resolveMemorySettings();
+      if (memForgettingSettings.forgetting?.demoteShadow) {
+        const scheduleForgetting = typeof setImmediate === "function"
+          ? setImmediate
+          : (fn: () => void) => setTimeout(fn, 0);
+        scheduleForgetting(() => {
+          try { runForgettingExecutorDryRun(cwd, memForgettingSettings); }
+          catch { /* dry-run advisory only; never affects sediment/agent_end */ }
+        });
+      }
 
       // ADR 0025 §4.3 skeptical-historian MVP: schedule deterministic
       // advisory aggregation over existing sidecars. setImmediate keeps the

@@ -5,11 +5,15 @@
  */
 import { createJiti } from "jiti";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-forgetting-exec-")); // sandbox: 不碰生产 ~/.abrain
+process.env.ABRAIN_ROOT = tmp;
 const jiti = createJiti(import.meta.url);
-const { selectDemoteTargets } = await jiti.import(path.join(__dirname, "..", "extensions/sediment/forgetting-executor.ts"));
+const { selectDemoteTargets, runForgettingExecutorDryRun } = await jiti.import(path.join(__dirname, "..", "extensions/sediment/forgetting-executor.ts"));
 
 let fails = 0;
 const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"}: ${m}`); if (!c) fails++; };
@@ -89,7 +93,26 @@ const base = (over = {}) => ({
   ok(p.skipped.some((s) => s.skip_reason === "no_slug"), "空 slug skip_reason=no_slug");
 }
 
+// ── runForgettingExecutorDryRun 门控(agent_end 接线路径)+ 无 mutation 结构保证 ──
+{
+  const off = runForgettingExecutorDryRun("/proj", { forgetting: { demoteShadow: false } });
+  ok(off.enabled === false && off.reason === "demoteShadow_off", "demoteShadow off → 短路 enabled:false(零行为变化)");
+  const noPr = runForgettingExecutorDryRun(undefined, { forgetting: { demoteShadow: true } });
+  ok(noPr.enabled === true && noPr.reason === "no_project_root", "on + 无 projectRoot → no_project_root");
+  const on = runForgettingExecutorDryRun("/proj", { forgetting: { demoteShadow: true, demoteMaxBatch: 5, resurrectionBackoffRate: 0.5 } });
+  ok(on.ok === true && on.dry_run === true && on.plan && on.plan.demote.length === 0, "on + sandbox 空 proposal → dry-run 空 plan, dry_run:true");
+}
+// 结构无-mutation 保证: executor 源码不 import writer/archive 路径
+{
+  const src = fs.readFileSync(path.join(__dirname, "..", "extensions/sediment/forgetting-executor.ts"), "utf-8");
+  // 检查真实 import / 调用(带「(」), 排除注释里解释「不用 archiveProjectEntry」的词提及。
+  const noWriterImport = !/from\s+["'][^"']*writer["']/.test(src);
+  const noMutateCall = !/\b(archiveProjectEntry|updateProjectEntry|supersedeProjectEntry)\s*\(/.test(src);
+  ok(noWriterImport && noMutateCall, "executor 源码无 writer import / 无 archive|update|supersedeProjectEntry 调用(结构保证绝不 mutate)");
+}
+try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
+
 console.log(fails === 0
-  ? "\n✅ ALL PASS — forgetting-executor(dry-run skeleton): 门优先级 + hysteresis + batch cap + resurrection 自回退"
+  ? "\n✅ ALL PASS — forgetting-executor(dry-run skeleton): 门优先级 + hysteresis + batch cap + resurrection 自回退 + agent_end 门控 + 无-mutation 结构保证"
   : `\n❌ ${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);
