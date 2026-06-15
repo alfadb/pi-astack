@@ -163,6 +163,18 @@ export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
   multiVectorMaxChunks: 4,
 };
 
+// ADR 0031 Phase 0 — 遗忘自治子系统设置。
+export interface ForgettingSettings {
+  /** ADR 0031 Phase 0: 读侧用量埋点(retrieval-hit + citation)总开关。
+   *  零行为变化、纯观测; off = 埋点完全短路不写文件。
+   *  作为 runtime kill-switch 显式落 pi-astack-settings.json(code 默认 false 为安全基线)。 */
+  instrumentation: boolean;
+}
+
+export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
+  instrumentation: false,
+};
+
 export interface MemorySettings {
   includeWorld: boolean;
   defaultLimit: number;
@@ -177,6 +189,7 @@ export interface MemorySettings {
   search: SearchSettings;
   pathA: PathASettings;
   embedding: EmbeddingSettings;
+  forgetting: ForgettingSettings;
 }
 
 export const DEFAULT_SETTINGS: MemorySettings = {
@@ -190,6 +203,7 @@ export const DEFAULT_SETTINGS: MemorySettings = {
   search: DEFAULT_SEARCH_SETTINGS,
   pathA: DEFAULT_PATH_A_SETTINGS,
   embedding: DEFAULT_EMBEDDING_SETTINGS,
+  forgetting: DEFAULT_FORGETTING_SETTINGS,
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -288,6 +302,13 @@ function resolvePathASettings(cfg: Record<string, unknown>): PathASettings {
   };
 }
 
+function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSettings {
+  const f = (cfg.forgetting as Record<string, unknown>) ?? {};
+  return {
+    instrumentation: asBoolean(f.instrumentation, DEFAULT_FORGETTING_SETTINGS.instrumentation),
+  };
+}
+
 export function resolveSettings(): MemorySettings {
   const root = loadPiStackSettings();
   const cfg = (root.memory as Record<string, unknown>) ?? {};
@@ -302,5 +323,6 @@ export function resolveSettings(): MemorySettings {
     search: resolveSearchSettings(cfg),
     pathA: resolvePathASettings(cfg),
     embedding: resolveEmbeddingSettings(cfg),
+    forgetting: resolveForgettingSettings(cfg),
   };
 }

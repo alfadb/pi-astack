@@ -10,6 +10,7 @@ import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "../sediment/sanitizer";
 import { SEARCH_PROFILES, resolveProfileExecution, type SearchProfileName } from "./search-profiles";
+import { recordUsage, isUsageRecordingProfile } from "./usage-telemetry";
 
 function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string): void {
   if (!projectRoot) return;
@@ -1094,11 +1095,23 @@ export async function runMemorySearch(
   // 仅 toolSearch 适用: path-A/decide/dedup/correction 的 query 永不是裸 slug/ADR 编号。
   if (profileName === "toolSearch" && search.queryRouting) {
     const routed = routeExactLookup(query, entries);
-    if (routed) return [resultCard(routed, 1, "exact-route (ADR 0036 P5: slug/ADR 精确直查跳 LLM)")];
+    if (routed) {
+      const cards = [resultCard(routed, 1, "exact-route (ADR 0036 P5: slug/ADR 精确直查跳 LLM)")];
+      // ADR 0031 Phase 0: 精确直查也是 toolSearch 的 retrieval-hit。
+      if (isUsageRecordingProfile(profileName)) recordUsage(cards.map((c) => c.slug), "retrieval_hit", effSettings, opts?.projectRoot);
+      return cards;
+    }
   }
-  return returnVerdict
-    ? llmSearchEntriesWithVerdict(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot)
-    : llmSearchEntries(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot);
+  const result = returnVerdict
+    ? await llmSearchEntriesWithVerdict(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot)
+    : await llmSearchEntries(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot);
+  // ADR 0031 Phase 0: 读侧 retrieval-hit 埋点 —— 仅 user-facing profile, flag+projectRoot 守卫。
+  // sedimentDedup/correctionSearch(写侧 curator 操作)不计。零行为变化。
+  if (isUsageRecordingProfile(profileName)) {
+    const hits = Array.isArray(result) ? result : result.hits;
+    recordUsage(hits.map((h) => h.slug), "retrieval_hit", effSettings, opts?.projectRoot);
+  }
+  return result;
 }
 
 /**

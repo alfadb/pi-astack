@@ -22,6 +22,7 @@ import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./ty
 import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
 import { runMemorySearch } from "./llm-search";
+import { recordUsage } from "./usage-telemetry";
 import { buildDecisionSearchQuery, pruneDecisionBriefSeqCountersForSession, runMemoryDecide } from "./decide";
 import { PATH_A_INJECT_MARKER } from "./memory-context-injector";
 import { readOutcomeLedger, summarizeEntryActivity } from "../sediment/outcome-collector";
@@ -598,6 +599,10 @@ export default function (pi: ExtensionAPI) {
       const fullEntries = searchCards
         .map((card) => findEntry(entries, String((card as any).slug ?? "")).entry)
         .filter((entry): entry is NonNullable<typeof entry> => !!entry);
+
+      // ADR 0031 Phase 0: citation 埋点 —— 进 decide brief 的 entry = cited。
+      // ctx.cwd = projectRoot; flag off / 无 projectRoot 时内部短路。
+      recordUsage(fullEntries.map((e) => e.slug), "cited", settings, ctx.cwd);
 
       const searchResults = fullEntries.map((entry) => ({
         slug: entry.slug,

@@ -36,6 +36,7 @@ import { rewriteUserMessageToSearchQuery } from "./query-rewriter";
 import type { QueryRewriteResult, ConversationTurn } from "./query-rewriter";
 import { loadEntries } from "./parser";
 import { runMemorySearch } from "./llm-search";
+import { recordUsage } from "./usage-telemetry";
 import type { SearchVerdictResult } from "./llm-search";
 import type { MemoryEntry } from "./types";
 import { resolveSettings } from "./settings";
@@ -463,6 +464,10 @@ export async function tryInjectRelevantMemoryContext(
       return { rowWritten: row };
     }
     const built = buildInjectBlock(hitsForInject, settings.pathA, injectId);
+
+    // ADR 0031 Phase 0: citation 埋点 —— 实际进 inject 块的 slug = cited(强于 retrieved)。
+    // ctx.cwd = projectRoot; settings.forgetting.instrumentation off / 无 projectRoot 时内部短路。
+    recordUsage(built.selectedSlugs, "cited", settings, ctx.cwd);
 
     const row = {
       ...rowBase,

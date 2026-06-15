@@ -32,6 +32,7 @@
     "smoke:query-routing": "node scripts/smoke-query-routing.mjs",
     "smoke:stale-floor-window": "node scripts/smoke-stale-floor-window.mjs",
     "smoke:auto-reconcile": "node scripts/smoke-auto-reconcile.mjs",
+    "smoke:forgetting-instrumentation": "node scripts/smoke-forgetting-instrumentation.mjs",
     "oracle:goldset": "node scripts/oracle-goldset.mjs",
     "oracle:dedup-neardup": "node scripts/oracle-dedup-neardup.mjs",
     "oracle:dedup-p5b": "node scripts/oracle-dedup-p5b.mjs",
