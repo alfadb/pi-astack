@@ -33,6 +33,7 @@ import { mergeEvolutionLedger, summarizeEvolutionLedger, type EvolutionLedgerSum
 import { appendLifecycleProposals } from "./entry-lifecycle-proposals";
 import { writeDecayShadow, auditDecayAssessments } from "./decay-shadow";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
+import { readEntryTelemetry } from "./entry-telemetry";
 import type { ModelRegistryLike } from "./llm-extractor";
 
 type AggregatorSeverity = "info" | "warning" | "critical";
@@ -1345,6 +1346,33 @@ export interface RunAggregatorOptionsWithLlm extends RunAggregatorOptions {
   signal?: AbortSignal;
 }
 
+/** ADR 0031 Phase 1B: 为 decay-shadow 构造紧凑 telemetry 上下文(decay 候选优先:
+ *  按 window_retrieved_unused desc, citation asc 取 top-50)。无数据 → undefined。 */
+function buildDecayShadowContext(projectRoot: string): unknown | undefined {
+  try {
+    const rows = readEntryTelemetry(projectRoot);
+    if (rows.length === 0) return undefined;
+    const ranked = [...rows]
+      .sort((a, b) => (b.window_retrieved_unused - a.window_retrieved_unused) || (a.citation_count - b.citation_count))
+      .slice(0, 50);
+    return {
+      window_basis_days: ranked[0]?.window_days ?? 30,
+      note: "usage signals only — disuse is WEAK context, never a would_demote driver (ADR 0031 §4)",
+      entries: ranked.map((t) => ({
+        slug: t.slug,
+        window_retrieved_unused: t.window_retrieved_unused,
+        decisive_streak: t.window_decisive_streak,
+        citation_count: t.citation_count,
+        total_retrievals: t.total_retrievals,
+        ...(t.last_cited_at ? { last_cited_at: t.last_cited_at } : {}),
+        ...(t.possible_echo_chamber ? { possible_echo_chamber: true } : {}),
+      })),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runAndWriteSedimentAggregator(options: RunAggregatorOptionsWithLlm): Promise<AggregatorSummary> {
   const summary = runSedimentAggregator(options);
 
@@ -1355,6 +1383,10 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
   let promptNative: PromptNativeOutput | undefined;
   let degraded = false;
   let degradedReason: string | undefined;
+  // ADR 0031 Phase 1B: 解析 forgetting flag 一次;仅 decayShadow on 时构 decay telemetry
+  // 上下文(off → undefined → prompt 逐字节不变)。
+  const memForgetting = resolveMemorySettings().forgetting;
+  const decayShadowCtx = memForgetting?.decayShadow ? buildDecayShadowContext(options.projectRoot) : undefined;
   if (options.modelRegistry) {
     try {
       const llmResult = await runAggregatorLlmPass(
@@ -1362,6 +1394,7 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
         options.settings,
         options.modelRegistry,
         options.signal,
+        decayShadowCtx,
       );
       if (llmResult.degraded) {
         degraded = true;
@@ -1422,7 +1455,7 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
     // 正交 entry_decay_assessments[](1B-ii prompt 产出)写独立 decay-shadow.jsonl + 跑 §4.2
     // 回归不变量审计(would_demote_usage_only_count 必须 0)。decayShadow off(生产默认)且
     // prompt 未产出该字段 → 完全短路 → aggregator 逐字节零行为变化。
-    if (resolveMemorySettings().forgetting?.decayShadow && Array.isArray(promptNative.entry_decay_assessments) && promptNative.entry_decay_assessments.length > 0) {
+    if (memForgetting?.decayShadow && Array.isArray(promptNative.entry_decay_assessments) && promptNative.entry_decay_assessments.length > 0) {
       const decayAudit = auditDecayAssessments(promptNative.entry_decay_assessments);
       const written = writeDecayShadow(options.projectRoot, promptNative.entry_decay_assessments, options.now);
       enrichedSummary.decay_shadow = {

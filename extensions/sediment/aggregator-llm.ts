@@ -169,6 +169,29 @@ export function loadAggregatorPrompt(): string {
   }
 }
 
+let _cachedDecayFragment: string | undefined;
+/** ADR 0031 Phase 1B: decay-shadow 指令片段(仅 decayShadow on 时拼接到 prompt 尾)。 */
+export function loadDecayShadowFragment(): string {
+  if (_cachedDecayFragment !== undefined) return _cachedDecayFragment;
+  _cachedDecayFragment = fs.readFileSync(path.join(__dirname, "prompts", "aggregator-decay-shadow-v1.md"), "utf-8");
+  return _cachedDecayFragment;
+}
+
+/** 组装 fullPrompt 的两半(pre-sanitize, 纯函数可单测)。decayShadowCtx 缺省 → prompt/input
+ *  与基线**逐字节相同**(零行为变化);提供 → 拼接 decay 指令片段 + telemetry 上下文块。 */
+export function buildAggregatorFullPromptParts(
+  summary: AggregatorSummary,
+  decayShadowCtx?: unknown,
+): { prompt: string; input: string } {
+  let prompt = loadAggregatorPrompt();
+  let input = buildAggregatorPromptInput(summary);
+  if (decayShadowCtx !== undefined && decayShadowCtx !== null) {
+    prompt = `${prompt}\n\n${loadDecayShadowFragment()}`;
+    input = `${input}\n\n## ENTRY DECAY TELEMETRY (ADR 0031 Phase 1B shadow context)\n\n\`\`\`json\n${JSON.stringify(decayShadowCtx, null, 2)}\n\`\`\`\n`;
+  }
+  return { prompt, input };
+}
+
 // ── Context assembly ──────────────────────────────────────────────────
 
 /**
@@ -421,16 +444,18 @@ export async function runAggregatorLlmPass(
   settings: SedimentSettings,
   modelRegistry: ModelRegistryLike,
   signal?: AbortSignal,
+  decayShadowCtx?: unknown,
 ): Promise<AggregatorLlmResult> {
   let prompt = "";
   let fullPrompt = "";
   try {
-    prompt = loadAggregatorPrompt();
-    const input = buildAggregatorPromptInput(summary);
+    // ADR 0031 Phase 1B: decayShadowCtx 缺省(decayShadow off)→ 与基线逐字节相同。
+    const parts = buildAggregatorFullPromptParts(summary, decayShadowCtx);
+    prompt = parts.prompt;
     // Belt-and-suspenders: sanitize the assembled INPUT before LLM call.
     // The prompt template is author-controlled and need not be sanitized,
     // but counterfactual quotes inside the input may carry raw user text.
-    const sanitizedInput = sanitizeForMemory(input);
+    const sanitizedInput = sanitizeForMemory(parts.input);
     fullPrompt = `${prompt}\n\n---\n\n${sanitizedInput.text}`;
     const { rawText, model, durationMs } = await invokeAggregatorLlm(settings, modelRegistry, fullPrompt, signal);
     try {

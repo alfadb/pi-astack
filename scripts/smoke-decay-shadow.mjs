@@ -17,7 +17,7 @@ process.env.ABRAIN_ROOT = tmp; // sandbox: decayShadowPath → tmp/.state/sedime
 const jiti = createJiti(import.meta.url);
 const { normalizeAssessment, auditDecayAssessments, deterministicDecayBaseline, reconcileDecayShadow, writeDecayShadow, decayShadowPath } =
   await jiti.import(path.join(__dirname, "..", "extensions/sediment/decay-shadow.ts"));
-const { parseAggregatorOutput } = await jiti.import(path.join(__dirname, "..", "extensions/sediment/aggregator-llm.ts"));
+const { parseAggregatorOutput, buildAggregatorFullPromptParts, loadAggregatorPrompt, buildAggregatorPromptInput } = await jiti.import(path.join(__dirname, "..", "extensions/sediment/aggregator-llm.ts"));
 
 let fails = 0;
 const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"}: ${m}`); if (!c) fails++; };
@@ -105,6 +105,18 @@ ok(normalizeAssessment({ slug: "", decay_score: 0.5 }) === null, "无 slug → n
   const without = parseAggregatorOutput(JSON.stringify({ promoted_advisories: [], demoted_signals: [] }));
   ok(without.entry_decay_assessments === undefined, "parser: 无 decay → 字段缺失(零行为变化)");
   ok(Array.isArray(without.promoted_advisories), "parser: 现有字段不受影响");
+}
+
+// ── buildAggregatorFullPromptParts: 零行为变化(off)+ 注入(on)(1B-ii)──
+{
+  const summaryFixture = { ts: "2026-06-15T00:00:00Z", project_root: "/proj", window_days: 30 };
+  const off = buildAggregatorFullPromptParts(summaryFixture);
+  ok(off.prompt === loadAggregatorPrompt(), "decayShadow off: prompt 与基线逐字节相同");
+  ok(off.input === buildAggregatorPromptInput(summaryFixture), "decayShadow off: input 与基线逐字节相同");
+  const on = buildAggregatorFullPromptParts(summaryFixture, { entries: [{ slug: "a", window_retrieved_unused: 5 }] });
+  ok(on.prompt.length > off.prompt.length && on.prompt.includes("entry_decay_assessments"), "decayShadow on: prompt 拼接 decay 指令段");
+  ok(on.prompt.includes("would_demote") && on.prompt.includes("NEVER"), "decay 段含 §4.2 gate(would_demote NEVER usage-only)");
+  ok(on.input.includes("ENTRY DECAY TELEMETRY") && on.input.includes('"slug": "a"'), "decayShadow on: input 含 telemetry 上下文块");
 }
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
