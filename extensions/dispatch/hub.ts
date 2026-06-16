@@ -115,13 +115,19 @@ function vendorOf(model: string): string {
   return String(model ?? "").split("/")[0]?.trim() || "unknown";
 }
 
-/** Flatten modelCurator.providers (Record<vendor, model[]>) into a flat
- *  "vendor/model" allow-set for plan validation. */
+/** Flatten modelCurator.providers into a flat "provider/model" allow-set for
+ *  plan validation. The settings shape is { provider: [bareModelName, ...] }
+ *  (e.g. { deepseek: ["deepseek-v4-pro"] }), so the full id is built as
+ *  `${provider}/${bareName}`. Entries that already contain "/" are kept as-is. */
 export function flattenRoster(providers: Record<string, readonly string[]> | undefined): string[] {
   if (!providers || typeof providers !== "object") return [];
   const out: string[] = [];
-  for (const list of Object.values(providers)) {
-    if (Array.isArray(list)) for (const m of list) if (typeof m === "string" && m.includes("/")) out.push(m);
+  for (const [provider, list] of Object.entries(providers)) {
+    if (!Array.isArray(list)) continue;
+    for (const m of list) {
+      if (typeof m !== "string" || !m.trim()) continue;
+      out.push(m.includes("/") ? m : `${provider}/${m.trim()}`);
+    }
   }
   return Array.from(new Set(out));
 }

@@ -59,13 +59,14 @@ ok(resolveHubSettings({ enabled: "yes" }).enabled === false, "non-boolean enable
 ok(resolveHubSettings({ model: "x/y" }).model === "x/y", "explicit model preserved");
 
 // ── flattenRoster ──
+// Real settings shape: { provider: [bareModelName, ...] } — full id = provider/bareName.
 const roster = flattenRoster({
-  anthropic: ["anthropic/claude-opus-4-8", "anthropic/claude-sonnet-4-6"],
-  deepseek: ["deepseek/deepseek-v4-pro"],
-  bogus: ["no-slash-model"],
+  anthropic: ["claude-opus-4-8", "claude-sonnet-4-6"],
+  deepseek: ["deepseek-v4-pro"],
+  weird: ["already/full-model"],
 });
-ok(roster.includes("anthropic/claude-opus-4-8") && roster.includes("deepseek/deepseek-v4-pro"), "flattenRoster collects provider/model strings");
-ok(!roster.includes("no-slash-model"), "flattenRoster drops non provider/model strings");
+ok(roster.includes("anthropic/claude-opus-4-8") && roster.includes("deepseek/deepseek-v4-pro"), "flattenRoster builds provider/model from bare names");
+ok(roster.includes("already/full-model"), "flattenRoster keeps already-full provider/model strings");
 ok(flattenRoster(undefined).length === 0, "flattenRoster handles undefined");
 
 // ── selectHubModel ──
