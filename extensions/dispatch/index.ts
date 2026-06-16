@@ -209,9 +209,9 @@ const DISPATCH_STATUS_KEY = FOOTER_STATUS_KEYS.dispatch;
  *    degraded  — dispatch_parallel partial-success (some tasks succeeded)
  *    cancelled — task(s) externally terminated (user abort, timeout)
  *  Single-task dispatch_agent never enters `degraded` (aggregate-only). */
-type DispatchState = "idle" | "running" | "completed" | "failed" | "degraded" | "cancelled";
+export type DispatchState = "idle" | "running" | "completed" | "failed" | "degraded" | "cancelled";
 
-interface DispatchCounts {
+export interface DispatchCounts {
   running: number;
   failed: number;
   success: number;
@@ -241,12 +241,16 @@ export function renderDispatchStatus(
 }
 
 function applyDispatchStatus(
-  ctx: { ui?: { setStatus?(extId: string, message?: string): void } },
+  // Permissive ctx (`ui?: unknown`) so ONE function satisfies both the real pi
+  // tool ctx and the hub's Record<string, unknown> ctx without a cast; the ui
+  // shape is narrowed below. (Fixes the HubDeps applyDispatchStatus variance.)
+  ctx: { ui?: unknown },
   state: DispatchState,
   counts?: DispatchCounts,
   durationMs?: number,
 ): void {
-  const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
+  const ui = ctx.ui as { setStatus?(extId: string, message?: string): void } | undefined;
+  const setStatusRaw = ui?.setStatus?.bind(ui);
   if (!setStatusRaw) return;
   try {
     setStatusRaw(DISPATCH_STATUS_KEY, renderDispatchStatus(state, counts, durationMs));

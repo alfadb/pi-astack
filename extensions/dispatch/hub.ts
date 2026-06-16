@@ -29,6 +29,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { DispatchState } from "./index"; // type-only (erased) — no runtime import cycle
 import {
   getCurrentAnchor,
   deriveSubAgentAnchor,
@@ -404,7 +405,7 @@ export interface HubDeps {
   providerFromModel: (model: string) => string;
   validateTools: (tools: string | undefined) => { ok: boolean; reason?: string };
   /** Reuse the existing dispatch footer indicator so hub progress is visible. */
-  applyDispatchStatus: (ctx: unknown, state: string, counts?: { running: number; failed: number; success: number; total: number }, durationMs?: number) => void;
+  applyDispatchStatus: (ctx: { ui?: unknown }, state: DispatchState, counts?: { running: number; failed: number; success: number; total: number }, durationMs?: number) => void;
   defaultTimeoutMs: number;
   maxProviderConcurrency: number;
   /** Read settings.modelCurator + settings.dispatch.hub fresh per call. */
