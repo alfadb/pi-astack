@@ -324,6 +324,16 @@ export function getCurrentAnchor(): CausalAnchor | undefined {
  *  in this scope. Synchronous handlers don't need it (live anchor still
  *  reflects trigger turn).
  *
+ *  ⚠ SUB-AGENT LEAKAGE CONTRACT (ADR 0027 C6 boundary): the inverse case is
+ *  unguardable by ALS — a fire-and-forget promise spawned INSIDE a sub-agent's
+ *  `runWithTriggerAnchor(subAnchor, …)` scope that OUTLIVES that scope will,
+ *  after the scope exits, observe the MAIN anchor (a leaked promise re-reads
+ *  live module state, not the captured sub-anchor). There is no mechanism here
+ *  to prevent it. THEREFORE every fire-and-forget bg writer MUST gate on
+ *  `isSubAgentSession(ctx)` and skip in sub-agent context (all current writers
+ *  do). A new bg writer that omits this guard can mis-anchor sub-agent-spawned
+ *  work onto the parent turn. This is a hard contract, not just the example below.
+ *
  *  Example:
  *
  *      pi.on("agent_end", async (event, ctx) => {

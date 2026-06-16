@@ -80,6 +80,11 @@ const MAX_PARALLEL = 16;
 // of the shared runner API surface — the workflow engine mirrors the same
 // global cap (W12) and per-unit timeout default instead of duplicating
 // literals that could drift.
+// ⚠ MAX_CONCURRENCY is the WORKFLOW engine's global stage cap, NOT a
+// dispatch_parallel bound. dispatch_parallel's only concurrency limits are
+// MAX_PROVIDER_CONCURRENCY (per-provider, enforced in the claim loop) under
+// MAX_PARALLEL (per-call task ceiling); it never reads MAX_CONCURRENCY.
+// smoke-workflow-executor locks dispatch.MAX_CONCURRENCY === dsl.WORKFLOW_MAX_CONCURRENCY.
 export const MAX_CONCURRENCY = 4;
 export const MAX_PROVIDER_CONCURRENCY = 2;
 export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
@@ -651,6 +656,14 @@ export async function runInProcess(
   const enrichHeartbeat = (result: AgentResult): AgentResult => {
     const heartbeat_trace_path = heartbeat.tracePath;
     if (!heartbeatAnchor || !heartbeat_trace_path) return result;
+    // heartbeat_liveness is best-effort AUDIT ENRICHMENT only — it never drives
+    // control flow (the dispatch Promise.race(timeoutMs) owns liveness). Known
+    // benign edge: assessLivenessForAnchor scans all pid-suffixed traces for the
+    // anchor (cross-process retry support); if our own trace was cleanly unlinked
+    // AND a same-anchor orphan from a crashed prior process lingers, this field
+    // can read `stale` for a task that actually completed. Audit-data only, not a
+    // control-flow defect — do not "fix" by narrowing the scan (the cross-pid
+    // contract is locked by smoke-pr-c-hygiene / smoke-c5-*).
     const heartbeat_liveness = assessLivenessForAnchor(heartbeatProjectRoot, heartbeatAnchor);
     return {
       ...result,
