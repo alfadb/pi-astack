@@ -40,7 +40,7 @@ export const WORKFLOW_MAX_CONCURRENCY = 4;
 export const READONLY_TOOLS = new Set([
   "read", "grep", "find", "ls",
   "web_search", "web_fetch",
-  "memory_search", "memory_get", "memory_neighbors", "memory_decide",
+  "memory_search", "memory_get", "memory_decide",
   // opus R1 F2: dispatch KNOWN_TOOLS additionally accepts memory_list —
   // keep the requestable read-only surface aligned.
   "memory_list",

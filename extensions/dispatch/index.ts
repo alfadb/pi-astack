@@ -107,7 +107,7 @@ const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
  *    (must stay in sync with createCodingTools / createReadOnlyTools)
  *  - web_search/web_fetch — pi-astack web-search extension (ADR 0027
  *    PR-A: L2 worker read tools, exposed to sub-agents by default)
- *  - memory_search/memory_get/memory_list/memory_neighbors/memory_decide —
+ *  - memory_search/memory_get/memory_list/memory_decide —
  *    pi-astack abrain extension (ADR 0027 PR-B: L2 workers grown on L1 hub
  *    need brain read access for the symbiosis loop)
  *  - vision — pi-astack vision extension (image analysis, read-only)
@@ -127,7 +127,7 @@ const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
 const KNOWN_TOOLS = new Set([
   "read", "bash", "edit", "write", "grep", "find", "ls",
   "web_search", "web_fetch",
-  "memory_search", "memory_get", "memory_list", "memory_neighbors", "memory_decide",
+  "memory_search", "memory_get", "memory_list", "memory_decide",
   "vision",
   "context7_resolve", "context7_docs",
 ]);
@@ -728,13 +728,13 @@ export async function runInProcess(
   //   - memory_list is a broad-inventory/management tool, not targeted
   //     retrieval. sub-agent workers don't need to enumerate the entire
   //     brain; they need to look up specific things (memory_search) or
-  //     read a specific entry (memory_get) or fetch related ones
-  //     (memory_neighbors) or get a decision brief (memory_decide).
+  //     read a specific entry (memory_get) or get a decision brief
+  //     (memory_decide).
   //   - DeepSeek + GPT-5.5 T0 votes both flagged memory_list as too wide.
   //
   // Caller can always override with explicit `tools=...`. memory_list is
   // in KNOWN_TOOLS so callers wanting it can pass it explicitly.
-  const tools = (toolAllowlist || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide")
+  const tools = (toolAllowlist || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide")
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean);
@@ -1154,7 +1154,7 @@ export default function (pi: ExtensionAPI) {
       model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
-      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
     }),
 
@@ -1408,7 +1408,7 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
-          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide)." })),
+          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide)." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 1800000 = 30min)" })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
@@ -1589,7 +1589,7 @@ export default function (pi: ExtensionAPI) {
               runInProcess(
                 t.model, t.thinking, prompt,
                 signal, t.timeoutMs ?? timeoutMs, ctx.modelRegistry,
-                t.tools || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide",
+                t.tools || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide",
                 // Stage 1b heartbeat ctx. Per-task subAnchor (subturn
                 // 1..N) gives each task its own heartbeat file under
                 // .pi-astack/dispatch/heartbeat/.

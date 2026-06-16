@@ -6,7 +6,7 @@
  * enforcement (ADR 0017), and `/memory migrate --go` one-shot migration.
  * Markdown + git remain the source of truth.
  *
- * LLM-facing tools (memory_search/get/list/neighbors) are strictly read-only.
+ * LLM-facing tools (memory_search/get/list) are strictly read-only.
  * `/memory migrate --go` performs one-shot B4 migration; it does not write
  * canonical knowledge entries — that is sediment's exclusive role. (The
  * `/memory rebuild` slash was retired 2026-06-15 as an unused brain-management
@@ -19,10 +19,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { bindLifecycle as bindCausalAnchorLifecycle } from "../_shared/causal-anchor";
-import { asBoolean, asNumber, resolveSettings } from "./settings";
-import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./types";
+import { asBoolean, resolveSettings } from "./settings";
+import type { GetParams, ListFilters, SearchParams } from "./types";
 import { loadEntries } from "./parser";
-import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
+import { findEntry, listEntries, serializeEntry } from "./search";
 import { runMemorySearch } from "./llm-search";
 import { recordUsage } from "./usage-telemetry";
 import { buildDecisionSearchQuery, pruneDecisionBriefSeqCountersForSession, runMemoryDecide } from "./decide";
@@ -34,7 +34,7 @@ import { formatMigrationGoSummary, runMigrationGo } from "./migrate-go";
 import * as os from "node:os";
 import { formatDoctorLiteReport, runDoctorLite } from "./doctor";
 import { checkBacklinks, formatBacklinkReport } from "./graph";
-import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
+import { normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
 import { resolveActiveProject } from "../_shared/runtime";
 
 const MEMORY_FOOTNOTE_PROTOCOL_VERSION = "memory-footnote-v1";
@@ -291,7 +291,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
 export default function (pi: ExtensionAPI) {
   // ── Sub-pi enforce ──────────────────────────────────────────
   // ADR 0014 §6 defense-in-depth: sub-pi should not register
-  // memory_search/get/list/neighbors (though dispatch's --tools
+  // memory_search/get/list (though dispatch's --tools
   // allowlist also blocks them).
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
@@ -442,58 +442,6 @@ export default function (pi: ExtensionAPI) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
       return wrapToolResult(listEntries(entries, params.filters ?? {}, settings));
-    },
-  });
-
-  pi.registerTool({
-    name: "memory_neighbors",
-    label: "Memory Neighbors",
-    description:
-      "Read-only graph traversal over frontmatter relations and body [[wikilinks]]. " +
-      "Does not create or repair links.",
-    promptSnippet: "memory_neighbors(slug, options?: { hop?: number, max?: number })",
-    promptGuidelines: [
-      "Use memory_neighbors to inspect related decisions/patterns after memory_get, especially when conflict or provenance matters.",
-      "This is read-only graph traversal. Do not use it to declare relationships; only sediment may write relations.",
-    ],
-    parameters: Type.Object({
-      slug: Type.String({ description: "Bare slug to traverse from" }),
-      options: Type.Optional(Type.Any({
-        description: "Optional: { hop?: number, max?: number }",
-      })),
-    }),
-    prepareArguments(rawArgs: unknown) {
-      const args = asRecord(rawArgs);
-      const options = (parseMaybeJson(args.options) as Record<string, unknown>) ?? {};
-      return {
-        slug: String(args.slug ?? args.id ?? ""),
-        options: {
-          hop: clamp(Math.floor(asNumber(options.hop ?? args.hop, 1)), 1, 3),
-          max: clamp(Math.floor(asNumber(options.max ?? args.max, 20)), 1, 100),
-        },
-      };
-    },
-    async execute(_id: string, params: NeighborsParams, signal: AbortSignal, _onUpdate: unknown, ctx: { cwd?: string }) {
-      const settings = resolveSettings();
-      const entries = await loadEntries(ctx.cwd, settings, signal);
-      const target = findEntry(entries, params.slug).entry;
-      if (!target) {
-        return wrapToolResult({
-          ok: false,
-          error: `memory entry not found: ${params.slug}`,
-          slug: normalizeBareSlug(params.slug),
-          neighbors: [],
-        });
-      }
-      return wrapToolResult({
-        slug: target.slug,
-        neighbors: neighbors(
-          entries,
-          target.slug,
-          params.options?.hop ?? 1,
-          params.options?.max ?? 20,
-        ),
-      });
     },
   });
 
@@ -744,7 +692,7 @@ export default function (pi: ExtensionAPI) {
 ## memory 工具：sub-agent 使用说明
 
 你现在是一个 sub-agent worker（由 dispatch_agent / dispatch_parallel 产生）。
-你可以用 \`memory_search\` / \`memory_get\` / \`memory_neighbors\` /
+你可以用 \`memory_search\` / \`memory_get\` /
 \`memory_decide\` 拉取用户的长期记忆、偏好、架构决策、已知坑点。
 
 什么时候调：

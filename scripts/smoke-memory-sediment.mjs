@@ -352,10 +352,11 @@ async function main() {
     memoryExt(makePi("memory", true));
     sedimentExt(makePi("sediment", false));
     compactionTunerExt(makePi("compactionTuner", false));
-    // memory_search / memory_get / memory_list / memory_neighbors / memory_decide
-    // (memory_decide was added by ADR 0026 P0a in commit 552c7b4; 4 → 5).
-    assert(tools.size === 5, `expected 5 memory tools, got ${tools.size}`);
-    for (const name of ["memory_search", "memory_get", "memory_list", "memory_neighbors", "memory_decide"]) {
+    // memory_search / memory_get / memory_list / memory_decide
+    // (memory_decide added by ADR 0026 P0a; memory_neighbors removed 2026-06-16
+    //  as an unused read tool — vector search covers related-entry recall; 5 → 4).
+    assert(tools.size === 4, `expected 4 memory tools, got ${tools.size}`);
+    for (const name of ["memory_search", "memory_get", "memory_list", "memory_decide"]) {
       assert(tools.has(name), `missing tool: ${name}`);
     }
     assert(commands.has("memory") && commands.has("sediment") && commands.has("compaction-tuner"), "expected memory, sediment, and compaction-tuner commands");

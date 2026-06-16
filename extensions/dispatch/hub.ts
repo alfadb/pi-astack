@@ -412,7 +412,7 @@ export interface HubDeps {
   readConfig: () => { hub: HubSettings; roster: string[]; flagshipModels: string[] };
 }
 
-const WORKER_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide";
+const WORKER_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide";
 const HUB_TOOLS = "read,grep,find,ls,memory_search,memory_get";
 
 /** Register dispatch_hub IFF settings.dispatch.hub.enabled === true.

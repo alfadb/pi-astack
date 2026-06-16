@@ -112,8 +112,3 @@ export interface GetParams {
   slug: string;
   options?: { include_related?: boolean };
 }
-
-export interface NeighborsParams {
-  slug: string;
-  options?: { hop?: number; max?: number };
-}
