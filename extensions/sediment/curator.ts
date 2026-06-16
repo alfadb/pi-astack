@@ -883,7 +883,7 @@ function makeCuratorPrompt(
     "- Use create only when no neighbor is the same evolving knowledge unit.",
     "- Use archive when a neighbor is no longer useful as active knowledge but should remain retained.",
     "- Use supersede when an existing neighbor is replaced by another existing neighbor or explicitly made stale by the candidate.",
-    "- Delete defaults to mode=soft: archive the existing entry with a delete timeline note. Use mode=hard only for secrets, obvious junk/noise, or explicit user-requested removal. Git history is the rollback surface.",
+    "- Delete defaults to mode=soft: archive the existing entry with a delete timeline note. Use mode=hard ONLY for secrets or explicit user-requested removal. Do NOT mode=hard content you autonomously judge to be junk/noise: low-value entries you decide to forget MUST terminate at archived (soft), never physical delete — per INV-REVERSIBLE-AUTONOMY, autonomous forgetting's terminus is archived (full text stays on disk as the resurrection surface). Git history is the rollback surface for the two sanctioned hard cases.",
     "",
     "Update vs create discipline (added 2026-05-13 after curator P0 in abrain commit 2e8924d: candidate was a downstream observation that touched the same topic as an existing entry; curator overwrote the upstream entry instead of creating a derived one, dropping 4 evidence bullets + 3 fix steps + principle section).",
     "- Use UPDATE only when the candidate REFINES the SAME claim the neighbor already makes (corrects an error, adds confidence, narrows scope, supplies a better compiled truth for the SAME assertion).",
