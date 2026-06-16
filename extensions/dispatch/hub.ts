@@ -424,15 +424,17 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       "(read-only, single-level) and returns the aggregate. Use for judgment-heavy " +
       "tasks where you want the hub to decide the worker mix. Cost is report-only. " +
       `Worker count is hard-capped at ${HARD_MAX_WORKERS}.`,
-    promptSnippet: "dispatch_hub({ task }) — hub LLM picks cross-vendor workers and dispatches them",
+    promptSnippet: "dispatch_hub({ task, hubModel? }) — you pick a hub model per-task; it plans cross-vendor workers and dispatches them",
     promptGuidelines: [
-      "Pass a clear, self-contained task description. The hub LLM (a different vendor) decides how many workers, which models, and what each does.",
+      "Pass a clear, self-contained task description. The hub LLM decides how many workers, which models, and what each does, then really dispatches them.",
+      "ADR 0030 §7: YOU (the main session) choose the hub model per-task via `hubModel`. Pick a model from a DIFFERENT vendor than yourself so the hub is an independent second voice (not self-talk). Omit hubModel to auto-pick a flagship model.",
       "The hub is read-only and single-level; results return in-turn. After it returns, your acceptance/revision of the result is the disposition signal (ADR 0030 §5).",
     ],
     parameters: {
       type: "object",
       properties: {
         task: { type: "string", description: "The task for the hub to plan a worker assignment for." },
+        hubModel: { type: "string", description: "Which model acts as the hub/planner for THIS task (provider/model). Choose per-task, cross-vendor from yourself to avoid self-talk. Omit to auto-pick a flagship model." },
         timeoutMs: { type: "number", description: "Per-worker timeout in ms (default 1800000)." },
       },
       required: ["task"],
@@ -448,7 +450,11 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const modelRegistry = ctx.modelRegistry;
       const parentAnchor = getCurrentAnchor();
 
-      const hubModel = selectHubModel({ explicit: hubCfg.model, flagshipModels });
+      // ADR 0030 §7: the main session picks the hub model per-task (params.hubModel).
+      // Priority: per-call choice → optional settings default → auto-pick flagship.
+      // NOT a fixed settings pin — hub model is chosen freely by the main session.
+      const requestedHubModel = typeof params.hubModel === "string" ? params.hubModel.trim() : "";
+      const hubModel = selectHubModel({ explicit: requestedHubModel || hubCfg.model, flagshipModels });
       if (!hubModel) {
         return { content: [{ type: "text" as const, text: "dispatch_hub: no flagship model available to act as hub (configure modelCurator.tiers.flagship or dispatch.hub.model)." }], details: { kind: "dispatch_hub_no_model" }, isError: true };
       }
