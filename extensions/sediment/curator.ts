@@ -284,6 +284,7 @@ function ruleEntryToMemoryEntry(rule: RuleEntry): MemoryEntry {
     kind: rule.kind,
     status: rule.status,
     confidence: rule.confidence,
+    provenance: rule.provenance,
     title: rule.title,
     summary: rule.mustDoSummary,
     created: rule.created,
