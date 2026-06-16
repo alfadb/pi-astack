@@ -253,6 +253,11 @@ export async function resolveRuleWrite(args: {
         if (!existing) return fallbackCreate("target_unreadable", adj.model);
         expectedBodyHash = existing.bodyHash;
       }
+      // round-2 review fix (gpt-5.5 MAJOR): a hashless target cannot be
+      // CAS-protected — applyTier1RuleAdjudication skips the TOCTOU witness when
+      // expectedBodyHash is undefined, so a concurrent edit could be clobbered.
+      // Don't merge what we can't protect: land the directive as a create.
+      if (!expectedBodyHash) return fallbackCreate("merge_target_no_bodyhash", adj.model);
     }
     result = await applyTier1RuleAdjudication(
       target,

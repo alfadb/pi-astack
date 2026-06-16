@@ -181,6 +181,19 @@ await check("archive cap: at most MAX_ARCHIVE_PER_OP (5) archived in one op", as
   assert(onDisk === 5, `exactly 5 archived on disk, got ${onDisk}`);
 });
 
+await check("round-2: hashless merge target → create fallback (cannot CAS-protect)", async () => {
+  const home = freshHome();
+  const t = await seed(home, "legacy hashless target", "A legacy rule whose body_hash will be stripped to simulate a pre-hash entry.");
+  const f = findRuleFile(home, "global", undefined, t);
+  fs.writeFileSync(f.path, fs.readFileSync(f.path, "utf-8").replace(/^body_hash:.*$/m, "")); // simulate legacy hashless rule
+  const draft = { ...baseDraft, title: "merge into hashless", body: "Directive the adjudicator wants to merge into a hashless target." };
+  const candidates = listRulesInScope(home, "global", undefined);
+  const { result, adjudication } = await resolveRuleWrite({ draft, candidates, settings: SETTINGS, modelRegistry: {}, abrainHome: home, auditContext: AUDIT, adjudicateFn: fakeAdj({ decision: "merge", targetSlug: t, mergedBody: "A merged body that must NOT clobber a hashless target.", archiveSlugs: [], reason: "merge attempt" }) });
+  assert(result.status === "created", `create fallback, got ${result.status}/${result.reason}`);
+  assert(adjudication.fallback === "merge_target_no_bodyhash", `fallback marker: ${JSON.stringify(adjudication)}`);
+  assert(statusOf(home, t) === "active", "hashless target left untouched");
+});
+
 console.log("");
 if (failures.length) { console.log(`❌ ${failures.length}/${total} failed`); process.exit(1); }
 console.log(`✅ A1 ruleset adjudication: all ${total} checks passed`);

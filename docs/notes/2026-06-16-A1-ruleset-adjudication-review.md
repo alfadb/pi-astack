@@ -1,8 +1,8 @@
 ---
 doc_type: review-evidence
-status: addressed-pending-ratification
+status: review-passed-round2
 created: 2026-06-16
-gate: cross-vendor-T0-review (mandated by goal g-eaaa09e1; review done 2026-06-16, blocker+majors fixed, see §7)
+gate: cross-vendor-T0-review (goal g-eaaa09e1) — round-1 blocker+majors fixed (§7); round-2 re-review 2 SHIP / 1 SWC, the SWC item closed (§8)
 ---
 
 # A1 评审证据包:规则路径全集裁决(去 Jaccard 门 + 归档相悖)
@@ -77,3 +77,12 @@ diff stat(不含新文件):5 files, +76/-2。
 **残留(全体认同)**:fake 裁决器只验机制,**live LLM 裁决质量未测** → A1 属“带监控上线”(kill-switch 可回滚 + 审计表观测 dogfood)。
 
 smoke:tier1-ruleset 现 **10/10**;回归 tier1-jaccard(16)/rule-writer-fs(18)/tier1-directive-defer(10)/rule-writer(14) 全绿。
+
+## 8. 第二轮复评(2026-06-16)
+
+3 家跨厂商(opus-4-8 / gpt-5.5 / deepseek-v4-pro)聚焦复评修复批,各自独立重跑 smoke。裁决:**2 SHIP / 1 SHIP-WITH-CHANGES**;前 5 条意见均逐条验证 RESOLVED(带证明行)。
+
+- 唯一新意见(gpt-5.5,[MAJOR]):**无 body_hash 的 merge 目标无法 CAS 保护**(两边 hash 都存在才比对),legacy/手编规则仍可被覆写 → **已修**:merge 解出 expectedBodyHash 为空时不合并、改为落 create(“保护不了就不覆写”)。新增 smoke 验证。
+- 两条 MINOR(opus,依据呈未改):create-deduped 分支归档 reason 引用未落盘的 winner slug(仅审计文案、不损语料);`duplicate_slug_race` 未映射为 slug_collision(仅标签)。都是 cosmetic,显式让过。
+
+smoke:tier1-ruleset 现 **11/11**(新增 hashless-merge 用例)。复评后 A1 视为通过,残留仍为“live LLM 质量带监控观测”。
