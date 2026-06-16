@@ -139,6 +139,7 @@
     "smoke:aggregator-structural-context": "node scripts/smoke-aggregator-structural-context.mjs",
     "smoke:p15-pass1-op-breakdown": "node scripts/smoke-p15-pass1-op-breakdown.mjs",
     "smoke:tier1-jaccard-adjudication": "node scripts/smoke-tier1-jaccard-adjudication.mjs",
+    "smoke:tier1-ruleset": "node scripts/smoke-tier1-ruleset-adjudication.mjs",
     "smoke:goal-state": "node scripts/smoke-goal-state.mjs",
     "smoke:goal-autocontinue": "node scripts/smoke-goal-autocontinue.mjs",
     "smoke:goal-doc-tools": "node scripts/smoke-goal-doc-tools.mjs",

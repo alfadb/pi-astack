@@ -108,6 +108,16 @@ export interface SedimentSettings {
    *  rollback evidence. */
   tier1JaccardShadowAudit: boolean;
 
+  /** A1 (2026-06-16, ruleset adjudication): when true, the Tier-1 rules path
+   *  drops the Jaccard near-dup GATE entirely and ALWAYS adjudicates the
+   *  directive against ALL active same-scope rules (small set, not embedded),
+   *  with a closed decision space {create, update, merge} PLUS archive_slugs
+   *  (soft-archive superseded/contradicted rules). Failure → deterministic
+   *  create (directive never lost). When false, falls back to the
+   *  tier1JaccardCuratorLane path (single-candidate Jaccard adjudication).
+   *  Explicit kill-switch (maxim: runtime toggles live in settings, not code). */
+  tier1RuleSetAdjudication: boolean;
+
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
    *  can track prompt changes without manual cross-reference.
@@ -213,6 +223,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // tier1JaccardShadowAudit:true to collect read-only comparison rows.
   tier1JaccardCuratorLane: true,
   tier1JaccardShadowAudit: false,
+  tier1RuleSetAdjudication: true,
   promptVersion: {
     activeCorrectionClassifier: "v2",
     reasoningNormalizationPreamble: "v1",
@@ -335,6 +346,7 @@ export function resolveSedimentSettings(): SedimentSettings {
     rulesAsReadonlyNeighborsEnabled: asBoolean(cfg.rulesAsReadonlyNeighborsEnabled, DEFAULT_SEDIMENT_SETTINGS.rulesAsReadonlyNeighborsEnabled),
     tier1JaccardCuratorLane: asBoolean(cfg.tier1JaccardCuratorLane, DEFAULT_SEDIMENT_SETTINGS.tier1JaccardCuratorLane),
     tier1JaccardShadowAudit: asBoolean(cfg.tier1JaccardShadowAudit, DEFAULT_SEDIMENT_SETTINGS.tier1JaccardShadowAudit),
+    tier1RuleSetAdjudication: asBoolean(cfg.tier1RuleSetAdjudication, DEFAULT_SEDIMENT_SETTINGS.tier1RuleSetAdjudication),
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,

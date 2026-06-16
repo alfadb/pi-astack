@@ -83,6 +83,7 @@ import {
   writeAbrainRule,
   writeProjectEntry,
   readRuleForAdjudication,
+  listRulesInScope,
   type AboutMeDraft,
   type ProjectEntryDraft,
   type WriteAboutMeResult,
@@ -91,6 +92,7 @@ import {
   type WriterAuditContext,
 } from "./writer";
 import { resolveTier1JaccardHit, runTier1JaccardAdjudication } from "./tier1-adjudicator";
+import { resolveRuleWrite } from "./tier1-ruleset-adjudicator";
 import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
@@ -4457,14 +4459,41 @@ async function tryAutoWriteLane(args: {
     // Jaccard hit comes back as "similar_found" (no write) and the curator
     // adjudicates {update,merge,create}; with the lane OFF (rollback only),
     // the legacy autonomous dedup gate stays the sole writer.
-    let result = await writeAbrainRule(draft, {
+    let result: WriteRuleResult;
+    let adjudication: Record<string, unknown> | undefined;
+    if (settings.tier1RuleSetAdjudication === true) {
+      // A1 (2026-06-16): full-candidate-set rule adjudication — NO Jaccard
+      // GATE. Always adjudicate the directive against ALL active same-scope
+      // rules, with archive of superseded/contradicted ones. resolveRuleWrite
+      // already degrades to deterministic create on any failure (directive
+      // never lost); this try/catch is defense-in-depth for an unexpected throw.
+      const rs = draft.scope === "global"
+        ? { scope: "global" as const, projectId: undefined as string | undefined }
+        : { scope: "project" as const, projectId: draft.scope.projectId };
+      const candidates = listRulesInScope(abrainHome, rs.scope, rs.projectId);
+      try {
+        const resolved = await resolveRuleWrite({
+          draft, candidates, settings, modelRegistry: args.modelRegistry,
+          abrainHome, auditContext: tier1AuditContext,
+        });
+        result = resolved.result;
+        adjudication = resolved.adjudication;
+      } catch (e: unknown) {
+        result = await writeAbrainRule(draft, {
+          abrainHome, settings, exactDuplicateAsDedup: true,
+          semanticDedup: "off", auditContext: tier1AuditContext,
+        });
+        adjudication = { ruleset: true, decision: "create", fallback: "ruleset_adjudication_threw", error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 200) };
+      }
+    } else {
+    // ---- legacy path (tier1RuleSetAdjudication=false rollback): Jaccard-gated single-candidate adjudication ----
+    result = await writeAbrainRule(draft, {
       abrainHome,
       settings,
       exactDuplicateAsDedup: true,
       semanticDedup: adjudicationLaneOn ? "report" : "dedup",
       auditContext: tier1AuditContext,
     });
-    let adjudication: Record<string, unknown> | undefined;
     if (result.status === "similar_found") {
       try {
         const resolved = await resolveTier1JaccardHit({
@@ -4519,6 +4548,7 @@ async function tryAutoWriteLane(args: {
         quote: sanitizeAuditText(tier1Signal.user_quote ?? "", 200),
       }).catch(() => {});
     }
+    } // end legacy-path else (tier1RuleSetAdjudication)
     const tier1StagingCleanup = (result.status === "created" || result.status === "updated")
       ? removeStagingEntriesBySlug(buildProvisionalStagingSlug(tier1Signal, window.text))
       : undefined;

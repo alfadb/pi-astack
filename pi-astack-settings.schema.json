@@ -354,6 +354,12 @@
           "description": "PR-4 rollback-mode shadow audit. When tier1JaccardCuratorLane is false, setting this true runs the adjudicator READ-ONLY for each Tier-1 cross-slug Jaccard hit and records its would-be verdict (tier1_jaccard_shadow audit row). Default false because the adjudication lane is live by default."
         },
 
+        "tier1RuleSetAdjudication": {
+          "type": "boolean",
+          "default": true,
+          "description": "A1 (2026-06-16). When true, the Tier-1 rules path drops the Jaccard near-dup gate and always adjudicates a directive against ALL active same-scope rules (closed space {create,update,merge} plus archive_slugs for superseded/contradicted rules; failure -> deterministic create). When false, falls back to the tier1JaccardCuratorLane single-candidate path. Explicit rollback kill-switch."
+        },
+
         "promptVersion": {
           "type": "object",
           "additionalProperties": false,

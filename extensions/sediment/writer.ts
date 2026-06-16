@@ -2322,6 +2322,31 @@ export function findRuleFile(abrainHome: string, scope: "global" | "project", pr
   return undefined;
 }
 
+/** A1 (2026-06-16, ADR-pending ruleset adjudication): list ALL active rules in
+ *  a scope (both inject modes), scope-exact (independent of cwd binding), as
+ *  candidates for the full-set rule adjudicator. Bodies are timeline-stripped
+ *  (reuses readRuleForAdjudication). Small set (~dozens) — no prefilter. */
+export function listRulesInScope(
+  abrainHome: string,
+  scope: "global" | "project",
+  projectId: string | undefined,
+): Array<{ slug: string; title: string; body: string; injectMode: RuleInjectMode }> {
+  const base = rulesBaseDir(path.resolve(abrainHome), scope, projectId);
+  const out: Array<{ slug: string; title: string; body: string; injectMode: RuleInjectMode }> = [];
+  for (const mode of ["always", "listed"] as RuleInjectMode[]) {
+    const dir = path.join(base, mode);
+    let names: string[];
+    try { names = fsSync.readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      if (!n.endsWith(".md") || n === "_index.md") continue;
+      const slug = n.slice(0, -3);
+      const r = readRuleForAdjudication(path.resolve(abrainHome), scope, projectId, slug);
+      if (r && r.status === "active") out.push({ slug: r.slug, title: r.title, body: r.body, injectMode: r.injectMode });
+    }
+  }
+  return out;
+}
+
 /** PR-4/P0.3: read an existing rule for the Tier-1 Jaccard adjudication
  *  prompt — title/status from frontmatter, body WITHOUT the timeline section
  *  (evidence lines would bloat the prompt and skew the merge output). */
