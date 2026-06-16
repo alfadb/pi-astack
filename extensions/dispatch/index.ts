@@ -19,8 +19,8 @@
  *   - JSON event stream via subscribe() (same observability as v2)
  *
  * Cost: shares process space with parent pi. Acceptable because dispatch
- * sub-agents run LLM inference on remote APIs — they don't execute local
- * code unless PI_MULTI_AGENT_ALLOW_MUTATING=1 is set.
+ * sub-agents run LLM inference on remote APIs — they only execute local
+ * code when the caller explicitly grants bash/edit/write via `tools=`.
  *
  * Registers:
  *   dispatch_agent    — single task
@@ -260,9 +260,19 @@ interface ToolValidation {
   reason?: string;
 }
 
-// PR-10 (ADR 0032 §8): exported — the workflow production runner routes its
-// per-stage tool allowlist through the SAME gate (nested-dispatch rejection +
-// PI_MULTI_AGENT_ALLOW_MUTATING env check inherit with the API, not by copy).
+// Universal sub-agent tool validation: reject nested dispatch (capability
+// boundary — sub-agents never spawn sub-agents; prevents runaway fan-out) and
+// unknown tool names. Exported; the workflow runner reuses it for those two
+// universal checks.
+//
+// NOTE (2026-06-16): mutating tools (bash/edit/write) are NO LONGER gated here.
+// The dispatch swarm may receive them via explicit `tools=`. Rationale: brain
+// writes are git-recoverable, and under the single-user threat model a runtime
+// mutating-gate guards a non-reachable threat (real exfil needs a malicious
+// installed extension = supply-chain trust, not a runtime-guard's job; see
+// ADR 0003 layer-2 accepted residual). The WORKFLOW channel keeps its W9 env
+// gate via enforceMutatingEnvGate (ADR 0033 triple-explicit), enforced in
+// extensions/workflow — NOT here.
 export function validateTools(toolsStr: string | undefined): ToolValidation {
   if (!toolsStr) return { ok: true };
 
@@ -275,13 +285,24 @@ export function validateTools(toolsStr: string | undefined): ToolValidation {
     if (!KNOWN_TOOLS.has(name)) {
       return { ok: false, reason: `unknown tool "${name}". Known tools: ${[...KNOWN_TOOLS].join(", ")}` };
     }
-    if (MUTATING_TOOLS.has(name)) {
-      if (process.env.PI_MULTI_AGENT_ALLOW_MUTATING !== "1") {
-        return { ok: false, reason: `mutating tool "${name}" requires PI_MULTI_AGENT_ALLOW_MUTATING=1` };
-      }
-    }
   }
 
+  return { ok: true };
+}
+
+// ADR 0033 W9 triple-explicit: the WORKFLOW channel (NOT the dispatch swarm)
+// keeps the mutating env gate as one of its three deliberate gates. Exported so
+// the workflow production runner enforces it locally, on top of validateTools.
+// Dropping this from workflow is an ADR 0033 promotion tripwire — do not fold
+// it back into validateTools.
+export function enforceMutatingEnvGate(toolsStr: string | undefined): ToolValidation {
+  if (!toolsStr) return { ok: true };
+  const names = toolsStr.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+  for (const name of names) {
+    if (MUTATING_TOOLS.has(name) && process.env.PI_MULTI_AGENT_ALLOW_MUTATING !== "1") {
+      return { ok: false, reason: `mutating tool "${name}" requires PI_MULTI_AGENT_ALLOW_MUTATING=1` };
+    }
+  }
   return { ok: true };
 }
 
@@ -609,11 +630,11 @@ function getSharedInfra(): Promise<{
  *     cannot request them via `tools=`. (Was noExtensions:true in v2;
  *     replaced by allowlist + isSubAgentSession guards — see getSharedInfra
  *     and scripts/smoke-dispatch-subagent-tool-allowlist.mjs.)
- *   - default allowlist is read-only
+ *   - default allowlist is read-only (callers opt into bash/edit/write via tools=)
  *   - `SessionManager.inMemory()` prevents session file writes
- *   - PI_MULTI_AGENT_ALLOW_MUTATING=1 gate still enforced
+ *   - nested dispatch is unconditionally rejected (no sub-agent fan-out)
  * This is acceptable because typical dispatch usage calls remote LLM APIs
- * for analysis — sub-agents don't execute local code.
+ * for analysis; mutating workers are an explicit, caller-granted opt-in.
  */
 export async function runInProcess(
   modelStr: string,
@@ -1116,20 +1137,20 @@ export default function (pi: ExtensionAPI) {
       "Run a SINGLE sub-agent task in-process. For 2+ independent tasks, use dispatch_parallel instead " +
       "(calling dispatch_agent N times runs them serially, wasting wall-clock time). " +
       "The sub-agent is an independent in-process AgentSession (not a subprocess), capable of multi-turn " +
-      "tool calling (read, grep, find, ls). Mutating tools (bash, edit, write) " +
-      "are blocked by default.",
+      "tool calling (read, grep, find, ls by default; bash/edit/write available via explicit tools=). " +
+      "Nested dispatch is always rejected.",
     promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?) — SINGLE task only",
     promptGuidelines: [
       "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_parallel.",
       "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_parallel which runs them in parallel (~30s).",
-      "Sub-agents CAN use read, grep, find, ls, web_search, web_fetch. Mutating tools (bash, edit, write) require PI_MULTI_AGENT_ALLOW_MUTATING=1.",
+      "Sub-agents default to read,grep,find,ls,web_search,web_fetch + memory read. To let a worker edit code, pass tools= including bash/edit/write (swarm editing is allowed; only nested dispatch is rejected).",
       "The sub-agent is an independent AgentSession — its context does NOT count against your token budget.",
     ],
     parameters: Type.Object({
       model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
-      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide). Mutating tools (bash/edit/write) require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_parallel is always rejected." })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
     }),
 
@@ -1368,7 +1389,7 @@ export default function (pi: ExtensionAPI) {
       "Run multiple sub-agents IN PARALLEL. Each is an independent in-process AgentSession. " +
       "Results are collected when ALL complete. This is the primary tool for " +
       "multi-model analysis — do NOT call dispatch_agent N times instead. " +
-      "Mutating tools blocked by default. " +
+      "bash/edit/write available via explicit per-task tools=; nested dispatch rejected. " +
       `Up to ${MAX_PARALLEL} tasks per call; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time.`,
     promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [

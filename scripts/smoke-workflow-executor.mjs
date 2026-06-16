@@ -410,7 +410,9 @@ await check("§8 API boundary: production runner uses dispatch's exported runInP
   assert(!/createAgentSession/.test(src), "workflow/index.ts must not re-implement the session loop");
   const dispatchSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
   assert(/export async function runInProcess\(/.test(dispatchSrc), "dispatch exports runInProcess");
-  assert(/export function validateTools\(/.test(dispatchSrc), "dispatch exports validateTools (W9 runtime gate inherits)");
+  assert(/export function validateTools\(/.test(dispatchSrc), "dispatch exports validateTools (nested/unknown universal check)");
+  assert(/export function enforceMutatingEnvGate\(/.test(dispatchSrc), "dispatch exports enforceMutatingEnvGate (W9 env gate, decoupled from validateTools 2026-06-16)");
+  assert(/enforceMutatingEnvGate\(req\.tools\)/.test(src), "workflow production runner enforces the W9 mutating env gate locally (not inherited from validateTools)");
   assert(/Symbol\.for\("pi-astack\/dispatch\/shared-infra\/v1"\)/.test(dispatchSrc), "shared infra is globalThis singleton (jiti copy safety)");
 });
 

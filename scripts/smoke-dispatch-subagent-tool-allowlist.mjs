@@ -88,6 +88,29 @@ if (/if\s*\(\s*!\s*KNOWN_TOOLS\.has\(\s*name\s*\)\s*\)/.test(src)) {
   bad("(c) validateTools MISSING the !KNOWN_TOOLS.has(name) rejection guard");
 }
 
+// ── (f) nested-dispatch still rejected; (g) mutating NO LONGER gated ─────
+// (2026-06-16) the dispatch swarm dropped the PI_MULTI_AGENT_ALLOW_MUTATING
+// gate: workers may receive bash/edit/write via explicit tools=. The ONLY
+// hard boundary left in validateTools is nested-dispatch + unknown-tool.
+// (The workflow channel keeps its W9 env gate via enforceMutatingEnvGate,
+//  verified separately in smoke-workflow-executor.)
+const vtMatch = src.match(/export function validateTools\(toolsStr[\s\S]*?\n}/);
+if (!vtMatch) {
+  bad("(f/g) could not locate validateTools body — dispatch source shape changed");
+} else {
+  const vt = vtMatch[0];
+  if (/dispatch_agent|dispatch_parallel/.test(vt) && /nested dispatch not allowed/.test(vt)) {
+    ok("(f) validateTools rejects nested dispatch (recursion / runaway-fanout boundary kept)");
+  } else {
+    bad("(f) validateTools MISSING nested-dispatch rejection — the one boundary that must stay");
+  }
+  if (/PI_MULTI_AGENT_ALLOW_MUTATING/.test(vt)) {
+    bad("(g) validateTools still gates mutating via PI_MULTI_AGENT_ALLOW_MUTATING — swarm edit/write must be ungated here (moved to workflow's enforceMutatingEnvGate)");
+  } else {
+    ok("(g) validateTools does NOT gate bash/edit/write (swarm editing allowed; env gate removed 2026-06-16)");
+  }
+}
+
 // ── (d) createAgentSession is actually CALLED WITH a `tools` allowlist ───
 // This is load-bearing: if `tools` is dropped from the call, the SDK falls
 // back to enabling ALL extension tools (incl. abrain's vault_release) — and

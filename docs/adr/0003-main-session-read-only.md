@@ -13,7 +13,8 @@ status: accepted
 
 - 主会话 LLM **只读** memory，所有 durable 写经 **sediment 单写**（agent_end 异步 vote/dedupe/refine + 单 provenance 审计）。
 - 两层防线：**层 1 mechanic** = LLM tool surface 无 brain mutation tool（写能力架构性缺席）；**层 2 best-effort** = 经通用工具（bash/edit/write/dispatch）间接触达是显式接受的有界 residual，靠 stdout 不返回 / 输出脱敏 / sediment 事后审计补偿，**不当作层 1 缺口去机械封堵**。
-- `prompt_user` 答案是 user-attested 信号（Lane-A 等价），但不软化层 1；sub-agent 不得 capability escalation 绕过只读。
+- `prompt_user` 答案是 user-attested 信号（Lane-A 等价），但不软化层 1。
+- **修订（2026-06-16）**：原「sub-agent 不得 capability escalation」曾以 env 闸（`PI_MULTI_AGENT_ALLOW_MUTATING`）机械封堵 dispatch swarm 的 bash/edit/write —— **现去除**。理由与层 2 一致：sub-agent 经通用工具间接写是**显式接受的有界 residual**（brain 写 git 可恢复；单用户威胁模型下运行时机械闸防的是不可达威胁；真实外传需安装恶意 extension = 供应链信任，非运行时护栏职责）。层 1 不变量仍然成立（LLM 工具面无 brain-mutation tool，sediment 仍是唯一 dedicated writer），dispatch 仅保留**禁套娃**（递归 / 失控边界，非只读边界）。机制条目 `dispatch-agents-cannot-escalate-to-brain-writes` 据此修订（由 sediment 落地）。workflow 通道的 W9 三重显式 env 闸是独立部署形态选择（ADR 0033），不在本次修订内。
 
 ## 机制（已分解入 abrain，逐条 slug）
 

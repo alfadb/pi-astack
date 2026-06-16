@@ -8,8 +8,10 @@
  * aggregate. This is NOT advisory-shadow: the assignment is executed, so the
  * online evaluation harness (ADR 0030 §5) gets real outcomes to judge.
  *
- * Cage (ADR 0030 §4): worker count hard-capped at HARD_MAX_WORKERS; read-only
- * tools only; NO cost gate (INV-COST-NOT-A-GATE — cost is report-only);
+ * Cage (ADR 0030 §4): worker count hard-capped at HARD_MAX_WORKERS; workers
+ * read-only by default (WORKER_TOOLS + hub prompt — not a hard tool cap; same
+ * posture as dispatch after the 2026-06-16 env-gate removal); NO cost gate
+ * (INV-COST-NOT-A-GATE — cost is report-only);
  * dispatch.hub.enabled default false (tool is not registered when off);
  * cross-vendor decorrelation flagged in audit (hub vendor vs worker vendors).
  *

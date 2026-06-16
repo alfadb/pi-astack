@@ -38,6 +38,7 @@ import { executeWorkflow, type StageRunner, type WorkflowRunResult } from "./exe
 import {
   runInProcess,
   validateTools,
+  enforceMutatingEnvGate,
   DEFAULT_TIMEOUT_MS,
   MAX_CONCURRENCY as DISPATCH_MAX_CONCURRENCY,
   type AgentResult,
@@ -194,6 +195,15 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
     const toolCheck = validateTools(req.tools);
     if (!toolCheck.ok) {
       return { output: "", error: `tool_rejected: ${toolCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
+    }
+    // ADR 0033 W9 triple-explicit (workflow-only): mutating tools require the
+    // PI_MULTI_AGENT_ALLOW_MUTATING env gate. Enforced HERE, not in the shared
+    // validateTools — the dispatch swarm intentionally dropped this gate
+    // (2026-06-16), but the workflow channel keeps it as a deliberate
+    // deployment-form gate (dropping it is an ADR 0033 promotion tripwire).
+    const mutCheck = enforceMutatingEnvGate(req.tools);
+    if (!mutCheck.ok) {
+      return { output: "", error: `tool_rejected: ${mutCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
     }
     const anchor = deriveSubAgentAnchor(getCurrentAnchor(), req.anchorLabel);
     const prompt = anchor ? `${formatAnchorPromptBlock(anchor)}\n\n${req.prompt}` : req.prompt;

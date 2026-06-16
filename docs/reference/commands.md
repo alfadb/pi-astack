@@ -120,7 +120,7 @@ These govern what `dispatch_agent` / `dispatch_parallel` sub-pi processes can do
 |---|---|
 | Main session calls `dispatch_agent` / `dispatch_parallel` without `tools` | **Default `read,grep,find,ls`** (read-only file/search tools). Not `[]`. |
 | `tools: "read,grep,find,ls,memory_search,memory_decide,memory_get,memory_list,memory_neighbors"` | Read-only + memory facade. |
-| `tools` includes any of `bash` / `edit` / `write` | Rejected unless `PI_MULTI_AGENT_ALLOW_MUTATING=1` is set in the **parent** process env. Without the env gate, `validateTools()` throws and the dispatch call fails. |
+| `tools` includes any of `bash` / `edit` / `write` | **Accepted** (2026-06-16): swarm workers may edit/write/run shell when the caller explicitly lists them. The old `PI_MULTI_AGENT_ALLOW_MUTATING` env gate was removed from the dispatch path (rationale: brain writes are git-recoverable; single-user threat model; see ADR 0003). The **workflow** channel keeps its own env gate via `enforceMutatingEnvGate` (ADR 0033 W9). |
 | Sub-agent tries to call `dispatch_agent` / `dispatch_parallel` | **Always rejected.** Nested dispatch is unconditionally blocked. |
 
 Sub-pi processes also inherit `PI_ABRAIN_DISABLED=1` (forced override after `...process.env`, so `export PI_ABRAIN_DISABLED=0` cannot defeat it). Inside a sub-pi the `abrain` extension's `activate()` early-returns without registering `vault_release`, `/vault`, `/secret`, or any vault hooks.

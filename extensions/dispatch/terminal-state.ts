@@ -3,9 +3,14 @@
  *
  * Implements the C5 contract: every dispatch audit row carries an
  * explicit terminal_state of `completed | failed | degraded | cancelled`,
- * plus per-state side-effect fields. This is the infra-layer prerequisite
- * for any L2 mutating production path; the schema must land BEFORE any
- * PR opens `PI_MULTI_AGENT_ALLOW_MUTATING=1` as default.
+ * plus per-state side-effect fields. The schema is the infra-layer record
+ * for L2 outcomes. NOTE (2026-06-16): the dispatch mutating env gate was
+ * removed (swarm workers may edit/write/bash via explicit tools=). The
+ * terminal_state SCHEMA landed, but there is no rollback ENGINE — partial
+ * writes from a failed mutating worker are recovered via git
+ * (INV-GIT-IS-RECOVERY), not an undo path; the per-state side-effect flags
+ * below are best-effort/optimistic v1 values (accepted residual under the
+ * single-user threat model).
  *
  * # ADR §C5 field contract (normative)
  *

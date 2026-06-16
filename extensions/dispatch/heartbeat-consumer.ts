@@ -313,10 +313,13 @@ export function assessLivenessForAnchor(
  *   3. assessment.reason is NOT carried into the returned fields (the §C5
  *      cancelled schema has no `reason` slot). The caller MUST log
  *      assessment.reason separately for the audit trail (3-T0 P2).
- *   4. cleanup_done is `true` here ONLY because v1 dispatch is READ-ONLY
- *      (vacuously clean). REVISIT before PI_MULTI_AGENT_ALLOW_MUTATING: an
- *      externally-observed hang did NOT run the producer's cleanup, so for
- *      mutating sub-agents this flag must become unknown/false (3-T0 P2).
+ *   4. cleanup_done is `true` here as a best-effort/optimistic v1 value. It
+ *      was vacuously clean while dispatch was read-only; after the 2026-06-16
+ *      env-gate removal a mutating worker CAN leave partial side effects on an
+ *      externally-observed hang. Accepted residual (git-is-recovery is the
+ *      real backstop, single-user threat model) rather than a cleanup-
+ *      accounting engine; tighten to unknown/false only if a real audit
+ *      consumer ever needs it.
  *
  * Scope reminder: `stale` only fires when the writer's beat loop stopped
  * (see file header). An async hang with a live event loop is NEVER `stale`

@@ -21,7 +21,7 @@ status: accepted
 
 H5 gate 的字面是"ADR 0030 完成前不进生产"，而 ADR 0030 的形态（定量 benchmark vs 定性 review）本就是 ADR 0027 §6 留下的开放题。本 ADR 给出答案：**单用户、owner 自担风险、配在线遥测 + 跨厂商判定的 harness**。这不是把 gate 删掉，是按 gate 自己写的前置条件把它清掉。
 
-gate 原始论证里的"assignment 错 → 所有下游 sub-agent 在错误前提下 stigmergy → 错误被放大"是按 Devin 式自治长跑威胁模型校准的。pi 的 L2 不是那个形态（经四家 T0 读码核实）：单层（`validateTools` 硬拒嵌套 dispatch）、默认只读（`PI_MULTI_AGENT_ALLOW_MUTATING` off）、当轮可问责（C4'）、共享 C6 anchor、成本全计量。在这个拓扑里一次坏 assignment 的最坏现实后果 = **烧掉一轮 ≤ 数美元、当轮可见、可重做**，不是不可逆的下游污染。gate 的字面"不进生产"对单用户 over-fit；它真正要保护的"correctness 不可凭 hub 自证"由 §5 的双跑判定守住。
+gate 原始论证里的"assignment 错 → 所有下游 sub-agent 在错误前提下 stigmergy → 错误被放大"是按 Devin 式自治长跑威胁模型校准的。pi 的 L2 不是那个形态（经四家 T0 读码核实）：单层（`validateTools` 硬拒嵌套 dispatch）、hub 默认只读（worker 默认 `WORKER_TOOLS` + hub prompt 守只读；dispatch 的 mutating env 闸已于 2026-06-16 去除，hub 只读现由其评估用途的 prompt 保证，非 env 闸）、当轮可问责（C4'）、共享 C6 anchor、成本全计量。在这个拓扑里一次坏 assignment 的最坏现实后果 = **烧掉一轮 ≤ 数美元、当轮可见、可重做**，不是不可逆的下游污染。gate 的字面"不进生产"对单用户 over-fit；它真正要保护的"correctness 不可凭 hub 自证"由 §5 的双跑判定守住。
 
 **唯一真正半不可逆的残留**是 L1 沉淀污染（一个自信地错的 hub 聚合被主会话接受 → 沉进大脑 → 自我强化，ADR 0027 §8 代价 9）。其主路径已被现有代码堵死（§6），本 ADR 只补一处。
 
