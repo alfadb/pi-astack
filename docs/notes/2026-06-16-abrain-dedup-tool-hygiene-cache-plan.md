@@ -112,7 +112,7 @@ F(安全热身,验证改-测闭环)→ T0 量旧账 → A(先 A1 规则、再 A2
 - [x] **F** 删除 memory_neighbors — 提交 66c0418;smoke dispatch/dispatch-hub/memory 全绿。
 - [x] **T0** 量旧账 — 提交 c308a9d;近重复 172 对(≥0.90 12 对/24 条)、黑话簇 5 条(冗余 4)、断链未解析 575(以失效路径约定为主)。
 - [x] **A1** 规则路径全集裁决(去 Jaccard 门 + 归档相悖)— 提交 b75a950 → 7294e54 → 281bf18;两轮跨厂商 T0 复评通过(2 SHIP/1 SWC,SWC 已闭);smoke 11/11。残留:live LLM 质量带监控观测。
-- [ ] **A2** 大库写入时去重修稳(嵌入召回 + LLM 判;修全库 bypass)— 动 sediment 写入路径,完成前过 T0 评审关。
+- [x] **A2** 大库写入时去重 — 验证结论:全库 bypass 已被 P7(ADR 0035)+ ADR 0037 profile facade 结构性修复,**无需改码**;2 家跨厂商 T0(opus/deepseek)独立 CONFIRM-NO-CHANGE;回归 smoke:stage0-nonactive + search-profiles 均绿。证据:docs/notes/2026-06-16-A2-fullcorpus-bypass-verification.md。
 - [ ] **B** 清旧账(黑话簇收敛 + 断链清理)。
 - [ ] **D** 缓存分区修复。
 - [ ] **C** 理由保鲜。
