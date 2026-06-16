@@ -400,6 +400,8 @@ export interface HubDeps {
   appendDispatchAudit: (projectRoot: string, anchor: CausalAnchor | undefined, event: Record<string, unknown>) => Promise<void>;
   providerFromModel: (model: string) => string;
   validateTools: (tools: string | undefined) => { ok: boolean; reason?: string };
+  /** Reuse the existing dispatch footer indicator so hub progress is visible. */
+  applyDispatchStatus: (ctx: unknown, state: string, counts?: { running: number; failed: number; success: number; total: number }, durationMs?: number) => void;
   defaultTimeoutMs: number;
   maxProviderConcurrency: number;
   /** Read settings.modelCurator + settings.dispatch.hub fresh per call. */
@@ -479,6 +481,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
           hubCost: usage?.cost ?? 0, workersCost: 0, hubDurationMs: durMs, totalWallMs: 0, dualExecSampled: false,
         }));
+        deps.applyDispatchStatus(ctx, "failed", { running: 0, failed: 1, success: 0, total: 1 });
         return {
           content: [{ type: "text" as const, text: `❌ dispatch_hub: ${reason}. Fall back to dispatch_parallel with an explicit assignment.` }],
           details: { kind: "dispatch_hub_plan_failed", error: reason, failure_type: failureType, hub_model: hubModel },
@@ -486,6 +489,9 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         };
       };
 
+      // Reuse the dispatch footer: show "running" during hub planning (worker
+      // count not yet known) so the user sees the hub is working, not stalled.
+      deps.applyDispatchStatus(ctx, "running", { running: 1, failed: 0, success: 0, total: 1 });
       const hubStart = Date.now();
       // MAJOR fix (cross-vendor audit): the planning call MUST be try/catch'd —
       // runInProcess can REJECT (getSharedInfra failure / undefined modelRegistry);
@@ -558,12 +564,19 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         if (n === 0) activeByProvider.delete(p); else activeByProvider.set(p, n);
       };
 
+      // Live footer (reuse the dispatch indicator): worker progress as they run.
+      let running = 0, success = 0, failed = 0;
+      const updateStatus = () => deps.applyDispatchStatus(ctx, "running", { running, failed, success, total });
+
       const fanStart = Date.now();
+      updateStatus();
       const worker = async () => {
         while (true) {
           if (signal.aborted) return;
           const i = claimNext();
           if (i === undefined) return;
+          running++;
+          updateStatus();
           try {
             const t = tasks[i];
             const subAnchor = deriveSubAgentAnchor(parentAnchor, `dispatch_hub[${i}]`);
@@ -588,6 +601,9 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
               }
             }
             results[i] = res;
+            running--;
+            if (res.error) failed++; else success++;
+            updateStatus();
             // MAJOR fix: emit the dispatch_hub.task terminal row for EVERY claimed
             // worker, INCLUDING tool-rejected (previously skipped via early continue
             // → that worker had a disposition row but no terminal row).
@@ -621,6 +637,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const successCount = dense.filter((r) => !r.error).length;
       const failedCount = dense.filter((r) => !!r.error).length;
       const terminalState = failedCount === 0 ? "completed" : successCount === 0 ? "failed" : "degraded";
+      deps.applyDispatchStatus(ctx, terminalState, { running: 0, failed: failedCount, success: successCount, total }, totalWallMs);
       const workersCost = dense.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
       const hubCost = hubRes.usage?.cost ?? 0;
 

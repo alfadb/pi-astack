@@ -969,6 +969,13 @@ export async function runInProcess(
   const result = await Promise.race([runPromise, timeoutPromise]);
   if (timeoutId) clearTimeout(timeoutId);
   settled = true;
+  // Cross-vendor audit (ADR 0030 dogfood, opus 2.C): remove the abort listener
+  // on EVERY race-resolution path. The timeout path invokes onAbort() MANUALLY
+  // (not via the abort event), so `{ once: true }` never fires and the listener
+  // would leak on the long-lived parent signal (unbounded per fan-out →
+  // MaxListenersExceededWarning). Idempotent: a no-op if a runPromise terminal
+  // path already removed it.
+  signal.removeEventListener("abort", onAbort);
   return enrichHeartbeat(result);
   } finally {
     // ADR 0027 §C2' Stage 1b R8 P1 fix: heartbeat.stop() in finally
@@ -1859,6 +1866,7 @@ export default function (pi: ExtensionAPI) {
         appendDispatchAudit,
         providerFromModel,
         validateTools,
+        applyDispatchStatus,
         defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
         maxProviderConcurrency: MAX_PROVIDER_CONCURRENCY,
         readConfig: readHubConfigFromSettings,
