@@ -69,7 +69,7 @@ export type CuratorDecision =
 
 export interface CuratorAudit {
   decision: CuratorDecision;
-  neighbors: Array<{ slug: string; score?: number; rank_reason?: string }>;
+  neighbors: Array<{ slug: string; status?: string; score?: number; rank_reason?: string }>;
   stage_ms: { search: number; decide: number; total: number };
   error?: string;
   /** ADR 0025 P0.5: multi-view verification result, present only when
@@ -1086,6 +1086,9 @@ export async function curateProjectDraft(
     .filter((entry): entry is MemoryEntry => !!entry);
   const neighborAudit = cards.map((card: any) => ({
     slug: String(card.slug),
+    // ADR 0031 CAS parity: carry observed status so lifecycle ops
+    // (archive/delete/merge) can pin expected_status at the writer.
+    ...(bySlug.get(String(card.slug))?.status ? { status: bySlug.get(String(card.slug))!.status } : {}),
     ...(typeof card.score === "number" ? { score: card.score } : {}),
     ...(typeof card.rank_reason === "string" ? { rank_reason: card.rank_reason } : {}),
   }));

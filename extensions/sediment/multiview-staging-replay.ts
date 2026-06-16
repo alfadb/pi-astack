@@ -52,6 +52,7 @@ import type { MemoryEntry } from "../memory/types";
 import type { CuratorDecision } from "./curator";
 import type { ProjectEntryDraft } from "./writer";
 import type { SedimentSettings } from "./settings";
+import type { EntryStatus } from "./validation";
 import { runMultiView, type MultiViewResult } from "./multi-view";
 import type { ModelRegistryLike } from "./llm-extractor";
 import type {
@@ -166,6 +167,7 @@ export interface ReplayDeps {
   writeApprovedToBrain: (
     decision: CuratorDecision,
     candidate: ProjectEntryDraft,
+    neighborStatusBySlug?: Record<string, EntryStatus>,
   ) => Promise<void>;
   signal?: AbortSignal;
 }
@@ -584,8 +586,13 @@ async function processOneEntry(
 
   let mvResult: MultiViewResult;
   let vanishedSlugs: string[] = [];
+  // ADR 0031 CAS parity: capture replay-time observed neighbor statuses so the
+  // brain write can pin expected_status (the first try's `neighbors` const is
+  // out of scope at the write site below).
+  let replayNeighborStatuses: Record<string, EntryStatus> = {};
   try {
     const neighbors = await deps.loadNeighborsBySlug(entry.neighbor_slugs);
+    replayNeighborStatuses = Object.fromEntries(neighbors.map((n) => [n.slug, n.status as EntryStatus]));
     const foundSet = new Set(neighbors.map((n) => n.slug));
     vanishedSlugs = entry.neighbor_slugs.filter((s) => !foundSet.has(s));
 
@@ -742,7 +749,7 @@ async function processOneEntry(
   // Other metadata fields (triggerPhrases / sessionId / timelineNote)
   // are NOT in CandidateSnapshot — schema decision per R3 fix-up,
   // see draftFromSnapshot JSDoc above.
-  await retryApprovedWriterOnly(entry, finalDecision, audit, deps, result, entryStart, vanishedDetail());
+  await retryApprovedWriterOnly(entry, finalDecision, audit, deps, result, entryStart, vanishedDetail(), replayNeighborStatuses);
 }
 
 async function retryApprovedWriterOnly(
@@ -753,6 +760,7 @@ async function retryApprovedWriterOnly(
   result: ReplayBatchResult,
   entryStart: number,
   extraDetail = "",
+  neighborStatusBySlug: Record<string, EntryStatus> = {},
 ): Promise<void> {
   try {
     const draft = draftFromSnapshot(entry, finalDecision);
@@ -783,7 +791,7 @@ async function retryApprovedWriterOnly(
       return;
     }
 
-    await deps.writeApprovedToBrain(finalDecision, draft);
+    await deps.writeApprovedToBrain(finalDecision, draft, neighborStatusBySlug);
     const completedAtIso = new Date().toISOString();
     if (!markMultiviewPendingBrainWriteCompleted(entry.slug, completedAtIso, finalDecision)) {
       inMemoryBrainCompleted.set(inMemoryKey(entry), completedAtIso);

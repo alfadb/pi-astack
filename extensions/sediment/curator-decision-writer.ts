@@ -17,6 +17,7 @@ import {
   type WriterAuditContext,
 } from "./writer";
 import type { SedimentSettings } from "./settings";
+import type { EntryStatus } from "./validation";
 
 function hasGitCommitFailure(result: WriteProjectEntryResult, settings: SedimentSettings): boolean {
   return settings.gitCommit === true
@@ -51,6 +52,11 @@ export async function executeCuratorDecisionToBrain(args: {
   dryRun?: boolean;
   auditContext?: WriterAuditContext;
   sessionId?: string;
+  /** ADR 0031 CAS parity: observed status per neighbor slug at curate time.
+   *  Lifecycle ops (archive/delete/merge) pin expected_status from this so a
+   *  concurrent reactivation/status change aborts the write instead of being
+   *  silently clobbered. Undefined → CAS skipped (legacy/backward-compatible). */
+  neighborStatusBySlug?: Record<string, EntryStatus>;
   createTimelineNote?: string;
   updateTimelineNote?: string;
   mergeTimelineNote?: string;
@@ -197,7 +203,7 @@ export async function executeCuratorDecisionToBrain(args: {
             "merged by sediment curator",
           sessionId,
         },
-        writerOpts(decision.scope),
+        { ...writerOpts(decision.scope), sourceExpectedStatus: args.neighborStatusBySlug },
       );
       assertNoGitCommitFailure(results, settings);
       return results;
@@ -212,6 +218,7 @@ export async function executeCuratorDecisionToBrain(args: {
           args.archiveReason ||
           "archived by sediment curator",
         sessionId,
+        expected_status: args.neighborStatusBySlug?.[decision.slug],
       });
       assertNoGitCommitFailure([result], settings);
       return [result];
@@ -242,6 +249,7 @@ export async function executeCuratorDecisionToBrain(args: {
           args.deleteReason ||
           "deleted by sediment curator",
         sessionId,
+        expected_status: args.neighborStatusBySlug?.[decision.slug],
       });
       assertNoGitCommitFailure([result], settings);
       return [result];

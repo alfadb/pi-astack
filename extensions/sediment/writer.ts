@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
@@ -490,9 +490,7 @@ function mergeUpdateMarkdown(
   for (const k of Object.keys(userPatch)) {
     if (PROTECTED_FRONTMATTER_KEYS.has(k)) {
       throw new Error(
-        `frontmatterPatch cannot override protected key '${k}'. " +
-        "Use the dedicated WriteProjectEntryOptions field (e.g. status " +
-        "flows through ProjectEntryUpdateDraft.status) so validation runs.`,
+        `frontmatterPatch cannot override protected key '${k}'. Use the dedicated WriteProjectEntryOptions field (e.g. status flows through ProjectEntryUpdateDraft.status) so validation runs.`,
       );
     }
     // Also guard key shape (no newline/control chars in keys themselves):
@@ -820,7 +818,7 @@ export async function mergeProjectEntries(
   targetSlugRaw: string,
   sourceSlugRaws: string[],
   patch: { compiledTruth: string; reason?: string; sessionId?: string; timelineNote?: string },
-  opts: WriteProjectEntryOptions,
+  opts: WriteProjectEntryOptions & { sourceExpectedStatus?: Record<string, EntryStatus> },
 ): Promise<WriteProjectEntryResult[]> {
   const targetSlug = slugify(targetSlugRaw);
   const sources = Array.from(new Set(sourceSlugRaws.map((slug) => slugify(slug)).filter(Boolean)));
@@ -860,6 +858,10 @@ export async function mergeProjectEntries(
       settings: opts.settings,
       dryRun: opts.dryRun,
       reason: `merged into ${targetSlug}: ${reason}`,
+      // ADR 0031 CAS parity: archive the merge source only if it is still
+      // in the status the curator observed — abort instead of silently
+      // clobbering a concurrent reactivation/status change.
+      expected_status: opts.sourceExpectedStatus?.[source],
       sessionId: patch.sessionId,
       auditContext: opts.auditContext,
     }));
@@ -1023,7 +1025,9 @@ export async function deleteProjectEntry(
     if (opts.settings.gitCommit && git === null) {
       try {
         const rel = path.relative(abrainHome, target);
-        execFileSync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+        // async reset (parity with all other rollback paths): never block the
+        // event loop on git while holding the sediment lock.
+        await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 });
       } catch { /* best-effort */ }
       try {
         await atomicWrite(target, originalRaw);
@@ -1227,7 +1231,9 @@ export async function updateProjectEntry(
     if (opts.settings.gitCommit && git === null) {
       try {
         const rel = path.relative(abrainHome, target);
-        execFileSync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+        // async reset (parity with all other rollback paths): never block the
+        // event loop on git while holding the sediment lock.
+        await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 });
       } catch { /* best-effort */ }
       try {
         await atomicWrite(target, prepared.originalRaw);

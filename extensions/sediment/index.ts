@@ -46,6 +46,7 @@ import {
   type RunWindow,
 } from "./checkpoint";
 import { curateProjectDraft, type CuratorAudit } from "./curator";
+import type { EntryStatus } from "./validation";
 import { executeCuratorDecisionToBrain } from "./curator-decision-writer";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitAboutMeBlocks, parseExplicitMemoryBlocks, previewExtraction, type ExtractedAboutMeDraft } from "./extractor";
@@ -4726,6 +4727,13 @@ async function tryAutoWriteLane(args: {
       continue;
     }
     curatorAudits.push(curated.audit);
+    // ADR 0031 CAS parity: pass observed neighbor statuses so the curator's
+    // archive/delete/merge ops pin expected_status and abort (instead of
+    // silently clobbering) on a concurrent reactivation/status change.
+    const neighborStatusBySlug: Record<string, EntryStatus> = {};
+    for (const n of curated.audit.neighbors) {
+      if (n.status) neighborStatusBySlug[n.slug] = n.status as EntryStatus;
+    }
     results.push(
       ...(await executeCuratorDecisionToBrain({
         decision: curated.decision,
@@ -4737,6 +4745,7 @@ async function tryAutoWriteLane(args: {
         dryRun: false,
         auditContext,
         sessionId,
+        neighborStatusBySlug,
         createTimelineNote: "captured from LLM auto-write extractor",
         updateTimelineNote: curated.decision.rationale || "updated by sediment curator",
         mergeTimelineNote: curated.decision.rationale || "merged by sediment curator",
@@ -4957,7 +4966,7 @@ function scheduleMultiviewReplay(args: {
           const bySlug = new Map(filtered.map((entry) => [entry.slug, entry]));
           return slugs.map((slug) => bySlug.get(slug)).filter((entry): entry is NonNullable<typeof entry> => !!entry);
         },
-        writeApprovedToBrain: async (decision, candidate) => {
+        writeApprovedToBrain: async (decision, candidate, neighborStatusBySlug) => {
           const replayCorrelationId = makeCorrelationId("replay", replaySessionId, {
             lastEntryId: `multiview-replay-${candidate.title}`,
           });
@@ -4972,6 +4981,7 @@ function scheduleMultiviewReplay(args: {
               projectId,
               settings,
               dryRun: false,
+              neighborStatusBySlug,
               auditContext: {
                 lane: "replay",
                 sessionId: replaySessionId,

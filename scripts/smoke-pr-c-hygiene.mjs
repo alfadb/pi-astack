@@ -96,7 +96,7 @@ check("replay persists intent before writer call", () => {
   if (!/export function markMultiviewPendingBrainWriteIntent/.test(multiviewIo)) throw new Error("intent marker IO function missing");
   if (!/markMultiviewPendingBrainWriteIntent\(entry\.slug, intentAtIso, finalDecision\)/.test(multiviewReplay)) throw new Error("replay must persist intent before writeApprovedToBrain");
   const intentIdx = multiviewReplay.indexOf("markMultiviewPendingBrainWriteIntent(entry.slug, intentAtIso, finalDecision)");
-  const writeIdx = multiviewReplay.indexOf("await deps.writeApprovedToBrain(finalDecision, draft)");
+  const writeIdx = multiviewReplay.indexOf("await deps.writeApprovedToBrain(finalDecision, draft");
   if (intentIdx < 0 || writeIdx < 0 || intentIdx > writeIdx) throw new Error("intent marker must precede brain write");
 });
 
