@@ -249,6 +249,30 @@ check("subsequent turns monotonic-increment turn_id (agent_end resets the per-tu
   }
 });
 
+check("same-session session_start RE-FIRE (compaction/resume) preserves turn_id", () => {
+  // Regression for the compaction turn-pin bug: a mid-session compaction
+  // re-fires session_start with the SAME session_id. Before the fix this reset
+  // currentTurnId to -1 and pinned turn_id to 0 for the rest of the run
+  // (diagnosed from dispatch audit: turn_id tracked 0→10, then collapsed to 0
+  // after a compaction and never recovered). The counter must survive a
+  // same-session re-fire and keep advancing.
+  _resetCausalAnchorForTests();
+  const pi = makeFakePi();
+  bindLifecycle(pi);
+  const sm = { getSessionId: () => "session-A" };
+  pi._fire("session_start", { type: "session_start", reason: "startup" }, { sessionManager: sm });
+  for (let i = 0; i <= 3; i++) {
+    pi._fire("before_agent_start", { type: "before_agent_start", prompt: `t${i}` }, { sessionManager: sm });
+    pi._fire("agent_end", { type: "agent_end" }, { sessionManager: sm });
+  }
+  // turn_id is now 3. Re-fire session_start for the SAME session (compaction).
+  pi._fire("session_start", { type: "session_start", reason: "compaction" }, { sessionManager: sm });
+  pi._fire("before_agent_start", { type: "before_agent_start", prompt: "t4" }, { sessionManager: sm });
+  const a = getCurrentAnchor();
+  if (a?.turn_id !== 4) throw new Error(`same-session re-fire reset turn_id: got ${a?.turn_id}, want 4 (compaction must NOT pin turn to 0)`);
+  if (a?.session_id !== "session-A") throw new Error(`session_id=${a?.session_id}`);
+});
+
 check("new session_start resets turn_id (different session)", () => {
   _resetCausalAnchorForTests();
   const pi = makeFakePi();

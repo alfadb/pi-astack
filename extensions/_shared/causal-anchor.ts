@@ -250,6 +250,17 @@ export function bindLifecycle(pi: ExtensionAPI): void {
       const sm = (ctx as { sessionManager?: { getSessionId?(): string | null | undefined } })?.sessionManager;
       const id = typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
       const state = _getState();
+      // session_start can RE-FIRE for the SAME session in-process (compaction /
+      // resume / continuation), not only at a fresh session boundary. The turn
+      // counter must SURVIVE that — only a genuinely NEW session_id resets it.
+      // Without this guard a mid-session compaction reset currentTurnId to -1 and
+      // pinned turn_id to 0 for the rest of the run, corrupting every subsequent
+      // anchor's turn attribution (diagnosed from dispatch audit: turn_id tracked
+      // 0→10 correctly, then collapsed to 0 right after a compaction and never
+      // recovered — same session_id throughout). A fresh process resuming the
+      // same session has empty module state (currentSessionId === undefined), so
+      // id !== undefined still resets there — the intended new-run behavior.
+      if (id && id === state.currentSessionId) return;
       state.currentSessionId = id ?? undefined;
       state.currentTurnId = -1; // next before_agent_start will bump to 0
       state.turnAlreadyBumped = false;
