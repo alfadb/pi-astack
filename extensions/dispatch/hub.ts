@@ -534,6 +534,9 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
           hubCost: hubRes.usage?.cost ?? 0, workersCost: 0, hubDurationMs, totalWallMs: 0, dualExecSampled: false,
         }));
+        // Cross-vendor review (gpt-5.5 MINOR): clear the planning footer so it
+        // does not stay stuck at "running 1/0/0/1" when no workers validate.
+        deps.applyDispatchStatus(ctx, "failed", { running: 0, failed: 1, success: 0, total: 1 });
         return {
           content: [{ type: "text" as const, text: `❌ dispatch_hub: no valid workers after validation. ${v.warnings.join("; ")}` }],
           details: { kind: "dispatch_hub_no_valid_workers", warnings: v.warnings, hub_model: hubModel },
