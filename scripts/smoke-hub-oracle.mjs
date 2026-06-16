@@ -78,6 +78,33 @@ const all = selectDualExecCandidates(runs, 1);
 ok(all.length === 2 && all[0].hub_model, "selectDualExecCandidates(rate=1) returns all runs with hub_model");
 ok(selectDualExecCandidates(runs, 0).length === 0, "selectDualExecCandidates(rate=0) returns none");
 
+// ── regression: two hub runs in the SAME (session_id, turn_id) must NOT merge ──
+// The first live dogfood surfaced this: anchorKey was (session,turn) only, so two
+// dispatch_hub calls in one turn (turn_id stayed 0) collided and the later
+// hub_decision overwrote the earlier — the oracle silently reported 1 run, not 2.
+// hub_run_id (stamped on every row by dispatch_hub) keeps sibling runs distinct.
+const sameTurnFixture = [
+  JSON.stringify({ row_kind: "hub_decision", operation: "dispatch_hub.decision", session_id: "sX", turn_id: 0, subturn: 2, hub_run_id: "run-A", hub_model: "deepseek/deepseek-v4-pro", hub_vendor: "deepseek", worker_count: 3, worker_models: ["a/x", "o/y", "m/z"], hub_cost: 0.005 }),
+  JSON.stringify({ row_kind: "hub_summary", operation: "dispatch_hub.summary", session_id: "sX", turn_id: 0, subturn: 0, hub_run_id: "run-A", success_count: 2, failed_count: 1, terminal_state: "degraded", hub_cost: 0.005, workers_cost: 0.98, total_cost: 0.985 }),
+  JSON.stringify({ row_kind: "hub_decision", operation: "dispatch_hub.decision", session_id: "sX", turn_id: 0, subturn: 1, hub_run_id: "run-B", hub_model: "deepseek/deepseek-v4-pro", hub_vendor: "deepseek", worker_count: 2, worker_models: ["a/x", "o/y"], hub_cost: 0.004 }),
+  JSON.stringify({ row_kind: "hub_summary", operation: "dispatch_hub.summary", session_id: "sX", turn_id: 0, subturn: 0, hub_run_id: "run-B", success_count: 2, failed_count: 0, terminal_state: "completed", hub_cost: 0.004, workers_cost: 0.18, total_cost: 0.184 }),
+].join("\n");
+const sameTurnRuns = groupHubRuns(parseAuditLines(sameTurnFixture));
+ok(sameTurnRuns.length === 2, "two runs sharing (session,turn) but distinct hub_run_id stay separate (dogfood collision regression)");
+const runA = sameTurnRuns.find((r) => r.key === "run:run-A");
+const runB = sameTurnRuns.find((r) => r.key === "run:run-B");
+ok(runA && runA.decision.worker_count === 3 && runA.summary.terminal_state === "degraded", "run-A keeps its own 3-worker degraded decision+summary (not overwritten)");
+ok(runB && runB.decision.worker_count === 2 && runB.summary.terminal_state === "completed", "run-B keeps its own 2-worker completed decision+summary (not overwritten)");
+
+// legacy fallback: rows WITHOUT hub_run_id sharing (session,turn) still collapse
+// to one anchor key — documented backward-compat behavior, not a regression.
+const legacyFixture = [
+  JSON.stringify({ row_kind: "hub_decision", operation: "dispatch_hub.decision", session_id: "sY", turn_id: 0, hub_model: "deepseek/deepseek-v4-pro", worker_count: 3, hub_cost: 0.005 }),
+  JSON.stringify({ row_kind: "hub_decision", operation: "dispatch_hub.decision", session_id: "sY", turn_id: 0, hub_model: "deepseek/deepseek-v4-pro", worker_count: 2, hub_cost: 0.004 }),
+].join("\n");
+const legacyRuns = groupHubRuns(parseAuditLines(legacyFixture));
+ok(legacyRuns.length === 1 && legacyRuns[0].key === "sY|0", "legacy rows w/o hub_run_id fall back to anchor key (collapse) — documented");
+
 console.log();
 if (failures === 0) {
   console.log("✅ oracle-hub-quality pure logic: all checks passed");

@@ -47,20 +47,30 @@ function anchorKey(r) {
   return `${r.session_id ?? "?"}|${r.turn_id ?? "?"}`;
 }
 
+/** Per-run grouping key. Prefer the explicit hub_run_id (dispatch_hub stamps it
+ *  on EVERY row): (session_id, turn_id) is NOT unique per run — multiple hub
+ *  calls share one turn, and a run's rows span subturns 0..N — so keying on the
+ *  anchor alone silently merges sibling runs (later hub_decision overwrites the
+ *  earlier). Fall back to the anchor key for legacy rows predating hub_run_id. */
+function runKey(r) {
+  return r.hub_run_id != null && r.hub_run_id !== "" ? `run:${r.hub_run_id}` : anchorKey(r);
+}
+
 /** Group audit rows into hub runs. A run is anchored by a hub_decision row;
  *  its hub_summary (subturn 0) and per-worker task rows (subturn 1..N) join on
- *  (session_id, turn_id). Rows from non-hub dispatch are ignored. */
+ *  hub_run_id (preferred) or the (session_id, turn_id) anchor (legacy fallback).
+ *  Rows from non-hub dispatch are ignored. */
 export function groupHubRuns(rows) {
   const byKey = new Map();
   for (const r of rows) {
     if (r.row_kind === "hub_decision") {
-      const k = anchorKey(r);
+      const k = runKey(r);
       if (!byKey.has(k)) byKey.set(k, { key: k, decision: null, summary: null, tasks: [], dispositions: [] });
       byKey.get(k).decision = r;
     }
   }
   for (const r of rows) {
-    const k = anchorKey(r);
+    const k = runKey(r);
     const run = byKey.get(k);
     if (!run) continue; // only attach to keys that have a hub_decision
     if (r.row_kind === "hub_summary") run.summary = r;

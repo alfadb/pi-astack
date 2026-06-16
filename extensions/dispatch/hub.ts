@@ -26,6 +26,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   getCurrentAnchor,
   deriveSubAgentAnchor,
@@ -461,6 +462,16 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         return { content: [{ type: "text" as const, text: "dispatch_hub: no flagship model available to act as hub (configure modelCurator.tiers.flagship or dispatch.hub.model)." }], details: { kind: "dispatch_hub_no_model" }, isError: true };
       }
 
+      // Unique id for THIS hub run, stamped on EVERY audit row. The oracle
+      // groups runs by hub_run_id because (session_id, turn_id) is NOT unique
+      // per run — multiple dispatch_hub calls share one turn, and a single run's
+      // rows span subturns 0..N (summary=0, decision=S, workers=S+1..). The first
+      // dogfood batch surfaced the oracle silently merging same-(session,turn)
+      // runs (later hub_decision overwrote earlier); hub_run_id fixes that.
+      const hubRunId = randomUUID();
+      const emit = (anchor: CausalAnchor | undefined, event: Record<string, unknown>) =>
+        deps.appendDispatchAudit(projectRoot, anchor, { ...event, hub_run_id: hubRunId });
+
       // ── Hub planning call ──
       const planPrompt = buildHubPlanPrompt({ task, roster, maxWorkers: hubCfg.maxWorkers, hubModel });
       const hubAnchor = deriveSubAgentAnchor(parentAnchor, "dispatch_hub.plan");
@@ -471,13 +482,13 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       // trace, then return a graceful error — never crash the tool, never execute
       // an errored plan. Shared by all three failure routes below.
       const failPlanning = (reason: string, failureType: string, planText: string, usage?: { input: number; output: number; cost: number }, durMs = 0) => {
-        void deps.appendDispatchAudit(projectRoot, hubAnchor, buildHubDecisionRow({
+        void emit(hubAnchor, buildHubDecisionRow({
           hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText,
           workers: [], rationale: "", warnings: [reason], sameVendorAsHub: 0,
           hubDurationMs: durMs, hubResult: "fail", hubFailureType: failureType,
           ...(usage ? { usage } : {}),
         }));
-        void deps.appendDispatchAudit(projectRoot, summaryAnchor, buildHubSummaryRow({
+        void emit(summaryAnchor, buildHubSummaryRow({
           workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
           hubCost: usage?.cost ?? 0, workersCost: 0, hubDurationMs: durMs, totalWallMs: 0, dualExecSampled: false,
         }));
@@ -523,14 +534,14 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       }
 
       const v = validateHubPlan(parsed.plan, { roster, hubModel, maxWorkers: hubCfg.maxWorkers });
-      void deps.appendDispatchAudit(projectRoot, hubAnchor, buildHubDecisionRow({
+      void emit(hubAnchor, buildHubDecisionRow({
         hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText: hubRes.output ?? "",
         workers: v.workers, rationale: parsed.plan.rationale, warnings: v.warnings, sameVendorAsHub: v.sameVendorAsHub,
         hubDurationMs, hubResult: "ok", ...(hubRes.usage ? { usage: hubRes.usage } : {}),
       }));
 
       if (v.workers.length === 0) {
-        void deps.appendDispatchAudit(projectRoot, summaryAnchor, buildHubSummaryRow({
+        void emit(summaryAnchor, buildHubSummaryRow({
           workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
           hubCost: hubRes.usage?.cost ?? 0, workersCost: 0, hubDurationMs, totalWallMs: 0, dualExecSampled: false,
         }));
@@ -583,7 +594,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           try {
             const t = tasks[i];
             const subAnchor = deriveSubAgentAnchor(parentAnchor, `dispatch_hub[${i}]`);
-            void deps.appendDispatchAudit(projectRoot, subAnchor, buildHubDispositionRow({
+            void emit(subAnchor, buildHubDispositionRow({
               workerIndex: i, workerCount: total, model: t.model, role: t.role, promptChars: t.prompt.length,
             }));
             let res: { output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } };
@@ -610,7 +621,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
             // MAJOR fix: emit the dispatch_hub.task terminal row for EVERY claimed
             // worker, INCLUDING tool-rejected (previously skipped via early continue
             // → that worker had a disposition row but no terminal row).
-            void deps.appendDispatchAudit(projectRoot, subAnchor, {
+            void emit(subAnchor, {
               operation: "dispatch_hub.task",
               row_kind: "task",
               task_index: i,
@@ -644,8 +655,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const workersCost = dense.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
       const hubCost = hubRes.usage?.cost ?? 0;
 
-      void deps.appendDispatchAudit(
-        projectRoot,
+      void emit(
         summaryAnchor,
         buildHubSummaryRow({
           workerCount: total, successCount, failedCount, terminalState,
