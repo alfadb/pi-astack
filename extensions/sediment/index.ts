@@ -4470,8 +4470,8 @@ async function tryAutoWriteLane(args: {
       const rs = draft.scope === "global"
         ? { scope: "global" as const, projectId: undefined as string | undefined }
         : { scope: "project" as const, projectId: draft.scope.projectId };
-      const candidates = listRulesInScope(abrainHome, rs.scope, rs.projectId);
       try {
+        const candidates = listRulesInScope(abrainHome, rs.scope, rs.projectId);
         const resolved = await resolveRuleWrite({
           draft, candidates, settings, modelRegistry: args.modelRegistry,
           abrainHome, auditContext: tier1AuditContext,

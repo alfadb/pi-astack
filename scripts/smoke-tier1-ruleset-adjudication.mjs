@@ -49,7 +49,9 @@ function freshHome() {
   return home;
 }
 async function seed(home, title, body, injectMode = "listed") {
-  const r = await writeAbrainRule({ ...baseDraft, title, body, injectMode }, { abrainHome: home, settings: SETTINGS, auditContext: AUDIT });
+  // semanticDedup:"off" so fixtures always create distinctly (we are seeding
+  // candidates on purpose; the writer's body-similarity dedup is not under test here).
+  const r = await writeAbrainRule({ ...baseDraft, title, body, injectMode }, { abrainHome: home, settings: SETTINGS, auditContext: AUDIT, semanticDedup: "off" });
   assert(r.status === "created", `seed ${title}: ${r.status} ${r.reason}`);
   return r.slug;
 }
@@ -151,6 +153,32 @@ await check("no candidates → deterministic create", async () => {
   const { result, adjudication } = await resolveRuleWrite({ draft, candidates: [], settings: SETTINGS, modelRegistry: {}, abrainHome: home, auditContext: AUDIT, adjudicateFn: fakeAdj({ decision: "update", targetSlug: "x", archiveSlugs: [], reason: "should not be called" }) });
   assert(result.status === "created", `created, got ${result.status}`);
   assert(adjudication.reason === "no_candidates", `no_candidates: ${JSON.stringify(adjudication)}`);
+});
+
+await check("BLOCKER fix: git_commit_failed primary → NO archive (directive did not land)", async () => {
+  const home = freshHome();
+  const sib = await seed(home, "survivor sibling rule", "This sibling must NOT be archived when the primary fails to commit.");
+  const draft = { ...baseDraft, title: "directive that hits git failure", body: "Directive whose primary create fails at git commit (temp home has no git repo)." };
+  const candidates = listRulesInScope(home, "global", undefined);
+  const GIT = { gitCommit: true, lockTimeoutMs: 5000 }; // no .git in temp home -> commit fails -> git_commit_failed
+  const { result, adjudication } = await resolveRuleWrite({ draft, candidates, settings: GIT, modelRegistry: {}, abrainHome: home, auditContext: AUDIT, adjudicateFn: fakeAdj({ decision: "create", archiveSlugs: [sib], reason: "would supersede" }) });
+  assert(result.status === "rejected" && result.reason === "git_commit_failed", `git_commit_failed, got ${result.status}/${result.reason}`);
+  assert(statusOf(home, sib) === "active", `sibling must stay active, got ${statusOf(home, sib)}`);
+  assert(Array.isArray(adjudication.archived) && adjudication.archived.length === 0, `no archive recorded, got ${JSON.stringify(adjudication.archived)}`);
+  assert(adjudication.deferred === "git_commit_failed", `deferred marker set, got ${JSON.stringify(adjudication)}`);
+});
+
+await check("archive cap: at most MAX_ARCHIVE_PER_OP (5) archived in one op", async () => {
+  const home = freshHome();
+  const slugs = [];
+  for (let i = 0; i < 7; i++) slugs.push(await seed(home, `archivable rule number ${i}`, `Archivable sibling rule body number ${i} for the archive-cap test.`));
+  const draft = { ...baseDraft, title: "winner over many siblings", body: "A winner rule whose adjudicator claims it supersedes seven siblings at once." };
+  const candidates = listRulesInScope(home, "global", undefined);
+  const { result, adjudication } = await resolveRuleWrite({ draft, candidates, settings: SETTINGS, modelRegistry: {}, abrainHome: home, auditContext: AUDIT, adjudicateFn: fakeAdj({ decision: "create", archiveSlugs: slugs, reason: "mass archive attempt" }) });
+  assert(result.status === "created", `winner created, got ${result.status}`);
+  assert(adjudication.archived.length === 5, `archive list capped to 5, got ${adjudication.archived.length}`);
+  const onDisk = slugs.filter((s) => statusOf(home, s) === "archived").length;
+  assert(onDisk === 5, `exactly 5 archived on disk, got ${onDisk}`);
 });
 
 console.log("");

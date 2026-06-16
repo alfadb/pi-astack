@@ -1,8 +1,8 @@
 ---
 doc_type: review-evidence
-status: pending-review
+status: addressed-pending-ratification
 created: 2026-06-16
-gate: cross-vendor-T0-review (mandated by goal g-eaaa09e1 verification rules; A NOT marked complete until passed)
+gate: cross-vendor-T0-review (mandated by goal g-eaaa09e1; review done 2026-06-16, blocker+majors fixed, see §7)
 ---
 
 # A1 评审证据包:规则路径全集裁决(去 Jaccard 门 + 归档相悖)
@@ -59,3 +59,21 @@ diff stat(不含新文件):5 files, +76/-2。
 
 - 评审意见落地 → 再标 A1 完成。
 - A2(大库写入时去重修稳)单独推进。
+
+## 7. 跨厂商 T0 评审结果与处置(2026-06-16)
+
+4 家独立盲评(opus-4-8 / gpt-5.5 / deepseek-v4-pro / kimi-k2.6),各自独立重跑 smoke(都 10/10 + 回归全绿)。裁决:2 BLOCK / 2 SHIP-WITH-CHANGES,焦点一致。
+
+**已修(代码 + 新增用例验证)**:
+- [BLOCKER, 3/4] `git_commit_failed` 主操作(已回滚)仍走归档循环 → 主操作 rejected 即 return、不归档。
+- [MAJOR, 4/4] 归档无上限 → `MAX_ARCHIVE_PER_OP=5`。
+- [MAJOR] `listRulesInScope` 在 try 外 → 移入 try。
+- [MAJOR] merge TOCTOU 见证在 LLM 后才读 → `listRulesInScope` 快照 `bodyHash` 覆盖 LLM 延迟窗口。
+- [MAJOR] slug 碰撞 reason 含糊 → 记为独立 `slug_collision`。
+- 廉价加固:prompt 加“误归档=丢偏好/拿不准保留两者 + 上限”、capBody 1200→2000、`listRulesInScope` small-set 警告 JSDoc。
+
+**有意让过(MINOR/NIT,含理由)**:`mergedBody<10`(与 writer merge apply 阈值一致,勿跨函数不一致);JSON 首`{`末`}`提取(已 fail-closed→create);candidate>60 截断(规则区仅 29 条);update 路径无 TOCTOU(pre-existing,非 A1 范围)。
+
+**残留(全体认同)**:fake 裁决器只验机制,**live LLM 裁决质量未测** → A1 属“带监控上线”(kill-switch 可回滚 + 审计表观测 dogfood)。
+
+smoke:tier1-ruleset 现 **10/10**;回归 tier1-jaccard(16)/rule-writer-fs(18)/tier1-directive-defer(10)/rule-writer(14) 全绿。

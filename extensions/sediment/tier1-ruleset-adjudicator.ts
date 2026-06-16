@@ -34,14 +34,21 @@ import {
   type WriterAuditContext,
 } from "./writer";
 
-const MAX_CANDIDATE_BODY = 1200;
+const MAX_CANDIDATE_BODY = 2000;
 const MAX_CANDIDATES_IN_PROMPT = 60;
+/** T0 review (2026-06-16): hard cap on soft-archives per write. The prompt's
+ *  "conservative" bias is advisory; this makes mass-archive mechanically
+ *  impossible even if the adjudicator hallucinates a long archive list. */
+const MAX_ARCHIVE_PER_OP = 5;
 
 export interface RuleCandidate {
   slug: string;
   title: string;
   body: string;
   injectMode?: string;
+  /** frontmatter body_hash snapshotted when candidates were listed (pre-LLM).
+   *  Threaded as the merge TOCTOU witness so it covers the LLM-latency window. */
+  bodyHash?: string;
 }
 
 export interface RuleSetDecision {
@@ -102,7 +109,7 @@ export function buildRuleSetAdjudicationPrompt(input: { draftTitle: string; draf
     '- "merge": same topic as an existing rule but ADDS/REFINES content → set "target_slug" AND "merged_body" (a single coherent body preserving ALL constraints from BOTH; do not drop specifics like hostnames, tool names, exceptions).',
     "",
     'Additionally, "archive_slugs": list existing rule slugs that the RESULTING rule makes redundant — i.e. it SUPERSEDES (strictly broader, fully contains) or CONTRADICTS them. These get soft-archived (reversible).',
-    "Bias (conservative): archive ONLY when one rule clearly subsumes/contradicts another. When unsure, leave it OUT of archive_slugs (keeping a near-duplicate is safer than wrongly archiving distinct intent). Never put the update/merge target in archive_slugs.",
+    `Bias (conservative): archive ONLY when one rule clearly subsumes/contradicts another. When unsure, leave it OUT of archive_slugs — wrongly archiving a distinct rule LOSES that user preference, so when in doubt keep both. Never put the update/merge target in archive_slugs. At most ${MAX_ARCHIVE_PER_OP} archives are honored per operation.`,
     'When unsure between update and merge, choose merge. When unsure whether the directive is the same as any existing rule at all, choose create.',
     "",
     "## OUTPUT — exactly one JSON object, no other text:",
@@ -235,9 +242,17 @@ export async function resolveRuleWrite(args: {
     const target = { slug: d.targetSlug!, scope, projectId };
     let expectedBodyHash: string | undefined;
     if (d.decision === "merge") {
-      const existing = readRuleForAdjudication(abrainHome, scope, projectId, d.targetSlug!);
-      if (!existing) return fallbackCreate("target_unreadable", adj.model);
-      expectedBodyHash = existing.bodyHash;
+      // T0 review fix: prefer the body_hash SNAPSHOTTED when candidates were
+      // listed (pre-LLM) so the TOCTOU witness also covers the LLM-latency
+      // window; only fall back to a fresh read if the candidate lacked one.
+      const cand = candidates.find((c) => c.slug === d.targetSlug);
+      if (cand?.bodyHash) {
+        expectedBodyHash = cand.bodyHash;
+      } else {
+        const existing = readRuleForAdjudication(abrainHome, scope, projectId, d.targetSlug!);
+        if (!existing) return fallbackCreate("target_unreadable", adj.model);
+        expectedBodyHash = existing.bodyHash;
+      }
     }
     result = await applyTier1RuleAdjudication(
       target,
@@ -249,13 +264,33 @@ export async function resolveRuleWrite(args: {
   // R1 B1 parity: any apply reject except transient git_commit_failed → safe
   // deterministic create (no archive). The directive lands visibly; cleanup later.
   if (result.status === "rejected" && result.reason !== "git_commit_failed") {
-    return fallbackCreate(`primary_apply_rejected:${result.reason ?? "unknown"}`, adj.model);
+    // T0 review fix: slug collision (create decision, same-slug different-body
+    // rule exists) is distinct from a generic apply reject — record it clearly
+    // (the directive is retained in staging for a later pass, not lost).
+    const fb = result.reason === "duplicate_slug" ? "slug_collision" : `primary_apply_rejected:${result.reason ?? "unknown"}`;
+    return fallbackCreate(fb, adj.model);
+  }
+
+  // [BLOCKER fix, T0 review 2026-06-16] Archive ONLY after the primary actually
+  // LANDED. A git_commit_failed primary returns status "rejected" (file rolled
+  // back; checkpoint retry owns recovery) — it must NOT trigger archiving, or
+  // siblings get archived while the directive never landed (corpus corruption).
+  if (result.status === "rejected") {
+    return {
+      result,
+      adjudication: {
+        ruleset: true, decision: d.decision, ...(d.targetSlug ? { target_slug: d.targetSlug } : {}),
+        model: adj.model, candidates: candidates.length, archived: [],
+        deferred: result.reason ?? "primary_rejected", reason: d.reason.slice(0, 300),
+      },
+    };
   }
 
   // Archive superseded/contradicted rules — ONLY after a successful primary,
-  // ONLY slugs from the candidate set, never the winner. Best-effort.
+  // ONLY slugs from the candidate set, never the winner, capped at
+  // MAX_ARCHIVE_PER_OP (mechanical mass-archive guard). Best-effort.
   const winner = result.slug;
-  const toArchive = [...new Set(d.archiveSlugs)].filter((s) => candidateSlugs.has(s) && s !== winner);
+  const toArchive = [...new Set(d.archiveSlugs)].filter((s) => candidateSlugs.has(s) && s !== winner).slice(0, MAX_ARCHIVE_PER_OP);
   const archived: Array<{ slug: string; status: string }> = [];
   for (const s of toArchive) {
     try {
