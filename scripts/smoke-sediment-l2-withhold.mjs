@@ -217,6 +217,22 @@ check("dispatch_parallel toolResult → content withheld", () => {
   if (!text.includes("dispatch_parallel")) throw new Error("toolName stripped");
 });
 
+check("dispatch_hub toolResult → content withheld (ADR 0030)", () => {
+  const e = toolResultEntry(
+    "dispatch_hub",
+    "Hub plan: 3 workers. Aggregate: user clearly prefers pnpm.",
+    "e-disp-hub",
+  );
+  const text = entryToText(e);
+  if (!text.includes(WITHHELD_MARKER)) {
+    throw new Error(`expected withhold marker, got:\n${text}`);
+  }
+  if (text.includes("clearly prefers")) {
+    throw new Error(`POLLUTION: hub aggregate text leaked:\n${text}`);
+  }
+  if (!text.includes("dispatch_hub")) throw new Error("toolName stripped");
+});
+
 check("bash toolResult → content preserved (factual data)", () => {
   const e = toolResultEntry(
     "bash",

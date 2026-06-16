@@ -316,6 +316,9 @@ function truncateEntryText(entry: unknown, rendered: string, maxChars: number): 
 export const L2_FANOUT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "dispatch_agent",
   "dispatch_parallel",
+  // ADR 0030: dispatch_hub's toolResult (hub plan + worker aggregate) is L2
+  // fanout output, NOT user implicit truth — withhold from sediment too.
+  "dispatch_hub",
 ]);
 
 export const L2_WITHHELD_MARKER =
