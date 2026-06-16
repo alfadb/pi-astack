@@ -3039,10 +3039,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           lane: "auto_write",
                           correlationId: corrId,
                         });
+                        // llm_error = the extraction LLM call broke; user
+                        // should see ⚠️, not ✅. Mirror the main bg lane
+                        // (auto.kind === "llm_error" -> failed). ineligible /
+                        // llm_skip remain healthy completions.
                         applySedimentStatus(
                           setStatus,
                           sessionId,
-                          "completed",
+                          auto.kind === "llm_error" ? "failed" : "completed",
                           auto.kind,
                         );
                       }
