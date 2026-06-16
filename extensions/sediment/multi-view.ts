@@ -29,13 +29,10 @@
  *     promoted DEFER from skip(multiview_deferred) into the
  *     unified multiview-pending staging queue). See §4.4.5 +
  *     §4.4.6 in ADR 0025 and multiview-staging-types.ts.
- *   - No cost budget enforcement yet (settings field present;
- *     consumed in P3.5 along with rate-limit handling).
  *
  * NOT in P0.5 (deferred to P3.5):
  *
  *   - Dynamic provider selection / rate-limit handling
- *   - costBudgetPerOpUsd enforcement
  *   - DEFER → staging provisional write (ADR §4.4.5)
  *   - Real dual-reviewer (two different reviewers, each running pass 1+2)
  */

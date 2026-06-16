@@ -391,12 +391,6 @@
               "default": [],
               "items": { "type": "string" },
               "description": "Additional reviewer refs tried after reviewerProviders."
-            },
-            "costBudgetPerOpUsd": {
-              "type": "number",
-              "default": 0.05,
-              "minimum": 0,
-              "description": "Soft target budget per multi-view op. Field exists in settings; enforcement is deferred to the dynamic provider/rate-limit phase."
             }
           }
         }

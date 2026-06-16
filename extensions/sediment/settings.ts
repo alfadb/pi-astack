@@ -131,8 +131,6 @@ export interface SedimentSettings {
     proposerProviders: string[];
     reviewerProviders: string[];
     fallbackProviders: string[];
-    /** Soft budget in USD per multi-view op. Exceeded → DEFER to staging. */
-    costBudgetPerOpUsd: number;
   };
 }
 
@@ -232,7 +230,6 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     proposerProviders: [],
     reviewerProviders: [],
     fallbackProviders: [],
-    costBudgetPerOpUsd: 0.05,
   },
 };
 
@@ -361,7 +358,6 @@ export function resolveSedimentSettings(): SedimentSettings {
         ? (cfg.multiView as Record<string,unknown>).reviewerProviders as string[] : DEFAULT_SEDIMENT_SETTINGS.multiView.reviewerProviders,
       fallbackProviders: Array.isArray((cfg.multiView as Record<string,unknown>|undefined)?.fallbackProviders)
         ? (cfg.multiView as Record<string,unknown>).fallbackProviders as string[] : DEFAULT_SEDIMENT_SETTINGS.multiView.fallbackProviders,
-      costBudgetPerOpUsd: asNumber((cfg.multiView as Record<string,unknown>|undefined)?.costBudgetPerOpUsd, DEFAULT_SEDIMENT_SETTINGS.multiView.costBudgetPerOpUsd),
     },
   };
 }
