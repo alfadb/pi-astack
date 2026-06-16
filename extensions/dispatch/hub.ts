@@ -462,29 +462,58 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       // ── Hub planning call ──
       const planPrompt = buildHubPlanPrompt({ task, roster, maxWorkers: hubCfg.maxWorkers, hubModel });
       const hubAnchor = deriveSubAgentAnchor(parentAnchor, "dispatch_hub.plan");
+      const summaryAnchor = parentAnchor ? { ...parentAnchor, subturn: 0, sub_agent_label: "dispatch_hub.summary" } : undefined;
+
+      // Planning-failure degrade path (C5 fail-degrade): emit hub_decision(fail)
+      // + a 0-worker hub_summary so failed invocations still leave a joinable
+      // trace, then return a graceful error — never crash the tool, never execute
+      // an errored plan. Shared by all three failure routes below.
+      const failPlanning = (reason: string, failureType: string, planText: string, usage?: { input: number; output: number; cost: number }, durMs = 0) => {
+        void deps.appendDispatchAudit(projectRoot, hubAnchor, buildHubDecisionRow({
+          hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText,
+          workers: [], rationale: "", warnings: [reason], sameVendorAsHub: 0,
+          hubDurationMs: durMs, hubResult: "fail", hubFailureType: failureType,
+          ...(usage ? { usage } : {}),
+        }));
+        void deps.appendDispatchAudit(projectRoot, summaryAnchor, buildHubSummaryRow({
+          workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
+          hubCost: usage?.cost ?? 0, workersCost: 0, hubDurationMs: durMs, totalWallMs: 0, dualExecSampled: false,
+        }));
+        return {
+          content: [{ type: "text" as const, text: `❌ dispatch_hub: ${reason}. Fall back to dispatch_parallel with an explicit assignment.` }],
+          details: { kind: "dispatch_hub_plan_failed", error: reason, failure_type: failureType, hub_model: hubModel },
+          isError: true,
+        };
+      };
+
       const hubStart = Date.now();
-      const hubRes = await runWithTriggerAnchor(hubAnchor, () =>
-        deps.runInProcess(
-          hubModel, hubCfg.thinking,
-          hubAnchor ? `${formatAnchorPromptBlock(hubAnchor)}\n\n${planPrompt}` : planPrompt,
-          signal, timeoutMs, modelRegistry, HUB_TOOLS, { anchor: hubAnchor, projectRoot },
-        ),
-      );
+      // MAJOR fix (cross-vendor audit): the planning call MUST be try/catch'd —
+      // runInProcess can REJECT (getSharedInfra failure / undefined modelRegistry);
+      // an unguarded reject would crash the whole tool + skip the audit (C5 breach).
+      let hubRes: { output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } };
+      try {
+        hubRes = await runWithTriggerAnchor(hubAnchor, () =>
+          deps.runInProcess(
+            hubModel, hubCfg.thinking,
+            hubAnchor ? `${formatAnchorPromptBlock(hubAnchor)}\n\n${planPrompt}` : planPrompt,
+            signal, timeoutMs, modelRegistry, HUB_TOOLS, { anchor: hubAnchor, projectRoot },
+          ),
+        );
+      } catch (err) {
+        return failPlanning(`hub planning call threw: ${(err as Error)?.message ?? String(err)}`, "hub_call_threw", "", undefined, Date.now() - hubStart);
+      }
       const hubDurationMs = Date.now() - hubStart;
+
+      // CRITICAL fix (cross-vendor audit): an errored/timed-out hub call must NOT
+      // be executed even if its partial output happens to parse as JSON — check
+      // hubRes.error BEFORE parsing/executing.
+      if (hubRes.error) {
+        return failPlanning(`hub planning errored: ${hubRes.error}`, hubRes.failureType ?? "hub_call_error", hubRes.output ?? "", hubRes.usage, hubDurationMs);
+      }
 
       const parsed = parseHubPlan(hubRes.output ?? "");
       if (!parsed.ok) {
-        void deps.appendDispatchAudit(projectRoot, hubAnchor, buildHubDecisionRow({
-          hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText: hubRes.output ?? "",
-          workers: [], rationale: "", warnings: [`plan parse failed: ${parsed.error}`], sameVendorAsHub: 0,
-          hubDurationMs, hubResult: "fail", hubFailureType: hubRes.failureType ?? "plan_parse_error",
-          ...(hubRes.usage ? { usage: hubRes.usage } : {}),
-        }));
-        return {
-          content: [{ type: "text" as const, text: `❌ dispatch_hub: hub planning failed — ${parsed.error}. Fall back to dispatch_parallel with an explicit assignment.` }],
-          details: { kind: "dispatch_hub_plan_failed", error: parsed.error, hub_model: hubModel },
-          isError: true,
-        };
+        return failPlanning(`plan parse failed: ${parsed.error}`, hubRes.failureType ?? "plan_parse_error", hubRes.output ?? "", hubRes.usage, hubDurationMs);
       }
 
       const v = validateHubPlan(parsed.plan, { roster, hubModel, maxWorkers: hubCfg.maxWorkers });
@@ -495,6 +524,10 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       }));
 
       if (v.workers.length === 0) {
+        void deps.appendDispatchAudit(projectRoot, summaryAnchor, buildHubSummaryRow({
+          workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
+          hubCost: hubRes.usage?.cost ?? 0, workersCost: 0, hubDurationMs, totalWallMs: 0, dualExecSampled: false,
+        }));
         return {
           content: [{ type: "text" as const, text: `❌ dispatch_hub: no valid workers after validation. ${v.warnings.join("; ")}` }],
           details: { kind: "dispatch_hub_no_valid_workers", warnings: v.warnings, hub_model: hubModel },
@@ -531,46 +564,53 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           if (signal.aborted) return;
           const i = claimNext();
           if (i === undefined) return;
-          const t = tasks[i];
-          const subAnchor = deriveSubAgentAnchor(parentAnchor, `dispatch_hub[${i}]`);
-          void deps.appendDispatchAudit(projectRoot, subAnchor, buildHubDispositionRow({
-            workerIndex: i, workerCount: total, model: t.model, role: t.role, promptChars: t.prompt.length,
-          }));
-          const toolCheck = deps.validateTools(t.tools ?? WORKER_TOOLS);
-          if (!toolCheck.ok) {
-            results[i] = { output: "", error: `worker[${i}] tool rejected: ${toolCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
-            release(i);
-            continue;
-          }
-          let res: { output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } };
           try {
-            res = await runWithTriggerAnchor(subAnchor, () =>
-              deps.runInProcess(
-                t.model, t.thinking ?? "high",
-                subAnchor ? `${formatAnchorPromptBlock(subAnchor)}\n\n${t.prompt}` : t.prompt,
-                signal, timeoutMs, modelRegistry, t.tools ?? WORKER_TOOLS, { anchor: subAnchor, projectRoot },
-              ),
-            );
-          } catch (err) {
-            res = { output: "", error: `worker crashed: ${(err as Error)?.message ?? String(err)}`, failureType: "crash", durationMs: 0 };
+            const t = tasks[i];
+            const subAnchor = deriveSubAgentAnchor(parentAnchor, `dispatch_hub[${i}]`);
+            void deps.appendDispatchAudit(projectRoot, subAnchor, buildHubDispositionRow({
+              workerIndex: i, workerCount: total, model: t.model, role: t.role, promptChars: t.prompt.length,
+            }));
+            let res: { output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } };
+            const toolCheck = deps.validateTools(t.tools ?? WORKER_TOOLS);
+            if (!toolCheck.ok) {
+              res = { output: "", error: `worker[${i}] tool rejected: ${toolCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
+            } else {
+              try {
+                res = await runWithTriggerAnchor(subAnchor, () =>
+                  deps.runInProcess(
+                    t.model, t.thinking ?? "high",
+                    subAnchor ? `${formatAnchorPromptBlock(subAnchor)}\n\n${t.prompt}` : t.prompt,
+                    signal, timeoutMs, modelRegistry, t.tools ?? WORKER_TOOLS, { anchor: subAnchor, projectRoot },
+                  ),
+                );
+              } catch (err) {
+                res = { output: "", error: `worker crashed: ${(err as Error)?.message ?? String(err)}`, failureType: "crash", durationMs: 0 };
+              }
+            }
+            results[i] = res;
+            // MAJOR fix: emit the dispatch_hub.task terminal row for EVERY claimed
+            // worker, INCLUDING tool-rejected (previously skipped via early continue
+            // → that worker had a disposition row but no terminal row).
+            void deps.appendDispatchAudit(projectRoot, subAnchor, {
+              operation: "dispatch_hub.task",
+              row_kind: "task",
+              task_index: i,
+              task_count: total,
+              model: t.model,
+              thinking: t.thinking ?? "high",
+              role: t.role,
+              prompt_chars: t.prompt.length,
+              duration_ms: res.durationMs,
+              result: res.error ? "fail" : "ok",
+              ...(res.failureType ? { failure_type: res.failureType } : {}),
+              output_chars: res.output?.length ?? 0,
+              ...(res.usage ? { tokens_in: res.usage.input, tokens_out: res.usage.output, cost: res.usage.cost } : {}),
+            });
+          } finally {
+            // MINOR fix (1.A): release ALWAYS runs, even on a synchronous throw
+            // between claim and dispatch — no provider-slot leak / pool starvation.
+            release(i);
           }
-          results[i] = res;
-          release(i);
-          void deps.appendDispatchAudit(projectRoot, subAnchor, {
-            operation: "dispatch_hub.task",
-            row_kind: "task",
-            task_index: i,
-            task_count: total,
-            model: t.model,
-            thinking: t.thinking ?? "high",
-            role: t.role,
-            prompt_chars: t.prompt.length,
-            duration_ms: res.durationMs,
-            result: res.error ? "fail" : "ok",
-            ...(res.failureType ? { failure_type: res.failureType } : {}),
-            output_chars: res.output?.length ?? 0,
-            ...(res.usage ? { tokens_in: res.usage.input, tokens_out: res.usage.output, cost: res.usage.cost } : {}),
-          });
         }
       };
       const concurrency = Math.min(total, Math.max(1, deps.maxProviderConcurrency * Math.max(1, new Set(tasks.map((t) => deps.providerFromModel(t.model))).size)));
@@ -586,7 +626,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
 
       void deps.appendDispatchAudit(
         projectRoot,
-        parentAnchor ? { ...parentAnchor, subturn: 0, sub_agent_label: "dispatch_hub.summary" } : undefined,
+        summaryAnchor,
         buildHubSummaryRow({
           workerCount: total, successCount, failedCount, terminalState,
           hubCost, workersCost, hubDurationMs, totalWallMs, dualExecSampled: false,
