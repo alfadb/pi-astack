@@ -45,7 +45,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "stage0-metrics-"));
 const metricsPath = memorySearchMetricsPath(tmp);
 
 console.log(`smoke-stage0-metrics (HTTP=live) | corpus=${corpus.length} world | metrics→${metricsPath}\n`);
-await llmSearchEntriesWithVerdict(corpus, { query: "embedding 向量检索 sublinear 架构" }, settings, registry, undefined, tmp);
+const verdict = await llmSearchEntriesWithVerdict(corpus, { query: "embedding 向量检索 sublinear 架构" }, settings, registry, undefined, tmp);
 
 let failed = 0;
 const check = (n, c) => { console.log(`  ${c ? "ok  " : "FAIL"}  ${n}`); if (!c) failed++; };
@@ -64,6 +64,9 @@ if (fs.existsSync(metricsPath)) {
   check(`stage0_embed_ms (embed latency) 存在 (${row.stage0_embed_ms})`, typeof row.stage0_embed_ms === "number");
   check(`stage0_pool / dense / sparse 存在`, typeof row.stage0_pool === "number" && typeof row.stage0_dense === "number" && typeof row.stage0_sparse === "number");
   check(`corpus_size 存在 (${row.corpus_size})`, typeof row.corpus_size === "number");
+  // item-4: retrievalDegraded 经真实路径透传, 且与 metrics stage0_fallback 同源一致
+  check(`verdict.retrievalDegraded 透传为 boolean (${verdict.retrievalDegraded})`, typeof verdict.retrievalDegraded === "boolean");
+  check(`verdict.retrievalDegraded === stage0_fallback (同源)`, verdict.retrievalDegraded === row.stage0_fallback);
   console.log(`\n  metrics row: ${JSON.stringify(row).slice(0, 400)}`);
 }
 fs.rmSync(tmp, { recursive: true, force: true });

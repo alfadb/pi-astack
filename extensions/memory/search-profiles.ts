@@ -36,7 +36,7 @@ export interface SearchProfile {
  *  toolSearch: filters 由 LLM 给(caller-overridable), 其余 fixed。 */
 export const SEARCH_PROFILES: Record<SearchProfileName, SearchProfile> = {
   // memory_search 工具: filters 全由 LLM 给(normalizeSearchFilters), 无角色覆写。
-  toolSearch: { name: "toolSearch", filtersMode: "caller-overridable", returnVerdict: false },
+  toolSearch: { name: "toolSearch", filtersMode: "caller-overridable", returnVerdict: true },
   // memory_decide: built decision query, status:[active], limit:8。search 用 stage1Model;
   // 合成走 decideModel(在 decide handler, 不在本 profile —— 二者保持解耦)。
   decideSearch: { name: "decideSearch", filtersMode: "fixed", status: ["active"], limit: () => 8, returnVerdict: false },

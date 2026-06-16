@@ -20,13 +20,13 @@ const ok = (cond, msg) => { console.log(`${cond ? "PASS" : "FAIL"}: ${msg}`); if
 const base = resolveSettings();
 const R = (name, settings = base, callerFilters) => resolveProfileExecution(SEARCH_PROFILES[name], settings, callerFilters);
 
-// toolSearch: caller-overridable —— filters 透传, search 不变, plain hits
+// toolSearch: caller-overridable —— filters 透传, search 不变, verdict(携 retrievalDegraded 信号)
 {
   const cf = { kinds: ["decision"], status: ["active"], limit: 3 };
   const r = R("toolSearch", base, cf);
   ok(JSON.stringify(r.filters) === JSON.stringify(cf), "toolSearch: filters == callerFilters 透传");
   ok(R("toolSearch", base, undefined).filters && Object.keys(R("toolSearch").filters).length === 0, "toolSearch: 无 callerFilters → 空 filters(内核用 settings 默认)");
-  ok(r.returnVerdict === false, "toolSearch: returnVerdict false");
+  ok(r.returnVerdict === true, "toolSearch: returnVerdict true(携 retrievalDegraded 降级信号)");
   ok(r.search.stage1Skip === base.search.stage1Skip && r.search.sparseBM25 === base.search.sparseBM25, "toolSearch: search 无覆写(继承全局)");
 }
 // decideSearch: status:[active], limit:8, plain; search 用全局(stage1Model 即 search model)

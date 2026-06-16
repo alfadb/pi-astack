@@ -884,6 +884,9 @@ interface ExecSearchResult {
   stage1Ms: number;
   stage2Ms: number;
   surface: string;
+  /** ADR 0035 stage0 熔断: dense embedding 不可用 → sparse-only 候选(召回面收窄,
+   *  stage2 LLM 精排仍跑). 送给调用方作 REQ-002 运行状态可见信号。 */
+  retrievalDegraded?: boolean;
 }
 
 /** 统一内核: stage0 候选 → 双阶段 → 安全网双触发 → metrics。两个 export 函数薄包装。 */
@@ -989,7 +992,7 @@ async function executeSearch(
     } : {}),
   }, projectRoot);
 
-  return { hits: result.hits, verdict: result.verdict, stage1Ms: result.stage1Ms, stage2Ms: result.stage2Ms, surface };
+  return { hits: result.hits, verdict: result.verdict, stage1Ms: result.stage1Ms, stage2Ms: result.stage2Ms, surface, retrievalDegraded: pool?.mode === "sparse_fallback" };
 }
 
 // ADR 0037: 私有内核 wrapper —— 生产唯一入口是 runMemorySearch(profile, ...)。
@@ -1020,6 +1023,8 @@ export interface SearchVerdictResult {
   totalDurationMs: number;
   stage1CandidateSurface: string;
   stage2DebugSlice?: string;
+  /** ADR 0035 stage0 熔断信号(sparse-only 候选): 召回面可能不全。 */
+  retrievalDegraded?: boolean;
 }
 
 async function llmSearchEntriesWithVerdict(
@@ -1043,6 +1048,7 @@ async function llmSearchEntriesWithVerdict(
     stage2DurationMs: r.stage2Ms,
     totalDurationMs: Date.now() - t0,
     stage1CandidateSurface: r.surface,
+    retrievalDegraded: r.retrievalDegraded,
   };
 }
 
