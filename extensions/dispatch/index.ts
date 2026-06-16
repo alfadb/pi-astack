@@ -37,6 +37,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
+import { registerHubTool, readHubConfigFromSettings } from "./hub";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
 import {
@@ -1847,4 +1848,23 @@ export default function (pi: ExtensionAPI) {
       };
     },
   });
+
+  // ADR 0030: register dispatch_hub IFF settings.dispatch.hub.enabled === true
+  // (default off → tool absent). Main-session only — never in the shared
+  // sub-agent loader (a sub-agent calling dispatch_hub = nested orchestration).
+  if (!_isActivatingInSharedLoaderInternal()) {
+    try {
+      registerHubTool(pi as unknown as { registerTool: (def: unknown) => void }, {
+        runInProcess,
+        appendDispatchAudit,
+        providerFromModel,
+        validateTools,
+        defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
+        maxProviderConcurrency: MAX_PROVIDER_CONCURRENCY,
+        readConfig: readHubConfigFromSettings,
+      });
+    } catch (err) {
+      console.warn(`pi-astack/dispatch: dispatch_hub registration skipped: ${(err as Error)?.message ?? "unknown"}`);
+    }
+  }
 }

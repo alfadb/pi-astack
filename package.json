@@ -65,6 +65,7 @@
     "smoke:staging-ageout": "node scripts/smoke-staging-ageout.mjs",
     "smoke:memory-path-a": "node scripts/smoke-memory-path-a.mjs",
     "smoke:dispatch": "node scripts/smoke-dispatch-input-compat.mjs",
+    "smoke:dispatch-hub": "node scripts/smoke-dispatch-hub.mjs",
     "smoke:dispatch-output-format": "node scripts/smoke-dispatch-output-format.mjs",
     "smoke:dispatch-subagent-tool-allowlist": "node scripts/smoke-dispatch-subagent-tool-allowlist.mjs",
     "smoke:dispatch-project-trust": "node scripts/smoke-dispatch-project-trust.mjs",

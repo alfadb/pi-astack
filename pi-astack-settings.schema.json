@@ -1066,6 +1066,50 @@
       }
     },
 
+    "dispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "dispatch extension (ADR 0009 + 0027). The `hub` sub-block configures the ADR 0030 caged-live dynamic hub (dispatch_hub tool).",
+      "properties": {
+        "hub": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0030 L2 dynamic hub. A cross-vendor hub LLM proposes a worker assignment, then dispatch_hub really dispatches it (read-only, single-level). NO cost gate (INV-COST-NOT-A-GATE). Default-off kill-switch.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Master switch. Default off -> dispatch_hub tool is NOT registered. Flip true to dogfood (ADR 0030 §4); flipping default-on is a separate data-gated ratify (ADR 0030 §8)."
+            },
+            "model": {
+              "type": "string",
+              "default": "",
+              "description": "Explicit hub planning model (provider/model). Empty -> auto-pick a flagship-tier model. Cross-vendor decorrelation from workers is flagged regardless (ADR 0030 §7)."
+            },
+            "maxWorkers": {
+              "type": "number",
+              "default": 8,
+              "minimum": 1,
+              "maximum": 8,
+              "description": "Worker-count ceiling, clamped to [1,8]. A non-tunable-past-8 infra sanity bound, NOT a cost gate (HARD_MAX_WORKERS in hub.ts)."
+            },
+            "thinking": {
+              "type": "string",
+              "default": "high",
+              "description": "Thinking level for the hub planning call."
+            },
+            "dualExecSampleRate": {
+              "type": "number",
+              "default": 0.2,
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Fraction of hub turns the oracle (increment 4) also dual-executes (human-pick vs hub-pick) for the cross-vendor correctness judge (ADR 0030 §5b)."
+            }
+          }
+        }
+      }
+    },
+
     "imagine": {
       "type": "object",
       "description": "Image generation tool settings (extensions/imagine/).",

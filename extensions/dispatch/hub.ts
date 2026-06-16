@@ -1,0 +1,616 @@
+/**
+ * dispatch_hub — ADR 0030 caged-live dynamic hub (increment 2 + 3).
+ *
+ * A hub LLM (cross-vendor, per-task selected) proposes a worker assignment
+ * { workers:[{model,role,prompt}], rationale } for a task; dispatch_hub then
+ * REALLY dispatches those workers via the exported runInProcess (single-level,
+ * read-only default, nested-dispatch forbidden — inherited) and returns the
+ * aggregate. This is NOT advisory-shadow: the assignment is executed, so the
+ * online evaluation harness (ADR 0030 §5) gets real outcomes to judge.
+ *
+ * Cage (ADR 0030 §4): worker count hard-capped at HARD_MAX_WORKERS; read-only
+ * tools only; NO cost gate (INV-COST-NOT-A-GATE — cost is report-only);
+ * dispatch.hub.enabled default false (tool is not registered when off);
+ * cross-vendor decorrelation flagged in audit (hub vendor vs worker vendors).
+ *
+ * This module keeps all decision logic in PURE, offline-testable functions
+ * (selection / parse / validate / audit-row builders). The orchestration
+ * shell (registerHubTool) is thin over them and reuses dispatch primitives
+ * injected as deps, so the smoke-locked dispatch_parallel core is untouched.
+ *
+ * Audit rows are ADDITIVE new row_kinds (hub_decision / hub_disposition /
+ * hub_summary) on the existing dispatch audit stream — joined to per-worker
+ * task rows by the C6 anchor (session_id, turn_id, subturn).
+ */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+  getCurrentAnchor,
+  deriveSubAgentAnchor,
+  formatAnchorPromptBlock,
+  runWithTriggerAnchor,
+  type CausalAnchor,
+} from "../_shared/causal-anchor";
+
+// ── Cage constant (ADR 0030 §4: non-tunable sanity ceiling) ─────
+
+/** Hard worker-count ceiling. An infra liveness/resource bound, NOT a cost
+ *  gate. settings.dispatch.hub.maxWorkers is clamped to [1, HARD_MAX_WORKERS]
+ *  so config can only LOWER it, never raise past the焊死 ceiling. */
+export const HARD_MAX_WORKERS = 8;
+
+// ── Types ───────────────────────────────────────────────────────
+
+export interface HubSettings {
+  /** ADR 0030 §4 kill-switch. Default false → tool not registered. */
+  enabled: boolean;
+  /** Explicit hub planning model. When absent, auto-pick a flagship-tier
+   *  model decorrelated from the worker vendors. */
+  model?: string;
+  /** Worker-count ceiling, clamped to [1, HARD_MAX_WORKERS]. */
+  maxWorkers: number;
+  /** Thinking level for the hub planning call. */
+  thinking: string;
+  /** ADR 0030 §5(b): fraction of hub turns that also dual-execute for the
+   *  cross-vendor correctness judge. Consumed by the oracle (increment 4). */
+  dualExecSampleRate: number;
+}
+
+export interface HubWorkerSpec {
+  model: string;
+  role: string;
+  prompt: string;
+  thinking?: string;
+  tools?: string;
+}
+
+export interface HubPlan {
+  workers: HubWorkerSpec[];
+  rationale: string;
+}
+
+export interface HubValidation {
+  /** Workers that survived validation (valid model, capped to maxWorkers). */
+  workers: HubWorkerSpec[];
+  /** Non-fatal observations (dropped invalid models, cap truncation, …). */
+  warnings: string[];
+  /** Count of surviving workers sharing the hub model's vendor (self-talk
+   *  signal — soft, surfaced in audit, NOT a hard reject per ADR 0030 §7). */
+  sameVendorAsHub: number;
+}
+
+// ── Defaults + settings resolution (pure) ───────────────────────
+
+export const DEFAULT_HUB_SETTINGS: HubSettings = {
+  enabled: false,
+  maxWorkers: HARD_MAX_WORKERS,
+  thinking: "high",
+  dualExecSampleRate: 0.2,
+};
+
+function asNum(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+/** Resolve + clamp the hub settings sub-block. maxWorkers is clamped to
+ *  [1, HARD_MAX_WORKERS]; dualExecSampleRate to [0, 1]. */
+export function resolveHubSettings(raw: unknown): HubSettings {
+  const cfg = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const maxWorkers = Math.max(1, Math.min(HARD_MAX_WORKERS, Math.floor(asNum(cfg.maxWorkers, DEFAULT_HUB_SETTINGS.maxWorkers))));
+  const rate = Math.max(0, Math.min(1, asNum(cfg.dualExecSampleRate, DEFAULT_HUB_SETTINGS.dualExecSampleRate)));
+  return {
+    enabled: cfg.enabled === true,
+    ...(typeof cfg.model === "string" && cfg.model.trim() ? { model: cfg.model.trim() } : {}),
+    maxWorkers,
+    thinking: typeof cfg.thinking === "string" && cfg.thinking.trim() ? cfg.thinking.trim() : DEFAULT_HUB_SETTINGS.thinking,
+    dualExecSampleRate: rate,
+  };
+}
+
+// ── Roster + model selection (pure) ─────────────────────────────
+
+function vendorOf(model: string): string {
+  return String(model ?? "").split("/")[0]?.trim() || "unknown";
+}
+
+/** Flatten modelCurator.providers (Record<vendor, model[]>) into a flat
+ *  "vendor/model" allow-set for plan validation. */
+export function flattenRoster(providers: Record<string, readonly string[]> | undefined): string[] {
+  if (!providers || typeof providers !== "object") return [];
+  const out: string[] = [];
+  for (const list of Object.values(providers)) {
+    if (Array.isArray(list)) for (const m of list) if (typeof m === "string" && m.includes("/")) out.push(m);
+  }
+  return Array.from(new Set(out));
+}
+
+/** Pick the hub planning model. Priority: explicit setting → first flagship
+ *  model whose vendor is NOT in avoidVendors → first flagship → undefined.
+ *  ADR 0030 §7: cross-vendor decorrelation is the one hard rule. */
+export function selectHubModel(opts: {
+  explicit?: string;
+  flagshipModels?: readonly string[];
+  avoidVendors?: readonly string[];
+}): string | undefined {
+  const { explicit, flagshipModels = [], avoidVendors = [] } = opts;
+  if (explicit && explicit.includes("/")) return explicit;
+  const avoid = new Set(avoidVendors.map((v) => v.trim()).filter(Boolean));
+  const decorrelated = flagshipModels.find((m) => typeof m === "string" && m.includes("/") && !avoid.has(vendorOf(m)));
+  if (decorrelated) return decorrelated;
+  return flagshipModels.find((m) => typeof m === "string" && m.includes("/"));
+}
+
+// ── Hub planning prompt (pure) ──────────────────────────────────
+
+export function buildHubPlanPrompt(opts: {
+  task: string;
+  roster: string[];
+  maxWorkers: number;
+  hubModel: string;
+}): string {
+  const { task, roster, maxWorkers, hubModel } = opts;
+  const hubVendor = vendorOf(hubModel);
+  return [
+    "You are the L2 dispatch HUB. Decide the worker assignment for the task below.",
+    "Output ONLY a single JSON object (no prose, no code fence) of the form:",
+    '{"workers":[{"model":"vendor/model","role":"short-role","prompt":"the full prompt for this worker","thinking":"high"}],"rationale":"why this assignment"}',
+    "",
+    "Rules:",
+    `- Choose 1..${maxWorkers} workers. Fewer is better when fewer suffice — do not over-provision.`,
+    "- Each worker.model MUST be one of the available models listed below (exact string).",
+    "- Prefer DIFFERENT vendors across workers for cross-vendor diversity on judgment-heavy tasks.",
+    `- You (the hub) are vendor "${hubVendor}". For independent-review tasks, prefer workers from OTHER vendors so the result is not self-confirming.`,
+    "- Write a focused, self-contained prompt for each worker (they share NO context with each other).",
+    "- Workers are read-only sub-agents (read/grep/find/ls + optional web/memory). They cannot edit/spawn.",
+    "",
+    "Available models:",
+    ...roster.map((m) => `  - ${m}`),
+    "",
+    "Task:",
+    task,
+  ].join("\n");
+}
+
+// ── Plan parsing (pure, tolerant) ───────────────────────────────
+
+/** Extract the first balanced {...} JSON object from arbitrary model text. */
+export function extractFirstJsonObject(text: string): string | undefined {
+  if (typeof text !== "string") return undefined;
+  const start = text.indexOf("{");
+  if (start < 0) return undefined;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return undefined;
+}
+
+export function parseHubPlan(text: string): { ok: true; plan: HubPlan } | { ok: false; error: string } {
+  const json = extractFirstJsonObject(text);
+  if (!json) return { ok: false, error: "no JSON object found in hub output" };
+  let obj: unknown;
+  try {
+    obj = JSON.parse(json);
+  } catch (e) {
+    return { ok: false, error: `hub plan JSON parse failed: ${(e as Error)?.message ?? "unknown"}` };
+  }
+  const rec = obj as Record<string, unknown>;
+  const rawWorkers = Array.isArray(rec.workers) ? rec.workers : undefined;
+  if (!rawWorkers) return { ok: false, error: "hub plan missing 'workers' array" };
+  const workers: HubWorkerSpec[] = [];
+  for (const w of rawWorkers) {
+    const wr = (w && typeof w === "object" ? w : {}) as Record<string, unknown>;
+    const model = typeof wr.model === "string" ? wr.model.trim() : "";
+    const role = typeof wr.role === "string" ? wr.role.trim() : "";
+    const prompt = typeof wr.prompt === "string" ? wr.prompt : "";
+    if (!model || !prompt) continue;
+    workers.push({
+      model,
+      role: role || "worker",
+      prompt,
+      ...(typeof wr.thinking === "string" && wr.thinking.trim() ? { thinking: wr.thinking.trim() } : {}),
+      ...(typeof wr.tools === "string" && wr.tools.trim() ? { tools: wr.tools.trim() } : {}),
+    });
+  }
+  if (workers.length === 0) return { ok: false, error: "hub plan has no usable workers (need model+prompt)" };
+  const rationale = typeof rec.rationale === "string" ? rec.rationale : "";
+  return { ok: true, plan: { workers, rationale } };
+}
+
+// ── Plan validation + cap + cross-vendor flag (pure) ────────────
+
+export function validateHubPlan(plan: HubPlan, opts: {
+  roster: string[];
+  hubModel: string;
+  maxWorkers: number;
+}): HubValidation {
+  const { roster, hubModel, maxWorkers } = opts;
+  const allow = new Set(roster);
+  const warnings: string[] = [];
+  const cap = Math.max(1, Math.min(HARD_MAX_WORKERS, maxWorkers));
+
+  let valid = plan.workers.filter((w) => {
+    if (allow.size > 0 && !allow.has(w.model)) {
+      warnings.push(`dropped worker with unknown model "${w.model}" (not in roster)`);
+      return false;
+    }
+    return true;
+  });
+
+  if (valid.length > cap) {
+    warnings.push(`hub proposed ${valid.length} workers; capped to ${cap} (HARD_MAX_WORKERS=${HARD_MAX_WORKERS})`);
+    valid = valid.slice(0, cap);
+  }
+
+  const hubVendor = vendorOf(hubModel);
+  const sameVendorAsHub = valid.filter((w) => vendorOf(w.model) === hubVendor).length;
+  if (sameVendorAsHub > 0) {
+    warnings.push(`${sameVendorAsHub}/${valid.length} workers share the hub vendor "${hubVendor}" (self-talk risk, ADR 0030 §7 — flagged, not rejected)`);
+  }
+
+  return { workers: valid, warnings, sameVendorAsHub };
+}
+
+// ── Audit row builders (pure; additive row_kinds on the dispatch stream) ──
+
+export function buildHubDecisionRow(args: {
+  hubModel: string;
+  hubThinking: string;
+  taskChars: number;
+  planText: string;
+  workers: HubWorkerSpec[];
+  rationale: string;
+  warnings: string[];
+  sameVendorAsHub: number;
+  mainVendor?: string;
+  hubDurationMs: number;
+  hubResult: "ok" | "fail";
+  hubFailureType?: string;
+  usage?: { input?: number; output?: number; cost?: number };
+}): Record<string, unknown> {
+  const hubVendor = vendorOf(args.hubModel);
+  return {
+    operation: "dispatch_hub.decision",
+    row_kind: "hub_decision",
+    hub_model: args.hubModel,
+    hub_vendor: hubVendor,
+    hub_thinking: args.hubThinking,
+    ...(args.mainVendor ? { main_session_vendor: args.mainVendor, decorrelated: hubVendor !== args.mainVendor } : {}),
+    task_chars: args.taskChars,
+    hub_plan_text: args.planText.slice(0, 8000),
+    worker_count: args.workers.length,
+    worker_models: args.workers.map((w) => w.model),
+    worker_roles: args.workers.map((w) => w.role),
+    rationale: String(args.rationale ?? "").slice(0, 2000),
+    warnings: args.warnings,
+    same_vendor_as_hub: args.sameVendorAsHub,
+    hub_duration_ms: args.hubDurationMs,
+    hub_result: args.hubResult,
+    ...(args.hubFailureType ? { hub_failure_type: args.hubFailureType } : {}),
+    ...(args.usage ? { hub_tokens_in: args.usage.input, hub_tokens_out: args.usage.output, hub_cost: args.usage.cost } : {}),
+  };
+}
+
+export function buildHubDispositionRow(args: {
+  workerIndex: number;
+  workerCount: number;
+  model: string;
+  role: string;
+  promptChars: number;
+}): Record<string, unknown> {
+  return {
+    operation: "dispatch_hub.disposition",
+    row_kind: "hub_disposition",
+    worker_index: args.workerIndex,
+    worker_count: args.workerCount,
+    model: args.model,
+    vendor: vendorOf(args.model),
+    role: args.role,
+    worker_prompt_chars: args.promptChars,
+  };
+}
+
+export function buildHubSummaryRow(args: {
+  workerCount: number;
+  successCount: number;
+  failedCount: number;
+  terminalState: string;
+  hubCost: number;
+  workersCost: number;
+  hubDurationMs: number;
+  totalWallMs: number;
+  dualExecSampled: boolean;
+}): Record<string, unknown> {
+  return {
+    operation: "dispatch_hub.summary",
+    row_kind: "hub_summary",
+    worker_count: args.workerCount,
+    success_count: args.successCount,
+    failed_count: args.failedCount,
+    terminal_state: args.terminalState,
+    hub_cost: args.hubCost,
+    workers_cost: args.workersCost,
+    total_cost: args.hubCost + args.workersCost,
+    hub_duration_ms: args.hubDurationMs,
+    total_wall_ms: args.totalWallMs,
+    // main_session_disposition is filled post-hoc by the oracle reader from
+    // the main session's subsequent behavior; the row carries a placeholder
+    // so the schema is stable. (ADR 0030 §5(a).)
+    main_session_disposition: "unobserved",
+    dual_exec_sampled: args.dualExecSampled,
+  };
+}
+
+// ── Settings reader (impure; reads the live pi-astack-settings.json) ──
+
+const PI_STACK_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");
+
+/** Read modelCurator roster/flagship + dispatch.hub fresh from the live
+ *  settings file (same path the model-curator uses). Fail-open to defaults
+ *  so a missing/corrupt settings file never throws into the dispatch path. */
+export function readHubConfigFromSettings(): { hub: HubSettings; roster: string[]; flagshipModels: string[] } {
+  let settings: Record<string, unknown> = {};
+  try {
+    settings = JSON.parse(fs.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"));
+  } catch { /* fail-open to defaults */ }
+  const curator = (settings.modelCurator && typeof settings.modelCurator === "object" ? settings.modelCurator : {}) as Record<string, unknown>;
+  const dispatch = (settings.dispatch && typeof settings.dispatch === "object" ? settings.dispatch : {}) as Record<string, unknown>;
+  const hub = resolveHubSettings(dispatch.hub);
+  const roster = flattenRoster(curator.providers as Record<string, readonly string[]> | undefined);
+  const tiers = (curator.tiers && typeof curator.tiers === "object" ? curator.tiers : {}) as Record<string, { models?: readonly string[] }>;
+  const flagshipModels = Array.isArray(tiers.flagship?.models)
+    ? (tiers.flagship!.models as readonly unknown[]).filter((m): m is string => typeof m === "string")
+    : [];
+  return { hub, roster, flagshipModels };
+}
+
+// ── Orchestration shell (registerHubTool) ───────────────────────
+
+export interface HubDeps {
+  runInProcess: (
+    model: string, thinking: string, prompt: string, signal: AbortSignal,
+    timeoutMs: number, modelRegistry: unknown, toolAllowlist?: string,
+    heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string },
+  ) => Promise<{
+    output: string; error?: string; failureType?: string; durationMs: number;
+    usage?: { input: number; output: number; cost: number };
+  }>;
+  appendDispatchAudit: (projectRoot: string, anchor: CausalAnchor | undefined, event: Record<string, unknown>) => Promise<void>;
+  providerFromModel: (model: string) => string;
+  validateTools: (tools: string | undefined) => { ok: boolean; reason?: string };
+  defaultTimeoutMs: number;
+  maxProviderConcurrency: number;
+  /** Read settings.modelCurator + settings.dispatch.hub fresh per call. */
+  readConfig: () => { hub: HubSettings; roster: string[]; flagshipModels: string[] };
+}
+
+const WORKER_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide";
+const HUB_TOOLS = "read,grep,find,ls,memory_search,memory_get";
+
+/** Register dispatch_hub IFF settings.dispatch.hub.enabled === true.
+ *  Default-off → the tool surface is absent (ADR 0030 §4 kill-switch). */
+export function registerHubTool(pi: { registerTool: (def: unknown) => void }, deps: HubDeps): boolean {
+  const { hub } = deps.readConfig();
+  if (!hub.enabled) return false;
+
+  pi.registerTool({
+    name: "dispatch_hub",
+    label: "Dispatch Hub",
+    description:
+      "ADR 0030 caged-live dynamic hub: a cross-vendor hub LLM proposes a worker " +
+      "assignment for the task, then dispatch_hub REALLY dispatches those workers " +
+      "(read-only, single-level) and returns the aggregate. Use for judgment-heavy " +
+      "tasks where you want the hub to decide the worker mix. Cost is report-only. " +
+      `Worker count is hard-capped at ${HARD_MAX_WORKERS}.`,
+    promptSnippet: "dispatch_hub({ task }) — hub LLM picks cross-vendor workers and dispatches them",
+    promptGuidelines: [
+      "Pass a clear, self-contained task description. The hub LLM (a different vendor) decides how many workers, which models, and what each does.",
+      "The hub is read-only and single-level; results return in-turn. After it returns, your acceptance/revision of the result is the disposition signal (ADR 0030 §5).",
+    ],
+    parameters: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "The task for the hub to plan a worker assignment for." },
+        timeoutMs: { type: "number", description: "Per-worker timeout in ms (default 1800000)." },
+      },
+      required: ["task"],
+    },
+    async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal, _onUpdate: unknown, ctx: Record<string, unknown>) {
+      const task = typeof params.task === "string" ? params.task : "";
+      if (!task.trim()) {
+        return { content: [{ type: "text" as const, text: "dispatch_hub: 'task' is required." }], details: { kind: "dispatch_hub_no_task" }, isError: true };
+      }
+      const { hub: hubCfg, roster, flagshipModels } = deps.readConfig();
+      const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : deps.defaultTimeoutMs;
+      const projectRoot = (typeof ctx.cwd === "string" ? ctx.cwd : "") || process.cwd();
+      const modelRegistry = ctx.modelRegistry;
+      const parentAnchor = getCurrentAnchor();
+
+      const hubModel = selectHubModel({ explicit: hubCfg.model, flagshipModels });
+      if (!hubModel) {
+        return { content: [{ type: "text" as const, text: "dispatch_hub: no flagship model available to act as hub (configure modelCurator.tiers.flagship or dispatch.hub.model)." }], details: { kind: "dispatch_hub_no_model" }, isError: true };
+      }
+
+      // ── Hub planning call ──
+      const planPrompt = buildHubPlanPrompt({ task, roster, maxWorkers: hubCfg.maxWorkers, hubModel });
+      const hubAnchor = deriveSubAgentAnchor(parentAnchor, "dispatch_hub.plan");
+      const hubStart = Date.now();
+      const hubRes = await runWithTriggerAnchor(hubAnchor, () =>
+        deps.runInProcess(
+          hubModel, hubCfg.thinking,
+          hubAnchor ? `${formatAnchorPromptBlock(hubAnchor)}\n\n${planPrompt}` : planPrompt,
+          signal, timeoutMs, modelRegistry, HUB_TOOLS, { anchor: hubAnchor, projectRoot },
+        ),
+      );
+      const hubDurationMs = Date.now() - hubStart;
+
+      const parsed = parseHubPlan(hubRes.output ?? "");
+      if (!parsed.ok) {
+        void deps.appendDispatchAudit(projectRoot, hubAnchor, buildHubDecisionRow({
+          hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText: hubRes.output ?? "",
+          workers: [], rationale: "", warnings: [`plan parse failed: ${parsed.error}`], sameVendorAsHub: 0,
+          hubDurationMs, hubResult: "fail", hubFailureType: hubRes.failureType ?? "plan_parse_error",
+          ...(hubRes.usage ? { usage: hubRes.usage } : {}),
+        }));
+        return {
+          content: [{ type: "text" as const, text: `❌ dispatch_hub: hub planning failed — ${parsed.error}. Fall back to dispatch_parallel with an explicit assignment.` }],
+          details: { kind: "dispatch_hub_plan_failed", error: parsed.error, hub_model: hubModel },
+          isError: true,
+        };
+      }
+
+      const v = validateHubPlan(parsed.plan, { roster, hubModel, maxWorkers: hubCfg.maxWorkers });
+      void deps.appendDispatchAudit(projectRoot, hubAnchor, buildHubDecisionRow({
+        hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText: hubRes.output ?? "",
+        workers: v.workers, rationale: parsed.plan.rationale, warnings: v.warnings, sameVendorAsHub: v.sameVendorAsHub,
+        hubDurationMs, hubResult: "ok", ...(hubRes.usage ? { usage: hubRes.usage } : {}),
+      }));
+
+      if (v.workers.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: `❌ dispatch_hub: no valid workers after validation. ${v.warnings.join("; ")}` }],
+          details: { kind: "dispatch_hub_no_valid_workers", warnings: v.warnings, hub_model: hubModel },
+          isError: true,
+        };
+      }
+
+      // ── Worker fan-out (claim loop, per-provider cap) ──
+      const tasks = v.workers;
+      const total = tasks.length;
+      const results: Array<{ output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } } | null> = new Array(total).fill(null);
+      const activeByProvider = new Map<string, number>();
+      const claimed = new Set<number>();
+      const claimNext = (): number | undefined => {
+        for (let i = 0; i < total; i++) {
+          if (claimed.has(i)) continue;
+          const p = deps.providerFromModel(tasks[i].model);
+          if ((activeByProvider.get(p) ?? 0) >= deps.maxProviderConcurrency) continue;
+          claimed.add(i);
+          activeByProvider.set(p, (activeByProvider.get(p) ?? 0) + 1);
+          return i;
+        }
+        return undefined;
+      };
+      const release = (i: number) => {
+        const p = deps.providerFromModel(tasks[i].model);
+        const n = Math.max(0, (activeByProvider.get(p) ?? 0) - 1);
+        if (n === 0) activeByProvider.delete(p); else activeByProvider.set(p, n);
+      };
+
+      const fanStart = Date.now();
+      const worker = async () => {
+        while (true) {
+          if (signal.aborted) return;
+          const i = claimNext();
+          if (i === undefined) return;
+          const t = tasks[i];
+          const subAnchor = deriveSubAgentAnchor(parentAnchor, `dispatch_hub[${i}]`);
+          void deps.appendDispatchAudit(projectRoot, subAnchor, buildHubDispositionRow({
+            workerIndex: i, workerCount: total, model: t.model, role: t.role, promptChars: t.prompt.length,
+          }));
+          const toolCheck = deps.validateTools(t.tools ?? WORKER_TOOLS);
+          if (!toolCheck.ok) {
+            results[i] = { output: "", error: `worker[${i}] tool rejected: ${toolCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
+            release(i);
+            continue;
+          }
+          let res: { output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } };
+          try {
+            res = await runWithTriggerAnchor(subAnchor, () =>
+              deps.runInProcess(
+                t.model, t.thinking ?? "high",
+                subAnchor ? `${formatAnchorPromptBlock(subAnchor)}\n\n${t.prompt}` : t.prompt,
+                signal, timeoutMs, modelRegistry, t.tools ?? WORKER_TOOLS, { anchor: subAnchor, projectRoot },
+              ),
+            );
+          } catch (err) {
+            res = { output: "", error: `worker crashed: ${(err as Error)?.message ?? String(err)}`, failureType: "crash", durationMs: 0 };
+          }
+          results[i] = res;
+          release(i);
+          void deps.appendDispatchAudit(projectRoot, subAnchor, {
+            operation: "dispatch_hub.task",
+            row_kind: "task",
+            task_index: i,
+            task_count: total,
+            model: t.model,
+            thinking: t.thinking ?? "high",
+            role: t.role,
+            prompt_chars: t.prompt.length,
+            duration_ms: res.durationMs,
+            result: res.error ? "fail" : "ok",
+            ...(res.failureType ? { failure_type: res.failureType } : {}),
+            output_chars: res.output?.length ?? 0,
+            ...(res.usage ? { tokens_in: res.usage.input, tokens_out: res.usage.output, cost: res.usage.cost } : {}),
+          });
+        }
+      };
+      const concurrency = Math.min(total, Math.max(1, deps.maxProviderConcurrency * Math.max(1, new Set(tasks.map((t) => deps.providerFromModel(t.model))).size)));
+      await Promise.allSettled(new Array(concurrency).fill(null).map(() => worker()));
+      const totalWallMs = Date.now() - fanStart;
+
+      const dense = results.map((r) => r ?? { output: "", error: "worker did not start", failureType: "aborted", durationMs: 0 });
+      const successCount = dense.filter((r) => !r.error).length;
+      const failedCount = dense.filter((r) => !!r.error).length;
+      const terminalState = failedCount === 0 ? "completed" : successCount === 0 ? "failed" : "degraded";
+      const workersCost = dense.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
+      const hubCost = hubRes.usage?.cost ?? 0;
+
+      void deps.appendDispatchAudit(
+        projectRoot,
+        parentAnchor ? { ...parentAnchor, subturn: 0, sub_agent_label: "dispatch_hub.summary" } : undefined,
+        buildHubSummaryRow({
+          workerCount: total, successCount, failedCount, terminalState,
+          hubCost, workersCost, hubDurationMs, totalWallMs, dualExecSampled: false,
+        }),
+      );
+
+      // ── Render aggregate for the main session ──
+      const lines: string[] = [];
+      lines.push(`🧭 dispatch_hub — hub=${hubModel} chose ${total} worker(s): ${tasks.map((t) => `${t.role}(${t.model})`).join(", ")}`);
+      if (parsed.plan.rationale) lines.push(`rationale: ${parsed.plan.rationale}`);
+      if (v.warnings.length) lines.push(`⚠ ${v.warnings.join(" | ")}`);
+      lines.push(`cost: hub $${hubCost.toFixed(4)} + workers $${workersCost.toFixed(4)} = $${(hubCost + workersCost).toFixed(4)} (report-only) · ${terminalState} · ${(totalWallMs / 1000).toFixed(1)}s`);
+      lines.push("");
+      dense.forEach((r, i) => {
+        const t = tasks[i];
+        lines.push(`### [${i}] ${t.role} — ${t.model} ${r.error ? "❌" : "✅"}`);
+        lines.push(r.error ? r.error : (r.output || "(empty)"));
+        lines.push("");
+      });
+
+      return {
+        content: [{ type: "text" as const, text: lines.join("\n") }],
+        details: {
+          kind: "dispatch_hub",
+          hub_model: hubModel,
+          worker_count: total,
+          success_count: successCount,
+          failed_count: failedCount,
+          terminal_state: terminalState,
+          total_cost: hubCost + workersCost,
+          same_vendor_as_hub: v.sameVendorAsHub,
+          warnings: v.warnings,
+        },
+        ...(failedCount === total ? { isError: true } : {}),
+      };
+    },
+  });
+  return true;
+}

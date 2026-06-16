@@ -195,6 +195,17 @@ fs.writeFileSync(
 };\n`,
 );
 
+// Stub `./hub` — ADR 0030 added registerHubTool/readHubConfigFromSettings
+// imports. formatResult doesn't touch them; module load only needs the
+// symbols to exist (registerHubTool is called from activate, not at load).
+fs.writeFileSync(
+  path.join(tmpDir, "hub.js"),
+  `module.exports = {
+  registerHubTool: () => false,
+  readHubConfigFromSettings: () => ({ hub: { enabled: false }, roster: [], flagshipModels: [] }),
+};\n`,
+);
+
 // Stub `@earendil-works/pi-coding-agent` — v3 in-process migration added
 // real (non-type) imports: createAgentSession, DefaultResourceLoader,
 // SessionManager, SettingsManager, getAgentDir. formatResult doesn't call
