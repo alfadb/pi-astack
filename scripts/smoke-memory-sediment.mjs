@@ -264,6 +264,8 @@ async function main() {
     const { bindAbrainProject } = req("./_shared/runtime.js");
     const { runDoctorLite, formatDoctorLiteReport } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
+    const { VectorIndex } = req("./memory/embedding.js");
+    const { writeRenameTransactionMarker } = req("./memory/rename-entry.js");
     const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow, writeAbrainAboutMe } = req("./sediment/writer.js");
     const { executeCuratorDecisionToBrain } = req("./sediment/curator-decision-writer.js");
     const { replayMultiviewPending } = req("./sediment/multiview-staging-replay.js");
@@ -2482,6 +2484,270 @@ END_MEMORY`;
       const scalarAfter = fs.readFileSync(scalarUpdate.path, "utf-8");
       assert(/legacy-only-anchor/.test(scalarAfter), `scalar UNION must preserve original 'legacy-only-anchor' (not silently dropped):\n${scalarAfter.slice(0, 600)}`);
       assert(/new-anchor/.test(scalarAfter), `scalar UNION must add new-anchor:\n${scalarAfter.slice(0, 600)}`);
+    }
+
+    // === A3 writer rename-on-update =========================================
+    // Rename is project-scope-only and scope-aware: owning-project bare refs
+    // rewrite, qualified project refs rewrite everywhere, and other bare refs
+    // stay unchanged.
+    {
+      const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-a3-rename-project-"));
+      const target = setupAbrainTarget("a3-rename-p");
+      const otherProjectId = "a3-rename-q";
+      fs.mkdirSync(path.join(target.abrainHome, "projects", otherProjectId, "knowledge"), { recursive: true });
+      fs.mkdirSync(path.join(target.abrainHome, "knowledge"), { recursive: true });
+      execFileSync("git", ["init"], { cwd: target.abrainHome, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: target.abrainHome });
+      execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: target.abrainHome });
+      fs.writeFileSync(path.join(target.abrainHome, ".gitignore"), ".state/\n");
+
+      const oldSlug = "old-a3-rename-entry";
+      const newSlug = "new-a3-rename-entry";
+      const ownerDir = path.join(target.abrainHome, "projects", target.projectId, "knowledge");
+      const otherDir = path.join(target.abrainHome, "projects", otherProjectId, "knowledge");
+      const ownerPath = path.join(ownerDir, `${oldSlug}.md`);
+      const ownerRefPath = path.join(ownerDir, "owner-ref.md");
+      const otherRefPath = path.join(otherDir, "other-ref.md");
+      const worldRefPath = path.join(target.abrainHome, "knowledge", "world-ref.md");
+      fs.mkdirSync(ownerDir, { recursive: true });
+      const entryMarkdown = [
+        "---",
+        `id: project:${target.projectId}:${oldSlug}`,
+        "scope: project",
+        "kind: fact",
+        "status: active",
+        "confidence: 5",
+        "schema_version: 1",
+        'title: "Old A3 Rename Entry"',
+        "created: 2026-06-17T10:00:00.000+08:00",
+        "updated: 2026-06-17T10:00:00.000+08:00",
+        "---",
+        "",
+        "# Old A3 Rename Entry",
+        "",
+        `Self link [[${oldSlug}#anchor|self label]] should rename inside the moved entry.`,
+        "",
+        "## Timeline",
+        "",
+        "- 2026-06-17T10:00:00.000+08:00 | seed | captured | seed",
+        "",
+      ].join("\n");
+      const ownerRefMarkdown = [
+        "---",
+        "id: project:a3-rename-p:owner-ref",
+        "scope: project",
+        "kind: fact",
+        "status: active",
+        "confidence: 5",
+        "schema_version: 1",
+        "title: Owner Ref",
+        "created: 2026-06-17T10:00:00.000+08:00",
+        "updated: 2026-06-17T10:00:00.000+08:00",
+        "derives_from:",
+        `  - ${oldSlug}`,
+        `  - project:${target.projectId}:${oldSlug}`,
+        "---",
+        "",
+        "# Owner Ref",
+        "",
+        `Owner bare [[${oldSlug}]] and qualified [[project:${target.projectId}:${oldSlug}]] refs should rename.`,
+        "",
+        "## Timeline",
+        "",
+        "- 2026-06-17T10:00:00.000+08:00 | seed | captured | seed",
+        "",
+      ].join("\n");
+      const otherRefMarkdown = [
+        "---",
+        "id: project:a3-rename-q:other-ref",
+        "scope: project",
+        "kind: fact",
+        "status: active",
+        "confidence: 5",
+        "schema_version: 1",
+        "title: Other Ref",
+        "created: 2026-06-17T10:00:00.000+08:00",
+        "updated: 2026-06-17T10:00:00.000+08:00",
+        "derives_from:",
+        `  - project:${target.projectId}:${oldSlug}`,
+        "---",
+        "",
+        "# Other Ref",
+        "",
+        `Other bare [[${oldSlug}]] must stay bare, but qualified [[project:${target.projectId}:${oldSlug}]] should rename.`,
+        "",
+        "## Timeline",
+        "",
+        "- 2026-06-17T10:00:00.000+08:00 | seed | captured | seed",
+        "",
+      ].join("\n");
+      const worldRefMarkdown = [
+        "---",
+        "id: world:world-ref",
+        "scope: world",
+        "kind: fact",
+        "status: active",
+        "confidence: 5",
+        "schema_version: 1",
+        "title: World Ref",
+        "created: 2026-06-17T10:00:00.000+08:00",
+        "updated: 2026-06-17T10:00:00.000+08:00",
+        "references:",
+        `  - project:${target.projectId}:${oldSlug}`,
+        "---",
+        "",
+        "# World Ref",
+        "",
+        `World qualified [[project:${target.projectId}:${oldSlug}]] should rename; bare [[${oldSlug}]] should stay.`,
+        "",
+        "## Timeline",
+        "",
+        "- 2026-06-17T10:00:00.000+08:00 | seed | captured | seed",
+        "",
+      ].join("\n");
+      fs.writeFileSync(ownerPath, entryMarkdown);
+      fs.writeFileSync(ownerRefPath, ownerRefMarkdown);
+      fs.writeFileSync(otherRefPath, otherRefMarkdown);
+      fs.writeFileSync(worldRefPath, worldRefMarkdown);
+      execFileSync("git", ["add", "."], { cwd: target.abrainHome });
+      execFileSync("git", ["commit", "-q", "-m", "seed a3 rename fixture"], { cwd: target.abrainHome });
+
+      const renameResult = await updateProjectEntry(
+        oldSlug,
+        {
+          newSlug,
+          compiledTruth: "# Old A3 Rename Entry\n\nSelf link [[old-a3-rename-entry#anchor|self label]] should rename inside the moved entry. Updated body.",
+          sessionId: "smoke-a3-rename",
+        },
+        { projectRoot, abrainHome: target.abrainHome, projectId: target.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: true } },
+      );
+      assert(renameResult.status === "updated" && renameResult.slug === newSlug, `rename update must succeed: ${JSON.stringify(renameResult)}`);
+      assert(!fs.existsSync(ownerPath), "old path must be removed after rename");
+      assert(fs.existsSync(renameResult.path), "new path must exist after rename");
+      const moved = fs.readFileSync(renameResult.path, "utf-8");
+      assert(new RegExp(`^id: project:${target.projectId}:${newSlug}$`, "m").test(moved), `moved entry id must use new slug:\n${moved.slice(0, 500)}`);
+      assert(moved.includes(`[[${newSlug}#anchor|self label]]`), `moved entry self link should preserve anchor/alias:\n${moved}`);
+      assert(/\| renamed \| old-a3-rename-entry → new-a3-rename-entry$/m.test(moved), `moved entry timeline must record renamed action:\n${moved}`);
+
+      const ownerAfter = fs.readFileSync(ownerRefPath, "utf-8");
+      assert(ownerAfter.includes(`[[${newSlug}]]`) && ownerAfter.includes(`[[project:${target.projectId}:${newSlug}]]`), `owner refs should rewrite bare + qualified:\n${ownerAfter}`);
+      assert(ownerAfter.includes(`  - ${newSlug}`) && ownerAfter.includes(`  - project:${target.projectId}:${newSlug}`), `owner relations should rewrite bare + qualified:\n${ownerAfter}`);
+      const otherAfter = fs.readFileSync(otherRefPath, "utf-8");
+      assert(otherAfter.includes(`Other bare [[${oldSlug}]] must stay bare`), `other project bare ref must not rewrite:\n${otherAfter}`);
+      assert(otherAfter.includes(`[[project:${target.projectId}:${newSlug}]]`) && otherAfter.includes(`  - project:${target.projectId}:${newSlug}`), `other project qualified refs should rewrite:\n${otherAfter}`);
+      const worldAfter = fs.readFileSync(worldRefPath, "utf-8");
+      assert(worldAfter.includes(`[[project:${target.projectId}:${newSlug}]]`) && worldAfter.includes(`  - project:${target.projectId}:${newSlug}`), `world qualified refs should rewrite:\n${worldAfter}`);
+      assert(worldAfter.includes(`bare [[${oldSlug}]] should stay`), `world bare ref must not rewrite:\n${worldAfter}`);
+      const gitStatus = execFileSync("git", ["-C", target.abrainHome, "status", "--porcelain"], { encoding: "utf-8" });
+      assert(gitStatus.trim() === "", `rename transaction should leave clean git worktree, got:\n${gitStatus}`);
+    }
+
+    // === A3 runtime recovery for leftover rename transaction ================
+    {
+      const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-a3-rename-recovery-project-"));
+      const target = setupAbrainTarget("a3-recovery-p");
+      const ownerDir = path.join(target.abrainHome, "projects", target.projectId, "knowledge");
+      fs.mkdirSync(ownerDir, { recursive: true });
+      fs.mkdirSync(path.join(target.abrainHome, "knowledge"), { recursive: true });
+      execFileSync("git", ["init"], { cwd: target.abrainHome, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: target.abrainHome });
+      execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: target.abrainHome });
+      fs.writeFileSync(path.join(target.abrainHome, ".gitignore"), ".state/\n");
+
+      const oldSlug = "old-a3-recovery-entry";
+      const newSlug = "new-a3-recovery-entry";
+      const oldPath = path.join(ownerDir, `${oldSlug}.md`);
+      const newPath = path.join(ownerDir, `${newSlug}.md`);
+      const refPath = path.join(ownerDir, "recovery-ref.md");
+      const oldRaw = [
+        "---",
+        `id: project:${target.projectId}:${oldSlug}`,
+        "scope: project",
+        "kind: fact",
+        "status: active",
+        "confidence: 5",
+        "schema_version: 1",
+        "title: Old A3 Recovery Entry",
+        "created: 2026-06-17T10:00:00.000+08:00",
+        "updated: 2026-06-17T10:00:00.000+08:00",
+        "---",
+        "",
+        "# Old A3 Recovery Entry",
+        "",
+        "Original body.",
+        "",
+        "## Timeline",
+        "",
+        "- 2026-06-17T10:00:00.000+08:00 | seed | captured | seed",
+        "",
+      ].join("\n");
+      const refRaw = [
+        "---",
+        "id: project:a3-recovery-p:recovery-ref",
+        "scope: project",
+        "kind: fact",
+        "status: active",
+        "confidence: 5",
+        "schema_version: 1",
+        "title: Recovery Ref",
+        "created: 2026-06-17T10:00:00.000+08:00",
+        "updated: 2026-06-17T10:00:00.000+08:00",
+        "relates_to:",
+        `  - ${oldSlug}`,
+        "---",
+        "",
+        "# Recovery Ref",
+        "",
+        `Ref [[${oldSlug}]] should be restored by recovery rollback.`,
+        "",
+        "## Timeline",
+        "",
+        "- 2026-06-17T10:00:00.000+08:00 | seed | captured | seed",
+        "",
+      ].join("\n");
+      fs.writeFileSync(oldPath, oldRaw);
+      fs.writeFileSync(refPath, refRaw);
+      execFileSync("git", ["add", "."], { cwd: target.abrainHome });
+      execFileSync("git", ["commit", "-q", "-m", "seed a3 recovery fixture"], { cwd: target.abrainHome });
+      const baseHead = execFileSync("git", ["-C", target.abrainHome, "rev-parse", "HEAD"], { encoding: "utf-8" }).trim();
+
+      const newRaw = oldRaw.replace(`id: project:${target.projectId}:${oldSlug}`, `id: project:${target.projectId}:${newSlug}`).replace("# Old A3 Recovery Entry", "# New A3 Recovery Entry");
+      const refNewRaw = refRaw.replaceAll(oldSlug, newSlug);
+      const markerPath = await writeRenameTransactionMarker({
+        target: { scope: "project", projectId: target.projectId, oldSlug, newSlug },
+        baseHead,
+        entryOldPath: oldPath,
+        entryNewPath: newPath,
+        entryNewContent: newRaw,
+        expectedNewId: `project:${target.projectId}:${newSlug}`,
+        fileChanges: [{ path: refPath, newContent: refNewRaw }],
+        vectorStaleSlugs: [oldSlug, newSlug],
+      }, { abrainHome: target.abrainHome });
+      fs.writeFileSync(newPath, newRaw);
+      fs.writeFileSync(refPath, refNewRaw);
+      fs.mkdirSync(path.join(target.abrainHome, ".state", "memory"), { recursive: true });
+      const indexPath = path.join(target.abrainHome, ".state", "memory", "embeddings.json");
+      const idx = new VectorIndex(indexPath, "smoke-model", 3);
+      idx.upsert(newSlug, "h-new", [[1, 0, 0]], `project:${target.projectId}`, "s");
+      idx.save();
+
+      const recoveryResult = await writeProjectEntry({
+        title: "Write After A3 Recovery",
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "This write should be rejected once after rollback.",
+      }, { projectRoot, abrainHome: target.abrainHome, projectId: target.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      assert(recoveryResult.status === "rejected" && recoveryResult.reason === "rename_transaction_rolled_back", `recovery should reject current write once, got: ${JSON.stringify(recoveryResult)}`);
+      assert(!fs.existsSync(markerPath), "rename transaction marker should be removed by recovery");
+      assert(fs.existsSync(oldPath), "old path should remain after recovery rollback");
+      assert(!fs.existsSync(newPath), "new path should be removed by recovery rollback");
+      const refAfter = fs.readFileSync(refPath, "utf-8");
+      assert(refAfter.includes(`[[${oldSlug}]]`) && refAfter.includes(`  - ${oldSlug}`), `refs should be restored to old slug:\n${refAfter}`);
+      const idxAfter = new VectorIndex(indexPath, "smoke-model", 3).load();
+      assert(idxAfter.topN([1, 0, 0], 5, { allowSlugs: new Set([oldSlug]) }).some((r) => r.slug === oldSlug), "vector rollback should restore old slug vector");
+      assert(!idxAfter.topN([1, 0, 0], 5, { allowSlugs: new Set([newSlug]) }).some((r) => r.slug === newSlug), "vector rollback should remove new slug vector");
+      const gitStatus = execFileSync("git", ["-C", target.abrainHome, "status", "--porcelain"], { encoding: "utf-8" });
+      assert(gitStatus.trim() === "", `recovery rollback should leave clean git worktree, got:\n${gitStatus}`);
     }
 
     // === slug-from-title bug fix ===========================================

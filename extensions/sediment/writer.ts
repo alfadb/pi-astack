@@ -9,6 +9,7 @@ import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
+import { renameSlugInVectorIndexFile, rollbackRenameSlugInVectorIndexFile } from "../memory/embedding";
 import {
   type RuleDraft,
   type RuleInjectMode,
@@ -22,6 +23,18 @@ import {
   RULE_DEDUP_SIMILARITY_THRESHOLD,
 } from "./rule-writer";
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
+import {
+  applyRenamePlan,
+  rollbackRenameTransaction,
+  basicRenamePreflight,
+  findPreexistingBareNewSlugRefs,
+  frontmatterScopeMatchesFileScope,
+  rewriteMarkdownForRename,
+  type RenameApplyPlan,
+  type RenameFileChangePlan,
+  type RenameFileScope,
+  type RenameTarget,
+} from "../memory/rename-entry";
 import type { Jsonish } from "../memory/types";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { gitSingleFlight } from "../_shared/git-singleflight";
@@ -41,9 +54,13 @@ import {
   abrainHabitsDir,
   abrainIdentityDir,
   abrainKnowledgeDir,
+  abrainStateDir,
   abrainProjectDir,
+  abrainProjectsDir,
+  abrainProjectRulesDir,
   abrainProjectWorkflowsDir,
   abrainSedimentAuditPath,
+  abrainRulesDir,
   abrainSedimentLocksDir,
   abrainSkillsDir,
   acquireFileLock,
@@ -123,6 +140,8 @@ export interface WriteProjectEntryOptions {
 export type DeleteMode = "soft" | "hard";
 
 export interface ProjectEntryUpdateDraft {
+  /** Optional A3 rename-on-update target slug. Project-scope v1 only. */
+  newSlug?: string;
   title?: string;
   kind?: EntryKind;
   status?: EntryStatus;
@@ -416,6 +435,181 @@ async function findProjectEntryFile(entryRoot: string, slug: string): Promise<st
   return walk(entryRoot);
 }
 
+async function listMarkdownFiles(root: string, skipNames = new Set([".git", ".state", ".index", "vault"])): Promise<string[]> {
+  const out: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    let entries: fsSync.Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (skipNames.has(entry.name)) continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(abs);
+      } else if (entry.isFile() && entry.name.endsWith(".md")) {
+        out.push(abs);
+      }
+    }
+  }
+  await walk(root);
+  return out.sort();
+}
+
+function fileScopeForMemoryPath(abrainHome: string, filePath: string): RenameFileScope | null {
+  const rel = path.relative(abrainHome, filePath).split(path.sep);
+  if (rel[0] === "knowledge") return { scope: "world" };
+  if (rel[0] === "projects" && rel[1] && !["rules", "workflows", "vault"].includes(rel[2] ?? "")) {
+    return { scope: "project", projectId: rel[1] };
+  }
+  return null;
+}
+
+async function listMemoryEntryMarkdownFiles(abrainHome: string): Promise<string[]> {
+  const roots = [abrainKnowledgeDir(abrainHome), abrainProjectsDir(abrainHome)];
+  const files: string[] = [];
+  for (const root of roots) files.push(...await listMarkdownFiles(root, new Set([".git", ".state", ".index", "_project.json", "rules", "workflows", "vault"])));
+  return files.sort();
+}
+
+async function listProjectIds(abrainHome: string): Promise<string[]> {
+  let entries: fsSync.Dirent[];
+  try {
+    entries = await fs.readdir(abrainProjectsDir(abrainHome), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+}
+
+async function listExternalZoneMarkdownFiles(abrainHome: string): Promise<Array<{ path: string; zone: string }>> {
+  const zones: Array<{ root: string; zone: string }> = [
+    { root: abrainRulesDir(abrainHome), zone: "rules" },
+    { root: abrainWorkflowsDir(abrainHome), zone: "workflows" },
+    { root: abrainIdentityDir(abrainHome), zone: "identity" },
+    { root: abrainSkillsDir(abrainHome), zone: "skills" },
+    { root: abrainHabitsDir(abrainHome), zone: "habits" },
+  ];
+  for (const projectId of await listProjectIds(abrainHome)) {
+    zones.push(
+      { root: abrainProjectRulesDir(abrainHome, projectId), zone: `project:${projectId}:rules` },
+      { root: abrainProjectWorkflowsDir(abrainHome, projectId), zone: `project:${projectId}:workflows` },
+    );
+  }
+  const out: Array<{ path: string; zone: string }> = [];
+  for (const zone of zones) {
+    for (const file of await listMarkdownFiles(zone.root)) out.push({ path: file, zone: zone.zone });
+  }
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function activeStatusOf(raw: string): string {
+  try {
+    const status = parseFrontmatter(splitFrontmatter(raw).frontmatterText).status;
+    return typeof status === "string" ? status : "provisional";
+  } catch {
+    return "provisional";
+  }
+}
+
+function replaceEntryIdForRename(raw: string, projectId: string, newSlug: string): string {
+  const { frontmatterText, body } = splitFrontmatter(raw);
+  const frontmatter = parseFrontmatter(frontmatterText);
+  frontmatter.id = `project:${projectId}:${newSlug}`;
+  frontmatter.scope = "project";
+  frontmatter.project_id = projectId;
+  return `${renderFrontmatter(frontmatter, frontmatterOrder(frontmatterText))}${body}`;
+}
+
+async function gitHead(abrainHome: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    return stdout.trim();
+  } catch {
+    throw new Error("rename_requires_git_head");
+  }
+}
+
+async function buildRenameApplyPlan(args: {
+  abrainHome: string;
+  entryRoot: string;
+  targetPath: string;
+  originalRaw: string;
+  mergedMarkdown: string;
+  oldSlug: string;
+  newSlugRaw: string;
+  projectId: string;
+}): Promise<{ ok: true; plan: RenameApplyPlan; issueCount: number } | { ok: false; reason: string; detail?: string }> {
+  const newSlug = slugify(args.newSlugRaw);
+  const target: RenameTarget = { scope: "project", projectId: args.projectId, oldSlug: args.oldSlug, newSlug };
+  const basicIssues = basicRenamePreflight(target);
+  if (basicIssues.length > 0) return { ok: false, reason: basicIssues[0]!.code, detail: basicIssues.map((i) => i.detail).join("; ") };
+  const currentStatus = activeStatusOf(args.originalRaw);
+  if (currentStatus === "archived" || currentStatus === "superseded" || currentStatus === "deprecated") {
+    return { ok: false, reason: "rename_inactive_entry", detail: `status=${currentStatus}` };
+  }
+  const sameProjectCollision = await findProjectEntryFile(args.entryRoot, newSlug);
+  if (sameProjectCollision) return { ok: false, reason: "rename_collision", detail: path.relative(args.abrainHome, sameProjectCollision) };
+
+  for (const file of await listMemoryEntryMarkdownFiles(args.abrainHome)) {
+    if (path.basename(file) !== `${newSlug}.md`) continue;
+    const raw = await fs.readFile(file, "utf-8").catch(() => "");
+    const status = activeStatusOf(raw);
+    if (status !== "archived" && status !== "superseded" && status !== "deprecated") {
+      return { ok: false, reason: "rename_active_corpus_collision", detail: path.relative(args.abrainHome, file) };
+    }
+  }
+
+  const externalNeedle = `project:${args.projectId}:${args.oldSlug}`;
+  for (const external of await listExternalZoneMarkdownFiles(args.abrainHome)) {
+    const raw = await fs.readFile(external.path, "utf-8").catch(() => "");
+    if (raw.includes(externalNeedle)) {
+      return { ok: false, reason: "external_zone_reference_unhandled", detail: `${external.zone}:${path.relative(args.abrainHome, external.path)}` };
+    }
+  }
+
+  const entryNewPath = path.join(path.dirname(args.targetPath), `${newSlug}.md`);
+  let entryNewContent = replaceEntryIdForRename(args.mergedMarkdown, args.projectId, newSlug);
+  const fileChanges: RenameFileChangePlan[] = [];
+  let issueCount = 0;
+  for (const file of await listMemoryEntryMarkdownFiles(args.abrainHome)) {
+    const fileScope = file === args.targetPath
+      ? { scope: "project", projectId: args.projectId } as RenameFileScope
+      : fileScopeForMemoryPath(args.abrainHome, file);
+    if (!fileScope) continue;
+    const raw = file === args.targetPath ? entryNewContent : await fs.readFile(file, "utf-8");
+    const scopeIssues = frontmatterScopeMatchesFileScope(splitFrontmatter(raw).frontmatterText, fileScope);
+    const shadowIssues = findPreexistingBareNewSlugRefs(raw, fileScope, target);
+    const rewritten = rewriteMarkdownForRename(raw, fileScope, target);
+    const issues = [...scopeIssues, ...shadowIssues, ...rewritten.issues];
+    if (issues.length > 0) return { ok: false, reason: issues[0]!.code, detail: issues.map((i) => `${path.relative(args.abrainHome, file)}:${i.line ?? 0}:${i.detail}`).join("; ") };
+    issueCount += rewritten.changes.length;
+    const finalPath = file === args.targetPath ? entryNewPath : file;
+    if (file === args.targetPath) {
+      entryNewContent = rewritten.content;
+    } else if (rewritten.content !== raw) {
+      fileChanges.push({ path: finalPath, newContent: rewritten.content });
+    }
+  }
+  const baseHead = await gitHead(args.abrainHome);
+  return {
+    ok: true,
+    plan: {
+      target,
+      baseHead,
+      entryOldPath: args.targetPath,
+      entryNewPath,
+      entryNewContent,
+      expectedNewId: `project:${args.projectId}:${newSlug}`,
+      fileChanges: fileChanges.filter((change) => change.path !== entryNewPath),
+      vectorStaleSlugs: [args.oldSlug, newSlug],
+    },
+    issueCount,
+  };
+}
+
 function mergeUpdateMarkdown(
   raw: string,
   patch: ProjectEntryUpdateDraft,
@@ -664,6 +858,20 @@ async function acquireLock(abrainHome: string, timeoutMs: number): Promise<LockH
   return { release: handle.release };
 }
 
+async function recoverRenameTransactionIfNeeded(abrainHome: string) {
+  const rollback = await rollbackRenameTransaction(abrainHome);
+  let vectorRollback: ReturnType<typeof rollbackRenameSlugInVectorIndexFile> | undefined;
+  if (rollback.didRollback && rollback.target?.scope === "project") {
+    vectorRollback = rollbackRenameSlugInVectorIndexFile(
+      rollback.target.oldSlug,
+      rollback.target.newSlug,
+      `project:${rollback.target.projectId}`,
+      path.join(abrainStateDir(abrainHome), "memory", "embeddings.json"),
+    );
+  }
+  return { ...rollback, vectorRollback };
+}
+
 async function atomicWrite(file: string, content: string) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = path.join(path.dirname(file), `.tmp-${path.basename(file)}-${process.pid}-${Date.now()}`);
@@ -704,20 +912,52 @@ async function gitCommitUnlocked(
   op: string,
   projectId?: string,
 ): Promise<string | null> {
+  return gitCommitManyUnlocked(abrainHome, [filePath], slug, op, projectId);
+}
+
+async function maybePushAbrainAsync(abrainHome: string, sha: string | null): Promise<void> {
+  // ADR 0020: after each successful sediment commit, fire-and-forget
+  // a git push to origin/main so cross-device knowledge sync happens
+  // automatically. Failures are silently audited to
+  // ~/.abrain/.state/git-sync.jsonl and never block sediment's main path.
+  if (sha
+    && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1"
+    && process.env.PI_ABRAIN_DISABLED !== "1") {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const gitSync = require("../abrain/git-sync");
+      if (typeof gitSync.pushAsync === "function") {
+        gitSync.pushAsync({ abrainHome }).catch(() => undefined);
+      }
+    } catch {
+      // git-sync module not loadable (e.g. standalone sediment). Silently skip.
+    }
+  }
+}
+
+async function gitCommitMany(
+  abrainHome: string,
+  filePaths: string[],
+  slug: string,
+  op: string,
+  projectId?: string,
+): Promise<string | null> {
+  return gitSingleFlight(abrainHome, () =>
+    gitCommitManyUnlocked(abrainHome, filePaths, slug, op, projectId));
+}
+
+async function gitCommitManyUnlocked(
+  abrainHome: string,
+  filePaths: string[],
+  slug: string,
+  op: string,
+  projectId?: string,
+): Promise<string | null> {
   // Commits land in the abrain repo (cross-project knowledge substrate).
-  // Commit message convention since the 2026-05-13 cutover:
-  //   sediment: <op> <slug> (project:<id>)   — project-scoped entries
-  //   sediment: <op> <slug> (world)           — world-scoped entries
-  // op ∈ {create, update, archive, merge, supersede, delete}.
   const scopeTag = projectId ? `project:${projectId}` : "world";
   try {
-    const rel = path.relative(abrainHome, filePath);
-    // Round 2 audit fix (opus m3): `--` terminates option parsing so a
-    // slug like `-x` can't be reinterpreted as a flag. Defense-in-depth
-    // — sediment slug sanitizer should already reject these, but a free
-    // `--` costs nothing and the blast radius widened with ADR 0020
-    // (bad commit now auto-pushes to remote).
-    await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
+    const rels = Array.from(new Set(filePaths.map((filePath) => path.relative(abrainHome, filePath)))).filter(Boolean);
+    await execFileAsync("git", ["-C", abrainHome, "add", "-A", "--", ...rels], { timeout: 10_000, maxBuffer: 1024 * 1024 });
     await execFileAsync(
       "git",
       ["-C", abrainHome, "commit", "-m", `sediment: ${op} ${slug} (${scopeTag})`],
@@ -725,41 +965,7 @@ async function gitCommitUnlocked(
     );
     const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     const sha = stdout.trim() || null;
-
-    // ADR 0020: after each successful sediment commit, fire-and-forget
-    // a git push to origin/main so cross-device knowledge sync happens
-    // automatically. Failures are silently audited to
-    // ~/.abrain/.state/git-sync.jsonl and never block sediment's main
-    // path. Skipped if no `origin` remote is configured.
-    //
-    // Dynamic require so sediment doesn't take a hard dep on the abrain
-    // extension load order (abrain extension owns git-sync.ts; sediment
-    // is conceptually upstream and can run with abrain disabled).
-    // Round 2 audit fix (opus M4 + gpt #1): also gate on PI_ABRAIN_DISABLED
-    // as defense-in-depth. Today sub-pi safety relies on sediment's own
-    // activate() early-return when PI_ABRAIN_DISABLED=1, but that's single-
-    // layer. If a future refactor calls writer functions outside the
-    // sediment activate path (test harness, ad-hoc import), pushAsync
-    // would auto-exfiltrate sub-pi-derived commits to origin. Adding the
-    // inline guard makes ADR 0014 invariant #6 enforcement multi-layer.
-    if (sha
-      && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1"
-      && process.env.PI_ABRAIN_DISABLED !== "1") {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const gitSync = require("../abrain/git-sync");
-        if (typeof gitSync.pushAsync === "function") {
-          // Detach: don't await. We've already returned the commit SHA
-          // to our caller; push happens in the background and writes its
-          // own audit row.
-          gitSync.pushAsync({ abrainHome }).catch(() => undefined);
-        }
-      } catch {
-        // git-sync module not loadable (e.g. abrain extension was deleted
-        // or sediment is running standalone). Silently skip.
-      }
-    }
-
+    await maybePushAbrainAsync(abrainHome, sha);
     return sha;
   } catch {
     return null;
@@ -992,6 +1198,18 @@ export async function deleteProjectEntry(
   let lock: LockHandle | undefined;
   try {
     lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
+    const recoveredRename = await recoverRenameTransactionIfNeeded(abrainHome);
+    if (recoveredRename.didRollback) {
+      const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+        operation: "reject",
+        reason: "rename_transaction_rolled_back",
+        target: `${targetPrefix}:${slug}`,
+        delete_mode: "hard",
+        rollback: recoveredRename,
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: "rename_transaction_rolled_back", auditPath, deleteMode: "hard", ...resultCtx };
+    }
     const originalRaw = await fs.readFile(target, "utf-8");
     // CAS / expected-status guard (ADR 0027 C3'): the read of originalRaw and
     // the unlink below are both inside the sediment lock, so comparing the
@@ -1160,7 +1378,11 @@ export async function updateProjectEntry(
         return { ok: false, response: { slug, path: target, status: "rejected", reason, auditPath, ...resultCtx } };
       }
     }
-    const merged = mergeUpdateMarkdown(raw, patch, slug, opts.projectId, { scope });
+    const requestedNewSlugForMerge = patch.newSlug ? slugify(patch.newSlug) : "";
+    const mergePatch = requestedNewSlugForMerge && requestedNewSlugForMerge !== slug
+      ? { ...patch, timelineAction: patch.timelineAction || "renamed", timelineNote: patch.timelineNote || `${slug} → ${requestedNewSlugForMerge}` }
+      : patch;
+    const merged = mergeUpdateMarkdown(raw, mergePatch, slug, opts.projectId, { scope });
     if ("error" in merged) {
       const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
       const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
@@ -1212,6 +1434,18 @@ export async function updateProjectEntry(
   let lintWarnings = 0;
   try {
     lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
+    const recoveredRename = await recoverRenameTransactionIfNeeded(abrainHome);
+    if (recoveredRename.didRollback) {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: "rename_transaction_rolled_back",
+        target: `${targetPrefix}:${slug}`,
+        rollback: recoveredRename,
+        duration_ms: Date.now() - started,
+        ...(opts.auditExtras ?? {}),
+      }));
+      return { slug, path: path.join(entryRoot, `${slug}.md`), status: "rejected", reason: "rename_transaction_rolled_back", auditPath, ...resultCtx };
+    }
     // Re-do the find+read+merge+lint cycle INSIDE the lock to observe any
     // concurrent state changes (hard delete, prior atomic write).
     const prepared = await prepareMergedMarkdown();
@@ -1220,9 +1454,76 @@ export async function updateProjectEntry(
     lintErrors = prepared.lintErrors;
     lintWarnings = prepared.lintWarnings;
     const merged = prepared.merged;
-    await atomicWrite(target, merged.markdown);
     const operation = opts.auditOperation || "update";
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
+    const requestedNewSlug = patch.newSlug ? slugify(patch.newSlug) : "";
+    if (requestedNewSlug && requestedNewSlug !== slug) {
+      if (scope !== "project") {
+        const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+          operation: "reject",
+          reason: "rename_world_unsupported",
+          target: `${targetPrefix}:${slug}`,
+          new_slug: requestedNewSlug,
+          duration_ms: Date.now() - started,
+          ...(opts.auditExtras ?? {}),
+        }));
+        return { slug, path: target, status: "rejected", reason: "rename_world_unsupported", lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
+      }
+      const renamePlan = await buildRenameApplyPlan({
+        abrainHome,
+        entryRoot,
+        targetPath: target,
+        originalRaw: prepared.originalRaw,
+        mergedMarkdown: merged.markdown,
+        oldSlug: slug,
+        newSlugRaw: requestedNewSlug,
+        projectId: opts.projectId,
+      });
+      if (!renamePlan.ok) {
+        const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+          operation: "reject",
+          reason: renamePlan.reason,
+          target: `${targetPrefix}:${slug}`,
+          new_slug: requestedNewSlug,
+          detail: renamePlan.detail,
+          duration_ms: Date.now() - started,
+          ...(opts.auditExtras ?? {}),
+        }));
+        return { slug, path: target, status: "rejected", reason: renamePlan.reason, lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
+      }
+      let vectorRename: ReturnType<typeof renameSlugInVectorIndexFile> | undefined;
+      const vectorIndexFile = path.join(abrainStateDir(abrainHome), "memory", "embeddings.json");
+      const applied = await applyRenamePlan(renamePlan.plan, {
+        abrainHome,
+        onVectorRename: () => {
+          vectorRename = renameSlugInVectorIndexFile(slug, requestedNewSlug, `project:${opts.projectId}`, vectorIndexFile);
+          if (!vectorRename.ok && (vectorRename.reason === "scope_mismatch" || vectorRename.reason === "new_exists")) {
+            throw new Error(`vector_rename_failed:${vectorRename.reason}`);
+          }
+        },
+        onVectorRollback: () => {
+          rollbackRenameSlugInVectorIndexFile(slug, requestedNewSlug, `project:${opts.projectId}`, vectorIndexFile);
+        },
+        onCommit: opts.settings.gitCommit
+          ? (paths) => gitCommitMany(abrainHome, paths, requestedNewSlug, "rename", opts.projectId)
+          : undefined,
+      });
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+        operation: "rename",
+        target: `${targetPrefix}:${requestedNewSlug}`,
+        old_slug: slug,
+        new_slug: requestedNewSlug,
+        path: path.relative(auditRoot, renamePlan.plan.entryNewPath),
+        rewritten_refs: renamePlan.issueCount,
+        vector_rename: vectorRename ?? { ok: false, reason: "not_attempted" },
+        lint_result: "pass",
+        git_commit: applied.gitCommit ?? null,
+        duration_ms: Date.now() - started,
+        ...(opts.auditExtras ?? {}),
+      }));
+      return { slug: requestedNewSlug, path: renamePlan.plan.entryNewPath, status: "updated", lintErrors, lintWarnings, gitCommit: applied.gitCommit ?? null, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
+    }
+    await atomicWrite(target, merged.markdown);
     const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId) : null;
     // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
     // (git add succeeded but git commit failed), reset the index to
@@ -1422,6 +1723,17 @@ export async function writeProjectEntry(
   let lock: LockHandle | undefined;
   try {
     lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
+    const recoveredRename = await recoverRenameTransactionIfNeeded(abrainHome);
+    if (recoveredRename.didRollback) {
+      const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
+        operation: "reject",
+        reason: "rename_transaction_rolled_back",
+        target: targetId,
+        rollback: recoveredRename,
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: "rename_transaction_rolled_back", auditPath, ...resultCtx };
+    }
     if (fsSync.existsSync(target)) {
       const duplicateRace: DedupeResult = {
         duplicate: true,

@@ -56,6 +56,7 @@ async function initRenameRepo() {
   await git(root, ["config", "user.name", "rename smoke"]);
   await fs.mkdir(path.join(root, "projects", "p", "decisions"), { recursive: true });
   await fs.mkdir(path.join(root, "knowledge"), { recursive: true });
+  await fs.writeFile(path.join(root, ".gitignore"), ".state/\n", "utf-8");
   const oldPath = path.join(root, "projects", "p", "decisions", "old-slug.md");
   const newPath = path.join(root, "projects", "p", "decisions", "new-slug.md");
   const refPath = path.join(root, "knowledge", "ref.md");
@@ -201,6 +202,93 @@ await testAsync("transaction failure after vector step auto-rolls back files and
     assert((await fs.readFile(refPath, "utf-8")).includes("[[project:p:old-slug]]"), "ref file should be restored after vector-step rollback");
     assert(!(await fs.stat(markerPath).then(() => true, () => false)), "marker should be deleted after auto rollback");
     assert((await git(root, ["status", "--porcelain"])) === "", "repo should be clean after vector-step rollback");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+await testAsync("transaction already_completed requires clean committed state", async () => {
+  const { root, oldPath, newPath, refPath, plan } = await initRenameRepo();
+  const markerPath = path.join(root, ".state", "sediment", "rename-transaction.json");
+  try {
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(markerPath, JSON.stringify({
+      kind: "abrain-rename-transaction",
+      version: 1,
+      startedAt: new Date().toISOString(),
+      target,
+      baseHead: plan.baseHead,
+      entryOldPath: oldPath,
+      entryNewPath: newPath,
+      expectedNewId: plan.expectedNewId,
+      plannedPaths: [oldPath, newPath, refPath],
+      vectorStaleSlugs: ["old-slug", "new-slug"],
+    }, null, 2), "utf-8");
+    await fs.writeFile(newPath, plan.entryNewContent, "utf-8");
+    await fs.writeFile(refPath, plan.fileChanges[0].newContent, "utf-8");
+    await fs.rm(oldPath, { force: true });
+    assert(await fs.stat(markerPath).then(() => true, () => false), "marker should remain after simulated process crash");
+    const dirtyRollback = await rollbackRenameTransaction(root, markerPath);
+    assert(dirtyRollback.didRollback === true, `dirty moved state must roll back, got ${JSON.stringify(dirtyRollback)}`);
+    assert(await fs.stat(oldPath).then(() => true, () => false), "old path should be restored after dirty completed rollback");
+    assert(!(await fs.stat(newPath).then(() => true, () => false)), "new path should be removed after dirty completed rollback");
+    assert((await fs.readFile(refPath, "utf-8")).includes("[[project:p:old-slug]]"), "ref file should be restored after dirty completed rollback");
+
+    await applyRenamePlan(plan, { abrainHome: root, markerPath, commitMessage: "rename old-slug to new-slug" });
+    assert(!(await fs.stat(markerPath).then(() => true, () => false)), "successful apply should delete marker");
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(markerPath, JSON.stringify({
+      kind: "abrain-rename-transaction",
+      version: 1,
+      startedAt: new Date().toISOString(),
+      target,
+      baseHead: plan.baseHead,
+      entryOldPath: oldPath,
+      entryNewPath: newPath,
+      expectedNewId: plan.expectedNewId,
+      plannedPaths: [oldPath, newPath, refPath],
+      vectorStaleSlugs: ["old-slug", "new-slug"],
+    }, null, 2), "utf-8");
+    const unrelatedPath = path.join(root, "unrelated-dirty.txt");
+    await fs.writeFile(unrelatedPath, "unrelated\n", "utf-8");
+    const completed = await rollbackRenameTransaction(root, markerPath);
+    assert(completed.didRollback === false && completed.reason === "already_completed", `committed transaction should be already_completed even with unrelated dirty file, got ${JSON.stringify(completed)}`);
+    assert(await fs.stat(newPath).then(() => true, () => false), "already_completed should keep new path");
+    assert(!(await fs.stat(oldPath).then(() => true, () => false)), "already_completed should not restore old path");
+    assert(await fs.stat(unrelatedPath).then(() => true, () => false), "already_completed should not touch unrelated dirty file");
+    assert(!(await fs.stat(markerPath).then(() => true, () => false)), "already_completed should delete marker");
+    await fs.rm(unrelatedPath, { force: true });
+    assert((await git(root, ["status", "--porcelain"])) === "", "already_completed recovery should leave planned paths clean");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+await testAsync("transaction onCommit null rolls back files and vector hook", async () => {
+  const { root, oldPath, newPath, refPath, plan } = await initRenameRepo();
+  const markerPath = path.join(root, ".state", "sediment", "rename-transaction.json");
+  let vectorRenamed = false;
+  let vectorRolledBack = false;
+  try {
+    let threw = false;
+    try {
+      await applyRenamePlan(plan, {
+        abrainHome: root,
+        markerPath,
+        onVectorRename: () => { vectorRenamed = true; },
+        onVectorRollback: () => { vectorRolledBack = true; },
+        onCommit: () => null,
+      });
+    } catch (error) {
+      threw = error instanceof Error && error.message === "git_commit_failed";
+    }
+    assert(threw, "onCommit null should throw git_commit_failed");
+    assert(vectorRenamed && vectorRolledBack, "commit failure should run vector rename and rollback hooks");
+    assert(await fs.stat(oldPath).then(() => true, () => false), "old path should be restored after commit failure");
+    assert(!(await fs.stat(newPath).then(() => true, () => false)), "new path should be removed after commit failure");
+    assert((await fs.readFile(refPath, "utf-8")).includes("[[project:p:old-slug]]"), "ref file should be restored after commit failure");
+    assert(!(await fs.stat(markerPath).then(() => true, () => false)), "marker should be deleted after commit failure rollback");
+    assert((await git(root, ["status", "--porcelain"])) === "", "repo should be clean after commit failure rollback");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

@@ -80,7 +80,7 @@ const runtimeStub = {
 };
 const embTsPath = path.join(repoRoot, "extensions", "memory", "embedding.ts");
 const mod = loadCJS(transpile(embTsPath), embTsPath, new Map([["../_shared/runtime", runtimeStub]]));
-const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath, selectStage0, scopeTagOf, staleOrMissingSlugs, reconcileEmbeddings } = mod;
+const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath, selectStage0, scopeTagOf, staleOrMissingSlugs, reconcileEmbeddings, renameSlugInVectorIndexFile } = mod;
 
 // ── config from secrets.json + models.json ────────────────────────────────────────
 const key = secret("embedding");
@@ -247,6 +247,15 @@ await check("12. VectorIndex.renameSlug: A3 rename 保留向量且不覆盖冲�
   const loaded = new VectorIndex(p, cfg.model, cfg.dim).load();
   assert(loaded.topN([1, 0, 0], 5, { allowSlugs: new Set(["new"]) }).some((r) => r.slug === "new"), "save/load should preserve renamed vector");
   assert(JSON.stringify(loaded.renameSlug("missing", "x", "project:p")) === JSON.stringify({ ok: false, reason: "missing_old" }), "missing old should report missing_old");
+
+  const filePath = path.join(tmpDir, "rename-slug-file-test.json");
+  const fileIdx = new VectorIndex(filePath, cfg.model, cfg.dim);
+  fileIdx.upsert("file-old", "h", [[0, 0, 1]], "project:p", "s");
+  fileIdx.save();
+  assert(renameSlugInVectorIndexFile("file-old", "file-new", "project:p", filePath).ok === true, "file helper should rename and save");
+  const fileLoaded = new VectorIndex(filePath, cfg.model, cfg.dim).load();
+  assert(fileLoaded.topN([0, 0, 1], 5, { allowSlugs: new Set(["file-new"]) }).some((r) => r.slug === "file-new"), "file helper should persist renamed vector");
+  assert(JSON.stringify(renameSlugInVectorIndexFile("file-new", "x", "project:q", filePath)) === JSON.stringify({ ok: false, reason: "scope_mismatch" }), "file helper should preserve scope guard");
 });
 
 await check("13. scope-filter-before-topN: 只召回 in-scope [HTTP]", async () => {

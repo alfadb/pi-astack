@@ -405,6 +405,34 @@ export function vectorIndexPath(): string {
   return path.join(abrainStateDir(resolveUserGlobalAbrainHome()), "memory", "embeddings.json");
 }
 
+export function renameSlugInVectorIndexFile(
+  oldSlug: string,
+  newSlug: string,
+  expectedScope: string,
+  indexPath = vectorIndexPath(),
+): { ok: true } | { ok: false; reason: "missing_index" | "bad_index" | "missing_old" | "scope_mismatch" | "new_exists" | "same_slug" } {
+  let raw: { model?: string; dim?: number };
+  try {
+    raw = JSON.parse(fs.readFileSync(indexPath, "utf8")) as { model?: string; dim?: number };
+  } catch {
+    return { ok: false, reason: "missing_index" };
+  }
+  if (!raw.model || typeof raw.dim !== "number") return { ok: false, reason: "bad_index" };
+  const idx = new VectorIndex(indexPath, raw.model, raw.dim).load();
+  const result = idx.renameSlug(oldSlug, newSlug, expectedScope);
+  if (result.ok) idx.save();
+  return result;
+}
+
+export function rollbackRenameSlugInVectorIndexFile(
+  oldSlug: string,
+  newSlug: string,
+  expectedScope: string,
+  indexPath = vectorIndexPath(),
+): { ok: true } | { ok: false; reason: "missing_index" | "bad_index" | "missing_old" | "scope_mismatch" | "new_exists" | "same_slug" } {
+  return renameSlugInVectorIndexFile(newSlug, oldSlug, expectedScope, indexPath);
+}
+
 export interface Stage0Result {
   candidates: Array<{ slug: string; score: number }>;
   fallback: string[]; // bounded fresh/missing slugs (no fresh vector → blind-union)

@@ -376,6 +376,7 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
     const effScope = effectiveScopeFor(slug);
     const patchObj = (obj.patch && typeof obj.patch === "object" ? obj.patch : obj) as Record<string, unknown>;
     const patch: ProjectEntryUpdateDraft = {
+      ...(asString(patchObj.newSlug ?? patchObj.new_slug) ? { newSlug: asString(patchObj.newSlug ?? patchObj.new_slug)! } : {}),
       ...(asString(patchObj.title) ? { title: asString(patchObj.title)! } : {}),
       ...(asString(patchObj.kind) ? { kind: asString(patchObj.kind)! as ProjectEntryUpdateDraft["kind"] } : {}),
       ...(asString(patchObj.status) ? { status: asString(patchObj.status)! as ProjectEntryUpdateDraft["status"] } : {}),

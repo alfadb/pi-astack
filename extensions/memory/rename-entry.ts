@@ -358,11 +358,16 @@ export interface RenameApplyOptions {
   failAfterStep?: "marker" | "entry_new" | "refs" | "vector" | "old_removed" | "git_add";
   /** Called after reference writes and before old-path removal. */
   onVectorRename?: () => Promise<void> | void;
+  /** Called after file rollback if the vector step started. */
+  onVectorRollback?: (rollback: RenameRollbackResult) => Promise<void> | void;
+  /** Optional writer-owned commit hook (e.g. sediment gitSingleFlight/autosync path). */
+  onCommit?: (absolutePaths: string[]) => Promise<string | null | void> | string | null | void;
 }
 
 export interface RenameRollbackResult {
   didRollback: boolean;
   markerPath: string;
+  target?: RenameTarget;
   vectorStaleSlugs: string[];
   reason?: string;
 }
@@ -393,6 +398,14 @@ async function isGitClean(cwd: string): Promise<boolean> {
 
 function relPath(root: string, file: string): string {
   return path.relative(root, file);
+}
+
+async function areGitPathsClean(cwd: string, files: string[]): Promise<boolean> {
+  const rels = Array.from(new Set(files
+    .map((file) => relPath(cwd, file))
+    .filter((file) => file && !file.startsWith(".."))));
+  if (rels.length === 0) return true;
+  return (await gitStdout(cwd, ["status", "--porcelain", "--", ...rels])).trim() === "";
 }
 
 async function readMaybe(file: string): Promise<string | null> {
@@ -451,10 +464,10 @@ export async function rollbackRenameTransaction(abrainHome: string, markerPath =
 
   const newRaw = await readMaybe(marker.entryNewPath);
   const oldExists = await fs.stat(marker.entryOldPath).then(() => true, () => false);
-  const completed = !oldExists && contentHasExpectedId(newRaw, marker.expectedNewId);
+  const completed = !oldExists && contentHasExpectedId(newRaw, marker.expectedNewId) && await areGitPathsClean(abrainHome, marker.plannedPaths).catch(() => false);
   if (completed) {
     await fs.rm(markerPath, { force: true });
-    return { didRollback: false, markerPath, vectorStaleSlugs: [], reason: "already_completed" };
+    return { didRollback: false, markerPath, target: marker.target, vectorStaleSlugs: [], reason: "already_completed" };
   }
 
   const rels = marker.plannedPaths
@@ -467,42 +480,62 @@ export async function rollbackRenameTransaction(abrainHome: string, markerPath =
   await execFileAsync("git", ["-C", abrainHome, "rm", "--cached", "--ignore-unmatch", "--", relPath(abrainHome, marker.entryNewPath)], { timeout: 10_000, maxBuffer: 512 * 1024 }).catch(() => { /* not staged */ });
   await fs.rm(marker.entryNewPath, { force: true });
   await fs.rm(markerPath, { force: true });
-  return { didRollback: true, markerPath, vectorStaleSlugs: marker.vectorStaleSlugs, reason: "rolled_back" };
+  return { didRollback: true, markerPath, target: marker.target, vectorStaleSlugs: marker.vectorStaleSlugs, reason: "rolled_back" };
 }
 
-export async function applyRenamePlan(plan: RenameApplyPlan, opts: RenameApplyOptions): Promise<{ committed: boolean; markerPath: string }> {
+export async function applyRenamePlan(plan: RenameApplyPlan, opts: RenameApplyOptions): Promise<{ committed: boolean; markerPath: string; gitCommit?: string | null }> {
   const markerPath = opts.markerPath ?? defaultMarkerPath(opts.abrainHome);
   if (!(await isGitClean(opts.abrainHome))) {
     throw new Error("dirty_worktree");
   }
   await writeRenameTransactionMarker(plan, { ...opts, markerPath });
   if (opts.failAfterStep === "marker") throw new Error("injected failure after marker");
+  let vectorStepStarted = false;
   try {
     await atomicWrite(plan.entryNewPath, plan.entryNewContent);
     if (opts.failAfterStep === "entry_new") throw new Error("injected failure after entry_new");
     for (const change of plan.fileChanges) await atomicWrite(change.path, change.newContent);
     if (opts.failAfterStep === "refs") throw new Error("injected failure after refs");
+    vectorStepStarted = true;
     await opts.onVectorRename?.();
     if (opts.failAfterStep === "vector") throw new Error("injected failure after vector");
     await fs.rm(plan.entryOldPath, { force: true });
     if (opts.failAfterStep === "old_removed") throw new Error("injected failure after old_removed");
-    const rels = Array.from(new Set([
+    const absolutePaths = Array.from(new Set([
       plan.entryOldPath,
       plan.entryNewPath,
       ...plan.fileChanges.map((c) => c.path),
-    ])).map((p) => relPath(opts.abrainHome, p));
-    await execFileAsync("git", ["-C", opts.abrainHome, "add", "-A", "--", ...rels], { timeout: 20_000, maxBuffer: 1024 * 1024 });
-    if (opts.failAfterStep === "git_add") throw new Error("injected failure after git_add");
-    if (opts.commitMessage) {
-      await execFileAsync("git", ["-C", opts.abrainHome, "commit", "-m", opts.commitMessage], { timeout: 20_000, maxBuffer: 1024 * 1024 });
-    }
+    ]));
+    const rels = absolutePaths.map((p) => relPath(opts.abrainHome, p));
     if (!contentHasExpectedId(await readMaybe(plan.entryNewPath), plan.expectedNewId)) {
       throw new Error("postcheck_failed_expected_id");
     }
+    let gitCommit: string | null | undefined;
+    if (opts.onCommit) {
+      gitCommit = await opts.onCommit(absolutePaths) ?? null;
+      if (gitCommit === null) throw new Error("git_commit_failed");
+    } else if (opts.commitMessage) {
+      await execFileAsync("git", ["-C", opts.abrainHome, "add", "-A", "--", ...rels], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+      if (opts.failAfterStep === "git_add") throw new Error("injected failure after git_add");
+      await execFileAsync("git", ["-C", opts.abrainHome, "commit", "-m", opts.commitMessage], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+      gitCommit = await gitStdout(opts.abrainHome, ["rev-parse", "HEAD"]);
+    }
     await fs.rm(markerPath, { force: true });
-    return { committed: !!opts.commitMessage, markerPath };
+    return { committed: !!(opts.commitMessage || opts.onCommit), markerPath, gitCommit: gitCommit ?? null };
   } catch (e) {
-    await rollbackRenameTransaction(opts.abrainHome, markerPath);
+    let rollback: RenameRollbackResult = { didRollback: false, markerPath, vectorStaleSlugs: [], reason: "rollback_failed" };
+    try {
+      rollback = await rollbackRenameTransaction(opts.abrainHome, markerPath);
+    } catch {
+      // keep the original apply failure as the result; marker remains for runtime retry
+    }
+    if (vectorStepStarted) {
+      try {
+        await opts.onVectorRollback?.(rollback);
+      } catch {
+        // best-effort cleanup; keep the original apply failure as the result
+      }
+    }
     throw e;
   }
 }
