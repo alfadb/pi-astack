@@ -2,7 +2,14 @@
 /**
  * A3 rename-on-update deterministic smoke: scope-aware mapper + preflight.
  */
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import { createJiti } from "jiti";
+
+const execFileAsync = promisify(execFile);
 
 const jiti = createJiti(import.meta.url);
 const {
@@ -11,6 +18,8 @@ const {
   findPreexistingBareNewSlugRefs,
   frontmatterScopeMatchesFileScope,
   basicRenamePreflight,
+  applyRenamePlan,
+  rollbackRenameTransaction,
 } = jiti("../extensions/memory/rename-entry.ts");
 
 function assert(cond, message) {
@@ -27,6 +36,45 @@ function test(name, fn) {
   fn();
   pass++;
   console.log(`ok ${pass} - ${name}`);
+}
+
+async function testAsync(name, fn) {
+  await fn();
+  pass++;
+  console.log(`ok ${pass} - ${name}`);
+}
+
+async function git(root, args) {
+  const { stdout } = await execFileAsync("git", ["-C", root, ...args], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  return String(stdout).trim();
+}
+
+async function initRenameRepo() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "rename-entry-"));
+  await git(root, ["init"]);
+  await git(root, ["config", "user.email", "smoke@example.invalid"]);
+  await git(root, ["config", "user.name", "rename smoke"]);
+  await fs.mkdir(path.join(root, "projects", "p", "decisions"), { recursive: true });
+  await fs.mkdir(path.join(root, "knowledge"), { recursive: true });
+  const oldPath = path.join(root, "projects", "p", "decisions", "old-slug.md");
+  const newPath = path.join(root, "projects", "p", "decisions", "new-slug.md");
+  const refPath = path.join(root, "knowledge", "ref.md");
+  await fs.writeFile(oldPath, "---\nid: project:p:old-slug\nscope: project\n---\n# Old\n", "utf-8");
+  await fs.writeFile(refPath, "---\nscope: world\n---\nSee [[project:p:old-slug]].\n", "utf-8");
+  await git(root, ["add", "."]);
+  await git(root, ["commit", "-m", "base"]);
+  const baseHead = await git(root, ["rev-parse", "HEAD"]);
+  const plan = {
+    target,
+    baseHead,
+    entryOldPath: oldPath,
+    entryNewPath: newPath,
+    entryNewContent: "---\nid: project:p:new-slug\nscope: project\n---\n# New\n",
+    expectedNewId: "project:p:new-slug",
+    fileChanges: [{ path: refPath, newContent: "---\nscope: world\n---\nSee [[project:p:new-slug]].\n" }],
+    vectorStaleSlugs: ["old-slug", "new-slug"],
+  };
+  return { root, oldPath, newPath, refPath, plan };
 }
 
 test("basic preflight rejects empty/same slug", () => {
@@ -90,6 +138,72 @@ test("frontmatter scope mismatch is rejected", () => {
   const issues = frontmatterScopeMatchesFileScope("scope: world\ntitle: bad", pScope);
   assert(issues.some((i) => i.code === "scope_mismatch"), "project file declaring world scope should be rejected");
   assert(frontmatterScopeMatchesFileScope("scope: project\ntitle: ok", pScope).length === 0, "matching project scope should pass");
+});
+
+await testAsync("transaction apply succeeds with single commit and removes marker", async () => {
+  const { root, oldPath, newPath, refPath, plan } = await initRenameRepo();
+  const markerPath = path.join(root, ".state", "sediment", "rename-transaction.json");
+  try {
+    await applyRenamePlan(plan, { abrainHome: root, markerPath, commitMessage: "rename old-slug to new-slug" });
+    assert(await fs.stat(newPath).then(() => true, () => false), "new path should exist after successful apply");
+    assert(!(await fs.stat(oldPath).then(() => true, () => false)), "old path should be removed after successful apply");
+    assert((await fs.readFile(refPath, "utf-8")).includes("[[project:p:new-slug]]"), "ref file should be rewritten to new slug");
+    assert(!(await fs.stat(markerPath).then(() => true, () => false)), "marker should be removed after successful apply");
+    assert((await git(root, ["status", "--porcelain"])) === "", "repo should be clean after successful apply");
+    assert((await git(root, ["log", "--oneline", "-1"])).includes("rename old-slug to new-slug"), "rename commit should be created");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+await testAsync("transaction marker-only crash rolls back on next lock", async () => {
+  const { root, oldPath, newPath, refPath, plan } = await initRenameRepo();
+  const markerPath = path.join(root, ".state", "sediment", "rename-transaction.json");
+  try {
+    let threw = false;
+    try {
+      await applyRenamePlan(plan, { abrainHome: root, markerPath, failAfterStep: "marker" });
+    } catch {
+      threw = true;
+    }
+    assert(threw, "injected marker failure should throw");
+    assert(await fs.stat(markerPath).then(() => true, () => false), "marker should remain after marker-only crash");
+    const rb = await rollbackRenameTransaction(root, markerPath);
+    assert(rb.didRollback === true && rb.vectorStaleSlugs.includes("old-slug") && rb.vectorStaleSlugs.includes("new-slug"), `rollback should report stale slugs, got ${JSON.stringify(rb)}`);
+    assert(await fs.stat(oldPath).then(() => true, () => false), "old path should remain after marker-only rollback");
+    assert(!(await fs.stat(newPath).then(() => true, () => false)), "new path should not exist after marker-only rollback");
+    assert((await fs.readFile(refPath, "utf-8")).includes("[[project:p:old-slug]]"), "ref file should remain old after marker-only rollback");
+    assert(!(await fs.stat(markerPath).then(() => true, () => false)), "marker should be deleted after rollback");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+await testAsync("transaction failure after vector step auto-rolls back files and marker", async () => {
+  const { root, oldPath, newPath, refPath, plan } = await initRenameRepo();
+  const markerPath = path.join(root, ".state", "sediment", "rename-transaction.json");
+  let vectorTouched = false;
+  try {
+    let threw = false;
+    try {
+      await applyRenamePlan(plan, {
+        abrainHome: root,
+        markerPath,
+        failAfterStep: "vector",
+        onVectorRename: () => { vectorTouched = true; },
+      });
+    } catch {
+      threw = true;
+    }
+    assert(threw && vectorTouched, "injected vector failure should throw after vector hook");
+    assert(await fs.stat(oldPath).then(() => true, () => false), "old path should be restored after vector-step failure");
+    assert(!(await fs.stat(newPath).then(() => true, () => false)), "new path should be removed after vector-step rollback");
+    assert((await fs.readFile(refPath, "utf-8")).includes("[[project:p:old-slug]]"), "ref file should be restored after vector-step rollback");
+    assert(!(await fs.stat(markerPath).then(() => true, () => false)), "marker should be deleted after auto rollback");
+    assert((await git(root, ["status", "--porcelain"])) === "", "repo should be clean after vector-step rollback");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 console.log(`\nPASS ${pass} / ${pass}`);
