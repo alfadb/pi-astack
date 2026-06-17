@@ -3589,6 +3589,71 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
             writeApprovedToBrain: async () => { worldNoOriginWrote = true; },
           });
           assert(worldNoOrigin.succeeded === 1 && worldNoOrigin.terminal_no_origin === 0 && worldNoOriginWrote === true, `S1: world-scope candidate with no origin must still be written: ${JSON.stringify(worldNoOrigin)} wrote=${worldNoOriginWrote}`);
+
+          // ── S1 partial-origin: id set but root unset must ALSO be unplaceable ──
+          // classifyProjectPlacement requires BOTH origin fields; a half-pinned
+          // entry cannot prove its owning project and must not be misfiled.
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-partial-origin",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            origin_project_id: aTarget.projectId,
+            // intentionally NO origin_project_root
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "partial origin proposer" },
+            proposer_raw_text: "partial origin raw",
+            approved_decision: { op: "create", rationale: "partial origin approved (project scope)" },
+            candidate_snapshot: { title: "Replay Partial Origin", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Partial Origin\n\nPartial origin (id without root) must not be treated as placeable." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          let partialWrote = false;
+          const partialOrigin = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { partialWrote = true; },
+          });
+          assert(partialOrigin.terminal_no_origin === 1 && partialWrote === false, `S1: partial origin (id without root) must be unplaceable / no-write: ${JSON.stringify(partialOrigin)} wrote=${partialWrote}`);
+
+          // ── S1 regression guard: unpinned GLOBAL rule create must still write ──
+          // A rules-zone create with ruleScope:global routes to the GLOBAL rules
+          // store (curator-decision-writer.ts), not a project — it has no misfile
+          // risk, so the project-binding gate must NOT abandon it.
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-no-origin-global-rule",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_rules_zone",
+            proposer_decision: { op: "create", zone: "rules", ruleScope: "global", rationale: "no origin global rule proposer" },
+            proposer_raw_text: "no origin global rule raw",
+            approved_decision: { op: "create", zone: "rules", ruleScope: "global", rationale: "no origin approved (global rule)" },
+            candidate_snapshot: { title: "Replay No Origin Global Rule", kind: "preference", status: "active", confidence: 9, compiledTruth: "# Replay No Origin Global Rule\n\nGlobal rule routes to the global store; must be written regardless of origin binding." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          let globalRuleWrote = false;
+          const globalRule = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { globalRuleWrote = true; },
+          });
+          assert(globalRule.succeeded === 1 && globalRule.terminal_no_origin === 0 && globalRuleWrote === true, `S1: unpinned global rule create must still be written (global store, not project): ${JSON.stringify(globalRule)} wrote=${globalRuleWrote}`);
         } finally {
           if (oldReplayAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
           else process.env.ABRAIN_ROOT = oldReplayAbrainRoot;

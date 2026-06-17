@@ -805,8 +805,22 @@ async function retryApprovedWriterOnly(
     // are unaffected. (S1: an unpinned project candidate previously fell back
     // to writing into whatever project was active, misfiling the kihh
     // `ayhz0001` decision into pi-global.)
+    // A replay write is binding-vulnerable only when it targets a PROJECT store
+    // (see curator-decision-writer.ts routing). Writes that route to a GLOBAL
+    // store regardless of the current binding are exempt: entry ops with
+    // scope:"world" (world entry store) and rules-zone create with
+    // ruleScope:"global" (global rules store). Project entries, project rules,
+    // and rule-lifecycle ops resolving to a project rule stay gated. KNOWN
+    // NARROW EDGE: a rule-lifecycle archive/delete that resolves to a GLOBAL
+    // rule is not distinguishable here without a rule-file lookup; an unpinned
+    // such op (legacy only — new captures always pin origin) would be
+    // soft-archived rather than applied. Accepted: rare, audited, recoverable,
+    // never a misfile.
     const writeScope = "scope" in finalDecision ? finalDecision.scope : undefined;
-    if (writeScope !== "world") {
+    const isGlobalRuleCreate = finalDecision.op === "create"
+      && finalDecision.zone === "rules"
+      && finalDecision.ruleScope === "global";
+    if (writeScope !== "world" && !isGlobalRuleCreate) {
       const placement = classifyProjectPlacement(entry.origin_project_id, entry.origin_project_root, deps);
       if (placement === "unplaceable") {
         if (!archiveTerminalOrAudit(entry, audit, result, `S1 fail-closed: project-scope op=${finalDecision.op} has no captured origin_project_id; refusing to write into ambient project=${deps.currentProjectId ?? "unknown"}; wanted to soft-archive`, entryStart)) return;
@@ -824,7 +838,7 @@ async function retryApprovedWriterOnly(
         // writer never targets the wrong project on any future refactor.
         audit.outcome = "deferred_other_project";
         audit.new_decision = finalDecision;
-        audit.detail = `S1 fail-closed: project-scope op=${finalDecision.op} origin=${entry.origin_project_id ?? "unknown"}/${entry.origin_project_root ?? "unknown"} does not match current binding ${deps.currentProjectId ?? "unknown"}/${deps.currentProjectRoot ?? "unknown"}; deferred (staging kept for its owning project).${extraDetail}`;
+        audit.detail = `S1 fail-closed: project-scope op=${finalDecision.op} origin=${entry.origin_project_id ?? "unknown"}/${entry.origin_project_root ?? "unknown"} does not match current binding ${deps.currentProjectId ?? "unknown"}/${deps.currentProjectRoot ?? "unknown"}; deferred (staging kept for its owning project; defense-in-depth: normally caught by the pre-LLM isOtherProjectEntry pre-filter).${extraDetail}`;
         audit.durationMs = Date.now() - entryStart;
         result.deferred_other_project++;
         result.auditRows.push(audit);
