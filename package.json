@@ -23,6 +23,7 @@
     "smoke:all": "node scripts/smoke-all.mjs",
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
+    "smoke:rename-entry": "node scripts/smoke-rename-entry.mjs",
     "smoke:embedding": "node scripts/smoke-memory-embedding.mjs",
     "smoke:stage0-pool": "node scripts/smoke-stage0-candidate-pool.mjs",
     "oracle:stage0": "node scripts/oracle-stage0-replay.mjs",
