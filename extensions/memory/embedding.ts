@@ -279,6 +279,21 @@ export class VectorIndex {
     return false;
   }
 
+  /** Move an unchanged entry vector from old slug to new slug during A3 rename.
+   *  Scope must match and the destination key must be empty: the index is still
+   *  bare-slug keyed, so overwriting would corrupt another entry's vector. */
+  renameSlug(oldSlug: string, newSlug: string, expectedScope: string): { ok: true } | { ok: false; reason: "missing_old" | "scope_mismatch" | "new_exists" | "same_slug" } {
+    if (oldSlug === newSlug) return { ok: false, reason: "same_slug" };
+    const rec = this.data.entries[oldSlug];
+    if (!rec) return { ok: false, reason: "missing_old" };
+    if (rec.scope !== expectedScope) return { ok: false, reason: "scope_mismatch" };
+    if (this.data.entries[newSlug]) return { ok: false, reason: "new_exists" };
+    this.data.entries[newSlug] = rec;
+    delete this.data.entries[oldSlug];
+    this.normCache = null;
+    return { ok: true };
+  }
+
   /** Coverage of an active-slug set: indexed vs missing. Lets the search
    *  layer build a BOUNDED cold-start fallback (ADR 0035 §4) instead of an
    *  O(库) full-body union. */

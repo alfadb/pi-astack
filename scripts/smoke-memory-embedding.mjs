@@ -231,7 +231,25 @@ await check("11. scope-tag(storeRoot 优先) + setScope 刷新(纯本地)", asyn
   assert(!idx.topN([1, 2, 3], 5, { scopes: new Set(["project:old"]) }).some((t) => t.slug === "s1"), "旧 scope 不再匹配");
 });
 
-await check("12. scope-filter-before-topN: 只召回 in-scope [HTTP]", async () => {
+await check("12. VectorIndex.renameSlug: A3 rename 保留向量且不覆盖冲突(纯本地)", async () => {
+  const p = path.join(tmpDir, "rename-slug-test.json");
+  const idx = new VectorIndex(p, cfg.model, cfg.dim);
+  idx.upsert("old", "h-old", [[1, 0, 0]], "project:p", "s");
+  idx.upsert("occupied", "h-occupied", [[0, 1, 0]], "project:p", "s");
+  assert(JSON.stringify(idx.renameSlug("old", "new", "project:q")) === JSON.stringify({ ok: false, reason: "scope_mismatch" }), "scope mismatch should not move vector");
+  assert(idx.topN([1, 0, 0], 5, { allowSlugs: new Set(["old"]) }).some((r) => r.slug === "old"), "old should remain after scope mismatch");
+  assert(JSON.stringify(idx.renameSlug("old", "occupied", "project:p")) === JSON.stringify({ ok: false, reason: "new_exists" }), "new_exists should not overwrite occupied vector");
+  const ok = idx.renameSlug("old", "new", "project:p");
+  assert(ok.ok === true, `rename should succeed, got ${JSON.stringify(ok)}`);
+  assert(!idx.topN([1, 0, 0], 5, { allowSlugs: new Set(["old"]) }).some((r) => r.slug === "old"), "old key should be gone after rename");
+  assert(idx.topN([1, 0, 0], 5, { allowSlugs: new Set(["new"]) }).some((r) => r.slug === "new"), "new key should retrieve moved vector");
+  idx.save();
+  const loaded = new VectorIndex(p, cfg.model, cfg.dim).load();
+  assert(loaded.topN([1, 0, 0], 5, { allowSlugs: new Set(["new"]) }).some((r) => r.slug === "new"), "save/load should preserve renamed vector");
+  assert(JSON.stringify(loaded.renameSlug("missing", "x", "project:p")) === JSON.stringify({ ok: false, reason: "missing_old" }), "missing old should report missing_old");
+});
+
+await check("13. scope-filter-before-topN: 只召回 in-scope [HTTP]", async () => {
   if (!HAVE_HTTP) return;
   // 索引为 check 7 后状态(11 条): git-push=project:pb, doc-adr/self-evolve=world, 其余 project:pa
   const idx = new VectorIndex(idxPath, cfg.model, cfg.dim).load();
