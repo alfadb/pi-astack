@@ -43,6 +43,7 @@ import {
   toolCallSignature,
   evaluateToolLoop,
   buildLoopReflection,
+  isGuardedTool,
   resolveIdleLoopGuardSettings,
   type ToolLoopState,
   type IdleLoopGuardSettings,
@@ -1170,7 +1171,15 @@ export default function (pi: ExtensionAPI) {
         loopStates.delete(sidOf(ctx)); // fresh streak each turn
       });
       pi.on("tool_call", async (event: any, ctx: any) => {
+        // bash (and any GUARD_EXEMPT_TOOLS) is the timeful escape hatch — a
+        // legitimate poll/wait can repeat identical args; never suppress it.
+        if (!isGuardedTool(String(event?.toolName ?? ""))) return undefined;
         const sid = sidOf(ctx);
+        // Bound memory in a long-lived process: ended sessions are never
+        // explicitly evicted, so prune all but the active streak past a cap.
+        if (loopStates.size > 128) {
+          for (const k of loopStates.keys()) if (k !== sid) loopStates.delete(k);
+        }
         let st = loopStates.get(sid);
         if (!st) {
           st = newToolLoopState();

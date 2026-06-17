@@ -76,6 +76,23 @@ export function buildLoopReflection(toolName: string, consecutive: number): stri
   );
 }
 
+/**
+ * Tools EXEMPT from the guard. `bash` is the escape hatch to the timeful
+ * external world: `sleep N && curl health`, `pgrep proc`, `docker ps`,
+ * retrying a flaky fetch — identical args back-to-back is a legitimate
+ * wait/poll AND the result can legitimately change between calls, so
+ * suppressing it would break the agent. Exempting bash also sidesteps
+ * abrain's vault-bash input rewrite entirely (no false-negative / orphaned
+ * vault-state interaction). The guard still covers read, grep, find, ls,
+ * dispatch_agent, memory_search and similar tools, where an identical
+ * back-to-back repeat is always a pointless spin (the result cannot differ).
+ */
+export const GUARD_EXEMPT_TOOLS: ReadonlySet<string> = new Set(["bash"]);
+
+export function isGuardedTool(toolName: string): boolean {
+  return !GUARD_EXEMPT_TOOLS.has(toolName);
+}
+
 export interface IdleLoopGuardSettings {
   enabled: boolean;
   /** Consecutive-identical count at which suppression starts (>= 2). */

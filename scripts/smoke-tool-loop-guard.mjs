@@ -16,6 +16,7 @@ const {
   toolCallSignature,
   evaluateToolLoop,
   buildLoopReflection,
+  isGuardedTool,
   resolveIdleLoopGuardSettings,
   IDLE_LOOP_GUARD_DEFAULTS,
 } = await jiti.import(path.join(__dirname, "..", "extensions/dispatch/tool-loop-guard.ts"));
@@ -61,10 +62,13 @@ function runSeq(calls, threshold = 3) {
   ok(blocks.every((b) => b === false), `交错 read/edit 同文件 → 从不抑制(假阳性护栏) got ${JSON.stringify(blocks)}`);
 }
 
-// ── 不同 bash 命令不算 spin ──
+// ── bash 豁免: timeful poll(sleep+curl / pgrep / docker ps)不误伤 + 避开 vault 交互 ──
+ok(isGuardedTool("read") && isGuardedTool("grep") && isGuardedTool("dispatch_agent"), "isGuardedTool: read/grep/dispatch_agent 受守");
+ok(!isGuardedTool("bash"), "isGuardedTool: bash 豁免(连发 poll 不误伤)");
+// ── 受守工具(grep)不同 args 不算 spin ──
 {
-  const blocks = runSeq([["bash", { command: "ls" }], ["bash", { command: "pwd" }], ["bash", { command: "ls" }]]);
-  ok(blocks.every((b) => b === false), `不同 bash 命令 → 不抑制 got ${JSON.stringify(blocks)}`);
+  const blocks = runSeq([["grep", { pattern: "a" }], ["grep", { pattern: "b" }], ["grep", { pattern: "a" }]]);
+  ok(blocks.every((b) => b === false), `不同 grep → 不抑制 got ${JSON.stringify(blocks)}`);
 }
 
 // ── threshold=2 更激进: 第 2 次起抑制 ──
