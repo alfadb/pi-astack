@@ -30,6 +30,7 @@
     "oracle:twostage-ablation": "node scripts/oracle-twostage-ablation.mjs",
     "smoke:sparse-bm25": "node scripts/smoke-sparse-bm25.mjs",
     "smoke:cache-partition": "node scripts/smoke-prompt-cache-partition.mjs",
+    "smoke:derive-provenance": "node scripts/smoke-derive-provenance.mjs",
     "smoke:search-profiles": "node scripts/smoke-search-profiles.mjs",
     "smoke:query-routing": "node scripts/smoke-query-routing.mjs",
     "smoke:stale-floor-window": "node scripts/smoke-stale-floor-window.mjs",

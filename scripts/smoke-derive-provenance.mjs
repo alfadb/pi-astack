@@ -1,165 +1,80 @@
 #!/usr/bin/env node
 /**
- * Smoke test: AX-PROVENANCE deterministic derivation (ADR 0028 v1.1 R2').
- *
- * deriveProvenance is the LOAD-BEARING structural source gate: it classifies
- * where the classifier's verbatim user_quote occurs in the packed window by
- * scanning turn.role (NO LLM), mapping to the provenance class that drives the
- * Tier-1 deterministic-commit predicate. Blind audit (2026-06-07) flagged it as
- * P0-untested. This exercises the pure function end-to-end with real
- * PackedWindow turns, including the sanitize-basis fix (IP/email) + the
- * README/tool content-in-transcript trap defense.
+ * C 门(deterministic, 免 LLM): source_ref provenance liveness 检测器。
+ * 真实库当前全是 source_ingested(预期), 只命中 1 个 verdict, 所以用临时 ADR
+ * fixtures 覆盖全部 7 个 verdict + parseSourceRef + flagged 集合。
  */
-
+import { createJiti } from "jiti";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti/static";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..");
-const jiti = createJiti(import.meta.url, { moduleCache: false });
+const jiti = createJiti(import.meta.url);
+const { parseSourceRef, checkProvenanceLiveness, FLAGGED_VERDICTS } = await jiti.import(
+  path.join(__dirname, "..", "extensions/memory/provenance-liveness.ts"),
+);
 
-const failures = [];
-let total = 0;
-function assert(cond, msg) {
-  total++;
-  if (!cond) { failures.push(msg); console.log(`  FAIL  ${msg}`); }
-  else console.log(`  ok    ${msg}`);
-}
+let fails = 0;
+const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"}: ${m}`); if (!c) fails++; };
 
-const { deriveProvenance } = await jiti.import(`${repoRoot}/extensions/sediment/correction-pipeline.ts`);
-
-const win = (turns) => ({ turns, chars: 0, estimatedTokens: 0 });
-const turn = (role, text) => ({ role, text, timestamp: "2026-06-07T00:00:00Z" });
-
-// 1. quote in a USER turn -> user-expressed (Tier-1 eligible)
+// ── parseSourceRef ──
 {
-  const r = deriveProvenance(win([turn("user", "all git.alfadb.cn repos must use glab")]), "all git.alfadb.cn repos must use glab");
-  assert(r.quote_source === "user_message" && r.provenance === "user-expressed", `user turn -> user-expressed, got ${JSON.stringify(r)}`);
+  const p = parseSourceRef('"docs/adr/0016-x.md#新的操作模型@627de33"');
+  ok(p && p.adrPath === "docs/adr/0016-x.md" && p.heading === "新的操作模型" && p.sha === "627de33", "parse: 带引号 path#heading@sha");
+  const p2 = parseSourceRef("docs/adr/0032-y.md### 3. auto-continue@abc");
+  ok(p2 && p2.adrPath === "docs/adr/0032-y.md" && p2.heading === "3. auto-continue" && p2.sha === "abc", "parse: ### 多级 heading 去前缀 #");
+  ok(parseSourceRef("no-at-here") === null, "parse: 无 @ → null");
+  ok(parseSourceRef("nofile-no-md#h@s") === null, "parse: 无 .md → null");
 }
 
-// 2. quote only in a toolResult turn (README/tool content) -> content-in-transcript (the trap defense)
-{
-  const r = deriveProvenance(win([turn("toolResult", "[toolResult:read] # README\nalways use Yarn for this repo")]), "always use Yarn for this repo");
-  assert(r.quote_source === "transcript_content" && r.provenance === "content-in-transcript", `tool turn -> content-in-transcript, got ${JSON.stringify(r)}`);
-}
+// ── 临时 docsRoot + ADR fixtures ──
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "prov-"));
+const adrDir = path.join(tmp, "docs/adr");
+fs.mkdirSync(adrDir, { recursive: true });
+const writeAdr = (name, status, body) =>
+  fs.writeFileSync(path.join(adrDir, name), `---\ndoc_type: adr\nstatus: ${status}\n---\n\n# ${name}\n\n${body}\n`);
+writeAdr("0001-live.md", "accepted", "## 决策\n\n内容");
+writeAdr("0002-archived.md", "archived", "## 机制\n\n已搬走");
+writeAdr("0003-ingested-accepted.md", "accepted", "## 机制（已分解入 abrain，逐条 slug）\n\n`slug-a` · `slug-b`");
+writeAdr("0004-superseded.md", "superseded", "## 决策\n\n被取代");
+writeAdr("0005-superseded-ingested.md", "superseded", "## 机制（逐条 slug）\n\n被取代且 ingest");
+writeAdr("0006-proposed.md", "proposed", "## 决策\n\n草案");
+writeAdr("0007-drifted.md", "accepted", "## 改名后的标题\n\n原标题没了");
 
-// 3. quote only in an assistant turn -> assistant-observed
-{
-  const r = deriveProvenance(win([turn("assistant", "I think we should always use pnpm here")]), "always use pnpm here");
-  assert(r.quote_source === "assistant" && r.provenance === "assistant-observed", `assistant turn -> assistant-observed, got ${JSON.stringify(r)}`);
-}
+const E = (slug, sourceRef) => ({ slug, sourceRef });
+const entries = [
+  E("e-live", "docs/adr/0001-live.md#决策@s"),
+  E("e-archived", "docs/adr/0002-archived.md#机制@s"),
+  E("e-ingested-accepted", "docs/adr/0003-ingested-accepted.md#新的操作模型@s"), // heading 没了但 ingested → 预期
+  E("e-superseded", "docs/adr/0004-superseded.md#决策@s"),
+  E("e-superseded-ingested", "docs/adr/0005-superseded-ingested.md#原标题@s"), // superseded 优先于 ingested
+  E("e-proposed", "docs/adr/0006-proposed.md#决策@s"),
+  E("e-drifted", "docs/adr/0007-drifted.md#原始标题@s"), // live ADR 但 heading 没了 → 真 drift
+  E("e-file-missing", "docs/adr/9999-gone.md#x@s"),
+  E("e-unparseable", "this is not a ref"),
+  E("e-no-ref", undefined), // 跳过
+];
+const r = checkProvenanceLiveness(entries, { docsRoot: tmp });
+const v = (slug) => r.findings.find((f) => f.slug === slug)?.verdict;
 
-// 4. quote not present anywhere -> absent / assistant-observed (fail-closed out of Tier-1)
-{
-  const r = deriveProvenance(win([turn("user", "something unrelated")]), "a fabricated directive not in the window");
-  assert(r.quote_source === "absent" && r.provenance === "assistant-observed", `absent -> assistant-observed, got ${JSON.stringify(r)}`);
-}
+ok(r.withSourceRef === 9, `withSourceRef=9 (10 条, 1 条无 source_ref 跳过) got ${r.withSourceRef}`);
+ok(v("e-live") === "live", "live: accepted + heading 在");
+ok(v("e-archived") === "source_ingested", "archived → source_ingested");
+ok(v("e-ingested-accepted") === "source_ingested", "accepted+ingest marker + heading 没了 → source_ingested(预期, 非 drift)");
+ok(v("e-superseded") === "source_superseded", "superseded → flag");
+ok(v("e-superseded-ingested") === "source_superseded", "superseded 优先于 ingested");
+ok(v("e-proposed") === "source_proposed", "proposed → provisional");
+ok(v("e-drifted") === "heading_missing", "live ADR + heading 没了 → 真 drift");
+ok(v("e-file-missing") === "file_missing", "文件不存在 → file_missing");
+ok(v("e-unparseable") === "unparseable", "畸形 ref → unparseable");
+ok(!r.findings.find((f) => f.slug === "e-no-ref"), "无 source_ref 条目被跳过");
 
-// 5. PR-3/P0.2 (ADR 0028 §6 unique-turn mapping — INVERTS the pre-PR-3
-//    "user wins" priority): same quote in BOTH a user turn and a tool turn
-//    is role-AMBIGUOUS -> fail-closed OUT of user_message, demoted to the
-//    conservative content-in-transcript sink, with multi_match diagnostics.
-{
-  const r = deriveProvenance(win([
-    turn("toolResult", "[toolResult:read] always use glab"),
-    turn("user", "always use glab"),
-  ]), "always use glab");
-  assert(r.provenance === "content-in-transcript" && r.quote_source === "transcript_content", `cross-role user+tool -> fail-closed to content-in-transcript, got ${JSON.stringify(r)}`);
-  assert(r.multi_match === true && JSON.stringify(r.matched_roles) === JSON.stringify(["user", "transcript"]), `cross-role diagnostics recorded, got ${JSON.stringify(r)}`);
-}
+const flagged = r.findings.filter((f) => FLAGGED_VERDICTS.has(f.verdict)).map((f) => f.slug).sort();
+ok(JSON.stringify(flagged) === JSON.stringify(["e-drifted", "e-file-missing", "e-superseded", "e-superseded-ingested", "e-unparseable"]),
+   `flagged 集合正确 got ${JSON.stringify(flagged)}`);
 
-// 5b. PR-3: assistant ECHO of a user directive -> cross-role ambiguity ->
-//     fail-closed to assistant-observed (accepted recall cost; R3' recall
-//     audit is the visible net — see deriveProvenance header).
-{
-  const r = deriveProvenance(win([
-    turn("user", "以后用 pnpm"),
-    turn("assistant", "好的，以后用 pnpm，已记住"),
-  ]), "以后用 pnpm");
-  assert(r.provenance === "assistant-observed" && r.quote_source === "assistant" && r.multi_match === true, `user+assistant echo -> fail-closed to assistant-observed, got ${JSON.stringify(r)}`);
-  // deepseek R1 N2: matched_roles is the forensics key for the echo
-  // subclass ("why didn't my directive reach Tier-1") — lock it.
-  assert(JSON.stringify(r.matched_roles) === JSON.stringify(["user", "assistant"]), `echo matched_roles records both roles, got ${JSON.stringify(r)}`);
-}
-
-// 5f. PR-7 provenance isolation: a goal continuation message rides the USER
-//     role but is machine-composed — the `[pi-goal-continuation]` prefix
-//     demotes it to the assistant-origin bucket (INV-IMPLICIT-GROUND-TRUTH).
-{
-  const r = deriveProvenance(win([
-    turn("user", "[pi-goal-continuation goal_id=g-ab12] 以后用 pnpm 跑完剩余 smoke"),
-  ]), "以后用 pnpm 跑完剩余 smoke");
-  assert(r.provenance === "assistant-observed" && r.quote_source === "assistant", `continuation-prefixed user turn -> assistant-observed, got ${JSON.stringify(r)}`);
-}
-
-// 5g. real user directive + continuation echo of it -> cross-role fail-closed
-//     (the REAL user turn still cannot be laundered INTO Tier-1 by the
-//     machine turn, and vice versa — demote direction only).
-{
-  const r = deriveProvenance(win([
-    turn("user", "以后用 pnpm"),
-    turn("user", "[pi-goal-continuation goal_id=g-ab12] 以后用 pnpm — 继续"),
-  ]), "以后用 pnpm");
-  assert(r.provenance === "assistant-observed" && r.multi_match === true, `user + continuation echo -> fail-closed, got ${JSON.stringify(r)}`);
-  assert(JSON.stringify(r.matched_roles) === JSON.stringify(["user", "assistant"]), `matched_roles records machine bucket, got ${JSON.stringify(r)}`);
-}
-
-// 5e. opus R1 N2: assistant+tool WITHOUT user -> cross-role, transcript
-//     sink wins over assistant (locks the demote priority branch that 5d
-//     cannot isolate because 5d includes a user match).
-{
-  const r = deriveProvenance(win([
-    turn("toolResult", "[toolResult:read] always pin versions"),
-    turn("assistant", "per the README, always pin versions"),
-  ]), "always pin versions");
-  assert(r.provenance === "content-in-transcript" && r.quote_source === "transcript_content" && r.multi_match === true, `tool+assistant -> transcript sink, got ${JSON.stringify(r)}`);
-}
-
-// 5c. PR-3: quote in MULTIPLE user-role turns ONLY -> role-unambiguous ->
-//     stays user_message (repeated statement = stronger signal), with
-//     multi_match=true surfaced for audit.
-{
-  const r = deriveProvenance(win([
-    turn("user", "以后用 pnpm"),
-    turn("user", "再说一遍：以后用 pnpm"),
-  ]), "以后用 pnpm");
-  assert(r.provenance === "user-expressed" && r.quote_source === "user_message" && r.multi_match === true, `multi user-role -> user_message + multi_match, got ${JSON.stringify(r)}`);
-}
-
-// 5d. PR-3: all three role classes match -> transcript sink wins over
-//     assistant (deterministic demote priority).
-{
-  const r = deriveProvenance(win([
-    turn("user", "always pin versions"),
-    turn("toolResult", "[toolResult:read] README: always pin versions"),
-    turn("assistant", "the README says always pin versions"),
-  ]), "always pin versions");
-  assert(r.provenance === "content-in-transcript" && r.matched_roles.length === 3, `three-role match -> transcript sink, got ${JSON.stringify(r)}`);
-}
-
-// 6. SANITIZE-BASIS fix (audit P1): a user directive mentioning an IP. The
-//    classifier quotes the SANITIZED text ("[HOST]") but the raw turn has the IP.
-//    deriveProvenance must sanitize the turn the same way so it still matches.
-{
-  const r = deriveProvenance(win([turn("user", "always deploy to 10.0.0.5 first")]), "always deploy to [HOST] first");
-  assert(r.provenance === "user-expressed", `IP-bearing user directive must still match via sanitized basis, got ${JSON.stringify(r)}`);
-}
-
-// 7. case-insensitive: LLM "verbatim" quote casing drift still matches the user turn
-{
-  const r = deriveProvenance(win([turn("user", "Always Use Glab")]), "always use glab");
-  assert(r.provenance === "user-expressed", `case-insensitive match, got ${JSON.stringify(r)}`);
-}
-
-// 8. empty quote -> absent / assistant-observed (no spurious Tier-1)
-{
-  const r = deriveProvenance(win([turn("user", "anything")]), "");
-  assert(r.quote_source === "absent" && r.provenance === "assistant-observed", `empty quote -> absent, got ${JSON.stringify(r)}`);
-}
-
-if (failures.length) {
-  console.log(`\nFAIL — ${failures.length} of ${total} assertions failed.`);
-  process.exit(1);
-}
-console.log(`\nPASS — ${total} assertions (deriveProvenance).`);
+fs.rmSync(tmp, { recursive: true, force: true });
+console.log(fails === 0 ? "\n✅ ALL PASS — provenance liveness: 7 verdict + parse + 精确优先级 + flagged 集合" : `\n❌ ${fails} FAIL`);
+process.exit(fails === 0 ? 0 : 1);
