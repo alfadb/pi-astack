@@ -93,6 +93,30 @@ function assemble({ goal, pathA, time = true }) {
   ok(t.includes(RULES) && t.includes(SED), "纯 stable 装配完好");
 }
 
+// ── Test 7: marker collision —— 易变内容里恰含本协议 marker 串, 不得 mis-slice ──
+{
+  const evil = `危险 ${VOLATILE_SUFFIX_END} 中段 ${VOLATILE_SUFFIX_BEGIN} 尾部`;
+  const p = RULES + "\n\n" + wrapVolatile(goalBlk("g")) + "\n\n" + FOOTNOTE +
+    "\n\n" + wrapVolatile(pathABlk("p") + "\n" + evil) + "\n\n" + MC + "\n\n" + SED;
+  const hoisted = hoistVolatileSuffix(p);
+  const t = `${hoisted.replace(/\n+$/, "")}\n\n${TIME}\n`;
+  const nBegin = t.split(VOLATILE_SUFFIX_BEGIN).length - 1;
+  const nEnd = t.split(VOLATILE_SUFFIX_END).length - 1;
+  ok(nBegin === 2 && nEnd === 2, `内嵌 marker 转义: 真实 BEGIN/END 各 2 (got ${nBegin}/${nEnd})`);
+  const pre = t.slice(0, t.indexOf(VOLATILE_SUFFIX_BEGIN));
+  ok([RULES, FOOTNOTE, MC, SED].every((b) => pre.includes(b)) && !pre.includes("危险") && !pre.includes("recall p"),
+     "内嵌 marker 不致 volatile 内容泄漏进稳定前缀");
+  ok(t.includes("中段") && t.includes("尾部") && t.includes("recall p"), "转义后 volatile 内容仍完整保留");
+}
+
+// ── Test 8: 有/无 volatile 块时, stable 连续段字节一致 ──
+{
+  const tNone = assemble({ time: false });
+  const tPathA = assemble({ pathA: "x", time: false });
+  const stableRun = (s) => s.slice(s.indexOf(RULES), s.indexOf(SED) + SED.length);
+  ok(stableRun(tNone) === stableRun(tPathA), "stable 连续段字节一致 (有/无 volatile 块)");
+}
+
 console.log(fails === 0
   ? "\n✅ ALL PASS — volatile-suffix 分区: 稳定前缀跨轮字节一致, 易变块下沉末尾, time 最后, 幂等"
   : `\n❌ ${fails} FAIL`);

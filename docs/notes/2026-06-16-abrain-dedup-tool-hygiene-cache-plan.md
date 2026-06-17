@@ -114,7 +114,7 @@ F(安全热身,验证改-测闭环)→ T0 量旧账 → A(先 A1 规则、再 A2
 - [x] **A1** 规则路径全集裁决(去 Jaccard 门 + 归档相悖)— 提交 b75a950 → 7294e54 → 281bf18;两轮跨厂商 T0 复评通过(2 SHIP/1 SWC,SWC 已闭);smoke 11/11。残留:live LLM 质量带监控观测。
 - [x] **A2** 大库写入时去重 — 验证结论:全库 bypass 已被 P7(ADR 0035)+ ADR 0037 profile facade 结构性修复,**无需改码**;2 家跨厂商 T0(opus/deepseek)独立 CONFIRM-NO-CHANGE;回归 smoke:stage0-nonactive + search-profiles 均绿。证据:docs/notes/2026-06-16-A2-fullcorpus-bypass-verification.md。
 - [x] **B** 清旧账 — **决定(用户 2026-06-16):不在主会话整理、不建批量子系统,靠 sediment 正常运行自然演化**。A1 已上线 → 下次黑话主题被触碰即写入当下合并那一簇;575 断链危害低,保持 lint 标记、随条目处理自然收口。主会话零动作(守只读红线;合于“第二大脑应自主演化、不靠主会话维护”的取向)。
-- [ ] **D** 缓存分区修复。
+- [x] **D** 缓存分区修复 — 实测真凶是 goal 状态块(字母序靠前)+ path-A 召回夹在 stable 中间(time 本就在末尾);修复=volatile-suffix 协议(_shared,wrapVolatile + time-injector hoist 下沉)。提交 9ba223e。应对 2 家跨厂商 T0 SHIP-WITH-CHANGES:修 marker 碰撞转义 + seam 自洽 + CRLF;smoke:cache-partition 18 断言绿 + time/goal/memory-path-a 回归绿。证据:docs/notes/2026-06-16-D-cache-partition-review.md。
 - [ ] **C** 理由保鲜。
 - [ ] **E** 工具空转检测。
 

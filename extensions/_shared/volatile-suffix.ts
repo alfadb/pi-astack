@@ -29,14 +29,29 @@ function escapeRegex(s: string): string {
 
 // Consume surrounding blank lines so removing a wrapped block restores the
 // exact "\n\n" seam a no-block turn would have had (prefix byte-identity).
+// \r? makes it robust to CRLF although the system is \n-only today.
 const VOLATILE_RE = new RegExp(
-  `(?:\\n*)${escapeRegex(VOLATILE_SUFFIX_BEGIN)}([\\s\\S]*?)${escapeRegex(VOLATILE_SUFFIX_END)}(?:\\n*)`,
+  `(?:\\r?\\n)*${escapeRegex(VOLATILE_SUFFIX_BEGIN)}([\\s\\S]*?)${escapeRegex(VOLATILE_SUFFIX_END)}(?:\\r?\\n)*`,
   "g",
 );
 
+// Neutralize any literal volatile-suffix marker that appears INSIDE block
+// content (e.g. a path-A memory excerpt that happens to quote this very
+// protocol). Without this, hoist's non-greedy regex would stop at the first
+// embedded END marker and mis-slice, leaking volatile text into the stable
+// prefix. The escaped form stays a harmless HTML comment and is never
+// un-escaped (it only needs to differ from the real markers).
+function sanitizeMarkers(block: string): string {
+  return block
+    .split(VOLATILE_SUFFIX_BEGIN)
+    .join("<!-- pi-astack:volatile-suffix(escaped) -->")
+    .split(VOLATILE_SUFFIX_END)
+    .join("<!-- pi-astack:/volatile-suffix(escaped) -->");
+}
+
 /** Wrap a per-turn / per-minute volatile block for later hoisting. */
 export function wrapVolatile(block: string): string {
-  return `${VOLATILE_SUFFIX_BEGIN}\n${block}\n${VOLATILE_SUFFIX_END}`;
+  return `${VOLATILE_SUFFIX_BEGIN}\n${sanitizeMarkers(block)}\n${VOLATILE_SUFFIX_END}`;
 }
 
 /**
@@ -54,7 +69,11 @@ export function hoistVolatileSuffix(prompt: string): string {
     return "\n\n";
   });
   const head = stripped.replace(/\n+$/, "");
-  if (blocks.length === 0) return `${head}\n`;
+  // Both branches end the head with the same "\n\n" seam so the function's
+  // output prefix is self-consistent whether or not a volatile block was
+  // present (time-injector also normalizes, but the invariant should not
+  // depend on the caller).
+  if (blocks.length === 0) return `${head}\n\n`;
   const tail = blocks
     .map((b) => `${VOLATILE_SUFFIX_BEGIN}\n${b}\n${VOLATILE_SUFFIX_END}`)
     .join("\n\n");
