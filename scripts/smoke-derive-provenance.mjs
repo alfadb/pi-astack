@@ -27,6 +27,7 @@ const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"}: ${m}`); if (!c) fail
   ok(p2 && p2.adrPath === "docs/adr/0032-y.md" && p2.heading === "3. auto-continue" && p2.sha === "abc", "parse: ### 多级 heading 去前缀 #");
   ok(parseSourceRef("no-at-here") === null, "parse: 无 @ → null");
   ok(parseSourceRef("nofile-no-md#h@s") === null, "parse: 无 .md → null");
+  ok(parseSourceRef("docs/adr/0001-x.mdx#h@s") === null, "parse: .mdx 不误判(非 .md#)→ null");
 }
 
 // ── 临时 docsRoot + ADR fixtures ──
@@ -42,6 +43,8 @@ writeAdr("0004-superseded.md", "superseded", "## 决策\n\n被取代");
 writeAdr("0005-superseded-ingested.md", "superseded", "## 机制（逐条 slug）\n\n被取代且 ingest");
 writeAdr("0006-proposed.md", "proposed", "## 决策\n\n草案");
 writeAdr("0007-drifted.md", "accepted", "## 改名后的标题\n\n原标题没了");
+// marker 只在正文 prose(引用别的 ADR 被 ingest), 不在 heading → 不应判为 ingested
+writeAdr("0008-prose-mention.md", "accepted", "## 决策\n\n依赖 ADR 0015(已 ingest 入 abrain)。\n\n## 真在的标题\n\nx");
 
 const E = (slug, sourceRef) => ({ slug, sourceRef });
 const entries = [
@@ -54,12 +57,15 @@ const entries = [
   E("e-drifted", "docs/adr/0007-drifted.md#原始标题@s"), // live ADR 但 heading 没了 → 真 drift
   E("e-file-missing", "docs/adr/9999-gone.md#x@s"),
   E("e-unparseable", "this is not a ref"),
+  E("e-prose-live", "docs/adr/0008-prose-mention.md#决策@s"), // marker 仅在 prose → 非 ingested, heading 在 → live
+  E("e-prose-drift", "docs/adr/0008-prose-mention.md#原标题没了@s"), // 非 ingested + heading 没了 → 真 drift
+  E("e-escape", "docs/adr/../../../etc/passwd.md#x@s"), // 路径逃逸 → file_missing
   E("e-no-ref", undefined), // 跳过
 ];
 const r = checkProvenanceLiveness(entries, { docsRoot: tmp });
 const v = (slug) => r.findings.find((f) => f.slug === slug)?.verdict;
 
-ok(r.withSourceRef === 9, `withSourceRef=9 (10 条, 1 条无 source_ref 跳过) got ${r.withSourceRef}`);
+ok(r.withSourceRef === 12, `withSourceRef=12 (13 条, 1 条无 source_ref 跳过) got ${r.withSourceRef}`);
 ok(v("e-live") === "live", "live: accepted + heading 在");
 ok(v("e-archived") === "source_ingested", "archived → source_ingested");
 ok(v("e-ingested-accepted") === "source_ingested", "accepted+ingest marker + heading 没了 → source_ingested(预期, 非 drift)");
@@ -69,10 +75,13 @@ ok(v("e-proposed") === "source_proposed", "proposed → provisional");
 ok(v("e-drifted") === "heading_missing", "live ADR + heading 没了 → 真 drift");
 ok(v("e-file-missing") === "file_missing", "文件不存在 → file_missing");
 ok(v("e-unparseable") === "unparseable", "畸形 ref → unparseable");
+ok(v("e-prose-live") === "live", "ingest marker 仅在 prose(非 heading)→ 非 ingested, heading 在 → live");
+ok(v("e-prose-drift") === "heading_missing", "prose-only marker 不掩盖真 drift → heading_missing");
+ok(v("e-escape") === "file_missing", "路径逃逸 docsRoot → file_missing(含 containment guard)");
 ok(!r.findings.find((f) => f.slug === "e-no-ref"), "无 source_ref 条目被跳过");
 
 const flagged = r.findings.filter((f) => FLAGGED_VERDICTS.has(f.verdict)).map((f) => f.slug).sort();
-ok(JSON.stringify(flagged) === JSON.stringify(["e-drifted", "e-file-missing", "e-superseded", "e-superseded-ingested", "e-unparseable"]),
+ok(JSON.stringify(flagged) === JSON.stringify(["e-drifted", "e-escape", "e-file-missing", "e-prose-drift", "e-superseded", "e-superseded-ingested", "e-unparseable"]),
    `flagged 集合正确 got ${JSON.stringify(flagged)}`);
 
 fs.rmSync(tmp, { recursive: true, force: true });

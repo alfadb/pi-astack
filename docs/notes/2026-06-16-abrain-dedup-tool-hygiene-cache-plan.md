@@ -115,7 +115,7 @@ F(安全热身,验证改-测闭环)→ T0 量旧账 → A(先 A1 规则、再 A2
 - [x] **A2** 大库写入时去重 — 验证结论:全库 bypass 已被 P7(ADR 0035)+ ADR 0037 profile facade 结构性修复,**无需改码**;2 家跨厂商 T0(opus/deepseek)独立 CONFIRM-NO-CHANGE;回归 smoke:stage0-nonactive + search-profiles 均绿。证据:docs/notes/2026-06-16-A2-fullcorpus-bypass-verification.md。
 - [x] **B** 清旧账 — **决定(用户 2026-06-16):不在主会话整理、不建批量子系统,靠 sediment 正常运行自然演化**。A1 已上线 → 下次黑话主题被触碰即写入当下合并那一簇;575 断链危害低,保持 lint 标记、随条目处理自然收口。主会话零动作(守只读红线;合于“第二大脑应自主演化、不靠主会话维护”的取向)。
 - [x] **D** 缓存分区修复 — 实测真凶是 goal 状态块(字母序靠前)+ path-A 召回夹在 stable 中间(time 本就在末尾);修复=volatile-suffix 协议(_shared,wrapVolatile + time-injector hoist 下沉)。提交 9ba223e。应对 2 家跨厂商 T0 SHIP-WITH-CHANGES:修 marker 碰撞转义 + seam 自洽 + CRLF;smoke:cache-partition 18 断言绿 + time/goal/memory-path-a 回归绿。证据:docs/notes/2026-06-16-D-cache-partition-review.md。
-- [ ] **C** 理由保鲜。
+- [x] **C** 理由保鲜 — source_ref provenance liveness 检测器(只读, extensions/memory/provenance-liveness.ts)。parseSourceRef + checkProvenanceLiveness 给每条确定性 verdict(file_missing/superseded/ingested/proposed/heading_missing/live/unparseable, superseded 优先于 ingested)。关键:靠 heading-scoped ingest 标记区分“ADR 被 condense”(预期)与“真 drift”。样本验证(真实 251,只读): 全 source_ingested、0 actionable(provenance 干净,检测器是前瞻守卫)。写路径交 sediment。提交 4347a4f。应对 2 家跨厂商 T0 SHIP-WITH-CHANGES:修 heading-scoped ingest(防隐藏 drift)+ .md# 解析 + 路径逃逸 guard;smoke:derive-provenance 20 断言绿。证据:docs/notes/2026-06-16-C-provenance-liveness-review.md。
 - [ ] **E** 工具空转检测。
 
 ### Backlog(D/C/E 之后)

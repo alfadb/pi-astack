@@ -37,10 +37,15 @@ export function parseSourceRef(refRaw: string): SourceRefParts | null {
   if (at < 0) return null;
   const sha = ref.slice(at + 1).trim();
   const rest = ref.slice(0, at);
-  const mdIdx = rest.indexOf(".md");
-  if (mdIdx < 0) return null;
-  const adrPath = rest.slice(0, mdIdx + 3).trim();
-  const heading = rest.slice(mdIdx + 3).replace(/^#+\s*/, "").trim();
+  // Faithful inverse of buildSourceRef(`${path}#${heading}`): the path always
+  // ends in `.md` and the separator is the `#` immediately after it, so split
+  // on the literal `.md#`. This rejects `.mdx` / `.md.bak` (→ unparseable)
+  // instead of mis-parsing them. Strip any remaining leading `#`s, which are
+  // the captured markdown heading-level markers (e.g. `### 3. auto-continue`).
+  const sepIdx = rest.indexOf(".md#");
+  if (sepIdx < 0) return null;
+  const adrPath = rest.slice(0, sepIdx + 3).trim();
+  const heading = rest.slice(sepIdx + 4).replace(/^#+\s*/, "").trim();
   if (!adrPath || !sha) return null;
   return { adrPath, heading, sha };
 }
@@ -84,10 +89,13 @@ export interface ProvenanceEntryInput {
 }
 
 // An ADR whose rationale was decomposed ("ingested") into abrain entries gets
-// its detailed sections condensed to a 方向/机制 skeleton + a slug list. Its
-// pinned headings legitimately disappear and its status may stay `accepted`
-// (not just `archived`), so status alone misses these. The body marker is the
-// reliable signal that the cited heading is gone BY DESIGN, not by drift.
+// its detailed sections condensed to a 方向/机制 skeleton whose HEADING carries
+// the marker (e.g. `## 机制（已分解入 abrain，逐条 slug）`). Its pinned headings
+// legitimately disappear and its status may stay `accepted` (not just
+// `archived`), so status alone misses these. We scope the marker to HEADING
+// lines, not the whole body: a still-live ADR that merely MENTIONS another
+// ADR's ingestion in prose (e.g. 0035 citing 0015) must NOT be classified as
+// ingested, or genuine future drift on that live ADR would be hidden.
 const INGEST_MARKER_RE = /逐条\s*slug|分解入\s*abrain|ingest\s*入\s*abrain/i;
 
 interface AdrInfo {
@@ -114,7 +122,7 @@ function loadAdr(absPath: string, cache: Map<string, AdrInfo>): AdrInfo {
     info = {
       exists: true,
       status,
-      ingested: status === "archived" || INGEST_MARKER_RE.test(raw),
+      ingested: status === "archived" || [...headings].some((h) => INGEST_MARKER_RE.test(h)),
       headings,
     };
   } catch {
@@ -153,8 +161,14 @@ export function checkProvenanceLiveness(
       findings.push({ slug: e.slug, sourceRef: ref, verdict: "unparseable" });
       continue;
     }
-    const abs = path.resolve(opts.docsRoot, parts.adrPath);
-    const adr = loadAdr(abs, adrCache);
+    // Containment guard: a source_ref with `../` must not resolve outside the
+    // docs root (path traversal). Out-of-tree → treat as file_missing.
+    const root = path.resolve(opts.docsRoot);
+    const abs = path.resolve(root, parts.adrPath);
+    const escaped = abs !== root && !abs.startsWith(root + path.sep);
+    const adr: AdrInfo = escaped
+      ? { exists: false, ingested: false, headings: new Set<string>() }
+      : loadAdr(abs, adrCache);
     const base: ProvenanceFinding = {
       slug: e.slug,
       sourceRef: ref,

@@ -1,8 +1,8 @@
 ---
 doc_type: review-evidence
-status: pending-review
+status: review-passed
 created: 2026-06-16
-gate: cross-vendor review (goal g-eaaa09e1, task C) — read-only detector; write path (archive/retire) delegated to sediment
+gate: cross-vendor review (goal g-eaaa09e1, task C) — read-only detector; 2 cross-vendor T0 SHIP-WITH-CHANGES, 3 findings fixed (see §结果)
 ---
 
 # C 理由保鲜:source_ref provenance liveness 检测器
@@ -52,3 +52,16 @@ provenance liveness: 251/251 entries carry source_ref
 2. parseSourceRef 有没有能错切的边界(heading 含 `@`/`#`、path 不以 .md 结尾、Windows 路径)?
 3. verdict 优先级排序是否合理?heading_missing 只对非 ingest 的存活 ADR 触发——够不够?
 4. "当前 251 全 source_ingested、0 actionable"这个结论成立吗?检测器是否真有前瞻价值,还是说 source_ref 这套 provenance 已无意义(因为原 heading 注定都被 condense 掉)?
+
+## 结果(2026-06-16, 2 家跨厂商 T0)
+
+gpt-5.5 + kimi-k2.6 均 **SHIP-WITH-CHANGES**, 3 个发现已闭:
+
+- **修1(gpt-5.5,重要):ingest 误判隐藏 drift**。原全正文扫 marker 会误中 ADR 0035(它只是 *提及* 0015 被 ingest, 本身是活的)—如果未来某 source_ref 指向 0035 且 heading 漂移, 会被错藏成 source_ingested。**修**:marker 只扫 **heading 行**(11 个 condensed ADR 的 marker 都在 `## 机制（…逐条 slug）` heading; 0035 的在 prose)—实测修后 251 仍全 source_ingested 且 0035 不再误判。
+- **修2(两家):parseSourceRef**。`indexOf(".md")` 会误切 `.mdx`/`.md.bak`。**修**:按 buildSourceRef 的真实格式 split on `.md#`(路径总以 .md 结尾、分隔符是紧跟的 #)。
+- **修3(kimi):路径逃逸**。`path.resolve(docsRoot, adrPath)` 遭 `../../` 可逃出根。**修**:加 containment guard, 出树 → file_missing。
+- INGEST_MARKER_RE 作为 canonical condensation marker 已在注释记明;bare catch 将 EACCES 归 file_missing(只读检测可接受)。
+- 两家都认同:当前 cohort 全 source_ingested 是诚实的; 检测器对 file_missing / superseded / unparseable / 未来非-ingest ADR 漂移 仍有前瞻价值。
+- 新增断言: .mdx 不误判、prose-only marker 非 ingested(live / heading_missing)、路径逃逸 file_missing — **smoke 20 断言全绿**。
+
+**结论**:C 评审通过, 3 个发现均已闭。
