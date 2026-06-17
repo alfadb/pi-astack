@@ -66,6 +66,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { hoistVolatileSuffix } from "../_shared/volatile-suffix";
 
 const BEGIN_MARKER = "<!-- pi-astack/time-injector: minute-precision wall clock -->";
 const END_MARKER = "<!-- /pi-astack/time-injector -->";
@@ -169,13 +170,20 @@ export default function (pi: ExtensionAPI) {
     // a stale block in place (would carry an old minute).
     const cleaned = stripExistingBlock(current);
 
+    // Hoist every volatile-wrapped block (goal status, path-A memory recall)
+    // to the end so the session-stable prefix stays byte-identical across
+    // turns. time-injector is the effective last injector, so it finalizes the
+    // prefix-cache partition; the time block is appended strictly after the
+    // hoisted volatile tail.
+    const hoisted = hoistVolatileSuffix(cleaned);
+
     const line = formatTimeLine();
     const block = composeBlock(line);
 
     // Append at the very END of the system prompt. Anthropic prompt
     // cache keys by prefix; anything cached before this point keeps
     // its cache validity across minutes.
-    const next = `${cleaned.replace(/\n+$/, "")}\n\n${block}\n`;
+    const next = `${hoisted.replace(/\n+$/, "")}\n\n${block}\n`;
 
     return { systemPrompt: next };
   });

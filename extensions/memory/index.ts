@@ -19,6 +19,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { bindLifecycle as bindCausalAnchorLifecycle } from "../_shared/causal-anchor";
+import { wrapVolatile } from "../_shared/volatile-suffix";
 import { asBoolean, resolveSettings } from "./settings";
 import type { GetParams, ListFilters, SearchParams } from "./types";
 import { loadEntries } from "./parser";
@@ -812,7 +813,9 @@ brief 是专家建议，不是命令。
         sessionManager: (ctx as { sessionManager?: unknown } | undefined)?.sessionManager,
       });
       if (r.block) {
-        return { systemPrompt: current + "\n\n" + r.block };
+        // Wrap volatile: path-A recall changes per-turn; time-injector hoists
+        // it to the prompt suffix to keep the stable prefix cache-valid.
+        return { systemPrompt: current + "\n\n" + wrapVolatile(r.block) };
       }
     } catch {
       // belt-and-suspenders; injector already absorbs internal failures.

@@ -3,10 +3,9 @@
  * smoke-time-injector — verifies the time-injector extension's pure
  * formatting + dedup logic.
  *
- * Loading strategy follows smoke-persistent-input-history.mjs: use the
- * locally-installed `typescript` package to transpile the .ts source
- * to CommonJS, write to a tmp .cjs, and require it. This avoids
- * jiti/Node-24 compatibility noise.
+ * Loading strategy: jiti.import the .ts source directly (resolves the
+ * extension's relative imports, e.g. ../_shared/volatile-suffix). The
+ * earlier standalone-transpile path could not resolve cross-module imports.
  *
  * What this asserts (no pi runtime needed; formatTimeLine / composeBlock
  * / stripExistingBlock are pure):
@@ -23,32 +22,13 @@
  * Run: node scripts/smoke-time-injector.mjs
  */
 
-import { createRequire } from "node:module";
-import fs from "node:fs";
-import os from "node:os";
+import { createJiti } from "jiti";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(__dirname, "..");
-const require = createRequire(import.meta.url);
-const ts = require("typescript");
-
-const srcPath = path.join(repoRoot, "extensions/time-injector/index.ts");
-const transpiled = ts.transpileModule(fs.readFileSync(srcPath, "utf8"), {
-  compilerOptions: {
-    module: ts.ModuleKind.CommonJS,
-    target: ts.ScriptTarget.ES2022,
-    esModuleInterop: true,
-    moduleResolution: ts.ModuleResolutionKind.NodeJs,
-  },
-}).outputText;
-
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-ti-"));
-const tmpFile = path.join(tmpDir, "time-injector.cjs");
-fs.writeFileSync(tmpFile, transpiled);
-
-const mod = require(tmpFile);
+const jiti = createJiti(import.meta.url);
+const mod = await jiti.import(path.join(__dirname, "..", "extensions/time-injector/index.ts"));
 const { formatTimeLine, composeBlock, stripExistingBlock, BEGIN_MARKER, END_MARKER } = mod.__TEST;
 
 let failures = 0;

@@ -32,6 +32,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCurrentAnchor } from "../_shared/causal-anchor";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { isSubAgentSession } from "../_shared/pi-internals";
+import { wrapVolatile } from "../_shared/volatile-suffix";
 import { Type } from "typebox";
 import { runAutoContinueOnce } from "./continue";
 import { packGoalJudgeWindow, runGoalJudge } from "./judge";
@@ -371,7 +372,9 @@ export default function (pi: ExtensionAPI) {
       return { systemPrompt: cleaned };
     }
     const current = (event as { systemPrompt?: string }).systemPrompt ?? "";
-    const block = formatGoalBlock(state);
+    // Wrap volatile: goal status changes per-turn; time-injector hoists it to
+    // the prompt suffix so the session-stable prefix stays cache-valid.
+    const block = wrapVolatile(formatGoalBlock(state));
     const next = `${stripGoalBlock(current).replace(/\n+$/, "")}\n\n${block}\n`;
     return { systemPrompt: next };
   });
