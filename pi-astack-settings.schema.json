@@ -1112,6 +1112,24 @@
               "description": "Fraction of hub turns the oracle (increment 4) also dual-executes (human-pick vs hub-pick) for the cross-vendor correctness judge (ADR 0030 §5b)."
             }
           }
+        },
+        "idleLoopGuard": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "E — tool idle-loop guard. Suppresses a back-to-back identical (tool,args) spin and returns a reflection nudge to the model instead of re-executing the repeat. Consecutive-only: any different tool call resets the streak, so false positives are near-zero (read-after-edit, spaced re-runs, etc. never trip it). Per-session, reset each turn.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Master kill-switch for the idle-loop guard. Default on."
+            },
+            "threshold": {
+              "type": "number",
+              "default": 3,
+              "minimum": 2,
+              "description": "Consecutive identical (tool,args) count at which suppression starts. 3 = allow two identical calls, suppress the 3rd onward until the signature changes."
+            }
+          }
         }
       }
     },

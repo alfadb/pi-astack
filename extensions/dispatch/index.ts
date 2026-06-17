@@ -38,6 +38,15 @@ import {
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
 import { registerHubTool, readHubConfigFromSettings } from "./hub";
+import {
+  newToolLoopState,
+  toolCallSignature,
+  evaluateToolLoop,
+  buildLoopReflection,
+  resolveIdleLoopGuardSettings,
+  type ToolLoopState,
+  type IdleLoopGuardSettings,
+} from "./tool-loop-guard";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
 import {
@@ -59,7 +68,9 @@ import {
 import { startHeartbeat, type HeartbeatHandle } from "../_shared/heartbeat";
 import { assessLivenessForAnchor } from "./heartbeat-consumer";
 import { appendFile, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -1130,6 +1141,49 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_start", async (_event: unknown, ctx: any) => {
     applyDispatchStatus(ctx, "idle");
   });
+
+  // ── E: tool idle-loop guard ──────────────────────────────────────
+  // Suppress a back-to-back identical (tool,args) spin and return a reflection
+  // nudge instead of executing the repeat. Consecutive-only → near-zero false
+  // positives; per-session state reset each turn; explicit settings kill-switch
+  // (dispatch.idleLoopGuard). NB: abrain's vault bash guard (alphabetically
+  // earlier) may rewrite `bash` input before this runs, so a vault-wrapped bash
+  // spin can be MISSED — a safe false-negative, never a false-positive.
+  {
+    let guard: IdleLoopGuardSettings;
+    try {
+      const raw = JSON.parse(readFileSync(join(homedir(), ".pi", "agent", "pi-astack-settings.json"), "utf-8"));
+      guard = resolveIdleLoopGuardSettings(raw);
+    } catch {
+      guard = resolveIdleLoopGuardSettings(undefined); // fail-open to defaults
+    }
+    if (guard.enabled) {
+      const loopStates = new Map<string, ToolLoopState>();
+      const sidOf = (c: any): string => {
+        try {
+          return String(c?.sessionManager?.getSessionId?.() ?? "main");
+        } catch {
+          return "main";
+        }
+      };
+      pi.on("agent_start", async (_event: unknown, ctx: any) => {
+        loopStates.delete(sidOf(ctx)); // fresh streak each turn
+      });
+      pi.on("tool_call", async (event: any, ctx: any) => {
+        const sid = sidOf(ctx);
+        let st = loopStates.get(sid);
+        if (!st) {
+          st = newToolLoopState();
+          loopStates.set(sid, st);
+        }
+        const verdict = evaluateToolLoop(st, toolCallSignature(event.toolName, event.input), guard.threshold);
+        if (verdict.block) {
+          return { block: true, reason: buildLoopReflection(event.toolName, verdict.consecutive) };
+        }
+        return undefined;
+      });
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════
   // dispatch_agent
