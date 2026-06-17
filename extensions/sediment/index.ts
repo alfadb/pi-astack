@@ -5078,6 +5078,7 @@ function scheduleMultiviewReplay(args: {
         terminal_max_retries: replayResult.terminal_max_retries,
         terminal_stale: replayResult.terminal_stale,
         deferred_other_project: replayResult.deferred_other_project,
+        terminal_no_origin: replayResult.terminal_no_origin,
         skipped_backoff: replayResult.skipped_backoff,
         cleanup_pending: replayResult.cleanup_pending,
         terminal_writer_max_retries: replayResult.terminal_writer_max_retries,

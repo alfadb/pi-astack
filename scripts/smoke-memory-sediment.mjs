@@ -3521,6 +3521,74 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-owned-behind-other-project"), `owned behind mismatch should delete after success`);
           assert(loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-other-project"), `other-project entry should remain after owned entry drains`);
           assert(deleteMultiviewPending("multiview-pending-loop-other-project") === true, `origin mismatch smoke cleanup failed`);
+
+          // ── S1: fail-closed project resolution (no-origin must NOT misfile) ──
+          // A project-scope candidate with NO captured origin must not be written
+          // into the ambient/current project (that misfiled the kihh `ayhz0001`
+          // decision into pi-global). It must be soft-archived as
+          // terminal_no_origin. Driven through the approved_decision fast-path so
+          // the final decision's scope is deterministic (no reviewer mock).
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-no-origin",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            // intentionally NO origin_project_id / origin_project_root
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "no origin proposer" },
+            proposer_raw_text: "no origin raw",
+            approved_decision: { op: "create", rationale: "no origin approved (project scope)" },
+            candidate_snapshot: { title: "Replay No Origin Project", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay No Origin Project\n\nUnpinned project candidate must not be misfiled into the ambient project." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          let noOriginWrote = false;
+          const noOrigin = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { noOriginWrote = true; },
+          });
+          assert(noOrigin.terminal_no_origin === 1 && noOrigin.succeeded === 0 && noOrigin.errors === 0 && noOriginWrote === false, `S1: unpinned project candidate must not write to ambient project (terminal_no_origin): ${JSON.stringify(noOrigin)} wrote=${noOriginWrote}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-no-origin"), `S1: unpinned project candidate should be soft-archived (removed from pending)`);
+
+          // ── S1 counter-case: world-scope no-origin MUST still write ──
+          // World entries live in the global store; origin binding is irrelevant.
+          // The gate must NOT over-defer them (otherwise a reviewer-promoted world
+          // insight captured in an unbound session would be silently lost).
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-no-origin-world",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", scope: "world", rationale: "no origin world proposer" },
+            proposer_raw_text: "no origin world raw",
+            approved_decision: { op: "create", scope: "world", rationale: "no origin approved (world scope)" },
+            candidate_snapshot: { title: "Replay No Origin World", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay No Origin World\n\nWorld candidate with no origin must still be written to the global store." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          let worldNoOriginWrote = false;
+          const worldNoOrigin = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { worldNoOriginWrote = true; },
+          });
+          assert(worldNoOrigin.succeeded === 1 && worldNoOrigin.terminal_no_origin === 0 && worldNoOriginWrote === true, `S1: world-scope candidate with no origin must still be written: ${JSON.stringify(worldNoOrigin)} wrote=${worldNoOriginWrote}`);
         } finally {
           if (oldReplayAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
           else process.env.ABRAIN_ROOT = oldReplayAbrainRoot;

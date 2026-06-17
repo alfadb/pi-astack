@@ -83,6 +83,7 @@ export type ReplayOutcome =
   | "terminal_max_retries"  // retry_attempts ≥ retryCapForState → deleted
   | "terminal_stale"        // age ≥ STALE_DAYS_MULTIVIEW_PENDING → deleted
   | "deferred_other_project"// current binding does not own this entry
+  | "terminal_no_origin"    // S1: project-scope candidate has no captured origin → cannot place safely → soft-archived
   | "skipped_backoff"       // next_retry_not_before_iso is still in future
   | "cleanup_pending"       // brain write already happened; retry staging delete
   | "terminal_writer_max_retries" // writer_retry_attempts exceeded cap
@@ -118,6 +119,7 @@ export interface ReplayBatchResult {
   terminal_max_retries: number;
   terminal_stale: number;
   deferred_other_project: number;
+  terminal_no_origin: number;
   skipped_backoff: number;
   cleanup_pending: number;
   terminal_writer_max_retries: number;
@@ -273,6 +275,34 @@ function originMismatchDetail(entry: MultiviewPendingEntry, deps: ReplayDeps): s
   return `origin binding mismatch; entry captured for project=${entry.origin_project_id ?? "unknown"} root=${entry.origin_project_root ?? "unknown"}, current project=${deps.currentProjectId ?? "unknown"} root=${deps.currentProjectRoot ?? "unknown"}. Staging kept for its owning project.`;
 }
 
+/**
+ * S1 fail-closed placement classifier. The multi-view replay writer targets the
+ * CURRENT binding (executeCuratorDecisionToBrain projectRoot=replayCwd), NOT the
+ * captured origin. A project-scope decision may therefore be applied ONLY when
+ * its captured origin provably matches the current binding:
+ *   - "unplaceable": no captured origin_project_id/root → can never be safely
+ *     placed; replay must NOT fall back to writing into the ambient project
+ *     (that misfiled the kihh `ayhz0001` decision into pi-global — see S1).
+ *   - "mismatch": origin is pinned but differs from the active binding (or the
+ *     current binding is unknown) → defer; a session bound to the owning
+ *     project applies it later.
+ *   - "match": safe to write here.
+ * World-scope decisions live in the global store and are not classified here
+ * (the caller checks scope before calling this).
+ */
+export function classifyProjectPlacement(
+  originId: string | undefined,
+  originRoot: string | undefined,
+  deps: Pick<ReplayDeps, "currentProjectId" | "currentProjectRoot">,
+): "match" | "mismatch" | "unplaceable" {
+  if (!originId || !originRoot) return "unplaceable";
+  if (!deps.currentProjectId || !deps.currentProjectRoot) return "mismatch";
+  return originId === deps.currentProjectId
+    && path.resolve(originRoot) === path.resolve(deps.currentProjectRoot)
+    ? "match"
+    : "mismatch";
+}
+
 const MAX_WRITER_RETRY_ATTEMPTS = 24;
 
 type MultiviewReplayGlobal = typeof globalThis & {
@@ -408,6 +438,7 @@ export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBa
     terminal_max_retries: 0,
     terminal_stale: 0,
     deferred_other_project: 0,
+    terminal_no_origin: 0,
     skipped_backoff: 0,
     cleanup_pending: 0,
     terminal_writer_max_retries: 0,
@@ -763,6 +794,44 @@ async function retryApprovedWriterOnly(
   neighborStatusBySlug: Record<string, EntryStatus> = {},
 ): Promise<void> {
   try {
+    // ── S1 fail-closed binding gate ──────────────────────────────────────
+    // Every replay brain write funnels through here, and the writer targets
+    // the CURRENT binding (replayCwd), NOT the captured origin. A project-scope
+    // decision must therefore be applied ONLY when its captured origin provably
+    // matches the active session. The authoritative scope is on the FINAL
+    // decision (the reviewer can promote project→world via pass1.scope), so
+    // this gate — not the cheap pre-LLM isOtherProjectEntry filter — is the
+    // correctness boundary. World-scope decisions go to the global store and
+    // are unaffected. (S1: an unpinned project candidate previously fell back
+    // to writing into whatever project was active, misfiling the kihh
+    // `ayhz0001` decision into pi-global.)
+    const writeScope = "scope" in finalDecision ? finalDecision.scope : undefined;
+    if (writeScope !== "world") {
+      const placement = classifyProjectPlacement(entry.origin_project_id, entry.origin_project_root, deps);
+      if (placement === "unplaceable") {
+        if (!archiveTerminalOrAudit(entry, audit, result, `S1 fail-closed: project-scope op=${finalDecision.op} has no captured origin_project_id; refusing to write into ambient project=${deps.currentProjectId ?? "unknown"}; wanted to soft-archive`, entryStart)) return;
+        audit.outcome = "terminal_no_origin";
+        audit.new_decision = finalDecision;
+        audit.detail = `S1 fail-closed: project-scope op=${finalDecision.op} candidate has no captured origin binding; replay refuses to write it into the ambient project (current=${deps.currentProjectId ?? "unknown"}) and soft-archived it to abandoned/. Re-captured correctly if it resurfaces in a project-bound session. (cf. ayhz0001 kihh→pi-global misfile.)${extraDetail}`;
+        audit.durationMs = Date.now() - entryStart;
+        result.terminal_no_origin++;
+        result.auditRows.push(audit);
+        return;
+      }
+      if (placement === "mismatch") {
+        // Defense-in-depth: a pinned origin≠current is normally caught by the
+        // pre-LLM isOtherProjectEntry pre-filter, but gate it here too so the
+        // writer never targets the wrong project on any future refactor.
+        audit.outcome = "deferred_other_project";
+        audit.new_decision = finalDecision;
+        audit.detail = `S1 fail-closed: project-scope op=${finalDecision.op} origin=${entry.origin_project_id ?? "unknown"}/${entry.origin_project_root ?? "unknown"} does not match current binding ${deps.currentProjectId ?? "unknown"}/${deps.currentProjectRoot ?? "unknown"}; deferred (staging kept for its owning project).${extraDetail}`;
+        audit.durationMs = Date.now() - entryStart;
+        result.deferred_other_project++;
+        result.auditRows.push(audit);
+        return;
+      }
+    }
+
     const draft = draftFromSnapshot(entry, finalDecision);
     audit.new_decision = finalDecision;
     const approvedAtIso = entry.approved_at_iso ?? new Date().toISOString();
