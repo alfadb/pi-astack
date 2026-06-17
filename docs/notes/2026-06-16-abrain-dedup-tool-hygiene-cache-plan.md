@@ -118,6 +118,10 @@ F(安全热身,验证改-测闭环)→ T0 量旧账 → A(先 A1 规则、再 A2
 - [ ] **C** 理由保鲜。
 - [ ] **E** 工具空转检测。
 
+### Backlog(D/C/E 之后)
+
+- [ ] **A3 rename-on-update**(用户 2026-06-16 确立为方向,排 D/C/E 之后):`update` 允许改 slug/文件名——slug 是随内容演化的可读把手、不冻结。**硬约束:改名必须原子重写所有入边引用**(正文 `[[old]]`→`[[new]]` + frontmatter 关系如 derives_from),否则制造断链(= 575 那类的成因)。复用 `extensions/memory/rewrite-cross-scope.ts`(已能扫全库找入边并重写)。区别于 `supersede`(那是 fork 身份);rename 保留同一条的 created/timeline/git 历史(git mv)。软约束:仅内容显著演化才改名。动 sediment 写入路径 → 过一轮跨厂商 T0 评审。
+
 ## 验证总则
 
 - 每项至少一条机械 / 可独立验证的证据(smoke 或计数),不靠自评。
