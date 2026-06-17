@@ -120,6 +120,9 @@ F(安全热身,验证改-测闭环)→ T0 量旧账 → A(先 A1 规则、再 A2
 
 ### Backlog(D/C/E 之后)
 
+- [ ] **S1(sediment 写入路径缺陷,2026-06-16 调查 A3 时发现)** `multiview-staging-replay` 的 project 解析 **fail-open**:`isOtherProjectEntry`(replay.ts:265)与写入回退(replay.ts:613)在 `origin_project_id` 缺失时落到「当前活动 project」而非 defer/skip。无 origin 锚的 staging 候选会漏进恰好活动的 project。**实例**:`ayhz0001-…-minimal-strategy`(kihh 领域:大臂电流控制/S7 PLC)被误写进 pi-global(commit e5e64ff @09:41:53)+ 正确写进 kihh(3715015 @09:42:19),两份逐字节相同、均 "captured from multi-view staging replay"。**硬化方向**:fail-closed —— origin 缺失即 defer/丢回 staging 等绑定明确,绝不写环境 project。动 sediment 写入路径 → 过 T0。当前新 capture 已钉 origin(live 4/4),洞对新条目基本闭合,此为残留护栏 + 遗留。
+- [ ] **S2(数据清理)** pi-global 的 `ayhz0001-main-arm-current-control-writer-failure-minimal-strategy` 是 kihh 内容误写副本(S1 产物);交 sediment 自然演化或显式清理。主会话不动(只读红线)。
+
 - [ ] **A3 rename-on-update**(用户 2026-06-16 确立为方向,排 D/C/E 之后):`update` 允许改 slug/文件名——slug 是随内容演化的可读把手、不冻结。**硬约束:改名必须原子重写所有入边引用**(正文 `[[old]]`→`[[new]]` + frontmatter 关系如 derives_from),否则制造断链(= 575 那类的成因)。复用 `extensions/memory/rewrite-cross-scope.ts`(已能扫全库找入边并重写)。区别于 `supersede`(那是 fork 身份);rename 保留同一条的 created/timeline/git 历史(git mv)。软约束:仅内容显著演化才改名。动 sediment 写入路径 → 过一轮跨厂商 T0 评审。
 
 ## 验证总则
