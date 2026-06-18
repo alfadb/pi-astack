@@ -65,7 +65,7 @@ export function maybeAutoReconcile(
 ): AutoReconcileDecision {
   const decision = shouldTriggerReconcile(sig, {
     enabled: settings.search.autoReconcile,
-    embeddingConfigured: !!(settings.embedding.provider && settings.embedding.model),
+    embeddingConfigured: !!(settings.embedding.model && ((settings.embedding.baseUrl && settings.embedding.apiKey) || settings.embedding.provider)),
     hasProjectRoot: !!projectRoot,
     inFlight,
     now: Date.now(),

@@ -8,7 +8,7 @@
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
-import { secret } from "./_secrets.mjs";
+import { embeddingConfig } from "./_embedding-config.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,15 +20,15 @@ const jiti = createJiti(import.meta.url);
 const MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "models.json");
 const ABRAIN = path.join(os.homedir(), ".abrain");
 
-const EMBED_KEY = secret("embedding");
-if (!EMBED_KEY) { console.log("SKIP: no embedding key in ~/.pi/secrets.json"); process.exit(0); }
+const EMBEDDING = embeddingConfig();
+if (!EMBEDDING.apiKey || !EMBEDDING.baseUrl) { console.log("SKIP: memory.embedding baseUrl/apiKey not configured"); process.exit(0); }
 
 const { llmSearchEntriesWithVerdict } = (await jiti.import(path.join(repoRoot, "extensions/memory/llm-search.ts"))).__oracleKernel; // ADR 0037: 经 __oracleKernel 拿私有 wrapper
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 const { memorySearchMetricsPath } = await jiti.import(path.join(repoRoot, "extensions/_shared/runtime.ts"));
 
-// 模型无关 registry: 从 models.json 解析 baseUrl+apiKey(!command 从 secrets.json)(见 _oracle-registry.mjs)
+// 模型无关 registry: chat 从 models.json 解析，embedding 从 memory.embedding 专用配置解析。
 const { registry } = makeOracleRegistry(MODELS_JSON);
 
 // corpus: world(knowledge) — 小且快, stage0 字段齐全即可

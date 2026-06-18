@@ -20,6 +20,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execSync } from "node:child_process";
 import { abrainStateDir, acquireFileLock, resolveUserGlobalAbrainHome } from "../_shared/runtime";
 import type { MemoryEntry } from "./types";
 import type { EmbeddingSettings } from "./settings";
@@ -474,7 +475,31 @@ export function selectStage0(
   return { candidates, fallback, coverage: { ranked: candidates.length, missing } };
 }
 
-// ── provider config resolution (modelRegistry + settings + models.json) ──
+// ── provider config resolution (settings first, legacy modelRegistry fallback) ──
+const secretCommandCache = new Map<string, string | undefined>();
+
+function resolveConfiguredSecret(raw: string): string | undefined {
+  if (!raw) return undefined;
+  if (raw.startsWith("!")) {
+    const command = raw.slice(1);
+    if (secretCommandCache.has(command)) return secretCommandCache.get(command);
+    let value: string | undefined;
+    try {
+      const out = execSync(command, { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] });
+      value = out.trim() || undefined;
+    } catch {
+      value = undefined;
+    }
+    secretCommandCache.set(command, value);
+    return value;
+  }
+  if (raw.startsWith("$")) {
+    const envName = raw.startsWith("${") && raw.endsWith("}") ? raw.slice(2, -1) : raw.slice(1);
+    return envName ? process.env[envName] : undefined;
+  }
+  return raw;
+}
+
 function readModelsJsonBaseUrl(provider: string): string | undefined {
   try {
     const file = path.join(require("node:os").homedir(), ".pi", "agent", "models.json");
@@ -492,8 +517,28 @@ export async function resolveEmbeddingProviderConfig(
   modelRegistry: ModelRegistryLike,
   s: EmbeddingSettings,
 ): Promise<EmbeddingProviderConfig> {
-  if (!s.provider || !s.model) {
-    throw new Error("embedding provider/model not configured (pi-astack-settings.json → memory.embedding)");
+  if (!s.model) {
+    throw new Error("embedding model not configured (pi-astack-settings.json → memory.embedding.model)");
+  }
+  if (s.baseUrl || s.apiKey) {
+    const apiKey = resolveConfiguredSecret(s.apiKey);
+    if (!s.baseUrl) throw new Error("embedding baseUrl not configured (pi-astack-settings.json → memory.embedding.baseUrl)");
+    if (!apiKey) throw new Error("embedding apiKey unavailable (pi-astack-settings.json → memory.embedding.apiKey)");
+    return {
+      baseUrl: s.baseUrl,
+      apiKey,
+      model: s.model,
+      dim: s.dim,
+      batchSize: s.batchSize,
+      tpmLimit: s.tpmLimit,
+      timeoutMs: s.timeoutMs,
+      maxRetries: s.maxRetries,
+      multiVector: s.multiVector,
+      multiVectorMaxChunks: s.multiVectorMaxChunks,
+    };
+  }
+  if (!s.provider) {
+    throw new Error("embedding baseUrl/apiKey not configured (pi-astack-settings.json → memory.embedding)");
   }
   const model = modelRegistry.find(s.provider, s.model);
   if (!model) throw new Error(`embedding model not found in registry: ${s.provider}/${s.model}`);

@@ -11,7 +11,7 @@
  * 需要 ~/.pi/secrets.json 的 embedding key。幂等:content-hash 增量,重跑只 embed 变化的。
  */
 import fs from "node:fs";
-import { secret } from "./_secrets.mjs";
+import { embeddingConfig } from "./_embedding-config.mjs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -97,16 +97,16 @@ const scopeCount = {};
 for (const e of active) scopeCount[emb.scopeTagOf(e)] = (scopeCount[emb.scopeTagOf(e)] || 0) + 1;
 console.log(`parsed ${entries.length} entries, ${active.length} active across ${Object.keys(scopeCount).length} scopes`);
 
-const key = secret("embedding");
-if (!key) { console.error("missing embedding key in ~/.pi/secrets.json"); process.exit(1); }
-const mj = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "models.json"), "utf8"));
-const baseUrl = mj.providers.embedding.baseUrl;
+const embedding = embeddingConfig();
+const key = embedding.apiKey;
+if (!key || !embedding.baseUrl) { console.error("memory.embedding baseUrl/apiKey not configured"); process.exit(1); }
+const baseUrl = embedding.baseUrl;
 // ADR 0036 P4: 多向量从生产 settings 读(env MULTI_VECTOR 可覆写)。设 multiVector=true
 // + 跨 init 会把全库重嵌为多向量(长 entry 出多 sub-vector); flag off 与现状一致。
 const embS = settingsMod.resolveSettings().embedding;
 const multiVector = process.env.MULTI_VECTOR != null ? process.env.MULTI_VECTOR === "1" : embS.multiVector;
 const multiVectorMaxChunks = Number(process.env.MULTI_VECTOR_MAX_CHUNKS || embS.multiVectorMaxChunks);
-const cfg = { baseUrl, apiKey: key, model: "doubao-embedding-vision", dim: 2048, batchSize: 10, tpmLimit: 600_000, timeoutMs: 60_000, maxRetries: 3, multiVector, multiVectorMaxChunks };
+const cfg = { baseUrl, apiKey: key, model: embS.model || embedding.model, dim: embS.dim, batchSize: embS.batchSize, tpmLimit: embS.tpmLimit, timeoutMs: embS.timeoutMs, maxRetries: embS.maxRetries, multiVector, multiVectorMaxChunks };
 console.log(`multiVector=${multiVector} maxChunks=${multiVectorMaxChunks}`);
 
 // ADR 0036 P4 条件2(原子 swap): OUT_PATH 可写 shadow 路径(不碰生产索引), 建好 validate 后原子 mv。

@@ -11,7 +11,7 @@
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
-import { secret } from "./_secrets.mjs";
+import { embeddingConfig } from "./_embedding-config.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,15 +20,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const jiti = createJiti(import.meta.url);
 
-const KEY = secret("embedding");
-if (!KEY) { console.log("smoke-stage0-candidate-pool: SKIP (no embedding key in ~/.pi/secrets.json)"); process.exit(0); }
+const EMBEDDING = embeddingConfig();
+const KEY = EMBEDDING.apiKey;
+if (!KEY || !EMBEDDING.baseUrl) { console.log("smoke-stage0-candidate-pool: SKIP (memory.embedding baseUrl/apiKey not configured)"); process.exit(0); }
 
 const { selectStage0Pool } = await jiti.import(path.join(repoRoot, "extensions/memory/llm-search.ts"));
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 
-const mj = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "models.json"), "utf8"));
-const BASE_URL = mj.providers.embedding.baseUrl;
+const BASE_URL = EMBEDDING.baseUrl;
 const ABRAIN = path.join(os.homedir(), ".abrain");
 
 function walkMd(dir) {

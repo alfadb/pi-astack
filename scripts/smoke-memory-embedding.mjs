@@ -10,12 +10,12 @@
  *   5. prune: 移除的 slug 被丢弃
  *   6. 版本戳: 换 model 名 load → 空索引(强制重建,禁跨模型混用)
  *
- * 需要 ~/.pi/secrets.json 的 embedding key + ~/.pi/agent/models.json providers.embedding.baseUrl。
- * 缺 key 时 SKIP HTTP 用例,仍跑纯本地用例(2/5/6 的索引逻辑)。
+ * 需要 pi-astack-settings.json → memory.embedding 的 baseUrl/apiKey。
+ * 缺配置时 SKIP HTTP 用例,仍跑纯本地用例(2/5/6 的索引逻辑)。
  */
 
 import fs from "node:fs";
-import { secret } from "./_secrets.mjs";
+import { embeddingConfig } from "./_embedding-config.mjs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -82,23 +82,18 @@ const embTsPath = path.join(repoRoot, "extensions", "memory", "embedding.ts");
 const mod = loadCJS(transpile(embTsPath), embTsPath, new Map([["../_shared/runtime", runtimeStub]]));
 const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath, selectStage0, scopeTagOf, staleOrMissingSlugs, reconcileEmbeddings, renameSlugInVectorIndexFile } = mod;
 
-// ── config from secrets.json + models.json ────────────────────────────────────────
-const key = secret("embedding");
-let baseUrl;
-try {
-  const mj = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".pi", "agent", "models.json"), "utf8"));
-  baseUrl = mj.providers?.embedding?.baseUrl ?? mj.providers?.embedding?.baseURL;
-} catch { /* ignore */ }
-const HAVE_HTTP = Boolean(key && baseUrl);
+// ── config from pi-astack-settings.json → memory.embedding ───────────────────────
+const embedding = embeddingConfig();
+const HAVE_HTTP = Boolean(embedding.apiKey && embedding.baseUrl);
 const cfg = {
-  baseUrl: baseUrl || "https://sub2api.alfadb.cn/v1",
-  apiKey: key || "",
-  model: "doubao-embedding-vision",
-  dim: 2048,
-  batchSize: 10,
-  tpmLimit: 600_000,
-  timeoutMs: 60_000,
-  maxRetries: 3,
+  baseUrl: embedding.baseUrl || "https://sub2api.alfadb.cn/v1",
+  apiKey: embedding.apiKey || "",
+  model: embedding.model || "doubao-embedding-vision",
+  dim: embedding.dim,
+  batchSize: embedding.batchSize,
+  tpmLimit: embedding.tpmLimit,
+  timeoutMs: embedding.timeoutMs,
+  maxRetries: embedding.maxRetries,
   multiVector: false,
   multiVectorMaxChunks: 4,
 };

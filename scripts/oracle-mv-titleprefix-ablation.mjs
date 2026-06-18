@@ -7,7 +7,7 @@
  */
 import { createJiti } from "jiti";
 import fs from "node:fs";
-import { secret } from "./_secrets.mjs";
+import { embeddingConfig } from "./_embedding-config.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,16 +16,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const jiti = createJiti(import.meta.url);
 const ABRAIN = path.join(os.homedir(), ".abrain");
-const MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "models.json");
 const emb = await jiti.import(path.join(repoRoot, "extensions/memory/embedding.ts"));
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { buildCorpusEmbeddings, VectorIndex, embedTexts } = emb;
 
-const KEY = secret("embedding");
-if (!KEY) { console.log("SKIP — no embedding key in ~/.pi/secrets.json"); process.exit(0); }
-const baseUrl = JSON.parse(fs.readFileSync(MODELS_JSON, "utf8")).providers.embedding.baseUrl;
+const EMBEDDING = embeddingConfig();
+if (!EMBEDDING.apiKey || !EMBEDDING.baseUrl) { console.log("SKIP — memory.embedding baseUrl/apiKey not configured"); process.exit(0); }
+const baseUrl = EMBEDDING.baseUrl;
 const MAXCHARS = 3500, MAXCHUNKS = 4, TOPN = 50;
-const cfgBase = { baseUrl, apiKey: KEY, model: "doubao-embedding-vision", dim: 2048, batchSize: 10, tpmLimit: 600_000, timeoutMs: 60_000, maxRetries: 3 };
+const cfgBase = { baseUrl, apiKey: EMBEDDING.apiKey, model: EMBEDDING.model || "doubao-embedding-vision", dim: EMBEDDING.dim, batchSize: EMBEDDING.batchSize, tpmLimit: EMBEDDING.tpmLimit, timeoutMs: EMBEDDING.timeoutMs, maxRetries: EMBEDDING.maxRetries };
 const cfgMultiPre = { ...cfgBase, multiVector: true, multiVectorMaxChunks: MAXCHUNKS, multiVectorTitlePrefix: true };
 const cfgMultiNo = { ...cfgBase, multiVector: true, multiVectorMaxChunks: MAXCHUNKS, multiVectorTitlePrefix: false };
 

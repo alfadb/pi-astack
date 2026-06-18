@@ -134,11 +134,13 @@ export const DEFAULT_PATH_A_SETTINGS: PathASettings = {
   entryExcerptChars: 800,
 };
 
-// ADR 0035 P1: stage0 embedding 候选检索配置。provider 指向 models.json
-// 里的 provider key(如 "embedding"),code 不硬编码 model;空 provider/model
-// = fail-closed(buildCorpusEmbeddings 会报错)。
+// ADR 0035 P1: stage0 embedding 候选检索配置。baseUrl/apiKey 是专用
+// endpoint 配置，不进入通用 chat modelRegistry，避免 embedding 模型出现在
+// /model 等聊天模型选择面。空 baseUrl/apiKey/model = fail-closed。
 export interface EmbeddingSettings {
   provider: string;
+  baseUrl: string;
+  apiKey: string;
   model: string;
   dim: number;
   batchSize: number;          // doubao hard cap = 10
@@ -152,6 +154,8 @@ export interface EmbeddingSettings {
 
 export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
   provider: "",
+  baseUrl: "",
+  apiKey: "",
   model: "",
   dim: 2048,
   batchSize: 10,
@@ -300,6 +304,8 @@ function resolveEmbeddingSettings(cfg: Record<string, unknown>): EmbeddingSettin
   const e = (cfg.embedding as Record<string, unknown>) ?? {};
   return {
     provider: asString(e.provider, DEFAULT_EMBEDDING_SETTINGS.provider),
+    baseUrl: asString(e.baseUrl, DEFAULT_EMBEDDING_SETTINGS.baseUrl),
+    apiKey: asString(e.apiKey, DEFAULT_EMBEDDING_SETTINGS.apiKey),
     model: asString(e.model, DEFAULT_EMBEDDING_SETTINGS.model),
     dim: Math.max(1, asNumber(e.dim, DEFAULT_EMBEDDING_SETTINGS.dim)),
     batchSize: Math.max(1, Math.min(10, asNumber(e.batchSize, DEFAULT_EMBEDDING_SETTINGS.batchSize))),

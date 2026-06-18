@@ -894,18 +894,28 @@
         "embedding": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ADR 0035 P1: stage0 embedding candidate-retrieval config. `provider` points at a models.json provider key (e.g. \"embedding\"); code never hardcodes a model. Empty provider/model = fail-closed (corpus embedding build errors out).",
+          "description": "ADR 0035 P1: stage0 embedding candidate-retrieval config. Embedding endpoints are configured here directly so non-chat models do not appear in the chat model registry. Empty baseUrl/apiKey/model = fail-closed (corpus embedding build errors out).",
           "properties": {
             "_comment": { "type": "string" },
             "provider": {
               "type": "string",
               "default": "",
-              "description": "models.json provider key supplying the embedding model (e.g. \"embedding\"). Empty = fail-closed."
+              "description": "Legacy models.json provider key fallback. Prefer baseUrl/apiKey so embedding models stay out of the chat model registry."
+            },
+            "baseUrl": {
+              "type": "string",
+              "default": "",
+              "description": "OpenAI-compatible embeddings endpoint base URL, including any required API prefix. Empty = fail-closed unless legacy provider fallback is set."
+            },
+            "apiKey": {
+              "type": "string",
+              "default": "",
+              "description": "Embedding endpoint API key or pi-style resolver string, such as !command or $ENV. Empty = fail-closed unless legacy provider fallback is set."
             },
             "model": {
               "type": "string",
               "default": "",
-              "description": "Embedding model id under the provider (e.g. \"doubao-embedding-vision\"). Empty = fail-closed."
+              "description": "Embedding model id for the dedicated endpoint. Empty = fail-closed."
             },
             "dim": {
               "type": "number",

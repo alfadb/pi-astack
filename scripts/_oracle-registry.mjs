@@ -1,12 +1,6 @@
-// 共享 oracle/smoke registry stub —— 模型无关, 从 agent/models.json 的
-// providers.<p>.{baseUrl, apiKey} 解析并注入。apiKey 支持 pi 的 config-value
-// 三种形态: "!command"(跑 shell 取 stdout, 现行: !jq 从 ~/.pi/secrets.json 读)、
-// "$ENV"(环境变量, 旧形态)、字面量。
-//
-// 为什么: realRegistry(ModelRegistry.create + AuthStorage)对部分 provider 的
-// getApiKeyAndHeaders 走 AuthStorage 优先路径, 而 oracle 脚本应"模型选择仅成本建议、
-// 与具体厂商解耦", 故这里统一从 models.json 直接解析 baseUrl+apiKey(与 embedding
-// stub 同路), 任何已配 key 的 provider 都能跑。
+// 共享 oracle/smoke registry stub。chat provider 仍从 agent/models.json 解析；
+// embedding endpoint 从 pi-astack-settings.json → memory.embedding 解析，避免
+// 非 chat 模型进入通用模型清单。
 //
 // 用法: const { registry, embedKey } = makeOracleRegistry(MODELS_JSON);
 //       if (!embedKey) { console.log("SKIP — no embedding key"); process.exit(0); }
@@ -14,6 +8,7 @@
 import fs from "node:fs";
 import { execSync } from "node:child_process";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { embeddingConfig } from "./_embedding-config.mjs";
 
 export function makeOracleRegistry(modelsJsonPath) {
   const real = ModelRegistry.create(AuthStorage.create(), modelsJsonPath);
@@ -30,11 +25,11 @@ export function makeOracleRegistry(modelsJsonPath) {
     }
     return ref.startsWith("$") ? (process.env[ref.slice(1)] || "") : ref;
   };
-  const embedBase = MODELS.providers?.embedding?.baseUrl;
-  const embedKey = resolveKey("embedding");
+  const embedding = embeddingConfig();
+  const embedBase = embedding.baseUrl;
+  const embedKey = embedding.apiKey;
   const registry = {
-    // embedding 走 stub(model-curator 动态注册, 静态 registry 不含); chat 走 real.find
-    // 拿正确 model 对象(baseUrl/能力位), apiKey 由 getApiKeyAndHeaders 从 models.json 注入。
+    // embedding 走专用 stub；chat 走 real.find 拿正确 model 对象。
     find: (p, id) => (p === "embedding" ? { __embed: true, provider: p, id, baseUrl: embedBase } : real.find(p, id)),
     getApiKeyAndHeaders: async (m) => {
       if (m && m.__embed) return { ok: true, apiKey: embedKey };
