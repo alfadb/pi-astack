@@ -99,11 +99,19 @@ export function lintRuleKind(kind: string, injectMode: RuleInjectMode): LintResu
 // **不适用 §7.6 过渡态门的 flip 条件要求**。forward-looking：若未来 curator 获得
 // inject_mode 语义裁决能力（LLM 判断长规则是否值得 always），本阈值退为兜底。
 export const ALWAYS_BODY_MAX_CODE_UNITS = 300;
+/** The injected always-mode reflex is the rule CONTENT, not the leading
+ *  `# <title>` heading (which only re-renders the frontmatter title metadata).
+ *  Measure with a single leading markdown heading line (+ its trailing blank
+ *  lines) stripped, so the cap bounds actual content and a title-length artifact
+ *  cannot silently demote an otherwise-compact always rule (2026-06-18). */
+export function alwaysContentSizeUnits(body: string): number {
+  return body.replace(/^\s*#{1,6}[^\n]*(?:\n+|$)/, "").length;
+}
 export function lintRuleAlwaysSize(body: string, injectMode: RuleInjectMode): LintResult {
   if (injectMode !== "always") return { ok: true };
-  const n = body.length; // UTF-16 code units; CJK counts 1 each (D2 note)
+  const n = alwaysContentSizeUnits(body); // content only; leading `# title` heading excluded (UTF-16 code units; CJK counts 1)
   if (n > ALWAYS_BODY_MAX_CODE_UNITS) {
-    return { ok: false, reason: `always-mode body is ${n} code units (> ${ALWAYS_BODY_MAX_CODE_UNITS}); demote to listed or shorten` };
+    return { ok: false, reason: `always-mode content is ${n} code units (> ${ALWAYS_BODY_MAX_CODE_UNITS}); demote to listed or shorten` };
   }
   return { ok: true };
 }

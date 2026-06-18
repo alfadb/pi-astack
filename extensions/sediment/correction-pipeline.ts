@@ -24,6 +24,21 @@ import type { StagingEntry } from "./staging-types";
 import type { SedimentSettings } from "./settings";
 import type { ModelRegistryLike } from "./llm-extractor";
 
+// ── Classifier rate-limit retry helpers (C, 2026-06-18) ───────────────
+// The correction classifier runs once per agent_end. A single transient
+// upstream 429 used to silently drop the whole turn's correction signal
+// (observed: a durable user correction lost to one rate-limit hit). Retry
+// rate-limit errors with bounded exponential backoff before failing. This is
+// a background pipeline, so the added latency never blocks the user.
+const CLASSIFIER_RATE_LIMIT_MAX_RETRIES = 3;
+const CLASSIFIER_RATE_LIMIT_BASE_MS = 800;
+function classifierSleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
+function classifierBackoffMs(attempt: number): number { return CLASSIFIER_RATE_LIMIT_BASE_MS * Math.pow(2, attempt); }
+function isRateLimitError(msg: string): boolean {
+  const m = (msg || "").toLowerCase();
+  return m.includes("429") || m.includes("rate limit") || m.includes("rate_limit") || m.includes("too many requests");
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 /** Tier-1 routing predicate (ADR 0028 v1.1 R2', O5-converged form per
@@ -583,7 +598,7 @@ export async function runCorrectionPipeline(
   }
 
   let rawText = "";
-  try {
+  {
     const piAi: {
       streamSimple(
         model: unknown,
@@ -592,26 +607,54 @@ export async function runCorrectionPipeline(
       ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
     } = await import("@earendil-works/pi-ai");
 
-    const stream = piAi.streamSimple(
-      model,
-      { messages: [{ role: "user", content: [{ type: "text", text: promptSanitize.text ?? prompt }] }] },
-      { apiKey: auth.apiKey, headers: auth.headers, signal: deps.signal, timeoutMs: deps.settings.classifierTimeoutMs, maxRetries: 0 },
-    );
+    // C (2026-06-18): retry transient upstream rate-limit (429) with bounded
+    // exponential backoff so one throttle hit no longer silently drops the
+    // turn's correction signal. Non-rate-limit errors still fail immediately.
+    let lastErr = "";
+    let succeeded = false;
+    for (let attempt = 0; attempt <= CLASSIFIER_RATE_LIMIT_MAX_RETRIES; attempt++) {
+      try {
+        const stream = piAi.streamSimple(
+          model,
+          { messages: [{ role: "user", content: [{ type: "text", text: promptSanitize.text ?? prompt }] }] },
+          { apiKey: auth.apiKey, headers: auth.headers, signal: deps.signal, timeoutMs: deps.settings.classifierTimeoutMs, maxRetries: 0 },
+        );
 
-    const result = await stream.result();
-    if (result.errorMessage) {
+        const result = await stream.result();
+        if (result.errorMessage) {
+          lastErr = result.errorMessage;
+          if (isRateLimitError(result.errorMessage) && attempt < CLASSIFIER_RATE_LIMIT_MAX_RETRIES) {
+            await classifierSleep(classifierBackoffMs(attempt));
+            continue;
+          }
+          return {
+            ok: false, model: modelRef, signal: null,
+            error: sanitizeAuditText(result.errorMessage, 500), durationMs: Date.now() - start, stagingWritten: false,
+          };
+        }
+        rawText = result.content?.map((c) => c.type === "text" ? c.text : "").join("") ?? "";
+        succeeded = true;
+        break;
+      } catch (e: unknown) {
+        lastErr = e instanceof Error ? e.message : String(e);
+        if (isRateLimitError(lastErr) && attempt < CLASSIFIER_RATE_LIMIT_MAX_RETRIES) {
+          await classifierSleep(classifierBackoffMs(attempt));
+          continue;
+        }
+        return {
+          ok: false, model: modelRef, signal: null,
+          error: sanitizeAuditText(lastErr, 500),
+          durationMs: Date.now() - start, stagingWritten: false,
+        };
+      }
+    }
+    if (!succeeded) {
       return {
         ok: false, model: modelRef, signal: null,
-        error: sanitizeAuditText(result.errorMessage, 500), durationMs: Date.now() - start, stagingWritten: false,
+        error: sanitizeAuditText(lastErr || "classifier rate-limit retries exhausted", 500),
+        durationMs: Date.now() - start, stagingWritten: false,
       };
     }
-    rawText = result.content?.map((c) => c.type === "text" ? c.text : "").join("") ?? "";
-  } catch (e: unknown) {
-    return {
-      ok: false, model: modelRef, signal: null,
-      error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 500),
-      durationMs: Date.now() - start, stagingWritten: false,
-    };
   }
 
   // 5. Parse signal + stamp AX-PROVENANCE deterministically from the packed

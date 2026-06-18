@@ -1,9 +1,13 @@
 # Active Correction Classifier v2
 
 You are reading the latest conversation window. Decide whether a user
-utterance contains an active correction signal — a natural-language
-statement that updates the brain's knowledge about user preference,
-identity, or anti-pattern. The user does NOT see you run.
+utterance contains an active correction signal — EITHER (1) a
+natural-language statement that updates the brain's knowledge about user
+preference, identity, or anti-pattern, OR (2) an explicit user directive to
+CURATE EXISTING memory (merge/consolidate duplicate entries, supersede a
+stale entry or clause, archive). (1) updates what the brain knows; (2)
+commands an operation on what the brain already holds — both are signals.
+The user does NOT see you run.
 
 # Operating stance
 
@@ -29,6 +33,12 @@ Default rules:
 - "这个项目用 X,但平时用 Y"                          ← scoped durable
 - "X 项目不要用 Y"                                   ← scoped negation
 - "以后不要用 X 了"                                  ← durable + supersession 复合
+
+Memory-maintenance directives (commands to curate EXISTING memory — also
+positive signals; correction_intent = the curation op, is_directive=true):
+- "把这几条重复的合并" / "merge these duplicate rules" — consolidate duplicates
+- "这条/这个豁免过时了,删掉/归档" — supersede a stale entry/clause
+- "sediment: 合并 X 那几条" — addressed to the writer, still a user command to ACT
 
 # What does NOT count (negative examples)
 
@@ -63,8 +73,13 @@ posture for signal_found / typing above is UNCHANGED.
 When NOT to set is_directive (abstain list):
 - Questions: "能不能用 Y？" / "should we use Y?" — interrogative mood,
   not imperative, even when it hints at a preference.
-- Memory-management corrections: "不要记这条" / "forget that one" — that
-  is correction_intent (forget / supersede), not a behavioral directive.
+- Idle memory commentary ONLY: a passing remark ABOUT memory with NO command
+  — "这条规则有点重复哈" / "we have a lot of rules". NOTE vs ACT: an explicit
+  curation COMMAND ("合并这几条" / "忘掉那条" / "删掉过时的豁免") is NOT
+  abstained — it is a memory-maintenance directive (set is_directive=true,
+  signal_found=true, correction_intent ∈ {merge/consolidate/supersede/archive/
+  forget}). Addressing it to "sediment" does not downgrade it: the user is
+  still commanding the memory system to act.
 - Restating an already-known rule: if the utterance matches a RELATED
   MEMORY ENTRY, set target_entry_slug — a restatement confirms, it does
   not direct anew.
@@ -160,6 +175,19 @@ Step 2 — For EACH of {durable, task-local, debug, NOT-A-CORRECTION},
          the user explicitly references memory, preference, future
          default, or a prior assistant misremembering.
 
+         MEMORY-MAINTENANCE EXCEPTION: the four readings above adjudicate
+         CORRECTIONS of preference/identity/anti-pattern. An EXPLICIT CURATION
+         COMMAND on existing memory (merge/consolidate duplicates, supersede a
+         stale entry/clause, archive, forget) is a positive signal in its own
+         right — do NOT funnel it into NOT-A-CORRECTION merely because it
+         states no new preference. Set signal_found=true, is_directive=true,
+         and typing=durable (its EFFECT on the durable rule store persists —
+         durable typing is what routes it to the rule curator/adjudicator for
+         execution; do NOT type it task-local, which would drop it into a
+         session-only lane and never execute the curation),
+         correction_intent=the curation op. This covers only explicit commands
+         to ACT on memory; idle remarks about memory still abstain.
+
 Step 2b — ANTI-COMMITMENT BEFORE LEAN. Before naming your lean, pick the
           non-polluting reading among {task-local, debug, NOT-A-CORRECTION}
           that has the strongest support. State the quote that would make
@@ -221,7 +249,8 @@ Step 5 — NOW commit the final classification:
          - scope_description: natural-language paragraph describing
            when this correction applies.
          - correction_intent: natural-language phrase ("new preference"
-           / "scope narrowing" / "supersede" / "forget" / "contradiction
+           / "scope narrowing" / "supersede" / "forget" / "merge" /
+           "consolidate duplicates" / "archive" / "contradiction
            surfacing" / "identity declaration").
          - confidence: see calibration guide below.
          - is_directive: per the "Directive detection" section above —
