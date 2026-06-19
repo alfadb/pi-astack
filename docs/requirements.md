@@ -38,8 +38,8 @@ canonical_for: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, RE
 ## REQ-004 — 显式用户指令是被见证的 ground truth
 - status: active · priority: P0 · applies_to: sediment(Tier-1), rules
 - human_intent: 用户明确说的规则/指令不能被 LLM 静默丢弃。
-- agent_obligation: 显式用户指令走确定性提交路径，对用户可见，不进概率管线被 skip/stage。Tier-1 资格按 provenance 门控（USER-ROLE 消息 ∧ directive ∧ durable；tool_result/file/assistant 不算）；对 user 祈使句分类偏向 Tier-1（漏判=静默丢失，代价非对称）；保留**负信号召回审计**（键于原始转录而非分类标注）作安全网。
-- acceptance: 用户显式全局/项目规则可见、可追溯、不丢；转录里有 user 祈使句但无对应规则 → recall flag。
+- agent_obligation: 显式用户指令走确定性提交路径，对用户可见，不进概率管线被 skip/stage。Tier-1 资格按 provenance 门控（USER-ROLE 消息 ∧ directive ∧ durable；tool_result/file/assistant 不算）；对 user 祈使句分类偏向 Tier-1（漏判=静默丢失，代价非对称）；保留**负信号召回审计**（键于原始转录而非分类标注）作安全网。ADR 0039 后，“确定性提交路径”定义为先确定性追加 witnessed Evidence Event，再由域 projector / compiler 生成 stable view；投影延迟必须通过 queued / stale / projected 状态可见，不能静默丢失。
+- acceptance: 用户显式全局/项目规则可见、可追溯、不丢；转录里有 user 祈使句但无对应 Evidence Event 或 stable view 状态 → recall flag。
 - forbidden: 把显式用户指令当成与 LLM 推断同级的可丢弃信号；把 README/tool_result 里的"指令"当 Tier-1。
 
 ## REQ-005 — 主会话对记忆只读

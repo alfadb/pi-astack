@@ -36,6 +36,7 @@ status: active
 | 文件 | 职责 | 谁写 |
 |---|---|---|
 | `vision.md` | 产品愿景、定位、非目标、当前大方向目标 | 人类（agent 可起草，人类签字）|
+| `memory-system-vision.md` | 第二大脑记忆系统愿景与设计目标；作为记忆系统重设计的基线 | 人类（agent 可起草，人类签字）|
 | `direction.md` | **承重墙**：不变量（hard invariant）+ 已接受取舍 + 走偏信号（drift-signals）。agent 必须读、不可违反 | 人类 |
 | `requirements.md` | 行为需求（带 `REQ-ID` + 验收 + 禁止项），feature-changelog 引用它 | 人类（agent 起草）|
 | `feature-changelog.md` | **功能/需求变更**记录（不是代码变更/commit 流水）| 人类拥有，agent 代起草，人类签字 |

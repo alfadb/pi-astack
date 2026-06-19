@@ -26,18 +26,21 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 | Tier 3 legacy backends reader UX | `ssh-key` / `gpg-file` / `passphrase-only` 在 ADR 0019 后是 explicit-only。`passphrase-only` reader 仍不能解锁（同一 tty pass-through 问题）。 | 上项 abrain-age-key passphrase wrap 落地后该 gap 自动关闭（同一 unwrap 路径）；在那之前 `/vault status` 仍会在旧 backend init 后显示 deprecation 提示。 |
 | Abrain auto-sync UX P0e | [ADR 0020](./adr/0020-abrain-auto-sync-to-remote.md) 已 ship 的 baseline（后台 push + 启动 ff-fetch + `/abrain sync` / `/abrain status`）上还差几个 UX 增强点。 | TUI footer 提示 `ahead > 0` 超 5 分钟；周期性 fetch（e.g. 每 15 min）；conflict suggestion logging（量化 LLM auto-merge 不做的代价）。全部是 deferred YAGNI，等真实 usage signal 再推进。 |
 
-## Constraint Pipeline Reset Migration
+## Unified Evidence Architecture Migration
 
-设计见 [ADR 0039](./adr/0039-constraint-pipeline-reset.md)。迁移原则：先 shadow 编译现有 rules 并输出 diff 报告，再启用 append-only Constraint Draft/Event 写入与 Compiled Constraint View 注入，最后停用旧 tier1-ruleset-adjudicator/rule-writer 的认知裁决职责；不得在迁移期继续扩大旧写时裁决特殊逻辑。
+设计见 [ADR 0039](./adr/0039-constraint-pipeline-reset.md)。迁移原则：所有长期记忆域先追加 Evidence Event，再由域自适应 projector / compiler 生成 stable view；Constraint 是第一优先迁移域，不再是独立特例。迁移期不得继续扩大旧 raw `agent_end` 写时裁决特殊逻辑。
 
 | Phase | Intent | Notes |
 |---|---|---|
-| P0 freeze old write-time adjudication | 停止为旧 rules 写时路径新增语义特例。 | 只允许安全/数据完整性修复；新语义边界进入 ADR 0039 compiler 设计。 |
-| P1 shadow compiler | 读取现有 active/listed/archived rules、相关 audit 与治理案例，生成 shadow Compiled Constraint View + diff 报告。 | 报告必须标出 settings/tool not-memory、project/global rescope、near-duplicate merge、conflict、compact constraints。 |
-| P2 draft/event parallel write | `agent_end` 对新的 Constraint 信号追加 sanitized draft/event，同时 compiler 持续生成 shadow view。 | 验收关注 draft 丢失率、compiler 活性、错误路由、not-memory 诊断、scope 保守性、旧路径差异。 |
-| P3 compiled view injection | `session_start` 从 compiled view 注入约束，旧 always/listed rules 目录降为 legacy fallback 或兼容投影。 | stale 时注入上一版稳定 view 并提示 queued，不同步触发 LLM 裁决。 |
-| P4 retire old cognitive adjudication | 停用旧 tier1-ruleset-adjudicator 的 create/merge/archive/rescope 职责，停用 writer 的写时 inject_mode demote 与近重裁决职责。 | writer 只保留基础设施写文件能力，或收缩为 compiled view 与 event 的低层存储模块。 |
-| P5 corpus split | 将现有 active rules 经 shadow diff 分流为 compiled constraints、project constraints、settings/tool 变更建议或 knowledge。 | 不要求人类手动编辑 abrain；用户自然纠错经 draft/event + compiler 消化。 |
+| P0 freeze old write-time adjudication | 停止为旧 rules 写时路径新增语义特例，并停止为其它长期记忆域新增 raw context → canonical mutation 特例。 | 只允许安全/数据完整性修复；新语义边界进入 ADR 0039 projector / compiler 设计。 |
+| P1 Constraint shadow compiler | 读取现有 active/listed/archived rules、相关 audit 与治理案例，生成 shadow Compiled Constraint View + diff 报告。 | 报告必须标出 settings/tool not-memory、project/global rescope、near-duplicate merge、conflict、compact constraints。 |
+| P2 Constraint event parallel write | `agent_end` 对新的 Constraint 信号追加 sanitized Evidence Event，同时 compiler 持续生成 shadow view。 | 验收关注 event 丢失率、compiler 活性、错误路由、not-memory 诊断、scope 保守性、旧路径差异。 |
+| P3 Constraint compiled view injection | `session_start` 从 compiled view 注入约束，旧 always/listed rules 目录降为 legacy fallback 或兼容投影。 | stale 时注入上一版稳定 view 并提示 queued，不同步触发 LLM 裁决。 |
+| P4 retire old Constraint adjudication | 停用旧 tier1-ruleset-adjudicator 的 create/merge/archive/rescope 职责，停用 writer 的写时 inject_mode demote 与近重裁决职责。 | writer 只保留基础设施写文件能力，或收缩为 compiled view 与 event 的低层存储模块。 |
+| P5 Constraint corpus split | 将现有 active rules 经 shadow diff 分流为 compiled constraints、project constraints、settings/tool 变更建议或 knowledge。 | 不要求人类手动编辑 abrain；用户自然纠错经 Evidence Event + compiler 消化。 |
+| P6 Knowledge projector shadow | 为 Knowledge 建立 Evidence Event → Search Corpus View 的 shadow projector，并用 diff、search A/B 与真实使用证据验证 freshness、召回质量和延迟。 | 未证明不退化前，Knowledge 可保留同步 projector；仍不得回到 raw transcript 直写 canonical。 |
+| P7 low-frequency zone/view migration | identity / skills / habits / workflows / project memory / rationale 等低频 zone 或 view 投影面迁移到 evidence → projector / compiler → stable view。 | 每个投影面单独通过真实使用证据；不新增 ADR 0028 之外的全局存储轴；禁止一次性重写全系统。 |
+| P8 unified ledger/schema review | 至少两个域完成迁移后，再评估是否需要共享 Evidence Ledger / schema。 | 默认保持 markdown + git 与分域落地；完整全域 event sourcing 数据库仍是 deferred exploration。 |
 
 ## ADR 0035 — memory stage1 embedding 候选检索实施
 

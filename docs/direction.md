@@ -33,8 +33,8 @@ canonical_for: INV-INVISIBILITY, INV-AUTONOMY, INV-IMPLICIT-GROUND-TRUTH, INV-AC
 ### INV-MAIN-SESSION-READ-ONLY(主会话对记忆只读,ADR 0003)
 主会话 LLM 不是记忆写入者;**sediment sidecar 是唯一专用写入者**。已接受的残余面:LLM 仍可经通用 bash 等路径间接写--这是显式接受的取舍,不是漏洞。
 
-### INV-GROUND-TRUTH-TIERED(真实信号分层,ADR 0028)
-**显式用户指令是"被见证的 ground truth"**:确定性提交、对用户可见、**永不被 LLM skip/stage 丢弃**;它**不走**与 LLM 推断知识相同的概率管线。
+### INV-GROUND-TRUTH-TIERED(真实信号分层,ADR 0028 + ADR 0039)
+**显式用户指令是"被见证的 ground truth"**:确定性提交、对用户可见、**永不被 LLM skip/stage 丢弃**;它**不走**与 LLM 推断知识相同的概率管线。ADR 0039 后,确定性提交先表现为 witnessed Evidence Event 持久化,再由域 projector / compiler 生成 stable view;投影延迟必须通过 queued / stale / projected 状态可见,不能静默丢失。
 **分层按 provenance 门控**:Tier-1(确定性提交)当且仅当 verbatim 落在 **USER-ROLE 消息** ∧ is_directive ∧ durable;content-in-transcript / tool_result / file / assistant turn **不是** Tier-1(挡掉 README "always use Yarn" 注入陷阱),落 Tier-2 由 curator 可 skip。代价非对称(过度提升有界、漏判=静默丢失)→ 对 user 祈使句分类偏向 Tier-1。
 
 ### INV-SYNC-DETERMINISTIC-MERGE(同步只走确定性合并,ADR 0020)

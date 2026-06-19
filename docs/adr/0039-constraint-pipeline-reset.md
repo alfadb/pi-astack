@@ -3,134 +3,173 @@ doc_type: adr
 status: accepted
 ---
 
-# ADR 0039 - Constraint Pipeline Reset：约束写入改为 append-only 草稿事件 + 后台语义编译 + 稳定视图注入
+# ADR 0039 - Unified Evidence Architecture：第二大脑记忆统一证据架构与域自适应投影器
 
-- **Status**: Accepted（2026-06-18，R2 复审 4×T0 全部 SIGN，无架构 blocker）。
-- **Date**: 2026-06-18
-- **Relates-to**: [ADR 0003](./0003-main-session-read-only.md), [ADR 0016](./0016-sediment-as-llm-curator.md), [ADR 0023](./0023-session-start-rule-injection.md), [ADR 0024](./0024-second-brain-from-natural-conversation.md), [ADR 0025](./0025-sediment-meta-curator-subsystem.md), [ADR 0028](./0028-sediment-ground-truth-tiered-rearchitecture.md), [ADR 0031](./0031-autonomous-self-calibrating-forgetting.md)。
-- **Revises-direction**: 修订 ADR 0028 在规则路径上的“Tier-1 直接确定性提交”形态：用户显式约束仍是高优先级真实信号，但不再在 `agent_end` 实时 mutate active rules；它先成为 append-only Constraint Draft/Event，再由后台 compiler 生成稳定的 Compiled Constraint View。
+- **Status**: Accepted（原 Constraint-only 版本于 2026-06-18 accepted；统一记忆架构修订于 2026-06-19 经 4×T0 R2 全部 SIGN 后 ratify）。
+- **Date**: 2026-06-18；统一架构修订：2026-06-19。
+- **Relates-to**: [ADR 0003](./0003-main-session-read-only.md), [ADR 0015](./0015-memory-search-llm-driven-retrieval.md), [ADR 0016](./0016-sediment-as-llm-curator.md), [ADR 0023](./0023-session-start-rule-injection.md), [ADR 0024](./0024-second-brain-from-natural-conversation.md), [ADR 0025](./0025-sediment-meta-curator-subsystem.md), [ADR 0028](./0028-sediment-ground-truth-tiered-rearchitecture.md), [ADR 0031](./0031-autonomous-self-calibrating-forgetting.md), [ADR 0035](./0035-memory-stage1-embedding-candidate-retrieval.md), [ADR 0036](./0036-memory-search-two-stage-collapse-and-hybrid-retrieval.md)。
+- **Revises-direction**: 本 ADR 原先只覆盖 Constraint Pipeline Reset；统一架构修订将同一根因提升到整个第二大脑记忆系统。原 constraint-only 决策被本版吸收，不再作为独立实施路线。
 
-## 1. 背景：规则治理进入持续修补状态
+## 1. 背景：Constraint 问题不是局部问题
 
-近期对 rules 区的实际维护暴露出同一类结构性问题：关于行业黑话的多条近重规则需要合并为一条 compact always 约束；关于 Unicode 转义的规则需要确认不存在重复；模型分层、`dispatch_hub` 工具使用方式、`sub2api` 同步策略、`pi-astack` 方法论、PR 中文要求等条目又暴露出配置策略、工具声明、项目约定被错误提升为全局 rule。每个具体问题都能通过 classifier prompt、ruleset adjudicator、writer lint、scope 修正等局部手段临时修复，但这些修复本身不断增加新的边界与特例，说明根因不在某个 prompt 或某个函数，而在规则写入形态本身。
+ADR 0039 最初只针对 rules / constraints：规则写入在 `agent_end` 实时路径中完成分类、去重、合并、scope 判断、归档、注入层选择，并直接修改 active rule 文件。持续出现的近重合并、scope 误升、settings/tool 信号混入 global rules、固定 body 大小降级、归档数量上限等修补，说明问题不在某个 prompt 或某个函数，而在写入形态本身：高不确定性的语义裁决被放在高影响的实时写入路径中。
 
-现有规则路径把至少四类不同语义放进同一个 active rules 写入路径：用户或项目行为约束、事实或经验知识、运行配置策略、工具调用契约。随后系统在实时 `agent_end` 路径里尝试完成分类、去重、合并、压缩、作用域判断、归档、注入层选择，并直接修改 active rule 文件。这个设计把高不确定性的语义裁决放进高影响的写时 mutation 中，于是每次新的边界案例都会生成新的机械补丁：相似度阈值、固定 body 大小降级、归档数量上限、跨目录移动限制、scope 例外、工具与配置的特殊排除等。
+后续重新审视发现，同一结构风险不仅存在于 Constraint 域。Knowledge，以及 identity / skills / habits / workflows / project memory / rationale 等 zone 或 view 投影面，也会遇到同类问题：`agent_end` 从原始对话上下文直接做 create / update / merge / archive / rescope / delete 等 canonical mutation。只要这种路径存在，新的边界案例就会推动系统继续增加局部特殊逻辑，而不是修正写入形态。
 
-本 ADR 记录一次基于 4×T0 多轮讨论达成的重新设计方向。讨论明确要求主会话不裁决，每轮都询问是否存在更好的方案；第三轮四个 T0 对同一候选方案全部 `SIGN`，无架构阻断项；ADR 草稿 R2 复审再次 4×T0 全部 `SIGN`。完整评审记录见 [`docs/audits/2026-06-18-adr-0039-constraint-pipeline-reset-t0-review.md`](../audits/2026-06-18-adr-0039-constraint-pipeline-reset-t0-review.md)，本 ADR 只保留影响决策有效性的摘要。
+本 ADR 因此将原 Constraint Pipeline Reset 扩展为 **Unified Evidence Architecture with Domain-Adaptive Projectors**：统一证据架构 + 域自适应投影器。Constraint 仍是该架构中的一个重要域，但不再是独立特例。
 
-## 2. 决策
+## 2. 术语
 
-采用 **Constraint Pipeline Reset**：约束写入改为 `append-only Constraint Draft/Event → 后台语义编译 → session_start 读取稳定 Compiled Constraint View`。`agent_end` 不再直接 create/merge/archive/rescope active rules；它只把用户表达、上下文证据、scope 线索和 provenance 追加为低风险草稿事件。语义合并、去重、scope 校验、冲突检测、压缩与注入摘要生成全部转移到后台 compiler；`session_start` 只读取上一次稳定编译视图，若视图过期则注入旧稳定视图并提示 queued/stale，不在启动路径同步调用 LLM 重新裁决。
+**Evidence Event** 是长期记忆写入前的证据事件，记录自然对话或系统运行中被观察到的信号。它不是最终记忆条目。
 
-该决策将规则治理从“实时写时裁决 active 文件”改为“追加证据、异步编译稳定视图”。原始证据不被销毁；compiled view 是可重新生成的物化投影；active 注入面来自 compiled view，而不是直接来自写时 rule 文件状态。
+**Evidence Ledger** 是 Evidence Event 的持久证据层。它可以按域逐步落地，不要求首期实现单一全域 ledger 或统一全域 schema。
 
-## 3. 四域硬隔离
+**Canonical memory** 是系统运行时使用的稳定记忆投影，包括 rules、knowledge entries、identity / skills / habits / workflows / project memory / rationale 等 zone 或 view 投影。它不是 raw `agent_end` 写时裁决的直接产物。
 
-系统必须区分四个语义域，路由结果只决定信号去哪里，不作为永久存储本体轴继续膨胀。
+**Projector** 是从 Evidence Event 生成 canonical memory 的投影器，可以同步或异步运行。**Compiler** 是更偏后台、批量或复杂语义综合的 projector。本文用 projector 作为通称。
 
-| 域 | 含义 | 归宿 | 是否生成 memory rule 镜像 |
-|---|---|---|---|
-| Constraint | 用户偏好、跨项目硬约束、当前项目行为约定 | Constraint Draft/Event + Compiled Constraint View | 是，作为约束视图的一部分 |
-| Knowledge | 事实、模式、经验、决策、反模式、观察 | 现有 knowledge/project memory 路径 | 否 |
-| Settings | 模型分层、运行开关、预算、provider、功能 flag 等运行配置 | `pi-astack-settings.json` 或等价配置面 | 否 |
-| Tool Contract | 工具调用方式、工具前置条件、工具安全约束、工具选择规则 | tool declaration、SKILL.md、代码声明 | 否 |
+**Diagnostic** 是不应进入 memory 的信号记录，例如 Settings / Tool Contract 相关诊断。Diagnostic 必须有消费面，例如 audit、notify 或后续实现任务入口。
 
-配置策略和工具契约不得通过“创建一条 global rule”来表达。如果用户自然语言中提出配置或工具契约相关要求，sediment 可以记录 notify/audit 诊断，说明该信号不属于 memory rule；真正变更必须走正常代码或配置修改流程。
+## 3. 决策
 
-## 4. Scope 保守策略
+采用统一证据架构：所有长期记忆域先追加 Evidence Event；canonical memory 是 Evidence Event 的物化投影；`agent_end` 不再从 raw transcript / raw context 直接执行 canonical memory mutation。不同消费面按 freshness 和影响半径选择不同投影器：Constraint 使用后台 compiler 生成 Compiled Constraint View；Knowledge 可以先使用同步 projector 维持检索新鲜度，满足条件后再迁移到异步 compiler；identity / skills / habits / workflows / project memory / rationale 等低频 zone 或 view 投影面逐步迁移。
 
-约束默认进入最窄可证明 scope。存在 active project binding 且用户未显式声明跨项目时，项目行为约定进入 project scope；global 仅允许显式跨项目信号（例如“所有项目”“以后每次”“全局”）或跨多个项目重复出现并由 compiler 解释为稳定跨项目偏好。项目名称、路径、仓库、技术栈、客户、业务流程等项目特定证据一旦出现在候选约束中，compiler 必须优先保持 project scope 或降级为 project scope。
+统一的是写入纪律，不是首期工程形态，也不是新增一套全局 per-entry layering。系统仍以 markdown + git 为基座，不引入完整全域 event sourcing 数据库，也不要求首期建设单一全域 ledger / schema。Evidence Event 是证据层；stable views / entries 是读取面和运行时投影。持久信息模型继续遵守 ADR 0028 的 AX-SCOPE / AX-PROVENANCE / AX-MATURITY + f-CATEGORY；zone、inject-mode、staging、GTier 仍是子系统概念。共享 schema 或统一 ledger 只有在至少两个投影面完成验证后才考虑收敛。
 
-这个策略反转了旧路径中“没看到项目标记就可能 global”的风险。错写 global 会污染所有项目；漏写 global 可以通过后续重复证据被 compiler 升级。因此 scope 的安全默认值是保守，而不是积极。
+## 4. 全域方向不变量
 
-## 5. 写路径：只追加 Draft/Event
+对所有长期记忆域，唯一低风险写原语是 append Evidence Event。`agent_end` 可以执行只读邻近语义检索、sanitize / redact、结构化提取、append event、audit / notify、调度 projector；不得从 raw transcript / raw context 直接执行 create、update、merge、archive、rescope、delete 等 canonical memory mutation。
 
-`agent_end` 对 Constraint 域只执行一个低风险写原语：append sanitized draft/event。draft/event 至少包含用户原话 quote、role provenance、session-id、turn-id、时间、active project binding、候选 scope、自然语言上下文摘要、相关已有条目或草稿的只读检索结果摘要、信号类型说明、以及 sanitizer 结果。该事件是原始证据，不是最终规则。
+Canonical memory 包括 rules、knowledge entries、identity / skills / habits / workflows / project memory / rationale 等 zone 或 view 投影。它们是 append-only evidence 的物化投影，不再是实时写时语义裁决直接修改的本体；这些投影面不构成 ADR 0028 之外的新存储轴。
 
-`agent_end` 不执行以下操作：直接创建 active rule、直接更新 active rule、直接归档旧 rule、直接跨 scope 迁移、直接决定 always/listed、直接物理删除、直接将 settings/tool 信号复制为 rule。失败时宁可只留下 queued/audit 状态，也不能静默丢失用户显式约束。
+Evidence Event 至少包含：用户或系统信号 quote、source role provenance、session id、turn id、timestamp、active project binding、candidate domain / scope hint、sanitizer result、邻近语义只读检索摘要、event id / hash。纠错、撤回、遗忘、矛盾也追加新事件，不覆写旧证据。邻近语义只读检索摘要只记录当时已知上下文，不作为之后跳过或删除信号的理由。
 
-写前必须读取相关已有条目或草稿，作为 draft/event 的上下文证据。这里的“写前查已有”不再表示写时必须完成 merge/update 决策，而是表示 draft/event 不得盲写；compiler 后续综合时必须能看到“当时已知的邻近语义环境”。
+显式用户信号不得因 extractor / classifier 不确定而静默丢失。若无法确定域或投影目标，系统必须追加 unclassified / queued Evidence Event 或 recall diagnostic，由后续 projector 消化。
 
-## 6. 编译阶段：唯一语义综合点
+Evidence Ledger 可作为审计和再生成输入，但不是自治遗忘的运行时复活通道。ADR 0031 的运行时复活通道仍必须由 `archived` 全文留在工作树、sparse 可达、用户自然纠错可触发复活来满足。
 
-后台 compiler 读取 Constraint Draft/Event、当前 Compiled Constraint View、相关既有 memory、scope 证据和 audit 线索，产出新的 Compiled Constraint View。compiler 执行语义合并、去重、冲突检测、scope 校验、配置/工具信号排除、文本压缩、优先级排序和注入摘要生成。compiler 是可重试、可观察、可审计的后台阶段，不阻塞主对话。
+## 5. 域自适应投影器
 
-compiler 必须记录来源 draft/event hash 集合、输入 compiled view hash、输出 compiled view hash、模型、时间、审计摘要和失败原因。运行时恢复路径是由系统恢复上一份稳定 compiled view，且保留的 append-only draft/event 使 compiler 可重新生成约束视图；该路径不依赖人类手动编辑 abrain，也不依赖人类执行 git revert。重新编译是可审计的再生成，不应被描述为确定性恢复。git 仍是离线灾备和审计基座，不是自治运行时恢复面。
+### 5.1 Constraint
 
-compiler 对冲突不应自动销毁证据。默认策略是把冲突显式呈现在 compiled view 的 conflict 区或候选解释中：更新证据足够强时可在投影层 supersede 旧约束，但原始 draft/event 保留；证据不足时保留两者并降低注入优先级或标注 contested。
+Constraint 域沿原 ADR 0039 的核心形态：append-only Constraint Draft/Event → background Constraint Compiler → Compiled Constraint View → `session_start` 稳定注入。`session_start` 只读取上一份稳定 view；存在 queued / stale 时提示状态，不同步调用 LLM 重新裁决。
 
-compiler 必须有活性保证。至少需要一个 drain-loop 或 session_start stale 检测后的异步触发机制，确保 draft/event 最终进入编译，而不是永久停留在 queued 状态。
+Constraint compiler 执行语义合并、去重、scope 校验、冲突检测、配置 / 工具信号排除、文本压缩、优先级排序和注入摘要生成。compiler 记录足够的来源和幂等审计，使投影可以解释、重试和回看。
 
-## 7. 读取阶段：只读稳定 Compiled Constraint View
+### 5.2 Knowledge
 
-`session_start` 只读取已物化的 Compiled Constraint View 作为约束注入来源，不做高延迟 LLM 裁决。若存在未编译草稿或 compiled view stale，则注入上一版稳定视图，并在 catalog 或状态反馈中提示存在 queued/stale 约束，等待后台 compiler 处理。这样读路径延迟稳定，且不会因每次启动的 LLM 重新裁决导致注入内容抖动。
+Knowledge 域采用 Knowledge Evidence → Knowledge Projector / Compiler → materialized Search Corpus View。Search Corpus View 可以表现为 markdown entries、metadata、indexable text 和检索索引输入。
 
-`always/listed/inject_mode` 不再是写入层事实。compiled constraints 是稳定语义视图；injector 按预算、provenance、scope、硬约束程度、compactness 和当前 session 需要决定注入形态。用户明确的短硬约束可以被编译为 always-worthy compact 文本，但 writer 不再以固定 body 字数在写时自动降级或改变事实。
+Knowledge projector 可以按阶段同步或异步调度。无论同步还是异步，projector 都只能从 Evidence Event、Evidence Ledger 或 stable views 读取，不能从 raw transcript / raw context 直接裁决写 canonical。同步 projector 是 Evidence Event 后的投影步骤，不是旧写时裁决路径的改名。同步 projector 不得重新解析 raw transcript 来绕过 Evidence Event；它只能读取已追加的 Evidence Event 及其记录的邻近只读检索摘要。失败时至少保留 queued event，不得静默丢失显式信号。
 
-## 8. 可逆性与存储关系
+Knowledge 默认可以先使用同步 projector 保持 `memory_search` freshness。只有 shadow projector / compile、diff、search A/B 证明 freshness、召回质量、延迟不退化，才将 Knowledge 从同步 projector 迁移到后台 compiler。若证据不足，保留同步 projector，但仍必须遵守 canonical = projection，不得回到 raw context 直写 canonical。
 
-Constraint Draft/Event 是 append-only 原始证据；Compiled Constraint View 是从证据和当前语义状态生成的物化视图。archive/delete/rescope 不直接销毁原始证据，只改变 compiled 投影或追加新的 retraction/supersession draft/event。该设计在 Constraint 域类比并继承 ADR 0031 的可逆自治边界：自治生命周期动作必须有运行时可达的恢复路径，不能依赖人类手动编辑 abrain，也不能依赖人类执行 git revert；append-only draft/event 是运行时 tombstone，上一份稳定 compiled view 是可恢复投影。
+### 5.3 低频 zone / view 投影面
 
-本 ADR 不要求为全 memory 建立完整事件存储系统。append-only 约束事件只作用于 Constraint 域，且可用 markdown/git 现有基座实现；它不是独立数据库，也不是把所有知识写入都历史化。git 仍是持久化与恢复基础，compiler 的 materialized view 只是读取面优化。
+Identity、skills、habits、workflows、project memory、rationale 等是 zone 或 view 投影面，不是 ADR 0028 之外的新全局存储轴。这些投影面同样从 Evidence Event 由 projector 生成稳定视图。低频投影面可以先保留同步 projector，但必须记录审计和重新评估条件，避免长期回到旧写时裁决形态。
 
-## 9. 删除的认知层机械门与保留的基础设施
+Rationale view 也应视为 evidence 的投影。它可以读取 ADR、audit、memory entry 和 source references，但不得把当前实现状态镜像回 ADR 正文；实现真相仍以代码和 `current-state.md` 为准。
 
-本 ADR 要删除或停用规则路径中的认知层机械门：Jaccard 或 token overlap 作为 merge/skip gate、固定 body size 写时 demote、`MAX_ARCHIVE_PER_OP` 这类语义风险的数量补丁、工具/配置/project scope 的硬编码特殊规则、写时直接 archive-after-create 顺序补丁、以及 active rules 上的多阶段写时裁决接力。
+### 5.4 Settings 与 Tool Contract
 
-以下基础设施安全仍然保留：secret sanitizer、strict project binding、path safety、schema lint、atomic write、lock/lease、audit、session-id + turn-id causal anchor、source role provenance、git history。它们是基础设施正确性与来源边界，不替代 LLM 做语义裁决。
+Settings 与 Tool Contract 不是 memory。模型分层、运行开关、预算、provider、功能 flag 等运行配置进入配置面；工具调用方式、前置条件、安全约束、选择规则进入 tool declaration、SKILL.md 或代码声明。自然对话中的相关信号只生成 not-memory diagnostic / audit，实际变更走配置、代码或工具声明流程。diagnostic 必须有消费面，例如 audit、notify 或后续实现任务入口，不能成为无人读取的记录。
 
-## 10. 对既有 ADR 的修订
+## 6. 读取面与 freshness
 
-ADR 0028 的 Tier-1 原则仍保留其核心：用户显式 durable directive 与 LLM 推断假设不是同一信号类，USER-role provenance 和 source gate 仍是硬边界，用户显式约束不得静默丢失。但本 ADR 修订 Tier-1 的写入形态：Tier-1 不再等于实时确定性提交 active rule，而是确定性 append Constraint Draft/Event；后续由 compiler 生成稳定 compiled constraint。
+Runtime consumer 默认只读 stable facade / view：`memory_search` 和 `memory_decide` 读 Search Corpus View；`session_start` 读 Compiled Constraint View；rationale / decision brief 读对应 materialized view。
 
-ADR 0023 的 rules 注入心智模型修订为 Compiled Constraint View 注入。rules 区不再是写时 source-of-truth active 文件集合，而是 compiled view 的呈现和兼容投影。实现迁移期间可以保留旧目录作为 legacy view，但新设计的权威语义来自 draft/event + compiler。
+Knowledge 若迁移到异步 compiler，或出现内容投影延迟，`memory_search` 必须支持 `stable view ∪ bounded hot evidence overlay`。近期未投影 Evidence Event 以 provisional tier 进入候选池，明确标注未编译、未投影、较低成熟度，不反写 canonical，不与 stable entry 同权。
 
-ADR 0024 的 INV-ACTIVE-CORRECTION 得到保留：用户自然提出“以后用 X”“忘掉那条”“这不是全局规则”等仍是核心信号通道。区别在于系统不要求用户审批，也不在实时路径做高影响 mutation，而是把纠错追加为证据并由 compiler 汇总。
+Hot overlay 必须有确定性的基础设施预算，例如数量、时间、token 或候选上限，并优先使用结构化 evidence 摘要而非全量原始转录。不得用相似度阈值、准确率阈值等认知机械门替代 LLM 判断。
 
-## 11. 迁移边界
+Hot overlay 和同步 projector 仍受 REQ-009 约束：`memory_search` 必须保持 LLM retrieval / rerank 的 accuracy-contract；模型不可用时 hard error；不得以 grep、BM25 或其它低准确度 fallback 当作正常结果继续写入长期记忆。
 
-架构迁移策略写入 [`docs/roadmap.md#constraint-pipeline-reset-migration`](../roadmap.md#constraint-pipeline-reset-migration)；本 ADR 只固定决策边界。迁移必须先 shadow 编译现有 rules 并生成 diff 报告，再启用 Draft/Event 写入与 Compiled View 注入，最后停用旧 tier1-ruleset-adjudicator/rule-writer 的认知裁决职责；具体 phase、验收指标和实施顺序不写入 ADR 正文，随 dogfood 证据在 roadmap/audit 中演进。
+Constraint freshness 接受 queued / stale。系统注入上一份稳定 compiled view，并提示 queued / stale，不同步 LLM 裁决。
 
-## 12. 接受的代价与风险
+## 7. 语义综合、冲突与多视角审查
 
-后台 compiler 可能延迟，导致用户刚说出的约束不能在下一次会话立即进入 compiled view。接受该代价，因为它换来主对话低延迟、写路径低风险和可重试编译。状态反馈必须告诉用户存在 queued/stale，但不能要求用户审批。
+语义合并、去重、scope 判断、冲突解释、demote、supersede 等认知判断由 projector / compiler 完成，以 prompt-native 判断为主。基础设施可以做 sanitizer、path safety、schema lint、atomic write、lock / lease、audit、source provenance、idempotency、dedup prefilter 等来源边界和候选缩小，但不能替代 LLM 语义判断。
 
-compiler 是新的复杂组件，可能产生错误合并或 scope 判断错误。接受该代价，因为错误发生在可重新生成的 compiled view 中，原始 draft/event 保留，恢复成本低于直接修改 active rules。compiler prompt 和评估应基于真实 draft/event 与 shadow diff，而不是只用合成 fixture。
+Multi-view verification 从 `agent_end` 写时门迁移到 projector / compiler 内部。高影响投影动作，例如跨 scope、merge / supersede、demote、高优先级约束提升，仍需要 prompt-native 交叉验证。该机制不是用户审批，也不是实时路径的机械阻断。
 
-配置或工具信号被判为 not-memory 后，相关配置或工具声明不会自动改变。接受该代价，因为配置和工具契约的实际变更属于代码或配置修改流程，不能通过 memory rule 镜像间接表达。系统应提供清晰 notify/audit，使后续实现任务能处理这些诊断。
+Projector 可以读取其它域 stable view 作为上下文，但不能形成循环写依赖。跨域引用必须记录输入 evidence / view hash、输出 view hash、模型、时间和审计摘要。若只是轻量上下文读取，可以记录摘要；若跨域信息影响输出决策，必须记录完整来源。
 
-compiled view 可能随 compiler 改进而变化。接受该代价，但 compiled view 必须记录来源 hash 和生成审计，避免无解释漂移。读取路径使用上一次稳定视图，避免每次 session_start 重新裁决导致抖动。
+## 8. 保留与删除
 
-## 13. 走偏信号
+保留以下方向和基础设施：INV-INVISIBILITY、INV-AUTONOMY、INV-ACTIVE-CORRECTION、INV-MAIN-SESSION-READ-ONLY、INV-GROUND-TRUTH-TIERED 的 provenance 实质、INV-REVERSIBLE-AUTONOMY、REQ-009 accuracy-contract、markdown + git、strict project binding、sanitizer、audit、atomic write、lock / lease、deterministic git sync、dedup prefilter、provenance / idempotency / sanitizer 等基础设施来源边界门。
 
-如果 queued draft 长期不被编译，说明 compiler 活性不成立，需要先修 drain-loop 或 stale-trigger，而不是恢复实时写时裁决。
+删除或降级以下形态：写时 Jaccard / 阈值 / 固定 body-size demote / archive cap / scope 黑名单等用于替代 LLM 语义判断的认知机械门；`always` / `listed` / `inject_mode` 作为写时事实；settings / tool contract 被复制为 memory rule；从 raw `agent_end` 上下文实时 mutate active memory 的旧写入模型。
 
-如果 settings/tool 信号继续出现在 global constraints，说明四域隔离失败，应修 router/compiler prompt 与 not-memory 诊断，而不是为每个工具或配置再新增 global 排除规则。
+Dedup / near-merge 仍然存在，但迁移到 projector / compiler 内部。基础设施预过滤只作候选缩小或安全边界，最终语义判断由 prompt-native projector / compiler 完成。
 
-如果 project-specific constraint 继续进入 global，说明 scope 保守策略失败，应修 scope rubric 与 project binding 证据呈现，而不是新增项目名黑名单。
+## 9. 对既有 ADR 的修订
 
-如果 compiler 频繁生成大规模无解释重写，说明编译过度自信，应要求输出 conflict/uncertainty 区和来源 hash，而不是新增固定归档数量上限。
+ADR 0028 的 Tier-1 原则保留其核心：用户显式 durable directive 与 LLM 推断假设不是同一信号类，USER-role provenance 和 source gate 仍是硬边界，用户显式约束不得静默丢失。本 ADR 修订写入形态：Tier-1 不再等于实时确定性提交 active rule，而是确定性 append witnessed Evidence Event；后续由对应域 projector / compiler 生成稳定投影。Provenance tier 与 compilation maturity 是正交轴：未投影不等于降级为可丢弃信号。
 
-如果 compiled view 过长导致注入噪音，说明 compiler compression 和 injector budget policy 失败，应改编译摘要和注入策略，而不是恢复 writer 的固定 body size demote。
+REQ-004 的“确定性提交、对用户可见、永不被 skip / stage 丢弃”在本架构下对应为：USER-role ∧ directive ∧ durable 的显式指令必须确定性追加 witnessed Evidence Event；event 必须可审计、可追溯、可见于 queued / stale / projected 状态反馈；不得被 skip、stage 或 drop；必须保留 keyed by raw transcript 的负信号召回审计。强制执行可能延迟到 projector / compiler 生成 stable view，这是本 ADR 接受的具名代价，但不是静默丢失。
+
+ADR 0023 的 rules 注入模型修订为 Compiled Constraint View 注入。Rules 区不再是写时 source-of-truth active 文件集合，而是 compiled view 的呈现或兼容投影。
+
+ADR 0024 的 INV-ACTIVE-CORRECTION 保留。用户自然提出“以后用 X”“忘掉那条”“这不是全局规则”等仍是核心信号通道。区别在于系统不要求用户审批，也不在实时路径做高影响 canonical mutation，而是把纠错追加为 evidence 并由 projector / compiler 消化。
+
+ADR 0031 的可逆自治边界保留。Evidence Ledger 不能替代 `archived` 全文留盘的运行时复活通道；任何 demote 投影都必须保持 `archived` 可达。
+
+ADR 0035 / 0036 的 search-time freshness 与 bounded-union 经验成为 Knowledge 异步化的前置证据基础，但不能用低准确度 fallback 继续写入长期记忆。`memory_search` 的 accuracy-contract 保留。
+
+## 10. 迁移边界
+
+迁移策略写入 `docs/roadmap.md`，本 ADR 只固定决策边界：canonical memory 是 append-only evidence 的投影；`agent_end` 不直接从 raw context 写 canonical；各消费面逐步迁移；过渡期旧 curator 只能作为 projector 消费 Evidence Event；逐投影面迁移必须有真实使用证据；禁止一次性重写全系统。
+
+过渡态同步 projector 必须有审计和重新评估条件，避免长期退回旧写时裁决形态。README 和 roadmap 等指针文件在本 ADR ratify 后同步更新，不在 ADR 正文中承载实施流水。
+
+## 11. 接受的代价与风险
+
+后台 compiler 可能延迟，导致某些信号不能立即进入 stable view。Constraint 域接受 queued / stale；Knowledge 域通过同步 projector 或 bounded hot evidence overlay 保持 freshness。该代价换来写路径低风险、投影可重试和证据可审计。
+
+Projector / compiler 仍可能错误合并、错误 scope、错误 demote 或错误解释冲突。接受该代价，因为错误发生在可重新生成或可修订的投影层，原始 evidence 和 `archived` 运行时复活通道保留，恢复成本低于直接修改 active memory。
+
+Evidence Event 会增加存储增长。首期不引入自治物理删除；压缩、归档或共享 schema 工程化必须另行基于真实使用证据设计，且不得破坏 ADR 0031 的运行时复活通道。
+
+Projector 重写可能增加跨设备 merge 面。接受该代价，但跨设备同步仍只使用确定性 git 合并；LLM 不自动解决 git 冲突，真冲突仍 abort 并给出 runbook。
+
+Settings / Tool Contract 被判为 not-memory 后，相关配置或工具声明不会自动改变。接受该代价，因为它们的实际变更属于配置或代码流程，不能通过 memory rule 间接表达。系统必须提供可消费的 diagnostic。
+
+## 12. 走偏信号
+
+如果 queued event 长期不被投影，说明 projector 活性不成立，需要先修 drain-loop、调度或 stale-trigger，而不是恢复 raw context 写时裁决。
+
+如果 settings / tool 信号继续出现在 global constraints 或 knowledge entries 中，说明域隔离失败，应修 router / projector prompt 与 not-memory diagnostic，而不是为每个工具或配置新增排除规则。
+
+如果 project-specific 信号继续进入 global view，说明 scope 保守策略失败，应修 scope rubric 与 project binding 证据呈现，而不是新增项目名黑名单。
+
+如果 projector 频繁生成大规模无解释重写，说明投影过度自信，应要求输出 conflict / uncertainty 区和来源 hash，而不是新增固定归档数量上限。
+
+如果 Knowledge 异步化后 `memory_search` freshness、召回质量或延迟退化，说明异步迁移条件不成立，应保留同步 projector 或强化 bounded hot evidence overlay，而不是降低 `memory_search` accuracy-contract。
+
+如果 `archived` 条目被投影重建过程丢弃，说明违反 ADR 0031，应立即回退该 projector 设计。
+
+如果 Tier-1 指令进入 Evidence Event 后长期不可见或无 queued / stale / projected 状态反馈，说明 REQ-004 的“对用户可见”没有兑现，应修状态反馈和召回审计，而不是恢复 active rule 直写。
+
+## 13. Deferred exploration
+
+完整 Typed Belief Graph、Unified Evidence Graph lazy materialization、CCR（从近期原始转录即时重构情境认知模型）、统一全域 ledger / schema 工程化都保留为 deferred exploration。进入主线必须有成本、质量、真实使用证据，不作为当前 ADR 的首期交付。
 
 ## 14. 评审摘要
 
-第一轮四个 T0 独立提出方案：全上下文 Reconciler、语义对象模型与可逆 diff、constraint taxonomy、C/K/S 三层分离。所有方案都承认现有规则路径存在结构性问题，并且必须将 settings/tool/project/global 的边界从全局 rules 中拆出。
+原 ADR 0039 的 Constraint-only 版本已经 4×T0 多轮审查并 accepted，但尚未实施。用户指出同类问题可能存在于整个第二大脑记忆系统，要求抛开现有 sediment 具体设计，由多个 T0 独立提出方案、交叉辩论，每轮都回答是否还有更好方案，并由 T0 全体一致后再定稿。
 
-第二轮交叉辩论形成关键收敛：纯写时 Reconciler 仍会保留 active mutation 的竞态和顺序问题；纯 session_start 动态裁决会引入启动延迟与抖动；完整全域 event sourcing 过重；更优折中是 append-only 草稿事件 + 后台 compiler + 稳定 compiled view。
-
-第三轮对本 ADR 的候选骨架进行签署检查。Opus、GPT-5.5、DeepSeek、Kimi-k2.6 全部 `SIGN`，无架构 blocker。ADR 草稿 R1 出现两个文本 blocker：`git revert` 恢复路径与 ADR 0031 冲突、迁移 phase 流水侵入 ADR 正文；R2 修订后四个 T0 全部 `SIGN`。非阻断实现注意事项包括 compiler 活性保证、compiled view 的来源 hash、上一份稳定 compiled view 作为运行时恢复投影、冲突策略显式化，以及 Knowledge 域边界在实施前单独明确。
+统一架构修订的评审记录见 [`2026-06-19-adr-0039-unified-evidence-architecture-t0-review.md`](../audits/2026-06-19-adr-0039-unified-evidence-architecture-t0-review.md)。本 ADR 仅保留影响决策有效性的摘要：讨论收敛到“统一写入纪律 + 域自适应投影器”，拒绝完整全域 event sourcing 数据库作为首期范围，保留 Knowledge 同步 projector 作为 freshness-preserving 迁移路径，并要求 Evidence Ledger 不替代 ADR 0031 的 `archived` 运行时复活通道。
 
 ## 15. 这份 ADR 不是什么
 
-不是要求用户审批规则写入；用户仍然不参与大脑管理。
+不是要求用户审批记忆写入；用户仍然不参与大脑管理。
 
-不是让主会话写 memory；主会话仍然只读，sediment 是唯一写入者。
+不是让主会话写 memory；主会话仍然只读，sediment sidecar 是 dedicated writer。
 
-不是把所有 memory 都改成完整 event sourcing；append-only draft/event 只用于 Constraint 域。
+不是把所有 memory 改成完整 event sourcing 数据库；首期只固定方向不变量和逐投影面迁移边界。
 
-不是禁止 notify/audit；告诉用户 queued/stale/compiled 状态是健康反馈，不是管理负担。
+不是禁止 notify / audit；告诉用户 queued / stale / projected 状态是健康反馈，不是管理负担。
 
-不是删除 AI 语义判断；语义判断从实时破坏性写时路径移动到后台可重试 compiler。
+不是删除 AI 语义判断；语义判断从 raw `agent_end` 写时 mutation 移动到 projector / compiler。
 
-不是把配置或工具声明藏进 memory；settings/tool 有自己的归宿，memory 只可记录 not-memory 诊断与审计。
+不是把配置或工具声明藏进 memory；settings / tool 有自己的归宿，memory 只可记录 not-memory diagnostic / audit。
