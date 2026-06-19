@@ -68,8 +68,9 @@ import { runArchiveReactivationIfDue } from "./archive-reactivation";
 import { runForgettingExecutor } from "./forgetting-executor";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
+import { appendTier1ConstraintEvidenceEvent } from "./constraint-evidence/integration";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
-import { getCurrentAnchor, runWithTriggerAnchor } from "../_shared/causal-anchor";
+import { getCurrentAnchor, getDeviceId, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { loadEntries } from "../memory/parser";
 import { reconcileEmbeddings, resolveEmbeddingProviderConfig, vectorIndexPath } from "../memory/embedding";
@@ -4344,6 +4345,20 @@ function buildTier1RuleDraft(signal: CorrectionSignal, sessionId: string, projec
   };
 }
 
+function stableRunWindowTimestamp(window: RunWindow): string {
+  const last = window.entries[window.entries.length - 1];
+  const timestamp = last && typeof last === "object" ? (last as Record<string, unknown>).timestamp : undefined;
+  if (typeof timestamp === "string") {
+    const parsed = Date.parse(timestamp);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  return "1970-01-01T00:00:00.000Z";
+}
+
+function stableRunWindowTurnId(window: RunWindow): string {
+  return window.lastEntryId || window.lastProcessedEntryId || "unknown-turn";
+}
+
 /**
  * Run the LLM auto-write lane end-to-end. The function performs all
  * gate checks, runs the LLM extractor when enabled, and applies
@@ -4449,12 +4464,42 @@ async function tryAutoWriteLane(args: {
     const writeStart = Date.now();
     const draft = buildTier1RuleDraft(tier1Signal, sessionId, projectId);
     const adjudicationLaneOn = settings.tier1JaccardCuratorLane === true;
+    const tier1CandidateId = candidateIdFor(correlationId, -1);
+    const tier1EvidenceCandidateId = "tier1-direct:c0";
     const tier1AuditContext: WriterAuditContext = {
       lane: "auto_write",
       sessionId,
       correlationId,
-      candidateId: candidateIdFor(correlationId, -1),
+      candidateId: tier1CandidateId,
     };
+    let constraintEvidenceEvent: Awaited<ReturnType<typeof appendTier1ConstraintEvidenceEvent>> | undefined;
+    if (settings.constraintEvidenceEventWriter.enabled === true) {
+      try {
+        constraintEvidenceEvent = await appendTier1ConstraintEvidenceEvent({
+          abrainHome,
+          signal: tier1Signal,
+          draft,
+          sessionId,
+          turnId: stableRunWindowTurnId(window),
+          projectId,
+          cwd,
+          createdAtUtc: stableRunWindowTimestamp(window),
+          correlationId,
+          candidateId: tier1EvidenceCandidateId,
+          deviceId: getDeviceId(),
+        });
+      } catch (e: unknown) {
+        await appendAudit(cwd, {
+          operation: "constraint_evidence_append_failed",
+          lane: "auto_write",
+          session_id: sessionId,
+          correlation_id: correlationId,
+          candidate_id: tier1EvidenceCandidateId,
+          error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 500),
+          checkpoint_advanced: false,
+        }).catch(() => {});
+      }
+    }
     // PR-4/P0.3 (O2 2026-06-10): with the lane ON (default), a cross-slug
     // Jaccard hit comes back as "similar_found" (no write) and the curator
     // adjudicates {update,merge,create}; with the lane OFF (rollback only),
@@ -4558,7 +4603,7 @@ async function tryAutoWriteLane(args: {
       session_id: sessionId,
       ...checkpointSummary(window),
       correlation_id: correlationId,
-      candidate_id: candidateIdFor(correlationId, -1),
+      candidate_id: tier1CandidateId,
       candidate_title: sanitizeAuditText(draft.title, 500),
       candidate_kind: draft.kind,
       candidate_confidence: draft.entryConfidence,
@@ -4587,6 +4632,16 @@ async function tryAutoWriteLane(args: {
       ...(tier1StagingCleanup ? { tier1_staging_cleanup: tier1StagingCleanup } : {}),
       // PR-4: adjudication trace (lane ON only) — decision/model/fallback.
       ...(adjudication ? { jaccard_adjudication: adjudication } : {}),
+      ...(constraintEvidenceEvent ? {
+        constraint_evidence_event: {
+          ok: constraintEvidenceEvent.append.ok,
+          status: constraintEvidenceEvent.append.status,
+          event_id: constraintEvidenceEvent.append.eventId ?? null,
+          audit_path: constraintEvidenceEvent.auditPath ?? null,
+          status_path: constraintEvidenceEvent.statusPath ?? null,
+          diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
+        },
+      } : {}),
       // "updated" = adjudication update/merge persisted the directive on the
       // existing rule (PR-4).
       signal_consumed: result.status === "created" || result.status === "deduped" || result.status === "dry_run" || result.status === "updated",

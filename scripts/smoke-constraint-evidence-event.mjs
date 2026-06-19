@@ -74,6 +74,7 @@ for (const file of [
   "extensions/sediment/constraint-evidence/read.ts",
   "extensions/sediment/constraint-evidence/append.ts",
   "extensions/sediment/constraint-evidence/status.ts",
+  "extensions/sediment/constraint-evidence/integration.ts",
 ]) {
   stageTs(outRoot, file);
 }
@@ -107,6 +108,10 @@ const {
   markStaleQueuedConstraintEvents,
   summarizeConstraintEventProjectionStatus,
 } = require(path.join(outRoot, "sediment", "constraint-evidence", "status.js"));
+const {
+  appendTier1ConstraintEvidenceEvent,
+  buildTier1ConstraintEvidenceEventBody,
+} = require(path.join(outRoot, "sediment", "constraint-evidence", "integration.js"));
 
 function listFiles(root) {
   if (!fs.existsSync(root)) return [];
@@ -445,6 +450,76 @@ check("append writer leaves canonical rules tree unchanged", async () => {
   fs.rmSync(abrainHome, { recursive: true, force: true });
 });
 
+check("runtime integration body is deterministic for repeated agent_end signal", () => {
+  const base = {
+    signal: {
+      user_quote: "本项目内，Constraint Evidence Event writer 必须默认关闭。",
+      correction_intent: "new preference",
+      scope_description: "current project only",
+      confidence: 9,
+      provenance: "user-expressed",
+    },
+    draft: {
+      title: "Constraint Evidence default off",
+      body: "本项目内，Constraint Evidence Event writer 必须默认关闭。",
+      entryConfidence: 9,
+    },
+    sessionId: "runtime-session",
+    turnId: "runtime-turn",
+    projectId: "pi-global",
+    cwd: repoRoot,
+    createdAtUtc: "2026-06-19T12:00:00.000Z",
+    correlationId: "runtime-session:auto-first",
+    candidateId: "tier1-direct:c0",
+    deviceId: "runtime-device",
+  };
+  const first = buildTier1ConstraintEvidenceEventBody(base);
+  const second = buildTier1ConstraintEvidenceEventBody({ ...base, correlationId: "runtime-session:auto-second" });
+  assert(constraintEvidenceBodyHash(first) === constraintEvidenceBodyHash(second), "correlation id changed event identity");
+  assert(first.source.channel === "agent_end", "runtime event channel mismatch");
+  assert(first.scope.scope_hint.kind === "project", "project signal must remain project-scoped at append time");
+  assert(first.legacy_parallel_write.legacy_path_kind === "tier1_ruleset_adjudicator", "legacy path hint missing");
+});
+
+check("runtime integration appends L1 event and state audit idempotently", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-runtime-"));
+  const options = {
+    abrainHome,
+    signal: {
+      user_quote: "所有项目中，显式 runtime 开关必须保留在 JSON 配置里。",
+      correction_intent: "new preference",
+      scope_description: "all projects",
+      confidence: 9,
+      provenance: "user-expressed",
+    },
+    draft: {
+      title: "Runtime switch explicit JSON",
+      body: "所有项目中，显式 runtime 开关必须保留在 JSON 配置里。",
+      entryConfidence: 9,
+    },
+    sessionId: "runtime-session",
+    turnId: "runtime-turn",
+    projectId: "pi-global",
+    cwd: repoRoot,
+    createdAtUtc: "2026-06-19T12:00:00.000Z",
+    correlationId: "runtime-session:auto-random-a",
+    candidateId: "tier1-direct:c0",
+    deviceId: "runtime-device",
+  };
+  const first = await appendTier1ConstraintEvidenceEvent(options);
+  const second = await appendTier1ConstraintEvidenceEvent({ ...options, correlationId: "runtime-session:auto-random-b" });
+  assert(first.append.ok && first.append.status === "appended", `first append failed: ${JSON.stringify(first.append.diagnostics)}`);
+  assert(second.append.ok && second.append.status === "idempotent_duplicate", `second append not idempotent: ${JSON.stringify(second.append)}`);
+  assert(first.append.eventId === second.append.eventId, "event id changed across repeated signal");
+  assert(listFiles(path.join(abrainHome, "l1", "events")).length === 1, "runtime append wrote duplicate L1 files");
+  assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-events", "runtime", "append-audit.jsonl")), "runtime audit missing");
+  assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-events", "runtime", "projection-status.jsonl")), "runtime status missing");
+  assert(!fs.existsSync(path.join(abrainHome, "rules")), "runtime append created canonical rules tree");
+  const statusLines = fs.readFileSync(path.join(abrainHome, ".state", "sediment", "constraint-events", "runtime", "projection-status.jsonl"), "utf8").trim().split("\n");
+  assert(statusLines.length === 2, "runtime status should record both attempts");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
 check("manual dossier is registered as dossier script, not smoke", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   assert(pkg.scripts["dossier:constraint-evidence-event"] === "node scripts/dossier-constraint-evidence-event.mjs", "missing dossier registration");
@@ -517,7 +592,16 @@ check("manual dossier rejects non-temporary abrain paths", () => {
   assert(`${result.stderr}${result.stdout}`.includes("must point inside"), "missing refusal reason");
 });
 
-check("PR2/PR3/PR4 module does not import mutation symbols or runtime hooks", () => {
+check("runtime evidence writer setting is default-off in schema and explicit config", () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf8"));
+  const schemaFlag = schema.properties.sediment.properties.constraintEvidenceEventWriter.properties.enabled;
+  assert(schemaFlag.default === false, "schema default must be false");
+  const settingsPath = path.resolve(repoRoot, "..", "..", "pi-astack-settings.json");
+  const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+  assert(settings.sediment.constraintEvidenceEventWriter.enabled === false, "runtime config must keep explicit false rollback switch");
+});
+
+check("PR2/PR3/PR4/PR5 module does not import mutation symbols or runtime hooks", () => {
   const dir = path.join(repoRoot, "extensions", "sediment", "constraint-evidence");
   const files = fs.readdirSync(dir).filter((file) => file.endsWith(".ts"));
   const combined = files.map((file) => fs.readFileSync(path.join(dir, file), "utf8")).join("\n");

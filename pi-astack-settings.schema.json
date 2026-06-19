@@ -333,6 +333,19 @@
           }
         },
 
+        "constraintEvidenceEventWriter": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0039 P2 PR5 default-off runtime append of Constraint Evidence Events from the existing sediment agent_end pipeline. When enabled it only writes ~/.abrain/l1/events/** plus minimal ~/.abrain/.state/sediment/constraint-events/** audit/status; it does not change canonical memory or register hooks.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicit default-off runtime guard. Keep this key present in pi-astack-settings.json as a rollback switch."
+            }
+          }
+        },
+
         "aggregatorModel": {
           "type": "string",
           "default": "deepseek/deepseek-v4-pro",

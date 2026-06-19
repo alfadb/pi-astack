@@ -57,6 +57,10 @@ export interface SedimentSettings {
     maxRetries: number;
     maxPromptChars: number;
   };
+  /** ADR 0039 P2 PR5: default-off runtime append of Constraint Evidence Events. */
+  constraintEvidenceEventWriter: {
+    enabled: boolean;
+  };
   /** ADR 0025 §4.3 Phase C.2: model for the aggregator v1 skeptical-historian
    *  LLM pass. Skeptical historian is a reasoning-heavy task; v4-pro is the
    *  reasonable default. Empty/invalid → fall back to curatorModel. */
@@ -201,6 +205,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     timeoutMs: 1_200_000,
     maxRetries: 0,
     maxPromptChars: 0,
+  },
+  constraintEvidenceEventWriter: {
+    enabled: false,
   },
   // Aggregator: empty default. Configure in pi-astack-settings.json.
   aggregatorModel: "",
@@ -358,6 +365,9 @@ export function resolveSedimentSettings(): SedimentSettings {
       timeoutMs: Math.max(1_000, asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.timeoutMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.timeoutMs)),
       maxRetries: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxRetries, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxRetries))),
       maxPromptChars: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxPromptChars, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxPromptChars))),
+    },
+    constraintEvidenceEventWriter: {
+      enabled: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.enabled),
     },
     aggregatorModel: typeof cfg.aggregatorModel === "string" && cfg.aggregatorModel.trim()
       ? cfg.aggregatorModel.trim()

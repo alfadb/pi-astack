@@ -105,6 +105,27 @@ function transpileExtensions(outRoot) {
     }
   }
 
+  for (const file of fs.readdirSync(path.join(extRoot, "sediment", "constraint-evidence")).filter((f) => f.endsWith(".ts"))) {
+    const srcPath = path.join(extRoot, "sediment", "constraint-evidence", file);
+    const outPath = path.join(outRoot, "sediment", "constraint-evidence", file.replace(/\.ts$/, ".js"));
+    const transpiled = ts.transpileModule(fs.readFileSync(srcPath, "utf-8"), {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.CommonJS,
+        moduleResolution: ts.ModuleResolutionKind.NodeJs,
+        esModuleInterop: true,
+        skipLibCheck: true,
+      },
+    });
+    try {
+      new (require("node:vm").Script)(transpiled.outputText, { filename: srcPath });
+    } catch (err) {
+      throw new Error(`Strict parse of ${path.relative(repoRoot, srcPath)} failed: ${err && err.stack ? err.stack : err}`);
+    }
+    writeFile(outPath, transpiled.outputText);
+    count++;
+  }
+
   const sedimentPromptsDir = path.join(outRoot, "sediment", "prompts");
   fs.mkdirSync(sedimentPromptsDir, { recursive: true });
   for (const file of fs.readdirSync(path.join(extRoot, "sediment", "prompts")).filter((f) => f.endsWith(".md"))) {
@@ -3259,6 +3280,52 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         assert(direct.draft.kind === "preference", `direct rule kind should be 'preference', got: ${direct.draft.kind}`);
         assert(fs.readFileSync(direct.result.path, "utf-8").includes(userQuote), `rule file must contain the verbatim quote`);
         assert(globalThis.__A2_INVOCATIONS__ === 0, `direct lane must not consult the extractor (0 LLM), got: ${globalThis.__A2_INVOCATIONS__}`);
+        assert(!fs.existsSync(path.join(aTarget.abrainHome, "l1", "events")), "default-off constraint event writer must not touch L1 events");
+        assert(!fs.existsSync(path.join(aTarget.abrainHome, ".state", "sediment", "constraint-events")), "default-off constraint event writer must not touch runtime state");
+
+        // (1b) opt-in runtime event writer: appends content-addressed L1 evidence while legacy Tier-1 behavior still runs.
+        const eventTarget = setupAbrainTarget("constraint-evidence-runtime-smoke");
+        const eventSettings = { ...a2Settings, constraintEvidenceEventWriter: { enabled: true } };
+        const eventQuote = "所有项目中，Constraint Evidence Event writer 必须通过显式 JSON 开关控制。";
+        const eventSignal = { ...qualifyingSignal, user_quote: eventQuote, scope_description: "All projects must keep the event writer behind an explicit JSON switch" };
+        const eventWinText = `--- ENTRY 1 ev1 message/user ---\n全局规则：${eventQuote}`;
+        const eventWin = {
+          entries: [{ type: "message", id: "ev1", timestamp: "2026-06-19T12:00:00.000Z", message: { role: "user", content: [{ type: "text", text: eventWinText }] } }],
+          text: eventWinText, chars: eventWinText.length, totalBranchEntries: 1,
+          candidateEntries: 1, includedEntries: 1, checkpointFound: false, lastEntryId: "ev1",
+        };
+        const eventArgs = (correlationId) => ({
+          cwd: aRoot, sessionId: "smoke-tier1-event", settings: eventSettings, window: eventWin,
+          modelRegistry: mockModelRegistry, signal: undefined, correlationId,
+          abrainHome: eventTarget.abrainHome, projectId: eventTarget.projectId, correctionSignal: eventSignal,
+        });
+        globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
+        const eventFirst = await _tryAutoWriteLaneForTests(eventArgs("smoke-tier1-event:auto-a"));
+        globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
+        const eventSecond = await _tryAutoWriteLaneForTests(eventArgs("smoke-tier1-event:auto-b"));
+        assert(eventFirst.kind === "tier1_direct" && eventFirst.result.status === "created", `enabled event writer must keep legacy create path, got: ${JSON.stringify(eventFirst)}`);
+        assert(eventSecond.kind === "tier1_direct" && eventSecond.result.status === "deduped", `replayed signal must keep legacy dedup path, got: ${JSON.stringify(eventSecond)}`);
+        const eventFiles = [];
+        const eventRoot = path.join(eventTarget.abrainHome, "l1", "events");
+        const walkEventFiles = (dir) => {
+          for (const child of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, child.name);
+            if (child.isDirectory()) walkEventFiles(full);
+            if (child.isFile()) eventFiles.push(path.relative(eventRoot, full).split(path.sep).join("/"));
+          }
+        };
+        walkEventFiles(eventRoot);
+        assert(eventFiles.length === 1, `enabled writer must write one idempotent L1 event file, got: ${eventFiles.join(",")}`);
+        const runtimeAuditPath = path.join(eventTarget.abrainHome, ".state", "sediment", "constraint-events", "runtime", "append-audit.jsonl");
+        const runtimeStatusPath = path.join(eventTarget.abrainHome, ".state", "sediment", "constraint-events", "runtime", "projection-status.jsonl");
+        assert(fs.existsSync(runtimeAuditPath), "enabled writer runtime audit missing");
+        assert(fs.existsSync(runtimeStatusPath), "enabled writer runtime status missing");
+        const runtimeAuditRows = fs.readFileSync(runtimeAuditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+        assert(runtimeAuditRows.length === 2, `runtime audit should record both append attempts, got: ${runtimeAuditRows.length}`);
+        assert(runtimeAuditRows[0].status === "appended" && runtimeAuditRows[1].status === "idempotent_duplicate", `runtime audit should show append then duplicate, got: ${JSON.stringify(runtimeAuditRows)}`);
+        const tier1AuditPath = path.join(aRoot, ".pi-astack", "sediment", "audit.jsonl");
+        const tier1Audit = fs.readFileSync(tier1AuditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((row) => row.session_id === "smoke-tier1-event" && row.operation === "tier1_direct_write");
+        assert(tier1Audit.length === 2 && tier1Audit.every((row) => row.constraint_evidence_event), `tier1 audit must include event summaries when enabled: ${JSON.stringify(tier1Audit)}`);
 
         // (2) non-qualifying (task-local, conf 6) -> not Tier-1 -> extractor path -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
