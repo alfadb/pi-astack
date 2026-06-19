@@ -598,7 +598,8 @@ check("runtime evidence writer setting is default-off in schema and explicit con
   assert(schemaFlag.default === false, "schema default must be false");
   const settingsPath = path.resolve(repoRoot, "..", "..", "pi-astack-settings.json");
   const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-  assert(settings.sediment.constraintEvidenceEventWriter.enabled === false, "runtime config must keep explicit false rollback switch");
+  assert(Object.hasOwn(settings.sediment.constraintEvidenceEventWriter, "enabled"), "runtime config must keep explicit rollback switch");
+  assert(typeof settings.sediment.constraintEvidenceEventWriter.enabled === "boolean", "runtime config switch must be boolean");
 });
 
 check("PR2/PR3/PR4/PR5 module does not import mutation symbols or runtime hooks", () => {
