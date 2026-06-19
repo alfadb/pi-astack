@@ -1241,7 +1241,7 @@ export default function (pi: ExtensionAPI) {
       "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_parallel which runs them in parallel (~30s).",
       "Sub-agents default to read,grep,find,ls,web_search,web_fetch + memory read. To let a worker edit code, pass tools= including bash/edit/write (swarm editing is allowed; only nested dispatch is rejected).",
       "The sub-agent is an independent AgentSession — its context does NOT count against your token budget.",
-      "maxOutputTokens explicitly sets the provider output budget; when omitted, dispatch sends the model registry's maxTokens as the request cap.",
+      "Prefer omitting maxOutputTokens: dispatch then uses the model registry maxTokens as the request cap. Set it only when intentionally testing or limiting output; low values can cause stopReason=length truncation.",
     ],
     parameters: Type.Object({
       model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
@@ -1249,7 +1249,7 @@ export default function (pi: ExtensionAPI) {
       prompt: Type.String({ description: "Prompt sent to this task" }),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
-      maxOutputTokens: Type.Optional(Type.Number({ description: "Provider output token budget. Defaults to the model registry maxTokens and is clamped to that cap." })),
+      maxOutputTokens: Type.Optional(Type.Number({ description: "Provider output token budget. Prefer omitting this so dispatch uses the model registry maxTokens (the largest configured cap). Set only to intentionally limit output; low values can cause stopReason=length truncation. Explicit values are clamped to the model cap." })),
     }),
 
     prepareArguments(rawArgs: unknown) {
@@ -1498,7 +1498,7 @@ export default function (pi: ExtensionAPI) {
       "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together. Use different providers per task for cross-vendor blind reviews.",
       `Concurrency: up to ${MAX_PARALLEL} tasks accepted; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time, while different providers can run together. Choose models from DIFFERENT providers for diversity.`,
       "For reasoning-only tasks, omit tools (sub-agent uses built-in read/grep/find/ls).",
-      "maxOutputTokens can be set per task or as a top-level default; omitted tasks use the model registry maxTokens as the request cap.",
+      "Prefer omitting maxOutputTokens: omitted tasks use the model registry maxTokens as the request cap. Set it per task or as a top-level default only when intentionally testing or limiting output; low values can cause stopReason=length truncation.",
     ],
     parameters: Type.Object({
       tasks: Type.Array(
@@ -1508,12 +1508,12 @@ export default function (pi: ExtensionAPI) {
           prompt: Type.String({ description: "Prompt sent to this task" }),
           tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide)." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 1800000 = 30min)" })),
-          maxOutputTokens: Type.Optional(Type.Number({ description: "Per-task provider output token budget. Defaults to the model registry maxTokens and is clamped to that cap." })),
+          maxOutputTokens: Type.Optional(Type.Number({ description: "Per-task provider output token budget. Prefer omitting this so dispatch uses the model registry maxTokens (the largest configured cap). Set only to intentionally limit output; low values can cause stopReason=length truncation. Explicit values are clamped to the model cap." })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
       ),
       timeoutMs: Type.Optional(Type.Number({ description: "Default per-task timeout in ms (default 1800000 = 30min)" })),
-      maxOutputTokens: Type.Optional(Type.Number({ description: "Default provider output token budget for tasks without their own maxOutputTokens." })),
+      maxOutputTokens: Type.Optional(Type.Number({ description: "Default provider output token budget for tasks without their own maxOutputTokens. Prefer omitting this so each task uses the model registry maxTokens (the largest configured cap). Set only to intentionally limit output; low values can cause stopReason=length truncation." })),
     }),
 
     prepareArguments(rawArgs: unknown) {

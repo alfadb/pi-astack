@@ -148,6 +148,16 @@ check("dispatch_parallel supports per-task and top-level defaults", () => {
   if (!/maxOutputTokens: r\.maxOutputTokens/.test(block)) throw new Error("per-task details field missing");
 });
 
+check("tool declaration tells callers to prefer omitting maxOutputTokens", () => {
+  if (!/Prefer omitting maxOutputTokens/.test(dispatchSrc)) throw new Error("prefer-omit guidance missing");
+  if (!/model registry maxTokens \(the largest configured cap\)/.test(dispatchSrc)) {
+    throw new Error("schema must say omitted maxOutputTokens uses the largest configured cap");
+  }
+  if (!/low values can cause stopReason=length truncation/.test(dispatchSrc)) {
+    throw new Error("schema must warn that low explicit budgets can truncate output");
+  }
+});
+
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 if (failures.length > 0) {
