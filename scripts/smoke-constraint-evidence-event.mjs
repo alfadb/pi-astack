@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 /**
- * Smoke test: ADR 0039 P2 Constraint Evidence Event PR2/PR3.
+ * Smoke test: ADR 0039 P2 Constraint Evidence Event PR2/PR3/PR4.
  *
  * Offline only: pure functions + fixture events. No runtime hook, no real abrain
- * writes, and no canonical memory mutation. PR3 append checks use temporary trees.
+ * writes, and no canonical memory mutation. PR3/PR4 checks use temporary trees.
  */
 
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -444,7 +445,79 @@ check("append writer leaves canonical rules tree unchanged", async () => {
   fs.rmSync(abrainHome, { recursive: true, force: true });
 });
 
-check("PR2/PR3 module does not import mutation symbols or runtime hooks", () => {
+check("manual dossier is registered as dossier script, not smoke", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  assert(pkg.scripts["dossier:constraint-evidence-event"] === "node scripts/dossier-constraint-evidence-event.mjs", "missing dossier registration");
+  assert(!Object.entries(pkg.scripts).some(([name, command]) => name.startsWith("smoke:") && String(command).includes("dossier-constraint-evidence-event")), "dossier registered under smoke");
+});
+
+check("manual dossier default uses temporary abrain and cleans it", () => {
+  const output = execFileSync("node", ["scripts/dossier-constraint-evidence-event.mjs", "--now", "2026-06-19T12:00:00.000Z"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  assert(output.includes("mode: manual-fixture"), "missing manual mode output");
+  assert(output.includes("ok=true"), "dossier did not append event");
+  assert(output.includes("rulesFileListChanged=false"), "rules changed");
+  assert(output.includes("reportPath=/tmp/constraint-evidence-dossier-"), "report path is not temporary");
+  assert(output.includes("tempCleaned=true"), "temporary abrain was not cleaned");
+});
+
+check("manual dossier --keep writes report and audit under temporary state", () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-dossier-smoke-"));
+  const output = execFileSync("node", [
+    "scripts/dossier-constraint-evidence-event.mjs",
+    "--abrain", abrainHome,
+    "--keep",
+    "--now", "2026-06-19T12:00:00.000Z",
+    "--session", "smoke-session",
+    "--turn", "smoke-turn",
+  ], { cwd: repoRoot, encoding: "utf8" });
+  assert(output.includes("tempCleaned=false"), "kept temp tree was cleaned");
+  const reportPath = path.join(abrainHome, ".state", "sediment", "constraint-events", "manual-dossier", "report.json");
+  const auditPath = path.join(abrainHome, ".state", "sediment", "constraint-events", "manual-dossier", "append-audit.jsonl");
+  assert(fs.existsSync(reportPath), "report missing");
+  assert(fs.existsSync(auditPath), "audit missing");
+  const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+  assert(report.schemaVersion === "constraint-evidence-dossier-report/v1", "bad report schema");
+  assert(report.ok === true && report.status === "appended", "bad report result");
+  assert(report.rulesFileListChanged === false, "rules changed");
+  assert(report.projection.queued === 1, "queued projection missing");
+  assert(report.eventFiles.length === 1, "event file list missing");
+  assert(fs.readFileSync(auditPath, "utf8").trim().split("\n").length === 1, "audit line count mismatch");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("manual dossier replay-json appends replayed event body", () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-dossier-smoke-"));
+  const replayFile = path.join(abrainHome, "replay-body.json");
+  writeFile(replayFile, `${JSON.stringify(fixtureBody({ device_event_seq: 501, event_type: "constraint_not_memory_observed", intent: { domain_hint: "constraint", operation_hint: "not_memory" }, payload: { sanitized_quote: "settings signal", not_memory_hint: "settings" } }), null, 2)}\n`);
+  const output = execFileSync("node", [
+    "scripts/dossier-constraint-evidence-event.mjs",
+    "--abrain", abrainHome,
+    "--keep",
+    "--replay-json", replayFile,
+    "--now", "2026-06-19T12:00:00.000Z",
+  ], { cwd: repoRoot, encoding: "utf8" });
+  assert(output.includes("mode: replay-json"), "missing replay mode output");
+  assert(output.includes("eventType: constraint_not_memory_observed"), "wrong event type output");
+  assert(output.includes("diagnostics=CE_NOT_MEMORY_SETTINGS:1, CE_APPEND_OK:1") || output.includes("diagnostics=CE_APPEND_OK:1"), "unexpected diagnostics output");
+  const report = JSON.parse(fs.readFileSync(path.join(abrainHome, ".state", "sediment", "constraint-events", "manual-dossier", "report.json"), "utf8"));
+  assert(report.mode === "replay-json", "report mode mismatch");
+  assert(report.eventType === "constraint_not_memory_observed", "report event type mismatch");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("manual dossier rejects non-temporary abrain paths", () => {
+  const result = spawnSync("node", ["scripts/dossier-constraint-evidence-event.mjs", "--abrain", repoRoot], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  assert(result.status !== 0, "non-temporary abrain path was accepted");
+  assert(`${result.stderr}${result.stdout}`.includes("must point inside"), "missing refusal reason");
+});
+
+check("PR2/PR3/PR4 module does not import mutation symbols or runtime hooks", () => {
   const dir = path.join(repoRoot, "extensions", "sediment", "constraint-evidence");
   const files = fs.readdirSync(dir).filter((file) => file.endsWith(".ts"));
   const combined = files.map((file) => fs.readFileSync(path.join(dir, file), "utf8")).join("\n");
