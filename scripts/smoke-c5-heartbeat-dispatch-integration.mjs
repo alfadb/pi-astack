@@ -42,11 +42,11 @@ check("runInProcess imports startHeartbeat from _shared/heartbeat", () => {
   }
 });
 
-check("runInProcess signature accepts heartbeatCtx (anchor + projectRoot + maxOutputTokens)", () => {
-  if (!/heartbeatCtx\?:\s*\{\s*anchor\?:\s*CausalAnchor;\s*projectRoot\?:\s*string;\s*maxOutputTokens\?:\s*number\s*\}/.test(dispatchSrc)) {
+check("runInProcess signature accepts heartbeatCtx (anchor + projectRoot)", () => {
+  if (!/heartbeatCtx\?:\s*\{\s*anchor\?:\s*CausalAnchor;\s*projectRoot\?:\s*string\s*\}/.test(dispatchSrc)) {
     throw new Error(
       "runInProcess must accept optional heartbeatCtx parameter " +
-      "with { anchor?: CausalAnchor; projectRoot?: string; maxOutputTokens?: number } shape",
+      "with { anchor?: CausalAnchor; projectRoot?: string } shape",
     );
   }
 });
@@ -115,9 +115,9 @@ check("dispatch_parallel.worker passes anchor + projectRoot to runInProcess", ()
   const window = dispatchSrc.slice(startIdx, startIdx + 2000);
   // Note: short-form `projectRoot` (no explicit value because the
   // projectRoot variable is captured by the closure).
-  if (!/anchor:\s*subAnchor,\s*projectRoot,\s*maxOutputTokens:\s*t\.maxOutputTokens\s*\?\?\s*params\.maxOutputTokens\s*\}/.test(window)) {
+  if (!/\{\s*anchor:\s*subAnchor,\s*projectRoot\s*\}/.test(window)) {
     throw new Error(
-      "dispatch_parallel must pass { anchor: subAnchor, projectRoot, maxOutputTokens: t.maxOutputTokens ?? params.maxOutputTokens } " +
+      "dispatch_parallel must pass { anchor: subAnchor, projectRoot } " +
       "as heartbeatCtx (projectRoot is the outer scope const captured by the worker)",
     );
   }

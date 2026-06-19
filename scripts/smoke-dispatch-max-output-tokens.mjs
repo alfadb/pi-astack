@@ -63,36 +63,29 @@ const inputCompatCompiled = transpileTsToCjs(inputCompatSrc);
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-dispatch-max-output-"));
 const tmpFile = path.join(tmpDir, "input-compat.cjs");
 fs.writeFileSync(tmpFile, inputCompatCompiled);
-const { normalizeMaxOutputTokens, normalizeTaskSpec } = loadModuleFromString(
+const { normalizeTaskSpec } = loadModuleFromString(
   inputCompatCompiled,
   tmpFile,
 );
 
 console.log("dispatch maxOutputTokens regression");
 
-check("input-compat normalizes positive integer budgets", () => {
-  if (normalizeMaxOutputTokens("2048") !== 2048) throw new Error("string budget not normalized");
-  if (normalizeMaxOutputTokens(2048.9) !== 2048) throw new Error("fractional budget not floored");
-  if (normalizeMaxOutputTokens(0) !== undefined) throw new Error("zero budget should be rejected");
-  if (normalizeMaxOutputTokens("nope") !== undefined) throw new Error("invalid budget should be rejected");
-});
-
-check("normalizeTaskSpec preserves maxOutputTokens", () => {
+check("normalizeTaskSpec ignores caller maxOutputTokens", () => {
   const task = normalizeTaskSpec({
     model: "provider-a/model-a",
     thinking: "high",
     prompt: "hi",
     maxOutputTokens: "4096",
   });
-  if (task.maxOutputTokens !== 4096) throw new Error(`got ${task.maxOutputTokens}`);
+  if ("maxOutputTokens" in task) throw new Error("caller budget must not survive normalization");
 });
 
-check("runInProcess resolves and installs maxTokens on createLoopConfig", () => {
-  if (!/export function resolveMaxOutputTokens\(model: any, requested\?: number\)/.test(dispatchSrc)) {
-    throw new Error("resolveMaxOutputTokens helper missing");
+check("runInProcess resolves model maxTokens and installs it on createLoopConfig", () => {
+  if (!/export function resolveMaxOutputTokens\(model: any\): number \| undefined/.test(dispatchSrc)) {
+    throw new Error("resolveMaxOutputTokens helper must only accept model");
   }
-  if (!/if \(modelCap === undefined\) return requestedCap;[\s\S]{0,160}?return Math\.min\(requestedCap, modelCap\);/.test(dispatchSrc)) {
-    throw new Error("requested budget must be clamped to model.maxTokens");
+  if (!/const modelMax = Number\(model\?\.maxTokens\);[\s\S]{0,120}?return Number\.isFinite\(modelMax\) && modelMax > 0 \? Math\.floor\(modelMax\) : undefined;/.test(dispatchSrc)) {
+    throw new Error("effective budget must come directly from model.maxTokens");
   }
   if (!/return \{ \.\.\.\(config as Record<string, unknown>\), maxTokens: maxOutputTokens \};/.test(dispatchSrc)) {
     throw new Error("createLoopConfig wrapper must inject maxTokens");
@@ -106,10 +99,13 @@ check("runInProcess resolves and installs maxTokens on createLoopConfig", () => 
   }
 });
 
-check("runInProcess surfaces the effective budget on AgentResult", () => {
+check("runInProcess surfaces the model-derived budget on AgentResult", () => {
   if (!/maxOutputTokens\?: number;/.test(dispatchSrc)) throw new Error("AgentResult field missing");
-  if (!/const effectiveMaxOutputTokens = resolveMaxOutputTokens\(model, heartbeatCtx\?\.maxOutputTokens\);/.test(dispatchSrc)) {
-    throw new Error("effective budget not derived from heartbeatCtx");
+  if (!/const effectiveMaxOutputTokens = resolveMaxOutputTokens\(model\);/.test(dispatchSrc)) {
+    throw new Error("effective budget must be derived from model only");
+  }
+  if (/heartbeatCtx\?\.maxOutputTokens/.test(dispatchSrc)) {
+    throw new Error("heartbeatCtx must not carry caller output budget");
   }
   if (!/const resultWithBudget = effectiveMaxOutputTokens === undefined[\s\S]{0,180}?\{ \.\.\.result, maxOutputTokens: effectiveMaxOutputTokens \};/.test(dispatchSrc)) {
     throw new Error("effective budget not added to AgentResult");
@@ -119,43 +115,29 @@ check("runInProcess surfaces the effective budget on AgentResult", () => {
   }
 });
 
-check("dispatch_agent schema and prepareArguments expose maxOutputTokens", () => {
+check("dispatch_agent does not expose caller output budget", () => {
   const block = dispatchSrc.match(/name: "dispatch_agent",[\s\S]*?name: "dispatch_parallel",/)?.[0] ?? "";
-  if (!/maxOutputTokens: Type\.Optional\(Type\.Number/.test(block)) throw new Error("schema field missing");
-  if (!/n\.maxOutputTokens !== undefined \? \{ maxOutputTokens: n\.maxOutputTokens \}/.test(block)) {
-    throw new Error("prepareArguments does not preserve maxOutputTokens");
-  }
-  if (!/maxOutputTokens: params\.maxOutputTokens/.test(block)) {
-    throw new Error("runInProcess heartbeatCtx does not receive dispatch_agent budget");
-  }
+  if (/maxOutputTokens: Type\.Optional\(Type\.Number/.test(block)) throw new Error("schema must not expose maxOutputTokens");
+  if (/n\.maxOutputTokens/.test(block)) throw new Error("prepareArguments must not preserve maxOutputTokens");
+  if (/params\.maxOutputTokens/.test(block)) throw new Error("execute must not read caller maxOutputTokens");
   if (!/max_output_tokens: result\.maxOutputTokens/.test(block)) throw new Error("audit field missing");
   if (!/maxOutputTokens: result\.maxOutputTokens/.test(block)) throw new Error("details field missing");
 });
 
-check("dispatch_parallel supports per-task and top-level defaults", () => {
+check("dispatch_parallel does not expose per-task or top-level output budget", () => {
   const block = dispatchSrc.match(/name: "dispatch_parallel",[\s\S]*?ADR 0030: register dispatch_hub/)?.[0] ?? "";
-  if (!/maxOutputTokens: Type\.Optional\(Type\.Number/.test(block)) throw new Error("schema field missing");
-  if (!/const topMaxOutputTokens = normalizeMaxOutputTokens\(\(args as any\)\.maxOutputTokens\);/.test(block)) {
-    throw new Error("top-level default is not normalized");
-  }
-  if (!/n\.maxOutputTokens !== undefined \? \{ maxOutputTokens: n\.maxOutputTokens \}/.test(block)) {
-    throw new Error("per-task budget not preserved by prepareArguments");
-  }
-  if (!/maxOutputTokens: t\.maxOutputTokens \?\? params\.maxOutputTokens/.test(block)) {
-    throw new Error("per-task budget must override top-level default");
-  }
+  if (/maxOutputTokens: Type\.Optional\(Type\.Number/.test(block)) throw new Error("schema must not expose maxOutputTokens");
+  if (/normalizeMaxOutputTokens/.test(block)) throw new Error("top-level output budget must not be normalized");
+  if (/n\.maxOutputTokens/.test(block)) throw new Error("per-task budget must not be preserved by prepareArguments");
+  if (/t\.maxOutputTokens|params\.maxOutputTokens/.test(block)) throw new Error("worker must not read caller output budget");
   if (!/max_output_tokens: res\.maxOutputTokens/.test(block)) throw new Error("per-task audit field missing");
   if (!/maxOutputTokens: r\.maxOutputTokens/.test(block)) throw new Error("per-task details field missing");
 });
 
-check("tool declaration tells callers to prefer omitting maxOutputTokens", () => {
-  if (!/Prefer omitting maxOutputTokens/.test(dispatchSrc)) throw new Error("prefer-omit guidance missing");
-  if (!/model registry maxTokens \(the largest configured cap\)/.test(dispatchSrc)) {
-    throw new Error("schema must say omitted maxOutputTokens uses the largest configured cap");
-  }
-  if (!/low values can cause stopReason=length truncation/.test(dispatchSrc)) {
-    throw new Error("schema must warn that low explicit budgets can truncate output");
-  }
+check("tool declaration says output budget is internal", () => {
+  if (!/Output budget is internal/.test(dispatchSrc)) throw new Error("internal-budget guidance missing");
+  if (!/callers cannot lower it/.test(dispatchSrc)) throw new Error("caller budget rejection guidance missing");
+  if (/Prefer omitting maxOutputTokens/.test(dispatchSrc)) throw new Error("old prefer-omit guidance should be gone");
 });
 
 fs.rmSync(tmpDir, { recursive: true, force: true });

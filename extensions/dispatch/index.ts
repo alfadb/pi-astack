@@ -36,7 +36,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { coerceTasksParam, normalizeMaxOutputTokens, normalizeTaskSpec } from "./input-compat";
+import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
 import { registerHubTool, readHubConfigFromSettings } from "./hub";
 import {
   newToolLoopState,
@@ -510,14 +510,9 @@ function resolveModel(
   return (modelRegistry as any).find?.(provider, modelId);
 }
 
-export function resolveMaxOutputTokens(model: any, requested?: number): number | undefined {
+export function resolveMaxOutputTokens(model: any): number | undefined {
   const modelMax = Number(model?.maxTokens);
-  const modelCap = Number.isFinite(modelMax) && modelMax > 0 ? Math.floor(modelMax) : undefined;
-  const req = Number(requested);
-  const requestedCap = Number.isFinite(req) && req > 0 ? Math.floor(req) : undefined;
-  if (modelCap === undefined) return requestedCap;
-  if (requestedCap === undefined) return modelCap;
-  return Math.min(requestedCap, modelCap);
+  return Number.isFinite(modelMax) && modelMax > 0 ? Math.floor(modelMax) : undefined;
 }
 
 export function installMaxOutputTokensOnSession(session: any, maxOutputTokens: number | undefined): void {
@@ -687,7 +682,7 @@ export async function runInProcess(
    *  independent heartbeat liveness channel. When undefined the
    *  heartbeat handle is a no-op (fail-open) and runInProcess works
    *  identically to pre-Stage-1b for callers that don't pass anchor. */
-  heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string; maxOutputTokens?: number },
+  heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string },
 ): Promise<AgentResult> {
   const start = Date.now();
 
@@ -744,7 +739,7 @@ export async function runInProcess(
     };
   }
 
-  const effectiveMaxOutputTokens = resolveMaxOutputTokens(model, heartbeatCtx?.maxOutputTokens);
+  const effectiveMaxOutputTokens = resolveMaxOutputTokens(model);
 
   // Build tool allowlist.
   //
@@ -1235,13 +1230,13 @@ export default function (pi: ExtensionAPI) {
       "The sub-agent is an independent in-process AgentSession (not a subprocess), capable of multi-turn " +
       "tool calling (read, grep, find, ls by default; bash/edit/write available via explicit tools=). " +
       "Nested dispatch is always rejected.",
-    promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?, maxOutputTokens?) — SINGLE task only",
+    promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?) — SINGLE task only",
     promptGuidelines: [
       "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_parallel.",
       "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_parallel which runs them in parallel (~30s).",
       "Sub-agents default to read,grep,find,ls,web_search,web_fetch + memory read. To let a worker edit code, pass tools= including bash/edit/write (swarm editing is allowed; only nested dispatch is rejected).",
       "The sub-agent is an independent AgentSession — its context does NOT count against your token budget.",
-      "Prefer omitting maxOutputTokens: dispatch then uses the model registry maxTokens as the request cap. Set it only when intentionally testing or limiting output; low values can cause stopReason=length truncation.",
+      "Output budget is internal: dispatch always sends the model registry maxTokens as the provider request cap; callers cannot lower it.",
     ],
     parameters: Type.Object({
       model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
@@ -1249,15 +1244,14 @@ export default function (pi: ExtensionAPI) {
       prompt: Type.String({ description: "Prompt sent to this task" }),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
-      maxOutputTokens: Type.Optional(Type.Number({ description: "Provider output token budget. Prefer omitting this so dispatch uses the model registry maxTokens (the largest configured cap). Set only to intentionally limit output; low values can cause stopReason=length truncation. Explicit values are clamped to the model cap." })),
     }),
 
     prepareArguments(rawArgs: unknown) {
       const args = asRecord(rawArgs);
       const n = normalizeTaskSpec(args);
       // Conditional spread for optional fields: SDK schema infers
-      // `tools?: string` / `timeoutMs?: number` / `maxOutputTokens?: number`
-      // (optional, not `T | undefined`). Returning `{ tools: undefined }`
+      // `tools?: string` / `timeoutMs?: number` (optional, not `T | undefined`).
+      // Returning `{ tools: undefined }`
       // literally would conflict under exactOptionalPropertyTypes; spreading
       // only when present yields the intended optional-property shape.
       return {
@@ -1266,7 +1260,6 @@ export default function (pi: ExtensionAPI) {
         prompt: n.prompt,
         ...(n.tools !== undefined ? { tools: n.tools } : {}),
         ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
-        ...(n.maxOutputTokens !== undefined ? { maxOutputTokens: n.maxOutputTokens } : {}),
       };
     },
 
@@ -1373,7 +1366,7 @@ export default function (pi: ExtensionAPI) {
             // runInProcess can write the liveness channel. subAnchor is
             // the per-dispatch sub-agent anchor; ctx.cwd is the project
             // root. Both are also used by C6 audit so no new state.
-            { anchor: subAnchor, projectRoot: ctx.cwd || process.cwd(), maxOutputTokens: params.maxOutputTokens },
+            { anchor: subAnchor, projectRoot: ctx.cwd || process.cwd() },
           ),
         );
       } catch (err: any) {
@@ -1492,13 +1485,13 @@ export default function (pi: ExtensionAPI) {
       "multi-model analysis — do NOT call dispatch_agent N times instead. " +
       "bash/edit/write available via explicit per-task tools=; nested dispatch rejected. " +
       `Up to ${MAX_PARALLEL} tasks per call; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time.`,
-    promptSnippet: "dispatch_parallel([{model, thinking, prompt, maxOutputTokens?}, ...], timeoutMs?, maxOutputTokens?) — parallel execution",
+    promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
       "Use dispatch_parallel EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
       "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together. Use different providers per task for cross-vendor blind reviews.",
       `Concurrency: up to ${MAX_PARALLEL} tasks accepted; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time, while different providers can run together. Choose models from DIFFERENT providers for diversity.`,
       "For reasoning-only tasks, omit tools (sub-agent uses built-in read/grep/find/ls).",
-      "Prefer omitting maxOutputTokens: omitted tasks use the model registry maxTokens as the request cap. Set it per task or as a top-level default only when intentionally testing or limiting output; low values can cause stopReason=length truncation.",
+      "Output budget is internal: each task always sends its model registry maxTokens as the provider request cap; callers cannot lower it.",
     ],
     parameters: Type.Object({
       tasks: Type.Array(
@@ -1508,12 +1501,10 @@ export default function (pi: ExtensionAPI) {
           prompt: Type.String({ description: "Prompt sent to this task" }),
           tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide)." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 1800000 = 30min)" })),
-          maxOutputTokens: Type.Optional(Type.Number({ description: "Per-task provider output token budget. Prefer omitting this so dispatch uses the model registry maxTokens (the largest configured cap). Set only to intentionally limit output; low values can cause stopReason=length truncation. Explicit values are clamped to the model cap." })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
       ),
       timeoutMs: Type.Optional(Type.Number({ description: "Default per-task timeout in ms (default 1800000 = 30min)" })),
-      maxOutputTokens: Type.Optional(Type.Number({ description: "Default provider output token budget for tasks without their own maxOutputTokens. Prefer omitting this so each task uses the model registry maxTokens (the largest configured cap). Set only to intentionally limit output; low values can cause stopReason=length truncation." })),
     }),
 
     prepareArguments(rawArgs: unknown) {
@@ -1543,15 +1534,12 @@ export default function (pi: ExtensionAPI) {
           prompt: n.prompt,
           ...(n.tools !== undefined ? { tools: n.tools } : {}),
           ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
-          ...(n.maxOutputTokens !== undefined ? { maxOutputTokens: n.maxOutputTokens } : {}),
         };
       });
       const topTimeoutMs = (args as any).timeoutMs;
-      const topMaxOutputTokens = normalizeMaxOutputTokens((args as any).maxOutputTokens);
       return {
         tasks,
         ...(topTimeoutMs !== undefined ? { timeoutMs: topTimeoutMs } : {}),
-        ...(topMaxOutputTokens !== undefined ? { maxOutputTokens: topMaxOutputTokens } : {}),
       };
     },
 
@@ -1696,7 +1684,7 @@ export default function (pi: ExtensionAPI) {
                 // Stage 1b heartbeat ctx. Per-task subAnchor (subturn
                 // 1..N) gives each task its own heartbeat file under
                 // .pi-astack/dispatch/heartbeat/.
-                { anchor: subAnchor, projectRoot, maxOutputTokens: t.maxOutputTokens ?? params.maxOutputTokens },
+                { anchor: subAnchor, projectRoot },
               ),
             );
           } catch (err: any) {
