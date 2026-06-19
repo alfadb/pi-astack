@@ -106,6 +106,7 @@
     "smoke:abrain-bootstrap": "node scripts/smoke-abrain-bootstrap.mjs",
     "smoke:abrain-vault-writer": "node scripts/smoke-abrain-vault-writer.mjs",
     "smoke:abrain-vault-reader": "node scripts/smoke-abrain-vault-reader.mjs",
+    "smoke:abrain-vault-overlay-startup": "node scripts/smoke-abrain-vault-overlay-startup.mjs",
     "smoke:abrain-vault-grant-isolation": "node scripts/smoke-abrain-vault-grant-isolation.mjs",
     "smoke:abrain-vault-bash": "node scripts/smoke-abrain-vault-bash.mjs",
     "smoke:abrain-vault-identity": "node scripts/smoke-abrain-vault-identity.mjs",

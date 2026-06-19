@@ -584,6 +584,20 @@ export function __setVaultDialogBuilderInitFailedForTests(v: boolean): void {
 type VaultUiPath = "overlay" | "select" | "confirm" | "cached" | "none";
 const vaultBashRuns = new Map<string, VaultBashRunRecord>();
 
+const LocalDynamicBorder: PiTuiBag["DynamicBorder"] = class {
+  private readonly paint: (text: string) => string;
+
+  constructor(paint: (text: string) => string = (text) => text) {
+    this.paint = paint;
+  }
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    return [this.paint("─".repeat(Math.max(1, width)))];
+  }
+};
+
 function vaultReleaseChoiceReason(choice: string | undefined): string {
   if (!choice) return "cancelled";
   return choice.toLowerCase().replace(/\s*\+\s*/g, "_").replace(/\s+/g, "_");
@@ -1591,18 +1605,17 @@ export default function activate(pi: ExtensionAPI): void {
       // The pitui surface is intentionally narrow (see PromptDialog.ts
       // `PiTuiBag`). We rely on each named export being present;
       // missing names would surface as runtime errors on first prompt.
+      // DynamicBorder is supplied locally because pi-coding-agent's root
+      // export is ESM-only in current builds while this lazy loader runs
+      // through CommonJS `require()` after jiti transpilation.
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const tuiModule = require("@earendil-works/pi-tui");
-      // DynamicBorder lives in pi-coding-agent, not pi-tui — pull from
-      // the coding-agent re-export so PromptDialog sees a unified bag.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const codingAgent = require("@earendil-works/pi-coding-agent");
       pitui = {
         Container: tuiModule.Container,
         Text: tuiModule.Text,
         Input: tuiModule.Input,
         SelectList: tuiModule.SelectList,
-        DynamicBorder: codingAgent.DynamicBorder,
+        DynamicBorder: LocalDynamicBorder,
         // R6.3 (2026-05-17): 加入 Spacer。PromptDialog 需要真正的空行间距 —
         // pi-tui Text 对 "" / "   " 走「不渲染」路径，以前用 Text("")
         // 当 spacer 一直是 0 行 (所以用户看到拥挤)。Spacer(1) 才是可靠间距。
