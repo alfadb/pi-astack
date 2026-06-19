@@ -297,6 +297,42 @@
           "description": "Max retries for curator calls. Default 1 to recover from occasional JSON parse errors (highly structured output)."
         },
 
+        "constraintShadowCompiler": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0039 P1 manual constraint shadow compiler report. Default disabled; manual entries may use it to call a real LLM and write only ~/.abrain/.state/sediment/constraint-shadow/** artifacts.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicit default-off guard for the manual constraint shadow report entry. This does not register any runtime hook."
+            },
+            "model": {
+              "type": "string",
+              "default": "",
+              "description": "Optional provider/model ref for the constraint compiler. Empty means the manual entry falls back to sediment.curatorModel."
+            },
+            "timeoutMs": {
+              "type": "number",
+              "default": 1200000,
+              "minimum": 1000,
+              "description": "Timeout for the manual constraint compiler model call."
+            },
+            "maxRetries": {
+              "type": "number",
+              "default": 0,
+              "minimum": 0,
+              "description": "Transport retry count for the manual constraint compiler model call. Does not retry to repair malformed JSON."
+            },
+            "maxPromptChars": {
+              "type": "number",
+              "default": 0,
+              "minimum": 0,
+              "description": "Optional prompt character budget. 0 means no script-level cap; positive values fail closed before calling the model."
+            }
+          }
+        },
+
         "aggregatorModel": {
           "type": "string",
           "default": "deepseek/deepseek-v4-pro",

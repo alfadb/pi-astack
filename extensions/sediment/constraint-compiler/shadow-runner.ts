@@ -155,6 +155,22 @@ function promptFailure(err: unknown): ConstraintShadowDiagnostic {
   });
 }
 
+function diagnosticDedupeKey(diagnostic: ConstraintShadowDiagnostic): string {
+  return `${diagnostic.code}:${diagnostic.sourceRecordIds.slice().sort().join("+")}`;
+}
+
+function dedupeDiagnostics(diagnostics: ConstraintShadowDiagnostic[]): ConstraintShadowDiagnostic[] {
+  const seen = new Set<string>();
+  const output: ConstraintShadowDiagnostic[] = [];
+  for (const diagnostic of diagnostics) {
+    const key = diagnosticDedupeKey(diagnostic);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(diagnostic);
+  }
+  return output;
+}
+
 export async function runConstraintShadowCompiler(options: ConstraintShadowRunOptions): Promise<ConstraintShadowRunResult> {
   const scan = await scanLegacyConstraintSources({
     abrainHome: options.abrainHome,
@@ -169,7 +185,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     knownProjectIds: options.knownProjectIds,
     ...(options.normalizeOptions ?? {}),
   });
-  const diagnostics: ConstraintShadowDiagnostic[] = [...scan.warnings, ...normalized.diagnostics];
+  const diagnostics: ConstraintShadowDiagnostic[] = dedupeDiagnostics([...scan.warnings, ...normalized.diagnostics]);
   const runId = options.runId ?? nowRunId(normalized.inputRootHash);
 
   let prompt: ConstraintCompilerPrompt | undefined;
@@ -232,7 +248,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
   try {
     decision = validateConstraintCompilerDecision(sources, {
       ...compile.decision,
-      diagnostics: [...diagnostics, ...compile.decision.diagnostics],
+      diagnostics: dedupeDiagnostics([...diagnostics, ...compile.decision.diagnostics]),
       inputRootHash: normalized.inputRootHash,
     }, {
       knownProjectIds: options.knownProjectIds,
@@ -263,7 +279,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
 
   const view = renderConstraintShadowView(decision);
   const diff = createConstraintDiffReport(sources, decision);
-  const allDiagnostics = decision.diagnostics;
+  const allDiagnostics = dedupeDiagnostics(decision.diagnostics);
   const artifactResult = options.writeArtifacts ? await writeArtifacts({
     abrainHome: options.abrainHome,
     artifactRoot: options.artifactRoot,
@@ -278,7 +294,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     ok: true,
   }) : undefined;
   if (artifactResult && !artifactResult.ok) {
-    const failedDiagnostics = [...allDiagnostics, artifactResult.diagnostic];
+    const failedDiagnostics = dedupeDiagnostics([...allDiagnostics, artifactResult.diagnostic]);
     return {
       ok: false,
       inputRootHash: normalized.inputRootHash,

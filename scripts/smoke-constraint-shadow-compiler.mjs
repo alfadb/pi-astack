@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Smoke test: ADR 0039 P1 Constraint Shadow Compiler PR2/PR3.
+ * Smoke test: ADR 0039 P1 Constraint Shadow Compiler PR2/PR3/PR4.
  *
  * Offline only: fixture sources + mock decisions, mock LLM invokers, no runtime hook,
  * no canonical rule mutation, and no writes outside temporary fixture trees.
@@ -97,6 +97,7 @@ for (const file of [
   "extensions/sediment/constraint-compiler/diff.ts",
   "extensions/sediment/constraint-compiler/prompt.ts",
   "extensions/sediment/constraint-compiler/llm-compiler.ts",
+  "extensions/sediment/constraint-compiler/pi-ai-invoker.ts",
   "extensions/sediment/constraint-compiler/shadow-runner.ts",
 ]) {
   stageTs(outRoot, file);
@@ -110,6 +111,7 @@ const { renderConstraintShadowView } = require(path.join(outRoot, "sediment", "c
 const { createConstraintDiffReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "diff.js"));
 const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment", "constraint-compiler", "prompt.js"));
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
+const { createPiAiConstraintCompilerInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
 
 function source(overrides) {
@@ -321,7 +323,7 @@ const decision = {
   diagnostics: baseDiagnostics,
 };
 
-console.log("constraint shadow compiler — ADR 0039 P1 PR2/PR3 shadow runner");
+console.log("constraint shadow compiler — ADR 0039 P1 PR2/PR3/PR4 shadow runner");
 
 check("diagnostics have consumers", () => {
   assertDiagnosticConsumers(baseDiagnostics);
@@ -492,6 +494,67 @@ check("LLM adapter reports model unavailable", async () => {
   assert(!result.ok && result.diagnostic.code === "SC_COMPILER_MODEL_UNAVAILABLE", "wrong model failure diagnostic");
 });
 
+check("pi-ai invoker uses registry auth and extracts text", async () => {
+  const invoker = createPiAiConstraintCompilerInvoker({
+    modelRegistry: {
+      find(provider, modelId) {
+        assert(provider === "test", "provider not parsed");
+        assert(modelId === "model", "model id not parsed");
+        return { provider, id: modelId };
+      },
+      async getApiKeyAndHeaders(model) {
+        assert(model.id === "model", "wrong model passed to auth");
+        return { ok: true, apiKey: "secret", headers: { "x-test": "1" } };
+      },
+    },
+    defaultModelRef: "test/model",
+    streamSimpleImpl: {
+      streamSimple(model, opts, config) {
+        assert(model.id === "model", "wrong model passed to stream");
+        assert(config.apiKey === "secret", "api key not forwarded");
+        assert(opts.messages[0].content[0].text.includes("shadow-only"), "prompt text missing");
+        return { result: async () => ({ content: [{ type: "text", text: "{\"ok\":true}" }] }) };
+      },
+    },
+  });
+  const prompt = buildConstraintCompilerPrompt({ normalized });
+  const result = await invoker({ prompt });
+  assert(result.ok && result.text === "{\"ok\":true}", "text result not extracted");
+});
+
+check("pi-ai invoker fails closed on missing model", async () => {
+  const invoker = createPiAiConstraintCompilerInvoker({
+    modelRegistry: {
+      find() { return null; },
+      async getApiKeyAndHeaders() { return { ok: false, error: "should not auth" }; },
+    },
+    defaultModelRef: "test/missing",
+    streamSimpleImpl: { streamSimple() { throw new Error("should not call stream"); } },
+  });
+  const prompt = buildConstraintCompilerPrompt({ normalized });
+  const result = await invoker({ prompt });
+  assert(!result.ok && result.error.includes("model not found"), "missing model was not fail-closed");
+});
+
+check("manual dossier entry is default-off and not a smoke script", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  assert(pkg.scripts["dossier:constraint-shadow-report"] === "node scripts/dossier-constraint-shadow-report.mjs", "dossier script missing");
+  assert(!Object.keys(pkg.scripts).some((name) => name.startsWith("smoke:") && String(pkg.scripts[name]).includes("dossier-constraint-shadow-report")), "manual dossier registered as smoke");
+  const script = fs.readFileSync(path.join(repoRoot, "scripts", "dossier-constraint-shadow-report.mjs"), "utf8");
+  assert(script.includes("SKIP — sediment.constraintShadowCompiler.enabled is false"), "default-off skip missing");
+  assert(script.includes("SKIP — dry-run mode does not call the real LLM"), "dry-run skip missing");
+  assert(!script.includes("agent_end"), "manual script mentions agent_end hook");
+  assert(!script.includes("session_start"), "manual script mentions session_start hook");
+  assert(!script.includes("before_agent_start"), "manual script mentions before_agent_start hook");
+});
+
+check("shadow settings schema exposes disabled manual compiler", () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf8"));
+  const cfg = schema.properties.sediment.properties.constraintShadowCompiler;
+  assert(cfg.properties.enabled.default === false, "constraint shadow compiler default is not disabled");
+  assert(cfg.properties.model.default === "", "constraint shadow compiler model should not be hardcoded");
+});
+
 check("shadow runner writes artifacts only under shadow state and keeps rules unchanged", async () => {
   const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-runner-"));
   const writeRule = (rel, frontmatter, body) => writeFile(path.join(abrainHome, rel), `---\n${frontmatter}\n---\n${body}\n`);
@@ -628,5 +691,5 @@ Promise.all(pending).finally(() => {
     console.log(`\nFAIL — ${failures.length} of ${total} assertions failed.`);
     process.exit(1);
   }
-  console.log(`\nall ok — constraint shadow compiler PR2/PR3 holds (${total} assertions).`);
+  console.log(`\nall ok — constraint shadow compiler PR2/PR3/PR4 holds (${total} assertions).`);
 });

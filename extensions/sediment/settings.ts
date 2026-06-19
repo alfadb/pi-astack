@@ -49,6 +49,14 @@ export interface SedimentSettings {
   curatorModel: string;
   curatorTimeoutMs: number;
   curatorMaxRetries: number;
+  /** ADR 0039 P1 PR4: default-off manual constraint shadow report entry. */
+  constraintShadowCompiler: {
+    enabled: boolean;
+    model: string;
+    timeoutMs: number;
+    maxRetries: number;
+    maxPromptChars: number;
+  };
   /** ADR 0025 §4.3 Phase C.2: model for the aggregator v1 skeptical-historian
    *  LLM pass. Skeptical historian is a reasoning-heavy task; v4-pro is the
    *  reasonable default. Empty/invalid → fall back to curatorModel. */
@@ -187,6 +195,13 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // See extractorTimeoutMs rationale above.
   curatorTimeoutMs: 1_200_000,
   curatorMaxRetries: 1,
+  constraintShadowCompiler: {
+    enabled: false,
+    model: "",
+    timeoutMs: 1_200_000,
+    maxRetries: 0,
+    maxPromptChars: 0,
+  },
   // Aggregator: empty default. Configure in pi-astack-settings.json.
   aggregatorModel: "",
   aggregatorTimeoutMs: 600_000,
@@ -335,6 +350,15 @@ export function resolveSedimentSettings(): SedimentSettings {
       : DEFAULT_SEDIMENT_SETTINGS.curatorModel,
     curatorTimeoutMs: Math.max(1_000, asNumber(cfg.curatorTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.curatorTimeoutMs)),
     curatorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.curatorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.curatorMaxRetries))),
+    constraintShadowCompiler: {
+      enabled: asBoolean((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.enabled),
+      model: typeof (cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.model === "string" && ((cfg.constraintShadowCompiler as Record<string, unknown>).model as string).trim()
+        ? ((cfg.constraintShadowCompiler as Record<string, unknown>).model as string).trim()
+        : DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.model,
+      timeoutMs: Math.max(1_000, asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.timeoutMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.timeoutMs)),
+      maxRetries: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxRetries, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxRetries))),
+      maxPromptChars: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxPromptChars, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxPromptChars))),
+    },
     aggregatorModel: typeof cfg.aggregatorModel === "string" && cfg.aggregatorModel.trim()
       ? cfg.aggregatorModel.trim()
       : DEFAULT_SEDIMENT_SETTINGS.aggregatorModel,

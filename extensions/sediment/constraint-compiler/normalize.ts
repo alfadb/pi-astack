@@ -164,6 +164,23 @@ export function normalizeConstraintSources(
     return normalizeGovernanceCase(source);
   }).sort((leftRecord, rightRecord) => leftRecord.sourceId.localeCompare(rightRecord.sourceId));
 
+  for (const record of records) {
+    if (record.categoryHint === "settings_not_memory") {
+      diagnostics.push(makeDiagnostic({
+        code: "SC_NOT_MEMORY_SETTINGS",
+        message: `settings-like constraint should be excluded from canonical rule memory: ${record.sourceId}`,
+        sourceRecordIds: [record.sourceId],
+      }));
+    }
+    if (record.categoryHint === "tool_contract_not_memory") {
+      diagnostics.push(makeDiagnostic({
+        code: "SC_NOT_MEMORY_TOOL_CONTRACT",
+        message: `tool-contract-like constraint should be excluded from canonical rule memory: ${record.sourceId}`,
+        sourceRecordIds: [record.sourceId],
+      }));
+    }
+  }
+
   for (const source of sources) {
     if (source.sourceKind !== "legacy_rule") continue;
     if (source.rawBodyHash && source.computedBodyHash && source.rawBodyHash !== source.computedBodyHash) {

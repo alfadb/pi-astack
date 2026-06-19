@@ -154,7 +154,8 @@
     "smoke:workflow-tools": "node scripts/smoke-workflow-tools.mjs",
     "smoke:model-curator-tiers": "node scripts/smoke-model-curator-tiers.mjs",
     "dossier:classifier-prompt": "node scripts/dossier-classifier-prompt.mjs",
-    "dossier:tier1-adjudicator-prompt": "node scripts/dossier-tier1-adjudicator-prompt.mjs"
+    "dossier:tier1-adjudicator-prompt": "node scripts/dossier-tier1-adjudicator-prompt.mjs",
+    "dossier:constraint-shadow-report": "node scripts/dossier-constraint-shadow-report.mjs"
   },
   "pi": {
     "extensions": [

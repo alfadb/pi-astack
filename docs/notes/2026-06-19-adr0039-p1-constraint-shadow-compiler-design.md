@@ -64,6 +64,7 @@ extensions/sediment/constraint-compiler/
   normalize.ts
   prompt.ts
   llm-compiler.ts
+  pi-ai-invoker.ts
   validate-decision.ts
   render.ts
   diff.ts
@@ -141,7 +142,7 @@ LLM 输出的 `ConstraintCompilerDecision` 至少包含：`schemaVersion`、`inp
 
 首期 token budget 采用 fail-closed 策略：若 normalized source records 超过配置的 prompt 预算，不做分批语义合并，不产出伪 view，而是生成 `SC_INPUT_TOO_LARGE_FOR_SINGLE_PASS` diagnostic。分批 compiler 与跨批 merge 是 P2+ 或后续 P1 修订项，不能在首期临时实现。
 
-`llm-compiler.ts` 调用模型并返回 raw text、model、prompt hash、input hash、output hash、duration 与 parse status。首期建议增加专用设置项 `constraintShadowCompilerModel`；缺省可复用 `SedimentSettings.curatorModel`，不建议回退到低能力 classifier。模型不可用或 parse 失败时只能产生 diagnostic，不能回退为 create、merge 或 archive。
+`llm-compiler.ts` 调用模型并返回 raw text、model、prompt hash、input hash、output hash、duration 与 parse status。PR4 增加 `pi-ai-invoker.ts`，只把 pi-ai 调用包装成可注入的 `ConstraintCompilerInvoker`，不导入 writer 或 runtime hook。手动入口读取 `sediment.constraintShadowCompiler`，其中 `enabled` 默认 false，`model` 默认为空；显式手动运行可复用 `SedimentSettings.curatorModel` 或通过命令行传入 `--model provider/model`。模型不可用、parse 失败或 validation 失败只能产生 diagnostic，不能回退为 create、merge 或 archive。
 
 ### 4.5 `validate-decision.ts`
 
@@ -344,11 +345,19 @@ PR 2：纯函数层与最小 validator。实现 `types.ts`、`legacy-scan.ts`、
 
 PR 3：LLM compiler 与完整 validator。实现 `prompt.ts`、`llm-compiler.ts`、`validate-decision.ts` 完整校验、`shadow-runner.ts` 和 `smoke-constraint-shadow-compiler.mjs`。smoke 默认使用 mock decision；真实 LLM 失败只产 diagnostic。
 
-PR 4：手动诊断入口或默认关闭的后台触发。必须有独立复审、显式 feature flag 名称和默认值。只写 `.state/sediment/constraint-shadow/**`，不接入注入，不写 canonical，不阻塞 `agent_end`。
+PR 4：手动诊断入口或默认关闭的后台触发。必须有独立复审、显式 feature flag 名称和默认值。只写 `.state/sediment/constraint-shadow/**`，不接入注入，不写 canonical，不阻塞 `agent_end`。实际实现采用 `scripts/dossier-constraint-shadow-report.mjs`，默认 dry-run 且 `sediment.constraintShadowCompiler.enabled=false` 时不调用真实模型；只有显式 `--force --write` 才执行一次手动报告并写 shadow artifact。该入口注册为 `dossier:constraint-shadow-report`，不注册为 smoke，不作为自动门禁或 runtime hook。
 
 PR 5：P2 设计。基于 P1 report 与复审结果，冻结 Constraint Evidence Event v1 和并行 event append 边界。
 
-## 13. T0 复审摘要
+## 13. PR4 首份真实 shadow report
+
+2026-06-19 PR4 通过手动命令生成首份真实报告：`npm run dossier:constraint-shadow-report -- --force --write --model deepseek/deepseek-v4-pro`。报告只写入 `/home/worker/.abrain/.state/sediment/constraint-shadow/**`，未修改 canonical rules，脚本输出 `rulesFileListChanged=false`。
+
+报告元数据：`runId=20260619T125703Z-6d4c9c8bad19`，`inputRootHash=6d4c9c8bad195fe4c523e5c1cb4e98f286b34ac20dbe391f44c7b5b5da806748`，`promptHash=22d04b2206bdcd8b5804aa39e4cbe926ffc2183ab569c4d005f80886ce2f9faa`，`validationHash=f96b0f81456a6c83687b6bbc74f50222942291d3f8cac5a31930df579338e530`，`shadowOutputHash=7e44ae89d2d9fda9b445fb1fc49360a5a572531cfe49b5129fe05e4056642f48`。`diff.json` summary 为 `totalSources=33`、`mappedSources=33`、`unmappedSources=0`、`constraints=18`、`exclusions=15`、`unresolved=0`、`validationStatus=valid`。`diagnostics.json` 经语义去重后为 36 条：`SC_NOT_MEMORY_SETTINGS=5`、`SC_INPUT_BODY_HASH_MISMATCH=20`、`SC_UNCLASSIFIED=11`。
+
+本次真实报告暴露三类后续工作：第一，body hash mismatch 需要单独调查 legacy rule frontmatter 与正文 hash 的旧格式差异；第二，当前 category hint 把 5 条 settings-like 输入标成 `SC_NOT_MEMORY_SETTINGS`，其中 4 条最终被模型排除，提示后续应区分“配置事实”与“配置相关行为约束”；第三，11 条历史文档措辞与记忆治理重叠项被模型作为 legacy observed exclusion 处理，并用 `SC_UNCLASSIFIED` 保留调查信号，进入 P2 前应由人工或 T0 审阅，不应由 P1 自动改写 canonical rules。
+
+## 14. T0 复审摘要
 
 四路 T0 均支持 P1 从只读 shadow compiler 开始，没有要求回到 ADR 0039 架构层重新讨论。共同结论是：当前最小有效阶段是 legacy rules corpus → normalized source records → structure-validated LLM compiler decision → deterministic shadow render → diff report → diagnostics。第一阶段的核心交付是完整 diff 与 shadow-only 证明，而不是 runtime 切换。
 

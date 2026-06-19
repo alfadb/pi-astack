@@ -76,11 +76,17 @@ function assertScopeKnown(scope: ConstraintScope, knownProjectIds: Set<string>, 
   }
 }
 
-function assertSourceIdsExist(ids: string[], sourceIds: Set<string>, context: string): void {
-  if (!ids.length) throw new Error(`${context} has no sourceRecordIds`);
+function assertSourceIdsKnown(ids: unknown, sourceIds: Set<string>, context: string): asserts ids is string[] {
+  if (!Array.isArray(ids)) throw new Error(`${context} sourceRecordIds must be an array`);
   for (const sourceId of ids) {
+    if (typeof sourceId !== "string") throw new Error(`${context} sourceRecordIds must contain only strings`);
     if (!sourceIds.has(sourceId)) throw new Error(`${context} references unknown source ${sourceId}`);
   }
+}
+
+function assertSourceIdsExist(ids: unknown, sourceIds: Set<string>, context: string): asserts ids is string[] {
+  assertSourceIdsKnown(ids, sourceIds, context);
+  if (!ids.length) throw new Error(`${context} has no sourceRecordIds`);
 }
 
 function addDisposition(dispositions: Map<string, string[]>, sourceId: string, disposition: string): void {
@@ -117,8 +123,23 @@ function validateUnresolvedReason(unresolved: ConstraintDecisionUnresolved): voi
   }
 }
 
+function assertDecisionArrays(decision: ConstraintCompilerDecision): void {
+  const requiredArrays: Array<keyof ConstraintCompilerDecision> = [
+    "constraints",
+    "exclusions",
+    "unresolved",
+    "merges",
+    "rescopeProposals",
+    "mappings",
+    "diagnostics",
+  ];
+  for (const key of requiredArrays) {
+    if (!Array.isArray(decision[key])) throw new Error(`decision.${key} must be an array`);
+  }
+}
+
 function hasDiagnosticForSource(decision: ConstraintCompilerDecision, sourceId: string): boolean {
-  return decision.diagnostics.some((diagnostic) => diagnostic.sourceRecordIds.includes(sourceId));
+  return decision.diagnostics.some((diagnostic) => Array.isArray(diagnostic.sourceRecordIds) && diagnostic.sourceRecordIds.includes(sourceId));
 }
 
 function hasNotMemoryDiagnostic(decision: ConstraintCompilerDecision, sourceIds: string[], reason: ConstraintExclusionReason): boolean {
@@ -130,7 +151,9 @@ function hasNotMemoryDiagnostic(decision: ConstraintCompilerDecision, sourceIds:
   if (!requiredCode) return true;
   return decision.diagnostics.some((diagnostic) => (
     diagnostic.code === requiredCode
+    && Array.isArray(diagnostic.consumers)
     && diagnostic.consumers.length > 0
+    && Array.isArray(diagnostic.sourceRecordIds)
     && sourceIds.every((sourceId) => diagnostic.sourceRecordIds.includes(sourceId))
   ));
 }
@@ -169,6 +192,7 @@ export function validateConstraintCompilerDecision(
     throw new Error(`decision inputRootHash ${decision.inputRootHash} does not match expected ${options.expectedInputRootHash}`);
   }
   assertNoForbiddenMutationKeys(decision);
+  assertDecisionArrays(decision);
   assertDiagnosticConsumers(decision.diagnostics);
 
   const knownProjectIds = new Set(options.knownProjectIds ?? []);
@@ -177,9 +201,7 @@ export function validateConstraintCompilerDecision(
   const dispositions = new Map<string, string[]>();
 
   decision.diagnostics.forEach((diagnostic, index) => {
-    for (const sourceId of diagnostic.sourceRecordIds) {
-      if (!sourceIds.has(sourceId)) throw new Error(`diagnostic[${index}] references unknown source ${sourceId}`);
-    }
+    assertSourceIdsKnown(diagnostic.sourceRecordIds, sourceIds, `diagnostic[${index}]`);
   });
 
   const validatedConstraints: ValidatedConstraint[] = decision.constraints.map((constraint, index) => {
