@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Smoke test: ADR 0039 P1 Constraint Shadow Compiler PR2 pure functions.
+ * Smoke test: ADR 0039 P1 Constraint Shadow Compiler PR2/PR3.
  *
- * Offline only: fixture sources + mock decisions, no LLM, no runtime hook,
+ * Offline only: fixture sources + mock decisions, mock LLM invokers, no runtime hook,
  * no canonical rule mutation, and no writes outside temporary fixture trees.
  */
 
@@ -47,6 +47,22 @@ function writeFile(file, content) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content, "utf8");
 }
+function listFiles(root) {
+  if (!fs.existsSync(root)) return [];
+  const out = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      if (entry.isFile()) out.push(path.relative(root, full).split(path.sep).join("/"));
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+function treeHash(root) {
+  return sha256Hex(listFiles(root).map((rel) => `${rel}:${sha256Hex(fs.readFileSync(path.join(root, rel), "utf8"))}`).join("\n"));
+}
 function transpile(srcPath) {
   const out = ts.transpileModule(fs.readFileSync(srcPath, "utf8"), {
     compilerOptions: {
@@ -79,6 +95,9 @@ for (const file of [
   "extensions/sediment/constraint-compiler/validate-decision.ts",
   "extensions/sediment/constraint-compiler/render.ts",
   "extensions/sediment/constraint-compiler/diff.ts",
+  "extensions/sediment/constraint-compiler/prompt.ts",
+  "extensions/sediment/constraint-compiler/llm-compiler.ts",
+  "extensions/sediment/constraint-compiler/shadow-runner.ts",
 ]) {
   stageTs(outRoot, file);
 }
@@ -89,6 +108,9 @@ const { scanLegacyConstraintSources } = require(path.join(outRoot, "sediment", "
 const { validateConstraintCompilerDecision } = require(path.join(outRoot, "sediment", "constraint-compiler", "validate-decision.js"));
 const { renderConstraintShadowView } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
 const { createConstraintDiffReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "diff.js"));
+const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment", "constraint-compiler", "prompt.js"));
+const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
+const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
 
 function source(overrides) {
   const body = overrides.body ?? "Use edit/write for file changes.";
@@ -299,7 +321,7 @@ const decision = {
   diagnostics: baseDiagnostics,
 };
 
-console.log("constraint shadow compiler — ADR 0039 P1 PR2 pure functions");
+console.log("constraint shadow compiler — ADR 0039 P1 PR2/PR3 shadow runner");
 
 check("diagnostics have consumers", () => {
   assertDiagnosticConsumers(baseDiagnostics);
@@ -429,6 +451,153 @@ check("legacy scanner reads active and non-active fixture rules", async () => {
   });
 });
 
+check("prompt builder is deterministic and shadow-only", () => {
+  const prompt = buildConstraintCompilerPrompt({ normalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  const again = buildConstraintCompilerPrompt({ normalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  assert(prompt.promptHash === again.promptHash, "prompt hash drifted");
+  assert(prompt.text.includes("shadow-only"), "shadow-only instruction missing");
+  assert(prompt.text.includes("Return JSON only"), "JSON-only instruction missing");
+  assert(prompt.text.includes(globalSource.sourceId), "source id missing from prompt");
+});
+
+check("prompt builder fails closed when input exceeds budget", () => {
+  let threw = false;
+  try { buildConstraintCompilerPrompt({ normalized, maxPromptChars: 32 }); } catch { threw = true; }
+  assert(threw, "oversized prompt accepted");
+});
+
+check("LLM adapter parses fenced JSON and stamps input hash", async () => {
+  const prompt = buildConstraintCompilerPrompt({ normalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  const result = await runConstraintCompilerWithInvoker({
+    prompt,
+    invoker: async () => ({ ok: true, text: `\`\`\`json\n${JSON.stringify({ ...decision, inputRootHash: "model-supplied-wrong-hash" })}\n\`\`\`` }),
+  });
+  assert(result.ok, "valid fenced JSON rejected");
+  assert(result.ok && result.decision.inputRootHash === normalized.inputRootHash, "adapter did not stamp expected input hash");
+});
+
+check("LLM adapter fails closed on malformed JSON", () => {
+  const parsed = parseConstraintCompilerDecision("not-json", normalized.inputRootHash);
+  assert(!parsed.ok, "malformed JSON accepted");
+  assert(!parsed.ok && parsed.diagnostic.code === "SC_COMPILER_PARSE_FAILED", "wrong parse failure diagnostic");
+});
+
+check("LLM adapter reports model unavailable", async () => {
+  const prompt = buildConstraintCompilerPrompt({ normalized });
+  const result = await runConstraintCompilerWithInvoker({
+    prompt,
+    invoker: async () => ({ ok: false, error: "offline model unavailable" }),
+  });
+  assert(!result.ok, "model failure accepted");
+  assert(!result.ok && result.diagnostic.code === "SC_COMPILER_MODEL_UNAVAILABLE", "wrong model failure diagnostic");
+});
+
+check("shadow runner writes artifacts only under shadow state and keeps rules unchanged", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-runner-"));
+  const writeRule = (rel, frontmatter, body) => writeFile(path.join(abrainHome, rel), `---\n${frontmatter}\n---\n${body}\n`);
+  writeRule("rules/always/use-edit-not-sed.md", "title: Use edit not sed\nstatus: active\nkind: preference", "# Use edit not sed\n\n修改文件必须用 edit/write，禁止 sed -i。");
+  writeRule("rules/always/model-tier-setting.md", "title: Model tier setting\nstatus: active\nkind: preference", "# Model tier setting\n\nAll model calls must use a configured model tier setting.");
+  const rulesRoot = path.join(abrainHome, "rules");
+  const beforeHash = treeHash(rulesRoot);
+  const beforeFiles = listFiles(rulesRoot).join("\n");
+  const result = await runConstraintShadowCompiler({
+    abrainHome,
+    cwd: repoRoot,
+    includeProjects: [],
+    includeStatuses: "all",
+    knownProjectIds: ["pi-astack"],
+    writeArtifacts: true,
+    runId: "fixture-run",
+    compilerInvoker: async () => ({
+      ok: true,
+      text: JSON.stringify({
+        schemaVersion: "constraint-shadow-decision/v1",
+        inputRootHash: "ignored-by-parser",
+        constraints: [{
+          scope: { kind: "global" },
+          injectMode: "always",
+          title: "Use edit/write",
+          compiledBody: "修改文件必须用 edit/write，禁止 sed -i。",
+          sourceRecordIds: ["rule:global:always:use-edit-not-sed"],
+        }],
+        exclusions: [{ reason: "settings_not_memory", sourceRecordIds: ["rule:global:always:model-tier-setting"] }],
+        unresolved: [],
+        merges: [],
+        rescopeProposals: [],
+        mappings: [
+          { sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" },
+          { sourceRecordId: "rule:global:always:model-tier-setting", disposition: "excluded" },
+        ],
+        diagnostics: [makeDiagnostic({ code: "SC_NOT_MEMORY_SETTINGS", message: "settings belong in settings", sourceRecordIds: ["rule:global:always:model-tier-setting"] })],
+      }),
+    }),
+  });
+  assert(result.ok, "runner success path failed");
+  assert(result.ok && result.diff.summary.unmappedSources === 0, "runner produced unmapped sources");
+  assert(result.ok && result.artifacts && result.artifacts.runDir.includes(".state/sediment/constraint-shadow/runs/fixture-run"), "artifact run dir outside shadow state");
+  assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "compiled-view.md")), "latest compiled view missing");
+  assert(beforeHash === treeHash(rulesRoot), "rules content changed");
+  assert(beforeFiles === listFiles(rulesRoot).join("\n"), "rules file list changed");
+});
+
+check("shadow runner fails closed on artifact path violation", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-violation-"));
+  writeFile(path.join(abrainHome, "rules/always/use-edit-not-sed.md"), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write。\n");
+  const result = await runConstraintShadowCompiler({
+    abrainHome,
+    cwd: repoRoot,
+    includeProjects: [],
+    includeStatuses: "all",
+    artifactRoot: path.join(abrainHome, "rules", "always"),
+    writeArtifacts: true,
+    runId: "bad-run",
+    compilerInvoker: async () => ({
+      ok: true,
+      text: JSON.stringify({
+        schemaVersion: "constraint-shadow-decision/v1",
+        inputRootHash: "ignored-by-parser",
+        constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit", compiledBody: "修改文件必须用 edit/write。", sourceRecordIds: ["rule:global:always:use-edit-not-sed"] }],
+        exclusions: [],
+        unresolved: [],
+        merges: [],
+        rescopeProposals: [],
+        mappings: [{ sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" }],
+        diagnostics: [],
+      }),
+    }),
+  });
+  assert(!result.ok, "artifact path violation accepted");
+  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_SHADOW_ONLY_VIOLATION_ATTEMPT"), "path violation diagnostic missing");
+});
+
+check("shadow runner fails closed on validation failure", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-invalid-"));
+  writeFile(path.join(abrainHome, "rules/always/use-edit-not-sed.md"), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write。\n");
+  const result = await runConstraintShadowCompiler({
+    abrainHome,
+    cwd: repoRoot,
+    includeProjects: [],
+    includeStatuses: "all",
+    writeArtifacts: false,
+    compilerInvoker: async () => ({
+      ok: true,
+      text: JSON.stringify({
+        schemaVersion: "constraint-shadow-decision/v1",
+        inputRootHash: "ignored-by-parser",
+        constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Bad", compiledBody: "", sourceRecordIds: ["rule:global:always:use-edit-not-sed"] }],
+        exclusions: [],
+        unresolved: [],
+        merges: [],
+        rescopeProposals: [],
+        mappings: [{ sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" }],
+        diagnostics: [],
+      }),
+    }),
+  });
+  assert(!result.ok, "invalid compiler decision accepted");
+  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_VALIDATION_FAILED"), "validation failure diagnostic missing");
+});
+
 check("constraint compiler source does not import writer mutation symbols", () => {
   const dir = path.join(repoRoot, "extensions", "sediment", "constraint-compiler");
   const offenders = [];
@@ -459,5 +628,5 @@ Promise.all(pending).finally(() => {
     console.log(`\nFAIL — ${failures.length} of ${total} assertions failed.`);
     process.exit(1);
   }
-  console.log(`\nall ok — constraint shadow compiler PR2 holds (${total} assertions).`);
+  console.log(`\nall ok — constraint shadow compiler PR2/PR3 holds (${total} assertions).`);
 });

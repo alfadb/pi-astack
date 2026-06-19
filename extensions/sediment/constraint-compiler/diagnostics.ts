@@ -23,6 +23,7 @@ export const DIAGNOSTIC_CONSUMERS: Record<ConstraintShadowDiagnosticCode, Constr
   SC_RENDER_DRIFT: ["compiler_prompt_iteration"],
   SC_COMPILER_MODEL_UNAVAILABLE: ["compiler_prompt_iteration"],
   SC_COMPILER_PARSE_FAILED: ["compiler_prompt_iteration"],
+  SC_COMPILER_VALIDATION_FAILED: ["compiler_prompt_iteration", "manual_investigation"],
   SC_SHADOW_ONLY_VIOLATION_ATTEMPT: ["manual_investigation"],
   SC_UNCLASSIFIED: ["compiler_prompt_iteration"],
 };
@@ -45,6 +46,7 @@ const DEFAULT_SEVERITY: Record<ConstraintShadowDiagnosticCode, ConstraintShadowD
   SC_RENDER_DRIFT: "warning",
   SC_COMPILER_MODEL_UNAVAILABLE: "error",
   SC_COMPILER_PARSE_FAILED: "error",
+  SC_COMPILER_VALIDATION_FAILED: "error",
   SC_SHADOW_ONLY_VIOLATION_ATTEMPT: "error",
   SC_UNCLASSIFIED: "warning",
 };

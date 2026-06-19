@@ -209,6 +209,112 @@ export interface ValidatedConstraintCompilerDecision extends ConstraintCompilerD
   validationHash: string;
 }
 
+export interface ConstraintCompilerPromptInput {
+  normalized: NormalizeConstraintResult;
+  knownProjectIds?: string[];
+  activeProjectId?: string;
+  maxPromptChars?: number;
+  baselineSummary?: string;
+}
+
+export interface ConstraintCompilerPrompt {
+  schemaVersion: "constraint-shadow-prompt/v1";
+  inputRootHash: string;
+  promptHash: string;
+  text: string;
+  recordCount: number;
+}
+
+export interface ConstraintCompilerInvokeRequest {
+  prompt: ConstraintCompilerPrompt;
+  modelRef?: string;
+  signal?: AbortSignal;
+}
+
+export type ConstraintCompilerInvokeResult = {
+  ok: true;
+  text: string;
+  modelRef?: string;
+  durationMs?: number;
+} | {
+  ok: false;
+  error: string;
+  modelRef?: string;
+  durationMs?: number;
+};
+
+export type ConstraintCompilerInvoker = (request: ConstraintCompilerInvokeRequest) => Promise<ConstraintCompilerInvokeResult>;
+
+export type ParsedConstraintCompilerDecision = {
+  ok: true;
+  decision: ConstraintCompilerDecision;
+  rawOutputHash: string;
+  parsedOutputHash: string;
+} | {
+  ok: false;
+  diagnostic: ConstraintShadowDiagnostic;
+  rawOutputHash: string;
+};
+
+export type ConstraintCompilerRunResult = {
+  ok: true;
+  decision: ConstraintCompilerDecision;
+  prompt: ConstraintCompilerPrompt;
+  rawOutputHash: string;
+  parsedOutputHash: string;
+  modelRef?: string;
+  durationMs?: number;
+} | {
+  ok: false;
+  prompt: ConstraintCompilerPrompt;
+  diagnostic: ConstraintShadowDiagnostic;
+  rawOutputHash?: string;
+  modelRef?: string;
+  durationMs?: number;
+};
+
+export interface ConstraintShadowRunOptions {
+  abrainHome: string;
+  cwd: string;
+  activeProjectId?: string;
+  knownProjectIds?: string[];
+  includeProjects?: LegacyConstraintScanOptions["includeProjects"];
+  includeStatuses?: LegacyConstraintScanOptions["includeStatuses"];
+  normalizeOptions?: NormalizeConstraintOptions;
+  maxPromptChars?: number;
+  modelRef?: string;
+  compilerInvoker: ConstraintCompilerInvoker;
+  writeArtifacts?: boolean;
+  artifactRoot?: string;
+  runId?: string;
+}
+
+export interface ConstraintShadowRunArtifacts {
+  root: string;
+  runDir: string;
+  latestDir: string;
+  files: Record<string, string>;
+}
+
+export type ConstraintShadowRunResult = {
+  ok: true;
+  inputRootHash: string;
+  sourceCount: number;
+  prompt: ConstraintCompilerPrompt;
+  decision: ValidatedConstraintCompilerDecision;
+  view: RenderedConstraintView;
+  diff: ConstraintDiffReport;
+  diagnostics: ConstraintShadowDiagnostic[];
+  artifacts?: ConstraintShadowRunArtifacts;
+} | {
+  ok: false;
+  inputRootHash: string;
+  sourceCount: number;
+  prompt?: ConstraintCompilerPrompt;
+  diagnostics: ConstraintShadowDiagnostic[];
+  artifacts?: ConstraintShadowRunArtifacts;
+};
+
 export type ConstraintShadowDiagnosticSeverity = "info" | "warning" | "error";
 
 export type ConstraintShadowDiagnosticConsumer =
@@ -237,6 +343,7 @@ export type ConstraintShadowDiagnosticCode =
   | "SC_RENDER_DRIFT"
   | "SC_COMPILER_MODEL_UNAVAILABLE"
   | "SC_COMPILER_PARSE_FAILED"
+  | "SC_COMPILER_VALIDATION_FAILED"
   | "SC_SHADOW_ONLY_VIOLATION_ATTEMPT"
   | "SC_UNCLASSIFIED";
 

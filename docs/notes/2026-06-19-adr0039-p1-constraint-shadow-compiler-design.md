@@ -215,11 +215,12 @@ SC_LEGACY_INJECTION_DELTA
 SC_RENDER_DRIFT
 SC_COMPILER_MODEL_UNAVAILABLE
 SC_COMPILER_PARSE_FAILED
+SC_COMPILER_VALIDATION_FAILED
 SC_SHADOW_ONLY_VIOLATION_ATTEMPT
 SC_UNCLASSIFIED
 ```
 
-默认 consumer：`SC_INPUT_*`、`SC_AUDIT_TRUNCATED`、`SC_INPUT_TOO_LARGE_FOR_SINGLE_PASS` → `diff_report` 与 `manual_investigation`；`SC_NOT_MEMORY_*` → `not_memory_audit`；`SC_SCOPE_*` → `scope_review`；`SC_NEAR_DUPLICATE_GROUP`、`SC_CONFLICT_DETECTED`、`SC_COMPACT_REQUIRED` → `diff_report`；`SC_RENDER_DRIFT`、`SC_COMPILER_*`、`SC_UNCLASSIFIED` → `compiler_prompt_iteration`；`SC_SHADOW_ONLY_VIOLATION_ATTEMPT` → `manual_investigation` 并 fail closed。
+默认 consumer：`SC_INPUT_*`、`SC_AUDIT_TRUNCATED`、`SC_INPUT_TOO_LARGE_FOR_SINGLE_PASS` → `diff_report` 与 `manual_investigation`；`SC_NOT_MEMORY_*` → `not_memory_audit`；`SC_SCOPE_*` → `scope_review`；`SC_NEAR_DUPLICATE_GROUP`、`SC_CONFLICT_DETECTED`、`SC_COMPACT_REQUIRED` → `diff_report`；`SC_RENDER_DRIFT`、`SC_COMPILER_MODEL_UNAVAILABLE`、`SC_COMPILER_PARSE_FAILED`、`SC_UNCLASSIFIED` → `compiler_prompt_iteration`；`SC_COMPILER_VALIDATION_FAILED` → `compiler_prompt_iteration` 与 `manual_investigation`；`SC_SHADOW_ONLY_VIOLATION_ATTEMPT` → `manual_investigation` 并 fail closed。
 
 ### 4.9 `shadow-runner.ts`
 
@@ -232,7 +233,7 @@ SC_UNCLASSIFIED
   audit.jsonl
   latest/
     input.normalized.json
-    compiler.raw.txt
+    prompt.txt
     decision.json
     compiled-view.md
     diff.md
@@ -241,6 +242,7 @@ SC_UNCLASSIFIED
   runs/
     <run-id>/
       input.normalized.json
+      prompt.txt
       decision.json
       compiled-view.md
       diff.md
@@ -248,7 +250,7 @@ SC_UNCLASSIFIED
       diagnostics.json
 ```
 
-`run-id` 建议使用 `timestamp + inputRootHash prefix`。`audit.jsonl` 只记录 shadow run 元信息、paths、hash、counts 与 error，不记录未清洗原文。所有写入 artifact 的文本必须先经过 sanitizer；`compiler.raw.txt` 只允许保存模型对 sanitized prompt 的输出，不能保存未净化转录、secret、vault 内容或未脱敏 tool output。
+`run-id` 建议使用 `timestamp + inputRootHash prefix`。`audit.jsonl` 只记录 shadow run 元信息、paths、hash、counts 与 error，不记录未清洗原文。所有写入 artifact 的文本必须先经过 sanitizer。PR3 默认不保存模型原文，只记录 `rawOutputHash`；若后续需要 `compiler.raw.txt`，只能保存模型对 sanitized prompt 的输出，不能保存未净化转录、secret、vault 内容或未脱敏 tool output。
 
 ## 5. 输入模型
 
