@@ -138,6 +138,7 @@
     "smoke:task-local-working-set": "node scripts/smoke-task-local-working-set.mjs",
     "smoke:outcome-classifier-enrich": "node scripts/smoke-outcome-classifier-enrich.mjs",
     "smoke:script-registry-drift": "node scripts/smoke-script-registry-drift.mjs",
+    "smoke:constraint-shadow-compiler": "node scripts/smoke-constraint-shadow-compiler.mjs",
     "smoke:adr-readme-anchors": "node scripts/smoke-adr-readme-anchors.mjs",
     "smoke:aggregator-llm-parse": "node scripts/smoke-aggregator-llm-parse.mjs",
     "smoke:aggregator-structural-context": "node scripts/smoke-aggregator-structural-context.mjs",

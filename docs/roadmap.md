@@ -33,7 +33,7 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 | Phase | Intent | Notes |
 |---|---|---|
 | P0 freeze old write-time adjudication | 停止为旧 rules 写时路径新增语义特例，并停止为其它长期记忆域新增 raw context → canonical mutation 特例。 | 只允许安全/数据完整性修复；新语义边界进入 ADR 0039 projector / compiler 设计。 |
-| P1 Constraint shadow compiler | 读取现有 active/listed/archived rules、相关 audit 与治理案例，生成 shadow Compiled Constraint View + diff 报告。 | 报告必须标出 settings/tool not-memory、project/global rescope、near-duplicate merge、conflict、compact constraints。 |
+| P1 Constraint shadow compiler | 读取现有 active/listed/archived rules、相关 audit 与治理案例，生成 shadow Compiled Constraint View + diff 报告。 | 详细设计见 [`2026-06-19-adr0039-p1-constraint-shadow-compiler-design.md`](./notes/2026-06-19-adr0039-p1-constraint-shadow-compiler-design.md)；报告必须标出 settings/tool not-memory、project/global rescope、near-duplicate merge、conflict、compact constraints。 |
 | P2 Constraint event parallel write | `agent_end` 对新的 Constraint 信号追加 sanitized Evidence Event，同时 compiler 持续生成 shadow view。 | 验收关注 event 丢失率、compiler 活性、错误路由、not-memory 诊断、scope 保守性、旧路径差异。 |
 | P3 Constraint compiled view injection | `session_start` 从 compiled view 注入约束，旧 always/listed rules 目录降为 legacy fallback 或兼容投影。 | stale 时注入上一版稳定 view 并提示 queued，不同步触发 LLM 裁决。 |
 | P4 retire old Constraint adjudication | 停用旧 tier1-ruleset-adjudicator 的 create/merge/archive/rescope 职责，停用 writer 的写时 inject_mode demote 与近重裁决职责。 | writer 只保留基础设施写文件能力，或收缩为 compiled view 与 event 的低层存储模块。 |
