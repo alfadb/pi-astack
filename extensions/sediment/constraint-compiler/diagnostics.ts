@@ -26,6 +26,12 @@ export const DIAGNOSTIC_CONSUMERS: Record<ConstraintShadowDiagnosticCode, Constr
   SC_COMPILER_VALIDATION_FAILED: ["compiler_prompt_iteration", "manual_investigation"],
   SC_SHADOW_ONLY_VIOLATION_ATTEMPT: ["manual_investigation"],
   SC_UNCLASSIFIED: ["compiler_prompt_iteration"],
+  SC_EVENT_READ_ERROR: ["manual_investigation", "compiler_liveness_report"],
+  SC_EVENT_COVERAGE_GAP: ["compiler_liveness_report", "p3_injection_readiness"],
+  SC_EVENT_STALE_THRESHOLD: ["compiler_liveness_report", "p3_injection_readiness"],
+  SC_LEGACY_PARALLEL_DELTA: ["diff_report", "p3_injection_readiness"],
+  SC_EVENT_NOT_MEMORY_LEAK: ["not_memory_audit", "p3_injection_readiness"],
+  SC_EVENT_SCOPE_BREACH: ["scope_review", "p3_injection_readiness"],
 };
 
 const DEFAULT_SEVERITY: Record<ConstraintShadowDiagnosticCode, ConstraintShadowDiagnosticSeverity> = {
@@ -49,6 +55,12 @@ const DEFAULT_SEVERITY: Record<ConstraintShadowDiagnosticCode, ConstraintShadowD
   SC_COMPILER_VALIDATION_FAILED: "error",
   SC_SHADOW_ONLY_VIOLATION_ATTEMPT: "error",
   SC_UNCLASSIFIED: "warning",
+  SC_EVENT_READ_ERROR: "error",
+  SC_EVENT_COVERAGE_GAP: "warning",
+  SC_EVENT_STALE_THRESHOLD: "warning",
+  SC_LEGACY_PARALLEL_DELTA: "info",
+  SC_EVENT_NOT_MEMORY_LEAK: "error",
+  SC_EVENT_SCOPE_BREACH: "error",
 };
 
 export function diagnosticId(code: ConstraintShadowDiagnosticCode, sourceRecordIds: string[] = [], message = ""): string {

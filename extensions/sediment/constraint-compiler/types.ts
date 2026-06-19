@@ -12,7 +12,7 @@ export type ConstraintCategoryHint =
   | "potential_conflict_signal"
   | "unknown";
 
-export type ConstraintSourceKind = "legacy_rule" | "audit" | "governance_case";
+export type ConstraintSourceKind = "legacy_rule" | "audit" | "governance_case" | "constraint_event";
 
 export type ConstraintProvenanceClass = "user-expressed" | "assistant-observed" | "content-in-transcript" | string;
 
@@ -85,7 +85,49 @@ export interface GovernanceCaseRecord {
   sourceRef: SourceRef;
 }
 
-export type ConstraintSourceRecord = LegacyRuleSourceRecord | AuditConstraintSourceRecord | GovernanceCaseRecord;
+export interface ConstraintEventSourceRecord {
+  sourceKind: "constraint_event";
+  sourceId: string;
+  eventId: string;
+  eventType: string;
+  createdAtUtc: string;
+  sessionId: string;
+  turnId: string;
+  sourceChannel: "agent_end" | "manual" | "replay" | string;
+  sourceRole: "user" | "assistant" | "system" | "tool" | string;
+  operationHint: string;
+  confidence?: number;
+  sanitizedQuote: string;
+  candidateText: string;
+  candidateTitle?: string;
+  candidateTriggerPhrases: string[];
+  candidateAppliesWhen?: string;
+  candidatePriorityHint: "always" | "listed" | "unknown" | string;
+  notMemoryHint?: string;
+  unclassifiedReason?: string;
+  scopeHint:
+    | { kind: "global"; evidence: string }
+    | { kind: "project"; projectId: string; evidence: string }
+    | { kind: "unknown"; reason: string };
+  activeProjectId?: string;
+  scopeConfidence?: number;
+  sanitizerStatus: string;
+  sanitizerReplacementsCount: number;
+  legacyParallelWrite?: {
+    attempted: boolean;
+    legacy_path_kind?: string;
+    legacy_operation_hint?: string;
+    legacy_audit_ref?: string;
+  };
+  causalParents: string[];
+  producerName: string;
+  producerVersion: string;
+  bodyHash: string;
+  rawFilePath: string;
+  sourceRef: SourceRef;
+}
+
+export type ConstraintSourceRecord = LegacyRuleSourceRecord | AuditConstraintSourceRecord | GovernanceCaseRecord | ConstraintEventSourceRecord;
 
 export interface NormalizedConstraintRecord {
   sourceKind: ConstraintSourceKind;
@@ -273,6 +315,48 @@ export type ConstraintCompilerRunResult = {
   durationMs?: number;
 };
 
+export interface ConstraintEventCoverageReport {
+  schemaVersion: "constraint-event-coverage/v1";
+  summary: {
+    totalEvents: number;
+    validEvents: number;
+    invalidEvents: number;
+    queuedEvents: number;
+    projectedEvents: number;
+    staleEvents: number;
+    appendFailedEvents: number;
+    oldestQueuedAgeMs?: number;
+    coverageRatio: number;
+  };
+  rows: Array<{
+    eventId: string;
+    sourceRecordId: string;
+    status: "queued" | "projected" | "stale" | "invalid" | "append_failed";
+    disposition?: ConstraintSourceDisposition;
+    observedAtUtc?: string;
+    projectedAtUtc?: string;
+    diagnostics: string[];
+  }>;
+}
+
+export interface ConstraintLegacyParallelDeltaReport {
+  schemaVersion: "constraint-legacy-parallel-delta/v1";
+  summary: {
+    totalEventsWithLegacyWrite: number;
+    matchedOutcomes: number;
+    mismatchedOutcomes: number;
+    eventOnlySignals: number;
+  };
+  rows: Array<{
+    eventId: string;
+    sourceRecordId: string;
+    legacyOperationHint?: string;
+    compilerDisposition?: ConstraintSourceDisposition;
+    status: "matched" | "mismatched" | "event_only";
+    reason: string;
+  }>;
+}
+
 export interface ConstraintShadowRunOptions {
   abrainHome: string;
   cwd: string;
@@ -287,6 +371,8 @@ export interface ConstraintShadowRunOptions {
   writeArtifacts?: boolean;
   artifactRoot?: string;
   runId?: string;
+  eventStaleAfterMs?: number;
+  nowMs?: number;
 }
 
 export interface ConstraintShadowRunArtifacts {
@@ -304,6 +390,8 @@ export type ConstraintShadowRunResult = {
   decision: ValidatedConstraintCompilerDecision;
   view: RenderedConstraintView;
   diff: ConstraintDiffReport;
+  eventCoverage?: ConstraintEventCoverageReport;
+  legacyParallelDelta?: ConstraintLegacyParallelDeltaReport;
   diagnostics: ConstraintShadowDiagnostic[];
   artifacts?: ConstraintShadowRunArtifacts;
 } | {
@@ -323,7 +411,9 @@ export type ConstraintShadowDiagnosticConsumer =
   | "not_memory_audit"
   | "scope_review"
   | "compiler_prompt_iteration"
-  | "manual_investigation";
+  | "manual_investigation"
+  | "compiler_liveness_report"
+  | "p3_injection_readiness";
 
 export type ConstraintShadowDiagnosticCode =
   | "SC_INPUT_MALFORMED_RULE"
@@ -345,7 +435,13 @@ export type ConstraintShadowDiagnosticCode =
   | "SC_COMPILER_PARSE_FAILED"
   | "SC_COMPILER_VALIDATION_FAILED"
   | "SC_SHADOW_ONLY_VIOLATION_ATTEMPT"
-  | "SC_UNCLASSIFIED";
+  | "SC_UNCLASSIFIED"
+  | "SC_EVENT_READ_ERROR"
+  | "SC_EVENT_COVERAGE_GAP"
+  | "SC_EVENT_STALE_THRESHOLD"
+  | "SC_LEGACY_PARALLEL_DELTA"
+  | "SC_EVENT_NOT_MEMORY_LEAK"
+  | "SC_EVENT_SCOPE_BREACH";
 
 export interface ConstraintShadowDiagnostic {
   id: string;

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Smoke test: ADR 0039 P1 Constraint Shadow Compiler PR2/PR3/PR4.
+ * Smoke test: ADR 0039 Constraint Shadow Compiler PR2/PR3/PR4/PR6.
  *
  * Offline only: fixture sources + mock decisions, mock LLM invokers, no runtime hook,
  * no canonical rule mutation, and no writes outside temporary fixture trees.
@@ -89,9 +89,17 @@ for (const file of [
   "extensions/memory/parser.ts",
   "extensions/sediment/sanitizer.ts",
   "extensions/sediment/constraint-compiler/types.ts",
+  "extensions/sediment/constraint-evidence/types.ts",
+  "extensions/sediment/constraint-evidence/canonical-json.ts",
+  "extensions/sediment/constraint-evidence/hash-envelope.ts",
+  "extensions/sediment/constraint-evidence/diagnostics.ts",
+  "extensions/sediment/constraint-evidence/read.ts",
+  "extensions/sediment/constraint-evidence/status.ts",
   "extensions/sediment/constraint-compiler/diagnostics.ts",
   "extensions/sediment/constraint-compiler/normalize.ts",
   "extensions/sediment/constraint-compiler/legacy-scan.ts",
+  "extensions/sediment/constraint-compiler/event-scan.ts",
+  "extensions/sediment/constraint-compiler/event-report.ts",
   "extensions/sediment/constraint-compiler/validate-decision.ts",
   "extensions/sediment/constraint-compiler/render.ts",
   "extensions/sediment/constraint-compiler/diff.ts",
@@ -104,15 +112,65 @@ for (const file of [
 }
 
 const { makeDiagnostic, assertDiagnosticConsumers } = require(path.join(outRoot, "sediment", "constraint-compiler", "diagnostics.js"));
+const { createConstraintEvidenceEnvelope, constraintEvidenceEventPath } = require(path.join(outRoot, "sediment", "constraint-evidence", "hash-envelope.js"));
 const { normalizeConstraintSources, sha256Hex } = require(path.join(outRoot, "sediment", "constraint-compiler", "normalize.js"));
 const { scanLegacyConstraintSources } = require(path.join(outRoot, "sediment", "constraint-compiler", "legacy-scan.js"));
 const { validateConstraintCompilerDecision } = require(path.join(outRoot, "sediment", "constraint-compiler", "validate-decision.js"));
 const { renderConstraintShadowView } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
 const { createConstraintDiffReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "diff.js"));
+const { scanConstraintEvidenceEvents } = require(path.join(outRoot, "sediment", "constraint-compiler", "event-scan.js"));
+const { createConstraintEventCoverageReport, createConstraintLegacyParallelDeltaReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "event-report.js"));
 const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment", "constraint-compiler", "prompt.js"));
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
 const { createPiAiConstraintCompilerInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
+
+function withoutUndefined(value) {
+  if (Array.isArray(value)) return value.map(withoutUndefined);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([, nested]) => nested !== undefined)
+    .map(([key, nested]) => [key, withoutUndefined(nested)]));
+}
+
+function writeConstraintEvidenceEvent(abrainHome, bodyOverrides = {}) {
+  const createdAtUtc = bodyOverrides.created_at_utc ?? "2026-06-19T00:00:00.000Z";
+  const body = withoutUndefined({
+    event_schema_version: "constraint-evidence-event/v1",
+    event_type: bodyOverrides.event_type ?? "constraint_signal_observed",
+    created_at_utc: createdAtUtc,
+    device_id: bodyOverrides.device_id ?? "test-device",
+    producer_nonce: bodyOverrides.producer_nonce ?? `nonce:${createdAtUtc}:${bodyOverrides.session_id ?? "session"}:${bodyOverrides.turn_id ?? "turn"}`,
+    actor: bodyOverrides.actor ?? { role: "user", id: "user" },
+    causal_parents: bodyOverrides.causal_parents ?? [],
+    session_id: bodyOverrides.session_id ?? "session",
+    turn_id: bodyOverrides.turn_id ?? "turn",
+    source: bodyOverrides.source ?? { channel: "agent_end", source_role: "user", source_ref: "turn:user", quote_hash: sha256Hex("quote") },
+    intent: bodyOverrides.intent ?? { domain_hint: "constraint", operation_hint: "create", confidence: 0.8 },
+    payload: bodyOverrides.payload ?? {
+      sanitized_quote: "以后修改文件必须用 edit/write。",
+      candidate_constraint_text: "修改文件必须用 edit/write。",
+      candidate_title: "Use edit/write",
+      candidate_trigger_phrases: ["edit/write"],
+      candidate_priority_hint: "always",
+    },
+    scope: bodyOverrides.scope ?? {
+      active_project_binding: { project_id: "pi-astack", binding_reason: "fixture" },
+      scope_hint: { kind: "global", evidence: "fixture global signal" },
+      scope_confidence: 0.8,
+    },
+    sanitizer: bodyOverrides.sanitizer ?? { sanitizer_name: "fixture", sanitizer_version: "1", status: "passed", replacements_count: 0 },
+    neighbor_summary: bodyOverrides.neighbor_summary ?? { retrieval_mode: "readonly", input_hash: sha256Hex("input"), neighbor_refs: [], summary: "fixture" },
+    producer: bodyOverrides.producer ?? { name: "sediment.constraint-event-writer", version: "fixture" },
+    legacy_parallel_write: bodyOverrides.legacy_parallel_write,
+    llm_extraction: bodyOverrides.llm_extraction,
+    diagnostics: bodyOverrides.diagnostics,
+    privacy: bodyOverrides.privacy,
+  });
+  const envelope = createConstraintEvidenceEnvelope(body);
+  writeFile(constraintEvidenceEventPath(abrainHome, envelope.event_id), `${JSON.stringify(envelope, null, 2)}\n`);
+  return envelope;
+}
 
 function source(overrides) {
   const body = overrides.body ?? "Use edit/write for file changes.";
@@ -323,7 +381,7 @@ const decision = {
   diagnostics: baseDiagnostics,
 };
 
-console.log("constraint shadow compiler — ADR 0039 P1 PR2/PR3/PR4 shadow runner");
+console.log("constraint shadow compiler — ADR 0039 PR2/PR3/PR4/PR6 shadow runner");
 
 check("diagnostics have consumers", () => {
   assertDiagnosticConsumers(baseDiagnostics);
@@ -451,6 +509,115 @@ check("legacy scanner reads active and non-active fixture rules", async () => {
     assert(result.rules.some((record) => record.status === "archived"), "archived rule missing");
     assert(result.rules.some((record) => record.status === "unknown"), "unknown status rule missing");
   });
+});
+
+check("event scanner reads valid L1 events and maps event diagnostics", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-events-"));
+  const signal = writeConstraintEvidenceEvent(abrainHome, {
+    session_id: "session-a",
+    turn_id: "turn-a",
+    legacy_parallel_write: { attempted: true, legacy_path_kind: "tier1_ruleset_adjudicator", legacy_operation_hint: "create", legacy_audit_ref: "audit:a" },
+  });
+  const notMemory = writeConstraintEvidenceEvent(abrainHome, {
+    event_type: "constraint_not_memory_observed",
+    created_at_utc: "2026-06-19T00:01:00.000Z",
+    session_id: "session-b",
+    turn_id: "turn-b",
+    intent: { domain_hint: "constraint", operation_hint: "not_memory", confidence: 0.9 },
+    payload: { sanitized_quote: "model id belongs in settings", not_memory_hint: "settings", candidate_priority_hint: "unknown" },
+    legacy_parallel_write: { attempted: true, legacy_path_kind: "tier1_ruleset_adjudicator", legacy_operation_hint: "none", legacy_audit_ref: "audit:b" },
+  });
+  const scan = await scanConstraintEvidenceEvents({ abrainHome });
+  assert(scan.events.length === 2, `expected 2 events, got ${scan.events.length}`);
+  assert(scan.invalidEventIds.length === 0, "valid events marked invalid");
+  assert(scan.events.some((event) => event.eventId === signal.event_id && event.sourceId === `event:${signal.event_id}`), "signal event missing");
+  assert(scan.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(`event:${notMemory.event_id}`)), "not-memory diagnostic missing");
+});
+
+check("event coverage reports queued stale projected and legacy delta", () => {
+  const projectedEvent = {
+    sourceKind: "constraint_event",
+    sourceId: "event:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    eventId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    eventType: "constraint_signal_observed",
+    createdAtUtc: "2026-06-18T00:00:00.000Z",
+    sessionId: "session-a",
+    turnId: "turn-a",
+    sourceChannel: "agent_end",
+    sourceRole: "user",
+    operationHint: "create",
+    confidence: 0.8,
+    sanitizedQuote: "修改文件必须用 edit/write。",
+    candidateText: "修改文件必须用 edit/write。",
+    candidateTitle: "Use edit/write",
+    candidateTriggerPhrases: ["edit/write"],
+    candidatePriorityHint: "always",
+    scopeHint: { kind: "global", evidence: "fixture" },
+    activeProjectId: "pi-astack",
+    scopeConfidence: 0.8,
+    sanitizerStatus: "passed",
+    sanitizerReplacementsCount: 0,
+    legacyParallelWrite: { attempted: true, legacy_operation_hint: "create" },
+    causalParents: [],
+    producerName: "sediment.constraint-event-writer",
+    producerVersion: "fixture",
+    bodyHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    rawFilePath: "/tmp/event-a.json",
+    sourceRef: { ref: "event:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", path: "/tmp/event-a.json" },
+  };
+  const queuedEvent = {
+    ...projectedEvent,
+    sourceId: "event:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    eventId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    bodyHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    createdAtUtc: "2026-06-18T00:00:00.000Z",
+    legacyParallelWrite: { attempted: true, legacy_operation_hint: "none" },
+    rawFilePath: "/tmp/event-b.json",
+    sourceRef: { ref: "event:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", path: "/tmp/event-b.json" },
+  };
+  const mismatchEvent = {
+    ...projectedEvent,
+    sourceId: "event:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    eventId: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    bodyHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    operationHint: "not_memory",
+    notMemoryHint: "settings",
+    createdAtUtc: "2026-06-19T00:00:00.000Z",
+    legacyParallelWrite: { attempted: true, legacy_operation_hint: "create" },
+    rawFilePath: "/tmp/event-c.json",
+    sourceRef: { ref: "event:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", path: "/tmp/event-c.json" },
+  };
+  const eventSources = [projectedEvent, queuedEvent, mismatchEvent];
+  const eventDecision = validateConstraintCompilerDecision(eventSources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: normalizeConstraintSources(eventSources).inputRootHash,
+    constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit/write", compiledBody: "修改文件必须用 edit/write。", sourceRecordIds: [projectedEvent.sourceId] }],
+    exclusions: [{ reason: "settings_not_memory", sourceRecordIds: [mismatchEvent.sourceId] }],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [
+      { sourceRecordId: projectedEvent.sourceId, disposition: "compiled" },
+      { sourceRecordId: mismatchEvent.sourceId, disposition: "excluded" },
+    ],
+    diagnostics: [makeDiagnostic({ code: "SC_NOT_MEMORY_SETTINGS", message: "settings signal", sourceRecordIds: [mismatchEvent.sourceId] })],
+  });
+  const coverage = createConstraintEventCoverageReport({
+    events: eventSources,
+    decision: eventDecision,
+    diagnostics: eventDecision.diagnostics,
+    staleAfterMs: 60 * 60 * 1000,
+    nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+  });
+  assert(coverage.report.summary.totalEvents === 3, "wrong event coverage total");
+  assert(coverage.report.summary.projectedEvents === 2, "projected event not counted");
+  assert(coverage.report.summary.staleEvents === 1, "stale queued event not counted");
+  assert(coverage.diagnostics.some((diagnostic) => diagnostic.code === "SC_EVENT_STALE_THRESHOLD"), "stale diagnostic missing");
+  const delta = createConstraintLegacyParallelDeltaReport({ events: eventSources, decision: eventDecision });
+  assert(delta.report.summary.totalEventsWithLegacyWrite === 3, "wrong legacy delta total");
+  assert(delta.report.summary.mismatchedOutcomes === 1, "legacy mismatch not counted");
+  assert(delta.report.summary.eventOnlySignals === 1, "event-only signal not counted");
+  assert(delta.diagnostics.some((diagnostic) => diagnostic.code === "SC_LEGACY_PARALLEL_DELTA"), "legacy delta diagnostic missing");
 });
 
 check("prompt builder is deterministic and shadow-only", () => {
@@ -603,6 +770,59 @@ check("shadow runner writes artifacts only under shadow state and keeps rules un
   assert(beforeFiles === listFiles(rulesRoot).join("\n"), "rules file list changed");
 });
 
+check("shadow runner reads L1 events and writes event coverage artifacts", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-runner-events-"));
+  const writeRule = (rel, frontmatter, body) => writeFile(path.join(abrainHome, rel), `---\n${frontmatter}\n---\n${body}\n`);
+  writeRule("rules/always/use-edit-not-sed.md", "title: Use edit not sed\nstatus: active\nkind: preference", "# Use edit not sed\n\n修改文件必须用 edit/write，禁止 sed -i。");
+  const event = writeConstraintEvidenceEvent(abrainHome, {
+    session_id: "runner-session",
+    turn_id: "runner-turn",
+    legacy_parallel_write: { attempted: true, legacy_path_kind: "tier1_ruleset_adjudicator", legacy_operation_hint: "create", legacy_audit_ref: "audit:runner" },
+  });
+  const eventSourceId = `event:${event.event_id}`;
+  const result = await runConstraintShadowCompiler({
+    abrainHome,
+    cwd: repoRoot,
+    includeProjects: [],
+    includeStatuses: "all",
+    knownProjectIds: ["pi-astack"],
+    writeArtifacts: true,
+    runId: "fixture-event-run",
+    nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+    compilerInvoker: async ({ prompt }) => {
+      assert(prompt.text.includes(eventSourceId), "event source missing from compiler prompt");
+      return {
+        ok: true,
+        text: JSON.stringify({
+          schemaVersion: "constraint-shadow-decision/v1",
+          inputRootHash: "ignored-by-parser",
+          constraints: [{
+            scope: { kind: "global" },
+            injectMode: "always",
+            title: "Use edit/write",
+            compiledBody: "修改文件必须用 edit/write，禁止 sed -i。",
+            sourceRecordIds: ["rule:global:always:use-edit-not-sed", eventSourceId],
+          }],
+          exclusions: [],
+          unresolved: [],
+          merges: [],
+          rescopeProposals: [],
+          mappings: [
+            { sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" },
+            { sourceRecordId: eventSourceId, disposition: "compiled" },
+          ],
+          diagnostics: [],
+        }),
+      };
+    },
+  });
+  assert(result.ok, "runner event success path failed");
+  assert(result.ok && result.eventCoverage?.summary.projectedEvents === 1, "event coverage did not project event");
+  assert(result.ok && result.legacyParallelDelta?.summary.matchedOutcomes === 1, "legacy delta did not match event");
+  assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "event-coverage.json")), "event coverage artifact missing");
+  assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "legacy-parallel-delta.json")), "legacy delta artifact missing");
+});
+
 check("shadow runner fails closed on artifact path violation", async () => {
   const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-violation-"));
   writeFile(path.join(abrainHome, "rules/always/use-edit-not-sed.md"), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write。\n");
@@ -691,5 +911,5 @@ Promise.all(pending).finally(() => {
     console.log(`\nFAIL — ${failures.length} of ${total} assertions failed.`);
     process.exit(1);
   }
-  console.log(`\nall ok — constraint shadow compiler PR2/PR3/PR4 holds (${total} assertions).`);
+  console.log(`\nall ok — constraint shadow compiler PR2/PR3/PR4/PR6 holds (${total} assertions).`);
 });

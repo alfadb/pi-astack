@@ -2,6 +2,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { makeDiagnostic } from "./diagnostics";
 import { createConstraintDiffReport } from "./diff";
+import { createConstraintEventCoverageReport, createConstraintLegacyParallelDeltaReport } from "./event-report";
+import { scanConstraintEvidenceEvents } from "./event-scan";
 import { runConstraintCompilerWithInvoker } from "./llm-compiler";
 import { scanLegacyConstraintSources } from "./legacy-scan";
 import { normalizeConstraintSources, sha256Hex, stableCanonicalize } from "./normalize";
@@ -11,6 +13,8 @@ import { validateConstraintCompilerDecision } from "./validate-decision";
 import type {
   ConstraintCompilerPrompt,
   ConstraintDiffReport,
+  ConstraintEventCoverageReport,
+  ConstraintLegacyParallelDeltaReport,
   ConstraintShadowDiagnostic,
   ConstraintShadowRunArtifacts,
   ConstraintShadowRunOptions,
@@ -21,6 +25,7 @@ import type {
 } from "./types";
 
 const ARTIFACT_SCHEMA_VERSION = "constraint-shadow-artifact/v1";
+const DEFAULT_EVENT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 function nowRunId(inputRootHash: string): string {
   const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
@@ -75,6 +80,8 @@ async function writeArtifacts(input: {
   decision?: ValidatedConstraintCompilerDecision;
   view?: RenderedConstraintView;
   diff?: ConstraintDiffReport;
+  eventCoverage?: ConstraintEventCoverageReport;
+  legacyParallelDelta?: ConstraintLegacyParallelDeltaReport;
   diagnostics: ConstraintShadowDiagnostic[];
   ok: boolean;
 }): Promise<{ ok: true; artifacts: ConstraintShadowRunArtifacts } | { ok: false; diagnostic: ConstraintShadowDiagnostic }> {
@@ -96,6 +103,8 @@ async function writeArtifacts(input: {
     view: "compiled-view.md",
     diffJson: "diff.json",
     diffMarkdown: "diff.md",
+    eventCoverage: "event-coverage.json",
+    legacyParallelDelta: "legacy-parallel-delta.json",
     diagnostics: "diagnostics.json",
   };
   const writeSet = async (dir: string): Promise<void> => {
@@ -107,6 +116,8 @@ async function writeArtifacts(input: {
       await writeJson(path.join(dir, files.diffJson), input.diff);
       await writeText(path.join(dir, files.diffMarkdown), input.diff.markdown);
     }
+    if (input.eventCoverage) await writeJson(path.join(dir, files.eventCoverage), input.eventCoverage);
+    if (input.legacyParallelDelta) await writeJson(path.join(dir, files.legacyParallelDelta), input.legacyParallelDelta);
     await writeJson(path.join(dir, files.diagnostics), input.diagnostics);
   };
 
@@ -122,6 +133,8 @@ async function writeArtifacts(input: {
     validationHash: input.decision?.validationHash,
     shadowOutputHash: input.view?.shadowOutputHash,
     sourceCount: input.normalized.records.length,
+    eventCoverage: input.eventCoverage?.summary,
+    legacyParallelDelta: input.legacyParallelDelta?.summary,
     diagnosticCodes: input.diagnostics.map((diagnostic) => diagnostic.code),
     artifacts: { runDir: path.relative(root, runDir), latestDir: path.relative(root, latestDir) },
   });
@@ -179,13 +192,14 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     includeStatuses: options.includeStatuses ?? "all",
     activeProjectId: options.activeProjectId,
   });
-  const sources = [...scan.rules, ...scan.audits];
+  const eventScan = await scanConstraintEvidenceEvents({ abrainHome: options.abrainHome });
+  const sources = [...scan.rules, ...scan.audits, ...eventScan.events];
   const normalized = normalizeConstraintSources(sources, {
     activeProjectId: options.activeProjectId,
     knownProjectIds: options.knownProjectIds,
     ...(options.normalizeOptions ?? {}),
   });
-  const diagnostics: ConstraintShadowDiagnostic[] = dedupeDiagnostics([...scan.warnings, ...normalized.diagnostics]);
+  const diagnostics: ConstraintShadowDiagnostic[] = dedupeDiagnostics([...scan.warnings, ...eventScan.diagnostics, ...normalized.diagnostics]);
   const runId = options.runId ?? nowRunId(normalized.inputRootHash);
 
   let prompt: ConstraintCompilerPrompt | undefined;
@@ -279,7 +293,17 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
 
   const view = renderConstraintShadowView(decision);
   const diff = createConstraintDiffReport(sources, decision);
-  const allDiagnostics = dedupeDiagnostics(decision.diagnostics);
+  const initialDiagnostics = dedupeDiagnostics(decision.diagnostics);
+  const coverage = createConstraintEventCoverageReport({
+    events: eventScan.events,
+    invalidEventIds: eventScan.invalidEventIds,
+    decision,
+    diagnostics: initialDiagnostics,
+    staleAfterMs: options.eventStaleAfterMs ?? DEFAULT_EVENT_STALE_AFTER_MS,
+    nowMs: options.nowMs,
+  });
+  const legacyParallelDelta = createConstraintLegacyParallelDeltaReport({ events: eventScan.events, decision });
+  const allDiagnostics = dedupeDiagnostics([...initialDiagnostics, ...coverage.diagnostics, ...legacyParallelDelta.diagnostics]);
   const artifactResult = options.writeArtifacts ? await writeArtifacts({
     abrainHome: options.abrainHome,
     artifactRoot: options.artifactRoot,
@@ -290,6 +314,8 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     decision,
     view,
     diff,
+    eventCoverage: coverage.report,
+    legacyParallelDelta: legacyParallelDelta.report,
     diagnostics: allDiagnostics,
     ok: true,
   }) : undefined;
@@ -312,6 +338,8 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     decision,
     view,
     diff,
+    eventCoverage: coverage.report,
+    legacyParallelDelta: legacyParallelDelta.report,
     diagnostics: allDiagnostics,
     ...(artifactResult?.ok ? { artifacts: artifactResult.artifacts } : {}),
   };

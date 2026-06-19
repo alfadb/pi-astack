@@ -3,6 +3,7 @@ import { sanitizeForMemory } from "../sanitizer";
 import type {
   AuditConstraintSourceRecord,
   ConstraintCategoryHint,
+  ConstraintEventSourceRecord,
   ConstraintShadowDiagnostic,
   ConstraintSourceRecord,
   GovernanceCaseRecord,
@@ -39,6 +40,13 @@ function textIncludesAny(text: string, needles: string[]): boolean {
 }
 
 export function inferCategoryHint(record: ConstraintSourceRecord): ConstraintCategoryHint {
+  if (record.sourceKind === "constraint_event") {
+    if (record.operationHint === "not_memory") {
+      return record.notMemoryHint === "tool_contract" ? "tool_contract_not_memory" : "settings_not_memory";
+    }
+    if (record.operationHint === "unclassified" || record.eventType === "constraint_unclassified_observed") return "unknown";
+    return "behavioral_constraint";
+  }
   if (record.sourceKind !== "legacy_rule") return "unknown";
   const combined = [
     record.title,
@@ -153,6 +161,59 @@ function normalizeGovernanceCase(record: GovernanceCaseRecord): NormalizedConstr
   };
 }
 
+function normalizeConstraintEvent(record: ConstraintEventSourceRecord): NormalizedConstraintRecord {
+  const sanitizedQuote = sanitizeText(record.sanitizedQuote);
+  const sanitizedText = sanitizeText(record.candidateText);
+  const scope = record.scopeHint.kind === "global"
+    ? { kind: "global" as const }
+    : record.scopeHint.kind === "project"
+      ? { kind: "project" as const, projectId: record.scopeHint.projectId }
+      : undefined;
+  const normalized = {
+    sourceKind: record.sourceKind,
+    sourceId: record.sourceId,
+    eventId: record.eventId,
+    eventType: record.eventType,
+    createdAtUtc: record.createdAtUtc,
+    sessionId: record.sessionId,
+    turnId: record.turnId,
+    sourceChannel: record.sourceChannel,
+    sourceRole: record.sourceRole,
+    operationHint: record.operationHint,
+    confidence: record.confidence,
+    sanitizedQuote: sanitizedQuote.text,
+    candidateText: sanitizedText.text,
+    candidateTitle: record.candidateTitle,
+    candidateTriggerPhrases: record.candidateTriggerPhrases.slice().sort(),
+    candidateAppliesWhen: record.candidateAppliesWhen,
+    candidatePriorityHint: record.candidatePriorityHint,
+    notMemoryHint: record.notMemoryHint,
+    unclassifiedReason: record.unclassifiedReason,
+    scopeHint: record.scopeHint,
+    activeProjectId: record.activeProjectId,
+    scopeConfidence: record.scopeConfidence,
+    sanitizerStatus: record.sanitizerStatus,
+    sanitizerReplacementsCount: record.sanitizerReplacementsCount,
+    legacyParallelWrite: record.legacyParallelWrite,
+    causalParents: record.causalParents.slice().sort(),
+    producerName: record.producerName,
+    producerVersion: record.producerVersion,
+    bodyHash: record.bodyHash,
+    sourceRef: record.sourceRef,
+  };
+  return {
+    sourceKind: record.sourceKind,
+    sourceId: record.sourceId,
+    scope,
+    title: record.candidateTitle,
+    body: sanitizedText.text,
+    categoryHint: inferCategoryHint(record),
+    sourceHash: sha256Hex(stableCanonicalize(normalized)),
+    normalized,
+    sanitizerReplacements: [...sanitizedQuote.replacements, ...sanitizedText.replacements].sort(),
+  };
+}
+
 export function normalizeConstraintSources(
   sources: ConstraintSourceRecord[],
   options: NormalizeConstraintOptions = {},
@@ -161,6 +222,7 @@ export function normalizeConstraintSources(
   const records = sources.map((source) => {
     if (source.sourceKind === "legacy_rule") return normalizeLegacyRule(source);
     if (source.sourceKind === "audit") return normalizeAudit(source);
+    if (source.sourceKind === "constraint_event") return normalizeConstraintEvent(source);
     return normalizeGovernanceCase(source);
   }).sort((leftRecord, rightRecord) => leftRecord.sourceId.localeCompare(rightRecord.sourceId));
 
