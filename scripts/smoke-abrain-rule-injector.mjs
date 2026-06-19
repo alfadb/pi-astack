@@ -66,6 +66,7 @@ function writeFile(file, content) {
 function stageModuleTree(outRoot) {
   const files = [
     ["extensions/abrain/rule-injector/index.ts", "abrain/rule-injector/index.js"],
+    ["extensions/abrain/rule-injector/dualread-audit.ts", "abrain/rule-injector/dualread-audit.js"],
     ["extensions/abrain/brain-layout.ts", "abrain/brain-layout.js"],
     ["extensions/_shared/footer-status.ts", "_shared/footer-status.js"],
     ["extensions/_shared/runtime.ts", "_shared/runtime.js"],
@@ -104,6 +105,48 @@ function writeRule(file, fm, body) {
   for (const [k, v] of Object.entries(fm)) lines.push(`${k}: ${v}`);
   lines.push("---", body.trim(), "");
   writeFile(file, lines.join("\n"));
+}
+
+function readJsonLines(file) {
+  return fs.readFileSync(file, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
+function legacySourceId(entry) {
+  if (entry.scope === "project" && entry.projectId) return `rule:project:${entry.projectId}:${entry.injectMode}:${entry.slug}`;
+  return `rule:global:${entry.injectMode}:${entry.slug}`;
+}
+
+function shadowConstraintFromRule(entry, overrides = {}) {
+  return {
+    constraintId: `shadow:${entry.slug}`,
+    scope: entry.scope === "project" && entry.projectId ? { kind: "project", projectId: entry.projectId } : { kind: "global" },
+    injectMode: entry.injectMode,
+    title: entry.title,
+    compiledBody: entry.body,
+    mustDoSummary: entry.mustDoSummary,
+    triggerPhrases: entry.triggerPhrases,
+    sourceRecordIds: [legacySourceId(entry)],
+    ...overrides,
+  };
+}
+
+function writeShadowDecision(file, constraints) {
+  writeFile(file, JSON.stringify({
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: "input-root-hash-for-smoke",
+    constraints,
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [],
+    diagnostics: [],
+    validationHash: "validation-hash-for-smoke",
+  }, null, 2));
 }
 
 console.log("abrain rule injector — ADR 0023-R5 read path");
@@ -284,7 +327,135 @@ await asyncCheck("extension registers append-only idempotent injector and diagno
     const second = await beforeAgent({ systemPrompt: first.systemPrompt }, { cwd: projectRoot });
     if (second !== undefined) throw new Error("injector must be idempotent when marker exists");
     if (!statuses.some(([, v]) => String(v).includes("rules:"))) throw new Error(`footer status not set: ${JSON.stringify(statuses)}`);
+    const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "session-start-dualread", "audit.jsonl");
+    if (fs.existsSync(auditFile)) throw new Error("dual-read audit must stay off by default");
   } finally {
+    if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+  }
+});
+
+check("dual-read audit helper is default-off and writes only constraint-shadow state when enabled", () => {
+  const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "abc123", resolveProject: fakeBound });
+  const dual = req("./abrain/rule-injector/dualread-audit.js");
+  const disabled = dual.runRuleInjectorDualReadAudit({
+    abrainHome,
+    cwd: projectRoot,
+    cache,
+    settings: dual.resolveRuleInjectorDualReadAuditSettings(undefined),
+  });
+  if (disabled.status !== "disabled" || disabled.attempted !== false) throw new Error(`unexpected disabled result: ${JSON.stringify(disabled)}`);
+  const disabledAudit = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "session-start-dualread", "audit.jsonl");
+  if (fs.existsSync(disabledAudit)) throw new Error("disabled dual-read audit wrote an audit file");
+
+  const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+  const constraints = [
+    shadowConstraintFromRule(cache.globalAlways[0]),
+    shadowConstraintFromRule(cache.globalListed[0], { mustDoSummary: "different summary" }),
+    shadowConstraintFromRule(cache.projectAlways[0]),
+    {
+      constraintId: "shadow:compiled-only",
+      scope: { kind: "global" },
+      injectMode: "listed",
+      title: "Compiled Only",
+      compiledBody: "Compiled-only body",
+      mustDoSummary: "Compiled-only summary",
+      triggerPhrases: [],
+      sourceRecordIds: ["event:compiled-only"],
+    },
+  ];
+  writeShadowDecision(path.join(latestDir, "decision.json"), constraints);
+  writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+    schemaVersion: "constraint-event-coverage/v1",
+    summary: {
+      totalEvents: 2,
+      validEvents: 2,
+      invalidEvents: 0,
+      queuedEvents: 1,
+      projectedEvents: 1,
+      staleEvents: 1,
+      appendFailedEvents: 0,
+      coverageRatio: 0.5,
+    },
+    rows: [],
+  }, null, 2));
+  const beforeRulesMtime = fs.statSync(path.join(abrainHome, "rules", "always", "edit-write-only.md")).mtimeMs;
+  const enabled = dual.runRuleInjectorDualReadAudit({
+    abrainHome,
+    cwd: projectRoot,
+    cache,
+    settings: dual.resolveRuleInjectorDualReadAuditSettings({ enabled: true, staleAfterMs: 0 }),
+    nowMs: Date.now() + 10_000,
+  });
+  if (enabled.status !== "delta") throw new Error(`expected delta audit, got ${JSON.stringify(enabled)}`);
+  if (!enabled.auditFile?.includes(path.join(".state", "sediment", "constraint-shadow", "session-start-dualread", "audit.jsonl"))) {
+    throw new Error(`audit file outside expected state path: ${enabled.auditFile}`);
+  }
+  const rows = readJsonLines(enabled.auditFile);
+  const row = rows.at(-1);
+  if (row.summary.legacyRules !== 4) throw new Error(`legacyRules=${row.summary.legacyRules}`);
+  if (row.summary.compiledOnly !== 1) throw new Error(`compiledOnly=${row.summary.compiledOnly}`);
+  if (row.summary.legacyOnly !== 1) throw new Error(`legacyOnly=${row.summary.legacyOnly}`);
+  if (row.summary.textDelta !== 1) throw new Error(`textDelta=${row.summary.textDelta}`);
+  if (row.eventCoverage.queuedEvents !== 1 || row.eventCoverage.staleEvents !== 1) throw new Error(`event coverage missing: ${JSON.stringify(row.eventCoverage)}`);
+  const afterRulesMtime = fs.statSync(path.join(abrainHome, "rules", "always", "edit-write-only.md")).mtimeMs;
+  if (afterRulesMtime !== beforeRulesMtime) throw new Error("dual-read audit changed a rule file");
+});
+
+await asyncCheck("dual-read audit flag on preserves injected system prompt bytes", async () => {
+  const prevAbrainRoot = process.env.ABRAIN_ROOT;
+  const prevHome = process.env.HOME;
+  const crypto = require("node:crypto");
+  const originalRandomBytes = crypto.randomBytes;
+  const fixedNonce = Buffer.from("0123456789abcdef0123456789abcdef", "hex");
+  async function runFresh(flagHome, compiledDir) {
+    process.env.HOME = flagHome;
+    stageModuleTree(compiledDir);
+    const freshReq = createRequire(path.join(compiledDir, "runner.cjs"));
+    const activate = freshReq("./abrain/rule-injector/index.js").default;
+    const events = new Map();
+    const pi = {
+      on(name, handler) {
+        if (!events.has(name)) events.set(name, []);
+        events.get(name).push(handler);
+      },
+      registerCommand() {},
+    };
+    activate(pi);
+    const sessionStart = events.get("session_start")?.[0];
+    const beforeAgent = events.get("before_agent_start")?.[0];
+    await sessionStart({ reason: "startup" }, { cwd: projectRoot, ui: { setStatus() {}, notify() {} } });
+    return beforeAgent({ systemPrompt: "BASE" }, { cwd: projectRoot });
+  }
+  try {
+    process.env.ABRAIN_ROOT = abrainHome;
+    crypto.randomBytes = () => Buffer.from(fixedNonce);
+    const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: fixedNonce.toString("hex"), resolveProject: fakeBound });
+    writeShadowDecision(
+      path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "decision.json"),
+      [
+        shadowConstraintFromRule(cache.globalAlways[0]),
+        shadowConstraintFromRule(cache.globalListed[0]),
+        shadowConstraintFromRule(cache.projectAlways[0]),
+        shadowConstraintFromRule(cache.projectListed[0]),
+      ],
+    );
+    const offHome = path.join(tmpRoot, "home-dualread-off");
+    const onHome = path.join(tmpRoot, "home-dualread-on");
+    writeFile(path.join(offHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+      ruleInjector: { dualReadAudit: { enabled: false } },
+    }, null, 2));
+    writeFile(path.join(onHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+      ruleInjector: { dualReadAudit: { enabled: true, staleAfterMs: 0 } },
+    }, null, 2));
+    const withoutAudit = await runFresh(offHome, path.join(tmpRoot, "fresh-dualread-off"));
+    const withAudit = await runFresh(onHome, path.join(tmpRoot, "fresh-dualread-on"));
+    if (withAudit.systemPrompt !== withoutAudit.systemPrompt) throw new Error("dual-read audit changed injected prompt bytes");
+    const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "session-start-dualread", "audit.jsonl");
+    const row = readJsonLines(auditFile).at(-1);
+    if (!row || row.schemaVersion !== "rule-injector-dualread-audit/v1") throw new Error(`missing dual-read audit row: ${JSON.stringify(row)}`);
+  } finally {
+    crypto.randomBytes = originalRandomBytes;
     if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
     if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
   }

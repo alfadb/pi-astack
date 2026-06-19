@@ -155,6 +155,26 @@ function transpileExtensions(outRoot) {
       throw new Error(`Strict parse of ${path.relative(repoRoot, srcPath)} failed: ${err && err.stack ? err.stack : err}`);
     }
     writeFile(outPath, transpiled.outputText);
+    {
+      const leafSrcPath = path.join(extRoot, "abrain", "rule-injector", "dualread-audit.ts");
+      const leafOutPath = path.join(outRoot, "abrain", "rule-injector", "dualread-audit.js");
+      const leafTranspiled = ts.transpileModule(fs.readFileSync(leafSrcPath, "utf-8"), {
+        compilerOptions: {
+          target: ts.ScriptTarget.ES2022,
+          module: ts.ModuleKind.CommonJS,
+          moduleResolution: ts.ModuleResolutionKind.NodeJs,
+          esModuleInterop: true,
+          skipLibCheck: true,
+        },
+      });
+      try {
+        new (require("node:vm").Script)(leafTranspiled.outputText, { filename: leafSrcPath });
+      } catch (err) {
+        throw new Error(`Strict parse of ${path.relative(repoRoot, leafSrcPath)} failed: ${err && err.stack ? err.stack : err}`);
+      }
+      writeFile(leafOutPath, leafTranspiled.outputText);
+      count++;
+    }
     writeFile(path.join(outRoot, "abrain", "rule-injector.js"), `module.exports = require("./rule-injector/index.js");\n`);
     count++;
   }

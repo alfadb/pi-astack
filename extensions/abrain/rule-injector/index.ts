@@ -29,6 +29,11 @@ import {
   splitFrontmatter,
 } from "../../memory/parser";
 import { slugify } from "../../memory/utils";
+import {
+  resolveRuleInjectorDualReadAuditSettings,
+  runRuleInjectorDualReadAudit,
+  type RuleInjectorDualReadAuditSettings,
+} from "./dualread-audit";
 
 /** ADR 0028 §12.3: the rules injection-budget axis is INJECT-MODE (values
  *  always/listed), renamed away from "tier" to stop colliding with the GTIER
@@ -42,6 +47,7 @@ export interface RuleInjectorSettings {
   enabled: boolean;
   maxCatalogSummaryChars: number;
   maxCatalogTriggerChars: number;
+  dualReadAudit: RuleInjectorDualReadAuditSettings;
 }
 
 export interface RuleEntry {
@@ -104,6 +110,7 @@ const DEFAULT_SETTINGS: RuleInjectorSettings = {
   enabled: true,
   maxCatalogSummaryChars: 220,
   maxCatalogTriggerChars: 160,
+  dualReadAudit: resolveRuleInjectorDualReadAuditSettings(undefined),
 };
 
 let cachedRules: RuleScanCache | null = null;
@@ -146,6 +153,7 @@ export function resolveRuleInjectorSettings(): RuleInjectorSettings {
     enabled: asBoolean(cfg.enabled, DEFAULT_SETTINGS.enabled),
     maxCatalogSummaryChars: Math.max(80, Math.floor(asNumber(cfg.maxCatalogSummaryChars, DEFAULT_SETTINGS.maxCatalogSummaryChars))),
     maxCatalogTriggerChars: Math.max(40, Math.floor(asNumber(cfg.maxCatalogTriggerChars, DEFAULT_SETTINGS.maxCatalogTriggerChars))),
+    dualReadAudit: resolveRuleInjectorDualReadAuditSettings(cfg.dualReadAudit),
   };
 }
 
@@ -649,6 +657,14 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings });
       ensureProjectRuleDirs(ABRAIN_HOME, cachedRules.activeProjectId);
       setFooterStatus(ctx, cachedRules);
+      if (settings.dualReadAudit.enabled) {
+        runRuleInjectorDualReadAudit({
+          abrainHome: ABRAIN_HOME,
+          cwd: ctx?.cwd || process.cwd(),
+          cache: cachedRules,
+          settings: settings.dualReadAudit,
+        });
+      }
       notifyWarningsOnce(ctx, cachedRules);
       // Real-time footer: capture the setter + watch the rules dirs so a rule
       // written mid-session by background sediment refreshes the footer live

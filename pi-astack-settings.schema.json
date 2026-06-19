@@ -695,6 +695,32 @@
           "default": 160,
           "minimum": 40,
           "description": "Maximum applies_when / trigger_phrases characters per injected catalog row. This is formatting only, not a write or recall gate."
+        },
+        "dualReadAudit": {
+          "type": "object",
+          "default": { "enabled": false },
+          "description": "ADR 0039 P3a default-off session_start dual-read audit. When enabled, legacy rules remain the only injected runtime truth; the injector also reads constraint-shadow latest artifacts and writes delta rows under ~/.abrain/.state/sediment/constraint-shadow/session-start-dualread/.",
+          "additionalProperties": false,
+          "properties": {
+            "_comment": { "type": "string" },
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicit default-off runtime guard. false means no shadow artifact read and no dual-read audit write."
+            },
+            "maxReadBytes": {
+              "type": "number",
+              "default": 1000000,
+              "minimum": 1000,
+              "description": "Maximum bytes read per shadow artifact JSON file during session_start audit. Oversized artifacts record shadow_invalid and do not affect legacy injection."
+            },
+            "staleAfterMs": {
+              "type": "number",
+              "default": 86400000,
+              "minimum": 0,
+              "description": "Shadow decision file age threshold for marking the dual-read audit row stale. Staleness is diagnostic only and never changes injection."
+            }
+          }
         }
       }
     },

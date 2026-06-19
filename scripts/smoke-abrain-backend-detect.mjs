@@ -451,6 +451,7 @@ const vaultReaderSrc = path.join(repoRoot, "extensions/abrain/vault-reader.ts");
 const vaultBashSrc = path.join(repoRoot, "extensions/abrain/vault-bash.ts");
 const brainLayoutSrc = path.join(repoRoot, "extensions/abrain/brain-layout.ts");
 const ruleInjectorSrc = path.join(repoRoot, "extensions/abrain/rule-injector/index.ts");
+const ruleInjectorDualReadAuditSrc = path.join(repoRoot, "extensions/abrain/rule-injector/dualread-audit.ts");
 fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapSrc));
 fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
@@ -524,11 +525,15 @@ for (const m of ["parser", "utils", "settings", "direction-impact"]) {
 const footerStatusPath = path.join(sharedTargetDir, "footer-status.cjs");
 fs.writeFileSync(footerStatusPath, transpileTsToCjs(path.join(repoRoot, "extensions/_shared/footer-status.ts")));
 fs.copyFileSync(footerStatusPath, path.join(sharedTargetDir, "footer-status.js"));
+const ruleInjectorDualReadAuditCompiled = transpileTsToCjs(ruleInjectorDualReadAuditSrc);
+fs.writeFileSync(path.join(tmpDir, "rule-injector", "dualread-audit.cjs"), ruleInjectorDualReadAuditCompiled);
+fs.copyFileSync(path.join(tmpDir, "rule-injector", "dualread-audit.cjs"), path.join(tmpDir, "rule-injector", "dualread-audit.js"));
 let ruleInjectorCompiled = transpileTsToCjs(ruleInjectorSrc)
   .replace(/require\("\.\.\/\.\.\/_shared\/footer-status"\)/g, 'require("../_shared/footer-status.cjs")')
   .replace(/require\("\.\.\/\.\.\/_shared\/runtime"\)/g, 'require("../_shared/runtime.cjs")')
   .replace(/require\("\.\.\/\.\.\/memory\/parser"\)/g, 'require("../memory/parser.cjs")')
-  .replace(/require\("\.\.\/\.\.\/memory\/utils"\)/g, 'require("../memory/utils.cjs")');
+  .replace(/require\("\.\.\/\.\.\/memory\/utils"\)/g, 'require("../memory/utils.cjs")')
+  .replace(/require\("\.\/dualread-audit"\)/g, 'require("./dualread-audit.cjs")');
 fs.writeFileSync(path.join(tmpDir, "rule-injector", "index.cjs"), ruleInjectorCompiled);
 fs.copyFileSync(path.join(tmpDir, "rule-injector", "index.cjs"), path.join(tmpDir, "rule-injector", "index.js"));
 fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), 'module.exports = require("./rule-injector/index.cjs");\n');
