@@ -8,6 +8,7 @@ status: accepted
 - **状态**：Accepted（2026-05-09，核心方向不变）。各 phase 的 ship 状态 / commit / file:line 是代码派生事实，不在 docs 镜像（REQ-006）——见下文 `## 实施现状` 的派生指针。
 - **部分取代**：[ADR 0013](0013-asymmetric-trust-three-lanes.md) Lane B（manual promote project→world）/ Lane D（auto-promote）——abrain 七区拓扑下不再有 promote 概念，sediment writer 直接将条目路由到七区内一个，详 §D3。
 - **部分被取代**：§D5 早期 `_bindings.md` + git remote / cwd 前缀推断的 project binding 方案被 [ADR 0017](0017-project-binding-strict-mode.md) B4.5 strict binding 取代（`.abrain-project.json` + `_project.json` + `local-map.json` 三层验证）。
+- **存储 SOT 口径被修订**：[ADR 0039](0039-constraint-pipeline-reset.md) 将旧 "Markdown + git 是 source of truth" 改读为 L1 Evidence Event SOT + L2 Markdown View + L3 SQLite 派生层；canonical memory 不再是实时写时语义裁决直接修改的本体，而是 append-only evidence 的物化投影。
 - **修订**：v1.4（2026-05-09，desktop-bias correction——vault unlock 从 OS keychain 依赖转为 portable identity （ssh-key/gpg-file/passphrase Tier 1），容器场景从 "不支持" 升 first-class）、v1.3（2026-05-09，incorporate Round 5 复核 P0 修订，含首次真代码修订）、v1.2（2026-05-09，incorporate Round 4 复核 P0 修订）、v1.1（2026-05-09，incorporate Round 3 复核 P0 修订）
 - **日期**：2026-05-09
 - **决策者**：alfadb
@@ -67,7 +68,7 @@ ADR 0013 的 Lane B（manual promote project→world）和 Lane D（auto-promote
 |---|---|---|---|---|
 | **A** explicit MEMORY | `MEMORY: ... END_MEMORY` | `projects/<active>/` | 高 | ✅ 已有，迁移目标 |
 | **C** auto-write | sediment LLM 后台 extract | `projects/<active>/` 或 `knowledge/` | 中 | ✅ 已有，迁移目标 |
-| **G** about-me declare | `/about-me` 或 `MEMORY-ABOUT-ME:` block | `identity/` 或 `habits/` 或 `skills/`（按内容路由，**非** lane↔目录绑定） | 高 | 🆕 |
+| **G** about-me declare | `/about-me` 或 `MEMORY-ABOUT-ME:` block | `identity/` 或 `habits/` 或 `skills/`（按内容路由，**非** lane↔目录绑定） | 高 | 🆕（ADR 0039 后属于过渡/诊断显式入口，不是长期用户管理大脑界面；最终应由自然对话产生 L1 evidence event 再投影） |
 | **V** vault declare | `/secret <key>` 等系列命令（**同步**：user slash → main pi 进程内 vaultWriter library 同步调用 → 加密落盘 → 立即可用。**不走 sediment IPC**（v1.2 修订 N1） | 全局或项目级 vault | 最高 | 🆕 |
 | ~~B promote~~ / ~~D auto-promote~~ | — | — | — | ⛔ 失去意义（abrain 内部无 promote） |
 
@@ -112,7 +113,7 @@ ADR 0013 的 Lane B（manual promote project→world）和 Lane D（auto-promote
    - **层 2 best-effort residual surface**（已知 trade-off）：LLM 仍可通过通用 tool（bash / edit / write / dispatch_agents）间接写 brain SOT——例如 bash `secret-tool lookup` + `age -e` 手写加密文件、bash `pi /secret` spawn 子 pi（不走 dispatch_agents 路径）。防御手段：§6.5.1 stdout 默认不回流 + §6.6 redaction + sediment audit 后置检测三者叠加，但**不是机制保证**。详 §坟处 #10。
    - **Lane V 同步路径**（v1.2 引入）：user slash command `/secret`（用户物理键入）触发 main pi 进程内 vaultWriter 同步调用。user typing 是面向 TUI 的独立路径，不进 LLM tool surface，**由层 1 不变量保护**。Lane G `/about-me` 仍走 sediment 异步 agent_end 路径。
    - **UI substrate 共享边界**（ADR 0022 P3b后，2026-05-18）：Lane V 的 `vault_release` UI 与 Lane LLM-facing 的 `prompt_user` 工具共享 `<PromptDialog>` overlay substrate（`extensions/abrain/prompt-user/ui/PromptDialog.ts`）。**但 UI 是唯一共享位**：Lane trust 层 / grant 状态（`releaseSessionGrants` / `releaseRememberDenies` / `bashOutputSessionGrants` vs prompt_user 的 manager pending map） / audit lane（`vault_release` / `bash_output` vs `prompt_user`） / writer path（vault-writer.ts vs sediment）均独立。Vault 对话走 `extensions/abrain/vault-authorize.ts` 远路记账，不走 `prompt-user/service.askPromptUser`；vault 有独立的 concurrent gate（`__vaultDialogInFlight`）不占用 prompt_user 的 INV-I 名额。介面共享节省 TUI 代码重复，但不变量上两条 lane 仍然是平行的：`smoke:abrain-vault-reader` 的 INV-E assertion 锁住 “vault-authorize.ts 累计导出均为 function，零 module-level state”。
-2. **Markdown + git 是 source of truth**（vault 例外：plaintext 永不进 git；encrypted artifacts + metadata 可作为 SOT 进 private git）：索引/derived view 可重建。
+2. **Markdown + git 是 source of truth**（vault 例外：plaintext 永不进 git；encrypted artifacts + metadata 可作为 SOT 进 private git）：索引/derived view 可重建。**（被 ADR 0039 存储分层取代：SOT 现为 L1 Evidence Event SOT + L2 Markdown View + L3 SQLite 派生层；Markdown 不再是唯一真相源，而是 L2 派生审计视图。）**
 3. **Facade 不暴露 scope/backend/source_path** 给 LLM ranking surface：`memory_search(query)` 签名无多余形参（`scope` 不存在于 schema）。例外：`memory_get(slug)` 是 exact lookup/debug view，可返回 scope/source_path 供调试——不是 LLM 选后端的机制。
 4. **跨 project vault 不互见**：active project（**boot-time snapshot**，详 spec §5.4）的 vault + 全局 vault 进 LLM context；其他 project 的 vault 连元数据都不暴露。会话中 bash `cd` 不改变 active project。
 5. **vault 明文进 LLM context 必须 user-explicit 授权**：`vault_release` 工具调用 + TUI 弹框确认；best-effort redaction（不是绝对保证）但默认排除是硬不变量。**补充**：引用了 `$VAULT_*` env 的 bash 命令 stdout/stderr **默认不回流 LLM**，需用户 once-授权（详 spec §6.5.1）——这是 LLM 主动 exfiltration 的机制性防御，不仅依赖 redaction 过滤器。

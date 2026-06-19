@@ -12,7 +12,7 @@ status: accepted
 ## 方向（canonical → `direction.md#INV-GROUND-TRUTH-TIERED` / `requirements.md#REQ-004`）
 
 - **根因**：把"用户显式指令"与"LLM 推断假设"当同一信号类是 silent-loss 的根。两者分流：classifier 管 directive→Tier-1，extractor 管 inferred→Tier-2，权限不相交。
-- **Tier-1 = provenance-gated 确定性提交**：仅当 verbatim quote 结构性源自 USER-role + is_directive + durable；router/curator 输出空间排除 skip/stage；源门挡 transcript-content 注入（README 里的 "always use Yarn" 不是 Tier-1）。
+- **Tier-1 = provenance-gated 确定性提交**：仅当 verbatim quote 结构性源自 USER-role + is_directive + durable；router/curator 输出空间排除 skip/stage；源门挡 transcript-content 注入（README 里的 "always use Yarn" 不是 Tier-1）。**（ADR 0039 修订写入形态：Tier-1 不再等于实时确定性提交 active rule，而是确定性 append witnessed Evidence Event；后续由对应域 projector / compiler 生成稳定投影。Provenance tier 与 compilation maturity 是正交轴。）**
 - Outcome edge 闭合写-only 环（矛盾降权、自回声先减）；Jaccard 仅 dedup prefilter 非自动 merge；staging 不是 Tier-1 路径；分层收敛为 AX-SCOPE/AX-PROVENANCE/AX-MATURITY + f-CATEGORY，GTier 是写时谓词非存储层。
 
 ## 机制（已分解入 abrain，逐条 slug）

@@ -137,6 +137,8 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | [0022](./0022-prompt-user-tool.md) | prompt_user 工具（任务相关决策） |
 | [0023](./0023-session-start-rule-injection.md) | rules 区 + 第二大脑心智模型 |
 
+> **ADR 0039 统一证据架构修订了 0014 / 0023 / 0028 的写入与存储口径**：旧 "Markdown + git 是 source of truth" 与 active rule 直写表述按 evidence → projector / compiler → stable view 读；canonical memory 是 append-only evidence 的物化投影，不再是实时写时语义裁决直接修改的本体。详见 [ADR 0039 §9](./0039-constraint-pipeline-reset.md#9-对既有-adr-的修订)。
+
 > **已删除的 gbrain 时代 ADR**（0002 / 0004 / 0005 / 0007 / 0008 / 0011 / 0012 + 0024-r5 快照）：架构已迁至 markdown+git，叙事见 [../memory-architecture.md](../memory-architecture.md)，逐字原文见 git history。编号刻意不连续、不留 stub（降噪）。
 
 ---

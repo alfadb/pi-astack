@@ -7,7 +7,7 @@ status: accepted
 
 > 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **17 条 typed entry** 存入第二大脑（含 INV-R1..R10 活契约理据），逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-004`）+ [`direction.md`](../direction.md)（`INV-GROUND-TRUTH-TIERED`）。原机制 prose（825 行，含 §1.4 威胁模型 / §11 演化史 / INV-R1..R10）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
-- **状态**：Accepted（R5；部分被 ADR 0024/0028 修订）。
+- **状态**：Accepted（R5；部分被 ADR 0024/0028 修订；ADR 0039 后 rules 区不再是写时 active source-of-truth 文件集合，而是 Compiled Constraint View 的呈现或兼容投影；自然对话学规则仍成立，但稳定注入读取 compiled view）。
 
 ## 方向（canonical → `requirements.md#REQ-004` / `direction.md#INV-GROUND-TRUTH-TIERED`）
 

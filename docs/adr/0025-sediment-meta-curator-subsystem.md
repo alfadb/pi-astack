@@ -39,4 +39,4 @@ abrain slugs：`prompt-version-field-p0-mandatory-infrastructure`
 
 ### 4.6 静默归档 + 回滚窗口
 
-abrain slugs：`archive-live-use-bridge-detection` · `archive-git-rm-after-reviewer-final-judgment` · `archive-cross-device-absolute-timestamp-no-reset` · `archive-existing-entry-migration-steps`
+abrain slugs：`archive-live-use-bridge-detection` · `archive-git-rm-after-reviewer-final-judgment`（**注：此机制条目为历史记录，自治硬删除授权已被 ADR 0031 / ADR 0039 取代；自治遗忘终点是 `archived` 全文 runtime tombstone，`git rm` 不在自治授权内**） · `archive-cross-device-absolute-timestamp-no-reset` · `archive-existing-entry-migration-steps`
