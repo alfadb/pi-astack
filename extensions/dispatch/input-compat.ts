@@ -7,7 +7,7 @@
  * Handles:
  *  - JSON-stringified arrays/objects (up to 2 levels of unwrap)
  *  - tools array → CSV string coercion
- *  - timeoutMs string → number coercion
+ *  - timeoutMs / maxOutputTokens string → number coercion
  *  - task array coercion (single task → [task])
  */
 
@@ -21,6 +21,7 @@ export interface TaskSpec {
   role?: string;
   tools?: string;
   timeoutMs?: number;
+  maxOutputTokens?: number;
 }
 
 // ── core: unwrap stringified values ────────────────────────────
@@ -75,6 +76,16 @@ export function normalizeTimeout(raw: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * Normalize maxOutputTokens: string → positive integer.
+ */
+export function normalizeMaxOutputTokens(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.floor(n);
+}
+
 // ── task normalization ─────────────────────────────────────────
 
 /**
@@ -91,6 +102,7 @@ export function normalizeTaskSpec(raw: unknown): TaskSpec {
     role: t.role ? String(t.role) : undefined,
     tools: normalizeTools(t.tools),
     timeoutMs: normalizeTimeout(t.timeoutMs),
+    maxOutputTokens: normalizeMaxOutputTokens(t.maxOutputTokens),
   };
 }
 
