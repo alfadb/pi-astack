@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * Smoke test: ADR 0039 P2 Constraint Evidence Event PR2.
+ * Smoke test: ADR 0039 P2 Constraint Evidence Event PR2/PR3.
  *
- * Offline only: pure functions + fixture events. No runtime hook, no append writer,
- * no real abrain writes, and no canonical memory mutation.
+ * Offline only: pure functions + fixture events. No runtime hook, no real abrain
+ * writes, and no canonical memory mutation. PR3 append checks use temporary trees.
  */
 
 import fs from "node:fs";
@@ -18,11 +18,22 @@ const require = createRequire(import.meta.url);
 const ts = require("typescript");
 
 const failures = [];
+const pending = [];
 let total = 0;
 function check(name, fn) {
   total += 1;
   try {
-    fn();
+    const result = fn();
+    if (result && typeof result.then === "function") {
+      pending.push(result.then(
+        () => console.log(`  ok    ${name}`),
+        (err) => {
+          failures.push({ name, err });
+          console.log(`  FAIL  ${name}\n        ${err && err.message ? err.message : err}`);
+        },
+      ));
+      return;
+    }
     console.log(`  ok    ${name}`);
   } catch (err) {
     failures.push({ name, err });
@@ -60,6 +71,7 @@ for (const file of [
   "extensions/sediment/constraint-evidence/diagnostics.ts",
   "extensions/sediment/constraint-evidence/hash-envelope.ts",
   "extensions/sediment/constraint-evidence/read.ts",
+  "extensions/sediment/constraint-evidence/append.ts",
   "extensions/sediment/constraint-evidence/status.ts",
 ]) {
   stageTs(outRoot, file);
@@ -87,9 +99,30 @@ const {
   validateConstraintEvidenceEnvelope,
 } = require(path.join(outRoot, "sediment", "constraint-evidence", "read.js"));
 const {
+  appendConstraintEvidenceEvent,
+  guardConstraintEvidencePath,
+} = require(path.join(outRoot, "sediment", "constraint-evidence", "append.js"));
+const {
   markStaleQueuedConstraintEvents,
   summarizeConstraintEventProjectionStatus,
 } = require(path.join(outRoot, "sediment", "constraint-evidence", "status.js"));
+
+function listFiles(root) {
+  if (!fs.existsSync(root)) return [];
+  const out = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      if (entry.isFile()) out.push(path.relative(root, full).split(path.sep).join("/"));
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+function treeHash(root) {
+  return sha256Hex(listFiles(root).map((rel) => `${rel}:${sha256Hex(fs.readFileSync(path.join(root, rel), "utf8"))}`).join("\n"));
+}
 
 function fixtureBody(overrides = {}) {
   return {
@@ -322,7 +355,96 @@ check("projection status summary counts queued and stale records", () => {
   assert(marked[0].status === "stale", "queued event not marked stale");
 });
 
-check("PR2 module does not import mutation symbols or runtime hooks", () => {
+check("append writer writes event under content-addressed L1 path", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-abrain-"));
+  const body = fixtureBody({ device_event_seq: 101 });
+  const result = await appendConstraintEvidenceEvent({ abrainHome, body });
+  assert(result.ok && result.status === "appended", `append failed: ${result.diagnostics.map((diagnostic) => diagnostic.code).join(",")}`);
+  assert(fs.existsSync(result.filePath), "event file missing");
+  assert(result.filePath.endsWith(constraintEvidenceEventRelativePath(result.eventId)), "wrong event path");
+  const text = fs.readFileSync(result.filePath, "utf8");
+  assert(text.endsWith("\n"), "event file lacks final newline");
+  const parsed = parseConstraintEvidenceEnvelopeJson(text, {
+    abrainHome,
+    filePath: result.filePath,
+    relativePath: constraintEvidenceEventRelativePath(result.eventId),
+  });
+  assert(parsed.ok, parsed.diagnostics.map((diagnostic) => diagnostic.message).join("; "));
+  const temps = listFiles(abrainHome).filter((file) => file.endsWith(".tmp"));
+  assert(temps.length === 0, `temp files left behind: ${temps.join(",")}`);
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("append writer returns idempotent duplicate for identical event", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-abrain-"));
+  const body = fixtureBody({ device_event_seq: 102 });
+  const first = await appendConstraintEvidenceEvent({ abrainHome, body });
+  const second = await appendConstraintEvidenceEvent({ abrainHome, body });
+  assert(first.ok && first.status === "appended", "first append did not write");
+  assert(second.ok && second.status === "idempotent_duplicate", "second append was not idempotent");
+  assert(second.diagnostics.some((diagnostic) => diagnostic.code === "CE_APPEND_IDEMPOTENT_DUPLICATE"), "missing duplicate diagnostic");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("append writer rejects existing path with different content", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-abrain-"));
+  const body = fixtureBody({ device_event_seq: 103 });
+  const first = await appendConstraintEvidenceEvent({ abrainHome, body });
+  assert(first.ok, "first append failed");
+  fs.writeFileSync(first.filePath, `${JSON.stringify({ collision: true })}\n`, "utf8");
+  const second = await appendConstraintEvidenceEvent({ abrainHome, body });
+  assert(!second.ok && second.status === "collision", "collision was not rejected");
+  assert(second.diagnostics.some((diagnostic) => diagnostic.code === "CE_HASH_PATH_COLLISION"), "missing collision diagnostic");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("append writer blocks sanitizer-blocked event before writing L1", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-abrain-"));
+  const body = fixtureBody({
+    device_event_seq: 104,
+    sanitizer: {
+      sanitizer_name: "fixture-sanitizer",
+      sanitizer_version: "v1",
+      status: "blocked",
+      replacements_count: 0,
+      blocked_reason: "secret-like payload",
+    },
+  });
+  const result = await appendConstraintEvidenceEvent({ abrainHome, body });
+  assert(!result.ok && result.status === "blocked", "blocked event was written");
+  assert(result.filePath && !fs.existsSync(result.filePath), "blocked event file exists");
+  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "CE_SANITIZER_BLOCKED"), "missing blocked diagnostic");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("path guard rejects canonical memory targets", () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-abrain-"));
+  const rejected = guardConstraintEvidencePath({
+    abrainHome,
+    targetPath: path.join(abrainHome, "rules", "always", "bad.md"),
+  });
+  assert(!rejected.ok, "canonical rules target was allowed");
+  const allowed = guardConstraintEvidencePath({
+    abrainHome,
+    targetPath: path.join(abrainHome, "l1", "events", "aa", "bb", "event.json"),
+  });
+  assert(allowed.ok, "event target was rejected");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("append writer leaves canonical rules tree unchanged", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-abrain-"));
+  const rulesDir = path.join(abrainHome, "rules");
+  writeFile(path.join(rulesDir, "always", "existing.md"), "---\nstatus: active\n---\n\n# Existing\n");
+  const before = treeHash(rulesDir);
+  const result = await appendConstraintEvidenceEvent({ abrainHome, body: fixtureBody({ device_event_seq: 105 }) });
+  assert(result.ok, "append failed");
+  const after = treeHash(rulesDir);
+  assert(before === after, "canonical rules tree changed");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("PR2/PR3 module does not import mutation symbols or runtime hooks", () => {
   const dir = path.join(repoRoot, "extensions", "sediment", "constraint-evidence");
   const files = fs.readdirSync(dir).filter((file) => file.endsWith(".ts"));
   const combined = files.map((file) => fs.readFileSync(path.join(dir, file), "utf8")).join("\n");
@@ -346,6 +468,7 @@ check("PR2 module does not import mutation symbols or runtime hooks", () => {
   }
 });
 
+await Promise.all(pending);
 fs.rmSync(outRoot, { recursive: true, force: true });
 
 if (failures.length > 0) {
