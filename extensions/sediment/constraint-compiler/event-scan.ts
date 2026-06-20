@@ -45,6 +45,29 @@ function maybeEventIdFromPath(file: string): string | undefined {
   return isSha256Hex(base) ? base : undefined;
 }
 
+// ADR0039 NS-2 (4×T0 unanimous 2026-06-20): l1/events/sha256/ is a MULTI-DOMAIN
+// content-addressed store — knowledge-evidence, constraint-evidence and
+// constraint-projection (固化) envelopes all share it. Cleanly skip KNOWN foreign
+// envelope schemas BEFORE the constraint parse so they are not mis-counted as
+// invalid constraint evidence (which would collapse the compiler coverageRatio
+// and can silently disable compiled-view injection at minCoverageRatio). This is
+// an ALLOWLIST, NOT a blanket skip: an unknown/mangled schema still falls through
+// to the full parse and surfaces as invalid — never silently swallow a corrupted
+// genuine constraint event (§4: 显式信号不静默丢失).
+const FOREIGN_SKIP_ENVELOPE_SCHEMAS = new Set<string>([
+  "knowledge-evidence-envelope/v1",
+  "constraint-projection-envelope/v1",
+]);
+
+function peekEnvelopeSchema(raw: string): string | undefined {
+  try {
+    const value = JSON.parse(raw) as { schema?: unknown };
+    return typeof value.schema === "string" ? value.schema : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function mapEvidenceDiagnostic(diagnostic: ConstraintEvidenceDiagnostic, fallbackEventId?: string): ConstraintShadowDiagnostic {
   const eventIds = diagnostic.eventIds.length ? diagnostic.eventIds : (fallbackEventId ? [fallbackEventId] : []);
   const sourceRecordIds = eventIds.map((eventId) => `event:${eventId}`);
@@ -165,6 +188,8 @@ export async function scanConstraintEvidenceEvents(options: { abrainHome: string
     const relativePath = path.relative(abrainHome, file).split(path.sep).join("/");
     try {
       const raw = await fs.readFile(file, "utf-8");
+      const peekedSchema = peekEnvelopeSchema(raw);
+      if (peekedSchema !== undefined && FOREIGN_SKIP_ENVELOPE_SCHEMAS.has(peekedSchema)) continue;
       const parsed = parseConstraintEvidenceEnvelopeJson(raw, { abrainHome, filePath: file, relativePath });
       diagnostics.push(...parsed.diagnostics.map((diagnostic) => mapEvidenceDiagnostic(diagnostic, fallbackEventId)));
       if (!parsed.ok) {

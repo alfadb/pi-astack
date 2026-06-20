@@ -569,6 +569,31 @@ check("event scanner reads valid L1 events and maps event diagnostics", async ()
   assert(scan.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(`event:${notMemory.event_id}`)), "not-memory diagnostic missing");
 });
 
+check("event scanner cleanly skips foreign envelope schemas, surfaces unknown/malformed (ADR0039 NS-2)", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-foreign-"));
+  const signal = writeConstraintEvidenceEvent(abrainHome, { session_id: "s", turn_id: "t" });
+  const writeRawEvent = (hex, content) =>
+    writeFile(path.join(abrainHome, "l1", "events", "sha256", hex.slice(0, 2), hex.slice(2, 4), `${hex}.json`), content);
+  const knowHex = "a1".repeat(32);
+  writeRawEvent(knowHex, `${JSON.stringify({ schema: "knowledge-evidence-envelope/v1", event_id: knowHex, body_hash: knowHex, body: { event_schema_version: "knowledge-evidence-event/v1", event_type: "knowledge_entry_observed" } }, null, 2)}\n`);
+  const projHex = "b2".repeat(32);
+  writeRawEvent(projHex, `${JSON.stringify({ schema: "constraint-projection-envelope/v1", event_id: projHex, body_hash: projHex, body: { event_schema_version: "constraint-projection-event/v1", event_type: "constraint_compiled_view_produced" } }, null, 2)}\n`);
+  const unkHex = "c3".repeat(32);
+  writeRawEvent(unkHex, `${JSON.stringify({ schema: "totally-unknown-envelope/v9", event_id: unkHex, body_hash: unkHex, body: {} }, null, 2)}\n`);
+  const badHex = "d4".repeat(32);
+  writeRawEvent(badHex, "{ this is not valid json ");
+  const scan = await scanConstraintEvidenceEvents({ abrainHome });
+  // only the real constraint evidence event is admitted as input
+  assert(scan.events.length === 1 && scan.events[0].eventId === signal.event_id, `expected 1 admitted constraint event, got ${scan.events.length}`);
+  // known foreign envelopes (knowledge + 固化 projection) are NOT counted invalid (the live-bug fix)
+  assert(!scan.invalidEventIds.includes(knowHex) && !scan.invalidEventIds.includes(projHex), "foreign envelope wrongly marked invalid");
+  const diagStr = JSON.stringify(scan.diagnostics);
+  assert(!diagStr.includes(knowHex) && !diagStr.includes(projHex), "foreign envelope wrongly emitted a diagnostic (should be a clean skip)");
+  // unknown schema + malformed json MUST surface as invalid (never silently swallowed)
+  assert(scan.invalidEventIds.includes(unkHex), "unknown envelope schema not surfaced as invalid");
+  assert(scan.invalidEventIds.includes(badHex), "malformed json not surfaced as invalid");
+});
+
 check("event coverage reports queued stale projected and legacy delta", () => {
   const projectedEvent = {
     sourceKind: "constraint_event",
