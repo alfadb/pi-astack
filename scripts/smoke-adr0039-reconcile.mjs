@@ -217,13 +217,66 @@ function isStrictKnowledgeEvent(body) {
   );
 }
 
+function splitMarkdownProjection(raw) {
+  const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  return match ? { frontmatter: match[1], body: match[2].trim() } : { frontmatter: "", body: raw.trim() };
+}
+
+function frontmatterScalar(frontmatter, key) {
+  const match = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
+  if (!match) return "";
+  const raw = match[1].trim();
+  if (raw.startsWith('"') && raw.endsWith('"')) {
+    try { return JSON.parse(raw); } catch { return raw.slice(1, -1); }
+  }
+  return raw;
+}
+
+function eventSearchCorpusRow(envelope, renderedMarkdown) {
+  const body = envelope.body;
+  const payload = body.payload ?? {};
+  const scope = body.scope ?? {};
+  return {
+    event_id: envelope.event_id,
+    slug: String(payload.slug ?? ""),
+    scope: String(scope.kind ?? ""),
+    project_id: String(scope.project_id ?? ""),
+    title: String(payload.title ?? ""),
+    kind: String(payload.kind ?? ""),
+    status: String(payload.status ?? ""),
+    confidence: Number(payload.confidence ?? 0),
+    provenance: String(payload.provenance ?? ""),
+    trigger_phrases: Array.isArray(payload.trigger_phrases) ? payload.trigger_phrases.map(String).sort() : [],
+    derives_from: Array.isArray(payload.derives_from) ? payload.derives_from.map(String).sort() : [],
+    search_text_hash: sha256Hex(String(renderedMarkdown).trim()),
+  };
+}
+
+function projectionSearchCorpusRow(eventId, raw) {
+  const parsed = splitMarkdownProjection(raw);
+  return {
+    event_id: eventId,
+    slug: path.basename(`/${frontmatterScalar(parsed.frontmatter, "id")}`).replace(/^.*:/, ""),
+    scope: frontmatterScalar(parsed.frontmatter, "scope"),
+    project_id: frontmatterScalar(parsed.frontmatter, "project_id"),
+    title: frontmatterScalar(parsed.frontmatter, "title"),
+    kind: frontmatterScalar(parsed.frontmatter, "kind"),
+    status: frontmatterScalar(parsed.frontmatter, "status"),
+    confidence: Number(frontmatterScalar(parsed.frontmatter, "confidence") || 0),
+    provenance: frontmatterScalar(parsed.frontmatter, "provenance"),
+    search_text_hash: sha256Hex(raw.trim()),
+  };
+}
+
 function validateKnowledgeProjection(abrainHome) {
   const latest = path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest");
-  if (!fs.existsSync(latest)) return { projectedFiles: 0, failures: [] };
+  if (!fs.existsSync(latest)) return { projectedFiles: 0, failures: [], searchCorpusRows: 0 };
   const failures = [];
   const knowledge = loadKnowledgeEvidenceModule();
   const markdownFiles = listFiles(latest, (file) => file.endsWith(".md"));
   const projectedByEvent = new Map();
+  const searchRowsFromEvents = new Map();
+  const searchRowsFromProjection = new Map();
   const manifest = path.join(latest, "manifest.json");
   const manifestEventIds = readManifestEventIds(manifest);
   if (!fs.existsSync(manifest) && markdownFiles.length > 0) failures.push("knowledge-projection/latest: missing_manifest_for_projected_markdown");
@@ -263,6 +316,13 @@ function validateKnowledgeProjection(abrainHome) {
       : renderLegacyKnowledgeProjectionMarkdown(envelope.body, eventId);
     if (raw !== expectedBytes) failures.push(`${rel}: projection_byte_mismatch:${eventId}`);
     projectedByEvent.set(eventId, rel);
+    const eventRow = eventSearchCorpusRow(envelope, expectedBytes);
+    const projectionRow = projectionSearchCorpusRow(eventId, raw);
+    searchRowsFromEvents.set(eventId, eventRow);
+    searchRowsFromProjection.set(eventId, projectionRow);
+    for (const key of ["slug", "scope", "project_id", "title", "kind", "status", "confidence", "provenance", "search_text_hash"]) {
+      if (eventRow[key] !== projectionRow[key]) failures.push(`${rel}: search_corpus_ab_mismatch:${key}:${eventId}`);
+    }
   }
   for (const eventFile of listFiles(path.join(abrainHome, "l1", "events"), (file) => file.endsWith(".json"))) {
     const envelope = readJson(eventFile);
@@ -274,8 +334,9 @@ function validateKnowledgeProjection(abrainHome) {
       continue;
     }
     if (!fs.existsSync(expectedPath)) failures.push(`${relativeUnix(abrainHome, eventFile)}: missing_projected_markdown:${eventId}`);
+    if (!searchRowsFromProjection.has(eventId)) failures.push(`${relativeUnix(abrainHome, eventFile)}: missing_search_corpus_projection:${eventId}`);
   }
-  return { projectedFiles: markdownFiles.length, failures, projectedEvents: projectedByEvent.size };
+  return { projectedFiles: markdownFiles.length, failures, projectedEvents: projectedByEvent.size, searchCorpusRows: searchRowsFromEvents.size };
 }
 
 function readDecisionInputRoot(decisionPath) {
@@ -363,6 +424,7 @@ function printResult(result) {
   console.log(`abrainHome: ${result.abrainHome}`);
   console.log(`l1_events: ${result.l1.files}`);
   console.log(`knowledge_projected_files: ${result.knowledge.projectedFiles}`);
+  console.log(`knowledge_search_corpus_rows: ${result.knowledge.searchCorpusRows ?? 0}`);
   console.log(`constraint_shadow_present: ${result.constraint.present}`);
   console.log(`l3_db: ${result.l3.dbPath || "unavailable"}`);
   if (result.failures.length) {
