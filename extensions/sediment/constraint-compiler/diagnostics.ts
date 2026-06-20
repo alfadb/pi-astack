@@ -32,6 +32,7 @@ export const DIAGNOSTIC_CONSUMERS: Record<ConstraintShadowDiagnosticCode, Constr
   SC_LEGACY_PARALLEL_DELTA: ["diff_report", "p3_injection_readiness"],
   SC_EVENT_NOT_MEMORY_LEAK: ["not_memory_audit", "p3_injection_readiness"],
   SC_EVENT_SCOPE_BREACH: ["scope_review", "p3_injection_readiness"],
+  SC_L2_WRITE_FAILED: ["manual_investigation"],
 };
 
 const DEFAULT_SEVERITY: Record<ConstraintShadowDiagnosticCode, ConstraintShadowDiagnosticSeverity> = {
@@ -61,6 +62,7 @@ const DEFAULT_SEVERITY: Record<ConstraintShadowDiagnosticCode, ConstraintShadowD
   SC_LEGACY_PARALLEL_DELTA: "info",
   SC_EVENT_NOT_MEMORY_LEAK: "error",
   SC_EVENT_SCOPE_BREACH: "error",
+  SC_L2_WRITE_FAILED: "error",
 };
 
 export function diagnosticId(code: ConstraintShadowDiagnosticCode, sourceRecordIds: string[] = [], message = ""): string {

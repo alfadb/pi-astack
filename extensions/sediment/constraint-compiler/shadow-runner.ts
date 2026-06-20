@@ -372,6 +372,17 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     }
   }
 
+  // ADR0039 Constraint L2 (4×T0 v3 bundle-b): the repo block is best-effort and
+  // swallows 固化/L2 write failures into l2Projection.status. Surface any
+  // non-{written,unchanged} status as an SC_L2_WRITE_FAILED diagnostic so the
+  // silent failure is observable in the returned diagnostics stream.
+  const l2WriteFailed = l2Projection && l2Projection.status !== "written" && l2Projection.status !== "unchanged"
+    ? makeDiagnostic({
+        code: "SC_L2_WRITE_FAILED",
+        message: `constraint L2 repo-mode 固化/render failed: ${l2Projection.status}`,
+        data: { status: l2Projection.status, decisionHash: l2Projection.decisionHash, ...(l2Projection.eventId ? { eventId: l2Projection.eventId } : {}) },
+      })
+    : undefined;
   return {
     ok: true,
     inputRootHash: normalized.inputRootHash,
@@ -382,7 +393,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     diff,
     eventCoverage: coverage.report,
     legacyParallelDelta: legacyParallelDelta.report,
-    diagnostics: allDiagnostics,
+    diagnostics: l2WriteFailed ? dedupeDiagnostics([...allDiagnostics, l2WriteFailed]) : allDiagnostics,
     ...(artifactResult?.ok ? { artifacts: artifactResult.artifacts } : {}),
     ...(l2Projection ? { l2Projection } : {}),
   };

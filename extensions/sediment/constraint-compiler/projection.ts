@@ -143,6 +143,24 @@ export async function appendConstraintProjectionEvent(abrainHome: string, body: 
   return wrote ? { ok: true, status: "appended", eventId, filePath } : { ok: false, status: "write_failed", eventId, filePath };
 }
 
+// ADR0039 Constraint L2 (4×T0 v3 bundle-a, deepseek comparator): among a set of
+// constraint projection events, the chronologically-latest is created_at_utc
+// DESC, tiebreak event_id DESC. There is no DAG edge between projection events
+// (causal_parents point to constraint-evidence INPUT events, not prior
+// projections), and the compiler is single-writer (one device) so wall-clock is
+// self-consistent; the event_id (content hash) tiebreak guarantees determinism
+// under timestamp collision. Used by the reconcile stale-L2 scan: if the L2's
+// referenced event is not the latest, a newer 固化 event was orphaned (e.g. a
+// swallowed l2_write_failed) and the L2 is stale.
+export function selectLatestConstraintProjectionEventId(
+  events: ReadonlyArray<{ eventId: string; createdAtUtc: string }>,
+): string | null {
+  if (!events.length) return null;
+  return [...events].sort((a, b) =>
+    b.createdAtUtc.localeCompare(a.createdAtUtc) || b.eventId.localeCompare(a.eventId),
+  )[0].eventId;
+}
+
 export interface FixateConstraintL2Options {
   abrainHome: string;
   decision: ValidatedConstraintCompilerDecision;

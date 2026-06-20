@@ -484,6 +484,37 @@ function validateConstraintL2(abrainHome) {
   } catch (err) {
     failures.push(`constraint-l2: re_render_failed:${eventId}:${err && err.message ? String(err.message).slice(0, 80) : err}`);
   }
+  // ADR0039 Constraint L2 (4×T0 v3 bundle-a): the byte-compare above only
+  // validates L2 against its REFERENCED event. If a NEWER 固化 event exists (e.g.
+  // a swallowed l2_write_failed left L2 stale while the L1 append succeeded), the
+  // L2 is silently stale and reconcile would false-pass. Detect it: the L2's
+  // referenced event MUST be the chronologically-latest constraint-projection
+  // event (created_at_utc desc, tiebreak event_id desc — mirrors
+  // selectLatestConstraintProjectionEventId in projection.ts; single-writer so
+  // wall-clock is self-consistent).
+  const projectionEvents = [];
+  const eventsRoot = path.join(abrainHome, "l1", "events", "sha256");
+  const walkProjections = (dir) => {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walkProjections(full);
+      else if (entry.isFile() && entry.name.endsWith(".json")) {
+        try {
+          const env = JSON.parse(fs.readFileSync(full, "utf8"));
+          if (env.schema === "constraint-projection-envelope/v1" && env.event_id) {
+            projectionEvents.push({ eventId: env.event_id, createdAtUtc: (env.body && env.body.created_at_utc) || "" });
+          }
+        } catch { /* skip unreadable */ }
+      }
+    }
+  };
+  walkProjections(eventsRoot);
+  if (projectionEvents.length) {
+    const latest = [...projectionEvents].sort((a, b) =>
+      b.createdAtUtc.localeCompare(a.createdAtUtc) || b.eventId.localeCompare(a.eventId))[0].eventId;
+    if (latest !== eventId) failures.push(`constraint-l2: stale_l2_newer_projection_exists:${eventId}:${latest}`);
+  }
   return { present: true, failures };
 }
 

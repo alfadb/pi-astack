@@ -129,7 +129,7 @@ const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment",
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
 const { createPiAiConstraintCompilerInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
-const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION } = require(path.join(outRoot, "sediment", "constraint-compiler", "projection.js"));
+const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, selectLatestConstraintProjectionEventId } = require(path.join(outRoot, "sediment", "constraint-compiler", "projection.js"));
 const { renderConstraintL2View } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
 const { buildCorpusSplitReport, stratumForRow, CORPUS_SPLIT_STRATA } = require(path.join(outRoot, "sediment", "constraint-compiler", "corpus-split.js"));
 
@@ -1071,6 +1071,19 @@ check("repo-mode 固化s decision to immutable L1 + renders deterministic git L2
   assert(!s1.l2Projection, "state-mode must not 固化/produce l2Projection");
   assert(!fs.existsSync(path.join(home2, "l2")), "state-mode wrote an l2/ tree");
   assert(fs.existsSync(path.join(home2, ".state", "sediment", "constraint-shadow", "latest", "compiled-view.md")), "state-mode .state bundle missing");
+});
+
+check("selectLatestConstraintProjectionEventId: created_at desc, tiebreak event_id desc (4×T0 v3 bundle-a)", () => {
+  assert(selectLatestConstraintProjectionEventId([]) === null, "empty -> null");
+  assert(selectLatestConstraintProjectionEventId([
+    { eventId: "aaa", createdAtUtc: "2026-01-01T00:00:00.000Z" },
+    { eventId: "ccc", createdAtUtc: "2026-06-01T00:00:00.000Z" },
+    { eventId: "bbb", createdAtUtc: "2026-03-01T00:00:00.000Z" },
+  ]) === "ccc", "latest by created_at_utc desc");
+  assert(selectLatestConstraintProjectionEventId([
+    { eventId: "aaa", createdAtUtc: "2026-06-01T00:00:00.000Z" },
+    { eventId: "zzz", createdAtUtc: "2026-06-01T00:00:00.000Z" },
+  ]) === "zzz", "tiebreak event_id desc on created_at collision");
 });
 
 check("shadow runner fails closed on artifact path violation", async () => {

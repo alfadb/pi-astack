@@ -140,6 +140,8 @@
     "smoke:outcome-classifier-enrich": "node scripts/smoke-outcome-classifier-enrich.mjs",
     "smoke:script-registry-drift": "node scripts/smoke-script-registry-drift.mjs",
     "smoke:constraint-shadow-compiler": "node scripts/smoke-constraint-shadow-compiler.mjs",
+    "smoke:constraint-l2-repo-preflight": "node scripts/smoke-constraint-l2-repo-preflight.mjs",
+    "verify:constraint-l2-flip": "node scripts/verify-constraint-l2-flip.mjs --abrain ~/.abrain",
     "smoke:constraint-evidence-event": "node scripts/smoke-constraint-evidence-event.mjs",
     "smoke:adr0039-reconcile": "node scripts/smoke-adr0039-reconcile.mjs",
     "reconcile:adr0039": "node scripts/smoke-adr0039-reconcile.mjs --abrain ~/.abrain",

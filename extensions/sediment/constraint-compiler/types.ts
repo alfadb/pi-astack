@@ -477,7 +477,11 @@ export type ConstraintShadowDiagnosticCode =
   | "SC_EVENT_STALE_THRESHOLD"
   | "SC_LEGACY_PARALLEL_DELTA"
   | "SC_EVENT_NOT_MEMORY_LEAK"
-  | "SC_EVENT_SCOPE_BREACH";
+  | "SC_EVENT_SCOPE_BREACH"
+  // ADR0039 Constraint L2 (4×T0 v3 bundle-b): repo-mode 固化/L2 write failed.
+  // The repo block is best-effort (never breaks the run); this surfaces the
+  // otherwise-swallowed failure into the diagnostics stream for observability.
+  | "SC_L2_WRITE_FAILED";
 
 export interface ConstraintShadowDiagnostic {
   id: string;
