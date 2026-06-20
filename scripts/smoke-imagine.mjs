@@ -25,9 +25,10 @@ function failMsg(msg) { fail++; console.log(`  ✗ ${msg}`); }
 
 console.log("\n  validateEnum:");
 
-const ALLOWED_SIZES = ["1024x1024", "1792x1024", "1024x1792"];
-const ALLOWED_QUALITIES = ["standard", "hd"];
+const ALLOWED_SIZES = ["auto", "1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792"];
+const ALLOWED_QUALITIES = ["auto", "low", "medium", "high", "standard", "hd"];
 const ALLOWED_STYLES = ["vivid", "natural"];
+const ALLOWED_INPUT_FIDELITIES = ["low", "high"];
 
 function validateEnum(value, allowed, label) {
   if (value === undefined || value === null) return undefined;
@@ -51,6 +52,13 @@ function validateEnum(value, allowed, label) {
     else failMsg(`returned ${r}`);
   } catch { failMsg("landscape size rejected"); }
 
+  // valid edit portrait size
+  try {
+    const r = validateEnum("1024x1536", ALLOWED_SIZES, "size");
+    if (r === "1024x1536") ok("valid edit portrait size passes");
+    else failMsg(`returned ${r}`);
+  } catch { failMsg("edit portrait size rejected"); }
+
   // invalid size
   try {
     validateEnum("bad", ALLOWED_SIZES, "size");
@@ -73,6 +81,13 @@ function validateEnum(value, allowed, label) {
     if (r === "standard") ok("quality case-insensitive");
     else failMsg(`returned ${r}`);
   } catch { failMsg("Standard quality rejected"); }
+
+  // valid GPT image quality
+  try {
+    const r = validateEnum("High", ALLOWED_QUALITIES, "quality");
+    if (r === "high") ok("GPT image quality case-insensitive");
+    else failMsg(`returned ${r}`);
+  } catch { failMsg("High quality rejected"); }
 
   // invalid quality
   try {
@@ -113,6 +128,22 @@ function validateEnum(value, allowed, label) {
     failMsg("invalid style accepted");
   } catch (e) {
     if (e.message.includes("Invalid style")) ok("invalid style rejected");
+    else failMsg(`wrong error: ${e.message}`);
+  }
+
+  // valid input fidelity
+  try {
+    const r = validateEnum("High", ALLOWED_INPUT_FIDELITIES, "inputFidelity");
+    if (r === "high") ok("inputFidelity case-insensitive");
+    else failMsg(`returned ${r}`);
+  } catch { failMsg("High inputFidelity rejected"); }
+
+  // invalid input fidelity
+  try {
+    validateEnum("medium", ALLOWED_INPUT_FIDELITIES, "inputFidelity");
+    failMsg("invalid inputFidelity accepted");
+  } catch (e) {
+    if (e.message.includes("Invalid inputFidelity")) ok("invalid inputFidelity rejected");
     else failMsg(`wrong error: ${e.message}`);
   }
 }
@@ -186,7 +217,60 @@ console.log("\n  style → prompt suffix:");
   else failMsg(`empty style changed prompt: ${r4}`);
 }
 
-// ── Test 4: Error paths (no API key) ────────────────────────────
+// ── Test 4: imagePath safety helper shape ───────────────────────
+
+console.log("\n  imagePath safety:");
+
+{
+  const IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+  };
+
+  function resolveInputImagePathSync(cwd, imagePath) {
+    const trimmed = imagePath.trim();
+    if (!trimmed) return { ok: false, error: "imagePath is empty" };
+    const root = path.resolve(cwd || process.cwd());
+    const resolved = path.resolve(root, trimmed);
+    const relative = path.relative(root, resolved);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      return { ok: false, error: `imagePath must stay inside cwd (${root}): ${imagePath}` };
+    }
+    const ext = path.extname(resolved).toLowerCase();
+    const mimeType = IMAGE_MIME_TYPES[ext];
+    if (!mimeType) {
+      return { ok: false, error: `Unsupported image type "${ext || "none"}". Allowed: png, jpg, jpeg, webp` };
+    }
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+      return { ok: false, error: `imagePath is not a file: ${imagePath}` };
+    }
+    return { ok: true, path: resolved, mimeType };
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-imagine-path-"));
+  try {
+    const png = path.join(tmp, "source.png");
+    fs.writeFileSync(png, "not really png; only path validation smoke");
+
+    const r1 = resolveInputImagePathSync(tmp, "source.png");
+    if (r1.ok && r1.mimeType === "image/png") ok("png imagePath inside cwd accepted");
+    else failMsg(`png imagePath rejected: ${r1.error}`);
+
+    const r2 = resolveInputImagePathSync(tmp, "../outside.png");
+    if (!r2.ok && r2.error.includes("inside cwd")) ok("parent traversal imagePath rejected");
+    else failMsg("parent traversal imagePath accepted");
+
+    const r3 = resolveInputImagePathSync(tmp, "source.gif");
+    if (!r3.ok && r3.error.includes("Unsupported image type")) ok("unsupported image type rejected");
+    else failMsg("unsupported image type accepted");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ── Test 5: Error paths (no API key) ────────────────────────────
 
 console.log("\n  error paths:");
 
@@ -233,9 +317,21 @@ console.log("\n  error paths:");
   const hasStyleInjection = source.includes("[Style:");
   if (hasStyleInjection) ok("style injection into prompt exists");
   else failMsg("style injection not found");
+
+  const hasImagePathParam = source.includes("imagePath: Type.Optional");
+  if (hasImagePathParam) ok("imagePath parameter exists");
+  else failMsg("imagePath parameter not found");
+
+  const hasImagesEditEndpoint = source.includes("/v1/images/edits");
+  if (hasImagesEditEndpoint) ok("image edit endpoint exists");
+  else failMsg("image edit endpoint not found");
+
+  const hasInputFidelity = source.includes("input_fidelity");
+  if (hasInputFidelity) ok("inputFidelity maps to input_fidelity");
+  else failMsg("input_fidelity mapping not found");
 }
 
-// ── Test 5: PI_ABRAIN_DISABLED guard ──────────────────────────────
+// ── Test 6: PI_ABRAIN_DISABLED guard ──────────────────────────────
 
 console.log("\n  sub-pi isolation:");
 

@@ -1,12 +1,13 @@
 /**
- * imagine extension for pi-astack — AI image generation via OpenAI Responses API.
+ * imagine extension for pi-astack — AI image generation + image-to-image editing via OpenAI APIs.
  *
  * Rewritten 2026-05-07 to piggyback on the user's existing openai provider
  * configuration. No model registration, no custom provider, no piStack config
  * needed — just uses pi's native modelRegistry to:
  *   1. getApiKeyForProvider("openai") → API key
  *   2. Find openai-responses model → get baseUrl (the Responses API endpoint)
- *   3. Call POST {baseUrl}/v1/responses with image_generation_call
+ *   3. Call POST {baseUrl}/v1/responses with image_generation_call for text-to-image
+ *   4. Call POST {baseUrl}/v1/images/edits for image-to-image when `imagePath` is provided
  *
  * No extra config: key and baseUrl both come from the openai provider — the
  * same one your chat models use. If you've pointed openai at a proxy, images
@@ -30,9 +31,16 @@ import { Type } from "typebox";
  *  its own subdirectory under .pi-astack/ for clean separation. The whole
  *  .pi-astack/ tree should be in the project's .gitignore. */
 const OUTPUT_DIR = path.join(".pi-astack", "imagine");
-const ALLOWED_SIZES = ["1024x1024", "1792x1024", "1024x1792"] as const;
-const ALLOWED_QUALITIES = ["standard", "hd"] as const;
+const ALLOWED_SIZES = ["auto", "1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792"] as const;
+const ALLOWED_QUALITIES = ["auto", "low", "medium", "high", "standard", "hd"] as const;
 const ALLOWED_STYLES = ["vivid", "natural"] as const;
+const ALLOWED_INPUT_FIDELITIES = ["low", "high"] as const;
+const IMAGE_MIME_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+};
 
 // ── Settings (read at call time, no model in code) ──────────────
 
@@ -69,6 +77,32 @@ async function makeOutputPath(cwd: string): Promise<string> {
   return path.join(outDir, filename);
 }
 
+// ── Input image helpers ─────────────────────────────────────────
+
+async function resolveInputImagePath(cwd: string, imagePath: string): Promise<{ ok: true; path: string; mimeType: string } | { ok: false; error: string }> {
+  const trimmed = imagePath.trim();
+  if (!trimmed) return { ok: false, error: "imagePath is empty" };
+  const root = path.resolve(cwd || process.cwd());
+  const resolved = path.resolve(root, trimmed);
+  const relative = path.relative(root, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return { ok: false, error: `imagePath must stay inside cwd (${root}): ${imagePath}` };
+  }
+  const ext = path.extname(resolved).toLowerCase();
+  const mimeType = IMAGE_MIME_TYPES[ext];
+  if (!mimeType) {
+    return { ok: false, error: `Unsupported image type "${ext || "none"}". Allowed: png, jpg, jpeg, webp` };
+  }
+  try {
+    const stat = await fs.stat(resolved);
+    if (!stat.isFile()) return { ok: false, error: `imagePath is not a file: ${imagePath}` };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `Cannot read imagePath ${imagePath}: ${msg}` };
+  }
+  return { ok: true, path: resolved, mimeType };
+}
+
 // ── Core image generation ───────────────────────────────────────
 
 interface ImagineParams {
@@ -77,6 +111,8 @@ interface ImagineParams {
   size?: string;
   quality?: string;
   style?: string;
+  imagePath?: string;
+  inputFidelity?: string;
 }
 
 // 2026-05-24 fix: explicit discriminated-union return type. Without
@@ -95,9 +131,123 @@ type GenerateImageResult =
       actualSize: string | undefined;
       requestedQuality: string | undefined;
       actualQuality: string | undefined;
+      mode: "generate" | "edit";
+      imagePath?: string;
       imageBase64?: string;
       mimeType?: "image/png";
     };
+
+async function saveImageResult(
+  imageBase64: string,
+  params: {
+    cwd: string;
+    callerSupportsImages: boolean;
+    model: string;
+    requestedSize: string | undefined;
+    actualSize: string | undefined;
+    requestedQuality: string | undefined;
+    actualQuality: string | undefined;
+    mode: "generate" | "edit";
+    imagePath?: string;
+  },
+): Promise<GenerateImageResult> {
+  const filepath = await makeOutputPath(params.cwd);
+  try {
+    await fs.writeFile(filepath, Buffer.from(imageBase64, "base64"));
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `Failed to save image to disk: ${msg}` };
+  }
+
+  return {
+    ok: true,
+    filepath,
+    model: params.model,
+    requestedSize: params.requestedSize,
+    actualSize: params.actualSize,
+    requestedQuality: params.requestedQuality,
+    actualQuality: params.actualQuality,
+    mode: params.mode,
+    ...(params.imagePath ? { imagePath: params.imagePath } : {}),
+    ...(params.callerSupportsImages
+      ? { imageBase64, mimeType: "image/png" as const }
+      : {}),
+  };
+}
+
+async function editImage(
+  params: ImagineParams,
+  opts: {
+    cwd: string;
+    callerSupportsImages: boolean;
+    signal?: AbortSignal;
+    baseUrl: string;
+    apiKey: string;
+  },
+): Promise<GenerateImageResult> {
+  const baseUrl = opts.baseUrl.replace(/\/$/, "");
+  const model = params.model || loadImagineDefaultModel();
+  const inputImage = await resolveInputImagePath(opts.cwd, params.imagePath ?? "");
+  if (!inputImage.ok) return { ok: false, error: inputImage.error };
+
+  const styledPrompt = params.style
+    ? `${params.prompt}\n\n[Style: ${params.style}]`
+    : params.prompt;
+
+  const imageBytes = await fs.readFile(inputImage.path);
+  const form = new FormData();
+  form.set("model", model);
+  form.set("prompt", styledPrompt);
+  form.set("image", new Blob([imageBytes], { type: inputImage.mimeType }), path.basename(inputImage.path));
+  form.set("output_format", "png");
+  if (params.size) form.set("size", params.size);
+  if (params.quality) form.set("quality", params.quality);
+  if (params.inputFidelity) form.set("input_fidelity", params.inputFidelity);
+
+  const url = `${baseUrl}/v1/images/edits`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${opts.apiKey}` },
+      body: form,
+      signal: opts.signal,
+    });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `Image edit network error: ${msg}` };
+  }
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "unknown");
+    return {
+      ok: false,
+      error: `Image edit HTTP ${response.status}: ${errText.slice(0, 500)}`,
+    };
+  }
+
+  const data = (await response.json()) as Record<string, unknown>;
+  const output = data.data as Array<Record<string, unknown>> | undefined;
+  const imageBase64 = typeof output?.[0]?.b64_json === "string" ? output[0].b64_json : "";
+  if (!imageBase64) {
+    return {
+      ok: false,
+      error: `No b64_json image in edit API response. Request was sent to: ${url}`,
+    };
+  }
+
+  return saveImageResult(imageBase64, {
+    cwd: opts.cwd,
+    callerSupportsImages: opts.callerSupportsImages,
+    model,
+    requestedSize: params.size,
+    actualSize: data.size as string | undefined,
+    requestedQuality: params.quality,
+    actualQuality: data.quality as string | undefined,
+    mode: "edit",
+    imagePath: inputImage.path,
+  });
+}
 
 async function generateImage(
   params: ImagineParams,
@@ -109,6 +259,8 @@ async function generateImage(
     apiKey: string;
   },
 ): Promise<GenerateImageResult> {
+  if (params.imagePath) return editImage(params, opts);
+
   const baseUrl = opts.baseUrl.replace(/\/$/, "");
 
   // Style is encoded into the prompt — the Responses image_generation_call
@@ -129,8 +281,8 @@ async function generateImage(
     // image arrives in the final `response.completed` event.
     stream: true,
   };
-  if (params.size) reqBody.size = params.size;
-  if (params.quality) reqBody.quality = params.quality;
+  if (params.size && params.size !== "auto") reqBody.size = params.size;
+  if (params.quality && params.quality !== "auto") reqBody.quality = params.quality;
 
   const url = `${baseUrl}/v1/responses`;
   let response: Response;
@@ -196,26 +348,16 @@ async function generateImage(
     };
   }
 
-  const filepath = await makeOutputPath(opts.cwd);
-  try {
-    await fs.writeFile(filepath, Buffer.from(imageBase64, "base64"));
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, error: `Failed to save image to disk: ${msg}` };
-  }
-
-  return {
-    ok: true,
-    filepath,
+  return saveImageResult(imageBase64, {
+    cwd: opts.cwd,
+    callerSupportsImages: opts.callerSupportsImages,
     model: reqBody.model as string,
     requestedSize: params.size,
     actualSize,
     requestedQuality: params.quality,
     actualQuality,
-    ...(opts.callerSupportsImages
-      ? { imageBase64, mimeType: "image/png" as const }
-      : {}),
-  };
+    mode: "generate",
+  });
 }
 
 // ── SSE parsing ─────────────────────────────────────────────────
@@ -337,13 +479,15 @@ export default function (pi: ExtensionAPI) {
     name: "imagine",
     label: "AI Image Generation",
     description:
-      "Generate images via the OpenAI Responses API. " +
-      "Call when the user asks to create, generate, or draw an image. " +
+      "Generate images or edit an existing local image via OpenAI image APIs. " +
+      "Call when the user asks to create, generate, draw, or image-to-image edit. " +
       "Uses your existing openai provider API key and endpoint — no extra config.",
-    promptSnippet: "imagine(prompt, size?, quality?, style?, model?)",
+    promptSnippet: "imagine(prompt, imagePath?, size?, quality?, style?, inputFidelity?, model?)",
     promptGuidelines: [
-      "Use imagine when the user asks for image generation, illustration, or visual creation.",
-      "Default model is read from pi-astack-settings.json → imagine.defaultModel. Pass `model` param to override per call. size / quality default to whatever the OpenAI Responses API picks unless you explicitly pass them; common values are size: 1024x1024 | 1792x1024 | 1024x1792, quality: standard | hd.",
+      "Use imagine when the user asks for image generation, illustration, visual creation, or image-to-image editing.",
+      "For image-to-image edits, pass `imagePath` as a local png/jpg/jpeg/webp path inside cwd; imagine will call the OpenAI image edit endpoint and save a new PNG without overwriting the source.",
+      "Default model is read from pi-astack-settings.json → imagine.defaultModel. Pass `model` param to override per call. size / quality default to whatever the OpenAI image API picks unless you explicitly pass them; common values are size: 1024x1024 | 1536x1024 | 1024x1536 | 1792x1024 | 1024x1792, quality: auto | low | medium | high | standard | hd.",
+      "Use `inputFidelity: high` for edits where preserving the source image's identity, layout, or text matters; omit it for freer edits.",
       "Uses your existing openai provider API key — no additional configuration needed.",
       "The tool saves the PNG to .pi-astack/imagine/ and returns it inline when the caller supports images.",
     ],
@@ -355,13 +499,19 @@ export default function (pi: ExtensionAPI) {
         description: "OpenAI image model id. If omitted, the tool uses pi-astack-settings.json → imagine.defaultModel. If both are absent, the call fails closed.",
       })),
       size: Type.Optional(Type.String({
-        description: "Image dimensions: 1024x1024, 1792x1024, or 1024x1792",
+        description: "Image dimensions. Common values: auto, 1024x1024, 1536x1024, 1024x1536, 1792x1024, 1024x1792.",
       })),
       quality: Type.Optional(Type.String({
-        description: "Quality level: standard or hd. OpenAI API default when omitted: standard.",
+        description: "Quality level. Common values: auto, low, medium, high, standard, hd.",
       })),
       style: Type.Optional(Type.String({
         description: "Style hint injected as prompt suffix '[Style: vivid|natural]'. vivid = hyper-real/dramatic, natural = realistic/subdued.",
+      })),
+      imagePath: Type.Optional(Type.String({
+        description: "Local source image path for image-to-image editing. Must be png/jpg/jpeg/webp and stay inside cwd.",
+      })),
+      inputFidelity: Type.Optional(Type.String({
+        description: "Image edit fidelity: low or high. Use high when preserving source layout, identity, or text matters.",
       })),
     }),
 
@@ -379,12 +529,16 @@ export default function (pi: ExtensionAPI) {
       const size = validateEnum(args.size, ALLOWED_SIZES, "size");
       const quality = validateEnum(args.quality, ALLOWED_QUALITIES, "quality");
       const style = validateEnum(args.style, ALLOWED_STYLES, "style");
+      const imagePath = args.imagePath ? String(args.imagePath) : undefined;
+      const inputFidelity = validateEnum(args.inputFidelity, ALLOWED_INPUT_FIDELITIES, "inputFidelity");
       return {
         prompt: String(args.prompt ?? ""),
         ...(model !== undefined ? { model } : {}),
         ...(size !== undefined ? { size } : {}),
         ...(quality !== undefined ? { quality } : {}),
         ...(style !== undefined ? { style } : {}),
+        ...(imagePath !== undefined ? { imagePath } : {}),
+        ...(inputFidelity !== undefined ? { inputFidelity } : {}),
       };
     },
 
@@ -438,7 +592,7 @@ export default function (pi: ExtensionAPI) {
       // Remove trailing slashes, then strip /v1 if it's the last path segment
       const baseUrl = raw.replace(/\/+$/, "").replace(/\/v1$/, "");
 
-      // ── Generate ──────────────────────────────────────────
+      // ── Generate / Edit ───────────────────────────────────
       const model = ctx.model as { input?: string[] } | undefined;
       const callerSupportsImages = !!model?.input?.includes?.("image");
 
@@ -465,7 +619,8 @@ export default function (pi: ExtensionAPI) {
       const qualityInfo = result.actualQuality ?? result.requestedQuality ?? "default";
       const text =
         `✅ Image saved: ${result.filepath}\n` +
-        `Model: ${result.model} | Size: ${sizeInfo} | Quality: ${qualityInfo}`;
+        `Mode: ${result.mode} | Model: ${result.model} | Size: ${sizeInfo} | Quality: ${qualityInfo}` +
+        (result.imagePath ? `\nSource: ${result.imagePath}` : "");
 
       const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
         { type: "text" as const, text },
@@ -486,6 +641,8 @@ export default function (pi: ExtensionAPI) {
           actualSize: result.actualSize,
           requestedQuality: result.requestedQuality,
           actualQuality: result.actualQuality,
+          mode: result.mode,
+          sourcePath: result.imagePath,
           path: result.filepath,
         },
       };
