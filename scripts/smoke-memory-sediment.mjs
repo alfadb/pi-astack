@@ -1536,6 +1536,20 @@ Original Pensieve seed content.
       assert(ovTotal.length === 2, `overlay reader must cap to maxEntries=2 over same dirs, got ${ovTotal.length}`);
     }
 
+    // Regression: memory_search returned [] because memory.embedding switched to the
+    // dedicated baseUrl/apiKey form (no `provider`), and selectStage0Pool's guard only
+    // checked `provider` → stage0 disabled → stage1Skip took an unranked corpus slice →
+    // late-ordered slugs never reached stage2. embeddingConfigured must accept the
+    // dedicated form (model + baseUrl) so dense ranking stays on.
+    {
+      const { embeddingConfigured } = req("./memory/llm-search.js");
+      assert(embeddingConfigured({ model: "doubao-embedding-vision", baseUrl: "https://x/v1", apiKey: "k" }) === true, "embeddingConfigured must accept dedicated baseUrl config (production form, no provider)");
+      assert(embeddingConfigured({ model: "m", provider: "p" }) === true, "embeddingConfigured must accept registry provider config");
+      assert(embeddingConfigured({ model: "m" }) === false, "embeddingConfigured must reject model with no route (no provider, no baseUrl)");
+      assert(embeddingConfigured({ baseUrl: "https://x/v1" }) === false, "embeddingConfigured must reject baseUrl with no model");
+      assert(embeddingConfigured({}) === false, "embeddingConfigured must reject empty config");
+    }
+
     // Audit log remains project-local (forensic), even though entry markdown went to abrain.
     const auditRows = fs.readFileSync(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
     const correlatedAudit = auditRows.find((row) => row.operation === "create" && row.target === `project:${writerTarget2.projectId}:writer-correlation-fixture`);

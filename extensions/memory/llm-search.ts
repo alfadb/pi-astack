@@ -719,6 +719,17 @@ interface Stage0Pool {
  *  未配置 或 非-active-status 查询的 dense 盲区), 调用方回退全 corpus 喂 stage1
  *  (罕见+条目少, 可接受 — 修订 7)。query embed 失败 → 熔断 sparse-only(禁全库
  *  full-body — 修订 5), 短超时 + 不重试。 */
+/** Embedding is "configured" when there is a model AND a route to call it: either
+ *  a registry `provider` OR a dedicated `baseUrl` (memory.embedding baseUrl/apiKey,
+ *  the 2026-06-18 "专用配置" form). The earlier guard only checked `provider`, so the
+ *  dedicated form silently disabled stage0 — selectStage0Pool returned null, the
+ *  caller kept the FULL unranked corpus, and stage1Skip=true then took an arbitrary
+ *  corpus.slice(0, candidateLimit) (project-first ordering). Late-ordered (e.g.
+ *  world) slugs never reached stage2, so exact-match queries returned []. */
+export function embeddingConfigured(emb: { provider?: string; model?: string; baseUrl?: string }): boolean {
+  return !!emb.model && (!!emb.provider || !!emb.baseUrl);
+}
+
 export async function selectStage0Pool(
   query: string,
   corpus: MemoryEntry[],
@@ -727,7 +738,7 @@ export async function selectStage0Pool(
   filters: SearchFilters,
 ): Promise<Stage0Pool | null> {
   const emb = settings.embedding;
-  if (!emb.provider || !emb.model) return null; // 未配置 → 全 corpus
+  if (!embeddingConfigured(emb)) return null; // 未配置 → 全 corpus
   // P7(4×T0 设计 review): 非-active-status 查询(如 sediment curator 去重
   // status:["all"])不再回退全库 full_body —— 走 hybrid 缩候选: dense 在 active
   // 索引(非 active 不在索引、自然不返回, 无害) + sparse 扫全 corpus(含非 active,
