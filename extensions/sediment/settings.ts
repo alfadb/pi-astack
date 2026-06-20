@@ -99,6 +99,15 @@ export interface SedimentSettings {
      *  DAG topological sort, deterministic fold to one entry; single-event
      *  degenerates byte-identically to "single". Explicit rollback flag. */
     projectionMode: "single" | "topo";
+    /** ADR 0039 Phase C: which source is canonical for Knowledge reads (loadEntries).
+     *  "legacy" (default/rollback) = legacy markdown wins; projection appended last as
+     *  a bounded overlay (loses dedup). "projection_with_legacy_fallback" = UNBOUNDED
+     *  stable-view projection (l2/views/knowledge) inserted at FRONT, wins via
+     *  first-store-wins; legacy stays in the pool to fill slugs projection lacks.
+     *  "projection_only" = stable view only; legacy leaves the winning pool. Read flag
+     *  is hot (resolveSedimentSettings re-read each loadEntries). Multi-T0 consensus +
+     *  preflight (pi restart onto repo root) gate any value other than "legacy". */
+    canonicalReadMode: "legacy" | "projection_with_legacy_fallback" | "projection_only";
     /** ADR 0039 B-prep blocker③ (§6 bounded hot overlay): defensive caps on the
      *  knowledge projection OVERLAY reader (readKnowledgeProjectionStores). The
      *  overlay role must never grow unbounded (async projector backlog, runaway
@@ -285,6 +294,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     maxReadBytes: 1_000_000,
     l2OutputRoot: "state",
     projectionMode: "single",
+    canonicalReadMode: "legacy",
     hotOverlay: {
       maxEntries: 500,
       maxTokens: 2_000_000,
@@ -473,6 +483,7 @@ export function resolveSedimentSettings(): SedimentSettings {
       maxReadBytes: Math.max(1_000, Math.floor(asNumber((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.maxReadBytes, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.maxReadBytes))),
       l2OutputRoot: ((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.l2OutputRoot === "repo" ? "repo" : "state"),
       projectionMode: ((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.projectionMode === "topo" ? "topo" : "single"),
+      canonicalReadMode: (((m) => (m === "projection_with_legacy_fallback" || m === "projection_only") ? m : "legacy")((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.canonicalReadMode)),
       hotOverlay: {
         maxEntries: Math.max(1, Math.floor(asNumber(((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.hotOverlay as Record<string, unknown> | undefined)?.maxEntries, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.hotOverlay.maxEntries))),
         maxTokens: Math.max(1_000, Math.floor(asNumber(((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.hotOverlay as Record<string, unknown> | undefined)?.maxTokens, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.hotOverlay.maxTokens))),

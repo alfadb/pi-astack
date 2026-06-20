@@ -320,7 +320,7 @@ async function main() {
     // re-exercise its semantics through the writer in this smoke.
     const { parseAboutMeArgs, deriveAboutMeTitle, buildAboutMeFence } = req("./sediment/index.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
-    const { knowledgeEvidenceEventPath, readKnowledgeProjectionStores } = req("./sediment/knowledge-evidence.js");
+    const { knowledgeEvidenceEventPath, readKnowledgeProjectionStores, readKnowledgeStableViewStores } = req("./sediment/knowledge-evidence.js");
     // P2 fix (2026-05-14): smoke tests don't use real git repos, so disable
     // gitCommit by default. Tests that need git (migration tests) override
     // with gitCommit: true explicitly.
@@ -1503,6 +1503,37 @@ Original Pensieve seed content.
       // hotOverlayEnabled=false → no overlay stores at all.
       const offStores = await readKnowledgeProjectionStores({ abrainHome: ovTarget.abrainHome, settings: { ...ovSettings, knowledgeProjector: { ...ovSettings.knowledgeProjector, hotOverlayEnabled: false } } });
       assert(offStores.length === 0, "hotOverlayEnabled=false must return no stores");
+    }
+
+    // ADR 0039 Phase C: the UNBOUNDED stable-view reader returns full projection
+    // dirs WITHOUT a files allow-list; scanStore must read EVERY file even though
+    // the root sits UNDER l2/ (noHomeExclusions opt-out of the home-world l1/l2 glob).
+    {
+      const svTarget = setupAbrainTarget("stable-view");
+      const svLatest = path.join(svTarget.abrainHome, "l2", "views", "knowledge", "latest");
+      const svWorld = path.join(svLatest, "world");
+      const svProj = path.join(svLatest, "projects", svTarget.projectId);
+      fs.mkdirSync(svWorld, { recursive: true });
+      fs.mkdirSync(svProj, { recursive: true });
+      const wEntry = (root, slug, body) => fs.writeFileSync(path.join(root, `${slug}.md`), `---\nid: ${slug}\nkind: fact\nstatus: active\nscope: world\n---\n\n${body}\n`);
+      for (const s of ["sv-a", "sv-b", "sv-c"]) wEntry(svWorld, s, `stable ${s}`);
+      wEntry(svProj, "sv-d", "stable d");
+      const svKP = { enabled: true, hotOverlayEnabled: true, projectOnWrite: false, maxReadBytes: 1000000, l2OutputRoot: "repo", projectionMode: "topo", canonicalReadMode: "projection_with_legacy_fallback", hotOverlay: { maxEntries: 2, maxTokens: 2000000, deadlineMs: 30000 } };
+      const svSettings = { ...DEFAULT_SEDIMENT_SETTINGS, knowledgeProjector: svKP };
+      // (1) stable-view reader is UNBOUNDED: dir refs WITHOUT a files allow-list.
+      const svStores = await readKnowledgeStableViewStores({ abrainHome: svTarget.abrainHome, projectId: svTarget.projectId, settings: svSettings });
+      assert(svStores.length === 2, `stable-view should return project+world stores: ${JSON.stringify(svStores.map((s) => s.label))}`);
+      assert(svStores.every((s) => s.files === undefined), "stable-view stores must NOT carry a bounded files allow-list");
+      assert(svStores.some((s) => s.label === "knowledge-stable-world") && svStores.some((s) => s.label === "knowledge-stable-project"), `stable-view labels wrong: ${JSON.stringify(svStores.map((s) => s.label))}`);
+      // (2) scanStore reads ALL world stable-view files despite the root being under l2/.
+      const { scanStore } = req("./memory/parser.js");
+      const worldStable = svStores.find((s) => s.label === "knowledge-stable-world");
+      const scanned = await scanStore(worldStable, svTarget.abrainHome, { maxEntries: 1000, includeWorld: true });
+      assert(scanned.length === 3, `stable-view world scan must read all 3 entries (noHomeExclusions), got ${scanned.length}`);
+      // (3) contrast: the bounded OVERLAY reader (maxEntries=2) caps the SAME dirs to 2.
+      const ovStores2 = await readKnowledgeProjectionStores({ abrainHome: svTarget.abrainHome, projectId: svTarget.projectId, settings: svSettings });
+      const ovTotal = ovStores2.flatMap((s) => s.files || []);
+      assert(ovTotal.length === 2, `overlay reader must cap to maxEntries=2 over same dirs, got ${ovTotal.length}`);
     }
 
     // Audit log remains project-local (forensic), even though entry markdown went to abrain.

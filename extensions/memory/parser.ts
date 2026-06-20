@@ -10,7 +10,7 @@ import { compareTimestamps, normalizeBareSlug, prettyPath, stableUnique, titleFr
 import { parseDirectionImpact } from "./direction-impact";
 import { resolveActiveProject, abrainProjectDir } from "../_shared/runtime";
 import { resolveSedimentSettings } from "../sediment/settings";
-import { readKnowledgeProjectionStores } from "../sediment/knowledge-evidence";
+import { readKnowledgeProjectionStores, readKnowledgeStableViewStores } from "../sediment/knowledge-evidence";
 
 const execFileAsync = promisify(execFile);
 
@@ -33,7 +33,7 @@ const IGNORE_DIRS = new Set([
 // listFilesWithRg already excludes these via --glob; the walker fallback
 // must mirror that behaviour or the safety contract regresses whenever
 // rg is missing/timeout/failed.
-const WORLD_EXTRA_IGNORE_DIRS = new Set(["projects", "vault", "rules"]);
+const WORLD_EXTRA_IGNORE_DIRS = new Set(["projects", "vault", "rules", "l1", "l2"]);
 
 // Project store STAGING exclusion (ADR 0021 invariant #7 + ADR 0014 §3.5
 // staging lifecycle): the Lane G router downgrades low-confidence about-me
@@ -657,7 +657,7 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
 export async function listFilesWithRg(
   root: string,
   signal?: AbortSignal,
-  opts: { includeIgnored?: boolean; excludeStaging?: boolean } = {},
+  opts: { includeIgnored?: boolean; excludeStaging?: boolean; noHomeExclusions?: boolean } = {},
 ): Promise<string[] | null> {
   // P1-A audit fix 2026-05-16 (round 3, gpt-5.5): staging exclusion is
   // now opt-in. Previously it was hardcoded — but listFilesWithRg is a
@@ -687,12 +687,24 @@ export async function listFilesWithRg(
         "--glob", "!**/.state/**",
         "--glob", "!**/.index/**",
         "--glob", "!**/.git/**",
-        // World store root is ~/.abrain/ which contains projects/<id>/,
-        // vault/, and ADR 0023 rules/. Exclude them from the ordinary
-        // memory_search corpus; rules use a dedicated push-injection path.
-        "--glob", "!**/projects/**",
-        "--glob", "!**/vault/**",
-        "--glob", "!**/rules/**",
+        // World store root is ~/.abrain/ which contains projects/<id>/, vault/,
+        // ADR 0023 rules/, plus ADR 0039 l1/ (json Evidence Events) and l2/ (the
+        // projection view). Exclude them from the ordinary memory_search corpus;
+        // projections are read via the dedicated stable-view / overlay readers,
+        // rules via a dedicated push-injection path. Default ON (preserves world
+        // + lint/migrate behavior). ADR 0039: rg outputs ABSOLUTE paths and
+        // matches --glob against the FULL path, so a stable-view store rooted
+        // UNDER ~/.abrain/l2/ would have its entire tree dropped by !**/l2/**.
+        // Such stores set noHomeExclusions=true to opt out.
+        ...(opts.noHomeExclusions
+          ? []
+          : [
+              "--glob", "!**/projects/**",
+              "--glob", "!**/vault/**",
+              "--glob", "!**/rules/**",
+              "--glob", "!**/l1/**",
+              "--glob", "!**/l2/**",
+            ]),
         ...stagingGlobs.flatMap((g) => ["--glob", g]),
         root,
       ],
@@ -779,6 +791,11 @@ export async function scanStore(
   // projects/ which is already in WORLD_EXTRA_IGNORE_DIRS).
   const rgFiles = await listFilesWithRg(store.root, signal, {
     excludeStaging: store.scope === "project",
+    // ADR 0039: the stable-view projection stores are rooted UNDER ~/.abrain/l2/,
+    // so the home exclusions (which match rg's absolute paths, incl. !**/l2/**)
+    // would drop their entire tree. They opt out; every other store keeps the
+    // default-on home exclusions (unchanged world / project / lint / migrate).
+    noHomeExclusions: store.label === "knowledge-stable-project" || store.label === "knowledge-stable-world",
   });
   // World walker MUST exclude `projects/`, `vault/`, and `rules/` to
   // mirror the rg --glob exclusions. Without this, an `rg`-missing host
@@ -821,14 +838,25 @@ export async function loadEntries(
   );
   try {
     const resolved = resolveActiveProject(cwd, { abrainHome });
-    const projectionStores = await readKnowledgeProjectionStores({
-      abrainHome,
-      projectId: resolved.activeProject?.projectId,
-      settings: resolveSedimentSettings(),
-    });
-    stores.push(...projectionStores);
+    const projectId = resolved.activeProject?.projectId;
+    const sediment = resolveSedimentSettings();
+    // ADR 0039 Phase C: three-state canonical read source (hot flag).
+    const readMode = sediment.knowledgeProjector?.canonicalReadMode ?? "legacy";
+    if (readMode !== "legacy") {
+      // The UNBOUNDED stable-view projection becomes a PRIMARY store at the FRONT,
+      // winning over legacy via first-store-wins. projection_only removes legacy
+      // from the winning pool entirely (stable view + bounded overlay only).
+      const stableView = await readKnowledgeStableViewStores({ abrainHome, projectId, settings: sediment });
+      if (readMode === "projection_only") stores.length = 0;
+      stores.unshift(...stableView);
+    }
+    // Bounded hot overlay is always appended LAST (recent-events bridge, gap-fill
+    // only; loses dedup to whatever is ahead of it). In "legacy" mode this is the
+    // sole projection contribution; in projection modes it backstops the stable view.
+    const overlayStores = await readKnowledgeProjectionStores({ abrainHome, projectId, settings: sediment });
+    stores.push(...overlayStores);
   } catch {
-    // Projection overlay is optional; canonical stores remain the read truth.
+    // Projection overlay/stable-view is optional; canonical stores remain read truth.
   }
   if (stores.length === 0) return [];
 

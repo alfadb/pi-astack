@@ -457,6 +457,11 @@
               "default": "single",
               "description": "ADR 0039 B2. How a Knowledge L2 entry is projected. 'single' (default) lets one triggering event overwrite one markdown file. 'topo' aggregates all events for a (scope, slug) identity, topologically sorts the causal-parent DAG, and deterministically folds them to one entry; a single event degenerates byte-identically to 'single'. Explicit rollback flag."
             },
+            "canonicalReadMode": {
+              "enum": ["legacy", "projection_with_legacy_fallback", "projection_only"],
+              "default": "legacy",
+              "description": "ADR 0039 Phase C truth-face inversion. 'legacy' (default/rollback) = legacy markdown wins; projection is appended last as a bounded overlay and loses dedup. 'projection_with_legacy_fallback' = the UNBOUNDED stable-view projection (l2/views/knowledge) is inserted at the front and wins via first-store-wins, with legacy kept in the pool to fill slugs the projection lacks. 'projection_only' = stable view only; legacy leaves the winning pool (doctor-visible). The read flag is hot (re-read each loadEntries). Any value other than 'legacy' is gated by recorded multi-T0 consensus plus a preflight (pi restart onto repo root, reproject, blocker quality gates, reconcile/prepush PASS). Explicit rollback flag."
+            },
             "hotOverlay": {
               "type": "object",
               "additionalProperties": false,

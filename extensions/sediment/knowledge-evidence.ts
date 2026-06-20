@@ -685,8 +685,11 @@ export async function readKnowledgeProjectionStores(args: { abrainHome: string; 
 
   if (truncated || deadlineHit) {
     // Auditable overflow diagnostic (non-fatal; overlay is bounded not dropped).
+    // MUST land in gitignored .state — NOT under stateRoot, which equals the
+    // git-tracked l2/views/knowledge dir when l2OutputRoot=repo (the diagnostic
+    // is runtime noise, never a projection; tracking it pollutes the L2 view).
     try {
-      const diagPath = path.join(stateRoot(args.abrainHome, args.settings), "overlay-budget.jsonl");
+      const diagPath = path.join(args.abrainHome, ".state", "sediment", "knowledge-projection", "overlay-budget.jsonl");
       await fs.mkdir(path.dirname(diagPath), { recursive: true });
       await fs.appendFile(diagPath, `${JSON.stringify({
         ts: new Date().toISOString(),
@@ -711,4 +714,27 @@ export async function readKnowledgeProjectionStores(args: { abrainHome: string; 
     g.files.push(c.file);
   }
   return [...byRoot.values()];
+}
+
+/** ADR 0039 Phase C: the UNBOUNDED stable-view reader. Returns the full
+ *  l2/views/knowledge (or .state) projection dirs as primary StoreRefs WITHOUT a
+ *  `files` allow-list, so scanStore takes its normal full dir-walk path (same
+ *  machinery as legacy stores). This is the post-flip canonical "stable view"
+ *  role and MUST stay distinct from readKnowledgeProjectionStores (the bounded
+ *  "recent hot overlay" role) — never apply the overlay's count/token/time caps
+ *  here, or entries beyond the cap would silently vanish from the truth face.
+ *  Gated only by `enabled` (NOT hotOverlayEnabled, which gates the overlay). */
+export async function readKnowledgeStableViewStores(args: { abrainHome: string; projectId?: string; settings: SedimentSettings }): Promise<Array<{ scope: KnowledgeEvidenceScope; root: string; label: string }>> {
+  if (!args.settings.knowledgeProjector.enabled) return [];
+  const latest = path.join(stateRoot(args.abrainHome, args.settings), "latest");
+  const stores: Array<{ scope: KnowledgeEvidenceScope; root: string; label: string }> = [];
+  if (args.projectId) {
+    const projectRoot = path.join(latest, "projects", args.projectId);
+    const stat = await fs.stat(projectRoot).catch(() => null);
+    if (stat?.isDirectory()) stores.push({ scope: "project", root: projectRoot, label: "knowledge-stable-project" });
+  }
+  const worldRoot = path.join(latest, "world");
+  const worldStat = await fs.stat(worldRoot).catch(() => null);
+  if (worldStat?.isDirectory()) stores.push({ scope: "world", root: worldRoot, label: "knowledge-stable-world" });
+  return stores;
 }
