@@ -143,6 +143,7 @@
     "smoke:constraint-evidence-event": "node scripts/smoke-constraint-evidence-event.mjs",
     "smoke:adr0039-reconcile": "node scripts/smoke-adr0039-reconcile.mjs",
     "reconcile:adr0039": "node scripts/smoke-adr0039-reconcile.mjs --abrain ~/.abrain",
+    "prepush:adr0039": "node scripts/pre-push-adr0039-reconcile.mjs --abrain ~/.abrain",
     "smoke:adr-readme-anchors": "node scripts/smoke-adr-readme-anchors.mjs",
     "smoke:aggregator-llm-parse": "node scripts/smoke-aggregator-llm-parse.mjs",
     "smoke:aggregator-structural-context": "node scripts/smoke-aggregator-structural-context.mjs",

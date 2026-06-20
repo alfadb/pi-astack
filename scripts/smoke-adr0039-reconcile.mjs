@@ -4,7 +4,7 @@
  *
  * Default mode uses a temporary abrain tree and verifies the reconcile checks
  * catch corrupted L1 events and stale derived views. With --abrain it validates
- * a real tree without mutating it.
+ * a real tree and refreshes only the derived ADR0039 L3 SQLite mirror.
  */
 
 import { execFileSync } from "node:child_process";
@@ -69,13 +69,24 @@ function loadKnowledgeEvidenceModule() {
   return createRequire(path.join(outRoot, "runner.cjs"))("./sediment/knowledge-evidence.js");
 }
 
+function loadAdr0039L3Module() {
+  const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-l3-"));
+  stageTs(outRoot, "extensions/sediment/adr0039-l3.ts");
+  return createRequire(path.join(outRoot, "runner.cjs"))("./sediment/adr0039-l3.js");
+}
+
 function sha256Hex(input) {
   return crypto.createHash("sha256").update(input, "utf8").digest("hex");
 }
 
 function canonicalJson(value) {
   if (value === null) return "null";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("non-finite number in canonical JSON");
+    return JSON.stringify(Object.is(value, -0) ? 0 : value);
+  }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
@@ -140,11 +151,79 @@ function readManifestEventIds(file) {
   return [...ids];
 }
 
+function expectedKnowledgeOutputPath(abrainHome, body) {
+  const projectPart = body.scope?.kind === "world" ? "world" : `projects/${body.scope?.project_id || "unknown"}`;
+  return path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest", projectPart, `${body.payload?.slug}.md`);
+}
+
+function markdownString(value) {
+  if (/^[A-Za-z0-9_.:/@+-]+$/.test(value)) return value;
+  return JSON.stringify(value);
+}
+
+function markdownList(key, values) {
+  if (!Array.isArray(values) || values.length === 0) return [];
+  return [key + ":", ...values.map((value) => `  - ${markdownString(String(value))}`)];
+}
+
+function normalizeCompiledTruth(title, body) {
+  let text = String(body || "").trim().replace(/^##\s+Timeline\s*[\s\S]*$/m, "").trim();
+  text = text.replace(/^---$/gm, " ---");
+  if (!/^#\s+/m.test(text)) text = `# ${title}\n\n${text}`;
+  return text.trim();
+}
+
+function renderLegacyKnowledgeProjectionMarkdown(body, eventId) {
+  const timestamp = body.created_at_utc;
+  const payload = body.payload;
+  const id = body.scope.kind === "world" ? `world:${payload.slug}` : `project:${body.scope.project_id}:${payload.slug}`;
+  const frontmatter = [
+    "---",
+    `id: ${id}`,
+    `scope: ${body.scope.kind}`,
+    `kind: ${payload.kind}`,
+    `status: ${payload.status}`,
+    `confidence: ${payload.confidence}`,
+    `provenance: ${markdownString(payload.provenance)}`,
+    "schema_version: 1",
+    `title: ${markdownString(payload.title)}`,
+    `created: ${timestamp}`,
+    `updated: ${timestamp}`,
+    "sediment_projection: knowledge-evidence/v1",
+    `sediment_event_id: ${eventId}`,
+    ...markdownList("trigger_phrases", payload.trigger_phrases),
+    ...markdownList("derives_from", payload.derives_from),
+  ];
+  if (body.scope.kind === "project" && body.scope.project_id) frontmatter.push(`project_id: ${markdownString(body.scope.project_id)}`);
+  frontmatter.push("---", "");
+  return [
+    ...frontmatter,
+    normalizeCompiledTruth(payload.title, payload.compiled_truth),
+    "",
+    "## Timeline",
+    "",
+    `- ${timestamp} | ${body.session_id || "sediment"} | projected | ${payload.timeline_note || "projected from Knowledge Evidence Event"}`,
+    "",
+  ].join("\n");
+}
+
+function isStrictKnowledgeEvent(body) {
+  return Boolean(
+    body?.producer?.version === "adr0039-p5"
+    || body?.device_id
+    || body?.sanitizer
+    || body?.producer_nonce
+    || body?.device_event_seq,
+  );
+}
+
 function validateKnowledgeProjection(abrainHome) {
   const latest = path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest");
   if (!fs.existsSync(latest)) return { projectedFiles: 0, failures: [] };
   const failures = [];
+  const knowledge = loadKnowledgeEvidenceModule();
   const markdownFiles = listFiles(latest, (file) => file.endsWith(".md"));
+  const projectedByEvent = new Map();
   const manifest = path.join(latest, "manifest.json");
   const manifestEventIds = readManifestEventIds(manifest);
   if (!fs.existsSync(manifest) && markdownFiles.length > 0) failures.push("knowledge-projection/latest: missing_manifest_for_projected_markdown");
@@ -164,10 +243,39 @@ function validateKnowledgeProjection(abrainHome) {
       failures.push(`${rel}: missing_sediment_event_id`);
       continue;
     }
-    const eventPath = expectedEventPath(abrainHome, match[1]);
-    if (!fs.existsSync(eventPath)) failures.push(`${rel}: missing_l1_event:${match[1]}`);
+    const eventId = match[1];
+    const eventPath = expectedEventPath(abrainHome, eventId);
+    if (!fs.existsSync(eventPath)) {
+      failures.push(`${rel}: missing_l1_event:${eventId}`);
+      continue;
+    }
+    const envelope = readJson(eventPath);
+    const strict = isStrictKnowledgeEvent(envelope.body);
+    if (strict) {
+      const verify = knowledge.verifyKnowledgeEvidenceEnvelope?.(envelope);
+      if (verify && verify.ok !== true) failures.push(`${relativeUnix(abrainHome, eventPath)}: knowledge_envelope_${verify.reason}`);
+    }
+    const expectedPath = expectedKnowledgeOutputPath(abrainHome, envelope.body);
+    if (path.resolve(file) !== path.resolve(expectedPath)) failures.push(`${rel}: projection_path_mismatch`);
+    if (envelope.body?.intent?.operation_hint === "delete") failures.push(`${rel}: delete_event_left_projected_markdown:${eventId}`);
+    const expectedBytes = strict
+      ? knowledge.renderKnowledgeProjectionMarkdown(envelope.body, eventId)
+      : renderLegacyKnowledgeProjectionMarkdown(envelope.body, eventId);
+    if (raw !== expectedBytes) failures.push(`${rel}: projection_byte_mismatch:${eventId}`);
+    projectedByEvent.set(eventId, rel);
   }
-  return { projectedFiles: markdownFiles.length, failures };
+  for (const eventFile of listFiles(path.join(abrainHome, "l1", "events"), (file) => file.endsWith(".json"))) {
+    const envelope = readJson(eventFile);
+    if (envelope.body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
+    const eventId = envelope.event_id;
+    const expectedPath = expectedKnowledgeOutputPath(abrainHome, envelope.body);
+    if (envelope.body.intent?.operation_hint === "delete") {
+      if (fs.existsSync(expectedPath)) failures.push(`${relativeUnix(abrainHome, expectedPath)}: stale_projection_after_delete:${eventId}`);
+      continue;
+    }
+    if (!fs.existsSync(expectedPath)) failures.push(`${relativeUnix(abrainHome, eventFile)}: missing_projected_markdown:${eventId}`);
+  }
+  return { projectedFiles: markdownFiles.length, failures, projectedEvents: projectedByEvent.size };
 }
 
 function readDecisionInputRoot(decisionPath) {
@@ -224,6 +332,13 @@ function validateDirtyDerived(abrainHome) {
   return { failures };
 }
 
+function validateL3Store(abrainHome) {
+  if (!process.versions.sqlite) return { ok: false, dbPath: null, counts: null, failures: ["adr0039-l3: node_sqlite_unavailable"] };
+  const l3 = loadAdr0039L3Module();
+  const result = l3.syncAdr0039L3Store({ abrainHome });
+  return result;
+}
+
 function loadRuntimeThresholds() {
   const cfg = fs.existsSync(settingsPath) ? readJson(settingsPath) : {};
   const compiled = cfg.ruleInjector?.compiledViewInjection ?? {};
@@ -238,9 +353,10 @@ function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   const l1 = validateL1Events(abrainHome);
   const knowledge = validateKnowledgeProjection(abrainHome);
   const constraint = validateConstraintShadow(abrainHome, opts);
+  const l3 = validateL3Store(abrainHome);
   const dirty = validateDirtyDerived(abrainHome);
-  const failures = [...l1.failures, ...knowledge.failures, ...constraint.failures, ...dirty.failures];
-  return { abrainHome, l1, knowledge, constraint, dirty, failures };
+  const failures = [...l1.failures, ...knowledge.failures, ...constraint.failures, ...l3.failures, ...dirty.failures];
+  return { abrainHome, l1, knowledge, constraint, l3, dirty, failures };
 }
 
 function printResult(result) {
@@ -248,6 +364,7 @@ function printResult(result) {
   console.log(`l1_events: ${result.l1.files}`);
   console.log(`knowledge_projected_files: ${result.knowledge.projectedFiles}`);
   console.log(`constraint_shadow_present: ${result.constraint.present}`);
+  console.log(`l3_db: ${result.l3.dbPath || "unavailable"}`);
   if (result.failures.length) {
     for (const failure of result.failures) console.log(`  FAIL  ${failure}`);
     console.log(`FAIL — ${result.failures.length} reconcile check(s) failed.`);

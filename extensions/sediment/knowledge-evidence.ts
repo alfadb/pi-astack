@@ -14,8 +14,12 @@ export interface KnowledgeEvidenceEventBodyV1 {
   event_schema_version: "knowledge-evidence-event/v1";
   event_type: "knowledge_entry_observed";
   created_at_utc: string;
-  session_id?: string;
-  turn_id?: string;
+  device_id: string;
+  device_event_seq?: number;
+  producer_nonce?: string;
+  causal_parents: string[];
+  session_id: string;
+  turn_id: string;
   actor: { role: "assistant"; id: "sediment" };
   source: {
     channel: "agent_end" | "manual" | "replay";
@@ -44,6 +48,13 @@ export interface KnowledgeEvidenceEventBodyV1 {
     derives_from: string[];
     timeline_note?: string;
   };
+  sanitizer: {
+    sanitizer_name: string;
+    sanitizer_version: string;
+    status: "passed" | "redacted" | "blocked";
+    replacements_count: number;
+    blocked_reason?: string;
+  };
   legacy_parallel_write: {
     attempted: boolean;
     status: string;
@@ -53,7 +64,7 @@ export interface KnowledgeEvidenceEventBodyV1 {
   };
   producer: {
     name: "sediment.knowledge-event-writer";
-    version: "adr0039-p4";
+    version: "adr0039-p5";
   };
 }
 
@@ -97,6 +108,8 @@ export interface AppendKnowledgeEvidenceForWriteOptions {
   turnId?: string;
   createdAtUtc?: string;
   projectEvent?: boolean;
+  causalParents?: string[];
+  sanitizer?: KnowledgeEvidenceEventBodyV1["sanitizer"];
 }
 
 export interface AppendKnowledgeEvidenceForWriteResult {
@@ -109,9 +122,14 @@ export function sha256Hex(input: string): string {
   return crypto.createHash("sha256").update(input, "utf-8").digest("hex");
 }
 
-function canonicalJson(value: JsonValue): string {
+export function canonicalJson(value: JsonValue): string {
   if (value === null) return "null";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("non-finite number in canonical JSON");
+    return JSON.stringify(Object.is(value, -0) ? 0 : value);
+  }
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key]!)}`).join(",")}}`;
 }
@@ -139,6 +157,10 @@ function evidenceRoot(abrainHome: string): string {
   return path.resolve(abrainHome, "l1", "events");
 }
 
+function abrainStateRoot(abrainHome: string): string {
+  return path.resolve(abrainHome, ".state");
+}
+
 function stateRoot(abrainHome: string): string {
   return path.resolve(abrainHome, ".state", "sediment", "knowledge-projection");
 }
@@ -161,8 +183,35 @@ function guardEventPath(abrainHome: string, targetPath: string): boolean {
   return isPathInside(evidenceRoot(abrainHome), targetPath);
 }
 
+async function readOrCreateDeviceId(abrainHome: string): Promise<string> {
+  const stateDir = abrainStateRoot(abrainHome);
+  const file = path.join(stateDir, "device-id");
+  const existing = await fs.readFile(file, "utf-8").catch((err: NodeJS.ErrnoException) => err.code === "ENOENT" ? null : Promise.reject(err));
+  const trimmed = existing?.trim();
+  if (trimmed && /^[A-Za-z0-9-]{8,64}$/.test(trimmed)) return trimmed;
+  const id = crypto.randomUUID();
+  await fs.mkdir(stateDir, { recursive: true });
+  const tmp = path.join(stateDir, `device-id.${process.pid}.${Date.now()}.tmp`);
+  await fs.writeFile(tmp, `${id}\n`, { encoding: "utf-8", flag: "wx", mode: 0o600 });
+  await fs.rename(tmp, file).catch(async (err) => {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    const created = await fs.readFile(file, "utf-8").catch(() => null);
+    if (created?.trim()) return;
+    throw err;
+  });
+  return (await fs.readFile(file, "utf-8")).trim();
+}
+
+function knowledgeEvidenceBodyHash(body: KnowledgeEvidenceEventBodyV1): string {
+  return sha256Hex(canonicalJson(toJsonValue(body)));
+}
+
+function knowledgeEvidenceEnvelopeJson(envelope: KnowledgeEvidenceEnvelopeV1): string {
+  return `${canonicalJson(toJsonValue(envelope))}\n`;
+}
+
 function createEnvelope(body: KnowledgeEvidenceEventBodyV1): KnowledgeEvidenceEnvelopeV1 {
-  const bodyHash = sha256Hex(canonicalJson(toJsonValue(body)));
+  const bodyHash = knowledgeEvidenceBodyHash(body);
   return {
     schema: "knowledge-evidence-envelope/v1",
     canonicalization: "RFC8785-JCS",
@@ -171,6 +220,33 @@ function createEnvelope(body: KnowledgeEvidenceEventBodyV1): KnowledgeEvidenceEn
     body_hash: bodyHash,
     body,
   };
+}
+
+export function renderKnowledgeEvidenceEnvelopeJson(envelope: KnowledgeEvidenceEnvelopeV1): string {
+  return knowledgeEvidenceEnvelopeJson(envelope);
+}
+
+export function verifyKnowledgeEvidenceEnvelope(envelope: KnowledgeEvidenceEnvelopeV1): { ok: true } | { ok: false; reason: string } {
+  if (envelope.schema !== "knowledge-evidence-envelope/v1") return { ok: false, reason: "unsupported_schema" };
+  if (envelope.canonicalization !== "RFC8785-JCS" || envelope.hash_alg !== "sha256") return { ok: false, reason: "unsupported_hash_metadata" };
+  if (!/^[0-9a-f]{64}$/.test(envelope.event_id) || !/^[0-9a-f]{64}$/.test(envelope.body_hash)) return { ok: false, reason: "invalid_hash_shape" };
+  const bodyHash = knowledgeEvidenceBodyHash(envelope.body);
+  if (envelope.event_id !== bodyHash || envelope.body_hash !== bodyHash) return { ok: false, reason: "body_hash_mismatch" };
+  const body = envelope.body;
+  if (body.event_schema_version !== "knowledge-evidence-event/v1" || body.event_type !== "knowledge_entry_observed") return { ok: false, reason: "unsupported_body_schema" };
+  if (!body.device_id || (!body.device_event_seq && !body.producer_nonce)) return { ok: false, reason: "missing_device_identity" };
+  if (!Array.isArray(body.causal_parents) || !body.causal_parents.every((item) => /^[0-9a-f]{64}$/.test(item))) return { ok: false, reason: "invalid_causal_parents" };
+  if (!body.session_id || !body.turn_id) return { ok: false, reason: "missing_anchor" };
+  if (!body.sanitizer || body.sanitizer.status === "blocked") return { ok: false, reason: "sanitizer_blocked_or_missing" };
+  return { ok: true };
+}
+
+function canonicalizeExistingEnvelopeJson(input: string): string | null {
+  try {
+    return knowledgeEvidenceEnvelopeJson(JSON.parse(input) as KnowledgeEvidenceEnvelopeV1);
+  } catch {
+    return null;
+  }
 }
 
 export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; body: KnowledgeEvidenceEventBodyV1 }): Promise<AppendKnowledgeEvidenceEventResult> {
@@ -183,12 +259,14 @@ export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; b
   const eventId = envelope.event_id;
   const filePath = knowledgeEvidenceEventPath(args.abrainHome, eventId);
   if (!guardEventPath(args.abrainHome, filePath)) return { ok: false, status: "path_violation", eventId, filePath, envelope };
-  const content = `${JSON.stringify(envelope, null, 2)}\n`;
+  const validation = verifyKnowledgeEvidenceEnvelope(envelope);
+  if (!validation.ok) return { ok: false, status: "write_failed", eventId, filePath, envelope, error: validation.reason };
+  const content = knowledgeEvidenceEnvelopeJson(envelope);
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const existing = await fs.readFile(filePath, "utf-8").catch((err: NodeJS.ErrnoException) => err.code === "ENOENT" ? null : Promise.reject(err));
     if (existing !== null) {
-      if (existing === content) return { ok: true, status: "idempotent_duplicate", eventId, filePath, envelope };
+      if (existing === content || canonicalizeExistingEnvelopeJson(existing) === content) return { ok: true, status: "idempotent_duplicate", eventId, filePath, envelope };
       return { ok: false, status: "collision", eventId, filePath, envelope };
     }
     const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
@@ -218,6 +296,12 @@ function normalizeCompiledTruth(title: string, body: string): string {
 }
 
 export function renderKnowledgeProjectionMarkdown(body: KnowledgeEvidenceEventBodyV1, eventId: string): string {
+  const outputWithoutHash = renderKnowledgeProjectionMarkdownBytes(body, eventId, "");
+  const outputHash = sha256Hex(outputWithoutHash);
+  return renderKnowledgeProjectionMarkdownBytes(body, eventId, outputHash);
+}
+
+function renderKnowledgeProjectionMarkdownBytes(body: KnowledgeEvidenceEventBodyV1, eventId: string, outputHash: string): string {
   const timestamp = body.created_at_utc;
   const payload = body.payload;
   const id = body.scope.kind === "world" ? `world:${payload.slug}` : `project:${body.scope.project_id}:${payload.slug}`;
@@ -234,6 +318,12 @@ export function renderKnowledgeProjectionMarkdown(body: KnowledgeEvidenceEventBo
     `created: ${timestamp}`,
     `updated: ${timestamp}`,
     `sediment_projection: knowledge-evidence/v1`,
+    `sediment_projector: knowledge-projector`,
+    `sediment_projector_version: adr0039-p5`,
+    `sediment_template_version: knowledge-markdown/v1`,
+    `sediment_input_event_set_hash: ${eventId}`,
+    `sediment_output_hash: ${outputHash}`,
+    `sediment_watermark_event_id: ${eventId}`,
     `sediment_event_id: ${eventId}`,
     ...markdownList("trigger_phrases", payload.trigger_phrases),
     ...markdownList("derives_from", payload.derives_from),
@@ -246,7 +336,7 @@ export function renderKnowledgeProjectionMarkdown(body: KnowledgeEvidenceEventBo
     "",
     "## Timeline",
     "",
-    `- ${timestamp} | ${body.session_id || "sediment"} | projected | ${payload.timeline_note || "projected from Knowledge Evidence Event"}`,
+    `- ${timestamp} | ${body.session_id} | projected | ${payload.timeline_note || "projected from Knowledge Evidence Event"}`,
     "",
   ].join("\n");
 }
@@ -283,15 +373,22 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
   }
 }
 
-export function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEvidenceForWriteOptions): KnowledgeEvidenceEventBodyV1 {
+export async function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEvidenceForWriteOptions): Promise<KnowledgeEvidenceEventBodyV1> {
   const now = args.createdAtUtc || new Date().toISOString();
   const slug = args.result.slug || slugify(args.draft.title);
+  const sessionId = args.sessionId || args.auditContext?.sessionId || args.draft.sessionId || "unknown-session";
+  const turnId = args.turnId || "unknown-turn";
+  const deviceId = await readOrCreateDeviceId(args.abrainHome);
+  const producerNonce = `knowledge:${now}:${sessionId}:${turnId}:${slug}:${args.operation || "create"}:${sha256Hex(JSON.stringify({ result: args.result.status, path: args.result.path ?? "" }))}`;
   return {
     event_schema_version: "knowledge-evidence-event/v1",
     event_type: "knowledge_entry_observed",
     created_at_utc: now,
-    ...(args.sessionId || args.auditContext?.sessionId ? { session_id: args.sessionId || args.auditContext?.sessionId } : {}),
-    ...(args.turnId ? { turn_id: args.turnId } : {}),
+    device_id: deviceId,
+    producer_nonce: producerNonce,
+    causal_parents: args.causalParents?.slice().sort() ?? [],
+    session_id: sessionId,
+    turn_id: turnId,
     actor: { role: "assistant", id: "sediment" },
     source: {
       channel: args.channel || "agent_end",
@@ -317,6 +414,12 @@ export function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEvidence
       derives_from: args.draft.derivesFrom ?? [],
       ...(args.draft.timelineNote ? { timeline_note: args.draft.timelineNote } : {}),
     },
+    sanitizer: args.sanitizer ?? {
+      sanitizer_name: "sediment.knowledge-evidence.default",
+      sanitizer_version: "v1",
+      status: "passed",
+      replacements_count: 0,
+    },
     legacy_parallel_write: {
       attempted: true,
       status: args.result.status,
@@ -324,13 +427,13 @@ export function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEvidence
       ...("gitCommit" in args.result ? { git_commit: args.result.gitCommit ?? null } : {}),
       ...(args.result.reason ? { reason: args.result.reason } : {}),
     },
-    producer: { name: "sediment.knowledge-event-writer", version: "adr0039-p4" },
+    producer: { name: "sediment.knowledge-event-writer", version: "adr0039-p5" },
   };
 }
 
 export async function appendKnowledgeEvidenceForWrite(args: AppendKnowledgeEvidenceForWriteOptions): Promise<AppendKnowledgeEvidenceForWriteResult> {
   if (!args.settings.knowledgeEvidenceEventWriter.enabled) return { append: { ok: false, status: "write_failed", error: "knowledge_event_writer_disabled" } };
-  const body = buildKnowledgeEvidenceBodyForWrite(args);
+  const body = await buildKnowledgeEvidenceBodyForWrite(args);
   const append = await appendKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, body });
   const projection = append.ok && append.envelope && args.projectEvent !== false && args.settings.knowledgeProjector.projectOnWrite
     ? await projectKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, envelope: append.envelope, settings: args.settings })
