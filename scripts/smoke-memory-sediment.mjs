@@ -1418,6 +1418,50 @@ Original Pensieve seed content.
     assert(fs.existsSync(knowledgeEvidenceEventPath(evidenceTarget.abrainHome, evidenceWrite.knowledgeEvidenceEvent.append.eventId)), "knowledge evidence event file missing");
     const projectionStores = await readKnowledgeProjectionStores({ abrainHome: evidenceTarget.abrainHome, projectId: evidenceTarget.projectId, settings: evidenceSettings });
     assert(projectionStores.some((store) => store.label === "knowledge-projection-project"), `knowledge projection store missing: ${JSON.stringify(projectionStores)}`);
+
+    // ADR 0039 B3-blocker-1: gitCommit must atomically include the derived L1
+    // event + L2 projection. Without the sweep every knowledge write leaves
+    // uncommitted l1/l2 delta, dirtying the abrain tree so the git-sync merge
+    // preflight refuses and the B4 pre-push dirty-view blocker rejects forever.
+    {
+      const l1l2Target = setupAbrainTarget("writer-l1l2-commit");
+      const l1l2Abrain = l1l2Target.abrainHome;
+      fs.writeFileSync(path.join(l1l2Abrain, ".gitignore"), ".state/\n");
+      execFileSync("git", ["-C", l1l2Abrain, "init", "-q"]);
+      execFileSync("git", ["-C", l1l2Abrain, "config", "user.email", "smoke@example.com"]);
+      execFileSync("git", ["-C", l1l2Abrain, "config", "user.name", "smoke"]);
+      execFileSync("git", ["-C", l1l2Abrain, "add", "-A"]);
+      execFileSync("git", ["-C", l1l2Abrain, "commit", "-q", "-m", "baseline"]);
+      const l1l2Settings = {
+        ...DEFAULT_SEDIMENT_SETTINGS,
+        gitCommit: true,
+        knowledgeEvidenceEventWriter: { enabled: true, mode: "event_first", legacyFallbackOnEventFailure: false },
+        knowledgeProjector: { enabled: true, hotOverlayEnabled: true, projectOnWrite: true, maxReadBytes: 1000000, l2OutputRoot: "repo", projectionMode: "topo" },
+      };
+      const l1l2Write = await writeProjectEntry({
+        title: "Writer L1L2 Commit Fixture",
+        kind: "fact",
+        confidence: 7,
+        sessionId: "session-l1l2-commit",
+        compiledTruth: "Validates that gitCommit atomically commits the derived L1 event and L2 projection alongside the canonical entry.",
+        triggerPhrases: ["writer l1l2 commit fixture"],
+      }, {
+        projectRoot: root,
+        abrainHome: l1l2Abrain,
+        projectId: l1l2Target.projectId,
+        settings: l1l2Settings,
+        dryRun: false,
+      });
+      assert(l1l2Write.status === "created", `l1l2 commit writer failed: ${l1l2Write.reason}`);
+      assert(typeof l1l2Write.gitCommit === "string" && l1l2Write.gitCommit.length >= 7, `l1l2 commit sha missing: ${JSON.stringify(l1l2Write.gitCommit)}`);
+      const l1l2Status = execFileSync("git", ["-C", l1l2Abrain, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf-8" }).trim();
+      assert(l1l2Status === "", `abrain tree must be clean after write (no uncommitted l1/l2), got:\n${l1l2Status}`);
+      const headFiles = execFileSync("git", ["-C", l1l2Abrain, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+      assert(headFiles.some((f) => f.startsWith("l1/events/")), `HEAD commit must include l1/ event: ${JSON.stringify(headFiles)}`);
+      assert(headFiles.some((f) => f.startsWith("l2/views/knowledge/")), `HEAD commit must include l2/ projection: ${JSON.stringify(headFiles)}`);
+      assert(headFiles.some((f) => f.includes(`projects/${l1l2Target.projectId}/`) && f.endsWith(".md")), `HEAD commit must include canonical entry: ${JSON.stringify(headFiles)}`);
+    }
+
     // Audit log remains project-local (forensic), even though entry markdown went to abrain.
     const auditRows = fs.readFileSync(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
     const correlatedAudit = auditRows.find((row) => row.operation === "create" && row.target === `project:${writerTarget2.projectId}:writer-correlation-fixture`);

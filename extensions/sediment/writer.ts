@@ -1046,11 +1046,21 @@ async function gitCommitManyUnlocked(
   const scopeTag = projectId ? `project:${projectId}` : "world";
   try {
     const rels = Array.from(new Set(filePaths.map((filePath) => path.relative(abrainHome, filePath)))).filter(Boolean);
-    await execFileAsync("git", ["-C", abrainHome, "add", "-A", "--", ...rels], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    // ADR 0039 B3-blocker-1: the derived L1 Evidence Events (l1/) and the
+    // git-tracked L2 view (l2/, when l2OutputRoot=repo) are written by the
+    // append/projector OUTSIDE this canonical commit. Stage them atomically in
+    // the same commit so the write transaction is canonical + L1 + L2 — without
+    // this, every agent_end leaves uncommitted l1/l2 delta, the git-sync merge
+    // preflight refuses on a dirty tree, and the B4 pre-push dirty-view blocker
+    // rejects the push permanently. l1/ is append-only content-addressed; l2/
+    // is a deterministic projection re-verified byte-for-byte by reconcile, so
+    // committing whatever changed there is safe. (`.state/` stays gitignored.)
+    const derivedRels = ["l1", "l2"].filter((dir) => fsSync.existsSync(path.join(abrainHome, dir)));
+    await execFileAsync("git", ["-C", abrainHome, "add", "-A", "--", ...rels, ...derivedRels], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
     await execFileAsync(
       "git",
       ["-C", abrainHome, "commit", "-m", `sediment: ${op} ${slug} (${scopeTag})`],
-      { timeout: 20_000, maxBuffer: 1024 * 1024 },
+      { timeout: 30_000, maxBuffer: 1024 * 1024 },
     );
     const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     const sha = stdout.trim() || null;
@@ -2382,9 +2392,14 @@ async function gitCommitAbrain(abrainHome: string, filePath: string, slug: strin
 async function gitCommitAbrainUnlocked(abrainHome: string, filePath: string, slug: string, label = "workflow"): Promise<string | null> {
   try {
     const rel = path.relative(abrainHome, filePath);
+    // ADR 0039 B3-blocker-1: sweep the derived L1/L2 evidence into the same
+    // commit so a rules/workflow write does not leave uncommitted constraint
+    // L1 events (or l2/ knowledge projections) dirtying the tree. Same safety
+    // rationale as gitCommitManyUnlocked. `.state/` stays gitignored.
+    const derivedRels = ["l1", "l2"].filter((dir) => fsSync.existsSync(path.join(abrainHome, dir)));
     // Round 2 audit fix (opus m3): same `--` defense-in-depth as gitCommit.
-    await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
-    await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `${label}: ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    await execFileAsync("git", ["-C", abrainHome, "add", "--", rel, ...derivedRels], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+    await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `${label}: ${slug}`], { timeout: 30_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     return stdout.trim() || null;
   } catch {
