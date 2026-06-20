@@ -110,6 +110,7 @@ for (const file of [
   "extensions/sediment/constraint-compiler/pi-ai-invoker.ts",
   "extensions/sediment/constraint-evidence/append.ts",
   "extensions/sediment/constraint-compiler/projection.ts",
+  "extensions/sediment/constraint-compiler/corpus-split.ts",
   "extensions/sediment/constraint-compiler/shadow-runner.ts",
 ]) {
   stageTs(outRoot, file);
@@ -130,6 +131,7 @@ const { createPiAiConstraintCompilerInvoker } = require(path.join(outRoot, "sedi
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
 const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION } = require(path.join(outRoot, "sediment", "constraint-compiler", "projection.js"));
 const { renderConstraintL2View } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
+const { buildCorpusSplitReport, stratumForRow, CORPUS_SPLIT_STRATA } = require(path.join(outRoot, "sediment", "constraint-compiler", "corpus-split.js"));
 
 function withoutUndefined(value) {
   if (Array.isArray(value)) return value.map(withoutUndefined);
@@ -496,6 +498,106 @@ check("diff maps every source and covers required categories", () => {
   const categories = new Set(report.rows.map((row) => row.category));
   for (const category of ["exclude_not_memory_settings", "exclude_not_memory_tool_contract", "merge_near_duplicates", "compact", "mark_conflict", "legacy_archived_observed", "rescope_global_to_project"]) {
     assert(categories.has(category), `missing category ${category}`);
+  }
+  assert(report.rows.every((row) => row.scope && typeof row.sourceStatus === "string"), "diff row missing scope/sourceStatus (P5)");
+});
+
+// ADR0039 Constraint P5 corpus-split shadow (4×T0 v4) — pure re-projection.
+check("corpus-split: deterministic pure re-projection, full coverage, needs_attention=0", () => {
+  const validated = validateConstraintCompilerDecision(allSources, decision, { knownProjectIds: ["pi-astack"], expectedInputRootHash: normalized.inputRootHash });
+  const diff = createConstraintDiffReport(allSources, validated);
+  const a = buildCorpusSplitReport(diff, { inputRootHash: normalized.inputRootHash });
+  const b = buildCorpusSplitReport(diff, { inputRootHash: normalized.inputRootHash });
+  assert(a.markdown === b.markdown, "corpus-split markdown drifted");
+  assert(a.manifest.outputHash === b.manifest.outputHash, "corpus-split outputHash drifted");
+  const m = a.manifest;
+  assert(m.schemaVersion === "constraint-corpus-split/v1", "wrong schema");
+  assert(m.shadowOnly === true, "shadowOnly not true");
+  assert(m.totalSources === allSources.length, "wrong totalSources");
+  const sum = CORPUS_SPLIT_STRATA.reduce((s, st) => s + m.counts[st], 0);
+  assert(sum === allSources.length && sum === m.rows.length, "Σ strata != totalSources");
+  assert(m.coverageOk === true, "coverageOk false on green corpus");
+  assert(m.needsAttention === 0, `needs_attention nonzero (${m.needsAttention}) on green corpus`);
+  assert(m.counts.settings_not_memory === 1, "settings stratum count");
+  assert(m.counts.tool_contract_not_memory === 1, "tool stratum count");
+  assert(m.counts.compiled_global >= 1 && m.counts.compiled_project >= 1, "compiled strata empty");
+  assert(m.counts.conflict_unresolved >= 1, "conflict stratum empty");
+  assert(a.markdown.includes("PROPOSAL — not applied"), "proposal banner missing");
+  assert(a.markdown.includes("shadow_only: true"), "shadow marker missing");
+  assert(a.markdown.includes(`output_hash: ${m.outputHash}`), "output hash not embedded");
+});
+
+check("corpus-split: stratum fold is total over every category + never-default throws", () => {
+  assert(CORPUS_SPLIT_STRATA.length === 8, "expected 8 strata");
+  const allCategories = ["kept", "compact", "merge_near_duplicates", "rescope_global_to_project", "rescope_project_to_global", "exclude_not_memory_settings", "exclude_not_memory_tool_contract", "split_knowledge_candidate", "mark_conflict", "keep_unresolved", "legacy_archived_observed", "missing_mapping"];
+  for (const cat of allCategories) {
+    const s = stratumForRow(cat, { kind: "global" });
+    assert(CORPUS_SPLIT_STRATA.includes(s), `category ${cat} -> invalid stratum ${s}`);
+  }
+  assert(stratumForRow("kept", { kind: "global" }) === "compiled_global", "kept global");
+  assert(stratumForRow("kept", { kind: "project", projectId: "x" }) === "compiled_project", "kept project");
+  assert(stratumForRow("rescope_global_to_project", { kind: "global" }) === "compiled_project", "rescope lands project");
+  assert(stratumForRow("missing_mapping", { kind: "global" }) === "needs_attention", "missing->needs_attention");
+  let threw = false;
+  try { stratumForRow("__bogus_category__", { kind: "global" }); } catch { threw = true; }
+  assert(threw, "never-default did not throw on unknown category");
+});
+
+check("corpus-split: split_knowledge_candidate is reachable as knowledge_candidate stratum", () => {
+  const synthetic = {
+    schemaVersion: "constraint-shadow-diff/v1",
+    summary: { totalSources: 1, validationStatus: "valid" },
+    rows: [{ sourceRecordId: "rule:global:listed:k", scope: { kind: "global" }, sourceStatus: "active", category: "split_knowledge_candidate", disposition: "excluded", reason: "belongs in knowledge" }],
+  };
+  const out = buildCorpusSplitReport(synthetic, { inputRootHash: "h" });
+  assert(out.manifest.counts.knowledge_candidate === 1, "knowledge_candidate not reached");
+  assert(out.manifest.rows[0].stratum === "knowledge_candidate", "row stratum wrong");
+  assert(out.manifest.coverageOk === true, "coverage not ok");
+});
+
+check("corpus-split: coverage fails closed when totalSources disagrees with rows", () => {
+  const broken = {
+    schemaVersion: "constraint-shadow-diff/v1",
+    summary: { totalSources: 2, validationStatus: "valid" },
+    rows: [{ sourceRecordId: "a", scope: { kind: "global" }, sourceStatus: "active", category: "kept", disposition: "compiled" }],
+  };
+  const out = buildCorpusSplitReport(broken, { inputRootHash: "h" });
+  assert(out.manifest.coverageOk === false, "coverageOk should be false when totalSources != rows.length");
+});
+
+check("corpus-split: real ~/.abrain decision re-projects with full coverage (skip if absent)", () => {
+  const base = path.join(os.homedir(), ".abrain/.state/sediment/constraint-shadow/latest");
+  const decisionPath = path.join(base, "decision.json");
+  const normPath = path.join(base, "input.normalized.json");
+  if (!fs.existsSync(decisionPath) || !fs.existsSync(normPath)) { console.log("        (skip: no real ~/.abrain .state present)"); return; }
+  const realDecision = JSON.parse(fs.readFileSync(decisionPath, "utf8"));
+  const realNorm = JSON.parse(fs.readFileSync(normPath, "utf8"));
+  const diff = createConstraintDiffReport(realNorm.records, realDecision);
+  const out = buildCorpusSplitReport(diff, { inputRootHash: realNorm.inputRootHash });
+  const m = out.manifest;
+  const sum = CORPUS_SPLIT_STRATA.reduce((s, st) => s + m.counts[st], 0);
+  assert(sum === m.totalSources && sum === m.rows.length, `real Σ ${sum} != totalSources ${m.totalSources}`);
+  assert(m.coverageOk === true, "real coverageOk false");
+  assert(out.markdown.includes(`output_hash: ${m.outputHash}`) && m.outputHash.length === 64, "real output hash not embedded");
+  console.log(`        real corpus-split: total=${m.totalSources} needs_attention=${m.needsAttention} | ` + CORPUS_SPLIT_STRATA.map((st) => `${st}=${m.counts[st]}`).join(" "));
+});
+
+check("corpus-split: §12 pure-fold + read-only-from-diff source contract", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/constraint-compiler/corpus-split.ts"), "utf8");
+  // Sound read-only contract: imports ONLY ./normalize (hash) + ./types. With
+  // this allowlist the module cannot reference any scanner / validator / fs at
+  // runtime (they are not imported). Checked against full source (imports are
+  // never inside comments).
+  const fromTargets = [...src.matchAll(/from "([^"]+)"/g)].map((mm) => mm[1]);
+  assert(fromTargets.length >= 1, "no imports found");
+  for (const t of fromTargets) {
+    assert(t === "./normalize" || t === "./types", `forbidden import target in corpus-split.ts: ${t}`);
+  }
+  // Content/name-matching guard (§12) runs on comment-stripped CODE so the
+  // module's own descriptive prose does not trip the literal scan.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  for (const forbidden of ["scanLegacy", "validateConstraint", "readFileSync", "writeFileSync", "fixateConstraint", "pi-astack", ".body", ".title", "memory_search", "dispatch_"]) {
+    assert(!code.includes(forbidden), `corpus-split.ts violates §12 / read-only contract (code references ${forbidden})`);
   }
 });
 

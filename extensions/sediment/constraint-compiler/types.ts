@@ -514,6 +514,11 @@ export type ConstraintDiffCategory =
 
 export interface ConstraintDiffRow {
   sourceRecordId: string;
+  // ADR0039 P5 (4×T0 v4): pure copy of the source's scope+status so the
+  // corpus-split view can stratify per-row without reaching back into the
+  // decision/sources (read-only-from-ConstraintDiffReport contract).
+  scope: ConstraintScope;
+  sourceStatus: LegacyRuleStatus;
   category: ConstraintDiffCategory;
   disposition: ConstraintSourceDisposition;
   targetId?: string;

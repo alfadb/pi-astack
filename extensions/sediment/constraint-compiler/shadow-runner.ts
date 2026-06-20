@@ -10,6 +10,7 @@ import { normalizeConstraintSources, sha256Hex, stableCanonicalize } from "./nor
 import { buildConstraintCompilerPrompt } from "./prompt";
 import { renderConstraintShadowView } from "./render";
 import { fixateConstraintDecisionAndRenderL2 } from "./projection";
+import { buildCorpusSplitReport, type CorpusSplitReport } from "./corpus-split";
 import { validateConstraintCompilerDecision } from "./validate-decision";
 import type {
   ConstraintCompilerPrompt,
@@ -81,6 +82,7 @@ async function writeArtifacts(input: {
   decision?: ValidatedConstraintCompilerDecision;
   view?: RenderedConstraintView;
   diff?: ConstraintDiffReport;
+  corpusSplit?: CorpusSplitReport;
   eventCoverage?: ConstraintEventCoverageReport;
   legacyParallelDelta?: ConstraintLegacyParallelDeltaReport;
   diagnostics: ConstraintShadowDiagnostic[];
@@ -104,6 +106,8 @@ async function writeArtifacts(input: {
     view: "compiled-view.md",
     diffJson: "diff.json",
     diffMarkdown: "diff.md",
+    corpusSplitJson: "corpus-split.json",
+    corpusSplitMarkdown: "corpus-split.md",
     eventCoverage: "event-coverage.json",
     legacyParallelDelta: "legacy-parallel-delta.json",
     diagnostics: "diagnostics.json",
@@ -116,6 +120,10 @@ async function writeArtifacts(input: {
     if (input.diff) {
       await writeJson(path.join(dir, files.diffJson), input.diff);
       await writeText(path.join(dir, files.diffMarkdown), input.diff.markdown);
+    }
+    if (input.corpusSplit) {
+      await writeJson(path.join(dir, files.corpusSplitJson), input.corpusSplit.manifest);
+      await writeText(path.join(dir, files.corpusSplitMarkdown), input.corpusSplit.markdown);
     }
     if (input.eventCoverage) await writeJson(path.join(dir, files.eventCoverage), input.eventCoverage);
     if (input.legacyParallelDelta) await writeJson(path.join(dir, files.legacyParallelDelta), input.legacyParallelDelta);
@@ -294,6 +302,9 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
 
   const view = renderConstraintShadowView(decision);
   const diff = createConstraintDiffReport(sources, decision);
+  // ADR0039 P5 (4×T0 v4): deterministic pure re-projection of the diff into the
+  // corpus-split shadow report (no new classification; read-only over the diff).
+  const corpusSplit = buildCorpusSplitReport(diff, { inputRootHash: normalized.inputRootHash });
   const initialDiagnostics = dedupeDiagnostics(decision.diagnostics);
   const coverage = createConstraintEventCoverageReport({
     events: eventScan.events,
@@ -315,6 +326,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     decision,
     view,
     diff,
+    corpusSplit,
     eventCoverage: coverage.report,
     legacyParallelDelta: legacyParallelDelta.report,
     diagnostics: allDiagnostics,

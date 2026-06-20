@@ -97,6 +97,8 @@ export function createConstraintDiffReport(
   const legacySources = legacySourcesOnly(sources).sort((left, right) => left.sourceId.localeCompare(right.sourceId));
   const rows: ConstraintDiffRow[] = legacySources.map((source) => ({
     sourceRecordId: source.sourceId,
+    scope: source.scope,
+    sourceStatus: source.status,
     ...categoryForSource(source, decision),
   }));
   const unmappedSources = rows.filter((row) => row.category === "missing_mapping" && row.reason === "no mapping").length;
