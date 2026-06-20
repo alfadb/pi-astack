@@ -9,6 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { runBackfill as runLegacyBackfill, buildLegacyImportBody, legacyKnowledgeEntries } from "./backfill-legacy-knowledge.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -837,5 +838,35 @@ console.log("PASS — B1 Knowledge L2 migrates to git-trackable l2/ namespace (f
     process.exit(1);
   }
   console.log("PASS — B2 deterministic topological projection (degeneration + determinism + fold + causal + tombstone + collect).");
+}
+
+// B3: legacy_import backfill makes B0 coverage reach 1.0 (append-only, idempotent).
+{
+  const bf = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-b3-"));
+  writeFile(path.join(bf, "knowledge", "b3-world-entry.md"), "---\nid: world:b3-world-entry\nscope: world\nkind: pattern\nstatus: active\nconfidence: 7\ntitle: \"B3 world entry\"\ncreated: 2026-01-01T00:00:00.000Z\n---\n# B3 world entry\n\nlegacy world body\n");
+  writeFile(path.join(bf, "projects", "pi-global", "decisions", "b3-proj-entry.md"), "---\nid: project:pi-global:b3-proj-entry\nscope: project\nkind: decision\nstatus: active\nconfidence: 8\ntitle: \"B3 project entry\"\ncreated: 2026-02-02T00:00:00.000Z\n---\n# B3 project entry\n\nlegacy project body\n");
+  const entries = legacyKnowledgeEntries(bf);
+  if (entries.length !== 2) { console.log(`FAIL — B3 enumerated ${entries.length} legacy entries (expected 2)`); process.exit(1); }
+  const before = computeLegacyKnowledgeCoverage(bf);
+  if (before.covered !== 0 || before.backfillNeeded !== true) { console.log(`FAIL — B3 pre-backfill coverage wrong: ${JSON.stringify(before)}`); process.exit(1); }
+  // dry-run must not write
+  const dry = await runLegacyBackfill({ abrainHome: bf, dryRun: true });
+  if (dry.appended !== 2 || fs.existsSync(path.join(bf, "l1", "events"))) { console.log(`FAIL — B3 dry-run wrote events or wrong count: ${JSON.stringify(dry)}`); process.exit(1); }
+  // apply
+  const applied = await runLegacyBackfill({ abrainHome: bf, dryRun: false });
+  if (applied.appended !== 2 || applied.failed !== 0) { console.log(`FAIL — B3 apply wrong: ${JSON.stringify(applied)}`); process.exit(1); }
+  const after = computeLegacyKnowledgeCoverage(bf);
+  if (after.ratio !== 1 || after.backfillNeeded !== false) { console.log(`FAIL — B3 post-backfill coverage not 1.0: ${JSON.stringify(after)}`); process.exit(1); }
+  // idempotent re-run: all duplicates, no new events
+  const again = await runLegacyBackfill({ abrainHome: bf, dryRun: false });
+  if (again.appended !== 0 || again.skipped !== 2) { console.log(`FAIL — B3 re-run not idempotent: ${JSON.stringify(again)}`); process.exit(1); }
+  // the imported event must verify strictly and degenerate-project cleanly
+  const km = loadKnowledgeEvidenceModule();
+  const body = buildLegacyImportBody(km, bf, entries[0]);
+  const eventId = km.knowledgeEvidenceBodyHash(body);
+  const envelope = readJson(km.knowledgeEvidenceEventPath(bf, eventId));
+  const verify = km.verifyKnowledgeEvidenceEnvelope(envelope);
+  if (verify.ok !== true) { console.log(`FAIL — B3 imported event fails strict verify: ${JSON.stringify(verify)}`); process.exit(1); }
+  console.log("PASS — B3 legacy_import backfill reaches 1.0 coverage, append-only, idempotent, strict-verifiable.");
 }
 process.exit(0);

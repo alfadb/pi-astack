@@ -216,7 +216,7 @@ async function readOrCreateDeviceId(abrainHome: string): Promise<string> {
   return (await fs.readFile(file, "utf-8")).trim();
 }
 
-function knowledgeEvidenceBodyHash(body: KnowledgeEvidenceEventBodyV1): string {
+export function knowledgeEvidenceBodyHash(body: KnowledgeEvidenceEventBodyV1): string {
   return sha256Hex(canonicalJson(toJsonValue(body)));
 }
 
