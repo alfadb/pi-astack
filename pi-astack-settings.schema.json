@@ -446,6 +446,11 @@
               "default": 1000000,
               "minimum": 1000,
               "description": "Maximum projection bytes read per file by read-side consumers that enforce a bound."
+            },
+            "l2OutputRoot": {
+              "enum": ["state", "repo"],
+              "default": "state",
+              "description": "ADR 0039 B1. Where the Knowledge L2 projection is written. 'state' keeps the gitignored runtime-cache location ~/.abrain/.state/sediment/knowledge-projection (current default). 'repo' moves it to the git-trackable namespace ~/.abrain/l2/views/knowledge; B1 keeps it shadow until B2 proves deterministic projection and B3 removes the gitignore. Explicit rollback flag."
             }
           }
         },

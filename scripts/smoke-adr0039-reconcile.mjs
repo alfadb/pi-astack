@@ -151,9 +151,20 @@ function readManifestEventIds(file) {
   return [...ids];
 }
 
-function expectedKnowledgeOutputPath(abrainHome, body) {
+function expectedKnowledgeOutputPath(latestDir, body) {
   const projectPart = body.scope?.kind === "world" ? "world" : `projects/${body.scope?.project_id || "unknown"}`;
-  return path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest", projectPart, `${body.payload?.slug}.md`);
+  return path.join(latestDir, projectPart, `${body.payload?.slug}.md`);
+}
+
+// ADR0039 B1: resolve the Knowledge L2 latest dir from the projector flag so
+// reconcile / L3 mirror read the same root the writer used.
+function resolveKnowledgeLatestDir(abrainHome, override) {
+  if (override) return override;
+  const cfg = fs.existsSync(settingsPath) ? readJson(settingsPath) : {};
+  const root = cfg.sediment?.knowledgeProjector?.l2OutputRoot === "repo"
+    ? path.join(abrainHome, "l2", "views", "knowledge")
+    : path.join(abrainHome, ".state", "sediment", "knowledge-projection");
+  return path.join(root, "latest");
 }
 
 function markdownString(value) {
@@ -268,8 +279,8 @@ function projectionSearchCorpusRow(eventId, raw) {
   };
 }
 
-function validateKnowledgeProjection(abrainHome) {
-  const latest = path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest");
+function validateKnowledgeProjection(abrainHome, latestDir) {
+  const latest = latestDir;
   if (!fs.existsSync(latest)) return { projectedFiles: 0, failures: [], searchCorpusRows: 0 };
   const failures = [];
   const knowledge = loadKnowledgeEvidenceModule();
@@ -308,7 +319,7 @@ function validateKnowledgeProjection(abrainHome) {
       const verify = knowledge.verifyKnowledgeEvidenceEnvelope?.(envelope);
       if (verify && verify.ok !== true) failures.push(`${relativeUnix(abrainHome, eventPath)}: knowledge_envelope_${verify.reason}`);
     }
-    const expectedPath = expectedKnowledgeOutputPath(abrainHome, envelope.body);
+    const expectedPath = expectedKnowledgeOutputPath(latest, envelope.body);
     if (path.resolve(file) !== path.resolve(expectedPath)) failures.push(`${rel}: projection_path_mismatch`);
     if (envelope.body?.intent?.operation_hint === "delete") failures.push(`${rel}: delete_event_left_projected_markdown:${eventId}`);
     const expectedBytes = strict
@@ -342,7 +353,7 @@ function validateKnowledgeProjection(abrainHome) {
   }
   for (const { eventFile, envelope } of latestByIdentity.values()) {
     const eventId = envelope.event_id;
-    const expectedPath = expectedKnowledgeOutputPath(abrainHome, envelope.body);
+    const expectedPath = expectedKnowledgeOutputPath(latest, envelope.body);
     if (envelope.body.intent?.operation_hint === "delete") {
       if (fs.existsSync(expectedPath)) failures.push(`${relativeUnix(abrainHome, expectedPath)}: stale_projection_after_delete:${eventId}`);
       continue;
@@ -400,17 +411,17 @@ function validateDirtyDerived(abrainHome) {
   const failures = [];
   for (const line of status.split("\n").filter(Boolean)) {
     const rel = line.slice(3).trim();
-    if (rel.startsWith(".state/sediment/constraint-shadow/") || rel.startsWith(".state/sediment/knowledge-projection/")) {
+    if (rel.startsWith(".state/sediment/constraint-shadow/") || rel.startsWith(".state/sediment/knowledge-projection/") || rel.startsWith("l2/views/knowledge/")) {
       failures.push(`dirty_derived_view:${line}`);
     }
   }
   return { failures };
 }
 
-function validateL3Store(abrainHome) {
+function validateL3Store(abrainHome, knowledgeLatestDir) {
   if (!process.versions.sqlite) return { ok: false, dbPath: null, counts: null, failures: ["adr0039-l3: node_sqlite_unavailable"] };
   const l3 = loadAdr0039L3Module();
-  const result = l3.syncAdr0039L3Store({ abrainHome });
+  const result = l3.syncAdr0039L3Store({ abrainHome, knowledgeLatestDir });
   return result;
 }
 
@@ -479,9 +490,10 @@ function loadRuntimeThresholds() {
 
 function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   const l1 = validateL1Events(abrainHome);
-  const knowledge = validateKnowledgeProjection(abrainHome);
+  const knowledgeLatestDir = resolveKnowledgeLatestDir(abrainHome, opts.knowledgeLatestDir);
+  const knowledge = validateKnowledgeProjection(abrainHome, knowledgeLatestDir);
   const constraint = validateConstraintShadow(abrainHome, opts);
-  const l3 = validateL3Store(abrainHome);
+  const l3 = validateL3Store(abrainHome, knowledgeLatestDir);
   const coverage = computeLegacyKnowledgeCoverage(abrainHome);
   const dirty = validateDirtyDerived(abrainHome);
   const l3SearchCorpusFailures = [];
@@ -516,7 +528,7 @@ function printResult(result) {
   }
 }
 
-async function buildFixtureTree() {
+async function buildFixtureTree(l2OutputRoot = "state") {
   const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-reconcile-"));
   const knowledge = loadKnowledgeEvidenceModule();
   const settings = {
@@ -530,6 +542,7 @@ async function buildFixtureTree() {
       hotOverlayEnabled: true,
       projectOnWrite: true,
       maxReadBytes: 1000000,
+      l2OutputRoot,
     },
   };
   const result = await knowledge.appendKnowledgeEvidenceForWrite({
@@ -701,4 +714,40 @@ if (!cov.missingSample.some((m) => m.identity === "project:pi-global:uncovered-l
   process.exit(1);
 }
 console.log("PASS — B0 legacy coverage gate computes covered/missing and backfill necessity.");
+
+// B1: l2OutputRoot="repo" writes the Knowledge L2 projection into the
+// git-trackable l2/ namespace (NOT .state) and reconcile validates it there.
+const repoFixture = await buildFixtureTree("repo");
+const repoProjected = path.join(repoFixture.abrainHome, "l2", "views", "knowledge", "latest", "projects", "pi-global", "adr0039-reconcile-fixture.md");
+if (!fs.existsSync(repoProjected)) {
+  console.log(`FAIL — B1 repo mode did not write projection under l2/: ${repoProjected}`);
+  process.exit(1);
+}
+if (fs.existsSync(path.join(repoFixture.abrainHome, ".state", "sediment", "knowledge-projection"))) {
+  console.log("FAIL — B1 repo mode must not write the Knowledge projection under .state");
+  process.exit(1);
+}
+const repoReconcile = reconcile(repoFixture.abrainHome, {
+  staleAfterMs: 24 * 60 * 60 * 1000,
+  minCoverageRatio: 1,
+  knowledgeLatestDir: path.join(repoFixture.abrainHome, "l2", "views", "knowledge", "latest"),
+});
+if (repoReconcile.failures.length) {
+  console.log(`FAIL — B1 repo mode reconcile failed: ${JSON.stringify(repoReconcile.failures)}`);
+  process.exit(1);
+}
+if (repoReconcile.knowledge.projectedFiles !== 1 || (repoReconcile.l3.counts?.searchCorpusRows ?? 0) !== 1) {
+  console.log(`FAIL — B1 repo mode did not validate l2/ projection: ${JSON.stringify({ k: repoReconcile.knowledge.projectedFiles, c: repoReconcile.l3.counts?.searchCorpusRows })}`);
+  process.exit(1);
+}
+const repoStores = await loadKnowledgeEvidenceModule().readKnowledgeProjectionStores({
+  abrainHome: repoFixture.abrainHome,
+  projectId: "pi-global",
+  settings: { knowledgeProjector: { enabled: true, hotOverlayEnabled: true, l2OutputRoot: "repo" } },
+});
+if (repoStores.length !== 1 || !repoStores[0].root.includes(`${path.sep}l2${path.sep}views${path.sep}knowledge${path.sep}`)) {
+  console.log(`FAIL — B1 repo overlay store did not resolve l2/ root: ${JSON.stringify(repoStores)}`);
+  process.exit(1);
+}
+console.log("PASS — B1 Knowledge L2 migrates to git-trackable l2/ namespace (flag-guarded, reconcile-validated).");
 process.exit(0);

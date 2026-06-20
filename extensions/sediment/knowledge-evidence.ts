@@ -161,8 +161,22 @@ function abrainStateRoot(abrainHome: string): string {
   return path.resolve(abrainHome, ".state");
 }
 
-function stateRoot(abrainHome: string): string {
+/** ADR 0039 B1: resolve the Knowledge L2 projection root.
+ *  "state" (default) keeps the runtime-cache location; "repo" moves it to the
+ *  git-trackable l2/ namespace. Exported so reconcile / L3 mirror resolve the
+ *  same root from the same flag. */
+export function knowledgeProjectionRoot(
+  abrainHome: string,
+  settings?: { knowledgeProjector?: { l2OutputRoot?: string } },
+): string {
+  if (settings?.knowledgeProjector?.l2OutputRoot === "repo") {
+    return path.resolve(abrainHome, "l2", "views", "knowledge");
+  }
   return path.resolve(abrainHome, ".state", "sediment", "knowledge-projection");
+}
+
+function stateRoot(abrainHome: string, settings?: { knowledgeProjector?: { l2OutputRoot?: string } }): string {
+  return knowledgeProjectionRoot(abrainHome, settings);
 }
 
 export function knowledgeEvidenceEventRelativePath(eventId: string): string {
@@ -346,10 +360,11 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
   const body = args.envelope.body;
   if (body.event_schema_version !== "knowledge-evidence-event/v1" || body.intent.domain_hint !== "knowledge") return { ok: false, status: "invalid" };
   const projectPart = body.scope.kind === "world" ? "world" : `projects/${body.scope.project_id || "unknown"}`;
-  const outputRoot = path.join(stateRoot(args.abrainHome), "latest", projectPart);
+  const root = stateRoot(args.abrainHome, args.settings);
+  const outputRoot = path.join(root, "latest", projectPart);
   const outputPath = path.join(outputRoot, `${body.payload.slug}.md`);
-  const manifestPath = path.join(stateRoot(args.abrainHome), "latest", "manifest.json");
-  if (!isPathInside(stateRoot(args.abrainHome), outputPath) || !isPathInside(stateRoot(args.abrainHome), manifestPath)) return { ok: false, status: "invalid", error: "projection path escaped state root" };
+  const manifestPath = path.join(root, "latest", "manifest.json");
+  if (!isPathInside(root, outputPath) || !isPathInside(root, manifestPath)) return { ok: false, status: "invalid", error: "projection path escaped state root" };
   try {
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
     if (body.intent.operation_hint === "delete") {
@@ -443,7 +458,7 @@ export async function appendKnowledgeEvidenceForWrite(args: AppendKnowledgeEvide
 
 export async function readKnowledgeProjectionStores(args: { abrainHome: string; projectId?: string; settings: SedimentSettings }): Promise<Array<{ scope: KnowledgeEvidenceScope; root: string; label: string }>> {
   if (!args.settings.knowledgeProjector.enabled || !args.settings.knowledgeProjector.hotOverlayEnabled) return [];
-  const latest = path.join(stateRoot(args.abrainHome), "latest");
+  const latest = path.join(stateRoot(args.abrainHome, args.settings), "latest");
   const stores: Array<{ scope: KnowledgeEvidenceScope; root: string; label: string }> = [];
   if (args.projectId) {
     const projectRoot = path.join(latest, "projects", args.projectId);

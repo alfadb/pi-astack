@@ -87,6 +87,12 @@ export interface SedimentSettings {
     hotOverlayEnabled: boolean;
     projectOnWrite: boolean;
     maxReadBytes: number;
+    /** ADR 0039 B1: where the Knowledge L2 projection is written.
+     *  "state" = ~/.abrain/.state/sediment/knowledge-projection (runtime cache,
+     *  gitignored — current default). "repo" = ~/.abrain/l2/views/knowledge
+     *  (git-trackable namespace; B1 keeps it shadow/gitignored until B2 proves
+     *  deterministic projection, B3 removes the ignore). Explicit rollback flag. */
+    l2OutputRoot: "state" | "repo";
   };
   /** ADR 0025 §4.3 Phase C.2: model for the aggregator v1 skeptical-historian
    *  LLM pass. Skeptical historian is a reasoning-heavy task; v4-pro is the
@@ -256,6 +262,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     hotOverlayEnabled: false,
     projectOnWrite: false,
     maxReadBytes: 1_000_000,
+    l2OutputRoot: "state",
   },
   // Aggregator: empty default. Configure in pi-astack-settings.json.
   aggregatorModel: "",
@@ -437,6 +444,7 @@ export function resolveSedimentSettings(): SedimentSettings {
       hotOverlayEnabled: asBoolean((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.hotOverlayEnabled, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.hotOverlayEnabled),
       projectOnWrite: asBoolean((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.projectOnWrite, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.projectOnWrite),
       maxReadBytes: Math.max(1_000, Math.floor(asNumber((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.maxReadBytes, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.maxReadBytes))),
+      l2OutputRoot: ((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.l2OutputRoot === "repo" ? "repo" : "state"),
     },
     aggregatorModel: typeof cfg.aggregatorModel === "string" && cfg.aggregatorModel.trim()
       ? cfg.aggregatorModel.trim()

@@ -272,12 +272,11 @@ function splitMarkdown(raw: string): { frontmatter: string; body: string } {
   return match ? { frontmatter: match[1]!, body: match[2]!.trim() } : { frontmatter: "", body: raw.trim() };
 }
 
-function mirrorKnowledgeSearchCorpus(abrainHome: string, db: DatabaseSyncLike, failures: string[]): number {
+function mirrorKnowledgeSearchCorpus(abrainHome: string, knowledgeRoot: string, db: DatabaseSyncLike, failures: string[]): number {
   let count = 0;
   const now = new Date().toISOString();
   const rows = db.prepare("INSERT INTO search_corpus(row_id, source_event_id, slug, scope, project_id, title, kind, status, confidence, provenance, file_path, search_text_hash, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   const fts = db.prepare("INSERT INTO search_corpus_fts(row_id, slug, title, body, file_path) VALUES (?, ?, ?, ?, ?)");
-  const knowledgeRoot = path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest");
   for (const file of listFiles(knowledgeRoot, (candidate) => candidate.endsWith(".md"))) {
     const raw = fs.readFileSync(file, "utf-8");
     const rel = relativeUnix(abrainHome, file);
@@ -300,11 +299,10 @@ function mirrorKnowledgeSearchCorpus(abrainHome: string, db: DatabaseSyncLike, f
   return count;
 }
 
-function mirrorL2Views(abrainHome: string, db: DatabaseSyncLike, failures: string[]): number {
+function mirrorL2Views(abrainHome: string, knowledgeRoot: string, db: DatabaseSyncLike, failures: string[]): number {
   let count = 0;
   const now = new Date().toISOString();
   const insert = db.prepare("INSERT INTO l2_views(view_id, view_kind, source_event_id, input_event_set_hash, output_hash, file_path, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?)");
-  const knowledgeRoot = path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest");
   for (const file of listFiles(knowledgeRoot, (candidate) => candidate.endsWith(".md"))) {
     const raw = fs.readFileSync(file, "utf-8");
     const rel = relativeUnix(abrainHome, file);
@@ -327,11 +325,11 @@ function mirrorL2Views(abrainHome: string, db: DatabaseSyncLike, failures: strin
   return count;
 }
 
-function mirrorProjectorState(abrainHome: string, db: DatabaseSyncLike): number {
+function mirrorProjectorState(abrainHome: string, knowledgeRoot: string, db: DatabaseSyncLike): number {
   const now = new Date().toISOString();
   const insert = db.prepare("INSERT INTO projector_state(projector, watermark_event_id, updated_at_utc, detail_json) VALUES (?, ?, ?, ?)");
   let count = 0;
-  const knowledgeManifest = path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest", "manifest.json");
+  const knowledgeManifest = path.join(knowledgeRoot, "manifest.json");
   if (fs.existsSync(knowledgeManifest)) {
     const manifest = JSON.parse(fs.readFileSync(knowledgeManifest, "utf-8")) as Record<string, unknown>;
     insert.run("knowledge-projector", scalarString(manifest.latestEventId), now, JSON.stringify(manifest));
@@ -346,9 +344,12 @@ function mirrorProjectorState(abrainHome: string, db: DatabaseSyncLike): number 
   return count;
 }
 
-export function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string }): Adr0039L3SyncResult {
+export function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string; knowledgeLatestDir?: string }): Adr0039L3SyncResult {
   const abrainHome = path.resolve(args.abrainHome);
   const dbPath = path.resolve(args.dbPath || path.join(abrainHome, ".state", "sediment", "adr0039-l3", "adr0039.sqlite"));
+  // ADR 0039 B1: Knowledge L2 root is flag-resolved by the caller; default keeps
+  // the legacy .state location so existing behavior is unchanged.
+  const knowledgeLatestDir = path.resolve(args.knowledgeLatestDir || path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest"));
   const failures: string[] = [];
   const db = openDatabase(dbPath);
   const startedAt = new Date().toISOString();
@@ -358,9 +359,9 @@ export function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string }
     db.prepare("INSERT INTO meta(key, value) VALUES (?, ?)").run("schema_version", "adr0039-l3/v1");
     const l1Events = mirrorL1Events(abrainHome, db, failures);
     const eventEdges = mirrorEventEdges(abrainHome, db, failures);
-    const l2Views = mirrorL2Views(abrainHome, db, failures);
-    const searchCorpusRows = mirrorKnowledgeSearchCorpus(abrainHome, db, failures);
-    const projectorState = mirrorProjectorState(abrainHome, db);
+    const l2Views = mirrorL2Views(abrainHome, knowledgeLatestDir, db, failures);
+    const searchCorpusRows = mirrorKnowledgeSearchCorpus(abrainHome, knowledgeLatestDir, db, failures);
+    const projectorState = mirrorProjectorState(abrainHome, knowledgeLatestDir, db);
     const finishedAt = new Date().toISOString();
     db.prepare("INSERT INTO jobs(job_id, kind, status, created_at_utc, updated_at_utc, detail_json) VALUES (?, ?, ?, ?, ?, ?)")
       .run(`adr0039-l3-sync:${finishedAt}`, "adr0039-l3-sync", failures.length ? "failed" : "completed", startedAt, finishedAt, JSON.stringify({ l1Events, eventEdges, l2Views, searchCorpusRows, projectorState }));
