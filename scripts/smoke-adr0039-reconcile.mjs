@@ -168,6 +168,12 @@ function resolveKnowledgeLatestDir(abrainHome, override) {
   return path.join(root, "latest");
 }
 
+function resolveProjectionMode(override) {
+  if (override) return override;
+  const cfg = fs.existsSync(settingsPath) ? readJson(settingsPath) : {};
+  return cfg.sediment?.knowledgeProjector?.projectionMode === "topo" ? "topo" : "single";
+}
+
 function markdownString(value) {
   if (/^[A-Za-z0-9_.:/@+-]+$/.test(value)) return value;
   return JSON.stringify(value);
@@ -280,12 +286,25 @@ function projectionSearchCorpusRow(eventId, raw) {
   };
 }
 
-function validateKnowledgeProjection(abrainHome, latestDir) {
+function validateKnowledgeProjection(abrainHome, latestDir, projectionMode = "single") {
   const latest = latestDir;
   if (!fs.existsSync(latest)) return { projectedFiles: 0, failures: [], searchCorpusRows: 0 };
   const failures = [];
   const knowledge = loadKnowledgeEvidenceModule();
   const markdownFiles = listFiles(latest, (file) => file.endsWith(".md"));
+  // ADR0039 B2/B3: in topo mode the expected bytes are the deterministic fold
+  // of the whole identity event set, so reconcile re-renders via the same
+  // set-projection. Build the identity->nodes map in a single L1 scan (O(N)).
+  const nodesByIdentity = new Map();
+  if (projectionMode === "topo") {
+    for (const eventFile of listFiles(path.join(abrainHome, "l1", "events"), (file) => file.endsWith(".json"))) {
+      const env = readJson(eventFile);
+      if (env.body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
+      const id = knowledge.knowledgeIdentityKey(env.body);
+      if (!nodesByIdentity.has(id)) nodesByIdentity.set(id, []);
+      nodesByIdentity.get(id).push({ eventId: env.event_id, body: env.body });
+    }
+  }
   const projectedByEvent = new Map();
   const searchRowsFromEvents = new Map();
   const searchRowsFromProjection = new Map();
@@ -323,10 +342,16 @@ function validateKnowledgeProjection(abrainHome, latestDir) {
     const expectedPath = expectedKnowledgeOutputPath(latest, envelope.body);
     if (path.resolve(file) !== path.resolve(expectedPath)) failures.push(`${rel}: projection_path_mismatch`);
     if (envelope.body?.intent?.operation_hint === "delete") failures.push(`${rel}: delete_event_left_projected_markdown:${eventId}`);
-    const expectedBytes = strict
-      ? knowledge.renderKnowledgeProjectionMarkdown(envelope.body, eventId)
-      : renderLegacyKnowledgeProjectionMarkdown(envelope.body, eventId);
-    if (raw !== expectedBytes) failures.push(`${rel}: projection_byte_mismatch:${eventId}`);
+    let expectedBytes;
+    if (projectionMode === "topo") {
+      const proj = knowledge.renderKnowledgeProjectionFromSet(nodesByIdentity.get(knowledge.knowledgeIdentityKey(envelope.body)) ?? [{ eventId, body: envelope.body }]);
+      expectedBytes = proj.kind === "delete" ? null : proj.markdown;
+    } else {
+      expectedBytes = strict
+        ? knowledge.renderKnowledgeProjectionMarkdown(envelope.body, eventId)
+        : renderLegacyKnowledgeProjectionMarkdown(envelope.body, eventId);
+    }
+    if (expectedBytes !== null && raw !== expectedBytes) failures.push(`${rel}: projection_byte_mismatch:${eventId}`);
     projectedByEvent.set(eventId, rel);
     const eventRow = eventSearchCorpusRow(envelope, expectedBytes);
     const projectionRow = projectionSearchCorpusRow(eventId, raw);
@@ -492,7 +517,8 @@ function loadRuntimeThresholds() {
 function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   const l1 = validateL1Events(abrainHome);
   const knowledgeLatestDir = resolveKnowledgeLatestDir(abrainHome, opts.knowledgeLatestDir);
-  const knowledge = validateKnowledgeProjection(abrainHome, knowledgeLatestDir);
+  const projectionMode = resolveProjectionMode(opts.projectionMode);
+  const knowledge = validateKnowledgeProjection(abrainHome, knowledgeLatestDir, projectionMode);
   const constraint = validateConstraintShadow(abrainHome, opts);
   const l3 = validateL3Store(abrainHome, knowledgeLatestDir);
   const coverage = computeLegacyKnowledgeCoverage(abrainHome);
@@ -593,14 +619,15 @@ if (hasFlag("abrain")) {
 
 console.log("ADR0039 reconcile smoke");
 const fixture = await buildFixtureTree();
-const clean = reconcile(fixture.abrainHome, { staleAfterMs: 24 * 60 * 60 * 1000, minCoverageRatio: 1 });
+const stateFixtureOpts = (home) => ({ staleAfterMs: 24 * 60 * 60 * 1000, minCoverageRatio: 1, knowledgeLatestDir: path.join(home, ".state", "sediment", "knowledge-projection", "latest"), projectionMode: "single" });
+const clean = reconcile(fixture.abrainHome, stateFixtureOpts(fixture.abrainHome));
 printResult(clean);
 if (clean.failures.length) process.exit(1);
 const eventPath = expectedEventPath(fixture.abrainHome, fixture.eventId);
 const corrupted = readJson(eventPath);
 corrupted.body.payload.title = "Corrupted Fixture";
 writeFile(eventPath, `${JSON.stringify(corrupted, null, 2)}\n`);
-const dirty = reconcile(fixture.abrainHome, { staleAfterMs: 24 * 60 * 60 * 1000, minCoverageRatio: 1 });
+const dirty = reconcile(fixture.abrainHome, stateFixtureOpts(fixture.abrainHome));
 if (!dirty.failures.some((failure) => failure.includes("body_hash_mismatch"))) {
   console.log("FAIL — corrupted fixture did not trigger body_hash_mismatch");
   process.exit(1);
@@ -615,7 +642,7 @@ execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "add", "."], { encoding:
 execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "commit", "-m", "baseline"], { encoding: "utf8" });
 const dirtyProjectedPath = listFiles(path.join(dirtyViewFixture.abrainHome, ".state", "sediment", "knowledge-projection", "latest"), (file) => file.endsWith(".md"))[0];
 writeFile(dirtyProjectedPath, `${fs.readFileSync(dirtyProjectedPath, "utf8")}\n<!-- dirty derived view -->\n`);
-const dirtyView = reconcile(dirtyViewFixture.abrainHome, { staleAfterMs: 24 * 60 * 60 * 1000, minCoverageRatio: 1 });
+const dirtyView = reconcile(dirtyViewFixture.abrainHome, stateFixtureOpts(dirtyViewFixture.abrainHome));
 if (!dirtyView.failures.some((failure) => failure.includes("dirty_derived_view:"))) {
   console.log("FAIL — dirty L2 fixture did not trigger dirty_derived_view");
   process.exit(1);
@@ -732,6 +759,7 @@ const repoReconcile = reconcile(repoFixture.abrainHome, {
   staleAfterMs: 24 * 60 * 60 * 1000,
   minCoverageRatio: 1,
   knowledgeLatestDir: path.join(repoFixture.abrainHome, "l2", "views", "knowledge", "latest"),
+  projectionMode: "single",
 });
 if (repoReconcile.failures.length) {
   console.log(`FAIL — B1 repo mode reconcile failed: ${JSON.stringify(repoReconcile.failures)}`);

@@ -222,6 +222,61 @@ export async function runBackfill({ abrainHome, dryRun = true, limit = Infinity 
   return { scanned, appended, skipped, duplicate, failed, failures: failures.slice(0, 10), total: entries.length };
 }
 
+/** Re-project every Knowledge identity present in L1 to the configured L2 root
+ *  (topo mode folds the full event set per identity). Used once after the
+ *  legacy_import backfill + flag flip so the git-tracked l2/ view is complete. */
+export async function reprojectAllKnowledge({ abrainHome, settings }) {
+  const km = loadKnowledgeModule();
+  // Single O(N) pass: scan L1 once, group nodes by identity in memory, then
+  // fold + write each identity. (Calling projectKnowledgeEvidenceEvent per
+  // identity would re-scan all of L1 each time => O(N^2).)
+  const root = path.join(abrainHome, "l1", "events");
+  const byIdentity = new Map();
+  const walk = (dir) => {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".json")) {
+        try {
+          const envelope = JSON.parse(fs.readFileSync(full, "utf-8"));
+          const body = envelope.body;
+          if (body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
+          const identity = km.knowledgeIdentityKey(body);
+          if (!byIdentity.has(identity)) byIdentity.set(identity, []);
+          byIdentity.get(identity).push({ eventId: envelope.event_id, body });
+        } catch { /* skip */ }
+      }
+    }
+  };
+  walk(root);
+  const projectionRoot = km.knowledgeProjectionRoot(abrainHome, settings);
+  const latestDir = path.join(projectionRoot, "latest");
+  let projected = 0;
+  let removed = 0;
+  let failed = 0;
+  let lastWinner = null;
+  const failures = [];
+  for (const [identity, nodes] of byIdentity) {
+    try {
+      const proj = km.renderKnowledgeProjectionFromSet(nodes);
+      const body = nodes[0].body;
+      const projectPart = body.scope.kind === "world" ? "world" : `projects/${body.scope.project_id || "unknown"}`;
+      const outputPath = path.join(latestDir, projectPart, `${body.payload.slug}.md`);
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      if (proj.kind === "delete") { fs.rmSync(outputPath, { force: true }); removed += 1; }
+      else { fs.writeFileSync(outputPath, proj.markdown, "utf-8"); projected += 1; lastWinner = proj.winnerEventId; }
+    } catch (err) {
+      failed += 1; failures.push(`${identity}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (lastWinner) {
+    fs.mkdirSync(latestDir, { recursive: true });
+    fs.writeFileSync(path.join(latestDir, "manifest.json"), `${JSON.stringify({ schemaVersion: "knowledge-projection-manifest/v1", updatedAtUtc: new Date().toISOString(), latestEventId: lastWinner, latestOperation: "reproject" }, null, 2)}\n`, "utf-8");
+  }
+  return { identities: byIdentity.size, projected, removed, failed, failures: failures.slice(0, 10) };
+}
+
 function expandHome(input) {
   return String(input).replace(/^~(?=$|\/)/, os.homedir());
 }
@@ -233,6 +288,20 @@ function arg(name, fallback) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const abrainHome = path.resolve(expandHome(arg("abrain", path.join(os.homedir(), ".abrain"))));
+  if (process.argv.includes("--reproject")) {
+    const settings = {
+      knowledgeProjector: { enabled: true, hotOverlayEnabled: true, projectOnWrite: true, maxReadBytes: 1000000, l2OutputRoot: arg("l2-root", "repo"), projectionMode: arg("projection-mode", "topo") },
+    };
+    const r = await reprojectAllKnowledge({ abrainHome, settings });
+    console.log(`abrainHome: ${abrainHome}`);
+    console.log(`reproject l2OutputRoot=${settings.knowledgeProjector.l2OutputRoot} projectionMode=${settings.knowledgeProjector.projectionMode}`);
+    console.log(`identities: ${r.identities}`);
+    console.log(`projected: ${r.projected}`);
+    console.log(`removed: ${r.removed}`);
+    console.log(`failed: ${r.failed}`);
+    if (r.failures.length) for (const f of r.failures) console.log(`  FAIL ${f}`);
+    process.exit(r.failed ? 1 : 0);
+  }
   const dryRun = !process.argv.includes("--no-dry-run") && !process.argv.includes("--apply");
   const limit = Number(arg("limit", "Infinity"));
   const result = await runBackfill({ abrainHome, dryRun, limit: Number.isFinite(limit) ? limit : Infinity });
