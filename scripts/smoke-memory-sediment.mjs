@@ -3379,6 +3379,36 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         const tier1Audit = fs.readFileSync(tier1AuditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((row) => row.session_id === "smoke-tier1-event" && row.operation === "tier1_direct_write");
         assert(tier1Audit.length === 2 && tier1Audit.every((row) => row.constraint_evidence_event), `tier1 audit must include event summaries when enabled: ${JSON.stringify(tier1Audit)}`);
 
+        const eventOnlyTarget = setupAbrainTarget("constraint-evidence-event-first-only-smoke");
+        const eventOnlySettings = {
+          ...a2Settings,
+          constraintEvidenceEventWriter: {
+            enabled: true,
+            mode: "event_first",
+            legacyFallbackOnEventFailure: false,
+            legacyRuleWriteOnSuccessfulEvent: false,
+          },
+        };
+        const eventOnlyQuote = "所有 Constraint 新信号必须先进入 L1 Evidence Event，旧规则写入只作为显式回滚路径。";
+        const eventOnlySignal = { ...qualifyingSignal, user_quote: eventOnlyQuote, scope_description: "All Constraint signals should be captured in L1 before legacy rule writes" };
+        const eventOnlyWinText = `--- ENTRY 1 ev2 message/user ---\n全局规则：${eventOnlyQuote}`;
+        const eventOnlyWin = {
+          entries: [{ type: "message", id: "ev2", timestamp: "2026-06-20T12:00:00.000Z", message: { role: "user", content: [{ type: "text", text: eventOnlyWinText }] } }],
+          text: eventOnlyWinText, chars: eventOnlyWinText.length, totalBranchEntries: 1,
+          candidateEntries: 1, includedEntries: 1, checkpointFound: false, lastEntryId: "ev2",
+        };
+        globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
+        const eventOnly = await _tryAutoWriteLaneForTests({
+          cwd: aRoot, sessionId: "smoke-tier1-event-only", settings: eventOnlySettings, window: eventOnlyWin,
+          modelRegistry: mockModelRegistry, signal: undefined, correlationId: "smoke-tier1-event-only:auto",
+          abrainHome: eventOnlyTarget.abrainHome, projectId: eventOnlyTarget.projectId, correctionSignal: eventOnlySignal,
+        });
+        assert(eventOnly.kind === "tier1_direct" && eventOnly.result.status === "deduped" && eventOnly.result.reason?.startsWith("constraint_evidence_event_captured"), `event-only mode must treat L1 capture as the Tier-1 outcome, got: ${JSON.stringify(eventOnly)}`);
+        assert(fs.existsSync(path.join(eventOnlyTarget.abrainHome, "l1", "events")), "event-only mode must write L1 events");
+        assert(!fs.existsSync(path.join(eventOnlyTarget.abrainHome, "rules")), "event-only mode must not write legacy rules");
+        const eventOnlyTier1Audit = fs.readFileSync(tier1AuditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((row) => row.session_id === "smoke-tier1-event-only" && row.operation === "tier1_direct_write");
+        assert(eventOnlyTier1Audit.length === 1 && eventOnlyTier1Audit[0].event_first_skipped_legacy_rule_write === true && eventOnlyTier1Audit[0].signal_consumed === true, `event-only audit must mark skipped legacy write: ${JSON.stringify(eventOnlyTier1Audit)}`);
+
         // (2) non-qualifying (task-local, conf 6) -> not Tier-1 -> extractor path -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
         const taskLocal = await _tryAutoWriteLaneForTests(laneArgs("smoke-tier1-tasklocal", { signal_found: true, typing: "task-local", confidence: 6, user_quote: userQuote, target_entry_slug: null }));

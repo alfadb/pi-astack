@@ -74,6 +74,7 @@ export interface SedimentSettings {
     enabled: boolean;
     mode: "parallel_legacy" | "event_first";
     legacyFallbackOnEventFailure: boolean;
+    legacyRuleWriteOnSuccessfulEvent: boolean;
   };
   /** ADR 0039: runtime append/project/read overlay for Knowledge Evidence Events. */
   knowledgeEvidenceEventWriter: {
@@ -243,6 +244,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     enabled: false,
     mode: "parallel_legacy",
     legacyFallbackOnEventFailure: true,
+    legacyRuleWriteOnSuccessfulEvent: true,
   },
   knowledgeEvidenceEventWriter: {
     enabled: false,
@@ -423,6 +425,7 @@ export function resolveSedimentSettings(): SedimentSettings {
       enabled: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.enabled),
       mode: resolveMode((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.mode, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.mode),
       legacyFallbackOnEventFailure: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyFallbackOnEventFailure, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.legacyFallbackOnEventFailure),
+      legacyRuleWriteOnSuccessfulEvent: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyRuleWriteOnSuccessfulEvent, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.legacyRuleWriteOnSuccessfulEvent),
     },
     knowledgeEvidenceEventWriter: {
       enabled: asBoolean((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.enabled),

@@ -4560,6 +4560,50 @@ async function tryAutoWriteLane(args: {
         }).catch(() => {});
         return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
       }
+      if (
+        settings.constraintEvidenceEventWriter.mode === "event_first"
+        && settings.constraintEvidenceEventWriter.legacyRuleWriteOnSuccessfulEvent !== true
+        && constraintEvidenceEvent?.append.ok === true
+      ) {
+        const result: WriteRuleResult = {
+          slug: draft.title,
+          path: "",
+          status: "deduped",
+          reason: `constraint_evidence_event_captured:${constraintEvidenceEvent.append.status}`,
+          dedupedAgainst: constraintEvidenceEvent.append.eventId,
+          lane: "auto_write",
+          sessionId,
+          correlationId,
+          candidateId: tier1CandidateId,
+        };
+        await appendAudit(cwd, {
+          operation: "tier1_direct_write",
+          lane: "auto_write",
+          session_id: sessionId,
+          ...checkpointSummary(window),
+          correlation_id: correlationId,
+          candidate_id: tier1CandidateId,
+          candidate_title: sanitizeAuditText(draft.title, 500),
+          candidate_kind: draft.kind,
+          candidate_confidence: draft.entryConfidence,
+          candidate_body_chars: draft.body.length,
+          result: resultSummary(result),
+          deterministic_direct_path: true,
+          constraint_evidence_event: {
+            ok: true,
+            status: constraintEvidenceEvent.append.status,
+            event_id: constraintEvidenceEvent.append.eventId,
+            audit_path: constraintEvidenceEvent.auditPath ?? null,
+            status_path: constraintEvidenceEvent.statusPath ?? null,
+            diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
+          },
+          event_first_skipped_legacy_rule_write: true,
+          signal_consumed: true,
+          checkpoint_advanced: false,
+          durationMs: Date.now() - writeStart,
+        }).catch(() => {});
+        return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+      }
     }
     // PR-4/P0.3 (O2 2026-06-10): with the lane ON (default), a cross-slug
     // Jaccard hit comes back as "similar_found" (no write) and the curator

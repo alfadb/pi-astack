@@ -389,6 +389,11 @@
               "type": "boolean",
               "default": true,
               "description": "When true, append failure may fall back to the legacy writer. Set false for fail-closed event_first operation."
+            },
+            "legacyRuleWriteOnSuccessfulEvent": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true, successful Constraint Evidence append still runs the legacy Tier-1 rules writer. Set false to isolate old write-time adjudication while keeping this rollback switch explicit."
             }
           }
         },
