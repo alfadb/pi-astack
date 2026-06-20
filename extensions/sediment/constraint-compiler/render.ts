@@ -9,6 +9,13 @@ import { sha256Hex, stableCanonicalize } from "./normalize";
 
 const TEMPLATE_VERSION = "constraint-shadow-render/v1";
 
+// ADR0039 §4.3 strict determinism: locale-independent codepoint ordering so the
+// same decision renders byte-identical L2 on any machine/locale. Keys are ASCII
+// today, but L2 reconcile byte-compare must not silently depend on that.
+function cmpCodepoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function scopeSortKey(constraint: ValidatedConstraint): string {
   const scopePart = constraint.scope.kind === "global" ? "0:global" : `1:${constraint.scope.projectId}`;
   const injectPart = constraint.injectMode === "always" ? "0:always" : "1:listed";
@@ -45,7 +52,7 @@ function renderExclusions(exclusions: ConstraintDecisionExclusion[]): string[] {
   if (!exclusions.length) return ["No exclusions.", ""];
   return exclusions
     .slice()
-    .sort((left, right) => `${left.reason}:${left.sourceRecordIds.join("+")}`.localeCompare(`${right.reason}:${right.sourceRecordIds.join("+")}`))
+    .sort((left, right) => cmpCodepoint(`${left.reason}:${left.sourceRecordIds.join("+")}`, `${right.reason}:${right.sourceRecordIds.join("+")}`))
     .flatMap((exclusion) => [
       `- ${exclusion.reason}: ${exclusion.sourceRecordIds.slice().sort().join(", ")}${exclusion.note ? ` — ${exclusion.note}` : ""}`,
     ])
@@ -56,7 +63,7 @@ function renderUnresolved(unresolved: ConstraintDecisionUnresolved[]): string[] 
   if (!unresolved.length) return ["No unresolved constraints.", ""];
   return unresolved
     .slice()
-    .sort((left, right) => `${left.reason}:${left.sourceRecordIds.join("+")}`.localeCompare(`${right.reason}:${right.sourceRecordIds.join("+")}`))
+    .sort((left, right) => cmpCodepoint(`${left.reason}:${left.sourceRecordIds.join("+")}`, `${right.reason}:${right.sourceRecordIds.join("+")}`))
     .flatMap((item) => [
       `- ${item.reason}: ${item.sourceRecordIds.slice().sort().join(", ")}${item.note ? ` — ${item.note}` : ""}`,
     ])
@@ -66,7 +73,7 @@ function renderUnresolved(unresolved: ConstraintDecisionUnresolved[]): string[] 
 export function renderConstraintShadowView(decision: ValidatedConstraintCompilerDecision): RenderedConstraintView {
   const decisionHash = sha256Hex(stableCanonicalize(decision));
   const grouped = new Map<string, ValidatedConstraint[]>();
-  for (const constraint of decision.constraints.slice().sort((left, right) => scopeSortKey(left).localeCompare(scopeSortKey(right)))) {
+  for (const constraint of decision.constraints.slice().sort((left, right) => cmpCodepoint(scopeSortKey(left), scopeSortKey(right)))) {
     const heading = scopeHeading(constraint);
     grouped.set(heading, [...(grouped.get(heading) ?? []), constraint]);
   }
