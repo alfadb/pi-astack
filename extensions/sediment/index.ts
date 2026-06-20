@@ -84,8 +84,6 @@ import {
   mutateRuleStatusContested,
   writeAbrainRule,
   writeProjectEntry,
-  readRuleForAdjudication,
-  listRulesInScope,
   type AboutMeDraft,
   type ProjectEntryDraft,
   type WriteAboutMeResult,
@@ -93,8 +91,6 @@ import {
   type WriteRuleResult,
   type WriterAuditContext,
 } from "./writer";
-import { resolveTier1JaccardHit, runTier1JaccardAdjudication } from "./tier1-adjudicator";
-import { resolveRuleWrite } from "./tier1-ruleset-adjudicator";
 import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
@@ -574,6 +570,23 @@ function isTerminalTier1Reject(result: WriteRuleResult): boolean {
   // burning one classifier call per turn until the window scrolled past
   // (deterministic rejects reproduce identically on every retry). Transient
   // reasons (git_commit_failed / lock timeouts) stay non-terminal → HOLD+retry.
+  //
+  // ADR0039 P4-a (2026-06-20, 4×T0 unanimous): constraint Evidence Event append
+  // failures. ALL deterministic append faults (invalid / path_violation /
+  // collision / blocked, and any unknown-throw reason produced by the catch at
+  // the append call site) are TERMINAL — they reproduce identically on retry,
+  // so a non-terminal HOLD would burn one classifier+append every turn until
+  // the window scrolls (the exact GAP this fixes). The SOLE transient exception
+  // is ":write_failed" (IO): it stays non-terminal so the checkpoint HOLDs and
+  // the content-addressed event idempotently re-appends next agent_end (no new
+  // persistence layer — durable retry deferred to the L3 SQLite jobs table).
+  // ":blocked" is classified defensively; it is UNREACHABLE today because
+  // constraint-evidence/integration.ts hardcodes sanitizer.status="passed".
+  // TODO(adr0039-p4a-sanitizer): exercise ":blocked" once real sanitizer
+  // wiring lands; until then this arm is dead-but-correct.
+  if (result.reason.startsWith("constraint_evidence_append_failed:")) {
+    return result.reason !== "constraint_evidence_append_failed:write_failed";
+  }
   return result.reason.startsWith("validation_error")
     || result.reason.startsWith("kind_invalid")
     || result.reason === "lint_error"
@@ -4464,7 +4477,6 @@ async function tryAutoWriteLane(args: {
   if (tier1Signal && !args.tier1AlreadyCommitted && shouldEscalateToCurator(tier1Signal)) {
     const writeStart = Date.now();
     const draft = buildTier1RuleDraft(tier1Signal, sessionId, projectId);
-    const adjudicationLaneOn = settings.tier1JaccardCuratorLane === true;
     const tier1CandidateId = candidateIdFor(correlationId, -1);
     const tier1EvidenceCandidateId = "tier1-direct:c0";
     const tier1AuditContext: WriterAuditContext = {
@@ -4605,100 +4617,25 @@ async function tryAutoWriteLane(args: {
         return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
       }
     }
-    // PR-4/P0.3 (O2 2026-06-10): with the lane ON (default), a cross-slug
-    // Jaccard hit comes back as "similar_found" (no write) and the curator
-    // adjudicates {update,merge,create}; with the lane OFF (rollback only),
-    // the legacy autonomous dedup gate stays the sole writer.
-    let result: WriteRuleResult;
-    let adjudication: Record<string, unknown> | undefined;
-    if (settings.tier1RuleSetAdjudication === true) {
-      // A1 (2026-06-16): full-candidate-set rule adjudication — NO Jaccard
-      // GATE. Always adjudicate the directive against ALL active same-scope
-      // rules, with archive of superseded/contradicted ones. resolveRuleWrite
-      // already degrades to deterministic create on any failure (directive
-      // never lost); this try/catch is defense-in-depth for an unexpected throw.
-      const rs = draft.scope === "global"
-        ? { scope: "global" as const, projectId: undefined as string | undefined }
-        : { scope: "project" as const, projectId: draft.scope.projectId };
-      try {
-        const candidates = listRulesInScope(abrainHome, rs.scope, rs.projectId);
-        const resolved = await resolveRuleWrite({
-          draft, candidates, settings, modelRegistry: args.modelRegistry,
-          abrainHome, auditContext: tier1AuditContext,
-        });
-        result = resolved.result;
-        adjudication = resolved.adjudication;
-      } catch (e: unknown) {
-        result = await writeAbrainRule(draft, {
-          abrainHome, settings, exactDuplicateAsDedup: true,
-          semanticDedup: "off", auditContext: tier1AuditContext,
-        });
-        adjudication = { ruleset: true, decision: "create", fallback: "ruleset_adjudication_threw", error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 200) };
-      }
-    } else {
-    // ---- legacy path (tier1RuleSetAdjudication=false rollback): Jaccard-gated single-candidate adjudication ----
-    result = await writeAbrainRule(draft, {
+    // ADR0039 P4-a (2026-06-20, 4×T0 unanimous R2): the Tier-1 write-time
+    // ruleset/Jaccard adjudicator is RETIRED. In steady state the constraint
+    // Evidence Event is the canonical write — the event_first guards above
+    // early-return before reaching here. This block is reachable ONLY under
+    // rollback configs (writer disabled / mode≠event_first / a legacy* flag
+    // flipped true) and is now a deterministic storage-only create, per
+    // ADR0039 §P4 ("writer 只保留基础设施写文件能力").
+    // Rollback drops the Jaccard near-dup gate (semanticDedup:"off"): near-dup
+    // detection now lives in the constraint Evidence Event normalizer + compiler,
+    // and REQ-004 recall-audit (keyed by raw transcript) catches divergence on
+    // later turns. Exact-title dups still fold via exactDuplicateAsDedup.
+    const result: WriteRuleResult = await writeAbrainRule(draft, {
       abrainHome,
       settings,
       exactDuplicateAsDedup: true,
-      semanticDedup: adjudicationLaneOn ? "report" : "dedup",
+      semanticDedup: "off",
       auditContext: tier1AuditContext,
     });
-    if (result.status === "similar_found") {
-      try {
-        const resolved = await resolveTier1JaccardHit({
-          draft, firstResult: result, settings,
-          modelRegistry: args.modelRegistry, abrainHome, auditContext: tier1AuditContext,
-        });
-        result = resolved.result;
-        adjudication = resolved.adjudication;
-      } catch (e: unknown) {
-        // Defense-in-depth: an unexpected throw must not leave the
-        // intermediate similar_found as the lane outcome — deterministic
-        // create per O2 failure policy.
-        result = await writeAbrainRule(draft, {
-          abrainHome, settings, exactDuplicateAsDedup: true,
-          semanticDedup: "off", auditContext: tier1AuditContext,
-        });
-        adjudication = { enabled: true, decision: "create", fallback: "adjudication_threw", error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 200) };
-      }
-    } else if (
-      !adjudicationLaneOn
-      && settings.tier1JaccardShadowAudit === true
-      && result.status === "deduped"
-      && result.dedupedAgainst
-      && result.dedupedAgainst !== result.slug
-    ) {
-      // §9.4 dual-path shadow audit (flag OFF): the legacy gate just consumed
-      // this directive as a cross-slug near-dup. Run the adjudicator READ-ONLY
-      // and record its would-be verdict, so the cutover decision ("does the
-      // curator lane improve on the autonomous gate?") is made from real
-      // dogfood data instead of intuition. Never writes; errors recorded.
-      const against = result.dedupedAgainst;
-      const existing = readRuleForAdjudication(abrainHome, result.ruleScope ?? "global", result.projectId, against);
-      const shadow = existing
-        ? await runTier1JaccardAdjudication(
-            { draftTitle: draft.title, draftBody: draft.body, existingSlug: against, existingTitle: existing.title, existingBody: existing.body },
-            { settings, modelRegistry: args.modelRegistry },
-          ).catch((e: unknown) => ({ ok: false as const, model: settings.curatorModel, error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 200), durationMs: 0 }))
-        : { ok: false as const, model: settings.curatorModel, error: "existing_rule_unreadable", durationMs: 0 };
-      await appendAudit(cwd, {
-        operation: "tier1_jaccard_shadow",
-        lane: "auto_write",
-        session_id: sessionId,
-        correlation_id: correlationId,
-        against,
-        legacy_outcome: "deduped",
-        shadow_ok: shadow.ok,
-        ...(shadow.ok && "decision" in shadow && shadow.decision
-          ? { would_decision: shadow.decision.decision, would_reason: shadow.decision.reason.slice(0, 300) }
-          : { shadow_error: ("error" in shadow ? shadow.error : undefined) ?? "unknown" }),
-        model: shadow.model,
-        adj_duration_ms: shadow.durationMs,
-        quote: sanitizeAuditText(tier1Signal.user_quote ?? "", 200),
-      }).catch(() => {});
-    }
-    } // end legacy-path else (tier1RuleSetAdjudication)
+    const adjudication: Record<string, unknown> | undefined = { p4a_rollback_storage_only: true };
     const tier1StagingCleanup = (result.status === "created" || result.status === "updated")
       ? removeStagingEntriesBySlug(buildProvisionalStagingSlug(tier1Signal, window.text))
       : undefined;

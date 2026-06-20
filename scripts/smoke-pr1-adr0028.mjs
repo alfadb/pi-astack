@@ -322,14 +322,12 @@ await check("S6: schema exposes ADR 0028-compliant Jaccard defaults and removes 
   const props = schema.properties?.sediment?.properties ?? {};
   assert(props.rulesAsReadonlyNeighborsEnabled?.type === "boolean" && props.rulesAsReadonlyNeighborsEnabled?.default === true, "rulesAsReadonlyNeighborsEnabled schema missing/default wrong");
   assert(props.tier1JaccardCuratorLane?.type === "boolean" && props.tier1JaccardCuratorLane?.default === true, "tier1JaccardCuratorLane schema missing/default wrong");
-  assert(props.tier1JaccardShadowAudit?.type === "boolean" && props.tier1JaccardShadowAudit?.default === false, "tier1JaccardShadowAudit schema missing/default wrong");
   assert(!Object.prototype.hasOwnProperty.call(props, "tier1ShadowEnabled"), "tier1ShadowEnabled schema flag must be removed");
 });
 
 await check("S7: settings resolver carries ADR 0028-compliant Jaccard defaults and no shadow flag", async () => {
   assert(DEFAULT_SEDIMENT_SETTINGS.rulesAsReadonlyNeighborsEnabled === true, "rulesAsReadonlyNeighborsEnabled default must be true");
   assert(DEFAULT_SEDIMENT_SETTINGS.tier1JaccardCuratorLane === true, "tier1JaccardCuratorLane default must be true");
-  assert(DEFAULT_SEDIMENT_SETTINGS.tier1JaccardShadowAudit === false, "tier1JaccardShadowAudit default must be false");
   assert(!Object.prototype.hasOwnProperty.call(DEFAULT_SEDIMENT_SETTINGS, "tier1ShadowEnabled"), "tier1ShadowEnabled default must be removed");
 });
 

@@ -172,26 +172,10 @@ export interface SedimentSettings {
    *    （禁 skip/stage）；adjudicator 不可用/解析失败 → 确定性 create。
    *    同时 Tier-2 curator lane 的 rules-create 跳过自主 gate（邻居预
    *    过滤已在 curator prompt 内，curator.ts:1056）。
-   *  - false（rollback only）: 回到旧路径自主 dedup gate，并可配合
-   *    tier1JaccardShadowAudit 只读采样裁决。 */
+   *  - false（rollback only）: 回到旧路径自主 dedup gate（storage-only create）。
+   *    （旧 tier1JaccardShadowAudit / tier1RuleSetAdjudication 写时裁决器随
+   *    ADR0039 P4-a 退休；rollback 写已收缩为 storage-only writeAbrainRule）。 */
   tier1JaccardCuratorLane: boolean;
-
-  /** PR-4 R1 N1 (opus) / N4 (deepseek): rollback-mode opt-in shadow audit
-   *  (the read-only adjudicator call on each Tier-1 cross-slug Jaccard hit).
-   *  Default false because the adjudication lane is now live by default; only
-   *  turn this on together with tier1JaccardCuratorLane=false when collecting
-   *  rollback evidence. */
-  tier1JaccardShadowAudit: boolean;
-
-  /** A1 (2026-06-16, ruleset adjudication): when true, the Tier-1 rules path
-   *  drops the Jaccard near-dup GATE entirely and ALWAYS adjudicates the
-   *  directive against ALL active same-scope rules (small set, not embedded),
-   *  with a closed decision space {create, update, merge} PLUS archive_slugs
-   *  (soft-archive superseded/contradicted rules). Failure → deterministic
-   *  create (directive never lost). When false, falls back to the
-   *  tier1JaccardCuratorLane path (single-candidate Jaccard adjudication).
-   *  Explicit kill-switch (maxim: runtime toggles live in settings, not code). */
-  tier1RuleSetAdjudication: boolean;
 
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
@@ -333,11 +317,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // write-path gate by default. It only reports a near-duplicate candidate
   // to the closed curator adjudicator ({update, merge, create}); exact slug /
   // body-hash remain deterministic no-op infrastructure. Operators can set
-  // tier1JaccardCuratorLane:false as a rollback path, optionally with
-  // tier1JaccardShadowAudit:true to collect read-only comparison rows.
+  // tier1JaccardCuratorLane:false as a rollback path to the legacy autonomous
+  // dedup gate (storage-only create after ADR0039 P4-a retired the adjudicator).
   tier1JaccardCuratorLane: true,
-  tier1JaccardShadowAudit: false,
-  tier1RuleSetAdjudication: true,
   promptVersion: {
     activeCorrectionClassifier: "v2",
     reasoningNormalizationPreamble: "v1",
@@ -500,8 +482,6 @@ export function resolveSedimentSettings(): SedimentSettings {
     skipContinuationSanitize: asBoolean(cfg.skipContinuationSanitize, DEFAULT_SEDIMENT_SETTINGS.skipContinuationSanitize),
     rulesAsReadonlyNeighborsEnabled: asBoolean(cfg.rulesAsReadonlyNeighborsEnabled, DEFAULT_SEDIMENT_SETTINGS.rulesAsReadonlyNeighborsEnabled),
     tier1JaccardCuratorLane: asBoolean(cfg.tier1JaccardCuratorLane, DEFAULT_SEDIMENT_SETTINGS.tier1JaccardCuratorLane),
-    tier1JaccardShadowAudit: asBoolean(cfg.tier1JaccardShadowAudit, DEFAULT_SEDIMENT_SETTINGS.tier1JaccardShadowAudit),
-    tier1RuleSetAdjudication: asBoolean(cfg.tier1RuleSetAdjudication, DEFAULT_SEDIMENT_SETTINGS.tier1RuleSetAdjudication),
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,
