@@ -70,30 +70,15 @@ function renderUnresolved(unresolved: ConstraintDecisionUnresolved[]): string[] 
     .concat("");
 }
 
-export function renderConstraintShadowView(decision: ValidatedConstraintCompilerDecision): RenderedConstraintView {
-  const decisionHash = sha256Hex(stableCanonicalize(decision));
+// Shared, deterministic section body for both the .state shadow view and the
+// git-tracked L2 view. Identical bytes given the same decision (ADR0039 §4.3).
+function buildConstraintSectionLines(decision: ValidatedConstraintCompilerDecision): string[] {
   const grouped = new Map<string, ValidatedConstraint[]>();
   for (const constraint of decision.constraints.slice().sort((left, right) => cmpCodepoint(scopeSortKey(left), scopeSortKey(right)))) {
     const heading = scopeHeading(constraint);
     grouped.set(heading, [...(grouped.get(heading) ?? []), constraint]);
   }
-
-  const lines: string[] = [
-    "---",
-    "schema_version: constraint-shadow-view/v1",
-    "view: compiled_constraint_shadow",
-    "projector: constraint-shadow-compiler",
-    `template_version: ${TEMPLATE_VERSION}`,
-    `input_root_hash: ${decision.inputRootHash}`,
-    `decision_hash: ${decisionHash}`,
-    "shadow_output_hash: __PENDING__",
-    "shadow_only: true",
-    "---",
-    "",
-    "# Compiled Constraint View (Shadow)",
-    "",
-  ];
-
+  const lines: string[] = [];
   const headings = [
     "Global always",
     "Global listed",
@@ -108,8 +93,28 @@ export function renderConstraintShadowView(decision: ValidatedConstraintCompiler
     }
     for (const constraint of constraints) lines.push(...renderConstraint(constraint));
   }
-
   lines.push("## Conflicts", "", ...renderUnresolved(decision.unresolved), "## Not-memory diagnostics", "", ...renderExclusions(decision.exclusions));
+  return lines;
+}
+
+export function renderConstraintShadowView(decision: ValidatedConstraintCompilerDecision): RenderedConstraintView {
+  const decisionHash = sha256Hex(stableCanonicalize(decision));
+  const lines: string[] = [
+    "---",
+    "schema_version: constraint-shadow-view/v1",
+    "view: compiled_constraint_shadow",
+    "projector: constraint-shadow-compiler",
+    `template_version: ${TEMPLATE_VERSION}`,
+    `input_root_hash: ${decision.inputRootHash}`,
+    `decision_hash: ${decisionHash}`,
+    "shadow_output_hash: __PENDING__",
+    "shadow_only: true",
+    "---",
+    "",
+    "# Compiled Constraint View (Shadow)",
+    "",
+    ...buildConstraintSectionLines(decision),
+  ];
   const pendingMarkdown = `${lines.join("\n").trimEnd()}\n`;
   const shadowOutputHash = sha256Hex(pendingMarkdown.replace("shadow_output_hash: __PENDING__", "shadow_output_hash: "));
   const markdown = pendingMarkdown.replace("shadow_output_hash: __PENDING__", `shadow_output_hash: ${shadowOutputHash}`);
@@ -119,6 +124,51 @@ export function renderConstraintShadowView(decision: ValidatedConstraintCompiler
     inputRootHash: decision.inputRootHash,
     decisionHash,
     shadowOutputHash,
+    markdown,
+  };
+}
+
+export interface RenderedConstraintL2View {
+  schemaVersion: "constraint-l2-view/v1";
+  inputRootHash: string;
+  decisionHash: string;
+  projectionEventId: string;
+  canonicalOutputHash: string;
+  markdown: string;
+}
+
+// ADR0039 Constraint L2 (FIX-1): deterministic git-tracked L2 view rendered from
+// the 固化d validated decision. Frontmatter pins sediment_projection_event_id so
+// reconcile can map L2 back to its immutable L1 source and re-render for a
+// byte-compare. Same section body as the shadow view; never invokes an LLM.
+export function renderConstraintL2View(decision: ValidatedConstraintCompilerDecision, projectionEventId: string): RenderedConstraintL2View {
+  const decisionHash = sha256Hex(stableCanonicalize(decision));
+  const lines: string[] = [
+    "---",
+    "schema_version: constraint-l2-view/v1",
+    "view: compiled_constraint",
+    "projector: constraint-compiler",
+    `template_version: ${TEMPLATE_VERSION}`,
+    `input_root_hash: ${decision.inputRootHash}`,
+    `decision_hash: ${decisionHash}`,
+    `sediment_projection_event_id: ${projectionEventId}`,
+    "shadow_only: false",
+    "canonical_output_hash: __PENDING__",
+    "---",
+    "",
+    "# Compiled Constraint View",
+    "",
+    ...buildConstraintSectionLines(decision),
+  ];
+  const pendingMarkdown = `${lines.join("\n").trimEnd()}\n`;
+  const canonicalOutputHash = sha256Hex(pendingMarkdown.replace("canonical_output_hash: __PENDING__", "canonical_output_hash: "));
+  const markdown = pendingMarkdown.replace("canonical_output_hash: __PENDING__", `canonical_output_hash: ${canonicalOutputHash}`);
+  return {
+    schemaVersion: "constraint-l2-view/v1",
+    inputRootHash: decision.inputRootHash,
+    decisionHash,
+    projectionEventId,
+    canonicalOutputHash,
     markdown,
   };
 }

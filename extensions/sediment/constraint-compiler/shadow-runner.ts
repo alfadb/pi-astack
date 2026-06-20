@@ -9,6 +9,7 @@ import { scanLegacyConstraintSources } from "./legacy-scan";
 import { normalizeConstraintSources, sha256Hex, stableCanonicalize } from "./normalize";
 import { buildConstraintCompilerPrompt } from "./prompt";
 import { renderConstraintShadowView } from "./render";
+import { fixateConstraintDecisionAndRenderL2 } from "./projection";
 import { validateConstraintCompilerDecision } from "./validate-decision";
 import type {
   ConstraintCompilerPrompt,
@@ -330,6 +331,35 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     };
   }
 
+  // ADR0039 Constraint L2 (NS-2/FIX-1): 固化 the validated decision as an
+  // immutable L1 projection event + render the deterministic git-tracked L2 view
+  // (SHADOW — runtime injection still reads the .state bundle; no read-flip).
+  // Best-effort: failure records status but never breaks the shadow run.
+  let l2Projection: { status: string; eventId?: string; l2RelativePath: string; decisionHash: string } | undefined;
+  if (options.l2OutputRoot === "repo") {
+    try {
+      const fixate = await fixateConstraintDecisionAndRenderL2({
+        abrainHome: options.abrainHome,
+        decision,
+        provenance: {
+          model: options.modelRef ?? "",
+          prompt_hash: prompt.promptHash,
+          input_hash: normalized.inputRootHash,
+          raw_output_hash: compile.rawOutputHash ?? "",
+          ...(decision.validationHash ? { parsed_output_hash: decision.validationHash } : {}),
+          acceptance: "accepted_for_event_append",
+        },
+        inputEventIds: eventScan.events.map((event) => event.eventId),
+        createdAtUtc: new Date().toISOString(),
+        deviceId: options.deviceId ?? "unknown-device",
+        producerVersion: ARTIFACT_SCHEMA_VERSION,
+      });
+      l2Projection = { status: fixate.status, eventId: fixate.eventId, l2RelativePath: fixate.l2RelativePath, decisionHash: fixate.decisionHash };
+    } catch (err) {
+      l2Projection = { status: `threw:${(err instanceof Error ? err.message : String(err)).slice(0, 160)}`, l2RelativePath: "l2/views/constraint/latest/compiled-view.md", decisionHash: "" };
+    }
+  }
+
   return {
     ok: true,
     inputRootHash: normalized.inputRootHash,
@@ -342,6 +372,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     legacyParallelDelta: legacyParallelDelta.report,
     diagnostics: allDiagnostics,
     ...(artifactResult?.ok ? { artifacts: artifactResult.artifacts } : {}),
+    ...(l2Projection ? { l2Projection } : {}),
   };
 }
 

@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createPiAiConstraintCompilerInvoker } from "./pi-ai-invoker";
 import { runConstraintShadowCompiler } from "./shadow-runner";
+import { getDeviceId } from "../../_shared/causal-anchor";
 import type { ConstraintShadowRunResult } from "./types";
 import type { SedimentSettings } from "../settings";
 
@@ -138,6 +139,8 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
         maxRetries: trigger.settings.constraintShadowCompiler.maxRetries,
       }),
       writeArtifacts: true,
+      l2OutputRoot: trigger.settings.constraintShadowCompiler.l2OutputRoot,
+      deviceId: getDeviceId() ?? "unknown-device",
     });
     await appendAuditLine(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",

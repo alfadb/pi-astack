@@ -108,6 +108,8 @@ for (const file of [
   "extensions/sediment/constraint-compiler/prompt.ts",
   "extensions/sediment/constraint-compiler/llm-compiler.ts",
   "extensions/sediment/constraint-compiler/pi-ai-invoker.ts",
+  "extensions/sediment/constraint-evidence/append.ts",
+  "extensions/sediment/constraint-compiler/projection.ts",
   "extensions/sediment/constraint-compiler/shadow-runner.ts",
 ]) {
   stageTs(outRoot, file);
@@ -126,6 +128,8 @@ const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment",
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
 const { createPiAiConstraintCompilerInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
+const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION } = require(path.join(outRoot, "sediment", "constraint-compiler", "projection.js"));
+const { renderConstraintL2View } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
 
 function withoutUndefined(value) {
   if (Array.isArray(value)) return value.map(withoutUndefined);
@@ -901,6 +905,70 @@ check("shadow runner reads L1 events and writes event coverage artifacts", async
   assert(result.ok && result.legacyParallelDelta?.summary.matchedOutcomes === 1, "legacy delta did not match event");
   assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "event-coverage.json")), "event coverage artifact missing");
   assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "legacy-parallel-delta.json")), "legacy delta artifact missing");
+});
+
+check("repo-mode 固化s decision to immutable L1 + renders deterministic git L2 (round-trip + idempotent); state-mode is a no-op (ADR0039 NS-2/FIX-1)", async () => {
+  const mkHome = () => fs.mkdtempSync(path.join(os.tmpdir(), "constraint-l2-"));
+  const writeRule = (home, rel, fm, body) => writeFile(path.join(home, rel), `---\n${fm}\n---\n${body}\n`);
+  const decisionText = JSON.stringify({
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: "ignored-by-parser",
+    constraints: [{
+      scope: { kind: "global" }, injectMode: "always",
+      title: "Use edit/write", compiledBody: "修改文件必须用 edit/write，禁止 sed -i。",
+      sourceRecordIds: ["rule:global:always:use-edit-not-sed"],
+    }],
+    exclusions: [], unresolved: [], merges: [], rescopeProposals: [],
+    mappings: [{ sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" }],
+    diagnostics: [],
+  });
+  const invoker = async () => ({ ok: true, text: decisionText });
+  const runOpts = (home, l2OutputRoot) => ({
+    abrainHome: home, cwd: repoRoot, includeProjects: [], includeStatuses: "all",
+    knownProjectIds: ["pi-astack"], writeArtifacts: true, runId: "l2-run",
+    nowMs: Date.parse("2026-06-19T00:00:00.000Z"), deviceId: "test-device",
+    l2OutputRoot, compilerInvoker: invoker,
+  });
+  const rule = ["title: Use edit not sed\nstatus: active\nkind: preference", "# Use edit not sed\n\n修改文件必须用 edit/write，禁止 sed -i。"];
+
+  // --- repo mode: 固化 + L2 ---
+  const home = mkHome();
+  writeRule(home, "rules/always/use-edit-not-sed.md", rule[0], rule[1]);
+  const r1 = await runConstraintShadowCompiler(runOpts(home, "repo"));
+  assert(r1.ok, "repo-mode run failed");
+  assert(r1.l2Projection && r1.l2Projection.status === "written", `expected l2 written, got ${r1.l2Projection && r1.l2Projection.status}`);
+  const eventId = r1.l2Projection.eventId;
+  const l2Path = path.join(home, "l2", "views", "constraint", "latest", "compiled-view.md");
+  assert(fs.existsSync(l2Path), "L2 compiled-view.md missing");
+  const l2 = fs.readFileSync(l2Path, "utf8");
+  assert(l2.includes(`sediment_projection_event_id: ${eventId}\n`), "L2 missing projection event id");
+  assert(l2.includes("shadow_only: false\n"), "L2 not marked non-shadow");
+  // 固化 L1 event exists with the DISTINCT projection envelope schema
+  const l1Path = constraintEvidenceEventPath(home, eventId);
+  assert(fs.existsSync(l1Path), "固化 L1 projection event missing");
+  const envelope = JSON.parse(fs.readFileSync(l1Path, "utf8"));
+  assert(envelope.schema === CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, "固化 event has wrong envelope schema");
+  assert(envelope.event_id === eventId && envelope.body_hash === eventId, "固化 event id/body_hash mismatch");
+  // FIX-1 round-trip: re-render from 固化 validated_decision → byte-identical to committed L2
+  const reRender = renderConstraintL2View(envelope.body.validated_decision, eventId);
+  assert(reRender.markdown === l2, "reconcile re-render is NOT byte-identical to committed L2 (round-trip broken)");
+  // NS-2: event-scan must NOT ingest the 固化 event as input, nor mark it invalid
+  const scan = await scanConstraintEvidenceEvents({ abrainHome: home });
+  assert(!scan.invalidEventIds.includes(eventId), "固化 projection event wrongly marked invalid by constraint scan");
+  assert(!scan.events.some((e) => e.eventId === eventId), "固化 projection event wrongly admitted as constraint input (feedback loop)");
+  // idempotency: re-run with same decision → unchanged, no churn
+  const r2 = await runConstraintShadowCompiler(runOpts(home, "repo"));
+  assert(r2.ok && r2.l2Projection && r2.l2Projection.status === "unchanged", `expected unchanged on re-run, got ${r2.ok && r2.l2Projection && r2.l2Projection.status}`);
+  assert(fs.readFileSync(l2Path, "utf8") === l2, "L2 changed on idempotent re-run");
+
+  // --- state mode (default): zero behavior change, no 固化, no l2/ ---
+  const home2 = mkHome();
+  writeRule(home2, "rules/always/use-edit-not-sed.md", rule[0], rule[1]);
+  const s1 = await runConstraintShadowCompiler(runOpts(home2, "state"));
+  assert(s1.ok, "state-mode run failed");
+  assert(!s1.l2Projection, "state-mode must not 固化/produce l2Projection");
+  assert(!fs.existsSync(path.join(home2, "l2")), "state-mode wrote an l2/ tree");
+  assert(fs.existsSync(path.join(home2, ".state", "sediment", "constraint-shadow", "latest", "compiled-view.md")), "state-mode .state bundle missing");
 });
 
 check("shadow runner fails closed on artifact path violation", async () => {

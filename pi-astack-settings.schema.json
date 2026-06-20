@@ -312,6 +312,12 @@
               "default": "",
               "description": "Optional provider/model ref for the constraint compiler. Empty means the manual entry falls back to sediment.curatorModel."
             },
+            "l2OutputRoot": {
+              "type": "string",
+              "enum": ["state", "repo"],
+              "default": "state",
+              "description": "ADR0039 Constraint L2 (4×T0 NS-2/FIX-1). When 'repo', each successful compile 固化s the validated decision as an immutable L1 constraint-projection event and renders the deterministic L2 view to git-tracked l2/views/constraint/latest/compiled-view.md (SHADOW: runtime injection still reads .state; no read-flip). 'state' (default) = current behavior, no 固化, no l2 write."
+            },
             "timeoutMs": {
               "type": "number",
               "default": 1200000,

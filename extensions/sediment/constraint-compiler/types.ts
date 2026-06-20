@@ -398,6 +398,11 @@ export interface ConstraintShadowRunOptions {
   runId?: string;
   eventStaleAfterMs?: number;
   nowMs?: number;
+  // ADR0039 Constraint L2 (NS-2/FIX-1): when "repo", 固化 the validated decision
+  // as an immutable L1 projection event and render the deterministic L2 view to
+  // git-tracked l2/views/constraint/ (SHADOW; injection still reads .state).
+  l2OutputRoot?: "state" | "repo";
+  deviceId?: string;
 }
 
 export interface ConstraintShadowRunArtifacts {
@@ -419,6 +424,12 @@ export type ConstraintShadowRunResult = {
   legacyParallelDelta?: ConstraintLegacyParallelDeltaReport;
   diagnostics: ConstraintShadowDiagnostic[];
   artifacts?: ConstraintShadowRunArtifacts;
+  l2Projection?: {
+    status: string;
+    eventId?: string;
+    l2RelativePath: string;
+    decisionHash: string;
+  };
 } | {
   ok: false;
   inputRootHash: string;

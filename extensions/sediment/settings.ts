@@ -61,6 +61,13 @@ export interface SedimentSettings {
     timeoutMs: number;
     maxRetries: number;
     maxPromptChars: number;
+    /** ADR0039 Constraint L2 (4×T0 NS-2/FIX-1): when "repo", the compiler also
+     *  固化s the validated decision as an immutable L1 constraint-projection
+     *  event and writes the deterministic L2 view to git-tracked
+     *  l2/views/constraint/latest/compiled-view.md (SHADOW — runtime injection
+     *  still reads .state, no read-flip). "state" (default) = current behavior,
+     *  no 固化, no l2 write. Mirrors knowledgeProjector.l2OutputRoot. */
+    l2OutputRoot: "state" | "repo";
     autoRefresh: {
       enabled: boolean;
       debounceMs: number;
@@ -252,6 +259,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     timeoutMs: 1_200_000,
     maxRetries: 0,
     maxPromptChars: 0,
+    l2OutputRoot: "state",
     autoRefresh: {
       enabled: false,
       debounceMs: 2_000,
@@ -439,6 +447,7 @@ export function resolveSedimentSettings(): SedimentSettings {
       timeoutMs: Math.max(1_000, asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.timeoutMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.timeoutMs)),
       maxRetries: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxRetries, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxRetries))),
       maxPromptChars: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxPromptChars, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxPromptChars))),
+      l2OutputRoot: ((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.l2OutputRoot === "repo" ? "repo" : "state"),
       autoRefresh: {
         enabled: asBoolean(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.enabled),
         debounceMs: Math.max(0, Math.floor(asNumber(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.debounceMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.debounceMs))),
