@@ -3,6 +3,8 @@
 > 状态：草案，待用户过目。决策链见对话：要不要 todolist → goal 已覆盖多少 → 纯目标 vs checklist（T0 3/3）→ checklist 会错/会变 → 重定义为"活账本"→ 方案 T0 设计评审（3/3 ship-with-changes）→ scope 决策（T0 4/4 全票 B 薄 v1）。
 > 血缘：ADR 0032（goal runtime）/ 0033（doc-driven goal）。本草案是对 `extensions/goal/` 的最小增量，**不建新 todo 工具**。
 
+> ⚠ **部分被取代（2026-06-20）**：本草案写于 G1-G6 决议之前。当前权威以 `2026-06-20-goal-complete-design.md` §0.2（G1-G6）为准。两处过期路径**作废，切勿照实现**：（1）`goal_log` 工具——按 D1 只留 `goal_check`，决策日志走裸 `edit`；（2）“goal_check 写 [x] 进 plan.md”——按 G2 **扩展永不写 doc**，AI 用 edit 写 `[x]/[~]`，goal_check 只记证据，parser 渲染时判定。证据账 SOT 是 `pi-goal-evidence` 事件源（§3.2 已标）。推进采 spike 路线（见 complete-design），本草案会被 spike 揭出的真实契约回灌。
+
 ## 0. 必须先纠正的事实前提（影响设计，不改决策）
 
 之前讨论（含给 T0 的题面）说"`goal_set(doc=plan.md)` 把整个 doc 每轮重注入 system prompt 尾部"。**读 `state.ts` 后确认这是错的。**
