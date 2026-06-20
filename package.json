@@ -170,7 +170,8 @@
     "dossier:constraint-shadow-report": "node scripts/dossier-constraint-shadow-report.mjs",
     "dossier:constraint-evidence-event": "node scripts/dossier-constraint-evidence-event.mjs",
     "dossier:constraint-audit-replay": "node scripts/dossier-constraint-audit-replay.mjs",
-    "dossier:adr0039-reindex-ab": "node scripts/dossier-adr0039-reindex-ab.mjs"
+    "dossier:adr0039-reindex-ab": "node scripts/dossier-adr0039-reindex-ab.mjs",
+    "dossier:adr0039-phase-c-flip-probe": "node scripts/dossier-adr0039-phase-c-flip-probe.mjs"
   },
   "pi": {
     "extensions": [
