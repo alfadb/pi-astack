@@ -23,6 +23,7 @@ export interface Adr0039L3SyncResult {
   counts: {
     l1Events: number;
     l2Views: number;
+    searchCorpusRows: number;
     projectorState: number;
     jobs: number;
     diagnostics: number;
@@ -121,6 +122,28 @@ CREATE TABLE IF NOT EXISTS l2_views (
   file_path TEXT NOT NULL,
   updated_at_utc TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS search_corpus (
+  row_id TEXT PRIMARY KEY,
+  source_event_id TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  project_id TEXT,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  confidence INTEGER NOT NULL,
+  provenance TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  search_text_hash TEXT NOT NULL,
+  updated_at_utc TEXT NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS search_corpus_fts USING fts5(
+  row_id UNINDEXED,
+  slug,
+  title,
+  body,
+  file_path UNINDEXED
+);
 CREATE TABLE IF NOT EXISTS jobs (
   job_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
@@ -180,6 +203,39 @@ function readFrontmatterScalar(raw: string, key: string): string | null {
   return match ? match[1]!.trim().replace(/^"(.*)"$/, "$1") : null;
 }
 
+function splitMarkdown(raw: string): { frontmatter: string; body: string } {
+  const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+  return match ? { frontmatter: match[1]!, body: match[2]!.trim() } : { frontmatter: "", body: raw.trim() };
+}
+
+function mirrorKnowledgeSearchCorpus(abrainHome: string, db: DatabaseSyncLike, failures: string[]): number {
+  let count = 0;
+  const now = new Date().toISOString();
+  const rows = db.prepare("INSERT INTO search_corpus(row_id, source_event_id, slug, scope, project_id, title, kind, status, confidence, provenance, file_path, search_text_hash, updated_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const fts = db.prepare("INSERT INTO search_corpus_fts(row_id, slug, title, body, file_path) VALUES (?, ?, ?, ?, ?)");
+  const knowledgeRoot = path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest");
+  for (const file of listFiles(knowledgeRoot, (candidate) => candidate.endsWith(".md"))) {
+    const raw = fs.readFileSync(file, "utf-8");
+    const rel = relativeUnix(abrainHome, file);
+    const parsed = splitMarkdown(raw);
+    const sourceEventId = readFrontmatterScalar(parsed.frontmatter, "sediment_event_id") || "";
+    const slug = path.basename(file, ".md");
+    const scope = readFrontmatterScalar(parsed.frontmatter, "scope") || "unknown";
+    const projectId = readFrontmatterScalar(parsed.frontmatter, "project_id");
+    const title = readFrontmatterScalar(parsed.frontmatter, "title") || slug;
+    const kind = readFrontmatterScalar(parsed.frontmatter, "kind") || "fact";
+    const status = readFrontmatterScalar(parsed.frontmatter, "status") || "active";
+    const confidence = Number(readFrontmatterScalar(parsed.frontmatter, "confidence") || 0);
+    const provenance = readFrontmatterScalar(parsed.frontmatter, "provenance") || "unknown";
+    if (!/^[0-9a-f]{64}$/.test(sourceEventId)) failures.push(`${rel}: l3_search_corpus_missing_event_id`);
+    const rowId = `knowledge:${rel}`;
+    rows.run(rowId, sourceEventId, slug, scope, projectId, title, kind, status, Number.isFinite(confidence) ? confidence : 0, provenance, rel, sha256Hex(raw.trim()), now);
+    fts.run(rowId, slug, title, parsed.body, rel);
+    count += 1;
+  }
+  return count;
+}
+
 function mirrorL2Views(abrainHome: string, db: DatabaseSyncLike, failures: string[]): number {
   let count = 0;
   const now = new Date().toISOString();
@@ -234,22 +290,23 @@ export function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string }
   const startedAt = new Date().toISOString();
   try {
     db.exec("BEGIN IMMEDIATE");
-    for (const table of ["meta", "l1_events", "projector_state", "l2_views", "jobs", "diagnostics"]) db.exec(`DELETE FROM ${table}`);
+    for (const table of ["meta", "l1_events", "projector_state", "l2_views", "search_corpus", "search_corpus_fts", "jobs", "diagnostics"]) db.exec(`DELETE FROM ${table}`);
     db.prepare("INSERT INTO meta(key, value) VALUES (?, ?)").run("schema_version", "adr0039-l3/v1");
     const l1Events = mirrorL1Events(abrainHome, db, failures);
     const l2Views = mirrorL2Views(abrainHome, db, failures);
+    const searchCorpusRows = mirrorKnowledgeSearchCorpus(abrainHome, db, failures);
     const projectorState = mirrorProjectorState(abrainHome, db);
     const finishedAt = new Date().toISOString();
     db.prepare("INSERT INTO jobs(job_id, kind, status, created_at_utc, updated_at_utc, detail_json) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(`adr0039-l3-sync:${finishedAt}`, "adr0039-l3-sync", failures.length ? "failed" : "completed", startedAt, finishedAt, JSON.stringify({ l1Events, l2Views, projectorState }));
+      .run(`adr0039-l3-sync:${finishedAt}`, "adr0039-l3-sync", failures.length ? "failed" : "completed", startedAt, finishedAt, JSON.stringify({ l1Events, l2Views, searchCorpusRows, projectorState }));
     const diagnosticInsert = db.prepare("INSERT INTO diagnostics(diagnostic_id, severity, code, message, created_at_utc) VALUES (?, ?, ?, ?, ?)");
     for (const failure of failures) diagnosticInsert.run(sha256Hex(failure), "error", failure.split(":")[1]?.trim() || "adr0039_l3_failure", failure, finishedAt);
     db.exec("COMMIT");
-    return { ok: failures.length === 0, dbPath, counts: { l1Events, l2Views, projectorState, jobs: 1, diagnostics: failures.length }, failures };
+    return { ok: failures.length === 0, dbPath, counts: { l1Events, l2Views, searchCorpusRows, projectorState, jobs: 1, diagnostics: failures.length }, failures };
   } catch (err) {
     try { db.exec("ROLLBACK"); } catch { /* ignore rollback errors */ }
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, dbPath, counts: { l1Events: 0, l2Views: 0, projectorState: 0, jobs: 0, diagnostics: 1 }, failures: [`l3_sync_failed:${message}`] };
+    return { ok: false, dbPath, counts: { l1Events: 0, l2Views: 0, searchCorpusRows: 0, projectorState: 0, jobs: 0, diagnostics: 1 }, failures: [`l3_sync_failed:${message}`] };
   } finally {
     db.close();
   }

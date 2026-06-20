@@ -416,7 +416,11 @@ function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   const constraint = validateConstraintShadow(abrainHome, opts);
   const l3 = validateL3Store(abrainHome);
   const dirty = validateDirtyDerived(abrainHome);
-  const failures = [...l1.failures, ...knowledge.failures, ...constraint.failures, ...l3.failures, ...dirty.failures];
+  const l3SearchCorpusFailures = [];
+  if (l3.counts && Number(l3.counts.searchCorpusRows ?? 0) !== Number(knowledge.searchCorpusRows ?? 0)) {
+    l3SearchCorpusFailures.push(`adr0039-l3: search_corpus_row_mismatch:${l3.counts.searchCorpusRows ?? 0}:${knowledge.searchCorpusRows ?? 0}`);
+  }
+  const failures = [...l1.failures, ...knowledge.failures, ...constraint.failures, ...l3.failures, ...l3SearchCorpusFailures, ...dirty.failures];
   return { abrainHome, l1, knowledge, constraint, l3, dirty, failures };
 }
 
@@ -425,6 +429,7 @@ function printResult(result) {
   console.log(`l1_events: ${result.l1.files}`);
   console.log(`knowledge_projected_files: ${result.knowledge.projectedFiles}`);
   console.log(`knowledge_search_corpus_rows: ${result.knowledge.searchCorpusRows ?? 0}`);
+  console.log(`l3_search_corpus_rows: ${result.l3.counts?.searchCorpusRows ?? 0}`);
   console.log(`constraint_shadow_present: ${result.constraint.present}`);
   console.log(`l3_db: ${result.l3.dbPath || "unavailable"}`);
   if (result.failures.length) {
@@ -526,4 +531,31 @@ if (!dirtyView.failures.some((failure) => failure.includes("dirty_derived_view:"
   process.exit(1);
 }
 console.log("PASS — dirty L2 fixture is rejected.");
+
+if (process.versions.sqlite) {
+  const ftsFixture = await buildFixtureTree();
+  const l3 = loadAdr0039L3Module();
+  const syncResult = l3.syncAdr0039L3Store({ abrainHome: ftsFixture.abrainHome });
+  if (!syncResult.ok || syncResult.counts.searchCorpusRows !== 1) {
+    console.log(`FAIL — L3 search corpus sync did not index the fixture row: ${JSON.stringify(syncResult)}`);
+    process.exit(1);
+  }
+  const { DatabaseSync } = require("node:sqlite");
+  const probe = new DatabaseSync(syncResult.dbPath);
+  try {
+    const hit = probe.prepare("SELECT row_id FROM search_corpus_fts WHERE search_corpus_fts MATCH ?").get("fixture");
+    if (!hit || typeof hit.row_id !== "string") {
+      console.log(`FAIL — L3 FTS probe did not match the projected fixture body: ${JSON.stringify(hit)}`);
+      process.exit(1);
+    }
+    const stored = probe.prepare("SELECT search_text_hash FROM search_corpus WHERE row_id = ?").get(hit.row_id);
+    if (!stored || !/^[0-9a-f]{64}$/.test(String(stored.search_text_hash))) {
+      console.log(`FAIL — L3 search corpus row missing search_text_hash: ${JSON.stringify(stored)}`);
+      process.exit(1);
+    }
+  } finally {
+    probe.close();
+  }
+  console.log("PASS — L3 search corpus FTS is rebuildable and queryable.");
+}
 process.exit(0);
