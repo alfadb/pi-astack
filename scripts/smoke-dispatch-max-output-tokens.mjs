@@ -80,6 +80,22 @@ check("normalizeTaskSpec ignores caller maxOutputTokens", () => {
   if ("maxOutputTokens" in task) throw new Error("caller budget must not survive normalization");
 });
 
+check("runInProcess refreshes modelRegistry before resolving maxTokens", () => {
+  if (!/function refreshModelRegistry\(modelRegistry: any\): any \{[\s\S]{0,180}?modelRegistry\.refresh\(\);[\s\S]{0,80}?return modelRegistry;[\s\S]{0,10}?\}/.test(dispatchSrc)) {
+    throw new Error("modelRegistry refresh helper missing");
+  }
+  const refreshIdx = dispatchSrc.search(/const refreshedModelRegistry = refreshModelRegistry\(modelRegistry\);/);
+  const resolveIdx = dispatchSrc.search(/const model = resolveModel\(modelStr, refreshedModelRegistry\);/);
+  const createSessionIdx = dispatchSrc.search(/await createAgentSession\(/);
+  if (refreshIdx < 0 || resolveIdx < 0 || createSessionIdx < 0) throw new Error("could not locate refresh lifecycle sites");
+  if (!(refreshIdx < resolveIdx && resolveIdx < createSessionIdx)) {
+    throw new Error("modelRegistry must refresh before model resolution and session creation");
+  }
+  if (!/modelRegistry: refreshedModelRegistry,/.test(dispatchSrc)) {
+    throw new Error("createAgentSession must receive the refreshed registry");
+  }
+});
+
 check("runInProcess resolves model maxTokens and installs it on createLoopConfig", () => {
   if (!/export function resolveMaxOutputTokens\(model: any\): number \| undefined/.test(dispatchSrc)) {
     throw new Error("resolveMaxOutputTokens helper must only accept model");

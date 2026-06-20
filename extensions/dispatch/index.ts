@@ -510,6 +510,13 @@ function resolveModel(
   return (modelRegistry as any).find?.(provider, modelId);
 }
 
+function refreshModelRegistry(modelRegistry: any): any {
+  if (modelRegistry && typeof modelRegistry.refresh === "function") {
+    modelRegistry.refresh();
+  }
+  return modelRegistry;
+}
+
 export function resolveMaxOutputTokens(model: any): number | undefined {
   const modelMax = Number(model?.maxTokens);
   return Number.isFinite(modelMax) && modelMax > 0 ? Math.floor(modelMax) : undefined;
@@ -728,8 +735,10 @@ export async function runInProcess(
     };
   };
 
+  const refreshedModelRegistry = refreshModelRegistry(modelRegistry);
+
   // Resolve model
-  const model = resolveModel(modelStr, modelRegistry);
+  const model = resolveModel(modelStr, refreshedModelRegistry);
   if (!model) {
     return {
       output: "",
@@ -872,7 +881,7 @@ export async function runInProcess(
         model,
         thinkingLevel: thinking as any, // "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
         tools,
-        modelRegistry,
+        modelRegistry: refreshedModelRegistry,
         settingsManager,
         resourceLoader,
         sessionManager: subAgentSm,
