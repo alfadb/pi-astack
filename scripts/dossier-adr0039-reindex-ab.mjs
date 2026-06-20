@@ -139,17 +139,45 @@ async function main() {
     compiledTruth: a.compiledTruth !== b.compiledTruth,
     timeline: (a.timeline || []).join("\n") !== (b.timeline || []).join("\n"),
   });
+  // blocker④ field-level quality gate (dimensions BEYOND contentBasis):
+  // kind/status/provenance/confidence/relations. These never enter contentHashOf
+  // but DO drive read/search behavior, so the flip must not lose/alter them.
+  const gate = { kind: [], status: [], provenance: [], confidence: [], relations: [] };
+  const relSet = (e) => new Set((e.relatedSlugs || []).slice().sort());
+  const setEq = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
   let processed = 0;
   for (const slug of shared) {
     if (processed >= limit) break;
     processed++;
     const L = legacy.get(slug), P = proj.get(slug);
+    // field-level gate (independent of contentBasis hash; runs for every slug)
+    if (L.kind !== P.kind) gate.kind.push({ slug, legacy: L.kind, projection: P.kind });
+    if (L.status !== P.status) gate.status.push({ slug, legacy: L.status, projection: P.status });
+    if (L.provenance !== P.provenance) gate.provenance.push({ slug, legacy: L.provenance, projection: P.provenance });
+    if (L.confidence !== P.confidence) gate.confidence.push({ slug, legacy: L.confidence, projection: P.confidence });
+    if (!setEq(relSet(L), relSet(P))) gate.relations.push({ slug, legacy: [...relSet(L)], projection: [...relSet(P)] });
+    // contentBasis hash bucketing (REQ-009 / blocker②)
     const hL = contentHashOf(L), hP = contentHashOf(P);
     if (hL === hP) { buckets.identical.push(slug); continue; }
     const fc = fieldChange(L, P);
     if (fc.title || fc.compiledTruth) buckets.semantic.push({ slug, fc });
     else buckets.timelineOnly.push(slug);
   }
+
+  // Thresholds (directive): kind/status = 0% loss (exact); provenance/confidence/
+  // relations ≤ 5% divergence. A canonical entry losing its kind or status on the
+  // flip is a hard regression; provenance/confidence/relations may legitimately
+  // re-derive within a small tolerance.
+  const pct = (n) => (processed ? n / processed : 0);
+  const dim = (arr, threshold) => ({ diverged: arr.length, ratio: Number(pct(arr.length).toFixed(6)), threshold, pass: pct(arr.length) <= threshold, samples: arr.slice(0, 10) });
+  const fieldGate = {
+    kind: dim(gate.kind, 0),
+    status: dim(gate.status, 0),
+    provenance: dim(gate.provenance, 0.05),
+    confidence: dim(gate.confidence, 0.05),
+    relations: dim(gate.relations, 0.05),
+  };
+  const fieldGatePass = Object.values(fieldGate).every((g) => g.pass);
 
   // ── staleOrMissingSlugs auto-recovery (real mechanism) ──
   const idxFile = path.join(out, "vec-index.json");
@@ -193,17 +221,28 @@ async function main() {
     },
     semantic_diff_samples: buckets.semantic.slice(0, 10),
     timeline_only_samples: buckets.timelineOnly.slice(0, 5),
+    field_gate: fieldGate,
+    field_gate_pass: fieldGatePass,
+    thresholds: { kind: "0%", status: "0%", provenance: "≤5%", confidence: "≤5%", relations: "≤5%" },
   };
   console.log(JSON.stringify(report, null, 2));
 
-  // ── Verdict (REQ-009 P6 regression gate) ──
-  const pass =
+  // ── Verdict: blocker② REQ-009 recall gate + blocker④ field-level quality gate ──
+  const req009Pass =
     flaggedMatchesChanged &&
     flaggedAfterReembed.length === 0 &&
     buckets.semantic.length === 0; // semantic (title/compiledTruth) drift is the only true recall risk
-  console.log(pass
-    ? "PASS — REQ-009: flip changes only timeline-derived hashes; staleOrMissingSlugs flags exactly the changed set and a single re-embed recovers; ZERO semantic (title/compiledTruth) drift → no recall regression."
-    : `REVIEW — semantic_diff=${buckets.semantic.length} flagged_matches_changed=${flaggedMatchesChanged} auto_recovered=${flaggedAfterReembed.length === 0}. Semantic drift > 0 means projection lost/altered title/compiledTruth vs legacy — gate the flip until fixed.`);
+  const pass = req009Pass && fieldGatePass;
+  if (pass) {
+    console.log("PASS — blocker② REQ-009: zero title/compiledTruth drift, exact stale detection, single-re-embed recovery.");
+    console.log("PASS — blocker④ field gate: kind/status 0% loss; provenance/confidence/relations within ≤5%. Projection is semantically equivalent to legacy across all read/search-affecting dimensions → canonical=projection flip is content-safe.");
+  } else {
+    if (!req009Pass) console.log(`REVIEW — blocker② REQ-009: semantic_diff=${buckets.semantic.length} flagged_matches_changed=${flaggedMatchesChanged} auto_recovered=${flaggedAfterReembed.length === 0}.`);
+    if (!fieldGatePass) {
+      const failed = Object.entries(fieldGate).filter(([, g]) => !g.pass).map(([k, g]) => `${k}(${g.diverged}/${processed}=${(g.ratio * 100).toFixed(2)}%>${(g.threshold * 100).toFixed(0)}%)`).join(", ");
+      console.log(`REVIEW — blocker④ field gate FAILED: ${failed}. Projection lost/altered a read-affecting field vs legacy — gate the flip until the projector is fixed.`);
+    }
+  }
   fs.rmSync(out, { recursive: true, force: true });
   process.exit(pass ? 0 : 1);
 }
