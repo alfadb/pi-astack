@@ -9,6 +9,8 @@ import type { Jsonish, MemoryEntry, RelationEdge, RelationScope, StoreRef, Scope
 import { compareTimestamps, normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
 import { parseDirectionImpact } from "./direction-impact";
 import { resolveActiveProject, abrainProjectDir } from "../_shared/runtime";
+import { resolveSedimentSettings } from "../sediment/settings";
+import { readKnowledgeProjectionStores } from "../sediment/knowledge-evidence";
 
 const execFileAsync = promisify(execFile);
 
@@ -799,6 +801,22 @@ export async function loadEntries(
 ): Promise<MemoryEntry[]> {
   const cwd = path.resolve(cwdRaw || process.cwd());
   const stores = resolveStores(cwd, settings);
+  const abrainHome = path.resolve(
+    process.env.ABRAIN_ROOT
+      ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+      : path.join(os.homedir(), ".abrain"),
+  );
+  try {
+    const resolved = resolveActiveProject(cwd, { abrainHome });
+    const projectionStores = await readKnowledgeProjectionStores({
+      abrainHome,
+      projectId: resolved.activeProject?.projectId,
+      settings: resolveSedimentSettings(),
+    });
+    stores.push(...projectionStores);
+  } catch {
+    // Projection overlay is optional; canonical stores remain the read truth.
+  }
   if (stores.length === 0) return [];
 
   // Round 7 P1 (gpt-5.5 audit fix): identify abort errors and rethrow.
@@ -811,7 +829,6 @@ export async function loadEntries(
       return [];
     })),
   );
-  const flat = batches.flat();
 
   // Dedup across stores. Store priority is fixed in resolveStores:
   //   abrain-project > world > legacy-pensieve

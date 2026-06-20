@@ -5,6 +5,7 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
+import { appendKnowledgeEvidenceForWrite, type AppendKnowledgeEvidenceForWriteResult } from "./knowledge-evidence";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
@@ -22,7 +23,7 @@ import {
   ruleBodyHash,
   RULE_DEDUP_SIMILARITY_THRESHOLD,
 } from "./rule-writer";
-import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
+import { parseFrontmatter, relationValues, scalarNumber, scalarString, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
 import {
   applyRenamePlan,
   rollbackRenameTransaction,
@@ -180,6 +181,7 @@ export interface WriteProjectEntryResult {
   sessionId?: string;
   correlationId?: string;
   candidateId?: string;
+  knowledgeEvidenceEvent?: AppendKnowledgeEvidenceForWriteResult;
 }
 
 interface LockHandle {
@@ -209,6 +211,93 @@ function resultAuditFields(opts: WriteProjectEntryOptions, fallbackSessionId?: s
 
 function withWriterAuditContext(opts: WriteProjectEntryOptions, fallbackSessionId: string | undefined, event: Record<string, unknown>): Record<string, unknown> {
   return { ...writerAuditFields(opts, fallbackSessionId), ...event };
+}
+
+function summarizeKnowledgeEvidenceEvent(result: AppendKnowledgeEvidenceForWriteResult): Record<string, unknown> {
+  return {
+    ok: result.append.ok,
+    status: result.append.status,
+    event_id: result.append.eventId ?? null,
+    file_path: result.append.filePath ?? null,
+    projection: result.projection ? {
+      ok: result.projection.ok,
+      status: result.projection.status,
+      output_path: result.projection.outputPath ?? null,
+      manifest_path: result.projection.manifestPath ?? null,
+      error: result.projection.error ?? null,
+    } : null,
+    error: result.append.error ?? null,
+  };
+}
+
+function shouldBlockKnowledgeLegacyWrite(settings: SedimentSettings, result: AppendKnowledgeEvidenceForWriteResult | undefined): boolean {
+  return settings.knowledgeEvidenceEventWriter.enabled === true
+    && settings.knowledgeEvidenceEventWriter.mode === "event_first"
+    && settings.knowledgeEvidenceEventWriter.legacyFallbackOnEventFailure !== true
+    && result?.append.ok !== true;
+}
+
+function isKnowledgeEvidenceEventFirst(settings: SedimentSettings): boolean {
+  return settings.knowledgeEvidenceEventWriter.enabled === true
+    && settings.knowledgeEvidenceEventWriter.mode === "event_first";
+}
+
+function draftFromEntryMarkdown(raw: string, fallbackSlug: string, fallbackPatch?: ProjectEntryUpdateDraft): ProjectEntryDraft {
+  const { frontmatterText, body } = splitFrontmatter(raw);
+  const frontmatter = parseFrontmatter(frontmatterText);
+  const title = scalarString(frontmatter.title) || fallbackPatch?.title || fallbackSlug;
+  const rawKind = scalarString(frontmatter.kind) || fallbackPatch?.kind || "fact";
+  const kind = ENTRY_KINDS.includes(rawKind as EntryKind) ? rawKind as EntryKind : "fact";
+  const rawStatus = scalarString(frontmatter.status) || fallbackPatch?.status || "provisional";
+  const status = ENTRY_STATUSES.includes(rawStatus as EntryStatus) ? rawStatus as EntryStatus : "provisional";
+  const rawProvenance = scalarString(frontmatter.provenance) || "assistant-observed";
+  const provenance: ProvenanceClass = rawProvenance === "user-expressed" ? "user-expressed" : "assistant-observed";
+  const confidence = Math.min(10, Math.max(0, Math.round(scalarNumber(frontmatter.confidence) ?? fallbackPatch?.confidence ?? 3)));
+  return {
+    title,
+    kind,
+    status,
+    provenance,
+    confidence,
+    compiledTruth: splitCompiledTruth(body).compiledTruth.trim() || body.trim() || title,
+    triggerPhrases: relationValues(frontmatter.trigger_phrases),
+    derivesFrom: relationValues(frontmatter.derives_from),
+    sessionId: fallbackPatch?.sessionId,
+    timelineNote: fallbackPatch?.timelineNote,
+  };
+}
+
+async function appendKnowledgeEvidenceForMarkdown(args: {
+  abrainHome: string;
+  projectId: string;
+  scope: "project" | "world";
+  raw: string;
+  fallbackSlug: string;
+  result: WriteProjectEntryResult;
+  settings: SedimentSettings;
+  auditContext?: WriterAuditContext;
+  patch?: ProjectEntryUpdateDraft;
+  operation: "update" | "merge" | "archive" | "supersede" | "delete";
+}): Promise<AppendKnowledgeEvidenceForWriteResult | undefined> {
+  if (args.settings.knowledgeEvidenceEventWriter.enabled !== true) return undefined;
+  const draft = draftFromEntryMarkdown(args.raw, args.fallbackSlug, args.patch);
+  return appendKnowledgeEvidenceForWrite({
+    abrainHome: args.abrainHome,
+    projectId: args.projectId,
+    scope: args.scope,
+    draft,
+    result: args.result,
+    settings: args.settings,
+    auditContext: args.auditContext,
+    sessionId: args.patch?.sessionId,
+    operation: args.operation,
+  }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
+    append: {
+      ok: false,
+      status: "write_failed",
+      error: err instanceof Error ? err.message : String(err),
+    },
+  }));
 }
 
 function nowIso(): string {
@@ -1233,6 +1322,34 @@ export async function deleteProjectEntry(
         return { slug, path: target, status: "rejected", reason: "status_precondition_failed", auditPath, deleteMode: "hard", ...resultCtx };
       }
     }
+    const baseResult: WriteProjectEntryResult = { slug, path: target, status: "deleted", gitCommit: null, deleteMode: "hard", ...resultCtx };
+    let knowledgeEvidenceEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
+    if (isKnowledgeEvidenceEventFirst(opts.settings)) {
+      knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
+        abrainHome,
+        projectId: opts.projectId,
+        scope,
+        raw: originalRaw,
+        fallbackSlug: slug,
+        result: baseResult,
+        settings: opts.settings,
+        auditContext: opts.auditContext,
+        patch: { sessionId: opts.sessionId, timelineNote: reason },
+        operation: "delete",
+      });
+      if (shouldBlockKnowledgeLegacyWrite(opts.settings, knowledgeEvidenceEvent)) {
+        const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+          operation: "reject",
+          reason: "knowledge_evidence_append_failed",
+          target: `${targetPrefix}:${slug}`,
+          path: path.relative(auditRoot, target),
+          delete_mode: "hard",
+          knowledge_evidence_event: knowledgeEvidenceEvent ? summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) : null,
+          duration_ms: Date.now() - started,
+        }));
+        return { slug, path: target, status: "rejected", reason: "knowledge_evidence_append_failed", gitCommit: null, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+      }
+    }
     await fs.unlink(target);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
     const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "delete", gitCommitProjectId) : null;
@@ -1250,15 +1367,47 @@ export async function deleteProjectEntry(
       try {
         await atomicWrite(target, originalRaw);
       } catch { /* best-effort rollback */ }
+      const knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
+        ? await appendKnowledgeEvidenceForMarkdown({
+            abrainHome,
+            projectId: opts.projectId,
+            scope,
+            raw: originalRaw,
+            fallbackSlug: slug,
+            result: { slug, path: target, status: "updated", gitCommit: null, ...resultCtx },
+            settings: opts.settings,
+            auditContext: opts.auditContext,
+            patch: { sessionId: opts.sessionId, timelineNote: "restore after delete git commit failure" },
+            operation: "update",
+          })
+        : undefined;
       const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
         operation: "reject",
         reason: "git_commit_failed",
         target: `${targetPrefix}:${slug}`,
         path: path.relative(auditRoot, target),
         delete_mode: "hard",
+        event_first_legacy_compensation: isKnowledgeEvidenceEventFirst(opts.settings) ? "restored_original_and_projected_compensation" : "legacy_restored",
+        ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
+        ...(knowledgeEvidenceCompensationEvent ? { knowledge_evidence_compensation_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceCompensationEvent) } : {}),
         duration_ms: Date.now() - started,
       }));
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", gitCommit: git, auditPath, deleteMode: "hard", ...resultCtx };
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", gitCommit: git, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+    }
+    const result: WriteProjectEntryResult = { ...baseResult, gitCommit: git };
+    if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
+      knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
+        abrainHome,
+        projectId: opts.projectId,
+        scope,
+        raw: originalRaw,
+        fallbackSlug: slug,
+        result,
+        settings: opts.settings,
+        auditContext: opts.auditContext,
+        patch: { sessionId: opts.sessionId, timelineNote: reason },
+        operation: "delete",
+      });
     }
     const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "delete",
@@ -1267,9 +1416,10 @@ export async function deleteProjectEntry(
       delete_mode: "hard",
       reason,
       git_commit: git,
+      ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
       duration_ms: Date.now() - started,
     }));
-    return { slug, path: target, status: "deleted", gitCommit: git, auditPath, deleteMode: "hard", ...resultCtx };
+    return { ...result, auditPath, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}) };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
@@ -1492,22 +1642,88 @@ export async function updateProjectEntry(
         return { slug, path: target, status: "rejected", reason: renamePlan.reason, lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
       }
       let vectorRename: ReturnType<typeof renameSlugInVectorIndexFile> | undefined;
+      let knowledgeEvidenceEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
       const vectorIndexFile = path.join(abrainStateDir(abrainHome), "memory", "embeddings.json");
-      const applied = await applyRenamePlan(renamePlan.plan, {
-        abrainHome,
-        onVectorRename: () => {
-          vectorRename = renameSlugInVectorIndexFile(slug, requestedNewSlug, `project:${opts.projectId}`, vectorIndexFile);
-          if (!vectorRename.ok && (vectorRename.reason === "scope_mismatch" || vectorRename.reason === "new_exists")) {
-            throw new Error(`vector_rename_failed:${vectorRename.reason}`);
-          }
-        },
-        onVectorRollback: () => {
-          rollbackRenameSlugInVectorIndexFile(slug, requestedNewSlug, `project:${opts.projectId}`, vectorIndexFile);
-        },
-        onCommit: opts.settings.gitCommit
-          ? (paths) => gitCommitMany(abrainHome, paths, requestedNewSlug, "rename", opts.projectId)
-          : undefined,
-      });
+      const renameEventResult: WriteProjectEntryResult = { slug: requestedNewSlug, path: renamePlan.plan.entryNewPath, status: "updated", lintErrors, lintWarnings, gitCommit: null, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
+      let applied: Awaited<ReturnType<typeof applyRenamePlan>>;
+      try {
+        applied = await applyRenamePlan(renamePlan.plan, {
+          abrainHome,
+          onVectorRename: () => {
+            vectorRename = renameSlugInVectorIndexFile(slug, requestedNewSlug, `project:${opts.projectId}`, vectorIndexFile);
+            if (!vectorRename.ok && (vectorRename.reason === "scope_mismatch" || vectorRename.reason === "new_exists")) {
+              throw new Error(`vector_rename_failed:${vectorRename.reason}`);
+            }
+          },
+          onVectorRollback: () => {
+            rollbackRenameSlugInVectorIndexFile(slug, requestedNewSlug, `project:${opts.projectId}`, vectorIndexFile);
+          },
+          onBeforeCommit: isKnowledgeEvidenceEventFirst(opts.settings)
+            ? async () => {
+                knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
+                  abrainHome,
+                  projectId: opts.projectId,
+                  scope,
+                  raw: renamePlan.plan.entryNewContent,
+                  fallbackSlug: requestedNewSlug,
+                  result: renameEventResult,
+                  settings: opts.settings,
+                  auditContext: opts.auditContext,
+                  patch,
+                  operation: "update",
+                });
+                if (shouldBlockKnowledgeLegacyWrite(opts.settings, knowledgeEvidenceEvent)) throw new Error("knowledge_evidence_append_failed");
+              }
+            : undefined,
+          onCommit: opts.settings.gitCommit
+            ? (paths) => gitCommitMany(abrainHome, paths, requestedNewSlug, "rename", opts.projectId)
+            : undefined,
+        });
+      } catch (err: unknown) {
+        const reason = err instanceof Error ? err.message : String(err);
+        const knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
+          ? await appendKnowledgeEvidenceForMarkdown({
+              abrainHome,
+              projectId: opts.projectId,
+              scope,
+              raw: prepared.originalRaw,
+              fallbackSlug: slug,
+              result: { slug, path: target, status: "updated", gitCommit: null, lintErrors, lintWarnings, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx },
+              settings: opts.settings,
+              auditContext: opts.auditContext,
+              patch: { ...patch, newSlug: undefined, timelineNote: "restore after rename failure" },
+              operation: "update",
+            })
+          : undefined;
+        const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+          operation: "reject",
+          reason,
+          target: `${targetPrefix}:${slug}`,
+          new_slug: requestedNewSlug,
+          path: path.relative(auditRoot, target),
+          event_first_legacy_compensation: knowledgeEvidenceCompensationEvent ? "restored_original_projection" : undefined,
+          ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
+          ...(knowledgeEvidenceCompensationEvent ? { knowledge_evidence_compensation_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceCompensationEvent) } : {}),
+          duration_ms: Date.now() - started,
+          ...(opts.auditExtras ?? {}),
+        }));
+        return { slug, path: target, status: "rejected", reason, lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+      }
+      const renameResult: WriteProjectEntryResult = { ...renameEventResult, gitCommit: applied.gitCommit ?? null };
+      if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
+        knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
+          abrainHome,
+          projectId: opts.projectId,
+          scope,
+          raw: renamePlan.plan.entryNewContent,
+          fallbackSlug: requestedNewSlug,
+          result: renameResult,
+          settings: opts.settings,
+          auditContext: opts.auditContext,
+          patch,
+          operation: "update",
+        });
+      }
       const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
         operation: "rename",
         target: `${targetPrefix}:${requestedNewSlug}`,
@@ -1518,10 +1734,54 @@ export async function updateProjectEntry(
         vector_rename: vectorRename ?? { ok: false, reason: "not_attempted" },
         lint_result: "pass",
         git_commit: applied.gitCommit ?? null,
+        ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
         duration_ms: Date.now() - started,
         ...(opts.auditExtras ?? {}),
       }));
-      return { slug: requestedNewSlug, path: renamePlan.plan.entryNewPath, status: "updated", lintErrors, lintWarnings, gitCommit: applied.gitCommit ?? null, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
+      return { ...renameResult, auditPath, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}) };
+    }
+    const eventOperation = operation === "merge" || operation === "archive" || operation === "supersede" || operation === "delete" ? operation : "update";
+    const resultStatus = eventOperation === "merge" ? "merged"
+      : eventOperation === "archive" ? "archived"
+        : eventOperation === "supersede" ? "superseded"
+          : eventOperation === "delete" ? "deleted"
+            : "updated";
+    const eventFirstResult: WriteProjectEntryResult = {
+      slug,
+      path: target,
+      status: resultStatus,
+      lintErrors,
+      lintWarnings,
+      gitCommit: null,
+      sanitizedReplacements: merged.sanitizedReplacements,
+      ...resultCtx,
+    };
+    let knowledgeEvidenceEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
+    if (isKnowledgeEvidenceEventFirst(opts.settings)) {
+      knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
+        abrainHome,
+        projectId: opts.projectId,
+        scope,
+        raw: merged.markdown,
+        fallbackSlug: slug,
+        result: eventFirstResult,
+        settings: opts.settings,
+        auditContext: opts.auditContext,
+        patch,
+        operation: eventOperation,
+      });
+      if (shouldBlockKnowledgeLegacyWrite(opts.settings, knowledgeEvidenceEvent)) {
+        const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+          operation: "reject",
+          reason: "knowledge_evidence_append_failed",
+          target: `${targetPrefix}:${slug}`,
+          path: path.relative(auditRoot, target),
+          knowledge_evidence_event: knowledgeEvidenceEvent ? summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) : null,
+          duration_ms: Date.now() - started,
+          ...(opts.auditExtras ?? {}),
+        }));
+        return { slug, path: target, status: "rejected", reason: "knowledge_evidence_append_failed", lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+      }
     }
     await atomicWrite(target, merged.markdown);
     const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId) : null;
@@ -1539,15 +1799,50 @@ export async function updateProjectEntry(
       try {
         await atomicWrite(target, prepared.originalRaw);
       } catch { /* best-effort rollback */ }
+      const knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
+        ? await appendKnowledgeEvidenceForMarkdown({
+            abrainHome,
+            projectId: opts.projectId,
+            scope,
+            raw: prepared.originalRaw,
+            fallbackSlug: slug,
+            result: { slug, path: target, status: "updated", gitCommit: null, lintErrors, lintWarnings, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx },
+            settings: opts.settings,
+            auditContext: opts.auditContext,
+            patch: { ...patch, timelineNote: "restore after update git commit failure" },
+            operation: "update",
+          })
+        : undefined;
       const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
         operation: "reject",
         reason: "git_commit_failed",
         target: `${targetPrefix}:${slug}`,
         path: path.relative(auditRoot, target),
+        event_first_legacy_compensation: isKnowledgeEvidenceEventFirst(opts.settings) ? "legacy_restored_after_commit_failure" : "legacy_restored",
+        ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
+        ...(knowledgeEvidenceCompensationEvent ? { knowledge_evidence_compensation_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceCompensationEvent) } : {}),
         duration_ms: Date.now() - started,
         ...(opts.auditExtras ?? {}),
       }));
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+    }
+    const baseResult: WriteProjectEntryResult = {
+      ...eventFirstResult,
+      gitCommit: git,
+    };
+    if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
+      knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
+        abrainHome,
+        projectId: opts.projectId,
+        scope,
+        raw: merged.markdown,
+        fallbackSlug: slug,
+        result: baseResult,
+        settings: opts.settings,
+        auditContext: opts.auditContext,
+        patch,
+        operation: eventOperation,
+      });
     }
     const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
       operation,
@@ -1555,19 +1850,14 @@ export async function updateProjectEntry(
       path: path.relative(auditRoot, target),
       lint_result: "pass",
       git_commit: git,
+      ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
       duration_ms: Date.now() - started,
       ...(opts.auditExtras ?? {}),
     }));
     return {
-      slug,
-      path: target,
-      status: "updated",
-      lintErrors,
-      lintWarnings,
-      gitCommit: git,
+      ...baseResult,
       auditPath,
-      sanitizedReplacements: merged.sanitizedReplacements,
-      ...resultCtx,
+      ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}),
     };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
@@ -1751,9 +2041,52 @@ export async function writeProjectEntry(
       return { slug, path: target, status: "rejected", reason: "duplicate_slug", duplicate: duplicateRace, auditPath, ...resultCtx };
     }
 
+    let knowledgeEvidenceEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
+    let git: string | null = null;
+    const baseResult: WriteProjectEntryResult = {
+      slug,
+      path: target,
+      status: "created",
+      lintErrors,
+      lintWarnings,
+      gitCommit: null,
+      sanitizedReplacements,
+      ...resultCtx,
+    };
+    if (isKnowledgeEvidenceEventFirst(opts.settings)) {
+      const eventResult = await appendKnowledgeEvidenceForWrite({
+        abrainHome,
+        projectId: opts.projectId,
+        scope,
+        draft: safeDraft,
+        result: baseResult,
+        settings: opts.settings,
+        auditContext: opts.auditContext,
+        sessionId: draft.sessionId,
+        operation: "create",
+      }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
+        append: {
+          ok: false,
+          status: "write_failed",
+          error: err instanceof Error ? err.message : String(err),
+        },
+      }));
+      knowledgeEvidenceEvent = eventResult;
+      if (shouldBlockKnowledgeLegacyWrite(opts.settings, eventResult)) {
+        const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
+          operation: "reject",
+          reason: "knowledge_evidence_append_failed",
+          target: targetId,
+          knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(eventResult),
+          duration_ms: Date.now() - started,
+        }));
+        return { slug, path: target, status: "rejected", reason: "knowledge_evidence_append_failed", lintErrors, lintWarnings, auditPath, knowledgeEvidenceEvent: eventResult, ...resultCtx };
+      }
+    }
+
     await atomicWrite(target, markdown);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
-    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "create", gitCommitProjectId) : null;
+    git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "create", gitCommitProjectId) : null;
     // P2 fix (2026-05-14 audit): when gitCommit is enabled but returns null
     // (e.g. index.lock race, hook failure, EACCES), the markdown file is on
     // disk but git has no record. Without cleanup, the next write for this
@@ -1770,13 +2103,56 @@ export async function writeProjectEntry(
       const rel = path.relative(abrainHome, target);
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
       await fs.unlink(target).catch(() => {});
+      const knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
+        ? await appendKnowledgeEvidenceForWrite({
+            abrainHome,
+            projectId: opts.projectId,
+            scope,
+            draft: { ...safeDraft, timelineNote: "remove projection after create git commit failure" },
+            result: { slug, path: target, status: "deleted", gitCommit: null, ...resultCtx },
+            settings: opts.settings,
+            auditContext: opts.auditContext,
+            sessionId: draft.sessionId,
+            operation: "delete",
+          }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
+            append: {
+              ok: false,
+              status: "write_failed",
+              error: err instanceof Error ? err.message : String(err),
+            },
+          }))
+        : undefined;
       const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
         operation: "reject",
         reason: "git_commit_failed",
         target: targetId,
+        event_first_legacy_compensation: isKnowledgeEvidenceEventFirst(opts.settings) ? "orphan_removed_and_projection_deleted" : "orphan_removed",
+        ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
+        ...(knowledgeEvidenceCompensationEvent ? { knowledge_evidence_compensation_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceCompensationEvent) } : {}),
         duration_ms: Date.now() - started,
       }));
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", auditPath, ...resultCtx };
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", auditPath, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+    }
+    const result: WriteProjectEntryResult = { ...baseResult, gitCommit: git };
+    if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
+      const eventResult = await appendKnowledgeEvidenceForWrite({
+        abrainHome,
+        projectId: opts.projectId,
+        scope,
+        draft: safeDraft,
+        result,
+        settings: opts.settings,
+        auditContext: opts.auditContext,
+        sessionId: draft.sessionId,
+        operation: "create",
+      }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
+        append: {
+          ok: false,
+          status: "write_failed",
+          error: err instanceof Error ? err.message : String(err),
+        },
+      }));
+      knowledgeEvidenceEvent = eventResult;
     }
     const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
       operation: "create",
@@ -1784,19 +2160,14 @@ export async function writeProjectEntry(
       path: path.relative(auditRoot, target),
       lint_result: "pass",
       git_commit: git,
+      ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
       duration_ms: Date.now() - started,
     }));
 
     return {
-      slug,
-      path: target,
-      status: "created",
-      lintErrors,
-      lintWarnings,
-      gitCommit: git,
+      ...result,
       auditPath,
-      sanitizedReplacements,
-      ...resultCtx,
+      ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}),
     };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);

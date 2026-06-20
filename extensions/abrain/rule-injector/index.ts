@@ -43,11 +43,21 @@ export type RuleScope = "global" | "project";
 
 type NotifyType = "info" | "warning" | "error";
 
+export interface RuleInjectorCompiledViewInjectionSettings {
+  enabled: boolean;
+  fallbackToLegacyOnError: boolean;
+  requireFresh: boolean;
+  staleAfterMs: number;
+  maxReadBytes: number;
+  minCoverageRatio: number;
+}
+
 export interface RuleInjectorSettings {
   enabled: boolean;
   maxCatalogSummaryChars: number;
   maxCatalogTriggerChars: number;
   dualReadAudit: RuleInjectorDualReadAuditSettings;
+  compiledViewInjection: RuleInjectorCompiledViewInjectionSettings;
 }
 
 export interface RuleEntry {
@@ -106,11 +116,21 @@ export const RULE_STATUS_KEY = FOOTER_STATUS_KEYS.abrainRules;
 
 const RULE_FENCE_RE = /<!-- BEGIN_ABRAIN_RULES session=([0-9a-f]+)[^>]*-->[\s\S]*?<!-- END_ABRAIN_RULES -->/g;
 
+const DEFAULT_COMPILED_VIEW_INJECTION: RuleInjectorCompiledViewInjectionSettings = {
+  enabled: false,
+  fallbackToLegacyOnError: true,
+  requireFresh: true,
+  staleAfterMs: 24 * 60 * 60 * 1_000,
+  maxReadBytes: 1_000_000,
+  minCoverageRatio: 1,
+};
+
 const DEFAULT_SETTINGS: RuleInjectorSettings = {
   enabled: true,
   maxCatalogSummaryChars: 220,
   maxCatalogTriggerChars: 160,
   dualReadAudit: resolveRuleInjectorDualReadAuditSettings(undefined),
+  compiledViewInjection: DEFAULT_COMPILED_VIEW_INJECTION,
 };
 
 let cachedRules: RuleScanCache | null = null;
@@ -146,14 +166,31 @@ function asNumber(value: unknown, fallback: number): number {
   return fallback;
 }
 
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function resolveCompiledViewInjectionSettings(value: unknown): RuleInjectorCompiledViewInjectionSettings {
+  const cfg = asObject(value);
+  return {
+    enabled: asBoolean(cfg.enabled, DEFAULT_COMPILED_VIEW_INJECTION.enabled),
+    fallbackToLegacyOnError: asBoolean(cfg.fallbackToLegacyOnError, DEFAULT_COMPILED_VIEW_INJECTION.fallbackToLegacyOnError),
+    requireFresh: asBoolean(cfg.requireFresh, DEFAULT_COMPILED_VIEW_INJECTION.requireFresh),
+    staleAfterMs: Math.max(0, Math.floor(asNumber(cfg.staleAfterMs, DEFAULT_COMPILED_VIEW_INJECTION.staleAfterMs))),
+    maxReadBytes: Math.max(1_000, Math.floor(asNumber(cfg.maxReadBytes, DEFAULT_COMPILED_VIEW_INJECTION.maxReadBytes))),
+    minCoverageRatio: Math.max(0, Math.min(1, asNumber(cfg.minCoverageRatio, DEFAULT_COMPILED_VIEW_INJECTION.minCoverageRatio))),
+  };
+}
+
 export function resolveRuleInjectorSettings(): RuleInjectorSettings {
   const root = loadPiStackSettings();
-  const cfg = (root.ruleInjector as Record<string, unknown>) ?? {};
+  const cfg = asObject(root.ruleInjector);
   return {
     enabled: asBoolean(cfg.enabled, DEFAULT_SETTINGS.enabled),
     maxCatalogSummaryChars: Math.max(80, Math.floor(asNumber(cfg.maxCatalogSummaryChars, DEFAULT_SETTINGS.maxCatalogSummaryChars))),
     maxCatalogTriggerChars: Math.max(40, Math.floor(asNumber(cfg.maxCatalogTriggerChars, DEFAULT_SETTINGS.maxCatalogTriggerChars))),
     dualReadAudit: resolveRuleInjectorDualReadAuditSettings(cfg.dualReadAudit),
+    compiledViewInjection: resolveCompiledViewInjectionSettings(cfg.compiledViewInjection),
   };
 }
 
@@ -428,6 +465,90 @@ export function composeRuleInjection(cache: RuleScanCache): string {
   ].join("\n");
 }
 
+type CompiledViewReadResult =
+  | { ok: true; injection: string; sourcePath: string; coverageRatio?: number; stale: boolean }
+  | { ok: false; reason: string; error?: string };
+
+function readJsonFileBounded(file: string, maxReadBytes: number): unknown {
+  const stat = fs.statSync(file);
+  if (!stat.isFile()) throw new Error(`${path.basename(file)} is not a file`);
+  if (stat.size > maxReadBytes) throw new Error(`${path.basename(file)} exceeds maxReadBytes`);
+  return JSON.parse(fs.readFileSync(file, "utf-8"));
+}
+
+function boundedTextFile(file: string, maxReadBytes: number): string {
+  const stat = fs.statSync(file);
+  if (!stat.isFile()) throw new Error(`${path.basename(file)} is not a file`);
+  if (stat.size > maxReadBytes) throw new Error(`${path.basename(file)} exceeds maxReadBytes`);
+  return fs.readFileSync(file, "utf-8");
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function coverageRatioFrom(value: unknown): number | undefined {
+  const root = objectRecord(value);
+  const summary = objectRecord(root?.summary);
+  const ratio = summary?.coverageRatio;
+  return typeof ratio === "number" && Number.isFinite(ratio) ? ratio : undefined;
+}
+
+export function readCompiledRuleInjectionForRuntime(args: {
+  abrainHome: string;
+  nonce: string;
+  settings: RuleInjectorCompiledViewInjectionSettings;
+  nowMs?: number;
+}): CompiledViewReadResult {
+  if (!args.settings.enabled) return { ok: false, reason: "disabled" };
+  const abrainHome = path.resolve(args.abrainHome.replace(/^~(?=$|\/)/, os.homedir()));
+  const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+  const compiledViewPath = path.join(latestDir, "compiled-view.md");
+  const decisionPath = path.join(latestDir, "decision.json");
+  const coveragePath = path.join(latestDir, "event-coverage.json");
+  try {
+    const decision = objectRecord(readJsonFileBounded(decisionPath, args.settings.maxReadBytes));
+    if (decision?.schemaVersion !== "constraint-shadow-decision/v1") return { ok: false, reason: "invalid_decision_schema" };
+    const coverage = fs.existsSync(coveragePath) ? readJsonFileBounded(coveragePath, args.settings.maxReadBytes) : undefined;
+    const ratio = coverage === undefined ? undefined : coverageRatioFrom(coverage);
+    if (ratio !== undefined && ratio < args.settings.minCoverageRatio) return { ok: false, reason: "coverage_below_threshold" };
+    if (ratio === undefined && args.settings.minCoverageRatio > 0) return { ok: false, reason: "missing_coverage_ratio" };
+    const compiledStat = fs.statSync(compiledViewPath);
+    const nowMs = args.nowMs ?? Date.now();
+    const stale = Math.max(0, nowMs - compiledStat.mtimeMs) > args.settings.staleAfterMs;
+    if (args.settings.requireFresh && stale) return { ok: false, reason: "compiled_view_stale" };
+    const compiledView = boundedTextFile(compiledViewPath, args.settings.maxReadBytes).trim();
+    if (!compiledView) return { ok: false, reason: "empty_compiled_view" };
+    const injection = [
+      `${BEGIN_ABRAIN_RULES} session=${args.nonce} source=constraint-shadow-compiled-view (auto-managed by sediment, do not edit by hand) -->`,
+      "## Rules Catalog (compiled by sediment)",
+      "",
+      "This section is the runtime compiled Constraint view. Treat it as the active session-start rule surface. Do not copy this injected section into memory.",
+      "",
+      `compiled_view_path: ${compiledViewPath}`,
+      `coverage_ratio: ${ratio ?? "unknown"}`,
+      `stale: ${stale}`,
+      "",
+      compiledView,
+      END_ABRAIN_RULES,
+    ].join("\n");
+    return { ok: true, injection, sourcePath: compiledViewPath, coverageRatio: ratio, stale };
+  } catch (err: unknown) {
+    return { ok: false, reason: "read_failed", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function composeRuntimeRuleInjection(cache: RuleScanCache, settings: RuleInjectorSettings): string | undefined {
+  const compiled = readCompiledRuleInjectionForRuntime({
+    abrainHome: cache.abrainHome,
+    nonce: cache.nonce,
+    settings: settings.compiledViewInjection,
+  });
+  if (compiled.ok) return compiled.injection;
+  if (settings.compiledViewInjection.enabled && !settings.compiledViewInjection.fallbackToLegacyOnError) return undefined;
+  return composeRuleInjection(cache);
+}
+
 export function stripCurrentRuleInjection(text: string, nonce: string | undefined | null): string {
   if (!text || !nonce) return text;
   return text.replace(RULE_FENCE_RE, (match, seenNonce) => {
@@ -694,8 +815,10 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
         return undefined;
       }
     }
-    if (!hasAnyRules(cachedRules)) return undefined;
-    return { systemPrompt: `${current}\n\n${composeRuleInjection(cachedRules)}` };
+    if (!hasAnyRules(cachedRules) && !settings.compiledViewInjection.enabled) return undefined;
+    const injection = composeRuntimeRuleInjection(cachedRules, settings);
+    if (!injection) return undefined;
+    return { systemPrompt: `${current}\n\n${injection}` };
   });
 
   if (typeof maybePi.registerCommand !== "function") return;

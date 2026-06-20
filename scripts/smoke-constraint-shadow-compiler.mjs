@@ -87,6 +87,8 @@ for (const file of [
   "extensions/memory/utils.ts",
   "extensions/memory/direction-impact.ts",
   "extensions/memory/parser.ts",
+  "extensions/sediment/settings.ts",
+  "extensions/sediment/knowledge-evidence.ts",
   "extensions/sediment/sanitizer.ts",
   "extensions/sediment/constraint-compiler/types.ts",
   "extensions/sediment/constraint-evidence/types.ts",

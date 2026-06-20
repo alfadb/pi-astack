@@ -360,6 +360,8 @@ export interface RenameApplyOptions {
   onVectorRename?: () => Promise<void> | void;
   /** Called after file rollback if the vector step started. */
   onVectorRollback?: (rollback: RenameRollbackResult) => Promise<void> | void;
+  /** Called after postcheck and before any git commit. Throwing triggers transaction rollback. */
+  onBeforeCommit?: (absolutePaths: string[]) => Promise<void> | void;
   /** Optional writer-owned commit hook (e.g. sediment gitSingleFlight/autosync path). */
   onCommit?: (absolutePaths: string[]) => Promise<string | null | void> | string | null | void;
 }
@@ -510,6 +512,7 @@ export async function applyRenamePlan(plan: RenameApplyPlan, opts: RenameApplyOp
     if (!contentHasExpectedId(await readMaybe(plan.entryNewPath), plan.expectedNewId)) {
       throw new Error("postcheck_failed_expected_id");
     }
+    await opts.onBeforeCommit?.(absolutePaths);
     let gitCommit: string | null | undefined;
     if (opts.onCommit) {
       gitCommit = await opts.onCommit(absolutePaths) ?? null;

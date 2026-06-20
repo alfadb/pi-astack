@@ -72,7 +72,7 @@
           "additionalProperties": { "type": "string" },
           "examples": [
             {
-              "gpt-image-2": "Latest OpenAI image generation model. Call `imagine(prompt: \"...\", size?, quality?, style?)` to generate images."
+              "gpt-image-2": "Latest OpenAI image generation model. Call `imagine(prompt: \"...\", imagePath?, size?, quality?, style?, inputFidelity?)` to generate or image-to-image edit."
             }
           ]
         },
@@ -300,12 +300,12 @@
         "constraintShadowCompiler": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ADR 0039 P1 manual constraint shadow compiler report. Default disabled; manual entries may use it to call a real LLM and write only ~/.abrain/.state/sediment/constraint-shadow/** artifacts.",
+          "description": "ADR 0039 P1/P4 constraint shadow compiler report and runtime auto-refresh. Manual entries may call a real LLM and write only ~/.abrain/.state/sediment/constraint-shadow/** artifacts; auto-refresh is guarded separately.",
           "properties": {
             "enabled": {
               "type": "boolean",
               "default": false,
-              "description": "Explicit default-off guard for the manual constraint shadow report entry. This does not register any runtime hook."
+              "description": "Explicit guard for the constraint shadow compiler. Auto-refresh also requires autoRefresh.enabled."
             },
             "model": {
               "type": "string",
@@ -316,19 +316,56 @@
               "type": "number",
               "default": 1200000,
               "minimum": 1000,
-              "description": "Timeout for the manual constraint compiler model call."
+              "description": "Timeout for the constraint compiler model call."
             },
             "maxRetries": {
               "type": "number",
               "default": 0,
               "minimum": 0,
-              "description": "Transport retry count for the manual constraint compiler model call. Does not retry to repair malformed JSON."
+              "description": "Transport retry count for the constraint compiler model call. Does not retry to repair malformed JSON."
             },
             "maxPromptChars": {
               "type": "number",
               "default": 0,
               "minimum": 0,
               "description": "Optional prompt character budget. 0 means no script-level cap; positive values fail closed before calling the model."
+            },
+            "autoRefresh": {
+              "type": "object",
+              "additionalProperties": false,
+              "default": { "enabled": false },
+              "description": "ADR 0039 P4 runtime refresh after successful Constraint Evidence Event append. It is debounce/single-flight guarded and writes only derived constraint-shadow artifacts.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Explicit runtime guard for live shadow refresh. false keeps manual-only operation."
+                },
+                "debounceMs": {
+                  "type": "number",
+                  "default": 2000,
+                  "minimum": 0,
+                  "description": "Delay before a scheduled auto-refresh run starts."
+                },
+                "minIntervalMs": {
+                  "type": "number",
+                  "default": 60000,
+                  "minimum": 0,
+                  "description": "Minimum interval between completed auto-refresh runs."
+                },
+                "eventStaleAfterMs": {
+                  "type": "number",
+                  "default": 86400000,
+                  "minimum": 1000,
+                  "description": "Derived shadow age threshold used by runtime/reconcile freshness checks."
+                },
+                "maxPromptChars": {
+                  "type": "number",
+                  "default": 0,
+                  "minimum": 0,
+                  "description": "Optional prompt budget for auto-refresh. 0 means use constraintShadowCompiler.maxPromptChars."
+                }
+              }
             }
           }
         },
@@ -336,12 +373,74 @@
         "constraintEvidenceEventWriter": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ADR 0039 P2 PR5 default-off runtime append of Constraint Evidence Events from the existing sediment agent_end pipeline. When enabled it only writes ~/.abrain/l1/events/** plus minimal ~/.abrain/.state/sediment/constraint-events/** audit/status; it does not change canonical memory or register hooks.",
+          "description": "ADR 0039 runtime append of Constraint Evidence Events from the existing sediment agent_end pipeline. event_first may reject legacy mutation when append fails and fallback is disabled.",
           "properties": {
             "enabled": {
               "type": "boolean",
               "default": false,
-              "description": "Explicit default-off runtime guard. Keep this key present in pi-astack-settings.json as a rollback switch."
+              "description": "Explicit runtime guard. Keep this key present in pi-astack-settings.json as a rollback switch."
+            },
+            "mode": {
+              "enum": ["parallel_legacy", "event_first"],
+              "default": "parallel_legacy",
+              "description": "parallel_legacy appends events alongside the legacy path; event_first treats successful append as the precondition for legacy mutation unless fallback is enabled."
+            },
+            "legacyFallbackOnEventFailure": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true, append failure may fall back to the legacy writer. Set false for fail-closed event_first operation."
+            }
+          }
+        },
+
+        "knowledgeEvidenceEventWriter": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0039 runtime append of Knowledge Evidence Events from sediment writer operations. It supports parallel legacy mode and fail-closed event_first mode.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicit runtime guard for Knowledge Evidence Event append."
+            },
+            "mode": {
+              "enum": ["parallel_legacy", "event_first"],
+              "default": "parallel_legacy",
+              "description": "parallel_legacy writes legacy markdown first; event_first appends evidence before canonical mutation and compensates projection after later failures."
+            },
+            "legacyFallbackOnEventFailure": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true, append failure may fall back to the legacy writer. Set false for fail-closed event_first operation."
+            }
+          }
+        },
+
+        "knowledgeProjector": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0039 Knowledge Evidence Event projector and read overlay. It writes only derived files under ~/.abrain/.state/sediment/knowledge-projection/**.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicit guard for Knowledge projection."
+            },
+            "hotOverlayEnabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "When true, memory read tools append projection stores after canonical stores."
+            },
+            "projectOnWrite": {
+              "type": "boolean",
+              "default": false,
+              "description": "When true, successful Knowledge Evidence Event append refreshes the derived projection immediately."
+            },
+            "maxReadBytes": {
+              "type": "number",
+              "default": 1000000,
+              "minimum": 1000,
+              "description": "Maximum projection bytes read per file by read-side consumers that enforce a bound."
             }
           }
         },
@@ -719,6 +818,49 @@
               "default": 86400000,
               "minimum": 0,
               "description": "Shadow decision file age threshold for marking the dual-read audit row stale. Staleness is diagnostic only and never changes injection."
+            }
+          }
+        },
+        "compiledViewInjection": {
+          "type": "object",
+          "default": { "enabled": false },
+          "description": "ADR 0039 compiled Constraint view injection. When enabled, the rule injector reads constraint-shadow latest compiled-view artifacts and can fall back to legacy rule injection.",
+          "additionalProperties": false,
+          "properties": {
+            "_comment": { "type": "string" },
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Explicit runtime guard. false keeps legacy rule injection as the only injected truth."
+            },
+            "fallbackToLegacyOnError": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true, compiled-view read errors fall back to legacy rule injection. Set false only after reconcile and coverage checks are stable."
+            },
+            "requireFresh": {
+              "type": "boolean",
+              "default": true,
+              "description": "When true, stale compiled views are rejected before injection."
+            },
+            "staleAfterMs": {
+              "type": "number",
+              "default": 86400000,
+              "minimum": 0,
+              "description": "Maximum compiled-view artifact age accepted by runtime injection."
+            },
+            "maxReadBytes": {
+              "type": "number",
+              "default": 1000000,
+              "minimum": 1000,
+              "description": "Maximum bytes read per compiled-view artifact."
+            },
+            "minCoverageRatio": {
+              "type": "number",
+              "default": 1,
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Minimum event coverage ratio required before compiled-view injection is accepted."
             }
           }
         }

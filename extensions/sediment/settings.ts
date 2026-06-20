@@ -24,6 +24,11 @@ function resolveAutoLlmWriteEnabled(
   return fallback;
 }
 
+function resolveMode(raw: unknown, fallback: "parallel_legacy" | "event_first"): "parallel_legacy" | "event_first" {
+  if (raw === "parallel_legacy" || raw === "event_first") return raw;
+  return fallback;
+}
+
 const PI_STACK_SETTINGS_PATH = path.join(
   os.homedir(), ".pi", "agent", "pi-astack-settings.json",
 );
@@ -49,17 +54,38 @@ export interface SedimentSettings {
   curatorModel: string;
   curatorTimeoutMs: number;
   curatorMaxRetries: number;
-  /** ADR 0039 P1 PR4: default-off manual constraint shadow report entry. */
+  /** ADR 0039 P1/P4: constraint shadow compiler and runtime auto-refresh. */
   constraintShadowCompiler: {
     enabled: boolean;
     model: string;
     timeoutMs: number;
     maxRetries: number;
     maxPromptChars: number;
+    autoRefresh: {
+      enabled: boolean;
+      debounceMs: number;
+      minIntervalMs: number;
+      eventStaleAfterMs: number;
+      maxPromptChars: number;
+    };
   };
-  /** ADR 0039 P2 PR5: default-off runtime append of Constraint Evidence Events. */
+  /** ADR 0039 P2/P4: runtime append of Constraint Evidence Events. */
   constraintEvidenceEventWriter: {
     enabled: boolean;
+    mode: "parallel_legacy" | "event_first";
+    legacyFallbackOnEventFailure: boolean;
+  };
+  /** ADR 0039: runtime append/project/read overlay for Knowledge Evidence Events. */
+  knowledgeEvidenceEventWriter: {
+    enabled: boolean;
+    mode: "parallel_legacy" | "event_first";
+    legacyFallbackOnEventFailure: boolean;
+  };
+  knowledgeProjector: {
+    enabled: boolean;
+    hotOverlayEnabled: boolean;
+    projectOnWrite: boolean;
+    maxReadBytes: number;
   };
   /** ADR 0025 §4.3 Phase C.2: model for the aggregator v1 skeptical-historian
    *  LLM pass. Skeptical historian is a reasoning-heavy task; v4-pro is the
@@ -205,9 +231,29 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     timeoutMs: 1_200_000,
     maxRetries: 0,
     maxPromptChars: 0,
+    autoRefresh: {
+      enabled: false,
+      debounceMs: 2_000,
+      minIntervalMs: 60_000,
+      eventStaleAfterMs: 24 * 60 * 60 * 1_000,
+      maxPromptChars: 0,
+    },
   },
   constraintEvidenceEventWriter: {
     enabled: false,
+    mode: "parallel_legacy",
+    legacyFallbackOnEventFailure: true,
+  },
+  knowledgeEvidenceEventWriter: {
+    enabled: false,
+    mode: "parallel_legacy",
+    legacyFallbackOnEventFailure: true,
+  },
+  knowledgeProjector: {
+    enabled: false,
+    hotOverlayEnabled: false,
+    projectOnWrite: false,
+    maxReadBytes: 1_000_000,
   },
   // Aggregator: empty default. Configure in pi-astack-settings.json.
   aggregatorModel: "",
@@ -365,9 +411,29 @@ export function resolveSedimentSettings(): SedimentSettings {
       timeoutMs: Math.max(1_000, asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.timeoutMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.timeoutMs)),
       maxRetries: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxRetries, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxRetries))),
       maxPromptChars: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxPromptChars, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxPromptChars))),
+      autoRefresh: {
+        enabled: asBoolean(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.enabled),
+        debounceMs: Math.max(0, Math.floor(asNumber(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.debounceMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.debounceMs))),
+        minIntervalMs: Math.max(0, Math.floor(asNumber(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.minIntervalMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.minIntervalMs))),
+        eventStaleAfterMs: Math.max(1_000, Math.floor(asNumber(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.eventStaleAfterMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.eventStaleAfterMs))),
+        maxPromptChars: Math.max(0, Math.floor(asNumber(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.maxPromptChars, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.maxPromptChars))),
+      },
     },
     constraintEvidenceEventWriter: {
       enabled: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.enabled),
+      mode: resolveMode((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.mode, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.mode),
+      legacyFallbackOnEventFailure: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyFallbackOnEventFailure, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.legacyFallbackOnEventFailure),
+    },
+    knowledgeEvidenceEventWriter: {
+      enabled: asBoolean((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.enabled),
+      mode: resolveMode((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.mode, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.mode),
+      legacyFallbackOnEventFailure: asBoolean((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyFallbackOnEventFailure, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.legacyFallbackOnEventFailure),
+    },
+    knowledgeProjector: {
+      enabled: asBoolean((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.enabled),
+      hotOverlayEnabled: asBoolean((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.hotOverlayEnabled, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.hotOverlayEnabled),
+      projectOnWrite: asBoolean((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.projectOnWrite, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.projectOnWrite),
+      maxReadBytes: Math.max(1_000, Math.floor(asNumber((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.maxReadBytes, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.maxReadBytes))),
     },
     aggregatorModel: typeof cfg.aggregatorModel === "string" && cfg.aggregatorModel.trim()
       ? cfg.aggregatorModel.trim()

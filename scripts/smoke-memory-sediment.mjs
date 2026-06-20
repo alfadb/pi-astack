@@ -105,25 +105,27 @@ function transpileExtensions(outRoot) {
     }
   }
 
-  for (const file of fs.readdirSync(path.join(extRoot, "sediment", "constraint-evidence")).filter((f) => f.endsWith(".ts"))) {
-    const srcPath = path.join(extRoot, "sediment", "constraint-evidence", file);
-    const outPath = path.join(outRoot, "sediment", "constraint-evidence", file.replace(/\.ts$/, ".js"));
-    const transpiled = ts.transpileModule(fs.readFileSync(srcPath, "utf-8"), {
-      compilerOptions: {
-        target: ts.ScriptTarget.ES2022,
-        module: ts.ModuleKind.CommonJS,
-        moduleResolution: ts.ModuleResolutionKind.NodeJs,
-        esModuleInterop: true,
-        skipLibCheck: true,
-      },
-    });
-    try {
-      new (require("node:vm").Script)(transpiled.outputText, { filename: srcPath });
-    } catch (err) {
-      throw new Error(`Strict parse of ${path.relative(repoRoot, srcPath)} failed: ${err && err.stack ? err.stack : err}`);
+  for (const subdir of ["constraint-evidence", "constraint-compiler"]) {
+    for (const file of fs.readdirSync(path.join(extRoot, "sediment", subdir)).filter((f) => f.endsWith(".ts"))) {
+      const srcPath = path.join(extRoot, "sediment", subdir, file);
+      const outPath = path.join(outRoot, "sediment", subdir, file.replace(/\.ts$/, ".js"));
+      const transpiled = ts.transpileModule(fs.readFileSync(srcPath, "utf-8"), {
+        compilerOptions: {
+          target: ts.ScriptTarget.ES2022,
+          module: ts.ModuleKind.CommonJS,
+          moduleResolution: ts.ModuleResolutionKind.NodeJs,
+          esModuleInterop: true,
+          skipLibCheck: true,
+        },
+      });
+      try {
+        new (require("node:vm").Script)(transpiled.outputText, { filename: srcPath });
+      } catch (err) {
+        throw new Error(`Strict parse of ${path.relative(repoRoot, srcPath)} failed: ${err && err.stack ? err.stack : err}`);
+      }
+      writeFile(outPath, transpiled.outputText);
+      count++;
     }
-    writeFile(outPath, transpiled.outputText);
-    count++;
   }
 
   const sedimentPromptsDir = path.join(outRoot, "sediment", "prompts");
@@ -318,6 +320,7 @@ async function main() {
     // re-exercise its semantics through the writer in this smoke.
     const { parseAboutMeArgs, deriveAboutMeTitle, buildAboutMeFence } = req("./sediment/index.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
+    const { knowledgeEvidenceEventPath, readKnowledgeProjectionStores } = req("./sediment/knowledge-evidence.js");
     // P2 fix (2026-05-14): smoke tests don't use real git repos, so disable
     // gitCommit by default. Tests that need git (migration tests) override
     // with gitCommit: true explicitly.
@@ -1386,6 +1389,35 @@ Original Pensieve seed content.
     });
     assert(correlatedWrite.status === "created", `correlated writer failed: ${correlatedWrite.reason}`);
     assert(correlatedWrite.correlationId === "corr-smoke" && correlatedWrite.candidateId === "corr-smoke:c1", "writer result should echo audit correlation ids");
+
+    const evidenceTarget = setupAbrainTarget("writer-knowledge-evidence");
+    const evidenceSettings = {
+      ...DEFAULT_SEDIMENT_SETTINGS,
+      gitCommit: false,
+      knowledgeEvidenceEventWriter: { enabled: true, mode: "parallel_legacy", legacyFallbackOnEventFailure: true },
+      knowledgeProjector: { enabled: true, hotOverlayEnabled: true, projectOnWrite: true, maxReadBytes: 1000000 },
+    };
+    const evidenceWrite = await writeProjectEntry({
+      title: "Writer Knowledge Evidence Fixture",
+      kind: "fact",
+      confidence: 8,
+      sessionId: "session-knowledge-evidence",
+      compiledTruth: "This validates that writeProjectEntry appends a Knowledge Evidence Event and projects a hot overlay.",
+      triggerPhrases: ["writer knowledge evidence fixture"],
+    }, {
+      projectRoot: root,
+      abrainHome: evidenceTarget.abrainHome,
+      projectId: evidenceTarget.projectId,
+      settings: evidenceSettings,
+      dryRun: false,
+      auditContext: { lane: "auto_write", sessionId: "session-knowledge-evidence", correlationId: "knowledge-corr", candidateId: "knowledge-c1" },
+    });
+    assert(evidenceWrite.status === "created", `knowledge evidence writer failed: ${evidenceWrite.reason}`);
+    assert(evidenceWrite.knowledgeEvidenceEvent?.append?.ok, `knowledge evidence append missing: ${JSON.stringify(evidenceWrite.knowledgeEvidenceEvent)}`);
+    assert(evidenceWrite.knowledgeEvidenceEvent.projection?.status === "projected", `knowledge evidence projection missing: ${JSON.stringify(evidenceWrite.knowledgeEvidenceEvent.projection)}`);
+    assert(fs.existsSync(knowledgeEvidenceEventPath(evidenceTarget.abrainHome, evidenceWrite.knowledgeEvidenceEvent.append.eventId)), "knowledge evidence event file missing");
+    const projectionStores = await readKnowledgeProjectionStores({ abrainHome: evidenceTarget.abrainHome, projectId: evidenceTarget.projectId, settings: evidenceSettings });
+    assert(projectionStores.some((store) => store.label === "knowledge-projection-project"), `knowledge projection store missing: ${JSON.stringify(projectionStores)}`);
     // Audit log remains project-local (forensic), even though entry markdown went to abrain.
     const auditRows = fs.readFileSync(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
     const correlatedAudit = auditRows.find((row) => row.operation === "create" && row.target === `project:${writerTarget2.projectId}:writer-correlation-fixture`);

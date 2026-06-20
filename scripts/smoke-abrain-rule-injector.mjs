@@ -76,6 +76,8 @@ function stageModuleTree(outRoot) {
     ["extensions/memory/direction-impact.ts", "memory/direction-impact.js"],
     ["extensions/memory/utils.ts", "memory/utils.js"],
     ["extensions/memory/settings.ts", "memory/settings.js"],
+    ["extensions/sediment/settings.ts", "sediment/settings.js"],
+    ["extensions/sediment/knowledge-evidence.ts", "sediment/knowledge-evidence.js"],
   ];
 
   // Stub `_shared/pi-internals` — ADR 0027 PR-B added the
@@ -333,6 +335,63 @@ await asyncCheck("extension registers append-only idempotent injector and diagno
     if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
     if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
   }
+});
+
+check("compiled-view runtime reader is default-off, bounded, and coverage-gated", () => {
+  const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "compiled123", resolveProject: fakeBound });
+  const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+  writeShadowDecision(path.join(latestDir, "decision.json"), [shadowConstraintFromRule(cache.globalAlways[0])]);
+  writeFile(path.join(latestDir, "compiled-view.md"), "# Compiled Constraint\n\nCompiled runtime body.\n");
+  writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+    schemaVersion: "constraint-event-coverage/v1",
+    summary: { coverageRatio: 1 },
+    rows: [],
+  }, null, 2));
+  const disabled = ruleInjector.readCompiledRuleInjectionForRuntime({
+    abrainHome,
+    nonce: "compiled123",
+    settings: {
+      enabled: false,
+      fallbackToLegacyOnError: true,
+      requireFresh: true,
+      staleAfterMs: 86400000,
+      maxReadBytes: 1000000,
+      minCoverageRatio: 1,
+    },
+  });
+  if (disabled.ok || disabled.reason !== "disabled") throw new Error(`expected disabled compiled view, got ${JSON.stringify(disabled)}`);
+  const ok = ruleInjector.readCompiledRuleInjectionForRuntime({
+    abrainHome,
+    nonce: "compiled123",
+    settings: {
+      enabled: true,
+      fallbackToLegacyOnError: true,
+      requireFresh: true,
+      staleAfterMs: 86400000,
+      maxReadBytes: 1000000,
+      minCoverageRatio: 1,
+    },
+  });
+  if (!ok.ok || !ok.injection.includes("source=constraint-shadow-compiled-view")) throw new Error(`compiled view did not inject: ${JSON.stringify(ok)}`);
+  if (!ok.injection.includes("Compiled runtime body.")) throw new Error(`compiled view body missing: ${ok.injection}`);
+  writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+    schemaVersion: "constraint-event-coverage/v1",
+    summary: { coverageRatio: 0.5 },
+    rows: [],
+  }, null, 2));
+  const lowCoverage = ruleInjector.readCompiledRuleInjectionForRuntime({
+    abrainHome,
+    nonce: "compiled123",
+    settings: {
+      enabled: true,
+      fallbackToLegacyOnError: true,
+      requireFresh: true,
+      staleAfterMs: 86400000,
+      maxReadBytes: 1000000,
+      minCoverageRatio: 1,
+    },
+  });
+  if (lowCoverage.ok || lowCoverage.reason !== "coverage_below_threshold") throw new Error(`expected coverage gate, got ${JSON.stringify(lowCoverage)}`);
 });
 
 check("dual-read audit helper is default-off and writes only constraint-shadow state when enabled", () => {

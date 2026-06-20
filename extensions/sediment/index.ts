@@ -69,6 +69,7 @@ import { runForgettingExecutor } from "./forgetting-executor";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { appendTier1ConstraintEvidenceEvent } from "./constraint-evidence/integration";
+import { scheduleConstraintShadowAutoRefresh } from "./constraint-compiler/auto-refresh";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
 import { getCurrentAnchor, getDeviceId, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
@@ -4473,6 +4474,8 @@ async function tryAutoWriteLane(args: {
       candidateId: tier1CandidateId,
     };
     let constraintEvidenceEvent: Awaited<ReturnType<typeof appendTier1ConstraintEvidenceEvent>> | undefined;
+    let constraintEvidenceAppendError: string | undefined;
+    let constraintAutoRefreshSchedule: ReturnType<typeof scheduleConstraintShadowAutoRefresh> | undefined;
     if (settings.constraintEvidenceEventWriter.enabled === true) {
       try {
         constraintEvidenceEvent = await appendTier1ConstraintEvidenceEvent({
@@ -4488,16 +4491,74 @@ async function tryAutoWriteLane(args: {
           candidateId: tier1EvidenceCandidateId,
           deviceId: getDeviceId(),
         });
+        if (constraintEvidenceEvent.append.ok) {
+          constraintAutoRefreshSchedule = scheduleConstraintShadowAutoRefresh({
+            abrainHome,
+            cwd,
+            activeProjectId: projectId,
+            knownProjectIds: projectId ? [projectId] : [],
+            settings,
+            modelRegistry: args.modelRegistry,
+            reason: "constraint_evidence_event_appended",
+            sourceEventId: constraintEvidenceEvent.append.eventId,
+          });
+        } else {
+          constraintEvidenceAppendError = constraintEvidenceEvent.append.status;
+        }
       } catch (e: unknown) {
+        constraintEvidenceAppendError = sanitizeAuditText(e instanceof Error ? e.message : String(e), 500) || "unknown";
         await appendAudit(cwd, {
           operation: "constraint_evidence_append_failed",
           lane: "auto_write",
           session_id: sessionId,
           correlation_id: correlationId,
           candidate_id: tier1EvidenceCandidateId,
-          error: sanitizeAuditText(e instanceof Error ? e.message : String(e), 500),
+          error: constraintEvidenceAppendError,
           checkpoint_advanced: false,
         }).catch(() => {});
+      }
+      if (
+        settings.constraintEvidenceEventWriter.mode === "event_first"
+        && constraintEvidenceAppendError
+        && settings.constraintEvidenceEventWriter.legacyFallbackOnEventFailure !== true
+      ) {
+        const result: WriteRuleResult = {
+          slug: draft.title,
+          path: "",
+          status: "rejected",
+          reason: `constraint_evidence_append_failed:${constraintEvidenceAppendError}`,
+          lane: "auto_write",
+          sessionId,
+          correlationId,
+          candidateId: tier1CandidateId,
+        };
+        await appendAudit(cwd, {
+          operation: "tier1_direct_write",
+          lane: "auto_write",
+          session_id: sessionId,
+          ...checkpointSummary(window),
+          correlation_id: correlationId,
+          candidate_id: tier1CandidateId,
+          candidate_title: sanitizeAuditText(draft.title, 500),
+          candidate_kind: draft.kind,
+          candidate_confidence: draft.entryConfidence,
+          candidate_body_chars: draft.body.length,
+          result: resultSummary(result),
+          deterministic_direct_path: true,
+          constraint_evidence_event: constraintEvidenceEvent ? {
+            ok: constraintEvidenceEvent.append.ok,
+            status: constraintEvidenceEvent.append.status,
+            event_id: constraintEvidenceEvent.append.eventId ?? null,
+            audit_path: constraintEvidenceEvent.auditPath ?? null,
+            status_path: constraintEvidenceEvent.statusPath ?? null,
+            diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
+          } : { ok: false, status: "threw", event_id: null, audit_path: null, status_path: null, diagnostics: [] },
+          event_first_blocked_legacy_write: true,
+          signal_consumed: false,
+          checkpoint_advanced: false,
+          durationMs: Date.now() - writeStart,
+        }).catch(() => {});
+        return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
       }
     }
     // PR-4/P0.3 (O2 2026-06-10): with the lane ON (default), a cross-slug
@@ -4642,6 +4703,7 @@ async function tryAutoWriteLane(args: {
           diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
         },
       } : {}),
+      ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
       // "updated" = adjudication update/merge persisted the directive on the
       // existing rule (PR-4).
       signal_consumed: result.status === "created" || result.status === "deduped" || result.status === "dry_run" || result.status === "updated",
