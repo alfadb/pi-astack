@@ -414,6 +414,59 @@ function validateL3Store(abrainHome) {
   return result;
 }
 
+// ADR0039 B0 coverage hard-gate (report mode): quantify how many legacy
+// canonical Knowledge entries already have a backing L1 Evidence Event. The
+// canonical=projection flip (B5) must NOT proceed until this reaches 1.0,
+// otherwise the flip silently drops legacy entries that predate the event
+// writer. Pre-backfill this is expected to be near-zero; it is report-only
+// here and only becomes a blocking gate behind an explicit flag at flip time.
+const LEGACY_KNOWLEDGE_PROJECT_ZONES = ["knowledge", "decisions", "maxims"];
+function legacyEntrySlug(file) {
+  return path.basename(file, ".md");
+}
+function computeLegacyKnowledgeCoverage(abrainHome) {
+  const legacy = new Map();
+  for (const file of listFiles(path.join(abrainHome, "knowledge"), (f) => f.endsWith(".md"))) {
+    legacy.set(`world::${legacyEntrySlug(file)}`, relativeUnix(abrainHome, file));
+  }
+  const projectsRoot = path.join(abrainHome, "projects");
+  if (fs.existsSync(projectsRoot)) {
+    for (const pid of fs.readdirSync(projectsRoot)) {
+      if (!fs.statSync(path.join(projectsRoot, pid)).isDirectory()) continue;
+      for (const zone of LEGACY_KNOWLEDGE_PROJECT_ZONES) {
+        for (const file of listFiles(path.join(projectsRoot, pid, zone), (f) => f.endsWith(".md"))) {
+          legacy.set(`project:${pid}:${legacyEntrySlug(file)}`, relativeUnix(abrainHome, file));
+        }
+      }
+    }
+  }
+  const l1 = new Set();
+  for (const file of listFiles(path.join(abrainHome, "l1", "events"), (f) => f.endsWith(".json"))) {
+    let body;
+    try { body = readJson(file).body; } catch { continue; }
+    if (body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
+    const scope = body.scope ?? {};
+    const slug = body.payload?.slug;
+    if (scope.kind === "world") l1.add(`world::${slug}`);
+    else if (scope.kind === "project") l1.add(`project:${scope.project_id}:${slug}`);
+  }
+  const missing = [];
+  let covered = 0;
+  for (const [identity, rel] of legacy) {
+    if (l1.has(identity)) covered += 1;
+    else missing.push({ identity, path: rel });
+  }
+  const total = legacy.size;
+  return {
+    total,
+    covered,
+    missing: missing.length,
+    ratio: total === 0 ? 1 : covered / total,
+    backfillNeeded: missing.length > 0,
+    missingSample: missing.slice(0, 5),
+  };
+}
+
 function loadRuntimeThresholds() {
   const cfg = fs.existsSync(settingsPath) ? readJson(settingsPath) : {};
   const compiled = cfg.ruleInjector?.compiledViewInjection ?? {};
@@ -429,18 +482,26 @@ function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   const knowledge = validateKnowledgeProjection(abrainHome);
   const constraint = validateConstraintShadow(abrainHome, opts);
   const l3 = validateL3Store(abrainHome);
+  const coverage = computeLegacyKnowledgeCoverage(abrainHome);
   const dirty = validateDirtyDerived(abrainHome);
   const l3SearchCorpusFailures = [];
   if (l3.counts && Number(l3.counts.searchCorpusRows ?? 0) !== Number(knowledge.searchCorpusRows ?? 0)) {
     l3SearchCorpusFailures.push(`adr0039-l3: search_corpus_row_mismatch:${l3.counts.searchCorpusRows ?? 0}:${knowledge.searchCorpusRows ?? 0}`);
   }
   const failures = [...l1.failures, ...knowledge.failures, ...constraint.failures, ...l3.failures, ...l3SearchCorpusFailures, ...dirty.failures];
-  return { abrainHome, l1, knowledge, constraint, l3, dirty, failures };
+  return { abrainHome, l1, knowledge, constraint, l3, coverage, dirty, failures };
 }
 
 function printResult(result) {
   console.log(`abrainHome: ${result.abrainHome}`);
   console.log(`l1_events: ${result.l1.files}`);
+  console.log(`b0_legacy_knowledge_entries: ${result.coverage.total}`);
+  console.log(`b0_covered_by_l1_event: ${result.coverage.covered}`);
+  console.log(`b0_coverage_ratio: ${result.coverage.ratio.toFixed(4)}`);
+  console.log(`b0_legacy_import_backfill_needed: ${result.coverage.backfillNeeded}`);
+  if (result.coverage.missing > 0) {
+    console.log(`b0_missing_sample: ${result.coverage.missingSample.map((m) => m.identity).join(", ")}`);
+  }
   console.log(`l3_event_edges: ${result.l3.counts?.eventEdges ?? 0}`);
   console.log(`knowledge_projected_files: ${result.knowledge.projectedFiles}`);
   console.log(`knowledge_search_corpus_rows: ${result.knowledge.searchCorpusRows ?? 0}`);
@@ -624,4 +685,20 @@ if (process.versions.sqlite) {
   }
   console.log("PASS — L3 event_edges is rebuildable from L1 and validates causal integrity.");
 }
+
+// B0 coverage gate: legacy entry with a matching L1 event counts as covered;
+// one without is missing and flags legacy_import backfill necessity.
+const covFixture = await buildFixtureTree();
+writeFile(path.join(covFixture.abrainHome, "projects", "pi-global", "knowledge", "adr0039-reconcile-fixture.md"), "---\nid: project:pi-global:adr0039-reconcile-fixture\nscope: project\n---\ncovered\n");
+writeFile(path.join(covFixture.abrainHome, "projects", "pi-global", "knowledge", "uncovered-legacy-entry.md"), "---\nid: project:pi-global:uncovered-legacy-entry\nscope: project\n---\nmissing\n");
+const cov = computeLegacyKnowledgeCoverage(covFixture.abrainHome);
+if (cov.total !== 2 || cov.covered !== 1 || Math.abs(cov.ratio - 0.5) > 1e-9 || cov.backfillNeeded !== true) {
+  console.log(`FAIL — B0 coverage gate miscomputed: ${JSON.stringify(cov)}`);
+  process.exit(1);
+}
+if (!cov.missingSample.some((m) => m.identity === "project:pi-global:uncovered-legacy-entry")) {
+  console.log(`FAIL — B0 coverage gate missing sample wrong: ${JSON.stringify(cov.missingSample)}`);
+  process.exit(1);
+}
+console.log("PASS — B0 legacy coverage gate computes covered/missing and backfill necessity.");
 process.exit(0);
