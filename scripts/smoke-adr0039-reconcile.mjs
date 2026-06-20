@@ -897,4 +897,41 @@ console.log("PASS — B1 Knowledge L2 migrates to git-trackable l2/ namespace (f
   if (verify.ok !== true) { console.log(`FAIL — B3 imported event fails strict verify: ${JSON.stringify(verify)}`); process.exit(1); }
   console.log("PASS — B3 legacy_import backfill reaches 1.0 coverage, append-only, idempotent, strict-verifiable.");
 }
+
+// B4: pre-push hardblock rejects a dirty derived L2 view; PI_SKIP_L2_CHECK=1
+// overrides with an auditable diagnostic (not a .state no-op — l2/ is tracked).
+{
+  const b4 = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-b4-"));
+  execFileSync("git", ["-C", b4, "init"], { encoding: "utf8" });
+  execFileSync("git", ["-C", b4, "config", "user.email", "adr0039@example.invalid"], { encoding: "utf8" });
+  execFileSync("git", ["-C", b4, "config", "user.name", "ADR0039"], { encoding: "utf8" });
+  writeFile(path.join(b4, "README"), "baseline\n");
+  execFileSync("git", ["-C", b4, "add", "."], { encoding: "utf8" });
+  execFileSync("git", ["-C", b4, "commit", "-m", "baseline"], { encoding: "utf8" });
+  // uncommitted (hand-edited) derived L2 view => dirty_derived_view
+  writeFile(path.join(b4, "l2", "views", "knowledge", "_dirty.txt"), "hand edit\n");
+  const prepush = path.join(repoRoot, "scripts", "pre-push-adr0039-reconcile.mjs");
+  const runPrepush = (env) => {
+    try {
+      execFileSync(process.execPath, [prepush, "--abrain", b4], { encoding: "utf8", env: { ...process.env, ...env }, stdio: "pipe" });
+      return 0;
+    } catch (err) {
+      return typeof err.status === "number" ? err.status : 1;
+    }
+  };
+  if (runPrepush({ PI_SKIP_L2_CHECK: "" }) === 0) {
+    console.log("FAIL — B4 pre-push did not block a dirty derived L2 view");
+    process.exit(1);
+  }
+  if (runPrepush({ PI_SKIP_L2_CHECK: "1" }) !== 0) {
+    console.log("FAIL — B4 PI_SKIP_L2_CHECK=1 did not override the block");
+    process.exit(1);
+  }
+  const overrideLog = path.join(b4, ".state", "sediment", "adr0039-l3", "prepush-overrides.jsonl");
+  if (!fs.existsSync(overrideLog) || !fs.readFileSync(overrideLog, "utf8").includes("PI_SKIP_L2_CHECK=1")) {
+    console.log("FAIL — B4 override did not record an auditable diagnostic");
+    process.exit(1);
+  }
+  console.log("PASS — B4 pre-push hardblock rejects dirty L2; PI_SKIP_L2_CHECK=1 overrides with audit.");
+}
 process.exit(0);
