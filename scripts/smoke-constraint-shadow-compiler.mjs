@@ -164,6 +164,7 @@ function writeConstraintEvidenceEvent(abrainHome, bodyOverrides = {}) {
     producer: bodyOverrides.producer ?? { name: "sediment.constraint-event-writer", version: "fixture" },
     legacy_parallel_write: bodyOverrides.legacy_parallel_write,
     llm_extraction: bodyOverrides.llm_extraction,
+    replay_provenance: bodyOverrides.replay_provenance,
     diagnostics: bodyOverrides.diagnostics,
     privacy: bodyOverrides.privacy,
   });
@@ -527,10 +528,42 @@ check("event scanner reads valid L1 events and maps event diagnostics", async ()
     payload: { sanitized_quote: "model id belongs in settings", not_memory_hint: "settings", candidate_priority_hint: "unknown" },
     legacy_parallel_write: { attempted: true, legacy_path_kind: "tier1_ruleset_adjudicator", legacy_operation_hint: "none", legacy_audit_ref: "audit:b" },
   });
+  const replay = writeConstraintEvidenceEvent(abrainHome, {
+    created_at_utc: "2026-06-19T00:02:00.000Z",
+    session_id: "session-c",
+    turn_id: "turn-c",
+    source: { channel: "replay", source_role: "system", source_ref: "audit:row-1", quote_hash: sha256Hex("replay quote") },
+    replay_provenance: {
+      source: "historical_audit_backfill",
+      audit_jsonl_path: "/tmp/audit.jsonl",
+      audit_jsonl_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      audit_row_index: 1,
+      audit_row_timestamp: "2026-06-19T00:02:00.000Z",
+      audit_row_operation: "create",
+      replay_run_id: "replay-smoke",
+      replay_harness_version: "smoke/v1",
+      mapping_table_version: "constraint-audit-replay-mapping/v1",
+      mapping_table_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      approximation: "smoke replay provenance",
+    },
+    legacy_parallel_write: { attempted: true, legacy_path_kind: "tier1_ruleset_adjudicator", legacy_operation_hint: "create", legacy_audit_ref: "audit:c" },
+  });
   const scan = await scanConstraintEvidenceEvents({ abrainHome });
-  assert(scan.events.length === 2, `expected 2 events, got ${scan.events.length}`);
+  assert(scan.events.length === 3, `expected 3 events, got ${scan.events.length}`);
   assert(scan.invalidEventIds.length === 0, "valid events marked invalid");
   assert(scan.events.some((event) => event.eventId === signal.event_id && event.sourceId === `event:${signal.event_id}`), "signal event missing");
+  const replaySource = scan.events.find((event) => event.eventId === replay.event_id);
+  assert(replaySource?.replayProvenance?.source === "historical_audit_backfill", "replay provenance missing");
+  assert(replaySource?.replayProvenance?.auditJsonlPath === "/tmp/audit.jsonl", "replay audit path missing");
+  assert(replaySource?.replayProvenance?.auditJsonlSha256 === "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "replay audit hash missing");
+  assert(replaySource?.replayProvenance?.auditRowIndex === 1, "replay audit row index missing");
+  assert(replaySource?.replayProvenance?.auditRowTimestamp === "2026-06-19T00:02:00.000Z", "replay audit timestamp missing");
+  assert(replaySource?.replayProvenance?.auditRowOperation === "create", "replay audit operation missing");
+  assert(replaySource?.replayProvenance?.replayRunId === "replay-smoke", "replay run id missing");
+  assert(replaySource?.replayProvenance?.replayHarnessVersion === "smoke/v1", "replay harness version missing");
+  assert(replaySource?.replayProvenance?.mappingTableVersion === "constraint-audit-replay-mapping/v1", "replay mapping version missing");
+  assert(replaySource?.replayProvenance?.mappingTableSha256 === "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "replay mapping hash missing");
+  assert(replaySource?.replayProvenance?.approximation === "smoke replay provenance", "replay approximation missing");
   assert(scan.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(`event:${notMemory.event_id}`)), "not-memory diagnostic missing");
 });
 
@@ -569,6 +602,7 @@ check("event coverage reports queued stale projected and legacy delta", () => {
     ...projectedEvent,
     sourceId: "event:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     eventId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    sourceChannel: "manual",
     bodyHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     createdAtUtc: "2026-06-18T00:00:00.000Z",
     legacyParallelWrite: { attempted: true, legacy_operation_hint: "none" },
@@ -579,10 +613,24 @@ check("event coverage reports queued stale projected and legacy delta", () => {
     ...projectedEvent,
     sourceId: "event:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     eventId: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    sourceChannel: "replay",
     bodyHash: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     operationHint: "not_memory",
     notMemoryHint: "settings",
     createdAtUtc: "2026-06-19T00:00:00.000Z",
+    replayProvenance: {
+      source: "historical_audit_backfill",
+      auditJsonlPath: "/tmp/audit.jsonl",
+      auditJsonlSha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      auditRowIndex: 2,
+      auditRowTimestamp: "2026-06-19T00:00:00.000Z",
+      auditRowOperation: "create",
+      replayRunId: "replay-smoke",
+      replayHarnessVersion: "smoke/v1",
+      mappingTableVersion: "constraint-audit-replay-mapping/v1",
+      mappingTableSha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      approximation: "smoke replay provenance",
+    },
     legacyParallelWrite: { attempted: true, legacy_operation_hint: "create" },
     rawFilePath: "/tmp/event-c.json",
     sourceRef: { ref: "event:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", path: "/tmp/event-c.json" },
@@ -612,6 +660,10 @@ check("event coverage reports queued stale projected and legacy delta", () => {
   assert(coverage.report.summary.totalEvents === 3, "wrong event coverage total");
   assert(coverage.report.summary.projectedEvents === 2, "projected event not counted");
   assert(coverage.report.summary.staleEvents === 1, "stale queued event not counted");
+  assert(coverage.report.summary.provenance.liveEvents === 1, "live provenance count missing");
+  assert(coverage.report.summary.provenance.manualEvents === 1, "manual provenance count missing");
+  assert(coverage.report.summary.provenance.replayBackfillEvents === 1, "replay provenance count missing");
+  assert(coverage.report.rows.some((row) => row.provenance?.source === "historical_audit_backfill" && row.sourceChannel === "replay"), "replay row provenance missing");
   assert(coverage.diagnostics.some((diagnostic) => diagnostic.code === "SC_EVENT_STALE_THRESHOLD"), "stale diagnostic missing");
   const delta = createConstraintLegacyParallelDeltaReport({ events: eventSources, decision: eventDecision });
   assert(delta.report.summary.totalEventsWithLegacyWrite === 3, "wrong legacy delta total");
@@ -626,6 +678,7 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.promptHash === again.promptHash, "prompt hash drifted");
   assert(prompt.text.includes("shadow-only"), "shadow-only instruction missing");
   assert(prompt.text.includes("Return JSON only"), "JSON-only instruction missing");
+  assert(prompt.text.includes("Never include mutation-key fields"), "mutation-key instruction missing");
   assert(prompt.text.includes(globalSource.sourceId), "source id missing from prompt");
 });
 

@@ -62,8 +62,17 @@ export function createConstraintEventCoverageReport(input: {
     nowMs: input.nowMs,
   }).sort((left, right) => left.eventId.localeCompare(right.eventId));
   const summary = summarizeConstraintEventProjectionStatus(records, { nowMs: input.nowMs });
+  const eventById = new Map(input.events.map((event) => [event.eventId, event]));
+  const provenanceSummary = input.events.reduce((acc, event) => {
+    if (event.replayProvenance?.source === "historical_audit_backfill") acc.replayBackfillEvents += 1;
+    else if (event.sourceChannel === "agent_end") acc.liveEvents += 1;
+    else if (event.sourceChannel === "manual") acc.manualEvents += 1;
+    else acc.unknownEvents += 1;
+    return acc;
+  }, { liveEvents: 0, replayBackfillEvents: 0, manualEvents: 0, unknownEvents: invalidEventIds.size });
   const rows = records.map((record) => {
     const sourceRecordId = `event:${record.eventId}`;
+    const event = eventById.get(record.eventId);
     return {
       eventId: record.eventId,
       sourceRecordId,
@@ -72,6 +81,8 @@ export function createConstraintEventCoverageReport(input: {
       observedAtUtc: record.observedAtUtc,
       projectedAtUtc: record.projectedAtUtc,
       diagnostics: diagnosticCodesForSource(input.diagnostics, sourceRecordId),
+      ...(event?.replayProvenance ? { provenance: event.replayProvenance } : {}),
+      ...(event?.sourceChannel ? { sourceChannel: event.sourceChannel } : {}),
     };
   });
   const diagnostics: ConstraintShadowDiagnostic[] = [];
@@ -106,6 +117,7 @@ export function createConstraintEventCoverageReport(input: {
         appendFailedEvents: summary.appendFailed,
         ...(summary.oldestQueuedAgeMs === undefined ? {} : { oldestQueuedAgeMs: summary.oldestQueuedAgeMs }),
         coverageRatio: summary.total === 0 ? 1 : summary.projected / summary.total,
+        provenance: provenanceSummary,
       },
       rows,
     },

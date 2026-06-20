@@ -198,6 +198,7 @@ function normalizeConstraintEvent(record: ConstraintEventSourceRecord): Normaliz
     causalParents: record.causalParents.slice().sort(),
     producerName: record.producerName,
     producerVersion: record.producerVersion,
+    replayProvenance: record.replayProvenance,
     bodyHash: record.bodyHash,
     sourceRef: record.sourceRef,
   };

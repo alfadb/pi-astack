@@ -106,6 +106,24 @@ export interface ConstraintEvidenceLlmExtraction {
   acceptance: "accepted_for_event_append" | "diagnostic_only";
 }
 
+export interface ConstraintEvidenceReplayProvenance {
+  source: "historical_audit_backfill";
+  audit_jsonl_path: string;
+  audit_jsonl_sha256: string;
+  audit_row_index: number;
+  audit_row_timestamp: string;
+  audit_row_operation: string;
+  audit_row_session_id?: string;
+  audit_row_correlation_id?: string;
+  audit_row_candidate_id?: string;
+  audit_row_git_commit?: string;
+  replay_run_id: string;
+  replay_harness_version: string;
+  mapping_table_version: string;
+  mapping_table_sha256: string;
+  approximation: string;
+}
+
 export interface ConstraintEvidencePrivacy {
   contains_user_quote: boolean;
   redaction_level: "none" | "partial" | "heavy";
@@ -131,6 +149,7 @@ export interface ConstraintEvidenceEventBodyV1 {
   producer: ConstraintEvidenceProducer;
   legacy_parallel_write?: ConstraintEvidenceLegacyParallelWrite;
   llm_extraction?: ConstraintEvidenceLlmExtraction;
+  replay_provenance?: ConstraintEvidenceReplayProvenance;
   diagnostics?: ConstraintEvidenceDiagnostic[];
   privacy?: ConstraintEvidencePrivacy;
 }

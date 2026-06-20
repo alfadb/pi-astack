@@ -41,6 +41,7 @@ export function buildConstraintCompilerPrompt(input: ConstraintCompilerPromptInp
     "You are ADR 0039 Constraint Shadow Compiler PR3.",
     "This is a shadow-only analysis task. Do not propose or describe writes to canonical rules, memory entries, settings, runtime hooks, or session injection.",
     "Return JSON only. Do not wrap the response in markdown fences. Do not invent sourceRecordIds or projectIds.",
+    "Never include mutation-key fields anywhere in the output object, including diagnostics.data: canonicalPath, canonical_path, targetPath, target_path, writePath, write_path, archiveSlugs, archive_slugs, deleteSlug, delete_slug, mutation, operation.",
     "Every item that references records must use sourceRecordIds as an array of exact sourceId strings from the input payload. Never use sourceId, sources, refs, sourceIds, or a single string.",
     "For every compiled constraint, injectMode must exactly match every referenced legacy rule record. Never combine always and listed records in one compiled constraint.",
     "For every compiled constraint, scope must exactly match every referenced legacy rule record unless a matching rescopeProposals item is present for that source.",

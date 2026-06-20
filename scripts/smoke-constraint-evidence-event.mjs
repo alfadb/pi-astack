@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Smoke test: ADR 0039 P2 Constraint Evidence Event PR2/PR3/PR4.
+ * Smoke test: ADR 0039 P2/P3b Constraint Evidence Event PR2/PR3/PR4/Phase 1.5.
  *
  * Offline only: pure functions + fixture events. No runtime hook, no real abrain
  * writes, and no canonical memory mutation. PR3/PR4 checks use temporary trees.
@@ -75,6 +75,7 @@ for (const file of [
   "extensions/sediment/constraint-evidence/append.ts",
   "extensions/sediment/constraint-evidence/status.ts",
   "extensions/sediment/constraint-evidence/integration.ts",
+  "extensions/sediment/constraint-evidence/audit-replay.ts",
 ]) {
   stageTs(outRoot, file);
 }
@@ -112,6 +113,11 @@ const {
   appendTier1ConstraintEvidenceEvent,
   buildTier1ConstraintEvidenceEventBody,
 } = require(path.join(outRoot, "sediment", "constraint-evidence", "integration.js"));
+const {
+  buildConstraintEvidenceEventBodyFromAuditRow,
+  constraintAuditReplayMappingRulesHash,
+  CONSTRAINT_AUDIT_REPLAY_MAPPING_VERSION,
+} = require(path.join(outRoot, "sediment", "constraint-evidence", "audit-replay.js"));
 
 function listFiles(root) {
   if (!fs.existsSync(root)) return [];
@@ -523,7 +529,46 @@ check("runtime integration appends L1 event and state audit idempotently", async
 check("manual dossier is registered as dossier script, not smoke", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   assert(pkg.scripts["dossier:constraint-evidence-event"] === "node scripts/dossier-constraint-evidence-event.mjs", "missing dossier registration");
+  assert(pkg.scripts["dossier:constraint-audit-replay"] === "node scripts/dossier-constraint-audit-replay.mjs", "missing audit replay dossier registration");
   assert(!Object.entries(pkg.scripts).some(([name, command]) => name.startsWith("smoke:") && String(command).includes("dossier-constraint-evidence-event")), "dossier registered under smoke");
+  assert(!Object.entries(pkg.scripts).some(([name, command]) => name.startsWith("smoke:") && String(command).includes("dossier-constraint-audit-replay")), "audit replay dossier registered under smoke");
+});
+
+check("audit replay mapper emits explicit historical provenance", () => {
+  const auditJsonlSha256 = sha256Hex("fixture audit jsonl");
+  const mappingTableSha256 = constraintAuditReplayMappingRulesHash();
+  const mapped = buildConstraintEvidenceEventBodyFromAuditRow({
+    row: {
+      rowIndex: 7,
+      timestamp: "2026-06-19T12:00:00.000Z",
+      lane: "rules",
+      operation: "create",
+      scope: "global",
+      inject_mode: "always",
+      slug: "use-edit-write",
+      sessionId: "session-a",
+      turnId: "turn-a",
+      correlationId: "correlation-a",
+    },
+    auditJsonlPath: "/tmp/audit.jsonl",
+    auditJsonlSha256,
+    replayRunId: "replay-smoke",
+    replayHarnessVersion: "smoke-harness/v1",
+    mappingTableSha256,
+    activeProjectId: "pi-global",
+    deviceId: "smoke-device",
+    sourceText: "Use edit/write for file changes.",
+  });
+  assert(mapped.ok, "replay mapper rejected supported row");
+  assert(mapped.body.source.channel === "replay", "replay source channel missing");
+  assert(mapped.body.replay_provenance.source === "historical_audit_backfill", "historical provenance missing");
+  assert(mapped.body.replay_provenance.mapping_table_version === CONSTRAINT_AUDIT_REPLAY_MAPPING_VERSION, "mapping version missing");
+  assert(mapped.body.replay_provenance.mapping_table_sha256 === mappingTableSha256, "mapping hash missing");
+  assert(mapped.body.replay_provenance.audit_row_index === 7, "audit row index missing");
+  assert(mapped.body.legacy_parallel_write.attempted === true, "legacy create marker missing");
+  const envelope = createConstraintEvidenceEnvelope(mapped.body);
+  const parsed = validateConstraintEvidenceEnvelope(envelope);
+  assert(parsed.ok, parsed.diagnostics.map((diagnostic) => diagnostic.message).join("; "));
 });
 
 check("manual dossier default uses temporary abrain and cleans it", () => {

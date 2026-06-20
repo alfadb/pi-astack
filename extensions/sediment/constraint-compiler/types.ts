@@ -122,6 +122,23 @@ export interface ConstraintEventSourceRecord {
   causalParents: string[];
   producerName: string;
   producerVersion: string;
+  replayProvenance?: {
+    source: "historical_audit_backfill";
+    auditJsonlPath: string;
+    auditJsonlSha256: string;
+    auditRowIndex: number;
+    auditRowTimestamp: string;
+    auditRowOperation: string;
+    auditRowSessionId?: string;
+    auditRowCorrelationId?: string;
+    auditRowCandidateId?: string;
+    auditRowGitCommit?: string;
+    replayRunId: string;
+    replayHarnessVersion: string;
+    mappingTableVersion: string;
+    mappingTableSha256: string;
+    approximation: string;
+  };
   bodyHash: string;
   rawFilePath: string;
   sourceRef: SourceRef;
@@ -327,6 +344,12 @@ export interface ConstraintEventCoverageReport {
     appendFailedEvents: number;
     oldestQueuedAgeMs?: number;
     coverageRatio: number;
+    provenance: {
+      liveEvents: number;
+      replayBackfillEvents: number;
+      manualEvents: number;
+      unknownEvents: number;
+    };
   };
   rows: Array<{
     eventId: string;
@@ -336,6 +359,8 @@ export interface ConstraintEventCoverageReport {
     observedAtUtc?: string;
     projectedAtUtc?: string;
     diagnostics: string[];
+    provenance?: ConstraintEventSourceRecord["replayProvenance"];
+    sourceChannel?: string;
   }>;
 }
 
