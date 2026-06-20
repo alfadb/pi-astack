@@ -456,6 +456,31 @@
               "enum": ["single", "topo"],
               "default": "single",
               "description": "ADR 0039 B2. How a Knowledge L2 entry is projected. 'single' (default) lets one triggering event overwrite one markdown file. 'topo' aggregates all events for a (scope, slug) identity, topologically sorts the causal-parent DAG, and deterministically folds them to one entry; a single event degenerates byte-identically to 'single'. Explicit rollback flag."
+            },
+            "hotOverlay": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "ADR 0039 B-prep blocker3 (section 6 bounded hot overlay). Defensive caps on the projection OVERLAY reader. The freshest entries within the shared count+token budget are kept; overflow is recorded to .state/sediment/knowledge-projection/overlay-budget.jsonl. Bounds the overlay role only; the post-flip stable view is a separate unbounded primary store.",
+              "properties": {
+                "maxEntries": {
+                  "type": "number",
+                  "default": 500,
+                  "minimum": 1,
+                  "description": "Max overlay entries (count cap). Freshest-by-mtime kept on overflow."
+                },
+                "maxTokens": {
+                  "type": "number",
+                  "default": 2000000,
+                  "minimum": 1000,
+                  "description": "Max overlay tokens, estimated as stat-size/4 (no file read)."
+                },
+                "deadlineMs": {
+                  "type": "number",
+                  "default": 30000,
+                  "minimum": 1000,
+                  "description": "Wall-clock budget for the overlay enumeration in milliseconds."
+                }
+              }
             }
           }
         },

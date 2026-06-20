@@ -99,6 +99,21 @@ export interface SedimentSettings {
      *  DAG topological sort, deterministic fold to one entry; single-event
      *  degenerates byte-identically to "single". Explicit rollback flag. */
     projectionMode: "single" | "topo";
+    /** ADR 0039 B-prep blocker③ (§6 bounded hot overlay): defensive caps on the
+     *  knowledge projection OVERLAY reader (readKnowledgeProjectionStores). The
+     *  overlay role must never grow unbounded (async projector backlog, runaway
+     *  projection dir). When the projection dir exceeds a cap, the reader keeps
+     *  only the freshest entries within budget and records an overflow
+     *  diagnostic. This bounds the OVERLAY role only; the post-flip stable-view
+     *  (full corpus as a primary canonical store) is a separate unbounded path. */
+    hotOverlay: {
+      /** Max overlay entries (count cap). Freshest-by-mtime kept on overflow. */
+      maxEntries: number;
+      /** Max overlay tokens (estimated bytes/4 from stat size; no file read). */
+      maxTokens: number;
+      /** Wall-clock budget for the overlay enumeration (ms). */
+      deadlineMs: number;
+    };
   };
   /** ADR 0025 §4.3 Phase C.2: model for the aggregator v1 skeptical-historian
    *  LLM pass. Skeptical historian is a reasoning-heavy task; v4-pro is the
@@ -270,6 +285,11 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     maxReadBytes: 1_000_000,
     l2OutputRoot: "state",
     projectionMode: "single",
+    hotOverlay: {
+      maxEntries: 500,
+      maxTokens: 2_000_000,
+      deadlineMs: 30_000,
+    },
   },
   // Aggregator: empty default. Configure in pi-astack-settings.json.
   aggregatorModel: "",
@@ -453,6 +473,11 @@ export function resolveSedimentSettings(): SedimentSettings {
       maxReadBytes: Math.max(1_000, Math.floor(asNumber((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.maxReadBytes, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.maxReadBytes))),
       l2OutputRoot: ((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.l2OutputRoot === "repo" ? "repo" : "state"),
       projectionMode: ((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.projectionMode === "topo" ? "topo" : "single"),
+      hotOverlay: {
+        maxEntries: Math.max(1, Math.floor(asNumber(((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.hotOverlay as Record<string, unknown> | undefined)?.maxEntries, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.hotOverlay.maxEntries))),
+        maxTokens: Math.max(1_000, Math.floor(asNumber(((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.hotOverlay as Record<string, unknown> | undefined)?.maxTokens, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.hotOverlay.maxTokens))),
+        deadlineMs: Math.max(1_000, Math.floor(asNumber(((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.hotOverlay as Record<string, unknown> | undefined)?.deadlineMs, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.hotOverlay.deadlineMs))),
+      },
     },
     aggregatorModel: typeof cfg.aggregatorModel === "string" && cfg.aggregatorModel.trim()
       ? cfg.aggregatorModel.trim()

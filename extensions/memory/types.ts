@@ -8,6 +8,11 @@ export interface StoreRef {
   scope: Scope;
   root: string;
   label: string;
+  /** ADR 0039 B-prep blocker③: optional bounded file allow-list. When set,
+   *  scanStore reads ONLY these files instead of walking `root`. Used by the
+   *  knowledge projection OVERLAY reader to enforce count/token/time caps
+   *  (freshest-within-budget); all other stores leave it undefined (full walk). */
+  files?: string[];
 }
 
 export interface MemoryEntry {

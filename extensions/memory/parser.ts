@@ -761,6 +761,19 @@ export async function scanStore(
   signal?: AbortSignal,
 ): Promise<MemoryEntry[]> {
   throwIfAborted(signal);
+  // ADR 0039 B-prep blocker③: a store may carry a pre-bounded file allow-list
+  // (knowledge projection OVERLAY reader enforcing count/token/time caps). When
+  // present, read ONLY those files — do NOT walk the dir — so the overlay budget
+  // is authoritative. All other stores leave `files` undefined and walk fully.
+  if (store.files) {
+    const entries: MemoryEntry[] = [];
+    for (const file of store.files.slice(0, settings.maxEntries)) {
+      throwIfAborted(signal);
+      const entry = await parseEntry(path.resolve(file), store, cwd);
+      if (entry) entries.push(entry);
+    }
+    return entries;
+  }
   // P1-A audit fix 2026-05-16 (round 3): only project store opts into
   // staging exclusion. World store doesn't need it (staging lives under
   // projects/ which is already in WORLD_EXTRA_IGNORE_DIRS).

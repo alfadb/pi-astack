@@ -608,17 +608,107 @@ export async function appendKnowledgeEvidenceForWrite(args: AppendKnowledgeEvide
   return { body, append, ...(projection ? { projection } : {}) };
 }
 
-export async function readKnowledgeProjectionStores(args: { abrainHome: string; projectId?: string; settings: SedimentSettings }): Promise<Array<{ scope: KnowledgeEvidenceScope; root: string; label: string }>> {
+/** Recursively list *.md projection files under root with mtime+size (stat),
+ *  honoring a wall-clock deadline. Returns [] if root missing. manifest.json is
+ *  excluded (it is not an entry). */
+async function statProjectionFiles(
+  root: string,
+  scope: KnowledgeEvidenceScope,
+  label: string,
+  deadlineAt: number,
+): Promise<{ files: Array<{ file: string; scope: KnowledgeEvidenceScope; label: string; mtimeMs: number; size: number }>; deadlineHit: boolean }> {
+  const out: Array<{ file: string; scope: KnowledgeEvidenceScope; label: string; mtimeMs: number; size: number }> = [];
+  let deadlineHit = false;
+  async function walk(dir: string): Promise<void> {
+    if (Date.now() >= deadlineAt) { deadlineHit = true; return; }
+    let ents: Array<{ name: string; isDir: boolean; isFile: boolean }>;
+    try {
+      ents = (await fs.readdir(dir, { withFileTypes: true })).map((e) => ({ name: e.name, isDir: e.isDirectory(), isFile: e.isFile() }));
+    } catch { return; }
+    for (const e of ents) {
+      if (Date.now() >= deadlineAt) { deadlineHit = true; return; }
+      const full = path.join(dir, e.name);
+      if (e.isDir) { await walk(full); if (deadlineHit) return; continue; }
+      if (!e.isFile || !e.name.endsWith(".md")) continue;
+      const st = await fs.stat(full).catch(() => null);
+      if (!st) continue;
+      out.push({ file: full, scope, label, mtimeMs: st.mtimeMs, size: st.size });
+    }
+  }
+  const rootStat = await fs.stat(root).catch(() => null);
+  if (rootStat?.isDirectory()) await walk(root);
+  return { files: out, deadlineHit };
+}
+
+export async function readKnowledgeProjectionStores(args: { abrainHome: string; projectId?: string; settings: SedimentSettings }): Promise<Array<{ scope: KnowledgeEvidenceScope; root: string; label: string; files?: string[] }>> {
   if (!args.settings.knowledgeProjector.enabled || !args.settings.knowledgeProjector.hotOverlayEnabled) return [];
   const latest = path.join(stateRoot(args.abrainHome, args.settings), "latest");
-  const stores: Array<{ scope: KnowledgeEvidenceScope; root: string; label: string }> = [];
-  if (args.projectId) {
-    const projectRoot = path.join(latest, "projects", args.projectId);
-    const stat = await fs.stat(projectRoot).catch(() => null);
-    if (stat?.isDirectory()) stores.push({ scope: "project", root: projectRoot, label: "knowledge-projection-project" });
+  // Defensive defaults: direct callers / older configs may omit hotOverlay.
+  const ho = (args.settings.knowledgeProjector as { hotOverlay?: { maxEntries?: number; maxTokens?: number; deadlineMs?: number } }).hotOverlay;
+  const budget = {
+    maxEntries: Math.max(1, Math.floor(ho?.maxEntries ?? 500)),
+    maxTokens: Math.max(1_000, Math.floor(ho?.maxTokens ?? 2_000_000)),
+    deadlineMs: Math.max(1_000, Math.floor(ho?.deadlineMs ?? 30_000)),
+  };
+  const deadlineAt = Date.now() + budget.deadlineMs;
+
+  // ADR 0039 B-prep blocker③ (§6 bounded hot overlay): enumerate candidate
+  // projection files across both scope roots, then keep only the FRESHEST set
+  // within a SHARED count + token budget under a wall-clock deadline. token ≈
+  // size/4 (estimated from stat, no file read). The OVERLAY role must never grow
+  // unbounded; the post-flip stable view is a separate primary store, not this.
+  const roots: Array<{ scope: KnowledgeEvidenceScope; root: string; label: string }> = [];
+  if (args.projectId) roots.push({ scope: "project", root: path.join(latest, "projects", args.projectId), label: "knowledge-projection-project" });
+  roots.push({ scope: "world", root: path.join(latest, "world"), label: "knowledge-projection-world" });
+
+  const candidates: Array<{ file: string; scope: KnowledgeEvidenceScope; label: string; root: string; mtimeMs: number; size: number }> = [];
+  let deadlineHit = false;
+  for (const r of roots) {
+    const res = await statProjectionFiles(r.root, r.scope, r.label, deadlineAt);
+    deadlineHit = deadlineHit || res.deadlineHit;
+    for (const f of res.files) candidates.push({ ...f, root: r.root });
   }
-  const worldRoot = path.join(latest, "world");
-  const worldStat = await fs.stat(worldRoot).catch(() => null);
-  if (worldStat?.isDirectory()) stores.push({ scope: "world", root: worldRoot, label: "knowledge-projection-world" });
-  return stores;
+
+  // Freshest-first within shared budget.
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const tokenOf = (size: number): number => Math.ceil(size / 4);
+  const selected: typeof candidates = [];
+  let tokens = 0;
+  for (const c of candidates) {
+    if (selected.length >= budget.maxEntries) break;
+    const t = tokenOf(c.size);
+    if (tokens + t > budget.maxTokens && selected.length > 0) break;
+    selected.push(c);
+    tokens += t;
+  }
+  const truncated = selected.length < candidates.length;
+
+  if (truncated || deadlineHit) {
+    // Auditable overflow diagnostic (non-fatal; overlay is bounded not dropped).
+    try {
+      const diagPath = path.join(stateRoot(args.abrainHome, args.settings), "overlay-budget.jsonl");
+      await fs.mkdir(path.dirname(diagPath), { recursive: true });
+      await fs.appendFile(diagPath, `${JSON.stringify({
+        ts: new Date().toISOString(),
+        event: "hot_overlay_budget_exceeded",
+        candidates: candidates.length,
+        selected: selected.length,
+        selected_tokens: tokens,
+        max_entries: budget.maxEntries,
+        max_tokens: budget.maxTokens,
+        deadline_ms: budget.deadlineMs,
+        truncated,
+        deadline_hit: deadlineHit,
+      })}\n`, "utf-8");
+    } catch { /* diagnostic is best-effort */ }
+  }
+
+  // Group selected files back per scope root, returning bounded stores.
+  const byRoot = new Map<string, { scope: KnowledgeEvidenceScope; root: string; label: string; files: string[] }>();
+  for (const c of selected) {
+    let g = byRoot.get(c.root);
+    if (!g) { g = { scope: c.scope, root: c.root, label: c.label, files: [] }; byRoot.set(c.root, g); }
+    g.files.push(c.file);
+  }
+  return [...byRoot.values()];
 }

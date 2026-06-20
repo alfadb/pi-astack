@@ -1462,6 +1462,49 @@ Original Pensieve seed content.
       assert(headFiles.some((f) => f.includes(`projects/${l1l2Target.projectId}/`) && f.endsWith(".md")), `HEAD commit must include canonical entry: ${JSON.stringify(headFiles)}`);
     }
 
+    // ADR 0039 B-prep blocker③: hot overlay bounded budget. readKnowledgeProjectionStores
+    // must keep only the freshest entries within count/token caps and record an overflow
+    // diagnostic — never return the whole projection dir unbounded.
+    {
+      const ovTarget = setupAbrainTarget("overlay-budget");
+      const ovStateRoot = path.join(ovTarget.abrainHome, ".state", "sediment", "knowledge-projection");
+      const ovWorld = path.join(ovStateRoot, "latest", "world");
+      fs.mkdirSync(ovWorld, { recursive: true });
+      const mk = (n, bytes) => {
+        const f = path.join(ovWorld, `entry-${n}.md`);
+        fs.writeFileSync(f, `---\nid: entry-${n}\nkind: fact\nstatus: active\n---\n\n${"x".repeat(bytes)}\n`);
+        const t = new Date(Date.now() - (10 - n) * 60_000); // larger n = newer mtime
+        fs.utimesSync(f, t, t);
+        return f;
+      };
+      for (let n = 0; n < 5; n++) mk(n, 100);
+      const base = (p) => path.basename(p);
+      const ovSettings = {
+        ...DEFAULT_SEDIMENT_SETTINGS,
+        knowledgeProjector: { enabled: true, hotOverlayEnabled: true, projectOnWrite: false, maxReadBytes: 1000000, l2OutputRoot: "state", projectionMode: "topo", hotOverlay: { maxEntries: 3, maxTokens: 2_000_000, deadlineMs: 30_000 } },
+      };
+      // count cap = 3 → keep the 3 freshest (entry-4/3/2), drop entry-1/0.
+      const ovStores = await readKnowledgeProjectionStores({ abrainHome: ovTarget.abrainHome, settings: ovSettings });
+      const ovFiles = ovStores.flatMap((s) => s.files || []);
+      assert(ovFiles.length === 3, `overlay count cap not enforced: got ${ovFiles.length} expected 3`);
+      const got = new Set(ovFiles.map(base));
+      for (const keep of ["entry-4.md", "entry-3.md", "entry-2.md"]) assert(got.has(keep), `overlay must keep freshest ${keep}: ${[...got].join(",")}`);
+      for (const drop of ["entry-1.md", "entry-0.md"]) assert(!got.has(drop), `overlay must drop stale ${drop}`);
+      const ovDiag = path.join(ovStateRoot, "overlay-budget.jsonl");
+      assert(fs.existsSync(ovDiag), "overlay-budget.jsonl diagnostic missing on overflow");
+      const ovLast = JSON.parse(fs.readFileSync(ovDiag, "utf-8").trim().split("\n").pop());
+      assert(ovLast.event === "hot_overlay_budget_exceeded" && ovLast.truncated === true && ovLast.candidates === 5 && ovLast.selected === 3, `overflow diagnostic wrong: ${JSON.stringify(ovLast)}`);
+      // token cap: rewrite entries large (≈2000 tokens each ≈ 8KB/4) and set a tight
+      // token budget so only the freshest single entry fits (first is unconditional).
+      for (let n = 0; n < 5; n++) mk(n, 8000);
+      const tokStores = await readKnowledgeProjectionStores({ abrainHome: ovTarget.abrainHome, settings: { ...ovSettings, knowledgeProjector: { ...ovSettings.knowledgeProjector, hotOverlay: { maxEntries: 500, maxTokens: 2500, deadlineMs: 30_000 } } } });
+      const tokFiles = tokStores.flatMap((s) => s.files || []);
+      assert(tokFiles.length === 1 && base(tokFiles[0]) === "entry-4.md", `token cap should admit only freshest single entry: ${tokFiles.map(base).join(",")}`);
+      // hotOverlayEnabled=false → no overlay stores at all.
+      const offStores = await readKnowledgeProjectionStores({ abrainHome: ovTarget.abrainHome, settings: { ...ovSettings, knowledgeProjector: { ...ovSettings.knowledgeProjector, hotOverlayEnabled: false } } });
+      assert(offStores.length === 0, "hotOverlayEnabled=false must return no stores");
+    }
+
     // Audit log remains project-local (forensic), even though entry markdown went to abrain.
     const auditRows = fs.readFileSync(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
     const correlatedAudit = auditRows.find((row) => row.operation === "create" && row.target === `project:${writerTarget2.projectId}:writer-correlation-fixture`);
