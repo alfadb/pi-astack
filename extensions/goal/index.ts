@@ -60,11 +60,19 @@ import {
   makeEvidenceRecord,
   parsePlanCriteria,
   replayGoalEvidenceEvents,
+  replayGoalEvidenceFlat,
   crossCheck,
   renderCriteriaHotzone,
   extractPlanSections,
+  summarizeLedgerForJudge,
+  renderEvidenceLog,
+  gcEvidence,
+  staleByTime,
+  findCachedVerified,
+  criterionTextSha,
   sha256short,
   type EvidenceKind,
+  type InputFingerprint,
 } from "./evidence";
 import { runEvidenceCmd, fileContentSha, resolveFileFacts } from "./exec";
 
@@ -127,12 +135,12 @@ function anchorTag(a: { session_id: string; turn_id: number; subturn?: number } 
  *  cross-check against replayed pi-goal-evidence events, render claimed|
  *  verified + per-criterion glyphs (G2/G6). Fail-safe: returns undefined on
  *  any error so before_agent_start degrades to the pointer-only block. */
-function buildLedgerHotzone(docPath: string, branch: unknown[], cwd: string): string | undefined {
+function buildLedgerHotzone(docPath: string, branch: unknown[], cwd: string, goalId?: string): string | undefined {
   try {
     const planText = fsSync.readFileSync(docPath, "utf-8");
     const { criteria, missingId } = parsePlanCriteria(planText);
     if (criteria.length === 0 && missingId.length === 0) return undefined;
-    const evidence = replayGoalEvidenceEvents(branch);
+    const evidence = replayGoalEvidenceEvents(branch, goalId ? { goalId } : undefined);
     const xc = crossCheck(criteria, evidence, { currentFileSha: (p) => fileContentSha(p, cwd) });
     const sections = extractPlanSections(planText);
     const parts: string[] = [];
@@ -145,6 +153,55 @@ function buildLedgerHotzone(docPath: string, branch: unknown[], cwd: string): st
       block += `\n⚠ ${missingId.length} 条验收缺 \`(id)\`，goal_check 无法定位——补成 \`- [ ] (some-id) ...\``;
     }
     return block;
+  } catch {
+    return undefined;
+  }
+}
+
+/** v2 judge-ev: build the cross-check ledger summary fed to the auto-continue
+ *  judge so it counts only system-verified criteria, never a bare `[x]`.
+ *  Scoped to the active goal_id (gc-archive). Fail-safe undefined. */
+function buildJudgeLedger(docPath: string, branch: unknown[], cwd: string, goalId?: string): string | undefined {
+  try {
+    const planText = fsSync.readFileSync(docPath, "utf-8");
+    const { criteria } = parsePlanCriteria(planText);
+    if (!criteria.length) return undefined;
+    const evidence = replayGoalEvidenceEvents(branch, goalId ? { goalId } : undefined);
+    const xc = crossCheck(criteria, evidence, { currentFileSha: (p) => fileContentSha(p, cwd) });
+    if (!xc.claimed && !xc.verified) return undefined;
+    return summarizeLedgerForJudge(xc);
+  } catch {
+    return undefined;
+  }
+}
+
+/** v2 status-viz: evidence-account block for goal_status — cross-check summary
+ *  + GC'd recent checks + stale-by-time inactivity hint. Scoped to the active
+ *  goal_id. Read-only, doc goals only. Fail-safe undefined. */
+function buildStatusEvidenceBlock(state: GoalState, branch: unknown[], cwd: string): string | undefined {
+  try {
+    const src = getGoalSource(state);
+    if (src.type !== "doc") return undefined;
+    const flat = replayGoalEvidenceFlat(branch, { goalId: state.goal_id });
+    if (!flat.length) return undefined;
+    const parts: string[] = [];
+    let planText: string | undefined;
+    try { planText = fsSync.readFileSync(src.doc_path, "utf-8"); } catch { planText = undefined; }
+    if (planText) {
+      const { criteria } = parsePlanCriteria(planText);
+      if (criteria.length) {
+        const xc = crossCheck(criteria, replayGoalEvidenceEvents(branch, { goalId: state.goal_id }), { currentFileSha: (p) => fileContentSha(p, cwd) });
+        parts.push(`验收: claimed ${xc.claimed} | verified ${xc.verified}`
+          + (xc.unverified ? ` | 未验证 ${xc.unverified}` : "")
+          + (xc.stale ? ` | stale ${xc.stale}` : ""));
+      }
+    }
+    const gc = gcEvidence(flat);
+    parts.push(renderEvidenceLog(gc.kept, 8));
+    if (gc.archived) parts.push(`  (另有 ${gc.archived} 条冗余记录可归档)`);
+    const st = staleByTime(flat, 7);
+    if (st.stale && st.ageDays !== undefined) parts.push(`⚠ 该 goal 已 ${st.ageDays.toFixed(0)} 天无 check 活动（plan.md 不自动删，按需 re-check 或 goal_clear）`);
+    return parts.join("\n");
   } catch {
     return undefined;
   }
@@ -298,9 +355,16 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     prepareArguments() { return {}; },
     async execute(_id, _params, _signal, _onUpdate, ctx: any) {
+      const cwd = ctx.cwd ?? process.cwd();
       const sessionId = readSessionId(ctx.sessionManager);
-      const state = sessionId ? loadGoalFile(ctx.cwd ?? process.cwd(), sessionId) : null;
-      return wrapText(formatGoalStatus(state), { kind: "goal_status", state });
+      const state = sessionId ? loadGoalFile(cwd, sessionId) : null;
+      let text = formatGoalStatus(state);
+      if (state) {
+        const branch = (ctx.sessionManager as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
+        const evBlock = buildStatusEvidenceBlock(state, branch, cwd);
+        if (evBlock) text += `\n\n${evBlock}`;
+      }
+      return wrapText(text, { kind: "goal_status", state });
     },
   });
 
@@ -377,6 +441,24 @@ export default function (pi: ExtensionAPI) {
     const inputs = Array.isArray(params.inputs) ? params.inputs.map(String) : [];
     const fileShas: Record<string, string> = {};
     for (const p of inputs) { const sha = fileContentSha(p, cwd); if (sha) fileShas[p] = sha; }
+    // v2 dedup-cache: skip re-running an expensive cmd when an identical
+    // fingerprint (criterion text + evidence expr + declared input shas) was
+    // already verified for THIS goal and nothing drifted. Gated on declared
+    // inputs so an undeclared-dependency cmd is never falsely cached — the
+    // fingerprint must capture what the command actually depends on.
+    if (kind === "cmd" && inputs.length > 0) {
+      const wantFp: InputFingerprint = {
+        criterion_text_sha: criterionTextSha(crit.text),
+        evidence_sha: sha256short(ev),
+        ...(Object.keys(fileShas).length ? { file_shas: fileShas } : {}),
+      };
+      const branch = (ctx.sessionManager as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
+      const prior = replayGoalEvidenceEvents(branch, { goalId: state.goal_id }).get(crit.id);
+      const cached = findCachedVerified(prior, wantFp);
+      if (cached) {
+        return { ok: true as const, status: "verified" as const, text: `✓ verified (${crit.id}): cached — 声明输入未变，跳过重跑 cmd（命中既有证据）。可标/留 \`[x]\`。`, record: cached };
+      }
+    }
     let result: Record<string, unknown>;
     let status: "verified" | "failed";
     let summary: string;
@@ -519,7 +601,7 @@ export default function (pi: ExtensionAPI) {
     const src = getGoalSource(state);
     if (src.type === "doc") {
       const branch = (ctx.sessionManager as unknown as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
-      ledgerBlock = buildLedgerHotzone(src.doc_path, branch, ctx.cwd ?? process.cwd());
+      ledgerBlock = buildLedgerHotzone(src.doc_path, branch, ctx.cwd ?? process.cwd(), state.goal_id);
     }
     // Wrap volatile: goal status changes per-turn; time-injector hoists it to
     // the prompt suffix so the session-stable prefix stays cache-valid.
@@ -557,6 +639,7 @@ export default function (pi: ExtensionAPI) {
       const branch = (ctx.sessionManager as unknown as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
       const source = getGoalSource(state);
       let goalDoc: { path: string; content: string; truncated?: boolean } | undefined;
+      let judgeLedger: string | undefined;
       if (source.type === "doc") {
         const doc = readGoalDoc(source.doc_path);
         if (!doc.ok) {
@@ -569,6 +652,7 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         goalDoc = { path: source.doc_display_path, content: doc.text, ...(doc.truncated ? { truncated: true } : {}) };
+        judgeLedger = buildJudgeLedger(source.doc_path, branch, cwd, state.goal_id);
       }
       await runAutoContinueOnce({
         state,
@@ -577,6 +661,7 @@ export default function (pi: ExtensionAPI) {
             objective: state.objective,
             successCriteria: state.success_criteria,
             ...(goalDoc ? { goalDoc } : {}),
+            ...(judgeLedger ? { evidenceLedger: judgeLedger } : {}),
             recentTranscript: packGoalJudgeWindow(branch),
             continuationsUsed: state.counters.continuations_used,
             maxContinuations: state.budget.max_continuations,

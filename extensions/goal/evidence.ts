@@ -168,13 +168,32 @@ export function makeEvidenceRecord(args: {
  *  ordered list per criterion_id INCLUDING failures, for audit / "tried &
  *  failed before passing" / re-verification (G1). Branch order is the
  *  caller's getBranch() (root→leaf), so chronological order is preserved. */
-export function replayGoalEvidenceEvents(entries: unknown[]): Map<string, EvidenceRecord[]> {
-  const byCriterion = new Map<string, EvidenceRecord[]>();
+export interface ReplayOpts {
+  /** When set, fold ONLY records whose goal_id matches (gc-archive: a
+   *  previous/abandoned goal's evidence on the same plan.md must not leak
+   *  into a new goal_id). Omit to fold all (backward compatible). */
+  goalId?: string;
+}
+
+/** Extract pi-goal-evidence records from branch entries in chronological
+ *  (root->leaf) order, optionally scoped to one goal_id. Shared base for
+ *  the grouped and flat replays. */
+export function replayGoalEvidenceFlat(entries: unknown[], opts?: ReplayOpts): EvidenceRecord[] {
+  const out: EvidenceRecord[] = [];
   for (const e of entries) {
     const entry = e as { type?: string; customType?: string; data?: unknown };
     if (entry?.type !== "custom" || entry.customType !== GOAL_EVIDENCE_EVENT_TYPE) continue;
     const rec = normalizeEvidenceRecord(entry.data);
     if (!rec) continue;
+    if (opts?.goalId && rec.goal_id !== opts.goalId) continue;
+    out.push(rec);
+  }
+  return out;
+}
+
+export function replayGoalEvidenceEvents(entries: unknown[], opts?: ReplayOpts): Map<string, EvidenceRecord[]> {
+  const byCriterion = new Map<string, EvidenceRecord[]>();
+  for (const rec of replayGoalEvidenceFlat(entries, opts)) {
     const list = byCriterion.get(rec.criterion_id) ?? [];
     list.push(rec);
     byCriterion.set(rec.criterion_id, list);
@@ -388,4 +407,104 @@ export function extractPlanSections(planText: string): { currentState?: string; 
   const cs = stateLines ? stateLines.join("\n").trim() : "";
   const dec = (decisionLines ?? []).map((l) => l.trim()).filter((l) => l.length > 0);
   return { ...(cs ? { currentState: cs } : {}), recentDecisions: dec };
+}
+
+// ── v2: judge ledger summary ───────────────────────────────────────────
+
+/** Compact the cross-check into a judge-facing evidence summary (v2 judge-ev):
+ *  the auto-continue judge must treat ONLY system-verified criteria as proven,
+ *  never a bare `[x]`. Verified / unverified[!] / stale are grouped as DATA. */
+export function summarizeLedgerForJudge(xc: CrossCheckResult): string {
+  const pick = (d: DisplayStatus) => xc.rendered.filter((r) => r.display === d).map((r) => `(${r.id}) ${r.text}`);
+  const verified = pick("verified");
+  const unverified = pick("unverified");
+  const stale = pick("stale");
+  const lines: string[] = [
+    `system-verified ${verified.length} / claimed ${xc.claimed} — ONLY verified criteria (a real goal_check recorded matching, non-stale evidence) count as proven:`,
+    ...(verified.length ? verified.map((t) => `  [verified] ${t}`) : ["  (none verified yet)"]),
+  ];
+  if (unverified.length) lines.push("claimed-but-UNVERIFIED (a [x] with NO evidence — do NOT treat as achieved):", ...unverified.map((t) => `  [!] ${t}`));
+  if (stale.length) lines.push("STALE (evidence drifted, must re-check — do NOT treat as achieved):", ...stale.map((t) => `  [stale] ${t}`));
+  return lines.join("\n");
+}
+
+// ── v2: evidence-log render (goal_status visualization) ────────────────
+
+function relAge(tsMs: number, nowMs: number): string {
+  const s = Math.max(0, Math.floor((nowMs - tsMs) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+/** Render the recent N checks for goal_status (v2 status-viz): newest-last,
+ *  one line per check with criterion / kind / outcome / relative age. */
+export function renderEvidenceLog(records: EvidenceRecord[], n = 8, nowMs = Date.now()): string {
+  if (!records.length) return "证据账: (空 — 尚无 goal_check)";
+  const recent = records.slice(-Math.max(1, n));
+  const lines = recent.map((r) => {
+    const mark = r.status === "verified" ? "✓" : "✗";
+    const t = Date.parse(r.ts);
+    const age = Number.isFinite(t) ? relAge(t, nowMs) : "?";
+    const detail = r.kind === "cmd" ? `exit ${r.result.exit ?? "?"}` : r.kind === "file" ? `${r.result.size ?? "?"}B` : (r.result.object_sha ?? "").slice(0, 12);
+    return `  ${mark} (${r.criterion_id}) ${r.kind}:${detail} · ${age}`;
+  });
+  return [`证据账（最近 ${recent.length}/${records.length} 条 check）:`, ...lines].join("\n");
+}
+
+// ── v2: GC / archive + stale-by-time ───────────────────────────────────
+
+export interface GcResult { kept: EvidenceRecord[]; archived: number; }
+
+/** Compact an evidence list (v2 gc-archive): per criterion keep the latest
+ *  verified record (= current state) plus the last K failures (audit of
+ *  "tried & failed"); drop older redundant records. Order preserved. The
+ *  event log itself is append-only/immutable; this bounds derived views. */
+export function gcEvidence(records: EvidenceRecord[], opts?: { keepFailuresPerCriterion?: number }): GcResult {
+  const keepFail = Math.max(0, opts?.keepFailuresPerCriterion ?? 2);
+  const byCrit = new Map<string, EvidenceRecord[]>();
+  for (const r of records) { const l = byCrit.get(r.criterion_id) ?? []; l.push(r); byCrit.set(r.criterion_id, l); }
+  const keep = new Set<EvidenceRecord>();
+  for (const list of byCrit.values()) {
+    for (let i = list.length - 1; i >= 0; i--) { if (list[i].status === "verified") { keep.add(list[i]); break; } }
+    let f = 0;
+    for (let i = list.length - 1; i >= 0 && f < keepFail; i--) { if (list[i].status === "failed") { keep.add(list[i]); f++; } }
+  }
+  const kept = records.filter((r) => keep.has(r));
+  return { kept, archived: records.length - kept.length };
+}
+
+/** Inactivity hint (v2 gc-archive): is the goal's newest evidence older than
+ *  thresholdDays? plan.md is never auto-deleted; this only surfaces a hint. */
+export function staleByTime(records: EvidenceRecord[], thresholdDays: number, nowMs = Date.now()): { stale: boolean; lastTs?: string; ageDays?: number } {
+  let lastMs = 0, lastTs: string | undefined;
+  for (const r of records) { const t = Date.parse(r.ts); if (Number.isFinite(t) && t > lastMs) { lastMs = t; lastTs = r.ts; } }
+  if (!lastTs) return { stale: false };
+  const ageDays = (nowMs - lastMs) / 86400000;
+  return { stale: ageDays > thresholdDays, lastTs, ageDays };
+}
+
+// ── v2: dedup cache ────────────────────────────────────────────────────
+
+function fpEqual(a: InputFingerprint, b: InputFingerprint): boolean {
+  if (a.criterion_text_sha !== b.criterion_text_sha) return false;
+  if ((a.evidence_sha ?? "") !== (b.evidence_sha ?? "")) return false;
+  const af = a.file_shas ?? {}, bf = b.file_shas ?? {};
+  const ak = Object.keys(af), bk = Object.keys(bf);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) { if (af[k] !== bf[k]) return false; }
+  return true;
+}
+
+/** dedup-cache (v2): the latest VERIFIED record whose input fingerprint
+ *  EXACTLY matches `fp` (same criterion text + evidence expr + input-file
+ *  shas). A hit means re-running would reproduce the same verified result
+ *  with nothing drifted, so the caller may skip the (costly) command. */
+export function findCachedVerified(records: EvidenceRecord[] | undefined, fp: InputFingerprint): EvidenceRecord | undefined {
+  if (!records) return undefined;
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (records[i].status === "verified" && fpEqual(records[i].input_fp, fp)) return records[i];
+  }
+  return undefined;
 }
