@@ -168,6 +168,16 @@ CREATE TABLE IF NOT EXISTS diagnostics (
   message TEXT NOT NULL,
   created_at_utc TEXT NOT NULL
 );
+-- ADR0039 §4.5 (4×T0 unanimous DEFER, 2026-06-20): the vector
+-- (chunks/embeddings) and graph (graph_nodes/graph_edges) tables from the
+-- §4.5 suggested boundaries are INTENTIONALLY NOT created in v1. There is no
+-- load evidence: vectors already live in ~/.abrain/.state/memory/embeddings.json
+-- (rebuildable, model-stamped — ADR0035), and the graph layer has zero consumers
+-- (event_edges already covers the event-level causal DAG). Per §4.5 line 95 /
+-- line 217, defer until a real reproducible load (see the evidence-gate in
+-- docs/notes/2026-06-20-adr0039-l3-schema-defer-consensus.md). Add the tables
+-- ONLY together with their mirror logic + reconcile assertions + a rebuildability
+-- proof, and remove this deferral marker.
 `);
   return db;
 }
@@ -357,11 +367,27 @@ export function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string; 
     db.exec("BEGIN IMMEDIATE");
     for (const table of ["meta", "l1_events", "event_edges", "projector_state", "l2_views", "search_corpus", "search_corpus_fts", "jobs", "diagnostics"]) db.exec(`DELETE FROM ${table}`);
     db.prepare("INSERT INTO meta(key, value) VALUES (?, ?)").run("schema_version", "adr0039-l3/v1");
+    // ADR0039 §4.5 (4×T0 unanimous DEFER): durable, queryable receipt that the
+    // vector + graph tables are deliberately absent (no load evidence), not
+    // forgotten. Retire this row when the evidence-gate fires and the tables land.
+    db.prepare("INSERT INTO meta(key, value) VALUES (?, ?)").run("schema_deferred", "vector(chunks,embeddings)+graph(graph_nodes,graph_edges): deferred, no load evidence (ADR0039 §4.5; vectors in .state/memory/embeddings.json per ADR0035; graph zero consumers)");
     const l1Events = mirrorL1Events(abrainHome, db, failures);
     const eventEdges = mirrorEventEdges(abrainHome, db, failures);
     const l2Views = mirrorL2Views(abrainHome, knowledgeLatestDir, db, failures);
     const searchCorpusRows = mirrorKnowledgeSearchCorpus(abrainHome, knowledgeLatestDir, db, failures);
     const projectorState = mirrorProjectorState(abrainHome, knowledgeLatestDir, db);
+    // ADR0039 §4.5 deferred-table tripwire (4×T0 unanimous, deepseek form): the
+    // expected state is ABSENCE — this never fails on a deferred (missing) table.
+    // It only fires if a future change CREATES one of the deferred tables but
+    // leaves partial/stale rows (a half-done migration leaking data into a table
+    // whose mirror+reconcile aren't wired yet). Activating a table = wire its
+    // mirror + drop it from this list in the same change.
+    for (const table of ["chunks", "embeddings", "graph_nodes", "graph_edges"]) {
+      const exists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
+      if (!exists) continue;
+      const row = db.prepare(`SELECT COUNT(*) AS cnt FROM "${table}"`).get() as { cnt?: number } | undefined;
+      if (row && Number(row.cnt) > 0) failures.push(`adr0039-l3: deferred_table_has_data:${table}:${row.cnt}`);
+    }
     const finishedAt = new Date().toISOString();
     db.prepare("INSERT INTO jobs(job_id, kind, status, created_at_utc, updated_at_utc, detail_json) VALUES (?, ?, ?, ?, ?, ?)")
       .run(`adr0039-l3-sync:${finishedAt}`, "adr0039-l3-sync", failures.length ? "failed" : "completed", startedAt, finishedAt, JSON.stringify({ l1Events, eventEdges, l2Views, searchCorpusRows, projectorState }));
