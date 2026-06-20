@@ -76,6 +76,19 @@ function loadAdr0039L3Module() {
   return createRequire(path.join(outRoot, "runner.cjs"))("./sediment/adr0039-l3.js");
 }
 
+let _constraintRenderModule = null;
+function loadConstraintRenderModule() {
+  if (_constraintRenderModule) return _constraintRenderModule;
+  const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-constraint-render-"));
+  stageTs(outRoot, "extensions/sediment/sanitizer.ts");
+  stageTs(outRoot, "extensions/sediment/constraint-compiler/types.ts");
+  stageTs(outRoot, "extensions/sediment/constraint-compiler/diagnostics.ts");
+  stageTs(outRoot, "extensions/sediment/constraint-compiler/normalize.ts");
+  stageTs(outRoot, "extensions/sediment/constraint-compiler/render.ts");
+  _constraintRenderModule = createRequire(path.join(outRoot, "runner.cjs"))("./sediment/constraint-compiler/render.js");
+  return _constraintRenderModule;
+}
+
 function sha256Hex(input) {
   return crypto.createHash("sha256").update(input, "utf8").digest("hex");
 }
@@ -437,11 +450,41 @@ function validateDirtyDerived(abrainHome) {
   const failures = [];
   for (const line of status.split("\n").filter(Boolean)) {
     const rel = line.slice(3).trim();
-    if (rel.startsWith(".state/sediment/constraint-shadow/") || rel.startsWith(".state/sediment/knowledge-projection/") || rel.startsWith("l2/views/knowledge/")) {
+    if (rel.startsWith(".state/sediment/constraint-shadow/") || rel.startsWith(".state/sediment/knowledge-projection/") || rel.startsWith("l2/views/knowledge/") || rel.startsWith("l2/views/constraint/")) {
       failures.push(`dirty_derived_view:${line}`);
     }
   }
   return { failures };
+}
+
+// ADR0039 Constraint L2 (§4.4 / FIX-1): the git-tracked L2 view must be a
+// deterministic re-render of its 固化d L1 projection event. Read the L2's
+// sediment_projection_event_id, load that immutable event, re-render via the
+// same renderer, and byte-compare. A mismatch with no new 固化 event is a dirty
+// derived view — block push.
+function validateConstraintL2(abrainHome) {
+  const l2Path = path.join(abrainHome, "l2", "views", "constraint", "latest", "compiled-view.md");
+  if (!fs.existsSync(l2Path)) return { present: false, failures: [] };
+  const failures = [];
+  const raw = fs.readFileSync(l2Path, "utf8");
+  const { frontmatter } = splitMarkdownProjection(raw);
+  const eventId = frontmatterScalar(frontmatter, "sediment_projection_event_id");
+  if (!eventId) return { present: true, failures: ["constraint-l2: missing_projection_event_id"] };
+  const l1Path = expectedEventPath(abrainHome, eventId);
+  if (!fs.existsSync(l1Path)) return { present: true, failures: [`constraint-l2: projection_event_missing:${eventId}`] };
+  let envelope;
+  try { envelope = JSON.parse(fs.readFileSync(l1Path, "utf8")); }
+  catch { return { present: true, failures: [`constraint-l2: projection_event_unreadable:${eventId}`] }; }
+  if (envelope.schema !== "constraint-projection-envelope/v1") failures.push(`constraint-l2: wrong_projection_schema:${eventId}`);
+  if (envelope.event_id !== eventId || envelope.body_hash !== eventId) failures.push(`constraint-l2: envelope_hash_mismatch:${eventId}`);
+  try {
+    const render = loadConstraintRenderModule();
+    const reRender = render.renderConstraintL2View(envelope.body.validated_decision, eventId).markdown;
+    if (reRender !== raw) failures.push(`constraint-l2: projection_byte_mismatch:${eventId}`);
+  } catch (err) {
+    failures.push(`constraint-l2: re_render_failed:${eventId}:${err && err.message ? String(err.message).slice(0, 80) : err}`);
+  }
+  return { present: true, failures };
 }
 
 function validateL3Store(abrainHome, knowledgeLatestDir) {
@@ -520,6 +563,7 @@ function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   const projectionMode = resolveProjectionMode(opts.projectionMode);
   const knowledge = validateKnowledgeProjection(abrainHome, knowledgeLatestDir, projectionMode);
   const constraint = validateConstraintShadow(abrainHome, opts);
+  const constraintL2 = validateConstraintL2(abrainHome);
   const l3 = validateL3Store(abrainHome, knowledgeLatestDir);
   const coverage = computeLegacyKnowledgeCoverage(abrainHome);
   const dirty = validateDirtyDerived(abrainHome);
@@ -527,8 +571,8 @@ function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   if (l3.counts && Number(l3.counts.searchCorpusRows ?? 0) !== Number(knowledge.searchCorpusRows ?? 0)) {
     l3SearchCorpusFailures.push(`adr0039-l3: search_corpus_row_mismatch:${l3.counts.searchCorpusRows ?? 0}:${knowledge.searchCorpusRows ?? 0}`);
   }
-  const failures = [...l1.failures, ...knowledge.failures, ...constraint.failures, ...l3.failures, ...l3SearchCorpusFailures, ...dirty.failures];
-  return { abrainHome, l1, knowledge, constraint, l3, coverage, dirty, failures };
+  const failures = [...l1.failures, ...knowledge.failures, ...constraint.failures, ...constraintL2.failures, ...l3.failures, ...l3SearchCorpusFailures, ...dirty.failures];
+  return { abrainHome, l1, knowledge, constraint, constraintL2, l3, coverage, dirty, failures };
 }
 
 function printResult(result) {
@@ -546,6 +590,7 @@ function printResult(result) {
   console.log(`knowledge_search_corpus_rows: ${result.knowledge.searchCorpusRows ?? 0}`);
   console.log(`l3_search_corpus_rows: ${result.l3.counts?.searchCorpusRows ?? 0}`);
   console.log(`constraint_shadow_present: ${result.constraint.present}`);
+  console.log(`constraint_l2_present: ${result.constraintL2?.present ?? false}`);
   console.log(`l3_db: ${result.l3.dbPath || "unavailable"}`);
   if (result.failures.length) {
     for (const failure of result.failures) console.log(`  FAIL  ${failure}`);
