@@ -55,6 +55,18 @@ import {
   stripGoalBlock,
   type GoalState,
 } from "./state";
+import {
+  GOAL_EVIDENCE_EVENT_TYPE,
+  makeEvidenceRecord,
+  parsePlanCriteria,
+  replayGoalEvidenceEvents,
+  crossCheck,
+  renderCriteriaHotzone,
+  extractPlanSections,
+  sha256short,
+  type EvidenceKind,
+} from "./evidence";
+import { runEvidenceCmd, fileContentSha, resolveFileFacts } from "./exec";
 
 // ── settings ───────────────────────────────────────────────────────────
 
@@ -111,6 +123,33 @@ function anchorTag(a: { session_id: string; turn_id: number; subturn?: number } 
   return `${a.session_id}:${a.turn_id}${a.subturn !== undefined ? `.${a.subturn}` : ""}`;
 }
 
+/** Build the live ledger hot-zone for a doc goal: parse plan.md criteria,
+ *  cross-check against replayed pi-goal-evidence events, render claimed|
+ *  verified + per-criterion glyphs (G2/G6). Fail-safe: returns undefined on
+ *  any error so before_agent_start degrades to the pointer-only block. */
+function buildLedgerHotzone(docPath: string, branch: unknown[], cwd: string): string | undefined {
+  try {
+    const planText = fsSync.readFileSync(docPath, "utf-8");
+    const { criteria, missingId } = parsePlanCriteria(planText);
+    if (criteria.length === 0 && missingId.length === 0) return undefined;
+    const evidence = replayGoalEvidenceEvents(branch);
+    const xc = crossCheck(criteria, evidence, { currentFileSha: (p) => fileContentSha(p, cwd) });
+    const sections = extractPlanSections(planText);
+    const parts: string[] = [];
+    if (sections.currentState) parts.push(`当前状态:\n${sections.currentState}`);
+    parts.push(renderCriteriaHotzone(xc));
+    const recent = sections.recentDecisions.slice(-3);
+    if (recent.length) parts.push(`最近决策:\n${recent.join("\n")}`);
+    let block = parts.join("\n");
+    if (missingId.length) {
+      block += `\n⚠ ${missingId.length} 条验收缺 \`(id)\`，goal_check 无法定位——补成 \`- [ ] (some-id) ...\``;
+    }
+    return block;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── session helpers ────────────────────────────────────────────────────
 
 /** Mirror of sediment's readSessionId: id only counts when the session is
@@ -164,6 +203,18 @@ export default function (pi: ExtensionAPI) {
     try {
       (pi as unknown as { appendEntry?: (t: string, d: unknown) => void })
         .appendEntry?.(GOAL_EVENT_TYPE, { action, state });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /** Append a pi-goal-evidence event (execution book, SOT). Same fail-soft
+   *  shape as appendGoalEvent; the materialized view is replay-derived. */
+  const appendEvidence = (rec: unknown): boolean => {
+    try {
+      (pi as unknown as { appendEntry?: (t: string, d: unknown) => void })
+        .appendEntry?.(GOAL_EVIDENCE_EVENT_TYPE, rec);
       return true;
     } catch {
       return false;
@@ -296,6 +347,96 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  // ── goal_check: record system-run evidence for a doc criterion (v1) ──
+  const runGoalCheck = async (
+    params: { criterion_id: string; evidence: string; inputs?: string[] },
+    ctx: any,
+  ) => {
+    const settings = resolveGoalSettings();
+    if (!settings.enabled) return { ok: false as const, error: "goal extension disabled", details: { kind: "goal_disabled" } };
+    const cwd = ctx.cwd ?? process.cwd();
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (!sessionId) return { ok: false as const, error: "goal_check requires a persisted session (sub-agent/ephemeral has no event log)", details: { kind: "no_persisted_session" } };
+    // G4: a machine/continuation turn (auto-continue judge) must not self-verify.
+    if (isCurrentTurnGoalContinuation(ctx.sessionManager)) return { ok: false as const, error: "goal_check rejected in auto-continue/machine turn (the judge must not verify its own output)", details: { kind: "machine_turn_rejected" } };
+    const state = loadGoalFile(cwd, sessionId);
+    if (!state || state.status !== "active") return { ok: false as const, error: "no active goal (goal_set first)", details: { kind: "no_active_goal" } };
+    const src = getGoalSource(state);
+    if (src.type !== "doc") return { ok: false as const, error: "goal_check needs a doc-based goal: goal_set(doc=plan.md)", details: { kind: "not_doc_goal" } };
+    let planText: string;
+    try { planText = fsSync.readFileSync(src.doc_path, "utf-8"); }
+    catch { return { ok: false as const, error: `cannot read goal doc: ${src.doc_display_path}`, details: { kind: "doc_unreadable" } }; }
+    const { criteria } = parsePlanCriteria(planText);
+    const crit = criteria.find((c) => c.id === params.criterion_id);
+    if (!crit) return { ok: false as const, error: `unknown criterion id "${params.criterion_id}"; available: ${criteria.map((c) => c.id).join(", ") || "(none — add a (id) marker)"}`, details: { kind: "unknown_criterion" } };
+    const ev = String(params.evidence ?? "").trim();
+    const m = /^(cmd|file|git):([\s\S]+)$/.exec(ev);
+    if (!m) return { ok: false as const, error: "evidence must be cmd:<shell> | file:<path> | git:<sha>", details: { kind: "bad_evidence" } };
+    const kind = m[1] as EvidenceKind;
+    const arg = m[2].trim();
+    const inputs = Array.isArray(params.inputs) ? params.inputs.map(String) : [];
+    const fileShas: Record<string, string> = {};
+    for (const p of inputs) { const sha = fileContentSha(p, cwd); if (sha) fileShas[p] = sha; }
+    let result: Record<string, unknown>;
+    let status: "verified" | "failed";
+    let summary: string;
+    if (kind === "cmd") {
+      const out = await runEvidenceCmd(arg, { cwd, timeoutMs: settings.judgeTimeoutMs });
+      result = { exit: out.exit, stdout_sha: out.stdout_sha, stderr_sha: out.stderr_sha, truncated: out.truncated, timed_out: out.timed_out, duration_ms: out.duration_ms };
+      status = out.status;
+      summary = out.status === "verified" ? "cmd exit 0" : `cmd ${out.reason ?? `exit ${out.exit}`}`;
+    } else if (kind === "file") {
+      const f = resolveFileFacts(arg, cwd);
+      result = { size: f.size, mtime_ms: f.mtime_ms, content_sha: f.content_sha };
+      status = f.exists && (f.size ?? 0) > 0 ? "verified" : "failed";
+      if (f.content_sha) fileShas[arg] = f.content_sha;
+      summary = status === "verified" ? `file present (${f.size}B)` : `file missing/empty: ${arg}`;
+    } else {
+      // git: verify an object/ref exists in the repo at cwd.
+      if (!/^[0-9a-zA-Z._\/-]{1,120}$/.test(arg)) return { ok: false as const, error: "git: sha/ref must match [0-9a-zA-Z._/-]", details: { kind: "bad_evidence" } };
+      const out = await runEvidenceCmd(`git cat-file -e ${arg}`, { cwd, timeoutMs: settings.judgeTimeoutMs });
+      result = { exit: out.exit, object_sha: arg };
+      status = out.status;
+      summary = status === "verified" ? `git object ${arg} exists` : `git object not found: ${arg}`;
+    }
+    const rec = makeEvidenceRecord({
+      goalId: state.goal_id, sessionId, criterionId: crit.id, criterionText: crit.text,
+      kind, raw: ev, status, result, evidenceSha: sha256short(ev),
+      fileShas, turn: anchorTag(getCurrentAnchor()),
+    });
+    const appended = appendEvidence(rec);
+    const verdict = status === "verified" ? "✓ verified" : "✗ failed";
+    const guide = status === "verified"
+      ? "现在可在 plan.md 标/留 `[x]`，注入时会判为 verified。"
+      : "保持 `[ ]/[~]`，勿打 `[x]`（会渲染 `[!]`）。";
+    const text = `${verdict} (${crit.id}): ${summary}. ${guide}${appended ? "" : " [警告: 证据事件 append 失败]"}`;
+    return { ok: true as const, status, text, record: rec };
+  };
+
+  pi.registerTool({
+    name: "goal_check",
+    label: "Goal Check",
+    description: "Record system-run evidence that an acceptance criterion (by its plan.md (id)) passed. evidence = cmd:<shell> (really executed) | file:<path> | git:<sha>. Does NOT edit plan.md — you mark [x] yourself; matching non-stale evidence is what upgrades that [x] to 'verified' at injection (no evidence → [!]; criterion text or declared input drift → stale). Optional inputs=[files] are fingerprinted. Blocked in auto-continue turns.",
+    promptSnippet: "goal_check(criterion_id, evidence, inputs?) — record system-verified evidence for a plan.md criterion",
+    parameters: Type.Object({
+      criterion_id: Type.String(),
+      evidence: Type.String(),
+      inputs: Type.Optional(Type.Array(Type.String())),
+    }),
+    prepareArguments(rawArgs) {
+      const a = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? rawArgs as Record<string, unknown> : {};
+      return {
+        criterion_id: String(a.criterion_id ?? ""),
+        evidence: String(a.evidence ?? ""),
+        ...(Array.isArray(a.inputs) ? { inputs: a.inputs.map(String) } : {}),
+      };
+    },
+    async execute(_id, params: any, _signal, _onUpdate, ctx: any) {
+      const r = await runGoalCheck(params, ctx);
+      return r.ok ? wrapText(r.text, { kind: "goal_check", status: r.status, record: r.record }) : wrapText(`✗ goal_check: ${r.error}`, r.details, true);
+    },
+  });
+
   pi.registerCommand("goal", {
     description:
       "Session goal: /goal set <objective> [--criteria=\"a;b\"] [--max-continuations=N] [--max-minutes=M] | pause | resume | stop | clear | status. Active goal is re-injected every turn (compaction-drift guard). Auto-continue ships separately behind goal.autoContinue.",
@@ -372,9 +513,17 @@ export default function (pi: ExtensionAPI) {
       return { systemPrompt: cleaned };
     }
     const current = (event as { systemPrompt?: string }).systemPrompt ?? "";
+    // Doc goals: build the live ledger hot-zone (cross-checked criteria) and
+    // inject it instead of the static success_criteria. Fail-safe to pointer.
+    let ledgerBlock: string | undefined;
+    const src = getGoalSource(state);
+    if (src.type === "doc") {
+      const branch = (ctx.sessionManager as unknown as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
+      ledgerBlock = buildLedgerHotzone(src.doc_path, branch, ctx.cwd ?? process.cwd());
+    }
     // Wrap volatile: goal status changes per-turn; time-injector hoists it to
     // the prompt suffix so the session-stable prefix stays cache-valid.
-    const block = wrapVolatile(formatGoalBlock(state));
+    const block = wrapVolatile(formatGoalBlock(state, ledgerBlock));
     const next = `${stripGoalBlock(current).replace(/\n+$/, "")}\n\n${block}\n`;
     return { systemPrompt: next };
   });

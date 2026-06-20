@@ -434,7 +434,7 @@ export function replayGoalEvents(entries: unknown[]): GoalState | null {
 const BEGIN_MARKER = "<!-- pi-astack/goal: active goal (user-set via /goal, C4' authorized) -->";
 const END_MARKER = "<!-- /pi-astack/goal -->";
 
-export function formatGoalBlock(state: GoalState): string {
+export function formatGoalBlock(state: GoalState, ledgerBlock?: string): string {
   const source = getGoalSource(state);
   const lines = [
     BEGIN_MARKER,
@@ -443,9 +443,12 @@ export function formatGoalBlock(state: GoalState): string {
   ];
   if (source.type === "doc") {
     lines.push(`Goal document: ${source.doc_display_path}`);
-    lines.push("Read/update that document when you need the full plan; this block is only the compact pointer.");
+    lines.push("Read/update that document for the full plan. Mark `[x]/[~]` yourself; a `[x]` only counts as verified when goal_check has recorded matching, non-stale evidence (else it renders `[!]`).");
   }
-  if (state.success_criteria.length > 0) {
+  if (ledgerBlock) {
+    // Live ledger hot-zone (doc goals): cross-checked criteria w/ claimed|verified.
+    lines.push(ledgerBlock);
+  } else if (state.success_criteria.length > 0) {
     lines.push("Success criteria:");
     for (const c of state.success_criteria) lines.push(`- ${c}`);
   }
