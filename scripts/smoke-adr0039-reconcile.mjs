@@ -324,9 +324,23 @@ function validateKnowledgeProjection(abrainHome) {
       if (eventRow[key] !== projectionRow[key]) failures.push(`${rel}: search_corpus_ab_mismatch:${key}:${eventId}`);
     }
   }
+  // Single-event→single-file projector (pre-B2 topological projection): a slug
+  // that received multiple events keeps only the LATEST event's markdown, so
+  // superseded older events are expected to be unprojected. Group L1 knowledge
+  // events by (scope, project_id, slug) identity key and only require the
+  // latest event per group to be projected. When B2 set-projection lands this
+  // tightens to verifying the full input event set.
+  const latestByIdentity = new Map();
   for (const eventFile of listFiles(path.join(abrainHome, "l1", "events"), (file) => file.endsWith(".json"))) {
     const envelope = readJson(eventFile);
     if (envelope.body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
+    const body = envelope.body;
+    const identity = `${body.scope?.kind ?? "unknown"}:${body.scope?.project_id ?? ""}:${body.payload?.slug ?? ""}`;
+    const prior = latestByIdentity.get(identity);
+    const key = `${body.created_at_utc ?? ""}:${envelope.event_id}`;
+    if (!prior || key > prior.key) latestByIdentity.set(identity, { key, eventFile, envelope });
+  }
+  for (const { eventFile, envelope } of latestByIdentity.values()) {
     const eventId = envelope.event_id;
     const expectedPath = expectedKnowledgeOutputPath(abrainHome, envelope.body);
     if (envelope.body.intent?.operation_hint === "delete") {
@@ -427,6 +441,7 @@ function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
 function printResult(result) {
   console.log(`abrainHome: ${result.abrainHome}`);
   console.log(`l1_events: ${result.l1.files}`);
+  console.log(`l3_event_edges: ${result.l3.counts?.eventEdges ?? 0}`);
   console.log(`knowledge_projected_files: ${result.knowledge.projectedFiles}`);
   console.log(`knowledge_search_corpus_rows: ${result.knowledge.searchCorpusRows ?? 0}`);
   console.log(`l3_search_corpus_rows: ${result.l3.counts?.searchCorpusRows ?? 0}`);
@@ -557,5 +572,56 @@ if (process.versions.sqlite) {
     probe.close();
   }
   console.log("PASS — L3 search corpus FTS is rebuildable and queryable.");
+
+  // event_edges: rebuildable from L1 causal_parents only, never a truth source.
+  const edgeFixture = await buildFixtureTree();
+  const l3edge = loadAdr0039L3Module();
+  // synthesize a child event that links the fixture event as a causal parent
+  const parentId = edgeFixture.eventId;
+  const childBody = {
+    event_schema_version: "knowledge-evidence-event/v1",
+    event_type: "knowledge_entry_observed",
+    created_at_utc: "2026-06-20T01:00:00.000Z",
+    device_id: "smoke-device",
+    producer_nonce: "smoke-edge-child",
+    causal_parents: [parentId],
+    session_id: "smoke-edge",
+    turn_id: "t1",
+    actor: { role: "assistant", id: "sediment" },
+    source: { channel: "agent_end", source_ref: "smoke:edge" },
+    intent: { domain_hint: "knowledge", operation_hint: "update" },
+    scope: { kind: "project", project_id: "pi-global" },
+    payload: { slug: "adr0039-reconcile-fixture", title: "ADR0039 Reconcile Fixture", kind: "fact", status: "active", provenance: "assistant-observed", confidence: 8, compiled_truth: "# x\n\ny", trigger_phrases: [], derives_from: [] },
+    sanitizer: { sanitizer_name: "smoke", sanitizer_version: "v1", status: "passed", replacements_count: 0 },
+    producer: { name: "sediment.knowledge-event-writer", version: "adr0039-p5" },
+  };
+  const childId = sha256Hex(canonicalJson(childBody));
+  writeFile(expectedEventPath(edgeFixture.abrainHome, childId), `${JSON.stringify({ schema: "knowledge-evidence-envelope/v1", canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: childId, body_hash: childId, body: childBody }, null, 0)}\n`);
+  const edgeSync = l3edge.syncAdr0039L3Store({ abrainHome: edgeFixture.abrainHome });
+  if (edgeSync.counts.eventEdges !== 1) {
+    console.log(`FAIL — L3 event_edges did not rebuild the causal edge: ${JSON.stringify(edgeSync.counts)}`);
+    process.exit(1);
+  }
+  const { DatabaseSync: EdgeDb } = require("node:sqlite");
+  const edgeProbe = new EdgeDb(edgeSync.dbPath);
+  try {
+    const edge = edgeProbe.prepare("SELECT parent_event_id, child_event_id, edge_type FROM event_edges").get();
+    if (!edge || edge.parent_event_id !== parentId || edge.child_event_id !== childId || edge.edge_type !== "correction") {
+      console.log(`FAIL — L3 event_edges row wrong: ${JSON.stringify(edge)}`);
+      process.exit(1);
+    }
+  } finally {
+    edgeProbe.close();
+  }
+  // dangling parent must be reported (rebuildable-from-L1 invariant)
+  const danglingChild = { ...childBody, producer_nonce: "smoke-edge-dangling", causal_parents: ["".padStart(64, "a")] };
+  const danglingId = sha256Hex(canonicalJson(danglingChild));
+  writeFile(expectedEventPath(edgeFixture.abrainHome, danglingId), `${JSON.stringify({ schema: "knowledge-evidence-envelope/v1", canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: danglingId, body_hash: danglingId, body: danglingChild }, null, 0)}\n`);
+  const danglingSync = l3edge.syncAdr0039L3Store({ abrainHome: edgeFixture.abrainHome });
+  if (!danglingSync.failures.some((f) => f.includes("l3_event_edge_dangling_parent"))) {
+    console.log(`FAIL — dangling causal parent not reported: ${JSON.stringify(danglingSync.failures)}`);
+    process.exit(1);
+  }
+  console.log("PASS — L3 event_edges is rebuildable from L1 and validates causal integrity.");
 }
 process.exit(0);

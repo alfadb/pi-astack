@@ -22,6 +22,7 @@ export interface Adr0039L3SyncResult {
   dbPath: string;
   counts: {
     l1Events: number;
+    eventEdges: number;
     l2Views: number;
     searchCorpusRows: number;
     projectorState: number;
@@ -113,6 +114,14 @@ CREATE TABLE IF NOT EXISTS projector_state (
   updated_at_utc TEXT NOT NULL,
   detail_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS event_edges (
+  parent_event_id TEXT NOT NULL,
+  child_event_id TEXT NOT NULL,
+  edge_type TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  created_at_utc TEXT,
+  PRIMARY KEY (parent_event_id, child_event_id, edge_type)
+);
 CREATE TABLE IF NOT EXISTS l2_views (
   view_id TEXT PRIMARY KEY,
   view_kind TEXT NOT NULL,
@@ -196,6 +205,61 @@ function mirrorL1Events(abrainHome: string, db: DatabaseSyncLike, failures: stri
     }
   }
   return files.length;
+}
+
+function edgeTypeForOperation(operationHint: string): string {
+  switch (operationHint) {
+    case "update": return "correction";
+    case "merge": return "merge";
+    case "supersede": return "supersede";
+    case "correction": return "correction";
+    case "archive": return "archive";
+    case "reactivate": return "reactivate";
+    case "delete": return "delete";
+    default: return "causal";
+  }
+}
+
+function mirrorEventEdges(abrainHome: string, db: DatabaseSyncLike, failures: string[]): number {
+  const knownEventIds = new Set<string>();
+  for (const file of listFiles(path.join(abrainHome, "l1", "events"), (candidate) => candidate.endsWith(".json"))) {
+    try {
+      const envelope = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+      const eventId = scalarString(envelope.event_id);
+      if (eventId) knownEventIds.add(eventId);
+    } catch { /* invalid event already reported by mirrorL1Events */ }
+  }
+  const insert = db.prepare("INSERT OR IGNORE INTO event_edges(parent_event_id, child_event_id, edge_type, ordinal, created_at_utc) VALUES (?, ?, ?, ?, ?)");
+  let count = 0;
+  for (const file of listFiles(path.join(abrainHome, "l1", "events"), (candidate) => candidate.endsWith(".json"))) {
+    const rel = relativeUnix(abrainHome, file);
+    let envelope: Record<string, unknown>;
+    try {
+      envelope = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const childId = scalarString(envelope.event_id);
+    const body = envelope.body as Record<string, unknown> | undefined;
+    if (!childId || !body) continue;
+    const parents = Array.isArray(body.causal_parents) ? body.causal_parents : [];
+    const operationHint = String(((body.intent as Record<string, unknown> | undefined)?.operation_hint) ?? "");
+    const edgeType = edgeTypeForOperation(operationHint);
+    const createdAt = scalarString(body.created_at_utc);
+    parents.forEach((parent, ordinal) => {
+      const parentId = typeof parent === "string" ? parent : "";
+      if (!/^[0-9a-f]{64}$/.test(parentId)) {
+        failures.push(`${rel}: l3_event_edge_invalid_parent`);
+        return;
+      }
+      // event_edges must be rebuildable from L1 only; a dangling parent means
+      // the causal graph references an event that is not present in L1.
+      if (!knownEventIds.has(parentId)) failures.push(`${rel}: l3_event_edge_dangling_parent:${parentId}`);
+      insert.run(parentId, childId, edgeType, ordinal, createdAt);
+      count += 1;
+    });
+  }
+  return count;
 }
 
 function readFrontmatterScalar(raw: string, key: string): string | null {
@@ -290,23 +354,24 @@ export function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string }
   const startedAt = new Date().toISOString();
   try {
     db.exec("BEGIN IMMEDIATE");
-    for (const table of ["meta", "l1_events", "projector_state", "l2_views", "search_corpus", "search_corpus_fts", "jobs", "diagnostics"]) db.exec(`DELETE FROM ${table}`);
+    for (const table of ["meta", "l1_events", "event_edges", "projector_state", "l2_views", "search_corpus", "search_corpus_fts", "jobs", "diagnostics"]) db.exec(`DELETE FROM ${table}`);
     db.prepare("INSERT INTO meta(key, value) VALUES (?, ?)").run("schema_version", "adr0039-l3/v1");
     const l1Events = mirrorL1Events(abrainHome, db, failures);
+    const eventEdges = mirrorEventEdges(abrainHome, db, failures);
     const l2Views = mirrorL2Views(abrainHome, db, failures);
     const searchCorpusRows = mirrorKnowledgeSearchCorpus(abrainHome, db, failures);
     const projectorState = mirrorProjectorState(abrainHome, db);
     const finishedAt = new Date().toISOString();
     db.prepare("INSERT INTO jobs(job_id, kind, status, created_at_utc, updated_at_utc, detail_json) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(`adr0039-l3-sync:${finishedAt}`, "adr0039-l3-sync", failures.length ? "failed" : "completed", startedAt, finishedAt, JSON.stringify({ l1Events, l2Views, searchCorpusRows, projectorState }));
+      .run(`adr0039-l3-sync:${finishedAt}`, "adr0039-l3-sync", failures.length ? "failed" : "completed", startedAt, finishedAt, JSON.stringify({ l1Events, eventEdges, l2Views, searchCorpusRows, projectorState }));
     const diagnosticInsert = db.prepare("INSERT INTO diagnostics(diagnostic_id, severity, code, message, created_at_utc) VALUES (?, ?, ?, ?, ?)");
     for (const failure of failures) diagnosticInsert.run(sha256Hex(failure), "error", failure.split(":")[1]?.trim() || "adr0039_l3_failure", failure, finishedAt);
     db.exec("COMMIT");
-    return { ok: failures.length === 0, dbPath, counts: { l1Events, l2Views, searchCorpusRows, projectorState, jobs: 1, diagnostics: failures.length }, failures };
+    return { ok: failures.length === 0, dbPath, counts: { l1Events, eventEdges, l2Views, searchCorpusRows, projectorState, jobs: 1, diagnostics: failures.length }, failures };
   } catch (err) {
     try { db.exec("ROLLBACK"); } catch { /* ignore rollback errors */ }
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, dbPath, counts: { l1Events: 0, l2Views: 0, searchCorpusRows: 0, projectorState: 0, jobs: 0, diagnostics: 1 }, failures: [`l3_sync_failed:${message}`] };
+    return { ok: false, dbPath, counts: { l1Events: 0, eventEdges: 0, l2Views: 0, searchCorpusRows: 0, projectorState: 0, jobs: 0, diagnostics: 1 }, failures: [`l3_sync_failed:${message}`] };
   } finally {
     db.close();
   }
