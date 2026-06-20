@@ -169,7 +169,8 @@
     "dossier:tier1-adjudicator-prompt": "node scripts/dossier-tier1-adjudicator-prompt.mjs",
     "dossier:constraint-shadow-report": "node scripts/dossier-constraint-shadow-report.mjs",
     "dossier:constraint-evidence-event": "node scripts/dossier-constraint-evidence-event.mjs",
-    "dossier:constraint-audit-replay": "node scripts/dossier-constraint-audit-replay.mjs"
+    "dossier:constraint-audit-replay": "node scripts/dossier-constraint-audit-replay.mjs",
+    "dossier:adr0039-reindex-ab": "node scripts/dossier-adr0039-reindex-ab.mjs"
   },
   "pi": {
     "extensions": [
