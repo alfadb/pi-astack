@@ -77,10 +77,16 @@ G1-G5 均收敛到 ①，并新增 4/4 一致的 G6：
 - 划线：**验证薄而硬（核心承诺不省）；其余全松（plan/状态/决策都靠 doc 自然语言）**。plan.md = SOT。
 
 ## G. 分期路线
-- **v1（薄，= living-ledger impl draft）**：`goal_check(cmd/file/git，含失败入账)` + section-aware 热区注入 + `[x]/[!]/[~]` 三态（parser 强制） + 证据账（事件源 SOT + gitignored 视图） + 决策日志（edit doc）。
-- **v2**：auto-continue 判官接证据账 / 证据账可视化（`goal_status` 展示最近 N 条 check） / GC 归档 / evidence 按 sha 去重缓存。
-- **v3（观望，数据驱动）**：第二 AI 审计 / 跨会话 goal pool / 多 goal 并行 / plan mode 只读 / criteria 依赖图——仅当 v1-v2 证明验证模型有价值才做。
-- 一句话路线：**先把 markdown 钉成 SOT、把「完成」做成需要证据的工具调用，其余一律不动；体验和重规划留待数据驱动。**
+- **v1（薄，= living-ledger impl draft）— 已实现 + live 验证**：`goal_check(cmd/file/git，含失败入账)` + section-aware 热区注入 + `[x]/[!]/[~]` 三态（parser 强制） + 证据账（事件源 SOT + gitignored 视图） + 决策日志（edit doc）。
+- **v2 — 已实现 + live 验证**：auto-continue 判官接证据账 / 证据账可视化（`goal_status` 展示最近 N 条 check） / GC 归档（goal_id 隔离 + gcEvidence 压缩 + staleByTime） / evidence 按 sha 去重缓存（仅 cmd + 有声明 inputs）。
+- **v3 — 路线裁决（2026-06-20，跨厂商 T0 盲评 5 家：gpt-5.5 / deepseek-v4-pro / kimi-k2.7-code / MiniMax-M3 / glm-5.2，主会话只主持不投票）**：「现在挑一项做」全票 NONE——数据门未达（v1/v2 仅 smoke + 自参考 dogfood，非持续真实使用证据）。逐项裁决：
+  - **第二 AI 审计 — DROP（5/5）**：违 v1 核心命题（信任=OS/git 进程边界，非第二个 LLM；AI 共享盲点）+ 本就 §F 非目标；判官已读账本只信 `[verified]`，再加审计 AI 是冗余。
+  - **criteria 依赖图 DAG — DROP（5/5）**：§F 已列过度工程；自然语言列表顺序已表依赖，形式化 DAG 会在分解事后证错时反挡正确动作，且使 plan.md 退化成 DSL。
+  - **plan mode 只读 — DROP（4/5，gpt 软化为不建子系统）**：典型机械主义；§B 已关「mode 切换」；危险操作 exec.ts 软护栏已管；prompt/约定即可达成。属 harness 层、非 goal 职责。
+  - **跨会话 goal pool — 不建注册表（DROP 2 / DEFER 3，均归结为现在不建）**：plan.md 放固定路径**本身即跨会话 pool**（§E：新会话打开 committed plan.md → `[x]` 渲染 `[!]` 待本地 re-check）；建注册表=把 §F 否决的 todo-DB 偷渡回来。需求由约定满足。
+  - **多 goal 并行 — DEFER（5/5，唯一「以后值得」能力）**：无 §F/命题冲突、有真实摩擦故事，但工程面 ≈2-3× v2（state 单例→列表、热区预算×N、判官选标的、goal_check 带 goal_id、status/dedup/GC/reconcile 全改）。**触发**：outcome-ledger 真记录到用户在同一会话为两条独立目标反复 goal_set 互相覆盖。
+- **开门数据（v3 闸的钥匙，不在原清单上）**：把 v1/v2 用到 N 个真实、非自参考的异质任务上，由 outcome-ledger 统计 `[!]`/`stale` 的有用触发 vs 被忽略噪声、verified-vs-claimed 是否拦住用户在意的漂移。这份数据才决定 v3（实质只剩「多 goal 并行」一项）是否动。
+- 一句话路线：**先把 markdown 钉成 SOT、把「完成」做成需要证据的工具调用，其余一律不动；v3 经盲评从 5 项剪到「实质 1 项且 DEFER」，体验和重规划留待真实使用数据驱动。**
 
 ## 从 codex 借的微纪律（写进注入约定，§11 of codex 分析）
 1. **不复述**：注入了状态就禁止模型在回复里复述账本（省 token）。
