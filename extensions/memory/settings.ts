@@ -32,6 +32,7 @@ export interface SearchSettings {
   stage1CompactSurface: boolean;    // P8: stage1 用紧凑 surface(meta+summary, 无 compiledTruth/timeline)做粗筛
   stage1Skip: boolean;              // ADR 0036: 跳过 stage1 LLM, stage0 top-K 直出 stage2(两阶段塔缩)
   sparseBM25: boolean;             // ADR 0036: sparse 用 char n-gram BM25(补中文/符号)替朴素子串
+  bestEffortOnNone: boolean;       // stage2 LLM 判 none + 扩召 retry 仍 none 时, 返回 stage0 排序 top-K(低置信)而非空。默认 false；依赖精准率的调用点保持空语义。
   queryRouting: boolean;           // ADR 0036 P5: toolSearch 精确直查路由(query 恰为 slug 或 ADR 编号 → 直接命中跳 LLM)
   dedupChunk0Aggregation: boolean; // ADR 0036 P4 条件1: dedup 路径 topN 只用 chunk0(head)向量, 避免 multiVector max-sim 的 false-merge 注入
   autoReconcile: boolean;          // ADR 0036 §10.6: search 时双向(stale-add ∪ orphan-prune)后台增量 reconcile(新设备/git-pull/archive/delete/纯读会话自收敛)
@@ -80,6 +81,7 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // 的 sparse 通道完全失效。BM25(ASCII 标识符 + CJK bigram + IDF 加权 + 字段
   // 权重)补 dense 的中文/精确符号/短 query 盲区, 与 dense RRF 融合。
   sparseBM25: false,
+  bestEffortOnNone: false,
   // ADR 0036 P5(dark-launch, 默认 off): toolSearch 精确查找路由。query 经规则 regex
   // (非 LLM)判定: 恰等于某 entry 的 slug, 或匹配 `ADR NNNN`/`adr-NNNN` 且唯一命中
   // adr-NNNN-* slug 时, 直接返回该 entry 跳过两次 LLM 调用(省成本+延迟)。仅 toolSearch
@@ -292,6 +294,7 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage1CompactSurface: asBoolean(search.stage1CompactSurface, DEFAULT_SEARCH_SETTINGS.stage1CompactSurface),
     stage1Skip: asBoolean(search.stage1Skip, DEFAULT_SEARCH_SETTINGS.stage1Skip),
     sparseBM25: asBoolean(search.sparseBM25, DEFAULT_SEARCH_SETTINGS.sparseBM25),
+    bestEffortOnNone: asBoolean(search.bestEffortOnNone, DEFAULT_SEARCH_SETTINGS.bestEffortOnNone),
     queryRouting: asBoolean(search.queryRouting, DEFAULT_SEARCH_SETTINGS.queryRouting),
     dedupChunk0Aggregation: asBoolean(search.dedupChunk0Aggregation, DEFAULT_SEARCH_SETTINGS.dedupChunk0Aggregation),
     autoReconcile: asBoolean(search.autoReconcile, DEFAULT_SEARCH_SETTINGS.autoReconcile),

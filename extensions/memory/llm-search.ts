@@ -898,6 +898,9 @@ interface ExecSearchResult {
   /** ADR 0035 stage0 熔断: dense embedding 不可用 → sparse-only 候选(召回面收窄,
    *  stage2 LLM 精排仍跑). 送给调用方作 REQ-002 运行状态可见信号。 */
   retrievalDegraded?: boolean;
+  /** bestEffortOnNone: stage2 LLM 判 none + 扩召 retry 仍 none 时, 不返空, 改返
+   *  stage0 排序 top-K 候选(低置信). 调用方需自行判断相关性。 */
+  lowConfidence?: boolean;
 }
 
 /** 统一内核: stage0 候选 → 双阶段 → 安全网双触发 → metrics。两个 export 函数薄包装。 */
@@ -964,6 +967,19 @@ async function executeSearch(
     }
   }
 
+  // 安全网底线(用户偏好: 宁可低置信结果也不返空 — bestEffortOnNone). 扩召 retry 仍
+  // verdict=none 时不返空: 返回 stage0 已排序的 top-finalLimit 候选作 best-effort, 标
+  // low_confidence(stage2 LLM 未确认相关, 由调用方自行判断). 仅在有真实 stage0 池
+  // (pool 非空)时触发 — 保证返回的是排序候选而非任意 corpus 头部。几乎零延迟
+  // (复用已算候选). flag 关时保持原 verdict=none 返空语义。
+  let bestEffortHits: ReturnType<typeof resultCard>[] = [];
+  if (settings.search.bestEffortOnNone && result.verdict === "none" && result.hits.length === 0 && pool && candidateEntries.length > 0) {
+    bestEffortHits = candidateEntries
+      .slice(0, finalLimit)
+      .map((e) => resultCard(e, 0.15, "best-effort: top embedding/keyword-similar entry; stage2 LLM found no confident match for this query (low confidence — verify relevance before relying on it)"));
+  }
+  const lowConfidence = bestEffortHits.length > 0;
+
   const s1 = result.stage1Usage;
   const s2 = result.stage2Usage;
   // stage0 观测探针(ADR §7 success criteria): best-dense-rank(最终 hits 在 dense
@@ -984,6 +1000,7 @@ async function executeSearch(
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     results: result.hits.length,
     verdict: result.verdict,
+    ...(lowConfidence ? { best_effort: true, best_effort_hits: bestEffortHits.length } : {}),
     stage1_surface: surface,
     stage1_ms: result.stage1Ms,
     stage2_ms: result.stage2Ms,
@@ -1003,7 +1020,15 @@ async function executeSearch(
     } : {}),
   }, projectRoot);
 
-  return { hits: result.hits, verdict: result.verdict, stage1Ms: result.stage1Ms, stage2Ms: result.stage2Ms, surface, retrievalDegraded: pool?.mode === "sparse_fallback" };
+  return {
+    hits: lowConfidence ? bestEffortHits : result.hits,
+    verdict: result.verdict,
+    stage1Ms: result.stage1Ms,
+    stage2Ms: result.stage2Ms,
+    surface,
+    retrievalDegraded: pool?.mode === "sparse_fallback",
+    ...(lowConfidence ? { lowConfidence: true } : {}),
+  };
 }
 
 // ADR 0037: 私有内核 wrapper —— 生产唯一入口是 runMemorySearch(profile, ...)。
@@ -1036,6 +1061,8 @@ export interface SearchVerdictResult {
   stage2DebugSlice?: string;
   /** ADR 0035 stage0 熔断信号(sparse-only 候选): 召回面可能不全。 */
   retrievalDegraded?: boolean;
+  /** bestEffortOnNone 兑现: hits 是 stage0 排序 top-K 兑底(stage2 LLM 未确认相关)。 */
+  lowConfidence?: boolean;
 }
 
 async function llmSearchEntriesWithVerdict(
@@ -1060,6 +1087,7 @@ async function llmSearchEntriesWithVerdict(
     totalDurationMs: Date.now() - t0,
     stage1CandidateSurface: r.surface,
     retrievalDegraded: r.retrievalDegraded,
+    ...(r.lowConfidence ? { lowConfidence: true } : {}),
   };
 }
 

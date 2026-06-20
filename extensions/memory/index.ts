@@ -359,8 +359,12 @@ export default function (pi: ExtensionAPI) {
         // 把降级信号上抛到结果, 让主会话能自我 caveat / 重试 —— 仅 degraded 时附带 banner,
         // 非 degraded 输出与既往一致(裸 cards 数组), 不进终端用户面、不每次刷屏。
         const degraded = !Array.isArray(r) && r.retrievalDegraded === true;
+        // bestEffortOnNone: stage2 LLM 判无确信匹配, 已返回 stage0 排序 top-K 兑底(低置信)。
+        const lowConf = !Array.isArray(r) && r.lowConfidence === true;
         return wrapToolResult(degraded
           ? { retrieval_degraded: true, note: "embedding 候选检索熔断为 sparse-only(稀疏召回), 召回面可能不全; stage2 LLM 精排仍在执行. 如需高保真可稍后重试.", hits: cards }
+          : lowConf
+          ? { low_confidence: true, note: "stage2 LLM 未找到确信匹配; 以下为 embedding/关键词最相似的 top-K 候选(低置信), 请自行判断相关性后再依赖.", hits: cards }
           : cards);
       } catch (err: unknown) {
         return wrapToolResult({
