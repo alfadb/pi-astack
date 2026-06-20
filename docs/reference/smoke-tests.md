@@ -94,7 +94,6 @@ status: active
 | `smoke:aggregator-llm-parse` | `scripts/smoke-aggregator-llm-parse.mjs` | aggregator LLM prompt input construction and tolerant output parsing |
 | `smoke:aggregator-structural-context` | `scripts/smoke-aggregator-structural-context.mjs` | STRUCTURAL_CONTEXT staleness lint for known-unimplemented capabilities |
 | `smoke:p15-pass1-op-breakdown` | `scripts/smoke-p15-pass1-op-breakdown.mjs` | P1.5 watchdog Pass1 op-type breakdown instrumentation |
-| `smoke:tier1-jaccard-adjudication` | `scripts/smoke-tier1-jaccard-adjudication.mjs` | Tier-1 Jaccard adjudication deterministic resolver/apply path |
 | `smoke:goal-state` | `scripts/smoke-goal-state.mjs` | goal state machine, CLI parsing, persisted view, injection block |
 | `smoke:goal-autocontinue` | `scripts/smoke-goal-autocontinue.mjs` | goal auto-continue judge, budget pre-decrement, stop/ESC gates |
 | `smoke:goal-doc-tools` | `scripts/smoke-goal-doc-tools.mjs` | document-driven goal source and goal tool registration |
@@ -110,7 +109,6 @@ These are live LLM prompt dossiers, not default release gates. They require conf
 | npm script | File | Coverage |
 |---|---|---|
 | `dossier:classifier-prompt` | `scripts/dossier-classifier-prompt.mjs` | ADR 0025 active-correction classifier prompt fixture dossier; fail-fast on provider infra errors |
-| `dossier:tier1-adjudicator-prompt` | `scripts/dossier-tier1-adjudicator-prompt.mjs` | Tier-1 Jaccard adjudicator prompt fixture dossier using configured DeepSeek provider |
 
 ## Recommended subsets
 

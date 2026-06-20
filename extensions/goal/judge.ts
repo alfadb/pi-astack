@@ -160,7 +160,7 @@ export function parseGoalJudgeVerdict(rawText: string): GoalJudgeDecision | null
   return { verdict, reason, ...(nextStep ? { next_step: nextStep } : {}) };
 }
 
-/** Run the judge LLM call (mirrors tier1-adjudicator's transport shape). */
+/** Run the judge LLM call (closed verdict space; deterministic fallback on parse/transport failure). */
 export async function runGoalJudge(
   input: GoalJudgeInput,
   deps: { judgeModel: string; judgeTimeoutMs: number; modelRegistry: unknown; signal?: AbortSignal },
