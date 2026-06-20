@@ -93,6 +93,12 @@ export interface SedimentSettings {
      *  (git-trackable namespace; B1 keeps it shadow/gitignored until B2 proves
      *  deterministic projection, B3 removes the ignore). Explicit rollback flag. */
     l2OutputRoot: "state" | "repo";
+    /** ADR 0039 B2: how the Knowledge L2 entry is projected from L1 events.
+     *  "single" (default) = one triggering event overwrites one markdown file.
+     *  "topo" = aggregate all events for a (scope, slug) identity, causal-parent
+     *  DAG topological sort, deterministic fold to one entry; single-event
+     *  degenerates byte-identically to "single". Explicit rollback flag. */
+    projectionMode: "single" | "topo";
   };
   /** ADR 0025 §4.3 Phase C.2: model for the aggregator v1 skeptical-historian
    *  LLM pass. Skeptical historian is a reasoning-heavy task; v4-pro is the
@@ -263,6 +269,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     projectOnWrite: false,
     maxReadBytes: 1_000_000,
     l2OutputRoot: "state",
+    projectionMode: "single",
   },
   // Aggregator: empty default. Configure in pi-astack-settings.json.
   aggregatorModel: "",
@@ -445,6 +452,7 @@ export function resolveSedimentSettings(): SedimentSettings {
       projectOnWrite: asBoolean((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.projectOnWrite, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.projectOnWrite),
       maxReadBytes: Math.max(1_000, Math.floor(asNumber((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.maxReadBytes, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.maxReadBytes))),
       l2OutputRoot: ((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.l2OutputRoot === "repo" ? "repo" : "state"),
+      projectionMode: ((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.projectionMode === "topo" ? "topo" : "single"),
     },
     aggregatorModel: typeof cfg.aggregatorModel === "string" && cfg.aggregatorModel.trim()
       ? cfg.aggregatorModel.trim()

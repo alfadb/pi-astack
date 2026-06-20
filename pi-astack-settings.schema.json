@@ -451,6 +451,11 @@
               "enum": ["state", "repo"],
               "default": "state",
               "description": "ADR 0039 B1. Where the Knowledge L2 projection is written. 'state' keeps the gitignored runtime-cache location ~/.abrain/.state/sediment/knowledge-projection (current default). 'repo' moves it to the git-trackable namespace ~/.abrain/l2/views/knowledge; B1 keeps it shadow until B2 proves deterministic projection and B3 removes the gitignore. Explicit rollback flag."
+            },
+            "projectionMode": {
+              "enum": ["single", "topo"],
+              "default": "single",
+              "description": "ADR 0039 B2. How a Knowledge L2 entry is projected. 'single' (default) lets one triggering event overwrite one markdown file. 'topo' aggregates all events for a (scope, slug) identity, topologically sorts the causal-parent DAG, and deterministically folds them to one entry; a single event degenerates byte-identically to 'single'. Explicit rollback flag."
             }
           }
         },

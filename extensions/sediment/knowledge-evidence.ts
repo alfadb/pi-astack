@@ -315,8 +315,22 @@ export function renderKnowledgeProjectionMarkdown(body: KnowledgeEvidenceEventBo
   return renderKnowledgeProjectionMarkdownBytes(body, eventId, outputHash);
 }
 
-function renderKnowledgeProjectionMarkdownBytes(body: KnowledgeEvidenceEventBodyV1, eventId: string, outputHash: string): string {
+interface KnowledgeRenderOverrides {
+  created?: string;
+  updated?: string;
+  setHash?: string;
+}
+
+function renderKnowledgeProjectionMarkdownBytes(
+  body: KnowledgeEvidenceEventBodyV1,
+  eventId: string,
+  outputHash: string,
+  overrides?: KnowledgeRenderOverrides,
+): string {
   const timestamp = body.created_at_utc;
+  const created = overrides?.created ?? timestamp;
+  const updated = overrides?.updated ?? timestamp;
+  const setHash = overrides?.setHash ?? eventId;
   const payload = body.payload;
   const id = body.scope.kind === "world" ? `world:${payload.slug}` : `project:${body.scope.project_id}:${payload.slug}`;
   const frontmatter = [
@@ -329,13 +343,13 @@ function renderKnowledgeProjectionMarkdownBytes(body: KnowledgeEvidenceEventBody
     `provenance: ${markdownString(payload.provenance)}`,
     "schema_version: 1",
     `title: ${markdownString(payload.title)}`,
-    `created: ${timestamp}`,
-    `updated: ${timestamp}`,
+    `created: ${created}`,
+    `updated: ${updated}`,
     `sediment_projection: knowledge-evidence/v1`,
     `sediment_projector: knowledge-projector`,
     `sediment_projector_version: adr0039-p5`,
     `sediment_template_version: knowledge-markdown/v1`,
-    `sediment_input_event_set_hash: ${eventId}`,
+    `sediment_input_event_set_hash: ${setHash}`,
     `sediment_output_hash: ${outputHash}`,
     `sediment_watermark_event_id: ${eventId}`,
     `sediment_event_id: ${eventId}`,
@@ -355,6 +369,128 @@ function renderKnowledgeProjectionMarkdownBytes(body: KnowledgeEvidenceEventBody
   ].join("\n");
 }
 
+// ─── ADR 0039 B2: deterministic topological set projection ───────────────────
+
+export interface KnowledgeEventNode {
+  eventId: string;
+  body: KnowledgeEvidenceEventBodyV1;
+}
+
+export function knowledgeIdentityKey(body: KnowledgeEvidenceEventBodyV1): string {
+  return body.scope.kind === "world"
+    ? `world::${body.payload.slug}`
+    : `project:${body.scope.project_id || "unknown"}:${body.payload.slug}`;
+}
+
+/** Collect every L1 knowledge event sharing the given (scope, slug) identity. */
+export async function collectKnowledgeEventSet(abrainHome: string, identity: string): Promise<KnowledgeEventNode[]> {
+  const root = evidenceRoot(abrainHome);
+  const nodes: KnowledgeEventNode[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".json")) {
+        try {
+          const envelope = JSON.parse(await fs.readFile(full, "utf-8")) as KnowledgeEvidenceEnvelopeV1;
+          const body = envelope.body;
+          if (body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
+          if (knowledgeIdentityKey(body) === identity) nodes.push({ eventId: envelope.event_id, body });
+        } catch { /* skip invalid event file */ }
+      }
+    }
+  };
+  await walk(root);
+  return nodes;
+}
+
+function sameLayerKey(node: KnowledgeEventNode): string {
+  // ADR 0039 §4.3 same-layer tie-break: created_at_utc, device_id,
+  // device_event_seq, event_id (event_id breaks all remaining ties).
+  const seq = typeof node.body.device_event_seq === "number" ? String(node.body.device_event_seq).padStart(20, "0") : "";
+  return [node.body.created_at_utc, node.body.device_id, seq, node.eventId].join("\u0000");
+}
+
+/** Kahn topological sort over the in-set causal-parent DAG; same-layer events
+ *  use the deterministic tie-break. Cycles fall back to tie-break order. */
+export function topoSortKnowledgeEvents(nodes: KnowledgeEventNode[]): KnowledgeEventNode[] {
+  const byId = new Map(nodes.map((n) => [n.eventId, n]));
+  const indegree = new Map<string, number>();
+  const children = new Map<string, string[]>();
+  for (const n of nodes) indegree.set(n.eventId, 0);
+  for (const n of nodes) {
+    for (const parent of n.body.causal_parents || []) {
+      if (!byId.has(parent)) continue; // out-of-set parent does not constrain ordering
+      indegree.set(n.eventId, (indegree.get(n.eventId) ?? 0) + 1);
+      children.set(parent, [...(children.get(parent) ?? []), n.eventId]);
+    }
+  }
+  const ready = nodes.filter((n) => (indegree.get(n.eventId) ?? 0) === 0).sort((a, b) => sameLayerKey(a).localeCompare(sameLayerKey(b)));
+  const out: KnowledgeEventNode[] = [];
+  const seen = new Set<string>();
+  while (ready.length > 0) {
+    const node = ready.shift()!;
+    if (seen.has(node.eventId)) continue;
+    seen.add(node.eventId);
+    out.push(node);
+    let pushed = false;
+    for (const childId of children.get(node.eventId) ?? []) {
+      indegree.set(childId, (indegree.get(childId) ?? 0) - 1);
+      if ((indegree.get(childId) ?? 0) === 0 && !seen.has(childId)) {
+        ready.push(byId.get(childId)!);
+        pushed = true;
+      }
+    }
+    if (pushed) ready.sort((a, b) => sameLayerKey(a).localeCompare(sameLayerKey(b)));
+  }
+  // Cycle / unreachable remainder: append in deterministic tie-break order.
+  if (out.length < nodes.length) {
+    for (const n of nodes.filter((x) => !seen.has(x.eventId)).sort((a, b) => sameLayerKey(a).localeCompare(sameLayerKey(b)))) out.push(n);
+  }
+  return out;
+}
+
+export interface KnowledgeSetProjection {
+  /** "delete" when the topologically-last event is a tombstone. */
+  kind: "entry" | "delete";
+  markdown?: string;
+  winnerEventId: string;
+  inputEventSetHash: string;
+}
+
+/** Deterministic fold of an event set to one entry. Last non-delete event in
+ *  topo order wins the payload; created comes from the earliest event. A single
+ *  event with no in-set parents degenerates byte-identically to the per-event
+ *  renderer (the B2 acceptance gate). */
+export function renderKnowledgeProjectionFromSet(nodes: KnowledgeEventNode[]): KnowledgeSetProjection {
+  if (nodes.length === 0) throw new Error("renderKnowledgeProjectionFromSet: empty event set");
+  const sorted = topoSortKnowledgeEvents(nodes);
+  const winner = sorted[sorted.length - 1]!;
+  const earliest = sorted[0]!;
+  const sortedIds = sorted.map((n) => n.eventId).slice().sort();
+  const inputEventSetHash = sorted.length === 1 ? winner.eventId : sha256Hex(canonicalJson(sortedIds));
+  if (winner.body.intent.operation_hint === "delete") {
+    return { kind: "delete", winnerEventId: winner.eventId, inputEventSetHash };
+  }
+  if (sorted.length === 1 && (winner.body.causal_parents?.length ?? 0) === 0) {
+    return { kind: "entry", markdown: renderKnowledgeProjectionMarkdown(winner.body, winner.eventId), winnerEventId: winner.eventId, inputEventSetHash };
+  }
+  const overrides: KnowledgeRenderOverrides = {
+    created: earliest.body.created_at_utc,
+    updated: winner.body.created_at_utc,
+    setHash: inputEventSetHash,
+  };
+  const withoutHash = renderKnowledgeProjectionMarkdownBytes(winner.body, winner.eventId, "", overrides);
+  const outputHash = sha256Hex(withoutHash);
+  return { kind: "entry", markdown: renderKnowledgeProjectionMarkdownBytes(winner.body, winner.eventId, outputHash, overrides), winnerEventId: winner.eventId, inputEventSetHash };
+}
+
 export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; envelope: KnowledgeEvidenceEnvelopeV1; settings: SedimentSettings }): Promise<ProjectKnowledgeEvidenceResult> {
   if (!args.settings.knowledgeProjector.enabled) return { ok: false, status: "disabled" };
   const body = args.envelope.body;
@@ -367,7 +503,23 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
   if (!isPathInside(root, outputPath) || !isPathInside(root, manifestPath)) return { ok: false, status: "invalid", error: "projection path escaped state root" };
   try {
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
-    if (body.intent.operation_hint === "delete") {
+    // ADR 0039 B2: in "topo" mode the entry is the deterministic fold of ALL
+    // events sharing the (scope, slug) identity; "single" keeps the per-event
+    // overwrite. A single event degenerates byte-identically across both.
+    let removed = body.intent.operation_hint === "delete";
+    let watermarkEventId = args.envelope.event_id;
+    if (args.settings.knowledgeProjector.projectionMode === "topo") {
+      const set = await collectKnowledgeEventSet(args.abrainHome, knowledgeIdentityKey(body));
+      const projection = renderKnowledgeProjectionFromSet(set.length > 0 ? set : [{ eventId: args.envelope.event_id, body }]);
+      watermarkEventId = projection.winnerEventId;
+      if (projection.kind === "delete") {
+        await fs.rm(outputPath, { force: true });
+        removed = true;
+      } else {
+        await fs.writeFile(outputPath, projection.markdown!, "utf-8");
+        removed = false;
+      }
+    } else if (body.intent.operation_hint === "delete") {
       await fs.rm(outputPath, { force: true });
     } else {
       await fs.writeFile(outputPath, renderKnowledgeProjectionMarkdown(body, args.envelope.event_id), "utf-8");
@@ -376,13 +528,13 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
     const manifest = {
       schemaVersion: "knowledge-projection-manifest/v1",
       updatedAtUtc: new Date().toISOString(),
-      latestEventId: args.envelope.event_id,
+      latestEventId: watermarkEventId,
       latestOutputPath: outputPath,
       latestScope: body.scope,
       latestOperation: body.intent.operation_hint,
     };
     await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
-    return { ok: true, status: body.intent.operation_hint === "delete" ? "removed" : "projected", outputPath, manifestPath };
+    return { ok: true, status: removed ? "removed" : "projected", outputPath, manifestPath };
   } catch (err) {
     return { ok: false, status: "write_failed", error: err instanceof Error ? err.message : String(err) };
   }

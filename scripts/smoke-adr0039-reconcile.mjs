@@ -750,4 +750,92 @@ if (repoStores.length !== 1 || !repoStores[0].root.includes(`${path.sep}l2${path
   process.exit(1);
 }
 console.log("PASS — B1 Knowledge L2 migrates to git-trackable l2/ namespace (flag-guarded, reconcile-validated).");
+
+// B2: deterministic topological set projection.
+{
+  const km = loadKnowledgeEvidenceModule();
+  const mkBody = (slug, createdAt, op, parents = [], extra = {}) => ({
+    event_schema_version: "knowledge-evidence-event/v1",
+    event_type: "knowledge_entry_observed",
+    created_at_utc: createdAt,
+    device_id: extra.device_id || "dev-a",
+    ...(extra.device_event_seq !== undefined ? { device_event_seq: extra.device_event_seq } : {}),
+    causal_parents: parents,
+    session_id: extra.session_id || "sess-1",
+    turn_id: "t1",
+    actor: { role: "assistant", id: "sediment" },
+    source: { channel: "agent_end", source_ref: "smoke:b2" },
+    intent: { domain_hint: "knowledge", operation_hint: op },
+    scope: { kind: "project", project_id: "pi-global" },
+    payload: { slug, title: extra.title || slug, kind: "fact", status: "active", provenance: "assistant-observed", confidence: 7, compiled_truth: extra.truth || `# ${slug}\n\nbody`, trigger_phrases: [], derives_from: [] },
+    sanitizer: { sanitizer_name: "smoke", sanitizer_version: "v1", status: "passed", replacements_count: 0 },
+    producer: { name: "sediment.knowledge-event-writer", version: "adr0039-p5" },
+  });
+
+  // (1) degeneration: single event with no parents == per-event renderer, byte-identical
+  const soloBody = mkBody("b2-solo", "2026-06-20T10:00:00.000Z", "create");
+  const soloId = sha256Hex(canonicalJson(soloBody));
+  const single = km.renderKnowledgeProjectionMarkdown(soloBody, soloId);
+  const fromSetSolo = km.renderKnowledgeProjectionFromSet([{ eventId: soloId, body: soloBody }]);
+  if (fromSetSolo.kind !== "entry" || fromSetSolo.markdown !== single || fromSetSolo.inputEventSetHash !== soloId) {
+    console.log("FAIL — B2 single-event degeneration is not byte-identical to per-event renderer");
+    process.exit(1);
+  }
+
+  // (2) determinism: same set in any input order → identical bytes + set hash
+  const createBody = mkBody("b2-multi", "2026-06-20T10:00:00.000Z", "create", [], { title: "old-title" });
+  const createId = sha256Hex(canonicalJson(createBody));
+  const updateBody = mkBody("b2-multi", "2026-06-20T10:10:00.000Z", "update", [], { title: "new-title", truth: "# new\n\nupdated body" });
+  const updateId = sha256Hex(canonicalJson(updateBody));
+  const a = km.renderKnowledgeProjectionFromSet([{ eventId: createId, body: createBody }, { eventId: updateId, body: updateBody }]);
+  const b = km.renderKnowledgeProjectionFromSet([{ eventId: updateId, body: updateBody }, { eventId: createId, body: createBody }]);
+  if (a.markdown !== b.markdown || a.inputEventSetHash !== b.inputEventSetHash) {
+    console.log("FAIL — B2 projection is not order-deterministic");
+    process.exit(1);
+  }
+
+  // (3) multi-event fold: latest event wins payload, earliest supplies created,
+  //     input_event_set_hash is the Merkle of sorted ids, winner is the update.
+  const expectedSetHash = sha256Hex(canonicalJson([createId, updateId].slice().sort()));
+  if (a.winnerEventId !== updateId || a.inputEventSetHash !== expectedSetHash) {
+    console.log(`FAIL — B2 winner/sethash wrong: ${JSON.stringify({ w: a.winnerEventId, h: a.inputEventSetHash, e: expectedSetHash })}`);
+    process.exit(1);
+  }
+  if (!a.markdown.includes("created: 2026-06-20T10:00:00.000Z") || !a.markdown.includes("updated: 2026-06-20T10:10:00.000Z") || !a.markdown.includes(`sediment_event_id: ${updateId}`) || !a.markdown.includes("title: new-title")) {
+    console.log("FAIL — B2 multi-event fold did not use earliest-created / winner-payload");
+    process.exit(1);
+  }
+
+  // (4) causal edge overrides timestamp: child wins even when its created_at is earlier
+  const parentLate = mkBody("b2-causal", "2026-06-20T12:00:00.000Z", "create");
+  const parentLateId = sha256Hex(canonicalJson(parentLate));
+  const childEarly = mkBody("b2-causal", "2026-06-20T09:00:00.000Z", "update", [parentLateId], { title: "child-wins" });
+  const childEarlyId = sha256Hex(canonicalJson(childEarly));
+  const causal = km.renderKnowledgeProjectionFromSet([{ eventId: childEarlyId, body: childEarly }, { eventId: parentLateId, body: parentLate }]);
+  if (causal.winnerEventId !== childEarlyId || !causal.markdown.includes("title: child-wins")) {
+    console.log(`FAIL — B2 causal DAG did not override timestamp ordering: ${causal.winnerEventId}`);
+    process.exit(1);
+  }
+
+  // (5) delete tombstone: topologically-last delete yields no entry
+  const delBody = mkBody("b2-multi", "2026-06-20T10:20:00.000Z", "delete");
+  const delId = sha256Hex(canonicalJson(delBody));
+  const tomb = km.renderKnowledgeProjectionFromSet([{ eventId: createId, body: createBody }, { eventId: updateId, body: updateBody }, { eventId: delId, body: delBody }]);
+  if (tomb.kind !== "delete") {
+    console.log("FAIL — B2 delete tombstone not detected");
+    process.exit(1);
+  }
+
+  // (6) collectKnowledgeEventSet reads the full identity set from L1
+  const setFixture = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-b2-collect-"));
+  for (const [id, body] of [[createId, createBody], [updateId, updateBody]]) {
+    writeFile(expectedEventPath(setFixture, id), `${JSON.stringify({ schema: "knowledge-evidence-envelope/v1", canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: id, body_hash: id, body }, null, 0)}\n`);
+  }
+  const collected = await km.collectKnowledgeEventSet(setFixture, km.knowledgeIdentityKey(createBody));
+  if (collected.length !== 2) {
+    console.log(`FAIL — B2 collectKnowledgeEventSet wrong count: ${collected.length}`);
+    process.exit(1);
+  }
+  console.log("PASS — B2 deterministic topological projection (degeneration + determinism + fold + causal + tombstone + collect).");
+}
 process.exit(0);
