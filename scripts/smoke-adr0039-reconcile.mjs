@@ -375,7 +375,7 @@ function validateConstraintShadow(abrainHome, opts) {
 
 function gitStatusPorcelain(cwd) {
   try {
-    return String(fs.existsSync(path.join(cwd, ".git")) ? execFileSync("git", ["-C", cwd, "status", "--porcelain"], { encoding: "utf8" }) : "");
+    return String(fs.existsSync(path.join(cwd, ".git")) ? execFileSync("git", ["-C", cwd, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" }) : "");
   } catch {
     return "";
   }
@@ -511,4 +511,19 @@ if (!dirty.failures.some((failure) => failure.includes("body_hash_mismatch"))) {
   process.exit(1);
 }
 console.log("PASS — corrupted fixture is rejected.");
+
+const dirtyViewFixture = await buildFixtureTree();
+execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "init"], { encoding: "utf8" });
+execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "config", "user.email", "adr0039-smoke@example.invalid"], { encoding: "utf8" });
+execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "config", "user.name", "ADR0039 Smoke"], { encoding: "utf8" });
+execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "add", "."], { encoding: "utf8" });
+execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "commit", "-m", "baseline"], { encoding: "utf8" });
+const dirtyProjectedPath = listFiles(path.join(dirtyViewFixture.abrainHome, ".state", "sediment", "knowledge-projection", "latest"), (file) => file.endsWith(".md"))[0];
+writeFile(dirtyProjectedPath, `${fs.readFileSync(dirtyProjectedPath, "utf8")}\n<!-- dirty derived view -->\n`);
+const dirtyView = reconcile(dirtyViewFixture.abrainHome, { staleAfterMs: 24 * 60 * 60 * 1000, minCoverageRatio: 1 });
+if (!dirtyView.failures.some((failure) => failure.includes("dirty_derived_view:"))) {
+  console.log("FAIL — dirty L2 fixture did not trigger dirty_derived_view");
+  process.exit(1);
+}
+console.log("PASS — dirty L2 fixture is rejected.");
 process.exit(0);
