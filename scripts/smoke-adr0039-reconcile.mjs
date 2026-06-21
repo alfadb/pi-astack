@@ -7,7 +7,7 @@
  * a real tree and refreshes only the derived ADR0039 L3 SQLite mirror.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { runBackfill as runLegacyBackfill, buildLegacyImportBody, legacyKnowledgeEntries } from "./backfill-legacy-knowledge.mjs";
 import crypto from "node:crypto";
@@ -409,32 +409,120 @@ function readDecisionInputRoot(decisionPath) {
   return String(decision.inputRootHash || decision.input_root_hash || "");
 }
 
+// ADR0039 guard-hardening (4xT0 unanimous 2026-06-21). Constraint-shadow
+// liveness is a LOGICAL set-difference over constraint-evidence events only,
+// discriminated by the PEEKED top-level envelope `schema` (never a substring --
+// knowledge bodies can contain the literal schema string). fs-mtime is NOT used
+// (non-deterministic across clone/checkout). Mirrors NS-2 FOREIGN_SKIP allowlist.
+const CONSTRAINT_EVIDENCE_ENVELOPE_SCHEMA = "constraint-evidence-envelope/v1";
+const KNOWN_L1_ENVELOPE_SCHEMAS = new Set([
+  "constraint-evidence-envelope/v1",
+  "knowledge-evidence-envelope/v1",
+  "constraint-projection-envelope/v1",
+]);
+function sanitizeSchemaLabel(value) {
+  return String(value).replace(/[^\x20-\x7e]/g, "").slice(0, 64);
+}
+function humanizeMs(ms) {
+  const minutes = Math.max(0, Math.floor(ms / 60000));
+  const hours = Math.floor(minutes / 60);
+  return hours > 0 ? `${hours}h${minutes % 60}m` : `${minutes}m`;
+}
+function spawnSyncGit(cwd, args) {
+  const r = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+function scanConstraintEvidenceEvents(abrainHome) {
+  const events = [];
+  const unknown = new Set();
+  for (const file of listFiles(path.join(abrainHome, "l1", "events", "sha256"), (f) => f.endsWith(".json"))) {
+    let env;
+    try { env = JSON.parse(fs.readFileSync(file, "utf8")); } catch { continue; }
+    const schema = env && typeof env.schema === "string" ? env.schema : undefined;
+    if (schema === CONSTRAINT_EVIDENCE_ENVELOPE_SCHEMA) {
+      events.push({ eventId: String(env.event_id || ""), createdAtUtc: String(env.body?.created_at_utc || "") });
+    } else if (schema === undefined || !KNOWN_L1_ENVELOPE_SCHEMAS.has(schema)) {
+      unknown.add(sanitizeSchemaLabel(schema ?? "(none)"));
+    }
+  }
+  return { events, unknown };
+}
+
+// Returns { present, warnings(advisory, never blocks), liveness(standalone
+// reconcile non-zero, NOT push-blocking) }. The constraint shadow bundle lives
+// under gitignored .state, so NOTHING here is push-blocking (ADR0039 §6 accepts
+// stale). §12 dead-projector + unknown L1 schema are surfaced as liveness so a
+// standalone `reconcile:adr0039` (CI) goes red without blocking pushes.
 function validateConstraintShadow(abrainHome, opts) {
   const latest = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
-  if (!fs.existsSync(latest)) return { present: false, failures: [] };
-  const failures = [];
-  const required = ["decision.json", "compiled-view.md", "event-coverage.json"];
-  for (const name of required) {
-    if (!fs.existsSync(path.join(latest, name))) failures.push(`constraint-shadow/latest: missing_${name}`);
-  }
+  if (!fs.existsSync(latest)) return { present: false, warnings: [], liveness: [] };
+  const warnings = [];
+  const liveness = [];
   const decisionPath = path.join(latest, "decision.json");
-  const compiledPath = path.join(latest, "compiled-view.md");
   const coveragePath = path.join(latest, "event-coverage.json");
-  const decisionMtime = fs.existsSync(decisionPath) ? fs.statSync(decisionPath).mtimeMs : 0;
-  const compiledMtime = fs.existsSync(compiledPath) ? fs.statSync(compiledPath).mtimeMs : 0;
-  const coverageMtime = fs.existsSync(coveragePath) ? fs.statSync(coveragePath).mtimeMs : 0;
-  const newestEventMtime = Math.max(0, ...listFiles(path.join(abrainHome, "l1", "events"), (file) => file.endsWith(".json")).map((file) => fs.statSync(file).mtimeMs));
-  if (newestEventMtime > 0 && decisionMtime + opts.staleAfterMs < newestEventMtime) failures.push("constraint-shadow/latest: stale_against_l1_events");
-  if (compiledMtime && decisionMtime && compiledMtime + 1000 < decisionMtime) failures.push("constraint-shadow/latest: compiled_view_older_than_decision");
-  if (coverageMtime && decisionMtime && coverageMtime + 1000 < decisionMtime) failures.push("constraint-shadow/latest: coverage_older_than_decision");
-  const inputRootHash = readDecisionInputRoot(decisionPath);
-  if (inputRootHash && !/^[0-9a-f]{64}$/.test(inputRootHash)) failures.push("constraint-shadow/latest/decision.json: invalid_input_root_hash");
-  if (fs.existsSync(coveragePath)) {
-    const coverage = readJson(coveragePath);
-    const ratio = Number(coverage.summary?.coverageRatio ?? coverage.summary?.coverage_ratio ?? coverage.coverageRatio ?? coverage.coverage_ratio ?? 0);
-    if (!Number.isFinite(ratio) || ratio < opts.minCoverageRatio) failures.push(`constraint-shadow/latest/event-coverage.json: coverage_below_min:${ratio}`);
+  for (const name of ["decision.json", "compiled-view.md", "event-coverage.json"]) {
+    if (!fs.existsSync(path.join(latest, name))) warnings.push(`constraint-shadow/latest: missing_${name}`);
   }
-  return { present: true, failures };
+  const inputRootHash = readDecisionInputRoot(decisionPath);
+  if (inputRootHash && !/^[0-9a-f]{64}$/.test(inputRootHash)) warnings.push("constraint-shadow/latest/decision.json: invalid_input_root_hash");
+
+  const { events: evidenceEvents, unknown } = scanConstraintEvidenceEvents(abrainHome);
+  for (const schema of unknown) liveness.push(`constraint-shadow: unknown_envelope_schema_in_l1:${schema}`);
+
+  let projected = null;
+  if (fs.existsSync(coveragePath)) {
+    try {
+      const coverage = readJson(coveragePath);
+      const ratio = Number(coverage.summary?.coverageRatio ?? coverage.summary?.coverage_ratio ?? coverage.coverageRatio ?? coverage.coverage_ratio ?? 0);
+      if (!Number.isFinite(ratio) || ratio < opts.minCoverageRatio) warnings.push(`constraint-shadow/latest/event-coverage.json: coverage_below_min:${ratio}`);
+      projected = new Set((coverage.rows ?? []).map((row) => String(row.eventId || "")).filter(Boolean));
+    } catch {
+      warnings.push("constraint-shadow/latest/event-coverage.json: unreadable_§12_skipped");
+    }
+  } else {
+    warnings.push("constraint-shadow/latest/event-coverage.json: missing_§12_skipped");
+  }
+
+  if (projected) {
+    const queued = evidenceEvents.filter((event) => event.eventId && !projected.has(event.eventId));
+    if (queued.length) {
+      warnings.push(`constraint-shadow: stale_per_§6:queued_${queued.length}`);
+      const now = Date.now();
+      const deadProjectorAfterMs = Number(opts.deadProjectorAfterMs ?? 4 * 60 * 60 * 1000);
+      const aged = queued
+        .map((event) => ({ ageMs: event.createdAtUtc ? now - Date.parse(event.createdAtUtc) : NaN }))
+        .filter((event) => Number.isFinite(event.ageMs) && event.ageMs > deadProjectorAfterMs);
+      if (aged.length) {
+        const maxAgeMs = Math.max(...aged.map((event) => event.ageMs));
+        liveness.push(`constraint-shadow: §12_dead_projector:queued_${aged.length}:max_age_${humanizeMs(maxAgeMs)}`);
+      }
+    }
+  }
+  return { present: true, warnings, liveness };
+}
+
+// ADR0039 §4.2 L1 append-only (4xT0 R-B): the not-yet-pushed range may only ADD
+// files under l1/. Modify/delete/copy/type-change of an existing L1 event breaks
+// the content-addressed immutable-by-path invariant on PUSHED content = blocker.
+// Logic lives here (single source of truth; standalone reconcile surfaces it) and
+// is enforced at pre-push via the existing spawn. Graceful skip+WARN when not a
+// git repo or no upstream (fresh clone / first push) so CI after a clean push
+// does not go permanently red. --no-renames => a rename shows as D+A; the D blocks.
+function validateL1AppendOnlyOnPushedRange(abrainHome) {
+  if (!fs.existsSync(path.join(abrainHome, ".git"))) return { failures: [], warnings: ["l1_append_only: skipped:not_a_git_repo"] };
+  const upstream = spawnSyncGit(abrainHome, ["rev-parse", "--verify", "--quiet", "@{u}"]);
+  if (upstream.status !== 0 || !upstream.stdout.trim()) return { failures: [], warnings: ["l1_append_only: skipped:no_range"] };
+  const diff = spawnSyncGit(abrainHome, ["diff", "--name-status", "--no-renames", "-z", "@{u}..HEAD", "--", "l1/"]);
+  if (diff.status !== 0) return { failures: [], warnings: ["l1_append_only: skipped:git_diff_failed"] };
+  const failures = [];
+  const tokens = diff.stdout.split("\0").filter(Boolean);
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const code = tokens[i][0];
+    const rel = tokens[i + 1];
+    if (code === "A") continue;
+    failures.push(`l1_append_only_violated:${code}:${rel}`);
+  }
+  return { failures, warnings: [] };
 }
 
 function gitStatusPorcelain(cwd) {
@@ -585,6 +673,7 @@ function loadRuntimeThresholds() {
   return {
     staleAfterMs: Number(compiled.staleAfterMs ?? shadowAuto.eventStaleAfterMs ?? 24 * 60 * 60 * 1000),
     minCoverageRatio: Number(compiled.minCoverageRatio ?? 1),
+    deadProjectorAfterMs: Number(cfg.sediment?.constraintShadowCompiler?.deadProjectorAfterMs ?? 4 * 60 * 60 * 1000),
   };
 }
 
@@ -598,12 +687,18 @@ function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   const l3 = validateL3Store(abrainHome, knowledgeLatestDir);
   const coverage = computeLegacyKnowledgeCoverage(abrainHome);
   const dirty = validateDirtyDerived(abrainHome);
+  const l1AppendOnly = validateL1AppendOnlyOnPushedRange(abrainHome);
   const l3SearchCorpusFailures = [];
   if (l3.counts && Number(l3.counts.searchCorpusRows ?? 0) !== Number(knowledge.searchCorpusRows ?? 0)) {
     l3SearchCorpusFailures.push(`adr0039-l3: search_corpus_row_mismatch:${l3.counts.searchCorpusRows ?? 0}:${knowledge.searchCorpusRows ?? 0}`);
   }
-  const failures = [...l1.failures, ...knowledge.failures, ...constraint.failures, ...constraintL2.failures, ...l3.failures, ...l3SearchCorpusFailures, ...dirty.failures];
-  return { abrainHome, l1, knowledge, constraint, constraintL2, l3, coverage, dirty, failures };
+  // blocker tier = PUSHED-content integrity only (drives pre-push block + standalone non-zero).
+  const failures = [...l1.failures, ...knowledge.failures, ...constraintL2.failures, ...l3.failures, ...l3SearchCorpusFailures, ...dirty.failures, ...l1AppendOnly.failures];
+  // liveness tier = standalone reconcile non-zero (CI alarm) but NOT push-blocking (gitignored .state).
+  const liveness = [...(constraint.liveness ?? [])];
+  // advisory tier = WARN only, never affects exit code.
+  const warnings = [...(constraint.warnings ?? []), ...(l1AppendOnly.warnings ?? [])];
+  return { abrainHome, l1, knowledge, constraint, constraintL2, l3, coverage, dirty, l1AppendOnly, failures, liveness, warnings };
 }
 
 function printResult(result) {
@@ -623,11 +718,16 @@ function printResult(result) {
   console.log(`constraint_shadow_present: ${result.constraint.present}`);
   console.log(`constraint_l2_present: ${result.constraintL2?.present ?? false}`);
   console.log(`l3_db: ${result.l3.dbPath || "unavailable"}`);
+  for (const warning of result.warnings ?? []) console.log(`  WARN  ${warning}`);
+  for (const signal of result.liveness ?? []) console.log(`  LIVENESS  ${signal}`);
   if (result.failures.length) {
     for (const failure of result.failures) console.log(`  FAIL  ${failure}`);
-    console.log(`FAIL — ${result.failures.length} reconcile check(s) failed.`);
+    console.log(`FAIL — ${result.failures.length} reconcile blocker(s) failed.`);
   } else {
-    console.log("PASS — ADR0039 reconcile checks passed.");
+    console.log("PASS — ADR0039 reconcile push-gate checks passed.");
+  }
+  if ((result.liveness ?? []).length) {
+    console.log(`LIVENESS — ${result.liveness.length} non-blocking projector-liveness signal(s) (standalone reconcile non-zero; not push-blocking).`);
   }
 }
 
@@ -687,10 +787,14 @@ async function buildFixtureTree(l2OutputRoot = "state") {
 }
 
 if (hasFlag("abrain")) {
+  const pushGateOnly = hasFlag("push-gate-only");
   const abrainHome = path.resolve(expandHome(arg("abrain", path.join(os.homedir(), ".abrain"))));
   const result = reconcile(abrainHome);
   printResult(result);
-  process.exit(result.failures.length ? 1 : 0);
+  // pre-push passes --push-gate-only: only blocker-tier (pushed content) blocks.
+  // standalone (CI): blocker + liveness (§12 dead-projector / unknown schema) -> non-zero.
+  const exitNonZero = pushGateOnly ? result.failures.length > 0 : (result.failures.length + result.liveness.length) > 0;
+  process.exit(exitNonZero ? 1 : 0);
 }
 
 console.log("ADR0039 reconcile smoke");
@@ -724,6 +828,43 @@ if (!dirtyView.failures.some((failure) => failure.includes("dirty_derived_view:"
   process.exit(1);
 }
 console.log("PASS — dirty L2 fixture is rejected.");
+
+// l1-append-only: the not-yet-pushed range (@{u}..HEAD) may only ADD under l1/.
+// In-place modify of an existing (already-pushed) L1 event blocks.
+{
+  const apFixture = await buildFixtureTree();
+  const home = apFixture.abrainHome;
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-l1ap-remote-"));
+  execFileSync("git", ["init", "--bare", "-b", "main", bare], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "init", "-b", "main"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "config", "user.email", "adr0039-smoke@example.invalid"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "config", "user.name", "ADR0039 Smoke"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "add", "."], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "commit", "-m", "baseline"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "remote", "add", "origin", bare], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "push", "-u", "origin", "main"], { encoding: "utf8" });
+  const originalEvent = listFiles(path.join(home, "l1", "events"), (file) => file.endsWith(".json"))[0];
+  // ADD a brand-new l1 event in the pushable range -> allowed (status A).
+  const newId = "a".repeat(64);
+  writeFile(expectedEventPath(home, newId), `${JSON.stringify({ schema: "knowledge-evidence-envelope/v1", event_id: newId, body_hash: newId, body: {} })}\n`);
+  execFileSync("git", ["-C", home, "add", "l1"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "commit", "-m", "add l1 event"], { encoding: "utf8" });
+  const addOnly = validateL1AppendOnlyOnPushedRange(home);
+  if (addOnly.failures.length) {
+    console.log(`FAIL — l1-append-only flagged a pure ADD: ${JSON.stringify(addOnly.failures)}`);
+    process.exit(1);
+  }
+  // MODIFY an existing already-pushed l1 event -> blocked (status M).
+  writeFile(originalEvent, `${fs.readFileSync(originalEvent, "utf8")}\n`);
+  execFileSync("git", ["-C", home, "add", "l1"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "commit", "-m", "tamper l1 event"], { encoding: "utf8" });
+  const tampered = validateL1AppendOnlyOnPushedRange(home);
+  if (!tampered.failures.some((failure) => failure.startsWith("l1_append_only_violated:M"))) {
+    console.log(`FAIL — l1-append-only did not block an in-place modify: ${JSON.stringify(tampered.failures)}`);
+    process.exit(1);
+  }
+  console.log("PASS — l1-append-only allows ADD, blocks in-place modify in pushed range.");
+}
 
 if (process.versions.sqlite) {
   const ftsFixture = await buildFixtureTree();
