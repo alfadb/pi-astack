@@ -307,11 +307,13 @@ export type ConstraintCompilerInvoker = (request: ConstraintCompilerInvokeReques
 export type ParsedConstraintCompilerDecision = {
   ok: true;
   decision: ConstraintCompilerDecision;
+  rawOutput: string;
   rawOutputHash: string;
   parsedOutputHash: string;
 } | {
   ok: false;
   diagnostic: ConstraintShadowDiagnostic;
+  rawOutput: string;
   rawOutputHash: string;
 };
 
@@ -319,6 +321,7 @@ export type ConstraintCompilerRunResult = {
   ok: true;
   decision: ConstraintCompilerDecision;
   prompt: ConstraintCompilerPrompt;
+  rawOutput: string;
   rawOutputHash: string;
   parsedOutputHash: string;
   modelRef?: string;
@@ -327,6 +330,7 @@ export type ConstraintCompilerRunResult = {
   ok: false;
   prompt: ConstraintCompilerPrompt;
   diagnostic: ConstraintShadowDiagnostic;
+  rawOutput?: string;
   rawOutputHash?: string;
   modelRef?: string;
   durationMs?: number;
@@ -471,6 +475,7 @@ export type ConstraintShadowDiagnosticCode =
   | "SC_COMPILER_PARSE_FAILED"
   | "SC_COMPILER_VALIDATION_FAILED"
   | "SC_COMPILER_ITEM_REJECTED"
+  | "SC_MAPPING_DISPOSITION_NORMALIZED"
   | "SC_SHADOW_ONLY_VIOLATION_ATTEMPT"
   | "SC_UNCLASSIFIED"
   | "SC_EVENT_READ_ERROR"

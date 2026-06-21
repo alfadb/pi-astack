@@ -175,10 +175,38 @@ function hasMatchingRescope(decision: ConstraintCompilerDecision, source: Legacy
 function dispositionForSource(decision: ConstraintCompilerDecision, sourceId: string): ConstraintSourceDisposition | null {
   if (decision.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(sourceId))) return "excluded";
   if (decision.unresolved.some((unresolved) => unresolved.sourceRecordIds.includes(sourceId))) return "unresolved";
-  if (decision.constraints.some((constraint) => constraint.sourceRecordIds.includes(sourceId))) return "compiled";
   if (decision.merges.some((merge) => merge.sourceRecordIds.includes(sourceId))) return "merged_source";
+  if (decision.constraints.some((constraint) => constraint.sourceRecordIds.includes(sourceId))) return "compiled";
   if (decision.diagnostics.some((diagnostic) => diagnostic.sourceRecordIds.includes(sourceId))) return "diagnostic";
   return null;
+}
+
+function hasConstraintMergeOverlap(decision: ConstraintCompilerDecision, sourceId: string): boolean {
+  return decision.constraints.some((constraint) => constraint.sourceRecordIds.includes(sourceId))
+    && decision.merges.some((merge) => merge.sourceRecordIds.includes(sourceId));
+}
+
+function isCompiledMergeDisposition(disposition: ConstraintSourceDisposition): boolean {
+  return disposition === "compiled" || disposition === "merged_source";
+}
+
+function mappingNormalizationDiagnostic(sourceRecordId: string, llmStated: ConstraintSourceDisposition, canonical: ConstraintSourceDisposition): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_MAPPING_DISPOSITION_NORMALIZED",
+    severity: "info",
+    message: "compiler mapping disposition normalized to canonical derived disposition",
+    sourceRecordIds: [sourceRecordId],
+    data: {
+      sourceKey: sourceRecordId,
+      llmStated,
+      canonical,
+      action: "accepted-as-equivalent",
+    },
+  });
+}
+
+function isValidationHashDiagnostic(diagnostic: ConstraintShadowDiagnostic): boolean {
+  return diagnostic.code !== "SC_MAPPING_DISPOSITION_NORMALIZED";
 }
 
 function quarantineDiagnostic(context: string, constraint: ConstraintDecisionConstraint, reason: string): ConstraintShadowDiagnostic {
@@ -340,12 +368,20 @@ export function validateConstraintCompilerDecision(
   const mappings: ConstraintDecisionMapping[] = [];
   decision.mappings.forEach((mapping: ConstraintDecisionMapping, index) => {
     if (!sourceIds.has(mapping.sourceRecordId)) throw new Error(`mapping[${index}] references unknown source ${mapping.sourceRecordId}`);
-    const actualDisposition = dispositionForSource({ ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, diagnostics }, mapping.sourceRecordId);
+    const derivedDecision = { ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, diagnostics };
+    const actualDisposition = dispositionForSource(derivedDecision, mapping.sourceRecordId);
     if (actualDisposition && mapping.disposition !== actualDisposition) {
-      if (!quarantinedSourceIds.has(mapping.sourceRecordId)) {
+      const compiledMergeEquivalent = hasConstraintMergeOverlap(derivedDecision, mapping.sourceRecordId)
+        && isCompiledMergeDisposition(mapping.disposition)
+        && isCompiledMergeDisposition(actualDisposition);
+      if (compiledMergeEquivalent) {
+        diagnostics.push(mappingNormalizationDiagnostic(mapping.sourceRecordId, mapping.disposition, actualDisposition));
+        mappings.push({ ...mapping, disposition: actualDisposition });
+      } else if (quarantinedSourceIds.has(mapping.sourceRecordId)) {
+        mappings.push({ ...mapping, disposition: actualDisposition });
+      } else {
         throw new Error(`mapping[${index}] disposition ${mapping.disposition} does not match actual ${actualDisposition}`);
       }
-      mappings.push({ ...mapping, disposition: actualDisposition });
     } else {
       mappings.push(mapping);
     }
@@ -371,6 +407,7 @@ export function validateConstraintCompilerDecision(
     }
   }
 
-  const validationHash = sha256Hex(stableCanonicalize({ ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, mappings, diagnostics }));
+  const validationHashDiagnostics = diagnostics.filter(isValidationHashDiagnostic);
+  const validationHash = sha256Hex(stableCanonicalize({ ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, mappings, diagnostics: validationHashDiagnostics }));
   return { ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, mappings, diagnostics, validationHash };
 }

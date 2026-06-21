@@ -69,6 +69,7 @@ export function parseConstraintCompilerDecision(rawText: string, inputRootHash: 
   if (!jsonText) {
     return {
       ok: false,
+      rawOutput,
       rawOutputHash,
       diagnostic: makeDiagnostic({
         code: "SC_COMPILER_PARSE_FAILED",
@@ -84,6 +85,7 @@ export function parseConstraintCompilerDecision(rawText: string, inputRootHash: 
     if (!decision) {
       return {
         ok: false,
+        rawOutput,
         rawOutputHash,
         diagnostic: makeDiagnostic({
           code: "SC_COMPILER_PARSE_FAILED",
@@ -95,12 +97,14 @@ export function parseConstraintCompilerDecision(rawText: string, inputRootHash: 
     return {
       ok: true,
       decision,
+      rawOutput,
       rawOutputHash,
       parsedOutputHash: sha256Hex(stableCanonicalize(decision)),
     };
   } catch (err) {
     return {
       ok: false,
+      rawOutput,
       rawOutputHash,
       diagnostic: makeDiagnostic({
         code: "SC_COMPILER_PARSE_FAILED",
@@ -154,6 +158,7 @@ export async function runConstraintCompilerWithInvoker(input: {
       prompt: input.prompt,
       modelRef: invoked.modelRef ?? input.modelRef,
       durationMs: invoked.durationMs,
+      rawOutput: parsed.rawOutput,
       rawOutputHash: parsed.rawOutputHash,
       diagnostic: parsed.diagnostic,
     };
@@ -163,6 +168,7 @@ export async function runConstraintCompilerWithInvoker(input: {
     ok: true,
     prompt: input.prompt,
     decision: parsed.decision,
+    rawOutput: parsed.rawOutput,
     rawOutputHash: parsed.rawOutputHash,
     parsedOutputHash: parsed.parsedOutputHash,
     modelRef: invoked.modelRef ?? input.modelRef,

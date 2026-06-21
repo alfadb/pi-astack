@@ -13,8 +13,8 @@ import type {
 function dispositionForSource(decision: ValidatedConstraintCompilerDecision, sourceId: string): ConstraintSourceDisposition | undefined {
   if (decision.exclusions.some((item) => item.sourceRecordIds.includes(sourceId))) return "excluded";
   if (decision.unresolved.some((item) => item.sourceRecordIds.includes(sourceId))) return "unresolved";
-  if (decision.constraints.some((item) => item.sourceRecordIds.includes(sourceId))) return "compiled";
   if (decision.merges.some((item) => item.sourceRecordIds.includes(sourceId))) return "merged_source";
+  if (decision.constraints.some((item) => item.sourceRecordIds.includes(sourceId))) return "compiled";
   if (decision.diagnostics.some((item) => item.sourceRecordIds.includes(sourceId))) return "diagnostic";
   return undefined;
 }

@@ -13,6 +13,7 @@ import { fixateConstraintDecisionAndRenderL2 } from "./projection";
 import { buildCorpusSplitReport, type CorpusSplitReport } from "./corpus-split";
 import { validateConstraintCompilerDecision } from "./validate-decision";
 import type {
+  ConstraintCompilerDecision,
   ConstraintCompilerPrompt,
   ConstraintDiffReport,
   ConstraintEventCoverageReport,
@@ -78,7 +79,9 @@ async function writeArtifacts(input: {
   runId: string;
   normalized: NormalizeConstraintResult;
   prompt?: ConstraintCompilerPrompt;
+  rawOutput?: string;
   rawOutputHash?: string;
+  parsedDecision?: ConstraintCompilerDecision;
   decision?: ValidatedConstraintCompilerDecision;
   view?: RenderedConstraintView;
   diff?: ConstraintDiffReport;
@@ -102,6 +105,8 @@ async function writeArtifacts(input: {
   const files = {
     input: "input.normalized.json",
     prompt: "prompt.txt",
+    rawOutput: "raw-output.txt",
+    parsedDecision: "parsed-decision.json",
     decision: "decision.json",
     view: "compiled-view.md",
     diffJson: "diff.json",
@@ -115,6 +120,8 @@ async function writeArtifacts(input: {
   const writeSet = async (dir: string): Promise<void> => {
     await writeJson(path.join(dir, files.input), input.normalized);
     if (input.prompt) await writeText(path.join(dir, files.prompt), input.prompt.text);
+    if (input.rawOutput !== undefined) await writeText(path.join(dir, files.rawOutput), input.rawOutput);
+    if (input.parsedDecision) await writeJson(path.join(dir, files.parsedDecision), input.parsedDecision);
     if (input.decision) await writeJson(path.join(dir, files.decision), input.decision);
     if (input.view) await writeText(path.join(dir, files.view), input.view.markdown);
     if (input.diff) {
@@ -252,6 +259,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
       runId,
       normalized,
       prompt,
+      rawOutput: compile.rawOutput,
       rawOutputHash: compile.rawOutputHash,
       diagnostics,
       ok: false,
@@ -285,7 +293,9 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
       runId,
       normalized,
       prompt,
+      rawOutput: compile.rawOutput,
       rawOutputHash: compile.rawOutputHash,
+      parsedDecision: compile.decision,
       diagnostics,
       ok: false,
     }) : undefined;

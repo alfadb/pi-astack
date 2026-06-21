@@ -419,6 +419,20 @@ check("validator accepts complete fixture decision", () => {
   assert(validated.constraints.every((constraint) => constraint.constraintId.startsWith("shadow:")), "constraint ids not derived");
 });
 
+check("validator canonicalizes compiled/merged_source mapping overlap", () => {
+  const compiledVariant = { ...decision, mappings: decision.mappings.map((mapping) => (mapping.sourceRecordId === globalSource.sourceId || mapping.sourceRecordId === duplicateSource.sourceId) ? { ...mapping, disposition: "compiled" } : mapping) };
+  const mergedVariant = { ...decision, mappings: decision.mappings.map((mapping) => (mapping.sourceRecordId === globalSource.sourceId || mapping.sourceRecordId === duplicateSource.sourceId) ? { ...mapping, disposition: "merged_source" } : mapping) };
+  const compiledValidated = validateConstraintCompilerDecision(allSources, compiledVariant, { knownProjectIds: ["pi-astack"], expectedInputRootHash: normalized.inputRootHash });
+  const mergedValidated = validateConstraintCompilerDecision(allSources, mergedVariant, { knownProjectIds: ["pi-astack"], expectedInputRootHash: normalized.inputRootHash });
+  for (const sourceId of [globalSource.sourceId, duplicateSource.sourceId]) {
+    assert(compiledValidated.mappings.some((mapping) => mapping.sourceRecordId === sourceId && mapping.disposition === "merged_source"), `compiled variant did not canonicalize ${sourceId}`);
+    assert(mergedValidated.mappings.some((mapping) => mapping.sourceRecordId === sourceId && mapping.disposition === "merged_source"), `merged variant did not keep canonical ${sourceId}`);
+  }
+  assert(compiledValidated.diagnostics.some((diagnostic) => diagnostic.code === "SC_MAPPING_DISPOSITION_NORMALIZED" && diagnostic.sourceRecordIds.includes(globalSource.sourceId)), "compiled variant normalization diagnostic missing");
+  assert(!mergedValidated.diagnostics.some((diagnostic) => diagnostic.code === "SC_MAPPING_DISPOSITION_NORMALIZED"), "canonical merged variant should not add normalization diagnostics");
+  assert(compiledValidated.validationHash === mergedValidated.validationHash, "equivalent overlap mapping variants changed validationHash");
+});
+
 check("validator rejects inputRootHash mismatch", () => {
   let threw = false;
   try { validateConstraintCompilerDecision(allSources, decision, { knownProjectIds: ["pi-astack"], expectedInputRootHash: "wrong" }); } catch { threw = true; }
@@ -489,6 +503,10 @@ check("validator rejects mapping disposition mismatch", () => {
   let threw = false;
   try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
   assert(threw, "mapping disposition mismatch accepted");
+  const compiledOnlyBad = { ...decision, mappings: decision.mappings.map((mapping) => mapping.sourceRecordId === compactSource.sourceId ? { ...mapping, disposition: "merged_source" } : mapping) };
+  threw = false;
+  try { validateConstraintCompilerDecision(allSources, compiledOnlyBad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
+  assert(threw, "compiled-only merged_source mismatch accepted");
 });
 
 check("validator rejects not-memory reason with wrong diagnostic code", () => {
@@ -858,6 +876,7 @@ check("LLM adapter parses fenced JSON and stamps input hash", async () => {
 check("LLM adapter fails closed on malformed JSON", () => {
   const parsed = parseConstraintCompilerDecision("not-json", normalized.inputRootHash);
   assert(!parsed.ok, "malformed JSON accepted");
+  assert(!parsed.ok && parsed.rawOutput === "not-json", "raw output missing on parse failure");
   assert(!parsed.ok && parsed.diagnostic.code === "SC_COMPILER_PARSE_FAILED", "wrong parse failure diagnostic");
 });
 
@@ -1168,6 +1187,55 @@ check("shadow runner quarantines semantic item validation failures", async () =>
   assert(result.decision.constraints.length === 0, "empty-body constraint entered compiled view");
   assert(result.decision.unresolved.some((item) => item.sourceRecordIds.includes("rule:global:always:use-edit-not-sed") && item.reason === "model_uncertain"), "semantic item was not quarantined to unresolved");
   assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_ITEM_REJECTED"), "item rejection diagnostic missing");
+});
+
+check("shadow runner writes raw and parsed artifacts on compiler failures", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-fail-artifacts-"));
+  writeFile(path.join(abrainHome, "rules/always/use-edit-not-sed.md"), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write。\n");
+  const sourceId = "rule:global:always:use-edit-not-sed";
+  const parsedFailure = await runConstraintShadowCompiler({
+    abrainHome,
+    cwd: repoRoot,
+    includeProjects: [],
+    includeStatuses: "all",
+    writeArtifacts: true,
+    runId: "validation-failure-run",
+    compilerInvoker: async () => ({
+      ok: true,
+      text: JSON.stringify({
+        schemaVersion: "constraint-shadow-decision/v1",
+        inputRootHash: "ignored-by-parser",
+        constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit", compiledBody: "修改文件必须用 edit/write。", sourceRecordIds: [sourceId] }],
+        exclusions: [],
+        unresolved: [],
+        merges: [],
+        rescopeProposals: [],
+        mappings: [{ sourceRecordId: sourceId, disposition: "excluded" }],
+        diagnostics: [],
+      }),
+    }),
+  });
+  assert(!parsedFailure.ok, "validation failure accepted");
+  assert(parsedFailure.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_VALIDATION_FAILED"), "validation failure diagnostic missing");
+  const validationRunDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "validation-failure-run");
+  assert(fs.existsSync(path.join(validationRunDir, "raw-output.txt")), "validation failure raw-output.txt missing");
+  assert(fs.existsSync(path.join(validationRunDir, "parsed-decision.json")), "validation failure parsed-decision.json missing");
+  const parsedDecision = JSON.parse(fs.readFileSync(path.join(validationRunDir, "parsed-decision.json"), "utf8"));
+  assert(parsedDecision.mappings[0].disposition === "excluded", "parsed decision did not preserve failed mapping");
+
+  const parseFailure = await runConstraintShadowCompiler({
+    abrainHome,
+    cwd: repoRoot,
+    includeProjects: [],
+    includeStatuses: "all",
+    writeArtifacts: true,
+    runId: "parse-failure-run",
+    compilerInvoker: async () => ({ ok: true, text: "not-json" }),
+  });
+  assert(!parseFailure.ok, "parse failure accepted");
+  const parseRunDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "parse-failure-run");
+  assert(fs.readFileSync(path.join(parseRunDir, "raw-output.txt"), "utf8").includes("not-json"), "parse failure raw output missing content");
+  assert(!fs.existsSync(path.join(parseRunDir, "parsed-decision.json")), "parse failure should not write parsed decision");
 });
 
 check("constraint compiler source does not import writer mutation symbols", () => {
