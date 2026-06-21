@@ -6,6 +6,7 @@ import type {
   ConstraintDecisionUnresolved,
   ConstraintExclusionReason,
   ConstraintScope,
+  ConstraintShadowDiagnostic,
   ConstraintSourceRecord,
   ConstraintSourceDisposition,
   ConstraintUnresolvedReason,
@@ -14,7 +15,7 @@ import type {
   ValidatedConstraintCompilerDecision,
 } from "./types";
 import { sha256Hex, stableCanonicalize } from "./normalize";
-import { assertDiagnosticConsumers } from "./diagnostics";
+import { assertDiagnosticConsumers, makeDiagnostic } from "./diagnostics";
 
 const EXCLUSION_REASONS = new Set<ConstraintExclusionReason>([
   "settings_not_memory",
@@ -142,14 +143,14 @@ function hasDiagnosticForSource(decision: ConstraintCompilerDecision, sourceId: 
   return decision.diagnostics.some((diagnostic) => Array.isArray(diagnostic.sourceRecordIds) && diagnostic.sourceRecordIds.includes(sourceId));
 }
 
-function hasNotMemoryDiagnostic(decision: ConstraintCompilerDecision, sourceIds: string[], reason: ConstraintExclusionReason): boolean {
+function hasNotMemoryDiagnostic(diagnostics: ConstraintShadowDiagnostic[], sourceIds: string[], reason: ConstraintExclusionReason): boolean {
   const requiredCode = reason === "settings_not_memory"
     ? "SC_NOT_MEMORY_SETTINGS"
     : reason === "tool_contract_not_memory"
       ? "SC_NOT_MEMORY_TOOL_CONTRACT"
       : null;
   if (!requiredCode) return true;
-  return decision.diagnostics.some((diagnostic) => (
+  return diagnostics.some((diagnostic) => (
     diagnostic.code === requiredCode
     && Array.isArray(diagnostic.consumers)
     && diagnostic.consumers.length > 0
@@ -180,6 +181,30 @@ function dispositionForSource(decision: ConstraintCompilerDecision, sourceId: st
   return null;
 }
 
+function quarantineDiagnostic(context: string, constraint: ConstraintDecisionConstraint, reason: string): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_COMPILER_ITEM_REJECTED",
+    severity: "warning",
+    message: `${context} rejected: ${reason}`,
+    sourceRecordIds: constraint.sourceRecordIds,
+    data: {
+      itemKind: "constraint",
+      reason,
+      scope: constraint.scope,
+      injectMode: constraint.injectMode,
+    },
+  });
+}
+
+function quarantineUnresolved(sourceRecordIds: string[], diagnosticId: string, reason: string): ConstraintDecisionUnresolved {
+  return {
+    reason: reason.includes("scope") || reason.includes("project") ? "scope_ambiguous" : "model_uncertain",
+    sourceRecordIds: sourceRecordIds.slice().sort(),
+    diagnosticIds: [diagnosticId],
+    note: `Compiler item quarantined: ${reason}`,
+  };
+}
+
 export function validateConstraintCompilerDecision(
   sources: ConstraintSourceRecord[],
   decision: ConstraintCompilerDecision,
@@ -199,31 +224,56 @@ export function validateConstraintCompilerDecision(
   const sourceIds = new Set(sources.map((source) => source.sourceId));
   const legacySources = legacySourcesOnly(sources);
   const dispositions = new Map<string, string[]>();
+  const diagnostics: ConstraintShadowDiagnostic[] = decision.diagnostics.slice();
+  const unresolved: ConstraintDecisionUnresolved[] = decision.unresolved.slice();
+  const acceptedMerges = decision.merges.slice();
+  const quarantinedSourceIds = new Set<string>();
 
-  decision.diagnostics.forEach((diagnostic, index) => {
+  diagnostics.forEach((diagnostic, index) => {
     assertSourceIdsKnown(diagnostic.sourceRecordIds, sourceIds, `diagnostic[${index}]`);
   });
 
-  const validatedConstraints: ValidatedConstraint[] = decision.constraints.map((constraint, index) => {
-    assertSourceIdsExist(constraint.sourceRecordIds, sourceIds, `constraint[${index}]`);
-    assertScopeKnown(constraint.scope, knownProjectIds, `constraint[${index}]`);
-    if (!constraint.compiledBody.trim()) throw new Error(`constraint[${index}] compiledBody is empty`);
-    for (const sourceId of constraint.sourceRecordIds) {
-      const source = findLegacySource(sources, sourceId);
-      if (source) {
-        if (source.injectMode !== constraint.injectMode) {
-          throw new Error(`constraint[${index}] injectMode does not match ${sourceId}`);
-        }
-        if (scopeKey(source.scope) !== scopeKey(constraint.scope) && !hasMatchingRescope(decision, source, constraint.scope)) {
-          throw new Error(`constraint[${index}] scope does not match ${sourceId} and has no matching rescope proposal`);
+  const validatedConstraints: ValidatedConstraint[] = [];
+  decision.constraints.forEach((constraint, index) => {
+    const context = `constraint[${index}]`;
+    assertSourceIdsExist(constraint.sourceRecordIds, sourceIds, context);
+    let quarantineReason = "";
+    try {
+      assertScopeKnown(constraint.scope, knownProjectIds, context);
+      if (!constraint.compiledBody.trim()) quarantineReason = `${context} compiledBody is empty`;
+      for (const sourceId of constraint.sourceRecordIds) {
+        const source = findLegacySource(sources, sourceId);
+        if (source) {
+          if (source.injectMode !== constraint.injectMode) {
+            quarantineReason = `${context} injectMode does not match ${sourceId}`;
+            break;
+          }
+          if (scopeKey(source.scope) !== scopeKey(constraint.scope) && !hasMatchingRescope(decision, source, constraint.scope)) {
+            quarantineReason = `${context} scope does not match ${sourceId} and has no matching rescope proposal`;
+            break;
+          }
         }
       }
-      addDisposition(dispositions, sourceId, "compiled");
+    } catch (error) {
+      quarantineReason = error instanceof Error ? error.message : String(error);
     }
-    return {
+
+    if (quarantineReason) {
+      const diagnostic = quarantineDiagnostic(context, constraint, quarantineReason);
+      diagnostics.push(diagnostic);
+      unresolved.push(quarantineUnresolved(constraint.sourceRecordIds, diagnostic.id, quarantineReason));
+      for (const sourceId of constraint.sourceRecordIds) {
+        quarantinedSourceIds.add(sourceId);
+        addDisposition(dispositions, sourceId, "unresolved");
+      }
+      return;
+    }
+
+    for (const sourceId of constraint.sourceRecordIds) addDisposition(dispositions, sourceId, "compiled");
+    validatedConstraints.push({
       ...constraint,
       constraintId: options.deriveConstraintIds === false && constraint.constraintId ? constraint.constraintId : constraintIdFor(constraint),
-    };
+    });
   });
 
   const constraintIds = new Set<string>();
@@ -235,7 +285,7 @@ export function validateConstraintCompilerDecision(
   decision.exclusions.forEach((exclusion, index) => {
     validateExclusionReason(exclusion);
     assertSourceIdsExist(exclusion.sourceRecordIds, sourceIds, `exclusion[${index}]`);
-    if ((exclusion.reason === "settings_not_memory" || exclusion.reason === "tool_contract_not_memory") && !hasNotMemoryDiagnostic(decision, exclusion.sourceRecordIds, exclusion.reason)) {
+    if ((exclusion.reason === "settings_not_memory" || exclusion.reason === "tool_contract_not_memory") && !hasNotMemoryDiagnostic(diagnostics, exclusion.sourceRecordIds, exclusion.reason)) {
       throw new Error(`exclusion[${index}] not-memory reason lacks matching diagnostic consumer`);
     }
     if (exclusion.reason !== "settings_not_memory" && exclusion.reason !== "tool_contract_not_memory" && exclusion.reason !== "knowledge_candidate") {
@@ -247,14 +297,16 @@ export function validateConstraintCompilerDecision(
     for (const sourceId of exclusion.sourceRecordIds) addDisposition(dispositions, sourceId, "excluded");
   });
 
-  decision.unresolved.forEach((unresolved, index) => {
-    validateUnresolvedReason(unresolved);
-    assertSourceIdsExist(unresolved.sourceRecordIds, sourceIds, `unresolved[${index}]`);
-    for (const sourceId of unresolved.sourceRecordIds) addDisposition(dispositions, sourceId, "unresolved");
+  unresolved.forEach((item, index) => {
+    validateUnresolvedReason(item);
+    assertSourceIdsExist(item.sourceRecordIds, sourceIds, `unresolved[${index}]`);
+    for (const sourceId of item.sourceRecordIds) addDisposition(dispositions, sourceId, "unresolved");
   });
 
+  acceptedMerges.length = 0;
   decision.merges.forEach((merge, index) => {
     assertSourceIdsExist(merge.sourceRecordIds, sourceIds, `merge[${index}]`);
+    if (merge.sourceRecordIds.some((sourceId) => quarantinedSourceIds.has(sourceId))) return;
     // ADR0039 design-maxim + §12 resilience: targetConstraintId is an OPTIONAL hint
     // the LLM cannot compute (real ids are post-hoc content hashes, constraintIdFor).
     // A dangling hint must NOT reject the whole decision — that froze the constraint
@@ -270,6 +322,7 @@ export function validateConstraintCompilerDecision(
       && merge.sourceRecordIds.every((sourceId) => constraint.sourceRecordIds.includes(sourceId))
     ));
     if (!coveringConstraint) throw new Error(`merge[${index}] source records are not covered by one compiled constraint`);
+    acceptedMerges.push(merge);
     for (const sourceId of merge.sourceRecordIds) addDisposition(dispositions, sourceId, "merged_source");
   });
 
@@ -284,18 +337,24 @@ export function validateConstraintCompilerDecision(
     }
   });
 
+  const mappings: ConstraintDecisionMapping[] = [];
   decision.mappings.forEach((mapping: ConstraintDecisionMapping, index) => {
     if (!sourceIds.has(mapping.sourceRecordId)) throw new Error(`mapping[${index}] references unknown source ${mapping.sourceRecordId}`);
-    const actualDisposition = dispositionForSource(decision, mapping.sourceRecordId);
+    const actualDisposition = dispositionForSource({ ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, diagnostics }, mapping.sourceRecordId);
     if (actualDisposition && mapping.disposition !== actualDisposition) {
-      throw new Error(`mapping[${index}] disposition ${mapping.disposition} does not match actual ${actualDisposition}`);
+      if (!quarantinedSourceIds.has(mapping.sourceRecordId)) {
+        throw new Error(`mapping[${index}] disposition ${mapping.disposition} does not match actual ${actualDisposition}`);
+      }
+      mappings.push({ ...mapping, disposition: actualDisposition });
+    } else {
+      mappings.push(mapping);
     }
     addDisposition(dispositions, mapping.sourceRecordId, "mapping");
   });
 
   for (const source of legacySources) {
     const existingPrimary = (dispositions.get(source.sourceId) ?? []).filter((disposition) => disposition !== "mapping");
-    if (existingPrimary.length === 0 && hasDiagnosticForSource(decision, source.sourceId)) {
+    if (existingPrimary.length === 0 && hasDiagnosticForSource({ ...decision, diagnostics }, source.sourceId)) {
       addDisposition(dispositions, source.sourceId, "diagnostic");
     }
     const primary = (dispositions.get(source.sourceId) ?? []).filter((disposition) => disposition !== "mapping");
@@ -312,6 +371,6 @@ export function validateConstraintCompilerDecision(
     }
   }
 
-  const validationHash = sha256Hex(stableCanonicalize({ ...decision, constraints: validatedConstraints }));
-  return { ...decision, constraints: validatedConstraints, validationHash };
+  const validationHash = sha256Hex(stableCanonicalize({ ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, mappings, diagnostics }));
+  return { ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, mappings, diagnostics, validationHash };
 }

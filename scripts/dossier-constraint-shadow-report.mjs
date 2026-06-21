@@ -154,6 +154,7 @@ for (const file of [
 
 const modelsJsonPath = path.join(agentDir, "models.json");
 const { registry } = makeOracleRegistry(modelsJsonPath);
+const { listAbrainProjects } = require(path.join(tmp, "_shared", "runtime.js"));
 const { createPiAiConstraintCompilerInvoker } = require(path.join(tmp, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(tmp, "sediment", "constraint-compiler", "shadow-runner.js"));
 const invoker = createPiAiConstraintCompilerInvoker({
@@ -171,7 +172,7 @@ const result = await runConstraintShadowCompiler({
   abrainHome,
   cwd: repoRoot,
   activeProjectId,
-  knownProjectIds: activeProjectId ? [activeProjectId] : [],
+  knownProjectIds: Array.from(new Set([...(activeProjectId ? [activeProjectId] : []), ...listAbrainProjects(abrainHome)])).sort(),
   includeProjects,
   includeStatuses: "all",
   maxPromptChars: maxPromptChars || undefined,

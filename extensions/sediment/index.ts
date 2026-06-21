@@ -94,7 +94,7 @@ import {
 import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
-import { abrainProjectDir, abrainSedimentStagingPath, resolveActiveProject } from "../_shared/runtime";
+import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 
 // ---------------------------------------------------------------
@@ -4508,7 +4508,7 @@ async function tryAutoWriteLane(args: {
             abrainHome,
             cwd,
             activeProjectId: projectId,
-            knownProjectIds: projectId ? [projectId] : [],
+            knownProjectIds: Array.from(new Set([...(projectId ? [projectId] : []), ...listAbrainProjects(abrainHome)])).sort(),
             settings,
             modelRegistry: args.modelRegistry,
             reason: "constraint_evidence_event_appended",

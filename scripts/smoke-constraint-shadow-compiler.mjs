@@ -439,18 +439,21 @@ check("validator rejects source compiled and excluded", () => {
   assert(threw, "compiled+excluded source accepted");
 });
 
-check("validator rejects unknown project scope", () => {
-  const bad = { ...decision, constraints: [{ ...decision.constraints[1], scope: { kind: "project", projectId: "missing-project" } }] };
-  let threw = false;
-  try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
-  assert(threw, "unknown project accepted");
+check("validator quarantines unknown project scope per item", () => {
+  const bad = { ...decision, constraints: decision.constraints.map((constraint) => constraint.sourceRecordIds.includes(projectSource.sourceId) ? { ...constraint, scope: { kind: "project", projectId: "missing-project" } } : constraint) };
+  const validated = validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] });
+  assert(!validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(projectSource.sourceId)), "bad project-scoped constraint entered compiled view");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(projectSource.sourceId) && item.reason === "scope_ambiguous"), "unknown project constraint not quarantined to unresolved");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_ITEM_REJECTED" && diagnostic.sourceRecordIds.includes(projectSource.sourceId)), "unknown project quarantine diagnostic missing");
+  assert(validated.mappings.some((mapping) => mapping.sourceRecordId === projectSource.sourceId && mapping.disposition === "unresolved"), "mapping not rewritten to unresolved for quarantined source");
 });
 
-check("validator rejects project source compiled into global without rescope", () => {
+check("validator quarantines source scope mismatch without rescope", () => {
   const bad = { ...decision, constraints: decision.constraints.map((constraint) => constraint.sourceRecordIds.includes(projectSource.sourceId) ? { ...constraint, scope: { kind: "global" } } : constraint), rescopeProposals: [] };
-  let threw = false;
-  try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
-  assert(threw, "project source globalized without rescope accepted");
+  const validated = validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] });
+  assert(!validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(projectSource.sourceId)), "scope-mismatched constraint entered compiled view");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(projectSource.sourceId) && item.reason === "scope_ambiguous"), "scope mismatch not quarantined to unresolved");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_ITEM_REJECTED" && diagnostic.sourceRecordIds.includes(projectSource.sourceId)), "scope mismatch quarantine diagnostic missing");
 });
 
 check("validator rejects merge not covered by compiled constraint", () => {
@@ -1137,7 +1140,7 @@ check("shadow runner fails closed on artifact path violation", async () => {
   assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_SHADOW_ONLY_VIOLATION_ATTEMPT"), "path violation diagnostic missing");
 });
 
-check("shadow runner fails closed on validation failure", async () => {
+check("shadow runner quarantines semantic item validation failures", async () => {
   const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-invalid-"));
   writeFile(path.join(abrainHome, "rules/always/use-edit-not-sed.md"), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write。\n");
   const result = await runConstraintShadowCompiler({
@@ -1161,8 +1164,10 @@ check("shadow runner fails closed on validation failure", async () => {
       }),
     }),
   });
-  assert(!result.ok, "invalid compiler decision accepted");
-  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_VALIDATION_FAILED"), "validation failure diagnostic missing");
+  assert(result.ok, "semantic item failure should not fail the whole shadow run");
+  assert(result.decision.constraints.length === 0, "empty-body constraint entered compiled view");
+  assert(result.decision.unresolved.some((item) => item.sourceRecordIds.includes("rule:global:always:use-edit-not-sed") && item.reason === "model_uncertain"), "semantic item was not quarantined to unresolved");
+  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_ITEM_REJECTED"), "item rejection diagnostic missing");
 });
 
 check("constraint compiler source does not import writer mutation symbols", () => {
