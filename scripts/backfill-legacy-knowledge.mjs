@@ -70,6 +70,19 @@ function listMarkdown(root) {
   return out.sort();
 }
 
+/** Shallow list: .md directly under root only (no recursion), excluding
+ *  `_`-prefixed non-entry files (e.g. _index.md). */
+function listMarkdownShallow(root) {
+  if (!fs.existsSync(root)) return [];
+  const out = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".md") && !entry.name.startsWith("_")) {
+      out.push(path.join(root, entry.name));
+    }
+  }
+  return out.sort();
+}
+
 /** Enumerate legacy canonical Knowledge entries with their path-derived identity. */
 export function legacyKnowledgeEntries(abrainHome) {
   const entries = [];
@@ -84,6 +97,18 @@ export function legacyKnowledgeEntries(abrainHome) {
         for (const file of listMarkdown(path.join(projectsRoot, pid, zone))) {
           entries.push({ file, scope: "project", projectId: pid, slug: path.basename(file, ".md") });
         }
+      }
+      // ADR0039 R2 consensus (2026-06-21, docs/notes/2026-06-21-adr0039-projection-only-terminal-consensus.md):
+      // top-level loose project .md (old flat layout) are canonical entries the
+      // zone scan structurally missed. Include them, excluding _-prefixed
+      // non-entries (handled in listMarkdownShallow) and kind=smell (staging
+      // semantics, stays out of canonical corpus per Q2). archive/ is deferred
+      // to the A2/A3 archived-tombstone work (gated flip prerequisite), not here.
+      for (const file of listMarkdownShallow(path.join(projectsRoot, pid))) {
+        const { fm } = splitFrontmatter(fs.readFileSync(file, "utf-8"));
+        const kind = fmScalar(fm, "kind");
+        if (!kind || kind === "smell") continue;
+        entries.push({ file, scope: "project", projectId: pid, slug: path.basename(file, ".md") });
       }
     }
   }
