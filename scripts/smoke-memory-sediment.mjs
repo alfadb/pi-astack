@@ -2543,6 +2543,19 @@ END_MEMORY`;
           `sibling knowledge entry MUST NOT trip detector; sourcePath=${sibEntry.sourcePath}, storeRoot=${sibEntry.storeRoot}`);
         assert(neighborLaneFor(sibEntry) === "project",
           `sibling knowledge entry must map to lane=project; got ${neighborLaneFor(sibEntry)}`);
+
+        // ADR0039 A6 (R3 4xT0): legacy-read tripwire instrument must be wired and
+        // anomaly-free outside projection_only. The two loadEntries calls above
+        // surfaced entries from the abrain-project legacy store (non-projection_only
+        // mode), so the counter is exercised; anomalies must be 0 (anomaly only
+        // fires under projection_only). Post-flip, a separate dossier asserts the
+        // legacy-winner count drops to 0.
+        const { getLegacyColdReadStats } = req("./memory/parser.js");
+        const a6 = getLegacyColdReadStats();
+        assert(a6 && typeof a6.total === "number" && typeof a6.last === "number" && typeof a6.anomalies === "number",
+          `A6 getLegacyColdReadStats must expose {total,last,anomalies}; got ${JSON.stringify(a6)}`);
+        assert(a6.anomalies === 0,
+          `A6 legacy_cold_access anomalies must be 0 outside projection_only; got ${a6.anomalies}`);
       } finally {
         if (savedAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
         else process.env.ABRAIN_ROOT = savedAbrainRoot;

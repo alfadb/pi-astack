@@ -824,6 +824,39 @@ export async function scanStore(
   return entries;
 }
 
+// ADR0039 A6 (R3 4xT0): legacy-read tripwire. Counts winning entries that
+// surfaced from a legacy markdown store (abrain-project / world / legacy-pensieve)
+// rather than the L2 projection. Under `projection_only` this MUST stay 0 — any
+// non-zero is a silent-legacy-resurrection anomaly, logged LOUD + diagnostic
+// (never swallowed). In legacy / projection_with_legacy_fallback modes a non-zero
+// count is the expected baseline (legacy still fills gaps), which proves the
+// instrument works and lets a post-flip run assert the drop to 0.
+const LEGACY_STORE_LABELS = new Set(["abrain-project", "world", "legacy-pensieve"]);
+let legacyColdReadTotal = 0;
+let legacyColdReadLast = 0;
+let legacyColdReadAnomalies = 0;
+export function getLegacyColdReadStats(): { total: number; last: number; anomalies: number } {
+  return { total: legacyColdReadTotal, last: legacyColdReadLast, anomalies: legacyColdReadAnomalies };
+}
+function recordLegacyColdRead(legacyWinners: number, readMode: string, abrainHome: string): void {
+  legacyColdReadLast = legacyWinners;
+  legacyColdReadTotal += legacyWinners;
+  if (readMode === "projection_only" && legacyWinners > 0) {
+    legacyColdReadAnomalies += legacyWinners;
+    // LOUD: projection_only must never surface legacy markdown. Do not swallow.
+    console.warn(`[ADR0039 A6] legacy_cold_access anomaly: ${legacyWinners} winning entries from legacy stores under projection_only`);
+    try {
+      const diagDir = path.join(abrainHome, ".state", "sediment");
+      fsSync.mkdirSync(diagDir, { recursive: true });
+      fsSync.appendFileSync(
+        path.join(diagDir, "legacy-cold-access.jsonl"),
+        `${JSON.stringify({ schemaVersion: "legacy-cold-access/v1", atUtc: new Date().toISOString(), legacyWinners, readMode })}\n`,
+        "utf-8",
+      );
+    } catch { /* diagnostic is best-effort; the LOUD warn is the primary signal */ }
+  }
+}
+
 export async function loadEntries(
   cwdRaw: string | undefined,
   settings: MemorySettings,
@@ -836,12 +869,15 @@ export async function loadEntries(
       ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
       : path.join(os.homedir(), ".abrain"),
   );
+  // ADR0039 A6: hoisted to function scope so the legacy-read tripwire below can
+  // see the mode after the (optional) projection-store assembly.
+  let readMode = "legacy";
   try {
     const resolved = resolveActiveProject(cwd, { abrainHome });
     const projectId = resolved.activeProject?.projectId;
     const sediment = resolveSedimentSettings();
     // ADR 0039 Phase C: three-state canonical read source (hot flag).
-    const readMode = sediment.knowledgeProjector?.canonicalReadMode ?? "legacy";
+    readMode = sediment.knowledgeProjector?.canonicalReadMode ?? "legacy";
     if (readMode !== "legacy") {
       // The UNBOUNDED stable-view projection becomes a PRIMARY store at the FRONT,
       // winning over legacy via first-store-wins. projection_only removes legacy
@@ -903,6 +939,14 @@ export async function loadEntries(
       }
     }
   }
+
+  // ADR0039 A6 (R3): legacy-read tripwire — count winners sourced from a legacy
+  // markdown store. Steady-state under projection_only must be 0 (loud otherwise).
+  let legacyWinners = 0;
+  for (const { storeIndex } of seen.values()) {
+    if (LEGACY_STORE_LABELS.has(stores[storeIndex]?.label ?? "")) legacyWinners += 1;
+  }
+  recordLegacyColdRead(legacyWinners, readMode, abrainHome);
 
   return Array.from(seen.values()).map((v) => v.entry);
 }
