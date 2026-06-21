@@ -460,6 +460,27 @@ check("validator rejects merge not covered by compiled constraint", () => {
   assert(threw, "uncovered merge accepted");
 });
 
+check("validator tolerates dangling merge targetConstraintId hint (2026-06-21 projector-death regression)", () => {
+  // The constraint projector died on 2026-06-21: the LLM correctly merged the
+  // near-duplicate no-industry-jargon rules and named the merge target
+  // descriptively (shadow-constraint-no-industry-jargon), which can never match a
+  // derived shadow:<hash> id, and the validator hard-threw on the WHOLE decision.
+  // targetConstraintId is an unfulfillable optional hint; a dangling hint must not
+  // reject a decision whose merge sources ARE covered by a compiled constraint.
+  const withDanglingTarget = {
+    ...decision,
+    merges: [{ sourceRecordIds: [globalSource.sourceId, duplicateSource.sourceId], targetConstraintId: "shadow-constraint-bogus-not-a-hash", reason: "near duplicate" }],
+  };
+  const validated = validateConstraintCompilerDecision(allSources, withDanglingTarget, { knownProjectIds: ["pi-astack"], expectedInputRootHash: normalized.inputRootHash });
+  assert(validated.validationHash, "dangling targetConstraintId hint must not reject a covered merge");
+  // The real invariant still holds: an uncovered merge is rejected regardless of hint.
+  let threw = false;
+  try {
+    validateConstraintCompilerDecision(allSources, { ...decision, merges: [{ sourceRecordIds: [settingsSource.sourceId, toolSource.sourceId], targetConstraintId: "shadow-constraint-bogus-not-a-hash", reason: "bad merge" }] }, { knownProjectIds: ["pi-astack"] });
+  } catch { threw = true; }
+  assert(threw, "uncovered merge with a dangling hint must still be rejected");
+});
+
 check("validator rejects mapping disposition mismatch", () => {
   const bad = { ...decision, mappings: decision.mappings.map((mapping) => mapping.sourceRecordId === settingsSource.sourceId ? { ...mapping, disposition: "compiled" } : mapping) };
   let threw = false;

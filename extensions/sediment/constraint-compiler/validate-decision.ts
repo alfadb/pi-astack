@@ -255,11 +255,18 @@ export function validateConstraintCompilerDecision(
 
   decision.merges.forEach((merge, index) => {
     assertSourceIdsExist(merge.sourceRecordIds, sourceIds, `merge[${index}]`);
-    if (merge.targetConstraintId && !constraintIds.has(merge.targetConstraintId)) {
-      throw new Error(`merge[${index}] references unknown target constraint ${merge.targetConstraintId}`);
-    }
+    // ADR0039 design-maxim + §12 resilience: targetConstraintId is an OPTIONAL hint
+    // the LLM cannot compute (real ids are post-hoc content hashes, constraintIdFor).
+    // A dangling hint must NOT reject the whole decision — that froze the constraint
+    // projector on 2026-06-21 (LLM merged the near-duplicate no-industry-jargon rules
+    // and named the target descriptively). Ignore an unknown hint and bind the merge
+    // by sourceRecordIds coverage, which is the real invariant; only an uncovered
+    // merge (no compiled constraint contains all its sources) is a hard error.
+    const pinnedTargetId = merge.targetConstraintId && constraintIds.has(merge.targetConstraintId)
+      ? merge.targetConstraintId
+      : undefined;
     const coveringConstraint = validatedConstraints.find((constraint) => (
-      (!merge.targetConstraintId || constraint.constraintId === merge.targetConstraintId)
+      (!pinnedTargetId || constraint.constraintId === pinnedTargetId)
       && merge.sourceRecordIds.every((sourceId) => constraint.sourceRecordIds.includes(sourceId))
     ));
     if (!coveringConstraint) throw new Error(`merge[${index}] source records are not covered by one compiled constraint`);

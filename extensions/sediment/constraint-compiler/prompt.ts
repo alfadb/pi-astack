@@ -72,7 +72,7 @@ export function buildConstraintCompilerPrompt(input: ConstraintCompilerPromptInp
       }],
       exclusions: [{ reason: "settings_not_memory", sourceRecordIds: ["exact sourceId string"], diagnosticIds: [], note: "optional note" }],
       unresolved: [{ reason: "conflict", sourceRecordIds: ["exact sourceId string"], diagnosticIds: [], note: "optional note" }],
-      merges: [{ sourceRecordIds: ["exact sourceId string", "exact sourceId string"], targetConstraintId: "optional shadow id", reason: "why these sources merge" }],
+      merges: [{ sourceRecordIds: ["exact sourceId string", "exact sourceId string"], reason: "why these sources merge" }],
       rescopeProposals: [{ sourceRecordIds: ["exact sourceId string"], fromScope: { kind: "global" }, toScope: { kind: "project", projectId: "known-project-id" }, reason: "why scope changes" }],
       mappings: [{ sourceRecordId: "exact sourceId string", disposition: "compiled", targetId: "optional shadow id", reason: "why this disposition was chosen" }],
       diagnostics: [{ id: "stable diagnostic id", code: "SC_UNCLASSIFIED", severity: "warning", message: "diagnostic text", sourceRecordIds: ["exact sourceId string"], consumers: ["manual_investigation"], data: {} }],
