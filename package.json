@@ -171,7 +171,8 @@
     "dossier:constraint-evidence-event": "node scripts/dossier-constraint-evidence-event.mjs",
     "dossier:constraint-audit-replay": "node scripts/dossier-constraint-audit-replay.mjs",
     "dossier:adr0039-reindex-ab": "node scripts/dossier-adr0039-reindex-ab.mjs",
-    "dossier:adr0039-phase-c-flip-probe": "node scripts/dossier-adr0039-phase-c-flip-probe.mjs"
+    "dossier:adr0039-phase-c-flip-probe": "node scripts/dossier-adr0039-phase-c-flip-probe.mjs",
+    "dossier:adr0039-l1-rebuild-canary": "node scripts/dossier-adr0039-l1-rebuild-canary.mjs --abrain ~/.abrain"
   },
   "pi": {
     "extensions": [
