@@ -891,8 +891,15 @@ export async function loadEntries(
     // sole projection contribution; in projection modes it backstops the stable view.
     const overlayStores = await readKnowledgeProjectionStores({ abrainHome, projectId, settings: sediment });
     stores.push(...overlayStores);
-  } catch {
-    // Projection overlay/stable-view is optional; canonical stores remain read truth.
+  } catch (err) {
+    // ADR0039 A5 (R3 4xT0): do NOT silently fall back to legacy on a projection
+    // read error. Surface it LOUD. Under projection_only this is fail-closed
+    // (hard error) — silently serving stale legacy is exactly the silent-recall-loss
+    // failure the flip must not have. In legacy / projection_with_legacy_fallback
+    // legacy may still serve, but the error is now visible, not swallowed.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[ADR0039 A5] projection store read failed (mode=${readMode}): ${msg}`);
+    if (readMode === "projection_only") throw err;
   }
   if (stores.length === 0) return [];
 
@@ -903,6 +910,10 @@ export async function loadEntries(
   const batches = await Promise.all(
     stores.map((store) => scanStore(store, cwd, settings, signal).catch((err: unknown) => {
       if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+      // ADR0039 A5 (R3): non-abort scanStore failure no longer silently contributes
+      // 0. Surface LOUD so a persistent store read failure (esp. a projection store
+      // under projection_only) is visible instead of masquerading as "no memory".
+      console.warn(`[ADR0039 A5] scanStore failed for store=${store.label} (mode=${readMode}): ${err instanceof Error ? err.message : String(err)}`);
       return [];
     })),
   );
