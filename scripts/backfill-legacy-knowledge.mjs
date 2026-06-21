@@ -54,7 +54,13 @@ export function loadKnowledgeModule() {
   return createRequire(path.join(outRoot, "runner.cjs"))("./sediment/knowledge-evidence.js");
 }
 
-const LEGACY_KNOWLEDGE_PROJECT_ZONES = ["knowledge", "decisions", "maxims"];
+// ADR0039 R2 consensus A2/A3 (2026-06-21): `archive` is a projected zone too.
+// Archived entries render as full-text L2 tombstones (status=archived) — the
+// projector treats status=archived as a normal entry (only operation_hint=delete
+// is a real delete), and memory_search default-excludes status=archived from the
+// active read surface. So scanning archive/ gives ADR0031 revival a fully
+// L1+L2-reconstructable tombstone without any legacy hot-read.
+const LEGACY_KNOWLEDGE_PROJECT_ZONES = ["knowledge", "decisions", "maxims", "archive"];
 
 function listMarkdown(root) {
   if (!fs.existsSync(root)) return [];
@@ -102,8 +108,8 @@ export function legacyKnowledgeEntries(abrainHome) {
       // top-level loose project .md (old flat layout) are canonical entries the
       // zone scan structurally missed. Include them, excluding _-prefixed
       // non-entries (handled in listMarkdownShallow) and kind=smell (staging
-      // semantics, stays out of canonical corpus per Q2). archive/ is deferred
-      // to the A2/A3 archived-tombstone work (gated flip prerequisite), not here.
+      // semantics, stays out of canonical corpus per Q2). archive/ is handled
+      // by the zone loop above (A2/A3): archived → full-text L2 tombstone.
       for (const file of listMarkdownShallow(path.join(projectsRoot, pid))) {
         const { fm } = splitFrontmatter(fs.readFileSync(file, "utf-8"));
         const kind = fmScalar(fm, "kind");
