@@ -71,6 +71,8 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 | Runtime path docs/tests | 避免 `.pensieve`/`.pi-astack`/`.abrain .state` 路径漂移。 |
 | Model fallback vs curator whitelist | 当前 model-curator session_start 只 WARN，不阻止 curator 删掉 fallback 候选；需要 curator 在 whitelist 时尊重 fallbackModels 列表，或 fallback 路径自带 whitelist bypass。 |
 | Audit 新字段默认 sanitize | 新加 audit 字段须默认走 `sanitizeAuditText`（曾有 explicit/auto-write lane 的 `candidates[].title` 漏 sanitize 的先例，已修；保留此项作纪律提醒）。 |
+| constraint manual-compile 工具加固（dossier） | `scripts/dossier-constraint-shadow-report.mjs --write` 当前两个坑：① `makeOracleRegistry`（`scripts/_oracle-registry.mjs`）只解析 pi 内置 catalog，model-curator 运行时注册的模型（如 `minimax/MiniMax-M3`）解析不到 → 手动重编译只能退到 `--model deepseek/deepseek-v4-pro`（curator 官方 rollback）；② `--write` 直接覆写 `~/.abrain/.state/.../latest/compiled-view.md`，而 `rule-injector` 正注入它 → 手动跑会改写 live 注入。应：让 registry 复用 pi 运行时模型源（或 curator catalog），且 `--write` 默认指向 temp 树、覆写 live `.state` 需显式 `--force-live` + 响亮告警。另：dossier 的 TS stage 清单随 shadow-runner/parser 加依赖而 bitrot（已补 knowledge-evidence/append/projection/corpus-split，`23aa0c4`）——根因是手维护 stage 清单，可考虑共享 stage helper。 |
+| legacy rule `body_hash` 漂移（21 条 global:always） | `legacy-scan.ts:69` 对 21 条 global:always 规则报 `SC_INPUT_BODY_HASH_MISMATCH`（frontmatter `body_hash` ≠ `sha256(当前正文)`）= legacy 规则正文被改/重渲染但 `body_hash` 没同步。非致命（仅 diff_report），但属输入数据漂移。应：批量重算并回写这些规则的 `body_hash`，或确认它们应被新证据投影取代后归档。 |
 
 > ADR 0022 `prompt_user` 的 housekeeping batch（P3b post-audit / T0 xhigh / polish sweep 等 P2 项）已全部 ship 或 won't-fix；实施流水与 audit 轨迹见 git history 与 `docs/audits/`，不再镜像于此。
 
