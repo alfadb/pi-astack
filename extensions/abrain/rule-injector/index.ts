@@ -487,11 +487,15 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function coverageRatioFrom(value: unknown): number | undefined {
+function coverageRatiosFrom(value: unknown): { coverageRatio?: number; injectableCoverageRatio?: number } {
   const root = objectRecord(value);
   const summary = objectRecord(root?.summary);
-  const ratio = summary?.coverageRatio;
-  return typeof ratio === "number" && Number.isFinite(ratio) ? ratio : undefined;
+  const coverageRatio = summary?.coverageRatio;
+  const injectableCoverageRatio = summary?.injectableCoverageRatio;
+  return {
+    ...(typeof coverageRatio === "number" && Number.isFinite(coverageRatio) ? { coverageRatio } : {}),
+    ...(typeof injectableCoverageRatio === "number" && Number.isFinite(injectableCoverageRatio) ? { injectableCoverageRatio } : {}),
+  };
 }
 
 export function readCompiledRuleInjectionForRuntime(args: {
@@ -510,9 +514,11 @@ export function readCompiledRuleInjectionForRuntime(args: {
     const decision = objectRecord(readJsonFileBounded(decisionPath, args.settings.maxReadBytes));
     if (decision?.schemaVersion !== "constraint-shadow-decision/v1") return { ok: false, reason: "invalid_decision_schema" };
     const coverage = fs.existsSync(coveragePath) ? readJsonFileBounded(coveragePath, args.settings.maxReadBytes) : undefined;
-    const ratio = coverage === undefined ? undefined : coverageRatioFrom(coverage);
-    if (ratio !== undefined && ratio < args.settings.minCoverageRatio) return { ok: false, reason: "coverage_below_threshold" };
-    if (ratio === undefined && args.settings.minCoverageRatio > 0) return { ok: false, reason: "missing_coverage_ratio" };
+    const ratios = coverage === undefined ? {} : coverageRatiosFrom(coverage);
+    const ratio = ratios.coverageRatio;
+    const gatingRatio = ratios.injectableCoverageRatio ?? ratios.coverageRatio;
+    if (gatingRatio !== undefined && gatingRatio < args.settings.minCoverageRatio) return { ok: false, reason: "coverage_below_threshold" };
+    if (gatingRatio === undefined && args.settings.minCoverageRatio > 0) return { ok: false, reason: "missing_coverage_ratio" };
     const compiledStat = fs.statSync(compiledViewPath);
     const nowMs = args.nowMs ?? Date.now();
     const stale = Math.max(0, nowMs - compiledStat.mtimeMs) > args.settings.staleAfterMs;

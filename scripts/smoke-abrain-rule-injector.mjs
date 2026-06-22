@@ -376,7 +376,25 @@ check("compiled-view runtime reader is default-off, bounded, and coverage-gated"
   if (!ok.injection.includes("Compiled runtime body.")) throw new Error(`compiled view body missing: ${ok.injection}`);
   writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
     schemaVersion: "constraint-event-coverage/v1",
-    summary: { coverageRatio: 0.5 },
+    summary: { coverageRatio: 0.5, injectableCoverageRatio: 1, deferredMergedSourceEvents: 1 },
+    rows: [],
+  }, null, 2));
+  const deferredCoverage = ruleInjector.readCompiledRuleInjectionForRuntime({
+    abrainHome,
+    nonce: "compiled123",
+    settings: {
+      enabled: true,
+      fallbackToLegacyOnError: true,
+      requireFresh: true,
+      staleAfterMs: 86400000,
+      maxReadBytes: 1000000,
+      minCoverageRatio: 1,
+    },
+  });
+  if (!deferredCoverage.ok) throw new Error(`expected deferred merged-source coverage to inject, got ${JSON.stringify(deferredCoverage)}`);
+  writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+    schemaVersion: "constraint-event-coverage/v1",
+    summary: { coverageRatio: 0.5, injectableCoverageRatio: 0.5, deferredMergedSourceEvents: 0 },
     rows: [],
   }, null, 2));
   const lowCoverage = ruleInjector.readCompiledRuleInjectionForRuntime({

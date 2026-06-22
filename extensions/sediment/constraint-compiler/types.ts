@@ -188,7 +188,8 @@ export type ConstraintUnresolvedReason =
   | "insufficient_provenance"
   | "parse_error"
   | "model_uncertain"
-  | "unknown_status";
+  | "unknown_status"
+  | "trigger_projection_loss";
 
 export interface ConstraintDecisionTrace {
   reason: string;
@@ -346,8 +347,10 @@ export interface ConstraintEventCoverageReport {
     projectedEvents: number;
     staleEvents: number;
     appendFailedEvents: number;
+    deferredMergedSourceEvents: number;
     oldestQueuedAgeMs?: number;
     coverageRatio: number;
+    injectableCoverageRatio: number;
     provenance: {
       liveEvents: number;
       replayBackfillEvents: number;
@@ -480,6 +483,9 @@ export type ConstraintShadowDiagnosticCode =
   | "SC_SOURCE_MULTI_HOME_QUARANTINED"
   | "SC_EXCLUSION_DEDUPED"
   | "SC_MAPPING_DISPOSITION_NORMALIZED"
+  | "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED"
+  | "SC_EMPTY_CONSTRAINT_DROPPED"
+  | "SC_ACTIVE_EXCLUSION_DROPPED"
   | "SC_SHADOW_ONLY_VIOLATION_ATTEMPT"
   | "SC_UNCLASSIFIED"
   | "SC_EVENT_READ_ERROR"

@@ -26,6 +26,10 @@ function diagnosticCodesForSource(diagnostics: ConstraintShadowDiagnostic[], sou
     .sort();
 }
 
+function hasCompiledConstraintForSource(event: ConstraintEventSourceRecord, decision: ValidatedConstraintCompilerDecision): boolean {
+  return decision.constraints.some((constraint) => constraint.sourceRecordIds.includes(event.sourceId));
+}
+
 function projectionRecordForEvent(
   event: ConstraintEventSourceRecord,
   decision: ValidatedConstraintCompilerDecision,
@@ -33,7 +37,10 @@ function projectionRecordForEvent(
   projectedAtUtc?: string,
 ): ConstraintEventProjectionRecord {
   const disposition = dispositionForSource(decision, event.sourceId);
-  if (disposition && disposition !== "diagnostic") {
+  if (disposition === "excluded") {
+    return { eventId: event.eventId, status: "projected", observedAtUtc: event.createdAtUtc, ...(projectedAtUtc ? { projectedAtUtc } : {}) };
+  }
+  if (disposition === "compiled" && hasCompiledConstraintForSource(event, decision)) {
     return { eventId: event.eventId, status: "projected", observedAtUtc: event.createdAtUtc, ...(projectedAtUtc ? { projectedAtUtc } : {}) };
   }
   const codes = diagnosticCodesForSource(diagnostics, event.sourceId);
@@ -85,6 +92,9 @@ export function createConstraintEventCoverageReport(input: {
       ...(event?.sourceChannel ? { sourceChannel: event.sourceChannel } : {}),
     };
   });
+  const deferredMergedSourceEvents = rows.filter((row) => row.status === "queued" && row.disposition === "merged_source" && input.decision.constraints.some((constraint) => constraint.sourceRecordIds.includes(row.sourceRecordId))).length;
+  const injectableDenominator = Math.max(0, summary.total - deferredMergedSourceEvents);
+  const injectableCoverageRatio = injectableDenominator === 0 ? 1 : summary.projected / injectableDenominator;
   const diagnostics: ConstraintShadowDiagnostic[] = [];
   for (const row of rows) {
     if (row.status === "queued") {
@@ -115,8 +125,10 @@ export function createConstraintEventCoverageReport(input: {
         projectedEvents: summary.projected,
         staleEvents: summary.stale,
         appendFailedEvents: summary.appendFailed,
+        deferredMergedSourceEvents,
         ...(summary.oldestQueuedAgeMs === undefined ? {} : { oldestQueuedAgeMs: summary.oldestQueuedAgeMs }),
         coverageRatio: summary.total === 0 ? 1 : summary.projected / summary.total,
+        injectableCoverageRatio,
         provenance: provenanceSummary,
       },
       rows,

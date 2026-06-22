@@ -215,6 +215,42 @@ function source(overrides) {
   };
 }
 
+function eventSource(overrides) {
+  const eventId = overrides.eventId ?? overrides.sourceId?.replace(/^event:/, "") ?? sha256Hex(overrides.candidateText ?? "event");
+  const sourceId = overrides.sourceId ?? `event:${eventId}`;
+  const candidateText = overrides.candidateText ?? "全局规则：以后我说T0审查，那就是要求T0们进行盲审。";
+  return {
+    sourceKind: "constraint_event",
+    sourceId,
+    eventId,
+    eventType: overrides.eventType ?? "constraint_signal_observed",
+    createdAtUtc: overrides.createdAtUtc ?? "2026-06-19T00:00:00.000Z",
+    sessionId: overrides.sessionId ?? "session",
+    turnId: overrides.turnId ?? "turn",
+    sourceChannel: overrides.sourceChannel ?? "agent_end",
+    sourceRole: overrides.sourceRole ?? "user",
+    operationHint: overrides.operationHint ?? "create",
+    confidence: overrides.confidence ?? 0.8,
+    sanitizedQuote: overrides.sanitizedQuote ?? candidateText,
+    candidateText,
+    candidateTitle: overrides.candidateTitle ?? candidateText,
+    candidateTriggerPhrases: overrides.candidateTriggerPhrases ?? [candidateText],
+    candidatePriorityHint: overrides.candidatePriorityHint ?? "always",
+    scopeHint: overrides.scopeHint ?? { kind: "global", evidence: "fixture" },
+    activeProjectId: overrides.activeProjectId ?? "pi-astack",
+    scopeConfidence: overrides.scopeConfidence ?? 0.8,
+    sanitizerStatus: overrides.sanitizerStatus ?? "passed",
+    sanitizerReplacementsCount: overrides.sanitizerReplacementsCount ?? 0,
+    legacyParallelWrite: overrides.legacyParallelWrite ?? { attempted: true, legacy_operation_hint: "create" },
+    causalParents: overrides.causalParents ?? [],
+    producerName: overrides.producerName ?? "sediment.constraint-event-writer",
+    producerVersion: overrides.producerVersion ?? "fixture",
+    bodyHash: overrides.bodyHash ?? eventId,
+    rawFilePath: overrides.rawFilePath ?? `/tmp/${eventId}.json`,
+    sourceRef: overrides.sourceRef ?? { ref: sourceId, path: overrides.rawFilePath ?? `/tmp/${eventId}.json` },
+  };
+}
+
 const settingsSource = source({
   sourceId: "rule:global:always:model-tier-setting",
   slug: "model-tier-setting",
@@ -494,6 +530,135 @@ check("validator quarantines reclassified exclusion when source is compiled", ()
   assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_SOURCE_MULTI_HOME_QUARANTINED" && diagnostic.sourceRecordIds.includes(compactSource.sourceId)), "multi-home quarantine diagnostic missing");
 });
 
+check("validator quarantines multi-home source before merge evaluation", () => {
+  const multiHomeSource = source({
+    sourceId: "rule:global:always:multi-home-merge-source",
+    slug: "multi-home-merge-source",
+    status: "archived",
+    body: "An archived source that the compiler incorrectly compiled and excluded.",
+  });
+  const archivedSibling = source({
+    sourceId: "rule:global:always:multi-home-merge-sibling",
+    slug: "multi-home-merge-sibling",
+    status: "archived",
+    body: "An archived sibling that stays excluded.",
+  });
+  const sources = [...allSources, multiHomeSource, archivedSibling];
+  const withMultiHomeMerge = {
+    ...decision,
+    constraints: [
+      ...decision.constraints,
+      {
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "Multi-home merge source",
+        compiledBody: "An archived source that the compiler incorrectly compiled and excluded.",
+        sourceRecordIds: [multiHomeSource.sourceId],
+      },
+    ],
+    exclusions: [...decision.exclusions, { reason: "superseded_observed", sourceRecordIds: [multiHomeSource.sourceId, archivedSibling.sourceId] }],
+    merges: [{ sourceRecordIds: [compactSource.sourceId, multiHomeSource.sourceId, archivedSibling.sourceId], reason: "family review pair with multi-home source" }],
+    mappings: [
+      ...decision.mappings,
+      { sourceRecordId: multiHomeSource.sourceId, disposition: "excluded" },
+      { sourceRecordId: archivedSibling.sourceId, disposition: "excluded" },
+    ],
+  };
+  const validated = validateConstraintCompilerDecision(sources, withMultiHomeMerge, { knownProjectIds: ["pi-astack"] });
+  assert(!validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(multiHomeSource.sourceId)), "pre-merge multi-home source remained compiled");
+  assert(!validated.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(multiHomeSource.sourceId)), "pre-merge multi-home source remained excluded");
+  assert(validated.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(archivedSibling.sourceId)), "non-conflicting archived sibling was dropped");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(multiHomeSource.sourceId) && item.reason === "conflict"), "pre-merge multi-home source was not quarantined");
+  assert(!validated.merges.some((merge) => merge.sourceRecordIds.includes(multiHomeSource.sourceId)), "merge containing quarantined source entered accepted merges");
+  assert(!validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED" && diagnostic.sourceRecordIds.includes(multiHomeSource.sourceId)), "multi-home source incorrectly used review-pair diagnostic");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_SOURCE_MULTI_HOME_QUARANTINED" && diagnostic.sourceRecordIds.includes(multiHomeSource.sourceId)), "pre-merge multi-home diagnostic missing");
+  assert(validated.mappings.some((mapping) => mapping.sourceRecordId === multiHomeSource.sourceId && mapping.disposition === "unresolved"), "pre-merge multi-home mapping not normalized");
+});
+
+check("validator drops empty-source ghost constraint only when trace source is excluded", () => {
+  const ghost = {
+    scope: { kind: "global" },
+    injectMode: "always",
+    title: "Empty-source ghost constraint",
+    compiledBody: "This compiled shell should be dropped because the source is already excluded.",
+    sourceRecordIds: [],
+    decisionTrace: {
+      reason: "archived source should be excluded, not compiled",
+      sourceRecordIds: [archivedSource.sourceId],
+    },
+  };
+  const withGhost = { ...decision, constraints: [...decision.constraints, ghost] };
+  const validated = validateConstraintCompilerDecision(allSources, withGhost, { knownProjectIds: ["pi-astack"] });
+  assert(!validated.constraints.some((constraint) => constraint.title === ghost.title), "empty-source ghost constraint entered compiled output");
+  assert(validated.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(archivedSource.sourceId)), "excluded trace source was changed");
+  assert(validated.mappings.some((mapping) => mapping.sourceRecordId === archivedSource.sourceId && mapping.disposition === "excluded"), "excluded trace source mapping changed");
+  const diagnostic = validated.diagnostics.find((item) => item.code === "SC_EMPTY_CONSTRAINT_DROPPED" && item.sourceRecordIds.includes(archivedSource.sourceId));
+  assert(diagnostic, "empty-source ghost drop diagnostic missing");
+  assert(diagnostic.data?.sourcePrimary?.[archivedSource.sourceId] === "excluded", "empty-source ghost diagnostic primary missing");
+});
+
+check("validator drops exact single-source status-stale active exclusion", () => {
+  const staleExclusion = { reason: "legacy_archived_observed", sourceRecordIds: [compactSource.sourceId], note: "stale archived side item" };
+  const withStaleExclusion = { ...decision, exclusions: [...decision.exclusions, staleExclusion] };
+  const withoutStaleExclusion = { ...decision };
+  const validated = validateConstraintCompilerDecision(allSources, withStaleExclusion, { knownProjectIds: ["pi-astack"] });
+  const canonical = validateConstraintCompilerDecision(allSources, withoutStaleExclusion, { knownProjectIds: ["pi-astack"] });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.length === 1 && constraint.sourceRecordIds[0] === compactSource.sourceId), "exact compiled primary was changed");
+  assert(!validated.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(compactSource.sourceId)), "status-stale active exclusion was retained");
+  assert(validated.mappings.some((mapping) => mapping.sourceRecordId === compactSource.sourceId && mapping.disposition === "compiled"), "compiled mapping changed");
+  const diagnostic = validated.diagnostics.find((item) => item.code === "SC_ACTIVE_EXCLUSION_DROPPED" && item.sourceRecordIds.includes(compactSource.sourceId));
+  assert(diagnostic, "active status-stale exclusion drop diagnostic missing");
+  assert(diagnostic.data?.exclusionReason === "legacy_archived_observed", "active status-stale diagnostic reason missing");
+  assert(validated.validationHash === canonical.validationHash, "active status-stale exclusion drop changed validationHash");
+});
+
+check("validator rejects status-stale active exclusion without exact single-source compiled primary", () => {
+  const staleExclusion = { reason: "legacy_archived_observed", sourceRecordIds: [globalSource.sourceId], note: "stale archived side item" };
+  let threw = false;
+  try { validateConstraintCompilerDecision(allSources, { ...decision, exclusions: [...decision.exclusions, staleExclusion] }, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
+  assert(threw, "status-stale active exclusion with multi-source compiled primary accepted");
+});
+
+check("validator rejects status-stale active exclusion with unresolved overlap", () => {
+  const staleExclusion = { reason: "legacy_archived_observed", sourceRecordIds: [compactSource.sourceId], note: "stale archived side item" };
+  let threw = false;
+  try {
+    validateConstraintCompilerDecision(allSources, { ...decision, exclusions: [...decision.exclusions, staleExclusion], unresolved: [...decision.unresolved, { reason: "conflict", sourceRecordIds: [compactSource.sourceId], note: "conflicting status" }] }, { knownProjectIds: ["pi-astack"] });
+  } catch { threw = true; }
+  assert(threw, "status-stale active exclusion with unresolved overlap accepted");
+});
+
+check("validator rejects empty-source ghost constraint without non-compiled coverage", () => {
+  const ghost = {
+    scope: { kind: "global" },
+    injectMode: "always",
+    title: "Uncovered empty-source ghost constraint",
+    compiledBody: "This shell has no safe non-compiled coverage.",
+    sourceRecordIds: [],
+    decisionTrace: {
+      reason: "trace source is still compiled",
+      sourceRecordIds: [compactSource.sourceId],
+    },
+  };
+  let threw = false;
+  try { validateConstraintCompilerDecision(allSources, { ...decision, constraints: [...decision.constraints, ghost] }, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
+  assert(threw, "empty-source ghost with compiled trace source accepted");
+});
+
+check("validator rejects empty-source ghost constraint without trace sources", () => {
+  const ghost = {
+    scope: { kind: "global" },
+    injectMode: "always",
+    title: "Untraced empty-source ghost constraint",
+    compiledBody: "This shell has no trace source.",
+    sourceRecordIds: [],
+    decisionTrace: { reason: "no sources", sourceRecordIds: [] },
+  };
+  let threw = false;
+  try { validateConstraintCompilerDecision(allSources, { ...decision, constraints: [...decision.constraints, ghost] }, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
+  assert(threw, "empty-source ghost without trace source accepted");
+});
+
 check("validator quarantines unknown project scope per item", () => {
   const bad = { ...decision, constraints: decision.constraints.map((constraint) => constraint.sourceRecordIds.includes(projectSource.sourceId) ? { ...constraint, scope: { kind: "project", projectId: "missing-project" } } : constraint) };
   const validated = validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] });
@@ -511,11 +676,164 @@ check("validator quarantines source scope mismatch without rescope", () => {
   assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_ITEM_REJECTED" && diagnostic.sourceRecordIds.includes(projectSource.sourceId)), "scope mismatch quarantine diagnostic missing");
 });
 
-check("validator rejects merge not covered by compiled constraint", () => {
-  const bad = { ...decision, merges: [{ sourceRecordIds: [settingsSource.sourceId, toolSource.sourceId], reason: "bad merge" }] };
+check("validator rejects merge with source lacking settled primary", () => {
+  const unsettledSource = source({
+    sourceId: "rule:global:listed:unsettled-merge-source",
+    slug: "unsettled-merge-source",
+    injectMode: "listed",
+    body: "A source that has no compiler bucket must not be accepted through a merge.",
+  });
+  const bad = { ...decision, merges: [{ sourceRecordIds: [compactSource.sourceId, unsettledSource.sourceId], reason: "bad merge" }] };
   let threw = false;
-  try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
-  assert(threw, "uncovered merge accepted");
+  try { validateConstraintCompilerDecision([...allSources, unsettledSource], bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
+  assert(threw, "merge source without settled primary accepted");
+});
+
+check("validator quarantines unsupported merge review pair", () => {
+  const listedCompiledSource = source({
+    sourceId: "rule:global:listed:listed-review-pair-source",
+    slug: "listed-review-pair-source",
+    injectMode: "listed",
+    body: "Listed source overlaps with an always source but must stay separately compiled.",
+  });
+  const sources = [...allSources, listedCompiledSource];
+  const withReviewPair = {
+    ...decision,
+    constraints: [
+      ...decision.constraints,
+      {
+        scope: { kind: "global" },
+        injectMode: "listed",
+        title: "Listed review pair source",
+        compiledBody: "Listed source overlaps with an always source but must stay separately compiled.",
+        sourceRecordIds: [listedCompiledSource.sourceId],
+      },
+    ],
+    merges: [{ sourceRecordIds: [compactSource.sourceId, listedCompiledSource.sourceId], reason: "overlap but different injectMode; cannot be combined; review pair" }],
+    mappings: [...decision.mappings, { sourceRecordId: listedCompiledSource.sourceId, disposition: "compiled" }],
+  };
+  const withoutReviewPair = { ...withReviewPair, merges: [] };
+  const validated = validateConstraintCompilerDecision(sources, withReviewPair, { knownProjectIds: ["pi-astack"] });
+  const canonical = validateConstraintCompilerDecision(sources, withoutReviewPair, { knownProjectIds: ["pi-astack"] });
+  assert(!validated.merges.some((merge) => merge.sourceRecordIds.includes(listedCompiledSource.sourceId)), "unsupported review pair entered accepted merges");
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(compactSource.sourceId)), "always compiled source was dropped");
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(listedCompiledSource.sourceId)), "listed compiled source was dropped");
+  assert(validated.mappings.some((mapping) => mapping.sourceRecordId === compactSource.sourceId && mapping.disposition === "compiled"), "always source mapping changed");
+  assert(validated.mappings.some((mapping) => mapping.sourceRecordId === listedCompiledSource.sourceId && mapping.disposition === "compiled"), "listed source mapping changed");
+  const diagnostic = validated.diagnostics.find((item) => item.code === "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED" && item.sourceRecordIds.includes(listedCompiledSource.sourceId));
+  assert(diagnostic, "unsupported merge review-pair diagnostic missing");
+  assert(diagnostic.severity === "info", "unsupported merge review-pair diagnostic severity drifted");
+  assert(diagnostic.consumers.includes("compiler_prompt_iteration") && diagnostic.consumers.includes("manual_investigation"), "unsupported merge review-pair consumers missing");
+  assert(diagnostic.data?.incompatibleDimension === "injectMode", "unsupported merge review-pair dimension missing");
+  assert(diagnostic.data?.perSourcePrimary?.[compactSource.sourceId] === "compiled", "compiled source primary missing");
+  assert(diagnostic.data?.perSourcePrimary?.[listedCompiledSource.sourceId] === "compiled", "listed source primary missing");
+  assert(validated.validationHash === canonical.validationHash, "unsupported merge review-pair normalization changed validationHash");
+});
+
+check("validator quarantines unsupported merge review pair with unresolved source", () => {
+  const unresolvedReviewSource = source({
+    sourceId: "rule:global:listed:unresolved-review-pair-source",
+    slug: "unresolved-review-pair-source",
+    injectMode: "listed",
+    body: "A source may be near-duplicate but still stay unresolved.",
+  });
+  const sources = [...allSources, unresolvedReviewSource];
+  const withReviewPair = {
+    ...decision,
+    unresolved: [...decision.unresolved, { reason: "scope_ambiguous", sourceRecordIds: [unresolvedReviewSource.sourceId], note: "scope remains ambiguous" }],
+    merges: [{ sourceRecordIds: [compactSource.sourceId, unresolvedReviewSource.sourceId], reason: "near duplicate but unresolved source must not be forced into compiled" }],
+    mappings: [...decision.mappings, { sourceRecordId: unresolvedReviewSource.sourceId, disposition: "unresolved" }],
+  };
+  const withoutReviewPair = { ...withReviewPair, merges: [] };
+  const validated = validateConstraintCompilerDecision(sources, withReviewPair, { knownProjectIds: ["pi-astack"] });
+  const canonical = validateConstraintCompilerDecision(sources, withoutReviewPair, { knownProjectIds: ["pi-astack"] });
+  const diagnostic = validated.diagnostics.find((item) => item.code === "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED" && item.sourceRecordIds.includes(unresolvedReviewSource.sourceId));
+  assert(diagnostic, "unsupported merge review-pair diagnostic missing for unresolved source");
+  assert(!validated.merges.some((merge) => merge.sourceRecordIds.includes(unresolvedReviewSource.sourceId)), "unresolved review pair entered accepted merges");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(unresolvedReviewSource.sourceId) && item.reason === "scope_ambiguous"), "unresolved source primary changed");
+  assert(validated.mappings.some((mapping) => mapping.sourceRecordId === unresolvedReviewSource.sourceId && mapping.disposition === "unresolved"), "unresolved source mapping changed");
+  assert(diagnostic.data?.perSourcePrimary?.[compactSource.sourceId] === "compiled", "compiled source primary missing for unresolved pair");
+  assert(diagnostic.data?.perSourcePrimary?.[unresolvedReviewSource.sourceId] === "unresolved", "unresolved source primary missing");
+  assert(validated.validationHash === canonical.validationHash, "unresolved review-pair quarantine changed validationHash");
+});
+
+check("validator keeps constraint_event trigger fidelity semantic-neutral", () => {
+  const discussionEvent = eventSource({
+    sourceId: "event:1111111111111111111111111111111111111111111111111111111111111111",
+    candidateText: "全局规则：以后我说T0讨论，那就是要求T0们进行多轮讨论并且直到将意见达成一致为止，主会话只做主持不做裁决",
+    candidateTitle: "Whenever the user says 'T0讨论' in any future session",
+    candidateTriggerPhrases: ["T0讨论"],
+  });
+  const reviewEvent = eventSource({
+    sourceId: "event:2222222222222222222222222222222222222222222222222222222222222222",
+    candidateText: "全局规则：以后我说T0审查，那就是要求T0们进行盲审，然后T0们做多轮交叉复核并且直到将结果达成一致为止，主会话同样只做主持不做裁决",
+    candidateTitle: "Whenever the user invokes 'T0审查' in any future session",
+    candidateTriggerPhrases: ["全局规则：以后我说T0审查，那就是要求T0们进行盲审，然后T0们做多轮交叉复核并且直到将结果达成一致为止"],
+  });
+  const sources = [discussionEvent, reviewEvent];
+  const mergedLoss = {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: normalizeConstraintSources(sources).inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "T0讨论: multi-round T0 consensus",
+      compiledBody: "Whenever the user says T0讨论, multiple T0 models conduct multi-round discussion until consensus; the main session only moderates.",
+      triggerPhrases: ["T0讨论"],
+      sourceRecordIds: [discussionEvent.sourceId, reviewEvent.sourceId],
+    }],
+    exclusions: [], unresolved: [], merges: [{ sourceRecordIds: [discussionEvent.sourceId, reviewEvent.sourceId], reason: "incorrectly merged distinct trigger events" }], rescopeProposals: [],
+    mappings: [
+      { sourceRecordId: discussionEvent.sourceId, disposition: "merged_source" },
+      { sourceRecordId: reviewEvent.sourceId, disposition: "merged_source" },
+    ],
+    diagnostics: [],
+  };
+  const validated = validateConstraintCompilerDecision(sources, mergedLoss, { knownProjectIds: ["pi-astack"] });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(discussionEvent.sourceId)), "discussion event was dropped by validator");
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(reviewEvent.sourceId)), "review event was semantically quarantined by validator");
+  assert(validated.merges.some((merge) => merge.sourceRecordIds.includes(reviewEvent.sourceId)), "covered event merge was rejected by validator");
+  assert(!validated.unresolved.some((item) => item.sourceRecordIds.includes(reviewEvent.sourceId)), "validator created semantic trigger unresolved item");
+  const coverage = createConstraintEventCoverageReport({ events: sources, decision: validated, diagnostics: validated.diagnostics, staleAfterMs: 60 * 60 * 1000, nowMs: Date.parse("2026-06-19T00:00:00.000Z") });
+  assert(coverage.report.summary.projectedEvents === 0, "merged_source event counted as projected without verifier");
+  assert(coverage.report.rows.every((row) => row.status === "queued"), "merged_source events did not surface as queued without verifier");
+});
+
+check("validator quarantines uncovered constraint_event review pair structurally", () => {
+  const discussionEvent = eventSource({
+    sourceId: "event:3333333333333333333333333333333333333333333333333333333333333333",
+    candidateText: "以后我说T0讨论，那就是要求T0们进行多轮讨论并且直到意见达成一致为止",
+    candidateTitle: "Whenever the user says 'T0讨论' in any future session",
+    candidateTriggerPhrases: ["T0讨论"],
+  });
+  const reviewEvent = eventSource({
+    sourceId: "event:4444444444444444444444444444444444444444444444444444444444444444",
+    candidateText: "以后我说T0审查，那就是要求T0们进行盲审并交叉复核直到一致",
+    candidateTitle: "Whenever the user invokes 'T0审查' in any future session",
+    candidateTriggerPhrases: ["T0审查"],
+  });
+  const sources = [discussionEvent, reviewEvent];
+  const uncoveredReviewPair = {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: normalizeConstraintSources(sources).inputRootHash,
+    constraints: [
+      { scope: { kind: "global" }, injectMode: "always", title: "T0讨论", compiledBody: "以后我说T0讨论时，T0们多轮讨论直到一致。", triggerPhrases: ["T0讨论"], sourceRecordIds: [discussionEvent.sourceId] },
+      { scope: { kind: "global" }, injectMode: "always", title: "T0审查", compiledBody: "以后我说T0审查时，T0们盲审并交叉复核直到一致。", triggerPhrases: ["T0审查"], sourceRecordIds: [reviewEvent.sourceId] },
+    ],
+    exclusions: [], unresolved: [], merges: [{ sourceRecordIds: [discussionEvent.sourceId, reviewEvent.sourceId], reason: "distinct trigger review pair" }], rescopeProposals: [],
+    mappings: [
+      { sourceRecordId: discussionEvent.sourceId, disposition: "compiled" },
+      { sourceRecordId: reviewEvent.sourceId, disposition: "compiled" },
+    ],
+    diagnostics: [],
+  };
+  const canonical = validateConstraintCompilerDecision(sources, { ...uncoveredReviewPair, merges: [] }, { knownProjectIds: ["pi-astack"] });
+  const validated = validateConstraintCompilerDecision(sources, uncoveredReviewPair, { knownProjectIds: ["pi-astack"] });
+  assert(!validated.merges.some((merge) => merge.sourceRecordIds.includes(reviewEvent.sourceId)), "uncovered review pair entered accepted merges");
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(discussionEvent.sourceId)), "discussion event constraint was dropped");
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(reviewEvent.sourceId)), "review event constraint was dropped");
+  assert(validated.diagnostics.some((item) => item.code === "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED" && item.sourceRecordIds.includes(reviewEvent.sourceId)), "unsupported review-pair diagnostic missing");
+  assert(validated.validationHash === canonical.validationHash, "uncovered event review-pair quarantine changed validationHash");
 });
 
 check("validator tolerates dangling merge targetConstraintId hint (2026-06-21 projector-death regression)", () => {
@@ -531,12 +849,18 @@ check("validator tolerates dangling merge targetConstraintId hint (2026-06-21 pr
   };
   const validated = validateConstraintCompilerDecision(allSources, withDanglingTarget, { knownProjectIds: ["pi-astack"], expectedInputRootHash: normalized.inputRootHash });
   assert(validated.validationHash, "dangling targetConstraintId hint must not reject a covered merge");
-  // The real invariant still holds: an uncovered merge is rejected regardless of hint.
+  // The real invariant still holds: a merge with an unsettled source is rejected regardless of hint.
+  const unsettledSource = source({
+    sourceId: "rule:global:listed:unsettled-merge-source-with-hint",
+    slug: "unsettled-merge-source-with-hint",
+    injectMode: "listed",
+    body: "A source without a compiler bucket remains invalid even with a target hint.",
+  });
   let threw = false;
   try {
-    validateConstraintCompilerDecision(allSources, { ...decision, merges: [{ sourceRecordIds: [settingsSource.sourceId, toolSource.sourceId], targetConstraintId: "shadow-constraint-bogus-not-a-hash", reason: "bad merge" }] }, { knownProjectIds: ["pi-astack"] });
+    validateConstraintCompilerDecision([...allSources, unsettledSource], { ...decision, merges: [{ sourceRecordIds: [compactSource.sourceId, unsettledSource.sourceId], targetConstraintId: "shadow-constraint-bogus-not-a-hash", reason: "bad merge" }] }, { knownProjectIds: ["pi-astack"] });
   } catch { threw = true; }
-  assert(threw, "uncovered merge with a dangling hint must still be rejected");
+  assert(threw, "unsettled merge with a dangling hint must still be rejected");
 });
 
 check("validator normalizes single-primary mapping disposition mismatch", () => {
@@ -857,6 +1181,17 @@ check("event coverage reports queued stale projected and legacy delta", () => {
     rawFilePath: "/tmp/event-b.json",
     sourceRef: { ref: "event:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", path: "/tmp/event-b.json" },
   };
+  const deferredMergeEvent = {
+    ...projectedEvent,
+    sourceId: "event:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    eventId: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    sourceChannel: "agent_end",
+    bodyHash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    createdAtUtc: "2026-06-19T00:00:00.000Z",
+    legacyParallelWrite: { attempted: false, legacy_operation_hint: "none" },
+    rawFilePath: "/tmp/event-d.json",
+    sourceRef: { ref: "event:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", path: "/tmp/event-d.json" },
+  };
   const mismatchEvent = {
     ...projectedEvent,
     sourceId: "event:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -883,14 +1218,14 @@ check("event coverage reports queued stale projected and legacy delta", () => {
     rawFilePath: "/tmp/event-c.json",
     sourceRef: { ref: "event:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", path: "/tmp/event-c.json" },
   };
-  const eventSources = [projectedEvent, queuedEvent, mismatchEvent];
+  const eventSources = [projectedEvent, queuedEvent, mismatchEvent, deferredMergeEvent];
   const eventDecision = validateConstraintCompilerDecision(eventSources, {
     schemaVersion: "constraint-shadow-decision/v1",
     inputRootHash: normalizeConstraintSources(eventSources).inputRootHash,
-    constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit/write", compiledBody: "修改文件必须用 edit/write。", sourceRecordIds: [projectedEvent.sourceId] }],
+    constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit/write", compiledBody: "修改文件必须用 edit/write。", triggerPhrases: ["edit/write"], sourceRecordIds: [projectedEvent.sourceId, deferredMergeEvent.sourceId] }],
     exclusions: [{ reason: "settings_not_memory", sourceRecordIds: [mismatchEvent.sourceId] }],
     unresolved: [],
-    merges: [],
+    merges: [{ sourceRecordIds: [deferredMergeEvent.sourceId], reason: "deferred merged-source coverage fixture" }],
     rescopeProposals: [],
     mappings: [
       { sourceRecordId: projectedEvent.sourceId, disposition: "compiled" },
@@ -905,10 +1240,13 @@ check("event coverage reports queued stale projected and legacy delta", () => {
     staleAfterMs: 60 * 60 * 1000,
     nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
   });
-  assert(coverage.report.summary.totalEvents === 3, "wrong event coverage total");
+  assert(coverage.report.summary.totalEvents === 4, "wrong event coverage total");
   assert(coverage.report.summary.projectedEvents === 2, "projected event not counted");
   assert(coverage.report.summary.staleEvents === 1, "stale queued event not counted");
-  assert(coverage.report.summary.provenance.liveEvents === 1, "live provenance count missing");
+  assert(coverage.report.summary.deferredMergedSourceEvents === 1, "deferred merged-source event not counted");
+  assert(coverage.report.summary.coverageRatio === 0.5, "strict coverage ratio should keep deferred merged-source queued");
+  assert(coverage.report.summary.injectableCoverageRatio === 2 / 3, "injectable coverage ratio should exclude deferred merged-source denominator");
+  assert(coverage.report.summary.provenance.liveEvents === 2, "live provenance count missing");
   assert(coverage.report.summary.provenance.manualEvents === 1, "manual provenance count missing");
   assert(coverage.report.summary.provenance.replayBackfillEvents === 1, "replay provenance count missing");
   assert(coverage.report.rows.some((row) => row.provenance?.source === "historical_audit_backfill" && row.sourceChannel === "replay"), "replay row provenance missing");
@@ -1103,6 +1441,7 @@ check("shadow runner reads L1 events and writes event coverage artifacts", async
             injectMode: "always",
             title: "Use edit/write",
             compiledBody: "修改文件必须用 edit/write，禁止 sed -i。",
+            triggerPhrases: ["edit/write"],
             sourceRecordIds: ["rule:global:always:use-edit-not-sed", eventSourceId],
           }],
           exclusions: [],

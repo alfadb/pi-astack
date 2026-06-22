@@ -14,7 +14,7 @@ import type {
   ValidatedConstraint,
   ValidatedConstraintCompilerDecision,
 } from "./types";
-import { inferCategoryHint, sha256Hex, stableCanonicalize } from "./normalize";
+import { sha256Hex, stableCanonicalize } from "./normalize";
 import { assertDiagnosticConsumers, makeDiagnostic } from "./diagnostics";
 
 const EXCLUSION_REASONS = new Set<ConstraintExclusionReason>([
@@ -34,6 +34,7 @@ const UNRESOLVED_REASONS = new Set<ConstraintUnresolvedReason>([
   "parse_error",
   "model_uncertain",
   "unknown_status",
+  "trigger_projection_loss",
 ]);
 
 const FORBIDDEN_MUTATION_KEYS = new Set([
@@ -60,6 +61,12 @@ const EXCLUSION_REASON_PRIORITY: Record<ConstraintExclusionReason, number> = {
   tool_contract_not_memory: 20,
   knowledge_candidate: 10,
 };
+
+const STATUS_STALE_ACTIVE_EXCLUSION_REASONS = new Set<ConstraintExclusionReason>([
+  "obsolete_archived",
+  "superseded_observed",
+  "legacy_archived_observed",
+]);
 
 export interface ValidateConstraintDecisionOptions {
   knownProjectIds?: string[];
@@ -193,7 +200,7 @@ function notMemorySubtypeDiagnostic(exclusion: ConstraintDecisionExclusion, cano
   });
 }
 
-function normalizeNotMemoryExclusion(exclusion: ConstraintDecisionExclusion, diagnostics: ConstraintShadowDiagnostic[], sources: ConstraintSourceRecord[]): ConstraintDecisionExclusion | null {
+function normalizeNotMemoryExclusion(exclusion: ConstraintDecisionExclusion, diagnostics: ConstraintShadowDiagnostic[]): ConstraintDecisionExclusion | null {
   const expectedCode = notMemoryDiagnosticCodeFor(exclusion.reason);
   if (!expectedCode) return exclusion;
   const matches = matchingNotMemoryDiagnostics(diagnostics, exclusion.sourceRecordIds);
@@ -201,8 +208,6 @@ function normalizeNotMemoryExclusion(exclusion: ConstraintDecisionExclusion, dia
   if (matches.some((diagnostic) => diagnostic.code === expectedCode)) return exclusion;
   const canonicalReasons = Array.from(new Set(matches.map((diagnostic) => notMemoryReasonForDiagnostic(diagnostic.code)).filter((reason): reason is ConstraintExclusionReason => Boolean(reason))));
   if (canonicalReasons.length !== 1) return null;
-  const sourceHints = exclusion.sourceRecordIds.map((sourceId) => sources.find((source) => source.sourceId === sourceId)).map((source) => source ? inferCategoryHint(source) : "unknown");
-  if (!sourceHints.every((hint) => hint === canonicalReasons[0])) return null;
   return { ...exclusion, reason: canonicalReasons[0] };
 }
 
@@ -296,11 +301,93 @@ function sourceMultiHomeDiagnostic(sourceId: string, primaryDispositions: string
   });
 }
 
+function emptyConstraintDroppedDiagnostic(constraint: ConstraintDecisionConstraint, index: number, traceSourceRecordIds: string[], sourcePrimary: Map<string, ConstraintSourceDisposition>): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_EMPTY_CONSTRAINT_DROPPED",
+    severity: "warning",
+    message: "compiler emitted an empty-source ghost constraint already covered by non-compiled primary dispositions",
+    sourceRecordIds: traceSourceRecordIds,
+    data: {
+      constraintIndex: index,
+      title: constraint.title,
+      sourcePrimary: Object.fromEntries(Array.from(sourcePrimary.entries()).sort(([left], [right]) => left.localeCompare(right))),
+      decisionTraceReason: constraint.decisionTrace?.reason,
+      action: "dropped-empty-source-ghost-constraint",
+    },
+  });
+}
+
+function activeExclusionDroppedDiagnostic(exclusion: ConstraintDecisionExclusion, index: number, compiledConstraint: ValidatedConstraint): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_ACTIVE_EXCLUSION_DROPPED",
+    severity: "warning",
+    message: "compiler emitted a status-stale exclusion for an exact active compiled source and it was dropped",
+    sourceRecordIds: exclusion.sourceRecordIds,
+    data: {
+      exclusionIndex: index,
+      exclusionReason: exclusion.reason,
+      compiledConstraintId: compiledConstraint.constraintId,
+      compiledTitle: compiledConstraint.title,
+      action: "dropped-status-stale-active-exclusion",
+    },
+  });
+}
+
+function unsupportedMergeReviewPairDiagnostic(merge: ConstraintCompilerDecision["merges"][number], index: number, sources: ConstraintSourceRecord[], perSourcePrimary: Map<string, ConstraintSourceDisposition>): ConstraintShadowDiagnostic {
+  const mergeSources = merge.sourceRecordIds
+    .map((sourceId) => sources.find((source) => source.sourceId === sourceId))
+    .filter((source): source is ConstraintSourceRecord => Boolean(source));
+  const legacySources = mergeSources.filter((source): source is LegacyRuleSourceRecord => source.sourceKind === "legacy_rule");
+  const injectModes = new Set(legacySources.map((source) => source.injectMode));
+  const scopes = new Set(legacySources.map((source) => scopeKey(source.scope)));
+  const sourceKinds = Array.from(new Set(mergeSources.map((source) => source.sourceKind))).sort();
+  const incompatibleDimension = sourceKinds.length > 1
+    ? "heterogeneous"
+    : injectModes.size > 1
+      ? "injectMode"
+      : scopes.size > 1
+        ? "scope"
+        : "multiplePrimaryDispositions";
+  return makeDiagnostic({
+    code: "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED",
+    severity: "info",
+    message: "compiler merge item was an unsupported review pair and was quarantined",
+    sourceRecordIds: merge.sourceRecordIds,
+    data: {
+      mergeIndex: index,
+      incompatibleDimension,
+      llmStatedReason: merge.reason,
+      perSourcePrimary: Object.fromEntries(Array.from(perSourcePrimary.entries()).sort(([left], [right]) => left.localeCompare(right))),
+      sourceKindsInMerge: sourceKinds,
+      action: "quarantined-unsupported-merge-review-pair",
+    },
+  });
+}
+
+function settledPrimaryDisposition(
+  sourceId: string,
+  constraints: ConstraintDecisionConstraint[],
+  exclusions: ConstraintDecisionExclusion[],
+  items: ConstraintDecisionUnresolved[],
+): ConstraintSourceDisposition | null {
+  const hasCompiled = constraints.some((constraint) => constraint.sourceRecordIds.includes(sourceId));
+  const hasExcluded = exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(sourceId));
+  const hasUnresolved = items.some((item) => item.sourceRecordIds.includes(sourceId));
+  const count = (hasCompiled ? 1 : 0) + (hasExcluded ? 1 : 0) + (hasUnresolved ? 1 : 0);
+  if (count !== 1) return null;
+  if (hasCompiled) return "compiled";
+  if (hasExcluded) return "excluded";
+  return "unresolved";
+}
+
 function isValidationHashDiagnostic(diagnostic: ConstraintShadowDiagnostic): boolean {
   return diagnostic.code !== "SC_MAPPING_DISPOSITION_NORMALIZED"
     && diagnostic.code !== "SC_EXCLUSION_REASON_RECLASSIFIED"
     && diagnostic.code !== "SC_EXCLUSION_DEDUPED"
-    && diagnostic.code !== "SC_NOT_MEMORY_SUBTYPE_NORMALIZED";
+    && diagnostic.code !== "SC_NOT_MEMORY_SUBTYPE_NORMALIZED"
+    && diagnostic.code !== "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED"
+    && diagnostic.code !== "SC_EMPTY_CONSTRAINT_DROPPED"
+    && diagnostic.code !== "SC_ACTIVE_EXCLUSION_DROPPED";
 }
 
 function quarantineDiagnostic(context: string, constraint: ConstraintDecisionConstraint, reason: string): ConstraintShadowDiagnostic {
@@ -341,6 +428,74 @@ function rebuildDispositions(
   return rebuilt;
 }
 
+function canDropStatusStaleActiveExclusion(
+  exclusion: ConstraintDecisionExclusion,
+  exclusionIndex: number,
+  sources: ConstraintSourceRecord[],
+  decision: ConstraintCompilerDecision,
+  constraints: ValidatedConstraint[],
+  acceptedExclusions: ConstraintDecisionExclusion[],
+  unresolved: ConstraintDecisionUnresolved[],
+): ValidatedConstraint | null {
+  if (!STATUS_STALE_ACTIVE_EXCLUSION_REASONS.has(exclusion.reason)) return null;
+  if (exclusion.sourceRecordIds.length !== 1) return null;
+  const sourceId = exclusion.sourceRecordIds[0];
+  const source = findLegacySource(sources, sourceId);
+  if (source?.status !== "active") return null;
+  if (unresolved.some((item) => item.sourceRecordIds.includes(sourceId))) return null;
+  if (acceptedExclusions.some((item) => item.sourceRecordIds.includes(sourceId))) return null;
+  if (decision.exclusions.some((item, index) => index !== exclusionIndex && item.sourceRecordIds.includes(sourceId))) return null;
+  const compiledConstraints = constraints.filter((constraint) => constraint.sourceRecordIds.length === 1 && constraint.sourceRecordIds[0] === sourceId);
+  if (compiledConstraints.length !== 1) return null;
+  if (constraints.some((constraint) => constraint !== compiledConstraints[0] && constraint.sourceRecordIds.includes(sourceId))) return null;
+  const mappings = decision.mappings.filter((mapping) => mapping.sourceRecordId === sourceId);
+  if (mappings.length !== 1) return null;
+  if (!isCompiledMergeDisposition(mappings[0].disposition)) return null;
+  return compiledConstraints[0];
+}
+
+function quarantineMultiHomeSources(
+  constraints: ConstraintDecisionConstraint[],
+  exclusions: ConstraintDecisionExclusion[],
+  unresolved: ConstraintDecisionUnresolved[],
+  merges: ConstraintCompilerDecision["merges"],
+  diagnostics: ConstraintShadowDiagnostic[],
+  quarantinedSourceIds: Set<string>,
+): void {
+  const rebuiltDispositions = rebuildDispositions(constraints, exclusions, unresolved, merges);
+  const multiHomeSourceIds = new Set<string>();
+  for (const [sourceId, sourceDispositions] of rebuiltDispositions) {
+    const primary = new Set(sourceDispositions.map((disposition) => disposition === "merged_source" ? "compiled" : disposition));
+    if (primary.size > 1) multiHomeSourceIds.add(sourceId);
+  }
+  for (const sourceId of multiHomeSourceIds) {
+    const primary = Array.from(new Set((rebuiltDispositions.get(sourceId) ?? []).map((disposition) => disposition === "merged_source" ? "compiled" : disposition))).sort();
+    const diagnostic = sourceMultiHomeDiagnostic(sourceId, primary);
+    diagnostics.push(diagnostic);
+    for (let index = constraints.length - 1; index >= 0; index -= 1) {
+      if (constraints[index].sourceRecordIds.includes(sourceId)) constraints.splice(index, 1);
+    }
+    for (let index = exclusions.length - 1; index >= 0; index -= 1) {
+      exclusions[index].sourceRecordIds = exclusions[index].sourceRecordIds.filter((candidate) => candidate !== sourceId);
+      if (!exclusions[index].sourceRecordIds.length) exclusions.splice(index, 1);
+    }
+    for (let index = unresolved.length - 1; index >= 0; index -= 1) {
+      unresolved[index].sourceRecordIds = unresolved[index].sourceRecordIds.filter((candidate) => candidate !== sourceId);
+      if (!unresolved[index].sourceRecordIds.length) unresolved.splice(index, 1);
+    }
+    for (let index = merges.length - 1; index >= 0; index -= 1) {
+      if (merges[index].sourceRecordIds.includes(sourceId)) merges.splice(index, 1);
+    }
+    unresolved.push({
+      reason: "conflict",
+      sourceRecordIds: [sourceId],
+      diagnosticIds: [diagnostic.id],
+      note: `Compiler source quarantined from multiple primary dispositions: ${primary.join(",")}`,
+    });
+    quarantinedSourceIds.add(sourceId);
+  }
+}
+
 export function validateConstraintCompilerDecision(
   sources: ConstraintSourceRecord[],
   decision: ConstraintCompilerDecision,
@@ -363,8 +518,9 @@ export function validateConstraintCompilerDecision(
   const diagnostics: ConstraintShadowDiagnostic[] = decision.diagnostics.slice();
   const unresolved: ConstraintDecisionUnresolved[] = decision.unresolved.slice();
   const acceptedExclusions: ConstraintDecisionExclusion[] = [];
-  const acceptedMerges = decision.merges.slice();
+  const acceptedMerges: ConstraintCompilerDecision["merges"] = [];
   const quarantinedSourceIds = new Set<string>();
+  const emptyConstraintGhosts: Array<{ constraint: ConstraintDecisionConstraint; index: number; traceSourceRecordIds: string[] }> = [];
 
   diagnostics.forEach((diagnostic, index) => {
     assertSourceIdsKnown(diagnostic.sourceRecordIds, sourceIds, `diagnostic[${index}]`);
@@ -373,6 +529,13 @@ export function validateConstraintCompilerDecision(
   const validatedConstraints: ValidatedConstraint[] = [];
   decision.constraints.forEach((constraint, index) => {
     const context = `constraint[${index}]`;
+    if (Array.isArray(constraint.sourceRecordIds) && constraint.sourceRecordIds.length === 0) {
+      const traceSourceRecordIds = constraint.decisionTrace?.sourceRecordIds;
+      if (!Array.isArray(traceSourceRecordIds) || traceSourceRecordIds.length === 0) throw new Error(`${context} has no sourceRecordIds`);
+      assertSourceIdsExist(traceSourceRecordIds, sourceIds, `${context}.decisionTrace`);
+      emptyConstraintGhosts.push({ constraint, index, traceSourceRecordIds: traceSourceRecordIds.slice().sort() });
+      return;
+    }
     assertSourceIdsExist(constraint.sourceRecordIds, sourceIds, context);
     let quarantineReason = "";
     try {
@@ -406,10 +569,13 @@ export function validateConstraintCompilerDecision(
       return;
     }
 
-    for (const sourceId of constraint.sourceRecordIds) addDisposition(dispositions, sourceId, "compiled");
+    const projectedSourceRecordIds = constraint.sourceRecordIds.filter((sourceId) => !quarantinedSourceIds.has(sourceId));
+    if (projectedSourceRecordIds.length === 0) return;
+    const projectedConstraint = { ...constraint, sourceRecordIds: projectedSourceRecordIds };
+    for (const sourceId of projectedSourceRecordIds) addDisposition(dispositions, sourceId, "compiled");
     validatedConstraints.push({
-      ...constraint,
-      constraintId: options.deriveConstraintIds === false && constraint.constraintId ? constraint.constraintId : constraintIdFor(constraint),
+      ...projectedConstraint,
+      constraintId: options.deriveConstraintIds === false && constraint.constraintId ? constraint.constraintId : constraintIdFor(projectedConstraint),
     });
   });
 
@@ -437,12 +603,17 @@ export function validateConstraintCompilerDecision(
       return;
     }
     validateExclusionReason(exclusion);
-    const normalizedExclusion = normalizeNotMemoryExclusion(exclusion, diagnostics, sources);
+    const normalizedExclusion = normalizeNotMemoryExclusion(exclusion, diagnostics);
     if (!normalizedExclusion) {
       throw new Error(`exclusion[${index}] not-memory reason lacks matching diagnostic consumer`);
     }
     if (normalizedExclusion.reason !== exclusion.reason) diagnostics.push(notMemorySubtypeDiagnostic(exclusion, normalizedExclusion.reason));
     if (normalizedExclusion.reason !== "settings_not_memory" && normalizedExclusion.reason !== "tool_contract_not_memory" && normalizedExclusion.reason !== "knowledge_candidate") {
+      const droppedConstraint = canDropStatusStaleActiveExclusion(normalizedExclusion, index, sources, decision, validatedConstraints, acceptedExclusions, unresolved);
+      if (droppedConstraint) {
+        diagnostics.push(activeExclusionDroppedDiagnostic(normalizedExclusion, index, droppedConstraint));
+        return;
+      }
       for (const sourceId of normalizedExclusion.sourceRecordIds) {
         const source = findLegacySource(sources, sourceId);
         if (source?.status === "active") throw new Error(`exclusion[${index}] uses ${normalizedExclusion.reason} for active source ${sourceId}`);
@@ -455,29 +626,6 @@ export function validateConstraintCompilerDecision(
     validateUnresolvedReason(item);
     assertSourceIdsExist(item.sourceRecordIds, sourceIds, `unresolved[${index}]`);
     for (const sourceId of item.sourceRecordIds) addDisposition(dispositions, sourceId, "unresolved");
-  });
-
-  acceptedMerges.length = 0;
-  decision.merges.forEach((merge, index) => {
-    assertSourceIdsExist(merge.sourceRecordIds, sourceIds, `merge[${index}]`);
-    if (merge.sourceRecordIds.some((sourceId) => quarantinedSourceIds.has(sourceId))) return;
-    // ADR0039 design-maxim + §12 resilience: targetConstraintId is an OPTIONAL hint
-    // the LLM cannot compute (real ids are post-hoc content hashes, constraintIdFor).
-    // A dangling hint must NOT reject the whole decision — that froze the constraint
-    // projector on 2026-06-21 (LLM merged the near-duplicate no-industry-jargon rules
-    // and named the target descriptively). Ignore an unknown hint and bind the merge
-    // by sourceRecordIds coverage, which is the real invariant; only an uncovered
-    // merge (no compiled constraint contains all its sources) is a hard error.
-    const pinnedTargetId = merge.targetConstraintId && constraintIds.has(merge.targetConstraintId)
-      ? merge.targetConstraintId
-      : undefined;
-    const coveringConstraint = validatedConstraints.find((constraint) => (
-      (!pinnedTargetId || constraint.constraintId === pinnedTargetId)
-      && merge.sourceRecordIds.every((sourceId) => constraint.sourceRecordIds.includes(sourceId))
-    ));
-    if (!coveringConstraint) throw new Error(`merge[${index}] source records are not covered by one compiled constraint`);
-    acceptedMerges.push(merge);
-    for (const sourceId of merge.sourceRecordIds) addDisposition(dispositions, sourceId, "merged_source");
   });
 
   const exclusionsBySource = new Map<string, ConstraintDecisionExclusion[]>();
@@ -502,39 +650,50 @@ export function validateConstraintCompilerDecision(
     if (!acceptedExclusions[index].sourceRecordIds.length) acceptedExclusions.splice(index, 1);
   }
 
-  let rebuiltDispositions = rebuildDispositions(validatedConstraints, acceptedExclusions, unresolved, acceptedMerges);
-  const multiHomeSourceIds = new Set<string>();
-  for (const [sourceId, sourceDispositions] of rebuiltDispositions) {
-    const primary = new Set(sourceDispositions.map((disposition) => disposition === "merged_source" ? "compiled" : disposition));
-    if (primary.size > 1) multiHomeSourceIds.add(sourceId);
+  quarantineMultiHomeSources(validatedConstraints, acceptedExclusions, unresolved, acceptedMerges, diagnostics, quarantinedSourceIds);
+  for (const ghost of emptyConstraintGhosts) {
+    const sourcePrimary = new Map<string, ConstraintSourceDisposition>();
+    for (const sourceId of ghost.traceSourceRecordIds) {
+      const primary = settledPrimaryDisposition(sourceId, validatedConstraints, acceptedExclusions, unresolved);
+      if (primary !== "excluded" && primary !== "unresolved") throw new Error(`constraint[${ghost.index}] has no sourceRecordIds`);
+      sourcePrimary.set(sourceId, primary);
+    }
+    diagnostics.push(emptyConstraintDroppedDiagnostic(ghost.constraint, ghost.index, ghost.traceSourceRecordIds, sourcePrimary));
   }
-  for (const sourceId of multiHomeSourceIds) {
-    const primary = Array.from(new Set((rebuiltDispositions.get(sourceId) ?? []).map((disposition) => disposition === "merged_source" ? "compiled" : disposition))).sort();
-    const diagnostic = sourceMultiHomeDiagnostic(sourceId, primary);
-    diagnostics.push(diagnostic);
-    for (let index = validatedConstraints.length - 1; index >= 0; index -= 1) {
-      if (validatedConstraints[index].sourceRecordIds.includes(sourceId)) validatedConstraints.splice(index, 1);
+
+  decision.merges.forEach((merge, index) => {
+    assertSourceIdsExist(merge.sourceRecordIds, sourceIds, `merge[${index}]`);
+    if (merge.sourceRecordIds.some((sourceId) => quarantinedSourceIds.has(sourceId))) return;
+    // ADR0039 design-maxim + §12 resilience: targetConstraintId is an OPTIONAL hint
+    // the LLM cannot compute (real ids are post-hoc content hashes, constraintIdFor).
+    // A dangling hint must NOT reject the whole decision — that froze the constraint
+    // projector on 2026-06-21 (LLM merged the near-duplicate no-industry-jargon rules
+    // and named the target descriptively). Ignore an unknown hint and bind the merge
+    // by sourceRecordIds coverage, which is the real invariant; only an uncovered
+    // merge (no compiled constraint contains all its sources) is a hard error.
+    const pinnedTargetId = merge.targetConstraintId && constraintIds.has(merge.targetConstraintId)
+      ? merge.targetConstraintId
+      : undefined;
+    const coveringConstraint = validatedConstraints.find((constraint) => (
+      (!pinnedTargetId || constraint.constraintId === pinnedTargetId)
+      && merge.sourceRecordIds.every((sourceId) => constraint.sourceRecordIds.includes(sourceId))
+    ));
+    if (!coveringConstraint) {
+      const perSourcePrimary = new Map<string, ConstraintSourceDisposition>();
+      for (const sourceId of merge.sourceRecordIds) {
+        const primary = settledPrimaryDisposition(sourceId, validatedConstraints, acceptedExclusions, unresolved);
+        if (!primary) throw new Error(`merge[${index}] source records are not all covered by exactly one settled primary disposition`);
+        perSourcePrimary.set(sourceId, primary);
+      }
+      diagnostics.push(unsupportedMergeReviewPairDiagnostic(merge, index, sources, perSourcePrimary));
+      return;
     }
-    for (let index = acceptedExclusions.length - 1; index >= 0; index -= 1) {
-      acceptedExclusions[index].sourceRecordIds = acceptedExclusions[index].sourceRecordIds.filter((candidate) => candidate !== sourceId);
-      if (!acceptedExclusions[index].sourceRecordIds.length) acceptedExclusions.splice(index, 1);
-    }
-    for (let index = unresolved.length - 1; index >= 0; index -= 1) {
-      unresolved[index].sourceRecordIds = unresolved[index].sourceRecordIds.filter((candidate) => candidate !== sourceId);
-      if (!unresolved[index].sourceRecordIds.length) unresolved.splice(index, 1);
-    }
-    for (let index = acceptedMerges.length - 1; index >= 0; index -= 1) {
-      if (acceptedMerges[index].sourceRecordIds.includes(sourceId)) acceptedMerges.splice(index, 1);
-    }
-    unresolved.push({
-      reason: "conflict",
-      sourceRecordIds: [sourceId],
-      diagnosticIds: [diagnostic.id],
-      note: `Compiler source quarantined from multiple primary dispositions: ${primary.join(",")}`,
-    });
-    quarantinedSourceIds.add(sourceId);
-  }
-  rebuiltDispositions = rebuildDispositions(validatedConstraints, acceptedExclusions, unresolved, acceptedMerges);
+    acceptedMerges.push(merge);
+    for (const sourceId of merge.sourceRecordIds) addDisposition(dispositions, sourceId, "merged_source");
+  });
+
+  quarantineMultiHomeSources(validatedConstraints, acceptedExclusions, unresolved, acceptedMerges, diagnostics, quarantinedSourceIds);
+  const rebuiltDispositions = rebuildDispositions(validatedConstraints, acceptedExclusions, unresolved, acceptedMerges);
   dispositions.clear();
   for (const [sourceId, sourceDispositions] of rebuiltDispositions) dispositions.set(sourceId, sourceDispositions.slice());
 

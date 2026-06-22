@@ -19,6 +19,7 @@ export interface ConstraintEvidenceTier1DraftInput {
   title: string;
   body: string;
   entryConfidence: number;
+  triggerPhrases?: string[];
 }
 
 export interface BuildTier1ConstraintEvidenceEventOptions {
@@ -222,12 +223,13 @@ function clampConfidence(value: number | null | undefined): number | undefined {
 }
 
 function triggerPhrases(
-  signal: ConstraintEvidenceTier1SignalInput,
+  _signal: ConstraintEvidenceTier1SignalInput,
   draft: ConstraintEvidenceTier1DraftInput,
 ): string[] {
   const out = new Set<string>();
-  const quote = typeof signal.user_quote === "string" ? signal.user_quote.trim() : "";
-  if (quote) out.add(quote.slice(0, 120));
-  if (draft.title) out.add(draft.title.slice(0, 120));
-  return [...out].filter(Boolean);
+  for (const phrase of draft.triggerPhrases ?? []) {
+    const normalized = phrase.trim();
+    if (normalized) out.add(normalized);
+  }
+  return [...out].sort();
 }
