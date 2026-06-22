@@ -570,11 +570,23 @@ check("validator still rejects mapping with no primary disposition", () => {
   assert(threw, "mapping-only source accepted without a primary disposition");
 });
 
-check("validator rejects not-memory reason with wrong diagnostic code", () => {
+check("validator normalizes not-memory subtype mismatch", () => {
+  const mismatched = {
+    ...decision,
+    exclusions: decision.exclusions.map((exclusion) => exclusion.sourceRecordIds.includes(settingsSource.sourceId) ? { ...exclusion, reason: "tool_contract_not_memory" } : exclusion),
+  };
+  const canonical = validateConstraintCompilerDecision(allSources, decision, { knownProjectIds: ["pi-astack"] });
+  const validated = validateConstraintCompilerDecision(allSources, mismatched, { knownProjectIds: ["pi-astack"] });
+  assert(validated.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(settingsSource.sourceId) && exclusion.reason === "settings_not_memory"), "not-memory subtype was not canonicalized");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SUBTYPE_NORMALIZED" && diagnostic.sourceRecordIds.includes(settingsSource.sourceId)), "not-memory subtype diagnostic missing");
+  assert(validated.validationHash === canonical.validationHash, "not-memory subtype normalization changed validationHash");
+});
+
+check("validator rejects not-memory exclusion without diagnostic", () => {
   const bad = { ...decision, diagnostics: decision.diagnostics.filter((diagnostic) => diagnostic.code !== "SC_NOT_MEMORY_TOOL_CONTRACT") };
   let threw = false;
   try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
-  assert(threw, "wrong not-memory diagnostic accepted");
+  assert(threw, "not-memory exclusion without diagnostic accepted");
 });
 
 check("validator rejects diagnostics without consumers", () => {

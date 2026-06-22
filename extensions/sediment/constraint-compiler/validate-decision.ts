@@ -14,7 +14,7 @@ import type {
   ValidatedConstraint,
   ValidatedConstraintCompilerDecision,
 } from "./types";
-import { sha256Hex, stableCanonicalize } from "./normalize";
+import { inferCategoryHint, sha256Hex, stableCanonicalize } from "./normalize";
 import { assertDiagnosticConsumers, makeDiagnostic } from "./diagnostics";
 
 const EXCLUSION_REASONS = new Set<ConstraintExclusionReason>([
@@ -157,20 +157,53 @@ function hasDiagnosticForSource(decision: ConstraintCompilerDecision, sourceId: 
   return decision.diagnostics.some((diagnostic) => Array.isArray(diagnostic.sourceRecordIds) && diagnostic.sourceRecordIds.includes(sourceId));
 }
 
-function hasNotMemoryDiagnostic(diagnostics: ConstraintShadowDiagnostic[], sourceIds: string[], reason: ConstraintExclusionReason): boolean {
-  const requiredCode = reason === "settings_not_memory"
-    ? "SC_NOT_MEMORY_SETTINGS"
-    : reason === "tool_contract_not_memory"
-      ? "SC_NOT_MEMORY_TOOL_CONTRACT"
-      : null;
-  if (!requiredCode) return true;
-  return diagnostics.some((diagnostic) => (
-    diagnostic.code === requiredCode
+function notMemoryDiagnosticCodeFor(reason: ConstraintExclusionReason): "SC_NOT_MEMORY_SETTINGS" | "SC_NOT_MEMORY_TOOL_CONTRACT" | null {
+  if (reason === "settings_not_memory") return "SC_NOT_MEMORY_SETTINGS";
+  if (reason === "tool_contract_not_memory") return "SC_NOT_MEMORY_TOOL_CONTRACT";
+  return null;
+}
+
+function notMemoryReasonForDiagnostic(code: ConstraintShadowDiagnostic["code"]): ConstraintExclusionReason | null {
+  if (code === "SC_NOT_MEMORY_SETTINGS") return "settings_not_memory";
+  if (code === "SC_NOT_MEMORY_TOOL_CONTRACT") return "tool_contract_not_memory";
+  return null;
+}
+
+function matchingNotMemoryDiagnostics(diagnostics: ConstraintShadowDiagnostic[], sourceIds: string[]): ConstraintShadowDiagnostic[] {
+  return diagnostics.filter((diagnostic) => (
+    notMemoryReasonForDiagnostic(diagnostic.code)
     && Array.isArray(diagnostic.consumers)
     && diagnostic.consumers.length > 0
     && Array.isArray(diagnostic.sourceRecordIds)
     && sourceIds.every((sourceId) => diagnostic.sourceRecordIds.includes(sourceId))
   ));
+}
+
+function notMemorySubtypeDiagnostic(exclusion: ConstraintDecisionExclusion, canonicalReason: ConstraintExclusionReason): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_NOT_MEMORY_SUBTYPE_NORMALIZED",
+    severity: "info",
+    message: "compiler not-memory exclusion subtype normalized to deterministic input diagnostic",
+    sourceRecordIds: exclusion.sourceRecordIds,
+    data: {
+      originalReason: exclusion.reason,
+      canonicalReason,
+      action: "normalized-to-not-memory-diagnostic",
+    },
+  });
+}
+
+function normalizeNotMemoryExclusion(exclusion: ConstraintDecisionExclusion, diagnostics: ConstraintShadowDiagnostic[], sources: ConstraintSourceRecord[]): ConstraintDecisionExclusion | null {
+  const expectedCode = notMemoryDiagnosticCodeFor(exclusion.reason);
+  if (!expectedCode) return exclusion;
+  const matches = matchingNotMemoryDiagnostics(diagnostics, exclusion.sourceRecordIds);
+  if (!matches.length) return null;
+  if (matches.some((diagnostic) => diagnostic.code === expectedCode)) return exclusion;
+  const canonicalReasons = Array.from(new Set(matches.map((diagnostic) => notMemoryReasonForDiagnostic(diagnostic.code)).filter((reason): reason is ConstraintExclusionReason => Boolean(reason))));
+  if (canonicalReasons.length !== 1) return null;
+  const sourceHints = exclusion.sourceRecordIds.map((sourceId) => sources.find((source) => source.sourceId === sourceId)).map((source) => source ? inferCategoryHint(source) : "unknown");
+  if (!sourceHints.every((hint) => hint === canonicalReasons[0])) return null;
+  return { ...exclusion, reason: canonicalReasons[0] };
 }
 
 function findLegacySource(sources: ConstraintSourceRecord[], sourceId: string): LegacyRuleSourceRecord | undefined {
@@ -266,7 +299,8 @@ function sourceMultiHomeDiagnostic(sourceId: string, primaryDispositions: string
 function isValidationHashDiagnostic(diagnostic: ConstraintShadowDiagnostic): boolean {
   return diagnostic.code !== "SC_MAPPING_DISPOSITION_NORMALIZED"
     && diagnostic.code !== "SC_EXCLUSION_REASON_RECLASSIFIED"
-    && diagnostic.code !== "SC_EXCLUSION_DEDUPED";
+    && diagnostic.code !== "SC_EXCLUSION_DEDUPED"
+    && diagnostic.code !== "SC_NOT_MEMORY_SUBTYPE_NORMALIZED";
 }
 
 function quarantineDiagnostic(context: string, constraint: ConstraintDecisionConstraint, reason: string): ConstraintShadowDiagnostic {
@@ -403,17 +437,19 @@ export function validateConstraintCompilerDecision(
       return;
     }
     validateExclusionReason(exclusion);
-    if ((exclusion.reason === "settings_not_memory" || exclusion.reason === "tool_contract_not_memory") && !hasNotMemoryDiagnostic(diagnostics, exclusion.sourceRecordIds, exclusion.reason)) {
+    const normalizedExclusion = normalizeNotMemoryExclusion(exclusion, diagnostics, sources);
+    if (!normalizedExclusion) {
       throw new Error(`exclusion[${index}] not-memory reason lacks matching diagnostic consumer`);
     }
-    if (exclusion.reason !== "settings_not_memory" && exclusion.reason !== "tool_contract_not_memory" && exclusion.reason !== "knowledge_candidate") {
-      for (const sourceId of exclusion.sourceRecordIds) {
+    if (normalizedExclusion.reason !== exclusion.reason) diagnostics.push(notMemorySubtypeDiagnostic(exclusion, normalizedExclusion.reason));
+    if (normalizedExclusion.reason !== "settings_not_memory" && normalizedExclusion.reason !== "tool_contract_not_memory" && normalizedExclusion.reason !== "knowledge_candidate") {
+      for (const sourceId of normalizedExclusion.sourceRecordIds) {
         const source = findLegacySource(sources, sourceId);
-        if (source?.status === "active") throw new Error(`exclusion[${index}] uses ${exclusion.reason} for active source ${sourceId}`);
+        if (source?.status === "active") throw new Error(`exclusion[${index}] uses ${normalizedExclusion.reason} for active source ${sourceId}`);
       }
     }
-    acceptedExclusions.push(exclusion);
-    for (const sourceId of exclusion.sourceRecordIds) addDisposition(dispositions, sourceId, "excluded");
+    acceptedExclusions.push(normalizedExclusion);
+    for (const sourceId of normalizedExclusion.sourceRecordIds) addDisposition(dispositions, sourceId, "excluded");
   });
   unresolved.forEach((item, index) => {
     validateUnresolvedReason(item);
