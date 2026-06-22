@@ -51,6 +51,16 @@ const FORBIDDEN_MUTATION_KEYS = new Set([
   "operation",
 ]);
 
+const EXCLUSION_REASON_PRIORITY: Record<ConstraintExclusionReason, number> = {
+  malformed_unusable: 70,
+  obsolete_archived: 60,
+  superseded_observed: 50,
+  legacy_archived_observed: 40,
+  settings_not_memory: 30,
+  tool_contract_not_memory: 20,
+  knowledge_candidate: 10,
+};
+
 export interface ValidateConstraintDecisionOptions {
   knownProjectIds?: string[];
   deriveConstraintIds?: boolean;
@@ -124,6 +134,10 @@ function validateUnresolvedReason(unresolved: ConstraintDecisionUnresolved): voi
   }
 }
 
+function isUnresolvedReason(reason: unknown): reason is ConstraintUnresolvedReason {
+  return typeof reason === "string" && UNRESOLVED_REASONS.has(reason as ConstraintUnresolvedReason);
+}
+
 function assertDecisionArrays(decision: ConstraintCompilerDecision): void {
   const requiredArrays: Array<keyof ConstraintCompilerDecision> = [
     "constraints",
@@ -190,7 +204,7 @@ function isCompiledMergeDisposition(disposition: ConstraintSourceDisposition): b
   return disposition === "compiled" || disposition === "merged_source";
 }
 
-function mappingNormalizationDiagnostic(sourceRecordId: string, llmStated: ConstraintSourceDisposition, canonical: ConstraintSourceDisposition): ConstraintShadowDiagnostic {
+function mappingNormalizationDiagnostic(sourceRecordId: string, llmStated: ConstraintSourceDisposition, canonical: ConstraintSourceDisposition, action = "normalized-to-single-primary"): ConstraintShadowDiagnostic {
   return makeDiagnostic({
     code: "SC_MAPPING_DISPOSITION_NORMALIZED",
     severity: "info",
@@ -200,13 +214,59 @@ function mappingNormalizationDiagnostic(sourceRecordId: string, llmStated: Const
       sourceKey: sourceRecordId,
       llmStated,
       canonical,
-      action: "accepted-as-equivalent",
+      action,
+    },
+  });
+}
+
+function exclusionReclassifiedDiagnostic(exclusion: ConstraintDecisionExclusion, index: number, reason: ConstraintUnresolvedReason): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_EXCLUSION_REASON_RECLASSIFIED",
+    severity: "warning",
+    message: "compiler exclusion reason reclassified to unresolved bucket",
+    sourceRecordIds: exclusion.sourceRecordIds,
+    data: {
+      exclusionIndex: index,
+      originalReason: reason,
+      canonicalDisposition: "unresolved",
+      action: "reclassified-to-unresolved",
+    },
+  });
+}
+
+function exclusionDedupedDiagnostic(sourceId: string, keptReason: ConstraintExclusionReason, droppedReasons: ConstraintExclusionReason[]): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_EXCLUSION_DEDUPED",
+    severity: "info",
+    message: "compiler duplicate exclusions canonicalized to one exclusion",
+    sourceRecordIds: [sourceId],
+    data: {
+      keptReason,
+      droppedReasons,
+      action: "deduped-same-disposition",
+    },
+  });
+}
+
+function sourceMultiHomeDiagnostic(sourceId: string, primaryDispositions: string[]): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_SOURCE_MULTI_HOME_QUARANTINED",
+    severity: "warning",
+    message: "compiler source had multiple primary dispositions and was quarantined to unresolved",
+    sourceRecordIds: [sourceId],
+    data: {
+      primaryDispositions: primaryDispositions.slice().sort(),
+      canonicalDisposition: "unresolved",
+      canonicalReason: "conflict",
+      action: "quarantined-to-unresolved",
     },
   });
 }
 
 function isValidationHashDiagnostic(diagnostic: ConstraintShadowDiagnostic): boolean {
-  return diagnostic.code !== "SC_MAPPING_DISPOSITION_NORMALIZED";
+  return diagnostic.code !== "SC_MAPPING_DISPOSITION_NORMALIZED"
+    && diagnostic.code !== "SC_EXCLUSION_REASON_RECLASSIFIED"
+    && diagnostic.code !== "SC_EXCLUSION_DEDUPED";
 }
 
 function quarantineDiagnostic(context: string, constraint: ConstraintDecisionConstraint, reason: string): ConstraintShadowDiagnostic {
@@ -233,6 +293,20 @@ function quarantineUnresolved(sourceRecordIds: string[], diagnosticId: string, r
   };
 }
 
+function rebuildDispositions(
+  constraints: ConstraintDecisionConstraint[],
+  exclusions: ConstraintDecisionExclusion[],
+  unresolved: ConstraintDecisionUnresolved[],
+  merges: ConstraintCompilerDecision["merges"],
+): Map<string, string[]> {
+  const rebuilt = new Map<string, string[]>();
+  for (const constraint of constraints) for (const sourceId of constraint.sourceRecordIds) addDisposition(rebuilt, sourceId, "compiled");
+  for (const exclusion of exclusions) for (const sourceId of exclusion.sourceRecordIds) addDisposition(rebuilt, sourceId, "excluded");
+  for (const item of unresolved) for (const sourceId of item.sourceRecordIds) addDisposition(rebuilt, sourceId, "unresolved");
+  for (const merge of merges) for (const sourceId of merge.sourceRecordIds) addDisposition(rebuilt, sourceId, "merged_source");
+  return rebuilt;
+}
+
 export function validateConstraintCompilerDecision(
   sources: ConstraintSourceRecord[],
   decision: ConstraintCompilerDecision,
@@ -254,6 +328,7 @@ export function validateConstraintCompilerDecision(
   const dispositions = new Map<string, string[]>();
   const diagnostics: ConstraintShadowDiagnostic[] = decision.diagnostics.slice();
   const unresolved: ConstraintDecisionUnresolved[] = decision.unresolved.slice();
+  const acceptedExclusions: ConstraintDecisionExclusion[] = [];
   const acceptedMerges = decision.merges.slice();
   const quarantinedSourceIds = new Set<string>();
 
@@ -311,8 +386,23 @@ export function validateConstraintCompilerDecision(
   }
 
   decision.exclusions.forEach((exclusion, index) => {
-    validateExclusionReason(exclusion);
     assertSourceIdsExist(exclusion.sourceRecordIds, sourceIds, `exclusion[${index}]`);
+    if (isUnresolvedReason(exclusion.reason)) {
+      const diagnostic = exclusionReclassifiedDiagnostic(exclusion, index, exclusion.reason);
+      diagnostics.push(diagnostic);
+      const alreadyUnresolved = exclusion.sourceRecordIds.every((sourceId) => unresolved.some((item) => item.sourceRecordIds.includes(sourceId)));
+      if (!alreadyUnresolved) {
+        unresolved.push({
+          reason: exclusion.reason,
+          sourceRecordIds: exclusion.sourceRecordIds.slice().sort(),
+          diagnosticIds: [...(exclusion.diagnosticIds ?? []), diagnostic.id],
+          note: exclusion.note ?? `Compiler exclusion reclassified to unresolved: ${exclusion.reason}`,
+        });
+      }
+      for (const sourceId of exclusion.sourceRecordIds) addDisposition(dispositions, sourceId, "unresolved");
+      return;
+    }
+    validateExclusionReason(exclusion);
     if ((exclusion.reason === "settings_not_memory" || exclusion.reason === "tool_contract_not_memory") && !hasNotMemoryDiagnostic(diagnostics, exclusion.sourceRecordIds, exclusion.reason)) {
       throw new Error(`exclusion[${index}] not-memory reason lacks matching diagnostic consumer`);
     }
@@ -322,9 +412,9 @@ export function validateConstraintCompilerDecision(
         if (source?.status === "active") throw new Error(`exclusion[${index}] uses ${exclusion.reason} for active source ${sourceId}`);
       }
     }
+    acceptedExclusions.push(exclusion);
     for (const sourceId of exclusion.sourceRecordIds) addDisposition(dispositions, sourceId, "excluded");
   });
-
   unresolved.forEach((item, index) => {
     validateUnresolvedReason(item);
     assertSourceIdsExist(item.sourceRecordIds, sourceIds, `unresolved[${index}]`);
@@ -354,6 +444,64 @@ export function validateConstraintCompilerDecision(
     for (const sourceId of merge.sourceRecordIds) addDisposition(dispositions, sourceId, "merged_source");
   });
 
+  const exclusionsBySource = new Map<string, ConstraintDecisionExclusion[]>();
+  for (const exclusion of acceptedExclusions) {
+    for (const sourceId of exclusion.sourceRecordIds) {
+      const current = exclusionsBySource.get(sourceId) ?? [];
+      current.push(exclusion);
+      exclusionsBySource.set(sourceId, current);
+    }
+  }
+  for (const [sourceId, exclusionsForSource] of exclusionsBySource) {
+    if (exclusionsForSource.length <= 1) continue;
+    const sorted = exclusionsForSource.slice().sort((a, b) => EXCLUSION_REASON_PRIORITY[b.reason] - EXCLUSION_REASON_PRIORITY[a.reason]);
+    const kept = sorted[0];
+    const dropped = sorted.slice(1);
+    diagnostics.push(exclusionDedupedDiagnostic(sourceId, kept.reason, dropped.map((item) => item.reason)));
+    for (const exclusion of dropped) {
+      exclusion.sourceRecordIds = exclusion.sourceRecordIds.filter((candidate) => candidate !== sourceId);
+    }
+  }
+  for (let index = acceptedExclusions.length - 1; index >= 0; index -= 1) {
+    if (!acceptedExclusions[index].sourceRecordIds.length) acceptedExclusions.splice(index, 1);
+  }
+
+  let rebuiltDispositions = rebuildDispositions(validatedConstraints, acceptedExclusions, unresolved, acceptedMerges);
+  const multiHomeSourceIds = new Set<string>();
+  for (const [sourceId, sourceDispositions] of rebuiltDispositions) {
+    const primary = new Set(sourceDispositions.map((disposition) => disposition === "merged_source" ? "compiled" : disposition));
+    if (primary.size > 1) multiHomeSourceIds.add(sourceId);
+  }
+  for (const sourceId of multiHomeSourceIds) {
+    const primary = Array.from(new Set((rebuiltDispositions.get(sourceId) ?? []).map((disposition) => disposition === "merged_source" ? "compiled" : disposition))).sort();
+    const diagnostic = sourceMultiHomeDiagnostic(sourceId, primary);
+    diagnostics.push(diagnostic);
+    for (let index = validatedConstraints.length - 1; index >= 0; index -= 1) {
+      if (validatedConstraints[index].sourceRecordIds.includes(sourceId)) validatedConstraints.splice(index, 1);
+    }
+    for (let index = acceptedExclusions.length - 1; index >= 0; index -= 1) {
+      acceptedExclusions[index].sourceRecordIds = acceptedExclusions[index].sourceRecordIds.filter((candidate) => candidate !== sourceId);
+      if (!acceptedExclusions[index].sourceRecordIds.length) acceptedExclusions.splice(index, 1);
+    }
+    for (let index = unresolved.length - 1; index >= 0; index -= 1) {
+      unresolved[index].sourceRecordIds = unresolved[index].sourceRecordIds.filter((candidate) => candidate !== sourceId);
+      if (!unresolved[index].sourceRecordIds.length) unresolved.splice(index, 1);
+    }
+    for (let index = acceptedMerges.length - 1; index >= 0; index -= 1) {
+      if (acceptedMerges[index].sourceRecordIds.includes(sourceId)) acceptedMerges.splice(index, 1);
+    }
+    unresolved.push({
+      reason: "conflict",
+      sourceRecordIds: [sourceId],
+      diagnosticIds: [diagnostic.id],
+      note: `Compiler source quarantined from multiple primary dispositions: ${primary.join(",")}`,
+    });
+    quarantinedSourceIds.add(sourceId);
+  }
+  rebuiltDispositions = rebuildDispositions(validatedConstraints, acceptedExclusions, unresolved, acceptedMerges);
+  dispositions.clear();
+  for (const [sourceId, sourceDispositions] of rebuiltDispositions) dispositions.set(sourceId, sourceDispositions.slice());
+
   decision.rescopeProposals.forEach((proposal, index) => {
     assertSourceIdsExist(proposal.sourceRecordIds, sourceIds, `rescopeProposal[${index}]`);
     assertScopeKnown(proposal.toScope, knownProjectIds, `rescopeProposal[${index}].toScope`);
@@ -368,19 +516,21 @@ export function validateConstraintCompilerDecision(
   const mappings: ConstraintDecisionMapping[] = [];
   decision.mappings.forEach((mapping: ConstraintDecisionMapping, index) => {
     if (!sourceIds.has(mapping.sourceRecordId)) throw new Error(`mapping[${index}] references unknown source ${mapping.sourceRecordId}`);
-    const derivedDecision = { ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, diagnostics };
+    const derivedDecision = { ...decision, constraints: validatedConstraints, exclusions: acceptedExclusions, unresolved, merges: acceptedMerges, diagnostics };
     const actualDisposition = dispositionForSource(derivedDecision, mapping.sourceRecordId);
     if (actualDisposition && mapping.disposition !== actualDisposition) {
       const compiledMergeEquivalent = hasConstraintMergeOverlap(derivedDecision, mapping.sourceRecordId)
         && isCompiledMergeDisposition(mapping.disposition)
         && isCompiledMergeDisposition(actualDisposition);
       if (compiledMergeEquivalent) {
-        diagnostics.push(mappingNormalizationDiagnostic(mapping.sourceRecordId, mapping.disposition, actualDisposition));
+        diagnostics.push(mappingNormalizationDiagnostic(mapping.sourceRecordId, mapping.disposition, actualDisposition, "accepted-as-equivalent"));
         mappings.push({ ...mapping, disposition: actualDisposition });
       } else if (quarantinedSourceIds.has(mapping.sourceRecordId)) {
+        diagnostics.push(mappingNormalizationDiagnostic(mapping.sourceRecordId, mapping.disposition, actualDisposition, "normalized-to-quarantined-primary"));
         mappings.push({ ...mapping, disposition: actualDisposition });
       } else {
-        throw new Error(`mapping[${index}] disposition ${mapping.disposition} does not match actual ${actualDisposition}`);
+        diagnostics.push(mappingNormalizationDiagnostic(mapping.sourceRecordId, mapping.disposition, actualDisposition));
+        mappings.push({ ...mapping, disposition: actualDisposition });
       }
     } else {
       mappings.push(mapping);
@@ -408,6 +558,6 @@ export function validateConstraintCompilerDecision(
   }
 
   const validationHashDiagnostics = diagnostics.filter(isValidationHashDiagnostic);
-  const validationHash = sha256Hex(stableCanonicalize({ ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, mappings, diagnostics: validationHashDiagnostics }));
-  return { ...decision, constraints: validatedConstraints, unresolved, merges: acceptedMerges, mappings, diagnostics, validationHash };
+  const validationHash = sha256Hex(stableCanonicalize({ ...decision, constraints: validatedConstraints, exclusions: acceptedExclusions, unresolved, merges: acceptedMerges, mappings, diagnostics: validationHashDiagnostics }));
+  return { ...decision, constraints: validatedConstraints, exclusions: acceptedExclusions, unresolved, merges: acceptedMerges, mappings, diagnostics, validationHash };
 }

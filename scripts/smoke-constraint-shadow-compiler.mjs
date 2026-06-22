@@ -453,6 +453,47 @@ check("validator rejects source compiled and excluded", () => {
   assert(threw, "compiled+excluded source accepted");
 });
 
+check("validator reclassifies unresolved-only exclusion reason to unresolved", () => {
+  const ambiguousSource = source({
+    sourceId: "rule:project:merdata:always:lsp-restart",
+    slug: "lsp-restart",
+    scope: { kind: "project", projectId: "merdata" },
+    body: "lsp过期了就重启lsp",
+  });
+  const bad = {
+    ...decision,
+    exclusions: [...decision.exclusions, { reason: "scope_ambiguous", sourceRecordIds: [ambiguousSource.sourceId], note: "wrong bucket" }],
+    mappings: [...decision.mappings, { sourceRecordId: ambiguousSource.sourceId, disposition: "unresolved" }],
+  };
+  const testSources = [...allSources, ambiguousSource];
+  const validated = validateConstraintCompilerDecision(testSources, bad, { knownProjectIds: ["pi-astack", "merdata"] });
+  assert(!validated.exclusions.some((item) => item.sourceRecordIds.includes(ambiguousSource.sourceId)), "reclassified exclusion remained excluded");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(ambiguousSource.sourceId) && item.reason === "scope_ambiguous"), "reclassified exclusion did not enter unresolved");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_EXCLUSION_REASON_RECLASSIFIED" && diagnostic.sourceRecordIds.includes(ambiguousSource.sourceId)), "reclassification diagnostic missing");
+});
+
+check("validator keeps destructive bare exclusion reasons hard-fail", () => {
+  const bad = { ...decision, exclusions: [...decision.exclusions, { reason: "archived", sourceRecordIds: [conflictSource.sourceId] }] };
+  let threw = false;
+  try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
+  assert(threw, "bare destructive exclusion reason accepted");
+});
+
+check("validator keeps unknown exclusion reasons hard-fail", () => {
+  const bad = { ...decision, exclusions: [...decision.exclusions, { reason: "totally_unknown", sourceRecordIds: [conflictSource.sourceId] }] };
+  let threw = false;
+  try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
+  assert(threw, "unknown exclusion reason accepted");
+});
+
+check("validator quarantines reclassified exclusion when source is compiled", () => {
+  const bad = { ...decision, exclusions: [...decision.exclusions, { reason: "scope_ambiguous", sourceRecordIds: [compactSource.sourceId] }] };
+  const validated = validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] });
+  assert(!validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(compactSource.sourceId)), "multi-home source remained compiled");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(compactSource.sourceId) && item.reason === "conflict"), "multi-home source was not quarantined to unresolved conflict");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_SOURCE_MULTI_HOME_QUARANTINED" && diagnostic.sourceRecordIds.includes(compactSource.sourceId)), "multi-home quarantine diagnostic missing");
+});
+
 check("validator quarantines unknown project scope per item", () => {
   const bad = { ...decision, constraints: decision.constraints.map((constraint) => constraint.sourceRecordIds.includes(projectSource.sourceId) ? { ...constraint, scope: { kind: "project", projectId: "missing-project" } } : constraint) };
   const validated = validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] });
@@ -498,15 +539,35 @@ check("validator tolerates dangling merge targetConstraintId hint (2026-06-21 pr
   assert(threw, "uncovered merge with a dangling hint must still be rejected");
 });
 
-check("validator rejects mapping disposition mismatch", () => {
-  const bad = { ...decision, mappings: decision.mappings.map((mapping) => mapping.sourceRecordId === settingsSource.sourceId ? { ...mapping, disposition: "compiled" } : mapping) };
+check("validator normalizes single-primary mapping disposition mismatch", () => {
+  const excludedVariant = { ...decision, mappings: decision.mappings.map((mapping) => mapping.sourceRecordId === settingsSource.sourceId ? { ...mapping, disposition: "compiled" } : mapping) };
+  const excludedCanonical = { ...decision, mappings: decision.mappings.map((mapping) => mapping.sourceRecordId === settingsSource.sourceId ? { ...mapping, disposition: "excluded" } : mapping) };
+  const excludedValidated = validateConstraintCompilerDecision(allSources, excludedVariant, { knownProjectIds: ["pi-astack"] });
+  const excludedCanonicalValidated = validateConstraintCompilerDecision(allSources, excludedCanonical, { knownProjectIds: ["pi-astack"] });
+  assert(excludedValidated.mappings.some((mapping) => mapping.sourceRecordId === settingsSource.sourceId && mapping.disposition === "excluded"), "excluded single-primary mapping not canonicalized");
+  assert(excludedValidated.diagnostics.some((diagnostic) => diagnostic.code === "SC_MAPPING_DISPOSITION_NORMALIZED" && diagnostic.sourceRecordIds.includes(settingsSource.sourceId)), "excluded mapping normalization diagnostic missing");
+  assert(excludedValidated.validationHash === excludedCanonicalValidated.validationHash, "excluded mapping normalization changed validationHash");
+
+  const compiledVariant = { ...decision, mappings: decision.mappings.map((mapping) => mapping.sourceRecordId === compactSource.sourceId ? { ...mapping, disposition: "merged_source" } : mapping) };
+  const compiledCanonical = { ...decision, mappings: decision.mappings.map((mapping) => mapping.sourceRecordId === compactSource.sourceId ? { ...mapping, disposition: "compiled" } : mapping) };
+  const compiledValidated = validateConstraintCompilerDecision(allSources, compiledVariant, { knownProjectIds: ["pi-astack"] });
+  const compiledCanonicalValidated = validateConstraintCompilerDecision(allSources, compiledCanonical, { knownProjectIds: ["pi-astack"] });
+  assert(compiledValidated.mappings.some((mapping) => mapping.sourceRecordId === compactSource.sourceId && mapping.disposition === "compiled"), "compiled single-primary mapping not canonicalized");
+  assert(compiledValidated.diagnostics.some((diagnostic) => diagnostic.code === "SC_MAPPING_DISPOSITION_NORMALIZED" && diagnostic.sourceRecordIds.includes(compactSource.sourceId)), "compiled mapping normalization diagnostic missing");
+  assert(compiledValidated.validationHash === compiledCanonicalValidated.validationHash, "compiled mapping normalization changed validationHash");
+});
+
+check("validator still rejects mapping with no primary disposition", () => {
+  const unmappedSource = source({
+    sourceId: "rule:global:listed:mapping-only-source",
+    slug: "mapping-only-source",
+    injectMode: "listed",
+    body: "A source with no compiler bucket is invalid.",
+  });
+  const bad = { ...decision, mappings: [...decision.mappings, { sourceRecordId: unmappedSource.sourceId, disposition: "compiled" }] };
   let threw = false;
-  try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
-  assert(threw, "mapping disposition mismatch accepted");
-  const compiledOnlyBad = { ...decision, mappings: decision.mappings.map((mapping) => mapping.sourceRecordId === compactSource.sourceId ? { ...mapping, disposition: "merged_source" } : mapping) };
-  threw = false;
-  try { validateConstraintCompilerDecision(allSources, compiledOnlyBad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
-  assert(threw, "compiled-only merged_source mismatch accepted");
+  try { validateConstraintCompilerDecision([...allSources, unmappedSource], bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
+  assert(threw, "mapping-only source accepted without a primary disposition");
 });
 
 check("validator rejects not-memory reason with wrong diagnostic code", () => {
@@ -1210,7 +1271,7 @@ check("shadow runner writes raw and parsed artifacts on compiler failures", asyn
         unresolved: [],
         merges: [],
         rescopeProposals: [],
-        mappings: [{ sourceRecordId: sourceId, disposition: "excluded" }],
+        mappings: [{ sourceRecordId: "missing-source", disposition: "compiled" }],
         diagnostics: [],
       }),
     }),
@@ -1221,7 +1282,7 @@ check("shadow runner writes raw and parsed artifacts on compiler failures", asyn
   assert(fs.existsSync(path.join(validationRunDir, "raw-output.txt")), "validation failure raw-output.txt missing");
   assert(fs.existsSync(path.join(validationRunDir, "parsed-decision.json")), "validation failure parsed-decision.json missing");
   const parsedDecision = JSON.parse(fs.readFileSync(path.join(validationRunDir, "parsed-decision.json"), "utf8"));
-  assert(parsedDecision.mappings[0].disposition === "excluded", "parsed decision did not preserve failed mapping");
+  assert(parsedDecision.mappings[0].sourceRecordId === "missing-source", "parsed decision did not preserve failed mapping");
 
   const parseFailure = await runConstraintShadowCompiler({
     abrainHome,
