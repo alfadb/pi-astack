@@ -241,6 +241,20 @@ export function ruleBodyHash(body: string): string {
   return crypto.createHash("sha256").update(body, "utf-8").digest("hex");
 }
 
+/** ADR0039 body_hash round-trip fix (T0 2026-06-22): the single canonical body
+ *  transform applied to a rule before it is written to disk. Shared by
+ *  buildRuleMarkdown (create) AND the Tier-1 merge path (writer.ts) so both
+ *  stamp body_hash over the EXACT bytes the constraint compiler re-extracts
+ *  (legacy-scan.ts → splitCompiledTruth(diskBody).compiledTruth.trim()).
+ *  Byte-identical to the legacy inline transform: trim → `^---$` break-out
+ *  guard → prepend `# title` when the body has no heading → trim. */
+export function renderRuleBody(rawBody: string, title: string): string {
+  let body = rawBody.trim();
+  body = body.replace(/^---$/gm, " ---");
+  if (!/^#\s+/m.test(body)) body = `# ${title}\n\n${body}`;
+  return body.trim();
+}
+
 /** #2 semantic dedup (T0 consensus 2026-06-07): normalize a rule body to a
  *  comparable token set — drop headings/timeline/markdown markers, lowercase,
  *  split on non-alphanumerics, keep tokens ≥ 2 chars. Used to detect a re-stated
@@ -283,7 +297,12 @@ export function buildRuleMarkdown(draft: RuleDraft, slug: string): string {
     throw new Error(`buildRuleMarkdown: invalid status "${status}"`);
   }
   const idInfo = ruleEntryId(slug, draft.injectMode, draft.scope);
-  const bodyHash = ruleBodyHash(draft.body);
+  // ADR0039 body_hash round-trip fix (T0 2026-06-22): hash the body AFTER the
+  // display transforms (heading-prepend / `---` guard / trim) so body_hash
+  // equals what the constraint compiler recomputes from the written file.
+  // Hashing the pre-transform draft.body was the SC_INPUT_BODY_HASH_MISMATCH bug.
+  const renderedBody = renderRuleBody(draft.body, draft.title);
+  const bodyHash = ruleBodyHash(renderedBody);
 
   const fm: string[] = ["---"];
   fm.push(`id: ${yamlScalar(idInfo.id)}`);
@@ -318,10 +337,6 @@ export function buildRuleMarkdown(draft: RuleDraft, slug: string): string {
   fm.push(`schema_version: 1`);
   fm.push("---");
 
-  let body = draft.body.trim();
-  body = body.replace(/^---$/gm, " ---"); // frontmatter break-out guard
-  if (!/^#\s+/m.test(body)) body = `# ${draft.title}\n\n${body}`;
-
   const timeline = `## Timeline\n- ${ts} | ${draft.sessionId || "sediment"} | created | ${draft.routingReason}`;
-  return `${fm.join("\n")}\n\n${body.trim()}\n\n${timeline}\n`;
+  return `${fm.join("\n")}\n\n${renderedBody}\n\n${timeline}\n`;
 }

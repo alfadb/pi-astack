@@ -21,6 +21,7 @@ import {
   ruleHintFallback,
   ruleBodySimilarity,
   ruleBodyHash,
+  renderRuleBody,
   RULE_DEDUP_SIMILARITY_THRESHOLD,
 } from "./rule-writer";
 import { parseFrontmatter, relationValues, scalarNumber, scalarString, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
@@ -3184,24 +3185,23 @@ export async function applyTier1RuleAdjudication(
         const auditPath = await audit({ operation: "reject", reason: bodySan.error });
         return { slug, path: found.path, status: "rejected", reason: bodySan.error, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
       }
-      // Hash semantics note (R1 N3 opus): this hashes the SANITIZED+TRIMMED
-      // merged body, pre display transforms (heading injection) — the same
-      // value class buildRuleMarkdown hashes (draft.body as provided). A
-      // creation-time draft carrying un-trimmed whitespace would hash
-      // differently; accepted cosmetic divergence, and the merge-idempotency
-      // check below is self-consistent because it uses this same source.
+      // ADR0039 body_hash round-trip fix (T0 2026-06-22): hash the body AFTER
+      // the display transforms via the SAME renderRuleBody helper that
+      // buildRuleMarkdown uses, so the stamped body_hash equals what the
+      // constraint compiler recomputes from the written file (legacy-scan.ts).
+      // Previously hashed the pre-transform body → SC_INPUT_BODY_HASH_MISMATCH.
+      // mergeJaccardVsOld below keeps using the pre-transform body as an
+      // audit-only similarity metric; the idempotency check now compares
+      // post-transform hashes on both sides (consistent after re-stamp).
       const hashSource = (bodySan.text ?? mergedRaw).trim();
-      const newHash = ruleBodyHash(hashSource);
+      const newBody = renderRuleBody(hashSource, typeof fm.title === "string" ? fm.title : slug);
+      const newHash = ruleBodyHash(newBody);
       // R1 N4 (opus) / N1 (deepseek): merge idempotency — re-applying a merge
       // that lands the same body (retry, user restatement re-adjudicated)
       // must not rewrite the file or append another timeline note.
       if (currentHash && newHash === currentHash) {
         const auditPath = await audit({ operation: "deduped", reason: "body_unchanged" });
         return { slug, path: found.path, status: "deduped", reason: `body_unchanged:${slug}`, dedupedAgainst: slug, injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
-      }
-      let newBody = hashSource.replace(/^---$/gm, " ---");
-      if (!/^#\s+/m.test(newBody)) {
-        newBody = `# ${typeof fm.title === "string" ? fm.title : slug}\n\n${newBody}`;
       }
       // R1 N5 (deepseek): audit-only fidelity metric — Jaccard between the
       // merged body and the old body segment. No gate (a legitimate merge

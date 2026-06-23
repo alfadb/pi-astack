@@ -172,8 +172,11 @@ check("buildRuleMarkdown: global always frontmatter + body_hash + heading inject
   assert(md.includes('kind: "maxim"'), "kind maxim");
   assert(md.includes('id: "rule:global:always:edit-not-sed"'), "id form");
   assert(!md.includes("project_id:"), "no project_id for global");
-  const expectHash = crypto.createHash("sha256").update("修改文件必须用 edit/write，禁止 sed -i。", "utf-8").digest("hex");
-  assert(md.includes(`body_hash: ${expectHash}`), "body_hash matches sha256(body)");
+  // ADR0039 body_hash round-trip fix (T0 2026-06-22): body_hash now hashes the
+  // POST-transform body (renderRuleBody: trim/`---`-guard/heading-prepend/trim),
+  // matching what the constraint compiler recomputes from the written file.
+  const expectHash = crypto.createHash("sha256").update(rw.renderRuleBody("修改文件必须用 edit/write，禁止 sed -i。", "Edit not sed"), "utf-8").digest("hex");
+  assert(md.includes(`body_hash: ${expectHash}`), "body_hash matches sha256(renderRuleBody(body,title))");
   assert(md.includes('hint: "use edit/write, never sed"'), "hint present");
   assert(md.includes("# Edit not sed"), "heading injected (body had none)");
   assert(md.includes("## Timeline"), "timeline present");
