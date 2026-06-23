@@ -476,7 +476,10 @@ function validateConstraintShadow(abrainHome, opts) {
       const strictRatio = Number(coverage.summary?.coverageRatio ?? coverage.summary?.coverage_ratio ?? coverage.coverageRatio ?? coverage.coverage_ratio ?? 0);
       const injectableRatio = Number(coverage.summary?.injectableCoverageRatio ?? coverage.summary?.injectable_coverage_ratio ?? strictRatio);
       if (!Number.isFinite(injectableRatio) || injectableRatio < opts.minCoverageRatio) warnings.push(`constraint-shadow/latest/event-coverage.json: coverage_below_min:${injectableRatio}`);
-      projected = new Set((coverage.rows ?? []).map((row) => String(row.eventId || "")).filter(Boolean));
+      // Only rows with status "projected" actually reached the shadow. Rows with
+      // status "queued"/"invalid" are NOT projected — counting them here masked
+      // genuinely-pending events from the §12 dead-projector signal.
+      projected = new Set((coverage.rows ?? []).filter((row) => row.status === "projected").map((row) => String(row.eventId || "")).filter(Boolean));
     } catch {
       warnings.push("constraint-shadow/latest/event-coverage.json: unreadable_§12_skipped");
     }
