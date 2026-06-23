@@ -132,6 +132,8 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
       maxPromptChars: auto.maxPromptChars || trigger.settings.constraintShadowCompiler.maxPromptChars || undefined,
       eventStaleAfterMs: auto.eventStaleAfterMs,
       modelRef,
+      maxCompileRetries: trigger.settings.constraintShadowCompiler.maxCompileRetries,
+      escalationModelRef: trigger.settings.constraintShadowCompiler.escalationModelRef || undefined,
       compilerInvoker: createPiAiConstraintCompilerInvoker({
         modelRegistry: trigger.modelRegistry,
         defaultModelRef: modelRef,

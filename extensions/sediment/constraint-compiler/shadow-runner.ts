@@ -15,6 +15,7 @@ import { validateConstraintCompilerDecision } from "./validate-decision";
 import type {
   ConstraintCompilerDecision,
   ConstraintCompilerPrompt,
+  ConstraintCompilerRunResult,
   ConstraintDiffReport,
   ConstraintEventCoverageReport,
   ConstraintLegacyParallelDeltaReport,
@@ -184,6 +185,36 @@ function promptFailure(err: unknown): ConstraintShadowDiagnostic {
   });
 }
 
+function diagnosticErrorText(diagnostic: ConstraintShadowDiagnostic): string {
+  const data = diagnostic.data as Record<string, unknown> | undefined;
+  const error = data && typeof data === "object" ? data.error : undefined;
+  return typeof error === "string" && error.trim() ? error : diagnostic.message;
+}
+
+// ADR0039 §B: build a one-shot retry prompt that appends the EXACT prior error so
+// the model self-corrects only that cause and re-emits the complete JSON decision.
+function withRetryFeedback(
+  prompt: ConstraintCompilerPrompt,
+  errorMessage: string,
+  attempt: number,
+  failureKind: "compile" | "validation" | undefined,
+): ConstraintCompilerPrompt {
+  const what = failureKind === "validation"
+    ? "failed automated validation"
+    : "could not be parsed as the required JSON decision";
+  const feedback = [
+    "",
+    `## RETRY ${attempt}`,
+    `Your previous response ${what} with this exact error:`,
+    "",
+    errorMessage,
+    "",
+    "Re-emit the COMPLETE corrected JSON decision object (schemaVersion \"constraint-shadow-decision/v1\") for the SAME input payload above. Fix ONLY the cause of that error and keep every other field identical. Output ONLY the JSON object \u2014 no prose, no markdown fences.",
+  ].join("\n");
+  const text = `${prompt.text}\n${feedback}`;
+  return { ...prompt, text, promptHash: sha256Hex(text) };
+}
+
 function diagnosticDedupeKey(diagnostic: ConstraintShadowDiagnostic): string {
   return `${diagnostic.code}:${diagnostic.sourceRecordIds.slice().sort().join("+")}`;
 }
@@ -246,66 +277,96 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     };
   }
 
-  const compile = await runConstraintCompilerWithInvoker({
-    prompt,
-    invoker: options.compilerInvoker,
-    modelRef: options.modelRef,
-  });
-  if (!compile.ok) {
-    diagnostics.push(compile.diagnostic);
-    const artifactResult = options.writeArtifacts ? await writeArtifacts({
-      abrainHome: options.abrainHome,
-      artifactRoot: options.artifactRoot,
-      runId,
-      normalized,
-      prompt,
-      rawOutput: compile.rawOutput,
-      rawOutputHash: compile.rawOutputHash,
-      diagnostics,
-      ok: false,
-    }) : undefined;
-    if (artifactResult && !artifactResult.ok) diagnostics.push(artifactResult.diagnostic);
-    return {
-      ok: false,
-      inputRootHash: normalized.inputRootHash,
-      sourceCount: sources.length,
-      prompt,
-      diagnostics,
-      ...(artifactResult?.ok ? { artifacts: artifactResult.artifacts } : {}),
-    };
+  // ADR0039 §B (T0 consensus 2026-06-23): validation/parse-feedback retry loop.
+  // A single brittle parse/validate failure must NOT hard-fail the whole compile
+  // (8/8 live runs died this way, each on a DIFFERENT invariant; the model can
+  // usually self-correct one named error). Attempt invoke+parse+validate up to
+  // 1+maxCompileRetries times; on failure re-prompt with the EXACT error so the
+  // model fixes only that; on the FINAL attempt escalate to escalationModelRef
+  // (stronger / alternate route — also the cure for SC_COMPILER_MODEL_UNAVAILABLE
+  // on a flaky primary route). Always falls through to a graceful ok:false write;
+  // never throws (sediment must not crash on a bad compile).
+  const maxAttempts = 1 + Math.max(0, Math.trunc(options.maxCompileRetries ?? 0));
+  let compile: Extract<ConstraintCompilerRunResult, { ok: true }> | undefined;
+  let decision: ValidatedConstraintCompilerDecision | undefined;
+  let lastAttempt: ConstraintCompilerRunResult | undefined;
+  let lastFailureKind: "compile" | "validation" | undefined;
+  let lastErrorMessage: string | undefined;
+  const retryDiagnostics: ConstraintShadowDiagnostic[] = [];
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const isFinalAttempt = attempt === maxAttempts - 1;
+    const attemptModelRef = isFinalAttempt && options.escalationModelRef
+      ? options.escalationModelRef
+      : options.modelRef;
+    const attemptPrompt = attempt > 0 && lastErrorMessage
+      ? withRetryFeedback(prompt, lastErrorMessage, attempt, lastFailureKind)
+      : prompt;
+    if (attempt > 0) {
+      retryDiagnostics.push(makeDiagnostic({
+        code: "SC_COMPILER_RETRY_ATTEMPT",
+        message: `constraint compiler retry attempt ${attempt} after ${lastFailureKind ?? "unknown"} failure`,
+        data: {
+          attempt,
+          failureKind: lastFailureKind ?? "unknown",
+          error: (lastErrorMessage ?? "").slice(0, 500),
+          modelRef: attemptModelRef ?? "",
+        },
+      }));
+    }
+
+    const attemptCompile = await runConstraintCompilerWithInvoker({
+      prompt: attemptPrompt,
+      invoker: options.compilerInvoker,
+      modelRef: attemptModelRef,
+    });
+    lastAttempt = attemptCompile;
+    if (!attemptCompile.ok) {
+      lastFailureKind = "compile";
+      lastErrorMessage = diagnosticErrorText(attemptCompile.diagnostic);
+      continue;
+    }
+    try {
+      decision = validateConstraintCompilerDecision(sources, {
+        ...attemptCompile.decision,
+        diagnostics: dedupeDiagnostics([...diagnostics, ...attemptCompile.decision.diagnostics]),
+        inputRootHash: normalized.inputRootHash,
+      }, {
+        knownProjectIds: options.knownProjectIds,
+        expectedInputRootHash: normalized.inputRootHash,
+      });
+      compile = attemptCompile;
+      break;
+    } catch (err) {
+      lastFailureKind = "validation";
+      lastErrorMessage = err instanceof Error ? err.message : String(err);
+    }
   }
 
-  let decision: ValidatedConstraintCompilerDecision;
-  try {
-    decision = validateConstraintCompilerDecision(sources, {
-      ...compile.decision,
-      diagnostics: dedupeDiagnostics([...diagnostics, ...compile.decision.diagnostics]),
-      inputRootHash: normalized.inputRootHash,
-    }, {
-      knownProjectIds: options.knownProjectIds,
-      expectedInputRootHash: normalized.inputRootHash,
-    });
-  } catch (err) {
-    diagnostics.push(validationFailure(err));
+  if (!compile || !decision) {
+    const failureDiagnostic = lastFailureKind === "compile" && lastAttempt && !lastAttempt.ok
+      ? lastAttempt.diagnostic
+      : validationFailure(lastErrorMessage ?? "constraint compiler decision failed validation");
+    const failDiagnostics = dedupeDiagnostics([...diagnostics, ...retryDiagnostics, failureDiagnostic]);
     const artifactResult = options.writeArtifacts ? await writeArtifacts({
       abrainHome: options.abrainHome,
       artifactRoot: options.artifactRoot,
       runId,
       normalized,
       prompt,
-      rawOutput: compile.rawOutput,
-      rawOutputHash: compile.rawOutputHash,
-      parsedDecision: compile.decision,
-      diagnostics,
+      rawOutput: lastAttempt?.rawOutput,
+      rawOutputHash: lastAttempt?.rawOutputHash,
+      parsedDecision: lastAttempt?.ok ? lastAttempt.decision : undefined,
+      diagnostics: failDiagnostics,
       ok: false,
     }) : undefined;
-    if (artifactResult && !artifactResult.ok) diagnostics.push(artifactResult.diagnostic);
+    if (artifactResult && !artifactResult.ok) failDiagnostics.push(artifactResult.diagnostic);
     return {
       ok: false,
       inputRootHash: normalized.inputRootHash,
       sourceCount: sources.length,
       prompt,
-      diagnostics,
+      diagnostics: failDiagnostics,
       ...(artifactResult?.ok ? { artifacts: artifactResult.artifacts } : {}),
     };
   }
@@ -325,7 +386,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     nowMs: options.nowMs,
   });
   const legacyParallelDelta = createConstraintLegacyParallelDeltaReport({ events: eventScan.events, decision });
-  const allDiagnostics = dedupeDiagnostics([...initialDiagnostics, ...coverage.diagnostics, ...legacyParallelDelta.diagnostics]);
+  const allDiagnostics = dedupeDiagnostics([...initialDiagnostics, ...retryDiagnostics, ...coverage.diagnostics, ...legacyParallelDelta.diagnostics]);
   const artifactResult = options.writeArtifacts ? await writeArtifacts({
     abrainHome: options.abrainHome,
     artifactRoot: options.artifactRoot,

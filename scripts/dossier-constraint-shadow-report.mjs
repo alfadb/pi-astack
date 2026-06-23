@@ -95,6 +95,8 @@ const modelRef = arg("model", configuredModel);
 const maxPromptChars = Number(arg("max-prompt-chars", shadowSettings.maxPromptChars ?? 0)) || 0;
 const timeoutMs = Number(arg("timeout-ms", shadowSettings.timeoutMs ?? 1_200_000)) || 1_200_000;
 const maxRetries = Number(arg("max-retries", shadowSettings.maxRetries ?? 0)) || 0;
+const maxCompileRetries = Number(arg("max-compile-retries", shadowSettings.maxCompileRetries ?? 0)) || 0;
+const escalationModelRef = arg("escalation-model", typeof shadowSettings.escalationModelRef === "string" ? shadowSettings.escalationModelRef : "") || "";
 
 console.log("constraint shadow report dossier — ADR 0039 P1 PR4");
 console.log(`mode: ${WRITE ? "write shadow artifacts" : "dry-run"}`);
@@ -177,6 +179,8 @@ const result = await runConstraintShadowCompiler({
   includeStatuses: "all",
   maxPromptChars: maxPromptChars || undefined,
   modelRef,
+  maxCompileRetries,
+  escalationModelRef: escalationModelRef || undefined,
   compilerInvoker: invoker,
   writeArtifacts: true,
 });

@@ -399,6 +399,13 @@ export interface ConstraintShadowRunOptions {
   normalizeOptions?: NormalizeConstraintOptions;
   maxPromptChars?: number;
   modelRef?: string;
+  // ADR0039 §B (T0 consensus 2026-06-23): validation/parse-feedback retry.
+  // Attempt invoke+parse+validate up to 1+maxCompileRetries times; on failure
+  // re-prompt the model with the exact error so it self-corrects. 0 = single-shot.
+  maxCompileRetries?: number;
+  // Model used for the FINAL retry attempt only (stronger / alternate route).
+  // Empty/undefined = keep modelRef for every attempt.
+  escalationModelRef?: string;
   compilerInvoker: ConstraintCompilerInvoker;
   writeArtifacts?: boolean;
   artifactRoot?: string;
@@ -478,6 +485,7 @@ export type ConstraintShadowDiagnosticCode =
   | "SC_COMPILER_MODEL_UNAVAILABLE"
   | "SC_COMPILER_PARSE_FAILED"
   | "SC_COMPILER_VALIDATION_FAILED"
+  | "SC_COMPILER_RETRY_ATTEMPT"
   | "SC_COMPILER_ITEM_REJECTED"
   | "SC_EXCLUSION_REASON_RECLASSIFIED"
   | "SC_SOURCE_MULTI_HOME_QUARANTINED"

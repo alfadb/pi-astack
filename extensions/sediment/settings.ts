@@ -60,6 +60,15 @@ export interface SedimentSettings {
     model: string;
     timeoutMs: number;
     maxRetries: number;
+    /** ADR0039 §B (T0 consensus 2026-06-23): validation/parse-feedback retry
+     *  attempts — re-prompt the model with the EXACT compile/validate error so it
+     *  self-corrects. 0 = single-shot (legacy). Distinct from maxRetries, which is
+     *  the transient LLM-call retry inside the invoker. */
+    maxCompileRetries: number;
+    /** ADR0039 §B: model used for the FINAL retry attempt only (a stronger /
+     *  alternate-route model — also the cure for SC_COMPILER_MODEL_UNAVAILABLE on a
+     *  flaky primary route). Empty = keep the primary model for every attempt. */
+    escalationModelRef: string;
     maxPromptChars: number;
     /** ADR0039 Constraint L2 (4×T0 NS-2/FIX-1): when "repo", the compiler also
      *  固化s the validated decision as an immutable L1 constraint-projection
@@ -258,6 +267,8 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     model: "",
     timeoutMs: 1_200_000,
     maxRetries: 0,
+    maxCompileRetries: 2,
+    escalationModelRef: "",
     maxPromptChars: 0,
     l2OutputRoot: "state",
     autoRefresh: {
@@ -446,6 +457,10 @@ export function resolveSedimentSettings(): SedimentSettings {
         : DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.model,
       timeoutMs: Math.max(1_000, asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.timeoutMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.timeoutMs)),
       maxRetries: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxRetries, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxRetries))),
+      maxCompileRetries: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxCompileRetries, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxCompileRetries))),
+      escalationModelRef: typeof (cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.escalationModelRef === "string"
+        ? ((cfg.constraintShadowCompiler as Record<string, unknown>).escalationModelRef as string).trim()
+        : DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.escalationModelRef,
       maxPromptChars: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxPromptChars, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxPromptChars))),
       l2OutputRoot: ((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.l2OutputRoot === "repo" ? "repo" : "state"),
       autoRefresh: {

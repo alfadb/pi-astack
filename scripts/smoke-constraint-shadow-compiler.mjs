@@ -1650,6 +1650,75 @@ check("shadow runner writes raw and parsed artifacts on compiler failures", asyn
   assert(!fs.existsSync(path.join(parseRunDir, "parsed-decision.json")), "parse failure should not write parsed decision");
 });
 
+// --- ADR0039 §B: validation/parse-feedback retry loop (T0 consensus 2026-06-23) ---
+const RETRY_RULE_REL = "rules/always/use-edit-not-sed.md";
+const RETRY_SOURCE_ID = "rule:global:always:use-edit-not-sed";
+const writeRetryRule = (home) => writeFile(path.join(home, RETRY_RULE_REL), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write，禁止 sed -i。\n");
+const retryDecision = (sourceForMapping) => JSON.stringify({
+  schemaVersion: "constraint-shadow-decision/v1",
+  inputRootHash: "ignored-by-parser",
+  constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit/write", compiledBody: "修改文件必须用 edit/write，禁止 sed -i。", sourceRecordIds: [RETRY_SOURCE_ID] }],
+  exclusions: [], unresolved: [], merges: [], rescopeProposals: [],
+  mappings: [{ sourceRecordId: sourceForMapping, disposition: "compiled" }],
+  diagnostics: [],
+});
+const retryValidText = retryDecision(RETRY_SOURCE_ID);
+const retryInvalidText = retryDecision("missing-source");
+
+check("ADR0039 §B: retry loop recovers after a validation failure (re-prompt carries the exact error)", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-retry-recover-"));
+  writeRetryRule(abrainHome);
+  const calls = [];
+  const result = await runConstraintShadowCompiler({
+    abrainHome, cwd: repoRoot, includeProjects: [], includeStatuses: "all",
+    writeArtifacts: false, runId: "retry-recover", maxCompileRetries: 2,
+    modelRef: "primary/model", knownProjectIds: [],
+    compilerInvoker: async ({ prompt, modelRef }) => {
+      calls.push({ modelRef, text: prompt.text });
+      return { ok: true, text: calls.length === 1 ? retryInvalidText : retryValidText };
+    },
+  });
+  assert(result.ok, `retry should recover to ok; diagnostics=${JSON.stringify(result.diagnostics?.map((d) => d.code))}`);
+  assert(calls.length === 2, `expected 2 invoker calls, got ${calls.length}`);
+  assert(calls[1].text.includes("## RETRY 1"), "retry prompt missing feedback header");
+  assert(/sourceRecordIds|disposition|missing-source/.test(calls[1].text), "retry prompt did not carry the validation error text");
+  assert(result.diagnostics.some((d) => d.code === "SC_COMPILER_RETRY_ATTEMPT"), "retry diagnostic missing on recovered run");
+});
+
+check("ADR0039 §B: retry loop exhausts gracefully (ok:false, no throw, bounded 1+maxCompileRetries attempts)", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-retry-exhaust-"));
+  writeRetryRule(abrainHome);
+  let calls = 0;
+  const result = await runConstraintShadowCompiler({
+    abrainHome, cwd: repoRoot, includeProjects: [], includeStatuses: "all",
+    writeArtifacts: false, runId: "retry-exhaust", maxCompileRetries: 2,
+    modelRef: "primary/model", knownProjectIds: [],
+    compilerInvoker: async () => { calls += 1; return { ok: true, text: retryInvalidText }; },
+  });
+  assert(!result.ok, "exhausted retries should be ok:false");
+  assert(calls === 3, `expected 3 attempts (1+2), got ${calls}`);
+  assert(result.diagnostics.some((d) => d.code === "SC_COMPILER_VALIDATION_FAILED"), "final validation diagnostic missing");
+  assert(result.diagnostics.some((d) => d.code === "SC_COMPILER_RETRY_ATTEMPT"), "retry attempt diagnostic missing");
+});
+
+check("ADR0039 §B: the FINAL retry attempt escalates to escalationModelRef", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-retry-escalate-"));
+  writeRetryRule(abrainHome);
+  const seenModels = [];
+  const result = await runConstraintShadowCompiler({
+    abrainHome, cwd: repoRoot, includeProjects: [], includeStatuses: "all",
+    writeArtifacts: false, runId: "retry-escalate", maxCompileRetries: 1,
+    modelRef: "primary/model", escalationModelRef: "escalation/model", knownProjectIds: [],
+    compilerInvoker: async ({ modelRef }) => {
+      seenModels.push(modelRef);
+      return { ok: true, text: seenModels.length < 2 ? retryInvalidText : retryValidText };
+    },
+  });
+  assert(result.ok, `escalated retry should recover; diagnostics=${JSON.stringify(result.diagnostics?.map((d) => d.code))}`);
+  assert(seenModels[0] === "primary/model", `first attempt should use primary, got ${seenModels[0]}`);
+  assert(seenModels[1] === "escalation/model", `final attempt should escalate, got ${seenModels[1]}`);
+});
+
 check("constraint compiler source does not import writer mutation symbols", () => {
   const dir = path.join(repoRoot, "extensions", "sediment", "constraint-compiler");
   const offenders = [];
