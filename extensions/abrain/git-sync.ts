@@ -207,6 +207,15 @@ export interface GitSyncEvent {
    */
   merged?: number;
   /**
+   * For `result=ok` fetch ops where a divergent merge conflicted ONLY in
+   * derived L2 views and we auto-resolved it (ADR 0039 conflict-path
+   * self-heal): knowledge L2 by reprojecting the merged L1 (deterministic),
+   * constraint L2 by adopting the incoming side (the LLM re-merge happens
+   * async via the next constraint compile). Value = number of conflicted
+   * derived paths resolved. Absent for clean merges.
+   */
+  conflictResolvedDerivedL2?: number;
+  /**
    * For `result=conflict`: list of paths git reported as unmerged after
    * the failed auto-merge attempt. Captured before `git merge --abort`
    * so the runbook can name the files even after working tree is reset.
@@ -646,6 +655,28 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
 
           const rawStderr = String(errObj?.stderr || "") + "\n" + String(errObj?.message || "");
 
+          // ADR 0039 conflict-path self-heal (try BEFORE aborting). L1 events
+          // are content-addressed + disjoint across devices, so they always
+          // merge cleanly; a divergent merge's ONLY conflicts are in DERIVED
+          // L2 views (knowledge entry files where the SAME slug was edited on
+          // both devices; the constraint compiled-view when both devices
+          // compiled). Those are not real content conflicts. If EVERY
+          // conflicted path is under a derived L2 view (l2/views/knowledge or
+          // l2/views/constraint), resolve + conclude the merge — turning an
+          // auto-sync stall into a self-heal. Any conflict OUTSIDE derived L2
+          // (real content — which content-addressed L1 should never produce)
+          // falls through to abort+classify. SIGTERM never auto-resolves.
+          let healed = false;
+          if (!wasTimeout && conflictPaths.length > 0 && conflictPaths.every((p) => p.startsWith("l2/views/knowledge/") || p.startsWith("l2/views/constraint/"))) {
+            healed = await resolveDerivedL2ConflictAndCommit(opts, timeoutMs, mergeMsg, conflictPaths);
+            if (healed) {
+              event.result = "ok";
+              event.merged = behind;
+              event.conflictResolvedDerivedL2 = conflictPaths.length;
+            }
+          }
+
+          if (!healed) {
           // Always attempt abort (even on non-conflict failures) so we
           // don't leave a merge state on disk for the next op to trip on.
           // Timeout matches merge timeout so a slow disk doesn't leave a
@@ -708,6 +739,7 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
               event.error = message;
             }
           }
+          }
         }
       }
       event.durationMs = Date.now() - start;
@@ -723,6 +755,99 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
     await audit(opts.abrainHome, event);
     return event;
   });
+}
+
+/**
+ * ADR 0039 derived-L2 conflict-path self-heal. Called by fetchAndFF when a
+ * divergent auto-merge conflicted and EVERY unmerged path is under a derived
+ * L2 view (l2/views/knowledge or l2/views/constraint). Content-addressed L1
+ * events are disjoint and merge cleanly, so they are already staged; the only
+ * conflicts are in derived views, and resolving them here turns a multi-device
+ * auto-sync stall into a self-heal.
+ *
+ * Returns true ONLY on full success. On ANY failure it returns false WITHOUT
+ * committing, so the caller's `merge --abort` cleanly restores the pre-merge
+ * tree (no dirty L2 is ever committed/pushed).
+ *
+ * Two derived views, two strategies (T0 panel, context-complete decision):
+ *
+ *  - Knowledge L2 is a DETERMINISTIC fold of L1 (topo projection). The correct
+ *    post-merge view IS reproject(merged L1) — a pure function, NOT a cognitive
+ *    merge — so we recompute it. An LLM here would only add hallucination to a
+ *    deterministic answer.
+ *
+ *  - Constraint L2 is an LLM SYNTHESIS over the rules corpus, so a truly
+ *    merged-correct view would need a fresh LLM compile over the merged rules
+ *    — which must NEVER run in the deterministic, fail-fast sync path (it would
+ *    make startup/sync block on, and fail with, LLM availability). But the
+ *    constraint compiled-view is a self-correcting audit SHADOW: runtime rule
+ *    injection reads each device's LOCAL .state/sediment/constraint-shadow,
+ *    and ADR 0039 §6 accepts staleness. So we only UNBLOCK git mechanically —
+ *    adopt the incoming side (`checkout --theirs`, converging toward the shared
+ *    remote) — and the LLM still owns the real merge ASYNCHRONOUSLY, via the
+ *    constraint compiler's next auto-refresh over the merged rules. The
+ *    mechanical step is pure transport-unblock, not a cognitive decision.
+ */
+async function resolveDerivedL2ConflictAndCommit(opts: GitSyncOptions, timeoutMs: number, mergeMsg: string, conflictPaths: string[]): Promise<boolean> {
+  try {
+    const knowledgeConflicts = conflictPaths.filter((p) => p.startsWith("l2/views/knowledge/"));
+    const constraintConflicts = conflictPaths.filter((p) => p.startsWith("l2/views/constraint/"));
+
+    if (knowledgeConflicts.length > 0) {
+      const { reprojectAllKnowledge } = await import("../sediment/knowledge-evidence");
+      const r = await reprojectAllKnowledge({
+        abrainHome: opts.abrainHome,
+        settings: { knowledgeProjector: { l2OutputRoot: "repo" } },
+      });
+      if (r.failed > 0) return false;
+      // Reproject overwrote the conflict-markered entries with the correct
+      // topo-fold; stage them (resolves the unmerged knowledge entries).
+      await execFileAsync(
+        "git", ["-C", opts.abrainHome, "add", "l2/views/knowledge"],
+        { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
+      );
+    }
+
+    if (constraintConflicts.length > 0) {
+      // Mechanical unblock only (no LLM in the sync path): adopt the incoming
+      // (origin) rendered view for each conflicted constraint path, then stage
+      // it. Stale-but-consistent shadow; the async constraint compiler produces
+      // the merged-correct view on its next run over the merged rules.
+      for (const p of constraintConflicts) {
+        await execFileAsync(
+          "git", ["-C", opts.abrainHome, "checkout", "--theirs", "--", p],
+          { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
+        );
+      }
+      await execFileAsync(
+        "git", ["-C", opts.abrainHome, "add", "--", ...constraintConflicts],
+        { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
+      );
+    }
+
+    // Defensive: every conflict must now be resolved. `-z` + NUL split (matches
+    // the conflictPaths capture) so a path with a newline can't false-negative.
+    const { stdout: stillUnmerged } = await execFileAsync(
+      "git", ["-C", opts.abrainHome, "diff", "-z", "--name-only", "--diff-filter=U"],
+      { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
+    );
+    if (stillUnmerged.split("\0").filter(Boolean).length > 0) return false;
+    // Conclude the merge as one commit carrying the resolved L2.
+    await execFileAsync(
+      "git",
+      [
+        "-C", opts.abrainHome,
+        "-c", "user.name=abrain-autosync",
+        "-c", "user.email=autosync@abrain.local",
+        "-c", "commit.gpgsign=false",
+        "commit", "--no-gpg-sign", "-m", mergeMsg,
+      ],
+      { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: MERGE_ENV },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -410,6 +410,94 @@ export async function collectKnowledgeEventSet(abrainHome: string, identity: str
   return nodes;
 }
 
+export interface ReprojectAllKnowledgeResult {
+  identities: number;
+  projected: number;
+  removed: number;
+  failed: number;
+  failures: string[];
+}
+
+/** Full-corpus deterministic reproject of every knowledge identity from L1 to
+ *  the L2 projection root. Single O(N) pass: scan L1 once, group nodes by
+ *  identity, then fold + write each identity. (Calling
+ *  projectKnowledgeEvidenceEvent per identity would re-scan all of L1 each
+ *  time => O(N^2).)
+ *
+ *  Async fs throughout so a multi-thousand-file reproject yields to the event
+ *  loop instead of blocking it. Callers:
+ *   - scripts/backfill-legacy-knowledge.mjs --reproject (CLI full rebuild)
+ *   - extensions/abrain/git-sync.ts fetchAndFF self-heal: after a cross-device
+ *     divergent merge git-3-way-merges a same-slug L2 file into a Frankenstein
+ *     (!= reproject(merged L1)), this rebuilds L2 from the merged L1 so the
+ *     pushed-to-fleet projection is correct (ADR 0039). */
+export async function reprojectAllKnowledge(
+  { abrainHome, settings }: { abrainHome: string; settings?: { knowledgeProjector?: { l2OutputRoot?: string } } },
+): Promise<ReprojectAllKnowledgeResult> {
+  const root = evidenceRoot(abrainHome);
+  const byIdentity = new Map<string, KnowledgeEventNode[]>();
+  const walk = async (dir: string): Promise<void> => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".json")) {
+        try {
+          const envelope = JSON.parse(await fs.readFile(full, "utf-8")) as KnowledgeEvidenceEnvelopeV1;
+          const body = envelope.body;
+          if (body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
+          const identity = knowledgeIdentityKey(body);
+          if (!byIdentity.has(identity)) byIdentity.set(identity, []);
+          byIdentity.get(identity)!.push({ eventId: envelope.event_id, body });
+        } catch { /* skip invalid event file */ }
+      }
+    }
+  };
+  await walk(root);
+
+  const projectionRoot = knowledgeProjectionRoot(abrainHome, settings);
+  const latestDir = path.join(projectionRoot, "latest");
+  let projected = 0;
+  let removed = 0;
+  let failed = 0;
+  let lastWinner: string | null = null;
+  const failures: string[] = [];
+  for (const [identity, nodes] of byIdentity) {
+    try {
+      const proj = renderKnowledgeProjectionFromSet(nodes);
+      const body = nodes[0]!.body;
+      const projectPart = body.scope.kind === "world" ? "world" : `projects/${body.scope.project_id || "unknown"}`;
+      const outputPath = path.join(latestDir, projectPart, `${body.payload.slug}.md`);
+      await fs.mkdir(path.dirname(outputPath), { recursive: true });
+      if (proj.kind === "delete") {
+        await fs.rm(outputPath, { force: true });
+        removed += 1;
+      } else {
+        await fs.writeFile(outputPath, proj.markdown!, "utf-8");
+        projected += 1;
+        lastWinner = proj.winnerEventId;
+      }
+    } catch (err) {
+      failed += 1;
+      failures.push(`${identity}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (lastWinner) {
+    await fs.mkdir(latestDir, { recursive: true });
+    await fs.writeFile(
+      path.join(latestDir, "manifest.json"),
+      `${JSON.stringify({ schemaVersion: "knowledge-projection-manifest/v1", updatedAtUtc: new Date().toISOString(), latestEventId: lastWinner, latestOperation: "reproject" }, null, 2)}\n`,
+      "utf-8",
+    );
+  }
+  return { identities: byIdentity.size, projected, removed, failed, failures: failures.slice(0, 10) };
+}
+
 function sameLayerKey(node: KnowledgeEventNode): string {
   // ADR 0039 §4.3 same-layer tie-break: created_at_utc, device_id,
   // device_event_seq, event_id (event_id breaks all remaining ties).

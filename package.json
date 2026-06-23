@@ -112,6 +112,7 @@
     "smoke:abrain-vault-bash": "node scripts/smoke-abrain-vault-bash.mjs",
     "smoke:abrain-vault-identity": "node scripts/smoke-abrain-vault-identity.mjs",
     "smoke:abrain-git-sync": "node scripts/smoke-abrain-git-sync.mjs",
+    "smoke:adr0039-merge-selfheal": "node scripts/smoke-adr0039-merge-selfheal.mjs",
     "smoke:git-singleflight": "node scripts/smoke-git-singleflight.mjs",
     "smoke:abrain-active-project": "node scripts/smoke-abrain-active-project.mjs",
     "smoke:abrain-secret-scope": "node scripts/smoke-abrain-secret-scope.mjs",
