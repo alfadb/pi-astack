@@ -92,11 +92,26 @@ export function createConstraintEventCoverageReport(input: {
       ...(event?.sourceChannel ? { sourceChannel: event.sourceChannel } : {}),
     };
   });
-  const deferredMergedSourceEvents = rows.filter((row) => row.status === "queued" && row.disposition === "merged_source" && input.decision.constraints.some((constraint) => constraint.sourceRecordIds.includes(row.sourceRecordId))).length;
-  const injectableDenominator = Math.max(0, summary.total - deferredMergedSourceEvents);
+  // Deferred = the compiler PROCESSED the event but it is legitimately not a
+  // strict "projected" row: merged_source (folded into a merge target, which
+  // validate-decision treats as compiled-equivalent) or unresolved (explicitly
+  // deferred). These are excluded from the injectable denominator AND must not
+  // emit coverage-gap/stale diagnostics — otherwise a deferred-resolution backlog
+  // falsely reads as a projector coverage gap / dead projector once it ages.
+  // Bug fix (2026-06-24): the old filter only matched status "queued", so an
+  // AGED deferred event silently dropped out of the exclusion once it became
+  // "stale"; it also gated on a fragile constraints.some() check that misses
+  // merged sources whose merge target lists only the primary source id.
+  const isDeferredRow = (row: { status: string; disposition?: string }): boolean =>
+    (row.status === "queued" || row.status === "stale")
+    && (row.disposition === "merged_source" || row.disposition === "unresolved");
+  const deferredMergedSourceEvents = rows.filter((row) => isDeferredRow(row) && row.disposition === "merged_source").length;
+  const deferredUnresolvedEvents = rows.filter((row) => isDeferredRow(row) && row.disposition === "unresolved").length;
+  const injectableDenominator = Math.max(0, summary.total - deferredMergedSourceEvents - deferredUnresolvedEvents);
   const injectableCoverageRatio = injectableDenominator === 0 ? 1 : summary.projected / injectableDenominator;
   const diagnostics: ConstraintShadowDiagnostic[] = [];
   for (const row of rows) {
+    if (isDeferredRow(row)) continue;
     if (row.status === "queued") {
       diagnostics.push(makeDiagnostic({
         code: "SC_EVENT_COVERAGE_GAP",

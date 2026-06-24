@@ -1258,6 +1258,58 @@ check("event coverage reports queued stale projected and legacy delta", () => {
   assert(delta.diagnostics.some((diagnostic) => diagnostic.code === "SC_LEGACY_PARALLEL_DELTA"), "legacy delta diagnostic missing");
 });
 
+check("ADR0039 (2026-06-24): AGED merged_source/unresolved are deferred — excluded from injectable coverage + no stale/gap diagnostics", () => {
+  const mkEvent = (tag) => ({
+    sourceKind: "constraint_event",
+    sourceId: `event:${tag.repeat(64)}`,
+    eventId: tag.repeat(64),
+    eventType: "constraint_signal_observed",
+    createdAtUtc: "2026-06-18T00:00:00.000Z",
+    sessionId: "session-x", turnId: "turn-x",
+    sourceChannel: "agent_end", sourceRole: "user",
+    operationHint: "create", confidence: 0.8,
+    sanitizedQuote: "x", candidateText: "x", candidateTitle: "X",
+    candidateTriggerPhrases: ["x"], candidatePriorityHint: "always",
+    scopeHint: { kind: "global", evidence: "fixture" }, activeProjectId: "pi-astack",
+    scopeConfidence: 0.8, sanitizerStatus: "passed", sanitizerReplacementsCount: 0,
+    legacyParallelWrite: { attempted: false }, causalParents: [],
+    producerName: "smoke", producerVersion: "fixture",
+    bodyHash: tag.repeat(64),
+    rawFilePath: `/tmp/event-${tag}.json`,
+    sourceRef: { ref: `event:${tag.repeat(64)}`, path: `/tmp/event-${tag}.json` },
+  });
+  const compiledEvent = mkEvent("a");
+  const mergedEvent = mkEvent("b");
+  const unresolvedEvent = mkEvent("c");
+  const events = [compiledEvent, mergedEvent, unresolvedEvent];
+  const decision = validateConstraintCompilerDecision(events, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: normalizeConstraintSources(events).inputRootHash,
+    constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "X", compiledBody: "x", triggerPhrases: ["x"], sourceRecordIds: [compiledEvent.sourceId, mergedEvent.sourceId] }],
+    exclusions: [],
+    unresolved: [{ sourceRecordIds: [unresolvedEvent.sourceId], reason: "conflict" }],
+    merges: [{ sourceRecordIds: [mergedEvent.sourceId], reason: "aged merged-source fixture" }],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: compiledEvent.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  // nowMs is 6 days past createdAt with a 60s stale threshold, so the queued
+  // merged_source + unresolved rows age into "stale" — the exact live shape that
+  // falsely tripped coverage_below_min + §12 dead_projector before the fix.
+  const coverage = createConstraintEventCoverageReport({
+    events, decision, diagnostics: decision.diagnostics,
+    staleAfterMs: 60 * 1000, nowMs: Date.parse("2026-06-24T00:00:00.000Z"),
+  });
+  const s = coverage.report.summary;
+  assert(s.totalEvents === 3, `total ${s.totalEvents}`);
+  assert(s.projectedEvents === 1, `projected ${s.projectedEvents}`);
+  assert(s.staleEvents === 2, `stale ${s.staleEvents} (merged+unresolved aged)`);
+  assert(s.deferredMergedSourceEvents === 1, `aged merged-source still counted as deferred, got ${s.deferredMergedSourceEvents}`);
+  assert(s.injectableCoverageRatio === 1, `injectable should exclude deferred from denom, got ${s.injectableCoverageRatio}`);
+  assert(!coverage.diagnostics.some((d) => d.code === "SC_EVENT_STALE_THRESHOLD"), "aged deferred merged/unresolved must NOT emit stale diagnostics");
+  assert(!coverage.diagnostics.some((d) => d.code === "SC_EVENT_COVERAGE_GAP"), "deferred must NOT emit coverage-gap diagnostics");
+});
+
 check("prompt builder is deterministic and shadow-only", () => {
   const prompt = buildConstraintCompilerPrompt({ normalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
   const again = buildConstraintCompilerPrompt({ normalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
