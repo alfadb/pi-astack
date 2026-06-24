@@ -248,6 +248,14 @@ async function runCustomCompactionSummary(
 ): Promise<{ compaction: CompactionResult } | undefined> {
   if (settings.summaryModels.length === 0) return undefined;
 
+  // P2 (pi 0.79.8 / 0.79.10): attribute every custom-summary audit row to the
+  // compaction trigger (manual / threshold / overflow) and the overflow-retry
+  // flag, so the audit can tell WHY compaction ran. Field names are namespaced
+  // (compaction_reason / will_retry) to avoid colliding with the existing
+  // skip-`reason` field already on these rows. (reason/willRetry ship in pi
+  // 0.79.10+; the package floor is >=0.80.0, so they are always present.)
+  const trigger = { compaction_reason: event.reason, will_retry: event.willRetry };
+
   const modelRegistry = ctx.modelRegistry;
   if (!modelRegistry || typeof modelRegistry.find !== "function" || typeof modelRegistry.getApiKeyAndHeaders !== "function") {
     await recordSimpleSkip(projectRoot, {
@@ -255,6 +263,7 @@ async function runCustomCompactionSummary(
       outcome: "unavailable",
       reason: "model_registry_unavailable",
       summary_models: settings.summaryModels,
+      ...trigger,
     });
     return undefined;
   }
@@ -347,8 +356,10 @@ async function runCustomCompactionSummary(
         attempts,
         elapsed_ms: Date.now() - started,
         tokens_before: event.preparation.tokensBefore,
+        estimated_tokens_after: compaction.estimatedTokensAfter,
         prompt_tokens_estimate: promptTokensEstimate,
         settings_snapshot: snapshotCompactionTunerSettings(settings),
+        ...trigger,
       });
       return { compaction };
     } catch (error) {
@@ -375,6 +386,7 @@ async function runCustomCompactionSummary(
     tokens_before: event.preparation.tokensBefore,
     prompt_tokens_estimate: promptTokensEstimate,
     settings_snapshot: snapshotCompactionTunerSettings(settings),
+    ...trigger,
   });
   return undefined;
 }
@@ -835,6 +847,8 @@ export default function (pi: ExtensionAPI) {
         outcome: "fallback_to_default",
         reason: "custom_summary_hook_threw",
         error_message: compactErrorMessage(error),
+        compaction_reason: event.reason,
+        will_retry: event.willRetry,
         settings_snapshot: snapshotCompactionTunerSettings(settings),
       });
       return undefined;
