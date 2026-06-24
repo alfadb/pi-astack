@@ -42,11 +42,11 @@ check("runInProcess imports startHeartbeat from _shared/heartbeat", () => {
   }
 });
 
-check("runInProcess signature accepts heartbeatCtx (anchor + projectRoot)", () => {
-  if (!/heartbeatCtx\?:\s*\{\s*anchor\?:\s*CausalAnchor;\s*projectRoot\?:\s*string\s*\}/.test(dispatchSrc)) {
+check("runInProcess signature accepts heartbeatCtx (anchor + projectRoot + maxRuntimeMs)", () => {
+  if (!/heartbeatCtx\?:\s*\{\s*anchor\?:\s*CausalAnchor;\s*projectRoot\?:\s*string;\s*maxRuntimeMs\?:\s*number\s*\}/.test(dispatchSrc)) {
     throw new Error(
       "runInProcess must accept optional heartbeatCtx parameter " +
-      "with { anchor?: CausalAnchor; projectRoot?: string } shape",
+      "with { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number } shape",
     );
   }
 });

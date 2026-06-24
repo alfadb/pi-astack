@@ -214,7 +214,7 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
         req.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         modelRegistry,
         req.tools,
-        { anchor, projectRoot },
+        { anchor, projectRoot, maxRuntimeMs: req.timeoutMs ?? DEFAULT_TIMEOUT_MS },
       ),
     );
     return {

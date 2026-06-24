@@ -396,7 +396,7 @@ export interface HubDeps {
   runInProcess: (
     model: string, thinking: string, prompt: string, signal: AbortSignal,
     timeoutMs: number, modelRegistry: unknown, toolAllowlist?: string,
-    heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string },
+    heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number },
   ) => Promise<{
     output: string; error?: string; failureType?: string; durationMs: number;
     usage?: { input: number; output: number; cost: number };
@@ -441,7 +441,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       properties: {
         task: { type: "string", description: "The task for the hub to plan a worker assignment for." },
         hubModel: { type: "string", description: "Which model acts as the hub/planner for THIS task (provider/model). Choose per-task, cross-vendor from yourself to avoid self-talk. Omit to auto-pick a flagship model." },
-        timeoutMs: { type: "number", description: "Per-worker timeout in ms (default 1800000)." },
+        timeoutMs: { type: "number", description: "Per-worker no-progress idle timeout in ms (default 1800000)." },
       },
       required: ["task"],
     },

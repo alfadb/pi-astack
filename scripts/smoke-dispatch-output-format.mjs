@@ -206,6 +206,21 @@ fs.writeFileSync(
 };\n`,
 );
 
+// Stub `./tool-loop-guard` — dispatch activation imports the idle-loop
+// guard helpers. formatResult doesn't call them; module load only needs the
+// symbols to exist.
+fs.writeFileSync(
+  path.join(tmpDir, "tool-loop-guard.js"),
+  `module.exports = {
+  newToolLoopState: () => ({}),
+  toolCallSignature: () => "sig",
+  evaluateToolLoop: () => ({ block: false, consecutive: 1 }),
+  buildLoopReflection: () => "loop",
+  isGuardedTool: () => false,
+  resolveIdleLoopGuardSettings: () => ({ enabled: false, threshold: 2 }),
+};\n`,
+);
+
 // Stub `@earendil-works/pi-coding-agent` — v3 in-process migration added
 // real (non-type) imports: createAgentSession, DefaultResourceLoader,
 // SessionManager, SettingsManager, getAgentDir. formatResult doesn't call
@@ -890,6 +905,24 @@ check("source invariant: no unconditional finalOutput wipe in subscribe", () => 
   // Also detect the inverse pattern (wipe just after message_end check).
   if (/message_end[\s\S]{0,200}finalOutput\s*=\s*""\s*;/.test(_indexSrc)) {
     throw new Error("R3 P0 regression: detected `finalOutput = \"\";` after message_end check");
+  }
+});
+
+check("source invariant: dispatch timeout is progress-idle, with max-runtime safety cap", () => {
+  if (!/const idleTimeoutMs = Number\.isFinite\(timeoutMs\)/.test(_indexSrc)) {
+    throw new Error("dispatch timeoutMs must feed idleTimeoutMs, not a wall-clock-only timeout");
+  }
+  if (!/const maxRuntimeMs = Number\.isFinite\(requestedMaxRuntimeMs\)/.test(_indexSrc)) {
+    throw new Error("dispatch must keep an internal maxRuntimeMs safety cap");
+  }
+  if (!/recordProgress = \(reason: string\) => \{[\s\S]{0,500}armIdleTimeout\(\);/.test(_indexSrc)) {
+    throw new Error("dispatch recordProgress must re-arm the idle timeout");
+  }
+  if (!/recordProgress\(`event:\$\{String\(event\?\.type \?\? \"unknown\"\)\}`\)/.test(_indexSrc)) {
+    throw new Error("dispatch subscribe events must count as idle-timeout progress");
+  }
+  if (!/setTimeout\(\(\) => resolveTimeout\("max_runtime"\), maxRuntimeMs\)/.test(_indexSrc)) {
+    throw new Error("dispatch max-runtime safety cap timer missing");
   }
 });
 

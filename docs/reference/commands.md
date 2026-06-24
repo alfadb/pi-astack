@@ -11,8 +11,8 @@ These tools may be visible to the assistant depending on pi settings and sub-pi 
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| `dispatch_agent({model, thinking, prompt, tools?, timeoutMs?})` | Spawn one independent pi subprocess. | Use only for a single task. |
-| `dispatch_parallel({tasks, timeoutMs?})` | Spawn multiple independent pi subprocesses in parallel. | Both fields live inside the same top-level object; per-task `tools` allowlist supported. Use for 2+ independent tasks. |
+| `dispatch_agent({model, thinking, prompt, tools?, timeoutMs?})` | Run one independent in-process sub-agent. | Use only for a single task. `timeoutMs` is the no-progress idle timeout. |
+| `dispatch_parallel({tasks, timeoutMs?})` | Run multiple independent in-process sub-agents in parallel. | Both fields live inside the same top-level object; per-task `tools` allowlist supported. Use for 2+ independent tasks. `timeoutMs` is the default per-task idle timeout. |
 | `memory_search(query, filters?)` | Semantic retrieval over project + world memory. | ADR 0015 LLM retrieval; hard error if model unavailable. |
 | `memory_decide(context, options?, constraints?)` | Synthesize a decision brief from relevant memories. | ADR 0026 Path B: use for high-value decisions where documented history may change the choice. |
 | `memory_get(slug, options?)` | Exact entry lookup. | May expose scope/source_path for debug/provenance. |

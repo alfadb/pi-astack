@@ -100,7 +100,8 @@ const MAX_PARALLEL = 16;
 // smoke-workflow-executor locks dispatch.MAX_CONCURRENCY === dsl.WORKFLOW_MAX_CONCURRENCY.
 export const MAX_CONCURRENCY = 4;
 export const MAX_PROVIDER_CONCURRENCY = 2;
-export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
+export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes without progress
+const DEFAULT_MAX_RUNTIME_MULTIPLIER = 4;
 
 export function providerFromModel(model: string): string {
   const provider = String(model ?? "").split("/")[0]?.trim();
@@ -463,6 +464,10 @@ export interface AgentResult {
   error?: string;
   /** Machine-readable failure category. Undefined on success. */
   failureType?: FailureType;
+  /** Which watchdog fired when failureType is timeout/timeout_partial. */
+  timeoutKind?: "idle" | "max_runtime";
+  /** Diagnostic marker for idle timeout decisions. */
+  lastProgressReason?: string;
   stopReason?: string;
   durationMs: number;
   maxOutputTokens?: number;
@@ -659,7 +664,8 @@ function getSharedInfra(): Promise<{
  *
  * Creates an independent AgentSession with its own model, thinking level,
  * and tool allowlist. Collects output via subscribe(). Supports abort
- * (via AbortSignal) and timeout (via Promise.race).
+ * (via AbortSignal), no-progress idle timeout, and a larger max-runtime
+ * safety cap (via Promise.race).
  *
  * SECURITY (ADR 0014): v3 in-process dispatch does NOT provide the OS-level
  * process isolation that v2 subprocess spawn did. Sub-agents share the
@@ -688,10 +694,20 @@ export async function runInProcess(
   /** ADR 0027 §C2' v1 Stage 1b: anchor + projectRoot needed for the
    *  independent heartbeat liveness channel. When undefined the
    *  heartbeat handle is a no-op (fail-open) and runInProcess works
-   *  identically to pre-Stage-1b for callers that don't pass anchor. */
-  heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string },
+   *  identically to pre-Stage-1b for callers that don't pass anchor.
+   *  maxRuntimeMs is an internal safety cap for callers such as workflow
+   *  that must preserve a wall-clock budget while dispatch itself uses
+   *  timeoutMs as the no-progress idle timeout. */
+  heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number },
 ): Promise<AgentResult> {
   const start = Date.now();
+  const idleTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? Math.floor(timeoutMs)
+    : DEFAULT_TIMEOUT_MS;
+  const requestedMaxRuntimeMs = heartbeatCtx?.maxRuntimeMs;
+  const maxRuntimeMs = Number.isFinite(requestedMaxRuntimeMs) && requestedMaxRuntimeMs! > 0
+    ? Math.max(idleTimeoutMs, Math.floor(requestedMaxRuntimeMs!))
+    : idleTimeoutMs * DEFAULT_MAX_RUNTIME_MULTIPLIER;
 
   // ADR 0027 §C2' Stage 1b heartbeat. Start BEFORE createAgentSession
   // (so caller can detect a session-construction hang) and stop on
@@ -720,7 +736,7 @@ export async function runInProcess(
     const heartbeat_trace_path = heartbeat.tracePath;
     if (!heartbeatAnchor || !heartbeat_trace_path) return result;
     // heartbeat_liveness is best-effort AUDIT ENRICHMENT only — it never drives
-    // control flow (the dispatch Promise.race(timeoutMs) owns liveness). Known
+    // control flow (the dispatch idle/max-runtime watchdog owns liveness). Known
     // benign edge: assessLivenessForAnchor scans all pid-suffixed traces for the
     // anchor (cross-process retry support); if our own trace was cleanly unlinked
     // AND a same-anchor orphan from a crashed prior process lingers, this field
@@ -834,35 +850,64 @@ export async function runInProcess(
   }
   signal.addEventListener("abort", onAbort, { once: true });
 
-  // Timeout: race against session.prompt().
-  // Note: Promise.race means timeout and normal completion may race;
-  // if the agent finishes in the same microtask as the timeout, the
-  // winner is non-deterministic. When timeout wins but finalOutput has
-  // content, we surface it as a partial result rather than a bare timeout.
+  // Timeout: race against session.prompt(). The primary watchdog is an
+  // IDLE timeout: any meaningful AgentSession event, retry event, session
+  // creation, or prompt boundary records progress and re-arms the timer.
+  // A larger max-runtime cap remains as a safety boundary for pathological
+  // event streams that keep producing progress but never terminate.
+  //
+  // Note: Promise.race means timeout and normal completion may race; if the
+  // agent finishes in the same microtask as a watchdog, the winner is
+  // non-deterministic. When timeout wins but finalOutput has content, we
+  // surface it as a partial result rather than a bare timeout.
   //
   // Also non-deterministic by design: if agent reaches stopReason="length"
-  // (truncation) in the same microtask the timeout fires, the result is
-  // either `truncated` (runPromise wins) or `timeout_partial` (timeoutPromise
-  // wins). Both are correct — the partial output is preserved in either
-  // case, so the caller is not misled.
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  // (truncation) in the same microtask a watchdog fires, the result is
+  // either `truncated` (runPromise wins) or `timeout_partial` (watchdog wins).
+  // Both are correct — the partial output is preserved in either case, so the
+  // caller is not misled.
+  let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
+  let maxRuntimeTimeoutId: ReturnType<typeof setTimeout> | undefined;
+  let lastProgressAt = start;
+  let lastProgressReason = "started";
+  let recordProgress = (_reason: string) => {};
   const timeoutPromise = new Promise<AgentResult>((resolve) => {
-    timeoutId = setTimeout(() => {
+    const resolveTimeout = (timeoutKind: "idle" | "max_runtime") => {
       onAbort();
       const hasPartial = finalOutput.length > 0;
+      const now = Date.now();
+      const limitMs = timeoutKind === "idle" ? idleTimeoutMs : maxRuntimeMs;
+      const idleForMs = Math.max(0, now - lastProgressAt);
+      const baseError = timeoutKind === "idle"
+        ? `idle timeout after ${limitMs}ms without progress (last progress: ${lastProgressReason}, ${idleForMs}ms ago)`
+        : `max runtime ${limitMs}ms exceeded`;
       resolve({
         output: finalOutput,
-        error: hasPartial
-          ? `timeout after ${timeoutMs}ms (partial output captured)`
-          : `timeout after ${timeoutMs}ms`,
+        error: hasPartial ? `${baseError} (partial output captured)` : baseError,
         failureType: hasPartial ? "timeout_partial" : "timeout",
-        durationMs: Date.now() - start,
+        timeoutKind,
+        lastProgressReason,
+        durationMs: now - start,
         usage,
         stopReason,
         retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
       });
-    }, timeoutMs);
-    timeoutId!.unref();
+    };
+    const armIdleTimeout = () => {
+      if (idleTimeoutId) clearTimeout(idleTimeoutId);
+      idleTimeoutId = setTimeout(() => resolveTimeout("idle"), idleTimeoutMs);
+      idleTimeoutId.unref();
+    };
+    recordProgress = (reason: string) => {
+      if (settled) return;
+      lastProgressAt = Date.now();
+      lastProgressReason = reason;
+      heartbeat.beat("alive", `progress:${reason}`);
+      armIdleTimeout();
+    };
+    recordProgress("watchdog_started");
+    maxRuntimeTimeoutId = setTimeout(() => resolveTimeout("max_runtime"), maxRuntimeMs);
+    maxRuntimeTimeoutId.unref();
   });
 
   const runPromise = (async (): Promise<AgentResult> => {
@@ -887,6 +932,7 @@ export async function runInProcess(
         sessionManager: subAgentSm,
       });
       session = result.session;
+      recordProgress("session_created");
       installMaxOutputTokensOnSession(session, effectiveMaxOutputTokens);
 
       // If aborted during session creation, bail.
@@ -904,6 +950,7 @@ export async function runInProcess(
       // NOTE: subscribe callbacks are serialized by the agent core — no
       // concurrent invocations — so retryHistory.entries.push is safe.
       const unsub = session.subscribe((event: any) => {
+        recordProgress(`event:${String(event?.type ?? "unknown")}`);
         if (event.type === "message_end" && event.message?.role === "assistant") {
           lastAssistant = event.message;
           // R3 P0 fix: use mergeAssistantTurn (pure, tested) instead of
@@ -946,7 +993,9 @@ export async function runInProcess(
       });
 
       // Run agent (this blocks until agent finishes or aborts)
+      recordProgress("prompt_start");
       await session.prompt(prompt);
+      recordProgress("prompt_end");
 
       unsub();
       session.dispose();
@@ -1037,7 +1086,8 @@ export async function runInProcess(
   const resultWithBudget = effectiveMaxOutputTokens === undefined
     ? result
     : { ...result, maxOutputTokens: effectiveMaxOutputTokens };
-  if (timeoutId) clearTimeout(timeoutId);
+  if (idleTimeoutId) clearTimeout(idleTimeoutId);
+  if (maxRuntimeTimeoutId) clearTimeout(maxRuntimeTimeoutId);
   settled = true;
   // Cross-vendor audit (ADR 0030 dogfood, opus 2.C): remove the abort listener
   // on EVERY race-resolution path. The timeout path invokes onAbort() MANUALLY
@@ -1252,7 +1302,7 @@ export default function (pi: ExtensionAPI) {
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
-      timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
+      timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
     }),
 
     prepareArguments(rawArgs: unknown) {
@@ -1443,6 +1493,8 @@ export default function (pi: ExtensionAPI) {
           result: result.error ? "fail" : "ok",
           ...tsFields,
           ...(result.failureType ? { failure_type: result.failureType } : {}),
+          ...(result.timeoutKind ? { timeout_kind: result.timeoutKind } : {}),
+          ...(result.lastProgressReason ? { last_progress_reason: result.lastProgressReason } : {}),
           ...(result.stopReason ? { stop_reason: result.stopReason } : {}),
           ...(result.heartbeat_trace_path ? { heartbeat_trace_path: result.heartbeat_trace_path } : {}),
           ...(result.heartbeat_liveness ? { heartbeat_liveness: result.heartbeat_liveness } : {}),
@@ -1472,6 +1524,8 @@ export default function (pi: ExtensionAPI) {
           ...(tsFields.cancel_source ? { cancelSource: tsFields.cancel_source } : {}),
           ...(subAnchor ? { anchor: subAnchor } : {}),
           ...(result.error ? { error: result.error, failureType: result.failureType } : {}),
+          ...(result.timeoutKind ? { timeoutKind: result.timeoutKind } : {}),
+          ...(result.lastProgressReason ? { lastProgressReason: result.lastProgressReason } : {}),
           ...(result.heartbeat_trace_path ? { heartbeatTracePath: result.heartbeat_trace_path } : {}),
           ...(result.heartbeat_liveness ? { heartbeatLiveness: result.heartbeat_liveness } : {}),
           ...(result.maxOutputTokens ? { maxOutputTokens: result.maxOutputTokens } : {}),
@@ -1509,11 +1563,11 @@ export default function (pi: ExtensionAPI) {
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
           tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide)." })),
-          timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 1800000 = 30min)" })),
+          timeoutMs: Type.Optional(Type.Number({ description: "Per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
       ),
-      timeoutMs: Type.Optional(Type.Number({ description: "Default per-task timeout in ms (default 1800000 = 30min)" })),
+      timeoutMs: Type.Optional(Type.Number({ description: "Default per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),
     }),
 
     prepareArguments(rawArgs: unknown) {
@@ -1738,6 +1792,8 @@ export default function (pi: ExtensionAPI) {
             result: res.error ? "fail" : "ok",
             ...taskTsFields,
             ...(res.failureType ? { failure_type: res.failureType } : {}),
+            ...(res.timeoutKind ? { timeout_kind: res.timeoutKind } : {}),
+            ...(res.lastProgressReason ? { last_progress_reason: res.lastProgressReason } : {}),
             ...(res.stopReason ? { stop_reason: res.stopReason } : {}),
             ...(res.heartbeat_trace_path ? { heartbeat_trace_path: res.heartbeat_trace_path } : {}),
             ...(res.heartbeat_liveness ? { heartbeat_liveness: res.heartbeat_liveness } : {}),

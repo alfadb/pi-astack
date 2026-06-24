@@ -13,32 +13,32 @@
  *
  * # Scope: what staleness CAN and CANNOT detect (read before wiring)
  *
- * The writer (Stage 1b) emits beats from an unconditional `setInterval`,
- * NOT from task-progress milestones (dispatch never calls handle.beat()).
- * Staleness therefore tracks the liveness of the writer's BEAT-EMITTING
- * EVENT LOOP, not logical task progress. Concretely:
+ * The writer (Stage 1b) emits periodic `setInterval` beats and dispatch now
+ * also writes explicit progress beats at known AgentSession milestones. This
+ * consumer remains a trace reader only: staleness tracks the last beat written
+ * to the independent channel, not a live in-process polling decision.
+ * Concretely:
  *
  *   - DETECTS (when observed by a reader whose own loop is alive — i.e.
  *     a cross-process or out-of-band reader): the producer's event loop
  *     stopped emitting beats — process death, a hard crash, or a
  *     synchronous wedge that froze the loop. The trace's last beat goes
  *     stale → cancelled/timeout.
- *   - DOES NOT DETECT: a producer ASYNC-hung inside an LLM/network await
- *     that never resolves. Its event loop stays alive, so `setInterval`
- *     keeps firing "alive" beats and the verdict stays `alive` forever.
- *     That class ("hung in an LLM call") is covered ONLY by the dispatch
- *     `timeoutMs` Promise.race, NOT by this channel.
+ *   - DOES NOT DETECT by periodic beats alone: a producer ASYNC-hung inside
+ *     an LLM/network await that never resolves. Its event loop stays alive,
+ *     so `setInterval` keeps firing "alive" beats. That class is covered by
+ *     dispatch's no-progress idle watchdog, which keys off explicit progress
+ *     events rather than this consumer's liveness verdict.
  *   - IN-PROCESS CAVEAT: pi runs sub-agents in the parent's process, so a
  *     synchronous wedge that stops the writer's timer ALSO blocks any
  *     in-process poller — meaning the reliable guarantee is cross-process
  *     / post-mortem observation, not same-process early detection.
  *
  * This is a narrower guarantee than "distinguishes still-working /
- * crashed / hung-in-LLM-call". Do NOT advertise the hung-LLM case until
- * the writer is made progress-driven (a Stage 1d+ change: dispatch must
- * beat() at genuine progress points and staleness must key off progress
- * beats). The verdict + terminal-state math below is correct within THIS
- * scope.
+ * crashed / hung-in-LLM-call". Dispatch's runtime idle watchdog now writes
+ * progress beats, but this file still does not poll them in-process to cancel
+ * tasks. The verdict + terminal-state math below is correct within THIS
+ * trace-reader scope.
  *
  * # C3' infra layer
  *
@@ -66,36 +66,17 @@
  * A single missed interval is normal jitter (GC pause, slow disk flush,
  * an LLM call that briefly exceeds the interval between phase beats). The
  * default threshold of 3 missed beats (= 3 × intervalMs, ~45s at the 15s
- * writer default) is well under a typical 30-minute dispatch timeout while
- * being long enough that ordinary jitter never trips it.
+ * writer default) is well under a typical 30-minute dispatch idle timeout
+ * while being long enough that ordinary jitter never trips it.
  *
- * # Stage 1d (live in-process polling) is DEFERRED — do not reflexively build it
+ * # Live in-process polling remains deferred
  *
- * A 3-model blind DESIGN review (opus-4-8 / gpt-5.5 / deepseek-v4-pro,
- * unanimous) concluded that wiring this consumer into the dispatch runtime
- * IN-PROCESS adds ZERO hang-detection capability over the existing
- * `runInProcess` Promise.race(timeoutMs). The truth table all three derived
- * independently:
- *   - async hang (stuck LLM await): event loop alive → timer keeps beating
- *     → verdict stays alive; only timeoutMs catches it (status quo).
- *   - synchronous wedge: the in-process poller is on the SAME frozen loop →
- *     it can't run to observe.
- *   - process death: the poller dies with the producer.
- * The only column where staleness is observable is a CROSS-PROCESS reader,
- * which does not exist (dispatch sub-agents share the parent process).
- * Building it now would be ADR 0024 §10 "infra for imagined load".
- *
- * Concrete triggers that should gate building Stage 1d (and in what form):
- *   1. A cross-process / multi-host L2 topology lands (dispatch spawns
- *      child processes/workers, OR a supervisor reads traces it does not
- *      itself produce) → then THIS consumer (as-is) gains real value for
- *      the sync-wedge / process-death classes.
- *   2. Dogfood shows REAL async-hang waste (sub-agents repeatedly burning
- *      toward the 30-min timeoutMs stuck in LLM calls) AND timeout tuning
- *      can't solve it → then build the PROGRESS-DRIVEN variant (dispatch
- *      calls handle.beat() at token/tool-round milestones so staleness
- *      means "no task progress"), NOT a poller against today's timer beats.
- * Until one of these is observed, the consumer stays a tested foundation.
+ * Dispatch runtime now uses an internal no-progress watchdog directly inside
+ * runInProcess. That is intentionally separate from this file: same-process
+ * polling of heartbeat traces still adds little value because a synchronous
+ * wedge freezes both producer and poller, while process death kills both.
+ * This consumer remains useful for audit/post-mortem and for a future
+ * cross-process supervisor that reads traces it does not itself produce.
  *
  * Also out of scope: audit row v3 `heartbeat_trace_path` enrichment.
  */
