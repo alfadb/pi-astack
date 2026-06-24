@@ -412,6 +412,42 @@ check("compiled-view runtime reader is default-off, bounded, and coverage-gated"
   if (lowCoverage.ok || lowCoverage.reason !== "coverage_below_threshold") throw new Error(`expected coverage gate, got ${JSON.stringify(lowCoverage)}`);
 });
 
+check("ADR0039 L3: compiled-view runtime injection filters project sections by active project (no cross-project leak)", () => {
+  const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+  const cacheL3 = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "l3proj", resolveProject: fakeBound });
+  writeShadowDecision(path.join(latestDir, "decision.json"), [shadowConstraintFromRule(cacheL3.globalAlways[0])]);
+  writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+    schemaVersion: "constraint-event-coverage/v1",
+    summary: { coverageRatio: 1, injectableCoverageRatio: 1 },
+    rows: [],
+  }, null, 2));
+  const multiProjectView = [
+    "## Global always", "### gh CLI rule", "- global body", "",
+    "## Project pi-global always", "### pi-global rule", "- pi-global body", "",
+    "## Project merdata always", "### merdata rule", "- merdata body", "",
+    "## Project sub2api listed", "### sub2api rule", "- sub2api body", "",
+    "## Conflicts", "- none", "",
+    "## Not-memory diagnostics", "- none", "",
+  ].join("\n");
+  writeFile(path.join(latestDir, "compiled-view.md"), multiProjectView);
+  const settings = {
+    enabled: true, fallbackToLegacyOnError: true, requireFresh: true,
+    staleAfterMs: 86400000, maxReadBytes: 1000000, minCoverageRatio: 1,
+  };
+  const piGlobal = ruleInjector.readCompiledRuleInjectionForRuntime({ abrainHome, nonce: "l3proj", settings, activeProjectId: "pi-global" });
+  if (!piGlobal.ok) throw new Error(`pi-global inject failed: ${JSON.stringify(piGlobal)}`);
+  if (!piGlobal.injection.includes("## Global always") || !piGlobal.injection.includes("pi-global body")) throw new Error("pi-global session lost Global or its own project section");
+  if (piGlobal.injection.includes("merdata body") || piGlobal.injection.includes("sub2api body")) throw new Error("LEAK: pi-global session received other projects' rules");
+  if (!piGlobal.injection.includes("## Conflicts") || !piGlobal.injection.includes("## Not-memory diagnostics")) throw new Error("pi-global session lost non-project sections");
+  const merdata = ruleInjector.readCompiledRuleInjectionForRuntime({ abrainHome, nonce: "l3proj", settings, activeProjectId: "merdata" });
+  if (!merdata.injection.includes("merdata body") || merdata.injection.includes("pi-global body") || merdata.injection.includes("sub2api body")) throw new Error(`merdata session filter wrong: ${merdata.injection}`);
+  const unbound = ruleInjector.readCompiledRuleInjectionForRuntime({ abrainHome, nonce: "l3proj", settings });
+  if (!unbound.injection.includes("## Global always")) throw new Error("unbound session lost Global");
+  if (unbound.injection.includes("pi-global body") || unbound.injection.includes("merdata body") || unbound.injection.includes("sub2api body")) throw new Error("unbound session received project rules");
+  const filtered = ruleInjector.filterCompiledViewByActiveProject(multiProjectView, "sub2api");
+  if (!filtered.includes("sub2api body") || filtered.includes("merdata body") || filtered.includes("pi-global body")) throw new Error(`filterCompiledViewByActiveProject wrong: ${filtered}`);
+});
+
 check("dual-read audit helper is default-off and writes only constraint-shadow state when enabled", () => {
   const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "abc123", resolveProject: fakeBound });
   const dual = req("./abrain/rule-injector/dualread-audit.js");

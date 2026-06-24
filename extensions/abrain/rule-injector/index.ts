@@ -498,10 +498,30 @@ function coverageRatiosFrom(value: unknown): { coverageRatio?: number; injectabl
   };
 }
 
+// ADR0039 L3: the runtime compiled-view contains ALL scopes (Global plus every
+// project's section). Injecting it raw leaks other projects' project-scoped
+// rules into the active session. Keep Global / Conflicts / Not-memory sections,
+// but drop "## Project <id> ..." sections whose <id> is not the active project
+// (and drop ALL project sections when no project is bound). Section boundaries
+// are "## " headings; "### " constraint subsections never start a new section.
+export function filterCompiledViewByActiveProject(markdown: string, activeProjectId: string | undefined): string {
+  const kept: string[] = [];
+  let dropping = false;
+  for (const line of markdown.split("\n")) {
+    if (line.startsWith("## ")) {
+      const projectHeading = /^##\s+Project\s+(\S+)\s/.exec(line);
+      dropping = projectHeading ? (!activeProjectId || projectHeading[1] !== activeProjectId) : false;
+    }
+    if (!dropping) kept.push(line);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+}
+
 export function readCompiledRuleInjectionForRuntime(args: {
   abrainHome: string;
   nonce: string;
   settings: RuleInjectorCompiledViewInjectionSettings;
+  activeProjectId?: string;
   nowMs?: number;
 }): CompiledViewReadResult {
   if (!args.settings.enabled) return { ok: false, reason: "disabled" };
@@ -523,8 +543,9 @@ export function readCompiledRuleInjectionForRuntime(args: {
     const nowMs = args.nowMs ?? Date.now();
     const stale = Math.max(0, nowMs - compiledStat.mtimeMs) > args.settings.staleAfterMs;
     if (args.settings.requireFresh && stale) return { ok: false, reason: "compiled_view_stale" };
-    const compiledView = boundedTextFile(compiledViewPath, args.settings.maxReadBytes).trim();
-    if (!compiledView) return { ok: false, reason: "empty_compiled_view" };
+    const rawCompiledView = boundedTextFile(compiledViewPath, args.settings.maxReadBytes).trim();
+    if (!rawCompiledView) return { ok: false, reason: "empty_compiled_view" };
+    const compiledView = filterCompiledViewByActiveProject(rawCompiledView, args.activeProjectId);
     const injection = [
       `${BEGIN_ABRAIN_RULES} session=${args.nonce} source=constraint-shadow-compiled-view (auto-managed by sediment, do not edit by hand) -->`,
       "## Rules Catalog (compiled by sediment)",
@@ -549,6 +570,7 @@ function composeRuntimeRuleInjection(cache: RuleScanCache, settings: RuleInjecto
     abrainHome: cache.abrainHome,
     nonce: cache.nonce,
     settings: settings.compiledViewInjection,
+    activeProjectId: cache.activeProjectId,
   });
   if (compiled.ok) return compiled.injection;
   if (settings.compiledViewInjection.enabled && !settings.compiledViewInjection.fallbackToLegacyOnError) return undefined;
