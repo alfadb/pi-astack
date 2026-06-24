@@ -334,6 +334,11 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
       }, {
         knownProjectIds: options.knownProjectIds,
         expectedInputRootHash: normalized.inputRootHash,
+        // ADR0039: a fresh compile must disposition every in-scope event; an
+        // uncovered event throws here -> caught below -> B loop re-prompts the
+        // model with the missing ids (it self-corrects). Without this an event
+        // silently drops, coverage stays <1, and the injection gate never flips.
+        requireEventCompleteness: true,
       });
       compile = attemptCompile;
       break;

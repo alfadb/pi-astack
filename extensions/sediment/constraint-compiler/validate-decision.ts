@@ -72,6 +72,13 @@ export interface ValidateConstraintDecisionOptions {
   knownProjectIds?: string[];
   deriveConstraintIds?: boolean;
   expectedInputRootHash?: string;
+  /** pi-astack: when true, EVERY constraint_event source must receive a primary
+   *  disposition (compiled/merged_source/excluded/unresolved) or validation throws.
+   *  Enabled only on a FRESH compile (shadow-runner) so the B retry loop re-prompts
+   *  the model to disposition any dropped event. Left off for cached-decision
+   *  re-validation (preflight) and coverage-report paths, where aged events are
+   *  legitimately tolerated as stale/queued. */
+  requireEventCompleteness?: boolean;
 }
 
 export function constraintIdFor(input: ConstraintDecisionConstraint): string {
@@ -750,6 +757,33 @@ export function validateConstraintCompilerDecision(
     if (uniquePrimary.size > 1 && !(uniquePrimary.has("merged_source") && uniquePrimary.has("compiled"))) {
       throw new Error(`legacy source ${source.sourceId} has multiple primary dispositions: ${Array.from(uniquePrimary).join(",")}`);
     }
+  }
+
+  // pi-astack: enforce the prompt contract "every source record must receive
+  // exactly one primary disposition" for EVENT sources too. The legacy loop
+  // above only covers legacy_rule sources, so the compiler could silently DROP a
+  // constraint_event (no compiled/merged/excluded/unresolved). That passed
+  // validation (ok:true) yet left the projection incomplete: the event stayed
+  // un-projected, event coverage fell below 1.0, the runtime injection gate fell
+  // back to legacy, and that event's rule never injected. Throwing here is
+  // RETRYABLE — the shadow-runner B loop re-prompts the model with this exact
+  // list so the model dispositions the missing events itself. Cognition stays
+  // with the LLM; this only makes the already-stated completeness contract
+  // enforceable instead of silently violable.
+  const uncoveredEventSources = options.requireEventCompleteness
+    ? sources
+      .filter((source) => source.sourceKind === "constraint_event")
+      .map((source) => source.sourceId)
+      .filter((sourceId) => !(dispositions.get(sourceId) ?? []).some((disposition) =>
+        disposition === "compiled" || disposition === "merged_source" || disposition === "excluded" || disposition === "unresolved"))
+      .sort()
+    : [];
+  if (uncoveredEventSources.length > 0) {
+    throw new Error(
+      `${uncoveredEventSources.length} constraint_event source(s) received no primary disposition: `
+      + `${uncoveredEventSources.join(", ")}. Every source record must receive exactly one primary `
+      + `disposition (compiled, merged_source, excluded, or unresolved); place each missing event in the correct bucket.`,
+    );
   }
 
   const validationHashDiagnostics = diagnostics.filter(isValidationHashDiagnostic);

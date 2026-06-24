@@ -455,6 +455,24 @@ check("validator accepts complete fixture decision", () => {
   assert(validated.constraints.every((constraint) => constraint.constraintId.startsWith("shadow:")), "constraint ids not derived");
 });
 
+check("validator: requireEventCompleteness rejects an undispositioned event (graceful by default)", () => {
+  // An in-corpus constraint_event the decision never dispositions.
+  const orphanId = "event:" + "c".repeat(64);
+  const orphan = { sourceKind: "constraint_event", sourceId: orphanId, eventId: "c".repeat(64) };
+  const sourcesWithOrphan = [...allSources, orphan];
+  // Default (queued/stale model): an in-corpus event the decision did not
+  // disposition is tolerated -> no throw. This is the cached-decision/preflight
+  // graceful path that must stay intact.
+  let threwDefault = false;
+  try { validateConstraintCompilerDecision(sourcesWithOrphan, decision, { knownProjectIds: ["pi-astack"] }); } catch { threwDefault = true; }
+  assert(!threwDefault, "default validation must tolerate an undispositioned event (graceful queued/stale)");
+  // Fresh compile: every in-scope event MUST be dispositioned -> throw naming the
+  // uncovered event so the shadow-runner B loop can re-prompt the model with it.
+  let msg = "";
+  try { validateConstraintCompilerDecision(sourcesWithOrphan, decision, { knownProjectIds: ["pi-astack"], requireEventCompleteness: true }); } catch (err) { msg = String((err && err.message) || err); }
+  assert(msg.includes("no primary disposition") && msg.includes(orphanId), "requireEventCompleteness must throw naming the uncovered event for retry re-prompt: " + msg);
+});
+
 check("validator canonicalizes compiled/merged_source mapping overlap", () => {
   const compiledVariant = { ...decision, mappings: decision.mappings.map((mapping) => (mapping.sourceRecordId === globalSource.sourceId || mapping.sourceRecordId === duplicateSource.sourceId) ? { ...mapping, disposition: "compiled" } : mapping) };
   const mergedVariant = { ...decision, mappings: decision.mappings.map((mapping) => (mapping.sourceRecordId === globalSource.sourceId || mapping.sourceRecordId === duplicateSource.sourceId) ? { ...mapping, disposition: "merged_source" } : mapping) };
