@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import * as piAi from "@earendil-works/pi-ai";
+import * as piAi from "@earendil-works/pi-ai/compat";
 import { makeOracleRegistry } from "./_oracle-registry.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
