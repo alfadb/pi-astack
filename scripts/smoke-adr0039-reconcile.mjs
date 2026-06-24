@@ -557,41 +557,29 @@ function validateDirtyDerived(abrainHome) {
   return { failures };
 }
 
-// ADR0039 Constraint L2 (§4.4 / FIX-1): the git-tracked L2 view must be a
-// deterministic re-render of its 固化d L1 projection event. Read the L2's
-// sediment_projection_event_id, load that immutable event, re-render via the
-// same renderer, and byte-compare. A mismatch with no new 固化 event is a dirty
-// derived view — block push.
+// ADR0039 Constraint L2 (§4.4 / FIX-1 + Part B 2026-06-24, 3/4 T0): the
+// git-tracked L2 view is a DEVICE-INDEPENDENT deterministic re-render keyed by
+// decision_hash (a pure fold of the validated decision), NOT the per-device
+// projection event_id (which embeds device_id/created_at_utc). Map L2 -> L1 by
+// scanning constraint-projection events for one whose validated_decision hashes
+// to the L2's decision_hash, re-render via the same renderer, and byte-compare.
+// Staleness: the L2's decision_hash MUST equal the chronologically-latest
+// projection event's decision_hash (a newer event with a DIFFERENT decision =>
+// the L2 is stale; a newer event with the SAME decision, e.g. another device's
+// compile of the same inputs, is fine). A mismatch is a dirty derived view.
 function validateConstraintL2(abrainHome) {
   const l2Path = path.join(abrainHome, "l2", "views", "constraint", "latest", "compiled-view.md");
   if (!fs.existsSync(l2Path)) return { present: false, failures: [] };
   const failures = [];
   const raw = fs.readFileSync(l2Path, "utf8");
   const { frontmatter } = splitMarkdownProjection(raw);
-  const eventId = frontmatterScalar(frontmatter, "sediment_projection_event_id");
-  if (!eventId) return { present: true, failures: ["constraint-l2: missing_projection_event_id"] };
-  const l1Path = expectedEventPath(abrainHome, eventId);
-  if (!fs.existsSync(l1Path)) return { present: true, failures: [`constraint-l2: projection_event_missing:${eventId}`] };
-  let envelope;
-  try { envelope = JSON.parse(fs.readFileSync(l1Path, "utf8")); }
-  catch { return { present: true, failures: [`constraint-l2: projection_event_unreadable:${eventId}`] }; }
-  if (envelope.schema !== "constraint-projection-envelope/v1") failures.push(`constraint-l2: wrong_projection_schema:${eventId}`);
-  if (envelope.event_id !== eventId || envelope.body_hash !== eventId) failures.push(`constraint-l2: envelope_hash_mismatch:${eventId}`);
-  try {
-    const render = loadConstraintRenderModule();
-    const reRender = render.renderConstraintL2View(envelope.body.validated_decision, eventId).markdown;
-    if (reRender !== raw) failures.push(`constraint-l2: projection_byte_mismatch:${eventId}`);
-  } catch (err) {
-    failures.push(`constraint-l2: re_render_failed:${eventId}:${err && err.message ? String(err.message).slice(0, 80) : err}`);
-  }
-  // ADR0039 Constraint L2 (4×T0 v3 bundle-a): the byte-compare above only
-  // validates L2 against its REFERENCED event. If a NEWER 固化 event exists (e.g.
-  // a swallowed l2_write_failed left L2 stale while the L1 append succeeded), the
-  // L2 is silently stale and reconcile would false-pass. Detect it: the L2's
-  // referenced event MUST be the chronologically-latest constraint-projection
-  // event (created_at_utc desc, tiebreak event_id desc — mirrors
-  // selectLatestConstraintProjectionEventId in projection.ts; single-writer so
-  // wall-clock is self-consistent).
+  const decisionHash = frontmatterScalar(frontmatter, "decision_hash");
+  if (!decisionHash) return { present: true, failures: ["constraint-l2: missing_decision_hash"] };
+  const render = loadConstraintRenderModule();
+  const decisionHashFor = (decision, eventId) => {
+    try { return render.renderConstraintL2View(decision, eventId).decisionHash; } catch { return null; }
+  };
+  // Scan all constraint-projection events; record (eventId, decision, decisionHash, createdAtUtc).
   const projectionEvents = [];
   const eventsRoot = path.join(abrainHome, "l1", "events", "sha256");
   const walkProjections = (dir) => {
@@ -600,20 +588,37 @@ function validateConstraintL2(abrainHome) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walkProjections(full);
       else if (entry.isFile() && entry.name.endsWith(".json")) {
-        try {
-          const env = JSON.parse(fs.readFileSync(full, "utf8"));
-          if (env.schema === "constraint-projection-envelope/v1" && env.event_id) {
-            projectionEvents.push({ eventId: env.event_id, createdAtUtc: (env.body && env.body.created_at_utc) || "" });
-          }
-        } catch { /* skip unreadable */ }
+        let env;
+        try { env = JSON.parse(fs.readFileSync(full, "utf8")); } catch { continue; }
+        if (env.schema !== "constraint-projection-envelope/v1" || !env.event_id || !env.body || !env.body.validated_decision) continue;
+        if (env.event_id !== env.body_hash) { failures.push(`constraint-l2: envelope_hash_mismatch:${env.event_id}`); continue; }
+        projectionEvents.push({
+          eventId: env.event_id,
+          decision: env.body.validated_decision,
+          decisionHash: decisionHashFor(env.body.validated_decision, env.event_id),
+          createdAtUtc: (env.body && env.body.created_at_utc) || "",
+        });
       }
     }
   };
   walkProjections(eventsRoot);
+  // Map L2 -> a projection event by decision_hash (device-independent).
+  const match = projectionEvents.find((e) => e.decisionHash === decisionHash);
+  if (!match) return { present: true, failures: [...failures, `constraint-l2: no_projection_event_for_decision:${decisionHash.slice(0, 16)}`] };
+  // Byte-compare: re-render (device-independent) from the matched decision.
+  try {
+    const reRender = render.renderConstraintL2View(match.decision, match.eventId).markdown;
+    if (reRender !== raw) failures.push(`constraint-l2: projection_byte_mismatch:${decisionHash.slice(0, 16)}`);
+  } catch (err) {
+    failures.push(`constraint-l2: re_render_failed:${decisionHash.slice(0, 16)}:${err && err.message ? String(err.message).slice(0, 80) : err}`);
+  }
+  // Staleness: L2's decision_hash must equal the LATEST projection event's decision_hash.
   if (projectionEvents.length) {
     const latest = [...projectionEvents].sort((a, b) =>
-      b.createdAtUtc.localeCompare(a.createdAtUtc) || b.eventId.localeCompare(a.eventId))[0].eventId;
-    if (latest !== eventId) failures.push(`constraint-l2: stale_l2_newer_projection_exists:${eventId}:${latest}`);
+      b.createdAtUtc.localeCompare(a.createdAtUtc) || b.eventId.localeCompare(a.eventId))[0];
+    if (latest.decisionHash !== decisionHash) {
+      failures.push(`constraint-l2: stale_l2_newer_projection_exists:${decisionHash.slice(0, 16)}:${(latest.decisionHash || "?").slice(0, 16)}`);
+    }
   }
   return { present: true, failures };
 }

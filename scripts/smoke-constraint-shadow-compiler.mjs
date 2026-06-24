@@ -1550,7 +1550,8 @@ check("repo-mode 固化s decision to immutable L1 + renders deterministic git L2
   const l2Path = path.join(home, "l2", "views", "constraint", "latest", "compiled-view.md");
   assert(fs.existsSync(l2Path), "L2 compiled-view.md missing");
   const l2 = fs.readFileSync(l2Path, "utf8");
-  assert(l2.includes(`sediment_projection_event_id: ${eventId}\n`), "L2 missing projection event id");
+  assert(l2.includes(`decision_hash: ${r1.l2Projection.decisionHash}\n`), "L2 missing decision_hash");
+  assert(!l2.includes("sediment_projection_event_id"), "L2 must be device-independent (no projection event_id in rendered bytes)");
   assert(l2.includes("shadow_only: false\n"), "L2 not marked non-shadow");
   // 固化 L1 event exists with the DISTINCT projection envelope schema
   const l1Path = constraintEvidenceEventPath(home, eventId);

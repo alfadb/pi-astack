@@ -108,7 +108,7 @@ function scanProjectionEvents(home) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) walk(full);
       else if (e.isFile() && e.name.endsWith(".json")) {
-        try { const env = JSON.parse(fs.readFileSync(full, "utf8")); if (env.schema === CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION && env.event_id) out.push({ eventId: env.event_id, createdAtUtc: (env.body && env.body.created_at_utc) || "" }); } catch { /* skip */ }
+        try { const env = JSON.parse(fs.readFileSync(full, "utf8")); if (env.schema === CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION && env.event_id) { const decision = env.body && env.body.validated_decision; out.push({ eventId: env.event_id, createdAtUtc: (env.body && env.body.created_at_utc) || "", decision, decisionHash: decision ? renderConstraintL2View(decision, env.event_id).decisionHash : null }); } } catch { /* skip */ }
       }
     }
   };
@@ -121,17 +121,19 @@ function reconcile(home) {
   const l2Path = path.join(home, "l2", "views", "constraint", "latest", "compiled-view.md");
   if (!fs.existsSync(l2Path)) return { present: false, failures: [] };
   const raw = fs.readFileSync(l2Path, "utf8");
-  const m = raw.match(/^sediment_projection_event_id:\s*(.+)$/m);
-  const eventId = m ? m[1].trim() : "";
+  const m = raw.match(/^decision_hash:\s*(.+)$/m);
+  const decisionHash = m ? m[1].trim() : "";
   const failures = [];
-  if (!eventId) return { present: true, failures: ["missing_projection_event_id"] };
-  const l1Path = constraintEvidenceEventPath(home, eventId);
-  if (!fs.existsSync(l1Path)) return { present: true, failures: [`projection_event_missing:${eventId}`] };
-  const env = JSON.parse(fs.readFileSync(l1Path, "utf8"));
-  if (env.schema !== CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION) failures.push(`wrong_schema:${eventId}`);
-  if (renderConstraintL2View(env.body.validated_decision, eventId).markdown !== raw) failures.push(`byte_mismatch:${eventId}`);
-  const latest = selectLatestConstraintProjectionEventId(scanProjectionEvents(home));
-  if (latest && latest !== eventId) failures.push(`stale_l2_newer_projection_exists:${eventId}:${latest}`);
+  if (!decisionHash) return { present: true, failures: ["missing_decision_hash"] };
+  const events = scanProjectionEvents(home);
+  const match = events.find((e) => e.decisionHash === decisionHash);
+  if (!match) return { present: true, failures: [`no_projection_event_for_decision:${decisionHash.slice(0, 16)}`] };
+  if (renderConstraintL2View(match.decision, match.eventId).markdown !== raw) failures.push(`byte_mismatch:${decisionHash.slice(0, 16)}`);
+  // Staleness by decision_hash: the latest projection event's decision must equal
+  // the L2's. A newer event with the SAME decision (another device) is NOT stale.
+  const latestId = selectLatestConstraintProjectionEventId(events);
+  const latest = events.find((e) => e.eventId === latestId);
+  if (latest && latest.decisionHash !== decisionHash) failures.push(`stale_l2_newer_projection_exists:${decisionHash.slice(0, 16)}:${(latest.decisionHash || "?").slice(0, 16)}`);
   return { present: true, failures };
 }
 function git(home, args) { execFileSync("git", ["-C", home, ...args], { stdio: ["ignore", "pipe", "pipe"] }); }
@@ -217,15 +219,33 @@ check("stale-L2 detection: a newer 固化 event without an L2 rewrite is flagged
     const a = await fixateConstraintDecisionAndRenderL2(fixateOpts(home, "2026-06-19T00:00:00.000Z"));
     assert(a.ok && a.status === "written", "setup fixate failed");
     assert(reconcile(home).failures.length === 0, "baseline reconcile should be clean");
-    // Simulate a swallowed l2_write_failed: append a NEWER projection event WITHOUT rewriting L2.
+    // Part B device-independence: a NEWER event with the SAME decision (another
+    // device's compile of the same inputs) must NOT flag stale — the L2 still
+    // shows the correct decision. This is exactly the case the OLD event_id-based
+    // staleness falsely flagged (the device_id-divergence bug).
+    const sameDecId = sha256Hex(`same-${a.eventId}`);
+    const sameDec = { schema: CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, event_id: sameDecId, body_hash: sameDecId, body: { event_schema_version: "constraint-projection-event/v1", event_type: "constraint_compiled_view_produced", created_at_utc: "2026-12-30T00:00:00.000Z", validated_decision: decision } };
+    writeFile(constraintEvidenceEventPath(home, sameDecId), `${JSON.stringify(sameDec, null, 2)}\n`);
+    assert(reconcile(home).failures.length === 0, "same-decision newer event must NOT flag stale (device-independent)");
+    // A swallowed l2_write_failed: a NEWER event with a DIFFERENT decision and no
+    // L2 rewrite IS genuinely stale (the latest compile changed the decision).
     const newerId = sha256Hex(`newer-${a.eventId}`);
-    const newer = { schema: CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, event_id: newerId, body_hash: newerId, body: { event_schema_version: "constraint-projection-event/v1", event_type: "constraint_compiled_view_produced", created_at_utc: "2026-12-31T23:59:59.000Z", validated_decision: decision } };
+    const newerDecision = { ...decision, inputRootHash: `${decision.inputRootHash}-newer` };
+    const newer = { schema: CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, event_id: newerId, body_hash: newerId, body: { event_schema_version: "constraint-projection-event/v1", event_type: "constraint_compiled_view_produced", created_at_utc: "2026-12-31T23:59:59.000Z", validated_decision: newerDecision } };
     writeFile(constraintEvidenceEventPath(home, newerId), `${JSON.stringify(newer, null, 2)}\n`);
     const rec = reconcile(home);
     assert(rec.failures.some((f) => f.startsWith("stale_l2_newer_projection_exists")), `expected stale_l2 flag, got: ${rec.failures.join("; ") || "(none)"}`);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+check("ADR0039 Part B: L2 render is DEVICE-INDEPENDENT (same decision, different event_ids → byte-identical, no event_id in bytes)", () => {
+  const x = renderConstraintL2View(decision, "x".repeat(64)).markdown;
+  const y = renderConstraintL2View(decision, "y".repeat(64)).markdown;
+  assert(x === y, "L2 bytes differ across event_ids — not device-independent");
+  assert(!x.includes("x".repeat(64)) && !x.includes("y".repeat(64)) && !x.includes("sediment_projection_event_id"), "event_id leaked into L2 rendered bytes");
+  assert(x.includes(`decision_hash: ${renderConstraintL2View(decision, "z".repeat(64)).decisionHash}\n`), "L2 missing device-independent decision_hash key");
 });
 
 await Promise.all(pending);

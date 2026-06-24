@@ -39,8 +39,8 @@ if (!fs.existsSync(l2Path)) {
   fail("constraint L2 view absent (l2/views/constraint/latest/compiled-view.md) — flip did not take effect, or 固化/L2 write failed (check for SC_L2_WRITE_FAILED in the auto-refresh log)");
 } else {
   const raw = fs.readFileSync(l2Path, "utf8");
-  const m = raw.match(/^sediment_projection_event_id:\s*(.+)$/m);
-  ok(`constraint L2 present (projection_event_id ${m ? m[1].trim().slice(0, 16) : "?"}…)`);
+  const m = raw.match(/^decision_hash:\s*(.+)$/m);
+  ok(`constraint L2 present (decision_hash ${m ? m[1].trim().slice(0, 16) : "?"}…)`);
 }
 
 // 2. full reconcile (includes the bundle-a constraint stale-L2 scan)

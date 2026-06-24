@@ -137,10 +137,18 @@ export interface RenderedConstraintL2View {
   markdown: string;
 }
 
-// ADR0039 Constraint L2 (FIX-1): deterministic git-tracked L2 view rendered from
-// the 固化d validated decision. Frontmatter pins sediment_projection_event_id so
-// reconcile can map L2 back to its immutable L1 source and re-render for a
-// byte-compare. Same section body as the shadow view; never invokes an LLM.
+// ADR0039 Constraint L2 (FIX-1 + Part B 2026-06-24, 3/4 T0): deterministic
+// git-tracked L2 view rendered from the 固化d validated decision. The rendered
+// bytes are DEVICE-INDEPENDENT — keyed by decision_hash (a pure fold of the
+// validated decision), NOT by the L1 projection event_id (which embeds
+// device_id/created_at_utc and so differs per device for the SAME decision).
+// This makes the same decision render byte-identically on every device, so
+// git-tracking is conflict-free (the idempotency gate in projection.ts skips a
+// rewrite when the on-disk L2 already carries this decision_hash). reconcile maps
+// L2 → L1 by scanning projection events for a matching decision_hash, then
+// re-renders for a byte-compare. projectionEventId stays in the return type for
+// programmatic consumers but is intentionally NOT part of the rendered bytes.
+// Same section body as the shadow view; never invokes an LLM.
 export function renderConstraintL2View(decision: ValidatedConstraintCompilerDecision, projectionEventId: string): RenderedConstraintL2View {
   const decisionHash = sha256Hex(stableCanonicalize(decision));
   const lines: string[] = [
@@ -151,7 +159,6 @@ export function renderConstraintL2View(decision: ValidatedConstraintCompilerDeci
     `template_version: ${TEMPLATE_VERSION}`,
     `input_root_hash: ${decision.inputRootHash}`,
     `decision_hash: ${decisionHash}`,
-    `sediment_projection_event_id: ${projectionEventId}`,
     "shadow_only: false",
     "canonical_output_hash: __PENDING__",
     "---",
