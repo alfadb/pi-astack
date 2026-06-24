@@ -487,6 +487,59 @@ check("runtime integration body is deterministic for repeated agent_end signal",
   assert(first.legacy_parallel_write.legacy_path_kind === "tier1_ruleset_adjudicator", "legacy path hint missing");
 });
 
+check("runtime integration scope: project wording beats incidental global-config mention", () => {
+  const body = buildTier1ConstraintEvidenceEventBody({
+    signal: {
+      user_quote: "pi-astack直接推main，不要开PR，它是我的自有仓库，pi-astack是属于我个人的~/.pi全局配置的pi-global仓库的子模块，推送pi-astack后要把pi-global的子模块指针一起提交推送",
+      correction_intent: "new preference",
+      scope_description: "项目级规则，适用于 pi-astack（作为 pi-global 子模块）",
+      confidence: 9,
+      provenance: "user-expressed",
+    },
+    draft: {
+      title: "项目级规则，适用于 pi-astack：直接推 main，不创建 PR",
+      body: "pi-astack直接推main，不要开PR，它是我的自有仓库，pi-astack是属于我个人的~/.pi全局配置的pi-global仓库的子模块，推送pi-astack后要把pi-global的子模块指针一起提交推送",
+      entryConfidence: 9,
+    },
+    sessionId: "runtime-session",
+    turnId: "runtime-turn",
+    projectId: "pi-global",
+    cwd: repoRoot,
+    createdAtUtc: "2026-06-24T12:39:20.511Z",
+    correlationId: "runtime-session:auto-scope",
+    candidateId: "tier1-direct:scope",
+    deviceId: "runtime-device",
+  });
+  assert(body.scope.scope_hint.kind === "project", "incidental 全局配置 mention must not force global scope");
+  assert(body.scope.scope_hint.project_id === "pi-global", "project scope must preserve active binding");
+});
+
+check("runtime integration scope: explicit all-project wording stays global", () => {
+  const body = buildTier1ConstraintEvidenceEventBody({
+    signal: {
+      user_quote: "所有项目中，显式 runtime 开关必须保留在 JSON 配置里。",
+      correction_intent: "new preference",
+      scope_description: "all projects",
+      confidence: 9,
+      provenance: "user-expressed",
+    },
+    draft: {
+      title: "Runtime switch explicit JSON",
+      body: "所有项目中，显式 runtime 开关必须保留在 JSON 配置里。",
+      entryConfidence: 9,
+    },
+    sessionId: "runtime-session",
+    turnId: "runtime-turn",
+    projectId: "pi-global",
+    cwd: repoRoot,
+    createdAtUtc: "2026-06-19T12:00:00.000Z",
+    correlationId: "runtime-session:auto-global-scope",
+    candidateId: "tier1-direct:global-scope",
+    deviceId: "runtime-device",
+  });
+  assert(body.scope.scope_hint.kind === "global", "explicit all-project wording must remain global-scoped");
+});
+
 check("runtime integration appends L1 event and state audit idempotently", async () => {
   const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-runtime-"));
   const options = {

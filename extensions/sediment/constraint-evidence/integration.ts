@@ -182,9 +182,28 @@ function normalizedQuote(
   return draft.body.trim() || draft.title.trim() || "Tier-1 user directive observed in agent_end";
 }
 
+function hasExplicitProjectScope(text: string): boolean {
+  return /(项目级|本项目|当前项目|这个项目|此项目|项目内|current project|this project|project-level|project scoped|project-scoped)/i.test(text);
+}
+
+function hasExplicitGlobalScope(text: string): boolean {
+  return /(所有项目|任何项目|全部项目|跨项目|全局规则|全局约定|全局范围|global rule|global scope|global convention|all projects|any project|cross-project)/i.test(text);
+}
+
 function conservativeScopeContext(options: BuildTier1ConstraintEvidenceEventOptions): ConstraintEvidenceScopeContext {
   const text = `${options.signal.scope_description ?? ""}\n${options.signal.correction_intent ?? ""}\n${options.signal.user_quote ?? ""}`;
-  if (/(全局|所有项目|任何项目|global|all projects|cross-project)/i.test(text)) {
+  if (hasExplicitProjectScope(text) && options.projectId) {
+    return {
+      active_project_binding: {
+        project_id: options.projectId,
+        binding_reason: "active project binding at agent_end",
+        cwd_hash: sha256Hex(options.cwd),
+      },
+      scope_hint: { kind: "project", project_id: options.projectId, evidence: "explicit project wording in witnessed signal" },
+      scope_confidence: 0.75,
+    };
+  }
+  if (hasExplicitGlobalScope(text)) {
     return {
       active_project_binding: {
         project_id: options.projectId,
