@@ -122,6 +122,20 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
     status: "started",
   }).catch(() => undefined);
 
+  // pi-astack: live footer indicator while the (minutes-long, async) compile
+  // runs, so the user sees a background compile in progress and does not close
+  // pi mid-flight. Driven via the globalThis setStatus stashed by the sediment
+  // extension (the auto-refresh has no ctx.ui of its own). No-op when unavailable.
+  const compileStatus = (globalThis as { __abrain_constraintCompileSetStatus?: (msg?: string) => void })
+    .__abrain_constraintCompileSetStatus;
+  const shortModel = modelRef.split("/").pop() ?? modelRef;
+  compileStatus?.(`约束编译中… (${shortModel})`);
+  const statusTicker = setInterval(() => {
+    const mins = Math.floor((Date.now() - startedAtMs) / 60000);
+    compileStatus?.(`约束编译中 ${mins}m… (${shortModel})`);
+  }, 30000);
+  (statusTicker as unknown as { unref?: () => void }).unref?.();
+
   try {
     const result = await runConstraintShadowCompiler({
       abrainHome: trigger.abrainHome,
@@ -173,6 +187,9 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
       durationMs: Date.now() - startedAtMs,
       error: err instanceof Error ? err.message : String(err),
     }).catch(() => undefined);
+  } finally {
+    clearInterval(statusTicker);
+    compileStatus?.(undefined);
   }
 }
 

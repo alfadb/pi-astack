@@ -208,6 +208,11 @@ const _G = globalThis as typeof globalThis & {
    *  indicator visible) from cross-session /new bg completion (flip
    *  the new session's stuck 'running (prev session)' back to idle). */
   __sediment_currentSessionId?: string | undefined;
+  /** pi-astack: setStatus bound to the constraint-compile footer slot, stashed
+   *  here so the async constraint auto-refresh (which has no ctx.ui of its own)
+   *  can drive a live 约束编译中 indicator while a minutes-long background compile
+   *  runs, so the user does not close pi mid-flight. */
+  __abrain_constraintCompileSetStatus?: ((msg?: string) => void) | undefined;
 };
 if (_G.__sediment_inflightCount === undefined) _G.__sediment_inflightCount = 0;
 if (!_G.__sediment_multiViewReplayInFlight) _G.__sediment_multiViewReplayInFlight = new Map<string, Promise<void>>();
@@ -307,6 +312,16 @@ export function renderSedimentStatus(
  *   See ADR 0024 §2 / §4.2 / §8 (updated in the same commit) for the
  *   restated invariant.
  */
+/** pi-astack: stash a constraint-compile footer-slot setStatus on globalThis so
+ *  the async constraint auto-refresh can show a live 约束编译中 indicator. Called
+ *  wherever the foreground setStatus is (re)captured, keeping it fresh across /new. */
+function stashConstraintCompileSetStatus(setStatusRaw: ((extId: string, message?: string) => void) | undefined): void {
+  if (!setStatusRaw) return;
+  _G.__abrain_constraintCompileSetStatus = (msg?: string) => {
+    try { setStatusRaw(FOOTER_STATUS_KEYS.constraintCompile, msg); } catch {}
+  };
+}
+
 function applySedimentStatus(
   setStatus: ((msg?: string) => void) | undefined,
   sessionId: string | undefined,
@@ -1699,6 +1714,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // currentSessionId — used by maybeSetIdleIfNoInflight to tell
       // same-session vs cross-session bg completion apart.
       _G.__sediment_latestSetStatus = setStatus;
+      stashConstraintCompileSetStatus(setStatusRaw);
       _G.__sediment_currentSessionId = sessionId;
 
       if ((_G.__sediment_inflightCount ?? 0) > 0 || multiViewReplayInFlight.size > 0) {
@@ -1749,6 +1765,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           }
         : undefined;
       _G.__sediment_latestSetStatus = setStatus;
+      stashConstraintCompileSetStatus(setStatusRaw);
       _G.__sediment_currentSessionId = sessionId;
       // If bg work from a previous session is still inflight, keep
       // showing running instead of resetting to idle.

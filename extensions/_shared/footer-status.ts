@@ -55,6 +55,7 @@ export const FOOTER_STATUS_KEYS = {
   dispatch:     "02-dispatch",
   abrainRules:  "03-abrain-rules",
   sediment:     "04-sediment",
+  constraintCompile: "04a-constraint-compile",
   toolContract: "05-tool-contract",
 } as const;
 
