@@ -1072,6 +1072,45 @@ async function gitCommitManyUnlocked(
   }
 }
 
+// ADR0039 Part A (T0 2026-06-24): the constraint pipeline writes l1/l2 outputs
+// OUTSIDE a sediment create commit — the background auto-refresh 固化 completes
+// AFTER the agent_end create that would have swept it, and a duplicate rule fires
+// no create at all. Those dirty l1/l2 then stall the git-sync merge preflight
+// (refuses on a dirty tree) and trip the B4 pre-push dirty-view block. This
+// commits whatever is dirty under l1/l2 via the SAME single-flight + sweep +
+// fire-and-forget push path as gitCommitMany, CONDITIONAL on change (unchanged
+// compiler re-runs = zero churn / no empty commit) and NO-THROW (a failed commit
+// must never crash the background compile).
+export async function commitAbrainDerivedOutputs(abrainHome: string, reason: string): Promise<string | null> {
+  return gitSingleFlight(abrainHome, () => commitAbrainDerivedOutputsUnlocked(abrainHome, reason));
+}
+
+async function commitAbrainDerivedOutputsUnlocked(abrainHome: string, reason: string): Promise<string | null> {
+  const derivedRels = ["l1", "l2"].filter((dir) => fsSync.existsSync(path.join(abrainHome, dir)));
+  if (derivedRels.length === 0) return null;
+  try {
+    await execFileAsync("git", ["-C", abrainHome, "add", "-A", "--", ...derivedRels], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+    let hasStaged = true;
+    try {
+      await execFileAsync("git", ["-C", abrainHome, "diff", "--cached", "--quiet", "--", ...derivedRels], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+      hasStaged = false;
+    } catch {
+      hasStaged = true;
+    }
+    if (!hasStaged) return null;
+    await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `sediment: derived l1/l2 outputs (${reason})`], { timeout: 30_000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    const sha = stdout.trim() || null;
+    await maybePushAbrainAsync(abrainHome, sha);
+    return sha;
+  } catch {
+    // Best-effort unstage so a failed commit never leaves a half-staged index a
+    // later writer commit would accidentally fold in.
+    try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", ...derivedRels], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
+    return null;
+  }
+}
+
 export async function appendAudit(projectRoot: string, event: Record<string, unknown>): Promise<string> {
   await ensureSedimentLegacyMigrated(projectRoot);
   // Round 9 P0 (sonnet R9-5 fix): ensure `.pi-astack/` is in the

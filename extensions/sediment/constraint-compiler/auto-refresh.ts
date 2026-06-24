@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createPiAiConstraintCompilerInvoker } from "./pi-ai-invoker";
 import { runConstraintShadowCompiler } from "./shadow-runner";
+import { commitAbrainDerivedOutputs } from "../writer";
 import { getDeviceId } from "../../_shared/causal-anchor";
 import type { ConstraintShadowRunResult } from "./types";
 import type { SedimentSettings } from "../settings";
@@ -155,6 +156,11 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
       durationMs: Date.now() - startedAtMs,
       result: compactResult(result),
     }).catch(() => undefined);
+    // ADR0039 Part A: commit this background compile's derived l1/l2 (固化 L1
+    // projection event + L2 view + the triggering constraint-evidence event),
+    // which no agent_end create will sweep because the compile completes minutes
+    // later. no-throw + conditional, so it never disrupts the background flow.
+    await commitAbrainDerivedOutputs(trigger.abrainHome, "constraint-shadow-auto-refresh");
   } catch (err) {
     await appendAuditLine(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
