@@ -192,7 +192,7 @@ export async function runGoalJudge(
         opts: { messages: unknown[] },
         config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
       ): { result(): Promise<{ errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
-    } = await import("@earendil-works/pi-ai");
+    } = await import("@earendil-works/pi-ai/compat");
     const stream = piAi.streamSimple(
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: promptSan.text ?? prompt }] }] },

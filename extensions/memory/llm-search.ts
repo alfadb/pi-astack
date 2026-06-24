@@ -154,7 +154,7 @@ export async function callSearchModel(
       opts: { messages: unknown[] },
       config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number; reasoning?: PiAiThinkingLevel },
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
-  } = await import("@earendil-works/pi-ai");
+  } = await import("@earendil-works/pi-ai/compat");
 
   const reasoningField: { reasoning?: PiAiThinkingLevel } =
     thinking === "off" ? {} : { reasoning: thinking };

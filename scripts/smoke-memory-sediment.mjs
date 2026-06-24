@@ -266,6 +266,12 @@ exports.streamSimple = (_model, opts, config) => {
 };
 `);
 
+  // Production migrated to `await import("@earendil-works/pi-ai/compat")`
+  // (pi 0.80.0 moved the global stream API off the pi-ai root). Mirror the
+  // stub at the /compat subpath so transpiled require() resolves it to the
+  // same module instance the bare-path inspector reads.
+  writeFile(path.join(outRoot, "node_modules", "@earendil-works", "pi-ai", "compat.js"), `module.exports = require("./index.js");\n`);
+
   return count;
 }
 

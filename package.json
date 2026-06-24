@@ -184,9 +184,15 @@
       "./skills"
     ]
   },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.80.2",
+    "jiti": "2.7.0",
+    "typescript": "6.0.3"
+  },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.75.0 <1.0.0",
-    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": ">=0.80.0 <1.0.0",
+    "@earendil-works/pi-ai": ">=0.80.0",
+    "@earendil-works/pi-tui": ">=0.80.0",
     "typebox": "*"
   }
 }

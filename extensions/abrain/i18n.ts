@@ -89,7 +89,7 @@ export async function defaultTranslator(en: string, userHint: string, ctx: unkno
       opts: { messages: Array<{ role: "user"; content: Array<{ type: "text"; text: string }>; timestamp: number }> },
       config: { apiKey: string; headers?: Record<string, string>; timeoutMs?: number; maxRetries?: number; signal?: AbortSignal },
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
-  } = await import("@earendil-works/pi-ai");
+  } = await import("@earendil-works/pi-ai/compat");
 
   const prompt = [
     "You are a vault authorization prompt localizer.",

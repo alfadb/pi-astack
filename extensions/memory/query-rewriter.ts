@@ -232,7 +232,7 @@ export async function rewriteUserMessageToSearchQuery(
         opts: { messages: unknown[] },
         config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
       ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
-    } = await import("@earendil-works/pi-ai");
+    } = await import("@earendil-works/pi-ai/compat");
 
     const stream = piAi.streamSimple(
       model,

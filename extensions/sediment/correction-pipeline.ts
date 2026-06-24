@@ -605,7 +605,7 @@ export async function runCorrectionPipeline(
         opts: { messages: unknown[] },
         config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
       ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
-    } = await import("@earendil-works/pi-ai");
+    } = await import("@earendil-works/pi-ai/compat");
 
     // C (2026-06-18): retry transient upstream rate-limit (429) with bounded
     // exponential backoff so one throttle hit no longer silently drops the

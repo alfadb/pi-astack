@@ -60,7 +60,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai/compat";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";

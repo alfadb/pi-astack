@@ -55,7 +55,7 @@ export function createPiAiConstraintCompilerInvoker(input: {
       return { ok: false, error: `model auth unavailable: ${auth.error || "missing api key"}`, modelRef };
     }
 
-    const piAi: StreamSimpleLike = input.streamSimpleImpl ?? await import("@earendil-works/pi-ai") as StreamSimpleLike;
+    const piAi: StreamSimpleLike = input.streamSimpleImpl ?? await import("@earendil-works/pi-ai/compat") as StreamSimpleLike;
     const stream = piAi.streamSimple(
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: request.prompt.text }] }] },

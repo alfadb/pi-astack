@@ -25,7 +25,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isSubAgentSession } from "../_shared/pi-internals";
 

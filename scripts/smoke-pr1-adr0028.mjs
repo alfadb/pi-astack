@@ -69,6 +69,9 @@ const jiti = createJiti(import.meta.url, {
   moduleCache: false,
   alias: {
     "@earendil-works/pi-ai": piAiStubPath,
+    // Production migrated to the /compat subpath (pi 0.80.0 moved the global
+    // stream API off the pi-ai root); alias it to the same stub.
+    "@earendil-works/pi-ai/compat": piAiStubPath,
     "@earendil-works/pi-coding-agent": piCodingAgentStubPath,
   },
 });
