@@ -20,6 +20,12 @@ export interface ConstraintEvidenceTier1DraftInput {
   body: string;
   entryConfidence: number;
   triggerPhrases?: string[];
+  // ADR0039 injectMode carry-through: the Tier-1 rule draft already decides
+  // always|listed (buildTier1RuleDraft hardcodes "always" today). Recording it
+  // on the evidence event lets the constraint compiler emit a real injectMode
+  // for event-sourced constraints instead of defaulting to "none" (which made
+  // project-scoped constraints non-injectable).
+  injectMode?: "always" | "listed";
 }
 
 export interface BuildTier1ConstraintEvidenceEventOptions {
@@ -89,7 +95,7 @@ export function buildTier1ConstraintEvidenceEventBody(
       candidate_title: options.draft.title,
       candidate_trigger_phrases: triggerPhrases(options.signal, options.draft),
       candidate_applies_when: options.signal.scope_description || "durable user directive observed in agent_end",
-      candidate_priority_hint: "unknown",
+      candidate_priority_hint: options.draft.injectMode ?? "unknown",
     },
     scope,
     sanitizer: {

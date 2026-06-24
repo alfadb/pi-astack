@@ -206,6 +206,15 @@ function normalizeConstraintEvent(record: ConstraintEventSourceRecord): Normaliz
     sourceKind: record.sourceKind,
     sourceId: record.sourceId,
     scope,
+    // ADR0039: lift the event's candidate_priority_hint to a real injectMode.
+    // Legacy rules carry injectMode directly; constraint events carry it as
+    // candidate_priority_hint ("always"|"listed"|"unknown"). Without this lift
+    // the top-level injectMode stayed undefined -> compiler rendered "none" ->
+    // project-scoped event constraints compiled as non-injectable. "unknown"
+    // defaults to "always" because Tier-1 directives are durable user rules.
+    // Derived from candidatePriorityHint (already inside `normalized`), so this
+    // does NOT change sourceHash -> no record churn / re-projection.
+    injectMode: record.candidatePriorityHint === "listed" ? "listed" : "always",
     title: record.candidateTitle,
     body: sanitizedText.text,
     categoryHint: inferCategoryHint(record),

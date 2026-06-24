@@ -43,7 +43,7 @@ export function buildConstraintCompilerPrompt(input: ConstraintCompilerPromptInp
     "Return JSON only. Do not wrap the response in markdown fences. Do not invent sourceRecordIds or projectIds.",
     "Never include mutation-key fields anywhere in the output object, including diagnostics.data: canonicalPath, canonical_path, targetPath, target_path, writePath, write_path, archiveSlugs, archive_slugs, deleteSlug, delete_slug, mutation, operation.",
     "Every item that references records must use sourceRecordIds as an array of exact sourceId strings from the input payload. Never use sourceId, sources, refs, sourceIds, or a single string.",
-    "For every compiled constraint, injectMode must exactly match every referenced legacy rule record. Never combine always and listed records in one compiled constraint.",
+    "For every compiled constraint, injectMode must exactly match every referenced source record (legacy rule or constraint event). Never combine always and listed records in one compiled constraint.",
     "For every compiled constraint, scope must exactly match every referenced legacy rule record unless a matching rescopeProposals item is present for that source.",
     "Source scope is authoritative. Topic text is not scope evidence: a global rule that mentions a project name such as sub2api or merdata stays global unless a valid explicit rescopeProposals item is present.",
     "Never infer project scope from a title, body, repository name, product name, or the word project in the rule text.",
