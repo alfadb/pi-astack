@@ -57,6 +57,7 @@ export const FOOTER_STATUS_KEYS = {
   sediment:     "04-sediment",
   constraintCompile: "04a-constraint-compile",
   toolContract: "05-tool-contract",
+  openaiServiceTier: "05a-openai-service-tier",
 } as const;
 
 export type FooterStatusKey =

@@ -146,6 +146,42 @@
       }
     },
 
+    "openaiServiceTier": {
+      "type": "object",
+      "description": "OpenAI service_tier injection (extensions/openai-service-tier/). Adds the official OpenAI request body field `service_tier` for explicitly allowlisted OpenAI models via before_provider_request. Intended for GPT fast/priority mode experiments without patching pi core. Env PI_ASTACK_DISABLE_OPENAI_SERVICE_TIER=1 wins over this setting.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Master switch. When false, the extension leaves provider payloads unchanged. Env PI_ASTACK_DISABLE_OPENAI_SERVICE_TIER=1 always disables injection."
+        },
+
+        "disableForSubAgent": {
+          "type": "boolean",
+          "default": true,
+          "description": "Skip service_tier injection for dispatch-spawned sub-agent sessions. Default true keeps critical reviews and background workers on normal provider scheduling unless explicitly changed later."
+        },
+
+        "serviceTier": {
+          "type": "string",
+          "enum": ["priority", "auto", "default", "flex", "scale", "fast"],
+          "default": "priority",
+          "description": "OpenAI service_tier value to inject. `fast` is accepted as a local alias and normalized to official OpenAI `priority`; all emitted requests use official values."
+        },
+
+        "modelAllowlist": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9_-]+/[A-Za-z0-9._-]+$" },
+          "default": [],
+          "description": "Exact `provider/modelId` allowlist. Empty list means inactive even when enabled, so a config typo fails closed instead of enabling service_tier broadly.",
+          "examples": [["openai/gpt-5.5"]]
+        }
+      }
+    },
+
     "modelFallback": {
       "type": "object",
       "description": "Multi-model fallback chain with retry (extensions/model-fallback/). Asymmetric policy: the **initial** model gets pi's full retry budget before fallback kicks in (retry count auto-read from pi settings.json#retry.maxRetries, no separate config needed); **each fallback model** gets exactly 1 attempt — any error switches to the next configured model immediately. When all fallback models are tried and all fail, the extension stops. For claude-code parity (10 attempts, 1s-256s delays), set pi settings.json#retry.maxRetries=9 + retry.baseDelayMs=1000; the extension auto-aligns.",
