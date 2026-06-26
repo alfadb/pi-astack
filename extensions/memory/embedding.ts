@@ -653,11 +653,18 @@ export function indexMetaPath(): string {
   return path.join(abrainStateDir(resolveUserGlobalAbrainHome()), "memory", "index-meta.json");
 }
 
-function writeIndexMeta(cfg: EmbeddingProviderConfig, result: CorpusBuildResult): void {
+function writeIndexMeta(cfg: EmbeddingProviderConfig, result: CorpusBuildResult, indexPath: string): void {
   try {
+    const idx = new VectorIndex(indexPath, cfg.model, cfg.dim).load();
+    const indexedEntries = idx.size();
     atomicWriteJson(indexMetaPath(), {
       updatedAt: new Date().toISOString(),
       activeEntries: result.total,
+      indexedEntries,
+      coverageRatio: result.total > 0 ? Math.min(indexedEntries, result.total) / result.total : 1,
+      embeddedThisRun: result.embedded,
+      skippedThisRun: result.skipped,
+      prunedThisRun: result.pruned,
       embedded: result.embedded,
       skipped: result.skipped,
       pruned: result.pruned,
@@ -691,7 +698,7 @@ export async function reconcileEmbeddings(
       onProgress: opts?.onProgress,
       pruneScopes: scopes,
     });
-    writeIndexMeta(cfg, result);
+    writeIndexMeta(cfg, result, indexPath);
     return result;
   } finally {
     await lock.release();

@@ -1083,6 +1083,7 @@ async function main() {
     assert(lintMarkdown(valid).length === 0, "valid entry should lint cleanly");
 
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-project-"));
+    const memorySmokeAbrainRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-memory-abrain-"));
     fs.mkdirSync(path.join(root, ".pensieve", "knowledge"), { recursive: true });
     fs.mkdirSync(path.join(root, ".pensieve", "staging"), { recursive: true });
     writeFile(path.join(root, ".pensieve", "knowledge", "alpha.md"), makeEntry({ title: "Alpha Memory", body: "Dispatch prompt memory architecture facade." }));
@@ -1132,7 +1133,15 @@ async function main() {
     // takes effect inside the search tool (CJS shared exports). Pin stage1Skip
     // explicitly to keep the test deterministic and independent of the live flag.
     const memSettings = req("./memory/settings.js");
+    const sedimentSettings = req("./sediment/settings.js");
     const origResolveSettings = memSettings.resolveSettings;
+    const origResolveSedimentSettings = sedimentSettings.resolveSedimentSettings;
+    const previousAbrainRoot = process.env.ABRAIN_ROOT;
+    process.env.ABRAIN_ROOT = memorySmokeAbrainRoot;
+    sedimentSettings.resolveSedimentSettings = () => {
+      const base = origResolveSedimentSettings();
+      return { ...base, knowledgeProjector: { ...base.knowledgeProjector, canonicalReadMode: "legacy" } };
+    };
     const pinStage1Skip = (skip) => {
       memSettings.resolveSettings = () => {
         const base = origResolveSettings();
@@ -1141,7 +1150,9 @@ async function main() {
         // stage1/stage2 metrics + prompt assertions; stage0 hybrid pooling is
         // covered by smoke:stage0-* ) and stage1Skip per the test path. Both are
         // pinned so this section is independent of the live settings.json flips.
-        return { ...base, search: { ...base.search, stage0Enabled: false, stage1Skip: skip } };
+        // The legacy read mode + isolated ABRAIN_ROOT keep this .pensieve fixture
+        // independent of the production projection_only setting and corpus.
+        return { ...base, includeWorld: false, search: { ...base.search, stage0Enabled: false, stage1Skip: skip } };
       };
     };
     pinStage1Skip(false);
@@ -1254,6 +1265,11 @@ async function main() {
       assert(!gammaWikilinkTargets.includes(banned), `code-span/fenced wikilink "${banned}" leaked into graph edges`);
     }
     fs.unlinkSync(path.join(root, ".pensieve", "knowledge", "gamma.md"));
+
+    memSettings.resolveSettings = origResolveSettings;
+    sedimentSettings.resolveSedimentSettings = origResolveSedimentSettings;
+    if (previousAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = previousAbrainRoot;
 
     const idx = await rebuildMarkdownIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", "_index.md")), "_index.md not written");
@@ -2508,7 +2524,12 @@ END_MEMORY`;
         now: "2026-05-19T22:00:00.000+08:00",
       });
       const savedAbrainRoot = process.env.ABRAIN_ROOT;
+      const savedResolveSedimentSettings = sedimentSettings.resolveSedimentSettings;
       process.env.ABRAIN_ROOT = ieTarget.abrainHome;
+      sedimentSettings.resolveSedimentSettings = () => {
+        const base = savedResolveSedimentSettings();
+        return { ...base, knowledgeProjector: { ...base.knowledgeProjector, canonicalReadMode: "legacy" } };
+      };
       try {
         // Write a project-scoped workflow via the canonical B1 writer.
         const wfWritten = await writeAbrainWorkflow(
@@ -2563,6 +2584,7 @@ END_MEMORY`;
         assert(a6.anomalies === 0,
           `A6 legacy_cold_access anomalies must be 0 outside projection_only; got ${a6.anomalies}`);
       } finally {
+        sedimentSettings.resolveSedimentSettings = savedResolveSedimentSettings;
         if (savedAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
         else process.env.ABRAIN_ROOT = savedAbrainRoot;
       }
@@ -4087,6 +4109,97 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-owned-behind-other-project"), `owned behind mismatch should delete after success`);
           assert(loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-other-project"), `other-project entry should remain after owned entry drains`);
           assert(deleteMultiviewPending("multiview-pending-loop-other-project") === true, `origin mismatch smoke cleanup failed`);
+
+          const staleCreated = new Date(Date.now() - 15 * 24 * 60 * 60 * 1000).toISOString();
+          const missingOriginRoot = path.join(replayRoot, "missing-origin-project-root");
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-stale-missing-origin",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: staleCreated,
+            updated: staleCreated,
+            origin_project_id: "missing-origin-project",
+            origin_project_root: missingOriginRoot,
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "stale missing origin proposer" },
+            proposer_raw_text: "stale missing origin raw",
+            candidate_snapshot: { title: "Replay Stale Missing Origin", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Stale Missing Origin\n\nOld other-project entry whose captured root no longer exists should be soft-archived." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-owned-behind-stale-missing-origin",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: new Date(Date.now() + 1_000).toISOString(),
+            updated: new Date().toISOString(),
+            origin_project_id: aTarget.projectId,
+            origin_project_root: aRoot,
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "owned behind stale missing origin proposer" },
+            proposer_raw_text: "owned behind stale missing origin raw",
+            candidate_snapshot: { title: "Replay Owned Behind Stale Missing Origin", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Owned Behind Stale Missing Origin\n\nOwned entry must still process after stale missing-origin cleanup." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          globalThis.__A2_INVOCATIONS__ = 0;
+          globalThis.__A2_RESPONSES__ = [
+            JSON.stringify({ op: "create", scope: "project", confidence: 9, reasoning: "pass1 confirm create" }),
+            JSON.stringify({ verdict: "confirm_proposer", rationale: "pass2 confirms proposer" }),
+          ];
+          let staleMissingWrote = false;
+          const staleMissing = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { staleMissingWrote = true; },
+          });
+          const abandonedDir = path.join(replayRoot, ".state", "sediment", "staging", "abandoned");
+          const abandonedFiles = fs.existsSync(abandonedDir) ? fs.readdirSync(abandonedDir) : [];
+          assert(staleMissing.terminal_stale === 1 && staleMissing.succeeded === 1 && staleMissing.deferred_other_project === 0 && staleMissing.errors === 0 && staleMissingWrote === true, `stale missing-origin should archive while owned entry still processes: ${JSON.stringify(staleMissing)} wrote=${staleMissingWrote}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-stale-missing-origin"), `stale missing-origin should leave live pending queue`);
+          assert(abandonedFiles.some((file) => file.endsWith("-multiview-pending-loop-stale-missing-origin.json")), `stale missing-origin should be soft-archived to abandoned/: ${JSON.stringify(abandonedFiles)}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-owned-behind-stale-missing-origin"), `owned behind stale missing-origin should delete after success`);
+
+          const liveOtherProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-live-other-project-"));
+          writeMultiviewPending({
+            slug: "multiview-pending-loop-stale-live-other-project",
+            kind: "multiview-pending",
+            status: "provisional",
+            created: staleCreated,
+            updated: staleCreated,
+            origin_project_id: "live-other-project",
+            origin_project_root: liveOtherProjectRoot,
+            originating_device: "smoke",
+            multiview_state: "reviewer_unavailable",
+            retry_attempts: 0,
+            trigger_reason: "create_high_confidence",
+            proposer_decision: { op: "create", rationale: "stale live other project proposer" },
+            proposer_raw_text: "stale live other project raw",
+            candidate_snapshot: { title: "Replay Stale Live Other Project", kind: "fact", status: "active", confidence: 9, compiledTruth: "# Replay Stale Live Other Project\n\nOld other-project entry with an existing origin root still belongs to that project." },
+            correction_signal: null,
+            neighbor_slugs: [],
+          });
+          let liveOtherProjectWrote = false;
+          const liveOtherProject = await replayMultiviewPending({
+            settings: replaySettings,
+            modelRegistry: loopModelRegistry,
+            currentProjectId: aTarget.projectId,
+            currentProjectRoot: aRoot,
+            loadNeighborsBySlug: async () => [],
+            writeApprovedToBrain: async () => { liveOtherProjectWrote = true; },
+          });
+          assert(liveOtherProject.deferred_other_project === 1 && liveOtherProject.terminal_stale === 0 && liveOtherProject.errors === 0 && liveOtherProject.auditRows.length === 0 && liveOtherProjectWrote === false, `stale live other-project should still defer silently: ${JSON.stringify(liveOtherProject)} wrote=${liveOtherProjectWrote}`);
+          assert(loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-stale-live-other-project"), `stale live other-project should remain pending for its owning project`);
+          assert(deleteMultiviewPending("multiview-pending-loop-stale-live-other-project") === true, `stale live other-project smoke cleanup failed`);
 
           // ── S1: fail-closed project resolution (no-origin must NOT misfile) ──
           // A project-scope candidate with NO captured origin must not be written

@@ -1,7 +1,7 @@
 {
   "name": "@alfadb/pi-astack",
   "version": "0.1.0",
-  "description": "alfadb's personal pi workflow + memory infrastructure. Current architecture: pure markdown+git in ~/.abrain (project memory under projects/<id>, world knowledge under knowledge/, legacy .pensieve read-only for migration); main session reads via memory_search/get/list/neighbors; sediment is the dedicated writer; abrain provides strict project binding and vault; vendor/gstack and vendor/pensieve are read-only methodology references; gbrain is retired.",
+  "description": "alfadb's personal pi workflow + memory infrastructure. Current architecture: L1 evidence events + L2 markdown projections + L3 rebuildable indexes in ~/.abrain; main session reads via memory_search/get/list/decide; sediment is the dedicated writer; abrain provides strict project binding and vault; vendor/gstack and vendor/pensieve are read-only methodology references; gbrain is retired.",
   "keywords": [
     "pi-package",
     "alfadb",

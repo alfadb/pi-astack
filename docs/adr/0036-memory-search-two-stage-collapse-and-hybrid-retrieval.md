@@ -226,7 +226,7 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 
 - 门: `search.autoReconcile`(默认 true, pi-astack-settings.json 显式 kill-switch)+ `autoReconcileCooldownMs`(5min)+ `autoReconcileMinBacklog`(3; ≤2 条走 bounded fallback)。`hasProjectRoot` gate 排除 oracle/scratch(不动生产索引)。
 - §75(4) 硬化: `buildCorpusEmbeddings` 的 prune 落盘与 embed 解耦(prune 后立即 save)—— delete/archive 孤儿在 embedding provider 宕机时也能清。
-- 可观测: `.state/memory/index-meta.json`(updatedAt + active/embedded/pruned + scheme)。
+- 可观测: `.state/memory/index-meta.json`(updatedAt + activeEntries + indexedEntries + coverageRatio + embeddedThisRun/skippedThisRun/prunedThisRun + scheme)。
 - 验证: `smoke-auto-reconcile`(决策 16 case)+ `smoke-memory-embedding`(countOrphans/prune-save)+ live selectStage0Pool 信号计算; fire→reconcile 链复用已证 sediment-reconcile 同调用。
 
 ## 11. P3 BM25 复活转产(本次, 3×T0 执行面板决定)

@@ -47,6 +47,7 @@
  * multiview-staging-types.ts for the D2 discovery).
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MemoryEntry } from "../memory/types";
 import type { CuratorDecision } from "./curator";
@@ -275,6 +276,35 @@ function originMismatchDetail(entry: MultiviewPendingEntry, deps: ReplayDeps): s
   return `origin binding mismatch; entry captured for project=${entry.origin_project_id ?? "unknown"} root=${entry.origin_project_root ?? "unknown"}, current project=${deps.currentProjectId ?? "unknown"} root=${deps.currentProjectRoot ?? "unknown"}. Staging kept for its owning project.`;
 }
 
+function missingOriginRoot(entry: MultiviewPendingEntry): string | null {
+  if (!entry.origin_project_root) return null;
+  return fs.existsSync(entry.origin_project_root) ? null : entry.origin_project_root;
+}
+
+function archiveStaleMissingOriginRootOtherProject(
+  entry: MultiviewPendingEntry,
+  deps: ReplayDeps,
+  result: ReplayBatchResult,
+  entryStart: number,
+): boolean {
+  const audit = startAuditRow(entry, entryStart);
+  const ageDays = audit.age_days;
+  if (ageDays < STALE_DAYS_MULTIVIEW_PENDING) return false;
+
+  const originRoot = missingOriginRoot(entry);
+  if (!originRoot) return false;
+
+  if (!archiveTerminalOrAudit(entry, audit, result, `origin binding mismatch and origin_project_root=${originRoot} is missing; age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; terminal stale wanted to archive entry`, entryStart)) {
+    return true;
+  }
+  audit.outcome = "terminal_stale";
+  audit.detail = `${originMismatchDetail(entry, deps)} origin_project_root=${originRoot} no longer exists; age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry soft-archived to abandoned/ for manual inspection (candidate preserved, not re-picked-up).`;
+  audit.durationMs = Date.now() - entryStart;
+  result.terminal_stale++;
+  result.auditRows.push(audit);
+  return true;
+}
+
 /**
  * S1 fail-closed placement classifier. The multi-view replay writer targets the
  * CURRENT binding (executeCuratorDecisionToBrain projectRoot=replayCwd), NOT the
@@ -457,6 +487,7 @@ export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBa
   const ownedEntries: MultiviewPendingEntry[] = [];
   for (const entry of loaded.entries) {
     if (isOtherProjectEntry(entry, deps)) {
+      if (archiveStaleMissingOriginRootOtherProject(entry, deps, result, Date.now())) continue;
       // Cross-project deferral is healthy operation, not an entry-level
       // failure. Count it in the batch summary, but do NOT emit one
       // per-entry audit row on every agent_end; staging is user-global
@@ -503,6 +534,7 @@ async function processOneEntry(
   // defense-in-depth for any direct processOneEntry reuse/refactor.
 
   if (isOtherProjectEntry(entry, deps)) {
+    if (archiveStaleMissingOriginRootOtherProject(entry, deps, result, entryStart)) return;
     audit.outcome = "deferred_other_project";
     audit.detail = originMismatchDetail(entry, deps);
     audit.durationMs = Date.now() - entryStart;

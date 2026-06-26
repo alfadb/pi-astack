@@ -131,7 +131,25 @@ try {
 }
 console.log(`\ndone in ${((Date.now() - t0) / 1000).toFixed(0)}s:`, JSON.stringify(r));
 const idxData = JSON.parse(fs.readFileSync(idxPath, "utf8"));
+const indexedEntries = Object.keys(idxData.entries).length;
+if (!process.env.OUT_PATH) {
+  fs.mkdirSync(path.dirname(emb.indexMetaPath()), { recursive: true });
+  fs.writeFileSync(emb.indexMetaPath(), `${JSON.stringify({
+    updatedAt: new Date().toISOString(),
+    activeEntries: r.total,
+    indexedEntries,
+    coverageRatio: r.total > 0 ? indexedEntries / r.total : 1,
+    embeddedThisRun: r.embedded,
+    skippedThisRun: r.skipped,
+    prunedThisRun: r.pruned,
+    embedded: r.embedded,
+    skipped: r.skipped,
+    pruned: r.pruned,
+    scheme: emb.embedSchemeTag(multiVector),
+    multiVectorMaxChunks,
+  })}\n`, "utf8");
+}
 const byScope = {};
 for (const rec of Object.values(idxData.entries)) byScope[rec.scope] = (byScope[rec.scope] || 0) + 1;
-console.log(`index: ${Object.keys(idxData.entries).length} vectors, dim ${idxData.dim}, model ${idxData.model}`);
+console.log(`index: ${indexedEntries} vectors, dim ${idxData.dim}, model ${idxData.model}`);
 console.log(`scope 分布:`, JSON.stringify(byScope, null, 0));
