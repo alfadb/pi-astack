@@ -301,6 +301,35 @@ await asyncCheck("extension registers append-only idempotent injector and diagno
   try {
     process.env.ABRAIN_ROOT = abrainHome;
     process.env.HOME = path.join(tmpRoot, "home");
+    writeFile(path.join(process.env.HOME, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+      ruleInjector: {
+        compiledViewInjection: {
+          enabled: true,
+          fallbackToLegacyOnError: true,
+          requireFresh: true,
+          staleAfterMs: 86400000,
+          maxReadBytes: 1000000,
+          minCoverageRatio: 1,
+        },
+      },
+    }, null, 2));
+    const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+    writeShadowDecision(path.join(latestDir, "decision.json"), [{
+      constraintId: "shadow:footer-compiled",
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Footer Compiled",
+      compiledBody: "Footer should show compiled view.",
+      mustDoSummary: "Footer should show compiled view.",
+      triggerPhrases: [],
+      sourceRecordIds: ["event:footer-compiled"],
+    }]);
+    writeFile(path.join(latestDir, "compiled-view.md"), "## Global always\n\n### Footer Compiled\n- Footer should show compiled view.\n");
+    writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+      schemaVersion: "constraint-event-coverage/v1",
+      summary: { coverageRatio: 1, injectableCoverageRatio: 1 },
+      rows: [],
+    }, null, 2));
     const freshOut = path.join(tmpRoot, "fresh");
     stageModuleTree(freshOut);
     const freshReq = createRequire(path.join(freshOut, "runner.cjs"));
@@ -328,7 +357,8 @@ await asyncCheck("extension registers append-only idempotent injector and diagno
     if (!first.systemPrompt.includes("BEGIN_ABRAIN_RULES")) throw new Error("missing injected marker");
     const second = await beforeAgent({ systemPrompt: first.systemPrompt }, { cwd: projectRoot });
     if (second !== undefined) throw new Error("injector must be idempotent when marker exists");
-    if (!statuses.some(([, v]) => String(v).includes("rules:"))) throw new Error(`footer status not set: ${JSON.stringify(statuses)}`);
+    if (!statuses.some(([, v]) => String(v).includes("rules: compiled 1 always, 0 listed"))) throw new Error(`footer status should show compiled counts: ${JSON.stringify(statuses)}`);
+    if (statuses.some(([, v]) => String(v).includes("legacy"))) throw new Error(`footer status leaked legacy source: ${JSON.stringify(statuses)}`);
     const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "session-start-dualread", "audit.jsonl");
     if (fs.existsSync(auditFile)) throw new Error("dual-read audit must stay off by default");
   } finally {

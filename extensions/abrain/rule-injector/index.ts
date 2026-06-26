@@ -465,8 +465,10 @@ export function composeRuleInjection(cache: RuleScanCache): string {
   ].join("\n");
 }
 
+type CompiledRuleCounts = { always: number; listed: number; total: number };
+
 type CompiledViewReadResult =
-  | { ok: true; injection: string; sourcePath: string; coverageRatio?: number; stale: boolean }
+  | { ok: true; injection: string; sourcePath: string; counts: CompiledRuleCounts; coverageRatio?: number; injectableCoverageRatio?: number; stale: boolean }
   | { ok: false; reason: string; error?: string };
 
 function readJsonFileBounded(file: string, maxReadBytes: number): unknown {
@@ -496,6 +498,24 @@ function coverageRatiosFrom(value: unknown): { coverageRatio?: number; injectabl
     ...(typeof coverageRatio === "number" && Number.isFinite(coverageRatio) ? { coverageRatio } : {}),
     ...(typeof injectableCoverageRatio === "number" && Number.isFinite(injectableCoverageRatio) ? { injectableCoverageRatio } : {}),
   };
+}
+
+function compiledRuleCountsFromDecision(value: unknown, activeProjectId: string | undefined): CompiledRuleCounts {
+  const root = objectRecord(value);
+  const constraints = Array.isArray(root?.constraints) ? root.constraints : [];
+  const counts: CompiledRuleCounts = { always: 0, listed: 0, total: 0 };
+  for (const item of constraints) {
+    const constraint = objectRecord(item);
+    const scope = objectRecord(constraint?.scope);
+    const scopeKind = scope?.kind;
+    const projectId = typeof scope?.projectId === "string" ? scope.projectId : undefined;
+    const inRuntimeScope = scopeKind === "global" || (scopeKind === "project" && !!activeProjectId && projectId === activeProjectId);
+    if (!inRuntimeScope) continue;
+    const injectMode = constraint?.injectMode === "listed" ? "listed" : "always";
+    counts[injectMode] += 1;
+    counts.total += 1;
+  }
+  return counts;
 }
 
 // ADR0039 L3: the runtime compiled-view contains ALL scopes (Global plus every
@@ -533,6 +553,7 @@ export function readCompiledRuleInjectionForRuntime(args: {
   try {
     const decision = objectRecord(readJsonFileBounded(decisionPath, args.settings.maxReadBytes));
     if (decision?.schemaVersion !== "constraint-shadow-decision/v1") return { ok: false, reason: "invalid_decision_schema" };
+    const counts = compiledRuleCountsFromDecision(decision, args.activeProjectId);
     const coverage = fs.existsSync(coveragePath) ? readJsonFileBounded(coveragePath, args.settings.maxReadBytes) : undefined;
     const ratios = coverage === undefined ? {} : coverageRatiosFrom(coverage);
     const ratio = ratios.coverageRatio;
@@ -554,12 +575,13 @@ export function readCompiledRuleInjectionForRuntime(args: {
       "",
       `compiled_view_path: ${compiledViewPath}`,
       `coverage_ratio: ${ratio ?? "unknown"}`,
+      `injectable_coverage_ratio: ${gatingRatio ?? "unknown"}`,
       `stale: ${stale}`,
       "",
       compiledView,
       END_ABRAIN_RULES,
     ].join("\n");
-    return { ok: true, injection, sourcePath: compiledViewPath, coverageRatio: ratio, stale };
+    return { ok: true, injection, sourcePath: compiledViewPath, counts, coverageRatio: ratio, injectableCoverageRatio: gatingRatio, stale };
   } catch (err: unknown) {
     return { ok: false, reason: "read_failed", error: err instanceof Error ? err.message : String(err) };
   }
@@ -605,19 +627,41 @@ function ruleCounts(cache: RuleScanCache): { always: number; listed: number; tot
   return { always, listed, total: always + listed };
 }
 
-function setFooterStatus(ctx: { ui?: { setStatus?(key: string, text: string | undefined): void } } | undefined, cache: RuleScanCache | null, detail?: string): void {
+function legacyFooterText(cache: RuleScanCache | null): string {
+  if (!cache || !hasAnyRules(cache)) return "🧠 rules: none";
+  const counts = ruleCounts(cache);
+  const warn = cache.warnings.some((w) => w.level === "warning" || w.level === "error");
+  return `${warn ? "⚠️" : "🧠"} rules: legacy ${counts.always} always, ${counts.listed} listed`;
+}
+
+function runtimeFooterText(cache: RuleScanCache | null, settings: RuleInjectorSettings, detail?: string): string {
+  if (cache) {
+    const compiled = readCompiledRuleInjectionForRuntime({
+      abrainHome: cache.abrainHome,
+      nonce: cache.nonce,
+      settings: settings.compiledViewInjection,
+      activeProjectId: cache.activeProjectId,
+    });
+    if (compiled.ok) {
+      const effectiveRatio = compiled.injectableCoverageRatio ?? compiled.coverageRatio;
+      const effectiveCoverage = effectiveRatio === undefined ? "unknown" : `${Math.round(effectiveRatio * 100)}%`;
+      const strictCoverage = compiled.coverageRatio !== undefined && compiled.injectableCoverageRatio !== undefined && compiled.coverageRatio !== compiled.injectableCoverageRatio
+        ? `, strict ${Math.round(compiled.coverageRatio * 100)}%`
+        : "";
+      return `🧠 rules: compiled ${compiled.counts.always} always, ${compiled.counts.listed} listed (${effectiveCoverage} injectable${strictCoverage}${compiled.stale ? ", stale" : ""}${detail ? `, ${detail}` : ""})`;
+    }
+    if (settings.compiledViewInjection.enabled && !settings.compiledViewInjection.fallbackToLegacyOnError) {
+      return `⚠️ rules: compiled view ${compiled.reason}${detail ? ` (${detail})` : ""}`;
+    }
+  }
+  const legacy = legacyFooterText(cache);
+  return detail ? `${legacy} (${detail})` : legacy;
+}
+
+function setFooterStatus(ctx: { ui?: { setStatus?(key: string, text: string | undefined): void } } | undefined, cache: RuleScanCache | null, settings: RuleInjectorSettings, detail?: string): void {
   try {
     if (!ctx?.ui?.setStatus) return;
-    if (!cache || !hasAnyRules(cache)) {
-      ctx.ui.setStatus(RULE_STATUS_KEY, "🧠 rules: none");
-      return;
-    }
-    const counts = ruleCounts(cache);
-    const warn = cache.warnings.some((w) => w.level === "warning" || w.level === "error");
-    ctx.ui.setStatus(
-      RULE_STATUS_KEY,
-      `${warn ? "⚠️" : "🧠"} rules: ${counts.always} always, ${counts.listed} listed${detail ? ` (${detail})` : ""}`,
-    );
+    ctx.ui.setStatus(RULE_STATUS_KEY, runtimeFooterText(cache, settings, detail));
   } catch {
     // footer is best-effort
   }
@@ -637,11 +681,8 @@ interface RuleInjectorRealtimeGlobal {
 }
 const _RG = globalThis as unknown as RuleInjectorRealtimeGlobal;
 
-function footerText(cache: RuleScanCache | null): string {
-  if (!cache || !hasAnyRules(cache)) return "🧠 rules: none";
-  const counts = ruleCounts(cache);
-  const warn = cache.warnings.some((w) => w.level === "warning" || w.level === "error");
-  return `${warn ? "⚠️" : "🧠"} rules: ${counts.always} always, ${counts.listed} listed`;
+function footerText(cache: RuleScanCache | null, settings: RuleInjectorSettings): string {
+  return runtimeFooterText(cache, settings);
 }
 
 /** Capture a KEY-bound setStatus into globalThis so the fs.watch callback
@@ -666,7 +707,7 @@ export function refreshRulesFooterRealtime(cwd: string, settings: RuleInjectorSe
   if (!setFooter) return;
   try {
     cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd, settings });
-    setFooter(footerText(cachedRules));
+    setFooter(footerText(cachedRules, settings));
   } catch { /* best-effort */ }
 }
 
@@ -805,7 +846,7 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       ensureRuleDirs(ABRAIN_HOME);
       cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings });
       ensureProjectRuleDirs(ABRAIN_HOME, cachedRules.activeProjectId);
-      setFooterStatus(ctx, cachedRules);
+      setFooterStatus(ctx, cachedRules, settings);
       if (settings.dualReadAudit.enabled) {
         runRuleInjectorDualReadAudit({
           abrainHome: ABRAIN_HOME,
@@ -862,7 +903,7 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       const [sub = "list", ...rest] = trimmed ? trimmed.split(/\s+/) : [];
       if (sub === "reload") {
         cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings });
-        setFooterStatus(ctx, cachedRules, "reloaded");
+        setFooterStatus(ctx, cachedRules, settings, "reloaded");
         notifyWarningsOnce(ctx, cachedRules);
         const counts = ruleCounts(cachedRules);
         ctx.ui?.notify?.(`abrain rules reloaded: ${counts.always} always, ${counts.listed} listed`, "info");
