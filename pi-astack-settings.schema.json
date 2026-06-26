@@ -1452,7 +1452,7 @@
 
     "vision": {
       "type": "object",
-      "description": "Vision tool model selection (extensions/vision/). Auto-selects the strongest vision-capable model from the registry, excluding the caller's own model.",
+      "description": "Vision tool model selection (extensions/vision/). Auto-selects the strongest vision-capable model from the registry according to modelPreferences.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },

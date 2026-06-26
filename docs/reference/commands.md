@@ -19,7 +19,7 @@ These tools may be visible to the assistant depending on pi settings and sub-pi 
 | `memory_list(filters?)` | Metadata browsing. | Not relevance-ranked. |
 | `memory_neighbors(slug, options?)` | Read-only graph traversal. | Relations + wikilinks. |
 | `vault_release(key, scope?, reason?)` | Release secret plaintext into LLM context after user authorization. | Do not use for shell commands; prefer `$VAULT_*` injection. |
-| `vision(imageBase64? | path?, prompt, mimeType?)` | Analyze image with best available vision model. | For screenshots/photos/diagrams when current model cannot see images. |
+| `vision(imageBase64? | path?, prompt, mimeType?)` | Analyze image with best available vision model. | For screenshots/photos/diagrams when the current model cannot process images. |
 | `imagine(prompt, imagePath?, size?, quality?, style?, inputFidelity?, model?)` | Generate or image-to-image edit via OpenAI image model. | `imagePath` enables local reference-image editing; output saved under `.pi-astack/imagine/`. |
 
 ## 2. Human slash command groups

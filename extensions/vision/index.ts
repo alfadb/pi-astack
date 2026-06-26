@@ -7,8 +7,8 @@
  * means subagents access this through pi's own tool registration, not through
  * in-process tool injection.
  *
- * Picks the strongest vision-capable model from the model registry (excluding
- * the caller's own model), then runs an in-process pi-ai streamSimple call
+ * Picks the strongest vision-capable model from the model registry, then runs
+ * an in-process pi-ai streamSimple call
  * with the image. Returns text analysis + model used + usage stats.
  *
  * Security model (path-based image loads):
@@ -25,7 +25,6 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Model } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 
 // ── pi-astack settings loader ──────────────────────────────
@@ -102,7 +101,6 @@ interface VisionDeps {
     find(provider: string, modelId: string): unknown;
   };
   prefs: string[];
-  excludeMain?: { provider: string; id: string; input?: string[] };
   signal?: AbortSignal;
   timeoutMs?: number;
   cwd?: string;
@@ -246,11 +244,6 @@ async function analyzeImage(
   const resolved = img as ResolvedImage;
 
   // 2. Select the best vision-capable model
-  const isExcluded = (m: { provider: string; id: string }) =>
-    !!deps.excludeMain &&
-    m.provider === deps.excludeMain.provider &&
-    m.id === deps.excludeMain.id;
-
   // Defensive: getAvailable() is not guaranteed on all pi versions.
   // model-curator already uses the same fallback pattern (getAvailable ?? getAll).
   const reg = deps.modelRegistry as any;
@@ -260,7 +253,6 @@ async function analyzeImage(
       : await reg.getAll?.() ?? [];
   const candidates = available
     .filter((m) => m.input?.includes("image"))
-    .filter((m) => !isExcluded(m))
     .map((m) => ({ m, pref: scoreByPrefs(m, deps.prefs) }))
     .sort((a, b) => {
       if (a.pref !== b.pref) return a.pref - b.pref;
@@ -270,23 +262,10 @@ async function analyzeImage(
     .map((x) => x.m);
 
   if (candidates.length === 0) {
-    // If the excluded main model itself supports images, surface a clear
-    // message — calling vision when the caller already has image input is
-    // a no-op round-trip.
-    if (deps.excludeMain?.input?.includes?.("image")) {
-      return {
-        ok: false,
-        error:
-          `Your current model (${deps.excludeMain.provider}/${deps.excludeMain.id}) ` +
-          "already supports image input. Pass the image directly in your prompt " +
-          "instead of using the vision tool. (vision exists to delegate to a *different* model.)",
-      };
-    }
     return {
       ok: false,
       error:
-        "No vision-capable model available (other than the excluded current model). " +
-        "Configure another provider with image support in your pi settings.",
+        "No vision-capable model available. Configure a provider with image support in your pi settings.",
     };
   }
 
@@ -410,7 +389,7 @@ export default function (pi: ExtensionAPI) {
       "images or file paths confined to the project directory.",
     promptSnippet: "vision(imageBase64?, path?, prompt, mimeType?) — analyze an image with the best vision model",
     promptGuidelines: [
-      "Use vision when the user provides an image (screenshot, photo, diagram) and your current model cannot process images.",
+      "Use vision when the user provides an image (screenshot, photo, diagram) and your current model cannot process images; if the current model supports image input, pass the image directly instead.",
       "Prefer imageBase64 for images already in context. Use path for local image files within the project.",
       "The tool auto-selects the best vision model per your `vision.modelPreferences` setting in pi-astack-settings.json (top-level, no piStack wrapper).",
       "Returns the text analysis from the vision model, along with model info and token usage.",
@@ -463,7 +442,6 @@ export default function (pi: ExtensionAPI) {
         modelRegistry: unknown;
       },
     ): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
-      const model = ctx.model as { provider: string; id: string; input?: string[] } | undefined;
       // P0 fix (2026-05-14 audit round 6): modelRegistry may be undefined in
       // some pi versions — return isError instead of crashing.
       if (!ctx.modelRegistry) {
@@ -483,9 +461,6 @@ export default function (pi: ExtensionAPI) {
       const result = await analyzeImage(params, {
         modelRegistry,
         prefs,
-        excludeMain: model
-          ? { provider: model.provider, id: model.id, input: model.input }
-          : undefined,
         signal,
         cwd: ctx.cwd ?? process.cwd(),
       });
