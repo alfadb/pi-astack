@@ -30,7 +30,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCurrentAnchor } from "../_shared/causal-anchor";
-import { isGoalContinuationText } from "../_shared/goal-continuation";
+import { isGoalContinuationText, parseGoalContinuationMessage } from "../_shared/goal-continuation";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { wrapVolatile } from "../_shared/volatile-suffix";
 import { Type } from "typebox";
@@ -92,6 +92,11 @@ interface GoalSettings {
   autoContinue: boolean;
   judgeModel: string;
   judgeTimeoutMs: number;
+  /** P1: an issued continuation intent whose follow-up never got consumed
+   *  (e.g. a fire-and-forget sendUserMessage that silently failed) would
+   *  otherwise wedge the pending gate forever. Past this age it is treated
+   *  as abandoned so auto-continue can recover. */
+  pendingContinuationStaleMinutes: number;
 }
 
 const DEFAULTS: GoalSettings = {
@@ -104,6 +109,7 @@ const DEFAULTS: GoalSettings = {
   // of truth. Empty default → fail-closed at goal judge.
   judgeModel: "",
   judgeTimeoutMs: 45_000,
+  pendingContinuationStaleMinutes: 10,
 };
 
 function resolveGoalSettings(): GoalSettings {
@@ -122,6 +128,7 @@ function resolveGoalSettings(): GoalSettings {
     autoContinue: typeof cfg.autoContinue === "boolean" ? cfg.autoContinue : DEFAULTS.autoContinue,
     judgeModel: typeof cfg.judgeModel === "string" && cfg.judgeModel.trim() ? cfg.judgeModel.trim() : DEFAULTS.judgeModel,
     judgeTimeoutMs: num(cfg.judgeTimeoutMs, DEFAULTS.judgeTimeoutMs, 5_000, 300_000),
+    pendingContinuationStaleMinutes: num(cfg.pendingContinuationStaleMinutes, DEFAULTS.pendingContinuationStaleMinutes, 1, 24 * 60),
   };
 }
 
@@ -229,6 +236,63 @@ export function isCurrentTurnGoalContinuation(sm: unknown): boolean {
   } catch {
     return true;
   }
+}
+
+function lastAssistantMessage(event: unknown): { role?: string; stopReason?: string; errorMessage?: string } | undefined {
+  const messages = (event as { messages?: unknown[] } | undefined)?.messages;
+  if (!Array.isArray(messages)) return undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i] as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
+    if (msg?.role === "assistant") return msg;
+  }
+  return undefined;
+}
+
+export function goalAutoContinueSkipReason(event: unknown): "no_assistant" | "assistant_error" | "assistant_aborted" | "assistant_truncated" | undefined {
+  const last = lastAssistantMessage(event);
+  if (!last) return "no_assistant";
+  if (last.stopReason === "error" || (typeof last.errorMessage === "string" && last.errorMessage.length > 0)) return "assistant_error";
+  if (last.stopReason === "aborted") return "assistant_aborted";
+  // A truncated turn (hit the output-token ceiling) is an incomplete answer;
+  // judging it would assess half a response. Skip — the runtime/user drives
+  // the next step, and a later clean agent_end re-opens auto-continue.
+  if (last.stopReason === "length" || last.stopReason === "max_tokens") return "assistant_truncated";
+  return undefined;
+}
+
+export function hasUnconsumedGoalContinuation(branch: unknown[], goalId: string, opts?: { now?: number; maxPendingAgeMs?: number }): boolean {
+  let latestIntentHash: string | undefined;
+  let latestIntentIndex = -1;
+  let latestIntentTs: number | undefined;
+  let latestConsumedIndex = -1;
+  for (let i = 0; i < branch.length; i++) {
+    const entry = branch[i] as { type?: string; customType?: string; data?: { goal_id?: unknown; message_hash?: unknown; ts?: unknown }; message?: { role?: string; content?: unknown } };
+    if (entry?.type === "custom" && entry.customType === "pi-goal-continuation" && entry.data?.goal_id === goalId && typeof entry.data.message_hash === "string") {
+      latestIntentHash = entry.data.message_hash;
+      latestIntentIndex = i;
+      latestConsumedIndex = -1;
+      latestIntentTs = typeof entry.data.ts === "string" ? Date.parse(entry.data.ts) : undefined;
+      continue;
+    }
+    if (entry?.type === "message" && entry.message?.role === "user") {
+      const text = extractMessageText(entry.message.content);
+      const parsed = parseGoalContinuationMessage(text);
+      if (parsed?.goalId !== goalId) continue;
+      const hash = createHash("sha256").update(text, "utf-8").digest("hex").slice(0, 12);
+      if (!latestIntentHash || hash === latestIntentHash) latestConsumedIndex = i;
+    }
+  }
+  const pending = latestIntentIndex >= 0 && latestConsumedIndex < latestIntentIndex;
+  if (!pending) return false;
+  // Staleness escape hatch: a never-consumed intent past the age bound is
+  // treated as abandoned (its follow-up likely never reached the queue), so
+  // a single dropped send cannot wedge auto-continue forever.
+  const maxAge = opts?.maxPendingAgeMs;
+  if (typeof maxAge === "number" && maxAge > 0 && typeof latestIntentTs === "number" && Number.isFinite(latestIntentTs)) {
+    const now = opts?.now ?? Date.now();
+    if (now - latestIntentTs > maxAge) return false;
+  }
+  return true;
 }
 
 function wrapText(text: string, details: unknown, isError = false) {
@@ -616,7 +680,7 @@ export default function (pi: ExtensionAPI) {
   // PRE-DECREMENTED and persisted before each send (continue.ts). The
   // in-flight set guards against overlapping agent_end emissions only.
   const autoContinueInFlight = new Set<string>();
-  pi.on("agent_end", async (_event, ctx) => {
+  pi.on("agent_end", async (event, ctx) => {
     const settings = resolveGoalSettings();
     if (!settings.enabled || !settings.autoContinue) return;
     if (isSubAgentSession(ctx as never)) return;
@@ -633,10 +697,19 @@ export default function (pi: ExtensionAPI) {
       try { ctx.ui?.notify?.("goal stopped: user abort/ESC", "info" as never); } catch { /* noop */ }
       return;
     }
+    const skipReason = goalAutoContinueSkipReason(event);
+    if (skipReason) {
+      try { ctx.ui?.notify?.(`goal auto-continue skipped: ${skipReason}`, "info" as never); } catch { /* noop */ }
+      return;
+    }
+    const branch = (ctx.sessionManager as unknown as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
+    if (hasUnconsumedGoalContinuation(branch, state.goal_id, { maxPendingAgeMs: settings.pendingContinuationStaleMinutes * 60_000 })) {
+      try { ctx.ui?.notify?.("goal auto-continue skipped: pending continuation already queued", "info" as never); } catch { /* noop */ }
+      return;
+    }
     if (autoContinueInFlight.has(sessionId)) return;
     autoContinueInFlight.add(sessionId);
     try {
-      const branch = (ctx.sessionManager as unknown as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
       const source = getGoalSource(state);
       let goalDoc: { path: string; content: string; truncated?: boolean } | undefined;
       let judgeLedger: string | undefined;

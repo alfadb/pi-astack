@@ -37,3 +37,10 @@ export function formatGoalContinuationMessage(goalId: string, instruction: strin
 export function isGoalContinuationText(text: string): boolean {
   return text.trimStart().startsWith(GOAL_CONTINUATION_PREFIX);
 }
+
+export function parseGoalContinuationMessage(text: string): { goalId: string; instruction: string } | undefined {
+  const trimmed = text.trimStart();
+  const match = /^\[pi-goal-continuation\s+goal_id=([^\]\s]+)\]\s*([\s\S]*)$/.exec(trimmed);
+  if (!match) return undefined;
+  return { goalId: match[1], instruction: match[2] ?? "" };
+}

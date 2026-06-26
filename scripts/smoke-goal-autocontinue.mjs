@@ -32,6 +32,7 @@ function assert(cond, msg) { if (!cond) throw new Error(msg || "assertion failed
 
 const S = await jiti.import(`${repoRoot}/extensions/goal/state.ts`);
 const C = await jiti.import(`${repoRoot}/extensions/goal/continue.ts`);
+const I = await jiti.import(`${repoRoot}/extensions/goal/index.ts`);
 const J = await jiti.import(`${repoRoot}/extensions/goal/judge.ts`);
 const G = await jiti.import(`${repoRoot}/extensions/_shared/goal-continuation.ts`);
 
@@ -192,6 +193,46 @@ await check("inactive goal → skipped (no judge, no writes)", async () => {
 await check("agent_end ESC gate persists stop before suppressing follow-up", async () => {
   const src = fs.readFileSync(path.join(repoRoot, "extensions/goal/index.ts"), "utf-8");
   assert(/if \(ctx\.signal\?\.aborted\) \{[\s\S]*status: "paused" as const[\s\S]*appendGoalEvent\("stop", stopped\)[\s\S]*await saveGoalFile\(cwd, stopped\)[\s\S]*return false;/.test(src), "isStillActive abort gate must persist paused stop before returning false");
+});
+
+await check("agent_end entry gate: error/aborted/truncated/no-assistant skip before judge", async () => {
+  const gate = I.goalAutoContinueSkipReason;
+  assert(gate({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "429" }] }) === "assistant_error", "error skipped");
+  assert(gate({ messages: [{ role: "assistant", errorMessage: "503" }] }) === "assistant_error", "errorMessage skipped");
+  assert(gate({ messages: [{ role: "assistant", stopReason: "aborted" }] }) === "assistant_aborted", "aborted skipped");
+  assert(gate({ messages: [{ role: "assistant", stopReason: "length" }] }) === "assistant_truncated", "length truncation skipped");
+  assert(gate({ messages: [{ role: "assistant", stopReason: "max_tokens" }] }) === "assistant_truncated", "max_tokens truncation skipped");
+  assert(gate({ messages: [{ role: "user", content: "x" }] }) === "no_assistant", "no assistant skipped");
+  assert(gate({ messages: [{ role: "assistant", stopReason: "stop" }] }) === undefined, "clean stop allowed");
+  assert(gate({ messages: [{ role: "assistant", stopReason: "end_turn" }] }) === undefined, "clean end_turn allowed");
+  assert(gate({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "old" }, { role: "assistant", stopReason: "stop" }] }) === undefined, "latest clean assistant allowed");
+});
+
+await check("pending continuation gate: issued intent blocks until matching user message appears", async () => {
+  const goalId = "g-pending";
+  const msg = G.formatGoalContinuationMessage(goalId, "continue");
+  const messageHash = (await import("node:crypto")).createHash("sha256").update(msg, "utf-8").digest("hex").slice(0, 12);
+  const intent = { type: "custom", customType: "pi-goal-continuation", data: { goal_id: goalId, message_hash: messageHash } };
+  assert(I.hasUnconsumedGoalContinuation([intent], goalId) === true, "intent without user is pending");
+  const consumed = { type: "message", message: { role: "user", content: [{ type: "text", text: msg }] } };
+  assert(I.hasUnconsumedGoalContinuation([intent, consumed], goalId) === false, "matching user consumes intent");
+  const wrongGoal = { type: "message", message: { role: "user", content: [{ type: "text", text: G.formatGoalContinuationMessage("g-other", "continue") }] } };
+  assert(I.hasUnconsumedGoalContinuation([intent, wrongGoal], goalId) === true, "other goal does not consume intent");
+  const second = { type: "custom", customType: "pi-goal-continuation", data: { goal_id: goalId, message_hash: "unmatched" } };
+  assert(I.hasUnconsumedGoalContinuation([intent, consumed, second], goalId) === true, "newer unmatched intent is pending");
+});
+
+await check("pending continuation gate: staleness bound frees a never-consumed intent", async () => {
+  const goalId = "g-stale";
+  const msg = G.formatGoalContinuationMessage(goalId, "continue");
+  const messageHash = (await import("node:crypto")).createHash("sha256").update(msg, "utf-8").digest("hex").slice(0, 12);
+  const issuedAt = "2026-06-26T10:00:00.000Z";
+  const intent = { type: "custom", customType: "pi-goal-continuation", data: { goal_id: goalId, message_hash: messageHash, ts: issuedAt } };
+  const fresh = Date.parse(issuedAt) + 60_000; // 1 min later
+  const stale = Date.parse(issuedAt) + 30 * 60_000; // 30 min later
+  assert(I.hasUnconsumedGoalContinuation([intent], goalId, { now: fresh, maxPendingAgeMs: 10 * 60_000 }) === true, "fresh intent still pending");
+  assert(I.hasUnconsumedGoalContinuation([intent], goalId, { now: stale, maxPendingAgeMs: 10 * 60_000 }) === false, "stale intent released");
+  assert(I.hasUnconsumedGoalContinuation([intent], goalId, { now: stale }) === true, "no bound → never released (staleness opt-in)");
 });
 
 // ── judge parse layer (C6) ─────────────────────────────────────────────
