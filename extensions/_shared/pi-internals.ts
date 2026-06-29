@@ -192,7 +192,7 @@ async function notifyTurnBoundaryError(
   }
 }
 
-async function runTurnBoundaryCompaction(session: InternalAgentSessionLike, turnContext?: PrepareNextTurnContext, signal?: AbortSignal): Promise<AgentLoopTurnUpdate | undefined> {
+async function runTurnBoundaryCompaction(session: InternalAgentSessionLike, signal?: AbortSignal): Promise<AgentLoopTurnUpdate | undefined> {
   const hookEntries = getTurnBoundaryHookEntries();
   if (hookEntries.length === 0) return undefined;
 
@@ -255,14 +255,24 @@ async function runTurnBoundaryCompaction(session: InternalAgentSessionLike, turn
     }
     const result = await session._runAutoCompaction("threshold", true);
     const elapsedMs = Date.now() - started;
+    if (!result) {
+      await notifyTurnBoundaryError(hooks, {
+        session,
+        usage: selected.usage,
+        sessionId: selected.sessionId,
+        elapsedMs,
+        error: new Error("turn-boundary auto-compaction returned false"),
+      });
+      return undefined;
+    }
     for (const hook of hooks) {
       try {
-        await hook.onComplete?.({ session, usage: selected.usage, sessionId: selected.sessionId, elapsedMs, result: !!result });
+        await hook.onComplete?.({ session, usage: selected.usage, sessionId: selected.sessionId, elapsedMs, result: true });
       } catch {
         // Hook errors must never interrupt the agent loop.
       }
     }
-    if (!result || signal?.aborted) return undefined;
+    if (signal?.aborted) return undefined;
 
     const agentState = session.agent.state;
     if (!agentState || !Array.isArray(agentState.messages)) return undefined;
@@ -335,7 +345,6 @@ function installPrepareNextTurnOnSession(session: InternalAgentSessionLike): voi
 
   agentRecord[TURN_BOUNDARY_INSTALLED_AGENT] = TURN_BOUNDARY_PATCH_VERSION;
   agent.prepareNextTurn = async (signalOrContext?: AbortSignal | PrepareNextTurnContext, signalSource?: AbortSignalSource) => {
-    const turnContext = isPrepareNextTurnContext(signalOrContext) ? signalOrContext : undefined;
     const signal = isAbortSignal(signalOrContext) ? signalOrContext : signalSource?.signal ?? agent.signal;
     let previousUpdate: AgentLoopTurnUpdate | undefined;
     if (originalPrepareNextTurn) {
@@ -343,7 +352,7 @@ function installPrepareNextTurnOnSession(session: InternalAgentSessionLike): voi
     }
     if (signal?.aborted) return previousUpdate;
 
-    const ourUpdate = await runTurnBoundaryCompaction(session, turnContext, signal);
+    const ourUpdate = await runTurnBoundaryCompaction(session, signal);
     if (!ourUpdate) return previousUpdate;
     return {
       ...previousUpdate,
@@ -357,8 +366,6 @@ function installPrepareNextTurnOnSession(session: InternalAgentSessionLike): voi
 
 function isContinuationCompactionEndEvent(event: Record<string, unknown>): boolean {
   if (event.type !== "compaction_end") return false;
-  const result = event.result;
-  if (!result || typeof result !== "object") return false;
   return event.reason === "threshold" && event.willRetry === true && event.willContinue !== true;
 }
 

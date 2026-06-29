@@ -835,7 +835,39 @@
           "type": "array",
           "default": [],
           "items": { "type": "string" },
-          "description": "Optional ordered provider/model refs used by compaction-tuner's custom session_before_compact summarizer. Empty default means do not override: pi core summarizes with the current main-session model. Example opt-in: [\"anthropic/claude-sonnet-4-6\", \"deepseek/deepseek-v4-pro\"]. If all configured models fail, compaction falls back to pi core default summarization."
+          "description": "Optional ordered provider/model refs used by compaction-tuner's custom session_before_compact summarizer. Empty default means do not override: pi core summarizes with the current main-session model. Example opt-in: [\"anthropic/claude-sonnet-4-6\", \"deepseek/deepseek-v4-pro\"]. If all configured models fail, compaction falls back to pi core default summarization. Ignored when remoteOpenAICompaction.enabled is true; remote OpenAI skip/failure returns undefined so pi core default compaction runs."
+        },
+
+        "remoteOpenAICompaction": {
+          "type": "object",
+          "default": {
+            "enabled": false,
+            "modelAllowlist": [],
+            "timeoutMs": 120000
+          },
+          "additionalProperties": false,
+          "description": "Optional OpenAI Responses remote compaction path. When enabled, session_before_compact first attempts /responses/compact for explicitly allowlisted OpenAI Responses/Codex Responses models, stores the encrypted compaction item in a recoverable summary marker, and replays it by replacing the marker in before_provider_request. Any skip, failure, unsupported model, missing auth, or invalid response returns undefined from the hook so pi core default compaction remains the fallback.",
+          "properties": {
+            "_comment": { "type": "string" },
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Master switch for the remote OpenAI compact path. Default false; enabling without an allowlist still skips and falls back to pi core."
+            },
+            "modelAllowlist": {
+              "type": "array",
+              "default": [],
+              "items": { "type": "string", "pattern": "^[a-z0-9_-]+/[A-Za-z0-9._-]+$" },
+              "description": "Exact provider/model refs allowed to use remote OpenAI compaction. Empty list is inactive even when enabled, so config mistakes fail closed.",
+              "examples": [["openai/gpt-5.5", "openai-codex/gpt-5-codex"]]
+            },
+            "timeoutMs": {
+              "type": "number",
+              "default": 120000,
+              "minimum": 1,
+              "description": "HTTP timeout in milliseconds for /responses/compact."
+            }
+          }
         },
 
         "summaryModel": {

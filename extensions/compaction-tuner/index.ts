@@ -49,6 +49,11 @@ import {
 // ADR 0027 C6b: cross-layer causal anchor for audit rows.
 import { getCurrentAnchor, runWithTriggerAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import {
+  injectRemoteOpenAICompactionIntoPayload,
+  tryRunRemoteOpenAICompaction,
+  type RemoteOpenAIModelLike,
+} from "./openai-remote-compact";
+import {
   DEFAULT_COMPACTION_TUNER_SETTINGS,
   resolveCompactionTunerSettings,
   snapshotCompactionTunerSettings,
@@ -62,8 +67,8 @@ const AUDIT_VERSION = 1;
 interface CompactionTunerCtx {
   cwd?: string;
   hasUI?: boolean;
-  ui?: { notify?(message: string, type?: string): void };
-  model?: { id?: string; provider?: string; contextWindow?: number };
+  ui?: { notify?(message: string, type?: string): void; setStatus?(key: string, text: string | undefined): void };
+  model?: RemoteOpenAIModelLike & { contextWindow?: number };
   sessionManager?: {
     getSessionId?(): string | undefined | null;
     getSessionFile?(): string | undefined | null;
@@ -78,18 +83,19 @@ interface CompactionTunerCtx {
     find?(provider: string, modelId: string): unknown;
     getApiKeyAndHeaders?(model: unknown): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }>;
   };
+  getSystemPrompt?(): string;
 }
 
 interface CompactionTunerSessionLike {
   agent?: {
     state?: {
       messages?: unknown[];
-      model?: { id?: string; provider?: string; contextWindow?: number };
+      model?: RemoteOpenAIModelLike & { contextWindow?: number };
     };
   };
   sessionManager?: CompactionTunerCtx["sessionManager"];
   getContextUsage?(): TurnBoundaryCompactionUsage | undefined;
-  model?: { id?: string; provider?: string; contextWindow?: number };
+  model?: RemoteOpenAIModelLike & { contextWindow?: number };
   _cwd?: string;
 }
 
@@ -144,6 +150,7 @@ const armedBySession = new Map<string, boolean>();
  */
 const failureCountBySession = new Map<string, number>();
 const cooldownUntilBySession = new Map<string, number>();
+const remoteInjectionNoMarkerAuditBySession = new Set<string>();
 
 const ERROR_COOLDOWN_BASE_MS = 60_000;       // 1 min after first failure
 const ERROR_COOLDOWN_MAX_MS = 5 * 60_000;    // cap at 5 min
@@ -238,6 +245,98 @@ function estimatePromptTokensForPreparation(preparation: SessionBeforeCompactEve
 function compactErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
+function resolveCurrentModelForRemoteCompaction(ctx: CompactionTunerCtx): RemoteOpenAIModelLike | undefined {
+  const direct = ctx.model;
+  if (!direct?.provider || !direct.id) return direct;
+  if (direct.api && direct.baseUrl) return direct;
+  const modelRegistry = ctx.modelRegistry;
+  if (typeof modelRegistry?.find !== "function") return direct;
+  return (modelRegistry.find(direct.provider, direct.id) as RemoteOpenAIModelLike | undefined) ?? direct;
+}
+
+async function runRemoteOpenAICompaction(
+  event: SessionBeforeCompactEvent,
+  ctx: CompactionTunerCtx,
+  settings: CompactionTunerSettings,
+  projectRoot: string,
+): Promise<{ compaction: CompactionResult } | undefined> {
+  const trigger = { compaction_reason: event.reason, will_retry: event.willRetry };
+  const model = resolveCurrentModelForRemoteCompaction(ctx);
+  const modelRegistry = ctx.modelRegistry;
+  if (!modelRegistry || typeof modelRegistry.getApiKeyAndHeaders !== "function") {
+    await recordSimpleSkip(projectRoot, {
+      operation: "remote_openai_compaction",
+      outcome: "skipped",
+      reason: "model_registry_unavailable",
+      model_provider: model?.provider ?? null,
+      model_id: model?.id ?? null,
+      settings_snapshot: snapshotCompactionTunerSettings(settings),
+      ...trigger,
+    });
+    return undefined;
+  }
+
+  const auth = model ? await modelRegistry.getApiKeyAndHeaders(model as never) : { ok: true as const };
+  if (!auth.ok) {
+    await recordSimpleSkip(projectRoot, {
+      operation: "remote_openai_compaction",
+      outcome: "skipped",
+      reason: "auth_unavailable",
+      error_message: compactErrorMessage(auth.error),
+      model_provider: model?.provider ?? null,
+      model_id: model?.id ?? null,
+      model_api: model?.api ?? null,
+      tokens_before: event.preparation.tokensBefore,
+      settings_snapshot: snapshotCompactionTunerSettings(settings),
+      ...trigger,
+    });
+    return undefined;
+  }
+
+  const sessionId = readSessionId(ctx.sessionManager);
+  const attempt = await tryRunRemoteOpenAICompaction({
+    event,
+    model,
+    auth,
+    settings: settings.remoteOpenAICompaction,
+    sessionId,
+    systemPrompt: typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : undefined,
+  });
+
+  if (attempt.outcome === "completed") {
+    await recordSimpleSkip(projectRoot, {
+      operation: "remote_openai_compaction",
+      outcome: "completed",
+      model_provider: model?.provider ?? null,
+      model_id: model?.id ?? null,
+      model_api: model?.api ?? null,
+      session_id: sessionId ?? null,
+      elapsed_ms: attempt.elapsedMs,
+      input_items: attempt.inputItems,
+      compacted_item_id: attempt.compactedItemId ?? null,
+      tokens_before: event.preparation.tokensBefore,
+      settings_snapshot: snapshotCompactionTunerSettings(settings),
+      ...trigger,
+    });
+    return { compaction: attempt.compaction };
+  }
+
+  await recordSimpleSkip(projectRoot, {
+    operation: "remote_openai_compaction",
+    outcome: attempt.outcome === "failed" ? "fallback_to_default" : "skipped",
+    reason: attempt.reason,
+    ...(attempt.outcome === "failed" ? { error_message: attempt.error, elapsed_ms: attempt.elapsedMs } : {}),
+    model_provider: model?.provider ?? null,
+    model_id: model?.id ?? null,
+    model_api: model?.api ?? null,
+    session_id: sessionId ?? null,
+    tokens_before: event.preparation.tokensBefore,
+    settings_snapshot: snapshotCompactionTunerSettings(settings),
+    ...trigger,
+  });
+  return undefined;
 }
 
 async function runCustomCompactionSummary(
@@ -835,10 +934,70 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.on("before_provider_request", (event, ctx: CompactionTunerCtx) => {
+    const settings = resolveCompactionTunerSettings();
+    if (!settings.enabled || !settings.remoteOpenAICompaction.enabled) return event.payload;
+    if (isSubAgentSession(ctx)) return event.payload;
+
+    const result = injectRemoteOpenAICompactionIntoPayload(
+      event.payload,
+      ctx,
+      settings.remoteOpenAICompaction,
+    );
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (result.injected || result.reason === "marker_invalid") {
+      void recordSimpleSkip(path.resolve(ctx.cwd || process.cwd()), {
+        operation: "remote_openai_compaction_injection",
+        outcome: result.injected ? "injected" : "fallback_marker_left_in_payload",
+        reason: result.reason,
+        session_id: sessionId ?? null,
+        model_provider: ctx.model?.provider ?? null,
+        model_id: ctx.model?.id ?? null,
+        model_api: ctx.model?.api ?? null,
+        settings_snapshot: snapshotCompactionTunerSettings(settings),
+      });
+    } else if (result.reason === "marker_not_found") {
+      const key = sessionId ?? `${ctx.model?.provider ?? "?"}/${ctx.model?.id ?? "?"}`;
+      if (!remoteInjectionNoMarkerAuditBySession.has(key)) {
+        remoteInjectionNoMarkerAuditBySession.add(key);
+        void recordSimpleSkip(path.resolve(ctx.cwd || process.cwd()), {
+          operation: "remote_openai_compaction_injection",
+          outcome: "no_marker",
+          reason: result.reason,
+          session_id: sessionId ?? null,
+          model_provider: ctx.model?.provider ?? null,
+          model_id: ctx.model?.id ?? null,
+          model_api: ctx.model?.api ?? null,
+          settings_snapshot: snapshotCompactionTunerSettings(settings),
+        });
+      }
+    }
+    return result.payload;
+  });
+
   pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx: CompactionTunerCtx) => {
     const settings = resolveCompactionTunerSettings();
-    if (!settings.enabled || settings.summaryModels.length === 0) return undefined;
+    if (!settings.enabled) return undefined;
     const cwd = path.resolve(ctx.cwd || process.cwd());
+
+    if (settings.remoteOpenAICompaction.enabled) {
+      try {
+        return await runRemoteOpenAICompaction(event, ctx, settings, cwd);
+      } catch (error) {
+        await recordSimpleSkip(cwd, {
+          operation: "remote_openai_compaction",
+          outcome: "fallback_to_default",
+          reason: "remote_openai_compaction_hook_threw",
+          error_message: compactErrorMessage(error),
+          compaction_reason: event.reason,
+          will_retry: event.willRetry,
+          settings_snapshot: snapshotCompactionTunerSettings(settings),
+        });
+        return undefined;
+      }
+    }
+
+    if (settings.summaryModels.length === 0) return undefined;
     try {
       return await runCustomCompactionSummary(event, ctx, settings, cwd);
     } catch (error) {
@@ -1208,6 +1367,9 @@ export default function (pi: ExtensionAPI) {
           `notifyOnTrigger: ${settings.notifyOnTrigger}`,
           `customInstructions: ${settings.customInstructions ? `(${settings.customInstructions.length} chars)` : "(empty)"}`,
           `summaryModels: ${settings.summaryModels.length > 0 ? settings.summaryModels.join(", ") : "(default — main session model)"}`,
+          `remoteOpenAICompaction: ${settings.remoteOpenAICompaction.enabled ? "enabled" : "disabled"}`,
+          `remoteOpenAICompaction.allowlist: ${settings.remoteOpenAICompaction.modelAllowlist.length > 0 ? settings.remoteOpenAICompaction.modelAllowlist.join(", ") : "(empty)"}`,
+          `remoteOpenAICompaction.timeoutMs: ${settings.remoteOpenAICompaction.timeoutMs}`,
           "",
           `current usage: ${metrics.percent != null ? `${metrics.percent.toFixed(1)}% (${usage?.tokens}/${metrics.effectiveContextBudget ?? usage?.contextWindow} effective tokens)` : "(unknown — no post-compaction usage yet)"}`,
           `raw usage: ${metrics.rawPercent != null ? `${metrics.rawPercent.toFixed(1)}% (${usage?.tokens}/${usage?.contextWindow} runtime tokens)` : "(unknown)"}`,
@@ -1242,6 +1404,7 @@ export default function (pi: ExtensionAPI) {
         armedBySession.delete(sid);
         failureCountBySession.delete(sid);
         cooldownUntilBySession.delete(sid);
+        remoteInjectionNoMarkerAuditBySession.delete(sid);
         const summary = hadFailures
           ? `cleared backoff (was failures=${f}/${MAX_CONSECUTIVE_FAILURES}` +
             (remainingMs > 0 ? `, cooldown=${Math.ceil(remainingMs / 1000)}s` : "") +

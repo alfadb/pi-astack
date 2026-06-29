@@ -50,6 +50,14 @@ export interface ModelCompactionPolicySettings {
   rearmMarginPercent?: number;
 }
 
+export interface RemoteOpenAICompactionSettings {
+  enabled: boolean;
+  /** Empty allowlist disables remote compaction; entries are provider/model refs. */
+  modelAllowlist: string[];
+  /** HTTP timeout for /responses/compact. */
+  timeoutMs: number;
+}
+
 export interface CompactionTunerSettings {
   enabled: boolean;
   /** User-configured maximum context-usage percentage to trigger compaction (0-100). */
@@ -64,6 +72,8 @@ export interface CompactionTunerSettings {
    * summary generation uses the current main-session model.
    */
   summaryModels: string[];
+  /** Optional OpenAI Responses remote compaction path. */
+  remoteOpenAICompaction: RemoteOpenAICompactionSettings;
   /**
    * Hysteresis margin (percentage points) below threshold that we must
    * dip to before re-arming. After triggering at e.g. 75%, we won't
@@ -103,6 +113,11 @@ export const DEFAULT_COMPACTION_TUNER_SETTINGS: CompactionTunerSettings = {
   modelPolicies: {},
   customInstructions: "",
   summaryModels: [],
+  remoteOpenAICompaction: {
+    enabled: false,
+    modelAllowlist: [],
+    timeoutMs: 120_000,
+  },
   rearmMarginPercent: 5,
   notifyOnTrigger: true,
   dynamicThreshold: DEFAULT_DYNAMIC_THRESHOLD_SETTINGS,
@@ -245,6 +260,16 @@ function dedupeStrings(values: string[]): string[] {
   return out;
 }
 
+function resolveRemoteOpenAICompactionSettings(value: unknown): RemoteOpenAICompactionSettings {
+  const raw = isPlainObject(value) ? value : {};
+  const def = DEFAULT_COMPACTION_TUNER_SETTINGS.remoteOpenAICompaction;
+  return {
+    enabled: asBoolean(raw.enabled, def.enabled),
+    modelAllowlist: dedupeStrings(asStringList(raw.modelAllowlist)),
+    timeoutMs: asPositiveNumber(raw.timeoutMs, def.timeoutMs),
+  };
+}
+
 export function resolveCompactionTunerSettings(): CompactionTunerSettings {
   const raw = loadPiStackSettings();
   const block = (raw.compactionTuner ?? {}) as Record<string, unknown>;
@@ -264,6 +289,7 @@ export function resolveCompactionTunerSettings(): CompactionTunerSettings {
     modelPolicies: resolveModelPolicies(block.modelPolicies, def.modelPolicies),
     customInstructions,
     summaryModels,
+    remoteOpenAICompaction: resolveRemoteOpenAICompactionSettings(block.remoteOpenAICompaction),
     rearmMarginPercent: Math.min(
       90,
       Math.max(0, asNumber(block.rearmMarginPercent, def.rearmMarginPercent)),
@@ -283,6 +309,11 @@ export function snapshotCompactionTunerSettings(s: CompactionTunerSettings): Rec
     notifyOnTrigger: s.notifyOnTrigger,
     hasCustomInstructions: s.customInstructions.length > 0,
     summaryModels: s.summaryModels,
+    remoteOpenAICompaction: {
+      enabled: s.remoteOpenAICompaction.enabled,
+      modelAllowlist: s.remoteOpenAICompaction.modelAllowlist,
+      timeoutMs: s.remoteOpenAICompaction.timeoutMs,
+    },
     dynamicThreshold: {
       enabled: s.dynamicThreshold.enabled,
       smallWindowMaxTokens: s.dynamicThreshold.smallWindowMaxTokens,

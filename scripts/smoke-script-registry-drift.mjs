@@ -36,7 +36,7 @@ function smokeFileFromCommand(command) {
 }
 
 function dossierFileFromCommand(command) {
-  const match = /^node\s+(scripts\/dossier-[^\s]+\.mjs)$/.exec(command);
+  const match = /^node\s+(scripts\/dossier-[^\s]+\.mjs)(?:\s+.*)?$/.exec(command);
   return match?.[1] ?? null;
 }
 
