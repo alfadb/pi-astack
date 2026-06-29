@@ -20,9 +20,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { createJiti } from "jiti";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+const jiti = createJiti(import.meta.url);
 
 let pass = 0;
 let fail = 0;
@@ -96,7 +98,18 @@ if (/process\.env\[this\.settings\.apiKeyEnv\]/.test(clientSrc) && /no API key/.
 if (/ctx7sk/.test(clientSrc)) ok("error guidance mentions ctx7sk key prefix");
 else failMsg("missing ctx7sk guidance");
 
-// 5. index.ts tool registration + trust boundary ────────────────
+// 5. secret.ts command resolver ─────────────────────────────────
+console.log("\n  secret.ts command resolver:");
+try {
+  const secret = await jiti.import(path.join(repoRoot, "extensions/context7/secret.ts"));
+  const resolved = secret.resolveSecret("!printf '%s' context7-secret-ok");
+  if (resolved === "context7-secret-ok") ok("!command executes through bash-compatible shell");
+  else failMsg(`!command resolver returned: ${JSON.stringify(resolved)}`);
+} catch (e) {
+  failMsg(`!command resolver threw: ${e.message}`);
+}
+
+// 6. index.ts tool registration + trust boundary ────────────────
 console.log("\n  index.ts tools:");
 const indexSrc = read("extensions/context7/index.ts");
 if (/name: "context7_resolve"/.test(indexSrc) && /name: "context7_docs"/.test(indexSrc)) {
@@ -109,7 +122,7 @@ else failMsg("disabled path does not skip registration");
 if (/<untrusted_external_content>/.test(indexSrc)) ok("docs framed as untrusted external content");
 else failMsg("docs NOT framed as untrusted content");
 
-// 6. reputationLabel parity (pure function) ─────────────────────
+// 7. reputationLabel parity (pure function) ─────────────────────
 console.log("\n  reputationLabel parity:");
 function reputationLabel(t) {
   if (t === undefined || t < 0) return "Unknown";
@@ -122,7 +135,7 @@ let repOk = true;
 for (const [inp, exp] of cases) if (reputationLabel(inp) !== exp) { repOk = false; failMsg(`reputationLabel(${inp}) !== ${exp}`); }
 if (repOk) ok("reputationLabel matches MCP thresholds (7/4 boundaries)");
 
-// 7. Optional live round-trip ────────────────────────────────────
+// 8. Optional live round-trip ────────────────────────────────────
 if (process.env.CONTEXT7_SMOKE_LIVE === "1") {
   console.log("\n  live round-trip (CONTEXT7_SMOKE_LIVE=1):");
   try {

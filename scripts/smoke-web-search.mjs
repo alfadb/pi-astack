@@ -22,9 +22,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createJiti } from "jiti";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+const jiti = createJiti(import.meta.url);
 
 let pass = 0;
 let fail = 0;
@@ -73,7 +75,7 @@ if (allowlistSites.length === patchedSites.length && patchedSites.length >= 4) {
   failMsg(`patched ${patchedSites.length} sites but ${allowlistSites.length} total occurrences — orphan(s) remain`);
 }
 
-if (/Sub-agents CAN use read, grep, find, ls, web_search, web_fetch\./.test(dispatchSrc)) {
+if (/Sub-agents default to read,grep,find,ls,web_search,web_fetch \+ memory read\./.test(dispatchSrc)) {
   ok("promptGuidelines text updated for sub-agent capabilities");
 } else failMsg("promptGuidelines text NOT updated");
 
@@ -184,7 +186,19 @@ if (/console\.warn/.test(settingsSrc) && /Failed to parse/.test(settingsSrc)) {
   ok("settings.ts JSON parse error warns (not silently swallowed)");
 } else failMsg("settings.ts still silently swallows JSON parse errors");
 
-// 7. index.ts tool registration + sub-pi guard ──────────────────
+// 7. secret.ts command resolver ─────────────────────────────────
+
+console.log("\n  utils/secret.ts command resolver:");
+try {
+  const secret = await jiti.import(path.join(repoRoot, "extensions/web-search/utils/secret.ts"));
+  const resolved = secret.resolveSecret("!printf '%s' web-search-secret-ok");
+  if (resolved === "web-search-secret-ok") ok("!command executes through bash-compatible shell");
+  else failMsg(`!command resolver returned: ${JSON.stringify(resolved)}`);
+} catch (e) {
+  failMsg(`!command resolver threw: ${e.message}`);
+}
+
+// 8. index.ts tool registration + sub-pi guard ──────────────────
 
 console.log("\n  index.ts tool registration + sub-pi guard:");
 const indexSrc = read("extensions/web-search/index.ts");
@@ -222,7 +236,7 @@ else failMsg("SSRF mention missing from promptGuidelines");
 if (/Privacy:/.test(indexSrc) || /privacy/i.test(indexSrc)) ok("promptGuidelines mentions privacy");
 else failMsg("privacy guideline missing");
 
-// 8. html-to-markdown utility (real function execution) ─────────
+// 9. html-to-markdown utility (real function execution) ─────────
 
 console.log("\n  utils/html-to-markdown.ts behavior:");
 const htmlSrc = read("extensions/web-search/utils/html-to-markdown.ts");
@@ -293,7 +307,7 @@ function extractTitle(html) {
   else failMsg(`extractTitle should be undefined, got: ${t}`);
 }
 
-// 9. schema.json webSearch section ──────────────────────────────
+// 10. schema.json webSearch section ─────────────────────────────
 
 console.log("\n  pi-astack-settings.schema.json:");
 const schemaSrc = read("pi-astack-settings.schema.json");
@@ -315,7 +329,7 @@ if (ws?.allowPrivateNetworks?.type === "boolean" && ws?.allowPrivateNetworks?.de
   ok("allowPrivateNetworks default is false (SSRF off by default)");
 } else failMsg("allowPrivateNetworks field missing or wrong default");
 
-// 10. url-guard SSRF defense ────────────────────────────────────
+// 11. url-guard SSRF defense ────────────────────────────────────
 
 console.log("\n  utils/url-guard.ts (SSRF defense):");
 const guardSrc = read("extensions/web-search/utils/url-guard.ts");

@@ -14,19 +14,85 @@
  * Returns undefined when a referenced env var is missing or a command
  * produced no output, so callers can fail closed.
  */
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 
 const commandCache = new Map<string, string | undefined>();
+
+interface CommandShell {
+  command: string;
+  argsPrefix: string[];
+  stdin?: boolean;
+}
+
+let shellCache: CommandShell | null | undefined;
+
+function isLegacyWslBashPath(file: string): boolean {
+  const normalized = file.replace(/\//g, "\\").toLowerCase();
+  return /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/.test(normalized);
+}
+
+function firstExisting(paths: Array<string | undefined>): string | undefined {
+  for (const p of paths) {
+    if (p && existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+function findWindowsBash(): string | undefined {
+  const programFiles = process.env.ProgramFiles;
+  const programFilesX86 = process.env["ProgramFiles(x86)"];
+  const gitBash = firstExisting([
+    programFiles ? `${programFiles}\\Git\\bin\\bash.exe` : undefined,
+    programFiles ? `${programFiles}\\Git\\usr\\bin\\bash.exe` : undefined,
+    programFilesX86 ? `${programFilesX86}\\Git\\bin\\bash.exe` : undefined,
+    programFilesX86 ? `${programFilesX86}\\Git\\usr\\bin\\bash.exe` : undefined,
+  ]);
+  if (gitBash) return gitBash;
+
+  try {
+    const out = execFileSync("where", ["bash.exe"], {
+      encoding: "utf-8",
+      timeout: 5_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return out.split(/\r?\n/).map((s) => s.trim()).find(Boolean) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveCommandShell(): CommandShell | undefined {
+  if (shellCache !== undefined) return shellCache ?? undefined;
+  const bash = process.platform === "win32"
+    ? findWindowsBash()
+    : firstExisting(["/bin/bash", "/usr/bin/bash"]) ?? "bash";
+  if (!bash) {
+    shellCache = null;
+    return undefined;
+  }
+  shellCache = isLegacyWslBashPath(bash)
+    ? { command: bash, argsPrefix: ["-s"], stdin: true }
+    : { command: bash, argsPrefix: ["-c"] };
+  return shellCache;
+}
 
 function runCommand(command: string): string | undefined {
   if (commandCache.has(command)) return commandCache.get(command);
   let value: string | undefined;
   try {
-    const out = execSync(command, {
-      encoding: "utf-8",
-      timeout: 10_000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
+    const shell = resolveCommandShell();
+    if (!shell) return undefined;
+    const out = execFileSync(
+      shell.command,
+      shell.stdin ? shell.argsPrefix : [...shell.argsPrefix, command],
+      {
+        input: shell.stdin ? command : undefined,
+        encoding: "utf-8",
+        timeout: 10_000,
+        stdio: ["pipe", "pipe", "ignore"],
+      },
+    );
     value = out.trim() || undefined;
   } catch {
     value = undefined;
