@@ -99,6 +99,8 @@ check("schema and package expose remote OpenAI compaction", () => {
   if (!schemaSrc.includes('"modelAllowlist"')) throw new Error("schema allowlist missing");
   if (!schemaSrc.includes('"timeoutMs"')) throw new Error("schema timeout missing");
   if (!packageSrc.includes('"smoke:compaction-tuner-openai-remote-compact"')) throw new Error("package smoke script missing");
+  const pkg = JSON.parse(packageSrc);
+  if (pkg.dependencies?.openai !== "6.26.0") throw new Error("openai runtime dependency missing");
 });
 
 check("helper parses CompactedResponse.output and exports test anchors", () => {

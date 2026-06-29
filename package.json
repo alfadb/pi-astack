@@ -186,6 +186,9 @@
       "./skills"
     ]
   },
+  "dependencies": {
+    "openai": "6.26.0"
+  },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.80.2",
     "jiti": "2.7.0",
