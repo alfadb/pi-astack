@@ -38,12 +38,24 @@ const { executeCuratorDecisionToBrain } = await jiti.import(`${repoRoot}/extensi
 const { shouldEscalateToCurator, isTier1Directive } = await jiti.import(`${repoRoot}/extensions/sediment/correction-pipeline.ts`);
 
 const SETTINGS = { gitCommit: false, lockTimeoutMs: 5000 };
+const gateSettings = (mode) => ({ ...SETTINGS, tier2RulesLegacyWriteGate: { mode } });
 function freshHome() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-rule-fs-"));
   fs.mkdirSync(path.join(home, "rules", "always"), { recursive: true });
   fs.mkdirSync(path.join(home, "rules", "listed"), { recursive: true });
   fs.mkdirSync(path.join(home, "projects", "pi-global"), { recursive: true });
   return home;
+}
+function auditEvents(home) {
+  const auditPath = path.join(home, ".state", "sediment", "audit.jsonl");
+  if (!fs.existsSync(auditPath)) return [];
+  return fs.readFileSync(auditPath, "utf-8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+function latestGateEvent(home) {
+  return auditEvents(home).filter((e) => e.operation === "tier2_rules_legacy_write_gate").at(-1);
+}
+function tier2GateContext(operation, extra = {}) {
+  return { caller: "curator_decision_writer", operation, ruleScope: "global", slug: "Context Title", ...extra };
 }
 const baseDraft = {
   zone: "rules", kind: "maxim", entryConfidence: 9, routingConfidence: 0.9,
@@ -186,6 +198,87 @@ await check("delete: unlinks the rule file", async () => {
   assert(!fs.existsSync(found.path), "file gone after delete");
 });
 
+// ── Tier-2 rules legacy write gate: observe/block/off + context boundary ────
+await check("tier2 gate observe: context create writes rule and records allow audit", async () => {
+  const home = freshHome();
+  const r = await writeAbrainRule(
+    { ...baseDraft, title: "Gate Observe", body: "tier two observe still writes the legacy rule", injectMode: "listed", scope: "global", kind: "pattern" },
+    { abrainHome: home, settings: gateSettings("observe"), tier2RulesLegacyWriteContext: tier2GateContext("create", { slug: "Gate Observe", injectMode: "listed" }) });
+  assert(r.status === "created", `observe should not block create: ${JSON.stringify(r)}`);
+  assert(!r.tier2RulesLegacyWriteGate, "observe mode does not alter result metadata");
+  assert(fs.existsSync(path.join(home, "rules", "listed", "gate-observe.md")), "observe create wrote rule file");
+  const event = latestGateEvent(home);
+  assert(event && event.gate_mode === "observe" && event.gate_decision === "allow", `observe audit: ${JSON.stringify(event)}`);
+  assert(event.slug === "gate-observe" && event.context_slug === "Gate Observe", `canonical slug preserved: ${JSON.stringify(event)}`);
+  assert(event.caller === "curator_decision_writer" && event.rule_operation === "create" && event.target_scope === "global", `audit context: ${JSON.stringify(event)}`);
+  assert(event.inject_mode === "listed" && event.dry_run === false, `audit mode: ${JSON.stringify(event)}`);
+});
+
+await check("tier2 gate block: context create returns skipped and writes no rule", async () => {
+  const home = freshHome();
+  const r = await writeAbrainRule(
+    { ...baseDraft, title: "Gate Block", body: "tier two block must not write legacy rule", injectMode: "listed", scope: "global", kind: "pattern" },
+    { abrainHome: home, settings: gateSettings("block"), tier2RulesLegacyWriteContext: tier2GateContext("create", { slug: "Gate Block", injectMode: "listed" }) });
+  assert(r.status === "skipped" && r.reason === "tier2_rules_legacy_write_blocked", `block create: ${JSON.stringify(r)}`);
+  assert(r.tier2RulesLegacyWriteGate?.mode === "block" && r.tier2RulesLegacyWriteGate.blocked === true, `block metadata: ${JSON.stringify(r)}`);
+  assert(!fs.existsSync(path.join(home, "rules", "listed", "gate-block.md")), "block create did not write rule file");
+  const event = latestGateEvent(home);
+  assert(event && event.gate_mode === "block" && event.gate_decision === "block", `block audit: ${JSON.stringify(event)}`);
+  assert(event.slug === "gate-block" && event.context_slug === "Gate Block", `canonical slug preserved: ${JSON.stringify(event)}`);
+});
+
+await check("tier2 gate block: direct writer without context is not blocked", async () => {
+  const home = freshHome();
+  const r = await writeAbrainRule(
+    { ...baseDraft, title: "Direct Writer", body: "direct rules writer remains available without tier two context", injectMode: "listed", scope: "global", kind: "pattern" },
+    { abrainHome: home, settings: gateSettings("block") });
+  assert(r.status === "created", `direct writer should create: ${JSON.stringify(r)}`);
+  assert(fs.existsSync(path.join(home, "rules", "listed", "direct-writer.md")), "direct writer created rule file");
+  assert(!latestGateEvent(home), `direct writer should not emit gate audit: ${JSON.stringify(auditEvents(home))}`);
+});
+
+await check("tier2 gate block: archive/delete return skipped without mutating files", async () => {
+  const archiveHome = freshHome();
+  await writeAbrainRule({ ...baseDraft, title: "Archive Block", body: "archive target stays active under tier two block", injectMode: "listed", scope: "global", kind: "pattern" }, { abrainHome: archiveHome, settings: SETTINGS });
+  const archivePath = path.join(archiveHome, "rules", "listed", "archive-block.md");
+  const beforeArchive = fs.readFileSync(archivePath, "utf-8");
+  const archived = await archiveAbrainRule("archive-block", "global", undefined, {
+    abrainHome: archiveHome,
+    settings: gateSettings("block"),
+    reason: "blocked by smoke",
+    tier2RulesLegacyWriteContext: tier2GateContext("archive", { slug: "archive-block" }),
+  });
+  assert(archived.status === "skipped" && archived.reason === "tier2_rules_legacy_write_blocked", `archive block: ${JSON.stringify(archived)}`);
+  assert(fs.readFileSync(archivePath, "utf-8") === beforeArchive, "archive block left file byte-identical");
+  const archiveEvent = latestGateEvent(archiveHome);
+  assert(archiveEvent?.rule_operation === "archive" && archiveEvent.gate_decision === "block", `archive audit: ${JSON.stringify(archiveEvent)}`);
+
+  const deleteHome = freshHome();
+  await writeAbrainRule({ ...baseDraft, title: "Delete Block", body: "delete target remains present under tier two block", injectMode: "listed", scope: "global", kind: "pattern" }, { abrainHome: deleteHome, settings: SETTINGS });
+  const deletePath = path.join(deleteHome, "rules", "listed", "delete-block.md");
+  const beforeDelete = fs.readFileSync(deletePath, "utf-8");
+  const deleted = await deleteAbrainRule("delete-block", "global", undefined, {
+    abrainHome: deleteHome,
+    settings: gateSettings("block"),
+    tier2RulesLegacyWriteContext: tier2GateContext("delete", { slug: "delete-block" }),
+  });
+  assert(deleted.status === "skipped" && deleted.reason === "tier2_rules_legacy_write_blocked", `delete block: ${JSON.stringify(deleted)}`);
+  assert(fs.existsSync(deletePath), "delete block kept file present");
+  assert(fs.readFileSync(deletePath, "utf-8") === beforeDelete, "delete block left file byte-identical");
+  const deleteEvent = latestGateEvent(deleteHome);
+  assert(deleteEvent?.rule_operation === "delete" && deleteEvent.gate_decision === "block", `delete audit: ${JSON.stringify(deleteEvent)}`);
+});
+
+await check("tier2 gate off: context create writes without gate audit", async () => {
+  const home = freshHome();
+  const r = await writeAbrainRule(
+    { ...baseDraft, title: "Gate Off", body: "tier two off disables the legacy write gate", injectMode: "listed", scope: "global", kind: "pattern" },
+    { abrainHome: home, settings: gateSettings("off"), tier2RulesLegacyWriteContext: tier2GateContext("create", { slug: "Gate Off", injectMode: "listed" }) });
+  assert(r.status === "created", `off should create: ${JSON.stringify(r)}`);
+  assert(fs.existsSync(path.join(home, "rules", "listed", "gate-off.md")), "off wrote rule file");
+  assert(!latestGateEvent(home), `off should not emit gate audit: ${JSON.stringify(auditEvents(home))}`);
+});
+
 // ── end-to-end: parseDecision -> dispatch -> rule writer (W0.2 + W2) ─────────
 await check("e2e: parseDecision rules-create -> executeCuratorDecisionToBrain -> file", async () => {
   const home = freshHome();
@@ -198,6 +291,23 @@ await check("e2e: parseDecision rules-create -> executeCuratorDecisionToBrain ->
   });
   assert(results[0].status === "created" && results[0].lane === "rules", `e2e create: ${JSON.stringify(results[0])}`);
   assert(fs.existsSync(path.join(home, "rules", "always", "edit-only.md")), "rule file written via dispatch");
+});
+
+await check("e2e: tier2 gate block via curator returns skipped, not rejected", async () => {
+  const home = freshHome();
+  const decision = parseDecision(JSON.stringify({ op: "create", zone: "rules", inject_mode: "listed", rule_scope: "global", rationale: "smoke block" }), new Map());
+  const results = await executeCuratorDecisionToBrain({
+    decision,
+    draft: { title: "Curator Block", kind: "pattern", status: "active", confidence: 8, compiledTruth: "curator block must return skipped and avoid legacy write" },
+    projectRoot: home, abrainHome: home, projectId: "pi-global", settings: gateSettings("block"),
+  });
+  assert(results.length === 1, `one result: ${JSON.stringify(results)}`);
+  assert(results[0].status === "skipped" && results[0].reason === "tier2_rules_legacy_write_blocked", `curator block should skip: ${JSON.stringify(results[0])}`);
+  assert(results[0].status !== "rejected", `curator block must not reject: ${JSON.stringify(results[0])}`);
+  assert(results[0].tier2RulesLegacyWriteGate?.blocked === true, `gate metadata carried: ${JSON.stringify(results[0])}`);
+  assert(!fs.existsSync(path.join(home, "rules", "listed", "curator-block.md")), "curator block wrote no rule file");
+  const event = latestGateEvent(home);
+  assert(event?.slug === "curator-block" && event.context_slug === "Curator Block", `curator audit slug: ${JSON.stringify(event)}`);
 });
 
 await check("e2e: project rules-create routes to projects/<id>/rules + archive routes by slug", async () => {

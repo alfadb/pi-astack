@@ -105,6 +105,7 @@ export async function executeCuratorDecisionToBrain(args: {
     // audit round-3 P3: carry lint + sanitization counts so the notify/audit
     // summary (resultSummary) is complete for rules results too.
     lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, sanitizedReplacements: r.sanitizedReplacements,
+    tier2RulesLegacyWriteGate: r.tier2RulesLegacyWriteGate,
   });
   // PR-4/P0.3 Tier-2 (O2 2026-06-10): with the adjudication lane ON, Jaccard
   // demotes from autonomous write-time gate to curator neighbor pre-filter —
@@ -125,14 +126,16 @@ export async function executeCuratorDecisionToBrain(args: {
   };
 
   if (decision.op === "create" && decision.zone === "rules") {
+    // §12.3 rename dual-read: persisted multiview-staging replay decisions
+    // written before the rename still carry the legacy `tier` key.
+    const injectMode = decision.injectMode ?? (decision as { tier?: "always" | "listed" }).tier ?? "listed";
+    const ruleScope = decision.ruleScope === "project" ? "project" : "global";
     const r = await writeAbrainRule({
       title: draft.title,
       body: draft.compiledTruth,
       zone: "rules",
-      // §12.3 rename dual-read: persisted multiview-staging replay decisions
-      // written before the rename still carry the legacy `tier` key.
-      injectMode: decision.injectMode ?? (decision as { tier?: "always" | "listed" }).tier ?? "listed",
-      scope: decision.ruleScope === "project" ? { projectId } : "global",
+      injectMode,
+      scope: ruleScope === "project" ? { projectId } : "global",
       kind: draft.kind,
       entryConfidence: typeof draft.confidence === "number" ? draft.confidence : 5,
       routingConfidence: 0.8,
@@ -145,7 +148,17 @@ export async function executeCuratorDecisionToBrain(args: {
       // autonomous curator/extractor-created rule is NOT mislabeled user-expressed.
       provenance: draft.provenance ?? "assistant-observed",
       sessionId,
-    }, ruleOpts);
+    }, {
+      ...ruleOpts,
+      tier2RulesLegacyWriteContext: {
+        caller: "curator_decision_writer",
+        operation: "create",
+        ruleScope,
+        ...(ruleScope === "project" ? { projectId } : {}),
+        slug: draft.title,
+        injectMode,
+      },
+    });
     return [ruleResult(r)];
   }
   if (decision.op === "archive" || decision.op === "delete") {
@@ -154,8 +167,28 @@ export async function executeCuratorDecisionToBrain(args: {
       const pid = ruleScope === "project" ? projectId : undefined;
       const reason = decision.reason || decision.rationale || (decision.op === "archive" ? args.archiveReason : args.deleteReason) || `${decision.op}d by sediment classifier`;
       const r = decision.op === "archive"
-        ? await archiveAbrainRule(decision.slug, ruleScope, pid, { ...ruleOpts, reason })
-        : await deleteAbrainRule(decision.slug, ruleScope, pid, { ...ruleOpts, reason });
+        ? await archiveAbrainRule(decision.slug, ruleScope, pid, {
+          ...ruleOpts,
+          reason,
+          tier2RulesLegacyWriteContext: {
+            caller: "curator_decision_writer",
+            operation: "archive",
+            ruleScope,
+            ...(pid ? { projectId: pid } : {}),
+            slug: decision.slug,
+          },
+        })
+        : await deleteAbrainRule(decision.slug, ruleScope, pid, {
+          ...ruleOpts,
+          reason,
+          tier2RulesLegacyWriteContext: {
+            caller: "curator_decision_writer",
+            operation: "delete",
+            ruleScope,
+            ...(pid ? { projectId: pid } : {}),
+            slug: decision.slug,
+          },
+        });
       return [ruleResult(r)];
     }
   }

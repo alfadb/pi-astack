@@ -1453,6 +1453,7 @@ function resultSummary(result: WriteProjectEntryResult | WriteRuleResult) {
     deduped_against: "dedupedAgainst" in result ? result.dedupedAgainst : undefined,
     rule_scope: "ruleScope" in result ? result.ruleScope : undefined,
     project_id: "projectId" in result ? result.projectId : undefined,
+    tier2_rules_legacy_write_gate: result.tier2RulesLegacyWriteGate,
   };
 }
 

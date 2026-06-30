@@ -183,6 +183,12 @@ export interface WriteProjectEntryResult {
   correlationId?: string;
   candidateId?: string;
   knowledgeEvidenceEvent?: AppendKnowledgeEvidenceForWriteResult;
+  tier2RulesLegacyWriteGate?: {
+    mode: "observe" | "block";
+    caller: "curator_decision_writer";
+    operation: "create" | "archive" | "delete";
+    blocked: boolean;
+  };
 }
 
 interface LockHandle {
@@ -2756,6 +2762,15 @@ export async function writeAbrainWorkflow(
 // ui.notify (INV-R8/R9) is the DISPATCH layer's job (the writer has no ctx.ui);
 // the result carries op/slug/injectMode/scope so the caller can notify.
 
+export interface Tier2RulesLegacyWriteContext {
+  caller: "curator_decision_writer";
+  operation: "create" | "archive" | "delete";
+  ruleScope: "global" | "project";
+  projectId?: string;
+  slug: string;
+  injectMode?: RuleInjectMode;
+}
+
 export interface WriteRuleOptions {
   abrainHome: string;
   settings: SedimentSettings;
@@ -2764,6 +2779,8 @@ export interface WriteRuleOptions {
   exactDuplicateAsDedup?: boolean;
   /** Advisory per-(scope,inject_mode) health cap. Over-budget never blocks writes. */
   budgetTokenCap?: number;
+  /** Tier-2 rules-zone gate context. Only callers that pass this context are subject to block mode. */
+  tier2RulesLegacyWriteContext?: Tier2RulesLegacyWriteContext;
   /** PR-4/P0.3 (O2 2026-06-10): cross-slug Jaccard near-dup policy.
    *  - "dedup" (default): autonomous gate — return status:"deduped" (legacy
    *    behavior, sole writer while tier1JaccardCuratorLane is off).
@@ -2781,7 +2798,7 @@ export interface WriteRuleResult {
   /** "similar_found" is an INTERMEDIATE status (semanticDedup:"report" only):
    *  nothing was written; the caller must resolve it via adjudication. It never
    *  reaches no-loss predicates / tells under the default settings. */
-  status: "created" | "archived" | "deleted" | "updated" | "rejected" | "dry_run" | "deduped" | "similar_found";
+  status: "created" | "archived" | "deleted" | "updated" | "skipped" | "rejected" | "dry_run" | "deduped" | "similar_found";
   reason?: string;
   /** ADR 0028 §12.3: rules injection-budget axis (values always/listed),
    *  renamed from `tier` to stop colliding with the GTIER Tier-1/2 predicate. */
@@ -2798,6 +2815,12 @@ export interface WriteRuleResult {
   budgetTokens?: number;
   budgetCap?: number;
   overSoftBudget?: boolean;
+  tier2RulesLegacyWriteGate?: {
+    mode: "observe" | "block";
+    caller: "curator_decision_writer";
+    operation: "create" | "archive" | "delete";
+    blocked: boolean;
+  };
   lane?: string;
   sessionId?: string;
   correlationId?: string;
@@ -2896,6 +2919,44 @@ function findSimilarRuleSlug(abrainHome: string, scope: "global" | "project", pr
   return undefined;
 }
 
+async function applyTier2RulesLegacyWriteGate(args: {
+  opts: WriteRuleOptions;
+  context?: Tier2RulesLegacyWriteContext;
+  audit: (event: Record<string, unknown>) => Promise<string>;
+  result: Omit<WriteRuleResult, "status" | "reason" | "path" | "auditPath" | "tier2RulesLegacyWriteGate"> & { path?: string };
+  fallbackPath: string;
+}): Promise<WriteRuleResult | undefined> {
+  const mode = args.opts.settings.tier2RulesLegacyWriteGate?.mode ?? "observe";
+  if (!args.context || mode === "off") return undefined;
+  const event = {
+    operation: "tier2_rules_legacy_write_gate",
+    gate_mode: mode,
+    gate_decision: mode === "block" ? "block" : "allow",
+    caller: args.context.caller,
+    rule_operation: args.context.operation,
+    target_scope: args.context.ruleScope,
+    ...(args.context.projectId ? { project_id: args.context.projectId } : {}),
+    context_slug: args.context.slug,
+    ...(args.context.injectMode ? { inject_mode: args.context.injectMode } : {}),
+    dry_run: args.opts.dryRun === true,
+  };
+  const auditPath = await args.audit(event);
+  if (mode !== "block") return undefined;
+  return {
+    ...args.result,
+    path: args.result.path ?? args.fallbackPath,
+    status: "skipped",
+    reason: "tier2_rules_legacy_write_blocked",
+    auditPath,
+    tier2RulesLegacyWriteGate: {
+      mode: "block",
+      caller: args.context.caller,
+      operation: args.context.operation,
+      blocked: true,
+    },
+  };
+}
+
 /** ADR 0023 D5: create a rule in ~/.abrain/[projects/<id>/]rules/<inject_mode>/. */
 export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions): Promise<WriteRuleResult> {
   const started = Date.now();
@@ -2974,6 +3035,15 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
 
   const modeDir = path.join(rulesBaseDir(abrainHome, ruleScope, projectId), effectiveInjectMode);
   const target = path.join(modeDir, `${slug}.md`);
+  const gateResult = await applyTier2RulesLegacyWriteGate({
+    opts,
+    context: opts.tier2RulesLegacyWriteContext,
+    audit,
+    result: { slug, injectMode: effectiveInjectMode, ruleScope, projectId, lintErrors, lintWarnings, ...resultCtx },
+    fallbackPath: target,
+  });
+  if (gateResult) return gateResult;
+
   const cap = opts.budgetTokenCap ?? DEFAULT_RULE_BUDGET_TOKENS[effectiveInjectMode];
 
   // Budget is health telemetry only. It intentionally does NOT gate writes:
@@ -3357,6 +3427,14 @@ export async function archiveAbrainRule(
     const auditPath = await audit({ operation: "reject", op: "archive", reason: "entry_not_found" });
     return { slug, path: abrainHome, status: "rejected", reason: "entry_not_found", ruleScope: scope, projectId, auditPath, ...resultCtx };
   }
+  const gateResult = await applyTier2RulesLegacyWriteGate({
+    opts,
+    context: opts.tier2RulesLegacyWriteContext,
+    audit,
+    result: { slug, injectMode: found.injectMode, ruleScope: scope, projectId, ...resultCtx },
+    fallbackPath: found.path,
+  });
+  if (gateResult) return gateResult;
   let lock: LockHandle | undefined;
   try {
     lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
@@ -3409,6 +3487,14 @@ export async function deleteAbrainRule(
     const auditPath = await audit({ operation: "reject", op: "delete", reason: "entry_not_found" });
     return { slug, path: abrainHome, status: "rejected", reason: "entry_not_found", ruleScope: scope, projectId, auditPath, ...resultCtx };
   }
+  const gateResult = await applyTier2RulesLegacyWriteGate({
+    opts,
+    context: opts.tier2RulesLegacyWriteContext,
+    audit,
+    result: { slug, injectMode: found.injectMode, ruleScope: scope, projectId, ...resultCtx },
+    fallbackPath: found.path,
+  });
+  if (gateResult) return gateResult;
   let lock: LockHandle | undefined;
   try {
     lock = await acquireAbrainRuleLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);

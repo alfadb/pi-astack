@@ -29,6 +29,11 @@ function resolveMode(raw: unknown, fallback: "parallel_legacy" | "event_first"):
   return fallback;
 }
 
+function resolveTier2RulesLegacyWriteGateMode(raw: unknown, fallback: "off" | "observe" | "block"): "off" | "observe" | "block" {
+  if (raw === "off" || raw === "observe" || raw === "block") return raw;
+  return fallback;
+}
+
 const PI_STACK_SETTINGS_PATH = path.join(
   os.homedir(), ".pi", "agent", "pi-astack-settings.json",
 );
@@ -91,6 +96,10 @@ export interface SedimentSettings {
     mode: "parallel_legacy" | "event_first";
     legacyFallbackOnEventFailure: boolean;
     legacyRuleWriteOnSuccessfulEvent: boolean;
+  };
+  /** Tier-2 rules-zone legacy writer gate. Default observe keeps current behavior while auditing caller/scope/slug. */
+  tier2RulesLegacyWriteGate: {
+    mode: "off" | "observe" | "block";
   };
   /** ADR 0039: runtime append/project/read overlay for Knowledge Evidence Events. */
   knowledgeEvidenceEventWriter: {
@@ -285,6 +294,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     legacyFallbackOnEventFailure: true,
     legacyRuleWriteOnSuccessfulEvent: true,
   },
+  tier2RulesLegacyWriteGate: {
+    mode: "observe",
+  },
   knowledgeEvidenceEventWriter: {
     enabled: false,
     mode: "parallel_legacy",
@@ -476,6 +488,9 @@ export function resolveSedimentSettings(): SedimentSettings {
       mode: resolveMode((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.mode, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.mode),
       legacyFallbackOnEventFailure: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyFallbackOnEventFailure, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.legacyFallbackOnEventFailure),
       legacyRuleWriteOnSuccessfulEvent: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyRuleWriteOnSuccessfulEvent, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.legacyRuleWriteOnSuccessfulEvent),
+    },
+    tier2RulesLegacyWriteGate: {
+      mode: resolveTier2RulesLegacyWriteGateMode((cfg.tier2RulesLegacyWriteGate as Record<string, unknown> | undefined)?.mode, DEFAULT_SEDIMENT_SETTINGS.tier2RulesLegacyWriteGate.mode),
     },
     knowledgeEvidenceEventWriter: {
       enabled: asBoolean((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.enabled),

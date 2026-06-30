@@ -440,6 +440,20 @@
           }
         },
 
+        "tier2RulesLegacyWriteGate": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Gate for Tier-2 curator rules-zone legacy rule writes. observe audits caller/scope/slug without changing behavior; block returns terminal skipped for Tier-2 rules-zone calls only; off disables this gate.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["off", "observe", "block"],
+              "default": "observe",
+              "description": "off disables the gate; observe records audit rows and allows writes; block returns skipped before legacy rules mutation for callers that pass Tier-2 rules-zone context."
+            }
+          }
+        },
+
         "knowledgeEvidenceEventWriter": {
           "type": "object",
           "additionalProperties": false,
