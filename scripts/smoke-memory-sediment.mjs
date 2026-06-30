@@ -236,6 +236,28 @@ exports.AgentSession = StubAgentSession;
 exports.InteractiveMode = StubInteractiveMode;
 `);
 
+  // Minimal OpenAI SDK subset so compaction-tuner modules can load inside the
+  // temporary CJS smoke tree. smoke:memory never performs a remote compaction.
+  writeFile(path.join(outRoot, "node_modules", "openai", "index.js"), `
+class OpenAI {
+  constructor(config = {}) {
+    this.config = config;
+    this.responses = {
+      compact: async () => { throw new Error('openai compact stub should not be called by smoke:memory'); },
+    };
+  }
+}
+exports.default = OpenAI;
+module.exports = OpenAI;
+module.exports.default = OpenAI;
+`);
+
+  writeFile(path.join(outRoot, "compaction-tuner", "openai-responses-shared-loader.mjs"), `
+export function convertResponsesMessages(messages) {
+  return messages || [];
+}
+`);
+
   // Minimal pi-ai subset for ADR 0015 memory_search LLM-path smoke. Dynamic
   // import('@earendil-works/pi-ai') from transpiled CommonJS sees these named
   // exports; no real model call is made.
@@ -1481,7 +1503,120 @@ Original Pensieve seed content.
       const headFiles = execFileSync("git", ["-C", l1l2Abrain, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
       assert(headFiles.some((f) => f.startsWith("l1/events/")), `HEAD commit must include l1/ event: ${JSON.stringify(headFiles)}`);
       assert(headFiles.some((f) => f.startsWith("l2/views/knowledge/")), `HEAD commit must include l2/ projection: ${JSON.stringify(headFiles)}`);
-      assert(headFiles.some((f) => f.includes(`projects/${l1l2Target.projectId}/`) && f.endsWith(".md")), `HEAD commit must include canonical entry: ${JSON.stringify(headFiles)}`);
+      assert(headFiles.some((f) => f.startsWith(`projects/${l1l2Target.projectId}/`) && f.endsWith(".md")), `HEAD commit must include canonical entry: ${JSON.stringify(headFiles)}`);
+    }
+
+    // ADR 0039 Knowledge stop-write prep: when explicitly disabled, successful
+    // event-first writes keep positive writer statuses and commit L1/L2 without
+    // mutating legacy markdown.
+    {
+      const stopTarget = setupAbrainTarget("writer-legacy-stop");
+      const stopAbrain = stopTarget.abrainHome;
+      fs.writeFileSync(path.join(stopAbrain, ".gitignore"), ".state/\n");
+      execFileSync("git", ["-C", stopAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", stopAbrain, "config", "user.email", "smoke@example.com"]);
+      execFileSync("git", ["-C", stopAbrain, "config", "user.name", "smoke"]);
+      execFileSync("git", ["-C", stopAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", stopAbrain, "commit", "-q", "-m", "baseline"]);
+      const stopSettings = {
+        ...DEFAULT_SEDIMENT_SETTINGS,
+        gitCommit: true,
+        knowledgeEvidenceEventWriter: { enabled: true, mode: "event_first", legacyFallbackOnEventFailure: false, legacyMarkdownWriteOnSuccessfulEvent: false },
+        knowledgeProjector: { enabled: true, hotOverlayEnabled: true, projectOnWrite: true, maxReadBytes: 1000000, l2OutputRoot: "repo", projectionMode: "topo" },
+      };
+      const stopCreate = await writeProjectEntry({
+        title: "Writer Legacy Stop Create",
+        kind: "fact",
+        confidence: 7,
+        sessionId: "session-legacy-stop-create",
+        compiledTruth: "Validates that create can skip legacy markdown after a successful Knowledge Evidence Event.",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(stopCreate.status === "created", `legacy stop create should preserve created status: ${JSON.stringify(stopCreate)}`);
+      assert(!fs.existsSync(stopCreate.path), `legacy stop create must not create markdown: ${stopCreate.path}`);
+      assert(stopCreate.knowledgeEvidenceEvent?.append?.ok, `legacy stop create event append missing: ${JSON.stringify(stopCreate.knowledgeEvidenceEvent)}`);
+      assert(stopCreate.knowledgeEvidenceEvent.body?.legacy_parallel_write?.attempted === false, `legacy stop create must mark attempted=false: ${JSON.stringify(stopCreate.knowledgeEvidenceEvent.body?.legacy_parallel_write)}`);
+      assert(stopCreate.knowledgeEvidenceEvent.body?.legacy_parallel_write?.reason === "legacy_markdown_write_disabled", `legacy stop create reason wrong: ${JSON.stringify(stopCreate.knowledgeEvidenceEvent.body?.legacy_parallel_write)}`);
+      assert(stopCreate.knowledgeEvidenceEvent.projection?.status === "projected" && fs.existsSync(stopCreate.knowledgeEvidenceEvent.projection.outputPath), `legacy stop create projection missing: ${JSON.stringify(stopCreate.knowledgeEvidenceEvent.projection)}`);
+      const stopCreateFiles = execFileSync("git", ["-C", stopAbrain, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+      assert(stopCreateFiles.some((f) => f.startsWith("l1/events/")), `legacy stop create commit must include l1: ${JSON.stringify(stopCreateFiles)}`);
+      assert(stopCreateFiles.some((f) => f.startsWith("l2/views/knowledge/")), `legacy stop create commit must include l2: ${JSON.stringify(stopCreateFiles)}`);
+      assert(!stopCreateFiles.some((f) => f.startsWith(`projects/${stopTarget.projectId}/`) && f.endsWith(".md")), `legacy stop create commit must not include legacy markdown: ${JSON.stringify(stopCreateFiles)}`);
+      assert(execFileSync("git", ["-C", stopAbrain, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf-8" }).trim() === "", "legacy stop create must leave abrain tree clean");
+
+      const seedSettings = { ...stopSettings, knowledgeEvidenceEventWriter: { ...stopSettings.knowledgeEvidenceEventWriter, legacyMarkdownWriteOnSuccessfulEvent: true } };
+      const seed = await writeProjectEntry({
+        title: "Writer Legacy Stop Seed",
+        kind: "fact",
+        confidence: 6,
+        sessionId: "session-legacy-stop-seed",
+        compiledTruth: "Seed markdown exists so update and hard delete can prove they do not mutate legacy files.",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: seedSettings,
+        dryRun: false,
+      });
+      assert(seed.status === "created" && fs.existsSync(seed.path), `legacy stop seed failed: ${JSON.stringify(seed)}`);
+      const seedBefore = fs.readFileSync(seed.path, "utf-8");
+      const updateResult = await updateProjectEntry(seed.slug, {
+        status: "active",
+        confidence: 9,
+        compiledTruth: "# Writer Legacy Stop Seed\n\nUpdated projection content that must not be written back to legacy markdown.",
+        sessionId: "session-legacy-stop-update",
+        timelineNote: "legacy stop update smoke",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(updateResult.status === "updated", `legacy stop update should preserve updated status: ${JSON.stringify(updateResult)}`);
+      assert(fs.readFileSync(seed.path, "utf-8") === seedBefore, "legacy stop update must not modify legacy markdown");
+      assert(updateResult.knowledgeEvidenceEvent?.body?.legacy_parallel_write?.attempted === false, `legacy stop update must mark attempted=false: ${JSON.stringify(updateResult.knowledgeEvidenceEvent?.body?.legacy_parallel_write)}`);
+      assert(updateResult.knowledgeEvidenceEvent?.projection?.status === "projected" && fs.existsSync(updateResult.knowledgeEvidenceEvent.projection.outputPath), `legacy stop update projection missing: ${JSON.stringify(updateResult.knowledgeEvidenceEvent?.projection)}`);
+      const updateFiles = execFileSync("git", ["-C", stopAbrain, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+      assert(updateFiles.some((f) => f.startsWith("l1/events/")) && updateFiles.some((f) => f.startsWith("l2/views/knowledge/")), `legacy stop update commit must include l1/l2: ${JSON.stringify(updateFiles)}`);
+      assert(!updateFiles.some((f) => f.startsWith(`projects/${stopTarget.projectId}/`) && f.endsWith(".md")), `legacy stop update commit must not include legacy markdown: ${JSON.stringify(updateFiles)}`);
+
+      const renameResult = await updateProjectEntry(seed.slug, {
+        newSlug: "writer-legacy-stop-renamed",
+        sessionId: "session-legacy-stop-rename",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(renameResult.status === "rejected" && renameResult.reason === "legacy_markdown_rename_disabled", `legacy stop rename must reject without legacy mutation: ${JSON.stringify(renameResult)}`);
+      assert(fs.readFileSync(seed.path, "utf-8") === seedBefore, "legacy stop rename rejection must not modify legacy markdown");
+
+      const deleteResult = await deleteProjectEntry(seed.slug, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+        mode: "hard",
+        reason: "legacy stop hard delete smoke",
+        sessionId: "session-legacy-stop-delete",
+      });
+      assert(deleteResult.status === "deleted" && deleteResult.deleteMode === "hard", `legacy stop hard delete should preserve deleted status: ${JSON.stringify(deleteResult)}`);
+      assert(fs.existsSync(seed.path) && fs.readFileSync(seed.path, "utf-8") === seedBefore, "legacy stop hard delete must not unlink or modify legacy markdown");
+      assert(deleteResult.knowledgeEvidenceEvent?.body?.legacy_parallel_write?.attempted === false, `legacy stop delete must mark attempted=false: ${JSON.stringify(deleteResult.knowledgeEvidenceEvent?.body?.legacy_parallel_write)}`);
+      assert(deleteResult.knowledgeEvidenceEvent?.projection?.status === "removed", `legacy stop delete projection should remove L2 entry: ${JSON.stringify(deleteResult.knowledgeEvidenceEvent?.projection)}`);
+      const deleteFiles = execFileSync("git", ["-C", stopAbrain, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+      assert(deleteFiles.some((f) => f.startsWith("l1/events/")) && deleteFiles.some((f) => f.startsWith("l2/views/knowledge/")), `legacy stop delete commit must include l1/l2: ${JSON.stringify(deleteFiles)}`);
+      assert(!deleteFiles.some((f) => f.startsWith(`projects/${stopTarget.projectId}/`) && f.endsWith(".md")), `legacy stop delete commit must not include legacy markdown: ${JSON.stringify(deleteFiles)}`);
+      assert(execFileSync("git", ["-C", stopAbrain, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf-8" }).trim() === "", "legacy stop update/delete must leave abrain tree clean");
     }
 
     // ADR 0039 B-prep blocker③: hot overlay bounded budget. readKnowledgeProjectionStores

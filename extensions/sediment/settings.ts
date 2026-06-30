@@ -106,6 +106,7 @@ export interface SedimentSettings {
     enabled: boolean;
     mode: "parallel_legacy" | "event_first";
     legacyFallbackOnEventFailure: boolean;
+    legacyMarkdownWriteOnSuccessfulEvent: boolean;
   };
   knowledgeProjector: {
     enabled: boolean;
@@ -301,6 +302,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     enabled: false,
     mode: "parallel_legacy",
     legacyFallbackOnEventFailure: true,
+    legacyMarkdownWriteOnSuccessfulEvent: true,
   },
   knowledgeProjector: {
     enabled: false,
@@ -496,6 +498,7 @@ export function resolveSedimentSettings(): SedimentSettings {
       enabled: asBoolean((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.enabled),
       mode: resolveMode((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.mode, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.mode),
       legacyFallbackOnEventFailure: asBoolean((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyFallbackOnEventFailure, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.legacyFallbackOnEventFailure),
+      legacyMarkdownWriteOnSuccessfulEvent: asBoolean((cfg.knowledgeEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyMarkdownWriteOnSuccessfulEvent, DEFAULT_SEDIMENT_SETTINGS.knowledgeEvidenceEventWriter.legacyMarkdownWriteOnSuccessfulEvent),
     },
     knowledgeProjector: {
       enabled: asBoolean((cfg.knowledgeProjector as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.knowledgeProjector.enabled),

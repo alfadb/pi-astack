@@ -110,6 +110,13 @@ export interface AppendKnowledgeEvidenceForWriteOptions {
   projectEvent?: boolean;
   causalParents?: string[];
   sanitizer?: KnowledgeEvidenceEventBodyV1["sanitizer"];
+  legacyParallelWrite?: {
+    attempted?: boolean;
+    status?: string;
+    path?: string;
+    gitCommit?: string | null;
+    reason?: string;
+  };
 }
 
 export interface AppendKnowledgeEvidenceForWriteResult {
@@ -634,7 +641,8 @@ export async function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEv
   const sessionId = args.sessionId || args.auditContext?.sessionId || args.draft.sessionId || "unknown-session";
   const turnId = args.turnId || "unknown-turn";
   const deviceId = await readOrCreateDeviceId(args.abrainHome);
-  const producerNonce = `knowledge:${now}:${sessionId}:${turnId}:${slug}:${args.operation || "create"}:${sha256Hex(JSON.stringify({ result: args.result.status, path: args.result.path ?? "" }))}`;
+  const legacyWrite = args.legacyParallelWrite;
+  const producerNonce = `knowledge:${now}:${sessionId}:${turnId}:${slug}:${args.operation || "create"}:${sha256Hex(JSON.stringify({ result: args.result.status, path: args.result.path ?? "", legacyWriteAttempted: legacyWrite?.attempted ?? true }))}`;
   return {
     event_schema_version: "knowledge-evidence-event/v1",
     event_type: "knowledge_entry_observed",
@@ -676,11 +684,11 @@ export async function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEv
       replacements_count: 0,
     },
     legacy_parallel_write: {
-      attempted: true,
-      status: args.result.status,
-      ...(args.result.path ? { path: args.result.path } : {}),
-      ...("gitCommit" in args.result ? { git_commit: args.result.gitCommit ?? null } : {}),
-      ...(args.result.reason ? { reason: args.result.reason } : {}),
+      attempted: legacyWrite?.attempted ?? true,
+      status: legacyWrite?.status ?? args.result.status,
+      ...((legacyWrite?.path ?? args.result.path) ? { path: legacyWrite?.path ?? args.result.path } : {}),
+      ...("gitCommit" in args.result || legacyWrite?.gitCommit !== undefined ? { git_commit: legacyWrite?.gitCommit ?? args.result.gitCommit ?? null } : {}),
+      ...((legacyWrite?.reason ?? args.result.reason) ? { reason: legacyWrite?.reason ?? args.result.reason } : {}),
     },
     producer: { name: "sediment.knowledge-event-writer", version: "adr0039-p5" },
   };

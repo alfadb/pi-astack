@@ -249,6 +249,25 @@ function isKnowledgeEvidenceEventFirst(settings: SedimentSettings): boolean {
     && settings.knowledgeEvidenceEventWriter.mode === "event_first";
 }
 
+function shouldSkipKnowledgeLegacyMarkdownAfterEvent(settings: SedimentSettings, result: AppendKnowledgeEvidenceForWriteResult | undefined): boolean {
+  return isKnowledgeEvidenceEventFirst(settings)
+    && settings.knowledgeEvidenceEventWriter.legacyMarkdownWriteOnSuccessfulEvent === false
+    && result?.append.ok === true;
+}
+
+function knowledgeLegacyMarkdownWriteDisabled(settings: SedimentSettings): boolean {
+  return isKnowledgeEvidenceEventFirst(settings)
+    && settings.knowledgeEvidenceEventWriter.legacyMarkdownWriteOnSuccessfulEvent === false;
+}
+
+function legacyMarkdownSkippedAudit(result: AppendKnowledgeEvidenceForWriteResult | undefined): Record<string, unknown> {
+  return {
+    attempted: false,
+    reason: "legacy_markdown_write_disabled",
+    event_id: result?.append.eventId ?? null,
+  };
+}
+
 function draftFromEntryMarkdown(raw: string, fallbackSlug: string, fallbackPatch?: ProjectEntryUpdateDraft): ProjectEntryDraft {
   const { frontmatterText, body } = splitFrontmatter(raw);
   const frontmatter = parseFrontmatter(frontmatterText);
@@ -288,6 +307,7 @@ async function appendKnowledgeEvidenceForMarkdown(args: {
 }): Promise<AppendKnowledgeEvidenceForWriteResult | undefined> {
   if (args.settings.knowledgeEvidenceEventWriter.enabled !== true) return undefined;
   const draft = draftFromEntryMarkdown(args.raw, args.fallbackSlug, args.patch);
+  const legacyMarkdownDisabled = knowledgeLegacyMarkdownWriteDisabled(args.settings);
   return appendKnowledgeEvidenceForWrite({
     abrainHome: args.abrainHome,
     projectId: args.projectId,
@@ -298,6 +318,7 @@ async function appendKnowledgeEvidenceForMarkdown(args: {
     auditContext: args.auditContext,
     sessionId: args.patch?.sessionId,
     operation: args.operation,
+    ...(legacyMarkdownDisabled ? { legacyParallelWrite: { attempted: false, status: args.result.status, reason: "legacy_markdown_write_disabled" } } : {}),
   }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
     append: {
       ok: false,
@@ -1406,46 +1427,59 @@ export async function deleteProjectEntry(
         return { slug, path: target, status: "rejected", reason: "knowledge_evidence_append_failed", gitCommit: null, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
       }
     }
-    await fs.unlink(target);
+    const legacyMarkdownSkipped = shouldSkipKnowledgeLegacyMarkdownAfterEvent(opts.settings, knowledgeEvidenceEvent);
+    if (!legacyMarkdownSkipped) await fs.unlink(target);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
-    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "delete", gitCommitProjectId) : null;
+    const git = opts.settings.gitCommit
+      ? legacyMarkdownSkipped
+        ? await gitCommitMany(abrainHome, [], slug, "delete", gitCommitProjectId)
+        : await gitCommit(abrainHome, target, slug, "delete", gitCommitProjectId)
+      : null;
     // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
     // (git add succeeded but git commit failed), reset the index to
     // prevent the staged deletion from being committed alongside a
     // later successful write — same ghost-file class bug as b40df1e.
     if (opts.settings.gitCommit && git === null) {
-      try {
-        const rel = path.relative(abrainHome, target);
-        // async reset (parity with all other rollback paths): never block the
-        // event loop on git while holding the sediment lock.
-        await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 });
-      } catch { /* best-effort */ }
-      try {
-        await atomicWrite(target, originalRaw);
-      } catch { /* best-effort rollback */ }
-      const knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
-        ? await appendKnowledgeEvidenceForMarkdown({
-            abrainHome,
-            projectId: opts.projectId,
-            scope,
-            raw: originalRaw,
-            fallbackSlug: slug,
-            result: { slug, path: target, status: "updated", gitCommit: null, ...resultCtx },
-            settings: opts.settings,
-            auditContext: opts.auditContext,
-            patch: { sessionId: opts.sessionId, timelineNote: "restore after delete git commit failure" },
-            operation: "update",
-          })
-        : undefined;
+      let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
+      if (legacyMarkdownSkipped) {
+        try {
+          await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", "l1", "l2"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+        } catch { /* best-effort */ }
+      } else {
+        try {
+          const rel = path.relative(abrainHome, target);
+          // async reset (parity with all other rollback paths): never block the
+          // event loop on git while holding the sediment lock.
+          await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 });
+        } catch { /* best-effort */ }
+        try {
+          await atomicWrite(target, originalRaw);
+        } catch { /* best-effort rollback */ }
+        knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
+          ? await appendKnowledgeEvidenceForMarkdown({
+              abrainHome,
+              projectId: opts.projectId,
+              scope,
+              raw: originalRaw,
+              fallbackSlug: slug,
+              result: { slug, path: target, status: "updated", gitCommit: null, ...resultCtx },
+              settings: opts.settings,
+              auditContext: opts.auditContext,
+              patch: { sessionId: opts.sessionId, timelineNote: "restore after delete git commit failure" },
+              operation: "update",
+            })
+          : undefined;
+      }
       const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
         operation: "reject",
         reason: "git_commit_failed",
         target: `${targetPrefix}:${slug}`,
         path: path.relative(auditRoot, target),
         delete_mode: "hard",
-        event_first_legacy_compensation: isKnowledgeEvidenceEventFirst(opts.settings) ? "restored_original_and_projected_compensation" : "legacy_restored",
+        event_first_legacy_compensation: legacyMarkdownSkipped ? "projection_only_commit_failed_no_legacy_mutation" : isKnowledgeEvidenceEventFirst(opts.settings) ? "restored_original_and_projected_compensation" : "legacy_restored",
         ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
         ...(knowledgeEvidenceCompensationEvent ? { knowledge_evidence_compensation_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceCompensationEvent) } : {}),
+        ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
         duration_ms: Date.now() - started,
       }));
       return { slug, path: target, status: "rejected", reason: "git_commit_failed", gitCommit: git, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
@@ -1473,6 +1507,7 @@ export async function deleteProjectEntry(
       reason,
       git_commit: git,
       ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
+      ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
       duration_ms: Date.now() - started,
     }));
     return { ...result, auditPath, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}) };
@@ -1675,6 +1710,17 @@ export async function updateProjectEntry(
         }));
         return { slug, path: target, status: "rejected", reason: "rename_world_unsupported", lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
       }
+      if (knowledgeLegacyMarkdownWriteDisabled(opts.settings)) {
+        const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+          operation: "reject",
+          reason: "legacy_markdown_rename_disabled",
+          target: `${targetPrefix}:${slug}`,
+          new_slug: requestedNewSlug,
+          duration_ms: Date.now() - started,
+          ...(opts.auditExtras ?? {}),
+        }));
+        return { slug, path: target, status: "rejected", reason: "legacy_markdown_rename_disabled", lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
+      }
       const renamePlan = await buildRenameApplyPlan({
         abrainHome,
         entryRoot,
@@ -1839,44 +1885,57 @@ export async function updateProjectEntry(
         return { slug, path: target, status: "rejected", reason: "knowledge_evidence_append_failed", lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
       }
     }
-    await atomicWrite(target, merged.markdown);
-    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId) : null;
+    const legacyMarkdownSkipped = shouldSkipKnowledgeLegacyMarkdownAfterEvent(opts.settings, knowledgeEvidenceEvent);
+    if (!legacyMarkdownSkipped) await atomicWrite(target, merged.markdown);
+    const git = opts.settings.gitCommit
+      ? legacyMarkdownSkipped
+        ? await gitCommitMany(abrainHome, [], slug, operation, gitCommitProjectId)
+        : await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId)
+      : null;
     // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
     // (git add succeeded but git commit failed), reset the index to
     // prevent the staged update from being committed alongside a later
     // successful write — same class of bug as b40df1e (create path).
     if (opts.settings.gitCommit && git === null) {
-      try {
-        const rel = path.relative(abrainHome, target);
-        // async reset (parity with all other rollback paths): never block the
-        // event loop on git while holding the sediment lock.
-        await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 });
-      } catch { /* best-effort */ }
-      try {
-        await atomicWrite(target, prepared.originalRaw);
-      } catch { /* best-effort rollback */ }
-      const knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
-        ? await appendKnowledgeEvidenceForMarkdown({
-            abrainHome,
-            projectId: opts.projectId,
-            scope,
-            raw: prepared.originalRaw,
-            fallbackSlug: slug,
-            result: { slug, path: target, status: "updated", gitCommit: null, lintErrors, lintWarnings, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx },
-            settings: opts.settings,
-            auditContext: opts.auditContext,
-            patch: { ...patch, timelineNote: "restore after update git commit failure" },
-            operation: "update",
-          })
-        : undefined;
+      let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
+      if (legacyMarkdownSkipped) {
+        try {
+          await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", "l1", "l2"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+        } catch { /* best-effort */ }
+      } else {
+        try {
+          const rel = path.relative(abrainHome, target);
+          // async reset (parity with all other rollback paths): never block the
+          // event loop on git while holding the sediment lock.
+          await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 });
+        } catch { /* best-effort */ }
+        try {
+          await atomicWrite(target, prepared.originalRaw);
+        } catch { /* best-effort rollback */ }
+        knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
+          ? await appendKnowledgeEvidenceForMarkdown({
+              abrainHome,
+              projectId: opts.projectId,
+              scope,
+              raw: prepared.originalRaw,
+              fallbackSlug: slug,
+              result: { slug, path: target, status: "updated", gitCommit: null, lintErrors, lintWarnings, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx },
+              settings: opts.settings,
+              auditContext: opts.auditContext,
+              patch: { ...patch, timelineNote: "restore after update git commit failure" },
+              operation: "update",
+            })
+          : undefined;
+      }
       const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
         operation: "reject",
         reason: "git_commit_failed",
         target: `${targetPrefix}:${slug}`,
         path: path.relative(auditRoot, target),
-        event_first_legacy_compensation: isKnowledgeEvidenceEventFirst(opts.settings) ? "legacy_restored_after_commit_failure" : "legacy_restored",
+        event_first_legacy_compensation: legacyMarkdownSkipped ? "projection_only_commit_failed_no_legacy_mutation" : isKnowledgeEvidenceEventFirst(opts.settings) ? "legacy_restored_after_commit_failure" : "legacy_restored",
         ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
         ...(knowledgeEvidenceCompensationEvent ? { knowledge_evidence_compensation_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceCompensationEvent) } : {}),
+        ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
         duration_ms: Date.now() - started,
         ...(opts.auditExtras ?? {}),
       }));
@@ -1907,6 +1966,7 @@ export async function updateProjectEntry(
       lint_result: "pass",
       git_commit: git,
       ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
+      ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
       duration_ms: Date.now() - started,
       ...(opts.auditExtras ?? {}),
     }));
@@ -2120,6 +2180,7 @@ export async function writeProjectEntry(
         auditContext: opts.auditContext,
         sessionId: draft.sessionId,
         operation: "create",
+        ...(knowledgeLegacyMarkdownWriteDisabled(opts.settings) ? { legacyParallelWrite: { attempted: false, status: baseResult.status, reason: "legacy_markdown_write_disabled" } } : {}),
       }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
         append: {
           ok: false,
@@ -2140,9 +2201,14 @@ export async function writeProjectEntry(
       }
     }
 
-    await atomicWrite(target, markdown);
+    const legacyMarkdownSkipped = shouldSkipKnowledgeLegacyMarkdownAfterEvent(opts.settings, knowledgeEvidenceEvent);
+    if (!legacyMarkdownSkipped) await atomicWrite(target, markdown);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
-    git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "create", gitCommitProjectId) : null;
+    git = opts.settings.gitCommit
+      ? legacyMarkdownSkipped
+        ? await gitCommitMany(abrainHome, [], slug, "create", gitCommitProjectId)
+        : await gitCommit(abrainHome, target, slug, "create", gitCommitProjectId)
+      : null;
     // P2 fix (2026-05-14 audit): when gitCommit is enabled but returns null
     // (e.g. index.lock race, hook failure, EACCES), the markdown file is on
     // disk but git has no record. Without cleanup, the next write for this
@@ -2156,35 +2222,41 @@ export async function writeProjectEntry(
     // history with no corresponding disk file — a silent wedge in the abrain
     // repo. git reset HEAD -- <rel> below cleans the index.
     if (opts.settings.gitCommit && git === null) {
-      const rel = path.relative(abrainHome, target);
-      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
-      await fs.unlink(target).catch(() => {});
-      const knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
-        ? await appendKnowledgeEvidenceForWrite({
-            abrainHome,
-            projectId: opts.projectId,
-            scope,
-            draft: { ...safeDraft, timelineNote: "remove projection after create git commit failure" },
-            result: { slug, path: target, status: "deleted", gitCommit: null, ...resultCtx },
-            settings: opts.settings,
-            auditContext: opts.auditContext,
-            sessionId: draft.sessionId,
-            operation: "delete",
-          }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
-            append: {
-              ok: false,
-              status: "write_failed",
-              error: err instanceof Error ? err.message : String(err),
-            },
-          }))
-        : undefined;
+      let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
+      if (legacyMarkdownSkipped) {
+        try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", "l1", "l2"], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
+      } else {
+        const rel = path.relative(abrainHome, target);
+        try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
+        await fs.unlink(target).catch(() => {});
+        knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
+          ? await appendKnowledgeEvidenceForWrite({
+              abrainHome,
+              projectId: opts.projectId,
+              scope,
+              draft: { ...safeDraft, timelineNote: "remove projection after create git commit failure" },
+              result: { slug, path: target, status: "deleted", gitCommit: null, ...resultCtx },
+              settings: opts.settings,
+              auditContext: opts.auditContext,
+              sessionId: draft.sessionId,
+              operation: "delete",
+            }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
+              append: {
+                ok: false,
+                status: "write_failed",
+                error: err instanceof Error ? err.message : String(err),
+              },
+            }))
+          : undefined;
+      }
       const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
         operation: "reject",
         reason: "git_commit_failed",
         target: targetId,
-        event_first_legacy_compensation: isKnowledgeEvidenceEventFirst(opts.settings) ? "orphan_removed_and_projection_deleted" : "orphan_removed",
+        event_first_legacy_compensation: legacyMarkdownSkipped ? "projection_only_commit_failed_no_legacy_mutation" : isKnowledgeEvidenceEventFirst(opts.settings) ? "orphan_removed_and_projection_deleted" : "orphan_removed",
         ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
         ...(knowledgeEvidenceCompensationEvent ? { knowledge_evidence_compensation_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceCompensationEvent) } : {}),
+        ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
         duration_ms: Date.now() - started,
       }));
       return { slug, path: target, status: "rejected", reason: "git_commit_failed", auditPath, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
@@ -2217,6 +2289,7 @@ export async function writeProjectEntry(
       lint_result: "pass",
       git_commit: git,
       ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
+      ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
       duration_ms: Date.now() - started,
     }));
 
