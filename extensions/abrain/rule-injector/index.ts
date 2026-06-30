@@ -468,7 +468,7 @@ export function composeRuleInjection(cache: RuleScanCache): string {
 type CompiledRuleCounts = { always: number; listed: number; total: number };
 
 type CompiledViewReadResult =
-  | { ok: true; injection: string; sourcePath: string; counts: CompiledRuleCounts; coverageRatio?: number; injectableCoverageRatio?: number; stale: boolean }
+  | { ok: true; injection: string; sourcePath: string; counts: CompiledRuleCounts; coverageRatio?: number; injectableCoverageRatio?: number; stale: boolean; queuedEvents?: number; appendFailedEvents?: number }
   | { ok: false; reason: string; error?: string };
 
 function readJsonFileBounded(file: string, maxReadBytes: number): unknown {
@@ -489,15 +489,42 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function coverageRatiosFrom(value: unknown): { coverageRatio?: number; injectableCoverageRatio?: number } {
+function numberField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function coverageSummaryFrom(value: unknown): {
+  coverageRatio?: number;
+  injectableCoverageRatio?: number;
+  queuedEvents?: number;
+  appendFailedEvents?: number;
+  oldestQueuedAgeMs?: number;
+} {
   const root = objectRecord(value);
   const summary = objectRecord(root?.summary);
-  const coverageRatio = summary?.coverageRatio;
-  const injectableCoverageRatio = summary?.injectableCoverageRatio;
+  const coverageRatio = numberField(summary?.coverageRatio);
+  const injectableCoverageRatio = numberField(summary?.injectableCoverageRatio);
+  const queuedEvents = numberField(summary?.queuedEvents);
+  const appendFailedEvents = numberField(summary?.appendFailedEvents);
+  const oldestQueuedAgeMs = numberField(summary?.oldestQueuedAgeMs);
   return {
-    ...(typeof coverageRatio === "number" && Number.isFinite(coverageRatio) ? { coverageRatio } : {}),
-    ...(typeof injectableCoverageRatio === "number" && Number.isFinite(injectableCoverageRatio) ? { injectableCoverageRatio } : {}),
+    ...(coverageRatio === undefined ? {} : { coverageRatio }),
+    ...(injectableCoverageRatio === undefined ? {} : { injectableCoverageRatio }),
+    ...(queuedEvents === undefined ? {} : { queuedEvents }),
+    ...(appendFailedEvents === undefined ? {} : { appendFailedEvents }),
+    ...(oldestQueuedAgeMs === undefined ? {} : { oldestQueuedAgeMs }),
   };
+}
+
+function compiledViewHasStalePendingEvidence(input: {
+  coverage: ReturnType<typeof coverageSummaryFrom>;
+  compiledAgeMs: number;
+  staleAfterMs: number;
+}): boolean {
+  const pendingEvents = (input.coverage.queuedEvents ?? 0) + (input.coverage.appendFailedEvents ?? 0);
+  if (pendingEvents <= 0) return false;
+  const pendingAgeMs = input.coverage.oldestQueuedAgeMs ?? input.compiledAgeMs;
+  return pendingAgeMs > input.staleAfterMs;
 }
 
 function compiledRuleCountsFromDecision(value: unknown, activeProjectId: string | undefined): CompiledRuleCounts {
@@ -555,14 +582,19 @@ export function readCompiledRuleInjectionForRuntime(args: {
     if (decision?.schemaVersion !== "constraint-shadow-decision/v1") return { ok: false, reason: "invalid_decision_schema" };
     const counts = compiledRuleCountsFromDecision(decision, args.activeProjectId);
     const coverage = fs.existsSync(coveragePath) ? readJsonFileBounded(coveragePath, args.settings.maxReadBytes) : undefined;
-    const ratios = coverage === undefined ? {} : coverageRatiosFrom(coverage);
-    const ratio = ratios.coverageRatio;
-    const gatingRatio = ratios.injectableCoverageRatio ?? ratios.coverageRatio;
+    const coverageSummary = coverage === undefined ? {} : coverageSummaryFrom(coverage);
+    const ratio = coverageSummary.coverageRatio;
+    const gatingRatio = coverageSummary.injectableCoverageRatio ?? coverageSummary.coverageRatio;
     if (gatingRatio !== undefined && gatingRatio < args.settings.minCoverageRatio) return { ok: false, reason: "coverage_below_threshold" };
     if (gatingRatio === undefined && args.settings.minCoverageRatio > 0) return { ok: false, reason: "missing_coverage_ratio" };
     const compiledStat = fs.statSync(compiledViewPath);
     const nowMs = args.nowMs ?? Date.now();
-    const stale = Math.max(0, nowMs - compiledStat.mtimeMs) > args.settings.staleAfterMs;
+    const compiledAgeMs = Math.max(0, nowMs - compiledStat.mtimeMs);
+    const stale = compiledViewHasStalePendingEvidence({
+      coverage: coverageSummary,
+      compiledAgeMs,
+      staleAfterMs: args.settings.staleAfterMs,
+    });
     if (args.settings.requireFresh && stale) return { ok: false, reason: "compiled_view_stale" };
     const rawCompiledView = boundedTextFile(compiledViewPath, args.settings.maxReadBytes).trim();
     if (!rawCompiledView) return { ok: false, reason: "empty_compiled_view" };
@@ -581,7 +613,17 @@ export function readCompiledRuleInjectionForRuntime(args: {
       compiledView,
       END_ABRAIN_RULES,
     ].join("\n");
-    return { ok: true, injection, sourcePath: compiledViewPath, counts, coverageRatio: ratio, injectableCoverageRatio: gatingRatio, stale };
+    return {
+      ok: true,
+      injection,
+      sourcePath: compiledViewPath,
+      counts,
+      coverageRatio: ratio,
+      injectableCoverageRatio: gatingRatio,
+      stale,
+      queuedEvents: coverageSummary.queuedEvents,
+      appendFailedEvents: coverageSummary.appendFailedEvents,
+    };
   } catch (err: unknown) {
     return { ok: false, reason: "read_failed", error: err instanceof Error ? err.message : String(err) };
   }

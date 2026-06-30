@@ -1,14 +1,15 @@
 ---
 doc_type: adr
-status: proposed
+status: accepted
 ---
 
 # ADR 0034 - abrain mechanism-ingest + direction-impact 注解 + rationale 渲染(spun-out keystone)
 
-- **状态**：Accepted（2026-06-13；3×T0 跨厂商盲审（opus-4-8 / gpt-5.5 / deepseek-v4-pro）一致 RATIFY WITH REVISIONS，下述修订集已并入；设计基线，未实现）。
+- **状态**：Accepted（2026-06-13；3×T0 跨厂商盲审（opus-4-8 / gpt-5.5 / deepseek-v4-pro）一致 RATIFY WITH REVISIONS，下述修订集已并入）。
 - **依赖**：[ADR 0003](0003-main-session-read-only.md)（主会话只读 / sediment 单写）、[ADR 0024](0024-second-brain-from-natural-conversation.md)（四 invariant + AI-Native）、[ADR 0025](0025-sediment-meta-curator-subsystem.md)（status: accepted；**本 ADR 仅复用其 sanitizer + writer 基建，不依赖其稳态 curator 管线**）、[ADR 0028](0028-sediment-ground-truth-tiered-rearchitecture.md)（ground-truth 分层 + AX-PROVENANCE 门控）；[`docs/README.md`](../README.md)(两库章程 §4 承重墙 / §5 升级 / §7 迁移)、[`docs/direction.md`](../direction.md)、[`docs/requirements.md`](../requirements.md)。
 - **触发**:文档体系 Phase-2 把 23 份 ADR 的方向上提到共识层(direction.md / requirements.md),机制正文按 3×T0 裁决 **mark-in-place(pending sediment→abrain)**,物理瘦身/归档**未做**。两件事因此 block 在一个尚不存在的能力上:(a) 把 ADR 机制变成 abrain 可检索记忆(才能物理移走 prose 而不丢 rationale);(b) `README.md` §4 的"按需渲染 rationale"承重墙(人类问"为何这样设计",abrain 渲成人话供审计)。主会话**不能写 abrain**(ADR 0003),故必须独立立项给 sediment 侧。
 - **对偶**:本 ADR 是 Phase-2 的 keystone--doc 侧 split 已完成并产出稳定源集,本 ADR 定义消费它的 abrain 侧能力。
+- **实现状态**:核心能力已落地：source-aware ADR mechanism ingest lane 见 `extensions/memory/ingest-adr.ts`; `direction_impact` flat frontmatter 解析与红线校验见 `extensions/memory/direction-impact.ts`; rationale rendering path 见 `extensions/memory/rationale.ts`。源 ADR@SHA 漂移后的 re-ingest / delta-update 仍按 §7 留作后续。
 
 ---
 

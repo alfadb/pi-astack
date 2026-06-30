@@ -102,7 +102,7 @@ const minimalSummary = {
   window_days: 30,
   audit: { rows_considered: 0, recent_rows: 0, operations: {}, skip_reasons: {}, error_like_count: 0 },
   outcome: { rows_considered: 0, window_rows: 0, slugs_seen: 0, high_unused: [], echo_chamber_candidates: [] },
-  staging: { total_files: 0, provisional_pending: 0, provisional_stale: 0, multiview_pending: 0, soft_archived: 0 },
+  staging: { total_files: 0, provisional_pending: 0, provisional_actionable: 0, provisional_stale: 0, multiview_pending: 0, soft_archived: 0 },
   search: { metrics_rows: 0, recent_rows: 0, total_results: 0, zero_result_count: 0 },
   per_turn_cost: { rows_attributed: 0, rows_unattributed: 0, turns_considered: 0, estimated_tokens_histogram: [], top_burners: [], totals: { tokens_in: 0, tokens_out: 0, estimated_tokens: 0, operations: {} }, estimated_tokens_by_operation: {} },
   advisories: [],

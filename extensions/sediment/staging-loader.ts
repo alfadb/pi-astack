@@ -39,6 +39,9 @@ const MAX_STAGING_ENTRIES = 10;  // K — token budget limits
 /** Age beyond which a pending hypothesis is left to the age-out / archive
  *  path. Exported so staging-resolver shares one definition (no drift). */
 export const STALE_DAYS = 30;
+/** Don't re-review a kept-aging entry within this many days. Shared with
+ *  staging-ageout and advisory counters so debounce semantics do not drift. */
+export const AGEOUT_RE_REVIEW_DAYS = 14;
 
 export interface StagingContext {
   entries: StagingEntry[];
@@ -185,6 +188,40 @@ export function stagingActiveFileCount(): number {
       try {
         const parsed: StagingFileOnDisk = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
         if (parsed?.entry?.lifecycle_state === "soft_archived") continue;
+      } catch {
+        // Corrupt file: count it (a real file on disk; conservative).
+      }
+      count++;
+    }
+  } catch {
+    return count;
+  }
+  return count;
+}
+
+/**
+ * Count staging files that can currently consume classifier/resolver/age-out
+ * attention. Excludes soft-archived entries and stale entries that the age-out
+ * reviewer already reviewed inside its debounce window.
+ */
+export function stagingActionableFileCount(now: Date = new Date()): number {
+  let count = 0;
+  const staleCutoffMs = now.getTime() - STALE_DAYS * 24 * 60 * 60 * 1000;
+  const reReviewCutoffMs = now.getTime() - AGEOUT_RE_REVIEW_DAYS * 24 * 60 * 60 * 1000;
+  try {
+    const dir = stagingDir();
+    if (!fs.existsSync(dir)) return 0;
+    for (const f of fs.readdirSync(dir)) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const parsed: StagingFileOnDisk = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
+        const entry = parsed?.entry;
+        if (entry?.lifecycle_state === "soft_archived") continue;
+        const createdMs = typeof entry?.created === "string" ? Date.parse(entry.created) : NaN;
+        if (Number.isFinite(createdMs) && createdMs < staleCutoffMs) {
+          const reviewedMs = typeof entry?.aged_out_reviewed_at === "string" ? Date.parse(entry.aged_out_reviewed_at) : NaN;
+          if (Number.isFinite(reviewedMs) && reviewedMs >= reReviewCutoffMs) continue;
+        }
       } catch {
         // Corrupt file: count it (a real file on disk; conservative).
       }

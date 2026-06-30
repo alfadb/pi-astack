@@ -52,7 +52,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import type { SedimentSettings } from "./settings";
-import { stagingDir, STALE_DAYS } from "./staging-loader";
+import { AGEOUT_RE_REVIEW_DAYS, stagingDir, STALE_DAYS } from "./staging-loader";
 import type { StagingEntry, StagingFileOnDisk } from "./staging-types";
 import { formatLocalIsoTimestamp, ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
@@ -66,9 +66,6 @@ const DEFAULT_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** Hypotheses reviewed per run (excess rolls into the next daily run via
  *  oldest-first selection). */
 const MAX_AGEOUT_PER_RUN = 20;
-/** Don't re-review a kept-aging entry within this many days — bounds token
- *  cost so a `keep_aging` verdict isn't re-litigated every single day. */
-const RE_REVIEW_DAYS = 14;
 const MAX_HYPOTHESIS_CHARS = 600;
 const MAX_QUOTE_CHARS = 400;
 const MAX_WINDOW_CHARS = 4000;
@@ -244,7 +241,7 @@ function releaseLock(projectRoot: string, claim: StagingAgeOutLockClaim | null):
 export function selectAgeOutCandidates(now: Date = new Date(), max: number = MAX_AGEOUT_PER_RUN): AgeOutCandidate[] {
   const out: AgeOutCandidate[] = [];
   const staleCutoff = now.getTime() - STALE_DAYS * 24 * 60 * 60 * 1000;
-  const reReviewCutoff = now.getTime() - RE_REVIEW_DAYS * 24 * 60 * 60 * 1000;
+  const reReviewCutoff = now.getTime() - AGEOUT_RE_REVIEW_DAYS * 24 * 60 * 60 * 1000;
   let dir: string;
   try {
     dir = stagingDir();

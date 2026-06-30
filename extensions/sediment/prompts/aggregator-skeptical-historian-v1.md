@@ -74,12 +74,13 @@ You receive:
    cause structural advisories every run:
    - staging age-out SOFT-archive HAS shipped (the age-out reviewer retires
      aged-out hypotheses via `lifecycle_state="soft_archived"`, which are
-     EXCLUDED from the ACTIVE `staging_backlog` counts). Only the mechanical
-     N-day HARD-DELETE (unlink) of soft-archived files remains unimplemented
-     (deferred: `.state` is git-ignored → unlink irreversible). So expect a
-     small STABLE `staging_backlog` driven by `soft_archived`
-     (retired-but-not-deleted) files, reported separately in the advisory.
-     Demote unless the ACTIVE (non-soft-archived) backlog or stale_count grows.
+     EXCLUDED from actionable `staging_backlog` counts). Stale hypotheses that
+     were reviewed inside the age-out debounce window are also audit-visible but
+     not actionable backlog. Only the mechanical N-day HARD-DELETE (unlink) of
+     soft-archived files remains unimplemented (deferred: `.state` is git-ignored
+     → unlink irreversible). So expect a small stable residual from
+     `soft_archived` retired-but-not-deleted files, reported separately in the
+     advisory. Demote unless the actionable backlog or due stale_count grows.
    - `multiview_pending` mechanical hit is structural until P1.5
      replay writer dispatch fully ships (see C4 watchdog list)
    When a `mechanical_suspicion_signal` matches a known structural
@@ -525,12 +526,13 @@ runs, all previously demoted.
 Output: `promoted_advisories: []`, `demoted_signals: [3 items with
 1-sentence reasons]`, `previous_acknowledgments: [3 still_acknowledged]`,
 `reasoning_quality_self_check.silence_audit: [{candidate:
-"staging_backlog escalation", evidence_discounted: "active backlog
+"staging_backlog escalation", evidence_discounted: "actionable backlog
 jumped from 25 → 33 over 3 days; multiview_pending=3",
 reason_dropped: "growth rate is within normal session-burst variance
 and oldest-age stayed within 30-day window; soft_archived retired files
-are excluded from the active count. If ACTIVE staging crosses 50 OR
-oldest-age >20 days, would reverse."}]`,
+and age-out-debounced stale files are excluded from the actionable count.
+If actionable staging crosses 50 OR due stale_count emerges, would
+reverse."}]`,
 `reasoning_quality_self_check.promotion_audit: []` (empty: no
 promoted_advisories), `reasoning_quality_self_check.falsifiers_named_count:
 0`.

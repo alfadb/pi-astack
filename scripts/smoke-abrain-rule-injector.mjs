@@ -404,6 +404,38 @@ check("compiled-view runtime reader is default-off, bounded, and coverage-gated"
   });
   if (!ok.ok || !ok.injection.includes("source=constraint-shadow-compiled-view")) throw new Error(`compiled view did not inject: ${JSON.stringify(ok)}`);
   if (!ok.injection.includes("Compiled runtime body.")) throw new Error(`compiled view body missing: ${ok.injection}`);
+  const oldButSettled = ruleInjector.readCompiledRuleInjectionForRuntime({
+    abrainHome,
+    nonce: "compiled123",
+    nowMs: Date.now() + 2 * 86400000,
+    settings: {
+      enabled: true,
+      fallbackToLegacyOnError: true,
+      requireFresh: true,
+      staleAfterMs: 86400000,
+      maxReadBytes: 1000000,
+      minCoverageRatio: 1,
+    },
+  });
+  if (!oldButSettled.ok || oldButSettled.stale) throw new Error(`settled compiled view should not stale by wall-clock age alone: ${JSON.stringify(oldButSettled)}`);
+  writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+    schemaVersion: "constraint-event-coverage/v1",
+    summary: { coverageRatio: 1, injectableCoverageRatio: 1, queuedEvents: 1, appendFailedEvents: 0, oldestQueuedAgeMs: 86400001 },
+    rows: [],
+  }, null, 2));
+  const stalePending = ruleInjector.readCompiledRuleInjectionForRuntime({
+    abrainHome,
+    nonce: "compiled123",
+    settings: {
+      enabled: true,
+      fallbackToLegacyOnError: true,
+      requireFresh: true,
+      staleAfterMs: 86400000,
+      maxReadBytes: 1000000,
+      minCoverageRatio: 1,
+    },
+  });
+  if (stalePending.ok || stalePending.reason !== "compiled_view_stale") throw new Error(`pending stale evidence should block compiled view: ${JSON.stringify(stalePending)}`);
   writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
     schemaVersion: "constraint-event-coverage/v1",
     summary: { coverageRatio: 0.5, injectableCoverageRatio: 1, deferredMergedSourceEvents: 1 },

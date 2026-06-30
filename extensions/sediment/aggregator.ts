@@ -25,7 +25,7 @@ import type { SedimentSettings } from "./settings";
 import { buildPromptVersionAudit } from "./settings";
 import { summarizeClassifierHealth, type ClassifierHealthSummary } from "./health";
 import type { LedgerOutcomeRow } from "./outcome-collector";
-import { stagingDir, stagingFileCount } from "./staging-loader";
+import { AGEOUT_RE_REVIEW_DAYS, stagingDir, stagingFileCount } from "./staging-loader";
 import { countMultiviewPending } from "./multiview-staging-io";
 import { scanPerTurnCost, type PerTurnCostSummary } from "./per-turn-cost";
 import { runAggregatorLlmPass, type PromptNativeOutput } from "./aggregator-llm";
@@ -311,8 +311,16 @@ export interface AggregatorSummary {
   staging: {
     total_files: number;
     provisional_pending: number;
+    /** Active provisional hypotheses that currently need classifier/resolver/
+     *  age-out attention. Excludes stale entries inside the age-out re-review
+     *  debounce window. */
+    provisional_actionable: number;
     provisional_stale: number;
     multiview_pending: number;
+    /** Active aged-out hypotheses that are inside the age-out reviewer's
+     *  re-review debounce window. They stay active, but they are not immediate
+     *  stale backlog because Stage 4 already reviewed them recently. */
+    provisional_stale_review_debounced?: number;
     /** Stage 4 (ADR 0025 §4.1.5 / §4.6.6): aged-out hypotheses retired by the
      *  age-out reviewer (lifecycle_state==="soft_archived"). These are EXCLUDED
      *  from provisional_pending / provisional_stale (the active backlog the
@@ -1015,8 +1023,10 @@ export const _scanP15WatchdogSignalsForTests = scanP15WatchdogSignals;
 function summarizeStaging(now: Date): AggregatorSummary["staging"] {
   let provisionalPending = 0;
   let provisionalStale = 0;
+  let provisionalStaleReviewDebounced = 0;
   let softArchived = 0;
   const staleCutoffMs = now.getTime() - 30 * 24 * 60 * 60 * 1000;
+  const reReviewCutoffMs = now.getTime() - AGEOUT_RE_REVIEW_DAYS * 24 * 60 * 60 * 1000;
   try {
     const dir = stagingDir();
     if (fs.existsSync(dir)) {
@@ -1039,7 +1049,11 @@ function summarizeStaging(now: Date): AggregatorSummary["staging"] {
           if (e.lifecycle_state === "soft_archived") { softArchived++; continue; }
           provisionalPending++;
           const createdMs = typeof e.created === "string" ? Date.parse(e.created) : NaN;
-          if (Number.isFinite(createdMs) && createdMs < staleCutoffMs) provisionalStale++;
+          if (Number.isFinite(createdMs) && createdMs < staleCutoffMs) {
+            const reviewedMs = typeof e.aged_out_reviewed_at === "string" ? Date.parse(e.aged_out_reviewed_at) : NaN;
+            if (Number.isFinite(reviewedMs) && reviewedMs >= reReviewCutoffMs) provisionalStaleReviewDebounced++;
+            else provisionalStale++;
+          }
         } catch {
           // Corrupt staging files are ignored here; the detailed staging
           // loaders/replay routines own per-file diagnostics.
@@ -1052,7 +1066,9 @@ function summarizeStaging(now: Date): AggregatorSummary["staging"] {
   return {
     total_files: stagingFileCount(),
     provisional_pending: provisionalPending,
+    provisional_actionable: Math.max(0, provisionalPending - provisionalStaleReviewDebounced),
     provisional_stale: provisionalStale,
+    provisional_stale_review_debounced: provisionalStaleReviewDebounced,
     multiview_pending: countMultiviewPending(),
     soft_archived: softArchived,
   };
@@ -1112,27 +1128,26 @@ function buildAdvisories(summary: Omit<AggregatorSummary, "ok" | "advisories">):
     });
   }
 
-  const totalStaging = summary.staging.total_files;
-  // Stage 4 (ADR 0025 §4.1.5 / §4.6.6): the threshold fires on the ACTIVE
-  // backlog (total minus soft_archived retired-but-not-deleted files), so that
-  // soft-archiving actually relieves file-count pressure. Retired files linger
-  // on disk only until the deferred mechanical hard-delete (Stage 5); a small
-  // stable `soft_archived` count is expected and must NOT keep escalating the
-  // advisory. total_files + soft_archived stay in evidence for visibility.
-  const activeStaging = Math.max(0, totalStaging - summary.staging.soft_archived);
+  // Stage 4 (ADR 0025 §4.1.5 / §4.6.6): threshold on the actionable backlog,
+  // not every retained file. Soft-archived entries are retired; stale entries
+  // inside age-out re-review debounce are visible audit state but do not need
+  // immediate classifier/resolver/age-out attention.
+  const debouncedStale = summary.staging.provisional_stale_review_debounced ?? 0;
+  const actionableStaging = summary.staging.provisional_actionable;
   const retiredNote = summary.staging.soft_archived > 0 ? ` (${summary.staging.soft_archived} soft-archived awaiting Stage-5 hard-delete)` : "";
-  if (activeStaging >= STAGING_CRITICAL_THRESHOLD || summary.staging.provisional_stale > 0) {
+  const reviewedNote = debouncedStale > 0 ? `; ${debouncedStale} stale reviewed within age-out debounce` : "";
+  if (actionableStaging >= STAGING_CRITICAL_THRESHOLD || summary.staging.provisional_stale > 0) {
     advisories.push({
       kind: "staging_backlog",
-      severity: activeStaging >= STAGING_CRITICAL_THRESHOLD ? "critical" : "warning",
-      message: `Sediment staging backlog needs attention: ${activeStaging} active files, ${summary.staging.provisional_stale} stale provisional corrections${retiredNote}.`,
+      severity: actionableStaging >= STAGING_CRITICAL_THRESHOLD ? "critical" : "warning",
+      message: `Sediment staging backlog needs attention: ${actionableStaging} actionable files, ${summary.staging.provisional_stale} stale provisional corrections${retiredNote}${reviewedNote}.`,
       evidence: summary.staging,
     });
-  } else if (activeStaging >= STAGING_WARNING_THRESHOLD) {
+  } else if (actionableStaging >= STAGING_WARNING_THRESHOLD) {
     advisories.push({
       kind: "staging_backlog",
       severity: "warning",
-      message: `Sediment staging backlog is growing (${activeStaging} active files)${retiredNote}.`,
+      message: `Sediment staging backlog is growing (${actionableStaging} actionable files)${retiredNote}${reviewedNote}.`,
       evidence: summary.staging,
     });
   }

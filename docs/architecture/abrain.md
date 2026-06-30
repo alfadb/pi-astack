@@ -74,8 +74,10 @@ Old project memory lived in `<project>/.pensieve/`. Current state:
 
 | Path | Git? | Meaning |
 |---|---|---|
-| `~/.abrain/projects/<id>/*.md` | yes | project memory SOT |
-| `~/.abrain/knowledge/*.md` | yes | world knowledge SOT |
+| `~/.abrain/l1/events/sha256/**` | yes | L1 Evidence Event semantic SOT |
+| `~/.abrain/l2/views/**` | yes | L2 deterministic markdown projections / audit views |
+| `~/.abrain/projects/<id>/*.md` | yes | project memory L2/legacy canonical area retained as write/rollback surface during migration |
+| `~/.abrain/knowledge/*.md` | yes | world knowledge L2/legacy canonical area retained as write/rollback surface during migration |
 | `~/.abrain/workflows/*.md` | yes | cross-project workflows |
 | `~/.abrain/vault/*.age` | no | encrypted secrets; never commit plaintext/secret ciphertext metadata policy depends on vault docs |
 | `~/.abrain/.state/` | no | local maps, audit, locks, metrics |
@@ -87,7 +89,7 @@ Old project memory lived in `<project>/.pensieve/`. Current state:
 2. LLM does not choose backend/path; routing is code/prompt-mediated and validated.
 3. Project identity must be explicit and reversible via git-visible artifacts.
 4. Vault plaintext is not memory and does not enter LLM context by default.
-5. Derived artifacts (`_index.md`, `graph.json`) can be rebuilt.
+5. Derived artifacts (`l2/views/**`, `_index.md`, `graph.json`, L3 indexes) can be rebuilt from L1 and stable retained surfaces.
 6. Migration is forward-only per repo; rollback uses git/pre-migration SHA, not symlink split-brain.
 
 ## 8. Related

@@ -19,7 +19,7 @@ import { sanitizeForMemory } from "./sanitizer";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { packClassifierWindow, packedWindowToText, type PackedWindow } from "./context-packer";
 import { type ProvenanceClass } from "./validation";
-import { loadStagingContext, writeStagingEntry, stagingActiveFileCount } from "./staging-loader";
+import { loadStagingContext, writeStagingEntry, stagingActionableFileCount } from "./staging-loader";
 import type { StagingEntry } from "./staging-types";
 import type { SedimentSettings } from "./settings";
 import type { ModelRegistryLike } from "./llm-extractor";
@@ -738,13 +738,13 @@ export async function runCorrectionPipeline(
     result.stagingWritten = writeStagingEntry(buildProvisionalStagingEntry(signal, rawText));
   }
 
-  // 7. Staging inflation advisory — counts ACTIVE files only (Stage 4: exclude
-  // age-out soft-archived, which are already retired and only await the
-  // deferred Stage-5 hard-delete; counting them would fire this advisory
-  // perpetually as retired files accumulate, falsely implying over-production).
-  const fileCount = stagingActiveFileCount();
+  // 7. Staging inflation advisory — counts actionable files only. Stage 4
+  // excludes soft-archived entries and stale entries already reviewed inside
+  // the age-out debounce window; counting them would falsely imply current
+  // classifier over-production.
+  const fileCount = stagingActionableFileCount();
   if (fileCount > 50) {
-    result.stagingAdvisory = `staging dir has ${fileCount} active files (>50). Classifier may be over-producing provisional hypotheses.`;
+    result.stagingAdvisory = `staging dir has ${fileCount} actionable files (>50). Classifier may be over-producing provisional hypotheses.`;
   }
 
   return result;

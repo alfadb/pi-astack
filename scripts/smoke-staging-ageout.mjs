@@ -186,6 +186,7 @@ try {
   check("loader: staleCount EXCLUDES soft_archived (1 stale-plain, not 2)", ctx2.staleCount === 1, `staleCount=${ctx2.staleCount}`);
   check("loader: active context has only the fresh entry", ctx2.entries.length === 1 && ctx2.entries[0].slug === "provisional-freshx", JSON.stringify(ctx2.entries.map((e) => e.slug)));
   check("loader: stagingActiveFileCount excludes soft_archived (2 active of 3)", loader.stagingActiveFileCount() === 2, `active=${loader.stagingActiveFileCount()} total=${loader.stagingFileCount()}`);
+  check("loader: stagingActionableFileCount excludes only retired/debounced entries (2 actionable)", loader.stagingActionableFileCount() === 2, `actionable=${loader.stagingActionableFileCount()}`);
 
   // DRAINAGE INVARIANT (the headline goal): the REAL aggregator's
   // staging_backlog advisory must NOT fire on soft_archived-only stale
@@ -199,9 +200,24 @@ try {
   const summary = aggregator.runSedimentAggregator({ projectRoot: aggProjRoot, settings: { autoLlmWriteEnabled: true }, now: new Date() });
   check("aggregator: provisional_stale EXCLUDES soft_archived (0, not 2)", summary.staging.provisional_stale === 0, `provisional_stale=${summary.staging.provisional_stale}`);
   check("aggregator: provisional_pending EXCLUDES soft_archived (0)", summary.staging.provisional_pending === 0, `provisional_pending=${summary.staging.provisional_pending}`);
+  check("aggregator: provisional_actionable EXCLUDES soft_archived (0)", summary.staging.provisional_actionable === 0, `provisional_actionable=${summary.staging.provisional_actionable}`);
   check("aggregator: soft_archived counter surfaces retired files (2)", summary.staging.soft_archived === 2, `soft_archived=${summary.staging.soft_archived}`);
   const stagingAdv = summary.advisories.filter((a) => a.kind === "staging_backlog");
   check("aggregator: staging_backlog advisory DRAINS when only soft_archived stale present", stagingAdv.length === 0, JSON.stringify(stagingAdv));
+
+  // A kept-aging entry that was reviewed inside the age-out re-review window is
+  // still active, but not an immediate stale backlog action item. It should be
+  // visible as debounced audit state instead of keeping provisional_stale > 0.
+  for (const f of fs.readdirSync(dirX)) { if (f.endsWith(".json")) fs.rmSync(path.join(dirX, f)); }
+  writeStaging("provisional-reviewed", {
+    created: new Date(Date.now() - 45 * DAY).toISOString(),
+    extra: { aged_out_reviewed_at: new Date().toISOString(), aged_out_decision: "keep_aging" },
+  });
+  const reviewedSummary = aggregator.runSedimentAggregator({ projectRoot: aggProjRoot, settings: { autoLlmWriteEnabled: true }, now: new Date() });
+  check("loader: stagingActionableFileCount excludes recently age-out-reviewed stale", loader.stagingActionableFileCount() === 0, `actionable=${loader.stagingActionableFileCount()}`);
+  check("aggregator: recently age-out-reviewed stale is debounced, not actionable stale", reviewedSummary.staging.provisional_stale === 0 && reviewedSummary.staging.provisional_stale_review_debounced === 1, JSON.stringify(reviewedSummary.staging));
+  check("aggregator: provisional_actionable excludes recently age-out-reviewed stale", reviewedSummary.staging.provisional_actionable === 0, JSON.stringify(reviewedSummary.staging));
+  check("aggregator: reviewed-only stale does not fire staging_backlog", reviewedSummary.advisories.filter((a) => a.kind === "staging_backlog").length === 0, JSON.stringify(reviewedSummary.advisories));
   try { fs.rmSync(aggProjRoot, { recursive: true, force: true }); } catch {}
 
   // Restore the apply-block fixture so subsequent assertions see aged1/aged2.
