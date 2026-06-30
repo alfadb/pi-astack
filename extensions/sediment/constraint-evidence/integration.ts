@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { appendConstraintEvidenceEvent, constraintEvidenceAllowedStateRoot, guardConstraintEvidencePath, type ConstraintEvidenceAppendResult } from "./append";
+import { sanitizeForMemory, type SanitizeResult } from "../sanitizer";
 import { sha256Hex } from "./hash-envelope";
 import type { ConstraintEvidenceEventBodyV1, ConstraintEvidenceScopeContext } from "./types";
 import { CONSTRAINT_EVIDENCE_EVENT_SCHEMA_VERSION } from "./types";
@@ -65,9 +66,14 @@ export async function appendTier1ConstraintEvidenceEvent(
 export function buildTier1ConstraintEvidenceEventBody(
   options: BuildTier1ConstraintEvidenceEventOptions,
 ): ConstraintEvidenceEventBodyV1 {
-  const quote = normalizedQuote(options.signal, options.draft);
+  const quote = sanitizeField(normalizedQuote(options.signal, options.draft));
+  const title = sanitizeField(options.draft.title);
+  const body = sanitizeField(options.draft.body);
+  const triggerPhraseResults = triggerPhrases(options.signal, options.draft).map((phrase) => sanitizeField(phrase));
+  const appliesWhen = sanitizeField(options.signal.scope_description || "durable user directive observed in agent_end");
+  const sanitizer = summarizeSanitizer([quote, title, body, appliesWhen, ...triggerPhraseResults]);
   const scope = conservativeScopeContext(options);
-  const quoteHash = sha256Hex(quote);
+  const quoteHash = sha256Hex(quote.text);
   return {
     event_schema_version: CONSTRAINT_EVIDENCE_EVENT_SCHEMA_VERSION,
     event_type: "constraint_signal_observed",
@@ -90,20 +96,15 @@ export function buildTier1ConstraintEvidenceEventBody(
       confidence: clampConfidence(options.signal.confidence ?? options.draft.entryConfidence),
     },
     payload: {
-      sanitized_quote: quote,
-      candidate_constraint_text: options.draft.body,
-      candidate_title: options.draft.title,
-      candidate_trigger_phrases: triggerPhrases(options.signal, options.draft),
-      candidate_applies_when: options.signal.scope_description || "durable user directive observed in agent_end",
+      sanitized_quote: quote.text,
+      candidate_constraint_text: body.text,
+      candidate_title: title.text,
+      candidate_trigger_phrases: sanitizedTriggerPhrases(triggerPhraseResults),
+      candidate_applies_when: appliesWhen.text,
       candidate_priority_hint: options.draft.injectMode ?? "unknown",
     },
     scope,
-    sanitizer: {
-      sanitizer_name: "sediment.correction-pipeline",
-      sanitizer_version: "v1",
-      status: "passed",
-      replacements_count: 0,
-    },
+    sanitizer,
     neighbor_summary: {
       retrieval_mode: "readonly",
       input_hash: sha256Hex(`${options.sessionId}\n${options.turnId}\n${quoteHash}`),
@@ -122,8 +123,32 @@ export function buildTier1ConstraintEvidenceEventBody(
       legacy_operation_hint: "create",
       legacy_audit_ref: `audit:${options.sessionId}:${options.turnId}:${options.candidateId}`,
     },
-    privacy: { contains_user_quote: true, redaction_level: "none" },
+    privacy: { contains_user_quote: true, redaction_level: sanitizer.replacements_count > 0 ? "partial" : "none" },
   };
+}
+
+function sanitizeField(input: string): SanitizeResult & { text: string } {
+  const result = sanitizeForMemory(input);
+  return { ...result, text: result.text ?? "" };
+}
+
+function summarizeSanitizer(results: Array<SanitizeResult>): ConstraintEvidenceEventBodyV1["sanitizer"] {
+  const replacementsCount = results.reduce((sum, result) => sum + (result.replacements?.length ?? 0), 0);
+  return {
+    sanitizer_name: "sediment.correction-pipeline",
+    sanitizer_version: "v1",
+    status: replacementsCount > 0 ? "redacted" : "passed",
+    replacements_count: replacementsCount,
+  };
+}
+
+function sanitizedTriggerPhrases(results: Array<SanitizeResult & { text: string }>): string[] {
+  const out = new Set<string>();
+  for (const result of results) {
+    const normalized = result.text.trim();
+    if (normalized) out.add(normalized);
+  }
+  return [...out].sort();
 }
 
 async function writeRuntimeState(options: AppendTier1ConstraintEvidenceEventOptions & {

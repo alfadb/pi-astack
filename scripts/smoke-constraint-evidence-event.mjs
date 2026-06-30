@@ -74,6 +74,7 @@ for (const file of [
   "extensions/sediment/constraint-evidence/read.ts",
   "extensions/sediment/constraint-evidence/append.ts",
   "extensions/sediment/constraint-evidence/status.ts",
+  "extensions/sediment/sanitizer.ts",
   "extensions/sediment/constraint-evidence/integration.ts",
   "extensions/sediment/constraint-evidence/audit-replay.ts",
 ]) {
@@ -485,6 +486,43 @@ check("runtime integration body is deterministic for repeated agent_end signal",
   assert(first.source.channel === "agent_end", "runtime event channel mismatch");
   assert(first.scope.scope_hint.kind === "project", "project signal must remain project-scoped at append time");
   assert(first.legacy_parallel_write.legacy_path_kind === "tier1_ruleset_adjudicator", "legacy path hint missing");
+});
+
+check("runtime integration records sanitizer redaction metadata", () => {
+  const rawToken = "sk-" + "A".repeat(32);
+  const rawAws = "AKIA" + "IOSFODNN7EXAMPLE";
+  const body = buildTier1ConstraintEvidenceEventBody({
+    signal: {
+      user_quote: `所有项目中，禁止记录 ${rawToken}`,
+      correction_intent: "new preference",
+      scope_description: `all projects for owner@example.com via ${rawAws}`,
+      confidence: 9,
+      provenance: "user-expressed",
+    },
+    draft: {
+      title: `Do not persist ${rawToken}`,
+      body: `Do not persist ${rawToken} or ${rawAws}`,
+      entryConfidence: 9,
+      triggerPhrases: [`token ${rawToken}`],
+    },
+    sessionId: "runtime-session",
+    turnId: "runtime-turn",
+    projectId: "pi-global",
+    cwd: repoRoot,
+    createdAtUtc: "2026-06-19T12:00:00.000Z",
+    correlationId: "runtime-session:auto-sanitize",
+    candidateId: "tier1-direct:sanitize",
+    deviceId: "runtime-device",
+  });
+  const persisted = JSON.stringify(body.payload);
+  assert(!persisted.includes(rawToken), "payload leaked raw API token");
+  assert(!persisted.includes(rawAws), "payload leaked raw AWS key");
+  assert(!persisted.includes("owner@example.com"), "payload leaked raw email");
+  assert(body.payload.sanitized_quote.includes("[SECRET:openai_api_key]"), "quote did not keep typed token placeholder");
+  assert(body.payload.candidate_constraint_text.includes("[SECRET:aws_access_key]"), "body did not keep typed AWS placeholder");
+  assert(body.sanitizer.status === "redacted", "sanitizer status must reflect redaction");
+  assert(body.sanitizer.replacements_count === 7, `unexpected replacement count: ${body.sanitizer.replacements_count}`);
+  assert(body.privacy.redaction_level === "partial", "privacy redaction level must reflect sanitizer metadata");
 });
 
 check("runtime integration scope: project wording beats incidental global-config mention", () => {

@@ -94,10 +94,13 @@ LLM 只用：`memory_search` / `memory_get` / `memory_list` / `memory_decide`（
 `memory_search` 语义契约：
 
 - 查 active project store、legacy `.pensieve/`（仅存在时只读接入）、world store；world 扫描整个 `~/.abrain/`，只排除 `projects/**` 与 `vault/**`（故 `knowledge/`、`workflows/` 下带 frontmatter 的 md 可检索）。
-- 两阶段 LLM rerank（候选选择 + full-content rerank）。
+- 当前生产形态是 `stage0 hybrid` 候选召回 + stage2 full-content LLM 精排：stage0 合并 dense embedding、sparse 候选与 stale/missing freshness floor；`stage1Skip=true` 时跳过 stage1 LLM 粗筛，仅在 verdict=none 或候选池过小时把 stage1 作为低频安全网。
+- sparse 臂当前用 char n-gram BM25（`sparseBM25=true`）补中文、符号与标识符召回；这是 stage0 候选机制，不是 LLM 不可用时的 grep/BM25 降级。
+- embedding 索引当前启用多向量（`multiVector=true`，每 entry 最多 `multiVectorMaxChunks` 个 sub-vector）；搜索时 `autoReconcile=true` 会按冷却与 backlog 门限修补 stale/add/orphan-prune，索引仍是 L3 可重建派生物。
+- `bestEffortOnNone=true` 时，stage2 判 `none` 且扩召后仍无命中，可以返回 stage0 排序 top-K 低置信结果；调用方需要自行判断相关性。
 - 默认排除 `status=archived` 与 `superseded`（`deprecated` 在解析期折叠为 `superseded`，一并排除）；要纳入被替代/历史条目须显式传 `filters.status`（传 `active` 则只看活跃）。
 - 返回 normalized cards，**不暴露 backend/source_path/scope**（`memory_get` exact lookup 作 debug 才暴露）。
-- **LLM search model 不可用时 hard error；没有 grep/BM25 fallback**（accuracy-is-contract，ADR 0015）。
+- **LLM 精排模型不可用时 hard error；没有 grep/BM25 fallback**（accuracy-is-contract，ADR 0015）。stage0 embedding 不可用只会熔断为 sparse-only 候选，召回面收窄但仍必须经过 LLM 精排或显式 best-effort 边界。
 
 `memory_decide` 语义契约：面向高价值决策点，内部先检索再合成 ≤500 token decision brief；result 暴露 `decisionBriefId`/`entrySlugs` 供 memory-footnote / outcome-ledger 归因；失败不等于"无相关记忆"，应修检索/模型可用性或退回 `memory_search` + 手工综合。
 
