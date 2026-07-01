@@ -193,20 +193,25 @@ await checkAsync("prepareNextTurn calls _runAutoCompaction and returns compacted
     },
   };
   const restoredChildren = [];
-  let staleLoaderStopped = false;
-  const staleWorkingLoader = { kind: "stale-working-loader", stop: () => { staleLoaderStopped = true; } };
+  let setWorkingVisibleCalls = 0;
   const mode = {
     session: { isStreaming: true },
     settingsManager: { getShowTerminalProgress: () => true },
     workingVisible: true,
-    loadingAnimation: staleWorkingLoader,
     autoCompactionLoader: { stop: () => {} },
     statusContainer: {
       clear: () => { restoredChildren.length = 0; },
       addChild: (child) => { restoredChildren.push(child); },
     },
     ui: { terminal: { setProgress: (active) => { mode.progress = active; } }, requestRender: () => { mode.rendered = true; } },
-    createWorkingLoader: () => ({ kind: "working-loader" }),
+    setWorkingVisible: (visible) => {
+      setWorkingVisibleCalls++;
+      if (visible !== true) throw new Error("setWorkingVisible should restore visibility with true");
+      const loader = { kind: "working-visible" };
+      mode.loadingAnimation = loader;
+      mode.statusContainer.addChild(loader);
+      mode.ui.requestRender();
+    },
   };
   mode.session = session;
   session.isStreaming = true;
@@ -226,9 +231,8 @@ await checkAsync("prepareNextTurn calls _runAutoCompaction and returns compacted
   await InteractiveMode.prototype.handleEvent.call(mode, emitted);
   const handled = handledEvents.at(-1)?.event;
   if (handled?.willContinue !== true) throw new Error(`willContinue was not observed by TUI: ${JSON.stringify(handled)}`);
-  if (!staleLoaderStopped) throw new Error("stale working loader was not stopped before restoration");
-  if (mode.loadingAnimation === staleWorkingLoader) throw new Error("stale working loader was reused instead of replaced");
-  if (mode.loadingAnimation?.kind !== "working-loader") throw new Error("working loader was not restored after compaction_end");
+  if (setWorkingVisibleCalls !== 1) throw new Error(`setWorkingVisible(true) was not called exactly once, got ${setWorkingVisibleCalls}`);
+  if (mode.loadingAnimation?.kind !== "working-visible") throw new Error("working loader was not restored after compaction_end");
   if (restoredChildren.length !== 1) throw new Error(`expected one restored status child, got ${restoredChildren.length}`);
   if (mode.progress !== true) throw new Error("terminal progress was not restored");
   if (mode.rendered !== true) throw new Error("UI render was not requested after restore");

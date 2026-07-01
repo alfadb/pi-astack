@@ -86,6 +86,7 @@ interface InternalInteractiveModeLike {
   session?: { isStreaming?: boolean };
   settingsManager?: { getShowTerminalProgress?(): boolean };
   workingVisible?: boolean;
+  setWorkingVisible?(visible: boolean): void;
   loadingAnimation?: { stop?(): void } | undefined;
   statusContainer?: { clear?(): void; addChild?(child: unknown): void };
   ui?: { terminal?: { setProgress?(active: boolean): void }; requestRender?(): void };
@@ -372,11 +373,21 @@ function isContinuationCompactionEndEvent(event: Record<string, unknown>): boole
 function restoreWorkingLoaderIfContinuing(mode: InternalInteractiveModeLike): void {
   try {
     if (!mode.session?.isStreaming || !mode.workingVisible) return;
-    mode.loadingAnimation?.stop?.();
-    mode.loadingAnimation = undefined;
     if (mode.settingsManager?.getShowTerminalProgress?.()) {
       mode.ui?.terminal?.setProgress?.(true);
     }
+
+    // Current pi creates WorkingStatusIndicator through setWorkingVisible().
+    // Prefer that path so this patch follows upstream behavior even when
+    // the old createWorkingLoader helper is absent.
+    if (typeof mode.setWorkingVisible === "function") {
+      mode.setWorkingVisible(true);
+      mode.ui?.requestRender?.();
+      return;
+    }
+
+    mode.loadingAnimation?.stop?.();
+    mode.loadingAnimation = undefined;
     mode.statusContainer?.clear?.();
     const loader = mode.createWorkingLoader?.();
     if (!loader) return;
