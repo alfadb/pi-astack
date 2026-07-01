@@ -39,47 +39,46 @@
 
         "providers": {
           "type": "object",
-          "description": "Keep-list per provider. Keys are provider names (anthropic, openai, deepseek, ...); values are arrays of model IDs to retain. All other models in that provider are removed from the registry. Providers not listed here are left untouched.",
+          "description": "Keep-list per provider. Keys are provider names; values are arrays of provider-native model IDs to retain. All other models in that provider are removed from the registry. Providers not listed here are left untouched. Concrete model IDs belong in pi-astack-settings.json, not in this schema.",
           "additionalProperties": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "Model IDs to keep for this provider"
+            "description": "Provider-native model IDs to keep for this provider. Choose models by the capability needed for the configured tier or call point."
           },
           "examples": [
             {
-              "anthropic": ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"],
-              "openai": ["gpt-5.5", "gpt-5.4-mini"],
-              "deepseek": ["deepseek-v4-pro", "deepseek-v4-flash"]
+              "provider-a": ["model-id-for-strong-reasoning", "model-id-for-fast-classification"],
+              "provider-b": ["model-id-for-independent-review"]
             }
           ]
         },
 
         "hints": {
           "type": "object",
-          "description": "One-line capability hints shown next to each chat model in the system prompt table. Keys are 'provider/modelId'. Style: present tense, max ~15 words, name a concrete strength so the LLM can reason about role fit.",
+          "description": "One-line capability hints shown next to each chat model in the system prompt table. Keys use 'provider/modelId'. Style: present tense, max ~15 words, and describe concrete capabilities rather than recommending a specific model globally.",
           "additionalProperties": { "type": "string" },
           "examples": [
             {
-              "anthropic/claude-fable-5": "Anthropic flagship for T0 escalation and hardest long-horizon agentic work.",
-              "anthropic/claude-sonnet-5": "Strong agentic coding and review at standard-tier cost.",
-              "openai/gpt-5.5": "Primary OpenAI model for planning, coding, and high-quality background calls."
+              "provider-a/strong-reasoning-model": "Long-context reasoning, architecture critique, and security review.",
+              "provider-a/fast-classification-model": "Low-latency classification and short structured summaries.",
+              "provider-b/independent-review-model": "Independent cross-vendor review and adversarial checking."
             }
           ]
         },
 
         "imageGen": {
           "type": "object",
-          "description": "Image generation models. NOT registered as pi Models (they can't do chat) — listed in a separate 'Image generation' section of the system prompt as informational hints only. Keys are model IDs (no provider prefix).",
+          "description": "Image generation models. NOT registered as pi Models (they cannot do chat) — listed in a separate 'Image generation' section of the system prompt as informational hints only. Keys are image model IDs from the configured provider.",
           "additionalProperties": { "type": "string" },
           "examples": [
             {
-              "gpt-image-2": "Latest OpenAI image generation model. Call `imagine(prompt: \"...\", imagePath?, size?, quality?, style?, inputFidelity?)` to generate or image-to-image edit."
+              "image-model-id": "Supports text-to-image generation and image-to-image editing through imagine()."
             }
           ]
         },
         "tiers": {
           "type": "object",
-          "description": "REQUIRED. Authoritative model-tier roster. Drives the 'Tier roster' section the model-curator injects into the system prompt and any T0 dispatch planning. Keys are tier names (commonly 'flagship' / 'flagship_candidate' / 'standard' / 'fast'); values are objects with `label`, optional `description`, and `models` (array of `provider/modelId`). Tiers are NOT runtime fallback chains; they are a capability ranking for LLM selection guidance. Business call points (memory, sediment, vision, workflow, goal, compaction, imagine) continue to read their own per-role model fields, NOT this roster. Selection rule: when adding flagship members, prefer cross-vendor + cross-architecture; do not count two Anthropic models as two independent voters. A `flagship_candidate` tier, when present, means specialist/under-validation voices: do not count them as primary T0 voters in 3-way blind audits.",
+          "description": "REQUIRED. Authoritative model-tier roster. Drives the 'Tier roster' section the model-curator injects into the system prompt and any T0 dispatch planning. Keys are tier names (commonly 'flagship' / 'flagship_candidate' / 'standard' / 'fast'); values are objects with `label`, optional `description`, and `models` (array of `provider/modelId`). Tiers are NOT runtime fallback chains; they are a capability ranking for LLM selection guidance. Business call points (memory, sediment, vision, workflow, goal, compaction, imagine) continue to read their own per-role model fields, NOT this roster. Selection rule: when adding flagship members, prefer cross-vendor + cross-architecture; do not count two same-vendor models as two independent voters. A `flagship_candidate` tier, when present, means specialist/under-validation voices: do not count them as primary T0 voters in 3-way blind audits.",
           "minProperties": 1,
           "additionalProperties": {
             "type": "object",
@@ -100,18 +99,17 @@
                 "label": "T0 — cost-blind flagship reasoning",
                 "description": "Critical agentic dispatch surface. Cost is never a consideration.",
                 "models": [
-                  "anthropic/claude-fable-5",
-                  "openai/gpt-5.5",
-                  "deepseek/deepseek-v4-pro"
+                  "provider-a/flagship-reasoning-model",
+                  "provider-b/flagship-review-model"
                 ]
               },
               "standard": {
                 "label": "T1 — standard tier",
-                "models": ["anthropic/claude-sonnet-5", "moonshotai/kimi-k2.6"]
+                "models": ["provider-a/standard-coding-model"]
               },
               "fast": {
                 "label": "T2 — fast / high-volume",
-                "models": ["anthropic/claude-haiku-4-5", "deepseek/deepseek-v4-flash"]
+                "models": ["provider-a/fast-classification-model"]
               }
             }
           ]
@@ -148,7 +146,7 @@
 
     "openaiServiceTier": {
       "type": "object",
-      "description": "OpenAI service_tier injection (extensions/openai-service-tier/). Adds the official OpenAI request body field `service_tier` for explicitly allowlisted OpenAI models via before_provider_request. Intended for GPT fast/priority mode experiments without patching pi core. Env PI_ASTACK_DISABLE_OPENAI_SERVICE_TIER=1 wins over this setting.",
+      "description": "OpenAI service_tier injection (extensions/openai-service-tier/). Adds the official OpenAI request body field `service_tier` for explicitly allowlisted OpenAI-compatible models via before_provider_request. Intended for provider scheduling experiments without patching pi core. Env PI_ASTACK_DISABLE_OPENAI_SERVICE_TIER=1 wins over this setting.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -176,15 +174,15 @@
           "type": "array",
           "items": { "type": "string", "pattern": "^[a-z0-9_-]+/[A-Za-z0-9._-]+$" },
           "default": [],
-          "description": "Exact `provider/modelId` allowlist. Empty list means inactive even when enabled, so a config typo fails closed instead of enabling service_tier broadly.",
-          "examples": [["openai/gpt-5.5"]]
+          "description": "Exact `provider/modelId` allowlist for models that support this provider-specific scheduling option. Empty list means inactive even when enabled, so a config typo fails closed instead of enabling service_tier broadly.",
+          "examples": [["provider/model-id"]]
         }
       }
     },
 
     "modelFallback": {
       "type": "object",
-      "description": "Multi-model fallback chain with retry (extensions/model-fallback/). Asymmetric policy: the **initial** model gets pi's full retry budget before fallback kicks in (retry count auto-read from pi settings.json#retry.maxRetries, no separate config needed); **each fallback model** gets exactly 1 attempt — any error switches to the next configured model immediately. When all fallback models are tried and all fail, the extension stops. For claude-code parity (10 attempts, 1s-256s delays), set pi settings.json#retry.maxRetries=9 + retry.baseDelayMs=1000; the extension auto-aligns.",
+      "description": "Multi-model fallback chain with retry (extensions/model-fallback/). Asymmetric policy: the **initial** model gets pi's full retry budget before fallback kicks in (retry count auto-read from pi settings.json#retry.maxRetries, no separate config needed); **each fallback model** gets exactly 1 attempt — any error switches to the next configured model immediately. When all fallback models are tried and all fail, the extension stops. For an aggressive ten-attempt retry profile with exponential delays, set pi settings.json#retry.maxRetries=9 + retry.baseDelayMs=1000; the extension auto-aligns.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -195,10 +193,9 @@
           "description": "Ordered list of `provider/modelId` strings. When the initial model exhausts its retries, the extension walks this list in order, picking the first un-tried entry that exists in pi's modelRegistry and has configured auth. Entries missing from the registry or without auth are logged as warnings and skipped. The currently-active model (whatever it is when the error happens) is auto-added to the tried set, so it's safe to include it in the list. Empty list = retry behavior only, no fallback.",
           "examples": [
             [
-              "openai/gpt-5.5",
-              "anthropic/claude-opus-4-8",
-              "anthropic/claude-sonnet-5",
-              "deepseek/deepseek-v4-pro"
+              "provider-a/primary-strong-model",
+              "provider-b/cross-family-fallback-model",
+              "provider-c/reliable-backstop-model"
             ]
           ]
         }
@@ -250,7 +247,7 @@
           "type": "number",
           "default": 350000,
           "minimum": 1000,
-          "description": "Maximum rendered run-window size. Raised from 200K to 350K (2026-05-11) with per-entry truncation at maxEntryChars. 350K chars ~87.5K tokens, 71% of deepseek 128K context."
+          "description": "Maximum rendered run-window size. Raised from 200K to 350K (2026-05-11) with per-entry truncation at maxEntryChars. 350K chars is about 87.5K tokens, so choose extractor models with enough context headroom."
         },
 
         "maxWindowEntries": {
@@ -269,8 +266,8 @@
 
         "extractorModel": {
           "type": "string",
-          "default": "deepseek/deepseek-v4-pro",
-          "description": "Model used by the LLM extractor (transcript → MEMORY blocks). Needs strong long-context reading comprehension + bilingual + adversarial resistance. v4-pro recommended; do not downgrade to flash for this task."
+          "default": "",
+          "description": "Model used by the LLM extractor (transcript → MEMORY blocks). Needs strong long-context reading comprehension, bilingual text handling, structured extraction, and adversarial-prompt resistance. Empty default means fail-closed unless configured in pi-astack-settings.json."
         },
 
         "extractorTimeoutMs": {
@@ -289,8 +286,8 @@
 
         "classifierModel": {
           "type": "string",
-          "default": "deepseek/deepseek-v4-flash",
-          "description": "Model used by the active-correction classifier (conversation window → CorrectionSignal). Cheap reading-comprehension task; default v4-flash."
+          "default": "",
+          "description": "Model used by the active-correction classifier (conversation window → CorrectionSignal). Needs low-latency reading comprehension and reliable structured output; deep reasoning is not required. Empty default means fail-closed unless configured in pi-astack-settings.json."
         },
 
         "classifierTimeoutMs": {
@@ -316,8 +313,8 @@
 
         "curatorModel": {
           "type": "string",
-          "default": "deepseek/deepseek-v4-flash",
-          "description": "Model used by the curator (candidate + neighbors → create/update/merge/skip decision). Small-context entity-resolution task; v4-flash is sufficient. Split from extractorModel (2026-05-11 audit)."
+          "default": "",
+          "description": "Model used by the curator (candidate + neighbors → create/update/merge/skip decision). Needs small-context entity resolution, conservative lifecycle judgment, and reliable structured output. Empty default means fail-closed unless configured in pi-astack-settings.json. Split from extractorModel (2026-05-11 audit)."
         },
 
         "curatorTimeoutMs": {
@@ -565,8 +562,8 @@
 
         "aggregatorModel": {
           "type": "string",
-          "default": "deepseek/deepseek-v4-pro",
-          "description": "Model used by the aggregator v1 skeptical-historian LLM pass (ADR 0025 §4.3 Phase C, 2026-05-28; v1.1 L1 evolution self-state 2026-05-31; v1.2 identity convergence 2026-06-03). Reasoning-heavy task over 9 input feeds including evolution_hypotheses; v4-pro is the cheapest top-tier reasoning model and the default. Empty/invalid → falls back to curatorModel. Aggregator runs are debounced to ~24h so cost is negligible (~$0.005-0.05 per run)."
+          "default": "",
+          "description": "Model used by the aggregator v1 skeptical-historian LLM pass (ADR 0025 §4.3 Phase C, 2026-05-28; v1.1 L1 evolution self-state 2026-05-31; v1.2 identity convergence 2026-06-03). Reasoning-heavy task over 9 input feeds including evolution_hypotheses; choose a model with strong long-context synthesis, skepticism, and structured output. Empty/invalid falls back to curatorModel. Aggregator runs are debounced to about 24h."
         },
 
         "aggregatorTimeoutMs": {
@@ -722,14 +719,7 @@
 
         "modelPolicies": {
           "type": "object",
-          "default": {
-            "openai/gpt-5.5": {
-              "effectiveContextBudget": 272000,
-              "thresholdPercent": 68,
-              "minHeadroomTokens": 48000,
-              "rearmMarginPercent": 8
-            }
-          },
+          "default": {},
           "additionalProperties": {
             "type": "object",
             "additionalProperties": false,
@@ -772,12 +762,10 @@
             "largeWindowMaxTokens": 1100000,
             "largeWindowThresholdPercent": 70,
             "minHeadroomTokens": 64000,
-            "modelEffectiveContextBudgets": {
-              "openai/gpt-5.5": 272000
-            }
+            "modelEffectiveContextBudgets": {}
           },
           "additionalProperties": false,
-          "description": "Optional dynamic threshold layer. Enabled by default: small/economic windows compact earlier so tool-call chains keep enough headroom before the next model request. `modelEffectiveContextBudgets` lets a provider/model use an economic or observed safe budget instead of its nominal contextWindow; default treats OpenAI API gpt-5.5 as 272k economic input budget, while users can override it to 1050000 for full-window mode.",
+          "description": "Optional dynamic threshold layer. Enabled by default: small/economic windows compact earlier so tool-call chains keep enough headroom before the next model request. `modelEffectiveContextBudgets` lets a provider/model use an economic or observed safe budget instead of its nominal contextWindow. Concrete model-specific budgets belong in pi-astack-settings.json.",
           "properties": {
             "_comment": { "type": "string" },
             "enabled": {
@@ -832,12 +820,12 @@
             },
             "modelEffectiveContextBudgets": {
               "type": "object",
-              "default": { "openai/gpt-5.5": 272000 },
+              "default": {},
               "additionalProperties": {
                 "type": "number",
                 "minimum": 1
               },
-              "description": "Provider/model → effective token budget overrides, keyed as `provider/modelId`. The override is capped by the runtime contextWindow if that is smaller. Use for provider-specific safe limits or economic sweet spots. If this object is present, it replaces the built-in default map; set {} to remove the default OpenAI gpt-5.5 economic-budget override."
+              "description": "Provider/model → effective token budget overrides, keyed as `provider/modelId`. The override is capped by the runtime contextWindow if that is smaller. Use for provider-specific safe limits or economic sweet spots. If this object is present, it replaces the built-in default map; set {} to keep no model-specific budget overrides."
             }
           }
         },
@@ -866,7 +854,7 @@
           "type": "array",
           "default": [],
           "items": { "type": "string" },
-          "description": "Optional ordered provider/model refs used by compaction-tuner's custom session_before_compact summarizer. Empty default means do not override: pi core summarizes with the current main-session model. Example opt-in: [\"anthropic/claude-sonnet-5\", \"deepseek/deepseek-v4-pro\"]. If all configured models fail, compaction falls back to pi core default summarization. Ignored when remoteOpenAICompaction.enabled is true; remote OpenAI skip/failure returns undefined so pi core default compaction runs."
+          "description": "Optional ordered provider/model refs used by compaction-tuner's custom session_before_compact summarizer. Empty default means do not override: pi core summarizes with the current main-session model. Choose models with strong summarization and long-context compression. If all configured models fail, compaction falls back to pi core default summarization. Ignored when remoteOpenAICompaction.enabled is true; remote OpenAI skip/failure returns undefined so pi core default compaction runs."
         },
 
         "remoteOpenAICompaction": {
@@ -889,8 +877,8 @@
               "type": "array",
               "default": [],
               "items": { "type": "string", "pattern": "^[a-z0-9_-]+/[A-Za-z0-9._-]+$" },
-              "description": "Exact provider/model refs allowed to use remote OpenAI compaction. Empty list is inactive even when enabled, so config mistakes fail closed.",
-              "examples": [["openai/gpt-5.5", "openai-codex/gpt-5-codex"]]
+              "description": "Exact provider/model refs allowed to use remote OpenAI compaction. Empty list is inactive even when enabled, so config mistakes fail closed. Choose models that support the required Responses compaction endpoint.",
+              "examples": [["provider/model-id"]]
             },
             "timeoutMs": {
               "type": "number",
@@ -1056,21 +1044,20 @@
         "decideModel": {
           "type": "string",
           "default": "",
-          "description": "memory_decide synthesis model. Empty = reuse search.stage1Model (backward-compatible). Set to decouple decision-brief quality from the high-frequency stage1 coarse-recall model; memory_decide is low-frequency + quality-sensitive, so a stronger model here is cheap. decide.ts reads decideModel ?? stage1Model. e.g. github-copilot/gpt-5.5 (1x premium-req, negligible at low frequency)."
+          "description": "memory_decide synthesis model. Empty = reuse search.stage1Model (backward-compatible). Set to decouple decision-brief quality from the high-frequency stage1 coarse-recall model; memory_decide is low-frequency and quality-sensitive, so choose a stronger synthesis model when available."
         },
 
         "search": {
           "type": "object",
-          "description": "LLM-driven memory_search settings (ADR 0015 two-stage rerank, extended by ADR 0035 stage0 embedding retrieval + ADR 0036 two-stage collapse). Current pipeline: stage0 = embedding dense (doubao) ∪ sparse (BM25) RRF candidate pool (stage0Enabled, default on); stage1 = LLM coarse candidate selection (skippable via stage1Skip); stage2 = LLM full-content rerank (final ranker). The stageN model/limit/thinking fields configure the LLM stages; the stage0* fields configure embedding retrieval. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
+          "description": "LLM-driven memory_search settings (ADR 0015 two-stage rerank, extended by ADR 0035 stage0 embedding retrieval + ADR 0036 two-stage collapse). Current pipeline: stage0 = embedding dense retrieval plus sparse BM25 RRF candidate pool (stage0Enabled, default on); stage1 = LLM coarse candidate selection (skippable via stage1Skip); stage2 = LLM full-content rerank (final ranker). The stageN model/limit/thinking fields configure the LLM stages; the stage0* fields configure embedding retrieval. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
           "additionalProperties": false,
           "properties": {
             "_comment": { "type": "string" },
 
             "stage1Model": {
               "type": "string",
-              "default": "deepseek/deepseek-v4-flash",
-              "minLength": 1,
-              "description": "Stage 1 candidate-selection model. Reads enhanced _index.md (~37k tokens for 250 entries) and outputs top-stage1Limit slug candidates. Recommended: a fast model (high-volume eval task, no deep reasoning needed). Must be non-empty; invalid/missing models hard-error rather than degrading."
+              "default": "",
+              "description": "Stage 1 candidate-selection model. Reads the enhanced _index.md candidate surface and outputs top-stage1Limit slug candidates. Choose a fast, low-cost model with reliable broad-recall classification and structured output; deep reasoning is not required. Empty default means fail-closed unless configured in pi-astack-settings.json."
             },
             "stage1Limit": {
               "type": "number",
@@ -1082,13 +1069,12 @@
               "type": "string",
               "default": "off",
               "enum": ["off", "minimal", "low", "medium", "high", "xhigh"],
-              "description": "Reasoning level for Stage 1 candidate selection. Default off because Stage 1 is broad recall/classification, and deepseek-v4 only supports off/high/xhigh — requesting minimal would be clamped to high by pi-ai. Unsupported levels hard-error rather than silently clamping."
+              "description": "Reasoning level for Stage 1 candidate selection. Default off because Stage 1 is broad recall/classification. Unsupported levels hard-error rather than silently clamping."
             },
             "stage2Model": {
               "type": "string",
-              "default": "deepseek/deepseek-v4-flash",
-              "minLength": 1,
-              "description": "Stage 2 final-rerank model. Reads stage 1 candidates' full content and produces ranked top-stage2Limit. This is a reading comprehension + relevance judgment task, NOT a reasoning task — thinking mode adds latency with zero ranking benefit. Default v4-flash is fast, cheap, and bilingual-quality-sufficient. Override to v4-pro or another family only if you observe quality issues with complex cross-entry semantic matching."
+              "default": "",
+              "description": "Stage 2 final-rerank model. Reads stage 1 candidates' full content and produces ranked top-stage2Limit. This is a reading comprehension and relevance-judgment task; choose a model with strong bilingual relevance ranking and reliable JSON output. Empty default means fail-closed unless configured in pi-astack-settings.json."
             },
             "stage2Limit": {
               "type": "number",
@@ -1106,7 +1092,7 @@
             "stage0Enabled": {
               "type": "boolean",
               "default": true,
-              "description": "ADR 0035 P5 (转产): enable stage0 embedding+sparse candidate retrieval as the default production recall surface. Dense (doubao) ∪ sparse (BM25) fused via RRF into a bounded candidate pool, replacing full-corpus full-body fan-out. Set false to emergency-rollback to full-corpus full-body (kill-switch)."
+              "description": "ADR 0035 P5: enable stage0 embedding+sparse candidate retrieval as the default production recall surface. Dense embedding retrieval and sparse BM25 are fused via RRF into a bounded candidate pool, replacing full-corpus full-body fan-out. Set false to emergency-rollback to full-corpus full-body."
             },
             "stage0PoolLimit": {
               "type": "number",
@@ -1203,9 +1189,8 @@
             },
             "queryRewriterModel": {
               "type": "string",
-              "default": "deepseek/deepseek-v4-flash",
-              "minLength": 1,
-              "description": "Stage-1 rewriter: classifies whether the user message carries usable intent + condenses to a search query. Recommended a fast / cheap model (~$0.001 per call). Matches the search Stage 1 model so token cost stays predictable."
+              "default": "",
+              "description": "Path-A rewriter model. Classifies whether the user message carries usable intent and condenses recent context into a search query. Choose a low-latency model with good bilingual intent rewriting and structured output. Empty default means fail-closed unless configured in pi-astack-settings.json."
             },
             "queryRewriterTimeoutMs": {
               "type": "number",
@@ -1281,13 +1266,13 @@
               "type": "number",
               "default": 2048,
               "minimum": 1,
-              "description": "Embedding vector dimensionality. Must match the provider model's output dim (doubao-embedding-vision = 2048)."
+              "description": "Embedding vector dimensionality. Must match the configured embedding model's output dimension."
             },
             "batchSize": {
               "type": "number",
               "default": 10,
               "minimum": 1,
-              "description": "Texts per embed request. doubao hard cap = 10."
+              "description": "Texts per embed request. Set no higher than the configured embedding provider's batch cap."
             },
             "tpmLimit": {
               "type": "number",
@@ -1531,9 +1516,8 @@
           "description": "Ordered preference list, most-preferred first. Each entry is 'provider/idSubstring' — substring match on model id (case-insensitive, version-suffix-tolerant). Models matching earlier entries win; unmatched models still participate, ordered by cost.input descending as a rough capability proxy.",
           "examples": [
             [
-              "openai/gpt-5.5",
-              "anthropic/claude-sonnet-5",
-              "anthropic/claude-opus-4-8"
+              "provider-a/vision-model-id",
+              "provider-b/multimodal-review-model-id"
             ]
           ]
         }
