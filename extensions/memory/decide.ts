@@ -166,7 +166,21 @@ export function buildDecisionBriefPrompt(args: {
   context: string;
   options: string[];
   constraints: string;
-  entries: Array<{ slug: string; title: string; kind: string; compiledTruth: string; status?: string; confidence?: number; created?: string; updated?: string; timeline?: string[]; frontmatter?: Record<string, unknown> }>;
+  entries: Array<{
+    slug: string;
+    title: string;
+    kind: string;
+    compiledTruth: string;
+    status?: string;
+    confidence?: number;
+    created?: string;
+    updated?: string;
+    timeline?: string[];
+    frontmatter?: Record<string, unknown>;
+    retrievalLowConfidence?: boolean;
+    retrievalDegraded?: boolean;
+    retrievalVerdict?: "has_relevant" | "none" | "unknown";
+  }>;
   activity?: EntryActivityStats[];
   activityWindowDays?: number;
 }): string {
@@ -177,15 +191,19 @@ export function buildDecisionBriefPrompt(args: {
   const windowDays = args.activityWindowDays ?? 30;
 
   const entryBlocks = args.entries.length > 0
-    ? args.entries.map((e) =>
-        [
+    ? args.entries.map((e) => {
+        const retrievalQuality = e.retrievalLowConfidence || e.retrievalDegraded || e.retrievalVerdict
+          ? `retrieval: verdict=${e.retrievalVerdict ?? "unknown"}${e.retrievalLowConfidence ? " | low_confidence=true" : ""}${e.retrievalDegraded ? " | degraded=true" : ""}`
+          : "";
+        return [
           `## ${e.slug} (${e.kind})`,
           `### ${e.title}`,
           `metadata: status=${e.status ?? "unknown"} | confidence=${e.confidence ?? "unknown"}${e.updated ? ` | updated=${e.updated}` : ""}${e.created ? ` | created=${e.created}` : ""}`,
+          retrievalQuality,
           e.compiledTruth,
           e.timeline && e.timeline.length > 0 ? `\nRecent timeline:\n${e.timeline.slice(-3).join("\n")}` : "",
-        ].join("\n"),
-      ).join("\n\n---\n\n")
+        ].filter((line) => line.length > 0).join("\n");
+      }).join("\n\n---\n\n")
     : "(no relevant memories found)";
 
   const activityText = renderActivitySection(args.activity, windowDays);
@@ -286,6 +304,9 @@ export function buildDecisionBriefPrompt(args: {
     "  say 'no explicit preference recorded'.",
     "- If a memory's confidence is low or status is provisional, mention",
     "  that uncertainty in the brief.",
+    "- If retrieval marks low_confidence=true, treat that memory as a weak",
+    "  hint rather than a confident match. If degraded=true, mention recall",
+    "  may be incomplete when it affects the recommendation.",
     "- Be concise. 500 tokens max. The LLM is mid-task and needs a quick",
     "  read, not an essay.",
     "- If no relevant memories were found, your brief should be a single",
@@ -342,7 +363,21 @@ export async function runMemoryDecide(args: {
   context: string;
   options: string[];
   constraints: string;
-  searchResults: Array<{ slug: string; title: string; kind: string; compiledTruth: string; status?: string; confidence?: number; created?: string; updated?: string; timeline?: string[]; frontmatter?: Record<string, unknown> }>;
+  searchResults: Array<{
+    slug: string;
+    title: string;
+    kind: string;
+    compiledTruth: string;
+    status?: string;
+    confidence?: number;
+    created?: string;
+    updated?: string;
+    timeline?: string[];
+    frontmatter?: Record<string, unknown>;
+    retrievalLowConfidence?: boolean;
+    retrievalDegraded?: boolean;
+    retrievalVerdict?: "has_relevant" | "none" | "unknown";
+  }>;
   /** ADR 0026 §3.4 outcome activity per slug, ordered to match searchResults. */
   activity?: EntryActivityStats[];
   /** Window for the activity stats label in the prompt. Default 30. */

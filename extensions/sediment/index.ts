@@ -2641,8 +2641,15 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               memSettings,
               modelRegistry,
               { projectRoot: cwd },
-            ) as Array<{ slug: unknown; title?: unknown; summary?: unknown; kind?: unknown; status?: unknown; scope?: unknown; compiled_truth?: unknown }>;
+            ) as Array<{ slug: unknown; title?: unknown; summary?: unknown; kind?: unknown; status?: unknown; scope?: unknown; compiled_truth?: unknown }> & {
+              lowConfidence?: boolean;
+              retrievalDegraded?: boolean;
+              relevance_verdict?: "has_relevant" | "none" | "unknown";
+            };
             const bySlug = new Map(loadedEntries.map((entry: any) => [String(entry.slug), entry]));
+            const searchLowConfidence = Array.isArray(memResult) && memResult.lowConfidence === true;
+            const searchRetrievalDegraded = Array.isArray(memResult) && memResult.retrievalDegraded === true;
+            const searchRetrievalVerdict = Array.isArray(memResult) ? memResult.relevance_verdict : undefined;
             relatedEntries = (memResult && !(memResult as any).ok)
               ? []
               : (Array.isArray(memResult) ? memResult.map((c: any) => {
@@ -2656,6 +2663,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                     summary: typeof full?.compiledTruth === "string"
                       ? full.compiledTruth.slice(0, 150)
                       : typeof c.summary === "string" ? c.summary.slice(0, 150) : undefined,
+                    ...(searchLowConfidence ? { retrieval_low_confidence: true } : {}),
+                    ...(searchRetrievalDegraded ? { retrieval_degraded: true } : {}),
+                    ...(searchRetrievalVerdict ? { retrieval_verdict: searchRetrievalVerdict } : {}),
                   };
                 }).filter(e => e.slug) : []);
           } catch { /* search failure is non-fatal */ }

@@ -24,7 +24,7 @@ import { asBoolean, resolveSettings } from "./settings";
 import type { GetParams, ListFilters, SearchParams } from "./types";
 import { loadEntries } from "./parser";
 import { findEntry, listEntries, serializeEntry } from "./search";
-import { runMemorySearch } from "./llm-search";
+import { runMemorySearch, type SearchPlainResult } from "./llm-search";
 import { recordUsage } from "./usage-telemetry";
 import { buildDecisionSearchQuery, pruneDecisionBriefSeqCountersForSession, runMemoryDecide } from "./decide";
 import { PATH_A_INJECT_MARKER } from "./memory-context-injector";
@@ -503,6 +503,9 @@ export default function (pi: ExtensionAPI) {
         constraints: params.constraints,
       });
       let searchCards: Array<{ slug: unknown }>;
+      let retrievalLowConfidence = false;
+      let retrievalDegraded = false;
+      let retrievalVerdict: SearchPlainResult["relevance_verdict"] | undefined;
       try {
         // ADR 0037: decideSearch profile(status:[active], limit:8; search 用 stage1Model;
         // 合成走 decideModel 在下方 handler, 与 search 解耦)
@@ -517,7 +520,11 @@ export default function (pi: ExtensionAPI) {
             hint: "memory_decide retrieval failed. Do not infer absence of relevant memories; fall back to memory_search only after fixing retrieval availability.",
           });
         }
-        searchCards = result as Array<{ slug: unknown }> ?? [];
+        const plain = (Array.isArray(result) ? result : result.hits) as SearchPlainResult;
+        retrievalLowConfidence = plain.lowConfidence === true;
+        retrievalDegraded = plain.retrievalDegraded === true;
+        retrievalVerdict = plain.relevance_verdict;
+        searchCards = plain ?? [];
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
         return wrapToolResult({
@@ -549,6 +556,9 @@ export default function (pi: ExtensionAPI) {
         compiledTruth: entry.compiledTruth,
         timeline: entry.timeline,
         frontmatter: entry.frontmatter,
+        ...(retrievalLowConfidence ? { retrievalLowConfidence: true } : {}),
+        ...(retrievalDegraded ? { retrievalDegraded: true } : {}),
+        ...(retrievalVerdict ? { retrievalVerdict } : {}),
       }));
 
       // Step 2.5 (ADR 0026 §3.4 P1.A): outcome activity summary.
@@ -607,10 +617,19 @@ export default function (pi: ExtensionAPI) {
             // for this call (e.g., lifecycle not bound, or memory_decide
             // invoked before before_agent_start). Only emit when true.
             ...(result.anchorMissing ? { anchorMissing: true } : {}),
+            ...(retrievalLowConfidence ? { retrievalLowConfidence: true } : {}),
+            ...(retrievalDegraded ? { retrievalDegraded: true } : {}),
+            ...(retrievalVerdict ? { retrievalVerdict } : {}),
           },
           hint: "memory_decide LLM call failed. Fall back to memory_search + manual synthesis.",
         });
       }
+
+      const retrievalHint = retrievalLowConfidence
+        ? " Retrieval note: the memories came from best-effort candidates because stage2 found no confident match; treat the brief as lower confidence."
+        : retrievalDegraded
+          ? " Retrieval note: embedding candidate retrieval degraded to sparse-only; recall may be incomplete."
+          : "";
 
       return wrapToolResult({
         ok: true,
@@ -623,8 +642,11 @@ export default function (pi: ExtensionAPI) {
           decisionBriefId: result.decisionBriefId,
           // R3 GPT-5.5: see above — surface anchorMissing only when true.
           ...(result.anchorMissing ? { anchorMissing: true } : {}),
+          ...(retrievalLowConfidence ? { retrievalLowConfidence: true } : {}),
+          ...(retrievalDegraded ? { retrievalDegraded: true } : {}),
+          ...(retrievalVerdict ? { retrievalVerdict } : {}),
         },
-        hint: "This is a synthesized decision brief based on the user's documented history. The LLM should treat it as expert advice, not as a binding command.",
+        hint: `This is a synthesized decision brief based on the user's documented history. The LLM should treat it as expert advice, not as a binding command.${retrievalHint}`,
       });
     },
   });

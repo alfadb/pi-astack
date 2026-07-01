@@ -272,6 +272,9 @@ exports.streamSimple = (_model, opts, config) => {
   let text;
   if (prompt.includes('MEMORY_SEARCH_CANDIDATES')) {
     exports.__calls.push('memory-search-stage2');
+    if (globalThis.__MEMORY_SEARCH_STAGE2_ERROR__) {
+      return { result: async () => ({ stopReason: 'error', errorMessage: String(globalThis.__MEMORY_SEARCH_STAGE2_ERROR__) }) };
+    }
     text = '[{"slug":"alpha","score":10,"why":"direct match"}]';
   } else if (prompt.includes('MEMORY_SEARCH_INDEX')) {
     exports.__calls.push('memory-search-stage1');
@@ -687,7 +690,24 @@ async function main() {
 
     // === correction classifier dispatch safety ========================
     {
+      const { _buildClassifierPromptForTests } = req("./sediment/correction-pipeline.js");
       const { _dispatchCorrectionSignalForTests, _resetAutoWriteStateForTests } = req("./sediment/index.js");
+      const classifierPrompt = _buildClassifierPromptForTests({
+        windowText: "user: 这条记忆不对",
+        stagingContext: [],
+        relatedEntries: [{
+          slug: "prefer-pnpm",
+          title: "Prefer pnpm",
+          kind: "preference",
+          status: "active",
+          summary: "User prefers pnpm.",
+          retrieval_low_confidence: true,
+          retrieval_degraded: true,
+          retrieval_verdict: "none",
+        }],
+      });
+      assert(classifierPrompt.includes("retrieval-quality: verdict=none low_confidence=true degraded=true"), `classifier prompt must expose related-entry retrieval quality: ${classifierPrompt}`);
+      assert(classifierPrompt.includes("stage2 found no confident match") && classifierPrompt.includes("prefer target_entry_slug=null"), `classifier prompt must instruct discounting low-confidence related entries: ${classifierPrompt}`);
       _resetAutoWriteStateForTests();
       const unknown = _dispatchCorrectionSignalForTests({ signal_found: true, confidence: 9, correction_intent: "unknown typed correction" });
       assert(unknown.forwarded === null, `unknown/missing correction typing must not reach curator: ${JSON.stringify(unknown)}`);
@@ -1251,6 +1271,28 @@ async function main() {
     );
     assert(lastMetric.stage1_surface === "full_body_v3", `memory_search metrics must record Stage 1 candidate surface for before/after comparison: ${JSON.stringify(lastMetric)}`);
     assert(typeof lastMetric.verdict === "string", `memory_search metrics must record stage2 verdict: ${JSON.stringify(lastMetric)}`);
+
+    // LLM hard-errors must still leave an observable metrics row. This keeps
+    // the accuracy contract (no grep fallback) while making provider/auth/model
+    // failures diagnosable for toolSearch/decide/correction plain-call paths.
+    {
+      const savedCalls = piAiStub.__calls, savedPrompts = piAiStub.__prompts, savedConfigs = piAiStub.__configs;
+      piAiStub.__calls = []; piAiStub.__prompts = []; piAiStub.__configs = [];
+      globalThis.__MEMORY_SEARCH_STAGE2_ERROR__ = "forced stage2 failure for smoke";
+      pinStage1Skip(true);
+      const failRaw = await search.execute("smoke-llm-failure-metrics", search.prepareArguments({ query: "find memory about dispatch facade", limit: 2 }), new AbortController().signal, null, { cwd: root, modelRegistry: mockModelRegistry });
+      delete globalThis.__MEMORY_SEARCH_STAGE2_ERROR__;
+      assert(failRaw.isError, `memory_search stage2 failure must remain a hard error: ${JSON.stringify(failRaw)}`);
+      const failPayload = JSON.parse(failRaw.content[0].text);
+      assert(String(failPayload.error || "").includes("forced stage2 failure"), `hard-error payload must expose the provider failure: ${JSON.stringify(failPayload)}`);
+      const failMetricLines = fs.readFileSync(metricsPath, "utf-8").trim().split(/\n/);
+      const failMetric = JSON.parse(failMetricLines[failMetricLines.length - 1]);
+      assert(failMetric.outcome === "llm_error", `LLM failure must write an observable metrics row: ${JSON.stringify(failMetric)}`);
+      assert(failMetric.error_stage === "stage2" && failMetric.error_phase === "primary", `failure metric must identify stage and phase: ${JSON.stringify(failMetric)}`);
+      assert(failMetric.stage1_skip === true && failMetric.stage2_model, `failure metric must include model/flag context: ${JSON.stringify(failMetric)}`);
+      pinStage1Skip(false);
+      piAiStub.__calls = savedCalls; piAiStub.__prompts = savedPrompts; piAiStub.__configs = savedConfigs;
+    }
 
     const graph = await rebuildGraphIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "graph.json not written");
@@ -8175,7 +8217,7 @@ Body.
           options: ["pnpm", "yarn"],
           constraints: "",
           entries: [
-            { slug: "prefer-pnpm", title: "Prefer pnpm", kind: "preference", status: "active", confidence: 9, compiledTruth: "User prefers pnpm." },
+            { slug: "prefer-pnpm", title: "Prefer pnpm", kind: "preference", status: "active", confidence: 9, compiledTruth: "User prefers pnpm.", retrievalLowConfidence: true, retrievalVerdict: "none" },
             { slug: "ci-github-actions", title: "CI on Actions", kind: "decision", status: "active", confidence: 7, compiledTruth: "User uses GH Actions." },
             { slug: "cold-slug-never-seen", title: "Cold", kind: "fact", status: "active", confidence: 4, compiledTruth: "Cold fact." },
           ],
@@ -8189,6 +8231,8 @@ Body.
         assert(/possible_echo_chamber=true/.test(prompt) && /pending reconfirmation/.test(prompt), `prompt must surface echo-chamber breaker and downgrade instruction; prompt was:\n${prompt}`);
         assert(/total_retrievals counts tool invocations, not unique sessions/.test(prompt), `prompt must warn that total_retrievals can be inflated by repeated searches: ${prompt}`);
         assert(/metadata: status=/.test(prompt) && /confidence=/.test(prompt), `prompt must expose memory status/confidence metadata to support uncertainty instructions: ${prompt}`);
+        assert(/retrieval: verdict=none \| low_confidence=true/.test(prompt), `prompt must expose low-confidence retrieval quality to memory_decide synthesis: ${prompt}`);
+        assert(/low_confidence=true, treat that memory as a weak/.test(prompt), `prompt must instruct memory_decide synthesis to discount low-confidence retrievals: ${prompt}`);
         assert(/CONTRADICTION CHECK INPUTS/.test(prompt) && /prefer-pnpm: kind=preference/.test(prompt), `prompt must expose high-confidence active memories for contradiction detection: ${prompt}`);
         assert(/No direct\s+contradiction detected/.test(prompt), `prompt must require an explicit contradiction-check section: ${prompt}`);
         assert(/Do NOT apply hard thresholds/.test(prompt), `prompt must instruct LLM to weight by judgment not threshold (ADR 0024 §3 AI-Native)`);

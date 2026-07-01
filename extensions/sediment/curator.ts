@@ -1058,9 +1058,10 @@ export async function curateProjectDraft(
         ...loadReadonlyRuleNeighborEntries({ abrainHome: deps.abrainHome, cwd: deps.projectRoot }),
       ];
     }
-    // ADR 0037: sedimentDedup profile —— status:[all] limit:5 + 强制 stage1Skip=false +
-    // sparseBM25=false 在 SEARCH_PROFILES 一处声明(取代此前手搓 dedupSettings)。脆弱的
-    // all-status 近重路径不随全局 flag 漂移; pin 集中可审计(ADR 0036 §9.1 条件2/§11)。
+    // ADR 0037: sedimentDedup profile declares status:[all] limit:5 in one place.
+    // ADR 0036 P5b removed the earlier stage1Skip/sparseBM25=false temporary pins
+    // after dedup-specific validation; the profile now inherits those global flags
+    // and only pins dedupChunk0Aggregation=true for multi-vector safety.
     // entries 由本处传(relevantEntriesForCurator + readonly-rule-neighbors 增强集),
     // runMemorySearch 不接管 pre-corpus shaping。
     cards = await runMemorySearch(

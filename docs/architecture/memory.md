@@ -21,9 +21,9 @@ pi-astack memory 的 current contract：
 |---|---|---|
 | `~/.abrain/l1/events/sha256/**` | content-addressed evidence events | semantic SOT |
 | `~/.abrain/l2/views/**` | deterministic markdown projections | stable read/audit view |
-| `~/.abrain/projects/<id>/` | project memory legacy/canonical markdown area | retained as write/rollback surface during migration |
+| `~/.abrain/projects/<id>/` | project memory legacy markdown area | retained rollback/debug surface; projection_only steady-state writes go through L1/L2 |
 | `<project>/.pensieve/` | legacy project memory | read-only migration source |
-| `~/.abrain/knowledge/` | world / cross-project knowledge markdown area | retained as write/rollback surface during migration |
+| `~/.abrain/knowledge/` | world / cross-project legacy markdown area | retained rollback/debug surface; projection_only steady-state writes go through L1/L2 |
 | `~/.abrain/workflows/` | cross-project workflows | current writer target |
 | `~/.abrain/projects/<id>/workflows/` | project workflows | current writer target |
 | `~/.abrain/.state/` | derived state/audit/locks/local maps | not semantic SOT |

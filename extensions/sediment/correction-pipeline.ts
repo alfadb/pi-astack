@@ -149,6 +149,11 @@ export interface RelatedEntryCard {
   status?: string;
   /** ≤150 chars of compiled_truth for context */
   summary?: string;
+  /** Related-entry retrieval quality from correctionSearch. Low confidence means
+   *  stage2 found no confident match and the card came from stage0 ordering. */
+  retrieval_low_confidence?: boolean;
+  retrieval_degraded?: boolean;
+  retrieval_verdict?: "has_relevant" | "none" | "unknown";
   /** P2.A (ADR 0025 §4.2.5): per-entry, PROJECT-SCOPED outcome track record.
    *  Attached by the caller ONLY when the entry has real ledger data
    *  (last_seen or any count > 0). Absent ⇒ classifier treats as no signal.
@@ -254,6 +259,9 @@ function buildClassifierPrompt(args: {
         "    marks may be assistant self-reinforcement, not user reconfirmation).",
         "  - BUT a durable correction still requires the user's current words to",
         "    conflict with the entry's content — track-record never replaces content match.",
+        "retrieval-quality (when present) describes how the related entry was found:",
+        "  - low_confidence=true means stage2 found no confident match; treat the entry as a weak hint and prefer target_entry_slug=null unless the quoted words strongly match the entry content.",
+        "  - degraded=true means embedding retrieval fell back to sparse-only; recall may be incomplete.",
         "  - (none recorded) = no signal; judge normally.",
         "",
         ...args.relatedEntries.map((e) =>
@@ -263,6 +271,9 @@ function buildClassifierPrompt(args: {
             e.kind || e.status ? `  kind/status: ${[e.kind, e.status].filter(Boolean).join(" / ")}` : "",
             e.scope ? `  scope: ${e.scope}` : "",
             e.summary ? `  summary: ${e.summary}` : "",
+            e.retrieval_low_confidence || e.retrieval_degraded || e.retrieval_verdict
+              ? `  retrieval-quality: verdict=${e.retrieval_verdict ?? "unknown"}${e.retrieval_low_confidence ? " low_confidence=true" : ""}${e.retrieval_degraded ? " degraded=true" : ""}`
+              : "  retrieval-quality: (none recorded)",
             e.outcome_activity
               ? `  track-record: decisive×${e.outcome_activity.decisive} confirmatory×${e.outcome_activity.confirmatory} retrieved-unused×${e.outcome_activity.retrieved_unused}${e.outcome_activity.possible_echo_chamber ? " ⚠️possible-echo-chamber" : ""}${e.outcome_activity.last_seen ? ` last_seen=${e.outcome_activity.last_seen.slice(0, 10)}` : ""}`
               : "  track-record: (none recorded)",

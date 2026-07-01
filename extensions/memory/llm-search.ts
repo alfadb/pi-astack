@@ -944,7 +944,44 @@ async function executeSearch(
     }
   }
 
-  let result = await runTwoStageSearch(query, candidateEntries, settings, modelRegistry, signal, finalLimit, candidateLimit);
+  const inferLlmErrorStage = (message: string): "stage1" | "stage2" | "unknown" => {
+    if (settings.search.stage2Model && message.includes(settings.search.stage2Model)) return "stage2";
+    if (settings.search.stage1Model && message.includes(settings.search.stage1Model)) return "stage1";
+    return settings.search.stage1Skip ? "stage2" : "unknown";
+  };
+  const logLlmFailure = (error: unknown, phase: "primary" | "expanded_retry"): void => {
+    const message = error instanceof Error ? error.message : String(error);
+    logSearchMetrics({
+      ts: new Date().toISOString(),
+      query: query.slice(0, 80),
+      outcome: "llm_error",
+      error_stage: inferLlmErrorStage(message),
+      error_phase: phase,
+      error: message.slice(0, 500),
+      stage1_model: settings.search.stage1Model,
+      stage2_model: settings.search.stage2Model,
+      stage1_skip: settings.search.stage1Skip,
+      stage1_surface: surface,
+      ...(pool ? {
+        stage0_mode: pool.mode,
+        stage0_fallback: pool.mode === "sparse_fallback",
+        stage0_pool: candidateEntries.length,
+        stage0_dense: pool.denseCount,
+        stage0_sparse: pool.sparseCount,
+        stage0_stale: pool.staleCount,
+        stage0_embed_ms: pool.embedMs,
+        corpus_size: corpus.length,
+      } : { corpus_size: corpus.length }),
+    }, projectRoot);
+  };
+
+  let result: TwoStageResult;
+  try {
+    result = await runTwoStageSearch(query, candidateEntries, settings, modelRegistry, signal, finalLimit, candidateLimit);
+  } catch (error) {
+    logLlmFailure(error, "primary");
+    throw error;
+  }
 
   // 安全网双触发(修订 6): verdict=none OR pool<K → 一次有界扩召(topN×3 上限 400),
   // 仍 none 返回 none(不全库)。insufficient_pool 用结构信号 pool<K, 非绝对 cosine 门。
@@ -960,7 +997,15 @@ async function executeSearch(
     const exp = await selectStage0Pool(query, corpus, expSettings, modelRegistry, filters);
     if (exp && exp.candidateEntries.length > candidateEntries.length) {
       const retrySettings: MemorySettings = { ...settings, search: { ...settings.search, stage1Skip: false } };
-      const retry = await runTwoStageSearch(query, exp.candidateEntries, retrySettings, modelRegistry, signal, finalLimit, candidateLimit);
+      let retry: TwoStageResult;
+      try {
+        retry = await runTwoStageSearch(query, exp.candidateEntries, retrySettings, modelRegistry, signal, finalLimit, candidateLimit);
+      } catch (error) {
+        candidateEntries = exp.candidateEntries;
+        pool = exp;
+        logLlmFailure(error, "expanded_retry");
+        throw error;
+      }
       if (retry.verdict === "has_relevant" || retry.hits.length > result.hits.length) {
         result = retry; pool = exp; candidateEntries = exp.candidateEntries; expanded = true;
       }
@@ -1031,6 +1076,23 @@ async function executeSearch(
   };
 }
 
+export type SearchPlainResult = ReturnType<typeof resultCard>[] & {
+  /** Present on plain-hit profiles so internal callers can distinguish LLM-confirmed hits from best-effort candidates. */
+  relevance_verdict: "has_relevant" | "none" | "unknown";
+  /** ADR 0035 stage0 熔断信号(sparse-only 候选): 召回面可能不全。 */
+  retrievalDegraded?: boolean;
+  /** bestEffortOnNone 兑现: hits 是 stage0 排序 top-K 兑底(stage2 LLM 未确认相关)。 */
+  lowConfidence?: boolean;
+};
+
+function toSearchPlainResult(result: ExecSearchResult): SearchPlainResult {
+  const out = result.hits as SearchPlainResult;
+  out.relevance_verdict = result.verdict;
+  if (result.retrievalDegraded !== undefined) out.retrievalDegraded = result.retrievalDegraded;
+  if (result.lowConfidence) out.lowConfidence = true;
+  return out;
+}
+
 // ADR 0037: 私有内核 wrapper —— 生产唯一入口是 runMemorySearch(profile, ...)。
 // 不再 export(防第 6 个调用方手搓 policy); oracle/smoke 脚本经文底 __oracleKernel 用。
 async function llmSearchEntries(
@@ -1040,8 +1102,8 @@ async function llmSearchEntries(
   modelRegistryRaw: unknown,
   signal?: AbortSignal,
   projectRoot?: string,
-) {
-  return (await executeSearch(entries, params, settings, modelRegistryRaw, signal, projectRoot)).hits;
+): Promise<SearchPlainResult> {
+  return toSearchPlainResult(await executeSearch(entries, params, settings, modelRegistryRaw, signal, projectRoot));
 }
 
 /**
@@ -1131,7 +1193,7 @@ export async function runMemorySearch(
   settings: MemorySettings,
   modelRegistry: unknown,
   opts?: { signal?: AbortSignal; projectRoot?: string; callerFilters?: SearchFilters },
-): Promise<SearchVerdictResult | ReturnType<typeof resultCard>[]> {
+): Promise<SearchVerdictResult | SearchPlainResult> {
   const profile = SEARCH_PROFILES[profileName];
   const { search, filters, returnVerdict } = resolveProfileExecution(profile, settings, opts?.callerFilters);
   const effSettings: MemorySettings = { ...settings, search };
@@ -1141,7 +1203,8 @@ export async function runMemorySearch(
   if (profileName === "toolSearch" && search.queryRouting) {
     const routed = routeExactLookup(query, entries);
     if (routed) {
-      const cards = [resultCard(routed, 1, "exact-route (ADR 0036 P5: slug/ADR 精确直查跳 LLM)")];
+      const cards = [resultCard(routed, 1, "exact-route (ADR 0036 P5: slug/ADR 精确直查跳 LLM)")] as SearchPlainResult;
+      cards.relevance_verdict = "has_relevant";
       // ADR 0031 Phase 0: 精确直查也是 toolSearch 的 retrieval-hit。
       if (isUsageRecordingProfile(profileName)) recordUsage(cards.map((c) => c.slug), "retrieval_hit", effSettings, opts?.projectRoot);
       return cards;
