@@ -3314,6 +3314,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         ...DEFAULT_SEDIMENT_SETTINGS,
         autoLlmWriteEnabled: true,
         extractorModel: "mock/extractor",
+        curatorModel: "mock/curator",
         gitCommit: false,
       };
 

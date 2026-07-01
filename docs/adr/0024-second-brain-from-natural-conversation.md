@@ -122,7 +122,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 - 用户的代码 commit / 工作习惯 / 选择 / 沉默 / 抱怨
 - `dispatch_agent` / `dispatch_parallel` 分派子任务
 - 用户主动问大脑（"你怎么知道我喜欢 X?"）→ LLM 回答即可，**不要引导用户去"管理"**
-- **大脑运行状态指示正常运行**：footer 状态机（💤/📝/✅/⚠️ sediment）、Lane C auto-write 完成 notify（`Sediment auto-write (bg): N entries`）、/sediment / /about-me slash 命令反馈、audit.jsonl 可读。全部属于**告诉**用户大脑在工作，不是"要求"用户做事，是 INV-INVISIBILITY 边界内的合法反馈信号
+- **大脑运行状态指示正常运行**：footer 状态机（💤/📝/✅/⚠️ sediment）、Lane C auto-write 完成 notify（`Sediment auto-write (bg): N entries`）、`/sediment` slash 命令反馈、audit.jsonl 可读。全部属于**告诉**用户大脑在工作，不是"要求"用户做事，是 INV-INVISIBILITY 边界内的合法反馈信号。`/about-me` slash 已于 2026-06-15 退役，不再作为用户面主动声明入口。
 
 ### 4.2 这些都不行（必须删除或避免）
 
@@ -156,7 +156,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 
 **补充反模式**：上表 "LLM 问 《我要把这个沉淀为规则吗?》" 这条覆盖了 LLM 直接问的形态;同样反模式还包括 **系统通过 prompt 引导 LLM 在响应里夹带此类问题**（LLM 出口的元工作问题,跟系统弹窗等价）。
 
-**过渡期说明**：上面 `MEMORY-RULE:` / `MEMORY-ABOUT-ME:` 围栏、`/rule add` / `/about-me` 这些表项在现有代码里**已经存在**（参 ADR 0025 §1.4）。现阶段是在 ADR 0024 设想默认不开（`autoLlmWriteEnabled: false`）的环境下，废弃这些反模式入口会让用户失去现有唯一的显式记忆入口。所以废弃必须等到六能力点上线 + 默认开启之后才能动（ADR 0025 §3.2.C + §5.4 详定过渡路径）。过渡期间这些入口重新定位为 "高级用户诊断 / 调试入口"，从 quickstart 与 `/help` 推广文案中抑制出现（同 §4.3 高级用户诊断入口处理）。**ADR 0039 后这些显式入口也不能成为 L2 Markdown 或 active memory 的用户管理面；需要保留的意图应转成 L1 correction / rejection / deletion / reason evidence event，再由 projector 重新派生 L2。**
+**过渡期说明**：上面 `MEMORY-RULE:` / `MEMORY-ABOUT-ME:` 围栏、`/rule add` / `/about-me` 这些表项描述的是反模式形态，不代表所有形态在当前用户面仍启用。当前代码中 `/about-me` slash 已于 2026-06-15 退役；`MEMORY-ABOUT-ME:` fence 仍由 sediment 在 `agent_end` 解析，作为兼容的显式 about-me 输入格式和 smoke fixture。现阶段 `autoLlmWriteEnabled` 已在当前生产配置中开启，但这些显式入口仍不能成为 L2 Markdown 或 active memory 的用户管理面；需要保留的意图应转成 L1 correction / rejection / deletion / reason evidence event，再由 projector 重新派生 L2。
 
 ### 4.3 灰色地带的处理原则
 

@@ -10,13 +10,14 @@ status: active
 sediment 是 pi-astack 的唯一 dedicated memory writer。主会话不会获得 `memory_write` 之类的 LLM-facing 工具；长期记忆写入由以下路径完成：
 
 - 明确 `MEMORY: ... END_MEMORY` block（Lane A）。
+- 明确 `MEMORY-ABOUT-ME: ... END_MEMORY` block（Lane G fence；`/about-me` slash 已退役）。
 - `agent_end` 背景 LLM auto-write（Lane C，需配置启用）。
-- human slash commands 触发的 maintenance/migration。
+- human slash commands 触发的 maintenance/migration（当前用户面保留 `/sediment` 等维护入口，不保留 `/about-me` 主动声明入口）。
 - vault Lane V（由 abrain/vault 子系统同步处理，不是 ordinary memory）。
 
 ## 2. Pipeline
 
-**阶段契约**（顺序语义）：`agent_end` → checkpoint/run-window → explicit `MEMORY:` extractor（fence-aware）→ **sanitizer（任何 LLM/audit/write 边界前的 typed redaction）** → （无显式 block 且 `autoLlmWriteEnabled` 时）LLM extractor → `memory_search` lookup（query 先 redaction）→ curator → writer validate/lint/lock/atomic write → audit → best-effort git commit。
+**阶段契约**（顺序语义）：`agent_end` → checkpoint/run-window → explicit `MEMORY:` / `MEMORY-ABOUT-ME:` extractor（fence-aware）→ **sanitizer（任何 LLM/audit/write 边界前的 typed redaction）** → （无显式 block 且 `autoLlmWriteEnabled` 时）LLM extractor → `memory_search` lookup（query 先 redaction）→ curator / event writer / projector → writer validate/lint/lock/atomic write（仅仍使用 markdown writer 的域）→ audit → best-effort git commit。
 
 > 机制实现以代码为准：`extensions/sediment/pipeline.ts`（入口）、`writer.ts`（落盘路由）。
 
@@ -44,9 +45,11 @@ ADR 0016 后，curator 是主要语义判断者。旧的 readiness/rate/sampling
 
 B5 cutover 后，sediment 不再写 `<project>/.pensieve/`。
 
-**拓扑契约**：project entry → `projects/<id>/`，world entry → `knowledge/`（flat），workflow → `workflows/`或 `projects/<id>/workflows/`。**audit 分两处**：project 侧 `<projectRoot>/.pi-astack/sediment/audit.jsonl`，abrain/world/workflow 侧 `~/.abrain/.state/sediment/audit.jsonl`。
+**当前生产拓扑**：project entry 仍可落到 `projects/<id>/`，workflow → `workflows/` 或 `projects/<id>/workflows/`；Knowledge 与 Constraint 在当前生产配置中走 `event_first`，成功追加 event 后跳过 legacy markdown/rule 直写，Knowledge 读侧为 `knowledgeProjector.canonicalReadMode="projection_only"`。旧 `knowledge/` 与 `projects/<id>/` markdown 区保留为 rollback/debug surface，不是 projection_only 稳态 source。
 
-> 具体落盘路径与 kind→目录映射（maxims/decisions/staging/knowledge/archive 等）以代码为准：`extensions/sediment/{writer,kind-router}.ts`。
+**audit 分两处**：project 侧 `<projectRoot>/.pi-astack/sediment/audit.jsonl`，abrain/world/workflow 侧 `~/.abrain/.state/sediment/audit.jsonl`。
+
+> 具体落盘路径、kind→目录映射以及 event-first fallback 开关以代码和 `agent/pi-astack-settings.json` 为准：`extensions/sediment/{writer,kind-router,knowledge-evidence,constraint-evidence}.ts`。
 
 ## 5. Locks and runtime state
 
@@ -56,11 +59,11 @@ B5 cutover 后，sediment 不再写 `<project>/.pensieve/`。
 
 ## 6. Git behavior
 
-sediment 的 markdown write 是 source-of-truth；git commit 是 best-effort audit trail：
+对仍使用 markdown writer 的域，markdown entry 是 durable entry；对当前已切到 event-first/projection-only 的 Knowledge 与 Constraint，L1 Evidence Event 是 source-of-truth，L2 projection 是稳定读取面。git commit 是 best-effort audit / sync trail：
 
-- 成功：提交到 `~/.abrain`，commit message 标注 slug + scope。
-- 失败：不会回滚已写 markdown；会尽力清理 git index，避免下次 commit 携带 ghost changes。
-- 读者应以文件内容 + audit 为准，git 作为回滚/审计网。
+- 成功：提交到 `~/.abrain`，commit message 标注 slug/scope 或 event/projection 变更。
+- 失败：不会回滚已写 markdown、event 或 projection；会尽力清理 git index，避免下次 commit 携带 ghost changes。
+- 读者应以当前域的 canonical source（L1 event 或 durable markdown entry）+ audit 为准，git 作为回滚/审计网。
 
 ## 7. Sub-pi / ephemeral behavior
 
