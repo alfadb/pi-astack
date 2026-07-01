@@ -47,8 +47,8 @@
           },
           "examples": [
             {
-              "anthropic": ["claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"],
-              "openai": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
+              "anthropic": ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"],
+              "openai": ["gpt-5.5", "gpt-5.4-mini"],
               "deepseek": ["deepseek-v4-pro", "deepseek-v4-flash"]
             }
           ]
@@ -100,14 +100,13 @@
                 "description": "Critical agentic dispatch surface. Cost is never a consideration.",
                 "models": [
                   "anthropic/claude-fable-5",
-                  "anthropic/claude-opus-4-8",
                   "openai/gpt-5.5",
                   "deepseek/deepseek-v4-pro"
                 ]
               },
               "standard": {
                 "label": "T1 — standard tier",
-                "models": ["anthropic/claude-sonnet-4-6", "moonshotai/kimi-k2.6"]
+                "models": ["anthropic/claude-sonnet-5", "moonshotai/kimi-k2.6"]
               },
               "fast": {
                 "label": "T2 — fast / high-volume",
@@ -854,7 +853,7 @@
           "type": "array",
           "default": [],
           "items": { "type": "string" },
-          "description": "Optional ordered provider/model refs used by compaction-tuner's custom session_before_compact summarizer. Empty default means do not override: pi core summarizes with the current main-session model. Example opt-in: [\"anthropic/claude-sonnet-4-6\", \"deepseek/deepseek-v4-pro\"]. If all configured models fail, compaction falls back to pi core default summarization. Ignored when remoteOpenAICompaction.enabled is true; remote OpenAI skip/failure returns undefined so pi core default compaction runs."
+          "description": "Optional ordered provider/model refs used by compaction-tuner's custom session_before_compact summarizer. Empty default means do not override: pi core summarizes with the current main-session model. Example opt-in: [\"anthropic/claude-sonnet-5\", \"deepseek/deepseek-v4-pro\"]. If all configured models fail, compaction falls back to pi core default summarization. Ignored when remoteOpenAICompaction.enabled is true; remote OpenAI skip/failure returns undefined so pi core default compaction runs."
         },
 
         "remoteOpenAICompaction": {
@@ -1515,8 +1514,8 @@
           "examples": [
             [
               "openai/gpt-5.5",
-              "anthropic/claude-sonnet-4-6",
-              "anthropic/claude-opus-4-7"
+              "anthropic/claude-sonnet-5",
+              "anthropic/claude-opus-4-8"
             ]
           ]
         }
