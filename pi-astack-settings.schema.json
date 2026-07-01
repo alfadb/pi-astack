@@ -60,8 +60,9 @@
           "additionalProperties": { "type": "string" },
           "examples": [
             {
-              "anthropic/claude-opus-4-7": "Strongest reasoning; security audits, architecture critique. Highest cost.",
-              "openai/gpt-5.5": "Strong general-purpose reasoning + coding. Image input."
+              "anthropic/claude-fable-5": "Anthropic flagship for T0 escalation and hardest long-horizon agentic work.",
+              "anthropic/claude-sonnet-5": "Strong agentic coding and review at standard-tier cost.",
+              "openai/gpt-5.5": "Primary OpenAI model for planning, coding, and high-quality background calls."
             }
           ]
         },
@@ -194,8 +195,9 @@
           "description": "Ordered list of `provider/modelId` strings. When the initial model exhausts its retries, the extension walks this list in order, picking the first un-tried entry that exists in pi's modelRegistry and has configured auth. Entries missing from the registry or without auth are logged as warnings and skipped. The currently-active model (whatever it is when the error happens) is auto-added to the tried set, so it's safe to include it in the list. Empty list = retry behavior only, no fallback.",
           "examples": [
             [
-              "anthropic/claude-opus-4-7",
               "openai/gpt-5.5",
+              "anthropic/claude-opus-4-8",
+              "anthropic/claude-sonnet-5",
               "deepseek/deepseek-v4-pro"
             ]
           ]
@@ -364,6 +366,17 @@
               "default": 0,
               "minimum": 0,
               "description": "Transport retry count for the constraint compiler model call. Does not retry to repair malformed JSON."
+            },
+            "maxCompileRetries": {
+              "type": "number",
+              "default": 2,
+              "minimum": 0,
+              "description": "Validation/parse-feedback retry count for the constraint compiler. These retries re-prompt with the exact compile/validate error and are distinct from transport retries."
+            },
+            "escalationModelRef": {
+              "type": "string",
+              "default": "",
+              "description": "Optional provider/model ref used only for the final compile retry attempt. Empty means keep the primary constraint compiler model for every attempt."
             },
             "maxPromptChars": {
               "type": "number",
@@ -1140,6 +1153,11 @@
               "type": "boolean",
               "default": false,
               "description": "ADR 0036: use char-ngram BM25 (ASCII identifier + CJK bigram + IDF + high-signal-field x3) for the stage0 sparse arm instead of naive substring matching (which returns zero matches for Chinese queries). Read paths only (search/path-A/decide/correction); curator dedup pins this false. Code DEFAULT false; settings flips it true (current production)."
+            },
+            "bestEffortOnNone": {
+              "type": "boolean",
+              "default": false,
+              "description": "When stage2 returns none even after bounded recall expansion, return low-confidence top candidates from the stage0 ranking instead of an empty result. Keep false for callers that require strict empty-result semantics."
             },
             "queryRouting": {
               "type": "boolean",
