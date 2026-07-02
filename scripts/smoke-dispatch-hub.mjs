@@ -149,13 +149,15 @@ ok(sum.total_cost === 0.51, "summary totals hub+workers cost");
 ok(sum.main_session_disposition === "unobserved", "summary disposition placeholder (filled post-hoc by oracle)");
 ok(sum.dual_exec_sampled === true, "summary carries dual-exec sampling flag");
 
-// ── live shell source wiring: hub must use the same below-editor dispatch widget ──
-ok(/widget\?:\s*\{[\s\S]{0,900}?startTicker/.test(hubSrc), "HubDeps accepts dispatch widget helpers");
-ok(/widget\.startTicker\(ctx, widgetSnapshot\)/.test(hubSrc), "dispatch_hub starts the dispatch widget ticker");
-ok(/name:\s*"hub planner"[\s\S]{0,120}?model:\s*hubModel[\s\S]{0,120}?thinking:\s*hubCfg\.thinking/.test(hubSrc), "dispatch_hub creates a visible hub planner widget row");
-ok(/workerWidgetTasks\s*=\s*widget[\s\S]{0,400}?widget\.taskFromSpec/.test(hubSrc), "dispatch_hub creates worker widget rows after planning");
-ok(/onProgress:\s*\(progress:\s*\{\s*reason:\s*string;\s*at:\s*number\s*\}\)\s*=>\s*widget\.markProgress/.test(hubSrc), "dispatch_hub forwards heartbeat progress to widget rows");
-ok(/widget:\s*\{[\s\S]{0,500}?taskFromSpec:\s*widgetTaskFromSpec[\s\S]{0,500}?startTicker:\s*startDispatchWidgetTicker/.test(dispatchSrc), "dispatch index injects widget helpers into dispatch_hub");
+// ── live shell source wiring: hub must use dispatch tool-block progress ──
+ok(/progress:\s*\{[\s\S]{0,900}?startTicker/.test(hubSrc), "HubDeps accepts dispatch progress helpers");
+ok(/renderShell:\s*"self"[\s\S]{0,160}?renderCall[\s\S]{0,160}?renderResult/.test(hubSrc), "dispatch_hub uses self-rendered tool blocks");
+ok(/progress\.startTicker\(onUpdate,\s*progressSnapshot\)/.test(hubSrc), "dispatch_hub starts the onUpdate progress ticker");
+ok(/name:\s*"hub planner"[\s\S]{0,120}?model:\s*hubModel[\s\S]{0,120}?thinking:\s*hubCfg\.thinking/.test(hubSrc), "dispatch_hub creates a visible hub planner progress row");
+ok(/workerProgressTasks\s*=\s*tasks\.map[\s\S]{0,400}?progress\.taskFromSpec/.test(hubSrc), "dispatch_hub creates worker progress rows after planning");
+ok(/onProgress:\s*\(p:\s*\{\s*reason:\s*string;\s*at:\s*number\s*\}\)\s*=>\s*progress\.markProgress/.test(hubSrc), "dispatch_hub forwards heartbeat progress to progress rows");
+ok(/progress:\s*\{[\s\S]{0,500}?taskFromSpec:\s*progressTaskFromSpec[\s\S]{0,500}?startTicker:\s*startDispatchProgressTicker[\s\S]{0,500}?details:\s*dispatchProgressDetails/.test(dispatchSrc), "dispatch index injects progress helpers into dispatch_hub");
+ok(/renderCall:\s*renderDispatchHubCall[\s\S]{0,120}?renderResult:\s*renderDispatchToolResult/.test(dispatchSrc), "dispatch index injects hub tool-block renderers");
 
 console.log();
 if (failures === 0) {

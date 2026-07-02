@@ -34,8 +34,8 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
-const require = createRequire(import.meta.url);
-const ts = require("typescript");
+const requireFromHere = createRequire(import.meta.url);
+const ts = requireFromHere("typescript");
 
 const failures = [];
 function check(name, fn) {
@@ -55,7 +55,6 @@ function transpileTsToCjs(srcPath) {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,
       esModuleInterop: true,
-      moduleResolution: ts.ModuleResolutionKind.NodeJs,
     },
     fileName: srcPath,
   });
@@ -63,7 +62,7 @@ function transpileTsToCjs(srcPath) {
 }
 
 function loadModuleFromString(code, fakePath) {
-  const Module = require("node:module").Module;
+  const Module = requireFromHere("node:module").Module;
   const m = new Module(fakePath);
   m.filename = fakePath;
   m.paths = Module._nodeModulePaths(path.dirname(fakePath));
@@ -76,7 +75,7 @@ const compiled = transpileTsToCjs(inputCompatSrc);
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-input-compat-"));
 const tmpFile = path.join(tmpDir, "input-compat.cjs");
 fs.writeFileSync(tmpFile, compiled);
-const { coerceTasksParam, unwrapStringified, normalizeTaskSpec } = loadModuleFromString(
+const { coerceTasksParam, normalizeTaskSpec } = loadModuleFromString(
   compiled,
   tmpFile,
 );
@@ -139,7 +138,7 @@ check("undefined input returns []", () => {
   if (!Array.isArray(r) || r.length !== 0) throw new Error("not empty array");
 });
 
-check("normalizeTaskSpec preserves optional widget display name", () => {
+check("normalizeTaskSpec preserves optional tool-block display name", () => {
   const r = normalizeTaskSpec({ model: "provider-a/model-a", thinking: "high", prompt: "hi", name: "schema audit" });
   if (r.name !== "schema audit") throw new Error(`name lost: ${JSON.stringify(r)}`);
 });

@@ -129,23 +129,41 @@ check("dispatch_parallel.worker passes anchor + projectRoot to runInProcess", ()
   }
 });
 
-console.log("\nSection: dispatch task widget");
+console.log("\nSection: dispatch tool-block progress");
 
-check("dispatch widget renders below the editor", () => {
-  if (!/setWidgetRaw\([\s\S]{0,500}?DISPATCH_WIDGET_KEY[\s\S]{0,800}?placement:\s*"belowEditor"/.test(dispatchSrc)) {
-    throw new Error("dispatch task widget must use ctx.ui.setWidget(..., { placement: \"belowEditor\" })");
+check("dispatch tools render progress inside their own tool blocks", () => {
+  if ((dispatchSrc.match(/renderShell:\s*"self"/g) ?? []).length < 2) {
+    throw new Error("dispatch_agent and dispatch_parallel must use self-rendered tool blocks");
+  }
+  if (!/renderCall:\s*renderDispatchAgentCall[\s\S]{0,120}?renderResult:\s*renderDispatchToolResult/.test(dispatchSrc)) {
+    throw new Error("dispatch_agent must provide tool-block renderCall/renderResult");
+  }
+  if (!/renderCall:\s*renderDispatchParallelCall[\s\S]{0,120}?renderResult:\s*renderDispatchToolResult/.test(dispatchSrc)) {
+    throw new Error("dispatch_parallel must provide tool-block renderCall/renderResult");
   }
 });
 
-check("dispatch_agent and dispatch_parallel both wire widget progress callbacks", () => {
-  const matches = dispatchSrc.match(/onProgress:\s*\(progress\)\s*=>\s*markWidgetTaskProgress\(widgetTask,\s*progress\.reason,\s*progress\.at\)/g) ?? [];
+check("dispatch_agent and dispatch_parallel both wire progress callbacks", () => {
+  const matches = dispatchSrc.match(/onProgress:\s*\(progress\)\s*=>\s*markProgressTask\(progressTask,\s*progress\.reason,\s*progress\.at\)/g) ?? [];
   if (matches.length < 2) {
-    throw new Error(`expected at least 2 widget progress callbacks, found ${matches.length}`);
+    throw new Error(`expected at least 2 progress callbacks, found ${matches.length}`);
   }
 });
 
-check("dispatch tool schemas accept optional task name for widget labels", () => {
-  const matches = dispatchSrc.match(/name:\s*Type\.Optional\(Type\.String\(\{ description:\s*"Short task name shown in the dispatch widget/g) ?? [];
+check("dispatch progress uses onUpdate details.dispatchProgress, not global widgets", () => {
+  if (!/startDispatchProgressTicker\(onUpdate,\s*progressSnapshot\)/.test(dispatchSrc)) {
+    throw new Error("dispatch tools must start an onUpdate progress ticker");
+  }
+  if (!/details:\s*\{\s*kind:\s*"dispatch_progress",\s*\.\.\.dispatchProgressDetails\(snapshot\)/.test(dispatchSrc)) {
+    throw new Error("partial updates must carry details.dispatchProgress");
+  }
+  if (/setWidget\(|setStatus\(|DISPATCH_WIDGET_KEY|FOOTER_STATUS_KEYS/.test(dispatchSrc)) {
+    throw new Error("dispatch progress must not use global setWidget/setStatus UI paths");
+  }
+});
+
+check("dispatch tool schemas accept optional task name for tool-block labels", () => {
+  const matches = dispatchSrc.match(/name:\s*Type\.Optional\(Type\.String\(\{ description:\s*"Short task name shown in the dispatch tool block/g) ?? [];
   if (matches.length < 2) {
     throw new Error("dispatch_agent and dispatch_parallel task schemas must both accept optional name");
   }

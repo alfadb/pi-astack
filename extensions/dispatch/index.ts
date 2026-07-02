@@ -35,6 +35,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
 import { registerHubTool, readHubConfigFromSettings } from "./hub";
@@ -48,7 +49,6 @@ import {
   type ToolLoopState,
   type IdleLoopGuardSettings,
 } from "./tool-loop-guard";
-import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
 import {
   bindLifecycle as bindCausalAnchorLifecycle,
@@ -213,15 +213,10 @@ async function appendDispatchAudit(
   }
 }
 
-// ── Footer status state machine ─────────────────────────────────
+// ── Dispatch tool-block progress state machine ──────────────────
 
-const DISPATCH_STATUS_KEY = FOOTER_STATUS_KEYS.dispatch;
-
-/** Footer state machine state. v2 (2026-05-28) adds `degraded` and
- *  `cancelled` to surface ADR 0027 §C5 distinctions in the UI:
- *    degraded  — dispatch_parallel partial-success (some tasks succeeded)
- *    cancelled — task(s) externally terminated (user abort, timeout)
- *  Single-task dispatch_agent never enters `degraded` (aggregate-only). */
+/** Dispatch lifecycle state. `degraded` is aggregate-only; single-task
+ *  dispatch_agent completes, fails, or is cancelled. */
 export type DispatchState = "idle" | "running" | "completed" | "failed" | "degraded" | "cancelled";
 
 export interface DispatchCounts {
@@ -231,56 +226,13 @@ export interface DispatchCounts {
   total: number;
 }
 
-export function renderDispatchStatus(
-  state: DispatchState,
-  counts?: DispatchCounts,
-  durationMs?: number,
-): string {
-  const c = counts
-    ? ` ${counts.running}/${counts.failed}/${counts.success}/${counts.total}`
-    : "";
-  const dur = typeof durationMs === "number"
-    ? ` (${(durationMs / 1000).toFixed(1)}s)`
-    : "";
-  switch (state) {
-    case "idle":      return "💤 dispatch idle";
-    case "running":   return `📡 dispatch${c}`;
-    case "completed": return `✅ dispatch${c}${dur}`;
-    case "degraded":  return `🟡 dispatch${c}${dur}`;
-    case "cancelled": return `🚫 dispatch${c}${dur}`;
-    case "failed":    return `⚠️  dispatch${c}${dur}`;
-    default:          return `❓ dispatch (${state})${c}${dur}`;
-  }
-}
+export type DispatchProgressTaskState = "queued" | "running" | "completed" | "failed" | "cancelled";
 
-function applyDispatchStatus(
-  // Permissive ctx (`ui?: unknown`) so ONE function satisfies both the real pi
-  // tool ctx and the hub's Record<string, unknown> ctx without a cast; the ui
-  // shape is narrowed below. (Fixes the HubDeps applyDispatchStatus variance.)
-  ctx: { ui?: unknown },
-  state: DispatchState,
-  counts?: DispatchCounts,
-  durationMs?: number,
-): void {
-  const ui = ctx.ui as { setStatus?(extId: string, message?: string): void } | undefined;
-  const setStatusRaw = ui?.setStatus?.bind(ui);
-  if (!setStatusRaw) return;
-  try {
-    setStatusRaw(DISPATCH_STATUS_KEY, renderDispatchStatus(state, counts, durationMs));
-  } catch { /* best-effort */ }
-}
-
-// ── Dispatch widget state machine ───────────────────────────────
-
-const DISPATCH_WIDGET_KEY = "dispatch-tasks";
-
-type DispatchWidgetTaskState = "queued" | "running" | "completed" | "failed" | "cancelled";
-
-interface DispatchWidgetTask {
+export interface DispatchProgressTask {
   name: string;
   model: string;
   thinking: string;
-  state: DispatchWidgetTaskState;
+  state: DispatchProgressTaskState;
   startedAt?: number;
   endedAt?: number;
   durationMs?: number;
@@ -290,14 +242,24 @@ interface DispatchWidgetTask {
   lastProgressReason?: string;
 }
 
-interface DispatchWidgetSnapshot {
+export interface DispatchProgressSnapshot {
   title: string;
   state: DispatchState;
   startedAt: number;
   durationMs?: number;
   counts?: DispatchCounts;
-  tasks: DispatchWidgetTask[];
+  tasks: DispatchProgressTask[];
 }
+
+interface DispatchProgressDetails {
+  dispatchProgress: DispatchProgressSnapshot;
+}
+
+type DispatchToolUpdate = (patch: {
+  content?: Array<{ type: "text"; text: string }>;
+  details?: unknown;
+  isError?: boolean;
+}) => void;
 
 function compactOneLine(value: unknown): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
@@ -343,7 +305,7 @@ function truncateDisplayText(value: string, maxWidth: number): string {
   return `${out}...`;
 }
 
-function formatWidgetDuration(ms: number | undefined): string {
+function formatProgressDuration(ms: number | undefined): string {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "--";
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
   const minutes = Math.floor(ms / 60_000);
@@ -358,7 +320,7 @@ function taskDisplayName(task: Record<string, unknown>, fallback: string): strin
   return truncateDisplayText(firstPromptLine || fallback, 48);
 }
 
-function widgetTaskFromSpec(task: Record<string, unknown>, fallback: string): DispatchWidgetTask {
+function progressTaskFromSpec(task: Record<string, unknown>, fallback: string): DispatchProgressTask {
   return {
     name: taskDisplayName(task, fallback),
     model: compactOneLine(task.model),
@@ -367,7 +329,7 @@ function widgetTaskFromSpec(task: Record<string, unknown>, fallback: string): Di
   };
 }
 
-function updateWidgetTaskFromResult(task: DispatchWidgetTask, result: AgentResult): void {
+function updateProgressTaskFromResult(task: DispatchProgressTask, result: AgentResult): void {
   task.state = !result.error ? "completed" : inferTerminalState(result) === "cancelled" ? "cancelled" : "failed";
   task.endedAt = Date.now();
   task.durationMs = result.durationMs;
@@ -378,12 +340,12 @@ function updateWidgetTaskFromResult(task: DispatchWidgetTask, result: AgentResul
   }
 }
 
-function markWidgetTaskProgress(task: DispatchWidgetTask, reason: string, at: number): void {
+function markProgressTask(task: DispatchProgressTask, reason: string, at: number): void {
   task.lastHeartbeatAt = at;
   task.lastProgressReason = reason;
 }
 
-function renderDispatchWidget(snapshot: DispatchWidgetSnapshot, now = Date.now(), width = 120): string[] {
+export function renderDispatchProgressLines(snapshot: DispatchProgressSnapshot, now = Date.now(), width = 160): string[] {
   const safeWidth = Math.max(20, Math.floor(width));
   const elapsedMs = snapshot.durationMs ?? Math.max(0, now - snapshot.startedAt);
   const counts = snapshot.counts
@@ -391,7 +353,7 @@ function renderDispatchWidget(snapshot: DispatchWidgetSnapshot, now = Date.now()
     : "";
   const lines = [
     truncateDisplayText(
-      `dispatch ${snapshot.title}: ${snapshot.state}${counts} elapsed ${formatWidgetDuration(elapsedMs)}`,
+      `dispatch ${snapshot.title}: ${snapshot.state}${counts} elapsed ${formatProgressDuration(elapsedMs)}`,
       safeWidth,
     ),
   ];
@@ -410,10 +372,13 @@ function renderDispatchWidget(snapshot: DispatchWidgetSnapshot, now = Date.now()
             ? "fail"
             : "wait";
     const prefix = `${String(i + 1).padStart(2, " ")}. [${state}] `;
-    const model = truncateDisplayText(task.model, safeWidth < 80 ? 20 : 38);
-    const thinking = truncateDisplayText(task.thinking || "off", 8);
+    const model = truncateDisplayText(task.model, safeWidth < 80 ? 20 : 42);
+    const thinking = truncateDisplayText(task.thinking || "off", 10);
+    const heartbeat = task.lastProgressReason
+      ? `:${truncateDisplayText(task.lastProgressReason, 20)}`
+      : "";
     const failure = task.failureType ? ` ${truncateDisplayText(task.failureType, 18)}` : "";
-    const right = ` | ${formatWidgetDuration(taskElapsed)} | ${model} | thinking:${thinking} | hb:${formatWidgetDuration(hbMs)}${failure}`;
+    const right = ` | ${formatProgressDuration(taskElapsed)} | ${model} | thinking:${thinking} | hb:${formatProgressDuration(hbMs)}${heartbeat}${failure}`;
     const nameWidth = safeWidth - visibleTextWidth(prefix) - visibleTextWidth(right);
     const fullLine = nameWidth >= 8
       ? `${prefix}${truncateDisplayText(task.name, nameWidth)}${right}`
@@ -424,37 +389,107 @@ function renderDispatchWidget(snapshot: DispatchWidgetSnapshot, now = Date.now()
   return lines;
 }
 
-function applyDispatchWidget(ctx: { ui?: unknown }, snapshot?: DispatchWidgetSnapshot): void {
-  const ui = ctx.ui as {
-    setWidget?(extId: string, content?: unknown, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
-  } | undefined;
-  const setWidgetRaw = ui?.setWidget?.bind(ui);
-  if (!setWidgetRaw) return;
-  try {
-    if (!snapshot) {
-      setWidgetRaw(DISPATCH_WIDGET_KEY, undefined);
-      return;
-    }
-    setWidgetRaw(
-      DISPATCH_WIDGET_KEY,
-      () => ({
-        render(width: number): string[] {
-          return renderDispatchWidget(snapshot, Date.now(), width);
-        },
-        invalidate() {},
-      }),
-      { placement: "belowEditor" },
-    );
-  } catch { /* best-effort */ }
+function cloneDispatchProgressSnapshot(snapshot: DispatchProgressSnapshot): DispatchProgressSnapshot {
+  return {
+    title: snapshot.title,
+    state: snapshot.state,
+    startedAt: snapshot.startedAt,
+    ...(snapshot.durationMs !== undefined ? { durationMs: snapshot.durationMs } : {}),
+    ...(snapshot.counts ? { counts: { ...snapshot.counts } } : {}),
+    tasks: snapshot.tasks.map((task) => ({ ...task })),
+  };
 }
 
-function startDispatchWidgetTicker(ctx: { ui?: unknown }, snapshot: DispatchWidgetSnapshot): () => void {
-  applyDispatchWidget(ctx, snapshot);
-  const timer = setInterval(() => applyDispatchWidget(ctx, snapshot), 1000);
+function dispatchProgressDetails(snapshot: DispatchProgressSnapshot): DispatchProgressDetails {
+  return { dispatchProgress: cloneDispatchProgressSnapshot(snapshot) };
+}
+
+function dispatchOnUpdate(onUpdate: unknown): DispatchToolUpdate | undefined {
+  return typeof onUpdate === "function" ? onUpdate as DispatchToolUpdate : undefined;
+}
+
+function emitDispatchProgress(onUpdate: unknown, snapshot: DispatchProgressSnapshot, isError?: boolean): void {
+  const update = dispatchOnUpdate(onUpdate);
+  if (!update) return;
+  try {
+    update({
+      content: [{ type: "text", text: `dispatch ${snapshot.title}: ${snapshot.state}` }],
+      details: { kind: "dispatch_progress", ...dispatchProgressDetails(snapshot) },
+      ...(isError ? { isError: true } : {}),
+    });
+  } catch { /* best-effort progress only */ }
+}
+
+function startDispatchProgressTicker(onUpdate: unknown, snapshot: DispatchProgressSnapshot): () => void {
+  emitDispatchProgress(onUpdate, snapshot);
+  const timer = setInterval(() => emitDispatchProgress(onUpdate, snapshot), 1000);
   if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
     (timer as unknown as { unref: () => void }).unref();
   }
   return () => clearInterval(timer);
+}
+
+function textContentFromResult(result: { content?: Array<{ type?: string; text?: string }> }): string {
+  const content = result.content?.[0];
+  return content?.type === "text" ? String(content.text ?? "") : "";
+}
+
+function renderDispatchToolResult(result: any, options: { expanded?: boolean; isPartial?: boolean }, theme: any) {
+  const details = result.details as DispatchProgressDetails | undefined;
+  const progress = details?.dispatchProgress;
+  const body = textContentFromResult(result);
+  if (!progress) {
+    return new Text(body || theme.fg("dim", "No dispatch output"), 0, 0);
+  }
+
+  let text = renderDispatchProgressLines(progress, Date.now(), options.expanded ? 220 : 160).join("\n");
+  if (options.isPartial) return new Text(text, 0, 0);
+
+  const trimmedBody = body.trimEnd();
+  if (options.expanded && trimmedBody) {
+    text += `\n\n${trimmedBody}`;
+  } else if (trimmedBody) {
+    const firstLine = trimmedBody.split("\n").find((line) => line.trim()) ?? "";
+    text += `\n${theme.fg("dim", truncateDisplayText(firstLine, 140))}`;
+    text += `\n${theme.fg("muted", "expand for full dispatch output")}`;
+  }
+  return new Text(text, 0, 0);
+}
+
+function renderDispatchAgentCall(args: any, theme: any) {
+  const name = compactOneLine(args?.name) || taskDisplayName(args ?? {}, "dispatch");
+  const model = compactOneLine(args?.model);
+  const thinking = compactOneLine(args?.thinking || "off");
+  return new Text(
+    `${theme.fg("toolTitle", theme.bold("dispatch_agent"))} ${theme.fg("accent", name)} ` +
+      `${theme.fg("dim", model)} ${theme.fg("muted", `thinking:${thinking}`)}`,
+    0,
+    0,
+  );
+}
+
+function renderDispatchParallelCall(args: any, theme: any) {
+  const tasks = Array.isArray(args?.tasks) ? args.tasks : [];
+  const models = tasks.map((task: any) => compactOneLine(task?.model)).filter(Boolean);
+  const summary = models.length ? models.join(", ") : `${tasks.length} task(s)`;
+  return new Text(
+    `${theme.fg("toolTitle", theme.bold("dispatch_parallel"))} ` +
+      `${theme.fg("accent", `${tasks.length} tasks`)} ${theme.fg("dim", summary)}`,
+    0,
+    0,
+  );
+}
+
+function renderDispatchHubCall(args: any, theme: any) {
+  const hub = compactOneLine(args?.hubModel);
+  const task = truncateDisplayText(compactOneLine(args?.task), 96);
+  return new Text(
+    `${theme.fg("toolTitle", theme.bold("dispatch_hub"))}` +
+      `${hub ? ` ${theme.fg("dim", `hub:${hub}`)}` : ""}` +
+      `${task ? ` ${theme.fg("accent", task)}` : ""}`,
+    0,
+    0,
+  );
 }
 
 // ── Tool validation ─────────────────────────────────────────────
@@ -1413,16 +1448,6 @@ export default function (pi: ExtensionAPI) {
   // See causal-anchor.ts bindLifecycle doc.
   bindCausalAnchorLifecycle(pi);
 
-  // Footer status + task widget: reset on session/agent boundaries.
-  pi.on("session_start", async (_event: unknown, ctx: any) => {
-    applyDispatchStatus(ctx, "idle");
-    applyDispatchWidget(ctx, undefined);
-  });
-  pi.on("agent_start", async (_event: unknown, ctx: any) => {
-    applyDispatchStatus(ctx, "idle");
-    applyDispatchWidget(ctx, undefined);
-  });
-
   // ── E: tool idle-loop guard ──────────────────────────────────────
   // Suppress a back-to-back identical (tool,args) spin and return a reflection
   // nudge instead of executing the repeat. Consecutive-only → near-zero false
@@ -1498,7 +1523,7 @@ export default function (pi: ExtensionAPI) {
       model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
-      name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch widget. If omitted, pi derives a label from id/role/prompt." })),
+      name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
     }),
@@ -1521,10 +1546,14 @@ export default function (pi: ExtensionAPI) {
       };
     },
 
+    renderShell: "self",
+    renderCall: renderDispatchAgentCall,
+    renderResult: renderDispatchToolResult,
+
     // 2026-05-24 fix: pi SDK 0.75 narrowing pattern follows the memory
     // extension lead (extensions/memory/index.ts) — keep `signal:
     // AbortSignal` (matches existing internal `signal.aborted` usage)
-    // and `_onUpdate: unknown` (`any` widens the return type and breaks
+    // and `onUpdate: unknown` (`any` widens the return type and breaks
     // strict-function-types assignment to ToolDefinition.execute).
     //
     // Explicit Promise<{...; details: unknown}> annotation prevents TS
@@ -1532,7 +1561,7 @@ export default function (pi: ExtensionAPI) {
     // happens with bare `async execute` — then subsequent returns with
     // different details shapes fail to assign to that locked TDetails).
     // This matches what memory/index.ts does via wrapToolResult.
-    async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
+    async execute(_id: string, params: any, signal: AbortSignal, onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
       const toolCheck = validateTools(params.tools);
       if (!toolCheck.ok) {
         // ADR 0027 §C5 v1 P1 fix (R6 GPT-5.5 P1-3): tool_rejected is a
@@ -1586,19 +1615,18 @@ export default function (pi: ExtensionAPI) {
 
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       const startedAt = Date.now();
-      applyDispatchStatus(ctx, "running", { running: 1, failed: 0, success: 0, total: 1 });
-      const widgetTask = widgetTaskFromSpec(params, "dispatch");
-      widgetTask.state = "running";
-      widgetTask.startedAt = startedAt;
-      markWidgetTaskProgress(widgetTask, "started", startedAt);
-      const widgetSnapshot: DispatchWidgetSnapshot = {
+      const progressTask = progressTaskFromSpec(params, "dispatch");
+      progressTask.state = "running";
+      progressTask.startedAt = startedAt;
+      markProgressTask(progressTask, "started", startedAt);
+      const progressSnapshot: DispatchProgressSnapshot = {
         title: "agent",
         state: "running",
         startedAt,
         counts: { running: 1, failed: 0, success: 0, total: 1 },
-        tasks: [widgetTask],
+        tasks: [progressTask],
       };
-      const stopWidgetTicker = startDispatchWidgetTicker(ctx, widgetSnapshot);
+      const stopProgressTicker = startDispatchProgressTicker(onUpdate, progressSnapshot);
 
       // ADR 0027 C6a: derive sub-agent anchor from main-session parent anchor.
       // - parentAnchor may be undefined (e.g., dispatch_agent called before any
@@ -1639,7 +1667,7 @@ export default function (pi: ExtensionAPI) {
             {
               anchor: subAnchor,
               projectRoot: ctx.cwd || process.cwd(),
-              onProgress: (progress) => markWidgetTaskProgress(widgetTask, progress.reason, progress.at),
+              onProgress: (progress) => markProgressTask(progressTask, progress.reason, progress.at),
             },
           ),
         );
@@ -1675,13 +1703,12 @@ export default function (pi: ExtensionAPI) {
           : "failed";
       const isOk = !result.error;
       const finalCounts = { running: 0, failed: isOk ? 0 : 1, success: isOk ? 1 : 0, total: 1 };
-      applyDispatchStatus(ctx, singleTaskFinalState, finalCounts, durationMs);
-      widgetSnapshot.state = singleTaskFinalState;
-      widgetSnapshot.durationMs = durationMs;
-      widgetSnapshot.counts = finalCounts;
-      updateWidgetTaskFromResult(widgetTask, result);
-      stopWidgetTicker();
-      applyDispatchWidget(ctx, widgetSnapshot);
+      progressSnapshot.state = singleTaskFinalState;
+      progressSnapshot.durationMs = durationMs;
+      progressSnapshot.counts = finalCounts;
+      updateProgressTaskFromResult(progressTask, result);
+      stopProgressTicker();
+      emitDispatchProgress(onUpdate, progressSnapshot, !!result.error);
 
       // ADR 0027 C6a + §C5 v1: dispatch audit row — cross-layer join key
       // for tracing a user turn through L1 (sediment / abrain) and L2
@@ -1733,6 +1760,7 @@ export default function (pi: ExtensionAPI) {
         content: [{ type: "text" as const, text }],
         details: {
           kind: "dispatch_agent_result",
+          ...dispatchProgressDetails(progressSnapshot),
           model: params.model,
           durationMs,
           ok: !result.error,
@@ -1780,7 +1808,7 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
-          name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch widget. If omitted, pi derives a label from id/role/prompt." })),
+          name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
           tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide)." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),
         }),
@@ -1826,7 +1854,11 @@ export default function (pi: ExtensionAPI) {
       };
     },
 
-    async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
+    renderShell: "self",
+    renderCall: renderDispatchParallelCall,
+    renderResult: renderDispatchToolResult,
+
+    async execute(_id: string, params: any, signal: AbortSignal, onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
       const tasks = params.tasks ?? [];
       if (tasks.length === 0) {
         return {
@@ -1867,20 +1899,19 @@ export default function (pi: ExtensionAPI) {
       let success = 0;
       let failed = 0;
       const total = tasks.length;
-      const widgetSnapshot: DispatchWidgetSnapshot = {
+      const progressSnapshot: DispatchProgressSnapshot = {
         title: "parallel",
         state: "running",
         startedAt: dispatchStart,
         counts: { running, failed, success, total },
-        tasks: tasks.map((t: Record<string, unknown>, i: number) => widgetTaskFromSpec(t, `task ${i + 1}`)),
+        tasks: tasks.map((t: Record<string, unknown>, i: number) => progressTaskFromSpec(t, `task ${i + 1}`)),
       };
-      const stopWidgetTicker = startDispatchWidgetTicker(ctx, widgetSnapshot);
+      const stopProgressTicker = startDispatchProgressTicker(onUpdate, progressSnapshot);
 
       const updateRunning = () => {
         const counts = { running, failed, success, total };
-        applyDispatchStatus(ctx, "running", counts);
-        widgetSnapshot.state = "running";
-        widgetSnapshot.counts = counts;
+        progressSnapshot.state = "running";
+        progressSnapshot.counts = counts;
       };
       updateRunning();
 
@@ -1911,11 +1942,11 @@ export default function (pi: ExtensionAPI) {
           const i = claimNextTask();
           if (i === undefined) return;
           const t = tasks[i];
-          const widgetTask = widgetSnapshot.tasks[i]!;
+          const progressTask = progressSnapshot.tasks[i]!;
           const taskStart = Date.now();
-          widgetTask.state = "running";
-          widgetTask.startedAt = taskStart;
-          markWidgetTaskProgress(widgetTask, "started", taskStart);
+          progressTask.state = "running";
+          progressTask.startedAt = taskStart;
+          markProgressTask(progressTask, "started", taskStart);
 
           running++;
           updateRunning();
@@ -1935,7 +1966,7 @@ export default function (pi: ExtensionAPI) {
                 failureType: "tool_rejected",
                 durationMs: 0,
               };
-              updateWidgetTaskFromResult(widgetTask, res);
+              updateProgressTaskFromResult(progressTask, res);
               results[i] = res;
               releaseProvider(i);
               running--;
@@ -1987,7 +2018,7 @@ export default function (pi: ExtensionAPI) {
                 {
                   anchor: subAnchor,
                   projectRoot,
-                  onProgress: (progress) => markWidgetTaskProgress(widgetTask, progress.reason, progress.at),
+                  onProgress: (progress) => markProgressTask(progressTask, progress.reason, progress.at),
                 },
               ),
             );
@@ -2004,7 +2035,7 @@ export default function (pi: ExtensionAPI) {
               durationMs: 0,
             };
           }
-          updateWidgetTaskFromResult(widgetTask, res);
+          updateProgressTaskFromResult(progressTask, res);
           results[i] = res;
           releaseProvider(i);
           running--;
@@ -2109,16 +2140,16 @@ export default function (pi: ExtensionAPI) {
       // never ran for hole slots — task_count ≠ success + failed.
       const successCount = materializedResults.filter((r) => !r.error).length;
       const failedCount = materializedResults.filter((r) => !!r.error).length;
+      const hasErrors = aggregateTsFields.terminal_state !== "completed";
       const finalCounts = { running: 0, failed: failedCount, success: successCount, total };
-      applyDispatchStatus(ctx, finalState, finalCounts, totalWallMs);
-      widgetSnapshot.state = finalState;
-      widgetSnapshot.durationMs = totalWallMs;
-      widgetSnapshot.counts = finalCounts;
+      progressSnapshot.state = finalState;
+      progressSnapshot.durationMs = totalWallMs;
+      progressSnapshot.counts = finalCounts;
       for (let i = 0; i < materializedResults.length; i++) {
-        updateWidgetTaskFromResult(widgetSnapshot.tasks[i]!, materializedResults[i]!);
+        updateProgressTaskFromResult(progressSnapshot.tasks[i]!, materializedResults[i]!);
       }
-      stopWidgetTicker();
-      applyDispatchWidget(ctx, widgetSnapshot);
+      stopProgressTicker();
+      emitDispatchProgress(onUpdate, progressSnapshot, hasErrors);
 
       // ADR 0027 §C5 v1: aggregate dispatch_parallel.summary audit row.
       // Prior to v1 only per-task rows existed, so cross-layer consumers had
@@ -2245,11 +2276,11 @@ export default function (pi: ExtensionAPI) {
       // `results.some(r => r?.error)` could be false when all slots were
       // holes (no completed task at all) — isError would not fire even
       // though the dispatch was effectively cancelled.
-      const hasErrors = aggregateTsFields.terminal_state !== "completed";
       return {
         content: [{ type: "text" as const, text: lines.join("\n") }],
         details: {
           kind: "dispatch_parallel_summary",
+          ...dispatchProgressDetails(progressSnapshot),
           taskCount: tasks.length,
           // R7: counter consistency with audit row.
           success: successCount,
@@ -2296,14 +2327,16 @@ export default function (pi: ExtensionAPI) {
         appendDispatchAudit,
         providerFromModel,
         validateTools,
-        applyDispatchStatus,
-        widget: {
-          taskFromSpec: widgetTaskFromSpec,
-          updateFromResult: updateWidgetTaskFromResult,
-          markProgress: markWidgetTaskProgress,
-          apply: applyDispatchWidget,
-          startTicker: startDispatchWidgetTicker,
+        progress: {
+          taskFromSpec: progressTaskFromSpec,
+          updateFromResult: updateProgressTaskFromResult,
+          markProgress: markProgressTask,
+          startTicker: startDispatchProgressTicker,
+          emit: emitDispatchProgress,
+          details: dispatchProgressDetails,
         },
+        renderCall: renderDispatchHubCall,
+        renderResult: renderDispatchToolResult,
         defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
         maxProviderConcurrency: MAX_PROVIDER_CONCURRENCY,
         readConfig: readHubConfigFromSettings,

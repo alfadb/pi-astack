@@ -96,7 +96,7 @@ check("dispatch_agent normal-execution audit writes ...tsFields", () => {
   // Look for "operation: \"dispatch_agent\"" with ...tsFields in the
   // same audit row.
   const m = dispatchSrc.match(
-    /operation:\s*"dispatch_agent"[\s\S]{0,1200}?\}\s*,\s*\)\s*;/g,
+    /operation:\s*"dispatch_agent"[\s\S]{0,3000}?\}\s*,\s*\)\s*;/g,
   );
   if (!m || m.length === 0) {
     throw new Error("could not locate dispatch_agent audit write block");
@@ -118,7 +118,6 @@ check("dispatch_agent normal-execution audit writes ...tsFields", () => {
 check("dispatch_agent tool_rejected writes audit row (R6 P1-3 fix)", () => {
   // Look for tool_rejected audit write inside dispatch_agent execute().
   // It must include failure_type: "tool_rejected" AND spread rejectTsFields.
-  const reIndex = dispatchSrc.search(/dispatch_agent execute/i);
   // Search the file for both the rejection branch and the audit row.
   // Use a heuristic: there is a `failure_type: "tool_rejected"` and
   // operation: "dispatch_agent" present after some "tool_rejected" guard.
@@ -255,7 +254,7 @@ check("taskSummaries derives from materializedResults (R7: single source of trut
   }
 });
 
-console.log("\nSection: footer state machine");
+console.log("\nSection: tool-block progress state machine");
 
 check("DispatchState union includes 'degraded' AND 'cancelled'", () => {
   if (!/type DispatchState =[^;]*"degraded"/.test(dispatchSrc)) {
@@ -266,12 +265,15 @@ check("DispatchState union includes 'degraded' AND 'cancelled'", () => {
   }
 });
 
-check("renderDispatchStatus has cases for degraded and cancelled", () => {
-  if (!/case "degraded":/.test(dispatchSrc)) {
-    throw new Error("renderDispatchStatus missing degraded case");
+check("tool-block progress renderer surfaces degraded and cancelled states", () => {
+  if (!/renderDispatchProgressLines/.test(dispatchSrc)) {
+    throw new Error("renderDispatchProgressLines missing");
   }
-  if (!/case "cancelled":/.test(dispatchSrc)) {
-    throw new Error("renderDispatchStatus missing cancelled case");
+  if (!/snapshot\.state/.test(dispatchSrc)) {
+    throw new Error("tool-block progress renderer must include snapshot.state");
+  }
+  if (!/task\.state === "cancelled"/.test(dispatchSrc)) {
+    throw new Error("tool-block progress renderer must distinguish cancelled tasks");
   }
 });
 
@@ -279,26 +281,26 @@ check("finalState mapping preserves cancelled (does not collapse to failed)", ()
   // R6 DeepSeek P2-3 fix
   if (!/aggregateTsFields\.terminal_state\s*===\s*"cancelled"\s*\?\s*"cancelled"/.test(dispatchSrc)) {
     throw new Error(
-      "finalState must map cancelled→cancelled (not failed); previously collapsed, hiding user-abort signal in footer",
+      "finalState must map cancelled→cancelled (not failed); previously collapsed, hiding user-abort signal in progress UI",
     );
   }
 });
 
-check("single-task dispatch_agent footer also maps cancelled (R7.1 P2 fix)", () => {
+check("single-task dispatch_agent progress also maps cancelled (R7.1 P2 fix)", () => {
   // R7.1 GPT-5.5 + DeepSeek unanimous P2: dispatch_agent was previously
   // `result.error ? "failed" : "completed"` — collapsing user-abort and
-  // timeout into ⚠️ failed despite the audit/details correctly showing
-  // terminal_state:"cancelled". Stage 1b heartbeat will rely on the
-  // single-task footer reading 🚫 so this symmetry must be locked.
+  // timeout into failed despite the audit/details correctly showing
+  // terminal_state:"cancelled". Stage 1b heartbeat relies on the
+  // single-task progress state reading cancelled so this symmetry must be locked.
   if (!/singleTaskFinalState:\s*DispatchState/.test(dispatchSrc)) {
     throw new Error(
-      "dispatch_agent footer must derive a DispatchState from terminal_state, " +
+      "dispatch_agent progress must derive a DispatchState from terminal_state, " +
       "not from result.error alone",
     );
   }
   if (!/result\.failureType\s*===\s*"aborted"\s*\|\|\s*result\.failureType\s*===\s*"timeout"\s*\|\|\s*result\.failureType\s*===\s*"timeout_partial"\s*\n\s*\?\s*"cancelled"/.test(dispatchSrc)) {
     throw new Error(
-      "dispatch_agent footer must map aborted/timeout/timeout_partial to cancelled",
+      "dispatch_agent progress must map aborted/timeout/timeout_partial to cancelled",
     );
   }
 });
@@ -347,8 +349,11 @@ check("dispatch imports and applies heartbeat consumer as audit-only enrichment"
   if (!/import \{ assessLivenessForAnchor \} from "\.\/heartbeat-consumer"/.test(dispatchSrc)) {
     throw new Error("dispatch must import heartbeat consumer assessment helper");
   }
-  if (!/return enrichHeartbeat\(result\)/.test(dispatchSrc)) {
-    throw new Error("runInProcess must enrich results with heartbeat trace/liveness before returning");
+  if (!/const enrichHeartbeat = \(result:\s*AgentResult\):\s*AgentResult => \{[\s\S]{0,900}?assessLivenessForAnchor\(heartbeatProjectRoot, heartbeatAnchor\)/.test(dispatchSrc)) {
+    throw new Error("runInProcess must assess heartbeat liveness inside enrichHeartbeat");
+  }
+  if (!/return enrichHeartbeat\(resultWithBudget\)/.test(dispatchSrc)) {
+    throw new Error("runInProcess must enrich settled results with heartbeat trace/liveness before returning");
   }
   if (/terminalStateFromLiveness\(heartbeat_liveness\)/.test(dispatchSrc)) {
     throw new Error("post-settlement heartbeat enrichment must be audit-only; do not mutate settled terminal state");

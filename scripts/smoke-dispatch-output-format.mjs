@@ -60,12 +60,11 @@ const out = ts.transpileModule(fs.readFileSync(srcPath, "utf8"), {
     module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022,
     esModuleInterop: true,
-    moduleResolution: ts.ModuleResolutionKind.NodeJs,
   },
 });
 
 // dispatch/index.ts imports many pi runtime types via `import type` (compiled
-// away) plus a few real imports (Type from typebox, host process modules).
+// away) plus a few real imports (Type from typebox, Text from pi-tui, host process modules).
 // Stub anything that would require a real pi runtime; formatResult itself is
 // a pure string function so it survives stubs.
 const cjsPath = path.join(tmpDir, "dispatch.cjs");
@@ -78,7 +77,6 @@ const inputCompatOut = ts.transpileModule(fs.readFileSync(inputCompatSrc, "utf8"
     module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022,
     esModuleInterop: true,
-    moduleResolution: ts.ModuleResolutionKind.NodeJs,
   },
 });
 fs.writeFileSync(path.join(tmpDir, "input-compat.cjs"), inputCompatOut.outputText);
@@ -96,19 +94,16 @@ const tsmsOut = ts.transpileModule(fs.readFileSync(tsmsSrc, "utf8"), {
     module: ts.ModuleKind.CommonJS,
     target: ts.ScriptTarget.ES2022,
     esModuleInterop: true,
-    moduleResolution: ts.ModuleResolutionKind.NodeJs,
   },
 });
 fs.writeFileSync(path.join(tmpDir, "terminal-state.cjs"), tsmsOut.outputText);
 fs.copyFileSync(path.join(tmpDir, "terminal-state.cjs"), path.join(tmpDir, "terminal-state.js"));
 
 // Stub `typebox` (dispatch/index.ts: `import { Type } from "typebox"`).
-// Also stub `../_shared/footer-status` which dispatch imports at module
-// load time. Both are needed because the file's default export
-// `function (pi) { pi.registerTool(...) }` body runs Type.Object at
-// registration site — but registerTool itself is only called when
-// activate(pi) runs, which our smoke doesn't do. The bare `import` lines
-// at file top still resolve through require() during module load.
+// It is needed because the file's default export `function (pi) { pi.registerTool(...) }`
+// body runs Type.Object at registration site — but registerTool itself is only
+// called when activate(pi) runs, which our smoke doesn't do. The bare `import`
+// lines at file top still resolve through require() during module load.
 const typeboxDir = path.join(tmpDir, "node_modules", "typebox");
 fs.mkdirSync(typeboxDir, { recursive: true });
 fs.writeFileSync(
@@ -123,14 +118,20 @@ exports.Type = new Proxy({}, { get: () => make });
 `,
 );
 
-// Stub `../_shared/footer-status` — sibling extension folder, just exports a
-// few string constants used in applyDispatchStatus(). Provide an empty object.
+// Stub `@earendil-works/pi-tui` because dispatch tool-block rendering imports Text.
+const piTuiDir = path.join(tmpDir, "node_modules", "@earendil-works", "pi-tui");
+fs.mkdirSync(piTuiDir, { recursive: true });
+fs.writeFileSync(
+  path.join(piTuiDir, "package.json"),
+  JSON.stringify({ name: "@earendil-works/pi-tui", main: "index.js" }),
+);
+fs.writeFileSync(
+  path.join(piTuiDir, "index.js"),
+  `class Text { constructor(text, paddingX = 0, paddingY = 0) { this.text = text; this.paddingX = paddingX; this.paddingY = paddingY; } render() { return String(this.text).split("\\n"); } }\nmodule.exports = { Text };\n`,
+);
+
 const sharedDir = path.join(tmpDir, "..", "_shared");
 fs.mkdirSync(sharedDir, { recursive: true });
-fs.writeFileSync(
-  path.join(sharedDir, "footer-status.js"),
-  `module.exports = { FOOTER_STATUS_KEYS: { dispatch: "dispatch" } };\n`,
-);
 
 // Stub `../_shared/pi-internals` — ADR 0027 PR-B added the
 // markSessionAsSubAgent import. formatResult doesn’t use it, but it’s
