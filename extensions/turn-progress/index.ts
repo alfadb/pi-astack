@@ -24,8 +24,8 @@
  *     pi.on("input") is the EARLIEST extension hook in
  *     `AgentSession.prompt()` (the user-message path) — it fires before
  *     `_checkCompaction` and before `emitBeforeAgentStart`. We set a
- *     footer status AND a one-line pre-working widget here so the user
- *     gets immediate visual confirmation that pi heard them. A stale
+ *     pre-working widget here so the user gets immediate visual
+ *     confirmation that pi heard them. A stale
  *     timer fallback guards against early-exit paths in prompt() (input
  *     handlers returning `handled`, missing model/key, compaction
  *     failures) where neither agent_start nor agent_end would fire to
@@ -34,15 +34,15 @@
  *   Layer B  (light prototype monkey-patch)
  *     We patch `ExtensionRunner.prototype.emitBeforeAgentStart` so that
  *     each time the loop is about to invoke a per-extension handler, we
- *     update the footer status and pre-working widget to show which
- *     extension is running. This turns the previously-invisible serial
- *     chain into a live progress readout like `⠋ memory` using the same
+ *     update the pre-working widget to show which extension is running.
+ *     This turns the previously-invisible serial chain into a live
+ *     progress readout like `⠋ Working… memory` using the same
  *     spinner frames as pi's native Working loader.
  *
  * Both layers degrade independently. If the patch fails to install (pi
  * upgrade changed the runner shape), Layer A still works and the user
- * sees an animated `preparing…` footer plus `Working… preparing turn`
- * widget until pi's own spinner takes over.
+ * sees an animated `Working… preparing turn` widget until pi's own
+ * spinner takes over.
  *
  * ## Why a monkey-patch is appropriate here
  *
@@ -57,12 +57,12 @@
  *
  * ## Why yieldToEventLoop() is needed
  *
- * `ctx.ui.setStatus(...)` only schedules a render via
+ * `ctx.ui.setWidget(...)` only schedules a render via
  * `ui.requestRender()` — actual paint happens on the next event-loop
  * tick. Without an explicit yield, the entire chain
  * `input handlers → _checkCompaction → emitBeforeAgentStart` runs
  * synchronously (each `await` resolves immediately) and the TUI never
- * gets a chance to flush the new status to screen until much later. The
+ * gets a chance to flush the new widget to screen until much later. The
  * yield is one tick — sub-millisecond in practice — but it's what makes
  * the indicator actually appear.
  *
@@ -78,7 +78,7 @@
  *     works. /reload will restore the pristine prototype.
  *
  *   PI_ASTACK_TURN_PROGRESS_NO_WIDGET=1
- *     Disables only the pre-working widget; footer status remains.
+ *     Disables the visible pre-working widget.
  *
  * These vars are read at activate() time. Changing them mid-session has
  * no effect until /reload.
@@ -87,10 +87,10 @@
  *
  * The `ExtensionRunner` prototype is process-wide, so the patch fires
  * inside dispatch-spawned sub-agents too. We don't unconditionally
- * suppress the patch (sub-agent has a no-op uiContext so setStatus /
- * setWidget calls are harmless), but every lifecycle handler that
- * captures `ctx.ui.setStatus` / `ctx.ui.setWidget` into module state
- * MUST gate on `isSubAgentSession(ctx)` — otherwise a sub-agent's
+ * suppress the patch (sub-agent has a no-op uiContext so setWidget
+ * calls are harmless), but every lifecycle handler that captures
+ * `ctx.ui.setWidget` into module state MUST gate on
+ * `isSubAgentSession(ctx)` — otherwise a sub-agent's
  * `input` hook overwrites the main session's captured UI references
  * with the sub-agent's no-op, killing Layer B's updates for the
  * duration of the sub-agent run. This invariant is documented in
@@ -107,7 +107,7 @@ import {
   ExtensionRunner,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
-import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
+import { Container, Spacer, Text, type Component } from "@earendil-works/pi-tui";
 import { isSubAgentSession } from "../_shared/pi-internals";
 
 // ── Symbols (named to match pi-internals.ts convention so grep can ──
@@ -126,7 +126,6 @@ const TURN_PROGRESS_ORIGINAL_EMIT_BEFORE_AGENT_START = Symbol.for(
 );
 const TURN_PROGRESS_STATE_KEY = Symbol.for("pi-astack.turn-progress.state/v1");
 
-const STATUS_KEY = FOOTER_STATUS_KEYS.turnProgress;
 const WIDGET_KEY = "turn-progress-pre-working";
 const WIDGET_PLACEMENT = "aboveEditor" as const;
 
@@ -136,8 +135,8 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 const SPINNER_INTERVAL_MS = 80;
 
 /**
- * Stale-status timeout. If a turn enters `input` but neither
- * `agent_start` nor `agent_end` fires within this window, the status
+ * Stale-widget timeout. If a turn enters `input` but neither
+ * `agent_start` nor `agent_end` fires within this window, the widget
  * is cleared automatically. Covers prompt() early-exit paths:
  *   - input handler returns { action: "handled" } (no agent run)
  *   - no model / missing API key (throws before _runAgentPrompt)
@@ -153,14 +152,14 @@ const SPINNER_INTERVAL_MS = 80;
  * Once Layer B sees the first before_agent_start handler-bearing
  * extension, it replaces this short timer with the long watchdog below.
  * This is critical because Path A memory injection can legitimately run
- * for 40–90s; the old 30s timer cleared the footer mid-injection,
+ * for 40–90s; the old 30s timer cleared the indicator mid-injection,
  * making users see "indicator disappeared but pi is still waiting".
  */
 const STALE_TIMEOUT_MS = 120_000;
 
 /** Long watchdog used after the before_agent_start chain has definitely
  *  begun. agent_start / agent_end are still the normal clear edges; this
- *  only prevents a genuinely stuck chain from leaving a footer forever. */
+ *  only prevents a genuinely stuck chain from leaving a widget forever. */
 const BEFORE_AGENT_START_WATCHDOG_MS = 5 * 60_000;
 
 // ── Shared state on globalThis ──────────────────────────────────────
@@ -168,38 +167,35 @@ const BEFORE_AGENT_START_WATCHDOG_MS = 5 * 60_000;
 // Same rationale as pi-internals.ts: jiti loads each extension in its
 // own instance with moduleCache:false, so module-level lets are NOT
 // shared between extensions. We must use globalThis[Symbol.for(...)]
-// for the captured setStatus reference and patched-flag to survive
+// for the captured widget reference and patched-flag to survive
 // across module instances.
 
-type SetStatusFn = (key: string, text: string | undefined) => void;
+type WidgetFactory = (tui: unknown, theme: unknown) => Component & { dispose?(): void };
+type WidgetContent = string[] | WidgetFactory;
+
 type SetWidgetFn = (
   key: string,
-  content: string[] | undefined,
+  content: WidgetContent | undefined,
   options?: { placement?: "aboveEditor" | "belowEditor" },
 ) => void;
 
 interface TurnProgressState {
-  /** Captured setStatus arrow (bound to its UI instance). Layer B reads
-   *  this; Layer A writes it on each `input` event from the MAIN session. */
-  setStatus: SetStatusFn | undefined;
   /** Captured setWidget arrow (bound to its UI instance) for the
-   *  non-footer pre-working row. */
+   *  pre-working row. Layer A writes it on each `input` event from the MAIN session. */
   setWidget: SetWidgetFn | undefined;
   /** Captured theme.fg("accent", ...) for spinner colouring. */
   themeAccent: ((s: string) => string) | undefined;
-  /** Captured theme.fg("muted", ...) for Working/status text colouring. */
+  /** Captured theme.fg("muted", ...) for Working text colouring. */
   themeMuted: ((s: string) => string) | undefined;
-  /** Current raw footer label (without spinner frame), if visible. */
-  statusLabel: string | undefined;
   /** Current raw widget label (without spinner frame / Working prefix), if visible. */
   widgetLabel: string | undefined;
-  /** Shared spinner frame for footer + widget. */
+  /** Shared spinner frame for the widget. */
   spinnerFrameIndex: number;
   /** Interval that animates the pre-working spinner. */
   spinnerTimer: ReturnType<typeof setInterval> | undefined;
   /** True once installEmitPatch has succeeded on the runner prototype. */
   patched: boolean;
-  /** Active status-clear timer: short preflight stale fallback before
+  /** Active widget-clear timer: short preflight stale fallback before
    *  Layer B starts, then a long watchdog while before_agent_start runs. */
   staleTimer: ReturnType<typeof setTimeout> | undefined;
   /** warnOnce dedup. */
@@ -211,11 +207,9 @@ function getState(): TurnProgressState {
   let state = g[TURN_PROGRESS_STATE_KEY] as TurnProgressState | undefined;
   if (!state) {
     state = {
-      setStatus: undefined,
       setWidget: undefined,
       themeAccent: undefined,
       themeMuted: undefined,
-      statusLabel: undefined,
       widgetLabel: undefined,
       spinnerFrameIndex: 0,
       spinnerTimer: undefined,
@@ -285,47 +279,17 @@ function formatSpinnerText(state: TurnProgressState, label: string): string {
   return `${indicator}${muted(label)}`;
 }
 
-function formatLine(state: TurnProgressState, shortName: string): string {
-  return formatSpinnerText(state, shortName);
+function formatWidget(state: TurnProgressState, label: string): WidgetFactory {
+  const text = formatSpinnerText(state, `Working… ${label}`);
+  return () => {
+    const root = new Container();
+    root.addChild(new Text(text, 1, 0));
+    root.addChild(new Spacer(1));
+    return root;
+  };
 }
 
-function formatPreparing(state: TurnProgressState): string {
-  return formatSpinnerText(state, "preparing…");
-}
-
-function formatWidget(state: TurnProgressState, label: string): string[] {
-  return [formatSpinnerText(state, `Working… ${label}`)];
-}
-
-function formatWidgetPreparing(state: TurnProgressState): string[] {
-  return formatWidget(state, "preparing turn");
-}
-
-function formatWidgetLine(state: TurnProgressState, shortName: string): string[] {
-  return formatWidget(state, shortName);
-}
-
-function formatWidgetAwaitingModel(state: TurnProgressState): string[] {
-  return formatWidget(state, "awaiting model…");
-}
-
-/** Honest terminal label for the HANDOFF window after the before_agent_start
- *  chain completes but before agent_start fires.
- *
- *  Accuracy note (verified against pi-agent-core agent-loop.js): agent_start
- *  is emitted at the START of the agent loop, BEFORE the provider request
- *  (`emit(agent_start)` → … → runLoop/stream). turn-progress clears the
- *  footer on agent_start. So this label covers the post-chain handoff
- *  (append custom messages, apply system prompt, enter agent.prompt) — NOT
- *  the provider time-to-first-token (the native Working spinner owns that,
- *  after agent_start). Without this label the footer froze on the LAST
- *  handler's extension name (e.g. the chain-tail time-injector),
- *  misattributing the handoff window to an extension. */
-function formatAwaitingModel(state: TurnProgressState): string {
-  return formatSpinnerText(state, "awaiting model…");
-}
-
-/** Cancel any pending stale-status timer. Called whenever agent_start /
+/** Cancel any pending stale timer. Called whenever agent_start /
  *  agent_end fires (normal completion path) or when a fresh `input`
  *  arrives (replaces the previous timer). */
 function clearStaleTimer(state: TurnProgressState): void {
@@ -347,16 +311,7 @@ function armStatusClearTimer(state: TurnProgressState, timeoutMs: number): void 
   if (typeof tref.unref === "function") tref.unref();
 }
 
-function setStatusIfCaptured(state: TurnProgressState, text: string | undefined): void {
-  if (typeof state.setStatus !== "function") return;
-  try {
-    state.setStatus(STATUS_KEY, text);
-  } catch {
-    // best-effort
-  }
-}
-
-function setWidgetIfCaptured(state: TurnProgressState, content: string[] | undefined): void {
+function setWidgetIfCaptured(state: TurnProgressState, content: WidgetContent | undefined): void {
   if (typeof state.setWidget !== "function") return;
   try {
     state.setWidget(WIDGET_KEY, content, { placement: WIDGET_PLACEMENT });
@@ -366,13 +321,10 @@ function setWidgetIfCaptured(state: TurnProgressState, content: string[] | undef
 }
 
 function hasVisibleIndicator(state: TurnProgressState): boolean {
-  return state.statusLabel !== undefined || state.widgetLabel !== undefined;
+  return state.widgetLabel !== undefined;
 }
 
 function refreshAnimatedIndicators(state: TurnProgressState): void {
-  if (state.statusLabel !== undefined) {
-    setStatusIfCaptured(state, formatSpinnerText(state, state.statusLabel));
-  }
   if (state.widgetLabel !== undefined) {
     setWidgetIfCaptured(state, formatWidget(state, state.widgetLabel));
   }
@@ -407,19 +359,6 @@ function syncSpinnerTimer(state: TurnProgressState): void {
   }
 }
 
-function setStatusLabelIfCaptured(state: TurnProgressState, label: string | undefined): void {
-  const wasVisible = hasVisibleIndicator(state);
-  if (label !== undefined && typeof state.setStatus !== "function") {
-    state.statusLabel = undefined;
-    syncSpinnerTimer(state);
-    return;
-  }
-  state.statusLabel = label;
-  if (!wasVisible && label !== undefined) state.spinnerFrameIndex = 0;
-  setStatusIfCaptured(state, label === undefined ? undefined : formatSpinnerText(state, label));
-  syncSpinnerTimer(state);
-}
-
 function setWidgetLabelIfCaptured(state: TurnProgressState, label: string | undefined): void {
   const wasVisible = hasVisibleIndicator(state);
   if (label !== undefined && typeof state.setWidget !== "function") {
@@ -433,19 +372,8 @@ function setWidgetLabelIfCaptured(state: TurnProgressState, label: string | unde
   syncSpinnerTimer(state);
 }
 
-/** Clear the footer status using the most recently captured setStatus
- *  (which is bound to the main session's UI, never the sub-agent's). */
-function clearStatusIfCaptured(state: TurnProgressState): void {
-  setStatusLabelIfCaptured(state, undefined);
-}
-
-function clearWidgetIfCaptured(state: TurnProgressState): void {
-  setWidgetLabelIfCaptured(state, undefined);
-}
-
 function clearIndicatorsIfCaptured(state: TurnProgressState): void {
-  clearStatusIfCaptured(state);
-  clearWidgetIfCaptured(state);
+  setWidgetLabelIfCaptured(state, undefined);
 }
 
 // ── Layer B: prototype patch ────────────────────────────────────────
@@ -478,7 +406,7 @@ type HandlerResult =
  * ## Strategy: mirror pi's loop, instrument it
  *
  * We replace `emitBeforeAgentStart` with a behaviourally-equivalent
- * re-implementation that adds setStatus calls between extensions.
+ * re-implementation that adds widget updates between extensions.
  *
  * Two **intentional** deviations from pi's exact behaviour, both
  * defensive hardening rather than semantic drift:
@@ -565,7 +493,6 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
     // need them, so missing-affordance branches degrade to no-op
     // (returning undefined is semantically equivalent to "no handlers
     // mutated anything" — safe).
-    const captured = state.setStatus;
     if (
       !exts ||
       typeof this.createContext !== "function" ||
@@ -592,12 +519,12 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
     // Sub-agent UI gate (3-T0 P2): the patch is process-wide and
     // captured UI functions resolve to the MAIN session. Without this,
     // a dispatch-spawned sub-agent's before_agent_start chain would write
-    // to the MAIN footer/widget — and the terminal "awaiting model…"
+    // to the MAIN widget — and the terminal "awaiting model…"
     // would LINGER, since the sub-agent's own agent_start clear is itself
     // isSubAgentSession-gated. Gate all UI WRITES (never handler
     // execution) on main-session, honoring the module-wide invariant.
     const shouldLabel =
-      (!!captured || typeof state.setWidget === "function") &&
+      typeof state.setWidget === "function" &&
       !isSubAgentSession(baseCtx as { sessionManager?: unknown });
     const ctx: Record<PropertyKey, unknown> = Object.defineProperties(
       {} as Record<PropertyKey, unknown>,
@@ -613,8 +540,8 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
     let systemPromptModified = false;
     // Track whether Layer B labeled at least one handler-bearing extension.
     // Only then is there a stale ext-name to correct with the terminal
-    // "awaiting model…" status after the loop (zero-handler chains leave
-    // Layer A's preparing… banner untouched — no regression).
+    // "awaiting model…" label after the loop (zero-handler chains leave
+    // Layer A's preparing widget untouched — no regression).
     let anyHandlerLabeled = false;
 
     for (const ext of exts) {
@@ -629,15 +556,14 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
           // pre-before_agent_start window. Once we are about to run the
           // first real handler, replace it with a long watchdog so slow
           // but healthy Path A memory injection remains visible until
-          // agent_start clears the footer.
+          // agent_start clears the widget.
           armStatusClearTimer(state, BEFORE_AGENT_START_WATCHDOG_MS);
         }
         anyHandlerLabeled = true;
         const shortName = extractShortName(ext.path ?? "<unknown>");
-        setStatusLabelIfCaptured(state, shortName);
         setWidgetLabelIfCaptured(state, shortName);
         // Yield once before the handler runs so the TUI flushes the
-        // new status. Sub-millisecond cost; without it, fast-but-many
+        // new widget. Sub-millisecond cost; without it, fast-but-many
         // extensions render as a single flash at the end.
         await yieldToEventLoop();
       }
@@ -679,21 +605,20 @@ function installEmitPatch(proto: Record<PropertyKey, unknown>): boolean {
       }
     }
 
-    // turn-progress fix (footer freeze): the chain is done. Replace the
+    // turn-progress fix (stale label): the chain is done. Replace the
     // last per-extension label with an honest terminal "awaiting model…"
     // for the post-chain handoff window (NOT provider TTFT — see
     // formatAwaitingModel's accuracy note), so that window is not
     // misattributed to whichever extension ran last (e.g. the chain-tail
     // time-injector). Gated on anyHandlerLabeled (⇒ shouldLabel was true,
     // i.e. main session AND ≥1 ext labeled) so zero-handler chains and
-    // sub-agents keep their prior footer untouched. agent_start clears it.
+    // sub-agents keep their prior widget untouched. agent_start clears it.
     //
     // No yieldToEventLoop() here (unlike the per-ext label): the caller's
     // next await (entering agent.prompt → agent loop) provides the tick
     // that flushes this to the TUI. Adding a yield would inject latency
     // into every turn's hot path for no benefit.
     if (shouldLabel && anyHandlerLabeled) {
-      setStatusLabelIfCaptured(state, "awaiting model…");
       setWidgetLabelIfCaptured(state, "awaiting model…");
     }
 
@@ -770,7 +695,6 @@ export default function (pi: ExtensionAPI): void {
     // doesn't reuse stale main-session UI references.
     clearStaleTimer(state);
     clearIndicatorsIfCaptured(state);
-    state.setStatus = undefined;
     state.setWidget = undefined;
     state.themeAccent = undefined;
     state.themeMuted = undefined;
@@ -778,7 +702,7 @@ export default function (pi: ExtensionAPI): void {
   }
 
   if (disableWidget) {
-    clearWidgetIfCaptured(state);
+    clearIndicatorsIfCaptured(state);
     state.setWidget = undefined;
   }
 
@@ -806,8 +730,8 @@ export default function (pi: ExtensionAPI): void {
     }
   }
 
-  // Layer A: capture setStatus + setWidget + theme, set preparing…
-  // banner and pre-working row, yield for TUI flush. Gated on:
+  // Layer A: capture setWidget + theme, set preparing… pre-working row,
+  // and yield for TUI flush. Gated on:
   //   - not a sub-agent session (prevents overwriting main-session
   //     captured UI refs with sub-agent's no-op);
   //   - input source is "interactive" (skips programmatic /extension
@@ -819,20 +743,13 @@ export default function (pi: ExtensionAPI): void {
 
     const ui = (ctx as {
       ui?: {
-        setStatus?: SetStatusFn;
         setWidget?: SetWidgetFn;
         theme?: { fg?: (color: string, text: string) => string };
       };
     }).ui;
-    if (!ui || typeof ui.setStatus !== "function") return;
+    if (!ui || typeof ui.setWidget !== "function") return;
 
-    // Bind setStatus to ui so future calls survive even if pi changes
-    // the implementation from an arrow to a method. Today it's an
-    // arrow (interactive-mode.js:1540), so .bind is a no-op cost-wise
-    // but a robustness gain.
-    const boundSetStatus = ui.setStatus.bind(ui);
-    state.setStatus = boundSetStatus;
-    if (!disableWidget && typeof ui.setWidget === "function") {
+    if (!disableWidget) {
       state.setWidget = ui.setWidget.bind(ui);
     } else {
       state.setWidget = undefined;
@@ -848,17 +765,16 @@ export default function (pi: ExtensionAPI): void {
       state.themeMuted = undefined;
     }
 
-    setStatusLabelIfCaptured(state, "preparing…");
     setWidgetLabelIfCaptured(state, "preparing turn");
 
-    // Short stale-status fallback: if the prompt exits before Layer B
+    // Short stale-widget fallback: if the prompt exits before Layer B
     // enters before_agent_start, clear ourselves. Once Layer B sees the
     // first handler-bearing extension, it replaces this with the long
     // before_agent_start watchdog.
     armStatusClearTimer(state, STALE_TIMEOUT_MS);
 
     // Critical: yield so the TUI render loop gets a chance to flush
-    // the new status before downstream synchronous work
+    // the new widget before downstream synchronous work
     // (_checkCompaction, emitBeforeAgentStart) takes over.
     await yieldToEventLoop();
   });
@@ -889,7 +805,6 @@ export const __TEST = {
   PATCH_MARKER: TURN_PROGRESS_EMIT_BEFORE_AGENT_START_PATCHED,
   ORIGINAL_MARKER: TURN_PROGRESS_ORIGINAL_EMIT_BEFORE_AGENT_START,
   STATE_KEY: TURN_PROGRESS_STATE_KEY,
-  STATUS_KEY,
   WIDGET_KEY,
   STALE_TIMEOUT_MS,
   BEFORE_AGENT_START_WATCHDOG_MS,

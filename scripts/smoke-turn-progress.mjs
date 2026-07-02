@@ -15,9 +15,9 @@
  *        B5 extensions without before_agent_start handlers are skipped
  *        B6 per-handler throw routes to emitError, sibling handlers
  *           still run
- *        B7 setStatus/setWidget invoked exactly once per extension with
- *           handlers, with the correct key + extension short name in the text
- *        B8 setStatus/setWidget NOT invoked for extensions without handlers
+ *        B7 setWidget invoked exactly once per extension with handlers,
+ *           with the correct key + extension short name in the text; setStatus is never called
+ *        B8 setWidget NOT invoked for extensions without handlers
  *        B9 NEW: emitError that throws is NOT caught (matches pi
  *           upstream, per review)
  *        B10 NEW: handler returns `{ message: null }` / falsy — NOT
@@ -26,7 +26,7 @@
  *           as mutation (`!== undefined` check)
  *        B12 NEW: handler returns only `message` (no systemPrompt) —
  *           return shape has `systemPrompt: undefined`
- *        B13 NEW: setStatus that throws does not abort the loop
+ *        B13 NEW: ignored setStatus that throws does not abort the loop
  *        B17 NEW: setWidget that throws does not abort the loop
  *        B16 NEW: first before_agent_start label replaces Layer A's
  *           preflight stale timer with a long watchdog so slow Path A
@@ -41,14 +41,14 @@
  *      cleared, state.patched flag flipped
  *
  *   F. Layer A behaviour (NEW: fully covered)
- *        F1 input handler captures setStatus + setWidget + theme
- *        F2 input handler writes preparing… + pre-working widget and yields
- *        F3 agent_start clears the status + widget
- *        F4 agent_end clears the status + widget
+ *        F1 input handler captures setWidget + theme
+ *        F2 input handler writes pre-working widget and yields
+ *        F3 agent_start clears the widget and never touches footer status
+ *        F4 agent_end clears the widget and never touches footer status
  *        F5 sub-agent input is gated (does NOT overwrite main captures)
  *        F6 input event.source = "extension" is gated
- *        F7 stale-status timer fallback clears indicators after STALE_TIMEOUT_MS
- *        F8 PI_ASTACK_TURN_PROGRESS_NO_WIDGET disables only the widget
+ *        F7 stale-widget timer fallback clears indicators after STALE_TIMEOUT_MS
+ *        F8 PI_ASTACK_TURN_PROGRESS_NO_WIDGET disables the visible widget
  *
  *   G. pi upstream drift sentinel (NEW): reads the real
  *      pi-coding-agent runner.js source and asserts the
@@ -74,14 +74,13 @@ const ts = require("typescript");
 //
 // turn-progress/index.ts imports:
 //   - @earendil-works/pi-coding-agent  (ESM-only; not require-able)
-//   - ../_shared/footer-status         (TS)
+//   - @earendil-works/pi-tui           (component constructors only)
 //   - ../_shared/pi-internals          (TS, heavy — we only need
 //                                       isSubAgentSession)
 //
-// We stub all three with minimal CJS files in the tmp dir.
+// We stub these with minimal CJS files in the tmp dir.
 
 const srcPath = path.join(repoRoot, "extensions/turn-progress/index.ts");
-const sharedPath = path.join(repoRoot, "extensions/_shared/footer-status.ts");
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-tp-"));
 
@@ -107,6 +106,43 @@ fs.mkdirSync(tpDir, { recursive: true });
 const piStubPath = path.join(tpDir, "_pi-stub.cjs");
 fs.writeFileSync(piStubPath, "exports.ExtensionRunner = class StubExtensionRunner {};\n");
 
+// Stub: @earendil-works/pi-tui — enough to verify Text + Spacer render height.
+const tuiStubPath = path.join(tpDir, "_tui-stub.cjs");
+fs.writeFileSync(
+  tuiStubPath,
+  [
+    "class Container {",
+    "  constructor() { this.children = []; }",
+    "  addChild(component) { this.children.push(component); }",
+    "  invalidate() { for (const child of this.children) child.invalidate?.(); }",
+    "  render(width) { return this.children.flatMap((child) => child.render(width)); }",
+    "}",
+    "class Text {",
+    "  constructor(text = '', paddingX = 1, paddingY = 1) { this.text = text; this.paddingX = paddingX; this.paddingY = paddingY; }",
+    "  invalidate() {}",
+    "  render(width) {",
+    "    if (!this.text || this.text.trim() === '') return [];",
+    "    const blank = ' '.repeat(width);",
+    "    const pad = ' '.repeat(this.paddingX);",
+    "    return [",
+    "      ...Array.from({ length: this.paddingY }, () => blank),",
+    "      `${pad}${this.text}${pad}`.padEnd(width, ' '),",
+    "      ...Array.from({ length: this.paddingY }, () => blank),",
+    "    ];",
+    "  }",
+    "}",
+    "class Spacer {",
+    "  constructor(lines = 1) { this.lines = lines; }",
+    "  invalidate() {}",
+    "  render() { return Array.from({ length: this.lines }, () => ''); }",
+    "}",
+    "exports.Container = Container;",
+    "exports.Text = Text;",
+    "exports.Spacer = Spacer;",
+    "",
+  ].join("\n"),
+);
+
 // Stub: ../_shared/pi-internals — controllable isSubAgentSession.
 // Tests flip the predicate by writing a flag on globalThis before
 // invoking handlers, then resetting.
@@ -127,12 +163,11 @@ fs.writeFileSync(
 const srcCode = fs
   .readFileSync(srcPath, "utf8")
   .replace(/from\s+"@earendil-works\/pi-coding-agent"/g, 'from "./_pi-stub.cjs"')
-  .replace(/from\s+"\.\.\/_shared\/footer-status"/g, 'from "../_shared/footer-status.js"')
+  .replace(/from\s+"@earendil-works\/pi-tui"/g, 'from "./_tui-stub.cjs"')
   .replace(/from\s+"\.\.\/_shared\/pi-internals"/g, 'from "../_shared/pi-internals.js"');
 const tpTmpSrc = path.join(tpDir, "index.ts");
 fs.writeFileSync(tpTmpSrc, srcCode);
 
-transpileTs(sharedPath, path.join(sharedDir, "footer-status.js"));
 transpileTs(tpTmpSrc, path.join(tpDir, "index.js"));
 
 let mod;
@@ -154,7 +189,6 @@ const {
   PATCH_VERSION,
   PATCH_MARKER,
   ORIGINAL_MARKER,
-  STATUS_KEY,
   WIDGET_KEY,
   STALE_TIMEOUT_MS,
   BEFORE_AGENT_START_WATCHDOG_MS,
@@ -178,11 +212,10 @@ function check(name, cond, detail) {
 
 function resetState() {
   const st = getState();
-  st.setStatus = undefined;
+  delete st.setStatus;
   st.setWidget = undefined;
   st.themeAccent = undefined;
   st.themeMuted = undefined;
-  st.statusLabel = undefined;
   st.widgetLabel = undefined;
   st.spinnerFrameIndex = 0;
   st.patched = false;
@@ -196,6 +229,17 @@ function resetState() {
   }
   st.warned.clear();
   internalsMock.__setSubAgentMock(false);
+}
+
+function renderWidgetContent(content, width = 80) {
+  if (Array.isArray(content)) return content;
+  if (typeof content !== "function") return [];
+  const component = content({}, { fg: (color, text) => `[${color}]${text}` });
+  return component.render(width);
+}
+
+function widgetFirstLine(call) {
+  return renderWidgetContent(call?.content)[0] ?? "";
 }
 
 console.log("smoke: turn-progress");
@@ -401,22 +445,8 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
     JSON.stringify(patched.result?.messages) === JSON.stringify(baseline.result?.messages),
   );
   check(
-    "B7. setStatus invoked once per ext-with-handlers + 1 terminal awaiting-model",
-    patched.setStatusCalls.length === 3,
-  );
-  check(
-    "B7. setStatus uses 00-turn-progress key",
-    patched.setStatusCalls.every((c) => c.key === STATUS_KEY),
-  );
-  check(
-    "B7. setStatus text contains extension short name",
-    patched.setStatusCalls[0].text.includes("extA") &&
-      patched.setStatusCalls[1].text.includes("extB"),
-  );
-  check(
-    "B7. terminal call is honest 'awaiting model' (not a frozen ext name)",
-    patched.setStatusCalls[2].text.includes("awaiting model") &&
-      !patched.setStatusCalls[2].text.includes("extB"),
+    "B7. setStatus is not used by Layer B",
+    patched.setStatusCalls.length === 0,
   );
   check(
     "B7. setWidget invoked once per ext-with-handlers + 1 terminal awaiting-model",
@@ -428,11 +458,22 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
   );
   check(
     "B7. widget content tracks extension names and terminal handoff",
-    patched.setWidgetCalls[0].content?.[0]?.includes("Working") &&
-      patched.setWidgetCalls[0].content?.[0]?.includes("extA") &&
-      patched.setWidgetCalls[1].content?.[0]?.includes("extB") &&
-      patched.setWidgetCalls[2].content?.[0]?.includes("awaiting model") &&
-      !patched.setWidgetCalls[2].content?.[0]?.includes("extB"),
+    widgetFirstLine(patched.setWidgetCalls[0]).includes("Working") &&
+      widgetFirstLine(patched.setWidgetCalls[0]).includes("extA") &&
+      widgetFirstLine(patched.setWidgetCalls[1]).includes("extB") &&
+      widgetFirstLine(patched.setWidgetCalls[2]).includes("awaiting model") &&
+      !widgetFirstLine(patched.setWidgetCalls[2]).includes("extB"),
+  );
+  check(
+    "B7. widget content uses component factory",
+    patched.setWidgetCalls.every((c) => typeof c.content === "function"),
+  );
+  check(
+    "B7. widget renders a real trailing blank line for native Working spacing",
+    patched.setWidgetCalls.every((c) => {
+      const lines = renderWidgetContent(c.content);
+      return lines.length === 2 && lines[1] === "";
+    }),
   );
 }
 
@@ -450,14 +491,13 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
   check("B5. ext without handlers skipped (baseline)", baseline.result?.systemPrompt === "X|B");
   check("B5. ext without handlers skipped (patched)", patched.result?.systemPrompt === baseline.result?.systemPrompt);
   check(
-    "B8. setStatus NOT called for ext without handlers (2 ext + 1 terminal, none=extEmpty)",
-    patched.setStatusCalls.length === 3 &&
-      !patched.setStatusCalls.some((c) => c.text.includes("extEmpty")),
+    "B8. setStatus remains unused when skipping ext without handlers",
+    patched.setStatusCalls.length === 0,
   );
   check(
     "B8. setWidget NOT called for ext without handlers (2 ext + 1 terminal, none=extEmpty)",
     patched.setWidgetCalls.length === 3 &&
-      !patched.setWidgetCalls.some((c) => c.content?.[0]?.includes("extEmpty")),
+      !patched.setWidgetCalls.some((c) => widgetFirstLine(c).includes("extEmpty")),
   );
 }
 
@@ -470,14 +510,14 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
     { path: "/e/y/index.ts", handlers: new Map([["agent_end", [async () => {}]]]) },
   ];
   const patched = await runPatched(exts);
-  check("B14. zero-handler chain → NO footer writes (terminal skipped)", patched.setStatusCalls.length === 0);
+  check("B14. zero-handler chain → NO status writes (terminal skipped)", patched.setStatusCalls.length === 0);
   check("B14. zero-handler chain → NO widget writes (terminal skipped)", patched.setWidgetCalls.length === 0);
   check("B14. zero-handler chain → result undefined (no mutations)", patched.result === undefined);
 }
 
-// B15 — sub-agent run: handlers STILL execute + mutate, but footer writes
+// B15 — sub-agent run: handlers STILL execute + mutate, but widget writes
 // (per-ext labels AND the terminal awaiting-model) are gated off so a
-// dispatch sub-agent never writes the MAIN session footer.
+// dispatch sub-agent never writes the MAIN session widget.
 {
   resetState();
   internalsMock.__setSubAgentMock(true);
@@ -488,7 +528,7 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
   const patched = await runPatched(exts);
   internalsMock.__setSubAgentMock(false);
   check("B15. sub-agent: handlers still run (systemPrompt mutated)", patched.result?.systemPrompt === "X|B");
-  check("B15. sub-agent: NO footer writes at all (per-ext + terminal gated)", patched.setStatusCalls.length === 0);
+  check("B15. sub-agent: NO status writes at all", patched.setStatusCalls.length === 0);
   check("B15. sub-agent: NO widget writes at all (per-ext + terminal gated)", patched.setWidgetCalls.length === 0);
 }
 
@@ -613,7 +653,7 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
   check("B12. message-only return shape (patched)", patched.result?.systemPrompt === undefined && Array.isArray(patched.result?.messages));
 }
 
-// B13 — throwing setStatus does not abort the loop
+// B13 — throwing setStatus is ignored because Layer B no longer writes footer status
 {
   resetState();
   const exts = [
@@ -622,7 +662,7 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
   ];
   const patched = await runPatched(exts, "BASE", { throwingSetStatus: true });
   check(
-    "B13. throwing setStatus does not abort loop",
+    "B13. ignored throwing setStatus does not abort loop",
     patched.result?.systemPrompt === "A|B",
     `got: ${JSON.stringify(patched.result)}`,
   );
@@ -645,7 +685,7 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
 
 // B16 — entering before_agent_start replaces Layer A's preflight stale
 // timer with the long watchdog. This locks the P0 fix for
-// slow-but-healthy Path A memory injection: the footer must stay visible
+// slow-but-healthy Path A memory injection: the widget must stay visible
 // until agent_start/agent_end clears it.
 {
   resetState();
@@ -662,7 +702,7 @@ async function runPatched(extensions, systemPrompt = "BASE", opts = {}) {
 
   check("B16. setup short timer exists before Layer B", shortTimer !== undefined);
   check("B16. entering first labeled handler replaced the short timer", longTimer !== undefined && longTimer !== shortTimer);
-  check("B16. replacement did not clear footer during healthy before_agent_start", !patched.setStatusCalls.some((c) => c.text === undefined));
+  check("B16. replacement did not write status during healthy before_agent_start", patched.setStatusCalls.length === 0);
   check("B16. replacement did not clear widget during healthy before_agent_start", !patched.setWidgetCalls.some((c) => c.content === undefined));
   check("B16. BEFORE_AGENT_START_WATCHDOG_MS is longer than STALE_TIMEOUT_MS", BEFORE_AGENT_START_WATCHDOG_MS > STALE_TIMEOUT_MS);
 
@@ -833,15 +873,16 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
   const { ctx, setStatusCalls, setWidgetCalls } = makeFakeCtx();
   await fakePi.emit("input", { type: "input", source: "interactive" }, ctx);
 
-  check("F1/F2. input handler captured setStatus into state", typeof getState().setStatus === "function");
+  check("F1/F2. input handler does not capture setStatus into state", getState().setStatus === undefined);
   check("F1/F2. input handler captured setWidget into state", typeof getState().setWidget === "function");
   check("F1. input handler captured theme.fg into state.themeAccent", typeof getState().themeAccent === "function");
-  check("F2. input handler wrote preparing… to status", setStatusCalls.length >= 1 && setStatusCalls[0].key === STATUS_KEY);
-  check("F2. preparing… text uses native spinner frame and theme colours", setStatusCalls[0].text.includes("[accent]⠋") && setStatusCalls[0].text.includes("[muted]preparing") && !setStatusCalls[0].text.includes("⏳"));
-  check("F2. setStatus called with correct `this` (bound to ui)", setStatusCalls[0].boundThis === true);
+  check("F2. input handler does not write status", setStatusCalls.length === 0);
   check("F2. input handler wrote pre-working widget", setWidgetCalls.length >= 1 && setWidgetCalls[0].key === WIDGET_KEY);
   check("F2. widget uses aboveEditor placement", setWidgetCalls[0].options?.placement === "aboveEditor");
-  check("F2. widget text uses native spinner frame and preparing label", setWidgetCalls[0].content?.[0]?.includes("[accent]⠋") && setWidgetCalls[0].content?.[0]?.includes("[muted]Working") && setWidgetCalls[0].content?.[0]?.includes("preparing turn") && !setWidgetCalls[0].content?.[0]?.includes("⏳"));
+  const f2Lines = renderWidgetContent(setWidgetCalls[0].content);
+  check("F2. widget content uses component factory", typeof setWidgetCalls[0].content === "function");
+  check("F2. widget text uses native spinner frame and preparing label", f2Lines[0]?.includes("[accent]⠋") && f2Lines[0]?.includes("[muted]Working") && f2Lines[0]?.includes("preparing turn") && !f2Lines[0]?.includes("⏳"));
+  check("F2. widget renders a real trailing blank line", f2Lines.length === 2 && f2Lines[1] === "");
   check("F2. setWidget called with correct `this` (bound to ui)", setWidgetCalls[0].boundThis === true);
 }
 
@@ -854,10 +895,9 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
   await fakePi.emit("input", { type: "input", source: "interactive" }, ctx);
   await fakePi.emit("agent_start", { type: "agent_start" }, ctx);
 
-  // Find the clear calls (text/content === undefined).
-  const clearCalls = setStatusCalls.filter((c) => c.text === undefined && c.key === STATUS_KEY);
+  // Find the clear calls (content === undefined).
   const widgetClearCalls = setWidgetCalls.filter((c) => c.content === undefined && c.key === WIDGET_KEY);
-  check("F3. agent_start cleared the status (called setStatus with undefined)", clearCalls.length === 1);
+  check("F3. agent_start does not write status", setStatusCalls.length === 0);
   check("F3. agent_start cleared the widget (called setWidget with undefined)", widgetClearCalls.length === 1);
 }
 
@@ -870,9 +910,8 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
   await fakePi.emit("input", { type: "input", source: "interactive" }, ctx);
   await fakePi.emit("agent_end", { type: "agent_end" }, ctx);
 
-  const clearCalls = setStatusCalls.filter((c) => c.text === undefined && c.key === STATUS_KEY);
   const widgetClearCalls = setWidgetCalls.filter((c) => c.content === undefined && c.key === WIDGET_KEY);
-  check("F4. agent_end cleared the status", clearCalls.length === 1);
+  check("F4. agent_end does not write status", setStatusCalls.length === 0);
   check("F4. agent_end cleared the widget", widgetClearCalls.length === 1);
 }
 
@@ -882,12 +921,11 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
   const fakePi = makeFakePi();
   mod.default(fakePi);
 
-  // First a normal main-session input captures setStatus.
+  // First a normal main-session input captures setWidget.
   const main = makeFakeCtx({ subAgent: false });
   await fakePi.emit("input", { type: "input", source: "interactive" }, main.ctx);
-  const mainCapturedRef = getState().setStatus;
   const mainCapturedWidgetRef = getState().setWidget;
-  check("F5. main-session input captured setStatus", typeof mainCapturedRef === "function");
+  check("F5. main-session input does not capture setStatus", getState().setStatus === undefined);
   check("F5. main-session input captured setWidget", typeof mainCapturedWidgetRef === "function");
 
   // Then a sub-agent input arrives.
@@ -897,8 +935,8 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
   internalsMock.__setSubAgentMock(false);
 
   check(
-    "F5. sub-agent input did NOT overwrite captured setStatus",
-    getState().setStatus === mainCapturedRef,
+    "F5. sub-agent input left setStatus unused",
+    getState().setStatus === undefined,
   );
   check(
     "F5. sub-agent input did NOT overwrite captured setWidget",
@@ -928,11 +966,11 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
 
   // Confirm that source=undefined (legacy event shape) still works.
   await fakePi.emit("input", { type: "input" }, ctx);
-  check("F6. source=undefined falls through for status (legacy compat)", setStatusCalls.length === 1);
+  check("F6. source=undefined still does not write status", setStatusCalls.length === 0);
   check("F6. source=undefined falls through for widget (legacy compat)", setWidgetCalls.length === 1);
 }
 
-// F7 — stale-status fallback fires
+// F7 — stale-widget fallback fires
 {
   resetState();
   const fakePi = makeFakePi();
@@ -966,10 +1004,9 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
     globalThis.clearTimeout = originalClearTimeout;
   }
 
-  const clearCalls = setStatusCalls.filter((c) => c.text === undefined && c.key === STATUS_KEY);
   const widgetClearCalls = setWidgetCalls.filter((c) => c.content === undefined && c.key === WIDGET_KEY);
   check("F7. real stale-timer callback clears state.staleTimer", getState().staleTimer === undefined);
-  check("F7. real stale-timer callback clears the status", clearCalls.length === 1);
+  check("F7. real stale-timer callback does not write status", setStatusCalls.length === 0);
   check("F7. real stale-timer callback clears the widget", widgetClearCalls.length === 1);
   check("F7. timer callback did not call clearTimeout on itself", clearTimeoutCalls === 0);
   check("F7. before_agent_start watchdog is a sane positive number", typeof BEFORE_AGENT_START_WATCHDOG_MS === "number" && BEFORE_AGENT_START_WATCHDOG_MS > STALE_TIMEOUT_MS);
@@ -985,7 +1022,7 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
     mod.default(fakePi);
     const { ctx, setStatusCalls, setWidgetCalls } = makeFakeCtx();
     await fakePi.emit("input", { type: "input", source: "interactive" }, ctx);
-    check("F8. NO_WIDGET still captures/writes status", typeof getState().setStatus === "function" && setStatusCalls.length >= 1);
+    check("F8. NO_WIDGET does not write status", setStatusCalls.length === 0);
     check("F8. NO_WIDGET does not capture setWidget", getState().setWidget === undefined);
     check("F8. NO_WIDGET does not write widget", setWidgetCalls.length === 0);
   } finally {
