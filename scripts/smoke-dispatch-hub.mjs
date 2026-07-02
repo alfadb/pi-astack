@@ -10,12 +10,15 @@
  * dispatch.hub.enabled and dogfooding — it cannot be offline-smoked.
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti/static";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+const hubSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/hub.ts"), "utf-8");
+const dispatchSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const hub = await jiti.import(`${repoRoot}/extensions/dispatch/hub.ts`);
 
@@ -145,6 +148,14 @@ ok(sum.row_kind === "hub_summary" && sum.terminal_state === "degraded", "summary
 ok(sum.total_cost === 0.51, "summary totals hub+workers cost");
 ok(sum.main_session_disposition === "unobserved", "summary disposition placeholder (filled post-hoc by oracle)");
 ok(sum.dual_exec_sampled === true, "summary carries dual-exec sampling flag");
+
+// ── live shell source wiring: hub must use the same below-editor dispatch widget ──
+ok(/widget\?:\s*\{[\s\S]{0,900}?startTicker/.test(hubSrc), "HubDeps accepts dispatch widget helpers");
+ok(/widget\.startTicker\(ctx, widgetSnapshot\)/.test(hubSrc), "dispatch_hub starts the dispatch widget ticker");
+ok(/name:\s*"hub planner"[\s\S]{0,120}?model:\s*hubModel[\s\S]{0,120}?thinking:\s*hubCfg\.thinking/.test(hubSrc), "dispatch_hub creates a visible hub planner widget row");
+ok(/workerWidgetTasks\s*=\s*widget[\s\S]{0,400}?widget\.taskFromSpec/.test(hubSrc), "dispatch_hub creates worker widget rows after planning");
+ok(/onProgress:\s*\(progress:\s*\{\s*reason:\s*string;\s*at:\s*number\s*\}\)\s*=>\s*widget\.markProgress/.test(hubSrc), "dispatch_hub forwards heartbeat progress to widget rows");
+ok(/widget:\s*\{[\s\S]{0,500}?taskFromSpec:\s*widgetTaskFromSpec[\s\S]{0,500}?startTicker:\s*startDispatchWidgetTicker/.test(dispatchSrc), "dispatch index injects widget helpers into dispatch_hub");
 
 console.log();
 if (failures === 0) {

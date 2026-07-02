@@ -392,13 +392,42 @@ export function readHubConfigFromSettings(): { hub: HubSettings; roster: string[
 
 // ── Orchestration shell (registerHubTool) ───────────────────────
 
+export interface HubWidgetTask {
+  name: string;
+  model: string;
+  thinking: string;
+  state: "queued" | "running" | "completed" | "failed" | "cancelled";
+  startedAt?: number;
+  endedAt?: number;
+  durationMs?: number;
+  failureType?: string;
+  lastHeartbeatAt?: number;
+  heartbeatMs?: number;
+  lastProgressReason?: string;
+}
+
+export interface HubWidgetSnapshot {
+  title: string;
+  state: DispatchState;
+  startedAt: number;
+  durationMs?: number;
+  counts?: { running: number; failed: number; success: number; total: number };
+  tasks: HubWidgetTask[];
+}
+
 export interface HubDeps {
   runInProcess: (
     model: string, thinking: string, prompt: string, signal: AbortSignal,
     timeoutMs: number, modelRegistry: unknown, toolAllowlist?: string,
-    heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number },
+    heartbeatCtx?: {
+      anchor?: CausalAnchor;
+      projectRoot?: string;
+      maxRuntimeMs?: number;
+      onProgress?: (progress: { reason: string; at: number; heartbeatTracePath?: string }) => void;
+    },
   ) => Promise<{
     output: string; error?: string; failureType?: string; durationMs: number;
+    heartbeat_liveness?: { msSinceLastBeat?: number };
     usage?: { input: number; output: number; cost: number };
   }>;
   appendDispatchAudit: (projectRoot: string, anchor: CausalAnchor | undefined, event: Record<string, unknown>) => Promise<void>;
@@ -406,6 +435,14 @@ export interface HubDeps {
   validateTools: (tools: string | undefined) => { ok: boolean; reason?: string };
   /** Reuse the existing dispatch footer indicator so hub progress is visible. */
   applyDispatchStatus: (ctx: { ui?: unknown }, state: DispatchState, counts?: { running: number; failed: number; success: number; total: number }, durationMs?: number) => void;
+  /** Reuse the dispatch below-editor task widget for hub planning + workers. */
+  widget?: {
+    taskFromSpec: (task: Record<string, unknown>, fallback: string) => HubWidgetTask;
+    updateFromResult: (task: HubWidgetTask, result: any) => void;
+    markProgress: (task: HubWidgetTask, reason: string, at: number) => void;
+    apply: (ctx: { ui?: unknown }, snapshot?: HubWidgetSnapshot) => void;
+    startTicker: (ctx: { ui?: unknown }, snapshot: HubWidgetSnapshot) => () => void;
+  };
   defaultTimeoutMs: number;
   maxProviderConcurrency: number;
   /** Read settings.modelCurator + settings.dispatch.hub fresh per call. */
@@ -465,6 +502,39 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         return { content: [{ type: "text" as const, text: "dispatch_hub: no flagship model available to act as hub (configure modelCurator.tiers.flagship or dispatch.hub.model)." }], details: { kind: "dispatch_hub_no_model" }, isError: true };
       }
 
+      const widget = deps.widget;
+      const hubWidgetTask = widget?.taskFromSpec({ name: "hub planner", model: hubModel, thinking: hubCfg.thinking }, "hub planner");
+      const widgetSnapshot: HubWidgetSnapshot | undefined = widget && hubWidgetTask
+        ? {
+            title: "hub",
+            state: "running",
+            startedAt: Date.now(),
+            counts: { running: 1, failed: 0, success: 0, total: 1 },
+            tasks: [hubWidgetTask],
+          }
+        : undefined;
+      let widgetTickerStopped = false;
+      let stopWidgetTicker = () => {};
+      const stopWidgetTickerOnce = () => {
+        if (widgetTickerStopped) return;
+        widgetTickerStopped = true;
+        stopWidgetTicker();
+      };
+      const finishWidget = (state: DispatchState, counts: { running: number; failed: number; success: number; total: number }, durationMs?: number) => {
+        if (!widget || !widgetSnapshot) return;
+        widgetSnapshot.state = state;
+        widgetSnapshot.counts = counts;
+        if (durationMs !== undefined) widgetSnapshot.durationMs = durationMs;
+        stopWidgetTickerOnce();
+        widget.apply(ctx, widgetSnapshot);
+      };
+      if (widget && widgetSnapshot && hubWidgetTask) {
+        hubWidgetTask.state = "running";
+        hubWidgetTask.startedAt = widgetSnapshot.startedAt;
+        widget.markProgress(hubWidgetTask, "hub_planning_started", widgetSnapshot.startedAt);
+        stopWidgetTicker = widget.startTicker(ctx, widgetSnapshot);
+      }
+
       // Unique id for THIS hub run, stamped on EVERY audit row. The oracle
       // groups runs by hub_run_id because (session_id, turn_id) is NOT unique
       // per run — multiple dispatch_hub calls share one turn, and a single run's
@@ -496,6 +566,10 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           hubCost: usage?.cost ?? 0, workersCost: 0, hubDurationMs: durMs, totalWallMs: 0, dualExecSampled: false,
         }));
         deps.applyDispatchStatus(ctx, "failed", { running: 0, failed: 1, success: 0, total: 1 });
+        if (widget && hubWidgetTask) {
+          widget.updateFromResult(hubWidgetTask, { output: planText, error: reason, failureType, durationMs: durMs });
+        }
+        finishWidget("failed", { running: 0, failed: 1, success: 0, total: 1 }, durMs);
         return {
           content: [{ type: "text" as const, text: `❌ dispatch_hub: ${reason}. Fall back to dispatch_parallel with an explicit assignment.` }],
           details: { kind: "dispatch_hub_plan_failed", error: reason, failure_type: failureType, hub_model: hubModel },
@@ -516,7 +590,14 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           deps.runInProcess(
             hubModel, hubCfg.thinking,
             hubAnchor ? `${formatAnchorPromptBlock(hubAnchor)}\n\n${planPrompt}` : planPrompt,
-            signal, timeoutMs, modelRegistry, HUB_TOOLS, { anchor: hubAnchor, projectRoot },
+            signal, timeoutMs, modelRegistry, HUB_TOOLS,
+            {
+              anchor: hubAnchor,
+              projectRoot,
+              ...(widget && hubWidgetTask
+                ? { onProgress: (progress: { reason: string; at: number }) => widget.markProgress(hubWidgetTask, progress.reason, progress.at) }
+                : {}),
+            },
           ),
         );
       } catch (err) {
@@ -535,6 +616,9 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       if (!parsed.ok) {
         return failPlanning(`plan parse failed: ${parsed.error}`, hubRes.failureType ?? "plan_parse_error", hubRes.output ?? "", hubRes.usage, hubDurationMs);
       }
+      if (widget && hubWidgetTask) {
+        widget.updateFromResult(hubWidgetTask, hubRes);
+      }
 
       const v = validateHubPlan(parsed.plan, { roster, hubModel, maxWorkers: hubCfg.maxWorkers });
       void emit(hubAnchor, buildHubDecisionRow({
@@ -551,6 +635,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         // Cross-vendor review (gpt-5.5 MINOR): clear the planning footer so it
         // does not stay stuck at "running 1/0/0/1" when no workers validate.
         deps.applyDispatchStatus(ctx, "failed", { running: 0, failed: 1, success: 0, total: 1 });
+        finishWidget("failed", { running: 0, failed: 1, success: 0, total: 1 }, hubDurationMs);
         return {
           content: [{ type: "text" as const, text: `❌ dispatch_hub: no valid workers after validation. ${v.warnings.join("; ")}` }],
           details: { kind: "dispatch_hub_no_valid_workers", warnings: v.warnings, hub_model: hubModel },
@@ -561,6 +646,14 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       // ── Worker fan-out (claim loop, per-provider cap) ──
       const tasks = v.workers;
       const total = tasks.length;
+      const workerWidgetTasks = widget
+        ? tasks.map((t, i) => widget.taskFromSpec({ name: t.role, role: t.role, model: t.model, thinking: t.thinking ?? "high", prompt: t.prompt }, `worker ${i + 1}`))
+        : [];
+      if (widget && widgetSnapshot) {
+        widgetSnapshot.tasks = hubWidgetTask ? [hubWidgetTask, ...workerWidgetTasks] : workerWidgetTasks;
+        widgetSnapshot.counts = { running: 0, failed: 0, success: 0, total };
+        widget.apply(ctx, widgetSnapshot);
+      }
       const results: Array<{ output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } } | null> = new Array(total).fill(null);
       const activeByProvider = new Map<string, number>();
       const claimed = new Set<number>();
@@ -583,7 +676,14 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
 
       // Live footer (reuse the dispatch indicator): worker progress as they run.
       let running = 0, success = 0, failed = 0;
-      const updateStatus = () => deps.applyDispatchStatus(ctx, "running", { running, failed, success, total });
+      const updateStatus = () => {
+        const counts = { running, failed, success, total };
+        deps.applyDispatchStatus(ctx, "running", counts);
+        if (widget && widgetSnapshot) {
+          widgetSnapshot.state = "running";
+          widgetSnapshot.counts = counts;
+        }
+      };
 
       const fanStart = Date.now();
       updateStatus();
@@ -592,6 +692,13 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           if (signal.aborted) return;
           const i = claimNext();
           if (i === undefined) return;
+          const widgetTask = workerWidgetTasks[i];
+          if (widget && widgetTask) {
+            const startedAt = Date.now();
+            widgetTask.state = "running";
+            widgetTask.startedAt = startedAt;
+            widget.markProgress(widgetTask, "worker_started", startedAt);
+          }
           running++;
           updateStatus();
           try {
@@ -610,12 +717,22 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
                   deps.runInProcess(
                     t.model, t.thinking ?? "high",
                     subAnchor ? `${formatAnchorPromptBlock(subAnchor)}\n\n${t.prompt}` : t.prompt,
-                    signal, timeoutMs, modelRegistry, t.tools ?? WORKER_TOOLS, { anchor: subAnchor, projectRoot },
+                    signal, timeoutMs, modelRegistry, t.tools ?? WORKER_TOOLS,
+                    {
+                      anchor: subAnchor,
+                      projectRoot,
+                      ...(widget && widgetTask
+                        ? { onProgress: (progress: { reason: string; at: number }) => widget.markProgress(widgetTask, progress.reason, progress.at) }
+                        : {}),
+                    },
                   ),
                 );
               } catch (err) {
                 res = { output: "", error: `worker crashed: ${(err as Error)?.message ?? String(err)}`, failureType: "crash", durationMs: 0 };
               }
+            }
+            if (widget && widgetTask) {
+              widget.updateFromResult(widgetTask, res);
             }
             results[i] = res;
             running--;
@@ -654,7 +771,15 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const successCount = dense.filter((r) => !r.error).length;
       const failedCount = dense.filter((r) => !!r.error).length;
       const terminalState = failedCount === 0 ? "completed" : successCount === 0 ? "failed" : "degraded";
-      deps.applyDispatchStatus(ctx, terminalState, { running: 0, failed: failedCount, success: successCount, total }, totalWallMs);
+      const finalCounts = { running: 0, failed: failedCount, success: successCount, total };
+      if (widget) {
+        for (let i = 0; i < dense.length; i++) {
+          const task = workerWidgetTasks[i];
+          if (task && !task.endedAt) widget.updateFromResult(task, dense[i]);
+        }
+      }
+      deps.applyDispatchStatus(ctx, terminalState, finalCounts, totalWallMs);
+      finishWidget(terminalState, finalCounts, totalWallMs);
       const workersCost = dense.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
       const hubCost = hubRes.usage?.cost ?? 0;
 

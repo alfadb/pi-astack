@@ -139,6 +139,11 @@ check("undefined input returns []", () => {
   if (!Array.isArray(r) || r.length !== 0) throw new Error("not empty array");
 });
 
+check("normalizeTaskSpec preserves optional widget display name", () => {
+  const r = normalizeTaskSpec({ model: "provider-a/model-a", thinking: "high", prompt: "hi", name: "schema audit" });
+  if (r.name !== "schema audit") throw new Error(`name lost: ${JSON.stringify(r)}`);
+});
+
 // ── prepareArguments behavior under the bug payload ─────────────
 // We can't easily import the dispatch extension itself (it pulls in pi runtime),
 // but we can replicate the prepareArguments fragment to assert the actionable
@@ -182,10 +187,11 @@ check("prepareArguments throws actionable error for broken-stringified payload",
 
 check("prepareArguments accepts well-formed array (smoke)", () => {
   const r = prepareArguments({
-    tasks: [{ model: "provider-a/model-a", thinking: "high", prompt: "hi" }],
+    tasks: [{ model: "provider-a/model-a", thinking: "high", prompt: "hi", name: "schema audit" }],
   });
   if (r.tasks.length !== 1) throw new Error("did not preserve task");
   if (r.tasks[0].model !== "provider-a/model-a") throw new Error("model lost");
+  if (r.tasks[0].name !== "schema audit") throw new Error("name lost");
 });
 
 check("dispatch_parallel concurrency is provider-scoped, not fixed global worker count", () => {

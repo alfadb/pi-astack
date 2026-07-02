@@ -42,11 +42,11 @@ check("runInProcess imports startHeartbeat from _shared/heartbeat", () => {
   }
 });
 
-check("runInProcess signature accepts heartbeatCtx (anchor + projectRoot + maxRuntimeMs)", () => {
-  if (!/heartbeatCtx\?:\s*\{\s*anchor\?:\s*CausalAnchor;\s*projectRoot\?:\s*string;\s*maxRuntimeMs\?:\s*number\s*\}/.test(dispatchSrc)) {
+check("runInProcess signature accepts heartbeatCtx (anchor + projectRoot + maxRuntimeMs + onProgress)", () => {
+  if (!/heartbeatCtx\?:\s*\{[\s\S]{0,250}?anchor\?:\s*CausalAnchor;[\s\S]{0,250}?projectRoot\?:\s*string;[\s\S]{0,250}?maxRuntimeMs\?:\s*number;[\s\S]{0,250}?onProgress\?:/.test(dispatchSrc)) {
     throw new Error(
       "runInProcess must accept optional heartbeatCtx parameter " +
-      "with { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number } shape",
+      "with { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number; onProgress?: ... } shape",
     );
   }
 });
@@ -87,6 +87,12 @@ check("runInProcess calls heartbeat.stop() in a finally block (R8 P1 fix)", () =
   }
 });
 
+check("runInProcess forwards progress events to heartbeatCtx.onProgress", () => {
+  if (!/heartbeatCtx\?\.onProgress\?\.\(\{\s*reason,\s*at:\s*lastProgressAt,\s*heartbeatTracePath:\s*heartbeat\.tracePath\s*\}\)/.test(dispatchSrc)) {
+    throw new Error("recordProgress must call heartbeatCtx.onProgress with reason, timestamp, and heartbeat trace path");
+  }
+});
+
 console.log("\nSection: caller-side heartbeatCtx threading");
 
 check("dispatch_agent.execute passes anchor + projectRoot to runInProcess", () => {
@@ -97,8 +103,8 @@ check("dispatch_agent.execute passes anchor + projectRoot to runInProcess", () =
     /result = await runWithTriggerAnchor\(subAnchor,/,
   );
   if (startIdx < 0) throw new Error("could not locate dispatch_agent runInProcess call");
-  const window = dispatchSrc.slice(startIdx, startIdx + 2000);
-  if (!/anchor:\s*subAnchor,\s*projectRoot:\s*ctx\.cwd\s*\|\|\s*process\.cwd\(\)/.test(window)) {
+  const window = dispatchSrc.slice(startIdx, startIdx + 3000);
+  if (!/anchor:\s*subAnchor,[\s\S]{0,400}?projectRoot:\s*ctx\.cwd\s*\|\|\s*process\.cwd\(\)/.test(window)) {
     throw new Error(
       "dispatch_agent must pass { anchor: subAnchor, projectRoot: ctx.cwd || process.cwd() } " +
       "as heartbeatCtx to runInProcess",
@@ -112,14 +118,36 @@ check("dispatch_parallel.worker passes anchor + projectRoot to runInProcess", ()
     /res = await runWithTriggerAnchor\(subAnchor,/,
   );
   if (startIdx < 0) throw new Error("could not locate dispatch_parallel runInProcess call");
-  const window = dispatchSrc.slice(startIdx, startIdx + 2000);
+  const window = dispatchSrc.slice(startIdx, startIdx + 3000);
   // Note: short-form `projectRoot` (no explicit value because the
   // projectRoot variable is captured by the closure).
-  if (!/\{\s*anchor:\s*subAnchor,\s*projectRoot\s*\}/.test(window)) {
+  if (!/\{[\s\S]{0,200}?anchor:\s*subAnchor,[\s\S]{0,200}?projectRoot[\s\S]{0,400}?\}/.test(window)) {
     throw new Error(
       "dispatch_parallel must pass { anchor: subAnchor, projectRoot } " +
       "as heartbeatCtx (projectRoot is the outer scope const captured by the worker)",
     );
+  }
+});
+
+console.log("\nSection: dispatch task widget");
+
+check("dispatch widget renders below the editor", () => {
+  if (!/setWidgetRaw\([\s\S]{0,500}?DISPATCH_WIDGET_KEY[\s\S]{0,800}?placement:\s*"belowEditor"/.test(dispatchSrc)) {
+    throw new Error("dispatch task widget must use ctx.ui.setWidget(..., { placement: \"belowEditor\" })");
+  }
+});
+
+check("dispatch_agent and dispatch_parallel both wire widget progress callbacks", () => {
+  const matches = dispatchSrc.match(/onProgress:\s*\(progress\)\s*=>\s*markWidgetTaskProgress\(widgetTask,\s*progress\.reason,\s*progress\.at\)/g) ?? [];
+  if (matches.length < 2) {
+    throw new Error(`expected at least 2 widget progress callbacks, found ${matches.length}`);
+  }
+});
+
+check("dispatch tool schemas accept optional task name for widget labels", () => {
+  const matches = dispatchSrc.match(/name:\s*Type\.Optional\(Type\.String\(\{ description:\s*"Short task name shown in the dispatch widget/g) ?? [];
+  if (matches.length < 2) {
+    throw new Error("dispatch_agent and dispatch_parallel task schemas must both accept optional name");
   }
 });
 

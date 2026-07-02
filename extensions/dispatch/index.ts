@@ -270,6 +270,193 @@ function applyDispatchStatus(
   } catch { /* best-effort */ }
 }
 
+// ── Dispatch widget state machine ───────────────────────────────
+
+const DISPATCH_WIDGET_KEY = "dispatch-tasks";
+
+type DispatchWidgetTaskState = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+interface DispatchWidgetTask {
+  name: string;
+  model: string;
+  thinking: string;
+  state: DispatchWidgetTaskState;
+  startedAt?: number;
+  endedAt?: number;
+  durationMs?: number;
+  failureType?: string;
+  lastHeartbeatAt?: number;
+  heartbeatMs?: number;
+  lastProgressReason?: string;
+}
+
+interface DispatchWidgetSnapshot {
+  title: string;
+  state: DispatchState;
+  startedAt: number;
+  durationMs?: number;
+  counts?: DispatchCounts;
+  tasks: DispatchWidgetTask[];
+}
+
+function compactOneLine(value: unknown): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function charDisplayWidth(ch: string): number {
+  const cp = ch.codePointAt(0) ?? 0;
+  if (cp === 0 || cp < 32 || (cp >= 0x7f && cp < 0xa0)) return 0;
+  if (
+    cp >= 0x1100 &&
+    (cp <= 0x115f || cp === 0x2329 || cp === 0x232a ||
+      (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe10 && cp <= 0xfe19) ||
+      (cp >= 0xfe30 && cp <= 0xfe6f) ||
+      (cp >= 0xff00 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6))
+  ) return 2;
+  return 1;
+}
+
+function visibleTextWidth(value: string): number {
+  let width = 0;
+  for (const ch of Array.from(value)) width += charDisplayWidth(ch);
+  return width;
+}
+
+function truncateDisplayText(value: string, maxWidth: number): string {
+  if (visibleTextWidth(value) <= maxWidth) return value;
+  if (maxWidth <= 0) return "";
+  if (maxWidth <= 3) return ".".repeat(maxWidth);
+
+  let out = "";
+  let width = 0;
+  const suffixWidth = 3;
+  for (const ch of Array.from(value)) {
+    const w = charDisplayWidth(ch);
+    if (width + w > maxWidth - suffixWidth) break;
+    out += ch;
+    width += w;
+  }
+  return `${out}...`;
+}
+
+function formatWidgetDuration(ms: number | undefined): string {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return "--";
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.floor((ms % 60_000) / 1000);
+  return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+}
+
+function taskDisplayName(task: Record<string, unknown>, fallback: string): string {
+  const explicit = compactOneLine(task.name ?? task.id ?? task.role);
+  if (explicit) return truncateDisplayText(explicit, 48);
+  const firstPromptLine = compactOneLine(String(task.prompt ?? "").split(/\r?\n/).find((line) => line.trim()));
+  return truncateDisplayText(firstPromptLine || fallback, 48);
+}
+
+function widgetTaskFromSpec(task: Record<string, unknown>, fallback: string): DispatchWidgetTask {
+  return {
+    name: taskDisplayName(task, fallback),
+    model: compactOneLine(task.model),
+    thinking: compactOneLine(task.thinking || "off"),
+    state: "queued",
+  };
+}
+
+function updateWidgetTaskFromResult(task: DispatchWidgetTask, result: AgentResult): void {
+  task.state = !result.error ? "completed" : inferTerminalState(result) === "cancelled" ? "cancelled" : "failed";
+  task.endedAt = Date.now();
+  task.durationMs = result.durationMs;
+  task.failureType = result.failureType;
+  const heartbeatMs = result.heartbeat_liveness?.msSinceLastBeat;
+  if (typeof heartbeatMs === "number" && Number.isFinite(heartbeatMs)) {
+    task.heartbeatMs = Math.max(0, heartbeatMs);
+  }
+}
+
+function markWidgetTaskProgress(task: DispatchWidgetTask, reason: string, at: number): void {
+  task.lastHeartbeatAt = at;
+  task.lastProgressReason = reason;
+}
+
+function renderDispatchWidget(snapshot: DispatchWidgetSnapshot, now = Date.now(), width = 120): string[] {
+  const safeWidth = Math.max(20, Math.floor(width));
+  const elapsedMs = snapshot.durationMs ?? Math.max(0, now - snapshot.startedAt);
+  const counts = snapshot.counts
+    ? ` ${snapshot.counts.running}/${snapshot.counts.failed}/${snapshot.counts.success}/${snapshot.counts.total}`
+    : "";
+  const lines = [
+    truncateDisplayText(
+      `dispatch ${snapshot.title}: ${snapshot.state}${counts} elapsed ${formatWidgetDuration(elapsedMs)}`,
+      safeWidth,
+    ),
+  ];
+
+  for (let i = 0; i < snapshot.tasks.length; i++) {
+    const task = snapshot.tasks[i]!;
+    const taskElapsed = task.durationMs ?? (task.startedAt ? Math.max(0, now - task.startedAt) : undefined);
+    const hbMs = task.heartbeatMs ?? (task.lastHeartbeatAt ? Math.max(0, now - task.lastHeartbeatAt) : undefined);
+    const state = task.state === "running"
+      ? "run"
+      : task.state === "completed"
+        ? "ok"
+        : task.state === "cancelled"
+          ? "cancel"
+          : task.state === "failed"
+            ? "fail"
+            : "wait";
+    const prefix = `${String(i + 1).padStart(2, " ")}. [${state}] `;
+    const model = truncateDisplayText(task.model, safeWidth < 80 ? 20 : 38);
+    const thinking = truncateDisplayText(task.thinking || "off", 8);
+    const failure = task.failureType ? ` ${truncateDisplayText(task.failureType, 18)}` : "";
+    const right = ` | ${formatWidgetDuration(taskElapsed)} | ${model} | thinking:${thinking} | hb:${formatWidgetDuration(hbMs)}${failure}`;
+    const nameWidth = safeWidth - visibleTextWidth(prefix) - visibleTextWidth(right);
+    const fullLine = nameWidth >= 8
+      ? `${prefix}${truncateDisplayText(task.name, nameWidth)}${right}`
+      : `${prefix}${truncateDisplayText(task.name, Math.max(0, safeWidth - visibleTextWidth(prefix) - 1))}`;
+    lines.push(truncateDisplayText(fullLine, safeWidth));
+  }
+
+  return lines;
+}
+
+function applyDispatchWidget(ctx: { ui?: unknown }, snapshot?: DispatchWidgetSnapshot): void {
+  const ui = ctx.ui as {
+    setWidget?(extId: string, content?: unknown, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
+  } | undefined;
+  const setWidgetRaw = ui?.setWidget?.bind(ui);
+  if (!setWidgetRaw) return;
+  try {
+    if (!snapshot) {
+      setWidgetRaw(DISPATCH_WIDGET_KEY, undefined);
+      return;
+    }
+    setWidgetRaw(
+      DISPATCH_WIDGET_KEY,
+      () => ({
+        render(width: number): string[] {
+          return renderDispatchWidget(snapshot, Date.now(), width);
+        },
+        invalidate() {},
+      }),
+      { placement: "belowEditor" },
+    );
+  } catch { /* best-effort */ }
+}
+
+function startDispatchWidgetTicker(ctx: { ui?: unknown }, snapshot: DispatchWidgetSnapshot): () => void {
+  applyDispatchWidget(ctx, snapshot);
+  const timer = setInterval(() => applyDispatchWidget(ctx, snapshot), 1000);
+  if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
+    (timer as unknown as { unref: () => void }).unref();
+  }
+  return () => clearInterval(timer);
+}
+
 // ── Tool validation ─────────────────────────────────────────────
 
 interface ToolValidation {
@@ -698,7 +885,12 @@ export async function runInProcess(
    *  maxRuntimeMs is an internal safety cap for callers such as workflow
    *  that must preserve a wall-clock budget while dispatch itself uses
    *  timeoutMs as the no-progress idle timeout. */
-  heartbeatCtx?: { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number },
+  heartbeatCtx?: {
+    anchor?: CausalAnchor;
+    projectRoot?: string;
+    maxRuntimeMs?: number;
+    onProgress?: (progress: { reason: string; at: number; heartbeatTracePath?: string }) => void;
+  },
 ): Promise<AgentResult> {
   const start = Date.now();
   const idleTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0
@@ -903,6 +1095,9 @@ export async function runInProcess(
       lastProgressAt = Date.now();
       lastProgressReason = reason;
       heartbeat.beat("alive", `progress:${reason}`);
+      try {
+        heartbeatCtx?.onProgress?.({ reason, at: lastProgressAt, heartbeatTracePath: heartbeat.tracePath });
+      } catch { /* best-effort UI telemetry */ }
       armIdleTimeout();
     };
     recordProgress("watchdog_started");
@@ -1218,12 +1413,14 @@ export default function (pi: ExtensionAPI) {
   // See causal-anchor.ts bindLifecycle doc.
   bindCausalAnchorLifecycle(pi);
 
-  // Footer status: reset to idle on session/agent boundaries.
+  // Footer status + task widget: reset on session/agent boundaries.
   pi.on("session_start", async (_event: unknown, ctx: any) => {
     applyDispatchStatus(ctx, "idle");
+    applyDispatchWidget(ctx, undefined);
   });
   pi.on("agent_start", async (_event: unknown, ctx: any) => {
     applyDispatchStatus(ctx, "idle");
+    applyDispatchWidget(ctx, undefined);
   });
 
   // ── E: tool idle-loop guard ──────────────────────────────────────
@@ -1301,6 +1498,7 @@ export default function (pi: ExtensionAPI) {
       model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
+      name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch widget. If omitted, pi derives a label from id/role/prompt." })),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
     }),
@@ -1317,6 +1515,7 @@ export default function (pi: ExtensionAPI) {
         model: n.model,
         thinking: n.thinking,
         prompt: n.prompt,
+        ...(n.name !== undefined ? { name: n.name } : {}),
         ...(n.tools !== undefined ? { tools: n.tools } : {}),
         ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
       };
@@ -1388,6 +1587,18 @@ export default function (pi: ExtensionAPI) {
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       const startedAt = Date.now();
       applyDispatchStatus(ctx, "running", { running: 1, failed: 0, success: 0, total: 1 });
+      const widgetTask = widgetTaskFromSpec(params, "dispatch");
+      widgetTask.state = "running";
+      widgetTask.startedAt = startedAt;
+      markWidgetTaskProgress(widgetTask, "started", startedAt);
+      const widgetSnapshot: DispatchWidgetSnapshot = {
+        title: "agent",
+        state: "running",
+        startedAt,
+        counts: { running: 1, failed: 0, success: 0, total: 1 },
+        tasks: [widgetTask],
+      };
+      const stopWidgetTicker = startDispatchWidgetTicker(ctx, widgetSnapshot);
 
       // ADR 0027 C6a: derive sub-agent anchor from main-session parent anchor.
       // - parentAnchor may be undefined (e.g., dispatch_agent called before any
@@ -1425,7 +1636,11 @@ export default function (pi: ExtensionAPI) {
             // runInProcess can write the liveness channel. subAnchor is
             // the per-dispatch sub-agent anchor; ctx.cwd is the project
             // root. Both are also used by C6 audit so no new state.
-            { anchor: subAnchor, projectRoot: ctx.cwd || process.cwd() },
+            {
+              anchor: subAnchor,
+              projectRoot: ctx.cwd || process.cwd(),
+              onProgress: (progress) => markWidgetTaskProgress(widgetTask, progress.reason, progress.at),
+            },
           ),
         );
       } catch (err: any) {
@@ -1459,11 +1674,14 @@ export default function (pi: ExtensionAPI) {
           ? "cancelled"
           : "failed";
       const isOk = !result.error;
-      applyDispatchStatus(
-        ctx, singleTaskFinalState,
-        { running: 0, failed: isOk ? 0 : 1, success: isOk ? 1 : 0, total: 1 },
-        durationMs,
-      );
+      const finalCounts = { running: 0, failed: isOk ? 0 : 1, success: isOk ? 1 : 0, total: 1 };
+      applyDispatchStatus(ctx, singleTaskFinalState, finalCounts, durationMs);
+      widgetSnapshot.state = singleTaskFinalState;
+      widgetSnapshot.durationMs = durationMs;
+      widgetSnapshot.counts = finalCounts;
+      updateWidgetTaskFromResult(widgetTask, result);
+      stopWidgetTicker();
+      applyDispatchWidget(ctx, widgetSnapshot);
 
       // ADR 0027 C6a + §C5 v1: dispatch audit row — cross-layer join key
       // for tracing a user turn through L1 (sediment / abrain) and L2
@@ -1562,6 +1780,7 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
+          name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch widget. If omitted, pi derives a label from id/role/prompt." })),
           tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide)." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),
         }),
@@ -1595,6 +1814,7 @@ export default function (pi: ExtensionAPI) {
           model: n.model,
           thinking: n.thinking,
           prompt: n.prompt,
+          ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.tools !== undefined ? { tools: n.tools } : {}),
           ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
         };
@@ -1647,9 +1867,21 @@ export default function (pi: ExtensionAPI) {
       let success = 0;
       let failed = 0;
       const total = tasks.length;
+      const widgetSnapshot: DispatchWidgetSnapshot = {
+        title: "parallel",
+        state: "running",
+        startedAt: dispatchStart,
+        counts: { running, failed, success, total },
+        tasks: tasks.map((t: Record<string, unknown>, i: number) => widgetTaskFromSpec(t, `task ${i + 1}`)),
+      };
+      const stopWidgetTicker = startDispatchWidgetTicker(ctx, widgetSnapshot);
 
-      const updateRunning = () =>
-        applyDispatchStatus(ctx, "running", { running, failed, success, total });
+      const updateRunning = () => {
+        const counts = { running, failed, success, total };
+        applyDispatchStatus(ctx, "running", counts);
+        widgetSnapshot.state = "running";
+        widgetSnapshot.counts = counts;
+      };
       updateRunning();
 
       const activeByProvider = new Map<string, number>();
@@ -1679,6 +1911,11 @@ export default function (pi: ExtensionAPI) {
           const i = claimNextTask();
           if (i === undefined) return;
           const t = tasks[i];
+          const widgetTask = widgetSnapshot.tasks[i]!;
+          const taskStart = Date.now();
+          widgetTask.state = "running";
+          widgetTask.startedAt = taskStart;
+          markWidgetTaskProgress(widgetTask, "started", taskStart);
 
           running++;
           updateRunning();
@@ -1688,7 +1925,6 @@ export default function (pi: ExtensionAPI) {
           // deriveSubAgentAnchor and stable across retry loops.
           const subAnchor = deriveSubAgentAnchor(parentAnchor, `dispatch_parallel[${i}]`);
           taskAnchors[i] = subAnchor;
-          const taskStart = Date.now();
           let res: AgentResult;
           try {
             const toolCheck = validateTools(t.tools);
@@ -1699,6 +1935,7 @@ export default function (pi: ExtensionAPI) {
                 failureType: "tool_rejected",
                 durationMs: 0,
               };
+              updateWidgetTaskFromResult(widgetTask, res);
               results[i] = res;
               releaseProvider(i);
               running--;
@@ -1747,7 +1984,11 @@ export default function (pi: ExtensionAPI) {
                 // Stage 1b heartbeat ctx. Per-task subAnchor (subturn
                 // 1..N) gives each task its own heartbeat file under
                 // .pi-astack/dispatch/heartbeat/.
-                { anchor: subAnchor, projectRoot },
+                {
+                  anchor: subAnchor,
+                  projectRoot,
+                  onProgress: (progress) => markWidgetTaskProgress(widgetTask, progress.reason, progress.at),
+                },
               ),
             );
           } catch (err: any) {
@@ -1763,6 +2004,7 @@ export default function (pi: ExtensionAPI) {
               durationMs: 0,
             };
           }
+          updateWidgetTaskFromResult(widgetTask, res);
           results[i] = res;
           releaseProvider(i);
           running--;
@@ -1867,11 +2109,16 @@ export default function (pi: ExtensionAPI) {
       // never ran for hole slots — task_count ≠ success + failed.
       const successCount = materializedResults.filter((r) => !r.error).length;
       const failedCount = materializedResults.filter((r) => !!r.error).length;
-      applyDispatchStatus(
-        ctx, finalState,
-        { running: 0, failed: failedCount, success: successCount, total },
-        totalWallMs,
-      );
+      const finalCounts = { running: 0, failed: failedCount, success: successCount, total };
+      applyDispatchStatus(ctx, finalState, finalCounts, totalWallMs);
+      widgetSnapshot.state = finalState;
+      widgetSnapshot.durationMs = totalWallMs;
+      widgetSnapshot.counts = finalCounts;
+      for (let i = 0; i < materializedResults.length; i++) {
+        updateWidgetTaskFromResult(widgetSnapshot.tasks[i]!, materializedResults[i]!);
+      }
+      stopWidgetTicker();
+      applyDispatchWidget(ctx, widgetSnapshot);
 
       // ADR 0027 §C5 v1: aggregate dispatch_parallel.summary audit row.
       // Prior to v1 only per-task rows existed, so cross-layer consumers had
@@ -2050,6 +2297,13 @@ export default function (pi: ExtensionAPI) {
         providerFromModel,
         validateTools,
         applyDispatchStatus,
+        widget: {
+          taskFromSpec: widgetTaskFromSpec,
+          updateFromResult: updateWidgetTaskFromResult,
+          markProgress: markWidgetTaskProgress,
+          apply: applyDispatchWidget,
+          startTicker: startDispatchWidgetTicker,
+        },
         defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
         maxProviderConcurrency: MAX_PROVIDER_CONCURRENCY,
         readConfig: readHubConfigFromSettings,

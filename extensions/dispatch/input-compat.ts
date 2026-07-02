@@ -15,6 +15,7 @@
 
 export interface TaskSpec {
   id?: string;
+  name?: string;
   model: string;
   thinking: string;
   prompt: string;
@@ -85,6 +86,7 @@ export function normalizeTaskSpec(raw: unknown): TaskSpec {
 
   return {
     id: t.id,
+    name: t.name ? String(t.name) : undefined,
     model: String(t.model ?? ""),
     thinking: String(t.thinking ?? "low"),
     prompt: String(t.prompt ?? ""),
