@@ -21,12 +21,18 @@ pi-astack memory 的 current contract：
 |---|---|---|
 | `~/.abrain/l1/events/sha256/**` | content-addressed evidence events | semantic SOT |
 | `~/.abrain/l2/views/**` | deterministic markdown projections | stable read/audit view |
+| `~/.abrain/l2/views/constraint/latest/compiled-view.md` | repo L2 Constraint compiled view | projection/audit view; currently not the rule-injector read path |
+| `~/.abrain/.state/sediment/constraint-shadow/latest/compiled-view.md` | runtime Constraint compiled view | current `session_start` rule-injector read path while compiled-view injection remains enabled |
 | `~/.abrain/projects/<id>/` | project memory legacy markdown area | retained rollback/debug surface; projection_only steady-state writes go through L1/L2 |
 | `<project>/.pensieve/` | legacy project memory | read-only migration source |
 | `~/.abrain/knowledge/` | world / cross-project legacy markdown area | retained rollback/debug surface; projection_only steady-state writes go through L1/L2 |
 | `~/.abrain/workflows/` | cross-project workflows | current writer target |
 | `~/.abrain/projects/<id>/workflows/` | project workflows | current writer target |
 | `~/.abrain/.state/` | derived state/audit/locks/local maps, including current JSON/sidecar L3 artifacts | not semantic SOT |
+
+### 2.1 Constraint compiled-view runtime boundary
+
+Constraint currently has two compiled-view materializations. The repo L2 file under `~/.abrain/l2/views/constraint/latest/compiled-view.md` is the canonical projection/audit artifact (`shadow_only:false`). The runtime rule injector still reads `~/.abrain/.state/sediment/constraint-shadow/latest/compiled-view.md` directly, filters it by active project, and injects that snapshot at `session_start`. With `ruleInjector.compiledViewInjection.fallbackToLegacyOnError=true`, read failure, coverage gate failure, or freshness failure falls back to legacy rules instead of failing closed. Do not interpret the existence of the repo L2 compiled-view as proof that the injector has migrated to L2 as its source.
 
 > **World scope 范围注**：memory facade 的 "world store" 扶袱法是扫描整个 `~/.abrain/`，只排除 `projects/**` （项目私有）与 `vault/**` （密文）。因此有 frontmatter 的 `workflows/` md 文件也会以 `scope=world` 进入 `memory_search` 结果；这是有意为之（workflow 文档可被检索），但与「world = 仅 `knowledge/`」的口语理解不同，根据需要优化粒度可以后续收窄。
 

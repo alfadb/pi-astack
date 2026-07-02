@@ -319,10 +319,10 @@ export default function (pi: ExtensionAPI) {
     label: "Search Memory",
     description:
       "Search markdown memory using a natural-language retrieval prompt via the unified read-only Facade. " +
-      "Internally uses ADR 0015 two-stage LLM rerank by default (stage 1 candidate selection from memory index, stage 2 full-content rerank) " +
-      "so Chinese-English mixed queries, semantic paraphrases, trigger phrases, and timeline-aware relevance work. " +
-      "Searches project memory (~/.abrain/projects/<id>/ post-B5 cutover, " +
-      "falling back to legacy .pensieve/ when not yet migrated) and, when configured/present, ~/.abrain/knowledge/. " +
+      "The production path uses stage0 hybrid candidate recall (dense embedding + sparse BM25 + freshness floor) " +
+      "feeding stage2 full-content LLM rerank; current configs normally skip stage1 LLM coarse screening and keep it as a bounded safety net. " +
+      "Exact slug or unique ADR queries may route directly for toolSearch, while natural-language queries use hybrid recall + LLM rerank. " +
+      "Searches project/world memory through the Facade according to canonical read mode, including L2 projections in projection_only mode. " +
       "Returns normalized cards without scope/backend/source_path so the LLM does not choose a backend.",
     promptSnippet: "memory_search(query: natural-language retrieval prompt, filters?: { kinds?, status?, limit? })",
     promptGuidelines: [
@@ -332,11 +332,12 @@ export default function (pi: ExtensionAPI) {
       "Do not ask for a project/world/backend selector; the Facade merges and ranks results internally.",
       "Search results are summaries. Call memory_get(slug) when you need the full compiled truth or timeline.",
       "Default results exclude archived/superseded entries; legacy deprecated entries fold to superseded at parse time, so pass filters.status if the user explicitly asks for replaced/history entries.",
-      "LLM search hard-errors if its configured model is unavailable; there is no grep degradation path because accuracy is the contract.",
+      "Current production search is stage0 hybrid candidate recall feeding stage2 LLM rerank; stage1 is normally skipped and used only as a bounded safety net.",
+      "LLM rerank hard-errors if its configured model is unavailable; there is no grep degradation path because accuracy is the contract.",
       "Valid kinds: maxim, decision, anti-pattern, pattern, fact, preference, smell. Valid statuses: active, archived, superseded, provisional, contested.",
     ],
     parameters: Type.Object({
-      query: Type.String({ description: "Natural-language retrieval prompt. State the full retrieval intent, including Chinese/English mixed terms, semantic context, and what kind of memory would be useful; ADR 0015 LLM retrieval interprets paraphrases and translates intent across languages." }),
+      query: Type.String({ description: "Natural-language retrieval prompt. State the full retrieval intent, including Chinese/English mixed terms, semantic context, and what kind of memory would be useful; hybrid recall plus LLM rerank interprets paraphrases and translates intent across languages." }),
       filters: Type.Optional(Type.Any({
         description: "Optional filters: { kinds?: string[], status?: string|string[], limit?: number }",
       })),
@@ -370,7 +371,7 @@ export default function (pi: ExtensionAPI) {
         return wrapToolResult({
           ok: false,
           error: err instanceof Error ? err.message : String(err),
-          hint: "memory_search uses ADR 0015 LLM retrieval and does not degrade to grep. Fix model/auth/network/configuration and retry.",
+          hint: "memory_search uses hybrid recall plus LLM rerank and does not degrade to grep. Fix model/auth/network/configuration and retry.",
         });
       }
     },

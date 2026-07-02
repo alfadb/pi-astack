@@ -111,4 +111,4 @@ No duplicate raw content hashes were found. Slug-level repeats exist and should 
 
 ## Decision boundary
 
-This inventory does not authorize cleanup. The next safe step is to define a staging policy that distinguishes replay, continued quarantine, and deletion using at least: duplicated slug handling, current L1/L2 presence checks, resolver confidence, age, and whether a file is under `abandoned/`. Until then, staging cleanup remains blocked by policy, not by missing scan data.
+This inventory does not authorize cleanup. The follow-up policy is documented in `2026-07-02-sediment-staging-backlog-policy.md`; it distinguishes replay, continued quarantine, and deletion using duplicated slug handling, current L1/L2 presence checks, resolver confidence, age, and whether a file is under `abandoned/`. Cleanup must follow that policy rather than act directly on this inventory.
