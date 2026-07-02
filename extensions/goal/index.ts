@@ -295,6 +295,91 @@ export function hasUnconsumedGoalContinuation(branch: unknown[], goalId: string,
   return true;
 }
 
+const GOAL_CONTINUATION_IDLE_TIMEOUT_MS = 30_000;
+const GOAL_CONTINUATION_IDLE_POLL_MS = 100;
+
+export type DeferredGoalContinuationResult =
+  | { action: "sent_direct" }
+  | { action: "queued_followup"; reason: "idle_timeout" | "direct_send_failed" }
+  | { action: "abandoned"; reason: "state_changed" | "send_failed" };
+
+export interface DeferredGoalContinuationDeps {
+  message: string;
+  goalId: string;
+  expectedContinuationsUsed: number;
+  appendIntent: () => void;
+  loadState: () => GoalState | null;
+  isIdle: () => boolean;
+  hasPendingMessages?: () => boolean;
+  /** May return a promise (pi.sendUserMessage is async): awaited so a
+   *  rejection — e.g. the idle-check→send race where a user prompt just
+   *  started and prompt() throws — is handled here instead of becoming an
+   *  unhandled rejection. */
+  sendDirect: (message: string) => void | Promise<void>;
+  sendFollowUp: (message: string) => void | Promise<void>;
+  notify: (message: string, type?: string) => void;
+  timeoutMs?: number;
+  pollMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export async function scheduleGoalContinuationAfterIdle(deps: DeferredGoalContinuationDeps): Promise<DeferredGoalContinuationResult> {
+  deps.appendIntent();
+  const timeoutMs = deps.timeoutMs ?? GOAL_CONTINUATION_IDLE_TIMEOUT_MS;
+  const pollMs = deps.pollMs ?? GOAL_CONTINUATION_IDLE_POLL_MS;
+  const now = deps.now ?? (() => Date.now());
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+  const started = now();
+
+  // Cross a timer boundary so sendUserMessage never runs synchronously inside
+  // the agent_end handler even if ctx.isIdle() already reports true.
+  await sleep(0);
+
+  for (;;) {
+    let idle = false;
+    let pending = false;
+    try { idle = deps.isIdle(); } catch { idle = false; }
+    try { pending = deps.hasPendingMessages?.() ?? false; } catch { pending = true; }
+    if (idle && !pending) break;
+    if (now() - started >= timeoutMs) {
+      deps.notify("goal auto-continue delayed send timed out waiting for idle; queued as follow-up instead", "warning");
+      try {
+        await deps.sendFollowUp(deps.message);
+      } catch (err) {
+        deps.notify(`goal auto-continue follow-up queueing failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
+        return { action: "abandoned", reason: "send_failed" };
+      }
+      return { action: "queued_followup", reason: "idle_timeout" };
+    }
+    await sleep(Math.max(1, Math.min(pollMs, timeoutMs - (now() - started))));
+  }
+
+  const latest = deps.loadState();
+  if (!latest || latest.goal_id !== deps.goalId || latest.status !== "active" || latest.counters.continuations_used !== deps.expectedContinuationsUsed) {
+    deps.notify("goal auto-continue delayed send abandoned: goal state changed before idle", "info");
+    return { action: "abandoned", reason: "state_changed" };
+  }
+
+  try {
+    await deps.sendDirect(deps.message);
+  } catch (directErr) {
+    // Race window: a user prompt can start between the idle check and the
+    // send, making the bare prompt() path throw. Degrade to followUp
+    // queueing (drained at that turn's end) — never worse than the old
+    // behavior, never an unhandled rejection.
+    deps.notify(`goal auto-continue direct send failed (${directErr instanceof Error ? directErr.message : String(directErr)}); queued as follow-up instead`, "warning");
+    try {
+      await deps.sendFollowUp(deps.message);
+    } catch (fallbackErr) {
+      deps.notify(`goal auto-continue follow-up fallback also failed: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, "warning");
+      return { action: "abandoned", reason: "send_failed" };
+    }
+    return { action: "queued_followup", reason: "direct_send_failed" };
+  }
+  return { action: "sent_direct" };
+}
+
 function wrapText(text: string, details: unknown, isError = false) {
   return { content: [{ type: "text" as const, text }], details, ...(isError ? { isError: true } : {}) };
 }
@@ -742,27 +827,34 @@ export default function (pi: ExtensionAPI) {
           { judgeModel: settings.judgeModel, judgeTimeoutMs: settings.judgeTimeoutMs, modelRegistry: ctx.modelRegistry },
         ),
         sendContinuation: (message) => {
-          // §P1 hard-constraint 2b (gpt R1): DEDICATED event-layer ledger —
-          // a typed custom entry recording the SEND INTENT before dispatch,
-          // so the injected user message can be cross-checked against this
-          // trace (sendUserMessage is fire-and-forget; transport failures
-          // are invisible to us — budget already pre-spent, conservative
-          // direction, and this ledger row marks the intent either way).
-          try {
-            (pi as unknown as { appendEntry?: (t: string, d: unknown) => void }).appendEntry?.("pi-goal-continuation", {
-              goal_id: state.goal_id,
-              session_id: sessionId,
-              continuations_used: state.counters.continuations_used + 1,
-              message_hash: createHash("sha256").update(message, "utf-8").digest("hex").slice(0, 12),
-              ts: new Date().toISOString(),
-            });
-          } catch { /* ledger is best-effort */ }
-          // deliverAs:"followUp" per the runtime contract (official examples
-          // git-merge-and-resolve.ts / reload-runtime.ts both use it from
-          // event handlers): queued if anything is still executing, delivered
-          // immediately when idle. Never bare-call from agent_end.
-          (pi as unknown as { sendUserMessage(content: string, opts?: { deliverAs?: string }): void })
-            .sendUserMessage(message, { deliverAs: "followUp" });
+          const expectedContinuationsUsed = state.counters.continuations_used + 1;
+          void scheduleGoalContinuationAfterIdle({
+            message,
+            goalId: state.goal_id,
+            expectedContinuationsUsed,
+            appendIntent: () => {
+              // §P1 hard-constraint 2b (gpt R1): DEDICATED event-layer ledger —
+              // record the SEND INTENT before dispatch. During the delayed
+              // idle window this also keeps the pending-continuation gate shut.
+              try {
+                (pi as unknown as { appendEntry?: (t: string, d: unknown) => void }).appendEntry?.("pi-goal-continuation", {
+                  goal_id: state.goal_id,
+                  session_id: sessionId,
+                  continuations_used: expectedContinuationsUsed,
+                  message_hash: createHash("sha256").update(message, "utf-8").digest("hex").slice(0, 12),
+                  ts: new Date().toISOString(),
+                });
+              } catch { /* ledger is best-effort */ }
+            },
+            loadState: () => loadGoalFile(cwd, sessionId),
+            isIdle: () => ctx.isIdle(),
+            hasPendingMessages: () => ctx.hasPendingMessages(),
+            sendDirect: (m) => pi.sendUserMessage(m),
+            sendFollowUp: (m) => pi.sendUserMessage(m, { deliverAs: "followUp" }),
+            notify: (msg, type) => { try { ctx.ui?.notify?.(msg, type as never); } catch { /* ui may be absent in print mode */ } },
+          }).catch((err) => {
+            try { ctx.ui?.notify?.(`goal auto-continue delayed send failed: ${err instanceof Error ? err.message : String(err)}`, "warning" as never); } catch { /* noop */ }
+          });
         },
         isStillActive: async (next) => {
           if (ctx.signal?.aborted) {

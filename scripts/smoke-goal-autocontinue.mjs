@@ -235,6 +235,119 @@ await check("pending continuation gate: staleness bound frees a never-consumed i
   assert(I.hasUnconsumedGoalContinuation([intent], goalId, { now: stale }) === true, "no bound → never released (staleness opt-in)");
 });
 
+await check("delayed continuation send: appends intent first, then direct-sends after idle", async () => {
+  const st = makeState();
+  const msg = G.formatGoalContinuationMessage(st.goal_id, "continue after idle");
+  const log = [];
+  let t = 0;
+  let idleCalls = 0;
+  const r = await I.scheduleGoalContinuationAfterIdle({
+    message: msg,
+    goalId: st.goal_id,
+    expectedContinuationsUsed: 1,
+    appendIntent: () => { log.push("intent"); },
+    loadState: () => ({ ...st, counters: { ...st.counters, continuations_used: 1 } }),
+    isIdle: () => { log.push("idle"); return idleCalls++ > 0; },
+    hasPendingMessages: () => false,
+    sendDirect: (m) => { log.push(`direct:${m}`); },
+    sendFollowUp: (m) => { log.push(`followUp:${m}`); },
+    notify: (m, type) => { log.push(`notify[${type ?? "info"}]:${m}`); },
+    timeoutMs: 50,
+    pollMs: 10,
+    now: () => t,
+    sleep: async (ms) => { log.push(`sleep:${ms}`); t += ms; },
+  });
+  assert(r.action === "sent_direct", `action=${r.action}`);
+  const intentIdx = log.indexOf("intent");
+  const directIdx = log.findIndex((l) => l.startsWith("direct:"));
+  assert(intentIdx === 0 && directIdx > intentIdx, `intent before direct send: ${log.join(" | ")}`);
+  assert(!log.some((l) => l.startsWith("followUp:")), `no followUp on idle direct path: ${log.join(" | ")}`);
+});
+
+await check("delayed continuation send: state check failure abandons without sending", async () => {
+  const st = makeState();
+  const log = [];
+  const r = await I.scheduleGoalContinuationAfterIdle({
+    message: G.formatGoalContinuationMessage(st.goal_id, "stale"),
+    goalId: st.goal_id,
+    expectedContinuationsUsed: 1,
+    appendIntent: () => { log.push("intent"); },
+    loadState: () => ({ ...st, status: "paused", counters: { ...st.counters, continuations_used: 1 } }),
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    sendDirect: () => { log.push("direct"); },
+    sendFollowUp: () => { log.push("followUp"); },
+    notify: (m, type) => { log.push(`notify[${type ?? "info"}]:${m}`); },
+  });
+  assert(r.action === "abandoned" && r.reason === "state_changed", `result=${JSON.stringify(r)}`);
+  assert(log.includes("intent"), "intent still recorded before delayed state check");
+  assert(!log.includes("direct") && !log.includes("followUp"), `no send after state change: ${log.join(" | ")}`);
+  assert(log.some((l) => l.includes("abandoned")), `abandon notify visible: ${log.join(" | ")}`);
+});
+
+await check("delayed continuation send: idle timeout falls back to followUp queue", async () => {
+  const st = makeState();
+  const log = [];
+  let t = 0;
+  const r = await I.scheduleGoalContinuationAfterIdle({
+    message: G.formatGoalContinuationMessage(st.goal_id, "timeout"),
+    goalId: st.goal_id,
+    expectedContinuationsUsed: 1,
+    appendIntent: () => { log.push("intent"); },
+    loadState: () => ({ ...st, counters: { ...st.counters, continuations_used: 1 } }),
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+    sendDirect: () => { log.push("direct"); },
+    sendFollowUp: (m) => { log.push(`followUp:${m}`); },
+    notify: (m, type) => { log.push(`notify[${type ?? "info"}]:${m}`); },
+    timeoutMs: 25,
+    pollMs: 10,
+    now: () => t,
+    sleep: async (ms) => { t += ms; },
+  });
+  assert(r.action === "queued_followup" && r.reason === "idle_timeout", `result=${JSON.stringify(r)}`);
+  assert(log.indexOf("intent") === 0, `intent first: ${log.join(" | ")}`);
+  assert(!log.includes("direct"), `no direct send on timeout: ${log.join(" | ")}`);
+  assert(log.some((l) => l.startsWith("followUp:")), `followUp fallback sent: ${log.join(" | ")}`);
+  assert(log.some((l) => l.includes("timed out")), `timeout notify visible: ${log.join(" | ")}`);
+});
+
+await check("delayed continuation send: direct-send rejection degrades to followUp, never unhandled", async () => {
+  const st = makeState();
+  const log = [];
+  const r = await I.scheduleGoalContinuationAfterIdle({
+    message: G.formatGoalContinuationMessage(st.goal_id, "race"),
+    goalId: st.goal_id,
+    expectedContinuationsUsed: 1,
+    appendIntent: () => { log.push("intent"); },
+    loadState: () => ({ ...st, counters: { ...st.counters, continuations_used: 1 } }),
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    sendDirect: async () => { throw new Error("Agent is already processing"); },
+    sendFollowUp: (m) => { log.push(`followUp:${m}`); },
+    notify: (m, type) => { log.push(`notify[${type ?? "info"}]:${m}`); },
+  });
+  assert(r.action === "queued_followup" && r.reason === "direct_send_failed", `result=${JSON.stringify(r)}`);
+  assert(log.some((l) => l.startsWith("followUp:")), `followUp fallback after direct rejection: ${log.join(" | ")}`);
+  assert(log.some((l) => l.includes("direct send failed")), `failure notify visible: ${log.join(" | ")}`);
+
+  const log2 = [];
+  const r2 = await I.scheduleGoalContinuationAfterIdle({
+    message: G.formatGoalContinuationMessage(st.goal_id, "race2"),
+    goalId: st.goal_id,
+    expectedContinuationsUsed: 1,
+    appendIntent: () => {},
+    loadState: () => ({ ...st, counters: { ...st.counters, continuations_used: 1 } }),
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+    sendDirect: async () => { throw new Error("boom1"); },
+    sendFollowUp: async () => { throw new Error("boom2"); },
+    notify: (m, type) => { log2.push(`notify[${type ?? "info"}]:${m}`); },
+  });
+  assert(r2.action === "abandoned" && r2.reason === "send_failed", `double failure abandons: ${JSON.stringify(r2)}`);
+  assert(log2.some((l) => l.includes("boom2")), `second failure notify visible: ${log2.join(" | ")}`);
+});
+
 // ── judge parse layer (C6) ─────────────────────────────────────────────
 
 await check("parseGoalJudgeVerdict: closed space; garbage null; embedded JSON ok", async () => {
