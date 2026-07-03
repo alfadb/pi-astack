@@ -172,6 +172,16 @@ export interface MultiviewPendingEntry {
   origin_project_root?: string;
 
   /**
+   * FIX-6: back-link to the original provisional-correction staging entry
+   * that spawned this pending candidate (set by the staging-promotion
+   * executor). The promotion selector skips the source entry while its
+   * pending replay file exists, preventing duplicate multi-view burn and
+   * letting the A' replay lane own the candidate's disposition.
+   */
+  source_staging_slug?: string;
+  source_staging_file?: string;
+
+  /**
    * Hostname of the device that captured this staging entry. Set from
    * `process.env.HOSTNAME ?? os.hostname() ?? "unknown"`.
    *

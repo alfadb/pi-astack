@@ -125,6 +125,21 @@ const KNOWN_ENTRIES = {
   // earlier than the ADR text reflected, so the entry was always stale.
   // The remaining P1.5 limitation (Pass 1 schema rich-payload synthesis)
   // is tracked structurally in P15WatchdogSignals, not here.
+  // 2026-07-03 Stage 5 follow-up: "staging-promotion-default-off" added.
+  // The executor is implemented (extensions/sediment/staging-promotion.ts)
+  // and multi-view gated, but defaults to false in DEFAULT_SEDIMENT_SETTINGS
+  // + schema. It becomes stale when the default flips to true.
+  "staging-promotion-default-off": {
+    description: "ADR 0025 §4.1.5 staging promotion executor default-disabled; legacy no-origin/no-target candidates remain unclaimed until backfill",
+    shouldBeAbsent: () => {
+      const settingsSrc = fs.readFileSync(path.join(repoRoot, "extensions/sediment/settings.ts"), "utf8");
+      const defaultOff = /stagingPromotionEnabled:\s*false/.test(settingsSrc);
+      if (!defaultOff) {
+        return "stagingPromotionEnabled default is no longer false — the promotion executor default-on ship may have happened; remove this STRUCTURAL_CONTEXT entry.";
+      }
+      return true;
+    },
+  },
 };
 
 // ──────────────────────────────────────────────────────────────────

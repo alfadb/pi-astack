@@ -88,6 +88,18 @@ export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
       "ADR 0025 §4.1.5 staging age-out SOFT-archive shipped (staging-ageout reviewer retires aged-out hypotheses reversibly + drops them from staleCount), but the mechanical N-day-window → hard-delete (unlink) of soft-archived files is NOT implemented (deferred: .state is git-ignored, unlink is irreversible). Expect a small STABLE staging_backlog from retired-but-not-deleted files; demote unless pending/unreviewed growth materially worsens.",
     causes_advisory: "staging_backlog",
   },
+  {
+    // 2026-07-03 Stage 5 follow-up: the staging-promotion executor is
+    // implemented and multi-view gated, but it defaults to OFF. While disabled,
+    // resolver/age-out promote_candidate flags are advisory-only and will
+    // accumulate in staging. This is EXPECTED until the operator opts in after
+    // reviewing the backlog policy and confirming multi-view reviewer
+    // providers are configured.
+    id: "staging-promotion-default-off",
+    description:
+      "ADR 0025 §4.1.5 staging promotion executor implemented (extensions/sediment/staging-promotion.ts) but default-disabled (sediment.stagingPromotionEnabled=false). promote_candidate flags from staging-resolver / staging-ageout are advisory-only and accumulate in staging while the switch is off; turning it on routes them through the multi-view gate and durable writer. Legacy promotion candidates with neither origin nor target_entry_slug are intentionally unclaimable by every project until a backfill assigns ownership. Demote staging_backlog growth caused by promote_candidate accumulation until the switch is enabled.",
+    causes_advisory: "staging_backlog",
+  },
   // NOTE 2026-05-28 Stage 2 (commit 9796bdd→...): archive-reactivation-
   // reviewer-unimplemented entry REMOVED. ADR 0025 §4.6 reviewer landed in
   // extensions/sediment/archive-reactivation.ts + prompts/archive-

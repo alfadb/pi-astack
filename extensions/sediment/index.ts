@@ -68,6 +68,7 @@ import { runArchiveReactivationIfDue } from "./archive-reactivation";
 import { runForgettingExecutor } from "./forgetting-executor";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
+import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
 import { appendTier1ConstraintEvidenceEvent } from "./constraint-evidence/integration";
 import { scheduleConstraintShadowAutoRefresh } from "./constraint-compiler/auto-refresh";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
@@ -2244,21 +2245,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         })();
       });
 
-      // Lane R: replay old multi-view staging backlog on every healthy,
-      // bound agent_end, independent of whether this turn also has an
-      // explicit marker or a natural-language auto-write window. The old
-      // implementation only scheduled replay after Lane A/G, so ordinary
-      // conversation turns could leave multiview-pending files undrained.
-      scheduleMultiviewReplay({
-        enabled: settings.autoLlmWriteEnabled !== false,
-        cwd,
-        sessionId,
-        settings,
-        modelRegistry,
-        abrainHome,
-        projectId,
-      });
-
       // ADR 0025 §4.1.5.1 staging-resolver (Stage 3, 2026-05-29).
       // Debounced batch pass that TRIAGES the provisional-correction staging
       // backlog. NON-DESTRUCTIVE: it only annotates each entry's
@@ -2358,6 +2344,67 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             /* fire-and-forget bg; never throw out of agent_end */
           }
         })();
+      });
+
+      // ADR 0025 §4.1.5 Stage 5 follow-up: staging-promotion executor.
+      // Multi-view gated promotion of resolver/age-out promote_candidate flags
+      // to durable memory entries. Default disabled (settings.stagingPromotionEnabled);
+      // also gated on autoLlmWriteEnabled===true because it performs durable
+      // writes. Registered AFTER resolver/age-out and BEFORE the multiview-pending
+      // replay lane so the callbacks are queued in that order, BUT setImmediate
+      // only guarantees registration order, not execution order; each lane is an
+      // independent fire-and-forget async task.
+      if (settings.stagingPromotionEnabled === true && settings.autoLlmWriteEnabled === true) scheduleAggregator(() => {
+        void (async () => {
+          try {
+            const promotionResult = await runStagingPromotionIfDue({
+              projectRoot: cwd,
+              abrainHome,
+              projectId,
+              settings,
+              modelRegistry: modelRegistry as Parameters<typeof runStagingPromotionIfDue>[0]["modelRegistry"],
+              sessionId,
+            });
+            if (!promotionResult.skipped && (promotionResult.promoted_slugs.length > 0 || promotionResult.rejected_slugs.length > 0 || promotionResult.duplicate_slugs.length > 0 || promotionResult.staged_for_replay_slugs.length > 0 || promotionResult.degraded)) {
+              await appendAudit(cwd, {
+                operation: "staging_promotion",
+                lane: "diagnostic",
+                session_id: sessionId,
+                ok: promotionResult.ok,
+                degraded: promotionResult.degraded ?? false,
+                reviewed_count: promotionResult.reviewed_count,
+                promoted_count: promotionResult.promoted_slugs.length,
+                promoted_slugs: promotionResult.promoted_slugs,
+                rejected_count: promotionResult.rejected_slugs.length,
+                rejected_slugs: promotionResult.rejected_slugs,
+                duplicate_count: promotionResult.duplicate_slugs.length,
+                duplicate_slugs: promotionResult.duplicate_slugs,
+                staged_for_replay_count: promotionResult.staged_for_replay_slugs.length,
+                staged_for_replay_slugs: promotionResult.staged_for_replay_slugs,
+                model: promotionResult.model,
+                duration_ms: promotionResult.durationMs,
+                prompt_version: STAGING_PROMOTION_PROMPT_VERSION,
+              });
+            }
+          } catch {
+            /* fire-and-forget bg; never throw out of agent_end */
+          }
+        })();
+      });
+
+      // Lane R: replay old multi-view staging backlog on every healthy,
+      // bound agent_end, independent of whether this turn also has an
+      // explicit marker or a natural-language auto-write window. The old
+      // implementation only scheduled replay after Lane A/G, so ordinary
+      // conversation turns could leave multiview-pending files undrained.
+      scheduleMultiviewReplay({
+        enabled: settings.autoLlmWriteEnabled !== false,
+        cwd,
+        sessionId,
+        settings,
+        modelRegistry,
+        abrainHome,
+        projectId,
       });
 
       // ADR 0025 §4.6 archive-reactivation reviewer (Stage 2).
@@ -2703,6 +2750,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             modelRegistry: modelRegistry as Parameters<typeof runCorrectionPipeline>[2]["modelRegistry"],
             signal: undefined,
             directLaneOwnsWindow,
+            projectId,
+            projectRoot: cwd,
           });
           // Log classifier result to audit — always, so failures are traceable.
           appendAudit(cwd, {
@@ -4470,7 +4519,7 @@ async function tryAutoWriteLane(args: {
     const flippedSignal = args.correctionSignal;
     if (flippedSignal && shouldEscalateToCurator(flippedSignal)) {
       if (settings.autoLlmWriteEnabled === "staging-only") {
-        const staged = writeStagingEntry(buildProvisionalStagingEntry(flippedSignal, window.text));
+        const staged = writeStagingEntry(buildProvisionalStagingEntry(flippedSignal, window.text, { projectId, projectRoot: cwd }));
         await appendAudit(cwd, {
           operation: "tier1_degraded_capture",
           lane: "auto_write",

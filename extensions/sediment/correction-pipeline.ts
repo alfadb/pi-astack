@@ -477,7 +477,11 @@ function sanitizeAuditText(text: string | undefined, maxLen: number): string {
  *  in-flight windows, and degraded-mode (staging-only) capture. Exported so
  *  tryAutoWriteLane can reuse it when a consumed working-set signal hits the
  *  tristate gate after a cross-turn mode flip. */
-export function buildProvisionalStagingEntry(signal: CorrectionSignal, seedText: string): StagingEntry {
+export function buildProvisionalStagingEntry(
+  signal: CorrectionSignal,
+  seedText: string,
+  origin?: { projectId?: string; projectRoot?: string },
+): StagingEntry {
   return {
     slug: buildProvisionalStagingSlug(signal, seedText),
     status: "provisional",
@@ -497,6 +501,10 @@ export function buildProvisionalStagingEntry(signal: CorrectionSignal, seedText:
       "reviewer-decide-via-archive-reactivation-prompt",
     ],
     correction_signal: {
+      // FIX-1c: the stored signal MUST carry signal_found so the multi-view
+      // reviewer sees the "HYPOTHESIS — NOT GROUND TRUTH" banner instead of
+      // a blank correction block.
+      signal_found: true,
       typing: signal.typing ?? "durable",
       confidence: signal.confidence ?? 5,
       // PR-2 (gpt R1 N2): carried for shadow/recall forensics — a staged
@@ -517,6 +525,8 @@ export function buildProvisionalStagingEntry(signal: CorrectionSignal, seedText:
     _provenance_warning:
       "PROVISIONAL CLASSIFIER GUESS. Do NOT treat as ground truth. " +
       "The only valid use is to RESOLVE this guess (promote / attribute / refute) or let it age.",
+    ...(origin?.projectId ? { origin_project_id: origin.projectId } : {}),
+    ...(origin?.projectRoot ? { origin_project_root: origin.projectRoot } : {}),
   };
 }
 
@@ -527,6 +537,11 @@ export async function runCorrectionPipeline(
     settings: SedimentSettings;
     modelRegistry: ModelRegistryLike;
     signal?: AbortSignal;
+    /** FIX-2a: project binding carried into the staging entry so the
+     *  global promotion queue can later attribute the entry to its
+     *  owning project. */
+    projectId?: string;
+    projectRoot?: string;
     /** R6' window-ownership attestation from the caller: true ONLY when THIS
      *  window's processing lane will actually invoke the Tier-1 direct writer
      *  this turn (auto_write short/long lane, not blocked by an in-flight bg
@@ -746,7 +761,7 @@ export async function runCorrectionPipeline(
     // stagingWritten reflects ACTUAL IO success (audit P0 2026-06-07): the
     // short-window escalation holds its checkpoint when the safety net did not
     // persist, so this must not optimistically report true on a failed write.
-    result.stagingWritten = writeStagingEntry(buildProvisionalStagingEntry(signal, rawText));
+    result.stagingWritten = writeStagingEntry(buildProvisionalStagingEntry(signal, rawText, { projectId: deps.projectId, projectRoot: deps.projectRoot }));
   }
 
   // 7. Staging inflation advisory — counts actionable files only. Stage 4

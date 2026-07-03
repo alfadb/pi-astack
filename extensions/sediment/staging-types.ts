@@ -37,9 +37,13 @@ export interface StagingEntry {
   /** How the classifier suggested this be resolved */
   suggested_resolution_paths: string[];
 
-  /** Raw CorrectionSignal output (for audit trace) */
+  /** Raw CorrectionSignal output (for audit trace). */
   correction_signal?: {
-    typing: string;
+    /** Mirrors CorrectionSignal.signal_found; required so downstream
+     *  renderCorrectionSignal can render the "HYPOTHESIS — NOT GROUND
+     *  TRUTH" block instead of treating the staged signal as absent. */
+    signal_found: true;
+    typing: "durable" | "task-local" | "debug";
     confidence: number;
     /** R2' is_directive (PR-2 2026-06-10): carried for shadow/recall
      *  forensics — a staged signal that WAS a directive but missed Tier-1
@@ -59,6 +63,14 @@ export interface StagingEntry {
     correction_intent: string;
     most_likely_error_direction: string;
   };
+
+  /** ADR 0025 §4.1.5 Stage 5 FIX-2: project binding captured at staging time.
+   *  The staging directory is user-global, so promotion must only write an
+   *  entry into the project that owns it. New entries always set these;
+   *  legacy entries without them are matched heuristically via
+   *  target_entry_slug. */
+  origin_project_id?: string;
+  origin_project_root?: string;
 
   /** Frontmatter: warning for downstream consumers */
   _provenance_warning: string;
@@ -111,6 +123,28 @@ export interface StagingEntry {
    *  hard-delete sweep (Stage 5) reads this to enforce its N-day window. */
   aged_out_at?: string;
   aged_out_prompt_version?: string;
+
+  // ── Promotion executor fields (set by staging-promotion.ts, ADR 0025 §4.1.5
+  // Stage 5 follow-up). Promotion to durable memory MUST pass the multi-view
+  // gate; these fields record the outcome without ever unlinking the file.
+  /** When the promotion executor last attempted to promote this entry. Used
+   *  to debounce retries (e.g. after a multi-view rejection or writer
+   *  failure) so the same candidate is not re-budgeted every agent_end. */
+  promotion_attempted_at?: string;
+  /** Outcome of the most recent promotion attempt:
+   *    - "promoted": multi-view approved and durable write succeeded
+   *    - "duplicate": an existing durable entry already covers this signal
+   *    - "rejected": multi-view rejected or writer rejected
+   *    - "error": unexpected framework error during promotion
+   *    - "staged_for_replay": transient reviewer failure; the candidate is
+   *      parked in multiview-pending and will be replayed by the A' lane. */
+  promotion_outcome?: "promoted" | "duplicate" | "rejected" | "error" | "staged_for_replay";
+  /** When promotion succeeded. */
+  promoted_at?: string;
+  /** Slug of the durable entry written on success. */
+  promoted_to_slug?: string;
+  /** Free-form rationale when promotion was rejected or errored. */
+  promotion_rationale?: string;
 }
 
 export interface StagingFileOnDisk {

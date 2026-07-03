@@ -675,6 +675,7 @@ async function processOneEntry(
       signal: deps.signal,
       originProjectId: entry.origin_project_id ?? deps.currentProjectId,
       originProjectRoot: entry.origin_project_root ?? deps.currentProjectRoot,
+      forceTrigger: entry.trigger_reason === "forced",
     });
   } catch (e: unknown) {
     audit.outcome = "error";
@@ -721,10 +722,9 @@ async function processOneEntry(
   // Writing that directly to brain would bypass reviewer verdict and
   // re-introduce the A' violation that batch 3b/3c exists to close.
   //
-  // The original staging entry was created EXACTLY because
-  // shouldTriggerMultiView said "this needs review". If the trigger
-  // disappeared, the candidate's basis for needing brain-write also
-  // disappeared (the same trigger criteria that demanded review).
+  // Forced promotion entries preserve their original A' requirement by
+  // replaying with forceTrigger=true above, so this guard should only fire
+  // for non-forced heuristic triggers whose basis disappeared.
   // Safer to drop the candidate and audit than to silently write.
   if (!mvResult.triggered) {
     if (!archiveTerminalOrAudit(entry, audit, result, `replay no longer triggers multi-view (A' guard); original trigger_reason=${entry.trigger_reason}; wanted to archive staging`, entryStart)) return;

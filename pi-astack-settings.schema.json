@@ -611,6 +611,12 @@
           "description": "PR-4/P0.3 (ADR 0028 R5'/R2' 调和). When true, a Tier-1 cross-slug Jaccard near-dup hit is adjudicated by a curator LLM ({update,merge,create}, no skip; failure → deterministic create) instead of the legacy autonomous dedup gate; also demotes the Tier-2 gate to curator neighbor pre-filter (requires rulesAsReadonlyNeighborsEnabled). Set false only as an explicit rollback to the legacy autonomous gate."
         },
 
+        "stagingPromotionEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "ADR 0025 §4.1.5 Stage 5 follow-up: enable multi-view gated promotion of staging promote_candidate entries to durable memory. Default false (opt-in). Requires autoLlmWriteEnabled=true and configured multiView.reviewerProviders to actually run; when false, promote_candidate flags remain advisory and accumulate in staging."
+        },
+
         "promptVersion": {
           "type": "object",
           "additionalProperties": false,

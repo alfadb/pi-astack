@@ -177,6 +177,8 @@ export interface WriteProjectEntryResult {
   deleteMode?: DeleteMode;
   sanitizedReplacements?: string[];
   duplicate?: DedupeResult;
+  /** Shared adapter field for no-op semantic/exact dedupe results, especially rules-zone writes. */
+  dedupedAgainst?: string;
   validationErrors?: Array<{ field: string; message: string }>;
   lane?: string;
   sessionId?: string;

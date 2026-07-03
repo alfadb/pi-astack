@@ -84,7 +84,8 @@ export type MultiViewTriggerReason =
   | "durable_correction_high_conf"
   | "update_high_confidence_candidate"
   | "update_high_confidence_neighbor"
-  | "update_compiled_truth_rewrite";
+  | "update_compiled_truth_rewrite"
+  | "forced";  // FIX-1: promotion executor forces review regardless of confidence heuristic
 
 export interface Pass1Verdict {
   op: string;
@@ -808,6 +809,13 @@ export type RunMultiViewArgs = {
   signal?: AbortSignal;
   originProjectId?: string;
   originProjectRoot?: string;
+  /** FIX-1: bypass confidence heuristic and force the reviewer gate. */
+  forceTrigger?: boolean;
+  /** FIX-6: optional back-link to the provisional-correction entry that
+   *  produced this multi-view run, so replay can avoid re-burning the
+   *  same candidate in the promotion executor. */
+  sourceStagingSlug?: string;
+  sourceStagingFile?: string;
 };
 
 /** Project the candidate draft onto the staging-entry's snapshot
@@ -841,7 +849,6 @@ function buildPendingEntry(
   triggerReason: MultiViewTriggerReason,
   pass1Verdict: Pass1Verdict | undefined,
   pass2Verdict: Pass2Verdict | undefined,
-  origin?: { originProjectId?: string; originProjectRoot?: string },
 ): MultiviewPendingEntry {
   const nowIso = new Date().toISOString();
   const slug = generateMultiviewPendingSlug({
@@ -853,8 +860,10 @@ function buildPendingEntry(
     status: "provisional",
     kind: "multiview-pending",
     created: nowIso,
-    ...(origin?.originProjectId ? { origin_project_id: origin.originProjectId } : {}),
-    ...(origin?.originProjectRoot ? { origin_project_root: origin.originProjectRoot } : {}),
+    ...(args.originProjectId ? { origin_project_id: args.originProjectId } : {}),
+    ...(args.originProjectRoot ? { origin_project_root: args.originProjectRoot } : {}),
+    ...(args.sourceStagingSlug ? { source_staging_slug: args.sourceStagingSlug } : {}),
+    ...(args.sourceStagingFile ? { source_staging_file: args.sourceStagingFile } : {}),
     originating_device: process.env.HOSTNAME ?? os.hostname() ?? "unknown",
     multiview_state: state,
     proposer_decision: args.proposerDecision,
@@ -886,9 +895,8 @@ function stageAndSkipDecision(
   pass2Verdict: Pass2Verdict | undefined,
   errorContext: string,
   overallStart: number,
-  origin?: { originProjectId?: string; originProjectRoot?: string },
 ): MultiViewResult {
-  const entry = buildPendingEntry(args, state, triggerReason, pass1Verdict, pass2Verdict, origin);
+  const entry = buildPendingEntry(args, state, triggerReason, pass1Verdict, pass2Verdict);
   const writtenPath = writeMultiviewPending(entry);
   return {
     triggered: true,
@@ -935,12 +943,18 @@ function stageAndSkipDecision(
  */
 export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewResult> {
   const overallStart = Date.now();
-  const trigger = shouldTriggerMultiView(
-    args.proposerDecision,
-    args.candidate,
-    args.neighbors,
-    args.correctionSignal,
-  );
+  // FIX-1a: promotion executor can force the reviewer gate so that a
+  // low-confidence staging hypothesis is never promoted without A'
+  // review. Curator leaves forceTrigger undefined; replay sets it only
+  // for entries whose original trigger_reason was forced.
+  const trigger = args.forceTrigger
+    ? { triggered: true, reason: "forced" as const }
+    : shouldTriggerMultiView(
+        args.proposerDecision,
+        args.candidate,
+        args.neighbors,
+        args.correctionSignal,
+      );
   if (!trigger.triggered) {
     return {
       triggered: false,
@@ -986,7 +1000,6 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       undefined, undefined,
       "no reviewer model registered or auth unavailable",
       overallStart,
-      args,
     );
   }
 
@@ -1018,7 +1031,6 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       undefined, undefined,
       pass1Resp.error,
       overallStart,
-      args,
     );
   }
 
@@ -1034,7 +1046,6 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       undefined, undefined,
       `parsePass1 returned null; raw text length=${pass1Resp.text.length} (full text in multi-view-metrics.jsonl)`,
       overallStart,
-      args,
     );
   }
 
@@ -1074,7 +1085,6 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       pass1, undefined,
       pass2Resp.error,
       overallStart,
-      args,
     );
   }
 
@@ -1086,7 +1096,6 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       pass1, undefined,
       `parsePass2 returned null; raw text length=${pass2Resp.text.length} (full text in multi-view-metrics.jsonl)`,
       overallStart,
-      args,
     );
   }
 
@@ -1173,7 +1182,6 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
         pass1, pass2,
         pass2.rationale ? `pass 2 deferred: ${pass2.rationale.slice(0, 200)}` : "pass 2 deferred without rationale",
         overallStart,
-        args,
       );
   }
 
