@@ -352,8 +352,149 @@ function formatProgressCounts(counts: DispatchCounts | undefined, label: string 
   return ` | ${noun} ${counts.success}/${counts.total} ok, ${counts.failed} failed, ${counts.running} running`;
 }
 
+type DispatchProgressColumnKey = "index" | "state" | "name" | "time" | "model" | "thinking" | "progress";
+
+type DispatchProgressColumn = {
+  key: DispatchProgressColumnKey;
+  label: string;
+  min: number;
+  max: number;
+  flex: number;
+  align?: "left" | "right";
+};
+
+type DispatchProgressRow = Record<DispatchProgressColumnKey, string>;
+
+const DISPATCH_PROGRESS_GUTTER = "  ";
+
+function dispatchTaskStateLabel(state: DispatchProgressTaskState): string {
+  return state === "running"
+    ? "run"
+    : state === "completed"
+      ? "ok"
+      : state === "cancelled"
+        ? "cancel"
+        : state === "failed"
+          ? "fail"
+          : "wait";
+}
+
+function dispatchTaskProgressCell(task: DispatchProgressTask, hbMs: number | undefined): string {
+  const reason = task.lastProgressReason ? compactOneLine(task.lastProgressReason) : "";
+  const progress = reason
+    ? `${reason} ${formatProgressDuration(hbMs)} ago`
+    : hbMs !== undefined
+      ? `heartbeat ${formatProgressDuration(hbMs)} ago`
+      : "";
+  const failure = task.failureType ? `failure:${compactOneLine(task.failureType)}` : "";
+  return [progress, failure].filter(Boolean).join("; ");
+}
+
+function dispatchProgressColumn(key: DispatchProgressColumnKey, indexWidth: number): DispatchProgressColumn {
+  switch (key) {
+    case "index": return { key, label: "#", min: indexWidth, max: indexWidth, flex: 0, align: "right" };
+    case "state": return { key, label: "State", min: 6, max: 6, flex: 0 };
+    case "name": return { key, label: "Task", min: 10, max: 40, flex: 3 };
+    case "time": return { key, label: "Time", min: 6, max: 7, flex: 0, align: "right" };
+    case "model": return { key, label: "Model", min: 18, max: 42, flex: 3 };
+    case "thinking": return { key, label: "Think", min: 7, max: 7, flex: 0 };
+    case "progress": return { key, label: "Progress", min: 18, max: 42, flex: 4 };
+  }
+}
+
+function dispatchProgressRows(tasks: DispatchProgressTask[], now: number): DispatchProgressRow[] {
+  return tasks.map((task, index) => {
+    const taskElapsed = task.durationMs ?? (task.startedAt ? Math.max(0, now - task.startedAt) : undefined);
+    const hbMs = task.heartbeatMs ?? (task.lastHeartbeatAt ? Math.max(0, now - task.lastHeartbeatAt) : undefined);
+    return {
+      index: String(index + 1),
+      state: dispatchTaskStateLabel(task.state),
+      name: compactOneLine(task.name),
+      time: formatProgressDuration(taskElapsed),
+      model: compactOneLine(task.model),
+      thinking: compactOneLine(task.thinking || "off"),
+      progress: dispatchTaskProgressCell(task, hbMs),
+    };
+  });
+}
+
+function minDispatchTableWidth(columns: DispatchProgressColumn[]): number {
+  const cells = columns.reduce((sum, column) => sum + column.min, 0);
+  const gutters = DISPATCH_PROGRESS_GUTTER.length * Math.max(0, columns.length - 1);
+  return cells + gutters;
+}
+
+function chooseDispatchProgressColumns(width: number, indexWidth: number): DispatchProgressColumn[] {
+  const layouts: Array<{ minWidth: number; keys: DispatchProgressColumnKey[] }> = [
+    { minWidth: 112, keys: ["index", "state", "name", "time", "model", "thinking", "progress"] },
+    { minWidth: 92, keys: ["index", "state", "name", "time", "model", "progress"] },
+    { minWidth: 72, keys: ["index", "state", "name", "time", "progress"] },
+    { minWidth: 52, keys: ["index", "state", "name", "time"] },
+    { minWidth: 21, keys: ["index", "state", "name"] },
+    { minWidth: 14, keys: ["index", "name"] },
+    { minWidth: 0, keys: ["name"] },
+  ];
+  for (const layout of layouts) {
+    if (width < layout.minWidth) continue;
+    const columns = layout.keys.map((key) => dispatchProgressColumn(key, indexWidth));
+    if (minDispatchTableWidth(columns) <= width) return columns;
+  }
+  const fallbackKeys: DispatchProgressColumnKey[] = ["name"];
+  return fallbackKeys.map((key) => dispatchProgressColumn(key, indexWidth));
+}
+
+function dispatchColumnWidths(columns: DispatchProgressColumn[], rows: DispatchProgressRow[], width: number): number[] {
+  const gutters = DISPATCH_PROGRESS_GUTTER.length * Math.max(0, columns.length - 1);
+  const available = Math.max(1, width - gutters);
+  const widths = columns.map((column) => column.min);
+  const natural = columns.map((column) => {
+    const cellWidth = rows.reduce((max, row) => Math.max(max, visibleTextWidth(row[column.key])), visibleTextWidth(column.label));
+    return Math.min(column.max, Math.max(column.min, cellWidth));
+  });
+  let overflow = widths.reduce((sum, columnWidth) => sum + columnWidth, 0) - available;
+  for (let i = widths.length - 1; overflow > 0 && i >= 0; i--) {
+    const shrink = Math.min(overflow, Math.max(0, widths[i]! - 1));
+    widths[i] = widths[i]! - shrink;
+    overflow -= shrink;
+  }
+  let extra = Math.max(0, available - widths.reduce((sum, columnWidth) => sum + columnWidth, 0));
+  while (extra > 0) {
+    let grew = false;
+    for (let i = 0; i < columns.length && extra > 0; i++) {
+      if (columns[i]!.flex <= 0 || widths[i]! >= natural[i]!) continue;
+      widths[i] = widths[i]! + 1;
+      extra--;
+      grew = true;
+    }
+    if (!grew) break;
+  }
+  return widths;
+}
+
+function dispatchTableCell(value: string, width: number, align: "left" | "right" = "left"): string {
+  const text = truncateDisplayText(value, width);
+  const pad = " ".repeat(Math.max(0, width - visibleTextWidth(text)));
+  return align === "right" ? `${pad}${text}` : `${text}${pad}`;
+}
+
+function renderDispatchTableLine(columns: DispatchProgressColumn[], widths: number[], row: DispatchProgressRow): string {
+  return columns
+    .map((column, index) => dispatchTableCell(row[column.key], widths[index]!, column.align))
+    .join(DISPATCH_PROGRESS_GUTTER);
+}
+
+function renderDispatchTaskTable(tasks: DispatchProgressTask[], now: number, width: number): string[] {
+  if (tasks.length === 0) return [];
+  const indexWidth = Math.max(1, String(tasks.length).length);
+  const rows = dispatchProgressRows(tasks, now);
+  const columns = chooseDispatchProgressColumns(width, indexWidth);
+  const widths = dispatchColumnWidths(columns, rows, width);
+  const header = Object.fromEntries(columns.map((column) => [column.key, column.label])) as DispatchProgressRow;
+  return [renderDispatchTableLine(columns, widths, header), ...rows.map((row) => renderDispatchTableLine(columns, widths, row))];
+}
+
 export function renderDispatchProgressLines(snapshot: DispatchProgressSnapshot, now = Date.now(), width = 160): string[] {
-  const safeWidth = Math.max(20, Math.floor(width));
+  const safeWidth = Math.max(1, Math.floor(width));
   const elapsedMs = snapshot.durationMs ?? Math.max(0, now - snapshot.startedAt);
   const lines = [
     truncateDisplayText(
@@ -361,38 +502,7 @@ export function renderDispatchProgressLines(snapshot: DispatchProgressSnapshot, 
       safeWidth,
     ),
   ];
-
-  for (let i = 0; i < snapshot.tasks.length; i++) {
-    const task = snapshot.tasks[i]!;
-    const taskElapsed = task.durationMs ?? (task.startedAt ? Math.max(0, now - task.startedAt) : undefined);
-    const hbMs = task.heartbeatMs ?? (task.lastHeartbeatAt ? Math.max(0, now - task.lastHeartbeatAt) : undefined);
-    const state = task.state === "running"
-      ? "run"
-      : task.state === "completed"
-        ? "ok"
-        : task.state === "cancelled"
-          ? "cancel"
-          : task.state === "failed"
-            ? "fail"
-            : "wait";
-    const prefix = `${String(i + 1).padStart(2, " ")}. [${state}] `;
-    const model = truncateDisplayText(task.model, safeWidth < 80 ? 20 : 42);
-    const thinking = truncateDisplayText(task.thinking || "off", 10);
-    const progressReason = task.lastProgressReason ? truncateDisplayText(task.lastProgressReason, 20) : "";
-    const progress = progressReason
-      ? ` | progress:${progressReason} ${formatProgressDuration(hbMs)} ago`
-      : hbMs !== undefined
-        ? ` | heartbeat:${formatProgressDuration(hbMs)} ago`
-        : "";
-    const failure = task.failureType ? ` | failure:${truncateDisplayText(task.failureType, 18)}` : "";
-    const right = ` | ${formatProgressDuration(taskElapsed)} | ${model} | thinking:${thinking}${progress}${failure}`;
-    const nameWidth = safeWidth - visibleTextWidth(prefix) - visibleTextWidth(right);
-    const fullLine = nameWidth >= 8
-      ? `${prefix}${truncateDisplayText(task.name, nameWidth)}${right}`
-      : `${prefix}${truncateDisplayText(task.name, Math.max(0, safeWidth - visibleTextWidth(prefix) - 1))}`;
-    lines.push(truncateDisplayText(fullLine, safeWidth));
-  }
-
+  lines.push(...renderDispatchTaskTable(snapshot.tasks, now, safeWidth));
   return lines;
 }
 
@@ -454,6 +564,68 @@ function dispatchOutputPreview(body: string): string {
   return candidate ?? lines[0] ?? "";
 }
 
+function splitDisplayText(value: string, maxWidth: number): [string, string] {
+  const chars = Array.from(value);
+  let width = 0;
+  let splitAt = 0;
+  for (let i = 0; i < chars.length; i++) {
+    const charWidth = charDisplayWidth(chars[i]!);
+    if (splitAt > 0 && width + charWidth > maxWidth) break;
+    width += charWidth;
+    splitAt = i + 1;
+    if (width >= maxWidth) break;
+  }
+  return [chars.slice(0, splitAt).join(""), chars.slice(splitAt).join("")];
+}
+
+function wrapDisplayText(value: string, maxWidth: number): string[] {
+  const safeWidth = Math.max(1, Math.floor(maxWidth));
+  const lines: string[] = [];
+  for (const rawLine of value.split("\n")) {
+    if (rawLine === "") {
+      lines.push("");
+      continue;
+    }
+    let rest = rawLine;
+    while (visibleTextWidth(rest) > safeWidth) {
+      const [head, tail] = splitDisplayText(rest, safeWidth);
+      lines.push(head);
+      rest = tail;
+    }
+    lines.push(rest);
+  }
+  return lines;
+}
+
+class DispatchToolResultView {
+  private readonly renderedAt = Date.now();
+
+  constructor(
+    private readonly progress: DispatchProgressSnapshot,
+    private readonly body: string,
+    private readonly options: { expanded?: boolean; isPartial?: boolean },
+    private readonly theme: any,
+  ) {}
+
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    const safeWidth = Math.max(1, Math.floor(width));
+    const lines = renderDispatchProgressLines(this.progress, this.renderedAt, safeWidth);
+    if (this.options.isPartial) return lines;
+
+    const trimmedBody = this.body.trimEnd();
+    if (this.options.expanded && trimmedBody) {
+      lines.push("", ...wrapDisplayText(trimmedBody, safeWidth));
+    } else if (trimmedBody) {
+      const preview = dispatchOutputPreview(trimmedBody);
+      if (preview) lines.push(this.theme.fg("dim", truncateDisplayText(`output: ${preview}`, safeWidth)));
+      lines.push(this.theme.fg("muted", truncateDisplayText("expand for full dispatch output", safeWidth)));
+    }
+    return lines;
+  }
+}
+
 function renderDispatchToolResult(result: any, options: { expanded?: boolean; isPartial?: boolean }, theme: any) {
   const details = result.details as DispatchProgressDetails | undefined;
   const progress = details?.dispatchProgress;
@@ -461,19 +633,7 @@ function renderDispatchToolResult(result: any, options: { expanded?: boolean; is
   if (!progress) {
     return new Text(body || theme.fg("dim", "No dispatch output"), 0, 0);
   }
-
-  let text = renderDispatchProgressLines(progress, Date.now(), options.expanded ? 220 : 160).join("\n");
-  if (options.isPartial) return new Text(text, 0, 0);
-
-  const trimmedBody = body.trimEnd();
-  if (options.expanded && trimmedBody) {
-    text += `\n\n${trimmedBody}`;
-  } else if (trimmedBody) {
-    const preview = dispatchOutputPreview(trimmedBody);
-    if (preview) text += `\n${theme.fg("dim", truncateDisplayText(`output: ${preview}`, 140))}`;
-    text += `\n${theme.fg("muted", "expand for full dispatch output")}`;
-  }
-  return new Text(text, 0, 0);
+  return new DispatchToolResultView(progress, body, options, theme);
 }
 
 function renderDispatchAgentCall(args: any, theme: any) {

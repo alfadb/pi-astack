@@ -272,8 +272,23 @@ check("tool-block progress renderer surfaces degraded and cancelled states", () 
   if (!/snapshot\.state/.test(dispatchSrc)) {
     throw new Error("tool-block progress renderer must include snapshot.state");
   }
-  if (!/task\.state === "cancelled"/.test(dispatchSrc)) {
+  if (!/state === "cancelled"/.test(dispatchSrc)) {
     throw new Error("tool-block progress renderer must distinguish cancelled tasks");
+  }
+});
+
+check("tool-block progress uses a responsive text table", () => {
+  if (!/class DispatchToolResultView/.test(dispatchSrc)) {
+    throw new Error("dispatch tool results must render through a width-aware component");
+  }
+  if (!/renderDispatchProgressLines\(this\.progress,\s*this\.renderedAt,\s*safeWidth\)/.test(dispatchSrc)) {
+    throw new Error("dispatch progress must render with the real component width");
+  }
+  if (!/function renderDispatchTaskTable/.test(dispatchSrc)) {
+    throw new Error("dispatch progress task table renderer missing");
+  }
+  if (!/chooseDispatchProgressColumns\(width,\s*indexWidth\)/.test(dispatchSrc)) {
+    throw new Error("dispatch progress table must select columns by width");
   }
 });
 
@@ -284,7 +299,7 @@ check("tool-block progress labels counts and heartbeat/progress age", () => {
   if (/hb:/.test(dispatchSrc)) {
     throw new Error("progress rows must not render terse hb:reason fields");
   }
-  if (!dispatchSrc.includes("progress:${progressReason} ${formatProgressDuration(hbMs)} ago")) {
+  if (!dispatchSrc.includes("${reason} ${formatProgressDuration(hbMs)} ago")) {
     throw new Error("progress rows must render progress reason with an explicit age");
   }
 });
@@ -302,8 +317,8 @@ check("collapsed tool result preview skips markdown/table metadata", () => {
   if (!dispatchSrc.includes("if (/^_serial sum:/.test(line)) return false;")) {
     throw new Error("collapsed preview must skip dispatch_parallel timing metadata");
   }
-  if (!dispatchSrc.includes("truncateDisplayText(`output: ${preview}`, 140)")) {
-    throw new Error("collapsed preview must label the selected user-visible output line");
+  if (!dispatchSrc.includes("truncateDisplayText(`output: ${preview}`, safeWidth)")) {
+    throw new Error("collapsed preview must label the selected user-visible output line using actual width");
   }
 });
 

@@ -979,7 +979,7 @@ check("classifyError: known limitation — microsecond unit bypass", () => {
 
 // ── Tool-block progress rendering ─────────────────────────────
 
-check("progress renderer uses labelled counts and explicit progress age", () => {
+check("progress renderer uses labelled counts and a responsive text table", () => {
   const now = 1_700_000_001_234;
   const lines = renderDispatchProgressLines({
     title: "agent",
@@ -1002,11 +1002,69 @@ check("progress renderer uses labelled counts and explicit progress age", () => 
   if (!text.includes("tasks 1/1 ok, 0 failed, 0 running")) {
     throw new Error(`labelled counts missing:\n${text}`);
   }
-  if (!text.includes("progress:prompt_end 0.0s ago")) {
+  if (!/^#\s+State\s+Task\s+Time\s+Model\s+Think\s+Progress/m.test(text)) {
+    throw new Error(`table header missing:\n${text}`);
+  }
+  if (!text.includes("prompt_end 0.0s ago")) {
     throw new Error(`progress age missing:\n${text}`);
   }
   if (/\b0\/0\/1\/1\b|hb:/.test(text)) {
     throw new Error(`old compact counters or hb field leaked:\n${text}`);
+  }
+});
+
+check("progress renderer drops columns instead of wrapping on narrow widths", () => {
+  const now = 1_700_000_001_234;
+  const width = 52;
+  const lines = renderDispatchProgressLines({
+    title: "parallel",
+    state: "running",
+    startedAt: now - 1_234,
+    counts: { running: 1, failed: 0, success: 0, total: 1 },
+    tasks: [{
+      name: "very long task name that should truncate",
+      model: "deepseek/deepseek-v4-flash",
+      thinking: "off",
+      state: "running",
+      startedAt: now - 1_234,
+      lastHeartbeatAt: now,
+      lastProgressReason: "prompt_end",
+    }],
+  }, now, width);
+  const text = lines.join("\n");
+  if (!/^#\s+State\s+Task\s+Time/m.test(text)) {
+    throw new Error(`narrow table did not keep core columns:\n${text}`);
+  }
+  if (/\bModel\b|\bThink\b|\bProgress\b/.test(text)) {
+    throw new Error(`narrow table should drop lower-priority columns:\n${text}`);
+  }
+  const tooWide = lines.find((line) => line.length > width);
+  if (tooWide) {
+    throw new Error(`rendered line exceeds width ${width}: ${tooWide.length} ${JSON.stringify(tooWide)}`);
+  }
+});
+
+check("progress renderer never emits lines wider than tiny component widths", () => {
+  const now = 1_700_000_001_234;
+  const width = 12;
+  const lines = renderDispatchProgressLines({
+    title: "parallel",
+    state: "running",
+    startedAt: now - 1_234,
+    counts: { running: 1, failed: 0, success: 0, total: 1 },
+    tasks: [{
+      name: "long task",
+      model: "deepseek/deepseek-v4-flash",
+      thinking: "medium",
+      state: "running",
+      startedAt: now - 1_234,
+      lastHeartbeatAt: now,
+      lastProgressReason: "prompt_end",
+    }],
+  }, now, width);
+  const tooWide = lines.find((line) => line.length > width);
+  if (tooWide) {
+    throw new Error(`rendered line exceeds tiny width ${width}: ${tooWide.length} ${JSON.stringify(tooWide)}`);
   }
 });
 
