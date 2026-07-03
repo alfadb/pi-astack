@@ -7,6 +7,32 @@ status: active
 
 本文只列 current design vision 中仍未完成或有意 deferred 的项。**只装未完成/计划**——已 ship 的当前事实写入 [`docs/current-state.md`](./current-state.md)，功能/需求级变更写入 [`docs/feature-changelog.md`](./feature-changelog.md)，多轮审计与 commit 级实施流水写入 `docs/audits/` 或保留在 git history（REQ-006：roadmap 不是 changelog）。
 
+## Externalized GIC 顺序路线图
+
+本节记录 pi-astack 在 arXiv 2606.23991 的 GIC 框架下的后续顺序路线。定位：pi-astack 不追求短期训练出论文意义上的 Agent Model，也不在软件工程域优先建设 learned World Model；下一阶段目标是成为 **externalized GIC system with a closed learning loop**：把 goal / identity / belief / configurator / learning 以系统能力显式化，锚定真实 repo / test / LSP / git / browser / workflow / memory 信号，并通过 L1/L2 causal trace 闭合学习回路。
+
+顺序项不是排期；只有前置验收信号在真实 dogfood 中成立，才进入下一项。低风险测量可以并行补齐，但不得绕过顺序把后项能力提前变成默认行为。
+
+| 顺序 | Epic | 目标 | 验收信号 | 主要风险 / 禁止走法 |
+|---|---|---|---|---|
+| 1 | **GIC 状态边界 ADR** | 固化 `goal` / `identity` / `belief` / `configurator` / `learning` 在 pi-astack 中的系统对应物、写权限、读路径和治理层级；明确 L1 仍 prompt-native、L2 仍 infra-structured。 | 后续 design / PR 能明确说明改动属于哪一类状态、由哪个 loop 拥有、是否触碰 `direction.md` 不变量。 | 只写术语不进入评审习惯；为对齐论文术语重构已工作的系统。 |
+| 2 | **Outcome Edge 完整化** | 闭合 `memory 注入 -> agent 行为 -> 用户/工具 outcome -> confidence / status / usage 反馈`，让 L1 从 write-only 记忆循环进入可校准学习循环。 | 活跃记忆条目出现由真实后续使用触发的 confidence 调整、降级或 contested 标记；self-echo 不被误判为确认。 | 把 LLM 自述升格为 ground truth；要求用户显式审查记忆。 |
+| 3 | **PEG 基线与仪表** | 建立 Performance / Efficiency / Growth 的最小可用指标，先观测、不作高风险 gating。 | 连续真实任务产生 P/E/G 时序；至少一类重复任务能计算跨会话变化；成本只事后透明，不作执行闸。 | 指标变成机械硬门；用 synthetic case 代替真实 dogfood 验收。 |
+| 4 | **显式 Belief State v1** | 把任务期状态从散落工具输出提升为一等结构，区分 `observed` / `inferred` / `stale`，并记录未验证假设与已证伪假设。 | sub-agent 能消费共享 belief 而减少重复探索；过期推断被显式标记；测试、LSP、git、browser 等真实观测优先于叙述性推断。 | 变成第二套手写 context 负担；用 learned simulation 替代可直接执行的真实 oracle。 |
+| 5 | **Live Caged Dynamic Hub** | 按 ADR 0030 推进受限动态 hub：预算上限、降级回静态 dispatch、全程 causal anchor 审计，避免坏 planner 污染下游。 | hub 决策可完整复盘；至少一次自动降级正确触发；真实任务表现不低于静态 dispatch 基线。 | 先建大规模 attribution corpus 再上线；无笼子直接默认启用。 |
+| 6 | **PEG-informed Configurator** | 让 configurator 从规则 + 即时 LLM 判断，升级为规则 + LLM 判断 + 历史 PEG / outcome 归因加权；只先影响低风险路由。 | hub / dispatch 选择能引用历史 P/E/G 证据；低风险路由质量优于无历史基线；失败可回退静态策略。 | 把 PEG 当机械裁决阈值；让成本成为执行 gate。 |
+| 7 | **L1 Identity Evolver** | 第二大脑沉淀并注入“这个用户 + 这个项目下 agent 应如何工作”的行为特征，包括验证严格度、风险偏好、协作方式和项目习惯。 | 盲测中 identity 注入提升任务质量；用户零管理操作；identity 变更有 outcome 证据链。 | 做出用户可见 memory / identity 管理界面；identity 漂移没有返回路径。 |
+| 8 | **Drift Detection Return Path** | 落地“人类管方向 / abrain 管细节”的返回路径，定期对照 `vision.md` / `direction.md` / ADR 基线检测实现细节是否反向改变方向。 | 至少能报告一类真实 direction drift 或明确确认无 drift；报告进入现有 aggregator / audit 面，不新增用户管理流程。 | 形成定期人工审查负担；把实现状态流水写进 ADR。 |
+| 9 | **Configurator 蒸馏候选** | 仅在前述 trace 足够后，评估是否从 causal trace + PEG 归因数据蒸馏小型 configurator，用于模型选择、dispatch 形态和工具选择。 | 外部化 configurator 已有可比较基线；蒸馏候选在真实任务上 P/E/G 优于外部化基线且可回滚。 | 过早训练 agentive model / world model；把模型权重自更新接入生产学习回路。 |
+
+明确不做，除非另有 ADR walk-back：
+
+- 不为对齐 GIC 论文而重构已工作的子系统；GIC 是坐标系，不是迁移规范。
+- 不在软件工程域优先建设 learned World Model；真实执行、测试、LSP、git、browser 观测是更高信任来源。
+- 不把 L1 第二大脑质量问题外包给用户审批、投票、审查、手动编辑或记忆管理 UI。
+- 不追求去 hub 化的自组织 swarm；L2 必须保留 completion / liveness / accountability 语义。
+- 不把 attribution corpus 作为 dynamic hub 的前置阻塞；trace 应是 caged live dogfood 的副产品。
+
 ## 文档体系 Phase 2（共识层重构）
 
 Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-changelog`，见 [`docs/README.md`](./README.md)）。Phase 2 **存量语料整体完成**：存量 ADR 方向上提 `direction.md`（hard invariant）/`requirements.md`（`REQ-*` 行为需求）；`current-state.md`/`architecture/*` 去代码镜像只留契约；frontmatter + `docs-doctor` 守卫落地（具体条目以各文件现状为准，不在此镜像计数）。
