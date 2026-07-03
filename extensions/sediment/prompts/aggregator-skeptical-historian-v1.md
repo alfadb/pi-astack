@@ -112,15 +112,13 @@ You receive:
    500K tokens with only `multi_view` operations may indicate replay
    loop stuck; correlate with `multiview_pending` count).
 
-8. **`p15_watchdog_signals`** — `multiview_pass1_op_not_synthesizable`
-   frequency, `candidate_lost` frequency, replay queue age + retry
-   distribution, cross-project multi-view distribution, Pass 1 op
-   type breakdown. (C4: P1.5 multi-view-pass1 schema upgrade was
-   deprioritized based on 0/30days of `multiview_pass1_op_not_synthesizable`,
-   but the deprioritization is conditional on these watchpoints
-   staying clear. ADR 0025 §6 documents `>5/week` as the threshold
-   where P1.5 re-prioritization becomes a candidate advisory — see
-   Step 8 for how to evaluate it as a *candidate*, not a hard rule.)
+8. **`p15_watchdog_signals`** — legacy `multiview_pass1_op_not_synthesizable`
+   frequency, current `synthesis_failed` frequency, `candidate_lost`
+   frequency, replay queue age + retry distribution, cross-project
+   multi-view distribution, synthesis call count/ok-rate, and Pass 1 op
+   type breakdowns. The Pass 1 rich-payload dead-loop now has an explicit
+   synthesis step; evaluate failures as prompt/model/validation quality
+   signals, not as an automatic request to add another mechanical cache.
 
 9. **`evolution_hypotheses`** — the internal L1 self-state distilled
    from earlier prompt-native aggregator outputs. It contains active,
@@ -336,35 +334,34 @@ or action queue.
 
 ### Step 8 — P1.5 watchdog telemetry check
 
-Specifically look at `p15_watchdog_signals`. ADR 0025 §6 documents
-the `>5/week` threshold on `multiview_pass1_op_not_synthesizable` as
-the trigger where P1.5 Pass 1 schema upgrade SHOULD be considered for
-re-prioritization. **This is documented escalation context, NOT a
-hard rule that bypasses your Step 2-3 judgment.** Apply the same
-case-FOR + case-AGAINST + falsifiability flow to each watchpoint
-signal:
+Specifically look at `p15_watchdog_signals`. The legacy
+`multiview_pass1_op_not_synthesizable` counter should normally stay at
+0 after the rich-payload synthesis step landed. Treat any new legacy
+not-synth rows as compatibility drift or an old audit shape, not as a
+fresh design request. The current actionable signal is
+`synthesis_failed_count` plus `synthesis_failed_op_type_breakdown` and
+`multi_view_metrics.synthesis_call_count` / `ok_rate`.
 
-- `multiview_pass1_op_not_synthesizable >5/week`: case-FOR is
-  "ADR §6 threshold crossed, escalation deserved"; case-AGAINST is
-  "could be a one-time spike (cite raw_distribution / prior runs);
-  is the count concentrated in one project / one candidate slug?"
-  Commit promotion only if case-FOR wins AND you can name a 2-week
-  falsifier (e.g. "should drop back below 3/week if spike"). Use
-  `pass1_op_type_breakdown` to SCOPE any escalation: the design review
-  ruling is update-only synthesis is the smallest safe first build and
-  `delete` must NEVER be synthesized, so a breakdown dominated by
-  `delete`/`merge` is a WEAKER case for building than one dominated by
-  `update` (the dangerous ops stay deferred regardless of frequency).
+Apply the same case-FOR + case-AGAINST + falsifiability flow to each
+watchpoint signal:
+
+- `synthesis_failed_count` growing: case-FOR is "the new rich-payload
+  synthesis step is failing under real inputs"; case-AGAINST is "could
+  be concentrated in one project, one prompt regression, or one model
+  outage". Commit promotion only if case-FOR wins AND you can name a
+  2-week falsifier (e.g. "should drop after prompt repair/model route
+  change"). Use `synthesis_failed_op_type_breakdown` to scope any
+  escalation: update/merge/supersede/delete require different payloads,
+  so do not generalize from one op's failures to every op.
+- legacy `multiview_pass1_op_not_synthesizable` >0: mention as a stale
+  compatibility signal unless recent audit rows prove the current code
+  still emits it.
 - `candidate_lost: true` growing: same flow. Cite specific growth
   rate and counter-cases.
 - replay queue retries trending up: same flow.
-- `pass1_op_type_breakdown` is now POPULATED (2026-05-29 instrument:
-  attributed from the structured `multi_view.pass1.op` audit field). An
-  EMPTY / all-zero breakdown means genuinely 0 dead-loops in-window (the
-  current 0/week reality) → NOT advisory. A NON-empty breakdown is the
-  op-typed evidence: weigh it via the first bullet's case-FOR/AGAINST
-  flow, scoped per the update-only / never-delete ruling. Note in
-  `reasoning_quality_self_check.silence_audit` if you considered
+- `pass1_op_type_breakdown` remains populated for legacy rows; prefer
+  `synthesis_failed_op_type_breakdown` for current synthesis failures.
+  Note in `reasoning_quality_self_check.silence_audit` if you considered
   flagging an empty breakdown and dropped it.
 
 The ADR threshold is your **evidence**, not your **boss** (§1 + C1).
@@ -539,29 +536,27 @@ promoted_advisories), `reasoning_quality_self_check.falsifiers_named_count:
 
 **Example B — single legitimate promotion**
 
-Input shows `multiview_pass1_op_not_synthesizable` jumped from 0 to 7
-in the last week. `p15_watchdog_signals` confirms cross-project.
+Input shows `synthesis_failed_count` jumped from 0 to 7 in the last
+week, `synthesis_failed_op_type_breakdown.update=6`, and
+`multi_view_metrics.synthesis_call_count=9` with ok_rate dropping.
 `prior_aggregator_summaries` shows this was 0 for the prior 8 runs.
-This crosses the ADR 0025 §6 5/week threshold.
 
 Output: `promoted_advisories: [{kind: "p15_re_prioritize_needed",
-severity: "warning", message: "multiview_pass1_op_not_synthesizable
-crossed 5/week threshold (current: 7/week, prior: 0/week × 8 runs);
-ADR 0025 §6 indicates P1.5 Pass 1 schema upgrade should be re-prioritized",
-reasoning: "Case-FOR: ADR §6 threshold crossed cleanly (7 vs 5).
-Case-AGAINST: could be one-week spike but prior_aggregator_summaries
-show 0 for 8 consecutive runs, ruling out high baseline volatility.
-Case-FOR wins.", falsifier: "Next 2 weeks should show this dropping
-back below 3/week if it was a one-time spike; if it stays at ≥5,
-the trigger is real and P1.5 cannot wait", evidence_quotes:
-["multiview_pass1_op_not_synthesizable current=7/week, prior=0/week×8"]}]`,
+severity: "warning", message: "multi-view rich synthesis failed 7
+ times this week (mostly update), after 8 prior zero-failure runs",
+reasoning: "Case-FOR: new synthesis step is failing on real update
+payloads. Case-AGAINST: could be one-week model-route outage, but
+prior_aggregator_summaries show 0 for 8 consecutive runs and the
+failures cluster in one op shape, making prompt/schema repair plausible.
+Case-FOR wins.", falsifier: "After prompt/model repair, the next 2
+weeks should show synthesis_failed_count below 2/week and ok_rate
+recovering", evidence_quotes: ["synthesis_failed_count=7",
+"synthesis_failed_op_type_breakdown.update=6"]}]`,
 `reasoning_quality_self_check.promotion_audit: [{kind:
 "p15_re_prioritize_needed", strongest_reason_not_to_promote: "single
-week crossing a hard ADR threshold could be a high-variance blip,
-especially if concentrated in one project", why_still_promote: "the
-prior 8 runs were all 0 — this is not high baseline variance, this
-is a clean regime change", anchor_evidence:
-"multiview_pass1_op_not_synthesizable prior=0/week×8 runs"}]`.
+week spike could be model outage", why_still_promote: "prior 8 runs
+were all 0 and failures concentrate in update synthesis", anchor_evidence:
+"synthesis_failed_count current=7, prior=0/week×8"}]`.
 
 **Example C — disagreement with prior run**
 

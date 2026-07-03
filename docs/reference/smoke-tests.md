@@ -53,7 +53,7 @@ status: active
 | `smoke:r2-newp1-fixes` | `scripts/smoke-r2-newp1-fixes.mjs` | ADR 0024–0027 R2 NEW-P1 regression bundle |
 | `smoke:jiti-singleton` | `scripts/smoke-jiti-singleton.mjs` | globalThis / Symbol singleton hardening across jiti module copies |
 | `smoke:per-turn-cost` | `scripts/smoke-per-turn-cost.mjs` | per-turn cost sidecar and rollup feed |
-| `smoke:multi-view-skip-cache` | `scripts/smoke-multi-view-skip-cache.mjs` | multi-view skip-cache / replay cost guard |
+| `smoke:multi-view` | `scripts/smoke-multi-view.mjs` | multi-view review-all mutations gate and Pass 1 rich-payload synthesis |
 | `smoke:paths` | `scripts/smoke-pi-astack-paths.mjs` | runtime path helpers and package layout assumptions |
 | `smoke:vault-subpi-isolation` | `scripts/smoke-vault-subpi-isolation.mjs` | legacy sub-pi vault isolation regression coverage |
 | `smoke:abrain` | `scripts/smoke-abrain-backend-detect.mjs` | vault backend detection |

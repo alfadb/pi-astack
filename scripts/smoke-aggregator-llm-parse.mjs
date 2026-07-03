@@ -146,7 +146,7 @@ check("buildAggregatorPromptInput preserves all 9 declared feeds when present", 
     outcome_counterfactual_excerpts: [{ slug: "x", used: "decisive", counterfactual: "q", ts: "2026-05-28T00:00:00Z" }],
     prior_aggregator_runs: [{ ts: "2026-05-27T00:00:00Z", project_root: "/p", advisory_kinds: {}, total_advisories: 0 }],
     classifier_health: { ok: true, quoteRate: 0.95, alternativeRate: 0.9, concreteSelfCritiqueRate: 0.92, sampleSize: 40, windowSize: 50, threshold: 0.4, advisories: [] },
-    p15_watchdog_signals: { pass1_op_not_synthesizable_count: 0, candidate_lost_count: 0, multi_view_metrics: { pass1_call_count: 0, pass2_call_count: 0, ok_rate: 0, distinct_device_ids: 0 }, multiview_pending_queue: { total: 0, oldest_age_days: 0, max_retry_attempts: 0 }, pass1_op_type_breakdown: {}, pass1_op_type_breakdown_available: true },
+    p15_watchdog_signals: { pass1_op_not_synthesizable_count: 0, synthesis_failed_count: 0, candidate_lost_count: 0, multi_view_metrics: { pass1_call_count: 0, pass2_call_count: 0, synthesis_call_count: 0, ok_rate: 0, distinct_device_ids: 0 }, multiview_pending_queue: { total: 0, oldest_age_days: 0, max_retry_attempts: 0 }, pass1_op_type_breakdown: {}, synthesis_failed_op_type_breakdown: {}, pass1_op_type_breakdown_available: true },
     evolution_hypotheses: { project_root: "/p", rows_considered: 1, matching_rows: 1, active_hypotheses: [{ key: "k::slug:s", kind: "k", slug: "s", status: "proposed", first_seen: "2026-05-27T00:00:00Z", last_seen: "2026-05-27T00:00:00Z", seen_count: 1, demoted_count: 0, acknowledgment_count: 0, withdrawn_count: 0 }], contested_hypotheses: [], withdrawn_hypotheses: [] },
   };
   const out = buildAggregatorPromptInput(fullSummary);

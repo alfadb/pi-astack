@@ -5,13 +5,13 @@
  * the 3-reviewer T0 audit identified that runMultiView has 7 fallback
  * paths that silently fall back to proposer direct-write — this violates
  * ADR 0025 §3.1 A' layer ("non-trivial create / destructive ops MUST be
- * double-reviewed"). Six of those paths are TRANSIENT failures and should
- * stage the candidate for replay when the reviewer recovers; one path
- * (`confirm_pass1_not_synthesizable`) is a KNOWN P0.5 schema limitation
- * and stays as a hard skip (staging would dead-loop because the schema
- * limitation does not resolve over time — see D5.5A in design review).
+ * double-reviewed"). Reviewer/pass transport failures and rich-synthesis
+ * transport failures should stage the candidate for replay when the model
+ * path recovers. Deterministic confirm_pass1 payload failures remain hard
+ * skips (synthesis_failed or multiview_pass1_op_not_synthesizable), because
+ * staging would replay the same invalid payload shape.
  *
- * Six transient paths captured here:
+ * Transient paths captured here:
  *
  *   reviewer_unavailable        — no reviewer model registered/auth at
  *                                 multi-view trigger time
@@ -23,6 +23,9 @@
  *   deferred                    — Pass 2 verdict = `defer` (reviewer
  *                                 explicitly chose to wait for more signal;
  *                                 ADR 0025 §4.4.5)
+ *   synthesis_call_failed       — Pass 2 confirmed Pass 1, but the rich
+ *                                 payload synthesis call failed at the
+ *                                 transport/model-availability layer
  *
  * Replay path (every agent_end):
  *   1. staging-loader returns retryable entries (originating_device match)
@@ -93,8 +96,9 @@ import type {
  * Transient-failure states that produce a `multiview-pending` staging
  * entry. Each maps 1:1 to a specific runMultiView fallback path
  * (see multi-view.ts::runMultiView). NOTE that
- * `confirm_pass1_not_synthesizable` is INTENTIONALLY ABSENT — that
- * path stays as a hard skip (D5.5A design-review verdict).
+ * `multiview_pass1_op_not_synthesizable` and deterministic
+ * `synthesis_failed` are INTENTIONALLY ABSENT — those paths stay hard
+ * skips rather than replaying a stable schema/validation failure.
  */
 export type MultiviewPendingState =
   | "reviewer_unavailable"
@@ -102,7 +106,8 @@ export type MultiviewPendingState =
   | "pass1_unparseable"
   | "pass2_call_failed"
   | "pass2_unparseable"
-  | "deferred";
+  | "deferred"
+  | "synthesis_call_failed";
 
 /**
  * Schema versions. v1 ships with batch 3. Bumping requires a migration
@@ -443,6 +448,7 @@ export interface SlugInputs {
  *   state=pass2_call_failed       → pass1_verdict PRESENT, pass2_verdict ABSENT
  *   state=pass2_unparseable       → pass1_verdict PRESENT, pass2_verdict ABSENT
  *   state=deferred                → pass1_verdict PRESENT, pass2_verdict PRESENT
+ *   state=synthesis_call_failed   → pass1_verdict PRESENT, pass2_verdict PRESENT
  */
 export function validateMultiviewPendingConsistency(
   entry: MultiviewPendingEntry,
@@ -470,6 +476,7 @@ export function validateMultiviewPendingConsistency(
     case "pass2_unparseable":
       return expect(true, false);
     case "deferred":
+    case "synthesis_call_failed":
       return expect(true, true);
     default: {
       // Exhaustiveness check at compile time.
@@ -500,6 +507,7 @@ export function retryCapForState(state: MultiviewPendingState): number {
     case "pass1_unparseable":
     case "pass2_call_failed":
     case "pass2_unparseable":
+    case "synthesis_call_failed":
       return MAX_RETRY_ATTEMPTS;
     default: {
       const _exhaustive: never = state;

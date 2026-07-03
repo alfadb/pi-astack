@@ -238,6 +238,11 @@ export interface SedimentSettings {
     proposerProviders: string[];
     reviewerProviders: string[];
     fallbackProviders: string[];
+    /** When true, every mutating curator op enters multi-view. op=skip remains unreviewed. */
+    reviewAllMutations: boolean;
+    /** Model for rich-payload synthesis after confirm_pass1 on update/merge/supersede/delete.
+     *  Empty means fall back to curatorModel. */
+    synthesisModel: string;
   };
 }
 
@@ -388,6 +393,8 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     proposerProviders: [],
     reviewerProviders: [],
     fallbackProviders: [],
+    reviewAllMutations: false,
+    synthesisModel: "",
   },
 };
 
@@ -572,6 +579,10 @@ export function resolveSedimentSettings(): SedimentSettings {
         ? (cfg.multiView as Record<string,unknown>).reviewerProviders as string[] : DEFAULT_SEDIMENT_SETTINGS.multiView.reviewerProviders,
       fallbackProviders: Array.isArray((cfg.multiView as Record<string,unknown>|undefined)?.fallbackProviders)
         ? (cfg.multiView as Record<string,unknown>).fallbackProviders as string[] : DEFAULT_SEDIMENT_SETTINGS.multiView.fallbackProviders,
+      reviewAllMutations: asBoolean((cfg.multiView as Record<string,unknown>|undefined)?.reviewAllMutations, DEFAULT_SEDIMENT_SETTINGS.multiView.reviewAllMutations),
+      synthesisModel: typeof (cfg.multiView as Record<string,unknown>|undefined)?.synthesisModel === "string" && ((cfg.multiView as Record<string,unknown>).synthesisModel as string).trim()
+        ? ((cfg.multiView as Record<string,unknown>).synthesisModel as string).trim()
+        : DEFAULT_SEDIMENT_SETTINGS.multiView.synthesisModel,
     },
   };
 }

@@ -19,7 +19,8 @@
  *   - empty audit → empty breakdown, available=true
  *   - seeded curator rows with decision.reason=multiview_pass1_op_not_synthesizable
  *     + multi_view.pass1.op ∈ {update,merge,...} → correct per-op counts
- *   - rows WITHOUT that skip reason → not counted
+ *   - seeded curator rows with decision.reason=synthesis_failed → current synthesis failure counts
+ *   - rows WITHOUT either skip reason → not counted
  *   - missing pass1.op on a matching row → counted as "unknown"
  *   - window cutoff respected
  *
@@ -102,9 +103,11 @@ console.log("\n[2] op-typed breakdown from structured curator audit");
       curatorRow(iso(60 * 1000), [{ reason: NS, pass1op: "update" }, { reason: NS, pass1op: "merge" }]),
       curatorRow(iso(120 * 1000), [{ reason: NS, pass1op: "update" }]),
       curatorRow(iso(180 * 1000), [{ reason: NS, pass1op: "supersede" }]),
+      // current rich-synthesis failures: counted separately from legacy not-synth.
+      curatorRow(iso(190 * 1000), [{ reason: "synthesis_failed", pass1op: "update" }, { reason: "synthesis_failed", pass1op: "delete" }]),
       // a NON-matching skip reason (must NOT count)
       curatorRow(iso(200 * 1000), [{ reason: "curator_low_confidence", pass1op: "update" }]),
-      // matching skip but NO pass1.op → "unknown"
+      // matching legacy skip but NO pass1.op → "unknown"
       curatorRow(iso(220 * 1000), [{ reason: NS, noPass1: true }]),
       // a non-curator row (aggregator advisory) must be ignored gracefully
       { ts: iso(240 * 1000), operation: "aggregator_advisory", advisories: [] },
@@ -116,11 +119,15 @@ console.log("\n[2] op-typed breakdown from structured curator audit");
     check("supersede counted once", b.supersede === 1, JSON.stringify(b));
     check("non-matching skip reason NOT counted", b.update === 2 /* not 3 */, JSON.stringify(b));
     check("matching skip without pass1.op → unknown", b.unknown === 1, JSON.stringify(b));
-    check("no spurious op keys", Object.keys(b).sort().join(",") === "merge,supersede,unknown,update", Object.keys(b).sort().join(","));
-    // R1 P1 (GPT-5.5): the legacy COUNT drives the §6 >5/week trigger, so it
-    // MUST also see current-shape curator[] rows (it previously only read the
-    // old outcome/results shapes → would read 0 on real auto-write rows).
-    check("legacy pass1_op_not_synthesizable_count reflects curator[] rows (=5, the trigger signal)",
+    check("no spurious legacy op keys", Object.keys(b).sort().join(",") === "merge,supersede,unknown,update", Object.keys(b).sort().join(","));
+    const sb = s.p15_watchdog_signals.synthesis_failed_op_type_breakdown;
+    check("synthesis_failed_count reflects current synthesis failures (=2)",
+      s.p15_watchdog_signals.synthesis_failed_count === 2, `count=${s.p15_watchdog_signals.synthesis_failed_count}`);
+    check("synthesis_failed update counted once", sb.update === 1, JSON.stringify(sb));
+    check("synthesis_failed delete counted once", sb.delete === 1, JSON.stringify(sb));
+    // R1 P1 (GPT-5.5): the legacy COUNT drives the historical §6 signal, so it
+    // MUST still see current-shape curator[] rows for backward-compatible audit scans.
+    check("legacy pass1_op_not_synthesizable_count reflects curator[] rows (=5, historical signal)",
       s.p15_watchdog_signals.pass1_op_not_synthesizable_count === 5, `count=${s.p15_watchdog_signals.pass1_op_not_synthesizable_count}`);
   } finally { try { fs.rmSync(pr, { recursive: true, force: true }); } catch {} }
 }

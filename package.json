@@ -101,7 +101,7 @@
     "smoke:r2-newp1-fixes": "node scripts/smoke-r2-newp1-fixes.mjs",
     "smoke:jiti-singleton": "node scripts/smoke-jiti-singleton.mjs",
     "smoke:per-turn-cost": "node scripts/smoke-per-turn-cost.mjs",
-    "smoke:multi-view-skip-cache": "node scripts/smoke-multi-view-skip-cache.mjs",
+    "smoke:multi-view": "node scripts/smoke-multi-view.mjs",
     "smoke:paths": "node scripts/smoke-pi-astack-paths.mjs",
     "smoke:vault-subpi-isolation": "node scripts/smoke-vault-subpi-isolation.mjs",
     "smoke:abrain": "node scripts/smoke-abrain-backend-detect.mjs",

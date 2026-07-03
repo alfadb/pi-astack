@@ -119,6 +119,8 @@ export interface CuratorAudit {
                             // tools that should not be coupled).
       path: string;
     };
+    /** Set when confirm_pass1 produced the final writer payload. */
+    synthesized?: true;
     durationMs: number;
   };
 }
@@ -619,6 +621,7 @@ function buildMultiViewAudit(
       path: mv.staged.path,
     };
   }
+  if (mv.synthesized) out.synthesized = true;
   return out;
 }
 
@@ -1148,14 +1151,14 @@ export async function curateProjectDraft(
     // reviewer model (different family from curator) — Pass 1 blind, Pass
     // 2 reveal.
     //
-    // ADR 0025 §4.4.6 batch 3b: on any of 6 transient reviewer failure
-    // paths (reviewer_unavailable / pass1_call_failed / pass1_unparseable
-    // / pass2_call_failed / pass2_unparseable / deferred), runMultiView
-    // writes a multiview-pending staging entry and returns op=skip
-    // (multiview_staged_for_replay). The candidate is NOT silently
-    // written to brain (would violate §3.1 A' layer). The 7th path
-    // (confirm_pass1_not_synthesizable) keeps op=skip(multiview_pass1_op_
-    // not_synthesizable) deliberately — known Pass 1 schema limitation.
+    // ADR 0025 §4.4.6 batch 3b/C6: transient reviewer and rich-synthesis
+    // transport failures (reviewer_unavailable / pass1_call_failed /
+    // pass1_unparseable / pass2_call_failed / pass2_unparseable /
+    // deferred / synthesis_call_failed) write a multiview-pending staging
+    // entry and return op=skip(multiview_staged_for_replay). The candidate
+    // is NOT silently written to brain (would violate §3.1 A' layer).
+    // Deterministic confirm_pass1 payload/schema failures remain hard skips
+    // (multiview_pass1_op_not_synthesizable or synthesis_failed).
     // Multi-view is a safety net + staging queue, not a blocking gate.
     const mvResult = await runMultiView({
       proposerDecision,

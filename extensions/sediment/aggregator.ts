@@ -108,62 +108,45 @@ export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
   // NOTE 2026-05-28 round-3 cleanup: previously had a "p15-writer-dispatch-stub"
   // entry here, but the writer dispatch was actually shipped earlier (see
   // sediment/index.ts:3012-3041 — `writeApprovedToBrain` calls
-  // `executeCuratorDecisionToBrain`). The remaining P1.5 limitation is
-  // "Pass 1 schema cannot synthesize update/merge/supersede/delete rich
-  // payloads" — a DELIBERATE belt-and-suspenders skip (ADR 0024 line 392),
-  // not a bug. Per the 2026-05-29 3-T0 design review (0/week dogfood) it is
-  // tracked via the now-populated P15WatchdogSignals.pass1_op_type_breakdown
-  // (available=true), NOT a structural_context entry. The
+  // `executeCuratorDecisionToBrain`). The later Pass 1 rich-payload gap is
+  // now handled in multi-view.ts by a structured synthesis call plus
+  // op/slug validation. Remaining signals (`synthesis_failed_count`, legacy
+  // not-synth rows) are telemetry, NOT a structural_context entry. The
   // smoke-aggregator-structural-context.mjs lint caught earlier drift on its
   // first run — working as intended.
 ];
 
 /**
- * Phase C.1.c (ADR 0025 §4.3 v1 prompt input C4 / Step 7 + ADR 0025 §6):
- * P1.5 watchdog signals — telemetry to evaluate whether the multi-view
- * Pass 1 schema upgrade should be re-prioritized. ADR 0025 §6
- * documents `>5/week` on `multiview_pass1_op_not_synthesizable` as the
- * trigger condition; the v1 prompt does NOT treat that threshold as a
- * hard rule, but uses these counts as evidence for the case-FOR side
- * of its Step 7 reasoning.
+ * Phase C.1.c (ADR 0025 §4.3 v1 prompt input C4 / Step 7): P15 watchdog
+ * signals for multi-view reliability. The historical not-synthesizable
+ * counter is retained for backward-compatible audit scans; current failures
+ * should appear as `synthesis_failed` rows plus `pass:"synthesis"` metrics.
  *
- * What we can derive from current telemetry (v0.2 data sources):
- *   1. `multiview_pass1_op_not_synthesizable` skip-reason frequency
+ * What we can derive from current telemetry:
+ *   1. legacy `multiview_pass1_op_not_synthesizable` skip-reason frequency
  *      from audit.jsonl rows
- *   2. `candidate_lost: true` occurrences in audit rows (signals where
- *      the replay writer dispatch lost a reviewer-approved entry)
- *   3. multi-view-metrics.jsonl pass1/pass2 ok-rate + cross-project
- *      breakdown via device_id + per-project audit roll-up
- *   4. multiview-pending staging files — oldest age + max retry count
+ *   2. current `synthesis_failed` skip-reason frequency and pass1-op
+ *      breakdown from curator audit rows
+ *   3. `candidate_lost: true` occurrences in audit rows
+ *   4. multi-view-metrics.jsonl pass1/pass2/synthesis ok-rate +
+ *      cross-project breakdown via device_id + per-project audit roll-up
+ *   5. multiview-pending staging files — oldest age + max retry count
  *
- * Pass 1 op-type distribution (item 5, 2026-05-29 — previously a KNOWN GAP):
- *   5. Pass 1 op-type distribution for the not-synthesizable skips
- *      (update / merge / supersede / delete vs create / archive / skip).
- *      This IS available structurally after all — `buildMultiViewAudit`
- *      records `multi_view.pass1.op` on every curator audit row
- *      (curator.ts), so we can attribute each
- *      `multiview_pass1_op_not_synthesizable` skip to the Pass 1 op that
- *      caused it WITHOUT re-parsing rawText. The earlier "schema doesn't
- *      record op" claim was overstated. We now surface it as
- *      `pass1_op_type_breakdown` and flip `pass1_op_type_breakdown_available`
- *      to true. This is INSTRUMENT-ONLY (3-T0 design review 2026-05-29,
- *      unanimous): the dogfood baseline shows 0/week not-synthesizable over
- *      30 days, well under the ADR 0025 §6 `>5/week` trigger, so we MEASURE
- *      the op mix rather than build risky Pass-1 rich-payload synthesis
- *      (which would add durable-memory corruption surface against zero real
- *      load — an ADR 0024 §10 "don't build for imagined load" violation).
- * Per the prompt's empty-feed edge case, the LLM treats an all-zero
- * breakdown as 'no signal', not 'signal == 0'.
+ * Per the prompt's empty-feed edge case, all-zero breakdowns mean no signal,
+ * not evidence that the subsystem is impossible to fail.
  */
 export interface P15WatchdogSignals {
-  /** From audit: count of skip rows with reason multiview_pass1_op_not_synthesizable. */
+  /** Legacy audit count: skip rows with reason multiview_pass1_op_not_synthesizable. */
   pass1_op_not_synthesizable_count: number;
+  /** Current audit count: skip rows with reason synthesis_failed after rich Pass 1 payload synthesis failed validation/call. */
+  synthesis_failed_count: number;
   /** From audit: count of rows with candidate_lost: true. */
   candidate_lost_count: number;
-  /** From multi-view-metrics: total pass1 + pass2 calls, and ok-rate. */
+  /** From multi-view-metrics: pass1/pass2/synthesis calls, and ok-rate. */
   multi_view_metrics: {
     pass1_call_count: number;
     pass2_call_count: number;
+    synthesis_call_count: number;
     ok_rate: number;
     /** Distinct device_ids seen — proxy for cross-project distribution. */
     distinct_device_ids: number;
@@ -174,13 +157,10 @@ export interface P15WatchdogSignals {
     oldest_age_days: number;
     max_retry_attempts: number;
   };
-  /** Per-Pass1-op breakdown of `multiview_pass1_op_not_synthesizable` skips,
-   *  attributed via the structured `multi_view.pass1.op` field on each
-   *  curator audit row. Keys are the Pass 1 op that hit the dead-loop
-   *  ("update" | "merge" | "supersede" | "delete" | "unknown"). Empty map
-   *  when none fired in-window. This is the op-typed evidence the ADR 0025
-   *  §6 `>5/week` re-prioritization decision needs. */
+  /** Per-Pass1-op breakdown of legacy `multiview_pass1_op_not_synthesizable` skips. */
   pass1_op_type_breakdown: Record<string, number>;
+  /** Per-Pass1-op breakdown of current `synthesis_failed` skips. */
+  synthesis_failed_op_type_breakdown: Record<string, number>;
   /** 2026-05-29: now TRUE — op-type IS derivable from the structured
    *  `multi_view.pass1.op` audit field (the earlier "not surfaced" gap was
    *  overstated). The v1 prompt may now use pass1_op_type_breakdown. */
@@ -867,13 +847,10 @@ function scanP15WatchdogSignals(
 ): P15WatchdogSignals {
   // (1) + (2) from audit.jsonl
   let pass1OpNotSynth = 0;
+  let synthesisFailed = 0;
   let candidateLost = 0;
-  // (5, 2026-05-29) Per-Pass1-op breakdown of not-synthesizable skips,
-  // attributed from the structured `multi_view.pass1.op` field on each
-  // curator audit row (the authoritative shape that co-locates the skip
-  // reason with the Pass 1 op). Additive to the legacy count above, which
-  // scans the older outcome/results shapes.
   const pass1OpBreakdown: Record<string, number> = {};
+  const synthesisFailedBreakdown: Record<string, number> = {};
   // PR-B1 (F7): tier1_jaccard_shadow accumulator (flip-readiness evidence).
   let shadowTotal = 0;
   const shadowBreakdown: Record<string, number> = {};
@@ -890,11 +867,16 @@ function scanP15WatchdogSignals(
       const outcome = row.outcome as Record<string, unknown> | undefined;
       const topSkip = typeof outcome?.skip_reason === "string" ? (outcome.skip_reason as string) : "";
       if (topSkip === "multiview_pass1_op_not_synthesizable") pass1OpNotSynth++;
+      else if (topSkip === "synthesis_failed") synthesisFailed++;
       else if (Array.isArray(row.results)) {
         for (const r of row.results as Array<Record<string, unknown>>) {
           const det = r.detail as Record<string, unknown> | undefined;
           if (typeof det?.skip_reason === "string" && det.skip_reason === "multiview_pass1_op_not_synthesizable") {
             pass1OpNotSynth++;
+            break;
+          }
+          if (typeof det?.skip_reason === "string" && det.skip_reason === "synthesis_failed") {
+            synthesisFailed++;
             break;
           }
         }
@@ -928,12 +910,17 @@ function scanP15WatchdogSignals(
       if (Array.isArray(row.curator)) {
         for (const c of row.curator as Array<Record<string, unknown>>) {
           const dec = c?.decision as Record<string, unknown> | undefined;
-          if (dec?.reason !== "multiview_pass1_op_not_synthesizable") continue;
-          pass1OpNotSynth++;
+          if (dec?.reason !== "multiview_pass1_op_not_synthesizable" && dec?.reason !== "synthesis_failed") continue;
           const mv = c?.multi_view as Record<string, unknown> | undefined;
           const p1 = mv?.pass1 as Record<string, unknown> | undefined;
           const op = typeof p1?.op === "string" && p1.op ? (p1.op as string) : "unknown";
-          pass1OpBreakdown[op] = (pass1OpBreakdown[op] ?? 0) + 1;
+          if (dec.reason === "multiview_pass1_op_not_synthesizable") {
+            pass1OpNotSynth++;
+            pass1OpBreakdown[op] = (pass1OpBreakdown[op] ?? 0) + 1;
+          } else {
+            synthesisFailed++;
+            synthesisFailedBreakdown[op] = (synthesisFailedBreakdown[op] ?? 0) + 1;
+          }
         }
       }
     }
@@ -944,6 +931,7 @@ function scanP15WatchdogSignals(
   // (3) from multi-view-metrics.jsonl (user-global sidecar).
   let pass1Calls = 0;
   let pass2Calls = 0;
+  let synthesisCalls = 0;
   let okCount = 0;
   let totalCount = 0;
   const deviceIds = new Set<string>();
@@ -957,6 +945,7 @@ function scanP15WatchdogSignals(
       const pass = typeof row.pass === "string" ? row.pass : "";
       if (pass === "pass1") pass1Calls++;
       else if (pass === "pass2") pass2Calls++;
+      else if (pass === "synthesis") synthesisCalls++;
       const dev = typeof row.device_id === "string" ? row.device_id : "";
       if (dev) deviceIds.add(dev);
     }
@@ -998,10 +987,12 @@ function scanP15WatchdogSignals(
 
   return {
     pass1_op_not_synthesizable_count: pass1OpNotSynth,
+    synthesis_failed_count: synthesisFailed,
     candidate_lost_count: candidateLost,
     multi_view_metrics: {
       pass1_call_count: pass1Calls,
       pass2_call_count: pass2Calls,
+      synthesis_call_count: synthesisCalls,
       ok_rate: Math.round(okRate * 1000) / 1000,
       distinct_device_ids: deviceIds.size,
     },
@@ -1011,6 +1002,7 @@ function scanP15WatchdogSignals(
       max_retry_attempts: maxRetry,
     },
     pass1_op_type_breakdown: pass1OpBreakdown,
+    synthesis_failed_op_type_breakdown: synthesisFailedBreakdown,
     pass1_op_type_breakdown_available: true,
     tier1_jaccard_shadow: (() => {
       // PR-B1 收敛 (opus BUG-2 / gpt BLOCKING): share 与 ≥50 门只对真正被

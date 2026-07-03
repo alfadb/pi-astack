@@ -3654,11 +3654,12 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         // window.text MUST contain the verbatim user_quote so the attribution guard
         // (only seed when the quote is grounded in the window) passes.
         const seedWinText = `--- ENTRY 1 r1 message/user ---\n全局规则：${userQuote}`;
-        const mkWin = () => ({
-          entries: [{ type: "message", id: "r1", timestamp: "2026-06-07T00:00:01Z", message: { role: "user", content: [{ type: "text", text: seedWinText }] } }],
-          text: seedWinText, chars: seedWinText.length, totalBranchEntries: 1,
-          candidateEntries: 1, includedEntries: 1, checkpointFound: false, lastEntryId: "r1",
+        const mkWinFor = (turnId, text) => ({
+          entries: [{ type: "message", id: turnId, timestamp: "2026-06-07T00:00:01Z", message: { role: "user", content: [{ type: "text", text }] } }],
+          text, chars: text.length, totalBranchEntries: 1,
+          candidateEntries: 1, includedEntries: 1, checkpointFound: false, lastEntryId: turnId,
         });
+        const mkWin = () => mkWinFor("r1", seedWinText);
         const qualifyingSignal = {
           signal_found: true, typing: "durable", confidence: 9, correction_intent: "new preference",
           scope_description: "All git.alfadb.cn repos must use glab across all projects/sessions",
@@ -3666,9 +3667,10 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           // ADR 0028 v1.1: the Tier-1 gate is now the deterministic AX-PROVENANCE
           // class (set by correction-pipeline.deriveProvenance from turn.role).
           provenance: "user-expressed",
+          rule_scope: "global",
         };
-        const laneArgs = (sessionId, correctionSignal) => ({
-          cwd: aRoot, sessionId, settings: a2Settings, window: mkWin(),
+        const laneArgs = (sessionId, correctionSignal, window = mkWin()) => ({
+          cwd: aRoot, sessionId, settings: a2Settings, window,
           modelRegistry: mockModelRegistry, signal: undefined, correlationId: `${sessionId}:auto`,
           abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, correctionSignal,
         });
@@ -3685,6 +3687,21 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         assert(globalThis.__A2_INVOCATIONS__ === 0, `direct lane must not consult the extractor (0 LLM), got: ${globalThis.__A2_INVOCATIONS__}`);
         assert(!fs.existsSync(path.join(aTarget.abrainHome, "l1", "events")), "default-off constraint event writer must not touch L1 events");
         assert(!fs.existsSync(path.join(aTarget.abrainHome, ".state", "sediment", "constraint-events")), "default-off constraint event writer must not touch runtime state");
+
+        // Missing rule_scope must stay conservative: project-scoped by default,
+        // because accidental global prompt pollution is more expensive.
+        const defaultScopeQuote = "本项目中，缺少 rule_scope 的 Tier-1 信号必须默认写入项目规则。";
+        const defaultScopeWinText = `--- ENTRY 1 r1b message/user ---\n项目规则：${defaultScopeQuote}`;
+        const { rule_scope: _omittedRuleScope, ...missingRuleScopeSignal } = {
+          ...qualifyingSignal,
+          user_quote: defaultScopeQuote,
+          scope_description: "This project should default missing rule_scope to project rules",
+        };
+        globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
+        const defaultScope = await _tryAutoWriteLaneForTests(laneArgs("smoke-tier1-default-project", missingRuleScopeSignal, mkWinFor("r1b", defaultScopeWinText)));
+        assert(defaultScope.kind === "tier1_direct", `Tier-1 signal without rule_scope must still direct-write, got: ${defaultScope.kind}`);
+        assert(defaultScope.result.status === "created" && defaultScope.result.ruleScope === "project", `missing rule_scope must default to project, got: ${JSON.stringify(defaultScope.result)}`);
+        assert(globalThis.__A2_INVOCATIONS__ === 0, `default-scope direct lane must not consult the extractor (0 LLM), got: ${globalThis.__A2_INVOCATIONS__}`);
 
         // (1b) opt-in runtime event writer: appends content-addressed L1 evidence while legacy Tier-1 behavior still runs.
         const eventTarget = setupAbrainTarget("constraint-evidence-runtime-smoke");

@@ -666,6 +666,16 @@
               "default": [],
               "items": { "type": "string" },
               "description": "Additional reviewer refs tried after reviewerProviders."
+            },
+            "reviewAllMutations": {
+              "type": "boolean",
+              "default": false,
+              "description": "When true, every mutating sediment curator op (create/update/merge/supersede/delete/archive) enters multi-view review. op=skip remains unreviewed. Default false preserves legacy heuristic triggering."
+            },
+            "synthesisModel": {
+              "type": "string",
+              "default": "",
+              "description": "Optional provider/model ref for rich CuratorDecision payload synthesis when Pass 2 confirms an unsynthesizable Pass 1 op (update/merge/supersede/delete). Empty means runtime falls back to sediment.curatorModel. Concrete model IDs belong in pi-astack-settings.json."
             }
           }
         }
