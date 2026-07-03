@@ -53,6 +53,9 @@ export interface SedimentSettings {
   /** ADR 0025 P1: model for the active correction classifier.
    *  Classification task, not reasoning — v4-flash is sufficient. */
   classifierModel: string;
+  /** Model for confirming rule CONTRADICT candidates before contested demotion.
+   *  Empty means fall back to classifierModel. */
+  ruleContradictionConfirmModel: string;
   classifierTimeoutMs: number;
   extractorMaxCandidates: number;
   extractorAuditRawChars: number;
@@ -269,6 +272,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   extractorMaxRetries: 0,
   // Classifier: empty default. Configure in pi-astack-settings.json.
   classifierModel: "",
+  ruleContradictionConfirmModel: "",
   // 2026-05-24: raised 30_000 → 1_200_000 (20 min) per user directive.
   // See extractorTimeoutMs rationale above. classifier was the most frequent
   // false-fail offender (e.g. audit.jsonl 15:14 + 15:17 deepseek blip).
@@ -470,6 +474,9 @@ export function resolveSedimentSettings(): SedimentSettings {
     classifierModel: typeof cfg.classifierModel === "string" && cfg.classifierModel.trim()
       ? cfg.classifierModel.trim()
       : DEFAULT_SEDIMENT_SETTINGS.classifierModel,
+    ruleContradictionConfirmModel: typeof cfg.ruleContradictionConfirmModel === "string" && cfg.ruleContradictionConfirmModel.trim()
+      ? cfg.ruleContradictionConfirmModel.trim()
+      : DEFAULT_SEDIMENT_SETTINGS.ruleContradictionConfirmModel,
     classifierTimeoutMs: Math.max(5_000, asNumber(cfg.classifierTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.classifierTimeoutMs)),
     extractorMaxCandidates: Math.max(1, Math.floor(asNumber(cfg.extractorMaxCandidates, DEFAULT_SEDIMENT_SETTINGS.extractorMaxCandidates))),
     extractorAuditRawChars: Math.max(0, Math.floor(asNumber(cfg.extractorAuditRawChars, DEFAULT_SEDIMENT_SETTINGS.extractorAuditRawChars))),

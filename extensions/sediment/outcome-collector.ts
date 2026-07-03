@@ -519,6 +519,9 @@ export interface RuleOutcomeEdgeRow {
   status_mutation?: string;
   outcome_used?: string;
   outcome_event_id?: string;
+  /** Original candidate event id when a non-terminal diagnostic row must not
+   *  burn the canonical dedup key (for example confirm_llm_unavailable). */
+  candidate_outcome_event_id?: string;
 }
 
 function ruleOutcomeEdgeDedupKey(row: Pick<RuleOutcomeEdgeRow, "session_id" | "edge" | "rule_scope" | "project_id" | "rule_slug" | "outcome_event_id" | "ts">): string {

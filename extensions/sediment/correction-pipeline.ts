@@ -128,6 +128,9 @@ export interface CorrectionSignal {
    *  Orthogonal to `typing` (mood vs time-scope). Exempts the confidence
    *  gate in isTier1Directive(); see the sunset note there. */
   is_directive?: boolean;
+  /** Classifier-owned Tier-1 rule blast radius. Missing/invalid values are
+   *  conservatively treated as project-scoped by downstream rule writers. */
+  rule_scope?: "project" | "global";
   /** PR-3/P0.2 (ADR 0028 §6): deterministic quote-match diagnostics set by
    *  deriveProvenance — NOT from the LLM. multi_match=true when the quote
    *  matched >1 turn. matched_roles is ALWAYS set when the quote was found
@@ -428,6 +431,7 @@ function parseCorrectionSignal(raw: string): CorrectionSignal | null {
       // (string "true", number) stays undefined so the predicate's
       // `is_directive === true` check fails closed to the conf≥8 fallback.
       is_directive: typeof p.is_directive === "boolean" ? p.is_directive : undefined,
+      rule_scope: p.rule_scope === "project" || p.rule_scope === "global" ? p.rule_scope : undefined,
       reasoning: p.reasoning,
       // Preserve full reasoning trace for curator/aggregator (ADR 0024 §3.3).
       // No schema validation — whole trace is passed through for downstream LLMs to read.
@@ -518,6 +522,7 @@ export function buildProvisionalStagingEntry(
       // PR-A3 (NIT-1): 归属保真——targeted Tier-1 指令进 staging 时不丢
       // classifier 已完成的 target 归属。
       target_entry_slug: signal.target_entry_slug ?? null,
+      rule_scope: signal.rule_scope ?? null,
       scope_description: signal.scope_description ?? "",
       correction_intent: signal.correction_intent ?? "",
       most_likely_error_direction: signal.most_likely_error ?? "",

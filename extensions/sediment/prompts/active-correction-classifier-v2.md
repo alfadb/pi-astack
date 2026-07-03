@@ -257,6 +257,10 @@ Step 5 — NOW commit the final classification:
            imperative/prescriptive mood aimed at assistant behavior.
            RECALL-BIASED: lean true for user-role imperatives; consult
            the abstain list before setting false on an imperative.
+         - rule_scope: "project" when the directive only constrains how the
+           assistant should work in the current project; "global" when it is
+           a cross-project general preference/habit. If uncertain, choose
+           "project" because over-globalizing a rule pollutes all projects.
          - target_entry_slug: choose from RELATED MEMORY ENTRIES only
            when their title/scope/summary strongly matches the correction
            target. A bare slug without content is a weak hint — prefer
@@ -351,6 +355,7 @@ If active correction IS present:
   "user_quote": "...",
   "typing": "durable",
   "is_directive": true,
+  "rule_scope": "project",
   "scope_description": "...",
   "correction_intent": "new preference",
   "confidence": 6,

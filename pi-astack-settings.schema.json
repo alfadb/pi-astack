@@ -290,6 +290,12 @@
           "description": "Model used by the active-correction classifier (conversation window → CorrectionSignal). Needs low-latency reading comprehension and reliable structured output; deep reasoning is not required. Empty default means fail-closed unless configured in pi-astack-settings.json."
         },
 
+        "ruleContradictionConfirmModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional provider/model ref for LLM confirmation before rule CONTRADICT candidates can demote a rule to contested. Empty means runtime falls back to sediment.classifierModel. Concrete model IDs belong in pi-astack-settings.json."
+        },
+
         "classifierTimeoutMs": {
           "type": "number",
           "default": 1200000,

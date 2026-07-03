@@ -734,11 +734,12 @@ export function buildProposerDecisionFromStagingEntry(entry: StagingEntry): Cura
   const cs = entry.correction_signal;
   const rationale = `Staging promotion candidate ${entry.slug}: ${entry.hypothesis ?? ""}`;
   if (cs?.is_directive === true) {
+    const ruleScope = cs.rule_scope === "global" ? "global" : "project";
     return {
       op: "create",
       zone: "rules",
       injectMode: "listed",
-      ruleScope: "project",
+      ruleScope,
       rationale,
       ...(cs?.target_entry_slug ? { derives_from: [cs.target_entry_slug] } : {}),
     };
@@ -815,12 +816,13 @@ function toDedupeEntry(e: MemoryEntry): DedupeEntry {
 
 function correctionSignalFromStaging(entry: StagingEntry): CorrectionSignal | null {
   if (!entry.correction_signal) return null;
-  const { is_directive, quote_multi_match, quote_matched_roles, ...rest } = entry.correction_signal;
+  const { is_directive, quote_multi_match, quote_matched_roles, rule_scope, ...rest } = entry.correction_signal;
   return {
     ...rest,
     ...(typeof is_directive === "boolean" ? { is_directive } : {}),
     ...(typeof quote_multi_match === "boolean" ? { quote_multi_match } : {}),
     ...(Array.isArray(quote_matched_roles) ? { quote_matched_roles } : {}),
+    ...(rule_scope === "project" || rule_scope === "global" ? { rule_scope } : {}),
   };
 }
 
