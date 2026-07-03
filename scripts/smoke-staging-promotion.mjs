@@ -85,6 +85,14 @@ function readStagingEntry(slug) {
   return JSON.parse(fs.readFileSync(path.join(dir, file), "utf-8")).entry;
 }
 
+function readStagingEntries(slug) {
+  const dir = loader.stagingDir();
+  return fs.readdirSync(dir)
+    .filter((f) => f.endsWith(`-${slug}.json`))
+    .sort()
+    .map((file) => JSON.parse(fs.readFileSync(path.join(dir, file), "utf-8")).entry);
+}
+
 function makeSettings(overrides = {}) {
   return {
     stagingPromotionEnabled: true,
@@ -640,7 +648,7 @@ console.log("\n[14] cross-project attribution");
 }
 
 // ── [15] FIX-5 + FIX-6 outcome semantics ────────────────────────────────
-console.log("\n[15] outcome semantics: duplicate writer skip + staged_for_replay");
+console.log("\n[15] outcome semantics: staged_for_replay sibling + duplicate writer skip");
 {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-outcome-"));
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-projO-"));
@@ -648,11 +656,23 @@ console.log("\n[15] outcome semantics: duplicate writer skip + staged_for_replay
   const prevRoot = process.env.ABRAIN_ROOT;
   process.env.ABRAIN_ROOT = tmpRoot;
   try {
-    // FIX-6: staged_for_replay
+    const replayCreated = new Date().toISOString();
+    const siblingCreated = new Date(Date.now() + 1).toISOString();
+
+    // FIX-6: staged_for_replay representative + sibling should defer sibling state.
     writeStaging(makeEntry("stage-replay", {
+      created: replayCreated,
       resolver_disposition: "promote_candidate",
       origin_project_id: projectId,
       origin_project_root: projectRoot,
+    }));
+    writeStaging(makeEntry("stage-replay", {
+      created: siblingCreated,
+      resolver_disposition: "promote_candidate",
+      origin_project_id: projectId,
+      origin_project_root: projectRoot,
+      hypothesis: "sibling for replay deferral",
+      source_utterance: [{ quote: "sibling for replay deferral", context: "", captured_at: siblingCreated }],
     }));
     const replay = await promotion.runStagingPromotionIfDue({
       projectRoot,
@@ -671,10 +691,13 @@ console.log("\n[15] outcome semantics: duplicate writer skip + staged_for_replay
       writeApprovedToBrain: async () => { throw new Error("should not be called"); },
       now: new Date(),
     });
+    const replayEntries = readStagingEntries("stage-replay");
+    const replayEntry = replayEntries.find((entry) => entry.promotion_outcome === "staged_for_replay");
+    const siblingEntry = replayEntries.find((entry) => entry.promotion_outcome === "sibling_deferred");
     check("staged_for_replay recorded", replay.staged_for_replay_slugs.includes("stage-replay"), JSON.stringify(replay));
-    const replayEntry = readStagingEntry("stage-replay");
-    check("staged_for_replay: attribution_pending true", replayEntry.attribution_pending === true);
-    check("staged_for_replay: promotion_outcome", replayEntry.promotion_outcome === "staged_for_replay");
+    check("staged_for_replay representative preserved", replayEntry?.attribution_pending === true && replayEntry?.promotion_outcome === "staged_for_replay", JSON.stringify(replayEntries));
+    check("staged_for_replay sibling deferred", siblingEntry?.promotion_outcome === "sibling_deferred" && siblingEntry?.attribution_pending === true, JSON.stringify(replayEntries));
+    check("staged_for_replay sibling has no promoted_to_slug", siblingEntry?.promoted_to_slug === undefined, JSON.stringify(siblingEntry));
 
     // FIX-5: writer dedupe skip → outcome duplicate. We create a rule first,
     // then promote a rules-zone directive whose body is similar enough to
@@ -799,6 +822,230 @@ console.log("\n[16] forced pending replay invokes reviewer path");
     check("forced replay: reviewer model selected", findCalls > 0, `findCalls=${findCalls}`);
     check("forced replay: reviewer auth path invoked", authCalls > 0, `authCalls=${authCalls}`);
     check("forced replay: does not archive as trigger disappeared", result.re_staged === 1 && result.succeeded === 0, JSON.stringify(result));
+  } finally {
+    if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = prevRoot;
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(projectRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ── [17] explicit quoted slug suggestion controls writer + promoted_to_slug
+console.log("\n[17] explicit quoted slug suggestion → canonical durable slug");
+{
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-slug-quote-"));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-projSQ-"));
+  const projectId = "smokeproject";
+  const prevRoot = process.env.ABRAIN_ROOT;
+  process.env.ABRAIN_ROOT = tmpRoot;
+  try {
+    const stagingSlug = "slug-quote-cand";
+    writeStaging(makeEntry(stagingSlug, {
+      hypothesis: "需要一个 durable 条目，slug 可能为 'agents-md-extension-agnostic-policy'，描述: AGENTS.md must remain extension agnostic.",
+      resolver_disposition: "promote_candidate",
+      origin_project_id: projectId,
+      origin_project_root: projectRoot,
+    }));
+
+    let seenTitle = "";
+    let multiViewCalls = 0;
+    let writerCalls = 0;
+    const result = await promotion.runStagingPromotionIfDue({
+      projectRoot,
+      abrainHome: tmpRoot,
+      projectId,
+      settings: makeSettings(),
+      modelRegistry: { find: () => ({}), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "x" }) },
+      runMultiView: async ({ candidate }) => {
+        multiViewCalls++;
+        seenTitle = candidate.title;
+        return {
+          triggered: true,
+          trigger_reason: "forced",
+          final_decision: { op: "create", rationale: "approved" },
+          durationMs: 1,
+        };
+      },
+      writeApprovedToBrain: async () => {
+        writerCalls++;
+        return "an-entry-capturing-the-principle-that-agents-md-must-remain-extension-agnostic";
+      },
+      now: new Date(),
+    });
+
+    const entryAfter = readStagingEntry(stagingSlug);
+    check("quoted slug: multi-view called once", multiViewCalls === 1);
+    check("quoted slug: writer called once", writerCalls === 1);
+    check("quoted slug: writer candidate title slugifies canonically", slugify(seenTitle) === "agents-md-extension-agnostic-policy", seenTitle);
+    check("quoted slug: title is not meta request", !/需要一个|slug 可能为/.test(seenTitle), seenTitle);
+    check("quoted slug: result durable slug canonical", result.promoted_to_slugs.includes("agents-md-extension-agnostic-policy"), JSON.stringify(result));
+    check("quoted slug: promoted_to_slug canonical", entryAfter.promoted_to_slug === "agents-md-extension-agnostic-policy", JSON.stringify(entryAfter));
+  } finally {
+    if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = prevRoot;
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(projectRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ── [18] explicit backtick slug suggestion controls writer + promoted_to_slug
+console.log("\n[18] explicit backtick slug suggestion → canonical durable slug");
+{
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-slug-backtick-"));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-projSB-"));
+  const projectId = "smokeproject";
+  const prevRoot = process.env.ABRAIN_ROOT;
+  process.env.ABRAIN_ROOT = tmpRoot;
+  try {
+    const stagingSlug = "slug-backtick-cand";
+    writeStaging(makeEntry(stagingSlug, {
+      hypothesis: "需要一个 durable 作业安全条目，slug 如 `Agents_MD_Extension_Agnostic_Policy`，描述: agents md extension agnostic policy should remain extension agnostic.",
+      resolver_disposition: "promote_candidate",
+      origin_project_id: projectId,
+      origin_project_root: projectRoot,
+    }));
+
+    let seenTitle = "";
+    let writerCalls = 0;
+    const result = await promotion.runStagingPromotionIfDue({
+      projectRoot,
+      abrainHome: tmpRoot,
+      projectId,
+      settings: makeSettings(),
+      modelRegistry: { find: () => ({}), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "x" }) },
+      runMultiView: async ({ candidate }) => {
+        seenTitle = candidate.title;
+        return {
+          triggered: true,
+          trigger_reason: "forced",
+          final_decision: { op: "create", rationale: "approved" },
+          durationMs: 1,
+        };
+      },
+      writeApprovedToBrain: async (decision, candidate) => {
+        writerCalls++;
+        return slugify(candidate.title);
+      },
+      now: new Date(),
+    });
+
+    const entryAfter = readStagingEntry(stagingSlug);
+    check("backtick slug: writer called once", writerCalls === 1);
+    check("backtick slug: mixed-case underscore slug canonicalized", slugify(seenTitle) === "agents-md-extension-agnostic-policy", seenTitle);
+    check("backtick slug: title is not meta request", !/需要一个|slug 如/.test(seenTitle), seenTitle);
+    check("backtick slug: result durable slug canonical", result.promoted_to_slugs.includes("agents-md-extension-agnostic-policy"), JSON.stringify(result));
+    check("backtick slug: promoted_to_slug canonical", entryAfter.promoted_to_slug === "agents-md-extension-agnostic-policy", JSON.stringify(entryAfter));
+  } finally {
+    if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = prevRoot;
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(projectRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ── [19] invalid slug candidate → error before multi-view / writer
+console.log("\n[19] invalid slug candidate → error, no writer");
+{
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-invalid-slug-"));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-projIS-"));
+  const projectId = "smokeproject";
+  const prevRoot = process.env.ABRAIN_ROOT;
+  process.env.ABRAIN_ROOT = tmpRoot;
+  try {
+    const stagingSlug = "invalid-slug-cand";
+    writeStaging(makeEntry(stagingSlug, {
+      hypothesis: "需要一个条目，描述这个偏好",
+      source_utterance: [{ quote: "这个偏好以后要记住", context: "", captured_at: new Date().toISOString() }],
+      resolver_disposition: "promote_candidate",
+      origin_project_id: projectId,
+      origin_project_root: projectRoot,
+    }));
+
+    let multiViewCalls = 0;
+    let writerCalls = 0;
+    const result = await promotion.runStagingPromotionIfDue({
+      projectRoot,
+      abrainHome: tmpRoot,
+      projectId,
+      settings: makeSettings(),
+      modelRegistry: { find: () => ({}), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "x" }) },
+      runMultiView: async () => { multiViewCalls++; throw new Error("should not be called"); },
+      writeApprovedToBrain: async () => { writerCalls++; return "should-not-write"; },
+      now: new Date(),
+    });
+
+    const entryAfter = readStagingEntry(stagingSlug);
+    check("invalid slug: multi-view not called", multiViewCalls === 0);
+    check("invalid slug: writer not called", writerCalls === 0);
+    check("invalid slug: result rejected", result.rejected_slugs.includes(stagingSlug), JSON.stringify(result));
+    check("invalid slug: promotion_outcome=error", entryAfter.promotion_outcome === "error", JSON.stringify(entryAfter));
+    check("invalid slug: rationale", entryAfter.promotion_rationale === "invalid_slug_candidate", JSON.stringify(entryAfter));
+  } finally {
+    if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = prevRoot;
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(projectRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ── [20] same provisional slug cluster processes one representative only
+console.log("\n[20] same provisional slug cluster → one representative");
+{
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-cluster-"));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-projCL-"));
+  const projectId = "smokeproject";
+  const prevRoot = process.env.ABRAIN_ROOT;
+  process.env.ABRAIN_ROOT = tmpRoot;
+  try {
+    const sharedSlug = "provisional-2772c60f";
+    const base = Date.now();
+    writeStaging(makeEntry(sharedSlug, {
+      created: new Date(base - 60_000).toISOString(),
+      hypothesis: "Use one active work stage per item",
+      resolver_disposition: "promote_candidate",
+      origin_project_id: projectId,
+      origin_project_root: projectRoot,
+    }));
+    writeStaging(makeEntry(sharedSlug, {
+      created: new Date(base).toISOString(),
+      hypothesis: "Use one active work stage per item",
+      resolver_disposition: "promote_candidate",
+      origin_project_id: projectId,
+      origin_project_root: projectRoot,
+    }));
+
+    let multiViewCalls = 0;
+    let writerCalls = 0;
+    const result = await promotion.runStagingPromotionIfDue({
+      projectRoot,
+      abrainHome: tmpRoot,
+      projectId,
+      settings: makeSettings(),
+      modelRegistry: { find: () => ({}), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "x" }) },
+      runMultiView: async () => {
+        multiViewCalls++;
+        return {
+          triggered: true,
+          trigger_reason: "forced",
+          final_decision: { op: "create", rationale: "approved" },
+          durationMs: 1,
+        };
+      },
+      writeApprovedToBrain: async (decision, candidate) => {
+        writerCalls++;
+        return slugify(candidate.title);
+      },
+      now: new Date(),
+    });
+
+    const entries = readStagingEntries(sharedSlug);
+    const outcomes = entries.map((e) => e.promotion_outcome).sort();
+    check("cluster: selected one representative", result.reviewed_count === 1, JSON.stringify(result));
+    check("cluster: multi-view called once", multiViewCalls === 1);
+    check("cluster: writer called once", writerCalls === 1);
+    check("cluster: no second promoted staging outcome", outcomes.filter((o) => o === "promoted").length === 1, JSON.stringify(outcomes));
+    check("cluster: sibling marked cluster_sibling", outcomes.includes("cluster_sibling"), JSON.stringify(outcomes));
+    check("cluster: sibling points at representative target", entries.every((e) => e.promoted_to_slug === "use-one-active-work-stage-per-item"), JSON.stringify(entries));
   } finally {
     if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
     else process.env.ABRAIN_ROOT = prevRoot;

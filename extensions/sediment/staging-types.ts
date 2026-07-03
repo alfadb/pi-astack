@@ -137,8 +137,13 @@ export interface StagingEntry {
    *    - "rejected": multi-view rejected or writer rejected
    *    - "error": unexpected framework error during promotion
    *    - "staged_for_replay": transient reviewer failure; the candidate is
-   *      parked in multiview-pending and will be replayed by the A' lane. */
-  promotion_outcome?: "promoted" | "duplicate" | "rejected" | "error" | "staged_for_replay";
+   *      parked in multiview-pending and will be replayed by the A' lane.
+   *    - "cluster_sibling": another staging file with the same provisional
+   *      slug represented this same cluster in the current promotion run.
+   *    - "sibling_deferred": another staging file with the same provisional
+   *      slug was reviewed and did not produce a terminal successful target;
+   *      keep this file pending for a later run. */
+  promotion_outcome?: "promoted" | "duplicate" | "rejected" | "error" | "staged_for_replay" | "cluster_sibling" | "sibling_deferred";
   /** When promotion succeeded. */
   promoted_at?: string;
   /** Slug of the durable entry written on success. */

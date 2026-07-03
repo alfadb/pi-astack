@@ -76,6 +76,8 @@ const SEMANTIC_SIMILARITY_THRESHOLD = 0.75;
 const QUOTE_CONTAINMENT_MIN_CHARS = 40;
 /** Cap compiledTruth so the reviewer prompt stays bounded. */
 const MAX_COMPILED_TRUTH_CHARS = 8000;
+const MAX_PROMOTION_SLUG_CHARS = 80;
+const MAX_PROMOTION_TITLE_CHARS = 120;
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -95,6 +97,7 @@ export interface StagingPromotionResult {
   degraded?: boolean;
   reviewed_count: number;
   promoted_slugs: string[];
+  promoted_to_slugs: string[];
   rejected_slugs: string[];
   duplicate_slugs: string[];
   staged_for_replay_slugs: string[];
@@ -106,6 +109,12 @@ export interface StagingPromotionResult {
 interface PromotionCandidate {
   file: string; // absolute path
   entry: StagingEntry;
+}
+
+interface PromotionSelectionContext {
+  projectRoot?: string;
+  projectId?: string;
+  abrainHome?: string;
 }
 
 export interface DuplicateCheckResult {
@@ -244,6 +253,33 @@ function releaseLock(claim: StagingPromotionLockClaim | null): void {
 
 // ── Candidate selection ─────────────────────────────────────────────────
 
+async function entryMatchesPromotionProject(entry: StagingEntry, ctx?: PromotionSelectionContext): Promise<boolean> {
+  if (!ctx) return true;
+  const currentRoot = ctx.projectRoot ? path.resolve(ctx.projectRoot) : undefined;
+  const currentId = ctx.projectId;
+
+  // FIX-2b: explicit origin takes precedence.
+  if (entry.origin_project_id || entry.origin_project_root) {
+    const rootMatch = currentRoot && entry.origin_project_root
+      ? path.resolve(entry.origin_project_root) === currentRoot
+      : false;
+    const idMatch = currentId && entry.origin_project_id
+      ? entry.origin_project_id === currentId
+      : false;
+    return Boolean(rootMatch || idMatch);
+  }
+
+  // Legacy entry without origin: only claim it if its target slug exists in
+  // the current project's durable store. Legacy entries with neither origin
+  // nor target_entry_slug are unowned residue and are skipped by every project
+  // until an explicit backfill claims them.
+  const targetSlug = entry.correction_signal?.target_entry_slug;
+  if (!targetSlug || !ctx.abrainHome || !currentId) return false;
+  const scanRoot = path.join(ctx.abrainHome, "projects", currentId);
+  const dup = await detectProjectDuplicate(scanRoot, "", { slug: targetSlug });
+  return dup.duplicate;
+}
+
 /** Load promote-candidate staging entries (oldest first, capped).
  *  Selects: provisional-correction, attribution_pending=true,
  *  (resolver_disposition=promote_candidate OR aged_out_decision=promote_candidate),
@@ -264,7 +300,7 @@ function releaseLock(claim: StagingPromotionLockClaim | null): void {
 export async function selectPromoteCandidates(
   now: Date = new Date(),
   max: number = MAX_PROMOTE_PER_RUN,
-  ctx?: { projectRoot?: string; projectId?: string; abrainHome?: string },
+  ctx?: PromotionSelectionContext,
 ): Promise<PromotionCandidate[]> {
   const out: PromotionCandidate[] = [];
   const debounceCutoff = now.getTime() - PROMOTION_ATTEMPT_DEBOUNCE_DAYS * 24 * 60 * 60 * 1000;
@@ -296,8 +332,7 @@ export async function selectPromoteCandidates(
     pendingSourceSlugs = new Set();
   }
 
-  const currentRoot = ctx?.projectRoot ? path.resolve(ctx.projectRoot) : undefined;
-  const currentId = ctx?.projectId;
+  const seenSlugs = new Set<string>();
 
   for (const f of files) {
     if (out.length >= max) break;
@@ -318,31 +353,9 @@ export async function selectPromoteCandidates(
       }
       if (pendingSourceSlugs?.has(entry.slug)) continue;
 
-      if (ctx) {
-        // FIX-2b: explicit origin takes precedence.
-        if (entry.origin_project_id || entry.origin_project_root) {
-          const rootMatch = currentRoot && entry.origin_project_root
-            ? path.resolve(entry.origin_project_root) === currentRoot
-            : false;
-          const idMatch = currentId && entry.origin_project_id
-            ? entry.origin_project_id === currentId
-            : false;
-          if (!rootMatch && !idMatch) continue;
-        } else {
-          // Legacy entry without origin: only claim it if its target slug
-          // exists in the current project's durable store. Legacy entries
-          // with neither origin nor target_entry_slug are unowned residue and
-          // are skipped by every project until an explicit backfill claims them.
-          const targetSlug = entry.correction_signal?.target_entry_slug;
-          if (!targetSlug) continue;
-          const scanRoot = ctx.abrainHome && currentId
-            ? path.join(ctx.abrainHome, "projects", currentId)
-            : undefined;
-          if (!scanRoot) continue;
-          const dup = await detectProjectDuplicate(scanRoot, "", { slug: targetSlug });
-          if (!dup.duplicate) continue;
-        }
-      }
+      if (!await entryMatchesPromotionProject(entry, ctx)) continue;
+      if (seenSlugs.has(entry.slug)) continue;
+      seenSlugs.add(entry.slug);
 
       out.push({ file: abs, entry });
     } catch {
@@ -352,17 +365,182 @@ export async function selectPromoteCandidates(
   return out;
 }
 
+async function findPromotionClusterSiblings(
+  representative: PromotionCandidate,
+  ctx?: PromotionSelectionContext,
+): Promise<PromotionCandidate[]> {
+  const out: PromotionCandidate[] = [];
+  let dir: string;
+  try {
+    dir = stagingDir();
+    if (!fs.existsSync(dir)) return out;
+  } catch {
+    return out;
+  }
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith(".json")).sort();
+  } catch {
+    return out;
+  }
+
+  for (const f of files) {
+    const abs = path.join(dir, f);
+    if (abs === representative.file) continue;
+    try {
+      const parsed: StagingFileOnDisk = JSON.parse(fs.readFileSync(abs, "utf-8"));
+      const entry = parsed?.entry;
+      if (!entry || entry.slug !== representative.entry.slug) continue;
+      if (entry.kind !== "provisional-correction") continue;
+      if (entry.attribution_pending !== true) continue;
+      if (entry.lifecycle_state === "soft_archived") continue;
+      const isPromoteCandidate =
+        entry.resolver_disposition === "promote_candidate" ||
+        entry.aged_out_decision === "promote_candidate";
+      if (!isPromoteCandidate) continue;
+      if (!await entryMatchesPromotionProject(entry, ctx)) continue;
+      out.push({ file: abs, entry });
+    } catch {
+      /* corrupted sibling file — skip */
+    }
+  }
+  return out;
+}
+
 // ── Draft reconstruction from staging entry ─────────────────────────────
+
+export type PromotionIdentity =
+  | { ok: true; slug: string; title: string; source: "explicit" | "fallback" }
+  | { ok: false; reason: "invalid_slug_candidate" };
+
+function asciiSlugify80(input: string): string {
+  return String(input || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-")
+    .slice(0, MAX_PROMOTION_SLUG_CHARS)
+    .replace(/-+$/g, "");
+}
+
+function looksLikeMetaSlug(slug: string): boolean {
+  const parts = slug.split("-").filter(Boolean);
+  if (parts.length === 0) return true;
+  if (slug === "slug" || slug === "durable-entry" || slug === "memory-entry") return true;
+  if (/^(an?|the)-entry-(capturing|describing|recording)/.test(slug)) return true;
+  if (/^(need|needs|needed|requires|required)-/.test(slug)) return true;
+  if (/^(an?|the)-durable-(entry|memory)-/.test(slug)) return true;
+  if (/^(remember|capture|record)-that-/.test(slug)) return true;
+  if (parts.length > 12 && /(?:^|-)(entry|capturing|describing|principle|that|should|must)(?:-|$)/.test(slug)) return true;
+  return false;
+}
+
+function isValidPromotionSlug(slug: string): boolean {
+  return slug.length > 0 &&
+    slug.length <= MAX_PROMOTION_SLUG_CHARS &&
+    /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) &&
+    !looksLikeMetaSlug(slug);
+}
+
+function titleFromPromotionSlug(slug: string): string {
+  const title = slug
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part ? part[0].toUpperCase() + part.slice(1) : part)
+    .join(" ")
+    .trim();
+  return title.slice(0, MAX_PROMOTION_TITLE_CHARS) || "Provisional staging candidate";
+}
+
+function cleanMetaRequestText(raw: string): string {
+  let text = String(raw || "").trim();
+  const labeled = text.match(/(?:描述|原则|内容|description|principle|body)\s*[:：]\s*([\s\S]+)$/i);
+  if (labeled?.[1]?.trim()) text = labeled[1].trim();
+  text = text
+    .replace(/slug\s*(?:可能为|可为|如|为|建议为|may be|could be|should be|suggest(?:ed|ion)?(?:\s+is)?)?\s*[:：]?\s*[`"'“‘][A-Za-z0-9][A-Za-z0-9_-]{2,120}[`"'”’]/giu, "")
+    .replace(/slug\s*(?:可能为|可为|如|为|建议为|may be|could be|should be|suggest(?:ed|ion)?(?:\s+is)?)?\s*[:：]?\s*[A-Za-z0-9][A-Za-z0-9_-]{2,120}/giu, "")
+    .replace(/[`"“”‘’]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  text = text.replace(/^(需要一个|需要一条|请创建一条|请记录一条|an entry capturing|an entry describing|a durable entry capturing|a durable memory capturing)\s*/i, "").trim();
+  return text;
+}
+
+function extractExplicitSlugSuggestion(entry: StagingEntry): string | null {
+  const texts = [
+    entry.hypothesis,
+    entry.correction_signal?.scope_description,
+    entry.correction_signal?.correction_intent,
+    ...((entry.source_utterance ?? []).map((u) => u.quote)),
+    ...(entry.suggested_resolution_paths ?? []),
+  ].filter((s): s is string => typeof s === "string" && s.trim().length > 0);
+
+  const patterns = [
+    /slug\s*(?:可能为|可为|如|为|建议为|may be|could be|should be|suggest(?:ed|ion)?(?:\s+is)?)?\s*[:：]?\s*[`"'“‘]([A-Za-z0-9][A-Za-z0-9_-]{2,120})[`"'”’]/iu,
+    /slug\s*(?:可能为|可为|如|为|建议为|may be|could be|should be|suggest(?:ed|ion)?(?:\s+is)?)\s+([A-Za-z0-9][A-Za-z0-9_-]{2,120})/iu,
+    /slug\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9_-]{2,120})/iu,
+  ];
+
+  for (const text of texts) {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (!match?.[1]) continue;
+      const slug = asciiSlugify80(match[1]);
+      if (isValidPromotionSlug(slug)) return slug;
+    }
+    for (const match of text.matchAll(/`([A-Za-z0-9][A-Za-z0-9_-]{2,120})`/g)) {
+      const slug = asciiSlugify80(match[1]);
+      if (isValidPromotionSlug(slug)) return slug;
+    }
+  }
+  return null;
+}
+
+function fallbackSlugSeed(entry: StagingEntry): string {
+  const candidates = [
+    cleanMetaRequestText(entry.hypothesis ?? ""),
+    entry.correction_signal?.scope_description,
+    entry.correction_signal?.correction_intent,
+    entry.source_utterance?.[0]?.quote,
+  ];
+  return candidates.find((s) => typeof s === "string" && s.trim().length > 0)?.trim() ?? "";
+}
+
+function resolvePromotionIdentity(entry: StagingEntry): PromotionIdentity {
+  const explicitSlug = extractExplicitSlugSuggestion(entry);
+  if (explicitSlug) {
+    return { ok: true, slug: explicitSlug, title: titleFromPromotionSlug(explicitSlug), source: "explicit" };
+  }
+
+  const seed = fallbackSlugSeed(entry);
+  const slug = asciiSlugify80(seed);
+  if (!isValidPromotionSlug(slug)) return { ok: false, reason: "invalid_slug_candidate" };
+  const titleSeed = cleanMetaRequestText(seed);
+  const title = titleSeed && asciiSlugify80(titleSeed) === slug
+    ? titleSeed.slice(0, MAX_PROMOTION_TITLE_CHARS)
+    : titleFromPromotionSlug(slug);
+  return { ok: true, slug, title: title.trim() || titleFromPromotionSlug(slug), source: "fallback" };
+}
+
+function canonicalPromotedSlug(raw: string | undefined, fallback: string): string {
+  if (!raw) return fallback;
+  const slug = asciiSlugify80(raw);
+  return isValidPromotionSlug(slug) ? slug : fallback;
+}
 
 /** Rebuild a ProjectEntryDraft from a provisional-correction staging entry.
  *  This is the analog of multiview-staging-replay's `draftFromSnapshot`,
  *  adapted to the different shape of a classifier staging entry. */
-export function buildDraftFromStagingEntry(entry: StagingEntry): ProjectEntryDraft {
+export function buildDraftFromStagingEntry(entry: StagingEntry, identity: PromotionIdentity = resolvePromotionIdentity(entry)): ProjectEntryDraft {
   const cs = entry.correction_signal;
   const quote = entry.source_utterance?.[0]?.quote ?? "";
-  const title = (entry.hypothesis ?? "Provisional staging candidate").trim().slice(0, 200) || "Provisional staging candidate";
+  const title = identity.ok ? identity.title : "Provisional staging candidate";
+  const hypothesis = cleanMetaRequestText(entry.hypothesis ?? "") || entry.hypothesis || "";
 
-  const bodyParts: string[] = [entry.hypothesis ?? ""];
+  const bodyParts: string[] = [hypothesis];
   if (quote) {
     bodyParts.push("", `Source quote: "${quote}"`);
   }
@@ -658,7 +836,7 @@ export function applyPromotionOutcome(
   file: string,
   _entry: StagingEntry,
   _now: Date,
-  outcome: "duplicate" | "promoted" | "rejected" | "error" | "staged_for_replay",
+  outcome: "duplicate" | "promoted" | "rejected" | "error" | "staged_for_replay" | "cluster_sibling" | "sibling_deferred",
   promotedToSlug?: string,
   promotionRationale?: string,
 ): void {
@@ -682,11 +860,50 @@ export function applyPromotionOutcome(
     latest.attribution_pending = false;
     latest.promoted_at = formatLocalIsoTimestamp(tsNow);
     if (promotedToSlug) latest.promoted_to_slug = promotedToSlug;
-  } else if (outcome === "duplicate") {
+  } else if (outcome === "duplicate" || outcome === "cluster_sibling") {
     latest.attribution_pending = false;
     if (promotedToSlug) latest.promoted_to_slug = promotedToSlug;
+  } else if (outcome === "sibling_deferred") {
+    latest.attribution_pending = true;
   }
   writeStagingFileAtomic(file, latest);
+}
+
+async function markClusterSiblings(
+  representative: PromotionCandidate,
+  now: Date,
+  representativeOutcome: "duplicate" | "promoted" | "rejected" | "error" | "staged_for_replay",
+  promotedToSlug: string | undefined,
+  ctx: PromotionSelectionContext,
+): Promise<boolean> {
+  const siblings = await findPromotionClusterSiblings(representative, ctx);
+  let ok = true;
+  for (const sibling of siblings) {
+    try {
+      if (representativeOutcome === "promoted" || representativeOutcome === "duplicate") {
+        applyPromotionOutcome(
+          sibling.file,
+          sibling.entry,
+          now,
+          "cluster_sibling",
+          promotedToSlug,
+          `cluster_sibling:${representative.entry.slug} representative_outcome=${representativeOutcome}`,
+        );
+      } else {
+        applyPromotionOutcome(
+          sibling.file,
+          sibling.entry,
+          now,
+          "sibling_deferred",
+          undefined,
+          `sibling_deferred:${representative.entry.slug} representative_outcome=${representativeOutcome}`,
+        );
+      }
+    } catch {
+      ok = false;
+    }
+  }
+  return ok;
 }
 
 // ── Multi-view + brain-write dispatch ───────────────────────────────────
@@ -715,6 +932,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
   const base: Omit<StagingPromotionResult, "ok" | "durationMs"> = {
     reviewed_count: 0,
     promoted_slugs: [],
+    promoted_to_slugs: [],
     rejected_slugs: [],
     duplicate_slugs: [],
     staged_for_replay_slugs: [],
@@ -739,11 +957,12 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
 
   // 2. Candidates (FIX-2: project-attributed only; FIX-6: skip entries
   //    with an active multiview-pending replay twin).
-  const candidates = await selectPromoteCandidates(now, MAX_PROMOTE_PER_RUN, {
+  const promotionCtx: PromotionSelectionContext = {
     projectRoot: options.projectRoot,
     projectId: options.projectId,
     abrainHome: options.abrainHome,
-  });
+  };
+  const candidates = await selectPromoteCandidates(now, MAX_PROMOTE_PER_RUN, promotionCtx);
   if (candidates.length === 0) {
     writeLastRun(options.projectRoot, now, "skipped");
     return { ok: true, skipped: "no_candidates", ...base, durationMs: Date.now() - t0 };
@@ -769,13 +988,26 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
       if (options.signal?.aborted) break;
       result.reviewed_count++;
       const entry = candidate.entry;
+      const identity = resolvePromotionIdentity(entry);
+      if (!identity.ok) {
+        degraded = true;
+        try {
+          applyPromotionOutcome(candidate.file, entry, now, "error", undefined, identity.reason);
+          if (!await markClusterSiblings(candidate, now, "error", undefined, promotionCtx)) degraded = true;
+          result.rejected_slugs.push(entry.slug);
+        } catch {
+          degraded = true;
+        }
+        continue;
+      }
+      const draft = buildDraftFromStagingEntry(entry, identity);
 
       // ── Dedup gate ──
       let dup: DuplicateCheckResult;
       try {
         dup = await findSemanticDuplicate(
           entry,
-          buildDraftFromStagingEntry(entry),
+          draft,
           options.abrainHome,
           options.projectId,
           options.signal,
@@ -786,10 +1018,12 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
       if (dup.duplicate) {
         try {
           const matchedSlug = dup.match?.slug;
+          const promotedToSlug = matchedSlug ? canonicalPromotedSlug(matchedSlug, identity.slug) : identity.slug;
           const rationale = dup.reason
             ? `duplicate:${dup.reason}${matchedSlug ? ` against ${matchedSlug}` : ""}${dup.score ? ` score=${dup.score}` : ""}`
             : "duplicate detected";
-          applyPromotionOutcome(candidate.file, entry, now, "duplicate", matchedSlug, rationale);
+          applyPromotionOutcome(candidate.file, entry, now, "duplicate", promotedToSlug, rationale);
+          if (!await markClusterSiblings(candidate, now, "duplicate", promotedToSlug, promotionCtx)) degraded = true;
           result.duplicate_slugs.push(entry.slug);
         } catch {
           degraded = true;
@@ -798,7 +1032,6 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
       }
 
       // ── Reconstruct + multi-view gate ──
-      const draft = buildDraftFromStagingEntry(entry);
       const proposerDecision = buildProposerDecisionFromStagingEntry(entry);
       const neighbors = await loadPromotionNeighbors(entry, options.projectRoot);
       const correctionSignal = correctionSignalFromStaging(entry);
@@ -828,6 +1061,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
         degraded = true;
         try {
           applyPromotionOutcome(candidate.file, entry, now, "error");
+          if (!await markClusterSiblings(candidate, now, "error", undefined, promotionCtx)) degraded = true;
           result.rejected_slugs.push(entry.slug);
         } catch {
           degraded = true;
@@ -851,6 +1085,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
         degraded = true;
         try {
           applyPromotionOutcome(candidate.file, entry, now, "error", undefined, "multi-view did not trigger despite forceTrigger");
+          if (!await markClusterSiblings(candidate, now, "error", undefined, promotionCtx)) degraded = true;
           result.rejected_slugs.push(entry.slug);
         } catch {
           degraded = true;
@@ -866,6 +1101,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
             ? `staged for replay as ${mvResult.staged.slug} (state=${mvResult.staged.state})`
             : "multiview_staged_for_replay";
           applyPromotionOutcome(candidate.file, entry, now, "staged_for_replay", undefined, rationale);
+          if (!await markClusterSiblings(candidate, now, "staged_for_replay", undefined, promotionCtx)) degraded = true;
           result.staged_for_replay_slugs.push(entry.slug);
         } catch {
           degraded = true;
@@ -877,6 +1113,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
       if (mvResult.final_decision.op === "skip") {
         try {
           applyPromotionOutcome(candidate.file, entry, now, "rejected", undefined, mvResult.final_decision.reason);
+          if (!await markClusterSiblings(candidate, now, "rejected", undefined, promotionCtx)) degraded = true;
           result.rejected_slugs.push(entry.slug);
         } catch {
           degraded = true;
@@ -919,8 +1156,10 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
         if (deduped.length === writeResults.length && writeResults.length > 0) {
           const first = writeResults[0];
           const matchedSlug = first?.dedupedAgainst ?? first?.slug;
+          const promotedToSlug = canonicalPromotedSlug(matchedSlug, identity.slug);
           const rationale = `writer dedupe: ${first?.reason ?? "unknown"}`;
-          applyPromotionOutcome(candidate.file, entry, now, "duplicate", matchedSlug, rationale);
+          applyPromotionOutcome(candidate.file, entry, now, "duplicate", promotedToSlug, rationale);
+          if (!await markClusterSiblings(candidate, now, "duplicate", promotedToSlug, promotionCtx)) degraded = true;
           result.duplicate_slugs.push(entry.slug);
           continue;
         }
@@ -932,10 +1171,12 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
         if (nonDedupeSkip) {
           throw new Error(`writer skipped op=${mvResult.final_decision.op}: ${nonDedupeSkip.reason || "unknown"}`);
         }
-        promotedSlug = writeResults[0]?.slug;
+        promotedSlug = canonicalPromotedSlug(writeResults[0]?.slug ?? promotedSlug, identity.slug);
         try {
           applyPromotionOutcome(candidate.file, entry, now, "promoted", promotedSlug);
+          if (!await markClusterSiblings(candidate, now, "promoted", promotedSlug, promotionCtx)) degraded = true;
           result.promoted_slugs.push(entry.slug);
+          result.promoted_to_slugs.push(promotedSlug);
         } catch {
           degraded = true;
         }
@@ -944,6 +1185,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
         degraded = true;
         try {
           applyPromotionOutcome(candidate.file, entry, now, "error", undefined, e instanceof Error ? e.message : String(e));
+          if (!await markClusterSiblings(candidate, now, "error", undefined, promotionCtx)) degraded = true;
           result.rejected_slugs.push(entry.slug);
         } catch {
           degraded = true;
@@ -975,6 +1217,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
       degraded: result.degraded ?? false,
       reviewed_count: result.reviewed_count,
       promoted_slugs: result.promoted_slugs,
+      promoted_to_slugs: result.promoted_to_slugs,
       rejected_slugs: result.rejected_slugs,
       duplicate_slugs: result.duplicate_slugs,
       staged_for_replay_slugs: result.staged_for_replay_slugs,
