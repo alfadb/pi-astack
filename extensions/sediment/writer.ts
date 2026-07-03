@@ -90,6 +90,10 @@ export interface ProjectEntryDraft {
   title: string;
   kind: EntryKind;
   compiledTruth: string;
+  /** Optional caller-provided durable identity slug. Most writers derive slug
+   *  from title; staging promotion sets this after LLM identity resolution so
+   *  title can stay human-readable while slug remains canonical. */
+  preferredSlug?: string;
   summary?: string;
   status?: EntryStatus;
   // AX-PROVENANCE (ADR 0028 v1.1): ground-truth-strength axis carried from the
@@ -106,6 +110,10 @@ export interface ProjectEntryDraft {
   derivesFrom?: string[];
   sessionId?: string;
   timelineNote?: string;
+}
+
+export function resolveDraftSlug(draft: Pick<ProjectEntryDraft, "preferredSlug" | "title">): string {
+  return (draft.preferredSlug && slugify(draft.preferredSlug)) || slugify(draft.title);
 }
 
 export interface WriterAuditContext {
@@ -422,7 +430,7 @@ function buildMarkdown(draft: ProjectEntryDraft, scope: "project" | "world", pro
   // project/world entries too. Legacy/missing callers default to
   // assistant-observed; memory/parser.ts mirrors this fallback on read.
   const provenance = draft.provenance ?? "assistant-observed";
-  const slug = slugify(draft.title);
+  const slug = resolveDraftSlug(draft);
   const compiledTruth = normalizeCompiledTruth(draft.title, draft.compiledTruth);
   const timelineSession = draft.sessionId || "sediment";
   const timelineNote = draft.timelineNote || `created by sediment ${scope} writer`;
@@ -2020,7 +2028,7 @@ export async function writeProjectEntry(
       duration_ms: Date.now() - started,
     }));
     return {
-      slug: slugify(draft.title),
+      slug: resolveDraftSlug(draft),
       path: entryRoot,
       status: "rejected",
       reason: "validation_error",
@@ -2049,7 +2057,7 @@ export async function writeProjectEntry(
       title: draft.title,
       duration_ms: Date.now() - started,
     }));
-    return { slug: slugify(draft.title), path: entryRoot, status: "rejected", reason: failedSanitize.error, auditPath, ...resultCtx };
+    return { slug: resolveDraftSlug(draft), path: entryRoot, status: "rejected", reason: failedSanitize.error, auditPath, ...resultCtx };
   }
 
   const sanitizedReplacements = [

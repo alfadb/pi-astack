@@ -135,6 +135,7 @@ export async function executeCuratorDecisionToBrain(args: {
     const ruleScope = decision.ruleScope === "project" ? "project" : "global";
     const r = await writeAbrainRule({
       title: draft.title,
+      slug: draft.preferredSlug,
       body: draft.compiledTruth,
       zone: "rules",
       injectMode,
@@ -158,7 +159,7 @@ export async function executeCuratorDecisionToBrain(args: {
         operation: "create",
         ruleScope,
         ...(ruleScope === "project" ? { projectId } : {}),
-        slug: draft.title,
+        slug: draft.preferredSlug ?? draft.title,
         injectMode,
       },
     });

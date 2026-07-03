@@ -208,6 +208,9 @@ export interface SedimentSettings {
    *  the new executor is opt-in; when false, promote_candidate flags remain
    *  advisory and accumulate in staging. */
   stagingPromotionEnabled: boolean;
+  /** Model for staging promotion identity resolution (slug/title/statement).
+   *  Empty means fall back to classifierModel, then curatorModel. */
+  stagingPromotionModel: string;
 
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
@@ -363,6 +366,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
    *  reviewing the backlog policy and confirming multi-view reviewer providers
    *  are configured. */
   stagingPromotionEnabled: false,
+  stagingPromotionModel: "",
   promptVersion: {
     activeCorrectionClassifier: "v2",
     reasoningNormalizationPreamble: "v1",
@@ -535,6 +539,9 @@ export function resolveSedimentSettings(): SedimentSettings {
     rulesAsReadonlyNeighborsEnabled: asBoolean(cfg.rulesAsReadonlyNeighborsEnabled, DEFAULT_SEDIMENT_SETTINGS.rulesAsReadonlyNeighborsEnabled),
     tier1JaccardCuratorLane: asBoolean(cfg.tier1JaccardCuratorLane, DEFAULT_SEDIMENT_SETTINGS.tier1JaccardCuratorLane),
     stagingPromotionEnabled: asBoolean(cfg.stagingPromotionEnabled, DEFAULT_SEDIMENT_SETTINGS.stagingPromotionEnabled),
+    stagingPromotionModel: typeof cfg.stagingPromotionModel === "string" && cfg.stagingPromotionModel.trim()
+      ? cfg.stagingPromotionModel.trim()
+      : DEFAULT_SEDIMENT_SETTINGS.stagingPromotionModel,
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,

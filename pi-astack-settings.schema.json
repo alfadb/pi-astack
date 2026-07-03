@@ -617,6 +617,12 @@
           "description": "ADR 0025 §4.1.5 Stage 5 follow-up: enable multi-view gated promotion of staging promote_candidate entries to durable memory. Default false (opt-in). Requires autoLlmWriteEnabled=true and configured multiView.reviewerProviders to actually run; when false, promote_candidate flags remain advisory and accumulate in staging."
         },
 
+        "stagingPromotionModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional provider/model ref for staging promotion identity resolution (slug/title/statement). Empty means runtime falls back to sediment.classifierModel, then sediment.curatorModel. Concrete model IDs belong in pi-astack-settings.json."
+        },
+
         "promptVersion": {
           "type": "object",
           "additionalProperties": false,
