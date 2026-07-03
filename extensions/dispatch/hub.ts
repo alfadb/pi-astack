@@ -466,7 +466,6 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       },
       required: ["task"],
     },
-    renderShell: "self",
     ...(deps.renderCall ? { renderCall: deps.renderCall } : {}),
     ...(deps.renderResult ? { renderResult: deps.renderResult } : {}),
     async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, ctx: Record<string, unknown>) {

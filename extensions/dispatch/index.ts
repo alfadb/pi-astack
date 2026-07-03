@@ -1546,7 +1546,6 @@ export default function (pi: ExtensionAPI) {
       };
     },
 
-    renderShell: "self",
     renderCall: renderDispatchAgentCall,
     renderResult: renderDispatchToolResult,
 
@@ -1854,7 +1853,6 @@ export default function (pi: ExtensionAPI) {
       };
     },
 
-    renderShell: "self",
     renderCall: renderDispatchParallelCall,
     renderResult: renderDispatchToolResult,
 

@@ -151,7 +151,8 @@ ok(sum.dual_exec_sampled === true, "summary carries dual-exec sampling flag");
 
 // ── live shell source wiring: hub must use dispatch tool-block progress ──
 ok(/progress:\s*\{[\s\S]{0,900}?startTicker/.test(hubSrc), "HubDeps accepts dispatch progress helpers");
-ok(/renderShell:\s*"self"[\s\S]{0,160}?renderCall[\s\S]{0,160}?renderResult/.test(hubSrc), "dispatch_hub uses self-rendered tool blocks");
+ok(!/renderShell:\s*"self"/.test(hubSrc), "dispatch_hub keeps the default boxed tool shell for padding/background");
+ok(/renderCall[\s\S]{0,160}?renderResult/.test(hubSrc), "dispatch_hub provides tool-block renderers");
 ok(/progress\.startTicker\(onUpdate,\s*progressSnapshot\)/.test(hubSrc), "dispatch_hub starts the onUpdate progress ticker");
 ok(/name:\s*"hub planner"[\s\S]{0,120}?model:\s*hubModel[\s\S]{0,120}?thinking:\s*hubCfg\.thinking/.test(hubSrc), "dispatch_hub creates a visible hub planner progress row");
 ok(/workerProgressTasks\s*=\s*tasks\.map[\s\S]{0,400}?progress\.taskFromSpec/.test(hubSrc), "dispatch_hub creates worker progress rows after planning");

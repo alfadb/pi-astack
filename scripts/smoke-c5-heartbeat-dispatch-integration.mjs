@@ -131,9 +131,9 @@ check("dispatch_parallel.worker passes anchor + projectRoot to runInProcess", ()
 
 console.log("\nSection: dispatch tool-block progress");
 
-check("dispatch tools render progress inside their own tool blocks", () => {
-  if ((dispatchSrc.match(/renderShell:\s*"self"/g) ?? []).length < 2) {
-    throw new Error("dispatch_agent and dispatch_parallel must use self-rendered tool blocks");
+check("dispatch tools render progress inside default boxed tool blocks", () => {
+  if (/renderShell:\s*"self"/.test(dispatchSrc)) {
+    throw new Error("dispatch_agent and dispatch_parallel must keep the default boxed tool shell for padding/background");
   }
   if (!/renderCall:\s*renderDispatchAgentCall[\s\S]{0,120}?renderResult:\s*renderDispatchToolResult/.test(dispatchSrc)) {
     throw new Error("dispatch_agent must provide tool-block renderCall/renderResult");
