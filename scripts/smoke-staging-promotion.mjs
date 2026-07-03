@@ -943,6 +943,67 @@ console.log("\n[18] explicit backtick slug suggestion → canonical durable slug
   }
 }
 
+// ── [18a] explicit English slug-like suggestion controls writer + promoted_to_slug
+console.log("\n[18a] explicit English slug like suggestion → canonical durable slug");
+{
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-slug-like-"));
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-projSL-"));
+  const projectId = "smokeproject";
+  const prevRoot = process.env.ABRAIN_ROOT;
+  process.env.ABRAIN_ROOT = tmpRoot;
+  try {
+    const stagingSlug = "slug-like-cand";
+    writeStaging(makeEntry(stagingSlug, {
+      hypothesis: "An entry with slug like 't0-three-model-cross-provider-review-methodology' describing: use three-model cross-provider review",
+      resolver_disposition: "promote_candidate",
+      origin_project_id: projectId,
+      origin_project_root: projectRoot,
+    }));
+
+    let seenTitle = "";
+    const result = await promotion.runStagingPromotionIfDue({
+      projectRoot,
+      abrainHome: tmpRoot,
+      projectId,
+      settings: makeSettings(),
+      modelRegistry: { find: () => ({}), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "x" }) },
+      runMultiView: async ({ candidate }) => {
+        seenTitle = candidate.title;
+        return {
+          triggered: true,
+          trigger_reason: "forced",
+          final_decision: { op: "create", rationale: "approved" },
+          durationMs: 1,
+        };
+      },
+      writeApprovedToBrain: async (decision, candidate) => slugify(candidate.title),
+      now: new Date(),
+    });
+
+    const entryAfter = readStagingEntry(stagingSlug);
+    check("slug like: identity ok", result.ok === true && result.rejected_slugs.includes(stagingSlug) === false, JSON.stringify(result));
+    check("slug like: extracted canonical slug", result.promoted_to_slugs.includes("t0-three-model-cross-provider-review-methodology"), JSON.stringify(result));
+    check("slug like: title slugifies canonically", slugify(seenTitle) === "t0-three-model-cross-provider-review-methodology", seenTitle);
+    check("slug like: promoted_to_slug canonical", entryAfter.promoted_to_slug === "t0-three-model-cross-provider-review-methodology", JSON.stringify(entryAfter));
+  } finally {
+    if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = prevRoot;
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(projectRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ── [18b] slug cleanup removes trailing similarity crumbs
+console.log("\n[18b] slug cleanup removes trailing similarity crumbs");
+{
+  const entry = makeEntry("slug-similar-crumb", {
+    hypothesis: "slug 可能为 'foo-bar-policy' 或类似。该条目描述:XYZ",
+  });
+  const draft = promotion.buildDraftFromStagingEntry(entry);
+  check("slug cleanup: title has no similarity crumb", !/或类似/.test(draft.title), draft.title);
+  check("slug cleanup: body has no similarity crumb", !/或类似/.test(draft.compiledTruth), draft.compiledTruth);
+}
+
 // ── [19] invalid slug candidate → error before multi-view / writer
 console.log("\n[19] invalid slug candidate → error, no writer");
 {

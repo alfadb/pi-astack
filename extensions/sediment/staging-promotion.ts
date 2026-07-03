@@ -78,6 +78,7 @@ const QUOTE_CONTAINMENT_MIN_CHARS = 40;
 const MAX_COMPILED_TRUTH_CHARS = 8000;
 const MAX_PROMOTION_SLUG_CHARS = 80;
 const MAX_PROMOTION_TITLE_CHARS = 120;
+const EXPLICIT_SLUG_CUE = String.raw`可能为|可为|如|为|建议为|may be|could be|should be|like|such as|suggest(?:ed|ion)?(?:\s+is)?`;
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -460,8 +461,11 @@ function cleanMetaRequestText(raw: string): string {
   const labeled = text.match(/(?:描述|原则|内容|description|principle|body)\s*[:：]\s*([\s\S]+)$/i);
   if (labeled?.[1]?.trim()) text = labeled[1].trim();
   text = text
-    .replace(/slug\s*(?:可能为|可为|如|为|建议为|may be|could be|should be|suggest(?:ed|ion)?(?:\s+is)?)?\s*[:：]?\s*[`"'“‘][A-Za-z0-9][A-Za-z0-9_-]{2,120}[`"'”’]/giu, "")
-    .replace(/slug\s*(?:可能为|可为|如|为|建议为|may be|could be|should be|suggest(?:ed|ion)?(?:\s+is)?)?\s*[:：]?\s*[A-Za-z0-9][A-Za-z0-9_-]{2,120}/giu, "")
+    .replace(new RegExp(String.raw`slug\s*(?:${EXPLICIT_SLUG_CUE})?\s*[:：]?\s*[\x60"'“‘][A-Za-z0-9][A-Za-z0-9_-]{2,120}[\x60"'”’]`, "giu"), "")
+    .replace(new RegExp(String.raw`slug\s*(?:${EXPLICIT_SLUG_CUE})?\s*[:：]?\s*[A-Za-z0-9][A-Za-z0-9_-]{2,120}`, "giu"), "")
+    .replace(/^\s*(?:[,，、]\s*)?(?:或类似|or similar|or something similar)\b\s*[。.]?\s*/iu, "")
+    .replace(/\s*[,，、]\s*(?:或类似|or similar|or something similar)\b\s*[。.]?/giu, "")
+    .replace(/^[\s,，、。.:：;；]+|[\s,，、]+$/g, "")
     .replace(/[`"“”‘’]+/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -479,8 +483,8 @@ function extractExplicitSlugSuggestion(entry: StagingEntry): string | null {
   ].filter((s): s is string => typeof s === "string" && s.trim().length > 0);
 
   const patterns = [
-    /slug\s*(?:可能为|可为|如|为|建议为|may be|could be|should be|suggest(?:ed|ion)?(?:\s+is)?)?\s*[:：]?\s*[`"'“‘]([A-Za-z0-9][A-Za-z0-9_-]{2,120})[`"'”’]/iu,
-    /slug\s*(?:可能为|可为|如|为|建议为|may be|could be|should be|suggest(?:ed|ion)?(?:\s+is)?)\s+([A-Za-z0-9][A-Za-z0-9_-]{2,120})/iu,
+    new RegExp(String.raw`slug\s*(?:${EXPLICIT_SLUG_CUE})?\s*[:：]?\s*[\x60"'“‘]([A-Za-z0-9][A-Za-z0-9_-]{2,120})[\x60"'”’]`, "iu"),
+    new RegExp(String.raw`slug\s*(?:${EXPLICIT_SLUG_CUE})\s+([A-Za-z0-9][A-Za-z0-9_-]{2,120})`, "iu"),
     /slug\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9_-]{2,120})/iu,
   ];
 
