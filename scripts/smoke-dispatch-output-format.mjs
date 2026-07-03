@@ -1017,6 +1017,50 @@ check("progress renderer uses labelled counts and a responsive text table", () =
   }
 });
 
+check("progress renderer freezes terminal task progress age", () => {
+  const now = 1_700_000_001_234;
+  const snapshot = {
+    title: "parallel",
+    state: "running",
+    startedAt: now - 10_000,
+    counts: { running: 1, failed: 0, success: 1, total: 2 },
+    tasks: [
+      {
+        name: "completed task",
+        model: "deepseek/deepseek-v4-flash",
+        thinking: "off",
+        state: "completed",
+        startedAt: now - 10_000,
+        endedAt: now - 5_000,
+        durationMs: 5_000,
+        lastHeartbeatAt: now - 6_000,
+        lastProgressReason: "done_event",
+      },
+      {
+        name: "running task",
+        model: "deepseek/deepseek-v4-flash",
+        thinking: "off",
+        state: "running",
+        startedAt: now - 10_000,
+        lastHeartbeatAt: now - 2_000,
+        lastProgressReason: "still_event",
+      },
+    ],
+  };
+
+  const first = renderDispatchProgressLines(snapshot, now, 160).join("\n");
+  const later = renderDispatchProgressLines(snapshot, now + 10_000, 160).join("\n");
+  if (!first.includes("done_event 1.0s ago") || !later.includes("done_event 1.0s ago")) {
+    throw new Error(`terminal progress age should stay frozen at endedAt:\nfirst:\n${first}\n\nlater:\n${later}`);
+  }
+  if (later.includes("done_event 11.0s ago")) {
+    throw new Error(`terminal progress age kept growing after completion:\n${later}`);
+  }
+  if (!first.includes("still_event 2.0s ago") || !later.includes("still_event 12.0s ago")) {
+    throw new Error(`running progress age should continue tracking current time:\nfirst:\n${first}\n\nlater:\n${later}`);
+  }
+});
+
 check("progress renderer drops columns instead of wrapping on narrow widths", () => {
   const now = 1_700_000_001_234;
   const width = 52;

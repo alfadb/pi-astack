@@ -425,7 +425,8 @@ function dispatchProgressColumn(key: DispatchProgressColumnKey, indexWidth: numb
 function dispatchProgressRows(tasks: DispatchProgressTask[], now: number): DispatchProgressRow[] {
   return tasks.map((task, index) => {
     const taskElapsed = task.durationMs ?? (task.startedAt ? Math.max(0, now - task.startedAt) : undefined);
-    const hbMs = task.heartbeatMs ?? (task.lastHeartbeatAt ? Math.max(0, now - task.lastHeartbeatAt) : undefined);
+    const progressNow = task.state === "running" || task.state === "queued" ? now : task.endedAt ?? now;
+    const hbMs = task.heartbeatMs ?? (task.lastHeartbeatAt ? Math.max(0, progressNow - task.lastHeartbeatAt) : undefined);
     return {
       index: String(index + 1),
       state: dispatchTaskStateLabel(task.state),
