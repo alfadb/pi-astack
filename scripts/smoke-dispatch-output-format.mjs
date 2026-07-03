@@ -258,7 +258,7 @@ try {
   process.exit(1);
 }
 
-const { formatResult, classifyError, classifyWithRetry, mergeAssistantTurn } = dispatchModule;
+const { formatResult, classifyError, classifyWithRetry, mergeAssistantTurn, renderDispatchProgressLines } = dispatchModule;
 if (typeof formatResult !== "function") {
   console.error("formatResult not exported from dispatch/index.ts");
   console.error("Available exports:", Object.keys(dispatchModule));
@@ -276,6 +276,11 @@ if (typeof classifyWithRetry !== "function") {
 }
 if (typeof mergeAssistantTurn !== "function") {
   console.error("mergeAssistantTurn not exported from dispatch/index.ts");
+  console.error("Available exports:", Object.keys(dispatchModule));
+  process.exit(1);
+}
+if (typeof renderDispatchProgressLines !== "function") {
+  console.error("renderDispatchProgressLines not exported from dispatch/index.ts");
   console.error("Available exports:", Object.keys(dispatchModule));
   process.exit(1);
 }
@@ -969,6 +974,56 @@ check("classifyError: known limitation — microsecond unit bypass", () => {
       `unexpected: "401 us" returned ${got} — has us been added to NOT_TIME_UNIT? ` +
       `Update this test if intentional.`,
     );
+  }
+});
+
+// ── Tool-block progress rendering ─────────────────────────────
+
+check("progress renderer uses labelled counts and explicit progress age", () => {
+  const now = 1_700_000_001_234;
+  const lines = renderDispatchProgressLines({
+    title: "agent",
+    state: "completed",
+    startedAt: now - 1_234,
+    durationMs: 1_234,
+    counts: { running: 0, failed: 0, success: 1, total: 1 },
+    tasks: [{
+      name: "format verify",
+      model: "deepseek/deepseek-v4-flash",
+      thinking: "off",
+      state: "completed",
+      startedAt: now - 1_234,
+      durationMs: 1_234,
+      lastHeartbeatAt: now,
+      lastProgressReason: "prompt_end",
+    }],
+  }, now, 160);
+  const text = lines.join("\n");
+  if (!text.includes("tasks 1/1 ok, 0 failed, 0 running")) {
+    throw new Error(`labelled counts missing:\n${text}`);
+  }
+  if (!text.includes("progress:prompt_end 0.0s ago")) {
+    throw new Error(`progress age missing:\n${text}`);
+  }
+  if (/\b0\/0\/1\/1\b|hb:/.test(text)) {
+    throw new Error(`old compact counters or hb field leaked:\n${text}`);
+  }
+});
+
+check("progress renderer supports custom count labels for dispatch_hub workers", () => {
+  const now = 1_700_000_001_000;
+  const lines = renderDispatchProgressLines({
+    title: "hub",
+    state: "completed",
+    startedAt: now - 10_000,
+    durationMs: 10_000,
+    counts: { running: 0, failed: 0, success: 1, total: 1 },
+    countsLabel: "workers",
+    tasks: [],
+  }, now, 160);
+  const text = lines.join("\n");
+  if (!text.includes("workers 1/1 ok, 0 failed, 0 running")) {
+    throw new Error(`custom count label missing:\n${text}`);
   }
 });
 

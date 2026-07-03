@@ -495,6 +495,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         state: "running",
         startedAt: Date.now(),
         counts: { running: 1, failed: 0, success: 0, total: 1 },
+        countsLabel: "steps",
         tasks: [hubProgressTask],
       };
       hubProgressTask.state = "running";
@@ -510,7 +511,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const finishProgress = (state: DispatchState, counts: DispatchCounts, durationMs?: number, isError?: boolean) => {
         progressSnapshot.state = state;
         progressSnapshot.counts = counts;
-        if (durationMs !== undefined) progressSnapshot.durationMs = durationMs;
+        progressSnapshot.durationMs = durationMs ?? Math.max(0, Date.now() - progressSnapshot.startedAt);
         stopProgressTickerOnce();
         progress.emit(onUpdate, progressSnapshot, isError);
       };
@@ -543,7 +544,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         }));
         void emit(summaryAnchor, buildHubSummaryRow({
           workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
-          hubCost: usage?.cost ?? 0, workersCost: 0, hubDurationMs: durMs, totalWallMs: 0, dualExecSampled: false,
+          hubCost: usage?.cost ?? 0, workersCost: 0, hubDurationMs: durMs, totalWallMs: durMs, dualExecSampled: false,
         }));
         progress.updateFromResult(hubProgressTask, { output: planText, error: reason, failureType, durationMs: durMs });
         finishProgress("failed", { running: 0, failed: 1, success: 0, total: 1 }, durMs, true);
@@ -606,7 +607,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       if (v.workers.length === 0) {
         void emit(summaryAnchor, buildHubSummaryRow({
           workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
-          hubCost: hubRes.usage?.cost ?? 0, workersCost: 0, hubDurationMs, totalWallMs: 0, dualExecSampled: false,
+          hubCost: hubRes.usage?.cost ?? 0, workersCost: 0, hubDurationMs, totalWallMs: hubDurationMs, dualExecSampled: false,
         }));
         finishProgress("failed", { running: 0, failed: 1, success: 0, total: 1 }, hubDurationMs, true);
         return {
@@ -622,6 +623,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const workerProgressTasks = tasks.map((t, i) => progress.taskFromSpec({ name: t.role, role: t.role, model: t.model, thinking: t.thinking ?? "high", prompt: t.prompt }, `worker ${i + 1}`));
       progressSnapshot.tasks = [hubProgressTask, ...workerProgressTasks];
       progressSnapshot.counts = { running: 0, failed: 0, success: 0, total };
+      progressSnapshot.countsLabel = "workers";
       progress.emit(onUpdate, progressSnapshot);
       const results: Array<{ output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } } | null> = new Array(total).fill(null);
       const activeByProvider = new Map<string, number>();
@@ -650,7 +652,6 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         progressSnapshot.counts = counts;
       };
 
-      const fanStart = Date.now();
       updateStatus();
       const worker = async () => {
         while (true) {
@@ -730,7 +731,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       };
       const concurrency = Math.min(total, Math.max(1, deps.maxProviderConcurrency * Math.max(1, new Set(tasks.map((t) => deps.providerFromModel(t.model))).size)));
       await Promise.allSettled(new Array(concurrency).fill(null).map(() => worker()));
-      const totalWallMs = Date.now() - fanStart;
+      const totalWallMs = Date.now() - progressSnapshot.startedAt;
 
       const dense = results.map((r) => r ?? { output: "", error: "worker did not start", failureType: "aborted", durationMs: 0 });
       const successCount = dense.filter((r) => !r.error).length;

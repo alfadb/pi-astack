@@ -155,8 +155,12 @@ ok(!/renderShell:\s*"self"/.test(hubSrc), "dispatch_hub keeps the default boxed 
 ok(/renderCall[\s\S]{0,160}?renderResult/.test(hubSrc), "dispatch_hub provides tool-block renderers");
 ok(/progress\.startTicker\(onUpdate,\s*progressSnapshot\)/.test(hubSrc), "dispatch_hub starts the onUpdate progress ticker");
 ok(/name:\s*"hub planner"[\s\S]{0,120}?model:\s*hubModel[\s\S]{0,120}?thinking:\s*hubCfg\.thinking/.test(hubSrc), "dispatch_hub creates a visible hub planner progress row");
+ok(/countsLabel:\s*"steps"/.test(hubSrc), "dispatch_hub labels planning-only progress counts as steps");
+ok(/progressSnapshot\.countsLabel\s*=\s*"workers"/.test(hubSrc), "dispatch_hub labels final fan-out counts as workers");
 ok(/workerProgressTasks\s*=\s*tasks\.map[\s\S]{0,400}?progress\.taskFromSpec/.test(hubSrc), "dispatch_hub creates worker progress rows after planning");
 ok(/onProgress:\s*\(p:\s*\{\s*reason:\s*string;\s*at:\s*number\s*\}\)\s*=>\s*progress\.markProgress/.test(hubSrc), "dispatch_hub forwards heartbeat progress to progress rows");
+ok(/const totalWallMs\s*=\s*Date\.now\(\)\s*-\s*progressSnapshot\.startedAt/.test(hubSrc), "dispatch_hub final elapsed includes hub planning plus worker fan-out");
+ok(!/Date\.now\(\)\s*-\s*fanStart/.test(hubSrc), "dispatch_hub must not render worker-only fan-out time as total elapsed");
 ok(/progress:\s*\{[\s\S]{0,500}?taskFromSpec:\s*progressTaskFromSpec[\s\S]{0,500}?startTicker:\s*startDispatchProgressTicker[\s\S]{0,500}?details:\s*dispatchProgressDetails/.test(dispatchSrc), "dispatch index injects progress helpers into dispatch_hub");
 ok(/renderCall:\s*renderDispatchHubCall[\s\S]{0,120}?renderResult:\s*renderDispatchToolResult/.test(dispatchSrc), "dispatch index injects hub tool-block renderers");
 

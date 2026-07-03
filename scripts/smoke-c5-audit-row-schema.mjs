@@ -277,6 +277,36 @@ check("tool-block progress renderer surfaces degraded and cancelled states", () 
   }
 });
 
+check("tool-block progress labels counts and heartbeat/progress age", () => {
+  if (!/formatProgressCounts\(snapshot\.counts,\s*snapshot\.countsLabel\)/.test(dispatchSrc)) {
+    throw new Error("progress header must render labelled counts instead of positional 0/0/1/1 counters");
+  }
+  if (/hb:/.test(dispatchSrc)) {
+    throw new Error("progress rows must not render terse hb:reason fields");
+  }
+  if (!dispatchSrc.includes("progress:${progressReason} ${formatProgressDuration(hbMs)} ago")) {
+    throw new Error("progress rows must render progress reason with an explicit age");
+  }
+});
+
+check("collapsed tool result preview skips markdown/table metadata", () => {
+  if (!/function dispatchOutputPreview\(body: string\)/.test(dispatchSrc)) {
+    throw new Error("dispatchOutputPreview helper missing");
+  }
+  if (!dispatchSrc.includes("if (/^#{1,6}\\s/.test(line)) return false;")) {
+    throw new Error("collapsed preview must skip markdown headings before selecting output preview");
+  }
+  if (!dispatchSrc.includes("if (/^\\|/.test(line)) return false;")) {
+    throw new Error("collapsed preview must skip markdown tables before selecting output preview");
+  }
+  if (!dispatchSrc.includes("if (/^_serial sum:/.test(line)) return false;")) {
+    throw new Error("collapsed preview must skip dispatch_parallel timing metadata");
+  }
+  if (!dispatchSrc.includes("truncateDisplayText(`output: ${preview}`, 140)")) {
+    throw new Error("collapsed preview must label the selected user-visible output line");
+  }
+});
+
 check("finalState mapping preserves cancelled (does not collapse to failed)", () => {
   // R6 DeepSeek P2-3 fix
   if (!/aggregateTsFields\.terminal_state\s*===\s*"cancelled"\s*\?\s*"cancelled"/.test(dispatchSrc)) {

@@ -248,6 +248,7 @@ export interface DispatchProgressSnapshot {
   startedAt: number;
   durationMs?: number;
   counts?: DispatchCounts;
+  countsLabel?: string;
   tasks: DispatchProgressTask[];
 }
 
@@ -345,15 +346,18 @@ function markProgressTask(task: DispatchProgressTask, reason: string, at: number
   task.lastProgressReason = reason;
 }
 
+function formatProgressCounts(counts: DispatchCounts | undefined, label: string | undefined): string {
+  if (!counts) return "";
+  const noun = compactOneLine(label || "tasks") || "tasks";
+  return ` | ${noun} ${counts.success}/${counts.total} ok, ${counts.failed} failed, ${counts.running} running`;
+}
+
 export function renderDispatchProgressLines(snapshot: DispatchProgressSnapshot, now = Date.now(), width = 160): string[] {
   const safeWidth = Math.max(20, Math.floor(width));
   const elapsedMs = snapshot.durationMs ?? Math.max(0, now - snapshot.startedAt);
-  const counts = snapshot.counts
-    ? ` ${snapshot.counts.running}/${snapshot.counts.failed}/${snapshot.counts.success}/${snapshot.counts.total}`
-    : "";
   const lines = [
     truncateDisplayText(
-      `dispatch ${snapshot.title}: ${snapshot.state}${counts} elapsed ${formatProgressDuration(elapsedMs)}`,
+      `dispatch ${snapshot.title}: ${snapshot.state}${formatProgressCounts(snapshot.counts, snapshot.countsLabel)} | elapsed ${formatProgressDuration(elapsedMs)}`,
       safeWidth,
     ),
   ];
@@ -374,11 +378,14 @@ export function renderDispatchProgressLines(snapshot: DispatchProgressSnapshot, 
     const prefix = `${String(i + 1).padStart(2, " ")}. [${state}] `;
     const model = truncateDisplayText(task.model, safeWidth < 80 ? 20 : 42);
     const thinking = truncateDisplayText(task.thinking || "off", 10);
-    const heartbeat = task.lastProgressReason
-      ? `:${truncateDisplayText(task.lastProgressReason, 20)}`
-      : "";
-    const failure = task.failureType ? ` ${truncateDisplayText(task.failureType, 18)}` : "";
-    const right = ` | ${formatProgressDuration(taskElapsed)} | ${model} | thinking:${thinking} | hb:${formatProgressDuration(hbMs)}${heartbeat}${failure}`;
+    const progressReason = task.lastProgressReason ? truncateDisplayText(task.lastProgressReason, 20) : "";
+    const progress = progressReason
+      ? ` | progress:${progressReason} ${formatProgressDuration(hbMs)} ago`
+      : hbMs !== undefined
+        ? ` | heartbeat:${formatProgressDuration(hbMs)} ago`
+        : "";
+    const failure = task.failureType ? ` | failure:${truncateDisplayText(task.failureType, 18)}` : "";
+    const right = ` | ${formatProgressDuration(taskElapsed)} | ${model} | thinking:${thinking}${progress}${failure}`;
     const nameWidth = safeWidth - visibleTextWidth(prefix) - visibleTextWidth(right);
     const fullLine = nameWidth >= 8
       ? `${prefix}${truncateDisplayText(task.name, nameWidth)}${right}`
@@ -396,6 +403,7 @@ function cloneDispatchProgressSnapshot(snapshot: DispatchProgressSnapshot): Disp
     startedAt: snapshot.startedAt,
     ...(snapshot.durationMs !== undefined ? { durationMs: snapshot.durationMs } : {}),
     ...(snapshot.counts ? { counts: { ...snapshot.counts } } : {}),
+    ...(snapshot.countsLabel ? { countsLabel: snapshot.countsLabel } : {}),
     tasks: snapshot.tasks.map((task) => ({ ...task })),
   };
 }
@@ -434,6 +442,18 @@ function textContentFromResult(result: { content?: Array<{ type?: string; text?:
   return content?.type === "text" ? String(content.text ?? "") : "";
 }
 
+function dispatchOutputPreview(body: string): string {
+  const lines = body.split("\n").map((line) => line.trim()).filter(Boolean);
+  const candidate = lines.find((line) => {
+    if (/^#{1,6}\s/.test(line)) return false;
+    if (/^\|/.test(line)) return false;
+    if (/^[-:|\s]+$/.test(line)) return false;
+    if (/^_serial sum:/.test(line)) return false;
+    return true;
+  });
+  return candidate ?? lines[0] ?? "";
+}
+
 function renderDispatchToolResult(result: any, options: { expanded?: boolean; isPartial?: boolean }, theme: any) {
   const details = result.details as DispatchProgressDetails | undefined;
   const progress = details?.dispatchProgress;
@@ -449,8 +469,8 @@ function renderDispatchToolResult(result: any, options: { expanded?: boolean; is
   if (options.expanded && trimmedBody) {
     text += `\n\n${trimmedBody}`;
   } else if (trimmedBody) {
-    const firstLine = trimmedBody.split("\n").find((line) => line.trim()) ?? "";
-    text += `\n${theme.fg("dim", truncateDisplayText(firstLine, 140))}`;
+    const preview = dispatchOutputPreview(trimmedBody);
+    if (preview) text += `\n${theme.fg("dim", truncateDisplayText(`output: ${preview}`, 140))}`;
     text += `\n${theme.fg("muted", "expand for full dispatch output")}`;
   }
   return new Text(text, 0, 0);
