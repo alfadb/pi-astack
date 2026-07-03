@@ -924,7 +924,7 @@ check("source invariant: dispatch timeout is progress-idle, with max-runtime saf
   if (!/recordProgress = \(reason: string\) => \{[\s\S]{0,500}armIdleTimeout\(\);/.test(_indexSrc)) {
     throw new Error("dispatch recordProgress must re-arm the idle timeout");
   }
-  if (!/recordProgress\(`event:\$\{String\(event\?\.type \?\? \"unknown\"\)\}`\)/.test(_indexSrc)) {
+  if (!/const eventType = String\(event\?\.type \?\? \"unknown\"\);[\s\S]{0,160}recordProgress\(`event:\$\{eventType\}`\)/.test(_indexSrc)) {
     throw new Error("dispatch subscribe events must count as idle-timeout progress");
   }
   if (!/setTimeout\(\(\) => resolveTimeout\("max_runtime"\), maxRuntimeMs\)/.test(_indexSrc)) {
@@ -994,6 +994,7 @@ check("progress renderer uses labelled counts and a responsive text table", () =
       state: "completed",
       startedAt: now - 1_234,
       durationMs: 1_234,
+      toolCallCount: 3,
       lastHeartbeatAt: now,
       lastProgressReason: "prompt_end",
     }],
@@ -1002,8 +1003,11 @@ check("progress renderer uses labelled counts and a responsive text table", () =
   if (!text.includes("tasks 1/1 ok, 0 failed, 0 running")) {
     throw new Error(`labelled counts missing:\n${text}`);
   }
-  if (!/^#\s+State\s+Task\s+Time\s+Model\s+Think\s+Progress/m.test(text)) {
+  if (!/^#\s+State\s+Task\s+Time\s+Tools\s+Model\s+Think\s+Progress/m.test(text)) {
     throw new Error(`table header missing:\n${text}`);
+  }
+  if (!/^1\s+ok\s+format verify\s+1\.2s\s+3\s+/m.test(text)) {
+    throw new Error(`tool call count missing from task row:\n${text}`);
   }
   if (!text.includes("prompt_end 0.0s ago")) {
     throw new Error(`progress age missing:\n${text}`);
@@ -1027,13 +1031,17 @@ check("progress renderer drops columns instead of wrapping on narrow widths", ()
       thinking: "off",
       state: "running",
       startedAt: now - 1_234,
+      toolCallCount: 12,
       lastHeartbeatAt: now,
       lastProgressReason: "prompt_end",
     }],
   }, now, width);
   const text = lines.join("\n");
-  if (!/^#\s+State\s+Task\s+Time/m.test(text)) {
+  if (!/^#\s+State\s+Task\s+Time\s+Tools/m.test(text)) {
     throw new Error(`narrow table did not keep core columns:\n${text}`);
+  }
+  if (!/^1\s+run\s+.+\s+1\.2s\s+12\s*$/m.test(text)) {
+    throw new Error(`narrow table did not keep tool count:\n${text}`);
   }
   if (/\bModel\b|\bThink\b|\bProgress\b/.test(text)) {
     throw new Error(`narrow table should drop lower-priority columns:\n${text}`);

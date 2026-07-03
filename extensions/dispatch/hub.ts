@@ -407,10 +407,10 @@ export interface HubDeps {
       anchor?: CausalAnchor;
       projectRoot?: string;
       maxRuntimeMs?: number;
-      onProgress?: (progress: { reason: string; at: number; heartbeatTracePath?: string }) => void;
+      onProgress?: (progress: { reason: string; at: number; heartbeatTracePath?: string; toolCallCount?: number }) => void;
     },
   ) => Promise<{
-    output: string; error?: string; failureType?: string; durationMs: number;
+    output: string; error?: string; failureType?: string; durationMs: number; toolCallCount?: number;
     heartbeat_liveness?: { msSinceLastBeat?: number };
     usage?: { input: number; output: number; cost: number };
   }>;
@@ -421,6 +421,7 @@ export interface HubDeps {
     taskFromSpec: (task: Record<string, unknown>, fallback: string) => DispatchProgressTask;
     updateFromResult: (task: DispatchProgressTask, result: any) => void;
     markProgress: (task: DispatchProgressTask, reason: string, at: number) => void;
+    applyRunProgress: (task: DispatchProgressTask, progress: { reason: string; at: number; heartbeatTracePath?: string; toolCallCount?: number }) => void;
     startTicker: (onUpdate: unknown, snapshot: DispatchProgressSnapshot) => () => void;
     emit: (onUpdate: unknown, snapshot: DispatchProgressSnapshot, isError?: boolean) => void;
     details: (snapshot: DispatchProgressSnapshot) => { dispatchProgress: DispatchProgressSnapshot };
@@ -575,7 +576,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
             {
               anchor: hubAnchor,
               projectRoot,
-              onProgress: (p: { reason: string; at: number }) => progress.markProgress(hubProgressTask, p.reason, p.at),
+              onProgress: (p) => progress.applyRunProgress(hubProgressTask, p),
             },
           ),
         );
@@ -688,7 +689,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
                       anchor: subAnchor,
                       projectRoot,
                       ...(progressTask
-                        ? { onProgress: (p: { reason: string; at: number }) => progress.markProgress(progressTask, p.reason, p.at) }
+                        ? { onProgress: (p) => progress.applyRunProgress(progressTask, p) }
                         : {}),
                     },
                   ),

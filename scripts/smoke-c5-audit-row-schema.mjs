@@ -304,6 +304,21 @@ check("tool-block progress labels counts and heartbeat/progress age", () => {
   }
 });
 
+check("tool-block progress tracks sub-agent tool call counts", () => {
+  if (!/toolCallCount\?: number/.test(dispatchSrc)) {
+    throw new Error("Dispatch progress tasks and AgentResult must carry toolCallCount");
+  }
+  if (!/eventType === "tool_execution_start"\) toolCallCount\+\+/.test(dispatchSrc)) {
+    throw new Error("runInProcess must count actual sub-agent tool_execution_start events");
+  }
+  if (!/onProgress\?\.\(\{ reason, at: lastProgressAt, heartbeatTracePath: heartbeat\.tracePath, toolCallCount \}\)/.test(dispatchSrc)) {
+    throw new Error("runInProcess progress updates must include toolCallCount");
+  }
+  if (!/case "tools": return \{ key, label: "Tools"/.test(dispatchSrc)) {
+    throw new Error("dispatch progress table must expose a Tools column");
+  }
+});
+
 check("collapsed tool result preview skips markdown/table metadata", () => {
   if (!/function dispatchOutputPreview\(body: string\)/.test(dispatchSrc)) {
     throw new Error("dispatchOutputPreview helper missing");

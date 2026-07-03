@@ -236,6 +236,7 @@ export interface DispatchProgressTask {
   startedAt?: number;
   endedAt?: number;
   durationMs?: number;
+  toolCallCount?: number;
   failureType?: string;
   lastHeartbeatAt?: number;
   heartbeatMs?: number;
@@ -327,6 +328,7 @@ function progressTaskFromSpec(task: Record<string, unknown>, fallback: string): 
     model: compactOneLine(task.model),
     thinking: compactOneLine(task.thinking || "off"),
     state: "queued",
+    toolCallCount: 0,
   };
 }
 
@@ -334,6 +336,9 @@ function updateProgressTaskFromResult(task: DispatchProgressTask, result: AgentR
   task.state = !result.error ? "completed" : inferTerminalState(result) === "cancelled" ? "cancelled" : "failed";
   task.endedAt = Date.now();
   task.durationMs = result.durationMs;
+  task.toolCallCount = typeof result.toolCallCount === "number" && Number.isFinite(result.toolCallCount)
+    ? Math.max(0, Math.floor(result.toolCallCount))
+    : task.toolCallCount ?? 0;
   task.failureType = result.failureType;
   const heartbeatMs = result.heartbeat_liveness?.msSinceLastBeat;
   if (typeof heartbeatMs === "number" && Number.isFinite(heartbeatMs)) {
@@ -341,9 +346,23 @@ function updateProgressTaskFromResult(task: DispatchProgressTask, result: AgentR
   }
 }
 
+interface DispatchRunProgress {
+  reason: string;
+  at: number;
+  heartbeatTracePath?: string;
+  toolCallCount?: number;
+}
+
 function markProgressTask(task: DispatchProgressTask, reason: string, at: number): void {
   task.lastHeartbeatAt = at;
   task.lastProgressReason = reason;
+}
+
+function applyRunProgressToTask(task: DispatchProgressTask, progress: DispatchRunProgress): void {
+  markProgressTask(task, progress.reason, progress.at);
+  if (typeof progress.toolCallCount === "number" && Number.isFinite(progress.toolCallCount)) {
+    task.toolCallCount = Math.max(0, Math.floor(progress.toolCallCount));
+  }
 }
 
 function formatProgressCounts(counts: DispatchCounts | undefined, label: string | undefined): string {
@@ -352,7 +371,7 @@ function formatProgressCounts(counts: DispatchCounts | undefined, label: string 
   return ` | ${noun} ${counts.success}/${counts.total} ok, ${counts.failed} failed, ${counts.running} running`;
 }
 
-type DispatchProgressColumnKey = "index" | "state" | "name" | "time" | "model" | "thinking" | "progress";
+type DispatchProgressColumnKey = "index" | "state" | "name" | "time" | "tools" | "model" | "thinking" | "progress";
 
 type DispatchProgressColumn = {
   key: DispatchProgressColumnKey;
@@ -396,6 +415,7 @@ function dispatchProgressColumn(key: DispatchProgressColumnKey, indexWidth: numb
     case "state": return { key, label: "State", min: 6, max: 6, flex: 0 };
     case "name": return { key, label: "Task", min: 10, max: 40, flex: 3 };
     case "time": return { key, label: "Time", min: 6, max: 7, flex: 0, align: "right" };
+    case "tools": return { key, label: "Tools", min: 5, max: 5, flex: 0, align: "right" };
     case "model": return { key, label: "Model", min: 18, max: 42, flex: 3 };
     case "thinking": return { key, label: "Think", min: 7, max: 7, flex: 0 };
     case "progress": return { key, label: "Progress", min: 18, max: 42, flex: 4 };
@@ -411,6 +431,7 @@ function dispatchProgressRows(tasks: DispatchProgressTask[], now: number): Dispa
       state: dispatchTaskStateLabel(task.state),
       name: compactOneLine(task.name),
       time: formatProgressDuration(taskElapsed),
+      tools: String(task.toolCallCount ?? 0),
       model: compactOneLine(task.model),
       thinking: compactOneLine(task.thinking || "off"),
       progress: dispatchTaskProgressCell(task, hbMs),
@@ -426,10 +447,10 @@ function minDispatchTableWidth(columns: DispatchProgressColumn[]): number {
 
 function chooseDispatchProgressColumns(width: number, indexWidth: number): DispatchProgressColumn[] {
   const layouts: Array<{ minWidth: number; keys: DispatchProgressColumnKey[] }> = [
-    { minWidth: 112, keys: ["index", "state", "name", "time", "model", "thinking", "progress"] },
-    { minWidth: 92, keys: ["index", "state", "name", "time", "model", "progress"] },
-    { minWidth: 72, keys: ["index", "state", "name", "time", "progress"] },
-    { minWidth: 52, keys: ["index", "state", "name", "time"] },
+    { minWidth: 120, keys: ["index", "state", "name", "time", "tools", "model", "thinking", "progress"] },
+    { minWidth: 100, keys: ["index", "state", "name", "time", "tools", "model", "progress"] },
+    { minWidth: 80, keys: ["index", "state", "name", "time", "tools", "progress"] },
+    { minWidth: 52, keys: ["index", "state", "name", "time", "tools"] },
     { minWidth: 21, keys: ["index", "state", "name"] },
     { minWidth: 14, keys: ["index", "name"] },
     { minWidth: 0, keys: ["name"] },
@@ -872,6 +893,8 @@ export interface AgentResult {
   lastProgressReason?: string;
   stopReason?: string;
   durationMs: number;
+  /** Number of sub-agent tool executions that actually started. */
+  toolCallCount?: number;
   maxOutputTokens?: number;
   usage?: {
     input: number;
@@ -1104,7 +1127,7 @@ export async function runInProcess(
     anchor?: CausalAnchor;
     projectRoot?: string;
     maxRuntimeMs?: number;
-    onProgress?: (progress: { reason: string; at: number; heartbeatTracePath?: string }) => void;
+    onProgress?: (progress: DispatchRunProgress) => void;
   },
 ): Promise<AgentResult> {
   const start = Date.now();
@@ -1159,6 +1182,7 @@ export async function runInProcess(
   };
 
   const refreshedModelRegistry = refreshModelRegistry(modelRegistry);
+  let toolCallCount = 0;
 
   // Resolve model
   const model = resolveModel(modelStr, refreshedModelRegistry);
@@ -1168,6 +1192,7 @@ export async function runInProcess(
       error: `Model not found: ${modelStr}`,
       failureType: "model_not_found",
       durationMs: Date.now() - start,
+      toolCallCount,
     };
   }
 
@@ -1253,7 +1278,7 @@ export async function runInProcess(
   };
 
   if (signal.aborted) {
-    return { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start };
+    return { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount };
   }
   signal.addEventListener("abort", onAbort, { once: true });
 
@@ -1295,6 +1320,7 @@ export async function runInProcess(
         timeoutKind,
         lastProgressReason,
         durationMs: now - start,
+        toolCallCount,
         usage,
         stopReason,
         retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
@@ -1311,7 +1337,7 @@ export async function runInProcess(
       lastProgressReason = reason;
       heartbeat.beat("alive", `progress:${reason}`);
       try {
-        heartbeatCtx?.onProgress?.({ reason, at: lastProgressAt, heartbeatTracePath: heartbeat.tracePath });
+        heartbeatCtx?.onProgress?.({ reason, at: lastProgressAt, heartbeatTracePath: heartbeat.tracePath, toolCallCount });
       } catch { /* best-effort UI telemetry */ }
       armIdleTimeout();
     };
@@ -1353,14 +1379,16 @@ export async function runInProcess(
         abortSessionOnce();
         session.dispose();
         signal.removeEventListener("abort", onAbort);
-        return { output: "", error: "aborted", failureType: "aborted", durationMs: Date.now() - start };
+        return { output: "", error: "aborted", failureType: "aborted", durationMs: Date.now() - start, toolCallCount };
       }
 
       // Subscribe to collect output and retry history.
       // NOTE: subscribe callbacks are serialized by the agent core — no
       // concurrent invocations — so retryHistory.entries.push is safe.
       const unsub = session.subscribe((event: any) => {
-        recordProgress(`event:${String(event?.type ?? "unknown")}`);
+        const eventType = String(event?.type ?? "unknown");
+        if (eventType === "tool_execution_start") toolCallCount++;
+        recordProgress(`event:${eventType}`);
         if (event.type === "message_end" && event.message?.role === "assistant") {
           lastAssistant = event.message;
           // R3 P0 fix: use mergeAssistantTurn (pure, tested) instead of
@@ -1425,6 +1453,7 @@ export async function runInProcess(
           failureType: "truncated",
           stopReason,
           durationMs,
+          toolCallCount,
           usage,
           retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
         };
@@ -1458,6 +1487,7 @@ export async function runInProcess(
           failureType: ft,
           stopReason: stopReason ?? "error",
           durationMs,
+          toolCallCount,
           usage,
           retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
         };
@@ -1467,6 +1497,7 @@ export async function runInProcess(
         output: finalOutput || "(no output)",
         stopReason,
         durationMs,
+        toolCallCount,
         usage,
         retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
       };
@@ -1486,6 +1517,7 @@ export async function runInProcess(
         error: errMsg,
         failureType: classifyWithRetry(errMsg, retryHistory, "crash"),
         durationMs,
+        toolCallCount,
         usage,
         retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
       };
@@ -1846,7 +1878,7 @@ export default function (pi: ExtensionAPI) {
             {
               anchor: subAnchor,
               projectRoot: ctx.cwd || process.cwd(),
-              onProgress: (progress) => markProgressTask(progressTask, progress.reason, progress.at),
+              onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
             },
           ),
         );
@@ -1923,6 +1955,7 @@ export default function (pi: ExtensionAPI) {
           ...(result.heartbeat_trace_path ? { heartbeat_trace_path: result.heartbeat_trace_path } : {}),
           ...(result.heartbeat_liveness ? { heartbeat_liveness: result.heartbeat_liveness } : {}),
           ...(result.maxOutputTokens ? { max_output_tokens: result.maxOutputTokens } : {}),
+          ...(typeof result.toolCallCount === "number" ? { tool_call_count: result.toolCallCount } : {}),
           output_chars: result.output?.length ?? 0,
           ...(result.usage
             ? {
@@ -1954,6 +1987,7 @@ export default function (pi: ExtensionAPI) {
           ...(result.heartbeat_trace_path ? { heartbeatTracePath: result.heartbeat_trace_path } : {}),
           ...(result.heartbeat_liveness ? { heartbeatLiveness: result.heartbeat_liveness } : {}),
           ...(result.maxOutputTokens ? { maxOutputTokens: result.maxOutputTokens } : {}),
+          ...(typeof result.toolCallCount === "number" ? { toolCallCount: result.toolCallCount } : {}),
           ...(result.usage ? { usage: result.usage } : {}),
         },
         ...(result.error ? { isError: true } : {}),
@@ -2196,7 +2230,7 @@ export default function (pi: ExtensionAPI) {
                 {
                   anchor: subAnchor,
                   projectRoot,
-                  onProgress: (progress) => markProgressTask(progressTask, progress.reason, progress.at),
+                  onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
                 },
               ),
             );
@@ -2249,6 +2283,7 @@ export default function (pi: ExtensionAPI) {
             ...(res.heartbeat_trace_path ? { heartbeat_trace_path: res.heartbeat_trace_path } : {}),
             ...(res.heartbeat_liveness ? { heartbeat_liveness: res.heartbeat_liveness } : {}),
             ...(res.maxOutputTokens ? { max_output_tokens: res.maxOutputTokens } : {}),
+            ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
             output_chars: res.output?.length ?? 0,
             ...(res.usage
               ? {
@@ -2486,6 +2521,7 @@ export default function (pi: ExtensionAPI) {
               ...(r.error ? { error: r.error, failureType: r.failureType } : {}),
               ...(r.usage ? { usage: r.usage } : {}),
               ...(r.maxOutputTokens ? { maxOutputTokens: r.maxOutputTokens } : {}),
+              ...(typeof r.toolCallCount === "number" ? { toolCallCount: r.toolCallCount } : {}),
               terminalState: inferTerminalState(r),
             };
           }),
@@ -2509,6 +2545,7 @@ export default function (pi: ExtensionAPI) {
           taskFromSpec: progressTaskFromSpec,
           updateFromResult: updateProgressTaskFromResult,
           markProgress: markProgressTask,
+          applyRunProgress: applyRunProgressToTask,
           startTicker: startDispatchProgressTicker,
           emit: emitDispatchProgress,
           details: dispatchProgressDetails,

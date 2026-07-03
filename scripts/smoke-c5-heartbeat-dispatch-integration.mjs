@@ -88,8 +88,8 @@ check("runInProcess calls heartbeat.stop() in a finally block (R8 P1 fix)", () =
 });
 
 check("runInProcess forwards progress events to heartbeatCtx.onProgress", () => {
-  if (!/heartbeatCtx\?\.onProgress\?\.\(\{\s*reason,\s*at:\s*lastProgressAt,\s*heartbeatTracePath:\s*heartbeat\.tracePath\s*\}\)/.test(dispatchSrc)) {
-    throw new Error("recordProgress must call heartbeatCtx.onProgress with reason, timestamp, and heartbeat trace path");
+  if (!/heartbeatCtx\?\.onProgress\?\.\(\{\s*reason,\s*at:\s*lastProgressAt,\s*heartbeatTracePath:\s*heartbeat\.tracePath,\s*toolCallCount\s*\}\)/.test(dispatchSrc)) {
+    throw new Error("recordProgress must call heartbeatCtx.onProgress with reason, timestamp, heartbeat trace path, and tool call count");
   }
 });
 
@@ -144,7 +144,7 @@ check("dispatch tools render progress inside default boxed tool blocks", () => {
 });
 
 check("dispatch_agent and dispatch_parallel both wire progress callbacks", () => {
-  const matches = dispatchSrc.match(/onProgress:\s*\(progress\)\s*=>\s*markProgressTask\(progressTask,\s*progress\.reason,\s*progress\.at\)/g) ?? [];
+  const matches = dispatchSrc.match(/onProgress:\s*\(progress\)\s*=>\s*applyRunProgressToTask\(progressTask,\s*progress\)/g) ?? [];
   if (matches.length < 2) {
     throw new Error(`expected at least 2 progress callbacks, found ${matches.length}`);
   }

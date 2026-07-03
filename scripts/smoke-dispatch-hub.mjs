@@ -158,10 +158,10 @@ ok(/name:\s*"hub planner"[\s\S]{0,120}?model:\s*hubModel[\s\S]{0,120}?thinking:\
 ok(/countsLabel:\s*"steps"/.test(hubSrc), "dispatch_hub labels planning-only progress counts as steps");
 ok(/progressSnapshot\.countsLabel\s*=\s*"workers"/.test(hubSrc), "dispatch_hub labels final fan-out counts as workers");
 ok(/workerProgressTasks\s*=\s*tasks\.map[\s\S]{0,400}?progress\.taskFromSpec/.test(hubSrc), "dispatch_hub creates worker progress rows after planning");
-ok(/onProgress:\s*\(p:\s*\{\s*reason:\s*string;\s*at:\s*number\s*\}\)\s*=>\s*progress\.markProgress/.test(hubSrc), "dispatch_hub forwards heartbeat progress to progress rows");
+ok(/onProgress:\s*\(p\)\s*=>\s*progress\.applyRunProgress/.test(hubSrc), "dispatch_hub forwards heartbeat and tool-count progress to progress rows");
 ok(/const totalWallMs\s*=\s*Date\.now\(\)\s*-\s*progressSnapshot\.startedAt/.test(hubSrc), "dispatch_hub final elapsed includes hub planning plus worker fan-out");
 ok(!/Date\.now\(\)\s*-\s*fanStart/.test(hubSrc), "dispatch_hub must not render worker-only fan-out time as total elapsed");
-ok(/progress:\s*\{[\s\S]{0,500}?taskFromSpec:\s*progressTaskFromSpec[\s\S]{0,500}?startTicker:\s*startDispatchProgressTicker[\s\S]{0,500}?details:\s*dispatchProgressDetails/.test(dispatchSrc), "dispatch index injects progress helpers into dispatch_hub");
+ok(/progress:\s*\{[\s\S]{0,500}?taskFromSpec:\s*progressTaskFromSpec[\s\S]{0,500}?applyRunProgress:\s*applyRunProgressToTask[\s\S]{0,500}?startTicker:\s*startDispatchProgressTicker[\s\S]{0,500}?details:\s*dispatchProgressDetails/.test(dispatchSrc), "dispatch index injects progress helpers into dispatch_hub");
 ok(/renderCall:\s*renderDispatchHubCall[\s\S]{0,120}?renderResult:\s*renderDispatchToolResult/.test(dispatchSrc), "dispatch index injects hub tool-block renderers");
 
 console.log();
