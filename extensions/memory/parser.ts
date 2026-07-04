@@ -61,6 +61,11 @@ const CANONICAL_KINDS = new Set([
 const CANONICAL_STATUSES = new Set([
   "provisional", "active", "contested", "deprecated", "superseded", "archived",
 ]);
+const LEGACY_STATUS_FOLD: Record<string, string> = {
+  deprecated: "superseded",
+  "in-progress": "provisional",
+  "superseded-in-part": "superseded",
+};
 
 // AX-PROVENANCE (ADR 0028 §12): read-side mirror of
 // sediment/validation.ts::PROVENANCE_CLASSES. Keep local to avoid a memory →
@@ -98,11 +103,11 @@ export function normalizeKind(raw: string): { kind: string; legacyKind?: string 
 export function normalizeStatus(raw: string | undefined): { status: string; legacyStatus?: string } {
   const trimmed = (raw || "").trim();
   if (!trimmed) return { status: "active" };
-  // AX-MATURITY (ADR 0028 v1.1 §12): `deprecated` FOLDS into `superseded`
-  // (both = "replaced, reference-only"). New writes should not use deprecated;
-  // existing deprecated entries read as superseded so the default search
-  // exclusion applies uniformly. Original preserved for diagnostics.
-  if (trimmed === "deprecated") return { status: "superseded", legacyStatus: "deprecated" };
+  // AX-MATURITY (ADR 0028 v1.1 §12): legacy/non-canonical statuses fold to
+  // the closest canonical read-side status. New writes should not use these;
+  // preserve the original for lint/doctor diagnostics.
+  const folded = LEGACY_STATUS_FOLD[trimmed];
+  if (folded) return { status: folded, legacyStatus: trimmed };
   if (CANONICAL_STATUSES.has(trimmed)) return { status: trimmed };
   // Unknown status → provisional (neutral; visible — NOT subject to the default
   // archived/superseded exclusion in search.ts::entryMatchesFilters, so a

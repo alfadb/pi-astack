@@ -275,12 +275,13 @@ function cumulativeBySlug(rows: LedgerOutcomeRow[]): Map<string, CumulativeStat>
     const slug = typeof row.entry_slug === "string" ? row.entry_slug : "";
     if (!slug) continue;
     const stat = out.get(slug) ?? { citation_count: 0, total_retrievals: 0 };
+    const countsAsCumulativeActivity = row.source === "tool-result" || row.source === "memory-footnote";
     if (row.source === "tool-result") {
       stat.total_retrievals += typeof row.retrieval_count === "number" && Number.isFinite(row.retrieval_count) ? Math.max(0, Math.floor(row.retrieval_count)) : 1;
     } else if (row.source === "memory-footnote" && typeof row.used === "string") {
       stat.citation_count += 1;
     }
-    const ts = typeof row.ts === "string" ? row.ts : "";
+    const ts = countsAsCumulativeActivity && typeof row.ts === "string" ? row.ts : "";
     if (ts) {
       if (!stat.first_cited_at || ts < stat.first_cited_at) stat.first_cited_at = ts;
       if (!stat.last_cited_at || ts > stat.last_cited_at) stat.last_cited_at = ts;

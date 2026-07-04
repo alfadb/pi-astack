@@ -8,7 +8,7 @@
  *   2. settings.pathA — default resolution + override merging
  *   3. memory-context-injector — outcome paths without real LLM:
  *      - skipped_disabled
- *      - skipped_no_model_registry
+ *      - skipped_no_model_registry (direct injector contract; hook waits first)
  *      - skipped_invalid_model_registry
  *
  * 不打实际 LLM (rewriter / search) — 那些是 dogfood 信号,通过 path-a-ledger
@@ -108,7 +108,34 @@ const rewriter = jiti(path.join(repoRoot, "extensions/memory/query-rewriter.ts")
 }
 
 // ──────────────────────────────────────────────────────────────
-console.log("\n[2] settings.pathA defaults");
+console.log("\n[2] status normalization aliases");
+{
+  const parser = jiti(path.join(repoRoot, "extensions/memory/parser.ts"));
+  const lint = jiti(path.join(repoRoot, "extensions/memory/lint.ts"));
+  const inProgress = parser.normalizeStatus("in-progress");
+  const partial = parser.normalizeStatus("superseded-in-part");
+  check("in-progress → provisional with legacyStatus", inProgress.status === "provisional" && inProgress.legacyStatus === "in-progress");
+  check("superseded-in-part → superseded with legacyStatus", partial.status === "superseded" && partial.legacyStatus === "superseded-in-part");
+
+  const lintIssues = lint.lintMarkdown([
+    "---",
+    "scope: project",
+    "kind: decision",
+    "status: in-progress",
+    "confidence: 5",
+    "created: 2026-06-01",
+    "schema_version: 1",
+    "title: Status Smoke",
+    "---",
+    "Body with enough content for smoke.",
+    "## Timeline",
+    "- 2026-06-01 | created",
+  ].join("\n"));
+  check("lint warns on non-canonical status", lintIssues.some((i) => i.rule === "T7 status-enum" && i.severity === "warning" && /folds it to 'provisional'/.test(i.message)));
+}
+
+// ──────────────────────────────────────────────────────────────
+console.log("\n[3] settings.pathA defaults");
 const settings = jiti(path.join(repoRoot, "extensions/memory/settings.ts"));
 {
   // Assert the DEFAULT constants, not resolveSettings() — the latter reflects
@@ -126,7 +153,7 @@ const settings = jiti(path.join(repoRoot, "extensions/memory/settings.ts"));
 }
 
 // ────────────────────────────────────────────────────────────────
-console.log("\n[3] memory-context-injector outcomes (no-LLM paths)");
+console.log("\n[4] memory-context-injector outcomes (no-LLM paths)");
 const injector = jiti(path.join(repoRoot, "extensions/memory/memory-context-injector.ts"));
 
 // Build a fake SessionManager-shape for history extraction smoke (no real pi).
@@ -199,7 +226,17 @@ try {
 }
 
 // ────────────────────────────────────────────────────────────────
-console.log("\n[4] rewriter v2 signature: history is required positional arg");
+console.log("\n[5] Path A hook waits briefly for cold-start modelRegistry");
+{
+  const indexSource = fs.readFileSync(path.join(repoRoot, "extensions/memory/index.ts"), "utf-8");
+  check("hook defines a bounded registry wait",
+    /PATH_A_MODEL_REGISTRY_WAIT_MS\s*=\s*250/.test(indexSource) && /PATH_A_MODEL_REGISTRY_POLL_MS\s*=\s*25/.test(indexSource));
+  check("before_agent_start awaits resolvePathAModelRegistry before injector",
+    /const modelRegistry = await resolvePathAModelRegistry\(ctx\);[\s\S]*tryInjectRelevantMemoryContext\(userPrompt, \{[\s\S]*modelRegistry,/.test(indexSource));
+}
+
+// ────────────────────────────────────────────────────────────────
+console.log("\n[6] rewriter v2 signature: history is required positional arg");
 // Smoke that signature changed: 2nd positional is history array.
 // We don't actually call LLM here (no model registry needed for static
 // shape check). Just ensure the function expects 5 args.
@@ -227,7 +264,7 @@ check("rewriter accepts 5 args (msg, history, registry, settings, signal?)",
 }
 
 // ────────────────────────────────────────────────────────────────
-console.log("\n[5] llm-search Stage 2 verdict parsing");
+console.log("\n[7] llm-search Stage 2 verdict parsing");
 const search = jiti(path.join(repoRoot, "extensions/memory/llm-search.ts"));
 // ADR 0037: 生产唯一入口 runMemorySearch; 裸 wrapper 已私有化, 仅经 __oracleKernel 测试暴露
 check("runMemorySearch exported (生产唯一入口)", typeof search.runMemorySearch === "function");
@@ -453,6 +490,40 @@ console.log("\n[10] LIVE end-to-end: dispatch-binds-first, memory Path A still r
       last.session_id === "e2e-sess", JSON.stringify(last));
     check("LIVE: Path A ledger row carries turn_id 0", last.turn_id === 0, JSON.stringify(last));
     check("LIVE: Path A row is NOT anchor_missing (the bug)", last.anchor_missing === undefined, JSON.stringify(last));
+  } finally {
+    if (prevR === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = prevR;
+    anchorMod._resetCausalAnchorForTests();
+    try { fs.rmSync(tmpH, { recursive: true, force: true }); } catch {}
+  }
+}
+
+console.log("\n[11] Path A hook resolves delayed modelRegistry instead of skipping the turn");
+{
+  anchorMod._resetCausalAnchorForTests();
+  const memMod = jiti(path.join(repoRoot, "extensions/memory/index.ts"));
+  const memoryExt = memMod.default ?? memMod;
+  const memEvt = {};
+  const memPi = {
+    on(e, fn) { (memEvt[e] ||= []).push(fn); },
+    registerTool() {},
+    registerCommand() {},
+  };
+  const tmpH = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-delayed-registry-"));
+  const prevR = process.env.ABRAIN_ROOT;
+  process.env.ABRAIN_ROOT = tmpH;
+  try {
+    memoryExt(memPi);
+    const ctx = { sessionManager: { getSessionId: () => "delayed-registry-sess" }, cwd: tmpH };
+    (memEvt.session_start || []).forEach((h) => h({}, ctx));
+    setTimeout(() => { ctx.modelRegistry = { wat: "not a registry, but present" }; }, 50);
+    for (const h of (memEvt.before_agent_start || [])) {
+      await h({ systemPrompt: "", prompt: "用 pnpm 还是 yarn?" }, ctx);
+    }
+    const lp = path.join(tmpH, ".state", "memory", "path-a-ledger.jsonl");
+    const rows = fs.readFileSync(lp, "utf-8").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+    const last = rows[rows.length - 1];
+    check("delayed registry avoids skipped_no_model_registry", last.outcome === "skipped_invalid_model_registry", JSON.stringify(last));
   } finally {
     if (prevR === undefined) delete process.env.ABRAIN_ROOT;
     else process.env.ABRAIN_ROOT = prevR;

@@ -36,6 +36,15 @@ export const REQUIRED_FRONTMATTER_FIELDS = [
   "scope", "kind", "status", "confidence", "created", "schema_version", "title",
 ];
 
+const CANONICAL_FRONTMATTER_STATUSES = new Set([
+  "provisional", "active", "contested", "deprecated", "superseded", "archived",
+]);
+const LEGACY_FRONTMATTER_STATUS_FOLD: Record<string, string> = {
+  deprecated: "superseded",
+  "in-progress": "provisional",
+  "superseded-in-part": "superseded",
+};
+
 function pushIssue(
   issues: LintIssue[],
   issue: Omit<LintIssue, "file">,
@@ -74,6 +83,22 @@ export function lintMarkdown(raw: string, file?: string): LintIssue[] {
       message: `missing required frontmatter field(s): ${missing.join(", ")}`,
       line: 1,
     }, file);
+  }
+
+  const rawStatus = typeof frontmatter.status === "string" ? frontmatter.status.trim() : "";
+  if (rawStatus) {
+    const normalizedStatus = rawStatus.toLowerCase();
+    if (!CANONICAL_FRONTMATTER_STATUSES.has(normalizedStatus)) {
+      const folded = LEGACY_FRONTMATTER_STATUS_FOLD[normalizedStatus];
+      pushIssue(issues, {
+        rule: "T7 status-enum",
+        severity: "warning",
+        message: folded
+          ? `frontmatter status '${rawStatus}' is non-canonical; read side folds it to '${folded}'`
+          : `frontmatter status '${rawStatus}' is not a valid status; read side falls back to 'provisional'`,
+        line: 1,
+      }, file);
+    }
   }
 
   const confidence = scalarNumber(frontmatter.confidence);

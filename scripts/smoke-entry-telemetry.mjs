@@ -4,7 +4,8 @@
  *
  * Locks the pure-INFRA contract of extensions/sediment/entry-telemetry.ts:
  *   - empty cited-slug set is a no-op (no file written)
- *   - cumulative citation_count counts memory-footnote rows; total_retrievals
+ *   - cumulative citation_count counts explicit memory-footnote rows only;
+ *     path-a-implicit is rolling unused baseline, not a citation; total_retrievals
  *     sums tool-result retrieval_count; first/last_cited_at track ts extremes
  *   - 30d rolling fields are delegated to summarizeEntryActivity and mapped
  *   - possible_echo_chamber fires on decisive_streak >= 5
@@ -109,6 +110,9 @@ function fnRow(slug, used, tsIso, project_root) {
 function toolRow(slug, count, tsIso, project_root) {
   return { source: "tool-result", entry_slug: slug, retrieval_count: count, ts: tsIso, project_root };
 }
+function implicitRow(slug, tsIso, project_root) {
+  return { source: "path-a-implicit", entry_slug: slug, used: "retrieved-unused", retrieval_count: 1, ts: tsIso, project_root, path_a_inject_id: "path-a-smoke" };
+}
 function rowsFor(project) { return readEntryTelemetry(project); }
 function rowOf(project, slug) {
   const r = getEntryTelemetry(project, slug);
@@ -133,14 +137,20 @@ check("cumulative citation_count + total_retrievals + cited-at extremes", () => 
     fnRow("alpha", "retrieved-unused", "2026-06-03T10:00:00Z", projectA),
     toolRow("alpha", 1, "2026-05-20T10:00:00Z", projectA),
     toolRow("alpha", 2, "2026-06-04T10:00:00Z", projectA),
+    implicitRow("alpha", "2026-06-04T11:00:00Z", projectA),
   ]);
   const r = mergeEntryTelemetry({ projectRoot: projectA, now: new Date("2026-06-04T12:00:00Z") });
   if (!r.ok || !r.written || r.slugs_considered !== 1) throw new Error(`merge failed: ${JSON.stringify(r)}`);
   const row = rowOf(projectA, "alpha");
-  if (row.citation_count !== 3) throw new Error(`citation_count should be 3, got ${row.citation_count}`);
+  if (row.citation_count !== 3) throw new Error(`citation_count should count explicit footnotes only (3), got ${row.citation_count}`);
   if (row.total_retrievals !== 3) throw new Error(`total_retrievals should be 1+2=3, got ${row.total_retrievals}`);
   if (row.first_cited_at !== "2026-05-20T10:00:00Z") throw new Error(`first_cited_at wrong: ${row.first_cited_at}`);
   if (row.last_cited_at !== "2026-06-04T10:00:00Z") throw new Error(`last_cited_at wrong: ${row.last_cited_at}`);
+});
+
+check("path-a-implicit is not counted as citation", () => {
+  const row = rowOf(projectA, "alpha");
+  if (row.citation_count !== 3) throw new Error(`implicit baseline must not inflate citation_count, got ${row.citation_count}`);
 });
 
 check("rolling-window fields delegate to summarizeEntryActivity", () => {

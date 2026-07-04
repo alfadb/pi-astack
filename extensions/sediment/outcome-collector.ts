@@ -13,7 +13,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ensureUserGlobalSidecarMigrated, sedimentAuditPath, userGlobalSedimentDir } from "../_shared/runtime";
+import { ensureUserGlobalSidecarMigrated, resolveUserGlobalAbrainHome, sedimentAuditPath, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { sanitizeForMemory } from "./sanitizer";
 
@@ -22,7 +22,7 @@ export interface OutcomeRow {
   session_id: string;
   entry_slug: string;
   /** Source of this outcome signal */
-  source: "memory-footnote" | "tool-result";
+  source: "memory-footnote" | "tool-result" | "path-a-implicit";
   /** Stable per-event id used to prevent repeated agent_end scans from
    * appending the same branch evidence again. */
   event_id?: string;
@@ -34,6 +34,8 @@ export interface OutcomeRow {
   retrieval_count: number;
   /** For memory_decide rows: stable id of the decision brief that retrieved this entry. */
   decision_brief_id?: string;
+  /** For path-a-implicit rows: stable id from path-a-ledger.jsonl. */
+  path_a_inject_id?: string;
 }
 
 /**
@@ -237,6 +239,104 @@ function parseMemoryFootnote(text: string): {
   return { entries, dropped };
 }
 
+interface PathALedgerRow {
+  inject_id?: unknown;
+  outcome?: unknown;
+  injected_slugs?: unknown;
+  session_id?: unknown;
+  turn_id?: unknown;
+}
+
+function currentTurnExplicitFootnoteSlugs(branch: unknown[]): Set<string> {
+  const messageEntries: Array<{ role: string; text: string }> = [];
+  for (const entry of branch) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    if (e.type !== "message" || !e.message || typeof e.message !== "object") continue;
+    const msg = e.message as Record<string, unknown>;
+    messageEntries.push({
+      role: typeof msg.role === "string" ? msg.role : "",
+      text: extractText(msg.content),
+    });
+  }
+
+  let lastUserIndex = -1;
+  for (let i = messageEntries.length - 1; i >= 0; i--) {
+    if (messageEntries[i].role === "user") {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  const slugs = new Set<string>();
+  if (lastUserIndex < 0) return slugs;
+  for (let i = lastUserIndex + 1; i < messageEntries.length; i++) {
+    if (messageEntries[i].role !== "assistant") continue;
+    const { entries } = parseMemoryFootnote(messageEntries[i].text);
+    for (const fn of entries) slugs.add(fn.entry_slug);
+  }
+  return slugs;
+}
+
+function readCurrentTurnPathAInjections(sessionId: string): Array<{ inject_id: string; slug: string }> {
+  const anchor = getCurrentAnchor();
+  if (!anchor || typeof anchor.turn_id !== "number") return [];
+  const filePath = path.join(resolveUserGlobalAbrainHome(), ".state", "memory", "path-a-ledger.jsonl");
+  if (!fs.existsSync(filePath)) return [];
+
+  const out: Array<{ inject_id: string; slug: string }> = [];
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let row: PathALedgerRow;
+      try { row = JSON.parse(trimmed) as PathALedgerRow; }
+      catch { continue; }
+      if (row.outcome !== "injected") continue;
+      if (row.session_id !== sessionId || row.turn_id !== anchor.turn_id) continue;
+      if (typeof row.inject_id !== "string") continue;
+      if (!Array.isArray(row.injected_slugs)) continue;
+      for (const rawSlug of row.injected_slugs) {
+        const slug = sanitizeSlug(String(rawSlug ?? ""));
+        if (!isValidSlug(slug)) continue;
+        out.push({ inject_id: row.inject_id, slug });
+      }
+    }
+  } catch {
+    return [];
+  }
+  return out;
+}
+
+function collectPathAImplicitRows(
+  sessionId: string,
+  ts: string,
+  explicitCurrentTurnSlugs: Set<string>,
+): OutcomeRow[] {
+  const injected = readCurrentTurnPathAInjections(sessionId);
+  if (injected.length === 0) return [];
+  const rows: OutcomeRow[] = [];
+  const seen = new Set<string>();
+  for (const item of injected) {
+    if (explicitCurrentTurnSlugs.has(item.slug)) continue;
+    const key = `${item.inject_id}|${item.slug}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
+      ts,
+      session_id: sessionId,
+      entry_slug: item.slug,
+      source: "path-a-implicit",
+      event_id: `path-a-implicit:${item.inject_id}:${item.slug}`,
+      used: "retrieved-unused",
+      counterfactual: "Path A injected this entry this turn, but no explicit memory-footnote cited it.",
+      retrieval_count: 1,
+      path_a_inject_id: item.inject_id,
+    });
+  }
+  return rows;
+}
+
 /**
  * Collect outcomes from the conversation branch.
  * Combines mechanical retrieval tracking + self-report footnote parsing.
@@ -371,16 +471,25 @@ export function collectOutcomes(
     }
   }
 
+  const explicitCurrentTurnSlugs = currentTurnExplicitFootnoteSlugs(branch);
+  for (const row of collectPathAImplicitRows(sessionId, ts, explicitCurrentTurnSlugs)) {
+    const key = `${row.entry_slug}|${row.source}|${row.event_id}`;
+    if (seen.has(key)) continue;
+    seen.set(key, row);
+    rows.push(row);
+  }
+
   return { rows, dropped };
 }
 
-function outcomeLedgerDedupKey(row: Pick<OutcomeRow, "session_id" | "entry_slug" | "source" | "event_id" | "used" | "counterfactual" | "decision_brief_id">): string {
+function outcomeLedgerDedupKey(row: Pick<OutcomeRow, "session_id" | "entry_slug" | "source" | "event_id" | "used" | "counterfactual" | "decision_brief_id" | "path_a_inject_id">): string {
   if (row.event_id) return `${row.session_id}|${row.entry_slug}|${row.source}|${row.event_id}`;
   // Backward-compatible fallback for legacy rows written before event_id.
   // Keep this intentionally conservative: it dedupes old repeated full-branch
   // scans while still separating different decision briefs when present.
   const brief = row.decision_brief_id ? `|${row.decision_brief_id}` : "";
   if (row.source === "tool-result") return `${row.session_id}|${row.entry_slug}|tool-result${brief}`;
+  if (row.source === "path-a-implicit") return `${row.session_id}|${row.entry_slug}|path-a-implicit|${row.path_a_inject_id ?? ""}`;
   return `${row.session_id}|${row.entry_slug}|memory-footnote|${row.used ?? ""}|${stableHash(row.counterfactual ?? "")}${brief}`;
 }
 
@@ -769,13 +878,15 @@ export function summarizeEntryActivity(
     if (row.source === "tool-result") {
       stats.total_retrievals += row.retrieval_count ?? 1;
     }
-    if (row.source === "memory-footnote" && row.used) {
+    if ((row.source === "memory-footnote" || row.source === "path-a-implicit") && row.used) {
       if (row.used === "decisive") stats.decisive_count++;
       else if (row.used === "confirmatory") stats.confirmatory_count++;
       else if (row.used === "retrieved-unused") stats.retrieved_unused_count++;
-      const list = footnoteRowsBySlug.get(row.entry_slug) ?? [];
-      list.push(row);
-      footnoteRowsBySlug.set(row.entry_slug, list);
+      if (row.source === "memory-footnote") {
+        const list = footnoteRowsBySlug.get(row.entry_slug) ?? [];
+        list.push(row);
+        footnoteRowsBySlug.set(row.entry_slug, list);
+      }
     }
     if (!stats.last_seen || row.ts > stats.last_seen) {
       stats.last_seen = row.ts;

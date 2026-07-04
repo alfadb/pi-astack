@@ -46,6 +46,34 @@ const MEMORY_FOOTNOTE_PROTOCOL_VERSION = "memory-footnote-v1";
 // 100% turn-0 loss per the 2026-05-29/30 outcome-ledger). Cache the registry at
 // session_start (where it IS available, per model-curator) and fall back to it.
 let capturedModelRegistry: unknown;
+const PATH_A_MODEL_REGISTRY_WAIT_MS = 250;
+const PATH_A_MODEL_REGISTRY_POLL_MS = 25;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function resolvePathAModelRegistry(ctx: unknown): Promise<unknown> {
+  let reg = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry ?? capturedModelRegistry;
+  if (reg) {
+    capturedModelRegistry = reg;
+    return reg;
+  }
+
+  // before_agent_start can beat session_start registry capture on early turns.
+  // Give the session_start handler or a mutating ctx a short chance to land
+  // instead of recording skipped_no_model_registry for the whole turn.
+  const deadline = Date.now() + PATH_A_MODEL_REGISTRY_WAIT_MS;
+  while (Date.now() < deadline) {
+    await sleep(PATH_A_MODEL_REGISTRY_POLL_MS);
+    reg = (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry ?? capturedModelRegistry;
+    if (reg) {
+      capturedModelRegistry = reg;
+      return reg;
+    }
+  }
+  return undefined;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tool result wrapper.
@@ -834,9 +862,10 @@ brief 是专家建议，不是命令。
 
     const { tryInjectRelevantMemoryContext } = await import("./memory-context-injector");
     try {
+      const modelRegistry = await resolvePathAModelRegistry(ctx);
       const r = await tryInjectRelevantMemoryContext(userPrompt, {
         cwd: (ctx as { cwd?: string } | undefined)?.cwd,
-        modelRegistry: (ctx as { modelRegistry?: unknown } | undefined)?.modelRegistry ?? capturedModelRegistry,
+        modelRegistry,
         sessionManager: (ctx as { sessionManager?: unknown } | undefined)?.sessionManager,
       });
       if (r.block) {

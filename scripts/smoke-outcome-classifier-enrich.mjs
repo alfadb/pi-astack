@@ -11,7 +11,8 @@
  *       includes project B rows for a same-named slug (gpt+deepseek BLOCKING).
  *   [4] readProjectOutcomeRows("") → [] (unscoped guard; gpt constraint).
  *   [5] summarizeEntryActivity over project-A rows: counts + echo-chamber
- *       (decisive_streak>=5); ABSENT slug → zeroed record (deepseek: proves
+ *       (including source=path-a-implicit as retrieved-unused baseline);
+ *       ABSENT slug → zeroed record (deepseek: proves
  *       the caller's last_seen/count>0 hasData guard is required).
  *   [6] Isolation end-to-end: summarize(readProjectOutcomeRows(A),["shared"])
  *       sees ONLY A's count, not A+B.
@@ -44,15 +45,17 @@ const now = Date.now();
 const iso = (daysAgo) => new Date(now - daysAgo * 86400000).toISOString();
 const row = (o) => JSON.stringify(o);
 
-// Project A: shared-slug = 2 retrieved-unused (OLDER) then 5 decisive (MOST
-//            RECENT → tail streak → echo-chamber); clean-slug = 3 decisive
-//            (well-grounded, no echo). decisive_streak counts consecutive
-//            decisive at the TAIL, so the 5 decisive must be newest.
+// Project A: shared-slug = 2 explicit retrieved-unused (OLDER), then 5 decisive,
+//            plus 1 implicit Path A unused baseline (NEWEST, non-footnote).
+//            clean-slug = 3 decisive (well-grounded, no echo). decisive_streak
+//            counts consecutive decisive FOOTNOTES at the tail, so the implicit
+//            baseline must not break the streak.
 // Project B: shared-slug = 1 decisive  (must NOT leak into project A read).
 const lines = [];
 lines.push(row({ ts: iso(11), session_id: "sA", entry_slug: "shared-slug", used: "retrieved-unused", source: "memory-footnote", counterfactual: "x", project_root: PROJ_A }));
 lines.push(row({ ts: iso(10), session_id: "sA", entry_slug: "shared-slug", used: "retrieved-unused", source: "memory-footnote", counterfactual: "x", project_root: PROJ_A }));
 for (let i = 5; i >= 1; i--) lines.push(row({ ts: iso(i), session_id: "sA", entry_slug: "shared-slug", used: "decisive", source: "memory-footnote", counterfactual: "x", project_root: PROJ_A }));
+lines.push(row({ ts: iso(0), session_id: "sA", entry_slug: "shared-slug", used: "retrieved-unused", source: "path-a-implicit", counterfactual: "implicit baseline", project_root: PROJ_A, path_a_inject_id: "path-a-smoke" }));
 for (let i = 3; i >= 1; i--) lines.push(row({ ts: iso(i), session_id: "sA", entry_slug: "clean-slug", used: "decisive", source: "memory-footnote", counterfactual: "x", project_root: PROJ_A }));
 lines.push(row({ ts: iso(1), session_id: "sB", entry_slug: "shared-slug", used: "decisive", source: "memory-footnote", counterfactual: "x", project_root: PROJ_B }));
 fs.writeFileSync(path.join(ledgerDir, "outcome-ledger.jsonl"), lines.join("\n") + "\n");
@@ -95,8 +98,8 @@ console.log("\n[5] summarizeEntryActivity counts + echo-chamber + absent=zeroed"
 const statsA = summarizeEntryActivity(aRows, ["shared-slug", "clean-slug", "absent-slug"], 30);
 const byA = Object.fromEntries(statsA.map((s) => [s.slug, s]));
 check("shared decisive=5", byA["shared-slug"].decisive_count === 5, JSON.stringify(byA["shared-slug"]));
-check("shared retrieved-unused=2", byA["shared-slug"].retrieved_unused_count === 2);
-check("shared echo-chamber=true (streak≥5)", byA["shared-slug"].possible_echo_chamber === true);
+check("shared retrieved-unused=3 (2 footnote + 1 path-a-implicit)", byA["shared-slug"].retrieved_unused_count === 3, JSON.stringify(byA["shared-slug"]));
+check("shared echo-chamber=true (path-a-implicit does not break footnote streak)", byA["shared-slug"].possible_echo_chamber === true);
 check("clean decisive=3, echo=false", byA["clean-slug"].decisive_count === 3 && byA["clean-slug"].possible_echo_chamber === false);
 const absent = byA["absent-slug"];
 const absentHasData = !!absent.last_seen || absent.decisive_count > 0 || absent.confirmatory_count > 0 || absent.retrieved_unused_count > 0 || absent.total_retrievals > 0;
@@ -105,7 +108,35 @@ check("absent slug → zeroed record (hasData guard required)", absent.decisive_
 console.log("\n[6] isolation end-to-end: A-read sees only A's count (5, not 6)");
 check("shared-slug decisive=5 from A-only", byA["shared-slug"].decisive_count === 5);
 
-console.log("\n[7] buildClassifierPrompt renders track-record");
+console.log("\n[7] collectOutcomes supplements Path A injected slugs as implicit baseline");
+{
+  const ca = jiti(path.join(repoRoot, "extensions/_shared/causal-anchor.ts"));
+  ca._setCurrentAnchorForTests("sPath", 7);
+  const pathALedgerDir = path.join(tmpHome, ".state", "memory");
+  fs.mkdirSync(pathALedgerDir, { recursive: true });
+  fs.writeFileSync(path.join(pathALedgerDir, "path-a-ledger.jsonl"), row({
+    ts: iso(0), session_id: "sPath", turn_id: 7, inject_id: "path-a-implicit-smoke",
+    outcome: "injected", injected_slugs: ["implicit-slug", "explicit-slug"],
+  }) + "\n");
+
+  const implicitOnly = oc.collectOutcomes([
+    { type: "message", message: { role: "user", content: "use memory" } },
+    { type: "message", message: { role: "assistant", content: "no explicit footnote" } },
+  ], "sPath");
+  const implicitRow = implicitOnly.rows.find((r) => r.source === "path-a-implicit" && r.entry_slug === "implicit-slug");
+  check("collector emits source=path-a-implicit", !!implicitRow && implicitRow.used === "retrieved-unused" && implicitRow.path_a_inject_id === "path-a-implicit-smoke", JSON.stringify(implicitOnly.rows));
+
+  const withFootnote = oc.collectOutcomes([
+    { type: "message", message: { role: "user", content: "use memory" } },
+    { type: "message", message: { role: "assistant", content: "```memory-footnote\nentry: explicit-slug\nused: confirmatory\ncounterfactual: used it\n```" } },
+  ], "sPath");
+  check("explicit current-turn footnote is not double-counted as implicit",
+    withFootnote.rows.some((r) => r.source === "memory-footnote" && r.entry_slug === "explicit-slug") &&
+    !withFootnote.rows.some((r) => r.source === "path-a-implicit" && r.entry_slug === "explicit-slug"),
+    JSON.stringify(withFootnote.rows));
+}
+
+console.log("\n[8] buildClassifierPrompt renders track-record");
 const cardWith = { slug: "shared-slug", title: "T", outcome_activity: { decisive: 5, confirmatory: 0, retrieved_unused: 2, possible_echo_chamber: true, last_seen: iso(1) } };
 const cardWithout = { slug: "clean-slug", title: "C" };
 const prompt = buildPrompt({ windowText: "user said use X", stagingContext: [], relatedEntries: [cardWith, cardWithout] });
@@ -114,12 +145,12 @@ check("renders ⚠️possible-echo-chamber", /⚠️possible-echo-chamber/.test(
 check("renders last_seen=YYYY-MM-DD", /last_seen=\d{4}-\d{2}-\d{2}/.test(prompt));
 check("renders (none recorded) for card without", /track-record: \(none recorded\)/.test(prompt));
 
-console.log("\n[8] prompt carries DISCOUNT guidance (direction-correct)");
+console.log("\n[9] prompt carries DISCOUNT guidance (direction-correct)");
 check("has 'DISCOUNT an entry's apparent authority'", /DISCOUNT an entry's apparent authority/.test(prompt));
 check("has 'NOT to inflate correction'", /NOT to inflate correction/.test(prompt));
 check("still requires content match", /STILL need the user's current/.test(prompt));
 
-console.log("\n[9] scoped related slug sanitizes to bare ledger slug (opus hardening)");
+console.log("\n[10] scoped related slug sanitizes to bare ledger slug (opus hardening)");
 check("project:pi:shared-slug → shared-slug", sanitizeSlug("project:pi:shared-slug") === "shared-slug");
 
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch {}

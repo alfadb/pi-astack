@@ -15,7 +15,9 @@ export function entryMatchesFilters(entry: MemoryEntry, filters?: SearchFilters)
     // ZERO entries (no read-model entry is ever `deprecated`). (audit P2.)
     const statuses = new Set(filters.status.map((s) => {
       const v = s.toLowerCase();
-      return v === "deprecated" ? "superseded" : v;
+      if (v === "deprecated" || v === "superseded-in-part") return "superseded";
+      if (v === "in-progress") return "provisional";
+      return v;
     }));
     if (!statuses.has("all") && !statuses.has(entry.status.toLowerCase())) return false;
   } else {
