@@ -57,11 +57,11 @@ export const STAGING_PROMOTION_PROMPT_VERSION = "v2";
 
 // ── Tunables ──────────────────────────────────────────────────────────
 
-/** Promotion is expensive (multi-view + durable write); daily cadence
- *  matches the archive-reactivation / age-out cost envelope. */
-const DEFAULT_MIN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** Promotion is expensive (multi-view + durable write); keep a bounded
+ *  cadence while allowing existing backlog to drain in days, not weeks. */
+const DEFAULT_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000;
 /** Oldest-first cap per run; excess rolls into the next debounced run. */
-const MAX_PROMOTE_PER_RUN = 3;
+const MAX_PROMOTE_PER_RUN = 6;
 /** Don't re-attempt a rejected / transiently-failed promotion within this
  *  many days. Spec is 14 days — not 4 weeks; reviewers sometimes misread
  *  the unit. */
@@ -287,15 +287,17 @@ async function entryMatchesPromotionProject(entry: StagingEntry, ctx?: Promotion
     return Boolean(rootMatch || idMatch);
   }
 
-  // Legacy entry without origin: only claim it if its target slug exists in
-  // the current project's durable store. Legacy entries with neither origin
-  // nor target_entry_slug are unowned residue and are skipped by every project
-  // until an explicit backfill claims them.
+  // Legacy entry without origin: first claim it if its target slug exists in
+  // the current project's durable store. If the legacy entry has no target,
+  // only pi-global may claim it; otherwise pre-origin staging residue with no
+  // target is permanently invisible to every project.
   const targetSlug = entry.correction_signal?.target_entry_slug;
-  if (!targetSlug || !ctx.abrainHome || !currentId) return false;
-  const scanRoot = path.join(ctx.abrainHome, "projects", currentId);
-  const dup = await detectProjectDuplicate(scanRoot, "", { slug: targetSlug });
-  return dup.duplicate;
+  if (targetSlug && ctx.abrainHome && currentId) {
+    const scanRoot = path.join(ctx.abrainHome, "projects", currentId);
+    const dup = await detectProjectDuplicate(scanRoot, "", { slug: targetSlug });
+    return dup.duplicate;
+  }
+  return currentId === "pi-global";
 }
 
 /** Load promote-candidate staging entries (oldest first, capped).
@@ -308,8 +310,8 @@ async function entryMatchesPromotionProject(entry: StagingEntry, ctx?: Promotion
  *    - explicit origin_project_id/root matching current project → select;
  *    - no origin but target_entry_slug resolves in current project store →
  *      select (legacy back-compat);
- *    - no origin AND no target_entry_slug → permanently skip in every
- *      project until a backfill claims it (unowned legacy residue);
+ *    - no origin AND no target_entry_slug → pi-global claims legacy
+ *      residue; other projects leave it alone;
  *    - otherwise → leave in the global pool for its owning project.
  *  FIX-6: also skip any entry whose slug is referenced by an existing
  *  multiview-pending replay file (source_staging_slug), because the A'
@@ -1440,7 +1442,9 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
     result.degraded = degraded || undefined;
     result.durationMs = Date.now() - t0;
 
-    writeLastRun(options.projectRoot, now, result.ok && !degraded ? "ok" : degraded ? "degraded" : "skipped");
+    if (!degraded) {
+      writeLastRun(options.projectRoot, now, result.ok ? "ok" : "skipped");
+    }
     appendLedgerRow({
       op: "staging_promote",
       ok: result.ok,

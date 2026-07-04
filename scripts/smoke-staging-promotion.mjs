@@ -730,6 +730,13 @@ console.log("\n[13] cap selects oldest N in order");
     })).map((c) => c.entry.slug);
     check("cap=3 returns exactly 3", selected.length === 3, selected.join(","));
     check("cap=3 returns oldest first", JSON.stringify(selected) === JSON.stringify(["cap-5", "cap-4", "cap-3"]), JSON.stringify(selected));
+
+    const defaultSelected = (await promotion.selectPromoteCandidates(new Date(), undefined, {
+      projectRoot,
+      projectId,
+      abrainHome: tmpRoot,
+    })).map((c) => c.entry.slug);
+    check("default cap returns six or fewer", defaultSelected.length === 5, JSON.stringify(defaultSelected));
   } finally {
     if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
     else process.env.ABRAIN_ROOT = prevRoot;
@@ -788,6 +795,22 @@ console.log("\n[14] cross-project attribution");
     check("project B processed its own entry", b.called === true && b.r.promoted_slugs.includes("cross-b"));
     check("project A did not process B's entry", a.r.promoted_slugs.includes("cross-b") === false);
     check("project B did not process A's entry", b.r.promoted_slugs.includes("cross-a") === false);
+
+    const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-promo-legacy-"));
+    writeStaging(makeEntry("legacy-unowned", { resolver_disposition: "promote_candidate" }));
+    const selectedByOrdinaryProject = await promotion.selectPromoteCandidates(new Date(), 10, {
+      projectRoot: legacyRoot,
+      projectId: "ordinary-project",
+      abrainHome: tmpRoot,
+    });
+    const selectedByPiGlobal = await promotion.selectPromoteCandidates(new Date(), 10, {
+      projectRoot: legacyRoot,
+      projectId: "pi-global",
+      abrainHome: tmpRoot,
+    });
+    check("legacy no-origin/no-target is not claimed by ordinary projects", selectedByOrdinaryProject.some((c) => c.entry.slug === "legacy-unowned") === false);
+    check("legacy no-origin/no-target is claimed by pi-global", selectedByPiGlobal.some((c) => c.entry.slug === "legacy-unowned") === true);
+    try { fs.rmSync(legacyRoot, { recursive: true, force: true }); } catch {}
   } finally {
     if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
     else process.env.ABRAIN_ROOT = prevRoot;
@@ -1316,6 +1339,7 @@ console.log("\n[19a] identity LLM throws twice → real error rationale + ledger
     check("llm error: outcome error", result.ok === false && result.rejected_slugs.includes(stagingSlug) && entryAfter.promotion_outcome === "error", JSON.stringify({ result, entryAfter }));
     check("llm error: rationale is real truncated error", entryAfter.promotion_rationale.startsWith("network down while resolving identity") && entryAfter.promotion_rationale.length <= 300, JSON.stringify(entryAfter));
     check("llm error: ledger has real truncated error", ledgerRows.some((row) => typeof row.error === "string" && row.error.startsWith("network down while resolving identity") && row.error.length <= 300), JSON.stringify(ledgerRows));
+    check("llm error: degraded run does not write last-run", !fs.existsSync(promotion.stagingPromotionLastRunPath(projectRoot)));
   } finally {
     if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
     else process.env.ABRAIN_ROOT = prevRoot;
