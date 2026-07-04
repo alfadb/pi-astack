@@ -42,6 +42,7 @@ status: active
 | `feature-changelog.md` | **功能/需求变更**记录（不是代码变更/commit 流水）| 人类拥有，agent 代起草，人类签字 |
 | `roadmap.md` | 未完成/deferred 的工作 backlog（任务级，区别于 vision 的目标级）| 人类 + agent |
 | `adr/` | **方向级**架构决策（被取代/walk-back 关系、为什么这么定）。详见 §4 迁移计划 | 人类签字 |
+| `research/` | 非规范研究资料架子：外部文章调研、来源链接、对比、工作性假设；可被后续方向/需求/ADR 吸收，但自身不构成项目决策 | 人类 + agent |
 
 **不进 docs**（属于 abrain + 代码域）：技术机制设计、调用链/模块图、prompt 全文、schema、当前实现状态快照（扩展清单、计数）、commit 流水、审计转录。
 
