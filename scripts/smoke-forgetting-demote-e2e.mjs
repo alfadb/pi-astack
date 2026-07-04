@@ -47,17 +47,18 @@ process.env.ABRAIN_ROOT = abrainHome; // sandbox device-id + ledger paths
 const sediment = { ...sedSettings.DEFAULT_SEDIMENT_SETTINGS, gitCommit: false, lockTimeoutMs: 5000 };
 const writeOpts = { projectRoot, abrainHome, projectId, settings: sediment, scope: "project" };
 
-// Mirror the production agent_end archiveEntry closure (index.ts ~L2072):
-// real updateProjectEntry with status=archived + expected_status:"active" CAS.
+// Mirror the production agent_end archiveEntry closure: real updateProjectEntry
+// with status=archived + proposal-pinned expected_status CAS.
 const archiveEntry = async (target) => {
   try {
+    const expectedStatus = target.expected_status ?? "active";
     const res = await writer.updateProjectEntry(
       target.slug,
       {
         status: "archived",
-        expected_status: "active",
+        expected_status: expectedStatus,
         timelineAction: "archived",
-        timelineNote: `forgetting-executor v1(${target.reason})`,
+        timelineNote: `forgetting-executor v1(${target.reason}; expected_status=${expectedStatus})`,
         sessionId: "demote-e2e",
       },
       { ...writeOpts, dryRun: false, auditOperation: "forgetting_demote_apply" },
@@ -133,6 +134,30 @@ try {
   //    clobber an entry the user/brain has since reactivated.
   const direct = await archiveEntry({ slug, kind: "decision", reason: "stale-retry" });
   check("real archiveEntry CAS-rejects an already-archived entry", direct.rejected === true && direct.ok === false, JSON.stringify(direct));
+
+  // 7) D* Phase 1 E1 path: a real superseded entry with a non-self successor
+  //    gets a deterministic execution_ready proposal and archives under
+  //    expected_status:"superseded" CAS.
+  const createdSup = await writer.writeProjectEntry(
+    { title: "Demote e2e superseded fixture entry", kind: "decision", status: "active", confidence: 5, compiledTruth: `${BODY} Superseded fixture variant.` },
+    writeOpts,
+  );
+  check("create second active entry", createdSup.status === "created", JSON.stringify(createdSup));
+  const supSlug = createdSup.slug;
+  const supFile = createdSup.path;
+  const superseded = await writer.supersedeProjectEntry(supSlug, { ...writeOpts, dryRun: false, reason: "fixture successor", newSlug: "demote-e2e-successor", sessionId: "demote-e2e" });
+  check("fixture entry flipped to superseded", superseded.status === "superseded" && /^status: superseded$/m.test(fs.readFileSync(supFile, "utf-8")), JSON.stringify(superseded));
+  const bridge = elp.appendSupersededFrontmatterProposals({
+    projectRoot,
+    entries: [{ slug: supSlug, kind: "decision", status: "superseded", frontmatter: { status: "superseded", superseded_by: ["demote-e2e-successor"] }, relations: [{ type: "superseded_by", to: "demote-e2e-successor" }] }],
+  });
+  check("frontmatter bridge queued one E1", bridge.proposals_appended === 1 && bridge.e1_count === 1, JSON.stringify(bridge));
+  const e1 = elp.readLifecycleProposals(projectRoot).find((p) => p.slug === supSlug);
+  check("E1 proposal is execution_ready with expected_status=superseded", e1?.disposition === "execution_ready" && e1?.expected_status === "superseded", JSON.stringify(e1));
+  const r3 = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
+  check("executor demoted the superseded E1 entry", (r3.demoted || []).includes(supSlug), JSON.stringify(r3.demoted));
+  const supAfter = fs.readFileSync(supFile, "utf-8");
+  check("superseded E1 entry .md flipped to archived", /^status: archived$/m.test(supAfter), supAfter.slice(0, 160));
 } finally {
   if (prevRoot === undefined) delete process.env.ABRAIN_ROOT;
   else process.env.ABRAIN_ROOT = prevRoot;

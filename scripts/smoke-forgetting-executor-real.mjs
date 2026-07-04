@@ -57,7 +57,7 @@ seedWarm();
 
 const settings = (autoDemote) => ({ forgetting: { demoteShadow: true, autoDemote, demoteMaxBatch: 5, resurrectionBackoffRate: 0.5, instrumentation: false, decayShadow: false } });
 const prop = (slug) => ({ slug, kind: "decision", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: `${slug} superseded`, falsifier: "if not" } });
-const mkArchive = (result) => { const calls = []; return { calls, fn: async (t) => { calls.push(t.slug); return typeof result === "function" ? result(t) : result; } }; };
+const mkArchive = (result) => { const calls = []; const targets = []; return { calls, targets, fn: async (t) => { calls.push(t.slug); targets.push(t); return typeof result === "function" ? result(t) : result; } }; };
 const statusOf = (slug) => { const r = elp.readLifecycleProposals(pr).find((x) => x.slug === slug); return r ? r.status : "absent"; };
 
 elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop("decay-b")] });
@@ -75,6 +75,7 @@ elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop
   const arc = mkArchive({ ok: true, status: "archived", rejected: false });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
   ok(r.dry_run === false && arc.calls.length === 2 && r.demoted.length === 2, `on → demote 2 (calls=${arc.calls.length} demoted=${r.demoted?.length})`);
+  ok(arc.targets.every((t) => t.expected_status === "active"), "legacy active proposals pass expected_status=active");
   ok(statusOf("decay-a") === "executed" && statusOf("decay-b") === "executed", "on → proposals executed");
   ok(et.getEntryTelemetry(pr, "decay-a")?.proposal_cooldown_until, "on → cooldown 写入");
   ok(fs.readFileSync(demoteLedger, "utf-8").trim().split("\n").length === 2, "on → demote-ledger 2 行");
@@ -97,7 +98,24 @@ elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-c")] });
   ok(statusOf("decay-c") === "executed", "CAS reject → proposal 标 executed(停重试, 防复活后重放, 不再 pending)");
 }
 
-// ---- 5) 断路器 corpus_floor: plannedCount + fail-closed ----
+// ---- 5) frontmatter E1/E2: E1 expected_status=superseded executes; E2 review_required stays pending ----
+elp.appendSupersededFrontmatterProposals({
+  projectRoot: pr,
+  entries: [
+    { slug: "sup-a", kind: "decision", status: "superseded", frontmatter: { status: "superseded", superseded_by: ["sup-new"] }, relations: [{ type: "superseded_by", to: "sup-new" }] },
+    { slug: "sup-b", kind: "decision", status: "superseded", frontmatter: { status: "superseded" }, relations: [] },
+  ],
+});
+{
+  const arc = mkArchive({ ok: true, status: "archived", rejected: false });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  ok(arc.calls.length === 1 && arc.calls[0] === "sup-a" && r.demoted?.includes("sup-a"), "E1 frontmatter proposal executes exactly once");
+  ok(arc.targets[0]?.expected_status === "superseded", "E1 passes expected_status=superseded to archiveEntry");
+  ok(statusOf("sup-a") === "executed", "E1 proposal marked executed");
+  ok(statusOf("sup-b") === "pending", "E2 review_required proposal remains pending and unexecuted");
+}
+
+// ---- 6) 断路器 corpus_floor: plannedCount + fail-closed ----
 fs.rmSync(demoteLedger, { force: true });
 elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-e"), prop("decay-f")] }); // 2 pending
 {
@@ -113,7 +131,7 @@ elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-e"), prop
   ok(r.dry_run === true && r.circuit_breaker?.reason === "corpus_floor" && arc.calls.length === 0, "corpus_floor fail-closed: active 未知 → trip(零 mutation)");
 }
 
-// ---- 6) 断路器 daily_cap ----
+// ---- 7) 断路器 daily_cap ----
 {
   const rows = [];
   for (let i = 0; i < 20; i++) rows.push(JSON.stringify({ ts_ms: NOW - i * 1000, slug: `past${i}`, op: "demote" }));
@@ -123,7 +141,7 @@ elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-e"), prop
   ok(r.circuit_breaker?.reason === "daily_cap" && arc.calls.length === 0, "daily_cap(20 in 24h)→ trip, 零 mutation");
 }
 
-// ---- 7) fail-safe insufficient_data ----
+// ---- 8) fail-safe insufficient_data ----
 fs.rmSync(demoteLedger, { force: true });
 fs.writeFileSync(reactLedger, "", "utf-8");
 {

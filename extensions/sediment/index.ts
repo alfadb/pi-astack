@@ -66,6 +66,7 @@ import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
 import { runArchiveReactivationIfDue } from "./archive-reactivation";
 import { runForgettingExecutor } from "./forgetting-executor";
+import { appendSupersededMarkdownFrontmatterProposals, type LifecycleProposalExpectedStatus } from "./entry-lifecycle-proposals";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
@@ -2132,10 +2133,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // ADR 0031 Phase 3(gated): forgetting executor。demoteShadow on → 跑 executor。
       // autoDemote off(或 autoLlmWriteEnabled≠true)→ DRY-RUN(读 pending archive proposal +
       // hysteresis + resurrection → 算 plan + 写 shadow audit, **零 mutation**)。autoDemote on
-      // 且全自动写 → 真实 active→archived:executor 编排 §4.2 门控 proposal + resurrection
+      // 且全自动写 → 真实 archive:executor 编排 §4.2 门控 proposal + resurrection
       // fail-safe + 反失控断路器, 实际归档由这里注入的 archiveEntry 完成(updateProjectEntry
-      // status=archived + expected_status:"active" CAS —— 仅当仍 active 才归, 防打回用户刚复活的
-      // 条目;archived 全文留盘可复活, 无 git rm)。demoteShadow 默认 false → 连调度都不发生
+      // status=archived + proposal.expected_status CAS —— legacy active proposal 仅当仍 active 才归,
+      // D* E1 superseded proposal 仅当仍 superseded 才归;archived 全文留盘可复活, 无 git rm)。demoteShadow 默认 false → 连调度都不发生
       // (零开销 + 零行为变化)。fire-and-forget, 绝不阻断 agent_end。
       const memForgettingSettings = resolveMemorySettings();
       if (memForgettingSettings.forgetting?.demoteShadow) {
@@ -2149,25 +2150,30 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               // 一律退化 dry-run, 尊重既有写 kill-switch 层级)。
               const wantReal = memForgettingSettings.forgetting?.autoDemote === true
                 && settings.autoLlmWriteEnabled === true;
+              try { appendSupersededMarkdownFrontmatterProposals({ projectRoot: cwd }); }
+              catch { /* frontmatter bridge is advisory; executor still runs */ }
+              let allEntries: Array<{ slug: string; status: string; scope?: string }> = [];
+              try { allEntries = (await loadEntries(cwd, memForgettingSettings, undefined)) as typeof allEntries; }
+              catch { /* active corpus stays unknown; real executor fail-closes via corpus floor */ }
               if (!wantReal) {
                 await runForgettingExecutor(cwd, memForgettingSettings);
                 return;
               }
               // real path: 从已加载条目解析 per-slug scope + active 语料规模(断路器用)。
-              const allEntries = (await loadEntries(cwd, memForgettingSettings, undefined)) as Array<{ slug: string; status: string; scope?: string }>;
-              const activeCorpusSize = allEntries.filter((e) => e.status === "active").length;
+              const activeCorpusSize = allEntries.length > 0 ? allEntries.filter((e) => e.status === "active").length : undefined;
               const scopeOf = new Map(allEntries.map((e) => [e.slug, e.scope === "world" ? "world" : "project"] as const));
-              const archiveEntry = async (target: { slug: string; kind: string; reason: string }) => {
+              const archiveEntry = async (target: { slug: string; kind: string; reason: string; expected_status?: LifecycleProposalExpectedStatus }) => {
                 try {
                   const scope = scopeOf.get(target.slug) ?? "project";
+                  const expectedStatus = target.expected_status ?? "active";
                   const res = await updateProjectEntry(
                     target.slug,
                     {
                       status: "archived",
-                      // CAS:仅当当前仍 active 才归档;若已被复活/超越 → rejected(留 pending)。
-                      expected_status: "active",
+                      // CAS: proposal pins the observed current status; E1 uses superseded, legacy demote uses active.
+                      expected_status: expectedStatus,
                       timelineAction: "archived",
-                      timelineNote: `forgetting-executor v1(${target.reason})`,
+                      timelineNote: `forgetting-executor v1(${target.reason}; expected_status=${expectedStatus})`,
                       sessionId,
                     },
                     {

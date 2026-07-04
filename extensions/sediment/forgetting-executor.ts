@@ -22,7 +22,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { userGlobalSedimentDir, ensureUserGlobalSidecarMigrated, formatLocalIsoTimestamp } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
-import { readLifecycleProposals, markProposalsExecuted } from "./entry-lifecycle-proposals";
+import { readLifecycleProposals, markProposalsExecuted, type LifecycleProposalExpectedStatus } from "./entry-lifecycle-proposals";
 import { getEntryTelemetry, setEntryHysteresis } from "./entry-telemetry";
 import { resurrectionRateReport } from "./resurrection-rate-monitor";
 import type { MemorySettings } from "../memory/settings";
@@ -38,12 +38,13 @@ export interface ArchiveProposalInput {
   slug: string;
   kind: string;
   reason: string; // affirm_stale | affirm_superseded | affirm_echo_chamber(已 §4.2 证据门控)
+  expected_status?: LifecycleProposalExpectedStatus;
 }
 export interface HysteresisState {
   proposal_cooldown_until?: string;
   holdout_until?: string;
 }
-export interface DemoteDecision { slug: string; kind: string; reason: string; }
+export interface DemoteDecision { slug: string; kind: string; reason: string; expected_status?: LifecycleProposalExpectedStatus; }
 export interface DemoteSkip { slug: string; skip_reason: "cooldown" | "holdout" | "batch_cap" | "resurrection_backoff" | "no_slug"; }
 export interface DemotePlan {
   demote: DemoteDecision[];
@@ -81,7 +82,7 @@ export function selectDemoteTargets(input: SelectDemoteInput): DemotePlan {
     const holdout = h.holdout_until ? Date.parse(h.holdout_until) : NaN;
     if (Number.isFinite(cooldown) && cooldown > input.nowMs) { skipped.push({ slug: p.slug, skip_reason: "cooldown" }); continue; }
     if (Number.isFinite(holdout) && holdout > input.nowMs) { skipped.push({ slug: p.slug, skip_reason: "holdout" }); continue; }
-    eligible.push({ slug: p.slug, kind: p.kind, reason: p.reason });
+    eligible.push({ slug: p.slug, kind: p.kind, reason: p.reason, expected_status: p.expected_status });
   }
 
   if (backoff) {
@@ -151,7 +152,10 @@ function appendDemoteLedger(projectRoot: string, target: DemoteDecision, now: Da
       slug: target.slug,
       kind: target.kind,
       reason: target.reason,
+      expected_status: target.expected_status ?? "active",
       op: "demote",
+      reactivation_monitor_window_days: 30,
+      reactivation_expected: false
     };
     fs.appendFileSync(file, JSON.stringify(row) + "\n", "utf-8");
   } catch { /* best-effort */ }
@@ -178,6 +182,23 @@ function appendRealAudit(projectRoot: string, plan: DemotePlan, demoted: string[
     };
     fs.appendFileSync(file, JSON.stringify(row) + "\n", "utf-8");
   } catch { /* best-effort */ }
+}
+
+function executableArchiveProposals(projectRoot: string): ArchiveProposalInput[] {
+  return readLifecycleProposals(projectRoot)
+    .filter((p) =>
+      p.op === "archive" &&
+      p.status === "pending" &&
+      (p.disposition ?? "execution_ready") === "execution_ready" &&
+      typeof p.slug === "string" &&
+      p.slug,
+    )
+    .map((p) => ({
+      slug: p.slug as string,
+      kind: p.kind,
+      reason: p.reason,
+      expected_status: p.expected_status ?? "active",
+    }));
 }
 
 function appendDryRunAudit(projectRoot: string, plan: DemotePlan, now: Date): void {
@@ -217,9 +238,7 @@ export function runForgettingExecutorDryRun(
   if (!settings.forgetting?.demoteShadow) return { ok: true, enabled: false, dry_run: true, reason: "demoteShadow_off" };
   if (!projectRoot) return { ok: true, enabled: true, dry_run: true, reason: "no_project_root" };
   try {
-    const proposals: ArchiveProposalInput[] = readLifecycleProposals(projectRoot)
-      .filter((p) => p.op === "archive" && p.status === "pending" && typeof p.slug === "string" && p.slug)
-      .map((p) => ({ slug: p.slug as string, kind: p.kind, reason: p.reason }));
+    const proposals: ArchiveProposalInput[] = executableArchiveProposals(projectRoot);
 
     const hysteresisBySlug: Record<string, HysteresisState> = {};
     for (const p of proposals) {
@@ -272,9 +291,7 @@ export async function runForgettingExecutor(
   if (!settings.forgetting?.demoteShadow) return { ok: true, enabled: false, dry_run: true, reason: "demoteShadow_off" };
   if (!projectRoot) return { ok: true, enabled: true, dry_run: true, reason: "no_project_root" };
   try {
-    const proposals: ArchiveProposalInput[] = readLifecycleProposals(projectRoot)
-      .filter((p) => p.op === "archive" && p.status === "pending" && typeof p.slug === "string" && p.slug)
-      .map((p) => ({ slug: p.slug as string, kind: p.kind, reason: p.reason }));
+    const proposals: ArchiveProposalInput[] = executableArchiveProposals(projectRoot);
 
     const hysteresisBySlug: Record<string, HysteresisState> = {};
     for (const p of proposals) {

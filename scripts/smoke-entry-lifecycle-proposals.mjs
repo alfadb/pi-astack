@@ -10,8 +10,10 @@
  *   - demoted_signals are NOT a source (the function only takes `promoted`)
  *   - rows are project-scoped; appends accumulate across runs
  *   - corrupt sidecar lines tolerated
+ *   - deterministic frontmatter bridge emits E1 execution_ready / E2 review_required
+ *   - same slug + evidence/source replays are idempotent
  *   - HARD BOUNDARY (prompt §8): never imports writer/curator/multi-view; never
- *     writes durable markdown; status is always "pending" (M3 never executes)
+ *     writes durable markdown; proposal generation status is always "pending"
  */
 
 import fs from "node:fs";
@@ -64,8 +66,11 @@ const projectA = path.join(tmpDir, "project-a");
 const projectB = path.join(tmpDir, "project-b");
 
 const runtimeStub = {
+  abrainProjectDir: (abrainHome, projectId) => path.join(abrainHome, "projects", projectId),
   ensureUserGlobalSidecarMigrated: () => {},
   formatLocalIsoTimestamp: (d) => (d ?? new Date()).toISOString(),
+  resolveActiveProject: () => ({ activeProject: { projectId: "smoke-project" } }),
+  resolveUserGlobalAbrainHome: () => path.join(tmpDir, "abrain"),
   userGlobalSedimentDir: () => ledgerDir,
 };
 const causalAnchorStub = {
@@ -87,7 +92,7 @@ const mod = loadCJS(transpile(modulePath), path.join(tmpDir, "entry-lifecycle-pr
   ["../_shared/causal-anchor", causalAnchorStub],
   ["../_shared/sync-file-lock", syncFileLockStub],
 ]));
-const { entryLifecycleProposalsPath, appendLifecycleProposals, readLifecycleProposals } = mod;
+const { entryLifecycleProposalsPath, appendLifecycleProposals, appendSupersededFrontmatterProposals, appendSupersededMarkdownFrontmatterProposals, readLifecycleProposals } = mod;
 
 function promotedWithProposal(slug, op, reason) {
   return {
@@ -120,8 +125,20 @@ check("a promoted advisory WITH lifecycle_proposal yields one pending row, field
   const row = rows[0];
   if (row.slug !== "stale-entry" || row.op !== "archive" || row.reason !== "affirm_superseded") throw new Error(`fields wrong: ${JSON.stringify(row)}`);
   if (row.status !== "pending") throw new Error("M3 must emit status=pending (never executes)");
+  if (row.expected_status !== "active" || row.disposition !== "execution_ready") throw new Error(`active proposal gate fields wrong: ${JSON.stringify(row)}`);
   if (!row.independent_evidence.includes("superseded evidence") || !row.falsifier) throw new Error("evidence/falsifier lost");
   if (row.message !== "msg for stale-entry") throw new Error("message context lost");
+});
+
+check("same promoted proposal replay is idempotent", () => {
+  const before = readLifecycleProposals(projectA).length;
+  const r = appendLifecycleProposals({
+    projectRoot: projectA,
+    promoted: [promotedWithProposal("stale-entry", "archive", "affirm_superseded")],
+    now: new Date("2026-06-04T11:01:00Z"),
+  });
+  if (!r.ok || r.proposals_appended !== 0 || r.written !== false) throw new Error(`expected duplicate no-op, got ${JSON.stringify(r)}`);
+  if (readLifecycleProposals(projectA).length !== before) throw new Error("duplicate replay changed row count");
 });
 
 check("promoted advisories without a proposal are never written", () => {
@@ -154,6 +171,88 @@ check("corrupt sidecar lines are tolerated and cleaned on next write", () => {
   if (survived < 2) throw new Error("read must ignore corrupt line, not crash");
   appendLifecycleProposals({ projectRoot: projectA, promoted: [promotedWithProposal("cleanup", "archive", "affirm_stale")], now: new Date("2026-06-04T12:20:00Z") });
   if (fs.readFileSync(entryLifecycleProposalsPath(), "utf8").includes("{not valid json")) throw new Error("next write should rewrite clean JSONL");
+});
+
+check("frontmatter bridge emits E1 executable and E2 review-only proposals", () => {
+  const r = appendSupersededFrontmatterProposals({
+    projectRoot: projectA,
+    now: new Date("2026-06-04T13:00:00Z"),
+    entries: [
+      { slug: "old-a", kind: "decision", status: "superseded", frontmatter: { status: "superseded", superseded_by: ["new-a"] }, relations: [{ type: "superseded_by", to: "new-a" }] },
+      { slug: "old-b", kind: "fact", status: "superseded", frontmatter: { status: "superseded" }, relations: [] },
+      { slug: "old-c", kind: "fact", status: "superseded", frontmatter: { status: "superseded", superseded_by: ["old-c"] }, relations: [{ type: "superseded_by", to: "old-c" }] },
+      { slug: "old-d", kind: "fact", status: "archived", frontmatter: { status: "archived", superseded_by: ["new-d"] }, relations: [{ type: "superseded_by", to: "new-d" }] },
+      { slug: "old-e", kind: "fact", status: "superseded", frontmatter: { status: "superseded-in-part", superseded_by: ["new-e"] }, relations: [{ type: "superseded_by", to: "new-e" }] },
+    ],
+  });
+  if (!r.ok || r.e1_count !== 1 || r.e2_count !== 2 || r.proposals_appended !== 3) throw new Error(`bridge counts wrong: ${JSON.stringify(r)}`);
+  const rows = readLifecycleProposals(projectA);
+  const e1 = rows.find((x) => x.slug === "old-a");
+  const e2 = rows.find((x) => x.slug === "old-b");
+  const self = rows.find((x) => x.slug === "old-c");
+  if (!e1 || e1.disposition !== "execution_ready" || e1.expected_status !== "superseded" || e1.target_slug !== "new-a") throw new Error(`E1 wrong: ${JSON.stringify(e1)}`);
+  if (!e2 || e2.disposition !== "review_required" || e2.reason !== "superseded_no_successor" || e2.review_required !== true) throw new Error(`E2 wrong: ${JSON.stringify(e2)}`);
+  if (!self || self.disposition !== "review_required") throw new Error(`self-edge must become E2 review: ${JSON.stringify(self)}`);
+  if (rows.some((x) => x.slug === "old-d" || x.slug === "old-e")) throw new Error("non-current-superseded entries must be skipped");
+});
+
+check("canonical markdown bridge reads block-list superseded_by", () => {
+  const projectRoot = path.join(tmpDir, "canonical-project");
+  const projectId = "smoke-project";
+  const projectDir = path.join(tmpDir, "abrain", "projects", projectId, "decisions");
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "block-list-old.md"), [
+    "---",
+    "id: project:smoke-project:block-list-old",
+    "scope: project",
+    "kind: decision",
+    "status: superseded",
+    "superseded_by:",
+    "  - block-list-new",
+    "---",
+    "",
+    "# Block list old",
+    "",
+    "Enough body text for a memory entry.",
+  ].join("\n"));
+  const r = appendSupersededMarkdownFrontmatterProposals({ projectRoot, abrainHome: path.join(tmpDir, "abrain"), projectId });
+  if (!r.ok || r.e1_count !== 1 || r.proposals_appended !== 1) throw new Error(`markdown bridge failed: ${JSON.stringify(r)}`);
+  const row = readLifecycleProposals(projectRoot).find((x) => x.slug === "block-list-old");
+  if (!row || row.target_slug !== "block-list-new" || row.disposition !== "execution_ready" || row.expected_status !== "superseded") throw new Error(`markdown E1 wrong: ${JSON.stringify(row)}`);
+  const r2 = appendSupersededMarkdownFrontmatterProposals({ projectRoot, abrainHome: path.join(tmpDir, "abrain"), projectId });
+  if (r2.proposals_appended !== 0) throw new Error(`markdown bridge replay not idempotent: ${JSON.stringify(r2)}`);
+
+  const l2Dir = path.join(tmpDir, "abrain", "l2", "views", "knowledge", "latest", "projects", projectId);
+  fs.mkdirSync(l2Dir, { recursive: true });
+  fs.writeFileSync(path.join(l2Dir, "block-list-old.md"), [
+    "---",
+    "id: project:smoke-project:block-list-old",
+    "scope: project",
+    "kind: decision",
+    "status: archived",
+    "---",
+    "",
+    "# Block list old",
+    "",
+    "Canonical projection says this entry is already archived.",
+  ].join("\n"));
+  const r3 = appendSupersededMarkdownFrontmatterProposals({ projectRoot: path.join(tmpDir, "canonical-project-2"), abrainHome: path.join(tmpDir, "abrain"), projectId });
+  if (r3.e1_count !== 0 || r3.e2_count !== 0 || r3.proposals_appended !== 0) throw new Error(`canonical archived overlay must skip legacy superseded edge: ${JSON.stringify(r3)}`);
+});
+
+check("frontmatter bridge second replay appends zero rows", () => {
+  const before = readLifecycleProposals(projectA).length;
+  const r = appendSupersededFrontmatterProposals({
+    projectRoot: projectA,
+    now: new Date("2026-06-04T13:05:00Z"),
+    entries: [
+      { slug: "old-a", kind: "decision", status: "superseded", frontmatter: { status: "superseded", superseded_by: ["new-a"] }, relations: [{ type: "superseded_by", to: "new-a" }] },
+      { slug: "old-b", kind: "fact", status: "superseded", frontmatter: { status: "superseded" }, relations: [] },
+      { slug: "old-c", kind: "fact", status: "superseded", frontmatter: { status: "superseded", superseded_by: ["old-c"] }, relations: [{ type: "superseded_by", to: "old-c" }] },
+    ],
+  });
+  if (!r.ok || r.proposals_appended !== 0 || r.written !== false) throw new Error(`expected idempotent no-op, got ${JSON.stringify(r)}`);
+  if (readLifecycleProposals(projectA).length !== before) throw new Error("idempotent bridge replay changed row count");
 });
 
 console.log("\nSource-level boundary guards (§8 Observation ≠ Authorization)");
