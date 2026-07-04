@@ -99,9 +99,28 @@ npm run project:activity-l2 -- --abrain ~/.abrain --as-of 2026-07-04T16:00:00.00
 
 ### P0b：人工可读入口与健康巡检
 
-候选后续工作：把 activity view 纳入 `health:memory` 的只读摘要，或新增只读 `health:activity` 脚本。它只报告 L2 view 是否存在、输入 hash、事件数量、unattributed 比例和最近 as_of，不自动修复。
+状态：已实施为显式只读 health 脚本，不接 `health:memory` 自动修复路径，不生成 projection，不写 abrain，不改变 runtime 注入或 `memory_search`。
 
-进入条件：P0a 在真实数据上至少使用一次，且 view 对人工判断有价值。
+代码触点：
+
+- `scripts/activity-l2-health.mjs`
+- `scripts/smoke-activity-l2-health.mjs`
+- `package.json` scripts：`health:activity-l2`、`smoke:activity-l2-health`
+
+运行方式：
+
+```bash
+npm run health:activity-l2 -- --abrain ~/.abrain
+npm run health:activity-l2 -- --view-root /tmp/activity-l2/latest --now 2026-07-04T16:00:00.000Z --max-age-hours 999999
+npm run smoke:activity-l2-health
+```
+
+验收：
+
+- health 默认读取 `~/.abrain/l2/views/activity/latest/manifest.json` 与 `project-time-allocation.md`。
+- 缺失 view、manifest/markdown 的 `output_hash`、`input_event_set_hash`、`included_events` 等字段不一致时返回非 0。
+- freshness 只报告 age；显式传 `--max-age-hours` 时才把 stale 作为失败。
+- 输出包含 included event 数、project/world/unattributed 分布和 manifest diagnostics，保持只读诊断身份。
 
 ### P1：runtime 消费实验（不默认注入）
 

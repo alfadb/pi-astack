@@ -39,7 +39,7 @@ status: active
 
 | Item | Intent | Notes |
 |---|---|---|
-| **Activity/attention L2 projector productization** | 让第二大脑从 L1 Evidence Events 派生“最近注意力分配到哪些项目”的人类可读 L2 view，并保持 deterministic / rebuildable。 | P0a 先以显式命令验证全局 project allocation；后续待做：纳入健康巡检、明确 output freshness、决定是否进入 session briefing / `memory_decide` prompt surface。禁止把 event count 说成真实工时；默认排除 legacy import。详细方案见 [`2026-07-04-activity-attention-timeline-l2-projector-plan.md`](./notes/2026-07-04-activity-attention-timeline-l2-projector-plan.md)。 |
+| **Activity/attention L2 projector productization** | 让第二大脑从 L1 Evidence Events 派生“最近注意力分配到哪些项目”的人类可读 L2 view，并保持 deterministic / rebuildable。 | P0a 已以显式命令验证全局 project allocation；P0b 已新增显式只读 health script，用于检查 view 存在性、manifest/markdown 一致性、output freshness 和 unattributed/project 分布。后续待决定是否进入 session briefing / `memory_decide` prompt surface。禁止把 event count 说成真实工时；默认排除 legacy import。详细方案见 [`2026-07-04-activity-attention-timeline-l2-projector-plan.md`](./notes/2026-07-04-activity-attention-timeline-l2-projector-plan.md)。 |
 | **Requirement / workline attribution gate** | 在 project 内回答“正在推进哪些需求 / 工作线”，但只在有真实 evidence 样本和 schema 论证后推进。 | 不与 project allocation 同批实现：project_id 是现有 L1 metadata，requirement/workline 是语义归因。若需要扩展 L1 event metadata 或新增 attribution event，先走 T0 / ADR；禁止从 slug/title 直接猜并冻结成字段。 |
 | **wiki-as-view rendering boundary** | 吸收 LLM Wiki 的“预编译人类可读知识”优点，但不新增第三个可写 memory store。 | L2 Markdown view 可以作为 human-readable wiki-like surface；canonical home 仍只能是 docs 或 abrain L1/L2。若未来人类高频消费、要求持久链接或批注，再带真实使用证据讨论物化层。 |
 | **canonical home 唯一规则成文化** | 降低 docs / research / abrain / wiki-like view split-brain 风险。 | 候选改动是 `docs/README.md` 或 `direction.md` 的小型边界补强：同一知识断言只有一个 canonical home；人类可读性通过 renderer 获得，不通过多写一份获得。需要人类签字后再改方向文档。 |
