@@ -425,6 +425,61 @@ export interface ReprojectAllKnowledgeResult {
   failures: string[];
 }
 
+export interface Adr0039L3PostWriteSyncResult {
+  ok: boolean;
+  dbPath: string;
+  counts: {
+    l1Events: number;
+    eventEdges: number;
+    l2Views: number;
+    searchCorpusRows: number;
+    projectorState: number;
+    jobs: number;
+    diagnostics: number;
+  };
+  failures: string[];
+}
+
+const ADR0039_L3_RELEVANT_WRITE_STATUSES = new Set(["created", "updated", "merged", "archived", "superseded", "deleted"]);
+
+type Adr0039L3WriteResultLike = {
+  status?: unknown;
+  knowledgeEvidenceEvent?: unknown;
+};
+
+function hasSuccessfulKnowledgeEvidenceEvent(result: Adr0039L3WriteResultLike): boolean {
+  const event = result.knowledgeEvidenceEvent;
+  if (!event || typeof event !== "object") return false;
+  const append = (event as { append?: unknown }).append;
+  const projection = (event as { projection?: unknown }).projection;
+  return !!(
+    (append && typeof append === "object" && (append as { ok?: unknown }).ok === true)
+    || (projection && typeof projection === "object")
+  );
+}
+
+export function hasAdr0039L3RelevantWriteResult(results: readonly Adr0039L3WriteResultLike[] | undefined): boolean {
+  return !!results?.some((result) => (
+    ADR0039_L3_RELEVANT_WRITE_STATUSES.has(String(result.status))
+    && hasSuccessfulKnowledgeEvidenceEvent(result)
+  ));
+}
+
+export async function syncAdr0039L3AfterKnowledgeWrite(args: {
+  abrainHome: string;
+  settings?: { knowledgeProjector?: { l2OutputRoot?: string } };
+}): Promise<Adr0039L3PostWriteSyncResult | undefined> {
+  try {
+    const { syncAdr0039L3Store } = await import("./adr0039-l3");
+    return await syncAdr0039L3Store({
+      abrainHome: args.abrainHome,
+      knowledgeLatestDir: path.join(knowledgeProjectionRoot(args.abrainHome, args.settings), "latest"),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 /** Full-corpus deterministic reproject of every knowledge identity from L1 to
  *  the L2 projection root. Single O(N) pass: scan L1 once, group nodes by
  *  identity, then fold + write each identity. (Calling
@@ -487,8 +542,8 @@ export async function reprojectAllKnowledge(
       } else {
         await fs.writeFile(outputPath, proj.markdown!, "utf-8");
         projected += 1;
-        lastWinner = proj.winnerEventId;
       }
+      lastWinner = proj.winnerEventId;
     } catch (err) {
       failed += 1;
       failures.push(`${identity}: ${err instanceof Error ? err.message : String(err)}`);
@@ -501,6 +556,7 @@ export async function reprojectAllKnowledge(
       `${JSON.stringify({ schemaVersion: "knowledge-projection-manifest/v1", updatedAtUtc: new Date().toISOString(), latestEventId: lastWinner, latestOperation: "reproject" }, null, 2)}\n`,
       "utf-8",
     );
+    await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
   }
   return { identities: byIdentity.size, projected, removed, failed, failures: failures.slice(0, 10) };
 }

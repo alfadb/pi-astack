@@ -149,6 +149,7 @@
     "smoke:constraint-l2-repo-preflight": "node scripts/smoke-constraint-l2-repo-preflight.mjs",
     "verify:constraint-l2-flip": "node scripts/verify-constraint-l2-flip.mjs --abrain ~/.abrain",
     "smoke:constraint-evidence-event": "node scripts/smoke-constraint-evidence-event.mjs",
+    "smoke:adr0039-l3-autosync": "node scripts/smoke-adr0039-l3-autosync.mjs",
     "smoke:adr0039-reconcile": "node scripts/smoke-adr0039-reconcile.mjs",
     "reconcile:adr0039": "node scripts/smoke-adr0039-reconcile.mjs --abrain ~/.abrain",
     "prepush:adr0039": "node scripts/pre-push-adr0039-reconcile.mjs --abrain ~/.abrain",

@@ -37,6 +37,7 @@ import type { CuratorDecision } from "./curator";
 import { runMultiView, type MultiViewResult } from "./multi-view";
 import { detectProjectDuplicate, type DedupeMatch } from "./dedupe";
 import { executeCuratorDecisionToBrain } from "./curator-decision-writer";
+import { hasAdr0039L3RelevantWriteResult, syncAdr0039L3AfterKnowledgeWrite } from "./knowledge-evidence";
 import type { ProjectEntryDraft, WriteProjectEntryResult } from "./writer";
 import { listRulesInScope, resolveDraftSlug } from "./writer";
 import type { SedimentSettings } from "./settings";
@@ -1183,6 +1184,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
 
   const result: StagingPromotionResult = { ok: true, ...base, model: resolveStagingPromotionModel(options.settings), durationMs: 0 };
   let degraded = false;
+  let wroteAdr0039L3RelevantKnowledge = false;
 
   try {
     for (const candidate of candidates) {
@@ -1381,6 +1383,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
             },
             createTimelineNote: `Promoted from staging ${entry.slug} by multi-view gate`,
           });
+          wroteAdr0039L3RelevantKnowledge = wroteAdr0039L3RelevantKnowledge || hasAdr0039L3RelevantWriteResult(writeResults);
         }
 
         // FIX-5: only a real durable write counts as promoted.
@@ -1434,6 +1437,10 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
           prompt_version: STAGING_PROMOTION_PROMPT_VERSION,
         });
       }
+    }
+
+    if (result.promoted_slugs.length > 0 && wroteAdr0039L3RelevantKnowledge) {
+      await syncAdr0039L3AfterKnowledgeWrite({ abrainHome: options.abrainHome, settings: options.settings });
     }
 
     // FIX-7b: ok = !degraded. A run that only duplicates/promotes some

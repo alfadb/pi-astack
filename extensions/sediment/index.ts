@@ -78,6 +78,7 @@ import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { loadEntries } from "../memory/parser";
 import { reconcileEmbeddings, resolveEmbeddingProviderConfig, vectorIndexPath } from "../memory/embedding";
 import { sanitizeForMemory } from "./sanitizer";
+import { hasAdr0039L3RelevantWriteResult, syncAdr0039L3AfterKnowledgeWrite } from "./knowledge-evidence";
 
 import {
   appendAudit,
@@ -3976,6 +3977,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         }
         tWriteEnd = Date.now();
         laneAShouldAdvance = shouldAdvanceAfterResults(results);
+        // ADR 0039 L3: refresh the rebuildable SQLite mirror once after
+        // explicit Knowledge L1/L2 writes. Best-effort inside helper.
+        if (hasAdr0039L3RelevantWriteResult(results)) {
+          await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
+        }
       }
 
       // ── Lane G (MEMORY-ABOUT-ME:) ────────────────────────────────
@@ -5142,6 +5148,13 @@ async function tryAutoWriteLane(args: {
     );
   }
 
+  const wrotePostWriteMaintenanceRelevant = hasAdr0039L3RelevantWriteResult(results);
+  // ADR 0039 L3: refresh the rebuildable SQLite mirror once after this
+  // auto-write batch. Best-effort: L3 freshness must not block L1/L2 writes.
+  if (wrotePostWriteMaintenanceRelevant) {
+    await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
+  }
+
   // ADR 0035 P2 (方向 B): reconcile vectors for entries written this turn.
   // Best-effort — embedding provider failure must NEVER block sediment. The
   // search-time staleOrMissing bounded-union (memory/embedding) is the freshness
@@ -5149,10 +5162,7 @@ async function tryAutoWriteLane(args: {
   // fallback path one extra search. Gated on embedding being configured
   // (provider+model set; DEFAULT is empty = disabled). content-hash gated +
   // scope-safe prune inside reconcileEmbeddings.
-  const wroteVectorRelevant = results.some((r) =>
-    r.status === "created" || r.status === "updated" || r.status === "merged"
-    || r.status === "archived" || r.status === "superseded" || r.status === "deleted");
-  if (wroteVectorRelevant && modelRegistry) {
+  if (wrotePostWriteMaintenanceRelevant && modelRegistry) {
     try {
       const memSettings = resolveMemorySettings();
       const emb = memSettings.embedding;
@@ -5418,6 +5428,9 @@ function scheduleMultiviewReplay(args: {
             && r.gitCommit === null);
           if (missingCommit) {
             throw new Error(`multi-view replay writer missing git commit op=${decision.op} status=${missingCommit.status} slug=${missingCommit.slug}`);
+          }
+          if (hasAdr0039L3RelevantWriteResult(results)) {
+            await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
           }
         },
         signal: undefined,
