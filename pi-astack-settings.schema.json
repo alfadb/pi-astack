@@ -1458,8 +1458,15 @@
     "dispatch": {
       "type": "object",
       "additionalProperties": false,
-      "description": "dispatch extension (ADR 0009 + 0027). The `hub` sub-block configures the ADR 0030 caged-live dynamic hub (dispatch_hub tool).",
+      "description": "dispatch extension (ADR 0009 + 0027). `maxProviderConcurrency` caps same-provider `dispatch_parallel` workers, while `hub` configures the ADR 0030 caged-live dynamic hub (`dispatch_hub` tool) and `idleLoopGuard` suppresses repeated identical tool-call loops.",
       "properties": {
+        "maxProviderConcurrency": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "maximum": 16,
+          "description": "Maximum number of concurrent dispatch_parallel workers allowed for the same provider. Invalid or missing values fall back to 4."
+        },
         "hub": {
           "type": "object",
           "additionalProperties": false,

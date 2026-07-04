@@ -70,6 +70,7 @@
     "smoke:staging-promotion": "node scripts/smoke-staging-promotion.mjs",
     "smoke:memory-path-a": "node scripts/smoke-memory-path-a.mjs",
     "smoke:dispatch": "node scripts/smoke-dispatch-input-compat.mjs",
+    "smoke:dispatch-settings": "node scripts/smoke-dispatch-settings.mjs",
     "smoke:dispatch-max-output-tokens": "node scripts/smoke-dispatch-max-output-tokens.mjs",
     "smoke:dispatch-hub": "node scripts/smoke-dispatch-hub.mjs",
     "smoke:hub-oracle": "node scripts/smoke-hub-oracle.mjs",

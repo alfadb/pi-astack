@@ -436,9 +436,8 @@ export interface HubDeps {
   renderCall?: HubToolRenderer;
   renderResult?: HubToolRenderer;
   defaultTimeoutMs: number;
-  maxProviderConcurrency: number;
   /** Read settings.modelCurator + settings.dispatch.hub fresh per call. */
-  readConfig: () => { hub: HubSettings; roster: string[]; flagshipModels: string[] };
+  readConfig: () => { hub: HubSettings; roster: string[]; flagshipModels: string[]; maxProviderConcurrency: number };
 }
 
 const WORKER_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide";
@@ -481,7 +480,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       if (!task.trim()) {
         return { content: [{ type: "text" as const, text: "dispatch_hub: 'task' is required." }], details: { kind: "dispatch_hub_no_task" }, isError: true };
       }
-      const { hub: hubCfg, roster, flagshipModels } = deps.readConfig();
+      const { hub: hubCfg, roster, flagshipModels, maxProviderConcurrency } = deps.readConfig();
       const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : deps.defaultTimeoutMs;
       const projectRoot = (typeof ctx.cwd === "string" ? ctx.cwd : "") || process.cwd();
       const modelRegistry = ctx.modelRegistry;
@@ -640,7 +639,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         for (let i = 0; i < total; i++) {
           if (claimed.has(i)) continue;
           const p = deps.providerFromModel(tasks[i].model);
-          if ((activeByProvider.get(p) ?? 0) >= deps.maxProviderConcurrency) continue;
+          if ((activeByProvider.get(p) ?? 0) >= maxProviderConcurrency) continue;
           claimed.add(i);
           activeByProvider.set(p, (activeByProvider.get(p) ?? 0) + 1);
           return i;
@@ -737,7 +736,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           }
         }
       };
-      const concurrency = Math.min(total, Math.max(1, deps.maxProviderConcurrency * Math.max(1, new Set(tasks.map((t) => deps.providerFromModel(t.model))).size)));
+      const concurrency = Math.min(total, Math.max(1, maxProviderConcurrency * Math.max(1, new Set(tasks.map((t) => deps.providerFromModel(t.model))).size)));
       await Promise.allSettled(new Array(concurrency).fill(null).map(() => worker()));
       const totalWallMs = Date.now() - progressSnapshot.startedAt;
 

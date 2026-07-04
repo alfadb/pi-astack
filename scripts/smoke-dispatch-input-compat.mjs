@@ -193,14 +193,17 @@ check("prepareArguments accepts well-formed array (smoke)", () => {
   if (r.tasks[0].name !== "schema audit") throw new Error("name lost");
 });
 
-check("dispatch_parallel concurrency is provider-scoped, not fixed global worker count", () => {
+check("dispatch_parallel concurrency is settings-driven, not fixed global worker count", () => {
   const dispatchSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
-  if (!/export const MAX_PROVIDER_CONCURRENCY = 2;/.test(dispatchSrc)) throw new Error("provider concurrency constant missing");
+  const settingsSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/settings.ts"), "utf-8");
+  if (!/export const MAX_PROVIDER_CONCURRENCY = DEFAULT_DISPATCH_SETTINGS\.maxProviderConcurrency;/.test(dispatchSrc)) throw new Error("default fallback constant missing");
+  if (!/export function readDispatchSettings\(\)/.test(settingsSrc)) throw new Error("dispatch settings helper missing");
+  if (!/const maxProviderConcurrency = readDispatchSettings\(\)\.maxProviderConcurrency;/.test(dispatchSrc)) throw new Error("runtime settings read missing");
   if (!/providerFromModel\(tasks\[i\]\?\.model/.test(dispatchSrc)) throw new Error("provider grouping missing");
-  if (!/activeByProvider\.get\(provider\)[\s\S]*MAX_PROVIDER_CONCURRENCY/.test(dispatchSrc)) throw new Error("same-provider cap not enforced");
+  if (!/activeByProvider\.get\(provider\) \?\? 0\) >= maxProviderConcurrency/.test(dispatchSrc)) throw new Error("same-provider cap not enforced from settings");
   if (!/const workers = new Array\(total\)/.test(dispatchSrc)) throw new Error("workers should cover all tasks so cross-provider fan-out is not globally capped");
   if (/const workers = new Array\(Math\.min\(MAX_CONCURRENCY, total\)\)/.test(dispatchSrc)) throw new Error("old fixed global worker cap still present");
-  if (!/same-provider tasks run at most/.test(dispatchSrc)) throw new Error("tool guidance not updated to provider-scoped concurrency");
+  if (!/dispatch\.maxProviderConcurrency/.test(dispatchSrc)) throw new Error("tool guidance should name the config key");
 });
 
 // ── cleanup ──────────────────────────────────────────────────────

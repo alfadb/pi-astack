@@ -72,6 +72,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { DEFAULT_DISPATCH_SETTINGS, readDispatchSettings } from "./settings";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -94,12 +95,12 @@ const MAX_PARALLEL = 16;
 // global cap (W12) and per-unit timeout default instead of duplicating
 // literals that could drift.
 // ⚠ MAX_CONCURRENCY is the WORKFLOW engine's global stage cap, NOT a
-// dispatch_parallel bound. dispatch_parallel's only concurrency limits are
-// MAX_PROVIDER_CONCURRENCY (per-provider, enforced in the claim loop) under
-// MAX_PARALLEL (per-call task ceiling); it never reads MAX_CONCURRENCY.
+// dispatch_parallel bound. dispatch_parallel's provider cap is read live
+// from pi-astack-settings.json → dispatch.maxProviderConcurrency on each
+// execute(), with a default fallback of 4; it never reads MAX_CONCURRENCY.
 // smoke-workflow-executor locks dispatch.MAX_CONCURRENCY === dsl.WORKFLOW_MAX_CONCURRENCY.
 export const MAX_CONCURRENCY = 4;
-export const MAX_PROVIDER_CONCURRENCY = 2;
+export const MAX_PROVIDER_CONCURRENCY = DEFAULT_DISPATCH_SETTINGS.maxProviderConcurrency;
 export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes without progress
 const DEFAULT_MAX_RUNTIME_MULTIPLIER = 4;
 
@@ -2007,12 +2008,12 @@ export default function (pi: ExtensionAPI) {
       "Results are collected when ALL complete. This is the primary tool for " +
       "multi-model analysis — do NOT call dispatch_agent N times instead. " +
       "bash/edit/write available via explicit per-task tools=; nested dispatch rejected. " +
-      `Up to ${MAX_PARALLEL} tasks per call; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time.`,
+      `Up to ${MAX_PARALLEL} tasks per call; same-provider tasks are capped by dispatch.maxProviderConcurrency (default 4).`,
     promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
       "Use dispatch_parallel EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
       "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together. Isolated contexts are the invariant; prefer cross-vendor blind reviews when multiple vendors are available, then degrade to cross-model or same-model isolated instances.",
-      `Concurrency: up to ${MAX_PARALLEL} tasks accepted; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time, while different providers can run together. Prefer DIFFERENT providers for diversity when available; isolation is still useful when only one provider is available.`,
+      `Concurrency: up to ${MAX_PARALLEL} tasks accepted; same-provider tasks are capped by dispatch.maxProviderConcurrency (default 4), while different providers can run together. Prefer DIFFERENT providers for diversity when available; isolation is still useful when only one provider is available.`,
       "For reasoning-only tasks, omit tools (sub-agent uses built-in read/grep/find/ls).",
       "Output budget is internal: each task always sends its model registry maxTokens as the provider request cap; callers cannot lower it.",
     ],
@@ -2131,11 +2132,12 @@ export default function (pi: ExtensionAPI) {
       const activeByProvider = new Map<string, number>();
       const claimed = new Set<number>();
       const providerOf = (i: number) => providerFromModel(tasks[i]?.model ?? "");
+      const maxProviderConcurrency = readDispatchSettings().maxProviderConcurrency;
       const claimNextTask = (): number | undefined => {
         for (let i = 0; i < total; i++) {
           if (claimed.has(i)) continue;
           const provider = providerOf(i);
-          if ((activeByProvider.get(provider) ?? 0) >= MAX_PROVIDER_CONCURRENCY) continue;
+          if ((activeByProvider.get(provider) ?? 0) >= maxProviderConcurrency) continue;
           claimed.add(i);
           activeByProvider.set(provider, (activeByProvider.get(provider) ?? 0) + 1);
           return i;
@@ -2554,8 +2556,14 @@ export default function (pi: ExtensionAPI) {
         renderCall: renderDispatchHubCall,
         renderResult: renderDispatchToolResult,
         defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
-        maxProviderConcurrency: MAX_PROVIDER_CONCURRENCY,
-        readConfig: readHubConfigFromSettings,
+        readConfig: () => {
+          const hubConfig = readHubConfigFromSettings();
+          const dispatchSettings = readDispatchSettings();
+          return {
+            ...hubConfig,
+            maxProviderConcurrency: dispatchSettings.maxProviderConcurrency,
+          };
+        },
       });
     } catch (err) {
       console.warn(`pi-astack/dispatch: dispatch_hub registration skipped: ${(err as Error)?.message ?? "unknown"}`);
