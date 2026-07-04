@@ -1,7 +1,7 @@
 /**
  * dispatch_hub — ADR 0030 caged-live dynamic hub (increment 2 + 3).
  *
- * A hub LLM (cross-vendor, per-task selected) proposes a worker assignment
+ * A hub LLM (prefer cross-vendor when available, per-task selected) proposes a worker assignment
  * { workers:[{model,role,prompt}], rationale } for a task; dispatch_hub then
  * REALLY dispatches those workers via the exported runInProcess (single-level,
  * read-only default, nested-dispatch forbidden — inherited) and returns the
@@ -13,7 +13,7 @@
  * posture as dispatch after the 2026-06-16 env-gate removal); NO cost gate
  * (INV-COST-NOT-A-GATE — cost is report-only);
  * dispatch.hub.enabled default false (tool is not registered when off);
- * cross-vendor decorrelation flagged in audit (hub vendor vs worker vendors).
+ * vendor diversity is preferred and flagged in audit, but isolation is the invariant.
  *
  * This module keeps all decision logic in PURE, offline-testable functions
  * (selection / parse / validate / audit-row builders). The orchestration
@@ -90,6 +90,9 @@ export interface HubValidation {
   /** Count of surviving workers sharing the hub model's vendor (self-talk
    *  signal — soft, surfaced in audit, NOT a hard reject per ADR 0030 §7). */
   sameVendorAsHub: number;
+  /** Vendor diversity across surviving workers. Single-vendor plans are accepted
+   *  when that is what availability or task fit allows. */
+  planDiversity: "cross-vendor" | "single-vendor";
 }
 
 // ── Defaults + settings resolution (pure) ───────────────────────
@@ -145,7 +148,8 @@ export function flattenRoster(providers: Record<string, readonly string[]> | und
 
 /** Pick the hub planning model. Priority: explicit setting → first flagship
  *  model whose vendor is NOT in avoidVendors → first flagship → undefined.
- *  ADR 0030 §7: cross-vendor decorrelation is the one hard rule. */
+ *  Isolated contexts are the invariant; cross-vendor decorrelation is preferred
+ *  when available and degrades without blocking. */
 export function selectHubModel(opts: {
   explicit?: string;
   flagshipModels?: readonly string[];
@@ -177,8 +181,8 @@ export function buildHubPlanPrompt(opts: {
     "Rules:",
     `- Choose 1..${maxWorkers} workers. Fewer is better when fewer suffice — do not over-provision.`,
     "- Each worker.model MUST be one of the available models listed below (exact string).",
-    "- Prefer DIFFERENT vendors across workers for cross-vendor diversity on judgment-heavy tasks.",
-    `- You (the hub) are vendor "${hubVendor}". For independent-review tasks, prefer workers from OTHER vendors so the result is not self-confirming.`,
+    "- Isolated worker contexts are the invariant. Prefer DIFFERENT vendors across workers for judgment-heavy tasks when available.",
+    `- You (the hub) are vendor "${hubVendor}". For independent-review tasks, prefer workers from OTHER vendors; when unavailable, use cross-model or same-model isolated workers and note the downgrade in rationale.`,
     "- Write a focused, self-contained prompt for each worker (they share NO context with each other).",
     "- Workers are read-only sub-agents (read/grep/find/ls + optional web/memory). They cannot edit/spawn.",
     "",
@@ -250,7 +254,7 @@ export function parseHubPlan(text: string): { ok: true; plan: HubPlan } | { ok: 
   return { ok: true, plan: { workers, rationale } };
 }
 
-// ── Plan validation + cap + cross-vendor flag (pure) ────────────
+// ── Plan validation + cap + diversity flag (pure) ───────────────
 
 export function validateHubPlan(plan: HubPlan, opts: {
   roster: string[];
@@ -277,11 +281,12 @@ export function validateHubPlan(plan: HubPlan, opts: {
 
   const hubVendor = vendorOf(hubModel);
   const sameVendorAsHub = valid.filter((w) => vendorOf(w.model) === hubVendor).length;
+  const planDiversity = new Set(valid.map((w) => vendorOf(w.model))).size > 1 ? "cross-vendor" : "single-vendor";
   if (sameVendorAsHub > 0) {
     warnings.push(`${sameVendorAsHub}/${valid.length} workers share the hub vendor "${hubVendor}" (self-talk risk, ADR 0030 §7 — flagged, not rejected)`);
   }
 
-  return { workers: valid, warnings, sameVendorAsHub };
+  return { workers: valid, warnings, sameVendorAsHub, planDiversity };
 }
 
 // ── Audit row builders (pure; additive row_kinds on the dispatch stream) ──
@@ -295,6 +300,7 @@ export function buildHubDecisionRow(args: {
   rationale: string;
   warnings: string[];
   sameVendorAsHub: number;
+  planDiversity?: "cross-vendor" | "single-vendor";
   mainVendor?: string;
   hubDurationMs: number;
   hubResult: "ok" | "fail";
@@ -314,6 +320,7 @@ export function buildHubDecisionRow(args: {
     worker_count: args.workers.length,
     worker_models: args.workers.map((w) => w.model),
     worker_roles: args.workers.map((w) => w.role),
+    plan_diversity: args.planDiversity ?? (new Set(args.workers.map((w) => vendorOf(w.model))).size > 1 ? "cross-vendor" : "single-vendor"),
     rationale: String(args.rationale ?? "").slice(0, 2000),
     warnings: args.warnings,
     same_vendor_as_hub: args.sameVendorAsHub,
@@ -447,22 +454,22 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
     name: "dispatch_hub",
     label: "Dispatch Hub",
     description:
-      "ADR 0030 caged-live dynamic hub: a cross-vendor hub LLM proposes a worker " +
+      "ADR 0030 caged-live dynamic hub: a vendor-diverse hub LLM proposes a worker " +
       "assignment for the task, then dispatch_hub REALLY dispatches those workers " +
       "(read-only, single-level) and returns the aggregate. Use for judgment-heavy " +
       "tasks where you want the hub to decide the worker mix. Cost is report-only. " +
       `Worker count is hard-capped at ${HARD_MAX_WORKERS}.`,
-    promptSnippet: "dispatch_hub({ task, hubModel? }) — you pick a hub model per-task; it plans cross-vendor workers and dispatches them",
+    promptSnippet: "dispatch_hub({ task, hubModel? }) — you pick a hub model per-task; it plans isolated workers, preferring cross-vendor when available",
     promptGuidelines: [
       "Pass a clear, self-contained task description. The hub LLM decides how many workers, which models, and what each does, then really dispatches them.",
-      "ADR 0030 §7: YOU (the main session) choose the hub model per-task via `hubModel`. Pick a model from a DIFFERENT vendor than yourself so the hub is an independent second voice (not self-talk). Omit hubModel to auto-pick a flagship model.",
+      "ADR 0030 §7: YOU (the main session) choose the hub model per-task via `hubModel`. Isolated contexts are the invariant; pick a DIFFERENT vendor when available, but same-vendor cross-model or same-model isolated workers are acceptable degradations. Omit hubModel to auto-pick a flagship model.",
       "The hub is read-only and single-level; results return in-turn. After it returns, your acceptance/revision of the result is the disposition signal (ADR 0030 §5).",
     ],
     parameters: {
       type: "object",
       properties: {
         task: { type: "string", description: "The task for the hub to plan a worker assignment for." },
-        hubModel: { type: "string", description: "Which model acts as the hub/planner for THIS task (provider/model). Choose per-task, cross-vendor from yourself to avoid self-talk. Omit to auto-pick a flagship model." },
+        hubModel: { type: "string", description: "Which model acts as the hub/planner for THIS task (provider/model). Choose per-task, preferring cross-vendor from yourself when available. Omit to auto-pick a flagship model." },
         timeoutMs: { type: "number", description: "Per-worker no-progress idle timeout in ms (default 1800000)." },
       },
       required: ["task"],
@@ -539,7 +546,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const failPlanning = (reason: string, failureType: string, planText: string, usage?: { input: number; output: number; cost: number }, durMs = 0) => {
         void emit(hubAnchor, buildHubDecisionRow({
           hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText,
-          workers: [], rationale: "", warnings: [reason], sameVendorAsHub: 0,
+          workers: [], rationale: "", warnings: [reason], sameVendorAsHub: 0, planDiversity: "single-vendor",
           hubDurationMs: durMs, hubResult: "fail", hubFailureType: failureType,
           ...(usage ? { usage } : {}),
         }));
@@ -601,7 +608,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const v = validateHubPlan(parsed.plan, { roster, hubModel, maxWorkers: hubCfg.maxWorkers });
       void emit(hubAnchor, buildHubDecisionRow({
         hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText: hubRes.output ?? "",
-        workers: v.workers, rationale: parsed.plan.rationale, warnings: v.warnings, sameVendorAsHub: v.sameVendorAsHub,
+        workers: v.workers, rationale: parsed.plan.rationale, warnings: v.warnings, sameVendorAsHub: v.sameVendorAsHub, planDiversity: v.planDiversity,
         hubDurationMs, hubResult: "ok", ...(hubRes.usage ? { usage: hubRes.usage } : {}),
       }));
 

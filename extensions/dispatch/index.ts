@@ -2011,8 +2011,8 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
       "Use dispatch_parallel EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
-      "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together. Use different providers per task for cross-vendor blind reviews.",
-      `Concurrency: up to ${MAX_PARALLEL} tasks accepted; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time, while different providers can run together. Choose models from DIFFERENT providers for diversity.`,
+      "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together. Isolated contexts are the invariant; prefer cross-vendor blind reviews when multiple vendors are available, then degrade to cross-model or same-model isolated instances.",
+      `Concurrency: up to ${MAX_PARALLEL} tasks accepted; same-provider tasks run at most ${MAX_PROVIDER_CONCURRENCY} at a time, while different providers can run together. Prefer DIFFERENT providers for diversity when available; isolation is still useful when only one provider is available.`,
       "For reasoning-only tasks, omit tools (sub-agent uses built-in read/grep/find/ls).",
       "Output budget is internal: each task always sends its model registry maxTokens as the provider request cap; callers cannot lower it.",
     ],

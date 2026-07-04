@@ -15,14 +15,13 @@
  * P0.5 scope (per ADR 0025 §4.4.4 "P0.5 minimal version"):
  *
  *   - Two SEPARATE API calls: Pass 1 Blind → Pass 2 Reveal.
- *   - Reviewer model is the first usable entry from
- *     settings.multiView.reviewerProviders, falling back to
- *     fallbackProviders. Different family from curator/proposer
- *     (default curator = deepseek; default reviewer = anthropic) —
- *     ADR 0024 §5.4 cross-provider requirement satisfied via
- *     proposer-vs-reviewer family diversity (NOT pass1-vs-pass2 —
- *     same reviewer model runs both passes since pass 2 must see its
- *     own pass 1 verdict).
+ *   - Reviewer model is selected from settings.multiView.reviewerProviders,
+ *     falling back to fallbackProviders. Selection is proposer-aware:
+ *     prefer a registered reviewer from a different provider; when none is
+ *     available, degrade to same-provider cross-model or same-model isolated
+ *     calls and leave reviewer_diversity audit/metrics breadcrumbs.
+ *     Pass 1 and Pass 2 intentionally use the same reviewer model because
+ *     Pass 2 must see its own Pass 1 verdict.
  *   - Devil's advocate third layer baked into the Pass 2 prompt
  *     (virtual third reviewer, no extra API call).
  *   - DEFER outcomes route to staging-pending replay (batch 3b
@@ -118,6 +117,8 @@ export interface MultiViewStagedRef {
   path: string;
 }
 
+export type MultiViewReviewerDiversity = "cross-vendor" | "same-vendor-cross-model" | "same-model";
+
 export interface MultiViewResult {
   triggered: boolean;
   trigger_reason?: MultiViewTriggerReason;
@@ -134,6 +135,8 @@ export interface MultiViewResult {
   final_decision: CuratorDecision;
   pass1?: Pass1Verdict;
   pass2?: Pass2Verdict;
+  /** Diversity tier for the selected reviewer relative to the proposer. */
+  reviewer_diversity?: MultiViewReviewerDiversity;
   /** When triggered but reviewer was unavailable / both passes failed. */
   error?: string;
   /** Set when this multi-view run produced a staged entry on disk
@@ -430,6 +433,21 @@ function parseModelRef(ref: string): { provider: string; id: string } | null {
   return { provider: ref.slice(0, slash), id: ref.slice(slash + 1) };
 }
 
+type SelectedReviewerModel = {
+  ref: string;
+  provider: string;
+  id: string;
+  reviewer_diversity: MultiViewReviewerDiversity;
+};
+
+function reviewerDiversity(
+  reviewer: { provider: string; id: string },
+  proposer: { provider: string; id: string } | null,
+): MultiViewReviewerDiversity {
+  if (!proposer || reviewer.provider !== proposer.provider) return "cross-vendor";
+  return reviewer.id === proposer.id ? "same-model" : "same-vendor-cross-model";
+}
+
 /**
  * Find the first usable reviewer model from the configured lists.
  * Tries reviewerProviders first, then fallbackProviders.
@@ -437,27 +455,34 @@ function parseModelRef(ref: string): { provider: string; id: string } | null {
  * Returns null when the lists are empty OR no entry is registered in
  * the model registry (auth not checked here — caller handles auth).
  *
- * Per ADR 0024 §5.4: the reviewer model SHOULD be from a different
- * provider than the proposer (curator). We do not enforce this in
- * code yet (P3.5 will when dynamic selection lands); we rely on the
- * default reviewerProviders list pointing at non-deepseek families.
+ * Isolated review contexts are the invariant. When multiple providers are
+ * available, prefer the first registered reviewer whose provider differs from
+ * the proposer. If not, keep list order and degrade to same-provider
+ * cross-model, then same-model, while recording reviewer_diversity.
  */
 function selectReviewerModel(
   settings: SedimentSettings,
   modelRegistry: ModelRegistryLike,
-): { ref: string; provider: string; id: string } | null {
+  proposer: { provider: string; id: string } | null,
+): SelectedReviewerModel | null {
   const candidates = [
     ...settings.multiView.reviewerProviders,
     ...settings.multiView.fallbackProviders,
   ];
+  const usable: Array<{ ref: string; provider: string; id: string }> = [];
   for (const ref of candidates) {
     const parsed = parseModelRef(ref);
     if (!parsed) continue;
     if (modelRegistry.find(parsed.provider, parsed.id)) {
-      return { ref, ...parsed };
+      usable.push({ ref, ...parsed });
     }
   }
-  return null;
+  const selected = usable.find((c) => proposer && c.provider !== proposer.provider) ?? usable[0];
+  if (!selected) return null;
+  return {
+    ...selected,
+    reviewer_diversity: reviewerDiversity(selected, proposer),
+  };
 }
 
 // ── Multi-view reviewer metrics (sidecar) ─────────────────────────────
@@ -492,6 +517,7 @@ interface ReviewerMetricsEntry {
   ok: boolean;
   durationMs: number;
   triggerReason?: MultiViewTriggerReason;
+  reviewer_diversity?: MultiViewReviewerDiversity;
   rawText?: string;
   rawTextTruncated?: boolean;
   error?: string;
@@ -506,7 +532,7 @@ export type MultiViewModelCaller = (
   settings: SedimentSettings,
   pass: MultiViewModelPass,
   signal?: AbortSignal,
-  options?: { suppressMetrics?: boolean; triggerReason?: MultiViewTriggerReason },
+  options?: { suppressMetrics?: boolean; triggerReason?: MultiViewTriggerReason; reviewerDiversity?: MultiViewReviewerDiversity },
 ) => Promise<{ ok: true; text: string } | { ok: false; error: string }>;
 
 function logReviewerMetrics(entry: ReviewerMetricsEntry): void {
@@ -543,12 +569,12 @@ const callReviewerModel: MultiViewModelCaller = async function callReviewerModel
   settings: SedimentSettings,
   pass: MultiViewModelPass,
   signal?: AbortSignal,
-  options: { suppressMetrics?: boolean; triggerReason?: MultiViewTriggerReason } = {},
+  options: { suppressMetrics?: boolean; triggerReason?: MultiViewTriggerReason; reviewerDiversity?: MultiViewReviewerDiversity } = {},
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const t0 = Date.now();
   const promptChars = prompt.length;
   const estimatedTokens = Math.ceil(promptChars / 3);
-  const emitMetric = (entry: Omit<ReviewerMetricsEntry, "ts" | "pass" | "model" | "promptChars" | "estimatedTokens" | "triggerReason">): void => {
+  const emitMetric = (entry: Omit<ReviewerMetricsEntry, "ts" | "pass" | "model" | "promptChars" | "estimatedTokens" | "triggerReason" | "reviewer_diversity">): void => {
     if (options.suppressMetrics) return;
     logReviewerMetrics({
       ts: new Date().toISOString(),
@@ -557,6 +583,7 @@ const callReviewerModel: MultiViewModelCaller = async function callReviewerModel
       promptChars,
       estimatedTokens,
       triggerReason: options.triggerReason,
+      reviewer_diversity: options.reviewerDiversity,
       ...entry,
     });
   };
@@ -942,6 +969,7 @@ async function synthesizeRichDecisionFromPass1(args: {
   pass1: Pass1Verdict;
   pass2: Pass2Verdict;
   triggerReason: MultiViewTriggerReason;
+  reviewerDiversity: MultiViewReviewerDiversity;
   callModel: MultiViewModelCaller;
 }): Promise<RichSynthesisResult> {
   const selected = selectSynthesisModel(args.runArgs.settings, args.runArgs.modelRegistry);
@@ -955,6 +983,7 @@ async function synthesizeRichDecisionFromPass1(args: {
       ok: false,
       durationMs: 0,
       triggerReason: args.triggerReason,
+      reviewer_diversity: args.reviewerDiversity,
       error: "synthesis model not configured or not registered",
     });
     return { ok: false, kind: "transient", error: "synthesis model not configured or not registered" };
@@ -981,6 +1010,7 @@ async function synthesizeRichDecisionFromPass1(args: {
       estimatedTokens,
       durationMs: Date.now() - t0,
       triggerReason: args.triggerReason,
+      reviewer_diversity: args.reviewerDiversity,
       ...entry,
     });
   };
@@ -995,7 +1025,7 @@ async function synthesizeRichDecisionFromPass1(args: {
       args.runArgs.settings,
       "synthesis",
       args.runArgs.signal,
-      { suppressMetrics: true, triggerReason: args.triggerReason },
+      { suppressMetrics: true, triggerReason: args.triggerReason, reviewerDiversity: args.reviewerDiversity },
     );
   } catch (e: unknown) {
     const error = e instanceof Error ? e.message : String(e);
@@ -1170,12 +1200,14 @@ function stageAndSkipDecision(
   pass2Verdict: Pass2Verdict | undefined,
   errorContext: string,
   overallStart: number,
+  reviewerDiversity?: MultiViewReviewerDiversity,
 ): MultiViewResult {
   const entry = buildPendingEntry(args, state, triggerReason, pass1Verdict, pass2Verdict);
   const writtenPath = writeMultiviewPending(entry);
   return {
     triggered: true,
     trigger_reason: triggerReason,
+    ...(reviewerDiversity ? { reviewer_diversity: reviewerDiversity } : {}),
     final_decision: {
       op: "skip",
       reason: "multiview_staged_for_replay",
@@ -1240,7 +1272,8 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
   }
 
   const callModel = args.callModel ?? callReviewerModel;
-  const reviewer = selectReviewerModel(args.settings, args.modelRegistry);
+  const proposerModel = parseModelRef(args.settings.curatorModel);
+  const reviewer = selectReviewerModel(args.settings, args.modelRegistry, proposerModel);
   if (!reviewer) {
     // batch 3b: stage instead of falling back to proposer direct-write.
     return stageAndSkipDecision(
@@ -1269,7 +1302,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
   const pass1Resp = await callModel(
     reviewer.ref, { provider: reviewer.provider, id: reviewer.id },
     args.modelRegistry, pass1Prompt, args.settings, "pass1", args.signal,
-    { triggerReason: trigger.reason },
+    { triggerReason: trigger.reason, reviewerDiversity: reviewer.reviewer_diversity },
   );
   const pass1DurationMs = Date.now() - pass1Start;
 
@@ -1280,6 +1313,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       undefined, undefined,
       pass1Resp.error,
       overallStart,
+      reviewer.reviewer_diversity,
     );
   }
 
@@ -1295,6 +1329,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       undefined, undefined,
       `parsePass1 returned null; raw text length=${pass1Resp.text.length} (full text in multi-view-metrics.jsonl)`,
       overallStart,
+      reviewer.reviewer_diversity,
     );
   }
 
@@ -1321,7 +1356,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
   const pass2Resp = await callModel(
     reviewer.ref, { provider: reviewer.provider, id: reviewer.id },
     args.modelRegistry, pass2Prompt, args.settings, "pass2", args.signal,
-    { triggerReason: trigger.reason },
+    { triggerReason: trigger.reason, reviewerDiversity: reviewer.reviewer_diversity },
   );
   const pass2DurationMs = Date.now() - pass2Start;
 
@@ -1335,6 +1370,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       pass1, undefined,
       pass2Resp.error,
       overallStart,
+      reviewer.reviewer_diversity,
     );
   }
 
@@ -1346,6 +1382,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
       pass1, undefined,
       `parsePass2 returned null; raw text length=${pass2Resp.text.length} (full text in multi-view-metrics.jsonl)`,
       overallStart,
+      reviewer.reviewer_diversity,
     );
   }
 
@@ -1369,6 +1406,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
           pass1,
           pass2,
           triggerReason: trigger.reason!,
+          reviewerDiversity: reviewer.reviewer_diversity,
           callModel,
         });
         if (richSynthesis.ok) {
@@ -1380,6 +1418,7 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
             pass1, pass2,
             richSynthesis.error,
             overallStart,
+            reviewer.reviewer_diversity,
           );
         } else {
           // Deterministic synthesis failures are not cached or circuit-broken:
@@ -1429,12 +1468,14 @@ export async function runMultiView(args: RunMultiViewArgs): Promise<MultiViewRes
         pass1, pass2,
         pass2.rationale ? `pass 2 deferred: ${pass2.rationale.slice(0, 200)}` : "pass 2 deferred without rationale",
         overallStart,
+        reviewer.reviewer_diversity,
       );
   }
 
   return {
     triggered: true,
     trigger_reason: trigger.reason,
+    reviewer_diversity: reviewer.reviewer_diversity,
     final_decision,
     pass1,
     pass2,

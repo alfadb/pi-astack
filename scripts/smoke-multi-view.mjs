@@ -50,9 +50,18 @@ function makeSettings(overrides = {}) {
   };
 }
 
+const registeredModels = new Set([
+  "mock/reviewer",
+  "mock/synth",
+  "mock/curator",
+  "openai/gpt-5.5",
+  "openai/gpt-5.4-mini",
+  "minimax/MiniMax-M3",
+]);
+
 const modelRegistry = {
   find(provider, id) {
-    return provider === "mock" && ["reviewer", "synth", "curator"].includes(id) ? { provider, id } : null;
+    return registeredModels.has(`${provider}/${id}`) ? { provider, id } : null;
   },
   async getApiKeyAndHeaders() {
     return { ok: true, apiKey: "mock" };
@@ -98,8 +107,8 @@ function makeNeighbor(slug = "prefer-yarn", overrides = {}) {
 function makeCaller(responses) {
   const queue = [...responses];
   const calls = [];
-  const caller = async (ref, parsed, _registry, prompt, _settings, passName) => {
-    calls.push({ ref, parsed, prompt, pass: passName });
+  const caller = async (ref, parsed, _registry, prompt, _settings, passName, _signal, options) => {
+    calls.push({ ref, parsed, prompt, pass: passName, options });
     const next = queue.shift();
     if (!next) throw new Error(`unexpected model call: ${passName}`);
     if (next.pass && next.pass !== passName) throw new Error(`expected pass ${next.pass}, got ${passName}`);
@@ -170,6 +179,61 @@ console.log("Smoke: multi-view review-all + synthesis\n");
   );
   check("reviewAllMutations=true does not review op=skip", result.triggered === false);
   check("skip path makes no model calls", calls.length === 0, `calls=${calls.length}`);
+}
+
+// Reviewer diversity selection: cross-vendor beats list-order same-provider when available.
+{
+  const settings = makeSettings({
+    curatorModel: "openai/gpt-5.5",
+    multiView: { reviewerProviders: ["openai/gpt-5.4-mini", "minimax/MiniMax-M3"], synthesisModel: "mock/synth", reviewAllMutations: true },
+  });
+  const { result, calls } = await run(
+    { proposerDecision: { op: "create", rationale: "create" }, candidate: makeCandidate(5) },
+    [
+      { pass: "pass1", text: { op: "create", scope: "project", slug_target: null, reasoning: "create" } },
+      { pass: "pass2", text: { verdict: "confirm_proposer", rationale: "ok" } },
+    ],
+    settings,
+  );
+  check("proposer=openai selects minimax reviewer when registered", calls[0]?.ref === "minimax/MiniMax-M3", calls[0]?.ref);
+  check("cross-vendor reviewer diversity is audited on result", result.reviewer_diversity === "cross-vendor", result.reviewer_diversity);
+  check("cross-vendor reviewer diversity is passed to model caller", calls.every((c) => c.options?.reviewerDiversity === "cross-vendor"), JSON.stringify(calls.map((c) => c.options)));
+}
+
+// Reviewer diversity selection: same-vendor cross-model is accepted when no other vendor is available.
+{
+  const settings = makeSettings({
+    curatorModel: "openai/gpt-5.5",
+    multiView: { reviewerProviders: ["openai/gpt-5.4-mini"], synthesisModel: "mock/synth", reviewAllMutations: true },
+  });
+  const { result, calls } = await run(
+    { proposerDecision: { op: "create", rationale: "create" }, candidate: makeCandidate(5) },
+    [
+      { pass: "pass1", text: { op: "create", scope: "project", slug_target: null, reasoning: "create" } },
+      { pass: "pass2", text: { verdict: "confirm_proposer", rationale: "ok" } },
+    ],
+    settings,
+  );
+  check("same-vendor cross-model reviewer is accepted", calls[0]?.ref === "openai/gpt-5.4-mini", calls[0]?.ref);
+  check("same-vendor cross-model diversity is audited", result.reviewer_diversity === "same-vendor-cross-model", result.reviewer_diversity);
+}
+
+// Reviewer diversity selection: same-model isolated review is the final degradation.
+{
+  const settings = makeSettings({
+    curatorModel: "openai/gpt-5.5",
+    multiView: { reviewerProviders: ["openai/gpt-5.5"], synthesisModel: "mock/synth", reviewAllMutations: true },
+  });
+  const { result, calls } = await run(
+    { proposerDecision: { op: "create", rationale: "create" }, candidate: makeCandidate(5) },
+    [
+      { pass: "pass1", text: { op: "create", scope: "project", slug_target: null, reasoning: "create" } },
+      { pass: "pass2", text: { verdict: "confirm_proposer", rationale: "ok" } },
+    ],
+    settings,
+  );
+  check("same-model isolated reviewer is accepted", calls[0]?.ref === "openai/gpt-5.5", calls[0]?.ref);
+  check("same-model diversity is audited", result.reviewer_diversity === "same-model", result.reviewer_diversity);
 }
 
 // B2: confirm_pass1 update gets a full payload from synthesis.

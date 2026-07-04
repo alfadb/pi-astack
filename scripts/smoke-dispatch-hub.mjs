@@ -3,9 +3,9 @@
  * Smoke: ADR 0030 dispatch_hub pure logic (increment 2 + 3).
  *
  * Pins the OFFLINE-testable core of the caged-live hub: settings clamp,
- * roster flatten, cross-vendor hub-model selection, plan parse (tolerant),
+ * roster flatten, cross-vendor-preferred hub-model selection, plan parse (tolerant),
  * plan validate (drop unknown models + cap to HARD_MAX_WORKERS + same-vendor
- * flag), and the additive audit row builders. The live LLM orchestration
+ * and plan-diversity flags), and the additive audit row builders. The live LLM orchestration
  * (registerHubTool execute) is exercised by the owner flipping
  * dispatch.hub.enabled and dogfooding — it cannot be offline-smoked.
  */
@@ -85,6 +85,7 @@ ok(prompt.includes("audit X"), "plan prompt includes the task");
 ok(prompt.includes("anthropic/claude-opus-4-8"), "plan prompt lists roster models");
 ok(prompt.includes("1..4 workers"), "plan prompt states the worker cap");
 ok(prompt.includes('vendor "deepseek"'), "plan prompt tells hub its own vendor (for cross-vendor preference)");
+ok(prompt.includes("Isolated worker contexts are the invariant"), "plan prompt states isolated contexts are the invariant");
 
 // ── extractFirstJsonObject ──
 ok(extractFirstJsonObject('prefix {"a":1} suffix') === '{"a":1}', "extracts first balanced object");
@@ -116,6 +117,7 @@ ok(vu.warnings.some((w) => w.includes("ghost/model")), "warns about dropped unkn
 const planCap = { workers: Array.from({ length: 12 }, () => ({ model: "openai/gpt-5.5", role: "r", prompt: "p" })), rationale: "" };
 const vc = validateHubPlan(planCap, { roster: vRoster, hubModel: "deepseek/deepseek-v4-pro", maxWorkers: 8 });
 ok(vc.workers.length === 8, "caps to HARD_MAX_WORKERS=8 even if maxWorkers says 8 and plan has 12");
+ok(vc.planDiversity === "single-vendor", "single-vendor worker plans are accepted and marked");
 const vc3 = validateHubPlan(planCap, { roster: vRoster, hubModel: "deepseek/deepseek-v4-pro", maxWorkers: 3 });
 ok(vc3.workers.length === 3, "caps to settings maxWorkers=3");
 
@@ -125,6 +127,7 @@ const planSame = { workers: [
 ], rationale: "" };
 const vs = validateHubPlan(planSame, { roster: vRoster, hubModel: "deepseek/deepseek-v4-pro", maxWorkers: 8 });
 ok(vs.sameVendorAsHub === 1, "counts workers sharing the hub vendor (self-talk signal)");
+ok(vs.planDiversity === "cross-vendor", "cross-vendor worker plans are marked");
 ok(vs.warnings.some((w) => w.includes("self-talk")), "warns about same-vendor self-talk (flag, not reject)");
 ok(vs.workers.length === 2, "same-vendor workers are FLAGGED not dropped (ADR 0030 §7)");
 
@@ -136,6 +139,7 @@ const dec = buildHubDecisionRow({
 });
 ok(dec.row_kind === "hub_decision" && dec.operation === "dispatch_hub.decision", "decision row_kind/operation");
 ok(dec.hub_vendor === "deepseek" && dec.decorrelated === true, "decision flags decorrelation (hub≠main vendor)");
+ok(dec.plan_diversity === "single-vendor", "decision row carries plan_diversity");
 ok(dec.hub_plan_text.length === 8000, "decision caps hub_plan_text to 8000 chars");
 ok(Array.isArray(dec.worker_models) && dec.worker_models[0] === "openai/gpt-5.5", "decision lists worker_models");
 ok(dec.hub_cost === 0.01, "decision carries hub cost (report-only)");

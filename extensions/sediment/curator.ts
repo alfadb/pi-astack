@@ -11,7 +11,7 @@ import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import type { DeleteMode, ProjectEntryDraft, ProjectEntryUpdateDraft } from "./writer";
 import type { CorrectionSignal } from "./correction-pipeline";
-import { runMultiView, type MultiViewResult } from "./multi-view";
+import { runMultiView, type MultiViewResult, type MultiViewReviewerDiversity } from "./multi-view";
 
 // ── Curator metrics (mirrors extractor-metrics.jsonl pattern) ─────────────
 // User-global cross-project sidecar (ADR 0025 §4.2.4): lives under
@@ -105,6 +105,8 @@ export interface CuratorAudit {
       durationMs: number;
     };
     error?: string;
+    /** Reviewer diversity tier relative to the proposer model. */
+    reviewer_diversity?: MultiViewReviewerDiversity;
     /** Batch 3b: set when runMultiView staged the candidate for replay
      *  on one of the 6 transient-failure paths. When present, `decision`
      *  is guaranteed to be op=skip(multiview_staged_for_replay). The
@@ -585,6 +587,7 @@ function buildMultiViewAudit(
     proposer_decision: proposerDecision,
     durationMs: mv.durationMs,
   };
+  if (mv.reviewer_diversity) out.reviewer_diversity = mv.reviewer_diversity;
   if (mv.error) out.error = mv.error;
   if (mv.pass1) {
     out.pass1 = {

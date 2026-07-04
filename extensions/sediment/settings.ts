@@ -231,9 +231,9 @@ export interface SedimentSettings {
     archiveReactivationReviewer: string;
   };
   /** ADR 0025 P0: multi-view verification provider lists.
-   *  If empty, multi-view is effectively disabled (single-provider
-   *  degradation). The proposer and reviewer MUST be from DIFFERENT
-   *  providers per ADR 0024 §5.4. */
+   *  If empty, multi-view is effectively disabled. Isolated review contexts
+   *  are the invariant; reviewer selection prefers a different provider than
+   *  the proposer when available, then degrades to cross-model/same-model. */
   multiView: {
     proposerProviders: string[];
     reviewerProviders: string[];
@@ -414,7 +414,7 @@ export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"
   reasoningNormalizationPreamble:
     "v1: fixed 5-stage reasoning surface (quote → claim → alternative → uncertainty → resolving evidence) shared across classifier + multi-view pass-1/2 so cross-prompt comparison works.",
   multiViewPass1:
-    "v1: Blind reviewer pass. Independent op recommendation from a DIFFERENT-family model than the proposer (model refs come from settings.multiView.reviewerProviders; proposer comes from the active curator model). Outputs op + scope + slug_target + confidence + key_evidence_quote + strongest_objection_to_your_own_op + reasoning (≤200 words). Prepended with reasoning-normalization-preamble v1 so Pass 2 can compare surfaces apples-to-apples. Triggered for high-value ops only: create(conf≥8 or scope=world) / archive(high-conf neighbor) / supersede / merge / hard-delete / durable-correction(conf≥8).",
+    "v1: Blind reviewer pass. Independent op recommendation from proposer-aware reviewer selection: prefer a different provider than the active curator when available, then degrade to same-provider cross-model or same-model isolated review with reviewer_diversity audit. Outputs op + scope + slug_target + confidence + key_evidence_quote + strongest_objection_to_your_own_op + reasoning (≤200 words). Prepended with reasoning-normalization-preamble v1 so Pass 2 can compare surfaces apples-to-apples. Triggered for high-value ops only: create(conf≥8 or scope=world) / archive(high-conf neighbor) / supersede / merge / hard-delete / durable-correction(conf≥8).",
   multiViewPass2:
     "v1: Reveal reviewer pass. SAME reviewer model as Pass 1 (different API call). Sees its own Pass 1 + proposer decision + proposer raw reasoning. Emits verdict={confirm_proposer, confirm_pass1, defer} + anchor_bias_self_check + devils_advocate_objection (virtual third-reviewer layer, no extra API call). Defer → batch 3b stages candidate for replay at next agent_end (op=skip(multiview_staged_for_replay)), NOT the old skip(multiview_deferred) audit-only path.",
   outcomeSelfReport:

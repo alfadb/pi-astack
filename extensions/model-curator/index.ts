@@ -231,8 +231,8 @@ function buildAvailableModelsBlock(
     "Chat models currently available for dispatch. Sections marked **curated** " +
       "have been hand-picked + annotated; sections marked **raw** are passed " +
       "through from pi's registry untouched (no obsolete-model filtering, no " +
-      "hints). When choosing a model, diversity across providers usually beats " +
-      "stacking the same family.",
+      "hints). Isolated contexts are the invariant; prefer provider diversity " +
+      "when multiple vendors are available, then degrade to cross-model or same-model isolation.",
     "",
   ];
 
@@ -267,8 +267,9 @@ function buildAvailableModelsBlock(
       lines.push(
         "When dispatching flagship-tier models for blind review or " +
           "architecture critique, prefer cross-vendor + cross-architecture " +
-          "picks; two models from the same vendor (e.g. fable-5 + opus-4-8) " +
-          "do NOT count as two independent voters. Always check the per-model " +
+          "picks when available; two models from the same vendor (e.g. fable-5 + opus-4-8) " +
+          "do NOT count as fully independent voters unless availability forces " +
+          "a cross-model/same-model isolated downgrade. Always check the per-model " +
           "hints below before dispatching — the tier roster is a rough guide.",
       );
     }
@@ -315,8 +316,9 @@ function buildAvailableModelsBlock(
   }
 
   lines.push(
-    "**Selection guidance.** When choosing models: (1) prefer DIFFERENT " +
-      "providers across roles to diversify reasoning failure modes; (2) match " +
+    "**Selection guidance.** When choosing models: (1) isolated contexts are " +
+      "the invariant; prefer DIFFERENT providers across roles when available, " +
+      "then degrade to cross-model or same-model isolated instances; (2) match " +
       "capability to need — don't pay for opus on one-line classification; " +
       "(3) for vision tasks, pick a model with `image-in: ✓`; (4) for **curated** " +
       "sections any listed name is safe to dispatch (obsolete models already " +
