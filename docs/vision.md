@@ -12,7 +12,7 @@ status: active
 pi-astack 不是"一个记忆插件"，而是 **alfadb 在 pi 里的第二大脑 / Jarvis substrate**：
 
 - 当前会话专注执行，**不直接维护长期记忆**。
-- 长期记忆由 sidecar / 命令 / 用户授权路径沉淀进 **markdown + git**。
+- 长期记忆由 sidecar / 命令 / 用户授权路径沉淀为 **L1 Evidence Event**；L2 Markdown/git 是确定性投影与审计视图，L3 SQLite/embedding/ledger 是可重建派生层。
 - `~/.abrain/` 不是 world knowledge dump，而是围绕"这个人"的**数字孪生**：身份、技能、习惯、工作流、项目知识、跨项目知识、秘密。
 - LLM 面向的是**稳定 facade**：读记忆用 `memory_*`，多代理用 `dispatch_*`，秘密用授权后的 `vault_release` 或 bash env 注入；物理拓扑可以继续演进。
 

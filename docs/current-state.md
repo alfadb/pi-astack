@@ -17,7 +17,7 @@ status: active
 
 ## 1. 一句话状态
 
-pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 markdown+git 记忆/数字孪生系统：提供一组 runtime extensions、一组 pi-astack LLM-facing tools（`vault_release` / `prompt_user` / `memory_*` / `dispatch_*` / `vision` / `imagine` / `web_*` / `final_answer`，不含 pi builtin tools）、若干 human slash commands。
+pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event-first 第二大脑/数字孪生系统：L1 Evidence Event 是语义 SOT，L2 Markdown 是确定性投影/审计视图，L3 SQLite/embedding/ledger 是可重建派生层；提供一组 runtime extensions、一组 pi-astack LLM-facing tools（`vault_release` / `prompt_user` / `memory_*` / `dispatch_*` / `vision` / `imagine` / `web_*` / `final_answer`，不含 pi builtin tools）、若干 human slash commands。
 
 > 扩展与工具的当下**计数**以 `ls extensions/` + 各扩展 `registerTool` 为准，不在此镜像。
 

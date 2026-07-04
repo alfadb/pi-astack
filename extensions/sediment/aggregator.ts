@@ -526,8 +526,14 @@ function readProjectOutcomeRows(projectRoot: string, rowLimit: number): LedgerOu
   return rows.filter((row) => normalizeProjectRoot(row.project_root) === normalizedProjectRoot);
 }
 
+function isOutcomeSummaryRow(row: LedgerOutcomeRow): boolean {
+  if (row.source === "tool-result") return true;
+  return (row.source === "memory-footnote" || row.source === "path-a-implicit") &&
+    (row.used === "decisive" || row.used === "confirmatory" || row.used === "retrieved-unused");
+}
+
 function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): AggregatorSummary["outcome"] {
-  const windowRows = rows.filter((row) => inWindow(row.ts, cutoffMs));
+  const windowRows = rows.filter((row) => inWindow(row.ts, cutoffMs) && isOutcomeSummaryRow(row));
   const bySlug = new Map<string, {
     slug: string;
     decisive_count: number;
@@ -550,8 +556,8 @@ function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): Aggregat
       footnotes: [],
     };
     if (row.source === "tool-result") stats.total_retrievals += row.retrieval_count ?? 1;
-    if (row.source === "memory-footnote" && row.used) {
-      stats.footnotes.push(row);
+    if (row.source === "memory-footnote" || row.source === "path-a-implicit") {
+      if (row.source === "memory-footnote") stats.footnotes.push(row);
       if (row.used === "decisive") stats.decisive_count++;
       else if (row.used === "confirmatory") stats.confirmatory_count++;
       else if (row.used === "retrieved-unused") stats.retrieved_unused_count++;
@@ -625,12 +631,12 @@ function buildRawDistributionSummary(
 ): RawDistributionSummary {
   const bySlug = new Map<string, { retrieved_unused: number; decisive: number; footnoteCount: number; toolResultCount: number }>();
   for (const row of rows) {
-    if (!inWindow(row.ts, cutoffMs)) continue;
+    if (!inWindow(row.ts, cutoffMs) || !isOutcomeSummaryRow(row)) continue;
     const slug = row.entry_slug;
     if (!slug) continue;
     const stats = bySlug.get(slug) ?? { retrieved_unused: 0, decisive: 0, footnoteCount: 0, toolResultCount: 0 };
-    if (row.source === "memory-footnote" && row.used) {
-      stats.footnoteCount++;
+    if (row.source === "memory-footnote" || row.source === "path-a-implicit") {
+      if (row.source === "memory-footnote") stats.footnoteCount++;
       if (row.used === "retrieved-unused") stats.retrieved_unused++;
       else if (row.used === "decisive") stats.decisive++;
     } else if (row.source === "tool-result") {

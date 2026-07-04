@@ -833,6 +833,9 @@ interface TwoStageResult {
   stage1Usage?: ModelCallResult["usage"];
   stage2Usage?: ModelCallResult["usage"];
   picksCount: number;
+  stage2Candidates: number;
+  stage2PromptChars: number;
+  stage2EntryChars: number;
 }
 
 /** 双阶段内核(folded): candidateEntries 喂 buildLlmIndexText(stage0 已缩 or 全
@@ -847,7 +850,7 @@ async function runTwoStageSearch(
   candidateLimit: number,
 ): Promise<TwoStageResult> {
   if (candidateEntries.length === 0) {
-    return { hits: [], verdict: "none", stage1Ms: 0, stage2Ms: 0, picksCount: 0 };
+    return { hits: [], verdict: "none", stage1Ms: 0, stage2Ms: 0, picksCount: 0, stage2Candidates: 0, stage2PromptChars: 0, stage2EntryChars: 0 };
   }
   const entriesBySlug = new Map(candidateEntries.map((e) => [e.slug, e]));
   let candidates: MemoryEntry[];
@@ -873,11 +876,13 @@ async function runTwoStageSearch(
       .filter((e): e is MemoryEntry => !!e);
   }
   if (candidates.length === 0) {
-    return { hits: [], verdict: "none", stage1Ms, stage2Ms: 0, stage1Usage, picksCount: 0 };
+    return { hits: [], verdict: "none", stage1Ms, stage2Ms: 0, stage1Usage, picksCount: 0, stage2Candidates: 0, stage2PromptChars: 0, stage2EntryChars: 0 };
   }
+  const stage2Prompt = makeStage2Prompt(query, candidates, finalLimit);
+  const stage2EntryChars = candidates.reduce((sum, entry) => sum + entryForStage2(entry).length, 0);
   const t2 = Date.now();
   const stage2 = await callSearchModel(
-    settings.search.stage2Model, makeStage2Prompt(query, candidates, finalLimit),
+    settings.search.stage2Model, stage2Prompt,
     modelRegistry, signal, STAGE2_TIMEOUT_MS, settings.search.stage2Thinking,
   );
   const stage2Ms = Date.now() - t2;
@@ -886,6 +891,9 @@ async function runTwoStageSearch(
   return {
     hits, verdict: parsed.verdict, stage1Ms, stage2Ms,
     stage1Usage, stage2Usage: stage2.usage, picksCount: parsed.picks.length,
+    stage2Candidates: candidates.length,
+    stage2PromptChars: stage2Prompt.length,
+    stage2EntryChars,
   };
 }
 
@@ -911,6 +919,7 @@ async function executeSearch(
   modelRegistryRaw: unknown,
   signal: AbortSignal | undefined,
   projectRoot: string | undefined,
+  metricsProfile?: SearchProfileName,
 ): Promise<ExecSearchResult> {
   const rawQuery = String(params.query ?? "").trim();
   if (!rawQuery) return { hits: [], verdict: "none", stage1Ms: 0, stage2Ms: 0, surface: "none" };
@@ -958,9 +967,13 @@ async function executeSearch(
       error_stage: inferLlmErrorStage(message),
       error_phase: phase,
       error: message.slice(0, 500),
+      search_profile: metricsProfile ?? "direct",
       stage1_model: settings.search.stage1Model,
       stage2_model: settings.search.stage2Model,
       stage1_skip: settings.search.stage1Skip,
+      stage1_limit: settings.search.stage1Limit,
+      stage2_limit: settings.search.stage2Limit,
+      candidate_limit: candidateLimit,
       stage1_surface: surface,
       ...(pool ? {
         stage0_mode: pool.mode,
@@ -1043,6 +1056,17 @@ async function executeSearch(
     query: query.slice(0, 80),
     s1: s1 ? { in: s1.input, out: s1.output, ...(s1.cacheHit != null ? { hit: s1.cacheHit } : {}), ...(s1.cacheWrite != null ? { write: s1.cacheWrite } : {}) } : null,
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
+    search_profile: metricsProfile ?? "direct",
+    stage1_model: settings.search.stage1Model,
+    stage2_model: settings.search.stage2Model,
+    stage1_skip: settings.search.stage1Skip,
+    stage1_limit: settings.search.stage1Limit,
+    stage2_limit: settings.search.stage2Limit,
+    candidate_limit: candidateLimit,
+    stage2_candidates: result.stage2Candidates,
+    stage2_prompt_chars: result.stage2PromptChars,
+    stage2_entry_chars: result.stage2EntryChars,
+    stage2_prompt_tokens_est: Math.ceil(result.stage2PromptChars / 4),
     results: result.hits.length,
     verdict: result.verdict,
     ...(lowConfidence ? { best_effort: true, best_effort_hits: bestEffortHits.length } : {}),
@@ -1102,8 +1126,9 @@ async function llmSearchEntries(
   modelRegistryRaw: unknown,
   signal?: AbortSignal,
   projectRoot?: string,
+  metricsProfile?: SearchProfileName,
 ): Promise<SearchPlainResult> {
-  return toSearchPlainResult(await executeSearch(entries, params, settings, modelRegistryRaw, signal, projectRoot));
+  return toSearchPlainResult(await executeSearch(entries, params, settings, modelRegistryRaw, signal, projectRoot, metricsProfile));
 }
 
 /**
@@ -1134,12 +1159,13 @@ async function llmSearchEntriesWithVerdict(
   modelRegistryRaw: unknown,
   signal?: AbortSignal,
   projectRoot?: string,
+  metricsProfile?: SearchProfileName,
 ): Promise<SearchVerdictResult> {
   const t0 = Date.now();
   const rawQuery = String(params.query ?? "").trim();
   const qs = sanitizeForMemory(rawQuery);
   const query = rawQuery ? (qs.ok ? (qs.text ?? rawQuery) : `[redacted: ${qs.error}]`) : "";
-  const r = await executeSearch(entries, params, settings, modelRegistryRaw, signal, projectRoot);
+  const r = await executeSearch(entries, params, settings, modelRegistryRaw, signal, projectRoot, metricsProfile);
   return {
     hits: r.hits,
     relevance_verdict: r.verdict,
@@ -1211,8 +1237,8 @@ export async function runMemorySearch(
     }
   }
   const result = returnVerdict
-    ? await llmSearchEntriesWithVerdict(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot)
-    : await llmSearchEntries(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot);
+    ? await llmSearchEntriesWithVerdict(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot, profileName)
+    : await llmSearchEntries(entries, params, effSettings, modelRegistry, opts?.signal, opts?.projectRoot, profileName);
   // ADR 0031 Phase 0: 读侧 retrieval-hit 埋点 —— 仅 user-facing profile, flag+projectRoot 守卫。
   // sedimentDedup/correctionSearch(写侧 curator 操作)不计。零行为变化。
   if (isUsageRecordingProfile(profileName)) {

@@ -22,7 +22,7 @@ export interface OutcomeRow {
   session_id: string;
   entry_slug: string;
   /** Source of this outcome signal */
-  source: "memory-footnote" | "tool-result" | "path-a-implicit";
+  source: "memory-footnote" | "tool-result" | "path-a-injected" | "path-a-implicit";
   /** Stable per-event id used to prevent repeated agent_end scans from
    * appending the same branch evidence again. */
   event_id?: string;
@@ -34,8 +34,12 @@ export interface OutcomeRow {
   retrieval_count: number;
   /** For memory_decide rows: stable id of the decision brief that retrieved this entry. */
   decision_brief_id?: string;
-  /** For path-a-implicit rows: stable id from path-a-ledger.jsonl. */
+  /** For path-a injection rows: stable id from path-a-ledger.jsonl. */
   path_a_inject_id?: string;
+  /** For path-a-injected rows: explicit non-usage signal. */
+  path_a_signal?: "injection-only";
+  /** True when the Path A ledger row had no causal anchor. */
+  path_a_anchor_missing?: boolean;
 }
 
 /**
@@ -337,6 +341,45 @@ function collectPathAImplicitRows(
   return rows;
 }
 
+export function recordPathAInjectedOutcomes(args: {
+  ts?: string;
+  sessionId?: string;
+  injectId: string;
+  slugs: string[];
+  projectRoot?: string;
+  anchorMissing?: boolean;
+}): OutcomeRow[] {
+  try {
+    const injectId = args.injectId.trim();
+    if (!injectId || !Array.isArray(args.slugs) || args.slugs.length === 0) return [];
+    const sessionId = args.sessionId?.trim() || `path-a-anchor-missing:${injectId}`;
+    const ts = args.ts || new Date().toISOString();
+    const rows: OutcomeRow[] = [];
+    const seen = new Set<string>();
+    for (const rawSlug of args.slugs) {
+      const slug = sanitizeSlug(String(rawSlug ?? ""));
+      if (!isValidSlug(slug)) continue;
+      const key = `${injectId}|${slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        ts,
+        session_id: sessionId,
+        entry_slug: slug,
+        source: "path-a-injected",
+        event_id: `path-a-injected:${injectId}:${slug}`,
+        retrieval_count: 1,
+        path_a_inject_id: injectId,
+        path_a_signal: "injection-only",
+        ...(args.anchorMissing ? { path_a_anchor_missing: true } : {}),
+      });
+    }
+    return writeOutcomeLedger(rows, args.projectRoot);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Collect outcomes from the conversation branch.
  * Combines mechanical retrieval tracking + self-report footnote parsing.
@@ -489,6 +532,7 @@ function outcomeLedgerDedupKey(row: Pick<OutcomeRow, "session_id" | "entry_slug"
   // scans while still separating different decision briefs when present.
   const brief = row.decision_brief_id ? `|${row.decision_brief_id}` : "";
   if (row.source === "tool-result") return `${row.session_id}|${row.entry_slug}|tool-result${brief}`;
+  if (row.source === "path-a-injected") return `${row.session_id}|${row.entry_slug}|path-a-injected|${row.path_a_inject_id ?? ""}`;
   if (row.source === "path-a-implicit") return `${row.session_id}|${row.entry_slug}|path-a-implicit|${row.path_a_inject_id ?? ""}`;
   return `${row.session_id}|${row.entry_slug}|memory-footnote|${row.used ?? ""}|${stableHash(row.counterfactual ?? "")}${brief}`;
 }
@@ -847,6 +891,12 @@ export interface EntryActivityStats {
  * needs to know "this entry has zero outcome history" vs "this entry has
  * been used decisively 10 times".
  */
+function isActivityOutcomeRow(row: LedgerOutcomeRow): boolean {
+  if (row.source === "tool-result") return true;
+  return (row.source === "memory-footnote" || row.source === "path-a-implicit") &&
+    (row.used === "decisive" || row.used === "confirmatory" || row.used === "retrieved-unused");
+}
+
 export function summarizeEntryActivity(
   rows: LedgerOutcomeRow[],
   slugs: string[],
@@ -874,11 +924,13 @@ export function summarizeEntryActivity(
     const tsMs = Date.parse(row.ts);
     if (!Number.isFinite(tsMs) || tsMs < cutoffMs) continue;
 
+    if (!isActivityOutcomeRow(row)) continue;
+
     const stats = byslug.get(row.entry_slug)!;
     if (row.source === "tool-result") {
       stats.total_retrievals += row.retrieval_count ?? 1;
     }
-    if ((row.source === "memory-footnote" || row.source === "path-a-implicit") && row.used) {
+    if (row.source === "memory-footnote" || row.source === "path-a-implicit") {
       if (row.used === "decisive") stats.decisive_count++;
       else if (row.used === "confirmatory") stats.confirmatory_count++;
       else if (row.used === "retrieved-unused") stats.retrieved_unused_count++;

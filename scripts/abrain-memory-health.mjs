@@ -290,11 +290,14 @@ function summarizeMetrics(metrics) {
   const embed = nums("stage0_embed_ms");
   const poolHit = nums("stage0_pool_hit");
   const stale = nums("stage0_stale");
+  const stage2Candidates = nums("stage2_candidates");
   const latestTs = rows.map((row) => parseTs(row.ts)).filter((v) => v !== null).sort((a, b) => b - a)[0] ?? null;
   const latestAgeHours = latestTs === null ? null : (Date.now() - latestTs) / 3600000;
   const stage0Modes = [...new Set(rows.map((row) => String(row.stage0_mode || "unknown")))].sort();
   const stage1Surfaces = [...new Set(rows.map((row) => String(row.stage1_surface || "unknown")))].sort();
-  const llmErrorRows = rows.filter((row) => row.s1?.err || row.s2?.err).length;
+  const searchProfiles = [...new Set(rows.map((row) => String(row.search_profile || "unknown")))].sort();
+  const stage2Models = [...new Set(rows.map((row) => String(row.stage2_model || "unknown")))].sort();
+  const llmErrorRows = rows.filter((row) => row.outcome === "llm_error" || row.s1?.err || row.s2?.err).length;
   const summary = {
     rows: rows.length,
     totalRows: metrics.totalRows,
@@ -304,8 +307,11 @@ function summarizeMetrics(metrics) {
     stage0ExpandedRate: boolRate("stage0_expanded"),
     stage0Modes,
     stage1Surfaces,
+    searchProfiles,
+    stage2Models,
     llmErrorRows,
     stage2Ms: { p50: percentile(stage2, 0.5), p95: percentile(stage2, 0.95), max: percentile(stage2, 1) },
+    stage2Candidates: { avg: average(stage2Candidates), max: percentile(stage2Candidates, 1) },
     stage0EmbedMs: { p50: percentile(embed, 0.5), p95: percentile(embed, 0.95), max: percentile(embed, 1) },
     stage0PoolHit: { avg: average(poolHit), min: percentile(poolHit, 0), p50: percentile(poolHit, 0.5) },
     stage0Stale: { max: percentile(stale, 1) },
@@ -326,7 +332,7 @@ function summarizeMetrics(metrics) {
   if (summary.latestAgeHours !== null && summary.latestAgeHours > thresholds.maxLatestMetricsAgeHours) {
     finding("WARN", "search_metrics_stale", `latest search metrics row is ${fmtNumber(summary.latestAgeHours)}h old`);
   }
-  if (llmErrorRows > 0) finding("WARN", "search_llm_error_rows", `${llmErrorRows} rows contain s1/s2 errors in the sampled window`);
+  if (llmErrorRows > 0) finding("WARN", "search_llm_error_rows", `${llmErrorRows} rows contain LLM errors in the sampled window`);
   return summary;
 }
 

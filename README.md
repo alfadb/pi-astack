@@ -2,17 +2,17 @@
 
 > alfadb 的个人 pi workflow 仓：把常用的 pi 扩展、模型选择、多代理、视觉/生图、记忆与 vault 能力集中在一个 local package 中维护。
 
-pi-astack 不是通用发行版，也不是可独立组合的插件市场。它的定位是：**作者自用、使用即开发、以 markdown+git 为长期记忆基底的完整 pi 工作流**。
+pi-astack 不是通用发行版，也不是可独立组合的插件市场。它的定位是：**作者自用、使用即开发、以 ADR0039 event-first 第二大脑为核心的完整 pi 工作流**。
 
 ## 当前状态
 
 | 主题 | 当前事实 |
 |---|---|
-| 记忆基底 | **markdown+git** 是唯一 source of truth；gbrain 已完全退场。 |
-| 项目记忆 | 新写入目标是 `~/.abrain/projects/<id>/`；旧 `<project>/.pensieve/` 只作为 legacy 只读/迁移源。 |
-| 世界/个人大脑 | `~/.abrain/` 是 alfadb 数字孪生 / Jarvis brain，七区：`identity/ skills/ habits/ workflows/ projects/ knowledge/ vault/`。 |
+| 记忆基底 | **L1 Evidence Event** 是唯一语义 SOT；L2 Markdown 是确定性投影/审计视图；L3 SQLite/embedding/ledger 是可重建派生层。gbrain 已完全退场。 |
+| 项目记忆 | Knowledge/Constraint 当前生产写入为 `event_first`；Knowledge 读取为 `projection_only`。`~/.abrain/projects/<id>/` 与旧 `<project>/.pensieve/` 只作为 legacy 回滚、调试、迁移输入。 |
+| 世界/个人大脑 | `~/.abrain/` 是 alfadb 数字孪生 / Jarvis brain；七区是人类可读视图层：`identity/ skills/ habits/ workflows/ projects/ knowledge/ vault/`。 |
 | 主会话 | 记忆只读：`memory_search/get/list/neighbors`；不会暴露 LLM-facing 写记忆工具。 |
-| 写入者 | sediment sidecar 是唯一 dedicated writer；B5 cutover 后写入 abrain project/world/workflow 路径。 |
+| 写入者 | sediment sidecar 是唯一 dedicated writer；Knowledge/Constraint 稳态写入先追加 L1 event，再生成 L2 projection，legacy markdown 仅保留为回滚、调试、迁移输入。 |
 | 检索 | `memory_search` 走 ADR 0015 双阶段 LLM retrieval；模型不可用时 hard error，不降级 grep/BM25。 |
 | vault | P0a-P0c 已实现：`/vault`、`/secret`、`vault_release`、`$VAULT_/$PVAULT_/$GVAULT_` bash 注入、输出默认 withheld。 |
 | 项目身份 | ADR 0017 strict binding：先 `/abrain bind --project=<id>`，再允许 project-scoped memory/vault 写入。 |
@@ -146,7 +146,7 @@ git commit -m "chore: bump pi-astack"
 ## 设计原则
 
 1. **作者自用优先**：不为外部发行、通用配置矩阵或多 harness 抽象牺牲速度。
-2. **markdown+git 是记忆 SOT**：纯文件、离线、人类可编辑、可审计、可回滚。
+2. **event-first 是记忆 SOT**：L1 Evidence Event 承载语义事实；L2 Markdown 提供纯文件、离线、可审计、可回滚的确定性视图；用户纠错生成新 event 再重投影。
 3. **Facade 隐藏拓扑**：LLM 读 `memory_*`，不直接选择 backend/scope/source path。
 4. **主会话只读，sediment 单写**：把长期记忆写入集中到 sidecar 和 human slash commands。
 5. **Abrain 是数字孪生，不只是 knowledge repo**：identity/skills/habits/workflows/projects/knowledge/vault 各有边界。
@@ -155,7 +155,7 @@ git commit -m "chore: bump pi-astack"
 
 ## 历史演进一句话
 
-v6.5 gbrain 唯一存储 + 三模型投票 → v6.6 单 agent + lookup tools → v6.8 `.pensieve+gbrain` 双 target → v7 纯 markdown+git → v7.1 `~/.abrain` 数字孪生 + strict binding + LLM retrieval + LLM curator + vault。
+v6.5 gbrain 唯一存储 + 三模型投票 → v6.6 单 agent + lookup tools → v6.8 `.pensieve+gbrain` 双 target → v7 纯 markdown+git → v7.1 `~/.abrain` 数字孪生 + strict binding + LLM retrieval + LLM curator + vault → ADR0039 event-first：L1 Evidence Event 作为语义 SOT，L2 Markdown 作为确定性投影/审计视图，L3 SQLite/embedding/ledger 作为可重建派生层。
 
 详细演进见 [docs/architecture/overview.md](./docs/architecture/overview.md) 与 [docs/adr/README.md](./docs/adr/README.md)。
 

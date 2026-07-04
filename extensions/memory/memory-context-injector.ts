@@ -37,6 +37,7 @@ import type { QueryRewriteResult, ConversationTurn } from "./query-rewriter";
 import { loadEntries } from "./parser";
 import { runMemorySearch } from "./llm-search";
 import { recordUsage } from "./usage-telemetry";
+import { recordPathAInjectedOutcomes } from "../sediment/outcome-collector";
 import type { SearchVerdictResult } from "./llm-search";
 import type { MemoryEntry } from "./types";
 import { resolveSettings } from "./settings";
@@ -477,6 +478,14 @@ export async function tryInjectRelevantMemoryContext(
       total_duration_ms: Date.now() - t0,
     };
     appendLedgerRow(row);
+    recordPathAInjectedOutcomes({
+      ts: row.ts,
+      sessionId: row.session_id,
+      injectId,
+      slugs: built.selectedSlugs,
+      projectRoot: ctx.cwd,
+      anchorMissing: row.anchor_missing === true,
+    });
     return { block: built.block, rowWritten: row };
   } catch (e) {
     // Final safety net — should never reach here (all inner failures

@@ -16,12 +16,14 @@
  *       the caller's last_seen/count>0 hasData guard is required).
  *   [6] Isolation end-to-end: summarize(readProjectOutcomeRows(A),["shared"])
  *       sees ONLY A's count, not A+B.
- *   [7] buildClassifierPrompt renders the track-record line (incl ⚠️ +
+ *   [7] Path A injection rows are visible as injection-only, while
+ *       collectOutcomes still records uncited injections as retrieved-unused.
+ *   [8] buildClassifierPrompt renders the track-record line (incl ⚠️ +
  *       last_seen) for a card WITH outcome_activity, and "(none recorded)"
  *       for a card WITHOUT.
- *   [8] Prompt carries the DISCOUNT guidance (direction-correct, not
+ *   [9] Prompt carries the DISCOUNT guidance (direction-correct, not
  *       "echo-chamber → correction more credible").
- *   [9] scoped related slug (project:pi:shared) sanitizes to the bare
+ *   [10] scoped related slug (project:pi:shared) sanitizes to the bare
  *       ledger slug → would match (opus hardening).
  */
 
@@ -67,7 +69,7 @@ const jiti = makeJiti(repoRoot, { interopDefault: true });
 
 const oc = jiti(path.join(repoRoot, "extensions/sediment/outcome-collector.ts"));
 const cp = jiti(path.join(repoRoot, "extensions/sediment/correction-pipeline.ts"));
-const { sanitizeSlug, normalizeProjectRoot, readProjectOutcomeRows, summarizeEntryActivity } = oc;
+const { sanitizeSlug, normalizeProjectRoot, readProjectOutcomeRows, summarizeEntryActivity, recordPathAInjectedOutcomes } = oc;
 const buildPrompt = cp._buildClassifierPromptForTests;
 
 let pass = 0, fail = 0;
@@ -108,8 +110,29 @@ check("absent slug → zeroed record (hasData guard required)", absent.decisive_
 console.log("\n[6] isolation end-to-end: A-read sees only A's count (5, not 6)");
 check("shared-slug decisive=5 from A-only", byA["shared-slug"].decisive_count === 5);
 
-console.log("\n[7] collectOutcomes supplements Path A injected slugs as implicit baseline");
+console.log("\n[7] Path A injection-only visibility + implicit baseline");
 {
+  const injectedRows = recordPathAInjectedOutcomes({
+    ts: iso(0),
+    sessionId: "sPathInjected",
+    injectId: "path-a-injected-smoke",
+    slugs: ["injected-slug", "injected-slug"],
+    projectRoot: PROJ_A,
+  });
+  check("recordPathAInjectedOutcomes writes source=path-a-injected", injectedRows.length === 1 && injectedRows[0].source === "path-a-injected" && injectedRows[0].path_a_signal === "injection-only", JSON.stringify(injectedRows));
+  check("path-a-injected is not marked used", injectedRows.length === 1 && injectedRows[0].used === undefined, JSON.stringify(injectedRows));
+  const injectedStats = summarizeEntryActivity(readProjectOutcomeRows(PROJ_A, 5000), ["injected-slug"], 30)[0];
+  const injectedHasActivity = !!injectedStats.last_seen || injectedStats.decisive_count > 0 || injectedStats.confirmatory_count > 0 || injectedStats.retrieved_unused_count > 0 || injectedStats.total_retrievals > 0;
+  check("path-a-injected does not create activity counts or last_seen", injectedHasActivity === false, JSON.stringify(injectedStats));
+  const duplicateInjectedRows = recordPathAInjectedOutcomes({
+    ts: iso(0),
+    sessionId: "sPathInjected",
+    injectId: "path-a-injected-smoke",
+    slugs: ["injected-slug"],
+    projectRoot: PROJ_A,
+  });
+  check("path-a-injected event_id dedupes repeated writes", duplicateInjectedRows.length === 0, JSON.stringify(duplicateInjectedRows));
+
   const ca = jiti(path.join(repoRoot, "extensions/_shared/causal-anchor.ts"));
   ca._setCurrentAnchorForTests("sPath", 7);
   const pathALedgerDir = path.join(tmpHome, ".state", "memory");

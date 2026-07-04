@@ -146,7 +146,7 @@ check("dispatch enriches audit fields from heartbeat consumer without changing s
     /const DISPATCH_AUDIT_VERSION = 3;/,
     /import \{ assessLivenessForAnchor \} from "\.\/heartbeat-consumer"/,
     /const heartbeat_liveness = assessLivenessForAnchor\(heartbeatProjectRoot, heartbeatAnchor\)/,
-    /return enrichHeartbeat\(result\)/,
+    /return enrichHeartbeat\([A-Za-z_$][\w$]*\)/,
     /heartbeat_trace_path/,
     /heartbeat_liveness/,
   ]) {

@@ -605,6 +605,7 @@ async function main() {
           JSON.stringify({ ts: recent(6), session_id: "s6", entry_slug: "echo-entry", source: "memory-footnote", used: "decisive", counterfactual: "changed", retrieval_count: 1, project_root: aggRoot }),
           JSON.stringify({ ts: recent(7), session_id: "s7", entry_slug: "echo-entry", source: "memory-footnote", used: "decisive", counterfactual: "changed", retrieval_count: 1, project_root: aggRoot }),
           JSON.stringify({ ts: recent(8), session_id: "s8", entry_slug: "echo-entry", source: "memory-footnote", used: "decisive", counterfactual: "changed", retrieval_count: 1, project_root: aggRoot }),
+          JSON.stringify({ ts: recent(0), session_id: "s-injected", entry_slug: "injected-only-entry", source: "path-a-injected", path_a_signal: "injection-only", path_a_inject_id: "agg-injected", retrieval_count: 0, project_root: aggRoot }),
           JSON.stringify({ ts: recent(1), session_id: "other-project", entry_slug: "foreign-entry", source: "memory-footnote", used: "retrieved-unused", counterfactual: "foreign", retrieval_count: 1, project_root: path.join(aggRoot, "other") }),
         ].join("\n") + "\n");
         const aggStagingDir = stagingDir();
@@ -620,6 +621,9 @@ async function main() {
         assert(summary.outcome.high_unused.some((x) => x.slug === "stale-entry"), `aggregator should flag high retrieved-unused entries: ${JSON.stringify(summary.outcome)}`);
         assert(!summary.outcome.high_unused.some((x) => x.slug === "foreign-entry"), `aggregator must not mix outcome rows from another project: ${JSON.stringify(summary.outcome)}`);
         assert(summary.outcome.echo_chamber_candidates.some((x) => x.slug === "echo-entry" && x.decisive_streak === 5), `aggregator should flag decisive echo streaks: ${JSON.stringify(summary.outcome)}`);
+        assert(summary.outcome.slugs_seen === 2, `path-a-injected must not enter outcome slugs_seen: ${JSON.stringify(summary.outcome)}`);
+        assert(summary.raw_distribution?.total_slugs === 2 && summary.raw_distribution?.non_flagged_slugs === 0, `path-a-injected must not enter raw distribution: ${JSON.stringify(summary.raw_distribution)}`);
+        assert(!summary.outcome.high_unused.some((x) => x.slug === "injected-only-entry") && !summary.outcome.echo_chamber_candidates.some((x) => x.slug === "injected-only-entry"), `path-a-injected must not create outcome advisories: ${JSON.stringify(summary.outcome)}`);
         assert(summary.audit.error_like_count === 3, `aggregator should count current corrupt/error audit rows once, got: ${JSON.stringify(summary.audit)}`);
         assert(summary.staging.provisional_stale === 1, `aggregator should count stale provisional staging: ${JSON.stringify(summary.staging)}`);
         assert(summary.staging.multiview_pending === 1, `aggregator should count multiview pending files: ${JSON.stringify(summary.staging)}`);
@@ -1271,6 +1275,12 @@ async function main() {
     );
     assert(lastMetric.stage1_surface === "full_body_v3", `memory_search metrics must record Stage 1 candidate surface for before/after comparison: ${JSON.stringify(lastMetric)}`);
     assert(typeof lastMetric.verdict === "string", `memory_search metrics must record stage2 verdict: ${JSON.stringify(lastMetric)}`);
+    assert(lastMetric.search_profile === "toolSearch", `memory_search metrics must record caller profile: ${JSON.stringify(lastMetric)}`);
+    assert(lastMetric.stage1_model && lastMetric.stage2_model && typeof lastMetric.stage1_skip === "boolean", `memory_search metrics must record model/skip context: ${JSON.stringify(lastMetric)}`);
+    assert(typeof lastMetric.candidate_limit === "number" && lastMetric.candidate_limit >= 1, `memory_search metrics must record candidate_limit: ${JSON.stringify(lastMetric)}`);
+    assert(typeof lastMetric.stage2_candidates === "number" && lastMetric.stage2_candidates >= 1, `memory_search metrics must record stage2 candidate count: ${JSON.stringify(lastMetric)}`);
+    assert(typeof lastMetric.stage2_prompt_chars === "number" && lastMetric.stage2_prompt_chars > 0, `memory_search metrics must record stage2 prompt size: ${JSON.stringify(lastMetric)}`);
+    assert(typeof lastMetric.stage2_prompt_tokens_est === "number" && lastMetric.stage2_prompt_tokens_est > 0, `memory_search metrics must record stage2 token-ish size: ${JSON.stringify(lastMetric)}`);
 
     // LLM hard-errors must still leave an observable metrics row. This keeps
     // the accuracy contract (no grep fallback) while making provider/auth/model
@@ -1289,7 +1299,8 @@ async function main() {
       const failMetric = JSON.parse(failMetricLines[failMetricLines.length - 1]);
       assert(failMetric.outcome === "llm_error", `LLM failure must write an observable metrics row: ${JSON.stringify(failMetric)}`);
       assert(failMetric.error_stage === "stage2" && failMetric.error_phase === "primary", `failure metric must identify stage and phase: ${JSON.stringify(failMetric)}`);
-      assert(failMetric.stage1_skip === true && failMetric.stage2_model, `failure metric must include model/flag context: ${JSON.stringify(failMetric)}`);
+      assert(failMetric.search_profile === "toolSearch", `failure metric must include caller profile: ${JSON.stringify(failMetric)}`);
+      assert(failMetric.stage1_skip === true && failMetric.stage2_model && typeof failMetric.candidate_limit === "number", `failure metric must include model/flag/candidate context: ${JSON.stringify(failMetric)}`);
       pinStage1Skip(false);
       piAiStub.__calls = savedCalls; piAiStub.__prompts = savedPrompts; piAiStub.__configs = savedConfigs;
     }

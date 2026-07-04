@@ -56,6 +56,9 @@ if (fs.existsSync(metricsPath)) {
   const row = JSON.parse(lines[lines.length - 1]);
   // success criteria 字段
   check(`stage1_surface=stage0_hybrid_v1 (${row.stage1_surface})`, row.stage1_surface === "stage0_hybrid_v1");
+  check(`search_profile 存在 (${row.search_profile})`, typeof row.search_profile === "string");
+  check(`stage1/stage2 model context 存在`, typeof row.stage1_model === "string" && typeof row.stage2_model === "string");
+  check(`stage2 candidate/prompt size 存在`, typeof row.stage2_candidates === "number" && typeof row.stage2_prompt_chars === "number" && typeof row.stage2_prompt_tokens_est === "number");
   check(`stage0_mode 存在 (${row.stage0_mode})`, typeof row.stage0_mode === "string");
   check(`stage0_fallback (rate) 存在 (${row.stage0_fallback})`, typeof row.stage0_fallback === "boolean");
   check(`stage0_pool_hit (candidate pool hit rate) 存在 (${row.stage0_pool_hit})`, "stage0_pool_hit" in row);
