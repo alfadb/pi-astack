@@ -1,0 +1,60 @@
+# 遗忘管道零产出诊断（2026-07-04）
+
+## 事实基线
+
+当前运行开关已经打开：`memory.forgetting.instrumentation=true`、`decayShadow=true`、`demoteShadow=true`、`autoDemote=true`，且 `sediment.autoLlmWriteEnabled=true`，见 `/home/worker/.pi/agent/pi-astack-settings.json:203` 和 `/home/worker/.pi/agent/pi-astack-settings.json:210`。这排除了“开关未开”作为主因。
+
+`~/.abrain/.state/sediment/decay-shadow.jsonl` 本次复算共 1472 行，`would_demote=true` 为 0，`demote_evidence_type` 全部为 `null`，`decay_score` 本次复算最大值为 0.40（与先前截面 max=0.35 的差异不影响结论）。`~/.abrain/.state/sediment/forgetting-dry-run-audit.jsonl` 本次复算 1079 行，`demoted_count` 总和为 0，近 7 天 267 行审计仍为 0。`entry-lifecycle-proposals.jsonl` 当前不存在或无有效行，aggregator ledger 中 65 次 prompt-native 输出里 `lifecycle_proposal` 数量为 0。
+
+全库 markdown 条目本次复算 3281 条：`active=2965`、`provisional=259`、`archived=36`、`superseded=12`、`contested=1`、`in-progress=1`、`superseded-in-part=1`、缺失 status 6。`archived` 仍只有 36 条，占 1.1%。未归档但 status 已为 `superseded` 的条目有 12 条；其中明确带 `superseded_by` frontmatter 边的有 2 条，且没有发现 `active` 条目带 `superseded_by`。
+
+跨 12 个项目/全局 `.pi-astack/sediment/audit.jsonl` 审计文件复算到 15689 行，其中 writer 生命周期操作为 `update=417`、`merge=29`、`archive=29`、`supersede=8`。ADR 0039 L1 evidence event 当前有 3407 个事件，`operation_hint=create` 3309、`update` 78、`archive` 2、`merge` 3、`supersede` 1、`delete` 1，说明事件化信号存在，但 supersede/archive 覆盖主要限于较新写侧。
+
+## 根因链（带文件:行号）
+
+设计根因不是 executor 没开，而是 decay scorer 的可见输入与它被要求判断的“真值变化”不匹配。ADR 0031 路线图明确要求“disuse 永不触发降级，真值变化才是安全驱动”，并且把“supersede/contradict 信号喂进 aggregator 视图”列为待补项，见 `docs/roadmap.md:134`、`docs/roadmap.md:147`。同一段还写明 Phase 1 预期消费 `usage-metrics.json`、`entry-telemetry` 加 supersede 信号，见 `docs/roadmap.md:149`；但当前实现只接了 usage telemetry 与 resurrection 汇总。
+
+decay prompt 实际拿到两层输入。第一层是 aggregator 的九类运行摘要：mechanical suspicion、raw distribution、outcome counterfactual、structural context、prior runs、classifier health、per-turn cost、watchdog、evolution hypotheses，组装见 `extensions/sediment/aggregator-llm.ts:208` 到 `extensions/sediment/aggregator-llm.ts:226`。第二层只在 `decayShadow` 开启时追加 `ENTRY DECAY TELEMETRY`，入口见 `extensions/sediment/aggregator-llm.ts:180` 到 `extensions/sediment/aggregator-llm.ts:190`。这块 telemetry 的构造只读 `entry-telemetry`，按 `window_retrieved_unused` 降序、citation 升序取 top-50，并附带 resurrection rate；返回对象还显式写着 `note: "usage signals only — disuse is WEAK context"`，见 `extensions/sediment/aggregator.ts:1369` 到 `extensions/sediment/aggregator.ts:1397`。
+
+decay addendum 要求 LLM 可以评估 usage top-50 加“existing input feeds carry truth-change evidence”的条目，但 `would_demote` 只能在 active newer entry supersession、user contradiction 或 version/domain staleness 下为 true，见 `extensions/sediment/prompts/aggregator-decay-shadow-v1.md:15` 到 `extensions/sediment/prompts/aggregator-decay-shadow-v1.md:39`。prompt 还强调多数条目应为 `would_demote=false`，usage 触发多个 true 是自错，见 `extensions/sediment/prompts/aggregator-decay-shadow-v1.md:64` 到 `extensions/sediment/prompts/aggregator-decay-shadow-v1.md:66`。代码侧又二次兜底：没有合法 `demote_evidence_type` 时强制 `would_demote=false`，见 `extensions/sediment/decay-shadow.ts:55` 到 `extensions/sediment/decay-shadow.ts:73`；审计只检查 `would_demote_usage_only_count` 这类不变量，不检查 recall，见 `extensions/sediment/decay-shadow.ts:95` 到 `extensions/sediment/decay-shadow.ts:123`。
+
+因此 1472 次评估一次都没判出，主要是结构性看不见，而不是单纯 prompt 过度保守。LLM 看到的是 usage 候选、counterfactual 摘要和少量运行状态；它没有被喂入“条目 X 已被 writer 标成 superseded / 被 Y 替代 / 某次 curator supersede 的 reason / L1 operation_hint=supersede”这类条目级事实。prompt 保守是设计不变量的一部分，代码兜底确保了信息不足时必然输出 false。真值变化实际主要发生在写侧 curator/writer/multi-view 路径，decay 侧当前只看到用量影子。
+
+executor 零产出是第二层结果：`forgetting-executor` 消费的是 pending `op=archive` lifecycle proposal，不是 decay-shadow 的 `would_demote`；文件头部和 dry-run 入口都写明只读 `entry-lifecycle-proposals` 中 `op=archive && status=pending` 的条目，见 `extensions/sediment/forgetting-executor.ts:6` 到 `extensions/sediment/forgetting-executor.ts:10`、`extensions/sediment/forgetting-executor.ts:216` 到 `extensions/sediment/forgetting-executor.ts:240`。真实入口同样先读 pending archive proposal，满足 `autoDemote` 且注入 `archiveEntry` 后才执行，见 `extensions/sediment/forgetting-executor.ts:262` 到 `extensions/sediment/forgetting-executor.ts:337`。由于 aggregator 至今没有产出 lifecycle proposal，executor 没有候选输入，即便开关全开也只能审计 0。
+
+## 证据源盘点表
+
+| 证据源 | 已有机器可读信号 | 是否能定位条目 X | 是否已接到 decay/forgetting | 文件:行号证据 | 诊断 |
+|---|---:|---:|---:|---|---|
+| Curator supersede/archive/update/merge 决策 | `CuratorDecision` 支持 `archive`、`supersede`，reason/rationale 结构化；parser 校验 slug 必须来自 neighbors | 是，`oldSlug`/`slug`/`target` | 写侧接 writer；未接 decay；历史审计可离线读 | `extensions/sediment/curator.ts:419`、`extensions/sediment/curator.ts:426`、`extensions/sediment/curator.ts:878`、`extensions/sediment/curator.ts:890` | 真值变化最直接来源之一。当前是写侧执行路径，不是 decay 输入面。 |
+| Writer supersede | `status: superseded`，可选 `superseded_by`，audit operation=`supersede`，reason/new_slug | 是 | 未接 decay；只落 markdown/audit/L1（新路径） | `extensions/sediment/writer.ts:1281` 到 `extensions/sediment/writer.ts:1305` | 可直接转成 `demote_evidence_type=superseded_by` 或 archive proposal；当前磁盘有 12 个未 archived 的 superseded。 |
+| Writer archive/merge | archive 写 `status=archived` 和 `archive_at`，merge 会 archive source；audit operation=`archive`/`merge` | 是 | archive 已是终态；merge source 已处理；不需要再 demote | `extensions/sediment/writer.ts:851` 到 `extensions/sediment/writer.ts:887`、`extensions/sediment/writer.ts:1261` 到 `extensions/sediment/writer.ts:1278` | 这是已经完成的归档，不解释零产出，但说明写侧有可逆终态能力。 |
+| Writer audit | 每条 writer audit 是 JSONL，含 operation、target、reason、git_commit、因果 anchor | 是 | aggregator 当前读取 audit rollup，不读取“supersede rows as truth-change feed” | `extensions/sediment/writer.ts:1151` 到 `extensions/sediment/writer.ts:1196` | 旧数据中 supersede 主要在 audit，接线成本低，但需要避免把旧已处理 archive 重放。 |
+| ADR 0039 knowledge evidence event | `operation_hint` 类型包含 create/update/merge/archive/supersede/delete；payload 有 slug/status | 是 | 投影/热覆盖接了；decay 未消费 | `extensions/sediment/knowledge-evidence.ts:10` 到 `extensions/sediment/knowledge-evidence.ts:33`、`extensions/sediment/knowledge-evidence.ts:641` 到 `extensions/sediment/knowledge-evidence.ts:685` | 新架构下最干净的事件源；当前 supersede 覆盖只有 1 条，历史需从 audit/frontmatter 回填或双读。 |
+| Correction pipeline | `CorrectionSignal` 有 `target_entry_slug`、`correction_intent`、`user_quote`、provenance；staging 保留 targeted 信息 | 可定位部分目标，但只是 classifier hypothesis | 未直接接 decay；通过 curator/multi-view 才能变成写侧事实 | `extensions/sediment/correction-pipeline.ts:1` 到 `extensions/sediment/correction-pipeline.ts:12`、`extensions/sediment/correction-pipeline.ts:97` 到 `extensions/sediment/correction-pipeline.ts:112`、`extensions/sediment/correction-pipeline.ts:250` 到 `extensions/sediment/correction-pipeline.ts:286`、`extensions/sediment/correction-pipeline.ts:505` 到 `extensions/sediment/correction-pipeline.ts:533` | 不能直接当 demote 证据；可作为 `contradicted` 候选，需 curator/multi-view 或 quote guard 确认。历史审计有 11 个 targeted correction，10 个 distinct target。 |
+| Multi-view | 对 archive/supersede/merge 等高价值 op 触发复核；可合成 archive/supersede payload | 是 | 接写侧，不接 decay | `extensions/sediment/multi-view.ts:1` 到 `extensions/sediment/multi-view.ts:14`、`extensions/sediment/multi-view.ts:154` 到 `extensions/sediment/multi-view.ts:210`、`extensions/sediment/multi-view.ts:737` 到 `extensions/sediment/multi-view.ts:753`、`extensions/sediment/multi-view.ts:875` 到 `extensions/sediment/multi-view.ts:916` | 评审结论是高质量证据，但 sidecar 主要是 metrics/raw text；没有形成 decay 可读的“X 被判 archive/supersede”索引。 |
+| Archive reactivation ledger | `archive_reactivation_decision` 记录 keep/reactivate/hard_archive_recommended；apply 记录 slug/scope/ok | 是（archived 条目） | resurrection-rate monitor 接入，用于保守调参和 executor backoff；不是 demote 输入 | `extensions/sediment/archive-reactivation.ts:1` 到 `extensions/sediment/archive-reactivation.ts:24`、`extensions/sediment/archive-reactivation.ts:588` 到 `extensions/sediment/archive-reactivation.ts:620`、`extensions/sediment/archive-reactivation.ts:947` 到 `extensions/sediment/archive-reactivation.ts:1035` | 已接入“过度遗忘反馈”，不是“真值变化导致可归档”的前向证据。历史有 517 个 decision、2 个 reactivate、195 个 hard_archive_recommended。 |
+| Entry lifecycle proposals | pending proposal sidecar，字段含 slug/op/reason/independent_evidence/falsifier/status | 是 | executor 唯一直接输入 | `extensions/sediment/entry-lifecycle-proposals.ts:1` 到 `extensions/sediment/entry-lifecycle-proposals.ts:23`、`extensions/sediment/entry-lifecycle-proposals.ts:135` 到 `extensions/sediment/entry-lifecycle-proposals.ts:181`、`extensions/sediment/entry-lifecycle-proposals.ts:194` 到 `extensions/sediment/entry-lifecycle-proposals.ts:228` | 架构正确但当前无行；因为 source 只来自 promoted advisory 的 lifecycle_proposal，而 aggregator 没产生。 |
+| Aggregator decay shadow | `entry_decay_assessments[]`、`decay-shadow.jsonl`，含 score/would/evidence type | 是 | 只写 shadow；不喂 executor | `extensions/sediment/aggregator.ts:1482` 到 `extensions/sediment/aggregator.ts:1496` | 当前只证明不变量没有回归；不能单独产生 demote。 |
+
+## 量化估算
+
+保守可立即解锁的量：如果保持“不变量不变，只接已有真值变化证据”，最明确的候选是当前 12 条 `status=superseded` 且未 `archived` 的条目。它们已经不再是当前 truth，符合 `superseded_by`/supersession 驱动；其中 2 条还带显式 `superseded_by` 边。注意 executor 当前设计是 `active→archived` CAS，见 `extensions/sediment/forgetting-executor.ts:262` 到 `extensions/sediment/forgetting-executor.ts:337`，所以这 12 条若要走同一 executor，需要允许 expected_status 为 `superseded` 或先由接线层生成“superseded standing demote”计划；否则它们不是现有 `active` CAS 的直接候选。
+
+历史可回放上限：跨项目审计中有 8 条 `operation=supersede`。其中至少一部分已经体现在当前 12 条 superseded 状态里，不能与 12 简单相加。L1 evidence event 里只有 1 条 `operation_hint=supersede`，说明事件化通道可作为未来主源，但历史覆盖不足。合理估算是：纯接线第一批可释放 12 条量级，若从旧 audit 回填并去重，新增量不会超过 8 条，且大概率与 12 高度重叠。
+
+Correction 信号估算：历史 correction classifier 审计 2353 行中 `signal_found=142`、`durable=122`、`target_entry_slug` 非空 11 行，涉及 10 个 distinct target。这些是“可能存在 contradiction”的候选，不是已确认推翻；若未经 curator/multi-view 或 quote guard 确认，不应直接转成 demote。按不变量严格口径，当前可直接解锁 0；按“接到 curator 复核队列”的口径，可形成约 10 个待判定候选。
+
+Archive reactivation 和 hard_archive 估算：`archive-reactivation-ledger.jsonl` 有 517 个 decision，其中 `reactivate=2`、`hard_archive_recommended=195`。这些只覆盖已经 archived 的条目，不能解锁 active→archived demote；195 个 hard_archive_recommended 更接近未来物理回收讨论，不属于 ADR 0031 当前授权范围。
+
+Lifecycle proposal 估算：当前 `entry-lifecycle-proposals.jsonl` 无有效行，aggregator 65 个 prompt-native run 中 `lifecycle_proposal=0`。因此在不接线新证据前，executor 预计继续 0。接线 writer supersede/frontmatter 后，第一批现实可见量约 12；接线 targeted correction 只能增加“复核候选”，不能承诺 demote 数。
+
+## 候选方案对比
+
+| 方案 | 内容 | 论据 | 风险 | 可逆性 |
+|---|---|---|---|---|
+| A. 纯接线，不改不变量 | 把已有 truth-change source 接入 aggregator/forgetting：优先读取当前 markdown frontmatter 的 `status=superseded`/`superseded_by`、writer audit `operation=supersede`、L1 `operation_hint=supersede`，生成 `entry_decay_assessments` 或 pending `op=archive` proposal；targeted correction 只进入复核候选，不直接 demote。 | 符合 ADR 0031 “disuse 永不触发降级，真值变化才驱动”的基线；当前根因正是 `docs/roadmap.md:147` 待补项未完成；预计第一批约 12 条，量小但能证明管道非死链。 | 如果直接从旧 audit 回放，可能重放已处理 merge/archive；如果把 `status=superseded` 直接 archive，需确认 dense/检索层是否已经排除 superseded，否则会改变可见性；executor 当前 CAS 只假设 active。 | 高。只新增 evidence adapter/sidecar 或 proposal writer，保留 archived 终态；若误判，可由 archive-reactivation 复活，且可关闭 adapter。 |
+| B. 放宽不变量，引入长期 usage-only 的软降级 | 保持 `would_demote` 不变，但新增更软状态，例如 `provisional_decay`、`needs_review` 或只影响 retrieval weighting；长期 high retrieved-unused、低 citation、旧 last_cited_at 可进入软层，不直接 archived。 | 解决单纯真值变化覆盖面太窄导致 corpus 单调增长的问题；usage-only 不再伪装成 truth-change demote，而是进入低风险注意力层。 | 会重新打开 ADR 0031 明确规避的 disuse→demote 后门；软状态若被检索层当成降权，仍可能伤害冷门但关键条目；需要定义新状态语义和复活/回滚路径。 | 中。若只作为 sidecar 或 retrieval hint，可关；若写入 markdown status，会引入状态迁移复杂度。 |
+| C. 维持现状，接受零产出 | 不接新证据，不放宽不变量；继续把 decay-shadow 当安全回归与标定数据，等待自然 curator lifecycle proposal。 | 当前 0 demote 是不变量正确工作的表现：LLM 没有真值变化证据时不应归档；系统已经有 archive-reactivation 保障和 write-side archive/supersede 能力；误降级长尾的风险比 corpus 增长更难观测。 | corpus 继续约 +8~10 条/天增长，archived 仅 1.1%；如果 curator supersede 主要写成 `status=superseded` 而非 `archived`，归档冷存储永远不会增长；“遗忘管道”名义上开启但实质无产出，会掩盖接线缺口。 | 最高。无需改动，但也无法验证 executor 真实路径。 |
+
+本报告不做裁决。若 T0 讨论目标是证明遗忘管道可用而不改变安全边界，A 是最小可观测实验；若目标是压制长期 corpus 增长，A 的量级不足，需要同时讨论 B；若目标是优先保护长尾记忆，C 可以成立，但应明确把“零产出”从 bug 改名为当前策略选择，并建立 corpus 增长/召回质量的外部监控。
