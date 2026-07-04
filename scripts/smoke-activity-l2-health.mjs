@@ -111,6 +111,9 @@ console.log("activity L2 health smoke");
 await check("health passes on projector output and reports distribution", async () => {
   const home = makeFixture();
   try {
+    const noMaxAge = checkActivityL2Health({ abrainHome: home, nowUtc: "2026-07-04T12:00:00.000Z" });
+    assert(noMaxAge.status === "pass", `default max-age behavior expected pass got ${JSON.stringify(noMaxAge.findings)}`);
+    assert(noMaxAge.freshness.maxAgeHours === null, "default health reports age without enforcing max-age");
     const report = runHealth(home);
     assert(report.status === "pass", `expected pass got ${JSON.stringify(report.findings)}`);
     assert(report.integrity.includedEvents === 3, `includedEvents expected 3 got ${report.integrity.includedEvents}`);

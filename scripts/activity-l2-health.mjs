@@ -14,7 +14,7 @@ import { sha256Hex } from "./project-activity-l2.mjs";
 const DEFAULT_MARKDOWN_NAME = "project-time-allocation.md";
 const DEFAULT_MANIFEST_NAME = "manifest.json";
 
-function arg(argv, name, fallback = null) {
+function arg(argv, name, fallback) {
   const index = argv.indexOf(`--${name}`);
   return index >= 0 && index + 1 < argv.length ? argv[index + 1] : fallback;
 }
