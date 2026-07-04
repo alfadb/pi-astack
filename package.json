@@ -121,6 +121,8 @@
     "smoke:abrain-i18n": "node scripts/smoke-abrain-i18n.mjs",
     "docs:doctor": "node scripts/docs-doctor.mjs",
     "health:memory": "node scripts/abrain-memory-health.mjs --abrain ~/.abrain --project-root ~/.pi",
+    "project:activity-l2": "node scripts/project-activity-l2.mjs",
+    "smoke:activity-l2": "node scripts/smoke-project-activity-l2.mjs",
     "smoke:abrain-redact": "node scripts/smoke-abrain-redact.mjs",
     "smoke:abrain-rule-injector": "node scripts/smoke-abrain-rule-injector.mjs",
     "smoke:abrain-rule-writer": "node scripts/smoke-abrain-rule-writer.mjs",

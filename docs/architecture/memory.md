@@ -22,6 +22,7 @@ pi-astack memory 的 current contract：
 | `~/.abrain/l1/events/sha256/**` | content-addressed evidence events | semantic SOT |
 | `~/.abrain/l2/views/**` | deterministic markdown projections | stable read/audit view |
 | `~/.abrain/l2/views/constraint/latest/compiled-view.md` | repo L2 Constraint compiled view | projection/audit view; currently not the rule-injector read path |
+| `~/.abrain/l2/views/activity/latest/project-time-allocation.md` | Activity / attention L2 view | deterministic human-readable projection over L1 evidence events; not an editable wiki store and not a `memory_search` canonical Knowledge store |
 | `~/.abrain/.state/sediment/constraint-shadow/latest/compiled-view.md` | runtime Constraint compiled view | current `session_start` rule-injector read path while compiled-view injection remains enabled |
 | `~/.abrain/projects/<id>/` | project memory legacy markdown area | retained rollback/debug surface; projection_only steady-state writes go through L1/L2 |
 | `<project>/.pensieve/` | legacy project memory | read-only migration source |

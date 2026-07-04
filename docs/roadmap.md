@@ -33,6 +33,19 @@ status: active
 - 不追求去 hub 化的自组织 swarm；L2 必须保留 completion / liveness / accountability 语义。
 - 不把 attribution corpus 作为 dynamic hub 的前置阻塞；trace 应是 caged live dogfood 的副产品。
 
+## 第二大脑 research 吸收路线（activity / wiki-as-view）
+
+本节把 2026-07-04 agent memory / LLM Wiki 调研吸收到 backlog。定位：research 是参考材料，不直接升级为 direction / requirements / ADR；只有命中方向边界、持久 schema、runtime 默认行为或高反转成本时才进入 T0 / ADR。
+
+| Item | Intent | Notes |
+|---|---|---|
+| **Activity/attention L2 projector productization** | 让第二大脑从 L1 Evidence Events 派生“最近注意力分配到哪些项目”的人类可读 L2 view，并保持 deterministic / rebuildable。 | P0a 先以显式命令验证全局 project allocation；后续待做：纳入健康巡检、明确 output freshness、决定是否进入 session briefing / `memory_decide` prompt surface。禁止把 event count 说成真实工时；默认排除 legacy import。详细方案见 [`2026-07-04-activity-attention-timeline-l2-projector-plan.md`](./notes/2026-07-04-activity-attention-timeline-l2-projector-plan.md)。 |
+| **Requirement / workline attribution gate** | 在 project 内回答“正在推进哪些需求 / 工作线”，但只在有真实 evidence 样本和 schema 论证后推进。 | 不与 project allocation 同批实现：project_id 是现有 L1 metadata，requirement/workline 是语义归因。若需要扩展 L1 event metadata 或新增 attribution event，先走 T0 / ADR；禁止从 slug/title 直接猜并冻结成字段。 |
+| **wiki-as-view rendering boundary** | 吸收 LLM Wiki 的“预编译人类可读知识”优点，但不新增第三个可写 memory store。 | L2 Markdown view 可以作为 human-readable wiki-like surface；canonical home 仍只能是 docs 或 abrain L1/L2。若未来人类高频消费、要求持久链接或批注，再带真实使用证据讨论物化层。 |
+| **canonical home 唯一规则成文化** | 降低 docs / research / abrain / wiki-like view split-brain 风险。 | 候选改动是 `docs/README.md` 或 `direction.md` 的小型边界补强：同一知识断言只有一个 canonical home；人类可读性通过 renderer 获得，不通过多写一份获得。需要人类签字后再改方向文档。 |
+| **Lifecycle signals in ranking / forgetting review** | 重新评估 recency、usage、contradiction、activity timeline 作为当下判断输入的边界。 | 不做 trust_score / half-life 标量；不把时间信号塞回 stage0/stage1 硬召回门。若 P0a 数据证明 useful，可作为 ADR 0031 自治遗忘的证据输入候选。 |
+| **AutoMem tracking, not training** | 保留“记忆操作作为可学习技能”的长期研究期权。 | 当前只检查 L1 是否足够记录“memory action -> outcome”闭环；不投入 LoRA / learned memory expert，除非真实 sediment prompt 迭代出现 plateau 且有可审计训练/评估语料。 |
+
 ## 文档体系 Phase 2（共识层重构）
 
 Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-changelog`，见 [`docs/README.md`](./README.md)）。Phase 2 **存量语料整体完成**：存量 ADR 方向上提 `direction.md`（hard invariant）/`requirements.md`（`REQ-*` 行为需求）；`current-state.md`/`architecture/*` 去代码镜像只留契约；frontmatter + `docs-doctor` 守卫落地（具体条目以各文件现状为准，不在此镜像计数）。
