@@ -21,6 +21,7 @@
   },
   "scripts": {
     "smoke:all": "node scripts/smoke-all.mjs",
+    "smoke:llm-audit": "node scripts/smoke-llm-audit.mjs",
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
     "smoke:rename-entry": "node scripts/smoke-rename-entry.mjs",
@@ -191,7 +192,29 @@
   },
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions/abrain/index.ts",
+      "./extensions/compaction-tuner/index.ts",
+      "./extensions/context7/index.ts",
+      "./extensions/dispatch/index.ts",
+      "./extensions/edit-strip-empty/index.ts",
+      "./extensions/empty-visible-output-retry/index.ts",
+      "./extensions/goal/index.ts",
+      "./extensions/imagine/index.ts",
+      "./extensions/memory/index.ts",
+      "./extensions/model-curator/index.ts",
+      "./extensions/model-fallback/index.ts",
+      "./extensions/openai-service-tier/index.ts",
+      "./extensions/persistent-input-history/index.ts",
+      "./extensions/sediment/index.ts",
+      "./extensions/time-injector/index.ts",
+      "./extensions/tool-contract/index.ts",
+      "./extensions/tool-parallel-cap/index.ts",
+      "./extensions/turn-progress/index.ts",
+      "./extensions/verify-after-edit/index.ts",
+      "./extensions/vision/index.ts",
+      "./extensions/web-search/index.ts",
+      "./extensions/workflow/index.ts",
+      "./extensions/llm-audit/index.ts"
     ],
     "skills": [
       "./skills"

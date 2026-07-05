@@ -78,8 +78,14 @@ const runtimeStub = {
   resolveUserGlobalAbrainHome: () => tmpDir,
   acquireFileLock: async () => ({ release: async () => {} }),
 };
+const llmAuditStub = {
+  appendLlmAudit: async () => {},
+};
 const embTsPath = path.join(repoRoot, "extensions", "memory", "embedding.ts");
-const mod = loadCJS(transpile(embTsPath), embTsPath, new Map([["../_shared/runtime", runtimeStub]]));
+const mod = loadCJS(transpile(embTsPath), embTsPath, new Map([
+  ["../_shared/runtime", runtimeStub],
+  ["../_shared/llm-audit", llmAuditStub],
+]));
 const { embedTexts, VectorIndex, buildCorpusEmbeddings, contentHashOf, embeddingInputOf, vectorIndexPath, selectStage0, scopeTagOf, staleOrMissingSlugs, reconcileEmbeddings, renameSlugInVectorIndexFile } = mod;
 
 // ── config from pi-astack-settings.json → memory.embedding ───────────────────────

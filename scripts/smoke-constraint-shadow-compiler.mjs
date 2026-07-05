@@ -115,6 +115,11 @@ for (const file of [
 ]) {
   stageTs(outRoot, file);
 }
+writeFile(path.join(outRoot, "_shared", "llm-audit.js"), `
+exports.auditStreamSimple = async function auditStreamSimple(_projectRoot, _meta, piAi, model, opts, config) {
+  return piAi.streamSimple(model, opts, config).result();
+};
+`);
 
 const { makeDiagnostic, assertDiagnosticConsumers } = require(path.join(outRoot, "sediment", "constraint-compiler", "diagnostics.js"));
 const { createConstraintEvidenceEnvelope, constraintEvidenceEventPath } = require(path.join(outRoot, "sediment", "constraint-evidence", "hash-envelope.js"));

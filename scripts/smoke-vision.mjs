@@ -52,6 +52,9 @@ try {
       if (m === "node:os") return os;
       if (m === "node:path") return path;
       if (m === "node:crypto") return require("node:crypto");
+      if (m === "../_shared/llm-audit") return {
+        auditStreamSimple: async (_projectRoot, _meta, piAi, model, opts, config) => piAi.streamSimple(model, opts, config).result(),
+      };
       if (m === "typebox") return {
         Type: {
           Object: () => ({}),

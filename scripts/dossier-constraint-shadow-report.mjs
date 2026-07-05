@@ -121,6 +121,8 @@ if (!modelRef) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-dossier-"));
 for (const file of [
   "extensions/_shared/runtime.ts",
+  "extensions/_shared/causal-anchor.ts",
+  "extensions/_shared/llm-audit.ts",
   "extensions/memory/settings.ts",
   "extensions/memory/utils.ts",
   "extensions/memory/direction-impact.ts",
@@ -153,6 +155,7 @@ for (const file of [
 ]) {
   stageTs(tmp, file);
 }
+writeFile(path.join(tmp, "_shared", "pi-internals.js"), "exports.isSubAgentSession = () => false;\n");
 
 const modelsJsonPath = path.join(agentDir, "models.json");
 const { registry } = makeOracleRegistry(modelsJsonPath);
@@ -165,6 +168,7 @@ const invoker = createPiAiConstraintCompilerInvoker({
   timeoutMs,
   maxRetries,
   streamSimpleImpl: piAi,
+  projectRoot: repoRoot,
 });
 
 const beforeRules = fs.existsSync(path.join(abrainHome, "rules"))

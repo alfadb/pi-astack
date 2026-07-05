@@ -12,10 +12,16 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+const require = createRequire(import.meta.url);
+const { default: createJitiDefault, createJiti } = require("jiti");
+const makeJiti = createJiti ?? createJitiDefault;
+const jiti = makeJiti(repoRoot, { interopDefault: true });
+const { appendLlmAudit } = jiti(path.join(repoRoot, "extensions/_shared/llm-audit.ts"));
 
 // ── Config ────────────────────────────────────────────────────────────
 
@@ -76,6 +82,8 @@ function loadPrompt() {
 }
 
 async function callDeepSeek(systemPrompt, windowText) {
+  const started = Date.now();
+  const callId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const body = {
     model: MODEL,
     messages: [
@@ -86,28 +94,85 @@ async function callDeepSeek(systemPrompt, windowText) {
     max_tokens: 8000,
     stream: false,
   };
-
-  const res = await fetch(CHAT_COMPLETIONS_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(60_000),
+  const headers = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${API_KEY}`,
+  };
+  const auditBase = {
+    call_id: callId,
+    module: "dossier",
+    operation: "classifier_prompt",
+    api_kind: "openai.chat.completions",
+    model_id: MODEL,
+  };
+  await appendLlmAudit(repoRoot, {
+    ...auditBase,
+    row_type: "start",
+    request_meta: { url: CHAT_COMPLETIONS_URL, method: "POST", headers, timeoutMs: 60_000 },
+    request_body: body,
   });
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${errText.substring(0, 200)}`);
-  }
+  try {
+    const res = await fetch(CHAT_COMPLETIONS_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+    const rawResponseText = await res.text().catch(() => "");
 
-  const data = await res.json();
-  const choice = data.choices?.[0];
-  if (choice?.finish_reason === "length") {
-    throw new Error("model_output_truncated: finish_reason=length");
+    if (!res.ok) {
+      await appendLlmAudit(repoRoot, {
+        ...auditBase,
+        row_type: "end",
+        duration_ms: Date.now() - started,
+        status: res.status,
+        headers: Object.fromEntries(res.headers.entries()),
+        raw_response_text: rawResponseText,
+        ok: false,
+      });
+      throw new Error(`HTTP ${res.status}: ${rawResponseText.substring(0, 200)}`);
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawResponseText);
+    } catch (e) {
+      await appendLlmAudit(repoRoot, {
+        ...auditBase,
+        row_type: "end",
+        duration_ms: Date.now() - started,
+        status: res.status,
+        headers: Object.fromEntries(res.headers.entries()),
+        raw_response_text: rawResponseText,
+        ok: false,
+      });
+      throw e;
+    }
+    const choice = data.choices?.[0];
+    await appendLlmAudit(repoRoot, {
+      ...auditBase,
+      row_type: "end",
+      duration_ms: Date.now() - started,
+      status: res.status,
+      headers: Object.fromEntries(res.headers.entries()),
+      raw_response_text: rawResponseText,
+      parsed_response: data,
+      ok: choice?.finish_reason !== "length",
+    });
+    if (choice?.finish_reason === "length") {
+      throw new Error("model_output_truncated: finish_reason=length");
+    }
+    return choice?.message?.content ?? "";
+  } catch (e) {
+    await appendLlmAudit(repoRoot, {
+      ...auditBase,
+      row_type: "error",
+      duration_ms: Date.now() - started,
+      error: e,
+    });
+    throw e;
   }
-  return choice?.message?.content ?? "";
 }
 
 function parseClassifierOutput(raw) {

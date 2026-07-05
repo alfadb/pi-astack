@@ -98,11 +98,15 @@ const causalAnchorStub = {
 const sanitizerStub = {
   sanitizeForMemory: (text) => ({ ok: true, text, replacements: [] }),
 };
+const llmAuditStub = {
+  auditStreamSimple: async (_projectRoot, _meta, piAi, model, opts, config) => piAi.streamSimple(model, opts, config).result(),
+};
 
 // Build a chained Module._load stub map.
 const stubMap = new Map([
   ["../_shared/runtime", runtimeStub],
   ["../_shared/causal-anchor", causalAnchorStub],
+  ["../_shared/llm-audit", llmAuditStub],
   ["./sanitizer", sanitizerStub],
 ]);
 
