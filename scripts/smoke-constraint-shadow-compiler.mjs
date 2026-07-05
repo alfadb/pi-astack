@@ -328,6 +328,41 @@ const unknownSource = source({
   status: "unknown",
   body: "这是一条状态未知规则。",
 });
+const unicodeEncodingSource = source({
+  sourceId: "rule:global:always:literal-utf8-output",
+  slug: "literal-utf8-output",
+  title: "Literal UTF-8 output",
+  body: "写配置/config、code、bash 和 string literal 输出时，禁止输出 \\u 转义；必须直接书写 literal UTF-8 Unicode 字符。",
+  triggerPhrases: ["no \\u", "literal UTF-8"],
+});
+const runtimeKillSwitchSource = source({
+  sourceId: "rule:global:always:runtime-kill-switch-human-required",
+  slug: "runtime-kill-switch-human-required",
+  title: "Runtime kill-switch setting",
+  body: "runtime-kill-switch 配置必须保持 human_required，不能自动改成行为规则。",
+  triggerPhrases: ["runtime-kill-switch", "human_required"],
+});
+const plainUtf8SettingsSource = source({
+  sourceId: "rule:global:always:provider-model-settings-json-utf8",
+  slug: "provider-model-settings-json-utf8",
+  title: "Provider model settings JSON",
+  body: "Provider/model settings JSON must be UTF-8 and must live in configuration, not memory.",
+  triggerPhrases: ["provider", "model", "settings JSON", "UTF-8"],
+});
+const jargonAlwaysSource = source({
+  sourceId: "rule:global:always:professional-vocabulary-hard-blocker",
+  slug: "professional-vocabulary-hard-blocker",
+  title: "Professional vocabulary hard blocker",
+  body: "Never use jargon; use precise professional vocabulary instead.",
+});
+const jargonListedPredecessor = source({
+  sourceId: "rule:global:listed:professional-vocabulary-predecessor",
+  slug: "professional-vocabulary-predecessor",
+  injectMode: "listed",
+  status: "superseded",
+  title: "Professional vocabulary predecessor",
+  body: "Avoid jargon and prefer professional vocabulary.",
+});
 
 const allSources = [
   settingsSource,
@@ -453,6 +488,28 @@ check("normalize inputRootHash changes when source body changes", () => {
     compilerOptions: { mode: "fixture" },
   });
   assert(normalized.inputRootHash !== changed.inputRootHash, "body change did not change inputRootHash");
+});
+
+check("normalize keeps no-u/literal UTF-8 output rules behavioral", () => {
+  const result = normalizeConstraintSources([unicodeEncodingSource], { knownProjectIds: ["pi-astack"] });
+  const record = result.records.find((item) => item.sourceId === unicodeEncodingSource.sourceId);
+  assert(record && record.categoryHint !== "settings_not_memory", `unicode output rule misclassified: ${record && record.categoryHint}`);
+  assert(record && record.categoryHint === "behavioral_constraint", `unicode output rule was not behavioral: ${record && record.categoryHint}`);
+  assert(!result.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(unicodeEncodingSource.sourceId)), "unicode output rule emitted SC_NOT_MEMORY_SETTINGS");
+});
+
+check("normalize keeps runtime-kill-switch on settings-like path", () => {
+  const result = normalizeConstraintSources([runtimeKillSwitchSource], { knownProjectIds: ["pi-astack"] });
+  const record = result.records.find((item) => item.sourceId === runtimeKillSwitchSource.sourceId);
+  assert(record && record.categoryHint === "settings_not_memory", `runtime kill-switch hint changed: ${record && record.categoryHint}`);
+  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(runtimeKillSwitchSource.sourceId)), "runtime kill-switch settings diagnostic missing");
+});
+
+check("normalize leaves plain UTF-8 provider/model settings JSON as settings", () => {
+  const result = normalizeConstraintSources([plainUtf8SettingsSource], { knownProjectIds: ["pi-astack"] });
+  const record = result.records.find((item) => item.sourceId === plainUtf8SettingsSource.sourceId);
+  assert(record && record.categoryHint === "settings_not_memory", `plain UTF-8 settings fact misclassified: ${record && record.categoryHint}`);
+  assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(plainUtf8SettingsSource.sourceId)), "plain UTF-8 settings diagnostic missing");
 });
 
 check("validator accepts complete fixture decision", () => {
@@ -618,6 +675,7 @@ check("validator drops empty-source ghost constraint only when trace source is e
   const diagnostic = validated.diagnostics.find((item) => item.code === "SC_EMPTY_CONSTRAINT_DROPPED" && item.sourceRecordIds.includes(archivedSource.sourceId));
   assert(diagnostic, "empty-source ghost drop diagnostic missing");
   assert(diagnostic.data?.sourcePrimary?.[archivedSource.sourceId] === "excluded", "empty-source ghost diagnostic primary missing");
+  assert(!validated.diagnostics.some((item) => item.code === "SC_DIAGNOSTIC_DECISION_INCONSISTENCY" && item.sourceRecordIds.includes(archivedSource.sourceId)), "empty-source ghost drop produced diagnostic-vs-decision inconsistency");
 });
 
 check("validator drops exact single-source status-stale active exclusion", () => {
@@ -632,6 +690,7 @@ check("validator drops exact single-source status-stale active exclusion", () =>
   const diagnostic = validated.diagnostics.find((item) => item.code === "SC_ACTIVE_EXCLUSION_DROPPED" && item.sourceRecordIds.includes(compactSource.sourceId));
   assert(diagnostic, "active status-stale exclusion drop diagnostic missing");
   assert(diagnostic.data?.exclusionReason === "legacy_archived_observed", "active status-stale diagnostic reason missing");
+  assert(!validated.diagnostics.some((item) => item.code === "SC_DIAGNOSTIC_DECISION_INCONSISTENCY" && item.sourceRecordIds.includes(compactSource.sourceId)), "active status-stale drop produced diagnostic-vs-decision inconsistency");
   assert(validated.validationHash === canonical.validationHash, "active status-stale exclusion drop changed validationHash");
 });
 
@@ -680,6 +739,93 @@ check("validator rejects empty-source ghost constraint without trace sources", (
   let threw = false;
   try { validateConstraintCompilerDecision(allSources, { ...decision, constraints: [...decision.constraints, ghost] }, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
   assert(threw, "empty-source ghost without trace source accepted");
+});
+
+check("validator accepts active always jargon rule with listed superseded predecessor excluded", () => {
+  const sources = [jargonAlwaysSource, jargonListedPredecessor];
+  const localNormalized = normalizeConstraintSources(sources);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Professional vocabulary hard blocker",
+      compiledBody: "Never use jargon; use precise professional vocabulary instead.",
+      sourceRecordIds: [jargonAlwaysSource.sourceId],
+    }],
+    exclusions: [{ reason: "superseded_observed", sourceRecordIds: [jargonListedPredecessor.sourceId] }],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [
+      { sourceRecordId: jargonAlwaysSource.sourceId, disposition: "compiled" },
+      { sourceRecordId: jargonListedPredecessor.sourceId, disposition: "excluded" },
+    ],
+    diagnostics: [],
+  });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(jargonAlwaysSource.sourceId)), "active always jargon source not compiled");
+  assert(validated.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(jargonListedPredecessor.sourceId) && exclusion.reason === "superseded_observed"), "listed predecessor not excluded as superseded");
+  assert(!validated.unresolved.length, "correct active/listed predecessor decision produced unresolved items");
+});
+
+check("validator quarantines bad merged always+listed jargon path", () => {
+  const sources = [jargonAlwaysSource, jargonListedPredecessor];
+  const localNormalized = normalizeConstraintSources(sources);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Merged professional vocabulary rule",
+      compiledBody: "Never use jargon; use precise professional vocabulary instead.",
+      sourceRecordIds: [jargonAlwaysSource.sourceId, jargonListedPredecessor.sourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [{ sourceRecordIds: [jargonAlwaysSource.sourceId, jargonListedPredecessor.sourceId], reason: "bad always/listed merge" }],
+    rescopeProposals: [],
+    mappings: [
+      { sourceRecordId: jargonAlwaysSource.sourceId, disposition: "merged_source" },
+      { sourceRecordId: jargonListedPredecessor.sourceId, disposition: "merged_source" },
+    ],
+    diagnostics: [],
+  });
+  assert(!validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(jargonAlwaysSource.sourceId)), "bad merged always/listed constraint was retained");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(jargonAlwaysSource.sourceId) && item.reason === "model_uncertain"), "active always source was not quarantined");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(jargonListedPredecessor.sourceId) && item.reason === "model_uncertain"), "listed predecessor was not quarantined");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_ITEM_REJECTED" && diagnostic.sourceRecordIds.includes(jargonListedPredecessor.sourceId)), "bad merged path rejection diagnostic missing");
+});
+
+check("validator warns when diagnostic claims compiled source is unresolved", () => {
+  const contradictory = {
+    ...decision,
+    diagnostics: [
+      ...decision.diagnostics,
+      makeDiagnostic({ code: "SC_UNCLASSIFIED", message: "active source compiled into a professional vocabulary constraint", sourceRecordIds: [conflictSource.sourceId] }),
+    ],
+  };
+  const validated = validateConstraintCompilerDecision(allSources, contradictory, { knownProjectIds: ["pi-astack"] });
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(conflictSource.sourceId)), "conflict source should remain unresolved");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_DIAGNOSTIC_DECISION_INCONSISTENCY" && diagnostic.sourceRecordIds.includes(conflictSource.sourceId)), "diagnostic-vs-decision inconsistency warning missing");
+});
+
+check("validator ignores negated compiled/merged diagnostic wording", () => {
+  const negated = {
+    ...decision,
+    diagnostics: [
+      ...decision.diagnostics,
+      makeDiagnostic({ code: "SC_UNCLASSIFIED", message: "source is non-compiled after empty-source ghost drop", sourceRecordIds: [archivedSource.sourceId] }),
+      makeDiagnostic({ code: "SC_UNCLASSIFIED", message: "source not compiled because it belongs in settings", sourceRecordIds: [settingsSource.sourceId] }),
+      makeDiagnostic({ code: "SC_UNCLASSIFIED", message: "source not merged because predecessor was excluded", sourceRecordIds: [supersededSource.sourceId] }),
+      makeDiagnostic({ code: "SC_UNCLASSIFIED", message: "source could not be compiled due conflict", sourceRecordIds: [conflictSource.sourceId] }),
+      makeDiagnostic({ code: "SC_UNCLASSIFIED", message: "source could not be merged due status mismatch", sourceRecordIds: [unknownSource.sourceId] }),
+    ],
+  };
+  const validated = validateConstraintCompilerDecision(allSources, negated, { knownProjectIds: ["pi-astack"] });
+  const negatedSourceIds = [archivedSource.sourceId, settingsSource.sourceId, supersededSource.sourceId, conflictSource.sourceId, unknownSource.sourceId];
+  assert(!validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_DIAGNOSTIC_DECISION_INCONSISTENCY" && diagnostic.sourceRecordIds.some((sourceId) => negatedSourceIds.includes(sourceId))), "negated diagnostic wording produced diagnostic-vs-decision inconsistency");
 });
 
 check("validator quarantines unknown project scope per item", () => {
@@ -1118,8 +1264,24 @@ check("event scanner reads valid L1 events and maps event diagnostics", async ()
     },
     legacy_parallel_write: { attempted: true, legacy_path_kind: "tier1_ruleset_adjudicator", legacy_operation_hint: "create", legacy_audit_ref: "audit:c" },
   });
+  const unicodeNotMemory = writeConstraintEvidenceEvent(abrainHome, {
+    event_type: "constraint_not_memory_observed",
+    created_at_utc: "2026-06-19T00:03:00.000Z",
+    session_id: "session-d",
+    turn_id: "turn-d",
+    intent: { domain_hint: "constraint", operation_hint: "not_memory", confidence: 0.9 },
+    payload: {
+      sanitized_quote: "写配置/config、code、bash 和 string literal 输出时，禁止输出 \\u 转义；必须直接书写 literal UTF-8 Unicode 字符。",
+      candidate_constraint_text: "写配置/config、code、bash 和 string literal 输出时，禁止输出 \\u 转义；必须直接书写 literal UTF-8 Unicode 字符。",
+      candidate_title: "Literal UTF-8 output",
+      candidate_trigger_phrases: ["no \\u", "literal UTF-8"],
+      candidate_priority_hint: "always",
+      not_memory_hint: "settings",
+    },
+    legacy_parallel_write: { attempted: true, legacy_path_kind: "tier1_ruleset_adjudicator", legacy_operation_hint: "none", legacy_audit_ref: "audit:d" },
+  });
   const scan = await scanConstraintEvidenceEvents({ abrainHome });
-  assert(scan.events.length === 3, `expected 3 events, got ${scan.events.length}`);
+  assert(scan.events.length === 4, `expected 4 events, got ${scan.events.length}`);
   assert(scan.invalidEventIds.length === 0, "valid events marked invalid");
   assert(scan.events.some((event) => event.eventId === signal.event_id && event.sourceId === `event:${signal.event_id}`), "signal event missing");
   const replaySource = scan.events.find((event) => event.eventId === replay.event_id);
@@ -1134,7 +1296,13 @@ check("event scanner reads valid L1 events and maps event diagnostics", async ()
   assert(replaySource?.replayProvenance?.mappingTableVersion === "constraint-audit-replay-mapping/v1", "replay mapping version missing");
   assert(replaySource?.replayProvenance?.mappingTableSha256 === "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "replay mapping hash missing");
   assert(replaySource?.replayProvenance?.approximation === "smoke replay provenance", "replay approximation missing");
+  const unicodeSource = scan.events.find((event) => event.eventId === unicodeNotMemory.event_id);
+  assert(unicodeSource, "unicode not-memory event missing");
+  const unicodeNormalized = normalizeConstraintSources([unicodeSource]);
+  assert(unicodeNormalized.records[0].categoryHint === "behavioral_constraint", `unicode event category drifted: ${unicodeNormalized.records[0].categoryHint}`);
+  assert(!unicodeNormalized.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS"), "unicode event normalized to SC_NOT_MEMORY_SETTINGS");
   assert(scan.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(`event:${notMemory.event_id}`)), "not-memory diagnostic missing");
+  assert(!scan.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(`event:${unicodeNotMemory.event_id}`)), "unicode not-memory event leaked SC_NOT_MEMORY_SETTINGS");
 });
 
 check("event scanner cleanly skips foreign envelope schemas, surfaces unknown/malformed (ADR0039 NS-2)", async () => {
@@ -1340,6 +1508,9 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("shadow-only"), "shadow-only instruction missing");
   assert(prompt.text.includes("Return JSON only"), "JSON-only instruction missing");
   assert(prompt.text.includes("Never include mutation-key fields"), "mutation-key instruction missing");
+  assert(prompt.text.includes("literal UTF-8 output"), "Unicode/output-encoding guidance missing");
+  assert(prompt.text.includes("no \\u escapes"), "no-u escape guidance missing");
+  assert(prompt.text.includes("active always source") && prompt.text.includes("listed predecessor"), "active-always/listed-predecessor guidance missing");
   assert(prompt.text.includes(globalSource.sourceId), "source id missing from prompt");
 });
 

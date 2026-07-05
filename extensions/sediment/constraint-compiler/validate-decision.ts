@@ -308,6 +308,52 @@ function sourceMultiHomeDiagnostic(sourceId: string, primaryDispositions: string
   });
 }
 
+const VALIDATOR_INTERNAL_CODES_IGNORED_FOR_COMPILED_CLAIMS = new Set<ConstraintShadowDiagnostic["code"]>([
+  "SC_MAPPING_DISPOSITION_NORMALIZED",
+  "SC_EXCLUSION_REASON_RECLASSIFIED",
+  "SC_EXCLUSION_DEDUPED",
+  "SC_NOT_MEMORY_SUBTYPE_NORMALIZED",
+  "SC_SOURCE_MULTI_HOME_QUARANTINED",
+  "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED",
+  "SC_EMPTY_CONSTRAINT_DROPPED",
+  "SC_ACTIVE_EXCLUSION_DROPPED",
+  "SC_COMPILER_ITEM_REJECTED",
+]);
+
+function diagnosticClaimsCompiledDisposition(diagnostic: ConstraintShadowDiagnostic): boolean {
+  if (VALIDATOR_INTERNAL_CODES_IGNORED_FOR_COMPILED_CLAIMS.has(diagnostic.code)) {
+    return false;
+  }
+
+  const message = diagnostic.message.toLowerCase();
+  if (/\b(?:non[-\s]?compiled|not\s+compiled|not\s+merged|could\s+not\s+be\s+compiled|could\s+not\s+be\s+merged)\b/i.test(message)) {
+    return false;
+  }
+
+  return /\bmerged_source\b|\bmerged\b|\bcompiled\b|active\s+sources?\s+compiled/i.test(message);
+}
+
+function diagnosticDecisionInconsistencyDiagnostic(
+  diagnostic: ConstraintShadowDiagnostic,
+  sourceId: string,
+  actualDisposition: ConstraintSourceDisposition,
+): ConstraintShadowDiagnostic {
+  return makeDiagnostic({
+    code: "SC_DIAGNOSTIC_DECISION_INCONSISTENCY",
+    severity: "warning",
+    message: "compiler diagnostic claimed a compiled or merged source but the final decision settled it as excluded or unresolved",
+    sourceRecordIds: [sourceId],
+    data: {
+      diagnosticId: diagnostic.id,
+      diagnosticCode: diagnostic.code,
+      diagnosticMessage: diagnostic.message,
+      claimedDisposition: "compiled_or_merged",
+      actualDisposition,
+      action: "warn-diagnostic-decision-inconsistency",
+    },
+  });
+}
+
 function emptyConstraintDroppedDiagnostic(constraint: ConstraintDecisionConstraint, index: number, traceSourceRecordIds: string[], sourcePrimary: Map<string, ConstraintSourceDisposition>): ConstraintShadowDiagnostic {
   return makeDiagnostic({
     code: "SC_EMPTY_CONSTRAINT_DROPPED",
@@ -394,7 +440,8 @@ function isValidationHashDiagnostic(diagnostic: ConstraintShadowDiagnostic): boo
     && diagnostic.code !== "SC_NOT_MEMORY_SUBTYPE_NORMALIZED"
     && diagnostic.code !== "SC_UNSUPPORTED_MERGE_REVIEW_PAIR_QUARANTINED"
     && diagnostic.code !== "SC_EMPTY_CONSTRAINT_DROPPED"
-    && diagnostic.code !== "SC_ACTIVE_EXCLUSION_DROPPED";
+    && diagnostic.code !== "SC_ACTIVE_EXCLUSION_DROPPED"
+    && diagnostic.code !== "SC_DIAGNOSTIC_DECISION_INCONSISTENCY";
 }
 
 function quarantineDiagnostic(context: string, constraint: ConstraintDecisionConstraint, reason: string): ConstraintShadowDiagnostic {
@@ -784,6 +831,23 @@ export function validateConstraintCompilerDecision(
       + `${uncoveredEventSources.join(", ")}. Every source record must receive exactly one primary `
       + `disposition (compiled, merged_source, excluded, or unresolved); place each missing event in the correct bucket.`,
     );
+  }
+
+  const finalDecisionForDisposition = { ...decision, constraints: validatedConstraints, exclusions: acceptedExclusions, unresolved, merges: acceptedMerges, diagnostics };
+  const existingInconsistencyKeys = new Set(diagnostics
+    .filter((diagnostic) => diagnostic.code === "SC_DIAGNOSTIC_DECISION_INCONSISTENCY")
+    .map((diagnostic) => `${diagnostic.data?.diagnosticId ?? ""}:${diagnostic.sourceRecordIds.join("+")}`));
+  for (const diagnostic of diagnostics.slice()) {
+    if (diagnostic.code === "SC_DIAGNOSTIC_DECISION_INCONSISTENCY") continue;
+    if (!diagnosticClaimsCompiledDisposition(diagnostic)) continue;
+    for (const sourceId of diagnostic.sourceRecordIds) {
+      const actualDisposition = dispositionForSource(finalDecisionForDisposition, sourceId);
+      if (actualDisposition !== "excluded" && actualDisposition !== "unresolved") continue;
+      const key = `${diagnostic.id}:${sourceId}`;
+      if (existingInconsistencyKeys.has(key)) continue;
+      diagnostics.push(diagnosticDecisionInconsistencyDiagnostic(diagnostic, sourceId, actualDisposition));
+      existingInconsistencyKeys.add(key);
+    }
   }
 
   const validationHashDiagnostics = diagnostics.filter(isValidationHashDiagnostic);

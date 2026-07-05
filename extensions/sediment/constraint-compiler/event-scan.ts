@@ -4,6 +4,7 @@ import { parseConstraintEvidenceEnvelopeJson } from "../constraint-evidence/read
 import { isSha256Hex } from "../constraint-evidence/hash-envelope";
 import type { ConstraintEvidenceDiagnostic, ConstraintEvidenceEnvelopeV1, ConstraintEvidenceEventBodyV1 } from "../constraint-evidence/types";
 import { makeDiagnostic } from "./diagnostics";
+import { inferCategoryHint } from "./normalize";
 import type { ConstraintEventSourceRecord, ConstraintShadowDiagnostic } from "./types";
 
 export interface ConstraintEventScanResult {
@@ -191,13 +192,18 @@ export async function scanConstraintEvidenceEvents(options: { abrainHome: string
       const peekedSchema = peekEnvelopeSchema(raw);
       if (peekedSchema !== undefined && FOREIGN_SKIP_ENVELOPE_SCHEMAS.has(peekedSchema)) continue;
       const parsed = parseConstraintEvidenceEnvelopeJson(raw, { abrainHome, filePath: file, relativePath });
-      diagnostics.push(...parsed.diagnostics.map((diagnostic) => mapEvidenceDiagnostic(diagnostic, fallbackEventId)));
       if (!parsed.ok) {
+        diagnostics.push(...parsed.diagnostics.map((diagnostic) => mapEvidenceDiagnostic(diagnostic, fallbackEventId)));
         const ids = parsed.diagnostics.flatMap((diagnostic) => diagnostic.eventIds);
         for (const eventId of ids.length ? ids : (fallbackEventId ? [fallbackEventId] : [])) invalidEventIds.push(eventId);
         continue;
       }
-      events.push(sourceFromEnvelope(parsed.value, file));
+      const event = sourceFromEnvelope(parsed.value, file);
+      const categoryHint = inferCategoryHint(event);
+      diagnostics.push(...parsed.diagnostics
+        .map((diagnostic) => mapEvidenceDiagnostic(diagnostic, fallbackEventId))
+        .filter((diagnostic) => !(diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && categoryHint === "behavioral_constraint")));
+      events.push(event);
     } catch (err) {
       if (fallbackEventId) invalidEventIds.push(fallbackEventId);
       diagnostics.push(makeDiagnostic({

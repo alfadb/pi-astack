@@ -39,7 +39,45 @@ function textIncludesAny(text: string, needles: string[]): boolean {
   return needles.some((needle) => lowerText.includes(needle));
 }
 
+function sourceClassificationText(record: ConstraintSourceRecord): string {
+  if (record.sourceKind === "legacy_rule") {
+    return [
+      record.title,
+      record.body,
+      record.appliesWhen,
+      record.mustDoSummary,
+      ...record.triggerPhrases,
+    ].join("\n");
+  }
+  if (record.sourceKind === "constraint_event") {
+    return [
+      record.sanitizedQuote,
+      record.candidateText,
+      record.candidateTitle ?? "",
+      record.candidateAppliesWhen ?? "",
+      ...record.candidateTriggerPhrases,
+    ].join("\n");
+  }
+  return "";
+}
+
+function isRuntimeKillSwitchText(text: string): boolean {
+  return /runtime[-_\s]?kill[-_\s]?switch|kill[-_\s]?switch|human_required|human\s+required/i.test(text);
+}
+
+function isUnicodeOutputEncodingBehaviorConstraint(text: string): boolean {
+  if (isRuntimeKillSwitchText(text)) return false;
+  const hasEscapeMarker = /\\u|\bu[-_\s]?(?:style|escape|风格|形式)\b|unicode\s+escapes?|转义|escapes?/i.test(text);
+  if (!hasEscapeMarker) return false;
+  const hasOutputSurface = /output|emit|render|write|text|encoding|encode|string|literal|输出|文本|编码|字符串|直接书写|原样/i.test(text);
+  const hasBehaviorDirective = /forbid|forbidden|ban|must|should|never|do not|don't|no\s+\\u|literal|directly|禁止|不要|别|不能|不得|必须|应当|直接|原样/i.test(text);
+  return hasOutputSurface && hasBehaviorDirective;
+}
+
 export function inferCategoryHint(record: ConstraintSourceRecord): ConstraintCategoryHint {
+  const combined = sourceClassificationText(record);
+  if (combined && isUnicodeOutputEncodingBehaviorConstraint(combined)) return "behavioral_constraint";
+
   if (record.sourceKind === "constraint_event") {
     if (record.operationHint === "not_memory") {
       return record.notMemoryHint === "tool_contract" ? "tool_contract_not_memory" : "settings_not_memory";
@@ -48,13 +86,6 @@ export function inferCategoryHint(record: ConstraintSourceRecord): ConstraintCat
     return "behavioral_constraint";
   }
   if (record.sourceKind !== "legacy_rule") return "unknown";
-  const combined = [
-    record.title,
-    record.body,
-    record.appliesWhen,
-    record.mustDoSummary,
-    ...record.triggerPhrases,
-  ].join("\n");
 
   if (textIncludesAny(combined, ["settings", "setting", "model tier", "provider", "feature flag", "配置", "模型档位", "供应商"])) {
     return "settings_not_memory";
