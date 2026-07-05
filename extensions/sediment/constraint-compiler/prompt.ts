@@ -45,6 +45,7 @@ export function buildConstraintCompilerPrompt(input: ConstraintCompilerPromptInp
     "Every item that references records must use sourceRecordIds as an array of exact sourceId strings from the input payload. Never use sourceId, sources, refs, sourceIds, or a single string.",
     "For every compiled constraint, injectMode must exactly match every referenced source record (legacy rule or constraint event). Never combine always and listed records in one compiled constraint.",
     "When an active always source is a near-duplicate of a listed predecessor, do not merge them into one always/listed mixed-source constraint. Compile the active always source, and exclude the listed archived/superseded predecessor as superseded_observed or legacy_archived_observed.",
+    "Active source compiled plus predecessor sources excluded is a consistent result; do not map excluded predecessors as compiled or merged_source.",
     "For every compiled constraint, scope must exactly match every referenced legacy rule record unless a matching rescopeProposals item is present for that source.",
     "Source scope is authoritative. Topic text is not scope evidence: a global rule that mentions a project name such as sub2api or merdata stays global unless a valid explicit rescopeProposals item is present.",
     "Never infer project scope from a title, body, repository name, product name, or the word project in the rule text.",

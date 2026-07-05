@@ -74,9 +74,20 @@ function isUnicodeOutputEncodingBehaviorConstraint(text: string): boolean {
   return hasOutputSurface && hasBehaviorDirective;
 }
 
+function isL2HumanViewWriteConfirmationBehaviorConstraint(text: string): boolean {
+  const hasL2 = /\bl2\b|level\s*2|二级/i.test(text);
+  const hasHumanViewSurface = /markdown|\.md\b|human[-_\s]?(?:view|facing|readable)|human\s+views?|derived\s+views?|视图|派生视图|人工/i.test(text);
+  const hasReadOnlyView = /read[-_\s]?only|readonly|not[-_\s]?user[-_\s]?managed|not\s+managed\s+by\s+users?|user[-_\s]?managed|只读|不要\s*手动管理|不可\s*手动管理/i.test(text);
+  const hasWriteConfirmation = /popup|pop[-_\s]?up|confirmation|confirm(?:ation)?\s+dialog|write\s+confirmation|写入确认|确认弹窗|弹窗/i.test(text)
+    && /write|writing|edit|modify|mutation|update|persist|写入|修改|编辑|更新/i.test(text);
+  const hasConstraintDirective = /must|should|only|never|do not|don't|forbid|禁止|不要|不得|必须|只能|仅/i.test(text);
+  return hasL2 && hasHumanViewSurface && hasReadOnlyView && hasWriteConfirmation && hasConstraintDirective;
+}
+
 export function inferCategoryHint(record: ConstraintSourceRecord): ConstraintCategoryHint {
   const combined = sourceClassificationText(record);
   if (combined && isUnicodeOutputEncodingBehaviorConstraint(combined)) return "behavioral_constraint";
+  if (combined && isL2HumanViewWriteConfirmationBehaviorConstraint(combined)) return "behavioral_constraint";
 
   if (record.sourceKind === "constraint_event") {
     if (record.operationHint === "not_memory") {

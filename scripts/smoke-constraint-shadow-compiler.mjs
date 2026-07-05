@@ -349,6 +349,16 @@ const plainUtf8SettingsSource = source({
   body: "Provider/model settings JSON must be UTF-8 and must live in configuration, not memory.",
   triggerPhrases: ["provider", "model", "settings JSON", "UTF-8"],
 });
+const l2HumanViewSource = source({
+  sourceId: "rule:global:listed:l2-not-user-managed-popup-only-on-write",
+  slug: "l2-not-user-managed-popup-only-on-write",
+  injectMode: "listed",
+  title: "L2 Markdown human views are read-only",
+  body: "L2 Markdown human views are read-only derived views of memory/knowledge state. They are not user-managed; show a popup/write confirmation only when writing or updating the derived view.",
+  triggerPhrases: ["L2 Markdown", "human views", "write confirmation"],
+  appliesWhen: "rendering or updating L2 Markdown human views",
+  mustDoSummary: "Treat L2 Markdown human views as read-only derived views; popup confirmation only on write.",
+});
 const jargonAlwaysSource = source({
   sourceId: "rule:global:always:professional-vocabulary-hard-blocker",
   slug: "professional-vocabulary-hard-blocker",
@@ -510,6 +520,64 @@ check("normalize leaves plain UTF-8 provider/model settings JSON as settings", (
   const record = result.records.find((item) => item.sourceId === plainUtf8SettingsSource.sourceId);
   assert(record && record.categoryHint === "settings_not_memory", `plain UTF-8 settings fact misclassified: ${record && record.categoryHint}`);
   assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(plainUtf8SettingsSource.sourceId)), "plain UTF-8 settings diagnostic missing");
+});
+
+check("normalize keeps L2 read-only human-view write-confirmation rule behavioral", () => {
+  const result = normalizeConstraintSources([l2HumanViewSource], { knownProjectIds: ["pi-astack"] });
+  const record = result.records.find((item) => item.sourceId === l2HumanViewSource.sourceId);
+  assert(record && record.categoryHint === "behavioral_constraint", `L2 human-view rule misclassified: ${record && record.categoryHint}`);
+  assert(record && record.categoryHint !== "knowledge_not_constraint", "L2 human-view rule normalized as knowledge_not_constraint");
+  assert(!result.diagnostics.some((diagnostic) => JSON.stringify(diagnostic).includes("knowledge_not_constraint")), "L2 human-view rule emitted knowledge_not_constraint diagnostic");
+});
+
+check("validator accepts compiled L2 read-only human-view write-confirmation rule", () => {
+  const sources = [l2HumanViewSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "listed",
+      title: "L2 Markdown human views are read-only",
+      compiledBody: "Treat L2 Markdown human views as read-only derived views; show popup/write confirmation only on write.",
+      sourceRecordIds: [l2HumanViewSource.sourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: l2HumanViewSource.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(l2HumanViewSource.sourceId)), "compiled L2 human-view rule missing");
+  assert(!validated.unresolved.length, "compiled L2 human-view rule produced unresolved items");
+});
+
+check("validator quarantines bad compiled+excluded L2 human-view multi-home decision", () => {
+  const sources = [l2HumanViewSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "listed",
+      title: "L2 Markdown human views are read-only",
+      compiledBody: "Treat L2 Markdown human views as read-only derived views; show popup/write confirmation only on write.",
+      sourceRecordIds: [l2HumanViewSource.sourceId],
+    }],
+    exclusions: [{ reason: "knowledge_candidate", sourceRecordIds: [l2HumanViewSource.sourceId], note: "bad classifier output" }],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: l2HumanViewSource.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  assert(!validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(l2HumanViewSource.sourceId)), "bad L2 multi-home decision remained compiled");
+  assert(!validated.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(l2HumanViewSource.sourceId)), "bad L2 multi-home decision remained excluded");
+  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(l2HumanViewSource.sourceId) && item.reason === "conflict"), "bad L2 multi-home decision was not quarantined to conflict");
+  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_SOURCE_MULTI_HOME_QUARANTINED" && diagnostic.sourceRecordIds.includes(l2HumanViewSource.sourceId)), "bad L2 multi-home quarantine diagnostic missing");
 });
 
 check("validator accepts complete fixture decision", () => {
@@ -809,6 +877,35 @@ check("validator warns when diagnostic claims compiled source is unresolved", ()
   const validated = validateConstraintCompilerDecision(allSources, contradictory, { knownProjectIds: ["pi-astack"] });
   assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(conflictSource.sourceId)), "conflict source should remain unresolved");
   assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_DIAGNOSTIC_DECISION_INCONSISTENCY" && diagnostic.sourceRecordIds.includes(conflictSource.sourceId)), "diagnostic-vs-decision inconsistency warning missing");
+});
+
+check("validator does not warn when diagnostic says active compiled and predecessor excluded", () => {
+  const sources = [jargonAlwaysSource, jargonListedPredecessor];
+  const localNormalized = normalizeConstraintSources(sources);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Professional vocabulary hard blocker",
+      compiledBody: "Never use jargon; use precise professional vocabulary instead.",
+      sourceRecordIds: [jargonAlwaysSource.sourceId],
+    }],
+    exclusions: [{ reason: "superseded_observed", sourceRecordIds: [jargonListedPredecessor.sourceId] }],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [
+      { sourceRecordId: jargonAlwaysSource.sourceId, disposition: "compiled" },
+      { sourceRecordId: jargonListedPredecessor.sourceId, disposition: "excluded" },
+    ],
+    diagnostics: [
+      makeDiagnostic({ code: "SC_UNCLASSIFIED", message: "active always source was compiled and predecessors were excluded", sourceRecordIds: [jargonListedPredecessor.sourceId] }),
+    ],
+  });
+  assert(validated.exclusions.some((exclusion) => exclusion.sourceRecordIds.includes(jargonListedPredecessor.sourceId) && exclusion.reason === "superseded_observed"), "listed predecessor not excluded as superseded");
+  assert(!validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_DIAGNOSTIC_DECISION_INCONSISTENCY" && diagnostic.sourceRecordIds.includes(jargonListedPredecessor.sourceId)), "predecessor exclusion diagnostic produced inconsistency warning");
 });
 
 check("validator ignores negated compiled/merged diagnostic wording", () => {
@@ -1563,6 +1660,7 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("literal UTF-8 output"), "Unicode/output-encoding guidance missing");
   assert(prompt.text.includes("no \\u escapes"), "no-u escape guidance missing");
   assert(prompt.text.includes("active always source") && prompt.text.includes("listed predecessor"), "active-always/listed-predecessor guidance missing");
+  assert(prompt.text.includes("Active source compiled plus predecessor sources excluded is a consistent result"), "active-compiled/predecessor-excluded consistency guidance missing");
   assert(prompt.text.includes("Settings/config/tool-contract exclusions require an input categoryHint of settings_not_memory or tool_contract_not_memory"), "not-memory categoryHint gate guidance missing");
   assert(prompt.text.includes("SC_NOT_MEMORY_SETTINGS or SC_NOT_MEMORY_TOOL_CONTRACT"), "not-memory diagnostic gate guidance missing");
   assert(prompt.text.includes("constraint_event with categoryHint=behavioral_constraint"), "behavioral event compile/unresolved guidance missing");

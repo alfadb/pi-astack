@@ -333,6 +333,12 @@ function diagnosticClaimsCompiledDisposition(diagnostic: ConstraintShadowDiagnos
   return /\bmerged_source\b|\bmerged\b|\bcompiled\b|active\s+sources?\s+compiled/i.test(message);
 }
 
+function diagnosticAffirmsExcludedDisposition(diagnostic: ConstraintShadowDiagnostic): boolean {
+  const message = diagnostic.message.toLowerCase();
+  if (/\bnot\s+(?:be\s+)?excluded\b/i.test(message)) return false;
+  return /\b(?:excluded|exclusion|exclude|superseded|archived|obsolete|predecessors?)\b/i.test(message);
+}
+
 function diagnosticDecisionInconsistencyDiagnostic(
   diagnostic: ConstraintShadowDiagnostic,
   sourceId: string,
@@ -843,6 +849,7 @@ export function validateConstraintCompilerDecision(
     for (const sourceId of diagnostic.sourceRecordIds) {
       const actualDisposition = dispositionForSource(finalDecisionForDisposition, sourceId);
       if (actualDisposition !== "excluded" && actualDisposition !== "unresolved") continue;
+      if (actualDisposition === "excluded" && diagnosticAffirmsExcludedDisposition(diagnostic)) continue;
       const key = `${diagnostic.id}:${sourceId}`;
       if (existingInconsistencyKeys.has(key)) continue;
       diagnostics.push(diagnosticDecisionInconsistencyDiagnostic(diagnostic, sourceId, actualDisposition));

@@ -127,6 +127,8 @@ Validation:
 
 First P0E refresh failed validation because the LLM invented `tool_contract_not_memory` for a behavioral ToolContract cleanup event; the fix tightens the prompt gate, and no production latest/audit refresh has succeeded yet.
 
+Second P0E refresh succeeded but revealed `l2-not-user-managed` conflict and noisy predecessor inconsistency. The P0F patch addresses classifier and diagnostic noise before another refresh.
+
 ## Blocked Actions
 
 The following actions remain blocked by this note:
