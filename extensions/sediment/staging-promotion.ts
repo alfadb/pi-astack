@@ -53,6 +53,7 @@ import {
   userGlobalSedimentDir,
 } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { auditStreamSimple } from "../_shared/llm-audit";
 
 export const STAGING_PROMOTION_PROMPT_VERSION = "v2";
 
@@ -613,12 +614,14 @@ async function callPromotionIdentityModel(
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 
-  const stream = piAi.streamSimple(
+  const result = await auditStreamSimple(
+    process.cwd(),
+    { module: "sediment", operation: "staging_promotion_identity", model_ref: modelRef, prompt_chars: (sanitized.text ?? prompt).length, staging_slug: entry.slug },
+    piAi,
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: sanitized.text ?? prompt }] }] },
     { apiKey: auth.apiKey, headers: auth.headers, signal, timeoutMs: Math.min(settings.classifierTimeoutMs, 120_000), maxRetries: 0 },
   );
-  const result = await stream.result();
   if (result.errorMessage || result.stopReason === "error" || result.stopReason === "aborted") {
     throw new Error(result.errorMessage ?? result.stopReason ?? "staging promotion identity call failed");
   }

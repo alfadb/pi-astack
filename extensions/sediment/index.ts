@@ -78,6 +78,7 @@ import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { loadEntries } from "../memory/parser";
 import { reconcileEmbeddings, resolveEmbeddingProviderConfig, vectorIndexPath } from "../memory/embedding";
 import { sanitizeForMemory } from "./sanitizer";
+import { auditStreamSimple } from "../_shared/llm-audit";
 import { hasAdr0039L3RelevantWriteResult, syncAdr0039L3AfterKnowledgeWrite } from "./knowledge-evidence";
 
 import {
@@ -4407,12 +4408,14 @@ async function confirmRuleContradictionLlm(args: {
         config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
       ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
     } = await import("@earendil-works/pi-ai/compat");
-    const stream = piAi.streamSimple(
+    const result = await auditStreamSimple(
+      process.cwd(),
+      { module: "sediment", operation: "rule_contradiction_confirm", model_ref: modelRef, prompt_chars: (sanitized.text ?? prompt).length },
+      piAi,
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: sanitized.text ?? prompt }] }] },
       { apiKey: auth.apiKey, headers: auth.headers, signal: args.signal, timeoutMs: args.settings.classifierTimeoutMs, maxRetries: 0 },
     );
-    const result = await stream.result();
     if (result.errorMessage || result.stopReason === "error" || result.stopReason === "aborted") {
       return { status: "unavailable", model: modelRef, rationale: sanitizeAuditText(result.errorMessage ?? result.stopReason ?? "confirm_call_failed", 300) || "confirm_call_failed" };
     }

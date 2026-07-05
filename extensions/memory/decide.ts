@@ -26,6 +26,7 @@ import type { MemoryEntry } from "./types";
 import type { EntryActivityStats } from "../sediment/outcome-collector";
 import { sanitizeForMemory } from "../sediment/sanitizer";
 import { getCurrentAnchor } from "../_shared/causal-anchor";
+import { auditStreamSimple } from "../_shared/llm-audit";
 
 // ── ADR 0026 §5.1 decision_brief_id schema (R2 NEW-P1-B fix) ───────────────────
 //
@@ -452,13 +453,14 @@ export async function runMemoryDecide(args: {
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 
-  const stream = piAi.streamSimple(
+  const finalMsg = await auditStreamSimple(
+    process.cwd(),
+    { module: "memory", operation: "memory_decide", model_ref: decideModelRef, entry_count: searchResults.length },
+    piAi,
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: sanitizedPrompt.text ?? prompt }] }] },
     { apiKey: auth.apiKey, headers: auth.headers, signal, timeoutMs: 60_000, maxRetries: 1 },
   );
-
-  const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
     return { ok: false, error: finalMsg.errorMessage || finalMsg.stopReason || "memory_decide failed", entryCount: searchResults.length, entrySlugs, decisionBriefId, ...(anchorMissing ? { anchorMissing: true } : {}) };
   }

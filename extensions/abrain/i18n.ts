@@ -19,6 +19,8 @@
  * previews are pre-rewritten so they contain only `$VAULT_*` variable refs.
  */
 
+import { auditStreamSimple } from "../_shared/llm-audit";
+
 const RING_MAX = 3;
 const RING_TEXT_MAX = 1200;
 const CACHE_MAX = 200;
@@ -111,12 +113,14 @@ export async function defaultTranslator(en: string, userHint: string, ctx: unkno
     en,
   ].join("\n");
 
-  const stream = piAi.streamSimple(
+  const final = await auditStreamSimple(
+    process.cwd(),
+    { module: "abrain", operation: "vault_prompt_i18n", prompt_chars: prompt.length },
+    piAi,
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }] },
     { apiKey: auth.apiKey, headers: auth.headers, timeoutMs: TRANSLATE_TIMEOUT_MS, maxRetries: 0 },
   );
-  const final = await stream.result();
   if (final.stopReason === "error" || final.stopReason === "aborted") return null;
   const text = (final.content ?? [])
     .filter((p) => p.type === "text")

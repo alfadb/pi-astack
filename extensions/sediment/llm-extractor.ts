@@ -7,6 +7,7 @@ import { sanitizeForMemory } from "./sanitizer";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { entryToText } from "./checkpoint";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { auditStreamSimple } from "../_shared/llm-audit";
 
 // ── System context cache (loaded once, same across all extractor calls) ───
 let _cachedSystemContext: string | null = null;
@@ -497,7 +498,7 @@ export async function runLlmExtractor(
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 
-  let stream: ReturnType<typeof piAi.streamSimple>;
+  let finalMsg: { stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> };
   let promptChars = 0; // tracked for metrics; set in both paths
   if (deps.continuationMessages && Array.isArray(deps.continuationMessages)) {
     // Continuation-call: reuse main session messages + append extractor instruction.
@@ -510,7 +511,10 @@ export async function runLlmExtractor(
       : sanitizeContinuationMessages(deps.continuationMessages as any[]);
     const continuationPrompt = buildLlmExtractorContinuationInstruction();
     promptChars = continuationPrompt.length; // approximate; messages chars tracked via estimatedTokens
-    stream = piAi.streamSimple(
+    finalMsg = await auditStreamSimple(
+      process.cwd(),
+      { module: "sediment", operation: "llm_extractor_continuation", model_ref: deps.settings.extractorModel, prompt_chars: promptChars },
+      piAi,
       model,
       {
         messages: [
@@ -532,7 +536,10 @@ export async function runLlmExtractor(
   } else {
     const prompt = buildLlmExtractorPrompt(sanitizedWindowText, systemContext || undefined);
     promptChars = prompt.length;
-    stream = piAi.streamSimple(
+    finalMsg = await auditStreamSimple(
+      process.cwd(),
+      { module: "sediment", operation: "llm_extractor", model_ref: deps.settings.extractorModel, prompt_chars: promptChars },
+      piAi,
       model,
       {
         messages: [{
@@ -550,7 +557,6 @@ export async function runLlmExtractor(
     );
   }
 
-  const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
     return {
       ok: false,

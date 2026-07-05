@@ -2,6 +2,7 @@ import type {
   ConstraintCompilerInvokeResult,
   ConstraintCompilerInvoker,
 } from "./types";
+import { auditStreamSimple } from "../../_shared/llm-audit";
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
@@ -36,6 +37,7 @@ export function createPiAiConstraintCompilerInvoker(input: {
   timeoutMs?: number;
   maxRetries?: number;
   streamSimpleImpl?: StreamSimpleLike;
+  projectRoot?: string;
 }): ConstraintCompilerInvoker {
   return async (request): Promise<ConstraintCompilerInvokeResult> => {
     const modelRef = request.modelRef || input.defaultModelRef;
@@ -56,7 +58,10 @@ export function createPiAiConstraintCompilerInvoker(input: {
     }
 
     const piAi: StreamSimpleLike = input.streamSimpleImpl ?? await import("@earendil-works/pi-ai/compat") as StreamSimpleLike;
-    const stream = piAi.streamSimple(
+    const result = await auditStreamSimple(
+      input.projectRoot ?? process.cwd(),
+      { module: "sediment", operation: "constraint_compiler", model_ref: modelRef, prompt_chars: request.prompt.text.length },
+      piAi,
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: request.prompt.text }] }] },
       {
@@ -67,7 +72,6 @@ export function createPiAiConstraintCompilerInvoker(input: {
         maxRetries: input.maxRetries ?? 0,
       },
     );
-    const result = await stream.result();
     const durationMs = Date.now() - started;
     if (result.stopReason === "error" || result.stopReason === "aborted") {
       return { ok: false, error: result.errorMessage || result.stopReason || "model call failed", modelRef, durationMs };

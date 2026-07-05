@@ -60,6 +60,7 @@ import {
   type CausalAnchor,
 } from "../_shared/causal-anchor";
 import { dispatchAuditPath } from "../_shared/runtime";
+import { auditSessionEvent } from "../_shared/llm-audit";
 import {
   buildTerminalStateFields,
   inferParallelTerminalState,
@@ -1388,6 +1389,17 @@ export async function runInProcess(
       // NOTE: subscribe callbacks are serialized by the agent core — no
       // concurrent invocations — so retryHistory.entries.push is safe.
       const unsub = session.subscribe((event: any) => {
+        auditSessionEvent(heartbeatProjectRoot, {
+          module: "dispatch",
+          operation: "subagent_session_event",
+          model_ref: modelStr,
+          thinking,
+          session_scope: "subagent",
+          sub_agent_label: heartbeatAnchor?.sub_agent_label,
+          subturn: heartbeatAnchor?.subturn,
+          prompt_chars: prompt.length,
+          tool_allowlist: tools,
+        }, event);
         const eventType = String(event?.type ?? "unknown");
         if (eventType === "tool_execution_start") toolCallCount++;
         recordProgress(`event:${eventType}`);

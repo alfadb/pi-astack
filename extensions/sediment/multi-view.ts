@@ -50,6 +50,7 @@ import type { CuratorDecision } from "./curator";
 import { isWorkflowNeighborEntry } from "./workflow-utils";
 import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { auditStreamSimple } from "../_shared/llm-audit";
 import { shouldEscalateToCurator, type CorrectionSignal } from "./correction-pipeline";
 import type { ProjectEntryDraft } from "./writer";
 import type { SedimentSettings } from "./settings";
@@ -610,7 +611,10 @@ const callReviewerModel: MultiViewModelCaller = async function callReviewerModel
       ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
     } = await import("@earendil-works/pi-ai/compat");
 
-    const stream = piAi.streamSimple(
+    const result = await auditStreamSimple(
+      process.cwd(),
+      { module: "sediment", operation: "multi_view", model_ref: ref, pass, prompt_chars: prompt.length },
+      piAi,
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: prompt }] }] },
       {
@@ -622,7 +626,6 @@ const callReviewerModel: MultiViewModelCaller = async function callReviewerModel
         maxRetries: 0,
       },
     );
-    const result = await stream.result();
     const durationMs = Date.now() - t0;
     if (result.errorMessage || result.stopReason === "error" || result.stopReason === "aborted") {
       const error = result.errorMessage ?? result.stopReason ?? "reviewer call failed";

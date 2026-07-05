@@ -24,6 +24,7 @@ import * as os from "node:os";
 import * as crypto from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { appendLlmAudit } from "../_shared/llm-audit";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -175,6 +176,12 @@ async function saveImageResult(
   };
 }
 
+function responseHeadersRecord(response: Response): Record<string, string> {
+  const headers: Record<string, string> = {};
+  response.headers.forEach((value, key) => { headers[key] = value; });
+  return headers;
+}
+
 async function editImage(
   params: ImagineParams,
   opts: {
@@ -205,48 +212,143 @@ async function editImage(
   if (params.inputFidelity) form.set("input_fidelity", params.inputFidelity);
 
   const url = `${baseUrl}/v1/images/edits`;
+  const started = Date.now();
+  const callId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const requestHeaders = { Authorization: `Bearer ${opts.apiKey}` };
+  const requestBody = {
+    type: "FormData",
+    fields: {
+      model,
+      prompt: styledPrompt,
+      output_format: "png",
+      ...(params.size ? { size: params.size } : {}),
+      ...(params.quality ? { quality: params.quality } : {}),
+      ...(params.inputFidelity ? { input_fidelity: params.inputFidelity } : {}),
+    },
+    image: {
+      path: inputImage.path,
+      filename: path.basename(inputImage.path),
+      mimeType: inputImage.mimeType,
+      byteLength: imageBytes.byteLength,
+      data: imageBytes,
+    },
+  };
+  const auditBase = {
+    call_id: callId,
+    module: "imagine",
+    operation: "editImage",
+    api_kind: "openai.images.edit",
+    model_id: model,
+  };
+  await appendLlmAudit(opts.cwd, {
+    ...auditBase,
+    row_type: "start",
+    request_meta: {
+      url,
+      method: "POST",
+      headers: requestHeaders,
+      imagePath: inputImage.path,
+      inputFidelity: params.inputFidelity,
+      prompt: styledPrompt,
+      model,
+      size: params.size,
+      quality: params.quality,
+      style: params.style,
+    },
+    request_body: requestBody,
+  });
+
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { Authorization: `Bearer ${opts.apiKey}` },
+      headers: requestHeaders,
       body: form,
       signal: opts.signal,
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
+    await appendLlmAudit(opts.cwd, {
+      ...auditBase,
+      row_type: "error",
+      duration_ms: Date.now() - started,
+      error: e,
+    });
     return { ok: false, error: `Image edit network error: ${msg}` };
   }
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "unknown");
+    await appendLlmAudit(opts.cwd, {
+      ...auditBase,
+      row_type: "end",
+      duration_ms: Date.now() - started,
+      status: response.status,
+      headers: responseHeadersRecord(response),
+      raw_response_text: errText,
+      ok: false,
+    });
     return {
       ok: false,
       error: `Image edit HTTP ${response.status}: ${errText.slice(0, 500)}`,
     };
   }
 
-  const data = (await response.json()) as Record<string, unknown>;
-  const output = data.data as Array<Record<string, unknown>> | undefined;
-  const imageBase64 = typeof output?.[0]?.b64_json === "string" ? output[0].b64_json : "";
-  if (!imageBase64) {
-    return {
-      ok: false,
-      error: `No b64_json image in edit API response. Request was sent to: ${url}`,
-    };
-  }
+  try {
+    const rawResponseText = await response.text();
+    const data = JSON.parse(rawResponseText) as Record<string, unknown>;
+    const output = data.data as Array<Record<string, unknown>> | undefined;
+    const imageBase64 = typeof output?.[0]?.b64_json === "string" ? output[0].b64_json : "";
+    if (!imageBase64) {
+      await appendLlmAudit(opts.cwd, {
+        ...auditBase,
+        row_type: "end",
+        duration_ms: Date.now() - started,
+        status: response.status,
+        headers: responseHeadersRecord(response),
+        raw_response_text: rawResponseText,
+        parsed_response: data,
+        ok: false,
+      });
+      return {
+        ok: false,
+        error: `No b64_json image in edit API response. Request was sent to: ${url}`,
+      };
+    }
 
-  return saveImageResult(imageBase64, {
-    cwd: opts.cwd,
-    callerSupportsImages: opts.callerSupportsImages,
-    model,
-    requestedSize: params.size,
-    actualSize: data.size as string | undefined,
-    requestedQuality: params.quality,
-    actualQuality: data.quality as string | undefined,
-    mode: "edit",
-    imagePath: inputImage.path,
-  });
+    const result = await saveImageResult(imageBase64, {
+      cwd: opts.cwd,
+      callerSupportsImages: opts.callerSupportsImages,
+      model,
+      requestedSize: params.size,
+      actualSize: data.size as string | undefined,
+      requestedQuality: params.quality,
+      actualQuality: data.quality as string | undefined,
+      mode: "edit",
+      imagePath: inputImage.path,
+    });
+    await appendLlmAudit(opts.cwd, {
+      ...auditBase,
+      row_type: "end",
+      duration_ms: Date.now() - started,
+      status: response.status,
+      headers: responseHeadersRecord(response),
+      raw_response_text: rawResponseText,
+      parsed_response: data,
+      saved_path: result.ok ? result.filepath : undefined,
+      result_error: result.ok ? undefined : result.error,
+      ok: result.ok,
+    });
+    return result;
+  } catch (e: unknown) {
+    await appendLlmAudit(opts.cwd, {
+      ...auditBase,
+      row_type: "error",
+      duration_ms: Date.now() - started,
+      error: e,
+    });
+    throw e;
+  }
 }
 
 async function generateImage(
@@ -285,79 +387,166 @@ async function generateImage(
   if (params.quality && params.quality !== "auto") reqBody.quality = params.quality;
 
   const url = `${baseUrl}/v1/responses`;
+  const started = Date.now();
+  const callId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const requestHeaders = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${opts.apiKey}`,
+  };
+  const auditBase = {
+    call_id: callId,
+    module: "imagine",
+    operation: "generateImage",
+    api_kind: "openai.responses.generate_image",
+    model_id: reqBody.model,
+  };
+  await appendLlmAudit(opts.cwd, {
+    ...auditBase,
+    row_type: "start",
+    request_meta: {
+      url,
+      method: "POST",
+      headers: requestHeaders,
+      prompt: styledPrompt,
+      model: reqBody.model,
+      size: params.size,
+      quality: params.quality,
+      style: params.style,
+    },
+    request_body: reqBody,
+  });
+
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${opts.apiKey}`,
-      },
+      headers: requestHeaders,
       body: JSON.stringify(reqBody),
       signal: opts.signal,
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
+    await appendLlmAudit(opts.cwd, {
+      ...auditBase,
+      row_type: "error",
+      duration_ms: Date.now() - started,
+      error: e,
+    });
     return { ok: false, error: `Image generation network error: ${msg}` };
   }
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "unknown");
+    await appendLlmAudit(opts.cwd, {
+      ...auditBase,
+      row_type: "end",
+      duration_ms: Date.now() - started,
+      status: response.status,
+      headers: responseHeadersRecord(response),
+      raw_response_text: errText,
+      ok: false,
+    });
     return {
       ok: false,
       error: `Image generation HTTP ${response.status}: ${errText.slice(0, 500)}`,
     };
   }
 
-  // Streamed endpoints answer with text/event-stream; endpoints that ignore
-  // `stream` (or proxies that unwrap it) still answer with application/json.
-  // Support both: parse SSE for the terminal response.completed event, or
-  // fall back to plain JSON.
-  const contentType = response.headers.get("content-type") ?? "";
-  let data: Record<string, unknown>;
-  if (contentType.includes("text/event-stream")) {
-    const sse = await readSseTerminalResponse(response.body);
-    if (!sse.ok) return { ok: false, error: sse.error };
-    data = sse.response;
-  } else {
-    data = (await response.json()) as Record<string, unknown>;
-  }
-
-  let imageBase64 = "";
-  let actualSize: string | undefined;
-  let actualQuality: string | undefined;
-
-  const output = data?.output as Array<Record<string, unknown>> | undefined;
-  for (const item of output ?? []) {
-    if (item.type === "image_generation_call" && item.result) {
-      imageBase64 = item.result as string;
-      actualSize = item.size as string | undefined;
-      actualQuality = item.quality as string | undefined;
-      break;
+  try {
+    // Streamed endpoints answer with text/event-stream; endpoints that ignore
+    // `stream` (or proxies that unwrap it) still answer with application/json.
+    // Support both: parse SSE for the terminal response.completed event, or
+    // fall back to plain JSON.
+    const contentType = response.headers.get("content-type") ?? "";
+    const rawResponseText = await response.text();
+    let data: Record<string, unknown>;
+    if (contentType.includes("text/event-stream")) {
+      const sse = readSseTerminalResponseText(rawResponseText);
+      if (!sse.ok) {
+        await appendLlmAudit(opts.cwd, {
+          ...auditBase,
+          row_type: "end",
+          duration_ms: Date.now() - started,
+          status: response.status,
+          headers: responseHeadersRecord(response),
+          raw_response_text: rawResponseText,
+          ok: false,
+          error: sse.error,
+        });
+        return { ok: false, error: sse.error };
+      }
+      data = sse.response;
+    } else {
+      data = JSON.parse(rawResponseText) as Record<string, unknown>;
     }
-  }
 
-  if (!imageBase64) {
-    const outputTypes = (output ?? []).map((x: any) => x.type).filter(Boolean).join(", ");
-    return {
-      ok: false,
-      error: `No image_generation_call in API response. Response output types: [${outputTypes || "empty"}]. ` +
-        `If using a proxy or non-native OpenAI endpoint, the model may require ` +
-        `tools:[{type:"image_generation"}] in the request body. ` +
-        `Request was sent to: ${url}`,
-    };
-  }
+    let imageBase64 = "";
+    let actualSize: string | undefined;
+    let actualQuality: string | undefined;
 
-  return saveImageResult(imageBase64, {
-    cwd: opts.cwd,
-    callerSupportsImages: opts.callerSupportsImages,
-    model: reqBody.model as string,
-    requestedSize: params.size,
-    actualSize,
-    requestedQuality: params.quality,
-    actualQuality,
-    mode: "generate",
-  });
+    const output = data?.output as Array<Record<string, unknown>> | undefined;
+    for (const item of output ?? []) {
+      if (item.type === "image_generation_call" && item.result) {
+        imageBase64 = item.result as string;
+        actualSize = item.size as string | undefined;
+        actualQuality = item.quality as string | undefined;
+        break;
+      }
+    }
+
+    if (!imageBase64) {
+      const outputTypes = (output ?? []).map((x: any) => x.type).filter(Boolean).join(", ");
+      await appendLlmAudit(opts.cwd, {
+        ...auditBase,
+        row_type: "end",
+        duration_ms: Date.now() - started,
+        status: response.status,
+        headers: responseHeadersRecord(response),
+        raw_response_text: rawResponseText,
+        parsed_response: data,
+        ok: false,
+      });
+      return {
+        ok: false,
+        error: `No image_generation_call in API response. Response output types: [${outputTypes || "empty"}]. ` +
+          `If using a proxy or non-native OpenAI endpoint, the model may require ` +
+          `tools:[{type:"image_generation"}] in the request body. ` +
+          `Request was sent to: ${url}`,
+      };
+    }
+
+    const result = await saveImageResult(imageBase64, {
+      cwd: opts.cwd,
+      callerSupportsImages: opts.callerSupportsImages,
+      model: reqBody.model as string,
+      requestedSize: params.size,
+      actualSize,
+      requestedQuality: params.quality,
+      actualQuality,
+      mode: "generate",
+    });
+    await appendLlmAudit(opts.cwd, {
+      ...auditBase,
+      row_type: "end",
+      duration_ms: Date.now() - started,
+      status: response.status,
+      headers: responseHeadersRecord(response),
+      raw_response_text: rawResponseText,
+      parsed_response: data,
+      saved_path: result.ok ? result.filepath : undefined,
+      result_error: result.ok ? undefined : result.error,
+      ok: result.ok,
+    });
+    return result;
+  } catch (e: unknown) {
+    await appendLlmAudit(opts.cwd, {
+      ...auditBase,
+      row_type: "error",
+      duration_ms: Date.now() - started,
+      error: e,
+    });
+    throw e;
+  }
 }
 
 // ── SSE parsing ─────────────────────────────────────────────────
@@ -366,22 +555,7 @@ type SseTerminalResult =
   | { ok: true; response: Record<string, unknown> }
   | { ok: false; error: string };
 
-/**
- * Read an OpenAI Responses API SSE stream to completion and return the
- * terminal `response.completed` payload's `.response` object (same shape as
- * the non-streaming JSON body). `response.failed` / `response.incomplete` /
- * `error` events map to an error result. Intermediate events (partial
- * images, keepalives, text deltas) are skipped — we only need the final
- * image. AbortSignal propagation: the fetch signal already covers body
- * reads, so no extra wiring is needed here.
- */
-async function readSseTerminalResponse(
-  body: ReadableStream<Uint8Array> | null,
-): Promise<SseTerminalResult> {
-  if (!body) return { ok: false, error: "SSE response had no body" };
-
-  const decoder = new TextDecoder("utf-8", { fatal: false });
-  let buf = "";
+function readSseTerminalResponseText(raw: string): SseTerminalResult {
   let eventType = "";
   let dataLines: string[] = [];
   let completed: Record<string, unknown> | undefined;
@@ -421,26 +595,12 @@ async function readSseTerminalResponse(
     }
   };
 
-  const reader = body.getReader();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, idx).replace(/\r$/, "");
-        buf = buf.slice(idx + 1);
-        if (line === "") flushEvent();
-        else if (line.startsWith("event:")) eventType = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
-        // comment lines (":keepalive") and unknown fields are ignored per SSE spec
-      }
-    }
-  } finally {
-    try { reader.releaseLock(); } catch { /* already released */ }
+  for (const rawLine of raw.split(/\n/)) {
+    const line = rawLine.replace(/\r$/, "");
+    if (line === "") flushEvent();
+    else if (line.startsWith("event:")) eventType = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
   }
-  buf += decoder.decode();
   if (dataLines.length > 0 || eventType) flushEvent();
 
   if (completed) return { ok: true, response: completed };

@@ -17,6 +17,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { sanitizeForMemory } from "./sanitizer";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
+import { auditStreamSimple } from "../_shared/llm-audit";
 import { packClassifierWindow, packedWindowToText, type PackedWindow } from "./context-packer";
 import { type ProvenanceClass } from "./validation";
 import { loadStagingContext, writeStagingEntry, stagingActionableFileCount } from "./staging-loader";
@@ -645,13 +646,14 @@ export async function runCorrectionPipeline(
     let succeeded = false;
     for (let attempt = 0; attempt <= CLASSIFIER_RATE_LIMIT_MAX_RETRIES; attempt++) {
       try {
-        const stream = piAi.streamSimple(
+        const result = await auditStreamSimple(
+          process.cwd(),
+          { module: "sediment", operation: "correction_classifier", model_ref: modelRef, attempt_index: attempt, prompt_chars: (promptSanitize.text ?? prompt).length },
+          piAi,
           model,
           { messages: [{ role: "user", content: [{ type: "text", text: promptSanitize.text ?? prompt }] }] },
           { apiKey: auth.apiKey, headers: auth.headers, signal: deps.signal, timeoutMs: deps.settings.classifierTimeoutMs, maxRetries: 0 },
         );
-
-        const result = await stream.result();
         if (result.errorMessage) {
           lastErr = result.errorMessage;
           if (isRateLimitError(result.errorMessage) && attempt < CLASSIFIER_RATE_LIMIT_MAX_RETRIES) {

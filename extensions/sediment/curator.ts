@@ -7,6 +7,7 @@ import type { MemoryEntry } from "../memory/types";
 import { scanRules, type RuleEntry } from "../abrain/rule-injector";
 import { ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { auditStreamSimple } from "../_shared/llm-audit";
 import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import type { DeleteMode, ProjectEntryDraft, ProjectEntryUpdateDraft } from "./writer";
@@ -964,12 +965,14 @@ async function callCuratorModel(
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 
-  const stream = piAi.streamSimple(
+  const finalMsg = await auditStreamSimple(
+    process.cwd(),
+    { module: "sediment", operation: "curator", model_ref: settings.curatorModel, prompt_chars: prompt.length },
+    piAi,
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: prompt }] }] },
     { apiKey: auth.apiKey, headers: auth.headers, signal, timeoutMs: settings.curatorTimeoutMs, maxRetries: settings.curatorMaxRetries },
   );
-  const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
     throw new Error(finalMsg.errorMessage || finalMsg.stopReason);
   }

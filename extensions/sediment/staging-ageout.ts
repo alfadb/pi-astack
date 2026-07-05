@@ -56,6 +56,7 @@ import { AGEOUT_RE_REVIEW_DAYS, stagingDir, STALE_DAYS } from "./staging-loader"
 import type { StagingEntry, StagingFileOnDisk } from "./staging-types";
 import { formatLocalIsoTimestamp, ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { auditStreamSimple } from "../_shared/llm-audit";
 
 export const STAGING_AGEOUT_PROMPT_VERSION = "v1";
 
@@ -457,7 +458,10 @@ async function invokeReviewer(
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 
-  const stream = piAi.streamSimple(
+  const finalMsg = await auditStreamSimple(
+    process.cwd(),
+    { module: "sediment", operation: "staging_ageout", model_ref: modelSpec, prompt_chars: fullPrompt.length },
+    piAi,
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: fullPrompt }] }] },
     {
@@ -468,7 +472,6 @@ async function invokeReviewer(
       maxRetries: settings.aggregatorMaxRetries ?? 1,
     },
   );
-  const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
     throw new Error(finalMsg.errorMessage || finalMsg.stopReason);
   }

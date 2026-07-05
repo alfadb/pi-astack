@@ -11,6 +11,7 @@
  */
 
 import { isGoalContinuationText } from "../_shared/goal-continuation";
+import { auditStreamSimple } from "../_shared/llm-audit";
 import { sanitizeForMemory } from "../sediment/sanitizer";
 
 export type GoalJudgeVerdict = "achieved" | "blocked" | "continue";
@@ -193,12 +194,14 @@ export async function runGoalJudge(
         config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
       ): { result(): Promise<{ errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
     } = await import("@earendil-works/pi-ai/compat");
-    const stream = piAi.streamSimple(
+    const result = await auditStreamSimple(
+      process.cwd(),
+      { module: "goal", operation: "judge", model_ref: modelRef, prompt_chars: (promptSan.text ?? prompt).length },
+      piAi,
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: promptSan.text ?? prompt }] }] },
       { apiKey: auth.apiKey, headers: auth.headers, signal: deps.signal, timeoutMs: deps.judgeTimeoutMs, maxRetries: 0 },
     );
-    const result = await stream.result();
     if (result.errorMessage) return fail(result.errorMessage.slice(0, 500));
     rawText = result.content?.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "";
   } catch (e: unknown) {

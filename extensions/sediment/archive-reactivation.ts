@@ -56,6 +56,7 @@ import {
   userGlobalSedimentDir,
 } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { auditStreamSimple } from "../_shared/llm-audit";
 import type { SedimentSettings } from "./settings";
 import type { ModelRegistryLike } from "./llm-extractor";
 import type { MemoryEntry } from "../memory/types";
@@ -734,7 +735,10 @@ async function invokeReviewer(
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 
-  const stream = piAi.streamSimple(
+  const finalMsg = await auditStreamSimple(
+    process.cwd(),
+    { module: "sediment", operation: "archive_reactivation", model_ref: modelSpec, prompt_chars: fullPrompt.length },
+    piAi,
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: fullPrompt }] }] },
     {
@@ -745,7 +749,6 @@ async function invokeReviewer(
       maxRetries: settings.aggregatorMaxRetries ?? 1,
     },
   );
-  const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
     throw new Error(finalMsg.errorMessage || finalMsg.stopReason);
   }

@@ -23,6 +23,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { auditStreamSimple } from "../_shared/llm-audit";
 
 export interface QueryRewriteResult {
   useful: boolean;
@@ -234,7 +235,10 @@ export async function rewriteUserMessageToSearchQuery(
       ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
     } = await import("@earendil-works/pi-ai/compat");
 
-    const stream = piAi.streamSimple(
+    const finalMsg = await auditStreamSimple(
+      process.cwd(),
+      { module: "memory", operation: "query_rewriter", model_ref: settings.queryRewriterModel, prompt_chars: fullPrompt.length },
+      piAi,
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: fullPrompt }] }] },
       {
@@ -245,7 +249,6 @@ export async function rewriteUserMessageToSearchQuery(
         maxRetries: 1,
       },
     );
-    const finalMsg = await stream.result();
     if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
       return {
         useful: false,

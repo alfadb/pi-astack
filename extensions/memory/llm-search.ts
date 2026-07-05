@@ -8,6 +8,7 @@ import { embedSchemeTag, embedTexts, resolveEmbeddingProviderConfig, scopeTagOf,
 import { maybeAutoReconcile, type ReconcileSignal } from "./auto-reconcile";
 import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { auditStreamSimple } from "../_shared/llm-audit";
 import { sanitizeForMemory } from "../sediment/sanitizer";
 import { SEARCH_PROFILES, resolveProfileExecution, type SearchProfileName } from "./search-profiles";
 import { recordUsage, isUsageRecordingProfile } from "./usage-telemetry";
@@ -170,7 +171,10 @@ export async function callSearchModel(
   const reasoningField: { reasoning?: PiAiThinkingLevel } =
     thinking === "off" ? {} : { reasoning: thinking };
 
-  const stream = piAi.streamSimple(
+  const finalMsg = await auditStreamSimple(
+    process.cwd(),
+    { module: "memory", operation: "llm_search", model_ref: modelRef, thinking },
+    piAi,
     model,
     {
       messages: [{
@@ -187,8 +191,6 @@ export async function callSearchModel(
       ...reasoningField,
     },
   );
-
-  const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
     throw new Error(`memory.search ${modelRef} failed: ${finalMsg.errorMessage || finalMsg.stopReason}`);
   }

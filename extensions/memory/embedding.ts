@@ -22,6 +22,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { abrainStateDir, acquireFileLock, resolveUserGlobalAbrainHome } from "../_shared/runtime";
+import { appendLlmAudit } from "../_shared/llm-audit";
 import type { MemoryEntry } from "./types";
 import type { EmbeddingSettings } from "./settings";
 
@@ -125,30 +126,99 @@ class TpmThrottle {
 // ── low-level batch HTTP ─────────────────────────────────────────────────
 async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt = 0): Promise<number[][]> {
   const url = `${cfg.baseUrl.replace(/\/+$/, "")}/embeddings`;
+  const started = Date.now();
+  const callId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const requestHeaders = {
+    Authorization: `Bearer ${cfg.apiKey}`,
+    "Content-Type": "application/json",
+    ...(cfg.headers || {}),
+  };
+  const requestBody = { model: cfg.model, input: chunk };
+  const auditBase = {
+    call_id: callId,
+    module: "memory",
+    operation: "embedding",
+    api_kind: "openai.embeddings",
+    model_id: cfg.model,
+    attempt,
+    input_count: chunk.length,
+  };
+  await appendLlmAudit(process.cwd(), {
+    ...auditBase,
+    row_type: "start",
+    request_meta: { url, method: "POST", headers: requestHeaders, timeoutMs: cfg.timeoutMs },
+    request_body: requestBody,
+  });
+
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${cfg.apiKey}`,
-        "Content-Type": "application/json",
-        ...(cfg.headers || {}),
-      },
-      body: JSON.stringify({ model: cfg.model, input: chunk }),
+      headers: requestHeaders,
+      body: JSON.stringify(requestBody),
       signal: AbortSignal.timeout(cfg.timeoutMs),
     });
+    const rawResponseText = await res.text().catch(() => "");
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`embedding HTTP ${res.status}: ${body.slice(0, 200)}`);
+      await appendLlmAudit(process.cwd(), {
+        ...auditBase,
+        row_type: "end",
+        duration_ms: Date.now() - started,
+        status: res.status,
+        headers: Object.fromEntries(res.headers.entries()),
+        raw_response_text: rawResponseText,
+        ok: false,
+      });
+      throw new Error(`embedding HTTP ${res.status}: ${rawResponseText.slice(0, 200)}`);
     }
-    const data = (await res.json()) as { data?: Array<{ index?: number; embedding: number[] }> };
+    let data: { data?: Array<{ index?: number; embedding: number[] }> };
+    try {
+      data = JSON.parse(rawResponseText) as { data?: Array<{ index?: number; embedding: number[] }> };
+    } catch (e) {
+      await appendLlmAudit(process.cwd(), {
+        ...auditBase,
+        row_type: "end",
+        duration_ms: Date.now() - started,
+        status: res.status,
+        headers: Object.fromEntries(res.headers.entries()),
+        raw_response_text: rawResponseText,
+        ok: false,
+      });
+      throw e;
+    }
     if (!Array.isArray(data.data) || data.data.length !== chunk.length) {
+      await appendLlmAudit(process.cwd(), {
+        ...auditBase,
+        row_type: "end",
+        duration_ms: Date.now() - started,
+        status: res.status,
+        headers: Object.fromEntries(res.headers.entries()),
+        raw_response_text: rawResponseText,
+        parsed_response: data,
+        ok: false,
+      });
       throw new Error(`embedding bad response: expected ${chunk.length} vectors, got ${data.data?.length}`);
     }
+    await appendLlmAudit(process.cwd(), {
+      ...auditBase,
+      row_type: "end",
+      duration_ms: Date.now() - started,
+      status: res.status,
+      headers: Object.fromEntries(res.headers.entries()),
+      raw_response_text: rawResponseText,
+      parsed_response: data,
+      ok: true,
+    });
     return data.data
       .slice()
       .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
       .map((d) => d.embedding);
   } catch (e) {
+    await appendLlmAudit(process.cwd(), {
+      ...auditBase,
+      row_type: "error",
+      duration_ms: Date.now() - started,
+      error: e,
+    });
     if (attempt < cfg.maxRetries) {
       await sleep(1000 * (attempt + 1));
       return embedBatch(chunk, cfg, attempt + 1);

@@ -26,6 +26,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { auditStreamSimple } from "../_shared/llm-audit";
 
 // ── pi-astack settings loader ──────────────────────────────
 // Read pi-astack's own config file. Missing/malformed → fallback to defaults.
@@ -305,7 +306,10 @@ async function analyzeImage(
       timestamp: Date.now(),
     };
 
-    const stream = piAi.streamSimple(
+    const finalMsg = await auditStreamSimple(
+      process.cwd(),
+      { module: "vision", operation: "analyze_image", model_ref: `${best.provider}/${best.id}` },
+      piAi,
       best,
       { messages: [userMsg] },
       {
@@ -316,8 +320,6 @@ async function analyzeImage(
         maxRetries: DEFAULT_MAX_RETRIES,
       },
     );
-
-    const finalMsg = await stream.result();
 
     if (
       finalMsg.stopReason === "error" ||
