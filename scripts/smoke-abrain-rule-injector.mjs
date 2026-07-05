@@ -537,7 +537,6 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
   const constraints = [
     shadowConstraintFromRule(cache.globalAlways[0]),
     shadowConstraintFromRule(cache.globalListed[0], { mustDoSummary: "different summary" }),
-    shadowConstraintFromRule(cache.projectAlways[0]),
     {
       constraintId: "shadow:compiled-only",
       scope: { kind: "global" },
@@ -550,11 +549,17 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
     },
   ];
   const settingsLegacyOnlySource = legacySourceId(cache.projectListed[0]);
+  const unresolvedLegacyOnlySource = legacySourceId(cache.projectAlways[0]);
   writeShadowDecision(path.join(latestDir, "decision.json"), constraints, {
     exclusions: [{
       reason: "settings_not_memory",
       sourceRecordIds: [settingsLegacyOnlySource],
       diagnosticIds: ["diag-settings-not-memory"],
+    }],
+    unresolved: [{
+      reason: "model_uncertain",
+      sourceRecordIds: [unresolvedLegacyOnlySource],
+      diagnosticIds: ["diag-unresolved-compiled"],
     }],
     mappings: [{
       sourceRecordId: settingsLegacyOnlySource,
@@ -565,6 +570,11 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
       id: "diag-settings-not-memory",
       code: "SC_NOT_MEMORY_SETTINGS",
       sourceRecordIds: [settingsLegacyOnlySource],
+    }, {
+      id: "diag-unresolved-compiled",
+      code: "SC_SMOKE_COMPILED_UNRESOLVED",
+      message: "Active sources were compiled into the smoke fixture despite one unresolved source.",
+      sourceRecordIds: [unresolvedLegacyOnlySource],
     }],
   });
   writeShadowDiff(path.join(latestDir, "diff.json"), [
@@ -612,20 +622,37 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
   const row = rows.at(-1);
   if (row.summary.legacyRules !== 4) throw new Error(`legacyRules=${row.summary.legacyRules}`);
   if (row.summary.compiledOnly !== 1) throw new Error(`compiledOnly=${row.summary.compiledOnly}`);
-  if (row.summary.legacyOnly !== 1) throw new Error(`legacyOnly=${row.summary.legacyOnly}`);
+  if (row.summary.legacyOnly !== 2) throw new Error(`legacyOnly=${row.summary.legacyOnly}`);
   if (row.summary.textDelta !== 1) throw new Error(`textDelta=${row.summary.textDelta}`);
   if (row.legacyOnlyDispositions.settings_not_memory !== 1) throw new Error(`legacyOnlyDispositions missing settings_not_memory: ${JSON.stringify(row.legacyOnlyDispositions)}`);
+  if (row.legacyOnlyDispositions.model_uncertain !== 1) throw new Error(`legacyOnlyDispositions missing model_uncertain: ${JSON.stringify(row.legacyOnlyDispositions)}`);
   const legacyDetail = row.legacyOnlyDetails.find((item) => item.sourceRecordId === settingsLegacyOnlySource);
   if (!legacyDetail || legacyDetail.disposition !== "settings_not_memory" || legacyDetail.category !== "exclude_not_memory_settings") {
     throw new Error(`legacyOnlyDetails did not explain settings exclusion: ${JSON.stringify(row.legacyOnlyDetails)}`);
   }
+  if (legacyDetail.machineDisposition !== "settings_not_memory" || legacyDetail.humanReviewRequired !== false) {
+    throw new Error(`settings legacy detail missing machine disposition/review gate: ${JSON.stringify(legacyDetail)}`);
+  }
+  const unresolvedDetail = row.legacyOnlyDetails.find((item) => item.sourceRecordId === unresolvedLegacyOnlySource);
+  if (!unresolvedDetail || unresolvedDetail.machineDisposition !== "model_uncertain" || unresolvedDetail.humanReviewRequired !== true) {
+    throw new Error(`unresolved legacy detail missing human review gate: ${JSON.stringify(row.legacyOnlyDetails)}`);
+  }
+  if (row.compiledOnlyBackfillAllowed !== false) throw new Error(`compiledOnlyBackfillAllowed should be false: ${JSON.stringify(row.compiledOnlyBackfillAllowed)}`);
   const compiledDetail = row.compiledOnlyDetails.find((item) => item.sourceRecordId === "event:compiled-only");
   if (!compiledDetail || compiledDetail.sourceKind !== "constraint_event" || compiledDetail.category !== "event_native" || compiledDetail.scope !== "global") {
     throw new Error(`compiledOnlyDetails did not explain event-native source: ${JSON.stringify(row.compiledOnlyDetails)}`);
   }
+  if (row.compiledOnlyDetails.some((item) => item.compiledOnlyBackfillAllowed !== false)) {
+    throw new Error(`compiledOnlyDetails should deny backfill: ${JSON.stringify(row.compiledOnlyDetails)}`);
+  }
   const textDetail = row.textDeltaDetails.find((item) => item.sourceRecordId === legacySourceId(cache.globalListed[0]));
   if (!textDetail || textDetail.legacyHash !== row.delta.textDelta[0].legacyHash || textDetail.disposition !== "normalization_possible") {
     throw new Error(`textDeltaDetails did not preserve hashes with coarse disposition: ${JSON.stringify(row.textDeltaDetails)}`);
+  }
+  if (textDetail.humanReviewRequired !== false) throw new Error(`normalization text delta should not require human review: ${JSON.stringify(textDetail)}`);
+  const inconsistent = row.inconsistentDiagnostics.find((item) => item.code === "SC_SMOKE_COMPILED_UNRESOLVED");
+  if (!inconsistent || inconsistent.reason !== "diagnostic_claims_compiled_for_unresolved_source") {
+    throw new Error(`inconsistentDiagnostics did not flag compiled/unresolved diagnostic: ${JSON.stringify(row.inconsistentDiagnostics)}`);
   }
   if (row.eventCoverage.queuedEvents !== 1 || row.eventCoverage.staleEvents !== 1) throw new Error(`event coverage missing: ${JSON.stringify(row.eventCoverage)}`);
   const afterRulesMtime = fs.statSync(path.join(abrainHome, "rules", "always", "edit-write-only.md")).mtimeMs;

@@ -311,6 +311,70 @@ function dispositionFromDiff(row: ShadowDiffRow | undefined): string | undefined
   return undefined;
 }
 
+function machineDisposition(input: {
+  disposition: string;
+  reason?: string;
+  category?: string;
+  compilerDisposition?: string;
+  diagnosticCode?: string;
+}): string {
+  const text = [input.disposition, input.reason, input.category, input.compilerDisposition, input.diagnosticCode]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (text.includes("settings_not_memory") || text.includes("exclude_not_memory_settings") || input.diagnosticCode === "SC_NOT_MEMORY_SETTINGS") return "settings_not_memory";
+  if (text.includes("tool_contract_not_memory") || text.includes("exclude_not_memory_tool_contract") || input.diagnosticCode === "SC_NOT_MEMORY_TOOL_CONTRACT") return "tool_contract_not_memory";
+  if (text.includes("model_uncertain") || text.includes("keep_unresolved")) return "model_uncertain";
+  if (input.disposition === "compiled_missing" || (input.disposition === "unknown" && (input.compilerDisposition === "compiled" || input.compilerDisposition === "merged_source"))) return "compiled_missing";
+  if (input.disposition === "unknown") return "unknown";
+  return input.disposition || "unknown";
+}
+
+function legacySourceNeedsHumanReview(sourceRecordId: string): boolean {
+  const lower = sourceRecordId.toLowerCase();
+  return sourceRecordId.includes("禁止使用-u-风格")
+    || sourceRecordId.includes("unicode-转义")
+    || lower.includes("runtime-kill-switch-flags-must-be-explicit")
+    || sourceRecordId.includes("禁止行业黑话")
+    || lower.includes("professional-neutral-vocabulary")
+    || lower.includes("industry-slang")
+    || lower.includes("jargon");
+}
+
+function legacyScopeCaveat(sourceRecordId: string): string | undefined {
+  if (!sourceRecordId.includes("配置文件内联注释")) return undefined;
+  return "pi-global event coverage; global legacy exclusion still needs scope acceptance before deletion";
+}
+
+function legacyHumanReviewRequired(input: { sourceRecordId: string; machineDisposition: string; unresolved: boolean }): boolean {
+  if (input.unresolved) return true;
+  if (["model_uncertain", "unknown", "compiled_missing"].includes(input.machineDisposition)) return true;
+  return legacySourceNeedsHumanReview(input.sourceRecordId);
+}
+
+function inconsistentDiagnostics(decision: ShadowDecision) {
+  const unresolvedSourceRecordIds = new Set<string>();
+  for (const item of decision.unresolved ?? []) {
+    for (const sourceRecordId of item.sourceRecordIds ?? []) unresolvedSourceRecordIds.add(sourceRecordId);
+  }
+  if (!unresolvedSourceRecordIds.size) return [];
+
+  return (decision.diagnostics ?? []).flatMap((diagnostic) => {
+    const sourceRecordIds = diagnostic.sourceRecordIds ?? [];
+    const overlappingSourceRecordIds = sourceRecordIds.filter((sourceRecordId) => unresolvedSourceRecordIds.has(sourceRecordId));
+    if (!overlappingSourceRecordIds.length) return [];
+    const message = diagnostic.message ?? "";
+    if (!/\bcompiled\b/i.test(message)) return [];
+    return [{
+      id: diagnostic.id,
+      code: diagnostic.code,
+      sourceRecordIds,
+      overlappingSourceRecordIds,
+      reason: "diagnostic_claims_compiled_for_unresolved_source",
+    }];
+  });
+}
+
 function legacyOnlyDetails(input: { sourceRecordIds: string[]; decision: ShadowDecision; diffRows: ShadowDiffRow[] }) {
   return input.sourceRecordIds.map((sourceRecordId) => {
     const exclusion = input.decision.exclusions?.find((item) => sourceIn(item.sourceRecordIds, sourceRecordId));
@@ -326,10 +390,25 @@ function legacyOnlyDetails(input: { sourceRecordIds: string[]; decision: ShadowD
       ?? dispositionFromDiff(diffRow)
       ?? dispositionFromDiagnostic(diagnostic)
       ?? "unknown";
+    const reason = exclusion?.reason
+      ?? unresolved?.reason
+      ?? mapping?.reason
+      ?? diffRow?.reason
+      ?? diagnosticReasonText;
+    const normalizedDisposition = machineDisposition({
+      disposition,
+      reason,
+      category: diffRow?.category,
+      compilerDisposition: mapping?.disposition,
+      diagnosticCode: diagnostic?.code,
+    });
 
     return {
       sourceRecordId,
       disposition,
+      machineDisposition: normalizedDisposition,
+      humanReviewRequired: legacyHumanReviewRequired({ sourceRecordId, machineDisposition: normalizedDisposition, unresolved: !!unresolved }),
+      ...(legacyScopeCaveat(sourceRecordId) ? { scopeCaveat: legacyScopeCaveat(sourceRecordId) } : {}),
       ...(exclusion?.reason ? { reason: exclusion.reason } : {}),
       ...(unresolved?.reason ? { reason: unresolved.reason } : {}),
       ...(mapping?.reason && !exclusion?.reason && !unresolved?.reason ? { reason: mapping.reason } : {}),
@@ -367,6 +446,7 @@ function compiledOnlyDetails(sourceRecordIds: string[], constraints: ShadowConst
       sourceKind,
       scope: scopeKey(constraint?.scope),
       category: sourceKind === "constraint_event" ? "event_native" : "compiled_only",
+      compiledOnlyBackfillAllowed: false,
       ...(constraint?.constraintId ? { constraintId: constraint.constraintId } : {}),
       ...(constraint?.injectMode ? { injectMode: constraint.injectMode } : {}),
     };
@@ -381,6 +461,7 @@ function textDeltaDetails(input: { textDelta: Array<{ sourceRecordId: string; le
     return {
       ...item,
       disposition: normalizationPossible ? "normalization_possible" : "semantic_review_required",
+      humanReviewRequired: !normalizationPossible,
       ...(diffRow?.category ? { category: diffRow.category } : {}),
       ...(diffRow?.reason ? { reason: diffRow.reason } : {}),
       ...(diffRow?.targetId ? { targetId: diffRow.targetId } : {}),
@@ -499,8 +580,10 @@ export function runRuleInjectorDualReadAudit(input: {
       delta,
       legacyOnlyDispositions: countByDisposition(legacyDetails),
       legacyOnlyDetails: legacyDetails,
+      compiledOnlyBackfillAllowed: false,
       compiledOnlyDetails: compiledOnlyDetails(delta.compiledOnly, constraints),
       textDeltaDetails: textDeltaDetails({ textDelta: delta.textDelta, diffRows: diff, decision }),
+      inconsistentDiagnostics: inconsistentDiagnostics(decision),
     });
   } catch (err: unknown) {
     return finish("shadow_invalid", { reason: "read_or_parse_failed" }, err);
