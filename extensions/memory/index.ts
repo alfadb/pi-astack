@@ -27,6 +27,7 @@ import { findEntry, listEntries, serializeEntry } from "./search";
 import { runMemorySearch, type SearchPlainResult } from "./llm-search";
 import { recordUsage } from "./usage-telemetry";
 import { buildDecisionSearchQuery, pruneDecisionBriefSeqCountersForSession, runMemoryDecide } from "./decide";
+import { readActivityView } from "./activity-view";
 import { PATH_A_INJECT_MARKER } from "./memory-context-injector";
 import { readOutcomeLedger, summarizeEntryActivity } from "../sediment/outcome-collector";
 import { formatLintReport, lintTarget } from "./lint";
@@ -476,6 +477,39 @@ export default function (pi: ExtensionAPI) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
       return wrapToolResult(listEntries(entries, params.filters ?? {}, settings));
+    },
+  });
+
+  pi.registerTool({
+    name: "memory_activity",
+    label: "Read Activity View",
+    description:
+      "Explicitly read the existing read-only Activity / Attention L2 view for recent work allocation. " +
+      "Use only for questions like 'what have I been busy with recently', activity attention timeline, project allocation, or attention distribution. " +
+      "It validates the latest manifest and markdown, returns bounded evidence-event counts, and never generates projections or writes abrain. " +
+      "Do not use for preferences, rules, durable knowledge lookup, or semantic memory retrieval.",
+    promptSnippet: "memory_activity({ windowDays?: number, limit?: number, includeExcerpt?: boolean })",
+    promptGuidelines: [
+      "Use memory_activity only when the task is about recent activity, attention timeline, project allocation, or what the user has been busy with.",
+      "Counts are evidence-event counts, not wall-clock minutes or actual time spent.",
+      "A missing or stale view is diagnostic only; do not infer no activity and do not generate a projection from this tool.",
+      "Use memory_search or memory_decide for preferences, rules, durable knowledge, and decision history.",
+    ],
+    parameters: Type.Object({
+      windowDays: Type.Optional(Type.Number({ description: "Requested activity window in days. Default 30; falls back to an available view window if absent." })),
+      limit: Type.Optional(Type.Number({ description: "Maximum top projects to return. Default 10; capped by the reader." })),
+      includeExcerpt: Type.Optional(Type.Boolean({ description: "Include a bounded markdown excerpt for debugging. Default false." })),
+    }),
+    prepareArguments(rawArgs: unknown) {
+      const args = asRecord(rawArgs);
+      return {
+        windowDays: Number(args.windowDays ?? args.window_days ?? 30),
+        limit: Number(args.limit ?? 10),
+        includeExcerpt: asBoolean(args.includeExcerpt ?? args.include_excerpt, false),
+      };
+    },
+    async execute(_id: string, params: { windowDays?: number; limit?: number; includeExcerpt?: boolean }) {
+      return wrapToolResult(readActivityView(params));
     },
   });
 

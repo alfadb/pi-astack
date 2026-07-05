@@ -122,13 +122,27 @@ npm run smoke:activity-l2-health
 - freshness 只报告 age；显式传 `--max-age-hours` 时才把 stale 作为失败。
 - 输出包含 included event 数、project/world/unattributed 分布和 manifest diagnostics，保持只读诊断身份。
 
-### P1：runtime 消费实验（不默认注入）
+### P1：显式只读 `memory_activity` pull 工具（不默认注入）
 
-候选后续工作：在 `memory_decide` 或 session briefing 的可选路径里按需加载 activity view，让 agent 在“最近在忙什么”类问题上直接读 L2 view，而不是发起 semantic memory_search。
+状态：已实施为 memory extension 的显式只读工具。主会话可在“最近在忙什么 / activity attention timeline / project allocation / 注意力分配”类问题上按需读取已有 L2 view，而不是发起 semantic `memory_search`。
 
-进入条件：真实会话中出现至少 3 次用户或 agent 需要 activity briefing 的场景，且手动读 P0a 输出比 git log / 人脑回忆有明显收益。
+代码触点：
 
-禁止走法：默认每轮注入完整 activity table；这会增加打扰成本，违反“召回不是越多越好”。
+- `extensions/memory/activity-view.ts`
+- `extensions/memory/index.ts`：注册 `memory_activity`
+- `scripts/smoke-memory-activity-view.mjs`
+- `package.json` script：`smoke:memory-activity-view`
+
+行为边界：
+
+- 只读取 `~/.abrain/l2/views/activity/latest/manifest.json` 与 `project-time-allocation.md`。
+- 校验 manifest / markdown frontmatter / output hash / windows / event counts 一致性。
+- 返回 bounded summary 和可选 bounded excerpt，不返回整份 markdown。
+- 缺 view 时返回明确 `missing_view`，不推断为无活动。
+- counts 明确是 evidence-event counts，不是 wall-clock minutes。
+- stale 只报告 age，不自动生成 projection。
+
+禁止走法：默认每轮注入完整 activity table；接入 `memory_search` 排序；接入 `memory_decide` 默认 prompt surface；写 abrain；新增 writable wiki store。
 
 ### P2：项目内 requirement / workline 归因
 
