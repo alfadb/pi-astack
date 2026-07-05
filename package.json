@@ -127,6 +127,7 @@
     "smoke:activity-l2": "node scripts/smoke-project-activity-l2.mjs",
     "smoke:activity-l2-health": "node scripts/smoke-activity-l2-health.mjs",
     "smoke:memory-activity-view": "node scripts/smoke-memory-activity-view.mjs",
+    "smoke:memory-activity-tool-registration": "node scripts/smoke-memory-activity-tool-registration.mjs",
     "smoke:abrain-redact": "node scripts/smoke-abrain-redact.mjs",
     "smoke:abrain-rule-injector": "node scripts/smoke-abrain-rule-injector.mjs",
     "smoke:abrain-rule-writer": "node scripts/smoke-abrain-rule-writer.mjs",
