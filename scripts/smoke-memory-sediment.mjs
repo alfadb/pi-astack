@@ -213,9 +213,41 @@ exports.Type = {
   String: (opts = {}) => ({ type: 'string', ...opts }),
   Number: (opts = {}) => ({ type: 'number', ...opts }),
   Array: (items, opts = {}) => ({ type: 'array', items, ...opts }),
+  Boolean: (opts = {}) => ({ type: 'boolean', ...opts }),
   Optional: (schema) => ({ ...schema, optional: true }),
   Any: (opts = {}) => ({ ...opts }),
 };
+`);
+
+  // Stub `@earendil-works/pi-tui`. memory/index.ts imports the shared
+  // foldable tool-result renderer, which needs Text plus width helpers.
+  // The real package is ESM-only; this CJS smoke tree uses a local subset.
+  writeFile(path.join(outRoot, "node_modules", "@earendil-works", "pi-tui", "index.js"), `
+class Text {
+  constructor(text, paddingX = 0, paddingY = 0) { this.text = text; this.paddingX = paddingX; this.paddingY = paddingY; }
+  invalidate() {}
+  render() { return String(this.text).split("\\n"); }
+}
+function visibleWidth(text) { return Array.from(String(text)).length; }
+function truncateToWidth(text, width, ellipsis = "...") {
+  text = String(text);
+  if (visibleWidth(text) <= width) return text;
+  if (width <= 0) return "";
+  if (width <= ellipsis.length) return ellipsis.slice(0, width);
+  return text.slice(0, width - ellipsis.length) + ellipsis;
+}
+function wrapTextWithAnsi(text, width) {
+  const out = [];
+  for (const line of String(text).split("\\n")) {
+    if (line.length === 0) { out.push(""); continue; }
+    for (let i = 0; i < line.length; i += width) out.push(line.slice(i, i + width));
+  }
+  return out;
+}
+exports.Text = Text;
+exports.visibleWidth = visibleWidth;
+exports.truncateToWidth = truncateToWidth;
+exports.wrapTextWithAnsi = wrapTextWithAnsi;
 `);
 
   // Minimal pi-coding-agent subset for compaction-tuner custom summary hook
@@ -429,11 +461,13 @@ async function main() {
     memoryExt(makePi("memory", true));
     sedimentExt(makePi("sediment", false));
     compactionTunerExt(makePi("compactionTuner", false));
-    // memory_search / memory_get / memory_list / memory_decide
+    // memory_search / memory_get / memory_list / memory_decide / memory_activity
     // (memory_decide added by ADR 0026 P0a; memory_neighbors removed 2026-06-16
-    //  as an unused read tool — vector search covers related-entry recall; 5 → 4).
-    assert(tools.size === 4, `expected 4 memory tools, got ${tools.size}`);
-    for (const name of ["memory_search", "memory_get", "memory_list", "memory_decide"]) {
+    //  as an unused read tool — vector search covers related-entry recall; 5 → 4;
+    //  memory_activity added by the activity/attention L2 on-demand reader,
+    //  4 → 5 — bump this count when the tool set changes again).
+    assert(tools.size === 5, `expected 5 memory tools, got ${tools.size}`);
+    for (const name of ["memory_search", "memory_get", "memory_list", "memory_decide", "memory_activity"]) {
       assert(tools.has(name), `missing tool: ${name}`);
     }
     assert(commands.has("memory") && commands.has("sediment") && commands.has("compaction-tuner"), "expected memory, sediment, and compaction-tuner commands");

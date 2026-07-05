@@ -25,6 +25,19 @@ import { Type } from "typebox";
 import { loadWebSearchSettings } from "./settings";
 import { createProvider } from "./registry";
 import type { WebSearchProvider, SearchResult } from "./types";
+import { renderFoldableToolResult } from "../_shared/foldable-tool-result";
+
+// Ctrl+O expand/collapse is owned by pi core. This renderer only consumes
+// options.expanded/isPartial plus context.isError; execute() still returns the
+// complete content/details payload for the LLM.
+function renderWebToolResult(toolName: string, fullOutputLabel: string) {
+  return (
+    result: unknown,
+    options: { expanded?: boolean; isPartial?: boolean },
+    theme: any,
+    context?: { isError?: boolean },
+  ) => renderFoldableToolResult(result, options, theme, { toolName, fullOutputLabel }, context);
+}
 
 // Lazy provider — instantiated on first tool call so settings reload
 // without process restart works (e.g. user edits settings during
@@ -92,6 +105,8 @@ export default function (pi: ExtensionAPI) {
       freshness: Type.Optional(Type.String({ description: "Filter by time: 'pd' / 'pw' / 'pm' / 'py' / 'YYYY-MM-DDtoYYYY-MM-DD'." })),
       country: Type.Optional(Type.String({ description: "ISO 3166 alpha-2 country code (e.g. US, DE). Default: US." })),
     }),
+
+    renderResult: renderWebToolResult("web_search", "web search"),
 
     prepareArguments(rawArgs: unknown) {
       const a = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
@@ -167,6 +182,8 @@ export default function (pi: ExtensionAPI) {
       url: Type.String({ description: "Absolute URL to fetch (http:// or https://)" }),
       maxBytes: Type.Optional(Type.Number({ description: "Truncate content to this many bytes. Default: 50000." })),
     }),
+
+    renderResult: renderWebToolResult("web_fetch", "web fetch"),
 
     prepareArguments(rawArgs: unknown) {
       const a = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)

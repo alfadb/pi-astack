@@ -33,6 +33,7 @@
     "smoke:cache-partition": "node scripts/smoke-prompt-cache-partition.mjs",
     "smoke:derive-provenance": "node scripts/smoke-derive-provenance.mjs",
     "smoke:tool-loop-guard": "node scripts/smoke-tool-loop-guard.mjs",
+    "smoke:foldable-tool-results": "node scripts/smoke-foldable-tool-results.mjs",
     "smoke:search-profiles": "node scripts/smoke-search-profiles.mjs",
     "smoke:query-routing": "node scripts/smoke-query-routing.mjs",
     "smoke:stale-floor-window": "node scripts/smoke-stale-floor-window.mjs",

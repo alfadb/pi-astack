@@ -38,6 +38,19 @@ import { formatDoctorLiteReport, runDoctorLite } from "./doctor";
 import { checkBacklinks, formatBacklinkReport } from "./graph";
 import { normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
 import { resolveActiveProject } from "../_shared/runtime";
+import { renderFoldableToolResult } from "../_shared/foldable-tool-result";
+
+// Ctrl+O expand/collapse is owned by pi core. This renderer only consumes
+// options.expanded/isPartial plus context.isError; wrapToolResult() still
+// returns the complete JSON payload for the LLM.
+function renderMemoryToolResult(toolName: string, fullOutputLabel: string) {
+  return (
+    result: unknown,
+    options: { expanded?: boolean; isPartial?: boolean },
+    theme: any,
+    context?: { isError?: boolean },
+  ) => renderFoldableToolResult(result, options, theme, { toolName, fullOutputLabel }, context);
+}
 
 const MEMORY_FOOTNOTE_PROTOCOL_VERSION = "memory-footnote-v1";
 
@@ -371,6 +384,7 @@ export default function (pi: ExtensionAPI) {
         description: "Optional filters: { kinds?: string[], status?: string|string[], limit?: number }",
       })),
     }),
+    renderResult: renderMemoryToolResult("memory_search", "memory search"),
     prepareArguments(rawArgs: unknown) {
       const args = asRecord(rawArgs);
       return {
@@ -424,6 +438,7 @@ export default function (pi: ExtensionAPI) {
         description: "Optional: { include_related?: boolean }",
       })),
     }),
+    renderResult: renderMemoryToolResult("memory_get", "memory entry"),
     prepareArguments(rawArgs: unknown) {
       const args = asRecord(rawArgs);
       const options = (parseMaybeJson(args.options) as Record<string, unknown>) ?? {};
@@ -469,6 +484,7 @@ export default function (pi: ExtensionAPI) {
         description: "Optional filters: { kinds?: string[], status?: string|string[], limit?: number, cursor?: string }",
       })),
     }),
+    renderResult: renderMemoryToolResult("memory_list", "memory list"),
     prepareArguments(rawArgs: unknown) {
       const args = asRecord(rawArgs);
       return { filters: normalizeListFilters(args.filters ?? args) };
@@ -500,6 +516,7 @@ export default function (pi: ExtensionAPI) {
       limit: Type.Optional(Type.Number({ description: "Maximum top projects to return. Default 10; capped by the reader." })),
       includeExcerpt: Type.Optional(Type.Boolean({ description: "Include a bounded markdown excerpt for debugging. Default false." })),
     }),
+    renderResult: renderMemoryToolResult("memory_activity", "memory activity"),
     prepareArguments(rawArgs: unknown) {
       const args = asRecord(rawArgs);
       return {
@@ -538,6 +555,7 @@ export default function (pi: ExtensionAPI) {
       options: Type.Optional(Type.Array(Type.String(), { description: "Choices on the table, e.g. ['pnpm', 'yarn']. Omit for open-ended decisions." })),
       constraints: Type.Optional(Type.String({ description: "Constraints or requirements, e.g. 'must work with monorepo, team standardized on yarn'." })),
     }),
+    renderResult: renderMemoryToolResult("memory_decide", "decision brief"),
     prepareArguments(rawArgs: unknown) {
       const args = asRecord(rawArgs);
       return {
