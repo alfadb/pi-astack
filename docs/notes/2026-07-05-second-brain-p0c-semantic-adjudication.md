@@ -123,20 +123,25 @@ Validation:
 - `smoke:abrain-rule-injector`: 11 assertions.
 - Clean worktree isolated `smoke:constraint-shadow-compiler`: 73 assertions.
 
-## P0E Shadow Refresh Failure
+## P0E/P0F Shadow Refresh Attempts
 
-First P0E refresh failed validation because the LLM invented `tool_contract_not_memory` for a behavioral ToolContract cleanup event; the fix tightens the prompt gate, and no production latest/audit refresh has succeeded yet.
+First P0E refresh failed validation because the LLM invented `tool_contract_not_memory` for a behavioral ToolContract cleanup event; the fix tightened the prompt gate.
 
-Second P0E refresh succeeded but revealed `l2-not-user-managed` conflict and noisy predecessor inconsistency. The P0F patch addresses classifier and diagnostic noise before another refresh.
+Second P0E refresh succeeded but revealed `l2-not-user-managed` conflict and noisy predecessor inconsistency. The P0F patch addressed classifier and diagnostic noise before another refresh.
+
+Third refresh after P0F succeeded: `runDir=/home/worker/.abrain/.state/sediment/constraint-shadow/runs/20260705T092131Z-e7fb9aa30155`, `constraints=38`, `exclusions=17`, `unresolved=0`, `rulesFileListChanged=false`, `shadowOutputHash=68eb1b8e0cc27350ae26831278b76fd7abf6b25a8e9169648a224e845e0fad73`.
+
+The follow-up production dual-read audit row at `2026-07-05T09:39:06.823Z` is fresh and still `status=delta`: `legacyRules=25`, `shadowConstraints=38`, `compiledOnly=19`, `legacyOnly=6`, `bothMatch=0`, `textDelta=19`, `inconsistentDiagnostics=0`.
+
+Remaining gates after the successful refresh: `legacyOnly=6` is all `settings_not_memory`, with only runtime-kill-switch still `humanReviewRequired=true`; `textDelta=19` has `normalization_possible=8` and `semantic_review_required=11`, including the still-unconfirmed sub2api release-criteria row. This is not runtime-flip or retirement authorization.
 
 ## Blocked Actions
 
 The following actions remain blocked by this note:
 
-- Writing production `~/.abrain`.
-- Refreshing or writing shadow state.
+- Additional production `~/.abrain` writes outside the already authorized P0E/P0F shadow refresh and dual-read audit rows.
 - Writing evidence.
 - Archiving or deleting records.
-- Changing runtime behavior or performing additional compiler changes beyond the authorized P0D compiler-only patch.
+- Changing runtime behavior or performing additional compiler changes beyond the authorized P0D/P0E/P0F compiler-only patches.
 - Performing runtime flip.
-- Treating P0C acceptance as convergence acceptance.
+- Treating P0C/P0E/P0F acceptance as convergence acceptance.
