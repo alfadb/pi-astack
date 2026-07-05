@@ -319,7 +319,7 @@ exports.streamSimple = (_model, opts, config) => {
   } else {
     text = 'SKIP';
   }
-  return { result: async () => ({ stopReason: 'stop', content: [{ type: 'text', text }] }) };
+  return { result: async () => ({ stopReason: 'stop', content: [{ type: 'text', text }], usage: { input: 111, output: 22, cacheRead: 7, cacheWrite: 3 } }) };
 };
 `);
 
@@ -558,6 +558,10 @@ async function main() {
         pathAResult === undefined,
         "path-A handler without modelRegistry must skip silently and return undefined",
       );
+      const pathASource = fs.readFileSync(path.join(repoRoot, "extensions/memory/memory-context-injector.ts"), "utf-8");
+      assert(pathASource.includes('source: "memory.before_agent_start"'), "path-A ledger rowBase must record the observability source");
+      assert(pathASource.includes('rowBase.context = anchor ? "anchored_user_turn" : "no_causal_anchor"'), "path-A ledger context must be coarse anchor state, not raw prompt");
+      assert(!/context:\s*userPrompt/.test(pathASource), "path-A ledger context must not store the raw user prompt");
     }
 
     // === classifier health meta-check ================================
@@ -1315,6 +1319,8 @@ async function main() {
     assert(typeof lastMetric.stage2_candidates === "number" && lastMetric.stage2_candidates >= 1, `memory_search metrics must record stage2 candidate count: ${JSON.stringify(lastMetric)}`);
     assert(typeof lastMetric.stage2_prompt_chars === "number" && lastMetric.stage2_prompt_chars > 0, `memory_search metrics must record stage2 prompt size: ${JSON.stringify(lastMetric)}`);
     assert(typeof lastMetric.stage2_prompt_tokens_est === "number" && lastMetric.stage2_prompt_tokens_est > 0, `memory_search metrics must record stage2 token-ish size: ${JSON.stringify(lastMetric)}`);
+    assert(lastMetric.retry_count === 0 && lastMetric.retry_phase === "none" && lastMetric.backoff_applied === false, `success metric must record retry observability fields: ${JSON.stringify(lastMetric)}`);
+    assert(lastMetric.stage2_usage_in === 111 && lastMetric.stage2_usage_out === 22 && lastMetric.stage2_usage_cache_hit === 7 && lastMetric.stage2_usage_cache_write === 3, `success metric must record stage2 usage/cache fields: ${JSON.stringify(lastMetric)}`);
 
     // LLM hard-errors must still leave an observable metrics row. This keeps
     // the accuracy contract (no grep fallback) while making provider/auth/model
@@ -1333,6 +1339,8 @@ async function main() {
       const failMetric = JSON.parse(failMetricLines[failMetricLines.length - 1]);
       assert(failMetric.outcome === "llm_error", `LLM failure must write an observable metrics row: ${JSON.stringify(failMetric)}`);
       assert(failMetric.error_stage === "stage2" && failMetric.error_phase === "primary", `failure metric must identify stage and phase: ${JSON.stringify(failMetric)}`);
+      assert(failMetric.error_type === "unknown" && failMetric.error_model_ref === failMetric.stage2_model, `failure metric must classify error type and model ref: ${JSON.stringify(failMetric)}`);
+      assert(failMetric.retry_count === 0 && failMetric.retry_phase === "primary" && failMetric.backoff_applied === false, `failure metric must record retry observability fields: ${JSON.stringify(failMetric)}`);
       assert(failMetric.search_profile === "toolSearch", `failure metric must include caller profile: ${JSON.stringify(failMetric)}`);
       assert(failMetric.stage1_skip === true && failMetric.stage2_model && typeof failMetric.candidate_limit === "number", `failure metric must include model/flag/candidate context: ${JSON.stringify(failMetric)}`);
       pinStage1Skip(false);

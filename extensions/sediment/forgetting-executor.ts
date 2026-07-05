@@ -18,6 +18,7 @@
 //     executor 只编排门控 + markProposalsExecuted + setEntryHysteresis + 反失控断路器 + audit。
 // 真实落地仍受:(1) data-gate(Phase 0 数据 + 影子回归绿);(2) graduation-gate(decay-scorer
 // 跨厂商去相关, ADR 0031 §5);flag `autoDemote` 默认 off + 冷启动 fail-safe(见下)。
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { userGlobalSedimentDir, ensureUserGlobalSidecarMigrated, formatLocalIsoTimestamp } from "../_shared/runtime";
@@ -39,13 +40,17 @@ export interface ArchiveProposalInput {
   kind: string;
   reason: string; // affirm_stale | affirm_superseded | affirm_echo_chamber(已 §4.2 证据门控)
   expected_status?: LifecycleProposalExpectedStatus;
+  proposal_id?: string;
+  evidence_source?: string;
+  evidence_key?: string;
+  evidence_type?: string;
 }
 export interface HysteresisState {
   proposal_cooldown_until?: string;
   holdout_until?: string;
 }
-export interface DemoteDecision { slug: string; kind: string; reason: string; expected_status?: LifecycleProposalExpectedStatus; }
-export interface DemoteSkip { slug: string; skip_reason: "cooldown" | "holdout" | "batch_cap" | "resurrection_backoff" | "no_slug"; }
+export interface DemoteDecision { slug: string; kind: string; reason: string; expected_status?: LifecycleProposalExpectedStatus; proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; }
+export interface DemoteSkip { slug: string; skip_reason: "cooldown" | "holdout" | "batch_cap" | "resurrection_backoff" | "no_slug"; proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; }
 export interface DemotePlan {
   demote: DemoteDecision[];
   skipped: DemoteSkip[];
@@ -67,6 +72,12 @@ export interface SelectDemoteInput {
  *  resurrection backoff(全 skip)> hysteresis(cooldown/holdout)> batch cap。 */
 export function selectDemoteTargets(input: SelectDemoteInput): DemotePlan {
   const skipped: DemoteSkip[] = [];
+  const skipMeta = (p: { proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string }) => ({
+    ...(p.proposal_id ? { proposal_id: p.proposal_id } : {}),
+    ...(p.evidence_source ? { evidence_source: p.evidence_source } : {}),
+    ...(p.evidence_key ? { evidence_key: p.evidence_key } : {}),
+    ...(p.evidence_type ? { evidence_type: p.evidence_type } : {}),
+  });
   // P1-2 fail-safe: insufficient_data(复活历史不足, 冷启动)视同 backoff —— 数据不足时
   // 绝不 demote, 而非照 demote。否则开局复活刹车是哑的(恰是最危险窗口)。
   const backoff =
@@ -76,23 +87,32 @@ export function selectDemoteTargets(input: SelectDemoteInput): DemotePlan {
 
   const eligible: DemoteDecision[] = [];
   for (const p of input.proposals) {
-    if (!p.slug) { skipped.push({ slug: String(p.slug ?? ""), skip_reason: "no_slug" }); continue; }
+    if (!p.slug) { skipped.push({ slug: String(p.slug ?? ""), skip_reason: "no_slug", ...skipMeta(p) }); continue; }
     const h = input.hysteresisBySlug[p.slug] ?? {};
     const cooldown = h.proposal_cooldown_until ? Date.parse(h.proposal_cooldown_until) : NaN;
     const holdout = h.holdout_until ? Date.parse(h.holdout_until) : NaN;
-    if (Number.isFinite(cooldown) && cooldown > input.nowMs) { skipped.push({ slug: p.slug, skip_reason: "cooldown" }); continue; }
-    if (Number.isFinite(holdout) && holdout > input.nowMs) { skipped.push({ slug: p.slug, skip_reason: "holdout" }); continue; }
-    eligible.push({ slug: p.slug, kind: p.kind, reason: p.reason, expected_status: p.expected_status });
+    if (Number.isFinite(cooldown) && cooldown > input.nowMs) { skipped.push({ slug: p.slug, skip_reason: "cooldown", ...skipMeta(p) }); continue; }
+    if (Number.isFinite(holdout) && holdout > input.nowMs) { skipped.push({ slug: p.slug, skip_reason: "holdout", ...skipMeta(p) }); continue; }
+    eligible.push({
+      slug: p.slug,
+      kind: p.kind,
+      reason: p.reason,
+      expected_status: p.expected_status,
+      ...(p.proposal_id ? { proposal_id: p.proposal_id } : {}),
+      ...(p.evidence_source ? { evidence_source: p.evidence_source } : {}),
+      ...(p.evidence_key ? { evidence_key: p.evidence_key } : {}),
+      ...(p.evidence_type ? { evidence_type: p.evidence_type } : {}),
+    });
   }
 
   if (backoff) {
-    for (const e of eligible) skipped.push({ slug: e.slug, skip_reason: "resurrection_backoff" });
+    for (const e of eligible) skipped.push({ slug: e.slug, skip_reason: "resurrection_backoff", ...skipMeta(e) });
     return { demote: [], skipped, resurrection_backoff: true, batch_cap: 0 };
   }
 
   const cap = Math.max(0, Math.floor(input.maxBatch));
   const demote = eligible.slice(0, cap);
-  for (const e of eligible.slice(cap)) skipped.push({ slug: e.slug, skip_reason: "batch_cap" });
+  for (const e of eligible.slice(cap)) skipped.push({ slug: e.slug, skip_reason: "batch_cap", ...skipMeta(e) });
   return { demote, skipped, resurrection_backoff: false, batch_cap: cap };
 }
 
@@ -140,6 +160,18 @@ function evalCircuitBreaker(nowMs: number, activeCorpusSize: number | undefined,
   return { tripped: false, demoted_last_24h: demoted24h };
 }
 
+function stableHash(parts: unknown[]): string {
+  return createHash("sha256").update(parts.map((p) => String(p ?? "")).join("\0")).digest("hex").slice(0, 16);
+}
+
+function proposalIds(targets: Array<{ proposal_id?: string }>): string[] {
+  return targets.map((t) => t.proposal_id).filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+function idempotencyKey(projectRoot: string, kind: string, ids: string[]): string {
+  return `forgetting-${kind}-${stableHash([path.resolve(projectRoot), kind, ...ids])}`;
+}
+
 function appendDemoteLedger(projectRoot: string, target: DemoteDecision, now: Date): void {
   try {
     const file = forgettingDemoteLedgerPath();
@@ -153,6 +185,11 @@ function appendDemoteLedger(projectRoot: string, target: DemoteDecision, now: Da
       kind: target.kind,
       reason: target.reason,
       expected_status: target.expected_status ?? "active",
+      proposal_id: target.proposal_id,
+      evidence_source: target.evidence_source,
+      evidence_key: target.evidence_key,
+      evidence_type: target.evidence_type,
+      idempotency_key: idempotencyKey(projectRoot, "demote-ledger", target.proposal_id ? [target.proposal_id] : [target.slug]),
       op: "demote",
       reactivation_monitor_window_days: 30,
       reactivation_expected: false
@@ -165,8 +202,13 @@ function appendRealAudit(projectRoot: string, plan: DemotePlan, demoted: string[
   try {
     const file = forgettingDryRunAuditPath();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const plannedIds = proposalIds(plan.demote);
+    const bySlug = new Map(plan.demote.map((d) => [d.slug, d] as const));
     const row = {
       ...spreadAnchor(getCurrentAnchor()),
+      schema_version: 1,
+      row_kind: "real_apply",
+      idempotency_key: idempotencyKey(projectRoot, "real-apply", plannedIds),
       ts: formatLocalIsoTimestamp(now),
       project_root: path.resolve(projectRoot),
       dry_run: false,
@@ -174,6 +216,9 @@ function appendRealAudit(projectRoot: string, plan: DemotePlan, demoted: string[
       demoted_count: demoted.length,
       failed_count: failed.length,
       abandoned_count: abandoned.length,
+      planned_proposal_ids: plannedIds,
+      demoted_proposal_ids: proposalIds(demoted.map((slug) => bySlug.get(slug)).filter((d): d is DemoteDecision => !!d)),
+      abandoned_proposal_ids: proposalIds(abandoned.map((slug) => bySlug.get(slug)).filter((d): d is DemoteDecision => !!d)),
       demoted_slugs: demoted,
       abandoned_slugs: abandoned,
       failed,
@@ -198,6 +243,10 @@ function executableArchiveProposals(projectRoot: string): ArchiveProposalInput[]
       kind: p.kind,
       reason: p.reason,
       expected_status: p.expected_status ?? "active",
+      ...(p.proposal_id ? { proposal_id: p.proposal_id } : {}),
+      ...(p.evidence_source ? { evidence_source: p.evidence_source } : {}),
+      ...(p.evidence_key ? { evidence_key: p.evidence_key } : {}),
+      ...(p.evidence_type ? { evidence_type: p.evidence_type } : {}),
     }));
 }
 
@@ -205,13 +254,18 @@ function appendDryRunAudit(projectRoot: string, plan: DemotePlan, now: Date): vo
   try {
     const file = forgettingDryRunAuditPath();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const ids = proposalIds(plan.demote);
     const row = {
       ...spreadAnchor(getCurrentAnchor()),
+      schema_version: 1,
+      row_kind: "dry_run_plan",
+      idempotency_key: idempotencyKey(projectRoot, "dry-run-plan", ids),
       ts: formatLocalIsoTimestamp(now),
       project_root: path.resolve(projectRoot),
       dry_run: true,
       would_demote_count: plan.demote.length,
       skipped_count: plan.skipped.length,
+      would_demote_proposal_ids: ids,
       resurrection_backoff: plan.resurrection_backoff,
       batch_cap: plan.batch_cap,
       would_demote_slugs: plan.demote.map((d) => d.slug),

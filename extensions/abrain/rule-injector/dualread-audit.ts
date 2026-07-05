@@ -32,11 +32,55 @@ interface ShadowConstraint {
   sourceRecordIds?: string[];
 }
 
+interface ShadowDecisionExclusion {
+  reason?: string;
+  sourceRecordIds?: string[];
+  diagnosticIds?: string[];
+}
+
+interface ShadowDecisionUnresolved {
+  reason?: string;
+  sourceRecordIds?: string[];
+  diagnosticIds?: string[];
+}
+
+interface ShadowDecisionMapping {
+  sourceRecordId?: string;
+  disposition?: string;
+  targetId?: string;
+  reason?: string;
+}
+
+interface ShadowDecisionDiagnostic {
+  id?: string;
+  code?: string;
+  message?: string;
+  sourceRecordIds?: string[];
+  data?: Record<string, unknown>;
+}
+
 interface ShadowDecision {
   schemaVersion?: string;
   inputRootHash?: string;
   validationHash?: string;
   constraints?: ShadowConstraint[];
+  exclusions?: ShadowDecisionExclusion[];
+  unresolved?: ShadowDecisionUnresolved[];
+  mappings?: ShadowDecisionMapping[];
+  diagnostics?: ShadowDecisionDiagnostic[];
+}
+
+interface ShadowDiffRow {
+  sourceRecordId?: string;
+  category?: string;
+  disposition?: string;
+  targetId?: string;
+  reason?: string;
+}
+
+interface ShadowDiffReport {
+  schemaVersion?: string;
+  rows?: ShadowDiffRow[];
 }
 
 interface ShadowEventCoverage {
@@ -221,6 +265,130 @@ function eventCoverageSummary(value: unknown): ShadowEventCoverage["summary"] | 
   return isObject(summary) ? summary : undefined;
 }
 
+function diffRows(value: unknown): ShadowDiffRow[] {
+  if (!isObject(value)) return [];
+  if (value.schemaVersion !== "constraint-shadow-diff/v1") return [];
+  const rows = (value as ShadowDiffReport).rows;
+  return Array.isArray(rows) ? rows.filter((row): row is ShadowDiffRow => isObject(row)) : [];
+}
+
+function sourceIn(ids: string[] | undefined, sourceRecordId: string): boolean {
+  return Array.isArray(ids) && ids.includes(sourceRecordId);
+}
+
+function countByDisposition(details: Array<{ disposition: string }>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const detail of details) out[detail.disposition] = (out[detail.disposition] ?? 0) + 1;
+  return out;
+}
+
+function diagnosticReason(diagnostic: ShadowDecisionDiagnostic | undefined): string | undefined {
+  if (!diagnostic) return undefined;
+  const dataReason = diagnostic.data?.reason ?? diagnostic.data?.category;
+  if (typeof dataReason === "string" && dataReason.trim()) return dataReason;
+  const message = diagnostic.message ?? "";
+  if (message.includes("settings_not_memory")) return "settings_not_memory";
+  if (message.includes("tool_contract_not_memory")) return "tool_contract_not_memory";
+  if (message.includes("model_uncertain")) return "model_uncertain";
+  return undefined;
+}
+
+function dispositionFromDiagnostic(diagnostic: ShadowDecisionDiagnostic | undefined): string | undefined {
+  const reason = diagnosticReason(diagnostic) ?? "";
+  if (reason.includes("settings_not_memory") || diagnostic?.code === "SC_NOT_MEMORY_SETTINGS") return "settings_not_memory";
+  if (reason.includes("tool_contract_not_memory") || diagnostic?.code === "SC_NOT_MEMORY_TOOL_CONTRACT") return "tool_contract_not_memory";
+  if (reason.includes("model_uncertain")) return "model_uncertain";
+  return undefined;
+}
+
+function dispositionFromDiff(row: ShadowDiffRow | undefined): string | undefined {
+  if (!row) return undefined;
+  const reason = row.reason ?? "";
+  if (reason.includes("settings_not_memory") || row.category === "exclude_not_memory_settings") return "settings_not_memory";
+  if (reason.includes("tool_contract_not_memory") || row.category === "exclude_not_memory_tool_contract") return "tool_contract_not_memory";
+  if (reason.includes("model_uncertain")) return "model_uncertain";
+  if (row.disposition === "compiled" || row.disposition === "merged_source") return "compiled_missing";
+  return undefined;
+}
+
+function legacyOnlyDetails(input: { sourceRecordIds: string[]; decision: ShadowDecision; diffRows: ShadowDiffRow[] }) {
+  return input.sourceRecordIds.map((sourceRecordId) => {
+    const exclusion = input.decision.exclusions?.find((item) => sourceIn(item.sourceRecordIds, sourceRecordId));
+    const unresolved = input.decision.unresolved?.find((item) => sourceIn(item.sourceRecordIds, sourceRecordId));
+    const mapping = input.decision.mappings?.find((item) => item.sourceRecordId === sourceRecordId);
+    const diffRow = input.diffRows.find((row) => row.sourceRecordId === sourceRecordId);
+    const diagnostic = input.decision.diagnostics?.find((item) => sourceIn(item.sourceRecordIds, sourceRecordId));
+
+    const diagnosticReasonText = diagnosticReason(diagnostic);
+    const disposition = exclusion?.reason
+      ?? unresolved?.reason
+      ?? (mapping?.disposition === "compiled" || mapping?.disposition === "merged_source" ? "compiled_missing" : undefined)
+      ?? dispositionFromDiff(diffRow)
+      ?? dispositionFromDiagnostic(diagnostic)
+      ?? "unknown";
+
+    return {
+      sourceRecordId,
+      disposition,
+      ...(exclusion?.reason ? { reason: exclusion.reason } : {}),
+      ...(unresolved?.reason ? { reason: unresolved.reason } : {}),
+      ...(mapping?.reason && !exclusion?.reason && !unresolved?.reason ? { reason: mapping.reason } : {}),
+      ...(diffRow?.category ? { category: diffRow.category } : {}),
+      ...(diffRow?.reason && !exclusion?.reason && !unresolved?.reason && !mapping?.reason ? { reason: diffRow.reason } : {}),
+      ...(diagnosticReasonText && !exclusion?.reason && !unresolved?.reason && !mapping?.reason && !diffRow?.reason ? { reason: diagnosticReasonText } : {}),
+      ...(mapping?.disposition ? { compilerDisposition: mapping.disposition } : {}),
+      ...(diagnostic?.code ? { diagnosticCode: diagnostic.code } : {}),
+      ...(mapping?.targetId ? { targetId: mapping.targetId } : {}),
+      ...(exclusion?.diagnosticIds ? { diagnosticIds: exclusion.diagnosticIds } : {}),
+      ...(unresolved?.diagnosticIds ? { diagnosticIds: unresolved.diagnosticIds } : {}),
+      ...(diagnostic?.id && !exclusion?.diagnosticIds && !unresolved?.diagnosticIds ? { diagnosticIds: [diagnostic.id] } : {}),
+    };
+  });
+}
+
+function inferSourceKind(sourceRecordId: string): string {
+  if (sourceRecordId.startsWith("rule:")) return "legacy_rule";
+  if (sourceRecordId.startsWith("event:")) return "constraint_event";
+  if (sourceRecordId.startsWith("audit:")) return "audit";
+  if (sourceRecordId.startsWith("governance:")) return "governance_case";
+  return "unknown";
+}
+
+function compiledOnlyDetails(sourceRecordIds: string[], constraints: ShadowConstraint[]) {
+  return sourceRecordIds.map((sourceRecordId) => {
+    const constraint = constraints.find((item) => (
+      sourceIn(item.sourceRecordIds, sourceRecordId)
+      || item.constraintId === sourceRecordId
+      || item.title === sourceRecordId
+    ));
+    const sourceKind = inferSourceKind(sourceRecordId);
+    return {
+      sourceRecordId,
+      sourceKind,
+      scope: scopeKey(constraint?.scope),
+      category: sourceKind === "constraint_event" ? "event_native" : "compiled_only",
+      ...(constraint?.constraintId ? { constraintId: constraint.constraintId } : {}),
+      ...(constraint?.injectMode ? { injectMode: constraint.injectMode } : {}),
+    };
+  });
+}
+
+function textDeltaDetails(input: { textDelta: Array<{ sourceRecordId: string; legacyHash: string; shadowHash: string }>; diffRows: ShadowDiffRow[]; decision: ShadowDecision }) {
+  return input.textDelta.map((item) => {
+    const diffRow = input.diffRows.find((row) => row.sourceRecordId === item.sourceRecordId);
+    const diagnostic = input.decision.diagnostics?.find((row) => sourceIn(row.sourceRecordIds, item.sourceRecordId));
+    const normalizationPossible = diffRow?.category === "compact" || diagnostic?.code === "SC_NOT_MEMORY_SUBTYPE_NORMALIZED";
+    return {
+      ...item,
+      disposition: normalizationPossible ? "normalization_possible" : "semantic_review_required",
+      ...(diffRow?.category ? { category: diffRow.category } : {}),
+      ...(diffRow?.reason ? { reason: diffRow.reason } : {}),
+      ...(diffRow?.targetId ? { targetId: diffRow.targetId } : {}),
+      ...(diagnostic?.id ? { diagnosticIds: [diagnostic.id] } : {}),
+    };
+  });
+}
+
 function defaultShadowRoot(abrainHome: string): string {
   return path.join(abrainHome, SHADOW_ROOT_REL);
 }
@@ -297,14 +465,22 @@ export function runRuleInjectorDualReadAudit(input: {
     if (!pathInside(shadowRoot, latestDir)) throw new Error("shadow latest dir outside constraint-shadow state root");
     const decisionPath = path.join(latestDir, "decision.json");
     const coveragePath = path.join(latestDir, "event-coverage.json");
+    const diffPath = path.join(latestDir, "diff.json");
     if (!fs.existsSync(decisionPath)) return finish("shadow_unavailable", { reason: "missing_decision" });
     const decision = validateDecision(readJsonBounded(decisionPath, input.settings.maxReadBytes));
     const coverage = fs.existsSync(coveragePath) ? eventCoverageSummary(readJsonBounded(coveragePath, input.settings.maxReadBytes)) : undefined;
+    let diff: ShadowDiffRow[] = [];
+    try {
+      diff = fs.existsSync(diffPath) ? diffRows(readJsonBounded(diffPath, input.settings.maxReadBytes)) : [];
+    } catch {
+      diff = [];
+    }
     const decisionStat = fs.statSync(decisionPath);
     const shadowAgeMs = Math.max(0, nowMs - decisionStat.mtimeMs);
     const stale = shadowAgeMs > input.settings.staleAfterMs;
     const constraints = decision.constraints ?? [];
     const delta = classifyDelta(allLegacyRules(input.cache), constraints);
+    const legacyDetails = legacyOnlyDetails({ sourceRecordIds: delta.legacyOnly, decision, diffRows: diff });
     const hasDelta = delta.compiledOnly.length > 0 || delta.legacyOnly.length > 0 || delta.textDelta.length > 0;
     return finish(hasDelta || stale ? "delta" : "match", {
       inputRootHash: decision.inputRootHash,
@@ -321,6 +497,10 @@ export function runRuleInjectorDualReadAudit(input: {
         textDelta: delta.textDelta.length,
       },
       delta,
+      legacyOnlyDispositions: countByDisposition(legacyDetails),
+      legacyOnlyDetails: legacyDetails,
+      compiledOnlyDetails: compiledOnlyDetails(delta.compiledOnly, constraints),
+      textDeltaDetails: textDeltaDetails({ textDelta: delta.textDelta, diffRows: diff, decision }),
     });
   } catch (err: unknown) {
     return finish("shadow_invalid", { reason: "read_or_parse_failed" }, err);

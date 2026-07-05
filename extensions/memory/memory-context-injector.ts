@@ -162,6 +162,10 @@ interface PathALedgerRow {
   };
   injected_slugs?: string[];
   injected_chars?: number;
+  /** Observability-only trigger source; never used for retrieval decisions. */
+  source?: string;
+  /** Coarse trigger context without storing the raw user prompt. */
+  context?: string;
   total_duration_ms: number;
   /** Set on terminal error path. */
   error?: string;
@@ -300,6 +304,8 @@ export async function tryInjectRelevantMemoryContext(
     inject_id: injectId,
     outcome: "skipped_unknown",
     prompt_chars: userPrompt?.length ?? 0,
+    source: "memory.before_agent_start",
+    context: "pre_causal_anchor",
     total_duration_ms: 0,
   };
   // ADR 0027 C6 / ADR 0026 §5.1: resolve the causal anchor once and stamp
@@ -313,6 +319,7 @@ export async function tryInjectRelevantMemoryContext(
   // rows. (Pre-2026-05-29 this relied on dispatch's bump and broke live.)
   const anchor = getCurrentAnchor();
   Object.assign(rowBase, spreadAnchor(anchor));
+  rowBase.context = anchor ? "anchored_user_turn" : "no_causal_anchor";
   if (!anchor) rowBase.anchor_missing = true;
 
   try {
@@ -329,6 +336,7 @@ export async function tryInjectRelevantMemoryContext(
       settings.pathA.historyMaxCharsPerTurn,
     );
     rowBase.history_turn_count = earlyHistory.length;
+    rowBase.context = `${rowBase.context}:${earlyHistory.length > 0 ? "with_history" : "no_history"}`;
 
     if (!settings.pathA.enabled) {
       const row = { ...rowBase, outcome: "skipped_disabled", total_duration_ms: Date.now() - t0 };

@@ -126,6 +126,7 @@ check("a promoted advisory WITH lifecycle_proposal yields one pending row, field
   if (row.slug !== "stale-entry" || row.op !== "archive" || row.reason !== "affirm_superseded") throw new Error(`fields wrong: ${JSON.stringify(row)}`);
   if (row.status !== "pending") throw new Error("M3 must emit status=pending (never executes)");
   if (row.expected_status !== "active" || row.disposition !== "execution_ready") throw new Error(`active proposal gate fields wrong: ${JSON.stringify(row)}`);
+  if (!row.proposal_id || row.evidence_type !== "superseded_by") throw new Error(`ordinary proposal must carry proposal_id/evidence_type: ${JSON.stringify(row)}`);
   if (!row.independent_evidence.includes("superseded evidence") || !row.falsifier) throw new Error("evidence/falsifier lost");
   if (row.message !== "msg for stale-entry") throw new Error("message context lost");
 });
@@ -193,7 +194,35 @@ check("frontmatter bridge emits E1 executable and E2 review-only proposals", () 
   if (!e1 || e1.disposition !== "execution_ready" || e1.expected_status !== "superseded" || e1.target_slug !== "new-a") throw new Error(`E1 wrong: ${JSON.stringify(e1)}`);
   if (!e2 || e2.disposition !== "review_required" || e2.reason !== "superseded_no_successor" || e2.review_required !== true) throw new Error(`E2 wrong: ${JSON.stringify(e2)}`);
   if (!self || self.disposition !== "review_required") throw new Error(`self-edge must become E2 review: ${JSON.stringify(self)}`);
+  if (!e1.proposal_id || e1.evidence_type !== "superseded_by") throw new Error(`E1 must carry proposal_id/evidence_type: ${JSON.stringify(e1)}`);
+  if (!e2.proposal_id || e2.evidence_type !== "superseded_no_successor") throw new Error(`E2 must carry proposal_id/evidence_type: ${JSON.stringify(e2)}`);
+  if (!self.proposal_id || self.evidence_type !== "superseded_no_successor") throw new Error(`self-edge E2 must carry proposal_id/evidence_type: ${JSON.stringify(self)}`);
   if (rows.some((x) => x.slug === "old-d" || x.slug === "old-e")) throw new Error("non-current-superseded entries must be skipped");
+});
+
+check("frontmatter E1 replacing previous E2 records supersedes_proposal_id", () => {
+  appendSupersededFrontmatterProposals({
+    projectRoot: projectA,
+    now: new Date("2026-06-04T13:10:00Z"),
+    entries: [
+      { slug: "old-replace", kind: "decision", status: "superseded", frontmatter: { status: "superseded" }, relations: [] },
+    ],
+  });
+  const oldE2 = readLifecycleProposals(projectA).find((x) => x.slug === "old-replace" && x.disposition === "review_required");
+  if (!oldE2?.proposal_id || oldE2.evidence_type !== "superseded_no_successor") throw new Error(`setup E2 missing proposal_id/evidence_type: ${JSON.stringify(oldE2)}`);
+  appendSupersededFrontmatterProposals({
+    projectRoot: projectA,
+    now: new Date("2026-06-04T13:11:00Z"),
+    entries: [
+      { slug: "old-replace", kind: "decision", status: "superseded", frontmatter: { status: "superseded", superseded_by: ["new-replace"] }, relations: [{ type: "superseded_by", to: "new-replace" }] },
+    ],
+  });
+  const rows = readLifecycleProposals(projectA).filter((x) => x.slug === "old-replace");
+  const failedE2 = rows.find((x) => x.disposition === "review_required");
+  const newE1 = rows.find((x) => x.disposition === "execution_ready");
+  if (failedE2?.status !== "failed") throw new Error(`previous E2 must be marked failed when E1 arrives: ${JSON.stringify(rows)}`);
+  if (!newE1?.proposal_id || newE1.evidence_type !== "superseded_by") throw new Error(`replacement E1 missing proposal_id/evidence_type: ${JSON.stringify(newE1)}`);
+  if (newE1.supersedes_proposal_id !== oldE2.proposal_id) throw new Error(`replacement E1 must point to old E2 proposal_id: ${JSON.stringify({ oldE2, newE1 })}`);
 });
 
 check("canonical markdown bridge reads block-list superseded_by", () => {

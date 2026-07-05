@@ -136,7 +136,7 @@ function shadowConstraintFromRule(entry, overrides = {}) {
   };
 }
 
-function writeShadowDecision(file, constraints) {
+function writeShadowDecision(file, constraints, overrides = {}) {
   writeFile(file, JSON.stringify({
     schemaVersion: "constraint-shadow-decision/v1",
     inputRootHash: "input-root-hash-for-smoke",
@@ -148,6 +148,16 @@ function writeShadowDecision(file, constraints) {
     mappings: [],
     diagnostics: [],
     validationHash: "validation-hash-for-smoke",
+    ...overrides,
+  }, null, 2));
+}
+
+function writeShadowDiff(file, rows) {
+  writeFile(file, JSON.stringify({
+    schemaVersion: "constraint-shadow-diff/v1",
+    summary: {},
+    rows,
+    markdown: "# fixture diff\n",
   }, null, 2));
 }
 
@@ -539,7 +549,39 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
       sourceRecordIds: ["event:compiled-only"],
     },
   ];
-  writeShadowDecision(path.join(latestDir, "decision.json"), constraints);
+  const settingsLegacyOnlySource = legacySourceId(cache.projectListed[0]);
+  writeShadowDecision(path.join(latestDir, "decision.json"), constraints, {
+    exclusions: [{
+      reason: "settings_not_memory",
+      sourceRecordIds: [settingsLegacyOnlySource],
+      diagnosticIds: ["diag-settings-not-memory"],
+    }],
+    mappings: [{
+      sourceRecordId: settingsLegacyOnlySource,
+      disposition: "excluded",
+      reason: "settings_not_memory",
+    }],
+    diagnostics: [{
+      id: "diag-settings-not-memory",
+      code: "SC_NOT_MEMORY_SETTINGS",
+      sourceRecordIds: [settingsLegacyOnlySource],
+    }],
+  });
+  writeShadowDiff(path.join(latestDir, "diff.json"), [
+    {
+      sourceRecordId: settingsLegacyOnlySource,
+      category: "exclude_not_memory_settings",
+      disposition: "excluded",
+      reason: "settings_not_memory",
+    },
+    {
+      sourceRecordId: legacySourceId(cache.globalListed[0]),
+      category: "compact",
+      disposition: "compiled",
+      targetId: "shadow:multi-audit",
+      reason: "summary normalized by compiler",
+    },
+  ]);
   writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
     schemaVersion: "constraint-event-coverage/v1",
     summary: {
@@ -572,6 +614,19 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
   if (row.summary.compiledOnly !== 1) throw new Error(`compiledOnly=${row.summary.compiledOnly}`);
   if (row.summary.legacyOnly !== 1) throw new Error(`legacyOnly=${row.summary.legacyOnly}`);
   if (row.summary.textDelta !== 1) throw new Error(`textDelta=${row.summary.textDelta}`);
+  if (row.legacyOnlyDispositions.settings_not_memory !== 1) throw new Error(`legacyOnlyDispositions missing settings_not_memory: ${JSON.stringify(row.legacyOnlyDispositions)}`);
+  const legacyDetail = row.legacyOnlyDetails.find((item) => item.sourceRecordId === settingsLegacyOnlySource);
+  if (!legacyDetail || legacyDetail.disposition !== "settings_not_memory" || legacyDetail.category !== "exclude_not_memory_settings") {
+    throw new Error(`legacyOnlyDetails did not explain settings exclusion: ${JSON.stringify(row.legacyOnlyDetails)}`);
+  }
+  const compiledDetail = row.compiledOnlyDetails.find((item) => item.sourceRecordId === "event:compiled-only");
+  if (!compiledDetail || compiledDetail.sourceKind !== "constraint_event" || compiledDetail.category !== "event_native" || compiledDetail.scope !== "global") {
+    throw new Error(`compiledOnlyDetails did not explain event-native source: ${JSON.stringify(row.compiledOnlyDetails)}`);
+  }
+  const textDetail = row.textDeltaDetails.find((item) => item.sourceRecordId === legacySourceId(cache.globalListed[0]));
+  if (!textDetail || textDetail.legacyHash !== row.delta.textDelta[0].legacyHash || textDetail.disposition !== "normalization_possible") {
+    throw new Error(`textDeltaDetails did not preserve hashes with coarse disposition: ${JSON.stringify(row.textDeltaDetails)}`);
+  }
   if (row.eventCoverage.queuedEvents !== 1 || row.eventCoverage.staleEvents !== 1) throw new Error(`event coverage missing: ${JSON.stringify(row.eventCoverage)}`);
   const afterRulesMtime = fs.statSync(path.join(abrainHome, "rules", "always", "edit-write-only.md")).mtimeMs;
   if (afterRulesMtime !== beforeRulesMtime) throw new Error("dual-read audit changed a rule file");

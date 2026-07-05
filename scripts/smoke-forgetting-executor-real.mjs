@@ -59,6 +59,7 @@ const settings = (autoDemote) => ({ forgetting: { demoteShadow: true, autoDemote
 const prop = (slug) => ({ slug, kind: "decision", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: `${slug} superseded`, falsifier: "if not" } });
 const mkArchive = (result) => { const calls = []; const targets = []; return { calls, targets, fn: async (t) => { calls.push(t.slug); targets.push(t); return typeof result === "function" ? result(t) : result; } }; };
 const statusOf = (slug) => { const r = elp.readLifecycleProposals(pr).find((x) => x.slug === slug); return r ? r.status : "absent"; };
+const readJsonl = (file) => fs.existsSync(file) ? fs.readFileSync(file, "utf-8").trim().split(/\n/).filter(Boolean).map((line) => JSON.parse(line)) : [];
 
 elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop("decay-b")] });
 
@@ -68,6 +69,9 @@ elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop
   const r = await fx.runForgettingExecutor(pr, settings(false), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
   ok(r.ok && r.dry_run === true && arc.calls.length === 0, "autoDemote off → dry_run + archiveEntry 零调用");
   ok(elp.readLifecycleProposals(pr).every((x) => x.status === "pending"), "off → proposals 仍 pending");
+  const audit = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
+  ok(audit?.schema_version === 1 && audit.row_kind === "dry_run_plan" && audit.idempotency_key, "dry-run audit carries schema_version/row_kind/idempotency_key");
+  ok(Array.isArray(audit?.would_demote_proposal_ids) && audit.would_demote_proposal_ids.length === 2, "dry-run audit carries would_demote_proposal_ids");
 }
 
 // ---- 2) autoDemote ON → 真实编排 ----
@@ -76,9 +80,15 @@ elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
   ok(r.dry_run === false && arc.calls.length === 2 && r.demoted.length === 2, `on → demote 2 (calls=${arc.calls.length} demoted=${r.demoted?.length})`);
   ok(arc.targets.every((t) => t.expected_status === "active"), "legacy active proposals pass expected_status=active");
+  ok(arc.targets.every((t) => t.proposal_id && t.evidence_source === "aggregator_promoted_advisory" && t.evidence_type === "superseded_by"), "archive targets carry proposal/evidence join fields");
   ok(statusOf("decay-a") === "executed" && statusOf("decay-b") === "executed", "on → proposals executed");
   ok(et.getEntryTelemetry(pr, "decay-a")?.proposal_cooldown_until, "on → cooldown 写入");
-  ok(fs.readFileSync(demoteLedger, "utf-8").trim().split("\n").length === 2, "on → demote-ledger 2 行");
+  const ledgerRows = readJsonl(demoteLedger);
+  ok(ledgerRows.length === 2, "on → demote-ledger 2 行");
+  ok(ledgerRows.every((row) => row.proposal_id && row.evidence_source === "aggregator_promoted_advisory" && row.evidence_type === "superseded_by" && row.idempotency_key), "demote-ledger rows carry proposal/evidence/idempotency join fields");
+  const audit = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
+  ok(audit?.schema_version === 1 && audit.row_kind === "real_apply" && audit.idempotency_key, "real audit carries schema_version/row_kind/idempotency_key");
+  ok(Array.isArray(audit?.planned_proposal_ids) && audit.planned_proposal_ids.length === 2 && Array.isArray(audit?.demoted_proposal_ids) && audit.demoted_proposal_ids.length === 2, "real audit carries planned/demoted proposal ids");
 }
 
 // ---- 3) 幂等 ----
@@ -111,6 +121,7 @@ elp.appendSupersededFrontmatterProposals({
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
   ok(arc.calls.length === 1 && arc.calls[0] === "sup-a" && r.demoted?.includes("sup-a"), "E1 frontmatter proposal executes exactly once");
   ok(arc.targets[0]?.expected_status === "superseded", "E1 passes expected_status=superseded to archiveEntry");
+  ok(arc.targets[0]?.proposal_id && arc.targets[0]?.evidence_source === "frontmatter_superseded" && arc.targets[0]?.evidence_type === "superseded_by", "E1 archive target carries frontmatter proposal/evidence join fields");
   ok(statusOf("sup-a") === "executed", "E1 proposal marked executed");
   ok(statusOf("sup-b") === "pending", "E2 review_required proposal remains pending and unexecuted");
 }

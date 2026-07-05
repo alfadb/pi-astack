@@ -16,6 +16,7 @@
  *   - Usage-only signals are not accepted by this module.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -56,6 +57,12 @@ export interface EntryLifecycleProposalRow {
   /** Stable source/key pair used for idempotent deterministic replays. */
   evidence_source?: LifecycleProposalEvidenceSource;
   evidence_key?: string;
+  /** Stable join key derived from the proposal identity. */
+  proposal_id?: string;
+  /** Stable join key for the proposal this row supersedes, when known. */
+  supersedes_proposal_id?: string;
+  /** Coarse evidence class for audit/ledger aggregation. */
+  evidence_type?: string;
   /** E1 successor target when known. */
   target_slug?: string;
   /** Explicit marker for curator/manual review queues. */
@@ -149,6 +156,19 @@ function validReason(value: unknown): LifecycleProposalReason | undefined {
     : undefined;
 }
 
+function lifecycleEvidenceType(reason: LifecycleProposalReason, source?: LifecycleProposalEvidenceSource, targetSlug?: string): string {
+  if (source === "frontmatter_superseded" && reason === "affirm_superseded" && targetSlug) return "superseded_by";
+  if (reason === "superseded_no_successor") return "superseded_no_successor";
+  if (reason === "affirm_superseded") return "superseded_by";
+  if (reason === "affirm_stale") return "stale";
+  if (reason === "affirm_echo_chamber") return "echo_chamber";
+  return reason;
+}
+
+function stableProposalId(row: EntryLifecycleProposalRow): string {
+  return `elp-${createHash("sha256").update(proposalIdentity(row)).digest("hex").slice(0, 16)}`;
+}
+
 function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
   if (!row || typeof row !== "object") return null;
   const r = row as Record<string, unknown>;
@@ -159,7 +179,7 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
   const expected = r.expected_status === "superseded" ? "superseded" : r.expected_status === "active" ? "active" : undefined;
   const disposition = r.disposition === "review_required" ? "review_required" : r.disposition === "execution_ready" ? "execution_ready" : undefined;
   const source = r.evidence_source === "frontmatter_superseded" ? "frontmatter_superseded" : r.evidence_source === "aggregator_promoted_advisory" ? "aggregator_promoted_advisory" : undefined;
-  return {
+  const normalized: EntryLifecycleProposalRow = {
     schema_version: 1,
     ts: typeof r.ts === "string" ? r.ts : formatLocalIsoTimestamp(),
     project_root: projectRoot,
@@ -175,9 +195,13 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
     ...(source ? { evidence_source: source } : {}),
     ...(typeof r.evidence_key === "string" && r.evidence_key ? { evidence_key: r.evidence_key } : {}),
     ...(typeof r.target_slug === "string" && r.target_slug ? { target_slug: r.target_slug } : {}),
+    ...(typeof r.supersedes_proposal_id === "string" && r.supersedes_proposal_id ? { supersedes_proposal_id: r.supersedes_proposal_id } : {}),
     ...(r.review_required === true ? { review_required: true } : {}),
     status: (r.status === "executed" || r.status === "failed") ? r.status : "pending",
   };
+  normalized.evidence_type = typeof r.evidence_type === "string" && r.evidence_type ? r.evidence_type : lifecycleEvidenceType(normalized.reason, normalized.evidence_source, normalized.target_slug);
+  normalized.proposal_id = typeof r.proposal_id === "string" && r.proposal_id ? r.proposal_id : stableProposalId(normalized);
+  return normalized;
 }
 
 function proposalIdentity(row: EntryLifecycleProposalRow): string {
@@ -208,6 +232,9 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[]): App
         .map((row) => normalizeRow({ ...row, project_root: pr }))
         .filter((row): row is EntryLifecycleProposalRow => !!row && row.evidence_source === "frontmatter_superseded" && row.disposition === "execution_ready" && row.expected_status === "superseded" && !!row.slug)
         .map((row) => row.slug as string));
+      const supersededBySlug = new Map(existing
+        .filter((row) => row.status === "pending" && row.disposition === "review_required" && row.evidence_source === "frontmatter_superseded" && !!row.slug)
+        .map((row) => [row.slug as string, row.proposal_id as string]));
       const reconciledExisting = e1Slugs.size === 0 ? existing : existing.map((row) => {
         if (row.status === "pending" && row.disposition === "review_required" && row.evidence_source === "frontmatter_superseded" && row.slug && e1Slugs.has(row.slug)) {
           return { ...row, status: "failed" as const, message: `${row.message ?? ""} superseded_by_edge_observed; replaced_by_E1` };
@@ -219,6 +246,10 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[]): App
       for (const row of rows) {
         const normalized = normalizeRow({ ...row, project_root: pr });
         if (!normalized) continue;
+        if (normalized.evidence_source === "frontmatter_superseded" && normalized.disposition === "execution_ready" && normalized.slug) {
+          const supersededId = supersededBySlug.get(normalized.slug);
+          if (supersededId) normalized.supersedes_proposal_id = supersededId;
+        }
         const id = proposalIdentity(normalized);
         if (seen.has(id)) continue;
         seen.add(id);

@@ -30,6 +30,7 @@ const check = (name, ok, why = "") => {
   if (ok) { pass++; console.log(`  \u2713 ${name}`); }
   else { fail++; console.log(`  \u2717 ${name}${why ? `  \u2190 ${why}` : ""}`); }
 };
+const readJsonl = (file) => fs.existsSync(file) ? fs.readFileSync(file, "utf-8").trim().split(/\n/).filter(Boolean).map((line) => JSON.parse(line)) : [];
 
 const writer = jiti(path.join(repoRoot, "extensions/sediment/writer.ts"));
 const sedSettings = jiti(path.join(repoRoot, "extensions/sediment/settings.ts"));
@@ -112,12 +113,18 @@ try {
     projectRoot,
     promoted: [{ slug, kind: "decision", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: `${slug} superseded by a newer decision`, falsifier: "if still cited" } }],
   });
-  check("proposal is pending", elp.readLifecycleProposals(projectRoot).find((p) => p.slug === slug)?.status === "pending");
+  const queued = elp.readLifecycleProposals(projectRoot).find((p) => p.slug === slug);
+  check("proposal is pending", queued?.status === "pending");
+  check("proposal carries join fields", !!queued?.proposal_id && queued.evidence_source === "aggregator_promoted_advisory" && queued.evidence_type === "superseded_by", JSON.stringify(queued));
 
   // 3) Run the REAL executor with the REAL archiveEntry closure.
   const r = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
   check("executor ran in REAL mode (dry_run=false)", r.dry_run === false, JSON.stringify({ dry_run: r.dry_run, cb: r.circuit_breaker }));
   check("executor reports the entry demoted", (r.demoted || []).includes(slug), JSON.stringify(r.demoted));
+  const ledgerRow = readJsonl(fx.forgettingDemoteLedgerPath()).find((row) => row.slug === slug);
+  check("demote ledger carries proposal/evidence join fields", ledgerRow?.proposal_id === queued?.proposal_id && ledgerRow.evidence_source === "aggregator_promoted_advisory" && ledgerRow.evidence_type === "superseded_by" && ledgerRow.idempotency_key, JSON.stringify(ledgerRow));
+  const auditRow = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
+  check("real audit carries planned/demoted proposal ids", auditRow?.schema_version === 1 && auditRow.row_kind === "real_apply" && auditRow.idempotency_key && auditRow.planned_proposal_ids?.includes(queued?.proposal_id) && auditRow.demoted_proposal_ids?.includes(queued?.proposal_id), JSON.stringify(auditRow));
 
   // 4) The REAL entry .md flipped active→archived, full body retained.
   const after = fs.readFileSync(file, "utf-8");
@@ -154,6 +161,7 @@ try {
   check("frontmatter bridge queued one E1", bridge.proposals_appended === 1 && bridge.e1_count === 1, JSON.stringify(bridge));
   const e1 = elp.readLifecycleProposals(projectRoot).find((p) => p.slug === supSlug);
   check("E1 proposal is execution_ready with expected_status=superseded", e1?.disposition === "execution_ready" && e1?.expected_status === "superseded", JSON.stringify(e1));
+  check("E1 proposal carries frontmatter join fields", !!e1?.proposal_id && e1.evidence_source === "frontmatter_superseded" && e1.evidence_type === "superseded_by", JSON.stringify(e1));
   const r3 = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
   check("executor demoted the superseded E1 entry", (r3.demoted || []).includes(supSlug), JSON.stringify(r3.demoted));
   const supAfter = fs.readFileSync(supFile, "utf-8");

@@ -41,6 +41,17 @@ function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string):
   } catch { /* best-effort */ }
 }
 
+function classifyLlmError(message: string): string {
+  const lower = message.toLowerCase();
+  if (/\b429\b/.test(lower) || lower.includes("rate_limit") || lower.includes("rate limit") || lower.includes("too many requests")) return "rate_limit";
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("abort")) return "timeout";
+  if (lower.includes("stream_read") || lower.includes("stream read") || lower.includes("connection reset")) return "stream_read";
+  if (lower.includes("json") && (lower.includes("parse") || lower.includes("invalid"))) return "json_parse";
+  if (lower.includes("model") && (lower.includes("unavailable") || lower.includes("not found") || lower.includes("does not exist"))) return "model_unavailable";
+  if (lower.includes("api") || lower.includes("provider") || lower.includes("http")) return "api_error";
+  return "unknown";
+}
+
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
   getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
@@ -960,12 +971,19 @@ async function executeSearch(
   };
   const logLlmFailure = (error: unknown, phase: "primary" | "expanded_retry"): void => {
     const message = error instanceof Error ? error.message : String(error);
+    const errorStage = inferLlmErrorStage(message);
+    const errorModelRef = errorStage === "stage2" ? settings.search.stage2Model : errorStage === "stage1" ? settings.search.stage1Model : undefined;
     logSearchMetrics({
       ts: new Date().toISOString(),
       query: query.slice(0, 80),
       outcome: "llm_error",
-      error_stage: inferLlmErrorStage(message),
+      error_stage: errorStage,
+      ...(errorModelRef ? { error_model_ref: errorModelRef } : {}),
       error_phase: phase,
+      error_type: classifyLlmError(message),
+      retry_count: phase === "expanded_retry" ? 1 : 0,
+      retry_phase: phase,
+      backoff_applied: false,
       error: message.slice(0, 500),
       search_profile: metricsProfile ?? "direct",
       stage1_model: settings.search.stage1Model,
@@ -1057,6 +1075,9 @@ async function executeSearch(
     s1: s1 ? { in: s1.input, out: s1.output, ...(s1.cacheHit != null ? { hit: s1.cacheHit } : {}), ...(s1.cacheWrite != null ? { write: s1.cacheWrite } : {}) } : null,
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     search_profile: metricsProfile ?? "direct",
+    retry_count: expanded ? 1 : 0,
+    retry_phase: expanded ? "expanded_retry" : "none",
+    backoff_applied: false,
     stage1_model: settings.search.stage1Model,
     stage2_model: settings.search.stage2Model,
     stage1_skip: settings.search.stage1Skip,
@@ -1067,6 +1088,12 @@ async function executeSearch(
     stage2_prompt_chars: result.stage2PromptChars,
     stage2_entry_chars: result.stage2EntryChars,
     stage2_prompt_tokens_est: Math.ceil(result.stage2PromptChars / 4),
+    ...(s2 ? {
+      stage2_usage_in: s2.input,
+      stage2_usage_out: s2.output,
+      ...(s2.cacheHit != null ? { stage2_usage_cache_hit: s2.cacheHit } : {}),
+      ...(s2.cacheWrite != null ? { stage2_usage_cache_write: s2.cacheWrite } : {}),
+    } : {}),
     results: result.hits.length,
     verdict: result.verdict,
     ...(lowConfidence ? { best_effort: true, best_effort_hits: bestEffortHits.length } : {}),
