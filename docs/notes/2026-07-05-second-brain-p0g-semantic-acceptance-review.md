@@ -81,6 +81,17 @@ Accepted `normalization_possible` items:
 
 Config-comments global legacy deletion/scope acceptance is deletion-only. It is not a P0G semantic review blocker.
 
+## P0H Follow-Up
+
+The two remaining P0G human decisions were later dispositioned by the user in P0H and no longer block P0G semantic acceptance.
+
+- Runtime-kill-switch was accepted as settings/runtime-governance, not as Constraint behavioral memory.
+- Sub2api was accepted as T0 semantic equivalent, with sync/release required only for core business-flow changes.
+
+See `docs/notes/2026-07-05-second-brain-p0h-human-policy-disposition.md` for the repo-only disposition record.
+
+This follow-up does not change the historical P0G review result. It only records that the two human-required semantic blockers were resolved after P0G. Runtime/convergence acceptance remains incomplete.
+
 ## Forbidden Actions
 
 This note forbids treating P0G review acceptance as authorization for:
