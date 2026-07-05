@@ -123,6 +123,10 @@ Validation:
 - `smoke:abrain-rule-injector`: 11 assertions.
 - Clean worktree isolated `smoke:constraint-shadow-compiler`: 73 assertions.
 
+## P0E Shadow Refresh Failure
+
+First P0E refresh failed validation because the LLM invented `tool_contract_not_memory` for a behavioral ToolContract cleanup event; the fix tightens the prompt gate, and no production latest/audit refresh has succeeded yet.
+
 ## Blocked Actions
 
 The following actions remain blocked by this note:
