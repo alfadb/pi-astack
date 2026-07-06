@@ -6,7 +6,8 @@ import { createConstraintEventCoverageReport, createConstraintLegacyParallelDelt
 import { scanConstraintEvidenceEvents } from "./event-scan";
 import { runConstraintCompilerWithInvoker } from "./llm-compiler";
 import { scanLegacyConstraintSources } from "./legacy-scan";
-import { buildMergedSourceVerifierLookup } from "./merged-source-verifier";
+import { runMergedSourceVerifierWithInvoker } from "./merged-source-verifier-llm";
+import { buildMergedSourceVerifierInputRows, buildMergedSourceVerifierLookup } from "./merged-source-verifier";
 import { normalizeConstraintSources, sha256Hex, stableCanonicalize } from "./normalize";
 import { buildConstraintCompilerPrompt } from "./prompt";
 import { renderConstraintShadowView } from "./render";
@@ -145,6 +146,9 @@ async function writeArtifacts(input: {
 
   await writeSet(runDir);
   await writeSet(latestDir);
+  if (!input.mergedSourceVerifier) {
+    await fs.rm(path.join(latestDir, "merged-source-verifier.json"), { force: true });
+  }
   await writeAuditLine(root, {
     schemaVersion: ARTIFACT_SCHEMA_VERSION,
     ok: input.ok,
@@ -388,6 +392,31 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
   // corpus-split shadow report (no new classification; read-only over the diff).
   const corpusSplit = buildCorpusSplitReport(diff, { inputRootHash: normalized.inputRootHash });
   const initialDiagnostics = dedupeDiagnostics(decision.diagnostics);
+  let candidateMergedSourceVerifier = options.mergedSourceVerifier;
+  const verifierDiagnostics: ConstraintShadowDiagnostic[] = [];
+  if (!candidateMergedSourceVerifier && options.generateMergedSourceVerifier) {
+    const verifierInputRows = buildMergedSourceVerifierInputRows(eventScan.events, decision);
+    if (verifierInputRows.length > 0 && !options.verifierInvoker) {
+      verifierDiagnostics.push(makeDiagnostic({
+        code: "SC_MERGED_SOURCE_VERIFIER_MODEL_UNAVAILABLE",
+        message: "constraint merged-source verifier invoker missing",
+        data: { error: "verifier invoker missing" },
+      }));
+    } else if (verifierInputRows.length > 0 && options.verifierInvoker) {
+      const generatedVerifier = await runMergedSourceVerifierWithInvoker({
+        events: eventScan.events,
+        decision,
+        invoker: options.verifierInvoker,
+        modelRef: options.verifierModelRef,
+        maxPromptChars: options.verifierMaxPromptChars,
+      });
+      if (generatedVerifier.ok) {
+        candidateMergedSourceVerifier = generatedVerifier.report;
+      } else {
+        verifierDiagnostics.push(generatedVerifier.diagnostic);
+      }
+    }
+  }
   const coverage = createConstraintEventCoverageReport({
     events: eventScan.events,
     invalidEventIds: eventScan.invalidEventIds,
@@ -395,12 +424,12 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     diagnostics: initialDiagnostics,
     staleAfterMs: options.eventStaleAfterMs ?? DEFAULT_EVENT_STALE_AFTER_MS,
     nowMs: options.nowMs,
-    mergedSourceVerifier: options.mergedSourceVerifier,
+    mergedSourceVerifier: candidateMergedSourceVerifier,
   });
   const legacyParallelDelta = createConstraintLegacyParallelDeltaReport({ events: eventScan.events, decision });
-  const mergedSourceVerifierLookup = buildMergedSourceVerifierLookup({ events: eventScan.events, decision, verifier: options.mergedSourceVerifier });
-  const validatedMergedSourceVerifier = mergedSourceVerifierLookup.reportStatus === "valid" ? options.mergedSourceVerifier : undefined;
-  const allDiagnostics = dedupeDiagnostics([...initialDiagnostics, ...retryDiagnostics, ...coverage.diagnostics, ...legacyParallelDelta.diagnostics]);
+  const mergedSourceVerifierLookup = buildMergedSourceVerifierLookup({ events: eventScan.events, decision, verifier: candidateMergedSourceVerifier });
+  const validatedMergedSourceVerifier = mergedSourceVerifierLookup.reportStatus === "valid" ? candidateMergedSourceVerifier : undefined;
+  const allDiagnostics = dedupeDiagnostics([...initialDiagnostics, ...retryDiagnostics, ...verifierDiagnostics, ...coverage.diagnostics, ...legacyParallelDelta.diagnostics]);
   const artifactResult = options.writeArtifacts ? await writeArtifacts({
     abrainHome: options.abrainHome,
     artifactRoot: options.artifactRoot,

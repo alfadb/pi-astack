@@ -285,6 +285,17 @@ export interface ConstraintCompilerPrompt {
   recordCount: number;
 }
 
+export interface ConstraintMergedSourceVerifierPrompt {
+  schemaVersion: "constraint-merged-source-verifier-prompt/v1";
+  inputRootHash: string;
+  decisionValidationHash: string;
+  decisionHash: string;
+  verifierInputHash: string;
+  promptHash: string;
+  text: string;
+  rowCount: number;
+}
+
 export interface ConstraintCompilerInvokeRequest {
   prompt: ConstraintCompilerPrompt;
   modelRef?: string;
@@ -304,6 +315,26 @@ export type ConstraintCompilerInvokeResult = {
 };
 
 export type ConstraintCompilerInvoker = (request: ConstraintCompilerInvokeRequest) => Promise<ConstraintCompilerInvokeResult>;
+
+export interface ConstraintMergedSourceVerifierInvokeRequest {
+  prompt: ConstraintMergedSourceVerifierPrompt;
+  modelRef?: string;
+  signal?: AbortSignal;
+}
+
+export type ConstraintMergedSourceVerifierInvokeResult = {
+  ok: true;
+  text: string;
+  modelRef?: string;
+  durationMs?: number;
+} | {
+  ok: false;
+  error: string;
+  modelRef?: string;
+  durationMs?: number;
+};
+
+export type ConstraintMergedSourceVerifierInvoker = (request: ConstraintMergedSourceVerifierInvokeRequest) => Promise<ConstraintMergedSourceVerifierInvokeResult>;
 
 export type ParsedConstraintCompilerDecision = {
   ok: true;
@@ -330,6 +361,45 @@ export type ConstraintCompilerRunResult = {
 } | {
   ok: false;
   prompt: ConstraintCompilerPrompt;
+  diagnostic: ConstraintShadowDiagnostic;
+  rawOutput?: string;
+  rawOutputHash?: string;
+  modelRef?: string;
+  durationMs?: number;
+};
+
+export type ParsedConstraintMergedSourceVerifierOutput = {
+  ok: true;
+  rows: Array<{
+    eventId: string;
+    sourceRecordId: string;
+    targetConstraintId: string;
+    verdict: "expressed" | "not_expressed" | "uncertain";
+    confidence: ConstraintMergedSourceVerifierConfidence;
+    reasoning: string;
+  }>;
+  rawOutput: string;
+  rawOutputHash: string;
+  parsedOutputHash: string;
+} | {
+  ok: false;
+  diagnostic: ConstraintShadowDiagnostic;
+  rawOutput: string;
+  rawOutputHash: string;
+};
+
+export type ConstraintMergedSourceVerifierRunResult = {
+  ok: true;
+  prompt: ConstraintMergedSourceVerifierPrompt;
+  report: ConstraintMergedSourceVerifierReport;
+  rawOutput: string;
+  rawOutputHash: string;
+  parsedOutputHash: string;
+  modelRef?: string;
+  durationMs?: number;
+} | {
+  ok: false;
+  prompt?: ConstraintMergedSourceVerifierPrompt;
   diagnostic: ConstraintShadowDiagnostic;
   rawOutput?: string;
   rawOutputHash?: string;
@@ -390,6 +460,14 @@ export interface ConstraintMergedSourceVerifierSummary {
   staleBindingRows?: number;
 }
 
+export interface ConstraintMergedSourceVerifierGeneratorMetadata {
+  modelRef?: string;
+  promptHash?: string;
+  rawOutputHash?: string;
+  parsedOutputHash?: string;
+  durationMs?: number;
+}
+
 export interface ConstraintMergedSourceVerifierReport {
   schemaVersion: "constraint-merged-source-verifier/v1";
   inputRootHash: string;
@@ -398,6 +476,7 @@ export interface ConstraintMergedSourceVerifierReport {
   verifierInputHash: string;
   summary: ConstraintMergedSourceVerifierSummary;
   rows: ConstraintMergedSourceVerifierRow[];
+  generator?: ConstraintMergedSourceVerifierGeneratorMetadata;
 }
 
 export interface ConstraintEventCoverageReport {
@@ -478,6 +557,10 @@ export interface ConstraintShadowRunOptions {
   eventStaleAfterMs?: number;
   nowMs?: number;
   mergedSourceVerifier?: ConstraintMergedSourceVerifierReport;
+  generateMergedSourceVerifier?: boolean;
+  verifierInvoker?: ConstraintMergedSourceVerifierInvoker;
+  verifierModelRef?: string;
+  verifierMaxPromptChars?: number;
   // ADR0039 Constraint L2 (NS-2/FIX-1): when "repo", 固化 the validated decision
   // as an immutable L1 projection event and render the deterministic L2 view to
   // git-tracked l2/views/constraint/ (SHADOW; injection still reads .state).
@@ -553,6 +636,8 @@ export type ConstraintShadowDiagnosticCode =
   | "SC_COMPILER_MODEL_UNAVAILABLE"
   | "SC_COMPILER_PARSE_FAILED"
   | "SC_COMPILER_VALIDATION_FAILED"
+  | "SC_MERGED_SOURCE_VERIFIER_PARSE_FAILED"
+  | "SC_MERGED_SOURCE_VERIFIER_MODEL_UNAVAILABLE"
   | "SC_COMPILER_RETRY_ATTEMPT"
   | "SC_COMPILER_ITEM_REJECTED"
   | "SC_EXCLUSION_REASON_RECLASSIFIED"

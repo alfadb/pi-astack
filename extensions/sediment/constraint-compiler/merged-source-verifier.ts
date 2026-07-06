@@ -2,6 +2,7 @@ import { sha256Hex, stableCanonicalize } from "./normalize";
 import type {
   ConstraintDecisionConstraint,
   ConstraintEventSourceRecord,
+  ConstraintMergedSourceVerifierGeneratorMetadata,
   ConstraintMergedSourceVerifierReport,
   ConstraintMergedSourceVerifierRow,
   ValidatedConstraint,
@@ -13,6 +14,28 @@ export type ConstraintMergedSourceVerifierReportStatus = "absent" | "valid" | "s
 export interface ConstraintMergedSourceVerifierLookup {
   reportStatus: ConstraintMergedSourceVerifierReportStatus;
   rowBySourceRecordId: Map<string, ConstraintMergedSourceVerifierRow>;
+}
+
+export interface ConstraintMergedSourceVerifierInputRow {
+  eventId: string;
+  sourceRecordId: string;
+  eventBodyHash: string;
+  eventText: string;
+  targetConstraintId: string;
+  targetContentHash: string;
+  targetTitle: string;
+  targetCompiledBody: string;
+  targetTriggerPhrases: string[];
+  mergeReason: string;
+}
+
+export interface ConstraintMergedSourceVerifierVerdictRow {
+  eventId: string;
+  sourceRecordId: string;
+  targetConstraintId: string;
+  verdict: ConstraintMergedSourceVerifierRow["verdict"];
+  confidence: ConstraintMergedSourceVerifierRow["confidence"];
+  reasoning: string;
 }
 
 const SCHEMA_VERSION: ConstraintMergedSourceVerifierReport["schemaVersion"] = "constraint-merged-source-verifier/v1";
@@ -35,7 +58,20 @@ export function mergedSourceVerifierDecisionHash(decision: ValidatedConstraintCo
   return sha256Hex(stableCanonicalize(decision));
 }
 
-function verifierInputRows(events: ConstraintEventSourceRecord[], decision: ValidatedConstraintCompilerDecision): unknown[] {
+function eventTextForVerifier(event: ConstraintEventSourceRecord): string {
+  return [
+    event.sanitizedQuote,
+    event.candidateTitle ?? "",
+    event.candidateText,
+    event.candidateAppliesWhen ?? "",
+    ...event.candidateTriggerPhrases,
+  ].filter((part) => part.trim()).join("\n");
+}
+
+export function buildMergedSourceVerifierInputRows(
+  events: ConstraintEventSourceRecord[],
+  decision: ValidatedConstraintCompilerDecision,
+): ConstraintMergedSourceVerifierInputRow[] {
   const eventBySourceId = new Map(events.map((event) => [event.sourceId, event]));
   const constraintById = new Map(decision.constraints.map((constraint) => [constraint.constraintId, constraint]));
   return decision.merges
@@ -48,8 +84,13 @@ function verifierInputRows(events: ConstraintEventSourceRecord[], decision: Vali
           eventId: event.eventId,
           sourceRecordId,
           eventBodyHash: event.bodyHash,
+          eventText: eventTextForVerifier(event),
           targetConstraintId: target.constraintId,
           targetContentHash: targetContentHashForConstraint(target),
+          targetTitle: target.title,
+          targetCompiledBody: target.compiledBody,
+          targetTriggerPhrases: target.triggerPhrases?.slice().sort() ?? [],
+          mergeReason: merge.reason,
         }));
       });
     })
@@ -62,7 +103,7 @@ export function mergedSourceVerifierInputHash(events: ConstraintEventSourceRecor
     inputRootHash: decision.inputRootHash,
     decisionValidationHash: decision.validationHash,
     decisionHash: mergedSourceVerifierDecisionHash(decision),
-    rows: verifierInputRows(events, decision),
+    rows: buildMergedSourceVerifierInputRows(events, decision),
   }));
 }
 
@@ -115,6 +156,64 @@ function optionalNonNegativeNumber(value: unknown): boolean {
   return value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0);
 }
 
+export function createMergedSourceVerifierReport(input: {
+  events: ConstraintEventSourceRecord[];
+  decision: ValidatedConstraintCompilerDecision;
+  verdictRows: ConstraintMergedSourceVerifierVerdictRow[];
+  invalidRows?: number;
+  generator?: ConstraintMergedSourceVerifierGeneratorMetadata;
+}): ConstraintMergedSourceVerifierReport {
+  const inputRowsByKey = new Map(buildMergedSourceVerifierInputRows(input.events, input.decision)
+    .map((row) => [`${row.sourceRecordId}\0${row.targetConstraintId}`, row]));
+  const rows: ConstraintMergedSourceVerifierRow[] = [];
+  for (const verdictRow of input.verdictRows) {
+    const inputRow = inputRowsByKey.get(`${verdictRow.sourceRecordId}\0${verdictRow.targetConstraintId}`);
+    if (!inputRow || inputRow.eventId !== verdictRow.eventId) continue;
+    rows.push({
+      eventId: inputRow.eventId,
+      sourceRecordId: inputRow.sourceRecordId,
+      eventBodyHash: inputRow.eventBodyHash,
+      targetConstraintId: inputRow.targetConstraintId,
+      targetContentHash: inputRow.targetContentHash,
+      verdict: verdictRow.verdict,
+      confidence: verdictRow.confidence,
+      reasoning: verdictRow.reasoning,
+    });
+  }
+  rows.sort((left, right) => stableCanonicalize(left).localeCompare(stableCanonicalize(right)));
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    inputRootHash: input.decision.inputRootHash,
+    decisionValidationHash: input.decision.validationHash,
+    decisionHash: mergedSourceVerifierDecisionHash(input.decision),
+    verifierInputHash: mergedSourceVerifierInputHash(input.events, input.decision),
+    summary: {
+      totalRows: rows.length,
+      expressedRows: rows.filter((row) => row.verdict === "expressed").length,
+      notExpressedRows: rows.filter((row) => row.verdict === "not_expressed").length,
+      uncertainRows: rows.filter((row) => row.verdict === "uncertain").length,
+      ...(input.invalidRows ? { invalidRows: input.invalidRows } : {}),
+    },
+    rows,
+    ...(input.generator ? { generator: input.generator } : {}),
+  };
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function reportGeneratorIsValid(generator: unknown): boolean {
+  if (generator === undefined) return true;
+  if (!generator || typeof generator !== "object" || Array.isArray(generator)) return false;
+  const value = generator as ConstraintMergedSourceVerifierGeneratorMetadata;
+  return optionalString(value.modelRef)
+    && optionalString(value.promptHash)
+    && optionalString(value.rawOutputHash)
+    && optionalString(value.parsedOutputHash)
+    && optionalNonNegativeNumber(value.durationMs);
+}
+
 function reportSummaryIsValid(verifier: ConstraintMergedSourceVerifierReport): boolean {
   if (!Array.isArray(verifier.rows)) return false;
   const summary = verifier.summary;
@@ -127,7 +226,8 @@ function reportSummaryIsValid(verifier: ConstraintMergedSourceVerifierReport): b
     && summary.notExpressedRows === notExpressedRows
     && summary.uncertainRows === uncertainRows
     && optionalNonNegativeNumber(summary.invalidRows)
-    && optionalNonNegativeNumber(summary.staleBindingRows);
+    && optionalNonNegativeNumber(summary.staleBindingRows)
+    && reportGeneratorIsValid(verifier.generator);
 }
 
 function reportBindingIsValid(input: {

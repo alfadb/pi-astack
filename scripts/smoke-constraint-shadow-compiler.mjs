@@ -102,6 +102,8 @@ for (const file of [
   "extensions/sediment/constraint-compiler/legacy-scan.ts",
   "extensions/sediment/constraint-compiler/event-scan.ts",
   "extensions/sediment/constraint-compiler/merged-source-verifier.ts",
+  "extensions/sediment/constraint-compiler/merged-source-verifier-prompt.ts",
+  "extensions/sediment/constraint-compiler/merged-source-verifier-llm.ts",
   "extensions/sediment/constraint-compiler/event-report.ts",
   "extensions/sediment/constraint-compiler/validate-decision.ts",
   "extensions/sediment/constraint-compiler/render.ts",
@@ -117,7 +119,9 @@ for (const file of [
   stageTs(outRoot, file);
 }
 writeFile(path.join(outRoot, "_shared", "llm-audit.js"), `
-exports.auditStreamSimple = async function auditStreamSimple(_projectRoot, _meta, piAi, model, opts, config) {
+exports.lastAuditMeta = null;
+exports.auditStreamSimple = async function auditStreamSimple(_projectRoot, meta, piAi, model, opts, config) {
+  exports.lastAuditMeta = meta;
   return piAi.streamSimple(model, opts, config).result();
 };
 `);
@@ -131,10 +135,12 @@ const { renderConstraintShadowView } = require(path.join(outRoot, "sediment", "c
 const { createConstraintDiffReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "diff.js"));
 const { scanConstraintEvidenceEvents } = require(path.join(outRoot, "sediment", "constraint-compiler", "event-scan.js"));
 const { createConstraintEventCoverageReport, createConstraintLegacyParallelDeltaReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "event-report.js"));
-const { mergedSourceVerifierDecisionHash, mergedSourceVerifierInputHash, targetContentHashForConstraint } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier.js"));
+const { buildMergedSourceVerifierInputRows, createMergedSourceVerifierReport, mergedSourceVerifierDecisionHash, mergedSourceVerifierInputHash, targetContentHashForConstraint } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier.js"));
+const { buildMergedSourceVerifierPrompt } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier-prompt.js"));
+const { parseMergedSourceVerifierOutput, runMergedSourceVerifierWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier-llm.js"));
 const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment", "constraint-compiler", "prompt.js"));
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
-const { createPiAiConstraintCompilerInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
+const { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
 const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, selectLatestConstraintProjectionEventId } = require(path.join(outRoot, "sediment", "constraint-compiler", "projection.js"));
 const { renderConstraintL2View } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
@@ -1645,6 +1651,7 @@ check("merged_source verifier sidecar deterministically projects only valid expr
     diagnostics: [],
   });
   const validationHashBefore = decision.validationHash;
+  const markdownBefore = renderConstraintShadowView(decision).markdown;
   const target = decision.constraints[0];
   const report = (rows, summaryOverrides = {}) => ({
     schemaVersion: "constraint-merged-source-verifier/v1",
@@ -1694,6 +1701,17 @@ check("merged_source verifier sidecar deterministically projects only valid expr
   assert(expressedRow?.coverageDisposition?.verifierConfidence === "medium", "expressed verifier confidence missing");
   assert(expressedRow?.coverageDisposition?.verifierInputHash === report([]).verifierInputHash, "expressed verifier input hash missing");
   assert(decision.validationHash === validationHashBefore, "coverage verifier changed decision validationHash");
+  assert(renderConstraintShadowView(decision).markdown === markdownBefore, "coverage verifier changed compiled-view markdown");
+
+  const lowConfidenceExpressed = createConstraintEventCoverageReport({
+    events, decision, diagnostics: decision.diagnostics,
+    staleAfterMs: 60 * 60 * 1000, nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+    mergedSourceVerifier: report([row("expressed", "low")]),
+  });
+  const lowConfidenceExpressedRow = lowConfidenceExpressed.report.rows.find((item) => item.sourceRecordId === mergedEvent.sourceId);
+  assert(lowConfidenceExpressedRow?.coverageDisposition?.kind === "deferred_merged_source", "low-confidence expressed row should remain deferred");
+  assert(lowConfidenceExpressedRow?.coverageDisposition?.verifierVerdict === "expressed", "low-confidence expressed verdict missing");
+  assert(lowConfidenceExpressedRow?.coverageDisposition?.verifierConfidence === "low", "low-confidence expressed confidence missing");
 
   const notExpressed = createConstraintEventCoverageReport({
     events, decision, diagnostics: decision.diagnostics,
@@ -1876,6 +1894,46 @@ check("pi-ai invoker uses registry auth and extracts text", async () => {
   const prompt = buildConstraintCompilerPrompt({ normalized });
   const result = await invoker({ prompt });
   assert(result.ok && result.text === "{\"ok\":true}", "text result not extracted");
+});
+
+check("pi-ai verifier invoker uses audit operation and extracts text", async () => {
+  const mergedEvent = eventSource({
+    sourceId: "event:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    eventId: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    candidateText: "Use edit/write.",
+    bodyHash: "f".repeat(64),
+  });
+  const events = [mergedEvent];
+  const localDecision = validateConstraintCompilerDecision(events, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: normalizeConstraintSources(events).inputRootHash,
+    constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit/write", compiledBody: "Use edit/write.", triggerPhrases: ["edit/write"], sourceRecordIds: [mergedEvent.sourceId] }],
+    exclusions: [], unresolved: [], merges: [{ sourceRecordIds: [mergedEvent.sourceId], reason: "fixture merge" }], rescopeProposals: [],
+    mappings: [{ sourceRecordId: mergedEvent.sourceId, disposition: "merged_source" }],
+    diagnostics: [],
+  });
+  const invoker = createPiAiMergedSourceVerifierInvoker({
+    modelRegistry: {
+      find(provider, modelId) {
+        assert(provider === "test" && modelId === "verifier", "verifier model ref not parsed");
+        return { provider, id: modelId };
+      },
+      async getApiKeyAndHeaders() { return { ok: true, apiKey: "secret" }; },
+    },
+    defaultModelRef: "test/verifier",
+    streamSimpleImpl: {
+      streamSimple(_model, opts, config) {
+        assert(config.apiKey === "secret", "verifier api key not forwarded");
+        assert(opts.messages[0].content[0].text.includes("Constraint Merged Source Verifier"), "verifier prompt text missing");
+        return { result: async () => ({ content: [{ type: "text", text: "{\"rows\":[]}" }] }) };
+      },
+    },
+  });
+  const prompt = buildMergedSourceVerifierPrompt({ events, decision: localDecision });
+  const result = await invoker({ prompt });
+  const audit = require(path.join(outRoot, "_shared", "llm-audit.js"));
+  assert(result.ok && result.text === "{\"rows\":[]}", "verifier text result not extracted");
+  assert(audit.lastAuditMeta?.operation === "constraint_merged_source_verifier", "verifier audit operation missing");
 });
 
 check("pi-ai invoker fails closed on missing model", async () => {
@@ -2068,16 +2126,212 @@ check("shadow runner reads L1 events and writes event coverage artifacts", async
   assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "fixture-event-run-with-verifier", "merged-source-verifier.json")), "run merged-source verifier artifact missing");
   const latestVerifier = JSON.parse(fs.readFileSync(latestVerifierPath, "utf8"));
   assert(latestVerifier.verifierInputHash === mergedSourceVerifier.verifierInputHash, "latest verifier artifact content mismatch");
-  const latestVerifierBytes = fs.readFileSync(latestVerifierPath, "utf8");
   const failedAfterSuccess = await runConstraintShadowCompiler({
     ...baseRunOptions,
-    runId: "fixture-event-run-with-verifier-failed-after-success",
-    mergedSourceVerifier,
+    runId: "fixture-event-run-without-verifier-failed-after-success",
     compilerInvoker: async () => ({ ok: false, error: "offline fixture failure" }),
   });
   assert(!failedAfterSuccess.ok, "runner post-success failure fixture unexpectedly succeeded");
-  assert(fs.readFileSync(latestVerifierPath, "utf8") === latestVerifierBytes, "failure run rewrote latest merged-source verifier artifact");
-  assert(!fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "fixture-event-run-with-verifier-failed-after-success", "merged-source-verifier.json")), "post-success failure run wrote run merged-source verifier artifact");
+  assert(!fs.existsSync(latestVerifierPath), "failure without valid sidecar did not clear latest merged-source verifier artifact");
+  assert(!fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "fixture-event-run-without-verifier-failed-after-success", "merged-source-verifier.json")), "post-success failure run wrote run merged-source verifier artifact");
+});
+
+function extractVerifierPromptRow(promptText) {
+  const last = (pattern) => {
+    const matches = [...promptText.matchAll(pattern)];
+    return matches[matches.length - 1]?.[1];
+  };
+  const eventId = last(/"eventId":"([^"]+)"/g);
+  const sourceRecordId = last(/"sourceRecordId":"([^"]+)"/g);
+  const targetConstraintId = last(/"targetConstraintId":"([^"]+)"/g);
+  assert(eventId && sourceRecordId && targetConstraintId, "verifier prompt row binding missing");
+  return { eventId, sourceRecordId, targetConstraintId };
+}
+
+function mergedSourceRunnerDecisionText(eventSourceId) {
+  return JSON.stringify({
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: "ignored-by-parser",
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Use edit/write",
+      compiledBody: "修改文件必须用 edit/write，禁止 sed -i。",
+      triggerPhrases: ["edit/write"],
+      sourceRecordIds: ["rule:global:always:use-edit-not-sed", eventSourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [{ sourceRecordIds: [eventSourceId], reason: "runner generated verifier fixture" }],
+    rescopeProposals: [],
+    mappings: [
+      { sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" },
+      { sourceRecordId: eventSourceId, disposition: "merged_source" },
+    ],
+    diagnostics: [],
+  });
+}
+
+async function runMergedSourceGeneratorFixture(input = {}) {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-verifier-gen-"));
+  writeFile(path.join(abrainHome, "rules/always/use-edit-not-sed.md"), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write，禁止 sed -i。\n");
+  const event = writeConstraintEvidenceEvent(abrainHome, {
+    session_id: input.sessionId ?? `verifier-${input.runId ?? "run"}`,
+    turn_id: "turn",
+    created_at_utc: "2026-06-19T00:00:00.000Z",
+    legacy_parallel_write: { attempted: false, legacy_operation_hint: "none" },
+  });
+  const eventSourceId = `event:${event.event_id}`;
+  const base = {
+    abrainHome,
+    cwd: repoRoot,
+    includeProjects: [],
+    includeStatuses: "all",
+    knownProjectIds: ["pi-astack"],
+    writeArtifacts: true,
+    nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+    runId: input.runId ?? "generated-verifier-run",
+    compilerInvoker: async () => ({ ok: true, text: mergedSourceRunnerDecisionText(eventSourceId) }),
+  };
+  const result = await runConstraintShadowCompiler({
+    ...base,
+    generateMergedSourceVerifier: input.generateMergedSourceVerifier ?? true,
+    ...(input.verifierInvoker !== undefined ? { verifierInvoker: input.verifierInvoker } : {}),
+    ...(input.verifierModelRef !== undefined ? { verifierModelRef: input.verifierModelRef } : {}),
+  });
+  return { abrainHome, eventSourceId, result, latestVerifierPath: path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "merged-source-verifier.json") };
+}
+
+check("merged-source verifier prompt/parse/run builds expressed report with local hashes", async () => {
+  const mergedEvent = eventSource({
+    sourceId: "event:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    eventId: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    candidateText: "修改文件必须用 edit/write。",
+    bodyHash: "e".repeat(64),
+  });
+  const events = [mergedEvent];
+  const localDecision = validateConstraintCompilerDecision(events, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: normalizeConstraintSources(events).inputRootHash,
+    constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit/write", compiledBody: "修改文件必须用 edit/write。", triggerPhrases: ["edit/write"], sourceRecordIds: [mergedEvent.sourceId] }],
+    exclusions: [], unresolved: [], merges: [{ sourceRecordIds: [mergedEvent.sourceId], reason: "fixture merge" }], rescopeProposals: [],
+    mappings: [{ sourceRecordId: mergedEvent.sourceId, disposition: "merged_source" }],
+    diagnostics: [],
+  });
+  const inputRows = buildMergedSourceVerifierInputRows(events, localDecision);
+  assert(inputRows.length === 1, "verifier input row missing");
+  const prompt = buildMergedSourceVerifierPrompt({ events, decision: localDecision });
+  assert(prompt.schemaVersion === "constraint-merged-source-verifier-prompt/v1", "wrong verifier prompt schema");
+  assert(prompt.verifierInputHash === mergedSourceVerifierInputHash(events, localDecision), "prompt verifier input hash mismatch");
+  assert(prompt.promptHash === sha256Hex(prompt.text), "promptHash not sha256(text)");
+  assert(prompt.rowCount === 1 && prompt.text.includes("Return JSON only") && prompt.text.includes("Do not output hashes"), "verifier prompt instructions missing");
+  const modelRow = { eventId: inputRows[0].eventId, sourceRecordId: inputRows[0].sourceRecordId, targetConstraintId: inputRows[0].targetConstraintId, verdict: "expressed", confidence: "medium", reasoning: "event text is present" };
+  const parsed = parseMergedSourceVerifierOutput(`\`\`\`json\n${JSON.stringify({ rows: [modelRow] })}\n\`\`\``, { prompt, events, decision: localDecision });
+  assert(parsed.ok && parsed.rows[0].verdict === "expressed", "verifier parser rejected expressed row");
+  const report = createMergedSourceVerifierReport({ events, decision: localDecision, verdictRows: parsed.rows });
+  assert(report.rows[0].eventBodyHash === mergedEvent.bodyHash, "report did not use local event body hash");
+  assert(report.rows[0].targetContentHash === targetContentHashForConstraint(localDecision.constraints[0]), "report did not use local target content hash");
+  const run = await runMergedSourceVerifierWithInvoker({
+    events,
+    decision: localDecision,
+    invoker: async ({ prompt }) => ({ ok: true, text: JSON.stringify({ rows: [{ ...extractVerifierPromptRow(prompt.text), verdict: "expressed", confidence: "medium", reasoning: "fixture" }] }) }),
+  });
+  assert(run.ok && run.report.summary.expressedRows === 1, "verifier invoker run did not produce expressed report");
+});
+
+check("shadow runner generator expressed writes sidecar and projects via verifier", async () => {
+  const baseline = await runMergedSourceGeneratorFixture({ generateMergedSourceVerifier: false, runId: "generator-baseline", sessionId: "generator-same-input" });
+  assert(baseline.result.ok && !baseline.result.mergedSourceVerifier, "baseline unexpectedly produced verifier");
+  const generated = await runMergedSourceGeneratorFixture({
+    runId: "generator-expressed",
+    sessionId: "generator-same-input",
+    verifierModelRef: "fixture-verifier-model",
+    verifierInvoker: async ({ prompt, modelRef }) => ({ ok: true, modelRef, durationMs: 12, text: JSON.stringify({ rows: [{ ...extractVerifierPromptRow(prompt.text), verdict: "expressed", confidence: "medium", reasoning: "target expresses event" }] }) }),
+  });
+  assert(generated.result.ok, "generated verifier run failed");
+  assert(generated.result.ok && generated.result.mergedSourceVerifier?.summary.expressedRows === 1, "generated verifier sidecar missing");
+  assert(generated.result.ok && generated.result.eventCoverage?.rows.some((row) => row.coverageDisposition?.kind === "projected_via_verifier"), "coverage did not project via verifier");
+  assert(fs.existsSync(generated.latestVerifierPath), "generated verifier artifact missing");
+  assert(generated.result.ok && generated.result.mergedSourceVerifier.decisionValidationHash === generated.result.decision.validationHash, "verifier decisionValidationHash mismatch");
+  const latestVerifier = JSON.parse(fs.readFileSync(generated.latestVerifierPath, "utf8"));
+  assert(latestVerifier.generator?.modelRef === "fixture-verifier-model", "generated verifier metadata modelRef missing");
+  assert(typeof latestVerifier.generator?.promptHash === "string" && latestVerifier.generator.promptHash.length === 64, "generated verifier metadata promptHash missing");
+  assert(typeof latestVerifier.generator?.rawOutputHash === "string" && latestVerifier.generator.rawOutputHash.length === 64, "generated verifier metadata rawOutputHash missing");
+  assert(typeof latestVerifier.generator?.parsedOutputHash === "string" && latestVerifier.generator.parsedOutputHash.length === 64, "generated verifier metadata parsedOutputHash missing");
+  assert(latestVerifier.generator?.durationMs === 12, "generated verifier metadata durationMs missing");
+});
+
+check("shadow runner generator not_expressed writes sidecar but remains deferred", async () => {
+  const generated = await runMergedSourceGeneratorFixture({
+    runId: "generator-not-expressed",
+    verifierInvoker: async ({ prompt }) => ({ ok: true, text: JSON.stringify({ rows: [{ ...extractVerifierPromptRow(prompt.text), verdict: "not_expressed", confidence: "high", reasoning: "target omits event" }] }) }),
+  });
+  assert(generated.result.ok && generated.result.mergedSourceVerifier?.summary.notExpressedRows === 1, "not_expressed verifier sidecar missing");
+  const row = generated.result.ok && generated.result.eventCoverage?.rows.find((item) => item.sourceRecordId === generated.eventSourceId);
+  assert(row && row.coverageDisposition?.kind === "deferred_merged_source", "not_expressed row should remain deferred");
+  assert(generated.result.ok && generated.result.diagnostics.some((diagnostic) => diagnostic.code === "SC_MERGED_SOURCE_VERIFIER_NOT_EXPRESSED"), "not_expressed diagnostic missing");
+});
+
+check("shadow runner generator parse failure is ok:true and absent", async () => {
+  const generated = await runMergedSourceGeneratorFixture({
+    runId: "generator-parse-failure",
+    verifierInvoker: async () => ({ ok: true, text: "not-json" }),
+  });
+  assert(generated.result.ok, "parse failure should not fail runner");
+  assert(generated.result.ok && !generated.result.mergedSourceVerifier, "parse failure returned verifier sidecar");
+  assert(generated.result.ok && generated.result.eventCoverage?.rows.some((row) => row.coverageDisposition?.kind === "deferred_merged_source"), "parse failure did not remain deferred");
+  assert(generated.result.ok && generated.result.diagnostics.some((diagnostic) => diagnostic.code === "SC_MERGED_SOURCE_VERIFIER_PARSE_FAILED"), "parse failure diagnostic missing");
+  assert(!fs.existsSync(generated.latestVerifierPath), "parse failure wrote verifier artifact");
+});
+
+check("shadow runner generator model unavailable and missing invoker are ok:true and absent", async () => {
+  const unavailable = await runMergedSourceGeneratorFixture({
+    runId: "generator-model-unavailable",
+    verifierInvoker: async () => ({ ok: false, error: "offline verifier unavailable" }),
+  });
+  assert(unavailable.result.ok && !unavailable.result.mergedSourceVerifier, "model unavailable returned verifier sidecar");
+  assert(unavailable.result.ok && unavailable.result.diagnostics.some((diagnostic) => diagnostic.code === "SC_MERGED_SOURCE_VERIFIER_MODEL_UNAVAILABLE"), "model unavailable diagnostic missing");
+  assert(!fs.existsSync(unavailable.latestVerifierPath), "model unavailable wrote verifier artifact");
+
+  const missing = await runMergedSourceGeneratorFixture({ runId: "generator-missing-invoker" });
+  assert(missing.result.ok && !missing.result.mergedSourceVerifier, "missing invoker returned verifier sidecar");
+  assert(missing.result.ok && missing.result.diagnostics.some((diagnostic) => diagnostic.code === "SC_MERGED_SOURCE_VERIFIER_MODEL_UNAVAILABLE" && diagnostic.data?.error === "verifier invoker missing"), "missing invoker diagnostic missing");
+  assert(!fs.existsSync(missing.latestVerifierPath), "missing invoker wrote verifier artifact");
+});
+
+check("shadow runner generator with no merged rows does not require verifier invoker", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-verifier-empty-"));
+  writeFile(path.join(abrainHome, "rules/always/use-edit-not-sed.md"), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write，禁止 sed -i。\n");
+  const result = await runConstraintShadowCompiler({
+    abrainHome,
+    cwd: repoRoot,
+    includeProjects: [],
+    includeStatuses: "all",
+    knownProjectIds: ["pi-astack"],
+    writeArtifacts: true,
+    runId: "generator-no-merged-rows",
+    generateMergedSourceVerifier: true,
+    compilerInvoker: async () => ({ ok: true, text: JSON.stringify({
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: "ignored-by-parser",
+      constraints: [{
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "Use edit/write",
+        compiledBody: "修改文件必须用 edit/write，禁止 sed -i。",
+        sourceRecordIds: ["rule:global:always:use-edit-not-sed"],
+      }],
+      exclusions: [],
+      unresolved: [],
+      merges: [],
+      rescopeProposals: [],
+      mappings: [{ sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" }],
+      diagnostics: [],
+    }) }),
+  });
+  assert(result.ok, "no merged rows generator run failed");
+  assert(result.ok && !result.diagnostics.some((diagnostic) => diagnostic.code === "SC_MERGED_SOURCE_VERIFIER_MODEL_UNAVAILABLE"), "no merged rows emitted verifier unavailable diagnostic");
+  assert(!fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "merged-source-verifier.json")), "no merged rows wrote verifier artifact");
 });
 
 check("repo-mode 固化s decision to immutable L1 + renders deterministic git L2 (round-trip + idempotent); state-mode is a no-op (ADR0039 NS-2/FIX-1)", async () => {

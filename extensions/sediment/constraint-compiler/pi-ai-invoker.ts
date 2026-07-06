@@ -1,6 +1,10 @@
 import type {
   ConstraintCompilerInvokeResult,
   ConstraintCompilerInvoker,
+  ConstraintCompilerPrompt,
+  ConstraintMergedSourceVerifierInvokeResult,
+  ConstraintMergedSourceVerifierInvoker,
+  ConstraintMergedSourceVerifierPrompt,
 } from "./types";
 import { auditStreamSimple } from "../../_shared/llm-audit";
 
@@ -31,15 +35,16 @@ function extractText(content: Array<{ type: string; text?: string }> | undefined
     .trim();
 }
 
-export function createPiAiConstraintCompilerInvoker(input: {
+function createPiAiTextInvoker<Prompt extends ConstraintCompilerPrompt | ConstraintMergedSourceVerifierPrompt>(input: {
   modelRegistry: ModelRegistryLike;
   defaultModelRef: string;
   timeoutMs?: number;
   maxRetries?: number;
   streamSimpleImpl?: StreamSimpleLike;
   projectRoot?: string;
-}): ConstraintCompilerInvoker {
-  return async (request): Promise<ConstraintCompilerInvokeResult> => {
+  auditOperation: "constraint_compiler" | "constraint_merged_source_verifier";
+}): (request: { prompt: Prompt; modelRef?: string; signal?: AbortSignal }) => Promise<ConstraintCompilerInvokeResult | ConstraintMergedSourceVerifierInvokeResult> {
+  return async (request) => {
     const modelRef = request.modelRef || input.defaultModelRef;
     const started = Date.now();
     const parsed = parseModelRef(modelRef);
@@ -60,7 +65,7 @@ export function createPiAiConstraintCompilerInvoker(input: {
     const piAi: StreamSimpleLike = input.streamSimpleImpl ?? await import("@earendil-works/pi-ai/compat") as StreamSimpleLike;
     const result = await auditStreamSimple(
       input.projectRoot ?? process.cwd(),
-      { module: "sediment", operation: "constraint_compiler", model_ref: modelRef, prompt_chars: request.prompt.text.length },
+      { module: "sediment", operation: input.auditOperation, model_ref: modelRef, prompt_chars: request.prompt.text.length },
       piAi,
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: request.prompt.text }] }] },
@@ -84,4 +89,26 @@ export function createPiAiConstraintCompilerInvoker(input: {
 
     return { ok: true, text, modelRef, durationMs };
   };
+}
+
+export function createPiAiConstraintCompilerInvoker(input: {
+  modelRegistry: ModelRegistryLike;
+  defaultModelRef: string;
+  timeoutMs?: number;
+  maxRetries?: number;
+  streamSimpleImpl?: StreamSimpleLike;
+  projectRoot?: string;
+}): ConstraintCompilerInvoker {
+  return createPiAiTextInvoker<ConstraintCompilerPrompt>({ ...input, auditOperation: "constraint_compiler" }) as ConstraintCompilerInvoker;
+}
+
+export function createPiAiMergedSourceVerifierInvoker(input: {
+  modelRegistry: ModelRegistryLike;
+  defaultModelRef: string;
+  timeoutMs?: number;
+  maxRetries?: number;
+  streamSimpleImpl?: StreamSimpleLike;
+  projectRoot?: string;
+}): ConstraintMergedSourceVerifierInvoker {
+  return createPiAiTextInvoker<ConstraintMergedSourceVerifierPrompt>({ ...input, auditOperation: "constraint_merged_source_verifier" }) as ConstraintMergedSourceVerifierInvoker;
 }
