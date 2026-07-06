@@ -16,15 +16,18 @@
  *     "rearmMarginPercent": 5,
  *     "notifyOnTrigger": true,
  *     "customInstructions": "",
- *     "summaryModels": []
+ *     "summaryModels": [],
+ *     "remoteOpenAICompaction": { "auditPayload": "off" }
  *   }
  *
  * Runtime data:
  *   - audit: <projectRoot>/.pi-astack/compaction-tuner/audit.jsonl
+ *   - remote payload audit: <projectRoot>/.pi-astack/compaction-tuner/remote-openai-compact-payloads.jsonl
  *
  * Default `enabled: false` — extension is a no-op until user opts in.
  */
 
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { compact as runPiCompaction } from "@earendil-works/pi-coding-agent";
@@ -51,6 +54,8 @@ import { getCurrentAnchor, runWithTriggerAnchor, spreadAnchor } from "../_shared
 import {
   injectRemoteOpenAICompactionIntoPayload,
   tryRunRemoteOpenAICompaction,
+  type RemoteOpenAICompactFn,
+  type RemoteOpenAICompactionAttempt,
   type RemoteOpenAIModelLike,
 } from "./openai-remote-compact";
 import {
@@ -60,6 +65,7 @@ import {
   type CompactionTunerSettings,
   type DynamicThresholdSettings,
   type ModelCompactionPolicySettings,
+  type RemoteOpenAICompactionPayloadAuditMode,
 } from "./settings";
 
 const AUDIT_VERSION = 1;
@@ -84,6 +90,7 @@ interface CompactionTunerCtx {
     getApiKeyAndHeaders?(model: unknown): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }>;
   };
   getSystemPrompt?(): string;
+  __testRemoteOpenAICompactFn?: RemoteOpenAICompactFn;
 }
 
 interface CompactionTunerSessionLike {
@@ -226,6 +233,128 @@ async function appendAudit(projectRoot: string, row: Record<string, unknown>): P
   await fs.appendFile(compactionTunerAuditPath(projectRoot), `${JSON.stringify(enriched)}\n`, "utf-8");
 }
 
+interface RemoteOpenAIPayloadAuditMeta {
+  sessionId?: string;
+  modelProvider?: string | null;
+  modelId?: string | null;
+  modelApi?: string | null;
+  compactionReason: SessionBeforeCompactEvent["reason"];
+  willRetry: SessionBeforeCompactEvent["willRetry"];
+}
+
+interface RemoteOpenAIPayloadAuditFields {
+  payload_mode?: RemoteOpenAICompactionPayloadAuditMode;
+  payload_kind?: "response_full" | "response_shape" | "error_shape";
+  payload_audit_id?: string;
+  payload_audit_path?: string;
+  payload_sha256?: string;
+  payload_bytes?: number;
+  payload_audit_error?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function remoteOpenAICompactPayloadAuditPath(projectRoot: string): string {
+  return path.join(compactionTunerDir(projectRoot), "remote-openai-compact-payloads.jsonl");
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value, "utf-8").digest("hex");
+}
+
+function valueType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function remoteCompactPayloadShape(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    return { value_type: valueType(value) };
+  }
+  const output = value.output;
+  return {
+    value_type: "object",
+    top_level_keys: Object.keys(value).sort(),
+    output_items: Array.isArray(output)
+      ? output.map((item, index) => {
+          if (!isRecord(item)) return { index, value_type: valueType(item) };
+          const encryptedContent = item.encrypted_content;
+          return {
+            index,
+            type: typeof item.type === "string" ? item.type : null,
+            keys: Object.keys(item).sort(),
+            ...(typeof encryptedContent === "string"
+              ? { encrypted_content_length: encryptedContent.length }
+              : Object.prototype.hasOwnProperty.call(item, "encrypted_content")
+                ? { encrypted_content_type: valueType(encryptedContent) }
+                : {}),
+          };
+        })
+      : null,
+  };
+}
+
+async function appendRemoteOpenAICompactPayloadAudit(
+  projectRoot: string,
+  mode: RemoteOpenAICompactionPayloadAuditMode,
+  attempt: Extract<RemoteOpenAICompactionAttempt, { outcome: "completed" }> | Extract<RemoteOpenAICompactionAttempt, { outcome: "failed" }>,
+  meta: RemoteOpenAIPayloadAuditMeta,
+): Promise<RemoteOpenAIPayloadAuditFields> {
+  if (mode === "off") return {};
+  try {
+    const isRemoteError = attempt.outcome === "failed" && attempt.reason === "remote_error";
+    const payloadKind: NonNullable<RemoteOpenAIPayloadAuditFields["payload_kind"]> = isRemoteError
+      ? "error_shape"
+      : mode === "full"
+        ? "response_full"
+        : "response_shape";
+    const responseAttempt = attempt as Extract<RemoteOpenAICompactionAttempt, { outcome: "completed" }> | Extract<RemoteOpenAICompactionAttempt, { reason: "invalid_response" }>;
+    const payload: unknown = isRemoteError
+      ? attempt.errorShape
+      : payloadKind === "response_full"
+        ? responseAttempt.response
+        : remoteCompactPayloadShape(responseAttempt.response);
+    const payloadJson = JSON.stringify(payload);
+    const payloadAuditId = randomUUID();
+    const payloadAuditPath = remoteOpenAICompactPayloadAuditPath(projectRoot);
+    const ref: RemoteOpenAIPayloadAuditFields = {
+      payload_mode: mode,
+      payload_kind: payloadKind,
+      payload_audit_id: payloadAuditId,
+      payload_audit_path: payloadAuditPath,
+      payload_sha256: sha256Hex(payloadJson),
+      payload_bytes: Buffer.byteLength(payloadJson, "utf-8"),
+    };
+    const row = {
+      timestamp: formatLocalIsoTimestamp(new Date()),
+      ...spreadAnchor(getCurrentAnchor()),
+      audit_version: AUDIT_VERSION,
+      pid: process.pid,
+      project_root: projectRoot,
+      operation: "remote_openai_compaction_payload",
+      remote_outcome: attempt.outcome,
+      reason: attempt.outcome === "failed" ? attempt.reason : null,
+      session_id: meta.sessionId ?? null,
+      model_provider: meta.modelProvider ?? null,
+      model_id: meta.modelId ?? null,
+      model_api: meta.modelApi ?? null,
+      compaction_reason: meta.compactionReason,
+      will_retry: meta.willRetry,
+      ...ref,
+      ...(payloadKind === "response_full" ? { payload } : payloadKind === "response_shape" ? { payload_shape: payload } : { error_shape: payload }),
+    };
+    await fs.mkdir(compactionTunerDir(projectRoot), { recursive: true });
+    await ensureProjectGitignoredOnce(projectRoot);
+    await fs.appendFile(payloadAuditPath, `${JSON.stringify(row)}\n`, "utf-8");
+    return ref;
+  } catch (error) {
+    return { payload_mode: mode, payload_audit_error: compactErrorMessage(error) };
+  }
+}
+
 function parseModelRef(ref: string): ModelRef | undefined {
   const trimmed = ref.trim();
   const slash = trimmed.indexOf("/");
@@ -303,9 +432,25 @@ async function runRemoteOpenAICompaction(
     settings: settings.remoteOpenAICompaction,
     sessionId,
     systemPrompt: typeof ctx.getSystemPrompt === "function" ? ctx.getSystemPrompt() : undefined,
+    compactFn: ctx.__testRemoteOpenAICompactFn,
   });
 
+  const payloadAuditMeta: RemoteOpenAIPayloadAuditMeta = {
+    sessionId,
+    modelProvider: model?.provider ?? null,
+    modelId: model?.id ?? null,
+    modelApi: model?.api ?? null,
+    compactionReason: event.reason,
+    willRetry: event.willRetry,
+  };
+
   if (attempt.outcome === "completed") {
+    const payloadAudit = await appendRemoteOpenAICompactPayloadAudit(
+      projectRoot,
+      settings.remoteOpenAICompaction.auditPayload,
+      attempt,
+      payloadAuditMeta,
+    );
     await recordSimpleSkip(projectRoot, {
       operation: "remote_openai_compaction",
       outcome: "completed",
@@ -318,11 +463,20 @@ async function runRemoteOpenAICompaction(
       compacted_item_id: attempt.compactedItemId ?? null,
       tokens_before: event.preparation.tokensBefore,
       settings_snapshot: snapshotCompactionTunerSettings(settings),
+      ...payloadAudit,
       ...trigger,
     });
     return { compaction: attempt.compaction };
   }
 
+  const payloadAudit = attempt.outcome === "failed"
+    ? await appendRemoteOpenAICompactPayloadAudit(
+        projectRoot,
+        settings.remoteOpenAICompaction.auditPayload,
+        attempt,
+        payloadAuditMeta,
+      )
+    : {};
   await recordSimpleSkip(projectRoot, {
     operation: "remote_openai_compaction",
     outcome: attempt.outcome === "failed" ? "fallback_to_default" : "skipped",
@@ -334,6 +488,7 @@ async function runRemoteOpenAICompaction(
     session_id: sessionId ?? null,
     tokens_before: event.preparation.tokensBefore,
     settings_snapshot: snapshotCompactionTunerSettings(settings),
+    ...payloadAudit,
     ...trigger,
   });
   return undefined;
@@ -1370,6 +1525,7 @@ export default function (pi: ExtensionAPI) {
           `remoteOpenAICompaction: ${settings.remoteOpenAICompaction.enabled ? "enabled" : "disabled"}`,
           `remoteOpenAICompaction.allowlist: ${settings.remoteOpenAICompaction.modelAllowlist.length > 0 ? settings.remoteOpenAICompaction.modelAllowlist.join(", ") : "(empty)"}`,
           `remoteOpenAICompaction.timeoutMs: ${settings.remoteOpenAICompaction.timeoutMs}`,
+          `remoteOpenAICompaction.auditPayload: ${settings.remoteOpenAICompaction.auditPayload}`,
           "",
           `current usage: ${metrics.percent != null ? `${metrics.percent.toFixed(1)}% (${usage?.tokens}/${metrics.effectiveContextBudget ?? usage?.contextWindow} effective tokens)` : "(unknown — no post-compaction usage yet)"}`,
           `raw usage: ${metrics.rawPercent != null ? `${metrics.rawPercent.toFixed(1)}% (${usage?.tokens}/${usage?.contextWindow} runtime tokens)` : "(unknown)"}`,
@@ -1443,4 +1599,12 @@ export default function (pi: ExtensionAPI) {
 
 // Test-only exports: the smoke harness uses these directly to verify
 // decision logic without going through pi's runtime.
-export { classifyDecision, computeEffectiveThreshold, DEFAULT_COMPACTION_TUNER_SETTINGS };
+export {
+  appendRemoteOpenAICompactPayloadAudit,
+  classifyDecision,
+  computeEffectiveThreshold,
+  DEFAULT_COMPACTION_TUNER_SETTINGS,
+  remoteCompactPayloadShape,
+  remoteOpenAICompactPayloadAuditPath,
+  runRemoteOpenAICompaction,
+};

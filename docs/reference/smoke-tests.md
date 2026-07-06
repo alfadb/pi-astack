@@ -80,6 +80,7 @@ status: active
 | `smoke:compaction-tuner-vault-defer` | `scripts/smoke-compaction-tuner-vault-defer.mjs` | INV-K compaction defer while vault dialog pending |
 | `smoke:compaction-tuner-backoff` | `scripts/smoke-compaction-tuner-backoff.mjs` | compaction-tuner retry/backoff guard |
 | `smoke:compaction-tuner-turn-boundary` | `scripts/smoke-compaction-tuner-turn-boundary.mjs` | compaction-tuner turn-boundary behavior |
+| `smoke:compaction-tuner-openai-remote-compact` | `scripts/smoke-compaction-tuner-openai-remote-compact.mjs` | compaction-tuner OpenAI Responses remote compaction, marker injection, invalid-response fallback, and `remoteOpenAICompaction.auditPayload` sidecar audit modes (`off`/`shape`/`full`) |
 | `smoke:tool-contract` | `scripts/smoke-tool-contract-payload.mjs` | LLM tool payload contract normalization |
 | `smoke:persistent-input-history` | `scripts/smoke-persistent-input-history.mjs` | persistent-input-history SDK-drift defense and replay matching |
 | `smoke:time-injector` | `scripts/smoke-time-injector.mjs` | time-injector session prompt block |

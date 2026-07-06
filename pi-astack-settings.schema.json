@@ -890,7 +890,8 @@
           "default": {
             "enabled": false,
             "modelAllowlist": [],
-            "timeoutMs": 120000
+            "timeoutMs": 120000,
+            "auditPayload": "off"
           },
           "additionalProperties": false,
           "description": "Optional OpenAI Responses remote compaction path. When enabled, session_before_compact first attempts /responses/compact for explicitly allowlisted OpenAI Responses/Codex Responses models, stores the encrypted compaction item in a recoverable summary marker, and replays it by replacing the marker in before_provider_request. Any skip, failure, unsupported model, missing auth, or invalid response returns undefined from the hook so pi core default compaction remains the fallback.",
@@ -913,6 +914,12 @@
               "default": 120000,
               "minimum": 1,
               "description": "HTTP timeout in milliseconds for /responses/compact."
+            },
+            "auditPayload": {
+              "type": "string",
+              "enum": ["off", "shape", "full"],
+              "default": "off",
+              "description": "Local sidecar audit mode for parsed /responses/compact payloads. `off` preserves default behavior. `shape` writes a redacted payload shape to `.pi-astack/compaction-tuner/remote-openai-compact-payloads.jsonl` including top-level keys, output item types, and encrypted_content lengths. `full` writes the full parsed compact response, including output item encrypted_content, to that sidecar. The main compaction-tuner audit row only stores payload_audit_id/path/hash/bytes/mode references."
             }
           }
         },

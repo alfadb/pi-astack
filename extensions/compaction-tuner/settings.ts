@@ -50,12 +50,16 @@ export interface ModelCompactionPolicySettings {
   rearmMarginPercent?: number;
 }
 
+export type RemoteOpenAICompactionPayloadAuditMode = "off" | "shape" | "full";
+
 export interface RemoteOpenAICompactionSettings {
   enabled: boolean;
   /** Empty allowlist disables remote compaction; entries are provider/model refs. */
   modelAllowlist: string[];
   /** HTTP timeout for /responses/compact. */
   timeoutMs: number;
+  /** Local sidecar audit mode for parsed /responses/compact payloads. */
+  auditPayload: RemoteOpenAICompactionPayloadAuditMode;
 }
 
 export interface CompactionTunerSettings {
@@ -117,6 +121,7 @@ export const DEFAULT_COMPACTION_TUNER_SETTINGS: CompactionTunerSettings = {
     enabled: false,
     modelAllowlist: [],
     timeoutMs: 120_000,
+    auditPayload: "off",
   },
   rearmMarginPercent: 5,
   notifyOnTrigger: true,
@@ -260,6 +265,10 @@ function dedupeStrings(values: string[]): string[] {
   return out;
 }
 
+function asRemoteOpenAICompactionPayloadAuditMode(value: unknown, fallback: RemoteOpenAICompactionPayloadAuditMode): RemoteOpenAICompactionPayloadAuditMode {
+  return value === "off" || value === "shape" || value === "full" ? value : fallback;
+}
+
 function resolveRemoteOpenAICompactionSettings(value: unknown): RemoteOpenAICompactionSettings {
   const raw = isPlainObject(value) ? value : {};
   const def = DEFAULT_COMPACTION_TUNER_SETTINGS.remoteOpenAICompaction;
@@ -267,6 +276,7 @@ function resolveRemoteOpenAICompactionSettings(value: unknown): RemoteOpenAIComp
     enabled: asBoolean(raw.enabled, def.enabled),
     modelAllowlist: dedupeStrings(asStringList(raw.modelAllowlist)),
     timeoutMs: asPositiveNumber(raw.timeoutMs, def.timeoutMs),
+    auditPayload: asRemoteOpenAICompactionPayloadAuditMode(raw.auditPayload, def.auditPayload),
   };
 }
 
@@ -313,6 +323,7 @@ export function snapshotCompactionTunerSettings(s: CompactionTunerSettings): Rec
       enabled: s.remoteOpenAICompaction.enabled,
       modelAllowlist: s.remoteOpenAICompaction.modelAllowlist,
       timeoutMs: s.remoteOpenAICompaction.timeoutMs,
+      auditPayload: s.remoteOpenAICompaction.auditPayload,
     },
     dynamicThreshold: {
       enabled: s.dynamicThreshold.enabled,

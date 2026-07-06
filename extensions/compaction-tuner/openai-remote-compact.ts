@@ -23,10 +23,18 @@ export interface RemoteOpenAIAuthLike {
   headers?: Record<string, string>;
 }
 
+type RemoteOpenAICompactResponse = CompactedResponse | string;
+
 export type RemoteOpenAICompactFn = (
   body: ResponseCompactParams,
   options: { signal?: AbortSignal; timeout?: number; maxRetries?: number },
-) => Promise<CompactedResponse>;
+) => Promise<RemoteOpenAICompactResponse>;
+
+type RemoteOpenAICompactionItemType = "compaction" | "compaction_summary";
+
+type RemoteOpenAICompactionItem = Omit<ResponseCompactionItemParam, "type"> & {
+  type: RemoteOpenAICompactionItemType;
+};
 
 export interface RemoteOpenAICompactionDetails {
   kind: "openai_responses_compaction";
@@ -34,7 +42,7 @@ export interface RemoteOpenAICompactionDetails {
   provider: string;
   model: string;
   api: string;
-  item: ResponseCompactionItemParam;
+  item: RemoteOpenAICompactionItem;
 }
 
 interface RemoteOpenAICompactionMarkerPayload extends RemoteOpenAICompactionDetails {
@@ -51,10 +59,20 @@ export interface RemoteOpenAICompactionAttemptOptions {
   compactFn?: RemoteOpenAICompactFn;
 }
 
+export interface RemoteOpenAICompactionErrorShape {
+  name?: string;
+  message: string;
+  keys?: string[];
+  status?: unknown;
+  code?: unknown;
+  type?: unknown;
+}
+
 export type RemoteOpenAICompactionAttempt =
-  | { outcome: "completed"; compaction: CompactionResult<RemoteOpenAICompactionDetails>; elapsedMs: number; inputItems: number; compactedItemId?: string | null }
+  | { outcome: "completed"; compaction: CompactionResult<RemoteOpenAICompactionDetails>; elapsedMs: number; inputItems: number; compactedItemId?: string | null; response: unknown }
   | { outcome: "skipped"; reason: "disabled" | "empty_allowlist" | "model_unavailable" | "unsupported_provider" | "unsupported_api" | "unsupported_model" | "missing_base_url" | "missing_api_key" }
-  | { outcome: "failed"; reason: "remote_error" | "invalid_response"; error: string; elapsedMs: number };
+  | { outcome: "failed"; reason: "invalid_response"; error: string; elapsedMs: number; response: unknown }
+  | { outcome: "failed"; reason: "remote_error"; error: string; elapsedMs: number; errorShape: RemoteOpenAICompactionErrorShape };
 
 export interface RemoteOpenAIInjectionResult {
   payload: unknown;
@@ -95,6 +113,22 @@ function isAllowlisted(model: RemoteOpenAIModelLike | undefined, settings: Remot
 function compactErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.length > 500 ? `${message.slice(0, 500)}...` : message;
+}
+
+function compactErrorShape(error: unknown): RemoteOpenAICompactionErrorShape {
+  const message = compactErrorMessage(error);
+  const shape: RemoteOpenAICompactionErrorShape = { message };
+  if (error instanceof Error) shape.name = error.name;
+  if (isRecord(error)) {
+    shape.keys = Object.keys(error).sort();
+    for (const key of ["status", "code", "type"] as const) {
+      const value = error[key];
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) {
+        shape[key] = value;
+      }
+    }
+  }
+  return shape;
 }
 
 function buildCompactContext(event: SessionBeforeCompactEvent, systemPrompt?: string): Context {
@@ -143,7 +177,7 @@ function buildCompactBody(
   return { body, inputItems: input.length };
 }
 
-function buildFallbackText(event: SessionBeforeCompactEvent, item: ResponseCompactionItemParam): string {
+function buildFallbackText(event: SessionBeforeCompactEvent, item: RemoteOpenAICompactionItem): string {
   const lines = [
     "OpenAI remote compaction is available for this history segment.",
     `Compaction item id: ${item.id ?? "(none)"}`,
@@ -162,15 +196,34 @@ export function encodeRemoteOpenAICompactionMarker(payload: RemoteOpenAICompacti
   return `${REMOTE_OPENAI_COMPACTION_MARKER_PREFIX}${JSON.stringify(payload)}`;
 }
 
-function compactionItemFromResponse(response: CompactedResponse): ResponseCompactionItemParam | undefined {
-  const item = response.output.find((candidate) => candidate.type === "compaction");
-  if (!item || item.type !== "compaction" || typeof item.encrypted_content !== "string" || item.encrypted_content.length === 0) {
+function isRemoteOpenAICompactionItemType(type: unknown): type is RemoteOpenAICompactionItemType {
+  return type === "compaction" || type === "compaction_summary";
+}
+
+function normalizeRemoteOpenAICompactResponse(response: unknown): unknown {
+  if (typeof response !== "string") return response;
+  const trimmed = response.trim();
+  if (!trimmed) return response;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return response;
+  }
+}
+
+function compactionItemFromResponse(response: unknown): RemoteOpenAICompactionItem | undefined {
+  const parsed = normalizeRemoteOpenAICompactResponse(response);
+  if (!isRecord(parsed)) return undefined;
+  const output = parsed.output;
+  if (!Array.isArray(output)) return undefined;
+  const item = output.find((candidate) => isRecord(candidate) && isRemoteOpenAICompactionItemType(candidate.type));
+  if (!isRecord(item) || !isRemoteOpenAICompactionItemType(item.type) || typeof item.encrypted_content !== "string" || item.encrypted_content.length === 0) {
     return undefined;
   }
   return {
-    type: "compaction",
+    type: item.type,
     encrypted_content: item.encrypted_content,
-    id: item.id ?? null,
+    id: typeof item.id === "string" ? item.id : null,
   };
 }
 
@@ -181,7 +234,7 @@ export function parseRemoteOpenAICompactionMarker(summary: string): RemoteOpenAI
     const parsed = JSON.parse(raw) as unknown;
     if (!isRecord(parsed)) return undefined;
     if (parsed.kind !== "openai_responses_compaction" || parsed.version !== 1) return undefined;
-    if (!isRecord(parsed.item) || parsed.item.type !== "compaction" || typeof parsed.item.encrypted_content !== "string" || parsed.item.encrypted_content.length === 0) return undefined;
+    if (!isRecord(parsed.item) || !isRemoteOpenAICompactionItemType(parsed.item.type) || typeof parsed.item.encrypted_content !== "string" || parsed.item.encrypted_content.length === 0) return undefined;
     if (parsed.item.id !== undefined && parsed.item.id !== null && typeof parsed.item.id !== "string") return undefined;
     if (typeof parsed.provider !== "string" || typeof parsed.model !== "string" || typeof parsed.api !== "string") return undefined;
     return parsed as unknown as RemoteOpenAICompactionMarkerPayload;
@@ -217,14 +270,15 @@ export async function tryRunRemoteOpenAICompaction(options: RemoteOpenAICompacti
       dangerouslyAllowBrowser: true,
     });
     const compact = compactFn ?? client.responses.compact.bind(client.responses);
-    const response = await compact(body, {
+    const rawResponse = await compact(body, {
       signal: event.signal,
       timeout: settings.timeoutMs,
       maxRetries: 0,
     });
+    const response = normalizeRemoteOpenAICompactResponse(rawResponse);
     const item = compactionItemFromResponse(response);
     if (!item) {
-      return { outcome: "failed", reason: "invalid_response", error: "responses.compact did not return a valid compaction item", elapsedMs: Date.now() - started };
+      return { outcome: "failed", reason: "invalid_response", error: "responses.compact did not return a valid compaction item", elapsedMs: Date.now() - started, response };
     }
     const details: RemoteOpenAICompactionDetails = {
       kind: "openai_responses_compaction",
@@ -249,9 +303,10 @@ export async function tryRunRemoteOpenAICompaction(options: RemoteOpenAICompacti
       elapsedMs: Date.now() - started,
       inputItems,
       compactedItemId: details.item.id,
+      response,
     };
   } catch (error) {
-    return { outcome: "failed", reason: "remote_error", error: compactErrorMessage(error), elapsedMs: Date.now() - started };
+    return { outcome: "failed", reason: "remote_error", error: compactErrorMessage(error), elapsedMs: Date.now() - started, errorShape: compactErrorShape(error) };
   }
 }
 
@@ -329,6 +384,8 @@ export const __TEST = {
   compactInputMessages,
   buildCompactBody,
   compactionItemFromResponse,
+  normalizeRemoteOpenAICompactResponse,
+  compactErrorShape,
   encodeRemoteOpenAICompactionMarker,
   parseRemoteOpenAICompactionMarker,
   injectRemoteOpenAICompactionIntoPayload,
