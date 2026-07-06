@@ -1015,6 +1015,26 @@
               "minimum": 0,
               "maximum": 1,
               "description": "Minimum event coverage ratio required before compiled-view injection is accepted."
+            },
+            "liveCanary": {
+              "type": "object",
+              "default": { "enabled": false, "sessionIds": [] },
+              "description": "Default-off session-scoped live canary for ADR0039 compiled-view injection. When enabled, only exact matches in sessionIds for persisted sessions with a session file opt into true fail-closed compiled injection: the effective runtime compiledViewInjection is enabled and fallbackToLegacyOnError is false for that session only. Ephemeral sessions and nonmatching sessions keep global behavior.",
+              "additionalProperties": false,
+              "properties": {
+                "_comment": { "type": "string" },
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Explicit default-off guard. false means no session canary override and no session-live-canary audit writes."
+                },
+                "sessionIds": {
+                  "type": "array",
+                  "default": [],
+                  "items": { "type": "string" },
+                  "description": "Exact persisted pi session ids allowed to opt into the live canary. A session id is ignored unless sessionManager.getSessionFile() returns a path, so ephemeral sessions cannot opt in."
+                }
+              }
             }
           }
         }

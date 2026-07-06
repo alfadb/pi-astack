@@ -249,6 +249,114 @@ const fakeBound = () => ({
 });
 const fakeUnbound = () => ({ activeProject: null, reason: "manifest_missing", cwd: projectRoot });
 
+function writeBasicRuleSet(root) {
+  writeRule(
+    path.join(root, "rules", "always", "legacy-fallback.md"),
+    {
+      title: "Legacy Fallback",
+      kind: "pattern",
+      status: "active",
+      confidence: 9,
+      applies_when: "testing live canary fallback behavior",
+      trigger_phrases: '["legacy fallback"]',
+      must_do_summary: "Legacy fallback rule should inject outside matching live canary sessions.",
+    },
+    "# Legacy Fallback\n\nLegacy fallback body must not appear in compiled canary drops.",
+  );
+}
+
+function writeValidCompiledView(root) {
+  const latestDir = path.join(root, ".state", "sediment", "constraint-shadow", "latest");
+  writeShadowDecision(path.join(latestDir, "decision.json"), [{
+    constraintId: "shadow:live-canary-compiled",
+    scope: { kind: "global" },
+    injectMode: "always",
+    title: "Live Canary Compiled",
+    compiledBody: "Live canary compiled rule should inject.",
+    mustDoSummary: "Live canary compiled rule should inject.",
+    triggerPhrases: [],
+    sourceRecordIds: ["event:live-canary-compiled"],
+  }]);
+  writeFile(path.join(latestDir, "compiled-view.md"), "## Global always\n\n### Live Canary Compiled\n- Live canary compiled rule should inject.\n");
+  writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+    schemaVersion: "constraint-event-coverage/v1",
+    summary: { coverageRatio: 1, injectableCoverageRatio: 1, queuedEvents: 0, appendFailedEvents: 0 },
+    rows: [],
+  }, null, 2));
+}
+
+async function runLiveCanaryScenario({ name, liveCanary, sessionId, persisted, compiledValid, compiledEnabled = true }) {
+  const prevAbrainRoot = process.env.ABRAIN_ROOT;
+  const prevHome = process.env.HOME;
+  const scenarioRoot = path.join(tmpRoot, `live-canary-${name}`);
+  const scenarioHome = path.join(scenarioRoot, "home");
+  const scenarioAbrain = path.join(scenarioRoot, "abrain");
+  const scenarioProject = path.join(scenarioRoot, "project");
+  const scenarioCompiled = path.join(scenarioRoot, "compiled");
+  try {
+    fs.mkdirSync(scenarioProject, { recursive: true });
+    writeBasicRuleSet(scenarioAbrain);
+    if (compiledValid) writeValidCompiledView(scenarioAbrain);
+    process.env.ABRAIN_ROOT = scenarioAbrain;
+    process.env.HOME = scenarioHome;
+    writeFile(path.join(scenarioHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+      ruleInjector: {
+        compiledViewInjection: {
+          enabled: compiledEnabled,
+          fallbackToLegacyOnError: true,
+          requireFresh: true,
+          staleAfterMs: 86400000,
+          maxReadBytes: 1000000,
+          minCoverageRatio: 1,
+          liveCanary,
+        },
+      },
+    }, null, 2));
+    stageModuleTree(scenarioCompiled);
+    const freshReq = createRequire(path.join(scenarioCompiled, "runner.cjs"));
+    const activate = freshReq("./abrain/rule-injector/index.js").default;
+    const events = new Map();
+    const statuses = [];
+    const notifications = [];
+    const pi = {
+      on(eventName, handler) {
+        if (!events.has(eventName)) events.set(eventName, []);
+        events.get(eventName).push(handler);
+      },
+      registerCommand() {},
+    };
+    activate(pi);
+    const sessionStart = events.get("session_start")?.[0];
+    const beforeAgent = events.get("before_agent_start")?.[0];
+    if (typeof sessionStart !== "function" || typeof beforeAgent !== "function") throw new Error("missing live canary handlers");
+    const sessionManager = {
+      getSessionId: () => sessionId,
+      getSessionFile: () => persisted ? path.join(scenarioRoot, "sessions", `${sessionId}.json`) : undefined,
+    };
+    const ctx = {
+      cwd: scenarioProject,
+      sessionManager,
+      ui: {
+        setStatus(key, value) { statuses.push([key, value]); },
+        notify(message, type) { notifications.push([message, type]); },
+      },
+    };
+    await sessionStart({ reason: "startup" }, ctx);
+    const result = await beforeAgent({ systemPrompt: "BASE" }, ctx);
+    const auditFile = path.join(scenarioAbrain, ".state", "sediment", "constraint-shadow", "session-live-canary", "audit.jsonl");
+    return {
+      result,
+      statuses,
+      notifications,
+      auditFile,
+      auditRows: fs.existsSync(auditFile) ? readJsonLines(auditFile) : [],
+    };
+  } finally {
+    if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+  }
+}
+
 check("ensureBrainLayout creates global rules inject-mode directories", () => {
   const home = path.join(tmpRoot, "layout-home");
   const r = ensureBrainLayout(home);
@@ -375,6 +483,100 @@ await asyncCheck("extension registers append-only idempotent injector and diagno
     if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
     if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
   }
+});
+
+await asyncCheck("live canary disabled/nonmatching session with broken compiled view keeps legacy fallback and writes no canary audit", async () => {
+  const disabled = await runLiveCanaryScenario({
+    name: "disabled",
+    liveCanary: { enabled: false, sessionIds: ["session-disabled"] },
+    sessionId: "session-disabled",
+    persisted: true,
+    compiledValid: false,
+  });
+  if (!disabled.result?.systemPrompt?.includes("Legacy Fallback")) throw new Error(`disabled live canary should legacy fallback: ${disabled.result?.systemPrompt}`);
+  if (disabled.auditRows.length !== 0 || fs.existsSync(disabled.auditFile)) throw new Error(`disabled live canary wrote audit: ${disabled.auditFile}`);
+
+  const nonmatching = await runLiveCanaryScenario({
+    name: "nonmatching",
+    liveCanary: { enabled: true, sessionIds: ["some-other-session"] },
+    sessionId: "session-nonmatching",
+    persisted: true,
+    compiledValid: false,
+  });
+  if (!nonmatching.result?.systemPrompt?.includes("Legacy Fallback")) throw new Error(`nonmatching session should legacy fallback: ${nonmatching.result?.systemPrompt}`);
+  if (nonmatching.auditRows.length !== 0 || fs.existsSync(nonmatching.auditFile)) throw new Error(`nonmatching live canary wrote audit: ${nonmatching.auditFile}`);
+});
+
+await asyncCheck("matching persisted live canary with broken compiled view fail-closes without legacy fallback and audits drop", async () => {
+  const out = await runLiveCanaryScenario({
+    name: "matching-broken",
+    liveCanary: { enabled: true, sessionIds: ["session-canary-broken"] },
+    sessionId: "session-canary-broken",
+    persisted: true,
+    compiledValid: false,
+  });
+  if (out.result !== undefined) throw new Error(`matching broken canary should not inject: ${JSON.stringify(out.result)}`);
+  const statusText = out.statuses.map(([, value]) => String(value)).join("\n");
+  const notifyText = out.notifications.map(([message]) => String(message)).join("\n");
+  if (!statusText.includes("compiled view read_failed") || !statusText.includes("live canary fail-closed")) throw new Error(`footer missing drop/read_failed: ${statusText}`);
+  if (!notifyText.includes("live canary fail-closed: read_failed")) throw new Error(`notify missing drop/read_failed: ${notifyText}`);
+  if (/legacy fallback/i.test(`${statusText}\n${notifyText}`)) throw new Error(`drop surfaces should not mention legacy fallback: ${statusText}\n${notifyText}`);
+  const row = out.auditRows.at(-1);
+  if (!row || row.decision !== "fail_closed_drop" || row.reason !== "read_failed") throw new Error(`missing fail_closed_drop audit row: ${JSON.stringify(out.auditRows)}`);
+  if (row.sessionId !== "session-canary-broken" || row.globalFallbackToLegacyOnError !== true || row.effectiveFallbackToLegacyOnError !== false) {
+    throw new Error(`audit row did not capture fallback override: ${JSON.stringify(row)}`);
+  }
+});
+
+await asyncCheck("matching persisted live canary with valid compiled view injects compiled and audits compiled_injected", async () => {
+  const out = await runLiveCanaryScenario({
+    name: "matching-valid",
+    liveCanary: { enabled: true, sessionIds: [" session-canary-valid "] },
+    sessionId: " session-canary-valid ",
+    persisted: true,
+    compiledValid: true,
+  });
+  const prompt = out.result?.systemPrompt ?? "";
+  if (!prompt.includes("source=constraint-shadow-compiled-view") || !prompt.includes("Live canary compiled rule should inject.")) throw new Error(`matching valid canary did not inject compiled view: ${prompt}`);
+  if (prompt.includes("Legacy Fallback")) throw new Error(`matching valid canary injected legacy fallback: ${prompt}`);
+  const statusText = out.statuses.map(([, value]) => String(value)).join("\n");
+  const warningText = out.notifications.filter(([, type]) => type === "warning").map(([message]) => String(message)).join("\n");
+  if (!statusText.includes("live canary active")) throw new Error(`footer missing active canary detail: ${statusText}`);
+  if (statusText.includes("fail-closed")) throw new Error(`valid canary footer should not say fail-closed: ${statusText}`);
+  if (warningText) throw new Error(`valid canary should not emit warning notification: ${warningText}`);
+  const row = out.auditRows.at(-1);
+  if (!row || row.decision !== "compiled_injected" || row.compiledStatus !== "ok") throw new Error(`missing compiled_injected audit row: ${JSON.stringify(out.auditRows)}`);
+  if (row.sessionId !== "session-canary-valid") throw new Error(`audit row should store trimmed session id: ${JSON.stringify(row)}`);
+  if (row.compiledCounts.always !== 1 || row.coverageRatio !== 1 || row.injectableCoverageRatio !== 1) throw new Error(`audit row missing compiled metadata: ${JSON.stringify(row)}`);
+});
+
+await asyncCheck("matching persisted live canary forces compiled injection when global compiled view injection is disabled", async () => {
+  const out = await runLiveCanaryScenario({
+    name: "matching-valid-global-disabled",
+    liveCanary: { enabled: true, sessionIds: ["session-canary-global-disabled"] },
+    sessionId: "session-canary-global-disabled",
+    persisted: true,
+    compiledValid: true,
+    compiledEnabled: false,
+  });
+  const prompt = out.result?.systemPrompt ?? "";
+  if (!prompt.includes("source=constraint-shadow-compiled-view") || !prompt.includes("Live canary compiled rule should inject.")) throw new Error(`canary did not force compiled view when globally disabled: ${prompt}`);
+  if (prompt.includes("Legacy Fallback")) throw new Error(`forced canary injected legacy fallback: ${prompt}`);
+  const row = out.auditRows.at(-1);
+  if (!row || row.decision !== "compiled_injected" || row.compiledStatus !== "ok") throw new Error(`missing forced compiled_injected audit row: ${JSON.stringify(out.auditRows)}`);
+  if (row.globalFallbackToLegacyOnError !== true || row.effectiveFallbackToLegacyOnError !== false) throw new Error(`forced canary audit row did not capture fallback override: ${JSON.stringify(row)}`);
+});
+
+await asyncCheck("ephemeral session id listed in live canary does not opt in and still legacy-fallbacks", async () => {
+  const out = await runLiveCanaryScenario({
+    name: "ephemeral",
+    liveCanary: { enabled: true, sessionIds: ["session-ephemeral"] },
+    sessionId: "session-ephemeral",
+    persisted: false,
+    compiledValid: false,
+  });
+  if (!out.result?.systemPrompt?.includes("Legacy Fallback")) throw new Error(`ephemeral listed session should legacy fallback: ${out.result?.systemPrompt}`);
+  if (out.auditRows.length !== 0 || fs.existsSync(out.auditFile)) throw new Error(`ephemeral live canary wrote audit: ${out.auditFile}`);
 });
 
 check("compiled-view runtime reader is default-off, bounded, and coverage-gated", () => {

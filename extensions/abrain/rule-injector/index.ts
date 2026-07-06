@@ -43,6 +43,11 @@ export type RuleScope = "global" | "project";
 
 type NotifyType = "info" | "warning" | "error";
 
+export interface RuleInjectorCompiledViewLiveCanarySettings {
+  enabled: boolean;
+  sessionIds: string[];
+}
+
 export interface RuleInjectorCompiledViewInjectionSettings {
   enabled: boolean;
   fallbackToLegacyOnError: boolean;
@@ -50,6 +55,7 @@ export interface RuleInjectorCompiledViewInjectionSettings {
   staleAfterMs: number;
   maxReadBytes: number;
   minCoverageRatio: number;
+  liveCanary: RuleInjectorCompiledViewLiveCanarySettings;
 }
 
 export interface RuleInjectorSettings {
@@ -116,6 +122,11 @@ export const RULE_STATUS_KEY = FOOTER_STATUS_KEYS.abrainRules;
 
 const RULE_FENCE_RE = /<!-- BEGIN_ABRAIN_RULES session=([0-9a-f]+)[^>]*-->[\s\S]*?<!-- END_ABRAIN_RULES -->/g;
 
+const DEFAULT_COMPILED_VIEW_LIVE_CANARY: RuleInjectorCompiledViewLiveCanarySettings = {
+  enabled: false,
+  sessionIds: [],
+};
+
 const DEFAULT_COMPILED_VIEW_INJECTION: RuleInjectorCompiledViewInjectionSettings = {
   enabled: false,
   fallbackToLegacyOnError: true,
@@ -123,6 +134,7 @@ const DEFAULT_COMPILED_VIEW_INJECTION: RuleInjectorCompiledViewInjectionSettings
   staleAfterMs: 24 * 60 * 60 * 1_000,
   maxReadBytes: 1_000_000,
   minCoverageRatio: 1,
+  liveCanary: DEFAULT_COMPILED_VIEW_LIVE_CANARY,
 };
 
 const DEFAULT_SETTINGS: RuleInjectorSettings = {
@@ -170,6 +182,21 @@ function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((item) => item.trim());
+}
+
+function resolveCompiledViewLiveCanarySettings(value: unknown): RuleInjectorCompiledViewLiveCanarySettings {
+  const cfg = asObject(value);
+  return {
+    enabled: asBoolean(cfg.enabled, DEFAULT_COMPILED_VIEW_LIVE_CANARY.enabled),
+    sessionIds: asStringArray(cfg.sessionIds),
+  };
+}
+
 function resolveCompiledViewInjectionSettings(value: unknown): RuleInjectorCompiledViewInjectionSettings {
   const cfg = asObject(value);
   return {
@@ -179,6 +206,7 @@ function resolveCompiledViewInjectionSettings(value: unknown): RuleInjectorCompi
     staleAfterMs: Math.max(0, Math.floor(asNumber(cfg.staleAfterMs, DEFAULT_COMPILED_VIEW_INJECTION.staleAfterMs))),
     maxReadBytes: Math.max(1_000, Math.floor(asNumber(cfg.maxReadBytes, DEFAULT_COMPILED_VIEW_INJECTION.maxReadBytes))),
     minCoverageRatio: Math.max(0, Math.min(1, asNumber(cfg.minCoverageRatio, DEFAULT_COMPILED_VIEW_INJECTION.minCoverageRatio))),
+    liveCanary: resolveCompiledViewLiveCanarySettings(cfg.liveCanary),
   };
 }
 
@@ -469,7 +497,73 @@ type CompiledRuleCounts = { always: number; listed: number; total: number };
 
 type CompiledViewReadResult =
   | { ok: true; injection: string; sourcePath: string; counts: CompiledRuleCounts; coverageRatio?: number; injectableCoverageRatio?: number; stale: boolean; queuedEvents?: number; appendFailedEvents?: number }
-  | { ok: false; reason: string; error?: string };
+  | { ok: false; reason: string; error?: string; counts?: CompiledRuleCounts; coverageRatio?: number; injectableCoverageRatio?: number; stale?: boolean; queuedEvents?: number; appendFailedEvents?: number };
+
+interface LiveCanaryRuntimeState {
+  active: boolean;
+  sessionId?: string;
+  optInSource?: string;
+}
+
+type RuntimeRuleInjectionDecision = "compiled_injected" | "fail_closed_drop" | "legacy_fallback";
+
+interface RuntimeRuleInjectionResult {
+  injection?: string;
+  decision: RuntimeRuleInjectionDecision;
+  compiled: CompiledViewReadResult;
+  settings: RuleInjectorSettings;
+  liveCanary: LiveCanaryRuntimeState;
+}
+
+function pathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function readPersistedSessionId(sm: unknown): string | undefined {
+  const manager = sm as { getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null } | undefined;
+  if (!manager || typeof manager.getSessionId !== "function") return undefined;
+  if (typeof manager.getSessionFile !== "function") return undefined;
+  try {
+    const file = manager.getSessionFile();
+    if (!file || typeof file !== "string") return undefined;
+  } catch {
+    return undefined;
+  }
+  try {
+    const id = manager.getSessionId();
+    if (typeof id !== "string") return undefined;
+    const trimmed = id.trim();
+    return trimmed ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveRuntimeRuleInjectorSettings(
+  settings: RuleInjectorSettings,
+  ctx: { sessionManager?: unknown } | undefined,
+): { settings: RuleInjectorSettings; liveCanary: LiveCanaryRuntimeState } {
+  const liveCanary = settings.compiledViewInjection.liveCanary;
+  const sessionId = liveCanary.enabled ? readPersistedSessionId(ctx?.sessionManager) : undefined;
+  const active = !!sessionId && liveCanary.sessionIds.includes(sessionId);
+  if (!active) return { settings, liveCanary: { active: false, sessionId } };
+  return {
+    settings: {
+      ...settings,
+      compiledViewInjection: {
+        ...settings.compiledViewInjection,
+        enabled: true,
+        fallbackToLegacyOnError: false,
+      },
+    },
+    liveCanary: {
+      active: true,
+      sessionId,
+      optInSource: "ruleInjector.compiledViewInjection.liveCanary.sessionIds",
+    },
+  };
+}
 
 function readJsonFileBounded(file: string, maxReadBytes: number): unknown {
   const stat = fs.statSync(file);
@@ -585,8 +679,15 @@ export function readCompiledRuleInjectionForRuntime(args: {
     const coverageSummary = coverage === undefined ? {} : coverageSummaryFrom(coverage);
     const ratio = coverageSummary.coverageRatio;
     const gatingRatio = coverageSummary.injectableCoverageRatio ?? coverageSummary.coverageRatio;
-    if (gatingRatio !== undefined && gatingRatio < args.settings.minCoverageRatio) return { ok: false, reason: "coverage_below_threshold" };
-    if (gatingRatio === undefined && args.settings.minCoverageRatio > 0) return { ok: false, reason: "missing_coverage_ratio" };
+    const readMetadata = {
+      counts,
+      coverageRatio: ratio,
+      injectableCoverageRatio: gatingRatio,
+      queuedEvents: coverageSummary.queuedEvents,
+      appendFailedEvents: coverageSummary.appendFailedEvents,
+    };
+    if (gatingRatio !== undefined && gatingRatio < args.settings.minCoverageRatio) return { ok: false, reason: "coverage_below_threshold", ...readMetadata };
+    if (gatingRatio === undefined && args.settings.minCoverageRatio > 0) return { ok: false, reason: "missing_coverage_ratio", ...readMetadata };
     const compiledStat = fs.statSync(compiledViewPath);
     const nowMs = args.nowMs ?? Date.now();
     const compiledAgeMs = Math.max(0, nowMs - compiledStat.mtimeMs);
@@ -595,9 +696,9 @@ export function readCompiledRuleInjectionForRuntime(args: {
       compiledAgeMs,
       staleAfterMs: args.settings.staleAfterMs,
     });
-    if (args.settings.requireFresh && stale) return { ok: false, reason: "compiled_view_stale" };
+    if (args.settings.requireFresh && stale) return { ok: false, reason: "compiled_view_stale", ...readMetadata, stale };
     const rawCompiledView = boundedTextFile(compiledViewPath, args.settings.maxReadBytes).trim();
-    if (!rawCompiledView) return { ok: false, reason: "empty_compiled_view" };
+    if (!rawCompiledView) return { ok: false, reason: "empty_compiled_view", ...readMetadata, stale };
     const compiledView = filterCompiledViewByActiveProject(rawCompiledView, args.activeProjectId);
     const injection = [
       `${BEGIN_ABRAIN_RULES} session=${args.nonce} source=constraint-shadow-compiled-view (auto-managed by sediment, do not edit by hand) -->`,
@@ -629,17 +730,89 @@ export function readCompiledRuleInjectionForRuntime(args: {
   }
 }
 
-function composeRuntimeRuleInjection(cache: RuleScanCache, settings: RuleInjectorSettings): string | undefined {
-  const compiled = readCompiledRuleInjectionForRuntime({
-    abrainHome: cache.abrainHome,
-    nonce: cache.nonce,
-    settings: settings.compiledViewInjection,
-    activeProjectId: cache.activeProjectId,
-  });
-  if (compiled.ok) return compiled.injection;
-  if (settings.compiledViewInjection.enabled && !settings.compiledViewInjection.fallbackToLegacyOnError) return undefined;
-  return composeRuleInjection(cache);
+function appendLiveCanaryAudit(args: {
+  cache: RuleScanCache;
+  globalSettings: RuleInjectorSettings;
+  result: RuntimeRuleInjectionResult;
+}): { ok: true } | { ok: false; error: string } {
+  if (!args.result.liveCanary.active || !args.result.liveCanary.sessionId) return { ok: true };
+  const abrainHome = path.resolve(args.cache.abrainHome.replace(/^~(?=$|\/)/, os.homedir()));
+  const auditDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "session-live-canary");
+  const auditFile = path.join(auditDir, "audit.jsonl");
+  if (!pathInside(abrainHome, auditFile)) return { ok: false, error: "audit_path_escape" };
+  const compiled = args.result.compiled;
+  const row = {
+    schemaVersion: "rule-injector-session-live-canary-audit/v1",
+    observedAtUtc: new Date().toISOString(),
+    cwd: args.cache.cwd,
+    activeProjectId: args.cache.activeProjectId ?? null,
+    sessionId: args.result.liveCanary.sessionId,
+    optInSource: args.result.liveCanary.optInSource ?? null,
+    globalFallbackToLegacyOnError: args.globalSettings.compiledViewInjection.fallbackToLegacyOnError,
+    effectiveFallbackToLegacyOnError: args.result.settings.compiledViewInjection.fallbackToLegacyOnError,
+    decision: args.result.decision,
+    compiledStatus: compiled.ok ? "ok" : "failed",
+    reason: compiled.ok ? null : compiled.reason,
+    compiledError: compiled.ok ? null : compiled.error ?? null,
+    coverageRatio: compiled.coverageRatio ?? null,
+    injectableCoverageRatio: compiled.injectableCoverageRatio ?? null,
+    stale: compiled.stale ?? null,
+    queuedEvents: compiled.queuedEvents ?? null,
+    appendFailedEvents: compiled.appendFailedEvents ?? null,
+    compiledCounts: compiled.counts ?? { always: 0, listed: 0, total: 0 },
+  };
+  try {
+    fs.mkdirSync(auditDir, { recursive: true, mode: 0o700 });
+    if (!pathInside(abrainHome, auditFile)) return { ok: false, error: "audit_path_escape" };
+    fs.appendFileSync(auditFile, `${JSON.stringify(row)}\n`, { encoding: "utf-8", mode: 0o600 });
+    try { fs.chmodSync(auditFile, 0o600); } catch { /* best-effort */ }
+    return { ok: true };
+  } catch (err: unknown) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 }
+
+function decideRuntimeRuleInjection(args: {
+  cache: RuleScanCache;
+  globalSettings: RuleInjectorSettings;
+  runtimeSettings: RuleInjectorSettings;
+  liveCanary: LiveCanaryRuntimeState;
+}): RuntimeRuleInjectionResult {
+  const compiled = readCompiledRuleInjectionForRuntime({
+    abrainHome: args.cache.abrainHome,
+    nonce: args.cache.nonce,
+    settings: args.runtimeSettings.compiledViewInjection,
+    activeProjectId: args.cache.activeProjectId,
+  });
+  let result: RuntimeRuleInjectionResult;
+  if (compiled.ok) {
+    result = {
+      injection: compiled.injection,
+      decision: "compiled_injected",
+      compiled,
+      settings: args.runtimeSettings,
+      liveCanary: args.liveCanary,
+    };
+  } else if (args.runtimeSettings.compiledViewInjection.enabled && !args.runtimeSettings.compiledViewInjection.fallbackToLegacyOnError) {
+    result = {
+      decision: "fail_closed_drop",
+      compiled,
+      settings: args.runtimeSettings,
+      liveCanary: args.liveCanary,
+    };
+  } else {
+    result = {
+      injection: composeRuleInjection(args.cache),
+      decision: "legacy_fallback",
+      compiled,
+      settings: args.runtimeSettings,
+      liveCanary: args.liveCanary,
+    };
+  }
+  appendLiveCanaryAudit({ cache: args.cache, globalSettings: args.globalSettings, result });
+  return result;
+}
+
 
 export function stripCurrentRuleInjection(text: string, nonce: string | undefined | null): string {
   if (!text || !nonce) return text;
@@ -874,7 +1047,7 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     registerCommand?: (name: string, options: {
       description?: string;
       getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null;
-      handler: (args: string, ctx: { cwd?: string; ui?: { notify?(message: string, type?: NotifyType): void; setStatus?(key: string, text: string | undefined): void } }) => Promise<void> | void;
+      handler: (args: string, ctx: { cwd?: string; sessionManager?: unknown; ui?: { notify?(message: string, type?: NotifyType): void; setStatus?(key: string, text: string | undefined): void } }) => Promise<void> | void;
     }) => void;
   };
 
@@ -886,9 +1059,10 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
 
     try {
       ensureRuleDirs(ABRAIN_HOME);
-      cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings });
+      const runtime = resolveRuntimeRuleInjectorSettings(settings, ctx);
+      cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtime.settings });
       ensureProjectRuleDirs(ABRAIN_HOME, cachedRules.activeProjectId);
-      setFooterStatus(ctx, cachedRules, settings);
+      setFooterStatus(ctx, cachedRules, runtime.settings, runtime.liveCanary.active ? "live canary active" : undefined);
       if (settings.dualReadAudit.enabled) {
         runRuleInjectorDualReadAudit({
           abrainHome: ABRAIN_HOME,
@@ -902,7 +1076,7 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       // written mid-session by background sediment refreshes the footer live
       // (no /rule reload or restart needed).
       captureRulesFooterSetter(ctx);
-      setupRulesWatcher(ctx?.cwd || process.cwd(), settings, cachedRules.activeProjectId);
+      setupRulesWatcher(ctx?.cwd || process.cwd(), runtime.settings, cachedRules.activeProjectId);
     } catch (e: unknown) {
       cachedRules = null;
       const msg = e instanceof Error ? e.message : String(e);
@@ -919,17 +1093,30 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
 
     const current = event.systemPrompt ?? "";
     if (current.includes(BEGIN_ABRAIN_RULES)) return undefined;
+    const runtime = resolveRuntimeRuleInjectorSettings(settings, ctx);
     if (!cachedRules || path.resolve(ctx?.cwd || process.cwd()) !== cachedRules.cwd) {
       try {
-        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings });
+        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtime.settings });
       } catch {
         return undefined;
       }
     }
-    if (!hasAnyRules(cachedRules) && !settings.compiledViewInjection.enabled) return undefined;
-    const injection = composeRuntimeRuleInjection(cachedRules, settings);
-    if (!injection) return undefined;
-    return { systemPrompt: `${current}\n\n${injection}` };
+    if (!hasAnyRules(cachedRules) && !runtime.settings.compiledViewInjection.enabled) return undefined;
+    const result = decideRuntimeRuleInjection({
+      cache: cachedRules,
+      globalSettings: settings,
+      runtimeSettings: runtime.settings,
+      liveCanary: runtime.liveCanary,
+    });
+    if (!result.injection) {
+      if (runtime.liveCanary.active && !result.compiled.ok) {
+        const detail = `live canary fail-closed: ${result.compiled.reason}`;
+        setFooterStatus(ctx, cachedRules, runtime.settings, detail);
+        try { ctx?.ui?.notify?.(`abrain rules: ${detail}`, "warning"); } catch { /* best-effort */ }
+      }
+      return undefined;
+    }
+    return { systemPrompt: `${current}\n\n${result.injection}` };
   });
 
   if (typeof maybePi.registerCommand !== "function") return;
@@ -943,16 +1130,17 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     async handler(args: string, ctx) {
       const trimmed = args.trim();
       const [sub = "list", ...rest] = trimmed ? trimmed.split(/\s+/) : [];
+      const runtime = resolveRuntimeRuleInjectorSettings(settings, ctx);
       if (sub === "reload") {
-        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings });
-        setFooterStatus(ctx, cachedRules, settings, "reloaded");
+        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtime.settings });
+        setFooterStatus(ctx, cachedRules, runtime.settings, runtime.liveCanary.active ? "reloaded, live canary active" : "reloaded");
         notifyWarningsOnce(ctx, cachedRules);
         const counts = ruleCounts(cachedRules);
         ctx.ui?.notify?.(`abrain rules reloaded: ${counts.always} always, ${counts.listed} listed`, "info");
         return;
       }
       if (!cachedRules || path.resolve(ctx?.cwd || process.cwd()) !== cachedRules.cwd) {
-        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings });
+        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtime.settings });
       }
       if (sub === "list") {
         ctx.ui?.notify?.(formatRuleList(cachedRules, rest.join(" ")), "info");
