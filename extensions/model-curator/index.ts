@@ -477,11 +477,8 @@ export default function (pi: ExtensionAPI) {
 
     if (ctx.hasUI) {
       try {
-        // Total models actually available for dispatch — includes both
-        // curated (kept after whitelist) and raw providers (e.g. kimi-coding
-        // when uncurated, which model-curator passes through untouched).
-        // Falls back to getAll() if getAvailable isn't exposed by this pi
-        // version.
+        // Total models actually available for dispatch. Falls back to getAll()
+        // if getAvailable isn't exposed by this pi version.
         let totalAvailable = totalKept;
         try {
           const list = reg.getAvailable ? reg.getAvailable() : reg.getAll();

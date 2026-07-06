@@ -636,8 +636,8 @@ writeAbrainWorkflow 存在（writer.ts:1689）；pi.appendEntry 存在
 
 ## Provenance
 
-- deep-research：6 worker（deepseek-v4-pro / sonnet-4-6 / gpt-5.4 /
-  MiniMax-M3 / kimi-k2-thinking / MiniMax-M2.7）+ gpt-5.5 citation pass。
+- deep-research：5 worker（deepseek-v4-pro / sonnet-4-6 / gpt-5.4 /
+  MiniMax-M3 / MiniMax-M2.7）+ gpt-5.5 citation pass。
 - Round-1 盲审：claude-opus-4-8（342s）/ gpt-5.5（187s）/
   deepseek-v4-pro（283s），各自独立核验 writer.ts dedup、
   correction-pipeline 谓词、git-sync gap、pi extensions.md sendUserMessage。
