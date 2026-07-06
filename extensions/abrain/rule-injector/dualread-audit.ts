@@ -98,6 +98,18 @@ interface ShadowEventCoverage {
   };
 }
 
+type TextDeltaDisposition = "semantic_equivalent" | "normalization_possible" | "semantic_mismatch_fix_required" | "semantic_review_required";
+
+interface TextDeltaDispositionItem {
+  sourceRecordId: string;
+  legacyHash: string;
+  shadowHash: string;
+  disposition: TextDeltaDisposition;
+  reviewedAtUtc?: string;
+  reviewRef?: string;
+  reason?: string;
+}
+
 type ComparableRule = {
   key: string;
   sourceRecordIds: string[];
@@ -115,6 +127,13 @@ const DEFAULT_AUDIT_SETTINGS: RuleInjectorDualReadAuditSettings = {
 };
 
 const SCHEMA_VERSION = "rule-injector-dualread-audit/v1";
+const TEXT_DELTA_DISPOSITION_SCHEMA_VERSION = "constraint-text-delta-dispositions/v1";
+const TEXT_DELTA_DISPOSITIONS = new Set<string>([
+  "semantic_equivalent",
+  "normalization_possible",
+  "semantic_mismatch_fix_required",
+  "semantic_review_required",
+]);
 const SHADOW_ROOT_REL = path.join(".state", "sediment", "constraint-shadow");
 const AUDIT_DIR_REL = path.join(SHADOW_ROOT_REL, "session-start-dualread");
 
@@ -270,6 +289,46 @@ function diffRows(value: unknown): ShadowDiffRow[] {
   if (value.schemaVersion !== "constraint-shadow-diff/v1") return [];
   const rows = (value as ShadowDiffReport).rows;
   return Array.isArray(rows) ? rows.filter((row): row is ShadowDiffRow => isObject(row)) : [];
+}
+
+function textDeltaDispositionKey(item: { sourceRecordId: string; legacyHash: string; shadowHash: string }): string {
+  return `${item.sourceRecordId}\0${item.legacyHash}\0${item.shadowHash}`;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function readTextDeltaDispositions(file: string, maxReadBytes: number): Map<string, TextDeltaDispositionItem> {
+  const value = readJsonBounded(file, maxReadBytes);
+  if (!isObject(value)) throw new Error("text-delta-dispositions is not an object");
+  if (value.schemaVersion !== TEXT_DELTA_DISPOSITION_SCHEMA_VERSION) throw new Error("unexpected text-delta-dispositions schemaVersion");
+  if (!Array.isArray(value.items)) throw new Error("text-delta-dispositions.items is not an array");
+  const out = new Map<string, TextDeltaDispositionItem>();
+  for (const raw of value.items) {
+    if (!isObject(raw)) throw new Error("text-delta-dispositions item is not an object");
+    const sourceRecordId = raw.sourceRecordId;
+    const legacyHash = raw.legacyHash;
+    const shadowHash = raw.shadowHash;
+    const disposition = raw.disposition;
+    if (typeof sourceRecordId !== "string" || typeof legacyHash !== "string" || typeof shadowHash !== "string") {
+      throw new Error("text-delta-dispositions item missing sourceRecordId/legacyHash/shadowHash");
+    }
+    if (typeof disposition !== "string" || !TEXT_DELTA_DISPOSITIONS.has(disposition)) {
+      throw new Error("text-delta-dispositions item has invalid disposition");
+    }
+    const item: TextDeltaDispositionItem = {
+      sourceRecordId,
+      legacyHash,
+      shadowHash,
+      disposition: disposition as TextDeltaDisposition,
+      ...(optionalString(raw.reviewedAtUtc) ? { reviewedAtUtc: optionalString(raw.reviewedAtUtc) } : {}),
+      ...(optionalString(raw.reviewRef) ? { reviewRef: optionalString(raw.reviewRef) } : {}),
+      ...(optionalString(raw.reason) ? { reason: optionalString(raw.reason) } : {}),
+    };
+    out.set(textDeltaDispositionKey(item), item);
+  }
+  return out;
 }
 
 function sourceIn(ids: string[] | undefined, sourceRecordId: string): boolean {
@@ -453,11 +512,32 @@ function compiledOnlyDetails(sourceRecordIds: string[], constraints: ShadowConst
   });
 }
 
-function textDeltaDetails(input: { textDelta: Array<{ sourceRecordId: string; legacyHash: string; shadowHash: string }>; diffRows: ShadowDiffRow[]; decision: ShadowDecision }) {
+function textDeltaDetails(input: {
+  textDelta: Array<{ sourceRecordId: string; legacyHash: string; shadowHash: string }>;
+  diffRows: ShadowDiffRow[];
+  decision: ShadowDecision;
+  dispositions?: Map<string, TextDeltaDispositionItem>;
+}) {
   return input.textDelta.map((item) => {
+    const disposition = input.dispositions?.get(textDeltaDispositionKey(item));
     const diffRow = input.diffRows.find((row) => row.sourceRecordId === item.sourceRecordId);
     const diagnostic = input.decision.diagnostics?.find((row) => sourceIn(row.sourceRecordIds, item.sourceRecordId));
     const normalizationPossible = diffRow?.category === "compact" || diagnostic?.code === "SC_NOT_MEMORY_SUBTYPE_NORMALIZED";
+    if (disposition) {
+      return {
+        ...item,
+        disposition: disposition.disposition,
+        machineDisposition: disposition.disposition,
+        humanReviewRequired: disposition.disposition === "semantic_mismatch_fix_required" || disposition.disposition === "semantic_review_required",
+        reviewSource: "text-delta-dispositions",
+        ...(disposition.reviewedAtUtc ? { reviewedAtUtc: disposition.reviewedAtUtc } : {}),
+        ...(disposition.reviewRef ? { reviewRef: disposition.reviewRef } : {}),
+        ...(disposition.reason ? { reason: disposition.reason } : {}),
+        ...(diffRow?.category ? { category: diffRow.category } : {}),
+        ...(diffRow?.targetId ? { targetId: diffRow.targetId } : {}),
+        ...(diagnostic?.id ? { diagnosticIds: [diagnostic.id] } : {}),
+      };
+    }
     return {
       ...item,
       disposition: normalizationPossible ? "normalization_possible" : "semantic_review_required",
@@ -547,6 +627,7 @@ export function runRuleInjectorDualReadAudit(input: {
     const decisionPath = path.join(latestDir, "decision.json");
     const coveragePath = path.join(latestDir, "event-coverage.json");
     const diffPath = path.join(latestDir, "diff.json");
+    const textDeltaDispositionsPath = path.join(latestDir, "text-delta-dispositions.json");
     if (!fs.existsSync(decisionPath)) return finish("shadow_unavailable", { reason: "missing_decision" });
     const decision = validateDecision(readJsonBounded(decisionPath, input.settings.maxReadBytes));
     const coverage = fs.existsSync(coveragePath) ? eventCoverageSummary(readJsonBounded(coveragePath, input.settings.maxReadBytes)) : undefined;
@@ -556,16 +637,27 @@ export function runRuleInjectorDualReadAudit(input: {
     } catch {
       diff = [];
     }
+    let textDeltaDispositionItems = new Map<string, TextDeltaDispositionItem>();
+    let textDeltaDispositionReadError: string | undefined;
+    try {
+      textDeltaDispositionItems = fs.existsSync(textDeltaDispositionsPath)
+        ? readTextDeltaDispositions(textDeltaDispositionsPath, input.settings.maxReadBytes)
+        : new Map<string, TextDeltaDispositionItem>();
+    } catch (err: unknown) {
+      textDeltaDispositionReadError = err instanceof Error ? err.message : String(err);
+    }
     const decisionStat = fs.statSync(decisionPath);
     const shadowAgeMs = Math.max(0, nowMs - decisionStat.mtimeMs);
     const stale = shadowAgeMs > input.settings.staleAfterMs;
     const constraints = decision.constraints ?? [];
     const delta = classifyDelta(allLegacyRules(input.cache), constraints);
     const legacyDetails = legacyOnlyDetails({ sourceRecordIds: delta.legacyOnly, decision, diffRows: diff });
+    const textDetails = textDeltaDetails({ textDelta: delta.textDelta, diffRows: diff, decision, dispositions: textDeltaDispositionItems });
     const hasDelta = delta.compiledOnly.length > 0 || delta.legacyOnly.length > 0 || delta.textDelta.length > 0;
     return finish(hasDelta || stale ? "delta" : "match", {
       inputRootHash: decision.inputRootHash,
       validationHash: decision.validationHash,
+      ...(textDeltaDispositionReadError ? { textDeltaDispositionReadError } : {}),
       shadowAgeMs,
       stale,
       eventCoverage: coverage,
@@ -582,7 +674,8 @@ export function runRuleInjectorDualReadAudit(input: {
       legacyOnlyDetails: legacyDetails,
       compiledOnlyBackfillAllowed: false,
       compiledOnlyDetails: compiledOnlyDetails(delta.compiledOnly, constraints),
-      textDeltaDetails: textDeltaDetails({ textDelta: delta.textDelta, diffRows: diff, decision }),
+      textDeltaDispositions: countByDisposition(textDetails),
+      textDeltaDetails: textDetails,
       inconsistentDiagnostics: inconsistentDiagnostics(decision),
     });
   } catch (err: unknown) {

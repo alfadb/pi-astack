@@ -10,6 +10,7 @@
  *   - brain-layout creates rules/always + rules/listed
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -120,6 +121,10 @@ function readJsonLines(file) {
 function legacySourceId(entry) {
   if (entry.scope === "project" && entry.projectId) return `rule:project:${entry.projectId}:${entry.injectMode}:${entry.slug}`;
   return `rule:global:${entry.injectMode}:${entry.slug}`;
+}
+
+function normalizedBodyHash(value) {
+  return crypto.createHash("sha256").update(String(value ?? "").replace(/\r\n/g, "\n").replace(/[ \t]+$/gm, "").trim()).digest("hex");
 }
 
 function shadowConstraintFromRule(entry, overrides = {}) {
@@ -737,7 +742,7 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
 
   const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
   const constraints = [
-    shadowConstraintFromRule(cache.globalAlways[0]),
+    shadowConstraintFromRule(cache.globalAlways[0], { compiledBody: `${cache.globalAlways[0].body}\n\nCompiler changed meaning.` }),
     shadowConstraintFromRule(cache.globalListed[0], { mustDoSummary: "different summary" }),
     {
       constraintId: "shadow:compiled-only",
@@ -752,6 +757,8 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
   ];
   const settingsLegacyOnlySource = legacySourceId(cache.projectListed[0]);
   const unresolvedLegacyOnlySource = legacySourceId(cache.projectAlways[0]);
+  const semanticEquivalentTextDeltaSource = legacySourceId(cache.globalListed[0]);
+  const hashMismatchTextDeltaSource = legacySourceId(cache.globalAlways[0]);
   writeShadowDecision(path.join(latestDir, "decision.json"), constraints, {
     exclusions: [{
       reason: "settings_not_memory",
@@ -808,6 +815,25 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
     },
     rows: [],
   }, null, 2));
+  writeFile(path.join(latestDir, "text-delta-dispositions.json"), JSON.stringify({
+    schemaVersion: "constraint-text-delta-dispositions/v1",
+    items: [{
+      sourceRecordId: semanticEquivalentTextDeltaSource,
+      legacyHash: normalizedBodyHash(cache.globalListed[0].body),
+      shadowHash: normalizedBodyHash(cache.globalListed[0].body),
+      disposition: "semantic_equivalent",
+      reviewedAtUtc: "2026-07-06T00:00:00.000Z",
+      reviewRef: "smoke-review:semantic-equivalent",
+      reason: "manual review accepted summary-only normalization",
+    }, {
+      sourceRecordId: hashMismatchTextDeltaSource,
+      legacyHash: "wrong-legacy-hash",
+      shadowHash: normalizedBodyHash(`${cache.globalAlways[0].body}\n\nCompiler changed meaning.`),
+      disposition: "semantic_equivalent",
+      reviewRef: "smoke-review:hash-mismatch",
+      reason: "must be ignored because hashes do not match",
+    }],
+  }, null, 2));
   const beforeRulesMtime = fs.statSync(path.join(abrainHome, "rules", "always", "edit-write-only.md")).mtimeMs;
   const enabled = dual.runRuleInjectorDualReadAudit({
     abrainHome,
@@ -825,7 +851,7 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
   if (row.summary.legacyRules !== 4) throw new Error(`legacyRules=${row.summary.legacyRules}`);
   if (row.summary.compiledOnly !== 1) throw new Error(`compiledOnly=${row.summary.compiledOnly}`);
   if (row.summary.legacyOnly !== 2) throw new Error(`legacyOnly=${row.summary.legacyOnly}`);
-  if (row.summary.textDelta !== 1) throw new Error(`textDelta=${row.summary.textDelta}`);
+  if (row.summary.textDelta !== 2) throw new Error(`textDelta=${row.summary.textDelta}`);
   if (row.legacyOnlyDispositions.settings_not_memory !== 1) throw new Error(`legacyOnlyDispositions missing settings_not_memory: ${JSON.stringify(row.legacyOnlyDispositions)}`);
   if (row.legacyOnlyDispositions.model_uncertain !== 1) throw new Error(`legacyOnlyDispositions missing model_uncertain: ${JSON.stringify(row.legacyOnlyDispositions)}`);
   const legacyDetail = row.legacyOnlyDetails.find((item) => item.sourceRecordId === settingsLegacyOnlySource);
@@ -847,16 +873,56 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
   if (row.compiledOnlyDetails.some((item) => item.compiledOnlyBackfillAllowed !== false)) {
     throw new Error(`compiledOnlyDetails should deny backfill: ${JSON.stringify(row.compiledOnlyDetails)}`);
   }
-  const textDetail = row.textDeltaDetails.find((item) => item.sourceRecordId === legacySourceId(cache.globalListed[0]));
-  if (!textDetail || textDetail.legacyHash !== row.delta.textDelta[0].legacyHash || textDetail.disposition !== "normalization_possible") {
-    throw new Error(`textDeltaDetails did not preserve hashes with coarse disposition: ${JSON.stringify(row.textDeltaDetails)}`);
+  const textDetail = row.textDeltaDetails.find((item) => item.sourceRecordId === semanticEquivalentTextDeltaSource);
+  if (!textDetail || textDetail.legacyHash !== normalizedBodyHash(cache.globalListed[0].body) || textDetail.disposition !== "semantic_equivalent") {
+    throw new Error(`textDeltaDetails did not preserve hashes with sidecar disposition: ${JSON.stringify(row.textDeltaDetails)}`);
   }
-  if (textDetail.humanReviewRequired !== false) throw new Error(`normalization text delta should not require human review: ${JSON.stringify(textDetail)}`);
+  if (textDetail.machineDisposition !== "semantic_equivalent" || textDetail.humanReviewRequired !== false) {
+    throw new Error(`semantic equivalent text delta should be machine-disposed without human review: ${JSON.stringify(textDetail)}`);
+  }
+  if (textDetail.reviewSource !== "text-delta-dispositions" || textDetail.reviewRef !== "smoke-review:semantic-equivalent" || textDetail.reason !== "manual review accepted summary-only normalization") {
+    throw new Error(`semantic equivalent text delta missing sidecar review metadata: ${JSON.stringify(textDetail)}`);
+  }
+  if (row.textDeltaDispositions.semantic_equivalent !== 1) {
+    throw new Error(`textDeltaDispositions missing semantic_equivalent count: ${JSON.stringify(row.textDeltaDispositions)}`);
+  }
+  const hashMismatchDetail = row.textDeltaDetails.find((item) => item.sourceRecordId === hashMismatchTextDeltaSource);
+  if (!hashMismatchDetail || hashMismatchDetail.disposition !== "semantic_review_required" || hashMismatchDetail.humanReviewRequired !== true) {
+    throw new Error(`hash-mismatched sidecar item should be ignored: ${JSON.stringify(row.textDeltaDetails)}`);
+  }
+  if (hashMismatchDetail.reviewSource || hashMismatchDetail.machineDisposition) {
+    throw new Error(`hash-mismatched sidecar metadata leaked into detail: ${JSON.stringify(hashMismatchDetail)}`);
+  }
   const inconsistent = row.inconsistentDiagnostics.find((item) => item.code === "SC_SMOKE_COMPILED_UNRESOLVED");
   if (!inconsistent || inconsistent.reason !== "diagnostic_claims_compiled_for_unresolved_source") {
     throw new Error(`inconsistentDiagnostics did not flag compiled/unresolved diagnostic: ${JSON.stringify(row.inconsistentDiagnostics)}`);
   }
   if (row.eventCoverage.queuedEvents !== 1 || row.eventCoverage.staleEvents !== 1) throw new Error(`event coverage missing: ${JSON.stringify(row.eventCoverage)}`);
+  writeFile(path.join(latestDir, "text-delta-dispositions.json"), "{ bad json");
+  const badSidecar = dual.runRuleInjectorDualReadAudit({
+    abrainHome,
+    cwd: projectRoot,
+    cache,
+    settings: dual.resolveRuleInjectorDualReadAuditSettings({ enabled: true, staleAfterMs: 0 }),
+    nowMs: Date.now() + 20_000,
+  });
+  if (badSidecar.status !== "delta" && badSidecar.status !== "match") throw new Error(`bad sidecar should not make shadow invalid: ${JSON.stringify(badSidecar)}`);
+  const badSidecarRow = readJsonLines(badSidecar.auditFile).at(-1);
+  if (!badSidecarRow.textDeltaDispositionReadError) throw new Error(`bad sidecar row missing read error: ${JSON.stringify(badSidecarRow)}`);
+  writeFile(path.join(latestDir, "text-delta-dispositions.json"), JSON.stringify({
+    schemaVersion: "constraint-text-delta-dispositions/v1",
+    items: [{ sourceRecordId: semanticEquivalentTextDeltaSource, legacyHash: normalizedBodyHash(cache.globalListed[0].body) }],
+  }, null, 2));
+  const schemaBadSidecar = dual.runRuleInjectorDualReadAudit({
+    abrainHome,
+    cwd: projectRoot,
+    cache,
+    settings: dual.resolveRuleInjectorDualReadAuditSettings({ enabled: true, staleAfterMs: 0 }),
+    nowMs: Date.now() + 30_000,
+  });
+  if (schemaBadSidecar.status !== "delta" && schemaBadSidecar.status !== "match") throw new Error(`schema-bad sidecar should not make shadow invalid: ${JSON.stringify(schemaBadSidecar)}`);
+  const schemaBadSidecarRow = readJsonLines(schemaBadSidecar.auditFile).at(-1);
+  if (!schemaBadSidecarRow.textDeltaDispositionReadError) throw new Error(`schema-bad sidecar row missing read error: ${JSON.stringify(schemaBadSidecarRow)}`);
   const afterRulesMtime = fs.statSync(path.join(abrainHome, "rules", "always", "edit-write-only.md")).mtimeMs;
   if (afterRulesMtime !== beforeRulesMtime) throw new Error("dual-read audit changed a rule file");
 });
