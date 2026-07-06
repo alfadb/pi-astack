@@ -1584,6 +1584,16 @@ check("event coverage reports queued stale projected and legacy delta", () => {
   assert(coverage.report.summary.projectedEvents === 2, "projected event not counted");
   assert(coverage.report.summary.staleEvents === 1, "stale queued event not counted");
   assert(coverage.report.summary.deferredMergedSourceEvents === 1, "deferred merged-source event not counted");
+  assert(coverage.report.summary.deferredUnresolvedEvents === 0, "unexpected deferred unresolved event count");
+  const deferredMergeRow = coverage.report.rows.find((row) => row.sourceRecordId === deferredMergeEvent.sourceId);
+  assert(deferredMergeRow?.coverageDisposition?.kind === "deferred_merged_source", "merged_source row disposition kind missing");
+  assert(deferredMergeRow?.coverageDisposition?.action === "exclude_from_injectable_denominator", "merged_source row disposition action missing");
+  assert(deferredMergeRow?.coverageDisposition?.verifierVerdict === "not_evaluated", "merged_source row verifier verdict missing");
+  assert(deferredMergeRow?.coverageDisposition?.targetConstraintIds?.length === 1, "merged_source row target constraint id missing");
+  assert(deferredMergeRow?.coverageDisposition?.mergeReasons?.includes("deferred merged-source coverage fixture"), "merged_source row merge reason missing");
+  const staleRow = coverage.report.rows.find((row) => row.sourceRecordId === queuedEvent.sourceId);
+  assert(staleRow?.coverageDisposition?.action === "emit_stale_threshold", "ordinary stale row disposition action missing");
+  assert(staleRow?.coverageDisposition?.kind === "stale_threshold", "ordinary stale row disposition kind missing");
   assert(coverage.report.summary.coverageRatio === 0.5, "strict coverage ratio should keep deferred merged-source queued");
   assert(coverage.report.summary.injectableCoverageRatio === 2 / 3, "injectable coverage ratio should exclude deferred merged-source denominator");
   assert(coverage.report.summary.provenance.liveEvents === 2, "live provenance count missing");
@@ -1645,6 +1655,17 @@ check("ADR0039 (2026-06-24): AGED merged_source/unresolved are deferred — excl
   assert(s.projectedEvents === 1, `projected ${s.projectedEvents}`);
   assert(s.staleEvents === 2, `stale ${s.staleEvents} (merged+unresolved aged)`);
   assert(s.deferredMergedSourceEvents === 1, `aged merged-source still counted as deferred, got ${s.deferredMergedSourceEvents}`);
+  assert(s.deferredUnresolvedEvents === 1, `aged unresolved still counted as deferred, got ${s.deferredUnresolvedEvents}`);
+  const mergedRow = coverage.report.rows.find((row) => row.sourceRecordId === mergedEvent.sourceId);
+  assert(mergedRow?.coverageDisposition?.kind === "deferred_merged_source", "aged merged_source row disposition kind missing");
+  assert(mergedRow?.coverageDisposition?.action === "exclude_from_injectable_denominator", "aged merged_source row action missing");
+  assert(mergedRow?.coverageDisposition?.verifierVerdict === "not_evaluated", "aged merged_source verifier verdict missing");
+  assert(mergedRow?.coverageDisposition?.targetConstraintIds?.length === 1, "aged merged_source target constraint id missing");
+  assert(mergedRow?.coverageDisposition?.mergeReasons?.includes("aged merged-source fixture"), "aged merged_source merge reason missing");
+  const unresolvedRow = coverage.report.rows.find((row) => row.sourceRecordId === unresolvedEvent.sourceId);
+  assert(unresolvedRow?.coverageDisposition?.kind === "deferred_unresolved", "aged unresolved row disposition kind missing");
+  assert(unresolvedRow?.coverageDisposition?.action === "exclude_from_injectable_denominator", "aged unresolved row action missing");
+  assert(unresolvedRow?.coverageDisposition?.reason === "conflict", "aged unresolved row reason missing");
   assert(s.injectableCoverageRatio === 1, `injectable should exclude deferred from denom, got ${s.injectableCoverageRatio}`);
   assert(!coverage.diagnostics.some((d) => d.code === "SC_EVENT_STALE_THRESHOLD"), "aged deferred merged/unresolved must NOT emit stale diagnostics");
   assert(!coverage.diagnostics.some((d) => d.code === "SC_EVENT_COVERAGE_GAP"), "deferred must NOT emit coverage-gap diagnostics");
@@ -1860,8 +1881,12 @@ check("shadow runner reads L1 events and writes event coverage artifacts", async
   });
   assert(result.ok, "runner event success path failed");
   assert(result.ok && result.eventCoverage?.summary.projectedEvents === 1, "event coverage did not project event");
+  assert(result.ok && result.eventCoverage?.rows.some((row) => row.coverageDisposition?.action === "count_projected"), "event coverage row disposition missing");
   assert(result.ok && result.legacyParallelDelta?.summary.matchedOutcomes === 1, "legacy delta did not match event");
-  assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "event-coverage.json")), "event coverage artifact missing");
+  const latestCoveragePath = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "event-coverage.json");
+  assert(fs.existsSync(latestCoveragePath), "event coverage artifact missing");
+  const latestCoverage = JSON.parse(fs.readFileSync(latestCoveragePath, "utf8"));
+  assert(latestCoverage.rows.some((row) => row.coverageDisposition?.action === "count_projected"), "latest event coverage row disposition missing");
   assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "legacy-parallel-delta.json")), "legacy delta artifact missing");
 });
 

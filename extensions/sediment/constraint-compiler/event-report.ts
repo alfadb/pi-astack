@@ -2,6 +2,7 @@ import { markStaleQueuedConstraintEvents, summarizeConstraintEventProjectionStat
 import type { ConstraintEventProjectionRecord } from "../constraint-evidence/types";
 import { makeDiagnostic } from "./diagnostics";
 import type {
+  ConstraintEventCoverageDisposition,
   ConstraintEventCoverageReport,
   ConstraintEventSourceRecord,
   ConstraintLegacyParallelDeltaReport,
@@ -28,6 +29,105 @@ function diagnosticCodesForSource(diagnostics: ConstraintShadowDiagnostic[], sou
 
 function hasCompiledConstraintForSource(event: ConstraintEventSourceRecord, decision: ValidatedConstraintCompilerDecision): boolean {
   return decision.constraints.some((constraint) => constraint.sourceRecordIds.includes(event.sourceId));
+}
+
+function sortedUnique(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.filter((value): value is string => typeof value === "string" && value.length > 0))).sort();
+}
+
+function mergeReasonsForSource(decision: ValidatedConstraintCompilerDecision, sourceId: string): string[] {
+  return sortedUnique(decision.merges
+    .filter((item) => item.sourceRecordIds.includes(sourceId))
+    .map((item) => item.reason));
+}
+
+function targetConstraintIdsForMergedSource(decision: ValidatedConstraintCompilerDecision, sourceId: string): string[] {
+  return sortedUnique([
+    ...decision.merges
+      .filter((item) => item.sourceRecordIds.includes(sourceId))
+      .map((item) => item.targetConstraintId),
+    ...decision.constraints
+      .filter((item) => item.sourceRecordIds.includes(sourceId))
+      .map((item) => item.constraintId),
+  ]);
+}
+
+function unresolvedReasonsForSource(decision: ValidatedConstraintCompilerDecision, sourceId: string): string[] {
+  return sortedUnique(decision.unresolved
+    .filter((item) => item.sourceRecordIds.includes(sourceId))
+    .map((item) => item.reason));
+}
+
+function exclusionReasonsForSource(decision: ValidatedConstraintCompilerDecision, sourceId: string): string[] {
+  return sortedUnique(decision.exclusions
+    .filter((item) => item.sourceRecordIds.includes(sourceId))
+    .map((item) => item.reason));
+}
+
+function coverageDispositionForRow(input: {
+  decision: ValidatedConstraintCompilerDecision;
+  sourceRecordId: string;
+  status: ConstraintEventCoverageReport["rows"][number]["status"];
+  disposition?: ConstraintSourceDisposition;
+  diagnostics: string[];
+  staleAfterMs: number;
+}): ConstraintEventCoverageDisposition {
+  if (input.status === "projected") {
+    const exclusionReasons = input.disposition === "excluded" ? exclusionReasonsForSource(input.decision, input.sourceRecordId) : [];
+    return {
+      kind: "projected",
+      action: "count_projected",
+      reason: input.disposition === "excluded"
+        ? `source disposition excluded${exclusionReasons.length ? `: ${exclusionReasons.join("; ")}` : ""}`
+        : "source disposition compiled",
+    };
+  }
+  if ((input.status === "queued" || input.status === "stale") && input.disposition === "merged_source") {
+    const mergeReasons = mergeReasonsForSource(input.decision, input.sourceRecordId);
+    const targetConstraintIds = targetConstraintIdsForMergedSource(input.decision, input.sourceRecordId);
+    return {
+      kind: "deferred_merged_source",
+      action: "exclude_from_injectable_denominator",
+      reason: "merged source is deferred pending verifier coverage",
+      targetConstraintIds,
+      mergeReasons,
+      verifierVerdict: "not_evaluated",
+    };
+  }
+  if ((input.status === "queued" || input.status === "stale") && input.disposition === "unresolved") {
+    const unresolvedReasons = unresolvedReasonsForSource(input.decision, input.sourceRecordId);
+    return {
+      kind: "deferred_unresolved",
+      action: "exclude_from_injectable_denominator",
+      reason: unresolvedReasons.length ? unresolvedReasons.join("; ") : "compiler marked source unresolved",
+    };
+  }
+  if (input.status === "queued") {
+    return {
+      kind: "coverage_gap",
+      action: "emit_coverage_gap",
+      reason: "event has no compiler disposition yet",
+    };
+  }
+  if (input.status === "stale") {
+    return {
+      kind: "stale_threshold",
+      action: "emit_stale_threshold",
+      reason: `event exceeded shadow projection stale threshold (${input.staleAfterMs}ms)`,
+    };
+  }
+  if (input.status === "invalid") {
+    return {
+      kind: "invalid",
+      action: "count_invalid",
+      reason: input.diagnostics.length ? `invalid event diagnostics: ${input.diagnostics.join("; ")}` : "event is invalid",
+    };
+  }
+  return {
+    kind: "append_failed",
+    action: "count_append_failed",
+    reason: "event append failed before shadow projection",
+  };
 }
 
 function projectionRecordForEvent(
@@ -80,14 +180,24 @@ export function createConstraintEventCoverageReport(input: {
   const rows = records.map((record) => {
     const sourceRecordId = `event:${record.eventId}`;
     const event = eventById.get(record.eventId);
+    const disposition = dispositionForSource(input.decision, sourceRecordId);
+    const diagnostics = diagnosticCodesForSource(input.diagnostics, sourceRecordId);
     return {
       eventId: record.eventId,
       sourceRecordId,
       status: record.status,
-      disposition: dispositionForSource(input.decision, sourceRecordId),
+      disposition,
+      coverageDisposition: coverageDispositionForRow({
+        decision: input.decision,
+        sourceRecordId,
+        status: record.status,
+        disposition,
+        diagnostics,
+        staleAfterMs: input.staleAfterMs,
+      }),
       observedAtUtc: record.observedAtUtc,
       projectedAtUtc: record.projectedAtUtc,
-      diagnostics: diagnosticCodesForSource(input.diagnostics, sourceRecordId),
+      diagnostics,
       ...(event?.replayProvenance ? { provenance: event.replayProvenance } : {}),
       ...(event?.sourceChannel ? { sourceChannel: event.sourceChannel } : {}),
     };
@@ -141,6 +251,7 @@ export function createConstraintEventCoverageReport(input: {
         staleEvents: summary.stale,
         appendFailedEvents: summary.appendFailed,
         deferredMergedSourceEvents,
+        deferredUnresolvedEvents,
         ...(summary.oldestQueuedAgeMs === undefined ? {} : { oldestQueuedAgeMs: summary.oldestQueuedAgeMs }),
         coverageRatio: summary.total === 0 ? 1 : summary.projected / summary.total,
         injectableCoverageRatio,

@@ -337,6 +337,34 @@ export type ConstraintCompilerRunResult = {
   durationMs?: number;
 };
 
+export type ConstraintEventCoverageDispositionKind =
+  | "projected"
+  | "deferred_merged_source"
+  | "deferred_unresolved"
+  | "coverage_gap"
+  | "stale_threshold"
+  | "invalid"
+  | "append_failed";
+
+export type ConstraintEventCoverageDispositionAction =
+  | "count_projected"
+  | "exclude_from_injectable_denominator"
+  | "emit_coverage_gap"
+  | "emit_stale_threshold"
+  | "count_invalid"
+  | "count_append_failed";
+
+export type ConstraintEventCoverageVerifierVerdict = "not_evaluated";
+
+export interface ConstraintEventCoverageDisposition {
+  kind: ConstraintEventCoverageDispositionKind;
+  action: ConstraintEventCoverageDispositionAction;
+  reason: string;
+  targetConstraintIds?: string[];
+  mergeReasons?: string[];
+  verifierVerdict?: ConstraintEventCoverageVerifierVerdict;
+}
+
 export interface ConstraintEventCoverageReport {
   schemaVersion: "constraint-event-coverage/v1";
   summary: {
@@ -348,6 +376,7 @@ export interface ConstraintEventCoverageReport {
     staleEvents: number;
     appendFailedEvents: number;
     deferredMergedSourceEvents: number;
+    deferredUnresolvedEvents: number;
     oldestQueuedAgeMs?: number;
     coverageRatio: number;
     injectableCoverageRatio: number;
@@ -363,6 +392,7 @@ export interface ConstraintEventCoverageReport {
     sourceRecordId: string;
     status: "queued" | "projected" | "stale" | "invalid" | "append_failed";
     disposition?: ConstraintSourceDisposition;
+    coverageDisposition?: ConstraintEventCoverageDisposition;
     observedAtUtc?: string;
     projectedAtUtc?: string;
     diagnostics: string[];
