@@ -15,7 +15,7 @@ It does not authorize:
 - Production write beyond the already executed authorized audit scope.
 - Runtime flip.
 - `fallbackToLegacyOnError` change.
-- Compiled-view runtime injection.
+- New compiled-view runtime injection change or expansion.
 - Legacy retirement, archive, or delete.
 - Evidence write.
 
@@ -126,7 +126,7 @@ This does not authorize runtime readiness or runtime flip.
 - No production `~/.abrain` write.
 - No runtime flip.
 - No `fallbackToLegacyOnError` change.
-- No compiled-view runtime injection.
+- No new compiled-view runtime injection change or expansion.
 - No legacy retirement, archive, or delete.
 - No evidence write.
 

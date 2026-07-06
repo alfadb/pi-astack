@@ -15,7 +15,7 @@ It does not authorize:
 - Production `~/.abrain` write.
 - Runtime flip.
 - `fallbackToLegacyOnError` change.
-- Compiled-view runtime injection.
+- New compiled-view runtime injection change or expansion.
 - Legacy retirement, archive, or delete.
 - Evidence write.
 
@@ -97,7 +97,7 @@ Requires explicit user authorization and a separate gate:
 - No production `~/.abrain` write.
 - No runtime flip.
 - No `fallbackToLegacyOnError` change.
-- No compiled-view runtime injection.
+- No new compiled-view runtime injection change or expansion.
 - No legacy retirement, archive, or delete.
 - No evidence write.
 
