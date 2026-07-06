@@ -53,9 +53,9 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 
 ### 2.2 Vendor methodology references
 
-vendor 清单见 `.gitmodules` / `UPSTREAM.md`（read-only submodules：方法论参考）。
+当前没有 active vendor methodology submodule；retired/reference-on-demand 清单见 `UPSTREAM.md`。
 
-**契约（不变量）**：vendor 不属于 runtime surface；不从 vendor 直接加载 pi 扩展，也不在 vendor 内改端口层代码（vendor read-only + 单向依赖，ADR 0001/0006）。
+**契约（不变量）**：vendor/reference material 不属于 runtime surface；不从 vendor 直接加载 pi 扩展，也不在 vendor 内改端口层代码。已退役的上游参考（如 `vendor/gstack/`）需要时临时 clone 到 tracked repo 外读取 diff，再把想法 port 进自有 pi-astack 路径。
 
 ## 3. 记忆与 abrain（契约/拓扑）
 

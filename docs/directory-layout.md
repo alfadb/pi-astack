@@ -12,7 +12,7 @@ status: active
 
 | 想知道 | 派生命令 / 来源 |
 |---|---|
-| 仓库目录结构 | `find . -maxdepth 2 -type d \| sort`、`.gitmodules` |
+| 仓库目录结构 | `find . -maxdepth 2 -type d \| sort`；retired upstream references 见 `UPSTREAM.md` |
 | 有哪些扩展 | `find extensions -maxdepth 1 -type d \| sort` |
 | 有哪些 smoke | `npm pkg get scripts`；可读镜像 [reference/smoke-tests.md](./reference/smoke-tests.md) |
 | abrain 实际布局 | `find ~/.abrain -maxdepth 3 -type d \| sort`、`/abrain status` |
@@ -20,7 +20,7 @@ status: active
 
 ## 2. Vendor（契约）
 
-vendor 清单见 `.gitmodules`（read-only submodules：方法论参考）。**契约**：vendor 是 read-only source material，不属于 runtime package surface；把想法 port 进自有 pi-astack 路径，不直接改 vendor 文件。
+当前没有 active vendor methodology submodule；retired/reference-on-demand 清单见 `UPSTREAM.md`。**契约**：vendor/reference material 是 read-only source material，不属于 runtime package surface；需要时临时 clone 到 tracked repo 外读取，再把想法 port 进自有 pi-astack 路径。
 
 ## 3. `_shared/`（依赖边界契约）
 

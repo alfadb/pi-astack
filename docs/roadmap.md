@@ -174,7 +174,7 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 | qmd / BM25 optional acceleration | 旧 BM25/tf-idf 仅作为 deprecated dead code 留在 `extensions/memory/search.ts`，不是 `memory_search` fallback；可做离线诊断/加速实验。 |
 | Cross-device abrain sync | 等真实多机冲突反馈；不要提前 over-engineer。 |
 | Incremental graph rebuild | graph/index 是派生物，当前可 rebuild；增量优化低优先。 |
-| Skills/prompts/vendor port | `skills/`、`prompts/`、`vendor/gstack/` 仍是计划，不在 current repo tree。 |
+| Skills/prompts/gstack reference port | `skills/`、`prompts/` 仍是计划，不在 current repo tree；`vendor/gstack/` 已退役，未来如需吸收 gstack 方法论，按 `UPSTREAM.md` 临时 clone/read diff 后 port。 |
 
 ## Design maxim
 

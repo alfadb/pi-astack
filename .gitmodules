@@ -1,6 +1,0 @@
-[submodule "vendor/gstack"]
-	path = vendor/gstack
-	url = https://github.com/garrytan/gstack.git
-[submodule "vendor/pensieve"]
-	path = vendor/pensieve
-	url = https://github.com/kingkongshot/Pensieve.git

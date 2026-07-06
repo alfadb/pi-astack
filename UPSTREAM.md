@@ -12,9 +12,9 @@
 
 ## 2. 当前事实
 
-- 当前仓库有两个 read-only methodology/reference submodules：
-  - `vendor/gstack/` → `https://github.com/garrytan/gstack.git`（main @ `e362b0ae2f94afdcb55e37cc4690f9ce55ee5d32`）
-  - `vendor/pensieve/` → `https://github.com/kingkongshot/Pensieve.git`（main @ `8731f61b18a65f09eb0d3cd1ffbff7650ef8df48`）
+- 当前仓库没有 active read-only methodology/reference submodule。
+- `vendor/gstack/` 已于 2026-07-06 退役为 reference-on-demand；历史 upstream 为 `https://github.com/garrytan/gstack.git`，last pinned SHA 为 `e362b0ae2f94afdcb55e37cc4690f9ce55ee5d32`。
+- Pensieve 上游参考 submodule 已移除；历史 pinned ref 为 `8731f61b18a65f09eb0d3cd1ffbff7650ef8df48`。
 - `vendor/` 是方法论参考来源，不是 runtime package surface；pi-astack 不从 vendor 目录直接加载扩展/skills。
 - 当前仓库没有 `skills/`、`prompts/`、`extensions/browse/`、`defaults/` 目录。
 - `extensions/gbrain/` 已废弃，不是 current component。
@@ -45,23 +45,24 @@
 | `extensions/gbrain/` | old gbrain extension | deleted/obsolete; replaced by memory facade。 |
 | `alfadb/pi-gstack` content | old pi-gstack archive | not currently restored into this repo; future port only if needed。 |
 
-## 5. B 类：active vendor methodology references
+## 5. B 类：retired / reference-on-demand vendor methodology references
 
-These submodules are read-only reference sources. They are not runtime dependencies and should not be edited in place. Porting means copying/adapting ideas into owned pi-astack files, then recording the decision here.
+There are currently no active B 类 vendor submodules. Retired references are not checked out by default and are not runtime dependencies. When a retired upstream is needed, clone it into a temporary path outside the tracked repo, inspect the pinned ref or upstream diff, then copy/adapt ideas into owned pi-astack files.
 
-| Path | Upstream | Pinned ref | Role |
-|---|---|---|---|
-| `vendor/gstack/` | `https://github.com/garrytan/gstack.git` | `e362b0ae2f94afdcb55e37cc4690f9ce55ee5d32` (`main`) | Claude-code/gstack methodology reference: review/QA/security skills, `ship` flow, browse ideas, specialist docs. |
-| `vendor/pensieve/` | `https://github.com/kingkongshot/Pensieve.git` | `8731f61b18a65f09eb0d3cd1ffbff7650ef8df48` (`main`) | Pensieve methodology reference: memory workflows, task blueprints, legacy sediment/pipeline ideas. |
+| Path | Upstream | Last pinned ref | Retired on | Role / access pattern |
+|---|---|---|---|---|
+| `vendor/gstack/` | `https://github.com/garrytan/gstack.git` | `e362b0ae2f94afdcb55e37cc4690f9ce55ee5d32` (`main`) | 2026-07-06 | Claude-code/gstack methodology reference: review/QA/security skills, `ship` flow, browse ideas, specialist docs. If needed: `git clone https://github.com/garrytan/gstack.git /tmp/gstack-ref && cd /tmp/gstack-ref && git checkout e362b0ae2f94afdcb55e37cc4690f9ce55ee5d32`; for upstream review, fetch in that temp clone and read `git diff e362b0ae2f94afdcb55e37cc4690f9ce55ee5d32..origin/main`. |
 
-Historical gstack baseline previously recorded: `bf65487` (v1.26.0.0, 2026-05-02). Current submodule now tracks a newer pinned `main` snapshot.
+Pensieve was previously tracked as a read-only methodology reference at `https://github.com/kingkongshot/Pensieve.git` (`8731f61b18a65f09eb0d3cd1ffbff7650ef8df48` on `main`), but `vendor/pensieve/` is now removed and retired.
+
+Historical gstack baseline previously recorded: `bf65487` (v1.26.0.0, 2026-05-02). Last tracked submodule snapshot before retirement was `e362b0ae2f94afdcb55e37cc4690f9ce55ee5d32`.
 
 ## 6. Upstream update workflow（LLM 协作）
 
-Applicable only to active B 类 vendors.
+Applicable only when a retired B 类 vendor is temporarily cloned for reference.
 
 1. User asks to inspect upstream.
-2. Assistant runs `git fetch` in `vendor/<name>/` and lists new commits.
+2. Assistant clones or reuses a temporary checkout outside the tracked repo, then runs `git fetch` and lists new commits.
 3. Assistant reads each relevant diff (`git show <sha>`), classifies semantic value.
 4. Assistant presents options to alfadb:
    - direct bugfix worth porting
@@ -69,8 +70,8 @@ Applicable only to active B 类 vendors.
    - upstream-only/no pi value
    - conflicts with pi-astack design
 5. After decision, assistant edits owned adaptation layer with `edit`/`write`.
-6. Commit vendor SHA bump separately from port changes.
-7. Update this file with new baseline/ported paths.
+6. Do not re-add the retired vendor as a submodule unless a new ADR/explicit user decision reverses retirement.
+7. Update this file with any new baseline/ported paths.
 
 This is deliberately not a Makefile/script workflow. Upstream integration needs semantic judgment, not path-list diffing.
 
@@ -82,8 +83,10 @@ This is deliberately not a Makefile/script workflow. Upstream integration needs 
 | `.gbrain-source` / `.gbrain-cache` / `.gbrain-scratch` | ADR 0017 strict binding |
 | `extensions/gbrain/` | `extensions/memory/` |
 | `<project>/.pensieve/` as write target | `~/.abrain/projects/<id>/` |
-| Pensieve runtime integration / write target | removed; `vendor/pensieve/` remains read-only methodology reference |
+| Pensieve runtime integration / write target | removed/retired; legacy `.pensieve/` paths remain migration/debug/rollback inputs only |
+| `vendor/pensieve/` | removed/retired; historical upstream reference only |
 | `pi memory migrate` style docs | current slash command `/memory migrate` |
-| `skills/`/`prompts/` gstack port maps | design-intent archive until actual files exist; `vendor/gstack/` is only reference source |
+| `vendor/gstack/` | retired 2026-07-06; reference-on-demand via temporary clone at last pinned SHA `e362b0ae2f94afdcb55e37cc4690f9ce55ee5d32` |
+| `skills/`/`prompts/` gstack port maps | design-intent archive until actual files exist; gstack reference is on-demand, not an active repo path |
 
 See [docs/adr/0006-component-consolidation.md](./docs/adr/0006-component-consolidation.md) for the historical consolidation decision.
