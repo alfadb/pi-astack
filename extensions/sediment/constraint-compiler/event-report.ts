@@ -1,11 +1,13 @@
 import { markStaleQueuedConstraintEvents, summarizeConstraintEventProjectionStatus } from "../constraint-evidence/status";
 import type { ConstraintEventProjectionRecord } from "../constraint-evidence/types";
 import { makeDiagnostic } from "./diagnostics";
+import { buildMergedSourceVerifierLookup, type ConstraintMergedSourceVerifierLookup } from "./merged-source-verifier";
 import type {
   ConstraintEventCoverageDisposition,
   ConstraintEventCoverageReport,
   ConstraintEventSourceRecord,
   ConstraintLegacyParallelDeltaReport,
+  ConstraintMergedSourceVerifierReport,
   ConstraintShadowDiagnostic,
   ConstraintSourceDisposition,
   ValidatedConstraintCompilerDecision,
@@ -71,8 +73,26 @@ function coverageDispositionForRow(input: {
   disposition?: ConstraintSourceDisposition;
   diagnostics: string[];
   staleAfterMs: number;
+  mergedSourceVerifierLookup: ConstraintMergedSourceVerifierLookup;
+  mergedSourceVerifier?: ConstraintMergedSourceVerifierReport;
 }): ConstraintEventCoverageDisposition {
+  const verifierRow = input.mergedSourceVerifierLookup.reportStatus === "valid"
+    ? input.mergedSourceVerifierLookup.rowBySourceRecordId.get(input.sourceRecordId)
+    : undefined;
   if (input.status === "projected") {
+    if (input.disposition === "merged_source" && verifierRow?.verdict === "expressed" && (verifierRow.confidence === "high" || verifierRow.confidence === "medium")) {
+      return {
+        kind: "projected_via_verifier",
+        action: "count_projected",
+        reason: "merged source verifier found the event expression in the target constraint",
+        targetConstraintIds: targetConstraintIdsForMergedSource(input.decision, input.sourceRecordId),
+        mergeReasons: mergeReasonsForSource(input.decision, input.sourceRecordId),
+        verifierVerdict: "expressed",
+        verifierConfidence: verifierRow.confidence,
+        verifierInputHash: input.mergedSourceVerifier?.verifierInputHash,
+        verifierReasoning: verifierRow.reasoning,
+      };
+    }
     const exclusionReasons = input.disposition === "excluded" ? exclusionReasonsForSource(input.decision, input.sourceRecordId) : [];
     return {
       kind: "projected",
@@ -85,13 +105,23 @@ function coverageDispositionForRow(input: {
   if ((input.status === "queued" || input.status === "stale") && input.disposition === "merged_source") {
     const mergeReasons = mergeReasonsForSource(input.decision, input.sourceRecordId);
     const targetConstraintIds = targetConstraintIdsForMergedSource(input.decision, input.sourceRecordId);
+    const verifierVerdict = verifierRow?.verdict ?? "not_evaluated";
+    const reason = input.mergedSourceVerifierLookup.reportStatus === "stale_binding"
+      ? "merged source verifier binding is stale"
+      : verifierRow?.verdict === "not_expressed"
+        ? "merged source verifier did not find the event expression in the target constraint"
+        : verifierRow?.verdict === "uncertain"
+          ? "merged source verifier was uncertain whether the target constraint expresses the event"
+          : "merged source is deferred pending verifier coverage";
     return {
       kind: "deferred_merged_source",
       action: "exclude_from_injectable_denominator",
-      reason: "merged source is deferred pending verifier coverage",
+      reason,
       targetConstraintIds,
       mergeReasons,
-      verifierVerdict: "not_evaluated",
+      verifierVerdict,
+      ...(verifierRow ? { verifierConfidence: verifierRow.confidence, verifierReasoning: verifierRow.reasoning } : {}),
+      ...(input.mergedSourceVerifier ? { verifierInputHash: input.mergedSourceVerifier.verifierInputHash } : {}),
     };
   }
   if ((input.status === "queued" || input.status === "stale") && input.disposition === "unresolved") {
@@ -134,13 +164,18 @@ function projectionRecordForEvent(
   event: ConstraintEventSourceRecord,
   decision: ValidatedConstraintCompilerDecision,
   diagnostics: ConstraintShadowDiagnostic[],
-  projectedAtUtc?: string,
+  projectedAtUtc: string | undefined,
+  mergedSourceVerifierLookup: ConstraintMergedSourceVerifierLookup,
 ): ConstraintEventProjectionRecord {
   const disposition = dispositionForSource(decision, event.sourceId);
   if (disposition === "excluded") {
     return { eventId: event.eventId, status: "projected", observedAtUtc: event.createdAtUtc, ...(projectedAtUtc ? { projectedAtUtc } : {}) };
   }
   if (disposition === "compiled" && hasCompiledConstraintForSource(event, decision)) {
+    return { eventId: event.eventId, status: "projected", observedAtUtc: event.createdAtUtc, ...(projectedAtUtc ? { projectedAtUtc } : {}) };
+  }
+  const verifierRow = mergedSourceVerifierLookup.reportStatus === "valid" ? mergedSourceVerifierLookup.rowBySourceRecordId.get(event.sourceId) : undefined;
+  if (disposition === "merged_source" && verifierRow?.verdict === "expressed" && (verifierRow.confidence === "high" || verifierRow.confidence === "medium")) {
     return { eventId: event.eventId, status: "projected", observedAtUtc: event.createdAtUtc, ...(projectedAtUtc ? { projectedAtUtc } : {}) };
   }
   const codes = diagnosticCodesForSource(diagnostics, event.sourceId);
@@ -157,10 +192,12 @@ export function createConstraintEventCoverageReport(input: {
   diagnostics: ConstraintShadowDiagnostic[];
   staleAfterMs: number;
   nowMs?: number;
+  mergedSourceVerifier?: ConstraintMergedSourceVerifierReport;
 }): { report: ConstraintEventCoverageReport; diagnostics: ConstraintShadowDiagnostic[] } {
   const invalidEventIds = new Set(input.invalidEventIds ?? []);
   const projectedAtUtc = input.nowMs === undefined ? undefined : new Date(input.nowMs).toISOString();
-  const validRecords = input.events.map((event) => projectionRecordForEvent(event, input.decision, input.diagnostics, projectedAtUtc));
+  const mergedSourceVerifierLookup = buildMergedSourceVerifierLookup({ events: input.events, decision: input.decision, verifier: input.mergedSourceVerifier });
+  const validRecords = input.events.map((event) => projectionRecordForEvent(event, input.decision, input.diagnostics, projectedAtUtc, mergedSourceVerifierLookup));
   const invalidRecords: ConstraintEventProjectionRecord[] = Array.from(invalidEventIds)
     .sort()
     .map((eventId) => ({ eventId, status: "invalid" }));
@@ -194,6 +231,8 @@ export function createConstraintEventCoverageReport(input: {
         disposition,
         diagnostics,
         staleAfterMs: input.staleAfterMs,
+        mergedSourceVerifierLookup,
+        mergedSourceVerifier: input.mergedSourceVerifier,
       }),
       observedAtUtc: record.observedAtUtc,
       projectedAtUtc: record.projectedAtUtc,
@@ -221,6 +260,14 @@ export function createConstraintEventCoverageReport(input: {
   const injectableCoverageRatio = injectableDenominator === 0 ? 1 : summary.projected / injectableDenominator;
   const diagnostics: ConstraintShadowDiagnostic[] = [];
   for (const row of rows) {
+    if (row.coverageDisposition?.verifierVerdict === "not_expressed") {
+      diagnostics.push(makeDiagnostic({
+        code: "SC_MERGED_SOURCE_VERIFIER_NOT_EXPRESSED",
+        message: "merged source verifier did not find the event expression in the target constraint",
+        sourceRecordIds: [row.sourceRecordId],
+        data: { eventId: row.eventId, verifierInputHash: row.coverageDisposition.verifierInputHash ?? "" },
+      }));
+    }
     if (isDeferredRow(row)) continue;
     if (row.status === "queued") {
       diagnostics.push(makeDiagnostic({

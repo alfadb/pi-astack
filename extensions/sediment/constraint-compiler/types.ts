@@ -339,6 +339,7 @@ export type ConstraintCompilerRunResult = {
 
 export type ConstraintEventCoverageDispositionKind =
   | "projected"
+  | "projected_via_verifier"
   | "deferred_merged_source"
   | "deferred_unresolved"
   | "coverage_gap"
@@ -354,7 +355,8 @@ export type ConstraintEventCoverageDispositionAction =
   | "count_invalid"
   | "count_append_failed";
 
-export type ConstraintEventCoverageVerifierVerdict = "not_evaluated";
+export type ConstraintEventCoverageVerifierVerdict = "not_evaluated" | "expressed" | "not_expressed" | "uncertain";
+export type ConstraintMergedSourceVerifierConfidence = "high" | "medium" | "low";
 
 export interface ConstraintEventCoverageDisposition {
   kind: ConstraintEventCoverageDispositionKind;
@@ -363,6 +365,39 @@ export interface ConstraintEventCoverageDisposition {
   targetConstraintIds?: string[];
   mergeReasons?: string[];
   verifierVerdict?: ConstraintEventCoverageVerifierVerdict;
+  verifierConfidence?: ConstraintMergedSourceVerifierConfidence;
+  verifierInputHash?: string;
+  verifierReasoning?: string;
+}
+
+export interface ConstraintMergedSourceVerifierRow {
+  eventId: string;
+  sourceRecordId: string;
+  eventBodyHash: string;
+  targetConstraintId: string;
+  targetContentHash: string;
+  verdict: "expressed" | "not_expressed" | "uncertain";
+  confidence: ConstraintMergedSourceVerifierConfidence;
+  reasoning: string;
+}
+
+export interface ConstraintMergedSourceVerifierSummary {
+  totalRows: number;
+  expressedRows: number;
+  notExpressedRows: number;
+  uncertainRows: number;
+  invalidRows?: number;
+  staleBindingRows?: number;
+}
+
+export interface ConstraintMergedSourceVerifierReport {
+  schemaVersion: "constraint-merged-source-verifier/v1";
+  inputRootHash: string;
+  decisionValidationHash: string;
+  decisionHash: string;
+  verifierInputHash: string;
+  summary: ConstraintMergedSourceVerifierSummary;
+  rows: ConstraintMergedSourceVerifierRow[];
 }
 
 export interface ConstraintEventCoverageReport {
@@ -442,6 +477,7 @@ export interface ConstraintShadowRunOptions {
   runId?: string;
   eventStaleAfterMs?: number;
   nowMs?: number;
+  mergedSourceVerifier?: ConstraintMergedSourceVerifierReport;
   // ADR0039 Constraint L2 (NS-2/FIX-1): when "repo", 固化 the validated decision
   // as an immutable L1 projection event and render the deterministic L2 view to
   // git-tracked l2/views/constraint/ (SHADOW; injection still reads .state).
@@ -466,6 +502,7 @@ export type ConstraintShadowRunResult = {
   diff: ConstraintDiffReport;
   eventCoverage?: ConstraintEventCoverageReport;
   legacyParallelDelta?: ConstraintLegacyParallelDeltaReport;
+  mergedSourceVerifier?: ConstraintMergedSourceVerifierReport;
   diagnostics: ConstraintShadowDiagnostic[];
   artifacts?: ConstraintShadowRunArtifacts;
   l2Projection?: {
@@ -530,6 +567,7 @@ export type ConstraintShadowDiagnosticCode =
   | "SC_EVENT_READ_ERROR"
   | "SC_EVENT_COVERAGE_GAP"
   | "SC_EVENT_STALE_THRESHOLD"
+  | "SC_MERGED_SOURCE_VERIFIER_NOT_EXPRESSED"
   | "SC_LEGACY_PARALLEL_DELTA"
   | "SC_EVENT_NOT_MEMORY_LEAK"
   | "SC_EVENT_SCOPE_BREACH"

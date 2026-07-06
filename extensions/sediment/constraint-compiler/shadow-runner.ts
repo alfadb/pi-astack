@@ -6,6 +6,7 @@ import { createConstraintEventCoverageReport, createConstraintLegacyParallelDelt
 import { scanConstraintEvidenceEvents } from "./event-scan";
 import { runConstraintCompilerWithInvoker } from "./llm-compiler";
 import { scanLegacyConstraintSources } from "./legacy-scan";
+import { buildMergedSourceVerifierLookup } from "./merged-source-verifier";
 import { normalizeConstraintSources, sha256Hex, stableCanonicalize } from "./normalize";
 import { buildConstraintCompilerPrompt } from "./prompt";
 import { renderConstraintShadowView } from "./render";
@@ -19,6 +20,7 @@ import type {
   ConstraintDiffReport,
   ConstraintEventCoverageReport,
   ConstraintLegacyParallelDeltaReport,
+  ConstraintMergedSourceVerifierReport,
   ConstraintShadowDiagnostic,
   ConstraintShadowRunArtifacts,
   ConstraintShadowRunOptions,
@@ -89,6 +91,7 @@ async function writeArtifacts(input: {
   corpusSplit?: CorpusSplitReport;
   eventCoverage?: ConstraintEventCoverageReport;
   legacyParallelDelta?: ConstraintLegacyParallelDeltaReport;
+  mergedSourceVerifier?: ConstraintMergedSourceVerifierReport;
   diagnostics: ConstraintShadowDiagnostic[];
   ok: boolean;
 }): Promise<{ ok: true; artifacts: ConstraintShadowRunArtifacts } | { ok: false; diagnostic: ConstraintShadowDiagnostic }> {
@@ -103,7 +106,7 @@ async function writeArtifacts(input: {
     if (targetViolation) return { ok: false, diagnostic: targetViolation };
   }
 
-  const files = {
+  const files: Record<string, string> = {
     input: "input.normalized.json",
     prompt: "prompt.txt",
     rawOutput: "raw-output.txt",
@@ -118,6 +121,7 @@ async function writeArtifacts(input: {
     legacyParallelDelta: "legacy-parallel-delta.json",
     diagnostics: "diagnostics.json",
   };
+  if (input.mergedSourceVerifier) files.mergedSourceVerifier = "merged-source-verifier.json";
   const writeSet = async (dir: string): Promise<void> => {
     await writeJson(path.join(dir, files.input), input.normalized);
     if (input.prompt) await writeText(path.join(dir, files.prompt), input.prompt.text);
@@ -135,6 +139,7 @@ async function writeArtifacts(input: {
     }
     if (input.eventCoverage) await writeJson(path.join(dir, files.eventCoverage), input.eventCoverage);
     if (input.legacyParallelDelta) await writeJson(path.join(dir, files.legacyParallelDelta), input.legacyParallelDelta);
+    if (input.mergedSourceVerifier) await writeJson(path.join(dir, files.mergedSourceVerifier), input.mergedSourceVerifier);
     await writeJson(path.join(dir, files.diagnostics), input.diagnostics);
   };
 
@@ -152,6 +157,7 @@ async function writeArtifacts(input: {
     sourceCount: input.normalized.records.length,
     eventCoverage: input.eventCoverage?.summary,
     legacyParallelDelta: input.legacyParallelDelta?.summary,
+    mergedSourceVerifier: input.mergedSourceVerifier?.summary,
     diagnosticCodes: input.diagnostics.map((diagnostic) => diagnostic.code),
     artifacts: { runDir: path.relative(root, runDir), latestDir: path.relative(root, latestDir) },
   });
@@ -389,8 +395,11 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     diagnostics: initialDiagnostics,
     staleAfterMs: options.eventStaleAfterMs ?? DEFAULT_EVENT_STALE_AFTER_MS,
     nowMs: options.nowMs,
+    mergedSourceVerifier: options.mergedSourceVerifier,
   });
   const legacyParallelDelta = createConstraintLegacyParallelDeltaReport({ events: eventScan.events, decision });
+  const mergedSourceVerifierLookup = buildMergedSourceVerifierLookup({ events: eventScan.events, decision, verifier: options.mergedSourceVerifier });
+  const validatedMergedSourceVerifier = mergedSourceVerifierLookup.reportStatus === "valid" ? options.mergedSourceVerifier : undefined;
   const allDiagnostics = dedupeDiagnostics([...initialDiagnostics, ...retryDiagnostics, ...coverage.diagnostics, ...legacyParallelDelta.diagnostics]);
   const artifactResult = options.writeArtifacts ? await writeArtifacts({
     abrainHome: options.abrainHome,
@@ -405,6 +414,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     corpusSplit,
     eventCoverage: coverage.report,
     legacyParallelDelta: legacyParallelDelta.report,
+    mergedSourceVerifier: validatedMergedSourceVerifier,
     diagnostics: allDiagnostics,
     ok: true,
   }) : undefined;
@@ -469,6 +479,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     diff,
     eventCoverage: coverage.report,
     legacyParallelDelta: legacyParallelDelta.report,
+    ...(validatedMergedSourceVerifier ? { mergedSourceVerifier: validatedMergedSourceVerifier } : {}),
     diagnostics: l2WriteFailed ? dedupeDiagnostics([...allDiagnostics, l2WriteFailed]) : allDiagnostics,
     ...(artifactResult?.ok ? { artifacts: artifactResult.artifacts } : {}),
     ...(l2Projection ? { l2Projection } : {}),

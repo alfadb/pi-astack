@@ -101,6 +101,7 @@ for (const file of [
   "extensions/sediment/constraint-compiler/normalize.ts",
   "extensions/sediment/constraint-compiler/legacy-scan.ts",
   "extensions/sediment/constraint-compiler/event-scan.ts",
+  "extensions/sediment/constraint-compiler/merged-source-verifier.ts",
   "extensions/sediment/constraint-compiler/event-report.ts",
   "extensions/sediment/constraint-compiler/validate-decision.ts",
   "extensions/sediment/constraint-compiler/render.ts",
@@ -130,6 +131,7 @@ const { renderConstraintShadowView } = require(path.join(outRoot, "sediment", "c
 const { createConstraintDiffReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "diff.js"));
 const { scanConstraintEvidenceEvents } = require(path.join(outRoot, "sediment", "constraint-compiler", "event-scan.js"));
 const { createConstraintEventCoverageReport, createConstraintLegacyParallelDeltaReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "event-report.js"));
+const { mergedSourceVerifierDecisionHash, mergedSourceVerifierInputHash, targetContentHashForConstraint } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier.js"));
 const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment", "constraint-compiler", "prompt.js"));
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
 const { createPiAiConstraintCompilerInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
@@ -1608,6 +1610,131 @@ check("event coverage reports queued stale projected and legacy delta", () => {
   assert(delta.diagnostics.some((diagnostic) => diagnostic.code === "SC_LEGACY_PARALLEL_DELTA"), "legacy delta diagnostic missing");
 });
 
+check("merged_source verifier sidecar deterministically projects only valid expressed rows", () => {
+  const mkEvent = (tag, createdAtUtc = "2026-06-18T00:00:00.000Z") => ({
+    sourceKind: "constraint_event",
+    sourceId: `event:${tag.repeat(64)}`,
+    eventId: tag.repeat(64),
+    eventType: "constraint_signal_observed",
+    createdAtUtc,
+    sessionId: `session-${tag}`, turnId: `turn-${tag}`,
+    sourceChannel: "agent_end", sourceRole: "user",
+    operationHint: "create", confidence: 0.8,
+    sanitizedQuote: "Use edit/write.", candidateText: "Use edit/write.", candidateTitle: "Use edit/write",
+    candidateTriggerPhrases: ["edit/write"], candidatePriorityHint: "always",
+    scopeHint: { kind: "global", evidence: "fixture" }, activeProjectId: "pi-astack",
+    scopeConfidence: 0.8, sanitizerStatus: "passed", sanitizerReplacementsCount: 0,
+    legacyParallelWrite: { attempted: false }, causalParents: [],
+    producerName: "smoke", producerVersion: "fixture",
+    bodyHash: tag.repeat(64),
+    rawFilePath: `/tmp/event-${tag}.json`,
+    sourceRef: { ref: `event:${tag.repeat(64)}`, path: `/tmp/event-${tag}.json` },
+  });
+  const compiledEvent = mkEvent("a");
+  const queuedEvent = mkEvent("b");
+  const mergedEvent = mkEvent("c", "2026-06-19T00:00:00.000Z");
+  const events = [compiledEvent, queuedEvent, mergedEvent];
+  const decision = validateConstraintCompilerDecision(events, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: normalizeConstraintSources(events).inputRootHash,
+    constraints: [{ scope: { kind: "global" }, injectMode: "always", title: "Use edit/write", compiledBody: "Use edit/write.", triggerPhrases: ["edit/write"], sourceRecordIds: [compiledEvent.sourceId, mergedEvent.sourceId] }],
+    exclusions: [], unresolved: [],
+    merges: [{ sourceRecordIds: [mergedEvent.sourceId], reason: "merged-source verifier fixture" }],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: compiledEvent.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  const validationHashBefore = decision.validationHash;
+  const target = decision.constraints[0];
+  const report = (rows, summaryOverrides = {}) => ({
+    schemaVersion: "constraint-merged-source-verifier/v1",
+    inputRootHash: decision.inputRootHash,
+    decisionValidationHash: decision.validationHash,
+    decisionHash: mergedSourceVerifierDecisionHash(decision),
+    verifierInputHash: mergedSourceVerifierInputHash(events, decision),
+    summary: {
+      totalRows: rows.length,
+      expressedRows: rows.filter((item) => item.verdict === "expressed").length,
+      notExpressedRows: rows.filter((item) => item.verdict === "not_expressed").length,
+      uncertainRows: rows.filter((item) => item.verdict === "uncertain").length,
+      ...summaryOverrides,
+    },
+    rows,
+  });
+  const row = (verdict, confidence = "high", overrides = {}) => ({
+    eventId: mergedEvent.eventId,
+    sourceRecordId: mergedEvent.sourceId,
+    eventBodyHash: mergedEvent.bodyHash,
+    targetConstraintId: target.constraintId,
+    targetContentHash: targetContentHashForConstraint(target),
+    verdict,
+    confidence,
+    reasoning: `${verdict} fixture`,
+    ...overrides,
+  });
+  const noSidecar = createConstraintEventCoverageReport({
+    events, decision, diagnostics: decision.diagnostics,
+    staleAfterMs: 60 * 60 * 1000, nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+  });
+  const expressed = createConstraintEventCoverageReport({
+    events, decision, diagnostics: decision.diagnostics,
+    staleAfterMs: 60 * 60 * 1000, nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+    mergedSourceVerifier: report([row("expressed", "medium")]),
+  });
+  const expressedRow = expressed.report.rows.find((item) => item.sourceRecordId === mergedEvent.sourceId);
+  assert(noSidecar.report.summary.projectedEvents === 1, "baseline projected count changed");
+  assert(noSidecar.report.summary.deferredMergedSourceEvents === 1, "baseline deferred merged count changed");
+  assert(expressed.report.summary.projectedEvents === 2, "expressed verifier did not increase projected count");
+  assert(expressed.report.summary.deferredMergedSourceEvents === 0, "expressed verifier did not reduce deferred merged count");
+  assert(expressed.report.summary.coverageRatio === 2 / 3, "expressed verifier did not raise strict coverage ratio");
+  assert(expressed.report.summary.injectableCoverageRatio === 2 / 3, "expressed verifier injectable ratio wrong");
+  assert(expressedRow?.coverageDisposition?.kind === "projected_via_verifier", "expressed row disposition kind missing");
+  assert(expressedRow?.coverageDisposition?.action === "count_projected", "expressed row action missing");
+  assert(expressedRow?.coverageDisposition?.verifierVerdict === "expressed", "expressed verifier verdict missing");
+  assert(expressedRow?.coverageDisposition?.verifierConfidence === "medium", "expressed verifier confidence missing");
+  assert(expressedRow?.coverageDisposition?.verifierInputHash === report([]).verifierInputHash, "expressed verifier input hash missing");
+  assert(decision.validationHash === validationHashBefore, "coverage verifier changed decision validationHash");
+
+  const notExpressed = createConstraintEventCoverageReport({
+    events, decision, diagnostics: decision.diagnostics,
+    staleAfterMs: 60 * 60 * 1000, nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+    mergedSourceVerifier: report([row("not_expressed")]),
+  });
+  const notExpressedRow = notExpressed.report.rows.find((item) => item.sourceRecordId === mergedEvent.sourceId);
+  assert(notExpressedRow?.coverageDisposition?.kind === "deferred_merged_source", "not_expressed row should remain deferred");
+  assert(notExpressedRow?.coverageDisposition?.verifierVerdict === "not_expressed", "not_expressed verdict missing");
+  assert(notExpressed.diagnostics.some((diagnostic) => diagnostic.code === "SC_MERGED_SOURCE_VERIFIER_NOT_EXPRESSED"), "not_expressed diagnostic missing");
+
+  const uncertain = createConstraintEventCoverageReport({
+    events, decision, diagnostics: decision.diagnostics,
+    staleAfterMs: 60 * 60 * 1000, nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+    mergedSourceVerifier: report([row("uncertain")]),
+  });
+  const uncertainRow = uncertain.report.rows.find((item) => item.sourceRecordId === mergedEvent.sourceId);
+  assert(uncertainRow?.coverageDisposition?.kind === "deferred_merged_source", "uncertain row should remain deferred");
+  assert(uncertainRow?.coverageDisposition?.verifierVerdict === "uncertain", "uncertain verdict missing");
+
+  const staleBinding = createConstraintEventCoverageReport({
+    events, decision, diagnostics: decision.diagnostics,
+    staleAfterMs: 60 * 60 * 1000, nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+    mergedSourceVerifier: report([row("expressed", "high", { eventBodyHash: "0".repeat(64) })]),
+  });
+  const staleBindingRow = staleBinding.report.rows.find((item) => item.sourceRecordId === mergedEvent.sourceId);
+  assert(staleBindingRow?.coverageDisposition?.kind === "deferred_merged_source", "stale binding row should remain deferred");
+  assert(staleBindingRow?.coverageDisposition?.verifierVerdict === "not_evaluated", "stale binding should fail closed to not_evaluated");
+  assert(staleBindingRow?.coverageDisposition?.reason.includes("stale"), "stale binding reason missing");
+
+  const summaryMismatch = createConstraintEventCoverageReport({
+    events, decision, diagnostics: decision.diagnostics,
+    staleAfterMs: 60 * 60 * 1000, nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
+    mergedSourceVerifier: report([row("expressed")], { expressedRows: 0 }),
+  });
+  const summaryMismatchRow = summaryMismatch.report.rows.find((item) => item.sourceRecordId === mergedEvent.sourceId);
+  assert(summaryMismatchRow?.coverageDisposition?.kind === "deferred_merged_source", "summary mismatch row should remain deferred");
+  assert(summaryMismatchRow?.coverageDisposition?.verifierVerdict === "not_evaluated", "summary mismatch should fail closed to not_evaluated");
+  assert(summaryMismatchRow?.coverageDisposition?.reason.includes("stale"), "summary mismatch stale reason missing");
+});
+
 check("ADR0039 (2026-06-24): AGED merged_source/unresolved are deferred — excluded from injectable coverage + no stale/gap diagnostics", () => {
   const mkEvent = (tag) => ({
     sourceKind: "constraint_event",
@@ -1842,42 +1969,46 @@ check("shadow runner reads L1 events and writes event coverage artifacts", async
     legacy_parallel_write: { attempted: true, legacy_path_kind: "tier1_ruleset_adjudicator", legacy_operation_hint: "create", legacy_audit_ref: "audit:runner" },
   });
   const eventSourceId = `event:${event.event_id}`;
-  const result = await runConstraintShadowCompiler({
+  const compilerInvoker = async ({ prompt }) => {
+    assert(prompt.text.includes(eventSourceId), "event source missing from compiler prompt");
+    return {
+      ok: true,
+      text: JSON.stringify({
+        schemaVersion: "constraint-shadow-decision/v1",
+        inputRootHash: "ignored-by-parser",
+        constraints: [{
+          scope: { kind: "global" },
+          injectMode: "always",
+          title: "Use edit/write",
+          compiledBody: "修改文件必须用 edit/write，禁止 sed -i。",
+          triggerPhrases: ["edit/write"],
+          sourceRecordIds: ["rule:global:always:use-edit-not-sed", eventSourceId],
+        }],
+        exclusions: [],
+        unresolved: [],
+        merges: [],
+        rescopeProposals: [],
+        mappings: [
+          { sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" },
+          { sourceRecordId: eventSourceId, disposition: "compiled" },
+        ],
+        diagnostics: [],
+      }),
+    };
+  };
+  const baseRunOptions = {
     abrainHome,
     cwd: repoRoot,
     includeProjects: [],
     includeStatuses: "all",
     knownProjectIds: ["pi-astack"],
     writeArtifacts: true,
-    runId: "fixture-event-run",
     nowMs: Date.parse("2026-06-19T00:00:00.000Z"),
-    compilerInvoker: async ({ prompt }) => {
-      assert(prompt.text.includes(eventSourceId), "event source missing from compiler prompt");
-      return {
-        ok: true,
-        text: JSON.stringify({
-          schemaVersion: "constraint-shadow-decision/v1",
-          inputRootHash: "ignored-by-parser",
-          constraints: [{
-            scope: { kind: "global" },
-            injectMode: "always",
-            title: "Use edit/write",
-            compiledBody: "修改文件必须用 edit/write，禁止 sed -i。",
-            triggerPhrases: ["edit/write"],
-            sourceRecordIds: ["rule:global:always:use-edit-not-sed", eventSourceId],
-          }],
-          exclusions: [],
-          unresolved: [],
-          merges: [],
-          rescopeProposals: [],
-          mappings: [
-            { sourceRecordId: "rule:global:always:use-edit-not-sed", disposition: "compiled" },
-            { sourceRecordId: eventSourceId, disposition: "compiled" },
-          ],
-          diagnostics: [],
-        }),
-      };
-    },
+    compilerInvoker,
+  };
+  const result = await runConstraintShadowCompiler({
+    ...baseRunOptions,
+    runId: "fixture-event-run",
   });
   assert(result.ok, "runner event success path failed");
   assert(result.ok && result.eventCoverage?.summary.projectedEvents === 1, "event coverage did not project event");
@@ -1888,6 +2019,65 @@ check("shadow runner reads L1 events and writes event coverage artifacts", async
   const latestCoverage = JSON.parse(fs.readFileSync(latestCoveragePath, "utf8"));
   assert(latestCoverage.rows.some((row) => row.coverageDisposition?.action === "count_projected"), "latest event coverage row disposition missing");
   assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "legacy-parallel-delta.json")), "legacy delta artifact missing");
+  const latestVerifierPath = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "merged-source-verifier.json");
+  assert(!fs.existsSync(latestVerifierPath), "merged-source verifier artifact written without sidecar input");
+
+  const scannedEvents = await scanConstraintEvidenceEvents({ abrainHome });
+  assert(result.ok, "cannot build verifier sidecar from failed run");
+  const mergedSourceVerifier = {
+    schemaVersion: "constraint-merged-source-verifier/v1",
+    inputRootHash: result.decision.inputRootHash,
+    decisionValidationHash: result.decision.validationHash,
+    decisionHash: mergedSourceVerifierDecisionHash(result.decision),
+    verifierInputHash: mergedSourceVerifierInputHash(scannedEvents.events, result.decision),
+    summary: { totalRows: 0, expressedRows: 0, notExpressedRows: 0, uncertainRows: 0 },
+    rows: [],
+  };
+  const failedWithVerifier = await runConstraintShadowCompiler({
+    ...baseRunOptions,
+    runId: "fixture-event-run-with-verifier-failed",
+    mergedSourceVerifier,
+    compilerInvoker: async () => ({ ok: false, error: "offline fixture failure" }),
+  });
+  assert(!failedWithVerifier.ok, "runner failure fixture unexpectedly succeeded");
+  assert(!fs.existsSync(latestVerifierPath), "failure run wrote latest merged-source verifier artifact");
+  assert(!fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "fixture-event-run-with-verifier-failed", "merged-source-verifier.json")), "failure run wrote run merged-source verifier artifact");
+
+  const invalidMergedSourceVerifier = {
+    ...mergedSourceVerifier,
+    summary: { ...mergedSourceVerifier.summary, totalRows: 1 },
+  };
+  const resultWithInvalidVerifier = await runConstraintShadowCompiler({
+    ...baseRunOptions,
+    runId: "fixture-event-run-with-invalid-verifier",
+    mergedSourceVerifier: invalidMergedSourceVerifier,
+  });
+  assert(resultWithInvalidVerifier.ok, "runner invalid sidecar success path failed");
+  assert(resultWithInvalidVerifier.ok && !resultWithInvalidVerifier.mergedSourceVerifier, "runner returned invalid verifier sidecar");
+  assert(!fs.existsSync(latestVerifierPath), "invalid sidecar run wrote latest merged-source verifier artifact");
+  assert(!fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "fixture-event-run-with-invalid-verifier", "merged-source-verifier.json")), "invalid sidecar run wrote run merged-source verifier artifact");
+
+  const resultWithVerifier = await runConstraintShadowCompiler({
+    ...baseRunOptions,
+    runId: "fixture-event-run-with-verifier",
+    mergedSourceVerifier,
+  });
+  assert(resultWithVerifier.ok, "runner sidecar artifact path failed");
+  assert(resultWithVerifier.ok && resultWithVerifier.mergedSourceVerifier?.verifierInputHash === mergedSourceVerifier.verifierInputHash, "runner did not return verifier sidecar");
+  assert(fs.existsSync(latestVerifierPath), "latest merged-source verifier artifact missing");
+  assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "fixture-event-run-with-verifier", "merged-source-verifier.json")), "run merged-source verifier artifact missing");
+  const latestVerifier = JSON.parse(fs.readFileSync(latestVerifierPath, "utf8"));
+  assert(latestVerifier.verifierInputHash === mergedSourceVerifier.verifierInputHash, "latest verifier artifact content mismatch");
+  const latestVerifierBytes = fs.readFileSync(latestVerifierPath, "utf8");
+  const failedAfterSuccess = await runConstraintShadowCompiler({
+    ...baseRunOptions,
+    runId: "fixture-event-run-with-verifier-failed-after-success",
+    mergedSourceVerifier,
+    compilerInvoker: async () => ({ ok: false, error: "offline fixture failure" }),
+  });
+  assert(!failedAfterSuccess.ok, "runner post-success failure fixture unexpectedly succeeded");
+  assert(fs.readFileSync(latestVerifierPath, "utf8") === latestVerifierBytes, "failure run rewrote latest merged-source verifier artifact");
+  assert(!fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "fixture-event-run-with-verifier-failed-after-success", "merged-source-verifier.json")), "post-success failure run wrote run merged-source verifier artifact");
 });
 
 check("repo-mode 固化s decision to immutable L1 + renders deterministic git L2 (round-trip + idempotent); state-mode is a no-op (ADR0039 NS-2/FIX-1)", async () => {
