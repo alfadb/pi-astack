@@ -11,16 +11,22 @@ status: active
 
 当前范围是：为 `ruleInjector.compiledViewInjection.liveCanary` 增加默认关闭的 per-session canary 机制，使未来在用户显式授权具体 persisted session id 后，可以对匹配 session 执行真实 compiled view 注入与 fail-closed 行为。
 
+## Status Update
+
+本 note 是执行前历史记录。后续运行态已发生全局设置变更：`ruleInjector.compiledViewInjection.fallbackToLegacyOnError=false`，当前为 fail-closed compiled-view injection。以下 “Current Runtime Remains” 段落保留为撰写当时的历史状态，不再代表当前运行时。
+
+Legacy rules retirement/archive/delete 仍未由本 note 授权，仍需独立 gate。
+
 ## Current Runtime Remains
 
-当前生产运行时仍保持全局 compiled-primary + legacy fallback。
+撰写当时的生产运行时仍保持全局 compiled-primary with legacy fallback。
 
-真实 `/home/worker/.pi/agent/pi-astack-settings.json` 仍为：
+当时真实 `/home/worker/.pi/agent/pi-astack-settings.json` 仍为：
 
-- `ruleInjector.compiledViewInjection.fallbackToLegacyOnError=true`
+- `ruleInjector.compiledViewInjection.fallbackToLegacyOnError` value was `true`
 - `ruleInjector.compiledViewInjection.liveCanary.enabled` 未启用
 
-因此当前没有生产 live canary activation。非 canary 路径仍按既有 compiled-primary + legacy fallback envelope 运行。
+因此当时没有生产 live canary activation。非 canary 路径仍按既有 compiled-primary with legacy fallback envelope 运行。
 
 ## What Changed
 

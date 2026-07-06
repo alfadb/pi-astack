@@ -11,8 +11,8 @@
 四家实读代码后一致确认：
 
 - **Constraint 读已是 compiled-view canonical**：`composeRuntimeRuleInjection` 在
-  `compiled.ok` 时直接 return compiled injection，legacy 仅 read-error fallback
-  （`compiledViewInjection.enabled=true, fallbackToLegacyOnError=true`）。
+  `compiled.ok` 时直接 return compiled injection；当时 legacy 仅 read-error fallback
+  （`compiledViewInjection.enabled=true`, `fallbackToLegacyOnError` value was `true`）。
 - **Knowledge 读仍是 legacy canonical**：`loadEntries` 把 projection store 追加在
   数组**最后**，dedup first-store-wins → projection 永远输给 legacy
   （abrain-project > world > .pensieve）。projection 只是 overlay。

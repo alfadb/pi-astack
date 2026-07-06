@@ -19,20 +19,24 @@ It does not authorize:
 - Legacy retirement, archive, or delete.
 - Evidence write.
 
+## Later Runtime Update
+
+This note records the 2026-07-05 runtime envelope. A later 2026-07-06 runtime change set `ruleInjector.compiledViewInjection.fallbackToLegacyOnError=false`; current production is fail-closed compiled-view injection. Legacy retirement/archive/delete remains unauthorized by this note and still requires an independent gate.
+
 ## Ground Truth Correction
 
-Compiled-view runtime injection is already enabled with legacy fallback.
+At the time of this note, compiled-view runtime injection was already enabled with legacy fallback.
 
 P0I/P0J wording such as "no compiled-view runtime injection" means no new compiled-view runtime injection change or expansion was authorized by those notes. It does not mean the actual live setting was disabled.
 
-## Actual Runtime State
+## Actual Runtime State At The Time
 
-The current envelope is compiled-primary with legacy fallback.
+The envelope at the time was compiled-primary with legacy fallback.
 
-Current `/home/worker/.pi/agent/pi-astack-settings.json` values:
+At that time, `/home/worker/.pi/agent/pi-astack-settings.json` values were:
 
 - `ruleInjector.compiledViewInjection.enabled=true`
-- `ruleInjector.compiledViewInjection.fallbackToLegacyOnError=true`
+- `ruleInjector.compiledViewInjection.fallbackToLegacyOnError` value was `true`
 - `ruleInjector.compiledViewInjection.requireFresh=true`
 - `ruleInjector.compiledViewInjection.staleAfterMs=86400000`
 - `ruleInjector.compiledViewInjection.maxReadBytes=1000000`
@@ -68,13 +72,13 @@ P0J fresh audit convergence passed on the latest comparable row:
 
 ## T0 P0K Review
 
-- 5/5 reviewers found the current state acceptable for continued operation.
-- 5/5 reviewers found `fallbackToLegacyOnError=false` not authorized and not ready.
+- 5/5 reviewers found the then-current state acceptable for continued operation.
+- 5/5 reviewers found `fallbackToLegacyOnError=false` not authorized and not ready at the time of this note.
 
 ## Decision
 
-- Current envelope: `ACCEPTABLE_CONTINUE_OPERATION`.
-- `fallbackToLegacyOnError=false`: `NOT AUTHORIZED`.
+- Then-current envelope: `ACCEPTABLE_CONTINUE_OPERATION`.
+- `fallbackToLegacyOnError=false`: `NOT AUTHORIZED` at the time of this note.
 - Legacy retirement: `NOT AUTHORIZED`.
 
 ## Blockers For Fallback False

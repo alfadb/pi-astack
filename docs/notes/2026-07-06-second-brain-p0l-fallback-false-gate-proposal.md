@@ -9,7 +9,13 @@ status: active
 
 本 note 仅记录 ADR0039/P0L 关于 `fallbackToLegacyOnError=false` gate proposal 的 T0 共识。它是 repo 文档与提案记录，不是运行时授权。
 
-当前讨论范围是：在未来另行授权的前提下，定义从 compiled-primary + legacy fallback 进入 fail-closed compiled-primary 的最低 A+ gate、回滚条件、后续授权要求，以及 legacy retirement 与 fallback=false 的边界。
+当前讨论范围是：在未来另行授权的前提下，定义从 compiled-primary with legacy fallback 进入 fail-closed compiled-primary 的最低 A+ gate、回滚条件、后续授权要求，以及 legacy retirement 与 fallback=false 的边界。
+
+## Status Update
+
+本 proposal 的“当前运行时”段落是撰写时状态。后续已发生设置变更：`ruleInjector.compiledViewInjection.fallbackToLegacyOnError=false`，当前为 fail-closed compiled-view injection；legacy rules read failure fallback 不再是当前包络。
+
+该后续变更不授权 legacy retirement/archive/delete。legacy retirement 仍是独立 gate，不能由 fallback=false 间接执行。
 
 ## Out of Scope
 
@@ -25,12 +31,12 @@ status: active
 
 ## Current Runtime Envelope
 
-当前运行时包络是 compiled-primary + legacy fallback。compiled-view runtime injection 已启用，但 compiled read 失败时仍回退 legacy rule injection。
+撰写当时的运行时包络是 compiled-primary with legacy fallback。compiled-view runtime injection 已启用，但 compiled read 失败时仍回退 legacy rule injection。
 
-当前 `/home/worker/.pi/agent/pi-astack-settings.json` 字段值为：
+当时 `/home/worker/.pi/agent/pi-astack-settings.json` 字段值为：
 
 - `ruleInjector.compiledViewInjection.enabled=true`
-- `ruleInjector.compiledViewInjection.fallbackToLegacyOnError=true`
+- `ruleInjector.compiledViewInjection.fallbackToLegacyOnError` value was `true`
 - `ruleInjector.compiledViewInjection.requireFresh=true`
 - `ruleInjector.compiledViewInjection.staleAfterMs=86400000`
 - `ruleInjector.compiledViewInjection.maxReadBytes=1000000`
@@ -47,7 +53,7 @@ status: active
 
 最终决策：`proposal_only_no_flip`。
 
-本 note 不授权 `fallbackToLegacyOnError=true` 到 `false` 的变更。任何未来执行都必须经过单独 T0 runtime pass 和显式用户 JSON settings 授权。
+本 note 不授权 `fallbackToLegacyOnError` 从 `true` 到 `false` 的变更。任何未来执行都必须经过单独 T0 runtime pass 和显式用户 JSON settings 授权。
 
 ## A+ Gate
 
@@ -123,4 +129,4 @@ Legacy retirement、archive 或 delete 仍是独立 gate，需要独立审查和
 
 ## Next Step
 
-除非用户后续明确授权单独 T0 runtime pass 与 JSON settings 修改，否则保持当前 compiled-primary + legacy fallback 运行时包络。
+除非用户后续明确授权单独 T0 runtime pass 与 JSON settings 修改，否则当时要求保持 compiled-primary with legacy fallback 运行时包络。

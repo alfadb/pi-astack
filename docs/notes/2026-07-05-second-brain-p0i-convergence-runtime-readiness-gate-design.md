@@ -86,7 +86,7 @@ Requires explicit authorization before execution:
 
 Requires explicit user authorization and a separate gate:
 
-- Initial `fallbackToLegacyOnError=true`.
+- Initial `fallbackToLegacyOnError` value was `true` at the time of this note.
 - Rollback available.
 - Success and failure conditions defined.
 - No full retirement is authorized by this note.

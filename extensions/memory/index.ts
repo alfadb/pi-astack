@@ -4,7 +4,9 @@
  * Full implementation (2026-05-14): dual-stage LLM retrieval (ADR 0015),
  * project-level `.pensieve/` + world `~/.abrain/` read tools, strict binding
  * enforcement (ADR 0017), and `/memory migrate --go` one-shot migration.
- * Markdown + git remain the source of truth.
+ * Current memory topology: L1 Evidence Events are the semantic source of truth,
+ * L2 Markdown is a deterministic projection/audit view, and L3 runtime indexes
+ * are derived/rebuildable.
  *
  * LLM-facing tools (memory_search/get/list) are strictly read-only.
  * `/memory migrate --go` performs one-shot B4 migration; it does not write
