@@ -1482,10 +1482,52 @@
       }
     },
 
+    "toolCircuitBreaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Global repeated tool-call circuit breaker. Applies to the current agent run, including dispatch-spawned sub-agents, through pi's shared tool_call hook. It blocks and aborts the current agent after repeated identical (toolName, normalized args) fingerprints exceed conservative per-agent-run thresholds.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch. Env PI_ASTACK_DISABLE_TOOL_CIRCUIT_BREAKER=1 disables regardless of settings. If this object is absent, legacy dispatch.idleLoopGuard.enabled=false is also honored."
+        },
+        "totalThreshold": {
+          "type": "integer",
+          "default": 8,
+          "minimum": 1,
+          "description": "Block once the same fingerprint has been requested more than this many times in one agent run. Default 8 means the 9th identical call trips."
+        },
+        "consecutiveThreshold": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "description": "Block once the same fingerprint has been requested more than this many times consecutively. Default 4 means the 5th back-to-back identical call trips."
+        },
+        "abortOnTrip": {
+          "type": "boolean",
+          "default": true,
+          "description": "After returning the blocking tool error, abort the active agent so it stops rather than continuing to spend provider calls."
+        },
+        "maxSessions": {
+          "type": "integer",
+          "default": 128,
+          "minimum": 1,
+          "description": "Maximum agent-run states retained by the process before oldest entries are pruned."
+        },
+        "maxFingerprints": {
+          "type": "integer",
+          "default": 1024,
+          "minimum": 16,
+          "description": "Maximum unique fingerprints retained per agent run before oldest entries are pruned."
+        }
+      }
+    },
+
     "dispatch": {
       "type": "object",
       "additionalProperties": false,
-      "description": "dispatch extension (ADR 0009 + 0027). `maxProviderConcurrency` caps same-provider `dispatch_parallel` workers, while `hub` configures the ADR 0030 caged-live dynamic hub (`dispatch_hub` tool) and `idleLoopGuard` suppresses repeated identical tool-call loops.",
+      "description": "dispatch extension (ADR 0009 + 0027). `maxProviderConcurrency` caps same-provider `dispatch_parallel` workers, while `hub` configures the ADR 0030 caged-live dynamic hub (`dispatch_hub` tool). Repeated tool-call protection now lives in top-level `toolCircuitBreaker` and applies to the current agent run, including sub-agents.",
       "properties": {
         "maxProviderConcurrency": {
           "type": "integer",
@@ -1533,18 +1575,18 @@
         "idleLoopGuard": {
           "type": "object",
           "additionalProperties": false,
-          "description": "E — tool idle-loop guard. Suppresses a back-to-back identical (tool,args) spin and returns a reflection nudge to the model instead of re-executing the repeat. Consecutive-only: any different tool call resets the streak, so false positives are near-zero (read-after-edit, spaced re-runs, etc. never trip it). Per-session, reset each turn.",
+          "description": "Legacy compatibility block from the old dispatch-only idle-loop guard. Runtime repeated-call protection now lives in top-level toolCircuitBreaker. If toolCircuitBreaker is absent, enabled=false here is still honored as a kill-switch; threshold is retained for old smoke/config compatibility only.",
           "properties": {
             "enabled": {
               "type": "boolean",
               "default": true,
-              "description": "Master kill-switch for the idle-loop guard. Default on."
+              "description": "Legacy kill-switch. Only enabled=false is honored when top-level toolCircuitBreaker is absent."
             },
             "threshold": {
               "type": "number",
               "default": 3,
               "minimum": 2,
-              "description": "Consecutive identical (tool,args) count at which suppression starts. 3 = allow two identical calls, suppress the 3rd onward until the signature changes."
+              "description": "Legacy consecutive threshold retained for config compatibility; use toolCircuitBreaker.consecutiveThreshold for the active global breaker."
             }
           }
         }

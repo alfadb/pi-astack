@@ -184,6 +184,16 @@ module.exports = {
 };\n`,
 );
 
+// Stub `../_shared/llm-audit` — dispatch imports auditSessionEvent for
+// runtime telemetry. formatResult does not call it; no-op keeps module load
+// self-contained.
+fs.writeFileSync(
+  path.join(sharedDir, "llm-audit.js"),
+  `module.exports = {
+  auditSessionEvent: () => {},
+};\n`,
+);
+
 // Stub `../_shared/heartbeat` — Stage 1b added startHeartbeat import.
 // formatResult doesn’t touch the heartbeat lifecycle; stub returns a
 // no-op handle so any accidental call is harmless.
