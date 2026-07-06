@@ -146,6 +146,23 @@ const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, selectLatestConstraintPro
 const { renderConstraintL2View } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
 const { buildCorpusSplitReport, stratumForRow, CORPUS_SPLIT_STRATA } = require(path.join(outRoot, "sediment", "constraint-compiler", "corpus-split.js"));
 
+function resolveSedimentSettingsWithConfig(config) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-settings-home-"));
+  writeFile(path.join(home, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify(config));
+  const settingsPath = path.join(outRoot, "sediment", "settings.js");
+  const oldHome = process.env.HOME;
+  delete require.cache[require.resolve(settingsPath)];
+  process.env.HOME = home;
+  try {
+    return require(settingsPath).resolveSedimentSettings();
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    delete require.cache[require.resolve(settingsPath)];
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+}
+
 function withoutUndefined(value) {
   if (Array.isArray(value)) return value.map(withoutUndefined);
   if (!value || typeof value !== "object") return value;
@@ -1957,16 +1974,66 @@ check("manual dossier entry is default-off and not a smoke script", () => {
   const script = fs.readFileSync(path.join(repoRoot, "scripts", "dossier-constraint-shadow-report.mjs"), "utf8");
   assert(script.includes("SKIP — sediment.constraintShadowCompiler.enabled is false"), "default-off skip missing");
   assert(script.includes("SKIP — dry-run mode does not call the real LLM"), "dry-run skip missing");
+  assert(script.includes("extensions/sediment/constraint-compiler/merged-source-verifier.ts"), "manual stage list missing verifier core");
+  assert(script.includes("extensions/sediment/constraint-compiler/merged-source-verifier-prompt.ts"), "manual stage list missing verifier prompt");
+  assert(script.includes("extensions/sediment/constraint-compiler/merged-source-verifier-llm.ts"), "manual stage list missing verifier llm");
+  assert(script.includes("hasFlag(\"merged-source-verifier\") || Boolean(verifierSettings.enabled)"), "manual verifier is not explicitly opt-in");
+  const verifierCreation = "const verifierInvoker = mergedSourceVerifierEnabled ? createPiAiMergedSourceVerifierInvoker";
+  assert(script.includes("createPiAiMergedSourceVerifierInvoker"), "manual verifier invoker wiring missing");
+  assert(script.includes("generateMergedSourceVerifier: true"), "manual verifier generator flag missing");
+  assert(script.includes("const verifierPromptCap = verifierMaxPromptChars || maxPromptChars || undefined"), "manual verifier prompt cap fallback missing");
+  assert(script.indexOf("if (!WRITE)") < script.indexOf(verifierCreation), "dry-run can reach verifier invoker creation");
   assert(!script.includes("agent_end"), "manual script mentions agent_end hook");
   assert(!script.includes("session_start"), "manual script mentions session_start hook");
   assert(!script.includes("before_agent_start"), "manual script mentions before_agent_start hook");
 });
 
-check("shadow settings schema exposes disabled manual compiler", () => {
+check("shadow settings schema exposes disabled manual compiler and verifier", () => {
   const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf8"));
   const cfg = schema.properties.sediment.properties.constraintShadowCompiler;
+  const verifier = cfg.properties.mergedSourceVerifier;
   assert(cfg.properties.enabled.default === false, "constraint shadow compiler default is not disabled");
   assert(cfg.properties.model.default === "", "constraint shadow compiler model should not be hardcoded");
+  assert(verifier.additionalProperties === false, "mergedSourceVerifier should reject additional properties");
+  assert(verifier.default.enabled === false && verifier.default.model === "" && verifier.default.maxPromptChars === 0, "mergedSourceVerifier object default incomplete");
+  assert(verifier.properties.enabled.default === false, "mergedSourceVerifier default is not disabled");
+  assert(verifier.properties.model.default === "", "mergedSourceVerifier model should not be hardcoded");
+  assert(verifier.properties.maxPromptChars.default === 0, "mergedSourceVerifier maxPromptChars default should be 0");
+  assert(verifier.description.includes("data-only") && verifier.description.includes("never read by runtime injection"), "mergedSourceVerifier data-only/runtime text missing");
+});
+
+check("shadow settings parser keeps merged-source verifier default-off and normalizes explicit config", () => {
+  const defaults = resolveSedimentSettingsWithConfig({ sediment: { constraintShadowCompiler: {} } });
+  assert(defaults.constraintShadowCompiler.mergedSourceVerifier.enabled === false, "settings default verifier enabled");
+  assert(defaults.constraintShadowCompiler.mergedSourceVerifier.model === "", "settings default verifier model should be empty");
+  assert(defaults.constraintShadowCompiler.mergedSourceVerifier.maxPromptChars === 0, "settings default verifier maxPromptChars should be 0");
+
+  const explicit = resolveSedimentSettingsWithConfig({
+    sediment: {
+      constraintShadowCompiler: {
+        model: " compiler/model ",
+        maxPromptChars: 500.9,
+        mergedSourceVerifier: { enabled: true, model: " verifier/model ", maxPromptChars: "123.9" },
+      },
+    },
+  });
+  assert(explicit.constraintShadowCompiler.model === "compiler/model", "compiler model not trimmed");
+  assert(explicit.constraintShadowCompiler.mergedSourceVerifier.enabled === true, "explicit verifier not enabled");
+  assert(explicit.constraintShadowCompiler.mergedSourceVerifier.model === "verifier/model", "verifier model not trimmed");
+  assert(explicit.constraintShadowCompiler.mergedSourceVerifier.maxPromptChars === 123, "verifier maxPromptChars not floored");
+
+  const clamped = resolveSedimentSettingsWithConfig({ sediment: { constraintShadowCompiler: { mergedSourceVerifier: { maxPromptChars: -10 } } } });
+  assert(clamped.constraintShadowCompiler.mergedSourceVerifier.maxPromptChars === 0, "verifier maxPromptChars not clamped non-negative");
+});
+
+check("auto-refresh verifier generator is default-off and gated by mergedSourceVerifier.enabled", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "extensions", "sediment", "constraint-compiler", "auto-refresh.ts"), "utf8");
+  assert(source.includes("createPiAiMergedSourceVerifierInvoker"), "auto-refresh verifier invoker import missing");
+  assert(source.includes("const verifierSettings = trigger.settings.constraintShadowCompiler.mergedSourceVerifier"), "auto-refresh verifier settings read missing");
+  assert(source.includes("...(verifierSettings.enabled ? {"), "auto-refresh verifier path is not gated by enabled flag");
+  assert(source.includes("generateMergedSourceVerifier: true"), "auto-refresh generator flag missing");
+  assert(source.includes("verifierSettings.model || modelRef"), "auto-refresh verifier model fallback missing");
+  assert(source.includes("verifierSettings.maxPromptChars") && source.includes("auto.maxPromptChars") && source.includes("trigger.settings.constraintShadowCompiler.maxPromptChars"), "auto-refresh verifier max prompt fallback missing");
 });
 
 check("shadow runner writes artifacts only under shadow state and keeps rules unchanged", async () => {

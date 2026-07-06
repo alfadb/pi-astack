@@ -387,6 +387,30 @@
               "minimum": 0,
               "description": "Optional prompt character budget. 0 means no script-level cap; positive values fail closed before calling the model."
             },
+            "mergedSourceVerifier": {
+              "type": "object",
+              "additionalProperties": false,
+              "default": { "enabled": false, "model": "", "maxPromptChars": 0 },
+              "description": "Default-off ADR0039 merged_source verifier generator. Produces a data-only shadow sidecar for audit/review; it does not affect validationHash and is never read by runtime injection.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Explicit opt-in for generating merged-source verifier sidecars. false preserves existing compiler and auto-refresh behavior."
+                },
+                "model": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Optional provider/model ref for the verifier. Empty falls back to the constraint compiler model."
+                },
+                "maxPromptChars": {
+                  "type": "number",
+                  "default": 0,
+                  "minimum": 0,
+                  "description": "Optional verifier prompt character budget. 0 falls back to autoRefresh.maxPromptChars for auto-refresh, then constraintShadowCompiler.maxPromptChars when available, then no cap."
+                }
+              }
+            },
             "autoRefresh": {
               "type": "object",
               "additionalProperties": false,

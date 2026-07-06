@@ -85,6 +85,13 @@ export interface SedimentSettings {
      *  still reads .state, no read-flip). "state" (default) = current behavior,
      *  no 固化, no l2 write. Mirrors knowledgeProjector.l2OutputRoot. */
     l2OutputRoot: "state" | "repo";
+    /** ADR0039 merged_source verifier generator. Data-only shadow sidecar;
+     *  default-off and never read by runtime injection. */
+    mergedSourceVerifier: {
+      enabled: boolean;
+      model: string;
+      maxPromptChars: number;
+    };
     autoRefresh: {
       enabled: boolean;
       debounceMs: number;
@@ -299,6 +306,11 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     escalationModelRef: "",
     maxPromptChars: 0,
     l2OutputRoot: "state",
+    mergedSourceVerifier: {
+      enabled: false,
+      model: "",
+      maxPromptChars: 0,
+    },
     autoRefresh: {
       enabled: false,
       debounceMs: 2_000,
@@ -505,6 +517,13 @@ export function resolveSedimentSettings(): SedimentSettings {
         : DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.escalationModelRef,
       maxPromptChars: Math.max(0, Math.floor(asNumber((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.maxPromptChars, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.maxPromptChars))),
       l2OutputRoot: ((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.l2OutputRoot === "repo" ? "repo" : "state"),
+      mergedSourceVerifier: {
+        enabled: asBoolean(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.mergedSourceVerifier as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.mergedSourceVerifier.enabled),
+        model: typeof ((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.mergedSourceVerifier as Record<string, unknown> | undefined)?.model === "string"
+          ? (((cfg.constraintShadowCompiler as Record<string, unknown>).mergedSourceVerifier as Record<string, unknown>).model as string).trim()
+          : DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.mergedSourceVerifier.model,
+        maxPromptChars: Math.max(0, Math.floor(asNumber(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.mergedSourceVerifier as Record<string, unknown> | undefined)?.maxPromptChars, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.mergedSourceVerifier.maxPromptChars))),
+      },
       autoRefresh: {
         enabled: asBoolean(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.enabled),
         debounceMs: Math.max(0, Math.floor(asNumber(((cfg.constraintShadowCompiler as Record<string, unknown> | undefined)?.autoRefresh as Record<string, unknown> | undefined)?.debounceMs, DEFAULT_SEDIMENT_SETTINGS.constraintShadowCompiler.autoRefresh.debounceMs))),

@@ -11,6 +11,8 @@
  *   node scripts/dossier-constraint-shadow-report.mjs [--write] [--force]
  *     [--model provider/model] [--abrain ~/.abrain] [--project pi-global]
  *     [--include-projects active|all|none|id1,id2] [--max-prompt-chars N]
+ *     [--merged-source-verifier] [--verifier-model provider/model]
+ *     [--verifier-max-prompt-chars N]
  */
 
 import fs from "node:fs";
@@ -66,6 +68,11 @@ function parseIncludeProjects(value) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+function nonNegativeInteger(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
+}
+
 function readSettings() {
   const settingsPath = path.join(agentDir, "pi-astack-settings.json");
   return fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, "utf8")) : {};
@@ -92,11 +99,17 @@ const configuredModel = typeof shadowSettings.model === "string" && shadowSettin
     ? sediment.curatorModel.trim()
     : "";
 const modelRef = arg("model", configuredModel);
-const maxPromptChars = Number(arg("max-prompt-chars", shadowSettings.maxPromptChars ?? 0)) || 0;
+const maxPromptChars = nonNegativeInteger(arg("max-prompt-chars", shadowSettings.maxPromptChars ?? 0));
 const timeoutMs = Number(arg("timeout-ms", shadowSettings.timeoutMs ?? 1_200_000)) || 1_200_000;
 const maxRetries = Number(arg("max-retries", shadowSettings.maxRetries ?? 0)) || 0;
 const maxCompileRetries = Number(arg("max-compile-retries", shadowSettings.maxCompileRetries ?? 0)) || 0;
 const escalationModelRef = arg("escalation-model", typeof shadowSettings.escalationModelRef === "string" ? shadowSettings.escalationModelRef : "") || "";
+const verifierSettings = shadowSettings.mergedSourceVerifier ?? {};
+const mergedSourceVerifierEnabled = hasFlag("merged-source-verifier") || Boolean(verifierSettings.enabled);
+const configuredVerifierModel = typeof verifierSettings.model === "string" && verifierSettings.model.trim() ? verifierSettings.model.trim() : "";
+const verifierModelRef = arg("verifier-model", configuredVerifierModel || modelRef);
+const verifierMaxPromptChars = nonNegativeInteger(arg("verifier-max-prompt-chars", verifierSettings.maxPromptChars ?? 0));
+const verifierPromptCap = verifierMaxPromptChars || maxPromptChars || undefined;
 
 console.log("constraint shadow report dossier — ADR 0039 P1 PR4");
 console.log(`mode: ${WRITE ? "write shadow artifacts" : "dry-run"}`);
@@ -104,6 +117,10 @@ console.log(`abrainHome: ${abrainHome}`);
 console.log(`activeProjectId: ${activeProjectId}`);
 console.log(`includeProjects: ${Array.isArray(includeProjects) ? includeProjects.join(",") || "none" : includeProjects}`);
 console.log(`model: ${modelRef || "<empty>"}`);
+console.log(`mergedSourceVerifier: ${mergedSourceVerifierEnabled ? "enabled" : "disabled"}`);
+if (mergedSourceVerifierEnabled) {
+  console.log(`verifierModel: ${verifierModelRef || "<empty>"}`);
+}
 
 if (!enabled && !FORCE) {
   console.log("SKIP — sediment.constraintShadowCompiler.enabled is false. Pass --force for a one-shot manual run.");
@@ -143,6 +160,9 @@ for (const file of [
   "extensions/sediment/constraint-compiler/legacy-scan.ts",
   "extensions/sediment/constraint-compiler/event-scan.ts",
   "extensions/sediment/constraint-compiler/event-report.ts",
+  "extensions/sediment/constraint-compiler/merged-source-verifier.ts",
+  "extensions/sediment/constraint-compiler/merged-source-verifier-prompt.ts",
+  "extensions/sediment/constraint-compiler/merged-source-verifier-llm.ts",
   "extensions/sediment/constraint-compiler/validate-decision.ts",
   "extensions/sediment/constraint-compiler/render.ts",
   "extensions/sediment/constraint-compiler/projection.ts",
@@ -160,7 +180,7 @@ writeFile(path.join(tmp, "_shared", "pi-internals.js"), "exports.isSubAgentSessi
 const modelsJsonPath = path.join(agentDir, "models.json");
 const { registry } = makeOracleRegistry(modelsJsonPath);
 const { listAbrainProjects } = require(path.join(tmp, "_shared", "runtime.js"));
-const { createPiAiConstraintCompilerInvoker } = require(path.join(tmp, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
+const { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } = require(path.join(tmp, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(tmp, "sediment", "constraint-compiler", "shadow-runner.js"));
 const invoker = createPiAiConstraintCompilerInvoker({
   modelRegistry: registry,
@@ -170,6 +190,14 @@ const invoker = createPiAiConstraintCompilerInvoker({
   streamSimpleImpl: piAi,
   projectRoot: repoRoot,
 });
+const verifierInvoker = mergedSourceVerifierEnabled ? createPiAiMergedSourceVerifierInvoker({
+  modelRegistry: registry,
+  defaultModelRef: verifierModelRef,
+  timeoutMs,
+  maxRetries,
+  streamSimpleImpl: piAi,
+  projectRoot: repoRoot,
+}) : undefined;
 
 const beforeRules = fs.existsSync(path.join(abrainHome, "rules"))
   ? JSON.stringify(fs.readdirSync(path.join(abrainHome, "rules"), { recursive: true }).sort())
@@ -186,6 +214,12 @@ const result = await runConstraintShadowCompiler({
   maxCompileRetries,
   escalationModelRef: escalationModelRef || undefined,
   compilerInvoker: invoker,
+  ...(mergedSourceVerifierEnabled ? {
+    generateMergedSourceVerifier: true,
+    verifierInvoker,
+    verifierModelRef,
+    verifierMaxPromptChars: verifierPromptCap,
+  } : {}),
   writeArtifacts: true,
 });
 const afterRules = fs.existsSync(path.join(abrainHome, "rules"))

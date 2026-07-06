@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createPiAiConstraintCompilerInvoker } from "./pi-ai-invoker";
+import { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } from "./pi-ai-invoker";
 import { runConstraintShadowCompiler } from "./shadow-runner";
 import { commitAbrainDerivedOutputs } from "../writer";
 import { getDeviceId } from "../../_shared/causal-anchor";
@@ -137,6 +137,12 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
   (statusTicker as unknown as { unref?: () => void }).unref?.();
 
   try {
+    const verifierSettings = trigger.settings.constraintShadowCompiler.mergedSourceVerifier;
+    const verifierModelRef = verifierSettings.model || modelRef;
+    const verifierMaxPromptChars = verifierSettings.maxPromptChars
+      || auto.maxPromptChars
+      || trigger.settings.constraintShadowCompiler.maxPromptChars
+      || undefined;
     const result = await runConstraintShadowCompiler({
       abrainHome: trigger.abrainHome,
       cwd: trigger.cwd,
@@ -155,6 +161,17 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
         timeoutMs: trigger.settings.constraintShadowCompiler.timeoutMs,
         maxRetries: trigger.settings.constraintShadowCompiler.maxRetries,
       }),
+      ...(verifierSettings.enabled ? {
+        generateMergedSourceVerifier: true,
+        verifierInvoker: createPiAiMergedSourceVerifierInvoker({
+          modelRegistry: trigger.modelRegistry,
+          defaultModelRef: verifierModelRef,
+          timeoutMs: trigger.settings.constraintShadowCompiler.timeoutMs,
+          maxRetries: trigger.settings.constraintShadowCompiler.maxRetries,
+        }),
+        verifierModelRef,
+        verifierMaxPromptChars,
+      } : {}),
       writeArtifacts: true,
       l2OutputRoot: trigger.settings.constraintShadowCompiler.l2OutputRoot,
       deviceId: getDeviceId() ?? "unknown-device",
