@@ -91,6 +91,13 @@ interface InternalInteractiveModeLike {
   statusContainer?: { clear?(): void; addChild?(child: unknown): void };
   ui?: { terminal?: { setProgress?(active: boolean): void }; requestRender?(): void };
   createWorkingLoader?(): unknown;
+  defaultEditor?: { onEscape?: unknown };
+  autoCompactionEscapeHandler?: unknown;
+  clearStatusIndicator?(type: string): void;
+  chatContainer?: { clear?(): void };
+  rebuildChatFromMessages?(): void;
+  footer?: { invalidate?(): void };
+  flushCompactionQueue?(options: { willRetry?: unknown }): Promise<void> | void;
   handleEvent?: InteractiveHandleEventFn;
 }
 
@@ -399,6 +406,40 @@ function restoreWorkingLoaderIfContinuing(mode: InternalInteractiveModeLike): vo
   }
 }
 
+function isSuccessfulCompactionEndEvent(event: Record<string, unknown>): boolean {
+  return event.type === "compaction_end" && event.aborted !== true && !!event.result;
+}
+
+function canHandleSuccessfulCompactionEnd(mode: InternalInteractiveModeLike): boolean {
+  return typeof mode.chatContainer?.clear === "function"
+    && typeof mode.rebuildChatFromMessages === "function"
+    && typeof mode.footer?.invalidate === "function";
+}
+
+function handleSuccessfulCompactionEndWithoutDuplicateSummary(
+  mode: InternalInteractiveModeLike,
+  event: Record<string, unknown>,
+): void {
+  if (mode.settingsManager?.getShowTerminalProgress?.()) {
+    mode.ui?.terminal?.setProgress?.(false);
+  }
+  if (mode.autoCompactionEscapeHandler) {
+    if (mode.defaultEditor) {
+      mode.defaultEditor.onEscape = mode.autoCompactionEscapeHandler;
+    }
+    mode.autoCompactionEscapeHandler = undefined;
+  }
+  mode.clearStatusIndicator?.("compaction");
+  mode.chatContainer?.clear?.();
+  mode.rebuildChatFromMessages?.();
+  mode.footer?.invalidate?.();
+  void mode.flushCompactionQueue?.({ willRetry: event.willRetry });
+  mode.ui?.requestRender?.();
+  if (event.willContinue === true) {
+    restoreWorkingLoaderIfContinuing(mode);
+  }
+}
+
 function installAgentSessionEmitWillContinuePatch(
   proto: InternalAgentSessionLike & Record<PropertyKey, unknown>,
   hooks: TurnBoundaryCompactionHooks,
@@ -438,6 +479,10 @@ function installInteractiveModeWillContinuePatch(hooks: TurnBoundaryCompactionHo
   const original = proto[INTERACTIVE_ORIGINAL_HANDLE_EVENT] as InteractiveHandleEventFn | undefined ?? proto.handleEvent;
   proto[INTERACTIVE_ORIGINAL_HANDLE_EVENT] = original;
   proto.handleEvent = async function patchedHandleEvent(this: InternalInteractiveModeLike, event: Record<string, unknown>): Promise<void> {
+    if (isSuccessfulCompactionEndEvent(event) && canHandleSuccessfulCompactionEnd(this)) {
+      handleSuccessfulCompactionEndWithoutDuplicateSummary(this, event);
+      return;
+    }
     await original.call(this, event);
     if (event.type === "compaction_end" && event.willContinue === true) {
       restoreWorkingLoaderIfContinuing(this);

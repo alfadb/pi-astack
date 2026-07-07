@@ -84,7 +84,7 @@ check("patch installs prepareNextTurn and createLoopConfig wrappers", () => {
   }
 });
 
-check("patch adds willContinue and restores working loader", () => {
+check("patch adds willContinue and handles successful compaction_end without duplicate summary", () => {
   if (!/InteractiveMode\.handleEvent/.test(internalsSrc)) {
     throw new Error("InteractiveMode.handleEvent integrity check missing");
   }
@@ -93,6 +93,12 @@ check("patch adds willContinue and restores working loader", () => {
   }
   if (!/restoreWorkingLoaderIfContinuing/.test(internalsSrc)) {
     throw new Error("working loader restore helper missing");
+  }
+  if (!/handleSuccessfulCompactionEndWithoutDuplicateSummary/.test(internalsSrc)) {
+    throw new Error("successful compaction_end duplicate-summary bypass missing");
+  }
+  if (/addMessageToChat\?\.\(/.test(internalsSrc)) {
+    throw new Error("successful compaction_end patch must not append a summary message");
   }
 });
 
@@ -141,6 +147,19 @@ AgentSession.prototype._emit = function smokeOriginalEmit(event) {
 const handledEvents = [];
 InteractiveMode.prototype.handleEvent = async function smokeOriginalHandleEvent(event) {
   handledEvents.push({ mode: this, event });
+  if (event.type === "compaction_end" && event.result && !event.aborted) {
+    this.chatContainer.clear();
+    this.rebuildChatFromMessages();
+    this.addMessageToChat({
+      role: "compactionSummary",
+      summary: event.result.summary,
+      tokensBefore: event.result.tokensBefore,
+      timestamp: event.result.timestamp,
+      source: "original-duplicate",
+    });
+    this.footer.invalidate();
+    this.ui.requestRender();
+  }
   if (event.type === "compaction_end" && this.autoCompactionLoader) {
     this.autoCompactionLoader.stop?.();
     this.autoCompactionLoader = undefined;
@@ -193,17 +212,42 @@ await checkAsync("prepareNextTurn calls _runAutoCompaction and returns compacted
     },
   };
   const restoredChildren = [];
+  const chatMessages = [];
+  const originalEscape = () => "restored";
   let setWorkingVisibleCalls = 0;
   const mode = {
     session: { isStreaming: true },
     settingsManager: { getShowTerminalProgress: () => true },
     workingVisible: true,
+    defaultEditor: { onEscape: () => "compaction-abort" },
+    autoCompactionEscapeHandler: originalEscape,
     autoCompactionLoader: { stop: () => {} },
     statusContainer: {
       clear: () => { restoredChildren.length = 0; },
       addChild: (child) => { restoredChildren.push(child); },
     },
-    ui: { terminal: { setProgress: (active) => { mode.progress = active; } }, requestRender: () => { mode.rendered = true; } },
+    chatContainer: {
+      clear: () => {
+        mode.chatClears = (mode.chatClears ?? 0) + 1;
+        chatMessages.length = 0;
+      },
+    },
+    rebuildChatFromMessages: () => {
+      mode.rebuilds = (mode.rebuilds ?? 0) + 1;
+      chatMessages.push(...agent.state.messages.map((message) => ({ ...message, source: "rebuild" })));
+    },
+    addMessageToChat: (message) => {
+      mode.addedMessages = (mode.addedMessages ?? 0) + 1;
+      chatMessages.push(message);
+    },
+    footer: { invalidate: () => { mode.footerInvalidations = (mode.footerInvalidations ?? 0) + 1; } },
+    clearStatusIndicator: (kind) => { mode.clearedStatus = kind; },
+    flushCompactionQueue: (options) => { mode.flushed = options; },
+    progressHistory: [],
+    ui: {
+      terminal: { setProgress: (active) => { mode.progress = active; mode.progressHistory.push(active); } },
+      requestRender: () => { mode.rendered = true; mode.renderCount = (mode.renderCount ?? 0) + 1; },
+    },
     setWorkingVisible: (visible) => {
       setWorkingVisibleCalls++;
       if (visible !== true) throw new Error("setWorkingVisible should restore visibility with true");
@@ -228,14 +272,29 @@ await checkAsync("prepareNextTurn calls _runAutoCompaction and returns compacted
   });
   const emitted = emittedEvents.at(-1)?.event;
   if (emitted?.willContinue !== true) throw new Error(`willContinue was not injected at emit: ${JSON.stringify(emitted)}`);
+  const handledBefore = handledEvents.length;
   await InteractiveMode.prototype.handleEvent.call(mode, emitted);
-  const handled = handledEvents.at(-1)?.event;
-  if (handled?.willContinue !== true) throw new Error(`willContinue was not observed by TUI: ${JSON.stringify(handled)}`);
+  if (handledEvents.length !== handledBefore) {
+    throw new Error("successful compaction_end should bypass the original duplicate-summary handler");
+  }
+  if (mode.chatClears !== 1) throw new Error(`expected one chat clear, got ${mode.chatClears}`);
+  if (mode.rebuilds !== 1) throw new Error(`expected one rebuildChatFromMessages call, got ${mode.rebuilds}`);
+  if (mode.addedMessages) throw new Error(`duplicate summary was appended ${mode.addedMessages} time(s)`);
+  if (chatMessages.length !== 1 || chatMessages[0].role !== "compactionSummary" || chatMessages[0].source !== "rebuild") {
+    throw new Error(`expected exactly one rebuilt compaction summary, got ${JSON.stringify(chatMessages)}`);
+  }
+  if (mode.footerInvalidations !== 1) throw new Error(`expected one footer invalidation, got ${mode.footerInvalidations}`);
+  if (mode.clearedStatus !== "compaction") throw new Error(`compaction status was not cleared: ${mode.clearedStatus}`);
+  if (mode.defaultEditor.onEscape !== originalEscape) throw new Error("auto-compaction escape handler was not restored");
+  if (mode.autoCompactionEscapeHandler !== undefined) throw new Error("autoCompactionEscapeHandler was not cleared");
+  if (mode.flushed?.willRetry !== true) throw new Error(`compaction queue was not flushed with willRetry=true: ${JSON.stringify(mode.flushed)}`);
   if (setWorkingVisibleCalls !== 1) throw new Error(`setWorkingVisible(true) was not called exactly once, got ${setWorkingVisibleCalls}`);
   if (mode.loadingAnimation?.kind !== "working-visible") throw new Error("working loader was not restored after compaction_end");
   if (restoredChildren.length !== 1) throw new Error(`expected one restored status child, got ${restoredChildren.length}`);
-  if (mode.progress !== true) throw new Error("terminal progress was not restored");
-  if (mode.rendered !== true) throw new Error("UI render was not requested after restore");
+  if (JSON.stringify(mode.progressHistory) !== JSON.stringify([false, true])) {
+    throw new Error(`terminal progress should stop for compaction_end then restore for continuation: ${JSON.stringify(mode.progressHistory)}`);
+  }
+  if (mode.rendered !== true || mode.renderCount < 2) throw new Error("UI render was not requested for compaction handling and restore");
   await new Promise((resolve) => setTimeout(resolve, 0));
   if (!completed) throw new Error("onComplete was not called with result=true");
   if (!update?.context) throw new Error("missing AgentLoopTurnUpdate.context");
@@ -247,6 +306,18 @@ await checkAsync("prepareNextTurn calls _runAutoCompaction and returns compacted
   if (update.thinkingLevel !== "high") throw new Error(`bad thinkingLevel ${update.thinkingLevel}`);
   if (AgentSession.prototype._buildRuntime.name !== "patchedBuildRuntime") {
     throw new Error("_buildRuntime was not patched");
+  }
+});
+
+await checkAsync("InteractiveMode.handleEvent passes through non-compaction_end events", async () => {
+  const event = { type: "message_delta", messageId: "m1", delta: { type: "text", text: "hi" } };
+  const handledBefore = handledEvents.length;
+  await InteractiveMode.prototype.handleEvent.call({}, event);
+  if (handledEvents.length !== handledBefore + 1) {
+    throw new Error("non-compaction_end event was not forwarded to the original handler");
+  }
+  if (handledEvents.at(-1)?.event !== event) {
+    throw new Error("forwarded event identity changed");
   }
 });
 
