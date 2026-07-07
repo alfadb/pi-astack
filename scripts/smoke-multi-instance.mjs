@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * smoke-multi-instance — first-pass multi-main-pi loss/rollback guard.
+ * smoke-multi-instance — multi-main-pi awareness and advisory risk surface.
  *
  * Covers:
  *   - process-stable instance_id and foreground session_epoch semantics
@@ -8,11 +8,11 @@
  *   - heartbeat stale vs PID-alive suspended classification
  *   - sub-agent session start does not register a peer manifest
  *   - sub-agent before_agent_start volatile block without foreground registration
- *   - sub-agent tool_call guard and tool_result observation recording
- *   - file fingerprint stale-context guard
- *   - high-risk whole-file write guard
+ *   - sub-agent tool_call advisory risk surface and tool_result observation recording
+ *   - file fingerprint stale-context advisory risk
+ *   - high-risk whole-file write advisory risk
  *   - peer activity advisory path for edit
- *   - dangerous git command detection/blocking
+ *   - dangerous git command detection without blocking
  *   - volatile runtime block text contract
  */
 
@@ -125,7 +125,7 @@ function subAgentCtx(root) {
   };
 }
 
-console.log("smoke: multi-instance guard");
+console.log("smoke: multi-instance awareness");
 
 console.log("\n[1] instance identity and session epoch");
 {
@@ -207,14 +207,14 @@ console.log("\n[5] sub-agent does not register peer");
   check("sub-agent start writes no manifest", !fs.existsSync(selfFile), selfFile);
 }
 
-console.log("\n[6] sub-agent extension guard path");
+console.log("\n[6] sub-agent extension advisory path");
 {
   mod.resetMultiInstanceStateForTests();
   const root = path.join(tmpRoot, "subagent-extension");
   fs.mkdirSync(root, { recursive: true });
   writePeerManifest(root, { instance_id: "pi-peer-subagent", current_tool: "edit", target_paths: ["peer-risk.txt"] });
   const harness = createMultiInstanceHarness();
-  const { ctx } = subAgentCtx(root);
+  const { ctx, notifications } = subAgentCtx(root);
   const beforeEpoch = mod.getMultiInstanceState().sessionEpoch;
   const before = await harness.handler("before_agent_start")({ systemPrompt: "base prompt\n" }, ctx);
   const selfFile = mod.manifestPathForInstance(root, mod.getInstanceId());
@@ -225,9 +225,9 @@ console.log("\n[6] sub-agent extension guard path");
 
   fs.writeFileSync(path.join(root, "whole.txt"), "existing\n", "utf-8");
   const whole = harness.handler("tool_call")({ toolName: "write", toolCallId: "whole", input: { path: "whole.txt", content: "replace\n" } }, ctx);
-  check("sub-agent whole-file write to unobserved existing file blocks", whole?.block === true && whole.reason.includes("unobserved_high_risk_write"), JSON.stringify(whole));
+  check("sub-agent whole-file write to unobserved existing file warns and continues", whole === undefined && notifications.some((n) => n.message.includes("unobserved_high_risk_write")), JSON.stringify(whole));
   const git = harness.handler("tool_call")({ toolName: "bash", toolCallId: "git", input: { command: "git reset --hard HEAD" } }, ctx);
-  check("sub-agent dangerous git command blocks", git?.block === true && git.reason.includes("dangerous_git"), JSON.stringify(git));
+  check("sub-agent dangerous git command warns and continues", git === undefined && notifications.some((n) => n.message.includes("dangerous_git")), JSON.stringify(git));
 
   const observedFile = path.join(root, "observed.txt");
   fs.writeFileSync(observedFile, "one\n", "utf-8");
@@ -236,12 +236,12 @@ console.log("\n[6] sub-agent extension guard path");
   await harness.handler("tool_result")({ toolName: "read", toolCallId: "read-observed", input: { path: "observed.txt" }, isError: false }, ctx);
   fs.writeFileSync(observedFile, "two\n", "utf-8");
   const stale = harness.handler("tool_call")({ toolName: "edit", toolCallId: "edit-observed", input: { path: "observed.txt", edits: [{ oldText: "two", newText: "three" }] } }, ctx);
-  check("sub-agent edit blocks after observed file changed externally", stale?.block === true && stale.reason.includes("stale_context"), JSON.stringify(stale));
-  check("sub-agent guard path still writes no manifest", !fs.existsSync(selfFile), selfFile);
+  check("sub-agent edit warns after observed file changed externally and continues", stale === undefined && notifications.some((n) => n.message.includes("stale_context")), JSON.stringify(stale));
+  check("sub-agent advisory path still writes no manifest", !fs.existsSync(selfFile), selfFile);
   mod.resetMultiInstanceStateForTests();
 }
 
-console.log("\n[7] file fingerprint stale-context guard");
+console.log("\n[7] file fingerprint stale-context advisory risk");
 {
   mod.resetMultiInstanceStateForTests();
   const root = path.join(tmpRoot, "guard");
@@ -252,14 +252,14 @@ console.log("\n[7] file fingerprint stale-context guard");
   mod.recordObservedPath(root, "a.txt", root);
   fs.writeFileSync(file, "two\n", "utf-8");
   const verdict = mod.evaluateToolGuard("edit", { path: "a.txt", edits: [{ oldText: "two", newText: "three" }] }, root, root, []);
-  check("edit blocks when target fingerprint changed after observation", verdict.action === "block", verdict.action);
+  check("edit warns when target fingerprint changed after observation", verdict.action === "warn", verdict.action);
   check("stale-context risk is recorded", verdict.risks.some((r) => r.kind === "stale_context"));
   mod.recordOwnWrite(root, "a.txt", root);
   const afterOwn = mod.evaluateToolGuard("edit", { path: "a.txt", edits: [{ oldText: "two", newText: "three" }] }, root, root, []);
   check("own known write refreshes observed fingerprint", afterOwn.action === "allow", afterOwn.action);
 }
 
-console.log("\n[8] high-risk write and peer activity guard");
+console.log("\n[8] high-risk write and peer activity advisory risk");
 {
   mod.resetMultiInstanceStateForTests();
   const root = path.join(tmpRoot, "risk");
@@ -271,14 +271,14 @@ console.log("\n[8] high-risk write and peer activity guard");
   fs.writeFileSync(path.join(root, "move-dir", "other-session.txt"), "landed\n", "utf-8");
   mod.startForegroundSession({ projectRoot: root, sessionId: "risk" });
   const whole = mod.evaluateToolGuard("write", { path: "whole.txt", content: "replace\n" }, root, root, []);
-  check("whole-file write to unobserved existing file blocks", whole.action === "block", whole.action);
+  check("whole-file write to unobserved existing file warns", whole.action === "warn", whole.action);
   const bashRmDir = mod.evaluateToolGuard("bash", { command: "rm -rf src" }, root, root, []);
-  check("bash rm -rf to unobserved existing directory blocks", bashRmDir.action === "block", bashRmDir.action);
+  check("bash rm -rf to unobserved existing directory warns", bashRmDir.action === "warn", bashRmDir.action);
   check("bash rm -rf directory records unobserved high-risk write", bashRmDir.risks.some((r) => r.kind === "unobserved_high_risk_write" && r.path === "src"));
   const deleteDir = mod.evaluateToolGuard("delete", { path: "src" }, root, root, []);
-  check("delete to unobserved existing directory blocks", deleteDir.action === "block", deleteDir.action);
+  check("delete to unobserved existing directory warns", deleteDir.action === "warn", deleteDir.action);
   const moveDir = mod.evaluateToolGuard("move", { source: "move-dir", destination: "moved-dir" }, root, root, []);
-  check("move from unobserved existing directory blocks", moveDir.action === "block", moveDir.action);
+  check("move from unobserved existing directory warns", moveDir.action === "warn", moveDir.action);
   const peerInfo = writePeerManifest(root, { instance_id: "pi-peer-edit", target_paths: ["peer.txt"], observed_files: ["peer.txt"] });
   fs.writeFileSync(path.join(root, "peer.txt"), "x\n", "utf-8");
   mod.recordObservedPath(root, "peer.txt", root);
@@ -303,7 +303,7 @@ console.log("\n[9] dangerous git command detection");
   mod.resetMultiInstanceStateForTests();
   mod.startForegroundSession({ projectRoot: root, sessionId: "git-risk" });
   const verdict = mod.evaluateToolGuard("bash", { command: "git checkout -- ." }, root, root, []);
-  check("dangerous git bash command blocks", verdict.action === "block", verdict.action);
+  check("dangerous git bash command warns without blocking", verdict.action === "warn" && verdict.risks.some((r) => r.kind === "dangerous_git"), verdict.action);
 }
 
 console.log("\n[10] peers notify severity");
@@ -338,7 +338,7 @@ console.log("\n[11] volatile runtime block text");
   check("no peers/risks => no volatile block", quiet === undefined, String(quiet));
   writePeerManifest(root, { instance_id: "pi-peer-block", current_tool: "edit", target_paths: ["x.ts"] });
   const scan = mod.scanInstanceManifests(root);
-  const block = mod.buildVolatileRuntimeBlock(scan, [{ ts: new Date().toISOString(), action: "block", kind: "stale_context", tool: "write", path: "x.ts", reason: "file changed" }]);
+  const block = mod.buildVolatileRuntimeBlock(scan, [{ ts: new Date().toISOString(), action: "warn", kind: "stale_context", tool: "write", path: "x.ts", reason: "file changed" }]);
   check("volatile block is emitted with peer/risk", typeof block === "string" && block.includes("multi-instance runtime guard"));
   check("volatile block states primary safety goal", block.includes("avoid overwriting, deleting, or rolling back modifications already written to disk by another pi session"));
   check("volatile block says it is not instruction override", block.includes("not an override of user instructions"));

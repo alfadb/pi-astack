@@ -4,7 +4,7 @@ import { isSubAgentSession } from "../_shared/pi-internals";
 import { ensureProjectGitignoredOnce } from "../_shared/runtime";
 import {
   buildFooterText,
-  buildGuardBlockReason,
+  buildGuardRiskReason,
   buildPeersNotifyType,
   buildPeersReport,
   buildVolatileSystemPromptUpdate,
@@ -139,15 +139,8 @@ export default function (pi: ExtensionAPI) {
     const scan = scanInstanceManifests(projectRoot);
     const verdict = evaluateToolGuard(toolName, event.input, projectRoot, cwd, scan.peers);
 
-    if (verdict.action === "block") {
-      const message = buildGuardBlockReason(verdict);
-      safeNotify(ctx, message, "error");
-      updateFooter(ctx, projectRoot);
-      return { block: true, reason: message };
-    }
-    if (verdict.action === "warn") {
-      const message = buildGuardBlockReason(verdict).replace("blocked this tool call", "flagged this tool call");
-      safeNotify(ctx, message, "warning");
+    if (verdict.risks.length > 0) {
+      safeNotify(ctx, buildGuardRiskReason(verdict), "warning");
     }
     updateFooter(ctx, projectRoot);
     return undefined;
@@ -193,7 +186,7 @@ export default function (pi: ExtensionAPI) {
   }).registerCommand;
   if (typeof registerCommand === "function") {
     registerCommand.call(pi, "peers", {
-      description: "Show pi-astack multi-instance peer and stale-context guard status",
+      description: "Show pi-astack multi-instance peer and advisory risk status",
       handler: async (_args: string, ctx: unknown) => {
         if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
         const projectRoot = currentProjectRoot(ctx);

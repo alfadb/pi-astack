@@ -79,7 +79,7 @@ export interface PeerScan {
 
 export interface GuardRisk {
   ts: string;
-  action: "warn" | "block";
+  action: "warn";
   kind: string;
   tool: string;
   path?: string;
@@ -88,7 +88,7 @@ export interface GuardRisk {
 }
 
 export interface GuardVerdict {
-  action: "allow" | "warn" | "block";
+  action: "allow" | "warn";
   toolName: string;
   writeKind?: WriteKind;
   targetPaths: string[];
@@ -571,7 +571,7 @@ export function evaluateToolGuard(
   setInstanceActivity(intent.activity ?? `writing with ${toolName}`, toolName, targetPaths);
 
   const risks: GuardRisk[] = [];
-  const pushRisk = (action: "warn" | "block", kind: string, absPath: string | undefined, reason: string, peerIds?: string[]) => {
+  const pushRisk = (action: "warn", kind: string, absPath: string | undefined, reason: string, peerIds?: string[]) => {
     risks.push({
       ts: nowIso(),
       action,
@@ -584,7 +584,7 @@ export function evaluateToolGuard(
   };
 
   if (intent.dangerousGit?.dangerous) {
-    pushRisk("block", "dangerous_git", undefined, intent.dangerousGit.reason ?? "dangerous git command");
+    pushRisk("warn", "dangerous_git", undefined, intent.dangerousGit.reason ?? "dangerous git command");
   }
   const editComplexity = intent.writeKind === "edit" ? detectEditComplexityRisk(input) : undefined;
   if (editComplexity) {
@@ -596,20 +596,19 @@ export function evaluateToolGuard(
     const observed = state.observedFiles.get(abs);
     const own = state.ownWrites.get(abs);
     if (observed && !sameFingerprint(current, observed) && !sameFingerprint(current, own)) {
-      pushRisk("block", "stale_context", abs, "file changed on disk after this instance observed it");
+      pushRisk("warn", "stale_context", abs, "file changed on disk after this instance observed it");
     }
     if (!observed && highRiskExistingTarget(intent.writeKind, current)) {
       const targetKind = current.kind === "file" ? "file" : "existing path";
-      pushRisk("block", "unobserved_high_risk_write", abs, `high-risk write targets an ${targetKind} that this instance has not observed in the current session epoch`);
+      pushRisk("warn", "unobserved_high_risk_write", abs, `high-risk write targets an ${targetKind} that this instance has not observed in the current session epoch`);
     }
     const peerIds = peersTouchingPath(peers, root, abs);
     if (peerIds.length > 0) {
-      const action = intent.writeKind === "edit" ? "warn" : "block";
-      pushRisk(action, "peer_activity", abs, "another pi instance recently targeted, observed, or wrote this path", peerIds);
+      pushRisk("warn", "peer_activity", abs, "another pi instance recently targeted, observed, or wrote this path", peerIds);
     }
   }
 
-  const action = risks.some((r) => r.action === "block") ? "block" : risks.some((r) => r.action === "warn") ? "warn" : "allow";
+  const action = risks.length > 0 ? "warn" : "allow";
   if (risks.length) rememberGuardRisks(risks);
   return { action, toolName, writeKind: intent.writeKind, targetPaths, risks, ...(intent.dangerousGit ? { dangerousGit: intent.dangerousGit } : {}) };
 }
@@ -796,14 +795,14 @@ function displayPath(projectRoot: string | undefined, absPath: string): string {
   return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? rel : abs;
 }
 
-export function buildGuardBlockReason(verdict: GuardVerdict): string {
+export function buildGuardRiskReason(verdict: GuardVerdict): string {
   const lines = [
-    "pi-astack multi-instance guard blocked this tool call to avoid overwriting, deleting, or rolling back changes already landed by another session or by disk state newer than this session's observation.",
+    "pi-astack multi-instance awareness flagged this tool call with advisory risk context. The tool call is not blocked; the LLM must decide how to proceed.",
   ];
   for (const risk of verdict.risks.slice(0, 6)) {
     lines.push(`- ${risk.kind}${risk.path ? ` ${risk.path}` : ""}: ${risk.reason}${risk.peer_instance_ids?.length ? ` (peer ${risk.peer_instance_ids.map(shortId).join(",")})` : ""}`);
   }
-  lines.push("Read the current file/worktree state first, narrow the change, or ask the user for explicit override before retrying.");
+  lines.push("Review current file/worktree state when the risk is relevant; this signal is observability, not an automatic veto.");
   return lines.join("\n");
 }
 
@@ -811,7 +810,7 @@ export function buildFooterText(scan: PeerScan, risks: GuardRisk[] = getRecentGu
   const peerBits = scan.counts.peers === 0
     ? "peers 0"
     : `peers ${scan.counts.peers} a${scan.counts.active}/i${scan.counts.idle}/s${scan.counts.suspended}/x${scan.counts.stale}`;
-  const riskCount = risks.filter((r) => r.action === "block" || r.action === "warn").length;
+  const riskCount = risks.length;
   return riskCount > 0 ? `${peerBits} risk ${riskCount}` : peerBits;
 }
 
@@ -858,7 +857,7 @@ export function buildVolatileRuntimeBlock(scan: PeerScan, risks: GuardRisk[] = g
     lines.push("recent_write_guard_risks:");
     for (const risk of risks.slice(-6)) lines.push(`- ${risk.action} ${risk.kind}${risk.path ? ` path=${risk.path}` : ""}: ${risk.reason}`);
   }
-  lines.push("Before edit/write/rm/mv or git worktree/index operations, re-read current targets when stale-context or peer risk is shown. Do not run destructive git rollback commands without explicit user confirmation.");
+  lines.push("Before edit/write/rm/mv or git worktree/index operations, re-read current targets when stale-context or peer risk is relevant. Treat this block as observability, not an automatic veto.");
   lines.push("<!-- /pi-astack/multi-instance -->");
   return lines.join("\n");
 }
