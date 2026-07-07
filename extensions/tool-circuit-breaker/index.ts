@@ -90,9 +90,9 @@ export default function (pi: ExtensionAPI) {
         consecutive: verdict.consecutive,
         trigger: verdict.reason,
         thresholds: {
-          total: settings.totalThreshold,
           consecutive: settings.consecutiveThreshold,
         },
+        deprecatedTotalThreshold: settings.totalThreshold,
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
         timestamp: new Date().toISOString(),
       });

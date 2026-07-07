@@ -29,7 +29,7 @@ const ok = (cond, msg) => {
   if (!cond) fails++;
 };
 
-const settings = { ...TOOL_CIRCUIT_BREAKER_DEFAULTS, totalThreshold: 8, consecutiveThreshold: 4, abortOnTrip: true };
+const settings = { ...TOOL_CIRCUIT_BREAKER_DEFAULTS, totalThreshold: 1, consecutiveThreshold: 4, abortOnTrip: true };
 
 // Fingerprint stability.
 ok(
@@ -60,19 +60,17 @@ ok(
   ok(verdicts[4].total === 5 && verdicts[4].consecutive === 5, "trip records total and consecutive counts");
 }
 
-// Total threshold: interleaving does not reset aggregate count; 9th A trips.
+// Total count can accumulate for diagnostics, but it must not block when repeats are interleaved.
 {
   const st = newToolCircuitBreakerState();
   let last;
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 9; i++) {
     last = evaluateToolCircuitBreaker(st, "grep", { pattern: "A", path: "." }, settings);
-    ok(!last.block, `aggregate repeat ${i + 1}/8 stays below total threshold`);
+    ok(!last.block, `interleaved repeat ${i + 1}/9 stays below block because it is not consecutive`);
     const other = evaluateToolCircuitBreaker(st, "grep", { pattern: `B-${i}`, path: "." }, settings);
     ok(!other.block, `different interleaved arg B-${i} does not misfire`);
   }
-  last = evaluateToolCircuitBreaker(st, "grep", { path: ".", pattern: "A" }, settings);
-  ok(last.block && last.reason === "total", "9th identical aggregate call trips even when interleaved");
-  ok(last.total === 9 && last.consecutive === 1, "aggregate trip records total=9 and consecutive=1 after interleaving");
+  ok(last.total === 9 && last.consecutive === 1, "same fingerprint can accumulate total count without tripping");
 }
 
 // Different parameters do not accidentally trip.
@@ -129,6 +127,7 @@ ok(
   let trip;
   for (let i = 0; i < 5; i++) trip = call("read", { path: "A" });
   ok(trip?.block && trip.reason.includes("Trigger: consecutive repeats 5 > 4"), "extension trips within the current agent run");
+  ok(!trip?.reason.includes("total repeats"), "extension message no longer reports total-repeat blocking");
 
   const failedClosed = call("find", { pattern: "*.ts" });
   ok(failedClosed?.block && failedClosed.reason.includes("Trigger: current agent run already tripped"), "extension returns already_tripped while the same state remains tripped");
@@ -140,7 +139,8 @@ ok(
   ok(
     afterReset[4]?.block &&
       afterReset[4].reason.includes("Counts: total=5, consecutive=5") &&
-      afterReset[4].reason.includes("Trigger: consecutive repeats 5 > 4"),
+      afterReset[4].reason.includes("Trigger: consecutive repeats 5 > 4") &&
+      !afterReset[4].reason.includes("total repeats"),
     "after agent_start reset, the same call trips from fresh counts instead of prior pollution",
   );
 
@@ -171,14 +171,14 @@ ok(
     { toolCircuitBreaker: { enabled: true, totalThreshold: 12, consecutiveThreshold: 6, abortOnTrip: false } },
     {},
   );
-  ok(resolved.totalThreshold === 12 && resolved.consecutiveThreshold === 6, "settings override thresholds");
+  ok(resolved.totalThreshold === 12 && resolved.consecutiveThreshold === 6, "settings preserve deprecated totalThreshold for compatibility and active consecutiveThreshold");
   ok(resolved.abortOnTrip === false, "settings override abortOnTrip");
 
   const envResolved = resolveToolCircuitBreakerSettings(undefined, {
     PI_ASTACK_DISABLE_TOOL_CIRCUIT_BREAKER: "1",
     PI_ASTACK_TOOL_CIRCUIT_BREAKER_TOTAL_THRESHOLD: "9",
   });
-  ok(envResolved.enabled === false && envResolved.totalThreshold === 9, "env disables breaker and can override threshold");
+  ok(envResolved.enabled === false && envResolved.totalThreshold === 9, "env disables breaker and can still carry deprecated totalThreshold");
 
   const legacyOff = resolveToolCircuitBreakerSettings({ dispatch: { idleLoopGuard: { enabled: false } } }, {});
   ok(legacyOff.enabled === false, "legacy dispatch.idleLoopGuard enabled=false disables breaker when no new config is present");

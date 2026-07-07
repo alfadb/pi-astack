@@ -1509,7 +1509,7 @@
     "toolCircuitBreaker": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Global repeated tool-call circuit breaker. Applies to the current agent run, including dispatch-spawned sub-agents, through pi's shared tool_call hook. It blocks and aborts the current agent after repeated identical (toolName, normalized args) fingerprints exceed conservative per-agent-run thresholds.",
+      "description": "Global repeated tool-call circuit breaker. Applies to the current agent run, including dispatch-spawned sub-agents, through pi's shared tool_call hook. It blocks and aborts the current agent only when identical (toolName, normalized args) fingerprints repeat consecutively past the active consecutive threshold; total repeats are retained for diagnostics only and do not trigger blocking.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -1520,7 +1520,7 @@
           "type": "integer",
           "default": 8,
           "minimum": 1,
-          "description": "Block once the same fingerprint has been requested more than this many times in one agent run. Default 8 means the 9th identical call trips."
+          "description": "Deprecated/ignored at runtime. Retained only for config compatibility and diagnostics so older settings continue to parse; it no longer blocks and does not influence trip decisions."
         },
         "consecutiveThreshold": {
           "type": "integer",

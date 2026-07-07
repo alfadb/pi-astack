@@ -8,7 +8,7 @@
 
 export interface ToolCircuitBreakerSettings {
   enabled: boolean;
-  /** Block after this many total calls with the same fingerprint in one agent run. */
+  /** Deprecated/ignored at runtime; kept for config compatibility and diagnostics only. */
   totalThreshold: number;
   /** Block after this many consecutive calls with the same fingerprint. */
   consecutiveThreshold: number;
@@ -39,7 +39,7 @@ export interface ToolCircuitBreakerTrip {
   fingerprintSummary: string;
   total: number;
   consecutive: number;
-  reason: "total" | "consecutive" | "already_tripped";
+  reason: "consecutive" | "already_tripped";
 }
 
 export interface ToolCircuitBreakerState {
@@ -94,12 +94,7 @@ export function evaluateToolCircuitBreaker(
   state.counts.set(fingerprint, { total });
   pruneOldest(state.counts, settings.maxFingerprints);
 
-  const reason =
-    total > settings.totalThreshold
-      ? "total"
-      : state.consecutive > settings.consecutiveThreshold
-        ? "consecutive"
-        : undefined;
+  const reason = state.consecutive > settings.consecutiveThreshold ? "consecutive" : undefined;
 
   if (!reason) {
     return { block: false, toolName, fingerprint, fingerprintSummary, total, consecutive: state.consecutive };
@@ -123,9 +118,7 @@ export function buildToolCircuitBreakerMessage(
 ): string {
   const trigger = trip.reason === "consecutive"
     ? `consecutive repeats ${trip.consecutive} > ${settings.consecutiveThreshold}`
-    : trip.reason === "total"
-      ? `total repeats ${trip.total} > ${settings.totalThreshold}`
-      : "current agent run already tripped";
+    : "current agent run already tripped";
 
   return [
     "Tool-call circuit breaker tripped.",
