@@ -1620,6 +1620,64 @@
       }
     },
 
+    "thinkingRepeatBreaker": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Visible-thinking repeat breaker for assistant message_update events. Only visible `thinking_delta.delta` chunks are inspected; final text, `text_delta`, and encrypted reasoning are ignored. The breaker tracks per-agent-run normalized segment fingerprints and trips on consecutive repeats or tail cycles, then aborts the current agent run.",
+      "properties": {
+        "_comment": { "type": "string" },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch. Env PI_ASTACK_DISABLE_THINKING_REPEAT_BREAKER=1 disables regardless of settings."
+        },
+        "consecutiveThreshold": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 1,
+          "description": "Block once the same normalized thinking segment has repeated more than this many times consecutively. Default 4 means the 5th identical segment trips."
+        },
+        "cycleDetectionEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable tail-pattern detection for repeated visible-thinking segment cycles such as ABABAB... and ABCABC...."
+        },
+        "maxCycleLength": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 2,
+          "maximum": 32,
+          "description": "Maximum segment-cycle length considered by the tail detector. Runtime clamps this to 32."
+        },
+        "cycleRepeatThreshold": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 2,
+          "maximum": 20,
+          "description": "Block once the same visible-thinking cycle appears this many rounds at the tail. Runtime clamps this to 20."
+        },
+        "minSegmentChars": {
+          "type": "integer",
+          "default": 80,
+          "minimum": 32,
+          "maximum": 512,
+          "description": "Minimum buffered visible-thinking characters before a segment candidate is fingerprinted. Short deltas are accumulated first; they are not fingerprinted one by one."
+        },
+        "maxBufferChars": {
+          "type": "integer",
+          "default": 8192,
+          "minimum": 256,
+          "maximum": 16384,
+          "description": "Maximum buffered visible-thinking characters kept per agent run before chunking continues. Runtime clamps this to 16384."
+        },
+        "abortOnTrip": {
+          "type": "boolean",
+          "default": true,
+          "description": "Abort the active agent after audit/notify when the breaker trips."
+        }
+      }
+    },
+
     "dispatch": {
       "type": "object",
       "additionalProperties": false,
