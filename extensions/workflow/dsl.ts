@@ -67,6 +67,8 @@ export interface WorkflowStage {
   thinking?: string;
   prompt?: string;
   tools?: string[];
+  taskProfile?: string;
+  profile?: string;
   mutating?: boolean;
   needs?: string[];
   on_fail?: OnFail;
@@ -169,6 +171,13 @@ export function validateWorkflow(doc: WorkflowDoc, opts: { readOnly: boolean }):
   const mutatingStages: string[] = [];
 
   const validateToolsAndFlags = (s: WorkflowStage, where: string) => {
+    const rawProfile = s.taskProfile ?? s.profile;
+    if (rawProfile !== undefined) {
+      const p = typeof rawProfile === "string" ? rawProfile.trim().toLowerCase().replace(/[ -]/g, "_") : "";
+      if (!["read_only", "readonly", "reviewer", "review", "research", "implementation", "heavy"].includes(p)) {
+        err(`${where}: taskProfile/profile must be one of reviewer/read_only, research, implementation, or heavy`);
+      }
+    }
     let hasMutatingTool = false;
     if (s.tools !== undefined) {
       if (!Array.isArray(s.tools) || s.tools.some((t) => typeof t !== "string")) {
@@ -246,8 +255,8 @@ export function validateWorkflow(doc: WorkflowDoc, opts: { readOnly: boolean }):
       // parallel = aggregate DAG node (§7): children agent-only, no needs,
       // no nesting, not externally referenceable.
       if (s.prompt !== undefined) warnings.push(`${where}: parallel stage prompt is ignored (children carry the prompts)`);
-      if (s.tools !== undefined || s.mutating !== undefined || s.model !== undefined || s.thinking !== undefined) {
-        err(`${where}: parallel stage must not carry tools/mutating/model/thinking — declare them per child`);
+      if (s.tools !== undefined || s.mutating !== undefined || s.model !== undefined || s.thinking !== undefined || s.taskProfile !== undefined || s.profile !== undefined) {
+        err(`${where}: parallel stage must not carry tools/mutating/model/thinking/taskProfile — declare them per child`);
       }
       if (!Array.isArray(s.children) || s.children.length === 0) {
         err(`${where}: parallel requires non-empty children[]`);
@@ -380,7 +389,8 @@ export function formatEffectiveStageLines(
     const model = s.model ?? `${defaults.model} (default)`;
     const thinking = s.thinking ?? `${defaults.thinking} (default)`;
     const tools = s.tools && s.tools.length > 0 ? s.tools.join(",") : "(default read-only set)";
-    lines.push(`${indent}${s.id}: model=${model} thinking=${thinking} tools=${tools}${s.mutating ? " ⚠MUTATING" : ""}`);
+    const profile = s.taskProfile ?? s.profile;
+    lines.push(`${indent}${s.id}: model=${model} thinking=${thinking} tools=${tools}${profile ? ` profile=${profile}` : ""}${s.mutating ? " ⚠MUTATING" : ""}`);
   };
   for (const s of doc.stages) {
     if (s.kind === "parallel") {

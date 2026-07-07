@@ -73,6 +73,7 @@ export interface StageRunRequest {
   prompt: string;
   /** Comma-joined allowlist; undefined → runner default (read-only set). */
   tools?: string;
+  taskProfile?: string;
   timeoutMs: number;
   signal?: AbortSignal;
 }
@@ -84,6 +85,7 @@ export interface StageRunResult {
   failureType?: string;
   durationMs: number;
   usage?: { input: number; output: number; total: number; cost: number };
+  toolCallCount?: number;
 }
 
 export type StageRunner = (req: StageRunRequest) => Promise<StageRunResult>;
@@ -103,6 +105,7 @@ export interface StageRecord {
   /** ids of degraded upstreams visible to this stage at launch. */
   degraded_upstreams?: string[];
   cost?: number;
+  tool_call_count?: number;
 }
 
 export interface WorkflowRunResult {
@@ -364,6 +367,7 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(rec.failure_source ? { failure_source: rec.failure_source } : {}),
       ...(rec.error ? { error: rec.error.slice(0, 300) } : {}),
       ...(typeof rec.cost === "number" ? { cost: rec.cost } : {}),
+      ...(typeof rec.tool_call_count === "number" ? { tool_call_count: rec.tool_call_count } : {}),
     });
     await persistState(runStatus);
   };
@@ -404,6 +408,7 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
           thinking,
           prompt,
           ...(stage.tools && stage.tools.length > 0 ? { tools: stage.tools.join(",") } : {}),
+          ...(stage.taskProfile ?? stage.profile ? { taskProfile: stage.taskProfile ?? stage.profile } : {}),
           timeoutMs,
           signal: runCtl.signal,
         });
@@ -445,6 +450,7 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       attempts,
       duration_ms: now() - startMs,
       ...(typeof res.usage?.cost === "number" ? { cost: res.usage.cost } : {}),
+      ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
     };
     if (res.error && haltSignal()) {
       // In-flight unit cut by external abort / run timeout → cancelled

@@ -22,6 +22,7 @@
   "scripts": {
     "smoke:all": "node scripts/smoke-all.mjs",
     "smoke:llm-audit": "node scripts/smoke-llm-audit.mjs",
+    "smoke:llm-audit-budget": "node scripts/smoke-llm-audit-budget.mjs",
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
     "smoke:rename-entry": "node scripts/smoke-rename-entry.mjs",
@@ -80,6 +81,7 @@
     "smoke:dispatch-output-format": "node scripts/smoke-dispatch-output-format.mjs",
     "smoke:dispatch-subagent-tool-allowlist": "node scripts/smoke-dispatch-subagent-tool-allowlist.mjs",
     "smoke:dispatch-project-trust": "node scripts/smoke-dispatch-project-trust.mjs",
+    "smoke:dispatch-task-governor": "node scripts/smoke-dispatch-task-governor.mjs",
     "smoke:fallback-timing": "node scripts/smoke-model-fallback-mutation-timing.mjs",
     "smoke:vision": "node scripts/smoke-vision.mjs",
     "smoke:imagine": "node scripts/smoke-imagine.mjs",

@@ -141,6 +141,13 @@ check("timeout_partial → cancelled (v1: no per-task SLA policy)", () => {
   );
 });
 
+check("guardrail_stop → cancelled", () => {
+  assertEq(
+    inferTerminalState({ error: "guardrail stop", failureType: "guardrail_stop", output: "some text" }),
+    "cancelled",
+  );
+});
+
 check("rate_limit → failed", () => {
   assertEq(
     inferTerminalState({ error: "rate limit", failureType: "rate_limit" }),
@@ -272,6 +279,16 @@ check("cancelled (aborted failureType) → cancel_source=user + cleanup_done", (
   assertEq(f, {
     terminal_state: "cancelled",
     cancel_source: "user",
+    cleanup_done: true,
+    resumable: false,
+  });
+});
+
+check("cancelled (guardrail_stop failureType) → cancel_source=guardrail + cleanup_done", () => {
+  const f = buildTerminalStateFields({ error: "g", failureType: "guardrail_stop" });
+  assertEq(f, {
+    terminal_state: "cancelled",
+    cancel_source: "guardrail",
     cleanup_done: true,
     resumable: false,
   });

@@ -268,6 +268,87 @@ ok(
   else process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CYCLE_REPEAT_THRESHOLD = priorEnv.cycleRepeatThreshold;
 }
 
+// Extension anonymous fallback sessions are isolated by sessionManager identity.
+{
+  const priorEnv = {
+    enabled: process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_ENABLED,
+    consecutive: process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CONSECUTIVE_THRESHOLD,
+    abort: process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_ABORT_ON_TRIP,
+    cycleDetectionEnabled: process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CYCLE_DETECTION_ENABLED,
+  };
+  process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_ENABLED = "1";
+  process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CONSECUTIVE_THRESHOLD = "2";
+  process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CYCLE_DETECTION_ENABLED = "0";
+  process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_ABORT_ON_TRIP = "0";
+
+  const handlers = new Map();
+  const entries = [];
+  const pi = {
+    on(name, handler) {
+      handlers.set(name, handler);
+    },
+    appendEntry(type, payload) {
+      entries.push({ type, payload });
+    },
+  };
+  registerToolCircuitBreaker(pi);
+
+  const makeCtx = (sessionManager) => ({
+    sessionManager,
+    hasUI: false,
+    abort() {
+      throw new Error("abort should be disabled in this smoke");
+    },
+  });
+  const call = (ctx, toolName, input) => handlers.get("tool_call")({ toolName, input }, ctx);
+  const drop = (ctx, eventName = "agent_end") => handlers.get(eventName)({}, ctx);
+
+  const a = makeCtx({ getSessionId: () => "" });
+  const b = makeCtx({ getSessionId: () => "" });
+  call(a, "read", { path: "anonymous-A" });
+  call(a, "read", { path: "anonymous-A" });
+  call(b, "read", { path: "anonymous-B" });
+  const aTrip = call(a, "read", { path: "anonymous-A" });
+  const bStillOpen = call(b, "read", { path: "anonymous-B" });
+  ok(aTrip?.block && aTrip.reason.includes("Trigger: consecutive repeats 3 > 2"), "empty-id anonymous session A trips on its own repeated calls");
+  ok(bStillOpen === undefined, "empty-id anonymous session B does not inherit session A's tripped state");
+
+  drop(a);
+  const aAfterDrop = call(a, "read", { path: "anonymous-A" });
+  const bTrip = call(b, "read", { path: "anonymous-B" });
+  ok(aAfterDrop === undefined, "agent_end clears only anonymous session A state");
+  ok(bTrip?.block && entries.length === 2, "dropping anonymous session A leaves anonymous session B state intact");
+  ok(
+    entries[0].payload.sessionId !== entries[1].payload.sessionId &&
+      entries.every((entry) => entry.payload.sessionId.startsWith("anonymous:")),
+    "empty-id anonymous sessions receive distinct anonymous keys",
+  );
+
+  drop(b);
+  const bAfterDrop = call(b, "read", { path: "anonymous-B" });
+  ok(bAfterDrop === undefined, "agent_end clears the targeted anonymous session B state");
+
+  const throwing = makeCtx({
+    getSessionId() {
+      throw new Error("session id unavailable");
+    },
+    getSessionFile: () => "",
+  });
+  call(throwing, "grep", { pattern: "stable-throw" });
+  call(throwing, "grep", { pattern: "stable-throw" });
+  const throwingTrip = call(throwing, "grep", { pattern: "stable-throw" });
+  ok(throwingTrip?.block && entries.at(-1).payload.sessionId.startsWith("anonymous:"), "throwing getSessionId still uses a stable anonymous key for the same sessionManager object");
+
+  if (priorEnv.enabled === undefined) delete process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_ENABLED;
+  else process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_ENABLED = priorEnv.enabled;
+  if (priorEnv.consecutive === undefined) delete process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CONSECUTIVE_THRESHOLD;
+  else process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CONSECUTIVE_THRESHOLD = priorEnv.consecutive;
+  if (priorEnv.abort === undefined) delete process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_ABORT_ON_TRIP;
+  else process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_ABORT_ON_TRIP = priorEnv.abort;
+  if (priorEnv.cycleDetectionEnabled === undefined) delete process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CYCLE_DETECTION_ENABLED;
+  else process.env.PI_ASTACK_TOOL_CIRCUIT_BREAKER_CYCLE_DETECTION_ENABLED = priorEnv.cycleDetectionEnabled;
+}
+
 // Message/audit surface.
 {
   const st = newToolCircuitBreakerState();

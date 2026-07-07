@@ -214,7 +214,7 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
         req.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         modelRegistry,
         req.tools,
-        { anchor, projectRoot, maxRuntimeMs: req.timeoutMs ?? DEFAULT_TIMEOUT_MS },
+        { anchor, projectRoot, maxRuntimeMs: req.timeoutMs ?? DEFAULT_TIMEOUT_MS, taskProfile: req.taskProfile },
       ),
     );
     return {
@@ -223,6 +223,7 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
       ...(result.failureType ? { failureType: result.failureType } : {}),
       durationMs: result.durationMs,
       ...(result.usage ? { usage: result.usage } : {}),
+      ...(typeof result.toolCallCount === "number" ? { toolCallCount: result.toolCallCount } : {}),
     };
   };
 }

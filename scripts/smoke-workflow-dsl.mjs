@@ -123,6 +123,18 @@ await check("on_fail bounds: closed set; max_retries only with retry, [1,3]", as
   assert(D.validateWorkflow(doc([agent("a", { on_fail: "retry", max_retries: 3 })]), RO).ok, "valid retry");
 });
 
+await check("taskProfile/profile: valid on agents incl. parallel children; invalid profile rejected", async () => {
+  const valid = D.validateWorkflow(doc([
+    agent("a", { taskProfile: "research" }),
+    { id: "p", kind: "parallel", children: [agent("c1", { profile: "heavy" })] },
+  ]), RO);
+  assert(valid.ok, errsOf(valid));
+  const invalidTop = D.validateWorkflow(doc([agent("a", { taskProfile: "unbounded" })]), RO);
+  assert(!invalidTop.ok && errsOf(invalidTop).includes("taskProfile/profile"), errsOf(invalidTop));
+  const invalidChild = D.validateWorkflow(doc([{ id: "p", kind: "parallel", children: [agent("c1", { profile: "unbounded" })] }]), RO);
+  assert(!invalidChild.ok && errsOf(invalidChild).includes("taskProfile/profile"), errsOf(invalidChild));
+});
+
 await check("W12 concurrency pre-check: parallel+agent same wave fails; needs ordering fixes it; parallel children self-cap", async () => {
   const over = D.validateWorkflow(doc([
     { id: "p", kind: "parallel", children: [agent("c1"), agent("c2"), agent("c3"), agent("c4"), agent("c5")] },

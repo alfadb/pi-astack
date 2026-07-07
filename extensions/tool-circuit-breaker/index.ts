@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { uniqueSessionKey } from "../_shared/session-key";
 import {
   buildToolCircuitBreakerMessage,
   evaluateToolCircuitBreaker,
@@ -21,15 +22,7 @@ function readSettings(): ReturnType<typeof resolveToolCircuitBreakerSettings> {
 }
 
 function sessionIdOf(ctx: ExtensionContext): string {
-  const sm = ctx.sessionManager as unknown as {
-    getSessionId?: () => string;
-    getSessionFile?: () => string | undefined;
-  };
-  try {
-    return String(sm.getSessionId?.() ?? sm.getSessionFile?.() ?? "ephemeral");
-  } catch {
-    return "ephemeral";
-  }
+  return uniqueSessionKey(ctx);
 }
 
 function logTrip(sessionId: string, trip: ToolCircuitBreakerTrip): void {

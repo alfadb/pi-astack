@@ -71,7 +71,7 @@ export type TerminalState = "completed" | "failed" | "degraded" | "cancelled";
 
 /** What cancelled the task. v1 distinguishes user abort vs timeout.
  *  Future v2 may add "L1" (L1 wrote cancel annotation) and "scheduler". */
-export type CancelSource = "user" | "timeout";
+export type CancelSource = "user" | "timeout" | "guardrail";
 
 /** All per-state extra fields. terminal_state is always present; the
  *  others depend on the state per ADR §C5.
@@ -158,7 +158,7 @@ function clipReason(raw: string | undefined): string | undefined {
  * Rules (v1):
  *   - no error → completed
  *   - failureType === "aborted" → cancelled (user signal or parent signal)
- *   - failureType === "timeout" / "timeout_partial" → cancelled (timeout source)
+ *   - failureType === "timeout" / "timeout_partial" / "guardrail_stop" → cancelled
  *       Rationale per ADR 0027 §C5: "task 被外部信号终止" applies to timeout
  *       too — the dispatch tool's timeout is an externally-imposed boundary,
  *       not the task itself failing. timeout_partial is still cancelled (not
@@ -174,7 +174,7 @@ export function inferTerminalState(result: ResultLike): TerminalState {
   if (!result.error) return "completed";
   const ft = result.failureType;
   if (ft === "aborted") return "cancelled";
-  if (ft === "timeout" || ft === "timeout_partial") return "cancelled";
+  if (ft === "timeout" || ft === "timeout_partial" || ft === "guardrail_stop") return "cancelled";
   return "failed";
 }
 
@@ -207,6 +207,8 @@ export function buildTerminalStateFields(
       out.cancel_source = ctx.cancelSource;
     } else if (result.failureType === "timeout" || result.failureType === "timeout_partial") {
       out.cancel_source = "timeout";
+    } else if (result.failureType === "guardrail_stop") {
+      out.cancel_source = "guardrail";
     } else {
       out.cancel_source = "user";
     }
@@ -303,6 +305,7 @@ export function inferParallelTerminalState(
         t.result.failureType === "timeout" || t.result.failureType === "timeout_partial",
       )
     ) return "timeout";
+    if (tasks.some((t) => t.result.failureType === "guardrail_stop")) return "guardrail";
     return "user";
   }
 

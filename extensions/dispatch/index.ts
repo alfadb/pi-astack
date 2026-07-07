@@ -61,7 +61,13 @@ import { startHeartbeat, type HeartbeatHandle } from "../_shared/heartbeat";
 import { assessLivenessForAnchor } from "./heartbeat-consumer";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { DEFAULT_DISPATCH_SETTINGS, readDispatchSettings } from "./settings";
+import {
+  DEFAULT_DISPATCH_SETTINGS,
+  readDispatchSettings,
+  type DispatchTaskGovernorProfile,
+  type DispatchTaskGovernorSettings,
+  type DispatchTaskGovernorStage,
+} from "./settings";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -99,6 +105,7 @@ export function providerFromModel(model: string): string {
 }
 
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
+const DEFAULT_SUBAGENT_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide";
 
 /** Known tool names accepted by validateTools — used to reject unknown
  *  names early (SDK would silently ignore them, leaving the sub-agent
@@ -737,6 +744,58 @@ export function enforceMutatingEnvGate(toolsStr: string | undefined): ToolValida
   return { ok: true };
 }
 
+function normalizeTaskProfile(raw: unknown): "read_only" | "research" | "implementation" | undefined {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase().replace(/[ -]/g, "_") : "";
+  if (s === "research") return "research";
+  if (s === "implementation" || s === "heavy") return "implementation";
+  if (s === "read_only" || s === "readonly" || s === "reviewer" || s === "review") return "read_only";
+  return undefined;
+}
+
+function toolNamesFromAllowlist(toolsStr: string | undefined): string[] {
+  return (toolsStr || DEFAULT_SUBAGENT_TOOLS).split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+}
+
+export function inferTaskGovernorProfile(toolsStr?: string, taskProfile?: string): DispatchTaskGovernorProfile {
+  const explicit = normalizeTaskProfile(taskProfile);
+  if (explicit === "implementation" || explicit === "research") return explicit;
+  const hasMutatingTool = toolNamesFromAllowlist(toolsStr).some((name) => MUTATING_TOOLS.has(name));
+  if (hasMutatingTool) return "mutating_default";
+  return "read_only";
+}
+
+export interface TaskGovernorVerdict {
+  profile: DispatchTaskGovernorProfile;
+  stage?: DispatchTaskGovernorStage;
+  limit?: number;
+  terminal: boolean;
+  failureType?: "tool_budget_exceeded" | "guardrail_stop";
+}
+
+export function evaluateTaskGovernor(
+  settings: DispatchTaskGovernorSettings,
+  profile: DispatchTaskGovernorProfile,
+  toolCallCount: number,
+  emittedStages: ReadonlySet<DispatchTaskGovernorStage> = new Set(),
+): TaskGovernorVerdict {
+  if (!settings.enabled) return { profile, terminal: false };
+  const limits = settings.profiles[profile];
+  if (!limits) return { profile, terminal: false };
+  if (toolCallCount >= limits.hard) {
+    return { profile, stage: "hard", limit: limits.hard, terminal: true, failureType: "tool_budget_exceeded" };
+  }
+  if (limits.freshAuth !== undefined && toolCallCount >= limits.freshAuth) {
+    return { profile, stage: "fresh_auth", limit: limits.freshAuth, terminal: true, failureType: "guardrail_stop" };
+  }
+  if (toolCallCount >= limits.auditPause && !emittedStages.has("audit_pause")) {
+    return { profile, stage: "audit_pause", limit: limits.auditPause, terminal: false };
+  }
+  if (toolCallCount >= limits.checkpoint && !emittedStages.has("checkpoint")) {
+    return { profile, stage: "checkpoint", limit: limits.checkpoint, terminal: false };
+  }
+  return { profile, terminal: false };
+}
+
 // ── In-process agent ────────────────────────────────────────────
 
 /** Categorised failure modes for observability. Ordered by lifecycle stage. */
@@ -754,6 +813,8 @@ type FailureType =
   | "agent_error"       // generic agent stopReason="error" (no specific classification)
   | "retry_exhausted"   // pi-ai auto_retry exhausted maxRetries
   | "truncated"         // stopReason="length" (max tokens) or "abort" (provider cut stream)
+  | "guardrail_stop"    // deterministic governor stopped for partial return / fresh-auth boundary
+  | "tool_budget_exceeded" // deterministic governor hard cap exceeded
   // lifecycle
   | "timeout"           // dispatch tool timed out (no output captured)
   | "timeout_partial"   // dispatch tool timed out but some output was captured
@@ -882,6 +943,9 @@ export interface AgentResult {
   timeoutKind?: "idle" | "max_runtime";
   /** Diagnostic marker for idle timeout decisions. */
   lastProgressReason?: string;
+  governorProfile?: DispatchTaskGovernorProfile;
+  governorStage?: DispatchTaskGovernorStage;
+  governorLimit?: number;
   stopReason?: string;
   durationMs: number;
   /** Number of sub-agent tool executions that actually started. */
@@ -1118,6 +1182,7 @@ export async function runInProcess(
     anchor?: CausalAnchor;
     projectRoot?: string;
     maxRuntimeMs?: number;
+    taskProfile?: string;
     onProgress?: (progress: DispatchRunProgress) => void;
   },
 ): Promise<AgentResult> {
@@ -1214,10 +1279,13 @@ export async function runInProcess(
   //
   // Caller can always override with explicit `tools=...`. memory_list is
   // in KNOWN_TOOLS so callers wanting it can pass it explicitly.
-  const tools = (toolAllowlist || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide")
+  const tools = (toolAllowlist || DEFAULT_SUBAGENT_TOOLS)
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean);
+  const dispatchSettings = readDispatchSettings();
+  const governorProfile = inferTaskGovernorProfile(toolAllowlist, heartbeatCtx?.taskProfile);
+  const governorEmittedStages = new Set<DispatchTaskGovernorStage>();
 
   const { settingsManager, resourceLoader } = await getSharedInfra();
 
@@ -1294,6 +1362,11 @@ export async function runInProcess(
   let lastProgressAt = start;
   let lastProgressReason = "started";
   let recordProgress = (_reason: string) => {};
+  let resolveGovernorStop: ((result: AgentResult) => void) | undefined;
+  const governorPromise = new Promise<AgentResult>((resolve) => {
+    resolveGovernorStop = resolve;
+  });
+
   const timeoutPromise = new Promise<AgentResult>((resolve) => {
     const resolveTimeout = (timeoutKind: "idle" | "max_runtime") => {
       onAbort();
@@ -1389,7 +1462,59 @@ export async function runInProcess(
           tool_allowlist: tools,
         }, event);
         const eventType = String(event?.type ?? "unknown");
-        if (eventType === "tool_execution_start") toolCallCount++;
+        if (eventType === "tool_execution_start") {
+          toolCallCount++;
+          const verdict = evaluateTaskGovernor(dispatchSettings.taskGovernor, governorProfile, toolCallCount, governorEmittedStages);
+          if (verdict.stage) {
+            governorEmittedStages.add(verdict.stage);
+            const governorFields = {
+              governor_profile: verdict.profile,
+              governor_stage: verdict.stage,
+              governor_limit: verdict.limit,
+              tool_call_count: toolCallCount,
+            };
+            void appendDispatchAudit(heartbeatProjectRoot, heartbeatAnchor, {
+              operation: "dispatch.task_governor",
+              row_kind: "governor",
+              model: modelStr,
+              thinking,
+              tools,
+              ...governorFields,
+              result: verdict.terminal ? "fail" : "ok",
+              ...(verdict.failureType ? { failure_type: verdict.failureType } : {}),
+            });
+            try {
+              heartbeatCtx?.onProgress?.({
+                reason: `governor:${verdict.stage}`,
+                at: Date.now(),
+                heartbeatTracePath: heartbeat.tracePath,
+                toolCallCount,
+              });
+            } catch { /* best-effort UI telemetry */ }
+            if (verdict.terminal && resolveGovernorStop) {
+              const now = Date.now();
+              const error = verdict.failureType === "guardrail_stop"
+                ? `guardrail stop: ${verdict.profile} worker reached ${verdict.stage} gate at ${toolCallCount} tool calls; partial output returned`
+                : `tool budget exceeded: ${verdict.profile} worker reached hard cap ${verdict.limit} at ${toolCallCount} tool calls; partial output returned`;
+              localCtl.abort();
+              abortSessionOnce();
+              settled = true;
+              resolveGovernorStop({
+                output: finalOutput,
+                error,
+                failureType: verdict.failureType,
+                durationMs: now - start,
+                toolCallCount,
+                usage,
+                stopReason,
+                governorProfile: verdict.profile,
+                governorStage: verdict.stage,
+                governorLimit: verdict.limit,
+                retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
+              });
+            }
+          }
+        }
         recordProgress(`event:${eventType}`);
         if (event.type === "message_end" && event.message?.role === "assistant") {
           lastAssistant = event.message;
@@ -1526,7 +1651,7 @@ export async function runInProcess(
     }
   })();
 
-  const result = await Promise.race([runPromise, timeoutPromise]);
+  const result = await Promise.race([runPromise, timeoutPromise, governorPromise]);
   const resultWithBudget = effectiveMaxOutputTokens === undefined
     ? result
     : { ...result, maxOutputTokens: effectiveMaxOutputTokens };
@@ -1590,6 +1715,8 @@ const PARTIAL_OUTPUT_FAILURES: ReadonlySet<FailureType> = new Set([
   "truncated",
   "agent_error",
   "retry_exhausted",
+  "guardrail_stop",
+  "tool_budget_exceeded",
 ]);
 
 export function formatResult(
@@ -1692,6 +1819,8 @@ export default function (pi: ExtensionAPI) {
       prompt: Type.String({ description: "Prompt sent to this task" }),
       name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
       tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
+      taskProfile: Type.Optional(Type.String({ description: "Optional deterministic budget profile: reviewer/read_only, research, implementation, or heavy. Mutating tools without an explicit implementation/heavy profile use mutating-default." })),
+      profile: Type.Optional(Type.String({ description: "Alias for taskProfile." })),
       timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
     }),
 
@@ -1709,6 +1838,7 @@ export default function (pi: ExtensionAPI) {
         prompt: n.prompt,
         ...(n.name !== undefined ? { name: n.name } : {}),
         ...(n.tools !== undefined ? { tools: n.tools } : {}),
+        ...(n.taskProfile !== undefined ? { taskProfile: n.taskProfile } : {}),
         ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
       };
     },
@@ -1833,6 +1963,7 @@ export default function (pi: ExtensionAPI) {
             {
               anchor: subAnchor,
               projectRoot: ctx.cwd || process.cwd(),
+              taskProfile: params.taskProfile,
               onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
             },
           ),
@@ -1864,7 +1995,7 @@ export default function (pi: ExtensionAPI) {
       // shows 🚫 not ⚠️ .
       const singleTaskFinalState: DispatchState = !result.error
         ? "completed"
-        : result.failureType === "aborted" || result.failureType === "timeout" || result.failureType === "timeout_partial"
+        : inferTerminalState(result) === "cancelled"
           ? "cancelled"
           : "failed";
       const isOk = !result.error;
@@ -1907,6 +2038,9 @@ export default function (pi: ExtensionAPI) {
           ...(result.timeoutKind ? { timeout_kind: result.timeoutKind } : {}),
           ...(result.lastProgressReason ? { last_progress_reason: result.lastProgressReason } : {}),
           ...(result.stopReason ? { stop_reason: result.stopReason } : {}),
+          ...(result.governorProfile ? { governor_profile: result.governorProfile } : {}),
+          ...(result.governorStage ? { governor_stage: result.governorStage } : {}),
+          ...(typeof result.governorLimit === "number" ? { governor_limit: result.governorLimit } : {}),
           ...(result.heartbeat_trace_path ? { heartbeat_trace_path: result.heartbeat_trace_path } : {}),
           ...(result.heartbeat_liveness ? { heartbeat_liveness: result.heartbeat_liveness } : {}),
           ...(result.maxOutputTokens ? { max_output_tokens: result.maxOutputTokens } : {}),
@@ -1939,6 +2073,9 @@ export default function (pi: ExtensionAPI) {
           ...(result.error ? { error: result.error, failureType: result.failureType } : {}),
           ...(result.timeoutKind ? { timeoutKind: result.timeoutKind } : {}),
           ...(result.lastProgressReason ? { lastProgressReason: result.lastProgressReason } : {}),
+          ...(result.governorProfile ? { governorProfile: result.governorProfile } : {}),
+          ...(result.governorStage ? { governorStage: result.governorStage } : {}),
+          ...(typeof result.governorLimit === "number" ? { governorLimit: result.governorLimit } : {}),
           ...(result.heartbeat_trace_path ? { heartbeatTracePath: result.heartbeat_trace_path } : {}),
           ...(result.heartbeat_liveness ? { heartbeatLiveness: result.heartbeat_liveness } : {}),
           ...(result.maxOutputTokens ? { maxOutputTokens: result.maxOutputTokens } : {}),
@@ -1978,6 +2115,8 @@ export default function (pi: ExtensionAPI) {
           prompt: Type.String({ description: "Prompt sent to this task" }),
           name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
           tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide)." })),
+          taskProfile: Type.Optional(Type.String({ description: "Optional deterministic budget profile: reviewer/read_only, research, implementation, or heavy." })),
+          profile: Type.Optional(Type.String({ description: "Alias for taskProfile." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
@@ -2012,6 +2151,7 @@ export default function (pi: ExtensionAPI) {
           prompt: n.prompt,
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.tools !== undefined ? { tools: n.tools } : {}),
+          ...(n.taskProfile !== undefined ? { taskProfile: n.taskProfile } : {}),
           ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
         };
       });
@@ -2179,13 +2319,14 @@ export default function (pi: ExtensionAPI) {
               runInProcess(
                 t.model, t.thinking, prompt,
                 signal, t.timeoutMs ?? timeoutMs, ctx.modelRegistry,
-                t.tools || "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide",
+                t.tools || DEFAULT_SUBAGENT_TOOLS,
                 // Stage 1b heartbeat ctx. Per-task subAnchor (subturn
                 // 1..N) gives each task its own heartbeat file under
                 // .pi-astack/dispatch/heartbeat/.
                 {
                   anchor: subAnchor,
                   projectRoot,
+                  taskProfile: t.taskProfile,
                   onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
                 },
               ),
@@ -2236,6 +2377,9 @@ export default function (pi: ExtensionAPI) {
             ...(res.timeoutKind ? { timeout_kind: res.timeoutKind } : {}),
             ...(res.lastProgressReason ? { last_progress_reason: res.lastProgressReason } : {}),
             ...(res.stopReason ? { stop_reason: res.stopReason } : {}),
+            ...(res.governorProfile ? { governor_profile: res.governorProfile } : {}),
+            ...(res.governorStage ? { governor_stage: res.governorStage } : {}),
+            ...(typeof res.governorLimit === "number" ? { governor_limit: res.governorLimit } : {}),
             ...(res.heartbeat_trace_path ? { heartbeat_trace_path: res.heartbeat_trace_path } : {}),
             ...(res.heartbeat_liveness ? { heartbeat_liveness: res.heartbeat_liveness } : {}),
             ...(res.maxOutputTokens ? { max_output_tokens: res.maxOutputTokens } : {}),
@@ -2478,6 +2622,9 @@ export default function (pi: ExtensionAPI) {
               ...(r.usage ? { usage: r.usage } : {}),
               ...(r.maxOutputTokens ? { maxOutputTokens: r.maxOutputTokens } : {}),
               ...(typeof r.toolCallCount === "number" ? { toolCallCount: r.toolCallCount } : {}),
+              ...(r.governorProfile ? { governorProfile: r.governorProfile } : {}),
+              ...(r.governorStage ? { governorStage: r.governorStage } : {}),
+              ...(typeof r.governorLimit === "number" ? { governorLimit: r.governorLimit } : {}),
               terminalState: inferTerminalState(r),
             };
           }),

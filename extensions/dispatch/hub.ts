@@ -75,6 +75,7 @@ export interface HubWorkerSpec {
   prompt: string;
   thinking?: string;
   tools?: string;
+  taskProfile?: string;
 }
 
 export interface HubPlan {
@@ -176,7 +177,7 @@ export function buildHubPlanPrompt(opts: {
   return [
     "You are the L2 dispatch HUB. Decide the worker assignment for the task below.",
     "Output ONLY a single JSON object (no prose, no code fence) of the form:",
-    '{"workers":[{"model":"vendor/model","role":"short-role","prompt":"the full prompt for this worker","thinking":"high"}],"rationale":"why this assignment"}',
+    '{"workers":[{"model":"vendor/model","role":"short-role","prompt":"the full prompt for this worker","thinking":"high","taskProfile":"research"}],"rationale":"why this assignment"}',
     "",
     "Rules:",
     `- Choose 1..${maxWorkers} workers. Fewer is better when fewer suffice — do not over-provision.`,
@@ -247,6 +248,8 @@ export function parseHubPlan(text: string): { ok: true; plan: HubPlan } | { ok: 
       prompt,
       ...(typeof wr.thinking === "string" && wr.thinking.trim() ? { thinking: wr.thinking.trim() } : {}),
       ...(typeof wr.tools === "string" && wr.tools.trim() ? { tools: wr.tools.trim() } : {}),
+      ...(typeof wr.taskProfile === "string" && wr.taskProfile.trim() ? { taskProfile: wr.taskProfile.trim() } : {}),
+      ...(typeof wr.profile === "string" && wr.profile.trim() && typeof wr.taskProfile !== "string" ? { taskProfile: wr.profile.trim() } : {}),
     });
   }
   if (workers.length === 0) return { ok: false, error: "hub plan has no usable workers (need model+prompt)" };
@@ -414,6 +417,7 @@ export interface HubDeps {
       anchor?: CausalAnchor;
       projectRoot?: string;
       maxRuntimeMs?: number;
+      taskProfile?: string;
       onProgress?: (progress: { reason: string; at: number; heartbeatTracePath?: string; toolCallCount?: number }) => void;
     },
   ) => Promise<{
@@ -694,6 +698,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
                     {
                       anchor: subAnchor,
                       projectRoot,
+                      taskProfile: t.taskProfile,
                       ...(progressTask
                         ? { onProgress: (p) => progress.applyRunProgress(progressTask, p) }
                         : {}),
@@ -726,6 +731,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
               duration_ms: res.durationMs,
               result: res.error ? "fail" : "ok",
               ...(res.failureType ? { failure_type: res.failureType } : {}),
+              ...("toolCallCount" in res && typeof (res as { toolCallCount?: unknown }).toolCallCount === "number" ? { tool_call_count: (res as { toolCallCount: number }).toolCallCount } : {}),
               output_chars: res.output?.length ?? 0,
               ...(res.usage ? { tokens_in: res.usage.input, tokens_out: res.usage.output, cost: res.usage.cost } : {}),
             });

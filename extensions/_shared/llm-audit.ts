@@ -1,4 +1,6 @@
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { ensureProjectGitignoredOnce, formatLocalIsoTimestamp, piAstackModuleDir } from "./runtime";
 import { getCurrentAnchor, spreadAnchor } from "./causal-anchor";
@@ -22,6 +24,52 @@ export interface StreamSimpleLike {
 type StreamSimpleResult<TPiAi> = TPiAi extends {
   streamSimple(model: unknown, opts: unknown, config: unknown): { result(): Promise<infer TResult> };
 } ? TResult : any;
+
+interface LlmAuditBudgetSettings {
+  enabled: boolean;
+  maxPromptChars: number;
+  maxPromptEstimatedTokens: number;
+  perOperationMaxCallsPerTurn: number;
+  perOperationMaxEstimatedTokensPerTurn: number;
+}
+
+interface LlmAuditBudgetCounter {
+  calls: number;
+  estimatedTokens: number;
+}
+
+interface LlmAuditBudgetState {
+  counters: Map<string, LlmAuditBudgetCounter>;
+}
+
+const DEFAULT_LLM_AUDIT_BUDGET_SETTINGS: LlmAuditBudgetSettings = {
+  enabled: true,
+  maxPromptChars: 400_000,
+  maxPromptEstimatedTokens: 120_000,
+  perOperationMaxCallsPerTurn: 12,
+  perOperationMaxEstimatedTokensPerTurn: 300_000,
+};
+const PROCESS_FALLBACK_BUDGET_WINDOW_MS = 10 * 60 * 1000;
+
+const PI_STACK_SETTINGS_PATH = path.join(
+  os.homedir(), ".pi", "agent", "pi-astack-settings.json",
+);
+const BUDGET_STATE_KEY = Symbol.for("pi-astack/llm-audit/background-budget/v1");
+
+export class BackgroundLlmBudgetExceededError extends Error {
+  readonly code = "PI_ASTACK_BACKGROUND_LLM_BUDGET_EXCEEDED";
+  readonly budgetName: string;
+  readonly count: number;
+  readonly limit: number;
+
+  constructor(budgetName: string, count: number, limit: number) {
+    super(`background LLM budget exceeded: ${budgetName} ${count} > ${limit}`);
+    this.name = "BackgroundLlmBudgetExceededError";
+    this.budgetName = budgetName;
+    this.count = count;
+    this.limit = limit;
+  }
+}
 
 function auditPath(projectRoot: string): string {
   return path.join(piAstackModuleDir(projectRoot, "llm-audit"), "audit.jsonl");
@@ -142,12 +190,189 @@ function modelInfoFromContext(ctx: unknown): Record<string, unknown> | undefined
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function asNumber(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return fallback;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const s = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(s)) return true;
+    if (["false", "0", "no", "off"].includes(s)) return false;
+  }
+  return fallback;
+}
+
+function loadPiStackSettings(): Record<string, unknown> {
+  try {
+    return JSON.parse(fsSync.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"));
+  } catch (e: unknown) {
+    try {
+      if (fsSync.existsSync(PI_STACK_SETTINGS_PATH)) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error(`pi-astack: failed to parse ${PI_STACK_SETTINGS_PATH}: ${message}. Using defaults.`);
+      }
+    } catch {
+      // ignore
+    }
+    return {};
+  }
+}
+
+function resolveLlmAuditBudgetSettings(): LlmAuditBudgetSettings {
+  const raw = loadPiStackSettings();
+  const llmAudit = (raw.llmAudit ?? {}) as Record<string, unknown>;
+  const block = (llmAudit.backgroundBudget ?? {}) as Record<string, unknown>;
+  const def = DEFAULT_LLM_AUDIT_BUDGET_SETTINGS;
+  return {
+    enabled: asBoolean(block.enabled, def.enabled),
+    maxPromptChars: Math.max(0, Math.floor(asNumber(block.maxPromptChars, def.maxPromptChars))),
+    maxPromptEstimatedTokens: Math.max(0, Math.floor(asNumber(block.maxPromptEstimatedTokens, def.maxPromptEstimatedTokens))),
+    perOperationMaxCallsPerTurn: Math.max(0, Math.floor(asNumber(block.perOperationMaxCallsPerTurn, def.perOperationMaxCallsPerTurn))),
+    perOperationMaxEstimatedTokensPerTurn: Math.max(0, Math.floor(asNumber(block.perOperationMaxEstimatedTokensPerTurn, def.perOperationMaxEstimatedTokensPerTurn))),
+  };
+}
+
+function budgetState(): LlmAuditBudgetState {
+  const g = globalThis as Record<symbol, unknown>;
+  let state = g[BUDGET_STATE_KEY] as LlmAuditBudgetState | undefined;
+  if (!state) {
+    state = { counters: new Map<string, LlmAuditBudgetCounter>() };
+    g[BUDGET_STATE_KEY] = state;
+  }
+  return state;
+}
+
+function promptCharsFrom(value: unknown, seen = new WeakSet<object>()): number {
+  if (typeof value === "string") return value.length;
+  if (typeof value === "bigint" || typeof value === "number" || typeof value === "boolean") return String(value).length;
+  if (value === null || typeof value !== "object") return 0;
+  if (seen.has(value)) return 0;
+  seen.add(value);
+  try {
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) return value.byteLength;
+    if (value instanceof ArrayBuffer) return value.byteLength;
+    if (isArrayBufferView(value)) return value.byteLength;
+    if (Array.isArray(value)) return value.reduce((sum, item) => sum + promptCharsFrom(item, seen), 0);
+    let sum = 0;
+    for (const item of Object.values(value as Record<string, unknown>)) {
+      sum += promptCharsFrom(item, seen);
+    }
+    return sum;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function budgetTurnKey(): string {
+  const anchor = getCurrentAnchor();
+  if (anchor) return `${anchor.session_id}:${anchor.turn_id}`;
+  const windowId = Math.floor(Date.now() / PROCESS_FALLBACK_BUDGET_WINDOW_MS);
+  return `process:${windowId}`;
+}
+
+function budgetCounterKey(meta: LlmAuditMeta, modelId: string | undefined): string {
+  return `${budgetTurnKey()}:${meta.module}:${meta.operation}:${modelId ?? "unknown-model"}`;
+}
+
+async function appendBudgetRow(projectRoot: string, row: {
+  module: string;
+  operation: string;
+  model_id: string | undefined;
+  promptChars: number;
+  estimatedTokens: number;
+  budgetName: string;
+  count: number;
+  limit: number;
+  result: "allow" | "blocked";
+}): Promise<void> {
+  await appendLlmAudit(projectRoot, {
+    row_type: "budget",
+    api_kind: "pi-ai.streamSimple",
+    module: row.module,
+    operation: row.operation,
+    model_id: row.model_id,
+    prompt_chars: row.promptChars,
+    estimated_tokens: row.estimatedTokens,
+    budget_name: row.budgetName,
+    count: row.count,
+    limit: row.limit,
+    result: row.result,
+  });
+}
+
+async function enforceBackgroundBudget(projectRoot: string, meta: LlmAuditMeta, modelId: string | undefined, opts: unknown): Promise<void> {
+  const settings = resolveLlmAuditBudgetSettings();
+  if (!settings.enabled) return;
+
+  const promptChars = promptCharsFrom(opts);
+  const estimatedTokens = Math.ceil(promptChars / 4);
+  const key = budgetCounterKey(meta, modelId);
+  const state = budgetState();
+  const current = state.counters.get(key) ?? { calls: 0, estimatedTokens: 0 };
+
+  const checks = [
+    { name: "maxPromptChars", count: promptChars, limit: settings.maxPromptChars },
+    { name: "maxPromptEstimatedTokens", count: estimatedTokens, limit: settings.maxPromptEstimatedTokens },
+    { name: "perOperationMaxCallsPerTurn", count: current.calls + 1, limit: settings.perOperationMaxCallsPerTurn },
+    { name: "perOperationMaxEstimatedTokensPerTurn", count: current.estimatedTokens + estimatedTokens, limit: settings.perOperationMaxEstimatedTokensPerTurn },
+  ];
+
+  for (const check of checks) {
+    if (check.limit > 0 && check.count > check.limit) {
+      await appendBudgetRow(projectRoot, {
+        module: meta.module,
+        operation: meta.operation,
+        model_id: modelId,
+        promptChars,
+        estimatedTokens,
+        budgetName: check.name,
+        count: check.count,
+        limit: check.limit,
+        result: "blocked",
+      });
+      throw new BackgroundLlmBudgetExceededError(check.name, check.count, check.limit);
+    }
+  }
+
+  current.calls += 1;
+  current.estimatedTokens += estimatedTokens;
+  state.counters.set(key, current);
+
+  const allowBudget = settings.perOperationMaxEstimatedTokensPerTurn > 0
+    ? { name: "perOperationMaxEstimatedTokensPerTurn", count: current.estimatedTokens, limit: settings.perOperationMaxEstimatedTokensPerTurn }
+    : settings.perOperationMaxCallsPerTurn > 0
+      ? { name: "perOperationMaxCallsPerTurn", count: current.calls, limit: settings.perOperationMaxCallsPerTurn }
+      : { name: "backgroundBudget", count: current.calls, limit: 0 };
+  await appendBudgetRow(projectRoot, {
+    module: meta.module,
+    operation: meta.operation,
+    model_id: modelId,
+    promptChars,
+    estimatedTokens,
+    budgetName: allowBudget.name,
+    count: allowBudget.count,
+    limit: allowBudget.limit,
+    result: "allow",
+  });
+}
+
 function withAuditBase(row: Record<string, unknown>): Record<string, unknown> {
   return {
     ts: formatLocalIsoTimestamp(),
     ...spreadAnchor(getCurrentAnchor()),
     ...row,
   };
+}
+
+export function _resetLlmAuditBudgetForTests(): void {
+  budgetState().counters.clear();
 }
 
 export async function appendLlmAudit(projectRoot: string, row: Record<string, unknown>): Promise<void> {
@@ -182,15 +407,18 @@ export async function auditStreamSimple<TPiAi extends StreamSimpleLike>(
   const started = Date.now();
   const callId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const modelRef = typeof meta.model_ref === "string" ? meta.model_ref : undefined;
+  const modelId = typeof meta.model_id === "string" ? meta.model_id : modelIdFrom(model, modelRef);
   const base = {
     call_id: callId,
     module: meta.module,
     operation: meta.operation,
     api_kind: "pi-ai.streamSimple",
     model_ref: modelRef,
-    model_id: typeof meta.model_id === "string" ? meta.model_id : modelIdFrom(model, modelRef),
+    model_id: modelId,
     meta,
   };
+
+  await enforceBackgroundBudget(projectRoot, meta, modelId, opts);
 
   await appendLlmAudit(projectRoot, {
     ...base,

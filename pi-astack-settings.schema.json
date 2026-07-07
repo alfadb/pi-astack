@@ -15,6 +15,59 @@
       "description": "Free-form comment field. JSON has no native comments; use this (or any underscore-prefixed key) for inline documentation."
     },
 
+    "llmAudit": {
+      "type": "object",
+      "description": "LLM audit settings (extensions/llm-audit/ and extensions/_shared/llm-audit.ts). The backgroundBudget shell guards shared auditStreamSimple calls before the model is invoked. It uses cheap process-local counters keyed by turn/module/operation/model when a causal anchor exists, and by bounded process-window/module/operation/model when no turn identity is available.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "backgroundBudget": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {
+            "enabled": true,
+            "maxPromptChars": 400000,
+            "maxPromptEstimatedTokens": 120000,
+            "perOperationMaxCallsPerTurn": 12,
+            "perOperationMaxEstimatedTokensPerTurn": 300000
+          },
+          "description": "Deterministic budget shell for background pi-ai streamSimple calls routed through auditStreamSimple. Limits are checked before the LLM call and fail closed with BackgroundLlmBudgetExceededError. Token counts are estimated from prompt characters and are intended as cost-control guards, not provider billing truth.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Master switch. false disables all budget checks while keeping normal llm-audit logging."
+            },
+            "maxPromptChars": {
+              "type": "number",
+              "default": 400000,
+              "minimum": 0,
+              "description": "Maximum prompt characters for a single auditStreamSimple call. 0 disables this single-call character cap."
+            },
+            "maxPromptEstimatedTokens": {
+              "type": "number",
+              "default": 120000,
+              "minimum": 0,
+              "description": "Maximum estimated prompt tokens for a single auditStreamSimple call. Estimated as ceil(promptChars / 4). 0 disables this single-call token cap."
+            },
+            "perOperationMaxCallsPerTurn": {
+              "type": "number",
+              "default": 12,
+              "minimum": 0,
+              "description": "Maximum auditStreamSimple calls per turn/module/operation/model key. 0 disables this call-count cap. Without a causal turn identity, the same cap is process-local within a bounded fallback window."
+            },
+            "perOperationMaxEstimatedTokensPerTurn": {
+              "type": "number",
+              "default": 300000,
+              "minimum": 0,
+              "description": "Maximum cumulative estimated prompt tokens per turn/module/operation/model key. Estimated as ceil(promptChars / 4). 0 disables this cumulative token cap. Without a causal turn identity, the same cap is process-local within a bounded fallback window."
+            }
+          }
+        }
+      }
+    },
+
     "abrain": {
       "type": "object",
       "description": "Abrain / vault settings (extensions/abrain/). Handles strict project binding, vault release, and Windows vault-backed bash injection guard.",
@@ -1579,6 +1632,35 @@
           "maximum": 16,
           "description": "Maximum number of concurrent dispatch_parallel workers allowed for the same provider. Invalid or missing values fall back to 4."
         },
+        "taskGovernor": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Deterministic per-worker tool-call budget for dispatch/workflow bounded workers. This does not apply to the main session and does not call an LLM audit. Checkpoint/audit gates emit audit/progress; terminal gates abort the sub-agent and return partial output.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Kill switch for deterministic sub-agent task budgets. Default true."
+            },
+            "profiles": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Optional overrides for per-profile tool-call limits. Omitted profiles use runtime defaults.",
+              "properties": {
+                "read_only": { "$ref": "#/definitions/dispatchTaskGovernorLimits" },
+                "research": { "$ref": "#/definitions/dispatchTaskGovernorLimits" },
+                "implementation": { "$ref": "#/definitions/dispatchTaskGovernorLimits" },
+                "mutating_default": { "$ref": "#/definitions/dispatchTaskGovernorLimits" }
+              },
+              "default": {
+                "read_only": { "checkpoint": 60, "auditPause": 90, "freshAuth": 120, "hard": 180 },
+                "research": { "checkpoint": 80, "auditPause": 120, "freshAuth": 160, "hard": 240 },
+                "implementation": { "checkpoint": 120, "auditPause": 180, "freshAuth": 240, "hard": 360 },
+                "mutating_default": { "checkpoint": 60, "auditPause": 100, "hard": 120 }
+              }
+            }
+          }
+        },
         "hub": {
           "type": "object",
           "additionalProperties": false,
@@ -1753,6 +1835,19 @@
           "minimum": 1000,
           "default": 20000
         }
+      }
+    }
+  },
+  "definitions": {
+    "dispatchTaskGovernorLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tool-call thresholds for a dispatch task-governor profile. checkpoint and auditPause are non-terminal audit/progress gates. freshAuth is a terminal guardrail stop when no external grant mechanism exists. hard is a terminal budget-exceeded stop.",
+      "properties": {
+        "checkpoint": { "type": "integer", "minimum": 1 },
+        "auditPause": { "type": "integer", "minimum": 1 },
+        "freshAuth": { "type": "integer", "minimum": 1 },
+        "hard": { "type": "integer", "minimum": 1 }
       }
     }
   }
