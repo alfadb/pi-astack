@@ -4,6 +4,7 @@ import { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvo
 import { runConstraintShadowCompiler } from "./shadow-runner";
 import { commitAbrainDerivedOutputs } from "../writer";
 import { getDeviceId } from "../../_shared/causal-anchor";
+import { acquireFileLock, abrainSedimentLocksDir } from "../../_shared/runtime";
 import type { ConstraintShadowRunResult } from "./types";
 import type { SedimentSettings } from "../settings";
 
@@ -85,7 +86,6 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
   const auto = trigger.settings.constraintShadowCompiler.autoRefresh;
   const modelRef = defaultModelRef(trigger.settings);
   const startedAtMs = Date.now();
-  state.lastStartedMs = startedAtMs;
 
   if (!modelRef) {
     await appendAuditLine(trigger.abrainHome, {
@@ -111,6 +111,32 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
     }).catch(() => undefined);
     return;
   }
+
+  // Cross-process mutual exclusion: only one pi instance compiles at a time.
+  // The lock covers the actual compile/commit section, not the debounce wait.
+  const lockPath = path.join(abrainSedimentLocksDir(trigger.abrainHome), "constraint-shadow-auto-refresh.lock");
+  let lockHandle: Awaited<ReturnType<typeof acquireFileLock>> | undefined;
+  try {
+    lockHandle = await acquireFileLock(lockPath, {
+      timeoutMs: 5_000,
+      staleMs: 30 * 60 * 1_000, // 30 min — long enough to survive a hung compile
+      retryMs: 100,
+      label: "constraint-shadow-auto-refresh",
+    });
+  } catch {
+    await appendAuditLine(trigger.abrainHome, {
+      schemaVersion: "constraint-shadow-auto-refresh/v1",
+      observedAtUtc: new Date(startedAtMs).toISOString(),
+      ok: false,
+      reason: trigger.reason,
+      sourceEventId: trigger.sourceEventId ?? null,
+      modelRef,
+      status: "lock_contended",
+    }).catch(() => undefined);
+    return;
+  }
+
+  state.lastStartedMs = startedAtMs;
 
   await appendAuditLine(trigger.abrainHome, {
     schemaVersion: "constraint-shadow-auto-refresh/v1",
@@ -207,6 +233,8 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger): Promise<voi
   } finally {
     clearInterval(statusTicker);
     compileStatus?.(undefined);
+    // Release the cross-process lock.
+    if (lockHandle) await lockHandle.release().catch(() => undefined);
   }
 }
 

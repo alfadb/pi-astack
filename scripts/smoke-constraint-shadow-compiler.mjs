@@ -47,6 +47,14 @@ function writeFile(file, content) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content, "utf8");
 }
+function setHomeEnv(home) {
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+}
+function restoreEnv(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
 function listFiles(root) {
   if (!fs.existsSync(root)) return [];
   const out = [];
@@ -115,6 +123,7 @@ for (const file of [
   "extensions/sediment/constraint-compiler/projection.ts",
   "extensions/sediment/constraint-compiler/corpus-split.ts",
   "extensions/sediment/constraint-compiler/shadow-runner.ts",
+  "extensions/sediment/constraint-compiler/auto-refresh.ts",
 ]) {
   stageTs(outRoot, file);
 }
@@ -124,6 +133,18 @@ exports.auditStreamSimple = async function auditStreamSimple(_projectRoot, meta,
   exports.lastAuditMeta = meta;
   return piAi.streamSimple(model, opts, config).result();
 };
+`);
+
+// Stub writer module for auto-refresh (commitAbrainDerivedOutputs is best-effort, not needed in smoke)
+writeFile(path.join(outRoot, "sediment", "writer.js"), `
+exports.commitAbrainDerivedOutputs = async () => null;
+`);
+
+// Stub causal-anchor for auto-refresh (getDeviceId)
+writeFile(path.join(outRoot, "_shared", "causal-anchor.js"), `
+exports.getDeviceId = () => "smoke-device";
+exports.getCurrentAnchor = () => null;
+exports.runWithTriggerAnchor = (fn) => fn();
 `);
 
 const { makeDiagnostic, assertDiagnosticConsumers } = require(path.join(outRoot, "sediment", "constraint-compiler", "diagnostics.js"));
@@ -142,6 +163,8 @@ const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment",
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
 const { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
+const { _runConstraintShadowAutoRefreshNowForTests, _resetConstraintShadowAutoRefreshForTests } = require(path.join(outRoot, "sediment", "constraint-compiler", "auto-refresh.js"));
+const { acquireFileLock, abrainSedimentLocksDir } = require(path.join(outRoot, "_shared", "runtime.js"));
 const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, selectLatestConstraintProjectionEventId } = require(path.join(outRoot, "sediment", "constraint-compiler", "projection.js"));
 const { renderConstraintL2View } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
 const { buildCorpusSplitReport, stratumForRow, CORPUS_SPLIT_STRATA } = require(path.join(outRoot, "sediment", "constraint-compiler", "corpus-split.js"));
@@ -151,13 +174,14 @@ function resolveSedimentSettingsWithConfig(config) {
   writeFile(path.join(home, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify(config));
   const settingsPath = path.join(outRoot, "sediment", "settings.js");
   const oldHome = process.env.HOME;
+  const oldUserProfile = process.env.USERPROFILE;
   delete require.cache[require.resolve(settingsPath)];
-  process.env.HOME = home;
+  setHomeEnv(home);
   try {
     return require(settingsPath).resolveSedimentSettings();
   } finally {
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
+    restoreEnv("HOME", oldHome);
+    restoreEnv("USERPROFILE", oldUserProfile);
     delete require.cache[require.resolve(settingsPath)];
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -2246,7 +2270,8 @@ check("shadow runner writes artifacts only under shadow state and keeps rules un
   });
   assert(result.ok, "runner success path failed");
   assert(result.ok && result.diff.summary.unmappedSources === 0, "runner produced unmapped sources");
-  assert(result.ok && result.artifacts && result.artifacts.runDir.includes(".state/sediment/constraint-shadow/runs/fixture-run"), "artifact run dir outside shadow state");
+  const runDir = result.ok && result.artifacts ? result.artifacts.runDir.split(path.sep).join("/") : "";
+  assert(runDir.includes(".state/sediment/constraint-shadow/runs/fixture-run"), "artifact run dir outside shadow state");
   assert(fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "compiled-view.md")), "latest compiled view missing");
   assert(beforeHash === treeHash(rulesRoot), "rules content changed");
   assert(beforeFiles === listFiles(rulesRoot).join("\n"), "rules file list changed");
@@ -2848,6 +2873,84 @@ check("constraint compiler source does not import writer mutation symbols", () =
     }
   }
   assert(offenders.length === 0, `forbidden mutation symbols found: ${offenders.join(", ")}`);
+});
+
+// ── Auto-refresh cross-process lock (runOnce) ──
+
+check("auto-refresh runOnce acquires and releases cross-process lock", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-lock-"));
+  const abrainHome = path.join(home, "abrain");
+  const locksDir = abrainSedimentLocksDir(abrainHome);
+  const lockPath = path.join(locksDir, "constraint-shadow-auto-refresh.lock");
+
+  // Acquire a lock manually to simulate another pi instance holding it
+  const holder = await acquireFileLock(lockPath, {
+    timeoutMs: 1_000,
+    staleMs: 30 * 60 * 1_000,
+    label: "test-holder",
+  });
+
+  try {
+    // Now try to run auto-refresh — it should fail to acquire the lock and audit lock_contended
+    const settings = resolveSedimentSettingsWithConfig({
+      sediment: {
+        constraintShadowCompiler: {
+          enabled: true,
+          model: "test/model",
+          autoRefresh: { enabled: true, debounceMs: 0, minIntervalMs: 0, eventStaleAfterMs: 86400000, maxPromptChars: 0 },
+        },
+      },
+    });
+
+    // We need a modelRegistry-like object for the runOnce to pass the gate
+    const fakeRegistry = {
+      find: () => ({ id: "test/model" }),
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fake" }),
+    };
+
+    // runOnce will try to acquire the lock, fail, and audit lock_contended
+    // It will NOT run the actual compiler because the lock is held
+    await _runConstraintShadowAutoRefreshNowForTests({
+      abrainHome,
+      cwd: home,
+      settings,
+      modelRegistry: fakeRegistry,
+      reason: "smoke_test",
+    });
+
+    // Check the audit file for lock_contended
+    const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
+    assert(fs.existsSync(auditFile), "auto-refresh audit file should exist");
+    const lines = fs.readFileSync(auditFile, "utf8").trim().split("\n").filter(Boolean);
+    const lastRow = JSON.parse(lines[lines.length - 1]);
+    assert(lastRow.status === "lock_contended", `expected lock_contended, got ${lastRow.status}`);
+    assert(lastRow.ok === false, "lock_contended row should be ok=false");
+  } finally {
+    await holder.release();
+    _resetConstraintShadowAutoRefreshForTests();
+  }
+});
+
+check("auto-refresh lock path is under abrainSedimentLocksDir", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "extensions", "sediment", "constraint-compiler", "auto-refresh.ts"), "utf8");
+  assert(source.includes("abrainSedimentLocksDir"), "auto-refresh must import abrainSedimentLocksDir");
+  assert(source.includes("constraint-shadow-auto-refresh.lock"), "lock file name must be constraint-shadow-auto-refresh.lock");
+  assert(source.includes("acquireFileLock"), "auto-refresh must import acquireFileLock");
+  assert(source.includes("timeoutMs: 5_000"), "lock timeout must be 5s");
+  assert(source.includes("staleMs: 30 * 60 * 1_000"), "lock stale must be 30min");
+  assert(source.includes('status: "lock_contended"'), "lock contention must audit lock_contended");
+  assert(source.includes("lockHandle.release"), "lock must be released in finally");
+});
+
+check("auto-refresh lock does not cover debounce wait — only runOnce compilation", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "extensions", "sediment", "constraint-compiler", "auto-refresh.ts"), "utf8");
+  // The lock acquisition must be inside runOnce, not in scheduleConstraintShadowAutoRefresh
+  const scheduleFn = source.slice(source.indexOf("export function scheduleConstraintShadowAutoRefresh"));
+  assert(!scheduleFn.includes("acquireFileLock"), "scheduleConstraintShadowAutoRefresh must not acquire lock (debounce period)");
+  // runOnce must have the lock
+  const runOnceFn = source.slice(source.indexOf("async function runOnce"));
+  assert(runOnceFn.includes("acquireFileLock"), "runOnce must acquire lock");
 });
 
 Promise.all(pending).finally(() => {

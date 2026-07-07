@@ -64,6 +64,16 @@ function writeFile(file, content) {
   fs.writeFileSync(file, content, "utf8");
 }
 
+function setHomeEnv(home) {
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+}
+
+function restoreEnv(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
 function stageModuleTree(outRoot) {
   const files = [
     ["extensions/abrain/rule-injector/index.ts", "abrain/rule-injector/index.js"],
@@ -293,6 +303,7 @@ function writeValidCompiledView(root) {
 async function runLiveCanaryScenario({ name, liveCanary, sessionId, persisted, compiledValid, compiledEnabled = true }) {
   const prevAbrainRoot = process.env.ABRAIN_ROOT;
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   const scenarioRoot = path.join(tmpRoot, `live-canary-${name}`);
   const scenarioHome = path.join(scenarioRoot, "home");
   const scenarioAbrain = path.join(scenarioRoot, "abrain");
@@ -303,7 +314,7 @@ async function runLiveCanaryScenario({ name, liveCanary, sessionId, persisted, c
     writeBasicRuleSet(scenarioAbrain);
     if (compiledValid) writeValidCompiledView(scenarioAbrain);
     process.env.ABRAIN_ROOT = scenarioAbrain;
-    process.env.HOME = scenarioHome;
+    setHomeEnv(scenarioHome);
     writeFile(path.join(scenarioHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
       ruleInjector: {
         compiledViewInjection: {
@@ -357,8 +368,9 @@ async function runLiveCanaryScenario({ name, liveCanary, sessionId, persisted, c
       auditRows: fs.existsSync(auditFile) ? readJsonLines(auditFile) : [],
     };
   } finally {
-    if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
-    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    restoreEnv("ABRAIN_ROOT", prevAbrainRoot);
+    restoreEnv("HOME", prevHome);
+    restoreEnv("USERPROFILE", prevUserProfile);
   }
 }
 
@@ -421,10 +433,12 @@ check("stripCurrentRuleInjection strips only current session nonce", () => {
 await asyncCheck("extension registers append-only idempotent injector and diagnostic-only /rule command", async () => {
   const prevAbrainRoot = process.env.ABRAIN_ROOT;
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   try {
     process.env.ABRAIN_ROOT = abrainHome;
-    process.env.HOME = path.join(tmpRoot, "home");
-    writeFile(path.join(process.env.HOME, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+    const home = path.join(tmpRoot, "home");
+    setHomeEnv(home);
+    writeFile(path.join(home, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
       ruleInjector: {
         compiledViewInjection: {
           enabled: true,
@@ -485,8 +499,9 @@ await asyncCheck("extension registers append-only idempotent injector and diagno
     const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "session-start-dualread", "audit.jsonl");
     if (fs.existsSync(auditFile)) throw new Error("dual-read audit must stay off by default");
   } finally {
-    if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
-    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    restoreEnv("ABRAIN_ROOT", prevAbrainRoot);
+    restoreEnv("HOME", prevHome);
+    restoreEnv("USERPROFILE", prevUserProfile);
   }
 });
 
@@ -957,11 +972,12 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
 await asyncCheck("dual-read audit flag on preserves injected system prompt bytes", async () => {
   const prevAbrainRoot = process.env.ABRAIN_ROOT;
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   const crypto = require("node:crypto");
   const originalRandomBytes = crypto.randomBytes;
   const fixedNonce = Buffer.from("0123456789abcdef0123456789abcdef", "hex");
   async function runFresh(flagHome, compiledDir) {
-    process.env.HOME = flagHome;
+    setHomeEnv(flagHome);
     stageModuleTree(compiledDir);
     const freshReq = createRequire(path.join(compiledDir, "runner.cjs"));
     const activate = freshReq("./abrain/rule-injector/index.js").default;
@@ -1008,8 +1024,9 @@ await asyncCheck("dual-read audit flag on preserves injected system prompt bytes
     if (!row || row.schemaVersion !== "rule-injector-dualread-audit/v1") throw new Error(`missing dual-read audit row: ${JSON.stringify(row)}`);
   } finally {
     crypto.randomBytes = originalRandomBytes;
-    if (prevAbrainRoot === undefined) delete process.env.ABRAIN_ROOT; else process.env.ABRAIN_ROOT = prevAbrainRoot;
-    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    restoreEnv("ABRAIN_ROOT", prevAbrainRoot);
+    restoreEnv("HOME", prevHome);
+    restoreEnv("USERPROFILE", prevUserProfile);
   }
 });
 
@@ -1018,6 +1035,242 @@ check("source does not expose /rule veto/add or rule writer", () => {
   if (/registerCommand\("rule"[\s\S]*veto/.test(src)) throw new Error("/rule veto must not be registered in R5 read path");
   if (/registerCommand\("rule"[\s\S]*add/.test(src)) throw new Error("/rule add must not be registered in R5 read path");
   if (/writeAbrainRule/.test(src)) throw new Error("R5 read path must not implement writeAbrainRule");
+});
+
+// ── Self-heal: compiled view unavailable → async recompile scheduling ──
+
+await asyncCheck("self-heal: session_start footer read_failed schedules self-heal via fake scheduler", async () => {
+  const prevAbrainRoot = process.env.ABRAIN_ROOT;
+  const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
+  const scenarioRoot = path.join(tmpRoot, "selfheal-session-start");
+  const scenarioHome = path.join(scenarioRoot, "home");
+  const scenarioAbrain = path.join(scenarioRoot, "abrain");
+  const scenarioProject = path.join(scenarioRoot, "project");
+  const scenarioCompiled = path.join(scenarioRoot, "compiled");
+  try {
+    fs.mkdirSync(scenarioProject, { recursive: true });
+    writeBasicRuleSet(scenarioAbrain);
+    process.env.ABRAIN_ROOT = scenarioAbrain;
+    setHomeEnv(scenarioHome);
+    writeFile(path.join(scenarioHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+      ruleInjector: {
+        compiledViewInjection: {
+          enabled: true,
+          fallbackToLegacyOnError: true,
+          requireFresh: true,
+          staleAfterMs: 86400000,
+          maxReadBytes: 1000000,
+          minCoverageRatio: 1,
+        },
+      },
+    }, null, 2));
+    stageModuleTree(scenarioCompiled);
+    const freshReq = createRequire(path.join(scenarioCompiled, "runner.cjs"));
+    const freshRuleInjector = freshReq("./abrain/rule-injector/index.js");
+    const scheduled = [];
+    freshRuleInjector.setRuleInjectorSelfHealScheduler((trigger) => scheduled.push({ ...trigger }));
+    const events = new Map();
+    freshRuleInjector.default({
+      on(name, handler) {
+        if (!events.has(name)) events.set(name, []);
+        events.get(name).push(handler);
+      },
+      registerCommand() {},
+    });
+    const sessionStart = events.get("session_start")?.[0];
+    if (typeof sessionStart !== "function") throw new Error("missing session_start handler");
+    const statuses = [];
+    await sessionStart({ reason: "startup" }, { cwd: scenarioProject, ui: { setStatus(key, value) { statuses.push([key, value]); }, notify() {} } });
+    if (scheduled.length !== 1) throw new Error(`expected one self-heal schedule from footer read_failed, got ${scheduled.length}`);
+    if (!scheduled[0].reason.startsWith("compiled_view_unavailable:read_failed")) throw new Error(`unexpected reason: ${scheduled[0].reason}`);
+    if (scheduled[0].abrainHome !== scenarioAbrain) throw new Error(`wrong abrainHome: ${scheduled[0].abrainHome}`);
+    if (scheduled[0].cwd !== scenarioProject) throw new Error(`wrong cwd: ${scheduled[0].cwd}`);
+    if (!statuses.some(([, value]) => String(value).includes("rules: legacy"))) throw new Error(`fallback footer changed: ${JSON.stringify(statuses)}`);
+  } finally {
+    restoreEnv("ABRAIN_ROOT", prevAbrainRoot);
+    restoreEnv("HOME", prevHome);
+    restoreEnv("USERPROFILE", prevUserProfile);
+  }
+});
+
+check("self-heal: broken compiled view schedules self-heal via fake scheduler", () => {
+  const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "selfheal1", resolveProject: fakeBound });
+  const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+  // Remove compiled view files to trigger read_failed
+  try { fs.rmSync(latestDir, { recursive: true, force: true }); } catch { /* ok */ }
+
+  const scheduled = [];
+  ruleInjector.setRuleInjectorSelfHealScheduler((trigger) => {
+    scheduled.push({ ...trigger });
+  });
+  try {
+    // Simulate what decideRuntimeRuleInjection does internally
+    const compiled = ruleInjector.readCompiledRuleInjectionForRuntime({
+      abrainHome,
+      nonce: "selfheal1",
+      settings: {
+        enabled: true,
+        fallbackToLegacyOnError: true,
+        requireFresh: true,
+        staleAfterMs: 86400000,
+        maxReadBytes: 1000000,
+        minCoverageRatio: 1,
+      },
+      activeProjectId: cache.activeProjectId,
+    });
+    if (compiled.ok) throw new Error("expected read_failed without compiled view files");
+    if (compiled.reason !== "read_failed") throw new Error(`expected read_failed, got ${compiled.reason}`);
+
+    // Now call decideRuntimeRuleInjection which triggers maybeScheduleSelfHeal
+    const runtimeSettings = {
+      enabled: true,
+      maxCatalogSummaryChars: 220,
+      maxCatalogTriggerChars: 160,
+      dualReadAudit: { enabled: false, maxReadBytes: 1000000, staleAfterMs: 86400000 },
+      compiledViewInjection: {
+        enabled: true,
+        fallbackToLegacyOnError: true,
+        requireFresh: true,
+        staleAfterMs: 86400000,
+        maxReadBytes: 1000000,
+        minCoverageRatio: 1,
+        liveCanary: { enabled: false, sessionIds: [] },
+      },
+    };
+    const result = ruleInjector.decideRuntimeRuleInjection({
+      cache,
+      globalSettings: runtimeSettings,
+      runtimeSettings,
+      liveCanary: { active: false },
+    });
+    // Should fall back to legacy since compiled view is broken
+    if (result.decision !== "legacy_fallback") throw new Error(`expected legacy_fallback, got ${result.decision}`);
+    if (!result.injection) throw new Error("legacy fallback should produce injection");
+
+    // Self-heal should have been scheduled
+    if (scheduled.length !== 1) throw new Error(`expected 1 self-heal schedule, got ${scheduled.length}`);
+    if (!scheduled[0].reason.startsWith("compiled_view_unavailable:read_failed")) throw new Error(`unexpected reason: ${scheduled[0].reason}`);
+    if (scheduled[0].abrainHome !== abrainHome) throw new Error(`wrong abrainHome: ${scheduled[0].abrainHome}`);
+  } finally {
+    ruleInjector.setRuleInjectorSelfHealScheduler(undefined);
+  }
+});
+
+check("self-heal: does not schedule when compiled view is disabled", () => {
+  const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "selfheal2", resolveProject: fakeBound });
+  const scheduled = [];
+  ruleInjector.setRuleInjectorSelfHealScheduler((trigger) => {
+    scheduled.push({ ...trigger });
+  });
+  try {
+    const runtimeSettings = {
+      enabled: true,
+      maxCatalogSummaryChars: 220,
+      maxCatalogTriggerChars: 160,
+      dualReadAudit: { enabled: false, maxReadBytes: 1000000, staleAfterMs: 86400000 },
+      compiledViewInjection: {
+        enabled: false, // disabled
+        fallbackToLegacyOnError: true,
+        requireFresh: true,
+        staleAfterMs: 86400000,
+        maxReadBytes: 1000000,
+        minCoverageRatio: 1,
+        liveCanary: { enabled: false, sessionIds: [] },
+      },
+    };
+    ruleInjector.decideRuntimeRuleInjection({
+      cache,
+      globalSettings: runtimeSettings,
+      runtimeSettings,
+      liveCanary: { active: false },
+    });
+    if (scheduled.length !== 0) throw new Error(`expected 0 schedules when disabled, got ${scheduled.length}`);
+  } finally {
+    ruleInjector.setRuleInjectorSelfHealScheduler(undefined);
+  }
+});
+
+check("self-heal: does not schedule when compiled view is ok", () => {
+  const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "selfheal3", resolveProject: fakeBound });
+  const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+  writeShadowDecision(path.join(latestDir, "decision.json"), [shadowConstraintFromRule(cache.globalAlways[0])]);
+  writeFile(path.join(latestDir, "compiled-view.md"), "## Global always\n\n### Test\n- ok.\n");
+  writeFile(path.join(latestDir, "event-coverage.json"), JSON.stringify({
+    schemaVersion: "constraint-event-coverage/v1",
+    summary: { coverageRatio: 1, injectableCoverageRatio: 1 },
+    rows: [],
+  }, null, 2));
+
+  const scheduled = [];
+  ruleInjector.setRuleInjectorSelfHealScheduler((trigger) => {
+    scheduled.push({ ...trigger });
+  });
+  try {
+    const runtimeSettings = {
+      enabled: true,
+      maxCatalogSummaryChars: 220,
+      maxCatalogTriggerChars: 160,
+      dualReadAudit: { enabled: false, maxReadBytes: 1000000, staleAfterMs: 86400000 },
+      compiledViewInjection: {
+        enabled: true,
+        fallbackToLegacyOnError: true,
+        requireFresh: true,
+        staleAfterMs: 86400000,
+        maxReadBytes: 1000000,
+        minCoverageRatio: 1,
+        liveCanary: { enabled: false, sessionIds: [] },
+      },
+    };
+    const result = ruleInjector.decideRuntimeRuleInjection({
+      cache,
+      globalSettings: runtimeSettings,
+      runtimeSettings,
+      liveCanary: { active: false },
+    });
+    if (result.decision !== "compiled_injected") throw new Error(`expected compiled_injected, got ${result.decision}`);
+    if (scheduled.length !== 0) throw new Error(`expected 0 schedules when compiled ok, got ${scheduled.length}`);
+  } finally {
+    ruleInjector.setRuleInjectorSelfHealScheduler(undefined);
+  }
+});
+
+check("self-heal: legacy fallback behavior unchanged — injection still works when compiled broken", () => {
+  const cache = ruleInjector.scanRules({ abrainHome, cwd: projectRoot, nonce: "selfheal4", resolveProject: fakeBound });
+  const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+  try { fs.rmSync(latestDir, { recursive: true, force: true }); } catch { /* ok */ }
+
+  // Even with self-heal scheduler set, the synchronous injection path must
+  // still produce legacy fallback (not block or throw).
+  ruleInjector.setRuleInjectorSelfHealScheduler(() => {});
+  try {
+    const runtimeSettings = {
+      enabled: true,
+      maxCatalogSummaryChars: 220,
+      maxCatalogTriggerChars: 160,
+      dualReadAudit: { enabled: false, maxReadBytes: 1000000, staleAfterMs: 86400000 },
+      compiledViewInjection: {
+        enabled: true,
+        fallbackToLegacyOnError: true,
+        requireFresh: true,
+        staleAfterMs: 86400000,
+        maxReadBytes: 1000000,
+        minCoverageRatio: 1,
+        liveCanary: { enabled: false, sessionIds: [] },
+      },
+    };
+    const result = ruleInjector.decideRuntimeRuleInjection({
+      cache,
+      globalSettings: runtimeSettings,
+      runtimeSettings,
+      liveCanary: { active: false },
+    });
+    if (result.decision !== "legacy_fallback") throw new Error(`expected legacy_fallback, got ${result.decision}`);
+    if (!result.injection) throw new Error("legacy fallback should produce injection");
+    if (!result.injection.includes("BEGIN_ABRAIN_RULES")) throw new Error("legacy injection missing marker");
+  } finally {
+    ruleInjector.setRuleInjectorSelfHealScheduler(undefined);
+  }
 });
 
 if (failures.length) {

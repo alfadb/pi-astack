@@ -147,6 +147,53 @@ const DEFAULT_SETTINGS: RuleInjectorSettings = {
 
 let cachedRules: RuleScanCache | null = null;
 
+// ── Self-heal: async constraint shadow recompile when compiled view is unavailable ──
+// Set by abrain/index.ts at activation time (dependency injection bridge).
+// The rule-injector itself has no modelRegistry; the abrain entry point wires it.
+export interface RuleInjectorSelfHealTrigger {
+  abrainHome: string;
+  cwd: string;
+  activeProjectId?: string;
+  reason: string;
+}
+
+export type RuleInjectorSelfHealScheduler = (trigger: RuleInjectorSelfHealTrigger) => void;
+
+let scheduleSelfHeal: RuleInjectorSelfHealScheduler | undefined;
+let selfHealLastScheduledMs = 0;
+const SELF_HEAL_MIN_INTERVAL_MS = 5 * 60 * 1000; // 5 min cooldown per process
+
+export function setRuleInjectorSelfHealScheduler(scheduler: RuleInjectorSelfHealScheduler | undefined): void {
+  scheduleSelfHeal = scheduler;
+  selfHealLastScheduledMs = 0;
+}
+
+function maybeScheduleSelfHeal(args: {
+  abrainHome: string;
+  cwd: string;
+  activeProjectId?: string;
+  compiledViewEnabled: boolean;
+  compiledOk: boolean;
+  reason: string;
+}): void {
+  if (!scheduleSelfHeal) return;
+  if (!args.compiledViewEnabled) return;
+  if (args.compiledOk) return;
+  const now = Date.now();
+  if (now - selfHealLastScheduledMs < SELF_HEAL_MIN_INTERVAL_MS) return;
+  selfHealLastScheduledMs = now;
+  try {
+    scheduleSelfHeal({
+      abrainHome: args.abrainHome,
+      cwd: args.cwd,
+      activeProjectId: args.activeProjectId,
+      reason: `compiled_view_unavailable:${args.reason}`,
+    });
+  } catch {
+    // Self-heal scheduling is best-effort and must never break rule injection.
+  }
+}
+
 function loadPiStackSettings(): Record<string, unknown> {
   try {
     return JSON.parse(fs.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"));
@@ -772,7 +819,7 @@ function appendLiveCanaryAudit(args: {
   }
 }
 
-function decideRuntimeRuleInjection(args: {
+export function decideRuntimeRuleInjection(args: {
   cache: RuleScanCache;
   globalSettings: RuleInjectorSettings;
   runtimeSettings: RuleInjectorSettings;
@@ -783,6 +830,16 @@ function decideRuntimeRuleInjection(args: {
     nonce: args.cache.nonce,
     settings: args.runtimeSettings.compiledViewInjection,
     activeProjectId: args.cache.activeProjectId,
+  });
+  // Self-heal: when compiled view is enabled but unavailable, schedule an async
+  // constraint shadow recompile (debounced per-process, non-blocking).
+  maybeScheduleSelfHeal({
+    abrainHome: args.cache.abrainHome,
+    cwd: args.cache.cwd,
+    activeProjectId: args.cache.activeProjectId,
+    compiledViewEnabled: args.runtimeSettings.compiledViewInjection.enabled,
+    compiledOk: compiled.ok,
+    reason: compiled.reason,
   });
   let result: RuntimeRuleInjectionResult;
   if (compiled.ok) {
@@ -865,6 +922,14 @@ function runtimeFooterText(cache: RuleScanCache | null, settings: RuleInjectorSe
         : "";
       return `🧠 rules: compiled ${compiled.counts.always} always, ${compiled.counts.listed} listed (${effectiveCoverage} injectable${strictCoverage}${compiled.stale ? ", stale" : ""}${detail ? `, ${detail}` : ""})`;
     }
+    maybeScheduleSelfHeal({
+      abrainHome: cache.abrainHome,
+      cwd: cache.cwd,
+      activeProjectId: cache.activeProjectId,
+      compiledViewEnabled: settings.compiledViewInjection.enabled,
+      compiledOk: compiled.ok,
+      reason: compiled.reason,
+    });
     if (settings.compiledViewInjection.enabled && !settings.compiledViewInjection.fallbackToLegacyOnError) {
       return `⚠️ rules: compiled view ${compiled.reason}${detail ? ` (${detail})` : ""}`;
     }

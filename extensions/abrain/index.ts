@@ -53,7 +53,7 @@ import {
   ensureAbrainStateGitignored,
   ensureBrainLayout,
 } from "./brain-layout";
-import activateRuleInjector from "./rule-injector";
+import activateRuleInjector, { setRuleInjectorSelfHealScheduler, type RuleInjectorSelfHealTrigger } from "./rule-injector";
 import {
   fetchAndFF, pushAsync, sync as gitSync, getStatus as getGitSyncStatus,
   formatSyncStatus, type AbrainSyncStatus, type GitSyncEvent,
@@ -1420,6 +1420,52 @@ export default function activate(pi: ExtensionAPI): void {
   // ADR 0023-R5: read-only rules injection. Loaded from abrain so it shares
   // the same PI_ABRAIN_DISABLED sub-pi boundary and strict project binding.
   // This registers /rule diagnostic pull commands but no rule write/veto UI.
+  //
+  // Self-heal bridge: when the rule-injector detects a broken compiled view,
+  // it calls back into the constraint shadow auto-refresh scheduler. The
+  // modelRegistry is captured lazily from session_start (not available at
+  // activation time).
+  let capturedModelRegistry: unknown = undefined;
+  let capturedCwd: string = process.cwd();
+  let pendingSelfHealTrigger: RuleInjectorSelfHealTrigger | undefined;
+  let selfHealTimer: ReturnType<typeof setTimeout> | undefined;
+  const queueSelfHealFlush = (): void => {
+    if (selfHealTimer) return;
+    selfHealTimer = setTimeout(() => {
+      selfHealTimer = undefined;
+      const next = pendingSelfHealTrigger;
+      if (!next) return;
+      if (!isUsableModelRegistry(capturedModelRegistry)) return;
+      pendingSelfHealTrigger = undefined;
+      try {
+        const settings = defaultResolveSedimentSettings();
+        if (!settings.constraintShadowCompiler?.enabled || !settings.constraintShadowCompiler?.autoRefresh?.enabled) return;
+        const abrainHome = next.abrainHome;
+        const activeProjectId = next.activeProjectId;
+        const knownProjectIds = Array.from(new Set([
+          ...(activeProjectId ? [activeProjectId] : []),
+          ...listAbrainProjects(abrainHome),
+        ])).sort();
+        defaultScheduleConstraintShadowAutoRefresh({
+          abrainHome,
+          cwd: next.cwd || capturedCwd,
+          activeProjectId,
+          knownProjectIds,
+          settings,
+          modelRegistry: capturedModelRegistry,
+          reason: next.reason,
+          sourceEventId: undefined,
+        });
+      } catch {
+        // Self-heal scheduling is best-effort; startup and rule injection continue.
+      }
+    }, 0);
+    (selfHealTimer as unknown as { unref?: () => void }).unref?.();
+  };
+  setRuleInjectorSelfHealScheduler((trigger: RuleInjectorSelfHealTrigger) => {
+    pendingSelfHealTrigger = trigger;
+    queueSelfHealFlush();
+  });
   activateRuleInjector(pi);
 
   const registry = pi as unknown as CommandRegistry;
@@ -1438,6 +1484,10 @@ export default function activate(pi: ExtensionAPI): void {
     eventRegistry.on("session_start", async (_event, ctx) => {
       try {
         if (isSubAgentSession(ctx as unknown as { sessionManager?: unknown })) return;
+        // Capture modelRegistry for the self-heal bridge (rule-injector → auto-refresh).
+        if (ctx?.modelRegistry) capturedModelRegistry = ctx.modelRegistry;
+        if (ctx?.cwd) capturedCwd = ctx.cwd;
+        queueSelfHealFlush();
         const notify = ctx?.ui?.notify?.bind(ctx.ui);
         runStartupAutoSync({ notify, modelRegistry: ctx?.modelRegistry, cwd: ctx?.cwd });
       } catch (err) {
