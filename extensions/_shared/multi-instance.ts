@@ -814,6 +814,14 @@ export function buildFooterText(scan: PeerScan, risks: GuardRisk[] = getRecentGu
   return riskCount > 0 ? `${peerBits} risk ${riskCount}` : peerBits;
 }
 
+export function buildPeersNotifyType(scan: PeerScan, risks: GuardRisk[] = getRecentGuardRisks()): "info" | "warning" {
+  if (scan.readError) return "warning";
+  if (risks.length > 0) return "warning";
+  if (scan.peers.some((peer) => peer.liveness === "stale" || peer.liveness === "suspended")) return "warning";
+  if (scan.peers.some((peer) => (peer.manifest.held_locks ?? []).length > 0)) return "warning";
+  return "info";
+}
+
 export function buildPeersReport(scan: PeerScan, risks: GuardRisk[] = getRecentGuardRisks()): string {
   const lines = [`multi-instance peers for ${scan.projectRoot}`, `self: ${shortId(scan.selfInstanceId)}`];
   if (scan.peers.length === 0) lines.push("peers: none");

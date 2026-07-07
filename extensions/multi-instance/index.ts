@@ -6,6 +6,7 @@ import { wrapVolatile } from "../_shared/volatile-suffix";
 import {
   buildFooterText,
   buildGuardBlockReason,
+  buildPeersNotifyType,
   buildPeersReport,
   buildVolatileRuntimeBlock,
   classifyToolIntent,
@@ -201,7 +202,8 @@ export default function (pi: ExtensionAPI) {
         if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
         const projectRoot = currentProjectRoot(ctx);
         const scan = scanInstanceManifests(projectRoot);
-        safeNotify(ctx, buildPeersReport(scan), scan.peers.length || getRecentGuardRisks().length ? "warning" : "info");
+        const risks = getRecentGuardRisks();
+        safeNotify(ctx, buildPeersReport(scan, risks), buildPeersNotifyType(scan, risks));
         updateFooter(ctx, projectRoot);
       },
     });

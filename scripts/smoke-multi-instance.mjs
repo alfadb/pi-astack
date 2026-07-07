@@ -222,7 +222,29 @@ console.log("\n[8] dangerous git command detection");
   check("dangerous git bash command blocks", verdict.action === "block", verdict.action);
 }
 
-console.log("\n[9] volatile runtime block text");
+console.log("\n[9] peers notify severity");
+{
+  mod.resetMultiInstanceStateForTests();
+  const root = path.join(tmpRoot, "notify");
+  fs.mkdirSync(root, { recursive: true });
+  mod.startForegroundSession({ projectRoot: root, sessionId: "notify" });
+  check("no peers notify is info", mod.buildPeersNotifyType(mod.scanInstanceManifests(root), []) === "info");
+  writePeerManifest(root, { instance_id: "pi-peer-active", status: "active", current_tool: "bash" });
+  check("active peer without risk notify is info", mod.buildPeersNotifyType(mod.scanInstanceManifests(root), []) === "info");
+  writePeerManifest(root, { instance_id: "pi-peer-lock", held_locks: [{ resource: "git:index", class: "git" }] });
+  check("peer held lock notify is warning", mod.buildPeersNotifyType(mod.scanInstanceManifests(root), []) === "warning");
+  const old = new Date(Date.now() - 60_000).toISOString();
+  writePeerManifest(root, { instance_id: "pi-peer-suspended", heartbeat_at: old, updated_at: old });
+  check("suspended peer notify is warning", mod.buildPeersNotifyType(mod.scanInstanceManifests(root), []) === "warning");
+  writePeerManifest(root, { instance_id: "pi-peer-stale", pid: 99999999, heartbeat_at: old, updated_at: old });
+  check("stale peer notify is warning", mod.buildPeersNotifyType(mod.scanInstanceManifests(root), []) === "warning");
+  const activeOnly = mod.scanInstanceManifests(root, { selfInstanceId: mod.getInstanceId() });
+  activeOnly.peers = activeOnly.peers.filter((peer) => peer.manifest.instance_id === "pi-peer-active");
+  activeOnly.counts = { active: 1, idle: 0, stale: 0, suspended: 0, exiting: 0, peers: 1, risk: 0 };
+  check("recent guard risk notify is warning", mod.buildPeersNotifyType(activeOnly, [{ ts: new Date().toISOString(), action: "warn", kind: "peer_activity", tool: "edit", path: "x.ts", reason: "peer activity" }]) === "warning");
+}
+
+console.log("\n[10] volatile runtime block text");
 {
   mod.resetMultiInstanceStateForTests();
   const root = path.join(tmpRoot, "volatile");
