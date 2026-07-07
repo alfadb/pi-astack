@@ -384,6 +384,26 @@ const l2HumanViewSource = source({
   appliesWhen: "rendering or updating L2 Markdown human views",
   mustDoSummary: "Treat L2 Markdown human views as read-only derived views; popup confirmation only on write.",
 });
+const sub2apiSemanticReviewSource = source({
+  sourceId: "rule:project:sub2api:always:semantic-review-required",
+  slug: "semantic-review-required",
+  scope: { kind: "project", projectId: "sub2api" },
+  title: "semantic_review_required gate",
+  body: "semantic_review_required: only business logic changes should drive semantic review; non-business changes alone should not drive semantic review.",
+  triggerPhrases: ["semantic_review_required", "business logic changes"],
+  appliesWhen: "sub2api review decisions",
+  mustDoSummary: "Set semantic_review_required only for business logic changes.",
+});
+const piGlobalPrivateRepoTrackingSource = source({
+  sourceId: "rule:project:pi-global:always:track-private-config-files",
+  slug: "track-private-config-files",
+  scope: { kind: "project", projectId: "pi-global" },
+  title: "Track private repo config files",
+  body: "In the pi-global private repository, user wants secrets.json and agent/models.json to be tracked in git despite normal secret-gitignore norms.",
+  triggerPhrases: ["pi-global", "secrets.json", "agent/models.json", "tracked in git"],
+  appliesWhen: "pi-global private repository git tracking decisions",
+  mustDoSummary: "Track secrets.json and agent/models.json in git for pi-global.",
+});
 const jargonAlwaysSource = source({
   sourceId: "rule:global:always:professional-vocabulary-hard-blocker",
   slug: "professional-vocabulary-hard-blocker",
@@ -1879,7 +1899,38 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("compile that source as a separate constraint using its original scope and injectMode"), "separate compile boundary missing");
   assert(prompt.text.includes("only when the rule text cannot be parsed into a behavioral directive"), "unresolved boundary missing");
   assert(prompt.text.includes("Mapping disposition must match the source's primary bucket"), "mapping disposition primary-bucket guidance missing");
+  assert(prompt.text.includes("Preserve mandatory and exclusive semantics from each source"), "mandatory/exclusive preservation guidance missing");
+  assert(prompt.text.includes("only, must, never, forbid, prohibited"), "exclusive keyword examples missing");
+  assert(prompt.text.includes("禁止, 必须, 仅, 只, 只能, and 不得"), "Chinese exclusive keyword examples missing");
+  assert(prompt.text.includes("prioritize, prefer, normally, generally, should, unless materially affect"), "weakened wording examples missing");
+  assert(prompt.text.includes("unless that exception or weakening is explicit in the same source text"), "source-explicit exception boundary missing");
+  assert(prompt.text.includes("If a source says only X may trigger Y"), "exclusive trigger gate guidance missing");
+  assert(prompt.text.includes("clear affirmative goals such as user wants, wants to, wants X to be Y, should, need, 要, 想把, 纳入, and 跟踪"), "affirmative directive preservation guidance missing");
+  assert(prompt.text.includes("Do not rewrite them as may, can, allowed, or permitted unless the source explicitly frames the directive as permission or an exception"), "affirmative directive permission-exception boundary missing");
   assert(prompt.text.includes(globalSource.sourceId), "source id missing from prompt");
+
+  const piGlobalNormalized = normalizeConstraintSources([piGlobalPrivateRepoTrackingSource], {
+    activeProjectId: "pi-global",
+    knownProjectIds: ["pi-global"],
+    compilerOptions: { mode: "fixture" },
+  });
+  const piGlobalPrompt = buildConstraintCompilerPrompt({ normalized: piGlobalNormalized, knownProjectIds: ["pi-global"], activeProjectId: "pi-global" });
+  assert(piGlobalPrompt.text.includes(piGlobalPrivateRepoTrackingSource.sourceId), "pi-global private repo tracking source id missing from prompt");
+  assert(piGlobalPrompt.text.includes("user wants secrets.json and agent/models.json to be tracked in git"), "pi-global affirmative tracking fixture missing from prompt");
+  assert(piGlobalPrompt.text.includes("despite normal secret-gitignore norms"), "pi-global secret-gitignore exception fixture missing from prompt");
+  assert(piGlobalPrompt.text.includes("Do not rewrite them as may, can, allowed, or permitted unless the source explicitly frames the directive as permission or an exception"), "pi-global prompt missing affirmative directive boundary");
+
+  const sub2apiNormalized = normalizeConstraintSources([sub2apiSemanticReviewSource], {
+    activeProjectId: "sub2api",
+    knownProjectIds: ["sub2api"],
+    compilerOptions: { mode: "fixture" },
+  });
+  const sub2apiPrompt = buildConstraintCompilerPrompt({ normalized: sub2apiNormalized, knownProjectIds: ["sub2api"], activeProjectId: "sub2api" });
+  assert(sub2apiPrompt.text.includes(sub2apiSemanticReviewSource.sourceId), "sub2api semantic_review_required source id missing from prompt");
+  assert(sub2apiPrompt.text.includes("semantic_review_required: only business logic changes should drive semantic review"), "sub2api semantic_review_required source text missing from prompt");
+  assert(sub2apiPrompt.text.includes("Preserve mandatory and exclusive semantics from each source"), "sub2api prompt missing exclusivity preservation guidance");
+  assert(sub2apiPrompt.text.includes("only business logic changes"), "sub2api prompt missing only-business-logic threshold guidance/source text");
+  assert(sub2apiPrompt.text.includes("unless materially affect") && sub2apiPrompt.text.includes("unless that exception or weakening is explicit in the same source text"), "sub2api prompt missing materiality-exception guard");
 
   const restartNormalized = normalizeConstraintSources([restartDisclosureLegacySource, restartDisclosureOverlapEvent], {
     activeProjectId: "pi-astack",
