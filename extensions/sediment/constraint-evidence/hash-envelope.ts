@@ -42,7 +42,7 @@ export function constraintEvidenceEventRelativePath(eventId: string): string {
 }
 
 export function constraintEvidenceEventPath(abrainHome: string, eventId: string): string {
-  const trimmed = abrainHome.replace(/[\\/]+$/g, "");
+  const trimmed = abrainHome.replace(/[\\/]+$/g, "").replace(/\\/g, "/");
   if (!trimmed) throw new Error("abrainHome is required");
   return `${trimmed}/${constraintEvidenceEventRelativePath(eventId)}`;
 }

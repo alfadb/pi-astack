@@ -235,6 +235,28 @@ check("relative and absolute event paths derive from event id", () => {
   assert(constraintEvidenceEventPath("/tmp/abrain", envelope.event_id).endsWith(rel), "absolute path does not end with relative path");
 });
 
+check("absolute path normalizes Windows backslashes to forward slashes", () => {
+  const envelope = createConstraintEvidenceEnvelope(fixtureBody());
+  const rel = constraintEvidenceEventRelativePath(envelope.event_id);
+  const result = constraintEvidenceEventPath("C:\\Users\\alfadb\\.abrain", envelope.event_id);
+  assert(!result.includes("\\"), `path contains backslash: ${result}`);
+  assert(result === `C:/Users/alfadb/.abrain/${rel}`, `unexpected path: ${result}`);
+});
+
+check("parse with Windows abrainHome and filePath does not false-positive CE_HASH_PATH_MISMATCH", () => {
+  const envelope = createConstraintEvidenceEnvelope(fixtureBody());
+  const rel = constraintEvidenceEventRelativePath(envelope.event_id);
+  const abrainHome = "C:\\Users\\alfadb\\.abrain";
+  const filePath = "C:\\Users\\alfadb\\.abrain\\" + rel.replace(/\//g, "\\");
+  const result = parseConstraintEvidenceEnvelopeJson(constraintEvidenceEnvelopeJson(envelope), {
+    abrainHome,
+    filePath,
+    relativePath: rel,
+  });
+  assert(result.ok, result.diagnostics.map((diagnostic) => diagnostic.message).join("; "));
+  assert(!result.diagnostics.some((diagnostic) => diagnostic.code === "CE_HASH_PATH_MISMATCH"), "false-positive CE_HASH_PATH_MISMATCH on Windows path");
+});
+
 check("valid envelope parses with expected path", () => {
   const envelope = createConstraintEvidenceEnvelope(fixtureBody());
   const result = parseConstraintEvidenceEnvelopeJson(constraintEvidenceEnvelopeJson(envelope), {
