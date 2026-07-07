@@ -84,10 +84,35 @@ function isL2HumanViewWriteConfirmationBehaviorConstraint(text: string): boolean
   return hasL2 && hasHumanViewSurface && hasReadOnlyView && hasWriteConfirmation && hasConstraintDirective;
 }
 
+function isSettingsKeywordBehaviorConstraint(text: string): boolean {
+  const hasDispatchHubModelSelection = /dispatch[-_\s]?hub/i.test(text)
+    && /models?|model\s+ids?|provider|供应商|模型/i.test(text)
+    && /main\s+session|per\s+task|task\s+selection|choose|select|hard[-_\s]?code|hardcoded|主会话|按任务|选择|硬编码/i.test(text);
+  if (hasDispatchHubModelSelection) return true;
+
+  const hasBusinessModelIdPlacement = /business\s+model\s+ids?|业务模型/i.test(text)
+    && /settings?|config(?:uration)?|配置/i.test(text)
+    && /code|代码/i.test(text)
+    && /fail[-_\s]?closed|not\s+code|not\s+in\s+code|belong|belongs|归配置|不写进代码|失败关闭/i.test(text);
+  if (hasBusinessModelIdPlacement) return true;
+
+  const hasNewestVendorRollback = /prefer|use|default\s+to|优先|使用/i.test(text)
+    && /newest|latest|current|最新|当前/i.test(text)
+    && /vendor\s+model|provider\s+model|models?|供应商模型|模型/i.test(text)
+    && /rollback|roll[-_\s]?back|old|previous|legacy|回滚|旧/i.test(text);
+  if (hasNewestVendorRollback) return true;
+
+  const hasRestartDisclosure = /restart|refresh|重启|刷新/i.test(text)
+    && /disclos|tell|mention|报告|说明|披露/i.test(text)
+    && /after\s+each\s+step|completion|complete|final|每步后|完成/i.test(text);
+  return hasRestartDisclosure;
+}
+
 export function inferCategoryHint(record: ConstraintSourceRecord): ConstraintCategoryHint {
   const combined = sourceClassificationText(record);
   if (combined && isUnicodeOutputEncodingBehaviorConstraint(combined)) return "behavioral_constraint";
   if (combined && isL2HumanViewWriteConfirmationBehaviorConstraint(combined)) return "behavioral_constraint";
+  if (combined && isSettingsKeywordBehaviorConstraint(combined)) return "behavioral_constraint";
 
   if (record.sourceKind === "constraint_event") {
     if (record.operationHint === "not_memory") {

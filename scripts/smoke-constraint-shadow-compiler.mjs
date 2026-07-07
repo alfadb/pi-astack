@@ -374,6 +374,35 @@ const plainUtf8SettingsSource = source({
   body: "Provider/model settings JSON must be UTF-8 and must live in configuration, not memory.",
   triggerPhrases: ["provider", "model", "settings JSON", "UTF-8"],
 });
+const dispatchHubModelSelectionSource = source({
+  sourceId: "rule:global:always:dispatch-hub-model-selection-by-main-session",
+  slug: "dispatch-hub-model-selection-by-main-session",
+  title: "Dispatch hub model selection",
+  body: "dispatch_hub model choice must be made by the main session per task; do not hard-code provider/model IDs in settings wiring.",
+  triggerPhrases: ["dispatch_hub", "model choice", "per task"],
+});
+const businessModelIdsFailClosedSource = source({
+  sourceId: "rule:global:always:business-model-ids-settings-not-code-fail-closed",
+  slug: "business-model-ids-settings-not-code-fail-closed",
+  title: "Business model IDs fail closed",
+  body: "Business model IDs belong in settings, not code; when a required business model ID is missing, fail closed instead of falling back to an arbitrary provider/model.",
+  triggerPhrases: ["business model IDs", "settings not code", "fail closed"],
+});
+const newestVendorRollbackSource = source({
+  sourceId: "rule:global:always:prefer-newest-vendor-model-old-as-rollback",
+  slug: "prefer-newest-vendor-model-old-as-rollback",
+  title: "Prefer newest vendor model",
+  body: "Prefer the newest vendor model for business routes and keep the old provider model only as rollback, including when updating model tier settings.",
+  triggerPhrases: ["newest vendor model", "old as rollback"],
+});
+const restartDisclosureSettingsWiringSource = source({
+  sourceId: "rule:global:listed:restart-disclosure-after-each-settings-step",
+  slug: "restart-disclosure-after-each-settings-step",
+  injectMode: "listed",
+  title: "Restart disclosure after each settings step",
+  body: "After each step that changes settings wiring or requires restart/refresh, disclose the restart requirement at completion.",
+  triggerPhrases: ["restart disclosure", "settings wiring", "after each step"],
+});
 const l2HumanViewSource = source({
   sourceId: "rule:global:listed:l2-not-user-managed-popup-only-on-write",
   slug: "l2-not-user-managed-popup-only-on-write",
@@ -599,6 +628,21 @@ check("normalize leaves plain UTF-8 provider/model settings JSON as settings", (
   const record = result.records.find((item) => item.sourceId === plainUtf8SettingsSource.sourceId);
   assert(record && record.categoryHint === "settings_not_memory", `plain UTF-8 settings fact misclassified: ${record && record.categoryHint}`);
   assert(result.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(plainUtf8SettingsSource.sourceId)), "plain UTF-8 settings diagnostic missing");
+});
+
+check("normalize keeps settings-word behavioral governance rules behavioral", () => {
+  const sources = [
+    dispatchHubModelSelectionSource,
+    businessModelIdsFailClosedSource,
+    newestVendorRollbackSource,
+    restartDisclosureSettingsWiringSource,
+  ];
+  const result = normalizeConstraintSources(sources, { knownProjectIds: ["pi-astack"] });
+  for (const sourceItem of sources) {
+    const record = result.records.find((item) => item.sourceId === sourceItem.sourceId);
+    assert(record && record.categoryHint === "behavioral_constraint", `${sourceItem.sourceId} misclassified: ${record && record.categoryHint}`);
+    assert(!result.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_SETTINGS" && diagnostic.sourceRecordIds.includes(sourceItem.sourceId)), `${sourceItem.sourceId} emitted SC_NOT_MEMORY_SETTINGS`);
+  }
 });
 
 check("normalize keeps L2 read-only human-view write-confirmation rule behavioral", () => {
