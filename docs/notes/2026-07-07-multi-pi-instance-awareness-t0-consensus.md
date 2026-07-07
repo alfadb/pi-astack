@@ -85,6 +85,10 @@ footer/status 显示 peer 数、active/idle/stale/suspended 状态和 guard risk
 
 dispatch v3 in-process sub-agent 不注册为 peer，只作为父主实例的 `subtasks` 或 `activity` 呈现。只有不同主 pi OS 进程才是 peer。
 
+sub-agent 的 `before_agent_start` 可以继承父主实例当前的 volatile peer/risk snapshot，用于提示并发风险和防丢失约束；该注入不调用 `startForegroundSession`，不递增 `session_epoch`，也不写入或更新 presence manifest。
+
+显式授予 `bash` / `edit` / `write` 等可变更工具的 mutating dispatch sub-agent 不能绕过写前防丢失 guard。其 `tool_call` / `tool_result` 复用父主实例的全局 state 执行 guard 判定、观察指纹记录和写入指纹记录，因此 sub-agent 的读写会进入同一套 stale-context 与 recent-write 视图。
+
 ## Non-Goals
 
 本方案明确不做 daemon/socket/网络协调，不自动 kill peer，不做全项目串行，不做跨机器同步，不默认生成 LLM prompt 摘要，不把 registry 当作 memory 或 sediment 真源，不用裸 PID 作为唯一身份，不使用共享 RMW `state.json`。

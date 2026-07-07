@@ -7,6 +7,8 @@
  *   - manifest write + scan
  *   - heartbeat stale vs PID-alive suspended classification
  *   - sub-agent session start does not register a peer manifest
+ *   - sub-agent before_agent_start volatile block without foreground registration
+ *   - sub-agent tool_call guard and tool_result observation recording
  *   - file fingerprint stale-context guard
  *   - high-risk whole-file write guard
  *   - peer activity advisory path for edit
@@ -27,6 +29,9 @@ process.env.ABRAIN_ROOT = path.join(tmpRoot, "abrain");
 
 const jiti = createJiti(import.meta.url);
 const mod = await jiti.import(path.join(repoRoot, "extensions/_shared/multi-instance.ts"));
+const piInternals = await jiti.import(path.join(repoRoot, "extensions/_shared/pi-internals.ts"));
+const extensionModule = await jiti.import(path.join(repoRoot, "extensions/multi-instance/index.ts"));
+const activateMultiInstanceExtension = extensionModule.default ?? extensionModule;
 
 const failures = [];
 function check(name, condition, detail = "") {
@@ -73,6 +78,51 @@ function writePeerManifest(root, patch) {
   const file = mod.manifestPathForInstance(root, manifest.instance_id);
   fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
   return { file, manifest };
+}
+
+function createMultiInstanceHarness() {
+  const handlers = new Map();
+  const pi = {
+    on(name, handler) {
+      const list = handlers.get(name) ?? [];
+      list.push(handler);
+      handlers.set(name, list);
+    },
+    registerCommand() {
+      // Commands are not needed in smoke harness.
+    },
+  };
+  activateMultiInstanceExtension(pi);
+  return {
+    handler(name) {
+      const list = handlers.get(name) ?? [];
+      if (list.length !== 1) throw new Error(`expected one handler for ${name}, got ${list.length}`);
+      return list[0];
+    },
+  };
+}
+
+function subAgentCtx(root) {
+  const sessionManager = {};
+  piInternals.markSessionAsSubAgent(sessionManager);
+  const notifications = [];
+  const statuses = [];
+  return {
+    ctx: {
+      cwd: root,
+      sessionManager,
+      ui: {
+        notify(message, type) {
+          notifications.push({ message, type });
+        },
+        setStatus(key, value) {
+          statuses.push({ key, value });
+        },
+      },
+    },
+    notifications,
+    statuses,
+  };
 }
 
 console.log("smoke: multi-instance guard");
@@ -157,7 +207,41 @@ console.log("\n[5] sub-agent does not register peer");
   check("sub-agent start writes no manifest", !fs.existsSync(selfFile), selfFile);
 }
 
-console.log("\n[6] file fingerprint stale-context guard");
+console.log("\n[6] sub-agent extension guard path");
+{
+  mod.resetMultiInstanceStateForTests();
+  const root = path.join(tmpRoot, "subagent-extension");
+  fs.mkdirSync(root, { recursive: true });
+  writePeerManifest(root, { instance_id: "pi-peer-subagent", current_tool: "edit", target_paths: ["peer-risk.txt"] });
+  const harness = createMultiInstanceHarness();
+  const { ctx } = subAgentCtx(root);
+  const beforeEpoch = mod.getMultiInstanceState().sessionEpoch;
+  const before = await harness.handler("before_agent_start")({ systemPrompt: "base prompt\n" }, ctx);
+  const selfFile = mod.manifestPathForInstance(root, mod.getInstanceId());
+  check("sub-agent before_agent_start does not bump session epoch", mod.getMultiInstanceState().sessionEpoch === beforeEpoch, `${beforeEpoch} -> ${mod.getMultiInstanceState().sessionEpoch}`);
+  check("sub-agent before_agent_start does not register self", mod.getMultiInstanceState().registered === false);
+  check("sub-agent before_agent_start writes no manifest", !fs.existsSync(selfFile), selfFile);
+  check("sub-agent before_agent_start emits volatile block with peer risk", typeof before?.systemPrompt === "string" && before.systemPrompt.includes("multi-instance runtime guard") && before.systemPrompt.includes("volatile-suffix"));
+
+  fs.writeFileSync(path.join(root, "whole.txt"), "existing\n", "utf-8");
+  const whole = harness.handler("tool_call")({ toolName: "write", toolCallId: "whole", input: { path: "whole.txt", content: "replace\n" } }, ctx);
+  check("sub-agent whole-file write to unobserved existing file blocks", whole?.block === true && whole.reason.includes("unobserved_high_risk_write"), JSON.stringify(whole));
+  const git = harness.handler("tool_call")({ toolName: "bash", toolCallId: "git", input: { command: "git reset --hard HEAD" } }, ctx);
+  check("sub-agent dangerous git command blocks", git?.block === true && git.reason.includes("dangerous_git"), JSON.stringify(git));
+
+  const observedFile = path.join(root, "observed.txt");
+  fs.writeFileSync(observedFile, "one\n", "utf-8");
+  const readCall = harness.handler("tool_call")({ toolName: "read", toolCallId: "read-observed", input: { path: "observed.txt" } }, ctx);
+  check("sub-agent read tool_call is allowed", readCall === undefined, JSON.stringify(readCall));
+  await harness.handler("tool_result")({ toolName: "read", toolCallId: "read-observed", input: { path: "observed.txt" }, isError: false }, ctx);
+  fs.writeFileSync(observedFile, "two\n", "utf-8");
+  const stale = harness.handler("tool_call")({ toolName: "edit", toolCallId: "edit-observed", input: { path: "observed.txt", edits: [{ oldText: "two", newText: "three" }] } }, ctx);
+  check("sub-agent edit blocks after observed file changed externally", stale?.block === true && stale.reason.includes("stale_context"), JSON.stringify(stale));
+  check("sub-agent guard path still writes no manifest", !fs.existsSync(selfFile), selfFile);
+  mod.resetMultiInstanceStateForTests();
+}
+
+console.log("\n[7] file fingerprint stale-context guard");
 {
   mod.resetMultiInstanceStateForTests();
   const root = path.join(tmpRoot, "guard");
@@ -175,7 +259,7 @@ console.log("\n[6] file fingerprint stale-context guard");
   check("own known write refreshes observed fingerprint", afterOwn.action === "allow", afterOwn.action);
 }
 
-console.log("\n[7] high-risk write and peer activity guard");
+console.log("\n[8] high-risk write and peer activity guard");
 {
   mod.resetMultiInstanceStateForTests();
   const root = path.join(tmpRoot, "risk");
@@ -206,7 +290,7 @@ console.log("\n[7] high-risk write and peer activity guard");
   check("batch edit enters explicit warning path", batch.action === "warn" && batch.risks.some((r) => r.kind === "batch_edit"), batch.action);
 }
 
-console.log("\n[8] dangerous git command detection");
+console.log("\n[9] dangerous git command detection");
 {
   const d1 = mod.detectDangerousGitCommand("git reset --hard HEAD~1");
   const d2 = mod.detectDangerousGitCommand("git -C repo restore --source=HEAD -- file.ts");
@@ -222,7 +306,7 @@ console.log("\n[8] dangerous git command detection");
   check("dangerous git bash command blocks", verdict.action === "block", verdict.action);
 }
 
-console.log("\n[9] peers notify severity");
+console.log("\n[10] peers notify severity");
 {
   mod.resetMultiInstanceStateForTests();
   const root = path.join(tmpRoot, "notify");
@@ -244,7 +328,7 @@ console.log("\n[9] peers notify severity");
   check("recent guard risk notify is warning", mod.buildPeersNotifyType(activeOnly, [{ ts: new Date().toISOString(), action: "warn", kind: "peer_activity", tool: "edit", path: "x.ts", reason: "peer activity" }]) === "warning");
 }
 
-console.log("\n[10] volatile runtime block text");
+console.log("\n[11] volatile runtime block text");
 {
   mod.resetMultiInstanceStateForTests();
   const root = path.join(tmpRoot, "volatile");

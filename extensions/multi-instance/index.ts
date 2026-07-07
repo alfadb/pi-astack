@@ -2,13 +2,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { ensureProjectGitignoredOnce } from "../_shared/runtime";
-import { wrapVolatile } from "../_shared/volatile-suffix";
 import {
   buildFooterText,
   buildGuardBlockReason,
   buildPeersNotifyType,
   buildPeersReport,
-  buildVolatileRuntimeBlock,
+  buildVolatileSystemPromptUpdate,
   classifyToolIntent,
   evaluateToolGuard,
   getMultiInstanceState,
@@ -132,7 +131,6 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", (event: { toolName?: string; toolCallId?: unknown; input?: unknown }, ctx: unknown) => {
-    if (isSubAgentSession(ctx as { sessionManager?: unknown })) return undefined;
     const toolName = String(event.toolName ?? "");
     const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
     if (toolCallId) toolEpochs.set(toolCallId, getMultiInstanceState().sessionEpoch);
@@ -156,7 +154,6 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event: { toolName?: string; toolCallId?: string; input?: unknown; isError?: boolean }, ctx: unknown) => {
-    if (isSubAgentSession(ctx as { sessionManager?: unknown })) return undefined;
     if (event.toolCallId) {
       const epochAtCall = toolEpochs.get(event.toolCallId);
       toolEpochs.delete(event.toolCallId);
@@ -180,16 +177,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event: { systemPrompt?: string }, ctx: unknown) => {
-    if (isSubAgentSession(ctx as { sessionManager?: unknown })) return undefined;
     const projectRoot = currentProjectRoot(ctx);
-    const { sessionId, sessionFile } = sessionInfo(ctx);
-    startForegroundSession({ projectRoot, sessionId, sessionFile, model: modelLabel(ctx) });
+    if (!isSubAgentSession(ctx as { sessionManager?: unknown })) {
+      const { sessionId, sessionFile } = sessionInfo(ctx);
+      startForegroundSession({ projectRoot, sessionId, sessionFile, model: modelLabel(ctx) });
+    }
     const scan = scanInstanceManifests(projectRoot);
-    const block = buildVolatileRuntimeBlock(scan, getRecentGuardRisks());
+    const risks = getRecentGuardRisks();
     updateFooter(ctx, projectRoot);
-    if (!block) return undefined;
-    const current = event.systemPrompt ?? "";
-    return { systemPrompt: `${current.replace(/\n+$/, "")}\n\n${wrapVolatile(block)}\n` };
+    return buildVolatileSystemPromptUpdate(event.systemPrompt, scan, risks);
   });
 
   const registerCommand = (pi as unknown as {

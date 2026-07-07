@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { getDeviceId } from "./causal-anchor";
 import { atomicWriteText } from "./sync-file-lock";
 import { formatLocalIsoTimestamp, normalizeProjectRoot, piAstackRoot } from "./runtime";
+import { wrapVolatile } from "./volatile-suffix";
 
 export const MULTI_INSTANCE_SCHEMA_VERSION = 1;
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
@@ -860,6 +861,17 @@ export function buildVolatileRuntimeBlock(scan: PeerScan, risks: GuardRisk[] = g
   lines.push("Before edit/write/rm/mv or git worktree/index operations, re-read current targets when stale-context or peer risk is shown. Do not run destructive git rollback commands without explicit user confirmation.");
   lines.push("<!-- /pi-astack/multi-instance -->");
   return lines.join("\n");
+}
+
+export function buildVolatileSystemPromptUpdate(
+  systemPrompt: string | undefined,
+  scan: PeerScan,
+  risks: GuardRisk[] = getRecentGuardRisks(),
+): { systemPrompt: string } | undefined {
+  const block = buildVolatileRuntimeBlock(scan, risks);
+  if (!block) return undefined;
+  const current = systemPrompt ?? "";
+  return { systemPrompt: `${current.replace(/\n+$/, "")}\n\n${wrapVolatile(block)}\n` };
 }
 
 function shortId(id: string): string {
