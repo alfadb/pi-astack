@@ -37,7 +37,10 @@ function logTrip(sessionId: string, trip: ToolCircuitBreakerTrip): void {
     console.warn(
       `[pi-astack/tool-circuit-breaker] session=${sessionId} tool=${trip.toolName} ` +
       `fingerprint=${trip.fingerprintSummary} total=${trip.total} consecutive=${trip.consecutive} ` +
-      `reason=${trip.reason}`,
+      `reason=${trip.reason}` +
+      (trip.reason === "cycle" && trip.cycleLength && trip.cycleRepeats
+        ? ` cycleLength=${trip.cycleLength} cycleRepeats=${trip.cycleRepeats}`
+        : ""),
     );
   } catch {
     // Diagnostics only.
@@ -88,9 +91,13 @@ export default function (pi: ExtensionAPI) {
         fingerprintSummary: verdict.fingerprintSummary,
         total: verdict.total,
         consecutive: verdict.consecutive,
+        cycleLength: verdict.cycleLength,
+        cycleRepeats: verdict.cycleRepeats,
         trigger: verdict.reason,
         thresholds: {
           consecutive: settings.consecutiveThreshold,
+          cycleRepeat: settings.cycleRepeatThreshold,
+          maxCycleLength: settings.maxCycleLength,
         },
         deprecatedTotalThreshold: settings.totalThreshold,
         model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,

@@ -1509,12 +1509,12 @@
     "toolCircuitBreaker": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Global repeated tool-call circuit breaker. Applies to the current agent run, including dispatch-spawned sub-agents, through pi's shared tool_call hook. It blocks and aborts the current agent only when identical (toolName, normalized args) fingerprints repeat consecutively past the active consecutive threshold; total repeats are retained for diagnostics only and do not trigger blocking.",
+      "description": "Global repeated tool-call circuit breaker. Applies to the current agent run, including dispatch-spawned sub-agents, through pi's shared tool_call hook. It blocks and aborts the current agent only when identical (toolName, normalized args) fingerprints repeat consecutively past the active consecutive threshold, or when the tail of recent fingerprints repeats the same multi-tool cycle past the active cycle threshold. Total repeats are retained for diagnostics only and do not trigger blocking.",
       "properties": {
         "enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Master switch. Env PI_ASTACK_DISABLE_TOOL_CIRCUIT_BREAKER=1 disables regardless of settings. If this object is absent, legacy dispatch.idleLoopGuard.enabled=false is also honored."
+          "description": "Master switch. Env PI_ASTACK_DISABLE_TOOL_CIRCUIT_BREAKER=1 disables regardless of settings. If this object is absent, legacy dispatch.idleLoopGuard.enabled=false is also honored. Cycle detection is enabled by default alongside the consecutive guard."
         },
         "totalThreshold": {
           "type": "integer",
@@ -1527,6 +1527,25 @@
           "default": 4,
           "minimum": 1,
           "description": "Block once the same fingerprint has been requested more than this many times consecutively. Default 4 means the 5th back-to-back identical call trips."
+        },
+        "cycleDetectionEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable tail-pattern detection for repeated multi-tool cycles such as ABABAB... and ABCABC.... Only the tail matters; scattered repeats do not count."
+        },
+        "maxCycleLength": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 2,
+          "maximum": 32,
+          "description": "Maximum cycle length considered by the tail-pattern detector. Length 1 is excluded because consecutive repeats are already handled by consecutiveThreshold. Runtime clamps this to 32 so env overrides cannot exceed the supported bound."
+        },
+        "cycleRepeatThreshold": {
+          "type": "integer",
+          "default": 5,
+          "minimum": 2,
+          "maximum": 20,
+          "description": "Block once the same cycle appears this many full rounds at the tail. Default 5 means the 5th repeated round of a pattern trips. Runtime clamps this to 20 so env overrides cannot exceed the supported bound."
         },
         "abortOnTrip": {
           "type": "boolean",
