@@ -101,6 +101,8 @@ const guarded = [
    "no rule footer/notify in sub-agent UI"],
   ["extensions/abrain/rule-injector/index.ts", "before_agent_start",
    "must NOT inject project rules into sub-agent's dispatch-crafted system prompt"],
+  ["extensions/abrain/index.ts", "session_start",
+   "startup auto-sync / constraint shadow refresh must not run in sub-agent sessions"],
   ["extensions/abrain/index.ts", "tool_call",
    "sub-agent bash must NOT get parent vault $VAULT_/$PVAULT_/$GVAULT_ injection (v3 in-process; PI_ABRAIN_DISABLED never flips, ADR 0014 \u00a76 F3 fix)"],
   ["extensions/abrain/index.ts", "tool_result",

@@ -465,7 +465,11 @@ fs.writeFileSync(
   path.join(tmpDir, "brain-layout.cjs"),
   transpileTsToCjs(brainLayoutSrc).replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")'),
 );
-fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts")));
+fs.writeFileSync(
+  path.join(tmpDir, "i18n.cjs"),
+  transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts"))
+    .replace(/require\("\.\.\/_shared\/llm-audit"\)/g, 'require("./_shared/llm-audit.cjs")'),
+);
 fs.writeFileSync(
   path.join(tmpDir, "git-sync.cjs"),
   transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts"))
@@ -513,6 +517,28 @@ fs.writeFileSync(path.join(sharedTargetDir, "runtime.cjs"), transpileTsToCjs(pat
 fs.copyFileSync(path.join(sharedTargetDir, "runtime.cjs"), path.join(sharedTargetDir, "runtime.js"));
 fs.writeFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
 fs.copyFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), path.join(sharedTargetDir, "git-singleflight.js"));
+fs.writeFileSync(
+  path.join(sharedTargetDir, "pi-internals.cjs"),
+  `exports.isSubAgentSession = function isSubAgentSession(ctx) { return !!(ctx && ctx.sessionManager && ctx.sessionManager.__piAstackSubAgent === true); };\n`,
+);
+fs.copyFileSync(path.join(sharedTargetDir, "pi-internals.cjs"), path.join(sharedTargetDir, "pi-internals.js"));
+fs.writeFileSync(
+  path.join(sharedTargetDir, "llm-audit.cjs"),
+  `exports.auditStreamSimple = function auditStreamSimple() {};\n`,
+);
+fs.copyFileSync(path.join(sharedTargetDir, "llm-audit.cjs"), path.join(sharedTargetDir, "llm-audit.js"));
+const sedimentTargetDir = path.join(tmpDir, "sediment");
+fs.mkdirSync(sedimentTargetDir, { recursive: true });
+fs.writeFileSync(
+  path.join(sedimentTargetDir, "settings.cjs"),
+  `exports.resolveSedimentSettings = function resolveSedimentSettings() { return { knowledgeProjector: { canonicalReadMode: "legacy" } }; };\n`,
+);
+fs.copyFileSync(path.join(sedimentTargetDir, "settings.cjs"), path.join(sedimentTargetDir, "settings.js"));
+fs.writeFileSync(
+  path.join(sedimentTargetDir, "knowledge-evidence.cjs"),
+  `exports.readKnowledgeProjectionStores = function readKnowledgeProjectionStores() { return []; };\nexports.readKnowledgeStableViewStores = function readKnowledgeStableViewStores() { return []; };\n`,
+);
+fs.copyFileSync(path.join(sedimentTargetDir, "knowledge-evidence.cjs"), path.join(sedimentTargetDir, "knowledge-evidence.js"));
 const memoryTargetDir = path.join(tmpDir, "memory");
 fs.mkdirSync(memoryTargetDir, { recursive: true });
 // ADR 0034 P1: parser.ts now imports ./direction-impact (parseDirectionImpact).
@@ -531,6 +557,7 @@ fs.copyFileSync(path.join(tmpDir, "rule-injector", "dualread-audit.cjs"), path.j
 let ruleInjectorCompiled = transpileTsToCjs(ruleInjectorSrc)
   .replace(/require\("\.\.\/\.\.\/_shared\/footer-status"\)/g, 'require("../_shared/footer-status.cjs")')
   .replace(/require\("\.\.\/\.\.\/_shared\/runtime"\)/g, 'require("../_shared/runtime.cjs")')
+  .replace(/require\("\.\.\/\.\.\/_shared\/pi-internals"\)/g, 'require("../_shared/pi-internals.cjs")')
   .replace(/require\("\.\.\/\.\.\/memory\/parser"\)/g, 'require("../memory/parser.cjs")')
   .replace(/require\("\.\.\/\.\.\/memory\/utils"\)/g, 'require("../memory/utils.cjs")')
   .replace(/require\("\.\/dualread-audit"\)/g, 'require("./dualread-audit.cjs")');
@@ -553,7 +580,8 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/vault-authorize"\)/g, 'require("./vault-authorize.cjs")')
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector/index.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
-  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
+  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+  .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);
 const indexModule = require(indexFile);
@@ -561,6 +589,93 @@ const activate = indexModule.default;
 
 check("activate is a function", () => {
   if (typeof activate !== "function") throw new Error(`expected function, got ${typeof activate}`);
+});
+
+check("startup git sync fetched updates schedule constraint shadow auto-refresh", () => {
+  const calls = [];
+  const modelRegistry = { find() {}, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "x" }) };
+  const result = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+    { result: "ok", merged: 2, behind: 2 },
+    {
+      abrainHome: "/tmp/abrain-smoke",
+      cwd: "/tmp/project-smoke",
+      activeProject: { activeProject: { projectId: "proj-main" } },
+      modelRegistry,
+      resolveSettings: () => ({ constraintShadowCompiler: { enabled: true, autoRefresh: { enabled: true } } }),
+      listProjectIds: () => ["proj-z", "proj-main"],
+      schedule: (trigger) => { calls.push(trigger); return { scheduled: true, reason: "scheduled_now" }; },
+    },
+  );
+  if (!result.scheduled || result.reason !== "scheduled_now") throw new Error(`unexpected result: ${JSON.stringify(result)}`);
+  if (calls.length !== 1) throw new Error(`expected one schedule call, got ${calls.length}`);
+  const trigger = calls[0];
+  if (trigger.reason !== "git_sync_fetched") throw new Error(`wrong reason: ${trigger.reason}`);
+  if (trigger.sourceEventId !== undefined) throw new Error(`sourceEventId should be undefined: ${trigger.sourceEventId}`);
+  if (trigger.activeProjectId !== "proj-main") throw new Error(`wrong activeProjectId: ${trigger.activeProjectId}`);
+  if (trigger.cwd !== "/tmp/project-smoke") throw new Error(`wrong cwd: ${trigger.cwd}`);
+  if (trigger.modelRegistry !== modelRegistry) throw new Error("modelRegistry was not forwarded by identity");
+  if (JSON.stringify(trigger.knownProjectIds) !== JSON.stringify(["proj-main", "proj-z"])) throw new Error(`wrong knownProjectIds: ${JSON.stringify(trigger.knownProjectIds)}`);
+});
+
+check("startup git sync with no fetched updates does NOT schedule constraint shadow auto-refresh", () => {
+  let calls = 0;
+  const result = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+    { result: "ok", merged: 0, behind: 0 },
+    {
+      modelRegistry: { find() {}, getApiKeyAndHeaders: async () => ({ ok: true }) },
+      resolveSettings: () => ({ constraintShadowCompiler: { enabled: true, autoRefresh: { enabled: true } } }),
+      schedule: () => { calls += 1; return { scheduled: true, reason: "bad" }; },
+    },
+  );
+  if (calls !== 0) throw new Error(`schedule called ${calls} time(s)`);
+  if (result.scheduled || result.reason !== "git_sync_no_fetched_updates") throw new Error(`unexpected result: ${JSON.stringify(result)}`);
+});
+
+check("startup git sync failure/conflict does NOT schedule constraint shadow auto-refresh", () => {
+  for (const event of [{ result: "failed", behind: 1 }, { result: "timeout", behind: 1 }, { result: "conflict", behind: 1 }]) {
+    let calls = 0;
+    const result = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(event, {
+      modelRegistry: { find() {}, getApiKeyAndHeaders: async () => ({ ok: true }) },
+      resolveSettings: () => ({ constraintShadowCompiler: { enabled: true, autoRefresh: { enabled: true } } }),
+      schedule: () => { calls += 1; return { scheduled: true, reason: "bad" }; },
+    });
+    if (calls !== 0) throw new Error(`schedule called for ${event.result}`);
+    if (result.scheduled || result.reason !== "git_sync_no_fetched_updates") throw new Error(`unexpected result for ${event.result}: ${JSON.stringify(result)}`);
+  }
+});
+
+check("startup git sync fetched updates respect constraint shadow gates and missing modelRegistry", () => {
+  let calls = 0;
+  const disabled = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+    { result: "ok", behind: 1 },
+    {
+      resolveSettings: () => ({ constraintShadowCompiler: { enabled: false, autoRefresh: { enabled: true } } }),
+      schedule: () => { calls += 1; return { scheduled: true, reason: "bad" }; },
+    },
+  );
+  if (disabled.scheduled || disabled.reason !== "constraint_shadow_compiler_disabled") throw new Error(`unexpected disabled result: ${JSON.stringify(disabled)}`);
+
+  const autoDisabled = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+    { result: "ok", behind: 1 },
+    {
+      resolveSettings: () => ({ constraintShadowCompiler: { enabled: true, autoRefresh: { enabled: false } } }),
+      schedule: () => { calls += 1; return { scheduled: true, reason: "bad" }; },
+    },
+  );
+  if (autoDisabled.scheduled || autoDisabled.reason !== "auto_refresh_disabled") throw new Error(`unexpected auto-disabled result: ${JSON.stringify(autoDisabled)}`);
+
+  const notices = [];
+  const missingRegistry = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+    { result: "ok", behind: 1 },
+    {
+      resolveSettings: () => ({ constraintShadowCompiler: { enabled: true, autoRefresh: { enabled: true } } }),
+      notify: (msg, type) => notices.push({ msg, type }),
+      schedule: () => { calls += 1; return { scheduled: true, reason: "bad" }; },
+    },
+  );
+  if (missingRegistry.scheduled || missingRegistry.reason !== "model_registry_unavailable") throw new Error(`unexpected missing-registry result: ${JSON.stringify(missingRegistry)}`);
+  if (notices.length !== 1 || !notices[0].msg.includes("model registry unavailable") || notices[0].type !== "warning") throw new Error(`missing observable notice: ${JSON.stringify(notices)}`);
+  if (calls !== 0) throw new Error(`schedule should not have been called, got ${calls}`);
 });
 
 check("PI_ABRAIN_DISABLED=1 → activate registers ZERO commands (sub-pi guard)", () => {
