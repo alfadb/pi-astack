@@ -15,8 +15,8 @@
  *         on signal that nothing consumes)
  *
  *   - dispatch default tool allowlist includes memory_search, memory_get,
- *     memory_neighbors, memory_decide (NOT memory_list — broad-inventory
- *     tool, not needed for L2 workers)
+ *     memory_decide (NOT memory_list — broad-inventory tool, not needed
+ *     for L2 workers)
  *
  * Why this smoke matters: this is the structural pin for the T0 3-way
  * vote synthesis (Opus B / GPT-5.5 C / DeepSeek A → Route A'). If a
@@ -99,7 +99,7 @@ if (subBlockMatch) {
   }
 
   // Must mention P0-α explicitly so future readers know WHY
-  if (/P0-\u03b1|sediment\s*mask/.test(subBlock)) {
+  if (/P0-α|sediment\s*mask/.test(subBlock)) {
     ok("sub-agent variant explains P0-α sink closure rationale to the LLM");
   } else {
     bad("sub-agent variant does not explain WHY footnote is omitted");
@@ -140,13 +140,23 @@ if (/current\.includes\(MEMORY_INJECT_MARKER\).*\|\|.*current\.includes\(MEMORY_
 console.log("\n  dispatch/index.ts default tool allowlist:");
 const disSrc = readFileSync(resolve(repoRoot, "extensions/dispatch/index.ts"), "utf8");
 
-// All 4 default allowlist sites should include memory_search/get/neighbors/decide
-const defaultPattern = /read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_neighbors,memory_decide/;
-const matches = disSrc.match(new RegExp(defaultPattern.source, "g"));
-if (matches && matches.length >= 4) {
-  ok(`default allowlist contains memory_search/get/neighbors/decide in all ${matches.length} sites`);
+// DEFAULT_SUBAGENT_TOOLS is the single default allowlist source reused by
+// runInProcess and dispatch_parallel. Pin the memory-tool contract there.
+const defaultConstMatch = disSrc.match(/const DEFAULT_SUBAGENT_TOOLS\s*=\s*"([^"]+)"/);
+if (defaultConstMatch) {
+  const defaults = defaultConstMatch[1].split(",").map((s) => s.trim());
+  for (const tool of ["memory_search", "memory_get", "memory_decide"]) {
+    if (defaults.includes(tool)) ok(`default allowlist includes ${tool}`);
+    else bad(`default allowlist missing ${tool}`);
+  }
 } else {
-  bad(`expected ≥4 default allowlist sites; found ${matches ? matches.length : 0}`);
+  bad("could not locate DEFAULT_SUBAGENT_TOOLS constant");
+}
+
+if (/toolAllowlist\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/.test(disSrc) && /t\.tools\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/.test(disSrc)) {
+  ok("dispatch runInProcess and dispatch_parallel reuse DEFAULT_SUBAGENT_TOOLS");
+} else {
+  bad("dispatch default allowlist is not reused from DEFAULT_SUBAGENT_TOOLS in both call paths");
 }
 
 // memory_list explicitly NOT in default (T0 consensus: too broad)

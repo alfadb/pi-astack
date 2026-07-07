@@ -151,7 +151,7 @@ check("RETRYABLE_PREFIX value is 'connection lost — '", () => {
   // exact prefix wording doesn't matter for retry, but it does affect
   // log readability.
   if (!m[1].includes("connection") || !m[1].includes("lost")) {
-    throw new Error(`RETRYABLE_PREFIX="${m[1]}" missing "connection"/"lost" \u2014 ` +
+    throw new Error(`RETRYABLE_PREFIX="${m[1]}" missing "connection"/"lost" — ` +
       `pi's regex won't match`);
   }
 });
@@ -171,7 +171,7 @@ check("agent_end handler does NOT assign to msg.errorMessage", () => {
   const block = mfSrc.slice(startIdx, startIdx + 6000);
   if (/msg\.errorMessage\s*=/.test(block)) {
     throw new Error(
-      "agent_end handler contains an assignment to msg.errorMessage \u2014 the " +
+      "agent_end handler contains an assignment to msg.errorMessage — the " +
       "'defensive mutation' was removed 2026-05-21 as dead code (message_end " +
       "always runs first). Re-adding it is harmless but wasteful.",
     );
@@ -213,7 +213,7 @@ if (!piRoot) {
   check("I-3: _handleAgentEvent is async (awaits extension handlers)", () => {
     if (!/_handleAgentEvent\s*=\s*async\s*\(event\)\s*=>/.test(piSession)) {
       throw new Error(
-        "Pi's _handleAgentEvent is no longer `async (event) =>` \u2014 model-fallback's " +
+        "Pi's _handleAgentEvent is no longer `async (event) =>` — model-fallback's " +
         "mutation timing assumption broken. Re-trace and adjust handler placement.",
       );
     }
@@ -223,7 +223,7 @@ if (!piRoot) {
     // We look for the specific sequence: await _emitExtensionEvent(event)
     // then _emit(...willRetry: _willRetryAfterAgentEnd(event)). This is
     // the ordering that makes mutation in extension agent_end (if it
-    // existed) also work \u2014 but more importantly proves message_end
+    // existed) also work — but more importantly proves message_end
     // mutation propagates to the willRetry computation.
     if (!/await\s+this\._emitExtensionEvent\(event\)/.test(piSession)) {
       throw new Error("await _emitExtensionEvent(event) not found in pi's dispatcher");
@@ -250,14 +250,27 @@ if (!piRoot) {
     }
   });
 
-  check("I-4: pi's _isRetryableError regex matches 'connection.?lost'", () => {
-    // Just confirm the substring is in the regex source.
-    const re = /_isRetryableError[\s\S]{0,2000}connection\.\?lost/;
-    if (!re.test(piSession)) {
+  check("I-4: piSession delegates retryability to isRetryableAssistantError and pi-ai retry.js keeps connection.?lost", () => {
+    if (!/isRetryableAssistantError/.test(piSession)) {
       throw new Error(
-        "_isRetryableError regex no longer contains 'connection.?lost'. " +
-        "model-fallback's RETRYABLE_PREFIX will not trigger pi's retry. " +
-        "Either change the prefix to match new regex or update pi.",
+        "agent-session.js no longer references isRetryableAssistantError. This looks like pi-session delegate drift; re-check _isRetryableError(message).",
+      );
+    }
+    if (!/_isRetryableError\s*\([^)]*message[^)]*\)\s*\{[\s\S]{0,400}return\s+isRetryableAssistantError\(message\)/.test(piSession)) {
+      throw new Error(
+        "agent-session.js no longer delegates _isRetryableError(message) to isRetryableAssistantError(message). This looks like agent-session delegate drift.",
+      );
+    }
+    const retryPath = path.join(piRoot, "node_modules", "@earendil-works", "pi-ai", "dist", "utils", "retry.js");
+    if (!fs.existsSync(retryPath)) {
+      throw new Error(
+        `pi-ai retry helper not found at ${retryPath}. This looks like pi-ai retry pattern drift or install corruption.`,
+      );
+    }
+    const retrySrc = fs.readFileSync(retryPath, "utf8");
+    if (!/connection\.\?lost/.test(retrySrc)) {
+      throw new Error(
+        "pi-ai retry helper no longer contains connection.?lost. This looks like pi-ai retry pattern drift, not just agent-session delegate drift.",
       );
     }
   });
@@ -380,7 +393,7 @@ check("I-6: agent_end handler retains sub-agent opt-out (no model switching)", (
 
 console.log(`\nTotal: ${totalChecks}  Passed: ${totalChecks - failures.length}  Failed: ${failures.length}`);
 if (failures.length) {
-  console.log("\nFAILED \u2014 model-fallback mutation timing invariants broken.");
+  console.log("\nFAILED — model-fallback mutation timing invariants broken.");
   console.log("Re-read the file header for what each invariant guards.");
   process.exit(1);
 }

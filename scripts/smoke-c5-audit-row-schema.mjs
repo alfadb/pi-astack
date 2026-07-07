@@ -141,13 +141,13 @@ console.log("\nSection: dispatch_parallel.task audit write sites");
 check("dispatch_parallel per-task normal write spreads ...taskTsFields", () => {
   // The normal completion per-task audit row.
   const m = dispatchSrc.match(
-    /operation:\s*"dispatch_parallel\.task"[\s\S]{0,1500}?\}\s*\)\s*;/g,
+    /operation:\s*"dispatch_parallel\.task"[\s\S]{0,3000}?\}\s*\)\s*;/g,
   );
   if (!m || m.length < 2) {
     // Two sites: the normal one and the tool_rejected one (parallel had it
     // from the start; R6 also added row_kind to both).
     throw new Error(
-      `expected \u22652 dispatch_parallel.task audit write sites; got ${m?.length ?? 0}`,
+      `expected ≥2 dispatch_parallel.task audit write sites; got ${m?.length ?? 0}`,
     );
   }
   for (const block of m) {
@@ -164,7 +164,7 @@ check("dispatch_parallel.task carries row_kind:\"task\" (R6 P2-1 fix)", () => {
   // Both per-task audit sites must include row_kind:"task" so jq queries
   // can disambiguate aggregate from task rows.
   const m = dispatchSrc.match(
-    /operation:\s*"dispatch_parallel\.task"[\s\S]{0,1500}?\}\s*\)\s*;/g,
+    /operation:\s*"dispatch_parallel\.task"[\s\S]{0,3000}?\}\s*\)\s*;/g,
   );
   if (!m) throw new Error("could not locate dispatch_parallel.task blocks");
   for (const block of m) {
@@ -308,7 +308,7 @@ check("tool-block progress tracks sub-agent tool call counts", () => {
   if (!/toolCallCount\?: number/.test(dispatchSrc)) {
     throw new Error("Dispatch progress tasks and AgentResult must carry toolCallCount");
   }
-  if (!/eventType === "tool_execution_start"\) toolCallCount\+\+/.test(dispatchSrc)) {
+  if (!/eventType === "tool_execution_start"\)\s*\{\s*toolCallCount\+\+/.test(dispatchSrc)) {
     throw new Error("runInProcess must count actual sub-agent tool_execution_start events");
   }
   if (!/onProgress\?\.\(\{ reason, at: lastProgressAt, heartbeatTracePath: heartbeat\.tracePath, toolCallCount \}\)/.test(dispatchSrc)) {
@@ -358,9 +358,9 @@ check("single-task dispatch_agent progress also maps cancelled (R7.1 P2 fix)", (
       "not from result.error alone",
     );
   }
-  if (!/result\.failureType\s*===\s*"aborted"\s*\|\|\s*result\.failureType\s*===\s*"timeout"\s*\|\|\s*result\.failureType\s*===\s*"timeout_partial"\s*\n\s*\?\s*"cancelled"/.test(dispatchSrc)) {
+  if (!/inferTerminalState\(result\)\s*===\s*"cancelled"\s*\n\s*\?\s*"cancelled"/.test(dispatchSrc)) {
     throw new Error(
-      "dispatch_agent progress must map aborted/timeout/timeout_partial to cancelled",
+      "dispatch_agent progress must map cancelled terminal_state to cancelled",
     );
   }
 });
@@ -447,10 +447,10 @@ check("legacy result:\"ok\"|\"fail\" field retained on all audit rows", () => {
   //   result: aggregateLegacyResult
   // so the regex needs to allow that form too.
   const sites = dispatchSrc.match(
-    /operation:\s*"dispatch_(?:agent|parallel\.task|parallel\.summary)"[\s\S]{0,3000}?\}\s*\)\s*;/g,
+    /operation:\s*"dispatch_(?:agent|parallel\.task|parallel\.summary)"[\s\S]{0,4500}?\}\s*\)\s*;/g,
   );
   if (!sites || sites.length < 5) {
-    throw new Error(`expected \u22655 audit write sites; got ${sites?.length ?? 0}`);
+    throw new Error(`expected ≥5 audit write sites; got ${sites?.length ?? 0}`);
   }
   for (const block of sites) {
     if (!/result:\s*(?:"|res\.error|result\.error|aggregateLegacyResult\b)/.test(block)) {

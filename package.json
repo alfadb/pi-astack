@@ -140,6 +140,7 @@
     "smoke:constraint-legacy-retirement": "node scripts/smoke-constraint-legacy-retirement.mjs",
     "smoke:constraint-semantic-review-pack": "node scripts/smoke-constraint-semantic-review-pack.mjs",
     "smoke:constraint-text-delta-dispositions-writer": "node scripts/smoke-constraint-text-delta-dispositions-writer.mjs",
+    "smoke:constraint-compiled-only-dispositions-writer": "node scripts/smoke-constraint-compiled-only-dispositions-writer.mjs",
     "smoke:abrain-rule-writer": "node scripts/smoke-abrain-rule-writer.mjs",
     "smoke:abrain-rule-writer-fs": "node scripts/smoke-abrain-rule-writer-fs.mjs",
     "smoke:prompt-user": "node scripts/smoke-prompt-user.mjs",

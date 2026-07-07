@@ -127,15 +127,13 @@ console.log("\nSection: details.tasks (caller-LLM-visible structured result)");
 
 check("details.tasks builds from materializedResults (not raw results[])", () => {
   // Most caller-visible surface; gave the worst-case contradiction in R6.
-  // R7 fix: details.tasks now does
-  //   tasks: tasks.map((t, i) => { const r = materializedResults[i]; ... })
-  // Non-greedy regex stops at the inner `}` of the returned object, so
-  // we use 3 independent regexes anchored at the start of the construction.
-  const headStart = dispatchSrc.search(/tasks:\s*tasks\.map\(/);
-  if (headStart < 0) throw new Error("could not locate details.tasks construction");
-  // Use a 2.5KB window starting at the construction site — enough to
-  // include the entire mapping body (~25 lines including comments).
-  const window = dispatchSrc.slice(headStart, headStart + 2500);
+  // Anchor to the dispatch_parallel_summary details block so we do not
+  // accidentally inspect the progress snapshot initialization's tasks.map.
+  const summaryStart = dispatchSrc.indexOf('kind: "dispatch_parallel_summary"');
+  if (summaryStart < 0) throw new Error("could not locate dispatch_parallel_summary details block");
+  const tasksStart = dispatchSrc.indexOf("tasks: tasks.map", summaryStart);
+  if (tasksStart < 0) throw new Error("could not locate caller-visible details.tasks construction");
+  const window = dispatchSrc.slice(tasksStart, tasksStart + 2500);
   if (!/const r = materializedResults\[i\]/.test(window)) {
     throw new Error(
       "details.tasks must dereference materializedResults[i], not results[i]?... " +
@@ -199,7 +197,7 @@ check("table assigns 🚫 prefix for cancelled tasks (distinct from ❌ failed)"
   // R7 R6-DeepSeek-P2-3 visual cue: cancelled (holes / abort / timeout)
   // should render differently from failed so the caller LLM can
   // distinguish "you cancelled this" from "this broke".
-  if (!/status\s*=\s*`\ud83d\udeab/.test(dispatchSrc)) {
+  if (!/status\s*=\s*`🚫/.test(dispatchSrc)) {
     throw new Error("table must assign 🚫 prefix when inferTerminalState(r) === 'cancelled'");
   }
 });
@@ -218,7 +216,7 @@ check("per-task detail section iterates materializedResults", () => {
 check("per-task detail uses 🚫 for cancelled (matches table)", () => {
   // Detail section must be consistent with the table prefix; previously
   // R7 left it as ❌ for all errors, including cancelled.
-  if (!/detailTs === "cancelled" \? "\ud83d\udeab"/.test(dispatchSrc)) {
+  if (!/detailTs === "cancelled" \? "🚫"/.test(dispatchSrc)) {
     throw new Error("per-task detail must use 🚫 prefix when terminal_state is cancelled (matches table)");
   }
 });
