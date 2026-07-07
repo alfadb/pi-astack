@@ -11,6 +11,7 @@
  * Usage:
  *   node scripts/write-constraint-text-delta-dispositions.mjs [--abrain ~/.abrain]
  *     [--post-refresh] [--latest] [--include-normalization]
+ *     [--source <sourceRecordId>] [--exclude-source <sourceRecordId>]
  *     [--review-ref <value>] [--reason <value>] [--dry-run] [--json]
  */
 
@@ -43,6 +44,8 @@ function usage() {
     "  --post-refresh                  use semantic review pack post-refresh selection",
     "  --latest                        use only the latest selected session-start row",
     "  --include-normalization         also write normalization_possible items as normalization_possible",
+    "  --source <sourceRecordId>        only consider this sourceRecordId (repeatable)",
+    "  --exclude-source <sourceRecordId> exclude this sourceRecordId after source filtering (repeatable)",
     "  --review-ref <value>            review reference metadata",
     "  --reason <value>                reason metadata",
     "  --dry-run                       compute merge without writing",
@@ -56,6 +59,8 @@ function parseArgs(argv) {
     postRefresh: false,
     latest: false,
     includeNormalization: false,
+    sources: [],
+    excludeSources: [],
     reviewRef: null,
     reason: null,
     dryRun: false,
@@ -75,15 +80,21 @@ function parseArgs(argv) {
       options.dryRun = true;
     } else if (arg === "--json") {
       options.json = true;
-    } else if (["--abrain", "--review-ref", "--reason"].includes(arg)) {
+    } else if (["--abrain", "--review-ref", "--reason", "--source", "--exclude-source"].includes(arg)) {
       if (i + 1 >= argv.length || argv[i + 1].startsWith("--")) {
         throw new Error(`${arg} requires a value`);
       }
-      const value = argv[i + 1];
+      const rawValue = argv[i + 1];
+      const value = ["--source", "--exclude-source"].includes(arg) ? rawValue.trim() : rawValue;
+      if (["--source", "--exclude-source"].includes(arg) && !value) {
+        throw new Error(`${arg} requires a non-empty value`);
+      }
       i += 1;
       if (arg === "--abrain") options.abrain = value;
       if (arg === "--review-ref") options.reviewRef = value;
       if (arg === "--reason") options.reason = value;
+      if (arg === "--source") options.sources.push(value);
+      if (arg === "--exclude-source") options.excludeSources.push(value);
     } else {
       throw new Error(`unknown argument: ${arg}`);
     }
@@ -172,6 +183,19 @@ function reasonForDisposition(disposition, explicitReason) {
   return disposition === "normalization_possible" ? DEFAULT_NORMALIZATION_REASON : DEFAULT_SEMANTIC_REASON;
 }
 
+function sourceFilterDecision(item, options) {
+  const sourceRecordId = stringValue(item?.sourceRecordId);
+  const include = options.sources.length ? new Set(options.sources) : null;
+  const exclude = options.excludeSources.length ? new Set(options.excludeSources) : null;
+  if (include && (!sourceRecordId || !include.has(sourceRecordId))) {
+    return { filtered: true, sourceRecordId, reason: "not included by --source" };
+  }
+  if (exclude && sourceRecordId && exclude.has(sourceRecordId)) {
+    return { filtered: true, sourceRecordId, reason: "excluded by --exclude-source" };
+  }
+  return { filtered: false, sourceRecordId, reason: null };
+}
+
 function candidateFromReviewItem(item, options, metadata) {
   const disposition = targetDisposition(item, options.includeNormalization);
   if (!disposition) return { skipped: null, candidate: null };
@@ -246,12 +270,19 @@ function buildCandidates(pack, options) {
   };
   const byKey = new Map();
   const skipped = [];
-  for (const item of Array.isArray(pack?.reviewItems) ? pack.reviewItems : []) {
+  const filtered = [];
+  const reviewItems = Array.isArray(pack?.reviewItems) ? pack.reviewItems : [];
+  for (const item of reviewItems) {
+    const filter = sourceFilterDecision(item, options);
+    if (filter.filtered) {
+      filtered.push({ sourceRecordId: filter.sourceRecordId ?? null, reason: filter.reason });
+      continue;
+    }
     const { candidate, skipped: skippedItem } = candidateFromReviewItem(item, options, metadata);
     if (skippedItem) skipped.push(skippedItem);
     if (candidate) byKey.set(dispositionKey(candidate), candidate);
   }
-  return { candidates: [...byKey.values()], skipped, metadata };
+  return { candidates: [...byKey.values()], skipped, filtered, considered: reviewItems.length - filtered.length, metadata };
 }
 
 function renderHuman(result) {
@@ -260,7 +291,10 @@ function renderHuman(result) {
   lines.push(`target: ${result.path}`);
   lines.push(`mode: ${result.dryRun ? "dry-run" : "write"}`);
   lines.push(`reviewRef: ${result.reviewRef}`);
+  if (result.inputs.sources.length) lines.push(`sources: ${result.inputs.sources.join(", ")}`);
+  if (result.inputs.excludeSources.length) lines.push(`excludeSources: ${result.inputs.excludeSources.join(", ")}`);
   lines.push(`created: ${result.stats.created}  updated: ${result.stats.updated}  unchanged: ${result.stats.unchanged}  total: ${result.stats.total}`);
+  lines.push(`considered: ${result.stats.considered}  filtered: ${result.stats.filtered}`);
   if (result.stats.skipped) lines.push(`skipped: ${result.stats.skipped}`);
   if (result.dryRun) lines.push("dry-run: no files written");
   if (result.warnings.length) {
@@ -279,7 +313,7 @@ function main() {
   options.abrainHome = resolveInputPath(options.abrain);
   const file = sidecarPath(options.abrainHome);
   const pack = runReviewPack(options);
-  const { candidates, skipped, metadata } = buildCandidates(pack, options);
+  const { candidates, skipped, filtered, considered, metadata } = buildCandidates(pack, options);
   const existing = readSidecar(file);
   const { sidecar, stats } = mergeSidecar(existing, candidates);
   const result = {
@@ -289,8 +323,10 @@ function main() {
     schemaVersion: SCHEMA_VERSION,
     stats: {
       ...stats,
-      considered: candidates.length,
+      considered,
       skipped: skipped.length,
+      filtered: filtered.length,
+      candidates: candidates.length,
     },
     reviewRef: metadata.reviewRef,
     reviewedAtUtc: metadata.reviewedAtUtc,
@@ -299,6 +335,8 @@ function main() {
       postRefresh: options.postRefresh,
       latest: options.latest,
       includeNormalization: options.includeNormalization,
+      sources: options.sources,
+      excludeSources: options.excludeSources,
     },
     reviewPack: {
       schemaVersion: pack?.schemaVersion ?? null,

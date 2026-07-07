@@ -398,6 +398,30 @@ const jargonListedPredecessor = source({
   title: "Professional vocabulary predecessor",
   body: "Avoid jargon and prefer professional vocabulary.",
 });
+const restartDisclosureLegacySource = source({
+  sourceId: "rule:global:listed:restart-disclosure-is-a-standing-completion-requirement",
+  slug: "restart-disclosure-is-a-standing-completion-requirement",
+  injectMode: "listed",
+  title: "Restart disclosure standing completion requirement",
+  body: "Always disclose required restarts at completion; this is a standing completion requirement.",
+  provenance: "assistant-observed",
+  confidence: 2,
+  triggerPhrases: ["restart disclosure", "standing completion requirement"],
+  appliesWhen: "completion responses after changes that require restart or refresh",
+  mustDoSummary: "Disclose required restarts at completion.",
+});
+const restartDisclosureOverlapEvent = eventSource({
+  sourceId: "event:pi-global-restart-disclosure-overlap",
+  eventId: "pi-global-restart-disclosure-overlap",
+  candidateText: "When changes require restart or refresh, disclose the requirement at completion.",
+  candidateTitle: "Restart or refresh disclosure",
+  candidateTriggerPhrases: ["restart", "refresh", "completion"],
+  candidatePriorityHint: "always",
+  confidence: 0.95,
+  sourceChannel: "manual",
+  sourceRole: "user",
+  scopeHint: { kind: "global", evidence: "fixture pi-global event" },
+});
 
 const allSources = [
   settingsSource,
@@ -1848,8 +1872,30 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("SC_NOT_MEMORY_SETTINGS or SC_NOT_MEMORY_TOOL_CONTRACT"), "not-memory diagnostic gate guidance missing");
   assert(prompt.text.includes("constraint_event with categoryHint=behavioral_constraint"), "behavioral event compile/unresolved guidance missing");
   assert(prompt.text.includes("toolContract, ToolContract, settings schema, removal, or checkpoint"), "ToolContract cleanup topical-word guard missing");
+  assert(prompt.text.includes("active legacy_rule with categoryHint=behavioral_constraint"), "active legacy behavioral rule guidance missing");
+  assert(prompt.text.includes("low numeric confidence, assistant-observed provenance"), "low-confidence/assistant-observed boundary missing");
+  assert(prompt.text.includes("different scope, injectMode, or sourceKind"), "overlap boundary missing");
+  assert(prompt.text.includes("not by itself a basis for unresolved/model_uncertain"), "model_uncertain boundary missing");
+  assert(prompt.text.includes("compile that source as a separate constraint using its original scope and injectMode"), "separate compile boundary missing");
+  assert(prompt.text.includes("only when the rule text cannot be parsed into a behavioral directive"), "unresolved boundary missing");
   assert(prompt.text.includes("Mapping disposition must match the source's primary bucket"), "mapping disposition primary-bucket guidance missing");
   assert(prompt.text.includes(globalSource.sourceId), "source id missing from prompt");
+
+  const restartNormalized = normalizeConstraintSources([restartDisclosureLegacySource, restartDisclosureOverlapEvent], {
+    activeProjectId: "pi-astack",
+    knownProjectIds: ["pi-astack"],
+    compilerOptions: { mode: "fixture" },
+  });
+  const restartRecord = restartNormalized.records.find((item) => item.sourceId === restartDisclosureLegacySource.sourceId);
+  assert(restartRecord && restartRecord.categoryHint === "behavioral_constraint", `restart disclosure rule category drifted: ${restartRecord && restartRecord.categoryHint}`);
+  const restartPrompt = buildConstraintCompilerPrompt({ normalized: restartNormalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  assert(restartPrompt.text.includes(restartDisclosureLegacySource.sourceId), "restart disclosure legacy rule missing from prompt");
+  assert(restartPrompt.text.includes(restartDisclosureOverlapEvent.sourceId), "restart disclosure overlap event missing from prompt");
+  assert(restartPrompt.text.includes('"categoryHint":"behavioral_constraint"'), "restart prompt missing behavioral category hint");
+  assert(restartPrompt.text.includes('"provenance":"assistant-observed"'), "restart prompt missing assistant-observed provenance");
+  assert(restartPrompt.text.includes('"confidence":2'), "restart prompt missing low confidence");
+  assert(restartPrompt.text.includes('"injectMode":"listed"'), "restart prompt missing listed inject mode");
+  assert(restartPrompt.text.includes("not by itself a basis for unresolved/model_uncertain"), "restart prompt missing model_uncertain boundary");
 });
 
 check("prompt builder fails closed when input exceeds budget", () => {
