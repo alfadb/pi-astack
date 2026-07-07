@@ -11,6 +11,7 @@
  * Usage:
  *   node scripts/write-constraint-text-delta-dispositions.mjs [--abrain ~/.abrain]
  *     [--post-refresh] [--latest] [--include-normalization]
+ *     [--promote-normalization-reviewed]
  *     [--source <sourceRecordId>] [--exclude-source <sourceRecordId>]
  *     [--review-ref <value>] [--reason <value>] [--dry-run] [--json]
  */
@@ -44,6 +45,7 @@ function usage() {
     "  --post-refresh                  use semantic review pack post-refresh selection",
     "  --latest                        use only the latest selected session-start row",
     "  --include-normalization         also write normalization_possible items as normalization_possible",
+    "  --promote-normalization-reviewed promote reviewed normalization_possible items to semantic_equivalent (guarded)",
     "  --source <sourceRecordId>        only consider this sourceRecordId (repeatable)",
     "  --exclude-source <sourceRecordId> exclude this sourceRecordId after source filtering (repeatable)",
     "  --review-ref <value>            review reference metadata",
@@ -59,6 +61,7 @@ function parseArgs(argv) {
     postRefresh: false,
     latest: false,
     includeNormalization: false,
+    promoteNormalizationReviewed: false,
     sources: [],
     excludeSources: [],
     reviewRef: null,
@@ -76,6 +79,8 @@ function parseArgs(argv) {
       options.latest = true;
     } else if (arg === "--include-normalization") {
       options.includeNormalization = true;
+    } else if (arg === "--promote-normalization-reviewed") {
+      options.promoteNormalizationReviewed = true;
     } else if (arg === "--dry-run") {
       options.dryRun = true;
     } else if (arg === "--json") {
@@ -100,6 +105,18 @@ function parseArgs(argv) {
     }
   }
   return options;
+}
+
+function validatePromotionGuards(options) {
+  if (!options.promoteNormalizationReviewed) return;
+  const missing = [];
+  if (!options.includeNormalization) missing.push("--include-normalization");
+  if (!options.sources.length) missing.push("--source");
+  if (!stringValue(options.reviewRef)) missing.push("--review-ref");
+  if (!stringValue(options.reason)) missing.push("--reason");
+  if (missing.length) {
+    throw new Error(`--promote-normalization-reviewed requires ${missing.join(", ")}`);
+  }
 }
 
 function expandHome(value) {
@@ -171,10 +188,12 @@ function defaultReviewRef(pack) {
   return `semantic-review-pack:${observedAt}`;
 }
 
-function targetDisposition(item, includeNormalization) {
+function targetDisposition(item, options) {
   if (item?.kind !== "text_delta_pair") return null;
   if (item.disposition === "semantic_review_required") return "semantic_equivalent";
-  if (includeNormalization && item.disposition === "normalization_possible") return "normalization_possible";
+  if (options.includeNormalization && item.disposition === "normalization_possible") {
+    return options.promoteNormalizationReviewed ? "semantic_equivalent" : "normalization_possible";
+  }
   return null;
 }
 
@@ -197,7 +216,7 @@ function sourceFilterDecision(item, options) {
 }
 
 function candidateFromReviewItem(item, options, metadata) {
-  const disposition = targetDisposition(item, options.includeNormalization);
+  const disposition = targetDisposition(item, options);
   if (!disposition) return { skipped: null, candidate: null };
   const sourceRecordId = stringValue(item.sourceRecordId);
   const legacyHash = stringValue(item.legacyHash);
@@ -291,6 +310,7 @@ function renderHuman(result) {
   lines.push(`target: ${result.path}`);
   lines.push(`mode: ${result.dryRun ? "dry-run" : "write"}`);
   lines.push(`reviewRef: ${result.reviewRef}`);
+  lines.push(`promoteNormalizationReviewed: ${result.inputs.promoteNormalizationReviewed ? "yes" : "no"}`);
   if (result.inputs.sources.length) lines.push(`sources: ${result.inputs.sources.join(", ")}`);
   if (result.inputs.excludeSources.length) lines.push(`excludeSources: ${result.inputs.excludeSources.join(", ")}`);
   lines.push(`created: ${result.stats.created}  updated: ${result.stats.updated}  unchanged: ${result.stats.unchanged}  total: ${result.stats.total}`);
@@ -310,6 +330,7 @@ function main() {
     console.log(usage());
     return 0;
   }
+  validatePromotionGuards(options);
   options.abrainHome = resolveInputPath(options.abrain);
   const file = sidecarPath(options.abrainHome);
   const pack = runReviewPack(options);
@@ -335,6 +356,7 @@ function main() {
       postRefresh: options.postRefresh,
       latest: options.latest,
       includeNormalization: options.includeNormalization,
+      promoteNormalizationReviewed: options.promoteNormalizationReviewed,
       sources: options.sources,
       excludeSources: options.excludeSources,
     },

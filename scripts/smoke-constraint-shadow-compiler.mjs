@@ -394,6 +394,16 @@ const sub2apiSemanticReviewSource = source({
   appliesWhen: "sub2api review decisions",
   mustDoSummary: "Set semantic_review_required only for business logic changes.",
 });
+const docDriftSeveritySource = source({
+  sourceId: "rule:project:pi-astack:always:doc-drift-severity-order",
+  slug: "doc-drift-severity-order",
+  scope: { kind: "project", projectId: "pi-astack" },
+  title: "Doc drift severity order",
+  body: "Charter document staleness is the highest-severity doc drift signal; README/charter read first has higher drift severity than subordinate documents; cross-check roadmap/changelog/git log/artifacts.",
+  triggerPhrases: ["doc drift", "highest-severity", "higher drift severity"],
+  appliesWhen: "document drift checks",
+  mustDoSummary: "Treat charter staleness as the highest-severity doc drift signal and read README/charter first.",
+});
 const piGlobalPrivateRepoTrackingSource = source({
   sourceId: "rule:project:pi-global:always:track-private-config-files",
   slug: "track-private-config-files",
@@ -1902,6 +1912,10 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("Preserve mandatory and exclusive semantics from each source"), "mandatory/exclusive preservation guidance missing");
   assert(prompt.text.includes("only, must, never, forbid, prohibited"), "exclusive keyword examples missing");
   assert(prompt.text.includes("禁止, 必须, 仅, 只, 只能, and 不得"), "Chinese exclusive keyword examples missing");
+  assert(prompt.text.includes("Preserve explicit severity, priority, and ranking semantics as behavioral ordering thresholds"), "severity/priority/ranking preservation guidance missing");
+  assert(prompt.text.includes("highest-severity, higher severity than, first, priority, critical, blocking, highest"), "severity/priority/ranking keyword examples missing");
+  assert(prompt.text.includes("最严重, 优先级, 最高, and 首先"), "Chinese severity/priority/ranking keyword examples missing");
+  assert(prompt.text.includes("compiledBody, mustDoSummary, or appliesWhen"), "behavioral ordering output-field guidance missing");
   assert(prompt.text.includes("prioritize, prefer, normally, generally, should, unless materially affect"), "weakened wording examples missing");
   assert(prompt.text.includes("unless that exception or weakening is explicit in the same source text"), "source-explicit exception boundary missing");
   assert(prompt.text.includes("If a source says only X may trigger Y"), "exclusive trigger gate guidance missing");
@@ -1931,6 +1945,19 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(sub2apiPrompt.text.includes("Preserve mandatory and exclusive semantics from each source"), "sub2api prompt missing exclusivity preservation guidance");
   assert(sub2apiPrompt.text.includes("only business logic changes"), "sub2api prompt missing only-business-logic threshold guidance/source text");
   assert(sub2apiPrompt.text.includes("unless materially affect") && sub2apiPrompt.text.includes("unless that exception or weakening is explicit in the same source text"), "sub2api prompt missing materiality-exception guard");
+
+  const docDriftNormalized = normalizeConstraintSources([docDriftSeveritySource], {
+    activeProjectId: "pi-astack",
+    knownProjectIds: ["pi-astack"],
+    compilerOptions: { mode: "fixture" },
+  });
+  const docDriftPrompt = buildConstraintCompilerPrompt({ normalized: docDriftNormalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  assert(docDriftPrompt.text.includes(docDriftSeveritySource.sourceId), "doc drift severity source id missing from prompt");
+  assert(docDriftPrompt.text.includes("Charter document staleness is the highest-severity doc drift signal"), "doc drift highest-severity fixture missing from prompt");
+  assert(docDriftPrompt.text.includes("README/charter read first has higher drift severity than subordinate documents"), "doc drift ranking fixture missing from prompt");
+  assert(docDriftPrompt.text.includes("cross-check roadmap/changelog/git log/artifacts"), "doc drift cross-check fixture missing from prompt");
+  assert(docDriftPrompt.text.includes("Preserve explicit severity, priority, and ranking semantics as behavioral ordering thresholds"), "doc drift prompt missing severity/priority/ranking guidance");
+  assert(docDriftPrompt.text.includes("compiledBody, mustDoSummary, or appliesWhen"), "doc drift prompt missing severity output-field guidance");
 
   const restartNormalized = normalizeConstraintSources([restartDisclosureLegacySource, restartDisclosureOverlapEvent], {
     activeProjectId: "pi-astack",

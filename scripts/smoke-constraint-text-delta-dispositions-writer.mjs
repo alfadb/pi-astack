@@ -164,6 +164,18 @@ function readSidecar(fixture) {
   return JSON.parse(fs.readFileSync(fixture.sidecar, "utf8"));
 }
 
+function assertPromotionGuardFailure(name, args, expectedMissingFlag) {
+  check(name, () => {
+    const fixture = makeFixture();
+    const { result, json } = runWriter(fixture, args);
+    assert(result.status === 1, `expected exit 1, got ${result.status}: ${result.stderr}`);
+    assert(json.ok === false, `expected ok false: ${JSON.stringify(json)}`);
+    assert(json.error.includes("--promote-normalization-reviewed requires"), `error mismatch: ${JSON.stringify(json)}`);
+    assert(json.error.includes(expectedMissingFlag), `missing flag not reported: ${JSON.stringify(json)}`);
+    assert(!fs.existsSync(fixture.sidecar), "guard failure wrote sidecar");
+  });
+}
+
 console.log("ADR0039 constraint text-delta dispositions writer smoke");
 
 check("dry-run does not write sidecar", () => {
@@ -172,6 +184,7 @@ check("dry-run does not write sidecar", () => {
   assert(result.status === 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
   assert(json.dryRun === true, `dryRun mismatch: ${JSON.stringify(json)}`);
   assert(json.path === fixture.sidecar, `target path mismatch: ${json.path}`);
+  assert(json.inputs.promoteNormalizationReviewed === false, `promotion input mismatch: ${JSON.stringify(json.inputs)}`);
   assert(json.stats.created === 2, `expected two planned creates: ${JSON.stringify(json.stats)}`);
   assert(json.stats.total === 2, `expected planned total 2: ${JSON.stringify(json.stats)}`);
   assert(json.stats.considered === 2 && json.stats.filtered === 0 && json.stats.candidates === 2, `filter stats mismatch: ${JSON.stringify(json.stats)}`);
@@ -248,12 +261,79 @@ check("include-normalization writes normalization_possible without semantic_equi
   assert(items.length === 2 && !items.some((item) => item.sourceRecordId === "rule:global:always:normalization-fixture"), `normalization included by default: ${JSON.stringify(items)}`);
   const { result, json } = runWriter(fixture, ["--include-normalization"]);
   assert(result.status === 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
+  assert(json.inputs.promoteNormalizationReviewed === false, `promotion input mismatch: ${JSON.stringify(json.inputs)}`);
   assert(json.stats.created === 1 && json.stats.unchanged === 2, `stats mismatch: ${JSON.stringify(json.stats)}`);
   items = readSidecar(fixture).items;
   const normalization = items.find((item) => item.sourceRecordId === "rule:global:always:normalization-fixture");
   assert(normalization, `normalization item missing: ${JSON.stringify(items)}`);
   assert(normalization.disposition === "normalization_possible", `normalization was spoofed: ${JSON.stringify(normalization)}`);
   assert(normalization.reason === "multi-model semantic review retained normalization_possible", `normalization reason mismatch: ${JSON.stringify(normalization)}`);
+});
+
+assertPromotionGuardFailure(
+  "promote-normalization-reviewed fails closed without include-normalization",
+  [
+    "--promote-normalization-reviewed",
+    "--source", "rule:global:always:normalization-fixture",
+    "--review-ref", "review:normalization-promotion",
+    "--reason", "reviewed normalization equivalent",
+  ],
+  "--include-normalization",
+);
+
+assertPromotionGuardFailure(
+  "promote-normalization-reviewed fails closed without source",
+  [
+    "--promote-normalization-reviewed",
+    "--include-normalization",
+    "--review-ref", "review:normalization-promotion",
+    "--reason", "reviewed normalization equivalent",
+  ],
+  "--source",
+);
+
+assertPromotionGuardFailure(
+  "promote-normalization-reviewed fails closed without review-ref",
+  [
+    "--promote-normalization-reviewed",
+    "--include-normalization",
+    "--source", "rule:global:always:normalization-fixture",
+    "--reason", "reviewed normalization equivalent",
+  ],
+  "--review-ref",
+);
+
+assertPromotionGuardFailure(
+  "promote-normalization-reviewed fails closed without reason",
+  [
+    "--promote-normalization-reviewed",
+    "--include-normalization",
+    "--source", "rule:global:always:normalization-fixture",
+    "--review-ref", "review:normalization-promotion",
+  ],
+  "--reason",
+);
+
+check("promote-normalization-reviewed promotes only the guarded normalization source", () => {
+  const fixture = makeFixture();
+  const { result, json } = runWriter(fixture, [
+    "--include-normalization",
+    "--promote-normalization-reviewed",
+    "--source", "rule:global:always:normalization-fixture",
+    "--review-ref", "review:normalization-promotion",
+    "--reason", "reviewed normalization equivalent",
+  ]);
+  assert(result.status === 0, `expected exit 0, got ${result.status}: ${result.stderr}`);
+  assert(json.inputs.promoteNormalizationReviewed === true, `promotion input mismatch: ${JSON.stringify(json.inputs)}`);
+  assert(json.inputs.sources.length === 1 && json.inputs.sources[0] === "rule:global:always:normalization-fixture", `sources missing: ${JSON.stringify(json.inputs)}`);
+  assert(json.stats.created === 1 && json.stats.filtered === 2 && json.stats.considered === 1 && json.stats.candidates === 1, `stats mismatch: ${JSON.stringify(json.stats)}`);
+  const items = readSidecar(fixture).items;
+  assert(items.length === 1, `expected one item: ${JSON.stringify(items)}`);
+  const normalization = items[0];
+  assert(normalization.sourceRecordId === "rule:global:always:normalization-fixture", `wrong source: ${JSON.stringify(normalization)}`);
+  assert(normalization.disposition === "semantic_equivalent", `normalization not promoted: ${JSON.stringify(normalization)}`);
+  assert(normalization.reviewRef === "review:normalization-promotion", `reviewRef mismatch: ${JSON.stringify(normalization)}`);
+  assert(normalization.reason === "reviewed normalization equivalent", `reason mismatch: ${JSON.stringify(normalization)}`);
 });
 
 check("exclude-source writes only the remaining semantic item", () => {
