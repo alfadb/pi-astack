@@ -56,7 +56,7 @@ import {
 import activateRuleInjector from "./rule-injector";
 import {
   fetchAndFF, pushAsync, sync as gitSync, getStatus as getGitSyncStatus,
-  formatSyncStatus, type AbrainSyncStatus,
+  formatSyncStatus, type AbrainSyncStatus, type GitSyncEvent,
 } from "./git-sync";
 import {
   authKey,
@@ -78,6 +78,7 @@ import {
 import { gitSingleFlight } from "../_shared/git-singleflight";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
+import type { SedimentSettings } from "../sediment/settings";
 // ADR 0022 P2: prompt_user LLM tool surface. Types only at top level;
 // runtime symbols are `require()`d inside `activate()` so any consumer
 // that loads abrain/index.ts purely for its EXPORTS (smoke fixtures,
@@ -233,7 +234,7 @@ interface CommandRegistry {
 interface EventRegistry {
   on?: (
     event: string,
-    handler: (event: any, ctx: { cwd?: string; ui?: VaultReleaseUi; signal?: AbortSignal }) => Promise<unknown> | unknown,
+    handler: (event: any, ctx: { cwd?: string; ui?: VaultReleaseUi; signal?: AbortSignal; modelRegistry?: unknown; sessionManager?: unknown }) => Promise<unknown> | unknown,
   ) => void;
 }
 
@@ -513,6 +514,123 @@ export function __resetBootActiveProjectForTests(value: ResolveActiveProjectResu
   bootActiveProjectAt = value ? Date.now() : null;
 }
 
+interface StartupConstraintShadowRefreshDeps {
+  abrainHome?: string;
+  cwd?: string;
+  activeProject?: ResolveActiveProjectResult | null;
+  modelRegistry?: unknown;
+  notify?: (msg: string, type?: string) => void;
+  resolveSettings?: () => SedimentSettings;
+  schedule?: (trigger: {
+    abrainHome: string;
+    cwd: string;
+    activeProjectId?: string;
+    knownProjectIds?: string[];
+    settings: SedimentSettings;
+    modelRegistry?: unknown;
+    reason: string;
+    sourceEventId?: string;
+  }) => { scheduled: boolean; reason: string };
+  listProjectIds?: (abrainHome: string) => string[];
+}
+
+function isUsableModelRegistry(value: unknown): boolean {
+  return !!value
+    && typeof value === "object"
+    && typeof (value as { find?: unknown }).find === "function"
+    && typeof (value as { getApiKeyAndHeaders?: unknown }).getApiKeyAndHeaders === "function";
+}
+
+function defaultResolveSedimentSettings(): SedimentSettings {
+  // Loaded lazily so smoke fixtures and abrain-only consumers do not pull the
+  // sediment compiler graph unless startup sync actually fetched new commits.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = require("../sediment/settings") as { resolveSedimentSettings(): SedimentSettings };
+  return mod.resolveSedimentSettings();
+}
+
+function defaultScheduleConstraintShadowAutoRefresh(trigger: Parameters<NonNullable<StartupConstraintShadowRefreshDeps["schedule"]>>[0]): { scheduled: boolean; reason: string } {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = require("../sediment/constraint-compiler/auto-refresh") as {
+    scheduleConstraintShadowAutoRefresh(args: typeof trigger): { scheduled: boolean; reason: string };
+  };
+  return mod.scheduleConstraintShadowAutoRefresh(trigger);
+}
+
+function notifyConstraintShadowRefreshSkip(
+  notify: StartupConstraintShadowRefreshDeps["notify"],
+  message: string,
+  type: "info" | "warning" | "error" = "warning",
+): void {
+  if (notify) {
+    try { notify(message, type); return; } catch { /* fall through */ }
+  }
+  console.error(`[abrain] ${message}`);
+}
+
+export function maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+  event: Pick<GitSyncEvent, "result" | "merged" | "behind">,
+  deps: StartupConstraintShadowRefreshDeps = {},
+): { scheduled: boolean; reason: string } {
+  const fetchedRemoteCommits = event.result === "ok"
+    && (((event.merged ?? 0) > 0) || ((event.behind ?? 0) > 0));
+  if (!fetchedRemoteCommits) return { scheduled: false, reason: "git_sync_no_fetched_updates" };
+
+  const resolveSettings = deps.resolveSettings ?? defaultResolveSedimentSettings;
+  let settings: SedimentSettings;
+  try {
+    settings = resolveSettings();
+  } catch (err) {
+    notifyConstraintShadowRefreshSkip(
+      deps.notify,
+      `abrain: constraint shadow refresh skipped after git sync - settings unavailable: ${err instanceof Error ? err.message : String(err)}`,
+      "warning",
+    );
+    return { scheduled: false, reason: "settings_unavailable" };
+  }
+
+  const compiler = settings?.constraintShadowCompiler;
+  if (!compiler?.enabled) return { scheduled: false, reason: "constraint_shadow_compiler_disabled" };
+  if (!compiler?.autoRefresh?.enabled) return { scheduled: false, reason: "auto_refresh_disabled" };
+
+  if (!isUsableModelRegistry(deps.modelRegistry)) {
+    notifyConstraintShadowRefreshSkip(
+      deps.notify,
+      "abrain: constraint shadow refresh skipped after git sync - model registry unavailable",
+      "warning",
+    );
+    return { scheduled: false, reason: "model_registry_unavailable" };
+  }
+
+  const abrainHome = deps.abrainHome ?? ABRAIN_HOME;
+  const activeProjectId = deps.activeProject?.activeProject?.projectId;
+  const listProjectIds = deps.listProjectIds ?? listAbrainProjects;
+  const knownProjectIds = Array.from(new Set([
+    ...(activeProjectId ? [activeProjectId] : []),
+    ...listProjectIds(abrainHome),
+  ])).sort();
+  const schedule = deps.schedule ?? defaultScheduleConstraintShadowAutoRefresh;
+
+  try {
+    return schedule({
+      abrainHome,
+      cwd: deps.cwd ?? process.cwd(),
+      activeProjectId,
+      knownProjectIds,
+      settings,
+      modelRegistry: deps.modelRegistry,
+      reason: "git_sync_fetched",
+      sourceEventId: undefined,
+    });
+  } catch (err) {
+    notifyConstraintShadowRefreshSkip(
+      deps.notify,
+      `abrain: constraint shadow refresh scheduling failed after git sync - ${err instanceof Error ? err.message : String(err)}`,
+      "warning",
+    );
+    return { scheduled: false, reason: "schedule_failed" };
+  }
+}
 
 const releaseSessionGrants = new Set<string>();
 const releaseRememberDenies = new Set<string>();
@@ -1180,8 +1298,8 @@ export default function activate(pi: ExtensionAPI): void {
   // (which the pi TUI styles per `type` and integrates with the chat
   // stream); abrain should too. But `activate(pi)` has no ctx — we get
   // ctx only inside an event handler. So we register a one-shot
-  // `session_start` listener whose ctx.ui.notify we capture early and
-  // pass into `runStartupAutoSync(notify)`. Headless/RPC mode (no ui)
+  // `session_start` listener whose ctx.ui.notify/modelRegistry/cwd we capture
+  // early and pass into `runStartupAutoSync(...)`. Headless/RPC mode (no ui)
   // falls back to console.error so the audit trail still surfaces.
   //
   // ORDERING (Round 4 gpt MAJOR-1): runStartupAutoSync is INVOKED at
@@ -1195,7 +1313,11 @@ export default function activate(pi: ExtensionAPI): void {
   // pi only renders "info" | "warning" | "error" specially; other strings
   // fall back to the default style, so the wider signature is safe at
   // both ends.
-  const runStartupAutoSync = (notify?: (msg: string, type?: string) => void): void => {
+  const runStartupAutoSync = (args: {
+    notify?: (msg: string, type?: string) => void;
+    modelRegistry?: unknown;
+    cwd?: string;
+  } = {}): void => {
     if (startupAutoSyncDone) return;
     startupAutoSyncDone = true;
     if (process.env.PI_ABRAIN_NO_AUTOSYNC === "1") return;
@@ -1206,14 +1328,22 @@ export default function activate(pi: ExtensionAPI): void {
     // (headless/RPC/print mode), fall back to console.error so the
     // audit trail still surfaces somewhere a user can find it.
     const announce = (msg: string, type: "info" | "warning" | "error" = "info"): void => {
-      if (notify) {
-        try { notify(msg, type); return; } catch { /* fall through to console */ }
+      if (args.notify) {
+        try { args.notify(msg, type); return; } catch { /* fall through to console */ }
       }
       console.error(`[abrain] ${msg}`);
     };
 
     fetchAndFF({ abrainHome: ABRAIN_HOME })
       .then((event) => {
+        maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(event, {
+          abrainHome: ABRAIN_HOME,
+          cwd: args.cwd,
+          activeProject: bootActiveProject,
+          modelRegistry: args.modelRegistry,
+          notify: announce,
+        });
+
         if (event.result === "ok" && event.merged && event.merged > 0) {
           announce(`abrain: auto-merged ${event.merged} commit(s) from origin/main; pushing merge…`, "info");
           // Fire-and-forget: pushAsync has its own audit + single-flight.
@@ -1299,16 +1429,17 @@ export default function activate(pi: ExtensionAPI): void {
 
   if (typeof eventRegistry.on === "function") {
     // Startup git sync trigger (Round 5 UX fix, 2026-05-17). We capture
-    // ctx.ui.notify SYNCHRONOUSLY at handler entry (sediment's stale-ctx
-    // pattern) and pass it into runStartupAutoSync's announce(). The
+    // ctx.ui.notify/modelRegistry/cwd SYNCHRONOUSLY at handler entry
+    // (sediment's stale-ctx pattern) and pass them into runStartupAutoSync. The
     // module-level startupAutoSyncDone flag ensures this runs exactly
     // once per pi process even though session_start fires on every new
     // session / fork / restart. Headless/RPC mode (no ctx.ui) falls back
     // to console.error inside announce(). Never throws to pi runtime.
     eventRegistry.on("session_start", async (_event, ctx) => {
       try {
+        if (isSubAgentSession(ctx as unknown as { sessionManager?: unknown })) return;
         const notify = ctx?.ui?.notify?.bind(ctx.ui);
-        runStartupAutoSync(notify);
+        runStartupAutoSync({ notify, modelRegistry: ctx?.modelRegistry, cwd: ctx?.cwd });
       } catch (err) {
         // Defensive: never let our sync trigger break the session.
         console.error(`[abrain] session_start auto-sync trigger threw:`, err);
