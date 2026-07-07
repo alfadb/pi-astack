@@ -834,6 +834,24 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
       reason: "must be ignored because hashes do not match",
     }],
   }, null, 2));
+  writeFile(path.join(latestDir, "compiled-only-dispositions.json"), JSON.stringify({
+    schemaVersion: "constraint-compiled-only-dispositions/v1",
+    items: [{
+      sourceRecordId: "event:compiled-only",
+      sourceKind: "constraint_event",
+      category: "event_native",
+      constraintId: "shadow:compiled-only",
+      bodyHash: normalizedBodyHash("Compiled-only body"),
+      inputRootHash: "input-root-hash-for-smoke",
+      validationHash: "validation-hash-for-smoke",
+      scope: "global",
+      injectMode: "listed",
+      disposition: "event_native_accepted",
+      reviewedAtUtc: "2026-07-06T00:00:00.000Z",
+      reviewRef: "smoke-review:event-native-accepted",
+      reason: "T0 accepted event-native compiled-only source",
+    }],
+  }, null, 2));
   const beforeRulesMtime = fs.statSync(path.join(abrainHome, "rules", "always", "edit-write-only.md")).mtimeMs;
   const enabled = dual.runRuleInjectorDualReadAudit({
     abrainHome,
@@ -869,6 +887,15 @@ check("dual-read audit helper is default-off and writes only constraint-shadow s
   const compiledDetail = row.compiledOnlyDetails.find((item) => item.sourceRecordId === "event:compiled-only");
   if (!compiledDetail || compiledDetail.sourceKind !== "constraint_event" || compiledDetail.category !== "event_native" || compiledDetail.scope !== "global") {
     throw new Error(`compiledOnlyDetails did not explain event-native source: ${JSON.stringify(row.compiledOnlyDetails)}`);
+  }
+  if (compiledDetail.machineDisposition !== "event_native_accepted" || compiledDetail.reviewSource !== "compiled-only-dispositions") {
+    throw new Error(`compiledOnlyDetails did not apply event-native sidecar disposition: ${JSON.stringify(compiledDetail)}`);
+  }
+  if (compiledDetail.reviewRef !== "smoke-review:event-native-accepted" || compiledDetail.reason !== "T0 accepted event-native compiled-only source") {
+    throw new Error(`compiledOnlyDetails missing event-native review metadata: ${JSON.stringify(compiledDetail)}`);
+  }
+  if (compiledDetail.disposition || compiledDetail.category !== "event_native") {
+    throw new Error(`compiledOnly sidecar should not overwrite disposition/category: ${JSON.stringify(compiledDetail)}`);
   }
   if (row.compiledOnlyDetails.some((item) => item.compiledOnlyBackfillAllowed !== false)) {
     throw new Error(`compiledOnlyDetails should deny backfill: ${JSON.stringify(row.compiledOnlyDetails)}`);

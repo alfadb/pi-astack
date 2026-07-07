@@ -31,6 +31,7 @@ const BLOCKING_DISPOSITIONS = new Set([
   "count_only_missing_details",
 ]);
 const ARCHIVABLE_DISPOSITIONS = new Set([
+  "event_native_accepted",
   "archived",
   "archive_authorized",
   "authorized_archive",
@@ -211,8 +212,8 @@ function dispositionOf(detail, fallback = "unknown") {
 
 function detailBlocksRetirement(detail, disposition) {
   if (detail?.humanReviewRequired === true) return true;
-  if (detail?.compiledOnlyBackfillAllowed === false) return true;
   if (ARCHIVABLE_DISPOSITIONS.has(disposition)) return false;
+  if (detail?.compiledOnlyBackfillAllowed === false) return true;
   if (BLOCKING_DISPOSITIONS.has(disposition)) return true;
   return true;
 }

@@ -195,6 +195,89 @@ check("empty delta is ready=true", () => {
   assert(json.retirementGate.ready === true, `expected ready=true: ${JSON.stringify(json.retirementGate)}`);
 });
 
+check("event_native_accepted is archivable but stale and ordinary compiled-only still block", () => {
+  const fixture = makeFixture();
+  writeJsonl(path.join(fixture.shadowRoot, "auto-refresh", "audit.jsonl"), []);
+  writeJsonl(path.join(fixture.shadowRoot, "session-start-dualread", "audit.jsonl"), [
+    row("2026-07-06T00:00:00.000Z", {
+      status: "delta",
+      summary: { legacyRules: 0, shadowConstraints: 4, compiledOnly: 4, legacyOnly: 0, bothMatch: 0, textDelta: 0 },
+      delta: {
+        compiledOnly: ["event:accepted", "event:stale", "rule:global:always:ordinary", "event:human"],
+        legacyOnly: [],
+        bothMatch: [],
+        textDelta: [],
+      },
+      compiledOnlyDetails: [{
+        sourceRecordId: "event:accepted",
+        sourceKind: "constraint_event",
+        scope: "global",
+        category: "event_native",
+        compiledOnlyBackfillAllowed: false,
+        constraintId: "constraint:accepted",
+        bodyHash: "accepted-body-hash",
+        inputRootHash: "input-fixture",
+        validationHash: "validation-fixture",
+        injectMode: "always",
+        machineDisposition: "event_native_accepted",
+        reviewSource: "compiled-only-dispositions",
+        reviewRef: "review:accepted",
+        reason: "accepted event-native source",
+      }, {
+        sourceRecordId: "event:stale",
+        sourceKind: "constraint_event",
+        scope: "global",
+        category: "event_native",
+        compiledOnlyBackfillAllowed: false,
+        constraintId: "constraint:stale",
+        bodyHash: "stale-body-hash",
+        inputRootHash: "old-input",
+        validationHash: "validation-fixture",
+        injectMode: "always",
+      }, {
+        sourceRecordId: "rule:global:always:ordinary",
+        sourceKind: "legacy_rule",
+        scope: "global",
+        category: "compiled_only",
+        compiledOnlyBackfillAllowed: false,
+        constraintId: "constraint:ordinary",
+        bodyHash: "ordinary-body-hash",
+        inputRootHash: "input-fixture",
+        validationHash: "validation-fixture",
+        injectMode: "always",
+      }, {
+        sourceRecordId: "event:human",
+        sourceKind: "constraint_event",
+        scope: "global",
+        category: "event_native",
+        compiledOnlyBackfillAllowed: false,
+        constraintId: "constraint:human",
+        bodyHash: "human-body-hash",
+        inputRootHash: "input-fixture",
+        validationHash: "validation-fixture",
+        injectMode: "always",
+        humanReviewRequired: true,
+        machineDisposition: "event_native_accepted",
+        reviewSource: "compiled-only-dispositions",
+      }],
+    }),
+  ]);
+
+  const { result, json } = runDossier(fixture, ["--latest"]);
+  assert(result.status === 0, `expected exit 0, got ${result.status}`);
+  assert(json.retirementGate.ready === false, "expected remaining blockers");
+  const accepted = json.deltas.compiledOnly.byDisposition.event_native_accepted;
+  assert(accepted.total === 2, `expected accepted group total 2 including human-review sample: ${JSON.stringify(accepted)}`);
+  assert(accepted.blockingUnique === 1 && accepted.humanReviewUnique === 1, `humanReviewRequired should still block accepted disposition: ${JSON.stringify(accepted)}`);
+  const eventNative = json.deltas.compiledOnly.byDisposition.event_native;
+  assert(eventNative.blockingUnique === 1, `stale/unaccepted event_native should block: ${JSON.stringify(eventNative)}`);
+  const ordinary = json.deltas.compiledOnly.byDisposition.compiled_only;
+  assert(ordinary.blockingUnique === 1, `ordinary compiled_only should block: ${JSON.stringify(ordinary)}`);
+  assert(json.retirementGate.blockingCounts["compiledOnly:event_native_accepted"] === 1, `accepted human review blocker missing: ${JSON.stringify(json.retirementGate.blockingCounts)}`);
+  assert(json.retirementGate.blockingCounts["compiledOnly:event_native"] === 1, `event_native blocker missing: ${JSON.stringify(json.retirementGate.blockingCounts)}`);
+  assert(json.retirementGate.blockingCounts["compiledOnly:compiled_only"] === 1, `compiled_only blocker missing: ${JSON.stringify(json.retirementGate.blockingCounts)}`);
+});
+
 if (failures.length) {
   console.log(`FAIL - ${failures.length}/${total} constraint legacy retirement smoke checks failed.`);
   process.exit(1);

@@ -99,12 +99,29 @@ interface ShadowEventCoverage {
 }
 
 type TextDeltaDisposition = "semantic_equivalent" | "normalization_possible" | "semantic_mismatch_fix_required" | "semantic_review_required";
+type CompiledOnlyDisposition = "event_native_accepted";
 
 interface TextDeltaDispositionItem {
   sourceRecordId: string;
   legacyHash: string;
   shadowHash: string;
   disposition: TextDeltaDisposition;
+  reviewedAtUtc?: string;
+  reviewRef?: string;
+  reason?: string;
+}
+
+interface CompiledOnlyDispositionItem {
+  sourceRecordId: string;
+  sourceKind: string;
+  category: string;
+  constraintId: string;
+  bodyHash: string;
+  inputRootHash: string;
+  validationHash: string;
+  scope: string;
+  injectMode: RuleInjectMode;
+  disposition: CompiledOnlyDisposition;
   reviewedAtUtc?: string;
   reviewRef?: string;
   reason?: string;
@@ -128,12 +145,14 @@ const DEFAULT_AUDIT_SETTINGS: RuleInjectorDualReadAuditSettings = {
 
 const SCHEMA_VERSION = "rule-injector-dualread-audit/v1";
 const TEXT_DELTA_DISPOSITION_SCHEMA_VERSION = "constraint-text-delta-dispositions/v1";
+const COMPILED_ONLY_DISPOSITION_SCHEMA_VERSION = "constraint-compiled-only-dispositions/v1";
 const TEXT_DELTA_DISPOSITIONS = new Set<string>([
   "semantic_equivalent",
   "normalization_possible",
   "semantic_mismatch_fix_required",
   "semantic_review_required",
 ]);
+const COMPILED_ONLY_DISPOSITIONS = new Set<string>(["event_native_accepted"]);
 const SHADOW_ROOT_REL = path.join(".state", "sediment", "constraint-shadow");
 const AUDIT_DIR_REL = path.join(SHADOW_ROOT_REL, "session-start-dualread");
 
@@ -295,6 +314,26 @@ function textDeltaDispositionKey(item: { sourceRecordId: string; legacyHash: str
   return `${item.sourceRecordId}\0${item.legacyHash}\0${item.shadowHash}`;
 }
 
+function compiledOnlyDispositionKey(item: {
+  sourceRecordId: string;
+  constraintId: string;
+  bodyHash: string;
+  inputRootHash: string;
+  validationHash: string;
+  scope: string;
+  injectMode: string;
+}): string {
+  return [
+    item.sourceRecordId,
+    item.constraintId,
+    item.bodyHash,
+    item.inputRootHash,
+    item.validationHash,
+    item.scope,
+    item.injectMode,
+  ].join("\0");
+}
+
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -327,6 +366,60 @@ function readTextDeltaDispositions(file: string, maxReadBytes: number): Map<stri
       ...(optionalString(raw.reason) ? { reason: optionalString(raw.reason) } : {}),
     };
     out.set(textDeltaDispositionKey(item), item);
+  }
+  return out;
+}
+
+function readCompiledOnlyDispositions(file: string, maxReadBytes: number): Map<string, CompiledOnlyDispositionItem> {
+  const value = readJsonBounded(file, maxReadBytes);
+  if (!isObject(value)) throw new Error("compiled-only-dispositions is not an object");
+  if (value.schemaVersion !== COMPILED_ONLY_DISPOSITION_SCHEMA_VERSION) throw new Error("unexpected compiled-only-dispositions schemaVersion");
+  if (!Array.isArray(value.items)) throw new Error("compiled-only-dispositions.items is not an array");
+  const out = new Map<string, CompiledOnlyDispositionItem>();
+  for (const raw of value.items) {
+    if (!isObject(raw)) throw new Error("compiled-only-dispositions item is not an object");
+    const sourceRecordId = raw.sourceRecordId;
+    const sourceKind = raw.sourceKind;
+    const category = raw.category;
+    const constraintId = raw.constraintId;
+    const bodyHash = raw.bodyHash;
+    const inputRootHash = raw.inputRootHash;
+    const validationHash = raw.validationHash;
+    const scope = raw.scope;
+    const injectMode = raw.injectMode;
+    const disposition = raw.disposition;
+    if (
+      typeof sourceRecordId !== "string"
+      || typeof sourceKind !== "string"
+      || typeof category !== "string"
+      || typeof constraintId !== "string"
+      || typeof bodyHash !== "string"
+      || typeof inputRootHash !== "string"
+      || typeof validationHash !== "string"
+      || typeof scope !== "string"
+      || (injectMode !== "always" && injectMode !== "listed")
+    ) {
+      throw new Error("compiled-only-dispositions item missing source/category/hash binding fields");
+    }
+    if (typeof disposition !== "string" || !COMPILED_ONLY_DISPOSITIONS.has(disposition)) {
+      throw new Error("compiled-only-dispositions item has invalid disposition");
+    }
+    const item: CompiledOnlyDispositionItem = {
+      sourceRecordId,
+      sourceKind,
+      category,
+      constraintId,
+      bodyHash,
+      inputRootHash,
+      validationHash,
+      scope,
+      injectMode,
+      disposition: disposition as CompiledOnlyDisposition,
+      ...(optionalString(raw.reviewedAtUtc) ? { reviewedAtUtc: optionalString(raw.reviewedAtUtc) } : {}),
+      ...(optionalString(raw.reviewRef) ? { reviewRef: optionalString(raw.reviewRef) } : {}),
+      ...(optionalString(raw.reason) ? { reason: optionalString(raw.reason) } : {}),
+    };
+    out.set(compiledOnlyDispositionKey(item), item);
   }
   return out;
 }
@@ -492,22 +585,62 @@ function inferSourceKind(sourceRecordId: string): string {
   return "unknown";
 }
 
-function compiledOnlyDetails(sourceRecordIds: string[], constraints: ShadowConstraint[]) {
-  return sourceRecordIds.map((sourceRecordId) => {
-    const constraint = constraints.find((item) => (
+function compiledOnlyDetails(input: {
+  sourceRecordIds: string[];
+  constraints: ShadowConstraint[];
+  inputRootHash?: string;
+  validationHash?: string;
+  dispositions?: Map<string, CompiledOnlyDispositionItem>;
+}) {
+  return input.sourceRecordIds.map((sourceRecordId) => {
+    const constraint = input.constraints.find((item) => (
       sourceIn(item.sourceRecordIds, sourceRecordId)
       || item.constraintId === sourceRecordId
       || item.title === sourceRecordId
     ));
     const sourceKind = inferSourceKind(sourceRecordId);
-    return {
+    const constraintId = constraint?.constraintId;
+    const injectMode = constraint?.injectMode;
+    const detail = {
       sourceRecordId,
       sourceKind,
       scope: scopeKey(constraint?.scope),
       category: sourceKind === "constraint_event" ? "event_native" : "compiled_only",
       compiledOnlyBackfillAllowed: false,
-      ...(constraint?.constraintId ? { constraintId: constraint.constraintId } : {}),
-      ...(constraint?.injectMode ? { injectMode: constraint.injectMode } : {}),
+      ...(constraintId ? { constraintId } : {}),
+      ...(constraint?.compiledBody !== undefined ? { bodyHash: sha256Hex(normalizeText(constraint.compiledBody)) } : {}),
+      ...(input.inputRootHash ? { inputRootHash: input.inputRootHash } : {}),
+      ...(input.validationHash ? { validationHash: input.validationHash } : {}),
+      ...(injectMode ? { injectMode } : {}),
+    };
+    const eligible = sourceRecordId.startsWith("event:")
+      && detail.sourceKind === "constraint_event"
+      && detail.category === "event_native"
+      && detail.compiledOnlyBackfillAllowed === false
+      && constraintId
+      && detail.bodyHash
+      && input.inputRootHash
+      && input.validationHash
+      && injectMode;
+    const disposition = eligible
+      ? input.dispositions?.get(compiledOnlyDispositionKey({
+        sourceRecordId,
+        constraintId,
+        bodyHash: detail.bodyHash,
+        inputRootHash: input.inputRootHash,
+        validationHash: input.validationHash,
+        scope: detail.scope,
+        injectMode,
+      }))
+      : undefined;
+    if (!disposition || disposition.sourceKind !== "constraint_event" || disposition.category !== "event_native") return detail;
+    return {
+      ...detail,
+      machineDisposition: disposition.disposition,
+      reviewSource: "compiled-only-dispositions",
+      ...(disposition.reviewRef ? { reviewRef: disposition.reviewRef } : {}),
+      ...(disposition.reason ? { reason: disposition.reason } : {}),
+      ...(disposition.reviewedAtUtc ? { reviewedAtUtc: disposition.reviewedAtUtc } : {}),
     };
   });
 }
@@ -628,6 +761,7 @@ export function runRuleInjectorDualReadAudit(input: {
     const coveragePath = path.join(latestDir, "event-coverage.json");
     const diffPath = path.join(latestDir, "diff.json");
     const textDeltaDispositionsPath = path.join(latestDir, "text-delta-dispositions.json");
+    const compiledOnlyDispositionsPath = path.join(latestDir, "compiled-only-dispositions.json");
     if (!fs.existsSync(decisionPath)) return finish("shadow_unavailable", { reason: "missing_decision" });
     const decision = validateDecision(readJsonBounded(decisionPath, input.settings.maxReadBytes));
     const coverage = fs.existsSync(coveragePath) ? eventCoverageSummary(readJsonBounded(coveragePath, input.settings.maxReadBytes)) : undefined;
@@ -646,6 +780,15 @@ export function runRuleInjectorDualReadAudit(input: {
     } catch (err: unknown) {
       textDeltaDispositionReadError = err instanceof Error ? err.message : String(err);
     }
+    let compiledOnlyDispositionItems = new Map<string, CompiledOnlyDispositionItem>();
+    let compiledOnlyDispositionReadError: string | undefined;
+    try {
+      compiledOnlyDispositionItems = fs.existsSync(compiledOnlyDispositionsPath)
+        ? readCompiledOnlyDispositions(compiledOnlyDispositionsPath, input.settings.maxReadBytes)
+        : new Map<string, CompiledOnlyDispositionItem>();
+    } catch (err: unknown) {
+      compiledOnlyDispositionReadError = err instanceof Error ? err.message : String(err);
+    }
     const decisionStat = fs.statSync(decisionPath);
     const shadowAgeMs = Math.max(0, nowMs - decisionStat.mtimeMs);
     const stale = shadowAgeMs > input.settings.staleAfterMs;
@@ -658,6 +801,7 @@ export function runRuleInjectorDualReadAudit(input: {
       inputRootHash: decision.inputRootHash,
       validationHash: decision.validationHash,
       ...(textDeltaDispositionReadError ? { textDeltaDispositionReadError } : {}),
+      ...(compiledOnlyDispositionReadError ? { compiledOnlyDispositionReadError } : {}),
       shadowAgeMs,
       stale,
       eventCoverage: coverage,
@@ -673,7 +817,13 @@ export function runRuleInjectorDualReadAudit(input: {
       legacyOnlyDispositions: countByDisposition(legacyDetails),
       legacyOnlyDetails: legacyDetails,
       compiledOnlyBackfillAllowed: false,
-      compiledOnlyDetails: compiledOnlyDetails(delta.compiledOnly, constraints),
+      compiledOnlyDetails: compiledOnlyDetails({
+        sourceRecordIds: delta.compiledOnly,
+        constraints,
+        inputRootHash: decision.inputRootHash,
+        validationHash: decision.validationHash,
+        dispositions: compiledOnlyDispositionItems,
+      }),
       textDeltaDispositions: countByDisposition(textDetails),
       textDeltaDetails: textDetails,
       inconsistentDiagnostics: inconsistentDiagnostics(decision),
