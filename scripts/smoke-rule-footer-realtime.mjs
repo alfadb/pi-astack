@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * Smoke: real-time rules footer refresh (rule-injector).
+ * Smoke: legacy rules footer realtime refresh.
  *
+ * This smoke pins the legacy footer realtime path only. The compiled-view
+ * runtime / fail-closed behavior is covered by smoke-abrain-rule-injector.
  * The footer was a session_start snapshot, so a rule written mid-session by
  * background sediment did not surface until /rule reload or restart. The
  * fs.watch + captured-setStatus path re-scans + pushes the footer live. fs.watch
@@ -27,7 +29,8 @@ for (const d of ["rules/always", "rules/listed"]) fs.mkdirSync(path.join(tmp, d)
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const ri = await jiti.import(`${repoRoot}/extensions/abrain/rule-injector/index.ts`);
 const { refreshRulesFooterRealtime, resolveRuleInjectorSettings } = ri;
-const settings = resolveRuleInjectorSettings();
+const baseSettings = resolveRuleInjectorSettings();
+const settings = { ...baseSettings, compiledViewInjection: { ...baseSettings.compiledViewInjection, enabled: false } };
 const cwd = path.join(tmp, "proj");
 fs.mkdirSync(cwd, { recursive: true });
 
@@ -76,7 +79,7 @@ fs.writeFileSync(path.join(tmp, "rules/always/legacy-fossil.md"), legacyRule, "u
 
 captured = undefined;
 refreshRulesFooterRealtime(cwd, settings);
-assert(captured === "🧠 rules: 2 always, 0 listed", `after write -> live count (incl. legacy-frontmatter fossil), got ${JSON.stringify(captured)}`);
+assert(captured === "🧠 rules: legacy 2 always, 0 listed", `after write -> live count (incl. legacy-frontmatter fossil), got ${JSON.stringify(captured)}`);
 
 // 3. no captured setter -> no throw (best-effort guard)
 delete globalThis.__abrainRules_setFooter;
