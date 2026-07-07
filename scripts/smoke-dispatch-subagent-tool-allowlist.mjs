@@ -32,8 +32,8 @@ const dispatchPath = resolve(repoRoot, "extensions/dispatch/index.ts");
 
 let pass = 0;
 let fail = 0;
-function ok(msg) { pass++; console.log(`  \u2713 ${msg}`); }
-function bad(msg) { fail++; console.log(`  \u2717 ${msg}`); }
+function ok(msg) { pass++; console.log(`  ✓ ${msg}`); }
+function bad(msg) { fail++; console.log(`  ✗ ${msg}`); }
 
 const src = readFileSync(dispatchPath, "utf8");
 
@@ -58,28 +58,35 @@ if (!knownMatch) {
   }
 }
 
-// ── (b) ALL default allowlist strings exclude the forbidden tools ───────
-// There are two inline defaults: runInProcess (`toolAllowlist || "..."`) and
-// dispatch_parallel (`t.tools || "..."`). Both must exclude the forbidden
-// tools, else the unchecked path ships a wider default. (gpt-5.5/deepseek P2)
-const defRe = /(?:toolAllowlist|t\.tools)\s*\|\|\s*"([^"]+)"/g;
-const defaults = [...src.matchAll(defRe)].map((m) => m[1]);
-if (defaults.length < 2) {
-  bad(`(b) expected >=2 default allowlist strings (runInProcess + dispatch_parallel), found ${defaults.length}`);
+// ── (b) shared default allowlist excludes the forbidden tools ──────────
+// Current dispatch source centralizes the default allowlist in
+// DEFAULT_SUBAGENT_TOOLS and reuses it from runInProcess + dispatch_parallel.
+// This smoke should pin the default capability boundary, not require stale
+// duplicated inline strings.
+const defaultConstMatch = src.match(/const DEFAULT_SUBAGENT_TOOLS\s*=\s*"([^"]+)"/);
+if (!defaultConstMatch) {
+  bad("(b) could not locate DEFAULT_SUBAGENT_TOOLS constant — dispatch source shape changed");
 } else {
-  ok(`(b) found ${defaults.length} default allowlist strings (runInProcess + parallel)`);
-}
-defaults.forEach((def, i) => {
-  const list = def.split(",").map((s) => s.trim());
+  const list = defaultConstMatch[1].split(",").map((s) => s.trim());
+  ok("(b) DEFAULT_SUBAGENT_TOOLS constant found");
   for (const t of EXPECTED_PRESENT) {
-    if (list.includes(t)) ok(`(b#${i}) default allowlist contains sanity anchor "${t}"`);
-    else bad(`(b#${i}) default allowlist missing sanity anchor "${t}" — parse likely wrong`);
+    if (list.includes(t)) ok(`(b) default allowlist contains sanity anchor "${t}"`);
+    else bad(`(b) default allowlist missing sanity anchor "${t}" — parse likely wrong`);
   }
   for (const t of FORBIDDEN) {
-    if (list.includes(t)) bad(`(b#${i}) default allowlist MUST NOT contain "${t}"`);
-    else ok(`(b#${i}) default allowlist excludes "${t}"`);
+    if (list.includes(t)) bad(`(b) default allowlist MUST NOT contain "${t}"`);
+    else ok(`(b) default allowlist excludes "${t}"`);
   }
-});
+}
+
+const defaultUses = [
+  ["runInProcess", /toolAllowlist\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/],
+  ["dispatch_parallel", /t\.tools\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/],
+];
+for (const [label, re] of defaultUses) {
+  if (re.test(src)) ok(`(b) ${label} reuses DEFAULT_SUBAGENT_TOOLS`);
+  else bad(`(b) ${label} does not reuse DEFAULT_SUBAGENT_TOOLS`);
+}
 
 // ── (c) validateTools rejects anything not in KNOWN_TOOLS ───────────────
 if (/if\s*\(\s*!\s*KNOWN_TOOLS\.has\(\s*name\s*\)\s*\)/.test(src)) {
@@ -140,12 +147,12 @@ if (/vault_release:\s*secret release, main-session-only/.test(src)) {
 // ── Summary ─────────────────────────────────────────────────────────────
 console.log();
 if (fail === 0) {
-  console.log(`\u2705 dispatch sub-agent tool allowlist: all ${pass} checks passed`);
+  console.log(`✅ dispatch sub-agent tool allowlist: all ${pass} checks passed`);
   console.log("   (vault_release/prompt_user not requestable via tools= and absent from all defaults;");
   console.log("    SDK-side exclusivity of allowedToolNames is verified separately — see header TODO)");
   process.exit(0);
 } else {
-  console.error(`\u274c dispatch sub-agent tool allowlist: ${fail} failure(s) out of ${pass + fail}`);
+  console.error(`❌ dispatch sub-agent tool allowlist: ${fail} failure(s) out of ${pass + fail}`);
   process.exit(1);
 }
 

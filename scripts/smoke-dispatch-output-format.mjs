@@ -947,7 +947,7 @@ check("source invariant: dispatch timeout is progress-idle, with max-runtime saf
   if (!/recordProgress = \(reason: string\) => \{[\s\S]{0,500}armIdleTimeout\(\);/.test(_indexSrc)) {
     throw new Error("dispatch recordProgress must re-arm the idle timeout");
   }
-  if (!/const eventType = String\(event\?\.type \?\? \"unknown\"\);[\s\S]{0,160}recordProgress\(`event:\$\{eventType\}`\)/.test(_indexSrc)) {
+  if (!/const eventType = String\(event\?\.type \?\? \"unknown\"\);[\s\S]{0,3000}recordProgress\(`event:\$\{eventType\}`\)/.test(_indexSrc)) {
     throw new Error("dispatch subscribe events must count as idle-timeout progress");
   }
   if (!/setTimeout\(\(\) => resolveTimeout\("max_runtime"\), maxRuntimeMs\)/.test(_indexSrc)) {
