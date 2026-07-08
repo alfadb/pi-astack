@@ -11,6 +11,22 @@ status: active
 
 ---
 
+## 2026-07-08 — accepted — R5 prompt revision dossier sidecar
+
+### 变更
+新增 R5 prompt revision proposal 的 deterministic dossier sidecar：`prompt-revision-proposals.jsonl` 只记录人审 proposal，包含 target prompt、current version、problem pattern、短 evidence excerpts、falsifier、summary、status 与 operator disposition 字段。
+
+### 原因
+T0 R2 收敛为先落观测/审计面，不输出 full prompt diff、不自动改 prompt 文件、不 bump promptVersion；真实生成必须由 reinforced classifier prompt evidence gate 触发。
+
+### 需求影响
+不新增用户管理面、不弹窗、不新增 slash UI、不自动 apply。当前普通 aggregator 输入不足以可靠生成完整 proposal 时保持 0 proposal；退出条件是后续真实 reinforced pattern 产出一条 proposal 并完成 operator disposition。
+
+### 非目标
+不写运行数字镜像，不把 proposal 当 durable writer/curator/archive/multi-view 输入，不新增 settings kill-switch。
+
+---
+
 ## 2026-07-08 — accepted — outcome usage 语义分层修复
 
 ### 变更

@@ -69,6 +69,7 @@
     "smoke:evolution-ledger": "node scripts/smoke-evolution-ledger.mjs",
     "smoke:entry-telemetry": "node scripts/smoke-entry-telemetry.mjs",
     "smoke:entry-lifecycle-proposals": "node scripts/smoke-entry-lifecycle-proposals.mjs",
+    "smoke:prompt-revision-proposals": "node scripts/smoke-prompt-revision-proposals.mjs",
     "smoke:cas-guard": "node scripts/smoke-cas-guard.mjs",
     "smoke:staging-resolver": "node scripts/smoke-staging-resolver.mjs",
     "smoke:staging-ageout": "node scripts/smoke-staging-ageout.mjs",

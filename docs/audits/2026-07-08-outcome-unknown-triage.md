@@ -49,7 +49,7 @@ Exposure denominator 禁止同时读取 `path-a-injected` 原始行与新 `path-
 - Path A usage 信号：是否、何时把 injection-only 进一步转成可判定 usage，需要 T0 设计；本批不改。
 - tool-result usage 信号：retrieval-only 只能说明被返回，不能说明被使用；是否引入后续引用/行为 join 需另行设计。
 - `path-a-implicit` silent 状态：当前只表达 injected-without-self-report observation，不表达 unused；若要把 silent 状态转成 usage 判定，需要另行 T0 设计。
-- R5 prompt revision proposal：仍为 advisory-only；T0 R2 已收敛到 deterministic dossier sidecar 方案，但实现不在本机械修复批内。
+- R5 prompt revision proposal：deterministic dossier sidecar scaffolding 已实现，写入面为 `~/.abrain/.state/sediment/prompt-revision-proposals.jsonl`；generation 仍由明确 reinforced classifier prompt evidence gate 控制。当前普通 aggregator 输入不足以可靠全自动生成完整 proposal 时保持 0 proposal，不编造。
 
 ## 隐私处理
 
