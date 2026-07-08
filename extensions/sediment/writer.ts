@@ -5,7 +5,7 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
-import { appendKnowledgeEvidenceForWrite, type AppendKnowledgeEvidenceForWriteResult } from "./knowledge-evidence";
+import { appendKnowledgeEvidenceForWrite, readKnowledgeStableViewStores, type AppendKnowledgeEvidenceForWriteResult } from "./knowledge-evidence";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
@@ -268,6 +268,12 @@ function shouldSkipKnowledgeLegacyMarkdownAfterEvent(settings: SedimentSettings,
 function knowledgeLegacyMarkdownWriteDisabled(settings: SedimentSettings): boolean {
   return isKnowledgeEvidenceEventFirst(settings)
     && settings.knowledgeEvidenceEventWriter.legacyMarkdownWriteOnSuccessfulEvent === false;
+}
+
+function canMutateKnowledgeStableView(settings: SedimentSettings): boolean {
+  return knowledgeLegacyMarkdownWriteDisabled(settings)
+    && settings.knowledgeProjector.enabled === true
+    && settings.knowledgeProjector.projectOnWrite === true;
 }
 
 function legacyMarkdownSkippedAudit(result: AppendKnowledgeEvidenceForWriteResult | undefined): Record<string, unknown> {
@@ -560,6 +566,47 @@ async function findProjectEntryFile(entryRoot: string, slug: string): Promise<st
     return undefined;
   }
   return walk(entryRoot);
+}
+
+function shouldPreferKnowledgeStableViewForMutation(settings: SedimentSettings): boolean {
+  return canMutateKnowledgeStableView(settings);
+}
+
+async function findStableViewEntryFile(args: {
+  abrainHome: string;
+  projectId: string;
+  settings: SedimentSettings;
+  scope: "project" | "world";
+  slug: string;
+}): Promise<string | undefined> {
+  const stores = await readKnowledgeStableViewStores({ abrainHome: args.abrainHome, projectId: args.projectId, settings: args.settings });
+  for (const store of stores) {
+    if (store.scope !== args.scope) continue;
+    const target = path.join(store.root, `${args.slug}.md`);
+    try {
+      await fs.access(target);
+      return target;
+    } catch { /* try next stable-view store */ }
+  }
+  return undefined;
+}
+
+async function findKnowledgeMutationReadFile(args: {
+  abrainHome: string;
+  projectId: string;
+  entryRoot: string;
+  settings: SedimentSettings;
+  scope: "project" | "world";
+  slug: string;
+}): Promise<{ path: string; source: "stable_view" | "legacy" } | undefined> {
+  if (shouldPreferKnowledgeStableViewForMutation(args.settings)) {
+    const stable = await findStableViewEntryFile(args);
+    if (stable) return { path: stable, source: "stable_view" };
+  }
+  const legacy = args.scope === "world"
+    ? await findWorldEntryFile(args.abrainHome, args.slug)
+    : await findProjectEntryFile(args.entryRoot, args.slug);
+  return legacy ? { path: legacy, source: "legacy" } : undefined;
 }
 
 async function listMarkdownFiles(root: string, skipNames = new Set([".git", ".state", ".index", "vault"])): Promise<string[]> {
@@ -1332,9 +1379,8 @@ export async function deleteProjectEntry(
   const reason = opts.reason || "deleted by sediment curator";
   const resultCtx = resultAuditFields(opts, opts.sessionId);
 
-  const target = scope === "world"
-    ? await findWorldEntryFile(abrainHome, slug)
-    : await findProjectEntryFile(entryRoot, slug);
+  const resolvedTarget = await findKnowledgeMutationReadFile({ abrainHome, projectId: opts.projectId, entryRoot, settings: opts.settings, scope, slug });
+  const target = resolvedTarget?.path;
   if (!target) {
     const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "reject",
@@ -1386,7 +1432,19 @@ export async function deleteProjectEntry(
       }));
       return { slug, path: target, status: "rejected", reason: "rename_transaction_rolled_back", auditPath, deleteMode: "hard", ...resultCtx };
     }
-    const originalRaw = await fs.readFile(target, "utf-8");
+    const lockedTarget = await findKnowledgeMutationReadFile({ abrainHome, projectId: opts.projectId, entryRoot, settings: opts.settings, scope, slug });
+    if (!lockedTarget) {
+      const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+        operation: "reject",
+        reason: "entry_not_found",
+        target: `${targetPrefix}:${slug}`,
+        delete_mode: "hard",
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: "entry_not_found", auditPath, deleteMode: "hard", ...resultCtx };
+    }
+    const lockedPath = lockedTarget.path;
+    const originalRaw = await fs.readFile(lockedPath, "utf-8");
     // CAS / expected-status guard (ADR 0027 C3'): the read of originalRaw and
     // the unlink below are both inside the sediment lock, so comparing the
     // freshly-read on-disk status to opts.expected_status is a true
@@ -1406,10 +1464,10 @@ export async function deleteProjectEntry(
           detail: `expected status '${opts.expected_status}', found '${actualStatus ?? "(none)"}'`,
           duration_ms: Date.now() - started,
         }));
-        return { slug, path: target, status: "rejected", reason: "status_precondition_failed", auditPath, deleteMode: "hard", ...resultCtx };
+        return { slug, path: lockedPath, status: "rejected", reason: "status_precondition_failed", auditPath, deleteMode: "hard", ...resultCtx };
       }
     }
-    const baseResult: WriteProjectEntryResult = { slug, path: target, status: "deleted", gitCommit: null, deleteMode: "hard", ...resultCtx };
+    const baseResult: WriteProjectEntryResult = { slug, path: lockedPath, status: "deleted", gitCommit: null, deleteMode: "hard", ...resultCtx };
     let knowledgeEvidenceEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
     if (isKnowledgeEvidenceEventFirst(opts.settings)) {
       knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
@@ -1429,21 +1487,33 @@ export async function deleteProjectEntry(
           operation: "reject",
           reason: "knowledge_evidence_append_failed",
           target: `${targetPrefix}:${slug}`,
-          path: path.relative(auditRoot, target),
+          path: path.relative(auditRoot, lockedPath),
           delete_mode: "hard",
           knowledge_evidence_event: knowledgeEvidenceEvent ? summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) : null,
           duration_ms: Date.now() - started,
         }));
-        return { slug, path: target, status: "rejected", reason: "knowledge_evidence_append_failed", gitCommit: null, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+        return { slug, path: lockedPath, status: "rejected", reason: "knowledge_evidence_append_failed", gitCommit: null, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
       }
     }
     const legacyMarkdownSkipped = shouldSkipKnowledgeLegacyMarkdownAfterEvent(opts.settings, knowledgeEvidenceEvent);
-    if (!legacyMarkdownSkipped) await fs.unlink(target);
+    if (lockedTarget.source === "stable_view" && !legacyMarkdownSkipped) {
+      const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+        operation: "reject",
+        reason: "knowledge_evidence_append_failed",
+        target: `${targetPrefix}:${slug}`,
+        path: path.relative(auditRoot, lockedPath),
+        delete_mode: "hard",
+        knowledge_evidence_event: knowledgeEvidenceEvent ? summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) : null,
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: lockedPath, status: "rejected", reason: "knowledge_evidence_append_failed", gitCommit: null, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+    }
+    if (!legacyMarkdownSkipped) await fs.unlink(lockedPath);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
     const git = opts.settings.gitCommit
       ? legacyMarkdownSkipped
         ? await gitCommitMany(abrainHome, [], slug, "delete", gitCommitProjectId)
-        : await gitCommit(abrainHome, target, slug, "delete", gitCommitProjectId)
+        : await gitCommit(abrainHome, lockedPath, slug, "delete", gitCommitProjectId)
       : null;
     // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
     // (git add succeeded but git commit failed), reset the index to
@@ -1457,13 +1527,13 @@ export async function deleteProjectEntry(
         } catch { /* best-effort */ }
       } else {
         try {
-          const rel = path.relative(abrainHome, target);
+          const rel = path.relative(abrainHome, lockedPath);
           // async reset (parity with all other rollback paths): never block the
           // event loop on git while holding the sediment lock.
           await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 });
         } catch { /* best-effort */ }
         try {
-          await atomicWrite(target, originalRaw);
+          await atomicWrite(lockedPath, originalRaw);
         } catch { /* best-effort rollback */ }
         knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
           ? await appendKnowledgeEvidenceForMarkdown({
@@ -1472,7 +1542,7 @@ export async function deleteProjectEntry(
               scope,
               raw: originalRaw,
               fallbackSlug: slug,
-              result: { slug, path: target, status: "updated", gitCommit: null, ...resultCtx },
+              result: { slug, path: lockedPath, status: "updated", gitCommit: null, ...resultCtx },
               settings: opts.settings,
               auditContext: opts.auditContext,
               patch: { sessionId: opts.sessionId, timelineNote: "restore after delete git commit failure" },
@@ -1484,7 +1554,7 @@ export async function deleteProjectEntry(
         operation: "reject",
         reason: "git_commit_failed",
         target: `${targetPrefix}:${slug}`,
-        path: path.relative(auditRoot, target),
+        path: path.relative(auditRoot, lockedPath),
         delete_mode: "hard",
         event_first_legacy_compensation: legacyMarkdownSkipped ? "projection_only_commit_failed_no_legacy_mutation" : isKnowledgeEvidenceEventFirst(opts.settings) ? "restored_original_and_projected_compensation" : "legacy_restored",
         ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
@@ -1492,7 +1562,7 @@ export async function deleteProjectEntry(
         ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
         duration_ms: Date.now() - started,
       }));
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", gitCommit: git, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+      return { slug, path: lockedPath, status: "rejected", reason: "git_commit_failed", gitCommit: git, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
     }
     const result: WriteProjectEntryResult = { ...baseResult, gitCommit: git };
     if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
@@ -1512,7 +1582,7 @@ export async function deleteProjectEntry(
     const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "delete",
       target: `${targetPrefix}:${slug}`,
-      path: path.relative(auditRoot, target),
+      path: path.relative(auditRoot, lockedPath),
       delete_mode: "hard",
       reason,
       git_commit: git,
@@ -1580,10 +1650,11 @@ export async function updateProjectEntry(
   // Helper: prepare merged markdown + lint, returning either ok result or
   // a rejected response. Used by both dry-run preview and locked RMW path.
   async function prepareMergedMarkdown(): Promise<
-    | { ok: true; target: string; originalRaw: string; merged: { markdown: string; sanitizedReplacements: string[] }; lintErrors: number; lintWarnings: number }
+    | { ok: true; target: string; source: "stable_view" | "legacy"; originalRaw: string; merged: { markdown: string; sanitizedReplacements: string[] }; lintErrors: number; lintWarnings: number }
     | { ok: false; response: WriteProjectEntryResult }
   > {
-    const target = await findProjectEntryFile(entryRoot, slug);
+    const resolvedTarget = await findKnowledgeMutationReadFile({ abrainHome, projectId: opts.projectId, entryRoot, settings: opts.settings, scope, slug });
+    const target = resolvedTarget?.path;
     if (!target) {
       const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
         operation: "reject",
@@ -1659,7 +1730,7 @@ export async function updateProjectEntry(
       }));
       return { ok: false, response: { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath, ...resultCtx } };
     }
-    return { ok: true, target, originalRaw: raw, merged, lintErrors, lintWarnings };
+    return { ok: true, target, source: resolvedTarget.source, originalRaw: raw, merged, lintErrors, lintWarnings };
   }
 
   // Dry-run path: lock-outside preview. Stale reads are acceptable here
@@ -1852,7 +1923,8 @@ export async function updateProjectEntry(
       }));
       return { ...renameResult, auditPath, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}) };
     }
-    const eventOperation = operation === "merge" || operation === "archive" || operation === "supersede" || operation === "delete" ? operation : "update";
+    const eventOperation = operation === "delete" && patch.status === "archived" ? "archive"
+      : operation === "merge" || operation === "archive" || operation === "supersede" || operation === "delete" ? operation : "update";
     const resultStatus = eventOperation === "merge" ? "merged"
       : eventOperation === "archive" ? "archived"
         : eventOperation === "supersede" ? "superseded"
@@ -1896,6 +1968,18 @@ export async function updateProjectEntry(
       }
     }
     const legacyMarkdownSkipped = shouldSkipKnowledgeLegacyMarkdownAfterEvent(opts.settings, knowledgeEvidenceEvent);
+    if (prepared.source === "stable_view" && !legacyMarkdownSkipped) {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: "knowledge_evidence_append_failed",
+        target: `${targetPrefix}:${slug}`,
+        path: path.relative(auditRoot, target),
+        knowledge_evidence_event: knowledgeEvidenceEvent ? summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) : null,
+        duration_ms: Date.now() - started,
+        ...(opts.auditExtras ?? {}),
+      }));
+      return { slug, path: target, status: "rejected", reason: "knowledge_evidence_append_failed", lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+    }
     if (!legacyMarkdownSkipped) await atomicWrite(target, merged.markdown);
     const git = opts.settings.gitCommit
       ? legacyMarkdownSkipped

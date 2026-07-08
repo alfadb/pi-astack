@@ -1647,6 +1647,125 @@ Original Pensieve seed content.
       assert(!stopCreateFiles.some((f) => f.startsWith(`projects/${stopTarget.projectId}/`) && f.endsWith(".md")), `legacy stop create commit must not include legacy markdown: ${JSON.stringify(stopCreateFiles)}`);
       assert(execFileSync("git", ["-C", stopAbrain, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf-8" }).trim() === "", "legacy stop create must leave abrain tree clean");
 
+      const l2OnlyProjection = stopCreate.knowledgeEvidenceEvent.projection.outputPath;
+      const l2OnlyProjectionBeforeProjectOff = fs.readFileSync(l2OnlyProjection, "utf-8");
+      const projectOffUpdate = await updateProjectEntry(stopCreate.slug, {
+        status: "active",
+        confidence: 8,
+        compiledTruth: "# Writer Legacy Stop Create\n\nThis must not pretend to update L2 when projectOnWrite is disabled.",
+        sessionId: "session-legacy-stop-project-off-update",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: { ...stopSettings, knowledgeProjector: { ...stopSettings.knowledgeProjector, projectOnWrite: false } },
+        dryRun: false,
+      });
+      assert(projectOffUpdate.status === "rejected" && projectOffUpdate.reason === "entry_not_found", `projectOnWrite=false L2-only update must fail closed, not spoof updated: ${JSON.stringify(projectOffUpdate)}`);
+      assert(!projectOffUpdate.knowledgeEvidenceEvent, `projectOnWrite=false rejected L2-only update must not append an event: ${JSON.stringify(projectOffUpdate.knowledgeEvidenceEvent)}`);
+      assert(fs.readFileSync(l2OnlyProjection, "utf-8") === l2OnlyProjectionBeforeProjectOff, "projectOnWrite=false rejected update must not mutate L2 projection");
+
+      const l2OnlyUpdate = await updateProjectEntry(stopCreate.slug, {
+        status: "active",
+        confidence: 8,
+        compiledTruth: "# Writer Legacy Stop Create\n\nUpdated from the L2 stable view merge base while no legacy markdown file exists.",
+        sessionId: "session-legacy-stop-l2only-update",
+        timelineNote: "l2-only update smoke",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(l2OnlyUpdate.status === "updated", `L2-only update must not return entry_not_found: ${JSON.stringify(l2OnlyUpdate)}`);
+      assert(l2OnlyUpdate.path === l2OnlyProjection, `L2-only update should read from stable view path: ${JSON.stringify(l2OnlyUpdate)}`);
+      assert(!fs.existsSync(stopCreate.path), `L2-only update must not create legacy markdown: ${stopCreate.path}`);
+      assert(l2OnlyUpdate.knowledgeEvidenceEvent?.append?.ok, `L2-only update event append missing: ${JSON.stringify(l2OnlyUpdate.knowledgeEvidenceEvent)}`);
+      assert(l2OnlyUpdate.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only update projection missing: ${JSON.stringify(l2OnlyUpdate.knowledgeEvidenceEvent?.projection)}`);
+
+      const l2OnlyArchive = await archiveProjectEntry(stopCreate.slug, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+        reason: "l2-only archive smoke",
+        sessionId: "session-legacy-stop-l2only-archive",
+      });
+      assert(l2OnlyArchive.status === "archived", `L2-only archive must not return entry_not_found: ${JSON.stringify(l2OnlyArchive)}`);
+      assert(!fs.existsSync(stopCreate.path), `L2-only archive must not create legacy markdown: ${stopCreate.path}`);
+      assert(l2OnlyArchive.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only archive projection missing: ${JSON.stringify(l2OnlyArchive.knowledgeEvidenceEvent?.projection)}`);
+
+      const l2OnlyReactivate = await updateProjectEntry(stopCreate.slug, {
+        status: "active",
+        sessionId: "session-legacy-stop-l2only-reactivate",
+        timelineAction: "reactivated",
+        timelineNote: "l2-only reactivate smoke",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(l2OnlyReactivate.status === "updated", `L2-only reactivate must not return entry_not_found: ${JSON.stringify(l2OnlyReactivate)}`);
+      assert(!fs.existsSync(stopCreate.path), `L2-only reactivate must not create legacy markdown: ${stopCreate.path}`);
+      assert(l2OnlyReactivate.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only reactivate projection missing: ${JSON.stringify(l2OnlyReactivate.knowledgeEvidenceEvent?.projection)}`);
+
+      const l2OnlySoftDelete = await deleteProjectEntry(stopCreate.slug, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+        mode: "soft",
+        reason: "l2-only soft delete smoke",
+        sessionId: "session-legacy-stop-l2only-soft-delete",
+      });
+      assert(l2OnlySoftDelete.status === "deleted" && l2OnlySoftDelete.deleteMode === "soft", `L2-only soft delete must not return entry_not_found: ${JSON.stringify(l2OnlySoftDelete)}`);
+      assert(l2OnlySoftDelete.knowledgeEvidenceEvent?.body?.intent?.operation_hint === "archive", `L2-only soft delete evidence event should archive, not delete: ${JSON.stringify(l2OnlySoftDelete.knowledgeEvidenceEvent?.body?.intent)}`);
+      assert(l2OnlySoftDelete.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only soft delete projection should keep archived tombstone: ${JSON.stringify(l2OnlySoftDelete.knowledgeEvidenceEvent?.projection)}`);
+      assert(fs.existsSync(l2OnlyProjection), `L2-only soft delete must keep stable view projection: ${l2OnlyProjection}`);
+      const l2OnlySoftDeletedProjection = fs.readFileSync(l2OnlyProjection, "utf-8");
+      assert(/^status: archived$/m.test(l2OnlySoftDeletedProjection), `L2-only soft delete projection must be readable archived tombstone:\n${l2OnlySoftDeletedProjection}`);
+      assert(!fs.existsSync(stopCreate.path), `L2-only soft delete must not create legacy markdown: ${stopCreate.path}`);
+
+      const l2OnlyPostSoftReactivate = await updateProjectEntry(stopCreate.slug, {
+        status: "active",
+        sessionId: "session-legacy-stop-l2only-post-soft-reactivate",
+        timelineAction: "reactivated",
+        timelineNote: "l2-only post-soft reactivate smoke",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(l2OnlyPostSoftReactivate.status === "updated", `L2-only post-soft reactivate must not return entry_not_found: ${JSON.stringify(l2OnlyPostSoftReactivate)}`);
+      assert(l2OnlyPostSoftReactivate.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only post-soft reactivate projection missing: ${JSON.stringify(l2OnlyPostSoftReactivate.knowledgeEvidenceEvent?.projection)}`);
+      assert(/^status: active$/m.test(fs.readFileSync(l2OnlyProjection, "utf-8")), `L2-only post-soft reactivate should restore active projection:\n${fs.readFileSync(l2OnlyProjection, "utf-8")}`);
+
+      const l2OnlyDelete = await deleteProjectEntry(stopCreate.slug, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+        mode: "hard",
+        reason: "l2-only hard delete smoke",
+        sessionId: "session-legacy-stop-l2only-delete",
+      });
+      assert(l2OnlyDelete.status === "deleted" && l2OnlyDelete.deleteMode === "hard", `L2-only hard delete must not return entry_not_found: ${JSON.stringify(l2OnlyDelete)}`);
+      assert(!fs.existsSync(stopCreate.path), `L2-only hard delete must not create legacy markdown: ${stopCreate.path}`);
+      assert(l2OnlyDelete.knowledgeEvidenceEvent?.projection?.status === "removed", `L2-only hard delete projection should remove L2 entry: ${JSON.stringify(l2OnlyDelete.knowledgeEvidenceEvent?.projection)}`);
+      assert(!fs.existsSync(l2OnlyProjection), `L2-only hard delete should remove stable view projection: ${l2OnlyProjection}`);
+      const l2OnlyDeleteFiles = execFileSync("git", ["-C", stopAbrain, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+      assert(l2OnlyDeleteFiles.some((f) => f.startsWith("l1/events/")) && l2OnlyDeleteFiles.some((f) => f.startsWith("l2/views/knowledge/")), `L2-only hard delete commit must include l1/l2: ${JSON.stringify(l2OnlyDeleteFiles)}`);
+      assert(!l2OnlyDeleteFiles.some((f) => f.startsWith(`projects/${stopTarget.projectId}/`) && f.endsWith(".md")), `L2-only hard delete commit must not include legacy markdown: ${JSON.stringify(l2OnlyDeleteFiles)}`);
+      assert(execFileSync("git", ["-C", stopAbrain, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf-8" }).trim() === "", "L2-only update/archive/reactivate/soft-delete/hard-delete must leave abrain tree clean");
+
       const seedSettings = { ...stopSettings, knowledgeEvidenceEventWriter: { ...stopSettings.knowledgeEvidenceEventWriter, legacyMarkdownWriteOnSuccessfulEvent: true } };
       const seed = await writeProjectEntry({
         title: "Writer Legacy Stop Seed",
