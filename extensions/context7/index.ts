@@ -32,6 +32,19 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadContext7Settings } from "./settings";
 import { Context7Client, formatLibrary } from "./client";
+import { renderFoldableToolResult } from "../_shared/foldable-tool-result";
+
+// Ctrl+O expand/collapse is owned by pi core. This renderer only consumes
+// options.expanded/isPartial plus context.isError; execute() still returns the
+// complete content/details payload for the LLM.
+function renderContext7ToolResult(toolName: string, fullOutputLabel: string) {
+  return (
+    result: unknown,
+    options: { expanded?: boolean; isPartial?: boolean },
+    theme: any,
+    context?: { isError?: boolean },
+  ) => renderFoldableToolResult(result, options, theme, { toolName, fullOutputLabel }, context);
+}
 
 export default function (pi: ExtensionAPI) {
   // ADR 0014 §6: sub-pi (sediment / internal sub-processes) must not
@@ -71,6 +84,8 @@ export default function (pi: ExtensionAPI) {
       libraryName: Type.String({ description: "Library/framework name to resolve, e.g. 'next.js' (required)." }),
       query: Type.Optional(Type.String({ description: "The user's task, used to rank candidates. Optional." })),
     }),
+
+    renderResult: renderContext7ToolResult("context7_resolve", "context7 resolve"),
 
     prepareArguments(rawArgs: unknown) {
       const a = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
@@ -145,6 +160,8 @@ export default function (pi: ExtensionAPI) {
       libraryId: Type.String({ description: "Context7-compatible library ID, e.g. '/vercel/next.js' (required)." }),
       query: Type.String({ description: "The user's task, used to rerank the returned docs (required)." }),
     }),
+
+    renderResult: renderContext7ToolResult("context7_docs", "context7 docs"),
 
     prepareArguments(rawArgs: unknown) {
       const a = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)

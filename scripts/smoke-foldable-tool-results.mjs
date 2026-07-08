@@ -30,6 +30,7 @@ const theme = {
 
 const webSearchSrc = fs.readFileSync(path.join(root, "extensions/web-search/index.ts"), "utf-8");
 const memorySrc = fs.readFileSync(path.join(root, "extensions/memory/index.ts"), "utf-8");
+const context7Src = fs.readFileSync(path.join(root, "extensions/context7/index.ts"), "utf-8");
 
 function toolBlock(src, name) {
   const idx = src.indexOf(`name: "${name}"`);
@@ -46,6 +47,11 @@ for (const name of ["web_search", "web_fetch"]) {
 for (const name of ["memory_search", "memory_get", "memory_list", "memory_activity", "memory_decide"]) {
   const block = toolBlock(memorySrc, name);
   ok(!!block, `memory/index.ts registers ${name}`);
+  ok(!!block && /renderResult\s*:/.test(block), `${name} registerTool() has renderResult wired`);
+}
+for (const name of ["context7_resolve", "context7_docs"]) {
+  const block = toolBlock(context7Src, name);
+  ok(!!block, `context7/index.ts registers ${name}`);
   ok(!!block && /renderResult\s*:/.test(block), `${name} registerTool() has renderResult wired`);
 }
 
