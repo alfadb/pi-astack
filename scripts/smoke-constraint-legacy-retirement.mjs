@@ -268,7 +268,7 @@ check("event_native_accepted is archivable but stale and ordinary compiled-only 
   assert(json.retirementGate.ready === false, "expected remaining blockers");
   const accepted = json.deltas.compiledOnly.byDisposition.event_native_accepted;
   assert(accepted.total === 2, `expected accepted group total 2 including human-review sample: ${JSON.stringify(accepted)}`);
-  assert(accepted.blockingUnique === 1 && accepted.humanReviewUnique === 1, `humanReviewRequired should still block accepted disposition: ${JSON.stringify(accepted)}`);
+  assert(accepted.blockingUnique === 1 && accepted.humanReviewUnique === 1, `humanReviewRequired should still block accepted disposition and count toward compiledOnly: ${JSON.stringify(accepted)}`);
   const eventNative = json.deltas.compiledOnly.byDisposition.event_native;
   assert(eventNative.blockingUnique === 1, `stale/unaccepted event_native should block: ${JSON.stringify(eventNative)}`);
   const ordinary = json.deltas.compiledOnly.byDisposition.compiled_only;
@@ -276,6 +276,8 @@ check("event_native_accepted is archivable but stale and ordinary compiled-only 
   assert(json.retirementGate.blockingCounts["compiledOnly:event_native_accepted"] === 1, `accepted human review blocker missing: ${JSON.stringify(json.retirementGate.blockingCounts)}`);
   assert(json.retirementGate.blockingCounts["compiledOnly:event_native"] === 1, `event_native blocker missing: ${JSON.stringify(json.retirementGate.blockingCounts)}`);
   assert(json.retirementGate.blockingCounts["compiledOnly:compiled_only"] === 1, `compiled_only blocker missing: ${JSON.stringify(json.retirementGate.blockingCounts)}`);
+  const compiledOnlyAction = json.recommendedActions.find((item) => item.category === "compiledOnly");
+  assert(compiledOnlyAction?.count === 3, `compiledOnly recommended action count should match all blocking compiled-only dispositions, including humanReviewRequired accepted disposition: ${JSON.stringify(compiledOnlyAction)}`);
 });
 
 if (failures.length) {

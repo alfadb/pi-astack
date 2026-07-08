@@ -156,7 +156,7 @@ const { renderConstraintShadowView } = require(path.join(outRoot, "sediment", "c
 const { createConstraintDiffReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "diff.js"));
 const { scanConstraintEvidenceEvents } = require(path.join(outRoot, "sediment", "constraint-compiler", "event-scan.js"));
 const { createConstraintEventCoverageReport, createConstraintLegacyParallelDeltaReport } = require(path.join(outRoot, "sediment", "constraint-compiler", "event-report.js"));
-const { buildMergedSourceVerifierInputRows, createMergedSourceVerifierReport, mergedSourceVerifierDecisionHash, mergedSourceVerifierInputHash, targetContentHashForConstraint } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier.js"));
+const { buildMergedSourceVerifierInputRows, buildMergedSourceVerifierLookup, createMergedSourceVerifierReport, mergedSourceVerifierDecisionHash, mergedSourceVerifierInputHash, targetContentHashForConstraint } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier.js"));
 const { buildMergedSourceVerifierPrompt } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier-prompt.js"));
 const { parseMergedSourceVerifierOutput, runMergedSourceVerifierWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "merged-source-verifier-llm.js"));
 const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment", "constraint-compiler", "prompt.js"));
@@ -447,6 +447,30 @@ const sub2apiSemanticReviewSource = source({
   appliesWhen: "sub2api review decisions",
   mustDoSummary: "Set semantic_review_required only for business logic changes.",
 });
+const legacyNoRetroactiveRewriteSource = source({
+  sourceId: "rule:global:always:legacy-no-retroactive-rewrite",
+  slug: "legacy-no-retroactive-rewrite",
+  title: "Legacy docs no retroactive rewrite",
+  body: "旧文档不追溯重写。",
+  triggerPhrases: ["旧文档", "不追溯重写"],
+  mustDoSummary: "旧文档不追溯重写。",
+});
+const truncatedNativeGitSource = source({
+  sourceId: "rule:global:always:all-github-repositories-gh-native-git-truncated",
+  slug: "all-github-repositories-gh-native-git-truncated",
+  title: "All GitHub repositories must use gh. Native git operatio",
+  body: "所有 GitHub 仓库必须使用 gh 工具进行管理",
+  triggerPhrases: ["GitHub", "gh"],
+  mustDoSummary: "所有 GitHub 仓库必须使用 gh 工具进行管理",
+});
+const truncatedDataMigrationSource = source({
+  sourceId: "rule:global:always:oauth-data-migrati-truncated",
+  slug: "oauth-data-migrati-truncated",
+  title: "Retirement review source / OAuth/data migrati",
+  body: "Retirement review must preserve visible source snippets exactly.",
+  triggerPhrases: ["retirement review", "OAuth", "data migrati"],
+  mustDoSummary: "Preserve visible source snippets exactly.",
+});
 const docDriftSeveritySource = source({
   sourceId: "rule:project:pi-astack:always:doc-drift-severity-order",
   slug: "doc-drift-severity-order",
@@ -701,6 +725,222 @@ check("validator accepts compiled L2 read-only human-view write-confirmation rul
   assert(!validated.unresolved.length, "compiled L2 human-view rule produced unresolved items");
 });
 
+check("validator rejects no-retroactive-rewrite rule with invented user-request exception", () => {
+  const sources = [legacyNoRetroactiveRewriteSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  let msg = "";
+  try {
+    validateConstraintCompilerDecision(sources, {
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: localNormalized.inputRootHash,
+      constraints: [{
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "Legacy docs no retroactive rewrite",
+        compiledBody: "旧文档不追溯重写，unless the user asks.",
+        sourceRecordIds: [legacyNoRetroactiveRewriteSource.sourceId],
+      }],
+      exclusions: [],
+      unresolved: [],
+      merges: [],
+      rescopeProposals: [],
+      mappings: [{ sourceRecordId: legacyNoRetroactiveRewriteSource.sourceId, disposition: "compiled" }],
+      diagnostics: [],
+    });
+  } catch (err) {
+    msg = String((err && err.message) || err);
+  }
+  assert(msg.includes("user-request exception"), "invented user-request exception did not hard-fail with reason: " + msg);
+});
+
+check("validator rejects only-business-logic rule with invented alternate-trigger escape hatch", () => {
+  const sources = [sub2apiSemanticReviewSource];
+  const localNormalized = normalizeConstraintSources(sources, { knownProjectIds: ["sub2api"] });
+  let msg = "";
+  try {
+    validateConstraintCompilerDecision(sources, {
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: localNormalized.inputRootHash,
+      constraints: [{
+        scope: { kind: "project", projectId: "sub2api" },
+        injectMode: "always",
+        title: "semantic_review_required gate",
+        compiledBody: "Set semantic_review_required only for business logic changes, unless the source explicitly provides another trigger.",
+        sourceRecordIds: [sub2apiSemanticReviewSource.sourceId],
+      }],
+      exclusions: [],
+      unresolved: [],
+      merges: [],
+      rescopeProposals: [],
+      mappings: [{ sourceRecordId: sub2apiSemanticReviewSource.sourceId, disposition: "compiled" }],
+      diagnostics: [],
+    }, { knownProjectIds: ["sub2api"] });
+  } catch (err) {
+    msg = String((err && err.message) || err);
+  }
+  assert(msg.includes("alternate-trigger exception"), "invented alternate-trigger exception did not hard-fail with reason: " + msg);
+});
+
+check("validator rejects native-git semantics invented from truncated legacy source", () => {
+  const sources = [truncatedNativeGitSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  let msg = "";
+  try {
+    validateConstraintCompilerDecision(sources, {
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: localNormalized.inputRootHash,
+      constraints: [{
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "GitHub repositories use gh",
+        compiledBody: "Native git operations remain separate from GitHub management operations.",
+        sourceRecordIds: [truncatedNativeGitSource.sourceId],
+      }],
+      exclusions: [],
+      unresolved: [],
+      merges: [],
+      rescopeProposals: [],
+      mappings: [{ sourceRecordId: truncatedNativeGitSource.sourceId, disposition: "compiled" }],
+      diagnostics: [],
+    });
+  } catch (err) {
+    msg = String((err && err.message) || err);
+  }
+  assert(msg.includes("native-git semantics from truncated legacy source text"), "invented native-git semantics did not hard-fail with reason: " + msg);
+});
+
+check("validator rejects data migration completion from truncated legacy source", () => {
+  const sources = [truncatedDataMigrationSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  let msg = "";
+  try {
+    validateConstraintCompilerDecision(sources, {
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: localNormalized.inputRootHash,
+      constraints: [{
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "Retirement review source preservation",
+        compiledBody: "Retirement review must preserve visible source snippets exactly, including OAuth/data migration.",
+        sourceRecordIds: [truncatedDataMigrationSource.sourceId],
+      }],
+      exclusions: [],
+      unresolved: [],
+      merges: [],
+      rescopeProposals: [],
+      mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
+      diagnostics: [],
+    });
+  } catch (err) {
+    msg = String((err && err.message) || err);
+  }
+  assert(msg.includes("completes truncated data-migration fragment"), "completed data-migration fragment did not hard-fail with reason: " + msg);
+});
+
+check("validator rejects raw data migrati tail from truncated legacy source", () => {
+  const sources = [truncatedDataMigrationSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  let msg = "";
+  try {
+    validateConstraintCompilerDecision(sources, {
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: localNormalized.inputRootHash,
+      constraints: [{
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "Retirement review source preservation",
+        compiledBody: "Retirement review must preserve visible source snippets exactly, including OAuth/data migrati",
+        sourceRecordIds: [truncatedDataMigrationSource.sourceId],
+      }],
+      exclusions: [],
+      unresolved: [],
+      merges: [],
+      rescopeProposals: [],
+      mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
+      diagnostics: [],
+    });
+  } catch (err) {
+    msg = String((err && err.message) || err);
+  }
+  assert(msg.includes("raw truncated data-migration fragment"), "raw truncated data-migration tail did not hard-fail with reason: " + msg);
+});
+
+check("validator rejects raw data migrati fragment inside compiled body", () => {
+  const sources = [truncatedDataMigrationSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  let msg = "";
+  try {
+    validateConstraintCompilerDecision(sources, {
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: localNormalized.inputRootHash,
+      constraints: [{
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "Retirement review source preservation",
+        compiledBody: "Retirement review must preserve visible source snippets exactly; OAuth/data migrati) may trigger follow-up review.",
+        sourceRecordIds: [truncatedDataMigrationSource.sourceId],
+      }],
+      exclusions: [],
+      unresolved: [],
+      merges: [],
+      rescopeProposals: [],
+      mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
+      diagnostics: [],
+    });
+  } catch (err) {
+    msg = String((err && err.message) || err);
+  }
+  assert(msg.includes("raw truncated data-migration fragment"), "raw truncated data-migration fragment did not hard-fail with reason: " + msg);
+});
+
+check("validator accepts explicitly labeled truncated data migrati fragment", () => {
+  const sources = [truncatedDataMigrationSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Retirement review source preservation",
+      compiledBody: "Retirement review must preserve visible source snippets exactly; source-truncated data migrati tail.",
+      sourceRecordIds: [truncatedDataMigrationSource.sourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(truncatedDataMigrationSource.sourceId)), "labeled truncated data-migration fragment was not compiled");
+  assert(!validated.constraints[0].compiledBody.includes("data migration"), "labeled truncated fragment was completed to data migration");
+});
+
+check("validator accepts no-retroactive-rewrite rule without invented exception", () => {
+  const sources = [legacyNoRetroactiveRewriteSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Legacy docs no retroactive rewrite",
+      compiledBody: "旧文档不追溯重写。",
+      sourceRecordIds: [legacyNoRetroactiveRewriteSource.sourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: legacyNoRetroactiveRewriteSource.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(legacyNoRetroactiveRewriteSource.sourceId)), "legal no-retroactive-rewrite rule was not compiled");
+  assert(!validated.unresolved.some((item) => item.sourceRecordIds.includes(legacyNoRetroactiveRewriteSource.sourceId)), "legal no-retroactive-rewrite rule was quarantined");
+});
+
 check("validator quarantines bad compiled+excluded L2 human-view multi-home decision", () => {
   const sources = [l2HumanViewSource];
   const localNormalized = normalizeConstraintSources(sources);
@@ -748,6 +988,37 @@ check("validator: requireEventCompleteness rejects an undispositioned event (gra
   let msg = "";
   try { validateConstraintCompilerDecision(sourcesWithOrphan, decision, { knownProjectIds: ["pi-astack"], requireEventCompleteness: true }); } catch (err) { msg = String((err && err.message) || err); }
   assert(msg.includes("no primary disposition") && msg.includes(orphanId), "requireEventCompleteness must throw naming the uncovered event for retry re-prompt: " + msg);
+});
+
+check("validator: requireEventCompleteness rejects unresolved-only all-source batch", () => {
+  const freshSources = [
+    eventSource({ sourceId: "event:unresolved-batch-one", eventId: "unresolved-batch-one", candidateText: "First fresh event must be compiled or excluded." }),
+    eventSource({ sourceId: "event:unresolved-batch-two", eventId: "unresolved-batch-two", candidateText: "Second fresh event must be compiled or excluded." }),
+  ];
+  const localNormalized = normalizeConstraintSources(freshSources);
+  const sourceRecordIds = freshSources.map((item) => item.sourceId);
+  let msg = "";
+  try {
+    validateConstraintCompilerDecision(freshSources, {
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: localNormalized.inputRootHash,
+      constraints: [],
+      exclusions: [],
+      unresolved: [{
+        reason: "model_uncertain",
+        sourceRecordIds,
+        diagnosticIds: ["SC_UNRESOLVED_BATCH_TOO_LARGE:all-records"],
+        note: "model marked every source unresolved",
+      }],
+      merges: [],
+      rescopeProposals: [],
+      mappings: [],
+      diagnostics: [],
+    }, { requireEventCompleteness: true });
+  } catch (err) {
+    msg = String((err && err.message) || err);
+  }
+  assert(msg.includes("unresolved batch too large") || msg.includes("unresolved-only decision"), "fresh unresolved-only all-source batch did not hard-fail: " + msg);
 });
 
 check("validator canonicalizes compiled/merged_source mapping overlap", () => {
@@ -825,12 +1096,30 @@ check("validator quarantines reclassified exclusion when source is compiled", ()
   assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_SOURCE_MULTI_HOME_QUARANTINED" && diagnostic.sourceRecordIds.includes(compactSource.sourceId)), "multi-home quarantine diagnostic missing");
 });
 
+check("validator hard-fails when an archived legacy source is compiled", () => {
+  const bad = {
+    ...decision,
+    constraints: [
+      ...decision.constraints,
+      {
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "Archived rule incorrectly compiled",
+        compiledBody: "This archived rule must not be compiled.",
+        sourceRecordIds: [archivedSource.sourceId],
+      },
+    ],
+  };
+  let msg = "";
+  try { validateConstraintCompilerDecision(allSources, bad, { knownProjectIds: ["pi-astack"] }); } catch (err) { msg = String((err && err.message) || err); }
+  assert(msg.includes("compiled archived or inactive legacy source"), "compiled archived source did not hard-fail with expected message: " + msg);
+});
+
 check("validator quarantines multi-home source before merge evaluation", () => {
   const multiHomeSource = source({
     sourceId: "rule:global:always:multi-home-merge-source",
     slug: "multi-home-merge-source",
-    status: "archived",
-    body: "An archived source that the compiler incorrectly compiled and excluded.",
+    body: "An active source that the compiler incorrectly compiled and excluded.",
   });
   const archivedSibling = source({
     sourceId: "rule:global:always:multi-home-merge-sibling",
@@ -847,11 +1136,15 @@ check("validator quarantines multi-home source before merge evaluation", () => {
         scope: { kind: "global" },
         injectMode: "always",
         title: "Multi-home merge source",
-        compiledBody: "An archived source that the compiler incorrectly compiled and excluded.",
+        compiledBody: "An active source that the compiler incorrectly compiled and excluded.",
         sourceRecordIds: [multiHomeSource.sourceId],
       },
     ],
-    exclusions: [...decision.exclusions, { reason: "superseded_observed", sourceRecordIds: [multiHomeSource.sourceId, archivedSibling.sourceId] }],
+    exclusions: [
+      ...decision.exclusions,
+      { reason: "knowledge_candidate", sourceRecordIds: [multiHomeSource.sourceId] },
+      { reason: "superseded_observed", sourceRecordIds: [archivedSibling.sourceId] },
+    ],
     merges: [{ sourceRecordIds: [compactSource.sourceId, multiHomeSource.sourceId, archivedSibling.sourceId], reason: "family review pair with multi-home source" }],
     mappings: [
       ...decision.mappings,
@@ -984,33 +1277,35 @@ check("validator accepts active always jargon rule with listed superseded predec
   assert(!validated.unresolved.length, "correct active/listed predecessor decision produced unresolved items");
 });
 
-check("validator quarantines bad merged always+listed jargon path", () => {
+check("validator hard-fails bad merged always+listed jargon path with superseded source", () => {
   const sources = [jargonAlwaysSource, jargonListedPredecessor];
   const localNormalized = normalizeConstraintSources(sources);
-  const validated = validateConstraintCompilerDecision(sources, {
-    schemaVersion: "constraint-shadow-decision/v1",
-    inputRootHash: localNormalized.inputRootHash,
-    constraints: [{
-      scope: { kind: "global" },
-      injectMode: "always",
-      title: "Merged professional vocabulary rule",
-      compiledBody: "Never use jargon; use precise professional vocabulary instead.",
-      sourceRecordIds: [jargonAlwaysSource.sourceId, jargonListedPredecessor.sourceId],
-    }],
-    exclusions: [],
-    unresolved: [],
-    merges: [{ sourceRecordIds: [jargonAlwaysSource.sourceId, jargonListedPredecessor.sourceId], reason: "bad always/listed merge" }],
-    rescopeProposals: [],
-    mappings: [
-      { sourceRecordId: jargonAlwaysSource.sourceId, disposition: "merged_source" },
-      { sourceRecordId: jargonListedPredecessor.sourceId, disposition: "merged_source" },
-    ],
-    diagnostics: [],
-  });
-  assert(!validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(jargonAlwaysSource.sourceId)), "bad merged always/listed constraint was retained");
-  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(jargonAlwaysSource.sourceId) && item.reason === "model_uncertain"), "active always source was not quarantined");
-  assert(validated.unresolved.some((item) => item.sourceRecordIds.includes(jargonListedPredecessor.sourceId) && item.reason === "model_uncertain"), "listed predecessor was not quarantined");
-  assert(validated.diagnostics.some((diagnostic) => diagnostic.code === "SC_COMPILER_ITEM_REJECTED" && diagnostic.sourceRecordIds.includes(jargonListedPredecessor.sourceId)), "bad merged path rejection diagnostic missing");
+  let msg = "";
+  try {
+    validateConstraintCompilerDecision(sources, {
+      schemaVersion: "constraint-shadow-decision/v1",
+      inputRootHash: localNormalized.inputRootHash,
+      constraints: [{
+        scope: { kind: "global" },
+        injectMode: "always",
+        title: "Merged professional vocabulary rule",
+        compiledBody: "Never use jargon; use precise professional vocabulary instead.",
+        sourceRecordIds: [jargonAlwaysSource.sourceId, jargonListedPredecessor.sourceId],
+      }],
+      exclusions: [],
+      unresolved: [],
+      merges: [{ sourceRecordIds: [jargonAlwaysSource.sourceId, jargonListedPredecessor.sourceId], reason: "bad always/listed merge" }],
+      rescopeProposals: [],
+      mappings: [
+        { sourceRecordId: jargonAlwaysSource.sourceId, disposition: "merged_source" },
+        { sourceRecordId: jargonListedPredecessor.sourceId, disposition: "merged_source" },
+      ],
+      diagnostics: [],
+    });
+  } catch (err) {
+    msg = String((err && err.message) || err);
+  }
+  assert(msg.includes("compiled archived or inactive legacy source") && msg.includes(jargonListedPredecessor.sourceId), "superseded merged source did not hard-fail with expected message: " + msg);
 });
 
 check("validator warns when diagnostic claims compiled source is unresolved", () => {
@@ -1294,7 +1589,7 @@ check("validator normalizes single-primary mapping disposition mismatch", () => 
   assert(compiledValidated.validationHash === compiledCanonicalValidated.validationHash, "compiled mapping normalization changed validationHash");
 });
 
-check("validator still rejects mapping with no primary disposition", () => {
+check("validator still rejects active legacy source with no primary disposition", () => {
   const unmappedSource = source({
     sourceId: "rule:global:listed:mapping-only-source",
     slug: "mapping-only-source",
@@ -1302,9 +1597,33 @@ check("validator still rejects mapping with no primary disposition", () => {
     body: "A source with no compiler bucket is invalid.",
   });
   const bad = { ...decision, mappings: [...decision.mappings, { sourceRecordId: unmappedSource.sourceId, disposition: "compiled" }] };
-  let threw = false;
-  try { validateConstraintCompilerDecision([...allSources, unmappedSource], bad, { knownProjectIds: ["pi-astack"] }); } catch { threw = true; }
-  assert(threw, "mapping-only source accepted without a primary disposition");
+  let msg = "";
+  try { validateConstraintCompilerDecision([...allSources, unmappedSource], bad, { knownProjectIds: ["pi-astack"] }); } catch (err) { msg = String((err && err.message) || err); }
+  assert(msg.includes("has no primary disposition"), "active mapping-only source accepted without a primary disposition: " + msg);
+});
+
+check("validator deterministically excludes omitted inactive legacy source", () => {
+  const omittedArchivedSource = source({
+    sourceId: "rule:global:always:omitted-archived-knowledge-source",
+    slug: "omitted-archived-knowledge-source",
+    status: "archived",
+    kind: "fact",
+    body: "Archived knowledge source that the compiler omitted entirely.",
+  });
+  const localNormalized = normalizeConstraintSources([omittedArchivedSource]);
+  const validated = validateConstraintCompilerDecision([omittedArchivedSource], {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [],
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [],
+    diagnostics: [],
+  });
+  assert(validated.exclusions.some((exclusion) => exclusion.reason === "legacy_archived_observed" && exclusion.sourceRecordIds.includes(omittedArchivedSource.sourceId)), "omitted archived source was not deterministically excluded");
+  assert(validated.mappings.some((mapping) => mapping.sourceRecordId === omittedArchivedSource.sourceId && mapping.disposition === "excluded"), "omitted archived source mapping was not added");
 });
 
 check("validator normalizes not-memory subtype mismatch", () => {
@@ -1962,14 +2281,21 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("shadow-only"), "shadow-only instruction missing");
   assert(prompt.text.includes("Return JSON only"), "JSON-only instruction missing");
   assert(prompt.text.includes("Never include mutation-key fields"), "mutation-key instruction missing");
+  assert(prompt.text.includes("Hard validation failures") && prompt.text.includes("rejected by the validator") && prompt.text.includes("force retry"), "hard validation failure banner missing");
+  assert(prompt.text.includes("status archived, superseded, or deprecated") && prompt.text.includes("must never appear in constraints[] or as a merged compiled source"), "closed-status hard validation failure guidance missing");
+  assert(prompt.text.includes("known mid-word native-git tail") && prompt.text.includes("compiledBody must not contain `native git` or `Native git`"), "native-git hard validation failure guidance missing");
+  assert(prompt.text.includes("incomplete final OAuth/category tail") && prompt.text.includes("do not complete it into a full category name") && prompt.text.includes("source-truncated or a visible truncated fragment"), "data-migration hard validation failure guidance missing");
   assert(prompt.text.includes("literal UTF-8 output"), "Unicode/output-encoding guidance missing");
   assert(prompt.text.includes("no \\u escapes"), "no-u escape guidance missing");
   assert(prompt.text.includes("active always source") && prompt.text.includes("listed predecessor"), "active-always/listed-predecessor guidance missing");
   assert(prompt.text.includes("Active source compiled plus predecessor sources excluded is a consistent result"), "active-compiled/predecessor-excluded consistency guidance missing");
   assert(prompt.text.includes("Settings/config/tool-contract exclusions require an input categoryHint of settings_not_memory or tool_contract_not_memory"), "not-memory categoryHint gate guidance missing");
   assert(prompt.text.includes("SC_NOT_MEMORY_SETTINGS or SC_NOT_MEMORY_TOOL_CONTRACT"), "not-memory diagnostic gate guidance missing");
+  assert(prompt.text.includes("must be placed only in exclusions[]") && prompt.text.includes("must not appear in constraints[], merges[], or unresolved[]") && prompt.text.includes("Do not merge settings_not_memory or tool_contract_not_memory sources with any active behavioral rule"), "not-memory exclusive exclusion guidance missing");
   assert(prompt.text.includes("constraint_event with categoryHint=behavioral_constraint"), "behavioral event compile/unresolved guidance missing");
+  assert(prompt.text.includes("fact, identity, provenance, deployment/infrastructure fact, or diagnostic background") && prompt.text.includes("exclude it as knowledge_candidate") && prompt.text.includes("do not put it in unresolved[] solely because it is not behavior"), "fact-like constraint_event knowledge_candidate boundary missing");
   assert(prompt.text.includes("toolContract, ToolContract, settings schema, removal, or checkpoint"), "ToolContract cleanup topical-word guard missing");
+  assert(prompt.text.includes("Checkpoint/reminder constraint_event records") && prompt.text.includes("two-week checkpoint") && prompt.text.includes("Compile the reminder/review obligation without inventing the future outcome"), "checkpoint/reminder event compile guidance missing");
   assert(prompt.text.includes("active legacy_rule with categoryHint=behavioral_constraint"), "active legacy behavioral rule guidance missing");
   assert(prompt.text.includes("low numeric confidence, assistant-observed provenance"), "low-confidence/assistant-observed boundary missing");
   assert(prompt.text.includes("different scope, injectMode, or sourceKind"), "overlap boundary missing");
@@ -1980,12 +2306,29 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("Preserve mandatory and exclusive semantics from each source"), "mandatory/exclusive preservation guidance missing");
   assert(prompt.text.includes("only, must, never, forbid, prohibited"), "exclusive keyword examples missing");
   assert(prompt.text.includes("禁止, 必须, 仅, 只, 只能, and 不得"), "Chinese exclusive keyword examples missing");
+  assert(prompt.text.includes("Preserve explicit action verbs in body text as obligations"), "body action verb preservation guidance missing");
+  assert(prompt.text.includes("analyze upstream update content / 分析上游更新内容") && prompt.text.includes("judge whether sync/release is needed / 是否有必要同步和发版"), "upstream sync/release body action examples missing");
+  assert(prompt.text.includes("Title gates and body actions are complementary evidence") && prompt.text.includes("combine them in compiledBody or mustDoSummary"), "title/body action combination guidance missing");
   assert(prompt.text.includes("Preserve explicit severity, priority, and ranking semantics as behavioral ordering thresholds"), "severity/priority/ranking preservation guidance missing");
   assert(prompt.text.includes("highest-severity, higher severity than, first, priority, critical, blocking, highest"), "severity/priority/ranking keyword examples missing");
   assert(prompt.text.includes("最严重, 优先级, 最高, and 首先"), "Chinese severity/priority/ranking keyword examples missing");
+  assert(prompt.text.includes("Preserve boundary, scope, fallback, rollback, and exception carve-outs exactly as written"), "boundary/scope/fallback/rollback carve-out guidance missing");
+  assert(prompt.text.includes("specific named examples, explicit must/record/disclose actions"), "boundary example/action preservation guidance missing");
+  assert(prompt.text.includes("previous model immediately after new model"), "rollback ordering guidance missing");
+  assert(prompt.text.includes("timeless-direction docs excluded") && prompt.text.includes("individual entry lifecycle ops excluded"), "scope carve-out guidance missing");
+  assert(prompt.text.includes("does not change T0 architecture protocol"), "exception carve-out guidance missing");
+  assert(prompt.text.includes("Preserve normative architecture and methodology directives even when they appear inside a scope note, heading, or numbered list item"), "normative architecture/methodology preservation guidance missing");
+  assert(prompt.text.includes("treat X as precedent") && prompt.text.includes("extend the same evidence-based unified architecture"), "architecture precedent/extension guidance missing");
+  assert(prompt.text.includes("deposition-time dedup") && prompt.text.includes("classifier-driven routing") && prompt.text.includes("materialized-view frontmatter"), "named architecture mechanism preservation guidance missing");
   assert(prompt.text.includes("compiledBody, mustDoSummary, or appliesWhen"), "behavioral ordering output-field guidance missing");
   assert(prompt.text.includes("prioritize, prefer, normally, generally, should, unless materially affect"), "weakened wording examples missing");
   assert(prompt.text.includes("unless that exception or weakening is explicit in the same source text"), "source-explicit exception boundary missing");
+  assert(prompt.text.includes("Do not add exception, permission, or override paths that are not present in the same source text"), "invented exception/permission/override guard missing");
+  assert(prompt.text.includes("unless explicitly requested") && prompt.text.includes("unless the source explicitly provides another trigger"), "forbidden invented exception phrase examples missing");
+  assert(prompt.text.includes("absolute/no-retroactive/only-gate semantics without adding an escape hatch"), "absolute/no-retroactive/only-gate preservation guidance missing");
+  assert(prompt.text.includes("truncated in the middle of a word or sentence") && prompt.text.includes("Preserve only visible complete obligations"), "truncated-source no-completion guidance missing");
+  assert(prompt.text.includes("copy only the visible fragment") && prompt.text.includes("instead of completing it into a full word/category name"), "truncated fragment no-completion guidance missing");
+  assert(prompt.text.includes("Do not leave compiledBody ending in a raw mid-word fragment") && prompt.text.includes("source-truncated or visible truncated fragment"), "truncated fragment labeling guidance missing");
   assert(prompt.text.includes("If a source says only X may trigger Y"), "exclusive trigger gate guidance missing");
   assert(prompt.text.includes("clear affirmative goals such as user wants, wants to, wants X to be Y, should, need, 要, 想把, 纳入, and 跟踪"), "affirmative directive preservation guidance missing");
   assert(prompt.text.includes("Do not rewrite them as may, can, allowed, or permitted unless the source explicitly frames the directive as permission or an exception"), "affirmative directive permission-exception boundary missing");
@@ -2012,7 +2355,83 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(sub2apiPrompt.text.includes("semantic_review_required: only business logic changes should drive semantic review"), "sub2api semantic_review_required source text missing from prompt");
   assert(sub2apiPrompt.text.includes("Preserve mandatory and exclusive semantics from each source"), "sub2api prompt missing exclusivity preservation guidance");
   assert(sub2apiPrompt.text.includes("only business logic changes"), "sub2api prompt missing only-business-logic threshold guidance/source text");
+  assert(sub2apiPrompt.text.includes("only gate") && sub2apiPrompt.text.includes("without adding an escape hatch"), "sub2api prompt missing only-gate no-escape guidance");
+  assert(sub2apiPrompt.text.includes("unless the source explicitly provides another trigger"), "sub2api prompt missing forbidden alternate-trigger phrase guard");
   assert(sub2apiPrompt.text.includes("unless materially affect") && sub2apiPrompt.text.includes("unless that exception or weakening is explicit in the same source text"), "sub2api prompt missing materiality-exception guard");
+
+  const legacyNoRetroactiveNormalized = normalizeConstraintSources([legacyNoRetroactiveRewriteSource], {
+    activeProjectId: "pi-astack",
+    knownProjectIds: ["pi-astack"],
+    compilerOptions: { mode: "fixture" },
+  });
+  const legacyNoRetroactivePrompt = buildConstraintCompilerPrompt({ normalized: legacyNoRetroactiveNormalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  assert(legacyNoRetroactivePrompt.text.includes(legacyNoRetroactiveRewriteSource.sourceId), "legacy no-retroactive source id missing from prompt");
+  assert(legacyNoRetroactivePrompt.text.includes("旧文档不追溯重写"), "legacy no-retroactive source text missing from prompt");
+  assert(legacyNoRetroactivePrompt.text.includes("no retroactive rewrite") && legacyNoRetroactivePrompt.text.includes("without adding an escape hatch"), "legacy no-retroactive prompt missing no-escape guidance");
+  assert(legacyNoRetroactivePrompt.text.includes("unless explicitly requested"), "legacy no-retroactive prompt missing forbidden explicit-request phrase guard");
+
+  const truncatedNativeGitNormalized = normalizeConstraintSources([truncatedNativeGitSource], {
+    activeProjectId: "pi-astack",
+    knownProjectIds: ["pi-astack"],
+    compilerOptions: { mode: "fixture" },
+  });
+  const truncatedNativeGitPrompt = buildConstraintCompilerPrompt({ normalized: truncatedNativeGitNormalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  assert(truncatedNativeGitPrompt.text.includes(truncatedNativeGitSource.sourceId), "truncated native-git source id missing from prompt");
+  assert(truncatedNativeGitPrompt.text.includes("[source text truncated mid-word; incomplete tail omitted]"), "truncated native-git marker missing from prompt");
+  assert(!truncatedNativeGitPrompt.text.includes("Native git operatio"), "raw truncated native-git fragment leaked into prompt");
+  assert(truncatedNativeGitPrompt.text.includes("All GitHub repositories must use gh"), "truncated native-git complete title obligation missing from prompt");
+  assert(truncatedNativeGitPrompt.text.includes("所有 GitHub 仓库必须使用 gh 工具进行管理"), "truncated native-git visible obligation missing from prompt");
+  assert(truncatedNativeGitPrompt.text.includes("truncated in the middle of a word or sentence") && truncatedNativeGitPrompt.text.includes("permission paths"), "truncated native-git prompt missing no-completion guidance");
+  assert(truncatedNativeGitPrompt.text.includes("sanitized input marks a known mid-word native-git tail") && truncatedNativeGitPrompt.text.includes("compiledBody must not contain native git or Native git"), "truncated native-git prompt missing explicit native-git ban");
+
+  const truncatedDataMigrationNormalized = normalizeConstraintSources([truncatedDataMigrationSource], {
+    activeProjectId: "pi-astack",
+    knownProjectIds: ["pi-astack"],
+    compilerOptions: { mode: "fixture" },
+  });
+  const truncatedDataMigrationPrompt = buildConstraintCompilerPrompt({ normalized: truncatedDataMigrationNormalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  assert(truncatedDataMigrationPrompt.text.includes(truncatedDataMigrationSource.sourceId), "truncated data-migration source id missing from prompt");
+  assert(truncatedDataMigrationPrompt.text.includes("[source-truncated incomplete final category omitted]"), "truncated data-migration marker missing from prompt");
+  assert(truncatedDataMigrationPrompt.text.includes("OAuth/[source-truncated incomplete final category omitted]"), "truncated data-migration complete prefix missing from prompt");
+  assert(!truncatedDataMigrationPrompt.text.includes("data migrati"), "raw truncated data-migration fragment leaked into prompt");
+  assert(!truncatedDataMigrationPrompt.text.includes("data migration"), "completed data-migration phrase leaked into prompt");
+  assert(truncatedDataMigrationPrompt.text.includes("copy only the visible fragment") && truncatedDataMigrationPrompt.text.includes("instead of completing it into a full word/category name"), "truncated data-migration prompt missing no-completion guidance");
+  assert(truncatedDataMigrationPrompt.text.includes("Do not leave compiledBody ending in a raw mid-word fragment") && truncatedDataMigrationPrompt.text.includes("source-truncated or visible truncated fragment"), "truncated data-migration prompt missing explicit labeling guidance");
+
+  const bareTruncatedNativeGitSource = source({
+    sourceId: "rule:global:always:bare-native-git-operatio-truncated",
+    slug: "bare-native-git-operatio-truncated",
+    title: "Native git operatio",
+    body: "Bare truncated native git fixture.",
+  });
+  const fullPromptSanitizerSources = [
+    bareTruncatedNativeGitSource,
+    source({
+      sourceId: "rule:global:always:complete-native-git-operations",
+      slug: "complete-native-git-operations",
+      title: "Native git operations complete fixture",
+      body: "Native git operation and Native git operations are complete words.",
+    }),
+    source({
+      sourceId: "rule:global:always:complete-data-migration",
+      slug: "complete-data-migration",
+      title: "Complete data migration fixture",
+      body: "data migration and data migrations are complete words.",
+    }),
+  ];
+  const fullPromptSanitizerNormalized = normalizeConstraintSources(fullPromptSanitizerSources, {
+    activeProjectId: "pi-astack",
+    knownProjectIds: ["pi-astack"],
+    compilerOptions: { mode: "fixture" },
+  });
+  const fullPromptSanitizerPrompt = buildConstraintCompilerPrompt({ normalized: fullPromptSanitizerNormalized, knownProjectIds: ["pi-astack"], activeProjectId: "pi-astack" });
+  assert(fullPromptSanitizerPrompt.text.includes("[source text truncated mid-word; incomplete tail omitted]"), "bare truncated native-git marker missing from prompt");
+  assert(!fullPromptSanitizerPrompt.text.includes('"title":"Native git operatio"'), "bare truncated native-git fragment leaked into prompt title");
+  assert(fullPromptSanitizerPrompt.text.includes("Native git operations"), "complete Native git operations phrase was altered by prompt sanitizer");
+  assert(fullPromptSanitizerPrompt.text.includes("Native git operation"), "complete Native git operation phrase was altered by prompt sanitizer");
+  assert(fullPromptSanitizerPrompt.text.includes("data migration"), "complete data migration phrase was altered by prompt sanitizer");
+  assert(fullPromptSanitizerPrompt.text.includes("data migrations"), "complete data migrations phrase was altered by prompt sanitizer");
+  assert(!fullPromptSanitizerPrompt.text.includes("[source-truncated incomplete final category omitted]"), "complete data migration phrases were replaced by prompt sanitizer");
 
   const docDriftNormalized = normalizeConstraintSources([docDriftSeveritySource], {
     activeProjectId: "pi-astack",
@@ -2559,9 +2978,10 @@ check("shadow runner generator model unavailable and missing invoker are ok:true
   assert(!fs.existsSync(missing.latestVerifierPath), "missing invoker wrote verifier artifact");
 });
 
-check("shadow runner generator with no merged rows does not require verifier invoker", async () => {
+check("shadow runner generator with no merged rows writes an empty verifier report", async () => {
   const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-verifier-empty-"));
   writeFile(path.join(abrainHome, "rules/always/use-edit-not-sed.md"), "---\ntitle: Use edit not sed\nstatus: active\nkind: preference\n---\n# Use edit not sed\n\n修改文件必须用 edit/write，禁止 sed -i。\n");
+  let verifierInvoked = false;
   const result = await runConstraintShadowCompiler({
     abrainHome,
     cwd: repoRoot,
@@ -2571,6 +2991,10 @@ check("shadow runner generator with no merged rows does not require verifier inv
     writeArtifacts: true,
     runId: "generator-no-merged-rows",
     generateMergedSourceVerifier: true,
+    verifierInvoker: async () => {
+      verifierInvoked = true;
+      return { ok: false, error: "verifier should not run for zero rows" };
+    },
     compilerInvoker: async () => ({ ok: true, text: JSON.stringify({
       schemaVersion: "constraint-shadow-decision/v1",
       inputRootHash: "ignored-by-parser",
@@ -2590,8 +3014,18 @@ check("shadow runner generator with no merged rows does not require verifier inv
     }) }),
   });
   assert(result.ok, "no merged rows generator run failed");
+  assert(!verifierInvoked, "no merged rows invoked verifier model");
   assert(result.ok && !result.diagnostics.some((diagnostic) => diagnostic.code === "SC_MERGED_SOURCE_VERIFIER_MODEL_UNAVAILABLE"), "no merged rows emitted verifier unavailable diagnostic");
-  assert(!fs.existsSync(path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "merged-source-verifier.json")), "no merged rows wrote verifier artifact");
+  assert(result.ok && result.mergedSourceVerifier?.summary.totalRows === 0, "no merged rows empty verifier report missing");
+  const lookup = result.ok ? buildMergedSourceVerifierLookup({ events: [], decision: result.decision, verifier: result.mergedSourceVerifier }) : undefined;
+  assert(lookup?.reportStatus === "valid", "no merged rows verifier lookup was not valid");
+  assert(result.ok && result.artifacts?.files.mergedSourceVerifier === "merged-source-verifier.json", "no merged rows artifact files missing verifier path");
+  const latestVerifierPath = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "merged-source-verifier.json");
+  const runVerifierPath = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "runs", "generator-no-merged-rows", "merged-source-verifier.json");
+  assert(fs.existsSync(latestVerifierPath), "no merged rows latest verifier artifact missing");
+  assert(fs.existsSync(runVerifierPath), "no merged rows run verifier artifact missing");
+  const latestVerifier = JSON.parse(fs.readFileSync(latestVerifierPath, "utf8"));
+  assert(latestVerifier.summary.totalRows === 0, "no merged rows latest verifier summary mismatch");
 });
 
 check("repo-mode 固化s decision to immutable L1 + renders deterministic git L2 (round-trip + idempotent); state-mode is a no-op (ADR0039 NS-2/FIX-1)", async () => {

@@ -7,7 +7,7 @@ import { scanConstraintEvidenceEvents } from "./event-scan";
 import { runConstraintCompilerWithInvoker } from "./llm-compiler";
 import { scanLegacyConstraintSources } from "./legacy-scan";
 import { runMergedSourceVerifierWithInvoker } from "./merged-source-verifier-llm";
-import { buildMergedSourceVerifierInputRows, buildMergedSourceVerifierLookup } from "./merged-source-verifier";
+import { buildMergedSourceVerifierInputRows, buildMergedSourceVerifierLookup, createMergedSourceVerifierReport } from "./merged-source-verifier";
 import { normalizeConstraintSources, sha256Hex, stableCanonicalize } from "./normalize";
 import { buildConstraintCompilerPrompt } from "./prompt";
 import { renderConstraintShadowView } from "./render";
@@ -396,13 +396,19 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
   const verifierDiagnostics: ConstraintShadowDiagnostic[] = [];
   if (!candidateMergedSourceVerifier && options.generateMergedSourceVerifier) {
     const verifierInputRows = buildMergedSourceVerifierInputRows(eventScan.events, decision);
-    if (verifierInputRows.length > 0 && !options.verifierInvoker) {
+    if (verifierInputRows.length === 0) {
+      candidateMergedSourceVerifier = createMergedSourceVerifierReport({
+        events: eventScan.events,
+        decision,
+        verdictRows: [],
+      });
+    } else if (!options.verifierInvoker) {
       verifierDiagnostics.push(makeDiagnostic({
         code: "SC_MERGED_SOURCE_VERIFIER_MODEL_UNAVAILABLE",
         message: "constraint merged-source verifier invoker missing",
         data: { error: "verifier invoker missing" },
       }));
-    } else if (verifierInputRows.length > 0 && options.verifierInvoker) {
+    } else if (options.verifierInvoker) {
       const generatedVerifier = await runMergedSourceVerifierWithInvoker({
         events: eventScan.events,
         decision,

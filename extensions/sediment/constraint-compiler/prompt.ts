@@ -7,6 +7,22 @@ import type {
 import { sha256Hex, stableCanonicalize } from "./normalize";
 
 const PROMPT_SCHEMA_VERSION = "constraint-shadow-prompt/v1";
+const TRUNCATED_NATIVE_GIT_PROMPT_MARKER = "[source text truncated mid-word; incomplete tail omitted]";
+const TRUNCATED_DATA_CATEGORY_PROMPT_MARKER = "[source-truncated incomplete final category omitted]";
+
+function sanitizePromptOnlyString(value: string): string {
+  return value
+    .replace(/\. Native git operatio(?![A-Za-z])/g, `. ${TRUNCATED_NATIVE_GIT_PROMPT_MARKER}`)
+    .replace(/Native git operatio(?![A-Za-z])/g, TRUNCATED_NATIVE_GIT_PROMPT_MARKER)
+    .replace(/data migrati(?![A-Za-z])/g, TRUNCATED_DATA_CATEGORY_PROMPT_MARKER);
+}
+
+function sanitizePromptOnlyValue(value: unknown): unknown {
+  if (typeof value === "string") return sanitizePromptOnlyString(value);
+  if (Array.isArray(value)) return value.map(sanitizePromptOnlyValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, sanitizePromptOnlyValue(nested)]));
+}
 
 function renderScope(record: NormalizedConstraintRecord): string {
   if (!record.scope) return "none";
@@ -20,10 +36,10 @@ function renderRecord(record: NormalizedConstraintRecord): Record<string, unknow
     scope: renderScope(record),
     injectMode: record.injectMode ?? "none",
     status: record.status ?? "none",
-    title: record.title ?? "",
+    title: sanitizePromptOnlyString(record.title ?? ""),
     categoryHint: record.categoryHint,
     sourceHash: record.sourceHash,
-    normalized: record.normalized,
+    normalized: sanitizePromptOnlyValue(record.normalized),
   };
 }
 
@@ -42,6 +58,7 @@ export function buildConstraintCompilerPrompt(input: ConstraintCompilerPromptInp
     "This is a shadow-only analysis task. Do not propose or describe writes to canonical rules, memory entries, settings, runtime hooks, or session injection.",
     "Return JSON only. Do not wrap the response in markdown fences. Do not invent sourceRecordIds or projectIds.",
     "Never include mutation-key fields anywhere in the output object, including diagnostics.data: canonicalPath, canonical_path, targetPath, target_path, writePath, write_path, archiveSlugs, archive_slugs, deleteSlug, delete_slug, mutation, operation.",
+    "Hard validation failures: these outputs are rejected by the validator and will force retry. (1) A legacy source with status archived, superseded, or deprecated must never appear in constraints[] or as a merged compiled source; place it only in exclusions[] or diagnostics. (2) If sanitized input marks a known mid-word native-git tail and no complete visible native-git carve-out exists, compiledBody must not contain `native git` or `Native git`. (3) If sanitized input marks an incomplete final OAuth/category tail, do not complete it into a full category name; any retained incomplete-tail wording must explicitly mark it as source-truncated or a visible truncated fragment, never as a bare phrase.",
     "Every item that references records must use sourceRecordIds as an array of exact sourceId strings from the input payload. Never use sourceId, sources, refs, sourceIds, or a single string.",
     "For every compiled constraint, injectMode must exactly match every referenced source record (legacy rule or constraint event). Never combine always and listed records in one compiled constraint.",
     "When an active always source is a near-duplicate of a listed predecessor, do not merge them into one always/listed mixed-source constraint. Compile the active always source, and exclude the listed archived/superseded predecessor as superseded_observed or legacy_archived_observed.",
@@ -52,7 +69,10 @@ export function buildConstraintCompilerPrompt(input: ConstraintCompilerPromptInp
     "Every legacy rule source must receive exactly one mapping disposition: compiled, merged_source, excluded, unresolved, or diagnostic.",
     "Mapping disposition must match the source's primary bucket: compiled constraint sources use compiled or merged_source, exclusion sources use excluded, and unresolved sources use unresolved. Never map an unresolved-only source as compiled.",
     "Settings/config/tool-contract exclusions require an input categoryHint of settings_not_memory or tool_contract_not_memory for that exact source, or an existingDiagnostics entry for that source with SC_NOT_MEMORY_SETTINGS or SC_NOT_MEMORY_TOOL_CONTRACT. Do not invent not-memory exclusions from topical words alone.",
+    "When a source has categoryHint=settings_not_memory or categoryHint=tool_contract_not_memory, or an existingDiagnostics entry for that source with SC_NOT_MEMORY_SETTINGS or SC_NOT_MEMORY_TOOL_CONTRACT, it must be placed only in exclusions[] and must not appear in constraints[], merges[], or unresolved[] unless the source is malformed or has unknown status. Do not merge settings_not_memory or tool_contract_not_memory sources with any active behavioral rule.",
     "For a constraint_event with categoryHint=behavioral_constraint, compile the behavioral directive or place it in unresolved[]. Do not exclude it as settings_not_memory or tool_contract_not_memory merely because it mentions config, code, bash, toolContract, ToolContract, settings schema, removal, or checkpoint.",
+    "If a constraint_event explicitly describes a fact, identity, provenance, deployment/infrastructure fact, or diagnostic background and has no behavioral imperative or trigger obligation, exclude it as knowledge_candidate even if categoryHint says behavioral_constraint; do not put it in unresolved[] solely because it is not behavior.",
+    "Checkpoint/reminder constraint_event records with triggers such as two-week checkpoint, record a checkpoint, or remind/review whether to remove X are compileable behavioral directives. Compile the reminder/review obligation without inventing the future outcome; do not place them in unresolved[] solely because the future decision is conditional.",
     "Do not exclude a behavioral rule merely because it mentions config, code, bash, or string literals. Output/text encoding rules such as no \\u escapes or literal UTF-8 output are behavioral constraints, not settings_not_memory.",
     "For an active legacy_rule with categoryHint=behavioral_constraint, low numeric confidence, assistant-observed provenance, or overlap with a stronger source that has a different scope, injectMode, or sourceKind is not by itself a basis for unresolved/model_uncertain. If the body contains a clear imperative, compile that source as a separate constraint using its original scope and injectMode; add a diagnostic for the overlap when useful.",
     "Place an active legacy behavioral_constraint rule in unresolved[] only when the rule text cannot be parsed into a behavioral directive, the actual source scope is ambiguous, the source status is unknown, or there is a true semantic conflict.",
@@ -71,9 +91,16 @@ export function buildConstraintCompilerPrompt(input: ConstraintCompilerPromptInp
     "Do not merge constraint_event records whose trigger conditions or required behavior cannot be faithfully expressed by one compiled constraint. Keep them separate, or place the unsupported event in unresolved[] with trigger_projection_loss.",
     "If records overlap but cannot be combined because injectMode, scope, source kind, or semantic trigger condition differs, keep them as separate compiled constraints and add a diagnostic; do not put that review pair in merges[].",
     "Preserve mandatory and exclusive semantics from each source. Terms such as only, must, never, forbid, prohibited, 禁止, 必须, 仅, 只, 只能, and 不得, and phrases such as only business logic changes, are semantic thresholds rather than stylistic emphasis.",
+    "Preserve explicit action verbs in body text as obligations, including examples such as analyze upstream update content / 分析上游更新内容 and judge whether sync/release is needed / 是否有必要同步和发版. Title gates and body actions are complementary evidence; combine them in compiledBody or mustDoSummary instead of letting one replace the other.",
     "Preserve explicit severity, priority, and ranking semantics as behavioral ordering thresholds, not stylistic emphasis. Terms such as highest-severity, higher severity than, first, priority, critical, blocking, highest, 最严重, 优先级, 最高, and 首先 must remain represented in compiledBody, mustDoSummary, or appliesWhen when they affect behavior order or priority.",
+    "Preserve boundary, scope, fallback, rollback, and exception carve-outs exactly as written. Keep specific named examples, explicit must/record/disclose actions, placement and ordering rules such as previous model immediately after new model, and carve-outs such as timeless-direction docs excluded, individual entry lifecycle ops excluded, and does not change T0 architecture protocol in compiledBody; do not compress them into generic phrases or leave them only in mustDoSummary or appliesWhen.",
+    "Preserve normative architecture and methodology directives even when they appear inside a scope note, heading, or numbered list item. Phrases such as treat X as precedent, extend the same evidence-based unified architecture, and named mechanisms/examples such as deposition-time dedup, classifier-driven routing, and materialized-view frontmatter are architectural requirements; keep them in compiledBody when present instead of reducing them to generic scope or background context.",
     "In behavioral constraint sources, clear affirmative goals such as user wants, wants to, wants X to be Y, should, need, 要, 想把, 纳入, and 跟踪 must be preserved as target states or execution requirements. Do not rewrite them as may, can, allowed, or permitted unless the source explicitly frames the directive as permission or an exception.",
     "Do not weaken mandatory or exclusive thresholds into softer forms such as prioritize, prefer, normally, generally, should, unless materially affect, or other exception-bearing or probabilistic language unless that exception or weakening is explicit in the same source text.",
+    "Do not add exception, permission, or override paths that are not present in the same source text. Never add phrases such as unless explicitly requested or unless the source explicitly provides another trigger when the source did not say them. If the source is absolute, says no retroactive rewrite, or uses an only gate, compiledBody must keep that absolute/no-retroactive/only-gate semantics without adding an escape hatch.",
+    "If source text appears truncated in the middle of a word or sentence, do not infer or complete the missing tail into behavior, exceptions, permission paths, or carve-outs. Preserve only visible complete obligations; leave missing/incomplete tail semantics out of compiledBody.",
+    "If a visible truncated fragment must be retained to preserve the source meaning, copy only the visible fragment instead of completing it into a full word/category name. Do not leave compiledBody ending in a raw mid-word fragment; if retaining an incomplete visible fragment, label it explicitly as source-truncated or visible truncated fragment.",
+    "When sanitized input marks a known mid-word native-git tail, compiledBody must not contain native git or Native git unless that same source text contains a complete visible native-git carve-out.",
     "If a source says only X may trigger Y, compiledBody must preserve that exclusive gate; it must not become a prioritization rule or a materiality exception unless the source explicitly states that exception.",
     "Return exactly one strict JSON object and no prose. Every string value must be valid JSON; escape literal double quotes inside text values as backslash-quote.",
     "Do not invent object properties. Each constraint object may contain only scope, injectMode, title, compiledBody, mustDoSummary, appliesWhen, triggerPhrases, priorityHint, sourceRecordIds, sourceAuditIds, and decisionTrace.",

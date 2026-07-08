@@ -279,7 +279,12 @@ const sessionStart = sessionStartSummary(sessionStartAudit.rows, cutoffMs, minCo
 const latestAutoRefreshCompletedMs = autoRefresh.latestCompleted?.observedAtUtc
   ? Date.parse(autoRefresh.latestCompleted.observedAtUtc)
   : undefined;
-const sessionStartPostRefreshCutoffMs = Number.isFinite(latestAutoRefreshCompletedMs) ? latestAutoRefreshCompletedMs : cutoffMs;
+const latestSuccessfulArtifactMs = decisionRead.exists && !decisionRead.error ? decisionRead.mtimeMs : undefined;
+const sessionStartPostRefreshCutoffMs = Math.max(
+  cutoffMs,
+  Number.isFinite(latestAutoRefreshCompletedMs) ? latestAutoRefreshCompletedMs : cutoffMs,
+  Number.isFinite(latestSuccessfulArtifactMs) ? latestSuccessfulArtifactMs : cutoffMs,
+);
 const sessionStartPostRefresh = sessionStartSummary(sessionStartAudit.rows, sessionStartPostRefreshCutoffMs, minCoverageRatio);
 const liveCanary = liveCanarySummary(liveCanaryAudit.rows);
 

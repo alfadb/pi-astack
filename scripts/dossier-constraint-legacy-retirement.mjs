@@ -439,7 +439,10 @@ function buildRecommendedActions(deltaSummary) {
   add("semantic_review_required", countDisposition("legacyOnly", "semantic_review_required") + countDisposition("textDelta", "semantic_review_required") + countDisposition("compiledOnly", "semantic_review_required"), "Send semantic deltas to manual or T0 semantic review; do not retire the legacy source until the review records equivalence or an accepted replacement.");
   add("semantic_mismatch_fix_required", countDisposition("textDelta", "semantic_mismatch_fix_required"), "Fix the compiled output or source mapping before considering retirement.");
   add("unknown", countDisposition("legacyOnly", "unknown") + countDisposition("textDelta", "unknown") + countDisposition("compiledOnly", "unknown") + countDisposition("legacyOnly", "count_only_missing_details") + countDisposition("textDelta", "count_only_missing_details") + countDisposition("compiledOnly", "count_only_missing_details"), "Improve the disposition sidecar or audit detail emission so each residual has an actionable category.");
-  add("compiledOnly", deltaSummary.compiledOnly.unique, "Confirm whether compiled-only constraints are event-native accepted sources or require backfill/retirement authorization; unresolved compiled-only items block the flip.");
+  const compiledOnlyBlocking = Object.values(deltaSummary.compiledOnly.byDisposition).reduce((sum, group) => {
+    return sum + (group.blockingUnique ?? 0);
+  }, 0);
+  add("compiledOnly", compiledOnlyBlocking, "Confirm whether compiled-only constraints are event-native accepted sources or require backfill/retirement authorization; unresolved compiled-only items block the flip, including humanReviewRequired accepted dispositions.");
   const humanReview = ["legacyOnly", "textDelta", "compiledOnly"].reduce((sum, kind) => {
     return sum + Object.values(deltaSummary[kind].byDisposition).reduce((inner, group) => {
       return inner + (group.humanReviewUnique ?? 0);

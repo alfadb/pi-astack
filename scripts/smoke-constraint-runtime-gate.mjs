@@ -201,6 +201,40 @@ check("insufficient session-start rows warns but exits 0", () => {
   assert(json.gate.hardFailures.length === 0, `unexpected hard failures: ${JSON.stringify(json.gate.hardFailures)}`);
 });
 
+check("decision mtime excludes earlier post-auto-refresh coverage-bad rows", () => {
+  const fixture = makeFixture();
+  const now = Date.now();
+  const iso = (offsetMs = 0) => new Date(now + offsetMs).toISOString();
+  const shadowRoot = path.join(fixture.abrainHome, ".state", "sediment", "constraint-shadow");
+  const decisionPath = path.join(shadowRoot, "latest", "decision.json");
+  const decisionMtime = new Date(now - 5 * 60_000);
+  fs.utimesSync(decisionPath, decisionMtime, decisionMtime);
+  const actualDecisionMtimeMs = fs.statSync(decisionPath).mtimeMs;
+  const row = (offsetMs, coverageRatio) => ({
+    schemaVersion: "rule-injector-dualread-audit/v1",
+    observedAtUtc: iso(offsetMs),
+    status: "match",
+    stale: false,
+    coverageRatio,
+    injectableCoverageRatio: coverageRatio,
+    summary: { legacyRules: 0, shadowConstraints: 0, compiledOnly: 0, legacyOnly: 0, bothMatch: 0, textDelta: 0 },
+    delta: { legacyOnly: [], textDelta: [] },
+  });
+  appendJsonl(path.join(shadowRoot, "session-start-dualread", "audit.jsonl"), [
+    row(-6 * 60_000, 0.5),
+    row(-4 * 60_000, 1),
+    row(-3 * 60_000, 1),
+    row(-2 * 60_000, 1),
+  ]);
+  const { result, json } = runGate(fixture);
+  assert(result.status === 0, `expected exit 0, got ${result.status}: ${JSON.stringify(json.gate)}`);
+  assert(Date.parse(json.sessionStartDualReadPostRefresh.cutoffUtc) >= Math.floor(actualDecisionMtimeMs), `cutoff did not use decision mtime: ${json.sessionStartDualReadPostRefresh.cutoffUtc}`);
+  assert(json.sessionStartDualReadPostRefresh.rows === 3, `expected 3 post-refresh rows after decision mtime: ${JSON.stringify(json.sessionStartDualReadPostRefresh)}`);
+  assert(json.sessionStartDualReadPostRefresh.coverageBadRows === 0, `bad row leaked into post-refresh summary: ${JSON.stringify(json.sessionStartDualReadPostRefresh)}`);
+  assert(json.gate.warnings.some((item) => item.includes("historical session-start dual-read coverage-bad")), `missing historical warning: ${JSON.stringify(json.gate.warnings)}`);
+  assert(json.gate.hardFailures.length === 0, `unexpected hard failures: ${JSON.stringify(json.gate.hardFailures)}`);
+});
+
 if (failures.length) {
   console.log(`FAIL — ${failures.length}/${total} constraint runtime gate smoke checks failed.`);
   process.exit(1);
