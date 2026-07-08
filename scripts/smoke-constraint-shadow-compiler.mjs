@@ -43,6 +43,25 @@ function check(name, fn) {
 function assert(condition, message) {
   if (!condition) throw new Error(message || "assertion failed");
 }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function waitFor(name, fn, timeoutMs = 10_000, intervalMs = 50) {
+  const started = Date.now();
+  while (Date.now() - started <= timeoutMs) {
+    if (fn()) return;
+    await sleep(intervalMs);
+  }
+  throw new Error(`timed out waiting for ${name}`);
+}
+let autoRefreshSmokeChain = Promise.resolve();
+function checkAutoRefresh(name, fn) {
+  check(name, () => {
+    const next = autoRefreshSmokeChain.then(fn);
+    autoRefreshSmokeChain = next.catch(() => undefined);
+    return next;
+  });
+}
 function writeFile(file, content) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content, "utf8");
@@ -67,6 +86,10 @@ function listFiles(root) {
   };
   walk(root);
   return out.sort();
+}
+function readJsonlRows(file) {
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 function treeHash(root) {
   return sha256Hex(listFiles(root).map((rel) => `${rel}:${sha256Hex(fs.readFileSync(path.join(root, rel), "utf8"))}`).join("\n"));
@@ -135,6 +158,31 @@ exports.auditStreamSimple = async function auditStreamSimple(_projectRoot, meta,
 };
 `);
 
+writeFile(path.join(outRoot, "node_modules", "@earendil-works", "pi-ai", "compat.js"), `
+const defaultDecisionText = JSON.stringify({
+  schemaVersion: "constraint-shadow-decision/v1",
+  inputRootHash: "ignored-by-parser",
+  constraints: [],
+  exclusions: [],
+  unresolved: [],
+  merges: [],
+  rescopeProposals: [],
+  mappings: [],
+  diagnostics: [],
+});
+exports.streamSimple = function streamSimple() {
+  return {
+    result: async function result() {
+      globalThis.__constraintShadowSmokePiAiCallCount = (globalThis.__constraintShadowSmokePiAiCallCount || 0) + 1;
+      const delays = globalThis.__constraintShadowSmokePiAiDelaysMs;
+      const delayMs = Array.isArray(delays) ? (delays.shift() || 0) : (globalThis.__constraintShadowSmokePiAiDelayMs || 0);
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return { content: [{ type: "text", text: globalThis.__constraintShadowSmokePiAiText || defaultDecisionText }] };
+    },
+  };
+};
+`);
+
 // Stub writer module for auto-refresh (commitAbrainDerivedOutputs is best-effort, not needed in smoke)
 writeFile(path.join(outRoot, "sediment", "writer.js"), `
 exports.commitAbrainDerivedOutputs = async () => null;
@@ -163,7 +211,7 @@ const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment",
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
 const { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
-const { _runConstraintShadowAutoRefreshNowForTests, _resetConstraintShadowAutoRefreshForTests } = require(path.join(outRoot, "sediment", "constraint-compiler", "auto-refresh.js"));
+const { scheduleConstraintShadowAutoRefresh, _runConstraintShadowAutoRefreshNowForTests, _resetConstraintShadowAutoRefreshForTests } = require(path.join(outRoot, "sediment", "constraint-compiler", "auto-refresh.js"));
 const { acquireFileLock, abrainSedimentLocksDir } = require(path.join(outRoot, "_shared", "runtime.js"));
 const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, selectLatestConstraintProjectionEventId } = require(path.join(outRoot, "sediment", "constraint-compiler", "projection.js"));
 const { renderConstraintL2View } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
@@ -3311,7 +3359,7 @@ check("constraint compiler source does not import writer mutation symbols", () =
 
 // ── Auto-refresh cross-process lock (runOnce) ──
 
-check("auto-refresh runOnce acquires and releases cross-process lock", async () => {
+checkAutoRefresh("auto-refresh runOnce acquires and releases cross-process lock", async () => {
   _resetConstraintShadowAutoRefreshForTests();
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-lock-"));
   const abrainHome = path.join(home, "abrain");
@@ -3360,8 +3408,170 @@ check("auto-refresh runOnce acquires and releases cross-process lock", async () 
     const lastRow = JSON.parse(lines[lines.length - 1]);
     assert(lastRow.status === "lock_contended", `expected lock_contended, got ${lastRow.status}`);
     assert(lastRow.ok === false, "lock_contended row should be ok=false");
+
+    const markerFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
+    assert(fs.existsSync(markerFile), "needs-refresh marker should exist after lock contention");
+    const markerRows = readJsonlRows(markerFile);
+    const marker = markerRows[markerRows.length - 1];
+    assert(marker.schemaVersion === "constraint-shadow-auto-refresh-needs-refresh/v1", "needs-refresh marker schema mismatch");
+    assert(typeof marker.observedAtUtc === "string" && Number.isFinite(Date.parse(marker.observedAtUtc)), "needs-refresh marker observedAtUtc missing");
+    assert(marker.reason === "smoke_test", "needs-refresh marker reason mismatch");
+    assert(marker.sourceEventId === null, "needs-refresh marker sourceEventId should be null");
+    assert(marker.modelRef === "test/model", "needs-refresh marker modelRef mismatch");
   } finally {
     await holder.release();
+    _resetConstraintShadowAutoRefreshForTests();
+  }
+});
+
+checkAutoRefresh("auto-refresh lock contention marker schedules follow-up after holder releases", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const oldDelays = globalThis.__constraintShadowSmokePiAiDelaysMs;
+  const oldDelay = globalThis.__constraintShadowSmokePiAiDelayMs;
+  const oldText = globalThis.__constraintShadowSmokePiAiText;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-needs-refresh-"));
+  const abrainHome = path.join(home, "abrain");
+  const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
+  const markerFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
+
+  try {
+    globalThis.__constraintShadowSmokePiAiDelaysMs = [7_000, 0];
+    globalThis.__constraintShadowSmokePiAiDelayMs = 0;
+    globalThis.__constraintShadowSmokePiAiText = undefined;
+    globalThis.__constraintShadowSmokePiAiCallCount = 0;
+
+    const settings = resolveSedimentSettingsWithConfig({
+      sediment: {
+        constraintShadowCompiler: {
+          enabled: true,
+          model: "test/model",
+          autoRefresh: { enabled: true, debounceMs: 10, minIntervalMs: 0, eventStaleAfterMs: 86400000, maxPromptChars: 0 },
+        },
+      },
+    });
+    const fakeRegistry = {
+      find: () => ({ id: "test/model" }),
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fake" }),
+    };
+    const trigger = {
+      abrainHome,
+      cwd: home,
+      settings,
+      modelRegistry: fakeRegistry,
+      reason: "holder_smoke",
+    };
+
+    const holderRun = _runConstraintShadowAutoRefreshNowForTests(trigger);
+    await waitFor("holder auto-refresh start audit", () => readJsonlRows(auditFile).some((row) => row.status === "started"), 2_000);
+
+    await _runConstraintShadowAutoRefreshNowForTests({
+      ...trigger,
+      reason: "contended_smoke",
+      sourceEventId: "event-contended-smoke",
+    });
+    const markerRows = readJsonlRows(markerFile);
+    assert(markerRows.some((row) => row.reason === "contended_smoke" && row.sourceEventId === "event-contended-smoke"), "contended run did not persist needs-refresh marker");
+
+    await holderRun;
+    await waitFor("needs-refresh follow-up auto-refresh completion", () => readJsonlRows(auditFile).filter((row) => row.status === "completed").length >= 2, 5_000);
+
+    const rows = readJsonlRows(auditFile);
+    const completedAfterFollowUp = rows.filter((row) => row.status === "completed").length;
+    assert(rows.some((row) => row.status === "lock_contended" && row.reason === "contended_smoke"), "lock_contended audit missing for contended run");
+    assert(rows.filter((row) => row.status === "started").length >= 2, "follow-up auto-refresh did not start after marker ledger check");
+    assert(readJsonlRows(markerFile).some((row) => row.reason === "contended_smoke" && row.sourceEventId === "event-contended-smoke"), "needs-refresh marker ledger should retain the contention marker");
+    await sleep(100);
+    assert(readJsonlRows(auditFile).filter((row) => row.status === "completed").length === completedAfterFollowUp, "old needs-refresh marker should not keep scheduling after a covering follow-up compile");
+    assert(globalThis.__constraintShadowSmokePiAiCallCount >= 2, "expected holder and follow-up compiler invocations");
+  } finally {
+    globalThis.__constraintShadowSmokePiAiDelaysMs = oldDelays;
+    globalThis.__constraintShadowSmokePiAiDelayMs = oldDelay;
+    globalThis.__constraintShadowSmokePiAiText = oldText;
+    _resetConstraintShadowAutoRefreshForTests();
+  }
+});
+
+checkAutoRefresh("auto-refresh scheduler retries after lock contention marker", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const oldDelays = globalThis.__constraintShadowSmokePiAiDelaysMs;
+  const oldDelay = globalThis.__constraintShadowSmokePiAiDelayMs;
+  const oldText = globalThis.__constraintShadowSmokePiAiText;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-scheduler-retry-"));
+  const abrainHome = path.join(home, "abrain");
+  const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
+  const markerFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
+  const lockPath = path.join(abrainSedimentLocksDir(abrainHome), "constraint-shadow-auto-refresh.lock");
+  const holder = await acquireFileLock(lockPath, {
+    timeoutMs: 1_000,
+    staleMs: 30 * 60 * 1_000,
+    label: "scheduler-retry-holder",
+  });
+
+  try {
+    globalThis.__constraintShadowSmokePiAiDelaysMs = [0];
+    globalThis.__constraintShadowSmokePiAiDelayMs = 0;
+    globalThis.__constraintShadowSmokePiAiText = undefined;
+    globalThis.__constraintShadowSmokePiAiCallCount = 0;
+
+    const settings = resolveSedimentSettingsWithConfig({
+      sediment: {
+        constraintShadowCompiler: {
+          enabled: true,
+          model: "test/model",
+          autoRefresh: { enabled: true, debounceMs: 10, minIntervalMs: 0, eventStaleAfterMs: 86400000, maxPromptChars: 0 },
+        },
+      },
+    });
+    const fakeRegistry = {
+      find: () => ({ id: "test/model" }),
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fake" }),
+    };
+
+    scheduleConstraintShadowAutoRefresh({
+      abrainHome,
+      cwd: home,
+      settings,
+      modelRegistry: fakeRegistry,
+      reason: "scheduler_retry_smoke",
+      sourceEventId: "event-scheduler-retry-smoke",
+    });
+
+    await waitFor("scheduler lock contention marker", () => readJsonlRows(markerFile).some((row) => row.reason === "scheduler_retry_smoke"), 6_500);
+    assert(readJsonlRows(auditFile).some((row) => row.status === "lock_contended" && row.reason === "scheduler_retry_smoke"), "scheduler lock contention audit missing");
+
+    await holder.release();
+    await waitFor("scheduler retry completion", () => readJsonlRows(auditFile).some((row) => row.status === "completed"), 6_500);
+    assert(globalThis.__constraintShadowSmokePiAiCallCount >= 1, "scheduler retry did not invoke compiler after lock released");
+  } finally {
+    await holder.release().catch(() => undefined);
+    globalThis.__constraintShadowSmokePiAiDelaysMs = oldDelays;
+    globalThis.__constraintShadowSmokePiAiDelayMs = oldDelay;
+    globalThis.__constraintShadowSmokePiAiText = oldText;
+    _resetConstraintShadowAutoRefreshForTests();
+  }
+});
+
+checkAutoRefresh("auto-refresh schedule API still returns scheduled status", () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  try {
+    const settings = resolveSedimentSettingsWithConfig({
+      sediment: {
+        constraintShadowCompiler: {
+          enabled: true,
+          model: "test/model",
+          autoRefresh: { enabled: true, debounceMs: 60_000, minIntervalMs: 0, eventStaleAfterMs: 86400000, maxPromptChars: 0 },
+        },
+      },
+    });
+    const result = scheduleConstraintShadowAutoRefresh({
+      abrainHome: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-schedule-")), "abrain"),
+      cwd: os.tmpdir(),
+      settings,
+      modelRegistry: { find: () => ({ id: "test/model" }), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fake" }) },
+      reason: "schedule_smoke",
+    });
+    assert(result.scheduled === true, "schedule API did not report scheduled=true");
+  } finally {
     _resetConstraintShadowAutoRefreshForTests();
   }
 });
