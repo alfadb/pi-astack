@@ -30,7 +30,7 @@ import { countMultiviewPending } from "./multiview-staging-io";
 import { scanPerTurnCost, type PerTurnCostSummary } from "./per-turn-cost";
 import { runAggregatorLlmPass, type PromptNativeOutput } from "./aggregator-llm";
 import { mergeEvolutionLedger, summarizeEvolutionLedger, type EvolutionLedgerSummary } from "./evolution-ledger";
-import { appendLifecycleProposals } from "./entry-lifecycle-proposals";
+import { appendDecayDemoteProposals, appendLifecycleProposals } from "./entry-lifecycle-proposals";
 import { writeDecayShadow, auditDecayAssessments } from "./decay-shadow";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { readEntryTelemetry } from "./entry-telemetry";
@@ -369,6 +369,18 @@ export interface AggregatorSummary {
     would_demote_usage_only_count: number;
     invalid_score_count: number;
     regression_ok: boolean;
+  };
+  /** ADR 0031 upstream bridge audit: bounded decay would_demote=true -> lifecycle proposal emission. */
+  decay_proposals?: {
+    source: "decay";
+    ok: boolean;
+    error?: string;
+    considered: number;
+    eligible: number;
+    appended: number;
+    skipped_duplicate_slug: number;
+    limited: number;
+    max_per_run: number;
   };
   /** Phase C.2 fallback flag: true when the v1 LLM call was attempted
    *  but failed (model resolution, auth, transport error, parse
@@ -1499,6 +1511,35 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
         would_demote_usage_only_count: decayAudit.would_demote_usage_only_count,
         invalid_score_count: decayAudit.invalid_score_count,
         regression_ok: decayAudit.ok,
+      };
+      const decayProposalResult = decayAudit.ok
+        ? appendDecayDemoteProposals({
+            projectRoot: options.projectRoot,
+            assessments: promptNative.entry_decay_assessments,
+            now: options.now,
+            maxPerRun: 3,
+          })
+        : {
+            source: "decay" as const,
+            ok: true,
+            error: undefined,
+            considered: promptNative.entry_decay_assessments.length,
+            eligible: 0,
+            proposals_appended: 0,
+            skipped_duplicate_slug: 0,
+            limited: 0,
+            max_per_run: 3,
+          };
+      enrichedSummary.decay_proposals = {
+        source: "decay",
+        ok: decayProposalResult.ok,
+        ...(decayProposalResult.error ? { error: decayProposalResult.error } : {}),
+        considered: decayProposalResult.considered,
+        eligible: decayProposalResult.eligible,
+        appended: decayProposalResult.proposals_appended,
+        skipped_duplicate_slug: decayProposalResult.skipped_duplicate_slug,
+        limited: decayProposalResult.limited,
+        max_per_run: decayProposalResult.max_per_run,
       };
     }
   }

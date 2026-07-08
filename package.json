@@ -49,6 +49,7 @@
     "smoke:forgetting-executor-real": "node scripts/smoke-forgetting-executor-real.mjs",
     "smoke:forgetting-demote-e2e": "node scripts/smoke-forgetting-demote-e2e.mjs",
     "smoke:decay-shadow": "node scripts/smoke-decay-shadow.mjs",
+    "smoke:decay-proposal-bridge": "node scripts/smoke-decay-proposal-bridge.mjs",
     "oracle:goldset": "node scripts/oracle-goldset.mjs",
     "oracle:hub-quality": "node scripts/oracle-hub-quality.mjs",
     "oracle:dedup-neardup": "node scripts/oracle-dedup-neardup.mjs",

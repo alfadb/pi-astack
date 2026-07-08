@@ -85,12 +85,28 @@ const syncFileLockStub = {
   withFileLock: (_lockPath, fn) => ({ ok: true, value: fn() }),
   atomicWriteText: (file, content) => fs.writeFileSync(file, content),
 };
+const decayShadowStub = {
+  normalizeAssessment: (raw) => {
+    if (!raw || typeof raw !== "object" || !raw.slug) return null;
+    const ev = ["superseded_by", "contradicted", "version_stale"].includes(raw.demote_evidence_type) ? raw.demote_evidence_type : null;
+    return {
+      slug: raw.slug,
+      decay_score: typeof raw.decay_score === "number" ? Math.max(0, Math.min(1, raw.decay_score)) : 0,
+      would_demote: raw.would_demote === true && ev !== null,
+      demote_evidence_type: raw.would_demote === true ? ev : null,
+      primary_driver: raw.primary_driver || "disuse",
+      decay_inputs: raw.decay_inputs || {},
+      falsifier: raw.falsifier || "",
+    };
+  },
+};
 
 const modulePath = path.join(repoRoot, "extensions/sediment/entry-lifecycle-proposals.ts");
 const mod = loadCJS(transpile(modulePath), path.join(tmpDir, "entry-lifecycle-proposals.cjs"), new Map([
   ["../_shared/runtime", runtimeStub],
   ["../_shared/causal-anchor", causalAnchorStub],
   ["../_shared/sync-file-lock", syncFileLockStub],
+  ["./decay-shadow", decayShadowStub],
 ]));
 const { entryLifecycleProposalsPath, appendLifecycleProposals, appendSupersededFrontmatterProposals, appendSupersededMarkdownFrontmatterProposals, readLifecycleProposals } = mod;
 

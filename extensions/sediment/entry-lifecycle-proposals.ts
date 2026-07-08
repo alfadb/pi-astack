@@ -6,7 +6,9 @@
  * current entry frontmatter: status=superseded + valid non-self superseded_by
  * becomes execution-ready archive proposal with expected_status=superseded; a
  * standing superseded entry without a valid successor becomes review_required
- * only and is not executable in Phase 1.
+ * only and is not executable in Phase 1. D* Phase 2 adds a bounded bridge from
+ * decay-shadow's truth-change-gated would_demote=true assessments to ordinary
+ * execution-ready archive proposals, leaving all mutation gates in the executor.
  *
  * HARD BOUNDARIES:
  *   - NEVER writes durable entry markdown. NEVER imports / calls the writer,
@@ -31,12 +33,13 @@ import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { withFileLock, atomicWriteText } from "../_shared/sync-file-lock";
 import type { Jsonish, MemoryEntry, RelationEdge } from "../memory/types";
 import type { LifecycleProposal, PromotedAdvisory } from "./aggregator-llm";
+import { normalizeAssessment, type EntryDecayAssessment } from "./decay-shadow";
 
 export type LifecycleProposalReason = LifecycleProposal["reason"] | "superseded_no_successor";
 export type LifecycleProposalStatus = "pending" | "executed" | "failed";
 export type LifecycleProposalDisposition = "execution_ready" | "review_required";
 export type LifecycleProposalExpectedStatus = "active" | "superseded";
-export type LifecycleProposalEvidenceSource = "aggregator_promoted_advisory" | "frontmatter_superseded";
+export type LifecycleProposalEvidenceSource = "aggregator_promoted_advisory" | "frontmatter_superseded" | "decay";
 
 export interface EntryLifecycleProposalRow {
   schema_version: 1;
@@ -105,6 +108,34 @@ export interface AppendSupersededMarkdownFrontmatterProposalsOptions {
   abrainHome?: string;
   projectId?: string;
   now?: Date;
+}
+
+export interface AppendDecayDemoteProposalsOptions {
+  projectRoot: string;
+  assessments: unknown[];
+  now?: Date;
+  maxPerRun?: number;
+}
+
+export interface AppendDecayDemoteProposalsResult extends AppendLifecycleProposalsResult {
+  source: "decay";
+  considered: number;
+  eligible: number;
+  limited: number;
+  skipped_duplicate_slug: number;
+  max_per_run: number;
+  appended_slugs: string[];
+}
+
+interface AppendRowsOptions {
+  dedupeArchiveBySlug?: boolean;
+  maxAppend?: number;
+}
+
+interface AppendRowsResult extends AppendLifecycleProposalsResult {
+  limited?: number;
+  skipped_duplicate_slug?: number;
+  appended_slugs?: string[];
 }
 
 const PROPOSALS_MAX_ROWS = 1000;
@@ -178,7 +209,13 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
   if (!projectRoot || !op || !reason) return null;
   const expected = r.expected_status === "superseded" ? "superseded" : r.expected_status === "active" ? "active" : undefined;
   const disposition = r.disposition === "review_required" ? "review_required" : r.disposition === "execution_ready" ? "execution_ready" : undefined;
-  const source = r.evidence_source === "frontmatter_superseded" ? "frontmatter_superseded" : r.evidence_source === "aggregator_promoted_advisory" ? "aggregator_promoted_advisory" : undefined;
+  const source = r.evidence_source === "frontmatter_superseded"
+    ? "frontmatter_superseded"
+    : r.evidence_source === "aggregator_promoted_advisory"
+      ? "aggregator_promoted_advisory"
+      : r.evidence_source === "decay"
+        ? "decay"
+        : undefined;
   const normalized: EntryLifecycleProposalRow = {
     schema_version: 1,
     ts: typeof r.ts === "string" ? r.ts : formatLocalIsoTimestamp(),
@@ -215,15 +252,26 @@ function proposalIdentity(row: EntryLifecycleProposalRow): string {
   return [row.project_root, row.slug ?? "", row.op, source, key].join("\0");
 }
 
-function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[]): AppendLifecycleProposalsResult {
+function lifecycleAppendResult(r: AppendRowsResult): AppendLifecycleProposalsResult {
+  return {
+    ok: r.ok,
+    written: r.written,
+    proposals_appended: r.proposals_appended,
+    rows_total: r.rows_total,
+    ...(r.error ? { error: r.error } : {}),
+  };
+}
+
+function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], options: AppendRowsOptions = {}): AppendRowsResult {
   const pr = normalizeProjectRoot(projectRoot);
   try {
     if (!pr || rows.length === 0) {
       const existing = readJsonlTail<unknown>(entryLifecycleProposalsPath())
         .map(normalizeRow)
         .filter((r): r is EntryLifecycleProposalRow => r !== null);
-      return { ok: true, written: false, proposals_appended: 0, rows_total: existing.length };
+      return { ok: true, written: false, proposals_appended: 0, rows_total: existing.length, limited: 0, skipped_duplicate_slug: 0, appended_slugs: [] };
     }
+    const maxAppend = typeof options.maxAppend === "number" ? Math.max(0, Math.floor(options.maxAppend)) : Number.POSITIVE_INFINITY;
     const locked = withFileLock(entryLifecycleProposalsLockPath(), () => {
       const existing = readJsonlTail<unknown>(entryLifecycleProposalsPath())
         .map(normalizeRow)
@@ -241,29 +289,56 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[]): App
         }
         return row;
       });
+      const archiveSlugs = options.dedupeArchiveBySlug
+        ? new Set(reconciledExisting.filter((row) => row.project_root === pr && row.op === "archive" && !!row.slug).map((row) => row.slug as string))
+        : undefined;
       const seen = new Set(reconciledExisting.map(proposalIdentity));
       const newRows: EntryLifecycleProposalRow[] = [];
+      let limited = 0;
+      let skippedDuplicateSlug = 0;
       for (const row of rows) {
         const normalized = normalizeRow({ ...row, project_root: pr });
         if (!normalized) continue;
+        if (archiveSlugs && normalized.op === "archive" && normalized.slug) {
+          if (archiveSlugs.has(normalized.slug)) {
+            skippedDuplicateSlug++;
+            continue;
+          }
+        }
+        const id = proposalIdentity(normalized);
+        if (seen.has(id)) continue;
+        if (newRows.length >= maxAppend) {
+          limited++;
+          continue;
+        }
         if (normalized.evidence_source === "frontmatter_superseded" && normalized.disposition === "execution_ready" && normalized.slug) {
           const supersededId = supersededBySlug.get(normalized.slug);
           if (supersededId) normalized.supersedes_proposal_id = supersededId;
         }
-        const id = proposalIdentity(normalized);
-        if (seen.has(id)) continue;
         seen.add(id);
+        if (archiveSlugs && normalized.op === "archive" && normalized.slug) archiveSlugs.add(normalized.slug);
         newRows.push(normalized);
       }
       const changedExisting = reconciledExisting.some((row, idx) => row !== existing[idx]);
-      if (newRows.length === 0 && !changedExisting) return { proposals_appended: 0, rows_total: existing.length };
+      const appendedSlugs = newRows.map((row) => row.slug).filter((slug): slug is string => typeof slug === "string" && slug.length > 0);
+      if (newRows.length === 0 && !changedExisting) {
+        return { proposals_appended: 0, rows_total: existing.length, limited, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
+      }
       const allRows = [...reconciledExisting, ...newRows].slice(-PROPOSALS_MAX_ROWS);
       const enriched = allRows.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
       atomicWriteText(entryLifecycleProposalsPath(), enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
-      return { proposals_appended: newRows.length, rows_total: allRows.length, written: true };
+      return { proposals_appended: newRows.length, rows_total: allRows.length, written: true, limited, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
     });
-    if (!locked.ok) return { ok: false, written: false, proposals_appended: 0, rows_total: 0, error: "proposal_lock_contention" };
-    return { ok: true, written: locked.value.written === true, proposals_appended: locked.value.proposals_appended, rows_total: locked.value.rows_total };
+    if (!locked.ok) return { ok: false, written: false, proposals_appended: 0, rows_total: 0, error: "proposal_lock_contention", limited: 0, skipped_duplicate_slug: 0, appended_slugs: [] };
+    return {
+      ok: true,
+      written: locked.value.written === true,
+      proposals_appended: locked.value.proposals_appended,
+      rows_total: locked.value.rows_total,
+      limited: locked.value.limited ?? 0,
+      skipped_duplicate_slug: locked.value.skipped_duplicate_slug ?? 0,
+      appended_slugs: locked.value.appended_slugs ?? [],
+    };
   } catch (e) {
     return {
       ok: false,
@@ -271,6 +346,9 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[]): App
       proposals_appended: 0,
       rows_total: 0,
       error: e instanceof Error ? e.message : String(e),
+      limited: 0,
+      skipped_duplicate_slug: 0,
+      appended_slugs: [],
     };
   }
 }
@@ -305,7 +383,69 @@ export function appendLifecycleProposals(options: AppendLifecycleProposalsOption
       status: "pending",
     };
   });
-  return appendRows(projectRoot, rows);
+  return lifecycleAppendResult(appendRows(projectRoot, rows));
+}
+
+function decayReason(a: EntryDecayAssessment): LifecycleProposalReason {
+  return a.demote_evidence_type === "superseded_by" ? "affirm_superseded" : "affirm_stale";
+}
+
+function decayEvidenceText(a: EntryDecayAssessment): string {
+  const parts = [
+    `decay would_demote=true`,
+    `demote_evidence_type=${a.demote_evidence_type}`,
+    `primary_driver=${a.primary_driver}`,
+    `decay_score=${a.decay_score.toFixed(3)}`,
+  ];
+  const inputs = a.decay_inputs ?? {};
+  if (typeof inputs.window_retrieved_unused === "number") parts.push(`window_retrieved_unused=${inputs.window_retrieved_unused}`);
+  if (typeof inputs.decisive_streak === "number") parts.push(`decisive_streak=${inputs.decisive_streak}`);
+  if (inputs.last_cited_at) parts.push(`last_cited_at=${inputs.last_cited_at}`);
+  return parts.join("; ");
+}
+
+/**
+ * Bridge decay-shadow's truth-change-gated would_demote=true signal into the
+ * existing proposal sidecar. This is deliberately small: no markdown mutation,
+ * no executor bypass, no historical decay-shadow replay, and no usage-only path.
+ */
+export function appendDecayDemoteProposals(options: AppendDecayDemoteProposalsOptions): AppendDecayDemoteProposalsResult {
+  const projectRoot = normalizeProjectRoot(options.projectRoot);
+  const ts = formatLocalIsoTimestamp(options.now ?? new Date());
+  const maxPerRun = Math.max(0, Math.min(3, Math.floor(options.maxPerRun ?? 3)));
+  const normalized = (Array.isArray(options.assessments) ? options.assessments : [])
+    .map(normalizeAssessment)
+    .filter((a): a is EntryDecayAssessment => !!a && a.would_demote === true && a.demote_evidence_type !== null);
+
+  const rows: EntryLifecycleProposalRow[] = normalized.map((a) => ({
+    schema_version: 1,
+    ts,
+    project_root: projectRoot,
+    slug: a.slug,
+    kind: "outcome_entry",
+    op: "archive",
+    reason: decayReason(a),
+    independent_evidence: clip(decayEvidenceText(a)),
+    falsifier: clip(a.falsifier || "newer evidence retracts the decay assessment or the entry is revalidated as current"),
+    message: clip(`decay-shadow would_demote=true for ${a.slug}`),
+    expected_status: "active",
+    disposition: "execution_ready",
+    evidence_source: "decay",
+    evidence_key: `decay:${a.slug}:${a.demote_evidence_type}:${a.primary_driver}`,
+    evidence_type: a.demote_evidence_type ?? undefined,
+    status: "pending",
+  }));
+  const appended = appendRows(projectRoot, rows, { dedupeArchiveBySlug: true, maxAppend: maxPerRun });
+  return {
+    ...appended,
+    source: "decay",
+    considered: Array.isArray(options.assessments) ? options.assessments.length : 0,
+    eligible: normalized.length,
+    limited: appended.limited ?? 0,
+    skipped_duplicate_slug: appended.skipped_duplicate_slug ?? 0,
+    max_per_run: maxPerRun,
+    appended_slugs: appended.appended_slugs ?? [],
+  };
 }
 
 function scalarString(value: Jsonish | undefined): string | undefined {
@@ -408,7 +548,7 @@ export function appendSupersededFrontmatterProposals(options: AppendSupersededFr
     }
   }
 
-  const r = appendRows(projectRoot, rows);
+  const r = lifecycleAppendResult(appendRows(projectRoot, rows));
   return { ...r, e1_count: e1.length, e2_count: e2.length, e1_slugs: e1, e2_slugs: e2 };
 }
 
