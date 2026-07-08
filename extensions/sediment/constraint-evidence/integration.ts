@@ -134,11 +134,13 @@ function sanitizeField(input: string): SanitizeResult & { text: string } {
 
 function summarizeSanitizer(results: Array<SanitizeResult>): ConstraintEvidenceEventBodyV1["sanitizer"] {
   const replacementsCount = results.reduce((sum, result) => sum + (result.replacements?.length ?? 0), 0);
+  const blocked = results.find((result) => result.ok === false);
   return {
     sanitizer_name: "sediment.correction-pipeline",
     sanitizer_version: "v1",
-    status: replacementsCount > 0 ? "redacted" : "passed",
+    status: blocked ? "blocked" : replacementsCount > 0 ? "redacted" : "passed",
     replacements_count: replacementsCount,
+    ...(blocked ? { blocked_reason: blocked.error || "sanitizeForMemory returned ok:false" } : {}),
   };
 }
 

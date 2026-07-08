@@ -10,6 +10,16 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 export type KnowledgeEvidenceOperation = "create" | "update" | "merge" | "archive" | "supersede" | "delete";
 export type KnowledgeEvidenceScope = "project" | "world";
 
+export interface KnowledgeEvidenceLlmExtraction {
+  model: string;
+  prompt_version: string;
+  prompt_hash: string;
+  input_hash: string;
+  output_hash: string;
+  parsed_output_hash?: string;
+  acceptance: "accepted_for_event_append" | "diagnostic_only";
+}
+
 export interface KnowledgeEvidenceEventBodyV1 {
   event_schema_version: "knowledge-evidence-event/v1";
   event_type: "knowledge_entry_observed";
@@ -66,6 +76,7 @@ export interface KnowledgeEvidenceEventBodyV1 {
     name: "sediment.knowledge-event-writer";
     version: "adr0039-p5";
   };
+  llm_extraction?: KnowledgeEvidenceLlmExtraction;
 }
 
 export interface KnowledgeEvidenceEnvelopeV1 {
@@ -314,6 +325,49 @@ function normalizeCompiledTruth(title: string, body: string): string {
   text = text.replace(/^---$/gm, " ---");
   if (!/^#\s+/m.test(text)) text = `# ${title}\n\n${text}`;
   return text.trim();
+}
+
+function knowledgeLlmExtractionForWrite(args: AppendKnowledgeEvidenceForWriteOptions, slug: string): KnowledgeEvidenceLlmExtraction | undefined {
+  const model = args.settings.curatorModel || args.settings.extractorModel;
+  if (!model) return undefined;
+  const promptVersion = "knowledge-evidence-writer/v1";
+  const input = {
+    operation: args.operation || "create",
+    scope: args.scope,
+    project_id: args.projectId,
+    draft: {
+      title: args.draft.title,
+      kind: args.draft.kind,
+      status: args.draft.status || "provisional",
+      provenance: args.draft.provenance || "assistant-observed",
+      confidence: args.draft.confidence,
+      compiled_truth_hash: sha256Hex(args.draft.compiledTruth),
+      trigger_phrases: args.draft.triggerPhrases ?? [],
+      derives_from: args.draft.derivesFrom ?? [],
+      timeline_note_hash: args.draft.timelineNote ? sha256Hex(args.draft.timelineNote) : undefined,
+    },
+    legacy_result: {
+      slug,
+      status: args.result.status,
+      reason: args.result.reason,
+    },
+  };
+  const output = {
+    slug,
+    title: args.draft.title,
+    kind: args.draft.kind,
+    status: args.draft.status || "provisional",
+    compiled_truth_hash: sha256Hex(args.draft.compiledTruth),
+  };
+  return {
+    model,
+    prompt_version: promptVersion,
+    prompt_hash: sha256Hex(promptVersion),
+    input_hash: sha256Hex(canonicalJson(toJsonValue(input))),
+    output_hash: sha256Hex(canonicalJson(toJsonValue(output))),
+    parsed_output_hash: sha256Hex(canonicalJson(toJsonValue(output))),
+    acceptance: "accepted_for_event_append",
+  };
 }
 
 export function renderKnowledgeProjectionMarkdown(body: KnowledgeEvidenceEventBodyV1, eventId: string): string {
@@ -699,6 +753,7 @@ export async function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEv
   const deviceId = await readOrCreateDeviceId(args.abrainHome);
   const legacyWrite = args.legacyParallelWrite;
   const producerNonce = `knowledge:${now}:${sessionId}:${turnId}:${slug}:${args.operation || "create"}:${sha256Hex(JSON.stringify({ result: args.result.status, path: args.result.path ?? "", legacyWriteAttempted: legacyWrite?.attempted ?? true }))}`;
+  const llmExtraction = knowledgeLlmExtractionForWrite(args, slug);
   return {
     event_schema_version: "knowledge-evidence-event/v1",
     event_type: "knowledge_entry_observed",
@@ -747,6 +802,7 @@ export async function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEv
       ...((legacyWrite?.reason ?? args.result.reason) ? { reason: legacyWrite?.reason ?? args.result.reason } : {}),
     },
     producer: { name: "sediment.knowledge-event-writer", version: "adr0039-p5" },
+    ...(llmExtraction ? { llm_extraction: llmExtraction } : {}),
   };
 }
 

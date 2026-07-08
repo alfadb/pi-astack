@@ -51,12 +51,10 @@ ok(HARD_MAX_WORKERS === 8, "HARD_MAX_WORKERS is 8 (non-tunable ceiling)");
 const dflt = resolveHubSettings(undefined);
 ok(dflt.enabled === false, "default enabled=false (kill-switch off)");
 ok(dflt.maxWorkers === 8, "default maxWorkers=8");
-ok(dflt.dualExecSampleRate === 0.2, "default dualExecSampleRate=0.2");
+ok(!Object.prototype.hasOwnProperty.call(dflt, "dualExecSampleRate"), "runtime hub settings do not expose dualExecSampleRate");
 ok(resolveHubSettings({ maxWorkers: 99 }).maxWorkers === 8, "maxWorkers clamped down to 8");
 ok(resolveHubSettings({ maxWorkers: 0 }).maxWorkers === 1, "maxWorkers clamped up to 1");
 ok(resolveHubSettings({ maxWorkers: 3 }).maxWorkers === 3, "maxWorkers 3 preserved");
-ok(resolveHubSettings({ dualExecSampleRate: 5 }).dualExecSampleRate === 1, "rate clamped to 1");
-ok(resolveHubSettings({ dualExecSampleRate: -1 }).dualExecSampleRate === 0, "rate clamped to 0");
 ok(resolveHubSettings({ enabled: true }).enabled === true, "enabled=true honored");
 ok(resolveHubSettings({ enabled: "yes" }).enabled === false, "non-boolean enabled → false (strict)");
 ok(resolveHubSettings({ model: "x/y" }).model === "x/y", "explicit model preserved");
@@ -155,6 +153,9 @@ ok(sum.dual_exec_sampled === true, "summary carries dual-exec sampling flag");
 
 // ── live shell source wiring: hub must use dispatch tool-block progress ──
 ok(/progress:\s*\{[\s\S]{0,900}?startTicker/.test(hubSrc), "HubDeps accepts dispatch progress helpers");
+ok(/mainSessionVendorFromCtx\(ctx\)/.test(hubSrc), "dispatch_hub derives main-session vendor from ctx.model");
+ok(/selectHubModel\(\{[\s\S]{0,160}?avoidVendors:\s*mainVendor/.test(hubSrc), "dispatch_hub passes main vendor to selectHubModel avoidVendors");
+ok(/buildHubDecisionRow\(\{[\s\S]{0,420}?\.\.\.\(mainVendor \? \{ mainVendor \} : \{\}\)/.test(hubSrc), "dispatch_hub passes mainVendor into decision audit rows");
 ok(!/renderShell:\s*"self"/.test(hubSrc), "dispatch_hub keeps the default boxed tool shell for padding/background");
 ok(/renderCall[\s\S]{0,160}?renderResult/.test(hubSrc), "dispatch_hub provides tool-block renderers");
 ok(/progress\.startTicker\(onUpdate,\s*progressSnapshot\)/.test(hubSrc), "dispatch_hub starts the onUpdate progress ticker");

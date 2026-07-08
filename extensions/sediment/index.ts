@@ -599,10 +599,9 @@ function isTerminalTier1Reject(result: WriteRuleResult): boolean {
   // is ":write_failed" (IO): it stays non-terminal so the checkpoint HOLDs and
   // the content-addressed event idempotently re-appends next agent_end (no new
   // persistence layer — durable retry deferred to the L3 SQLite jobs table).
-  // ":blocked" is classified defensively; it is UNREACHABLE today because
-  // constraint-evidence/integration.ts hardcodes sanitizer.status="passed".
-  // TODO(adr0039-p4a-sanitizer): exercise ":blocked" once real sanitizer
-  // wiring lands; until then this arm is dead-but-correct.
+  // ":blocked" is deterministic: constraint-evidence/integration.ts now
+  // propagates sanitizeForMemory ok:false into sanitizer.status="blocked",
+  // and append.ts rejects it with CE_SANITIZER_BLOCKED.
   if (result.reason.startsWith("constraint_evidence_append_failed:")) {
     return result.reason !== "constraint_evidence_append_failed:write_failed";
   }

@@ -52,14 +52,15 @@ const R = (name, settings = base, callerFilters) => resolveProfileExecution(SEAR
   ok(JSON.stringify(r.filters.status) === JSON.stringify(["all"]) && r.filters.limit === 5, "sedimentDedup: status:[all] limit:5");
   ok(r.search.stage1Skip === base.search.stage1Skip, "sedimentDedup: stage1Skip 继承全局(P5b 验证后跟读栈)");
   ok(r.search.sparseBM25 === base.search.sparseBM25, "sedimentDedup: sparseBM25 继承全局");
+  ok(r.search.bestEffortOnNone === false, "sedimentDedup: bestEffortOnNone 强制 false(verdict=none 返空语义)");
   ok(r.search.dedupChunk0Aggregation === true, "sedimentDedup: dedupChunk0Aggregation 强制 true(ADR 0036 P4 条件1 dedup 专用 pin)");
   // 关键泄漏防护: 全局开/关 dedupChunk0Aggregation, dedup 仍钉 true; 同时 stage1Skip/sparseBM25 跟随全局
-  const gOff = { ...base, search: { ...base.search, stage1Skip: false, sparseBM25: false, dedupChunk0Aggregation: false } };
+  const gOff = { ...base, search: { ...base.search, stage1Skip: false, sparseBM25: false, bestEffortOnNone: false, dedupChunk0Aggregation: false } };
   const r2 = R("sedimentDedup", gOff);
-  ok(r2.search.dedupChunk0Aggregation === true && r2.search.stage1Skip === false && r2.search.sparseBM25 === false, "sedimentDedup: 全局关时 chunk0 仍钉 true(漏不进), stage1Skip/sparseBM25 跟随全局 false");
-  const gOn = { ...base, search: { ...base.search, stage1Skip: true, sparseBM25: true, dedupChunk0Aggregation: false } };
+  ok(r2.search.dedupChunk0Aggregation === true && r2.search.bestEffortOnNone === false && r2.search.stage1Skip === false && r2.search.sparseBM25 === false, "sedimentDedup: 全局关时 chunk0 仍钉 true、bestEffortOnNone 仍钉 false, stage1Skip/sparseBM25 跟随全局 false");
+  const gOn = { ...base, search: { ...base.search, stage1Skip: true, sparseBM25: true, bestEffortOnNone: true, dedupChunk0Aggregation: false } };
   const r3 = R("sedimentDedup", gOn);
-  ok(r3.search.dedupChunk0Aggregation === true && r3.search.stage1Skip === true && r3.search.sparseBM25 === true, "sedimentDedup: 全局开时 chunk0 仍钉 true, stage1Skip/sparseBM25 跟随全局 true(ADR 0037 dedup 专用 pin 核心保证)");
+  ok(r3.search.dedupChunk0Aggregation === true && r3.search.bestEffortOnNone === false && r3.search.stage1Skip === true && r3.search.sparseBM25 === true, "sedimentDedup: 全局开时 chunk0 仍钉 true、bestEffortOnNone 仍钉 false, stage1Skip/sparseBM25 跟随全局 true(ADR 0037 dedup 专用 pin 核心保证)");
   ok(r.returnVerdict === false, "sedimentDedup: returnVerdict false");
 }
 // correctionSearch: status:[active], limit:10

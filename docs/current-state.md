@@ -37,12 +37,16 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 | `empty-visible-output-retry/` | `message_end` 空可见输出重试 hook | ✓ |
 | `goal/` | `goal_status/set/pause/resume/stop/clear`；`/goal` | ✓ |
 | `imagine/` | `imagine` | ✓ |
+| `llm-audit/` | hook（无 LLM tool/slash） | ✓ |
 | `memory/` | `memory_search/get/list/decide`；`/memory` | ✓ |
 | `model-curator/` | model snapshot 注入；`/curator-reload` | ✓ |
 | `model-fallback/` | error hooks | ✓ |
+| `openai-service-tier/` | hook（无 LLM tool/slash） | ✓ |
 | `persistent-input-history/` | editor 子类；`/history-compact`、`/history-status` | ✓ |
 | `sediment/` | `agent_end` hook；`/sediment`；background lanes | ✓ |
+| `thinking-repeat-breaker/` | hook（无 LLM tool/slash） | ✓ |
 | `time-injector/` | system-prompt time block | ✓ |
+| `tool-circuit-breaker/` | hook（无 LLM tool/slash） | ✓ |
 | `tool-contract/` | `final_answer`；provider payload hook | ✓ |
 | `tool-parallel-cap/` | Anthropic payload hook | ✓ |
 | `turn-progress/` | footer / pre-working widget | ✓ |
@@ -62,10 +66,12 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 | 主题 | 契约 |
 |---|---|
 | Source of truth | **L1 Evidence Event** 是唯一语义证据源（内容寻址、一事件一文件、immutable、随 git 同步，`~/.abrain/l1/events/sha256/`）；canonical memory = L1 的确定性投影（ADR0039）。Knowledge/Constraint 当前生产写入为 `event_first`，成功追加 event 后不再稳态写 legacy markdown；legacy markdown 保留为回滚、调试、迁移输入。 |
-| 证据架构（ADR0039） | 三层 HYBRID_MD_GIT_PLUS_DB：L1 Evidence Event SOT（git）→ L2 Markdown View（git，人类可读审计视图，**非用户编辑面**；用户纠错须转成新 L1 event 再重投影）→ L3 SQLite / embedding 等派生索引（不入 git、可丢弃重建）。读路径现状：Knowledge 读 `projection_only`（以 `knowledgeProjector.canonicalReadMode` 运行配置为准，legacy markdown 保留作显式回滚输入，不进入稳态 winning pool）。Constraint `session_start` 已注入 compiled-view，但当前 runtime consumer 仍读取 `~/.abrain/.state/sediment/constraint-shadow/latest/compiled-view.md`；`~/.abrain/l2/views/constraint/latest/compiled-view.md` 是 repo L2 投影/审计面，不是当前 injector 的读取源。当前 `ruleInjector.compiledViewInjection.fallbackToLegacyOnError=false`，compiled-view 读/coverage/freshness/schema/size 失败会 fail-closed；legacy rules 保留为 rollback/debug/migration surface，不是 read failure fallback。最新 pi-global dual-read audit 仍为 `status=delta`：`legacyOnlyDispositions=settings_not_memory:6`，机器 audit 中 `textDelta=19` 仍为 semantic review surface，本轮人工审查判断为语义等价压缩，`queuedEvents=2` 是 `merged_source` freshness surface，不阻塞 `injectableCoverageRatio=1`；legacy retirement/archive/delete 仍需独立 gate，不能由 fallback=false 间接执行。Knowledge L1/L2 coverage gate 与 reconcile 已通过；health 仍有 warnings。各域迁移阶段/未完成项以 [`docs/roadmap.md`](./roadmap.md) + [ADR0039](./adr/0039-constraint-pipeline-reset.md) 为准。 |
+| 证据架构（ADR0039） | 三层 HYBRID_MD_GIT_PLUS_DB：L1 Evidence Event SOT（git）→ L2 Markdown View（git，人类可读审计视图，**非用户编辑面**；用户纠错须转成新 L1 event 再重投影）→ L3 SQLite / embedding 等派生索引（不入 git、可丢弃重建）。读路径现状：Knowledge 读 `projection_only`（以 `knowledgeProjector.canonicalReadMode` 运行配置为准，legacy markdown 保留作显式回滚输入，不进入稳态 winning pool）。Constraint `session_start` 已注入 compiled-view，但当前 runtime consumer 仍读取 `~/.abrain/.state/sediment/constraint-shadow/latest/compiled-view.md`；`~/.abrain/l2/views/constraint/latest/compiled-view.md` 是 repo L2 投影/审计面，不是当前 injector 的读取源。当前 `ruleInjector.compiledViewInjection.fallbackToLegacyOnError=false`，compiled-view 读/coverage/schema/size 失败会 fail-closed；`requireFresh=false` 后 stale 处置为注入上一版稳定 view 并显示 banner。2026-07-08 实测数据门全绿：coverage=1.0、queued=0、appendFailed=0、legacyOnly=0，textDelta 已经多轮 T0 复核至 2026-07-07 且全部 semantic_equivalent。legacy rules 保留为 rollback/debug/migration surface，不是 read failure fallback；legacy retirement/archive/delete 仍需独立 gate，不能由 fallback=false 间接执行。各域迁移阶段/未完成项以 [`docs/roadmap.md`](./roadmap.md) + [ADR0039](./adr/0039-constraint-pipeline-reset.md) 为准。 |
 | 七区拓扑 | `identity/ skills/ habits/ workflows/ projects/ knowledge/ vault/`（人类可读视图层）；底层证据/投影/索引见上「证据架构」行。 |
 | 项目知识 legacy surface | `~/.abrain/projects/<projectId>/...` 保留为回滚、调试、迁移输入；Knowledge 稳态写入走 L1 event，稳态读取走 L2 projection。 |
 | 世界知识 legacy surface | `~/.abrain/knowledge/<slug>.md` 保留为回滚、调试、迁移输入；world 知识稳态读取来自 L2 projection。 |
+| Forgetting 运行实态 | `memory.forgetting` instrumentation/decayShadow/demoteShadow/autoDemote 四 flag 全开，`autoLlmWriteEnabled=true`；2026-07-04 已有首条真实 demote 写入 forgetting-demote-ledger（reason `affirm_superseded`，30 天 reactivation 窗口至 2026-08-03）。剩余缺口是 aggregator→lifecycle_proposal 接线：aggregator 61 次运行产出 0 条 lifecycle_proposal，executor 当前无上游输入；decay-shadow 已识别 5 条 `would_demote=true` 但未喂 executor。 |
+| 过渡态登记 | 当前 shadow/observe/dogfood/gated-defer 面以 [`docs/transition-register.md`](./transition-register.md) 为唯一登记表；新增过渡态必须同步登记退出条件。 |
 | workflows | `~/.abrain/workflows/` 或 `~/.abrain/projects/<id>/workflows/`。 |
 | `.pensieve/` | legacy 只读迁移源；sediment 不再写入。 |
 | 跨设备同步 | sediment commit 后后台 push、启动 `fetch` 后先试 `merge --ff-only`，分叉时退到确定性 `merge --no-ff`（git 自带 3-way）；**LLM 解冲突被明确拒绝（知识库幻觉风险），真冲突 abort 并向用户出 runbook**（ADR 0020）。 |

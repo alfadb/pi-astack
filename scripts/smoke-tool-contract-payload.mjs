@@ -77,7 +77,9 @@ check("before_provider_request hook injects via shared payload helper", () => {
   if (!/injectToolChoiceIntoPayload\(event\.payload/.test(indexSrc)) throw new Error("payload injection helper not used");
 });
 
-check("sub-agent path is gated off by default", () => {
+check("tool-contract and sub-agent path are gated off by default", () => {
+  if (!/enabled:\s*false/.test(settingsSrc)) throw new Error("enabled default must be false");
+  if (!schemaSrc.includes('"default": false')) throw new Error("schema enabled default must include false");
   if (!/disableForSubAgent/.test(settingsSrc)) throw new Error("disableForSubAgent setting missing");
   if (!/disableForSubAgent:\s*true/.test(settingsSrc)) throw new Error("disableForSubAgent default must be true");
   if (!/isSubAgentSession\(ctx\)/.test(indexSrc)) throw new Error("isSubAgentSession guard missing");

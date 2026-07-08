@@ -21,7 +21,7 @@ export interface ToolContractSettings {
 }
 
 export const DEFAULT_TOOL_CONTRACT_SETTINGS: ToolContractSettings = {
-  enabled: true,
+  enabled: false,
   disableForSubAgent: true,
   checkMismatch: true,
 };

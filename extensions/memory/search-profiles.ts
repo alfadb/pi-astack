@@ -52,7 +52,7 @@ export const SEARCH_PROFILES: Record<SearchProfileName, SearchProfile> = {
   // dedup 只用 chunk0 head 聚合, 不让共享尾段 chunk 的 distinct entry 浮上为近重候选(实测 -74%
   // 新增邻居)—— 全局无此 flag 的对应物, 故钉死不随全局漂。near-dup 判定与
   // relevantEntriesForCurator/readonly-rule-neighbors 入参由调用方控(preloadedEntries)。
-  sedimentDedup: { name: "sedimentDedup", filtersMode: "fixed", status: ["all"], limit: () => 5, searchOverrides: () => ({ dedupChunk0Aggregation: true }), returnVerdict: false },
+  sedimentDedup: { name: "sedimentDedup", filtersMode: "fixed", status: ["all"], limit: () => 5, searchOverrides: () => ({ bestEffortOnNone: false, dedupChunk0Aggregation: true }), returnVerdict: false },
   // sediment 纠错: status:[active], limit:10。
   correctionSearch: { name: "correctionSearch", filtersMode: "fixed", status: ["active"], limit: () => 10, returnVerdict: false },
 };

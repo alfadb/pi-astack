@@ -5,7 +5,7 @@ status: superseded
 
 # ADR 0006 — 组件合并清单
 
-> 🗄️ **ARCHIVE-CLASS · SUPERSEDED（Phase-2，3×T0 mark-in-place）**：组件清单/路径已过时，三类上游关系已入 `UPSTREAM.md`；当前真相以 `UPSTREAM.md` / `directory-layout.md` / 代码为准，勿据本正文判断当前实现。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿删。
+> 🗄️ **ARCHIVE-CLASS · SUPERSEDED（Phase-2，3×T0 mark-in-place）**：组件清单/路径已过时，三类上游关系已入 `UPSTREAM.md`；当前真相以 `UPSTREAM.md` / `directory-layout.md` / 代码为准，勿据本正文判断当前实现。机制正文原地保留可读、物理归档延后至 abrain ingest lane 落地，勿删。2026-07-08 文档补注：正文引用的 ADR 0002/0004/0005/0007/0008 已随 gbrain 退场删除，不留 stub；历史原文见 git history。补注理由：避免读者把过时交叉引用误判为当前文档缺失。
 
 > ⚠️ PARTIALLY HISTORICAL：A/B/C 上游关系与组件合并思想仍有效；具体目录、扩展清单和 gbrain/sediment 路径以 [../directory-layout.md](../directory-layout.md) 与 [../../UPSTREAM.md](../../UPSTREAM.md) 为准。当前没有 active vendor methodology submodule；`vendor/gstack/` 已于 2026-07-06 退役为 reference-on-demand，`vendor/pensieve/` 已移除/retired，正文中相关 vendor 目录规划仅作历史记录。
 

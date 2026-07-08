@@ -179,8 +179,8 @@
 
         "enabled": {
           "type": "boolean",
-          "default": true,
-          "description": "Master switch. When false the extension factory returns early: no final_answer tool, no payload injection, and no mismatch warning hook. Env PI_ASTACK_DISABLE_TOOL_CONTRACT=1 wins over this setting."
+          "default": false,
+          "description": "Master switch. Default off: when false the extension factory returns early, with no final_answer tool, no payload injection, and no mismatch warning hook. Env PI_ASTACK_DISABLE_TOOL_CONTRACT=1 wins over this setting."
         },
 
         "disableForSubAgent": {
@@ -1752,13 +1752,6 @@
               "type": "string",
               "default": "high",
               "description": "Thinking level for the hub planning call."
-            },
-            "dualExecSampleRate": {
-              "type": "number",
-              "default": 0.2,
-              "minimum": 0,
-              "maximum": 1,
-              "description": "Fraction of hub turns the oracle (increment 4) also dual-executes (human-pick vs hub-pick) for the cross-vendor correctness judge (ADR 0030 §5b)."
             }
           }
         },

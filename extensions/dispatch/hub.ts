@@ -64,9 +64,6 @@ export interface HubSettings {
   maxWorkers: number;
   /** Thinking level for the hub planning call. */
   thinking: string;
-  /** ADR 0030 §5(b): fraction of hub turns that also dual-execute for the
-   *  cross-vendor correctness judge. Consumed by the oracle (increment 4). */
-  dualExecSampleRate: number;
 }
 
 export interface HubWorkerSpec {
@@ -102,7 +99,6 @@ export const DEFAULT_HUB_SETTINGS: HubSettings = {
   enabled: false,
   maxWorkers: HARD_MAX_WORKERS,
   thinking: "high",
-  dualExecSampleRate: 0.2,
 };
 
 function asNum(v: unknown, fallback: number): number {
@@ -110,17 +106,15 @@ function asNum(v: unknown, fallback: number): number {
 }
 
 /** Resolve + clamp the hub settings sub-block. maxWorkers is clamped to
- *  [1, HARD_MAX_WORKERS]; dualExecSampleRate to [0, 1]. */
+ *  [1, HARD_MAX_WORKERS]. */
 export function resolveHubSettings(raw: unknown): HubSettings {
   const cfg = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const maxWorkers = Math.max(1, Math.min(HARD_MAX_WORKERS, Math.floor(asNum(cfg.maxWorkers, DEFAULT_HUB_SETTINGS.maxWorkers))));
-  const rate = Math.max(0, Math.min(1, asNum(cfg.dualExecSampleRate, DEFAULT_HUB_SETTINGS.dualExecSampleRate)));
   return {
     enabled: cfg.enabled === true,
     ...(typeof cfg.model === "string" && cfg.model.trim() ? { model: cfg.model.trim() } : {}),
     maxWorkers,
     thinking: typeof cfg.thinking === "string" && cfg.thinking.trim() ? cfg.thinking.trim() : DEFAULT_HUB_SETTINGS.thinking,
-    dualExecSampleRate: rate,
   };
 }
 
@@ -128,6 +122,14 @@ export function resolveHubSettings(raw: unknown): HubSettings {
 
 function vendorOf(model: string): string {
   return String(model ?? "").split("/")[0]?.trim() || "unknown";
+}
+
+function mainSessionVendorFromCtx(ctx: Record<string, unknown>): string | undefined {
+  const model = (ctx.model && typeof ctx.model === "object" ? ctx.model : undefined) as Record<string, unknown> | undefined;
+  const provider = typeof model?.provider === "string" ? model.provider.trim() : "";
+  if (provider) return provider;
+  const id = typeof model?.id === "string" ? model.id.trim() : typeof model?.modelId === "string" ? model.modelId.trim() : "";
+  return id.includes("/") ? vendorOf(id) : undefined;
 }
 
 /** Flatten modelCurator.providers into a flat "provider/model" allow-set for
@@ -488,13 +490,14 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : deps.defaultTimeoutMs;
       const projectRoot = (typeof ctx.cwd === "string" ? ctx.cwd : "") || process.cwd();
       const modelRegistry = ctx.modelRegistry;
+      const mainVendor = mainSessionVendorFromCtx(ctx);
       const parentAnchor = getCurrentAnchor();
 
       // ADR 0030 §7: the main session picks the hub model per-task (params.hubModel).
       // Priority: per-call choice → optional settings default → auto-pick flagship.
       // NOT a fixed settings pin — hub model is chosen freely by the main session.
       const requestedHubModel = typeof params.hubModel === "string" ? params.hubModel.trim() : "";
-      const hubModel = selectHubModel({ explicit: requestedHubModel || hubCfg.model, flagshipModels });
+      const hubModel = selectHubModel({ explicit: requestedHubModel || hubCfg.model, flagshipModels, avoidVendors: mainVendor ? [mainVendor] : [] });
       if (!hubModel) {
         return { content: [{ type: "text" as const, text: "dispatch_hub: no flagship model available to act as hub (configure modelCurator.tiers.flagship or dispatch.hub.model)." }], details: { kind: "dispatch_hub_no_model" }, isError: true };
       }
@@ -550,6 +553,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         void emit(hubAnchor, buildHubDecisionRow({
           hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText,
           workers: [], rationale: "", warnings: [reason], sameVendorAsHub: 0, planDiversity: "single-vendor",
+          ...(mainVendor ? { mainVendor } : {}),
           hubDurationMs: durMs, hubResult: "fail", hubFailureType: failureType,
           ...(usage ? { usage } : {}),
         }));
@@ -612,6 +616,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       void emit(hubAnchor, buildHubDecisionRow({
         hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText: hubRes.output ?? "",
         workers: v.workers, rationale: parsed.plan.rationale, warnings: v.warnings, sameVendorAsHub: v.sameVendorAsHub, planDiversity: v.planDiversity,
+        ...(mainVendor ? { mainVendor } : {}),
         hubDurationMs, hubResult: "ok", ...(hubRes.usage ? { usage: hubRes.usage } : {}),
       }));
 

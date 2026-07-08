@@ -12,7 +12,7 @@ status: accepted
   3. "运行环境强制 git 版本管理"——repo 内变更可逆，"不可逆性"清单比 0032 假设的窄得多；
   4. "会话内变更改坏了大不了重来，你这种搞法又陷入机械主义"——为低概率/低损失/可重做事件建专用防护 = 过度工程（第二大脑中有同型 anti-pattern 档案：LLM assistant 反复默认机械护栏框架）。
 - **依赖**: [ADR 0003](0003-main-session-read-only.md)（主会话只读—— 不动，且是废除闸 (c) 的结构承重墙，见 §1.1-5）、ADR 0014（vault 秘密释放门——**显式 out of scope**）、 [ADR 0024](0024-second-brain-from-natural-conversation.md) （INV-INVISIBILITY / AI-Native 原则——本 ADR 的哲学上游）、 [ADR 0027](0027-coupled-stigmergic-dual-loop-agent-system.md) （C1'-C6、H5——H5 边界在本 ADR 中被精确化而非放宽）、 [ADR 0032](0032-goal-runtime-and-declarative-workflow.md)（**被修订对象**：W1、W7、§5 晋升机检、§6 三闸、§8 W6 措辞）。
-- **编号说明**: 0029/0030/0031 预留（0030 = evaluation harness）。 0033 为下一空号。
+- **编号说明**: 0029 当时预留；0030 已为 L2 hub baseline（2026-06-16 Accepted），0031 已为自治遗忘（2026-06-15 Accepted）。0033 为当时下一空号（2026-07-08 文档补注理由：补齐后续编号落定事实，保留原编号选择语义）。
 
 ---
 

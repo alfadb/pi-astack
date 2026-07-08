@@ -1533,6 +1533,7 @@ Original Pensieve seed content.
     const evidenceSettings = {
       ...DEFAULT_SEDIMENT_SETTINGS,
       gitCommit: false,
+      curatorModel: "provider/curator-model",
       knowledgeEvidenceEventWriter: { enabled: true, mode: "parallel_legacy", legacyFallbackOnEventFailure: true },
       knowledgeProjector: { enabled: true, hotOverlayEnabled: true, projectOnWrite: true, maxReadBytes: 1000000 },
     };
@@ -1553,6 +1554,8 @@ Original Pensieve seed content.
     });
     assert(evidenceWrite.status === "created", `knowledge evidence writer failed: ${evidenceWrite.reason}`);
     assert(evidenceWrite.knowledgeEvidenceEvent?.append?.ok, `knowledge evidence append missing: ${JSON.stringify(evidenceWrite.knowledgeEvidenceEvent)}`);
+    assert(evidenceWrite.knowledgeEvidenceEvent.body?.llm_extraction?.model === "provider/curator-model", `knowledge llm_extraction model missing: ${JSON.stringify(evidenceWrite.knowledgeEvidenceEvent.body?.llm_extraction)}`);
+    assert(/^[0-9a-f]{64}$/.test(evidenceWrite.knowledgeEvidenceEvent.body?.llm_extraction?.input_hash || ""), `knowledge llm_extraction input_hash missing: ${JSON.stringify(evidenceWrite.knowledgeEvidenceEvent.body?.llm_extraction)}`);
     assert(evidenceWrite.knowledgeEvidenceEvent.projection?.status === "projected", `knowledge evidence projection missing: ${JSON.stringify(evidenceWrite.knowledgeEvidenceEvent.projection)}`);
     assert(fs.existsSync(knowledgeEvidenceEventPath(evidenceTarget.abrainHome, evidenceWrite.knowledgeEvidenceEvent.append.eventId)), "knowledge evidence event file missing");
     const projectionStores = await readKnowledgeProjectionStores({ abrainHome: evidenceTarget.abrainHome, projectId: evidenceTarget.projectId, settings: evidenceSettings });

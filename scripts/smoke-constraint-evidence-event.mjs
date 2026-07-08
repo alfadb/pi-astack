@@ -65,6 +65,7 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
   writeFile(path.join(outRoot, dst), transpile(path.join(repoRoot, src)));
 }
 
+const integrationSrc = fs.readFileSync(path.join(repoRoot, "extensions/sediment/constraint-evidence/integration.ts"), "utf8");
 const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-constraint-evidence-"));
 for (const file of [
   "extensions/sediment/constraint-evidence/types.ts",
@@ -508,6 +509,12 @@ check("runtime integration body is deterministic for repeated agent_end signal",
   assert(first.source.channel === "agent_end", "runtime event channel mismatch");
   assert(first.scope.scope_hint.kind === "project", "project signal must remain project-scoped at append time");
   assert(first.legacy_parallel_write.legacy_path_kind === "tier1_ruleset_adjudicator", "legacy path hint missing");
+});
+
+check("runtime integration propagates sanitizer blocked status", () => {
+  assert(integrationSrc.includes("result.ok === false"), "integration must inspect sanitizer ok:false");
+  assert(integrationSrc.includes('status: blocked ? "blocked"'), "integration must emit blocked sanitizer status");
+  assert(integrationSrc.includes("blocked_reason"), "integration must emit blocked_reason");
 });
 
 check("runtime integration records sanitizer redaction metadata", () => {
