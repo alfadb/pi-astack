@@ -1665,6 +1665,114 @@ Original Pensieve seed content.
       assert(!projectOffUpdate.knowledgeEvidenceEvent, `projectOnWrite=false rejected L2-only update must not append an event: ${JSON.stringify(projectOffUpdate.knowledgeEvidenceEvent)}`);
       assert(fs.readFileSync(l2OnlyProjection, "utf-8") === l2OnlyProjectionBeforeProjectOff, "projectOnWrite=false rejected update must not mutate L2 projection");
 
+      const countStopL1Events = () => {
+        const eventRoot = path.join(stopAbrain, "l1", "events");
+        let count = 0;
+        const walk = (dir) => {
+          if (!fs.existsSync(dir)) return;
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) walk(full);
+            else if (entry.isFile() && entry.name.endsWith(".json")) count += 1;
+          }
+        };
+        walk(eventRoot);
+        return count;
+      };
+      const staleUpdateCreate = await writeProjectEntry({
+        title: "Writer Legacy Stop Stale Update",
+        kind: "fact",
+        confidence: 7,
+        sessionId: "session-legacy-stop-stale-update-create",
+        compiledTruth: "Creates an L2-only projection whose watermark will be tampered before update.",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(staleUpdateCreate.status === "created" && !fs.existsSync(staleUpdateCreate.path), `stale update seed must be L2-only: ${JSON.stringify(staleUpdateCreate)}`);
+      const staleUpdateProjection = staleUpdateCreate.knowledgeEvidenceEvent?.projection?.outputPath;
+      assert(staleUpdateProjection && fs.existsSync(staleUpdateProjection), `stale update projection missing: ${JSON.stringify(staleUpdateCreate.knowledgeEvidenceEvent?.projection)}`);
+      const staleUpdateOriginalProjection = fs.readFileSync(staleUpdateProjection, "utf-8");
+      const staleUpdateTamperedProjection = staleUpdateOriginalProjection.replace(/^sediment_watermark_event_id: [0-9a-f]{64}$/m, "sediment_watermark_event_id: 0000000000000000000000000000000000000000000000000000000000000000");
+      assert(staleUpdateTamperedProjection !== staleUpdateOriginalProjection, "stale update smoke failed to tamper watermark");
+      fs.writeFileSync(staleUpdateProjection, staleUpdateTamperedProjection);
+      const staleUpdateEventCountBefore = countStopL1Events();
+      const staleUpdate = await updateProjectEntry(staleUpdateCreate.slug, {
+        status: "active",
+        expected_status: "archived",
+        confidence: 8,
+        compiledTruth: "# Writer Legacy Stop Stale Update\n\nThis update must reject stale_projection before expected_status mismatch.",
+        sessionId: "session-legacy-stop-stale-update-expected-status",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(staleUpdate.status === "rejected" && staleUpdate.reason === "stale_projection", `tampered L2 update with expected_status mismatch must reject stale_projection before status_precondition_failed: ${JSON.stringify(staleUpdate)}`);
+      assert(!staleUpdate.knowledgeEvidenceEvent, `stale update with expected_status mismatch must not append event result: ${JSON.stringify(staleUpdate.knowledgeEvidenceEvent)}`);
+      assert(countStopL1Events() === staleUpdateEventCountBefore, "stale update with expected_status mismatch must not append an L1 event");
+      assert(fs.readFileSync(staleUpdateProjection, "utf-8") === staleUpdateTamperedProjection, "stale update with expected_status mismatch must not mutate tampered L2 projection bytes");
+      fs.writeFileSync(staleUpdateProjection, staleUpdateOriginalProjection);
+
+      const staleHardDeleteCreate = await writeProjectEntry({
+        title: "Writer Legacy Stop Stale Hard Delete",
+        kind: "fact",
+        confidence: 7,
+        sessionId: "session-legacy-stop-stale-hard-delete-create",
+        compiledTruth: "Creates an L2-only projection whose set hash will be tampered before hard delete.",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(staleHardDeleteCreate.status === "created" && !fs.existsSync(staleHardDeleteCreate.path), `stale hard-delete seed must be L2-only: ${JSON.stringify(staleHardDeleteCreate)}`);
+      const staleHardDeleteProjection = staleHardDeleteCreate.knowledgeEvidenceEvent?.projection?.outputPath;
+      assert(staleHardDeleteProjection && fs.existsSync(staleHardDeleteProjection), `stale hard-delete projection missing: ${JSON.stringify(staleHardDeleteCreate.knowledgeEvidenceEvent?.projection)}`);
+      const staleHardDeleteOriginalProjection = fs.readFileSync(staleHardDeleteProjection, "utf-8");
+      const staleHardDeleteTamperedProjection = staleHardDeleteOriginalProjection.replace(/^sediment_input_event_set_hash: [0-9a-f]{64}$/m, "sediment_input_event_set_hash: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+      assert(staleHardDeleteTamperedProjection !== staleHardDeleteOriginalProjection, "stale hard-delete smoke failed to tamper input_event_set_hash");
+      fs.writeFileSync(staleHardDeleteProjection, staleHardDeleteTamperedProjection);
+      const staleHardDeleteEventCountBefore = countStopL1Events();
+      const staleHardDeleteWithExpectedStatus = await deleteProjectEntry(staleHardDeleteCreate.slug, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+        mode: "hard",
+        expected_status: "archived",
+        reason: "stale hard delete expected-status smoke",
+        sessionId: "session-legacy-stop-stale-hard-delete-expected-status",
+      });
+      assert(staleHardDeleteWithExpectedStatus.status === "rejected" && staleHardDeleteWithExpectedStatus.reason === "stale_projection", `tampered L2 hard delete with expected_status must reject stale_projection before status_precondition_failed: ${JSON.stringify(staleHardDeleteWithExpectedStatus)}`);
+      assert(!staleHardDeleteWithExpectedStatus.knowledgeEvidenceEvent, `stale hard delete with expected_status must not append event result: ${JSON.stringify(staleHardDeleteWithExpectedStatus.knowledgeEvidenceEvent)}`);
+      assert(countStopL1Events() === staleHardDeleteEventCountBefore, "stale hard delete with expected_status must not append an L1 event");
+      assert(fs.existsSync(staleHardDeleteProjection), `stale hard delete with expected_status must keep L2 projection: ${staleHardDeleteProjection}`);
+      assert(fs.readFileSync(staleHardDeleteProjection, "utf-8") === staleHardDeleteTamperedProjection, "stale hard delete with expected_status must not mutate tampered L2 projection bytes");
+      const staleHardDelete = await deleteProjectEntry(staleHardDeleteCreate.slug, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+        mode: "hard",
+        reason: "stale hard delete smoke",
+        sessionId: "session-legacy-stop-stale-hard-delete",
+      });
+      assert(staleHardDelete.status === "rejected" && staleHardDelete.reason === "stale_projection", `tampered L2 hard delete must reject stale_projection: ${JSON.stringify(staleHardDelete)}`);
+      assert(!staleHardDelete.knowledgeEvidenceEvent, `stale hard delete must not append event result: ${JSON.stringify(staleHardDelete.knowledgeEvidenceEvent)}`);
+      assert(countStopL1Events() === staleHardDeleteEventCountBefore, "stale hard delete must not append an L1 event");
+      assert(fs.existsSync(staleHardDeleteProjection), `stale hard delete must keep L2 projection: ${staleHardDeleteProjection}`);
+      assert(fs.readFileSync(staleHardDeleteProjection, "utf-8") === staleHardDeleteTamperedProjection, "stale hard delete must not mutate tampered L2 projection bytes");
+      fs.writeFileSync(staleHardDeleteProjection, staleHardDeleteOriginalProjection);
+
       const l2OnlyUpdate = await updateProjectEntry(stopCreate.slug, {
         status: "active",
         confidence: 8,

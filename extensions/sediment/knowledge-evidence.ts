@@ -669,6 +669,13 @@ export interface KnowledgeSetProjection {
   inputEventSetHash: string;
 }
 
+export interface KnowledgeEvidenceL1Head {
+  winnerEventId: string;
+  inputEventSetHash: string;
+  projectionKind: "entry" | "delete";
+  eventCount: number;
+}
+
 /** Deterministic fold of an event set to one entry. Last non-delete event in
  *  topo order wins the payload; created comes from the earliest event. A single
  *  event with no in-set parents degenerates byte-identically to the per-event
@@ -694,6 +701,24 @@ export function renderKnowledgeProjectionFromSet(nodes: KnowledgeEventNode[]): K
   const withoutHash = renderKnowledgeProjectionMarkdownBytes(winner.body, winner.eventId, "", overrides);
   const outputHash = sha256Hex(withoutHash);
   return { kind: "entry", markdown: renderKnowledgeProjectionMarkdownBytes(winner.body, winner.eventId, outputHash, overrides), winnerEventId: winner.eventId, inputEventSetHash };
+}
+
+export async function readKnowledgeEvidenceL1Head(args: {
+  abrainHome: string;
+  scope: KnowledgeEvidenceScope;
+  projectId?: string;
+  slug: string;
+}): Promise<KnowledgeEvidenceL1Head | undefined> {
+  const identity = args.scope === "world" ? `world::${args.slug}` : `project:${args.projectId || "unknown"}:${args.slug}`;
+  const nodes = await collectKnowledgeEventSet(args.abrainHome, identity);
+  if (nodes.length === 0) return undefined;
+  const projection = renderKnowledgeProjectionFromSet(nodes);
+  return {
+    winnerEventId: projection.winnerEventId,
+    inputEventSetHash: projection.inputEventSetHash,
+    projectionKind: projection.kind,
+    eventCount: nodes.length,
+  };
 }
 
 export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; envelope: KnowledgeEvidenceEnvelopeV1; settings: SedimentSettings }): Promise<ProjectKnowledgeEvidenceResult> {

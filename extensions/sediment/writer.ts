@@ -5,7 +5,7 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
-import { appendKnowledgeEvidenceForWrite, readKnowledgeStableViewStores, type AppendKnowledgeEvidenceForWriteResult } from "./knowledge-evidence";
+import { appendKnowledgeEvidenceForWrite, readKnowledgeEvidenceL1Head, readKnowledgeStableViewStores, type AppendKnowledgeEvidenceForWriteResult, type KnowledgeEvidenceL1Head } from "./knowledge-evidence";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
@@ -273,7 +273,8 @@ function knowledgeLegacyMarkdownWriteDisabled(settings: SedimentSettings): boole
 function canMutateKnowledgeStableView(settings: SedimentSettings): boolean {
   return knowledgeLegacyMarkdownWriteDisabled(settings)
     && settings.knowledgeProjector.enabled === true
-    && settings.knowledgeProjector.projectOnWrite === true;
+    && settings.knowledgeProjector.projectOnWrite === true
+    && settings.knowledgeProjector.projectionMode === "topo";
 }
 
 function legacyMarkdownSkippedAudit(result: AppendKnowledgeEvidenceForWriteResult | undefined): Record<string, unknown> {
@@ -282,6 +283,43 @@ function legacyMarkdownSkippedAudit(result: AppendKnowledgeEvidenceForWriteResul
     reason: "legacy_markdown_write_disabled",
     event_id: result?.append.eventId ?? null,
   };
+}
+
+interface StableViewWatermarkCasResult {
+  ok: boolean;
+  detail?: string;
+  l2?: { sediment_watermark_event_id?: string; sediment_input_event_set_hash?: string };
+  l1?: KnowledgeEvidenceL1Head | null;
+}
+
+function isSha256Hex(value: string | undefined): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+}
+
+async function checkKnowledgeStableViewWatermarkCas(args: {
+  abrainHome: string;
+  projectId: string;
+  scope: "project" | "world";
+  slug: string;
+  raw: string;
+}): Promise<StableViewWatermarkCasResult> {
+  const frontmatter = parseFrontmatter(splitFrontmatter(args.raw).frontmatterText);
+  const watermarkEventId = scalarString(frontmatter.sediment_watermark_event_id);
+  const inputEventSetHash = scalarString(frontmatter.sediment_input_event_set_hash);
+  const l2 = { sediment_watermark_event_id: watermarkEventId, sediment_input_event_set_hash: inputEventSetHash };
+  if (!watermarkEventId || !inputEventSetHash) return { ok: false, detail: "missing_watermark", l2, l1: null };
+  if (!isSha256Hex(watermarkEventId) || !isSha256Hex(inputEventSetHash)) return { ok: false, detail: "malformed_watermark", l2, l1: null };
+  const l1 = await readKnowledgeEvidenceL1Head({
+    abrainHome: args.abrainHome,
+    projectId: args.projectId,
+    scope: args.scope,
+    slug: args.slug,
+  });
+  if (!l1) return { ok: false, detail: "missing_l1_head", l2, l1: null };
+  if (l1.projectionKind === "delete") return { ok: false, detail: "l1_head_deleted", l2, l1 };
+  if (l1.winnerEventId !== watermarkEventId) return { ok: false, detail: "watermark_event_id_mismatch", l2, l1 };
+  if (l1.inputEventSetHash !== inputEventSetHash) return { ok: false, detail: "input_event_set_hash_mismatch", l2, l1 };
+  return { ok: true, l2, l1 };
 }
 
 function draftFromEntryMarkdown(raw: string, fallbackSlug: string, fallbackPatch?: ProjectEntryUpdateDraft): ProjectEntryDraft {
@@ -1445,12 +1483,27 @@ export async function deleteProjectEntry(
     }
     const lockedPath = lockedTarget.path;
     const originalRaw = await fs.readFile(lockedPath, "utf-8");
+    if (lockedTarget.source === "stable_view") {
+      const watermarkCas = await checkKnowledgeStableViewWatermarkCas({ abrainHome, projectId: opts.projectId, scope, slug, raw: originalRaw });
+      if (!watermarkCas.ok) {
+        const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+          operation: "reject",
+          reason: "stale_projection",
+          stale_projection_detail: watermarkCas.detail,
+          target: `${targetPrefix}:${slug}`,
+          path: path.relative(auditRoot, lockedPath),
+          delete_mode: "hard",
+          stable_view_watermark_cas: watermarkCas,
+          duration_ms: Date.now() - started,
+        }));
+        return { slug, path: lockedPath, status: "rejected", reason: "stale_projection", auditPath, deleteMode: "hard", ...resultCtx };
+      }
+    }
     // CAS / expected-status guard (ADR 0027 C3'): the read of originalRaw and
     // the unlink below are both inside the sediment lock, so comparing the
     // freshly-read on-disk status to opts.expected_status is a true
-    // compare-and-swap. This is what lets hard_archive `git rm` an entry ONLY
-    // while it is still archived — a concurrent reactivate flips status to
-    // active and the delete is rejected instead of destroying live state.
+    // compare-and-swap. Stable-view reads prove their watermark first, so a
+    // stale or tampered L2 projection cannot drive this frontmatter check.
     // Opt-in: undefined expected_status skips the check (backward-compatible).
     if (opts.expected_status !== undefined) {
       const actualStatusRaw = parseFrontmatter(splitFrontmatter(originalRaw).frontmatterText).status;
@@ -1676,6 +1729,22 @@ export async function updateProjectEntry(
         duration_ms: Date.now() - started,
       }));
       return { ok: false, response: { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx } };
+    }
+    if (resolvedTarget.source === "stable_view") {
+      const watermarkCas = await checkKnowledgeStableViewWatermarkCas({ abrainHome, projectId: opts.projectId, scope, slug, raw });
+      if (!watermarkCas.ok) {
+        const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+          operation: "reject",
+          reason: "stale_projection",
+          stale_projection_detail: watermarkCas.detail,
+          target: `${targetPrefix}:${slug}`,
+          path: path.relative(auditRoot, target),
+          stable_view_watermark_cas: watermarkCas,
+          duration_ms: Date.now() - started,
+          ...(opts.auditExtras ?? {}),
+        }));
+        return { ok: false, response: { slug, path: target, status: "rejected", reason: "stale_projection", auditPath, ...resultCtx } };
+      }
     }
     // CAS / expected-status guard (ADR 0027 C3' infra). Opt-in: only runs when
     // a caller sets patch.expected_status. On the real RMW path this read of
