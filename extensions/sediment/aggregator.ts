@@ -265,8 +265,31 @@ export interface RawDistributionSummary {
   };
   /** How many slugs have at least one footnote in the window. */
   slugs_with_any_footnote: number;
-  /** How many slugs have zero footnotes (retrieved only via tool-result). */
+  /** How many slugs have zero footnotes (retrieved only via tool-result/source_tool). */
   slugs_with_only_tool_result: number;
+}
+
+export interface OutcomeActivityBuckets {
+  /** Valid memory-footnote rows with a usable `used` taxonomy value. */
+  self_report: number;
+  /** Path A injected this turn and no explicit self-report cited the slug. */
+  implicit_unused: number;
+  /** Retrieval-only observations that are allowed to omit `used`. */
+  retrieval_only: number;
+  /** Path A injection inventory rows that are allowed to omit `used`. */
+  injection_only: number;
+  /** Sources that should carry a valid `used` value but do not. */
+  missing_used_unexpected: number;
+  /** Historical or unknown sources that cannot be assigned safely. */
+  legacy_or_unknown_source: number;
+}
+
+export interface OutcomeMissingUsedSummary {
+  /** Missing/invalid `used` rows whose source is observation-only by design. */
+  allowed: number;
+  /** Missing/invalid `used` rows from self-report-like sources. */
+  unexpected: number;
+  unexpected_sources: Record<string, number>;
 }
 
 export interface AggregatorAdvisory {
@@ -295,10 +318,16 @@ export interface AggregatorSummary {
   };
   outcome: {
     rows_considered: number;
+    /** Rows that still participate in the legacy mechanical outcome summary. */
     window_rows: number;
+    /** All outcome-ledger rows in the time window, including observation-only rows. */
+    activity_window_rows: number;
     slugs_seen: number;
     high_unused: Array<{ slug: string; retrieved_unused_count: number; total_retrievals: number; decisive_count: number; last_seen?: string }>;
     echo_chamber_candidates: Array<{ slug: string; decisive_streak: number; decisive_count: number; last_seen?: string }>;
+    activity_buckets: OutcomeActivityBuckets;
+    source_counts: Record<string, number>;
+    missing_used: OutcomeMissingUsedSummary;
   };
   staging: {
     total_files: number;
@@ -538,14 +567,73 @@ function readProjectOutcomeRows(projectRoot: string, rowLimit: number): LedgerOu
   return rows.filter((row) => normalizeProjectRoot(row.project_root) === normalizedProjectRoot);
 }
 
+function outcomeSource(row: LedgerOutcomeRow): string {
+  const value = (row as Record<string, unknown>).source;
+  return typeof value === "string" && value.trim() ? value.trim() : "(missing)";
+}
+
+function isValidOutcomeUsed(value: unknown): value is "decisive" | "confirmatory" | "retrieved-unused" {
+  return value === "decisive" || value === "confirmatory" || value === "retrieved-unused";
+}
+
+function isRetrievalOnlySource(source: string): boolean {
+  return source === "tool-result" || source === "source_tool";
+}
+
 function isOutcomeSummaryRow(row: LedgerOutcomeRow): boolean {
-  if (row.source === "tool-result") return true;
-  return (row.source === "memory-footnote" || row.source === "path-a-implicit") &&
-    (row.used === "decisive" || row.used === "confirmatory" || row.used === "retrieved-unused");
+  const source = outcomeSource(row);
+  if (isRetrievalOnlySource(source)) return true;
+  return (source === "memory-footnote" || source === "path-a-implicit") && isValidOutcomeUsed(row.used);
+}
+
+function emptyOutcomeActivityBuckets(): OutcomeActivityBuckets {
+  return {
+    self_report: 0,
+    implicit_unused: 0,
+    retrieval_only: 0,
+    injection_only: 0,
+    missing_used_unexpected: 0,
+    legacy_or_unknown_source: 0,
+  };
 }
 
 function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): AggregatorSummary["outcome"] {
-  const windowRows = rows.filter((row) => inWindow(row.ts, cutoffMs) && isOutcomeSummaryRow(row));
+  const activityRows = rows.filter((row) => inWindow(row.ts, cutoffMs));
+  const windowRows = activityRows.filter(isOutcomeSummaryRow);
+  const activityBuckets = emptyOutcomeActivityBuckets();
+  const sourceCounts: Record<string, number> = {};
+  const missingUsed: OutcomeMissingUsedSummary = { allowed: 0, unexpected: 0, unexpected_sources: {} };
+
+  for (const row of activityRows) {
+    const source = outcomeSource(row);
+    sourceCounts[source] = (sourceCounts[source] ?? 0) + 1;
+    const hasValidUsed = isValidOutcomeUsed(row.used);
+
+    if (source === "memory-footnote") {
+      if (hasValidUsed) activityBuckets.self_report++;
+      else {
+        activityBuckets.missing_used_unexpected++;
+        missingUsed.unexpected++;
+        missingUsed.unexpected_sources[source] = (missingUsed.unexpected_sources[source] ?? 0) + 1;
+      }
+    } else if (source === "path-a-implicit") {
+      if (hasValidUsed) activityBuckets.implicit_unused++;
+      else {
+        activityBuckets.missing_used_unexpected++;
+        missingUsed.unexpected++;
+        missingUsed.unexpected_sources[source] = (missingUsed.unexpected_sources[source] ?? 0) + 1;
+      }
+    } else if (isRetrievalOnlySource(source)) {
+      activityBuckets.retrieval_only++;
+      if (!hasValidUsed) missingUsed.allowed++;
+    } else if (source === "path-a-injected") {
+      activityBuckets.injection_only++;
+      if (!hasValidUsed) missingUsed.allowed++;
+    } else {
+      activityBuckets.legacy_or_unknown_source++;
+    }
+  }
+
   const bySlug = new Map<string, {
     slug: string;
     decisive_count: number;
@@ -559,6 +647,7 @@ function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): Aggregat
   for (const row of windowRows) {
     const slug = row.entry_slug;
     if (!slug) continue;
+    const source = outcomeSource(row);
     const stats = bySlug.get(slug) ?? {
       slug,
       decisive_count: 0,
@@ -567,9 +656,9 @@ function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): Aggregat
       total_retrievals: 0,
       footnotes: [],
     };
-    if (row.source === "tool-result") stats.total_retrievals += row.retrieval_count ?? 1;
-    if (row.source === "memory-footnote" || row.source === "path-a-implicit") {
-      if (row.source === "memory-footnote") stats.footnotes.push(row);
+    if (isRetrievalOnlySource(source)) stats.total_retrievals += row.retrieval_count ?? 1;
+    if (source === "memory-footnote" || source === "path-a-implicit") {
+      if (source === "memory-footnote") stats.footnotes.push(row);
       if (row.used === "decisive") stats.decisive_count++;
       else if (row.used === "confirmatory") stats.confirmatory_count++;
       else if (row.used === "retrieved-unused") stats.retrieved_unused_count++;
@@ -615,9 +704,13 @@ function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): Aggregat
   return {
     rows_considered: rows.length,
     window_rows: windowRows.length,
+    activity_window_rows: activityRows.length,
     slugs_seen: bySlug.size,
     high_unused: highUnused.slice(0, 10),
     echo_chamber_candidates: echo.slice(0, 10),
+    activity_buckets: activityBuckets,
+    source_counts: sourceCounts,
+    missing_used: missingUsed,
   };
 }
 
@@ -647,11 +740,12 @@ function buildRawDistributionSummary(
     const slug = row.entry_slug;
     if (!slug) continue;
     const stats = bySlug.get(slug) ?? { retrieved_unused: 0, decisive: 0, footnoteCount: 0, toolResultCount: 0 };
-    if (row.source === "memory-footnote" || row.source === "path-a-implicit") {
-      if (row.source === "memory-footnote") stats.footnoteCount++;
+    const source = outcomeSource(row);
+    if (source === "memory-footnote" || source === "path-a-implicit") {
+      if (source === "memory-footnote") stats.footnoteCount++;
       if (row.used === "retrieved-unused") stats.retrieved_unused++;
       else if (row.used === "decisive") stats.decisive++;
-    } else if (row.source === "tool-result") {
+    } else if (isRetrievalOnlySource(source)) {
       stats.toolResultCount++;
     }
     bySlug.set(slug, stats);

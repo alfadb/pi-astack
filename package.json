@@ -172,6 +172,7 @@
     "smoke:adr0039-p4a": "node scripts/smoke-adr0039-p4a-adjudicator-retired.mjs",
     "smoke:adr-readme-anchors": "node scripts/smoke-adr-readme-anchors.mjs",
     "smoke:aggregator-llm-parse": "node scripts/smoke-aggregator-llm-parse.mjs",
+    "smoke:aggregator-outcome-buckets": "node scripts/smoke-aggregator-outcome-buckets.mjs",
     "smoke:aggregator-structural-context": "node scripts/smoke-aggregator-structural-context.mjs",
     "smoke:p15-pass1-op-breakdown": "node scripts/smoke-p15-pass1-op-breakdown.mjs",
     "smoke:goal-state": "node scripts/smoke-goal-state.mjs",

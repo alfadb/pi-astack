@@ -684,7 +684,7 @@
           "additionalProperties": false,
           "description": "ADR 0025 prompt/protocol version tags written into audit rows so classifier and multi-view quality can be grouped by prompt version.",
           "properties": {
-            "activeCorrectionClassifier": { "type": "string", "default": "v1" },
+            "activeCorrectionClassifier": { "type": "string", "default": "v2" },
             "reasoningNormalizationPreamble": { "type": "string", "default": "v1" },
             "multiViewPass1": { "type": "string", "default": "v1" },
             "multiViewPass2": { "type": "string", "default": "v1" },
