@@ -229,97 +229,6 @@ function findLegacySource(sources: ConstraintSourceRecord[], sourceId: string): 
   return source?.sourceKind === "legacy_rule" ? source : undefined;
 }
 
-function legacySourceText(source: LegacyRuleSourceRecord): string {
-  return [source.title, source.body, source.mustDoSummary].filter(Boolean).join("\n").toLowerCase();
-}
-
-function hasNoRetroactiveRewriteGate(text: string): boolean {
-  return /旧文档[^\n。.;]*不追溯重写/.test(text)
-    || /\b(?:no|do\s+not|don't|must\s+not|never)\s+(?:retroactively\s+)?rewrite\b[^\n.]*\b(?:old|legacy|existing)\s+(?:docs?|documents?|documentation)\b/i.test(text)
-    || /\b(?:old|legacy|existing)\s+(?:docs?|documents?|documentation)\b[^\n.]*\b(?:no|do\s+not|don't|must\s+not|never)\s+(?:retroactively\s+)?rewrite\b/i.test(text)
-    || /\bno\s+retroactive\s+rewrite\b/i.test(text);
-}
-
-function hasUserRequestException(text: string): boolean {
-  return /\bunless\s+(?:the\s+)?user\s+(?:asks?|requests?)\b/i.test(text)
-    || /\bunless\s+explicitly\s+requested\b/i.test(text)
-    || /\bif\s+(?:explicitly\s+)?requested\b/i.test(text)
-    || /\bif\s+(?:the\s+)?user\s+(?:asks?|requests?)\b/i.test(text)
-    || /\b(?:on|upon)\s+(?:user\s+)?request\b/i.test(text)
-    || /\bwhen\s+(?:explicitly\s+)?requested\b/i.test(text)
-    || /\bat\s+(?:the\s+)?user'?s\s+request\b/i.test(text);
-}
-
-function hasOnlyBusinessLogicGate(text: string): boolean {
-  return /\bonly\s+business\s+logic\s+changes?\b/i.test(text)
-    || /\bsemantic_review_required\b[^\n.]*\bonly\s+(?:for\s+)?business\s+logic\s+changes?\b/i.test(text);
-}
-
-function hasAlternateTriggerEscapeHatch(text: string): boolean {
-  return /\b(?:unless|except|if|when|where|provided(?:\s+that)?|or\s+when)\b[^\n.]{0,120}\b(?:source|rule|text|constraint)\b[^\n.]{0,120}\b(?:explicitly\s+)?(?:provides?|states?|defines?|names?)\b[^\n.]{0,120}\b(?:another|alternate|alternative|additional|different|other)\s+trigger\b/i.test(text)
-    || /\b(?:another|alternate|alternative|additional|different|other)\s+trigger\b[^\n.]{0,120}\b(?:unless|except|escape\s+hatch)\b/i.test(text);
-}
-
-function hasTruncatedNativeGitFragment(text: string): boolean {
-  return /\bnative\s+git\s+operatio\b/i.test(text);
-}
-
-function hasCompleteNativeGitCarveOut(text: string): boolean {
-  return /\bnative\s+git\s+operations?\b[^\n.。;；]{0,80}\b(?:remain\s+)?(?:permitted|allowed)\b/i.test(text)
-    || /\bnative\s+git\b[^\n.。;；]{0,80}\b(?:remain\s+)?(?:permitted|allowed)\b/i.test(text)
-    || /\b(?:permitted|allowed)\b[^\n.。;；]{0,80}\bnative\s+git(?:\s+operations?)?\b/i.test(text);
-}
-
-function hasNativeGitMention(text: string): boolean {
-  return /\bnative\s+git\b/i.test(text);
-}
-
-function inventedNativeGitSemanticsFromTruncatedSource(sourceText: string, compiledBody: string): boolean {
-  return hasTruncatedNativeGitFragment(sourceText)
-    && !hasCompleteNativeGitCarveOut(sourceText)
-    && hasNativeGitMention(compiledBody);
-}
-
-function hasTruncatedDataMigrationFragment(text: string): boolean {
-  return /\bdata\s+migrati\b/i.test(text) && !/\bdata\s+migration\b/i.test(text);
-}
-
-function completesTruncatedDataMigrationFragment(sourceText: string, compiledBody: string): boolean {
-  return hasTruncatedDataMigrationFragment(sourceText) && /\bdata\s+migration\b/i.test(compiledBody);
-}
-
-function leavesRawTruncatedDataMigrationTail(sourceText: string, compiledBody: string): boolean {
-  if (!hasTruncatedDataMigrationFragment(sourceText)) return false;
-  const pattern = /\bdata\s+migrati\b/ig;
-  for (const match of compiledBody.matchAll(pattern)) {
-    const start = match.index ?? 0;
-    const end = start + match[0].length;
-    const vicinity = compiledBody.slice(Math.max(0, start - 80), Math.min(compiledBody.length, end + 80));
-    if (!/truncated/i.test(vicinity)) return true;
-  }
-  return false;
-}
-
-function inventedLegacyExceptionReason(source: LegacyRuleSourceRecord, compiledBody: string): string | null {
-  const sourceText = legacySourceText(source);
-  if (hasNoRetroactiveRewriteGate(sourceText) && !hasUserRequestException(sourceText) && hasUserRequestException(compiledBody)) {
-    return "compiledBody invents a user-request exception not present in the legacy source text";
-  }
-  if (hasOnlyBusinessLogicGate(sourceText) && !hasAlternateTriggerEscapeHatch(sourceText) && hasAlternateTriggerEscapeHatch(compiledBody)) {
-    return "compiledBody invents an alternate-trigger exception not present in the legacy source text";
-  }
-  if (inventedNativeGitSemanticsFromTruncatedSource(sourceText, compiledBody)) {
-    return "compiledBody invents native-git semantics from truncated legacy source text";
-  }
-  if (completesTruncatedDataMigrationFragment(sourceText, compiledBody)) {
-    return "compiledBody completes truncated data-migration fragment from legacy source text";
-  }
-  if (leavesRawTruncatedDataMigrationTail(sourceText, compiledBody)) {
-    return "compiledBody contains raw truncated data-migration fragment from legacy source text";
-  }
-  return null;
-}
-
 function hasMatchingRescope(decision: ConstraintCompilerDecision, source: LegacyRuleSourceRecord, targetScope: ConstraintScope): boolean {
   return decision.rescopeProposals.some((proposal) => (
     proposal.sourceRecordIds.includes(source.sourceId)
@@ -712,11 +621,6 @@ export function validateConstraintCompilerDecision(
           }
           if (scopeKey(source.scope) !== scopeKey(constraint.scope) && !hasMatchingRescope(decision, source, constraint.scope)) {
             quarantineReason = `${context} scope does not match ${sourceId} and has no matching rescope proposal`;
-            break;
-          }
-          const inventedExceptionReason = inventedLegacyExceptionReason(source, constraint.compiledBody);
-          if (inventedExceptionReason) {
-            hardValidationReason = `${context} ${inventedExceptionReason}`;
             break;
           }
         }

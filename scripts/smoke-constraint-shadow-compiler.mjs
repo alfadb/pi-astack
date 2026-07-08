@@ -773,175 +773,76 @@ check("validator accepts compiled L2 read-only human-view write-confirmation rul
   assert(!validated.unresolved.length, "compiled L2 human-view rule produced unresolved items");
 });
 
-check("validator rejects no-retroactive-rewrite rule with invented user-request exception", () => {
+check("validator allows user-request exception wording without semantic regex hard-fail", () => {
   const sources = [legacyNoRetroactiveRewriteSource];
   const localNormalized = normalizeConstraintSources(sources);
-  let msg = "";
-  try {
-    validateConstraintCompilerDecision(sources, {
-      schemaVersion: "constraint-shadow-decision/v1",
-      inputRootHash: localNormalized.inputRootHash,
-      constraints: [{
-        scope: { kind: "global" },
-        injectMode: "always",
-        title: "Legacy docs no retroactive rewrite",
-        compiledBody: "旧文档不追溯重写，unless the user asks.",
-        sourceRecordIds: [legacyNoRetroactiveRewriteSource.sourceId],
-      }],
-      exclusions: [],
-      unresolved: [],
-      merges: [],
-      rescopeProposals: [],
-      mappings: [{ sourceRecordId: legacyNoRetroactiveRewriteSource.sourceId, disposition: "compiled" }],
-      diagnostics: [],
-    });
-  } catch (err) {
-    msg = String((err && err.message) || err);
-  }
-  assert(msg.includes("user-request exception"), "invented user-request exception did not hard-fail with reason: " + msg);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Legacy docs no retroactive rewrite",
+      compiledBody: "旧文档不追溯重写，unless the user asks.",
+      sourceRecordIds: [legacyNoRetroactiveRewriteSource.sourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: legacyNoRetroactiveRewriteSource.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(legacyNoRetroactiveRewriteSource.sourceId)), "user-request wording was not compiled");
 });
 
-check("validator rejects only-business-logic rule with invented alternate-trigger escape hatch", () => {
+check("validator allows alternate-trigger wording without semantic regex hard-fail", () => {
   const sources = [sub2apiSemanticReviewSource];
   const localNormalized = normalizeConstraintSources(sources, { knownProjectIds: ["sub2api"] });
-  let msg = "";
-  try {
-    validateConstraintCompilerDecision(sources, {
-      schemaVersion: "constraint-shadow-decision/v1",
-      inputRootHash: localNormalized.inputRootHash,
-      constraints: [{
-        scope: { kind: "project", projectId: "sub2api" },
-        injectMode: "always",
-        title: "semantic_review_required gate",
-        compiledBody: "Set semantic_review_required only for business logic changes, unless the source explicitly provides another trigger.",
-        sourceRecordIds: [sub2apiSemanticReviewSource.sourceId],
-      }],
-      exclusions: [],
-      unresolved: [],
-      merges: [],
-      rescopeProposals: [],
-      mappings: [{ sourceRecordId: sub2apiSemanticReviewSource.sourceId, disposition: "compiled" }],
-      diagnostics: [],
-    }, { knownProjectIds: ["sub2api"] });
-  } catch (err) {
-    msg = String((err && err.message) || err);
-  }
-  assert(msg.includes("alternate-trigger exception"), "invented alternate-trigger exception did not hard-fail with reason: " + msg);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "project", projectId: "sub2api" },
+      injectMode: "always",
+      title: "semantic_review_required gate",
+      compiledBody: "Set semantic_review_required only for business logic changes, unless the source explicitly provides another trigger.",
+      sourceRecordIds: [sub2apiSemanticReviewSource.sourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: sub2apiSemanticReviewSource.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  }, { knownProjectIds: ["sub2api"] });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(sub2apiSemanticReviewSource.sourceId)), "alternate-trigger wording was not compiled");
 });
 
-check("validator rejects native-git semantics invented from truncated legacy source", () => {
+check("validator allows complete native-git wording from truncated legacy source without hard-fail", () => {
   const sources = [truncatedNativeGitSource];
   const localNormalized = normalizeConstraintSources(sources);
-  let msg = "";
-  try {
-    validateConstraintCompilerDecision(sources, {
-      schemaVersion: "constraint-shadow-decision/v1",
-      inputRootHash: localNormalized.inputRootHash,
-      constraints: [{
-        scope: { kind: "global" },
-        injectMode: "always",
-        title: "GitHub repositories use gh",
-        compiledBody: "Native git operations remain separate from GitHub management operations.",
-        sourceRecordIds: [truncatedNativeGitSource.sourceId],
-      }],
-      exclusions: [],
-      unresolved: [],
-      merges: [],
-      rescopeProposals: [],
-      mappings: [{ sourceRecordId: truncatedNativeGitSource.sourceId, disposition: "compiled" }],
-      diagnostics: [],
-    });
-  } catch (err) {
-    msg = String((err && err.message) || err);
-  }
-  assert(msg.includes("native-git semantics from truncated legacy source text"), "invented native-git semantics did not hard-fail with reason: " + msg);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "GitHub repositories use gh",
+      compiledBody: "Native git operations remain separate from GitHub management operations.",
+      sourceRecordIds: [truncatedNativeGitSource.sourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: truncatedNativeGitSource.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(truncatedNativeGitSource.sourceId)), "native-git wording was not compiled");
 });
 
-check("validator rejects data migration completion from truncated legacy source", () => {
-  const sources = [truncatedDataMigrationSource];
-  const localNormalized = normalizeConstraintSources(sources);
-  let msg = "";
-  try {
-    validateConstraintCompilerDecision(sources, {
-      schemaVersion: "constraint-shadow-decision/v1",
-      inputRootHash: localNormalized.inputRootHash,
-      constraints: [{
-        scope: { kind: "global" },
-        injectMode: "always",
-        title: "Retirement review source preservation",
-        compiledBody: "Retirement review must preserve visible source snippets exactly, including OAuth/data migration.",
-        sourceRecordIds: [truncatedDataMigrationSource.sourceId],
-      }],
-      exclusions: [],
-      unresolved: [],
-      merges: [],
-      rescopeProposals: [],
-      mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
-      diagnostics: [],
-    });
-  } catch (err) {
-    msg = String((err && err.message) || err);
-  }
-  assert(msg.includes("completes truncated data-migration fragment"), "completed data-migration fragment did not hard-fail with reason: " + msg);
-});
-
-check("validator rejects raw data migrati tail from truncated legacy source", () => {
-  const sources = [truncatedDataMigrationSource];
-  const localNormalized = normalizeConstraintSources(sources);
-  let msg = "";
-  try {
-    validateConstraintCompilerDecision(sources, {
-      schemaVersion: "constraint-shadow-decision/v1",
-      inputRootHash: localNormalized.inputRootHash,
-      constraints: [{
-        scope: { kind: "global" },
-        injectMode: "always",
-        title: "Retirement review source preservation",
-        compiledBody: "Retirement review must preserve visible source snippets exactly, including OAuth/data migrati",
-        sourceRecordIds: [truncatedDataMigrationSource.sourceId],
-      }],
-      exclusions: [],
-      unresolved: [],
-      merges: [],
-      rescopeProposals: [],
-      mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
-      diagnostics: [],
-    });
-  } catch (err) {
-    msg = String((err && err.message) || err);
-  }
-  assert(msg.includes("raw truncated data-migration fragment"), "raw truncated data-migration tail did not hard-fail with reason: " + msg);
-});
-
-check("validator rejects raw data migrati fragment inside compiled body", () => {
-  const sources = [truncatedDataMigrationSource];
-  const localNormalized = normalizeConstraintSources(sources);
-  let msg = "";
-  try {
-    validateConstraintCompilerDecision(sources, {
-      schemaVersion: "constraint-shadow-decision/v1",
-      inputRootHash: localNormalized.inputRootHash,
-      constraints: [{
-        scope: { kind: "global" },
-        injectMode: "always",
-        title: "Retirement review source preservation",
-        compiledBody: "Retirement review must preserve visible source snippets exactly; OAuth/data migrati) may trigger follow-up review.",
-        sourceRecordIds: [truncatedDataMigrationSource.sourceId],
-      }],
-      exclusions: [],
-      unresolved: [],
-      merges: [],
-      rescopeProposals: [],
-      mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
-      diagnostics: [],
-    });
-  } catch (err) {
-    msg = String((err && err.message) || err);
-  }
-  assert(msg.includes("raw truncated data-migration fragment"), "raw truncated data-migration fragment did not hard-fail with reason: " + msg);
-});
-
-check("validator accepts explicitly labeled truncated data migrati fragment", () => {
+check("validator allows complete data migration wording from truncated legacy source without hard-fail", () => {
   const sources = [truncatedDataMigrationSource];
   const localNormalized = normalizeConstraintSources(sources);
   const validated = validateConstraintCompilerDecision(sources, {
@@ -951,7 +852,7 @@ check("validator accepts explicitly labeled truncated data migrati fragment", ()
       scope: { kind: "global" },
       injectMode: "always",
       title: "Retirement review source preservation",
-      compiledBody: "Retirement review must preserve visible source snippets exactly; source-truncated data migrati tail.",
+      compiledBody: "Retirement review must preserve visible source snippets exactly, including OAuth/data migration.",
       sourceRecordIds: [truncatedDataMigrationSource.sourceId],
     }],
     exclusions: [],
@@ -961,8 +862,30 @@ check("validator accepts explicitly labeled truncated data migrati fragment", ()
     mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
     diagnostics: [],
   });
-  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(truncatedDataMigrationSource.sourceId)), "labeled truncated data-migration fragment was not compiled");
-  assert(!validated.constraints[0].compiledBody.includes("data migration"), "labeled truncated fragment was completed to data migration");
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(truncatedDataMigrationSource.sourceId)), "data migration wording was not compiled");
+});
+
+check("validator allows raw data migrati fragment without semantic regex hard-fail", () => {
+  const sources = [truncatedDataMigrationSource];
+  const localNormalized = normalizeConstraintSources(sources);
+  const validated = validateConstraintCompilerDecision(sources, {
+    schemaVersion: "constraint-shadow-decision/v1",
+    inputRootHash: localNormalized.inputRootHash,
+    constraints: [{
+      scope: { kind: "global" },
+      injectMode: "always",
+      title: "Retirement review source preservation",
+      compiledBody: "Retirement review must preserve visible source snippets exactly; OAuth/data migrati) may trigger follow-up review.",
+      sourceRecordIds: [truncatedDataMigrationSource.sourceId],
+    }],
+    exclusions: [],
+    unresolved: [],
+    merges: [],
+    rescopeProposals: [],
+    mappings: [{ sourceRecordId: truncatedDataMigrationSource.sourceId, disposition: "compiled" }],
+    diagnostics: [],
+  });
+  assert(validated.constraints.some((constraint) => constraint.sourceRecordIds.includes(truncatedDataMigrationSource.sourceId)), "raw truncated wording was not compiled");
 });
 
 check("validator accepts no-retroactive-rewrite rule without invented exception", () => {
@@ -2329,10 +2252,10 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("shadow-only"), "shadow-only instruction missing");
   assert(prompt.text.includes("Return JSON only"), "JSON-only instruction missing");
   assert(prompt.text.includes("Never include mutation-key fields"), "mutation-key instruction missing");
-  assert(prompt.text.includes("Hard validation failures") && prompt.text.includes("rejected by the validator") && prompt.text.includes("force retry"), "hard validation failure banner missing");
-  assert(prompt.text.includes("status archived, superseded, or deprecated") && prompt.text.includes("must never appear in constraints[] or as a merged compiled source"), "closed-status hard validation failure guidance missing");
-  assert(prompt.text.includes("known mid-word native-git tail") && prompt.text.includes("compiledBody must not contain `native git` or `Native git`"), "native-git hard validation failure guidance missing");
-  assert(prompt.text.includes("incomplete final OAuth/category tail") && prompt.text.includes("do not complete it into a full category name") && prompt.text.includes("source-truncated or a visible truncated fragment"), "data-migration hard validation failure guidance missing");
+  assert(prompt.text.includes("Validator-enforced structural failures") && !prompt.text.includes("rejected by the validator"), "structural validation guidance missing or old validator-rejection banner present");
+  assert(prompt.text.includes("status archived, superseded, or deprecated") && prompt.text.includes("must never appear in constraints[] or as a merged compiled source"), "closed-status structural validation guidance missing");
+  assert(prompt.text.includes("known mid-word native-git tail") && prompt.text.includes("compiledBody must not contain native git or Native git"), "native-git prompt guidance missing");
+  assert(prompt.text.includes("Do not leave compiledBody ending in a raw mid-word fragment") && prompt.text.includes("source-truncated or visible truncated fragment"), "data-migration prompt guidance missing");
   assert(prompt.text.includes("literal UTF-8 output"), "Unicode/output-encoding guidance missing");
   assert(prompt.text.includes("no \\u escapes"), "no-u escape guidance missing");
   assert(prompt.text.includes("active always source") && prompt.text.includes("listed predecessor"), "active-always/listed-predecessor guidance missing");
