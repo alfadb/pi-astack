@@ -15,9 +15,6 @@
  * Display order rationale — follows the event timeline so the footer
  * reads left-to-right as "environment → turn → end-of-turn":
  *
- *   00  multi-instance peer/risk visibility and stale-context guard.
- *                      Updated from session/tool lifecycle events.
- *
  *   01  model-curator  environment readiness (which models are usable
  *                      in this session). Set once at session_start.
  *
@@ -43,7 +40,6 @@
  */
 
 export const FOOTER_STATUS_KEYS = {
-  multiInstance: "00-multi-instance",
   modelCurator: "01-model-curator",
   dispatch:     "02-dispatch",
   abrainRules:  "03-abrain-rules",
