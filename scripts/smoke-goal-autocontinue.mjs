@@ -222,6 +222,13 @@ await check("pending continuation gate: issued intent blocks until matching user
   assert(I.hasUnconsumedGoalContinuation([intent, consumed, second], goalId) === true, "newer unmatched intent is pending");
 });
 
+await check("schema declares goal.pendingContinuationStaleMinutes", async () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf-8"));
+  const prop = schema.properties?.goal?.properties?.pendingContinuationStaleMinutes;
+  assert(prop?.type === "number", "schema property type");
+  assert(prop.default === 10 && prop.minimum === 1 && prop.maximum === 1440, `schema bounds: ${JSON.stringify(prop)}`);
+});
+
 await check("pending continuation gate: staleness bound frees a never-consumed intent", async () => {
   const goalId = "g-stale";
   const msg = G.formatGoalContinuationMessage(goalId, "continue");

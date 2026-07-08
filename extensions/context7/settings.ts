@@ -67,6 +67,14 @@ function asBoolean(v: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
+export function context7SettingsMtimeMs(): number | null {
+  try {
+    return fsSync.statSync(PI_STACK_SETTINGS_PATH).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 export function loadContext7Settings(): Context7Settings {
   let raw: unknown = {};
   let parseError: Error | null = null;

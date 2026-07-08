@@ -1527,6 +1527,13 @@
           "type": "number",
           "default": 45000,
           "description": "Judge LLM call timeout (clamped 5000..300000)."
+        },
+        "pendingContinuationStaleMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 1440,
+          "description": "Pending continuation intents older than this many minutes are treated as stale, allowing the auto-continue gate to recover after an unconsumed intent."
         }
       }
     },

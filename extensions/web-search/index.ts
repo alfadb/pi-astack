@@ -22,7 +22,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadWebSearchSettings } from "./settings";
+import { loadWebSearchSettings, webSearchSettingsMtimeMs } from "./settings";
 import { createProvider } from "./registry";
 import type { WebSearchProvider, SearchResult } from "./types";
 import { renderFoldableToolResult } from "../_shared/foldable-tool-result";
@@ -39,12 +39,17 @@ function renderWebToolResult(toolName: string, fullOutputLabel: string) {
   ) => renderFoldableToolResult(result, options, theme, { toolName, fullOutputLabel }, context);
 }
 
-// Lazy provider — instantiated on first tool call so settings reload
-// without process restart works (e.g. user edits settings during
-// session, next call picks up new provider).
+// Lazy provider — instantiated on first tool call. The settings file mtime
+// gates rebuilds, so edits take effect on the next call without mutating any
+// provider instance already in use by an in-flight request.
 let _provider: WebSearchProvider | undefined;
+let _providerSettingsMtimeMs: number | null | undefined;
 function getProvider(): WebSearchProvider {
-  if (!_provider) _provider = createProvider(loadWebSearchSettings());
+  const settingsMtimeMs = webSearchSettingsMtimeMs();
+  if (!_provider || _providerSettingsMtimeMs !== settingsMtimeMs) {
+    _provider = createProvider(loadWebSearchSettings());
+    _providerSettingsMtimeMs = settingsMtimeMs;
+  }
   return _provider;
 }
 
@@ -52,6 +57,7 @@ function getProvider(): WebSearchProvider {
  *  smoke scripts; not registered as a tool. */
 export function resetWebSearchProvider(): void {
   _provider = undefined;
+  _providerSettingsMtimeMs = undefined;
 }
 
 function formatSearchResults(

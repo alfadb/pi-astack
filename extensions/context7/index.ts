@@ -30,7 +30,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadContext7Settings } from "./settings";
+import { context7SettingsMtimeMs, loadContext7Settings } from "./settings";
 import { Context7Client, formatLibrary } from "./client";
 import { renderFoldableToolResult } from "../_shared/foldable-tool-result";
 
@@ -56,10 +56,17 @@ export default function (pi: ExtensionAPI) {
   const settings = loadContext7Settings();
   if (!settings.enabled) return;
 
-  // Lazy client — rebuilt only if reset; settings are read at load.
+  // Lazy client. The registration kill-switch above stays load-time only;
+  // mtime gates client rebuilds so endpoint/key/timeout edits apply on the
+  // next tool call without mutating any in-flight client instance.
   let _client: Context7Client | undefined;
+  let _clientSettingsMtimeMs: number | null | undefined;
   const getClient = (): Context7Client => {
-    if (!_client) _client = new Context7Client(loadContext7Settings());
+    const settingsMtimeMs = context7SettingsMtimeMs();
+    if (!_client || _clientSettingsMtimeMs !== settingsMtimeMs) {
+      _client = new Context7Client(loadContext7Settings());
+      _clientSettingsMtimeMs = settingsMtimeMs;
+    }
     return _client;
   };
 

@@ -182,6 +182,9 @@ for (const literal of [
 }
 if (/loadWebSearchSettings/.test(settingsSrc)) ok("loadWebSearchSettings exported");
 else failMsg("loadWebSearchSettings missing");
+if (/export function webSearchSettingsMtimeMs\(\): number \| null/.test(settingsSrc) && /statSync\(PI_STACK_SETTINGS_PATH\)\.mtimeMs/.test(settingsSrc)) {
+  ok("webSearchSettingsMtimeMs exported and reads settings mtime");
+} else failMsg("webSearchSettingsMtimeMs missing or not wired to settings mtime");
 if (/console\.warn/.test(settingsSrc) && /Failed to parse/.test(settingsSrc)) {
   ok("settings.ts JSON parse error warns (not silently swallowed)");
 } else failMsg("settings.ts still silently swallows JSON parse errors");
@@ -212,6 +215,12 @@ if (/name:\s*"web_fetch"/.test(indexSrc)) ok("registers web_fetch tool");
 else failMsg("web_fetch tool not registered");
 if (/resetWebSearchProvider/.test(indexSrc)) ok("resetWebSearchProvider hook exported");
 else failMsg("reset hook missing");
+if (/webSearchSettingsMtimeMs/.test(indexSrc) && /_providerSettingsMtimeMs\s*!==\s*settingsMtimeMs/.test(indexSrc)) {
+  ok("provider singleton is gated by settings mtime");
+} else failMsg("provider singleton missing settings mtime gate");
+if (/resetWebSearchProvider\(\): void \{[\s\S]*?_provider = undefined;[\s\S]*?_providerSettingsMtimeMs = undefined;[\s\S]*?\}/.test(indexSrc)) {
+  ok("resetWebSearchProvider resets provider mtime state");
+} else failMsg("resetWebSearchProvider does not reset provider mtime state");
 
 // PR-A review fix A2: signal pass-through (no more `_signal`).
 if (/signal:\s*AbortSignal/.test(indexSrc) && !/\b_signal:\s*AbortSignal/.test(indexSrc)) {

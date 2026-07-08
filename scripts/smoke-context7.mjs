@@ -72,6 +72,11 @@ for (const k of ["enabled", "baseUrl", "apiKey", "apiKeyEnv", "timeout"]) {
 if (c7schema?.properties?.enabled?.default === true) ok("schema default enabled=true");
 else failMsg("schema default enabled is not true");
 
+const settingsSrc = read("extensions/context7/settings.ts");
+if (/export function context7SettingsMtimeMs\(\): number \| null/.test(settingsSrc) && /statSync\(PI_STACK_SETTINGS_PATH\)\.mtimeMs/.test(settingsSrc)) {
+  ok("context7SettingsMtimeMs exported and reads settings mtime");
+} else failMsg("context7SettingsMtimeMs missing or not wired to settings mtime");
+
 const liveSettingsPath = path.join(process.env.HOME, ".pi", "agent", "pi-astack-settings.json");
 if (fs.existsSync(liveSettingsPath)) {
   const live = JSON.parse(fs.readFileSync(liveSettingsPath, "utf8"));
@@ -119,6 +124,17 @@ if (/PI_ABRAIN_DISABLED.*===.*"1"/.test(indexSrc)) ok("sub-pi guard present (no 
 else failMsg("sub-pi guard missing");
 if (/if \(!settings\.enabled\) return;/.test(indexSrc)) ok("disabled kill-switch skips registration");
 else failMsg("disabled path does not skip registration");
+{
+  const loadIdx = indexSrc.indexOf("const settings = loadContext7Settings();");
+  const gateIdx = indexSrc.indexOf("if (!settings.enabled) return;");
+  const registerIdx = indexSrc.indexOf("pi.registerTool({");
+  if (loadIdx >= 0 && gateIdx > loadIdx && registerIdx > gateIdx) {
+    ok("context7 enabled gate remains at registration time before tool registration");
+  } else failMsg("context7 enabled gate is not clearly before tool registration");
+}
+if (/context7SettingsMtimeMs/.test(indexSrc) && /_clientSettingsMtimeMs\s*!==\s*settingsMtimeMs/.test(indexSrc)) {
+  ok("Context7 client singleton is gated by settings mtime");
+} else failMsg("Context7 client singleton missing settings mtime gate");
 if (/<untrusted_external_content>/.test(indexSrc)) ok("docs framed as untrusted external content");
 else failMsg("docs NOT framed as untrusted content");
 

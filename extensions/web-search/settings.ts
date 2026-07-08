@@ -66,6 +66,14 @@ function asBoolean(v: unknown, fallback: boolean): boolean {
   return fallback;
 }
 
+export function webSearchSettingsMtimeMs(): number | null {
+  try {
+    return fsSync.statSync(PI_STACK_SETTINGS_PATH).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 export function loadWebSearchSettings(): WebSearchSettings {
   let raw: unknown = {};
   let parseError: Error | null = null;
