@@ -1719,6 +1719,48 @@ Original Pensieve seed content.
       assert(fs.readFileSync(staleUpdateProjection, "utf-8") === staleUpdateTamperedProjection, "stale update with expected_status mismatch must not mutate tampered L2 projection bytes");
       fs.writeFileSync(staleUpdateProjection, staleUpdateOriginalProjection);
 
+      const staleOutputHashCreate = await writeProjectEntry({
+        title: "Writer Legacy Stop Output Hash Tamper",
+        kind: "fact",
+        confidence: 7,
+        sessionId: "session-legacy-stop-output-hash-tamper-create",
+        compiledTruth: "Creates an L2-only projection whose body will be tampered while output hash remains unchanged.",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(staleOutputHashCreate.status === "created" && !fs.existsSync(staleOutputHashCreate.path), `stale output-hash seed must be L2-only: ${JSON.stringify(staleOutputHashCreate)}`);
+      const staleOutputHashProjection = staleOutputHashCreate.knowledgeEvidenceEvent?.projection?.outputPath;
+      assert(staleOutputHashProjection && fs.existsSync(staleOutputHashProjection), `stale output-hash projection missing: ${JSON.stringify(staleOutputHashCreate.knowledgeEvidenceEvent?.projection)}`);
+      const staleOutputHashOriginalProjection = fs.readFileSync(staleOutputHashProjection, "utf-8");
+      const staleOutputHashTamperedProjection = staleOutputHashOriginalProjection.replace(
+        "Creates an L2-only projection whose body will be tampered while output hash remains unchanged.",
+        "Creates an L2-only projection whose BODY WAS TAMPERED while output hash remains unchanged.",
+      );
+      assert(staleOutputHashTamperedProjection !== staleOutputHashOriginalProjection, "stale output-hash smoke failed to tamper projection body");
+      fs.writeFileSync(staleOutputHashProjection, staleOutputHashTamperedProjection);
+      const staleOutputHashEventCountBefore = countStopL1Events();
+      const staleOutputHashUpdate = await updateProjectEntry(staleOutputHashCreate.slug, {
+        status: "active",
+        confidence: 8,
+        compiledTruth: "# Writer Legacy Stop Output Hash Tamper\n\nThis update must reject stale_projection when L2 body bytes no longer match sediment_output_hash.",
+        sessionId: "session-legacy-stop-output-hash-tamper-update",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+      });
+      assert(staleOutputHashUpdate.status === "rejected" && staleOutputHashUpdate.reason === "stale_projection", `tampered L2 body update must reject stale_projection: ${JSON.stringify(staleOutputHashUpdate)}`);
+      assert(!staleOutputHashUpdate.knowledgeEvidenceEvent, `stale output-hash update must not append event result: ${JSON.stringify(staleOutputHashUpdate.knowledgeEvidenceEvent)}`);
+      assert(countStopL1Events() === staleOutputHashEventCountBefore, "stale output-hash update must not append an L1 event");
+      assert(fs.readFileSync(staleOutputHashProjection, "utf-8") === staleOutputHashTamperedProjection, "stale output-hash update must not mutate tampered L2 projection bytes");
+      fs.writeFileSync(staleOutputHashProjection, staleOutputHashOriginalProjection);
+
       const staleHardDeleteCreate = await writeProjectEntry({
         title: "Writer Legacy Stop Stale Hard Delete",
         kind: "fact",

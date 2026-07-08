@@ -5,7 +5,7 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
-import { appendKnowledgeEvidenceForWrite, readKnowledgeEvidenceL1Head, readKnowledgeStableViewStores, type AppendKnowledgeEvidenceForWriteResult, type KnowledgeEvidenceL1Head } from "./knowledge-evidence";
+import { appendKnowledgeEvidenceForWrite, knowledgeProjectionOutputHashFromMarkdownBytes, readKnowledgeEvidenceL1Head, readKnowledgeStableViewStores, type AppendKnowledgeEvidenceForWriteResult, type KnowledgeEvidenceL1Head } from "./knowledge-evidence";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
@@ -288,7 +288,7 @@ function legacyMarkdownSkippedAudit(result: AppendKnowledgeEvidenceForWriteResul
 interface StableViewWatermarkCasResult {
   ok: boolean;
   detail?: string;
-  l2?: { sediment_watermark_event_id?: string; sediment_input_event_set_hash?: string };
+  l2?: { sediment_watermark_event_id?: string; sediment_input_event_set_hash?: string; sediment_output_hash?: string };
   l1?: KnowledgeEvidenceL1Head | null;
 }
 
@@ -306,9 +306,15 @@ async function checkKnowledgeStableViewWatermarkCas(args: {
   const frontmatter = parseFrontmatter(splitFrontmatter(args.raw).frontmatterText);
   const watermarkEventId = scalarString(frontmatter.sediment_watermark_event_id);
   const inputEventSetHash = scalarString(frontmatter.sediment_input_event_set_hash);
-  const l2 = { sediment_watermark_event_id: watermarkEventId, sediment_input_event_set_hash: inputEventSetHash };
+  const outputHash = scalarString(frontmatter.sediment_output_hash);
+  const l2 = { sediment_watermark_event_id: watermarkEventId, sediment_input_event_set_hash: inputEventSetHash, sediment_output_hash: outputHash };
   if (!watermarkEventId || !inputEventSetHash) return { ok: false, detail: "missing_watermark", l2, l1: null };
   if (!isSha256Hex(watermarkEventId) || !isSha256Hex(inputEventSetHash)) return { ok: false, detail: "malformed_watermark", l2, l1: null };
+  if (!outputHash) return { ok: false, detail: "missing_output_hash", l2, l1: null };
+  if (!isSha256Hex(outputHash)) return { ok: false, detail: "malformed_output_hash", l2, l1: null };
+  const actualOutputHash = knowledgeProjectionOutputHashFromMarkdownBytes(args.raw);
+  if (!actualOutputHash) return { ok: false, detail: "malformed_output_hash", l2, l1: null };
+  if (actualOutputHash !== outputHash) return { ok: false, detail: "output_hash_mismatch", l2, l1: null };
   const l1 = await readKnowledgeEvidenceL1Head({
     abrainHome: args.abrainHome,
     projectId: args.projectId,

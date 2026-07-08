@@ -370,9 +370,28 @@ function knowledgeLlmExtractionForWrite(args: AppendKnowledgeEvidenceForWriteOpt
   };
 }
 
+function hashKnowledgeProjectionMarkdownBytes(markdownWithoutOutputHash: string): string {
+  return sha256Hex(markdownWithoutOutputHash);
+}
+
+function blankKnowledgeProjectionOutputHash(markdown: string): string | undefined {
+  if (!markdown.startsWith("---\n")) return undefined;
+  const frontmatterEnd = markdown.indexOf("\n---\n", 4);
+  if (frontmatterEnd < 0) return undefined;
+  const frontmatter = markdown.slice(0, frontmatterEnd);
+  const outputHashLines = frontmatter.match(/^sediment_output_hash:.*$/gm) ?? [];
+  if (outputHashLines.length !== 1) return undefined;
+  return frontmatter.replace(/^sediment_output_hash:.*$/m, "sediment_output_hash: ") + markdown.slice(frontmatterEnd);
+}
+
+export function knowledgeProjectionOutputHashFromMarkdownBytes(markdown: string): string | undefined {
+  const withoutOutputHash = blankKnowledgeProjectionOutputHash(markdown);
+  return withoutOutputHash === undefined ? undefined : hashKnowledgeProjectionMarkdownBytes(withoutOutputHash);
+}
+
 export function renderKnowledgeProjectionMarkdown(body: KnowledgeEvidenceEventBodyV1, eventId: string): string {
   const outputWithoutHash = renderKnowledgeProjectionMarkdownBytes(body, eventId, "");
-  const outputHash = sha256Hex(outputWithoutHash);
+  const outputHash = hashKnowledgeProjectionMarkdownBytes(outputWithoutHash);
   return renderKnowledgeProjectionMarkdownBytes(body, eventId, outputHash);
 }
 
@@ -699,7 +718,7 @@ export function renderKnowledgeProjectionFromSet(nodes: KnowledgeEventNode[]): K
     setHash: inputEventSetHash,
   };
   const withoutHash = renderKnowledgeProjectionMarkdownBytes(winner.body, winner.eventId, "", overrides);
-  const outputHash = sha256Hex(withoutHash);
+  const outputHash = hashKnowledgeProjectionMarkdownBytes(withoutHash);
   return { kind: "entry", markdown: renderKnowledgeProjectionMarkdownBytes(winner.body, winner.eventId, outputHash, overrides), winnerEventId: winner.eventId, inputEventSetHash };
 }
 
