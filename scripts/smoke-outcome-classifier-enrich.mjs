@@ -10,14 +10,14 @@
  *   [3] readProjectOutcomeRows is PROJECT-SCOPED: project A read never
  *       includes project B rows for a same-named slug (gpt+deepseek BLOCKING).
  *   [4] readProjectOutcomeRows("") → [] (unscoped guard; gpt constraint).
- *   [5] summarizeEntryActivity over project-A rows: counts + echo-chamber
- *       (including source=path-a-implicit as retrieved-unused baseline);
- *       ABSENT slug → zeroed record (deepseek: proves
- *       the caller's last_seen/count>0 hasData guard is required).
+ *   [5] summarizeEntryActivity over project-A rows: counts + echo-chamber;
+ *       source=path-a-implicit is observation/legacy compatibility only and
+ *       must not become retrieved-unused activity. ABSENT slug → zeroed record
+ *       (deepseek: proves the caller's last_seen/count>0 hasData guard is required).
  *   [6] Isolation end-to-end: summarize(readProjectOutcomeRows(A),["shared"])
  *       sees ONLY A's count, not A+B.
  *   [7] Path A injection rows are visible as injection-only, while
- *       collectOutcomes still records uncited injections as retrieved-unused.
+ *       collectOutcomes records uncited injections as observation-only.
  *   [8] buildClassifierPrompt renders the track-record line (incl ⚠️ +
  *       last_seen) for a card WITH outcome_activity, and "(none recorded)"
  *       for a card WITHOUT.
@@ -48,16 +48,16 @@ const iso = (daysAgo) => new Date(now - daysAgo * 86400000).toISOString();
 const row = (o) => JSON.stringify(o);
 
 // Project A: shared-slug = 2 explicit retrieved-unused (OLDER), then 5 decisive,
-//            plus 1 implicit Path A unused baseline (NEWEST, non-footnote).
-//            clean-slug = 3 decisive (well-grounded, no echo). decisive_streak
-//            counts consecutive decisive FOOTNOTES at the tail, so the implicit
-//            baseline must not break the streak.
+//            plus 1 legacy implicit Path A row (NEWEST, non-footnote) that must
+//            not become usage activity. clean-slug = 3 decisive (well-grounded,
+//            no echo). decisive_streak counts consecutive decisive FOOTNOTES at
+//            the tail, so observation/legacy rows must not break the streak.
 // Project B: shared-slug = 1 decisive  (must NOT leak into project A read).
 const lines = [];
 lines.push(row({ ts: iso(11), session_id: "sA", entry_slug: "shared-slug", used: "retrieved-unused", source: "memory-footnote", counterfactual: "x", project_root: PROJ_A }));
 lines.push(row({ ts: iso(10), session_id: "sA", entry_slug: "shared-slug", used: "retrieved-unused", source: "memory-footnote", counterfactual: "x", project_root: PROJ_A }));
 for (let i = 5; i >= 1; i--) lines.push(row({ ts: iso(i), session_id: "sA", entry_slug: "shared-slug", used: "decisive", source: "memory-footnote", counterfactual: "x", project_root: PROJ_A }));
-lines.push(row({ ts: iso(0), session_id: "sA", entry_slug: "shared-slug", used: "retrieved-unused", source: "path-a-implicit", counterfactual: "implicit baseline", project_root: PROJ_A, path_a_inject_id: "path-a-smoke" }));
+lines.push(row({ ts: iso(0), session_id: "sA", entry_slug: "shared-slug", used: "retrieved-unused", source: "path-a-implicit", counterfactual: "legacy implicit row", project_root: PROJ_A, path_a_inject_id: "path-a-smoke" }));
 for (let i = 3; i >= 1; i--) lines.push(row({ ts: iso(i), session_id: "sA", entry_slug: "clean-slug", used: "decisive", source: "memory-footnote", counterfactual: "x", project_root: PROJ_A }));
 lines.push(row({ ts: iso(1), session_id: "sB", entry_slug: "shared-slug", used: "decisive", source: "memory-footnote", counterfactual: "x", project_root: PROJ_B }));
 fs.writeFileSync(path.join(ledgerDir, "outcome-ledger.jsonl"), lines.join("\n") + "\n");
@@ -100,7 +100,7 @@ console.log("\n[5] summarizeEntryActivity counts + echo-chamber + absent=zeroed"
 const statsA = summarizeEntryActivity(aRows, ["shared-slug", "clean-slug", "absent-slug"], 30);
 const byA = Object.fromEntries(statsA.map((s) => [s.slug, s]));
 check("shared decisive=5", byA["shared-slug"].decisive_count === 5, JSON.stringify(byA["shared-slug"]));
-check("shared retrieved-unused=3 (2 footnote + 1 path-a-implicit)", byA["shared-slug"].retrieved_unused_count === 3, JSON.stringify(byA["shared-slug"]));
+check("shared retrieved-unused=2 (path-a-implicit excluded)", byA["shared-slug"].retrieved_unused_count === 2, JSON.stringify(byA["shared-slug"]));
 check("shared echo-chamber=true (path-a-implicit does not break footnote streak)", byA["shared-slug"].possible_echo_chamber === true);
 check("clean decisive=3, echo=false", byA["clean-slug"].decisive_count === 3 && byA["clean-slug"].possible_echo_chamber === false);
 const absent = byA["absent-slug"];
@@ -110,7 +110,7 @@ check("absent slug → zeroed record (hasData guard required)", absent.decisive_
 console.log("\n[6] isolation end-to-end: A-read sees only A's count (5, not 6)");
 check("shared-slug decisive=5 from A-only", byA["shared-slug"].decisive_count === 5);
 
-console.log("\n[7] Path A injection-only visibility + implicit baseline");
+console.log("\n[7] Path A injection-only visibility + implicit observation");
 {
   const injectedRows = recordPathAInjectedOutcomes({
     ts: iso(0),
@@ -147,7 +147,7 @@ console.log("\n[7] Path A injection-only visibility + implicit baseline");
     { type: "message", message: { role: "assistant", content: "no explicit footnote" } },
   ], "sPath");
   const implicitRow = implicitOnly.rows.find((r) => r.source === "path-a-implicit" && r.entry_slug === "implicit-slug");
-  check("collector emits source=path-a-implicit", !!implicitRow && implicitRow.used === "retrieved-unused" && implicitRow.path_a_inject_id === "path-a-implicit-smoke", JSON.stringify(implicitOnly.rows));
+  check("collector emits observation-only source=path-a-implicit", !!implicitRow && implicitRow.used === undefined && implicitRow.path_a_signal === "injected_no_self_report" && implicitRow.path_a_inject_id === "path-a-implicit-smoke", JSON.stringify(implicitOnly.rows));
 
   const withFootnote = oc.collectOutcomes([
     { type: "message", message: { role: "user", content: "use memory" } },

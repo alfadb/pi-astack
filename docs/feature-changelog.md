@@ -11,6 +11,25 @@ status: active
 
 ---
 
+## 2026-07-08 — accepted — outcome usage 语义分层修复
+
+### 变更
+outcome usage 语义拆为三层：exposure（`tool-result` / `path-a-injected`）、self_report（`memory-footnote`）、derived_attribution（同 session/turn/slug 的确定性 join）。新 `path-a-implicit` 不再写 `used:"retrieved-unused"`，只作为 observation-only `path_a_signal:"injected_no_self_report"`；旧 ledger 中已有 implicit-unused 行只进入 legacy 分桶。
+
+### 原因
+T0 R2 共识确认：把 Path A 注入但未自报的 silent 状态机械写成 retrieved-unused 会把“未观测到自报告”误当“确定未使用”，并污染 high_unused/demotion 类读侧信号。
+
+### 需求影响
+不新增 REQ；这是对既有 INV-INVISIBILITY / 自治第二大脑约束下 outcome 监控口径的语义修正。Runtime 不新增 sidecar LLM、不弹窗、不要求用户管理记忆、不自动改 prompt；R5 sidecar 仍为下一批。
+
+### 非目标
+不重写 memory-footnote parser，不改原始 ledger 行，不让 derived_attribution 参与 runtime 读取、排序、demote/archive/confidence 决策；禁止把 `path-a-injected` 与新 `path-a-implicit` 双计为 exposure denominator。
+
+### 关联
+[outcome unknown triage](audits/2026-07-08-outcome-unknown-triage.md)；[transition register](transition-register.md)。
+
+---
+
 ## 2026-07-08 — accepted — 治理修复批
 
 ### 变更

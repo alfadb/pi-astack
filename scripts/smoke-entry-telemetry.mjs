@@ -111,7 +111,7 @@ function toolRow(slug, count, tsIso, project_root) {
   return { source: "tool-result", entry_slug: slug, retrieval_count: count, ts: tsIso, project_root };
 }
 function implicitRow(slug, tsIso, project_root) {
-  return { source: "path-a-implicit", entry_slug: slug, used: "retrieved-unused", retrieval_count: 1, ts: tsIso, project_root, path_a_inject_id: "path-a-smoke" };
+  return { source: "path-a-implicit", entry_slug: slug, retrieval_count: 1, ts: tsIso, project_root, path_a_inject_id: "path-a-smoke", path_a_signal: "injected_no_self_report" };
 }
 function rowsFor(project) { return readEntryTelemetry(project); }
 function rowOf(project, slug) {
@@ -150,7 +150,7 @@ check("cumulative citation_count + total_retrievals + cited-at extremes", () => 
 
 check("path-a-implicit is not counted as citation", () => {
   const row = rowOf(projectA, "alpha");
-  if (row.citation_count !== 3) throw new Error(`implicit baseline must not inflate citation_count, got ${row.citation_count}`);
+  if (row.citation_count !== 3) throw new Error(`implicit observation must not inflate citation_count, got ${row.citation_count}`);
 });
 
 check("rolling-window fields delegate to summarizeEntryActivity", () => {

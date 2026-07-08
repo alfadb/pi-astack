@@ -36,8 +36,8 @@ export interface OutcomeRow {
   decision_brief_id?: string;
   /** For path-a injection rows: stable id from path-a-ledger.jsonl. */
   path_a_inject_id?: string;
-  /** For path-a-injected rows: explicit non-usage signal. */
-  path_a_signal?: "injection-only";
+  /** For Path A observation-only rows: injection inventory or injected-without-self-report. */
+  path_a_signal?: "injection-only" | "injected_no_self_report";
   /** True when the Path A ledger row had no causal anchor. */
   path_a_anchor_missing?: boolean;
 }
@@ -332,10 +332,9 @@ function collectPathAImplicitRows(
       entry_slug: item.slug,
       source: "path-a-implicit",
       event_id: `path-a-implicit:${item.inject_id}:${item.slug}`,
-      used: "retrieved-unused",
-      counterfactual: "Path A injected this entry this turn, but no explicit memory-footnote cited it.",
       retrieval_count: 1,
       path_a_inject_id: item.inject_id,
+      path_a_signal: "injected_no_self_report",
     });
   }
   return rows;
@@ -893,7 +892,7 @@ export interface EntryActivityStats {
  */
 function isActivityOutcomeRow(row: LedgerOutcomeRow): boolean {
   if (row.source === "tool-result") return true;
-  return (row.source === "memory-footnote" || row.source === "path-a-implicit") &&
+  return row.source === "memory-footnote" &&
     (row.used === "decisive" || row.used === "confirmatory" || row.used === "retrieved-unused");
 }
 
@@ -930,15 +929,13 @@ export function summarizeEntryActivity(
     if (row.source === "tool-result") {
       stats.total_retrievals += row.retrieval_count ?? 1;
     }
-    if (row.source === "memory-footnote" || row.source === "path-a-implicit") {
+    if (row.source === "memory-footnote") {
       if (row.used === "decisive") stats.decisive_count++;
       else if (row.used === "confirmatory") stats.confirmatory_count++;
       else if (row.used === "retrieved-unused") stats.retrieved_unused_count++;
-      if (row.source === "memory-footnote") {
-        const list = footnoteRowsBySlug.get(row.entry_slug) ?? [];
-        list.push(row);
-        footnoteRowsBySlug.set(row.entry_slug, list);
-      }
+      const list = footnoteRowsBySlug.get(row.entry_slug) ?? [];
+      list.push(row);
+      footnoteRowsBySlug.set(row.entry_slug, list);
     }
     if (!stats.last_seen || row.ts > stats.last_seen) {
       stats.last_seen = row.ts;
