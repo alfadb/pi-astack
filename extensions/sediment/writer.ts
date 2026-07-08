@@ -5,7 +5,7 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
-import { appendKnowledgeEvidenceForWrite, knowledgeProjectionOutputHashFromMarkdownBytes, readKnowledgeEvidenceL1Head, readKnowledgeStableViewStores, type AppendKnowledgeEvidenceForWriteResult, type KnowledgeEvidenceL1Head } from "./knowledge-evidence";
+import { appendKnowledgeEvidenceForWrite, knowledgeEvidenceEventRelativePath, knowledgeProjectionOutputHashFromMarkdownBytes, knowledgeProjectionRoot, readKnowledgeEvidenceL1Head, readKnowledgeStableViewStores, type AppendKnowledgeEvidenceForWriteResult, type KnowledgeEvidenceL1Head } from "./knowledge-evidence";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
@@ -364,6 +364,7 @@ async function appendKnowledgeEvidenceForMarkdown(args: {
   auditContext?: WriterAuditContext;
   patch?: ProjectEntryUpdateDraft;
   operation: "update" | "merge" | "archive" | "supersede" | "delete";
+  causalParents?: string[];
 }): Promise<AppendKnowledgeEvidenceForWriteResult | undefined> {
   if (args.settings.knowledgeEvidenceEventWriter.enabled !== true) return undefined;
   const draft = draftFromEntryMarkdown(args.raw, args.fallbackSlug, args.patch);
@@ -378,6 +379,7 @@ async function appendKnowledgeEvidenceForMarkdown(args: {
     auditContext: args.auditContext,
     sessionId: args.patch?.sessionId,
     operation: args.operation,
+    causalParents: args.causalParents,
     ...(legacyMarkdownDisabled ? { legacyParallelWrite: { attempted: false, status: args.result.status, reason: "legacy_markdown_write_disabled" } } : {}),
   }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
     append: {
@@ -1489,6 +1491,12 @@ export async function deleteProjectEntry(
     }
     const lockedPath = lockedTarget.path;
     const originalRaw = await fs.readFile(lockedPath, "utf-8");
+    const originalProjectionManifestPath = lockedTarget.source === "stable_view"
+      ? path.join(knowledgeProjectionRoot(abrainHome, opts.settings), "latest", "manifest.json")
+      : undefined;
+    const originalProjectionManifestRaw = originalProjectionManifestPath
+      ? await fs.readFile(originalProjectionManifestPath, "utf-8").catch(() => null)
+      : undefined;
     if (lockedTarget.source === "stable_view") {
       const watermarkCas = await checkKnowledgeStableViewWatermarkCas({ abrainHome, projectId: opts.projectId, scope, slug, raw: originalRaw });
       if (!watermarkCas.ok) {
@@ -1580,10 +1588,66 @@ export async function deleteProjectEntry(
     // later successful write — same ghost-file class bug as b40df1e.
     if (opts.settings.gitCommit && git === null) {
       let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
+      let knowledgeEvidenceCompensationGitCommit: string | null | undefined;
+      let restoreMode = legacyMarkdownSkipped
+        ? "projection_only_compensation_not_attempted"
+        : isKnowledgeEvidenceEventFirst(opts.settings) ? "restored_original_and_projected_compensation" : "legacy_restored";
       if (legacyMarkdownSkipped) {
-        try {
-          await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", "l1", "l2"], { timeout: 5_000, maxBuffer: 128 * 1024 });
-        } catch { /* best-effort */ }
+        const resetL1L2Index = async () => {
+          try {
+            await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", "l1", "l2"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+          } catch { /* best-effort */ }
+        };
+        const restoreProjectionPreimage = async () => {
+          try { await atomicWrite(lockedPath, originalRaw); } catch { /* best-effort fail-safe restore */ }
+          if (originalProjectionManifestPath) {
+            try {
+              if (originalProjectionManifestRaw === null) await fs.rm(originalProjectionManifestPath, { force: true });
+              else if (typeof originalProjectionManifestRaw === "string") await atomicWrite(originalProjectionManifestPath, originalProjectionManifestRaw);
+            } catch { /* best-effort fail-safe restore */ }
+          }
+        };
+        const removeUncommittedEventFile = async (event: AppendKnowledgeEvidenceForWriteResult | undefined) => {
+          if (event?.append.status !== "appended") return;
+          const filePath = event.append.filePath
+            ?? (event.append.eventId ? path.join(abrainHome, knowledgeEvidenceEventRelativePath(event.append.eventId)) : undefined);
+          if (!filePath) return;
+          try { await fs.rm(filePath, { force: true }); } catch { /* best-effort cleanup */ }
+        };
+
+        await resetL1L2Index();
+        knowledgeEvidenceCompensationEvent = isKnowledgeEvidenceEventFirst(opts.settings) && knowledgeEvidenceEvent?.append.ok
+          ? await appendKnowledgeEvidenceForMarkdown({
+              abrainHome,
+              projectId: opts.projectId,
+              scope,
+              raw: originalRaw,
+              fallbackSlug: slug,
+              result: { slug, path: lockedPath, status: "updated", gitCommit: null, ...resultCtx },
+              settings: opts.settings,
+              auditContext: opts.auditContext,
+              patch: { sessionId: opts.sessionId, timelineNote: "restore after delete git commit failure" },
+              operation: "update",
+              causalParents: knowledgeEvidenceEvent.append.eventId ? [knowledgeEvidenceEvent.append.eventId] : undefined,
+            })
+          : undefined;
+        const compensationAppendRestoredProjection = knowledgeEvidenceCompensationEvent?.append.ok === true
+          && knowledgeEvidenceCompensationEvent.projection?.status === "projected";
+        if (compensationAppendRestoredProjection) {
+          knowledgeEvidenceCompensationGitCommit = await gitCommitMany(abrainHome, [], slug, "restore_after_delete_git_failure", gitCommitProjectId);
+        }
+        if (compensationAppendRestoredProjection && knowledgeEvidenceCompensationGitCommit) {
+          restoreMode = "projection_only_compensation_committed";
+        } else {
+          restoreMode = compensationAppendRestoredProjection
+            ? "fallback_restore_after_compensation_commit_failed"
+            : "fallback_restore_after_compensation_append_failed";
+          await resetL1L2Index();
+          await restoreProjectionPreimage();
+          await removeUncommittedEventFile(knowledgeEvidenceEvent);
+          await removeUncommittedEventFile(knowledgeEvidenceCompensationEvent);
+          await resetL1L2Index();
+        }
       } else {
         try {
           const rel = path.relative(abrainHome, lockedPath);
@@ -1615,9 +1679,10 @@ export async function deleteProjectEntry(
         target: `${targetPrefix}:${slug}`,
         path: path.relative(auditRoot, lockedPath),
         delete_mode: "hard",
-        event_first_legacy_compensation: legacyMarkdownSkipped ? "projection_only_commit_failed_no_legacy_mutation" : isKnowledgeEvidenceEventFirst(opts.settings) ? "restored_original_and_projected_compensation" : "legacy_restored",
+        event_first_legacy_compensation: restoreMode,
         ...(knowledgeEvidenceEvent ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceEvent) } : {}),
         ...(knowledgeEvidenceCompensationEvent ? { knowledge_evidence_compensation_event: summarizeKnowledgeEvidenceEvent(knowledgeEvidenceCompensationEvent) } : {}),
+        ...(legacyMarkdownSkipped ? { knowledge_evidence_compensation_git_commit: knowledgeEvidenceCompensationGitCommit ?? null } : {}),
         ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
         duration_ms: Date.now() - started,
       }));
