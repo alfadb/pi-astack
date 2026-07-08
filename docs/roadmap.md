@@ -112,7 +112,6 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 | Model fallback vs curator whitelist | 当前 model-curator session_start 只 WARN，不阻止 curator 删掉 fallback 候选；需要 curator 在 whitelist 时尊重 fallbackModels 列表，或 fallback 路径自带 whitelist bypass。 |
 | Audit 新字段默认 sanitize | 新加 audit 字段须默认走 `sanitizeAuditText`（曾有 explicit/auto-write lane 的 `candidates[].title` 漏 sanitize 的先例，已修；保留此项作纪律提醒）。 |
 | constraint manual-compile 工具加固（dossier） | `scripts/dossier-constraint-shadow-report.mjs --write` 当前两个坑：① `makeOracleRegistry`（`scripts/_oracle-registry.mjs`）只解析 pi 内置 catalog，model-curator 运行时注册的模型（如 `minimax/MiniMax-M3`）解析不到 → 手动重编译只能退到 `--model deepseek/deepseek-v4-pro`（curator 官方 rollback）；② `--write` 直接覆写 `~/.abrain/.state/.../latest/compiled-view.md`，而 `rule-injector` 正注入它 → 手动跑会改写 live 注入。应：让 registry 复用 pi 运行时模型源（或 curator catalog），且 `--write` 默认指向 temp 树、覆写 live `.state` 需显式 `--force-live` + 响亮告警。另：dossier 的 TS stage 清单随 shadow-runner/parser 加依赖而 bitrot（已补 knowledge-evidence/append/projection/corpus-split，`23aa0c4`）——根因是手维护 stage 清单，可考虑共享 stage helper。 |
-| legacy rule `body_hash` 漂移（21 条 global:always） | `legacy-scan.ts:69` 对 21 条 global:always 规则报 `SC_INPUT_BODY_HASH_MISMATCH`（frontmatter `body_hash` ≠ `sha256(当前正文)`）= legacy 规则正文被改/重渲染但 `body_hash` 没同步。非致命（仅 diff_report），但属输入数据漂移。应：批量重算并回写这些规则的 `body_hash`，或确认它们应被新证据投影取代后归档。 |
 
 > ADR 0022 `prompt_user` 的 housekeeping batch（P3b post-audit / T0 xhigh / polish sweep 等 P2 项）已全部 ship 或 won't-fix；实施流水与 audit 轨迹见 git history 与 `docs/audits/`，不再镜像于此。
 
@@ -144,7 +143,7 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 
 ## ADR 0031 — 自治自标定遗忘实施(复用既有 meta-curator infra,dark-launch)
 
-设计见 [ADR 0031](./adr/0031-autonomous-self-calibrating-forgetting.md)(accepted)。原则:**先补标定数据(Lane G 当年缺的那块),再上可逆 demote;自治遗忘终点是 `archived`(全文留盘 = 复活面),本 ADR 范围内无自治物理删除;disuse 永不触发降级,真值变化(supersession/contradiction)才是安全驱动**。flag 守卫(代码 DEFAULT off);**运行时 flag 状态以 settings.json 为单一真相**(kill-switch-explicit-in-settings)。当前生产 `memory.forgetting` instrumentation/decayShadow/demoteShadow/autoDemote 四 flag 全开，`autoLlmWriteEnabled=true`；2026-07-04 已落首条真实 demote（forgetting-demote-ledger，slug `semi-auto-mode-blocks-map-hole-clicks...`，reason `affirm_superseded`，30 天 reactivation 窗口至 2026-08-03）。剩余缺口是 aggregator→lifecycle_proposal 上游接线：aggregator 61 次运行产出 0 条 lifecycle_proposal，executor 当前无上游输入；这不是数据门未通过问题。
+设计见 [ADR 0031](./adr/0031-autonomous-self-calibrating-forgetting.md)(accepted)。原则:**先补标定数据(Lane G 当年缺的那块),再上可逆 demote;自治遗忘终点是 `archived`(全文留盘 = 复活面),本 ADR 范围内无自治物理删除;disuse 永不触发降级,真值变化(supersession/contradiction)才是安全驱动**。flag 守卫(代码 DEFAULT off);**运行时 flag 状态以 settings.json 为单一真相**(kill-switch-explicit-in-settings)。decay→lifecycle_proposal 接线已落地（60b5d40，2026-07-08）；pending 与计数以 `~/.abrain/.state/sediment/entry-lifecycle-proposals.jsonl` 为准。剩余缺口是 executor 消费一个受控批次，并让 demote ledger 与 reactivation window 可审计。
 
 **架构基线(2×T0 gap 分析 2026-06-15):ADR 0031 不是新管线,是 ADR 0024/0025 meta-curator 生命周期的安全硬化层。强制复用,不重建**:
 - 复活通道 = `archive-reactivation.ts`(已 LLM:keep_archived/reactivate/hard_archive_recommended + ledger)。
@@ -159,11 +158,11 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 - resurrection 事件流已由 `archive-reactivation-ledger.jsonl` 覆盖(不新建)。
 - 待补:supersede/contradict 信号喂进 aggregator 视图(真值变化驱动);demote 事件流 Phase 3 才需要。
 
-**Phase 1 — would_demote 影子标记(只标不动)**:decay-shadow 已识别 5 条 `would_demote=true`，但该信号尚未喂给 executor；当前缺口是 aggregator 产出 `lifecycle_proposal` 的接线批次，而不是再等待数据门。影子回归仍按最近 N 真实 query 跑 corpus vs corpus−would_demote，量 decide brief 质量是否退。**无 `would_delete`、无 tombstone-extra-fields、无 `git rm`**——`archived` 全文留盘即 tombstone(ADR 0031 §2.1 archived 地板)。
+**Phase 1 — would_demote 影子标记(只标不动)**:decay-shadow 信号已接到 lifecycle proposal sink；pending 内容以 `entry-lifecycle-proposals.jsonl` 为准。当前缺口是 executor 消费受控批次，而不是再等待数据门。影子回归仍按最近真实 query 跑 corpus vs corpus−would_demote，量 decide brief 质量是否退。**无 `would_delete`、无 tombstone-extra-fields、无 `git rm`**——`archived` 全文留盘即 tombstone(ADR 0031 §2.1 archived 地板)。
 
 **Phase 2 — resurrection 稳态自标定(观测闭环)**:`resurrection-rate-monitor`(从 `archive-reactivation-ledger.jsonl` 算 rate + 趋势)→ 喂 aggregator 的 prompt-native 自调(更保守/更积极),噪声/近重信号复用 `entry-telemetry` echo_chamber + aggregator high_unused;自审闸 = resurrection rate 超阈值自动回退衰减强度。**低 resurrection rate 不当「安全」证明**(§2.2 非对称盲区)。
 
-**Phase 3 — gated demote executor(可逆)✅ 已实现并接线**:`extensions/sediment/forgetting-executor.ts` + `sediment/index.ts` agent_end debounced 调度,消费 pending `op=archive` proposal + decay 上下文 + `entry-telemetry` hysteresis(cooldown/holdout/CAS)→ `active→archived`(注入式 `updateProjectEntry` + `expected_status:"active"` CAS);构建期焊死的反失控地板(`DEMOTE_MAX_PER_DAY=20`/`MIN_ACTIVE_CORPUS_FLOOR=50`/`DEMOTE_COOLDOWN_MS=30d`)+ demote 后监控 resurrection rate 自动回退;独立 audit lane。**运行模式以 settings flag 为准**:`demoteShadow`(代码 DEFAULT off)开 → 跑 executor;`autoDemote` 且 `autoLlmWriteEnabled===true` → 真实 demote,否则 dry-run(零 mutation,写 shadow audit)。当前生产四 flag 已开，且 `autoLlmWriteEnabled=true`；2026-07-04 已有首条真实 demote 写入 `forgetting-demote-ledger`。剩余运行缺口是上游 aggregator 仍未产出 `lifecycle_proposal` 给 executor 消费。**物理删除(`git rm`)不在本 ADR 授权**——若将来需要,另起 supersession-gated 专门设计(独立论证持久性/灾备)。
+**Phase 3 — gated demote executor(可逆)✅ 已实现并接线**:`extensions/sediment/forgetting-executor.ts` + `sediment/index.ts` agent_end debounced 调度,消费 pending `op=archive` proposal + decay 上下文 + `entry-telemetry` hysteresis(cooldown/holdout/CAS)→ `active→archived`(注入式 `updateProjectEntry` + `expected_status:"active"` CAS);构建期焊死的反失控地板(`DEMOTE_MAX_PER_DAY`/`MIN_ACTIVE_CORPUS_FLOOR`/`DEMOTE_COOLDOWN_MS`)+ demote 后监控 resurrection rate 自动回退;独立 audit lane。**运行模式以 settings flag 为准**:`demoteShadow`(代码 DEFAULT off)开 → 跑 executor;`autoDemote` 且 `autoLlmWriteEnabled===true` → 真实 demote,否则 dry-run(零 mutation,写 shadow audit)。decay→lifecycle_proposal 上游接线已落地（60b5d40，2026-07-08）；剩余运行缺口是 executor 消费一个受控批次。**物理删除(`git rm`)不在本 ADR 授权**——若将来需要,另起 supersession-gated 专门设计(独立论证持久性/灾备)。
 
 **最小新写件**(gap 分析裁定,复用优先):`resurrection-rate-monitor`(纯确定性)+ `forgetting-executor`(gated)+ `demote-audit`(ledger)+ aggregator/proposal 的 `decay_score`/`would_demote` 字段扩展 + 影子回归 harness。**不新建**:reactivation 通道、tombstone 存储、hysteresis 存储、writer 路径、噪声检测、第三套 telemetry、`git rm`。
 
@@ -171,7 +170,7 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 
 | Item | Current stance |
 |---|---|
-| qmd / BM25 optional acceleration | 旧 BM25/tf-idf 仅作为 deprecated dead code 留在 `extensions/memory/search.ts`，不是 `memory_search` fallback；可做离线诊断/加速实验。 |
+| qmd / BM25 optional acceleration | `searchEntries` 已删除（零调用）；`search.ts` 其余函数活跃。sparse BM25 已作为 stage0 候选臂转产（ADR 0036），不是 LLM 不可用时的 fallback；qmd 仍只作未来离线诊断/加速实验候选。 |
 | Cross-device abrain sync | 等真实多机冲突反馈；不要提前 over-engineer。 |
 | Incremental graph rebuild | graph/index 是派生物，当前可 rebuild；增量优化低优先。 |
 | Skills/prompts/gstack reference port | `skills/`、`prompts/` 仍是计划，不在 current repo tree；`vendor/gstack/` 已退役，未来如需吸收 gstack 方法论，按 `UPSTREAM.md` 临时 clone/read diff 后 port。 |

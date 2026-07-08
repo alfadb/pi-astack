@@ -28,11 +28,6 @@
  *   04  sediment       agent_end background extraction status. Updated
  *                      per turn after the LLM returns.
  *
- *   05  tool-contract  provider payload contract status and rare protocol
- *                      mismatch alarms. Mostly idle/diagnostic; sorts after
- *                      end-of-turn sediment because it concerns final LLM
- *                      request/response shape rather than environment setup.
- *
  * To add a new extension:
  *   1. Pick an unused 2-digit prefix that fits the timeline.
  *   2. Add an entry here so the registry stays the single source of
@@ -45,7 +40,6 @@ export const FOOTER_STATUS_KEYS = {
   abrainRules:  "03-abrain-rules",
   sediment:     "04-sediment",
   constraintCompile: "04a-constraint-compile",
-  toolContract: "05-tool-contract",
   openaiServiceTier: "05a-openai-service-tier",
 } as const;
 

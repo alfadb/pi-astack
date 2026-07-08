@@ -180,10 +180,6 @@ export interface ForgettingSettings {
    *  plan + 写 shadow audit),**绝不 mutate**(skeleton 无 mutation 路径;真实 demote
    *  待 data-gate + 跨厂商去相关 graduation-gate)。 */
   demoteShadow: boolean;
-  /** 每批 dry-run demote 上限(级联防护)。 */
-  demoteMaxBatch: number;
-  /** resurrection recent rate ≥ 此值(或趋势 accelerating)→ 自动 backoff(本批全 skip)。 */
-  resurrectionBackoffRate: number;
   /** ADR 0031 Phase 1B: aggregator decay 影子评估开关(默认 false)。
    *  off = aggregator prompt 不含 decay 段、不解析 entry_decay_assessments、不写
    *  decay-shadow.jsonl —— 逐字节零行为变化。on = 写影子 + 跑 §4.2 回归不变量审计。 */
@@ -199,8 +195,6 @@ export interface ForgettingSettings {
 export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
   instrumentation: false,
   demoteShadow: false,
-  demoteMaxBatch: 5,
-  resurrectionBackoffRate: 0.5,
   decayShadow: false,
   autoDemote: false,
 };
@@ -340,8 +334,6 @@ function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSett
   return {
     instrumentation: asBoolean(f.instrumentation, DEFAULT_FORGETTING_SETTINGS.instrumentation),
     demoteShadow: asBoolean(f.demoteShadow, DEFAULT_FORGETTING_SETTINGS.demoteShadow),
-    demoteMaxBatch: Math.max(0, asNumber(f.demoteMaxBatch, DEFAULT_FORGETTING_SETTINGS.demoteMaxBatch)),
-    resurrectionBackoffRate: Math.min(1, Math.max(0, asNumber(f.resurrectionBackoffRate, DEFAULT_FORGETTING_SETTINGS.resurrectionBackoffRate))),
     decayShadow: asBoolean(f.decayShadow, DEFAULT_FORGETTING_SETTINGS.decayShadow),
     autoDemote: asBoolean(f.autoDemote, DEFAULT_FORGETTING_SETTINGS.autoDemote),
   };

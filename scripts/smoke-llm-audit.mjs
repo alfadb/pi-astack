@@ -58,7 +58,6 @@ await check("package manifest loads llm-audit after provider payload mutators", 
   for (const mutator of [
     "./extensions/compaction-tuner/index.ts",
     "./extensions/openai-service-tier/index.ts",
-    "./extensions/tool-contract/index.ts",
     "./extensions/tool-parallel-cap/index.ts",
   ]) {
     const mutatorIndex = manifestExtensions.indexOf(mutator);

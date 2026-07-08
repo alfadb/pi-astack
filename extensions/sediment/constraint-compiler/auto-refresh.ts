@@ -30,6 +30,7 @@ export interface ConstraintShadowAutoRefreshTrigger {
   modelRegistry?: unknown;
   reason: string;
   sourceEventId?: string;
+  retryAttempt?: number;
 }
 
 interface NeedsRefreshMarker {
@@ -172,6 +173,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
   const modelRef = defaultModelRef(trigger.settings);
   const startedAtMs = Date.now();
   let compileStartedAtMs = startedAtMs;
+  let terminalStatus: "completed" | "failed" | "threw" | undefined;
 
   if (!modelRef) {
     await appendAuditLine(trigger.abrainHome, {
@@ -306,6 +308,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       l2OutputRoot: trigger.settings.constraintShadowCompiler.l2OutputRoot,
       deviceId: getDeviceId() ?? "unknown-device",
     });
+    terminalStatus = result.ok ? "completed" : "failed";
     await appendAuditLine(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date().toISOString(),
@@ -313,7 +316,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       reason: trigger.reason,
       sourceEventId: trigger.sourceEventId ?? null,
       modelRef,
-      status: result.ok ? "completed" : "failed",
+      status: terminalStatus,
       durationMs: Date.now() - compileStartedAtMs,
       result: compactResult(result),
     }).catch(() => undefined);
@@ -323,6 +326,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
     // later. no-throw + conditional, so it never disrupts the background flow.
     await commitAbrainDerivedOutputs(trigger.abrainHome, "constraint-shadow-auto-refresh");
   } catch (err) {
+    terminalStatus = "threw";
     await appendAuditLine(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date().toISOString(),
@@ -360,6 +364,20 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
         reason: needsRefresh.reason,
         sourceEventId: needsRefresh.sourceEventId ?? undefined,
       });
+    } else if ((terminalStatus === "failed" || terminalStatus === "threw") && (trigger.retryAttempt ?? 0) < 1) {
+      const retryAttempt = (trigger.retryAttempt ?? 0) + 1;
+      await appendAuditLine(trigger.abrainHome, {
+        schemaVersion: "constraint-shadow-auto-refresh/v1",
+        observedAtUtc: new Date().toISOString(),
+        ok: true,
+        reason: trigger.reason,
+        sourceEventId: trigger.sourceEventId ?? null,
+        modelRef,
+        status: "retry_scheduled",
+        retryAttempt,
+        previousStatus: terminalStatus,
+      }).catch(() => undefined);
+      scheduleConstraintShadowAutoRefresh({ ...trigger, retryAttempt, reason: "previous_run_failed" });
     }
   }
 }

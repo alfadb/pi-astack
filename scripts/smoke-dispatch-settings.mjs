@@ -75,7 +75,7 @@ check("schema defines exactly one top-level dispatch key", () => {
   const schema = JSON.parse(schemaText);
   const dispatchProps = schema?.properties?.dispatch?.properties;
   if (!dispatchProps) throw new Error("dispatch.properties missing from parsed schema");
-  for (const key of ["maxProviderConcurrency", "taskGovernor", "hub", "idleLoopGuard"]) {
+  for (const key of ["maxProviderConcurrency", "taskGovernor", "hub"]) {
     if (!(key in dispatchProps)) {
       throw new Error(`dispatch.properties missing ${key}`);
     }

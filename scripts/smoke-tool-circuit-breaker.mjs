@@ -412,9 +412,6 @@ ok(
       envResolved.cycleRepeatThreshold === 20,
     "env overrides are clamped after resolution and cannot exceed the supported cycle bounds",
   );
-
-  const legacyOff = resolveToolCircuitBreakerSettings({ dispatch: { idleLoopGuard: { enabled: false } } }, {});
-  ok(legacyOff.enabled === false, "legacy dispatch.idleLoopGuard enabled=false disables breaker when no new config is present");
 }
 
 console.log(fails === 0 ? "\nALL PASS - tool circuit breaker" : `\n${fails} FAIL`);

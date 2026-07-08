@@ -87,7 +87,7 @@ fs.writeFileSync(reactLedger, [
 ].join("\n") + "\n", "utf-8");
 
 const forgettingSettings = {
-  forgetting: { demoteShadow: true, autoDemote: true, demoteMaxBatch: 5, resurrectionBackoffRate: 0.5, instrumentation: false, decayShadow: false },
+  forgetting: { demoteShadow: true, autoDemote: true, instrumentation: false, decayShadow: false },
 };
 
 const BODY = [

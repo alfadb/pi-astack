@@ -20,6 +20,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 - **审计记录 / 多轮评审 / commit 级实施流水**写在 `docs/audits/` 或 git history；ADR 只保留会影响决策有效性的证据摘要与链接。
 - **允许的 ADR 修订**是设计立场改变、walk-back、supersede、accepted baseline 更新；修订时改“决策本身”，不要追加 `✅ DONE`、`CLOSED`、实现状态快照、commit-by-commit 列表。
 - **实现与 ADR 不一致**时，先判断是实现 drift 还是设计已改变：drift 修代码/`current-state`；设计改变才修 ADR，并把实现状态放回 `current-state` / `roadmap`。
+- **引用已 archived 的 ADR**时，引用处必须显式标注归档状态；不得继续把被引 ADR 写成 accepted 当前依赖。
 
 ---
 

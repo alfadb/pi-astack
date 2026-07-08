@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { uniqueSessionKey } from "../_shared/session-key";
@@ -12,12 +12,38 @@ import {
   type ThinkingRepeatBreakerTrip,
 } from "../_shared/thinking-repeat-detector";
 
+const SETTINGS_PATH = join(homedir(), ".pi", "agent", "pi-astack-settings.json");
+const SETTINGS_ENV_KEYS = [
+  "PI_ASTACK_THINKING_REPEAT_BREAKER_ENABLED",
+  "PI_ASTACK_DISABLE_THINKING_REPEAT_BREAKER",
+  "PI_ASTACK_THINKING_REPEAT_BREAKER_CONSECUTIVE_THRESHOLD",
+  "PI_ASTACK_THINKING_REPEAT_BREAKER_CYCLE_DETECTION_ENABLED",
+  "PI_ASTACK_THINKING_REPEAT_BREAKER_MAX_CYCLE_LENGTH",
+  "PI_ASTACK_THINKING_REPEAT_BREAKER_CYCLE_REPEAT_THRESHOLD",
+  "PI_ASTACK_THINKING_REPEAT_BREAKER_MIN_SEGMENT_CHARS",
+  "PI_ASTACK_THINKING_REPEAT_BREAKER_MAX_BUFFER_CHARS",
+  "PI_ASTACK_THINKING_REPEAT_BREAKER_ABORT_ON_TRIP",
+] as const;
+let cachedSettingsKey = "";
+let cachedSettings: ReturnType<typeof resolveThinkingRepeatBreakerSettings> | undefined;
+
+function settingsEnvKey(): string {
+  return SETTINGS_ENV_KEYS.map((key) => `${key}=${process.env[key] ?? ""}`).join("\0");
+}
+
 function readSettings(): ReturnType<typeof resolveThinkingRepeatBreakerSettings> {
   try {
-    const raw = JSON.parse(readFileSync(join(homedir(), ".pi", "agent", "pi-astack-settings.json"), "utf-8"));
-    return resolveThinkingRepeatBreakerSettings(raw);
+    const stat = statSync(SETTINGS_PATH);
+    const key = `${stat.mtimeMs}:${stat.size}:${settingsEnvKey()}`;
+    if (cachedSettings && cachedSettingsKey === key) return cachedSettings;
+    const raw = JSON.parse(readFileSync(SETTINGS_PATH, "utf-8"));
+    cachedSettings = resolveThinkingRepeatBreakerSettings(raw);
+    cachedSettingsKey = key;
+    return cachedSettings;
   } catch {
-    return resolveThinkingRepeatBreakerSettings(undefined);
+    cachedSettings = resolveThinkingRepeatBreakerSettings(undefined);
+    cachedSettingsKey = "";
+    return cachedSettings;
   }
 }
 

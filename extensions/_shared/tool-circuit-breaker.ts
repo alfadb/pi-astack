@@ -166,19 +166,10 @@ export function resolveToolCircuitBreakerSettings(
 ): ToolCircuitBreakerSettings {
   const root = asRecord(rawSettings);
   const cfg = asRecord(root.toolCircuitBreaker);
-  const legacyDispatch = asRecord(root.dispatch);
-  const legacyIdleLoop = asRecord(legacyDispatch.idleLoopGuard);
-
-  const hasNewConfig = Object.keys(cfg).length > 0;
   const defaults = TOOL_CIRCUIT_BREAKER_DEFAULTS;
 
-  let enabled = boolOr(cfg.enabled, defaults.enabled);
-  if (!hasNewConfig && typeof legacyIdleLoop.enabled === "boolean" && legacyIdleLoop.enabled === false) {
-    enabled = false;
-  }
-
   const resolved: ToolCircuitBreakerSettings = {
-    enabled,
+    enabled: boolOr(cfg.enabled, defaults.enabled),
     totalThreshold: intAtLeast(cfg.totalThreshold, defaults.totalThreshold, 1),
     consecutiveThreshold: intAtLeast(cfg.consecutiveThreshold, defaults.consecutiveThreshold, 1),
     cycleDetectionEnabled: boolOr(cfg.cycleDetectionEnabled, defaults.cycleDetectionEnabled),

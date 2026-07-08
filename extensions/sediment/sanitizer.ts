@@ -82,13 +82,21 @@ const CREDENTIAL_PATTERNS: CredentialPattern[] = [
 
 // Round 8 P1 (opus R8 audit): Unicode bypass shapes — zero-width spaces
 // and bidi/RTL overrides between e.g. `pass` and `word` defeat the
-// `\b` boundary and keyword tokenization. Strip these before matching
-// (NFKC also folds some homoglyph fullwidth chars, but does NOT fold
-// Cyrillic `ѕ` → Latin `s`; that would require a confusables map and
-// is out of scope here — documented as a known residual).
+// `\b` boundary and keyword tokenization. Strip these before matching.
+// ADR 0027 C6: after NFKC, fold only a minimal credential-keyword
+// homoglyph set in the scan buffer, leaving non-redacted source text intact.
 const INVISIBLE_BYPASS_CHARS = /[\u200B-\u200D\u2060\u202A-\u202E\u00AD\uFEFF]/g;
+const CREDENTIAL_KEYWORD_CONFUSABLES: Record<string, string> = {
+  "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x", "\u0456": "i", "\u0455": "s", "\u043a": "k",
+  "\u03b1": "a", "\u03b5": "e", "\u03bf": "o", "\u03c1": "p", "\u03c7": "x", "\u03c5": "y", "\u03ba": "k",
+};
+const CREDENTIAL_KEYWORD_CONFUSABLE_RE = /[\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0456\u0455\u043a\u03b1\u03b5\u03bf\u03c1\u03c7\u03c5\u03ba]/g;
 const PEM_END_LINE_RE = /-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/;
 const PEM_BODY_LINE_RE = /^(?:[A-Za-z0-9+/=]{8,}|Proc-Type:.*|DEK-Info:.*|Version:.*)$/;
+
+function foldCredentialKeywordConfusables(input: string): string {
+  return input.replace(CREDENTIAL_KEYWORD_CONFUSABLE_RE, (ch) => CREDENTIAL_KEYWORD_CONFUSABLES[ch] ?? ch);
+}
 
 function addReplacement(replacements: string[], name: string): void {
   if (!replacements.includes(name)) replacements.push(name);
@@ -124,7 +132,7 @@ function redactCredentialPatterns(input: string, replacements: string[]): string
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
     if (line === "\n" || line === "\r\n") continue;
-    const scanLine = line.normalize("NFKC").replace(INVISIBLE_BYPASS_CHARS, "");
+    const scanLine = foldCredentialKeywordConfusables(line.normalize("NFKC").replace(INVISIBLE_BYPASS_CHARS, ""));
     for (const pattern of CREDENTIAL_PATTERNS) {
       pattern.re.lastIndex = 0;
       const hit = pattern.re.test(scanLine);
@@ -135,7 +143,7 @@ function redactCredentialPatterns(input: string, replacements: string[]): string
           for (let j = i + 1; j < lines.length; j += 1) {
             const nextLine = lines[j];
             if (nextLine === "\n" || nextLine === "\r\n") continue;
-            const scanNextLine = nextLine.normalize("NFKC").replace(INVISIBLE_BYPASS_CHARS, "").trim();
+            const scanNextLine = foldCredentialKeywordConfusables(nextLine.normalize("NFKC").replace(INVISIBLE_BYPASS_CHARS, "")).trim();
             if (!scanNextLine) break;
             if (PEM_END_LINE_RE.test(scanNextLine) || PEM_BODY_LINE_RE.test(scanNextLine)) {
               lines[j] = secretPlaceholder(pattern.name);

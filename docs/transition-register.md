@@ -6,24 +6,29 @@
 
 | 面 | 进入时间 | 当前状态 | 退出条件 | 证据源 | 下一动作 |
 |---|---|---|---|---|---|
-| Constraint 双读 flip | 2026-07-08 审计登记 | 数据门全绿：coverage=1.0、queued=0、appendFailed=0、legacyOnly=0；textDelta 已经多轮 T0 复核至 2026-07-07 且全部 semantic_equivalent。 | 完成一次明确 flip/retirement 决策，记录授权、回滚条件与 R 轮边界。 | constraint dual-read audit、shadow compiler metrics、2026-07-08 三源交叉审计。 | 发起一次 flip 决策；不得把既有 fallback=false 直接等同于 legacy retirement。 |
 | Knowledge legacy 物删 | 2026-07-05 soak 届满 | Knowledge legacy 物删 soak 已满 ≥14 日历日（2026-06-21 起算）；A6 tripwire 干净，无 legacy-cold-access.jsonl。 | R 轮批准 legacy archive/delete，且定义恢复路径与失败回滚。 | Knowledge projection_only 运行数据、A6 tripwire、2026-07-08 审计。 | 启动 Knowledge legacy retirement R 轮。 |
-| P5.6 verifier | 2026-07-08 验收达成 | merged-source verifier 生产已见 projected_via_verifier；deferredMergedSourceEvents=0；Phase 2 验收数据已达成。 | roadmap 标记 DONE，并保留后续回归监控。 | constraint compiler/verifier 生产指标、roadmap P5.6。 | 本次同步 roadmap 收尾；后续仅按 regression 处理。 |
 
 ## 滞留需推进
 
 | 面 | 进入时间 | 当前状态 | 退出条件 | 证据源 | 下一动作 |
 |---|---|---|---|---|---|
-| hub dogfood | 2026-07-08 审计登记 | 双跑仪器缺失；ADR 0030 已另行 walkback 至 material 模式，并要求 ≥20 次判定前置。 | material 模式跑满 ≥20 次判定，且有可复核的双跑或等价证据。 | ADR 0030 walkback、dogfood 运行记录。 | 补齐判定记录与仪器口径，再评估是否退出 dogfood。 |
-| forgetting 上游接线 | 2026-07-08 审计登记 | 生产 instrumentation、decayShadow、demoteShadow、autoDemote 四 flag 全开，autoLlmWriteEnabled=true；2026-07-04 已有首条真实 demote，但 aggregator 61 次运行产出 0 条 lifecycle_proposal，executor 缺输入；decay-shadow 已识别 5 条 would_demote=true 但未喂 executor。 | aggregator 能生成 lifecycle_proposal，executor 能消费一个受控批次，demote ledger 与 reactivation window 可审计。 | forgetting-demote-ledger、aggregator run ledger、decay-shadow audit、2026-07-08 审计。 | 实现 aggregator→lifecycle_proposal 接线批次，并用小批量验证。 |
+| Constraint 双读 flip | 2026-07-08 审计登记 | 数据门在 2026-07-08 治理审计窗口总体达标；但 2026-07-08 06:53Z shadow run 出现一次 compile 失败（SC_COMPILER_VALIDATION_FAILED），同 source 在 06:37Z 成功，定性为 LLM 输出抖动；失败后第 29 条 constraint-evidence 待投影。 | 重跑 compile 成功并确认第 29 条 evidence 已投影后，再完成明确 flip/retirement 决策，记录授权、回滚条件与 R 轮边界。 | constraint dual-read audit、shadow compiler metrics、2026-07-08 三源交叉审计。 | 先重跑 compile 确认，再评估 flip；不得把既有 fallback=false 直接等同于 legacy retirement。 |
+| hub dogfood | 2026-07-08 审计登记 | ADR 0030 已 walk-back 至 material 模式离线判定；本批落地判定回填格式 `hub-judgments.jsonl`，并执行首次真实跨厂商 material 盲判。 | 累计 ≥20 次 material 判定且质量 ≥ human-pick；计数以 `hub-judgments.jsonl` 为准。30 天无新 material 判定则告警并重评；若 2026-07-15 前未产生 ≥1 次真实判定则关闭 `dispatch.hub.enabled`。 | ADR 0030 walkback、hub audit、`hub-judgments.jsonl`、2026-07-08 治理批 audit。 | 继续回填 material 判定；触发 stale-guard 或 fail-closed 条件时执行开关处理。 |
+| forgetting 上游接线 | 2026-07-08 审计登记 | decay→lifecycle_proposal 接线已落地（60b5d40，2026-07-08）；pending 与计数以 `~/.abrain/.state/sediment/entry-lifecycle-proposals.jsonl` 为准。 | executor 消费一个受控批次，且 demote ledger 与 reactivation window 可审计。 | entry-lifecycle-proposals ledger、forgetting-demote-ledger、aggregator run ledger、decay-shadow audit、2026-07-08 审计。 | 用小批量验证 executor 消费链路。 |
+| auto-refresh failed-run 重试 | 2026-07-08 审计登记 | 取证确认 failed/threw 后无重试并静默悬挂约 13 小时；本批已加有界重试（retryAttempt≤1）。若代码批次遇到架构限制未完全落地，以治理批 audit 的实际结果为准。 | 重试机制经真实失败触发验证，并能在失败后留下可审计记录。 | auto-refresh run ledger、2026-07-08 治理批 audit。 | 临时缓解为 owner 手动 re-trigger；等待真实失败验证重试链路。 |
 | tier2RulesLegacyWriteGate observe→block | 2026-07-08 审计登记 | 仍停在 observe；缺少足够前置保证。 | tier2 evidence 路径存在，或 constraint legacy retirement gate 通过。 | settings gate、constraint retirement 计划。 | 等待前置条件；触发后把 observe 切到 block。 |
 | read-flip .state→git L2 | 2026-07-08 审计登记 | Constraint runtime consumer 仍读 .state compiled view；git L2 是审计/投影面。 | 门控元数据进入 git L2，preflight smoke 通过，并完成一次 multi-T0 复审。 | current-state §3、L2 projection output、preflight smoke。 | 设计并执行 .state→git L2 read-flip 复审。 |
 | dual-read audit 关闭 | 2026-07-08 审计登记 | dual-read audit 仍作为过渡监控面存在。 | constraint legacy retirement 完成，且无新的 undispositioned delta。 | dual-read audit、constraint retirement gate。 | 绑定到 constraint legacy retirement 完成后关闭。 |
-| staging 硬删 | 2026-07-08 审计登记 | staging 现存 138 条（71 provisional + 67 multiview-pending），最老 46 天；promotion 0.27/天、ageout 0.4/天。 | 存在 recovery primitive，并完成硬删 runbook 与回滚验证。 | staging inventory、promotion/ageout metrics。 | 先设计 recovery primitive，再讨论硬删。 |
+| staging 硬删 | 2026-07-08 审计登记 | staging backlog 仍需按 inventory/metrics 指针评估；不在本文冻结数量。 | 存在 recovery primitive，并完成硬删 runbook 与回滚验证。 | staging inventory、promotion/ageout metrics。 | 先设计 recovery primitive，再讨论硬删。 |
 | O5 conf≥8 fallback 巡检 | 2026-07-08 审计登记 | 仍需持续确认 conf≥8 非指令 durable fallback 没有引入用户纠正或召回漏失。 | 审计窗口内无被用户纠正的 accepted corrections / recall misses，可移除 fallback 回 ADR 原文谓词。 | tier1_direct_write audit、O5 sunset 指标。 | 做一次窗口巡检并记录结论。 |
 | ADR 0035/0036/0037 slim+ingest | 2026-07-08 审计登记 | slim 与 ingest 相关工作仍未形成可退出的闭环状态。 | slim/ingest 验收口径、数据样本与回滚边界齐备。 | ADR 0035/0036/0037 实施记录、ingest 指标。 | 汇总三项当前实态，拆出最小验收批次。 |
-| legacy rule body_hash 漂移 | 2026-07-08 审计登记 | legacy-scan 对 21 条 global:always 规则报 SC_INPUT_BODY_HASH_MISMATCH。 | 重算并回写 body_hash，或确认由新证据投影取代后归档。 | roadmap Architecture debt、legacy-scan。 | 先产出 mismatch 清单，再选择回写或归档路径。 |
-| outcome unknown 占比溯因 | 2026-07-08 审计登记 | outcome-ledger 12626 行，近 7 天 5485 行；decisive 5.5%、confirmatory 11.7%、retrieved-unused 13.5%、unknown 69.3%。 | unknown 来源被分解到可行动类别，并有降低或保留的明确决策。 | outcome-ledger、2026-07-08 审计。 | 抽样 unknown 行，区分缺埋点、分类器保守、真实不可判定。 |
+| outcome unknown 占比溯因 | 2026-07-08 审计登记 | outcome unknown 占比仍需溯因；具体行数和比例以 outcome-ledger 与抽样报告为准，不在本文冻结。 | unknown 来源被分解到可行动类别，并有降低或保留的明确决策。 | outcome-ledger、2026-07-08 审计。 | 抽样 unknown 行，区分缺埋点、分类器保守、真实不可判定。 |
+
+## 已收口记录
+
+- P5.6 verifier 已从待决策面移除：roadmap 已标 DONE，后续仅按回归监控处理。
+- legacy rule `body_hash` 漂移已从过渡面移除：写侧 hash 已改为 post-transform 计算（`writer.ts:3604-3612`，`rule-writer.ts:300` 注释），2026-06-24 已 re-stamp，最近运行报告 0 mismatch；证据收口见 `docs/audits/2026-07-08-governance-fix-batch.md`。
+- tool-contract 相关文档面按本批退役完成；后续若代码或 smoke 仍残留，以治理批 audit 与代码批结果为准。
 
 ## 健康 gated-defer
 

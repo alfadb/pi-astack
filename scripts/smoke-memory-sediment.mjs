@@ -2453,6 +2453,8 @@ END_MEMORY`;
       assertRedacted("short password keyword", shortPasswordResult, shortPasswordRaw, /password: \[SECRET:short_secret_assignment\]/);
       const benignPasswordState = sanitizeForMemory("password: required before continuing");
       assert(!benignPasswordState.replacements.some((r) => r.startsWith("credential:")), `short secret heuristic must not redact benign state words: ${JSON.stringify(benignPasswordState)}`);
+      const homoglyphPassword = sanitizeForMemory("pa\u0455\u0455word=abc123secret");
+      assert(homoglyphPassword.ok && homoglyphPassword.text === "[SECRET:short_secret_assignment]", `homoglyph password keyword bypass must redact containing line: ${JSON.stringify(homoglyphPassword)}`);
 
       // Round 8 P1 (opus R8 audit): zero-width / bidi-control bypass
       // forms must NOT defeat keyword scanning. Insert U+200B between

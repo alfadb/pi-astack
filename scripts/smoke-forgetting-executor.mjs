@@ -25,7 +25,7 @@ const prop = (slug, kind = "fact", reason = "affirm_superseded") => ({ slug, kin
 const calm = { trend: "stable", recent_rate: 0.1 };
 const base = (over = {}) => ({
   proposals: [], hysteresisBySlug: {}, resurrection: calm,
-  nowMs: NOW, maxBatch: 5, resurrectionBackoffRate: 0.5, ...over,
+  nowMs: NOW, maxBatch: 5, resurrectionBackoffThreshold: 0.5, ...over,
 });
 
 // 空
@@ -99,7 +99,7 @@ const base = (over = {}) => ({
   ok(off.enabled === false && off.reason === "demoteShadow_off", "demoteShadow off → 短路 enabled:false(零行为变化)");
   const noPr = runForgettingExecutorDryRun(undefined, { forgetting: { demoteShadow: true } });
   ok(noPr.enabled === true && noPr.reason === "no_project_root", "on + 无 projectRoot → no_project_root");
-  const on = runForgettingExecutorDryRun("/proj", { forgetting: { demoteShadow: true, demoteMaxBatch: 5, resurrectionBackoffRate: 0.5 } });
+  const on = runForgettingExecutorDryRun("/proj", { forgetting: { demoteShadow: true } });
   ok(on.ok === true && on.dry_run === true && on.plan && on.plan.demote.length === 0, "on + sandbox 空 proposal → dry-run 空 plan, dry_run:true");
 }
 // 结构无-mutation 保证: executor 源码不 import writer/archive 路径

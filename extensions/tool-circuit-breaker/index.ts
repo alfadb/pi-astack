@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { uniqueSessionKey } from "../_shared/session-key";
@@ -12,12 +12,37 @@ import {
   type ToolCircuitBreakerTrip,
 } from "../_shared/tool-circuit-breaker";
 
+const SETTINGS_PATH = join(homedir(), ".pi", "agent", "pi-astack-settings.json");
+const SETTINGS_ENV_KEYS = [
+  "PI_ASTACK_DISABLE_TOOL_CIRCUIT_BREAKER",
+  "PI_ASTACK_TOOL_CIRCUIT_BREAKER_ENABLED",
+  "PI_ASTACK_TOOL_CIRCUIT_BREAKER_TOTAL_THRESHOLD",
+  "PI_ASTACK_TOOL_CIRCUIT_BREAKER_CONSECUTIVE_THRESHOLD",
+  "PI_ASTACK_TOOL_CIRCUIT_BREAKER_CYCLE_DETECTION_ENABLED",
+  "PI_ASTACK_TOOL_CIRCUIT_BREAKER_MAX_CYCLE_LENGTH",
+  "PI_ASTACK_TOOL_CIRCUIT_BREAKER_CYCLE_REPEAT_THRESHOLD",
+  "PI_ASTACK_TOOL_CIRCUIT_BREAKER_ABORT_ON_TRIP",
+] as const;
+let cachedSettingsKey = "";
+let cachedSettings: ReturnType<typeof resolveToolCircuitBreakerSettings> | undefined;
+
+function settingsEnvKey(): string {
+  return SETTINGS_ENV_KEYS.map((key) => `${key}=${process.env[key] ?? ""}`).join("\0");
+}
+
 function readSettings(): ReturnType<typeof resolveToolCircuitBreakerSettings> {
   try {
-    const raw = JSON.parse(readFileSync(join(homedir(), ".pi", "agent", "pi-astack-settings.json"), "utf-8"));
-    return resolveToolCircuitBreakerSettings(raw);
+    const stat = statSync(SETTINGS_PATH);
+    const key = `${stat.mtimeMs}:${stat.size}:${settingsEnvKey()}`;
+    if (cachedSettings && cachedSettingsKey === key) return cachedSettings;
+    const raw = JSON.parse(readFileSync(SETTINGS_PATH, "utf-8"));
+    cachedSettings = resolveToolCircuitBreakerSettings(raw);
+    cachedSettingsKey = key;
+    return cachedSettings;
   } catch {
-    return resolveToolCircuitBreakerSettings(undefined);
+    cachedSettings = resolveToolCircuitBreakerSettings(undefined);
+    cachedSettingsKey = "";
+    return cachedSettings;
   }
 }
 

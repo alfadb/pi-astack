@@ -171,8 +171,26 @@ function auditPathFor(root) {
   return path.join(root, ".pi-astack", "dispatch", "audit.jsonl");
 }
 
+function hubJudgmentsPath() {
+  return "/home/worker/.pi/.pi-astack/dispatch/hub-judgments.jsonl";
+}
+
+function countJudgmentRows() {
+  try {
+    return fs.readFileSync(hubJudgmentsPath(), "utf-8").split("\n").filter((line) => line.trim()).length;
+  } catch (err) {
+    if (err?.code === "ENOENT") return 0;
+    throw err;
+  }
+}
+
 function main() {
   const args = process.argv.slice(2);
+  if (args.includes("--count-judgments")) {
+    console.log(JSON.stringify({ judgments_path: hubJudgmentsPath(), judgment_count: countJudgmentRows() }, null, 2));
+    return;
+  }
+
   const rootArg = args.find((a) => a.startsWith("--root="));
   const modeArg = args.find((a) => a.startsWith("--mode="));
   const rateArg = args.find((a) => a.startsWith("--rate="));

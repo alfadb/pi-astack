@@ -434,7 +434,7 @@ function buildRecommendedActions(deltaSummary) {
   };
   const countDisposition = (kind, disposition) => deltaSummary[kind]?.byDisposition?.[disposition]?.blockingUnique ?? 0;
   add("legacyOnly.settings_not_memory", countDisposition("legacyOnly", "settings_not_memory"), "Keep settings-like residuals separate from memory and require explicit retirement authorization before deleting legacy rules.");
-  add("legacyOnly.tool_contract_not_memory", countDisposition("legacyOnly", "tool_contract_not_memory"), "Keep tool-contract residuals out of memory retirement and route them through the owning contract/settings surface.");
+  add("legacyOnly.tool_contract_not_memory", countDisposition("legacyOnly", "tool_contract_not_memory"), "Keep tool declaration residuals out of memory retirement and route them through the owning contract/settings surface.");
   add("textDelta.normalization_possible", countDisposition("textDelta", "normalization_possible"), "Review canonicalization candidates and record an explicit disposition before treating them as safe to archive.");
   add("semantic_review_required", countDisposition("legacyOnly", "semantic_review_required") + countDisposition("textDelta", "semantic_review_required") + countDisposition("compiledOnly", "semantic_review_required"), "Send semantic deltas to manual or T0 semantic review; do not retire the legacy source until the review records equivalence or an accepted replacement.");
   add("semantic_mismatch_fix_required", countDisposition("textDelta", "semantic_mismatch_fix_required"), "Fix the compiled output or source mapping before considering retirement.");

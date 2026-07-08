@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0036: memory_search 两阶段塌缩 + hybrid 检索增强
 
-- Status: **Accepted** — P6 两阶段塌缩已转产(`pi-astack-settings.json` memory.search.stage1Skip=true, flag-reversible kill-switch); 跨厂商金标 + 3×T0 评审所有代码条件已落(§9.4)。**P4 多向量已转产**(flip 2026-06-14, §10.6; `multiVector=true` 全局重嵌 2368 entry→2731 sub-vector + dedup chunk0 分离), 5 条件逐一过 + 人类绿灯。**P3 BM25 已转产**(§11, sparseBM25=true 读路径; dedup pin false)。**P5a query 路由已转产**(`pi-astack-settings.json` memory.search.queryRouting=true; 代码 DEFAULT 仍 false; 仅 toolSearch 精确 slug/唯一 ADR 编号直查跳 LLM; ambiguous 或自然语言 query fall-through; deterministic smoke-query-routing 验证边界)。**P5b sediment dedup dense-only 已实现**(3×T0 近重金标 60 对 + 真实检索 oracle-dedup-p5b 10/10 验证 dense-only 与三阶段 dedup 候选逐对等价): 解除 sedimentDedup 的 stage1Skip/sparseBM25 临时 pin, dedup 现跟读栈(两阶段+BM25)。**P4 dedup 分离(条件1)已实现**(chunk0 聚合, multiVector flip 后生效); multiVector 原子重嵌和 flip 已在 §10.6 完成。
+- Status: **Accepted**
 - Date: 2026-06-14
 - Supersedes-direction: 承接 ADR 0035(stage0 embedding 候选检索); 本 ADR 修订 stage1 的存废
 
@@ -49,7 +49,7 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 |---|---|---|
 | P1 实证(本提交) | `stage1Skip` flag + oracle ablation | 初步: 差 5 点/降 91% ✅ |
 | P2 金标集 | 从 search-metrics.jsonl 采样真实 query + 人工标注正确 entry(跨过 ground-truth 正偏) | 转产硬门 |
-| P3 BM25 复活(**已转产**, §11) | char n-gram BM25(CJK bigram+IDF+高信号字段×3)替 sparseMatchSlugs | ✅ 中文 0→159, 英文不退; 读路径 on, dedup pin off |
+| P3 BM25 复活(§11) | char n-gram BM25(CJK bigram+IDF+高信号字段×3)替 sparseMatchSlugs | 中文与符号召回补盲; 转产事实见 `feature-changelog.md` |
 | P4 多向量(实现, 见 §10) | chunk 多 sub-vector + max-sim 解 3500 截断 | ✅ paraphrase 尾部 recall@10 +30pt / @50 +12pt, 无短文回归 → dark, 待 flip |
 | P5a 路由(**已转产**) | query 路由: toolSearch 精确 slug/唯一 ADR 编号直查跳 LLM | settings 中 `queryRouting` on; 代码 DEFAULT off; smoke 验证只在精确命中时短路, 歧义/自然语言保持正常检索 |
 | P5b dedup dense-only(**已实现**) | dedup 解 stage1Skip/sparseBM25 pin, 跟读栈 | 近重金标 60 对 + oracle-dedup-p5b 10/10: dense-only ≡ 三阶段(intrusion@5/recall@5 逐对等); curator-LLM 是最终合并门 |
@@ -110,7 +110,7 @@ token: 每 query stage1 310K + stage2 30K = 340K → two-stage 仅 stage2 30K(**
 - 判据(§5 P6 门): two-stage recall@gold ≈ three-stage, 且金标跨厂商投票(非单模型凑满, 非 derives_from)。**达标**(two 58.3% ≥ three 53.7%; 4 厂商 ≥2/4 共识)。
 - 提案: `DEFAULT_SEARCH_SETTINGS.stage1Skip` 由 `false` 转 `true`(两阶段塌缩转产, 省 ~91% LLM token)。stage1 代码保留为 flag-off kill-switch + 安全网底座, 不删除。
 - **安全网契约已修复(本次, 3×T0 条件 1)**: 原 `executeSearch` 安全网只“扩 stage0 池后同设置重跑”, 与 §4“verdict=none / pool<K 回退 stage1 LLM 救场”矛盾。已改: 扩召 retry 强制 `stage1Skip=false`(`llm-search.ts` 安全网块), stage1 LLM 在扩召池上救场。stage1Skip=false(现默认)无行为变化; 转产 true 后这是 stage1 降级为低频 fallback(非删除)的落点。
-- P6 当时未做(超出 stage1 转产范围, 各自独立 flag/门): P3 BM25(sparseBM25, smoke 已验中文 0→159)、P4 多向量、P5 query 路由 + sediment dedup dense-only 仍 dark, 不随 P6 一起转。后续状态见本文 Status 行和对应章节。
+- P6 当时未做(超出 stage1 转产范围, 各自独立 flag/门): P3 BM25(sparseBM25, smoke 已验中文 0→159)、P4 多向量、P5 query 路由 + sediment dedup dense-only 仍 dark, 不随 P6 一起转。后续转产事实见 `feature-changelog.md` 与对应章节。
 
 ## 9. 3×T0 评审共识(本次)+ 转产门修订
 

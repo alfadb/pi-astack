@@ -1,7 +1,7 @@
 import type { MemorySettings } from "./settings";
-import type { ListFilters, MemoryEntry, SearchFilters, SearchParams } from "./types";
-import { relationValues, tokenize } from "./parser";
-import { clamp, normalizeBareSlug, stableUnique } from "./utils";
+import type { ListFilters, MemoryEntry, SearchFilters } from "./types";
+import { relationValues } from "./parser";
+import { clamp, normalizeBareSlug } from "./utils";
 
 export function entryMatchesFilters(entry: MemoryEntry, filters?: SearchFilters): boolean {
   if (filters?.kinds?.length) {
@@ -32,96 +32,6 @@ export function entryMatchesFilters(entry: MemoryEntry, filters?: SearchFilters)
   }
 
   return true;
-}
-
-function documentFrequencies(entries: MemoryEntry[]): Map<string, number> {
-  const df = new Map<string, number>();
-  for (const entry of entries) {
-    for (const token of entry.tokenCounts.keys()) {
-      df.set(token, (df.get(token) ?? 0) + 1);
-    }
-  }
-  return df;
-}
-
-function textScoreEntry(
-  entry: MemoryEntry,
-  query: string,
-  queryTerms: string[],
-  df: Map<string, number>,
-  docCount: number,
-): number {
-  const q = query.trim().toLowerCase();
-  const titleLower = entry.title.toLowerCase();
-  const slugLower = entry.slug.toLowerCase();
-  const compiledLower = entry.compiledTruth.toLowerCase();
-
-  let textScore = 0;
-  for (const term of queryTerms) {
-    const tf = (entry.tokenCounts.get(term) ?? 0) / Math.sqrt(entry.tokenTotal);
-    const idf = Math.log(1 + docCount / (1 + (df.get(term) ?? 0))) + 1;
-    textScore += tf * idf;
-
-    if (titleLower.includes(term)) textScore += 2.0;
-    if (slugLower.includes(term)) textScore += 1.2;
-  }
-
-  if (q && titleLower.includes(q)) textScore += 3.0;
-  if (q && compiledLower.includes(q)) textScore += 1.5;
-  return textScore;
-}
-
-function finalRankScore(entry: MemoryEntry, normalizedTextScore: number, settings: MemorySettings): number {
-  const confidenceFactor = Math.max(0.1, entry.confidence / 10);
-  const projectBoost = entry.scope === "project" ? settings.projectBoost : 1;
-  return normalizedTextScore * confidenceFactor * projectBoost;
-}
-
-/** @deprecated BM25 search — dead code kept for potential offline diagnostics CLI.
- *  No caller in extensions/. ADR 0015 LLM retrieval fully replaces this path. */
-export function searchEntries(entries: MemoryEntry[], params: SearchParams, settings: MemorySettings) {
-  const query = String(params.query ?? "").trim();
-  const filters = params.filters ?? {};
-  const limit = clamp(
-    Math.floor(filters.limit ?? settings.defaultLimit),
-    1,
-    settings.maxLimit,
-  );
-
-  if (!query) return [];
-
-  const filtered = entries.filter((entry) => entryMatchesFilters(entry, filters));
-  const queryTerms = stableUnique(tokenize(query));
-  const df = documentFrequencies(filtered);
-  const textScored = filtered
-    .map((entry) => ({ entry, textScore: textScoreEntry(entry, query, queryTerms, df, filtered.length || 1) }))
-    .filter((item) => item.textScore > 0);
-
-  if (textScored.length === 0) return [];
-
-  const minText = Math.min(...textScored.map((item) => item.textScore));
-  const maxText = Math.max(...textScored.map((item) => item.textScore));
-  const range = maxText - minText;
-  const scored = textScored
-    .map(({ entry, textScore }) => {
-      const normalizedTextScore = range === 0 ? 1 : (textScore - minText) / range;
-      return { entry, rawScore: finalRankScore(entry, normalizedTextScore, settings) };
-    })
-    .filter((item) => item.rawScore > 0)
-    .sort((a, b) => b.rawScore - a.rawScore);
-
-  const maxScore = scored[0]?.rawScore || 1;
-  return scored.slice(0, limit).map(({ entry, rawScore }) => ({
-    slug: entry.slug,
-    title: entry.title,
-    summary: entry.summary,
-    score: Number((rawScore / maxScore).toFixed(4)),
-    kind: entry.kind,
-    status: entry.status,
-    confidence: entry.confidence,
-    degraded: false,
-    related_slugs: entry.relatedSlugs.slice(0, 5),
-  }));
 }
 
 function parseCursor(cursor: string | undefined): number {

@@ -62,16 +62,19 @@ status: accepted
 
 ## 2. Part A — 调用面规范
 
-### 2.1 新工具契约（8 个独立 tool，全部 tell-not-ask，仅主会话；合议 RC1/gpt）
+### 2.1 新工具契约（10 个独立 tool，全部 tell-not-ask，仅主会话；合议 RC1/gpt）
 
 | tool | 参数 | 返回 details（成功） | 副作用 |
 |---|---|---|---|
 | `goal_status()` | 无 | `{state: GoalState \| null}` | 无（只读） |
 | `goal_set({objective?, doc?, criteria?, max_continuations?, max_minutes?})` | objective/doc 二选一互斥 | `{goal_id, source, budget}` | event+view 写入；ui.notify tell |
-| `goal_pause()` / `goal_resume()` / `goal_clear()` | 无 | `{goal_id, status}` | event+view；notify tell |
+| `goal_pause()` / `goal_resume()` / `goal_stop()` / `goal_clear()` | 无 | `{goal_id, status}` | event+view；notify tell |
+| `goal_check({summary?, evidence?})` | 运行证据摘要 | `{goal_id, recorded}` | event+view；notify tell |
 | `workflow_validate({file})` | 路径（~/相对/绝对） | 结构化 dry-run summary（`{ok, errors[], plan, estConcurrency, mutatingStages}`）+ 人类报告文本 | 无（只读） |
 | `workflow_list()` | 无 | `{entries: [{namespace: "project"\|"abrain", name, path, runnable}], settings: {enabled, readOnly, defaultModel}}` | 无（只读） |
 | `workflow_run({file})` | 路径 | `{runId, status, stages, degraded, totalCost, statePath}` | 执行 + trace 落盘；启动/逐 stage/结束 notify |
+
+**2026-07-08 实施期新增**：accepted 后实现新增 `goal_stop` 与 `goal_check`。`goal_stop` 用于把终止目标记为终态，`goal_check` 用于登记系统运行证据；二者仍是 tell-not-ask 工具，不引入确认弹窗或 per-run 用户动作。
 
 - 失败一律结构化（`isError` + `details.kind`），不抛裸异常：`workflow_disabled`（enabled=false 时**不调 runner** 直接返回，合议 RC6/gpt）、`validation_failed`（含 errors[]）、`machine_turn_rejected`（仅 set/resume）、`goal_not_found` 等。
 - 字段名实现 PR 可微调，语义与互斥关系不可（与 0032 §7 同口径）。
@@ -79,7 +82,7 @@ status: accepted
 
 ### 2.2 边界约束
 
-- **仅主会话（N2）**：8 个工具不进入 dispatch `KNOWN_TOOLS`（子 agent 永远无法获得——与 vault_release/prompt_user 同列；机制为既有 allowlist 排除式设计，非新设施；smoke 锁定集合断言）。stage 内 dispatch 硬拒（M1）不变，故 workflow 不能嵌套 workflow，goal_set 也不可能出现在 stage 子 agent 中。
+- **仅主会话（N2）**：10 个工具不进入 dispatch `KNOWN_TOOLS`（子 agent 永远无法获得——与 vault_release/prompt_user 同列；机制为既有 allowlist 排除式设计，非新设施；smoke 锁定集合断言）。stage 内 dispatch 硬拒（M1）不变，故 workflow 不能嵌套 workflow，goal_set 也不可能出现在 stage 子 agent 中。
 - **机器 turn 拒绝面 = `goal_set`/`goal_resume` 两个**（§1.3）。
 - **用户中断**：`workflow_run` 必须把 tool execute 的 `signal` 线程进 `executeWorkflow`（用户 abort → run cancelled，C5 语义现成）。
 - **同 turn 多次调用**：允许，互相独立（与 dispatch_parallel 同等待遇，合议 M3/deepseek）；自然边界 = 每次调用同步阻塞至终态、每次启动/结束均有 tell、用户随时可中断、不另设次数硬限。

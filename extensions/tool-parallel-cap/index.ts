@@ -25,27 +25,11 @@
  * at most one tool_use. The model still chooses freely whether to use a
  * tool (type: auto), but cannot emit two in the same message.
  *
- * ## Composability with tool-contract
+ * ## Payload preservation
  *
- * The sibling `tool-contract` extension also sets `tool_choice` on the
- * payload (it forces `{ type: "any" | "auto" }` to make the model emit
- * `final_answer`). Both run on `before_provider_request` and pi does not
- * sort extension load order (fs.readdirSync is filesystem-native order,
- * not alphabetical). We CANNOT assume who runs first.
- *
- * Mitigation in two places, both required for order-independence:
- *   1. `tool-contract/payload.ts` is patched (in the same commit
- *      introducing this extension) to PRESERVE pre-existing tool_choice
- *      subfields when augmenting `type` — its spread is now
- *      `{ ...existingTC, type: forced }` instead of `{ type: forced }`.
- *      So if cap-parallel ran first, our `disable_parallel_tool_use:true`
- *      survives tool-contract's augmentation.
- *   2. This extension ALWAYS reads `payload.tool_choice` and spreads it
- *      first, so if tool-contract ran before us, its `type: auto/any` is
- *      preserved while we add our flag.
- *
- * Net result: order-independent. Whoever runs second sees and preserves
- * what the first wrote, plus adds its own subfields.
+ * This extension reads any existing `payload.tool_choice` and spreads it
+ * first, then adds `disable_parallel_tool_use:true`. That keeps unrelated
+ * provider payload fields intact if another hook already populated them.
  *
  * ## Sub-agent isolation
  *
@@ -96,10 +80,7 @@ function readTargetModelSubstrings(): string[] {
 /**
  * Detect whether the payload is Anthropic Messages-shaped.
  *
- * We deliberately keep this lightweight rather than reusing
- * tool-contract's `inferToolContractProvider` — that one ships its own
- * weight (provider precedence rules, tool-shape voting) and importing it
- * would couple the two extensions even more.
+ * We deliberately keep this lightweight and local.
  *
  * Heuristic:
  *   - `messages` is an array (both Anthropic Messages and OpenAI Chat
@@ -160,9 +141,8 @@ export function shouldCapForPayload(
 
 /**
  * Pure: produce a new payload object with `disable_parallel_tool_use: true`
- * merged into tool_choice. Preserves any existing tool_choice subfields
- * (so this is safe to chain with tool-contract). Caller decides whether
- * to call this based on `shouldCapForPayload`.
+ * merged into tool_choice. Preserves any existing tool_choice subfields.
+ * Caller decides whether to call this based on `shouldCapForPayload`.
  */
 export function applyParallelCap(payload: Obj): Obj {
   const existing = isObj(payload.tool_choice) ? payload.tool_choice : undefined;

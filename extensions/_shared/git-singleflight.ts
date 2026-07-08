@@ -15,7 +15,9 @@
  * here would give abrain (git-sync) and sediment (writer) two separate
  * "locks" that never contend — exactly the bug this module exists to fix.
  * The chain map therefore lives on
- * `globalThis[Symbol.for("pi-astack/git-singleflight/state/v1")]`.
+ * `globalThis[Symbol.for("pi-astack/git-singleflight/state/v1")]`. Because
+ * jiti `moduleCache:false` can load multiple copies, state() also checks a
+ * version field and reuses any existing singleton in place after warning.
  *
  * KEYING: one chain per *resolved* repo root path. Ops against the same
  * `.git/index.lock` must share a key; ops on different repos must not
@@ -44,8 +46,10 @@
 import * as path from "node:path";
 
 const _STATE_KEY = Symbol.for("pi-astack/git-singleflight/state/v1");
+const STATE_VERSION = 1;
 
 interface GitSingleFlightState {
+  version: number;
   /** resolved repo root → swallowed tail of the chain */
   tails: Map<string, Promise<unknown>>;
   /** total ops ever enqueued in this process (introspection / smoke) */
@@ -54,12 +58,19 @@ interface GitSingleFlightState {
 
 function state(): GitSingleFlightState {
   const g = globalThis as Record<symbol, unknown>;
-  let s = g[_STATE_KEY] as GitSingleFlightState | undefined;
-  if (!s) {
-    s = { tails: new Map(), opsStarted: 0 };
+  let s = g[_STATE_KEY] as Partial<GitSingleFlightState> | undefined;
+  if (!s || typeof s !== "object") {
+    s = { version: STATE_VERSION, tails: new Map(), opsStarted: 0 };
     g[_STATE_KEY] = s;
+    return s as GitSingleFlightState;
   }
-  return s;
+  if (s.version !== STATE_VERSION || !(s.tails instanceof Map) || typeof s.opsStarted !== "number") {
+    console.warn("[pi-astack/git-singleflight] incompatible global singleton shape/version; reusing existing instance in place");
+    if (!(s.tails instanceof Map)) s.tails = new Map();
+    if (typeof s.opsStarted !== "number") s.opsStarted = 0;
+    if (typeof s.version !== "number") s.version = STATE_VERSION;
+  }
+  return s as GitSingleFlightState;
 }
 
 /**

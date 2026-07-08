@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /**
- * smoke-tool-parallel-cap — verify the tool-parallel-cap pure helpers AND
- * the composability invariant with tool-contract's injectToolChoiceIntoPayload.
+ * smoke-tool-parallel-cap — verify the tool-parallel-cap pure helpers.
  *
  * What this asserts:
  *   1. isAnthropicMessagesShape() rejects non-objects, OpenAI Responses
@@ -10,11 +9,7 @@
  *      tools array non-empty, tool_choice !== "none", sub-agent guard.
  *   3. applyParallelCap() preserves existing tool_choice fields while
  *      adding disable_parallel_tool_use:true.
- *   4. Order-independence with tool-contract:
- *      - cap-first → tool-contract-second: final has BOTH type AND
- *        disable_parallel_tool_use (verifies tool-contract patch).
- *      - tool-contract-first → cap-second: same result via cap's spread.
- *   5. Env override PI_ASTACK_PARALLEL_CAP_MODELS works.
+ *   4. Env override PI_ASTACK_PARALLEL_CAP_MODELS works.
  *
  * Loads .ts via jiti; no pi runtime needed.
  */
@@ -37,8 +32,6 @@ function check(name, ok, why = "") {
 }
 
 const cap = jiti(path.join(repoRoot, "extensions/tool-parallel-cap/index.ts"));
-const tcPayload = jiti(path.join(repoRoot, "extensions/tool-contract/payload.ts"));
-
 const {
   isAnthropicMessagesShape,
   shouldCapForPayload,
@@ -48,8 +41,6 @@ const {
   modelIdFromCtx,
   modelApiFromCtx,
 } = cap.__TEST;
-
-const { injectToolChoiceIntoPayload } = tcPayload;
 
 // ─── basic shape detection ──────────────────────────────────────────
 console.log("[1] isAnthropicMessagesShape");
@@ -113,52 +104,8 @@ console.log("[3] applyParallelCap");
   check("richTC: disable flag added alongside", r4.tool_choice.disable_parallel_tool_use === true);
 }
 
-// ─── ORDER-INDEPENDENCE WITH tool-contract ──────────────────────────
-// Build a realistic Anthropic Messages payload with final_answer tool
-// + edit tool, so tool-contract's payloadHasFinalAnswerTool() finds it.
-console.log("[4] Composability with tool-contract (order-independent)");
-{
-  const FINAL_ANSWER_TOOL_NAME = "final_answer";
-  const baseAnthropic = {
-    model: "provider/model-a",
-    messages: [{ role: "user", content: "do something" }],
-    system: "you are pi",
-    tools: [
-      { name: "edit", description: "edit a file", input_schema: { type: "object", properties: {}, required: [] } },
-      { name: FINAL_ANSWER_TOOL_NAME, description: "finish the turn", input_schema: { type: "object", properties: {}, required: [] } },
-    ],
-    thinking: { type: "enabled", budget_tokens: 16000 },
-  };
-
-  // Scenario A: cap-parallel runs FIRST, tool-contract SECOND
-  let payloadA = baseAnthropic;
-  payloadA = applyParallelCap(payloadA);
-  const injA = injectToolChoiceIntoPayload(payloadA, { finalAnswerToolName: FINAL_ANSWER_TOOL_NAME });
-  payloadA = injA.payload;
-  check("A: tool-contract injected (final_answer present)", injA.injected === true);
-  check("A: type set to auto (thinking enabled)", payloadA.tool_choice.type === "auto");
-  check("A: disable_parallel_tool_use SURVIVED tool-contract spread", payloadA.tool_choice.disable_parallel_tool_use === true);
-
-  // Scenario B: tool-contract runs FIRST, cap-parallel SECOND
-  let payloadB = baseAnthropic;
-  const injB = injectToolChoiceIntoPayload(payloadB, { finalAnswerToolName: FINAL_ANSWER_TOOL_NAME });
-  payloadB = injB.payload;
-  payloadB = applyParallelCap(payloadB);
-  check("B: type still auto", payloadB.tool_choice.type === "auto");
-  check("B: disable_parallel_tool_use added by cap", payloadB.tool_choice.disable_parallel_tool_use === true);
-
-  // Scenario C: only cap-parallel runs (tool-contract no-op because no final_answer)
-  const noFinal = { ...baseAnthropic, tools: [baseAnthropic.tools[0]] };
-  let payloadC = noFinal;
-  payloadC = applyParallelCap(payloadC);
-  const injC = injectToolChoiceIntoPayload(payloadC, { finalAnswerToolName: FINAL_ANSWER_TOOL_NAME });
-  check("C: tool-contract no-op (final_answer missing)", injC.injected === false);
-  check("C: cap-parallel result intact", injC.payload.tool_choice.disable_parallel_tool_use === true);
-  check("C: type defaulted to auto", injC.payload.tool_choice.type === "auto");
-}
-
 // ─── env override ───────────────────────────────────────────────────
-console.log("[5] PI_ASTACK_PARALLEL_CAP_MODELS env override");
+console.log("[4] PI_ASTACK_PARALLEL_CAP_MODELS env override");
 {
   const before = process.env.PI_ASTACK_PARALLEL_CAP_MODELS;
   try {
@@ -180,13 +127,13 @@ console.log("[5] PI_ASTACK_PARALLEL_CAP_MODELS env override");
 }
 
 // ─── DEFAULT_TARGETS sanity ─────────────────────────────────────────
-console.log("[6] DEFAULT_TARGETS invariant");
+console.log("[5] DEFAULT_TARGETS invariant");
 {
   check("DEFAULT_TARGETS is empty", DEFAULT_TARGETS.length === 0);
 }
 
 // ─── ctx extraction (3-T0 P1 dead-code + api gate) ──────────────────
-console.log("[7] modelIdFromCtx / modelApiFromCtx");
+console.log("[6] modelIdFromCtx / modelApiFromCtx");
 {
   // pi's Model exposes `id`, NOT `modelId`. The old code read modelId and
   // silently got undefined → ctx-side matching was dead.

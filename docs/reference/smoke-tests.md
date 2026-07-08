@@ -13,6 +13,7 @@ status: active
 |---|---|---|
 | `smoke:turn-progress` | `scripts/smoke-turn-progress.mjs` | turn-progress extension registration / status rendering basics |
 | `smoke:memory` | `scripts/smoke-memory-sediment.mjs` | memory facade + sediment integration regressions, including credential typed-redaction boundary |
+| `smoke:sanitizer-homoglyph` | `scripts/smoke-sanitizer-homoglyph.mjs` | sanitizer homoglyph / lookalike secret-boundary regression coverage |
 | `smoke:derive-provenance` | `scripts/smoke-derive-provenance.mjs` | active-correction signal quote-source → provenance derivation, including sanitized user-message matching |
 | `smoke:rule-footer-realtime` | `scripts/smoke-rule-footer-realtime.mjs` | real-time rules footer refresh after rules directory changes |
 | `smoke:tier1-directive-defer` | `scripts/smoke-tier1-directive-defer-resolution.mjs` | ADR 0028 Tier-1 deterministic directive commit path when curator multi-view defers |
@@ -81,7 +82,6 @@ status: active
 | `smoke:compaction-tuner-backoff` | `scripts/smoke-compaction-tuner-backoff.mjs` | compaction-tuner retry/backoff guard |
 | `smoke:compaction-tuner-turn-boundary` | `scripts/smoke-compaction-tuner-turn-boundary.mjs` | compaction-tuner turn-boundary behavior |
 | `smoke:compaction-tuner-openai-remote-compact` | `scripts/smoke-compaction-tuner-openai-remote-compact.mjs` | compaction-tuner OpenAI Responses remote compaction, marker injection, invalid-response fallback, and `remoteOpenAICompaction.auditPayload` sidecar audit modes (`off`/`shape`/`full`) |
-| `smoke:tool-contract` | `scripts/smoke-tool-contract-payload.mjs` | LLM tool payload contract normalization |
 | `smoke:persistent-input-history` | `scripts/smoke-persistent-input-history.mjs` | persistent-input-history SDK-drift defense and replay matching |
 | `smoke:time-injector` | `scripts/smoke-time-injector.mjs` | time-injector session prompt block |
 | `smoke:verify-after-edit` | `scripts/smoke-verify-after-edit.mjs` | verify-after-edit extension registration / edit-result contract |

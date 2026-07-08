@@ -55,7 +55,7 @@ seedWarm();
   ok(global.recent.resurrection_rate > 0.25, "全局(无过滤)rate 被外项目抬高 → 证明 per-project 过滤生效");
 }
 
-const settings = (autoDemote) => ({ forgetting: { demoteShadow: true, autoDemote, demoteMaxBatch: 5, resurrectionBackoffRate: 0.5, instrumentation: false, decayShadow: false } });
+const settings = (autoDemote) => ({ forgetting: { demoteShadow: true, autoDemote, instrumentation: false, decayShadow: false } });
 const prop = (slug) => ({ slug, kind: "decision", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: `${slug} superseded`, falsifier: "if not" } });
 const mkArchive = (result) => { const calls = []; const targets = []; return { calls, targets, fn: async (t) => { calls.push(t.slug); targets.push(t); return typeof result === "function" ? result(t) : result; } }; };
 const statusOf = (slug) => { const r = elp.readLifecycleProposals(pr).find((x) => x.slug === slug); return r ? r.status : "absent"; };

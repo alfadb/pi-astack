@@ -34,6 +34,8 @@ import type { MemorySettings } from "../memory/settings";
 const DEMOTE_MAX_PER_DAY = 20;                          // 24h 真实 demote 累计上限(跨 agent_end)
 const MIN_ACTIVE_CORPUS_FLOOR = 50;                     // active 语料 ≤ 此 → 停止 demote(防抽空)
 const DEMOTE_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;    // demote 后 30d 不再 demote(防 demote↔reactivate 振荡)
+const DEMOTE_MAX_BATCH = 5;                             // ADR0031 反失控结构地板, build-time 焊死, 不得回 settings
+const RESURRECTION_BACKOFF_RATE = 0.5;                  // interim const; ADR0031 Phase 2 应迁入大脑自管 state 自标定, 禁止回填 settings
 
 export interface ArchiveProposalInput {
   slug: string;
@@ -65,7 +67,7 @@ export interface SelectDemoteInput {
   resurrection: { trend: string; recent_rate: number };
   nowMs: number;
   maxBatch: number;
-  resurrectionBackoffRate: number;
+  resurrectionBackoffThreshold: number;
 }
 
 /** 纯决策(deterministic, 免 IO, 可单测)。门优先级固定:
@@ -83,7 +85,7 @@ export function selectDemoteTargets(input: SelectDemoteInput): DemotePlan {
   const backoff =
     input.resurrection.trend === "accelerating" ||
     input.resurrection.trend === "insufficient_data" ||
-    input.resurrection.recent_rate >= input.resurrectionBackoffRate;
+    input.resurrection.recent_rate >= input.resurrectionBackoffThreshold;
 
   const eligible: DemoteDecision[] = [];
   for (const p of input.proposals) {
@@ -306,8 +308,8 @@ export function runForgettingExecutorDryRun(
       hysteresisBySlug,
       resurrection: { trend: rr.trend, recent_rate: rr.recent.resurrection_rate },
       nowMs: now.getTime(),
-      maxBatch: settings.forgetting.demoteMaxBatch,
-      resurrectionBackoffRate: settings.forgetting.resurrectionBackoffRate,
+      maxBatch: DEMOTE_MAX_BATCH,
+      resurrectionBackoffThreshold: RESURRECTION_BACKOFF_RATE,
     });
     appendDryRunAudit(projectRoot, plan, now);
     return { ok: true, enabled: true, dry_run: true, plan };
@@ -359,8 +361,8 @@ export async function runForgettingExecutor(
       hysteresisBySlug,
       resurrection: { trend: rr.trend, recent_rate: rr.recent.resurrection_rate },
       nowMs: now.getTime(),
-      maxBatch: settings.forgetting.demoteMaxBatch,
-      resurrectionBackoffRate: settings.forgetting.resurrectionBackoffRate,
+      maxBatch: DEMOTE_MAX_BATCH,
+      resurrectionBackoffThreshold: RESURRECTION_BACKOFF_RATE,
     });
 
     const wantReal = settings.forgetting.autoDemote === true && typeof deps.archiveEntry === "function";

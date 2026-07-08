@@ -230,21 +230,6 @@ fs.writeFileSync(
 };\n`,
 );
 
-// Stub `./tool-loop-guard` — dispatch activation imports the idle-loop
-// guard helpers. formatResult doesn't call them; module load only needs the
-// symbols to exist.
-fs.writeFileSync(
-  path.join(tmpDir, "tool-loop-guard.js"),
-  `module.exports = {
-  newToolLoopState: () => ({}),
-  toolCallSignature: () => "sig",
-  evaluateToolLoop: () => ({ block: false, consecutive: 1 }),
-  buildLoopReflection: () => "loop",
-  isGuardedTool: () => false,
-  resolveIdleLoopGuardSettings: () => ({ enabled: false, threshold: 2 }),
-};\n`,
-);
-
 // Stub `@earendil-works/pi-coding-agent` — v3 in-process migration added
 // real (non-type) imports: createAgentSession, DefaultResourceLoader,
 // SessionManager, SettingsManager, getAgentDir. formatResult doesn't call

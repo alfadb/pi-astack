@@ -314,7 +314,7 @@ export function normalizeConstraintSources(
     if (record.categoryHint === "tool_contract_not_memory") {
       diagnostics.push(makeDiagnostic({
         code: "SC_NOT_MEMORY_TOOL_CONTRACT",
-        message: `tool-contract-like constraint should be excluded from canonical rule memory: ${record.sourceId}`,
+        message: `tool declaration-like constraint should be excluded from canonical rule memory: ${record.sourceId}`,
         sourceRecordIds: [record.sourceId],
       }));
     }

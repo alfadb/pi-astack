@@ -361,12 +361,12 @@ const settingsSource = source({
   triggerPhrases: ["model tier", "setting"],
 });
 const toolSource = source({
-  sourceId: "rule:global:listed:tool-contract",
-  slug: "tool-contract",
+  sourceId: "rule:global:listed:tool-declaration",
+  slug: "tool-declaration",
   injectMode: "listed",
-  title: "Tool contract",
-  body: "dispatch_parallel must follow the tool contract and worker limit.",
-  triggerPhrases: ["dispatch_parallel", "tool contract"],
+  title: "Tool declaration",
+  body: "dispatch_parallel must follow the tool declaration and worker limit.",
+  triggerPhrases: ["dispatch_parallel", "tool declaration"],
 });
 const globalSource = source({
   sourceId: "rule:global:always:use-edit-not-sed",
@@ -1616,56 +1616,56 @@ check("validator rejects not-memory exclusion without diagnostic", () => {
   assert(threw, "not-memory exclusion without diagnostic accepted");
 });
 
-check("validator rejects behavioral ToolContract cleanup event as not-memory without diagnostic", () => {
+check("validator rejects behavioral cleanup event as not-memory without diagnostic", () => {
   const cleanupEventId = `c1e623${"0".repeat(58)}`;
-  const toolContractCleanupEventSource = eventSource({
+  const cleanupEventSource = eventSource({
     sourceId: `event:${cleanupEventId}`,
     eventId: cleanupEventId,
-    candidateText: "Pi-Global ToolContract Cleanup Checkpoint: when doing toolContract cleanup, preserve the active behavioral reminder/checkpoint and compile it as a durable constraint.",
-    candidateTitle: "Pi-Global ToolContract Cleanup Checkpoint",
-    candidateTriggerPhrases: ["ToolContract cleanup checkpoint"],
+    candidateText: "Pi-Global Cleanup Checkpoint: when doing retired contract cleanup, preserve the active behavioral reminder/checkpoint and compile it as a durable constraint.",
+    candidateTitle: "Pi-Global Cleanup Checkpoint",
+    candidateTriggerPhrases: ["retired contract cleanup checkpoint"],
     candidatePriorityHint: "always",
     scopeHint: { kind: "project", projectId: "pi-global", evidence: "pi-global always reminder/checkpoint" },
     activeProjectId: "pi-global",
   });
-  const eventNormalized = normalizeConstraintSources([toolContractCleanupEventSource], { activeProjectId: "pi-global", knownProjectIds: ["pi-global"] });
+  const eventNormalized = normalizeConstraintSources([cleanupEventSource], { activeProjectId: "pi-global", knownProjectIds: ["pi-global"] });
   assert(eventNormalized.records[0].categoryHint === "behavioral_constraint", `cleanup event category drifted: ${eventNormalized.records[0].categoryHint}`);
-  assert(!eventNormalized.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_TOOL_CONTRACT"), "cleanup event unexpectedly emitted tool-contract diagnostic");
+  assert(!eventNormalized.diagnostics.some((diagnostic) => diagnostic.code === "SC_NOT_MEMORY_TOOL_CONTRACT"), "cleanup event unexpectedly emitted contract diagnostic");
 
   const bad = {
     schemaVersion: "constraint-shadow-decision/v1",
     inputRootHash: eventNormalized.inputRootHash,
     constraints: [],
-    exclusions: [{ reason: "tool_contract_not_memory", sourceRecordIds: [toolContractCleanupEventSource.sourceId] }],
+    exclusions: [{ reason: "tool_contract_not_memory", sourceRecordIds: [cleanupEventSource.sourceId] }],
     unresolved: [],
     merges: [],
     rescopeProposals: [],
-    mappings: [{ sourceRecordId: toolContractCleanupEventSource.sourceId, disposition: "excluded" }],
+    mappings: [{ sourceRecordId: cleanupEventSource.sourceId, disposition: "excluded" }],
     diagnostics: [],
   };
   let threw = false;
-  try { validateConstraintCompilerDecision([toolContractCleanupEventSource], bad, { knownProjectIds: ["pi-global"], expectedInputRootHash: eventNormalized.inputRootHash }); } catch { threw = true; }
-  assert(threw, "behavioral ToolContract cleanup event accepted as tool_contract_not_memory without diagnostic");
+  try { validateConstraintCompilerDecision([cleanupEventSource], bad, { knownProjectIds: ["pi-global"], expectedInputRootHash: eventNormalized.inputRootHash }); } catch { threw = true; }
+  assert(threw, "behavioral cleanup event accepted as tool_contract_not_memory without diagnostic");
 
-  const good = validateConstraintCompilerDecision([toolContractCleanupEventSource], {
+  const good = validateConstraintCompilerDecision([cleanupEventSource], {
     schemaVersion: "constraint-shadow-decision/v1",
     inputRootHash: eventNormalized.inputRootHash,
     constraints: [{
       scope: { kind: "project", projectId: "pi-global" },
       injectMode: "always",
-      title: "ToolContract cleanup checkpoint",
-      compiledBody: "When doing toolContract cleanup, preserve the active behavioral reminder/checkpoint and compile it as a durable constraint.",
-      triggerPhrases: ["ToolContract cleanup checkpoint"],
-      sourceRecordIds: [toolContractCleanupEventSource.sourceId],
+      title: "retired contract cleanup checkpoint",
+      compiledBody: "When doing retired contract cleanup, preserve the active behavioral reminder/checkpoint and compile it as a durable constraint.",
+      triggerPhrases: ["retired contract cleanup checkpoint"],
+      sourceRecordIds: [cleanupEventSource.sourceId],
     }],
     exclusions: [],
     unresolved: [],
     merges: [],
     rescopeProposals: [],
-    mappings: [{ sourceRecordId: toolContractCleanupEventSource.sourceId, disposition: "compiled" }],
+    mappings: [{ sourceRecordId: cleanupEventSource.sourceId, disposition: "compiled" }],
     diagnostics: [],
   }, { knownProjectIds: ["pi-global"], expectedInputRootHash: eventNormalized.inputRootHash });
-  assert(good.constraints.some((constraint) => constraint.sourceRecordIds.includes(toolContractCleanupEventSource.sourceId)), "compiled cleanup event did not validate");
+  assert(good.constraints.some((constraint) => constraint.sourceRecordIds.includes(cleanupEventSource.sourceId)), "compiled cleanup event did not validate");
 });
 
 check("validator rejects diagnostics without consumers", () => {
@@ -2260,12 +2260,12 @@ check("prompt builder is deterministic and shadow-only", () => {
   assert(prompt.text.includes("no \\u escapes"), "no-u escape guidance missing");
   assert(prompt.text.includes("active always source") && prompt.text.includes("listed predecessor"), "active-always/listed-predecessor guidance missing");
   assert(prompt.text.includes("Active source compiled plus predecessor sources excluded is a consistent result"), "active-compiled/predecessor-excluded consistency guidance missing");
-  assert(prompt.text.includes("Settings/config/tool-contract exclusions require an input categoryHint of settings_not_memory or tool_contract_not_memory"), "not-memory categoryHint gate guidance missing");
-  assert(prompt.text.includes("SC_NOT_MEMORY_SETTINGS or SC_NOT_MEMORY_TOOL_CONTRACT"), "not-memory diagnostic gate guidance missing");
+  assert(prompt.text.includes("Settings/config exclusions require an input categoryHint of settings_not_memory"), "settings not-memory categoryHint gate guidance missing");
+  assert(prompt.text.includes("SC_NOT_MEMORY_SETTINGS"), "settings not-memory diagnostic gate guidance missing");
   assert(prompt.text.includes("must be placed only in exclusions[]") && prompt.text.includes("must not appear in constraints[], merges[], or unresolved[]") && prompt.text.includes("Do not merge settings_not_memory or tool_contract_not_memory sources with any active behavioral rule"), "not-memory exclusive exclusion guidance missing");
   assert(prompt.text.includes("constraint_event with categoryHint=behavioral_constraint"), "behavioral event compile/unresolved guidance missing");
   assert(prompt.text.includes("fact, identity, provenance, deployment/infrastructure fact, or diagnostic background") && prompt.text.includes("exclude it as knowledge_candidate") && prompt.text.includes("do not put it in unresolved[] solely because it is not behavior"), "fact-like constraint_event knowledge_candidate boundary missing");
-  assert(prompt.text.includes("toolContract, ToolContract, settings schema, removal, or checkpoint"), "ToolContract cleanup topical-word guard missing");
+  assert(prompt.text.includes("config, code, bash, settings schema, removal, or checkpoint"), "behavioral cleanup topical-word guard missing");
   assert(prompt.text.includes("Checkpoint/reminder constraint_event records") && prompt.text.includes("two-week checkpoint") && prompt.text.includes("Compile the reminder/review obligation without inventing the future outcome"), "checkpoint/reminder event compile guidance missing");
   assert(prompt.text.includes("active legacy_rule with categoryHint=behavioral_constraint"), "active legacy behavioral rule guidance missing");
   assert(prompt.text.includes("low numeric confidence, assistant-observed provenance"), "low-confidence/assistant-observed boundary missing");
@@ -3497,6 +3497,15 @@ checkAutoRefresh("auto-refresh schedule API still returns scheduled status", () 
   } finally {
     _resetConstraintShadowAutoRefreshForTests();
   }
+});
+
+check("auto-refresh failed/threw run has one bounded retry", () => {
+  const source = fs.readFileSync(path.join(repoRoot, "extensions", "sediment", "constraint-compiler", "auto-refresh.ts"), "utf8");
+  assert(source.includes("retryAttempt?: number"), "trigger must carry optional retryAttempt");
+  assert(source.includes('terminalStatus === "failed" || terminalStatus === "threw"'), "retry must be limited to failed/threw runs");
+  assert(source.includes("(trigger.retryAttempt ?? 0) < 1"), "retry must be bounded to one attempt");
+  assert(source.includes('reason: "previous_run_failed"'), "retry reason must be previous_run_failed");
+  assert(source.includes('status: "retry_scheduled"'), "retry scheduling must be audited");
 });
 
 check("auto-refresh lock path is under abrainSedimentLocksDir", () => {

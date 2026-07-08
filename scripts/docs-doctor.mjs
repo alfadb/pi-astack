@@ -25,6 +25,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -135,6 +136,9 @@ function lineOf(text, index) {
 const LINK_RE = /\[[^\]]*\]\(([^)]+)\)/g;
 const COMMIT_RE = /\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/g;
 const EXT_COUNT_RE = /(\d+)\s*(?:个|个独立的)?\s*(?:extension|extensions|扩展|tool|tools|工具)\b/gi;
+const GOVERNANCE_DOCS = ["docs/direction.md", "docs/requirements.md", "docs/vision.md"];
+const FEATURE_CHANGELOG = "docs/feature-changelog.md";
+const ADR_STATUS_RE = /^[+-]status:\s*\S+/m;
 
 const anchorCache = new Map();
 function anchorsFor(file) {
@@ -150,6 +154,27 @@ function anchorsFor(file) {
 }
 
 const canonicalForOwners = new Map(); // id -> file
+
+function git(args) {
+  try {
+    return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return "";
+  }
+}
+
+function changedFiles(args) {
+  return new Set(git(args).split("\n").map((line) => line.trim()).filter(Boolean));
+}
+
+function addGovernanceChangelogWarning(label, namesArgs, diffArgs) {
+  const files = changedFiles(namesArgs);
+  const governanceTouched = GOVERNANCE_DOCS.some((file) => files.has(file));
+  const adrStatusTouched = ADR_STATUS_RE.test(git(diffArgs));
+  if ((governanceTouched || adrStatusTouched) && !files.has(FEATURE_CHANGELOG)) {
+    softWarn(repoRoot, `${label}: governance docs or ADR status changed without same-batch ${FEATURE_CHANGELOG} update`);
+  }
+}
 
 for (const file of listCanonicalDocs()) {
   const raw = fs.readFileSync(file, "utf8");
@@ -215,6 +240,17 @@ for (const file of listCanonicalDocs()) {
     req006(file, `hardcoded count "${m[0].trim()}" at line ${lineOf(prose, m.index)} (code-mirror smell — derive from ls extensions/)`);
   }
 }
+
+addGovernanceChangelogWarning(
+  "working tree",
+  ["diff", "--name-only", "HEAD", "--", ...GOVERNANCE_DOCS, FEATURE_CHANGELOG, "docs/adr"],
+  ["diff", "--unified=0", "HEAD", "--", "docs/adr"],
+);
+addGovernanceChangelogWarning(
+  "last commit",
+  ["show", "--format=", "--name-only", "HEAD", "--", ...GOVERNANCE_DOCS, FEATURE_CHANGELOG, "docs/adr"],
+  ["show", "--format=", "--unified=0", "HEAD", "--", "docs/adr"],
+);
 
 // --- report ----------------------------------------------------------------
 const promotedErrors = STRICT ? [...errors, ...warns] : errors;

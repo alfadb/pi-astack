@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0037: memory search Facade — 检索策略 profile registry
 
-- Status: **Accepted (P1-P3 已实现; P5b 策略更新已落)** — 3×T0 设计评审 GO-WITH-REVISIONS 修订已并入(§3.1/§9); runMemorySearch 单入口 + 5 profile + 私有内核(__oracleKernel test-export)+ grep-guard 已落, 5 调用方全迁, profile registry 生效。ADR 0036 P5b 后 sedimentDedup 的 stage1Skip/sparseBM25 临时 pin 已解除, 现继承全局读栈; profile 仅固定 dedupChunk0Aggregation=true。等价 smoke 与 enforcement guard 过。loadEntries 复用(P4 可选)未做。
+- Status: **Accepted**
 - Date: 2026-06-14
 - Relates-to: ADR 0015(LLM 检索)、ADR 0035(stage0 候选)、ADR 0036(两阶段塌缩 + 多向量); 本 ADR 不改检索算法, 只收口"调用方策略层"
 

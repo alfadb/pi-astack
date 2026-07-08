@@ -11,13 +11,127 @@ status: active
 
 ---
 
+## 2026-07-08 — accepted — 治理修复批
+
+### 变更
+本批按 6×T0 三轮一致裁决与用户 2026-07-08 会话授权执行治理修复：Q1 对 ADR 0039 记忆写入审批式弹窗条款 walk-back；Q4 把自治遗忘反失控参数拆分为 build-time 焊死地板与 Phase 2 自标定状态；Q5/Q6 退役 tool-contract 与 idleLoopGuard 相关文档面；hub dogfood 闭合判定回路，新增判定回填 ledger 与 fail-closed/stale-guard 纪律。
+
+### 原因
+治理审计发现 changelog 停摆、ADR0039 弹窗条款与 INV-INVISIBILITY/REQ-001/ADR0024 §4.2 冲突、若干文档把实现流水或易变计数写成长期事实。本批只执行已收敛裁决，不重新设计。
+
+### 需求影响
+无新增 REQ；修正的是既有不变量和文档治理纪律的执行方式。hub 仍为 owner dogfood，翻默认开仍需 material 模式累计判定且质量不低于 human-pick。
+
+### 非目标
+不改变代码实现真相；代码批次另行落地判定回填与 auto-refresh 有界重试。本条为追溯补签，用户 2026-07-08 会话授权；实际发生日期 2026-07-08。
+
+### 关联
+[治理修复批 audit](audits/2026-07-08-governance-fix-batch.md)；[ADR 0039](adr/0039-constraint-pipeline-reset.md)；[ADR 0030](adr/0030-l2-hub-baseline-and-evaluation-harness.md)；[ADR 0031](adr/0031-autonomous-self-calibrating-forgetting.md)。
+
+---
+
+## 2026-07-08 — accepted — 共识层定位补注：两层结构、机械护栏边界、operator 边界
+
+### 变更
+`vision.md` 明确 pi-astack 分为 substrate 层与 brain 层：通用 pi 运行环境增强不等于第二大脑记忆本体，隐形/自治不变量只约束 brain 层。`direction.md` 同步补入机械护栏 justification 对照表，区分 infra/provider/落盘补偿与认知层机械门；INV-TELL-NOT-ASK 增 operator 边界，说明诊断/迁移类 slash 是维护者逃生口，不得成为正常产品调用面。
+
+### 原因
+已 ship 的 web、Context7、vision、imagine、goal/workflow、dispatch 等能力被误套第二大脑隐形自治约束会造成治理混乱；同时既有机械补偿扩展需要给出真实故障、分层判定与退役条件，避免例外无限扩张。
+
+### 需求影响
+无新增 REQ；这是对现有 direction/vision 的边界澄清。本条为追溯补签，用户 2026-07-08 会话授权；实际发生日期 2026-07-08。
+
+### 非目标
+不把维护者命令升级为用户日常 UI，不为认知层机械门开新口子。
+
+### 关联
+[vision.md](vision.md)；[direction.md](direction.md)。
+
+---
+
+## 2026-06-21 — accepted — Knowledge 读路径切到 projection_only
+
+### 变更
+Knowledge 侧 canonical read mode 切到 `projection_only`：稳态读取来自 L1 Evidence Event 派生的 L2 projection，legacy markdown 保留为回滚、调试、迁移输入，不再进入稳态 winning pool。
+
+### 原因
+ADR 0039 的 event-first 证据架构要求 canonical memory 是投影结果，而不是旧 raw-context 写时裁决产物；Knowledge 是第一批迁移到投影读取的高频域。
+
+### 需求影响
+不新增 REQ；兑现 INV-GROUND-TRUTH-TIERED 与 REQ-004 在 ADR0039 后的 witnessed Evidence Event 语义。本条为追溯补签，用户 2026-07-08 会话授权；实际发生日期 2026-06-21。
+
+### 非目标
+不删除 legacy markdown；legacy retirement 仍需独立 gate。
+
+### 关联
+[ADR 0039](adr/0039-constraint-pipeline-reset.md)；`notes/2026-06-21-adr0039-p1-flip-executed.md`。
+
+---
+
+## 2026-06-18/19 — accepted — ADR 0039 Constraint Pipeline Reset 扩展为统一证据架构
+
+### 变更
+ADR 0039 从 constraint-only reset 扩展为 Unified Evidence Architecture：所有长期记忆域先追加 Evidence Event，再由域自适应 projector/compiler 生成 stable view。REQ-004 的「确定性提交」语义修订为 USER-role durable directive 必须确定性追加 witnessed Evidence Event；存储基座经复审收敛为 HYBRID_MD_GIT_PLUS_DB：L1 Evidence Event SOT + L2 Markdown View + L3 SQLite/embedding/ledger 派生层。
+
+### 原因
+rules/constraints 的写时裁决问题不是局部 bug，而是 raw `agent_end` 直接 mutate canonical memory 的结构风险。Knowledge、identity、skills、habits、workflows、project memory、rationale 等面都会遇到同类风险。
+
+### 需求影响
+不新增 REQ；修订 REQ-004 的实现语义：确定性首先落在 witnessed Evidence Event，不等于实时写 active rule。queued/stale/projected 状态必须可见，不能静默丢失。本条为追溯补签，用户 2026-07-08 会话授权；实际发生日期 2026-06-18/19。
+
+### 非目标
+不是全域 event sourcing 数据库；不是让用户维护 Markdown；不是让主会话写 memory。
+
+### 关联
+[ADR 0039](adr/0039-constraint-pipeline-reset.md)；`audits/2026-06-18-adr-0039-constraint-pipeline-reset-t0-review.md`；`audits/2026-06-19-adr-0039-unified-evidence-architecture-t0-review.md`。
+
+---
+
+## 2026-06-16 — accepted — ADR 0030 L2 hub baseline 与 2026-07-08 material 判定 walk-back
+
+### 变更
+ADR 0030 accepted：caged-live dynamic hub 以默认关闭 flag 进入 owner dogfood，生产 audit 记录 hub assignment、worker disposition 与 summary。2026-07-08 治理批 walk-back 原在线双跑口径：在线 hub 调用没有 human-pick counterfactual，正确性判定改为 material 模式离线生成候选材料，再由跨厂商盲判回填 ledger。
+
+### 原因
+H5 gate 要保护的是 assignment correctness 不可凭 hub 自证。advisory shadow 测不了「不一致时谁对」，在线 hub 又缺 human-pick 对照；material 离线判定是当前可复审的最小闭环。
+
+### 需求影响
+hub enabled=true 仍只是 owner dogfood，不是默认开 ratify。翻默认开仍需累计足量 material 判定且质量不低于 human-pick。本条为追溯补签，用户 2026-07-08 会话授权；实际发生日期 2026-06-16，walk-back 实际发生日期 2026-07-08。
+
+### 非目标
+不引入成本闸、不引入 per-run 用户确认、不把 hub 产物作为 L1 ground truth。
+
+### 关联
+[ADR 0030](adr/0030-l2-hub-baseline-and-evaluation-harness.md)。
+
+---
+
+## 2026-06-15 — accepted — ADR 0031 自治遗忘与 INV-REVERSIBLE-AUTONOMY
+
+### 变更
+ADR 0031 accepted：遗忘策略零人类可调参数，自治遗忘终点固定为 `archived`，不授权自治物理删除；`direction.md` 新增 INV-REVERSIBLE-AUTONOMY，把「自治动作必须有界可逆」升格为方向不变量。
+
+### 原因
+第二大脑只进不出会导致近重、陈旧和噪声持续堆积，但安全风险来自不可逆销毁而非自治本身。`archived` 全文留盘 + sparse 可达 + 用户自然纠错是最小可逆基座。
+
+### 需求影响
+不新增 REQ；深化 INV-INVISIBILITY / INV-AUTONOMY，并把 roadmap 的 auto-demote 方向升格为结构不变量。本条为追溯补签，用户 2026-07-08 会话授权；实际发生日期 2026-06-15。
+
+### 非目标
+不做自治 `git rm`，不要求人类设置遗忘速率或审查降级队列。
+
+### 关联
+[ADR 0031](adr/0031-autonomous-self-calibrating-forgetting.md)；[direction.md](direction.md)。
+
+---
+
 ## 2026-06-14 — accepted — memory_search 检索栈重构：embedding 候选 + 两阶段塌缩 + profile registry（ADR 0035/0036/0037）
 
 ### 变更
 `memory_search` 的检索行为分三步演进（均已 Accepted、相关 flag 已转产）：
 - **ADR 0035**：stage1 候选面从「全库 full-body 海选」改为 embedding 向量召回 + 小候选集，检索成本从 O(库×频率) 降为 O(N)；supersede ADR 0015 的候选面决策，保留其双阶段框架 + result-cache 禁令 + freshness 契约。
-- **ADR 0036**：删除 stage1 LLM 环节（两阶段塌缩 `stage0 hybrid → top-K → stage2 精排`），并复活 BM25 sparse + 多向量补 dense 盲区；`stage1Skip` / `sparseBM25` / `multiVector` 已转产。
-- **ADR 0037**：把分散在 5 个调用方手搓的检索 policy 收口为 typed `SearchProfile` registry + 单入口，消除「per-caller policy 漂移 / 全局 flag 泄漏到去重路径」一类事故。
+- **ADR 0036**：删除 stage1 LLM 环节（两阶段塌缩 `stage0 hybrid → top-K → stage2 精排`），并复活 BM25 sparse + 多向量补 dense 盲区；P6 两阶段塌缩、P3 BM25、P4 多向量、P5a query 路由均已转产，P5b sediment dedup dense-only 已实现并解除 stage1Skip/sparseBM25 临时 pin。
+- **ADR 0037**：把分散在 5 个调用方手搓的检索 policy 收口为 typed `SearchProfile` registry + 单入口，消除「per-caller policy 漂移 / 全局 flag 泄漏到去重路径」一类事故；P1-P3 已实现，P5b 策略更新已落。
 
 ### 原因
 原 stage1 用 full-body LLM 从候选里再选一遍，是在重做 dense 向量已经做得更好的排序，单次约 324K token 且 path-A / sediment 高频调用，是成本主体；策略分散又导致 false-merge corpus corruption 类事故。
@@ -26,7 +140,7 @@ status: active
 无新增 REQ；守住既有记忆 accuracy/recall 契约——stage0 转产硬门要求 21 query 强 baseline coverage ≥95%（final 实测 98.1%），未达标不转产。检索更快/更省属用户可感知行为变化，故按 `README.md` §5「用户可见行为变化」升级触发器记入本表。
 
 ### 非目标
-不是代码变更日志；具体 phase 流水、参数收敛（poolLimit/maxCand/sparse 权重）、oracle 度量、向量索引格式等为实现细节，归 `roadmap.md`「ADR 0035」段 + abrain + git。
+不是代码变更日志；具体参数收敛（poolLimit/maxCand/sparse 权重）、oracle 度量、向量索引格式等为实现细节，归 `roadmap.md`「ADR 0035」段 + abrain + git。P3/P4/P5a/P5b/P6 转产事实从 ADR 头部下沉至本条，属于追溯补签，用户 2026-07-08 会话授权；实际发生日期 2026-06-14。
 
 ### 关联
 [ADR 0035](adr/0035-memory-stage1-embedding-candidate-retrieval.md) / [ADR 0036](adr/0036-memory-search-two-stage-collapse-and-hybrid-retrieval.md) / [ADR 0037](adr/0037-memory-search-facade-profile-registry.md)；实施 phase 详 `roadmap.md`。这三份机制 ADR 的 slim + ingest 尚待执行（见 `roadmap.md` 残留缺口）。
