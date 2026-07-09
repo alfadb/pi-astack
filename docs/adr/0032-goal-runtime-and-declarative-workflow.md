@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0032 — Goal 续行运行时 + 声明式 Workflow 编排（实验通道）
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **10 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)（`INV-TELL-NOT-ASK` / `INV-COST-NOT-A-GATE` / `INV-AUTONOMY`，部分被 0033 修订）。原机制 prose 见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **10 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)（`INV-TELL-NOT-ASK` / `INV-COST-NOT-A-GATE` / `INV-AUTONOMY`，部分被 0033 修订）。原机制 prose 见 `docs/notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（实验通道：workflow.enabled 默认 off / readOnly 默认 true）。
 

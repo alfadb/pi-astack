@@ -10,7 +10,7 @@ status: active
 pi-astack memory 的 current contract：
 
 1. **L1 Evidence Event 是语义 source of truth**；L2 markdown 是确定性投影视图，L3 运行索引是可重建派生物。ADR 0039 的 SQLite 是目标边界；当前已有 partial production SQLite instance，但 `memory_search` 仍主要使用 JSON/sidecar 索引与 embedding cache 作为 L3 runtime。
-2. **LLM-facing surface 只读**：`memory_search` / `memory_get` / `memory_list` / `memory_decide`。
+2. **LLM-facing surface 只读**：`memory_search` / `memory_get` / `memory_list` / `memory_activity` / `memory_decide`。
 3. **Facade 隐藏物理拓扑**：普通 search/list 结果不暴露 backend/source_path；exact lookup/debug 可暴露 provenance。
 4. **`.pensieve/` 是 legacy read-only source**：不再写入；Knowledge 稳态读由 `knowledgeProjector.canonicalReadMode` 控制，当前生产配置为 `projection_only`。
 5. **`memory_search` 是 LLM retrieval**：生产形态是 `stage0 hybrid` 候选召回 + stage2 full-content LLM 精排；LLM 精排模型不可用时 hard error，不降级 grep/BM25。
@@ -42,7 +42,7 @@ Constraint currently has two compiled-view materializations. The repo L2 file un
 
 L2 projection entry = markdown file：frontmatter（`id` / `scope`∈{project,world} / `kind`(§3.1) / `status`(§3.2) / `confidence` 0..10 / `schema_version` / `title` / `trigger_phrases` / `derives_from` / `created` / `updated`）+ body（`# Compiled Truth` + `## Timeline` 事件行）。L1 Evidence Event 仍是语义 source of truth；L2 markdown 是确定性投影/审计视图。
 
-> 完整 frontmatter 类型定义以代码为准：`extensions/memory/schema.ts`。
+> 完整 frontmatter 类型定义以代码为准：`extensions/memory/types.ts`、`extensions/memory/parser.ts` 与 `extensions/memory/settings.ts`。
 
 ### 3.1 Canonical kinds
 

@@ -19,7 +19,7 @@ sediment 是 pi-astack 的唯一 dedicated memory writer。主会话不会获得
 
 **阶段契约**（顺序语义）：`agent_end` → checkpoint/run-window → explicit `MEMORY:` / `MEMORY-ABOUT-ME:` extractor（fence-aware）→ **sanitizer（任何 LLM/audit/write 边界前的 typed redaction）** → （无显式 block 且 `autoLlmWriteEnabled` 时）LLM extractor → `memory_search` lookup（query 先 redaction）→ curator / event writer / projector → writer validate/lint/lock/atomic write（仅仍使用 markdown writer 的域）→ audit → best-effort git commit。
 
-> 机制实现以代码为准：`extensions/sediment/pipeline.ts`（入口）、`writer.ts`（落盘路由）。
+> 机制实现以代码为准：`extensions/sediment/index.ts`（入口/注册）、`extensions/sediment/writer.ts`（落盘路由）与 `extensions/sediment/checkpoint.ts`（run-window/checkpoint）。
 
 ## 3. Curator operation set
 
@@ -49,13 +49,13 @@ B5 cutover 后，sediment 不再写 `<project>/.pensieve/`。
 
 **audit 分两处**：project 侧 `<projectRoot>/.pi-astack/sediment/audit.jsonl`，abrain/world/workflow 侧 `~/.abrain/.state/sediment/audit.jsonl`。
 
-> 具体落盘路径、kind→目录映射以及 event-first fallback 开关以代码和 `agent/pi-astack-settings.json` 为准：`extensions/sediment/{writer,kind-router,knowledge-evidence,constraint-evidence}.ts`。
+> 具体落盘路径、kind→目录映射以及 event-first fallback 开关以代码和 `agent/pi-astack-settings.json` 为准：`extensions/sediment/writer.ts`、`extensions/sediment/knowledge-evidence.ts`、`extensions/sediment/constraint-evidence/*.ts` 与 `extensions/sediment/settings.ts`。
 
 ## 5. Locks and runtime state
 
 **契约**：entry 写锁在 abrain 侧（多项目并发写同一 `~/.abrain` git repo）；checkpoint 锁留在 project 侧（只保护本项目 session 状态）。
 
-> 具体 lock/checkpoint/audit 文件路径以代码为准：`extensions/sediment/lock.ts`。
+> 具体 lock/checkpoint/audit 文件路径以代码为准：`extensions/sediment/checkpoint.ts`、`extensions/sediment/writer.ts` 与 `extensions/_shared/sync-file-lock.ts`。
 
 ## 6. Git behavior
 

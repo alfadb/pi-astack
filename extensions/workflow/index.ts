@@ -104,12 +104,53 @@ function expandWorkflowPath(fileArgRaw: string, cwd: string): { fp?: string; err
   const quoted = /^(["'])(.*)\1$/.exec(trimmedArg);
   const fileArgRaw2 = quoted ? quoted[2] : trimmedArg;
   if (!fileArgRaw2.trim()) return { error: "empty file argument" };
-  const fileArg = fileArgRaw2 === "~"
-    ? os.homedir()
-    : fileArgRaw2.startsWith("~/")
-      ? path.join(os.homedir(), fileArgRaw2.slice(2))
-      : fileArgRaw2;
-  return { fp: path.isAbsolute(fileArg) ? fileArg : path.resolve(cwd, fileArg) };
+
+  // Reject ~ paths: they expand outside cwd by design and are not allowed
+  // for workflow files (ADR 0027 C6 containment).
+  if (fileArgRaw2 === "~" || fileArgRaw2.startsWith("~/")) {
+    return { error: `~ paths are not allowed for workflow files; use a path relative to the project root (cwd: ${path.resolve(cwd)})` };
+  }
+
+  const resolvedCwd = path.resolve(cwd);
+  const resolvedFp = path.isAbsolute(fileArgRaw2)
+    ? path.resolve(fileArgRaw2)
+    : path.resolve(cwd, fileArgRaw2);
+
+  // Containment check: the resolved path must be within cwd.
+  // path.relative returns a path that starts with ".." (or is absolute on
+  // Windows) when the target is outside the base directory.
+  const rel = path.relative(resolvedCwd, resolvedFp);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return { error: `workflow file path must be within the current working directory (cwd: ${resolvedCwd}), got: ${resolvedFp}` };
+  }
+
+  // Symlink containment (ADR 0027 C6): if the path already exists, its
+  // realpath must be within cwd's realpath AND it must be a regular file.
+  // Non-existent files skip this check so loadWorkflowFile can produce the
+  // standard "cannot read" error.
+  try {
+    const st = fsSync.statSync(resolvedFp);
+    // Always check realpath containment for any existing path — a symlink
+    // to a directory/device/FIFO outside cwd must not bypass the guard.
+    const realFp = fsSync.realpathSync(resolvedFp);
+    const realCwd = fsSync.realpathSync(resolvedCwd);
+    const realRel = path.relative(realCwd, realFp);
+    if (realRel.startsWith("..") || path.isAbsolute(realRel)) {
+      return { error: `workflow file realpath is outside cwd (symlink escape): ${realFp} not within ${realCwd}` };
+    }
+    if (!st.isFile()) {
+      return { error: `workflow file must be a regular file: ${resolvedFp}` };
+    }
+  } catch (e: unknown) {
+    // ENOENT → file doesn't exist; let loadWorkflowFile produce the
+    // "cannot read" error.  Other stat errors (permission, etc.) are
+    // surfaced here because readFileSync would fail the same way.
+    if (!(e instanceof Error && (e as NodeJS.ErrnoException).code === "ENOENT")) {
+      return { error: `cannot access ${resolvedFp}: ${(e instanceof Error ? e.message : String(e)).slice(0, 120)}` };
+    }
+  }
+
+  return { fp: resolvedFp };
 }
 
 /** Read + parse + validate a workflow file from disk (persisted artifact). */

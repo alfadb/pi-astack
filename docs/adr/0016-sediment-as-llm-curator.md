@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0016 — Sediment 从 gate-heavy extractor 转向 LLM curator
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **8 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-003`）+ [`direction.md`](../direction.md) §2 AI-Native。原机制 prose 见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **8 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`requirements.md`](../requirements.md)（`REQ-003`）+ [`direction.md`](../direction.md) §2 AI-Native。原机制 prose 见 `docs/notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（2026-05-15 sanitizer 改 typed-redaction+continue）。
 

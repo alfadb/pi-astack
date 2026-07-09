@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0020 — Abrain auto-sync to remote (sediment-driven push + startup ff-pull)
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **12 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)（`INV-SYNC-DETERMINISTIC-MERGE`）。原机制 prose（含 Alt A-F / why-not-LLM-merge / 4 轮审计）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **12 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)（`INV-SYNC-DETERMINISTIC-MERGE`）。原机制 prose（含 Alt A-F / why-not-LLM-merge / 4 轮审计）见 `docs/notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（2026-05-17 修订：divergence 走 git 3-way auto-merge）。
 

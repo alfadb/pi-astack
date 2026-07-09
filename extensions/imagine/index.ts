@@ -202,6 +202,7 @@ async function editImage(
     : params.prompt;
 
   const imageBytes = await fs.readFile(inputImage.path);
+  const imageSha256 = crypto.createHash("sha256").update(imageBytes).digest("hex");
   const form = new FormData();
   form.set("model", model);
   form.set("prompt", styledPrompt);
@@ -230,7 +231,8 @@ async function editImage(
       filename: path.basename(inputImage.path),
       mimeType: inputImage.mimeType,
       byteLength: imageBytes.byteLength,
-      data: imageBytes,
+      sha256: imageSha256,
+      redacted: true,
     },
   };
   const auditBase = {

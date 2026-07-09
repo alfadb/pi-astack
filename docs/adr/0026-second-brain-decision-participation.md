@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0026 — 第二大脑参与任务执行
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **12 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md) / [`requirements.md`](../requirements.md)。原机制 prose（402 行全文）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **12 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md) / [`requirements.md`](../requirements.md)。原机制 prose（402 行全文）见 `docs/notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（R0 草案 v2，2026-05-22 用户方向校正后重写：从"推送系统"改为"参与系统"——大脑是 LLM 决策时的内置参谋，不是内容推送器）。
 - **基准**：[ADR 0024](0024-second-brain-from-natural-conversation.md) 四 invariant + AI-Native。**对偶**：[ADR 0025](0025-sediment-meta-curator-subsystem.md)（写侧"怎么写对"），本 ADR 是用侧"怎么用出来"。

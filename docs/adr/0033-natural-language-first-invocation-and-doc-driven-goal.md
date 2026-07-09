@@ -56,7 +56,7 @@ status: accepted
 
 **机器 turn 拒绝面只含权威创建（合议 RC1，opus/deepseek 收敛）**：`workflow_run` / `goal_pause` / `goal_clear` / 只读工具在续行 turn **放行**——续行 turn 里 LLM 在干活，干活可能正需要跑 workflow；拒绝 "确定性校验过、拓扑固定"的 workflow_run 却放行即兴 dispatch_parallel = 重建 §1.1-1 谴责的闸门倒挂。有界性由 W3 预算管（续行次数+墙钟），不靠禁工具。**权威创建（set/resume）与有界执行（run）是两类操作，不混在同一条拒绝里。**
 
-**实现注记（合议 RC2/gpt）**：机器 turn 判定 = tool execute 层经 `ctx.sessionManager.getBranch()` 取当前分支最后一条 user 消息，调用 `_shared/goal-continuation.ts` 的共享判定 helper（只 import，不复制前缀字符串）；无法读取当前 turn 时对 `goal_set`/`goal_resume` fail-closed 拒绝。smoke：带 `[pi-goal-continuation ...]` 前缀的 user turn 内 set/resume 拒绝且零副作用。
+**实现注记（合议 RC2/gpt）**：机器 turn 判定 = tool execute 层经 `ctx.sessionManager.getBranch()` 取当前分支最后一条 user 消息，调用 `extensions/_shared/goal-continuation.ts` 的共享判定 helper（只 import，不复制前缀字符串）；无法读取当前 turn 时对 `goal_set`/`goal_resume` fail-closed 拒绝。smoke：带 `[pi-goal-continuation ...]` 前缀的 user turn 内 set/resume 拒绝且零副作用。
 
 ### 1.4 哲学锚（为什么这不是"放宽安全"）本 ADR 没有移除任何**结构层**控制：DSL 确定性校验、白名单默认闭合、dispatch 类工具硬拒（M1）、全局并发信号量（W12，且口径升级见 §2.3）、预算/墙钟硬停（W3）、provenance 隔离（W5/W10）、judge 封闭输出空间（W4/C6）、主会话只读（ADR 0003）全部原样。被移除的只是 **人肉确认环节**——它们防的是"LLM 替用户做了用户本来也会做的决定"，在单用户模型下这不是风险，是任务完成本身。结构层管不变量，认知层管判断，用户管意图——三层各归其位。确认弹窗是把"判断"错放到了"意图"层。
 

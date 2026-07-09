@@ -70,7 +70,7 @@ interface SearchProfile {
 
 ## 5. 明确不收口的(故意保留)
 
-- `memory_get`(findEntry 精确)/`memory_list`(listEntries 浏览)/`memory_neighbors`(graph 遍历)走 `search.ts`/`graph.ts`, **不是排序检索**, 不进 SearchProfile。可并入同一 Facade 模块当独立方法以便发现, 但保留各自非排序实现。
+- `memory_get`(findEntry 精确)/`memory_list`(listEntries 浏览)走 `search.ts`, **不是排序检索**, 不进 SearchProfile。已退役的 `memory_neighbors` 不再作为 LLM-facing 工具保留；如需图遍历，应作为独立非排序读方法重新设计，而不是进入 SearchProfile。
 - rewriter(path-A)、decision synthesis(decide)、near-dup merge 判定(dedup)等**角色专属前/后处理**留在各自调用方。
 
 ## 6. 实施计划(分阶段, 提案通过 + 评审后)

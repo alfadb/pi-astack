@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0028 — Sediment Ground-Truth-Tiered Rearchitecture
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **10 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)（`INV-GROUND-TRUTH-TIERED`）+ [`requirements.md`](../requirements.md)（`REQ-004`）。原机制 prose（含 §2 根因 bug-chain / §10 debate / §12 统一分层模型）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **10 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)（`INV-GROUND-TRUTH-TIERED`）+ [`requirements.md`](../requirements.md)（`REQ-004`）。原机制 prose（含 §2 根因 bug-chain / §10 debate / §12 统一分层模型）见 `docs/notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（v1.1，三家 T0 全票签署的共识不变式）。
 

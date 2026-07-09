@@ -32,11 +32,135 @@ await check("workflow_list sees project JSON asset as runnable and markdown conv
   assert(entries.every((e) => !(e.path.endsWith(".md") && e.runnable)), "markdown entries are not runnable");
 });
 
-await check("loadWorkflowFile expands ~/ and validates repo example", async () => {
+await check("loadWorkflowFile resolves relative path and validates repo example", async () => {
   const cwd = repoRoot;
-  const loaded = W.loadWorkflowFile("~/../worker/.pi/agent/skills/pi-astack/workflows/repo-review-example.json", cwd, true);
+  const loaded = W.loadWorkflowFile("workflows/repo-review-example.json", cwd, true);
   assert(loaded.doc?.name === "repo-review-example", loaded.error || "wrong doc");
   assert(loaded.validation?.ok, loaded.validation?.errors?.join("\n"));
+});
+
+await check("loadWorkflowFile rejects ~/ paths", async () => {
+  const cwd = repoRoot;
+  const loaded = W.loadWorkflowFile("~/some/path.json", cwd, true);
+  assert(loaded.error != null && loaded.error.includes("~ paths are not allowed"), `expected ~ rejection, got: ${loaded.error}`);
+  assert(!loaded.doc, "should not parse doc for rejected path");
+});
+
+await check("loadWorkflowFile rejects absolute paths outside cwd", async () => {
+  const cwd = repoRoot;
+  const loaded = W.loadWorkflowFile("/etc/passwd", cwd, true);
+  assert(loaded.error != null && loaded.error.includes("must be within the current working directory"), `expected containment error, got: ${loaded.error}`);
+  assert(!loaded.doc, "should not parse doc for out-of-cwd path");
+});
+
+await check("loadWorkflowFile allows absolute paths within cwd", async () => {
+  const cwd = repoRoot;
+  const absPath = path.join(repoRoot, "workflows", "repo-review-example.json");
+  const loaded = W.loadWorkflowFile(absPath, cwd, true);
+  assert(loaded.doc?.name === "repo-review-example", loaded.error || "wrong doc");
+  assert(loaded.validation?.ok, loaded.validation?.errors?.join("\n"));
+});
+
+await check("loadWorkflowFile allows quoted relative paths", async () => {
+  const cwd = repoRoot;
+  const loaded = W.loadWorkflowFile('"workflows/repo-review-example.json"', cwd, true);
+  assert(loaded.doc?.name === "repo-review-example", loaded.error || "wrong doc");
+  assert(loaded.validation?.ok, loaded.validation?.errors?.join("\n"));
+});
+
+await check("loadWorkflowFile gives reasonable error for nonexistent file within cwd", async () => {
+  const cwd = repoRoot;
+  const loaded = W.loadWorkflowFile("workflows/nonexistent.json", cwd, true);
+  assert(loaded.error != null && loaded.error.includes("cannot read"), `expected read error, got: ${loaded.error}`);
+  assert(!loaded.doc, "should not parse doc for missing file");
+});
+
+await check("loadWorkflowFile rejects symlink escape to file outside cwd", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wf-symlink-escape-"));
+  const outside = path.join(os.tmpdir(), `wf-outside-${Date.now()}.json`);
+  fs.writeFileSync(outside, "{}");
+  try {
+    const link = path.join(tmp, "escape.json");
+    fs.symlinkSync(outside, link);
+    const loaded = W.loadWorkflowFile("escape.json", tmp, true);
+    assert(loaded.error != null && loaded.error.includes("symlink escape"), `expected symlink escape error, got: ${loaded.error}`);
+    assert(!loaded.doc, "should not parse doc for symlink escape");
+  } finally {
+    try { fs.unlinkSync(outside); } catch {}
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
+
+await check("loadWorkflowFile rejects symlink escape via relative traversal + symlink", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wf-symlink-traversal-"));
+  const outside = path.join(os.tmpdir(), `wf-outside-${Date.now()}.json`);
+  fs.writeFileSync(outside, "{}");
+  try {
+    // Create a symlink inside tmp that points outside
+    const link = path.join(tmp, "sub", "escape.json");
+    fs.mkdirSync(path.join(tmp, "sub"), { recursive: true });
+    fs.symlinkSync(outside, link);
+    const loaded = W.loadWorkflowFile("sub/escape.json", tmp, true);
+    assert(loaded.error != null && loaded.error.includes("symlink escape"), `expected symlink escape error, got: ${loaded.error}`);
+    assert(!loaded.doc, "should not parse doc for symlink escape via subdirectory");
+  } finally {
+    try { fs.unlinkSync(outside); } catch {}
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
+
+await check("loadWorkflowFile rejects symlink to directory outside cwd", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wf-symlink-dir-escape-"));
+  const outsideDir = path.join(os.tmpdir(), `wf-outside-dir-${Date.now()}`);
+  fs.mkdirSync(outsideDir);
+  try {
+    const link = path.join(tmp, "escape-dir");
+    fs.symlinkSync(outsideDir, link);
+    const loaded = W.loadWorkflowFile("escape-dir", tmp, true);
+    assert(loaded.error != null && loaded.error.includes("symlink escape"), `expected symlink escape error for directory, got: ${loaded.error}`);
+    assert(!loaded.doc, "should not parse doc for symlink-to-directory escape");
+  } finally {
+    try { fs.rmSync(outsideDir, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
+
+await check("loadWorkflowFile rejects non-regular file (directory) within cwd", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wf-dir-in-cwd-"));
+  try {
+    const dir = path.join(tmp, "subdir");
+    fs.mkdirSync(dir);
+    const loaded = W.loadWorkflowFile("subdir", tmp, true);
+    assert(loaded.error != null && loaded.error.includes("must be a regular file"), `expected regular-file error, got: ${loaded.error}`);
+    assert(!loaded.doc, "should not parse doc for directory");
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
+
+await check("loadWorkflowFile allows symlink to file still within cwd realpath", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wf-symlink-ok-"));
+  try {
+    const real = path.join(tmp, "real.json");
+    fs.writeFileSync(real, JSON.stringify({ schema_version: 1, name: "ok", stages: [] }));
+    const link = path.join(tmp, "link.json");
+    fs.symlinkSync("real.json", link);
+    const loaded = W.loadWorkflowFile("link.json", tmp, true);
+    assert(loaded.doc?.name === "ok", `expected doc name "ok", got: ${loaded.error ?? JSON.stringify(loaded.doc)}`);
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
+});
+
+await check("loadWorkflowFile nonexistent file still returns cannot-read (not symlink escape)", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wf-nonexist-"));
+  try {
+    const loaded = W.loadWorkflowFile("nope.json", tmp, true);
+    assert(loaded.error != null && loaded.error.includes("cannot read"), `expected cannot read, got: ${loaded.error}`);
+    assert(!loaded.doc, "should not parse doc for missing file");
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  }
 });
 
 await check("workflow.enabled=false and executeWorkflow exceptions are structured errors (source lock)", async () => {

@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0003 — 主会话只读，sediment 单写
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **9 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)（`INV-MAIN-SESSION-READ-ONLY`）/ [`requirements.md`](../requirements.md)（`REQ-005`）。原机制 prose 见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
+> 🗄️ **机制已 ingest 入 abrain（pi-global）**：本 ADR 的机制 rationale 已由 ADR 0034 ingest lane 分解为 **9 条 typed entry** 存入第二大脑，逐条 rationale 经 `renderRationale` 可得（带 pinned `source_ref` SHA）。方向契约见 [`direction.md`](../direction.md)（`INV-MAIN-SESSION-READ-ONLY`）/ [`requirements.md`](../requirements.md)（`REQ-005`）。原机制 prose 见 `docs/notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 - **状态**：Accepted（旧 gbrain CLI / postgres role / bash regex guard 实现已过时，只作历史参考；核心原则不变）。
 

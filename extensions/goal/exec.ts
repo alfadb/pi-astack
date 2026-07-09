@@ -41,10 +41,19 @@ export interface RunCmdOutcome extends EvidenceResult {
   reason?: string;
 }
 
-// Coarse guard for irreversible/destructive shapes. NOT a security boundary
-// (the AI has bash anyway) — it stops a fat-fingered `rm -rf /` from riding
-// the evidence path. Conservative: only blocks unmistakable patterns.
-const DANGEROUS_RE = [
+// Guard for the `cmd:<shell>` evidence path. Still NOT a hard security boundary
+// (the AI has a bash tool anyway), but it now refuses the most common ways a
+// shell can overreach: chaining/piping/redirection, command substitution, env
+// expansion, network exfil, sensitive dot-dir reads, and obvious destructive
+// shapes. The override (`guardDangerous: false`) stays available for rare,
+// audited exceptions.
+//
+// Simple, common evidence commands (e.g. `npm run smoke:*`, `rg pattern file`,
+// `node scripts/foo.mjs`, `git rev-parse HEAD`) stay allowed.
+
+const DENY_FIRST_TOKEN = /^(?:sh|bash|dash|zsh|fish|ksh|csh|tcsh|env|curl|wget|nc|netcat|nmap|ssh|scp|rsync|sftp|ftp|telnet)$/i;
+
+const DESTRUCTIVE_RE = [
   /\brm\s+-[a-z]*r[a-z]*f?\b[^\n]*\s(\/|~|\$HOME)(\s|$)/i, // rm -rf / | ~ | $HOME
   /\bmkfs\b/i,
   /\b(dd)\b[^\n]*\bof=\/dev\//i,
@@ -53,8 +62,113 @@ const DANGEROUS_RE = [
   /\b(shutdown|reboot|halt)\b/i,
 ];
 
+// Match sensitive dot-dirs/files when they look like path tokens (home,
+// absolute, ./, ../, or bare relative such as `.env`). This guard is
+// intentionally conservative for goal evidence commands.
+const SENSITIVE_PATH_RE = /(?:^|[\s"'=]|\/)(?:~\/|\$HOME\/|\.\/|\.\.\/)?(?:\.ssh|\.abrain|\.gnupg|\.aws|\.kube|\.docker|\.npmrc|\.pypirc|\.netrc|\.gitconfig|\.env(?:\.[A-Za-z0-9_-]+)?)(?:\/|$|[\s"'])/i;
+
+/** Split simple shell words, honoring quotes/backslash enough for guard checks. */
+function shellWords(cmd: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let quote = "";
+  let inWord = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
+    if (quote) {
+      if (ch === quote) { quote = ""; inWord = true; continue; }
+      if (ch === "\\") { if (i + 1 < cmd.length) word += cmd[++i]; continue; }
+      word += ch;
+      inWord = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (inWord) { words.push(word); word = ""; inWord = false; }
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; inWord = true; continue; }
+    if (ch === "\\") { if (i + 1 < cmd.length) word += cmd[++i]; inWord = true; continue; }
+    word += ch;
+    inWord = true;
+  }
+  if (inWord) words.push(word);
+  return words;
+}
+
+function isShellEnvAssignment(word: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(word);
+}
+
+function commandWords(cmd: string): string[] {
+  const words = shellWords(cmd);
+  let i = 0;
+  while (i < words.length && isShellEnvAssignment(words[i])) i++;
+  return words.slice(i);
+}
+
+function isInlineCodeExecution(cmd: string): boolean {
+  const words = commandWords(cmd);
+  if (words.length < 2) return false;
+  const exe = path.basename(words[0]).toLowerCase();
+  const args = words.slice(1);
+  if (exe === "node") {
+    return args.some((a) =>
+      a === "-e" || a === "--eval" || a.startsWith("--eval=") ||
+      a === "-p" || a === "--print" || a.startsWith("--print=") ||
+      /^-[^-]*[ep]/.test(a)
+    );
+  }
+  if (/^python(?:\d+(?:\.\d+)*)?$/.test(exe)) return args.some((a) => a === "-c" || a.startsWith("-c"));
+  if (exe === "perl" || exe === "ruby") return args.some((a) => a === "-e" || a.startsWith("-e"));
+  if (exe === "php") return args.some((a) => a === "-r" || a.startsWith("-r"));
+  return false;
+}
+
 export function isDangerousCommand(cmd: string): boolean {
-  return DANGEROUS_RE.some((re) => re.test(cmd));
+  // Refuse shell binaries and network tools as the command name.
+  const firstWord = commandWords(cmd)[0] ?? "";
+  if (DENY_FIRST_TOKEN.test(path.basename(firstWord))) return true;
+
+  // Refuse interpreter inline-code forms that bypass the shell/path guard.
+  if (isInlineCodeExecution(cmd)) return true;
+
+  // Refuse destructive shapes and sensitive paths anywhere in the string.
+  if (DESTRUCTIVE_RE.some((re) => re.test(cmd))) return true;
+  if (SENSITIVE_PATH_RE.test(cmd)) return true;
+
+  // Quote-aware scan: only flag shell metacharacters / expansions when they
+  // are not protected by single quotes. Double quotes still allow $, `, and
+  // command substitution, so those remain dangerous inside double quotes.
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      else if (ch === "\\") i++; // skip escaped char
+      else if (ch === "$") return true; // $var / $(cmd) inside "..."
+      continue;
+    }
+    if (ch === "'") { inSingle = true; continue; }
+    if (ch === '"') { inDouble = true; continue; }
+    if (ch === "\\") { i++; continue; } // skip escaped char
+    if (ch === "$" || ch === "`") return true;
+    if (ch === ";" || ch === "\n" || ch === "<" || ch === ">") return true;
+    if (ch === "|") {
+      if (cmd[i + 1] === "|") i++; // ||
+      return true;
+    }
+    if (ch === "&") {
+      if (cmd[i + 1] === "&") { i++; return true; } // &&
+      // standalone background operator (e.g. "cmd &" / "cmd&")
+      if (i === 0 || /\s/.test(cmd[i - 1]) || i === cmd.length - 1 || /\s/.test(cmd[i + 1])) return true;
+    }
+  }
+  return false;
 }
 
 function hash(buf: Buffer): string {
@@ -84,7 +198,7 @@ export function runEvidenceCmd(cmd: string, opts: RunCmdOptions): Promise<RunCmd
     try {
       child = spawn(cmd, {
         cwd: opts.cwd,
-        shell: true,           // allow "npm run x && grep y" style
+        shell: true,           // allow ordinary CLI command strings such as "npm run smoke:..."
         stdio: ["ignore", "pipe", "pipe"], // no tty; stdin closed
         env: opts.env ?? { ...process.env, CI: "1", NO_COLOR: "1" },
       });

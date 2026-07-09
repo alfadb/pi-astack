@@ -73,9 +73,9 @@ await check("real cmd pass -> [x]; real cmd fail -> stays [!]; no check -> [!]",
 
   const branch = [];
   // really run a passing command
-  branch.push(asEvent(await goalCheck(docPath, cwd, "pass", "cmd:sh -c 'exit 0'")));
+  branch.push(asEvent(await goalCheck(docPath, cwd, "pass", "cmd:true")));
   // really run a failing command -> failed evidence (NOT verified)
-  branch.push(asEvent(await goalCheck(docPath, cwd, "fail", "cmd:sh -c 'exit 1'")));
+  branch.push(asEvent(await goalCheck(docPath, cwd, "fail", "cmd:false")));
   // (none) gets no goal_check at all
 
   const { xc, block } = render(docPath, branch, cwd);
@@ -93,7 +93,7 @@ await check("real file drift -> verified [x] goes stale on next render (G6)", as
 
   const branch = [];
   // verify with mod.ts declared as an input (fingerprint captured)
-  branch.push(asEvent(await goalCheck(docPath, cwd, "impl", "cmd:sh -c 'grep -q v mod.ts'", ["mod.ts"])));
+  branch.push(asEvent(await goalCheck(docPath, cwd, "impl", "cmd:rg -q v mod.ts", ["mod.ts"])));
   assert(/\[x\] \(impl\)/.test(render(docPath, branch, cwd).block), "verified while mod.ts unchanged");
 
   // drift the implementation file

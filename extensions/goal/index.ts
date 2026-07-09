@@ -647,7 +647,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "goal_check",
     label: "Goal Check",
-    description: "Record system-run evidence that an acceptance criterion (by its plan.md (id)) passed. evidence = cmd:<shell> (really executed) | file:<path> | git:<sha>. Does NOT edit plan.md — you mark [x] yourself; matching non-stale evidence is what upgrades that [x] to 'verified' at injection (no evidence → [!]; criterion text or declared input drift → stale). Optional inputs=[files] are fingerprinted. Blocked in auto-continue turns.",
+    description: "Record system-run evidence that an acceptance criterion (by its plan.md (id)) passed. evidence = cmd:<shell> (really executed) | file:<path> | git:<sha>. cmd: rejects shell chaining/piping/redirection, command substitution, env expansion, interpreter inline-code flags, network tools, and sensitive dot-dir reads. Does NOT edit plan.md — you mark [x] yourself; matching non-stale evidence is what upgrades that [x] to 'verified' at injection (no evidence → [!]; criterion text or declared input drift → stale). Optional inputs=[files] are fingerprinted. Blocked in auto-continue turns.",
     promptSnippet: "goal_check(criterion_id, evidence, inputs?) — record system-verified evidence for a plan.md criterion",
     parameters: Type.Object({
       criterion_id: Type.String(),

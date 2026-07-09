@@ -14,6 +14,7 @@
  *     - link points at a missing #anchor in an existing .md target
  *     - bare git commit hash embedded in a canonical doc body (REQ-006)
  *     - canonical doc hardcodes an extension/tool COUNT (code-mirror smell)
+ *     - canonical doc references a missing `smoke:*` / `dossier:*` package script
  *     - canonical doc missing frontmatter (advisory until split lands)
  *
  * Once the migration completes, anchor + frontmatter WARN tiers can be promoted
@@ -46,6 +47,9 @@ const err = (file, msg) => errors.push(`${rel(file)}: ${msg}`);
 const warn = (file, msg) => warns.push(`${rel(file)}: ${msg}`);
 const softWarn = (file, msg) => softWarns.push(`${rel(file)}: ${msg}`);
 const rel = (p) => path.relative(repoRoot, p);
+
+const packageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+const packageScripts = new Set(Object.keys(packageJson.scripts || {}));
 
 function listCanonicalDocs() {
   const out = [];
@@ -132,8 +136,27 @@ function lineOf(text, index) {
   return text.slice(0, index).split("\n").length;
 }
 
+function lineTextAt(text, index) {
+  const start = text.lastIndexOf("\n", index - 1) + 1;
+  const end = text.indexOf("\n", index);
+  return text.slice(start, end === -1 ? text.length : end);
+}
+
+function isObviousLocalFilePath(span) {
+  if (!span.includes("/")) return false;
+  if (!LOCAL_FILE_EXT_RE.test(span)) return false;
+  if (/[{}<>*#]/.test(span) || span.includes("...")) return false;
+  if (LOCAL_FILE_EXCLUDED_PREFIX_RE.test(span)) return false;
+  return true;
+}
+
 // --- checks ----------------------------------------------------------------
 const LINK_RE = /\[[^\]]*\]\(([^)]+)\)/g;
+const SCRIPT_REF_RE = /`((?:smoke|dossier):[A-Za-z0-9._-]+)`/g;
+const CODE_SPAN_RE = /(^|[^`])`([^`\n]+)`(?!`)/g;
+const LOCAL_FILE_EXT_RE = /\.(?:ts|tsx|js|mjs|json|md|ya?ml|sh)$/;
+const LOCAL_FILE_EXCLUDED_PREFIX_RE = /^(?:\/|~|https?:\/\/|@|\.git\/|\.state\/|\.pensieve\/|vault\/|_meta\/|l2\/|agent\/)/;
+const LOCAL_FILE_HISTORICAL_CONTEXT_RE = /(?:已删除|剥离|历史|removed|deleted|former|legacy)/i;
 const COMMIT_RE = /\b(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/g;
 const EXT_COUNT_RE = /(\d+)\s*(?:个|个独立的)?\s*(?:extension|extensions|扩展|tool|tools|工具)\b/gi;
 const GOVERNANCE_DOCS = ["docs/direction.md", "docs/requirements.md", "docs/vision.md"];
@@ -202,8 +225,20 @@ for (const file of listCanonicalDocs()) {
     }
   }
 
-  // links
+  // backtick-wrapped package script references; advisory only, never STRICT-promoted
   let m;
+  const scriptRefs = new Map();
+  SCRIPT_REF_RE.lastIndex = 0;
+  while ((m = SCRIPT_REF_RE.exec(raw))) {
+    if (!packageScripts.has(m[1]) && !scriptRefs.has(m[1])) {
+      scriptRefs.set(m[1], lineOf(raw, m.index));
+    }
+  }
+  for (const [name, line] of scriptRefs) {
+    softWarn(file, `package script reference \`${name}\` at line ${line} is not present in package.json#scripts`);
+  }
+
+  // links
   LINK_RE.lastIndex = 0;
   while ((m = LINK_RE.exec(prose))) {
     const target = m[1].trim().split(/\s+/)[0]; // drop optional "title"
@@ -225,6 +260,18 @@ for (const file of listCanonicalDocs()) {
       if (!anchorsFor(resolved).has(anchor)) {
         warn(file, `link ${target} → anchor #${anchor} not found in ${rel(resolved)}`);
       }
+    }
+  }
+
+  // backtick-wrapped local repo file paths; advisory only, never STRICT-promoted
+  CODE_SPAN_RE.lastIndex = 0;
+  while ((m = CODE_SPAN_RE.exec(prose))) {
+    const span = m[2].trim();
+    if (!isObviousLocalFilePath(span)) continue;
+    if (LOCAL_FILE_HISTORICAL_CONTEXT_RE.test(lineTextAt(prose, m.index))) continue;
+    const resolved = path.resolve(repoRoot, span);
+    if (!fs.existsSync(resolved)) {
+      softWarn(file, `code span \`${span}\` at line ${lineOf(prose, m.index + m[1].length)} references missing file ${rel(resolved)}`);
     }
   }
 

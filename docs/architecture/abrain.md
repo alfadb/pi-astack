@@ -56,7 +56,7 @@ Important properties:
 |---|---|---|---|
 | A — explicit MEMORY | user writes `MEMORY: ... END_MEMORY` | project/world/workflow via sediment | high |
 | C — auto-write | `agent_end` LLM extraction + curator | project/world/workflow via sediment | medium |
-| G — about-me | `/about-me` or `MEMORY-ABOUT-ME` | `identity/skills/habits/` | planned |
+| G — about-me | `MEMORY-ABOUT-ME` fence or `agent_end` Lane G extraction | `identity/skills/habits/` | active natural path; `/about-me` slash retired |
 | V — vault | `/secret` / vault commands | encrypted vault | highest |
 
 Lane B/D “project→world promotion” is obsolete in seven-zone abrain: writer should route to the correct zone directly instead of promoting later.
@@ -94,6 +94,6 @@ Old project memory lived in `<project>/.pensieve/`. Current state:
 
 ## 8. Related
 
-> Roadmap/未完成项（Lane G、跨设备同步 UX、schema 版本兼容等）见 `docs/roadmap.md`。
+> Roadmap/未完成项（Lane G review/ranking refinements、跨设备同步 UX、schema 版本兼容等）见 `docs/roadmap.md`。
 
 Related: [vault.md](./vault.md), [memory.md](./memory.md), [../migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md), [../adr/0014-abrain-as-personal-brain.md](../adr/0014-abrain-as-personal-brain.md), [../adr/0017-project-binding-strict-mode.md](../adr/0017-project-binding-strict-mode.md).

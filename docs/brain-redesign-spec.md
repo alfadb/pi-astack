@@ -35,7 +35,7 @@ identity/  skills/  habits/  workflows/  projects/  knowledge/  vault/
 
 | 能力 | 目标 |
 |---|---|
-| Lane G / about-me（G1 writer ✅ shipped）| G1 writer + fence extractor + router 已落（[ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)）；G2 `/about-me` slash + G3 LLM classifier + G4 review-staging + G5 region ranking hint backlog |
+| Lane G / about-me（G1 writer shipped）| G1 writer + `MEMORY-ABOUT-ME` fence extractor + router + `agent_end` Lane G natural path 已落（[ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)）；`/about-me` slash 已退役；G4 review-staging + G5 region ranking hint backlog |
 | vault P0d/P1 | masked wizard、`.env` import、backend migration UX |
 | cross-device sync UX | 多机同步冲突可见性与操作流程 |
 | schema evolution | binding/frontmatter/audit 的前向兼容 |
@@ -58,7 +58,7 @@ identity/  skills/  habits/  workflows/  projects/  knowledge/  vault/
 2. Project identity 必须通过 strict binding 三件套确认。
 3. `.pensieve/` 是 legacy source，不是 current write target。
 4. Vault plaintext 默认不进入 LLM；`vault_release` 必须解释 reason 并等待用户授权。
-5. `identity/skills/habits` G1 writer (`writeAbrainAboutMe`) 已 ship（2026-05-16 [ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)）；`/about-me` slash 则在 G2 phase 未落地，任何文档声称现在能 `/about-me` 交互都过时。
+5. `identity/skills/habits` G1 writer (`writeAbrainAboutMe`) 已 ship（2026-05-16 [ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)）；当前入口是 `MEMORY-ABOUT-ME` fence 与 `agent_end` Lane G natural path，`/about-me` slash 已退役，任何文档声称现在能 `/about-me` 交互都过时。
 
 详见：
 

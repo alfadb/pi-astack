@@ -5,7 +5,7 @@ status: archived
 
 # ADR 0021 — Lane G writer：`identity/skills/habits` 三区落地
 
-> 🗄️ **机制已 ingest 入 abrain（pi-global），本 ADR 归档**：Lane G writer/router/fence/schema 机制 rationale 已由 ADR 0034 ingest lane 分解为 **20 条 typed entry** 存入第二大脑。Lane G 区模型概念见 ADR 0014（区模型 canonical）。逐条 rationale 经 `renderRationale` 可得。原机制 prose（219 行）见 `notes/adr0034-impl-plan.md` 记录的 prose 基线。
+> 🗄️ **机制已 ingest 入 abrain（pi-global），本 ADR 归档**：Lane G writer/router/fence/schema 机制 rationale 已由 ADR 0034 ingest lane 分解为 **20 条 typed entry** 存入第二大脑。Lane G 区模型概念见 ADR 0014（区模型 canonical）。逐条 rationale 经 `renderRationale` 可得。原机制 prose（219 行）见 `docs/notes/adr0034-impl-plan.md` 记录的 prose 基线。
 
 ## 方向沉淀（已入 abrain，逐条 slug）
 

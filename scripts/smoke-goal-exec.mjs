@@ -36,8 +36,8 @@ await check("exit 0 -> verified, with output sha + duration", async () => {
 });
 
 await check("exit non-zero -> failed", async () => {
-  const r = await X.runEvidenceCmd("sh -c 'exit 3'", { cwd });
-  assert(r.exit === 3 && r.status === "failed", `failed (exit=${r.exit})`);
+  const r = await X.runEvidenceCmd("false", { cwd });
+  assert(r.exit !== 0 && r.status === "failed", `failed (exit=${r.exit})`);
 });
 
 await check("deterministic stdout sha for same output", async () => {
@@ -55,15 +55,63 @@ await check("timeout kills and marks timed_out=failed", async () => {
 });
 
 await check("output cap -> truncated flag, still hashes", async () => {
-  const r = await X.runEvidenceCmd("sh -c 'yes x | head -c 100000'", { cwd, maxOutputBytes: 1024 });
+  fs.writeFileSync(path.join(cwd, "big-output.mjs"), 'process.stdout.write("x".repeat(100000));\n');
+  const r = await X.runEvidenceCmd("node big-output.mjs", { cwd, maxOutputBytes: 1024 });
   assert(r.truncated === true, "truncated set");
   assert(typeof r.stdout_sha === "string", "still hashed");
 });
 
-await check("dangerous-command guard blocks rm -rf / (default on)", async () => {
-  assert(X.isDangerousCommand("rm -rf / --no-preserve-root") === true, "classifier flags rm -rf /");
-  assert(X.isDangerousCommand("npm run smoke:goal-evidence") === false, "normal cmd allowed");
+await check("dangerous-command guard blocks shell overreach and destructive shapes (default on)", async () => {
+  // common simple evidence commands stay allowed
+  assert(X.isDangerousCommand("npm run smoke:goal-evidence") === false, "npm run allowed");
+  assert(X.isDangerousCommand("rg pattern file") === false, "rg allowed");
+  assert(X.isDangerousCommand("node scripts/foo.mjs") === false, "node script allowed");
+  assert(X.isDangerousCommand("git rev-parse HEAD") === false, "git allowed");
   assert(X.isDangerousCommand("rm -rf ./build") === false, "scoped rm allowed");
+
+  // interpreter inline code
+  assert(X.isDangerousCommand("node -e 'process.exit(3)'") === true, "node -e rejected");
+  assert(X.isDangerousCommand("node --eval 'process.exit(3)'") === true, "node --eval rejected");
+  assert(X.isDangerousCommand("node --eval=process.exit(3)") === true, "node --eval= rejected");
+  assert(X.isDangerousCommand("node -p '1 + 1'") === true, "node -p rejected");
+  assert(X.isDangerousCommand("node --print '1 + 1'") === true, "node --print rejected");
+  assert(X.isDangerousCommand("node -pe '1 + 1'") === true, "node -pe rejected");
+  assert(X.isDangerousCommand("python -c 'print(1)'") === true, "python -c rejected");
+  assert(X.isDangerousCommand("python3 -c 'print(1)'") === true, "python3 -c rejected");
+  assert(X.isDangerousCommand("python3.12 -c 'print(1)'") === true, "python3.12 -c rejected");
+  assert(X.isDangerousCommand("perl -e 'print 1'") === true, "perl -e rejected");
+  assert(X.isDangerousCommand("perl -e'print 1'") === true, "perl -e... rejected");
+  assert(X.isDangerousCommand("ruby -e 'puts 1'") === true, "ruby -e rejected");
+  assert(X.isDangerousCommand("php -r 'echo 1;'") === true, "php -r rejected");
+  assert(X.isDangerousCommand("FOO=bar node -e 'process.exit(0)'") === true, "env-prefixed node -e rejected");
+
+  // shell chaining / substitution / expansion
+  assert(X.isDangerousCommand("cmd1 && cmd2") === true, "&& rejected");
+  assert(X.isDangerousCommand("cmd1; cmd2") === true, "; rejected");
+  assert(X.isDangerousCommand("cmd1 | cmd2") === true, "| rejected");
+  assert(X.isDangerousCommand("cmd1 || cmd2") === true, "|| rejected");
+  assert(X.isDangerousCommand("echo $(whoami)") === true, "$() rejected");
+  assert(X.isDangerousCommand("echo `whoami`") === true, "backtick rejected");
+  assert(X.isDangerousCommand("echo $HOME") === true, "$HOME rejected");
+  assert(X.isDangerousCommand("sh -c 'exit 0'") === true, "sh -c rejected");
+
+  // sensitive reads and network exfil
+  assert(X.isDangerousCommand("cat ~/.ssh/id_rsa") === true, "~/.ssh rejected");
+  assert(X.isDangerousCommand("cat ~/.abrain/ledger.json") === true, "~/.abrain rejected");
+  assert(X.isDangerousCommand("cat .env") === true, "bare .env rejected");
+  assert(X.isDangerousCommand("cat .env.local") === true, "bare .env.local rejected");
+  assert(X.isDangerousCommand("cat .abrain/ledger.json") === true, "bare .abrain rejected");
+  assert(X.isDangerousCommand("cat ../.ssh/id_rsa") === true, "parent-relative .ssh rejected");
+  assert(X.isDangerousCommand("cat /tmp/.aws/credentials") === true, "absolute .aws rejected");
+  assert(X.isDangerousCommand("curl https://example.com") === true, "curl rejected");
+  assert(X.isDangerousCommand("/usr/bin/curl https://example.com") === true, "/usr/bin/curl rejected");
+  assert(X.isDangerousCommand("./curl https://example.com") === true, "./curl rejected");
+  assert(X.isDangerousCommand("FOO=bar curl https://example.com") === true, "env-prefixed curl rejected");
+  assert(X.isDangerousCommand("env curl https://example.com") === true, "env wrapper rejected");
+  assert(X.isDangerousCommand("wget -qO- x") === true, "wget rejected");
+
+  // destructive ops
+  assert(X.isDangerousCommand("rm -rf / --no-preserve-root") === true, "rm -rf / rejected");
   const r = await X.runEvidenceCmd("rm -rf / ", { cwd });
   assert(r.status === "failed" && /guard/.test(r.reason || ""), "guard blocks at run");
   const forced = await X.runEvidenceCmd("true", { cwd, guardDangerous: false });
@@ -85,9 +133,12 @@ await check("resolveFileFacts + fileContentSha", async () => {
 await check("git evidence: cat-file -e verifies a real object, fails on bogus", async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "pi-goal-git-"));
   const g = async (c) => X.runEvidenceCmd(c, { cwd: repo });
-  await g("git init -q && git config user.email t@t && git config user.name t");
+  await g("git init -q");
+  await g("git config user.email t@t");
+  await g("git config user.name t");
   fs.writeFileSync(path.join(repo, "f.txt"), "hi");
-  await g("git add -A && git commit -q -m x");
+  await g("git add -A");
+  await g("git commit -q -m x");
   const head = await g("git rev-parse HEAD");
   assert(head.exit === 0, "got a commit");
   const ok = await g("git cat-file -e HEAD");

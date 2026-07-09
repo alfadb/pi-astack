@@ -30,7 +30,7 @@ pi-astack 的长期目标不是“一个记忆插件”，而是 **alfadb 在 pi
 ```text
 LLM surface
   ├── dispatch_agent / dispatch_parallel
-  ├── memory_search / memory_get / memory_list / memory_neighbors
+  ├── memory_search / memory_get / memory_list / memory_activity / memory_decide
   ├── vault_release
   ├── vision / imagine
   └── slash commands (human-only maintenance)
