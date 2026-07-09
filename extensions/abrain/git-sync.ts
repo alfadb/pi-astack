@@ -533,8 +533,14 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
       }
 
       if (behind === 0) {
-        // Nothing new on remote.
+        // Nothing new on remote. If this instance is already ahead, a prior
+        // writer in this or another pi process committed but did not push.
+        // Enqueue a detached push behind this fetch on the shared singleflight;
+        // pushAsync performs the ADR0039 reconcile gate and audits its result.
         event.result = "noop";
+        if (ahead > 0) {
+          pushAsync({ abrainHome: opts.abrainHome, timeoutMs }).catch(() => undefined);
+        }
       } else if (ahead === 0) {
         // Pure fast-forward: local has no unique commits.
         await execFileAsync(

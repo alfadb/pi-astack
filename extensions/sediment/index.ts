@@ -71,7 +71,7 @@ import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./stag
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
 import { appendTier1ConstraintEvidenceEvent } from "./constraint-evidence/integration";
-import { scheduleConstraintShadowAutoRefresh } from "./constraint-compiler/auto-refresh";
+import { ensureConstraintShadowLiveness, scheduleConstraintShadowAutoRefresh } from "./constraint-compiler/auto-refresh";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession, isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic } from "../_shared/pi-internals";
 import { getCurrentAnchor, getDeviceId, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
@@ -1739,6 +1739,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           getSessionFile?(): string | undefined | null;
         };
         ui?: { setStatus?(extId: string, message?: string): void };
+        cwd?: string;
+        modelRegistry?: unknown;
       },
     ) => {
       // ADR 0027 PR-B: sub-agent has no sediment footer / no checkpoint
@@ -1776,6 +1778,18 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       } else {
         applySedimentStatus(setStatus, sessionId, "idle");
       }
+
+      void ensureConstraintShadowLiveness({
+        abrainHome,
+        cwd: path.resolve(ctx.cwd || process.cwd()),
+        activeProjectId: undefined,
+        knownProjectIds: listAbrainProjects(abrainHome),
+        settings,
+        modelRegistry: ctx.modelRegistry,
+        reason: "liveness_recovery",
+      }).catch((err) => {
+        console.error(`[sediment] constraint shadow liveness recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     },
   );
 

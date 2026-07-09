@@ -1180,22 +1180,50 @@ async function gitCommitUnlocked(
   return gitCommitManyUnlocked(abrainHome, [filePath], slug, op, projectId, derivedFilePaths);
 }
 
+function pushTriggerErrorSummary(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).trim().slice(0, 500) || "unknown";
+}
+
+async function appendPushTriggerFailureAudit(abrainHome: string, err: unknown): Promise<void> {
+  try {
+    const stateDir = path.join(abrainHome, ".state");
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.appendFile(
+      path.join(stateDir, "git-sync.jsonl"),
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        op: "push",
+        result: "trigger_failed",
+        error: pushTriggerErrorSummary(err),
+      }) + "\n",
+      "utf-8",
+    );
+  } catch (auditErr) {
+    console.error(`[sediment-writer] push trigger failure audit append failed: ${pushTriggerErrorSummary(auditErr)}`);
+    // Audit failure must not block the sediment commit path.
+  }
+}
+
 async function maybePushAbrainAsync(abrainHome: string, sha: string | null): Promise<void> {
   // ADR 0020: after each successful sediment commit, fire-and-forget
   // a git push to origin/main so cross-device knowledge sync happens
-  // automatically. Failures are silently audited to
-  // ~/.abrain/.state/git-sync.jsonl and never block sediment's main path.
+  // automatically. Push execution failures are audited by git-sync itself;
+  // trigger/load failures are audited here so cross-instance stalls are visible.
   if (sha
     && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1"
     && process.env.PI_ABRAIN_DISABLED !== "1") {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const gitSync = require("../abrain/git-sync");
-      if (typeof gitSync.pushAsync === "function") {
-        gitSync.pushAsync({ abrainHome }).catch(() => undefined);
+      if (typeof gitSync.pushAsync !== "function") {
+        await appendPushTriggerFailureAudit(abrainHome, new Error("git-sync pushAsync unavailable"));
+        return;
       }
-    } catch {
-      // git-sync module not loadable (e.g. standalone sediment). Silently skip.
+      gitSync.pushAsync({ abrainHome }).catch((err: unknown) => {
+        void appendPushTriggerFailureAudit(abrainHome, err);
+      });
+    } catch (err) {
+      await appendPushTriggerFailureAudit(abrainHome, err);
     }
   }
 }

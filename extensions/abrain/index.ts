@@ -1366,6 +1366,10 @@ export default function activate(pi: ExtensionAPI): void {
             .catch(() => { /* pushAsync never throws; defense in depth */ });
         } else if (event.result === "ok" && event.behind && event.behind > 0) {
           announce(`abrain: fast-forwarded ${event.behind} commit(s) from origin/main`, "info");
+        } else if (event.result === "noop" && event.ahead && event.ahead > 0) {
+          // fetchAndFF already enqueued pushAsync behind its singleflight op;
+          // this is only the startup UI breadcrumb for a local-ahead repair.
+          announce(`abrain: ${event.ahead} local commit(s) queued for push`, "info");
         } else if (event.result === "conflict") {
           const where = event.conflictPaths && event.conflictPaths.length > 0
             ? ` in ${event.conflictPaths.length} file(s): ${event.conflictPaths.slice(0, 3).join(", ")}${event.conflictPaths.length > 3 ? ", ..." : ""}`

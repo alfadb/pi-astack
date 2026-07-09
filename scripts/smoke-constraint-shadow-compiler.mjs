@@ -3461,7 +3461,7 @@ checkAutoRefresh("auto-refresh scheduler retries after lock contention marker", 
     });
 
     await waitFor("scheduler lock contention marker", () => readJsonlRows(markerFile).some((row) => row.reason === "scheduler_retry_smoke"), 6_500);
-    assert(readJsonlRows(auditFile).some((row) => row.status === "lock_contended" && row.reason === "scheduler_retry_smoke"), "scheduler lock contention audit missing");
+    await waitFor("scheduler lock contention audit", () => readJsonlRows(auditFile).some((row) => row.status === "lock_contended" && row.reason === "scheduler_retry_smoke"), 6_500);
 
     await holder.release();
     await waitFor("scheduler retry completion", () => readJsonlRows(auditFile).some((row) => row.status === "completed"), 6_500);
@@ -3504,7 +3504,8 @@ check("auto-refresh failed/threw run has one bounded retry", () => {
   const source = fs.readFileSync(path.join(repoRoot, "extensions", "sediment", "constraint-compiler", "auto-refresh.ts"), "utf8");
   assert(source.includes("retryAttempt?: number"), "trigger must carry optional retryAttempt");
   assert(source.includes('terminalStatus === "failed" || terminalStatus === "threw"'), "retry must be limited to failed/threw runs");
-  assert(source.includes("(trigger.retryAttempt ?? 0) < 1"), "retry must be bounded to one attempt");
+  assert(source.includes("scheduleRecoverableRetry"), "retry helper must be used for recoverable retry paths");
+  assert(source.includes("(trigger.retryAttempt ?? 0) >= 1"), "retry helper must be bounded to one attempt");
   assert(source.includes('reason: "previous_run_failed"'), "retry reason must be previous_run_failed");
   assert(source.includes('status: "retry_scheduled"'), "retry scheduling must be audited");
 });

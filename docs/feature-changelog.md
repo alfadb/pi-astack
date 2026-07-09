@@ -11,6 +11,23 @@ status: active
 
 ---
 
+## 2026-07-09 — accepted — ADR 0020 autosync fetch 领先补推语义补全
+
+### 变更
+ADR 0020 autosync 语义补全：`fetchAndFF` 在 fetch 后发现本地领先且远端无新提交时，不再只记录 fetch noop，而是补发后台 `pushAsync`。补推仍经过 ADR 0039 reconcile gate；gate 拒绝时按既有 push 审计面记录，不由 fetch 路径绕过。
+
+### 原因
+跨进程或早期异常可能留下本地已提交但未推送的 abrain 状态。启动 fetch 看到 `ahead > 0 && behind === 0` 时，卡在 noop 会让跨设备同步永久等待下一次写入触发 push。
+
+### 需求影响
+不新增用户交互面；autosync 仍 silent-by-default。该补推仅在本地领先且远端无新提交时触发，远端有新提交仍走既有 fast-forward/merge/divergence 处理。
+
+### 非目标
+不改变 ADR 0039 reconcile gate，不跳过 L1/L2 一致性检查，不在冲突或远端领先场景强推。
+
+### 关联
+[ADR 0020](adr/0020-git-backed-autosync.md)；[ADR 0039](adr/0039-constraint-pipeline-reset.md)。
+
 ## 2026-07-09 — accepted — 遗忘子系统收敛与 docs 冲突裁定
 
 ### 变更

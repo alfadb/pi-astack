@@ -14,6 +14,7 @@
  *   7. pushAsync diverged remote: push_rejected
  *   8. fetchAndFF on non-git: skipped
  *   9. fetchAndFF behind=0: noop
+ *   9b. fetchAndFF ahead>0 && behind=0: noop + detached pushAsync repair
  *  10. fetchAndFF pure ff: ok (local catches up to remote)
  *  11. fetchAndFF diverged (no textual conflict): auto-merges via git
  *       3-way merge; result=ok, merged=<behind> (ADR 0020 rev. 2026-05-17)
@@ -93,6 +94,19 @@ function git(cwd, args, opts = {}) {
     throw new Error(`git ${args.join(" ")} failed (${res.status}): ${res.stderr}`);
   }
   return res;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitFor(name, predicate, timeoutMs = 5_000, intervalMs = 50) {
+  const started = Date.now();
+  while (Date.now() - started <= timeoutMs) {
+    if (predicate()) return;
+    await sleep(intervalMs);
+  }
+  throw new Error(`timed out waiting for ${name}`);
 }
 
 // ── Compile git-sync.ts ────────────────────────────────────────────
@@ -357,6 +371,19 @@ await asyncCheck("fetchAndFF with no remote changes returns noop", async () => {
   if (ev.result !== "noop") {
     throw new Error(`expected noop, got ${ev.result}`);
   }
+});
+
+await asyncCheck("fetchAndFF with local ahead only queues detached pushAsync repair", async () => {
+  fs.writeFileSync(path.join(deviceA, "fetch-ahead-repair.md"), "repair via fetch noop\n");
+  git(deviceA, ["add", "fetch-ahead-repair.md"]);
+  git(deviceA, ["commit", "-m", "fetch ahead repair"]);
+  const ev = await gitSync.fetchAndFF({ abrainHome: deviceA });
+  if (ev.result !== "noop") throw new Error(`expected noop, got ${ev.result} (error: ${ev.error})`);
+  if (ev.ahead !== 1 || ev.behind !== 0) throw new Error(`expected ahead=1 behind=0, got ahead=${ev.ahead} behind=${ev.behind}`);
+  await waitFor("detached pushAsync repair to land on remote", () => {
+    const log = git(remoteDir, ["log", "--oneline", "-5"], { allowFail: true });
+    return log.stdout.includes("fetch ahead repair");
+  });
 });
 
 // ── 8. sync() combined op happy path ──────────────────────────────

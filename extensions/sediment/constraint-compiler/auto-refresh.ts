@@ -53,6 +53,10 @@ interface RunOnceOptions {
 }
 
 const GLOBAL_KEY = "__piAstConstraintShadowAutoRefresh";
+const LIVENESS_GLOBAL_KEY = Symbol.for("pi-astack.constraint-shadow.liveness-recovery");
+const LIVENESS_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
+const NEEDS_REFRESH_MAX_BYTES = 64 * 1024;
+const NEEDS_REFRESH_MAX_LINES = 200;
 const state: AutoRefreshGlobalState = ((globalThis as unknown as Record<string, AutoRefreshGlobalState>)[GLOBAL_KEY] ??= {});
 
 function stateRoot(abrainHome: string): string {
@@ -69,12 +73,21 @@ async function appendAuditLine(abrainHome: string, row: Record<string, unknown>)
   await fs.appendFile(path.join(root, "audit.jsonl"), `${JSON.stringify(row)}\n`, "utf-8");
 }
 
+async function appendAuditLineNoThrow(abrainHome: string, row: Record<string, unknown>): Promise<void> {
+  try {
+    await appendAuditLine(abrainHome, row);
+  } catch (err) {
+    console.error(`[constraint-shadow-auto-refresh] audit append failed: ${errorMessage(err)}`);
+  }
+}
+
 async function appendNeedsRefreshMarker(
   trigger: ConstraintShadowAutoRefreshTrigger,
   observedAtMs: number,
   modelRef: string,
 ): Promise<void> {
   const root = stateRoot(trigger.abrainHome);
+  const markerPath = needsRefreshPath(trigger.abrainHome);
   const marker: NeedsRefreshMarker = {
     schemaVersion: "constraint-shadow-auto-refresh-needs-refresh/v1",
     observedAtUtc: new Date(observedAtMs).toISOString(),
@@ -83,7 +96,25 @@ async function appendNeedsRefreshMarker(
     modelRef,
   };
   await fs.mkdir(root, { recursive: true });
-  await fs.appendFile(needsRefreshPath(trigger.abrainHome), `${JSON.stringify(marker)}\n`, "utf-8");
+
+  let raw = "";
+  try {
+    raw = await fs.readFile(markerPath, "utf-8");
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") throw err;
+  }
+
+  const lineCount = raw.split("\n").filter((line) => line.trim()).length;
+  if (!raw || (Buffer.byteLength(raw, "utf-8") <= NEEDS_REFRESH_MAX_BYTES && lineCount <= NEEDS_REFRESH_MAX_LINES)) {
+    await fs.appendFile(markerPath, `${JSON.stringify(marker)}\n`, "utf-8");
+    return;
+  }
+
+  const latest = latestNeedsRefreshMarker(raw);
+  const compacted = `${latest ? `${JSON.stringify(latest)}\n` : ""}${JSON.stringify(marker)}\n`;
+  const tmpPath = path.join(root, `.needs-refresh.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
+  await fs.writeFile(tmpPath, compacted, "utf-8");
+  await fs.rename(tmpPath, markerPath);
 }
 
 function parseNeedsRefreshMarker(value: unknown): NeedsRefreshMarker | null {
@@ -138,6 +169,114 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+async function scheduleRecoverableRetry(
+  trigger: ConstraintShadowAutoRefreshTrigger,
+  modelRef: string,
+  previousStatus: string,
+): Promise<void> {
+  if ((trigger.retryAttempt ?? 0) >= 1) return;
+  const retryAttempt = (trigger.retryAttempt ?? 0) + 1;
+  await appendAuditLineNoThrow(trigger.abrainHome, {
+    schemaVersion: "constraint-shadow-auto-refresh/v1",
+    observedAtUtc: new Date().toISOString(),
+    ok: true,
+    reason: trigger.reason,
+    sourceEventId: trigger.sourceEventId ?? null,
+    modelRef,
+    status: "retry_scheduled",
+    retryAttempt,
+    previousStatus,
+  });
+  scheduleConstraintShadowAutoRefresh({ ...trigger, retryAttempt, reason: "previous_run_failed" });
+}
+
+async function hasReadableConstraintEvidenceEnvelope(
+  root: string,
+  isQueued: (envelope: Record<string, unknown>) => boolean,
+): Promise<boolean> {
+  const walk = async (dir: string): Promise<boolean> => {
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (err: any) {
+      if (err?.code === "ENOENT") return false;
+      throw err;
+    }
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (await walk(full)) return true;
+      } else if (entry.isFile() && entry.name.endsWith(".json")) {
+        try {
+          const envelope = JSON.parse(await fs.readFile(full, "utf-8")) as Record<string, unknown>;
+          if (envelope.schema === "constraint-evidence-envelope/v1" && isQueued(envelope)) return true;
+        } catch {
+          // Conservative liveness recovery is only for readable evidence rows.
+        }
+      }
+    }
+    return false;
+  };
+  return walk(root);
+}
+
+function coverageRowSettled(row: Record<string, unknown>): boolean {
+  if (row.status === "projected") return true;
+  return (row.status === "queued" || row.status === "stale")
+    && (row.disposition === "merged_source" || row.disposition === "unresolved");
+}
+
+async function readQueuedConstraintEventCount(abrainHome: string): Promise<{ queuedEvents: number; fallbackReason?: string }> {
+  const evidenceRoot = path.join(abrainHome, "l1", "events", "sha256");
+  const coveragePath = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "event-coverage.json");
+  let coverage: unknown;
+  let fallbackReason: string | undefined;
+  try {
+    coverage = JSON.parse(await fs.readFile(coveragePath, "utf-8"));
+  } catch (err: any) {
+    fallbackReason = err?.code === "ENOENT" ? "event_coverage_missing" : "event_coverage_unreadable";
+  }
+
+  if (fallbackReason) {
+    const hasAnyReadableEnvelope = await hasReadableConstraintEvidenceEnvelope(evidenceRoot, () => true);
+    return { queuedEvents: hasAnyReadableEnvelope ? 1 : 0, fallbackReason };
+  }
+
+  const rows = Array.isArray((coverage as { rows?: unknown }).rows) ? (coverage as { rows: unknown[] }).rows : undefined;
+  if (!rows) {
+    const hasAnyReadableEnvelope = await hasReadableConstraintEvidenceEnvelope(evidenceRoot, () => true);
+    return { queuedEvents: hasAnyReadableEnvelope ? 1 : 0, fallbackReason: "event_coverage_rows_missing" };
+  }
+
+  const settledEventIds = new Set<string>();
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const record = row as Record<string, unknown>;
+    if (typeof record.eventId === "string" && coverageRowSettled(record)) settledEventIds.add(record.eventId);
+  }
+
+  const hasQueued = await hasReadableConstraintEvidenceEnvelope(evidenceRoot, (envelope) => {
+    const eventId = typeof envelope.event_id === "string" ? envelope.event_id : undefined;
+    return !!eventId && !settledEventIds.has(eventId);
+  });
+  return { queuedEvents: hasQueued ? 1 : 0 };
+}
+
+async function latestCompiledViewObservedMs(abrainHome: string): Promise<number | undefined> {
+  const latest = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
+  const candidates = [path.join(latest, "compiled-view.md"), path.join(latest, "decision.json")];
+  let newest = -Infinity;
+  for (const file of candidates) {
+    try {
+      const stat = await fs.stat(file);
+      newest = Math.max(newest, stat.mtimeMs);
+    } catch (err: any) {
+      if (err?.code !== "ENOENT") return undefined;
+    }
+  }
+  return Number.isFinite(newest) ? newest : undefined;
+}
+
 function isModelRegistry(value: unknown): value is ModelRegistryLike {
   return !!value
     && typeof value === "object"
@@ -176,19 +315,21 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
   let terminalStatus: "completed" | "failed" | "threw" | undefined;
 
   if (!modelRef) {
-    await appendAuditLine(trigger.abrainHome, {
+    await appendAuditLineNoThrow(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date(startedAtMs).toISOString(),
       ok: false,
       reason: trigger.reason,
       sourceEventId: trigger.sourceEventId ?? null,
+      modelRef,
       status: "model_not_configured",
-    }).catch(() => undefined);
+    });
+    await scheduleRecoverableRetry(trigger, modelRef, "model_not_configured");
     return;
   }
 
   if (!isModelRegistry(trigger.modelRegistry)) {
-    await appendAuditLine(trigger.abrainHome, {
+    await appendAuditLineNoThrow(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date(startedAtMs).toISOString(),
       ok: false,
@@ -196,7 +337,8 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       sourceEventId: trigger.sourceEventId ?? null,
       modelRef,
       status: "model_registry_unavailable",
-    }).catch(() => undefined);
+    });
+    await scheduleRecoverableRetry(trigger, modelRef, "model_registry_unavailable");
     return;
   }
 
@@ -212,7 +354,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       label: "constraint-shadow-auto-refresh",
     });
   } catch {
-    await appendAuditLine(trigger.abrainHome, {
+    await appendAuditLineNoThrow(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date().toISOString(),
       ok: false,
@@ -220,11 +362,11 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       sourceEventId: trigger.sourceEventId ?? null,
       modelRef,
       status: "lock_contended",
-    }).catch(() => undefined);
+    });
     try {
       await appendNeedsRefreshMarker(trigger, Date.now(), modelRef);
     } catch (err) {
-      await appendAuditLine(trigger.abrainHome, {
+      await appendAuditLineNoThrow(trigger.abrainHome, {
         schemaVersion: "constraint-shadow-auto-refresh/v1",
         observedAtUtc: new Date().toISOString(),
         ok: false,
@@ -233,7 +375,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
         modelRef,
         status: "needs_refresh_marker_write_failed",
         error: errorMessage(err),
-      }).catch(() => undefined);
+      });
     }
     if (options.scheduleOnLockContention) {
       scheduleConstraintShadowAutoRefresh(trigger);
@@ -244,7 +386,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
   compileStartedAtMs = Date.now();
   state.lastStartedMs = compileStartedAtMs;
 
-  await appendAuditLine(trigger.abrainHome, {
+  await appendAuditLineNoThrow(trigger.abrainHome, {
     schemaVersion: "constraint-shadow-auto-refresh/v1",
     observedAtUtc: new Date(compileStartedAtMs).toISOString(),
     ok: true,
@@ -252,7 +394,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
     sourceEventId: trigger.sourceEventId ?? null,
     modelRef,
     status: "started",
-  }).catch(() => undefined);
+  });
 
   // pi-astack: live footer indicator while the (minutes-long, async) compile
   // runs, so the user sees a background compile in progress and does not close
@@ -309,7 +451,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       deviceId: getDeviceId() ?? "unknown-device",
     });
     terminalStatus = result.ok ? "completed" : "failed";
-    await appendAuditLine(trigger.abrainHome, {
+    await appendAuditLineNoThrow(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date().toISOString(),
       ok: result.ok,
@@ -319,7 +461,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       status: terminalStatus,
       durationMs: Date.now() - compileStartedAtMs,
       result: compactResult(result),
-    }).catch(() => undefined);
+    });
     // ADR0039 Part A: commit this background compile's derived l1/l2 (固化 L1
     // projection event + L2 view + the triggering constraint-evidence event),
     // which no agent_end create will sweep because the compile completes minutes
@@ -327,7 +469,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
     await commitAbrainDerivedOutputs(trigger.abrainHome, "constraint-shadow-auto-refresh");
   } catch (err) {
     terminalStatus = "threw";
-    await appendAuditLine(trigger.abrainHome, {
+    await appendAuditLineNoThrow(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date().toISOString(),
       ok: false,
@@ -337,7 +479,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       status: "threw",
       durationMs: Date.now() - compileStartedAtMs,
       error: errorMessage(err),
-    }).catch(() => undefined);
+    });
   } finally {
     clearInterval(statusTicker);
     compileStatus?.(undefined);
@@ -347,7 +489,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
     try {
       needsRefresh = await readLatestNeedsRefreshMarker(trigger.abrainHome);
     } catch (err) {
-      await appendAuditLine(trigger.abrainHome, {
+      await appendAuditLineNoThrow(trigger.abrainHome, {
         schemaVersion: "constraint-shadow-auto-refresh/v1",
         observedAtUtc: new Date().toISOString(),
         ok: false,
@@ -356,7 +498,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
         modelRef,
         status: "needs_refresh_marker_read_failed",
         error: errorMessage(err),
-      }).catch(() => undefined);
+      });
     }
     if (needsRefresh && markerObservedAfter(needsRefresh, compileStartedAtMs)) {
       scheduleConstraintShadowAutoRefresh({
@@ -364,20 +506,8 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
         reason: needsRefresh.reason,
         sourceEventId: needsRefresh.sourceEventId ?? undefined,
       });
-    } else if ((terminalStatus === "failed" || terminalStatus === "threw") && (trigger.retryAttempt ?? 0) < 1) {
-      const retryAttempt = (trigger.retryAttempt ?? 0) + 1;
-      await appendAuditLine(trigger.abrainHome, {
-        schemaVersion: "constraint-shadow-auto-refresh/v1",
-        observedAtUtc: new Date().toISOString(),
-        ok: true,
-        reason: trigger.reason,
-        sourceEventId: trigger.sourceEventId ?? null,
-        modelRef,
-        status: "retry_scheduled",
-        retryAttempt,
-        previousStatus: terminalStatus,
-      }).catch(() => undefined);
-      scheduleConstraintShadowAutoRefresh({ ...trigger, retryAttempt, reason: "previous_run_failed" });
+    } else if (terminalStatus === "failed" || terminalStatus === "threw") {
+      await scheduleRecoverableRetry(trigger, modelRef, terminalStatus);
     }
   }
 }
@@ -391,6 +521,20 @@ export function scheduleConstraintShadowAutoRefresh(trigger: ConstraintShadowAut
   if (state.timer) clearTimeout(state.timer);
 
   const now = Date.now();
+  const modelRef = defaultModelRef(trigger.settings);
+  void appendNeedsRefreshMarker(trigger, now, modelRef).catch((err) => {
+    void appendAuditLineNoThrow(trigger.abrainHome, {
+      schemaVersion: "constraint-shadow-auto-refresh/v1",
+      observedAtUtc: new Date().toISOString(),
+      ok: false,
+      reason: trigger.reason,
+      sourceEventId: trigger.sourceEventId ?? null,
+      modelRef,
+      status: "needs_refresh_marker_write_failed",
+      error: errorMessage(err),
+    });
+  });
+
   const cooldownMs = Math.max(0, auto.minIntervalMs - (now - (state.lastStartedMs ?? 0)));
   const delayMs = Math.max(0, auto.debounceMs, cooldownMs);
   state.timer = setTimeout(() => {
@@ -413,6 +557,63 @@ export function scheduleConstraintShadowAutoRefresh(trigger: ConstraintShadowAut
   return { scheduled: true, reason: delayMs > 0 ? "scheduled_debounced" : "scheduled_now" };
 }
 
+export async function ensureConstraintShadowLiveness(trigger: ConstraintShadowAutoRefreshTrigger): Promise<{ scheduled: boolean; reason: string; queuedEvents?: number; staleAgeMs?: number; queuedFallbackReason?: string }> {
+  if (!trigger.settings.constraintShadowCompiler.enabled) return { scheduled: false, reason: "constraint_shadow_compiler_disabled" };
+  if (!trigger.settings.constraintShadowCompiler.autoRefresh.enabled) return { scheduled: false, reason: "auto_refresh_disabled" };
+
+  const observedMs = await latestCompiledViewObservedMs(trigger.abrainHome);
+  if (observedMs === undefined) return { scheduled: false, reason: "compiled_view_unreadable" };
+  const staleAgeMs = Date.now() - observedMs;
+  if (staleAgeMs < LIVENESS_STALE_AFTER_MS) return { scheduled: false, reason: "compiled_view_fresh", staleAgeMs };
+
+  const queued = await readQueuedConstraintEventCount(trigger.abrainHome);
+  const { queuedEvents, fallbackReason: queuedFallbackReason } = queued;
+  if (queuedEvents <= 0) return { scheduled: false, reason: "no_queued_events", queuedEvents, staleAgeMs, queuedFallbackReason };
+
+  const modelRef = defaultModelRef(trigger.settings);
+  const guardReason = !modelRef
+    ? "model_not_configured"
+    : !isModelRegistry(trigger.modelRegistry)
+      ? "model_registry_unavailable"
+      : undefined;
+  if (guardReason) {
+    await appendAuditLineNoThrow(trigger.abrainHome, {
+      schemaVersion: "constraint-shadow-auto-refresh/v1",
+      observedAtUtc: new Date().toISOString(),
+      ok: false,
+      reason: "liveness_recovery",
+      sourceEventId: null,
+      modelRef,
+      status: "liveness_recovery_skipped",
+      scheduleReason: guardReason,
+      queuedEvents,
+      staleAgeMs,
+      ...(queuedFallbackReason ? { queuedFallbackReason } : {}),
+    });
+    return { scheduled: false, reason: guardReason, queuedEvents, staleAgeMs, queuedFallbackReason };
+  }
+
+  const g = globalThis as typeof globalThis & { [LIVENESS_GLOBAL_KEY]?: boolean };
+  if (g[LIVENESS_GLOBAL_KEY]) return { scheduled: false, reason: "liveness_recovery_already_attempted", queuedEvents, staleAgeMs, queuedFallbackReason };
+
+  const scheduled = scheduleConstraintShadowAutoRefresh({ ...trigger, reason: "liveness_recovery", sourceEventId: undefined });
+  if (scheduled.scheduled) g[LIVENESS_GLOBAL_KEY] = true;
+  await appendAuditLineNoThrow(trigger.abrainHome, {
+    schemaVersion: "constraint-shadow-auto-refresh/v1",
+    observedAtUtc: new Date().toISOString(),
+    ok: scheduled.scheduled,
+    reason: "liveness_recovery",
+    sourceEventId: null,
+    modelRef,
+    status: scheduled.scheduled ? "liveness_recovery_scheduled" : "liveness_recovery_skipped",
+    scheduleReason: scheduled.reason,
+    queuedEvents,
+    staleAgeMs,
+    ...(queuedFallbackReason ? { queuedFallbackReason } : {}),
+  });
+  return { ...scheduled, queuedEvents, staleAgeMs, queuedFallbackReason };
+}
+
 export async function _runConstraintShadowAutoRefreshNowForTests(trigger: ConstraintShadowAutoRefreshTrigger): Promise<void> {
   await runOnce(trigger);
 }
@@ -423,4 +624,5 @@ export function _resetConstraintShadowAutoRefreshForTests(): void {
   state.inFlight = undefined;
   state.pending = undefined;
   state.lastStartedMs = undefined;
+  delete (globalThis as typeof globalThis & { [LIVENESS_GLOBAL_KEY]?: boolean })[LIVENESS_GLOBAL_KEY];
 }
