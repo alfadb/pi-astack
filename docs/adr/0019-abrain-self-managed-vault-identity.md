@@ -7,7 +7,7 @@ status: superseded
 
 > 🗄️ **ARCHIVE-CLASS · SUPERSEDED（Phase-2，3×T0 mark-in-place）**：age/Tier-1/`.vault-backend` 机制是代码正确性（`extensions/abrain/backend-detect.ts` 等）；可移植身份取舍（不寄生系统 ssh key）可一句提炼，当前真相以代码为准。机制正文（含 3 根因 + invariant 表）原地保留可读、物理归档延后至 abrain ingest lane 落地，勿删。
 
-- **状态**: Accepted
+- **状态**: Superseded（与 frontmatter 一致）
 - **日期**: 2026-05-15
 - **决策者**: alfadb
 - **依赖**: ADR 0014 (abrain seven-zone) / ADR 0017 (strict project binding) / ADR 0001 (pi-astack as personal pi workflow)
@@ -195,4 +195,4 @@ P0d 时单独 ADR 决策。本 ADR 仅锁定 schema：`.vault-identity/master.ag
 - ADR 0017（strict project binding 的 manifest/state 分离模式作为参考）
 - `docs/migration/vault-bootstrap.md` v1.4（被本 ADR 部分取代）
 - `docs/audits/2026-05-14-rounds-1-5.md`（R6 fail-closed audit）
-- `docs/audits/2026-05-15-doc-vs-impl.md`（本 ADR 触发的多模型审计）
+- `docs/audits/2026-05-15-doc-vs-code.md`（本 ADR 触发的多模型审计）

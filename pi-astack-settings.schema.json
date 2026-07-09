@@ -87,6 +87,7 @@
       "type": "object",
       "description": "Whitelist + capability hints for chat models. The curator filters pi-ai's hundreds of built-in model definitions to a curated keep-list per provider, then injects a markdown capability table into the main session system prompt on every turn.",
       "additionalProperties": false,
+      "required": ["tiers"],
       "properties": {
         "_comment": { "type": "string" },
 
@@ -1420,28 +1421,36 @@
         "forgetting": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ADR 0031 Phase 0+ forgetting-autonomy subsystem. The four boolean flags are explicit runtime kill-switches. All anti-runaway ceilings, including the per-batch cap, are build-time welded structural floors. The resurrection backoff rate is an interim const pending migration into brain-managed self-calibrating state.",
+          "description": "ADR 0031 forgetting-autonomy subsystem. Two orthogonal runtime switches: enabled gates decay evaluation, forgetting-side writes, and mutation; instrumentation gates read-side usage observation only. Anti-runaway ceilings, including the per-batch cap, are build-time welded structural floors. Archive reactivation is independent and remains governed by sediment.autoLlmWriteEnabled.",
           "properties": {
             "_comment": { "type": "string" },
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Master switch for forgetting evaluation and mutation. false = no decay assessment scheduling, zero forgetting-side writes, and zero mutation. Does not control read-side instrumentation and does not gate archive reactivation."
+            },
             "instrumentation": {
               "type": "boolean",
               "default": false,
-              "description": "ADR 0031 Phase 0: read-side usage instrumentation (retrieval-hit + citation). Zero behavior change, pure observation; off = instrumentation short-circuits and writes nothing."
+              "description": "Read-side usage instrumentation (retrieval-hit + citation). Pure observation; off = instrumentation short-circuits and writes nothing."
             },
             "demoteShadow": {
               "type": "boolean",
               "default": false,
-              "description": "ADR 0031 Phase 3 skeleton: dry-run/shadow demote executor. On = compute a demote plan from pending archive proposals + hysteresis + resurrection and write a shadow audit; NEVER mutates. Real demote awaits data-gate + cross-vendor graduation-gate."
+              "deprecated": true,
+              "description": "Deprecated legacy migration key. Runtime reads this only when enabled is absent; enabled = decayShadow || demoteShadow || autoDemote. Use enabled instead."
             },
             "decayShadow": {
               "type": "boolean",
               "default": false,
-              "description": "ADR 0031 Phase 1B: aggregator decay shadow-assessment. Off = aggregator prompt omits the decay section, parses no entry_decay_assessments, writes no decay-shadow.jsonl (byte-for-byte zero behavior change). On = write shadow + run §4.2 regression-invariant audit."
+              "deprecated": true,
+              "description": "Deprecated legacy migration key. Runtime reads this only when enabled is absent; enabled = decayShadow || demoteShadow || autoDemote. Use enabled instead."
             },
             "autoDemote": {
               "type": "boolean",
               "default": false,
-              "description": "ADR 0031 Phase 3 real-demote master switch (runtime kill-switch). Off (with demoteShadow on) = executor only dry-runs, zero mutation. On = real active->archived via §4.2 evidence-gated proposal + CAS + resurrection backoff + build-time circuit breaker + hysteresis; archived full text stays on disk (revivable, no git rm)."
+              "deprecated": true,
+              "description": "Deprecated legacy migration key. Runtime reads this only when enabled is absent; enabled = decayShadow || demoteShadow || autoDemote. Use enabled instead."
             }
           }
         }

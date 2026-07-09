@@ -115,7 +115,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 
 ---
 
-## 9. 基础 / 历史 ADR（pre-0024，仍 active）
+## 9. 基础 / 历史 ADR（pre-0024，部分 archived/superseded，以各 ADR frontmatter 为准）
 
 > 这些 ADR 早于第二大脑框架；核心仍有效但部分实现细节过时。**current 真相以代码 / [current-state.md](../current-state.md) 为准**，下表只给"读什么去哪查 + 怎么读"。
 

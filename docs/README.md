@@ -117,3 +117,5 @@ abrain 不可读 ⇒ 它的上千个"细节"决定里，某些累积起来可能
 2. **docs/（vision/direction/requirements）** — 期望方向的真相；代码与之冲突默认是 drift。
 3. **abrain** — rationale / 先例（可能 stale）。
 4. `docs/audits/`、`docs/archive/`、git history — 仅证据/历史。
+
+**docs 内部冲突裁定**：direction.md（不变量）> requirements.md（REQ 行为契约）> 已接受且未被 supersede 的 ADR > vision/spec 愿景文档。本裁定仅解决读时冲突；由 vision 驱动的方向变更须经新 ADR 或 direction.md 修订；冲突事件升级人类，不得静默依从任一方。

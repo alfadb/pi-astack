@@ -9,7 +9,7 @@ status: superseded
 
 > ⚠️ PARTIALLY HISTORICAL：A/B/C 上游关系与组件合并思想仍有效；具体目录、扩展清单和 gbrain/sediment 路径以 [../directory-layout.md](../directory-layout.md) 与 [../../UPSTREAM.md](../../UPSTREAM.md) 为准。当前没有 active vendor methodology submodule；`vendor/gstack/` 已于 2026-07-06 退役为 reference-on-demand，`vendor/pensieve/` 已移除/retired，正文中相关 vendor 目录规划仅作历史记录。
 
-- **状态**: Accepted。**sediment/gbrain 相关描述已过时**（2026-05-07）— 组件合并清单中的 gbrain/cache/pending queue 等描述基于旧架构。新架构（[memory-architecture.md](../memory-architecture.md)）下 sediment 组件需重新设计，但扩展/skills/prompts 的归并清单不变。
+- **状态**: Superseded（与 frontmatter 一致）。**sediment/gbrain 相关描述已过时**（2026-05-07）— 组件合并清单中的 gbrain/cache/pending queue 等描述基于旧架构。新架构（[memory-architecture.md](../memory-architecture.md)）下 sediment 组件需重新设计，但扩展/skills/prompts 的归并清单不变。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0001（项目定位）/ 0002（gbrain）/ 0005（pensieve 退场）

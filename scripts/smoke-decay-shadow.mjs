@@ -52,13 +52,14 @@ ok(normalizeAssessment({ slug: "", decay_score: 0.5 }) === null, "无 slug → n
   ok(r.would_demote_count === 1, "would_demote_count=1");
 }
 {
-  // 违规: would_demote=true 但无证据(prompt regression — §4 disuse-only 后门)
+  // 违规: would_demote=true 但无证据(prompt regression — §4 disuse-only 后门)或弱信号
   const dirty = [
     { slug: "x", decay_score: 0.9, would_demote: true, demote_evidence_type: null },
     { slug: "y", decay_score: 0.9, would_demote: true },  // 缺字段
+    { slug: "k", decay_score: 0.9, would_demote: true, demote_evidence_type: "kind_atypical" },
   ];
   const r = auditDecayAssessments(dirty);
-  ok(r.would_demote_usage_only_count === 2 && r.ok === false, "would_demote 无证据 → usage_only=2, ok=false(回归命中)");
+  ok(r.would_demote_usage_only_count === 3 && r.ok === false, "would_demote 无证据/弱信号 → usage_only=3, ok=false(回归命中)");
   ok(r.violations.some((v) => v.reason === "would_demote_without_truth_change_evidence"), "violation reason 正确");
 }
 {
@@ -85,13 +86,22 @@ ok(normalizeAssessment({ slug: "", decay_score: 0.5 }) === null, "无 slug → n
   const file = decayShadowPath();
   ok(file.startsWith(tmp), "sandbox: decay-shadow.jsonl 落 ABRAIN_ROOT 下");
   ok(writeDecayShadow("", [{ slug: "a", decay_score: 0.5 }]) === 0, "无 projectRoot → 写 0 行");
+  ok(writeDecayShadow("/proj", [{ slug: "quiet", decay_score: 0.2, would_demote: false, demote_evidence_type: null, primary_driver: "disuse" }]) === 0, "would_demote=false 常态 shadow → 不落盘");
   const n = writeDecayShadow("/proj", [
     { slug: "a", decay_score: 0.8, would_demote: true, demote_evidence_type: "superseded_by", primary_driver: "supersede", falsifier: "f" },
     { slug: "", decay_score: 0.5 }, // 无 slug → 丢弃
   ]);
   ok(n === 1, "写 1 行(无 slug 的被丢)");
-  const rows = fs.readFileSync(file, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+  let rows = fs.readFileSync(file, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
   ok(rows.length === 1 && rows[0].slug === "a" && rows[0].status === "shadow", "落盘行正确 + status=shadow");
+  const v = writeDecayShadow("/proj", [
+    { slug: "kind", decay_score: 0.8, would_demote: true, demote_evidence_type: "kind_atypical", primary_driver: "kind_atypical", falsifier: "f" },
+  ]);
+  ok(v === 1, "kind_atypical weak-signal violation → 写 1 行审计");
+  rows = fs.readFileSync(file, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+  const violation = rows.find((row) => row.slug === "kind");
+  ok(violation?.would_demote === false && violation?.demote_evidence_type === null, "kind_atypical 不成为有效 demote evidence");
+  ok(violation?.violation_reason === "would_demote_usage_only" && violation?.raw_demote_evidence_type === "kind_atypical", "kind_atypical would_demote → violation_reason=would_demote_usage_only");
 }
 
 // ── parseAggregatorOutput: entry_decay_assessments 容忍解析 + raw 保留(1B-i 接线)──
@@ -111,12 +121,12 @@ ok(normalizeAssessment({ slug: "", decay_score: 0.5 }) === null, "无 slug → n
 {
   const summaryFixture = { ts: "2026-06-15T00:00:00Z", project_root: "/proj", window_days: 30 };
   const off = buildAggregatorFullPromptParts(summaryFixture);
-  ok(off.prompt === loadAggregatorPrompt(), "decayShadow off: prompt 与基线逐字节相同");
-  ok(off.input === buildAggregatorPromptInput(summaryFixture), "decayShadow off: input 与基线逐字节相同");
+  ok(off.prompt === loadAggregatorPrompt(), "forgetting.enabled off: prompt 与基线逐字节相同");
+  ok(off.input === buildAggregatorPromptInput(summaryFixture), "forgetting.enabled off: input 与基线逐字节相同");
   const on = buildAggregatorFullPromptParts(summaryFixture, { entries: [{ slug: "a", window_retrieved_unused: 5 }] });
-  ok(on.prompt.length > off.prompt.length && on.prompt.includes("entry_decay_assessments"), "decayShadow on: prompt 拼接 decay 指令段");
+  ok(on.prompt.length > off.prompt.length && on.prompt.includes("entry_decay_assessments"), "forgetting.enabled on: prompt 拼接 decay 指令段");
   ok(on.prompt.includes("would_demote") && on.prompt.includes("NEVER"), "decay 段含 §4.2 gate(would_demote NEVER usage-only)");
-  ok(on.input.includes("ENTRY DECAY TELEMETRY") && on.input.includes('"slug": "a"'), "decayShadow on: input 含 telemetry 上下文块");
+  ok(on.input.includes("ENTRY DECAY TELEMETRY") && on.input.includes('"slug": "a"'), "forgetting.enabled on: input 含 telemetry 上下文块");
 }
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }

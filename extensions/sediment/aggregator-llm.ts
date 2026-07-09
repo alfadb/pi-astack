@@ -55,6 +55,7 @@ import { sanitizeForMemory } from "./sanitizer";
 export interface LifecycleProposal {
   op: "contest" | "archive" | "supersede";
   reason: "affirm_stale" | "affirm_superseded" | "affirm_echo_chamber";
+  evidence_type?: "superseded_by" | "contradicted" | "version_stale";
   /** §4.2 INDEPENDENT evidence (user correction / contradiction by a newer entry /
    *  version-domain staleness / reviewer content mismatch) — NEVER retrieved-unused alone. */
   independent_evidence: string;
@@ -128,7 +129,7 @@ export interface PromptNativeOutput {
   };
   /** ADR 0031 Phase 1B(decay shadow, optional)。正交于 promoted/demoted 的独立
    *  decay 评估列表;**保留 raw**(不规范化/不强制 §4.2)供下游 audit 捕获 prompt
-   *  违规, normalize 在 writeDecayShadow 写时做。prompt 未产出(decayShadow off)时缺失。 */
+   *  违规, normalize 在 writeDecayShadow 写时做。prompt 未产出(forgetting.enabled off)时缺失。 */
   entry_decay_assessments?: Record<string, unknown>[];
 }
 
@@ -171,24 +172,24 @@ export function loadAggregatorPrompt(): string {
 }
 
 let _cachedDecayFragment: string | undefined;
-/** ADR 0031 Phase 1B: decay-shadow 指令片段(仅 decayShadow on 时拼接到 prompt 尾)。 */
+/** ADR 0031 Phase 1B: decay-shadow 指令片段(仅 forgetting.enabled on 时拼接到 prompt 尾)。 */
 export function loadDecayShadowFragment(): string {
   if (_cachedDecayFragment !== undefined) return _cachedDecayFragment;
   _cachedDecayFragment = fs.readFileSync(path.join(__dirname, "prompts", "aggregator-decay-shadow-v1.md"), "utf-8");
   return _cachedDecayFragment;
 }
 
-/** 组装 fullPrompt 的两半(pre-sanitize, 纯函数可单测)。decayShadowCtx 缺省 → prompt/input
+/** 组装 fullPrompt 的两半(pre-sanitize, 纯函数可单测)。decay context 缺省 → prompt/input
  *  与基线**逐字节相同**(零行为变化);提供 → 拼接 decay 指令片段 + telemetry 上下文块。 */
 export function buildAggregatorFullPromptParts(
   summary: AggregatorSummary,
-  decayShadowCtx?: unknown,
+  decayCtx?: unknown,
 ): { prompt: string; input: string } {
   let prompt = loadAggregatorPrompt();
   let input = buildAggregatorPromptInput(summary);
-  if (decayShadowCtx !== undefined && decayShadowCtx !== null) {
+  if (decayCtx !== undefined && decayCtx !== null) {
     prompt = `${prompt}\n\n${loadDecayShadowFragment()}`;
-    input = `${input}\n\n## ENTRY DECAY TELEMETRY (ADR 0031 Phase 1B shadow context)\n\n\`\`\`json\n${JSON.stringify(decayShadowCtx, null, 2)}\n\`\`\`\n`;
+    input = `${input}\n\n## ENTRY DECAY TELEMETRY (ADR 0031 Phase 1B shadow context)\n\n\`\`\`json\n${JSON.stringify(decayCtx, null, 2)}\n\`\`\`\n`;
   }
   return { prompt, input };
 }
@@ -357,10 +358,13 @@ export function parseAggregatorOutput(rawText: string): PromptNativeOutput {
     const p = v as Record<string, unknown>;
     const op = p.op === "contest" || p.op === "archive" || p.op === "supersede" ? p.op : undefined;
     const reason = p.reason === "affirm_stale" || p.reason === "affirm_superseded" || p.reason === "affirm_echo_chamber" ? p.reason : undefined;
+    const evidenceType = p.evidence_type === "superseded_by" || p.evidence_type === "contradicted" || p.evidence_type === "version_stale" ? p.evidence_type : undefined;
+    if (p.evidence_type !== undefined && !evidenceType) return undefined;
     const ev = typeof p.independent_evidence === "string" ? p.independent_evidence.trim() : "";
     const fal = typeof p.falsifier === "string" ? p.falsifier.trim() : "";
     if (!op || !reason || !ev || !fal) return undefined;
-    return { op, reason, independent_evidence: ev, falsifier: fal };
+    if (op === "archive" && reason === "affirm_stale" && !evidenceType) return undefined;
+    return { op, reason, ...(evidenceType ? { evidence_type: evidenceType } : {}), independent_evidence: ev, falsifier: fal };
   };
   const promoted = asArray<Record<string, unknown>>(parsed.promoted_advisories).map((a): PromotedAdvisory => {
     const proposal = parseLifecycleProposal(a.lifecycle_proposal);
@@ -447,13 +451,13 @@ export async function runAggregatorLlmPass(
   settings: SedimentSettings,
   modelRegistry: ModelRegistryLike,
   signal?: AbortSignal,
-  decayShadowCtx?: unknown,
+  decayCtx?: unknown,
 ): Promise<AggregatorLlmResult> {
   let prompt = "";
   let fullPrompt = "";
   try {
-    // ADR 0031 Phase 1B: decayShadowCtx 缺省(decayShadow off)→ 与基线逐字节相同。
-    const parts = buildAggregatorFullPromptParts(summary, decayShadowCtx);
+    // ADR 0031 Phase 1B: decay context 缺省(forgetting.enabled off)→ 与基线逐字节相同。
+    const parts = buildAggregatorFullPromptParts(summary, decayCtx);
     prompt = parts.prompt;
     // Belt-and-suspenders: sanitize the assembled INPUT before LLM call.
     // The prompt template is author-controlled and need not be sanitized,

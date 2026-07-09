@@ -29,6 +29,10 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
+for (const stale of ["smoke-classifier-results.json", "smoke-final.log", "smoke_memory_last.log"]) {
+  try { fs.rmSync(path.join(repoRoot, stale), { force: true }); } catch { /* best-effort cleanup */ }
+}
+
 // Smokes that perform real network calls (embedding HTTP / search backend) or
 // depend on a live API key. They self-SKIP without a key but otherwise run live
 // and can be slow (e.g. stage0-metrics: ~140s for the M3 stage2 ranker). Kept

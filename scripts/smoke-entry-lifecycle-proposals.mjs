@@ -110,11 +110,11 @@ const mod = loadCJS(transpile(modulePath), path.join(tmpDir, "entry-lifecycle-pr
 ]));
 const { entryLifecycleProposalsPath, appendLifecycleProposals, appendSupersededFrontmatterProposals, appendSupersededMarkdownFrontmatterProposals, readLifecycleProposals } = mod;
 
-function promotedWithProposal(slug, op, reason) {
+function promotedWithProposal(slug, op, reason, evidence_type) {
   return {
     kind: "outcome_entry", severity: "warning", slug, message: `msg for ${slug}`,
     reasoning: "r", falsifier: "f", evidence_quotes: ["q"],
-    lifecycle_proposal: { op, reason, independent_evidence: `superseded evidence for ${slug}`, falsifier: "would retract if X" },
+    lifecycle_proposal: { op, reason, ...(evidence_type ? { evidence_type } : {}), independent_evidence: `superseded evidence for ${slug}`, falsifier: "would retract if X" },
   };
 }
 function promotedNoProposal(slug) {
@@ -158,6 +158,17 @@ check("same promoted proposal replay is idempotent", () => {
   if (readLifecycleProposals(projectA).length !== before) throw new Error("duplicate replay changed row count");
 });
 
+check("appendLifecycleProposals preserves explicit evidence_type", () => {
+  const r = appendLifecycleProposals({
+    projectRoot: projectA,
+    promoted: [promotedWithProposal("contradicted-entry", "archive", "affirm_stale", "contradicted")],
+    now: new Date("2026-06-04T11:02:00Z"),
+  });
+  if (!r.ok || r.proposals_appended !== 1) throw new Error(`expected explicit evidence_type append, got ${JSON.stringify(r)}`);
+  const row = readLifecycleProposals(projectA).find((x) => x.slug === "contradicted-entry");
+  if (!row || row.evidence_type !== "contradicted") throw new Error(`explicit evidence_type not preserved: ${JSON.stringify(row)}`);
+});
+
 check("promoted advisories without a proposal are never written", () => {
   // Re-running with only plain advisories appends nothing new.
   const before = readLifecycleProposals(projectA).length;
@@ -169,8 +180,8 @@ check("promoted advisories without a proposal are never written", () => {
 check("appends accumulate across runs", () => {
   appendLifecycleProposals({ projectRoot: projectA, promoted: [promotedWithProposal("contested-entry", "contest", "affirm_echo_chamber")], now: new Date("2026-06-04T12:00:00Z") });
   const rows = readLifecycleProposals(projectA);
-  if (rows.length !== 2) throw new Error(`expected 2 accumulated rows, got ${rows.length}`);
-  if (!rows.some((r) => r.slug === "stale-entry") || !rows.some((r) => r.slug === "contested-entry")) throw new Error("accumulation lost a prior row");
+  if (rows.length !== 3) throw new Error(`expected 3 accumulated rows, got ${rows.length}`);
+  if (!rows.some((r) => r.slug === "stale-entry") || !rows.some((r) => r.slug === "contradicted-entry") || !rows.some((r) => r.slug === "contested-entry")) throw new Error("accumulation lost a prior row");
 });
 
 check("rows are project-scoped", () => {

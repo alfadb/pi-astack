@@ -10,7 +10,7 @@
 //     与 LLM 给的 decay_score 对账(reconcile)做漂移检测。
 //
 // 本模块是 decay 的「消费/校验」半 —— 纯函数 + sidecar append,**不**触碰 live aggregator
-// (1B 才把 entry_decay_assessments[] 接进 aggregator 输出,gated by forgetting.decayShadow)。
+// (1B 才把 entry_decay_assessments[] 接进 aggregator 输出,gated by forgetting.enabled)。
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { userGlobalSedimentDir, ensureUserGlobalSidecarMigrated, formatLocalIsoTimestamp } from "../_shared/runtime";
@@ -43,9 +43,13 @@ export interface DecayShadowRow extends EntryDecayAssessment {
   ts: string;
   project_root: string;
   status: "shadow";
+  violation_reason?: "would_demote_usage_only";
+  raw_would_demote?: boolean;
+  raw_demote_evidence_type?: string | null;
 }
 
-const EVIDENCE_TYPES: ReadonlySet<string> = new Set(["superseded_by", "contradicted", "version_stale"]);
+export const EVIDENCE_TYPES: ReadonlySet<string> = new Set(["superseded_by", "contradicted", "version_stale"]);
+export const USAGE_ONLY_EVIDENCE_TYPES: ReadonlySet<string> = new Set(["", "usage_only", "usage-only", "disuse", "retrieval_only", "retrieval-only", "kind_atypical", "low_citation", "low-citations"]);
 
 export function decayShadowPath(): string {
   ensureUserGlobalSidecarMigrated();
@@ -95,6 +99,15 @@ export interface DecayAuditResult {
 /** 回归不变量审计(可复现钩子)。打 invariant 不打 float:核心是
  *  would_demote_usage_only_count 必须 0(P0-2)。对**原始**(未规范化)评估跑,
  *  以捕获 prompt 真实产出的违规(规范化会兜底掩盖,故审计看原始)。 */
+function rawUsageOnlyViolation(raw: unknown): { violation: boolean; evidenceType: string | null } {
+  if (!raw || typeof raw !== "object") return { violation: false, evidenceType: null };
+  const r = raw as Record<string, unknown>;
+  if (r.would_demote !== true) return { violation: false, evidenceType: null };
+  const evidenceType = typeof r.demote_evidence_type === "string" ? r.demote_evidence_type.trim() : null;
+  if (evidenceType !== null && EVIDENCE_TYPES.has(evidenceType)) return { violation: false, evidenceType };
+  return { violation: evidenceType === null || USAGE_ONLY_EVIDENCE_TYPES.has(evidenceType), evidenceType };
+}
+
 export function auditDecayAssessments(rawAssessments: unknown[]): DecayAuditResult {
   const violations: Array<{ slug: string; reason: string }> = [];
   let wouldDemote = 0, usageOnly = 0, invalidScore = 0;
@@ -103,14 +116,13 @@ export function auditDecayAssessments(rawAssessments: unknown[]): DecayAuditResu
     const r = raw as Record<string, unknown>;
     const slug = typeof r.slug === "string" ? r.slug : "";
     const wd = r.would_demote === true;
-    const evType = typeof r.demote_evidence_type === "string" && EVIDENCE_TYPES.has(r.demote_evidence_type);
     const score = r.decay_score;
     if (typeof score !== "number" || !Number.isFinite(score) || score < 0 || score > 1) {
       invalidScore++; violations.push({ slug, reason: "decay_score_out_of_range" });
     }
     if (wd) {
       wouldDemote++;
-      if (!evType) { usageOnly++; violations.push({ slug, reason: "would_demote_without_truth_change_evidence" }); }
+      if (rawUsageOnlyViolation(raw).violation) { usageOnly++; violations.push({ slug, reason: "would_demote_without_truth_change_evidence" }); }
     }
   }
   return {
@@ -153,7 +165,17 @@ export function writeDecayShadow(projectRoot: string, assessments: unknown[], no
     const rows: DecayShadowRow[] = [];
     for (const a of Array.isArray(assessments) ? assessments : []) {
       const norm = normalizeAssessment(a);
-      if (norm) rows.push({ ...norm, schema_version: 1, ts: formatLocalIsoTimestamp(now), project_root: path.resolve(projectRoot), status: "shadow" });
+      if (!norm) continue;
+      const usageOnly = rawUsageOnlyViolation(a);
+      if (!norm.would_demote && !usageOnly.violation) continue;
+      rows.push({
+        ...norm,
+        schema_version: 1,
+        ts: formatLocalIsoTimestamp(now),
+        project_root: path.resolve(projectRoot),
+        status: "shadow",
+        ...(usageOnly.violation ? { violation_reason: "would_demote_usage_only" as const, raw_would_demote: true, raw_demote_evidence_type: usageOnly.evidenceType } : {}),
+      });
     }
     if (rows.length === 0) return 0;
     const file = decayShadowPath();

@@ -1,7 +1,7 @@
 // ADR 0031 Phase 3 — gated forgetting executor(dry-run + real demote 两模式)。
 // 注:此件含**真实** active→archived 编排路径(非 skeleton/非只读)——运行模式
-// 由 settings flag 决定(见下两模式说明);真实 demote 仅在 autoDemote && autoLlmWriteEnabled
-// && orchestrator 注入 archiveEntry 时发生,否则退化 dry-run。
+// 由 settings.forgetting.enabled 决定; enabled=false 时不调度、不写遗忘侧审计、不 mutation。
+// enabled=true 且 orchestrator 注入 archiveEntry 时可真实 demote,否则退化 dry-run。
 //
 // 消费**既有** pending `op=archive` lifecycle proposal(`entry-lifecycle-proposals.ts`,
 // 已是 §4.2 独立证据门控的 affirmative 通道 —— disuse-only 永不进入,故 executor
@@ -10,14 +10,14 @@
 // 产出 demote plan。
 //
 // 两种运行模式:
-//   - **dry-run**(`runForgettingExecutorDryRun`, flag `demoteShadow`):只读 + 算 plan +
+//   - **dry-run**(`runForgettingExecutorDryRun`, flag `enabled`):只读 + 算 plan +
 //     写 shadow audit,**绝不 mutate**。
-//   - **real**(`runForgettingExecutor`, flag `autoDemote` 且 orchestrator 注入 archiveEntry):
+//   - **real**(`runForgettingExecutor`, flag `enabled` 且 orchestrator 注入 archiveEntry):
 //     真实 active→archived,但 executor **自身仍不 import writer** —— 实际归档由注入的
 //     archiveEntry callback 完成(orchestrator 持 writer + expected_status:"active" CAS),
 //     executor 只编排门控 + markProposalsExecuted + setEntryHysteresis + 反失控断路器 + audit。
 // 真实落地仍受:(1) data-gate(Phase 0 数据 + 影子回归绿);(2) graduation-gate(decay-scorer
-// 跨厂商去相关, ADR 0031 §5);flag `autoDemote` 默认 off + 冷启动 fail-safe(见下)。
+// 跨厂商去相关, ADR 0031 §5);flag `enabled` 默认 off + 冷启动 fail-safe(见下)。
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -26,6 +26,7 @@ import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { readLifecycleProposals, markProposalsExecuted, type LifecycleProposalExpectedStatus } from "./entry-lifecycle-proposals";
 import { getEntryTelemetry, setEntryHysteresis } from "./entry-telemetry";
 import { resurrectionRateReport } from "./resurrection-rate-monitor";
+import { kindDistributionReport, type KindDistributionBucket } from "./kind-distribution-monitor";
 import type { MemorySettings } from "../memory/settings";
 
 // 构建时焊死的反失控结构地板(INV-REVERSIBLE-AUTONOMY:大脑自治决定「忘什么」,这些
@@ -36,6 +37,17 @@ const MIN_ACTIVE_CORPUS_FLOOR = 50;                     // active 语料 ≤ 此
 const DEMOTE_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;    // demote 后 30d 不再 demote(防 demote↔reactivate 振荡)
 const DEMOTE_MAX_BATCH = 5;                             // ADR0031 反失控结构地板, build-time 焊死, 不得回 settings
 const RESURRECTION_BACKOFF_RATE = 0.5;                  // interim const; ADR0031 Phase 2 应迁入大脑自管 state 自标定, 禁止回填 settings
+
+export const VALID_DEMOTE_EVIDENCE_TYPES: ReadonlySet<string> = new Set(["superseded_by", "contradicted", "version_stale"]);
+export const KIND_EVIDENCE_STRENGTH: Readonly<Record<string, { minEvidence: readonly string[]; requiresLane: boolean }>> = Object.freeze({
+  fact: { minEvidence: ["superseded_by", "contradicted", "version_stale"], requiresLane: false },
+  smell: { minEvidence: ["superseded_by", "contradicted", "version_stale"], requiresLane: false },
+  "anti-pattern": { minEvidence: ["superseded_by"], requiresLane: true },
+  maxim: { minEvidence: ["superseded_by"], requiresLane: true },
+  preference: { minEvidence: ["superseded_by"], requiresLane: true },
+  decision: { minEvidence: ["superseded_by"], requiresLane: true },
+  pattern: { minEvidence: ["superseded_by"], requiresLane: true },
+});
 
 export interface ArchiveProposalInput {
   slug: string;
@@ -52,7 +64,7 @@ export interface HysteresisState {
   holdout_until?: string;
 }
 export interface DemoteDecision { slug: string; kind: string; reason: string; expected_status?: LifecycleProposalExpectedStatus; proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; }
-export interface DemoteSkip { slug: string; skip_reason: "cooldown" | "holdout" | "batch_cap" | "resurrection_backoff" | "no_slug"; proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; }
+export interface DemoteSkip { slug: string; skip_reason: "cooldown" | "holdout" | "batch_cap" | "resurrection_backoff" | "no_slug" | "invalid_evidence" | "kind_mismatch" | "lane_required"; proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; durable_kind?: string; }
 export interface DemotePlan {
   demote: DemoteDecision[];
   skipped: DemoteSkip[];
@@ -174,6 +186,104 @@ function idempotencyKey(projectRoot: string, kind: string, ids: string[]): strin
   return `forgetting-${kind}-${stableHash([path.resolve(projectRoot), kind, ...ids])}`;
 }
 
+function skipMeta(p: { proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; durable_kind?: string }) {
+  return {
+    ...(p.proposal_id ? { proposal_id: p.proposal_id } : {}),
+    ...(p.evidence_source ? { evidence_source: p.evidence_source } : {}),
+    ...(p.evidence_key ? { evidence_key: p.evidence_key } : {}),
+    ...(p.evidence_type ? { evidence_type: p.evidence_type } : {}),
+    ...(p.durable_kind ? { durable_kind: p.durable_kind } : {}),
+  };
+}
+
+function splitFrontmatter(raw: string): string {
+  const m = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(raw.replace(/\r\n/g, "\n"));
+  return m?.[1] ?? "";
+}
+
+function frontmatterScalar(frontmatter: string, key: string): string {
+  const re = new RegExp(`^${key}:\\s*(.*)$`, "m");
+  const m = re.exec(frontmatter);
+  return (m?.[1] ?? "").trim().replace(/^['\"]|['\"]$/g, "");
+}
+
+function frontmatterSlug(frontmatter: string, file: string): string {
+  const id = frontmatterScalar(frontmatter, "id");
+  return (id.split(":").filter(Boolean).pop() || path.basename(file, ".md")).toLowerCase();
+}
+
+function readDurableEntryKind(projectRoot: string, slug: string): string | undefined {
+  const roots = [projectRoot, process.env.ABRAIN_ROOT ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, process.env.HOME ?? "") : path.join(process.env.HOME ?? "", ".abrain")];
+  const wanted = slug.toLowerCase();
+  const skipDirs = new Set([".git", ".state", "node_modules", "vault", "staging"]);
+  for (const root of roots) {
+    const walk = (dir: string): string | undefined => {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return undefined; }
+      for (const ent of entries) {
+        if (skipDirs.has(ent.name)) continue;
+        const p = path.join(dir, ent.name);
+        if (ent.isDirectory()) {
+          const found = walk(p);
+          if (found) return found;
+          continue;
+        }
+        if (!ent.isFile() || !p.endsWith(".md")) continue;
+        try {
+          const fm = splitFrontmatter(fs.readFileSync(p, "utf-8"));
+          if (frontmatterSlug(fm, p) === wanted) return frontmatterScalar(fm, "kind") || undefined;
+        } catch { /* ignore unreadable markdown */ }
+      }
+      return undefined;
+    };
+    const found = walk(path.resolve(root));
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function isFrontmatterSupersededE1(target: DemoteDecision): boolean {
+  return target.evidence_source === "frontmatter_superseded" &&
+    target.reason === "affirm_superseded" &&
+    target.expected_status === "superseded" &&
+    target.evidence_type === "superseded_by";
+}
+
+function validateExecutorGate(projectRoot: string, plan: DemotePlan, now: Date): DemotePlan {
+  const demote: DemoteDecision[] = [];
+  const skipped: DemoteSkip[] = [...plan.skipped];
+  for (const target of plan.demote) {
+    const evidenceType = target.evidence_type ?? "";
+    if (!VALID_DEMOTE_EVIDENCE_TYPES.has(evidenceType)) {
+      skipped.push({ slug: target.slug, skip_reason: "invalid_evidence", ...skipMeta(target) });
+      continue;
+    }
+    const e1 = isFrontmatterSupersededE1(target);
+    const durableKind = readDurableEntryKind(projectRoot, target.slug);
+    if (durableKind && durableKind !== target.kind) {
+      skipped.push({ slug: target.slug, skip_reason: "kind_mismatch", ...skipMeta({ ...target, durable_kind: durableKind }) });
+      continue;
+    }
+    const strength = KIND_EVIDENCE_STRENGTH[target.kind];
+    if (!e1 && !strength) {
+      skipped.push({ slug: target.slug, skip_reason: "lane_required", ...skipMeta({ ...target, durable_kind: durableKind }) });
+      continue;
+    }
+    if (!e1 && strength.requiresLane) {
+      skipped.push({ slug: target.slug, skip_reason: "lane_required", ...skipMeta({ ...target, durable_kind: durableKind }) });
+      continue;
+    }
+    if (!e1 && !strength.minEvidence.includes(evidenceType)) {
+      skipped.push({ slug: target.slug, skip_reason: "invalid_evidence", ...skipMeta({ ...target, durable_kind: durableKind }) });
+      continue;
+    }
+    demote.push(target);
+  }
+  const next = { ...plan, demote, skipped };
+  appendGateAudit(projectRoot, skipped.slice(plan.skipped.length), now);
+  return next;
+}
+
 function appendDemoteLedger(projectRoot: string, target: DemoteDecision, now: Date): void {
   try {
     const file = forgettingDemoteLedgerPath();
@@ -200,8 +310,104 @@ function appendDemoteLedger(projectRoot: string, target: DemoteDecision, now: Da
   } catch { /* best-effort */ }
 }
 
+function appendGateAudit(projectRoot: string, skipped: DemoteSkip[], now: Date): void {
+  try {
+    if (skipped.length === 0) return;
+    const file = forgettingDryRunAuditPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const row = {
+      ...spreadAnchor(getCurrentAnchor()),
+      schema_version: 1,
+      row_kind: "executor_gate_skip",
+      idempotency_key: idempotencyKey(projectRoot, "executor-gate-skip", skipped.map((s) => s.proposal_id ?? s.slug)),
+      ts: formatLocalIsoTimestamp(now),
+      project_root: path.resolve(projectRoot),
+      planned_count: skipped.length,
+      skipped_count: skipped.length,
+      skipped,
+      skip_reasons: [...new Set(skipped.map((s) => s.skip_reason))],
+    };
+    fs.appendFileSync(file, JSON.stringify(row) + "\n", "utf-8");
+  } catch { /* best-effort */ }
+}
+
+function hasRecentKindDistributionAudit(file: string, key: string, nowMs: number): boolean {
+  try {
+    if (!fs.existsSync(file)) return false;
+    const cutoff = 24 * 60 * 60 * 1000;
+    for (const line of fs.readFileSync(file, "utf-8").split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        const row = JSON.parse(t) as { row_kind?: string; idempotency_key?: string; ts_ms?: number; ts?: string };
+        if (row.row_kind !== "kind_distribution_alert" || row.idempotency_key !== key) continue;
+        const tsMs = typeof row.ts_ms === "number" ? row.ts_ms : (row.ts ? Date.parse(row.ts) : NaN);
+        if (Number.isFinite(tsMs) && nowMs - tsMs >= 0 && nowMs - tsMs <= cutoff) return true;
+      } catch { /* corrupt audit line ignored */ }
+    }
+  } catch { /* best-effort */ }
+  return false;
+}
+
+function appendKindDistributionAudit(projectRoot: string, alerts: KindDistributionBucket[], now: Date): void {
+  try {
+    if (alerts.length === 0) return;
+    const file = forgettingDryRunAuditPath();
+    const alertKinds = alerts.map((a) => a.kind).sort();
+    const key = idempotencyKey(projectRoot, "kind-distribution-alert", alertKinds);
+    if (hasRecentKindDistributionAudit(file, key, now.getTime())) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const row = {
+      ...spreadAnchor(getCurrentAnchor()),
+      schema_version: 1,
+      row_kind: "kind_distribution_alert",
+      idempotency_key: key,
+      ts: formatLocalIsoTimestamp(now),
+      ts_ms: now.getTime(),
+      project_root: path.resolve(projectRoot),
+      threshold_ratio: 2,
+      min_sample: 10,
+      alerts: alerts.map((a) => ({ kind: a.kind, active: a.active, archived: a.archived, active_ratio: a.active_ratio, archived_ratio: a.archived_ratio, ratio: a.ratio, sample: a.sample })),
+    };
+    fs.appendFileSync(file, JSON.stringify(row) + "\n", "utf-8");
+  } catch { /* best-effort */ }
+}
+
+function evaluateKindDistributionAudit(projectRoot: string, now: Date): void {
+  try {
+    const report = kindDistributionReport(projectRoot);
+    appendKindDistributionAudit(projectRoot, report.alerts, now);
+  } catch { /* advisory only */ }
+}
+
+function appendDemoteActionSummary(projectRoot: string, plan: DemotePlan, demoted: string[], failed: { slug: string; error: string }[], abandoned: string[], breaker: CircuitBreakerStatus, now: Date): void {
+  try {
+    if (demoted.length === 0) return;
+    const file = forgettingDemoteLedgerPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const bySlug = new Map(plan.demote.map((d) => [d.slug, d] as const));
+    const demotedTargets = demoted.map((slug) => bySlug.get(slug)).filter((d): d is DemoteDecision => !!d);
+    const countBy = (values: string[]) => values.reduce<Record<string, number>>((acc, v) => { acc[v] = (acc[v] ?? 0) + 1; return acc; }, {});
+    const row = {
+      ...spreadAnchor(getCurrentAnchor()),
+      schema_version: 1,
+      row_kind: "action_summary",
+      ts: formatLocalIsoTimestamp(now),
+      ts_ms: now.getTime(),
+      project_root: path.resolve(projectRoot),
+      demoted_by_kind: countBy(demotedTargets.map((d) => d.kind)),
+      evidence_types: countBy(demotedTargets.map((d) => d.evidence_type ?? "unknown")),
+      counts: { planned: plan.demote.length, demoted: demoted.length, failed: failed.length, abandoned: abandoned.length },
+      cap: { batch_cap: plan.batch_cap, max_batch: DEMOTE_MAX_BATCH },
+      backoff: { resurrection_backoff: plan.resurrection_backoff, circuit_breaker: breaker },
+    };
+    fs.appendFileSync(file, JSON.stringify(row) + "\n", "utf-8");
+  } catch { /* best-effort */ }
+}
+
 function appendRealAudit(projectRoot: string, plan: DemotePlan, demoted: string[], failed: { slug: string; error: string }[], abandoned: string[], breaker: CircuitBreakerStatus, now: Date): void {
   try {
+    if (plan.demote.length === 0) return;
     const file = forgettingDryRunAuditPath();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const plannedIds = proposalIds(plan.demote);
@@ -254,6 +460,7 @@ function executableArchiveProposals(projectRoot: string): ArchiveProposalInput[]
 
 function appendDryRunAudit(projectRoot: string, plan: DemotePlan, now: Date): void {
   try {
+    if (plan.demote.length === 0) return;
     const file = forgettingDryRunAuditPath();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const ids = proposalIds(plan.demote);
@@ -291,7 +498,7 @@ export function runForgettingExecutorDryRun(
   settings: MemorySettings,
   now: Date = new Date(),
 ): ForgettingExecutorResult {
-  if (!settings.forgetting?.demoteShadow) return { ok: true, enabled: false, dry_run: true, reason: "demoteShadow_off" };
+  if (!settings.forgetting?.enabled) return { ok: true, enabled: false, dry_run: true, reason: "forgetting_disabled" };
   if (!projectRoot) return { ok: true, enabled: true, dry_run: true, reason: "no_project_root" };
   try {
     const proposals: ArchiveProposalInput[] = executableArchiveProposals(projectRoot);
@@ -303,14 +510,15 @@ export function runForgettingExecutorDryRun(
     }
 
     const rr = resurrectionRateReport(30, now, projectRoot);
-    const plan = selectDemoteTargets({
+    const plan = validateExecutorGate(projectRoot, selectDemoteTargets({
       proposals,
       hysteresisBySlug,
       resurrection: { trend: rr.trend, recent_rate: rr.recent.resurrection_rate },
       nowMs: now.getTime(),
       maxBatch: DEMOTE_MAX_BATCH,
       resurrectionBackoffThreshold: RESURRECTION_BACKOFF_RATE,
-    });
+    }), now);
+    evaluateKindDistributionAudit(projectRoot, now);
     appendDryRunAudit(projectRoot, plan, now);
     return { ok: true, enabled: true, dry_run: true, plan };
   } catch (e) {
@@ -334,8 +542,8 @@ export interface ForgettingExecutorRealResult {
   circuit_breaker?: CircuitBreakerStatus;
 }
 
-/** Real-capable 入口(orchestrator 用)。`autoDemote` off 或未注入 archiveEntry → 退化为
- *  dry-run(写 shadow audit, 零 mutation)。on + 注入 + 断路器未跳 → 逐条 archiveEntry
+/** Real-capable 入口(orchestrator 用)。未注入 archiveEntry → 退化为
+ *  dry-run(写 shadow audit, 零 mutation)。enabled + 注入 + 断路器未跳 → 逐条 archiveEntry
  *  (CAS active→archived)+ markProposalsExecuted + setEntryHysteresis + ledger。
  *  per-target fail-open:单条失败不阻断其余, 失败条目留 pending(下轮重试)。 */
 export async function runForgettingExecutor(
@@ -344,7 +552,7 @@ export async function runForgettingExecutor(
   deps: { archiveEntry?: ArchiveEntryFn; activeCorpusSize?: number } = {},
   now: Date = new Date(),
 ): Promise<ForgettingExecutorRealResult> {
-  if (!settings.forgetting?.demoteShadow) return { ok: true, enabled: false, dry_run: true, reason: "demoteShadow_off" };
+  if (!settings.forgetting?.enabled) return { ok: true, enabled: false, dry_run: true, reason: "forgetting_disabled" };
   if (!projectRoot) return { ok: true, enabled: true, dry_run: true, reason: "no_project_root" };
   try {
     const proposals: ArchiveProposalInput[] = executableArchiveProposals(projectRoot);
@@ -356,16 +564,17 @@ export async function runForgettingExecutor(
     }
 
     const rr = resurrectionRateReport(30, now, projectRoot);
-    const plan = selectDemoteTargets({
+    const plan = validateExecutorGate(projectRoot, selectDemoteTargets({
       proposals,
       hysteresisBySlug,
       resurrection: { trend: rr.trend, recent_rate: rr.recent.resurrection_rate },
       nowMs: now.getTime(),
       maxBatch: DEMOTE_MAX_BATCH,
       resurrectionBackoffThreshold: RESURRECTION_BACKOFF_RATE,
-    });
+    }), now);
+    evaluateKindDistributionAudit(projectRoot, now);
 
-    const wantReal = settings.forgetting.autoDemote === true && typeof deps.archiveEntry === "function";
+    const wantReal = typeof deps.archiveEntry === "function";
     if (!wantReal) {
       appendDryRunAudit(projectRoot, plan, now);
       return { ok: true, enabled: true, dry_run: true, plan };
@@ -407,6 +616,7 @@ export async function runForgettingExecutor(
       }
     }
     appendRealAudit(projectRoot, plan, demoted, failed, abandoned, breaker, now);
+    appendDemoteActionSummary(projectRoot, plan, demoted, failed, abandoned, breaker, now);
     return { ok: true, enabled: true, dry_run: false, plan, demoted, failed, abandoned, circuit_breaker: breaker };
   } catch (e) {
     return { ok: false, enabled: true, dry_run: true, reason: e instanceof Error ? e.message : String(e) };

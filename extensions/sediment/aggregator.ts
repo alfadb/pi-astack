@@ -405,7 +405,7 @@ export interface AggregatorSummary {
    *  when no modelRegistry was supplied (v0.2-only run) or when the
    *  LLM call failed (see degraded_to_mechanical below). */
   prompt_native?: PromptNativeOutput;
-  /** ADR 0031 Phase 1B: decay 影子审计 rollup(仅 decayShadow on + LLM 产出 assessments 时)。
+  /** ADR 0031 Phase 1B: decay 影子审计 rollup(仅 forgetting.enabled + LLM 产出 assessments 时)。
    *  would_demote_usage_only_count 是 §4.2 可复现回归钩子(必须恒 0)。 */
   decay_shadow?: {
     assessments: number;
@@ -1594,10 +1594,10 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
   let promptNative: PromptNativeOutput | undefined;
   let degraded = false;
   let degradedReason: string | undefined;
-  // ADR 0031 Phase 1B: 解析 forgetting flag 一次;仅 decayShadow on 时构 decay telemetry
-  // 上下文(off → undefined → prompt 逐字节不变)。
+  // ADR 0031 Phase 1B+: forgetting.enabled gates decay assessment scheduling.
+  // Off -> undefined -> prompt/input stay byte-for-byte unchanged.
   const memForgetting = resolveMemorySettings().forgetting;
-  const decayShadowCtx = memForgetting?.decayShadow ? buildDecayShadowContext(options.projectRoot) : undefined;
+  const decayCtx = memForgetting?.enabled ? buildDecayShadowContext(options.projectRoot) : undefined;
   if (options.modelRegistry) {
     try {
       const llmResult = await runAggregatorLlmPass(
@@ -1605,7 +1605,7 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
         options.settings,
         options.modelRegistry,
         options.signal,
-        decayShadowCtx,
+        decayCtx,
       );
       if (llmResult.degraded) {
         degraded = true;
@@ -1672,11 +1672,10 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
     );
     appendPromptRevisionProposals(promptRevisionProposals, options.settings);
 
-    // ADR 0031 Phase 1B(shadow, gated by forgetting.decayShadow, 默认 off): 把 LLM 给的
-    // 正交 entry_decay_assessments[](1B-ii prompt 产出)写独立 decay-shadow.jsonl + 跑 §4.2
-    // 回归不变量审计(would_demote_usage_only_count 必须 0)。decayShadow off(生产默认)且
-    // prompt 未产出该字段 → 完全短路 → aggregator 逐字节零行为变化。
-    if (memForgetting?.decayShadow && Array.isArray(promptNative.entry_decay_assessments) && promptNative.entry_decay_assessments.length > 0) {
+    // ADR 0031 Phase 1B+(gated by forgetting.enabled): 把 LLM 给的正交
+    // entry_decay_assessments[] 写独立 decay-shadow.jsonl + 跑 §4.2 回归不变量审计。
+    // enabled=false 或 prompt 未产出该字段 -> 完全短路。
+    if (memForgetting?.enabled && Array.isArray(promptNative.entry_decay_assessments) && promptNative.entry_decay_assessments.length > 0) {
       const decayAudit = auditDecayAssessments(promptNative.entry_decay_assessments);
       const written = writeDecayShadow(options.projectRoot, promptNative.entry_decay_assessments, options.now);
       enrichedSummary.decay_shadow = {

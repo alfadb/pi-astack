@@ -47,6 +47,7 @@
     "smoke:forgetting-mutation-primitives": "node scripts/smoke-forgetting-mutation-primitives.mjs",
     "smoke:forgetting-executor-real": "node scripts/smoke-forgetting-executor-real.mjs",
     "smoke:forgetting-demote-e2e": "node scripts/smoke-forgetting-demote-e2e.mjs",
+    "smoke:forgetting-production-readonly": "node scripts/smoke-forgetting-production-readonly.mjs",
     "smoke:decay-shadow": "node scripts/smoke-decay-shadow.mjs",
     "smoke:decay-proposal-bridge": "node scripts/smoke-decay-proposal-bridge.mjs",
     "oracle:goldset": "node scripts/oracle-goldset.mjs",

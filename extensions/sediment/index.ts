@@ -2131,26 +2131,25 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         catch { /* advisory-only; telemetry failure never affects sediment */ }
       });
 
-      // ADR 0031 Phase 3(gated): forgetting executor。demoteShadow on → 跑 executor。
-      // autoDemote off(或 autoLlmWriteEnabled≠true)→ DRY-RUN(读 pending archive proposal +
-      // hysteresis + resurrection → 算 plan + 写 shadow audit, **零 mutation**)。autoDemote on
-      // 且全自动写 → 真实 archive:executor 编排 §4.2 门控 proposal + resurrection
-      // fail-safe + 反失控断路器, 实际归档由这里注入的 archiveEntry 完成(updateProjectEntry
+      // ADR 0031 Phase 3(gated): forgetting executor。enabled on → 跑 executor。
+      // autoLlmWriteEnabled≠true → DRY-RUN(读 pending archive proposal + hysteresis +
+      // resurrection → 算 plan + 写 shadow audit, **零 mutation**)。enabled on 且全自动写
+      // → 真实 archive:executor 编排 §4.2 门控 proposal + resurrection fail-safe +
+      // 反失控断路器, 实际归档由这里注入的 archiveEntry 完成(updateProjectEntry
       // status=archived + proposal.expected_status CAS —— legacy active proposal 仅当仍 active 才归,
-      // D* E1 superseded proposal 仅当仍 superseded 才归;archived 全文留盘可复活, 无 git rm)。demoteShadow 默认 false → 连调度都不发生
-      // (零开销 + 零行为变化)。fire-and-forget, 绝不阻断 agent_end。
+      // D* E1 superseded proposal 仅当仍 superseded 才归;archived 全文留盘可复活, 无 git rm)。
+      // enabled=false → 连调度都不发生。fire-and-forget, 绝不阻断 agent_end。
       const memForgettingSettings = resolveMemorySettings();
-      if (memForgettingSettings.forgetting?.demoteShadow) {
+      if (memForgettingSettings.forgetting?.enabled) {
         const scheduleForgetting = typeof setImmediate === "function"
           ? setImmediate
           : (fn: () => void) => setTimeout(fn, 0);
         scheduleForgetting(() => {
           void (async () => {
             try {
-              // 真实 demote 要求 autoDemote 且 autoLlmWriteEnabled===true(staging-only/false
-              // 一律退化 dry-run, 尊重既有写 kill-switch 层级)。
-              const wantReal = memForgettingSettings.forgetting?.autoDemote === true
-                && settings.autoLlmWriteEnabled === true;
+              // 真实 demote 要求 memory.forgetting.enabled 且 autoLlmWriteEnabled===true
+              // (staging-only/false 一律退化 dry-run, 尊重既有写 kill-switch 层级)。
+              const wantReal = settings.autoLlmWriteEnabled === true;
               try { appendSupersededMarkdownFrontmatterProposals({ projectRoot: cwd }); }
               catch { /* frontmatter bridge is advisory; executor still runs */ }
               let allEntries: Array<{ slug: string; status: string; scope?: string }> = [];

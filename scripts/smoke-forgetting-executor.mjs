@@ -95,11 +95,11 @@ const base = (over = {}) => ({
 
 // ── runForgettingExecutorDryRun 门控(agent_end 接线路径)+ 无 mutation 结构保证 ──
 {
-  const off = runForgettingExecutorDryRun("/proj", { forgetting: { demoteShadow: false } });
-  ok(off.enabled === false && off.reason === "demoteShadow_off", "demoteShadow off → 短路 enabled:false(零行为变化)");
-  const noPr = runForgettingExecutorDryRun(undefined, { forgetting: { demoteShadow: true } });
+  const off = runForgettingExecutorDryRun("/proj", { forgetting: { enabled: false } });
+  ok(off.enabled === false && off.reason === "forgetting_disabled", "enabled=false → 短路 enabled:false(零写入零 mutation)");
+  const noPr = runForgettingExecutorDryRun(undefined, { forgetting: { enabled: true } });
   ok(noPr.enabled === true && noPr.reason === "no_project_root", "on + 无 projectRoot → no_project_root");
-  const on = runForgettingExecutorDryRun("/proj", { forgetting: { demoteShadow: true } });
+  const on = runForgettingExecutorDryRun("/proj", { forgetting: { enabled: true } });
   ok(on.ok === true && on.dry_run === true && on.plan && on.plan.demote.length === 0, "on + sandbox 空 proposal → dry-run 空 plan, dry_run:true");
 }
 // 结构无-mutation 保证: executor 源码不 import writer/archive 路径

@@ -397,8 +397,12 @@ Return strict JSON matching:
         // (that is healthy disuse → a demoted_signal, NOT a proposal). If your
         // judgment is "this suspicion is unfounded / the entry is healthy", that
         // belongs in demoted_signals, NOT here.
+        // HARD GATE: every archive proposal MUST carry `evidence_type` below.
+        // `retrieved-unused`, disuse, and kind_atypical are NOT evidence_type
+        // values and must not be used to justify lifecycle proposals.
         "op": "contest" | "archive" | "supersede",
         "reason": "affirm_stale" | "affirm_superseded" | "affirm_echo_chamber",
+        "evidence_type": "superseded_by" | "contradicted" | "version_stale",
         "independent_evidence": "<verbatim quote / concrete §4.2 evidence — NOT a retrieved-unused count>",
         "falsifier": "<what observation in the next window would retract this proposal>"
       }

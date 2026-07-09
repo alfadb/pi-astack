@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ADR 0031 Phase 3 real demote 路径 smoke(含 opus/gpt/deepseek M4/M5 review Round-2 修复):
-//   - autoDemote off → dry_run, archiveEntry 绝不被调(零 mutation)
-//   - autoDemote on  → 逐条 archiveEntry(CAS)+ markProposalsExecuted + setEntryHysteresis + ledger
+//   - no archiveEntry → dry_run, archiveEntry 绝不被调(零 mutation)
+//   - archiveEntry injected → 逐条 archiveEntry(CAS)+ markProposalsExecuted + setEntryHysteresis + ledger
 //   - 幂等:executed proposal 不再进 plan
 //   - CAS reject(rejected:true)→ ABANDON(标 executed 停重试,不再留 pending → 防复活后重放)
 //   - 断路器:corpus_floor(active-planned<50)+ fail-closed(active 未知)+ daily_cap(24h≥20)
@@ -55,26 +55,33 @@ seedWarm();
   ok(global.recent.resurrection_rate > 0.25, "全局(无过滤)rate 被外项目抬高 → 证明 per-project 过滤生效");
 }
 
-const settings = (autoDemote) => ({ forgetting: { demoteShadow: true, autoDemote, instrumentation: false, decayShadow: false } });
-const prop = (slug) => ({ slug, kind: "decision", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: `${slug} superseded`, falsifier: "if not" } });
+const settings = (enabled = true) => ({ forgetting: { enabled, instrumentation: false } });
+const prop = (slug, kind = "fact", reason = "affirm_superseded") => ({ slug, kind, lifecycle_proposal: { op: "archive", reason, independent_evidence: `${slug} ${reason}`, falsifier: "if not" } });
 const mkArchive = (result) => { const calls = []; const targets = []; return { calls, targets, fn: async (t) => { calls.push(t.slug); targets.push(t); return typeof result === "function" ? result(t) : result; } }; };
 const statusOf = (slug) => { const r = elp.readLifecycleProposals(pr).find((x) => x.slug === slug); return r ? r.status : "absent"; };
 const readJsonl = (file) => fs.existsSync(file) ? fs.readFileSync(file, "utf-8").trim().split(/\n/).filter(Boolean).map((line) => JSON.parse(line)) : [];
+const appendRawProposal = (row) => fs.appendFileSync(elp.entryLifecycleProposalsPath(), JSON.stringify({ schema_version: 1, ts: new Date(NOW).toISOString(), project_root: path.resolve(pr), op: "archive", status: "pending", disposition: "execution_ready", expected_status: "active", independent_evidence: "fixture", falsifier: "fixture", ...row }) + "\n", "utf-8");
+const writeDurableKind = (slug, kind, status = "active") => fs.writeFileSync(path.join(pr, `${slug}.md`), `---\nid: project:test:${slug}\nkind: ${kind}\nstatus: ${status}\n---\n# ${slug}\n`, "utf-8");
+const writeDistributionEntry = (slug, kind, status) => {
+  const dir = path.join(tmp, "projects", "kind-dist");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${slug}.md`), `---\nid: project:dist:${slug}\nkind: ${kind}\nstatus: ${status}\n---\n# ${slug}\n`, "utf-8");
+};
 
 elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop("decay-b")] });
 
-// ---- 1) autoDemote OFF → dry_run, 零 mutation ----
+// ---- 1) no archiveEntry → dry_run, 零 mutation ----
 {
   const arc = mkArchive({ ok: true, status: "archived" });
-  const r = await fx.runForgettingExecutor(pr, settings(false), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
-  ok(r.ok && r.dry_run === true && arc.calls.length === 0, "autoDemote off → dry_run + archiveEntry 零调用");
-  ok(elp.readLifecycleProposals(pr).every((x) => x.status === "pending"), "off → proposals 仍 pending");
+  const r = await fx.runForgettingExecutor(pr, settings(true), { activeCorpusSize: 1000 }, new Date(NOW));
+  ok(r.ok && r.dry_run === true && arc.calls.length === 0, "no archiveEntry → dry_run + archiveEntry 零调用");
+  ok(elp.readLifecycleProposals(pr).every((x) => x.status === "pending"), "dry-run → proposals 仍 pending");
   const audit = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
   ok(audit?.schema_version === 1 && audit.row_kind === "dry_run_plan" && audit.idempotency_key, "dry-run audit carries schema_version/row_kind/idempotency_key");
   ok(Array.isArray(audit?.would_demote_proposal_ids) && audit.would_demote_proposal_ids.length === 2, "dry-run audit carries would_demote_proposal_ids");
 }
 
-// ---- 2) autoDemote ON → 真实编排 ----
+// ---- 2) archiveEntry injected → 真实编排 ----
 {
   const arc = mkArchive({ ok: true, status: "archived", rejected: false });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
@@ -84,8 +91,10 @@ elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop
   ok(statusOf("decay-a") === "executed" && statusOf("decay-b") === "executed", "on → proposals executed");
   ok(et.getEntryTelemetry(pr, "decay-a")?.proposal_cooldown_until, "on → cooldown 写入");
   const ledgerRows = readJsonl(demoteLedger);
-  ok(ledgerRows.length === 2, "on → demote-ledger 2 行");
-  ok(ledgerRows.every((row) => row.proposal_id && row.evidence_source === "aggregator_promoted_advisory" && row.evidence_type === "superseded_by" && row.idempotency_key), "demote-ledger rows carry proposal/evidence/idempotency join fields");
+  const demoteRows = ledgerRows.filter((row) => row.op === "demote");
+  ok(demoteRows.length === 2, "on → demote-ledger 2 demote 行");
+  ok(demoteRows.every((row) => row.proposal_id && row.evidence_source === "aggregator_promoted_advisory" && row.evidence_type === "superseded_by" && row.idempotency_key), "demote-ledger rows carry proposal/evidence/idempotency join fields");
+  ok(ledgerRows.some((row) => row.row_kind === "action_summary" && row.counts?.demoted === 2 && row.demoted_by_kind?.fact === 2), "nonzero demote batch appends action_summary");
   const audit = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
   ok(audit?.schema_version === 1 && audit.row_kind === "real_apply" && audit.idempotency_key, "real audit carries schema_version/row_kind/idempotency_key");
   ok(Array.isArray(audit?.planned_proposal_ids) && audit.planned_proposal_ids.length === 2 && Array.isArray(audit?.demoted_proposal_ids) && audit.demoted_proposal_ids.length === 2, "real audit carries planned/demoted proposal ids");
@@ -126,7 +135,49 @@ elp.appendSupersededFrontmatterProposals({
   ok(statusOf("sup-b") === "pending", "E2 review_required proposal remains pending and unexecuted");
 }
 
-// ---- 6) 断路器 corpus_floor: plannedCount + fail-closed ----
+// ---- 6) executor gates: lane_required + kind_mismatch + enabled=false strict-off ----
+appendRawProposal({ slug: "lane-a", kind: "anti-pattern", reason: "affirm_stale", evidence_source: "aggregator_promoted_advisory", evidence_type: "version_stale", evidence_key: "lane-a" });
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  const audit = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
+  ok(arc.calls.length === 0 && (r.demoted?.length ?? 0) === 0, "anti-pattern + version_stale → no mutation");
+  ok(audit?.row_kind === "executor_gate_skip" && audit.skip_reasons?.includes("lane_required"), "anti-pattern + version_stale → lane_required audit");
+  ok(statusOf("lane-a") === "pending", "lane_required proposal remains pending");
+}
+writeDurableKind("unknown-a", "emerging-kind");
+appendRawProposal({ slug: "unknown-a", kind: "emerging-kind", reason: "affirm_superseded", evidence_source: "aggregator_promoted_advisory", evidence_type: "superseded_by", evidence_key: "unknown-a" });
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  const audit = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
+  const unknownSkip = audit?.skipped?.find((s) => s.slug === "unknown-a");
+  ok(arc.calls.length === 0 && (r.demoted?.length ?? 0) === 0, "unknown kind + valid evidence(non-E1) → no mutation");
+  ok(unknownSkip?.skip_reason === "lane_required" && unknownSkip?.durable_kind === "emerging-kind", "unknown kind + valid evidence(non-E1) → lane_required audit with durable_kind");
+  ok(statusOf("unknown-a") === "pending", "unknown kind lane_required proposal remains pending");
+}
+writeDurableKind("mismatch-a", "smell");
+appendRawProposal({ slug: "mismatch-a", kind: "fact", reason: "affirm_superseded", evidence_source: "aggregator_promoted_advisory", evidence_type: "superseded_by", evidence_key: "mismatch-a" });
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  const audit = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
+  ok(arc.calls.length === 0 && (r.demoted?.length ?? 0) === 0, "kind_mismatch → no mutation");
+  ok(audit?.row_kind === "executor_gate_skip" && audit.skip_reasons?.includes("kind_mismatch"), "kind_mismatch audit written");
+  ok(statusOf("mismatch-a") === "pending", "kind_mismatch proposal remains pending");
+}
+{
+  const auditBefore = readJsonl(fx.forgettingDryRunAuditPath()).length;
+  const ledgerBefore = readJsonl(demoteLedger).length;
+  elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("disabled-a")] });
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(false), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  ok(r.enabled === false && r.reason === "forgetting_disabled" && arc.calls.length === 0, "enabled=false → executor strict-off");
+  ok(readJsonl(fx.forgettingDryRunAuditPath()).length === auditBefore && readJsonl(demoteLedger).length === ledgerBefore, "enabled=false → zero forgetting audit/ledger writes");
+  ok(statusOf("disabled-a") === "pending", "enabled=false → zero proposal mutation");
+}
+
+// ---- 7) 断路器 corpus_floor: plannedCount + fail-closed ----
 fs.rmSync(demoteLedger, { force: true });
 elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-e"), prop("decay-f")] }); // 2 pending
 {
@@ -159,6 +210,25 @@ fs.writeFileSync(reactLedger, "", "utf-8");
   const arc = mkArchive({ ok: true, status: "archived" });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
   ok((r.plan?.resurrection_backoff ?? false) === true && arc.calls.length === 0, "insufficient_data → backoff, 不 demote");
+}
+
+// ---- 9) kind_distribution_alert 24h 去重 ----
+for (let i = 0; i < 10; i++) writeDistributionEntry(`dist-fact-${i}`, "fact", "active");
+writeDistributionEntry("dist-smell-active", "smell", "active");
+for (let i = 0; i < 10; i++) writeDistributionEntry(`dist-smell-archived-${i}`, "smell", "archived");
+{
+  const countAlerts = () => readJsonl(fx.forgettingDryRunAuditPath()).filter((row) => row.row_kind === "kind_distribution_alert").length;
+  const before = countAlerts();
+  const arc1 = mkArchive({ ok: true, status: "archived" });
+  await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc1.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  const afterFirst = countAlerts();
+  const alert = readJsonl(fx.forgettingDryRunAuditPath()).filter((row) => row.row_kind === "kind_distribution_alert").at(-1);
+  const arc2 = mkArchive({ ok: true, status: "archived" });
+  await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc2.fn, activeCorpusSize: 1000 }, new Date(NOW + 1000));
+  const afterSecond = countAlerts();
+  ok(afterFirst === before + 1, "kind_distribution_alert first persistent alert writes once");
+  ok(afterSecond === afterFirst, "kind_distribution_alert duplicate within 24h is skipped");
+  ok(typeof alert?.ts_ms === "number" && alert.idempotency_key, "kind_distribution_alert carries ts_ms/idempotency_key");
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

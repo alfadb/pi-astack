@@ -87,7 +87,7 @@ fs.writeFileSync(reactLedger, [
 ].join("\n") + "\n", "utf-8");
 
 const forgettingSettings = {
-  forgetting: { demoteShadow: true, autoDemote: true, instrumentation: false, decayShadow: false },
+  forgetting: { enabled: true, instrumentation: false },
 };
 
 const BODY = [
@@ -99,7 +99,7 @@ const BODY = [
 try {
   // 1) Create a REAL active entry on disk.
   const created = await writer.writeProjectEntry(
-    { title: "Demote e2e fixture entry", kind: "decision", status: "active", confidence: 5, compiledTruth: BODY },
+    { title: "Demote e2e fixture entry", kind: "fact", status: "active", confidence: 5, compiledTruth: BODY },
     writeOpts,
   );
   check("create real active entry", created.status === "created", JSON.stringify(created));
@@ -111,7 +111,7 @@ try {
   // 2) Queue a real pending archive proposal (truth-change driven, op=archive).
   elp.appendLifecycleProposals({
     projectRoot,
-    promoted: [{ slug, kind: "decision", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: `${slug} superseded by a newer decision`, falsifier: "if still cited" } }],
+    promoted: [{ slug, kind: "fact", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: `${slug} superseded by a newer fact`, falsifier: "if still cited" } }],
   });
   const queued = elp.readLifecycleProposals(projectRoot).find((p) => p.slug === slug);
   check("proposal is pending", queued?.status === "pending");

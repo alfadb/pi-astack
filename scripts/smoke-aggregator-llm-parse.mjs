@@ -279,6 +279,46 @@ check("parseAggregatorOutput preserves a valid lifecycle_proposal on a promoted 
   if (lp.independent_evidence !== "superseded by newer active entry X" || !lp.falsifier) throw new Error(`lifecycle_proposal fields lost: ${JSON.stringify(lp)}`);
 });
 
+check("parseAggregatorOutput preserves valid lifecycle_proposal evidence_type", () => {
+  const out = { promoted_advisories: [{
+    kind: "outcome_entry", severity: "warning", slug: "contradicted-entry", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: ["q"],
+    lifecycle_proposal: { op: "contest", reason: "affirm_stale", evidence_type: "contradicted", independent_evidence: "newer entry contradicts this claim", falsifier: "if contradiction is withdrawn" },
+  }] };
+  const lp = parseAggregatorOutput(JSON.stringify(out)).promoted_advisories[0].lifecycle_proposal;
+  if (!lp || lp.evidence_type !== "contradicted") throw new Error(`valid evidence_type not preserved: ${JSON.stringify(lp)}`);
+});
+
+check("parseAggregatorOutput DROPS a lifecycle_proposal with invalid evidence_type", () => {
+  const out = { promoted_advisories: [{
+    kind: "outcome_entry", severity: "warning", slug: "s", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: [],
+    lifecycle_proposal: { op: "archive", reason: "affirm_superseded", evidence_type: "retrieved-unused", independent_evidence: "e", falsifier: "f" },
+  }] };
+  const r = parseAggregatorOutput(JSON.stringify(out));
+  if (r.promoted_advisories[0].lifecycle_proposal !== undefined) {
+    throw new Error("proposal with invalid evidence_type must be dropped");
+  }
+});
+
+check("parseAggregatorOutput DROPS archive affirm_stale without evidence_type", () => {
+  const out = { promoted_advisories: [{
+    kind: "outcome_entry", severity: "warning", slug: "s", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: [],
+    lifecycle_proposal: { op: "archive", reason: "affirm_stale", independent_evidence: "entry references removed API", falsifier: "if API still exists" },
+  }] };
+  const r = parseAggregatorOutput(JSON.stringify(out));
+  if (r.promoted_advisories[0].lifecycle_proposal !== undefined) {
+    throw new Error("archive affirm_stale without evidence_type must be dropped");
+  }
+});
+
+check("parseAggregatorOutput preserves archive affirm_stale with version_stale evidence_type", () => {
+  const out = { promoted_advisories: [{
+    kind: "outcome_entry", severity: "warning", slug: "s", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: [],
+    lifecycle_proposal: { op: "archive", reason: "affirm_stale", evidence_type: "version_stale", independent_evidence: "entry references removed API v1", falsifier: "if API v1 still exists" },
+  }] };
+  const lp = parseAggregatorOutput(JSON.stringify(out)).promoted_advisories[0].lifecycle_proposal;
+  if (!lp || lp.reason !== "affirm_stale" || lp.evidence_type !== "version_stale") throw new Error(`affirm_stale+version_stale not preserved: ${JSON.stringify(lp)}`);
+});
+
 check("parseAggregatorOutput DROPS a lifecycle_proposal missing §4.2 independent_evidence", () => {
   const out = { promoted_advisories: [{
     kind: "outcome_entry", severity: "warning", slug: "s", message: "m", reasoning: "r", falsifier: "f", evidence_quotes: [],

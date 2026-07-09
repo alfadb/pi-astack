@@ -380,6 +380,7 @@ export function appendLifecycleProposals(options: AppendLifecycleProposalsOption
       disposition: "execution_ready",
       evidence_source: "aggregator_promoted_advisory",
       evidence_key: `${a.slug ?? ""}:${a.kind}:${p.op}:${p.reason}:${evidence}`,
+      ...(p.evidence_type ? { evidence_type: p.evidence_type } : {}),
       status: "pending",
     };
   });

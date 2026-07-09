@@ -1,8 +1,8 @@
 # Aggregator addendum — ADR 0031 Phase 1B decay shadow assessment (v1)
 
-> This block is appended to the skeptical-historian prompt ONLY when the
-> `forgetting.decayShadow` flag is enabled. It adds ONE orthogonal output array,
-> `entry_decay_assessments[]`. It does NOT change any existing instruction,
+> This block is appended to the skeptical-historian prompt ONLY when forgetting
+> is enabled (`memory.forgetting.enabled` / `forgetting.enabled`). It adds ONE
+> orthogonal output array, `entry_decay_assessments[]`. It does NOT change any existing instruction,
 > output field, or the empty-output discipline for `promoted_advisories`.
 
 ## Decay assessment — purpose and hard limits

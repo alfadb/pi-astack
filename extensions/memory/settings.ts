@@ -171,32 +171,19 @@ export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
 
 // ADR 0031 Phase 0 — 遗忘自治子系统设置。
 export interface ForgettingSettings {
-  /** ADR 0031 Phase 0: 读侧用量埋点(retrieval-hit + citation)总开关。
-   *  零行为变化、纯观测; off = 埋点完全短路不写文件。
-   *  作为 runtime kill-switch 显式落 pi-astack-settings.json(code 默认 false 为安全基线)。 */
+  /** Runtime kill-switch for all forgetting-side evaluation and mutation.
+   *  enabled=false: no decay assessment scheduling, no forgetting side writes,
+   *  and no mutation. Read-side instrumentation remains governed only by its
+   *  orthogonal switch below; archive reactivation is governed by sediment. */
+  enabled: boolean;
+  /** ADR 0031 Phase 0: read-side usage instrumentation switch.
+   *  Pure observation; off = instrumentation short-circuits and writes nothing. */
   instrumentation: boolean;
-  /** ADR 0031 Phase 3 skeleton: dry-run/shadow demote executor 开关(默认 false)。
-   *  on = 跑 dry-run(读 pending archive proposal + hysteresis + resurrection → 算 demote
-   *  plan + 写 shadow audit),**绝不 mutate**(skeleton 无 mutation 路径;真实 demote
-   *  待 data-gate + 跨厂商去相关 graduation-gate)。 */
-  demoteShadow: boolean;
-  /** ADR 0031 Phase 1B: aggregator decay 影子评估开关(默认 false)。
-   *  off = aggregator prompt 不含 decay 段、不解析 entry_decay_assessments、不写
-   *  decay-shadow.jsonl —— 逐字节零行为变化。on = 写影子 + 跑 §4.2 回归不变量审计。 */
-  decayShadow: boolean;
-  /** ADR 0031 Phase 3 real demote 总开关(默认 false; runtime kill-switch)。
-   *  off(且 demoteShadow on)= executor 只 dry-run, 零 mutation。on = 真实 active→archived
-   *  (经 §4.2 证据门控 proposal + CAS + resurrection backoff + 构建时反失控断路器 + hysteresis;
-   *  archived 全文留盘可复活, 无 git rm)。反失控上限(每日累计/语料下限)是构建时焊死的
-   *  结构地板, 非 settings 可调(INV-REVERSIBLE-AUTONOMY:零可调遗忘策略)。 */
-  autoDemote: boolean;
 }
 
 export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
+  enabled: false,
   instrumentation: false,
-  demoteShadow: false,
-  decayShadow: false,
-  autoDemote: false,
 };
 
 export interface MemorySettings {
@@ -329,13 +316,21 @@ function resolvePathASettings(cfg: Record<string, unknown>): PathASettings {
   };
 }
 
+let warnedForgettingLegacyKeys = false;
+
 function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSettings {
   const f = (cfg.forgetting as Record<string, unknown>) ?? {};
+  const legacyKeys = ["decayShadow", "demoteShadow", "autoDemote"] as const;
+  const hasEnabled = Object.prototype.hasOwnProperty.call(f, "enabled");
+  const hasLegacy = legacyKeys.some((key) => Object.prototype.hasOwnProperty.call(f, key));
+  if (!hasEnabled && hasLegacy && !warnedForgettingLegacyKeys) {
+    warnedForgettingLegacyKeys = true;
+    console.warn("pi-astack: memory.forgetting decayShadow/demoteShadow/autoDemote are deprecated; use memory.forgetting.enabled. Migration fallback maps enabled = decayShadow || demoteShadow || autoDemote.");
+  }
+  const migratedEnabled = legacyKeys.some((key) => asBoolean(f[key], false));
   return {
+    enabled: hasEnabled ? asBoolean(f.enabled, DEFAULT_FORGETTING_SETTINGS.enabled) : migratedEnabled,
     instrumentation: asBoolean(f.instrumentation, DEFAULT_FORGETTING_SETTINGS.instrumentation),
-    demoteShadow: asBoolean(f.demoteShadow, DEFAULT_FORGETTING_SETTINGS.demoteShadow),
-    decayShadow: asBoolean(f.decayShadow, DEFAULT_FORGETTING_SETTINGS.decayShadow),
-    autoDemote: asBoolean(f.autoDemote, DEFAULT_FORGETTING_SETTINGS.autoDemote),
   };
 }
 

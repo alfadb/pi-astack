@@ -32,13 +32,13 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 | `abrain/` | `vault_release`、`prompt_user`；`/abrain`、`/vault`、`/secret` | ✓ |
 | `compaction-tuner/` | `/compaction-tuner` | ✓ |
 | `context7/` | `context7_resolve`、`context7_docs` | ✓ |
-| `dispatch/` | `dispatch_agent`、`dispatch_parallel` | ✓ |
+| `dispatch/` | `dispatch_agent`、`dispatch_parallel`、`dispatch_hub`（受 `dispatch.hub.enabled` 门控，live 已开） | ✓ |
 | `edit-strip-empty/` | `edit` wrapper | ✓ |
 | `empty-visible-output-retry/` | `message_end` 空可见输出重试 hook | ✓ |
-| `goal/` | `goal_status/set/pause/resume/stop/clear`；`/goal` | ✓ |
+| `goal/` | `goal_status/set/pause/resume/stop/clear`、`goal_check`；`/goal` | ✓ |
 | `imagine/` | `imagine` | ✓ |
 | `llm-audit/` | hook（无 LLM tool/slash） | ✓ |
-| `memory/` | `memory_search/get/list/decide`；`/memory` | ✓ |
+| `memory/` | `memory_search/get/list/decide`、`memory_activity`；`/memory` | ✓ |
 | `model-curator/` | model snapshot 注入；`/curator-reload` | ✓ |
 | `model-fallback/` | error hooks | ✓ |
 | `openai-service-tier/` | hook（无 LLM tool/slash） | ✓ |
@@ -94,7 +94,7 @@ active project 是 pi 启动/会话绑定时的快照；shell 中 `cd` 不会自
 
 ## 5. Memory read path（契约）
 
-LLM 只用：`memory_search` / `memory_get` / `memory_list` / `memory_decide`（只读 facade）。
+LLM 只用：`memory_search` / `memory_get` / `memory_list` / `memory_decide` / `memory_activity`（只读 facade）。
 
 `memory_search` 语义契约：
 
