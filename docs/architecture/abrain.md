@@ -54,9 +54,9 @@ Important properties:
 
 | Lane | Trigger | Target | Trust |
 |---|---|---|---|
-| A — explicit MEMORY | user writes `MEMORY: ... END_MEMORY` | project/world/workflow via sediment | high |
-| C — auto-write | `agent_end` LLM extraction + curator | project/world/workflow via sediment | medium |
-| G — about-me | `MEMORY-ABOUT-ME` fence or `agent_end` Lane G extraction | `identity/skills/habits/` | active natural path; `/about-me` slash retired |
+| A — explicit MEMORY | user writes `MEMORY: ... END_MEMORY` | project/world/workflow via sediment | compatibility/diagnostic 通道，非正常产品路径 |
+| C — auto-write | `agent_end` LLM extraction + curator | project/world/workflow via sediment | 自然对话正常路径 |
+| G — about-me | `MEMORY-ABOUT-ME` fence or `agent_end` Lane G extraction | `identity/skills/habits/` | 自然对话是正常路径；fence 仅为 compatibility/diagnostic 通道；`/about-me` slash 已退役 |
 | V — vault | `/secret` / vault commands | encrypted vault | highest |
 
 Lane B/D “project→world promotion” is obsolete in seven-zone abrain: writer should route to the correct zone directly instead of promoting later.

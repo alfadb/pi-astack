@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { durableAtomicWriteFile } from "../_shared/durable-write";
 import { slugify } from "../memory/utils";
 import type { ProjectEntryDraft, WriteProjectEntryResult, WriterAuditContext } from "./writer";
 import type { SedimentSettings } from "./settings";
@@ -88,6 +89,12 @@ export interface KnowledgeEvidenceEnvelopeV1 {
   body: KnowledgeEvidenceEventBodyV1;
 }
 
+export interface KnowledgeEvidenceDiagnostic {
+  code: "KE_APPEND_OK" | "KE_APPEND_IDEMPOTENT_DUPLICATE" | "KE_RECOVERED_EMPTY_RESIDUE" | "KE_HASH_PATH_COLLISION" | "KE_APPEND_FAILED";
+  message: string;
+  data?: Record<string, JsonValue>;
+}
+
 export interface AppendKnowledgeEvidenceEventResult {
   ok: boolean;
   status: "appended" | "idempotent_duplicate" | "collision" | "write_failed" | "path_violation";
@@ -95,6 +102,8 @@ export interface AppendKnowledgeEvidenceEventResult {
   filePath?: string;
   envelope?: KnowledgeEvidenceEnvelopeV1;
   error?: string;
+  recoveredEmptyResidue?: boolean;
+  diagnostics?: KnowledgeEvidenceDiagnostic[];
 }
 
 export interface ProjectKnowledgeEvidenceResult {
@@ -223,14 +232,7 @@ async function readOrCreateDeviceId(abrainHome: string): Promise<string> {
   if (trimmed && /^[A-Za-z0-9-]{8,64}$/.test(trimmed)) return trimmed;
   const id = crypto.randomUUID();
   await fs.mkdir(stateDir, { recursive: true });
-  const tmp = path.join(stateDir, `device-id.${process.pid}.${Date.now()}.tmp`);
-  await fs.writeFile(tmp, `${id}\n`, { encoding: "utf-8", flag: "wx", mode: 0o600 });
-  await fs.rename(tmp, file).catch(async (err) => {
-    await fs.rm(tmp, { force: true }).catch(() => undefined);
-    const created = await fs.readFile(file, "utf-8").catch(() => null);
-    if (created?.trim()) return;
-    throw err;
-  });
+  await durableAtomicWriteFile(file, `${id}\n`, { mode: 0o600 });
   return (await fs.readFile(file, "utf-8")).trim();
 }
 
@@ -281,6 +283,19 @@ function canonicalizeExistingEnvelopeJson(input: string): string | null {
   }
 }
 
+function knowledgeEvidenceDiagnostic(
+  code: KnowledgeEvidenceDiagnostic["code"],
+  message: string,
+  data?: Record<string, JsonValue>,
+): KnowledgeEvidenceDiagnostic {
+  return data ? { code, message, data } : { code, message };
+}
+
+function knowledgeCollisionReason(existing: string, expected: string): string {
+  if (canonicalizeExistingEnvelopeJson(existing) === null) return "existing_unparseable";
+  return existing === expected ? "identical" : "content_mismatch";
+}
+
 export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; body: KnowledgeEvidenceEventBodyV1 }): Promise<AppendKnowledgeEvidenceEventResult> {
   let envelope: KnowledgeEvidenceEnvelopeV1;
   try {
@@ -298,13 +313,49 @@ export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; b
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const existing = await fs.readFile(filePath, "utf-8").catch((err: NodeJS.ErrnoException) => err.code === "ENOENT" ? null : Promise.reject(err));
     if (existing !== null) {
-      if (existing === content || canonicalizeExistingEnvelopeJson(existing) === content) return { ok: true, status: "idempotent_duplicate", eventId, filePath, envelope };
-      return { ok: false, status: "collision", eventId, filePath, envelope };
+      if (existing === content || canonicalizeExistingEnvelopeJson(existing) === content) {
+        return {
+          ok: true,
+          status: "idempotent_duplicate",
+          eventId,
+          filePath,
+          envelope,
+          diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_IDEMPOTENT_DUPLICATE", "knowledge evidence event already exists with identical content", { eventId, filePath })],
+        };
+      }
+      const stat = await fs.stat(filePath);
+      if (stat.size === 0) {
+        await durableAtomicWriteFile(filePath, content);
+        return {
+          ok: true,
+          status: "appended",
+          eventId,
+          filePath,
+          envelope,
+          recoveredEmptyResidue: true,
+          diagnostics: [knowledgeEvidenceDiagnostic("KE_RECOVERED_EMPTY_RESIDUE", "knowledge evidence event recovered an empty crash residue", { eventId, filePath, recovered: "recovered_empty_residue" })],
+        };
+      }
+      const reason = knowledgeCollisionReason(existing, content);
+      return {
+        ok: false,
+        status: "collision",
+        eventId,
+        filePath,
+        envelope,
+        error: `knowledge evidence event path collision: ${reason}`,
+        diagnostics: [knowledgeEvidenceDiagnostic("KE_HASH_PATH_COLLISION", "knowledge evidence event path already exists with different content", { eventId, filePath, reason })],
+      };
     }
-    const tmp = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
-    await fs.writeFile(tmp, content, { encoding: "utf-8", flag: "wx" });
-    await fs.rename(tmp, filePath);
-    return { ok: true, status: "appended", eventId, filePath, envelope };
+    await durableAtomicWriteFile(filePath, content);
+    return {
+      ok: true,
+      status: "appended",
+      eventId,
+      filePath,
+      envelope,
+      diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_OK", "knowledge evidence event appended", { eventId, filePath })],
+    };
   } catch (err) {
     return { ok: false, status: "write_failed", eventId, filePath, envelope, error: err instanceof Error ? err.message : String(err) };
   }
@@ -496,6 +547,7 @@ export interface ReprojectAllKnowledgeResult {
   removed: number;
   failed: number;
   failures: string[];
+  writtenPaths: string[];
 }
 
 export interface Adr0039L3PostWriteSyncResult {
@@ -602,6 +654,7 @@ export async function reprojectAllKnowledge(
   let failed = 0;
   let lastWinner: string | null = null;
   const failures: string[] = [];
+  const writtenPaths: string[] = [];
   for (const [identity, nodes] of byIdentity) {
     try {
       const proj = renderKnowledgeProjectionFromSet(nodes);
@@ -616,6 +669,7 @@ export async function reprojectAllKnowledge(
         await fs.writeFile(outputPath, proj.markdown!, "utf-8");
         projected += 1;
       }
+      writtenPaths.push(outputPath);
       lastWinner = proj.winnerEventId;
     } catch (err) {
       failed += 1;
@@ -624,14 +678,16 @@ export async function reprojectAllKnowledge(
   }
   if (lastWinner) {
     await fs.mkdir(latestDir, { recursive: true });
+    const manifestPath = path.join(latestDir, "manifest.json");
     await fs.writeFile(
-      path.join(latestDir, "manifest.json"),
+      manifestPath,
       `${JSON.stringify({ schemaVersion: "knowledge-projection-manifest/v1", updatedAtUtc: new Date().toISOString(), latestEventId: lastWinner, latestOperation: "reproject" }, null, 2)}\n`,
       "utf-8",
     );
+    writtenPaths.push(manifestPath);
     await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
   }
-  return { identities: byIdentity.size, projected, removed, failed, failures: failures.slice(0, 10) };
+  return { identities: byIdentity.size, projected, removed, failed, failures: failures.slice(0, 10), writtenPaths: Array.from(new Set(writtenPaths)).sort() };
 }
 
 function sameLayerKey(node: KnowledgeEventNode): string {

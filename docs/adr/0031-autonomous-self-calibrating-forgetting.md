@@ -7,6 +7,8 @@ status: accepted
 
 > 本 ADR 深化 [ADR 0024 §5.6](./0024-second-brain-from-natural-conversation.md#56-自治归档--回滚窗口) / [ADR 0025 §4.6](./0025-sediment-meta-curator-subsystem.md#46-静默归档--回滚窗口)（已归档至 abrain）「自治归档 + 回滚窗口」与 roadmap 的 INV-R12 auto-demote 方向:把「遗忘」从被动滞留 + 人类可调策略,收敛为**人类设零可调策略、大脑全自治自标定、一条不可调结构下限(可逆基座)作为回退保障**。设计输入是 5×T0 跨厂商盲评(设计) + 3×T0 文本盲审(R2)两轮(模型清单与完整记录见 git history / `docs/audits/`),证据摘要见 §4。实施与 instrumentation 埋点见 [`docs/roadmap.md`](../roadmap.md),不在本 ADR 正文。
 
+> **Revised 2026-07-09**：settings 形状已由四开关修订为 `memory.forgetting.enabled` + `memory.forgetting.instrumentation` 两开关；功能/需求级记录见 [feature-changelog.md 2026-07-09 条目](../feature-changelog.md#2026-07-09--accepted--遗忘子系统收敛与-docs-冲突裁定)。
+
 ## 修订记录
 
 2026-07-09 walk-back：本次修订基于 5×T0 跨厂商三轮一致共识，收敛前向遗忘的授权面、观测面和验收顺序；不得把本记录解释为重新开放自治物理删除或人工记忆管理。

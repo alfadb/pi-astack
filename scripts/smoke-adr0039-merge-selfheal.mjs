@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
+process.env.PI_ASTACK_REPO_ROOT = repoRoot;
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
 
@@ -95,11 +96,14 @@ for (const d of [abrainBridgeDir, sharedBridgeDir, sedimentBridgeDir, memoryBrid
 
 fs.writeFileSync(path.join(abrainBridgeDir, "redact.cjs"), transpile(path.join(repoRoot, "extensions/abrain/redact.ts")));
 fs.writeFileSync(path.join(abrainBridgeDir, "redact.js"), `module.exports = require("./redact.cjs");\n`);
+fs.writeFileSync(path.join(abrainBridgeDir, "reconcile-gate.js"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
 fs.writeFileSync(path.join(abrainBridgeDir, "git-sync.cjs"), transpile(path.join(repoRoot, "extensions/abrain/git-sync.ts")));
 fs.writeFileSync(path.join(sharedBridgeDir, "causal-anchor.js"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
 fs.writeFileSync(path.join(sharedBridgeDir, "git-singleflight.js"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
+fs.writeFileSync(path.join(sharedBridgeDir, "durable-write.js"), transpile(path.join(repoRoot, "extensions/_shared/durable-write.ts")));
 fs.writeFileSync(path.join(memoryBridgeDir, "settings.js"), transpile(path.join(repoRoot, "extensions/memory/settings.ts")));
 fs.writeFileSync(path.join(memoryBridgeDir, "utils.js"), transpile(path.join(repoRoot, "extensions/memory/utils.ts")));
+fs.writeFileSync(path.join(sedimentBridgeDir, "adr0039-l3.js"), transpile(path.join(repoRoot, "extensions/sediment/adr0039-l3.ts")));
 fs.writeFileSync(path.join(sedimentBridgeDir, "knowledge-evidence.js"), transpile(path.join(repoRoot, "extensions/sediment/knowledge-evidence.ts")));
 
 const gitSync = require(path.join(abrainBridgeDir, "git-sync.cjs"));
@@ -227,7 +231,7 @@ await asyncCheck("conflict auto-resolved: result=ok, conflictResolvedByReproject
   // remote as an independent observer and assert the REMOTE tip carries the
   // corrected winner L2 — not a conflicted state. This is the whole point.
   const push = await gitSync.pushAsync({ abrainHome: deviceB });
-  assert(push.result === "ok", `expected push ok, got ${push.result} (${push.error || ""})`);
+  assert(push.result === "ok", `expected push ok, got ${push.result} (${push.error || ""}) details=${JSON.stringify(push.details || null)}`);
   git(tmpDir, ["clone", "--quiet", remote, "observerA"]);
   const remoteAlpha = fs.readFileSync(knowledgeL2Path(path.join(tmpDir, "observerA"), "alpha"), "utf-8");
   assert(!/^(<{7}|={7}|>{7})/m.test(remoteAlpha), "remote alpha.md has conflict markers");

@@ -48,6 +48,7 @@ function stage(outRoot, src) {
 
 export function loadKnowledgeModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-backfill-"));
+  stage(outRoot, "extensions/_shared/durable-write.ts");
   stage(outRoot, "extensions/memory/settings.ts");
   stage(outRoot, "extensions/memory/utils.ts");
   stage(outRoot, "extensions/sediment/knowledge-evidence.ts");

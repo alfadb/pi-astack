@@ -56,7 +56,7 @@ import {
 import activateRuleInjector, { setRuleInjectorSelfHealScheduler, type RuleInjectorSelfHealTrigger } from "./rule-injector";
 import {
   fetchAndFF, pushAsync, sync as gitSync, getStatus as getGitSyncStatus,
-  formatSyncStatus, type AbrainSyncStatus, type GitSyncEvent,
+  formatSyncStatus, ensureAdr0039PrePushHook, type AbrainSyncStatus, type GitSyncEvent,
 } from "./git-sync";
 import {
   authKey,
@@ -1412,6 +1412,13 @@ export default function activate(pi: ExtensionAPI): void {
     console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
   }
 
+  try {
+    const hook = ensureAdr0039PrePushHook(ABRAIN_HOME);
+    if (!hook.ok && hook.warning) console.warn(`[abrain] ADR0039 pre-push hook warning: ${hook.warning}`);
+  } catch (err: any) {
+    console.warn(`[abrain] ADR0039 pre-push hook install failed (non-fatal): ${err?.message ?? err}`);
+  }
+
   // NOTE: startup git sync runs in the session_start event handler
   // below (not here at activate() time) so we can capture ctx.ui.notify
   // and surface results via pi's TUI instead of raw stderr. See the
@@ -2748,11 +2755,15 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
       console.error(`[abrain] getGitSyncStatus failed:`, msg);
     }
     const syncMsg = syncStatus ? formatSyncStatus(syncStatus) : "";
+    const reconcileBlocked = (syncStatus?.consecutivePushBlockedReconcile ?? 0) >= 3;
+    if (reconcileBlocked) {
+      console.warn(`[abrain] ADR0039 push gate has blocked ${syncStatus?.consecutivePushBlockedReconcile} consecutive push attempts; reproject L2 from L1 before retrying auto-sync.`);
+    }
     // 2026-05-17: warning is now triggered by last fetch hitting a textual
     // conflict — the only state that genuinely needs user attention after
     // the auto-merge revision of fetchAndFF. Mere ahead+behind both >0 is
     // transient pre-fetch state, not a problem.
-    const needsAttention = syncStatus?.lastFetch?.result === "conflict";
+    const needsAttention = syncStatus?.lastFetch?.result === "conflict" || reconcileBlocked;
     const fullMsg = syncMsg ? `${bindingMsg}\n\n${syncMsg}` : bindingMsg;
     ui.notify(fullMsg, needsAttention ? "warning" : (current.activeProject ? "info" : "warning"));
     return;

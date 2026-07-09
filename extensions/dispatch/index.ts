@@ -117,7 +117,7 @@ const DEFAULT_SUBAGENT_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_se
  *    (must stay in sync with createCodingTools / createReadOnlyTools)
  *  - web_search/web_fetch — pi-astack web-search extension (ADR 0027
  *    PR-A: L2 worker read tools, exposed to sub-agents by default)
- *  - memory_search/memory_get/memory_list/memory_decide —
+ *  - memory_search/memory_get/memory_list/memory_activity/memory_decide —
  *    pi-astack abrain extension (ADR 0027 PR-B: L2 workers grown on L1 hub
  *    need brain read access for the symbiosis loop)
  *  - vision — pi-astack vision extension (image analysis, read-only)
@@ -135,7 +135,7 @@ const DEFAULT_SUBAGENT_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_se
 const KNOWN_TOOLS = new Set([
   "read", "bash", "edit", "write", "grep", "find", "ls",
   "web_search", "web_fetch",
-  "memory_search", "memory_get", "memory_list", "memory_decide",
+  "memory_search", "memory_get", "memory_list", "memory_activity", "memory_decide",
   "vision",
   "context7_resolve", "context7_docs",
 ]);
@@ -1410,12 +1410,18 @@ export async function runInProcess(
 
   const runPromise = (async (): Promise<AgentResult> => {
     try {
-      // ADR 0027 PR-B: mark this SessionManager as sub-agent so that
+      // ADR 0027 PR-B/A4: mark this SessionManager as sub-agent so that
       // lifecycle handlers in sediment / compaction-tuner / model-fallback /
       // persistent-input-history / model-curator / abrain rule-injector
       // can detect via isSubAgentSession(ctx) and skip main-session-only
       // side effects. Must happen BEFORE createAgentSession() because pi
       // fires session_start synchronously inside session construction.
+      // SessionManager.inMemory() currently creates a stable getSessionId()
+      // immediately; markSessionAsSubAgent registers that id plus a random
+      // nonce in globalThis before spawn. If a future pi creates the id only
+      // inside createAgentSession, the WeakSet channel covers that window and
+      // backfills the id on first readable ctx. This is the sub-agent SM id,
+      // never ADR 0027 C6's parent causal session_id.
       const subAgentSm = SessionManager.inMemory(process.cwd());
       markSessionAsSubAgent(subAgentSm);
 

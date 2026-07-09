@@ -137,6 +137,8 @@ fs.writeFileSync(path.join(tmpDir, "_shared", "pi-internals.cjs"), "module.expor
 fs.copyFileSync(path.join(tmpDir, "_shared", "pi-internals.cjs"), path.join(tmpDir, "_shared", "pi-internals.js"));
 fs.writeFileSync(path.join(tmpDir, "_shared", "causal-anchor.cjs"), transpile(path.join(repoRoot, "extensions/_shared/causal-anchor.ts")));
 fs.copyFileSync(path.join(tmpDir, "_shared", "causal-anchor.cjs"), path.join(tmpDir, "_shared", "causal-anchor.js"));
+fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
+fs.copyFileSync(path.join(tmpDir, "reconcile-gate.cjs"), path.join(tmpDir, "reconcile-gate.js"));
 fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
 
 const bootstrap = require(path.join(tmpDir, "bootstrap.cjs"));
@@ -161,7 +163,8 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector.js")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
-  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
+  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+  .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCompiled);
 const indexModule = require(path.join(tmpDir, "index.cjs"));
 

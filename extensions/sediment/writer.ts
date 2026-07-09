@@ -244,6 +244,8 @@ function summarizeKnowledgeEvidenceEvent(result: AppendKnowledgeEvidenceForWrite
       error: result.projection.error ?? null,
     } : null,
     error: result.append.error ?? null,
+    recovered_empty_residue: result.append.recoveredEmptyResidue ?? false,
+    diagnostics: result.append.diagnostics ?? [],
   };
 }
 
@@ -388,6 +390,47 @@ async function appendKnowledgeEvidenceForMarkdown(args: {
       error: err instanceof Error ? err.message : String(err),
     },
   }));
+}
+
+function knowledgeEvidenceWrittenPaths(...events: Array<AppendKnowledgeEvidenceForWriteResult | undefined>): string[] {
+  const paths = events.flatMap((event) => [
+    event?.append.filePath,
+    event?.projection?.outputPath,
+    event?.projection?.manifestPath,
+  ]);
+  return Array.from(new Set(paths.filter((p): p is string => typeof p === "string" && p.length > 0)));
+}
+
+async function resetKnowledgeEvidenceIndex(abrainHome: string, event: AppendKnowledgeEvidenceForWriteResult | undefined): Promise<void> {
+  const rels = knowledgeEvidenceWrittenPaths(event)
+    .map((filePath) => path.relative(abrainHome, filePath))
+    .filter((rel) => rel && !rel.startsWith("..") && rel !== ".");
+  if (rels.length === 0) return;
+  try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", ...rels], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
+}
+
+async function changedDerivedRepoPaths(abrainHome: string): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "status", "--porcelain", "-z", "--", "l1", "l2"], { timeout: 10_000, maxBuffer: 1024 * 1024, encoding: "utf-8" });
+    const records = String(stdout).split("\0").filter(Boolean);
+    const out: string[] = [];
+    for (let i = 0; i < records.length; i += 1) {
+      const rec = records[i]!;
+      const status = rec.slice(0, 2);
+      const firstPath = rec.slice(3);
+      if (status.startsWith("R") || status.startsWith("C")) {
+        if (records[i + 1]) {
+          out.push(records[i + 1]!);
+          i += 1;
+        }
+      } else if (firstPath) {
+        out.push(firstPath);
+      }
+    }
+    return Array.from(new Set(out.filter((rel) => rel === "l1" || rel === "l2" || rel.startsWith("l1/") || rel.startsWith("l2/")))).sort();
+  } catch {
+    return [];
+  }
 }
 
 function nowIso(): string {
@@ -1114,6 +1157,7 @@ async function gitCommit(
   slug: string,
   op: string,
   projectId?: string,
+  derivedFilePaths: string[] = [],
 ): Promise<string | null> {
   // PR-1 / P0.6a (ADR 0027 C2', 2026-06-10): serialize against git-sync's
   // auto-merge/push AND the other writer-side commit helpers on the shared
@@ -1122,7 +1166,7 @@ async function gitCommit(
   // pushAsync fired at the end of the unlocked body is NOT awaited, so it
   // chains BEHIND this op instead of self-deadlocking.
   return gitSingleFlight(abrainHome, () =>
-    gitCommitUnlocked(abrainHome, filePath, slug, op, projectId));
+    gitCommitUnlocked(abrainHome, filePath, slug, op, projectId, derivedFilePaths));
 }
 
 async function gitCommitUnlocked(
@@ -1131,8 +1175,9 @@ async function gitCommitUnlocked(
   slug: string,
   op: string,
   projectId?: string,
+  derivedFilePaths: string[] = [],
 ): Promise<string | null> {
-  return gitCommitManyUnlocked(abrainHome, [filePath], slug, op, projectId);
+  return gitCommitManyUnlocked(abrainHome, [filePath], slug, op, projectId, derivedFilePaths);
 }
 
 async function maybePushAbrainAsync(abrainHome: string, sha: string | null): Promise<void> {
@@ -1161,9 +1206,10 @@ async function gitCommitMany(
   slug: string,
   op: string,
   projectId?: string,
+  derivedFilePaths: string[] = [],
 ): Promise<string | null> {
   return gitSingleFlight(abrainHome, () =>
-    gitCommitManyUnlocked(abrainHome, filePaths, slug, op, projectId));
+    gitCommitManyUnlocked(abrainHome, filePaths, slug, op, projectId, derivedFilePaths));
 }
 
 async function gitCommitManyUnlocked(
@@ -1172,22 +1218,19 @@ async function gitCommitManyUnlocked(
   slug: string,
   op: string,
   projectId?: string,
+  derivedFilePaths: string[] = [],
 ): Promise<string | null> {
   // Commits land in the abrain repo (cross-project knowledge substrate).
   const scopeTag = projectId ? `project:${projectId}` : "world";
   try {
-    const rels = Array.from(new Set(filePaths.map((filePath) => path.relative(abrainHome, filePath)))).filter(Boolean);
-    // ADR 0039 B3-blocker-1: the derived L1 Evidence Events (l1/) and the
-    // git-tracked L2 view (l2/, when l2OutputRoot=repo) are written by the
-    // append/projector OUTSIDE this canonical commit. Stage them atomically in
-    // the same commit so the write transaction is canonical + L1 + L2 — without
-    // this, every agent_end leaves uncommitted l1/l2 delta, the git-sync merge
-    // preflight refuses on a dirty tree, and the B4 pre-push dirty-view blocker
-    // rejects the push permanently. l1/ is append-only content-addressed; l2/
-    // is a deterministic projection re-verified byte-for-byte by reconcile, so
-    // committing whatever changed there is safe. (`.state/` stays gitignored.)
-    const derivedRels = ["l1", "l2"].filter((dir) => fsSync.existsSync(path.join(abrainHome, dir)));
-    await execFileAsync("git", ["-C", abrainHome, "add", "-A", "--", ...rels, ...derivedRels], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+    const rels = Array.from(new Set([...filePaths, ...derivedFilePaths]
+      .map((filePath) => path.relative(abrainHome, filePath))
+      .filter((rel) => rel && !rel.startsWith("..") && rel !== ".")));
+    if (rels.length === 0) return null;
+    // ADR0039 A1: stage the exact canonical/L1/L2 files produced by this
+    // writer transaction. A directory pathspec (`git add -A -- l1 l2`) can
+    // silently fold unrelated hand-edited derived files into a valid commit.
+    await execFileAsync("git", ["-C", abrainHome, "add", "-A", "--", ...rels], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
     await execFileAsync(
       "git",
       ["-C", abrainHome, "commit", "-m", `sediment: ${op} ${slug} (${scopeTag})`],
@@ -1216,9 +1259,12 @@ export async function commitAbrainDerivedOutputs(abrainHome: string, reason: str
 }
 
 async function commitAbrainDerivedOutputsUnlocked(abrainHome: string, reason: string): Promise<string | null> {
-  const derivedRels = ["l1", "l2"].filter((dir) => fsSync.existsSync(path.join(abrainHome, dir)));
+  const derivedRels = await changedDerivedRepoPaths(abrainHome);
   if (derivedRels.length === 0) return null;
   try {
+    // This helper is the explicit constraint/derived-output drain. It has no
+    // per-projector return value to thread, so it narrows the former directory
+    // sweep to the exact dirty l1/l2 files reported by git status.
     await execFileAsync("git", ["-C", abrainHome, "add", "-A", "--", ...derivedRels], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
     let hasStaged = true;
     try {
@@ -1421,6 +1467,9 @@ export async function deleteProjectEntry(
   const auditRoot = scope === "world" ? abrainHome : projectRoot;
   const targetPrefix = scope === "world" ? "world" : `project:${opts.projectId}`;
   const slug = slugify(slugRaw);
+  // Autonomous curator output is soft-only (curator.ts downgrades hard to soft).
+  // The hard branch below is retained for explicit non-autonomous callers such
+  // as CAS/maintenance tests and future reviewed archive-reclamation tools.
   const mode: DeleteMode = opts.mode === "hard" ? "hard" : "soft";
   const reason = opts.reason || "deleted by sediment curator";
   const resultCtx = resultAuditFields(opts, opts.sessionId);
@@ -1579,8 +1628,8 @@ export async function deleteProjectEntry(
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
     const git = opts.settings.gitCommit
       ? legacyMarkdownSkipped
-        ? await gitCommitMany(abrainHome, [], slug, "delete", gitCommitProjectId)
-        : await gitCommit(abrainHome, lockedPath, slug, "delete", gitCommitProjectId)
+        ? await gitCommitMany(abrainHome, [], slug, "delete", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
+        : await gitCommit(abrainHome, lockedPath, slug, "delete", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
       : null;
     // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
     // (git add succeeded but git commit failed), reset the index to
@@ -1594,9 +1643,7 @@ export async function deleteProjectEntry(
         : isKnowledgeEvidenceEventFirst(opts.settings) ? "restored_original_and_projected_compensation" : "legacy_restored";
       if (legacyMarkdownSkipped) {
         const resetL1L2Index = async () => {
-          try {
-            await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", "l1", "l2"], { timeout: 5_000, maxBuffer: 128 * 1024 });
-          } catch { /* best-effort */ }
+          await resetKnowledgeEvidenceIndex(abrainHome, knowledgeEvidenceEvent);
         };
         const restoreProjectionPreimage = async () => {
           try { await atomicWrite(lockedPath, originalRaw); } catch { /* best-effort fail-safe restore */ }
@@ -1634,7 +1681,7 @@ export async function deleteProjectEntry(
         const compensationAppendRestoredProjection = knowledgeEvidenceCompensationEvent?.append.ok === true
           && knowledgeEvidenceCompensationEvent.projection?.status === "projected";
         if (compensationAppendRestoredProjection) {
-          knowledgeEvidenceCompensationGitCommit = await gitCommitMany(abrainHome, [], slug, "restore_after_delete_git_failure", gitCommitProjectId);
+          knowledgeEvidenceCompensationGitCommit = await gitCommitMany(abrainHome, [], slug, "restore_after_delete_git_failure", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent, knowledgeEvidenceCompensationEvent));
         }
         if (compensationAppendRestoredProjection && knowledgeEvidenceCompensationGitCommit) {
           restoreMode = "projection_only_compensation_committed";
@@ -1999,7 +2046,7 @@ export async function updateProjectEntry(
               }
             : undefined,
           onCommit: opts.settings.gitCommit
-            ? (paths) => gitCommitMany(abrainHome, paths, requestedNewSlug, "rename", opts.projectId)
+            ? (paths) => gitCommitMany(abrainHome, paths, requestedNewSlug, "rename", opts.projectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
             : undefined,
         });
       } catch (err: unknown) {
@@ -2123,8 +2170,8 @@ export async function updateProjectEntry(
     if (!legacyMarkdownSkipped) await atomicWrite(target, merged.markdown);
     const git = opts.settings.gitCommit
       ? legacyMarkdownSkipped
-        ? await gitCommitMany(abrainHome, [], slug, operation, gitCommitProjectId)
-        : await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId)
+        ? await gitCommitMany(abrainHome, [], slug, operation, gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
+        : await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
       : null;
     // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
     // (git add succeeded but git commit failed), reset the index to
@@ -2133,9 +2180,7 @@ export async function updateProjectEntry(
     if (opts.settings.gitCommit && git === null) {
       let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
       if (legacyMarkdownSkipped) {
-        try {
-          await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", "l1", "l2"], { timeout: 5_000, maxBuffer: 128 * 1024 });
-        } catch { /* best-effort */ }
+        await resetKnowledgeEvidenceIndex(abrainHome, knowledgeEvidenceEvent);
       } else {
         try {
           const rel = path.relative(abrainHome, target);
@@ -2440,8 +2485,8 @@ export async function writeProjectEntry(
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
     git = opts.settings.gitCommit
       ? legacyMarkdownSkipped
-        ? await gitCommitMany(abrainHome, [], slug, "create", gitCommitProjectId)
-        : await gitCommit(abrainHome, target, slug, "create", gitCommitProjectId)
+        ? await gitCommitMany(abrainHome, [], slug, "create", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
+        : await gitCommit(abrainHome, target, slug, "create", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
       : null;
     // P2 fix (2026-05-14 audit): when gitCommit is enabled but returns null
     // (e.g. index.lock race, hook failure, EACCES), the markdown file is on
@@ -2458,7 +2503,7 @@ export async function writeProjectEntry(
     if (opts.settings.gitCommit && git === null) {
       let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
       if (legacyMarkdownSkipped) {
-        try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", "l1", "l2"], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
+        await resetKnowledgeEvidenceIndex(abrainHome, knowledgeEvidenceEvent);
       } else {
         const rel = path.relative(abrainHome, target);
         try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
@@ -2745,13 +2790,11 @@ async function gitCommitAbrain(abrainHome: string, filePath: string, slug: strin
 async function gitCommitAbrainUnlocked(abrainHome: string, filePath: string, slug: string, label = "workflow"): Promise<string | null> {
   try {
     const rel = path.relative(abrainHome, filePath);
-    // ADR 0039 B3-blocker-1: sweep the derived L1/L2 evidence into the same
-    // commit so a rules/workflow write does not leave uncommitted constraint
-    // L1 events (or l2/ knowledge projections) dirtying the tree. Same safety
-    // rationale as gitCommitManyUnlocked. `.state/` stays gitignored.
-    const derivedRels = ["l1", "l2"].filter((dir) => fsSync.existsSync(path.join(abrainHome, dir)));
     // Round 2 audit fix (opus m3): same `--` defense-in-depth as gitCommit.
-    await execFileAsync("git", ["-C", abrainHome, "add", "--", rel, ...derivedRels], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+    // ADR0039 A1: workflow/rules writes do not receive a projector-produced
+    // file list, so they stage only their own canonical file. Derived-output
+    // drains go through commitAbrainDerivedOutputs(), which audits its scope.
+    await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
     await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `${label}: ${slug}`], { timeout: 30_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     return stdout.trim() || null;

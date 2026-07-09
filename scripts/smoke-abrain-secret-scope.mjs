@@ -52,7 +52,10 @@ fs.copyFileSync(path.join(sharedTarget, "runtime.cjs"), path.join(sharedTarget, 
 // (anchor enrichment not under test), git-singleflight as the REAL module
 // (lock routing is part of /abrain bind's commit path now).
 fs.writeFileSync(path.join(sharedTarget, "causal-anchor.cjs"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
+fs.writeFileSync(path.join(sharedTarget, "pi-internals.cjs"), `module.exports = { isSubAgentSession: () => false };\n`);
 fs.writeFileSync(path.join(sharedTarget, "git-singleflight.cjs"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
+fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
+fs.copyFileSync(path.join(tmpDir, "reconcile-gate.cjs"), path.join(tmpDir, "reconcile-gate.js"));
 
 // ADR 0022 P1: "redact" added — git-sync.ts re-exports redactCredentials
 // from ./redact. The for-loop already writes both .cjs and .js aliases,
@@ -98,7 +101,8 @@ const indexCjs = ts.transpileModule(indexSrc, {
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector.js")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
   .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
-  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
+  .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+  .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCjs);
 
 const indexModule = require(path.join(tmpDir, "index.cjs"));

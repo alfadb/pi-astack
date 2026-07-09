@@ -8,12 +8,13 @@ status: accepted
 - **状态**：Accepted（2026-05-09，核心方向不变）。各 phase 的 ship 状态 / commit / file:line 是代码派生事实，不在 docs 镜像（REQ-006）——见下文 `## 实施现状` 的派生指针。
 - **部分取代**：[ADR 0013](0013-asymmetric-trust-three-lanes.md) Lane B（manual promote project→world）/ Lane D（auto-promote）——abrain 七区拓扑下不再有 promote 概念，sediment writer 直接将条目路由到七区内一个，详 §D3。
 - **部分被取代**：§D5 早期 `_bindings.md` + git remote / cwd 前缀推断的 project binding 方案被 [ADR 0017](0017-project-binding-strict-mode.md) B4.5 strict binding 取代（`.abrain-project.json` + `_project.json` + `local-map.json` 三层验证）。
+- **部分被取代**：§D4 早期 vault backend 方案中的 ssh-key/gpg Tier 1 口径已被 [ADR 0019](0019-abrain-self-managed-vault-identity.md) 与 [architecture/vault.md](../architecture/vault.md) 取代；当前 Tier 1 是 abrain-age-key 自管身份，ssh-key/gpg-file/passphrase-only 为 explicit-only legacy/deprecated backend。
 - **存储 SOT 口径被修订**：[ADR 0039](0039-constraint-pipeline-reset.md) 将旧 "Markdown + git 是 source of truth" 改读为 L1 Evidence Event SOT + L2 Markdown View + L3 SQLite 派生层；canonical memory 不再是实时写时语义裁决直接修改的本体，而是 append-only evidence 的物化投影。
 - **修订**：v1.4（2026-05-09，desktop-bias correction——vault unlock 从 OS keychain 依赖转为 portable identity （ssh-key/gpg-file/passphrase Tier 1），容器场景从 "不支持" 升 first-class）、v1.3（2026-05-09，incorporate Round 5 复核 P0 修订，含首次真代码修订）、v1.2（2026-05-09，incorporate Round 4 复核 P0 修订）、v1.1（2026-05-09，incorporate Round 3 复核 P0 修订）
 - **日期**：2026-05-09
 - **决策者**：alfadb
 - **依赖**：[ADR 0003](0003-main-session-read-only.md)、[ADR 0010](0010-sediment-single-agent-with-lookup-tools.md)、[ADR 0013](0013-asymmetric-trust-three-lanes.md)、[memory-architecture.md](../memory-architecture.md)
-- **被引用**：[brain-redesign-spec.md](../brain-redesign-spec.md)（详细规范）、[migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)、[migration/vault-bootstrap.md](../migration/vault-bootstrap.md)、[ADR 0017](0017-project-binding-strict-mode.md)（B4.5 strict project binding）
+- **被引用**：[architecture/abrain.md](../architecture/abrain.md)、[architecture/vault.md](../architecture/vault.md)、[archive/2026-07-09-brain-redesign-spec-current-summary.md](../archive/2026-07-09-brain-redesign-spec-current-summary.md)、[migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)、[migration/vault-bootstrap.md](../migration/vault-bootstrap.md)、[ADR 0017](0017-project-binding-strict-mode.md)（B4.5 strict project binding）
 - **触发**：2026-05-09 三轮多模型辩论（Opus 4-7 / GPT-5.5 / DeepSeek v4-pro）+ 用户重定位 ~/.abrain + 一轮 P0 复核（三方 PASS after fixing P0）
 
 ## 背景
@@ -54,7 +55,7 @@ ADR 0013 的 Lane B（manual promote project→world）和 Lane D（auto-promote
 | `vault/` + `projects/<id>/vault/` | 双层秘密 | 用户主动（Lane V）；encrypted artifacts / metadata 可进 git，plaintext / lock / tmp 不进 git |
 | `rules/{always,listed}` + `projects/<id>/rules/{always,listed}` | **第 8 类（独立于上述七区 entries 概念域）**：session-start 注入的行为规则（[ADR 0023](0023-session-start-rule-injection.md)） | sediment 全自动 lifecycle（classifier zone:"rules" → `writeAbrainRule`，2026-06-07 R1 CREATE/archive/delete ship） |
 
-详细 schema、子目录、读写规则见 [brain-redesign-spec.md](../brain-redesign-spec.md)。
+当前七区契约见 [architecture/abrain.md](../architecture/abrain.md)；vault 安全模型见 [architecture/vault.md](../architecture/vault.md)。历史详细规范原文见 [archive/brain-redesign-spec-v1.5-original.md](../archive/brain-redesign-spec-v1.5-original.md)。
 
 ### D2. 项目知识从 `<cwd>/.pensieve/` 迁入 `~/.abrain/projects/<id>/`
 
@@ -72,7 +73,7 @@ ADR 0013 的 Lane B（manual promote project→world）和 Lane D（auto-promote
 | **V** vault declare | `/secret <key>` 等系列命令（**同步**：user slash → main pi 进程内 vaultWriter library 同步调用 → 加密落盘 → 立即可用。**不走 sediment IPC**（v1.2 修订 N1） | 全局或项目级 vault | 最高 | 🆕 |
 | ~~B promote~~ / ~~D auto-promote~~ | — | — | — | ⛔ 失去意义（abrain 内部无 promote） |
 
-> Lane G 的目标在 identity / habits / skills 三区中按内容路由（deterministic router 见 [spec](../brain-redesign-spec.md)），不是 Lane 与目录的硬绑定。Lane G 保证 trust=高，目录由内容路由。**低置信样本（`routing_confidence < 0.6`）进 §3.5 staging review queue——不直接落 identity/habits**（v1.3 补，Round 5 Opus NP1-2：三区不是唯一出口，staging 是第四出口）。
+> Lane G 的目标在 identity / habits / skills 三区中按内容路由（当前契约见 [architecture/abrain.md](../architecture/abrain.md)，历史 deterministic router 细节见 [archive/brain-redesign-spec-v1.5-original.md](../archive/brain-redesign-spec-v1.5-original.md)），不是 Lane 与目录的硬绑定。Lane G 保证 trust=高，目录由内容路由。**低置信样本（`routing_confidence < 0.6`）进 §3.5 staging review queue——不直接落 identity/habits**（v1.3 补，Round 5 Opus NP1-2：三区不是唯一出口，staging 是第四出口）。
 
 ### D4. Vault 双层架构
 
@@ -228,7 +229,7 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 |---|---|---|
 | ADR 0003 主会话只读 | **保留** | sediment 仍唯一 writer，主 session 仍只读 |
 | ADR 0010 sediment single-agent | **保留** | sediment 内核完全不动 |
-| ADR 0011 / 0012 | 已被 memory-architecture.md superseded | 不变 |
+| ADR 0011 / 0012 | 旧 gbrain 时代 ADR，已随架构演进删除，原文见 git history | 不变 |
 | ADR 0013 三 Lane trust | **扩展为四 Lane** | A/C 保留，B/D 失去意义，新增 G/V |
 | memory-architecture.md | **部分 superseded** | scope=project\|world 二元划分被吸收到 brain 七区结构；`.pensieve/` 物理位置废止；其余（writer policy、validation、rolling gate 等）保留 |
 
@@ -236,7 +237,7 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 
 | Q | 问题 | 当前答案 |
 |---|---|---|
-| Q1 | identity vs habits 边界（Q-A） | **trust 与目录路由分离**。Lane G 保证 trust=高，Lane C 保证 trust=中；identity / habits / skills 三区由 sediment 按 aboutness 分类路由（**不是 Lane↔目录硬绑定**）。habits 接受 Lane C 主写也接受 Lane G 校正；identity 通常 Lane G，sediment 跨多 session 稳定观察才能补充（高门槛）。具体路由规范见 [spec](../brain-redesign-spec.md) |
+| Q1 | identity vs habits 边界（Q-A） | **trust 与目录路由分离**。Lane G 保证 trust=高，Lane C 保证 trust=中；identity / habits / skills 三区由 sediment 按 aboutness 分类路由（**不是 Lane↔目录硬绑定**）。habits 接受 Lane C 主写也接受 Lane G 校正；identity 通常 Lane G，sediment 跨多 session 稳定观察才能补充（高门槛）。当前契约见 [architecture/abrain.md](../architecture/abrain.md) |
 | Q2 | workflows MVP 写入策略（Q-B） | 保留目录占位，MVP 不主动 sediment 写；等用户主动声明再开始填 |
 | Q3 | 团队协作 fallback（Q-C） | MVP 不实现 export 命令；等真有协作需求再加 `pi project export` |
 | Q4 | vault key 命名规范（Q-D） | 自由形式，推荐 `<env>-<service>-<purpose>`，不强制 |
@@ -258,4 +259,4 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 
 ### 详细规范
 
-- **[brain-redesign-spec.md](../brain-redesign-spec.md)** —— 七区目录细则、Lane G/V 命令语义、vault 双层完整规范、并发处理、迁移路径
+- **[architecture/abrain.md](../architecture/abrain.md) / [architecture/vault.md](../architecture/vault.md)** —— 当前七区、Lane、strict binding 与 vault 契约；历史详细规范原文见 [archive/brain-redesign-spec-v1.5-original.md](../archive/brain-redesign-spec-v1.5-original.md)

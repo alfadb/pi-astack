@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { durableAtomicWriteFile } from "../../_shared/durable-write";
 import { makeConstraintEvidenceDiagnostic } from "./diagnostics";
 import {
   constraintEvidenceEnvelopeJson,
@@ -160,21 +161,7 @@ export async function appendConstraintEvidenceEvent(options: AppendConstraintEvi
       };
     }
 
-    const tmpPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
-    try {
-      const handle = await fs.open(tmpPath, "wx");
-      try {
-        await handle.writeFile(content, "utf-8");
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      await fs.rename(tmpPath, filePath);
-      await fsyncDirectory(path.dirname(filePath));
-    } catch (err) {
-      await fs.rm(tmpPath, { force: true }).catch(() => undefined);
-      throw err;
-    }
+    await writeDurableEvidenceFile(filePath, content);
 
     return {
       ok: true,
@@ -214,14 +201,8 @@ async function readExisting(filePath: string): Promise<string | null> {
   }
 }
 
-async function fsyncDirectory(dir: string): Promise<void> {
-  let handle: fs.FileHandle | undefined;
-  try {
-    handle = await fs.open(dir, "r");
-    await handle.sync();
-  } finally {
-    await handle?.close();
-  }
+async function writeDurableEvidenceFile(filePath: string, content: string): Promise<void> {
+  await durableAtomicWriteFile(filePath, content);
 }
 
 function blockedAuditData(body: ConstraintEvidenceEventBodyV1, eventId: string): Record<string, unknown> {

@@ -470,9 +470,11 @@ fs.writeFileSync(
   transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts"))
     .replace(/require\("\.\.\/_shared\/llm-audit"\)/g, 'require("./_shared/llm-audit.cjs")'),
 );
+fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
 fs.writeFileSync(
   path.join(tmpDir, "git-sync.cjs"),
   transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts"))
+    .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
     .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")'),
 );
 // ADR 0022 P3b: index.ts imports ./vault-authorize for PromptDialog overlay
@@ -492,6 +494,7 @@ fs.copyFileSync(path.join(tmpDir, "vault-writer.cjs"), path.join(tmpDir, "vault-
 fs.copyFileSync(path.join(tmpDir, "vault-reader.cjs"), path.join(tmpDir, "vault-reader.js"));
 fs.copyFileSync(path.join(tmpDir, "brain-layout.cjs"), path.join(tmpDir, "brain-layout.js"));
 fs.copyFileSync(path.join(tmpDir, "git-sync.cjs"), path.join(tmpDir, "git-sync.js"));
+fs.copyFileSync(path.join(tmpDir, "reconcile-gate.cjs"), path.join(tmpDir, "reconcile-gate.js"));
 fs.copyFileSync(path.join(tmpDir, "redact.cjs"), path.join(tmpDir, "redact.js"));
 // ADR 0023-R5: abrain/index.ts imports ./rule-injector. Stage the leaf
 // module and its extensionless shim; relative imports are rewritten below
@@ -517,6 +520,8 @@ fs.writeFileSync(path.join(sharedTargetDir, "runtime.cjs"), transpileTsToCjs(pat
 fs.copyFileSync(path.join(sharedTargetDir, "runtime.cjs"), path.join(sharedTargetDir, "runtime.js"));
 fs.writeFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
 fs.copyFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), path.join(sharedTargetDir, "git-singleflight.js"));
+fs.writeFileSync(path.join(sharedTargetDir, "causal-anchor.cjs"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
+fs.copyFileSync(path.join(sharedTargetDir, "causal-anchor.cjs"), path.join(sharedTargetDir, "causal-anchor.js"));
 fs.writeFileSync(
   path.join(sharedTargetDir, "pi-internals.cjs"),
   `exports.isSubAgentSession = function isSubAgentSession(ctx) { return !!(ctx && ctx.sessionManager && ctx.sessionManager.__piAstackSubAgent === true); };\n`,

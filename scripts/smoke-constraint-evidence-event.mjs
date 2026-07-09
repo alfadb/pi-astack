@@ -68,6 +68,7 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
 const integrationSrc = fs.readFileSync(path.join(repoRoot, "extensions/sediment/constraint-evidence/integration.ts"), "utf8");
 const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-constraint-evidence-"));
 for (const file of [
+  "extensions/_shared/durable-write.ts",
   "extensions/sediment/constraint-evidence/types.ts",
   "extensions/sediment/constraint-evidence/canonical-json.ts",
   "extensions/sediment/constraint-evidence/diagnostics.ts",

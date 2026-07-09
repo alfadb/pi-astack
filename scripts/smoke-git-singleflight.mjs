@@ -180,6 +180,11 @@ await asyncCheck("[8] git-sync._queueDepth() sees ops from other copies", async 
     transpile(path.join(repoRoot, "extensions/abrain/redact.ts")),
   );
   fs.writeFileSync(path.join(tmpDir, "redact.js"), `module.exports = require("./redact.cjs");\n`);
+  fs.writeFileSync(
+    path.join(tmpDir, "reconcile-gate.cjs"),
+    transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")),
+  );
+  fs.writeFileSync(path.join(tmpDir, "reconcile-gate.js"), `module.exports = require("./reconcile-gate.cjs");\n`);
   const sharedBridgeDir = path.join(tmpDir, "..", "_shared");
   fs.mkdirSync(sharedBridgeDir, { recursive: true });
   fs.writeFileSync(

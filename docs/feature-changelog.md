@@ -14,7 +14,7 @@ status: active
 ## 2026-07-09 — accepted — 遗忘子系统收敛与 docs 冲突裁定
 
 ### 变更
-遗忘子系统按 ADR 0031 walk-back 收敛：settings 四开关改为 `memory.forgetting.enabled` + `memory.forgetting.instrumentation` 两开关，采用 evidence-first + kind prior 的自动 demote 前置条件，审计面改为异常/动作驱动，并新增 archived-vs-active kind 分布监控。同步修复 memory-system-vision 与 direction 的恢复/复活边界冲突，并在 docs README 增加内部冲突裁定规则。
+遗忘子系统按 ADR 0031 walk-back 收敛：settings 四开关改为 `memory.forgetting.enabled` + `memory.forgetting.instrumentation` 两开关，采用 evidence-first + kind prior 的自动 demote 前置条件，审计面改为异常/动作驱动，并新增 archived-vs-active kind 分布监控。同步修复 memory-system-vision 与 direction 的恢复/复活边界冲突，并在 docs README 增加内部冲突裁定规则。遗忘子系统形状为两开关；sediment 主开关 `autoLlmWriteEnabled` 独立存在，并承担 demote 生产门控。
 
 ### 原因
 经 3 轮 5×T0 一致共识，原四开关是依赖链而非独立安全面，dry-run/live 组合会制造观察与生产配置漂移；条目级自治遗忘的可逆面应限定在工作树内 archived 状态，Git 只承担库级灾备与人工例外通道。

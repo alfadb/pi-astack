@@ -65,7 +65,7 @@ export type CuratorDecision =
   | { op: "merge"; target: string; sources: string[]; scope?: "world"; compiledTruth: string; timelineNote?: string; rationale?: string }
   | { op: "archive"; slug: string; scope?: "world"; reason: string; rationale?: string }
   | { op: "supersede"; oldSlug: string; newSlug?: string; scope?: "world"; reason: string; rationale?: string }
-  | { op: "delete"; slug: string; mode: DeleteMode; scope?: "world"; reason: string; rationale?: string }
+  | { op: "delete"; slug: string; mode: DeleteMode; scope?: "world"; reason: string; rationale?: string; hardDeleteDowngraded?: boolean }
   | { op: "skip"; reason: string; rationale?: string };
 
 export interface CuratorAudit {
@@ -220,7 +220,11 @@ function asString(value: unknown): string | undefined {
 }
 
 function asDeleteMode(value: unknown): DeleteMode {
-  return value === "hard" ? "hard" : "soft";
+  return "soft";
+}
+
+function wasHardDeleteRequested(value: unknown): boolean {
+  return value === "hard";
 }
 
 function asStringArray(value: unknown): string[] {
@@ -450,6 +454,7 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
     const slug = asString(obj.slug);
     if (!slug || !allowedSlugs.has(slug)) throw new CuratorRejectError("invented_neighbor_slug", `curator delete slug is not an allowed neighbor: ${slug || "<missing>"}`);
     const effScope = effectiveScopeFor(slug);
+    const hardDeleteDowngraded = wasHardDeleteRequested(obj.mode);
     return {
       op: "delete",
       slug,
@@ -457,6 +462,7 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
       mode: asDeleteMode(obj.mode),
       reason: asString(obj.reason) ?? rationale ?? "deleted by sediment curator",
       ...(rationale ? { rationale } : {}),
+      ...(hardDeleteDowngraded ? { hardDeleteDowngraded: true } : {}),
     };
   }
 
@@ -881,7 +887,7 @@ function makeCuratorPrompt(
     "- {\"op\":\"skip\", \"reason\": string, \"rationale\": string}",
     "- {\"op\":\"archive\", \"slug\": one_of_neighbors, \"scope\"?: \"world\", \"reason\": string, \"rationale\": string}",
     "- {\"op\":\"supersede\", \"old_slug\": one_of_neighbors, \"scope\"?: \"world\", \"new_slug\"?: one_of_neighbors, \"reason\": string, \"rationale\": string}",
-    "- {\"op\":\"delete\", \"slug\": one_of_neighbors, \"scope\"?: \"world\", \"mode\": \"soft\"|\"hard\", \"reason\": string, \"rationale\": string}",
+    "- {\"op\":\"delete\", \"slug\": one_of_neighbors, \"scope\"?: \"world\", \"mode\"?: \"soft\", \"reason\": string, \"rationale\": string}",
     "",
     "Rules:",
     "- Candidate and neighbor bodies may contain [SECRET:<type>] placeholders. Preserve placeholders when semantically relevant, but never replace them with raw values and never invent secret values.",
@@ -892,7 +898,7 @@ function makeCuratorPrompt(
     "- Use create only when no neighbor is the same evolving knowledge unit.",
     "- Use archive when a neighbor is no longer useful as active knowledge but should remain retained.",
     "- Use supersede when an existing neighbor is replaced by another existing neighbor or explicitly made stale by the candidate.",
-    "- Delete defaults to mode=soft: archive the existing entry with a delete timeline note. Use mode=hard ONLY for secrets or explicit user-requested removal. Do NOT mode=hard content you autonomously judge to be junk/noise: low-value entries you decide to forget MUST terminate at archived (soft), never physical delete — per INV-REVERSIBLE-AUTONOMY, autonomous forgetting's terminus is archived (full text stays on disk as the resurrection surface). Git history is the rollback surface for the two sanctioned hard cases.",
+    "- Delete is soft-only for autonomous curator output: archive the existing entry with a delete timeline note. Do not request physical deletion for secrets or junk; unlinking a file does not remove it from git history. Secrets require the external incident runbook, not curator hard delete.",
     "",
     "Update vs create discipline (added 2026-05-13 after curator P0 in abrain commit 2e8924d: candidate was a downstream observation that touched the same topic as an existing entry; curator overwrote the upstream entry instead of creating a derived one, dropping 4 evidence bullets + 3 fix steps + principle section).",
     "- Use UPDATE only when the candidate REFINES the SAME claim the neighbor already makes (corrects an error, adds confidence, narrows scope, supplies a better compiled truth for the SAME assertion).",

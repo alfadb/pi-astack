@@ -9,8 +9,9 @@ status: active
 
 sediment 是 pi-astack 的唯一 dedicated memory writer。主会话不会获得 `memory_write` 之类的 LLM-facing 工具；长期记忆写入由以下路径完成：
 
-- 明确 `MEMORY: ... END_MEMORY` block（Lane A）。
-- 明确 `MEMORY-ABOUT-ME: ... END_MEMORY` block（Lane G fence；`/about-me` slash 已退役）。
+- 明确 `MEMORY: ... END_MEMORY` block（Lane A compatibility/diagnostic 通道；非正常产品路径）。
+- 明确 `MEMORY-ABOUT-ME: ... END_MEMORY` block（Lane G compatibility/diagnostic 通道；`/about-me` slash 已退役；非正常产品路径）。
+- 自然对话经 `agent_end` 背景抽取是唯一正常产品路径，和 ADR 0024 / REQ-001 的隐形自治要求一致。
 - `agent_end` 背景 LLM auto-write（Lane C，需配置启用）。
 - human slash commands 触发的 maintenance/migration（当前用户面保留 `/sediment` 等维护入口，不保留 `/about-me` 主动声明入口）。
 - vault Lane V（由 abrain/vault 子系统同步处理，不是 ordinary memory）。
@@ -75,6 +76,7 @@ B5 cutover 后，sediment 不再写 `<project>/.pensieve/`。
 
 - 对 LLM 语义错误，优先修 curator/extractor prompt 与 examples。
 - 对 credential/secret 泄漏，保留 deterministic sanitizer，但边界语义是 **redact plaintext, continue extraction**：raw secret 不进入第三方 LLM、audit JSONL 或 memory markdown；保留语义价值的上下文与 `[SECRET:<type>]` 占位符。
+- curator delete 是 soft-only；即使显式维护入口使用 hard delete，也只会移除当前工作树文件，不能清除 git history 中的 secret。泄漏处理走 [secret leak incident runbook](../reference/secret-leak-incident-runbook.md)。
 - extractor / curator prompt 明确要求不要复制 raw secrets；看到 secret-like string 时输出 typed placeholder，且不得还原或编造 `[SECRET:<type>]` 的原值。
 - 对存储完整性，保留 schema/path/lock/atomic write hard gates。
 

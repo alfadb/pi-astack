@@ -64,7 +64,7 @@ import type { Model } from "@earendil-works/pi-ai/compat";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { isSubAgentSession } from "../_shared/pi-internals";
+import { isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic, isSubAgentSession } from "../_shared/pi-internals";
 import {
 	formatLocalIsoTimestamp,
 	legacyModelFallbackCanaryPath,
@@ -268,6 +268,7 @@ export default function (pi: ExtensionAPI) {
 	// prefix, and Handler B uses startsWith(RETRYABLE_PREFIX) guard, so
 	// the prefix is idempotent across handlers.
 	pi.on("message_end", (event, ctx?: any) => {
+		if (isSubAgentBoundaryUntrusted()) return;
 		const isSub = isSubAgentSession(ctx);
 		const isLegacySubPi = process.env.PI_ABRAIN_DISABLED === "1";
 		// Main pi (neither sub-agent nor legacy sub-pi) → defer to Handler B.
@@ -298,6 +299,15 @@ export default function (pi: ExtensionAPI) {
 		const config = loadConfig();
 		if (config.fallbackModels?.length) {
 			pi.on("session_start", async (_event, ctx) => {
+				if (isSubAgentBoundaryUntrusted()) {
+					const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+					const projectRoot = path.resolve(ctx?.cwd || process.cwd());
+					console.error(`[model-fallback] sub-agent boundary untrusted; blocked session_start preflight (${diagnostic?.reason ?? "unknown"})`);
+					canaryLog(projectRoot, `blocked session_start reason=subagent_boundary_untrusted detail=${diagnostic?.reason ?? "unknown"}`);
+					try { ctx.ui?.notify?.("model-fallback: sub-agent boundary untrusted; fallback preflight disabled", "error"); } catch { /* best-effort */ }
+					return;
+				}
+
 				// ADR 0027 PR-B: skip pre-flight in sub-agent (parent already
 				// validated the model + sub-agent uses an explicit dispatched
 				// model, not the fallback chain).
@@ -376,6 +386,14 @@ export default function (pi: ExtensionAPI) {
 	//      —— 必须在 agent_end 同步评估之前完成（详见文件头注释）。
 	// 保持 sync handler——不能加 async，否则 await listener 会意外延迟。
 	pi.on("message_end", (event, ctx: any) => {
+		if (isSubAgentBoundaryUntrusted()) {
+			const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+			const projectRoot = path.resolve(ctx?.cwd || process.cwd());
+			console.error(`[model-fallback] sub-agent boundary untrusted; blocked message_end state mutation (${diagnostic?.reason ?? "unknown"})`);
+			canaryLog(projectRoot, `blocked message_end reason=subagent_boundary_untrusted detail=${diagnostic?.reason ?? "unknown"}`);
+			return;
+		}
+
 		// ADR 0027 PR-B: sub-agent must not trigger fallback chain switching.
 		if (isSubAgentSession(ctx)) return;
 
@@ -405,13 +423,21 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (event, ctx: any) => {
-		// ADR 0027 PR-B: sub-agent does not participate in main-session
-		// fallback state machine / canary logging. Fail-fast back to parent.
-		if (isSubAgentSession(ctx)) return;
-
 		// Resolve projectRoot once per agent_end — reused by every canaryLog
 		// call below (including the deferred setTimeout closure).
 		const projectRoot = path.resolve(ctx?.cwd || process.cwd());
+
+		if (isSubAgentBoundaryUntrusted()) {
+			const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+			console.error(`[model-fallback] sub-agent boundary untrusted; blocked agent_end fallback state machine (${diagnostic?.reason ?? "unknown"})`);
+			canaryLog(projectRoot, `blocked agent_end reason=subagent_boundary_untrusted detail=${diagnostic?.reason ?? "unknown"}`);
+			try { ctx.ui?.notify?.("model-fallback: sub-agent boundary untrusted; fallback switching disabled", "error"); } catch { /* best-effort */ }
+			return;
+		}
+
+		// ADR 0027 PR-B: sub-agent does not participate in main-session
+		// fallback state machine / canary logging. Fail-fast back to parent.
+		if (isSubAgentSession(ctx)) return;
 
 		// Find last assistant message in the turn's messages.
 		let last: (typeof event.messages)[number] | undefined;

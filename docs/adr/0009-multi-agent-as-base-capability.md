@@ -13,7 +13,7 @@ status: accepted
 
 - **dispatch 是基座能力，暴露 primitive（dispatch_agent / dispatch_parallel）而非固定策略工厂**；parallel/debate/chain/ensemble 是 cookbook pattern（进 prompt/skill），不是 API enum——反约束 LLM 自行编排。
 - 输入兼容在 argument-prep 层（strict schema 不退化为 Any），最多双层 unwrap，逐字段 opt-in，错误带修复上下文。
-- 子代理工具安全：默认只读、mutating 需 env gate、嵌套 dispatch 永拒、vision/imagine 需显式 list；并发是真 IO 并发（非进程隔离），跨 provider 散开降 rate-limit 耦合。
+- 子代理工具安全：默认只读、mutating 需 env gate、嵌套 dispatch 永拒、vision/imagine 需显式 list；并发是真 IO 并发（非进程隔离），跨 provider 散开降 rate-limit 耦合。修订注记：mutating env gate 条款已被 ADR 0003 2026-06-16 修订与 ADR 0030 取代，dispatch env gate 已移除。
 
 ## 机制（已分解入 abrain，逐条 slug）
 

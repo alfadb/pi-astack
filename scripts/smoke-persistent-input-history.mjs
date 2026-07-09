@@ -154,9 +154,21 @@ function stageExtension({ fakePi, fakePiTui, fakePackageJson, env }) {
     path.join(tmpDir, "settings.js"),
     `module.exports = require("./settings.cjs");\n`,
   );
+  fs.mkdirSync(path.join(tmpDir, "_shared"), { recursive: true });
+  fs.writeFileSync(
+    path.join(tmpDir, "_shared", "pi-internals.js"),
+    `module.exports = {
+       isSubAgentBoundaryUntrusted: () => false,
+       getSubAgentBoundaryUntrustedDiagnostic: () => undefined,
+       isSubAgentSession: () => false,
+     };\n`,
+  );
 
   const indexSrc = transpile(
     path.join(repoRoot, "extensions/persistent-input-history/index.ts"),
+  ).replace(
+    /require\(["']\.\.\/_shared\/pi-internals["']\)/g,
+    `require("./_shared/pi-internals.js")`,
   );
   // index.ts imports from "./settings"; relative require already works.
   // Imports from "@earendil-works/pi-*" resolve via the tmpDir/node_modules

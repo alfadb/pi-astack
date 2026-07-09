@@ -68,6 +68,7 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
 
 function loadKnowledgeModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-l3-autosync-mod-"));
+  stageTs(outRoot, "extensions/_shared/durable-write.ts");
   stageTs(outRoot, "extensions/memory/settings.ts");
   stageTs(outRoot, "extensions/memory/utils.ts");
   stageTs(outRoot, "extensions/sediment/adr0039-l3.ts");

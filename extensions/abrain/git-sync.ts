@@ -137,9 +137,10 @@ const MERGE_ENV: NodeJS.ProcessEnv = {
  * reference (no drift, no shadow definition).
  */
 import { redactCredentials } from "./redact";
+import { checkAdr0039ReconcileGate, ensureAdr0039PrePushHook, type Adr0039ReconcileGateDetails, type Adr0039PrePushHookResult } from "./reconcile-gate";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { gitSingleFlight, _gitSingleFlightStats } from "../_shared/git-singleflight";
-export { redactCredentials };
+export { redactCredentials, ensureAdr0039PrePushHook };
 
 /**
  * POSIX shell-quote a filesystem path for safe paste-into-bash.
@@ -181,6 +182,7 @@ export type GitSyncOp = "push" | "fetch" | "sync";
  *                 auto-merge path produces `ok` or `conflict`). Kept in
  *                 the union so historical jsonl rows still parse.
  *   push_rejected git push rejected (remote ahead; user must pull first)
+ *   push_blocked_reconcile ADR0039 L1/L2 reconcile gate rejected the pushed content
  *   timeout       git command exceeded timeout (likely network)
  *   failed        any other error (auth, fs, network reset, etc.)
  */
@@ -191,6 +193,7 @@ export type GitSyncResult =
   | "conflict"
   | "diverged"
   | "push_rejected"
+  | "push_blocked_reconcile"
   | "timeout"
   | "failed";
 
@@ -223,6 +226,8 @@ export interface GitSyncEvent {
   conflictPaths?: string[];
   durationMs?: number;
   error?: string;
+  reason?: string;
+  details?: Adr0039ReconcileGateDetails | Adr0039PrePushHookResult | Record<string, unknown>;
 }
 
 export interface GitSyncOptions {
@@ -407,6 +412,17 @@ export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
 
       if (ahead === 0) {
         event.result = "noop";
+        event.durationMs = Date.now() - start;
+        await audit(opts.abrainHome, event);
+        return event;
+      }
+
+      const reconcile = await checkAdr0039ReconcileGate({ abrainHome: opts.abrainHome, timeoutMs });
+      if (!reconcile.ok) {
+        event.result = "push_blocked_reconcile";
+        event.reason = reconcile.reason;
+        event.details = reconcile.details;
+        event.error = "ADR0039 reconcile gate blocked push; reproject L2 from L1 or append a corrective L1 event, then commit l1/l2 before retrying";
         event.durationMs = Date.now() - start;
         await audit(opts.abrainHome, event);
         return event;
@@ -800,10 +816,15 @@ async function resolveDerivedL2ConflictAndCommit(opts: GitSyncOptions, timeoutMs
         settings: { knowledgeProjector: { l2OutputRoot: "repo" } },
       });
       if (r.failed > 0) return false;
+      const reprojected = r.writtenPaths
+        .map((filePath: string) => path.relative(opts.abrainHome, filePath).split(path.sep).join("/"))
+        .filter((rel: string) => rel && !rel.startsWith("..") && !path.isAbsolute(rel))
+        .filter((rel: string) => rel !== "l2/views/knowledge/latest/manifest.json");
+      if (reprojected.length === 0) return false;
       // Reproject overwrote the conflict-markered entries with the correct
-      // topo-fold; stage them (resolves the unmerged knowledge entries).
+      // topo-fold; stage only the files this projector actually wrote/removed.
       await execFileAsync(
-        "git", ["-C", opts.abrainHome, "add", "l2/views/knowledge"],
+        "git", ["-C", opts.abrainHome, "add", "-A", "--", ...reprojected],
         { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
       );
     }
@@ -936,6 +957,7 @@ export interface AbrainSyncStatus {
   behind: number;
   lastPush?: GitSyncEvent;
   lastFetch?: GitSyncEvent;
+  consecutivePushBlockedReconcile?: number;
 }
 
 export async function getStatus(abrainHome: string): Promise<AbrainSyncStatus> {
@@ -989,16 +1011,23 @@ export async function getStatus(abrainHome: string): Promise<AbrainSyncStatus> {
       await handle.read(buf, 0, readSize, offset);
       const text = buf.toString("utf-8");
       const lines = text.trim().split("\n").reverse();
+      let countingBlockedPushes = true;
+      let consecutiveBlocked = 0;
       for (const line of lines) {
         try {
           const ev = JSON.parse(line) as GitSyncEvent;
-          if (ev.op === "push" && !status.lastPush) status.lastPush = ev;
+          if (ev.op === "push") {
+            if (!status.lastPush) status.lastPush = ev;
+            if (countingBlockedPushes && ev.result === "push_blocked_reconcile") consecutiveBlocked += 1;
+            else countingBlockedPushes = false;
+          }
           if (ev.op === "fetch" && !status.lastFetch) status.lastFetch = ev;
-          if (status.lastPush && status.lastFetch) break;
+          if (status.lastPush && status.lastFetch && !countingBlockedPushes) break;
         } catch {
           // skip malformed audit lines
         }
       }
+      status.consecutivePushBlockedReconcile = consecutiveBlocked;
     } finally {
       await handle.close();
     }
@@ -1033,6 +1062,9 @@ export function formatSyncStatus(status: AbrainSyncStatus): string {
   };
   lines.push(fmtEvent("push", status.lastPush));
   lines.push(fmtEvent("fetch", status.lastFetch));
+  if ((status.consecutivePushBlockedReconcile ?? 0) >= 3) {
+    lines.push(`  ⚠ ADR0039 push gate has blocked ${status.consecutivePushBlockedReconcile} consecutive push attempts; run reconcile/reproject before expecting auto-sync to recover`);
+  }
   // 2026-05-17: ahead+behind>0 is no longer a steady state — fetchAndFF
   // auto-merges. If it persists, it means the most recent fetch hit a
   // textual conflict (last fetch result === 'conflict'); surface that

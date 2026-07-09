@@ -64,6 +64,7 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
 
 function loadKnowledgeEvidenceModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-knowledge-evidence-"));
+  stageTs(outRoot, "extensions/_shared/durable-write.ts");
   stageTs(outRoot, "extensions/memory/settings.ts");
   stageTs(outRoot, "extensions/memory/utils.ts");
   stageTs(outRoot, "extensions/sediment/knowledge-evidence.ts");
@@ -518,13 +519,15 @@ function validateConstraintShadow(abrainHome, opts) {
 // the content-addressed immutable-by-path invariant on PUSHED content = blocker.
 // Logic lives here (single source of truth; standalone reconcile surfaces it) and
 // is enforced at pre-push via the existing spawn. Graceful skip+WARN when not a
-// git repo or no upstream (fresh clone / first push) so CI after a clean push
-// does not go permanently red. --no-renames => a rename shows as D+A; the D blocks.
+// git repo or origin/main is unavailable (fresh clone / first push) so CI after
+// a clean push does not go permanently red. Dirty derived checks still run
+// independently even when this pushed range cannot be computed. --no-renames =>
+// a rename shows as D+A; the D blocks.
 function validateL1AppendOnlyOnPushedRange(abrainHome) {
   if (!fs.existsSync(path.join(abrainHome, ".git"))) return { failures: [], warnings: ["l1_append_only: skipped:not_a_git_repo"] };
-  const upstream = spawnSyncGit(abrainHome, ["rev-parse", "--verify", "--quiet", "@{u}"]);
-  if (upstream.status !== 0 || !upstream.stdout.trim()) return { failures: [], warnings: ["l1_append_only: skipped:no_range"] };
-  const diff = spawnSyncGit(abrainHome, ["diff", "--name-status", "--no-renames", "-z", "@{u}..HEAD", "--", "l1/"]);
+  const originMain = spawnSyncGit(abrainHome, ["rev-parse", "--verify", "--quiet", "origin/main"]);
+  if (originMain.status !== 0 || !originMain.stdout.trim()) return { failures: [], warnings: ["l1_append_only: skipped:origin_main_missing"] };
+  const diff = spawnSyncGit(abrainHome, ["diff", "--name-status", "--no-renames", "-z", "origin/main..HEAD", "--", "l1/"]);
   if (diff.status !== 0) return { failures: [], warnings: ["l1_append_only: skipped:git_diff_failed"] };
   const failures = [];
   const tokens = diff.stdout.split("\0").filter(Boolean);
@@ -846,7 +849,7 @@ if (!dirtyView.failures.some((failure) => failure.includes("dirty_derived_view:"
 }
 console.log("PASS — dirty L2 fixture is rejected.");
 
-// l1-append-only: the not-yet-pushed range (@{u}..HEAD) may only ADD under l1/.
+// l1-append-only: the not-yet-pushed range (origin/main..HEAD) may only ADD under l1/.
 // In-place modify of an existing (already-pushed) L1 event blocks.
 {
   const apFixture = await buildFixtureTree();

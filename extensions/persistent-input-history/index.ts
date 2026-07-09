@@ -37,7 +37,7 @@
  */
 
 import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isSubAgentSession } from "../_shared/pi-internals";
+import { isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic, isSubAgentSession } from "../_shared/pi-internals";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import {
   appendFileSync,
@@ -345,6 +345,27 @@ function ensureHistoryDir(): void {
   }
 }
 
+function auditBoundaryUntrusted(operation: string, ctx?: { cwd?: string; ui?: { notify?(message: string, type?: string): void } }): void {
+  const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+  const message = `persistent-input-history: sub-agent boundary untrusted; blocked ${operation} (${diagnostic?.reason ?? "unknown"})`;
+  console.error(`[persistent-input-history] ${message}`);
+  try { ctx?.ui?.notify?.(message, "error"); } catch { /* best-effort */ }
+  try {
+    ensureHistoryDir();
+    appendFileSync(join(HISTORY_DIR, "boundary-audit.jsonl"), `${JSON.stringify({
+      ts: new Date().toISOString(),
+      module: "persistent-input-history",
+      operation,
+      outcome: "blocked",
+      reason: "subagent_boundary_untrusted",
+      cwd: ctx?.cwd ?? null,
+      boundary_diagnostic: diagnostic,
+    })}\n`);
+  } catch {
+    // Audit is best-effort; the fail-closed return is the safety property.
+  }
+}
+
 /** Best-effort chmod 600 the history file on first creation. */
 function tightenPermissions(file: string): void {
   try {
@@ -542,6 +563,11 @@ export default function (pi: ExtensionAPI) {
   // ── input event: the ONLY place disk writes happen ─────────────
 
   pi.on("input", (_event, ctx) => {
+    if (isSubAgentBoundaryUntrusted()) {
+      auditBoundaryUntrusted("input", ctx);
+      return;
+    }
+
     // ADR 0027 PR-B: sub-agent has no interactive editor; sub-agent
     // “inputs” are dispatch-provided prompts, not user-typed history.
     if (isSubAgentSession(ctx)) return;
@@ -612,6 +638,11 @@ export default function (pi: ExtensionAPI) {
   // ── session_start: install the editor ─────────────────────────
 
   pi.on("session_start", (_event, ctx) => {
+    if (isSubAgentBoundaryUntrusted()) {
+      auditBoundaryUntrusted("session_start", ctx);
+      return;
+    }
+
     // ADR 0027 PR-B: sub-agent has no TUI editor to install history into,
     // and loading the parent's history file would be incorrect + wasteful.
     if (isSubAgentSession(ctx)) return;

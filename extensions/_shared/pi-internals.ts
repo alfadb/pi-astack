@@ -18,6 +18,7 @@
  *   3. Use the getter in extension code instead of raw casts
  */
 
+import { randomUUID } from "node:crypto";
 import { AgentSession, InteractiveMode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Types for internal APIs we depend on ─────────────────────────────────
@@ -677,22 +678,37 @@ export function warnOnceIfUnavailable(
 // use env (shared with parent) so we need an explicit marker.
 //
 // Mechanism: dispatch calls `markSessionAsSubAgent(sm)` on the
-// SessionManager instance it passes to createAgentSession. Lifecycle handlers
-// receive a ctx where `ctx.sessionManager` is the SAME object identity
-// (verified via pi SDK source: ReadonlySessionManager is a Pick<> type alias,
-// not a wrapper; AgentSession + ExtensionRunner pass the ref through
-// unchanged — see core/agent-session.js:116 + core/extensions/runner.js:393).
+// SessionManager instance it passes to createAgentSession. That call writes
+// TWO process-global channels before any sub-agent lifecycle handler can run:
+//
+//   1. stable session id registry: `sm.getSessionId()` -> random nonce
+//   2. WeakSet identity marker: `sm` object identity
+//
+// `isSubAgentSession(ctx)` checks the id registry first, then WeakSet. The id
+// channel is robust if a future pi version wraps `ctx.sessionManager` in a
+// Proxy/facade but still passes through method/property reads. The WeakSet
+// channel remains the pre-existing fallback and covers the narrow future case
+// where a stable id is not readable until inside createAgentSession: the SM is
+// still marked before creation, and the first WeakSet hit backfills the id if
+// it has become readable. Do NOT use ADR 0027 C6 causal session_id here: that
+// id belongs to the parent/user session and would mark the main session as a
+// sub-agent.
+//
 // Handlers do `if (isSubAgentSession(ctx)) return;` to opt out.
 //
 // Why WeakSet: ties marker lifetime to SessionManager instance — when the
 // sub-agent disposes (dispose() drops its ref), the SessionManager becomes
-// GC-eligible and falls out of the marker set automatically. No leak.
+// GC-eligible and falls out of the marker set automatically. No leak. The id
+// registry is process-lifetime state keyed by pi's random session id; dispatch
+// creates a bounded number of sub-agent sessions per process, so this is an
+// acceptable diagnostic/safety registry.
 //
 // Why not monkey-patch: pi-internals already monkey-patches
 // AgentSession.prototype._buildRuntime (turn-boundary compaction), and
-// patches add upgrade-fragility surface. WeakSet identity marking has zero
-// pi-internals coupling and stays correct across pi versions as long as
-// ExtensionContext.sessionManager remains a passthrough getter.
+// patches add upgrade-fragility surface. The explicit id channel plus WeakSet
+// identity marker has no pi-internals coupling and stays correct across pi
+// versions as long as ExtensionContext.sessionManager exposes the same stable
+// session id.
 
 // State below is stored on `globalThis[Symbol.for(...)]` so all extension
 // instances of this module — each loaded by a separate jiti instance with
@@ -721,29 +737,75 @@ export function warnOnceIfUnavailable(
 
 const _SUB_AGENT_STATE_KEY = Symbol.for("pi-astack/pi-internals/sub-agent/v1");
 
+type BoundaryUntrustedDiagnostic = {
+  reason: string;
+  timestamp: string;
+  details?: Record<string, unknown>;
+};
+
+type SubAgentIdRegistration = {
+  nonce: string;
+  registeredAt: string;
+};
+
 type SubAgentState = {
   weakSet: WeakSet<object>;
+  weakNonce: WeakMap<object, string>;
+  idRegistry: Map<string, SubAgentIdRegistration>;
   boundaryProbeStatus: BoundaryProbeStatus;
   boundaryProbeDiagnostic: {
     observedSmType: string;
     observedSmKeys: string[];
+    observedSessionId: string | null;
+    idRegistered: boolean;
+    weakMarked: boolean;
     weakSetSize: "weak-set-opaque";
     timestamp: string;
   } | null;
+  boundaryUntrusted: boolean;
+  boundaryUntrustedDiagnostic: BoundaryUntrustedDiagnostic | null;
 };
 
 function _getSubAgentState(): SubAgentState {
   const g = globalThis as Record<symbol, unknown>;
-  let state = g[_SUB_AGENT_STATE_KEY] as SubAgentState | undefined;
+  let state = g[_SUB_AGENT_STATE_KEY] as Partial<SubAgentState> | undefined;
   if (!state) {
-    state = {
-      weakSet: new WeakSet<object>(),
-      boundaryProbeStatus: "untested",
-      boundaryProbeDiagnostic: null,
-    };
+    state = {};
     g[_SUB_AGENT_STATE_KEY] = state;
   }
-  return state;
+  if (!(state.weakSet instanceof WeakSet)) state.weakSet = new WeakSet<object>();
+  if (!(state.weakNonce instanceof WeakMap)) state.weakNonce = new WeakMap<object, string>();
+  if (!(state.idRegistry instanceof Map)) state.idRegistry = new Map<string, SubAgentIdRegistration>();
+  if (state.boundaryProbeStatus !== "ok" && state.boundaryProbeStatus !== "broken") {
+    state.boundaryProbeStatus = "untested";
+  }
+  if (state.boundaryProbeDiagnostic === undefined) state.boundaryProbeDiagnostic = null;
+  if (state.boundaryUntrusted !== true) state.boundaryUntrusted = false;
+  if (state.boundaryUntrustedDiagnostic === undefined) state.boundaryUntrustedDiagnostic = null;
+  return state as SubAgentState;
+}
+
+function readStableSessionIdFromSessionManager(sessionManager: unknown): string | null {
+  if (sessionManager == null || typeof sessionManager !== "object") return null;
+  const sm = sessionManager as { getSessionId?: unknown; sessionId?: unknown };
+  try {
+    if (typeof sm.getSessionId === "function") {
+      const id = sm.getSessionId.call(sessionManager);
+      if (typeof id === "string" && id.trim()) return id;
+    }
+  } catch {
+    return null;
+  }
+  try {
+    if (typeof sm.sessionId === "string" && sm.sessionId.trim()) return sm.sessionId;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function registerSubAgentSessionId(state: SubAgentState, sessionId: string, nonce: string): void {
+  state.idRegistry.set(sessionId, { nonce, registeredAt: new Date().toISOString() });
 }
 
 /** Mark a SessionManager instance as belonging to a dispatch-spawned sub-agent.
@@ -754,7 +816,12 @@ function _getSubAgentState(): SubAgentState {
  *  Idempotent: re-marking the same instance is a no-op. */
 export function markSessionAsSubAgent(sessionManager: object): void {
   if (sessionManager == null || typeof sessionManager !== "object") return;
-  _getSubAgentState().weakSet.add(sessionManager);
+  const state = _getSubAgentState();
+  state.weakSet.add(sessionManager);
+  const nonce = state.weakNonce.get(sessionManager) ?? randomUUID();
+  state.weakNonce.set(sessionManager, nonce);
+  const sessionId = readStableSessionIdFromSessionManager(sessionManager);
+  if (sessionId) registerSubAgentSessionId(state, sessionId, nonce);
 }
 
 /** Whether a lifecycle handler is currently running inside a dispatch-spawned
@@ -770,33 +837,89 @@ export function isSubAgentSession(ctx: { sessionManager?: unknown } | undefined 
   if (!ctx) return false;
   const sm = ctx.sessionManager;
   if (sm == null || typeof sm !== "object") return false;
-  return _getSubAgentState().weakSet.has(sm);
+  const state = _getSubAgentState();
+  const sessionId = readStableSessionIdFromSessionManager(sm);
+  if (sessionId && state.idRegistry.has(sessionId)) return true;
+  if (!state.weakSet.has(sm)) return false;
+  if (sessionId) {
+    const nonce = state.weakNonce.get(sm) ?? randomUUID();
+    state.weakNonce.set(sm, nonce);
+    registerSubAgentSessionId(state, sessionId, nonce);
+  }
+  return true;
+}
+
+export type SubAgentBoundarySignals = {
+  sessionId: string | null;
+  idRegistered: boolean;
+  weakMarked: boolean;
+};
+
+export function inspectSubAgentBoundarySignals(
+  ctx: { sessionManager?: unknown } | undefined | null,
+): SubAgentBoundarySignals {
+  const sm = ctx?.sessionManager;
+  if (sm == null || typeof sm !== "object") {
+    return { sessionId: null, idRegistered: false, weakMarked: false };
+  }
+  const state = _getSubAgentState();
+  const sessionId = readStableSessionIdFromSessionManager(sm);
+  return {
+    sessionId,
+    idRegistered: sessionId ? state.idRegistry.has(sessionId) : false,
+    weakMarked: state.weakSet.has(sm),
+  };
+}
+
+export function markSubAgentBoundaryUntrusted(
+  reason: string,
+  details?: Record<string, unknown>,
+): void {
+  const state = _getSubAgentState();
+  state.boundaryUntrusted = true;
+  state.boundaryUntrustedDiagnostic = {
+    reason,
+    timestamp: new Date().toISOString(),
+    ...(details ? { details } : {}),
+  };
+}
+
+export function isSubAgentBoundaryUntrusted(): boolean {
+  return _getSubAgentState().boundaryUntrusted === true;
+}
+
+export function getSubAgentBoundaryUntrustedDiagnostic(): BoundaryUntrustedDiagnostic | null {
+  const d = _getSubAgentState().boundaryUntrustedDiagnostic;
+  return d ? { ...d, details: d.details ? { ...d.details } : undefined } : null;
 }
 
 /** Test-only: clear the marker set. Production code should never need this
  *  because the WeakSet self-clears on GC. */
 export function _resetSubAgentMarkersForTests(): void {
-  // WeakSet has no .clear(); rely on the fact that callers also drop their
-  // SessionManager refs between tests, so GC handles it. This stub exists
-  // only to satisfy test-suite contract symmetry with _resetWarnedApisForTests. */
+  const state = _getSubAgentState();
+  state.weakSet = new WeakSet<object>();
+  state.weakNonce = new WeakMap<object, string>();
+  state.idRegistry.clear();
 }
 
 // ── Sub-agent passthrough boundary sentinel (ADR 0027 PR-B+ R1 P1-1) ──
 //
-// The WeakSet-based `isSubAgentSession(ctx)` defense (above) is grounded
-// in ONE critical invariant from pi's SDK:
+// The dual-channel `isSubAgentSession(ctx)` defense (above) is grounded in
+// ONE critical invariant from pi's SDK:
 //
-//   ExtensionContext.sessionManager is a PASSTHROUGH reference — the
-//   exact same object identity that was passed to createAgentSession.
+//   ExtensionContext.sessionManager exposes a stable sub-agent session id
+//   that matches the SessionManager dispatch registered before spawn.
 //
-// If a future pi version wraps SessionManager in a Proxy / facade / Pick<>
-// adapter that returns a new object at the ExtensionContext boundary, then:
-//   1. dispatch calls markSessionAsSubAgent(sm) — sm goes into WeakSet
-//   2. createAgentSession spawns lifecycle handlers with
-//      ctx.sessionManager = wrapper(sm) — a DIFFERENT object
-//   3. handlers call isSubAgentSession(ctx) → WeakSet.has(wrapper(sm)) → false
-//   4. sediment / model-fallback / etc. run as if main session
-//   5. sub-agent reasoning gets learned as user implicit truth signal
+// The WeakSet identity channel remains as a fallback for current passthrough
+// behavior and for a possible id-generation window. If a future pi version
+// wraps SessionManager in a Proxy / facade / Pick<> adapter, the id channel
+// should still pass as long as `getSessionId()` / `sessionId` reads are
+// forwarded. If both channels miss in the shared sub-agent loader, then:
+//   1. dispatch called markSessionAsSubAgent(sm) before createAgentSession
+//   2. session_start fired in a runtime that only hosts sub-agent sessions
+//   3. neither registered id nor WeakSet identity matched ctx.sessionManager
+//   4. sediment / model-fallback / etc. would run as if main session
+//   5. sub-agent reasoning could be learned as user implicit truth signal
 //      (violates ADR 0024 INV-IMPLICIT-GROUND-TRUTH and ADR 0027 PR-B)
 //
 // The failure mode is SILENT — nothing throws, audit rows look normal,
@@ -808,10 +931,11 @@ export function _resetSubAgentMarkersForTests(): void {
 // loader's runtime, EVERY session_start fires for a sub-agent (the loader
 // only spawns sub-agent AgentSessions). So:
 //
-//   - if isSubAgentSession(ctx) returns true at session_start, the
-//     passthrough invariant is VERIFIED for the runtime  → boundary OK
-//   - if isSubAgentSession(ctx) returns false at session_start, the
-//     invariant is VIOLATED  → loud alarm
+//   - if the id channel matches at session_start, the boundary is VERIFIED,
+//     including Proxy/facade wrapping where WeakSet identity no longer matches
+//   - if only WeakSet matches, the boundary is still safe for this event and
+//     the id channel is backfilled when a stable id is readable
+//   - if both channels miss, the boundary is UNTRUSTED → fail closed + loud alarm
 //
 // No race conditions: the shared loader is ONLY accessed via dispatch's
 // runInProcess, which marks the SM before calling createAgentSession.
@@ -843,6 +967,8 @@ export function _resetSubAgentBoundaryProbeForTests(): void {
   const state = _getSubAgentState();
   state.boundaryProbeStatus = "untested";
   state.boundaryProbeDiagnostic = null;
+  state.boundaryUntrusted = false;
+  state.boundaryUntrustedDiagnostic = null;
 }
 
 /**
@@ -876,16 +1002,18 @@ export function bindSubAgentBoundarySentinel(
     }
 
     const subAgentState = _getSubAgentState();
-    if (isSubAgentSession(c)) {
-      // ✓ The SM in ctx is identity-equal to one we marked. Passthrough
-      // invariant holds. Sentinel passes — sticky from now on.
+    const matched = isSubAgentSession(c);
+    const signals = inspectSubAgentBoundarySignals(c);
+    if (matched) {
+      // The id channel may be the only hit when pi wraps the SessionManager
+      // in a Proxy. The WeakSet channel may be the only hit during a future
+      // id-generation window; isSubAgentSession backfills the id once readable.
       subAgentState.boundaryProbeStatus = "ok";
       return;
     }
 
-    // ✗ In the shared sub-agent loader, session_start is supposed to be
-    // a sub-agent session. But the SM we see isn't in our WeakSet.
-    // SessionManager passthrough invariant is broken.
+    // In the shared sub-agent loader, session_start is supposed to be a
+    // sub-agent session. If both channels miss, the boundary is untrusted.
     subAgentState.boundaryProbeStatus = "broken";
     subAgentState.boundaryProbeDiagnostic = {
       observedSmType: Object.prototype.toString.call(sm),
@@ -896,21 +1024,30 @@ export function bindSubAgentBoundarySentinel(
           return ["<unintrospectable>"];
         }
       })(),
+      observedSessionId: signals.sessionId,
+      idRegistered: signals.idRegistered,
+      weakMarked: signals.weakMarked,
       weakSetSize: "weak-set-opaque",
       timestamp: new Date().toISOString(),
     };
+    markSubAgentBoundaryUntrusted("subagent_boundary_probe_missed_both_channels", {
+      observedSessionId: signals.sessionId,
+      idRegistered: signals.idRegistered,
+      weakMarked: signals.weakMarked,
+    });
 
     warn(
       "\n\u2554" + "\u2550".repeat(78) + "\u2557\n" +
       "\u2551 \ud83d\udea8 PI-ASTACK CRITICAL: sub-agent boundary invariant VIOLATED                  \u2551\n" +
       "\u255a" + "\u2550".repeat(78) + "\u255d\n" +
       "\n" +
-      "  markSessionAsSubAgent(sm) was called for SessionManager identity A,\n" +
-      "  but the corresponding session_start event in the sub-agent runtime\n" +
-      "  fired with ctx.sessionManager = identity B — a DIFFERENT object.\n" +
+      "  markSessionAsSubAgent(sm) registered the sub-agent SessionManager\n" +
+      "  before createAgentSession(), but the corresponding session_start\n" +
+      "  event in the sub-agent runtime matched neither the stable session-id\n" +
+      "  registry nor the WeakSet identity fallback.\n" +
       "\n" +
-      "  Consequence: WeakSet-based isSubAgentSession(ctx) returns FALSE\n" +
-      "  inside sub-agent lifecycle handlers, so:\n" +
+      "  Consequence: isSubAgentSession(ctx) cannot prove this is a\n" +
+      "  sub-agent lifecycle handler, so without fail-closed guards:\n" +
       "    - sediment.agent_end will EXTRACT sub-agent reasoning as user implicit\n" +
       "      truth (violates ADR 0024 / ADR 0025 INV-IMPLICIT-GROUND-TRUTH)\n" +
       "    - compaction-tuner.agent_end will MIX sub-agent token usage into\n" +
@@ -922,18 +1059,22 @@ export function bindSubAgentBoundarySentinel(
       "  Refs: ADR 0027 PR-B (sub-agent extension visibility), ADR 0014 §6\n" +
       "        (extension boundary), pi-internals.ts WeakSet section.\n" +
       "\n" +
-      "  Likely cause: pi was upgraded and now wraps SessionManager at the\n" +
-      "  ExtensionContext boundary (Proxy / facade / Pick<> adapter) instead\n" +
-      "  of passing the reference through unchanged. See pi-internals.ts\n" +
-      "  WeakSet section for the invariant documentation.\n" +
+      "  Likely cause: pi was upgraded and changed ExtensionContext\n" +
+      "  sessionManager shape so neither getSessionId()/sessionId nor object\n" +
+      "  identity reaches extensions. See pi-internals.ts sub-agent boundary\n" +
+      "  section for the invariant documentation.\n" +
       "\n" +
       `  Observed SM diagnostic:\n` +
       `    type:  ${_getSubAgentState().boundaryProbeDiagnostic?.observedSmType}\n` +
       `    keys:  ${JSON.stringify(_getSubAgentState().boundaryProbeDiagnostic?.observedSmKeys)}\n` +
+      `    id:    ${JSON.stringify(_getSubAgentState().boundaryProbeDiagnostic?.observedSessionId)}\n` +
+      `    idReg: ${JSON.stringify(_getSubAgentState().boundaryProbeDiagnostic?.idRegistered)}\n` +
+      `    weak:  ${JSON.stringify(_getSubAgentState().boundaryProbeDiagnostic?.weakMarked)}\n` +
       `    when:  ${_getSubAgentState().boundaryProbeDiagnostic?.timestamp}\n` +
       "\n" +
       "  Action: investigate pi SDK's ExtensionContext shape and adjust\n" +
-      "  pi-internals.ts WeakSet marker mechanism.\n" +
+      "  pi-internals.ts id/WeakSet marker mechanism. Mutating consumers\n" +
+      "  will stop writing until the process restarts with a trusted boundary.\n" +
       "\n" +
       "  This warning fires ONCE per process. To suppress (NOT recommended)\n" +
       "  set PI_ASTACK_SUPPRESS_BOUNDARY_SENTINEL=1.\n"

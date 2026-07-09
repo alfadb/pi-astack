@@ -12,7 +12,7 @@ status: superseded
 - **状态**: Superseded（与 frontmatter 一致）。**sediment/gbrain 相关描述已过时**（2026-05-07）— 组件合并清单中的 gbrain/cache/pending queue 等描述基于旧架构。新架构（[memory-architecture.md](../memory-architecture.md)）下 sediment 组件需重新设计，但扩展/skills/prompts 的归并清单不变。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
-- **依赖**: ADR 0001（项目定位）/ 0002（gbrain）/ 0005（pensieve 退场）
+- **依赖**: ADR 0001（项目定位）。旧 gbrain 时代 ADR 已随架构演进删除，原文见 git history。
 
 ## 背景
 
@@ -125,10 +125,6 @@ UPSTREAM.md 按以下三类组织。
 ## 引用
 
 - ADR 0001: pi-astack 项目定位
-- ADR 0002: gbrain 作为唯一记忆存储
-- ADR 0004: sediment 写入策略（含 pensieve 4 象限 + gstack 字段 + 不写判据）
-- ADR 0005: pensieve 退场
-- ADR 0007: offline 降级与 gbrain 部署边界
-- ADR 0008: ~/.pi 双重身份与 source 路由
+- 旧 gbrain 时代 ADR 已随架构演进删除，不在本文逐一保留超链；原文见 git history。
 - ADR 0009: multi-agent 作为基础能力
 - 历史迁移文档: `docs/archive/migration/steps-v7-roadmap.md`；当前迁移手册: `docs/migration/abrain-pensieve-migration.md`

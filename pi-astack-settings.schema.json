@@ -231,7 +231,7 @@
 
     "sediment": {
       "type": "object",
-      "description": "Project-only sediment writer settings (extensions/sediment/). Provides explicit MEMORY writes plus LLM auto-write. ADR 0016 curator model for semantic decisions; sensitive-info sanitizer + storage integrity gates remain hard. Extractor and Curator have independent model configs (2026-05-11 audit).",
+      "description": "Sediment writer settings (extensions/sediment/). Provides explicit MEMORY writes plus LLM auto-write for project-bound memory and abrain world targets, including event-first Knowledge/Constraint writes and derived projections. ADR 0016 curator model for semantic decisions; sensitive-info sanitizer + storage integrity gates remain hard. Extractor and Curator have independent model configs (2026-05-11 audit).",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -1101,7 +1101,7 @@
 
     "memory": {
       "type": "object",
-      "description": "Read-only markdown memory Facade (extensions/memory/). Registers memory_search/get/list/neighbors over project .pensieve/ and optional world ~/.abrain/ stores. The extension never writes memory; sediment remains the sole writer.",
+      "description": "Read-only markdown memory Facade (extensions/memory/). Registers memory_search/get/list/activity/decide over project and optional world ~/.abrain/ stores. The extension never writes memory; sediment remains the sole writer.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },

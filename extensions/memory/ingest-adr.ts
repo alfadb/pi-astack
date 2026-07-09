@@ -303,9 +303,11 @@ async function gitResetHard(cwd: string, sha: string): Promise<void> {
   }
 }
 
-async function gitCommitAll(cwd: string, message: string): Promise<GitCommitOutcome> {
+async function gitCommitAll(cwd: string, message: string, pathspecs: string[]): Promise<GitCommitOutcome> {
   try {
-    await execFileAsync("git", ["-C", cwd, "add", "-A"], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    const narrowed = Array.from(new Set(pathspecs.filter((p) => p && !p.startsWith("..") && p !== "."))).sort();
+    if (narrowed.length === 0) return { sha: null, nothingToCommit: true };
+    await execFileAsync("git", ["-C", cwd, "add", "-A", "--", ...narrowed], { timeout: 10_000, maxBuffer: 1024 * 1024 });
     await execFileAsync("git", ["-C", cwd, "commit", "-m", message], { timeout: 20_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 3000, maxBuffer: 64 * 1024 });
     return { sha: stdout.trim() || null };
@@ -431,8 +433,14 @@ export async function runAdrIngest(opts: RunIngestOptions): Promise<IngestRunRes
 
     await appendIngestAudit(abrainHome, opts.projectId, timestamp, result, manifest);
 
+    const commitPathspecs = [
+      ...result.written.map((slug) => path.relative(abrainHome, path.join(projectDir, `${slug}.md`))),
+      path.relative(abrainHome, path.join(projectDir, "_index.md")),
+      path.relative(abrainHome, path.join(projectDir, ".index", "graph.json")),
+      path.relative(abrainHome, abrainSedimentAuditPath(abrainHome)),
+    ];
     const commit = await gitSingleFlight(abrainHome, () =>
-      gitCommitAll(abrainHome, `ingest(adr): ${result.written.length} entries from ${opts.sources.length} ADR(s)`),
+      gitCommitAll(abrainHome, `ingest(adr): ${result.written.length} entries from ${opts.sources.length} ADR(s)`, commitPathspecs),
     );
     result.commitSha = commit.sha;
     if (commit.error) throw new Error(`git commit failed: ${commit.error}`);

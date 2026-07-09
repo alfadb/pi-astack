@@ -27,7 +27,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
-import { isSubAgentSession } from "../_shared/pi-internals";
+import { isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic, isSubAgentSession } from "../_shared/pi-internals";
 
 // ── pi-astack settings loader ──────────────────────────────
 // pi-astack uses its own settings file (not pi's settings.json) to keep our
@@ -500,6 +500,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    if (isSubAgentBoundaryUntrusted()) {
+      const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+      console.error(`[model-curator] sub-agent boundary untrusted; blocked session_start registry mutation (${diagnostic?.reason ?? "unknown"})`);
+      try { ctx.ui?.setStatus?.(FOOTER_STATUS_KEYS.modelCurator, "boundary untrusted"); } catch { /* ignore */ }
+      try { ctx.ui?.notify?.("model-curator: sub-agent boundary untrusted; registry mutation disabled", "error"); } catch { /* ignore */ }
+      return;
+    }
+
     // ADR 0027 PR-B (v3 in-process replacement for the env guard above):
     // model-curator must NOT prune a sub-agent's model registry — dispatch
     // explicitly chose the sub-agent's model, and the curator's whitelist
@@ -529,7 +537,11 @@ export default function (pi: ExtensionAPI) {
     // block so a newly added model is dispatchable this very turn — no
     // restart. Guarded for sub-agents: their registry must not be re-pruned
     // mid-dispatch (same invariant as the session_start guard).
-    if (!isSubAgentSession(ctx)) {
+    if (isSubAgentBoundaryUntrusted()) {
+      const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+      console.error(`[model-curator] sub-agent boundary untrusted; blocked live registry re-apply (${diagnostic?.reason ?? "unknown"})`);
+      try { ctx.ui?.setStatus?.(FOOTER_STATUS_KEYS.modelCurator, "boundary untrusted"); } catch { /* ignore */ }
+    } else if (!isSubAgentSession(ctx)) {
       const m = settingsMtimeMs();
       if (m !== null && m !== lastAppliedMtimeMs) {
         try {

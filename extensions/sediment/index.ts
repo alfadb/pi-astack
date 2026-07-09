@@ -72,7 +72,7 @@ import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-
 import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
 import { appendTier1ConstraintEvidenceEvent } from "./constraint-evidence/integration";
 import { scheduleConstraintShadowAutoRefresh } from "./constraint-compiler/auto-refresh";
-import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession } from "../_shared/pi-internals";
+import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession, isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic } from "../_shared/pi-internals";
 import { getCurrentAnchor, getDeviceId, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { loadEntries } from "../memory/parser";
@@ -1855,6 +1855,31 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         };
       },
     ) => {
+      if (isSubAgentBoundaryUntrusted()) {
+        const cwd = path.resolve(ctx.cwd || process.cwd());
+        const sessionId = readSessionId(ctx.sessionManager);
+        const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+        const message = `sediment: sub-agent boundary untrusted; blocked agent_end writes (${diagnostic?.reason ?? "unknown"})`;
+        console.error(`[sediment] ${message}`);
+        try { ctx.ui?.notify?.(message, "error"); } catch { /* best-effort */ }
+        const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
+        const setStatus = setStatusRaw
+          ? (msg?: string) => {
+              try { setStatusRaw(SEDIMENT_STATUS_KEY, msg); } catch { /* best-effort */ }
+            }
+          : undefined;
+        applySedimentStatus(setStatus, sessionId, "failed", "subagent_boundary_untrusted");
+        await appendAudit(cwd, {
+          operation: "skip",
+          lane: "system",
+          reason: "subagent_boundary_untrusted",
+          session_id: sessionId,
+          boundary_diagnostic: diagnostic,
+          checkpoint_advanced: false,
+        }).catch(() => {});
+        return;
+      }
+
       // ADR 0027 PR-B (critical): sub-agent output is a tool product, not
       // user conversation. Letting sediment extract from it would pollute
       // the brain with LLM-reasoning artifacts instead of user implicit

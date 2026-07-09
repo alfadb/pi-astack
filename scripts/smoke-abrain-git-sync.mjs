@@ -99,6 +99,7 @@ function git(cwd, args, opts = {}) {
 // ADR 0022 P1: git-sync.ts now `export { redactCredentials } from "./redact"`,
 // so we must also transpile redact.ts into the same tmpDir and bridge
 // `./redact` to the .cjs output (CJS resolver looks for .js / index.js).
+process.env.PI_ASTACK_REPO_ROOT = repoRoot;
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-git-sync-"));
 fs.writeFileSync(
   path.join(tmpDir, "redact.cjs"),
@@ -107,6 +108,14 @@ fs.writeFileSync(
 fs.writeFileSync(
   path.join(tmpDir, "redact.js"),
   `module.exports = require("./redact.cjs");\n`,
+);
+fs.writeFileSync(
+  path.join(tmpDir, "reconcile-gate.cjs"),
+  transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")),
+);
+fs.writeFileSync(
+  path.join(tmpDir, "reconcile-gate.js"),
+  `module.exports = require("./reconcile-gate.cjs");\n`,
 );
 fs.writeFileSync(
   path.join(tmpDir, "git-sync.cjs"),

@@ -1,0 +1,62 @@
+[
+  {
+    "file": "extensions/_shared/causal-anchor.ts",
+    "pattern": "let _cachedDeviceId",
+    "reason": "Existing process-local device id cache; value is derived from stable local environment and not used to distinguish main vs sub-agent boundaries."
+  },
+  {
+    "file": "extensions/_shared/pi-internals.ts",
+    "pattern": "const _warnedApis = new Set",
+    "reason": "Existing best-effort warning de-duplication for unavailable pi internals; duplicate warnings across jiti instances are noisy but not a boundary safety issue."
+  },
+  {
+    "file": "extensions/_shared/runtime.ts",
+    "pattern": "let userGlobalSidecarMigrated",
+    "reason": "Existing one-shot migration guard for user-global sidecar layout; repeated execution is idempotent and unrelated to sub-agent session classification."
+  },
+  {
+    "file": "extensions/_shared/runtime.ts",
+    "pattern": "const migrated = new Set",
+    "reason": "Existing per-process migration de-duplication keyed by path; protects repeated filesystem migration work and is idempotent if split by jiti."
+  },
+  {
+    "file": "extensions/_shared/runtime.ts",
+    "pattern": "const gitignoreEnsured = new Set",
+    "reason": "Existing per-process .gitignore de-duplication keyed by project root; repeated ensure calls are idempotent and safe under module splitting."
+  },
+  {
+    "file": "extensions/_shared/session-key.ts",
+    "pattern": "const anonymousSessionIds = new WeakMap",
+    "reason": "Existing anonymous session key helper for contexts without persisted ids; WeakMap lifetime follows object identity and does not carry authority across sessions."
+  },
+  {
+    "file": "extensions/_shared/session-key.ts",
+    "pattern": "let anonymousSessionCounter",
+    "reason": "Existing companion counter for anonymousSessionIds; only creates diagnostic local labels and does not decide sub-agent/main-session trust."
+  },
+  {
+    "file": "extensions/abrain/rule-injector/index.ts",
+    "pattern": "let cachedRules",
+    "reason": "Existing rule scan cache used by several consumers of rule-injector APIs; cache misses fall back to filesystem scan and do not create new writes by themselves."
+  },
+  {
+    "file": "extensions/abrain/rule-injector/index.ts",
+    "pattern": "let scheduleSelfHeal",
+    "reason": "Existing rule-injector self-heal scheduler hook shared with abrain startup wiring; split instances degrade scheduling but do not bypass sub-agent guards."
+  },
+  {
+    "file": "extensions/abrain/rule-injector/index.ts",
+    "pattern": "let selfHealLastScheduledMs",
+    "reason": "Existing debounce timestamp for rule-injector self-heal scheduling; duplicate debounce state can over-schedule but not pollute sub-agent boundaries."
+  },
+  {
+    "file": "extensions/memory/embedding.ts",
+    "pattern": "const secretCommandCache = new Map",
+    "reason": "Existing secret resolution command cache for embedding provider setup; values are configuration lookups and not session-bound mutable user signal."
+  },
+  {
+    "file": "extensions/memory/settings.ts",
+    "pattern": "let warnedForgettingLegacyKeys",
+    "reason": "Existing one-shot warning for legacy forgetting settings; duplicate warnings across loaders are harmless and not a persistence authority boundary."
+  }
+]

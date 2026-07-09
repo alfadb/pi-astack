@@ -79,8 +79,10 @@ function stageModuleTree(outRoot) {
     ["extensions/abrain/rule-injector/index.ts", "abrain/rule-injector/index.js"],
     ["extensions/abrain/rule-injector/dualread-audit.ts", "abrain/rule-injector/dualread-audit.js"],
     ["extensions/abrain/brain-layout.ts", "abrain/brain-layout.js"],
+    ["extensions/abrain/reconcile-gate.ts", "abrain/reconcile-gate.js"],
     ["extensions/_shared/footer-status.ts", "_shared/footer-status.js"],
     ["extensions/_shared/runtime.ts", "_shared/runtime.js"],
+    ["extensions/_shared/durable-write.ts", "_shared/durable-write.js"],
     ["extensions/memory/parser.ts", "memory/parser.js"],
     // ADR 0034 P1: parser.ts now imports ./direction-impact
     // (parseDirectionImpact). Stage it so the transpiled require resolves.

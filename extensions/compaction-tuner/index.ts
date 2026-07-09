@@ -45,6 +45,8 @@ import {
 } from "../_shared/runtime";
 import {
   installTurnBoundaryCompactionPatch,
+  isSubAgentBoundaryUntrusted,
+  getSubAgentBoundaryUntrustedDiagnostic,
   isSubAgentSession,
   type TurnBoundaryCompactionDecision,
   type TurnBoundaryCompactionUsage,
@@ -912,6 +914,7 @@ export default function (pi: ExtensionAPI) {
   installTurnBoundaryCompactionPatch("compaction-tuner", {
     warn: (msg) => console.warn(msg),
     shouldCompact: async (sessionUnknown: unknown): Promise<TurnBoundaryCompactionDecision> => {
+      if (isSubAgentBoundaryUntrusted()) return { decision: "skip", reason: "subagent_boundary_untrusted" };
       const session = sessionUnknown as CompactionTunerSessionLike;
       const settings = resolveCompactionTunerSettings();
       if (!settings.enabled) return { decision: "skip", reason: "disabled" };
@@ -1092,6 +1095,18 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_provider_request", (event, ctx: CompactionTunerCtx) => {
     const settings = resolveCompactionTunerSettings();
     if (!settings.enabled || !settings.remoteOpenAICompaction.enabled) return event.payload;
+    if (isSubAgentBoundaryUntrusted()) {
+      const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+      console.error(`[compaction-tuner] sub-agent boundary untrusted; blocked provider payload mutation (${diagnostic?.reason ?? "unknown"})`);
+      void recordSimpleSkip(path.resolve(ctx.cwd || process.cwd()), {
+        operation: "remote_openai_compaction_injection",
+        outcome: "blocked",
+        reason: "subagent_boundary_untrusted",
+        boundary_diagnostic: diagnostic,
+        session_id: readSessionId(ctx.sessionManager) ?? null,
+      });
+      return event.payload;
+    }
     if (isSubAgentSession(ctx)) return event.payload;
 
     const result = injectRemoteOpenAICompactionIntoPayload(
@@ -1134,6 +1149,19 @@ export default function (pi: ExtensionAPI) {
     const settings = resolveCompactionTunerSettings();
     if (!settings.enabled) return undefined;
     const cwd = path.resolve(ctx.cwd || process.cwd());
+    if (isSubAgentBoundaryUntrusted()) {
+      const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+      console.error(`[compaction-tuner] sub-agent boundary untrusted; blocked compaction hook (${diagnostic?.reason ?? "unknown"})`);
+      await recordSimpleSkip(cwd, {
+        operation: "session_before_compact",
+        outcome: "blocked",
+        reason: "subagent_boundary_untrusted",
+        boundary_diagnostic: diagnostic,
+        compaction_reason: event.reason,
+        will_retry: event.willRetry,
+      });
+      return undefined;
+    }
 
     if (settings.remoteOpenAICompaction.enabled) {
       try {
@@ -1170,6 +1198,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async (_event: unknown, ctx: CompactionTunerCtx) => {
+    if (isSubAgentBoundaryUntrusted()) {
+      const cwd = path.resolve(ctx.cwd || process.cwd());
+      const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+      console.error(`[compaction-tuner] sub-agent boundary untrusted; blocked agent_end state update (${diagnostic?.reason ?? "unknown"})`);
+      await recordSimpleSkip(cwd, {
+        operation: "agent_end",
+        outcome: "blocked",
+        reason: "subagent_boundary_untrusted",
+        boundary_diagnostic: diagnostic,
+        session_id: readSessionId(ctx.sessionManager) ?? null,
+      });
+      return;
+    }
+
     // ADR 0027 PR-B: compaction-tuner observes main-session context
     // pressure to adjust thresholds. Sub-agent sessions are in-memory
     // ephemeral, have their own (different) model + budget, and shouldn’t

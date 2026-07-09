@@ -114,6 +114,7 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
 const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-constraint-shadow-"));
 for (const file of [
   "extensions/_shared/runtime.ts",
+  "extensions/_shared/durable-write.ts",
   "extensions/memory/settings.ts",
   "extensions/memory/utils.ts",
   "extensions/memory/direction-impact.ts",

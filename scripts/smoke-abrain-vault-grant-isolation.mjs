@@ -122,6 +122,12 @@ fs.writeFileSync(
   transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")),
 );
 fs.copyFileSync(path.join(sharedTarget, "git-singleflight.cjs"), path.join(sharedTarget, "git-singleflight.js"));
+fs.writeFileSync(path.join(sharedTarget, "causal-anchor.cjs"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
+fs.copyFileSync(path.join(sharedTarget, "causal-anchor.cjs"), path.join(sharedTarget, "causal-anchor.js"));
+fs.writeFileSync(path.join(sharedTarget, "pi-internals.cjs"), `module.exports = { isSubAgentSession: () => false };\n`);
+fs.copyFileSync(path.join(sharedTarget, "pi-internals.cjs"), path.join(sharedTarget, "pi-internals.js"));
+fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
+fs.copyFileSync(path.join(tmpDir, "reconcile-gate.cjs"), path.join(tmpDir, "reconcile-gate.js"));
 
 const ABRAIN_LEAF_FILES = [
   "vault-writer", "vault-reader", "vault-bash", "keychain", "bootstrap",
@@ -131,6 +137,7 @@ const ABRAIN_LEAF_FILES = [
 for (const file of ABRAIN_LEAF_FILES) {
   const compiled = transpile(path.join(repoRoot, "extensions/abrain", `${file}.ts`))
     .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
+    .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
     .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
@@ -160,7 +167,9 @@ fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = functi
     .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
     .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
     .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
-    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
+    .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
+    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+    .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
   fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCjs);
 }
 

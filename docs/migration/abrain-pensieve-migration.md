@@ -6,7 +6,7 @@ status: active
 # Migration — `.pensieve/` → `~/.abrain/projects/<id>/`
 
 > **状态**：ACTIVE RUNBOOK（2026-05-15）——B4 `/memory migrate --go`、B4.5 strict binding、B5 sediment writer cutover 均已 ship。本文只描述 legacy `.pensieve/` 历史数据迁入 `~/.abrain/projects/<id>/` 的 per-repo 操作；sediment 新写入已经不触碰 `.pensieve/`。
-> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [ADR 0017](../adr/0017-project-binding-strict-mode.md) / [brain-redesign-spec.md](../brain-redesign-spec.md) / [architecture/abrain.md](../architecture/abrain.md)
+> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [ADR 0017](../adr/0017-project-binding-strict-mode.md) / [architecture/abrain.md](../architecture/abrain.md) / [architecture/vault.md](../architecture/vault.md)
 > **前置**：[vault-bootstrap.md](vault-bootstrap.md)（vault 基础设施已 ship，P0a-P0c.read）
 
 ## 1. 模型：per-repo 一次性迁移
