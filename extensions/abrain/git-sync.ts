@@ -61,7 +61,11 @@ import { existsSync } from "node:fs";
 
 const execFileAsync = promisify(execFile);
 
-const DEFAULT_TIMEOUT_MS = 8_000;
+const DEFAULT_FETCH_TIMEOUT_MS = 8_000;
+// Fire-and-forget background pushes can safely wait longer. A short timeout
+// can kill the local git process after the remote has received the push but
+// before local ref/status confirmation, creating a false ahead/ref-drift view.
+export const DEFAULT_PUSH_TIMEOUT_MS = 60_000;
 const MAX_BUFFER = 1024 * 1024;
 
 /**
@@ -79,8 +83,8 @@ const MAX_BUFFER = 1024 * 1024;
  *
  * GIT_TERMINAL_PROMPT=0 (opus M3 bonus): if git's credential helper is
  * missing or misconfigured, HTTPS push would otherwise prompt for a
- * password and the subprocess would hang until our 8s timeout, costing
- * the user a slow startup. Setting this var makes git fail-fast with
+ * password and the subprocess would hang until the operation timeout,
+ * costing the user a slow startup. Setting this var makes git fail-fast with
  * "could not read Username for ..." which we then classify as `failed`.
  */
 const GIT_ENV: NodeJS.ProcessEnv = {
@@ -384,7 +388,7 @@ function classifyError(
  * Never throws. Always records to audit.
  */
 export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_PUSH_TIMEOUT_MS;
   const start = Date.now();
 
   if (!(await hasGitRemote(opts.abrainHome))) {
@@ -417,7 +421,7 @@ export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
         return event;
       }
 
-      const reconcile = await checkAdr0039ReconcileGate({ abrainHome: opts.abrainHome, timeoutMs });
+      const reconcile = await checkAdr0039ReconcileGate({ abrainHome: opts.abrainHome });
       if (!reconcile.ok) {
         event.result = "push_blocked_reconcile";
         event.reason = reconcile.reason;
@@ -478,7 +482,7 @@ export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
  * Never throws.
  */
 export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
   const start = Date.now();
 
   if (!(await hasGitRemote(opts.abrainHome))) {
@@ -539,7 +543,7 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
         // pushAsync performs the ADR0039 reconcile gate and audits its result.
         event.result = "noop";
         if (ahead > 0) {
-          pushAsync({ abrainHome: opts.abrainHome, timeoutMs }).catch(() => undefined);
+          pushAsync({ abrainHome: opts.abrainHome }).catch(() => undefined);
         }
       } else if (ahead === 0) {
         // Pure fast-forward: local has no unique commits.

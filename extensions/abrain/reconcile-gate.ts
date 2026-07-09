@@ -26,7 +26,7 @@ export interface Adr0039ReconcileGateDetails {
 
 export interface Adr0039ReconcileGateResult {
   ok: boolean;
-  reason: "passed" | "overridden" | "blocked" | "runner_error";
+  reason: "passed" | "overridden" | "blocked" | "runner_timeout" | "runner_error";
   details: Adr0039ReconcileGateDetails;
 }
 
@@ -39,7 +39,10 @@ export interface Adr0039PrePushHookResult {
 
 export const ADR0039_PRE_PUSH_HOOK_MARKER = "# pi-astack ADR0039 pre-push hook v1";
 
-const DEFAULT_RECONCILE_TIMEOUT_MS = 30_000;
+// Full reconcile cost grows with the event store. A too-short gate timeout
+// fails closed and can permanently block push, so the asymmetric cost favors
+// giving the authoritative byte/hash check a larger budget.
+export const DEFAULT_RECONCILE_TIMEOUT_MS = 120_000;
 const MAX_RECONCILE_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 function repoRootFromHere(): string {
@@ -103,7 +106,7 @@ function appendBounded(current: string, chunk: Buffer | string): string {
   return next.slice(-MAX_RECONCILE_OUTPUT_BYTES);
 }
 
-function runReconcileRunner(args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<{ status: number | null; stdout: string; stderr: string; error?: Error }> {
+function runReconcileRunner(args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<{ status: number | null; stdout: string; stderr: string; error?: Error; timedOut?: boolean }> {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
@@ -127,7 +130,7 @@ function runReconcileRunner(args: string[], opts: { cwd: string; env: NodeJS.Pro
       settled = true;
       clearTimeout(timer);
       const error = timedOut ? new Error(`ADR0039 reconcile runner timed out after ${opts.timeoutMs}ms`) : undefined;
-      resolve({ status: timedOut ? null : status, stdout, stderr, error });
+      resolve({ status: timedOut ? null : status, stdout, stderr, error, timedOut });
     });
   });
 }
@@ -191,6 +194,7 @@ export async function checkAdr0039ReconcileGate(opts: { abrainHome: string; repo
     costNote: "The gate computes pending/dirty l1/l2 path hints, then runs the existing full ADR0039 push-gate reconciler as the authoritative byte/hash check.",
   };
 
+  if (result.timedOut) return { ok: false, reason: "runner_timeout", details };
   if (result.error) return { ok: false, reason: "runner_error", details };
   if (result.status === 0) return { ok: true, reason: "passed", details };
 

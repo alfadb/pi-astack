@@ -13,7 +13,7 @@ const gitSync = await jiti.import(path.join(repoRoot, "extensions", "abrain", "g
 const writer = await jiti.import(path.join(repoRoot, "extensions", "sediment", "writer.ts"));
 const curator = await jiti.import(path.join(repoRoot, "extensions", "sediment", "curator.ts"));
 const sedimentSettings = await jiti.import(path.join(repoRoot, "extensions", "sediment", "settings.ts"));
-const { checkAdr0039ReconcileGate, ensureAdr0039PrePushHook, ADR0039_PRE_PUSH_HOOK_MARKER } = await jiti.import(path.join(repoRoot, "extensions", "abrain", "reconcile-gate.ts"));
+const { checkAdr0039ReconcileGate, ensureAdr0039PrePushHook, ADR0039_PRE_PUSH_HOOK_MARKER, DEFAULT_RECONCILE_TIMEOUT_MS } = await jiti.import(path.join(repoRoot, "extensions", "abrain", "reconcile-gate.ts"));
 
 function sh(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], ...opts });
@@ -65,6 +65,24 @@ function assert(cond, msg) {
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "abrain-push-gate-"));
 try {
+  {
+    const gitSyncSrc = fs.readFileSync(path.join(repoRoot, "extensions", "abrain", "git-sync.ts"), "utf-8");
+    assert(gitSync.DEFAULT_PUSH_TIMEOUT_MS === 60_000, `push default timeout should be 60s, got ${gitSync.DEFAULT_PUSH_TIMEOUT_MS}`);
+    assert(DEFAULT_RECONCILE_TIMEOUT_MS >= 120_000, `reconcile gate default timeout should be at least 120s, got ${DEFAULT_RECONCILE_TIMEOUT_MS}`);
+    assert(gitSyncSrc.includes("const reconcile = await checkAdr0039ReconcileGate({ abrainHome: opts.abrainHome });"), "pushAsync must let reconcile gate use its own default timeout");
+    assert(!/checkAdr0039ReconcileGate\(\{ abrainHome: opts\.abrainHome, timeoutMs/.test(gitSyncSrc), "pushAsync must not pass its shorter git push timeout into reconcile gate");
+    assert(gitSyncSrc.includes("pushAsync({ abrainHome: opts.abrainHome }).catch"), "fetchAndFF local-ahead repair must use pushAsync's push timeout default");
+  }
+
+  {
+    const { repo } = initRemotePair(tmp, "runner-timeout");
+    write(path.join(repo, "l2", "views", "knowledge", "latest", "dirty.md"), "dirty l2 forces full gate\n");
+    const fakeRoot = path.join(tmp, "slow-reconcile-root");
+    write(path.join(fakeRoot, "scripts", "smoke-adr0039-reconcile.mjs"), "#!/usr/bin/env node\nsetTimeout(() => {}, 5000);\n");
+    const gate = await checkAdr0039ReconcileGate({ abrainHome: repo, repoRoot: fakeRoot, timeoutMs: 10 });
+    assert(!gate.ok && gate.reason === "runner_timeout", `runner timeout should be diagnosed separately, got ${JSON.stringify(gate)}`);
+  }
+
   {
     const { repo } = initRemotePair(tmp, "pass");
     write(path.join(repo, "ok.md"), "ok\n");
