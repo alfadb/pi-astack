@@ -19,7 +19,12 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { AgentSession, InteractiveMode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  AgentSession,
+  CompactionSummaryMessageComponent,
+  InteractiveMode,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 
 // ── Types for internal APIs we depend on ─────────────────────────────────
 
@@ -92,13 +97,7 @@ interface InternalInteractiveModeLike {
   statusContainer?: { clear?(): void; addChild?(child: unknown): void };
   ui?: { terminal?: { setProgress?(active: boolean): void }; requestRender?(): void };
   createWorkingLoader?(): unknown;
-  defaultEditor?: { onEscape?: unknown };
-  autoCompactionEscapeHandler?: unknown;
-  clearStatusIndicator?(type: string): void;
-  chatContainer?: { clear?(): void };
-  rebuildChatFromMessages?(): void;
-  footer?: { invalidate?(): void };
-  flushCompactionQueue?(options: { willRetry?: unknown }): Promise<void> | void;
+  chatContainer?: { children?: unknown[] };
   handleEvent?: InteractiveHandleEventFn;
 }
 
@@ -134,7 +133,7 @@ const TURN_BOUNDARY_BUILD_RUNTIME_PATCHED = Symbol.for("pi-astack.turn-boundary-
 const TURN_BOUNDARY_ORIGINAL_BUILD_RUNTIME = Symbol.for("pi-astack.turn-boundary-compaction.AgentSession._buildRuntime.original");
 const TURN_BOUNDARY_EMIT_PATCHED = Symbol.for("pi-astack.turn-boundary-compaction.AgentSession._emit.patched");
 const TURN_BOUNDARY_ORIGINAL_EMIT = Symbol.for("pi-astack.turn-boundary-compaction.AgentSession._emit.original");
-const TURN_BOUNDARY_PATCH_VERSION = "2026-05-26.turn-boundary-compaction.v2";
+const TURN_BOUNDARY_PATCH_VERSION = "2026-07-10.turn-boundary-compaction.v3";
 const TURN_BOUNDARY_INSTALLED_AGENT = Symbol.for("pi-astack.turn-boundary-compaction.agent.installed");
 const TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_ORIGINAL = Symbol.for("pi-astack.turn-boundary-compaction.agent.prepareNextTurn.original");
 const TURN_BOUNDARY_AGENT_CREATE_LOOP_CONFIG_ORIGINAL = Symbol.for("pi-astack.turn-boundary-compaction.agent.createLoopConfig.original");
@@ -411,34 +410,36 @@ function isSuccessfulCompactionEndEvent(event: Record<string, unknown>): boolean
   return event.type === "compaction_end" && event.aborted !== true && !!event.result;
 }
 
-function canHandleSuccessfulCompactionEnd(mode: InternalInteractiveModeLike): boolean {
-  return typeof mode.chatContainer?.clear === "function"
-    && typeof mode.rebuildChatFromMessages === "function"
-    && typeof mode.footer?.invalidate === "function";
+function isSpacerComponent(component: unknown): boolean {
+  // Spacer can come from a different pi-tui module instance under jiti.
+  if (!component || typeof component !== "object") return false;
+  const candidate = component as {
+    constructor?: { name?: string };
+    lines?: unknown;
+    setLines?: unknown;
+    render?: unknown;
+  };
+  return candidate.constructor?.name === "Spacer"
+    && typeof candidate.lines === "number"
+    && typeof candidate.setLines === "function"
+    && typeof candidate.render === "function";
 }
 
-function handleSuccessfulCompactionEndWithoutDuplicateSummary(
-  mode: InternalInteractiveModeLike,
-  event: Record<string, unknown>,
-): void {
-  if (mode.settingsManager?.getShowTerminalProgress?.()) {
-    mode.ui?.terminal?.setProgress?.(false);
+function removeEarlierCompactionSummaries(mode: InternalInteractiveModeLike): boolean {
+  const children = mode.chatContainer?.children;
+  if (!Array.isArray(children)) return false;
+
+  const summaryIndexes = children
+    .map((child, index) => child instanceof CompactionSummaryMessageComponent ? index : -1)
+    .filter((index) => index >= 0);
+  if (summaryIndexes.length <= 1) return false;
+
+  for (let i = summaryIndexes.length - 2; i >= 0; i--) {
+    const summaryIndex = summaryIndexes[i];
+    const removeSpacer = summaryIndex > 0 && isSpacerComponent(children[summaryIndex - 1]);
+    children.splice(removeSpacer ? summaryIndex - 1 : summaryIndex, removeSpacer ? 2 : 1);
   }
-  if (mode.autoCompactionEscapeHandler) {
-    if (mode.defaultEditor) {
-      mode.defaultEditor.onEscape = mode.autoCompactionEscapeHandler;
-    }
-    mode.autoCompactionEscapeHandler = undefined;
-  }
-  mode.clearStatusIndicator?.("compaction");
-  mode.chatContainer?.clear?.();
-  mode.rebuildChatFromMessages?.();
-  mode.footer?.invalidate?.();
-  void mode.flushCompactionQueue?.({ willRetry: event.willRetry });
-  mode.ui?.requestRender?.();
-  if (event.willContinue === true) {
-    restoreWorkingLoaderIfContinuing(mode);
-  }
+  return true;
 }
 
 function installAgentSessionEmitWillContinuePatch(
@@ -480,11 +481,10 @@ function installInteractiveModeWillContinuePatch(hooks: TurnBoundaryCompactionHo
   const original = proto[INTERACTIVE_ORIGINAL_HANDLE_EVENT] as InteractiveHandleEventFn | undefined ?? proto.handleEvent;
   proto[INTERACTIVE_ORIGINAL_HANDLE_EVENT] = original;
   proto.handleEvent = async function patchedHandleEvent(this: InternalInteractiveModeLike, event: Record<string, unknown>): Promise<void> {
-    if (isSuccessfulCompactionEndEvent(event) && canHandleSuccessfulCompactionEnd(this)) {
-      handleSuccessfulCompactionEndWithoutDuplicateSummary(this, event);
-      return;
-    }
     await original.call(this, event);
+    if (isSuccessfulCompactionEndEvent(event) && removeEarlierCompactionSummaries(this)) {
+      this.ui?.requestRender?.();
+    }
     if (event.type === "compaction_end" && event.willContinue === true) {
       restoreWorkingLoaderIfContinuing(this);
     }
