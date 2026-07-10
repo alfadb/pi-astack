@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { scanWholeL1Validated } from "../../_shared/l1-schema-registry";
 import { parseConstraintEvidenceEnvelopeJson } from "../constraint-evidence/read";
-import { isSha256Hex } from "../constraint-evidence/hash-envelope";
 import type { ConstraintEvidenceDiagnostic, ConstraintEvidenceEnvelopeV1, ConstraintEvidenceEventBodyV1 } from "../constraint-evidence/types";
 import { makeDiagnostic } from "./diagnostics";
 import { inferCategoryHint } from "./normalize";
@@ -13,61 +13,16 @@ export interface ConstraintEventScanResult {
   diagnostics: ConstraintShadowDiagnostic[];
 }
 
-async function pathExists(file: string): Promise<boolean> {
-  try {
-    await fs.stat(file);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function listEventFiles(root: string): Promise<string[]> {
-  if (!(await pathExists(root))) return [];
-  const out: string[] = [];
-  const walk = async (dir: string): Promise<void> => {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      if (entry.isFile() && entry.name.endsWith(".json")) out.push(full);
-    }
-  };
-  await walk(root);
-  return out.sort();
-}
-
-function eventRoot(abrainHome: string): string {
-  return path.resolve(abrainHome, "l1", "events", "sha256");
-}
-
-function maybeEventIdFromPath(file: string): string | undefined {
-  const base = path.basename(file, ".json");
-  return isSha256Hex(base) ? base : undefined;
-}
-
-// ADR0039 NS-2 (4×T0 unanimous 2026-06-20): l1/events/sha256/ is a MULTI-DOMAIN
-// content-addressed store — knowledge-evidence, constraint-evidence and
-// constraint-projection (固化) envelopes all share it. Cleanly skip KNOWN foreign
-// envelope schemas BEFORE the constraint parse so they are not mis-counted as
-// invalid constraint evidence (which would collapse the compiler coverageRatio
-// and can silently disable compiled-view injection at minCoverageRatio). This is
-// an ALLOWLIST, NOT a blanket skip: an unknown/mangled schema still falls through
-// to the full parse and surfaces as invalid — never silently swallow a corrupted
-// genuine constraint event (§4: 显式信号不静默丢失).
-const FOREIGN_SKIP_ENVELOPE_SCHEMAS = new Set<string>([
-  "knowledge-evidence-envelope/v1",
-  "constraint-projection-envelope/v1",
-]);
-
-function peekEnvelopeSchema(raw: string): string | undefined {
-  try {
-    const value = JSON.parse(raw) as { schema?: unknown };
-    return typeof value.schema === "string" ? value.schema : undefined;
-  } catch {
-    return undefined;
-  }
-}
+// ADR0039 NS-2 (4×T0 unanimous 2026-06-20) + canonical-path R3.4.2 P1-S3:
+// l1/events/sha256/ is a MULTI-DOMAIN content-addressed store — knowledge,
+// constraint-evidence and constraint-projection envelopes all share it. The
+// foreign-vs-selected classification now comes from the central machine
+// schema-role registry via scanWholeL1Validated: EVERY event in L1 (any
+// domain) is envelope/hash/path/role/producer validated before the constraint
+// parse sees a single record, and an unknown or corrupt envelope anywhere
+// fails the whole scan closed (§4: 显式信号不静默丢失). Constraint
+// body-level semantic problems keep flowing through the existing diagnostic /
+// invalidEventIds / coverageRatio machinery below.
 
 function mapEvidenceDiagnostic(diagnostic: ConstraintEvidenceDiagnostic, fallbackEventId?: string): ConstraintShadowDiagnostic {
   const eventIds = diagnostic.eventIds.length ? diagnostic.eventIds : (fallbackEventId ? [fallbackEventId] : []);
@@ -179,18 +134,26 @@ function sourceFromEnvelope(envelope: ConstraintEvidenceEnvelopeV1, file: string
 
 export async function scanConstraintEvidenceEvents(options: { abrainHome: string }): Promise<ConstraintEventScanResult> {
   const abrainHome = path.resolve(options.abrainHome);
-  const root = eventRoot(abrainHome);
+  const scan = await scanWholeL1Validated({ abrainHome, domains: ["constraint"], roles: ["evidence"] });
   const events: ConstraintEventSourceRecord[] = [];
   const invalidEventIds: string[] = [];
   const diagnostics: ConstraintShadowDiagnostic[] = [];
 
-  for (const file of await listEventFiles(root)) {
-    const fallbackEventId = maybeEventIdFromPath(file);
-    const relativePath = path.relative(abrainHome, file).split(path.sep).join("/");
+  for (const residue of scan.tempResidue) {
+    diagnostics.push(makeDiagnostic({
+      code: "SC_EVENT_READ_ERROR",
+      message: `durable-write temp residue in L1 event tree: ${residue}`,
+      sourceRecordIds: [],
+      data: { file: residue, kind: "temp_residue" },
+    }));
+  }
+
+  for (const record of scan.selected) {
+    const file = record.filePath ?? path.resolve(abrainHome, ...(record.relativePath ?? "").split("/"));
+    const fallbackEventId = record.eventId;
+    const relativePath = record.relativePath ?? path.relative(abrainHome, file).split(path.sep).join("/");
     try {
       const raw = await fs.readFile(file, "utf-8");
-      const peekedSchema = peekEnvelopeSchema(raw);
-      if (peekedSchema !== undefined && FOREIGN_SKIP_ENVELOPE_SCHEMAS.has(peekedSchema)) continue;
       const parsed = parseConstraintEvidenceEnvelopeJson(raw, { abrainHome, filePath: file, relativePath });
       if (!parsed.ok) {
         diagnostics.push(...parsed.diagnostics.map((diagnostic) => mapEvidenceDiagnostic(diagnostic, fallbackEventId)));

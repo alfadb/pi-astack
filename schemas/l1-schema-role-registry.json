@@ -1,0 +1,115 @@
+{
+  "schema_version": "l1-schema-role-registry/v1",
+  "registry_id": "pi-astack-canonical-path-r3.4.2",
+  "storage": {
+    "root_relative_path": "l1/events/sha256",
+    "canonicalization": "RFC8785-JCS",
+    "hash_algorithm": "sha256",
+    "shard_width": 2,
+    "shard_depth": 2,
+    "file_extension": ".json"
+  },
+  "entries": [
+    {
+      "envelope_schema": "knowledge-evidence-envelope/v1",
+      "body_schema": "knowledge-evidence-event/v1",
+      "domain": "knowledge",
+      "role": "canonical",
+      "phase": "active",
+      "write_enabled": true,
+      "fold_eligible": true,
+      "event_types": [
+        "knowledge_entry_observed"
+      ],
+      "producers": [
+        "sediment.knowledge-event-writer"
+      ],
+      "body_domain_path": "intent.domain_hint"
+    },
+    {
+      "envelope_schema": "constraint-evidence-envelope/v1",
+      "body_schema": "constraint-evidence-event/v1",
+      "domain": "constraint",
+      "role": "evidence",
+      "phase": "active",
+      "write_enabled": true,
+      "fold_eligible": true,
+      "event_types": [
+        "constraint_signal_observed",
+        "constraint_correction_observed",
+        "constraint_rejection_observed",
+        "constraint_forget_observed",
+        "constraint_retract_observed",
+        "constraint_not_memory_observed",
+        "constraint_unclassified_observed"
+      ],
+      "producers": [
+        "sediment.constraint-event-writer"
+      ],
+      "body_domain_path": "intent.domain_hint"
+    },
+    {
+      "envelope_schema": "constraint-projection-envelope/v1",
+      "body_schema": "constraint-projection-event/v1",
+      "domain": "constraint",
+      "role": "canonical",
+      "phase": "active",
+      "write_enabled": true,
+      "fold_eligible": true,
+      "event_types": [
+        "constraint_compiled_view_produced"
+      ],
+      "producers": [
+        "sediment.constraint-compiler"
+      ]
+    },
+    {
+      "envelope_schema": "knowledge-candidate-observation/v1",
+      "domain": "knowledge",
+      "role": "meta",
+      "phase": "phase_disabled",
+      "write_enabled": false,
+      "fold_eligible": false
+    },
+    {
+      "envelope_schema": "knowledge-curator-attempt/v1",
+      "domain": "knowledge",
+      "role": "meta",
+      "phase": "phase_disabled",
+      "write_enabled": false,
+      "fold_eligible": false
+    },
+    {
+      "envelope_schema": "knowledge-curator-decision/v1",
+      "domain": "knowledge",
+      "role": "meta",
+      "phase": "phase_disabled",
+      "write_enabled": false,
+      "fold_eligible": false
+    },
+    {
+      "envelope_schema": "knowledge-apply-receipt/v1",
+      "domain": "knowledge",
+      "role": "meta",
+      "phase": "phase_disabled",
+      "write_enabled": false,
+      "fold_eligible": false
+    },
+    {
+      "envelope_schema": "constraint-genesis/v1",
+      "domain": "constraint",
+      "role": "meta",
+      "phase": "phase_disabled",
+      "write_enabled": false,
+      "fold_eligible": false
+    },
+    {
+      "envelope_schema": "drain-recovery-envelope/v1",
+      "domain": "canonical_path",
+      "role": "meta",
+      "phase": "phase_disabled",
+      "write_enabled": false,
+      "fold_eligible": false
+    }
+  ]
+}

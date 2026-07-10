@@ -57,7 +57,7 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
 
 const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-l2-preflight-"));
 for (const file of [
-  "extensions/_shared/runtime.ts", "extensions/_shared/durable-write.ts",
+  "extensions/_shared/runtime.ts", "extensions/_shared/durable-write.ts", "extensions/_shared/jcs.ts", "extensions/_shared/l1-schema-registry.ts",
   "extensions/memory/settings.ts", "extensions/memory/utils.ts", "extensions/memory/direction-impact.ts", "extensions/memory/parser.ts",
   "extensions/sediment/settings.ts", "extensions/sediment/knowledge-evidence.ts", "extensions/sediment/sanitizer.ts",
   "extensions/sediment/constraint-compiler/types.ts",
@@ -71,6 +71,8 @@ for (const file of [
 ]) {
   stageTs(outRoot, file);
 }
+fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
+fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
 const R = (m, f) => require(path.join(outRoot, "sediment", m, `${f}.js`));
 const { fixateConstraintDecisionAndRenderL2, selectLatestConstraintProjectionEventId, CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION } = R("constraint-compiler", "projection");
 const { renderConstraintL2View } = R("constraint-compiler", "render");
@@ -143,11 +145,27 @@ function snapshot() {
   if (fs.existsSync(gi)) fs.copyFileSync(gi, path.join(home, ".gitignore"));
   fs.mkdirSync(path.join(home, "l1", "events", "sha256"), { recursive: true });
   fs.mkdirSync(path.join(home, "l2", "views", "constraint"), { recursive: true });
-  // NS-2 realism: seed sibling foreign envelopes (knowledge + unknown schema).
-  const seed = (hex, schema, body) => writeFile(path.join(home, "l1", "events", "sha256", hex.slice(0, 2), hex.slice(2, 4), `${hex}.json`), `${JSON.stringify({ schema, event_id: hex, body_hash: hex, body }, null, 2)}\n`);
-  seed(sha256Hex("seed-know-1"), "knowledge-evidence-envelope/v1", { event_schema_version: "knowledge-evidence-event/v1", event_type: "knowledge_entry_observed" });
-  seed(sha256Hex("seed-know-2"), "knowledge-evidence-envelope/v1", { event_schema_version: "knowledge-evidence-event/v1", event_type: "knowledge_entry_observed" });
-  seed(sha256Hex("seed-unknown"), "totally-unknown-envelope/v9", {});
+  // NS-2 realism: seed sibling VALID registered foreign envelopes. Canonical
+  // path R3.4.2 P1-S3: unknown or hash-mismatched events now fail the central
+  // registry scan closed (covered by smoke:canonical-path-foundation and
+  // smoke:constraint-shadow-compiler), so the shared-store realism fixture
+  // must itself be envelope/hash/producer valid.
+  const { canonicalJson: seedCanonicalJson, canonicalJsonValue: seedCanonicalJsonValue } = R("constraint-evidence", "canonical-json");
+  const seed = (schema, body) => {
+    const hex = sha256Hex(seedCanonicalJson(seedCanonicalJsonValue(body)));
+    writeFile(path.join(home, "l1", "events", "sha256", hex.slice(0, 2), hex.slice(2, 4), `${hex}.json`), `${JSON.stringify({ schema, canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: hex, body_hash: hex, body }, null, 2)}\n`);
+  };
+  const seedKnowledgeBody = (marker) => ({
+    event_schema_version: "knowledge-evidence-event/v1",
+    event_type: "knowledge_entry_observed",
+    created_at_utc: "2026-06-19T00:00:00.000Z",
+    intent: { domain_hint: "knowledge", operation_hint: "create" },
+    producer: { name: "sediment.knowledge-event-writer", version: "preflight" },
+    scope: { kind: "world" },
+    payload: { slug: `preflight-seed-${marker}` },
+  });
+  seed("knowledge-evidence-envelope/v1", seedKnowledgeBody("one"));
+  seed("knowledge-evidence-envelope/v1", seedKnowledgeBody("two"));
   git(home, ["init", "-q"]);
   git(home, ["config", "user.email", "preflight@local"]);
   git(home, ["config", "user.name", "preflight"]);

@@ -177,6 +177,8 @@ const replayRunId = arg("run-id", `${new Date().toISOString().replace(/[-:.]/g, 
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-audit-replay-stage-"));
 for (const file of [
+  "extensions/_shared/jcs.ts",
+  "extensions/_shared/l1-schema-registry.ts",
   "extensions/sediment/constraint-evidence/types.ts",
   "extensions/sediment/constraint-evidence/canonical-json.ts",
   "extensions/sediment/constraint-evidence/diagnostics.ts",
@@ -187,6 +189,8 @@ for (const file of [
 ]) {
   stageTs(tmp, file);
 }
+fs.mkdirSync(path.join(tmp, "schemas"), { recursive: true });
+fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(tmp, "schemas", "l1-schema-role-registry.json"));
 
 const { appendConstraintEvidenceEvent } = require(path.join(tmp, "sediment", "constraint-evidence", "append.js"));
 const { parseConstraintEvidenceEnvelopeJson } = require(path.join(tmp, "sediment", "constraint-evidence", "read.js"));

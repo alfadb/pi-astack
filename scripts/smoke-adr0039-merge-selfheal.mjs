@@ -101,6 +101,10 @@ fs.writeFileSync(path.join(abrainBridgeDir, "git-sync.cjs"), transpile(path.join
 fs.writeFileSync(path.join(sharedBridgeDir, "causal-anchor.js"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
 fs.writeFileSync(path.join(sharedBridgeDir, "git-singleflight.js"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
 fs.writeFileSync(path.join(sharedBridgeDir, "durable-write.js"), transpile(path.join(repoRoot, "extensions/_shared/durable-write.ts")));
+fs.writeFileSync(path.join(sharedBridgeDir, "jcs.js"), transpile(path.join(repoRoot, "extensions/_shared/jcs.ts")));
+fs.writeFileSync(path.join(sharedBridgeDir, "l1-schema-registry.js"), transpile(path.join(repoRoot, "extensions/_shared/l1-schema-registry.ts")));
+fs.mkdirSync(path.join(path.dirname(sharedBridgeDir), "schemas"), { recursive: true });
+fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(path.dirname(sharedBridgeDir), "schemas", "l1-schema-role-registry.json"));
 fs.writeFileSync(path.join(memoryBridgeDir, "settings.js"), transpile(path.join(repoRoot, "extensions/memory/settings.ts")));
 fs.writeFileSync(path.join(memoryBridgeDir, "utils.js"), transpile(path.join(repoRoot, "extensions/memory/utils.ts")));
 fs.writeFileSync(path.join(sedimentBridgeDir, "adr0039-l3.js"), transpile(path.join(repoRoot, "extensions/sediment/adr0039-l3.ts")));
@@ -288,13 +292,19 @@ await asyncCheck("reproject failure bails to abort: result=conflict, HEAD restor
   // the resolver) ...
   await appendEvent(deviceB, "alpha", "alpha body B\n", "deviceB");
   await buildL2(deviceB);
-  // ... then plants an UNRENDERABLE L1 event (valid schema + identity, no
-  // `intent` => render throws => reproject failed>0 => resolver returns false
-  // => caller aborts). Written directly (the validating writer can't make one).
-  const badDir = path.join(deviceB, "l1", "events", "bad");
+  // ... then plants a CORRUPT L1 event inside the content-addressed store
+  // (event_id != RFC8785/JCS body hash). Canonical-path R3.4.2 P1-S3: the
+  // central schema-role registry scan fails closed on it => reprojectAllKnowledge
+  // throws => resolver catch returns false => caller aborts the merge.
+  const badId = `${"ab"}${"cd"}${"0".repeat(60)}`;
+  const badDir = path.join(deviceB, "l1", "events", "sha256", badId.slice(0, 2), badId.slice(2, 4));
   fs.mkdirSync(badDir, { recursive: true });
-  fs.writeFileSync(path.join(badDir, "bad.json"), JSON.stringify({
-    event_id: "badrenderevent",
+  fs.writeFileSync(path.join(badDir, `${badId}.json`), JSON.stringify({
+    schema: "knowledge-evidence-envelope/v1",
+    canonicalization: "RFC8785-JCS",
+    hash_alg: "sha256",
+    event_id: badId,
+    body_hash: badId,
     body: { event_schema_version: "knowledge-evidence-event/v1", scope: { kind: "world" }, payload: { slug: "badrender" } },
   }, null, 2));
   git(deviceB, ["add", "-A"]); git(deviceB, ["commit", "-q", "-m", "deviceB: alpha v2 + unrenderable event"]);

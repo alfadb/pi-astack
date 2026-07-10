@@ -1,0 +1,616 @@
+{
+  "schema_version": "transition-register/v1",
+  "register_id": "pi-astack-transition-register",
+  "updated": "2026-07-10",
+  "review_policy": {
+    "cadence": "biweekly",
+    "default_owner": "pi-astack-maintainers",
+    "markdown_mirror": "docs/transition-register.md"
+  },
+  "transitions": [
+    {
+      "id": "canonical_path.p1",
+      "partition": "canonical_path",
+      "title": "canonical_path P1",
+      "human_section": "Canonical path 阶段门",
+      "register_class": "active",
+      "phase_status": "in_progress",
+      "authorization_status": "authorized",
+      "entered": "2026-07-10",
+      "review_by": "2026-07-24",
+      "current": "R3.4.2 仅授权 P1；当前实施 P1-S3 foundation，不改变 Knowledge/Constraint canonical read 或 fold。",
+      "exit": [
+        "P1-S3/S1/S2/S4、P1-B、P1-A 全部具有真实外部证据",
+        "P1 completion record 落盘且 P2/P3 仍未执行"
+      ],
+      "evidence": [
+        "docs/plans/2026-07-10-canonical-path-convergence-r3.4.2-plan.md",
+        "/home/worker/.pi/.pi-astack/reports/canonical-path-p1-baseline-2026-07-10.md"
+      ],
+      "owner": "canonical-path-p1",
+      "consumer": [
+        "canonical-path implementation",
+        "startup transition validator",
+        "P1 completion gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "完成 P1-S3 foundation 后继续 P1-S1/S2/S4；不得越过 P1 授权边界。"
+    },
+    {
+      "id": "canonical_path.p2",
+      "partition": "canonical_path",
+      "title": "canonical_path P2",
+      "human_section": "Canonical path 阶段门",
+      "register_class": "active",
+      "phase_status": "blocked",
+      "authorization_status": "not_authorized",
+      "entered": "2026-07-10",
+      "review_by": "2026-07-24",
+      "current": "Knowledge fold-input truth cutover 未授权、未执行。",
+      "exit": [
+        "P1 完成",
+        "P2 获得新的六供应商或同等独立 multi-T0 unanimous 授权",
+        "满足 P2 byte equality 与完整链/冲突证据门"
+      ],
+      "evidence": [
+        "docs/plans/2026-07-10-canonical-path-convergence-r3.4.2-plan.md#phase-table"
+      ],
+      "owner": "canonical-path-p2",
+      "consumer": [
+        "knowledge projector",
+        "P2 authorization gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "仅准备候选 diff 与只读证据；P1 close 后另行请求 P2 授权。"
+    },
+    {
+      "id": "canonical_path.p3",
+      "partition": "canonical_path",
+      "title": "canonical_path P3",
+      "human_section": "Canonical path 阶段门",
+      "register_class": "active",
+      "phase_status": "blocked",
+      "authorization_status": "not_authorized",
+      "entered": "2026-07-10",
+      "review_by": "2026-07-24",
+      "current": "Constraint .state→validated atomic Git L2 read flip 未授权、未执行。",
+      "exit": [
+        "P1 完成",
+        "P3 获得新的六供应商或同等独立 multi-T0 unanimous 授权",
+        "满足 genesis、K=5 真实 delta/replay 与连续 7 日 zero-drift 门"
+      ],
+      "evidence": [
+        "docs/plans/2026-07-10-canonical-path-convergence-r3.4.2-plan.md#phase-table"
+      ],
+      "owner": "canonical-path-p3",
+      "consumer": [
+        "constraint runtime injector",
+        "P3 authorization gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "仅准备 read-source diff 与 verifier；P1 close 后另行请求 P3 授权。"
+    },
+    {
+      "id": "canonical_path.p4a",
+      "partition": "canonical_path",
+      "title": "canonical_path P4a",
+      "human_section": "Canonical path 阶段门",
+      "register_class": "active",
+      "phase_status": "blocked",
+      "authorization_status": "not_authorized",
+      "entered": "2026-07-10",
+      "review_by": "2026-07-24",
+      "current": "Legacy inventory/snapshot/archive move 未授权；禁止物理删除。",
+      "exit": [
+        "P2 与 P3 均完成",
+        "P4a 获得新的独立 unanimous multi-T0 授权",
+        "snapshot manifest 与 restore byte verification 完成"
+      ],
+      "evidence": [
+        "docs/plans/2026-07-10-canonical-path-convergence-r3.4.2-plan.md#phase-table"
+      ],
+      "owner": "canonical-path-p4a",
+      "consumer": [
+        "legacy archive tooling",
+        "P4a authorization gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "保持 blocked；不得移动或删除 legacy 内容。"
+    },
+    {
+      "id": "canonical_path.p4b",
+      "partition": "canonical_path",
+      "title": "canonical_path P4b",
+      "human_section": "Canonical path 阶段门",
+      "register_class": "active",
+      "phase_status": "blocked",
+      "authorization_status": "not_authorized",
+      "entered": "2026-07-10",
+      "review_by": "2026-07-24",
+      "current": "最终 14 日 completion observation/declaration 未授权、未开始。",
+      "exit": [
+        "P4a 完成",
+        "P4b 获得新的独立 unanimous multi-T0 授权",
+        "固定 14 日门与全部 verifier/query/chain/session/restart/restore 事件门通过"
+      ],
+      "evidence": [
+        "docs/plans/2026-07-10-canonical-path-convergence-r3.4.2-plan.md#phase-table"
+      ],
+      "owner": "canonical-path-p4b",
+      "consumer": [
+        "canonical-path completion gate",
+        "final convergence dossier"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "保持 blocked；P4a 完成后仍需单独授权。"
+    },
+    {
+      "id": "knowledge.legacy-physical-retirement",
+      "partition": "knowledge",
+      "title": "Knowledge legacy 物删",
+      "human_section": "已就绪待决策",
+      "register_class": "active",
+      "phase_status": "ready_for_decision",
+      "authorization_status": "separate_authorization_required",
+      "entered": "2026-07-05",
+      "review_by": "2026-07-24",
+      "current": "Knowledge legacy 物删 soak 已满至少 14 日历日；A6 tripwire 干净。",
+      "exit": [
+        "R 轮批准 legacy archive/delete",
+        "恢复路径与失败回滚已定义"
+      ],
+      "evidence": [
+        "Knowledge projection_only 运行数据",
+        "A6 tripwire",
+        "2026-07-08 governance audit"
+      ],
+      "owner": "knowledge-retirement",
+      "consumer": [
+        "knowledge legacy retirement gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "high",
+      "next_action": "启动 Knowledge legacy retirement R 轮。"
+    },
+    {
+      "id": "constraint.dual-read-flip",
+      "partition": "constraint",
+      "title": "Constraint 双读 flip",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "blocked_on_evidence",
+      "authorization_status": "separate_authorization_required",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "数据门总体达标，但一次 compiler validation failure 后的第 29 条 evidence 待投影。",
+      "exit": [
+        "重跑 compile 成功并确认第 29 条 evidence 已投影",
+        "明确记录 flip/retirement 授权、回滚条件与 R 轮边界"
+      ],
+      "evidence": [
+        "constraint dual-read audit",
+        "shadow compiler metrics",
+        "2026-07-08 cross-source audit"
+      ],
+      "owner": "constraint-pipeline",
+      "consumer": [
+        "constraint compiler",
+        "constraint runtime gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "先重跑 compile 确认，再评估 flip。"
+    },
+    {
+      "id": "dispatch.hub-dogfood",
+      "partition": "dispatch",
+      "title": "hub dogfood",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "dogfood",
+      "authorization_status": "authorized",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-15",
+      "current": "material 模式离线判定已启用判定回填格式，需继续积累真实盲判。",
+      "exit": [
+        "累计至少 20 次 material 判定且质量不低于 human-pick",
+        "30 天无新判定触发告警与重评"
+      ],
+      "evidence": [
+        "ADR 0030 walkback",
+        "hub-judgments.jsonl",
+        "2026-07-08 governance audit"
+      ],
+      "owner": "dispatch-hub",
+      "consumer": [
+        "dispatch hub quality gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "high",
+      "next_action": "继续回填 material 判定；触发 stale/fail-closed 条件时处理开关。"
+    },
+    {
+      "id": "forgetting.upstream-wiring",
+      "partition": "forgetting",
+      "title": "forgetting 上游接线",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "in_progress",
+      "authorization_status": "authorized",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "decay→lifecycle_proposal 已接线，等待 executor 受控消费。",
+      "exit": [
+        "executor 消费一个受控批次",
+        "demote ledger 与 reactivation window 可审计"
+      ],
+      "evidence": [
+        "entry-lifecycle-proposals ledger",
+        "forgetting-demote-ledger",
+        "aggregator run ledger",
+        "decay-shadow audit"
+      ],
+      "owner": "sediment-forgetting",
+      "consumer": [
+        "forgetting executor"
+      ],
+      "renewal_count": 0,
+      "risk_class": "high",
+      "next_action": "用小批量验证 executor 消费链路。"
+    },
+    {
+      "id": "memory.dedup-archived-dense",
+      "partition": "memory",
+      "title": "dedup-archived 无 dense 通道",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "blocked_on_implementation",
+      "authorization_status": "authorized",
+      "entered": "2026-07-09",
+      "review_by": "2026-07-24",
+      "current": "archived 只能由 BM25 词面命中，缺少 dense dedup 候选。",
+      "exit": [
+        "embed/prune 合法集扩展至 archived",
+        "检索 profile active 过滤保持不变",
+        "smoke 覆盖 archived dense candidate"
+      ],
+      "evidence": [
+        "extensions/memory/search-profiles.ts",
+        "extensions/memory/embedding.ts"
+      ],
+      "owner": "memory-retrieval",
+      "consumer": [
+        "sediment dedup"
+      ],
+      "renewal_count": 0,
+      "risk_class": "medium",
+      "next_action": "在 C2 受控批次放量前或同批修复。"
+    },
+    {
+      "id": "forgetting.kind-evidence-strength-v1",
+      "partition": "forgetting",
+      "title": "KIND_EVIDENCE_STRENGTH 映射表（v1 过渡面）",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "observe",
+      "authorization_status": "authorized",
+      "entered": "2026-07-09",
+      "review_by": "2026-07-24",
+      "current": "kind→证据强度使用确定性 infra 白名单，长尾 kind 排除自动 demote。",
+      "exit": [
+        "大脑内部 reviewer lane 上线后退化为 prompt 引导"
+      ],
+      "evidence": [
+        "ADR 0031 revision record"
+      ],
+      "owner": "sediment-reviewer-lane",
+      "consumer": [
+        "forgetting evidence classifier"
+      ],
+      "renewal_count": 0,
+      "risk_class": "medium",
+      "next_action": "推进 reviewer lane 设计。"
+    },
+    {
+      "id": "constraint.auto-refresh-failed-run-retry",
+      "partition": "constraint",
+      "title": "auto-refresh failed-run 重试",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "observe",
+      "authorization_status": "authorized",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "有界重试 retryAttempt≤1 已落地，等待真实失败触发验证。",
+      "exit": [
+        "真实失败触发重试",
+        "失败后留下可审计记录"
+      ],
+      "evidence": [
+        "auto-refresh run ledger",
+        "2026-07-08 governance audit"
+      ],
+      "owner": "constraint-auto-refresh",
+      "consumer": [
+        "constraint compiler liveness"
+      ],
+      "renewal_count": 0,
+      "risk_class": "high",
+      "next_action": "真实失败前由 owner 手动 re-trigger；继续观察重试链路。"
+    },
+    {
+      "id": "constraint.tier2-legacy-write-gate",
+      "partition": "constraint",
+      "title": "tier2RulesLegacyWriteGate observe→block",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "observe",
+      "authorization_status": "blocked_on_prerequisite",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "gate 仍处于 observe，缺少 tier2 evidence 或 retirement 前置保证。",
+      "exit": [
+        "tier2 evidence 路径存在，或 constraint legacy retirement gate 通过"
+      ],
+      "evidence": [
+        "settings gate",
+        "constraint retirement plan"
+      ],
+      "owner": "constraint-writer",
+      "consumer": [
+        "tier2 rules writer"
+      ],
+      "renewal_count": 0,
+      "risk_class": "high",
+      "next_action": "等待前置条件后将 observe 切到 block。"
+    },
+    {
+      "id": "constraint.read-flip-state-to-git-l2",
+      "partition": "constraint",
+      "title": "read-flip .state→git L2",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "blocked",
+      "authorization_status": "separate_authorization_required",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "Constraint runtime 仍读 .state compiled view；Git L2 仅为投影/审计面。",
+      "exit": [
+        "门控元数据进入 Git L2",
+        "preflight smoke 通过",
+        "完成一次独立 multi-T0 复审"
+      ],
+      "evidence": [
+        "docs/current-state.md",
+        "constraint L2 projection output",
+        "constraint L2 preflight smoke"
+      ],
+      "owner": "constraint-runtime",
+      "consumer": [
+        "rule injector"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "设计并执行 .state→Git L2 read-flip 复审。"
+    },
+    {
+      "id": "constraint.dual-read-audit-retirement",
+      "partition": "constraint",
+      "title": "dual-read audit 关闭",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "blocked_on_prerequisite",
+      "authorization_status": "not_applicable",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "dual-read audit 仍作为过渡监控面存在。",
+      "exit": [
+        "constraint legacy retirement 完成",
+        "不存在新的 undispositioned delta"
+      ],
+      "evidence": [
+        "dual-read audit",
+        "constraint retirement gate"
+      ],
+      "owner": "constraint-runtime",
+      "consumer": [
+        "constraint transition monitoring"
+      ],
+      "renewal_count": 0,
+      "risk_class": "medium",
+      "next_action": "绑定到 constraint legacy retirement 完成后关闭。"
+    },
+    {
+      "id": "staging.hard-delete",
+      "partition": "staging",
+      "title": "staging 硬删",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "blocked",
+      "authorization_status": "separate_authorization_required",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "staging backlog 需由 inventory/metrics 评估，当前无 recovery primitive。",
+      "exit": [
+        "存在 recovery primitive",
+        "硬删 runbook 与回滚验证完成"
+      ],
+      "evidence": [
+        "staging inventory",
+        "promotion/ageout metrics"
+      ],
+      "owner": "sediment-staging",
+      "consumer": [
+        "staging lifecycle"
+      ],
+      "renewal_count": 0,
+      "risk_class": "high",
+      "next_action": "先设计 recovery primitive，再讨论硬删。"
+    },
+    {
+      "id": "knowledge.o5-confidence-fallback-review",
+      "partition": "knowledge",
+      "title": "O5 conf≥8 fallback 巡检",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "observe",
+      "authorization_status": "authorized",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "持续确认 conf≥8 非指令 durable fallback 没有引入用户纠正或召回漏失。",
+      "exit": [
+        "审计窗口内无被用户纠正的 accepted corrections 或 recall misses",
+        "fallback 可移除并回到 ADR 原文谓词"
+      ],
+      "evidence": [
+        "tier1_direct_write audit",
+        "O5 sunset metrics"
+      ],
+      "owner": "knowledge-writer",
+      "consumer": [
+        "tier1 direct write gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "medium",
+      "next_action": "执行一次窗口巡检并记录结论。"
+    },
+    {
+      "id": "memory.adr0035-0037-slim-ingest",
+      "partition": "memory",
+      "title": "ADR 0035/0036/0037 slim+ingest",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "blocked_on_definition",
+      "authorization_status": "not_applicable",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "slim 与 ingest 尚未形成可退出的验收闭环。",
+      "exit": [
+        "slim/ingest 验收口径、数据样本与回滚边界齐备"
+      ],
+      "evidence": [
+        "ADR 0035/0036/0037 implementation records",
+        "ingest metrics"
+      ],
+      "owner": "memory-ingest",
+      "consumer": [
+        "memory ingest pipeline"
+      ],
+      "renewal_count": 0,
+      "risk_class": "medium",
+      "next_action": "汇总三项实态并拆出最小验收批次。"
+    },
+    {
+      "id": "outcome.unknown-attribution",
+      "partition": "outcome",
+      "title": "outcome unknown 占比溯因",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "observe",
+      "authorization_status": "authorized",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "missing-used observation bucket 已拆为 per-source ratio、自述与 derived attribution；等待真实 reinforced proposal disposition。",
+      "exit": [
+        "per-source ratio 与 derived attribution 稳定可解释",
+        "真实 reinforced pattern 生成 proposal 并完成 operator disposition"
+      ],
+      "evidence": [
+        "outcome-ledger",
+        "2026-07-08 outcome unknown triage",
+        "prompt-revision-proposals sidecar"
+      ],
+      "owner": "sediment-outcome",
+      "consumer": [
+        "outcome classifier",
+        "prompt revision proposal gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "medium",
+      "next_action": "跟踪 per-source ratio，等待真实 reinforced pattern 与 operator disposition。"
+    },
+    {
+      "id": "memory.p7-low-frequency-three-arm-gate",
+      "partition": "memory",
+      "title": "P7 低频域三臂 gate",
+      "human_section": "健康 gated-defer",
+      "register_class": "gated",
+      "phase_status": "gated_deferred",
+      "authorization_status": "blocked_on_trigger",
+      "entered": "2026-06-21",
+      "review_by": "2026-07-24",
+      "current": "低频域尚无任一 gate arm 的真实触发证据。",
+      "exit": [
+        "30 天内足量 constraint-evidence，或真实 identity-class 塑形错误，或可 replay 历史事实样本触发"
+      ],
+      "evidence": [
+        "roadmap P7",
+        "ADR0039 P7 consensus"
+      ],
+      "owner": "memory-architecture",
+      "consumer": [
+        "P7 implementation gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "low",
+      "next_action": "无触发继续 deferred；触发时按 P7 runbook 执行。"
+    },
+    {
+      "id": "memory.l3-chunks-embeddings-graph",
+      "partition": "memory",
+      "title": "L3 chunks/embeddings/graph 表",
+      "human_section": "健康 gated-defer",
+      "register_class": "gated",
+      "phase_status": "gated_deferred",
+      "authorization_status": "blocked_on_trigger",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "派生索引保持可重建，不作为 Git SOT；当前无必须物化证据。",
+      "exit": [
+        "真实规模、查询延迟或恢复成本证明需要物化"
+      ],
+      "evidence": [
+        "ADR0039 L3 schema defer",
+        "runtime search metrics"
+      ],
+      "owner": "memory-l3",
+      "consumer": [
+        "L3 schema gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "low",
+      "next_action": "保持 deferred；触发时先做 schema 与 rebuild 评审。"
+    },
+    {
+      "id": "constraint.adr0034-staleness-resync",
+      "partition": "constraint",
+      "title": "ADR 0034 staleness re-sync",
+      "human_section": "健康 gated-defer",
+      "register_class": "gated",
+      "phase_status": "gated_deferred",
+      "authorization_status": "blocked_on_trigger",
+      "entered": "2026-07-08",
+      "review_by": "2026-07-24",
+      "current": "staleness re-sync 当前无故障触发。",
+      "exit": [
+        "出现 staleness 复发、跨源不一致或 re-sync 失败证据"
+      ],
+      "evidence": [
+        "ADR0034 implementation plan",
+        "staleness audit"
+      ],
+      "owner": "constraint-runtime",
+      "consumer": [
+        "staleness recovery gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "low",
+      "next_action": "无触发不推进；触发即进入修复批次。"
+    }
+  ]
+}

@@ -1,10 +1,9 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { scanWholeL1Validated, type ValidatedL1ScanRecord } from "../_shared/l1-schema-registry";
 
 const sqliteModule = require("node:sqlite") as { DatabaseSync: new (filename: string) => DatabaseSyncLike };
-
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 interface DatabaseSyncLike {
   exec(sql: string): void;
@@ -36,37 +35,6 @@ function sha256Hex(input: string): string {
   return crypto.createHash("sha256").update(input, "utf-8").digest("hex");
 }
 
-function canonicalJson(value: JsonValue): string {
-  if (value === null) return "null";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("non-finite number in canonical JSON");
-    return JSON.stringify(Object.is(value, -0) ? 0 : value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key]!)}`).join(",")}}`;
-}
-
-function toJsonValue(value: unknown, at = "root"): JsonValue {
-  if (value === null) return null;
-  if (typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error(`non-finite number at ${at}`);
-    return Object.is(value, -0) ? 0 : value;
-  }
-  if (Array.isArray(value)) return value.map((item, index) => toJsonValue(item, `${at}[${index}]`));
-  if (value && typeof value === "object") {
-    const out: Record<string, JsonValue> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      const child = (value as Record<string, unknown>)[key];
-      if (child !== undefined) out[key] = toJsonValue(child, `${at}.${key}`);
-    }
-    return out;
-  }
-  throw new Error(`unsupported JSON value at ${at}: ${typeof value}`);
-}
-
 function listFiles(root: string, predicate = (_file: string) => true): string[] {
   if (!fs.existsSync(root)) return [];
   const out: string[] = [];
@@ -83,10 +51,6 @@ function listFiles(root: string, predicate = (_file: string) => true): string[] 
 
 function relativeUnix(root: string, file: string): string {
   return path.relative(root, file).split(path.sep).join("/");
-}
-
-function expectedEventRelativePath(eventId: string): string {
-  return `l1/events/sha256/${eventId.slice(0, 2)}/${eventId.slice(2, 4)}/${eventId}.json`;
 }
 
 function openDatabase(dbPath: string): DatabaseSyncLike {
@@ -186,35 +150,29 @@ function scalarString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function mirrorL1Events(abrainHome: string, db: DatabaseSyncLike, failures: string[]): number {
-  const files = listFiles(path.join(abrainHome, "l1", "events"), (file) => file.endsWith(".json"));
+// Canonical-path R3.4.2 P1-S3: the L3 mirror consumes centrally validated scan
+// records — envelope/hash/path/role/producer were verified by the schema-role
+// registry before this function runs, so hash/path mismatch failure branches
+// are impossible here; corruption anywhere in L1 aborts the sync before any
+// SQLite mutation instead of being mirrored with a failure row.
+function mirrorL1Events(abrainHome: string, records: readonly ValidatedL1ScanRecord[], db: DatabaseSyncLike): number {
   const insert = db.prepare("INSERT INTO l1_events(event_id, body_hash, schema_name, event_type, created_at_utc, source_domain, file_path, content_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-  for (const file of files) {
-    const rel = relativeUnix(abrainHome, file);
-    const raw = fs.readFileSync(file, "utf-8");
-    try {
-      const envelope = JSON.parse(raw) as Record<string, unknown>;
-      const body = envelope.body as Record<string, unknown> | undefined;
-      const eventId = scalarString(envelope.event_id) || "";
-      const bodyHash = sha256Hex(canonicalJson(toJsonValue(body ?? null)));
-      const expectedRel = /^[0-9a-f]{64}$/.test(eventId) ? expectedEventRelativePath(eventId) : "";
-      if (eventId !== bodyHash || envelope.body_hash !== bodyHash) failures.push(`${rel}: l3_body_hash_mismatch`);
-      if (expectedRel && rel !== expectedRel) failures.push(`${rel}: l3_content_address_path_mismatch`);
-      insert.run(
-        eventId || sha256Hex(raw),
-        String(envelope.body_hash || bodyHash),
-        String(envelope.schema || "unknown"),
-        String(body?.event_type || "unknown"),
-        scalarString(body?.created_at_utc),
-        String(body?.intent && typeof body.intent === "object" && (body.intent as Record<string, unknown>).domain_hint || "unknown"),
-        rel,
-        sha256Hex(raw),
-      );
-    } catch (err) {
-      failures.push(`${rel}: l3_invalid_event_json:${err instanceof Error ? err.message : String(err)}`);
-    }
+  for (const record of records) {
+    const rel = record.relativePath ?? relativeUnix(abrainHome, record.filePath ?? "");
+    const raw = fs.readFileSync(record.filePath ?? path.resolve(abrainHome, ...rel.split("/")), "utf-8");
+    const body = record.body as Record<string, unknown>;
+    insert.run(
+      record.eventId,
+      record.bodyHash,
+      record.registration.envelope_schema,
+      String(body.event_type || "unknown"),
+      scalarString(body.created_at_utc),
+      String(body.intent && typeof body.intent === "object" && (body.intent as Record<string, unknown>).domain_hint || "unknown"),
+      rel,
+      sha256Hex(raw),
+    );
   }
-  return files.length;
+  return records.length;
 }
 
 function edgeTypeForOperation(operationHint: string): string {
@@ -230,28 +188,14 @@ function edgeTypeForOperation(operationHint: string): string {
   }
 }
 
-function mirrorEventEdges(abrainHome: string, db: DatabaseSyncLike, failures: string[]): number {
-  const knownEventIds = new Set<string>();
-  for (const file of listFiles(path.join(abrainHome, "l1", "events"), (candidate) => candidate.endsWith(".json"))) {
-    try {
-      const envelope = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
-      const eventId = scalarString(envelope.event_id);
-      if (eventId) knownEventIds.add(eventId);
-    } catch { /* invalid event already reported by mirrorL1Events */ }
-  }
+function mirrorEventEdges(abrainHome: string, records: readonly ValidatedL1ScanRecord[], db: DatabaseSyncLike, failures: string[]): number {
+  const knownEventIds = new Set<string>(records.map((record) => record.eventId));
   const insert = db.prepare("INSERT OR IGNORE INTO event_edges(parent_event_id, child_event_id, edge_type, ordinal, created_at_utc) VALUES (?, ?, ?, ?, ?)");
   let count = 0;
-  for (const file of listFiles(path.join(abrainHome, "l1", "events"), (candidate) => candidate.endsWith(".json"))) {
-    const rel = relativeUnix(abrainHome, file);
-    let envelope: Record<string, unknown>;
-    try {
-      envelope = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const childId = scalarString(envelope.event_id);
-    const body = envelope.body as Record<string, unknown> | undefined;
-    if (!childId || !body) continue;
+  for (const record of records) {
+    const rel = record.relativePath ?? relativeUnix(abrainHome, record.filePath ?? "");
+    const childId = record.eventId;
+    const body = record.body as Record<string, unknown>;
     const parents = Array.isArray(body.causal_parents) ? body.causal_parents : [];
     const operationHint = String(((body.intent as Record<string, unknown> | undefined)?.operation_hint) ?? "");
     const edgeType = edgeTypeForOperation(operationHint);
@@ -354,12 +298,23 @@ function mirrorProjectorState(abrainHome: string, knowledgeRoot: string, db: Dat
   return count;
 }
 
-export function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string; knowledgeLatestDir?: string }): Adr0039L3SyncResult {
+export async function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string; knowledgeLatestDir?: string }): Promise<Adr0039L3SyncResult> {
   const abrainHome = path.resolve(args.abrainHome);
   const dbPath = path.resolve(args.dbPath || path.join(abrainHome, ".state", "sediment", "adr0039-l3", "adr0039.sqlite"));
   // ADR 0039 B1: Knowledge L2 root is flag-resolved by the caller; default keeps
   // the legacy .state location so existing behavior is unchanged.
   const knowledgeLatestDir = path.resolve(args.knowledgeLatestDir || path.join(abrainHome, ".state", "sediment", "knowledge-projection", "latest"));
+  // Canonical-path R3.4.2 P1-S3: whole-L1 validation through the central
+  // schema-role registry BEFORE any SQLite mutation. A corrupt or unknown
+  // envelope anywhere in L1 aborts the mirror closed with zero L3 writes.
+  let scanRecords: readonly ValidatedL1ScanRecord[];
+  try {
+    const scan = await scanWholeL1Validated({ abrainHome });
+    scanRecords = scan.all;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, dbPath, counts: { l1Events: 0, eventEdges: 0, l2Views: 0, searchCorpusRows: 0, projectorState: 0, jobs: 0, diagnostics: 1 }, failures: [`l3_l1_scan_failed:${message}`] };
+  }
   const failures: string[] = [];
   const db = openDatabase(dbPath);
   const startedAt = new Date().toISOString();
@@ -371,8 +326,8 @@ export function syncAdr0039L3Store(args: { abrainHome: string; dbPath?: string; 
     // vector + graph tables are deliberately absent (no load evidence), not
     // forgotten. Retire this row when the evidence-gate fires and the tables land.
     db.prepare("INSERT INTO meta(key, value) VALUES (?, ?)").run("schema_deferred", "vector(chunks,embeddings)+graph(graph_nodes,graph_edges): deferred, no load evidence (ADR0039 §4.5; vectors in .state/memory/embeddings.json per ADR0035; graph zero consumers)");
-    const l1Events = mirrorL1Events(abrainHome, db, failures);
-    const eventEdges = mirrorEventEdges(abrainHome, db, failures);
+    const l1Events = mirrorL1Events(abrainHome, scanRecords, db);
+    const eventEdges = mirrorEventEdges(abrainHome, scanRecords, db, failures);
     const l2Views = mirrorL2Views(abrainHome, knowledgeLatestDir, db, failures);
     const searchCorpusRows = mirrorKnowledgeSearchCorpus(abrainHome, knowledgeLatestDir, db, failures);
     const projectorState = mirrorProjectorState(abrainHome, knowledgeLatestDir, db);

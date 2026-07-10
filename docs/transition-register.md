@@ -1,6 +1,47 @@
 # 第二大脑过渡态登记表
 
-本表登记当前仍有 shadow、observe、dogfood、gated-defer 语义的过渡面。已完成且无后续决策面的历史阶段不重复登记。
+`docs/transition-register.machine.json` 是本登记表的 machine source of truth；本文仅是人类可读镜像。所有状态、授权、复审日期和 stable ID 变更必须先更新 JSON，再同步下面的确定性镜像与详细说明。
+
+<!-- transition-register-machine-mirror:start -->
+## Machine source 镜像
+
+> 此区块由 `docs/transition-register.machine.json` 确定性生成；JSON 是 machine source of truth，Markdown 仅用于人类阅读。
+
+| Stable ID | 面 | Phase | Authorization | Review by | Risk |
+|---|---|---|---|---|---|
+| `canonical_path.p1` | canonical_path P1 | `in_progress` | `authorized` | 2026-07-24 | `critical` |
+| `canonical_path.p2` | canonical_path P2 | `blocked` | `not_authorized` | 2026-07-24 | `critical` |
+| `canonical_path.p3` | canonical_path P3 | `blocked` | `not_authorized` | 2026-07-24 | `critical` |
+| `canonical_path.p4a` | canonical_path P4a | `blocked` | `not_authorized` | 2026-07-24 | `critical` |
+| `canonical_path.p4b` | canonical_path P4b | `blocked` | `not_authorized` | 2026-07-24 | `critical` |
+| `constraint.adr0034-staleness-resync` | ADR 0034 staleness re-sync | `gated_deferred` | `blocked_on_trigger` | 2026-07-24 | `low` |
+| `constraint.auto-refresh-failed-run-retry` | auto-refresh failed-run 重试 | `observe` | `authorized` | 2026-07-24 | `high` |
+| `constraint.dual-read-audit-retirement` | dual-read audit 关闭 | `blocked_on_prerequisite` | `not_applicable` | 2026-07-24 | `medium` |
+| `constraint.dual-read-flip` | Constraint 双读 flip | `blocked_on_evidence` | `separate_authorization_required` | 2026-07-24 | `critical` |
+| `constraint.read-flip-state-to-git-l2` | read-flip .state→git L2 | `blocked` | `separate_authorization_required` | 2026-07-24 | `critical` |
+| `constraint.tier2-legacy-write-gate` | tier2RulesLegacyWriteGate observe→block | `observe` | `blocked_on_prerequisite` | 2026-07-24 | `high` |
+| `dispatch.hub-dogfood` | hub dogfood | `dogfood` | `authorized` | 2026-07-15 | `high` |
+| `forgetting.kind-evidence-strength-v1` | KIND_EVIDENCE_STRENGTH 映射表（v1 过渡面） | `observe` | `authorized` | 2026-07-24 | `medium` |
+| `forgetting.upstream-wiring` | forgetting 上游接线 | `in_progress` | `authorized` | 2026-07-24 | `high` |
+| `knowledge.legacy-physical-retirement` | Knowledge legacy 物删 | `ready_for_decision` | `separate_authorization_required` | 2026-07-24 | `high` |
+| `knowledge.o5-confidence-fallback-review` | O5 conf≥8 fallback 巡检 | `observe` | `authorized` | 2026-07-24 | `medium` |
+| `memory.adr0035-0037-slim-ingest` | ADR 0035/0036/0037 slim+ingest | `blocked_on_definition` | `not_applicable` | 2026-07-24 | `medium` |
+| `memory.dedup-archived-dense` | dedup-archived 无 dense 通道 | `blocked_on_implementation` | `authorized` | 2026-07-24 | `medium` |
+| `memory.l3-chunks-embeddings-graph` | L3 chunks/embeddings/graph 表 | `gated_deferred` | `blocked_on_trigger` | 2026-07-24 | `low` |
+| `memory.p7-low-frequency-three-arm-gate` | P7 低频域三臂 gate | `gated_deferred` | `blocked_on_trigger` | 2026-07-24 | `low` |
+| `outcome.unknown-attribution` | outcome unknown 占比溯因 | `observe` | `authorized` | 2026-07-24 | `medium` |
+| `staging.hard-delete` | staging 硬删 | `blocked` | `separate_authorization_required` | 2026-07-24 | `high` |
+<!-- transition-register-machine-mirror:end -->
+
+## Canonical path 阶段门
+
+| 面 | 进入时间 | 当前状态 | 退出条件 | 证据源 | 下一动作 |
+|---|---|---|---|---|---|
+| canonical_path P1 | 2026-07-10 | `in_progress / authorized`；只授权 P1 实现与真实取证，不改变 Knowledge/Constraint canonical read 或 fold。 | P1-S3/S1/S2/S4、P1-B、P1-A 全部有真实外部证据，且 completion record 落盘。 | R3.4.2 living plan、P1 baseline dossier。 | 完成 P1；不得自动越过 P1 授权边界。 |
+| canonical_path P2 | 2026-07-10 | `blocked / not_authorized`；Knowledge fold-input truth cutover 未执行。 | P1 完成并取得新的独立 unanimous multi-T0 授权，再满足 byte equality 与完整链/冲突门。 | R3.4.2 living plan Phase Table。 | 仅准备候选 diff 与只读证据。 |
+| canonical_path P3 | 2026-07-10 | `blocked / not_authorized`；Constraint read flip 未执行。 | P1 完成并取得新的独立 unanimous multi-T0 授权，再满足 genesis、K=5 与连续 7 日门。 | R3.4.2 living plan Phase Table。 | 仅准备 read-source diff 与 verifier。 |
+| canonical_path P4a | 2026-07-10 | `blocked / not_authorized`；legacy archive move 未执行且禁止物理删除。 | P2/P3 均完成并取得 P4a 独立授权，完成 snapshot manifest 与 restore byte verify。 | R3.4.2 living plan Phase Table。 | 保持 blocked，不移动或删除 legacy 内容。 |
+| canonical_path P4b | 2026-07-10 | `blocked / not_authorized`；最终 observation/declaration 未开始。 | P4a 完成并取得 P4b 独立授权，固定 14 日门与全部事件门通过。 | R3.4.2 living plan Phase Table。 | 保持 blocked；P4a 完成不自动授权 P4b。 |
 
 ## 已就绪待决策
 

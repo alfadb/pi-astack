@@ -88,6 +88,21 @@ function parseTimestampMs(value) {
   return Number.isFinite(ms) ? ms : null;
 }
 
+// Canonical-path R3.4.2 P1-S3: the central machine schema-role registry is the
+// single source of truth for which envelope schemas may exist in L1. Unknown
+// envelope schemas are a blocking corpus violation, not a tolerated skip.
+const SCRIPT_DIR = path.dirname(new URL(import.meta.url).pathname);
+const L1_REGISTRY = JSON.parse(fs.readFileSync(path.resolve(SCRIPT_DIR, "..", "schemas", "l1-schema-role-registry.json"), "utf8"));
+const KNOWN_ENVELOPE_SCHEMAS = new Set(L1_REGISTRY.entries.map((entry) => entry.envelope_schema));
+const ACTIVITY_BLOCKING_REASONS = new Set([
+  "invalid_json",
+  "missing_body",
+  "invalid_event_id",
+  "path_mismatch",
+  "body_hash_mismatch",
+  "unknown_envelope_schema",
+]);
+
 function eventSchema(envelope, body) {
   return String(body?.event_schema_version || envelope?.schema || "unknown");
 }
@@ -130,6 +145,7 @@ function classifySourceEvent(envelope, file, options) {
   if (path.resolve(file) !== path.resolve(expectedPath)) return { ok: false, reason: "path_mismatch" };
   const bodyHash = sha256Hex(canonicalJson(body));
   if (envelope.body_hash !== bodyHash || eventId !== bodyHash) return { ok: false, reason: "body_hash_mismatch" };
+  if (!KNOWN_ENVELOPE_SCHEMAS.has(String(envelope?.schema || ""))) return { ok: false, reason: "unknown_envelope_schema" };
   if (isProjectionEvent(envelope, body)) return { ok: false, reason: "derived_projection_event" };
   if (!schema.endsWith("evidence-event/v1")) return { ok: false, reason: "unsupported_schema" };
   if (isLegacyImport(body) && !options.includeLegacy) return { ok: false, reason: "legacy_import_excluded" };
@@ -399,6 +415,14 @@ export function writeProjectActivityProjection(args) {
   const outputRoot = path.resolve(expandHome(args.outputRoot || path.join(abrainHome, "l2", "views", "activity")));
   assertSafeOutputRoot(abrainHome, outputRoot);
   const result = buildProjectActivityView({ ...args, abrainHome });
+  // Canonical-path R3.4.2 P1-S3: a corrupted or unknown event anywhere in the
+  // scanned corpus fails the projection write closed (zero L2 mutation).
+  const blocking = Object.entries(result.view.diagnostics)
+    .filter(([reason]) => ACTIVITY_BLOCKING_REASONS.has(reason))
+    .map(([reason, count]) => `${reason}:${count}`);
+  if (blocking.length > 0) {
+    throw new Error(`ACTIVITY_L1_CORPUS_INVALID: refusing to write activity L2 over an invalid L1 corpus (${blocking.join(", ")})`);
+  }
   const latestDir = path.join(outputRoot, "latest");
   const markdownPath = path.join(latestDir, "project-time-allocation.md");
   const manifestPath = path.join(latestDir, "manifest.json");

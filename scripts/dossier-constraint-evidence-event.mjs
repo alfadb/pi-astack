@@ -214,6 +214,8 @@ const replayJson = arg("replay-json", "");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-dossier-stage-"));
 for (const file of [
   "extensions/_shared/durable-write.ts",
+  "extensions/_shared/jcs.ts",
+  "extensions/_shared/l1-schema-registry.ts",
   "extensions/sediment/constraint-evidence/types.ts",
   "extensions/sediment/constraint-evidence/canonical-json.ts",
   "extensions/sediment/constraint-evidence/diagnostics.ts",
@@ -224,6 +226,8 @@ for (const file of [
 ]) {
   stageTs(tmp, file);
 }
+fs.mkdirSync(path.join(tmp, "schemas"), { recursive: true });
+fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(tmp, "schemas", "l1-schema-role-registry.json"));
 
 const {
   appendConstraintEvidenceEvent,

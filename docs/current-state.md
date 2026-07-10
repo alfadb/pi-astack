@@ -71,7 +71,7 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 | 项目知识 legacy surface | `~/.abrain/projects/<projectId>/...` 保留为回滚、调试、迁移输入；Knowledge 稳态写入走 L1 event，稳态读取走 L2 projection。 |
 | 世界知识 legacy surface | `~/.abrain/knowledge/<slug>.md` 保留为回滚、调试、迁移输入；world 知识稳态读取来自 L2 projection。 |
 | Forgetting 运行实态 | decay→lifecycle_proposal 接线已落地（60b5d40，2026-07-08）；pending、demote 与 reactivation 计数以 `~/.abrain/.state/sediment/entry-lifecycle-proposals.jsonl`、forgetting-demote-ledger 与 archive-reactivation ledger 为准。剩余缺口是 executor 消费一个受控批次并让 demote ledger / reactivation window 可审计。 |
-| 过渡态登记 | 当前 shadow/observe/dogfood/gated-defer 面以 [`docs/transition-register.md`](./transition-register.md) 为唯一登记表；新增过渡态必须同步登记退出条件。 |
+| 过渡态登记 | 当前 shadow/observe/dogfood/gated-defer 面以 [`docs/transition-register.machine.json`](./transition-register.machine.json) 为 machine source of truth；[`docs/transition-register.md`](./transition-register.md) 是确定性人类可读镜像。新增过渡态必须先登记稳定 ID、退出条件、授权与复审字段。 |
 | workflows | `~/.abrain/workflows/` 或 `~/.abrain/projects/<id>/workflows/`。 |
 | `.pensieve/` | legacy 只读迁移源；sediment 不再写入。 |
 | 跨设备同步 | sediment commit 后后台 push、启动 `fetch` 后先试 `merge --ff-only`，分叉时退到确定性 `merge --no-ff`（git 自带 3-way）；**LLM 解冲突被明确拒绝（知识库幻觉风险），真冲突 abort 并向用户出 runbook**（ADR 0020）。 |

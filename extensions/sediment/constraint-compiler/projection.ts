@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { validateL1WritePreflight } from "../../_shared/l1-schema-registry";
 import { canonicalJson, canonicalJsonValue } from "../constraint-evidence/canonical-json";
 import { constraintEvidenceEventPath, sha256Hex } from "../constraint-evidence/hash-envelope";
 import { guardConstraintEvidencePath, isPathInside } from "../constraint-evidence/append";
@@ -128,6 +129,18 @@ export async function appendConstraintProjectionEvent(abrainHome: string, body: 
   // l1/events-only path guard (rejects canonical rules/knowledge/projects roots).
   const guard = guardConstraintEvidencePath({ abrainHome, targetPath: filePath });
   if (!guard.ok) return { ok: false, status: "path_violation", eventId, filePath };
+  // Canonical-path R3.4.2 P1-S3 write gate: central registry role/producer
+  // check plus lstat+realpath symlink-escape validation before durable write.
+  try {
+    await validateL1WritePreflight({
+      abrainHome,
+      envelope,
+      targetPath: filePath,
+      expected: { domain: "constraint", role: "canonical" },
+    });
+  } catch {
+    return { ok: false, status: "path_violation", eventId, filePath };
+  }
   const content = constraintProjectionEnvelopeJson(envelope);
   try {
     const existing = await fs.readFile(filePath, "utf-8");

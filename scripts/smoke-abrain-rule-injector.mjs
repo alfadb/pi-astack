@@ -83,6 +83,8 @@ function stageModuleTree(outRoot) {
     ["extensions/_shared/footer-status.ts", "_shared/footer-status.js"],
     ["extensions/_shared/runtime.ts", "_shared/runtime.js"],
     ["extensions/_shared/durable-write.ts", "_shared/durable-write.js"],
+    ["extensions/_shared/jcs.ts", "_shared/jcs.js"],
+    ["extensions/_shared/l1-schema-registry.ts", "_shared/l1-schema-registry.js"],
     ["extensions/memory/parser.ts", "memory/parser.js"],
     // ADR 0034 P1: parser.ts now imports ./direction-impact
     // (parseDirectionImpact). Stage it so the transpiled require resolves.
@@ -113,6 +115,8 @@ function stageModuleTree(outRoot) {
     new (require("node:vm").Script)(out, { filename: src });
     writeFile(path.join(outRoot, dst), out);
   }
+  fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
 }
 
 function writeRule(file, fm, body) {

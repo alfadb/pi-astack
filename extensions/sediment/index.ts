@@ -98,6 +98,7 @@ import {
 import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
+import { loadAndValidateTransitionRegister } from "../_shared/transition-register";
 import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 
@@ -1738,7 +1739,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           getSessionId?(): string | undefined | null;
           getSessionFile?(): string | undefined | null;
         };
-        ui?: { setStatus?(extId: string, message?: string): void };
+        ui?: {
+          setStatus?(extId: string, message?: string): void;
+          notify?(message: string, type?: "info" | "warning" | "error"): void;
+        };
         cwd?: string;
         modelRegistry?: unknown;
       },
@@ -1749,6 +1753,21 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
+
+      // Canonical-path R3.4.2 P1-S3: validate the repo-owned machine
+      // transition source at startup. This is read-only and warning-only; it
+      // must not alter fetch, self-heal, canonical read, or fold behavior.
+      try {
+        loadAndValidateTransitionRegister();
+      } catch (err) {
+        const message = `canonical-path transition register invalid: ${err instanceof Error ? err.message : String(err)}`;
+        try {
+          if (ctx.ui?.notify) ctx.ui.notify(message, "warning");
+          else console.error(`[sediment] ${message}`);
+        } catch {
+          console.error(`[sediment] ${message}`);
+        }
+      }
 
       // ADR 0025 P0: ensure the sidecar staging directory exists.
       const abrainHome = resolveAbrainHomeForSediment();

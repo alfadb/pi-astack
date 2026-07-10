@@ -86,6 +86,8 @@ function loadProjectionModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-constraint-projection-"));
   // Full transitive dependency tree of constraint-compiler/projection.ts.
   for (const src of [
+    "extensions/_shared/jcs.ts",
+    "extensions/_shared/l1-schema-registry.ts",
     "extensions/sediment/sanitizer.ts",
     "extensions/sediment/constraint-evidence/types.ts",
     "extensions/sediment/constraint-evidence/canonical-json.ts",
@@ -99,6 +101,8 @@ function loadProjectionModule() {
     "extensions/sediment/constraint-compiler/render.ts",
     "extensions/sediment/constraint-compiler/projection.ts",
   ]) stageTs(outRoot, src);
+  fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
   return createRequire(path.join(outRoot, "runner.cjs"))("./sediment/constraint-compiler/projection.js");
 }
 

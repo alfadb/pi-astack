@@ -69,6 +69,8 @@ const integrationSrc = fs.readFileSync(path.join(repoRoot, "extensions/sediment/
 const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-constraint-evidence-"));
 for (const file of [
   "extensions/_shared/durable-write.ts",
+  "extensions/_shared/jcs.ts",
+  "extensions/_shared/l1-schema-registry.ts",
   "extensions/sediment/constraint-evidence/types.ts",
   "extensions/sediment/constraint-evidence/canonical-json.ts",
   "extensions/sediment/constraint-evidence/diagnostics.ts",
@@ -82,6 +84,8 @@ for (const file of [
 ]) {
   stageTs(outRoot, file);
 }
+fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
+fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
 
 const { canonicalJson, canonicalJsonValue } = require(path.join(outRoot, "sediment", "constraint-evidence", "canonical-json.js"));
 const {

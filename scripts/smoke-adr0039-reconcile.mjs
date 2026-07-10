@@ -65,6 +65,10 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
 function loadKnowledgeEvidenceModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-knowledge-evidence-"));
   stageTs(outRoot, "extensions/_shared/durable-write.ts");
+  stageTs(outRoot, "extensions/_shared/jcs.ts");
+  stageTs(outRoot, "extensions/_shared/l1-schema-registry.ts");
+  fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
   stageTs(outRoot, "extensions/memory/settings.ts");
   stageTs(outRoot, "extensions/memory/utils.ts");
   stageTs(outRoot, "extensions/sediment/knowledge-evidence.ts");
@@ -73,6 +77,10 @@ function loadKnowledgeEvidenceModule() {
 
 function loadAdr0039L3Module() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-l3-"));
+  stageTs(outRoot, "extensions/_shared/jcs.ts");
+  stageTs(outRoot, "extensions/_shared/l1-schema-registry.ts");
+  fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
   stageTs(outRoot, "extensions/sediment/adr0039-l3.ts");
   return createRequire(path.join(outRoot, "runner.cjs"))("./sediment/adr0039-l3.js");
 }
@@ -416,11 +424,14 @@ function readDecisionInputRoot(decisionPath) {
 // knowledge bodies can contain the literal schema string). fs-mtime is NOT used
 // (non-deterministic across clone/checkout). Mirrors NS-2 FOREIGN_SKIP allowlist.
 const CONSTRAINT_EVIDENCE_ENVELOPE_SCHEMA = "constraint-evidence-envelope/v1";
-const KNOWN_L1_ENVELOPE_SCHEMAS = new Set([
-  "constraint-evidence-envelope/v1",
-  "knowledge-evidence-envelope/v1",
-  "constraint-projection-envelope/v1",
-]);
+// Canonical-path R3.4.2 P1-S3: the KNOWN set is registry-driven — the central
+// machine schema-role registry is the single source of truth for which
+// envelope schemas may exist in L1 (active canonical/evidence plus approved
+// phase-disabled future meta schemas). No second hardcoded allowlist.
+const KNOWN_L1_ENVELOPE_SCHEMAS = new Set(
+  JSON.parse(fs.readFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), "utf8"))
+    .entries.map((entry) => entry.envelope_schema),
+);
 function sanitizeSchemaLabel(value) {
   return String(value).replace(/[^\x20-\x7e]/g, "").slice(0, 64);
 }
@@ -626,10 +637,10 @@ function validateConstraintL2(abrainHome) {
   return { present: true, failures };
 }
 
-function validateL3Store(abrainHome, knowledgeLatestDir) {
+async function validateL3Store(abrainHome, knowledgeLatestDir) {
   if (!process.versions.sqlite) return { ok: false, dbPath: null, counts: null, failures: ["adr0039-l3: node_sqlite_unavailable"] };
   const l3 = loadAdr0039L3Module();
-  const result = l3.syncAdr0039L3Store({ abrainHome, knowledgeLatestDir });
+  const result = await l3.syncAdr0039L3Store({ abrainHome, knowledgeLatestDir });
   return result;
 }
 
@@ -697,14 +708,14 @@ function loadRuntimeThresholds() {
   };
 }
 
-function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
+async function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   const l1 = validateL1Events(abrainHome);
   const knowledgeLatestDir = resolveKnowledgeLatestDir(abrainHome, opts.knowledgeLatestDir);
   const projectionMode = resolveProjectionMode(opts.projectionMode);
   const knowledge = validateKnowledgeProjection(abrainHome, knowledgeLatestDir, projectionMode);
   const constraint = validateConstraintShadow(abrainHome, opts);
   const constraintL2 = validateConstraintL2(abrainHome);
-  const l3 = validateL3Store(abrainHome, knowledgeLatestDir);
+  const l3 = await validateL3Store(abrainHome, knowledgeLatestDir);
   const coverage = computeLegacyKnowledgeCoverage(abrainHome);
   const dirty = validateDirtyDerived(abrainHome);
   const l1AppendOnly = validateL1AppendOnlyOnPushedRange(abrainHome);
@@ -809,7 +820,7 @@ async function buildFixtureTree(l2OutputRoot = "state") {
 if (hasFlag("abrain")) {
   const pushGateOnly = hasFlag("push-gate-only");
   const abrainHome = path.resolve(expandHome(arg("abrain", path.join(os.homedir(), ".abrain"))));
-  const result = reconcile(abrainHome);
+  const result = await reconcile(abrainHome);
   printResult(result);
   // pre-push passes --push-gate-only: only blocker-tier (pushed content) blocks.
   // standalone (CI): blocker + liveness (§12 dead-projector / unknown schema) -> non-zero.
@@ -820,14 +831,14 @@ if (hasFlag("abrain")) {
 console.log("ADR0039 reconcile smoke");
 const fixture = await buildFixtureTree();
 const stateFixtureOpts = (home) => ({ staleAfterMs: 24 * 60 * 60 * 1000, minCoverageRatio: 1, knowledgeLatestDir: path.join(home, ".state", "sediment", "knowledge-projection", "latest"), projectionMode: "single" });
-const clean = reconcile(fixture.abrainHome, stateFixtureOpts(fixture.abrainHome));
+const clean = await reconcile(fixture.abrainHome, stateFixtureOpts(fixture.abrainHome));
 printResult(clean);
 if (clean.failures.length) process.exit(1);
 const eventPath = expectedEventPath(fixture.abrainHome, fixture.eventId);
 const corrupted = readJson(eventPath);
 corrupted.body.payload.title = "Corrupted Fixture";
 writeFile(eventPath, `${JSON.stringify(corrupted, null, 2)}\n`);
-const dirty = reconcile(fixture.abrainHome, stateFixtureOpts(fixture.abrainHome));
+const dirty = await reconcile(fixture.abrainHome, stateFixtureOpts(fixture.abrainHome));
 if (!dirty.failures.some((failure) => failure.includes("body_hash_mismatch"))) {
   console.log("FAIL — corrupted fixture did not trigger body_hash_mismatch");
   process.exit(1);
@@ -842,7 +853,7 @@ execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "add", "."], { encoding:
 execFileSync("git", ["-C", dirtyViewFixture.abrainHome, "commit", "-m", "baseline"], { encoding: "utf8" });
 const dirtyProjectedPath = listFiles(path.join(dirtyViewFixture.abrainHome, ".state", "sediment", "knowledge-projection", "latest"), (file) => file.endsWith(".md"))[0];
 writeFile(dirtyProjectedPath, `${fs.readFileSync(dirtyProjectedPath, "utf8")}\n<!-- dirty derived view -->\n`);
-const dirtyView = reconcile(dirtyViewFixture.abrainHome, stateFixtureOpts(dirtyViewFixture.abrainHome));
+const dirtyView = await reconcile(dirtyViewFixture.abrainHome, stateFixtureOpts(dirtyViewFixture.abrainHome));
 if (!dirtyView.failures.some((failure) => failure.includes("dirty_derived_view:"))) {
   console.log("FAIL — dirty L2 fixture did not trigger dirty_derived_view");
   process.exit(1);
@@ -889,7 +900,7 @@ console.log("PASS — dirty L2 fixture is rejected.");
 if (process.versions.sqlite) {
   const ftsFixture = await buildFixtureTree();
   const l3 = loadAdr0039L3Module();
-  const syncResult = l3.syncAdr0039L3Store({ abrainHome: ftsFixture.abrainHome });
+  const syncResult = await l3.syncAdr0039L3Store({ abrainHome: ftsFixture.abrainHome });
   if (!syncResult.ok || syncResult.counts.searchCorpusRows !== 1) {
     console.log(`FAIL — L3 search corpus sync did not index the fixture row: ${JSON.stringify(syncResult)}`);
     process.exit(1);
@@ -936,7 +947,7 @@ if (process.versions.sqlite) {
   };
   const childId = sha256Hex(canonicalJson(childBody));
   writeFile(expectedEventPath(edgeFixture.abrainHome, childId), `${JSON.stringify({ schema: "knowledge-evidence-envelope/v1", canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: childId, body_hash: childId, body: childBody }, null, 0)}\n`);
-  const edgeSync = l3edge.syncAdr0039L3Store({ abrainHome: edgeFixture.abrainHome });
+  const edgeSync = await l3edge.syncAdr0039L3Store({ abrainHome: edgeFixture.abrainHome });
   if (edgeSync.counts.eventEdges !== 1) {
     console.log(`FAIL — L3 event_edges did not rebuild the causal edge: ${JSON.stringify(edgeSync.counts)}`);
     process.exit(1);
@@ -956,7 +967,7 @@ if (process.versions.sqlite) {
   const danglingChild = { ...childBody, producer_nonce: "smoke-edge-dangling", causal_parents: ["".padStart(64, "a")] };
   const danglingId = sha256Hex(canonicalJson(danglingChild));
   writeFile(expectedEventPath(edgeFixture.abrainHome, danglingId), `${JSON.stringify({ schema: "knowledge-evidence-envelope/v1", canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: danglingId, body_hash: danglingId, body: danglingChild }, null, 0)}\n`);
-  const danglingSync = l3edge.syncAdr0039L3Store({ abrainHome: edgeFixture.abrainHome });
+  const danglingSync = await l3edge.syncAdr0039L3Store({ abrainHome: edgeFixture.abrainHome });
   if (!danglingSync.failures.some((f) => f.includes("l3_event_edge_dangling_parent"))) {
     console.log(`FAIL — dangling causal parent not reported: ${JSON.stringify(danglingSync.failures)}`);
     process.exit(1);
@@ -992,7 +1003,7 @@ if (fs.existsSync(path.join(repoFixture.abrainHome, ".state", "sediment", "knowl
   console.log("FAIL — B1 repo mode must not write the Knowledge projection under .state");
   process.exit(1);
 }
-const repoReconcile = reconcile(repoFixture.abrainHome, {
+const repoReconcile = await reconcile(repoFixture.abrainHome, {
   staleAfterMs: 24 * 60 * 60 * 1000,
   minCoverageRatio: 1,
   knowledgeLatestDir: path.join(repoFixture.abrainHome, "l2", "views", "knowledge", "latest"),

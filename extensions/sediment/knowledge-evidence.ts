@@ -2,11 +2,13 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicWriteFile } from "../_shared/durable-write";
+import { canonicalizeJcs, normalizeJcsValueOmittingUndefined, type JcsJsonValue } from "../_shared/jcs";
+import { scanWholeL1Validated, validateL1WritePreflight } from "../_shared/l1-schema-registry";
 import { slugify } from "../memory/utils";
 import type { ProjectEntryDraft, WriteProjectEntryResult, WriterAuditContext } from "./writer";
 import type { SedimentSettings } from "./settings";
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+type JsonValue = JcsJsonValue;
 
 export type KnowledgeEvidenceOperation = "create" | "update" | "merge" | "archive" | "supersede" | "delete";
 export type KnowledgeEvidenceScope = "project" | "world";
@@ -150,34 +152,11 @@ export function sha256Hex(input: string): string {
 }
 
 export function canonicalJson(value: JsonValue): string {
-  if (value === null) return "null";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("non-finite number in canonical JSON");
-    return JSON.stringify(Object.is(value, -0) ? 0 : value);
-  }
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key]!)}`).join(",")}}`;
+  return canonicalizeJcs(value);
 }
 
-function toJsonValue(value: unknown, at = "root"): JsonValue {
-  if (value === null) return null;
-  if (typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error(`non-finite number at ${at}`);
-    return Object.is(value, -0) ? 0 : value;
-  }
-  if (Array.isArray(value)) return value.map((item, index) => toJsonValue(item, `${at}[${index}]`));
-  if (value && typeof value === "object") {
-    const out: Record<string, JsonValue> = {};
-    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      const child = (value as Record<string, unknown>)[key];
-      if (child !== undefined) out[key] = toJsonValue(child, `${at}.${key}`);
-    }
-    return out;
-  }
-  throw new Error(`unsupported JSON value at ${at}: ${typeof value}`);
+function toJsonValue(value: unknown): JsonValue {
+  return normalizeJcsValueOmittingUndefined(value);
 }
 
 function evidenceRoot(abrainHome: string): string {
@@ -308,6 +287,18 @@ export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; b
   if (!guardEventPath(args.abrainHome, filePath)) return { ok: false, status: "path_violation", eventId, filePath, envelope };
   const validation = verifyKnowledgeEvidenceEnvelope(envelope);
   if (!validation.ok) return { ok: false, status: "write_failed", eventId, filePath, envelope, error: validation.reason };
+  // Canonical-path R3.4.2 P1-S3 write gate: registry role/producer/path and
+  // lstat+realpath symlink-escape validation before any durable L1 write.
+  try {
+    await validateL1WritePreflight({
+      abrainHome: args.abrainHome,
+      envelope,
+      targetPath: filePath,
+      expected: { domain: "knowledge", role: "canonical" },
+    });
+  } catch (err) {
+    return { ok: false, status: "write_failed", eventId, filePath, envelope, error: err instanceof Error ? err.message : String(err) };
+  }
   const content = knowledgeEvidenceEnvelopeJson(envelope);
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -513,32 +504,22 @@ export function knowledgeIdentityKey(body: KnowledgeEvidenceEventBodyV1): string
     : `project:${body.scope.project_id || "unknown"}:${body.payload.slug}`;
 }
 
+/** Canonical-path R3.4.2 P1-S3: whole-L1 scan through the central schema-role
+ *  registry. Every event file (any domain) is envelope/hash/path/role/producer
+ *  validated before the knowledge fold sees a single node; unknown or corrupt
+ *  events fail the scan closed instead of being silently skipped. */
+async function scanKnowledgeEventNodes(abrainHome: string): Promise<KnowledgeEventNode[]> {
+  const scan = await scanWholeL1Validated({ abrainHome, domains: ["knowledge"], roles: ["canonical"] });
+  return scan.selected.map((record) => ({
+    eventId: record.eventId,
+    body: record.body as unknown as KnowledgeEvidenceEventBodyV1,
+  }));
+}
+
 /** Collect every L1 knowledge event sharing the given (scope, slug) identity. */
 export async function collectKnowledgeEventSet(abrainHome: string, identity: string): Promise<KnowledgeEventNode[]> {
-  const root = evidenceRoot(abrainHome);
-  const nodes: KnowledgeEventNode[] = [];
-  const walk = async (dir: string): Promise<void> => {
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile() && entry.name.endsWith(".json")) {
-        try {
-          const envelope = JSON.parse(await fs.readFile(full, "utf-8")) as KnowledgeEvidenceEnvelopeV1;
-          const body = envelope.body;
-          if (body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
-          if (knowledgeIdentityKey(body) === identity) nodes.push({ eventId: envelope.event_id, body });
-        } catch { /* skip invalid event file */ }
-      }
-    }
-  };
-  await walk(root);
-  return nodes;
+  const nodes = await scanKnowledgeEventNodes(abrainHome);
+  return nodes.filter((node) => knowledgeIdentityKey(node.body) === identity);
 }
 
 export interface ReprojectAllKnowledgeResult {
@@ -621,31 +602,14 @@ export async function syncAdr0039L3AfterKnowledgeWrite(args: {
 export async function reprojectAllKnowledge(
   { abrainHome, settings }: { abrainHome: string; settings?: { knowledgeProjector?: { l2OutputRoot?: string } } },
 ): Promise<ReprojectAllKnowledgeResult> {
-  const root = evidenceRoot(abrainHome);
+  // Whole-L1 validation completes before a single L2 byte is written; any
+  // envelope/hash/path/role/producer violation aborts the reproject closed.
   const byIdentity = new Map<string, KnowledgeEventNode[]>();
-  const walk = async (dir: string): Promise<void> => {
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile() && entry.name.endsWith(".json")) {
-        try {
-          const envelope = JSON.parse(await fs.readFile(full, "utf-8")) as KnowledgeEvidenceEnvelopeV1;
-          const body = envelope.body;
-          if (body?.event_schema_version !== "knowledge-evidence-event/v1") continue;
-          const identity = knowledgeIdentityKey(body);
-          if (!byIdentity.has(identity)) byIdentity.set(identity, []);
-          byIdentity.get(identity)!.push({ eventId: envelope.event_id, body });
-        } catch { /* skip invalid event file */ }
-      }
-    }
-  };
-  await walk(root);
+  for (const node of await scanKnowledgeEventNodes(abrainHome)) {
+    const identity = knowledgeIdentityKey(node.body);
+    if (!byIdentity.has(identity)) byIdentity.set(identity, []);
+    byIdentity.get(identity)!.push(node);
+  }
 
   const projectionRoot = knowledgeProjectionRoot(abrainHome, settings);
   const latestDir = path.join(projectionRoot, "latest");

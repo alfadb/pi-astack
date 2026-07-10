@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicWriteFile } from "../../_shared/durable-write";
+import { validateL1WritePreflight } from "../../_shared/l1-schema-registry";
 import { makeConstraintEvidenceDiagnostic } from "./diagnostics";
 import {
   constraintEvidenceEnvelopeJson,
@@ -126,6 +127,31 @@ export async function appendConstraintEvidenceEvent(options: AppendConstraintEvi
     relativePath: constraintEvidenceEventRelativePath(eventId),
   });
   if (!validation.ok) return { ok: false, status: "invalid", eventId, filePath, envelope, diagnostics: validation.diagnostics };
+
+  // Canonical-path R3.4.2 P1-S3 write gate: central registry role/producer
+  // check plus lstat+realpath symlink-escape validation before durable write.
+  try {
+    await validateL1WritePreflight({
+      abrainHome: options.abrainHome,
+      envelope,
+      targetPath: filePath,
+      expected: { domain: "constraint", role: "evidence" },
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      status: "invalid",
+      eventId,
+      filePath,
+      envelope,
+      diagnostics: [makeConstraintEvidenceDiagnostic({
+        code: "CE_HASH_PATH_MISMATCH",
+        message: `central schema-role registry rejected constraint evidence write: ${err instanceof Error ? err.message : String(err)}`,
+        eventIds: [eventId],
+        data: { filePath },
+      })],
+    };
+  }
 
   const content = constraintEvidenceEnvelopeJson(envelope);
   try {

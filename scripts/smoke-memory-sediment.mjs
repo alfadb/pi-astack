@@ -134,6 +134,11 @@ function transpileExtensions(outRoot) {
     fs.copyFileSync(path.join(extRoot, "sediment", "prompts", file), path.join(sedimentPromptsDir, file));
   }
 
+  // Canonical-path R3.4.2 P1-S3: the central schema-role registry JSON must be
+  // available at <stage>/schemas for the staged _shared/l1-schema-registry.js.
+  fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
+
   // ADR 0023-R5: sediment imports the abrain rule-injector strip helper.
   // The smoke historically staged only memory/sediment/compaction; stage
   // this one abrain leaf module plus its parent index shim so relative
