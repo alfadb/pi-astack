@@ -6,14 +6,13 @@ import { durableAtomicCreateFile } from "./durable-write";
 import {
   cohortManifestRoot,
   convergeExactCohortIndex,
-  isAncestor,
   publishExactCohortCommit,
   refContainsCohort,
   resolveRef,
   verifyCandidateShape,
   type PreparedExactCohortCommit,
 } from "./git-exact-cohort";
-import { canonicalizeJcs, jcsSha256Hex, type JcsJsonValue } from "./jcs";
+import { canonicalizeJcs, jcsSha256Hex, sha256Hex, type JcsJsonValue } from "./jcs";
 import {
   canonicalL1BodyHash,
   canonicalL1EnvelopeJson,
@@ -32,6 +31,27 @@ const PRODUCER_VERSION = "1.0.0";
 const TERMINAL_REASON_CATEGORY = "owner_intervention_required";
 const ABORT_REASON_CATEGORY = "recovery_slot_aborted";
 const ABORT_ERROR_CODE = "RECOVERY_SLOT_ABORTED";
+const GIT_OID_RE = /^[0-9a-fA-F]{40,64}$/;
+
+function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("GIT_") && value !== undefined) env[key] = value;
+  }
+  return {
+    ...env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+function execGit(repo: string, args: readonly string[]) {
+  return execFileAsync("git", ["-C", repo, ...args], {
+    env: sanitizedGitEnvironment(),
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
 
 export const RECOVERY_LANE_BUDGETS = Object.freeze({ curator: 3, drain: 5, push: 5 } as const);
 export type RecoveryLane = keyof typeof RECOVERY_LANE_BUDGETS;
@@ -221,6 +241,13 @@ function hasExactBodyKeys(event: RecoveryEvent, keys: readonly string[]): boolea
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
+function hasValidPushOutcomeBody(event: RecoveryEvent): boolean {
+  return hasExactBodyKeys(event, ["classification", "target_commit"])
+    && (event.body.classification === "success" || event.body.classification === "retryable" || event.body.classification === "nonretryable")
+    && typeof event.body.target_commit === "string"
+    && GIT_OID_RE.test(event.body.target_commit);
+}
+
 function laneAllows(lane: RecoveryLane, type: RecoveryEventType): boolean {
   if (type === "recovery_slot_claimed" || type === "recovery_slot_aborted" || type === "recovery_episode_terminal") return true;
   if (lane === "drain") return type === "commit_prepared" || type === "commit_published" || type === "index_converged";
@@ -276,8 +303,8 @@ export function foldRecoveryEvents(events: readonly RecoveryEvent[]): ReadonlyMa
     if (slot.converged && !hasExactBodyKeys(slot.converged, ["candidate"])) {
       throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", `slot ${number} converged event contains non-authoritative diagnostics`);
     }
-    if (slot.pushOutcome && !["success", "retryable", "nonretryable"].includes(String(slot.pushOutcome.body.classification))) {
-      throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", `slot ${number} has an invalid push classification`);
+    if (slot.pushOutcome && !hasValidPushOutcomeBody(slot.pushOutcome)) {
+      throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", `slot ${number} has a malformed push outcome`);
     }
     if (slot.aborted && (!hasExactBodyKeys(slot.aborted, ["reason", "error_code"]) || slot.aborted.body.reason !== ABORT_REASON_CATEGORY || slot.aborted.body.error_code !== ABORT_ERROR_CODE)) {
       throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", `slot ${number} abort event is not deterministic`);
@@ -574,7 +601,7 @@ export async function burnPendingRecoverySlot(options: { abrainHome: string; epi
 
 async function currentContainsPrepared(prepared: PreparedExactCohortCommit): Promise<boolean> {
   const current = await resolveRef(prepared.repo, prepared.refName);
-  return await isAncestor(prepared.repo, prepared.candidate, current)
+  return await gitIsAncestor(prepared.repo, prepared.candidate, current)
     || await refContainsCohort(prepared.repo, prepared.refName, prepared.entries);
 }
 
@@ -634,18 +661,35 @@ export async function recoverDrainSlot(options: { abrainHome: string; episodeId:
 }
 
 export type PushClassification = "success" | "retryable" | "nonretryable";
+export interface PushTransportEvidence {
+  transportAttempted: boolean;
+  commandExitCode: number | null;
+  stderrSha256: string | null;
+}
+
 export function classifyPushFailure(error: unknown): Exclude<PushClassification, "success"> {
   const text = error instanceof Error ? `${error.message}\n${(error as any).stderr ?? ""}` : String(error);
+  if (/cannot lock ref|failed to update ref|reference already locked|P1B_RETRYABLE_REF_LOCK/i.test(text)) return "retryable";
   if (/non-fast-forward|rejected|permission denied|authentication failed|repository not found|protected branch/i.test(text)) return "nonretryable";
   return "retryable";
 }
 
 async function objectExists(repo: string, oid: string): Promise<boolean> {
   try {
-    await execFileAsync("git", ["-C", repo, "cat-file", "-e", `${oid}^{commit}`]);
+    await execGit(repo, ["cat-file", "-e", `${oid}^{commit}`]);
     return true;
   } catch {
     return false;
+  }
+}
+
+async function gitIsAncestor(repo: string, maybeAncestor: string, descendant: string): Promise<boolean> {
+  try {
+    await execGit(repo, ["merge-base", "--is-ancestor", maybeAncestor, descendant]);
+    return true;
+  } catch (error) {
+    if ((error as { code?: unknown })?.code === 1) return false;
+    throw error;
   }
 }
 
@@ -653,8 +697,7 @@ async function remoteContainsTarget(repo: string, remote: string, refName: strin
   if (!/^refs\/(heads|tags)\/[A-Za-z0-9._\/-]+$/.test(refName) || refName.includes("..") || refName.endsWith("/")) {
     throw new ConvergenceRecoveryError("REMOTE_REF_INVALID", `remote ref must be fully qualified: ${refName}`);
   }
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  const { stdout } = await execFileAsync("git", ["-C", repo, "ls-remote", "--refs", remote, refName], { env });
+  const { stdout } = await execGit(repo, ["ls-remote", "--refs", remote, refName]);
   const matches = stdout.trim().split("\n").filter(Boolean).map((line) => {
     const fields = line.split(/\s+/);
     if (fields.length !== 2 || fields[1] !== refName || !/^[0-9a-fA-F]{40,64}$/.test(fields[0]!)) {
@@ -667,29 +710,47 @@ async function remoteContainsTarget(repo: string, remote: string, refName: strin
   const remoteOid = matches[0]!;
   if (remoteOid === target) return true;
   if (!await objectExists(repo, remoteOid)) {
-    await execFileAsync("git", ["-C", repo, "fetch", "--no-tags", "--no-write-fetch-head", remote, refName], { env });
+    await execGit(repo, ["fetch", "--no-tags", "--no-write-fetch-head", remote, refName]);
   }
-  return isAncestor(repo, target, remoteOid);
+  return gitIsAncestor(repo, target, remoteOid);
 }
 
-async function executeClaimedPushSlot(options: { abrainHome: string; episodeId: string; slot: number; repo: string; remote: string; refName: string; targetCommit: string }): Promise<{ classification: PushClassification; remoteContainsTarget: boolean }> {
+async function executeClaimedPushSlot(options: { abrainHome: string; episodeId: string; slot: number; repo: string; remote: string; refName: string; targetCommit: string }): Promise<{ classification: PushClassification; targetCommit: string; remoteContainsTarget: boolean } & PushTransportEvidence> {
   let classification: PushClassification = "success";
   let remoteContains = false;
+  let transportAttempted = false;
+  let commandExitCode: number | null = null;
+  let stderrSha256: string | null = null;
   try {
     remoteContains = await remoteContainsTarget(options.repo, options.remote, options.refName, options.targetCommit);
     if (!remoteContains) {
-      await execFileAsync("git", ["-C", options.repo, "push", options.remote, `${options.targetCommit}:${options.refName}`], { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+      transportAttempted = true;
+      const completed = await execGit(options.repo, ["push", options.remote, `${options.targetCommit}:${options.refName}`]);
+      remoteContains = true;
+      commandExitCode = 0;
+      stderrSha256 = sha256Hex(String(completed.stderr ?? ""));
     }
   } catch (error) {
     if (error instanceof ConvergenceRecoveryError) throw error;
     classification = classifyPushFailure(error);
     remoteContains = false;
+    if (transportAttempted) {
+      const rawCode = (error as any)?.code;
+      commandExitCode = typeof rawCode === "number" ? rawCode : -1;
+      stderrSha256 = sha256Hex(String((error as any)?.stderr ?? (error instanceof Error ? error.message : error)));
+    }
   }
-  await appendRecoveryEvent({ ...options, lane: "push", eventType: "push_outcome", body: { classification, target_commit: options.targetCommit } });
+  const evidence = { transportAttempted, commandExitCode, stderrSha256 };
+  await appendRecoveryEvent({
+    ...options,
+    lane: "push",
+    eventType: "push_outcome",
+    body: { classification, target_commit: options.targetCommit },
+  });
   if (classification !== "success" && (classification === "nonretryable" || options.slot === RECOVERY_LANE_BUDGETS.push)) {
     await ensureTerminal(options.abrainHome, options.episodeId, "push", options.slot);
   }
-  return { classification, remoteContainsTarget: remoteContains };
+  return { classification, targetCommit: options.targetCommit, remoteContainsTarget: remoteContains, ...evidence };
 }
 
 export type PushRecoveryAction = "burned" | "success" | "retryable" | "nonretryable" | "terminal";
@@ -718,26 +779,26 @@ export async function recoverPushSlot(options: { abrainHome: string; episodeId: 
 }
 
 /** Resume an episode, burn a missing result, then execute only the continuous next slot. */
-export async function recoverPushEpisode(options: { abrainHome: string; episodeId: string; repo: string; remote: string; refName: string; targetCommit: string }): Promise<{ classification: PushClassification | "burned" | "complete" | "terminal" | "consumed"; slot: number | null; remoteContainsTarget: boolean }> {
+export async function recoverPushEpisode(options: { abrainHome: string; episodeId: string; repo: string; remote: string; refName: string; targetCommit: string }): Promise<{ classification: PushClassification | "burned" | "complete" | "terminal" | "consumed"; targetCommit: string; slot: number | null; remoteContainsTarget: boolean } & Partial<PushTransportEvidence>> {
   let cursor = recoveryEpisodeCursor(options.episodeId, "push", await readRecoveryEvents(options.abrainHome, options.episodeId, "push"));
-  if (cursor.complete) return { classification: "complete", slot: cursor.lastClaimedSlot, remoteContainsTarget: true };
-  if (cursor.terminal) return { classification: "terminal", slot: cursor.lastClaimedSlot, remoteContainsTarget: false };
+  if (cursor.complete) return { classification: "complete", targetCommit: options.targetCommit, slot: cursor.lastClaimedSlot, remoteContainsTarget: true };
+  if (cursor.terminal) return { classification: "terminal", targetCommit: options.targetCommit, slot: cursor.lastClaimedSlot, remoteContainsTarget: false };
   if (cursor.pendingSlot !== null) {
     const recovered = await recoverPushSlot({ abrainHome: options.abrainHome, episodeId: options.episodeId, slot: cursor.pendingSlot });
-    if (recovered === "success") return { classification: "complete", slot: cursor.pendingSlot, remoteContainsTarget: true };
-    if (recovered === "nonretryable" || recovered === "terminal") return { classification: "terminal", slot: cursor.pendingSlot, remoteContainsTarget: false };
+    if (recovered === "success") return { classification: "complete", targetCommit: options.targetCommit, slot: cursor.pendingSlot, remoteContainsTarget: true };
+    if (recovered === "nonretryable" || recovered === "terminal") return { classification: "terminal", targetCommit: options.targetCommit, slot: cursor.pendingSlot, remoteContainsTarget: false };
     cursor = recoveryEpisodeCursor(options.episodeId, "push", await readRecoveryEvents(options.abrainHome, options.episodeId, "push"));
   }
   const next = await claimNextRecoverySlot({ abrainHome: options.abrainHome, episodeId: options.episodeId, lane: "push" });
-  if (next.status === "complete" || next.status === "terminal") return { classification: next.status, slot: null, remoteContainsTarget: next.status === "complete" };
-  if (next.status === "pending" || !next.shouldExecute) return { classification: "consumed", slot: next.slot, remoteContainsTarget: false };
+  if (next.status === "complete" || next.status === "terminal") return { classification: next.status, targetCommit: options.targetCommit, slot: null, remoteContainsTarget: next.status === "complete" };
+  if (next.status === "pending" || !next.shouldExecute) return { classification: "consumed", targetCommit: options.targetCommit, slot: next.slot, remoteContainsTarget: false };
   const result = await executeClaimedPushSlot({ ...options, slot: next.slot });
   return { ...result, slot: next.slot };
 }
 
 /** Compatibility/competition surface. New orchestration should call recoverPushEpisode. */
-export async function runPushSlot(options: { abrainHome: string; episodeId: string; slot: number; repo: string; remote: string; refName: string; targetCommit: string }): Promise<{ classification: PushClassification | "consumed"; remoteContainsTarget: boolean }> {
+export async function runPushSlot(options: { abrainHome: string; episodeId: string; slot: number; repo: string; remote: string; refName: string; targetCommit: string }): Promise<({ classification: PushClassification | "consumed"; targetCommit: string; remoteContainsTarget: boolean } & Partial<PushTransportEvidence>)> {
   const claim = await claimRecoverySlot({ abrainHome: options.abrainHome, episodeId: options.episodeId, lane: "push", slot: options.slot });
-  if (!claim.shouldExecute) return { classification: "consumed", remoteContainsTarget: false };
+  if (!claim.shouldExecute) return { classification: "consumed", targetCommit: options.targetCommit, remoteContainsTarget: false };
   return executeClaimedPushSlot(options);
 }

@@ -76,7 +76,7 @@ async function claimNext(home, episodeId, lane) {
   assert(result.shouldExecute, `next ${lane} slot not acquired: ${JSON.stringify(result)}`);
   return result.slot;
 }
-async function pushOutcome(home, episodeId, slot, classification, target = "target") {
+async function pushOutcome(home, episodeId, slot, classification, target = "a".repeat(40)) {
   await recovery.appendRecoveryEvent({ abrainHome: home, episodeId, lane: "push", slot, eventType: "push_outcome", body: { classification, target_commit: target } });
 }
 async function preparedSlot(home, fixtureValue, slot = 1) {
@@ -149,6 +149,12 @@ await check("fold is order-independent and absorbs raced claims and lower-slot l
   await expectCode("RECOVERY_LANE_INVARIANT", () => recovery.foldRecoveryEvents([claimedEvent("lane", "push", 1), event("lane", "push", 1, "commit_prepared", {})]));
   await expectCode("RECOVERY_EVENT_INVARIANT", () => recovery.foldRecoveryEvents([claim1, prepared, published, { ...published, body: publishedBody("b") }]));
   await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.foldRecoveryEvents([claim1, prepared, { ...published, body: { candidate: "a", publication_confirmed: true, outcome: "published" } }]));
+
+  const pushClaim = claimedEvent("push-body-contract", "push", 1);
+  const validTarget = "b".repeat(40);
+  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.foldRecoveryEvents([pushClaim, event("push-body-contract", "push", 1, "push_outcome", { classification: "success", target_commit: validTarget, stderr_sha256: "c".repeat(64) })]));
+  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.foldRecoveryEvents([pushClaim, event("push-body-contract", "push", 1, "push_outcome", { classification: "unknown", target_commit: validTarget })]));
+  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.foldRecoveryEvents([pushClaim, event("push-body-contract", "push", 1, "push_outcome", { classification: "success", target_commit: "not-an-oid" })]));
 });
 
 await check("stale abort refold preserves late drain convergence and push success", async () => {
@@ -211,6 +217,53 @@ await check("exact cohort supports delete and executable mode and rejects invali
     await expectCode("COHORT_PATH_INVALID", () => cohort.prepareExactCohortCommit({ repo: f.repo, refName: "HEAD", frozenCommit: git(f.repo, "rev-parse", "HEAD"), plan: [{ path: badPath, op: "put", content: "x" }], message: "bad" }));
   }
   await expectCode("COHORT_PLAN_INVALID", () => cohort.prepareExactCohortCommit({ repo: f.repo, refName: "HEAD", frozenCommit: git(f.repo, "rev-parse", "HEAD"), plan: [{ path: "bad-mode", op: "put", mode: "100600", content: "x" }], message: "bad" }));
+});
+
+await check("exact cohort ignores external Git repo, worktree, and config environment", async () => {
+  const good = initRepo("git-env-good");
+  const bad = initRepo("git-env-bad");
+  const goodFrozen = git(good, "rev-parse", "HEAD");
+  const badHeadBefore = git(bad, "rev-parse", "HEAD");
+  const badIndexBefore = fs.readFileSync(path.join(bad, ".git", "index"));
+  const badWorktreeBefore = fs.readFileSync(path.join(bad, "base.txt"));
+  const goodWorktreeBefore = fs.readFileSync(path.join(good, "base.txt"));
+  const goodSnapshot = await cohort.snapshotIndexEntries(good, ["owned.txt"]);
+  const polluted = Object.fromEntries([
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_KEY_0",
+    "GIT_CONFIG_VALUE_0",
+  ].map((key) => [key, process.env[key]]));
+  process.env.GIT_DIR = path.join(bad, ".git");
+  process.env.GIT_WORK_TREE = bad;
+  process.env.GIT_CONFIG_COUNT = "1";
+  process.env.GIT_CONFIG_KEY_0 = "core.bare";
+  process.env.GIT_CONFIG_VALUE_0 = "true";
+  try {
+    assert(await cohort.resolveRef(good, "HEAD") === goodFrozen, "resolveRef escaped to polluted repository");
+    const prepared = await cohort.prepareExactCohortCommit({
+      repo: good,
+      refName: "HEAD",
+      frozenCommit: goodFrozen,
+      plan: [{ path: "owned.txt", op: "put", content: "good-owned\n" }],
+      message: "Git environment isolation",
+    });
+    const published = await cohort.publishExactCohortCommit({ repo: good, refName: "HEAD", candidate: prepared.candidate, frozenCommit: goodFrozen });
+    assert(published.status === "published", `polluted publish status: ${published.status}`);
+    await cohort.convergeExactCohortIndex({ repo: good, refName: "HEAD", cohortPaths: ["owned.txt"], frozenIndexSnapshot: goodSnapshot });
+    assert(await cohort.resolveRef(good, "HEAD") === prepared.candidate, "good ref did not publish under pollution");
+    assert((await cohort.snapshotIndexEntries(good, ["owned.txt"])).get("owned.txt")?.includes(prepared.entries[0].blobOid), "good index did not converge under pollution");
+  } finally {
+    for (const [key, value] of Object.entries(polluted)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert(git(bad, "rev-parse", "HEAD") === badHeadBefore, "bad repository ref changed");
+  assert(fs.readFileSync(path.join(bad, ".git", "index")).equals(badIndexBefore), "bad repository index changed");
+  assert(fs.readFileSync(path.join(bad, "base.txt")).equals(badWorktreeBefore), "bad repository worktree changed");
+  assert(fs.readFileSync(path.join(good, "base.txt")).equals(goodWorktreeBefore), "good repository worktree changed");
 });
 
 await check("snapshot rejects non-stage-0 and duplicate-stage owned paths", async () => {
@@ -415,6 +468,7 @@ await check("push missing and late outcomes burn once without reviving an aborte
   assert(await claimNext(home, episodeId, "push") === 1, "missing slot not claimed");
   const result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
   assert(result.slot === 2 && result.classification === "success", `missing result did not advance: ${JSON.stringify(result)}`);
+  assert(result.transportAttempted === true && result.remoteContainsTarget === true, `successful real push did not return remote containment fact: ${JSON.stringify(result)}`);
 
   const late = "push-late";
   assert(await claimNext(home, late, "push") === 1, "late slot1 claim failed");
@@ -424,6 +478,28 @@ await check("push missing and late outcomes burn once without reviving an aborte
   await pushOutcome(home, late, 1, "success");
   const cursor = recovery.recoveryEpisodeCursor(late, "push", await recovery.readRecoveryEvents(home, late, "push"));
   assert(cursor.nextSlot === 3 && !cursor.complete && cursor.folded.get(1).pushOutcome, "late result revived burned slot");
+});
+
+await check("push durable outcome is deterministic across different transport stderr", async () => {
+  const repo = initRepo("push-durable-determinism");
+  const target = git(repo, "rev-parse", "HEAD");
+  const outcomes = [];
+  for (const suffix of ["alpha", "beta"]) {
+    const home = makeHome(`push-durable-${suffix}`);
+    const bare = path.join(tmp, `push-durable-${suffix}.git`);
+    execFileSync("git", ["init", "--bare", "-q", bare]);
+    const lockPath = path.join(bare, "refs", "heads", "main.lock");
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(lockPath, `held-${suffix}\n`);
+    const episodeId = recovery.pushEpisodeIdentity({ repo_id: `push-durable-${suffix}`, remote: bare, ref_name: "refs/heads/main", target_commit: target });
+    const result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
+    const body = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, episodeId, "push")).get(1).pushOutcome.body;
+    outcomes.push({ result, body });
+  }
+  assert(outcomes.every(({ result }) => result.classification === "retryable" && result.transportAttempted === true && typeof result.stderrSha256 === "string"), "transport failures were not transiently evidenced");
+  assert(outcomes[0].result.stderrSha256 !== outcomes[1].result.stderrSha256, "fixture did not produce distinct stderr hashes");
+  assert(JSON.stringify(outcomes[0].body) === JSON.stringify(outcomes[1].body), "transport diagnostics changed durable outcome bytes");
+  assert(JSON.stringify(Object.keys(outcomes[0].body).sort()) === JSON.stringify(["classification", "target_commit"]), "durable push body contains transport evidence");
 });
 
 await check("push nonretryable and slot-5 retryable share deterministic terminal bytes", async () => {
@@ -464,8 +540,26 @@ await check("remote descendant fetch is object-only and remote refs must be full
   const fetchHead = path.join(repo, ".git", "FETCH_HEAD");
   fs.rmSync(fetchHead, { force: true });
   const episodeId = recovery.pushEpisodeIdentity({ repo_id: "push-fetch", remote: bare, ref_name: "refs/heads/main", target_commit: target });
-  const result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
-  assert(result.classification === "success" && result.remoteContainsTarget, "remote descendant not absorbed");
+  const polluted = {
+    GIT_DIR: process.env.GIT_DIR,
+    GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT,
+    GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0,
+    GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0,
+  };
+  process.env.GIT_DIR = path.join(tmp, "poisoned-git-dir");
+  process.env.GIT_CONFIG_COUNT = "1";
+  process.env.GIT_CONFIG_KEY_0 = "core.bare";
+  process.env.GIT_CONFIG_VALUE_0 = "true";
+  let result;
+  try {
+    result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
+  } finally {
+    for (const [key, value] of Object.entries(polluted)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  assert(result.classification === "success" && result.remoteContainsTarget, "remote descendant not absorbed under external Git environment pollution");
   assert(!fs.existsSync(fetchHead) && git(repo, "cat-file", "-t", remoteOid) === "commit", "object-only fetch contract failed");
 
   const invalid = recovery.pushEpisodeIdentity({ repo_id: "invalid-ref", remote: bare, ref_name: "main", target_commit: target });

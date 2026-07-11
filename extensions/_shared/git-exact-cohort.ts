@@ -78,6 +78,28 @@ const GIT_ENV = Object.freeze({
   GIT_CONFIG_SYSTEM: "/dev/null",
 });
 
+const ALLOWED_GIT_EXTRA_ENV = new Set([
+  "GIT_INDEX_FILE",
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+]);
+
+function gitEnvironment(extraEnv: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("GIT_") && value !== undefined) env[key] = value;
+  }
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (!ALLOWED_GIT_EXTRA_ENV.has(key)) {
+      throw new GitExactCohortError("GIT_ENV_INVALID", `Git extra environment key is not allowlisted: ${key}`);
+    }
+    env[key] = value;
+  }
+  return { ...env, ...GIT_ENV };
+}
+
 const COHORT_MANIFEST_DOMAIN = "pi-astack/adr0039-r3/cohort-manifest/v1";
 
 function compareAscii(a: string, b: string): number {
@@ -86,7 +108,7 @@ function compareAscii(a: string, b: string): number {
 
 async function git(repo: string, args: string[], extraEnv: Record<string, string> = {}): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", repo, "--literal-pathspecs", ...args], {
-    env: { ...process.env, ...GIT_ENV, ...extraEnv },
+    env: gitEnvironment(extraEnv),
     maxBuffer: 64 * 1024 * 1024,
   });
   return stdout;
@@ -103,7 +125,7 @@ function gitExitCode(error: unknown): number | undefined {
 async function gitIndexInfo(repo: string, records: readonly string[]): Promise<void> {
   const run = () => new Promise<void>((resolve, reject) => {
     const child = spawn("git", ["-C", repo, "--literal-pathspecs", "update-index", "-z", "--index-info"], {
-      env: { ...process.env, ...GIT_ENV },
+      env: gitEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
