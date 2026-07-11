@@ -63,11 +63,13 @@ check("DISPATCH_AUDIT_VERSION = 3 (Stage 1c heartbeat enrichment)", () => {
   }
 });
 
-check("appendDispatchAudit serializes per-file writes through singleFlight", () => {
+check("appendDispatchAudit preserves singleFlight and routes rows through configured rotation", () => {
   const expected = [
     /Symbol\.for\("pi-astack\/dispatch\/audit-singleflight\/v1"\)/,
     /const prior = chains\.get\(auditPath\) \?\? Promise\.resolve\(\)/,
     /const next = prior\.catch\(\(\) => \{\}\)\.then\(async \(\) => \{/,
+    /appendRotatingJsonlLine\(auditPath, JSON\.stringify\(row\)/,
+    /rotation: readDispatchSettings\(\)\.auditRotation/,
     /if \(chains\.get\(auditPath\) === next\) chains\.delete\(auditPath\)/,
   ];
   for (const re of expected) {

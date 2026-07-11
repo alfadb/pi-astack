@@ -114,11 +114,13 @@ check("ambiguous crash intent suppresses fresh non-idempotent replay and stale-a
 
 console.log("\nSection: F13 dispatch audit singleFlight");
 
-check("dispatch audit uses per-file singleFlight chain", () => {
+check("dispatch audit uses per-file singleFlight plus configured rotating JSONL", () => {
   for (const re of [
     /Symbol\.for\("pi-astack\/dispatch\/audit-singleflight\/v1"\)/,
     /const prior = chains\.get\(auditPath\) \?\? Promise\.resolve\(\)/,
     /const next = prior\.catch\(\(\) => \{\}\)\.then\(async \(\) => \{/,
+    /appendRotatingJsonlLine\(auditPath, JSON\.stringify\(row\)/,
+    /rotation: readDispatchSettings\(\)\.auditRotation/,
     /if \(chains\.get\(auditPath\) === next\) chains\.delete\(auditPath\)/,
   ]) {
     if (!re.test(dispatch)) throw new Error(`dispatch singleFlight invariant missing: ${re}`);

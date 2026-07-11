@@ -23,6 +23,19 @@
       "properties": {
         "_comment": { "type": "string" },
 
+        "rotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": { "enabled": true, "maxBytes": 268435456, "maxAgeMs": 86400000, "lockTimeoutMs": 1000 },
+          "description": "Process-local serialized JSONL append with size/age generation rotation. Rotation alone uses the shared O_EXCL lock; lock or rotation failures fail open to the active audit.jsonl.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "maxBytes": { "type": "integer", "minimum": 1, "maximum": 1099511627776, "default": 268435456 },
+            "maxAgeMs": { "type": "integer", "minimum": 1, "maximum": 31622400000, "default": 86400000 },
+            "lockTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 1000 }
+          }
+        },
+
         "backgroundBudget": {
           "type": "object",
           "additionalProperties": false,
@@ -1679,6 +1692,18 @@
       "additionalProperties": false,
       "description": "dispatch extension (ADR 0009 + 0027). `maxProviderConcurrency` caps same-provider `dispatch_parallel` workers, while `hub` configures the ADR 0030 caged-live dynamic hub (`dispatch_hub` tool). Repeated tool-call protection now lives in top-level `toolCircuitBreaker` and applies to the current agent run, including sub-agents.",
       "properties": {
+        "auditRotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": { "enabled": true, "maxBytes": 67108864, "maxAgeMs": 604800000, "lockTimeoutMs": 1000 },
+          "description": "Dispatch audit.jsonl generation rotation. Business append remains fail-open and process-local ordering is retained.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "maxBytes": { "type": "integer", "minimum": 1, "maximum": 1099511627776, "default": 67108864 },
+            "maxAgeMs": { "type": "integer", "minimum": 1, "maximum": 31622400000, "default": 604800000 },
+            "lockTimeoutMs": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 1000 }
+          }
+        },
         "maxProviderConcurrency": {
           "type": "integer",
           "default": 4,

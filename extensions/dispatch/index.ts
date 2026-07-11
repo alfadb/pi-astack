@@ -50,6 +50,7 @@ import {
   type CausalAnchor,
 } from "../_shared/causal-anchor";
 import { dispatchAuditPath } from "../_shared/runtime";
+import { appendRotatingJsonlLine } from "../_shared/rotating-jsonl";
 import {
   createDispatchReasoningTrace,
   type DispatchReasoningTraceWriter,
@@ -62,9 +63,8 @@ import {
 } from "./terminal-state";
 import { startHeartbeat, type HeartbeatHandle } from "../_shared/heartbeat";
 import { assessLivenessForAnchor } from "./heartbeat-consumer";
-import { appendFile, mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   DEFAULT_DISPATCH_SETTINGS,
   readDispatchSettings,
@@ -201,7 +201,6 @@ async function appendDispatchAudit(
   const chains = dispatchAuditChains();
   const prior = chains.get(auditPath) ?? Promise.resolve();
   const next = prior.catch(() => {}).then(async () => {
-    await mkdir(dirname(auditPath), { recursive: true });
     const row = {
       timestamp: new Date().toISOString(),
       audit_version: DISPATCH_AUDIT_VERSION,
@@ -209,7 +208,20 @@ async function appendDispatchAudit(
       ...spreadAnchor(anchor),
       ...event,
     };
-    await appendFile(auditPath, `${JSON.stringify(row)}\n`, "utf-8");
+    const result = await appendRotatingJsonlLine(auditPath, JSON.stringify(row), {
+      sink: "dispatch",
+      rotation: readDispatchSettings().auditRotation,
+    });
+    if (!result.appended) {
+      const detail = result.diagnostics.at(-1)?.message ?? "unknown append failure";
+      throw new Error(detail);
+    }
+    const degraded = result.diagnostics.find((item) => item.code === "rotation_failed" || item.code === "recovery_failed");
+    if (degraded) {
+      try {
+        console.warn(`pi-astack/dispatch: audit rotation degraded (${degraded.message}); row appended to active log.`);
+      } catch { /* best-effort diagnostic */ }
+    }
   });
   chains.set(auditPath, next);
   try {

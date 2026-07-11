@@ -234,6 +234,16 @@ module.exports = {
 };\n`,
 );
 
+// Shared rotation is exercised by its own filesystem smoke. This formatter
+// harness only needs the import surface used by dispatch and settings.
+fs.writeFileSync(
+  path.join(sharedDir, "rotating-jsonl.js"),
+  `module.exports = {
+  appendRotatingJsonlLine: async () => ({ appended: true, rotated: false, diagnostics: [], bytes: 0, oversize: false }),
+  resolveJsonlRotationSettings: (raw, defaults) => ({ ...defaults, ...(raw && typeof raw === "object" ? raw : {}) }),
+};\n`,
+);
+
 // Stub `../_shared/heartbeat` — Stage 1b added startHeartbeat import.
 // formatResult doesn’t touch the heartbeat lifecycle; stub returns a
 // no-op handle so any accidental call is harmless.

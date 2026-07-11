@@ -5,6 +5,10 @@ import {
   DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS,
   type WorkerRunGovernorSettings,
 } from "./worker-run-governor";
+import {
+  resolveJsonlRotationSettings,
+  type JsonlRotationSettings,
+} from "../_shared/rotating-jsonl";
 
 export type DispatchTaskGovernorProfile = "read_only" | "research" | "implementation" | "mutating_default";
 
@@ -24,6 +28,7 @@ export interface DispatchTaskGovernorSettings {
 
 export interface DispatchSettings {
   maxProviderConcurrency: number;
+  auditRotation: JsonlRotationSettings;
   taskGovernor: DispatchTaskGovernorSettings;
   workerRunGovernor: WorkerRunGovernorSettings;
 }
@@ -37,6 +42,12 @@ export const DEFAULT_TASK_GOVERNOR_PROFILES: Record<DispatchTaskGovernorProfile,
 
 export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
   maxProviderConcurrency: 4,
+  auditRotation: {
+    enabled: true,
+    maxBytes: 64 * 1024 * 1024,
+    maxAgeMs: 7 * 24 * 60 * 60 * 1000,
+    lockTimeoutMs: 1_000,
+  },
   taskGovernor: {
     enabled: true,
     profiles: DEFAULT_TASK_GOVERNOR_PROFILES,
@@ -175,6 +186,7 @@ export function resolveDispatchSettings(rawSettings: unknown = {}): DispatchSett
   const def = DEFAULT_DISPATCH_SETTINGS;
   return {
     maxProviderConcurrency: asPositiveInt(dispatch.maxProviderConcurrency, def.maxProviderConcurrency),
+    auditRotation: resolveJsonlRotationSettings(dispatch.auditRotation, def.auditRotation),
     taskGovernor: resolveTaskGovernor(dispatch.taskGovernor),
     workerRunGovernor: resolveWorkerRunGovernor(dispatch.workerRunGovernor),
   };

@@ -1,11 +1,20 @@
 import { createHash, randomUUID, type Hash } from "node:crypto";
-import { chmod, mkdir, open } from "node:fs/promises";
+import * as fsSync from "node:fs";
+import { chmod, lstat, mkdir, open, realpath } from "node:fs/promises";
 import * as path from "node:path";
 import type { CausalAnchor } from "../_shared/causal-anchor";
 
 export const DISPATCH_REASONING_TRACE_SCHEMA_VERSION = 1;
 export const DEFAULT_MAX_TRACE_BYTES = 64 * 1024 * 1024;
 export const DISPATCH_REASONING_TRACE_TERMINAL_RESERVE_BYTES = 12 * 1024;
+export const DISPATCH_REASONING_RETENTION = {
+  schema_version: "reasoning-retention/v1",
+  hot_retention_days: 7,
+  archive_retention_days: 30,
+  pinned_exempt: true,
+  automatic_gc: false,
+} as const;
+const RETENTION_METADATA_FILE = ".retention.json";
 // Back-compat for older smoke/import sites. The cap is now serialized JSONL
 // trace bytes, not raw reasoning delta bytes.
 export const DEFAULT_MAX_RAW_REASONING_BYTES = DEFAULT_MAX_TRACE_BYTES;
@@ -75,6 +84,80 @@ const REAL_TRACE_IO: DispatchReasoningTraceIo = {
   chmod,
   open: async (file) => open(file, "ax", 0o600),
 };
+
+const RETENTION_BYTES = Buffer.from(`${JSON.stringify(DISPATCH_REASONING_RETENTION, null, 2)}\n`, "utf8");
+const RETENTION_KEYS = Object.keys(DISPATCH_REASONING_RETENTION).sort();
+const RETENTION_NOFOLLOW = fsSync.constants.O_NOFOLLOW ?? 0;
+
+function validRetentionMetadata(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (JSON.stringify(Object.keys(record).sort()) !== JSON.stringify(RETENTION_KEYS)) return false;
+  return RETENTION_KEYS.every((key) => record[key] === DISPATCH_REASONING_RETENTION[key as keyof typeof DISPATCH_REASONING_RETENTION]);
+}
+
+async function validateExistingRetentionMetadata(metadataPath: string): Promise<void> {
+  const before = await lstat(metadataPath);
+  if (before.isSymbolicLink() || !before.isFile()) throw new Error("retention metadata must be a regular non-symlink file");
+  const handle = await open(metadataPath, fsSync.constants.O_RDONLY | RETENTION_NOFOLLOW);
+  try {
+    const held = await handle.stat();
+    if (!held.isFile() || held.dev !== before.dev || held.ino !== before.ino) throw new Error("retention metadata identity changed while opening");
+    if (held.size > 4096) throw new Error("retention metadata exceeds schema byte limit");
+    const parsed = JSON.parse((await handle.readFile()).toString("utf8"));
+    if (!validRetentionMetadata(parsed)) throw new Error("existing retention metadata fails reasoning-retention/v1 schema");
+    await handle.chmod(0o600);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function ensureRetentionMetadata(dir: string): Promise<void> {
+  const metadataPath = path.join(dir, RETENTION_METADATA_FILE);
+  let handle;
+  try {
+    handle = await open(
+      metadataPath,
+      fsSync.constants.O_WRONLY | fsSync.constants.O_CREAT | fsSync.constants.O_EXCL | RETENTION_NOFOLLOW,
+      0o600,
+    );
+    const held = await handle.stat();
+    if (!held.isFile()) throw new Error("new retention metadata is not a regular file");
+    await handle.writeFile(RETENTION_BYTES);
+    await handle.sync();
+    await handle.chmod(0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    await validateExistingRetentionMetadata(metadataPath);
+  } finally {
+    await handle?.close();
+  }
+}
+
+function retentionWarning(error: unknown): void {
+  const code = error && typeof error === "object" && typeof (error as NodeJS.ErrnoException).code === "string"
+    ? (error as NodeJS.ErrnoException).code
+    : error instanceof Error ? error.name : "unknown";
+  console.warn(`pi-astack: reasoning retention metadata warning (${String(code).replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 48) || "unknown"}); trace remains fail-open`);
+}
+
+async function secureTraceDirectory(dir: string, projectRoot: string): Promise<void> {
+  const before = await lstat(dir);
+  if (before.isSymbolicLink() || !before.isDirectory()) throw new Error("reasoning trace directory must be a regular non-symlink directory");
+  const canonicalDir = await realpath(dir);
+  const canonicalRoot = await realpath(path.resolve(projectRoot));
+  if (canonicalDir !== canonicalRoot && !canonicalDir.startsWith(`${canonicalRoot}${path.sep}`)) {
+    throw new Error("reasoning trace directory resolves outside project root");
+  }
+  const handle = await open(dir, fsSync.constants.O_RDONLY | (fsSync.constants.O_DIRECTORY ?? 0) | RETENTION_NOFOLLOW);
+  try {
+    const held = await handle.stat();
+    if (!held.isDirectory() || held.dev !== before.dev || held.ino !== before.ino) throw new Error("reasoning trace directory identity changed while opening");
+    await handle.chmod(0o700);
+  } finally {
+    await handle.close();
+  }
+}
 
 interface RetryOrigin {
   agentCallSeq: number;
@@ -672,7 +755,12 @@ class FileDispatchReasoningTraceWriter implements DispatchReasoningTraceWriter {
     const dir = path.dirname(this.tracePath);
     try {
       await this.io.mkdir(dir);
-      try { await this.io.chmod(dir, 0o700); } catch { /* best-effort mode repair */ }
+      if (this.io === REAL_TRACE_IO) {
+        await secureTraceDirectory(dir, this.options.projectRoot);
+        try { await ensureRetentionMetadata(dir); } catch (error) { retentionWarning(error); }
+      } else {
+        try { await this.io.chmod(dir, 0o700); } catch { /* best-effort mode repair */ }
+      }
       this.fileHandle = await this.io.open(this.tracePath);
       try { await this.fileHandle.chmod(0o600); } catch { /* best-effort mode repair */ }
       return this.fileHandle;

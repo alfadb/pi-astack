@@ -51,6 +51,21 @@ function loadModuleFromString(code, fakePath) {
   const m = new Module(fakePath);
   m.filename = fakePath;
   m.paths = Module._nodeModulePaths(path.dirname(fakePath));
+  const baseRequire = m.require.bind(m);
+  m.require = (id) => id === "../_shared/rotating-jsonl"
+    ? {
+        resolveJsonlRotationSettings(raw, defaults) {
+          const rec = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+          const bounded = (value, fallback, max) => typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= max ? value : fallback;
+          return {
+            enabled: typeof rec.enabled === "boolean" ? rec.enabled : defaults.enabled,
+            maxBytes: bounded(rec.maxBytes, defaults.maxBytes, 1099511627776),
+            maxAgeMs: bounded(rec.maxAgeMs, defaults.maxAgeMs, 31622400000),
+            lockTimeoutMs: bounded(rec.lockTimeoutMs, defaults.lockTimeoutMs, 60000),
+          };
+        },
+      }
+    : baseRequire(id);
   m._compile(code, fakePath);
   return m.exports;
 }
@@ -78,14 +93,14 @@ check("schema defines exactly one top-level dispatch key", () => {
   const schema = JSON.parse(schemaText);
   const dispatchProps = schema?.properties?.dispatch?.properties;
   if (!dispatchProps) throw new Error("dispatch.properties missing from parsed schema");
-  for (const key of ["maxProviderConcurrency", "taskGovernor", "workerRunGovernor", "hub"]) {
+  for (const key of ["auditRotation", "maxProviderConcurrency", "taskGovernor", "workerRunGovernor", "hub"]) {
     if (!(key in dispatchProps)) {
       throw new Error(`dispatch.properties missing ${key}`);
     }
   }
 });
 
-check("default resolver value is 4", () => {
+check("default resolver value is 4 with 64 MiB / 7d audit rotation", () => {
   if (DEFAULT_DISPATCH_SETTINGS.maxProviderConcurrency !== 4) {
     throw new Error(`default constant mismatch: ${DEFAULT_DISPATCH_SETTINGS.maxProviderConcurrency}`);
   }
@@ -93,11 +108,16 @@ check("default resolver value is 4", () => {
   if (resolved.maxProviderConcurrency !== 4) {
     throw new Error(`empty settings resolved to ${resolved.maxProviderConcurrency}`);
   }
+  const rotation = resolved.auditRotation;
+  if (!rotation.enabled || rotation.maxBytes !== 64 * 1024 * 1024 || rotation.maxAgeMs !== 7 * 24 * 60 * 60 * 1000 || rotation.lockTimeoutMs !== 1000) {
+    throw new Error(`audit rotation defaults drifted: ${JSON.stringify(rotation)}`);
+  }
 });
 
 check("valid override is honored", () => {
   const resolved = resolveDispatchSettings({ dispatch: {
     maxProviderConcurrency: 7,
+    auditRotation: { enabled: false, maxBytes: 1234, maxAgeMs: 5678, lockTimeoutMs: 99 },
     workerRunGovernor: {
       providerBudgets: { providerRetryLimit: 9, fullOutputUsageRatio: 0.99 },
       visibleText: { abortOnRepeat: false },
@@ -105,6 +125,9 @@ check("valid override is honored", () => {
   } });
   if (resolved.maxProviderConcurrency !== 7) {
     throw new Error(`expected 7, got ${resolved.maxProviderConcurrency}`);
+  }
+  if (JSON.stringify(resolved.auditRotation) !== JSON.stringify({ enabled: false, maxBytes: 1234, maxAgeMs: 5678, lockTimeoutMs: 99 })) {
+    throw new Error(`audit rotation override not honored: ${JSON.stringify(resolved.auditRotation)}`);
   }
   if (resolved.workerRunGovernor.providerBudgets.providerRetryLimit !== 9 || resolved.workerRunGovernor.providerBudgets.fullOutputUsageRatio !== 0.99) {
     throw new Error(`workerRunGovernor provider override not honored: ${JSON.stringify(resolved.workerRunGovernor)}`);
@@ -146,8 +169,14 @@ check("nested invalid workerRunGovernor values fall back independently", () => {
   }
 });
 
-check("workerRunGovernor schema validates nested bounds and rejects unknown fields", () => {
-  const schema = JSON.parse(schemaText).properties.dispatch.properties.workerRunGovernor;
+check("auditRotation and workerRunGovernor schema validate nested bounds and reject unknown fields", () => {
+  const dispatchSchema = JSON.parse(schemaText).properties.dispatch.properties;
+  const rotation = dispatchSchema.auditRotation;
+  if (rotation.type !== "object" || rotation.additionalProperties !== false) throw new Error("auditRotation schema must be strict");
+  if (rotation.properties.maxBytes.minimum !== 1 || rotation.properties.maxBytes.maximum !== 1099511627776) throw new Error("auditRotation maxBytes bounds drifted");
+  if (rotation.properties.maxAgeMs.minimum !== 1 || rotation.properties.maxAgeMs.maximum !== 31622400000) throw new Error("auditRotation maxAgeMs bounds drifted");
+  if (rotation.properties.lockTimeoutMs.minimum !== 1 || rotation.properties.lockTimeoutMs.maximum !== 60000) throw new Error("auditRotation lockTimeoutMs bounds drifted");
+  const schema = dispatchSchema.workerRunGovernor;
   const provider = schema.properties.providerBudgets;
   const readChurn = schema.properties.toolObservers.properties.sameFileSmallReadChurn;
   const schemaStorm = schema.properties.toolObservers.properties.schemaErrorStorm;
@@ -168,6 +197,12 @@ check("invalid values fall back to default", () => {
     if (resolved.maxProviderConcurrency !== 4) {
       throw new Error(`value ${JSON.stringify(value)} resolved to ${resolved.maxProviderConcurrency}, expected 4`);
     }
+  }
+  const invalidRotation = resolveDispatchSettings({ dispatch: { auditRotation: {
+    enabled: "true", maxBytes: 0, maxAgeMs: Infinity, lockTimeoutMs: 60001,
+  } } }).auditRotation;
+  if (JSON.stringify(invalidRotation) !== JSON.stringify(DEFAULT_DISPATCH_SETTINGS.auditRotation)) {
+    throw new Error(`invalid audit rotation did not strictly fall back: ${JSON.stringify(invalidRotation)}`);
   }
 });
 

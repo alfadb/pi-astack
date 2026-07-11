@@ -1,9 +1,13 @@
-import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ensureProjectGitignoredOnce, formatLocalIsoTimestamp, piAstackModuleDir } from "./runtime";
 import { getCurrentAnchor, spreadAnchor } from "./causal-anchor";
+import {
+  appendRotatingJsonlLine,
+  resolveJsonlRotationSettings,
+  type JsonlRotationSettings,
+} from "./rotating-jsonl";
 
 const REDACTED = "[pi-astack-redacted]";
 const API_KEY_REDACTED = "[pi-astack-redacted-api-key]";
@@ -48,6 +52,12 @@ const DEFAULT_LLM_AUDIT_BUDGET_SETTINGS: LlmAuditBudgetSettings = {
   maxPromptEstimatedTokens: 120_000,
   perOperationMaxCallsPerTurn: 12,
   perOperationMaxEstimatedTokensPerTurn: 300_000,
+};
+export const DEFAULT_LLM_AUDIT_ROTATION_SETTINGS: JsonlRotationSettings = {
+  enabled: true,
+  maxBytes: 256 * 1024 * 1024,
+  maxAgeMs: 24 * 60 * 60 * 1000,
+  lockTimeoutMs: 1_000,
 };
 const PROCESS_FALLBACK_BUDGET_WINDOW_MS = 10 * 60 * 1000;
 
@@ -225,6 +235,12 @@ function loadPiStackSettings(): Record<string, unknown> {
   }
 }
 
+export function resolveLlmAuditRotationSettings(rawSettings?: Record<string, unknown>): JsonlRotationSettings {
+  const raw = rawSettings ?? loadPiStackSettings();
+  const llmAudit = (raw.llmAudit ?? {}) as Record<string, unknown>;
+  return resolveJsonlRotationSettings(llmAudit.rotation, DEFAULT_LLM_AUDIT_ROTATION_SETTINGS);
+}
+
 function resolveLlmAuditBudgetSettings(): LlmAuditBudgetSettings {
   const raw = loadPiStackSettings();
   const llmAudit = (raw.llmAudit ?? {}) as Record<string, unknown>;
@@ -384,12 +400,10 @@ export async function appendLlmAudit(projectRoot: string, row: Record<string, un
   }
 
   try {
-    const file = auditPath(projectRoot);
-    const dir = path.dirname(file);
-    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-    try { await fs.chmod(dir, 0o700); } catch { /* best-effort */ }
-    await fs.appendFile(file, line, { encoding: "utf-8", mode: 0o600 });
-    try { await fs.chmod(file, 0o600); } catch { /* best-effort */ }
+    await appendRotatingJsonlLine(auditPath(projectRoot), line, {
+      sink: "llm-audit",
+      rotation: resolveLlmAuditRotationSettings(),
+    });
     void ensureProjectGitignoredOnce(projectRoot).catch(() => { /* best-effort */ });
   } catch {
     /* audit must never affect the caller */

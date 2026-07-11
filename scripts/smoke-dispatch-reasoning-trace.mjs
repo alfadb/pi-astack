@@ -579,7 +579,7 @@ await check("concurrent worker queues use separate files without cross-line cont
   assert.ok(bTrace.rows.every((row) => row.task_index === 1 && row.trace_id === b.traceId));
 });
 
-await check("every line parses and trace directory/file permissions are 0700/0600", async () => {
+await check("trace permissions and directory retention metadata are 0700/0600 with pinned exemption", async () => {
   const writer = makeWriter({ taskIndex: 6, taskCount: 7 });
   start(writer, "response-mode");
   delta(writer, "response-mode", "mode");
@@ -587,10 +587,47 @@ await check("every line parses and trace directory/file permissions are 0700/060
   const summary = await endSettled(writer, { stopReason: "stop" });
   const { rows } = readTrace(summary.reasoning_trace_path);
   assert.ok(rows.length >= 5);
-  const dirMode = fs.statSync(path.dirname(summary.reasoning_trace_path)).mode & 0o777;
-  const fileMode = fs.statSync(summary.reasoning_trace_path).mode & 0o777;
-  assert.equal(dirMode, 0o700);
-  assert.equal(fileMode, 0o600);
+  const traceDir = path.dirname(summary.reasoning_trace_path);
+  const retentionPath = path.join(traceDir, ".retention.json");
+  const retention = JSON.parse(fs.readFileSync(retentionPath, "utf8"));
+  assert.deepEqual(retention, {
+    schema_version: "reasoning-retention/v1",
+    hot_retention_days: 7,
+    archive_retention_days: 30,
+    pinned_exempt: true,
+    automatic_gc: false,
+  });
+  assert.equal(fs.statSync(traceDir).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(summary.reasoning_trace_path).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(retentionPath).mode & 0o777, 0o600);
+});
+
+await check("retention symlink or invalid existing JSON warns fail-open without chmod outside targets", async () => {
+  for (const variant of ["symlink", "invalid-json"]) {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), `pi-astack-retention-${variant}-`));
+    const traceDir = path.join(projectRoot, ".pi-astack", "llm-audit", "dispatch-reasoning");
+    fs.mkdirSync(traceDir, { recursive: true, mode: 0o700 });
+    const retentionPath = path.join(traceDir, ".retention.json");
+    let protectedPath = retentionPath;
+    if (variant === "symlink") {
+      protectedPath = path.join(projectRoot, "external-retention.json");
+      fs.writeFileSync(protectedPath, "external-must-not-change\n", { mode: 0o644 });
+      fs.symlinkSync(protectedPath, retentionPath);
+    } else {
+      fs.writeFileSync(retentionPath, "{\"schema_version\":\"wrong\"}\n", { mode: 0o644 });
+    }
+    const beforeMode = fs.statSync(protectedPath).mode & 0o777;
+    const beforeContent = fs.readFileSync(protectedPath, "utf8");
+    const writer = makeWriter({ projectRoot, taskIndex: variant === "symlink" ? 30 : 31, taskCount: 32 });
+    start(writer, `response-${variant}`);
+    delta(writer, `response-${variant}`, variant);
+    messageEnd(writer, `response-${variant}`);
+    const summary = await endSettled(writer, { stopReason: "stop" });
+    assert.equal(summary.reasoning_trace_status, "complete");
+    assert(fs.existsSync(summary.reasoning_trace_path));
+    assert.equal(fs.statSync(protectedPath).mode & 0o777, beforeMode);
+    assert.equal(fs.readFileSync(protectedPath, "utf8"), beforeContent);
+  }
 });
 
 await check("OpenAI model trace states visible-summary-only scope and never claims complete CoT", async () => {
