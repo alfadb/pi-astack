@@ -885,7 +885,7 @@ async function main() {
       transpileExtensions(hookOut);
       const fakeHome = path.join(hookRoot, "home");
       writeFile(path.join(fakeHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
-        canonicalGitRuntime: { enabled: false, mode: "p1_controlled" },
+        canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" },
         sediment: { enabled: true, gitCommit: false, minWindowChars: 0, autoLlmWriteEnabled: false },
       }, null, 2));
       const hookAbrain = path.join(hookRoot, "abrain");
@@ -4181,7 +4181,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           ok: true,
           status: "completed",
           sourceEventId: eventOnly.result.dedupedAgainst,
-          publication: { status: "remote_durable", commit: "a".repeat(40), localCommit: "index_converged", drainStatus: "index_converged", pushStatus: "success", canonical: true },
+          publication: { status: "local_durable", commit: "a".repeat(40), localCommit: "index_converged", drainStatus: "index_converged", canonical: true },
         })}\n`);
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
         const eventOnlyDurable = await _tryAutoWriteLaneForTests({

@@ -267,6 +267,19 @@ asyncCheck("directory fsync failure never arms and a fresh process recovers the 
   _resetConstraintShadowAutoRefreshForTests();
 });
 
+asyncCheck("legacy remote_durable audit fixture is read-only local durability evidence", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-legacy-remote-durable-"));
+  const eventId = "e".repeat(64);
+  const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
+  const fixture = path.join(repoRoot, "scripts", "fixtures", "constraint-auto-refresh-legacy-remote-durable-audit.jsonl");
+  writeFile(auditFile, fs.readFileSync(fixture, "utf8"));
+  const durability = await readConstraintPublicationDurability(abrainHome, eventId);
+  assert(durability.durable === true && durability.required === "local_durable", `legacy audit evidence not accepted locally: ${JSON.stringify(durability)}`);
+  assert(durability.publication === undefined, `legacy remote status escaped through the production publication type: ${JSON.stringify(durability)}`);
+  _resetConstraintShadowAutoRefreshForTests();
+});
+
 asyncCheck("startup resumes durable marker and pending publication cannot unlock it", async () => {
   _resetConstraintShadowAutoRefreshForTests();
   const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-startup-resume-"));
@@ -276,7 +289,7 @@ asyncCheck("startup resumes durable marker and pending publication cannot unlock
   writeFile(markerFile, `${JSON.stringify({ schemaVersion: "constraint-shadow-auto-refresh-needs-refresh/v1", observedAtUtc: "2026-07-11T00:00:00.000Z", reason: "restart_fixture", sourceEventId: eventId, modelRef: "test/model" })}\n`);
   writeFile(auditFile, `${JSON.stringify({ schemaVersion: "constraint-shadow-auto-refresh/v1", observedAtUtc: "2026-07-11T00:00:01.000Z", ok: true, status: "completed", sourceEventId: eventId, publication: { status: "durable_pending", commit: "b".repeat(40), localCommit: "index_converged", drainStatus: "index_converged", canonical: true } })}\n`);
   const pendingDurability = await readConstraintPublicationDurability(abrainHome, eventId);
-  assert(pendingDurability.durable === false && pendingDurability.required === "remote_durable", `durable_pending incorrectly unlocked correlation: ${JSON.stringify(pendingDurability)}`);
+  assert(pendingDurability.durable === false && pendingDurability.required === "local_durable", `durable_pending incorrectly unlocked correlation: ${JSON.stringify(pendingDurability)}`);
   const freshProcess = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--resume-worker"], {
     env: { ...process.env, CONSTRAINT_RESUME_ABRAIN: abrainHome },
     encoding: "utf8",
@@ -288,9 +301,9 @@ asyncCheck("startup resumes durable marker and pending publication cannot unlock
   assert(readJsonlRows(auditFile).some((row) => row.status === "startup_retry_scheduled" && row.sourceEventId === eventId), "startup retry audit missing");
   _resetConstraintShadowAutoRefreshForTests();
 
-  fs.appendFileSync(auditFile, `${JSON.stringify({ schemaVersion: "constraint-shadow-auto-refresh/v1", observedAtUtc: "2026-07-11T00:00:02.000Z", ok: true, status: "completed", sourceEventId: eventId, publication: { status: "remote_durable", commit: "c".repeat(40), localCommit: "index_converged", drainStatus: "index_converged", pushStatus: "success", canonical: true } })}\n`);
+  fs.appendFileSync(auditFile, `${JSON.stringify({ schemaVersion: "constraint-shadow-auto-refresh/v1", observedAtUtc: "2026-07-11T00:00:02.000Z", ok: true, status: "completed", sourceEventId: eventId, publication: { status: "local_durable", commit: "c".repeat(40), localCommit: "index_converged", drainStatus: "index_converged", canonical: true } })}\n`);
   const durable = await readConstraintPublicationDurability(abrainHome, eventId);
-  assert(durable.durable === true, `remote_durable correlation not recognized: ${JSON.stringify(durable)}`);
+  assert(durable.durable === true, `local_durable correlation not recognized: ${JSON.stringify(durable)}`);
   const settled = await resumeConstraintShadowAutoRefreshAtStartup(trigger(abrainHome, baseSettings(), { reason: "startup" }));
   assert(settled.scheduled === false && settled.reason === "marker_already_durable", `durable marker was redundantly scheduled: ${JSON.stringify(settled)}`);
   _resetConstraintShadowAutoRefreshForTests();

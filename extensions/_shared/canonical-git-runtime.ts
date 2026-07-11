@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -13,24 +12,13 @@ import {
   type CohortPlanEntry,
 } from "./git-exact-cohort";
 import { gitSingleFlight } from "./git-singleflight";
-import {
-  validateTransportPolicy,
-  type CanonicalTransportPolicy,
-  type CanonicalGitTransportSession,
-  type StableRemoteProof,
-} from "./canonical-git-transport";
 import { parseGitStatusPorcelainV1Z, type GitPorcelainV1Record } from "./git-z-parser";
-import { assessLegacyTerminalResolutions } from "./legacy-terminal-resolver";
 import {
   claimNextRecoverySlot,
   foldRecoveryEvents,
-  pushEpisodeIdentity,
-  readPushIntent,
   readRecoveryEvents,
-  recordPushIntent,
   recoverDrainSlot,
   recoverOpenRecoveryEpisodes,
-  recoverPushEpisode,
   recordDrainPrepared,
   resolveRecoveryEpisode,
 } from "./convergence-recovery";
@@ -45,16 +33,12 @@ import { sha256Hex } from "./jcs";
 const execFileAsync = promisify(execFile);
 const GLOBAL_KEY = Symbol.for("pi-astack/canonical-git-runtime/v1");
 const API_VERSION = 1;
-const SETTINGS_MODE = "p1_controlled" as const;
+const SETTINGS_MODE = "local_convergence_v2" as const;
 const MAX_DIAGNOSTIC_TAIL = 64;
-const PRODUCTION_ENDPOINT_SHA256 = "a7c1da64e68eeb361f2052fc8fccd54727573130676f3bf48c2c87ec7d4cb74e";
-const PRODUCTION_CREDENTIAL_RESOLUTION_FINGERPRINT = "3383decbb77e63abab2f97931ef6f22b96693051d921a90b698e9c0bf4c7ddd1";
-const PRODUCTION_TRANSPORT_POLICY_ID = "4c29c864bda62aa9d980a1d4aed9027752baeb4f57a4d50779a8e97b6b92370b";
 
 export interface CanonicalGitRuntimeSettings {
   enabled: boolean;
   mode: typeof SETTINGS_MODE;
-  transport?: CanonicalTransportPolicy;
   valid: boolean;
   reason: "enabled" | "disabled" | "missing" | "invalid" | "unreadable";
   settingsPath: string;
@@ -114,24 +98,6 @@ export interface DrainResult {
   reason?: string;
 }
 
-export interface PushResult {
-  status: "disabled" | "blocked" | "success" | "retryable" | "terminal" | "consumed";
-  targetCommit?: string;
-  episodeId?: string;
-  reason?: string;
-  remoteContained?: boolean;
-}
-
-export interface RemoteConvergenceResult {
-  status: "ready" | "ahead" | "behind" | "diverged" | "blocked";
-  targetCommit: string;
-  remoteCommit?: string;
-  remoteContained: boolean;
-  ahead: number;
-  behind: number;
-  reason?: string;
-}
-
 export interface CanonicalOwnershipInstrumentation {
   wholeL1Scans: number;
   knowledgeIdentityCount: number;
@@ -159,16 +125,12 @@ export interface CanonicalGitRuntimeOptions {
   settingsPath?: string;
   sourceRoot?: string;
   refName?: string;
-  remote?: string;
-  reconcileTimeoutMs?: number;
 }
 
 export interface CanonicalGitRuntime {
   awaitStartup(): Promise<CanonicalRuntimeDiagnostics>;
   recoverAtStartup(): Promise<void>;
   requestDrain(receipts: readonly ProducedArtifact[], message?: string): Promise<DrainResult>;
-  requestPush(targetCommit?: string): Promise<PushResult>;
-  verifyRemoteConvergence(targetCommit?: string): Promise<RemoteConvergenceResult>;
   requestBacklogPreflight(): Promise<BacklogPreflightResult>;
   diagnostics(): CanonicalRuntimeDiagnostics;
 }
@@ -235,19 +197,7 @@ export function resolveCanonicalGitRuntimeSettings(settingsPath = defaultSetting
   }
   const cfg = raw as Record<string, unknown>;
   const keys = Object.keys(cfg).sort(compareAscii);
-  const allowed = new Set(["_comment", "enabled", "mode", "transport"]);
-  let transport: CanonicalTransportPolicy;
-  try { transport = validateTransportPolicy(cfg.transport); }
-  catch {
-    return Object.freeze({ enabled: false, mode: SETTINGS_MODE, valid: false, reason: "invalid", settingsPath: resolved });
-  }
-  if (
-    transport.remote !== "origin" || transport.refName !== "refs/heads/main"
-    || transport.endpointSha256 !== PRODUCTION_ENDPOINT_SHA256
-    || transport.credentialResolution.credentialResolutionFingerprint !== PRODUCTION_CREDENTIAL_RESOLUTION_FINGERPRINT
-    || transport.rewritePolicy !== "forbidden" || transport.redirectPolicy !== "forbidden" || transport.promptPolicy !== "forbidden"
-    || transport.transportPolicyId !== PRODUCTION_TRANSPORT_POLICY_ID
-  ) return Object.freeze({ enabled: false, mode: SETTINGS_MODE, valid: false, reason: "invalid", settingsPath: resolved });
+  const allowed = new Set(["_comment", "enabled", "mode"]);
   if (
     keys.some((key) => !allowed.has(key))
     || typeof cfg.enabled !== "boolean"
@@ -256,7 +206,7 @@ export function resolveCanonicalGitRuntimeSettings(settingsPath = defaultSetting
   ) {
     return Object.freeze({ enabled: false, mode: SETTINGS_MODE, valid: false, reason: "invalid", settingsPath: resolved });
   }
-  return Object.freeze({ enabled: cfg.enabled, mode: SETTINGS_MODE, transport, valid: true, reason: cfg.enabled ? "enabled" : "disabled", settingsPath: resolved });
+  return Object.freeze({ enabled: cfg.enabled, mode: SETTINGS_MODE, valid: true, reason: cfg.enabled ? "enabled" : "disabled", settingsPath: resolved });
 }
 
 export type CanonicalGitRuntimeDisposition = "enabled" | "legacy";
@@ -317,34 +267,13 @@ async function gitIsAncestor(repo: string, ancestor: string, descendant: string)
   }
 }
 
-async function remoteRefCommit(repo: string, remote: string, refName: string): Promise<string> {
-  const output = await git(repo, ["ls-remote", "--refs", remote, refName], 30_000);
-  const rows = output.trim().split("\n").filter(Boolean).map((line) => line.split(/\s+/));
-  if (rows.length !== 1 || rows[0]!.length !== 2 || rows[0]![1] !== refName || !/^[0-9a-f]{40,64}$/.test(rows[0]![0]!)) {
-    throw new CanonicalGitRuntimeError("REMOTE_REF_UNAVAILABLE", "remote did not advertise one exact configured ref", { remote, refName });
-  }
-  return rows[0]![0]!;
-}
-
-async function ensureCommitObject(repo: string, remote: string, refName: string, oid: string): Promise<void> {
-  try {
-    await git(repo, ["cat-file", "-e", `${oid}^{commit}`], 5_000);
-  } catch {
-    await git(repo, ["fetch", "--no-tags", "--no-write-fetch-head", remote, refName], 30_000);
-    await git(repo, ["cat-file", "-e", `${oid}^{commit}`], 5_000);
-  }
-}
-
 function sourcePaths(sourceRoot: string, settingsPath: string): Array<[string, string]> {
   return [
     ["orchestrator", path.join(sourceRoot, "extensions/_shared/canonical-git-runtime.ts")],
     ["dossier-evidence-validator", path.join(sourceRoot, "extensions/_shared/p1a-dossier-evidence.ts")],
     ["singleflight", path.join(sourceRoot, "extensions/_shared/git-singleflight.ts")],
-    ["transport", path.join(sourceRoot, "extensions/_shared/canonical-git-transport.ts")],
-    ["credential-adapter", path.join(sourceRoot, "extensions/_shared/credential-broker-adapter.mjs")],
     ["git-z-parser", path.join(sourceRoot, "extensions/_shared/git-z-parser.ts")],
     ["recovery", path.join(sourceRoot, "extensions/_shared/convergence-recovery.ts")],
-    ["legacy-terminal-resolver", path.join(sourceRoot, "extensions/_shared/legacy-terminal-resolver.ts")],
     ["exact", path.join(sourceRoot, "extensions/_shared/git-exact-cohort.ts")],
     ["durable-write", path.join(sourceRoot, "extensions/_shared/durable-write.ts")],
     ["jcs", path.join(sourceRoot, "extensions/_shared/jcs.ts")],
@@ -559,9 +488,19 @@ async function validateL1Artifact(repo: string, rel: string, bytes: Buffer): Pro
   try { parsed = JSON.parse(bytes.toString("utf-8")); } catch { throw new CanonicalGitRuntimeError("L1_INVALID", "L1 artifact is not JSON", { rel }); }
   const registry = loadL1SchemaRegistry();
   const validated = validateL1Envelope(parsed, { registry, abrainHome: repo, filePath: path.join(repo, rel), relativePath: rel });
+  if (validated.registration.phase === "legacy_read_only") throw new CanonicalGitRuntimeError("LEGACY_L1_EXCLUDED", "legacy read-only L1 is excluded from active ownership", { rel });
   if (validated.registration.domain === "knowledge") return "knowledge_l1";
   if (validated.registration.domain === "constraint") return "constraint_l1";
   return "canonical_path_meta";
+}
+
+async function isLegacyReadOnlyL1(repo: string, rel: string): Promise<boolean> {
+  if (!rel.startsWith("l1/events/sha256/")) return false;
+  let parsed: unknown;
+  try { parsed = JSON.parse(await fsp.readFile(path.join(repo, rel), "utf-8")); }
+  catch (error) { throw new CanonicalGitRuntimeError("L1_INVALID", "L1 artifact is not valid JSON", { rel, error: String(error) }); }
+  const validated = validateL1Envelope(parsed, { registry: loadL1SchemaRegistry(), abrainHome: repo, filePath: path.join(repo, rel), relativePath: rel });
+  return validated.registration.phase === "legacy_read_only";
 }
 
 function knowledgeIdentityFromL2Path(rel: string): string {
@@ -799,15 +738,9 @@ async function pruneNoops(repo: string, frozen: string, plan: readonly CohortPla
   return pruned;
 }
 
-interface TransportCycle {
-  sessionPromise?: Promise<CanonicalGitTransportSession>;
-  pushSlotClaimed: boolean;
-  proofs: Map<string, StableRemoteProof>;
-}
-
 class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   readonly repo: string;
-  readonly options: Required<Pick<CanonicalGitRuntimeOptions, "refName" | "remote" | "reconcileTimeoutMs">> & CanonicalGitRuntimeOptions;
+  readonly options: Required<Pick<CanonicalGitRuntimeOptions, "refName">> & CanonicalGitRuntimeOptions;
   readonly settings: CanonicalGitRuntimeSettings;
   readonly sourceRoot: string;
   readonly loadedProvenance: readonly LoadedProvenanceEntry[];
@@ -816,15 +749,12 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   private startupPromise?: Promise<CanonicalRuntimeDiagnostics>;
   private blockedReason?: string;
   private frozenOwnershipContext?: { statusHash: string; context: CanonicalOwnershipContext };
-  private readonly effectiveResolvedTerminals = new Set<string>();
-  private readonly diagnosticTerminals = new Set<string>();
   private readonly tail: Record<string, unknown>[] = [];
 
   constructor(args: { repo: string; options: CanonicalGitRuntimeOptions; settings: CanonicalGitRuntimeSettings; sourceRoot: string; provenance: readonly LoadedProvenanceEntry[] }) {
     this.repo = args.repo;
-    this.options = { ...args.options, refName: args.options.refName ?? "refs/heads/main", remote: args.options.remote ?? "origin", reconcileTimeoutMs: args.options.reconcileTimeoutMs ?? 120_000 };
+    this.options = { ...args.options, refName: args.options.refName ?? "refs/heads/main" };
     this.settings = args.settings;
-    if (args.settings.transport && (this.options.remote !== args.settings.transport.remote || this.options.refName !== args.settings.transport.refName)) throw new CanonicalGitRuntimeError("TRANSPORT_SCOPE_OVERRIDE_FORBIDDEN", "runtime options cannot override the pinned production remote/ref");
     this.sourceRoot = args.sourceRoot;
     this.loadedProvenance = args.provenance;
     this.implementationFingerprint = provenanceFingerprint(args.provenance);
@@ -833,28 +763,6 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   private record(row: Record<string, unknown>): void {
     this.tail.push(Object.freeze({ at: new Date().toISOString(), ...row }));
     if (this.tail.length > MAX_DIAGNOSTIC_TAIL) this.tail.splice(0, this.tail.length - MAX_DIAGNOSTIC_TAIL);
-  }
-
-  private async finishPush(result: PushResult): Promise<PushResult> {
-    this.record({ operation: "push", episodeId: result.episodeId, target: result.targetCommit, status: result.status, reason: result.reason, remoteContained: result.remoteContained });
-    try {
-      const stateDir = path.join(this.repo, ".state");
-      await fsp.mkdir(stateDir, { recursive: true });
-      await fsp.appendFile(path.join(stateDir, "git-sync.jsonl"), `${JSON.stringify({
-        ts: new Date().toISOString(),
-        op: "canonical_push",
-        result: result.status,
-        reason: result.reason ?? null,
-        episodeId: result.episodeId ?? null,
-        remote: this.options.remote,
-        refName: this.options.refName,
-        targetCommit: result.targetCommit ?? null,
-        remoteContained: result.remoteContained ?? false,
-      })}\n`, "utf-8");
-    } catch (error) {
-      this.record({ operation: "push_audit", status: "failed", reason: error instanceof Error ? error.message : String(error) });
-    }
-    return result;
   }
 
   diagnostics(): CanonicalRuntimeDiagnostics {
@@ -879,62 +787,9 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     await preflightSharedIndexLock(this.repo);
   }
 
-  private localTestTransportEnabled(): boolean {
-    const tmpRoot = `${path.resolve(os.tmpdir())}${path.sep}`;
-    return process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1" && process.env.PI_ASTACK_CANONICAL_LOCAL_TRANSPORT_FOR_TESTS === "1" && this.repo.startsWith(tmpRoot) && this.settings.settingsPath.startsWith(tmpRoot);
-  }
-
-  private async createLocalTestTransport(): Promise<CanonicalGitTransportSession> {
-    if (!this.localTestTransportEnabled()) throw new CanonicalGitRuntimeError("TEST_TRANSPORT_DISABLED", "local transport fixture is disabled");
-    const session = {
-      stableProof: async (target: string): Promise<StableRemoteProof> => {
-        const tipBefore = await remoteRefCommit(this.repo, this.options.remote, this.options.refName);
-        await ensureCommitObject(this.repo, this.options.remote, this.options.refName, tipBefore);
-        const tipAfter = await remoteRefCommit(this.repo, this.options.remote, this.options.refName);
-        if (tipBefore !== tipAfter) throw new CanonicalGitRuntimeError("REMOTE_TIP_CHANGED", "test remote changed during stable proof");
-        const contains = tipAfter === target || await gitIsAncestor(this.repo, target, tipAfter);
-        return { tipBefore, fetchedOid: tipBefore, tipAfter, remoteContainsTarget: contains, relation: !contains ? "absent" : tipAfter === target ? "equal" : "descendant", commands: [] };
-      },
-      push: async (target: string) => {
-        try {
-          const stdout = await git(this.repo, ["-c", "core.hooksPath=/dev/null", "push", this.options.remote, `${target}:${this.options.refName}`], 30_000);
-          return { exitCode: 0, command: { exitCode: 0, stdoutSha256: sha256Hex(stdout), stderrSha256: sha256Hex("") } };
-        } catch (error) {
-          return { exitCode: Number((error as any)?.code ?? -1), command: { exitCode: Number((error as any)?.code ?? -1), stdoutSha256: sha256Hex(String((error as any)?.stdout ?? "")), stderrSha256: sha256Hex(String((error as any)?.stderr ?? "")) } };
-        }
-      },
-      close: async () => undefined,
-    };
-    return session as unknown as CanonicalGitTransportSession;
-  }
-
-  private async getTransport(cycle: TransportCycle): Promise<CanonicalGitTransportSession> {
-    if (!this.settings.transport) throw new CanonicalGitRuntimeError("TRANSPORT_POLICY_MISSING", "canonical transport policy is unavailable");
-    cycle.sessionPromise ??= this.localTestTransportEnabled()
-      ? this.createLocalTestTransport()
-      : import("./canonical-git-transport").then(({ CanonicalGitTransportSession }) => CanonicalGitTransportSession.create({ repo: this.repo, policy: this.settings.transport! }));
-    return cycle.sessionPromise;
-  }
-
-  private allowPushClaim(cycle: TransportCycle): boolean {
-    if (cycle.pushSlotClaimed) return false;
-    cycle.pushSlotClaimed = true;
-    return true;
-  }
-
-  private async withTransportCycle<T>(operation: string, fn: (cycle: TransportCycle) => Promise<T>): Promise<T> {
-    const cycle: TransportCycle = { pushSlotClaimed: false, proofs: new Map() };
-    this.record({ operation: "transport_cycle", publicOperation: operation, status: "opened" });
-    try { return await fn(cycle); }
-    finally {
-      if (cycle.sessionPromise) await cycle.sessionPromise.then((session) => session.close()).catch(() => undefined);
-      this.record({ operation: "transport_cycle", publicOperation: operation, status: "closed", pushSlotClaimed: cycle.pushSlotClaimed });
-    }
-  }
-
   awaitStartup(): Promise<CanonicalRuntimeDiagnostics> {
     if (!this.startupPromise) {
-      this.startupPromise = gitSingleFlight(this.repo, () => this.withTransportCycle("startup", async (cycle) => {
+      this.startupPromise = gitSingleFlight(this.repo, async () => {
         if (!this.settings.enabled || !this.settings.valid) {
           this.startupState = "ready";
           this.record({ operation: "startup", status: "legacy_boundary", reason: this.settings.reason });
@@ -943,129 +798,49 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         this.startupState = "running";
         this.blockedReason = undefined;
         try {
-          await this.recoverAtStartupUnlocked(cycle);
-          let target = await resolveRef(this.repo, this.options.refName);
+          await this.recoverAtStartupUnlocked();
           const backlog = await this.requestBacklogPreflightUnlocked();
           if (backlog.status === "ready") {
-            const drained = await this.requestDrainUnlocked(backlog.receipts, "abrain: canonical startup backlog drain");
-            if (drained.status !== "index_converged" && drained.status !== "empty") {
-              throw new CanonicalGitRuntimeError("STARTUP_DRAIN_NOT_DURABLE", `startup backlog drain ended in ${drained.status}`, { drained });
-            }
-            target = drained.commit ?? await resolveRef(this.repo, this.options.refName);
-          } else if (backlog.status === "blocked") {
-            throw new CanonicalGitRuntimeError("STARTUP_BACKLOG_BLOCKED", backlog.reason ?? "backlog preflight blocked");
-          }
-          const pushed = await this.finishPush(await this.requestPushUnlocked(cycle, target));
-          if (pushed.status !== "success") {
-            throw new CanonicalGitRuntimeError("STARTUP_PUSH_NOT_DURABLE", `startup push ended in ${pushed.status}`, { pushed });
-          }
-          const remote = await this.verifyRemoteConvergenceUnlocked(cycle, target);
-          if (remote.status !== "ready" || !remote.remoteContained || remote.ahead !== 0 || remote.behind !== 0) {
-            throw new CanonicalGitRuntimeError("STARTUP_REMOTE_NOT_CONVERGED", `startup remote state is ${remote.status}`, { remote });
-          }
+            const drained = await this.requestDrainUnlocked(backlog.receipts, "startup-local-drain", false);
+            if (drained.status !== "index_converged" && drained.status !== "empty" && drained.status !== "consumed") throw new CanonicalGitRuntimeError("STARTUP_DRAIN_NOT_DURABLE", `startup local drain ended in ${drained.status}`, { drained });
+          } else if (backlog.status === "blocked") throw new CanonicalGitRuntimeError("STARTUP_BACKLOG_BLOCKED", backlog.reason ?? "backlog preflight blocked");
           const finalRecovery = await recoverOpenRecoveryEpisodes(this.repo);
-          const finalBlockingQuarantines = await this.classifyStartupQuarantines(finalRecovery);
-          if (finalBlockingQuarantines.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", "startup recovery contains current-scope quarantined episodes", { episodes: finalBlockingQuarantines });
-          const finalBlockingTerminals = finalRecovery.terminal.filter((item) => item.lane === "drain" || (!this.effectiveResolvedTerminals.has(item.episodeId) && !this.diagnosticTerminals.has(item.episodeId)));
-          if (finalBlockingTerminals.length) throw new CanonicalGitRuntimeError("OWNER_INTERVENTION_REQUIRED", "current-scope terminal recovery episode requires owner intervention", { episodes: finalBlockingTerminals.map((item) => `${item.lane}:${item.episodeId}`) });
-          if (finalRecovery.open.length) throw new CanonicalGitRuntimeError("STARTUP_RECOVERY_OPEN", "startup recovery did not reach durable closure", { episodes: finalRecovery.open.map((item) => `${item.lane}:${item.episodeId}`) });
+          if (finalRecovery.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", "active v2 recovery is malformed", { episodes: finalRecovery.quarantined.map((item) => item.episodeId) });
+          if (finalRecovery.terminal.length) throw new CanonicalGitRuntimeError("OWNER_INTERVENTION_REQUIRED", "active v2 terminal is absorbing for the current generation", { episodes: finalRecovery.terminal.map((item) => item.episodeId) });
           this.startupState = "ready";
+          this.record({ operation: "startup", status: "local_ready" });
         } catch (error) {
           this.startupState = "blocked";
           this.blockedReason = error instanceof Error ? error.message : String(error);
           this.record({ operation: "startup", status: "blocked", reason: this.blockedReason });
         }
         return this.diagnostics();
-      }));
+      });
     }
     return this.startupPromise;
   }
 
   async recoverAtStartup(): Promise<void> {
-    return gitSingleFlight(this.repo, () => this.withTransportCycle("recoverAtStartup", (cycle) => this.recoverAtStartupUnlocked(cycle)));
+    return gitSingleFlight(this.repo, () => this.recoverAtStartupUnlocked());
   }
 
-  private async classifyStartupQuarantines(recovered: Awaited<ReturnType<typeof recoverOpenRecoveryEpisodes>>): Promise<readonly string[]> {
-    const blocking: string[] = [];
-    const policy = this.settings.transport!;
-    for (const item of recovered.quarantined) {
-      if (item.lane === "drain") { blocking.push(item.episodeId); continue; }
-      let intent: Awaited<ReturnType<typeof readPushIntent>>;
-      try { intent = await readPushIntent(this.repo, item.episodeId); }
-      catch { blocking.push(item.episodeId); continue; }
-      if (!intent) { blocking.push(item.episodeId); continue; }
-      const current = intent.version === "v2"
-        ? intent.scope.repo_id === sha256Hex(this.repo) && intent.scope.remote === policy.remote && intent.scope.ref_name === policy.refName && intent.scope.remote_url_id === policy.endpointSha256 && intent.scope.transport_policy_id === policy.transportPolicyId
-        : sha256Hex(path.resolve(intent.repo)) === sha256Hex(this.repo) && intent.scope.remote === policy.remote && intent.scope.ref_name === policy.refName;
-      if (current) blocking.push(item.episodeId);
-      else this.diagnosticTerminals.add(item.episodeId);
-    }
-    return Object.freeze(blocking.sort(compareAscii));
-  }
-
-  private async classifyStartupTerminals(cycle: TransportCycle, target: string, recovered: Awaited<ReturnType<typeof recoverOpenRecoveryEpisodes>>): Promise<readonly string[]> {
-    const blocking: string[] = recovered.terminal.filter((item) => item.lane === "drain").map((item) => item.episodeId);
-    const pushTerminals = recovered.terminal.filter((item) => item.lane === "push");
-    if (!pushTerminals.length) return blocking;
-    const policy = this.settings.transport!;
-    const currentScope = { repo_id: sha256Hex(this.repo), remote: policy.remote, ref_name: policy.refName, target_commit: target, remote_url_id: policy.endpointSha256, transport_policy_id: policy.transportPolicyId };
-    const assessment = await assessLegacyTerminalResolutions({ abrainHome: this.repo, currentScope, transportFactory: () => this.getTransport(cycle) });
-    for (const episodeId of assessment.effectiveResolvedEpisodeIds) this.effectiveResolvedTerminals.add(episodeId);
-    for (const episodeId of assessment.diagnosticsOnlyTerminalIds) this.diagnosticTerminals.add(episodeId);
-    blocking.push(...assessment.currentScopeUnresolved, ...assessment.quarantinedEpisodeIds);
-    for (const cursor of pushTerminals) {
-      const intent = await readPushIntent(this.repo, cursor.episodeId);
-      if (!intent || intent.version === "v1") continue;
-      if (intent.scope.repo_id === currentScope.repo_id && intent.scope.remote === currentScope.remote && intent.scope.ref_name === currentScope.ref_name && intent.scope.remote_url_id === currentScope.remote_url_id && intent.scope.transport_policy_id === currentScope.transport_policy_id) blocking.push(cursor.episodeId);
-      else this.diagnosticTerminals.add(cursor.episodeId);
-    }
-    return Object.freeze([...new Set(blocking)].sort(compareAscii));
-  }
-
-  private async recoverAtStartupUnlocked(cycle: TransportCycle): Promise<void> {
+  private async recoverAtStartupUnlocked(): Promise<void> {
     await this.mutationPreflight();
     const recovered = await recoverOpenRecoveryEpisodes(this.repo);
-    const target = await resolveRef(this.repo, this.options.refName);
-    const blockingQuarantines = await this.classifyStartupQuarantines(recovered);
-    if (blockingQuarantines.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", "current-scope invalid recovery episode requires owner intervention", { episodes: blockingQuarantines });
-    const blockingTerminals = await this.classifyStartupTerminals(cycle, target, recovered);
-    if (blockingTerminals.length) throw new CanonicalGitRuntimeError("OWNER_INTERVENTION_REQUIRED", "current-scope terminal recovery episode requires exact owner resolution", { episodes: blockingTerminals });
-    for (const cursor of recovered.open.filter((item) => item.lane === "drain")) {
+    if (recovered.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", "active v2 recovery is malformed", { episodes: recovered.quarantined.map((item) => item.episodeId) });
+    if (recovered.terminal.length) throw new CanonicalGitRuntimeError("OWNER_INTERVENTION_REQUIRED", "active v2 terminal is absorbing for the current generation", { episodes: recovered.terminal.map((item) => item.episodeId) });
+    for (const cursor of recovered.open) {
       if (cursor.pendingSlot === null) continue;
       const action = await recoverDrainSlot({
         abrainHome: this.repo,
+        repo: this.repo,
+        symbolicRef: this.options.refName,
         episodeId: cursor.episodeId,
         slot: cursor.pendingSlot,
         prePublishCheck: () => this.mutationPreflight(),
         preConvergeCheck: () => preflightSharedIndexLock(this.repo),
       });
       this.record({ operation: "recover_drain", episodeId: cursor.episodeId, slot: cursor.pendingSlot, action });
-    }
-    const openPush = recovered.open.filter((item) => item.lane === "push");
-    for (const cursor of openPush) {
-      const intent = await readPushIntent(this.repo, cursor.episodeId);
-      if (!intent) {
-        throw new CanonicalGitRuntimeError("PUSH_INTENT_MISSING", "open push episode has no durable production push intent", { episodeId: cursor.episodeId });
-      }
-      if (intent.version !== "v2") throw new CanonicalGitRuntimeError("LEGACY_PUSH_RECOVERY_REQUIRES_RESOLVER", "open v1 push episodes cannot execute automatically", { episodeId: cursor.episodeId });
-      const expectedEpisode = pushEpisodeIdentity(intent.scope);
-      if (cursor.episodeId !== expectedEpisode || intent.scope.repo_id !== sha256Hex(this.repo) || intent.scope.remote !== this.options.remote || intent.scope.ref_name !== this.options.refName || intent.scope.remote_url_id !== this.settings.transport!.endpointSha256 || intent.scope.transport_policy_id !== this.settings.transport!.transportPolicyId) {
-        throw new CanonicalGitRuntimeError("PUSH_INTENT_UNSAFE", "durable v2 push intent does not match this repository/runtime", { episodeId: cursor.episodeId });
-      }
-      const result = await recoverPushEpisode({
-        abrainHome: this.repo,
-        episodeId: cursor.episodeId,
-        repo: this.repo,
-        scope: intent.scope,
-        transportFactory: () => this.getTransport(cycle),
-        closeTransport: false,
-        allowClaim: () => this.allowPushClaim(cycle),
-      });
-      if (result.proof) cycle.proofs.set(intent.scope.target_commit, result.proof);
-      this.record({ operation: "recover_push", episodeId: cursor.episodeId, classification: result.classification, slot: result.slot });
-      if (result.classification !== "success" && result.classification !== "complete") {
-        throw new CanonicalGitRuntimeError("STARTUP_PUSH_NOT_DURABLE", `startup push recovery ended in ${result.classification}`, { episodeId: cursor.episodeId, slot: result.slot });
-      }
     }
   }
 
@@ -1093,6 +868,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         if (row.status !== "??" && row.status !== " M" && row.status !== " D") {
           throw new CanonicalGitRuntimeError("STATUS_UNSAFE", "startup backlog accepts only untracked puts, tracked modifications, or tracked deletes", { path: row.path, status: row.status });
         }
+        if (row.status !== " D" && await isLegacyReadOnlyL1(this.repo, row.path)) continue;
         const filePath = path.join(this.repo, ...row.path.split("/"));
         let receipt = await createProducedArtifactReceipt({ abrainHome: this.repo, filePath, ...(row.status === " D" ? { op: "delete" as const } : {}) });
         const validated = await validateReceipt(this.repo, receipt, false, ownershipContext);
@@ -1126,10 +902,10 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   async requestDrain(receipts: readonly ProducedArtifact[], message = "abrain: canonical artifact drain"): Promise<DrainResult> {
     const startup = await this.awaitStartup();
     if (startup.startup === "blocked") return { status: "blocked", localCommit: "not_published", reason: startup.blockedReason };
-    return gitSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message));
+    return gitSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message, true));
   }
 
-  private async requestDrainUnlocked(receipts: readonly ProducedArtifact[], message: string): Promise<DrainResult> {
+  private async requestDrainUnlocked(receipts: readonly ProducedArtifact[], message: string, allowNextGeneration: boolean): Promise<DrainResult> {
     if (!this.settings.enabled || !this.settings.valid) return { status: "disabled", localCommit: "not_published" };
     await this.mutationPreflight();
     const seen = new Set<string>();
@@ -1179,6 +955,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         continue;
       }
       if (!row.path.startsWith("l1/events/sha256/")) throw new CanonicalGitRuntimeError("ARTIFACT_UNOWNED", "dirty path outside the explicit transaction blocks canonical drain", { path: row.path });
+      if (await isLegacyReadOnlyL1(this.repo, row.path)) continue;
       const tailReceipt = await createProducedArtifactReceipt({ abrainHome: this.repo, filePath: path.join(this.repo, row.path) });
       const tailValidated = await validateReceipt(this.repo, tailReceipt, false, ownershipContext);
       if (tailValidated.receipt.owner !== "canonical_path_meta") {
@@ -1195,7 +972,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     const plan = await pruneNoops(this.repo, frozenCommit, rawPlan);
     if (!plan.length) return { status: "empty", commit: frozenCommit, localCommit: "not_published" };
     const frozenIndexSnapshot = await snapshotIndexEntries(this.repo, plan.map((entry) => entry.path));
-    const episode = await resolveRecoveryEpisode({ abrainHome: this.repo, repoId: sha256Hex(this.repo), refName: this.options.refName });
+    const episode = await resolveRecoveryEpisode({ abrainHome: this.repo, symbolicRef: this.options.refName, allowNextGeneration });
     const claim = await claimNextRecoverySlot({ abrainHome: this.repo, episodeId: episode.episodeId, lane: "drain" });
     if (!claim.shouldExecute || claim.slot === null) return { status: "consumed", episodeId: episode.episodeId, slot: claim.slot ?? undefined, localCommit: "not_published", reason: claim.status };
     await preflightSharedIndexLock(this.repo);
@@ -1205,6 +982,8 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     try {
       action = await recoverDrainSlot({
         abrainHome: this.repo,
+        repo: this.repo,
+        symbolicRef: this.options.refName,
         episodeId: episode.episodeId,
         slot: claim.slot,
         prePublishCheck: async () => {
@@ -1237,92 +1016,6 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     return { status: "index_converged", commit: await resolveRef(this.repo, this.options.refName), episodeId: episode.episodeId, slot: claim.slot, localCommit: "index_converged" };
   }
 
-  async requestPush(targetCommit?: string): Promise<PushResult> {
-    let result: PushResult;
-    try {
-      const startup = await this.awaitStartup();
-      result = startup.startup === "blocked"
-        ? { status: "blocked", targetCommit, reason: startup.blockedReason }
-        : await gitSingleFlight(this.repo, () => this.withTransportCycle("requestPush", (cycle) => this.requestPushUnlocked(cycle, targetCommit)));
-    } catch (error) {
-      result = {
-        status: "blocked",
-        targetCommit,
-        reason: `${(error as { code?: string })?.code ?? "PUSH_THREW"}:${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-    return this.finishPush(result);
-  }
-
-  async verifyRemoteConvergence(targetCommit?: string): Promise<RemoteConvergenceResult> {
-    return gitSingleFlight(this.repo, () => this.withTransportCycle("verifyRemoteConvergence", (cycle) => this.verifyRemoteConvergenceUnlocked(cycle, targetCommit)));
-  }
-
-  private async verifyRemoteConvergenceUnlocked(cycle: TransportCycle, targetCommit?: string): Promise<RemoteConvergenceResult> {
-    const target = targetCommit ?? await resolveRef(this.repo, this.options.refName);
-    if (!/^[0-9a-f]{40,64}$/.test(target)) return { status: "blocked", targetCommit: target, remoteContained: false, ahead: 0, behind: 0, reason: "PUSH_TARGET_INVALID" };
-    try {
-      let proof = cycle.proofs.get(target);
-      if (!proof) {
-        proof = await (await this.getTransport(cycle)).stableProof(target);
-        cycle.proofs.set(target, proof);
-      }
-      const remoteCommit = proof.tipAfter;
-      if (remoteCommit === target) return { status: "ready", targetCommit: target, remoteCommit, remoteContained: true, ahead: 0, behind: 0 };
-      if (proof.remoteContainsTarget) return { status: "behind", targetCommit: target, remoteCommit, remoteContained: true, ahead: 0, behind: 1 };
-      const localContains = await gitIsAncestor(this.repo, remoteCommit, target);
-      if (localContains) return { status: "ahead", targetCommit: target, remoteCommit, remoteContained: false, ahead: 1, behind: 0 };
-      return { status: "diverged", targetCommit: target, remoteCommit, remoteContained: false, ahead: 1, behind: 1 };
-    } catch (error) {
-      return { status: "blocked", targetCommit: target, remoteContained: false, ahead: 0, behind: 0, reason: error instanceof Error ? error.message : String(error) };
-    }
-  }
-
-  private async requestPushUnlocked(cycle: TransportCycle, targetCommit?: string): Promise<PushResult> {
-    if (!this.settings.enabled || !this.settings.valid) return { status: "disabled" };
-    await this.mutationPreflight();
-    const target = targetCommit ?? await resolveRef(this.repo, this.options.refName);
-    if (!/^[0-9a-f]{40,64}$/.test(target)) return { status: "blocked", reason: "PUSH_TARGET_INVALID" };
-    const events = await recoverOpenRecoveryEpisodes(this.repo);
-    const blockingQuarantines = await this.classifyStartupQuarantines(events);
-    const blockingTerminals = await this.classifyStartupTerminals(cycle, target, events);
-    if (blockingTerminals.length) return { status: "blocked", targetCommit: target, reason: "owner_intervention_required" };
-    if (blockingQuarantines.length || events.open.some((item) => item.lane === "drain")) return { status: "blocked", targetCommit: target, reason: "DRAIN_NOT_CONVERGED" };
-    const recoveryScan = await scanWholeL1Validated({ abrainHome: this.repo, domains: ["canonical_path"], roles: ["meta"] });
-    const targetConverged = recoveryScan.selected.some((record) => (
-      record.body.event_type === "index_converged"
-      && record.body.body && typeof record.body.body === "object"
-      && (record.body.body as Record<string, unknown>).candidate === target
-    ));
-    const currentHead = await resolveRef(this.repo, this.options.refName);
-    if (!targetConverged && target !== currentHead) return { status: "blocked", targetCommit: target, reason: "TARGET_NOT_INDEX_CONVERGED" };
-    const reconcile = await import("../abrain/reconcile-gate");
-    const gate = await reconcile.checkAdr0039ReconcileGate({ abrainHome: this.repo, timeoutMs: this.options.reconcileTimeoutMs });
-    if (!gate.ok) return { status: "blocked", targetCommit: target, reason: `RECONCILE_${gate.reason.toUpperCase()}` };
-    const policy = this.settings.transport!;
-    const scope = { repo_id: sha256Hex(this.repo), remote: policy.remote, ref_name: policy.refName, target_commit: target, remote_url_id: policy.endpointSha256, transport_policy_id: policy.transportPolicyId };
-    const episodeId = pushEpisodeIdentity(scope);
-    await recordPushIntent({ abrainHome: this.repo, episodeId, scope });
-    const result = await recoverPushEpisode({
-      abrainHome: this.repo,
-      episodeId,
-      repo: this.repo,
-      scope,
-      transportFactory: () => this.getTransport(cycle),
-      closeTransport: false,
-      allowClaim: () => this.allowPushClaim(cycle),
-    });
-    if (result.proof) cycle.proofs.set(target, result.proof);
-    if (result.classification === "complete" && !cycle.proofs.has(target)) {
-      const proof = await (await this.getTransport(cycle)).stableProof(target);
-      cycle.proofs.set(target, proof);
-      if (!proof.remoteContainsTarget) return { status: "blocked", targetCommit: target, episodeId, remoteContained: false, reason: "FRESH_REMOTE_PROOF_MISSING" };
-    }
-    if (result.classification === "success" || result.classification === "complete") return { status: "success", targetCommit: target, episodeId, remoteContained: true };
-    if (result.classification === "retryable" || result.classification === "burned") return { status: "retryable", targetCommit: target, episodeId, remoteContained: false, reason: result.classification };
-    if (result.classification === "consumed") return { status: "consumed", targetCommit: target, episodeId, remoteContained: false, reason: "PUSH_SLOT_CONSUMED" };
-    return { status: "terminal", targetCommit: target, episodeId, remoteContained: false, reason: result.classification };
-  }
 }
 
 export async function getCanonicalGitRuntime(options: CanonicalGitRuntimeOptions): Promise<CanonicalGitRuntime> {
@@ -1365,8 +1058,4 @@ export async function awaitCanonicalGitStartup(options: CanonicalGitRuntimeOptio
 
 export async function requestCanonicalDrain(options: CanonicalGitRuntimeOptions & { receipts: readonly ProducedArtifact[]; message?: string }): Promise<DrainResult> {
   return (await getCanonicalGitRuntime(options)).requestDrain(options.receipts, options.message);
-}
-
-export async function requestCanonicalPush(options: CanonicalGitRuntimeOptions & { targetCommit?: string }): Promise<PushResult> {
-  return (await getCanonicalGitRuntime(options)).requestPush(options.targetCommit);
 }

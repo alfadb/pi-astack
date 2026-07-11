@@ -32,8 +32,8 @@ These tools may be visible to the assistant depending on pi settings and sub-pi 
 /abrain sync
 ```
 
-- `bind` / `status`: ADR 0017 strict project binding. Required before project-scoped sediment/vault writes. `status` also shows ADR 0020 git auto-sync state (remote, ahead/behind, last push, last fetch).
-- `sync` ([ADR 0020](../adr/0020-abrain-auto-sync-to-remote.md)): manual `git fetch + ff-pull + push` against `~/.abrain`'s `origin` remote. Auto-sync already runs in the background (startup fetch + post-sediment-commit push); `/abrain sync` is the manual escape hatch and the divergence runbook surface. Conflict-resolution is intentionally human-only: when local and remote both have new commits, `/abrain sync` aborts and prints the exact `cd ~/.abrain && git merge|rebase origin/main` commands. LLM auto-merge was explicitly rejected to avoid hallucinated content polluting the knowledge substrate.
+- `bind` / `status`: ADR 0017 strict project binding. Required before project-scoped sediment/vault writes. `status` also shows device Git delivery state for the current branch and its configured upstream: ahead/behind counts plus the last push and fetch results.
+- `sync` ([ADR 0020](../adr/0020-abrain-auto-sync-to-remote.md)): manual device delivery using native `git fetch`, `git merge --ff-only @{upstream}`, and `git push`. The repository's current branch, configured upstream, authentication, transport, URL rewrites, and other Git configuration remain the device/user's responsibility. Startup sync and post-commit pushes are best-effort and never gate local durability. Divergence stops at the ff-only boundary; resolve branch state manually with normal Git tooling, then rerun `/abrain sync`. The runtime does not select `origin/main`, auto-merge divergent history, or override the native push destination.
 - `PI_ABRAIN_NO_AUTOSYNC=1` env var disables both startup fetch and post-commit push (for offline / CI use).
 
 ### `/memory`

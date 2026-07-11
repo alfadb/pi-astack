@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { jcsSha256Hex, sha256Hex } from "./jcs";
+import { isCanonicalCohortPath } from "./l1-schema-registry";
 
 const execFileAsync = promisify(execFile);
 
@@ -84,8 +85,10 @@ const ALLOWED_GIT_EXTRA_ENV = new Set([
   "GIT_INDEX_FILE",
   "GIT_AUTHOR_NAME",
   "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_DATE",
   "GIT_COMMITTER_NAME",
   "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_DATE",
 ]);
 
 function gitEnvironment(extraEnv: Readonly<Record<string, string>> = {}): NodeJS.ProcessEnv {
@@ -102,7 +105,12 @@ function gitEnvironment(extraEnv: Readonly<Record<string, string>> = {}): NodeJS
   return { ...env, ...GIT_ENV };
 }
 
-const COHORT_MANIFEST_DOMAIN = "pi-astack/adr0039-r3/cohort-manifest/v1";
+const COHORT_MANIFEST_DOMAIN = "pi-astack/local-drain/cohort-semantic-manifest/v2";
+const LOCAL_DRAIN_PROTOCOL = "local-drain-recovery/v2";
+const DRAIN_IDENTITY = Object.freeze({
+  name: "pi-astack-local-drain",
+  email: "local-drain@pi-astack.invalid",
+});
 
 function compareAscii(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -167,12 +175,7 @@ export function validateCohortPlan(entries: readonly CohortPlanEntry[]): readonl
   const seen = new Set<string>();
   for (const entry of entries) {
     const rel = entry.path;
-    if (!rel || rel.includes("\0") || rel.startsWith("/") || rel.includes("\\") || rel.split("/").some((part) => part === "" || part === "." || part === "..")) {
-      throw new GitExactCohortError("COHORT_PATH_INVALID", `cohort path is not canonical repo-relative: ${rel}`);
-    }
-    if (rel === ".git" || rel.startsWith(".git/")) {
-      throw new GitExactCohortError("COHORT_PATH_INVALID", `cohort path may not target .git: ${rel}`);
-    }
+    if (!isCanonicalCohortPath(rel)) throw new GitExactCohortError("COHORT_PATH_INVALID", `cohort path is not canonical repo-relative: ${rel}`);
     if (seen.has(rel)) throw new GitExactCohortError("COHORT_PATH_DUPLICATE", `duplicate cohort path: ${rel}`);
     seen.add(rel);
     if (entry.op === "put") {
@@ -191,11 +194,22 @@ export function validateCohortPlan(entries: readonly CohortPlanEntry[]): readonl
   return [...entries].sort((a, b) => compareAscii(a.path, b.path));
 }
 
+export function stableCohortSemanticManifest(entries: readonly PreparedCohortEntry[]): Readonly<Record<string, unknown>> {
+  return Object.freeze({
+    protocol: LOCAL_DRAIN_PROTOCOL,
+    entries: Object.freeze([...entries]
+      .sort((a, b) => compareAscii(a.path, b.path))
+      .map((entry) => Object.freeze({ path: entry.path, op: entry.op, mode: entry.mode, bytes_sha256: entry.bytesSha256 }))),
+  });
+}
+
 export function cohortManifestRoot(entries: readonly PreparedCohortEntry[]): string {
-  const manifest = [...entries]
-    .sort((a, b) => compareAscii(a.path, b.path))
-    .map((entry) => ({ path: entry.path, op: entry.op, mode: entry.mode, bytes_sha256: entry.bytesSha256 }));
-  return sha256Hex(`${COHORT_MANIFEST_DOMAIN}\n${JSON.stringify(manifest)}`);
+  return sha256Hex(`${COHORT_MANIFEST_DOMAIN}\n${JSON.stringify(stableCohortSemanticManifest(entries))}`);
+}
+
+export function deterministicDrainCommitMessage(manifestRoot: string): string {
+  if (!/^[0-9a-f]{64}$/.test(manifestRoot)) throw new GitExactCohortError("COHORT_MANIFEST_INVALID", "manifest root must be SHA-256 hex");
+  return `pi-astack local drain\n\nprotocol: ${LOCAL_DRAIN_PROTOCOL}\nmanifest: ${manifestRoot}`;
 }
 
 export async function resolveRef(repo: string, refName: string): Promise<string> {
@@ -301,11 +315,19 @@ export async function prepareExactCohortCommit(options: {
       }
     }
 
-    const candidate = (await git(repo, ["commit-tree", newTree, "-p", options.frozenCommit, "-m", options.message], {
-      GIT_AUTHOR_NAME: "abrain-drain",
-      GIT_AUTHOR_EMAIL: "drain@abrain.local",
-      GIT_COMMITTER_NAME: "abrain-drain",
-      GIT_COMMITTER_EMAIL: "drain@abrain.local",
+    const manifestRoot = cohortManifestRoot(prepared);
+    const parentEpochText = (await git(repo, ["show", "-s", "--format=%ct", options.frozenCommit])).trim();
+    const parentEpoch = /^\d+$/.test(parentEpochText) ? parentEpochText : "0";
+    const stableDate = `${parentEpoch} +0000`;
+    // `options.message` is intentionally excluded from commit bytes. It is a
+    // caller diagnostic only; protocol + semantic manifest define the commit.
+    const candidate = (await git(repo, ["commit-tree", newTree, "-p", options.frozenCommit, "-m", deterministicDrainCommitMessage(manifestRoot)], {
+      GIT_AUTHOR_NAME: DRAIN_IDENTITY.name,
+      GIT_AUTHOR_EMAIL: DRAIN_IDENTITY.email,
+      GIT_AUTHOR_DATE: stableDate,
+      GIT_COMMITTER_NAME: DRAIN_IDENTITY.name,
+      GIT_COMMITTER_EMAIL: DRAIN_IDENTITY.email,
+      GIT_COMMITTER_DATE: stableDate,
     })).trim();
     return Object.freeze({
       repo,
@@ -313,7 +335,7 @@ export async function prepareExactCohortCommit(options: {
       frozenCommit: options.frozenCommit,
       newTree,
       candidate,
-      cohortManifestRoot: cohortManifestRoot(prepared),
+      cohortManifestRoot: manifestRoot,
       entries: Object.freeze(prepared),
     });
   } finally {

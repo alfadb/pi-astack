@@ -593,12 +593,9 @@ export async function syncAdr0039L3AfterKnowledgeWrite(args: {
  *  time => O(N^2).)
  *
  *  Async fs throughout so a multi-thousand-file reproject yields to the event
- *  loop instead of blocking it. Callers:
- *   - scripts/backfill-legacy-knowledge.mjs --reproject (CLI full rebuild)
- *   - extensions/abrain/git-sync.ts fetchAndFF self-heal: after a cross-device
- *     divergent merge git-3-way-merges a same-slug L2 file into a Frankenstein
- *     (!= reproject(merged L1)), this rebuilds L2 from the merged L1 so the
- *     pushed-to-fleet projection is correct (ADR 0039). */
+ *  loop instead of blocking it. Called by
+ *  scripts/backfill-legacy-knowledge.mjs --reproject for an explicit CLI full
+ *  rebuild; device Git sync does not invoke projection repair. */
 export async function reprojectAllKnowledge(
   { abrainHome, settings }: { abrainHome: string; settings?: { knowledgeProjector?: { l2OutputRoot?: string } } },
 ): Promise<ReprojectAllKnowledgeResult> {

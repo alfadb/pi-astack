@@ -5,7 +5,7 @@ import { canonicalizeJcs, jcsSha256Hex, sha256Hex } from "./jcs";
 
 export type L1SchemaDomain = "knowledge" | "constraint" | "canonical_path";
 export type L1SchemaRole = "canonical" | "evidence" | "meta";
-export type L1SchemaPhase = "active" | "phase_disabled";
+export type L1SchemaPhase = "active" | "legacy_read_only" | "phase_disabled";
 
 export interface L1SchemaRegistration {
   envelope_schema: string;
@@ -59,7 +59,7 @@ export interface ValidatedL1Envelope {
   filePath?: string;
 }
 
-export type L1ScanClassification = "selected" | "foreign-skip" | "phase-disabled-shadow";
+export type L1ScanClassification = "selected" | "foreign-skip" | "legacy-read-only" | "phase-disabled-shadow";
 
 export interface ValidatedL1ScanRecord extends ValidatedL1Envelope {
   classification: L1ScanClassification;
@@ -79,6 +79,7 @@ export interface WholeL1ScanResult {
   selected: readonly ValidatedL1ScanRecord[];
   foldable: readonly ValidatedL1ScanRecord[];
   foreignSkipped: readonly ValidatedL1ScanRecord[];
+  legacyReadOnly: readonly ValidatedL1ScanRecord[];
   phaseDisabledShadow: readonly ValidatedL1ScanRecord[];
   /**
    * Crash residue of the durable atomic write protocol (`.{name}.….tmp`
@@ -150,7 +151,7 @@ export function validateL1SchemaRegistry(input: unknown): L1SchemaRoleRegistry {
     envelopeSchemas.add(envelopeSchema);
     const domain = oneOf(item.domain, ["knowledge", "constraint", "canonical_path"] as const, `${at}.domain`);
     const role = oneOf(item.role, ["canonical", "evidence", "meta"] as const, `${at}.role`);
-    const phase = oneOf(item.phase, ["active", "phase_disabled"] as const, `${at}.phase`);
+    const phase = oneOf(item.phase, ["active", "legacy_read_only", "phase_disabled"] as const, `${at}.phase`);
     const writeEnabled = boolean(item.write_enabled, `${at}.write_enabled`);
     const foldEligible = boolean(item.fold_eligible, `${at}.fold_eligible`);
     const bodySchema = item.body_schema === undefined ? undefined : versionedName(item.body_schema, `${at}.body_schema`);
@@ -158,11 +159,14 @@ export function validateL1SchemaRegistry(input: unknown): L1SchemaRoleRegistry {
     const producers = item.producers === undefined ? undefined : uniqueStrings(item.producers, `${at}.producers`);
     const bodyDomainPath = item.body_domain_path === undefined ? undefined : dottedPath(item.body_domain_path, `${at}.body_domain_path`);
 
-    if (phase === "active") {
+    if (phase === "active" || phase === "legacy_read_only") {
       if (!bodySchema || !eventTypes?.length || !producers?.length) {
-        throw failure("L1_REGISTRY_INVALID", `${at} active registration requires body_schema, event_types, and producers`);
+        throw failure("L1_REGISTRY_INVALID", `${at} registered body contract requires body_schema, event_types, and producers`);
       }
-      if (!writeEnabled) throw failure("L1_REGISTRY_INVALID", `${at} active registration must enable existing writes`);
+      if (phase === "active" && !writeEnabled) throw failure("L1_REGISTRY_INVALID", `${at} active registration must enable writes`);
+      if (phase === "legacy_read_only" && (writeEnabled || foldEligible || role !== "meta")) {
+        throw failure("L1_REGISTRY_INVALID", `${at} legacy-read-only registration must be non-writable, non-foldable meta`);
+      }
       if (bodySchemas.has(bodySchema)) throw failure("L1_REGISTRY_DUPLICATE", `duplicate body schema ${bodySchema}`);
       bodySchemas.add(bodySchema);
     } else {
@@ -268,7 +272,9 @@ export function validateL1Envelope(
     throw failure("L1_HASH_MISMATCH", "body_hash does not match RFC8785/JCS body hash", { expected: bodyHash, actual: computedBodyHash });
   }
 
-  if (registration.phase === "active") validateActiveBodyContract(body, registration);
+  if (registration.phase === "active" || registration.phase === "legacy_read_only") validateActiveBodyContract(body, registration);
+  if (registration.envelope_schema === "drain-recovery-envelope/v1") validateDrainRecoveryBody(body, 1);
+  if (registration.envelope_schema === "local-drain-recovery-envelope/v2") validateDrainRecoveryBody(body, 2);
   validateExpectation(registration, body, options.expected);
 
   const expectedRelative = expectedL1EventRelativePath(eventId);
@@ -353,7 +359,8 @@ export async function scanWholeL1Validated(options: WholeL1ScanOptions): Promise
     records.push(deepFreeze({ ...validated, classification }));
   }
 
-  records.sort((left, right) => (left.relativePath ?? "").localeCompare(right.relativePath ?? ""));
+  validateLegacyRecoveryCohorts(records);
+  records.sort((left, right) => compareCodeUnits(left.relativePath ?? "", right.relativePath ?? ""));
   const all = Object.freeze(records.slice());
   const selected = Object.freeze(all.filter((item) => item.classification === "selected"));
   const result: WholeL1ScanResult = {
@@ -361,8 +368,9 @@ export async function scanWholeL1Validated(options: WholeL1ScanOptions): Promise
     selected,
     foldable: Object.freeze(selected.filter((item) => item.registration.fold_eligible)),
     foreignSkipped: Object.freeze(all.filter((item) => item.classification === "foreign-skip")),
+    legacyReadOnly: Object.freeze(all.filter((item) => item.classification === "legacy-read-only")),
     phaseDisabledShadow: Object.freeze(all.filter((item) => item.classification === "phase-disabled-shadow")),
-    tempResidue: Object.freeze(tempResidue.slice().sort()),
+    tempResidue: Object.freeze(tempResidue.slice().sort(compareCodeUnits)),
   };
   return deepFreeze(result);
 }
@@ -384,6 +392,257 @@ function validateActiveBodyContract(body: Record<string, unknown>, registration:
     const actualDomain = readDotted(body, registration.body_domain_path);
     if (actualDomain !== registration.domain) {
       throw failure("L1_SCHEMA_ROLE_MISMATCH", "body domain does not match registered envelope domain", { path: registration.body_domain_path, expected: registration.domain, actual: actualDomain });
+    }
+  }
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[], at: string): void {
+  const actual = Object.keys(value).sort(compareCodeUnits);
+  const wanted = [...expected].sort(compareCodeUnits);
+  if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+    throw failure("L1_BODY_SHAPE_MISMATCH", `${at} has unexpected keys`, { actual, expected: wanted });
+  }
+}
+
+function recoveryString(value: unknown, at: string, pattern?: RegExp): string {
+  if (typeof value !== "string" || !value || (pattern && !pattern.test(value))) {
+    throw failure("L1_BODY_SHAPE_MISMATCH", `${at} is invalid`);
+  }
+  return value;
+}
+
+/** Lexical, clone-neutral path contract shared by recovery schema validation,
+ * exact-cohort preparation, and restart decoding. */
+export function isCanonicalCohortPath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.startsWith("/") || value.endsWith("/") || value.includes("\\") || value.includes("\0")) return false;
+  const segments = value.split("/");
+  return segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+    && segments[0] !== ".git";
+}
+
+function validatePreparedEntries(value: unknown, at: string, requireSorted: boolean): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) throw failure("L1_BODY_SHAPE_MISMATCH", `${at} must be a non-empty array`);
+  const paths: string[] = [];
+  let previous: string | null = null;
+  for (const [index, raw] of value.entries()) {
+    const entry = record(raw, "L1_BODY_SHAPE_MISMATCH", `${at}[${index}] must be an object`);
+    exactKeys(entry, ["path", "op", "mode", "blobOid", "bytesSha256"], `${at}[${index}]`);
+    const rel = recoveryString(entry.path, `${at}[${index}].path`);
+    if (!isCanonicalCohortPath(rel) || (previous !== null && (rel === previous || (requireSorted && compareCodeUnits(previous, rel) >= 0)))) {
+      throw failure("L1_BODY_SHAPE_MISMATCH", `${at}[${index}].path is not canonical, unique, and sorted`);
+    }
+    if (!requireSorted && paths.includes(rel)) throw failure("L1_BODY_SHAPE_MISMATCH", `${at}[${index}].path is duplicated`);
+    paths.push(rel);
+    previous = rel;
+    if (entry.op === "put") {
+      if ((entry.mode !== "100644" && entry.mode !== "100755") || typeof entry.blobOid !== "string" || !/^[0-9a-f]{40,64}$/.test(entry.blobOid) || typeof entry.bytesSha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.bytesSha256)) {
+        throw failure("L1_BODY_SHAPE_MISMATCH", `${at}[${index}] put fields are invalid`);
+      }
+    } else if (entry.op === "delete") {
+      if (entry.mode !== "000000" || entry.blobOid !== "" || entry.bytesSha256 !== "") throw failure("L1_BODY_SHAPE_MISMATCH", `${at}[${index}] delete fields are invalid`);
+    } else throw failure("L1_BODY_SHAPE_MISMATCH", `${at}[${index}].op is invalid`);
+  }
+  return Object.freeze(paths);
+}
+
+const LEGACY_RECOVERY_EPISODE_DOMAIN = "pi-astack/adr0027-c6/recovery-episode/v1";
+const LEGACY_PUSH_EPISODE_V2_DOMAIN = "pi-astack/adr0027-c6/push-episode/v2";
+const LEGACY_RECOVERY_CLAIM_DOMAIN = "pi-astack/adr0027-c6/recovery-claim/v1";
+const LOCAL_RECOVERY_CLAIM_DOMAIN = "pi-astack/local-drain/recovery-claim/v2";
+const PUSH_SCOPE_KEYS = ["repo_id", "remote", "ref_name", "target_commit", "remote_url_id", "transport_policy_id"] as const;
+const PUSH_OUTCOME_V2_KEYS = [
+  "classification", "command_exit_code", "error_code", "ref_name", "remote", "remote_contains_target",
+  "remote_ref_after", "remote_ref_before", "remote_url_id", "repo_id", "stage", "stderr_redacted_sha256",
+  "stdout_redacted_sha256", "target_commit", "transport_attempted", "transport_policy_id",
+] as const;
+
+function validateRecoveryRemote(value: unknown, at: string, pinned = false): string {
+  const remote = recoveryString(value, at);
+  if (remote.length > 4096 || /[\x00-\x1f\x7f]/.test(remote) || (pinned && remote !== "origin")) throw failure("L1_BODY_SHAPE_MISMATCH", `${at} is invalid`);
+  return remote;
+}
+
+function validateRecoveryRef(value: unknown, at: string, pinned = false): string {
+  const ref = recoveryString(value, at, /^refs\/(?:heads|tags)\/[A-Za-z0-9._\/-]+$/);
+  if (ref.includes("..") || ref.endsWith("/") || (pinned && ref !== "refs/heads/main")) throw failure("L1_BODY_SHAPE_MISMATCH", `${at} is invalid`);
+  return ref;
+}
+
+function validateLegacyRemoteScope(payload: Record<string, unknown>, at: string): void {
+  for (const key of ["repo_id", "remote_url_id", "transport_policy_id"]) recoveryString(payload[key], `${at}.${key}`, /^[0-9a-f]{64}$/);
+  validateRecoveryRemote(payload.remote, `${at}.remote`, true);
+  validateRecoveryRef(payload.ref_name, `${at}.ref_name`, true);
+  recoveryString(payload.target_commit, `${at}.target_commit`, /^[0-9a-f]{40,64}$/);
+}
+
+function validateDrainRecoveryBody(body: Record<string, unknown>, version: 1 | 2): void {
+  exactKeys(body, ["event_schema_version", "event_type", "producer", "episode_id", "lane", "slot", "body"], "recovery event");
+  const expectedSchema = version === 1 ? "drain-recovery-event/v1" : "local-drain-recovery-event/v2";
+  exactString(body.event_schema_version, expectedSchema, "recovery event.event_schema_version", "L1_SCHEMA_ROLE_MISMATCH");
+  const producer = record(body.producer, "L1_PRODUCER_MISMATCH", "recovery event.producer must be an object");
+  exactKeys(producer, ["name", "version"], "recovery event.producer");
+  exactString(producer.name, "pi-astack.convergence-recovery", "recovery event.producer.name", "L1_PRODUCER_MISMATCH");
+  exactString(producer.version, version === 1 ? "1.0.0" : "2.0.0", "recovery event.producer.version", "L1_PRODUCER_MISMATCH");
+  const episodeId = recoveryString(body.episode_id, "recovery event.episode_id", /^[0-9a-f]{64}$/);
+  const lane = body.lane;
+  if (version === 2 ? lane !== "drain" : lane !== "drain" && lane !== "push" && lane !== "curator") throw failure("L1_BODY_SHAPE_MISMATCH", "recovery event.lane is invalid");
+  const slot = body.slot;
+  if (!Number.isInteger(slot) || (slot as number) < 1 || (slot as number) > (lane === "curator" ? 3 : 5)) throw failure("L1_BODY_SHAPE_MISMATCH", "recovery event.slot is invalid");
+  const payload = record(body.body, "L1_BODY_SHAPE_MISMATCH", "recovery event.body must be an object");
+  const eventType = recoveryString(body.event_type, "recovery event.event_type");
+  const oid = (value: unknown, at: string) => recoveryString(value, at, /^[0-9a-f]{40,64}$/);
+  const hash = (value: unknown, at: string) => recoveryString(value, at, /^[0-9a-f]{64}$/);
+  const common = eventType === "recovery_slot_claimed" || eventType === "recovery_slot_aborted" || eventType === "recovery_episode_terminal";
+  const drain = eventType === "commit_prepared" || eventType === "commit_published" || eventType === "index_converged";
+  const push = eventType === "push_intent" || eventType === "push_outcome" || eventType === "push_terminal_resolution_candidate" || eventType === "push_terminal_resolution_attestation";
+  if (!common && !(lane === "drain" && drain) && !(version === 1 && lane === "push" && push)) throw failure("L1_BODY_SHAPE_MISMATCH", `${eventType} is invalid for lane ${String(lane)}`);
+
+  if (eventType === "recovery_slot_claimed") {
+    exactKeys(payload, ["claim_id"], "recovery claim body");
+    const domain = version === 1 ? LEGACY_RECOVERY_CLAIM_DOMAIN : LOCAL_RECOVERY_CLAIM_DOMAIN;
+    const expected = jcsSha256Hex({ domain, episode_id: episodeId, lane, slot });
+    if (payload.claim_id !== expected) throw failure("L1_BODY_SHAPE_MISMATCH", "claim_id does not derive from episode/lane/slot");
+    return;
+  }
+  if (eventType === "recovery_slot_aborted") {
+    exactKeys(payload, ["reason", "error_code"], "recovery abort body");
+    if (payload.reason !== "recovery_slot_aborted" || payload.error_code !== "RECOVERY_SLOT_ABORTED") throw failure("L1_BODY_SHAPE_MISMATCH", "recovery abort body is invalid");
+    return;
+  }
+  if (eventType === "recovery_episode_terminal") {
+    exactKeys(payload, ["reason", "owner_alert"], "recovery terminal body");
+    if (payload.reason !== "owner_intervention_required" || payload.owner_alert !== true) throw failure("L1_BODY_SHAPE_MISMATCH", "recovery terminal body is invalid");
+    return;
+  }
+  if (eventType === "commit_published") {
+    exactKeys(payload, ["candidate", "publication_confirmed"], "commit_published body"); oid(payload.candidate, "candidate");
+    if (payload.publication_confirmed !== true) throw failure("L1_BODY_SHAPE_MISMATCH", "publication_confirmed must be true");
+    return;
+  }
+  if (eventType === "index_converged") {
+    exactKeys(payload, ["candidate"], "index_converged body"); oid(payload.candidate, "candidate");
+    return;
+  }
+  if (eventType === "commit_prepared") {
+    const keys = version === 1
+      ? ["repo", "ref_name", "frozen_commit", "new_tree", "candidate", "cohort_manifest_root", "entries", "frozen_index_snapshot"]
+      : ["symbolic_ref", "frozen_commit", "new_tree", "candidate", "cohort_manifest_root", "entries", "frozen_index_snapshot"];
+    exactKeys(payload, keys, "commit_prepared body");
+    if (version === 1 && !path.isAbsolute(recoveryString(payload.repo, "repo"))) throw failure("L1_BODY_SHAPE_MISMATCH", "legacy repo must be absolute");
+    const symbolic = recoveryString(version === 1 ? payload.ref_name : payload.symbolic_ref, "symbolic ref", /^refs\/[A-Za-z0-9._\/-]+$|^HEAD$/);
+    if (symbolic.includes("..") || symbolic.endsWith("/")) throw failure("L1_BODY_SHAPE_MISMATCH", "symbolic ref is invalid");
+    oid(payload.frozen_commit, "frozen_commit"); oid(payload.new_tree, "new_tree"); oid(payload.candidate, "candidate"); hash(payload.cohort_manifest_root, "cohort_manifest_root");
+    const entryPaths = validatePreparedEntries(payload.entries, "entries", version === 2);
+    const entrySet = new Set(entryPaths);
+    const snapshot = record(payload.frozen_index_snapshot, "L1_BODY_SHAPE_MISMATCH", "frozen_index_snapshot must be an object");
+    const snapshotKeys = Object.keys(snapshot);
+    if (snapshotKeys.some((key) => !isCanonicalCohortPath(key) || !entrySet.has(key))) throw failure("L1_BODY_SHAPE_MISMATCH", "frozen_index_snapshot contains a non-cohort or non-canonical path");
+    if (version === 2 && (snapshotKeys.length !== entryPaths.length || entryPaths.some((key) => !Object.hasOwn(snapshot, key)))) throw failure("L1_BODY_SHAPE_MISMATCH", "active frozen_index_snapshot keys must exactly equal entries paths");
+    for (const [key, value] of Object.entries(snapshot)) {
+      if (version === 2 && value === null) continue;
+      recoveryString(value, `frozen_index_snapshot.${key}`, /^(?:100644|100755|120000|160000) [0-9a-f]{40,64} 0$/);
+    }
+    return;
+  }
+  if (version === 2) throw failure("L1_EVENT_TYPE_MISMATCH", `event type is not valid for local drain v2: ${eventType}`);
+
+  if (eventType === "push_intent") {
+    if (Object.hasOwn(payload, "scope_version")) {
+      exactKeys(payload, ["scope_version", ...PUSH_SCOPE_KEYS], "push_intent v2 body");
+      if (payload.scope_version !== "remote-scope/v2") throw failure("L1_BODY_SHAPE_MISMATCH", "scope_version is invalid");
+      validateLegacyRemoteScope(payload, "push_intent");
+      const scope = Object.fromEntries(PUSH_SCOPE_KEYS.map((key) => [key, payload[key]]));
+      if (episodeId !== jcsSha256Hex({ domain: LEGACY_PUSH_EPISODE_V2_DOMAIN, scope_version: "remote-scope/v2", ...scope })) throw failure("L1_BODY_SHAPE_MISMATCH", "v2 push intent does not derive episode_id");
+    } else {
+      exactKeys(payload, ["repo", "remote", "ref_name", "target_commit"], "push_intent v1 body");
+      const repo = recoveryString(payload.repo, "repo");
+      if (!path.isAbsolute(repo)) throw failure("L1_BODY_SHAPE_MISMATCH", "push repo must be absolute");
+      const remote = validateRecoveryRemote(payload.remote, "remote");
+      const refName = validateRecoveryRef(payload.ref_name, "ref_name");
+      const targetCommit = oid(payload.target_commit, "target_commit");
+      const identity = { repo_id: sha256Hex(path.resolve(repo)), remote, ref_name: refName, target_commit: targetCommit };
+      if (episodeId !== jcsSha256Hex({ domain: LEGACY_RECOVERY_EPISODE_DOMAIN, lane: "push", identity })) throw failure("L1_BODY_SHAPE_MISMATCH", "legacy push intent does not derive episode_id");
+    }
+    if (slot !== 1) throw failure("L1_BODY_SHAPE_MISMATCH", "push intent must use slot 1");
+    return;
+  }
+  if (eventType === "push_outcome") {
+    const classification = payload.classification;
+    if (classification !== "success" && classification !== "retryable" && classification !== "nonretryable") throw failure("L1_BODY_SHAPE_MISMATCH", "push classification is invalid");
+    if (Object.keys(payload).length === 2) {
+      exactKeys(payload, ["classification", "target_commit"], "push_outcome v1 body");
+      oid(payload.target_commit, "target_commit");
+      return;
+    }
+    exactKeys(payload, PUSH_OUTCOME_V2_KEYS, "push_outcome v2 body");
+    validateLegacyRemoteScope(payload, "push_outcome");
+    if (typeof payload.transport_attempted !== "boolean" || typeof payload.remote_contains_target !== "boolean") throw failure("L1_BODY_SHAPE_MISMATCH", "push outcome booleans are invalid");
+    if (payload.command_exit_code !== null && !Number.isSafeInteger(payload.command_exit_code)) throw failure("L1_BODY_SHAPE_MISMATCH", "command_exit_code must be an integer or null");
+    for (const key of ["stdout_redacted_sha256", "stderr_redacted_sha256"]) if (payload[key] !== null) hash(payload[key], key);
+    for (const key of ["remote_ref_before", "remote_ref_after"]) if (payload[key] !== null) oid(payload[key], key);
+    recoveryString(payload.stage, "stage");
+    if (payload.error_code !== null) recoveryString(payload.error_code, "error_code");
+    const commandEvidence = [payload.command_exit_code, payload.stdout_redacted_sha256, payload.stderr_redacted_sha256];
+    if (commandEvidence.some((value) => value === null) && commandEvidence.some((value) => value !== null)) throw failure("L1_BODY_SHAPE_MISMATCH", "command exit/stdout/stderr evidence must be all null or all present");
+    if (classification === "success" ? payload.remote_contains_target !== true || payload.error_code !== null || payload.remote_ref_after === null : payload.remote_contains_target !== false || payload.error_code === null) throw failure("L1_BODY_SHAPE_MISMATCH", "push outcome status fields contradict classification");
+    return;
+  }
+  if (eventType === "push_terminal_resolution_candidate") {
+    exactKeys(payload, ["legacy_episode_id", "legacy_intent_event_id", "legacy_terminal_event_id", "scope_version", ...PUSH_SCOPE_KEYS], "legacy candidate body");
+    for (const key of ["legacy_episode_id", "legacy_intent_event_id", "legacy_terminal_event_id"]) hash(payload[key], key);
+    if (payload.legacy_episode_id !== episodeId || payload.scope_version !== "remote-scope/v2") throw failure("L1_BODY_SHAPE_MISMATCH", "candidate episode/scope binding is invalid");
+    validateLegacyRemoteScope(payload, "legacy candidate");
+    return;
+  }
+  if (eventType === "push_terminal_resolution_attestation") {
+    exactKeys(payload, ["candidate_event_id", "observed_tip", "relation"], "legacy attestation body"); hash(payload.candidate_event_id, "candidate_event_id"); oid(payload.observed_tip, "observed_tip");
+    if (payload.relation !== "equal" && payload.relation !== "descendant") throw failure("L1_BODY_SHAPE_MISMATCH", "attestation relation is invalid");
+    return;
+  }
+  throw failure("L1_EVENT_TYPE_MISMATCH", `unknown legacy recovery event type: ${eventType}`);
+}
+
+function validateLegacyRecoveryCohorts(records: readonly ValidatedL1ScanRecord[]): void {
+  const legacy = records.filter((record) => record.registration.envelope_schema === "drain-recovery-envelope/v1");
+  const byId = new Map(legacy.map((record) => [record.eventId, record]));
+  const byEpisode = new Map<string, ValidatedL1ScanRecord[]>();
+  for (const record of legacy) {
+    const episodeId = String(record.body.episode_id);
+    byEpisode.set(episodeId, [...(byEpisode.get(episodeId) ?? []), record]);
+  }
+  for (const [episodeId, events] of byEpisode) {
+    const pushIntent = events.find((record) => record.body.event_type === "push_intent");
+    const intentBody = pushIntent ? record(pushIntent.body.body, "L1_BODY_SHAPE_MISMATCH", "push intent body must be an object") : null;
+    const preparedBySlot = new Map(events.filter((item) => item.body.event_type === "commit_prepared").map((item) => [item.body.slot as number, record(item.body.body, "L1_BODY_SHAPE_MISMATCH", "prepared body must be an object")]));
+    for (const event of events) {
+      const eventType = String(event.body.event_type);
+      const slot = event.body.slot as number;
+      const payload = record(event.body.body, "L1_BODY_SHAPE_MISMATCH", "legacy recovery payload must be an object");
+      if (eventType === "commit_published" || eventType === "index_converged") {
+        const prepared = preparedBySlot.get(slot);
+        if (prepared && payload.candidate !== prepared.candidate) throw failure("L1_BODY_SHAPE_MISMATCH", `${eventType} candidate does not match commit_prepared`);
+      }
+      if (eventType === "push_outcome") {
+        if (!intentBody) throw failure("L1_BODY_SHAPE_MISMATCH", "push outcome has no durable intent in its episode");
+        if (payload.target_commit !== intentBody.target_commit) throw failure("L1_BODY_SHAPE_MISMATCH", "push outcome target does not match durable intent");
+        if (Object.hasOwn(payload, "repo_id")) {
+          if (!Object.hasOwn(intentBody, "scope_version") || PUSH_SCOPE_KEYS.some((key) => payload[key] !== intentBody[key])) throw failure("L1_BODY_SHAPE_MISMATCH", "push outcome scope does not match durable intent");
+        }
+      }
+      if (eventType === "push_terminal_resolution_candidate") {
+        const intent = byId.get(String(payload.legacy_intent_event_id));
+        const terminal = byId.get(String(payload.legacy_terminal_event_id));
+        if (!intent || intent.body.event_type !== "push_intent" || intent.body.episode_id !== episodeId || !terminal || terminal.body.event_type !== "recovery_episode_terminal" || terminal.body.episode_id !== episodeId) throw failure("L1_BODY_SHAPE_MISMATCH", "resolution candidate IDs do not bind the exact legacy intent/terminal cohort");
+        const boundIntent = record(intent.body.body, "L1_BODY_SHAPE_MISMATCH", "bound intent body must be an object");
+        if (payload.target_commit !== boundIntent.target_commit || payload.remote !== boundIntent.remote || payload.ref_name !== boundIntent.ref_name) throw failure("L1_BODY_SHAPE_MISMATCH", "resolution candidate target/remote/ref do not match legacy intent");
+        if (typeof boundIntent.repo === "string" && payload.repo_id !== sha256Hex(path.resolve(boundIntent.repo))) throw failure("L1_BODY_SHAPE_MISMATCH", "resolution candidate repo_id does not derive from recorded legacy repo");
+      }
+      if (eventType === "push_terminal_resolution_attestation") {
+        const candidate = byId.get(String(payload.candidate_event_id));
+        if (!candidate || candidate.body.event_type !== "push_terminal_resolution_candidate" || candidate.body.episode_id !== episodeId || candidate.body.slot !== slot) throw failure("L1_BODY_SHAPE_MISMATCH", "resolution attestation does not bind an exact candidate in its episode/slot");
+        const candidateBody = record(candidate.body.body, "L1_BODY_SHAPE_MISMATCH", "candidate body must be an object");
+        if ((payload.relation === "equal" && payload.observed_tip !== candidateBody.target_commit) || (payload.relation === "descendant" && payload.observed_tip === candidateBody.target_commit)) throw failure("L1_BODY_SHAPE_MISMATCH", "resolution attestation relation contradicts observed_tip/target");
+      }
     }
   }
 }
@@ -411,6 +670,7 @@ function validateExpectation(registration: L1SchemaRegistration, body: Record<st
 
 function classifyScanRecord(registration: L1SchemaRegistration, options: WholeL1ScanOptions): L1ScanClassification {
   if (registration.phase === "phase_disabled") return "phase-disabled-shadow";
+  if (registration.phase === "legacy_read_only") return "legacy-read-only";
   const domainMatch = !options.domains?.length || options.domains.includes(registration.domain);
   const roleMatch = !options.roles?.length || options.roles.includes(registration.role);
   return domainMatch && roleMatch ? "selected" : "foreign-skip";
@@ -500,7 +760,7 @@ async function assertWritePathNoSymlink(abrainHome: string, targetPath: string):
 
 function emptyScanResult(): WholeL1ScanResult {
   const empty = Object.freeze([]) as readonly ValidatedL1ScanRecord[];
-  return deepFreeze({ all: empty, selected: empty, foldable: empty, foreignSkipped: empty, phaseDisabledShadow: empty, tempResidue: Object.freeze([]) as readonly string[] });
+  return deepFreeze({ all: empty, selected: empty, foldable: empty, foreignSkipped: empty, legacyReadOnly: empty, phaseDisabledShadow: empty, tempResidue: Object.freeze([]) as readonly string[] });
 }
 
 function failure(code: string, message: string, detail?: Record<string, unknown>): L1SchemaRegistryError {
@@ -581,8 +841,12 @@ function isPathInside(parent: string, child: string): boolean {
   return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 async function sortedDirents(dir: string): Promise<fs.Dirent[]> {
-  return (await fsp.readdir(dir, { withFileTypes: true })).sort((left: fs.Dirent, right: fs.Dirent) => left.name.localeCompare(right.name));
+  return (await fsp.readdir(dir, { withFileTypes: true })).sort((left: fs.Dirent, right: fs.Dirent) => compareCodeUnits(left.name, right.name));
 }
 
 async function exists(file: string): Promise<boolean> {

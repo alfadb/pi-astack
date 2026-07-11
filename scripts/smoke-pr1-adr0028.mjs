@@ -79,7 +79,7 @@ process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
 const smokeHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-pr1-home-"));
 process.env.HOME = smokeHome;
 writeFile(path.join(smokeHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
-  canonicalGitRuntime: { enabled: false, mode: "p1_controlled" },
+  canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" },
   sediment: {
     enabled: true,
     autoLlmWriteEnabled: true,

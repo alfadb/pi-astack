@@ -1,610 +1,345 @@
 #!/usr/bin/env node
-/** Canonical-path R3.4.2 P1-S1/S2 convergence recovery smoke. Temporary repos only. */
 import fs from "node:fs";
-import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const { createJiti } = require("jiti");
 const jiti = createJiti(root, { interopDefault: true });
 const recovery = jiti(path.join(root, "extensions/_shared/convergence-recovery.ts"));
 const cohort = jiti(path.join(root, "extensions/_shared/git-exact-cohort.ts"));
 const l1 = jiti(path.join(root, "extensions/_shared/l1-schema-registry.ts"));
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-recovery-"));
+const jcs = jiti(path.join(root, "extensions/_shared/jcs.ts"));
+const fixture = JSON.parse(fs.readFileSync(path.join(root, "scripts/fixtures/legacy-drain-recovery-v1.json"), "utf8"));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-local-recovery-v2-"));
 let passed = 0;
 const failures = [];
 
-function git(repo, ...args) {
-  return execFileSync("git", ["-C", repo, ...args], {
-    encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_TERMINAL_PROMPT: "0" },
-  }).trim();
-}
 function assert(value, message) { if (!value) throw new Error(message); }
 async function check(name, fn) {
   try { await fn(); passed++; console.log(`  ok    ${name}`); }
-  catch (err) { failures.push({ name, err }); console.log(`  FAIL  ${name}\n        ${err?.stack || err}`); }
+  catch (error) { failures.push({ name, error }); console.log(`  FAIL  ${name}\n        ${error?.stack ?? error}`); }
 }
 async function expectCode(code, fn) {
-  try { await fn(); } catch (err) { assert(err.code === code, `expected ${code}, got ${err.code}: ${err.message}`); return err; }
+  try { await fn(); } catch (error) { assert(error.code === code, `expected ${code}, got ${error.code}: ${error.message}`); return; }
   throw new Error(`expected ${code}`);
 }
-async function expectReject(fn) {
-  try { await fn(); } catch (err) { return err; }
-  throw new Error("expected rejection");
+function git(repo, ...args) {
+  return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env: { ...process.env, LANG: "C", LC_ALL: "C" } }).trim();
 }
-function makeHome(name) {
-  const home = path.join(tmp, `home-${name}`);
-  fs.mkdirSync(path.join(home, "l1", "events", "sha256"), { recursive: true });
-  return home;
-}
-function initRepo(name) {
+function initRepo(name, format = "sha1") {
   const repo = path.join(tmp, name);
   fs.mkdirSync(repo);
-  git(repo, "init", "-q");
-  git(repo, "config", "user.name", "Smoke");
-  git(repo, "config", "user.email", "smoke@example.test");
+  git(repo, "init", "-q", "-b", "main", `--object-format=${format}`);
   fs.writeFileSync(path.join(repo, "base.txt"), "base\n");
   git(repo, "add", "base.txt");
-  git(repo, "commit", "-qm", "base");
+  execFileSync("git", ["-C", repo, "commit", "-qm", "base"], {
+    env: { ...process.env, LANG: "C", LC_ALL: "C", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", GIT_AUTHOR_DATE: "1700000000 +0000", GIT_COMMITTER_DATE: "1700000000 +0000" },
+  });
   return repo;
 }
-async function fixture(name, plan = [{ path: "owned.txt", op: "put", content: "owned\n" }], generationAnchor = "genesis") {
-  const repo = initRepo(name);
+function emptyHome(name) {
+  const home = path.join(tmp, name);
+  fs.mkdirSync(path.join(home, "l1/events/sha256"), { recursive: true });
+  return home;
+}
+function writeEnvelope(home, envelope) {
+  const rel = l1.expectedL1EventRelativePath(envelope.event_id);
+  const file = path.join(home, rel);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(envelope)}\n`);
+  return file;
+}
+function rehash(envelope) {
+  envelope.body_hash = l1.canonicalL1BodyHash(envelope.body);
+  envelope.event_id = envelope.body_hash;
+  return envelope;
+}
+function legacyEnvelope(event) {
+  const bodyHash = l1.canonicalL1BodyHash(event);
+  return { schema: "drain-recovery-envelope/v1", canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: bodyHash, body_hash: bodyHash, body: event };
+}
+function legacyEvent(episodeId, slot, eventType, body) {
+  return { event_schema_version: "drain-recovery-event/v1", event_type: eventType, producer: { name: "pi-astack.convergence-recovery", version: "1.0.0" }, episode_id: episodeId, lane: "push", slot, body };
+}
+async function activePreparedFixture(name) {
+  const repo = initRepo(`${name}-repo`);
+  const prepared = await prepare(repo);
+  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  await recovery.recordDrainPrepared({ abrainHome: repo, episodeId, slot: 1, prepared: prepared.prepared, frozenIndexSnapshot: prepared.snapshot });
+  const scan = await l1.scanWholeL1Validated({ abrainHome: repo });
+  const record = scan.all.find((item) => item.body.event_type === "commit_prepared");
+  assert(record, "active prepared fixture missing");
+  return { repo, event: structuredClone(record.body), envelope: structuredClone(record.envelope) };
+}
+async function prepare(repo, message = "ignored caller message") {
   const frozen = git(repo, "rev-parse", "HEAD");
-  const snapshot = await cohort.snapshotIndexEntries(repo, plan.map((entry) => entry.path));
-  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "HEAD", frozenCommit: frozen, plan, message: `prepare ${name}` });
-  const episodeId = recovery.drainEpisodeIdentity({ repo_id: name, ref_name: "HEAD", generation_anchor: generationAnchor });
-  return { repo, frozen, snapshot, prepared, episodeId, paths: plan.map((entry) => entry.path) };
-}
-function event(episode_id, lane, slot, event_type, body) {
-  return { event_schema_version: "drain-recovery-event/v1", event_type, producer: { name: "pi-astack.convergence-recovery", version: "1.0.0" }, episode_id, lane, slot, body };
-}
-function claimedEvent(episode, lane, slot) {
-  return event(episode, lane, slot, "recovery_slot_claimed", { claim_id: recovery.recoveryClaimId(episode, lane, slot) });
-}
-const abortBody = () => ({ reason: "recovery_slot_aborted", error_code: "RECOVERY_SLOT_ABORTED" });
-const terminalBody = () => ({ reason: "owner_intervention_required", owner_alert: true });
-const publishedBody = (candidate) => ({ candidate, publication_confirmed: true });
-async function claimNext(home, episodeId, lane) {
-  const result = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId, lane });
-  assert(result.shouldExecute, `next ${lane} slot not acquired: ${JSON.stringify(result)}`);
-  return result.slot;
-}
-function repoId(repo) { return crypto.createHash("sha256").update(path.resolve(repo)).digest("hex"); }
-async function ensurePushIntent(home, episodeId, target = "a".repeat(40), repo = path.resolve(tmp, "intent-fixture"), remote = "origin", refName = "refs/heads/main") {
-  const existing = await recovery.readPushIntent(home, episodeId);
-  if (!existing) await recovery.recordPushIntent({ abrainHome: home, episodeId, repo, remote, refName, targetCommit: target });
-}
-async function pushOutcome(home, episodeId, slot, classification, target = "a".repeat(40)) {
-  await ensurePushIntent(home, episodeId, target);
-  await recovery.appendRecoveryEvent({ abrainHome: home, episodeId, lane: "push", slot, eventType: "push_outcome", body: { classification, target_commit: target } });
-}
-async function preparedSlot(home, fixtureValue, slot = 1) {
-  await recovery.claimRecoverySlot({ abrainHome: home, episodeId: fixtureValue.episodeId, lane: "drain", slot });
-  await recovery.recordDrainPrepared({ abrainHome: home, episodeId: fixtureValue.episodeId, slot, prepared: fixtureValue.prepared, frozenIndexSnapshot: fixtureValue.snapshot });
+  const plan = [
+    { path: "Z.txt", op: "put", content: "z\n" },
+    { path: "a.txt", op: "put", content: "a\n" },
+    { path: "\u4e2d.txt", op: "put", content: "unicode\n" },
+  ];
+  const snapshot = await cohort.snapshotIndexEntries(repo, plan.map((item) => item.path));
+  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan, message });
+  return { frozen, plan, snapshot, prepared };
 }
 
-console.log("smoke: canonical-path convergence recovery R3.4.2 P1-S1/S2");
+console.log("smoke: local drain recovery v2");
 
-await check("resolveRecoveryEpisode reuses open generation across refreeze, cohort and unrelated L1 events", async () => {
-  const home = makeHome("episode-resolution");
-  const repo = initRepo("episode-resolution");
-  const first = await recovery.resolveRecoveryEpisode({ abrainHome: home, repoId: "scope-a", refName: "refs/heads/main" });
-  assert(first.status === "new" && first.generationAnchor === "genesis", "genesis resolution failed");
-  assert(await claimNext(home, first.episodeId, "drain") === 1, "slot 1 not claimed");
-
-  fs.writeFileSync(path.join(repo, "refreeze.txt"), "new head\n");
-  git(repo, "add", "refreeze.txt");
-  git(repo, "commit", "-qm", "refreeze");
-  await cohort.prepareExactCohortCommit({
-    repo,
-    refName: "HEAD",
-    frozenCommit: git(repo, "rev-parse", "HEAD"),
-    plan: [{ path: "new-cohort.txt", op: "put", content: "new cohort\n" }],
-    message: "new cohort",
-  });
-  const unrelated = recovery.drainEpisodeIdentity({ repo_id: "other", ref_name: "HEAD", generation_anchor: "unrelated-l1" });
-  await recovery.claimRecoverySlot({ abrainHome: home, episodeId: unrelated, lane: "drain", slot: 1 });
-
-  const resolved = await recovery.resolveRecoveryEpisode({ abrainHome: home, repoId: "scope-a", refName: "refs/heads/main" });
-  assert(resolved.status === "open" && resolved.episodeId === first.episodeId, "open episode identity changed");
-  const pending = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId: first.episodeId, lane: "drain" });
-  assert(pending.status === "pending" && pending.slot === 1, "pending claim was skipped");
-  assert(await recovery.burnPendingRecoverySlot({ abrainHome: home, episodeId: first.episodeId, lane: "drain" }) === 1, "pending slot not burned");
-  assert(await claimNext(home, first.episodeId, "drain") === 2, "episode budget did not continue at slot 2");
-  for (let slot = 2; slot <= 5; slot++) {
-    assert(await recovery.recoverDrainSlot({ abrainHome: home, episodeId: first.episodeId, slot }) === (slot === 5 ? "terminal" : "burned"), `slot ${slot} did not close generation`);
-    if (slot < 5) assert(await claimNext(home, first.episodeId, "drain") === slot + 1, `slot ${slot + 1} not claimed`);
-  }
-  const terminalEvent = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, first.episodeId, "drain")).get(5).terminal;
-  const closureId = l1.canonicalL1BodyHash(terminalEvent);
-  const nextGeneration = await recovery.resolveRecoveryEpisode({ abrainHome: home, repoId: "scope-a", refName: "refs/heads/main" });
-  assert(nextGeneration.status === "new" && nextGeneration.generationAnchor === closureId, "next generation was not anchored to terminal event_id");
-  assert(nextGeneration.episodeId === recovery.deriveNextEpisodeIdentity({ repoId: "scope-a", refName: "refs/heads/main", generationAnchor: closureId }), "next episode identity mismatch");
+await check("registry declares v1 legacy_read_only and v2 active/write-only", () => {
+  const registry = l1.loadL1SchemaRegistry();
+  const old = registry.entries.find((entry) => entry.envelope_schema === "drain-recovery-envelope/v1");
+  const active = registry.entries.find((entry) => entry.envelope_schema === "local-drain-recovery-envelope/v2");
+  assert(old?.phase === "legacy_read_only" && !old.write_enabled && !old.fold_eligible, "v1 disposition mismatch");
+  assert(active?.phase === "active" && active.write_enabled && !active.fold_eligible, "v2 disposition mismatch");
 });
 
-await check("claims are no-replace, pending blocks next slot, lane and gap validation fail closed", async () => {
-  const home = makeHome("claims");
-  const episodeId = "claim-competition";
-  const results = await Promise.all(Array.from({ length: 8 }, () => recovery.claimRecoverySlot({ abrainHome: home, episodeId, lane: "drain", slot: 1 })));
-  assert(results.filter((result) => result.shouldExecute).length === 1, "expected one claim winner");
-  const pending = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId, lane: "drain" });
-  assert(pending.status === "pending" && pending.slot === 1, "pending slot did not block claim");
-  await expectCode("RECOVERY_LANE_INVALID", () => recovery.recoveryClaimId("bad-lane", "invalid", 1));
-  await expectCode("RECOVERY_SLOT_GAP", () => recovery.foldRecoveryEvents([claimedEvent("gap", "drain", 2)]));
-});
-
-await check("fold is order-independent and absorbs raced claims and lower-slot late results after terminal", async () => {
-  const ep = "fold-order";
-  const claim1 = claimedEvent(ep, "drain", 1);
-  const prepared = event(ep, "drain", 1, "commit_prepared", { candidate: "a" });
-  const published = event(ep, "drain", 1, "commit_published", publishedBody("a"));
-  const converged = event(ep, "drain", 1, "index_converged", { candidate: "a" });
-  const claim2 = claimedEvent(ep, "drain", 2);
-  const terminal = event(ep, "drain", 2, "recovery_episode_terminal", terminalBody());
-  const folded = recovery.foldRecoveryEvents([terminal, claim2, converged, published, claim1, prepared]);
-  assert(folded.get(1).converged && folded.get(2).terminal, "late facts did not fold");
-  await expectCode("RECOVERY_RESULT_WITHOUT_CLAIM", () => recovery.foldRecoveryEvents([published, prepared]));
-  await expectCode("RECOVERY_STATE_ORDER", () => recovery.foldRecoveryEvents([claim1, published]));
-  await expectCode("RECOVERY_LANE_INVARIANT", () => recovery.foldRecoveryEvents([claimedEvent("lane", "push", 1), event("lane", "push", 1, "commit_prepared", {})]));
-  await expectCode("RECOVERY_EVENT_INVARIANT", () => recovery.foldRecoveryEvents([claim1, prepared, published, { ...published, body: publishedBody("b") }]));
-  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.foldRecoveryEvents([claim1, prepared, { ...published, body: { candidate: "a", publication_confirmed: true, outcome: "published" } }]));
-
-  const pushClaim = claimedEvent("push-body-contract", "push", 1);
-  const validTarget = "b".repeat(40);
-  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.foldRecoveryEvents([pushClaim, event("push-body-contract", "push", 1, "push_outcome", { classification: "success", target_commit: validTarget, stderr_sha256: "c".repeat(64) })]));
-  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.foldRecoveryEvents([pushClaim, event("push-body-contract", "push", 1, "push_outcome", { classification: "unknown", target_commit: validTarget })]));
-  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.foldRecoveryEvents([pushClaim, event("push-body-contract", "push", 1, "push_outcome", { classification: "success", target_commit: "not-an-oid" })]));
-});
-
-await check("stale abort refold preserves late drain convergence and push success", async () => {
-  const drainHome = makeHome("stale-abort-drain");
-  const f = await fixture("stale-abort-drain");
-  await preparedSlot(drainHome, f);
-  const staleDrain = recovery.recoveryEpisodeCursor(f.episodeId, "drain", await recovery.readRecoveryEvents(drainHome, f.episodeId, "drain"));
-  assert(staleDrain.pendingSlot === 1 && !staleDrain.complete, "drain cursor was not stale-pending");
-  await recovery.appendRecoveryEvent({ abrainHome: drainHome, episodeId: f.episodeId, lane: "drain", slot: 1, eventType: "commit_published", body: publishedBody(f.prepared.candidate) });
-  await recovery.appendRecoveryEvent({ abrainHome: drainHome, episodeId: f.episodeId, lane: "drain", slot: 1, eventType: "index_converged", body: { candidate: f.prepared.candidate } });
-  assert(await recovery.abortRecoverySlotAfterRefold({ abrainHome: drainHome, episodeId: f.episodeId, lane: "drain", slot: staleDrain.pendingSlot }) === "already_complete", "late drain convergence was not preserved");
-  const drainEvents = await recovery.readRecoveryEvents(drainHome, f.episodeId, "drain");
-  assert(!drainEvents.some((item) => item.event_type === "recovery_slot_aborted"), "stale drain abort was published");
-  assert(recovery.recoveryEpisodeCursor(f.episodeId, "drain", drainEvents).complete, "drain episode did not remain complete");
-  const converged = recovery.foldRecoveryEvents(drainEvents).get(1).converged;
-  const nextGeneration = await recovery.resolveRecoveryEpisode({ abrainHome: drainHome, repoId: "stale-abort-drain", refName: "HEAD" });
-  assert(nextGeneration.status === "new" && nextGeneration.generationAnchor === l1.canonicalL1BodyHash(converged), "late convergence did not remain the generation anchor");
-
-  const pushHome = makeHome("stale-abort-push");
-  const pushRepo = path.resolve(tmp, "stale-abort-push-intent");
-  const pushTarget = "a".repeat(40);
-  const pushRemote = "origin-stale-abort";
-  const pushEpisode = recovery.pushEpisodeIdentity({ repo_id: repoId(pushRepo), remote: pushRemote, ref_name: "refs/heads/main", target_commit: pushTarget });
-  await recovery.recordPushIntent({ abrainHome: pushHome, episodeId: pushEpisode, repo: pushRepo, remote: pushRemote, refName: "refs/heads/main", targetCommit: pushTarget });
-  await recovery.claimRecoverySlot({ abrainHome: pushHome, episodeId: pushEpisode, lane: "push", slot: 1 });
-  const stalePush = recovery.recoveryEpisodeCursor(pushEpisode, "push", await recovery.readRecoveryEvents(pushHome, pushEpisode, "push"));
-  assert(stalePush.pendingSlot === 1 && !stalePush.complete, "push cursor was not stale-pending");
-  await pushOutcome(pushHome, pushEpisode, 1, "success", pushTarget);
-  assert(await recovery.abortRecoverySlotAfterRefold({ abrainHome: pushHome, episodeId: pushEpisode, lane: "push", slot: stalePush.pendingSlot }) === "success", "late push success was not preserved");
-  const pushEvents = await recovery.readRecoveryEvents(pushHome, pushEpisode, "push");
-  assert(!pushEvents.some((item) => item.event_type === "recovery_slot_aborted"), "stale push abort was published");
-  assert(recovery.recoveryEpisodeCursor(pushEpisode, "push", pushEvents).complete, "push episode did not remain complete");
-});
-
-await check("one quarantined episode does not block another open episode and curator is excluded", async () => {
-  const home = makeHome("quarantine");
-  const good = "good-open";
-  await recovery.claimRecoverySlot({ abrainHome: home, episodeId: good, lane: "drain", slot: 1 });
-  await recovery.burnPendingRecoverySlot({ abrainHome: home, episodeId: good, lane: "drain" });
-  const bad = "bad-conflict";
-  await recovery.claimRecoverySlot({ abrainHome: home, episodeId: bad, lane: "drain", slot: 1 });
-  await recovery.appendRecoveryEvent({ abrainHome: home, episodeId: bad, lane: "drain", slot: 1, eventType: "commit_prepared", body: { candidate: "a" } });
-  await recovery.appendRecoveryEvent({ abrainHome: home, episodeId: bad, lane: "drain", slot: 1, eventType: "commit_prepared", body: { candidate: "b" } });
-  const curator = recovery.curatorEpisodeIdentity({ scope: "external-e2" });
-  await recovery.claimRecoverySlot({ abrainHome: home, episodeId: curator, lane: "curator", slot: 1 });
-  const result = await recovery.recoverOpenRecoveryEpisodes(home);
-  assert(result.open.some((cursor) => cursor.episodeId === good && cursor.nextSlot === 2), "good episode not recovered");
-  assert(result.quarantined.some((item) => item.episodeId === bad && item.ownerAlert && item.errorCode === "RECOVERY_EVENT_INVARIANT"), "bad episode not quarantined");
-  assert(!result.open.some((cursor) => cursor.episodeId === curator), "curator entered P1-S2 open recovery");
-});
-
-await check("exact cohort supports delete and executable mode and rejects invalid paths/modes", async () => {
-  const home = makeHome("plan-shape");
-  const f = await fixture("plan-shape", [
-    { path: "base.txt", op: "delete" },
-    { path: "run.sh", op: "put", mode: "100755", content: "#!/bin/sh\nexit 0\n" },
-  ]);
-  await preparedSlot(home, f);
-  assert(await recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }) === "index_converged", "delete/executable cohort did not converge");
-  assert(fs.existsSync(path.join(f.repo, "base.txt")), "delete operation modified the worktree");
-  const tree = git(f.repo, "ls-tree", "HEAD", "run.sh");
-  assert(tree.startsWith("100755 blob "), `executable mode lost: ${tree}`);
-  for (const badPath of ["../escape", "/absolute", "a\\b", ".git/config", "bad\0path"]) {
-    await expectCode("COHORT_PATH_INVALID", () => cohort.prepareExactCohortCommit({ repo: f.repo, refName: "HEAD", frozenCommit: git(f.repo, "rev-parse", "HEAD"), plan: [{ path: badPath, op: "put", content: "x" }], message: "bad" }));
-  }
-  await expectCode("COHORT_PLAN_INVALID", () => cohort.prepareExactCohortCommit({ repo: f.repo, refName: "HEAD", frozenCommit: git(f.repo, "rev-parse", "HEAD"), plan: [{ path: "bad-mode", op: "put", mode: "100600", content: "x" }], message: "bad" }));
-});
-
-await check("exact cohort ignores external Git repo, worktree, and config environment", async () => {
-  const good = initRepo("git-env-good");
-  const bad = initRepo("git-env-bad");
-  const goodFrozen = git(good, "rev-parse", "HEAD");
-  const badHeadBefore = git(bad, "rev-parse", "HEAD");
-  const badIndexBefore = fs.readFileSync(path.join(bad, ".git", "index"));
-  const badWorktreeBefore = fs.readFileSync(path.join(bad, "base.txt"));
-  const goodWorktreeBefore = fs.readFileSync(path.join(good, "base.txt"));
-  const goodSnapshot = await cohort.snapshotIndexEntries(good, ["owned.txt"]);
-  const polluted = Object.fromEntries([
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_CONFIG_COUNT",
-    "GIT_CONFIG_KEY_0",
-    "GIT_CONFIG_VALUE_0",
-  ].map((key) => [key, process.env[key]]));
-  process.env.GIT_DIR = path.join(bad, ".git");
-  process.env.GIT_WORK_TREE = bad;
-  process.env.GIT_CONFIG_COUNT = "1";
-  process.env.GIT_CONFIG_KEY_0 = "core.bare";
-  process.env.GIT_CONFIG_VALUE_0 = "true";
-  try {
-    assert(await cohort.resolveRef(good, "HEAD") === goodFrozen, "resolveRef escaped to polluted repository");
-    const prepared = await cohort.prepareExactCohortCommit({
-      repo: good,
-      refName: "HEAD",
-      frozenCommit: goodFrozen,
-      plan: [{ path: "owned.txt", op: "put", content: "good-owned\n" }],
-      message: "Git environment isolation",
-    });
-    const published = await cohort.publishExactCohortCommit({ repo: good, refName: "HEAD", candidate: prepared.candidate, frozenCommit: goodFrozen });
-    assert(published.status === "published", `polluted publish status: ${published.status}`);
-    await cohort.convergeExactCohortIndex({ repo: good, refName: "HEAD", cohortPaths: ["owned.txt"], frozenIndexSnapshot: goodSnapshot });
-    assert(await cohort.resolveRef(good, "HEAD") === prepared.candidate, "good ref did not publish under pollution");
-    assert((await cohort.snapshotIndexEntries(good, ["owned.txt"])).get("owned.txt")?.includes(prepared.entries[0].blobOid), "good index did not converge under pollution");
-  } finally {
-    for (const [key, value] of Object.entries(polluted)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-  assert(git(bad, "rev-parse", "HEAD") === badHeadBefore, "bad repository ref changed");
-  assert(fs.readFileSync(path.join(bad, ".git", "index")).equals(badIndexBefore), "bad repository index changed");
-  assert(fs.readFileSync(path.join(bad, "base.txt")).equals(badWorktreeBefore), "bad repository worktree changed");
-  assert(fs.readFileSync(path.join(good, "base.txt")).equals(goodWorktreeBefore), "good repository worktree changed");
-});
-
-await check("snapshot rejects non-stage-0 and duplicate-stage owned paths", async () => {
-  const repo = initRepo("index-stages");
-  fs.writeFileSync(path.join(repo, "one"), "one\n");
-  fs.writeFileSync(path.join(repo, "two"), "two\n");
-  const one = git(repo, "hash-object", "-w", "one");
-  const two = git(repo, "hash-object", "-w", "two");
-  execFileSync("git", ["-C", repo, "update-index", "--index-info"], {
-    input: `100644 ${one} 1\towned.txt\n100644 ${two} 2\towned.txt\n`,
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
-  });
-  await expectCode("OWNED_INDEX_CONFLICT", () => cohort.snapshotIndexEntries(repo, ["owned.txt"]));
-});
-
-await check("publication preserves non-cohort index/worktree and second recovery is already_complete", async () => {
-  const home = makeHome("preserve");
-  const f = await fixture("preserve");
-  fs.writeFileSync(path.join(f.repo, "staged.txt"), "staged\n");
-  git(f.repo, "add", "staged.txt");
-  fs.writeFileSync(path.join(f.repo, "base.txt"), "dirty-worktree\n");
-  const fingerprint = await cohort.fullIndexFingerprint(f.repo, new Set(f.paths));
-  const worktree = fs.readFileSync(path.join(f.repo, "base.txt"), "utf8");
-  await preparedSlot(home, f);
-  assert(await recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }) === "index_converged", "did not converge");
-  assert(await recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }) === "already_complete", "completed slot was not idempotent");
-  assert(await cohort.fullIndexFingerprint(f.repo, new Set(f.paths)) === fingerprint, "non-cohort stage changed");
-  assert(fs.readFileSync(path.join(f.repo, "base.txt"), "utf8") === worktree, "worktree changed");
-});
-
-await check("CAS already applied without commit_published is absorbed with deterministic fact", async () => {
-  const home = makeHome("cas-applied");
-  const f = await fixture("cas-applied");
-  await preparedSlot(home, f);
-  await cohort.publishExactCohortCommit({ repo: f.repo, refName: "HEAD", candidate: f.prepared.candidate, frozenCommit: f.frozen });
-  assert(await recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }) === "index_converged", "applied CAS was not absorbed");
-  const state = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, f.episodeId, "drain")).get(1);
-  assert(JSON.stringify(state.published.body) === JSON.stringify(publishedBody(f.prepared.candidate)), "publication fact contains path-dependent diagnostics");
-});
-
-await check("candidate descendant and independent exact cohort are both absorbed", async () => {
-  const descendantHome = makeHome("descendant");
-  const descendant = await fixture("descendant");
-  await preparedSlot(descendantHome, descendant);
-  await cohort.publishExactCohortCommit({ repo: descendant.repo, refName: "HEAD", candidate: descendant.prepared.candidate, frozenCommit: descendant.frozen });
-  await cohort.convergeExactCohortIndex({ repo: descendant.repo, refName: "HEAD", cohortPaths: descendant.paths, frozenIndexSnapshot: descendant.snapshot });
-  fs.writeFileSync(path.join(descendant.repo, "child.txt"), "child\n");
-  git(descendant.repo, "add", "child.txt");
-  git(descendant.repo, "commit", "-qm", "descendant");
-  assert(await recovery.recoverDrainSlot({ abrainHome: descendantHome, episodeId: descendant.episodeId, slot: 1 }) === "index_converged", "candidate descendant not absorbed");
-
-  const exactHome = makeHome("independent");
-  const exact = await fixture("independent");
-  await preparedSlot(exactHome, exact);
-  fs.writeFileSync(path.join(exact.repo, "owned.txt"), "owned\n");
-  git(exact.repo, "add", "owned.txt");
-  git(exact.repo, "commit", "-qm", "independent exact cohort");
-  assert(!await cohort.isAncestor(exact.repo, exact.prepared.candidate, git(exact.repo, "rev-parse", "HEAD")), "fixture unexpectedly contains candidate");
-  const exactContained = await cohort.refContainsCohort(exact.repo, "HEAD", exact.prepared.entries);
-  assert(exactContained, `exact cohort helper rejected matching tree: tree=${git(exact.repo, "ls-tree", "HEAD", "owned.txt")} expected=${JSON.stringify(exact.prepared.entries[0])}`);
-  const exactState = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(exactHome, exact.episodeId, "drain")).get(1);
-  const durable = exactState.prepared.body;
-  const durableShape = await cohort.verifyCandidateShape(durable.repo, durable.candidate, { frozenCommit: durable.frozen_commit, newTree: durable.new_tree });
-  const durableContains = await cohort.refContainsCohort(durable.repo, durable.ref_name, durable.entries);
-  const exactAction = await recovery.recoverDrainSlot({ abrainHome: exactHome, episodeId: exact.episodeId, slot: 1 });
-  assert(exactAction === "index_converged", `independent exact cohort not absorbed: ${exactAction}; shape=${durableShape}; contains=${durableContains}`);
-});
-
-await check("explicit CAS conflict burns slot, but ref lock error rethrows without burn", async () => {
-  const conflictHome = makeHome("cas-conflict");
-  const conflict = await fixture("cas-conflict");
-  await preparedSlot(conflictHome, conflict);
-  fs.writeFileSync(path.join(conflict.repo, "other.txt"), "other\n");
-  git(conflict.repo, "add", "other.txt");
-  git(conflict.repo, "commit", "-qm", "concurrent");
-  assert(await recovery.recoverDrainSlot({ abrainHome: conflictHome, episodeId: conflict.episodeId, slot: 1 }) === "refreeze_required", "CAS mismatch did not burn slot");
-
-  const lockHome = makeHome("ref-lock");
-  const locked = await fixture("ref-lock");
-  await preparedSlot(lockHome, locked);
-  const symbolic = git(locked.repo, "symbolic-ref", "HEAD");
-  const lockPath = path.join(locked.repo, ".git", `${symbolic}.lock`);
-  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-  fs.writeFileSync(lockPath, "held\n");
-  await expectReject(() => recovery.recoverDrainSlot({ abrainHome: lockHome, episodeId: locked.episodeId, slot: 1 }));
-  fs.rmSync(lockPath, { force: true });
-  const beforeRetry = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(lockHome, locked.episodeId, "drain")).get(1);
-  assert(!beforeRetry.aborted, "ref lock failure burned recovery slot");
-  assert(await recovery.recoverDrainSlot({ abrainHome: lockHome, episodeId: locked.episodeId, slot: 1 }) === "index_converged", "slot did not retry after lock removal");
-});
-
-await check("merge-base non-1 failures rethrow and do not burn a recovery slot", async () => {
-  const home = makeHome("merge-base-error");
-  const f = await fixture("merge-base-error");
-  await preparedSlot(home, f);
-  const missingOid = "f".repeat(f.frozen.length);
-
-  const ancestorError = await expectReject(() => cohort.isAncestor(f.repo, missingOid, f.frozen));
-  assert(ancestorError.code !== 1, `isAncestor converted non-1 failure: ${ancestorError.code}`);
-
-  const publishError = await expectReject(() => cohort.publishExactCohortCommit({ repo: f.repo, refName: "HEAD", candidate: missingOid, frozenCommit: f.frozen }));
-  assert(publishError.code !== 1 && /merge-base|not a valid object|invalid object/i.test(`${publishError.message}\n${publishError.stderr ?? ""}`), `publish did not rethrow ancestry failure: ${publishError.message}`);
-  const state = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, f.episodeId, "drain")).get(1);
-  assert(!state.aborted, "merge-base infrastructure failure burned recovery slot");
-});
-
-await check("candidate shape and prepared structure validation fail explicitly", async () => {
-  const shapeHome = makeHome("candidate-shape");
-  const f = await fixture("candidate-shape");
-  const invalid = { ...f.prepared, candidate: f.frozen };
-  await recovery.claimRecoverySlot({ abrainHome: shapeHome, episodeId: f.episodeId, lane: "drain", slot: 1 });
-  await recovery.recordDrainPrepared({ abrainHome: shapeHome, episodeId: f.episodeId, slot: 1, prepared: invalid, frozenIndexSnapshot: f.snapshot });
-  assert(await recovery.recoverDrainSlot({ abrainHome: shapeHome, episodeId: f.episodeId, slot: 1 }) === "refreeze_required", "invalid candidate shape accepted");
-
-  const malformedHome = makeHome("prepared-malformed");
-  const episodeId = "prepared-malformed";
-  await recovery.claimRecoverySlot({ abrainHome: malformedHome, episodeId, lane: "drain", slot: 1 });
-  await recovery.appendRecoveryEvent({ abrainHome: malformedHome, episodeId, lane: "drain", slot: 1, eventType: "commit_prepared", body: { candidate: "only" } });
-  await expectCode("RECOVERY_PREPARED_INVALID", () => recovery.recoverDrainSlot({ abrainHome: malformedHome, episodeId, slot: 1 }));
-});
-
-await check("owned index conflict is all-or-nothing after publication", async () => {
-  const home = makeHome("owned-conflict");
-  const f = await fixture("owned-conflict", [
-    { path: "a-owned.txt", op: "put", content: "candidate-a\n" },
-    { path: "z-owned.txt", op: "put", content: "candidate-z\n" },
-  ]);
-  await preparedSlot(home, f);
-  await cohort.publishExactCohortCommit({ repo: f.repo, refName: "HEAD", candidate: f.prepared.candidate, frozenCommit: f.frozen });
-  await recovery.appendRecoveryEvent({ abrainHome: home, episodeId: f.episodeId, lane: "drain", slot: 1, eventType: "commit_published", body: publishedBody(f.prepared.candidate) });
-  fs.writeFileSync(path.join(f.repo, "z-owned.txt"), "user-stage\n");
-  git(f.repo, "add", "z-owned.txt");
-  const before = git(f.repo, "ls-files", "-s");
-  await expectCode("OWNED_INDEX_CONFLICT", () => recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }));
-  assert(git(f.repo, "ls-files", "-s") === before, "index was partially converged");
-  const pending = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, f.episodeId, "drain")).get(1);
-  assert(pending.published && !pending.aborted && !pending.converged, "post-CAS index conflict must remain published pending without abort");
-});
-
-await check("published fact cannot authorize convergence against unrelated current ref", async () => {
-  const home = makeHome("published-unrelated");
-  const f = await fixture("published-unrelated");
-  await preparedSlot(home, f);
-  await cohort.publishExactCohortCommit({ repo: f.repo, refName: "HEAD", candidate: f.prepared.candidate, frozenCommit: f.frozen });
-  await recovery.appendRecoveryEvent({ abrainHome: home, episodeId: f.episodeId, lane: "drain", slot: 1, eventType: "commit_published", body: publishedBody(f.prepared.candidate) });
-  git(f.repo, "update-ref", "HEAD", f.frozen, f.prepared.candidate);
-  fs.writeFileSync(path.join(f.repo, "unrelated.txt"), "unrelated\n");
-  git(f.repo, "add", "unrelated.txt");
-  git(f.repo, "commit", "-qm", "unrelated");
-  const before = git(f.repo, "ls-files", "-s");
-  await expectCode("RECOVERY_PUBLISHED_REF_DIVERGED", () => recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }));
-  assert(git(f.repo, "ls-files", "-s") === before, "unrelated rejection changed index");
-});
-
-await check("concurrent recoverDrainSlot calls converge to one non-conflicting durable result", async () => {
-  const home = makeHome("concurrent-drain");
-  const f = await fixture("concurrent-drain");
-  await preparedSlot(home, f);
-  const actions = await Promise.all([
-    recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }),
-    recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }),
-  ]);
-  assert(actions.every((action) => action === "index_converged" || action === "already_complete"), `concurrent actions: ${actions}`);
-  const events = await recovery.readRecoveryEvents(home, f.episodeId, "drain");
-  const folded = recovery.foldRecoveryEvents(events);
-  assert(folded.get(1).published && folded.get(1).converged && !folded.get(1).aborted, "concurrent fold did not converge cleanly");
-  assert(events.filter((item) => item.event_type === "commit_published").length === 1, "publication bytes diverged");
-  assert(events.filter((item) => item.event_type === "index_converged").length === 1, "convergence bytes diverged");
-  assert(git(f.repo, "rev-parse", "HEAD") === f.prepared.candidate, "ref not converged");
-  assert((await cohort.snapshotIndexEntries(f.repo, f.paths)).get("owned.txt")?.includes(f.prepared.entries[0].blobOid), "index not converged");
-});
-
-await check("durable no-replace collision is surfaced", async () => {
-  const home = makeHome("durable-collision");
-  const first = await recovery.claimRecoverySlot({ abrainHome: home, episodeId: "durable-collision", lane: "drain", slot: 1 });
-  fs.writeFileSync(first.filePath, "{}\n");
-  await expectCode("RECOVERY_DURABLE_COLLISION", () => recovery.claimRecoverySlot({ abrainHome: home, episodeId: "durable-collision", lane: "drain", slot: 1 }));
-});
-
-await check("drain budget and terminal/abort bodies are fixed and terminal blocks new claims", async () => {
-  const home = makeHome("drain-budget");
-  const episodeId = "budget-drain";
-  for (let slot = 1; slot <= 5; slot++) {
-    assert(await claimNext(home, episodeId, "drain") === slot, `slot ${slot} not allocated`);
-    assert(await recovery.recoverDrainSlot({ abrainHome: home, episodeId, slot }) === (slot === 5 ? "terminal" : "burned"), `slot ${slot} action wrong`);
-  }
-  const state = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, episodeId, "drain")).get(5);
-  assert(state.terminal.body.reason === terminalBody().reason && state.terminal.body.owner_alert === true, "terminal reason is path-dependent");
-  assert(state.aborted.body.reason === abortBody().reason && state.aborted.body.error_code === abortBody().error_code, "abort reason is path-dependent");
-  const next = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId, lane: "drain" });
-  assert(next.status === "terminal", "terminal episode accepted a new claim");
-  assert(recovery.RECOVERY_LANE_BUDGETS.curator === 3, "curator budget changed");
-});
-
-await check("push missing and late outcomes burn once without reviving an aborted slot", async () => {
-  const home = makeHome("push-missing-late");
-  const repo = initRepo("push-missing-late");
-  const bare = path.join(tmp, "push-missing-late.git");
-  execFileSync("git", ["init", "--bare", "-q", bare]);
-  const target = git(repo, "rev-parse", "HEAD");
-  const episodeId = recovery.pushEpisodeIdentity({ repo_id: repoId(repo), remote: bare, ref_name: "refs/heads/main", target_commit: target });
-  await recovery.recordPushIntent({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
-  assert(await claimNext(home, episodeId, "push") === 1, "missing slot not claimed");
-  const result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
-  assert(result.slot === 2 && result.classification === "success", `missing result did not advance: ${JSON.stringify(result)}`);
-  assert(result.transportAttempted === true && result.remoteContainsTarget === true, `successful real push did not return remote containment fact: ${JSON.stringify(result)}`);
-
-  const lateRepo = path.resolve(tmp, "push-late-intent");
-  const lateTarget = "a".repeat(40);
-  const lateRemote = "origin-push-late";
-  const late = recovery.pushEpisodeIdentity({ repo_id: repoId(lateRepo), remote: lateRemote, ref_name: "refs/heads/main", target_commit: lateTarget });
-  await recovery.recordPushIntent({ abrainHome: home, episodeId: late, repo: lateRepo, remote: lateRemote, refName: "refs/heads/main", targetCommit: lateTarget });
-  assert(await claimNext(home, late, "push") === 1, "late slot1 claim failed");
-  assert(await recovery.recoverPushSlot({ abrainHome: home, episodeId: late, slot: 1 }) === "burned", "late slot1 not burned");
-  assert(await claimNext(home, late, "push") === 2, "late slot2 claim failed");
-  await pushOutcome(home, late, 2, "retryable");
-  await pushOutcome(home, late, 1, "success");
-  const cursor = recovery.recoveryEpisodeCursor(late, "push", await recovery.readRecoveryEvents(home, late, "push"));
-  assert(cursor.nextSlot === 3 && !cursor.complete && cursor.folded.get(1).pushOutcome, "late result revived burned slot");
-});
-
-await check("push durable outcome is deterministic across different transport stderr", async () => {
-  const repo = initRepo("push-durable-determinism");
-  const target = git(repo, "rev-parse", "HEAD");
-  const outcomes = [];
-  for (const suffix of ["alpha", "beta"]) {
-    const home = makeHome(`push-durable-${suffix}`);
-    const bare = path.join(tmp, `push-durable-${suffix}.git`);
-    execFileSync("git", ["init", "--bare", "-q", bare]);
-    const lockPath = path.join(bare, "refs", "heads", "main.lock");
-    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-    fs.writeFileSync(lockPath, `held-${suffix}\n`);
-    const episodeId = recovery.pushEpisodeIdentity({ repo_id: repoId(repo), remote: bare, ref_name: "refs/heads/main", target_commit: target });
-    await recovery.recordPushIntent({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
-    const result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
-    const body = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, episodeId, "push")).get(1).pushOutcome.body;
-    outcomes.push({ result, body });
-  }
-  assert(outcomes.every(({ result }) => result.classification === "retryable" && result.transportAttempted === true && typeof result.stderrSha256 === "string"), "transport failures were not transiently evidenced");
-  assert(outcomes[0].result.stderrSha256 !== outcomes[1].result.stderrSha256, "fixture did not produce distinct stderr hashes");
-  assert(JSON.stringify(outcomes[0].body) === JSON.stringify(outcomes[1].body), "transport diagnostics changed durable outcome bytes");
-  assert(JSON.stringify(Object.keys(outcomes[0].body).sort()) === JSON.stringify(["classification", "target_commit"]), "durable push body contains transport evidence");
-});
-
-await check("push nonretryable and slot-5 retryable share deterministic terminal bytes", async () => {
-  const home = makeHome("push-terminal");
-  const terminalTarget = "a".repeat(40);
-  const nonretryRepo = path.resolve(tmp, "push-nonretry-intent");
-  const nonretryRemote = "origin-push-nonretry";
-  const nonretry = recovery.pushEpisodeIdentity({ repo_id: repoId(nonretryRepo), remote: nonretryRemote, ref_name: "refs/heads/main", target_commit: terminalTarget });
-  await recovery.recordPushIntent({ abrainHome: home, episodeId: nonretry, repo: nonretryRepo, remote: nonretryRemote, refName: "refs/heads/main", targetCommit: terminalTarget });
-  assert(await claimNext(home, nonretry, "push") === 1, "nonretry claim failed");
-  await pushOutcome(home, nonretry, 1, "nonretryable");
-  assert(await recovery.recoverPushSlot({ abrainHome: home, episodeId: nonretry, slot: 1 }) === "nonretryable", "nonretry did not terminal");
-
-  const exhaustedRepo = path.resolve(tmp, "push-exhausted-intent");
-  const exhaustedRemote = "origin-push-exhausted";
-  const exhausted = recovery.pushEpisodeIdentity({ repo_id: repoId(exhaustedRepo), remote: exhaustedRemote, ref_name: "refs/heads/main", target_commit: terminalTarget });
-  await recovery.recordPushIntent({ abrainHome: home, episodeId: exhausted, repo: exhaustedRepo, remote: exhaustedRemote, refName: "refs/heads/main", targetCommit: terminalTarget });
-  for (let slot = 1; slot <= 5; slot++) {
-    assert(await claimNext(home, exhausted, "push") === slot, `push slot ${slot} not allocated`);
-    await pushOutcome(home, exhausted, slot, "retryable");
-    assert(await recovery.recoverPushSlot({ abrainHome: home, episodeId: exhausted, slot }) === (slot === 5 ? "terminal" : "retryable"), `push slot ${slot} wrong`);
-  }
-  const nonBody = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, nonretry, "push")).get(1).terminal.body;
-  const exhaustedBody = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, exhausted, "push")).get(5).terminal.body;
-  assert(JSON.stringify(nonBody) === JSON.stringify(exhaustedBody), "terminal bytes differ by reason path");
-  assert(nonBody.reason === terminalBody().reason && nonBody.owner_alert === true, "terminal body category drifted");
-});
-
-await check("remote descendant fetch is object-only and remote refs must be fully qualified", async () => {
-  const home = makeHome("push-remote");
-  const repo = initRepo("push-fetch-local");
-  const bare = path.join(tmp, "push-fetch.git");
-  execFileSync("git", ["init", "--bare", "-q", bare]);
-  const target = git(repo, "rev-parse", "HEAD");
-  git(repo, "push", bare, `${target}:refs/heads/main`);
-  const other = path.join(tmp, "push-fetch-other");
-  git(tmp, "clone", "-q", bare, other);
-  git(other, "config", "user.name", "Other");
-  git(other, "config", "user.email", "other@example.test");
-  fs.writeFileSync(path.join(other, "descendant.txt"), "descendant\n");
-  git(other, "add", "descendant.txt");
-  git(other, "commit", "-qm", "descendant");
-  const remoteOid = git(other, "rev-parse", "HEAD");
-  git(other, "push", "-q", "origin", "HEAD:refs/heads/main");
-  const fetchHead = path.join(repo, ".git", "FETCH_HEAD");
-  fs.rmSync(fetchHead, { force: true });
-  const episodeId = recovery.pushEpisodeIdentity({ repo_id: repoId(repo), remote: bare, ref_name: "refs/heads/main", target_commit: target });
-  await recovery.recordPushIntent({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
-  const polluted = {
-    GIT_DIR: process.env.GIT_DIR,
-    GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT,
-    GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0,
-    GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0,
-  };
-  process.env.GIT_DIR = path.join(tmp, "poisoned-git-dir");
-  process.env.GIT_CONFIG_COUNT = "1";
-  process.env.GIT_CONFIG_KEY_0 = "core.bare";
-  process.env.GIT_CONFIG_VALUE_0 = "true";
-  let result;
-  try {
-    result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
-  } finally {
-    for (const [key, value] of Object.entries(polluted)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-  assert(result.classification === "success" && result.remoteContainsTarget, "remote descendant not absorbed under external Git environment pollution");
-  assert(!fs.existsSync(fetchHead) && git(repo, "cat-file", "-t", remoteOid) === "commit", "object-only fetch contract failed");
-
-  const invalid = recovery.pushEpisodeIdentity({ repo_id: repoId(repo), remote: bare, ref_name: "main", target_commit: target });
-  await recovery.recordPushIntent({ abrainHome: home, episodeId: invalid, repo, remote: bare, refName: "main", targetCommit: target });
-  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.recoverPushEpisode({ abrainHome: home, episodeId: invalid, repo, remote: bare, refName: "main", targetCommit: target }));
-});
-
-await check("curator claims stay 1..3 and whole-L1 recovery events remain meta-only", async () => {
-  const home = makeHome("curator");
-  const episodeId = recovery.curatorEpisodeIdentity({ generation_anchor: "curator-genesis" });
-  for (let slot = 1; slot <= 3; slot++) {
-    assert(await claimNext(home, episodeId, "curator") === slot, `curator slot ${slot} failed`);
-    await recovery.burnPendingRecoverySlot({ abrainHome: home, episodeId, lane: "curator" });
-  }
-  const terminal = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId, lane: "curator" });
-  assert(terminal.status === "terminal", "curator exhaustion not terminal");
+await check("real legacy IDs strict-validate but stay outside active scan/fold", async () => {
+  const home = emptyHome("legacy-valid");
+  fixture.envelopes.forEach((envelope) => writeEnvelope(home, envelope));
   const scan = await l1.scanWholeL1Validated({ abrainHome: home });
-  assert(scan.all.length > 0 && scan.all.every((record) => record.registration.role === "meta" && !record.registration.fold_eligible), "recovery event entered canonical fold");
-  assert(scan.foldable.length === 0, "meta events became foldable");
+  assert(scan.all.length === 3 && scan.legacyReadOnly.length === 3, "legacy records were not classified read-only");
+  assert(scan.selected.length === 0 && scan.foldable.length === 0, "legacy record entered active selection/fold");
+  assert(scan.legacyReadOnly.some((record) => record.eventId === fixture.candidate_event_id), "real candidate ID missing");
+  const recovered = recovery.recoverOpenRecoveryEpisodesFromScan(scan);
+  assert(recovered.open.length === 0 && recovered.terminal.length === 0, "legacy terminal entered active ownership");
+  for (const removed of ["recordPushIntent", "recoverPushEpisode", "recoverPushSlot", "pushEpisodeIdentity", "readPushIntent", "claimCuratorSlot", "curatorEpisodeIdentity"]) assert(!(removed in recovery), `legacy writer fallback remains exported: ${removed}`);
+});
+
+await check("malformed legacy v1 fails whole-L1 closed", async () => {
+  const home = emptyHome("legacy-malformed");
+  const bad = structuredClone(fixture.envelopes[0]);
+  bad.body.body.unexpected = true;
+  bad.body_hash = l1.canonicalL1BodyHash(bad.body);
+  bad.event_id = bad.body_hash;
+  writeEnvelope(home, bad);
+  await expectCode("L1_BODY_SHAPE_MISMATCH", () => l1.scanWholeL1Validated({ abrainHome: home }));
+});
+
+await check("legacy v1 exact-body mutation table fails whole-L1 closed", async () => {
+  const fixtureMutations = [
+    ["invalid repo_id", 2, (body) => { body.repo_id = "x".repeat(64); }],
+    ["invalid remote", 2, (body) => { body.remote = "upstream"; }],
+    ["invalid ref", 0, (body) => { body.ref_name = "refs/heads/../main"; }],
+    ["string boolean", 1, (body) => { body.owner_alert = "true"; }],
+    ["bad hash", 2, (body) => { body.remote_url_id = "0".repeat(63); }],
+    ["extra field", 2, (body) => { body.extra = true; }],
+    ["missing field", 2, (body) => { delete body.transport_policy_id; }],
+    ["relative historical repo", 0, (body) => { body.repo = "relative/repo"; }],
+  ];
+  for (const [name, index, mutate] of fixtureMutations) {
+    const envelopes = structuredClone(fixture.envelopes);
+    mutate(envelopes[index].body.body);
+    rehash(envelopes[index]);
+    const home = emptyHome(`legacy-mutation-${String(name).replace(/[^a-z]+/gi, "-")}`);
+    envelopes.forEach((envelope) => writeEnvelope(home, envelope));
+    await expectCode("L1_BODY_SHAPE_MISMATCH", () => l1.scanWholeL1Validated({ abrainHome: home }));
+  }
+
+  const legacyOutcomeBody = { classification: "retryable", target_commit: fixture.envelopes[0].body.body.target_commit };
+  const legacyOutcomeHome = emptyHome("legacy-two-field-outcomes-valid");
+  const historicalOutcomes = Array.from({ length: 5 }, (_, index) => legacyEnvelope(legacyEvent(fixture.episode_id, index + 1, "push_outcome", structuredClone(legacyOutcomeBody))));
+  [...fixture.envelopes, ...historicalOutcomes].forEach((envelope) => writeEnvelope(legacyOutcomeHome, envelope));
+  assert((await l1.scanWholeL1Validated({ abrainHome: legacyOutcomeHome })).legacyReadOnly.length === 8, "historical exact two-field outcomes rejected");
+  for (const [name, mutate] of [
+    ["invalid classification", (body) => { body.classification = "unknown"; }],
+    ["bad target oid", (body) => { body.target_commit = "bad"; }],
+    ["extra simple outcome", (body) => { body.transport_attempted = false; }],
+    ["missing simple outcome", (body) => { delete body.classification; }],
+  ]) {
+    const bad = legacyEnvelope(legacyEvent(fixture.episode_id, 1, "push_outcome", structuredClone(legacyOutcomeBody)));
+    mutate(bad.body.body);
+    rehash(bad);
+    const home = emptyHome(`legacy-simple-outcome-${String(name).replace(/[^a-z]+/gi, "-")}`);
+    [fixture.envelopes[0], bad].forEach((envelope) => writeEnvelope(home, envelope));
+    await expectCode("L1_BODY_SHAPE_MISMATCH", () => l1.scanWholeL1Validated({ abrainHome: home }));
+  }
+
+  const scope = { repo_id: "1".repeat(64), remote: "origin", ref_name: "refs/heads/main", target_commit: "2".repeat(40), remote_url_id: "3".repeat(64), transport_policy_id: "4".repeat(64) };
+  const episodeId = jcs.jcsSha256Hex({ domain: "pi-astack/adr0027-c6/push-episode/v2", scope_version: "remote-scope/v2", ...scope });
+  const intent = legacyEnvelope(legacyEvent(episodeId, 1, "push_intent", { scope_version: "remote-scope/v2", ...scope }));
+  const validOutcomeBody = {
+    classification: "nonretryable", ...scope, stage: "push", transport_attempted: true, command_exit_code: 1,
+    stdout_redacted_sha256: "5".repeat(64), stderr_redacted_sha256: "6".repeat(64), remote_ref_before: null,
+    remote_ref_after: null, remote_contains_target: false, error_code: "PUSH_REJECTED",
+  };
+  const outcomeMutations = [
+    ["string transport boolean", (body) => { body.transport_attempted = "true"; }],
+    ["string proof boolean", (body) => { body.remote_contains_target = "false"; }],
+    ["noninteger exit", (body) => { body.command_exit_code = 1.5; }],
+    ["bad stdout hash", (body) => { body.stdout_redacted_sha256 = "bad"; }],
+    ["scope mismatch", (body) => { body.repo_id = "7".repeat(64); }],
+    ["extra outcome field", (body) => { body.proof = true; }],
+    ["missing outcome field", (body) => { delete body.stage; }],
+    ["contradictory success", (body) => { body.classification = "success"; body.error_code = null; }],
+  ];
+  const validOutcome = legacyEnvelope(legacyEvent(episodeId, 1, "push_outcome", structuredClone(validOutcomeBody)));
+  const validHome = emptyHome("legacy-v2-outcome-valid");
+  [intent, validOutcome].forEach((envelope) => writeEnvelope(validHome, envelope));
+  assert((await l1.scanWholeL1Validated({ abrainHome: validHome })).legacyReadOnly.length === 2, "valid full transport outcome rejected");
+  for (const [name, mutate] of outcomeMutations) {
+    const bad = legacyEnvelope(legacyEvent(episodeId, 1, "push_outcome", structuredClone(validOutcomeBody)));
+    mutate(bad.body.body);
+    rehash(bad);
+    const home = emptyHome(`legacy-outcome-${String(name).replace(/[^a-z]+/gi, "-")}`);
+    [intent, bad].forEach((envelope) => writeEnvelope(home, envelope));
+    await expectCode("L1_BODY_SHAPE_MISMATCH", () => l1.scanWholeL1Validated({ abrainHome: home }));
+  }
+
+  const attestationBody = { candidate_event_id: fixture.candidate_event_id, observed_tip: fixture.envelopes[0].body.body.target_commit, relation: "equal" };
+  const attestation = legacyEnvelope(legacyEvent(fixture.episode_id, 5, "push_terminal_resolution_attestation", structuredClone(attestationBody)));
+  const attestationHome = emptyHome("legacy-attestation-valid");
+  [...fixture.envelopes, attestation].forEach((envelope) => writeEnvelope(attestationHome, envelope));
+  assert((await l1.scanWholeL1Validated({ abrainHome: attestationHome })).legacyReadOnly.length === 4, "valid resolution attestation rejected");
+  for (const [name, mutate] of [
+    ["unknown candidate", (body) => { body.candidate_event_id = "9".repeat(64); }],
+    ["bad observed hash", (body) => { body.observed_tip = "bad"; }],
+    ["relation contradiction", (body) => { body.relation = "descendant"; }],
+    ["extra attestation", (body) => { body.proof = true; }],
+    ["missing attestation", (body) => { delete body.relation; }],
+  ]) {
+    const bad = legacyEnvelope(legacyEvent(fixture.episode_id, 5, "push_terminal_resolution_attestation", structuredClone(attestationBody)));
+    mutate(bad.body.body);
+    rehash(bad);
+    const home = emptyHome(`legacy-attestation-${String(name).replace(/[^a-z]+/gi, "-")}`);
+    [...fixture.envelopes, bad].forEach((envelope) => writeEnvelope(home, envelope));
+    await expectCode("L1_BODY_SHAPE_MISMATCH", () => l1.scanWholeL1Validated({ abrainHome: home }));
+  }
+});
+
+await check("active v2 prepared paths/snapshot fail closed in registry and recovery decoder", async () => {
+  const base = await activePreparedFixture("prepared-path-contract");
+  const basePayload = base.envelope.body.body;
+  const entryPaths = basePayload.entries.map((entry) => entry.path);
+  assert(JSON.stringify(Object.keys(basePayload.frozen_index_snapshot)) === JSON.stringify(entryPaths), "active snapshot is not total over entries");
+  assert(Object.values(basePayload.frozen_index_snapshot).every((value) => value === null), "absent index entries must serialize as null");
+  recovery.decodePreparedRecoveryEvent(base.event, base.repo, "refs/heads/main");
+
+  const mutations = [
+    ["absolute entry", (payload) => { payload.entries[0].path = "/home/worker/.abrain/private-path.txt"; }],
+    ["traversal entry", (payload) => { payload.entries[0].path = "l1/../../private-path.txt"; }],
+    ["backslash entry", (payload) => { payload.entries[0].path = "l1\\private.txt"; }],
+    ["trailing slash entry", (payload) => { payload.entries[0].path = "l1/private/"; }],
+    ["dot-git entry", (payload) => { payload.entries[0].path = ".git/config"; }],
+    ["absolute snapshot key", (payload) => { payload.frozen_index_snapshot["/home/worker/.abrain/private-path.txt"] = null; }],
+    ["extra snapshot key", (payload) => { payload.frozen_index_snapshot["extra.txt"] = null; }],
+    ["missing snapshot key", (payload) => { delete payload.frozen_index_snapshot[payload.entries[0].path]; }],
+    ["unsorted entries", (payload) => { payload.entries.reverse(); }],
+    ["duplicate entry", (payload) => { payload.entries.splice(1, 0, structuredClone(payload.entries[0])); }],
+    ["invalid snapshot value", (payload) => { payload.frozen_index_snapshot[payload.entries[0].path] = "100644 not-an-oid 0"; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    const bad = structuredClone(base.envelope);
+    mutate(bad.body.body);
+    rehash(bad);
+    const home = emptyHome(`active-bad-${String(name).replace(/[^a-z]+/gi, "-")}`);
+    writeEnvelope(home, bad);
+    await expectCode("L1_BODY_SHAPE_MISMATCH", () => l1.scanWholeL1Validated({ abrainHome: home }));
+    await expectCode("RECOVERY_PREPARED_INVALID", () => Promise.resolve(recovery.decodePreparedRecoveryEvent(bad.body, base.repo, "refs/heads/main")));
+  }
+});
+
+await check("episode and claim identities exclude realpath/cohort and bind symbolic generation slot", () => {
+  const one = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  const two = recovery.recoveryEpisodeIdentity({ protocol_version: "local-drain-recovery/v2", lane: "drain", symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  assert(one === two && /^[0-9a-f]{64}$/.test(one), "episode identity mismatch");
+  assert(recovery.recoveryClaimId(one, "drain", 1) !== recovery.recoveryClaimId(one, "drain", 2), "slot not bound into claim");
+});
+
+await check("refreeze stays in one episode and consumes the next contiguous slot", async () => {
+  const home = emptyHome("refreeze");
+  const episode = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main", allowNextGeneration: true });
+  const claim1 = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId: episode.episodeId, lane: "drain" });
+  assert(claim1.slot === 1 && claim1.shouldExecute, "slot 1 not claimed");
+  assert(await recovery.burnPendingRecoverySlot({ abrainHome: home, episodeId: episode.episodeId, lane: "drain" }) === 1, "slot 1 not burned");
+  const same = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main", allowNextGeneration: true });
+  const claim2 = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId: same.episodeId, lane: "drain" });
+  assert(same.episodeId === episode.episodeId && claim2.slot === 2, "refreeze reset episode/slot");
+});
+
+await check("terminal is absorbing and does not auto-open a generation", async () => {
+  const home = emptyHome("terminal");
+  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  for (let slot = 1; slot <= 5; slot++) {
+    const claim = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId, lane: "drain" });
+    assert(claim.slot === slot, `slot ${slot} not claimed`);
+    await recovery.burnPendingRecoverySlot({ abrainHome: home, episodeId, lane: "drain" });
+  }
+  const cursor = recovery.recoveryEpisodeCursor(episodeId, "drain", await recovery.readRecoveryEvents(home, episodeId));
+  assert(cursor.terminal && cursor.nextSlot === null, "terminal not absorbing");
+  const resolved = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main", allowNextGeneration: true });
+  assert(resolved.status === "terminal" && resolved.episodeId === episodeId, "terminal auto-opened another generation");
+});
+
+await check("same-format clones produce byte-equal commit and recovery events across realpaths", async () => {
+  const seed = initRepo("clone-seed");
+  const a = path.join(tmp, "clone-a");
+  const b = path.join(tmp, "clone-b");
+  execFileSync("git", ["clone", "-q", "--no-hardlinks", seed, a]);
+  execFileSync("git", ["clone", "-q", "--no-hardlinks", seed, b]);
+  const pa = await prepare(a, "caller A");
+  const pb = await prepare(b, "caller B");
+  assert(pa.prepared.candidate === pb.prepared.candidate, "caller message/realpath changed candidate OID");
+  assert(pa.prepared.cohortManifestRoot === pb.prepared.cohortManifestRoot, "semantic manifest changed");
+  const homeA = emptyHome("events-a");
+  const homeB = emptyHome("events-b");
+  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  await recovery.claimRecoverySlot({ abrainHome: homeA, episodeId, lane: "drain", slot: 1 });
+  await recovery.claimRecoverySlot({ abrainHome: homeB, episodeId, lane: "drain", slot: 1 });
+  await recovery.recordDrainPrepared({ abrainHome: homeA, episodeId, slot: 1, prepared: pa.prepared, frozenIndexSnapshot: pa.snapshot });
+  await recovery.recordDrainPrepared({ abrainHome: homeB, episodeId, slot: 1, prepared: pb.prepared, frozenIndexSnapshot: pb.snapshot });
+  const eventsA = await recovery.readRecoveryEvents(homeA, episodeId);
+  const eventsB = await recovery.readRecoveryEvents(homeB, episodeId);
+  assert(JSON.stringify(eventsA) === JSON.stringify(eventsB), "shared recovery bytes contain realpath");
+  assert(!JSON.stringify(eventsA).includes(a) && !JSON.stringify(eventsA).includes(b), "prepared event leaked absolute path");
+});
+
+await check("deterministic metadata/message and locale independence", async () => {
+  const seed = initRepo("locale-seed");
+  const a = path.join(tmp, "locale-a");
+  const b = path.join(tmp, "locale-b");
+  execFileSync("git", ["clone", "-q", seed, a]);
+  execFileSync("git", ["clone", "-q", seed, b]);
+  const old = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+  process.env.LANG = "tr_TR.UTF-8"; process.env.LC_ALL = "tr_TR.UTF-8";
+  const pa = await prepare(a, "locale A");
+  process.env.LANG = "zh_CN.UTF-8"; process.env.LC_ALL = "zh_CN.UTF-8";
+  const pb = await prepare(b, "locale B");
+  for (const [key, value] of Object.entries(old)) value === undefined ? delete process.env[key] : process.env[key] = value;
+  assert(pa.prepared.candidate === pb.prepared.candidate, "locale changed commit OID");
+  const body = git(a, "cat-file", "commit", pa.prepared.candidate);
+  assert(body.includes("author pi-astack-local-drain <local-drain@pi-astack.invalid> 1700000000 +0000"), "author/date not fixed");
+  assert(body.includes(`protocol: local-drain-recovery/v2\nmanifest: ${pa.prepared.cohortManifestRoot}`), "message not manifest-derived");
+  assert(!body.includes("locale A"), "caller message entered commit bytes");
+});
+
+await check("SHA-1 and SHA-256 are deterministic per format with equal OID-free semantics", async () => {
+  const sha1a = initRepo("sha1-a", "sha1");
+  const sha1b = path.join(tmp, "sha1-b"); execFileSync("git", ["clone", "-q", sha1a, sha1b]);
+  const one = await prepare(sha1a); const two = await prepare(sha1b);
+  assert(one.prepared.candidate === two.prepared.candidate, "SHA-1 per-format determinism failed");
+  const sha256a = initRepo("sha256-a", "sha256");
+  const sha256b = path.join(tmp, "sha256-b"); execFileSync("git", ["clone", "-q", sha256a, sha256b]);
+  const three = await prepare(sha256a); const four = await prepare(sha256b);
+  assert(three.prepared.candidate === four.prepared.candidate, "SHA-256 per-format determinism failed");
+  assert(one.prepared.cohortManifestRoot === three.prepared.cohortManifestRoot, "cross-format semantic manifest differs");
+  assert(one.prepared.candidate !== three.prepared.candidate, "cross-format OIDs unexpectedly equal");
+});
+
+await check("prepared/published/index recovery converges without touching worktree", async () => {
+  const repo = initRepo("recover-local");
+  const prepared = await prepare(repo);
+  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  await recovery.claimRecoverySlot({ abrainHome: repo, episodeId, lane: "drain", slot: 1 });
+  await recovery.recordDrainPrepared({ abrainHome: repo, episodeId, slot: 1, prepared: prepared.prepared, frozenIndexSnapshot: prepared.snapshot });
+  const worktreeBefore = fs.readFileSync(path.join(repo, "base.txt"), "utf8");
+  const action = await recovery.recoverDrainSlot({ abrainHome: repo, repo, symbolicRef: "refs/heads/main", episodeId, slot: 1 });
+  assert(action === "index_converged" && git(repo, "rev-parse", "HEAD") === prepared.prepared.candidate, "local recovery did not converge");
+  assert(fs.readFileSync(path.join(repo, "base.txt"), "utf8") === worktreeBefore && !fs.existsSync(path.join(repo, "a.txt")), "worktree changed");
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

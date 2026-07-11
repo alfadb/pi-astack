@@ -31,15 +31,6 @@ export interface Adr0039ReconcileGateResult {
   details: Adr0039ReconcileGateDetails;
 }
 
-export interface Adr0039PrePushHookResult {
-  ok: boolean;
-  status: "installed" | "updated" | "already_installed" | "skipped_not_git" | "skipped_hooks_path" | "skipped_existing_hook" | "failed";
-  hookPath?: string;
-  warning?: string;
-}
-
-export const ADR0039_PRE_PUSH_HOOK_MARKER = "# pi-astack ADR0039 pre-push hook v1";
-
 // Full reconcile cost grows with the event store. A too-short gate timeout
 // fails closed and can permanently block push, so the asymmetric cost favors
 // giving the authoritative byte/hash check a larger budget.
@@ -237,77 +228,4 @@ export async function checkAdr0039ReconcileGate(opts: { abrainHome: string; repo
   }
 
   return { ok: false, reason: "blocked", details };
-}
-
-function shSingleQuote(value: string): string {
-  if (/[\x00-\x1f\x7f]/.test(value)) {
-    return "'<path contains control characters; edit the hook manually>'";
-  }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function hookBody(scriptPath: string, abrainHome: string): string {
-  return [
-    "#!/bin/sh",
-    ADR0039_PRE_PUSH_HOOK_MARKER,
-    "command -v node >/dev/null 2>&1 || exit 0",
-    `SCRIPT=${shSingleQuote(scriptPath)}`,
-    `ABRAIN_HOME=${shSingleQuote(abrainHome)}`,
-    "if [ ! -f \"$SCRIPT\" ]; then",
-    "  echo \"WARN - pi-astack ADR0039 pre-push hook script missing; allowing push (runtime pushAsync gate remains primary).\" >&2",
-    "  exit 0",
-    "fi",
-    "exec node \"$SCRIPT\" --abrain \"$ABRAIN_HOME\"",
-    "",
-  ].join("\n");
-}
-
-function appendHookAudit(abrainHome: string, event: Record<string, unknown>): void {
-  try {
-    const stateDir = path.join(abrainHome, ".state");
-    fs.mkdirSync(stateDir, { recursive: true });
-    fs.appendFileSync(path.join(stateDir, "git-sync.jsonl"), `${JSON.stringify({ ts: new Date().toISOString(), op: "hook_install", ...event })}\n`, "utf-8");
-  } catch {
-    // best-effort only
-  }
-}
-
-export function ensureAdr0039PrePushHook(abrainHomeInput: string, opts: { repoRoot?: string } = {}): Adr0039PrePushHookResult {
-  const abrainHome = path.resolve(expandHome(abrainHomeInput));
-  const gitDir = path.join(abrainHome, ".git");
-  if (!fs.existsSync(gitDir)) return { ok: true, status: "skipped_not_git" };
-
-  try {
-    const hooksPath = execFileSync("git", ["-C", abrainHome, "config", "--get", "core.hooksPath"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3_000 }).trim();
-    if (hooksPath) {
-      const warning = `core.hooksPath is set (${hooksPath}); not installing ADR0039 pre-push hook into .git/hooks`;
-      appendHookAudit(abrainHome, { result: "skipped_hooks_path", reason: "pre_push_hook_skipped_hooks_path", details: { hooksPath } });
-      return { ok: false, status: "skipped_hooks_path", warning };
-    }
-  } catch {
-    // no hooksPath configured
-  }
-
-  const repoRoot = path.resolve(opts.repoRoot ?? repoRootFromHere());
-  const scriptPath = path.join(repoRoot, "scripts", "pre-push-adr0039-reconcile.mjs");
-  const hookPath = path.join(gitDir, "hooks", "pre-push");
-  const desired = hookBody(scriptPath, abrainHome);
-  try {
-    fs.mkdirSync(path.dirname(hookPath), { recursive: true });
-    const existing = fs.existsSync(hookPath) ? fs.readFileSync(hookPath, "utf-8") : null;
-    if (existing !== null && !existing.includes(ADR0039_PRE_PUSH_HOOK_MARKER)) {
-      const warning = `existing non-pi pre-push hook preserved at ${hookPath}`;
-      appendHookAudit(abrainHome, { result: "skipped_existing_hook", reason: "pre_push_hook_not_overwritten", details: { hookPath } });
-      return { ok: false, status: "skipped_existing_hook", hookPath, warning };
-    }
-    if (existing === desired) return { ok: true, status: "already_installed", hookPath };
-    fs.writeFileSync(hookPath, desired, { encoding: "utf-8", mode: 0o755 });
-    try { fs.chmodSync(hookPath, 0o755); } catch { /* chmod best-effort on non-POSIX */ }
-    appendHookAudit(abrainHome, { result: existing ? "updated" : "installed", reason: existing ? "pre_push_hook_updated" : "pre_push_hook_installed", details: { hookPath } });
-    return { ok: true, status: existing ? "updated" : "installed", hookPath };
-  } catch (err) {
-    const warning = err instanceof Error ? err.message : String(err);
-    appendHookAudit(abrainHome, { result: "failed", reason: "pre_push_hook_install_failed", error: warning });
-    return { ok: false, status: "failed", hookPath, warning };
-  }
 }

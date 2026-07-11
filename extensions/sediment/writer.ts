@@ -180,14 +180,13 @@ export interface ProjectEntryUpdateDraft {
   timelineAction?: string;
 }
 
-export type WriterPublicationStatus = "local_durable" | "remote_durable" | "durable_pending" | "clean" | "terminal_before_publish";
+export type WriterPublicationStatus = "local_durable" | "durable_pending" | "clean" | "terminal_before_publish";
 
 export interface WriterPublicationResult {
   status: WriterPublicationStatus;
   commit: string | null;
   localCommit: "not_published" | "published" | "index_converged";
   drainStatus: string;
-  pushStatus?: string;
   reason?: string;
   canonical: boolean;
 }
@@ -1184,7 +1183,6 @@ async function appendWriterPublicationAudit(abrainHome: string, publication: Wri
       commit: publication.commit,
       localCommit: publication.localCommit,
       drainStatus: publication.drainStatus,
-      pushStatus: publication.pushStatus ?? null,
       reason: publication.reason ?? null,
       canonical: publication.canonical,
     })}\n`, "utf-8");
@@ -1247,20 +1245,7 @@ async function canonicalCommitExplicitPaths(
   }
   let publication: WriterPublicationResult;
   if (drained.status === "empty") {
-    if (!drained.commit) {
-      publication = { status: "clean", commit: null, localCommit: drained.localCommit, drainStatus: drained.status, canonical: true };
-    } else if (process.env.PI_ABRAIN_NO_AUTOSYNC === "1" || process.env.PI_ABRAIN_DISABLED === "1") {
-      publication = { status: "local_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: "policy_disabled", canonical: true };
-    } else {
-      try {
-        const pushed = await runtime.requestPush(drained.commit);
-        publication = pushed.status === "success"
-          ? { status: "remote_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: pushed.status, canonical: true }
-          : { status: "durable_pending", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: pushed.status, reason: pushed.reason ?? pushed.status, canonical: true };
-      } catch (error) {
-        publication = { status: "durable_pending", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: "threw", reason: pushTriggerErrorSummary(error), canonical: true };
-      }
-    }
+    publication = { status: "clean", commit: drained.commit ?? null, localCommit: drained.localCommit, drainStatus: drained.status, canonical: true };
   } else if (drained.status !== "index_converged" || !drained.commit) {
     publication = {
       status: drained.status === "disabled" ? "terminal_before_publish" : "durable_pending",
@@ -1270,17 +1255,12 @@ async function canonicalCommitExplicitPaths(
       reason: drained.reason ?? drained.status,
       canonical: true,
     };
-  } else if (process.env.PI_ABRAIN_NO_AUTOSYNC === "1" || process.env.PI_ABRAIN_DISABLED === "1") {
-    publication = { status: "local_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: "policy_disabled", canonical: true };
   } else {
-    try {
-      const pushed = await runtime.requestPush(drained.commit);
-      publication = pushed.status === "success"
-        ? { status: "remote_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: pushed.status, canonical: true }
-        : { status: "durable_pending", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: pushed.status, reason: pushed.reason ?? pushed.status, canonical: true };
-    } catch (error) {
-      publication = { status: "durable_pending", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: "threw", reason: pushTriggerErrorSummary(error), canonical: true };
-    }
+    publication = { status: "local_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, canonical: true };
+    // Device delivery is deliberately detached from canonical success. The
+    // native git-sync audit owns delivery diagnostics and never changes this
+    // local publication result.
+    void maybePushAbrainAsync(abrainHome, drained.commit);
   }
   await appendWriterPublicationAudit(abrainHome, publication, sourceId);
   return publication;
@@ -1343,10 +1323,9 @@ async function appendPushTriggerFailureAudit(abrainHome: string, err: unknown): 
 }
 
 async function maybePushAbrainAsync(abrainHome: string, sha: string | null): Promise<void> {
-  // ADR 0020: after each successful sediment commit, fire-and-forget
-  // a git push to origin/main so cross-device knowledge sync happens
-  // automatically. Push execution failures are audited by git-sync itself;
-  // trigger/load failures are audited here so cross-instance stalls are visible.
+  // After each successful sediment commit, trigger best-effort device delivery.
+  // Push execution failures are audited by git-sync itself; trigger/load failures
+  // are audited here so cross-device stalls remain visible.
   if (sha
     && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1"
     && process.env.PI_ABRAIN_DISABLED !== "1") {

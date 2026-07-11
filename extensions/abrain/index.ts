@@ -55,8 +55,8 @@ import {
 } from "./brain-layout";
 import activateRuleInjector, { setRuleInjectorSelfHealScheduler, type RuleInjectorSelfHealTrigger } from "./rule-injector";
 import {
-  fetchAndFF, pushAsync, sync as gitSync, getStatus as getGitSyncStatus,
-  formatSyncStatus, ensureAdr0039PrePushHook, type AbrainSyncStatus, type GitSyncEvent,
+  pushAsync, sync as gitSync, getStatus as getGitSyncStatus,
+  formatSyncStatus, type AbrainSyncStatus, type GitSyncEvent, type GitSyncNotifyType,
 } from "./git-sync";
 import {
   authKey,
@@ -404,8 +404,7 @@ async function canonicalAutoCommitAbrainPaths(repoRoot: string, relPaths: string
   const drained = await runtime.requestDrain(receipts, message);
   if (drained.status === "empty") return { repoRoot: root, paths, status: "clean", commitSha: drained.commit };
   if (drained.status !== "index_converged" || !drained.commit) return { repoRoot: root, paths, status: "queued", detail: drained.reason ?? drained.status };
-  const pushed = await runtime.requestPush(drained.commit);
-  if (pushed.status !== "success") return { repoRoot: root, paths, status: "queued", commitSha: drained.commit, detail: pushed.reason ?? pushed.status };
+  void pushAsync({ abrainHome: root });
   return { repoRoot: root, paths, status: "committed", commitSha: drained.commit };
 }
 
@@ -543,7 +542,7 @@ interface StartupConstraintShadowRefreshDeps {
   cwd?: string;
   activeProject?: ResolveActiveProjectResult | null;
   modelRegistry?: unknown;
-  notify?: (msg: string, type?: string) => void;
+  notify?: (msg: string, type?: GitSyncNotifyType) => void;
   resolveSettings?: () => SedimentSettings;
   schedule?: (trigger: {
     abrainHome: string;
@@ -585,7 +584,7 @@ async function defaultScheduleConstraintShadowAutoRefresh(trigger: Parameters<No
 function notifyConstraintShadowRefreshSkip(
   notify: StartupConstraintShadowRefreshDeps["notify"],
   message: string,
-  type: "info" | "warning" | "error" = "warning",
+  type: GitSyncNotifyType = "warning",
 ): void {
   if (notify) {
     try { notify(message, type); return; } catch { /* fall through */ }
@@ -594,11 +593,10 @@ function notifyConstraintShadowRefreshSkip(
 }
 
 export async function maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
-  event: Pick<GitSyncEvent, "result" | "merged" | "behind">,
+  event: Pick<GitSyncEvent, "result" | "merged">,
   deps: StartupConstraintShadowRefreshDeps = {},
 ): Promise<{ scheduled: boolean; reason: string }> {
-  const fetchedRemoteCommits = event.result === "ok"
-    && (((event.merged ?? 0) > 0) || ((event.behind ?? 0) > 0));
+  const fetchedRemoteCommits = event.result === "ok" && (event.merged ?? 0) > 0;
   if (!fetchedRemoteCommits) return { scheduled: false, reason: "git_sync_no_fetched_updates" };
 
   const resolveSettings = deps.resolveSettings ?? defaultResolveSedimentSettings;
@@ -1310,17 +1308,12 @@ export default function activate(pi: ExtensionAPI): void {
       console.error(`[abrain] reconcile failed:`, err);
     });
 
-  // ── Startup git fetch + ff (ADR 0020) ────────────────────────
-  // Fire-and-forget: pull any new commits from abrain remote so this pi
-  // session starts with the freshest knowledge sediment from other devices.
-  // Fast-forward only — divergence aborts silently (user runs /abrain sync
-  // to see the runbook). Skipped when there's no git remote.
-  // 2026-05-17 (ADR 0020 rev.): divergence now triggers `git merge`
-  // (3-way, no LLM); only a textual conflict surfaces a runbook. When
-  // auto-merge produces a local merge commit we also schedule a push
-  // so the merge becomes visible to other devices (Round 3 MAJOR-D).
+  // ── Startup device sync (ADR 0020) ──────────────────────────
+  // Fire-and-forget device delivery runs fetch -> ff-only configured upstream
+  // -> push. Divergence and delivery failures are user-visible warnings, while
+  // the detached result never gates canonical startup or local convergence.
   //
-  // 2026-05-17 (Round 5 UX fix): the startup sync USED TO emit `console.
+  // Startup sync used to emit `console.
   // error(...)` lines, which is the raw stderr path — ugly and
   // intercalated with pi's TUI rendering. Sediment uses `ctx.ui.notify`
   // (which the pi TUI styles per `type` and integrates with the chat
@@ -1330,19 +1323,10 @@ export default function activate(pi: ExtensionAPI): void {
   // early and pass into `runStartupAutoSync(...)`. Headless/RPC mode (no ui)
   // falls back to console.error so the audit trail still surfaces.
   //
-  // ORDERING (Round 4 gpt MAJOR-1): runStartupAutoSync is INVOKED at
-  // session_start time, but session_start fires AFTER activate()
-  // finishes, by which point `.state/` gitignore guard has already run
-  // — so the dirty-tree preflight inside fetchAndFF still sees the
-  // canonical "ignore .state/" rule on first run. The ordering
-  // invariant is preserved.
-  // Notify type signature is widened to `string` to match VaultReleaseUi
-  // (the existing pi runtime contract for ctx.ui.notify on this codebase).
-  // pi only renders "info" | "warning" | "error" specially; other strings
-  // fall back to the default style, so the wider signature is safe at
-  // both ends.
+  // runStartupAutoSync is invoked at session_start after activate() finishes,
+  // so the `.state/` gitignore guard has already run.
   const runStartupAutoSync = (args: {
-    notify?: (msg: string, type?: string) => void;
+    notify?: (msg: string, type?: GitSyncNotifyType) => void;
     modelRegistry?: unknown;
     cwd?: string;
   } = {}): void => {
@@ -1355,63 +1339,41 @@ export default function activate(pi: ExtensionAPI): void {
     // work doesn't blow up the announce path. If notify is missing
     // (headless/RPC/print mode), fall back to console.error so the
     // audit trail still surfaces somewhere a user can find it.
-    const announce = (msg: string, type: "info" | "warning" | "error" = "info"): void => {
+    const announce = (msg: string, type: GitSyncNotifyType = "info"): void => {
       if (args.notify) {
         try { args.notify(msg, type); return; } catch { /* fall through to console */ }
       }
       console.error(`[abrain] ${msg}`);
     };
 
-    fetchAndFF({ abrainHome: ABRAIN_HOME })
-      .then(async (event) => {
-        await maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(event, {
-          abrainHome: ABRAIN_HOME,
-          cwd: args.cwd,
-          activeProject: bootActiveProject,
-          modelRegistry: args.modelRegistry,
-          notify: announce,
-        });
-
-        if (event.result === "ok" && event.merged && event.merged > 0) {
-          announce(`abrain: auto-merged ${event.merged} commit(s) from origin/main; pushing merge…`, "info");
-          // Fire-and-forget: pushAsync has its own audit + single-flight.
-          // Round 4 gpt MINOR-1: always emit a terminal line so the
-          // "pushing…" announcement is never left hanging — even for
-          // noop (someone else already pushed the merge) or skipped
-          // (origin removed between merge and push).
-          pushAsync({ abrainHome: ABRAIN_HOME })
-            .then((pushEv) => {
-              if (pushEv.result === "ok") {
-                announce(`abrain: auto-merge commit landed on origin/main`, "info");
-              } else if (pushEv.result === "noop") {
-                announce(`abrain: auto-merge already on origin/main`, "info");
-              } else if (pushEv.result === "skipped") {
-                announce(`abrain: push skipped (no origin remote)`, "info");
-              } else {
-                announce(`abrain: push of auto-merge ${pushEv.result} — ${pushEv.error || "unknown"} (next sediment commit will retry)`, "warning");
-              }
-            })
-            .catch(() => { /* pushAsync never throws; defense in depth */ });
-        } else if (event.result === "ok" && event.behind && event.behind > 0) {
-          announce(`abrain: fast-forwarded ${event.behind} commit(s) from origin/main`, "info");
-        } else if (event.result === "noop" && event.ahead && event.ahead > 0) {
-          // fetchAndFF already enqueued pushAsync behind its singleflight op;
-          // this is only the startup UI breadcrumb for a local-ahead repair.
-          announce(`abrain: ${event.ahead} local commit(s) queued for push`, "info");
-        } else if (event.result === "conflict") {
-          const where = event.conflictPaths && event.conflictPaths.length > 0
-            ? ` in ${event.conflictPaths.length} file(s): ${event.conflictPaths.slice(0, 3).join(", ")}${event.conflictPaths.length > 3 ? ", ..." : ""}`
-            : "";
-          announce(`abrain: merge conflict${where} — working tree restored. Run /abrain sync for runbook.`, "warning");
-        } else if (event.result === "failed" || event.result === "timeout") {
-          announce(`abrain: fetch ${event.result} — ${event.error || "unknown"} (auto-sync continues; use /abrain sync to retry)`, "warning");
+    gitSync({ abrainHome: ABRAIN_HOME })
+      .then(async (result) => {
+        const fetchEvent = result.events.find((event) => event.op === "fetch");
+        if (fetchEvent) {
+          await maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(fetchEvent, {
+            abrainHome: ABRAIN_HOME,
+            cwd: args.cwd,
+            activeProject: bootActiveProject,
+            modelRegistry: args.modelRegistry,
+            notify: announce,
+          });
         }
-        // result === "ok" with no merged + no behind → nothing happened,
-        // stay silent. result === "noop"/"skipped" also silent.
+
+        if (fetchEvent?.result === "ok" && (fetchEvent.merged ?? 0) > 0) {
+          announce(`abrain: fast-forwarded ${fetchEvent.merged} commit(s) from the configured upstream`, "info");
+        } else if (fetchEvent?.result === "diverged") {
+          announce(`abrain: configured upstream has diverged - ${fetchEvent.error || "fast-forward unavailable"}. Run /abrain sync after resolving the branch state.`, "warning");
+        } else if (fetchEvent && fetchEvent.result !== "ok" && fetchEvent.result !== "noop" && fetchEvent.result !== "skipped") {
+          announce(`abrain: device fetch/fast-forward ${fetchEvent.result} - ${fetchEvent.error || "unknown"}. Startup continues; use /abrain sync to retry.`, "warning");
+        }
+
+        const pushEvent = result.events.find((event) => event.op === "push");
+        if (pushEvent && pushEvent.result !== "ok" && pushEvent.result !== "noop" && pushEvent.result !== "skipped") {
+          announce(`abrain: device push ${pushEvent.result} - ${pushEvent.error || "unknown"}. Local startup remains available; use /abrain sync to retry.`, "warning");
+        }
       })
       .catch((err) => {
-        // git-sync ops should never throw, but belt-and-suspenders:
-        announce(`abrain: fetch threw (should be caught internally) — ${err && (err as Error).message ? (err as Error).message : String(err)}`, "error");
+        announce(`abrain: device sync threw unexpectedly - ${err && (err as Error).message ? (err as Error).message : String(err)}`, "error");
       });
   };
 
@@ -1432,12 +1394,6 @@ export default function activate(pi: ExtensionAPI): void {
     } catch (err: any) {
       console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
     }
-    try {
-      const hook = ensureAdr0039PrePushHook(ABRAIN_HOME);
-      if (!hook.ok && hook.warning) console.warn(`[abrain] ADR0039 pre-push hook warning: ${hook.warning}`);
-    } catch (err: any) {
-      console.warn(`[abrain] ADR0039 pre-push hook install failed (non-fatal): ${err?.message ?? err}`);
-    }
   };
   // Explicit disabled mode preserves legacy activation behavior. Enabled mode
   // may not mutate the Git worktree or hooks until canonical startup is ready.
@@ -1452,8 +1408,8 @@ export default function activate(pi: ExtensionAPI): void {
   // the same PI_ABRAIN_DISABLED sub-pi boundary and strict project binding.
   // This registers /rule diagnostic pull commands but no rule write/veto UI.
   //
-  // Self-heal bridge: when the rule-injector detects a broken compiled view,
-  // it calls back into the constraint shadow auto-refresh scheduler. The
+  // Compiled-view repair bridge: when the rule-injector detects a broken
+  // compiled view, it calls the constraint shadow auto-refresh scheduler. The
   // modelRegistry is captured lazily from session_start (not available at
   // activation time).
   let capturedModelRegistry: unknown = undefined;
@@ -1489,7 +1445,7 @@ export default function activate(pi: ExtensionAPI): void {
           sourceEventId: undefined,
         });
       } catch {
-        // Self-heal scheduling is best-effort; startup and rule injection continue.
+        // Compiled-view refresh is best-effort; startup and rule injection continue.
       }
     }, 0);
     (selfHealTimer as unknown as { unref?: () => void }).unref?.();
@@ -1516,7 +1472,7 @@ export default function activate(pi: ExtensionAPI): void {
     eventRegistry.on("session_start", async (_event, ctx) => {
       try {
         if (isSubAgentSession(ctx as unknown as { sessionManager?: unknown })) return;
-        // Capture modelRegistry for the self-heal bridge (rule-injector → auto-refresh).
+        // Capture modelRegistry for rule-injector compiled-view refresh.
         if (ctx?.modelRegistry) capturedModelRegistry = ctx.modelRegistry;
         if (ctx?.cwd) capturedCwd = ctx.cwd;
         const notify = ctx?.ui?.notify?.bind(ctx.ui);
@@ -1531,12 +1487,12 @@ export default function activate(pi: ExtensionAPI): void {
           canonicalBarrierReady = true;
           initializeAbrainRuntimeAfterBarrier();
           queueSelfHealFlush();
-          // Enabled P1 mode retires startup legacy fetch/merge entirely.
         } else {
           queueSelfHealFlush();
-          // Explicit enabled=false preserves the legacy startup path.
-          runStartupAutoSync({ notify, modelRegistry: ctx?.modelRegistry, cwd: ctx?.cwd });
         }
+        // Device delivery runs outside the canonical startup barrier. Its
+        // result is advisory and cannot change local convergence success.
+        runStartupAutoSync({ notify, modelRegistry: ctx?.modelRegistry, cwd: ctx?.cwd });
       } catch (err) {
         // Defensive: never let our sync trigger break the session.
         console.error(`[abrain] session_start auto-sync trigger threw:`, err);
@@ -2799,18 +2755,16 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     if (reconcileBlocked) {
       console.warn(`[abrain] ADR0039 push gate has blocked ${syncStatus?.consecutivePushBlockedReconcile} consecutive push attempts; reproject L2 from L1 before retrying auto-sync.`);
     }
-    // 2026-05-17: warning is now triggered by last fetch hitting a textual
-    // conflict — the only state that genuinely needs user attention after
-    // the auto-merge revision of fetchAndFF. Mere ahead+behind both >0 is
-    // transient pre-fetch state, not a problem.
-    const needsAttention = syncStatus?.lastFetch?.result === "conflict" || reconcileBlocked;
+    // A failed or divergent configured-upstream update needs user attention.
+    const lastFetchResult = syncStatus?.lastFetch?.result;
+    const needsAttention = (lastFetchResult !== undefined && !["ok", "noop", "skipped"].includes(lastFetchResult)) || reconcileBlocked;
     const fullMsg = syncMsg ? `${bindingMsg}\n\n${syncMsg}` : bindingMsg;
     ui.notify(fullMsg, needsAttention ? "warning" : (current.activeProject ? "info" : "warning"));
     return;
   }
   if (sub === "sync") {
     // Manual /abrain sync: fetch + ff-pull + push in one call (ADR 0020).
-    ui.notify("abrain: syncing with origin/main...", "info");
+    ui.notify("abrain: syncing with the configured upstream...", "info");
     const result = await gitSync({ abrainHome: ABRAIN_HOME });
     ui.notify(result.summary, result.ok ? "info" : "warning");
     return;
@@ -2840,7 +2794,7 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
       });
       // PR-1 R2 review fix (gpt-5.5 BLOCKING-1, 2026-06-10): autoCommitPaths
       // is execFileSync (blocks the event loop while running), but a bg
-      // sediment commit / detached pushAsync / auto-merge SUBPROCESS spawned
+      // sediment commit / detached device push subprocess spawned
       // before this handler ran keeps executing in the kernel and can still
       // contend the abrain `.git/index.lock`. Enqueue through the shared
       // per-repo chain so we don't START until prior abrain git ops settled.

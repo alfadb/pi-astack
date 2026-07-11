@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } from "./pi-ai-invoker";
 import { runConstraintShadowCompiler } from "./shadow-runner";
-import { commitAbrainDerivedOutputs, type WriterPublicationResult } from "../writer";
+import { commitAbrainDerivedOutputs, type WriterPublicationResult, type WriterPublicationStatus } from "../writer";
 import { getDeviceId } from "../../_shared/causal-anchor";
 import { fsyncDirectory } from "../../_shared/durable-write";
 import { acquireFileLock, abrainSedimentLocksDir } from "../../_shared/runtime";
@@ -221,7 +221,7 @@ function markerObservedAfter(marker: NeedsRefreshMarker, timestampMs: number): b
 
 export interface ConstraintPublicationDurability {
   durable: boolean;
-  required: "local_durable" | "remote_durable";
+  required: "local_durable";
   sourceEventId: string | null;
   sourceEventIds?: readonly string[];
   status?: string;
@@ -229,18 +229,78 @@ export interface ConstraintPublicationDurability {
   observedAtUtc?: string;
 }
 
-function requiredPublicationDurability(): "local_durable" | "remote_durable" {
-  return process.env.PI_ABRAIN_NO_AUTOSYNC === "1" || process.env.PI_ABRAIN_DISABLED === "1"
-    ? "local_durable"
-    : "remote_durable";
+function requiredPublicationDurability(): "local_durable" {
+  return "local_durable";
 }
 
-function publicationSatisfiesDurability(publication: WriterPublicationResult | undefined, required: "local_durable" | "remote_durable"): boolean {
+type AuditPublicationStatus = WriterPublicationStatus | "remote_durable";
+
+interface AuditPublicationEvidence {
+  status: AuditPublicationStatus;
+  commit: string | null;
+  localCommit: WriterPublicationResult["localCommit"];
+  drainStatus: string;
+  reason?: string;
+  canonical: boolean;
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isWriterPublicationStatus(value: unknown): value is WriterPublicationStatus {
+  return value === "local_durable"
+    || value === "durable_pending"
+    || value === "clean"
+    || value === "terminal_before_publish";
+}
+
+function isAuditPublicationStatus(value: unknown): value is AuditPublicationStatus {
+  return isWriterPublicationStatus(value) || value === "remote_durable";
+}
+
+function isWriterPublicationLocalCommit(value: unknown): value is WriterPublicationResult["localCommit"] {
+  return value === "not_published" || value === "published" || value === "index_converged";
+}
+
+function parseAuditPublication(value: unknown): AuditPublicationEvidence | undefined {
+  if (!isUnknownRecord(value)) return undefined;
+  const { status, commit, localCommit, drainStatus, reason, canonical } = value;
+  if (!isAuditPublicationStatus(status)) return undefined;
+  if (commit !== null && typeof commit !== "string") return undefined;
+  if (!isWriterPublicationLocalCommit(localCommit)) return undefined;
+  if (typeof drainStatus !== "string" || typeof canonical !== "boolean") return undefined;
+  if (reason !== undefined && typeof reason !== "string") return undefined;
+  return {
+    status,
+    commit,
+    localCommit,
+    drainStatus,
+    ...(typeof reason === "string" ? { reason } : {}),
+    canonical,
+  };
+}
+
+function currentPublicationFromAudit(publication: AuditPublicationEvidence | undefined): WriterPublicationResult | undefined {
+  if (!publication || !isWriterPublicationStatus(publication.status)) return undefined;
+  return {
+    status: publication.status,
+    commit: publication.commit,
+    localCommit: publication.localCommit,
+    drainStatus: publication.drainStatus,
+    ...(publication.reason !== undefined ? { reason: publication.reason } : {}),
+    canonical: publication.canonical,
+  };
+}
+
+function publicationSatisfiesDurability(
+  publication: Pick<AuditPublicationEvidence, "status"> | undefined,
+  _required: "local_durable",
+): boolean {
   if (!publication) return false;
-  if (!publication.canonical) return publication.status === "clean" || publication.status === "local_durable" || publication.status === "remote_durable";
-  return required === "remote_durable"
-    ? publication.status === "remote_durable"
-    : publication.status === "local_durable" || publication.status === "remote_durable";
+  // Legacy audit compatibility only: old remote_durable rows prove that the
+  // local commit was durable. Remote state is not canonical truth.
+  return publication.status === "clean" || publication.status === "local_durable" || publication.status === "remote_durable";
 }
 
 async function readAutoRefreshAuditRows(abrainHome: string): Promise<Record<string, unknown>[]> {
@@ -278,11 +338,10 @@ export async function readConstraintPublicationSetDurability(
       ...(typeof row.sourceEventId === "string" ? [row.sourceEventId] : []),
     ]);
     if (requested.size === 0 ? rowIds.size !== 0 : [...requested].some((eventId) => !rowIds.has(eventId))) continue;
-    const publication = row.publication && typeof row.publication === "object" && !Array.isArray(row.publication)
-      ? row.publication as unknown as WriterPublicationResult
-      : undefined;
+    const auditPublication = parseAuditPublication(row.publication);
+    const publication = currentPublicationFromAudit(auditPublication);
     return {
-      durable: publicationSatisfiesDurability(publication, required),
+      durable: publicationSatisfiesDurability(auditPublication, required),
       required,
       sourceEventId: sourceEventIds.length === 1 ? sourceEventIds[0]! : null,
       sourceEventIds,

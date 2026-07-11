@@ -84,74 +84,19 @@
 
     "canonicalGitRuntime": {
       "type": "object",
-      "description": "P1-A production canonical Git orchestrator kill switch. Missing or invalid values fail closed. Enabling transfers all abrain commit/push authority to the process-global exact-cohort runtime; legacy mutation paths may not run in parallel.",
+      "description": "Fail-closed local Git convergence runtime. It validates whole L1, recovers active local drain v2 episodes, publishes exact temporary-index commits by CAS, and converges the shared index. Device remote delivery is outside this runtime.",
       "additionalProperties": false,
-      "required": ["enabled", "mode", "transport"],
+      "required": ["enabled", "mode"],
       "properties": {
         "_comment": { "type": "string" },
         "enabled": {
           "type": "boolean",
-          "description": "Explicit activation switch. P1-A remains false until transport v2 and legacy-terminal recovery pass production acceptance."
+          "description": "Explicit activation switch. Production remains disabled until separately authorized."
         },
         "mode": {
           "type": "string",
-          "const": "p1_controlled",
-          "description": "Pinned P1-A protocol mode. Unknown modes fail closed instead of falling back to legacy mutation."
-        },
-        "transport": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["remote", "refName", "endpointSha256", "credentialResolution", "rewritePolicy", "redirectPolicy", "promptPolicy", "transportPolicyId"],
-          "properties": {
-            "remote": { "const": "origin" },
-            "refName": { "const": "refs/heads/main" },
-            "endpointSha256": { "const": "a7c1da64e68eeb361f2052fc8fccd54727573130676f3bf48c2c87ec7d4cb74e" },
-            "credentialResolution": {
-              "const": {
-                "source": "global",
-                "matchingPolicyVersion": "git-credential-urlmatch/v1",
-                "includeCount": 0,
-                "scopes": [
-                  {
-                    "scope": "unscoped",
-                    "provenanceSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                    "rawEntryCount": 0,
-                    "rawEntries": []
-                  },
-                  {
-                    "scope": "host",
-                    "provenanceSha256": "25359d035fecbf5c3f669616500f4491eb3e55089ad84e84b5d9795e79e1f44f",
-                    "rawEntryCount": 2,
-                    "rawEntries": [
-                      { "kind": "reset", "valueSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
-                      { "kind": "shell-snippet", "valueSha256": "22d3659a58ce8e92a994f1013c829112a17a9ca568bff8abb4196eeb996f3668" }
-                    ]
-                  },
-                  {
-                    "scope": "path-prefix",
-                    "provenanceSha256": "83a5d979e918c07203276352b84b47b33ae84b7c83b3ad1c028692676bedb52d",
-                    "rawEntryCount": 0,
-                    "rawEntries": []
-                  },
-                  {
-                    "scope": "exact-repo",
-                    "provenanceSha256": "a7c1da64e68eeb361f2052fc8fccd54727573130676f3bf48c2c87ec7d4cb74e",
-                    "rawEntryCount": 0,
-                    "rawEntries": []
-                  }
-                ],
-                "effectiveHelperCount": 1,
-                "effectiveHelpers": [
-                  { "kind": "shell-snippet", "valueSha256": "22d3659a58ce8e92a994f1013c829112a17a9ca568bff8abb4196eeb996f3668" }
-                ],
-                "credentialResolutionFingerprint": "3383decbb77e63abab2f97931ef6f22b96693051d921a90b698e9c0bf4c7ddd1"
-              }
-            },
-            "rewritePolicy": { "const": "forbidden" },
-            "redirectPolicy": { "const": "forbidden" },
-            "promptPolicy": { "const": "forbidden" },
-            "transportPolicyId": { "const": "4c29c864bda62aa9d980a1d4aed9027752baeb4f57a4d50779a8e97b6b92370b" }
-          }
+          "const": "local_convergence_v2",
+          "description": "Pinned local-only protocol mode. Unknown modes and residual transport fields fail closed."
         }
       }
     },

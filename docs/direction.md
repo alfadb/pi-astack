@@ -38,7 +38,7 @@ canonical_for: INV-INVISIBILITY, INV-AUTONOMY, INV-IMPLICIT-GROUND-TRUTH, INV-AC
 **分层按 provenance 门控**:Tier-1(确定性提交)当且仅当 verbatim 落在 **USER-ROLE 消息** ∧ is_directive ∧ durable;content-in-transcript / tool_result / file / assistant turn **不是** Tier-1(挡掉 README "always use Yarn" 注入陷阱),落 Tier-2 由 curator 可 skip。代价非对称(过度提升有界、漏判=静默丢失)→ 对 user 祈使句分类偏向 Tier-1。
 
 ### INV-SYNC-DETERMINISTIC-MERGE(同步只走确定性合并,ADR 0020)
-跨设备同步只用**确定性 git 操作**:ff + git 自带 3-way auto-merge(无冲突分叉自动合并)。**LLM 合并冲突被明确拒绝**--知识库里一句幻觉就污染基底且事后难查。真冲突 abort 并向用户出 runbook("提示用户去处理"),不静默、不 LLM 编造。
+跨设备同步以前提是用户已在每台设备 clone 并配置 repo；pi-astack 只调用 native `git fetch`、对已配置 upstream 执行 `ff-only`，再 `git push`。发生 divergence 时由用户人工处理；pi-astack 不自动合并，也不管理 transport。**LLM 合并冲突被明确拒绝**--知识库里一句幻觉就污染基底且事后难查。
 
 ### 信任 × 影响半径(ADR 0013)
 门的严格度 ∝ (1-信任) × 影响半径;用户亲手输入 > 用户调用 > LLM 后台;不存在用户→world 的直接自动写。

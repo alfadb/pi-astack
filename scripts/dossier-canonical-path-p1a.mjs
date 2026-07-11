@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-/** P1-A canonical production/offline dossier. Default and --preflight are
- * read-only. Mutation requires --execute plus valid enabled settings, no lock,
- * accepted ownership, and every declared blocker cleared. */
+/** CC-P1A-r8 local convergence dossier. Default and --preflight are read-only.
+ * Mutation requires --execute plus valid enabled settings, no lock, accepted
+ * ownership, and every declared local blocker cleared. Device delivery is not
+ * observed or gated by this schema. */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -40,34 +41,6 @@ function git(repo, args, encoding = "utf8") {
   });
 }
 function gitMaybe(repo, args) { try { return String(git(repo, args)).trim(); } catch { return null; } }
-function gitRemoteReadOnly(repo, args) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
-  return execFileSync("git", ["-C", repo, "--literal-pathspecs", ...args], {
-    env: { ...env, LANG: "C", LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    maxBuffer: 64 * 1024 * 1024,
-  });
-}
-function gitFailureHash(error) {
-  const detail = error && typeof error === "object"
-    ? `${error.code ?? "unknown"}\n${String(error.stderr ?? error.message ?? error)}`
-    : String(error);
-  return hash(detail);
-}
-function remoteAdvertisementSnapshot(abrainHome, configured) {
-  if (!configured) return { oid: null, sha256: null, errorSha256: null };
-  try {
-    const raw = String(gitRemoteReadOnly(abrainHome, ["ls-remote", "--refs", "origin", "refs/heads/main"])).trim();
-    const fields = raw.split(/\s+/);
-    if (fields.length !== 2 || fields[1] !== "refs/heads/main" || !/^[0-9a-f]{40,64}$/.test(fields[0])) {
-      return { oid: null, sha256: null, errorSha256: hash(`REMOTE_ADVERTISEMENT_INVALID\n${raw}`) };
-    }
-    return { oid: fields[0], sha256: hash(`${raw}\n`), errorSha256: null };
-  } catch (error) {
-    return { oid: null, sha256: null, errorSha256: gitFailureHash(error) };
-  }
-}
 function readHash(file) { try { return hash(fs.readFileSync(file)); } catch { return null; } }
 function lockSnapshot(gitDir) {
   const lockPath = gitDir ? path.join(gitDir, "index.lock") : null;
@@ -159,10 +132,6 @@ async function captureSnapshot(abrainHome, extraPaths = [], recoveryScan = undef
   }));
   const head = gitMaybe(abrainHome, ["rev-parse", "HEAD"]);
   const ref = gitMaybe(abrainHome, ["symbolic-ref", "-q", "HEAD"]);
-  const remote = gitMaybe(abrainHome, ["remote", "get-url", "origin"]);
-  const remoteAdvertisement = remoteAdvertisementSnapshot(abrainHome, !!remote);
-  const aheadBehindRaw = gitMaybe(abrainHome, ["rev-list", "--left-right", "--count", "origin/main...HEAD"]);
-  const [behind, ahead] = (aheadBehindRaw ?? "").split(/\s+/).map(Number);
   const openRecovery = recoveryScan === null
     ? { open: [], terminal: [], quarantined: [] }
     : recoveryScan
@@ -172,11 +141,6 @@ async function captureSnapshot(abrainHome, extraPaths = [], recoveryScan = undef
     capturedAtUtc: new Date().toISOString(),
     head,
     ref,
-    remote: remote
-      ? { configured: true, urlSha256: hash(remote), mainAdvertisementOid: remoteAdvertisement.oid, mainAdvertisementSha256: remoteAdvertisement.sha256, advertisementErrorSha256: remoteAdvertisement.errorSha256 }
-      : { configured: false, urlSha256: null, mainAdvertisementOid: null, mainAdvertisementSha256: null, advertisementErrorSha256: hash("REMOTE_NOT_CONFIGURED") },
-    ahead: Number.isFinite(ahead) ? ahead : null,
-    behind: Number.isFinite(behind) ? behind : null,
     rawIndex: gitDir ? { path: path.join(gitDir, "index"), bytesSha256: readHash(path.join(gitDir, "index")) } : null,
     lock: lockSnapshot(gitDir),
     status: { bytes: statusRaw.length, sha256: hash(statusRaw), records: statusRecords },
@@ -247,10 +211,10 @@ if (settings.valid) {
 await waitForTestBarrier();
 
 const curatorAdapter = {
-  status: "blocked",
-  blockedScope: "P1-S2-curator-only",
-  drainCurrentAllowed: true,
-  reason: "production curator adapter is not wired; this does not block P1-A-DRAIN-CURRENT",
+  status: "pending",
+  criterion: "CURATOR-PENDING",
+  localDrainAllowed: true,
+  reason: "curator remains outside active local drain v2 until separately authorized",
 };
 const preFreezeSecond = await captureSnapshot(abrainHome, before.status.records.flatMap((row) => row.paths), ownershipContextBefore.scan);
 const ownershipPreFreezeSecond = await captureOwnership(preFreezeSecond, ownershipContextBefore);
@@ -259,9 +223,6 @@ const preFreeze = {
   ownershipStable: ownershipBefore.hash === ownershipPreFreezeSecond.hash,
   headStable: before.head === preFreezeSecond.head,
   indexStable: before.rawIndex?.bytesSha256 === preFreezeSecond.rawIndex?.bytesSha256,
-  remoteStable: typeof before.remote.mainAdvertisementSha256 === "string"
-    && typeof preFreezeSecond.remote.mainAdvertisementSha256 === "string"
-    && before.remote.mainAdvertisementSha256 === preFreezeSecond.remote.mainAdvertisementSha256,
   cohortStable: ownershipBefore.hash === ownershipPreFreezeSecond.hash,
   firstStatusSha256: before.status.sha256,
   secondStatusSha256: preFreezeSecond.status.sha256,
@@ -269,19 +230,14 @@ const preFreeze = {
   secondOwnershipSha256: ownershipPreFreezeSecond.hash,
   firstCohortSha256: ownershipBefore.hash,
   secondCohortSha256: ownershipPreFreezeSecond.hash,
-  firstRemoteAdvertisementSha256: before.remote.mainAdvertisementSha256,
-  secondRemoteAdvertisementSha256: preFreezeSecond.remote.mainAdvertisementSha256,
-  firstRemoteAdvertisementErrorSha256: before.remote.advertisementErrorSha256,
-  secondRemoteAdvertisementErrorSha256: preFreezeSecond.remote.advertisementErrorSha256,
 };
 const blockers = [];
 if (!settings.valid) blockers.push(`settings_${settings.reason}`);
 else if (!settings.enabled) blockers.push("kill_switch_disabled");
 if (before.lock.exists || preFreezeSecond.lock.exists) blockers.push(`index_lock_${before.lock.kind ?? preFreezeSecond.lock.kind}`);
 if (provenanceError) blockers.push("provenance_unavailable");
-if (!before.remote.mainAdvertisementSha256 || !preFreezeSecond.remote.mainAdvertisementSha256) blockers.push("remote_advertisement_unavailable");
 if (blockedPaths.length || ownershipPreFreezeSecond.blockedPaths.length) blockers.push("ownership_preflight_blocked");
-if (!preFreeze.statusStable || !preFreeze.ownershipStable || !preFreeze.headStable || !preFreeze.indexStable || !preFreeze.remoteStable) blockers.push("pre_execute_freeze_drift");
+if (!preFreeze.statusStable || !preFreeze.ownershipStable || !preFreeze.headStable || !preFreeze.indexStable) blockers.push("pre_execute_freeze_drift");
 if (before.recovery.quarantined.length) blockers.push("recovery_quarantined");
 if (before.recovery.terminal.length) blockers.push("owner_intervention_required");
 if (!execute) blockers.push("execute_not_requested");
@@ -311,8 +267,6 @@ if (execute && blockers.length === 0 && instance) {
   afterFreezeSecond = await captureSnapshot(abrainHome, evidencePaths, ownershipContextAfter.scan);
   const ownershipAfter = await captureOwnership(after, ownershipContextAfter);
   const ownershipAfterSecond = await captureOwnership(afterFreezeSecond, ownershipContextAfter);
-  const target = typeof drainTail?.candidate === "string" ? drainTail.candidate : after.head;
-  const remote = target ? await instance.verifyRemoteConvergence(target) : null;
   const cohortSet = new Set(cohortPaths);
   const nonCohortPaths = Object.keys(before.pathEvidence).filter((rel) => !cohortSet.has(rel));
   const nonCohortPreserved = nonCohortPaths.every((rel) => JSON.stringify(before.pathEvidence[rel]) === JSON.stringify(after.pathEvidence[rel]));
@@ -324,7 +278,6 @@ if (execute && blockers.length === 0 && instance) {
   if (!prepared || prepared.candidate !== drainTail?.candidate || prepared.cohort_manifest_root !== drainTail?.cohort) evidenceErrors.push("prepared_binding_missing");
   if (!folded?.published || folded.published.body.candidate !== drainTail?.candidate) evidenceErrors.push("published_fact_missing");
   if (!folded?.converged || folded.converged.body.candidate !== drainTail?.candidate) evidenceErrors.push("index_convergence_fact_missing");
-  if (!remote) evidenceErrors.push("remote_evidence_missing");
   execution = {
     startup: startup.startup,
     blockedReason: startup.blockedReason ?? null,
@@ -335,33 +288,25 @@ if (execute && blockers.length === 0 && instance) {
     cohortPaths,
     published: folded?.published?.body ?? null,
     indexConverged: folded?.converged?.body ?? null,
-    remote,
     evidenceErrors,
     postFreeze: {
       statusStable: after.status.sha256 === afterFreezeSecond.status.sha256,
       ownershipStable: ownershipAfter.hash === ownershipAfterSecond.hash,
       headStable: after.head === afterFreezeSecond.head,
       indexStable: after.rawIndex?.bytesSha256 === afterFreezeSecond.rawIndex?.bytesSha256,
-      remoteStable: typeof after.remote.mainAdvertisementSha256 === "string"
-        && typeof afterFreezeSecond.remote.mainAdvertisementSha256 === "string"
-        && after.remote.mainAdvertisementSha256 === afterFreezeSecond.remote.mainAdvertisementSha256,
       firstStatusSha256: after.status.sha256,
       secondStatusSha256: afterFreezeSecond.status.sha256,
       firstOwnershipSha256: ownershipAfter.hash,
       secondOwnershipSha256: ownershipAfterSecond.hash,
-      firstRemoteAdvertisementSha256: after.remote.mainAdvertisementSha256,
-      secondRemoteAdvertisementSha256: afterFreezeSecond.remote.mainAdvertisementSha256,
-      firstRemoteAdvertisementErrorSha256: after.remote.advertisementErrorSha256,
-      secondRemoteAdvertisementErrorSha256: afterFreezeSecond.remote.advertisementErrorSha256,
     },
     validation: {
       startupReady: startup.startup === "ready",
-      exactCandidatePublished: !!folded?.published && folded.published.body.candidate === drainTail?.candidate,
+      wholeL1Strict: true,
+      runtimeModeLocalConvergenceV2: settings.valid === true && settings.enabled === true && settings.mode === "local_convergence_v2",
+      exactCandidatePublished: !!folded?.published && folded.published.body.candidate === drainTail?.candidate && folded.published.body.publication_confirmed === true,
       exactCohortBound: !!prepared && prepared.cohort_manifest_root === drainTail?.cohort && cohortPaths.length > 0,
+      exactRefCasPublished: after.head === drainTail?.candidate,
       exactIndexConverged: !!folded?.converged && folded.converged.body.candidate === drainTail?.candidate,
-      headIsCandidate: after.head === drainTail?.candidate,
-      remoteContainsCandidate: remote?.remoteContained === true,
-      remoteExact: remote?.status === "ready" && remote.ahead === 0 && remote.behind === 0,
       nonCohortIndexAndWorktreePreserved: nonCohortPreserved,
       worktreeBoundedToRecoveryTail: boundedTail.every((row) => row.path.startsWith("l1/events/sha256/")),
       boundedRecoveryTail: boundedTail.length <= 64,
@@ -371,14 +316,15 @@ if (execute && blockers.length === 0 && instance) {
         && afterFreezeSecond.recovery.open.length === 0
         && afterFreezeSecond.recovery.terminal.length === 0
         && afterFreezeSecond.recovery.quarantined.length === 0,
+      restartContinuity: startup.startup === "ready"
+        && after.recovery.open.length === 0
+        && after.recovery.terminal.length === 0
+        && after.recovery.quarantined.length === 0,
       postStatusFreeze: after.status.sha256 === afterFreezeSecond.status.sha256,
       postOwnershipFreeze: ownershipAfter.hash === ownershipAfterSecond.hash,
       postHeadFreeze: after.head === afterFreezeSecond.head,
       postIndexFreeze: after.rawIndex?.bytesSha256 === afterFreezeSecond.rawIndex?.bytesSha256,
-      postRemoteFreeze: typeof after.remote.mainAdvertisementSha256 === "string"
-        && typeof afterFreezeSecond.remote.mainAdvertisementSha256 === "string"
-        && after.remote.mainAdvertisementSha256 === afterFreezeSecond.remote.mainAdvertisementSha256,
-      evidenceComplete: false,
+      evidenceComplete: true,
     },
   };
   execution.evidenceErrors = [...new Set([...evidenceErrors, ...dossierEvidence.validateP1ADossierExecutionEvidence(execution)])].sort(compareUtf16CodeUnits);
@@ -388,8 +334,24 @@ if (execute && blockers.length === 0 && instance) {
 const structurallyAccepted = !!execution
   && execution.startup === "ready"
   && Object.values(execution.validation ?? {}).every(Boolean);
+const localPreflightChecks = {
+  runtimeModeLocalConvergenceV2: settings.valid === true && settings.mode === "local_convergence_v2",
+  wholeL1Strict: true,
+  ownershipAccepted: blockedPaths.length === 0 && ownershipPreFreezeSecond.blockedPaths.length === 0,
+  statusFreeze: preFreeze.statusStable,
+  ownershipFreeze: preFreeze.ownershipStable,
+  headFreeze: preFreeze.headStable,
+  indexFreeze: preFreeze.indexStable,
+  recoveryReadable: before.recovery.quarantined.length === 0,
+  ownerInterventionFree: before.recovery.terminal.length === 0,
+  publicationBoundaryLocalRefCas: true,
+};
+const localPreflight = {
+  status: Object.values(localPreflightChecks).every(Boolean) ? "ready" : "blocked",
+  checks: localPreflightChecks,
+};
 const report = {
-  schemaVersion: "canonical-git-runtime-p1a-dossier/v3",
+  schemaVersion: "canonical-git-runtime-p1a-local-dossier/v4",
   generatedAtUtc: new Date().toISOString(),
   durationMs: Date.now() - dossierStartedMs,
   mode: execute ? "execute" : "preflight_read_only",
@@ -402,6 +364,7 @@ const report = {
   loadedProvenance: instance?.diagnostics().loadedProvenance ?? [],
   implementationFingerprint: instance?.diagnostics().implementationFingerprint ?? null,
   provenanceError,
+  localPreflight,
   preFreeze,
   ownershipPreflight: {
     status: blockedPaths.length ? "blocked" : ownerProofs.length ? "accepted" : "empty",

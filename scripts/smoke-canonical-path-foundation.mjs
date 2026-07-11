@@ -115,14 +115,17 @@ console.log("canonical-path P1-S3 foundation smoke");
 
 await check("registry loads, validates, freezes, and declares only approved schema names", () => {
   const registry = l1.loadL1SchemaRegistry();
-  assert(registry.entries.length === 9, `expected 9 entries, got ${registry.entries.length}`);
+  assert(registry.entries.length === 10, `expected 10 entries, got ${registry.entries.length}`);
   assert(Object.isFrozen(registry) && Object.isFrozen(registry.entries), "registry is mutable");
   const active = l1.lookupL1SchemaRoles(registry, { phase: "active" });
+  const legacy = l1.lookupL1SchemaRoles(registry, { phase: "legacy_read_only" });
   const future = l1.lookupL1SchemaRoles(registry, { phase: "phase_disabled" });
   assert(active.length === 4, `expected 4 active entries, got ${active.length}`);
+  assert(legacy.length === 1, `expected 1 legacy-read-only entry, got ${legacy.length}`);
   assert(future.length === 5, `expected 5 future entries, got ${future.length}`);
-  const drainRecovery = active.find((entry) => entry.envelope_schema === "drain-recovery-envelope/v1");
-  assert(drainRecovery && drainRecovery.role === "meta" && !drainRecovery.fold_eligible && drainRecovery.write_enabled, "drain-recovery-envelope/v1 must be active write-enabled meta-only (P1-S2)");
+  const drainRecovery = active.find((entry) => entry.envelope_schema === "local-drain-recovery-envelope/v2");
+  assert(drainRecovery && drainRecovery.role === "meta" && !drainRecovery.fold_eligible && drainRecovery.write_enabled, "local-drain-recovery-envelope/v2 must be active write-enabled meta-only");
+  assert(legacy[0].envelope_schema === "drain-recovery-envelope/v1" && !legacy[0].write_enabled && !legacy[0].fold_eligible, "drain-recovery-envelope/v1 must be strict legacy read-only");
   const futureNames = future.map((entry) => entry.envelope_schema).sort();
   assert(JSON.stringify(futureNames) === JSON.stringify([
     "constraint-genesis/v1",

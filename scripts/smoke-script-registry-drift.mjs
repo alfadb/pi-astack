@@ -103,6 +103,16 @@ const dossierUnderSmoke = registeredSmoke
   .map(([name, command]) => `${name}=${command}`);
 check("dossier scripts are not in the default smoke gate", dossierUnderSmoke.length === 0, dossierUnderSmoke.join("\n"));
 
+const retiredRuntimeArtifacts = [
+  "extensions/_shared/production-trace-replay.ts",
+  "scripts/dossier-convergence-production-trace.mjs",
+  "scripts/_convergence-production-trace-worker.mjs",
+];
+const retiredOnDisk = retiredRuntimeArtifacts.filter((file) => fs.existsSync(path.join(repoRoot, file)));
+const retiredPackageRefs = Object.entries(packageScripts).filter(([, command]) => retiredRuntimeArtifacts.some((file) => String(command).includes(file)));
+check("retired P1-B runtime trace artifacts stay forward-deleted", retiredOnDisk.length === 0, retiredOnDisk.join("\n"));
+check("package scripts do not resurrect retired P1-B runtime trace entrypoints", retiredPackageRefs.length === 0, retiredPackageRefs.map(([name, command]) => `${name}=${command}`).join("\n"));
+
 console.log(`\nsummary: smoke_files=${smokeFiles.length} smoke_scripts=${registeredSmoke.length} dossier_files=${dossierFiles.length} dossier_scripts=${registeredDossiers.length}`);
 if (failures.length) {
   console.log(`FAIL — ${failures.length} registry drift check(s) failed.`);
