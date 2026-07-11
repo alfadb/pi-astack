@@ -1,0 +1,173 @@
+{
+  "schema_version": "canonical-path-p1-s4-production-evidence/v1",
+  "scope": {
+    "claim": "P1-S4 only",
+    "exclusions": [
+      "P1-B",
+      "P1-A"
+    ],
+    "counting_rule": "This evidence counts only for P1-S4 and does not count toward P1-B or P1-A."
+  },
+  "production_report": {
+    "origin_narrative": "The original production report was retained at /tmp/pi-astack-s4-final/l2/shadow/r3/knowledge/p1-s4-production-final/dossier.json during evidence extraction; this path is descriptive and is not a manifest runtime dependency.",
+    "schema_version": "canonical-path-shadow-dossier/v1",
+    "exact_bytes_sha256": "0e96b67150a6a57315a600726301565a0461d7ac29ecb211d131efd8e9122ca6",
+    "exact_bytes": 73812,
+    "logical_dossier_self_hash": "96709967a8598eedf27bb1b2371f227c7968db732b1a9f9fbeb9de858a9761d4",
+    "run_id": "p1-s4-production-final",
+    "producer": {
+      "name": "pi-astack.canonical-shadow-chain",
+      "version": "r3.4.2-p1-s4"
+    },
+    "reproducibility_input_hash": "8e5243489a07b203dfaf86a2de0f6e4ec57fa38f8d4953629ef06f266a7939b9"
+  },
+  "source_immutability": {
+    "before": {
+      "source_git_head": "a58a12a3a3f599fe386ef2a83ee78133f4c5e401",
+      "source_ref": "refs/heads/main",
+      "snapshot_hash": "a59eebbed8f10edb5da9c7d5da79f1b505a21a65ba32c861a8e3ba2d321fa7cf",
+      "refs_hash": "e431656d7baff81af46e782bafecfa01d35d84726573e52e5d976ae16bbe6d5f",
+      "index_hash": "775783661f6947442d1122f14e92ff1b873dc181a54915b43d29f4e1493e777d",
+      "index_status_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "worktree_status_hash": "2cd3922beaa4791eefa351893c0be395b9376fa1859c7e821c07055a0e0778f2",
+      "untracked_content_hash": "71a14abb19f3408f9d56947b07b0cce6ab9e4b09510f3195084c71e38b16f7ca",
+      "push_remote_refs_hash": "1ab419b0cdf99ac129edf33f9e56097abcc05a81160080317ebc6e572d135e04",
+      "canonical_trees_hash": "0d491e079c8e5c0a0d88248d32425e08fa6a72cbaf3fd3568a1e6d054b82c69e",
+      "canonical_trees": {
+        "knowledge": {
+          "hash": "9aab44f296d65cc51b0384c60b918b53d8746e2fd4013194fa548843c459ecf6",
+          "files": 183,
+          "bytes": 419720
+        },
+        "projects": {
+          "hash": "1f942b39645dbfd9c8c15f03e21ad392b6a603b904b8c6c7849157425f4f0e4e",
+          "files": 3128,
+          "bytes": 9890950
+        },
+        "rules": {
+          "hash": "6ba46026c242f91d796aaa7ddf04bcf7ccf4ecd4f58595b5a38fddaf40725f7a",
+          "files": 36,
+          "bytes": 82548
+        }
+      },
+      "l1_event_set_hash": "acc9f9adeac12103dbcbc7bbebdc4a52082cd16b5f4dcc85e67c0d5700debc69",
+      "l1_event_count": 4099,
+      "fold_input_set_hash": "9d450a837d5a1848b4cdec7d79a378e5a625530137ddf91e02145b69e51c2dd1",
+      "fold_output_hash": "75cdeaec6c7e15ec419f09ec025e8e747f71e05412c610db02a60bcd8cdc0374",
+      "fold_event_count": 4099,
+      "canonical_read_hash": "d817e4b685970eb415f0d52421c19952fdfce432a592d6bbfab77f7193e8cfe5",
+      "phase_disabled_shadow_count": 0,
+      "phase_disabled_shadow_ids_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "after": {
+      "source_git_head": "a58a12a3a3f599fe386ef2a83ee78133f4c5e401",
+      "source_ref": "refs/heads/main",
+      "snapshot_hash": "a59eebbed8f10edb5da9c7d5da79f1b505a21a65ba32c861a8e3ba2d321fa7cf",
+      "refs_hash": "e431656d7baff81af46e782bafecfa01d35d84726573e52e5d976ae16bbe6d5f",
+      "index_hash": "775783661f6947442d1122f14e92ff1b873dc181a54915b43d29f4e1493e777d",
+      "index_status_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "worktree_status_hash": "2cd3922beaa4791eefa351893c0be395b9376fa1859c7e821c07055a0e0778f2",
+      "untracked_content_hash": "71a14abb19f3408f9d56947b07b0cce6ab9e4b09510f3195084c71e38b16f7ca",
+      "push_remote_refs_hash": "1ab419b0cdf99ac129edf33f9e56097abcc05a81160080317ebc6e572d135e04",
+      "canonical_trees_hash": "0d491e079c8e5c0a0d88248d32425e08fa6a72cbaf3fd3568a1e6d054b82c69e",
+      "canonical_trees": {
+        "knowledge": {
+          "hash": "9aab44f296d65cc51b0384c60b918b53d8746e2fd4013194fa548843c459ecf6",
+          "files": 183,
+          "bytes": 419720
+        },
+        "projects": {
+          "hash": "1f942b39645dbfd9c8c15f03e21ad392b6a603b904b8c6c7849157425f4f0e4e",
+          "files": 3128,
+          "bytes": 9890950
+        },
+        "rules": {
+          "hash": "6ba46026c242f91d796aaa7ddf04bcf7ccf4ecd4f58595b5a38fddaf40725f7a",
+          "files": 36,
+          "bytes": 82548
+        }
+      },
+      "l1_event_set_hash": "acc9f9adeac12103dbcbc7bbebdc4a52082cd16b5f4dcc85e67c0d5700debc69",
+      "l1_event_count": 4099,
+      "fold_input_set_hash": "9d450a837d5a1848b4cdec7d79a378e5a625530137ddf91e02145b69e51c2dd1",
+      "fold_output_hash": "75cdeaec6c7e15ec419f09ec025e8e747f71e05412c610db02a60bcd8cdc0374",
+      "fold_event_count": 4099,
+      "canonical_read_hash": "d817e4b685970eb415f0d52421c19952fdfce432a592d6bbfab77f7193e8cfe5",
+      "phase_disabled_shadow_count": 0,
+      "phase_disabled_shadow_ids_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    }
+  },
+  "impact_flags": {
+    "sourceChanged": false,
+    "refChanged": false,
+    "indexChanged": false,
+    "worktreeChanged": false,
+    "pushChanged": false,
+    "canonicalChanged": false,
+    "readChanged": false,
+    "foldChanged": false
+  },
+  "knowledge": {
+    "source_fold": {
+      "identity": "project:pi-global:push-integrity-gates-need-runtime-placement",
+      "input_event_ids": [
+        "521a21f4f7024b4ff79a8709ac948a1fad5b2fc34bda3a3f031af61788e279f5",
+        "8e2c513fa7954d0dd7cc417147fbb2b8f912da33f5d0a9671a1d7a4fbfd5f910"
+      ],
+      "input_event_set_hash": "2ac24f30379f66806cc1b19abdc881138d9d2a8f623b3807c3cb625428c91fb8",
+      "winner_event_id": "8e2c513fa7954d0dd7cc417147fbb2b8f912da33f5d0a9671a1d7a4fbfd5f910",
+      "output_markdown_hash": "59e4177115ba2890e82cf2a02600546aaaafbfa8cf1aa99c170e9549f6b700ef"
+    },
+    "chain": {
+      "e1_candidate_event_id": "add01e4a4b33ebf7776b96006e917951b09dad3f3fea583991bb457ab2583016",
+      "attempt_event_ids": [
+        "ef9873f6d67035bc1dc9b079db63dfaf382bf8d377f7d969dc657cd7f3cbb08b"
+      ],
+      "e2_decision_event_id": "e7ade6e09b513c3002fd3b7f56b59ffb6108f379437e6500bcb69466982c7967",
+      "e3_receipt_event_id": "6a150c58bc09e2757fd77430eab069f8dc5e4429aaae391c1885372d3573ad97",
+      "chain_hash": "68575ebd0dd8d321126254a663aab9fc4112e0de5340cb41be6ec1409f5bf72e",
+      "provenance_mode": "replay-existing-accepted-fold-winner",
+      "provenance_hash": "2d6f031c0a4f1a7880f96ce8d17900b83eb526871026d9f80de1e37ee4a3826d",
+      "input_hash": "c653e70085323c4eddf94f513b44c87c66ec5da195593f07dda4140f73960d20",
+      "output_hash": "663bf60443552a6a4ba63be91a89748f13c7aee364b74902102a96c411c587c8",
+      "canonical_fold_eligible": false,
+      "canonical_applied": false
+    }
+  },
+  "constraint": {
+    "genesis_event_id": "87a28805517b0ccb5c2d6892ddd51fa0edfd4991f6ad90c552abee1e28fb6c2a",
+    "projection_event_id": "1debbd612d4fa45aacb6e76edfb257a3ef07212cb05c1c606409d6c6ad848cdf",
+    "projection_blob_oid": "e545bfa538e340c42a884b6e1ef45de973d18844",
+    "projection_blob_sha256": "0a304e766ad3da20dbe94cae9468fa41da899a3a830fc4f8612c257d06be7000",
+    "decision_hash": "c90273e360bc840e569f569867b4f69413edec33fef89a50d2692621deb68889",
+    "decision_input_root_hash": "6e73928e4867a531f7cf83438166102bf503e2cc4f8234483c6ea40e91b02762",
+    "decision_validation_hash": "fbe94a4d819ff6402b57d2efbbd3a0cef0c78a9f32a45f91a61d5c4994feea61",
+    "canonical_output_hash": "da25b9eef38f161eff3f065984deb1b98ab128ef5e234fce4bcffe4942ab0cd2",
+    "source_l2": {
+      "relative_path": "l2/views/constraint/latest/compiled-view.md",
+      "blob_oid": "aeeea53fa98b769bfb1b4ba1ce90582bb2eeb5e7",
+      "committed_sha256": "67dd44eed81d561ca5f6ee48e762fcf0461622754c8941673c7e6be195695f3a",
+      "rerendered_sha256": "67dd44eed81d561ca5f6ee48e762fcf0461622754c8941673c7e6be195695f3a",
+      "byte_equal": true,
+      "worktree_matches_head": false,
+      "worktree_sha256": "3782ccb73c81765179a11220c245da99ff39e69db8d3e9a60ed5b696b739187b"
+    },
+    "canonical_delta_expected": 0,
+    "historical_llm_rerun": false
+  },
+  "shadow_outputs": {
+    "knowledge_event_ids": [
+      "add01e4a4b33ebf7776b96006e917951b09dad3f3fea583991bb457ab2583016",
+      "ef9873f6d67035bc1dc9b079db63dfaf382bf8d377f7d969dc657cd7f3cbb08b",
+      "e7ade6e09b513c3002fd3b7f56b59ffb6108f379437e6500bcb69466982c7967",
+      "6a150c58bc09e2757fd77430eab069f8dc5e4429aaae391c1885372d3573ad97"
+    ],
+    "constraint_event_ids": [
+      "87a28805517b0ccb5c2d6892ddd51fa0edfd4991f6ad90c552abee1e28fb6c2a"
+    ],
+    "rendered_output_hash": "663bf60443552a6a4ba63be91a89748f13c7aee364b74902102a96c411c587c8",
+    "rendered_output_relative_path": "outputs/sha256/66/3b/663bf60443552a6a4ba63be91a89748f13c7aee364b74902102a96c411c587c8.json"
+  },
+  "reproduction_command": "node scripts/dossier-canonical-path-shadow.mjs --source /home/worker/.abrain --shadow-home /tmp/pi-astack-s4-final --run-id p1-s4-production-final --keep",
+  "immutability_anchor": "This manifest intentionally carries no intrinsic self-digest field. Its Git commit is the external immutable anchor."
+}
