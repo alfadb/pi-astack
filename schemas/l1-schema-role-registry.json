@@ -119,7 +119,9 @@
         "recovery_slot_aborted",
         "recovery_episode_terminal",
         "push_intent",
-        "push_outcome"
+        "push_outcome",
+        "push_terminal_resolution_candidate",
+        "push_terminal_resolution_attestation"
       ],
       "producers": [
         "pi-astack.convergence-recovery"

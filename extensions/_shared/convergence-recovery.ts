@@ -14,6 +14,11 @@ import {
 } from "./git-exact-cohort";
 import { canonicalizeJcs, jcsSha256Hex, sha256Hex, type JcsJsonValue } from "./jcs";
 import {
+  CanonicalGitTransportError,
+  type CanonicalGitTransportSession,
+  type StableRemoteProof,
+} from "./canonical-git-transport";
+import {
   canonicalL1BodyHash,
   canonicalL1EnvelopeJson,
   expectedL1EventPath,
@@ -23,6 +28,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const EPISODE_DOMAIN = "pi-astack/adr0027-c6/recovery-episode/v1";
+const PUSH_EPISODE_V2_DOMAIN = "pi-astack/adr0027-c6/push-episode/v2";
 const CLAIM_DOMAIN = "pi-astack/adr0027-c6/recovery-claim/v1";
 const ENVELOPE_SCHEMA = "drain-recovery-envelope/v1";
 const EVENT_SCHEMA_VERSION = "drain-recovery-event/v1";
@@ -65,7 +71,9 @@ export type RecoveryEventType =
   | "recovery_slot_aborted"
   | "recovery_episode_terminal"
   | "push_intent"
-  | "push_outcome";
+  | "push_outcome"
+  | "push_terminal_resolution_candidate"
+  | "push_terminal_resolution_attestation";
 
 export class ConvergenceRecoveryError extends Error {
   readonly code: string;
@@ -131,8 +139,24 @@ export function deriveNextEpisodeIdentity(input: { repoId: string; refName: stri
   return drainEpisodeIdentity({ repo_id: input.repoId, ref_name: input.refName, generation_anchor: input.generationAnchor });
 }
 
-export function pushEpisodeIdentity(input: { repo_id: string; remote: string; ref_name: string; target_commit: string }): string {
+export interface RemoteScopeV2 {
+  repo_id: string;
+  remote: string;
+  ref_name: string;
+  target_commit: string;
+  remote_url_id: string;
+  transport_policy_id: string;
+}
+
+/** New push episodes are v2. The v1 helper is retained only for validating
+ * already-durable legacy records and is never used by a writer. */
+export function legacyPushEpisodeIdentity(input: Pick<RemoteScopeV2, "repo_id" | "remote" | "ref_name" | "target_commit">): string {
   return recoveryEpisodeIdentity("push", input);
+}
+
+export function pushEpisodeIdentity(input: RemoteScopeV2): string {
+  if (!input.remote_url_id || !input.transport_policy_id) return legacyPushEpisodeIdentity(input);
+  return jcsSha256Hex({ domain: PUSH_EPISODE_V2_DOMAIN, scope_version: "remote-scope/v2", ...input });
 }
 
 export function curatorEpisodeIdentity(identity: Record<string, JcsJsonValue>): string {
@@ -162,7 +186,7 @@ function recoveryEnvelope(event: RecoveryEvent): RecoveryEnvelope {
   return { schema: ENVELOPE_SCHEMA, canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: bodyHash, body_hash: bodyHash, body: event };
 }
 
-async function createRecoveryEnvelope(abrainHome: string, event: RecoveryEvent): Promise<{ status: "created" | "identical"; filePath: string }> {
+async function createRecoveryEnvelope(abrainHome: string, event: RecoveryEvent): Promise<{ status: "created" | "identical"; filePath: string; eventId: string }> {
   const envelope = recoveryEnvelope(event);
   const filePath = expectedL1EventPath(abrainHome, envelope.event_id);
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
@@ -174,7 +198,7 @@ async function createRecoveryEnvelope(abrainHome: string, event: RecoveryEvent):
   });
   const status = await durableAtomicCreateFile(filePath, canonicalL1EnvelopeJson(envelope));
   if (status === "collision") throw new ConvergenceRecoveryError("RECOVERY_DURABLE_COLLISION", `different bytes already occupy ${filePath}`, { filePath });
-  return { status, filePath };
+  return { status, filePath, eventId: envelope.event_id };
 }
 
 export interface ClaimResult {
@@ -200,7 +224,7 @@ export async function appendRecoveryEvent(options: {
   slot: number;
   eventType: RecoveryEventType;
   body: Record<string, JcsJsonValue>;
-}): Promise<{ status: "created" | "identical"; event: RecoveryEvent; filePath: string }> {
+}): Promise<{ status: "created" | "identical"; event: RecoveryEvent; filePath: string; eventId: string }> {
   assertSlot(options.lane, options.slot);
   const event = recoveryEvent(options.episodeId, options.lane, options.slot, options.eventType, options.body);
   const created = await createRecoveryEnvelope(options.abrainHome, event);
@@ -230,6 +254,8 @@ export interface FoldedRecoverySlot {
   terminal?: RecoveryEvent;
   pushIntent?: RecoveryEvent;
   pushOutcome?: RecoveryEvent;
+  resolutionCandidates?: RecoveryEvent[];
+  resolutionAttestations?: RecoveryEvent[];
 }
 
 function uniqueEvent(existing: RecoveryEvent | undefined, next: RecoveryEvent): RecoveryEvent {
@@ -245,32 +271,87 @@ function hasExactBodyKeys(event: RecoveryEvent, keys: readonly string[]): boolea
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
+const REMOTE_SCOPE_KEYS = ["remote", "ref_name", "remote_url_id", "repo_id", "target_commit", "transport_policy_id"] as const;
+const PUSH_OUTCOME_V2_KEYS = [
+  "classification", "command_exit_code", "error_code", "ref_name", "remote", "remote_contains_target",
+  "remote_ref_after", "remote_ref_before", "remote_url_id", "repo_id", "stage", "stderr_redacted_sha256",
+  "stdout_redacted_sha256", "target_commit", "transport_attempted", "transport_policy_id",
+] as const;
+const HASH_OR_NULL = (value: unknown) => value === null || (typeof value === "string" && /^[0-9a-f]{64}$/.test(value));
+const OID_OR_NULL = (value: unknown) => value === null || (typeof value === "string" && GIT_OID_RE.test(value));
+
+export function remoteScopeFromBody(body: Record<string, JcsJsonValue>): RemoteScopeV2 | undefined {
+  if (
+    body.scope_version !== "remote-scope/v2"
+    || typeof body.repo_id !== "string" || !/^[0-9a-f]{64}$/.test(body.repo_id)
+    || typeof body.remote !== "string" || body.remote !== "origin"
+    || typeof body.ref_name !== "string" || body.ref_name !== "refs/heads/main"
+    || typeof body.target_commit !== "string" || !GIT_OID_RE.test(body.target_commit)
+    || typeof body.remote_url_id !== "string" || !/^[0-9a-f]{64}$/.test(body.remote_url_id)
+    || typeof body.transport_policy_id !== "string" || !/^[0-9a-f]{64}$/.test(body.transport_policy_id)
+  ) return undefined;
+  return {
+    repo_id: body.repo_id,
+    remote: body.remote,
+    ref_name: body.ref_name,
+    target_commit: body.target_commit,
+    remote_url_id: body.remote_url_id,
+    transport_policy_id: body.transport_policy_id,
+  };
+}
+
 function hasValidPushOutcomeBody(event: RecoveryEvent): boolean {
-  return hasExactBodyKeys(event, ["classification", "target_commit"])
+  if (hasExactBodyKeys(event, ["classification", "target_commit"])) {
+    return (event.body.classification === "success" || event.body.classification === "retryable" || event.body.classification === "nonretryable")
+      && typeof event.body.target_commit === "string" && GIT_OID_RE.test(event.body.target_commit);
+  }
+  return hasExactBodyKeys(event, PUSH_OUTCOME_V2_KEYS)
     && (event.body.classification === "success" || event.body.classification === "retryable" || event.body.classification === "nonretryable")
-    && typeof event.body.target_commit === "string"
-    && GIT_OID_RE.test(event.body.target_commit);
+    && typeof event.body.repo_id === "string" && /^[0-9a-f]{64}$/.test(event.body.repo_id)
+    && event.body.remote === "origin" && event.body.ref_name === "refs/heads/main"
+    && typeof event.body.target_commit === "string" && GIT_OID_RE.test(event.body.target_commit)
+    && typeof event.body.remote_url_id === "string" && /^[0-9a-f]{64}$/.test(event.body.remote_url_id)
+    && typeof event.body.transport_policy_id === "string" && /^[0-9a-f]{64}$/.test(event.body.transport_policy_id)
+    && typeof event.body.stage === "string"
+    && typeof event.body.transport_attempted === "boolean"
+    && (event.body.command_exit_code === null || Number.isInteger(event.body.command_exit_code))
+    && HASH_OR_NULL(event.body.stdout_redacted_sha256) && HASH_OR_NULL(event.body.stderr_redacted_sha256)
+    && OID_OR_NULL(event.body.remote_ref_before) && OID_OR_NULL(event.body.remote_ref_after)
+    && typeof event.body.remote_contains_target === "boolean"
+    && (event.body.error_code === null || typeof event.body.error_code === "string");
 }
 
 function hasValidPushIntentBody(event: RecoveryEvent): boolean {
-  return hasExactBodyKeys(event, ["repo", "remote", "ref_name", "target_commit"])
-    && typeof event.body.repo === "string"
-    && path.isAbsolute(event.body.repo)
-    && typeof event.body.remote === "string"
-    && event.body.remote.length > 0
-    && event.body.remote.length <= 4096
-    && !/[\x00-\x1f\x7f]/.test(event.body.remote)
-    && typeof event.body.ref_name === "string"
-    && /^refs\/(heads|tags)\/[A-Za-z0-9._\/-]+$/.test(event.body.ref_name)
-    && !event.body.ref_name.includes("..")
-    && typeof event.body.target_commit === "string"
-    && GIT_OID_RE.test(event.body.target_commit);
+  if (hasExactBodyKeys(event, ["repo", "remote", "ref_name", "target_commit"])) {
+    return typeof event.body.repo === "string" && path.isAbsolute(event.body.repo)
+      && typeof event.body.remote === "string" && event.body.remote.length > 0 && event.body.remote.length <= 4096
+      && !/[\x00-\x1f\x7f]/.test(event.body.remote)
+      && typeof event.body.ref_name === "string" && /^refs\/(heads|tags)\/[A-Za-z0-9._\/-]+$/.test(event.body.ref_name)
+      && !event.body.ref_name.includes("..")
+      && typeof event.body.target_commit === "string" && GIT_OID_RE.test(event.body.target_commit);
+  }
+  return hasExactBodyKeys(event, ["scope_version", ...REMOTE_SCOPE_KEYS]) && !!remoteScopeFromBody(event.body);
+}
+
+function hasValidResolutionCandidate(event: RecoveryEvent): boolean {
+  return hasExactBodyKeys(event, ["legacy_episode_id", "legacy_intent_event_id", "legacy_terminal_event_id", "scope_version", ...REMOTE_SCOPE_KEYS])
+    && event.body.legacy_episode_id === event.episode_id
+    && typeof event.body.legacy_intent_event_id === "string" && /^[0-9a-f]{64}$/.test(event.body.legacy_intent_event_id)
+    && typeof event.body.legacy_terminal_event_id === "string" && /^[0-9a-f]{64}$/.test(event.body.legacy_terminal_event_id)
+    && !!remoteScopeFromBody(event.body);
+}
+
+function hasValidResolutionAttestation(event: RecoveryEvent): boolean {
+  return hasExactBodyKeys(event, ["candidate_event_id", "observed_tip", "relation"])
+    && typeof event.body.candidate_event_id === "string" && /^[0-9a-f]{64}$/.test(event.body.candidate_event_id)
+    && typeof event.body.observed_tip === "string" && GIT_OID_RE.test(event.body.observed_tip)
+    && (event.body.relation === "equal" || event.body.relation === "descendant");
 }
 
 function laneAllows(lane: RecoveryLane, type: RecoveryEventType): boolean {
   if (type === "recovery_slot_claimed" || type === "recovery_slot_aborted" || type === "recovery_episode_terminal") return true;
   if (lane === "drain") return type === "commit_prepared" || type === "commit_published" || type === "index_converged";
-  return lane === "push" && (type === "push_intent" || type === "push_outcome");
+  return lane === "push" && (type === "push_intent" || type === "push_outcome" || type === "push_terminal_resolution_candidate" || type === "push_terminal_resolution_attestation");
 }
 
 /** Aggregate content-addressed events first, then validate the state graph independent of scan order. */
@@ -298,7 +379,9 @@ export function foldRecoveryEvents(events: readonly RecoveryEvent[]): ReadonlyMa
     else if (event.event_type === "recovery_slot_aborted") slot.aborted = uniqueEvent(slot.aborted, event);
     else if (event.event_type === "recovery_episode_terminal") slot.terminal = uniqueEvent(slot.terminal, event);
     else if (event.event_type === "push_intent") slot.pushIntent = uniqueEvent(slot.pushIntent, event);
-    else slot.pushOutcome = uniqueEvent(slot.pushOutcome, event);
+    else if (event.event_type === "push_outcome") slot.pushOutcome = uniqueEvent(slot.pushOutcome, event);
+    else if (event.event_type === "push_terminal_resolution_candidate") (slot.resolutionCandidates ??= []).push(event);
+    else (slot.resolutionAttestations ??= []).push(event);
     folded.set(event.slot, slot);
   }
 
@@ -312,12 +395,15 @@ export function foldRecoveryEvents(events: readonly RecoveryEvent[]): ReadonlyMa
   }
   const durablePushIntent = pushIntents[0];
   if (durablePushIntent) {
-    const expectedEpisode = pushEpisodeIdentity({
-      repo_id: sha256Hex(path.resolve(String(durablePushIntent.body.repo))),
-      remote: String(durablePushIntent.body.remote),
-      ref_name: String(durablePushIntent.body.ref_name),
-      target_commit: String(durablePushIntent.body.target_commit),
-    });
+    const v2Scope = remoteScopeFromBody(durablePushIntent.body);
+    const expectedEpisode = v2Scope
+      ? pushEpisodeIdentity(v2Scope)
+      : legacyPushEpisodeIdentity({
+        repo_id: sha256Hex(path.resolve(String(durablePushIntent.body.repo))),
+        remote: String(durablePushIntent.body.remote),
+        ref_name: String(durablePushIntent.body.ref_name),
+        target_commit: String(durablePushIntent.body.target_commit),
+      });
     if (durablePushIntent.episode_id !== expectedEpisode) {
       throw new ConvergenceRecoveryError("PUSH_INTENT_EPISODE_MISMATCH", "push intent fields do not derive this episode identity");
     }
@@ -354,9 +440,22 @@ export function foldRecoveryEvents(events: readonly RecoveryEvent[]): ReadonlyMa
     }
     if (slot.pushOutcome) {
       if (!durablePushIntent) throw new ConvergenceRecoveryError("PUSH_INTENT_MISSING", `slot ${number} has a push outcome without a durable intent`);
-      if (slot.pushOutcome.body.target_commit !== durablePushIntent.body.target_commit) {
-        throw new ConvergenceRecoveryError("PUSH_OUTCOME_TARGET_MISMATCH", `slot ${number} outcome target differs from durable push intent`);
+      if (slot.pushOutcome.body.target_commit !== durablePushIntent.body.target_commit) throw new ConvergenceRecoveryError("PUSH_OUTCOME_TARGET_MISMATCH", `slot ${number} outcome target differs from durable push intent`);
+      const intentScope = remoteScopeFromBody(durablePushIntent.body);
+      if (intentScope && REMOTE_SCOPE_KEYS.some((key) => slot.pushOutcome!.body[key] !== intentScope[key])) {
+        throw new ConvergenceRecoveryError("PUSH_OUTCOME_SCOPE_MISMATCH", `slot ${number} outcome scope differs from durable push intent`);
       }
+    }
+    if (slot.resolutionCandidates) {
+      slot.resolutionCandidates = [...new Map(slot.resolutionCandidates.map((item) => [canonicalizeJcs(item.body), item])).values()];
+      if (slot.resolutionCandidates.some((item) => !hasValidResolutionCandidate(item))) throw new ConvergenceRecoveryError("LEGACY_CANDIDATE_INVALID", `slot ${number} has a malformed legacy resolution candidate`);
+      if (slot.resolutionCandidates.length > 1) throw new ConvergenceRecoveryError("LEGACY_CANDIDATE_CONFLICT", `slot ${number} has different legacy resolution candidates`);
+    }
+    if (slot.resolutionAttestations) {
+      slot.resolutionAttestations = [...new Map(slot.resolutionAttestations.map((item) => [canonicalizeJcs(item.body), item])).values()];
+      if (slot.resolutionAttestations.some((item) => !hasValidResolutionAttestation(item))) throw new ConvergenceRecoveryError("LEGACY_ATTESTATION_INVALID", `slot ${number} has a malformed legacy resolution attestation`);
+      const candidateId = slot.resolutionCandidates?.[0] ? canonicalL1BodyHash(slot.resolutionCandidates[0]) : null;
+      if (!candidateId || slot.resolutionAttestations.some((item) => item.body.candidate_event_id !== candidateId)) throw new ConvergenceRecoveryError("LEGACY_ATTESTATION_CANDIDATE_MISMATCH", `slot ${number} attestation does not bind its exact candidate`);
     }
     if (slot.aborted && (!hasExactBodyKeys(slot.aborted, ["reason", "error_code"]) || slot.aborted.body.reason !== ABORT_REASON_CATEGORY || slot.aborted.body.error_code !== ABORT_ERROR_CODE)) {
       throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", `slot ${number} abort event is not deterministic`);
@@ -546,14 +645,39 @@ export async function claimLaneSlot(options: Parameters<typeof claimRecoverySlot
 }
 export const claimCuratorSlot = (options: Omit<Parameters<typeof claimRecoverySlot>[0], "lane">) => claimRecoverySlot({ ...options, lane: "curator" });
 
-export interface DurablePushIntent {
-  repo: string;
-  remote: string;
-  refName: string;
-  targetCommit: string;
+export type DurablePushIntent =
+  | ({ version: "v1"; repo: string; scope: Pick<RemoteScopeV2, "remote" | "ref_name" | "target_commit"> })
+  | ({ version: "v2"; scope: RemoteScopeV2 });
+
+export async function recordPushIntent(options: { abrainHome: string; episodeId: string; scope: RemoteScopeV2 } | ({ abrainHome: string; episodeId: string; repo: string; remote: string; refName: string; targetCommit: string })): Promise<void> {
+  if (!("scope" in options)) return recordLegacyPushIntentForTests(options);
+  if (options.episodeId !== pushEpisodeIdentity(options.scope)) throw new ConvergenceRecoveryError("PUSH_INTENT_EPISODE_MISMATCH", "v2 push intent does not derive the supplied episode id");
+  await appendRecoveryEvent({
+    abrainHome: options.abrainHome,
+    episodeId: options.episodeId,
+    lane: "push",
+    slot: 1,
+    eventType: "push_intent",
+    body: { scope_version: "remote-scope/v2", ...options.scope },
+  });
 }
 
-export async function recordPushIntent(options: { abrainHome: string; episodeId: string } & DurablePushIntent): Promise<void> {
+function legacyFixtureExecutionEnabled(repo: string, abrainHome: string): boolean {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1") return true;
+  const replayRoot = process.env.P1B_REPLAY_ROOT;
+  if (!replayRoot || !path.isAbsolute(replayRoot)) return false;
+  const root = path.resolve(replayRoot);
+  const tmpPrefix = `${path.resolve(process.env.TMPDIR || "/tmp")}${path.sep}`;
+  const contained = (candidate: string) => {
+    const relative = path.relative(root, path.resolve(candidate));
+    return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+  };
+  return `${root}${path.sep}`.startsWith(tmpPrefix) && contained(repo) && contained(abrainHome);
+}
+
+/** Fixture-only compatibility writer. Production code must never call this. */
+export async function recordLegacyPushIntentForTests(options: { abrainHome: string; episodeId: string; repo: string; remote: string; refName: string; targetCommit: string }): Promise<void> {
+  if (!legacyFixtureExecutionEnabled(options.repo, options.abrainHome)) throw new ConvergenceRecoveryError("LEGACY_PUSH_WRITE_FORBIDDEN", "v1 push intent writes are disabled");
   await appendRecoveryEvent({
     abrainHome: options.abrainHome,
     episodeId: options.episodeId,
@@ -575,11 +699,12 @@ export async function readPushIntent(abrainHome: string, episodeId: string): Pro
     }
   }
   if (!hasValidPushIntentBody(first)) throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", "push episode intent is malformed");
+  const v2 = remoteScopeFromBody(first.body);
+  if (v2) return { version: "v2", scope: v2 };
   return {
+    version: "v1",
     repo: String(first.body.repo),
-    remote: String(first.body.remote),
-    refName: String(first.body.ref_name),
-    targetCommit: String(first.body.target_commit),
+    scope: { remote: String(first.body.remote), ref_name: String(first.body.ref_name), target_commit: String(first.body.target_commit) },
   };
 }
 
@@ -776,14 +901,19 @@ export type PushClassification = "success" | "retryable" | "nonretryable";
 export interface PushTransportEvidence {
   transportAttempted: boolean;
   commandExitCode: number | null;
+  stdoutSha256: string | null;
   stderrSha256: string | null;
+  remoteRefBefore: string | null;
+  remoteRefAfter: string | null;
+  stage: string;
+  errorCode: string | null;
 }
 
 export function classifyPushFailure(error: unknown): Exclude<PushClassification, "success"> {
   const text = error instanceof Error ? `${error.message}\n${(error as any).stderr ?? ""}` : String(error);
   if (/cannot lock ref|failed to update ref|reference already locked|P1B_RETRYABLE_REF_LOCK/i.test(text)) return "retryable";
   if (/non-fast-forward|rejected|permission denied|authentication failed|repository not found|protected branch/i.test(text)) return "nonretryable";
-  return "retryable";
+  return "nonretryable";
 }
 
 async function objectExists(repo: string, oid: string): Promise<boolean> {
@@ -827,19 +957,55 @@ async function remoteContainsTarget(repo: string, remote: string, refName: strin
   return gitIsAncestor(repo, target, remoteOid);
 }
 
-async function executeClaimedPushSlot(options: { abrainHome: string; episodeId: string; slot: number; repo: string; remote: string; refName: string; targetCommit: string }): Promise<{ classification: PushClassification; targetCommit: string; remoteContainsTarget: boolean } & PushTransportEvidence> {
+interface PushExecutionOptions {
+  abrainHome: string;
+  episodeId: string;
+  repo: string;
+  scope: RemoteScopeV2;
+  transportFactory?: () => Promise<CanonicalGitTransportSession>;
+  closeTransport?: boolean;
+  allowClaim?: () => boolean;
+  legacy?: { remote: string; refName: string; targetCommit: string };
+}
+
+function outcomeBody(scope: RemoteScopeV2, evidence: PushTransportEvidence, classification: PushClassification, remoteContainsTarget: boolean): Record<string, JcsJsonValue> {
+  return {
+    classification,
+    repo_id: scope.repo_id,
+    remote: scope.remote,
+    ref_name: scope.ref_name,
+    target_commit: scope.target_commit,
+    remote_url_id: scope.remote_url_id,
+    transport_policy_id: scope.transport_policy_id,
+    stage: evidence.stage,
+    transport_attempted: evidence.transportAttempted,
+    command_exit_code: evidence.commandExitCode,
+    stdout_redacted_sha256: evidence.stdoutSha256,
+    stderr_redacted_sha256: evidence.stderrSha256,
+    remote_ref_before: evidence.remoteRefBefore,
+    remote_ref_after: evidence.remoteRefAfter,
+    remote_contains_target: remoteContainsTarget,
+    error_code: evidence.errorCode,
+  };
+}
+
+async function executeLegacyPushSlot(options: PushExecutionOptions & { slot: number }): Promise<{ classification: PushClassification; targetCommit: string; remoteContainsTarget: boolean } & PushTransportEvidence> {
+  const legacy = options.legacy!;
   let classification: PushClassification = "success";
   let remoteContains = false;
   let transportAttempted = false;
   let commandExitCode: number | null = null;
+  let stdoutSha256: string | null = null;
   let stderrSha256: string | null = null;
+  let errorCode: string | null = null;
   try {
-    remoteContains = await remoteContainsTarget(options.repo, options.remote, options.refName, options.targetCommit);
+    remoteContains = await remoteContainsTarget(options.repo, legacy.remote, legacy.refName, legacy.targetCommit);
     if (!remoteContains) {
       transportAttempted = true;
-      const completed = await execGit(options.repo, ["push", options.remote, `${options.targetCommit}:${options.refName}`]);
+      const completed = await execGit(options.repo, ["push", legacy.remote, `${legacy.targetCommit}:${legacy.refName}`]);
       remoteContains = true;
       commandExitCode = 0;
+      stdoutSha256 = sha256Hex(String(completed.stdout ?? ""));
       stderrSha256 = sha256Hex(String(completed.stderr ?? ""));
     }
   } catch (error) {
@@ -849,20 +1015,59 @@ async function executeClaimedPushSlot(options: { abrainHome: string; episodeId: 
     if (transportAttempted) {
       const rawCode = (error as any)?.code;
       commandExitCode = typeof rawCode === "number" ? rawCode : -1;
+      stdoutSha256 = sha256Hex(String((error as any)?.stdout ?? ""));
       stderrSha256 = sha256Hex(String((error as any)?.stderr ?? (error instanceof Error ? error.message : error)));
+      errorCode = "LEGACY_PUSH_FAILED";
     }
   }
-  const evidence = { transportAttempted, commandExitCode, stderrSha256 };
-  await appendRecoveryEvent({
-    ...options,
-    lane: "push",
-    eventType: "push_outcome",
-    body: { classification, target_commit: options.targetCommit },
-  });
-  if (classification !== "success" && (classification === "nonretryable" || options.slot === RECOVERY_LANE_BUDGETS.push)) {
-    await ensureTerminal(options.abrainHome, options.episodeId, "push", options.slot);
+  const evidence: PushTransportEvidence = { transportAttempted, commandExitCode, stdoutSha256, stderrSha256, remoteRefBefore: null, remoteRefAfter: null, stage: transportAttempted ? "push" : "proof_before", errorCode };
+  await appendRecoveryEvent({ ...options, lane: "push", eventType: "push_outcome", body: { classification, target_commit: legacy.targetCommit } });
+  if (classification !== "success" && (classification === "nonretryable" || options.slot === RECOVERY_LANE_BUDGETS.push)) await ensureTerminal(options.abrainHome, options.episodeId, "push", options.slot);
+  return { classification, targetCommit: legacy.targetCommit, remoteContainsTarget: remoteContains, ...evidence };
+}
+
+async function executeV2PushSlot(options: PushExecutionOptions & { slot: number }): Promise<{ classification: PushClassification; targetCommit: string; remoteContainsTarget: boolean; proof?: StableRemoteProof } & PushTransportEvidence> {
+  let classification: PushClassification = "success";
+  let remoteContainsTarget = false;
+  let proof: StableRemoteProof | undefined;
+  let evidence: PushTransportEvidence = { transportAttempted: false, commandExitCode: null, stdoutSha256: null, stderrSha256: null, remoteRefBefore: null, remoteRefAfter: null, stage: "pretransport", errorCode: null };
+  let transport: CanonicalGitTransportSession | undefined;
+  try {
+    if (!options.transportFactory) throw new ConvergenceRecoveryError("TRANSPORT_FACTORY_MISSING", "v2 push execution requires the credential broker transport");
+    transport = await options.transportFactory();
+    evidence = { ...evidence, stage: "proof_before" };
+    proof = await transport.stableProof(options.scope.target_commit);
+    evidence = { ...evidence, remoteRefBefore: proof.tipBefore, remoteRefAfter: proof.tipAfter, commandExitCode: proof.commands.at(-1)?.exitCode ?? null, stdoutSha256: proof.commands.at(-1)?.stdoutSha256 ?? null, stderrSha256: proof.commands.at(-1)?.stderrSha256 ?? null };
+    remoteContainsTarget = proof.remoteContainsTarget;
+    if (!remoteContainsTarget) {
+      evidence = { ...evidence, stage: "push", transportAttempted: true };
+      const pushed = await transport.push(options.scope.target_commit);
+      evidence = { ...evidence, commandExitCode: pushed.command.exitCode, stdoutSha256: pushed.command.stdoutSha256, stderrSha256: pushed.command.stderrSha256 };
+      if (pushed.exitCode !== 0) throw new CanonicalGitTransportError(pushed.retryableNetwork ? "NETWORK_TRANSIENT" : "PUSH_REJECTED", "push command did not succeed", { stage: "push", retryable: pushed.retryableNetwork, transportAttempted: true, commandExitCode: pushed.exitCode, stdoutSha256: pushed.command.stdoutSha256, stderrSha256: pushed.command.stderrSha256 });
+      evidence = { ...evidence, stage: "proof_after" };
+      proof = await transport.stableProof(options.scope.target_commit);
+      evidence = { ...evidence, remoteRefAfter: proof.tipAfter, commandExitCode: proof.commands.at(-1)?.exitCode ?? null, stdoutSha256: proof.commands.at(-1)?.stdoutSha256 ?? null, stderrSha256: proof.commands.at(-1)?.stderrSha256 ?? null };
+      remoteContainsTarget = proof.remoteContainsTarget;
+      if (!remoteContainsTarget) throw new CanonicalGitTransportError("REMOTE_PROOF_MISSING_TARGET", "stable post-push proof does not contain target", { stage: "proof_after", transportAttempted: true });
+    }
+  } catch (error) {
+    classification = error instanceof CanonicalGitTransportError && error.retryable ? "retryable" : "nonretryable";
+    evidence = {
+      ...evidence,
+      stage: error instanceof CanonicalGitTransportError ? error.stage : evidence.stage,
+      transportAttempted: error instanceof CanonicalGitTransportError ? error.transportAttempted || evidence.transportAttempted : evidence.transportAttempted,
+      commandExitCode: error instanceof CanonicalGitTransportError ? error.commandExitCode : evidence.commandExitCode,
+      stdoutSha256: error instanceof CanonicalGitTransportError ? error.stdoutSha256 : evidence.stdoutSha256,
+      stderrSha256: error instanceof CanonicalGitTransportError ? error.stderrSha256 : evidence.stderrSha256,
+      errorCode: error instanceof CanonicalGitTransportError || error instanceof ConvergenceRecoveryError ? error.code : "PUSH_INTERNAL_FAILURE",
+    };
+    remoteContainsTarget = false;
+  } finally {
+    if (options.closeTransport !== false) await transport?.close();
   }
-  return { classification, targetCommit: options.targetCommit, remoteContainsTarget: remoteContains, ...evidence };
+  await appendRecoveryEvent({ ...options, lane: "push", eventType: "push_outcome", body: outcomeBody(options.scope, evidence, classification, remoteContainsTarget) });
+  if (classification !== "success" && (classification === "nonretryable" || options.slot === RECOVERY_LANE_BUDGETS.push)) await ensureTerminal(options.abrainHome, options.episodeId, "push", options.slot);
+  return { classification, targetCommit: options.scope.target_commit, remoteContainsTarget, ...evidence, ...(proof ? { proof } : {}) };
 }
 
 export type PushRecoveryAction = "burned" | "success" | "retryable" | "nonretryable" | "terminal";
@@ -891,42 +1096,42 @@ export async function recoverPushSlot(options: { abrainHome: string; episodeId: 
 }
 
 /** Resume an episode, burn a missing result, then execute only the continuous next slot. */
-export async function recoverPushEpisode(options: { abrainHome: string; episodeId: string; repo: string; remote: string; refName: string; targetCommit: string }): Promise<{ classification: PushClassification | "burned" | "complete" | "terminal" | "consumed"; targetCommit: string; slot: number | null; remoteContainsTarget: boolean } & Partial<PushTransportEvidence>> {
+export async function recoverPushEpisode(options: PushExecutionOptions | ({ abrainHome: string; episodeId: string; repo: string; remote: string; refName: string; targetCommit: string })): Promise<{ classification: PushClassification | "burned" | "complete" | "terminal" | "consumed"; targetCommit: string; slot: number | null; remoteContainsTarget: boolean; proof?: StableRemoteProof } & Partial<PushTransportEvidence>> {
+  if (!("scope" in options)) {
+    if (!legacyFixtureExecutionEnabled(options.repo, options.abrainHome)) throw new ConvergenceRecoveryError("LEGACY_PUSH_EXECUTION_FORBIDDEN", "v1 push execution is disabled");
+    options = { ...options, scope: { repo_id: sha256Hex(path.resolve(options.repo)), remote: "origin", ref_name: "refs/heads/main", target_commit: options.targetCommit, remote_url_id: "0".repeat(64), transport_policy_id: "0".repeat(64) }, legacy: { remote: options.remote, refName: options.refName, targetCommit: options.targetCommit } };
+  }
   const intent = await readPushIntent(options.abrainHome, options.episodeId);
   if (!intent) throw new ConvergenceRecoveryError("PUSH_INTENT_MISSING", "push execution requires a durable intent");
-  const expectedEpisode = pushEpisodeIdentity({ repo_id: sha256Hex(path.resolve(options.repo)), remote: intent.remote, ref_name: intent.refName, target_commit: intent.targetCommit });
-  if (
-    options.episodeId !== expectedEpisode
-    || path.resolve(intent.repo) !== path.resolve(options.repo)
-    || intent.remote !== options.remote
-    || intent.refName !== options.refName
-    || intent.targetCommit !== options.targetCommit
-  ) {
-    throw new ConvergenceRecoveryError("PUSH_INTENT_MISMATCH", "push execution arguments do not exactly match durable intent", { episodeId: options.episodeId });
+  const targetCommit = intent.scope.target_commit;
+  if (intent.version === "v2") {
+    if (options.episodeId !== pushEpisodeIdentity(intent.scope) || canonicalizeJcs(intent.scope as never) !== canonicalizeJcs(options.scope as never)) throw new ConvergenceRecoveryError("PUSH_INTENT_MISMATCH", "v2 push arguments do not exactly match durable intent", { episodeId: options.episodeId });
+  } else if (!options.legacy || options.episodeId !== legacyPushEpisodeIdentity({ repo_id: sha256Hex(path.resolve(intent.repo)), ...intent.scope }) || path.resolve(intent.repo) !== path.resolve(options.repo) || canonicalizeJcs(intent.scope as never) !== canonicalizeJcs({ remote: options.legacy.remote, ref_name: options.legacy.refName, target_commit: options.legacy.targetCommit } as never)) {
+    throw new ConvergenceRecoveryError("PUSH_INTENT_MISMATCH", "legacy push arguments do not exactly match durable intent", { episodeId: options.episodeId });
   }
   let cursor = recoveryEpisodeCursor(options.episodeId, "push", await readRecoveryEvents(options.abrainHome, options.episodeId, "push"));
-  if (cursor.complete) return { classification: "complete", targetCommit: options.targetCommit, slot: cursor.lastClaimedSlot, remoteContainsTarget: true };
-  if (cursor.terminal) return { classification: "terminal", targetCommit: options.targetCommit, slot: cursor.lastClaimedSlot, remoteContainsTarget: false };
+  if (cursor.complete) return { classification: "complete", targetCommit, slot: cursor.lastClaimedSlot, remoteContainsTarget: true };
+  if (cursor.terminal) return { classification: "terminal", targetCommit, slot: cursor.lastClaimedSlot, remoteContainsTarget: false };
   if (cursor.pendingSlot !== null) {
     const recovered = await recoverPushSlot({ abrainHome: options.abrainHome, episodeId: options.episodeId, slot: cursor.pendingSlot });
-    if (recovered === "success") return { classification: "complete", targetCommit: options.targetCommit, slot: cursor.pendingSlot, remoteContainsTarget: true };
-    if (recovered === "nonretryable" || recovered === "terminal") return { classification: "terminal", targetCommit: options.targetCommit, slot: cursor.pendingSlot, remoteContainsTarget: false };
+    if (recovered === "success") return { classification: "complete", targetCommit, slot: cursor.pendingSlot, remoteContainsTarget: true };
+    if (recovered === "nonretryable" || recovered === "terminal") return { classification: "terminal", targetCommit, slot: cursor.pendingSlot, remoteContainsTarget: false };
     cursor = recoveryEpisodeCursor(options.episodeId, "push", await readRecoveryEvents(options.abrainHome, options.episodeId, "push"));
   }
+  if (options.allowClaim && !options.allowClaim()) return { classification: "consumed", targetCommit, slot: null, remoteContainsTarget: false };
   const next = await claimNextRecoverySlot({ abrainHome: options.abrainHome, episodeId: options.episodeId, lane: "push" });
-  if (next.status === "complete" || next.status === "terminal") return { classification: next.status, targetCommit: options.targetCommit, slot: null, remoteContainsTarget: next.status === "complete" };
-  if (next.status === "pending" || !next.shouldExecute) return { classification: "consumed", targetCommit: options.targetCommit, slot: next.slot, remoteContainsTarget: false };
-  const result = await executeClaimedPushSlot({ ...options, slot: next.slot });
+  if (next.status === "complete" || next.status === "terminal") return { classification: next.status, targetCommit, slot: null, remoteContainsTarget: next.status === "complete" };
+  if (next.status === "pending" || !next.shouldExecute) return { classification: "consumed", targetCommit, slot: next.slot, remoteContainsTarget: false };
+  const result = intent.version === "v2" ? await executeV2PushSlot({ ...options, slot: next.slot }) : await executeLegacyPushSlot({ ...options, slot: next.slot });
   return { ...result, slot: next.slot };
 }
 
 /** Compatibility/competition surface. New orchestration should call recoverPushEpisode. */
 export async function runPushSlot(options: { abrainHome: string; episodeId: string; slot: number; repo: string; remote: string; refName: string; targetCommit: string }): Promise<({ classification: PushClassification | "consumed"; targetCommit: string; remoteContainsTarget: boolean } & Partial<PushTransportEvidence>)> {
+  if (!legacyFixtureExecutionEnabled(options.repo, options.abrainHome)) throw new ConvergenceRecoveryError("LEGACY_PUSH_EXECUTION_FORBIDDEN", "v1 push execution is fixture-only");
   const intent = await readPushIntent(options.abrainHome, options.episodeId);
-  if (!intent || path.resolve(intent.repo) !== path.resolve(options.repo) || intent.remote !== options.remote || intent.refName !== options.refName || intent.targetCommit !== options.targetCommit) {
-    throw new ConvergenceRecoveryError("PUSH_INTENT_MISMATCH", "push slot arguments do not exactly match durable intent");
-  }
+  if (!intent || intent.version !== "v1" || path.resolve(intent.repo) !== path.resolve(options.repo) || intent.scope.remote !== options.remote || intent.scope.ref_name !== options.refName || intent.scope.target_commit !== options.targetCommit) throw new ConvergenceRecoveryError("PUSH_INTENT_MISMATCH", "push slot arguments do not exactly match durable intent");
   const claim = await claimRecoverySlot({ abrainHome: options.abrainHome, episodeId: options.episodeId, lane: "push", slot: options.slot });
   if (!claim.shouldExecute) return { classification: "consumed", targetCommit: options.targetCommit, remoteContainsTarget: false };
-  return executeClaimedPushSlot(options);
+  return executeLegacyPushSlot({ abrainHome: options.abrainHome, episodeId: options.episodeId, slot: options.slot, repo: options.repo, scope: { repo_id: sha256Hex(path.resolve(options.repo)), remote: "origin", ref_name: "refs/heads/main", target_commit: options.targetCommit, remote_url_id: "0".repeat(64), transport_policy_id: "0".repeat(64) }, legacy: { remote: options.remote, refName: options.refName, targetCommit: options.targetCommit } });
 }

@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
+process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);

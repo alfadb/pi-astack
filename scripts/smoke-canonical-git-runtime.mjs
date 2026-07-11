@@ -7,6 +7,8 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
+process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+process.env.PI_ASTACK_CANONICAL_LOCAL_TRANSPORT_FOR_TESTS = "1";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 const require = createRequire(import.meta.url);
@@ -35,9 +37,10 @@ function initRepo(base, remote = true) {
   }
   return { repo, bare };
 }
+const TEST_TRANSPORT_POLICY = JSON.parse(fs.readFileSync(path.resolve(root, "..", "..", "pi-astack-settings.json"), "utf8")).canonicalGitRuntime.transport;
 function settingsFile(base, enabled, suffix = "") {
   const file = path.join(base, `settings${suffix}.json`);
-  fs.writeFileSync(file, `${JSON.stringify({ canonicalGitRuntime: { enabled, mode: "p1_controlled" } }, null, 2)}\n`);
+  fs.writeFileSync(file, `${JSON.stringify({ canonicalGitRuntime: { enabled, mode: "p1_controlled", transport: TEST_TRANSPORT_POLICY } }, null, 2)}\n`);
   return file;
 }
 
@@ -96,6 +99,14 @@ async function worker() {
 
   const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath, sourceRoot: process.env.SMOKE_SOURCE_ROOT ?? root });
   const startup = await runtime.awaitStartup();
+  if (process.env.SMOKE_PHASE === "primary") {
+    const l1Registry = jiti(path.join(root, "extensions/_shared/l1-schema-registry.ts"));
+    const pushClaims = async () => (await l1Registry.scanWholeL1Validated({ abrainHome: repo })).all.filter((record) => record.body?.lane === "push" && record.body?.event_type === "recovery_slot_claimed").length;
+    const claimsBeforeRepeat = await pushClaims();
+    const repeatedStartup = await runtime.awaitStartup();
+    assert.strictEqual(repeatedStartup, startup, "awaitStartup did not return the process-cached result");
+    assert.equal(await pushClaims(), claimsBeforeRepeat, "repeated awaitStartup advanced another push slot");
+  }
   if (process.env.SMOKE_PHASE === "startup-blocked") {
     assert.equal(startup.startup, "blocked", JSON.stringify(startup));
     process.stdout.write("startup-blocked-ready\n");
@@ -505,6 +516,14 @@ async function worker() {
   assert.equal(contained.remoteContained, true);
   const pushAuditRows = fs.readFileSync(path.join(repo, ".state", "git-sync.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
   assert.ok(pushAuditRows.some((row) => row.op === "canonical_push" && row.result === "success" && row.targetCommit === second.commit && row.episodeId), "successful canonical push audit missing episode/ref/target binding");
+  const cycleRows = runtime.diagnostics().tail.filter((row) => row.operation === "transport_cycle");
+  assert.ok(cycleRows.some((row) => row.publicOperation === "startup" && row.status === "closed"), "startup transport cycle did not close");
+  assert.equal(cycleRows.filter((row) => row.publicOperation === "requestPush" && row.status === "opened").length, 2, "steady-state writes did not open independent transport cycles");
+  assert.equal(cycleRows.filter((row) => row.publicOperation === "requestPush" && row.status === "closed").length, 2, "steady-state transport cycles did not close");
+  const runtimeL1 = jiti(path.join(root, "extensions/_shared/l1-schema-registry.ts"));
+  const runtimeRecords = (await runtimeL1.scanWholeL1Validated({ abrainHome: repo })).all;
+  const steadyEpisodeIds = new Set(pushAuditRows.filter((row) => row.op === "canonical_push" && row.targetCommit === second.commit).map((row) => row.episodeId));
+  assert.equal(runtimeRecords.some((record) => record.body?.event_type === "recovery_episode_terminal" && steadyEpisodeIds.has(record.body?.episode_id)), false, "post-startup steady-state push became terminal");
   const remoteOid = execFileSync("git", ["--git-dir", process.env.SMOKE_REMOTE, "rev-parse", "refs/heads/main"], { encoding: "utf8" }).trim();
   assert.equal(remoteOid, second.commit, "target OID not remote-contained");
   assert.ok(runtime.diagnostics().tail.length <= 64, "diagnostic tail unbounded");
@@ -513,7 +532,7 @@ async function worker() {
   fs.rmSync(path.join(repo, "manual.txt"));
 
   const splitSettings = path.join(path.dirname(settingsPath), "split-settings.json");
-  fs.writeFileSync(splitSettings, `${JSON.stringify({ canonicalGitRuntime: { enabled: true, mode: "p1_controlled" }, split: true })}\n`);
+  fs.writeFileSync(splitSettings, `${JSON.stringify({ canonicalGitRuntime: { enabled: true, mode: "p1_controlled", transport: TEST_TRANSPORT_POLICY }, split: true })}\n`);
   await assert.rejects(
     () => runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: splitSettings, sourceRoot: root }),
     /RUNTIME_PROVENANCE_SPLIT/,
@@ -562,8 +581,8 @@ if (process.argv.includes("--worker")) {
     const schema = JSON.parse(fs.readFileSync(path.join(root, "pi-astack-settings.schema.json"), "utf8"));
     assert.ok(schema.required.includes("canonicalGitRuntime"), "settings schema does not require the fail-closed canonical section");
     assert.equal(schema.properties.canonicalGitRuntime.additionalProperties, false);
-    assert.deepEqual(schema.properties.canonicalGitRuntime.required.slice().sort(), ["enabled", "mode"]);
-    assert.deepEqual(Object.keys(schema.properties.canonicalGitRuntime.properties).sort(), ["_comment", "enabled", "mode"]);
+    assert.deepEqual(schema.properties.canonicalGitRuntime.required.slice().sort(), ["enabled", "mode", "transport"]);
+    assert.deepEqual(Object.keys(schema.properties.canonicalGitRuntime.properties).sort(), ["_comment", "enabled", "mode", "transport"]);
     const sourceRuntime = fs.readFileSync(path.join(root, "extensions/_shared/canonical-git-runtime.ts"), "utf8");
     const sourceWriter = fs.readFileSync(path.join(root, "extensions/sediment/writer.ts"), "utf8");
     const sourceSync = fs.readFileSync(path.join(root, "extensions/abrain/git-sync.ts"), "utf8");
@@ -917,7 +936,12 @@ if (process.argv.includes("--worker")) {
     });
     assert.equal(terminalWriter.status, 0, `${terminalWriter.stdout}\n${terminalWriter.stderr}`);
     assert.match(terminalWriter.stdout, /writer-push-terminal-ready/);
+    const terminalEpisodeTarget = git(terminalFixture.repo, ["rev-parse", "HEAD"]);
+    fs.writeFileSync(path.join(terminalFixture.repo, "target-different.txt"), "new HEAD must not bypass same-scope v2 terminal\n");
+    git(terminalFixture.repo, ["add", "target-different.txt"]);
+    git(terminalFixture.repo, ["commit", "-m", "advance HEAD after terminal"]);
     const terminalHeadBeforeRestart = git(terminalFixture.repo, ["rev-parse", "HEAD"]);
+    assert.notEqual(terminalHeadBeforeRestart, terminalEpisodeTarget, "v2 target-different fixture did not advance HEAD");
     const terminalStatusBeforeRestart = git(terminalFixture.repo, ["status", "--porcelain=v1", "-uall"]);
     const terminalIndexPath = path.join(git(terminalFixture.repo, ["rev-parse", "--absolute-git-dir"]), "index");
     const terminalIndexBeforeRestart = fs.readFileSync(terminalIndexPath);
