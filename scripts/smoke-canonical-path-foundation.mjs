@@ -119,12 +119,13 @@ await check("registry loads, validates, freezes, and declares only approved sche
   assert(Object.isFrozen(registry) && Object.isFrozen(registry.entries), "registry is mutable");
   const active = l1.lookupL1SchemaRoles(registry, { phase: "active" });
   const future = l1.lookupL1SchemaRoles(registry, { phase: "phase_disabled" });
-  assert(active.length === 3, `expected 3 active entries, got ${active.length}`);
-  assert(future.length === 6, `expected 6 future entries, got ${future.length}`);
+  assert(active.length === 4, `expected 4 active entries, got ${active.length}`);
+  assert(future.length === 5, `expected 5 future entries, got ${future.length}`);
+  const drainRecovery = active.find((entry) => entry.envelope_schema === "drain-recovery-envelope/v1");
+  assert(drainRecovery && drainRecovery.role === "meta" && !drainRecovery.fold_eligible && drainRecovery.write_enabled, "drain-recovery-envelope/v1 must be active write-enabled meta-only (P1-S2)");
   const futureNames = future.map((entry) => entry.envelope_schema).sort();
   assert(JSON.stringify(futureNames) === JSON.stringify([
     "constraint-genesis/v1",
-    "drain-recovery-envelope/v1",
     "knowledge-apply-receipt/v1",
     "knowledge-candidate-observation/v1",
     "knowledge-curator-attempt/v1",

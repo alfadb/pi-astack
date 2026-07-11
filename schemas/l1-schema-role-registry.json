@@ -105,11 +105,24 @@
     },
     {
       "envelope_schema": "drain-recovery-envelope/v1",
+      "body_schema": "drain-recovery-event/v1",
       "domain": "canonical_path",
       "role": "meta",
-      "phase": "phase_disabled",
-      "write_enabled": false,
-      "fold_eligible": false
+      "phase": "active",
+      "write_enabled": true,
+      "fold_eligible": false,
+      "event_types": [
+        "recovery_slot_claimed",
+        "commit_prepared",
+        "commit_published",
+        "index_converged",
+        "recovery_slot_aborted",
+        "recovery_episode_terminal",
+        "push_outcome"
+      ],
+      "producers": [
+        "pi-astack.convergence-recovery"
+      ]
     }
   ]
 }

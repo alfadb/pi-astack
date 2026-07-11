@@ -1,7 +1,7 @@
 {
   "schema_version": "transition-register/v1",
   "register_id": "pi-astack-transition-register",
-  "updated": "2026-07-10",
+  "updated": "2026-07-11",
   "review_policy": {
     "cadence": "biweekly",
     "default_owner": "pi-astack-maintainers",
@@ -18,7 +18,7 @@
       "authorization_status": "authorized",
       "entered": "2026-07-10",
       "review_by": "2026-07-24",
-      "current": "R3.4.2 仅授权 P1；当前实施 P1-S3 foundation，不改变 Knowledge/Constraint canonical read 或 fold。",
+      "current": "R3.4.2 仅授权 P1；P1-S3 已完成，P1-S1/S2 implementation candidate 已通过 synthetic smoke 与独立审查，P1-S4/P1-B/P1-A 待执行；不改变 Knowledge/Constraint canonical read 或 fold。",
       "exit": [
         "P1-S3/S1/S2/S4、P1-B、P1-A 全部具有真实外部证据",
         "P1 completion record 落盘且 P2/P3 仍未执行"
@@ -35,7 +35,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "完成 P1-S3 foundation 后继续 P1-S1/S2/S4；不得越过 P1 授权边界。"
+      "next_action": "继续 P1-S4，再执行 P1-B production-trace replay 与 P1-A controlled drains；不得用 synthetic smoke 替代 production acceptance，也不得越过 P1 授权边界。"
     },
     {
       "id": "canonical_path.p2",
@@ -435,14 +435,15 @@
       "authorization_status": "separate_authorization_required",
       "entered": "2026-07-08",
       "review_by": "2026-07-24",
-      "current": "staging backlog 需由 inventory/metrics 评估，当前无 recovery primitive。",
+      "current": "staging backlog 需由 inventory/metrics 评估；canonical-path recovery primitive 已有 implementation candidate，但尚未通过 P1-B/P1-A production acceptance，且不构成 staging 硬删授权。",
       "exit": [
-        "存在 recovery primitive",
-        "硬删 runbook 与回滚验证完成"
+        "recovery primitive 完成 P1 production acceptance",
+        "硬删 runbook、回滚验证与独立授权完成"
       ],
       "evidence": [
         "staging inventory",
-        "promotion/ageout metrics"
+        "promotion/ageout metrics",
+        "canonical-path P1 completion dossier"
       ],
       "owner": "sediment-staging",
       "consumer": [
@@ -450,7 +451,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "high",
-      "next_action": "先设计 recovery primitive，再讨论硬删。"
+      "next_action": "等待 recovery primitive 完成 P1 production acceptance；另行完成硬删 runbook、回滚验证与授权后再讨论硬删。"
     },
     {
       "id": "knowledge.o5-confidence-fallback-review",

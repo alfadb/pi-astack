@@ -34,15 +34,17 @@ updated: 2026-07-10
 - 当前阶段：P1 in progress；R3.4.2 只直接授权 P1 的实现和真实取证，不授权 P2/P3/P4a/P4b 执行。
 - 基线快照（2026-07-10 20:52:56 +08:00）：P1 执行前真实生产 baseline dossier 为 `/home/worker/.pi/.pi-astack/reports/canonical-path-p1-baseline-2026-07-10.md`；该 dossier 自身的 SHA-256 未在报告中记录，报告内可复核的 R3.4.2 living plan SHA-256 为 `45a38bea37a6c23f96d1dec9bc34a6d6cf39cb2407b2047fabfdec2283ff8644`。
 - 现场 Git 快照（2026-07-10 20:52:56 +08:00）：pi-astack `HEAD=9097f34724c809b1ac969b5127a6032c12900341`，工作树现存 13 项改动必须保留；`~/.abrain` `HEAD=a58a12a3a3f599fe386ef2a83ee78133f4c5e401`、ahead/behind 为 `3/0`，共有 210 个路径变化（`l1=155`、`l2=55`、`.state=0`）。
-- 现场 runtime/gate 快照（2026-07-10 20:52:56 +08:00）：Knowledge 保持 Git L2 `projection_only`；Constraint 保持 `.state` compiled bundle fail-closed read；最新 push gate 为 `push_blocked_reconcile`，记录 46 个 blockers 且连续 22 次阻塞；中央 machine-readable schema-role registry 与 machine transition-register source/register 均不存在。
-- 下一动作：S3 foundation，先建立 central machine-readable schema-role registry 写前门与 machine transition-register source/register consumer；所有新 schema 和所有 whole-L1 scanner 必须先接入统一验证入口，之后才可写新的恢复或 shadow 事件。
-- 当前证据状态：所有 acceptance criteria 均未完成；不得从 2026-07-10 审计、历史 smoke 或会话投票推断实现已经通过。
+- 现场 runtime/gate 快照（2026-07-10 20:52:56 +08:00）：Knowledge 保持 Git L2 `projection_only`；Constraint 保持 `.state` compiled bundle fail-closed read；最新 push gate 为 `push_blocked_reconcile`，记录 46 个 blockers 且连续 22 次阻塞。
+- S3 完成（2026-07-10，pi-astack commit `e4124e6`）：中央 machine-readable schema-role registry（`schemas/l1-schema-role-registry.json` + `extensions/_shared/l1-schema-registry.ts`）已成为新 schema 写前门，六个已批准未来 schema 以 phase_disabled meta 预登记；六个已批准 whole-L1 消费者（knowledge collect/reproject、constraint event-scan、reconcile KNOWN、L3 mirror、activity projector、git-sync self-heal）全部先全库验证再写 L2/L3，unknown/corrupt fail closed；三个 L1 writer 接入 `validateL1WritePreflight`；`docs/transition-register.machine.json` + loader/validator/CLI + sediment startup 只读校验 + smoke 消费已落地，canonical_path P1/P2+的 phase/authorization 由 validator 硬编码互锁。验证：foundation smoke 18 检查、受影响 15 个 smoke 全绿、真实生产 `~/.abrain` 4051 个 L1 事件只读全量扫描零失败（开发期证据，不计 P1-A/P1-B production acceptance）。
+- S1+S2 implementation candidate 完成（2026-07-11）：`extensions/_shared/git-exact-cohort.ts` 使用 temporary `GIT_INDEX_FILE`、`read-tree`、`write-tree`、exact `diff-tree` blob/mode/path 校验、`commit-tree` 与 `update-ref <ref> <candidate> <frozen>` CAS；CAS 后对 exact cohort 做全路径预检和单 index lock 批量收敛，non-cohort stage 以 fingerprint 前后核对，worktree 不写，owned/unmerged index conflict fail closed。`extensions/_shared/convergence-recovery.ts` 将 deterministic claim 与全部恢复结果写为经 registry preflight 的 content-addressed L1 meta envelope，curator=3、drain/push=5；drain generation 只由 genesis/previous closure anchor 推进，不绑定 refreeze、cohort 或新事件；prepared/published/converged、missing/late result、candidate/descendant/exact-cohort/remote-contained absorption、terminal owner alert 与 per-episode quarantine 已实现。GPT 完成实现，Claude 两轮独立审查识别并推动修复自定义 `.state` truth、episode 重置、并发 result 毒化、pending 跳 slot、unmerged index 覆盖、transient Git error 烧 slot、late abort generation 回退等问题；最终 Claude 复核确认无 blocker，可作为 P1-B production-trace replay 候选。开发验证：S1/S2 综合 smoke 22/22、foundation 18/18、TypeScript 零错误，受 registry 翻转影响的既有回归全绿。
+- 下一动作：S4 isolated Knowledge E1/attempt/E2/E3 shadow 链、Constraint genesis 与 reproducible dossier；S4 完成后进入 P1-B 带 provenance 的真实 production trace 隔离 replay，再进入 P1-A controlled production drains。
+- 当前证据状态：P1-S3-REGISTRY 已有外部证据并勾选；P1-S1-GIT 与 P1-S2-RECOVERY 仅达到 implementation candidate，因当前 22 项 smoke 使用 synthetic temporary repositories，不满足 production data acceptance gate，保持未勾选并等待 P1-B/P1-A 外部证据；其余 acceptance criteria 均未完成。
 
 ## Phase Table
 
 | Phase | 状态 | 当前授权 | 前置 | 退出证据 | 下一授权 |
 |---|---|---|---|---|---|
-| P1 | authorized / not started | R3.4.2 直接授权实现与取证 | 执行前现场刷新；S3 写前门先行 | P1-S3/S1/S2/S4、P1-B、P1-A 全部有真实外部证据；完成记录落盘 | P2 与 P3 分别发起新的独立 unanimous multi-T0 gate；可在 P1 后并行 |
+| P1 | authorized / in progress（S3 完成；S1/S2 implementation candidate 完成；S4 待执行） | R3.4.2 直接授权实现与取证 | 执行前现场刷新；S3 写前门先行 | P1-S3/S1/S2/S4、P1-B、P1-A 全部有真实外部证据；完成记录落盘 | P2 与 P3 分别发起新的独立 unanimous multi-T0 gate；可在 P1 后并行 |
 | P2 | blocked / not authorized | 无 | P1 完成；P2 新 T0 全票 | 全量 production byte equality；至少 3 条完整链且至少 1 条 live；冲突覆盖 | P4a 仍不得开始，等待 P3 也完成并另行授权 |
 | P3 | blocked / not authorized | 无 | P1 完成；P3 新 T0 全票；可与 P2 并行 | genesis 0-delta；K=5 真实 delta/replay；连续 7 个日历日每日 1 次 zero-drift verifier | P4a 仍不得开始，等待 P2 也完成并另行授权 |
 | P4a | blocked / not authorized | 无 | P2 与 P3 都完成；P4a 新 T0 全票 | live inventory、registry export、content-addressed snapshot+manifest、restore byte verify；只移不删 | 独立发起 P4b unanimous multi-T0 gate |
@@ -54,7 +56,7 @@ updated: 2026-07-10
 
 下面每一行都使用 goal parser 的真实格式 `- [ ] (criterion-id) text`。ID 是稳定证据主键；不得复用或改名。只有外部证据已经存在并且与当前 criterion 文本匹配时，才允许用普通 edit 把 `[ ]` 改成 `[x]`，随后用 `goal_check` 记录验证；裸 `[x]`、模型自述或旧 goal 的 evidence 都不算 verified。`goal_check` 的 evidence 必须是 `cmd:<shell>`、`file:<path>` 或 `git:<sha>`；`cmd:` 记录真实执行结果，`file:`/`git:` 只证明对应工件或 Git object 的可验证事实。复合 production 条件优先固化为不可变 dossier、content-addressed manifest 或包含 dossier 的 Git commit，再由 `file:`/`git:` 指向；不得把多条未经固化的聊天描述拼成通过证据。criterion 文本或声明输入发生语义漂移会令既有 evidence stale，必须重新检查。所有项目初始未完成。
 
-- [ ] (P1-S3-REGISTRY) 中央 machine-readable schema-role registry 已成为新 schema 的写前门；所有 whole-L1 scanners 在任何 L2 输出前统一验证 RFC8785/JCS SHA-256 envelope、内容寻址路径、文件名/body hash、schema role 与 producer；unknown/invalid fail closed；machine transition-register source 已被 startup 与 smoke 消费。
+- [x] (P1-S3-REGISTRY) 中央 machine-readable schema-role registry 已成为新 schema 的写前门；所有 whole-L1 scanners 在任何 L2 输出前统一验证 RFC8785/JCS SHA-256 envelope、内容寻址路径、文件名/body hash、schema role 与 producer；unknown/invalid fail closed；machine transition-register source 已被 startup 与 smoke 消费。
 - [ ] (P1-S1-GIT) Git 提交原语使用临时 `GIT_INDEX_FILE`、`write-tree`、exact `diff-tree`/blob 校验、`commit-tree` 与 `update-ref <ref> <candidate> <frozen>` CAS；发布后 exact-cohort shared-index 幂等收敛到 current HEAD，并证明 worktree 与 non-cohort staged entries 保持不变，owned-path index conflict fail closed。
 - [ ] (P1-S2-RECOVERY) attempt/drain/push 使用 byte-deterministic atomic no-replace claim；curator slot 固定 1..3，drain/push stable episode 固定 1..5 且不因 refreeze、重启或新事件重置；`commit_prepared`、`commit_published`、`index_converged` 状态完整，并通过 restart、missing/late result、CAS/remote-contained reconcile、预算耗尽 terminal alert 验证。
 - [ ] (P1-S4-SHADOW) Knowledge 新链在 isolated shadow namespace 产生 E1 candidate、attempt claim、E2 decision、E3 apply/receipt，Constraint genesis 只锚定既有 committed projection/validated decision且不重跑历史 LLM；可复算 dossier 覆盖 provenance/input/output hashes，并证明 canonical read、fold、ref 与 push zero impact。
@@ -88,7 +90,7 @@ updated: 2026-07-10
 
 ## Current Blockers
 
-- P1 无授权阻塞；当前仅有“执行前刷新现场”和“S3 写前门必须先完成”的依赖门，不得误记为需要再次批准 P1。
+- P1 无授权阻塞；S3 已完成，S1/S2 已达到 implementation candidate；当前依赖顺序为 S4 → P1-B production trace replay → P1-A controlled drains，不得误记为需要再次批准 P1。
 - P2、P3、P4a、P4b 均受新的独立 unanimous multi-T0 授权阻塞；准备设计、只读核验和测试脚手架不得被描述成已获执行授权。
 - P3 连续 7 日与 P4b 固定 14 日是不可压缩的真实日历门；等待更久不能替代规定的 verifier、query、chain、session_start、delta、restart、restore 等事件门，增加事件也不能缩短日历门。
 
@@ -102,7 +104,9 @@ updated: 2026-07-10
 - 2026-07-10：采用 living plan + `goal_set(doc=...)`，因为任务跨阶段、跨重启并包含 7/14 日真实时间门；本文保存稳定目标、可重写 Current State、外证 acceptance criteria 与 append-only Decision Log，goal evidence ledger 保存独立执行证据，二者不得合并为模型自证。
 - 2026-07-10：P1 可直接从现场刷新和 S3 写前门开始，无需重复授权；P1 不包含新的 truth/read flip，Knowledge `projection_only` 与 Constraint 当前 read source 在 P1 保持不变。
 - 2026-07-10：P2、P3、P4a、P4b 各需新的六供应商或同等独立 multi-T0 unanimous 授权；P1 通过不自动授权 P2/P3，P2/P3 通过不自动授权 P4a，P4a 通过不自动授权 P4b。
+- 2026-07-10：因模型供应商配额限制，S3 实现由主会话直接接手完成（子代理中断前的产出经逐文件审查后保留并修复）。关键实现裁决：① JCS 抽取为共享实现且与旧实现字节级等价，真实生产 4051 事件全量 hash 复算零失败证明无回归；② durable-write 崩溃残留 temp 文件（`.{event}.json.{pid}.{ts}.{hex}.tmp`）识别为非事件残留并计数上报，其余不合规名称仍硬失败，避免合法协议残留卡死全部投影；③ constraint body 语义层问题（payload 细节）保留既有 invalid/diagnostic/coverage 机制，registry 层只硬失败 envelope/hash/path/role/producer 违规；④ 三个旧语义测试 fixture（merge-selfheal 毒药事件、shadow-compiler NS-2、repo-preflight 种子）改写为新 fail-closed 语义下的等价验证。提交 `e4124e6` 已推送 main 并同步更新 pi-global submodule 指针（`2d765ba`）；用户未提交的 dispatch/model-curator/llm-audit 改动保持不动。
 - 2026-07-10：执行前真实生产 baseline dossier 确认 P1 现场为 red：pi-astack 现存工作树改动须保留，`~/.abrain` 仍 ahead 且 push gate blocked，Knowledge 保持 `projection_only`、Constraint 保持 `.state` fail-closed read，并且 central schema-role registry 与 machine transition-register source/register 尚不存在；因此 S3 foundation 是 P1 的首要依赖，任何 recovery 或 shadow schema 写入均须在其后。
+- 2026-07-11：S1/S2 采用“GPT 实现 + 主会话审查 + Claude 独立审查 + GPT 修复 + Claude 最终复核”的闭环。首版 S2 将 recovery truth 写入自定义目录且 claim 含 owner identity，主会话拒绝该设计并要求全部状态进入标准 content-addressed L1 envelope、claim bytes 仅由 episode/lane/slot 决定。Claude 首轮进一步发现并发恢复会写出不同 authoritative result 从而永久毒化 fold、pending slot 可被跳过、drain episode 绑定 cohort root 会重置预算、unmerged index 可被覆盖、transient Git 错误会烧 slot；修复后 authoritative published/converged/abort/terminal body byte-stable，next-slot 阻止 pending，episode generation 由 genesis/previous closure 驱动，index 全路径预检后单锁批量更新。Claude 最终复核无 blocker，并识别 late abort 与 merge-base 非 1 错误两个窄窗口；二者随后修复，综合 smoke 增至 22/22。由于测试使用 synthetic temporary repositories，S1/S2 仅记为 P1-B 候选，不勾选 production acceptance criteria。
 
 ## Definition of Fully Complete
 

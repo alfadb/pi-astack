@@ -169,6 +169,7 @@
     "smoke:task-local-working-set": "node scripts/smoke-task-local-working-set.mjs",
     "smoke:outcome-classifier-enrich": "node scripts/smoke-outcome-classifier-enrich.mjs",
     "smoke:canonical-path-foundation": "node scripts/smoke-canonical-path-foundation.mjs",
+    "smoke:convergence-recovery": "node scripts/smoke-convergence-recovery.mjs",
     "smoke:script-registry-drift": "node scripts/smoke-script-registry-drift.mjs",
     "smoke:constraint-shadow-compiler": "node scripts/smoke-constraint-shadow-compiler.mjs",
     "smoke:constraint-shadow-liveness-recovery": "node scripts/smoke-constraint-shadow-liveness-recovery.mjs",
