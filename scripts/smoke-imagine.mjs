@@ -352,6 +352,110 @@ console.log("\n  sub-pi isolation:");
   }
 }
 
+// ── Test 7: runtime audit minimization ──────────────────────────
+
+console.log("\n  runtime audit minimization:");
+
+{
+  const oldFetch = globalThis.fetch;
+  const oldDisabled = process.env.PI_ABRAIN_DISABLED;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-imagine-audit-"));
+  try {
+    delete process.env.PI_ABRAIN_DISABLED;
+    const { createJiti } = require("jiti");
+    const jiti = createJiti(import.meta.url, { moduleCache: false });
+    const imported = await jiti.import(path.join(repoRoot, "extensions", "imagine", "index.ts"));
+    const activate = imported.default;
+    let tool;
+    activate({ registerTool(definition) { tool = definition; } });
+    if (!tool) throw new Error("imagine tool did not register");
+
+    const outputBytes = Buffer.from("inline-image-secret-bytes");
+    const outputInline = outputBytes.toString("base64");
+    const registry = {
+      async getApiKeyForProvider() { return "imagine-api-key-secret"; },
+      getAll() { return [{ provider: "openai", baseUrl: "https://sensitive-imagine.example/v1", api: "responses" }]; },
+    };
+    globalThis.fetch = async (_url, init) => {
+      if (init?.body instanceof FormData) {
+        return new Response(JSON.stringify({ data: [{ b64_json: outputInline }], usage: { input: 2, output: 3 } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (!String(body.input).includes("generate-prompt-secret")) throw new Error("generate request lost prompt");
+      return new Response(JSON.stringify({
+        output: [{ type: "image_generation_call", result: outputInline, size: "1024x1024", quality: "high" }],
+        usage: { input: 4, output: 5, totalTokens: 9 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+
+    const context = { cwd: tmp, model: { input: [] }, modelRegistry: registry };
+    const generated = await tool.execute("generate-audit", {
+      prompt: "generate-prompt-secret",
+      model: "gpt-image-test",
+      size: "1024x1024",
+      quality: "high",
+    }, new AbortController().signal, undefined, context);
+    if (generated.isError) throw new Error(`generate failed: ${JSON.stringify(generated)}`);
+
+    const source = path.join(tmp, "source.png");
+    fs.writeFileSync(source, "source-image-secret-bytes");
+    const edited = await tool.execute("edit-audit", {
+      prompt: "edit-prompt-secret",
+      model: "gpt-image-test",
+      imagePath: "source.png",
+      size: "1024x1024",
+      quality: "high",
+      inputFidelity: "high",
+    }, new AbortController().signal, undefined, context);
+    if (edited.isError) throw new Error(`edit failed: ${JSON.stringify(edited)}`);
+
+    const auditFile = path.join(tmp, ".pi-astack", "llm-audit", "audit.jsonl");
+    const raw = fs.readFileSync(auditFile, "utf8");
+    for (const forbidden of [
+      "generate-prompt-secret", "edit-prompt-secret", "source-image-secret-bytes",
+      outputInline, "inline-image-secret-bytes", "imagine-api-key-secret",
+      "https://sensitive-imagine.example", source,
+    ]) {
+      if (raw.includes(forbidden)) throw new Error(`imagine audit leaked forbidden value: ${forbidden}`);
+    }
+    const rows = raw.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const starts = rows.filter((row) => row.row_type === "start");
+    const ends = rows.filter((row) => row.row_type === "end");
+    if (starts.length !== 2 || ends.length !== 2) throw new Error(`wrong audit row count: ${rows.length}`);
+    const generateStart = starts.find((row) => row.operation === "generateImage");
+    const editStart = starts.find((row) => row.operation === "editImage");
+    if (generateStart?.has_input_image !== false || generateStart?.input_bytes !== 0) throw new Error("generate request shape missing");
+    if (editStart?.has_input_image !== true || editStart?.input_bytes !== Buffer.byteLength("source-image-secret-bytes")) throw new Error("edit request shape missing");
+    for (const end of ends) {
+      if (end.image_count !== 1 || end.result_transport_kinds?.[0] !== "inline_bytes" || end.result_byte_lengths?.[0] !== outputBytes.length) {
+        throw new Error(`image response shape missing: ${JSON.stringify(end)}`);
+      }
+    }
+    const forbiddenKeys = new Set(["prompt", "text", "content", "reasoning", "tool_output", "request_body", "raw_response_text", "parsed_response", "request_payload", "event", "message", "delta", "base64", "url", "headers", "credentials", "signature", "encrypted_content"]);
+    const inspect = (value) => {
+      if (!value || typeof value !== "object") return;
+      if (Array.isArray(value)) return value.forEach(inspect);
+      for (const [key, child] of Object.entries(value)) {
+        const normalized = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").replace(/[\s-]+/g, "_").toLowerCase();
+        if (forbiddenKeys.has(normalized)) throw new Error(`forbidden imagine audit key: ${key}`);
+        inspect(child);
+      }
+    };
+    rows.forEach(inspect);
+    ok("generate/edit audit stores only controlled image transport statistics");
+  } catch (error) {
+    failMsg(`runtime audit minimization failed: ${error?.stack || error}`);
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldDisabled === undefined) delete process.env.PI_ABRAIN_DISABLED;
+    else process.env.PI_ABRAIN_DISABLED = oldDisabled;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 // ── Summary ─────────────────────────────────────────────────────
 
 console.log(`\n  Results: ${pass} passed, ${fail} failed\n`);

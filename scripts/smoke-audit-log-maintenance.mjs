@@ -263,6 +263,8 @@ await check("strict CLI rejects unknown flags, missing values, duplicates, and i
   assert.equal(run(["rotate-legacy", "--root", tmpRoot, "--root", tmpRoot, "--path", "/tmp/x"], 1).code, "CLI_ARGUMENT_INVALID");
   assert.equal(run(["pin", "--input-manifest", "/tmp/a", "--output-dir", "/tmp/b", "--yes=true"], 1).code, "CLI_ARGUMENT_INVALID");
   assert.equal(run(["seal", "--root", "relative"], 1).code, "PATH_REJECTED");
+  assert.equal(run(["seal", "--root", tmpRoot, "--read-max-entries", "4097"], 1).code, "CLI_ARGUMENT_INVALID");
+  assert.equal(run(["pin", "--input-manifest", "/tmp/a", "--output-dir", "/tmp/b", "--read-max-entries", "100001"], 1).code, "CLI_ARGUMENT_INVALID");
 });
 
 await check("inventory requires absolute roots, reads no content, and is byte-identical", async () => {
@@ -367,6 +369,8 @@ await check("pin is dry-run by default and --yes emits only schema-validated fie
   const outputDir = path.join(tmpRoot, "pins-valid");
   const dry = run(["pin", "--input-manifest", input, "--output-dir", outputDir]);
   assert(dry.dry_run && dry.pin_path === null);
+  assert.equal(dry.read_budget.consumed.entries, 2);
+  assert(dry.read_budget.consumed.bytes > 0 && dry.read_budget.consumed.bytes <= dry.read_budget.limits.bytes);
   assert(!fs.existsSync(outputDir), "dry-run created output directory");
   const actual = run(["pin", "--input-manifest", input, "--output-dir", outputDir, "--yes"]);
   const raw = fs.readFileSync(actual.pin_path, "utf8");
@@ -565,6 +569,8 @@ await check("seal verifies stable snapshots without changing archive bytes", asy
   const dry = run(["seal", "--root", root, "--stable-ms", "1"]);
   assert.equal(dry.roots[0].entries[0].status, "snapshot_planned");
   const actual = run(["seal", "--root", root, "--stable-ms", "1", "--yes"]);
+  assert.equal(actual.read_budget.consumed.entries, 1);
+  assert.equal(actual.read_budget.consumed.bytes, fs.statSync(archive).size);
   const sealed = actual.roots[0].entries.find((entry) => entry.path === archive);
   assert.equal(sealed.status, "snapshot_verified");
   assert.equal(sealed.lines, 2);
@@ -576,6 +582,10 @@ await check("seal verifies stable snapshots without changing archive bytes", asy
   assert.equal(manifest.schema_version, "audit-seal-manifest/v2");
   assert.equal(manifest.canonical_root, root);
   assert.equal(manifest.entries[0].identity.ino, fs.statSync(archive).ino);
+  assert.equal(manifest.signature.algorithm, "hmac-sha256");
+  assert.match(manifest.signature.key_id, /^[0-9a-f]{24}$/);
+  assert.match(manifest.signature.digest, /^[0-9a-f]{64}$/);
+  assert(!Object.hasOwn(manifest, "secret"));
 });
 
 await check("seal writes through the pinned archive fd when the archive path is replaced", async () => {
@@ -644,6 +654,9 @@ await check("seal enforces max-byte and time budgets without hashing unbounded f
   );
   assert.equal(timeResult.roots[0].entries[0].reason, "time_budget_exceeded");
   assert.equal(run(["seal", "--root", timeFixture.root, "--max-bytes", String(16 * 1024 * 1024 * 1024 + 1)], 1).code, "CLI_ARGUMENT_INVALID");
+  assert.equal(run(["seal", "--root", timeFixture.root, "--total-max-bytes", String(16 * 1024 * 1024 * 1024 + 1)], 1).code, "CLI_ARGUMENT_INVALID");
+  assert.equal(run(["seal", "--root", timeFixture.root, "--time-budget-ms", "60001"], 1).code, "CLI_ARGUMENT_INVALID");
+  assert.equal(run(["seal", "--root", timeFixture.root, "--total-time-budget-ms", "600001"], 1).code, "CLI_ARGUMENT_INVALID");
 });
 
 await check("seal readdir permission failure is fail-closed before any root manifest write", async () => {

@@ -54,6 +54,55 @@ const tsSrc = fs.readFileSync(
   path.join(repoRoot, "extensions/dispatch/terminal-state.ts"),
   "utf-8",
 );
+const llmAuditSrc = fs.readFileSync(
+  path.join(repoRoot, "extensions/_shared/llm-audit.ts"),
+  "utf-8",
+);
+const llmAuditExtensionSrc = fs.readFileSync(
+  path.join(repoRoot, "extensions/llm-audit/index.ts"),
+  "utf-8",
+);
+
+console.log("Section: session stream summary schema");
+
+check("message_update aggregation is bounded and emits a dedicated summary row", () => {
+  if (!/export const MAX_SESSION_STREAM_AGGREGATES = 256;/.test(llmAuditSrc)) {
+    throw new Error("session stream aggregate map must remain capped at 256");
+  }
+  if (!/row_type:\s*"session_stream_summary"/.test(llmAuditSrc)) {
+    throw new Error("session_stream_summary row schema is missing");
+  }
+  const updateBranch = llmAuditSrc.match(/if \(eventType === "message_update"\)[\s\S]{0,250}?return;/)?.[0] ?? "";
+  if (!/aggregateSessionUpdate/.test(updateBranch) || /appendLlmAudit/.test(updateBranch)) {
+    throw new Error("message_update must aggregate without direct per-delta append");
+  }
+});
+
+check("summary schema contains only bounded counts, lengths, identity, completion, and HMAC metadata", () => {
+  const summary = llmAuditSrc.match(/function streamSummaryRow[\s\S]{0,2600}?\n\}/)?.[0] ?? "";
+  for (const field of [
+    "event_type_counts", "type_counts", "delta_stats", "content_block_kind_counts",
+    "content_index_distinct_count", "content_index_overflow", "first_timestamp", "last_timestamp",
+    "response_id", "provider", "model", "complete", "incomplete", "flush_reason",
+  ]) {
+    if (!summary.includes(field)) throw new Error(`session stream summary missing ${field}`);
+  }
+  if (!/algorithm:\s*stats\.hmac\.algorithm[\s\S]*key_id:\s*stats\.hmac\.keyId[\s\S]*digest:\s*stats\.hmac\.digestHex\(\)/.test(llmAuditSrc)) {
+    throw new Error("session stream summary must carry rolling HMAC algorithm/key_id/digest");
+  }
+  for (const forbidden of ["assistantMessageEvent", "partial", "request_body", "raw_response_text", "parsed_response"]) {
+    if (summary.includes(forbidden)) throw new Error(`summary schema retained forbidden field ${forbidden}`);
+  }
+});
+
+check("message_end and agent_end await summary flush before terminal append", () => {
+  if (!/eventType === "message_end"\) await flushTerminalStreams[\s\S]{0,250}?else if \(eventType === "agent_end"\) await flushTerminalStreams[\s\S]{0,500}?await appendLlmAudit/.test(llmAuditSrc)) {
+    throw new Error("terminal session rows must be appended only after awaited stream flush");
+  }
+  if (!/pi\.on\(eventName as any, async[\s\S]{0,120}?await auditSessionEvent/.test(llmAuditExtensionSrc)) {
+    throw new Error("llm-audit extension lifecycle handler must return the awaited flush promise");
+  }
+});
 
 console.log("Section: audit version bump");
 

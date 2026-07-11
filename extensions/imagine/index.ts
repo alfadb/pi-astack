@@ -24,7 +24,7 @@ import * as os from "node:os";
 import * as crypto from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { appendLlmAudit } from "../_shared/llm-audit";
+import { appendLlmAudit, controlledLlmAuditError, controlledLlmAuditUsage } from "../_shared/llm-audit";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -176,10 +176,33 @@ async function saveImageResult(
   };
 }
 
-function responseHeadersRecord(response: Response): Record<string, string> {
-  const headers: Record<string, string> = {};
-  response.headers.forEach((value, key) => { headers[key] = value; });
-  return headers;
+function imageResultAuditShape(items: Array<Record<string, unknown>> | undefined): {
+  image_count: number;
+  result_transport_kinds: string[];
+  result_byte_lengths: number[];
+} {
+  const kinds = new Set<string>();
+  const byteLengths: number[] = [];
+  let imageCount = 0;
+  for (const item of items ?? []) {
+    const inline = typeof item.b64_json === "string"
+      ? item.b64_json
+      : item.type === "image_generation_call" && typeof item.result === "string" ? item.result : undefined;
+    if (inline) {
+      imageCount += 1;
+      kinds.add("inline_bytes");
+      byteLengths.push(Buffer.byteLength(inline, "base64"));
+    } else if (typeof item.url === "string") {
+      imageCount += 1;
+      kinds.add("remote_reference");
+      byteLengths.push(0);
+    }
+  }
+  return { image_count: imageCount, result_transport_kinds: [...kinds].sort(), result_byte_lengths: byteLengths };
+}
+
+function emptyImageResultAuditShape(): ReturnType<typeof imageResultAuditShape> {
+  return { image_count: 0, result_transport_kinds: [], result_byte_lengths: [] };
 }
 
 async function editImage(
@@ -202,7 +225,6 @@ async function editImage(
     : params.prompt;
 
   const imageBytes = await fs.readFile(inputImage.path);
-  const imageSha256 = crypto.createHash("sha256").update(imageBytes).digest("hex");
   const form = new FormData();
   form.set("model", model);
   form.set("prompt", styledPrompt);
@@ -216,49 +238,18 @@ async function editImage(
   const started = Date.now();
   const callId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   const requestHeaders = { Authorization: `Bearer ${opts.apiKey}` };
-  const requestBody = {
-    type: "FormData",
-    fields: {
-      model,
-      prompt: styledPrompt,
-      output_format: "png",
-      ...(params.size ? { size: params.size } : {}),
-      ...(params.quality ? { quality: params.quality } : {}),
-      ...(params.inputFidelity ? { input_fidelity: params.inputFidelity } : {}),
-    },
-    image: {
-      path: inputImage.path,
-      filename: path.basename(inputImage.path),
-      mimeType: inputImage.mimeType,
-      byteLength: imageBytes.byteLength,
-      sha256: imageSha256,
-      redacted: true,
-    },
-  };
   const auditBase = {
     call_id: callId,
     module: "imagine",
     operation: "editImage",
     api_kind: "openai.images.edit",
     model_id: model,
+    has_input_image: true,
+    input_bytes: imageBytes.byteLength,
+    size: params.size,
+    quality: params.quality,
   };
-  await appendLlmAudit(opts.cwd, {
-    ...auditBase,
-    row_type: "start",
-    request_meta: {
-      url,
-      method: "POST",
-      headers: requestHeaders,
-      imagePath: inputImage.path,
-      inputFidelity: params.inputFidelity,
-      prompt: styledPrompt,
-      model,
-      size: params.size,
-      quality: params.quality,
-      style: params.style,
-    },
-    request_body: requestBody,
-  });
+  await appendLlmAudit(opts.cwd, { ...auditBase, row_type: "start" });
 
   let response: Response;
   try {
@@ -274,20 +265,23 @@ async function editImage(
       ...auditBase,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error: e,
+      ...emptyImageResultAuditShape(),
+      error: controlledLlmAuditError(opts.cwd, e),
     });
     return { ok: false, error: `Image edit network error: ${msg}` };
   }
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "unknown");
+    const failure = new Error(`Image edit HTTP ${response.status}: ${errText.slice(0, 500)}`);
     await appendLlmAudit(opts.cwd, {
       ...auditBase,
       row_type: "end",
       duration_ms: Date.now() - started,
       status: response.status,
-      headers: responseHeadersRecord(response),
-      raw_response_text: errText,
+      response_bytes: Buffer.byteLength(errText, "utf8"),
+      ...emptyImageResultAuditShape(),
+      error: controlledLlmAuditError(opts.cwd, failure),
       ok: false,
     });
     return {
@@ -302,14 +296,16 @@ async function editImage(
     const output = data.data as Array<Record<string, unknown>> | undefined;
     const imageBase64 = typeof output?.[0]?.b64_json === "string" ? output[0].b64_json : "";
     if (!imageBase64) {
+      const failure = new Error("image edit response did not contain inline image bytes");
       await appendLlmAudit(opts.cwd, {
         ...auditBase,
         row_type: "end",
         duration_ms: Date.now() - started,
         status: response.status,
-        headers: responseHeadersRecord(response),
-        raw_response_text: rawResponseText,
-        parsed_response: data,
+        response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
+        ...imageResultAuditShape(output),
+        usage: controlledLlmAuditUsage(data.usage),
+        error: controlledLlmAuditError(opts.cwd, failure),
         ok: false,
       });
       return {
@@ -334,11 +330,10 @@ async function editImage(
       row_type: "end",
       duration_ms: Date.now() - started,
       status: response.status,
-      headers: responseHeadersRecord(response),
-      raw_response_text: rawResponseText,
-      parsed_response: data,
-      saved_path: result.ok ? result.filepath : undefined,
-      result_error: result.ok ? undefined : result.error,
+      response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
+      ...imageResultAuditShape(output),
+      usage: controlledLlmAuditUsage(data.usage),
+      error: result.ok ? undefined : controlledLlmAuditError(opts.cwd, result.error),
       ok: result.ok,
     });
     return result;
@@ -347,7 +342,8 @@ async function editImage(
       ...auditBase,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error: e,
+      ...emptyImageResultAuditShape(),
+      error: controlledLlmAuditError(opts.cwd, e),
     });
     throw e;
   }
@@ -401,22 +397,12 @@ async function generateImage(
     operation: "generateImage",
     api_kind: "openai.responses.generate_image",
     model_id: reqBody.model,
+    has_input_image: false,
+    input_bytes: 0,
+    size: params.size,
+    quality: params.quality,
   };
-  await appendLlmAudit(opts.cwd, {
-    ...auditBase,
-    row_type: "start",
-    request_meta: {
-      url,
-      method: "POST",
-      headers: requestHeaders,
-      prompt: styledPrompt,
-      model: reqBody.model,
-      size: params.size,
-      quality: params.quality,
-      style: params.style,
-    },
-    request_body: reqBody,
-  });
+  await appendLlmAudit(opts.cwd, { ...auditBase, row_type: "start" });
 
   let response: Response;
   try {
@@ -432,20 +418,23 @@ async function generateImage(
       ...auditBase,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error: e,
+      ...emptyImageResultAuditShape(),
+      error: controlledLlmAuditError(opts.cwd, e),
     });
     return { ok: false, error: `Image generation network error: ${msg}` };
   }
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "unknown");
+    const failure = new Error(`Image generation HTTP ${response.status}: ${errText.slice(0, 500)}`);
     await appendLlmAudit(opts.cwd, {
       ...auditBase,
       row_type: "end",
       duration_ms: Date.now() - started,
       status: response.status,
-      headers: responseHeadersRecord(response),
-      raw_response_text: errText,
+      response_bytes: Buffer.byteLength(errText, "utf8"),
+      ...emptyImageResultAuditShape(),
+      error: controlledLlmAuditError(opts.cwd, failure),
       ok: false,
     });
     return {
@@ -470,10 +459,10 @@ async function generateImage(
           row_type: "end",
           duration_ms: Date.now() - started,
           status: response.status,
-          headers: responseHeadersRecord(response),
-          raw_response_text: rawResponseText,
+          response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
+          ...emptyImageResultAuditShape(),
+          error: controlledLlmAuditError(opts.cwd, sse.error),
           ok: false,
-          error: sse.error,
         });
         return { ok: false, error: sse.error };
       }
@@ -498,14 +487,16 @@ async function generateImage(
 
     if (!imageBase64) {
       const outputTypes = (output ?? []).map((x: any) => x.type).filter(Boolean).join(", ");
+      const failure = new Error("image generation response did not contain inline image bytes");
       await appendLlmAudit(opts.cwd, {
         ...auditBase,
         row_type: "end",
         duration_ms: Date.now() - started,
         status: response.status,
-        headers: responseHeadersRecord(response),
-        raw_response_text: rawResponseText,
-        parsed_response: data,
+        response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
+        ...imageResultAuditShape(output),
+        usage: controlledLlmAuditUsage(data.usage),
+        error: controlledLlmAuditError(opts.cwd, failure),
         ok: false,
       });
       return {
@@ -532,11 +523,10 @@ async function generateImage(
       row_type: "end",
       duration_ms: Date.now() - started,
       status: response.status,
-      headers: responseHeadersRecord(response),
-      raw_response_text: rawResponseText,
-      parsed_response: data,
-      saved_path: result.ok ? result.filepath : undefined,
-      result_error: result.ok ? undefined : result.error,
+      response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
+      ...imageResultAuditShape(output),
+      usage: controlledLlmAuditUsage(data.usage),
+      error: result.ok ? undefined : controlledLlmAuditError(opts.cwd, result.error),
       ok: result.ok,
     });
     return result;
@@ -545,7 +535,8 @@ async function generateImage(
       ...auditBase,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error: e,
+      ...emptyImageResultAuditShape(),
+      error: controlledLlmAuditError(opts.cwd, e),
     });
     throw e;
   }

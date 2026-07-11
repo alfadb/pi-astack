@@ -23,6 +23,7 @@
     "smoke:all": "node scripts/smoke-all.mjs",
     "smoke:audit-log-rotation": "node scripts/smoke-audit-log-rotation.mjs",
     "smoke:audit-log-maintenance": "node scripts/smoke-audit-log-maintenance.mjs",
+    "smoke:audit-log-prune": "node scripts/smoke-audit-log-prune.mjs",
     "probe:openai-context-window": "node scripts/probe-openai-context-window.mjs",
     "test:probe-openai-context-window": "node --test scripts/probe-openai-context-window.test.mjs",
     "smoke:llm-audit": "node scripts/smoke-llm-audit.mjs",

@@ -80,6 +80,8 @@ const runtimeStub = {
 };
 const llmAuditStub = {
   appendLlmAudit: async () => {},
+  controlledLlmAuditError: () => ({ category: "test" }),
+  controlledLlmAuditUsage: () => undefined,
 };
 const embTsPath = path.join(repoRoot, "extensions", "memory", "embedding.ts");
 const mod = loadCJS(transpile(embTsPath), embTsPath, new Map([

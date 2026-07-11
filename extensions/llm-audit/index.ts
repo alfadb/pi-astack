@@ -10,8 +10,8 @@ export default function (pi: ExtensionAPI): void {
   };
 
   for (const eventName of ["message_start", "message_update", "message_end", "agent_end"] as const) {
-    pi.on(eventName as any, (event: unknown) => {
-      auditSessionEvent(projectRoot, sessionMeta, event);
+    pi.on(eventName as any, async (event: unknown) => {
+      await auditSessionEvent(projectRoot, sessionMeta, event);
     });
   }
 

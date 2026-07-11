@@ -21,7 +21,7 @@ const require = createRequire(import.meta.url);
 const { default: createJitiDefault, createJiti } = require("jiti");
 const makeJiti = createJiti ?? createJitiDefault;
 const jiti = makeJiti(repoRoot, { interopDefault: true });
-const { appendLlmAudit } = jiti(path.join(repoRoot, "extensions/_shared/llm-audit.ts"));
+const { appendLlmAudit, controlledLlmAuditError, controlledLlmAuditUsage } = jiti(path.join(repoRoot, "extensions/_shared/llm-audit.ts"));
 
 // ── Config ────────────────────────────────────────────────────────────
 
@@ -98,6 +98,7 @@ async function callDeepSeek(systemPrompt, windowText) {
     "Content-Type": "application/json",
     "Authorization": `Bearer ${API_KEY}`,
   };
+  const inputLengths = body.messages.map((item) => item.content.length);
   const auditBase = {
     call_id: callId,
     module: "dossier",
@@ -108,8 +109,13 @@ async function callDeepSeek(systemPrompt, windowText) {
   await appendLlmAudit(repoRoot, {
     ...auditBase,
     row_type: "start",
-    request_meta: { url: CHAT_COMPLETIONS_URL, method: "POST", headers, timeoutMs: 60_000 },
-    request_body: body,
+    request_shape: {
+      method: "POST",
+      timeout_ms: 60_000,
+      input_count: inputLengths.length,
+      total_input_chars: inputLengths.reduce((sum, length) => sum + length, 0),
+      max_input_chars: Math.max(0, ...inputLengths),
+    },
   });
 
   try {
@@ -122,16 +128,18 @@ async function callDeepSeek(systemPrompt, windowText) {
     const rawResponseText = await res.text().catch(() => "");
 
     if (!res.ok) {
+      const failure = new Error(`HTTP ${res.status}: ${rawResponseText.substring(0, 200)}`);
       await appendLlmAudit(repoRoot, {
         ...auditBase,
         row_type: "end",
         duration_ms: Date.now() - started,
         status: res.status,
-        headers: Object.fromEntries(res.headers.entries()),
-        raw_response_text: rawResponseText,
+        response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
+        choice_count: 0,
+        error: controlledLlmAuditError(repoRoot, failure),
         ok: false,
       });
-      throw new Error(`HTTP ${res.status}: ${rawResponseText.substring(0, 200)}`);
+      throw failure;
     }
 
     let data;
@@ -143,8 +151,9 @@ async function callDeepSeek(systemPrompt, windowText) {
         row_type: "end",
         duration_ms: Date.now() - started,
         status: res.status,
-        headers: Object.fromEntries(res.headers.entries()),
-        raw_response_text: rawResponseText,
+        response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
+        choice_count: 0,
+        error: controlledLlmAuditError(repoRoot, e),
         ok: false,
       });
       throw e;
@@ -155,9 +164,10 @@ async function callDeepSeek(systemPrompt, windowText) {
       row_type: "end",
       duration_ms: Date.now() - started,
       status: res.status,
-      headers: Object.fromEntries(res.headers.entries()),
-      raw_response_text: rawResponseText,
-      parsed_response: data,
+      response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
+      choice_count: Array.isArray(data.choices) ? data.choices.length : 0,
+      finish_reason: typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined,
+      usage: controlledLlmAuditUsage(data.usage),
       ok: choice?.finish_reason !== "length",
     });
     if (choice?.finish_reason === "length") {
@@ -169,7 +179,7 @@ async function callDeepSeek(systemPrompt, windowText) {
       ...auditBase,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error: e,
+      error: controlledLlmAuditError(repoRoot, e),
     });
     throw e;
   }

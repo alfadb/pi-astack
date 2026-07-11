@@ -22,7 +22,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
 import { abrainStateDir, acquireFileLock, resolveUserGlobalAbrainHome } from "../_shared/runtime";
-import { appendLlmAudit } from "../_shared/llm-audit";
+import { appendLlmAudit, controlledLlmAuditError, controlledLlmAuditUsage } from "../_shared/llm-audit";
 import type { MemoryEntry } from "./types";
 import type { EmbeddingSettings } from "./settings";
 
@@ -134,6 +134,8 @@ async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt
     ...(cfg.headers || {}),
   };
   const requestBody = { model: cfg.model, input: chunk };
+  const projectRoot = process.cwd();
+  const totalInputChars = chunk.reduce((sum, item) => sum + item.length, 0);
   const auditBase = {
     call_id: callId,
     module: "memory",
@@ -142,12 +144,13 @@ async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt
     model_id: cfg.model,
     attempt,
     input_count: chunk.length,
+    total_input_chars: totalInputChars,
+    max_input_chars: chunk.reduce((maximum, item) => Math.max(maximum, item.length), 0),
   };
-  await appendLlmAudit(process.cwd(), {
+  await appendLlmAudit(projectRoot, {
     ...auditBase,
     row_type: "start",
-    request_meta: { url, method: "POST", headers: requestHeaders, timeoutMs: cfg.timeoutMs },
-    request_body: requestBody,
+    request_shape: { method: "POST", timeout_ms: cfg.timeoutMs },
   });
 
   try {
@@ -158,72 +161,83 @@ async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt
       signal: AbortSignal.timeout(cfg.timeoutMs),
     });
     const rawResponseText = await res.text().catch(() => "");
+    const responseBytes = Buffer.byteLength(rawResponseText, "utf8");
     if (!res.ok) {
-      await appendLlmAudit(process.cwd(), {
+      const failure = new Error(`embedding HTTP ${res.status}: ${rawResponseText.slice(0, 200)}`);
+      await appendLlmAudit(projectRoot, {
         ...auditBase,
         row_type: "end",
         duration_ms: Date.now() - started,
         status: res.status,
-        headers: Object.fromEntries(res.headers.entries()),
-        raw_response_text: rawResponseText,
+        response_bytes: responseBytes,
+        vector_count: 0,
+        dimension: 0,
         ok: false,
+        error: controlledLlmAuditError(projectRoot, failure),
       });
-      throw new Error(`embedding HTTP ${res.status}: ${rawResponseText.slice(0, 200)}`);
+      throw failure;
     }
-    let data: { data?: Array<{ index?: number; embedding: number[] }> };
+    let data: { data?: Array<{ index?: number; embedding: number[] }>; usage?: unknown };
     try {
-      data = JSON.parse(rawResponseText) as { data?: Array<{ index?: number; embedding: number[] }> };
-    } catch (e) {
-      await appendLlmAudit(process.cwd(), {
+      data = JSON.parse(rawResponseText) as { data?: Array<{ index?: number; embedding: number[] }>; usage?: unknown };
+    } catch (error) {
+      await appendLlmAudit(projectRoot, {
         ...auditBase,
         row_type: "end",
         duration_ms: Date.now() - started,
         status: res.status,
-        headers: Object.fromEntries(res.headers.entries()),
-        raw_response_text: rawResponseText,
+        response_bytes: responseBytes,
+        vector_count: 0,
+        dimension: 0,
         ok: false,
+        error: controlledLlmAuditError(projectRoot, error),
       });
-      throw e;
+      throw error;
     }
     if (!Array.isArray(data.data) || data.data.length !== chunk.length) {
-      await appendLlmAudit(process.cwd(), {
+      const failure = new Error(`embedding bad response: expected ${chunk.length} vectors, got ${data.data?.length}`);
+      await appendLlmAudit(projectRoot, {
         ...auditBase,
         row_type: "end",
         duration_ms: Date.now() - started,
         status: res.status,
-        headers: Object.fromEntries(res.headers.entries()),
-        raw_response_text: rawResponseText,
-        parsed_response: data,
+        response_bytes: responseBytes,
+        vector_count: Array.isArray(data.data) ? data.data.length : 0,
+        dimension: 0,
+        usage: controlledLlmAuditUsage(data.usage),
         ok: false,
+        error: controlledLlmAuditError(projectRoot, failure),
       });
-      throw new Error(`embedding bad response: expected ${chunk.length} vectors, got ${data.data?.length}`);
+      throw failure;
     }
-    await appendLlmAudit(process.cwd(), {
+    const vectors = data.data
+      .slice()
+      .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+      .map((item) => item.embedding);
+    await appendLlmAudit(projectRoot, {
       ...auditBase,
       row_type: "end",
       duration_ms: Date.now() - started,
       status: res.status,
-      headers: Object.fromEntries(res.headers.entries()),
-      raw_response_text: rawResponseText,
-      parsed_response: data,
+      response_bytes: responseBytes,
+      vector_count: vectors.length,
+      dimension: Array.isArray(vectors[0]) ? vectors[0].length : 0,
+      usage: controlledLlmAuditUsage(data.usage),
       ok: true,
     });
-    return data.data
-      .slice()
-      .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-      .map((d) => d.embedding);
-  } catch (e) {
-    await appendLlmAudit(process.cwd(), {
+    return vectors;
+  } catch (error) {
+    await appendLlmAudit(projectRoot, {
       ...auditBase,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error: e,
+      error: controlledLlmAuditError(projectRoot, error),
     });
     if (attempt < cfg.maxRetries) {
       await sleep(1000 * (attempt + 1));
       return embedBatch(chunk, cfg, attempt + 1);
     }
-    throw e;
+    throw error;
   }
 }
 
