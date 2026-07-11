@@ -421,12 +421,31 @@ export interface HubDeps {
       maxRuntimeMs?: number;
       taskProfile?: string;
       onProgress?: (progress: { reason: string; at: number; heartbeatTracePath?: string; toolCallCount?: number }) => void;
+      reasoningTrace?: {
+        dispatchToolCallId?: string;
+        taskIndex?: number;
+        taskCount?: number;
+        maxTraceBytes?: number;
+        /** @deprecated use maxTraceBytes. */
+        maxRawReasoningBytes?: number;
+        workflowRunId?: string;
+        workflowStageId?: string;
+      };
     },
   ) => Promise<{
     output: string; error?: string; failureType?: string; durationMs: number; toolCallCount?: number;
     heartbeat_liveness?: { msSinceLastBeat?: number };
     usage?: { input: number; output: number; cost: number };
+    reasoning_trace_path?: string;
+    reasoning_chars?: number;
+    reasoning_chunks?: number;
+    reasoning_truncated?: boolean;
+    reasoning_sha256?: string;
+    reasoning_trace_status?: "complete" | "forced_incomplete" | "write_failed";
+    reasoning_trace_error_code?: string;
+    reasoning_trace_bytes?: number;
   }>;
+  reasoningTraceFields: (result: unknown) => Record<string, unknown>;
   appendDispatchAudit: (projectRoot: string, anchor: CausalAnchor | undefined, event: Record<string, unknown>) => Promise<void>;
   providerFromModel: (model: string) => string;
   validateTools: (tools: string | undefined) => { ok: boolean; reason?: string };
@@ -481,7 +500,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
     },
     ...(deps.renderCall ? { renderCall: deps.renderCall } : {}),
     ...(deps.renderResult ? { renderResult: deps.renderResult } : {}),
-    async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, ctx: Record<string, unknown>) {
+    async execute(toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, ctx: Record<string, unknown>) {
       const task = typeof params.task === "string" ? params.task : "";
       if (!task.trim()) {
         return { content: [{ type: "text" as const, text: "dispatch_hub: 'task' is required." }], details: { kind: "dispatch_hub_no_task" }, isError: true };
@@ -538,7 +557,11 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       // runs (later hub_decision overwrote earlier); hub_run_id fixes that.
       const hubRunId = randomUUID();
       const emit = (anchor: CausalAnchor | undefined, event: Record<string, unknown>) =>
-        deps.appendDispatchAudit(projectRoot, anchor, { ...event, hub_run_id: hubRunId });
+        deps.appendDispatchAudit(projectRoot, anchor, {
+          ...event,
+          hub_run_id: hubRunId,
+          dispatch_tool_call_id: toolCallId,
+        });
 
       // ── Hub planning call ──
       const planPrompt = buildHubPlanPrompt({ task, roster, maxWorkers: hubCfg.maxWorkers, hubModel });
@@ -549,14 +572,18 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       // + a 0-worker hub_summary so failed invocations still leave a joinable
       // trace, then return a graceful error — never crash the tool, never execute
       // an errored plan. Shared by all three failure routes below.
-      const failPlanning = (reason: string, failureType: string, planText: string, usage?: { input: number; output: number; cost: number }, durMs = 0) => {
-        void emit(hubAnchor, buildHubDecisionRow({
-          hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText,
-          workers: [], rationale: "", warnings: [reason], sameVendorAsHub: 0, planDiversity: "single-vendor",
-          ...(mainVendor ? { mainVendor } : {}),
-          hubDurationMs: durMs, hubResult: "fail", hubFailureType: failureType,
-          ...(usage ? { usage } : {}),
-        }));
+      const failPlanning = (reason: string, failureType: string, planText: string, usage?: { input: number; output: number; cost: number }, durMs = 0, traceSource?: unknown) => {
+        const reasoningFields = deps.reasoningTraceFields(traceSource);
+        void emit(hubAnchor, {
+          ...buildHubDecisionRow({
+            hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText,
+            workers: [], rationale: "", warnings: [reason], sameVendorAsHub: 0, planDiversity: "single-vendor",
+            ...(mainVendor ? { mainVendor } : {}),
+            hubDurationMs: durMs, hubResult: "fail", hubFailureType: failureType,
+            ...(usage ? { usage } : {}),
+          }),
+          ...reasoningFields,
+        });
         void emit(summaryAnchor, buildHubSummaryRow({
           workerCount: 0, successCount: 0, failedCount: 0, terminalState: "failed",
           hubCost: usage?.cost ?? 0, workersCost: 0, hubDurationMs: durMs, totalWallMs: durMs, dualExecSampled: false,
@@ -571,6 +598,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
             error: reason,
             failure_type: failureType,
             hub_model: hubModel,
+            hub_reasoning: reasoningFields,
           },
           isError: true,
         };
@@ -590,12 +618,20 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
             {
               anchor: hubAnchor,
               projectRoot,
+              reasoningTrace: { dispatchToolCallId: toolCallId },
               onProgress: (p) => progress.applyRunProgress(hubProgressTask, p),
             },
           ),
         );
       } catch (err) {
-        return failPlanning(`hub planning call threw: ${(err as Error)?.message ?? String(err)}`, "hub_call_threw", "", undefined, Date.now() - hubStart);
+        return failPlanning(
+          `hub planning call threw: ${(err as Error)?.message ?? String(err)}`,
+          "hub_call_threw",
+          "",
+          undefined,
+          Date.now() - hubStart,
+          err,
+        );
       }
       const hubDurationMs = Date.now() - hubStart;
 
@@ -603,22 +639,25 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       // be executed even if its partial output happens to parse as JSON — check
       // hubRes.error BEFORE parsing/executing.
       if (hubRes.error) {
-        return failPlanning(`hub planning errored: ${hubRes.error}`, hubRes.failureType ?? "hub_call_error", hubRes.output ?? "", hubRes.usage, hubDurationMs);
+        return failPlanning(`hub planning errored: ${hubRes.error}`, hubRes.failureType ?? "hub_call_error", hubRes.output ?? "", hubRes.usage, hubDurationMs, hubRes);
       }
 
       const parsed = parseHubPlan(hubRes.output ?? "");
       if (!parsed.ok) {
-        return failPlanning(`plan parse failed: ${parsed.error}`, hubRes.failureType ?? "plan_parse_error", hubRes.output ?? "", hubRes.usage, hubDurationMs);
+        return failPlanning(`plan parse failed: ${parsed.error}`, hubRes.failureType ?? "plan_parse_error", hubRes.output ?? "", hubRes.usage, hubDurationMs, hubRes);
       }
       progress.updateFromResult(hubProgressTask, hubRes);
 
       const v = validateHubPlan(parsed.plan, { roster, hubModel, maxWorkers: hubCfg.maxWorkers });
-      void emit(hubAnchor, buildHubDecisionRow({
-        hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText: hubRes.output ?? "",
-        workers: v.workers, rationale: parsed.plan.rationale, warnings: v.warnings, sameVendorAsHub: v.sameVendorAsHub, planDiversity: v.planDiversity,
-        ...(mainVendor ? { mainVendor } : {}),
-        hubDurationMs, hubResult: "ok", ...(hubRes.usage ? { usage: hubRes.usage } : {}),
-      }));
+      void emit(hubAnchor, {
+        ...buildHubDecisionRow({
+          hubModel, hubThinking: hubCfg.thinking, taskChars: task.length, planText: hubRes.output ?? "",
+          workers: v.workers, rationale: parsed.plan.rationale, warnings: v.warnings, sameVendorAsHub: v.sameVendorAsHub, planDiversity: v.planDiversity,
+          ...(mainVendor ? { mainVendor } : {}),
+          hubDurationMs, hubResult: "ok", ...(hubRes.usage ? { usage: hubRes.usage } : {}),
+        }),
+        ...deps.reasoningTraceFields(hubRes),
+      });
 
       if (v.workers.length === 0) {
         void emit(summaryAnchor, buildHubSummaryRow({
@@ -628,7 +667,13 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         finishProgress("failed", { running: 0, failed: 1, success: 0, total: 1 }, hubDurationMs, true);
         return {
           content: [{ type: "text" as const, text: `❌ dispatch_hub: no valid workers after validation. ${v.warnings.join("; ")}` }],
-          details: { kind: "dispatch_hub_no_valid_workers", ...progress.details(progressSnapshot), warnings: v.warnings, hub_model: hubModel },
+          details: {
+            kind: "dispatch_hub_no_valid_workers",
+            ...progress.details(progressSnapshot),
+            warnings: v.warnings,
+            hub_model: hubModel,
+            hub_reasoning: deps.reasoningTraceFields(hubRes),
+          },
           isError: true,
         };
       }
@@ -704,6 +749,11 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
                       anchor: subAnchor,
                       projectRoot,
                       taskProfile: t.taskProfile,
+                      reasoningTrace: {
+                        dispatchToolCallId: toolCallId,
+                        taskIndex: i,
+                        taskCount: total,
+                      },
                       ...(progressTask
                         ? { onProgress: (p) => progress.applyRunProgress(progressTask, p) }
                         : {}),
@@ -711,7 +761,13 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
                   ),
                 );
               } catch (err) {
-                res = { output: "", error: `worker crashed: ${(err as Error)?.message ?? String(err)}`, failureType: "crash", durationMs: 0 };
+                res = {
+                  output: "",
+                  error: `worker crashed: ${(err as Error)?.message ?? String(err)}`,
+                  failureType: "crash",
+                  durationMs: 0,
+                  ...deps.reasoningTraceFields(err),
+                };
               }
             }
             if (progressTask) {
@@ -737,6 +793,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
               result: res.error ? "fail" : "ok",
               ...(res.failureType ? { failure_type: res.failureType } : {}),
               ...("toolCallCount" in res && typeof (res as { toolCallCount?: unknown }).toolCallCount === "number" ? { tool_call_count: (res as { toolCallCount: number }).toolCallCount } : {}),
+              ...deps.reasoningTraceFields(res),
               output_chars: res.output?.length ?? 0,
               ...(res.usage ? { tokens_in: res.usage.input, tokens_out: res.usage.output, cost: res.usage.cost } : {}),
             });
@@ -791,7 +848,14 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
         details: {
           kind: "dispatch_hub",
           ...progress.details(progressSnapshot),
+          dispatch_tool_call_id: toolCallId,
           hub_model: hubModel,
+          hub_reasoning: deps.reasoningTraceFields(hubRes),
+          tasks: dense.map((result, index) => ({
+            task_index: index,
+            model: tasks[index]?.model,
+            ...deps.reasoningTraceFields(result),
+          })),
           worker_count: total,
           success_count: successCount,
           failed_count: failedCount,

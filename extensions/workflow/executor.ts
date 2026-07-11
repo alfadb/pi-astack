@@ -66,6 +66,7 @@ export type FailureSource =
 
 export interface StageRunRequest {
   stageId: string;
+  workflowRunId: string;
   /** W13: label the production runner feeds to deriveSubAgentAnchor. */
   anchorLabel: string;
   model: string;
@@ -86,9 +87,38 @@ export interface StageRunResult {
   durationMs: number;
   usage?: { input: number; output: number; total: number; cost: number };
   toolCallCount?: number;
+  reasoning_trace_path?: string;
+  reasoning_chars?: number;
+  reasoning_chunks?: number;
+  reasoning_truncated?: boolean;
+  reasoning_sha256?: string;
+  reasoning_trace_status?: "complete" | "forced_incomplete" | "write_failed";
+  reasoning_trace_error_code?: string;
+  reasoning_trace_bytes?: number;
 }
 
 export type StageRunner = (req: StageRunRequest) => Promise<StageRunResult>;
+
+function reasoningTraceFieldsFromThrown(value: unknown): Partial<StageRunResult> {
+  if (!value || typeof value !== "object") return {};
+  const record = value as Record<string, unknown>;
+  if (typeof record.reasoning_trace_path !== "string" || record.reasoning_trace_path.length === 0) return {};
+  const status = record.reasoning_trace_status;
+  return {
+    reasoning_trace_path: record.reasoning_trace_path,
+    ...(typeof record.reasoning_chars === "number" ? { reasoning_chars: record.reasoning_chars } : {}),
+    ...(typeof record.reasoning_chunks === "number" ? { reasoning_chunks: record.reasoning_chunks } : {}),
+    ...(typeof record.reasoning_truncated === "boolean" ? { reasoning_truncated: record.reasoning_truncated } : {}),
+    ...(typeof record.reasoning_sha256 === "string" ? { reasoning_sha256: record.reasoning_sha256 } : {}),
+    ...(status === "complete" || status === "forced_incomplete" || status === "write_failed"
+      ? { reasoning_trace_status: status }
+      : {}),
+    ...(typeof record.reasoning_trace_error_code === "string"
+      ? { reasoning_trace_error_code: record.reasoning_trace_error_code }
+      : {}),
+    ...(typeof record.reasoning_trace_bytes === "number" ? { reasoning_trace_bytes: record.reasoning_trace_bytes } : {}),
+  };
+}
 
 export interface StageRecord {
   id: string;
@@ -106,6 +136,14 @@ export interface StageRecord {
   degraded_upstreams?: string[];
   cost?: number;
   tool_call_count?: number;
+  reasoning_trace_path?: string;
+  reasoning_chars?: number;
+  reasoning_chunks?: number;
+  reasoning_truncated?: boolean;
+  reasoning_sha256?: string;
+  reasoning_trace_status?: "complete" | "forced_incomplete" | "write_failed";
+  reasoning_trace_error_code?: string;
+  reasoning_trace_bytes?: number;
 }
 
 export interface WorkflowRunResult {
@@ -368,6 +406,14 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(rec.error ? { error: rec.error.slice(0, 300) } : {}),
       ...(typeof rec.cost === "number" ? { cost: rec.cost } : {}),
       ...(typeof rec.tool_call_count === "number" ? { tool_call_count: rec.tool_call_count } : {}),
+      ...(rec.reasoning_trace_path ? { reasoning_trace_path: rec.reasoning_trace_path } : {}),
+      ...(typeof rec.reasoning_chars === "number" ? { reasoning_chars: rec.reasoning_chars } : {}),
+      ...(typeof rec.reasoning_chunks === "number" ? { reasoning_chunks: rec.reasoning_chunks } : {}),
+      ...(typeof rec.reasoning_truncated === "boolean" ? { reasoning_truncated: rec.reasoning_truncated } : {}),
+      ...(rec.reasoning_sha256 ? { reasoning_sha256: rec.reasoning_sha256 } : {}),
+      ...(rec.reasoning_trace_status ? { reasoning_trace_status: rec.reasoning_trace_status } : {}),
+      ...(rec.reasoning_trace_error_code ? { reasoning_trace_error_code: rec.reasoning_trace_error_code } : {}),
+      ...(typeof rec.reasoning_trace_bytes === "number" ? { reasoning_trace_bytes: rec.reasoning_trace_bytes } : {}),
     });
     await persistState(runStatus);
   };
@@ -403,6 +449,7 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
         const timeoutMs = Math.min(perStageTimeout, Math.max(1, wallRemaining()));
         res = await opts.runner({
           stageId: stage.id,
+          workflowRunId: opts.runId,
           anchorLabel: `workflow[${opts.doc.name}].stage[${parent ? `${parent.id}/` : ""}${stage.id}]`,
           model,
           thinking,
@@ -418,6 +465,7 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
           error: `runner crashed: ${(e instanceof Error ? e.message : String(e)).slice(0, 300)}`,
           failureType: "crash",
           durationMs: 0,
+          ...reasoningTraceFieldsFromThrown(e),
         };
       } finally {
         sem.release();
@@ -451,6 +499,14 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       duration_ms: now() - startMs,
       ...(typeof res.usage?.cost === "number" ? { cost: res.usage.cost } : {}),
       ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
+      ...(res.reasoning_trace_path ? { reasoning_trace_path: res.reasoning_trace_path } : {}),
+      ...(typeof res.reasoning_chars === "number" ? { reasoning_chars: res.reasoning_chars } : {}),
+      ...(typeof res.reasoning_chunks === "number" ? { reasoning_chunks: res.reasoning_chunks } : {}),
+      ...(typeof res.reasoning_truncated === "boolean" ? { reasoning_truncated: res.reasoning_truncated } : {}),
+      ...(res.reasoning_sha256 ? { reasoning_sha256: res.reasoning_sha256 } : {}),
+      ...(res.reasoning_trace_status ? { reasoning_trace_status: res.reasoning_trace_status } : {}),
+      ...(res.reasoning_trace_error_code ? { reasoning_trace_error_code: res.reasoning_trace_error_code } : {}),
+      ...(typeof res.reasoning_trace_bytes === "number" ? { reasoning_trace_bytes: res.reasoning_trace_bytes } : {}),
     };
     if (res.error && haltSignal()) {
       // In-flight unit cut by external abort / run timeout → cancelled

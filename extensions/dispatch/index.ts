@@ -50,7 +50,10 @@ import {
   type CausalAnchor,
 } from "../_shared/causal-anchor";
 import { dispatchAuditPath } from "../_shared/runtime";
-import { auditSessionEvent } from "../_shared/llm-audit";
+import {
+  createDispatchReasoningTrace,
+  type DispatchReasoningTraceWriter,
+} from "./reasoning-trace";
 import {
   buildTerminalStateFields,
   inferParallelTerminalState,
@@ -98,6 +101,7 @@ export const MAX_CONCURRENCY = 4;
 export const MAX_PROVIDER_CONCURRENCY = DEFAULT_DISPATCH_SETTINGS.maxProviderConcurrency;
 export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes without progress
 const DEFAULT_MAX_RUNTIME_MULTIPLIER = 4;
+const ABORT_TRACE_DRAIN_MS = 3_000;
 
 export function providerFromModel(model: string): string {
   const provider = String(model ?? "").split("/")[0]?.trim();
@@ -957,6 +961,15 @@ export interface AgentResult {
   };
   /** Heartbeat trace path written for this sub-agent run, when anchor is available. */
   heartbeat_trace_path?: string;
+  /** Per-worker reasoning trace and exact delivered thinking_delta totals. */
+  reasoning_trace_path?: string;
+  reasoning_chars?: number;
+  reasoning_chunks?: number;
+  reasoning_truncated?: boolean;
+  reasoning_sha256?: string;
+  reasoning_trace_status?: "complete" | "forced_incomplete" | "write_failed";
+  reasoning_trace_error_code?: string;
+  reasoning_trace_bytes?: number;
   /** Stage 1c heartbeat consumer assessment captured at run settlement. */
   heartbeat_liveness?: ReturnType<typeof assessLivenessForAnchor>;
   /** Retry history from pi's auto_retry_start / auto_retry_end events.
@@ -972,6 +985,30 @@ export interface AgentResult {
     finalOutcome?: "succeeded" | "exhausted";
     finalAttempt?: number;
     finalError?: string;
+  };
+}
+
+export function dispatchReasoningTraceFields(result: unknown): Record<string, unknown> {
+  const trace = result as Pick<AgentResult,
+    | "reasoning_trace_path"
+    | "reasoning_chars"
+    | "reasoning_chunks"
+    | "reasoning_truncated"
+    | "reasoning_sha256"
+    | "reasoning_trace_status"
+    | "reasoning_trace_error_code"
+    | "reasoning_trace_bytes"
+  > | undefined;
+  if (!trace?.reasoning_trace_path) return {};
+  return {
+    reasoning_trace_path: trace.reasoning_trace_path,
+    reasoning_chars: trace.reasoning_chars ?? 0,
+    reasoning_chunks: trace.reasoning_chunks ?? 0,
+    reasoning_truncated: trace.reasoning_truncated === true,
+    reasoning_sha256: trace.reasoning_sha256 ?? "",
+    reasoning_trace_status: trace.reasoning_trace_status ?? "complete",
+    ...(trace.reasoning_trace_error_code ? { reasoning_trace_error_code: trace.reasoning_trace_error_code } : {}),
+    ...(typeof trace.reasoning_trace_bytes === "number" ? { reasoning_trace_bytes: trace.reasoning_trace_bytes } : {}),
   };
 }
 
@@ -1182,6 +1219,16 @@ export async function runInProcess(
     maxRuntimeMs?: number;
     taskProfile?: string;
     onProgress?: (progress: DispatchRunProgress) => void;
+    reasoningTrace?: {
+      dispatchToolCallId?: string;
+      taskIndex?: number;
+      taskCount?: number;
+      maxTraceBytes?: number;
+      /** @deprecated use maxTraceBytes. */
+      maxRawReasoningBytes?: number;
+      workflowRunId?: string;
+      workflowStageId?: string;
+    };
   },
 ): Promise<AgentResult> {
   const start = Date.now();
@@ -1205,6 +1252,8 @@ export async function runInProcess(
     projectRoot: heartbeatProjectRoot,
     startedNote: `model=${modelStr}`,
   });
+  let reasoningTrace: DispatchReasoningTraceWriter | undefined;
+  let reasoningTraceEnded = false;
 
   // R8 P1 fix (Opus P0-A + GPT-5.5 P1-1 + DeepSeek P1-2 unanimous):
   // wrap the entire body in try/finally so heartbeat.stop() fires on
@@ -1216,6 +1265,47 @@ export async function runInProcess(
   // heartbeat.stop() is idempotent + best-effort, so wrapping is
   // mechanically safe.
   try {
+  if (heartbeatCtx?.reasoningTrace) {
+    reasoningTrace = createDispatchReasoningTrace({
+      projectRoot: heartbeatProjectRoot,
+      anchor: heartbeatAnchor,
+      dispatchToolCallId: heartbeatCtx.reasoningTrace.dispatchToolCallId,
+      taskIndex: heartbeatCtx.reasoningTrace.taskIndex,
+      taskCount: heartbeatCtx.reasoningTrace.taskCount,
+      model: modelStr,
+      thinking,
+      maxTraceBytes: heartbeatCtx.reasoningTrace.maxTraceBytes,
+      maxRawReasoningBytes: heartbeatCtx.reasoningTrace.maxRawReasoningBytes,
+      workflowRunId: heartbeatCtx.reasoningTrace.workflowRunId,
+      workflowStageId: heartbeatCtx.reasoningTrace.workflowStageId,
+    });
+  }
+  const finalizeReasoningTrace = async (
+    result: AgentResult,
+    opts: { forceIncomplete?: boolean; runSettled?: boolean } = {},
+  ): Promise<AgentResult> => {
+    if (!reasoningTrace) return result;
+    const summary = await reasoningTrace.end({
+      stopReason: result.stopReason ?? (result.failureType === "aborted" ? "aborted" : undefined),
+      error: result.error,
+      usage: result.usage,
+      forceIncomplete: opts.forceIncomplete === true,
+      runSettled: opts.runSettled === true,
+    });
+    reasoningTraceEnded = true;
+    return {
+      ...result,
+      reasoning_trace_path: summary.reasoning_trace_path,
+      reasoning_chars: summary.reasoning_chars,
+      reasoning_chunks: summary.reasoning_chunks,
+      reasoning_truncated: summary.reasoning_truncated,
+      reasoning_sha256: summary.reasoning_sha256,
+      reasoning_trace_status: summary.reasoning_trace_status,
+      reasoning_trace_bytes: summary.reasoning_trace_bytes,
+      ...(summary.reasoning_trace_error_code ? { reasoning_trace_error_code: summary.reasoning_trace_error_code } : {}),
+    };
+  };
+
   const enrichHeartbeat = (result: AgentResult): AgentResult => {
     const heartbeat_trace_path = heartbeat.tracePath;
     if (!heartbeatAnchor || !heartbeat_trace_path) return result;
@@ -1241,13 +1331,13 @@ export async function runInProcess(
   // Resolve model
   const model = resolveModel(modelStr, refreshedModelRegistry);
   if (!model) {
-    return {
+    return finalizeReasoningTrace({
       output: "",
       error: `Model not found: ${modelStr}`,
       failureType: "model_not_found",
       durationMs: Date.now() - start,
       toolCallCount,
-    };
+    });
   }
 
   const effectiveMaxOutputTokens = resolveMaxOutputTokens(model);
@@ -1335,7 +1425,10 @@ export async function runInProcess(
   };
 
   if (signal.aborted) {
-    return { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount };
+    return finalizeReasoningTrace(
+      { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount },
+      { forceIncomplete: true },
+    );
   }
   signal.addEventListener("abort", onAbort, { once: true });
 
@@ -1454,17 +1547,7 @@ export async function runInProcess(
       // NOTE: subscribe callbacks are serialized by the agent core — no
       // concurrent invocations — so retryHistory.entries.push is safe.
       const unsub = session.subscribe((event: any) => {
-        auditSessionEvent(heartbeatProjectRoot, {
-          module: "dispatch",
-          operation: "subagent_session_event",
-          model_ref: modelStr,
-          thinking,
-          session_scope: "subagent",
-          sub_agent_label: heartbeatAnchor?.sub_agent_label,
-          subturn: heartbeatAnchor?.subturn,
-          prompt_chars: prompt.length,
-          tool_allowlist: tools,
-        }, event);
+        reasoningTrace?.handleSessionEvent(event);
         const eventType = String(event?.type ?? "unknown");
         if (eventType === "tool_execution_start") {
           toolCallCount++;
@@ -1655,7 +1738,9 @@ export async function runInProcess(
     }
   })();
 
-  const result = await Promise.race([runPromise, timeoutPromise, governorPromise]);
+  let runPromiseSettled = false;
+  const trackedRunPromise = runPromise.finally(() => { runPromiseSettled = true; });
+  const result = await Promise.race([trackedRunPromise, timeoutPromise, governorPromise]);
   const resultWithBudget = effectiveMaxOutputTokens === undefined
     ? result
     : { ...result, maxOutputTokens: effectiveMaxOutputTokens };
@@ -1669,7 +1754,59 @@ export async function runInProcess(
   // MaxListenersExceededWarning). Idempotent: a no-op if a runPromise terminal
   // path already removed it.
   signal.removeEventListener("abort", onAbort);
-  return enrichHeartbeat(resultWithBudget);
+  const abortRace = resultWithBudget.failureType === "timeout" ||
+    resultWithBudget.failureType === "timeout_partial" ||
+    resultWithBudget.failureType === "guardrail_stop" ||
+    resultWithBudget.failureType === "tool_budget_exceeded" ||
+    resultWithBudget.failureType === "aborted";
+  if (abortRace && !runPromiseSettled) {
+    await new Promise<void>((resolve) => {
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(finish, ABORT_TRACE_DRAIN_MS);
+      trackedRunPromise.then(finish, finish);
+    });
+  }
+  const resultWithHeartbeat = enrichHeartbeat(resultWithBudget);
+  return finalizeReasoningTrace(resultWithHeartbeat, {
+    forceIncomplete: abortRace,
+    runSettled: runPromiseSettled,
+  });
+  } catch (error) {
+    let thrown = error;
+    if (reasoningTrace && !reasoningTraceEnded) {
+      const summary = await reasoningTrace.end({ error, forceIncomplete: true, runSettled: false });
+      reasoningTraceEnded = true;
+      const fields = {
+        reasoning_trace_path: summary.reasoning_trace_path,
+        reasoning_chars: summary.reasoning_chars,
+        reasoning_chunks: summary.reasoning_chunks,
+        reasoning_truncated: summary.reasoning_truncated,
+        reasoning_sha256: summary.reasoning_sha256,
+        reasoning_trace_status: summary.reasoning_trace_status,
+        reasoning_trace_bytes: summary.reasoning_trace_bytes,
+        ...(summary.reasoning_trace_error_code ? { reasoning_trace_error_code: summary.reasoning_trace_error_code } : {}),
+      };
+      let attached = false;
+      if (error && typeof error === "object") {
+        try {
+          Object.assign(error, fields);
+          attached = dispatchReasoningTraceFields(error).reasoning_trace_path === summary.reasoning_trace_path;
+        } catch { /* wrap non-extensible errors below */ }
+      }
+      if (!attached) {
+        const wrapped = new Error(error instanceof Error ? error.message : String(error), { cause: error });
+        Object.assign(wrapped, fields);
+        thrown = wrapped;
+      }
+    }
+    throw thrown;
   } finally {
     // ADR 0027 §C2' Stage 1b R8 P1 fix: heartbeat.stop() in finally
     // closes the lifecycle on EVERY terminal path. Idempotent +
@@ -1680,6 +1817,14 @@ export async function runInProcess(
     //   - early return for pre-aborted signal
     //   - getSharedInfra rejection (Opus P1-C)
     //   - any unexpected throw from session/prompt path
+    if (reasoningTrace && !reasoningTraceEnded) {
+      await reasoningTrace.end({
+        error: "run terminated before a dispatch result was produced",
+        forceIncomplete: true,
+        runSettled: false,
+      });
+      reasoningTraceEnded = true;
+    }
     heartbeat.stop();
   }
 }
@@ -1861,7 +2006,7 @@ export default function (pi: ExtensionAPI) {
     // happens with bare `async execute` — then subsequent returns with
     // different details shapes fail to assign to that locked TDetails).
     // This matches what memory/index.ts does via wrapToolResult.
-    async execute(_id: string, params: any, signal: AbortSignal, onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
+    async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
       const toolCheck = validateTools(params.tools);
       if (!toolCheck.ok) {
         // ADR 0027 §C5 v1 P1 fix (R6 GPT-5.5 P1-3): tool_rejected is a
@@ -1884,6 +2029,7 @@ export default function (pi: ExtensionAPI) {
           // row_kind:"task"; dispatch_agent should match for symmetry so
           // jq queries filtering by row_kind catch both.
           row_kind: "task",
+          dispatch_tool_call_id: toolCallId,
           model: params.model,
           thinking: params.thinking,
           tools: params.tools ?? null,
@@ -1903,6 +2049,7 @@ export default function (pi: ExtensionAPI) {
             kind: "tool_rejected",
             reason: toolCheck.reason,
             terminalState: rejectTsFields.terminal_state,
+            dispatch_tool_call_id: toolCallId,
             ...(rejectAnchor ? { anchor: rejectAnchor } : {}),
           },
           // isError is a pi-SDK excess property (not in AgentToolResult<T>
@@ -1968,6 +2115,11 @@ export default function (pi: ExtensionAPI) {
               anchor: subAnchor,
               projectRoot: ctx.cwd || process.cwd(),
               taskProfile: params.taskProfile,
+              reasoningTrace: {
+                dispatchToolCallId: toolCallId,
+                taskIndex: 0,
+                taskCount: 1,
+              },
               onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
             },
           ),
@@ -1987,6 +2139,7 @@ export default function (pi: ExtensionAPI) {
           error: `dispatch crashed: ${rawMsg}`,
           failureType: classifyError(rawMsg, "crash"),
           durationMs: Date.now() - startedAt,
+          ...dispatchReasoningTraceFields(err as AgentResult),
         };
       }
 
@@ -2031,6 +2184,7 @@ export default function (pi: ExtensionAPI) {
           operation: "dispatch_agent",
           // R7 NIT fix (DeepSeek NIT-1): symmetry with dispatch_parallel.task.
           row_kind: "task",
+          dispatch_tool_call_id: toolCallId,
           model: params.model,
           thinking: params.thinking,
           tools: params.tools ?? null,
@@ -2049,6 +2203,7 @@ export default function (pi: ExtensionAPI) {
           ...(result.heartbeat_liveness ? { heartbeat_liveness: result.heartbeat_liveness } : {}),
           ...(result.maxOutputTokens ? { max_output_tokens: result.maxOutputTokens } : {}),
           ...(typeof result.toolCallCount === "number" ? { tool_call_count: result.toolCallCount } : {}),
+          ...dispatchReasoningTraceFields(result),
           output_chars: result.output?.length ?? 0,
           ...(result.usage
             ? {
@@ -2069,6 +2224,8 @@ export default function (pi: ExtensionAPI) {
           model: params.model,
           durationMs,
           ok: !result.error,
+          dispatch_tool_call_id: toolCallId,
+          ...dispatchReasoningTraceFields(result),
           // ADR 0027 §C5 v1: surface terminal_state so the caller LLM can
           // distinguish cancelled (timeout / user abort) from failed.
           terminalState: tsFields.terminal_state,
@@ -2169,7 +2326,7 @@ export default function (pi: ExtensionAPI) {
     renderCall: renderDispatchParallelCall,
     renderResult: renderDispatchToolResult,
 
-    async execute(_id: string, params: any, signal: AbortSignal, onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
+    async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
       const tasks = params.tasks ?? [];
       if (tasks.length === 0) {
         return {
@@ -2292,6 +2449,7 @@ export default function (pi: ExtensionAPI) {
               void appendDispatchAudit(projectRoot, subAnchor, {
                 operation: "dispatch_parallel.task",
                 row_kind: "task",
+                dispatch_tool_call_id: toolCallId,
                 task_index: i,
                 task_count: total,
                 model: t.model,
@@ -2331,6 +2489,11 @@ export default function (pi: ExtensionAPI) {
                   anchor: subAnchor,
                   projectRoot,
                   taskProfile: t.taskProfile,
+                  reasoningTrace: {
+                    dispatchToolCallId: toolCallId,
+                    taskIndex: i,
+                    taskCount: total,
+                  },
                   onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
                 },
               ),
@@ -2346,6 +2509,7 @@ export default function (pi: ExtensionAPI) {
               error: `dispatch crashed: ${rawMsg}`,
               failureType: classifyError(rawMsg, "crash"),
               durationMs: 0,
+              ...dispatchReasoningTraceFields(err as AgentResult),
             };
           }
           updateProgressTaskFromResult(progressTask, res);
@@ -2368,6 +2532,7 @@ export default function (pi: ExtensionAPI) {
           void appendDispatchAudit(projectRoot, subAnchor, {
             operation: "dispatch_parallel.task",
             row_kind: "task",
+            dispatch_tool_call_id: toolCallId,
             task_index: i,
             task_count: total,
             model: t.model,
@@ -2388,6 +2553,7 @@ export default function (pi: ExtensionAPI) {
             ...(res.heartbeat_liveness ? { heartbeat_liveness: res.heartbeat_liveness } : {}),
             ...(res.maxOutputTokens ? { max_output_tokens: res.maxOutputTokens } : {}),
             ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
+            ...dispatchReasoningTraceFields(res),
             output_chars: res.output?.length ?? 0,
             ...(res.usage
               ? {
@@ -2492,6 +2658,7 @@ export default function (pi: ExtensionAPI) {
       void appendDispatchAudit(projectRoot, aggregateAnchor, {
         operation: "dispatch_parallel.summary",
         row_kind: "aggregate",
+        dispatch_tool_call_id: toolCallId,
         task_count: total,
         // R7: counters now reflect materialized array (holes counted as
         // failed). Previously this could leave failed_count=0 + holes,
@@ -2599,6 +2766,7 @@ export default function (pi: ExtensionAPI) {
           kind: "dispatch_parallel_summary",
           ...dispatchProgressDetails(progressSnapshot),
           taskCount: tasks.length,
+          dispatch_tool_call_id: toolCallId,
           // R7: counter consistency with audit row.
           success: successCount,
           failed: failedCount,
@@ -2626,6 +2794,7 @@ export default function (pi: ExtensionAPI) {
               ...(r.usage ? { usage: r.usage } : {}),
               ...(r.maxOutputTokens ? { maxOutputTokens: r.maxOutputTokens } : {}),
               ...(typeof r.toolCallCount === "number" ? { toolCallCount: r.toolCallCount } : {}),
+              ...dispatchReasoningTraceFields(r),
               ...(r.governorProfile ? { governorProfile: r.governorProfile } : {}),
               ...(r.governorStage ? { governorStage: r.governorStage } : {}),
               ...(typeof r.governorLimit === "number" ? { governorLimit: r.governorLimit } : {}),
@@ -2645,6 +2814,7 @@ export default function (pi: ExtensionAPI) {
     try {
       registerHubTool(pi as unknown as { registerTool: (def: unknown) => void }, {
         runInProcess,
+        reasoningTraceFields: dispatchReasoningTraceFields,
         appendDispatchAudit,
         providerFromModel,
         validateTools,

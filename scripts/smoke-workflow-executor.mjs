@@ -56,8 +56,17 @@ function makeRunner(behaviors = {}) {
   const calls = [];
   let active = 0;
   let peak = 0;
+  const traceFields = (stageId, status = "complete") => ({
+    reasoning_trace_path: `/tmp/workflow-reasoning-${stageId}-${status}.jsonl`,
+    reasoning_chars: stageId.length,
+    reasoning_chunks: 1,
+    reasoning_truncated: false,
+    reasoning_sha256: `sha-${stageId}-${status}`,
+    reasoning_trace_status: status,
+    reasoning_trace_bytes: 1024 + stageId.length,
+  });
   const runner = async (req) => {
-    calls.push({ stageId: req.stageId, anchorLabel: req.anchorLabel, model: req.model, tools: req.tools, prompt: req.prompt });
+    calls.push({ stageId: req.stageId, workflowRunId: req.workflowRunId, anchorLabel: req.anchorLabel, model: req.model, tools: req.tools, prompt: req.prompt });
     active++;
     peak = Math.max(peak, active);
     try {
@@ -66,14 +75,16 @@ function makeRunner(behaviors = {}) {
       const slept = sleep(delay);
       if (req.signal) {
         await Promise.race([slept, new Promise((r) => req.signal.addEventListener("abort", r, { once: true }))]);
-        if (req.signal.aborted) return { output: "", error: "aborted in flight", failureType: "aborted", durationMs: delay };
+        if (req.signal.aborted) {
+          return { output: "", error: "aborted in flight", failureType: "aborted", durationMs: delay, ...traceFields(req.stageId, "forced_incomplete") };
+        }
       } else {
         await slept;
       }
       if (typeof b.fail === "function" ? b.fail() : b.fail) {
-        return { output: b.partial ?? "", error: b.error ?? `${req.stageId} boom`, failureType: "agent_error", durationMs: delay };
+        return { output: b.partial ?? "", error: b.error ?? `${req.stageId} boom`, failureType: "agent_error", durationMs: delay, ...traceFields(req.stageId, b.traceStatus ?? "complete") };
       }
-      return { output: `output of ${req.stageId}`, durationMs: delay, usage: { input: 1, output: 1, total: 2, cost: 0.001 } };
+      return { output: `output of ${req.stageId}`, durationMs: delay, usage: { input: 1, output: 1, total: 2, cost: 0.001 }, ...traceFields(req.stageId) };
     } finally {
       active--;
     }
@@ -112,6 +123,9 @@ await check("happy linear a→b: completed; trace files + state.json; downstream
   assert(bCall.prompt.includes("<workflow-upstream>") && bCall.prompt.includes('"upstream_status":"completed"'), "upstream block present");
   assert(bCall.prompt.includes("stage-a.md") && bCall.prompt.includes("output of a"), "path + summary threaded");
   assert(r.stages.a.cost === 0.001, "cost recorded");
+  assert(r.stages.a.reasoning_trace_path === "/tmp/workflow-reasoning-a-complete.jsonl", "success stage reasoning trace path recorded");
+  assert(r.stages.a.reasoning_trace_status === "complete" && r.stages.a.reasoning_sha256 === "sha-a-complete", "success stage reasoning completeness recorded");
+  assert(calls.find((c) => c.stageId === "a").workflowRunId === "run1", "runner receives workflowRunId for trace correlation");
   assert(Math.abs(r.totalCost - 0.002) < 1e-9, `run-level cost roll-up (got ${r.totalCost})`);
 });
 
@@ -166,6 +180,36 @@ await check("retry exhaust → failed(runner_terminal) → downstream cancelled(
   assert(calls.filter((c) => c.stageId === "b").length === 0, "b never launched");
 });
 
+await check("thrown runner preserves standard reasoning trace fields in stage state and audit", async () => {
+  const runDir = tmpRunDir();
+  const auditRows = [];
+  const thrown = new Error("production runner exploded");
+  Object.assign(thrown, {
+    reasoning_trace_path: "/tmp/workflow-thrown-trace.jsonl",
+    reasoning_chars: 77,
+    reasoning_chunks: 3,
+    reasoning_truncated: true,
+    reasoning_sha256: "sha-thrown",
+    reasoning_trace_status: "write_failed",
+    reasoning_trace_error_code: "terminal_sync:EIO",
+    reasoning_trace_bytes: 4096,
+    prompt: "must-not-duck-copy",
+  });
+  const r = await E.executeWorkflow({
+    doc: doc([agent("a")]),
+    ...baseOpts(runDir, async () => { throw thrown; }, { audit: (row) => auditRows.push(row) }),
+  });
+  assert(r.status === "failed", `status=${r.status}`);
+  assert(r.stages.a.reasoning_trace_path === "/tmp/workflow-thrown-trace.jsonl", JSON.stringify(r.stages.a));
+  assert(r.stages.a.reasoning_trace_status === "write_failed", JSON.stringify(r.stages.a));
+  assert(r.stages.a.reasoning_trace_error_code === "terminal_sync:EIO", JSON.stringify(r.stages.a));
+  assert(r.stages.a.reasoning_trace_bytes === 4096 && r.stages.a.reasoning_sha256 === "sha-thrown", JSON.stringify(r.stages.a));
+  assert(!Object.hasOwn(r.stages.a, "prompt"), "executor must only duck-copy standard trace fields");
+  const terminal = auditRows.find((row) => row.event === "stage_terminal" && row.stage === "a");
+  assert(terminal?.reasoning_trace_path === "/tmp/workflow-thrown-trace.jsonl", JSON.stringify(auditRows));
+  assert(terminal?.reasoning_trace_status === "write_failed" && terminal?.reasoning_trace_error_code === "terminal_sync:EIO", JSON.stringify(terminal));
+});
+
 await check("§7 degrade: path produced → degraded; downstream runs with structured marker; never silent", async () => {
   const runDir = tmpRunDir();
   const { runner, calls } = makeRunner({ a: { fail: true, partial: "partial result", error: "tool exploded" } });
@@ -176,6 +220,8 @@ await check("§7 degrade: path produced → degraded; downstream runs with struc
   assert(r.status === "degraded", `status=${r.status}`);
   assert(r.degraded.join() === "a", "degraded list carries a");
   assert(r.stages.a.status === "degraded" && r.stages.a.output_path, JSON.stringify(r.stages.a));
+  assert(r.stages.a.reasoning_trace_path === "/tmp/workflow-reasoning-a-complete.jsonl", "degraded/error stage reasoning trace path recorded");
+  assert(r.stages.a.reasoning_trace_status === "complete" && r.stages.a.reasoning_sha256 === "sha-a-complete", "degraded/error stage reasoning completeness recorded");
   const trace = fs.readFileSync(r.stages.a.output_path, "utf-8");
   assert(trace.includes("failure_note: tool exploded") && trace.includes("partial result"), "partial output + failure note in file");
   assert(r.stages.b.status === "completed", "downstream ran (degraded satisfies needs)");
@@ -228,6 +274,8 @@ await check("C5: external abort mid-run → in-flight cancelled(external_abort);
   });
   assert(r.status === "cancelled", `status=${r.status}`);
   assert(r.stages.a.status === "cancelled" && r.stages.a.failure_source === "external_abort", JSON.stringify(r.stages.a));
+  assert(r.stages.a.reasoning_trace_path === "/tmp/workflow-reasoning-a-forced_incomplete.jsonl", "abort stage reasoning trace path recorded");
+  assert(r.stages.a.reasoning_trace_status === "forced_incomplete", "abort stage reasoning status recorded");
   assert(r.stages.b.status === "cancelled", "pending b cancelled");
 });
 
@@ -323,6 +371,8 @@ await check("audit rows: stage_terminal per stage/child + run_terminal with degr
   assert(stageRows.length === 2 && runRows.length === 1, `rows: ${JSON.stringify(rows.map((r) => r.event))}`);
   assert(runRows[0].status === "degraded" && runRows[0].degraded.join() === "a", "run row carries degraded list");
   assert(stageRows.every((r) => r.run_id === "run1"), "run_id threaded");
+  assert(stageRows.every((r) => r.reasoning_trace_path && r.reasoning_trace_status === "complete"), `stage audit rows carry trace association: ${JSON.stringify(stageRows)}`);
+  assert(stageRows.find((r) => r.stage === "a").reasoning_sha256 === "sha-a-complete", "stage audit row carries reasoning hash");
 });
 
 await check("validation re-enforced at execution entry (unvalidated doc rejected)", async () => {
@@ -396,6 +446,8 @@ await check("ADR 0033 tool surface: workflow tools registered; sub-agents cannot
   assert(dt && et && Number(dt[1].replace(/_/g, "")) === Number(et[1].replace(/_/g, "")), `timeout default drift: dispatch=${dt?.[1]} executor=${et?.[1]}`);
   assert(/perStageTimeoutMs:\s*DEFAULT_TIMEOUT_MS/.test(src), "production call site threads dispatch DEFAULT_TIMEOUT_MS");
   assert(/maxRuntimeMs:\s*req\.timeoutMs \?\? DEFAULT_TIMEOUT_MS/.test(src), "workflow preserves its wall-clock budget via dispatch maxRuntimeMs");
+  assert(/reasoningTrace:\s*\{[\s\S]{0,180}?workflowRunId: req\.workflowRunId,[\s\S]{0,100}?workflowStageId: req\.stageId/.test(src), "workflow production runner enables per-stage reasoning trace");
+  assert(/\.\.\.dispatchReasoningTraceFields\(result\)/.test(src), "workflow production runner returns reasoning trace fields");
   assert(/startsWith\("~\/"\)/.test(src) && /os\.homedir\(\)/.test(src), "loadWorkflowFile expands leading ~");
 });
 

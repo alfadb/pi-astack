@@ -40,6 +40,42 @@ function rows() {
   return fs.readFileSync(auditFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
+async function waitForJsonlRows(file, expected) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) {
+      const lines = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
+      if (lines.length >= expected) return lines.map((line) => JSON.parse(line));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${expected} JSONL rows in ${file}`);
+}
+
+async function writeGenericGrowingProjection(count) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-llm-audit-growth-"));
+  const file = path.join(root, ".pi-astack", "llm-audit", "audit.jsonl");
+  let partial = "";
+  for (let i = 0; i < count; i++) {
+    partial += "x";
+    auditSessionEvent(root, { module: "smoke", operation: "growth", session_scope: "test" }, {
+      type: "message_update",
+      message: {
+        role: "assistant",
+        responseId: `growth-${count}`,
+        content: [{ type: "thinking", thinking: `cumulative-secret-${partial}` }],
+      },
+      assistantMessageEvent: {
+        type: "thinking_delta",
+        contentIndex: 0,
+        delta: "x",
+      },
+    });
+  }
+  const projectedRows = await waitForJsonlRows(file, count);
+  return { raw: fs.readFileSync(file, "utf8"), rows: projectedRows };
+}
+
 console.log("llm-audit smoke");
 
 await check("package manifest loads llm-audit after provider payload mutators", async () => {
@@ -115,16 +151,27 @@ await check("apiKey and sensitive headers are redacted", async () => {
   if (!raw.includes("ordinary-key-value")) throw new Error("ordinary Key header should be preserved");
 });
 
-await check("auditStreamSimple records start/end and full final message", async () => {
-  const fullText = "完整 final message\n" + "x".repeat(5000);
+await check("auditStreamSimple records allowlisted shapes without prompt, output, tool, signature, or credentials", async () => {
+  const promptText = "stream-prompt-body-must-not-persist";
+  const visibleText = "stream-visible-final-must-not-persist-" + "x".repeat(5000);
+  const toolOutput = "stream-tool-output-must-not-persist";
   const fakePiAi = {
-    streamSimple(model, opts, config) {
+    streamSimple() {
       return {
         async result() {
           return {
+            role: "assistant",
+            provider: "fake",
+            api: "fake-api",
+            model: "model",
             stopReason: "stop",
             usage: { input: 1, output: 2, totalTokens: 3 },
-            content: [{ type: "text", text: fullText }],
+            content: [
+              { type: "text", text: visibleText },
+              { type: "toolResult", output: toolOutput },
+              { type: "thinking", thinking: "stream-thinking-must-not-persist", signature: "stream-signature-must-not-persist" },
+            ],
+            encryptedContent: "stream-encrypted-payload-must-not-persist",
           };
         },
       };
@@ -132,20 +179,49 @@ await check("auditStreamSimple records start/end and full final message", async 
   };
   const result = await auditStreamSimple(
     tmpRoot,
-    { module: "smoke", operation: "fake_stream", model_ref: "fake/model" },
+    {
+      module: "smoke",
+      operation: "fake_stream",
+      model_ref: "fake/model",
+      prompt: "meta-prompt-must-not-persist",
+      output: "meta-output-must-not-persist",
+      accessToken: "meta-access-token-must-not-persist",
+    },
     fakePiAi,
-    { provider: "fake", id: "model" },
-    { messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }] },
-    { apiKey: "fake-key", headers: { Authorization: "Bearer fake" } },
+    { provider: "fake", id: "model", api: "fake-api", accessToken: "model-token-must-not-persist" },
+    {
+      messages: [{ role: "user", content: [{ type: "text", text: promptText }] }],
+      tools: [{ name: "danger", output: toolOutput }],
+    },
+    {
+      apiKey: "fake-key",
+      accessToken: "config-access-token-must-not-persist",
+      headers: { Authorization: "Bearer fake" },
+    },
   );
-  if (result.content[0].text !== fullText) throw new Error("wrapper changed final message");
+  if (result.content[0].text !== visibleText) throw new Error("wrapper changed final message");
   const all = rows().filter((r) => r.call_id && r.operation === "fake_stream");
   const start = all.find((r) => r.row_type === "start");
   const end = all.find((r) => r.row_type === "end");
   if (!start || !end) throw new Error(`missing start/end rows: ${JSON.stringify(all)}`);
-  if (end.final_message?.content?.[0]?.text !== fullText) throw new Error("final message was truncated or changed");
+  if (start.request_shape?.messages_count !== 1 || start.request_shape?.tools_count !== 1) throw new Error(`request shape missing: ${JSON.stringify(start)}`);
+  if (typeof start.request_shape?.bytes !== "number" || typeof start.config_shape?.bytes !== "number") throw new Error("request/config byte shape missing");
+  if (end.final_message_shape?.content_blocks !== 3 || end.final_message_shape?.content_block_lengths?.[0]?.text_length?.chars !== visibleText.length) {
+    throw new Error(`final message shape missing: ${JSON.stringify(end)}`);
+  }
+  if (end.usage?.totalTokens !== 3 || end.stopReason !== "stop") throw new Error(`terminal metadata missing: ${JSON.stringify(end)}`);
+  for (const forbiddenKey of ["request", "opts", "config", "final_message"]) {
+    if (Object.hasOwn(start, forbiddenKey) || Object.hasOwn(end, forbiddenKey)) throw new Error(`raw field persisted: ${forbiddenKey}`);
+  }
   const raw = fs.readFileSync(auditFile, "utf8");
-  if (raw.includes("fake-key") || raw.includes("Bearer fake")) throw new Error("auditStreamSimple leaked credentials");
+  for (const forbidden of [
+    promptText, visibleText, toolOutput, "stream-thinking-must-not-persist",
+    "stream-signature-must-not-persist", "stream-encrypted-payload-must-not-persist",
+    "meta-prompt-must-not-persist", "meta-output-must-not-persist", "meta-access-token-must-not-persist",
+    "model-token-must-not-persist", "config-access-token-must-not-persist", "fake-key", "Bearer fake",
+  ]) {
+    if (raw.includes(forbidden)) throw new Error(`auditStreamSimple leaked forbidden value: ${forbidden}`);
+  }
 });
 
 await check("auditStreamSimple records error rows and rethrows", async () => {
@@ -177,29 +253,119 @@ await check("auditStreamSimple records error rows and rethrows", async () => {
   const error = all.find((r) => r.row_type === "error");
   if (!start || !error) throw new Error(`missing start/error rows: ${JSON.stringify(all)}`);
   if (typeof error.duration_ms !== "number") throw new Error(`missing duration_ms on error row: ${JSON.stringify(error)}`);
+  if (error.error?.message || !error.error?.message_length?.chars) throw new Error(`error row retained raw message or missed length shape: ${JSON.stringify(error)}`);
   const raw = fs.readFileSync(auditFile, "utf8");
-  if (raw.includes("error-path-api-key")) throw new Error("error-path request header leaked credentials");
+  if (raw.includes("error-path-api-key") || raw.includes("boom secret should stay in message")) {
+    throw new Error("error-path request credential or raw error body leaked");
+  }
 });
 
-await check("auditSessionEvent records message_end complete content", async () => {
-  const content = [{ type: "text", text: "complete session content " + "y".repeat(3000) }];
+await check("auditSessionEvent message_end records shape only without final body", async () => {
+  const finalText = "complete session content " + "y".repeat(3000);
+  const thinking = "plaintext-thinking-must-not-persist";
   auditSessionEvent(tmpRoot, { module: "smoke", operation: "session_event", session_scope: "test" }, {
     type: "message_end",
-    message: { role: "assistant", content, usage: { input: 9, output: 10 } },
+    message: {
+      role: "assistant",
+      provider: "fake-provider",
+      api: "fake-api",
+      model: "fake-model",
+      responseId: "shape-response-id",
+      stopReason: "stop",
+      content: [{ type: "text", text: finalText }, { type: "thinking", thinking }],
+      usage: { input: 9, output: 10 },
+      thinkingSignature: "opaque-signature-must-not-persist",
+    },
   });
   await new Promise((resolve) => setTimeout(resolve, 50));
   const eventRows = rows().filter((r) => r.row_type === "session_event" && r.event_type === "message_end");
   const last = eventRows.at(-1);
   if (!last) throw new Error("missing message_end audit row");
-  if (last.message?.content?.[0]?.text !== content[0].text) throw new Error("message_end content was not preserved");
+  if (last.message_shape?.role !== "assistant" || last.message_shape?.responseId !== "shape-response-id") {
+    throw new Error(`message_end shape missing identity metadata: ${JSON.stringify(last)}`);
+  }
+  if (last.message_shape?.content_blocks !== 2 || last.message_shape?.content_types?.join(",") !== "text,thinking") {
+    throw new Error(`message_end shape missing content metadata: ${JSON.stringify(last)}`);
+  }
+  if (last.message_shape?.content_block_lengths?.[0]?.text_length?.chars !== finalText.length) {
+    throw new Error(`message_end shape missing text length: ${JSON.stringify(last)}`);
+  }
+  if (last.usage?.input !== 9 || last.usage?.output !== 10) throw new Error(`message_end usage missing: ${JSON.stringify(last)}`);
+  for (const forbidden of ["event", "message", "assistantMessageEvent", "content", "thinkingSignature"]) {
+    if (Object.hasOwn(last, forbidden)) throw new Error(`message_end retained forbidden key ${forbidden}: ${JSON.stringify(last)}`);
+  }
+  const raw = fs.readFileSync(auditFile, "utf8");
+  for (const forbidden of [finalText, thinking, "opaque-signature-must-not-persist"]) {
+    if (raw.includes(forbidden)) throw new Error(`message_end persisted forbidden body: ${forbidden.slice(0, 40)}`);
+  }
 });
 
-await check("provider boundary events record request payload and response headers", async () => {
+await check("auditSessionEvent message_update records shape only without cumulative partial or raw delta", async () => {
+  const rawDelta = "generic-raw-delta-must-not-persist";
+  const partialMarker = "generic-growing-partial-must-not-persist";
+  auditSessionEvent(tmpRoot, { module: "smoke", operation: "session_event", session_scope: "test" }, {
+    type: "message_update",
+    message: {
+      role: "assistant",
+      responseId: "generic-response-id",
+      content: [{ type: "thinking", thinking: partialMarker }],
+    },
+    assistantMessageEvent: {
+      type: "thinking_delta",
+      contentIndex: 3,
+      delta: rawDelta,
+      partial: {
+        role: "assistant",
+        responseId: "generic-response-id",
+        content: [{ type: "thinking", thinking: partialMarker }],
+      },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const eventRows = rows().filter((r) => r.row_type === "session_event" && r.event_type === "message_update");
+  const last = eventRows.at(-1);
+  if (!last) throw new Error("missing message_update audit row");
+  if (last.assistant_event_type !== "thinking_delta") throw new Error(`missing delta shape: ${JSON.stringify(last)}`);
+  if (last.delta_chars !== rawDelta.length || last.delta_bytes !== Buffer.byteLength(rawDelta)) {
+    throw new Error(`wrong delta lengths: ${JSON.stringify(last)}`);
+  }
+  if (last.content_index !== 3 || last.response_id !== "generic-response-id") {
+    throw new Error(`missing response/content metadata: ${JSON.stringify(last)}`);
+  }
+  for (const forbidden of ["event", "message", "assistantMessageEvent", "partial", "delta"]) {
+    if (Object.hasOwn(last, forbidden)) throw new Error(`message_update retained forbidden key ${forbidden}: ${JSON.stringify(last)}`);
+  }
+  const raw = fs.readFileSync(auditFile, "utf8");
+  if (raw.includes(rawDelta) || raw.includes(partialMarker)) {
+    throw new Error("message_update persisted raw delta or cumulative partial body");
+  }
+});
+
+await check("generic message_update projection stays linear as cumulative partial grows", async () => {
+  const small = await writeGenericGrowingProjection(80);
+  const large = await writeGenericGrowingProjection(160);
+  if (small.rows.length !== 80 || large.rows.length !== 160) {
+    throw new Error(`wrong generic growth row counts: ${small.rows.length}/${large.rows.length}`);
+  }
+  const ratio = large.raw.length / small.raw.length;
+  if (ratio >= 2.2) throw new Error(`generic audit growth is not linear: ratio=${ratio}`);
+  if (small.raw.includes("cumulative-secret") || large.raw.includes("cumulative-secret")) {
+    throw new Error("generic projection retained cumulative partial content");
+  }
+  for (const row of [...small.rows, ...large.rows]) {
+    if (Object.hasOwn(row, "event") || Object.hasOwn(row, "message") || Object.hasOwn(row, "assistantMessageEvent") || Object.hasOwn(row, "delta")) {
+      throw new Error(`generic projection retained a raw event field: ${JSON.stringify(row)}`);
+    }
+  }
+});
+
+await check("provider boundary events record payload/header shape only", async () => {
   await auditProviderBoundaryEvent(tmpRoot, { module: "smoke", operation: "provider_request" }, {
     type: "before_provider_request",
     payload: {
       model: "fake-model",
-      messages: [{ role: "user", content: "provider payload text" }],
+      messages: [{ role: "user", content: "provider payload text must not persist" }],
+      tools: [{ name: "tool", output: "tool output must not persist" }],
       headers: { Authorization: "Bearer nested-secret", "X-Trace-Id": "provider-trace" },
     },
   }, { model: { provider: "fake", id: "fake-model", api: "chat" } });
@@ -207,18 +373,36 @@ await check("provider boundary events record request payload and response header
     type: "after_provider_response",
     status: 200,
     headers: { "x-request-id": "provider-request-id", "set-cookie": "cookie-secret" },
+    usage: { input: 1, output: 2, totalTokens: 3 },
   }, { model: { provider: "fake", id: "fake-model", api: "chat" } });
 
   const all = rows().filter((r) => r.row_type === "provider_event");
   const request = all.find((r) => r.operation === "provider_request");
   const response = all.find((r) => r.operation === "provider_response");
   if (!request || !response) throw new Error(`missing provider event rows: ${JSON.stringify(all)}`);
-  if (request.request_payload?.messages?.[0]?.content !== "provider payload text") throw new Error("provider request payload missing");
+  if (request.request_payload_shape?.model !== "fake-model" || request.request_payload_shape?.messages_count !== 1) {
+    throw new Error(`provider request shape missing: ${JSON.stringify(request)}`);
+  }
+  if (request.request_payload_shape?.tools_count !== 1 || typeof request.request_payload_shape?.payload_bytes !== "number") {
+    throw new Error(`provider request byte/tool shape missing: ${JSON.stringify(request)}`);
+  }
   if (request.model?.provider !== "fake" || request.model?.id !== "fake-model") throw new Error("provider model metadata missing");
-  if (response.response_status !== 200 || response.response_headers?.["x-request-id"] !== "provider-request-id") throw new Error("provider response metadata missing");
+  if (request.request_payload || request.event || request.response_headers) throw new Error(`provider request retained raw fields: ${JSON.stringify(request)}`);
+  if (response.response_status !== 200 || response.response_headers_shape?.non_sensitive_header_names?.[0] !== "x-request-id") {
+    throw new Error(`provider response metadata missing: ${JSON.stringify(response)}`);
+  }
+  if (response.usage?.totalTokens !== 3) throw new Error(`provider usage shape missing: ${JSON.stringify(response)}`);
   const raw = fs.readFileSync(auditFile, "utf8");
-  if (raw.includes("Bearer nested-secret") || raw.includes("cookie-secret")) throw new Error("provider event leaked sensitive headers");
-  if (!raw.includes("provider-trace")) throw new Error("provider event dropped non-sensitive header");
+  for (const forbidden of [
+    "provider payload text must not persist",
+    "tool output must not persist",
+    "Bearer nested-secret",
+    "cookie-secret",
+    "provider-trace",
+    "provider-request-id",
+  ]) {
+    if (raw.includes(forbidden)) throw new Error(`provider event persisted forbidden value: ${forbidden}`);
+  }
 });
 
 await check("embedding fetch records request and raw response", async () => {

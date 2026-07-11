@@ -39,6 +39,7 @@ import {
   runInProcess,
   validateTools,
   enforceMutatingEnvGate,
+  dispatchReasoningTraceFields,
   DEFAULT_TIMEOUT_MS,
   MAX_CONCURRENCY as DISPATCH_MAX_CONCURRENCY,
   type AgentResult,
@@ -255,7 +256,16 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
         req.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         modelRegistry,
         req.tools,
-        { anchor, projectRoot, maxRuntimeMs: req.timeoutMs ?? DEFAULT_TIMEOUT_MS, taskProfile: req.taskProfile },
+        {
+          anchor,
+          projectRoot,
+          maxRuntimeMs: req.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+          taskProfile: req.taskProfile,
+          reasoningTrace: {
+            workflowRunId: req.workflowRunId,
+            workflowStageId: req.stageId,
+          },
+        },
       ),
     );
     return {
@@ -265,6 +275,7 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
       durationMs: result.durationMs,
       ...(result.usage ? { usage: result.usage } : {}),
       ...(typeof result.toolCallCount === "number" ? { toolCallCount: result.toolCallCount } : {}),
+      ...dispatchReasoningTraceFields(result),
     };
   };
 }

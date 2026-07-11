@@ -396,6 +396,49 @@ export async function appendLlmAudit(projectRoot: string, row: Record<string, un
   }
 }
 
+function controlledMetaShape(meta: LlmAuditMeta): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of [
+    "module", "operation", "model_ref", "model_id", "session_scope",
+    "sub_agent_label", "subturn", "task_index", "task_count",
+    "workflow_run_id", "workflow_stage_id", "thinking",
+  ]) {
+    const value = meta[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function topLevelShape(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {
+      kind: value === null ? "null" : Array.isArray(value) ? "array" : typeof value,
+      bytes: safeJsonByteLength(value),
+    };
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    kind: "object",
+    bytes: safeJsonByteLength(value),
+    key_count: Object.keys(record).length,
+    keys: [...new Set(Object.keys(record).map(publicShapeKey))].sort(),
+    messages_count: Array.isArray(record.messages) ? record.messages.length : undefined,
+    tools_count: Array.isArray(record.tools) ? record.tools.length : undefined,
+    headers_shape: headersShape(record.headers),
+  };
+}
+
+function streamModelShape(model: unknown, modelId: string | undefined): Record<string, unknown> {
+  const record = model && typeof model === "object" ? model as Record<string, unknown> : undefined;
+  return {
+    provider: typeof record?.provider === "string" ? record.provider : undefined,
+    id: typeof record?.id === "string" ? record.id : modelId,
+    api: typeof record?.api === "string" ? record.api : undefined,
+  };
+}
+
 export async function auditStreamSimple<TPiAi extends StreamSimpleLike>(
   projectRoot: string,
   meta: LlmAuditMeta,
@@ -415,7 +458,8 @@ export async function auditStreamSimple<TPiAi extends StreamSimpleLike>(
     api_kind: "pi-ai.streamSimple",
     model_ref: modelRef,
     model_id: modelId,
-    meta,
+    model: streamModelShape(model, modelId),
+    meta: controlledMetaShape(meta),
   };
 
   await enforceBackgroundBudget(projectRoot, meta, modelId, opts);
@@ -423,19 +467,23 @@ export async function auditStreamSimple<TPiAi extends StreamSimpleLike>(
   await appendLlmAudit(projectRoot, {
     ...base,
     row_type: "start",
-    request: { opts, config },
+    request_shape: topLevelShape(opts),
+    config_shape: topLevelShape(config),
   });
 
   try {
     const stream = piAi.streamSimple(model, opts, config);
     const finalMessage = await stream.result() as StreamSimpleResult<TPiAi>;
+    const finalRecord = finalMessage && typeof finalMessage === "object"
+      ? finalMessage as Record<string, unknown>
+      : undefined;
     await appendLlmAudit(projectRoot, {
       ...base,
       row_type: "end",
       duration_ms: Date.now() - started,
-      final_message: finalMessage,
-      usage: (finalMessage as any)?.usage,
-      stopReason: (finalMessage as any)?.stopReason,
+      final_message_shape: sessionMessageShape(finalMessage),
+      usage: controlledUsageShape(finalRecord?.usage),
+      stopReason: typeof finalRecord?.stopReason === "string" ? finalRecord.stopReason : undefined,
     });
     return finalMessage;
   } catch (error) {
@@ -443,26 +491,215 @@ export async function auditStreamSimple<TPiAi extends StreamSimpleLike>(
       ...base,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error,
+      error: controlledErrorShape(error),
     });
     throw error;
   }
 }
 
+function controlledUsageShape(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "total", "totalTokens"]) {
+    if (typeof input[key] === "number" && Number.isFinite(input[key])) output[key] = input[key];
+  }
+  if (typeof input.cost === "number" && Number.isFinite(input.cost)) output.cost = input.cost;
+  if (input.cost && typeof input.cost === "object") {
+    const cost: Record<string, number> = {};
+    for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"]) {
+      const amount = (input.cost as Record<string, unknown>)[key];
+      if (typeof amount === "number" && Number.isFinite(amount)) cost[key] = amount;
+    }
+    if (Object.keys(cost).length > 0) output.cost = cost;
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
+function redactControlledErrorText(value: string): string {
+  return value
+    .slice(0, 500)
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [pi-astack-redacted]")
+    .replace(/\b(?:api[\s_-]?key|authorization)\s*[:=]\s*[^\s,;]+/gi, "credential=[pi-astack-redacted]")
+    .replace(/\b(?:sk|rk|pk|xai)-[A-Za-z0-9_-]{8,}\b/g, "[pi-astack-redacted-api-key]")
+    .replace(/\b(?:AIza|AKIA)[A-Za-z0-9_-]{12,}\b/g, "[pi-astack-redacted-api-key]")
+    .replace(/\bgsk_[A-Za-z0-9_-]{8,}\b/g, "[pi-astack-redacted-api-key]");
+}
+
+function controlledErrorShape(value: unknown): Record<string, unknown> | undefined {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+  const message = typeof value === "string"
+    ? value
+    : value instanceof Error
+      ? value.message
+      : typeof record?.message === "string" ? record.message : undefined;
+  const code = typeof record?.code === "string" ? redactControlledErrorText(record.code).slice(0, 80) : undefined;
+  const name = value instanceof Error ? value.name : typeof record?.name === "string" ? record.name.slice(0, 80) : undefined;
+  if (!message && !code && !name) return undefined;
+  return {
+    ...(name ? { name } : {}),
+    ...(code ? { code } : {}),
+    ...(message ? { message_length: stringLengthShape(String(message)) } : {}),
+  };
+}
+
+function stringLengthShape(value: string): Record<string, number> {
+  return { chars: value.length, bytes: Buffer.byteLength(value, "utf8") };
+}
+
+function contentBlockShape(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") return { type: "text", text: stringLengthShape(value) };
+  if (!value || typeof value !== "object") return { type: "unknown" };
+  const block = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {
+    type: typeof block.type === "string" ? block.type : "unknown",
+  };
+  for (const key of ["text", "thinking", "reasoning", "summary", "content", "output"]) {
+    const item = block[key];
+    if (typeof item === "string") out[`${key}_length`] = stringLengthShape(item);
+    else if (Array.isArray(item)) out[`${key}_items`] = item.length;
+  }
+  return out;
+}
+
+function contentShape(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    return {
+      content_kind: "string",
+      content_blocks: 1,
+      content_types: ["text"],
+      content_block_lengths: [contentBlockShape(value)],
+    };
+  }
+  if (Array.isArray(value)) {
+    const blocks = value.map(contentBlockShape);
+    return {
+      content_kind: "array",
+      content_blocks: value.length,
+      content_types: blocks.map((block) => typeof block.type === "string" ? block.type : "unknown"),
+      content_block_lengths: blocks,
+    };
+  }
+  if (value === undefined) return { content_kind: "absent", content_blocks: 0, content_types: [], content_block_lengths: [] };
+  return { content_kind: typeof value, content_blocks: 0, content_types: [], content_block_lengths: [] };
+}
+
+function sessionMessageShape(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const message = value as Record<string, unknown>;
+  const error = controlledErrorShape(message.errorMessage ?? message.error);
+  return {
+    role: typeof message.role === "string" ? message.role : undefined,
+    api: typeof message.api === "string" ? message.api : undefined,
+    provider: typeof message.provider === "string" ? message.provider : undefined,
+    model: typeof message.model === "string"
+      ? message.model
+      : typeof message.responseModel === "string" ? message.responseModel : undefined,
+    responseId: typeof message.responseId === "string" ? message.responseId : undefined,
+    stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
+    ...contentShape(message.content),
+    usage: controlledUsageShape(message.usage),
+    ...(error ? { error } : {}),
+  };
+}
+
+function safeJsonByteLength(value: unknown): number | undefined {
+  try { return Buffer.byteLength(safeJson(value), "utf8"); }
+  catch { return undefined; }
+}
+
+function publicShapeKey(key: string): string {
+  const lower = key.toLowerCase();
+  return isSensitiveHeaderName(key) || lower === "apikey" || lower === "api_key" || lower === "api-key"
+    ? "[sensitive-key]"
+    : key;
+}
+
+function headersShape(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value as Record<string, unknown>);
+  const nonSensitive = keys.filter((key) => !isSensitiveHeaderName(key)).map((key) => key.toLowerCase()).sort();
+  return {
+    header_count: keys.length,
+    sensitive_header_count: keys.length - nonSensitive.length,
+    non_sensitive_header_names: nonSensitive,
+  };
+}
+
+function providerPayloadShape(payload: unknown): Record<string, unknown> | undefined {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload === undefined ? undefined : { payload_kind: typeof payload, payload_bytes: safeJsonByteLength(payload) };
+  }
+  const record = payload as Record<string, unknown>;
+  return {
+    payload_kind: "object",
+    payload_bytes: safeJsonByteLength(payload),
+    payload_keys: [...new Set(Object.keys(record).map(publicShapeKey))].sort(),
+    model: typeof record.model === "string" ? record.model : undefined,
+    api: typeof record.api === "string" ? record.api : undefined,
+    messages_count: Array.isArray(record.messages) ? record.messages.length : undefined,
+    input_kind: record.input === undefined ? undefined : Array.isArray(record.input) ? "array" : typeof record.input,
+    input_count: Array.isArray(record.input) ? record.input.length : undefined,
+    tools_count: Array.isArray(record.tools) ? record.tools.length : undefined,
+    stream: typeof record.stream === "boolean" ? record.stream : undefined,
+    max_tokens: typeof record.max_tokens === "number" ? record.max_tokens : undefined,
+    max_completion_tokens: typeof record.max_completion_tokens === "number" ? record.max_completion_tokens : undefined,
+    temperature: typeof record.temperature === "number" ? record.temperature : undefined,
+    headers_shape: headersShape(record.headers),
+  };
+}
+
 export function auditSessionEvent(projectRoot: string, meta: LlmAuditMeta, event: unknown): void {
   const e = event as Record<string, unknown> | undefined;
-  void appendLlmAudit(projectRoot, {
+  const eventType = typeof e?.type === "string" ? e.type : "unknown";
+  const base = {
     row_type: "session_event",
     module: meta.module,
     operation: meta.operation,
     api_kind: "pi.session_event",
-    event_type: typeof e?.type === "string" ? e.type : "unknown",
-    meta,
-    event,
-    message: e?.message,
-    assistantMessageEvent: e?.assistantMessageEvent,
-    usage: (e?.message as any)?.usage ?? e?.usage,
-    error: e?.error ?? e?.errorMessage ?? e?.finalError,
+    event_type: eventType,
+    meta: controlledMetaShape(meta),
+  };
+
+  if (eventType === "message_update") {
+    const assistantEvent = e?.assistantMessageEvent as Record<string, unknown> | undefined;
+    const delta = typeof assistantEvent?.delta === "string" ? assistantEvent.delta : undefined;
+    const partial = assistantEvent?.partial as Record<string, unknown> | undefined;
+    const message = e?.message as Record<string, unknown> | undefined;
+    void appendLlmAudit(projectRoot, {
+      ...base,
+      assistant_event_type: typeof assistantEvent?.type === "string" ? assistantEvent.type : "unknown",
+      content_index: typeof assistantEvent?.contentIndex === "number" ? assistantEvent.contentIndex : undefined,
+      delta_chars: delta?.length ?? 0,
+      delta_bytes: delta === undefined ? 0 : Buffer.byteLength(delta, "utf8"),
+      response_id:
+        (typeof partial?.responseId === "string" ? partial.responseId : undefined) ??
+        (typeof message?.responseId === "string" ? message.responseId : undefined),
+      message_shape: sessionMessageShape(e?.message),
+    });
+    return;
+  }
+
+  if (eventType === "message_end") {
+    const message = e?.message as Record<string, unknown> | undefined;
+    void appendLlmAudit(projectRoot, {
+      ...base,
+      message_shape: sessionMessageShape(e?.message),
+      usage: controlledUsageShape(message?.usage ?? e?.usage),
+      error: controlledErrorShape(message?.errorMessage ?? e?.error ?? e?.errorMessage ?? e?.finalError),
+    });
+    return;
+  }
+
+  void appendLlmAudit(projectRoot, {
+    ...base,
+    message_shape: sessionMessageShape(e?.message),
+    message_count: Array.isArray(e?.messages) ? e.messages.length : undefined,
+    assistant_message_count: Array.isArray(e?.messages)
+      ? e.messages.filter((message) => !!message && typeof message === "object" && (message as Record<string, unknown>).role === "assistant").length
+      : undefined,
+    will_retry: typeof e?.willRetry === "boolean" ? e.willRetry : undefined,
+    error: controlledErrorShape(e?.error ?? e?.errorMessage ?? e?.finalError),
   });
 }
 
@@ -480,11 +717,12 @@ export async function auditProviderBoundaryEvent(
     operation: meta.operation,
     api_kind: "pi.provider_boundary",
     event_type: eventType,
-    meta,
+    meta: controlledMetaShape(meta),
     model: modelInfoFromContext(ctx),
-    request_payload: e?.payload,
-    response_status: e?.status,
-    response_headers: e?.headers,
-    event,
+    request_payload_shape: providerPayloadShape(e?.payload),
+    response_status: typeof e?.status === "number" ? e.status : undefined,
+    response_headers_shape: headersShape(e?.headers),
+    usage: controlledUsageShape(e?.usage),
+    error: controlledErrorShape(e?.error ?? e?.errorMessage ?? e?.finalError),
   });
 }

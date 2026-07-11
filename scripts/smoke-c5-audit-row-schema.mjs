@@ -412,8 +412,8 @@ check("dispatch imports and applies heartbeat consumer as audit-only enrichment"
   if (!/const enrichHeartbeat = \(result:\s*AgentResult\):\s*AgentResult => \{[\s\S]{0,900}?assessLivenessForAnchor\(heartbeatProjectRoot, heartbeatAnchor\)/.test(dispatchSrc)) {
     throw new Error("runInProcess must assess heartbeat liveness inside enrichHeartbeat");
   }
-  if (!/return enrichHeartbeat\(resultWithBudget\)/.test(dispatchSrc)) {
-    throw new Error("runInProcess must enrich settled results with heartbeat trace/liveness before returning");
+  if (!/const resultWithHeartbeat\s*=\s*enrichHeartbeat\(resultWithBudget\);[\s\S]{0,180}?return finalizeReasoningTrace\(resultWithHeartbeat/.test(dispatchSrc)) {
+    throw new Error("runInProcess must enrich settled results with heartbeat trace/liveness before reasoning trace finalization");
   }
   if (/terminalStateFromLiveness\(heartbeat_liveness\)/.test(dispatchSrc)) {
     throw new Error("post-settlement heartbeat enrichment must be audit-only; do not mutate settled terminal state");

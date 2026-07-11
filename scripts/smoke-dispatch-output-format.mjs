@@ -112,6 +112,28 @@ const tsmsOut = ts.transpileModule(fs.readFileSync(tsmsSrc, "utf8"), {
 fs.writeFileSync(path.join(tmpDir, "terminal-state.cjs"), tsmsOut.outputText);
 fs.copyFileSync(path.join(tmpDir, "terminal-state.cjs"), path.join(tmpDir, "terminal-state.js"));
 
+// Stub the per-worker reasoning writer. formatResult never starts a session,
+// but dispatch/index.ts resolves the module at load time.
+fs.writeFileSync(
+  path.join(tmpDir, "reasoning-trace.js"),
+  `module.exports = {
+  createDispatchReasoningTrace: () => ({
+    traceId: "stub",
+    tracePath: "/tmp/stub-reasoning.jsonl",
+    handleSessionEvent: () => {},
+    end: async () => ({
+      reasoning_trace_path: "/tmp/stub-reasoning.jsonl",
+      reasoning_chars: 0,
+      reasoning_chunks: 0,
+      reasoning_truncated: false,
+      reasoning_sha256: "",
+      reasoning_trace_status: "complete",
+      reasoning_trace_bytes: 0,
+    }),
+  }),
+};\n`,
+);
+
 // Stub `typebox` (dispatch/index.ts: `import { Type } from "typebox"`).
 // It is needed because the file's default export `function (pi) { pi.registerTool(...) }`
 // body runs Type.Object at registration site — but registerTool itself is only
@@ -181,16 +203,6 @@ fs.writeFileSync(
   `const path = require("node:path");
 module.exports = {
   dispatchAuditPath: (root) => path.join(root, ".pi-astack", "dispatch", "audit.jsonl"),
-};\n`,
-);
-
-// Stub `../_shared/llm-audit` — dispatch imports auditSessionEvent for
-// runtime telemetry. formatResult does not call it; no-op keeps module load
-// self-contained.
-fs.writeFileSync(
-  path.join(sharedDir, "llm-audit.js"),
-  `module.exports = {
-  auditSessionEvent: () => {},
 };\n`,
 );
 

@@ -126,8 +126,8 @@ check("runInProcess surfaces the model-derived budget on AgentResult", () => {
   if (!/const resultWithBudget = effectiveMaxOutputTokens === undefined[\s\S]{0,180}?\{ \.\.\.result, maxOutputTokens: effectiveMaxOutputTokens \};/.test(dispatchSrc)) {
     throw new Error("effective budget not added to AgentResult");
   }
-  if (!/return enrichHeartbeat\(resultWithBudget\);/.test(dispatchSrc)) {
-    throw new Error("enriched result must preserve maxOutputTokens");
+  if (!/const resultWithHeartbeat\s*=\s*enrichHeartbeat\(resultWithBudget\);[\s\S]{0,180}?return finalizeReasoningTrace\(resultWithHeartbeat/.test(dispatchSrc)) {
+    throw new Error("heartbeat enrichment and reasoning finalization must preserve maxOutputTokens");
   }
 });
 
