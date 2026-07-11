@@ -317,13 +317,13 @@ function buildAvailableModelsBlock(
 
   lines.push(
     "**Selection guidance.** When choosing models: (1) isolated contexts are " +
-      "the invariant; prefer DIFFERENT providers across roles when available, " +
-      "then degrade to cross-model or same-model isolated instances; (2) match " +
-      "capability to need — don't pay for opus on one-line classification; " +
-      "(3) for vision tasks, pick a model with `image-in: ✓`; (4) for **curated** " +
-      "sections any listed name is safe to dispatch (obsolete models already " +
-      "removed); (5) for **raw** sections (e.g. github-copilot) pi exposes its " +
-      "full model list — prefer the newest non-preview entries.",
+      "the invariant; prefer DIFFERENT providers for independent judgment when " +
+      "available, then degrade to cross-model or same-model isolated instances; " +
+      "(2) assign execution-oriented tasks, including coding, log review, and concrete implementation, exclusively to GPT models; GPT models may also be used for judgment-oriented tasks, including research, discussion, classification, synthesis, decision-making, solution evaluation, architecture critique, and independent review of completed task results or final diffs. " +
+      "Use non-GPT curated models only for judgment-oriented tasks, including research, discussion, classification, synthesis, decision-making, solution evaluation, architecture critique, and independent review of completed task results or final diffs; see each model's hint for permitted examples and boundaries; (3) for vision " +
+      "tasks, pick a model with `image-in: ✓`; (4) for **curated** sections, " +
+      "follow each model's hint; (5) for **raw** sections (e.g. github-copilot) " +
+      "pi exposes its full model list — prefer the newest non-preview entries.",
   );
 
   if (imageGen && Object.keys(imageGen).length > 0) {

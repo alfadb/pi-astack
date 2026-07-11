@@ -14,6 +14,11 @@
  *  5. /curator-reload registered with feature detection.
  *  6. Plan A intact: DEFAULTS holds no model strategy data (empty objects),
  *     and buildAvailableModelsBlock has the size===0 no-op guard.
+ *  7. Responsibility boundaries stay split: non-GPT hints are judgment-oriented,
+ *     GPT hints are execution-oriented but may also be used for judgment-oriented tasks,
+ *     including research, discussion, classification, synthesis, decision-making, solution evaluation,
+ *     architecture critique, and independent review of completed task results or final diffs;
+ *     runtime selection guidance mirrors both phrases without blurring coding, log review, or concrete implementation.
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -24,6 +29,10 @@ const src = readFileSync(
   join(root, "extensions/model-curator/index.ts"),
   "utf8",
 );
+const settings = JSON.parse(readFileSync(
+  join(root, "..", "..", "pi-astack-settings.json"),
+  "utf8",
+));
 
 let failures = 0;
 function ok(msg) { console.log(`  ✓ ${msg}`); }
@@ -133,6 +142,49 @@ assert(
 assert(
   /if \(curatedProviders\.size === 0\) return null/.test(src),
   "unconfigured guard: no registry dump into system prompt",
+);
+
+const hints = settings.modelCurator?.hints ?? {};
+const providers = settings.modelCurator?.providers ?? {};
+const expectedHintKeys = new Set(
+  Object.entries(providers).flatMap(([provider, models]) =>
+    Array.isArray(models) ? models.map((model) => `${provider}/${model}`) : [],
+  ),
+);
+const actualHintKeys = new Set(Object.keys(hints));
+assert(
+  expectedHintKeys.size > 0 && expectedHintKeys.size === actualHintKeys.size &&
+    [...expectedHintKeys].every((key) => actualHintKeys.has(key)) &&
+    [...actualHintKeys].every((key) => expectedHintKeys.has(key)),
+  "provider/model entries and hint keys stay in exact one-to-one sync",
+);
+const nonGptHints = Object.entries(hints)
+  .filter(([model]) => !model.startsWith("openai/"))
+  .map(([, hint]) => hint);
+const gptHints = Object.entries(hints)
+  .filter(([model]) => model.startsWith("openai/"))
+  .map(([, hint]) => hint);
+assert(
+  nonGptHints.length > 0 && nonGptHints.every((hint) =>
+    hint.includes("Use only for judgment-oriented tasks") &&
+    hint.includes("do not use for coding, log review, or concrete implementation."),
+  ),
+  "all non-GPT curated hints limit work to judgment-oriented tasks",
+);
+const gptJudgmentClause = "GPT models may also be used for judgment-oriented tasks, including research, discussion, classification, synthesis, decision-making, solution evaluation, architecture critique, and independent review of completed task results or final diffs.";
+assert(
+  gptHints.length > 0 && gptHints.every((hint) =>
+    hint.includes("Assign execution-oriented tasks, including coding, log review, and concrete implementation, exclusively to GPT models.") &&
+    hint.includes(gptJudgmentClause) &&
+    !hint.includes("Use only for"),
+  ),
+  "all GPT curated hints reserve execution work to GPT without restricting GPT to it",
+);
+assert(
+  src.toLowerCase().includes("assign execution-oriented tasks, including coding, log review, and concrete implementation, exclusively to gpt models") &&
+    src.includes(gptJudgmentClause) &&
+    src.includes("Use non-GPT curated models only for judgment-oriented tasks, including research, discussion, classification, synthesis, decision-making, solution evaluation, architecture critique, and independent review of completed task results or final diffs; see each model's hint for permitted examples and boundaries;"),
+  "runtime selection guidance preserves the execution and judgment boundary",
 );
 
 console.log("");
