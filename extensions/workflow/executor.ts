@@ -87,6 +87,7 @@ export interface StageRunResult {
   durationMs: number;
   usage?: { input: number; output: number; total: number; cost: number };
   toolCallCount?: number;
+  workerRunGovernance?: import("../dispatch/worker-run-governor").WorkerRunGovernanceSummary;
   reasoning_trace_path?: string;
   reasoning_chars?: number;
   reasoning_chunks?: number;
@@ -131,11 +132,13 @@ export interface StageRecord {
   /** parallel parent: all child output paths. */
   output_paths?: string[];
   error?: string;
+  failure_type?: string;
   failure_source?: FailureSource;
   /** ids of degraded upstreams visible to this stage at launch. */
   degraded_upstreams?: string[];
   cost?: number;
   tool_call_count?: number;
+  worker_run_governance?: import("../dispatch/worker-run-governor").WorkerRunGovernanceSummary | import("../dispatch/worker-run-governor").WorkerRunGovernanceSummary[];
   reasoning_trace_path?: string;
   reasoning_chars?: number;
   reasoning_chunks?: number;
@@ -197,6 +200,19 @@ export interface WorkflowRunOptions {
 
 const SUMMARY_CHARS = 700;
 const DEFAULT_STAGE_TIMEOUT_MS = 1_800_000; // mirrors dispatch DEFAULT_TIMEOUT_MS
+
+export const NON_RETRYABLE_GOVERNANCE_FAILURES = new Set([
+  "repetitive_output",
+  "provider_retry_budget_exceeded",
+  "empty_visible_retry_budget_exceeded",
+  "full_output_cap_budget_exceeded",
+  "guardrail_stop",
+  "tool_budget_exceeded",
+]);
+
+export function isNonRetryableGovernanceFailure(failureType: string | undefined): boolean {
+  return typeof failureType === "string" && NON_RETRYABLE_GOVERNANCE_FAILURES.has(failureType);
+}
 
 export interface Semaphore {
   acquire(): Promise<void>;
@@ -404,8 +420,10 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       duration_ms: rec.duration_ms,
       ...(rec.failure_source ? { failure_source: rec.failure_source } : {}),
       ...(rec.error ? { error: rec.error.slice(0, 300) } : {}),
+      ...(rec.failure_type ? { failure_type: rec.failure_type } : {}),
       ...(typeof rec.cost === "number" ? { cost: rec.cost } : {}),
       ...(typeof rec.tool_call_count === "number" ? { tool_call_count: rec.tool_call_count } : {}),
+      ...(rec.worker_run_governance ? { worker_run_governance: rec.worker_run_governance } : {}),
       ...(rec.reasoning_trace_path ? { reasoning_trace_path: rec.reasoning_trace_path } : {}),
       ...(typeof rec.reasoning_chars === "number" ? { reasoning_chars: rec.reasoning_chars } : {}),
       ...(typeof rec.reasoning_chunks === "number" ? { reasoning_chunks: rec.reasoning_chunks } : {}),
@@ -471,8 +489,9 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
         sem.release();
       }
       // W11: retry routing keyed ONLY on the runner's deterministic
-      // terminal result. Don't burn retries once the run is aborted.
-      if (!res.error || haltSignal()) break;
+      // terminal result. Governance terminals are already bounded inside one
+      // worker run and must never be replayed by workflow retry policy.
+      if (!res.error || haltSignal() || isNonRetryableGovernanceFailure(res.failureType)) break;
     }
     return { res, attempts };
   };
@@ -499,6 +518,8 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       duration_ms: now() - startMs,
       ...(typeof res.usage?.cost === "number" ? { cost: res.usage.cost } : {}),
       ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
+      ...(res.failureType ? { failure_type: res.failureType } : {}),
+      ...(res.workerRunGovernance ? { worker_run_governance: res.workerRunGovernance } : {}),
       ...(res.reasoning_trace_path ? { reasoning_trace_path: res.reasoning_trace_path } : {}),
       ...(typeof res.reasoning_chars === "number" ? { reasoning_chars: res.reasoning_chars } : {}),
       ...(typeof res.reasoning_chunks === "number" ? { reasoning_chunks: res.reasoning_chunks } : {}),
@@ -598,8 +619,9 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       for (const rec of settled) childRecords.set(rec.id, rec);
       // retry only children that did not reach completed/degraded
       pendingChildren = pendingChildren.filter((c) => {
-        const st = childRecords.get(c.id)?.status;
-        return st !== "completed" && st !== "degraded";
+        const record = childRecords.get(c.id);
+        const st = record?.status;
+        return st !== "completed" && st !== "degraded" && !isNonRetryableGovernanceFailure(record?.failure_type);
       });
       if (onFail !== "retry") break;
       if (haltSignal()) break;
@@ -616,6 +638,12 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       id: stage.id, kind: "parallel", status: aggStatus,
       attempts: attempt, duration_ms: now() - startMs,
       output_paths: okPaths,
+      ...(childList.some((r) => r.worker_run_governance) ? {
+        worker_run_governance: childList.flatMap((r) => {
+          const governance = r.worker_run_governance;
+          return governance ? (Array.isArray(governance) ? governance : [governance]) : [];
+        }),
+      } : {}),
       ...(degradedUps.length > 0 ? { degraded_upstreams: degradedUps } : {}),
       ...(aggStatus === "failed" ? {
         error: `children failed: ${childList.filter((r) => r.status === "failed").map((r) => r.id).join(",") || "(missing)"}`,

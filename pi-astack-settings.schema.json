@@ -1695,6 +1695,61 @@
             }
           }
         },
+        "workerRunGovernor": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Phase-1 per-run governance owner for dispatch/workflow workers. Owns one governance termination promise; parent abort and timeout remain external lifecycle boundaries.",
+          "properties": {
+            "enabled": { "type": "boolean", "default": true },
+            "visibleText": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean", "default": true },
+                "abortOnRepeat": { "type": "boolean", "default": true, "description": "Abort only on high-confidence exact-tail visible-text cycles. Entropy, n-gram, and length-only aborts are not used." }
+              }
+            },
+            "providerBudgets": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean", "default": true },
+                "providerRetryLimit": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 4 },
+                "emptyVisibleRetryLimit": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2 },
+                "fullOutputCapLimit": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2 },
+                "fullOutputUsageRatio": { "type": "number", "minimum": 0.5, "maximum": 1, "default": 0.98 }
+              }
+            },
+            "toolObservers": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Bounded audit-only tool behavior observers. Schema rejection coverage is post_execution_only because pi session events do not expose every pre-execution schema reject.",
+              "properties": {
+                "enabled": { "type": "boolean", "default": true },
+                "sameFileSmallReadChurn": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": { "type": "boolean", "default": true },
+                    "observeAfter": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 3 },
+                    "maxWindowLines": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 200 },
+                    "overlapRatio": { "type": "number", "minimum": 0.5, "maximum": 1, "default": 0.8 },
+                    "maxTrackedPaths": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 32 }
+                  }
+                },
+                "schemaErrorStorm": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": { "type": "boolean", "default": true },
+                    "observeAfter": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 3 },
+                    "maxTrackedShapes": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 64 }
+                  }
+                }
+              }
+            }
+          }
+        },
         "hub": {
           "type": "object",
           "additionalProperties": false,

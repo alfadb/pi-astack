@@ -368,11 +368,10 @@ check("single-task dispatch_agent progress also maps cancelled (R7.1 P2 fix)", (
 console.log("\nSection: tool result details surface terminalState");
 
 check("dispatch_agent details include terminalState", () => {
-  const block = dispatchSrc.match(
-    /kind:\s*"dispatch_agent_result"[\s\S]{0,800}?\}/,
-  );
-  if (!block) throw new Error("could not locate dispatch_agent_result details");
-  if (!/terminalState:\s*tsFields\.terminal_state/.test(block[0])) {
+  const start = dispatchSrc.search(/kind:\s*"dispatch_agent_result"/);
+  if (start < 0) throw new Error("could not locate dispatch_agent_result details");
+  const block = dispatchSrc.slice(start, start + 2000);
+  if (!/terminalState:\s*tsFields\.terminal_state/.test(block)) {
     throw new Error("dispatch_agent details missing terminalState surface");
   }
 });

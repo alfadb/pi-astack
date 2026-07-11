@@ -89,6 +89,7 @@
     "smoke:dispatch-subagent-tool-allowlist": "node scripts/smoke-dispatch-subagent-tool-allowlist.mjs",
     "smoke:dispatch-project-trust": "node scripts/smoke-dispatch-project-trust.mjs",
     "smoke:dispatch-task-governor": "node scripts/smoke-dispatch-task-governor.mjs",
+    "smoke:worker-run-governor": "node scripts/smoke-worker-run-governor.mjs",
     "smoke:fallback-timing": "node scripts/smoke-model-fallback-mutation-timing.mjs",
     "smoke:vision": "node scripts/smoke-vision.mjs",
     "smoke:imagine": "node scripts/smoke-imagine.mjs",

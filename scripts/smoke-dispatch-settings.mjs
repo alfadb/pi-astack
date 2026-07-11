@@ -56,17 +56,20 @@ function loadModuleFromString(code, fakePath) {
 }
 
 const settingsSrcPath = path.join(repoRoot, "extensions/dispatch/settings.ts");
+const governorSrcPath = path.join(repoRoot, "extensions/dispatch/worker-run-governor.ts");
 const schemaPath = path.join(repoRoot, "pi-astack-settings.schema.json");
+const schemaText = fs.readFileSync(schemaPath, "utf8");
 const compiled = transpileTsToCjs(settingsSrcPath);
+const compiledGovernor = transpileTsToCjs(governorSrcPath);
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-dispatch-settings-"));
 const tmpFile = path.join(tmpDir, "settings.cjs");
 fs.writeFileSync(tmpFile, compiled);
+fs.writeFileSync(path.join(tmpDir, "worker-run-governor.js"), compiledGovernor);
 const { DEFAULT_DISPATCH_SETTINGS, resolveDispatchSettings, readDispatchSettings } = loadModuleFromString(compiled, tmpFile);
 
 console.log("dispatch settings smoke\n");
 
 check("schema defines exactly one top-level dispatch key", () => {
-  const schemaText = fs.readFileSync(schemaPath, "utf8");
   const matches = schemaText.match(/^\s*"dispatch":\s*\{$/gm) ?? [];
   if (matches.length !== 1) {
     throw new Error(`expected exactly one top-level dispatch key, found ${matches.length}`);
@@ -75,7 +78,7 @@ check("schema defines exactly one top-level dispatch key", () => {
   const schema = JSON.parse(schemaText);
   const dispatchProps = schema?.properties?.dispatch?.properties;
   if (!dispatchProps) throw new Error("dispatch.properties missing from parsed schema");
-  for (const key of ["maxProviderConcurrency", "taskGovernor", "hub"]) {
+  for (const key of ["maxProviderConcurrency", "taskGovernor", "workerRunGovernor", "hub"]) {
     if (!(key in dispatchProps)) {
       throw new Error(`dispatch.properties missing ${key}`);
     }
@@ -93,10 +96,70 @@ check("default resolver value is 4", () => {
 });
 
 check("valid override is honored", () => {
-  const resolved = resolveDispatchSettings({ dispatch: { maxProviderConcurrency: 7 } });
+  const resolved = resolveDispatchSettings({ dispatch: {
+    maxProviderConcurrency: 7,
+    workerRunGovernor: {
+      providerBudgets: { providerRetryLimit: 9, fullOutputUsageRatio: 0.99 },
+      visibleText: { abortOnRepeat: false },
+    },
+  } });
   if (resolved.maxProviderConcurrency !== 7) {
     throw new Error(`expected 7, got ${resolved.maxProviderConcurrency}`);
   }
+  if (resolved.workerRunGovernor.providerBudgets.providerRetryLimit !== 9 || resolved.workerRunGovernor.providerBudgets.fullOutputUsageRatio !== 0.99) {
+    throw new Error(`workerRunGovernor provider override not honored: ${JSON.stringify(resolved.workerRunGovernor)}`);
+  }
+  if (resolved.workerRunGovernor.visibleText.abortOnRepeat !== false) {
+    throw new Error("workerRunGovernor visibleText override not honored");
+  }
+});
+
+check("workerRunGovernor defaults are enabled and bounded", () => {
+  const cfg = resolveDispatchSettings({}).workerRunGovernor;
+  if (!cfg.enabled || !cfg.visibleText.enabled || !cfg.visibleText.abortOnRepeat || !cfg.providerBudgets.enabled || !cfg.toolObservers.enabled) {
+    throw new Error(`expected enabled defaults: ${JSON.stringify(cfg)}`);
+  }
+  if (cfg.providerBudgets.providerRetryLimit !== 4 || cfg.providerBudgets.emptyVisibleRetryLimit !== 2 || cfg.providerBudgets.fullOutputCapLimit !== 2) {
+    throw new Error(`narrow budget defaults drifted: ${JSON.stringify(cfg.providerBudgets)}`);
+  }
+});
+
+check("nested invalid workerRunGovernor values fall back independently", () => {
+  const cfg = resolveDispatchSettings({ dispatch: { workerRunGovernor: {
+    enabled: "yes",
+    visibleText: { enabled: 1, abortOnRepeat: null },
+    providerBudgets: {
+      enabled: [], providerRetryLimit: 0, emptyVisibleRetryLimit: 2.5,
+      fullOutputCapLimit: 10001, fullOutputUsageRatio: 0.49,
+    },
+    toolObservers: {
+      enabled: "true",
+      sameFileSmallReadChurn: {
+        enabled: {}, observeAfter: -1, maxWindowLines: 0,
+        overlapRatio: 1.01, maxTrackedPaths: 10001,
+      },
+      schemaErrorStorm: { enabled: "false", observeAfter: NaN, maxTrackedShapes: 0 },
+    },
+  } } }).workerRunGovernor;
+  if (JSON.stringify(cfg) !== JSON.stringify(DEFAULT_DISPATCH_SETTINGS.workerRunGovernor)) {
+    throw new Error(`nested invalid values did not fall back: ${JSON.stringify(cfg)}`);
+  }
+});
+
+check("workerRunGovernor schema validates nested bounds and rejects unknown fields", () => {
+  const schema = JSON.parse(schemaText).properties.dispatch.properties.workerRunGovernor;
+  const provider = schema.properties.providerBudgets;
+  const readChurn = schema.properties.toolObservers.properties.sameFileSmallReadChurn;
+  const schemaStorm = schema.properties.toolObservers.properties.schemaErrorStorm;
+  for (const node of [schema, schema.properties.visibleText, provider, schema.properties.toolObservers, readChurn, schemaStorm]) {
+    if (node.type !== "object" || node.additionalProperties !== false) throw new Error(`nested object is not strict: ${JSON.stringify(node)}`);
+  }
+  if (provider.properties.fullOutputUsageRatio.minimum !== 0.5 || provider.properties.fullOutputUsageRatio.maximum !== 1) throw new Error("usage ratio schema bounds drifted");
+  for (const key of ["providerRetryLimit", "emptyVisibleRetryLimit", "fullOutputCapLimit"]) {
+    const node = provider.properties[key];
+    if (node.type !== "integer" || node.minimum !== 1 || node.maximum !== 10000) throw new Error(`invalid provider budget schema: ${key}`);
+  }
+  if (readChurn.properties.overlapRatio.minimum !== 0.5 || readChurn.properties.overlapRatio.maximum !== 1) throw new Error("overlap ratio schema bounds drifted");
 });
 
 check("invalid values fall back to default", () => {

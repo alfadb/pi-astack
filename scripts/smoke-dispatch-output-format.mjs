@@ -95,6 +95,17 @@ const dispatchSettingsOut = ts.transpileModule(fs.readFileSync(dispatchSettingsS
 fs.writeFileSync(path.join(tmpDir, "settings.cjs"), dispatchSettingsOut.outputText);
 fs.copyFileSync(path.join(tmpDir, "settings.cjs"), path.join(tmpDir, "settings.js"));
 
+// Phase-1 worker-run governor is imported by settings and dispatch.
+const workerGovernorSrc = path.join(repoRoot, "extensions/dispatch/worker-run-governor.ts");
+const workerGovernorOut = ts.transpileModule(fs.readFileSync(workerGovernorSrc, "utf8"), {
+  compilerOptions: {
+    module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2022,
+    esModuleInterop: true,
+  },
+});
+fs.writeFileSync(path.join(tmpDir, "worker-run-governor.js"), workerGovernorOut.outputText);
+
 // ADR 0027 §C5 v1: stage terminal-state.ts (real module, no external deps).
 // dispatch/index.ts imports buildTerminalStateFields/inferParallelTerminalState/
 // inferTerminalState at module-load time. The terminal-state.ts source
@@ -167,6 +178,23 @@ fs.writeFileSync(
 
 const sharedDir = path.join(tmpDir, "..", "_shared");
 fs.mkdirSync(sharedDir, { recursive: true });
+
+// Visible repeat detection and empty-output categorization are runtime-only for
+// this format smoke; module-load stubs keep the pure formatter harness narrow.
+fs.writeFileSync(
+  path.join(sharedDir, "visible-text-repeat-detector.js"),
+  `module.exports = {
+  VisibleTextRepeatDetector: class { messageStart() {} pushDelta() { return { trip: false }; } messageEnd() { return { trip: false }; } },
+  scanVisibleTextForRepeat: () => ({ trip: false }),
+  visibleTextFingerprint: () => "stub",
+};\n`,
+);
+const emptyRetryDir = path.join(tmpDir, "..", "empty-visible-output-retry");
+fs.mkdirSync(emptyRetryDir, { recursive: true });
+fs.writeFileSync(
+  path.join(emptyRetryDir, "index.js"),
+  `module.exports = { RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR: "provider returned error: ended without visible assistant text after thinking" };\n`,
+);
 
 // Stub `../_shared/pi-internals` — ADR 0027 PR-B added the
 // markSessionAsSubAgent import. formatResult doesn’t use it, but it’s
@@ -944,7 +972,7 @@ check("source invariant: dispatch timeout is progress-idle, with max-runtime saf
   if (!/recordProgress = \(reason: string\) => \{[\s\S]{0,500}armIdleTimeout\(\);/.test(_indexSrc)) {
     throw new Error("dispatch recordProgress must re-arm the idle timeout");
   }
-  if (!/const eventType = String\(event\?\.type \?\? \"unknown\"\);[\s\S]{0,3000}recordProgress\(`event:\$\{eventType\}`\)/.test(_indexSrc)) {
+  if (!/const eventType = String\(event\?\.type \?\? \"unknown\"\);[\s\S]{0,10000}recordProgress\(`event:\$\{eventType\}`\)/.test(_indexSrc)) {
     throw new Error("dispatch subscribe events must count as idle-timeout progress");
   }
   if (!/setTimeout\(\(\) => resolveTimeout\("max_runtime"\), maxRuntimeMs\)/.test(_indexSrc)) {

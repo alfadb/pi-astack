@@ -444,8 +444,10 @@ export interface HubDeps {
     reasoning_trace_status?: "complete" | "forced_incomplete" | "write_failed";
     reasoning_trace_error_code?: string;
     reasoning_trace_bytes?: number;
+    workerRunGovernance?: unknown;
   }>;
   reasoningTraceFields: (result: unknown) => Record<string, unknown>;
+  governanceFields: (result: unknown) => Record<string, unknown>;
   appendDispatchAudit: (projectRoot: string, anchor: CausalAnchor | undefined, event: Record<string, unknown>) => Promise<void>;
   providerFromModel: (model: string) => string;
   validateTools: (tools: string | undefined) => { ok: boolean; reason?: string };
@@ -582,6 +584,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
             hubDurationMs: durMs, hubResult: "fail", hubFailureType: failureType,
             ...(usage ? { usage } : {}),
           }),
+          ...deps.governanceFields(traceSource),
           ...reasoningFields,
         });
         void emit(summaryAnchor, buildHubSummaryRow({
@@ -598,6 +601,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
             error: reason,
             failure_type: failureType,
             hub_model: hubModel,
+            hub_governance: deps.governanceFields(traceSource),
             hub_reasoning: reasoningFields,
           },
           isError: true,
@@ -656,6 +660,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           ...(mainVendor ? { mainVendor } : {}),
           hubDurationMs, hubResult: "ok", ...(hubRes.usage ? { usage: hubRes.usage } : {}),
         }),
+        ...deps.governanceFields(hubRes),
         ...deps.reasoningTraceFields(hubRes),
       });
 
@@ -672,6 +677,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
             ...progress.details(progressSnapshot),
             warnings: v.warnings,
             hub_model: hubModel,
+            hub_governance: deps.governanceFields(hubRes),
             hub_reasoning: deps.reasoningTraceFields(hubRes),
           },
           isError: true,
@@ -793,6 +799,7 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
               result: res.error ? "fail" : "ok",
               ...(res.failureType ? { failure_type: res.failureType } : {}),
               ...("toolCallCount" in res && typeof (res as { toolCallCount?: unknown }).toolCallCount === "number" ? { tool_call_count: (res as { toolCallCount: number }).toolCallCount } : {}),
+              ...deps.governanceFields(res),
               ...deps.reasoningTraceFields(res),
               output_chars: res.output?.length ?? 0,
               ...(res.usage ? { tokens_in: res.usage.input, tokens_out: res.usage.output, cost: res.usage.cost } : {}),
@@ -821,12 +828,19 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       const workersCost = dense.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
       const hubCost = hubRes.usage?.cost ?? 0;
 
+      const workerGovernance = dense.flatMap((result) => {
+        const governance = deps.governanceFields(result).worker_run_governance;
+        return governance ? [governance] : [];
+      });
       void emit(
         summaryAnchor,
-        buildHubSummaryRow({
-          workerCount: total, successCount, failedCount, terminalState,
-          hubCost, workersCost, hubDurationMs, totalWallMs, dualExecSampled: false,
-        }),
+        {
+          ...buildHubSummaryRow({
+            workerCount: total, successCount, failedCount, terminalState,
+            hubCost, workersCost, hubDurationMs, totalWallMs, dualExecSampled: false,
+          }),
+          worker_run_governance: workerGovernance,
+        },
       );
 
       // ── Render aggregate for the main session ──
@@ -839,7 +853,10 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       dense.forEach((r, i) => {
         const t = tasks[i];
         lines.push(`### [${i}] ${t.role} — ${t.model} ${r.error ? "❌" : "✅"}`);
-        lines.push(r.error ? r.error : (r.output || "(empty)"));
+        const governed = Boolean(deps.governanceFields(r).worker_run_governance);
+        lines.push(r.error
+          ? `${r.error}${governed && r.output ? `\n\n_partial output (${r.output.length} chars):_\n\n${r.output}` : ""}`
+          : (r.output || "(empty)"));
         lines.push("");
       });
 
@@ -850,16 +867,19 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
           ...progress.details(progressSnapshot),
           dispatch_tool_call_id: toolCallId,
           hub_model: hubModel,
+          hub_governance: deps.governanceFields(hubRes),
           hub_reasoning: deps.reasoningTraceFields(hubRes),
           tasks: dense.map((result, index) => ({
             task_index: index,
             model: tasks[index]?.model,
+            ...deps.governanceFields(result),
             ...deps.reasoningTraceFields(result),
           })),
           worker_count: total,
           success_count: successCount,
           failed_count: failedCount,
           terminal_state: terminalState,
+          worker_run_governance: workerGovernance,
           total_cost: hubCost + workersCost,
           same_vendor_as_hub: v.sameVendorAsHub,
           warnings: v.warnings,

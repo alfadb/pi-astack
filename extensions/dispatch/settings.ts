@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+  DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS,
+  type WorkerRunGovernorSettings,
+} from "./worker-run-governor";
 
 export type DispatchTaskGovernorProfile = "read_only" | "research" | "implementation" | "mutating_default";
 
@@ -21,6 +25,7 @@ export interface DispatchTaskGovernorSettings {
 export interface DispatchSettings {
   maxProviderConcurrency: number;
   taskGovernor: DispatchTaskGovernorSettings;
+  workerRunGovernor: WorkerRunGovernorSettings;
 }
 
 export const DEFAULT_TASK_GOVERNOR_PROFILES: Record<DispatchTaskGovernorProfile, DispatchTaskGovernorLimits> = {
@@ -36,6 +41,7 @@ export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
     enabled: true,
     profiles: DEFAULT_TASK_GOVERNOR_PROFILES,
   },
+  workerRunGovernor: DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS,
 };
 
 const MAX_PROVIDER_CONCURRENCY_LIMIT = 16;
@@ -73,6 +79,61 @@ function asPositiveBudget(value: unknown, fallback: number): number {
   const n = typeof value === "number" ? value : NaN;
   if (!Number.isInteger(n) || n < 1 || n > 10_000) return fallback;
   return n;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function boolOr(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function boundedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
+    ? value
+    : fallback;
+}
+
+function resolveWorkerRunGovernor(raw: unknown): WorkerRunGovernorSettings {
+  const rec = asRecord(raw);
+  const visible = asRecord(rec.visibleText);
+  const provider = asRecord(rec.providerBudgets);
+  const tools = asRecord(rec.toolObservers);
+  const readChurn = asRecord(tools.sameFileSmallReadChurn);
+  const schemaStorm = asRecord(tools.schemaErrorStorm);
+  const def = DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS;
+  return {
+    enabled: boolOr(rec.enabled, def.enabled),
+    visibleText: {
+      enabled: boolOr(visible.enabled, def.visibleText.enabled),
+      abortOnRepeat: boolOr(visible.abortOnRepeat, def.visibleText.abortOnRepeat),
+    },
+    providerBudgets: {
+      enabled: boolOr(provider.enabled, def.providerBudgets.enabled),
+      providerRetryLimit: asPositiveBudget(provider.providerRetryLimit, def.providerBudgets.providerRetryLimit),
+      emptyVisibleRetryLimit: asPositiveBudget(provider.emptyVisibleRetryLimit, def.providerBudgets.emptyVisibleRetryLimit),
+      fullOutputCapLimit: asPositiveBudget(provider.fullOutputCapLimit, def.providerBudgets.fullOutputCapLimit),
+      fullOutputUsageRatio: boundedNumber(provider.fullOutputUsageRatio, def.providerBudgets.fullOutputUsageRatio, 0.5, 1),
+    },
+    toolObservers: {
+      enabled: boolOr(tools.enabled, def.toolObservers.enabled),
+      sameFileSmallReadChurn: {
+        enabled: boolOr(readChurn.enabled, def.toolObservers.sameFileSmallReadChurn.enabled),
+        observeAfter: asPositiveBudget(readChurn.observeAfter, def.toolObservers.sameFileSmallReadChurn.observeAfter),
+        maxWindowLines: asPositiveBudget(readChurn.maxWindowLines, def.toolObservers.sameFileSmallReadChurn.maxWindowLines),
+        overlapRatio: boundedNumber(readChurn.overlapRatio, def.toolObservers.sameFileSmallReadChurn.overlapRatio, 0.5, 1),
+        maxTrackedPaths: asPositiveBudget(readChurn.maxTrackedPaths, def.toolObservers.sameFileSmallReadChurn.maxTrackedPaths),
+      },
+      schemaErrorStorm: {
+        enabled: boolOr(schemaStorm.enabled, def.toolObservers.schemaErrorStorm.enabled),
+        observeAfter: asPositiveBudget(schemaStorm.observeAfter, def.toolObservers.schemaErrorStorm.observeAfter),
+        maxTrackedShapes: asPositiveBudget(schemaStorm.maxTrackedShapes, def.toolObservers.schemaErrorStorm.maxTrackedShapes),
+      },
+    },
+  };
 }
 
 function resolveTaskGovernor(raw: unknown): DispatchTaskGovernorSettings {
@@ -115,6 +176,7 @@ export function resolveDispatchSettings(rawSettings: unknown = {}): DispatchSett
   return {
     maxProviderConcurrency: asPositiveInt(dispatch.maxProviderConcurrency, def.maxProviderConcurrency),
     taskGovernor: resolveTaskGovernor(dispatch.taskGovernor),
+    workerRunGovernor: resolveWorkerRunGovernor(dispatch.workerRunGovernor),
   };
 }
 

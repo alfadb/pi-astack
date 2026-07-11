@@ -180,6 +180,65 @@ await check("retry exhaust → failed(runner_terminal) → downstream cancelled(
   assert(calls.filter((c) => c.stageId === "b").length === 0, "b never launched");
 });
 
+await check("governance terminal is non-retryable and governance fields reach stage/audit", async () => {
+  const runDir = tmpRunDir();
+  const rows = [];
+  let calls = 0;
+  const governance = {
+    worker_run_id: "worker-gov-1",
+    rule_version: "dispatch-worker-run-governor/v1",
+    profile: "read_only",
+    counters: { provider_request_count: 5, provider_retry_count: 5 },
+    thresholds: { provider_retry_limit: 4 },
+    terminal: {
+      signal: "provider_retry",
+      termination_source: "worker_run_governor",
+      failureType: "provider_retry_budget_exceeded",
+      count: 5,
+      limit: 4,
+      action: "abort_session_return_bounded_partial",
+    },
+  };
+  const r = await E.executeWorkflow({
+    doc: doc([agent("a", { on_fail: "retry", max_retries: 3 })]),
+    ...baseOpts(runDir, async () => {
+      calls++;
+      return {
+        output: "bounded partial",
+        error: "provider retry budget exceeded",
+        failureType: "provider_retry_budget_exceeded",
+        durationMs: 2,
+        workerRunGovernance: governance,
+      };
+    }, { audit: (row) => rows.push(row) }),
+  });
+  assert(calls === 1, `governance terminal must not retry (calls=${calls})`);
+  assert(r.stages.a.attempts === 1 && r.stages.a.failure_type === "provider_retry_budget_exceeded", JSON.stringify(r.stages.a));
+  assert(r.stages.a.worker_run_governance?.worker_run_id === "worker-gov-1", JSON.stringify(r.stages.a));
+  const row = rows.find((item) => item.event === "stage_terminal" && item.stage === "a");
+  assert(row?.worker_run_governance?.terminal?.termination_source === "worker_run_governor", JSON.stringify(row));
+});
+
+await check("degrade policy preserves bounded governance partial in output file", async () => {
+  const runDir = tmpRunDir();
+  let calls = 0;
+  const r = await E.executeWorkflow({
+    doc: doc([agent("a", { on_fail: "degrade" })]),
+    ...baseOpts(runDir, async () => {
+      calls++;
+      return {
+        output: "bounded partial from repetitive worker",
+        error: "repetitive output stopped",
+        failureType: "repetitive_output",
+        durationMs: 2,
+      };
+    }),
+  });
+  assert(calls === 1 && r.stages.a.status === "degraded", JSON.stringify(r.stages.a));
+  const body = fs.readFileSync(r.stages.a.output_path, "utf8");
+  assert(body.includes("bounded partial from repetitive worker") && body.includes("failure_note"), body);
+});
+
 await check("thrown runner preserves standard reasoning trace fields in stage state and audit", async () => {
   const runDir = tmpRunDir();
   const auditRows = [];

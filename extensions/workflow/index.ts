@@ -275,6 +275,7 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
       durationMs: result.durationMs,
       ...(result.usage ? { usage: result.usage } : {}),
       ...(typeof result.toolCallCount === "number" ? { toolCallCount: result.toolCallCount } : {}),
+      ...(result.workerRunGovernance ? { workerRunGovernance: result.workerRunGovernance } : {}),
       ...dispatchReasoningTraceFields(result),
     };
   };

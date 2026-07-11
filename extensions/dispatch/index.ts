@@ -63,6 +63,7 @@ import {
 import { startHeartbeat, type HeartbeatHandle } from "../_shared/heartbeat";
 import { assessLivenessForAnchor } from "./heartbeat-consumer";
 import { appendFile, mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import {
   DEFAULT_DISPATCH_SETTINGS,
@@ -71,6 +72,20 @@ import {
   type DispatchTaskGovernorSettings,
   type DispatchTaskGovernorStage,
 } from "./settings";
+import {
+  VisibleTextRepeatDetector,
+  scanVisibleTextForRepeat,
+  type VisibleTextRepeatMetrics,
+  type VisibleTextRepeatVerdict,
+} from "../_shared/visible-text-repeat-detector";
+import {
+  WorkerRunGovernor,
+  buildWorkerRunAuditEvent,
+  type WorkerRunGovernanceSummary,
+  type WorkerRunGovernorDecision,
+  type WorkerGovernorFailureType,
+} from "./worker-run-governor";
+import { RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR } from "../empty-visible-output-retry/index";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -817,6 +832,10 @@ type FailureType =
   | "truncated"         // stopReason="length" (max tokens) or "abort" (provider cut stream)
   | "guardrail_stop"    // deterministic governor stopped for partial return / fresh-auth boundary
   | "tool_budget_exceeded" // deterministic governor hard cap exceeded
+  | "repetitive_output"
+  | "provider_retry_budget_exceeded"
+  | "empty_visible_retry_budget_exceeded"
+  | "full_output_cap_budget_exceeded"
   // lifecycle
   | "timeout"           // dispatch tool timed out (no output captured)
   | "timeout_partial"   // dispatch tool timed out but some output was captured
@@ -936,6 +955,93 @@ export function mergeAssistantTurn(
   return turnText.length > 0 ? turnText : prev;
 }
 
+const MAX_GOVERNANCE_PARTIAL_BYTES = 64 * 1024;
+export const WORKER_RUN_GOVERNOR_TERMINAL_ERROR =
+  "worker run governor stopped this assistant response before native retry";
+
+function assistantVisibleText(message: { content?: Array<{ type?: string; text?: unknown }> } | null | undefined): string {
+  if (!Array.isArray(message?.content)) return "";
+  return message.content
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("");
+}
+
+function appendUtf8Bounded(
+  prefix: string,
+  prefixBytes: number,
+  delta: string,
+  maxBytes = MAX_GOVERNANCE_PARTIAL_BYTES,
+): { text: string; bytes: number } {
+  if (prefixBytes >= maxBytes || !delta) return { text: prefix, bytes: prefixBytes };
+  let text = prefix;
+  let bytes = prefixBytes;
+  for (const ch of delta) {
+    const width = Buffer.byteLength(ch, "utf8");
+    if (bytes + width > maxBytes) break;
+    text += ch;
+    bytes += width;
+  }
+  return { text, bytes };
+}
+
+export function boundedUtf8Prefix(value: string, maxBytes = MAX_GOVERNANCE_PARTIAL_BYTES): string {
+  return appendUtf8Bounded("", 0, value, Math.max(0, maxBytes)).text;
+}
+
+function repetitiveOutputMarker(metrics: VisibleTextRepeatMetrics): string {
+  return `\n\n[worker_run_governor signal=repetitive_output hash=${metrics.hash} period=${metrics.period} rounds=${metrics.rounds} repeated_chars=${metrics.repeated_chars}; output truncated before abort]`;
+}
+
+export function buildRepetitiveOutputPartial(partial: string, metrics: VisibleTextRepeatMetrics): string {
+  const marker = repetitiveOutputMarker(metrics);
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const prefixBudget = Math.max(0, MAX_GOVERNANCE_PARTIAL_BYTES - markerBytes);
+  return `${boundedUtf8Prefix(partial, prefixBudget)}${marker}`;
+}
+
+export function markGovernorTerminalAssistantMessage(
+  message: { stopReason?: unknown; errorMessage?: unknown } | null | undefined,
+  decision: WorkerRunGovernorDecision | undefined,
+): boolean {
+  if (!message || decision?.mode !== "abort") return false;
+  message.stopReason = "aborted";
+  message.errorMessage = `${WORKER_RUN_GOVERNOR_TERMINAL_ERROR}: ${decision.failureType ?? decision.signal}`;
+  return true;
+}
+
+export function isFullOutputCapHit(
+  stopReason: unknown,
+  outputTokens: unknown,
+  requestedCap: number | undefined,
+  usageRatio: number,
+): boolean {
+  if (stopReason === "length" || stopReason === "max_tokens") return true;
+  if (stopReason === "toolUse" || requestedCap === undefined) return false;
+  const tokens = Number(outputTokens);
+  return Number.isFinite(tokens) && tokens >= usageRatio * requestedCap;
+}
+
+export function reconcileFinalVisibleRepeat(
+  streamed: VisibleTextRepeatVerdict,
+  finalText: string,
+  independentScan: (text: string) => VisibleTextRepeatVerdict = scanVisibleTextForRepeat,
+): VisibleTextRepeatVerdict {
+  return streamed.trip ? streamed : independentScan(finalText);
+}
+
+function governanceFailureMessage(decision: WorkerRunGovernorDecision): string {
+  switch (decision.failureType) {
+    case "repetitive_output": return "worker visible output entered an exact repeated tail cycle; bounded partial output returned";
+    case "provider_retry_budget_exceeded": return `provider retry budget exceeded: ${decision.count} retries > limit ${decision.limit}`;
+    case "empty_visible_retry_budget_exceeded": return `empty visible output retry budget exceeded: ${decision.count} failures > limit ${decision.limit}`;
+    case "full_output_cap_budget_exceeded": return `full output cap budget exceeded: ${decision.count} cap hits > limit ${decision.limit}`;
+    case "guardrail_stop": return `task governor fresh-auth boundary reached at ${decision.count} tool calls; partial output returned`;
+    case "tool_budget_exceeded": return `task governor hard tool budget reached at ${decision.count} tool calls; partial output returned`;
+    default: return "worker run governor stopped the session; bounded partial output returned";
+  }
+}
+
 export interface AgentResult {
   output: string;
   error?: string;
@@ -948,6 +1054,7 @@ export interface AgentResult {
   governorProfile?: DispatchTaskGovernorProfile;
   governorStage?: DispatchTaskGovernorStage;
   governorLimit?: number;
+  workerRunGovernance?: WorkerRunGovernanceSummary;
   stopReason?: string;
   durationMs: number;
   /** Number of sub-agent tool executions that actually started. */
@@ -986,6 +1093,11 @@ export interface AgentResult {
     finalAttempt?: number;
     finalError?: string;
   };
+}
+
+export function dispatchGovernanceFields(result: unknown): Record<string, unknown> {
+  const governance = (result as { workerRunGovernance?: WorkerRunGovernanceSummary } | undefined)?.workerRunGovernance;
+  return governance ? { worker_run_governance: governance } : {};
 }
 
 export function dispatchReasoningTraceFields(result: unknown): Record<string, unknown> {
@@ -1374,6 +1486,37 @@ export async function runInProcess(
   const dispatchSettings = readDispatchSettings();
   const governorProfile = inferTaskGovernorProfile(toolAllowlist, heartbeatCtx?.taskProfile);
   const governorEmittedStages = new Set<DispatchTaskGovernorStage>();
+  const visibleRepeatEnabled =
+    dispatchSettings.workerRunGovernor.enabled && dispatchSettings.workerRunGovernor.visibleText.enabled;
+  const workerGovernor = new WorkerRunGovernor(
+    randomUUID(),
+    governorProfile,
+    dispatchSettings.workerRunGovernor,
+    heartbeatProjectRoot,
+    start,
+  );
+  const emitWorkerRunDecision = (decision: WorkerRunGovernorDecision | undefined): void => {
+    if (!decision) return;
+    const trace = heartbeatCtx?.reasoningTrace;
+    void appendDispatchAudit(heartbeatProjectRoot, heartbeatAnchor, buildWorkerRunAuditEvent(decision, {
+      ...(trace?.dispatchToolCallId ? { dispatchToolCallId: trace.dispatchToolCallId } : {}),
+      ...(trace?.taskIndex !== undefined ? { taskIndex: trace.taskIndex } : {}),
+      ...(trace?.taskCount !== undefined ? { taskCount: trace.taskCount } : {}),
+      task: trace?.taskIndex !== undefined ? `dispatch[${trace.taskIndex}]` : "dispatch_agent",
+      ...(trace?.workflowRunId ? { workflowRunId: trace.workflowRunId } : {}),
+      ...(trace?.workflowStageId ? {
+        workflowStageId: trace.workflowStageId,
+        workflow: trace.workflowRunId ?? "workflow",
+      } : {}),
+    }));
+  };
+  if (effectiveMaxOutputTokens !== undefined) {
+    emitWorkerRunDecision(workerGovernor.observe({
+      signal: "requested_output_cap",
+      requestedOutputCap: effectiveMaxOutputTokens,
+      action: "audit_requested_output_cap_no_abort",
+    }));
+  }
 
   const { settingsManager, resourceLoader } = await getSharedInfra();
 
@@ -1402,6 +1545,36 @@ export async function runInProcess(
   let lastAssistant: any = null;
   let usage: AgentResult["usage"] | undefined;
   let stopReason: string | undefined;
+  const visibleDetector = new VisibleTextRepeatDetector();
+  let responsePartial = "";
+  let responsePartialBytes = 0;
+  let visibleRepeatReported = false;
+  let governanceOutputOverride: string | undefined;
+
+  const captureResponsePartial = (delta: string): void => {
+    const next = appendUtf8Bounded(responsePartial, responsePartialBytes, delta);
+    responsePartial = next.text;
+    responsePartialBytes = next.bytes;
+  };
+  const tripVisibleRepeat = (metrics: VisibleTextRepeatMetrics, fallbackText?: string): void => {
+    if (workerGovernor.terminalDecision || visibleRepeatReported) return;
+    visibleRepeatReported = true;
+    if (fallbackText !== undefined) {
+      responsePartial = boundedUtf8Prefix(fallbackText);
+      responsePartialBytes = Buffer.byteLength(responsePartial, "utf8");
+    }
+    const decision = workerGovernor.observe({
+      signal: "repetitive_output",
+      hash: metrics.hash,
+      count: metrics.repeated_chars,
+      ...(metrics.structured ? { limit: Math.max(131072, metrics.period * 32) } : {}),
+      action: "abort_session_return_bounded_partial",
+    });
+    if (decision?.mode === "abort") {
+      governanceOutputOverride = buildRepetitiveOutputPartial(responsePartial, metrics);
+    }
+    emitWorkerRunDecision(decision);
+  };
 
   // Retry observability (P1 fix: restore retryHistory from auto_retry_* events)
   const retryHistory: AgentResult["retryHistory"] = { entries: [] };
@@ -1453,9 +1626,27 @@ export async function runInProcess(
   let lastProgressAt = start;
   let lastProgressReason = "started";
   let recordProgress = (_reason: string) => {};
-  let resolveGovernorStop: ((result: AgentResult) => void) | undefined;
-  const governorPromise = new Promise<AgentResult>((resolve) => {
-    resolveGovernorStop = resolve;
+  const governancePromise = workerGovernor.termination.then((decision): AgentResult => {
+    localCtl.abort();
+    abortSessionOnce();
+    settled = true;
+    const output = governanceOutputOverride ?? boundedUtf8Prefix(finalOutput || responsePartial);
+    return {
+      output,
+      error: governanceFailureMessage(decision),
+      failureType: decision.failureType as FailureType,
+      durationMs: Date.now() - start,
+      toolCallCount,
+      usage,
+      stopReason,
+      ...(decision.signal.startsWith("task_governor_") ? {
+        governorProfile: governorProfile,
+        governorStage: decision.signal.replace("task_governor_", "") as DispatchTaskGovernorStage,
+        governorLimit: decision.limit,
+      } : {}),
+      retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
+      workerRunGovernance: workerGovernor.snapshot(),
+    };
   });
 
   const timeoutPromise = new Promise<AgentResult>((resolve) => {
@@ -1549,27 +1740,46 @@ export async function runInProcess(
       const unsub = session.subscribe((event: any) => {
         reasoningTrace?.handleSessionEvent(event);
         const eventType = String(event?.type ?? "unknown");
+
+        if (eventType === "message_start" && event.message?.role === "assistant") {
+          visibleDetector.messageStart();
+          responsePartial = "";
+          responsePartialBytes = 0;
+          visibleRepeatReported = false;
+          emitWorkerRunDecision(workerGovernor.observe({
+            signal: "provider_request",
+            action: "audit_provider_request_proxy_no_abort",
+          }));
+        }
+
+        if (
+          eventType === "message_update" &&
+          event.message?.role === "assistant" &&
+          event.assistantMessageEvent?.type === "text_delta" &&
+          typeof event.assistantMessageEvent.delta === "string"
+        ) {
+          const delta = event.assistantMessageEvent.delta;
+          captureResponsePartial(delta);
+          if (visibleRepeatEnabled) {
+            const repeat = visibleDetector.pushDelta(delta);
+            if (repeat.trip && repeat.metrics) tripVisibleRepeat(repeat.metrics);
+          }
+        }
+
         if (eventType === "tool_execution_start") {
           toolCallCount++;
           const verdict = evaluateTaskGovernor(dispatchSettings.taskGovernor, governorProfile, toolCallCount, governorEmittedStages);
           if (verdict.stage) {
             governorEmittedStages.add(verdict.stage);
-            const governorFields = {
-              governor_profile: verdict.profile,
-              governor_stage: verdict.stage,
-              governor_limit: verdict.limit,
-              tool_call_count: toolCallCount,
-            };
-            void appendDispatchAudit(heartbeatProjectRoot, heartbeatAnchor, {
-              operation: "dispatch.task_governor",
-              row_kind: "governor",
-              model: modelStr,
-              thinking,
-              tools,
-              ...governorFields,
-              result: verdict.terminal ? "fail" : "ok",
-              ...(verdict.failureType ? { failure_type: verdict.failureType } : {}),
-            });
+            emitWorkerRunDecision(workerGovernor.observe({
+              signal: `task_governor_${verdict.stage}` as WorkerRunGovernorDecision["signal"],
+              count: toolCallCount,
+              ...(verdict.limit !== undefined ? { limit: verdict.limit } : {}),
+              terminal: verdict.terminal,
+              ...(verdict.failureType ? { failureType: verdict.failureType as WorkerGovernorFailureType } : {}),
+              ...(typeof event.toolCallId === "string" ? { toolCallId: event.toolCallId } : {}),
+              action: verdict.terminal ? "abort_session_return_bounded_partial" : "audit_task_governor_stage_no_abort",
+            }));
             try {
               heartbeatCtx?.onProgress?.({
                 reason: `governor:${verdict.stage}`,
@@ -1578,38 +1788,43 @@ export async function runInProcess(
                 toolCallCount,
               });
             } catch { /* best-effort UI telemetry */ }
-            if (verdict.terminal && resolveGovernorStop) {
-              const now = Date.now();
-              const error = verdict.failureType === "guardrail_stop"
-                ? `guardrail stop: ${verdict.profile} worker reached ${verdict.stage} gate at ${toolCallCount} tool calls; partial output returned`
-                : `tool budget exceeded: ${verdict.profile} worker reached hard cap ${verdict.limit} at ${toolCallCount} tool calls; partial output returned`;
-              localCtl.abort();
-              abortSessionOnce();
-              settled = true;
-              resolveGovernorStop({
-                output: finalOutput,
-                error,
-                failureType: verdict.failureType,
-                durationMs: now - start,
-                toolCallCount,
-                usage,
-                stopReason,
-                governorProfile: verdict.profile,
-                governorStage: verdict.stage,
-                governorLimit: verdict.limit,
-                retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
-              });
-            }
           }
+          emitWorkerRunDecision(workerGovernor.observeToolStart(
+            String(event.toolName ?? "unknown"),
+            event.args,
+            typeof event.toolCallId === "string" ? event.toolCallId : undefined,
+          ));
         }
+
+        if (eventType === "tool_execution_end") {
+          emitWorkerRunDecision(workerGovernor.observeToolEnd(
+            String(event.toolName ?? "unknown"),
+            event.result,
+            event.isError === true,
+            typeof event.toolCallId === "string" ? event.toolCallId : undefined,
+          ));
+        }
+
         recordProgress(`event:${eventType}`);
-        if (event.type === "message_end" && event.message?.role === "assistant") {
+        if (eventType === "message_end" && event.message?.role === "assistant") {
           lastAssistant = event.message;
-          // R3 P0 fix: use mergeAssistantTurn (pure, tested) instead of
-          // inline merge — the inline version had an unconditional wipe
-          // that defeated R2 P2-3 multi-turn preservation. See mergeAssistantTurn
-          // docstring for details.
-          finalOutput = mergeAssistantTurn(finalOutput, event.message);
+          const finalText = assistantVisibleText(event.message);
+          let repeat = visibleRepeatEnabled
+            ? visibleDetector.messageEnd()
+            : { trip: false };
+          if (visibleRepeatEnabled) {
+            // Final reconciliation always uses a fresh detector. No hash or
+            // length fingerprint is accepted as an equality proof, and final
+            // text is never appended to the streamed detector.
+            repeat = reconcileFinalVisibleRepeat(repeat, finalText);
+          }
+          if (repeat.trip && repeat.metrics) {
+            tripVisibleRepeat(repeat.metrics, finalText);
+          }
+
+          if (workerGovernor.terminalDecision?.failureType !== "repetitive_output") {
+            finalOutput = mergeAssistantTurn(finalOutput, event.message);
+          }
           if (event.message.usage) {
             usage = {
               input: event.message.usage.input ?? 0,
@@ -1619,11 +1834,38 @@ export async function runInProcess(
             };
           }
           stopReason = event.message.stopReason;
+          emitWorkerRunDecision(workerGovernor.observe({
+            signal: "assistant_response",
+            action: "audit_response_no_budget_reset",
+          }));
+          if (event.message.errorMessage === RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR) {
+            const emptyDecision = workerGovernor.observe({
+              signal: "empty_visible_retry",
+              action: "count_empty_visible_retry",
+            });
+            if (emptyDecision?.mode === "abort") {
+              // AgentSession checks retry eligibility immediately after this
+              // message_end. Seal this exact message before the governance
+              // promise schedules the unified session abort.
+              markGovernorTerminalAssistantMessage(event.message, emptyDecision);
+              stopReason = "aborted";
+            }
+            emitWorkerRunDecision(emptyDecision);
+          }
+          if (isFullOutputCapHit(
+            stopReason,
+            event.message.usage?.output,
+            effectiveMaxOutputTokens,
+            dispatchSettings.workerRunGovernor.providerBudgets.fullOutputUsageRatio,
+          )) {
+            emitWorkerRunDecision(workerGovernor.observe({
+              signal: "full_output_cap_hit",
+              action: "count_full_output_cap_hit",
+            }));
+          }
         }
-        // P1 fix: restore retry observability from auto_retry_* events.
-        // These fire inside the AgentSession's own retry loop (pi-ai level),
-        // independent of model-fallback retries.
-        if (event.type === "auto_retry_start") {
+
+        if (eventType === "auto_retry_start") {
           retryHistory.entries.push({
             attempt: typeof event.attempt === "number" ? event.attempt : retryHistory.entries.length + 1,
             errorPreview: typeof event.errorMessage === "string"
@@ -1632,12 +1874,14 @@ export async function runInProcess(
             delayMs: typeof event.delayMs === "number" ? event.delayMs : undefined,
             startedAt: Date.now(),
           });
+          emitWorkerRunDecision(workerGovernor.observe({
+            signal: "provider_retry",
+            action: "count_cumulative_provider_retry",
+          }));
         }
-        if (event.type === "auto_retry_end") {
+        if (eventType === "auto_retry_end") {
           retryHistory.finalOutcome = event.success ? "succeeded" : "exhausted";
-          if (typeof event.attempt === "number") {
-            retryHistory.finalAttempt = event.attempt;
-          }
+          if (typeof event.attempt === "number") retryHistory.finalAttempt = event.attempt;
           if (typeof event.finalError === "string" && event.finalError) {
             retryHistory.finalError = event.finalError.slice(0, 200);
           }
@@ -1655,13 +1899,13 @@ export async function runInProcess(
 
       const durationMs = Date.now() - start;
 
-      // Truncation: max-tokens ("length") or provider stream abort ("abort").
+      // Truncation: max-tokens ("length"/"max_tokens") or provider stream abort ("abort").
       // P0 fix: these were previously returned as success with truncated output;
       // now surfaced as failures so the caller knows the output is incomplete.
-      if (stopReason === "length" || stopReason === "abort") {
+      if (stopReason === "length" || stopReason === "max_tokens" || stopReason === "abort") {
         return {
           output: finalOutput,
-          error: stopReason === "length"
+          error: stopReason === "length" || stopReason === "max_tokens"
             ? "output truncated (max tokens reached)"
             : "stream aborted by provider",
           failureType: "truncated",
@@ -1740,10 +1984,12 @@ export async function runInProcess(
 
   let runPromiseSettled = false;
   const trackedRunPromise = runPromise.finally(() => { runPromiseSettled = true; });
-  const result = await Promise.race([trackedRunPromise, timeoutPromise, governorPromise]);
-  const resultWithBudget = effectiveMaxOutputTokens === undefined
-    ? result
-    : { ...result, maxOutputTokens: effectiveMaxOutputTokens };
+  const result = await Promise.race([trackedRunPromise, timeoutPromise, governancePromise]);
+  const resultWithBudget: AgentResult = {
+    ...result,
+    ...(effectiveMaxOutputTokens === undefined ? {} : { maxOutputTokens: effectiveMaxOutputTokens }),
+    workerRunGovernance: result.workerRunGovernance ?? workerGovernor.snapshot(),
+  };
   if (idleTimeoutId) clearTimeout(idleTimeoutId);
   if (maxRuntimeTimeoutId) clearTimeout(maxRuntimeTimeoutId);
   settled = true;
@@ -1758,6 +2004,10 @@ export async function runInProcess(
     resultWithBudget.failureType === "timeout_partial" ||
     resultWithBudget.failureType === "guardrail_stop" ||
     resultWithBudget.failureType === "tool_budget_exceeded" ||
+    resultWithBudget.failureType === "repetitive_output" ||
+    resultWithBudget.failureType === "provider_retry_budget_exceeded" ||
+    resultWithBudget.failureType === "empty_visible_retry_budget_exceeded" ||
+    resultWithBudget.failureType === "full_output_cap_budget_exceeded" ||
     resultWithBudget.failureType === "aborted";
   if (abortRace && !runPromiseSettled) {
     await new Promise<void>((resolve) => {
@@ -1866,6 +2116,10 @@ const PARTIAL_OUTPUT_FAILURES: ReadonlySet<FailureType> = new Set([
   "retry_exhausted",
   "guardrail_stop",
   "tool_budget_exceeded",
+  "repetitive_output",
+  "provider_retry_budget_exceeded",
+  "empty_visible_retry_budget_exceeded",
+  "full_output_cap_budget_exceeded",
 ]);
 
 export function formatResult(
@@ -2203,6 +2457,7 @@ export default function (pi: ExtensionAPI) {
           ...(result.heartbeat_liveness ? { heartbeat_liveness: result.heartbeat_liveness } : {}),
           ...(result.maxOutputTokens ? { max_output_tokens: result.maxOutputTokens } : {}),
           ...(typeof result.toolCallCount === "number" ? { tool_call_count: result.toolCallCount } : {}),
+          ...dispatchGovernanceFields(result),
           ...dispatchReasoningTraceFields(result),
           output_chars: result.output?.length ?? 0,
           ...(result.usage
@@ -2225,6 +2480,7 @@ export default function (pi: ExtensionAPI) {
           durationMs,
           ok: !result.error,
           dispatch_tool_call_id: toolCallId,
+          ...(result.workerRunGovernance ? { workerRunGovernance: result.workerRunGovernance } : {}),
           ...dispatchReasoningTraceFields(result),
           // ADR 0027 §C5 v1: surface terminal_state so the caller LLM can
           // distinguish cancelled (timeout / user abort) from failed.
@@ -2553,6 +2809,7 @@ export default function (pi: ExtensionAPI) {
             ...(res.heartbeat_liveness ? { heartbeat_liveness: res.heartbeat_liveness } : {}),
             ...(res.maxOutputTokens ? { max_output_tokens: res.maxOutputTokens } : {}),
             ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
+            ...dispatchGovernanceFields(res),
             ...dispatchReasoningTraceFields(res),
             output_chars: res.output?.length ?? 0,
             ...(res.usage
@@ -2669,6 +2926,7 @@ export default function (pi: ExtensionAPI) {
         serial_estimate_ms: materializedResults.reduce((s, r) => s + r.durationMs, 0),
         max_single_ms: Math.max(0, ...materializedResults.map((r) => r.durationMs)),
         result: aggregateLegacyResult,
+        worker_run_governance: materializedResults.flatMap((r) => r.workerRunGovernance ? [r.workerRunGovernance] : []),
         ...aggregateTsFields,
       });
 
@@ -2773,6 +3031,7 @@ export default function (pi: ExtensionAPI) {
           totalWallMs,
           serialEstimateMs: serialEstimate,
           maxSingleMs: maxSingle,
+          workerRunGovernance: materializedResults.flatMap((r) => r.workerRunGovernance ? [r.workerRunGovernance] : []),
           // ADR 0027 §C5 v1: surface aggregate terminal_state to the
           // caller LLM so it can read the dispatch outcome (degraded /
           // failed) without re-aggregating per-task error fields.
@@ -2794,6 +3053,7 @@ export default function (pi: ExtensionAPI) {
               ...(r.usage ? { usage: r.usage } : {}),
               ...(r.maxOutputTokens ? { maxOutputTokens: r.maxOutputTokens } : {}),
               ...(typeof r.toolCallCount === "number" ? { toolCallCount: r.toolCallCount } : {}),
+              ...(r.workerRunGovernance ? { workerRunGovernance: r.workerRunGovernance } : {}),
               ...dispatchReasoningTraceFields(r),
               ...(r.governorProfile ? { governorProfile: r.governorProfile } : {}),
               ...(r.governorStage ? { governorStage: r.governorStage } : {}),
@@ -2815,6 +3075,7 @@ export default function (pi: ExtensionAPI) {
       registerHubTool(pi as unknown as { registerTool: (def: unknown) => void }, {
         runInProcess,
         reasoningTraceFields: dispatchReasoningTraceFields,
+        governanceFields: dispatchGovernanceFields,
         appendDispatchAudit,
         providerFromModel,
         validateTools,
