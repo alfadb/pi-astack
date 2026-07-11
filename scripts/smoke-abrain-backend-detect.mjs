@@ -596,10 +596,10 @@ check("activate is a function", () => {
   if (typeof activate !== "function") throw new Error(`expected function, got ${typeof activate}`);
 });
 
-check("startup git sync fetched updates schedule constraint shadow auto-refresh", () => {
+check("startup git sync fetched updates schedule constraint shadow auto-refresh", async () => {
   const calls = [];
   const modelRegistry = { find() {}, getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "x" }) };
-  const result = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+  const result = await indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
     { result: "ok", merged: 2, behind: 2 },
     {
       abrainHome: "/tmp/abrain-smoke",
@@ -622,9 +622,9 @@ check("startup git sync fetched updates schedule constraint shadow auto-refresh"
   if (JSON.stringify(trigger.knownProjectIds) !== JSON.stringify(["proj-main", "proj-z"])) throw new Error(`wrong knownProjectIds: ${JSON.stringify(trigger.knownProjectIds)}`);
 });
 
-check("startup git sync with no fetched updates does NOT schedule constraint shadow auto-refresh", () => {
+check("startup git sync with no fetched updates does NOT schedule constraint shadow auto-refresh", async () => {
   let calls = 0;
-  const result = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+  const result = await indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
     { result: "ok", merged: 0, behind: 0 },
     {
       modelRegistry: { find() {}, getApiKeyAndHeaders: async () => ({ ok: true }) },
@@ -636,10 +636,10 @@ check("startup git sync with no fetched updates does NOT schedule constraint sha
   if (result.scheduled || result.reason !== "git_sync_no_fetched_updates") throw new Error(`unexpected result: ${JSON.stringify(result)}`);
 });
 
-check("startup git sync failure/conflict does NOT schedule constraint shadow auto-refresh", () => {
+check("startup git sync failure/conflict does NOT schedule constraint shadow auto-refresh", async () => {
   for (const event of [{ result: "failed", behind: 1 }, { result: "timeout", behind: 1 }, { result: "conflict", behind: 1 }]) {
     let calls = 0;
-    const result = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(event, {
+    const result = await indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(event, {
       modelRegistry: { find() {}, getApiKeyAndHeaders: async () => ({ ok: true }) },
       resolveSettings: () => ({ constraintShadowCompiler: { enabled: true, autoRefresh: { enabled: true } } }),
       schedule: () => { calls += 1; return { scheduled: true, reason: "bad" }; },
@@ -649,9 +649,9 @@ check("startup git sync failure/conflict does NOT schedule constraint shadow aut
   }
 });
 
-check("startup git sync fetched updates respect constraint shadow gates and missing modelRegistry", () => {
+check("startup git sync fetched updates respect constraint shadow gates and missing modelRegistry", async () => {
   let calls = 0;
-  const disabled = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+  const disabled = await indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
     { result: "ok", behind: 1 },
     {
       resolveSettings: () => ({ constraintShadowCompiler: { enabled: false, autoRefresh: { enabled: true } } }),
@@ -660,7 +660,7 @@ check("startup git sync fetched updates respect constraint shadow gates and miss
   );
   if (disabled.scheduled || disabled.reason !== "constraint_shadow_compiler_disabled") throw new Error(`unexpected disabled result: ${JSON.stringify(disabled)}`);
 
-  const autoDisabled = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+  const autoDisabled = await indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
     { result: "ok", behind: 1 },
     {
       resolveSettings: () => ({ constraintShadowCompiler: { enabled: true, autoRefresh: { enabled: false } } }),
@@ -670,7 +670,7 @@ check("startup git sync fetched updates respect constraint shadow gates and miss
   if (autoDisabled.scheduled || autoDisabled.reason !== "auto_refresh_disabled") throw new Error(`unexpected auto-disabled result: ${JSON.stringify(autoDisabled)}`);
 
   const notices = [];
-  const missingRegistry = indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+  const missingRegistry = await indexModule.maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
     { result: "ok", behind: 1 },
     {
       resolveSettings: () => ({ constraintShadowCompiler: { enabled: true, autoRefresh: { enabled: true } } }),

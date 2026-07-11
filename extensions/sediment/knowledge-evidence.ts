@@ -508,7 +508,7 @@ export function knowledgeIdentityKey(body: KnowledgeEvidenceEventBodyV1): string
  *  registry. Every event file (any domain) is envelope/hash/path/role/producer
  *  validated before the knowledge fold sees a single node; unknown or corrupt
  *  events fail the scan closed instead of being silently skipped. */
-async function scanKnowledgeEventNodes(abrainHome: string): Promise<KnowledgeEventNode[]> {
+export async function collectAllKnowledgeEventNodes(abrainHome: string): Promise<KnowledgeEventNode[]> {
   const scan = await scanWholeL1Validated({ abrainHome, domains: ["knowledge"], roles: ["canonical"] });
   return scan.selected.map((record) => ({
     eventId: record.eventId,
@@ -518,7 +518,7 @@ async function scanKnowledgeEventNodes(abrainHome: string): Promise<KnowledgeEve
 
 /** Collect every L1 knowledge event sharing the given (scope, slug) identity. */
 export async function collectKnowledgeEventSet(abrainHome: string, identity: string): Promise<KnowledgeEventNode[]> {
-  const nodes = await scanKnowledgeEventNodes(abrainHome);
+  const nodes = await collectAllKnowledgeEventNodes(abrainHome);
   return nodes.filter((node) => knowledgeIdentityKey(node.body) === identity);
 }
 
@@ -605,7 +605,8 @@ export async function reprojectAllKnowledge(
   // Whole-L1 validation completes before a single L2 byte is written; any
   // envelope/hash/path/role/producer violation aborts the reproject closed.
   const byIdentity = new Map<string, KnowledgeEventNode[]>();
-  for (const node of await scanKnowledgeEventNodes(abrainHome)) {
+  const allNodes = await collectAllKnowledgeEventNodes(abrainHome);
+  for (const node of allNodes) {
     const identity = knowledgeIdentityKey(node.body);
     if (!byIdentity.has(identity)) byIdentity.set(identity, []);
     byIdentity.get(identity)!.push(node);
@@ -616,7 +617,6 @@ export async function reprojectAllKnowledge(
   let projected = 0;
   let removed = 0;
   let failed = 0;
-  let lastWinner: string | null = null;
   const failures: string[] = [];
   const writtenPaths: string[] = [];
   for (const [identity, nodes] of byIdentity) {
@@ -634,29 +634,29 @@ export async function reprojectAllKnowledge(
         projected += 1;
       }
       writtenPaths.push(outputPath);
-      lastWinner = proj.winnerEventId;
     } catch (err) {
       failed += 1;
       failures.push(`${identity}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  if (lastWinner) {
+  if (allNodes.length > 0) {
     await fs.mkdir(latestDir, { recursive: true });
     const manifestPath = path.join(latestDir, "manifest.json");
-    await fs.writeFile(
-      manifestPath,
-      `${JSON.stringify({ schemaVersion: "knowledge-projection-manifest/v1", updatedAtUtc: new Date().toISOString(), latestEventId: lastWinner, latestOperation: "reproject" }, null, 2)}\n`,
-      "utf-8",
-    );
+    await fs.writeFile(manifestPath, renderKnowledgeProjectionManifestFromSet(allNodes).json, "utf-8");
     writtenPaths.push(manifestPath);
     await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
   }
   return { identities: byIdentity.size, projected, removed, failed, failures: failures.slice(0, 10), writtenPaths: Array.from(new Set(writtenPaths)).sort() };
 }
 
+function compareUtf16CodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function sameLayerKey(node: KnowledgeEventNode): string {
   // ADR 0039 §4.3 same-layer tie-break: created_at_utc, device_id,
-  // device_event_seq, event_id (event_id breaks all remaining ties).
+  // device_event_seq, event_id (event_id breaks all remaining ties). Explicit
+  // UTF-16 code-unit order matches JCS property ordering in every locale.
   const seq = typeof node.body.device_event_seq === "number" ? String(node.body.device_event_seq).padStart(20, "0") : "";
   return [node.body.created_at_utc, node.body.device_id, seq, node.eventId].join("\u0000");
 }
@@ -675,7 +675,7 @@ export function topoSortKnowledgeEvents(nodes: KnowledgeEventNode[]): KnowledgeE
       children.set(parent, [...(children.get(parent) ?? []), n.eventId]);
     }
   }
-  const ready = nodes.filter((n) => (indegree.get(n.eventId) ?? 0) === 0).sort((a, b) => sameLayerKey(a).localeCompare(sameLayerKey(b)));
+  const ready = nodes.filter((n) => (indegree.get(n.eventId) ?? 0) === 0).sort((a, b) => compareUtf16CodeUnits(sameLayerKey(a), sameLayerKey(b)));
   const out: KnowledgeEventNode[] = [];
   const seen = new Set<string>();
   while (ready.length > 0) {
@@ -691,11 +691,11 @@ export function topoSortKnowledgeEvents(nodes: KnowledgeEventNode[]): KnowledgeE
         pushed = true;
       }
     }
-    if (pushed) ready.sort((a, b) => sameLayerKey(a).localeCompare(sameLayerKey(b)));
+    if (pushed) ready.sort((a, b) => compareUtf16CodeUnits(sameLayerKey(a), sameLayerKey(b)));
   }
   // Cycle / unreachable remainder: append in deterministic tie-break order.
   if (out.length < nodes.length) {
-    for (const n of nodes.filter((x) => !seen.has(x.eventId)).sort((a, b) => sameLayerKey(a).localeCompare(sameLayerKey(b)))) out.push(n);
+    for (const n of nodes.filter((x) => !seen.has(x.eventId)).sort((a, b) => compareUtf16CodeUnits(sameLayerKey(a), sameLayerKey(b)))) out.push(n);
   }
   return out;
 }
@@ -713,6 +713,34 @@ export interface KnowledgeEvidenceL1Head {
   inputEventSetHash: string;
   projectionKind: "entry" | "delete";
   eventCount: number;
+}
+
+export interface KnowledgeProjectionManifestV1 {
+  schemaVersion: "knowledge-projection-manifest/v1";
+  updatedAtUtc: string;
+  latestEventId: string;
+  latestOutputPath: string;
+  latestScope: KnowledgeEvidenceEventBodyV1["scope"];
+  latestOperation: KnowledgeEvidenceOperation;
+}
+
+export interface RenderedKnowledgeProjectionManifest {
+  manifest: KnowledgeProjectionManifestV1;
+  json: string;
+  winnerEventId: string;
+  identityWinnerEventIds: readonly string[];
+}
+
+export function resolveKnowledgeManifestOutputPath(projectionRoot: string, manifest: KnowledgeProjectionManifestV1): string {
+  const normalized = manifest.latestOutputPath.split("/");
+  if (
+    path.isAbsolute(manifest.latestOutputPath)
+    || manifest.latestOutputPath.includes("\\")
+    || normalized.some((part) => !part || part === "." || part === "..")
+  ) {
+    throw new Error("knowledge manifest latestOutputPath is not a normalized repo-relative projection path");
+  }
+  return path.join(projectionRoot, ...normalized);
 }
 
 /** Deterministic fold of an event set to one entry. Last non-delete event in
@@ -740,6 +768,47 @@ export function renderKnowledgeProjectionFromSet(nodes: KnowledgeEventNode[]): K
   const withoutHash = renderKnowledgeProjectionMarkdownBytes(winner.body, winner.eventId, "", overrides);
   const outputHash = hashKnowledgeProjectionMarkdownBytes(withoutHash);
   return { kind: "entry", markdown: renderKnowledgeProjectionMarkdownBytes(winner.body, winner.eventId, outputHash, overrides), winnerEventId: winner.eventId, inputEventSetHash };
+}
+
+/** Pure manifest renderer over the complete validated Knowledge event set.
+ *  Each identity is folded first; the manifest watermark is selected from
+ *  those winners. No wall clock or caller event can affect canonical bytes. */
+export function renderKnowledgeProjectionManifestFromSet(
+  nodes: KnowledgeEventNode[],
+): RenderedKnowledgeProjectionManifest {
+  if (nodes.length === 0) throw new Error("renderKnowledgeProjectionManifestFromSet: empty event set");
+  const byIdentity = new Map<string, KnowledgeEventNode[]>();
+  for (const node of nodes) {
+    const identity = knowledgeIdentityKey(node.body);
+    const current = byIdentity.get(identity) ?? [];
+    current.push(node);
+    byIdentity.set(identity, current);
+  }
+  const byId = new Map(nodes.map((node) => [node.eventId, node]));
+  const identityWinners = [...byIdentity.values()].map((set) => renderKnowledgeProjectionFromSet(set).winnerEventId);
+  const winnerNodes = identityWinners.map((eventId) => byId.get(eventId)!).sort((left, right) => {
+    const keyOrder = compareUtf16CodeUnits(sameLayerKey(left), sameLayerKey(right));
+    return keyOrder || compareUtf16CodeUnits(left.eventId, right.eventId);
+  });
+  const winner = winnerNodes[winnerNodes.length - 1]!;
+  const body = winner.body;
+  const outputPath = body.scope.kind === "world"
+    ? `latest/world/${body.payload.slug}.md`
+    : `latest/projects/${body.scope.project_id || "unknown"}/${body.payload.slug}.md`;
+  const manifest: KnowledgeProjectionManifestV1 = {
+    schemaVersion: "knowledge-projection-manifest/v1",
+    updatedAtUtc: body.created_at_utc,
+    latestEventId: winner.eventId,
+    latestOutputPath: outputPath,
+    latestScope: body.scope,
+    latestOperation: body.intent.operation_hint,
+  };
+  return {
+    manifest,
+    json: `${JSON.stringify(manifest, null, 2)}\n`,
+    winnerEventId: winner.eventId,
+    identityWinnerEventIds: Object.freeze(identityWinners.slice().sort(compareUtf16CodeUnits)),
+  };
 }
 
 export async function readKnowledgeEvidenceL1Head(args: {
@@ -776,11 +845,9 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
     // events sharing the (scope, slug) identity; "single" keeps the per-event
     // overwrite. A single event degenerates byte-identically across both.
     let removed = body.intent.operation_hint === "delete";
-    let watermarkEventId = args.envelope.event_id;
     if (args.settings.knowledgeProjector.projectionMode === "topo") {
       const set = await collectKnowledgeEventSet(args.abrainHome, knowledgeIdentityKey(body));
       const projection = renderKnowledgeProjectionFromSet(set.length > 0 ? set : [{ eventId: args.envelope.event_id, body }]);
-      watermarkEventId = projection.winnerEventId;
       if (projection.kind === "delete") {
         await fs.rm(outputPath, { force: true });
         removed = true;
@@ -794,15 +861,11 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
       await fs.writeFile(outputPath, renderKnowledgeProjectionMarkdown(body, args.envelope.event_id), "utf-8");
     }
     await fs.mkdir(path.dirname(manifestPath), { recursive: true });
-    const manifest = {
-      schemaVersion: "knowledge-projection-manifest/v1",
-      updatedAtUtc: new Date().toISOString(),
-      latestEventId: watermarkEventId,
-      latestOutputPath: outputPath,
-      latestScope: body.scope,
-      latestOperation: body.intent.operation_hint,
-    };
-    await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
+    const allNodes = await collectAllKnowledgeEventNodes(args.abrainHome);
+    const manifest = renderKnowledgeProjectionManifestFromSet(
+      allNodes.length > 0 ? allNodes : [{ eventId: args.envelope.event_id, body }],
+    );
+    await fs.writeFile(manifestPath, manifest.json, "utf-8");
     return { ok: true, status: removed ? "removed" : "projected", outputPath, manifestPath };
   } catch (err) {
     return { ok: false, status: "write_failed", error: err instanceof Error ? err.message : String(err) };

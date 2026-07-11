@@ -144,6 +144,7 @@ import { redactCredentials } from "./redact";
 import { checkAdr0039ReconcileGate, ensureAdr0039PrePushHook, type Adr0039ReconcileGateDetails, type Adr0039PrePushHookResult } from "./reconcile-gate";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { gitSingleFlight, _gitSingleFlightStats } from "../_shared/git-singleflight";
+import { canonicalGitRuntimeEnabled, getCanonicalGitRuntime } from "../_shared/canonical-git-runtime";
 export { redactCredentials, ensureAdr0039PrePushHook };
 
 /**
@@ -391,6 +392,31 @@ export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_PUSH_TIMEOUT_MS;
   const start = Date.now();
 
+  if (canonicalGitRuntimeEnabled()) {
+    const event: GitSyncEvent = { ts: new Date().toISOString(), op: "push", result: "failed", durationMs: 0 };
+    try {
+      if (!(await hasGitRemote(opts.abrainHome))) {
+        event.result = "skipped";
+      } else {
+        const runtime = await getCanonicalGitRuntime({ abrainHome: opts.abrainHome });
+        const pushed = await runtime.requestPush();
+        event.result = pushed.status === "success" ? "ok"
+          : pushed.status === "disabled" ? "skipped"
+          : pushed.reason?.startsWith("RECONCILE_") ? "push_blocked_reconcile"
+          : "failed";
+        event.reason = pushed.reason ?? pushed.status;
+        event.details = { canonicalGitRuntime: true, episodeId: pushed.episodeId, targetCommit: pushed.targetCommit, remoteContained: pushed.remoteContained };
+        if (event.result === "failed") event.error = pushed.reason ?? pushed.status;
+      }
+    } catch (error) {
+      event.result = "failed";
+      event.error = redactCredentials(error instanceof Error ? error.message : String(error)).slice(0, 500);
+    }
+    event.durationMs = Date.now() - start;
+    await audit(opts.abrainHome, event);
+    return event;
+  }
+
   if (!(await hasGitRemote(opts.abrainHome))) {
     const event: GitSyncEvent = {
       ts: new Date().toISOString(),
@@ -484,6 +510,20 @@ export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
 export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
   const start = Date.now();
+
+  if (canonicalGitRuntimeEnabled()) {
+    const event: GitSyncEvent = {
+      ts: new Date().toISOString(),
+      op: "fetch",
+      result: "failed",
+      reason: "canonical_fetch_merge_retired",
+      error: "canonical P1 mode forbids legacy fetch/fast-forward/merge; remote-behind or divergence requires owner reconciliation",
+      durationMs: Date.now() - start,
+      details: { canonicalGitRuntime: true },
+    };
+    await audit(opts.abrainHome, event);
+    return event;
+  }
 
   if (!(await hasGitRemote(opts.abrainHome))) {
     const event: GitSyncEvent = {
@@ -895,6 +935,65 @@ export async function sync(opts: GitSyncOptions): Promise<{
   ok: boolean;
   summary: string;
 }> {
+  if (canonicalGitRuntimeEnabled()) {
+    const started = Date.now();
+    const event: GitSyncEvent = { ts: new Date().toISOString(), op: "sync", result: "failed", details: { canonicalGitRuntime: true } };
+    try {
+      const runtime = await getCanonicalGitRuntime({ abrainHome: opts.abrainHome });
+      const startup = await runtime.awaitStartup();
+      if (startup.startup !== "ready") {
+        event.reason = "canonical_startup_blocked";
+        event.error = startup.blockedReason ?? "canonical startup barrier is not ready";
+      } else {
+        await runtime.recoverAtStartup();
+        const backlog = await runtime.requestBacklogPreflight();
+        if (backlog.status === "blocked") {
+          event.reason = "canonical_backlog_blocked";
+          event.error = backlog.reason ?? "canonical backlog ownership preflight blocked";
+        } else {
+          if (backlog.status === "ready") {
+            const drained = await runtime.requestDrain(backlog.receipts, "abrain: manual canonical backlog drain");
+            if (drained.status !== "index_converged" && drained.status !== "empty") {
+              event.reason = `canonical_drain_${drained.status}`;
+              event.error = drained.reason ?? `canonical drain ended in ${drained.status}`;
+            }
+          }
+          if (!event.error) {
+            const pushed = await runtime.requestPush();
+            const remote = pushed.status === "success" ? await runtime.verifyRemoteConvergence(pushed.targetCommit) : null;
+            event.details = { canonicalGitRuntime: true, push: pushed, remote };
+            event.ahead = remote?.ahead;
+            event.behind = remote?.behind;
+            if (pushed.status !== "success") {
+              event.result = "failed";
+              event.reason = pushed.reason ?? `canonical_push_${pushed.status}`;
+              event.error = pushed.reason ?? `canonical push ended in ${pushed.status}`;
+            } else if (!remote || remote.status !== "ready" || !remote.remoteContained || remote.ahead !== 0 || remote.behind !== 0) {
+              event.result = "failed";
+              event.reason = `canonical_remote_${remote?.status ?? "blocked"}`;
+              event.error = remote?.reason ?? "canonical remote is not exact-converged";
+            } else {
+              event.result = "ok";
+              event.reason = "canonical_remote_converged";
+            }
+          }
+        }
+      }
+    } catch (error) {
+      event.reason = (error as { code?: string })?.code ?? "canonical_sync_threw";
+      event.error = redactCredentials(error instanceof Error ? error.message : String(error)).slice(0, 500);
+    }
+    event.durationMs = Date.now() - started;
+    await audit(opts.abrainHome, event);
+    return {
+      events: [event],
+      ok: event.result === "ok",
+      summary: event.result === "ok"
+        ? `synced via canonical facade: ${event.result}`
+        : `canonical sync blocked (${event.reason ?? event.result}): ${event.error ?? "unknown"}`,
+    };
+  }
+
   const fetchEvent = await fetchAndFF(opts);
 
   if (fetchEvent.result === "conflict") {

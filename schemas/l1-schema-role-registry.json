@@ -118,6 +118,7 @@
         "index_converged",
         "recovery_slot_aborted",
         "recovery_episode_terminal",
+        "push_intent",
         "push_outcome"
       ],
       "producers": [

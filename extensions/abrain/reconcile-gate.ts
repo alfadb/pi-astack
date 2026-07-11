@@ -2,6 +2,7 @@ import { spawn, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { parseGitNulPathList, parseGitStatusPorcelainV1Z, type GitPorcelainV1Record } from "../_shared/git-z-parser";
 
 export interface Adr0039ReconcileGateDetails {
   abrainHome: string;
@@ -54,21 +55,16 @@ function expandHome(input: string): string {
   return String(input).replace(/^~(?=$|\/)/, os.homedir());
 }
 
-function normalizeRel(p: string): string {
-  return p.split(path.sep).join("/").replace(/^\.\//, "");
-}
+export type { GitPorcelainV1Record };
+export { parseGitStatusPorcelainV1Z };
 
 function derivedOnly(paths: string[]): string[] {
-  return Array.from(new Set(paths.map(normalizeRel).filter((p) => p === "l1" || p === "l2" || p.startsWith("l1/") || p.startsWith("l2/")))).sort();
+  return Array.from(new Set(paths.filter((p) => p === "l1" || p === "l2" || p.startsWith("l1/") || p.startsWith("l2/")))).sort();
 }
 
-function gitList(abrainHome: string, args: string[]): string[] {
-  try {
-    const stdout = execFileSync("git", ["-C", abrainHome, ...args], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 });
-    return stdout.split("\n").map((line) => line.replace(/\r$/, "")).filter((line) => line.length > 0);
-  } catch {
-    return [];
-  }
+function gitBuffer(abrainHome: string, args: string[]): Buffer {
+  const stdout = execFileSync("git", ["-C", abrainHome, ...args], { encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 });
+  return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
 }
 
 function pushedDerivedPaths(abrainHome: string): string[] {
@@ -77,12 +73,12 @@ function pushedDerivedPaths(abrainHome: string): string[] {
   } catch {
     return [];
   }
-  return derivedOnly(gitList(abrainHome, ["diff", "--name-only", "origin/main...HEAD", "--", "l1", "l2"]));
+  return derivedOnly(parseGitNulPathList(gitBuffer(abrainHome, ["diff", "--name-only", "-z", "origin/main...HEAD", "--", "l1", "l2"])));
 }
 
 function dirtyDerivedPaths(abrainHome: string): string[] {
-  const lines = gitList(abrainHome, ["status", "--porcelain", "--", "l1", "l2"]);
-  return derivedOnly(lines.map((line) => line.slice(3).trim()).filter(Boolean));
+  const records = parseGitStatusPorcelainV1Z(gitBuffer(abrainHome, ["status", "--porcelain=v1", "-z", "-uall", "--", "l1", "l2"]));
+  return derivedOnly(records.flatMap((record) => record.paths));
 }
 
 function recordOverride(abrainHome: string, detail: Record<string, unknown>): string | null {
@@ -142,8 +138,15 @@ export async function checkAdr0039ReconcileGate(opts: { abrainHome: string; repo
   const script = path.join(repoRoot, "scripts", "smoke-adr0039-reconcile.mjs");
   const env = input.env ?? process.env;
   const timeoutMs = input.timeoutMs ?? DEFAULT_RECONCILE_TIMEOUT_MS;
-  const pushed = pushedDerivedPaths(abrainHome);
-  const dirty = dirtyDerivedPaths(abrainHome);
+  let pushed: string[] = [];
+  let dirty: string[] = [];
+  let pathHintError: Error | undefined;
+  try {
+    pushed = pushedDerivedPaths(abrainHome);
+    dirty = dirtyDerivedPaths(abrainHome);
+  } catch (error) {
+    pathHintError = error instanceof Error ? error : new Error(String(error));
+  }
   const command = [script, "--abrain", abrainHome, "--push-gate-only"];
   const baseDetails = {
     abrainHome,
@@ -156,6 +159,24 @@ export async function checkAdr0039ReconcileGate(opts: { abrainHome: string; repo
     pushedDerivedPaths: pushed,
     dirtyDerivedPaths: dirty,
   };
+
+  if (pathHintError) {
+    return {
+      ok: false,
+      reason: "runner_error",
+      details: {
+        ...baseDetails,
+        status: null,
+        stdout: "",
+        stderr: `ADR0039 reconcile path hint failed: ${pathHintError.message}`,
+        failLines: [],
+        l1Violations: [],
+        otherBlockers: [],
+        fast_path: false,
+        costNote: "The incremental ADR0039 path hint failed closed before the reconcile runner could start.",
+      },
+    };
+  }
 
   if (pushed.length === 0 && dirty.length === 0) {
     return {

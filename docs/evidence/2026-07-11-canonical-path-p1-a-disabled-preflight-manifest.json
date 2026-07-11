@@ -1,0 +1,194 @@
+{
+  "schema_version": "canonical-path-p1-a-disabled-preflight-evidence/v1",
+  "scope": {
+    "claim": "P1-A preflight only",
+    "non_acceptance": true,
+    "counting_rule": "This read-only disabled-candidate preflight does not satisfy or check any P1-A acceptance criterion.",
+    "exclusions": [
+      "P1-A-DRAIN-CURRENT",
+      "P1-A-DRAIN-NEXT",
+      "P1-A-RUNTIME",
+      "P1-S2-RECOVERY",
+      "P2",
+      "P3"
+    ]
+  },
+  "anchoring": {
+    "manifest_self_hash_included": false,
+    "external_anchor": "Git commit containing this manifest",
+    "commit_created_by_this_run": false
+  },
+  "production_report": {
+    "origin_path": "/tmp/p1a-preflight-commit-candidate.json",
+    "origin_path_is_descriptive": true,
+    "schema_version": "canonical-git-runtime-p1a-dossier/v3",
+    "exact_file_sha256": "58b1cebc7d92bd9f812903d75c931a43cade487046744f29f4e4e53f72c46b6d",
+    "exact_file_bytes": 764024,
+    "generated_at_utc": "2026-07-11T12:30:20.544Z",
+    "duration_ms": 11753,
+    "mode": "preflight_read_only",
+    "status": "preflight-blocked",
+    "stop_reason": "kill_switch_disabled",
+    "command": {
+      "entrypoint": "scripts/dossier-canonical-path-p1a.mjs",
+      "abrain": "/home/worker/.abrain",
+      "settings": "/home/worker/.pi/agent/pi-astack-settings.json",
+      "output": "/tmp/p1a-preflight-commit-candidate.json",
+      "execute_requested": false
+    }
+  },
+  "implementation": {
+    "candidate_worktree_git_head": "a82fb1a4d675ca7c1b6dadd76ccc53a7d38f7e62",
+    "candidate_worktree_ref": "refs/heads/main",
+    "implementation_fingerprint": "f67f81c1dc9fd3d64fd576b4d625d0e00db4ef358d04f0a6f3883de50f666297",
+    "loaded_provenance_count": 24,
+    "loaded_provenance_array_sha256": "63840a0c1ba69d05d0a64d131a6ff336266391c461aeecad5df889ac8d38e1ee",
+    "loaded_provenance_hash_rule": "sha256(exact bytes emitted by jq -c '.loadedProvenance' report), including the trailing newline",
+    "loaded_provenance_labels": [
+      "abrain-index",
+      "constraint-auto-refresh",
+      "constraint-normalizer",
+      "constraint-projector",
+      "constraint-renderer",
+      "dossier-evidence-validator",
+      "durable-write",
+      "exact",
+      "git-sync",
+      "git-z-parser",
+      "jcs",
+      "knowledge-evidence-renderer",
+      "l1-registry-implementation",
+      "memory-parser",
+      "orchestrator",
+      "reconcile",
+      "recovery",
+      "registry",
+      "rename-wiring",
+      "sediment-index",
+      "settings",
+      "settings-schema",
+      "singleflight",
+      "writer"
+    ]
+  },
+  "settings_gate": {
+    "valid": true,
+    "enabled": false,
+    "mode": "p1_controlled",
+    "reason": "disabled",
+    "settings_bytes_sha256": "b2093d03b62050fbd9ac4578a4929c1d8c21fcaa1f0c14034a31d0212ceea192"
+  },
+  "production_git": {
+    "head": "a58a12a3a3f599fe386ef2a83ee78133f4c5e401",
+    "ref": "refs/heads/main",
+    "origin": {
+      "configured": true,
+      "url_sha256": "a7c1da64e68eeb361f2052fc8fccd54727573130676f3bf48c2c87ec7d4cb74e",
+      "main_advertisement_oid": "10bfaf359486a7d6e39179f2dd1b0dd2a00d7cca",
+      "main_advertisement_sha256": "0f9d82ee6e45dee6a5df902b6c4f828445eb481e2183016716d5699f300b023f",
+      "advertisement_error_sha256": null
+    },
+    "ahead": 3,
+    "behind": 0,
+    "raw_index": {
+      "path": "/home/worker/.abrain/.git/index",
+      "bytes_sha256": "f4b79815985a20271c885e8664945501fed44bcde8e59a6c6c8729a366b00191"
+    },
+    "index_lock": {
+      "exists": true,
+      "path": "/home/worker/.abrain/.git/index.lock",
+      "kind": "file",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "removed_or_modified_by_this_run": false
+    },
+    "status": {
+      "record_count": 375,
+      "raw_bytes": 36446,
+      "raw_sha256": "5bbb1da49ec387737b5a6365f78544022ab8b0ce511edbb52ff60453e8da6547"
+    },
+    "recovery": {
+      "open": 0,
+      "terminal": 0,
+      "quarantined": 0
+    }
+  },
+  "ownership": {
+    "status": "accepted",
+    "dirty_count": 375,
+    "owner_proof_count": 375,
+    "blocked_path_count": 0,
+    "owner_counts": {
+      "constraint_l1": 7,
+      "constraint_l2": 1,
+      "knowledge_l1": 283,
+      "knowledge_l2": 84
+    },
+    "owner_proof_array_sha256": "bd98d503ca2af90667c0a78262aa54842eefcc2d8762ca6dff0375ee6c18edb9",
+    "owner_proof_array_hash_rule": "sha256(exact bytes emitted by jq -c '.ownershipPreflight.ownerProofs' report), including the trailing newline",
+    "owner_proof_paths_sha256": "2759640bd4eb27f71c04c35f5e4aeeac643723bcf238c0fbbfc231b0889b21a0",
+    "owner_proof_paths_hash_rule": "sha256(UTF-8 paths emitted in report order, one path plus LF per proof)",
+    "cohort_hash": "b06bd3d3704df7d8e83693d6a4f0ce2bd223bce680dc740934eeac2bbf833ae9",
+    "instrumentation": {
+      "whole_l1_scans": 1,
+      "knowledge_identity_count": 3703,
+      "knowledge_fold_renders": 3703,
+      "global_manifest_renders": 1,
+      "constraint_decision_renders": 1,
+      "head_membership_queries": 1,
+      "index_membership_queries": 1
+    }
+  },
+  "freeze_proofs": {
+    "status_stable": true,
+    "ownership_stable": true,
+    "head_stable": true,
+    "index_stable": true,
+    "remote_stable": true,
+    "cohort_stable": true,
+    "first_status_sha256": "5bbb1da49ec387737b5a6365f78544022ab8b0ce511edbb52ff60453e8da6547",
+    "second_status_sha256": "5bbb1da49ec387737b5a6365f78544022ab8b0ce511edbb52ff60453e8da6547",
+    "first_ownership_sha256": "b06bd3d3704df7d8e83693d6a4f0ce2bd223bce680dc740934eeac2bbf833ae9",
+    "second_ownership_sha256": "b06bd3d3704df7d8e83693d6a4f0ce2bd223bce680dc740934eeac2bbf833ae9",
+    "first_cohort_sha256": "b06bd3d3704df7d8e83693d6a4f0ce2bd223bce680dc740934eeac2bbf833ae9",
+    "second_cohort_sha256": "b06bd3d3704df7d8e83693d6a4f0ce2bd223bce680dc740934eeac2bbf833ae9",
+    "first_remote_advertisement_sha256": "0f9d82ee6e45dee6a5df902b6c4f828445eb481e2183016716d5699f300b023f",
+    "second_remote_advertisement_sha256": "0f9d82ee6e45dee6a5df902b6c4f828445eb481e2183016716d5699f300b023f"
+  },
+  "canonical_read_hashes": {
+    "knowledge_manifest": "28a4e3405e05a57c9a79b3c0c09390b2a45c0da7f3d25459f037a758e68e6539",
+    "constraint_l2": "1d58f525940634c66d296f99892acfb3b77181de246952ec4b73981b8c375ea5",
+    "registry": "0537ca312090a22eafd980b98430d60513a04549d226f85fbe9d0735896efa57"
+  },
+  "blockers": [
+    "kill_switch_disabled",
+    "index_lock_file",
+    "execute_not_requested"
+  ],
+  "mutation": {
+    "attempted": false,
+    "execution_evidence": null,
+    "after_snapshot": null,
+    "after_freeze_snapshot": null,
+    "bounded_recovery_tail_count": 0
+  },
+  "acceptance": {
+    "non_acceptance": true,
+    "criteria_checked_or_satisfied": [],
+    "P1-A-DRAIN-CURRENT": false,
+    "P1-A-DRAIN-NEXT": false,
+    "P1-A-RUNTIME": false,
+    "reason": "The runtime remained disabled, execute was not requested, no production mutation was attempted, origin/main remained three commits behind HEAD, and the external index.lock remained present."
+  },
+  "required_owner_action": {
+    "responsible_party": "owner of /home/worker/.abrain/.git/index.lock and the production release sequence",
+    "sequence": [
+      "Determine and safely resolve the external index.lock without having pi-astack delete or overwrite it.",
+      "Commit and push the disabled candidate so the implementation provenance is Git-anchored.",
+      "Enable canonicalGitRuntime in the production settings.",
+      "Restart the production process so runtime wiring and startup recovery load from the committed implementation.",
+      "Rerun the P1-A dossier with --execute and evaluate the unchanged P1-A criteria from immutable execution evidence."
+    ],
+    "preflight_must_be_rerun_after_lock_resolution": true
+  }
+}

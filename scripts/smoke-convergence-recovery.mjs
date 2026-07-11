@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /** Canonical-path R3.4.2 P1-S1/S2 convergence recovery smoke. Temporary repos only. */
 import fs from "node:fs";
+import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -76,7 +77,13 @@ async function claimNext(home, episodeId, lane) {
   assert(result.shouldExecute, `next ${lane} slot not acquired: ${JSON.stringify(result)}`);
   return result.slot;
 }
+function repoId(repo) { return crypto.createHash("sha256").update(path.resolve(repo)).digest("hex"); }
+async function ensurePushIntent(home, episodeId, target = "a".repeat(40), repo = path.resolve(tmp, "intent-fixture"), remote = "origin", refName = "refs/heads/main") {
+  const existing = await recovery.readPushIntent(home, episodeId);
+  if (!existing) await recovery.recordPushIntent({ abrainHome: home, episodeId, repo, remote, refName, targetCommit: target });
+}
 async function pushOutcome(home, episodeId, slot, classification, target = "a".repeat(40)) {
+  await ensurePushIntent(home, episodeId, target);
   await recovery.appendRecoveryEvent({ abrainHome: home, episodeId, lane: "push", slot, eventType: "push_outcome", body: { classification, target_commit: target } });
 }
 async function preparedSlot(home, fixtureValue, slot = 1) {
@@ -174,11 +181,15 @@ await check("stale abort refold preserves late drain convergence and push succes
   assert(nextGeneration.status === "new" && nextGeneration.generationAnchor === l1.canonicalL1BodyHash(converged), "late convergence did not remain the generation anchor");
 
   const pushHome = makeHome("stale-abort-push");
-  const pushEpisode = "stale-abort-push";
+  const pushRepo = path.resolve(tmp, "stale-abort-push-intent");
+  const pushTarget = "a".repeat(40);
+  const pushRemote = "origin-stale-abort";
+  const pushEpisode = recovery.pushEpisodeIdentity({ repo_id: repoId(pushRepo), remote: pushRemote, ref_name: "refs/heads/main", target_commit: pushTarget });
+  await recovery.recordPushIntent({ abrainHome: pushHome, episodeId: pushEpisode, repo: pushRepo, remote: pushRemote, refName: "refs/heads/main", targetCommit: pushTarget });
   await recovery.claimRecoverySlot({ abrainHome: pushHome, episodeId: pushEpisode, lane: "push", slot: 1 });
   const stalePush = recovery.recoveryEpisodeCursor(pushEpisode, "push", await recovery.readRecoveryEvents(pushHome, pushEpisode, "push"));
   assert(stalePush.pendingSlot === 1 && !stalePush.complete, "push cursor was not stale-pending");
-  await pushOutcome(pushHome, pushEpisode, 1, "success");
+  await pushOutcome(pushHome, pushEpisode, 1, "success", pushTarget);
   assert(await recovery.abortRecoverySlotAfterRefold({ abrainHome: pushHome, episodeId: pushEpisode, lane: "push", slot: stalePush.pendingSlot }) === "success", "late push success was not preserved");
   const pushEvents = await recovery.readRecoveryEvents(pushHome, pushEpisode, "push");
   assert(!pushEvents.some((item) => item.event_type === "recovery_slot_aborted"), "stale push abort was published");
@@ -399,8 +410,8 @@ await check("owned index conflict is all-or-nothing after publication", async ()
   const before = git(f.repo, "ls-files", "-s");
   await expectCode("OWNED_INDEX_CONFLICT", () => recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }));
   assert(git(f.repo, "ls-files", "-s") === before, "index was partially converged");
-  const aborted = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, f.episodeId, "drain")).get(1).aborted;
-  assert(aborted.body.error_code === "RECOVERY_SLOT_ABORTED", "abort did not record deterministic error code");
+  const pending = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, f.episodeId, "drain")).get(1);
+  assert(pending.published && !pending.aborted && !pending.converged, "post-CAS index conflict must remain published pending without abort");
 });
 
 await check("published fact cannot authorize convergence against unrelated current ref", async () => {
@@ -414,7 +425,7 @@ await check("published fact cannot authorize convergence against unrelated curre
   git(f.repo, "add", "unrelated.txt");
   git(f.repo, "commit", "-qm", "unrelated");
   const before = git(f.repo, "ls-files", "-s");
-  assert(await recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }) === "refreeze_required", "unrelated ref was converged");
+  await expectCode("RECOVERY_PUBLISHED_REF_DIVERGED", () => recovery.recoverDrainSlot({ abrainHome: home, episodeId: f.episodeId, slot: 1 }));
   assert(git(f.repo, "ls-files", "-s") === before, "unrelated rejection changed index");
 });
 
@@ -464,13 +475,18 @@ await check("push missing and late outcomes burn once without reviving an aborte
   const bare = path.join(tmp, "push-missing-late.git");
   execFileSync("git", ["init", "--bare", "-q", bare]);
   const target = git(repo, "rev-parse", "HEAD");
-  const episodeId = recovery.pushEpisodeIdentity({ repo_id: "push-missing", remote: bare, ref_name: "refs/heads/main", target_commit: target });
+  const episodeId = recovery.pushEpisodeIdentity({ repo_id: repoId(repo), remote: bare, ref_name: "refs/heads/main", target_commit: target });
+  await recovery.recordPushIntent({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
   assert(await claimNext(home, episodeId, "push") === 1, "missing slot not claimed");
   const result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
   assert(result.slot === 2 && result.classification === "success", `missing result did not advance: ${JSON.stringify(result)}`);
   assert(result.transportAttempted === true && result.remoteContainsTarget === true, `successful real push did not return remote containment fact: ${JSON.stringify(result)}`);
 
-  const late = "push-late";
+  const lateRepo = path.resolve(tmp, "push-late-intent");
+  const lateTarget = "a".repeat(40);
+  const lateRemote = "origin-push-late";
+  const late = recovery.pushEpisodeIdentity({ repo_id: repoId(lateRepo), remote: lateRemote, ref_name: "refs/heads/main", target_commit: lateTarget });
+  await recovery.recordPushIntent({ abrainHome: home, episodeId: late, repo: lateRepo, remote: lateRemote, refName: "refs/heads/main", targetCommit: lateTarget });
   assert(await claimNext(home, late, "push") === 1, "late slot1 claim failed");
   assert(await recovery.recoverPushSlot({ abrainHome: home, episodeId: late, slot: 1 }) === "burned", "late slot1 not burned");
   assert(await claimNext(home, late, "push") === 2, "late slot2 claim failed");
@@ -491,7 +507,8 @@ await check("push durable outcome is deterministic across different transport st
     const lockPath = path.join(bare, "refs", "heads", "main.lock");
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(lockPath, `held-${suffix}\n`);
-    const episodeId = recovery.pushEpisodeIdentity({ repo_id: `push-durable-${suffix}`, remote: bare, ref_name: "refs/heads/main", target_commit: target });
+    const episodeId = recovery.pushEpisodeIdentity({ repo_id: repoId(repo), remote: bare, ref_name: "refs/heads/main", target_commit: target });
+    await recovery.recordPushIntent({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
     const result = await recovery.recoverPushEpisode({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
     const body = recovery.foldRecoveryEvents(await recovery.readRecoveryEvents(home, episodeId, "push")).get(1).pushOutcome.body;
     outcomes.push({ result, body });
@@ -504,12 +521,19 @@ await check("push durable outcome is deterministic across different transport st
 
 await check("push nonretryable and slot-5 retryable share deterministic terminal bytes", async () => {
   const home = makeHome("push-terminal");
-  const nonretry = "push-nonretry";
+  const terminalTarget = "a".repeat(40);
+  const nonretryRepo = path.resolve(tmp, "push-nonretry-intent");
+  const nonretryRemote = "origin-push-nonretry";
+  const nonretry = recovery.pushEpisodeIdentity({ repo_id: repoId(nonretryRepo), remote: nonretryRemote, ref_name: "refs/heads/main", target_commit: terminalTarget });
+  await recovery.recordPushIntent({ abrainHome: home, episodeId: nonretry, repo: nonretryRepo, remote: nonretryRemote, refName: "refs/heads/main", targetCommit: terminalTarget });
   assert(await claimNext(home, nonretry, "push") === 1, "nonretry claim failed");
   await pushOutcome(home, nonretry, 1, "nonretryable");
   assert(await recovery.recoverPushSlot({ abrainHome: home, episodeId: nonretry, slot: 1 }) === "nonretryable", "nonretry did not terminal");
 
-  const exhausted = "push-exhausted";
+  const exhaustedRepo = path.resolve(tmp, "push-exhausted-intent");
+  const exhaustedRemote = "origin-push-exhausted";
+  const exhausted = recovery.pushEpisodeIdentity({ repo_id: repoId(exhaustedRepo), remote: exhaustedRemote, ref_name: "refs/heads/main", target_commit: terminalTarget });
+  await recovery.recordPushIntent({ abrainHome: home, episodeId: exhausted, repo: exhaustedRepo, remote: exhaustedRemote, refName: "refs/heads/main", targetCommit: terminalTarget });
   for (let slot = 1; slot <= 5; slot++) {
     assert(await claimNext(home, exhausted, "push") === slot, `push slot ${slot} not allocated`);
     await pushOutcome(home, exhausted, slot, "retryable");
@@ -539,7 +563,8 @@ await check("remote descendant fetch is object-only and remote refs must be full
   git(other, "push", "-q", "origin", "HEAD:refs/heads/main");
   const fetchHead = path.join(repo, ".git", "FETCH_HEAD");
   fs.rmSync(fetchHead, { force: true });
-  const episodeId = recovery.pushEpisodeIdentity({ repo_id: "push-fetch", remote: bare, ref_name: "refs/heads/main", target_commit: target });
+  const episodeId = recovery.pushEpisodeIdentity({ repo_id: repoId(repo), remote: bare, ref_name: "refs/heads/main", target_commit: target });
+  await recovery.recordPushIntent({ abrainHome: home, episodeId, repo, remote: bare, refName: "refs/heads/main", targetCommit: target });
   const polluted = {
     GIT_DIR: process.env.GIT_DIR,
     GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT,
@@ -562,8 +587,9 @@ await check("remote descendant fetch is object-only and remote refs must be full
   assert(result.classification === "success" && result.remoteContainsTarget, "remote descendant not absorbed under external Git environment pollution");
   assert(!fs.existsSync(fetchHead) && git(repo, "cat-file", "-t", remoteOid) === "commit", "object-only fetch contract failed");
 
-  const invalid = recovery.pushEpisodeIdentity({ repo_id: "invalid-ref", remote: bare, ref_name: "main", target_commit: target });
-  await expectCode("REMOTE_REF_INVALID", () => recovery.recoverPushEpisode({ abrainHome: home, episodeId: invalid, repo, remote: bare, refName: "main", targetCommit: target }));
+  const invalid = recovery.pushEpisodeIdentity({ repo_id: repoId(repo), remote: bare, ref_name: "main", target_commit: target });
+  await recovery.recordPushIntent({ abrainHome: home, episodeId: invalid, repo, remote: bare, refName: "main", targetCommit: target });
+  await expectCode("RECOVERY_STATE_INVARIANT", () => recovery.recoverPushEpisode({ abrainHome: home, episodeId: invalid, repo, remote: bare, refName: "main", targetCommit: target }));
 });
 
 await check("curator claims stay 1..3 and whole-L1 recovery events remain meta-only", async () => {

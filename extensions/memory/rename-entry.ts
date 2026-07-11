@@ -4,6 +4,9 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parseWikilinkTarget, splitFrontmatter, type WikilinkTarget } from "./parser";
 import { normalizeBareSlug, slugify } from "./utils";
+import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
+import { parseGitStatusPorcelainV1Z } from "../_shared/git-z-parser";
+import { loadL1SchemaRegistry, validateL1Envelope } from "../_shared/l1-schema-registry";
 
 const execFileAsync = promisify(execFile);
 
@@ -395,7 +398,32 @@ async function gitStdout(cwd: string, args: string[]): Promise<string> {
 }
 
 async function isGitClean(cwd: string): Promise<boolean> {
-  return (await gitStdout(cwd, ["status", "--porcelain"])).trim() === "";
+  if (!canonicalGitRuntimeEnabled()) return (await gitStdout(cwd, ["status", "--porcelain"])).trim() === "";
+  const { stdout } = await execFileAsync("git", ["-C", cwd, "--literal-pathspecs", "status", "--porcelain=v1", "-z", "-uall"], {
+    timeout: 10_000,
+    maxBuffer: 8 * 1024 * 1024,
+    encoding: "buffer",
+  });
+  const records = parseGitStatusPorcelainV1Z(stdout as Buffer);
+  if (records.length === 0) return true;
+  const registry = loadL1SchemaRegistry();
+  for (const record of records) {
+    if (record.status !== "??" || record.sourcePath || !record.path.startsWith("l1/events/sha256/")) return false;
+    try {
+      const filePath = path.join(cwd, ...record.path.split("/"));
+      const raw = await fs.readFile(filePath);
+      const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
+      const validated = validateL1Envelope(parsed, { registry, abrainHome: cwd, filePath, relativePath: record.path });
+      if (
+        validated.registration.domain !== "canonical_path"
+        || validated.registration.role !== "meta"
+        || validated.registration.envelope_schema !== "drain-recovery-envelope/v1"
+      ) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 function relPath(root: string, file: string): string {

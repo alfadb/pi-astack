@@ -20,6 +20,7 @@ import { legacyPensieveSeedFor, legacyPensieveSeedPrunedReason } from "./legacy-
 import { clamp, normalizeBareSlug, prettyPath, titleFromSlug, throwIfAborted } from "./utils";
 import { collectGitAuthorTimes, type GitAuthorTimes } from "./git-times";
 import { gitSingleFlight } from "../_shared/git-singleflight";
+import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
 import {
   abrainProjectDir,
   abrainProjectWorkflowsDir,
@@ -959,6 +960,9 @@ async function atomicWrite(file: string, content: string): Promise<void> {
 }
 
 export async function runMigrationGo(opts: MigrationGoOptions): Promise<MigrationGoResult> {
+  if (canonicalGitRuntimeEnabled()) {
+    throw new Error("CANONICAL_MIGRATION_REQUIRES_EVENT_IMPORT: /memory migrate --go cannot write legacy Markdown while canonicalGitRuntime is enabled");
+  }
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
   const pensieveAbs = path.resolve(opts.pensieveTarget);
   const abrainHome = path.resolve(opts.abrainHome);

@@ -76,6 +76,7 @@ import {
   type ResolveActiveProjectResult,
 } from "../_shared/runtime";
 import { gitSingleFlight } from "../_shared/git-singleflight";
+import { canonicalGitRuntimeEnabled, createProducedArtifactReceipt, getCanonicalGitRuntime } from "../_shared/canonical-git-runtime";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
 import type { SedimentSettings } from "../sediment/settings";
@@ -341,7 +342,7 @@ export function vaultReleaseDisplayLabel(choice: string): string {
   return choice;
 }
 
-export type AutoCommitStatus = "committed" | "clean" | "not_git" | "failed";
+export type AutoCommitStatus = "committed" | "queued" | "clean" | "not_git" | "failed";
 
 export interface AutoCommitResult {
   repoRoot: string;
@@ -386,16 +387,39 @@ export function autoCommitPaths(repoRoot: string, relPaths: string[], message: s
   }
 }
 
+async function canonicalAutoCommitAbrainPaths(repoRoot: string, relPaths: string[], message: string): Promise<AutoCommitResult> {
+  const root = path.resolve(repoRoot);
+  const paths = Array.from(new Set(relPaths.map((item) => item.replace(/\\/g, "/")).filter(Boolean))).sort();
+  const receipts = [];
+  for (const rel of paths) {
+    receipts.push(await createProducedArtifactReceipt({
+      abrainHome: root,
+      filePath: path.join(root, ...rel.split("/")),
+      sourceIds: [`abrain-bind:${rel}`],
+    }));
+  }
+  const runtime = await getCanonicalGitRuntime({ abrainHome: root });
+  const startup = await runtime.awaitStartup();
+  if (startup.startup !== "ready") return { repoRoot: root, paths, status: "queued", detail: startup.blockedReason ?? "startup barrier blocked" };
+  const drained = await runtime.requestDrain(receipts, message);
+  if (drained.status === "empty") return { repoRoot: root, paths, status: "clean", commitSha: drained.commit };
+  if (drained.status !== "index_converged" || !drained.commit) return { repoRoot: root, paths, status: "queued", detail: drained.reason ?? drained.status };
+  const pushed = await runtime.requestPush(drained.commit);
+  if (pushed.status !== "success") return { repoRoot: root, paths, status: "queued", commitSha: drained.commit, detail: pushed.reason ?? pushed.status };
+  return { repoRoot: root, paths, status: "committed", commitSha: drained.commit };
+}
+
 function formatAutoCommitResult(label: string, result: AutoCommitResult): string {
   const paths = result.paths.join(", ");
   if (result.status === "committed") return `- ${label}: committed ${result.commitSha?.slice(0, 12) ?? "(unknown sha)"} (${paths})`;
+  if (result.status === "queued") return `- ${label}: durable pending (${paths}) - ${result.detail ?? "canonical retry required"}`;
   if (result.status === "clean") return `- ${label}: clean (${paths})`;
   if (result.status === "not_git") return `- ${label}: skipped; not a git worktree (${result.repoRoot})`;
   return `- ${label}: failed (${paths}) — ${result.detail ?? "unknown error"}`;
 }
 
 function autoCommitNeedsWarning(result: AutoCommitResult): boolean {
-  return result.status === "failed" || result.status === "not_git";
+  return result.status === "failed" || result.status === "not_git" || result.status === "queued";
 }
 
 // ── /secret scope parsing (ADR 0014 P1 step 2) ──────────────────────────
@@ -530,7 +554,8 @@ interface StartupConstraintShadowRefreshDeps {
     modelRegistry?: unknown;
     reason: string;
     sourceEventId?: string;
-  }) => { scheduled: boolean; reason: string };
+    sourceEventIds?: readonly string[];
+  }) => Promise<{ scheduled: boolean; reason: string }> | { scheduled: boolean; reason: string };
   listProjectIds?: (abrainHome: string) => string[];
 }
 
@@ -549,10 +574,10 @@ function defaultResolveSedimentSettings(): SedimentSettings {
   return mod.resolveSedimentSettings();
 }
 
-function defaultScheduleConstraintShadowAutoRefresh(trigger: Parameters<NonNullable<StartupConstraintShadowRefreshDeps["schedule"]>>[0]): { scheduled: boolean; reason: string } {
+async function defaultScheduleConstraintShadowAutoRefresh(trigger: Parameters<NonNullable<StartupConstraintShadowRefreshDeps["schedule"]>>[0]): Promise<{ scheduled: boolean; reason: string }> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const mod = require("../sediment/constraint-compiler/auto-refresh") as {
-    scheduleConstraintShadowAutoRefresh(args: typeof trigger): { scheduled: boolean; reason: string };
+    scheduleConstraintShadowAutoRefresh(args: typeof trigger): Promise<{ scheduled: boolean; reason: string }>;
   };
   return mod.scheduleConstraintShadowAutoRefresh(trigger);
 }
@@ -568,10 +593,10 @@ function notifyConstraintShadowRefreshSkip(
   console.error(`[abrain] ${message}`);
 }
 
-export function maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
+export async function maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
   event: Pick<GitSyncEvent, "result" | "merged" | "behind">,
   deps: StartupConstraintShadowRefreshDeps = {},
-): { scheduled: boolean; reason: string } {
+): Promise<{ scheduled: boolean; reason: string }> {
   const fetchedRemoteCommits = event.result === "ok"
     && (((event.merged ?? 0) > 0) || ((event.behind ?? 0) > 0));
   if (!fetchedRemoteCommits) return { scheduled: false, reason: "git_sync_no_fetched_updates" };
@@ -612,7 +637,7 @@ export function maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(
   const schedule = deps.schedule ?? defaultScheduleConstraintShadowAutoRefresh;
 
   try {
-    return schedule({
+    return await schedule({
       abrainHome,
       cwd: deps.cwd ?? process.cwd(),
       activeProjectId,
@@ -1260,6 +1285,9 @@ export default function activate(pi: ExtensionAPI): void {
   // (extensions/dispatch/index.ts) sets this env var when spawning
   // sub-pi; the `smoke:vault-subpi-isolation` smoke verifies that.
   if (process.env[PI_ABRAIN_DISABLED] === "1") return;
+  // Resolve once at activation. Invalid/missing/unreadable canonical settings
+  // abort every abrain startup/bind/sync writer path instead of selecting legacy.
+  const canonicalModeEnabled = canonicalGitRuntimeEnabled();
 
   // Boot-time snapshot per ADR 0017: active project identity comes from
   // strict binding, not bash `cd`. Only /abrain bind may refresh it
@@ -1335,8 +1363,8 @@ export default function activate(pi: ExtensionAPI): void {
     };
 
     fetchAndFF({ abrainHome: ABRAIN_HOME })
-      .then((event) => {
-        maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(event, {
+      .then(async (event) => {
+        await maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(event, {
           abrainHome: ABRAIN_HOME,
           cwd: args.cwd,
           activeProject: bootActiveProject,
@@ -1387,41 +1415,33 @@ export default function activate(pi: ExtensionAPI): void {
       });
   };
 
-  // ── 7-zone layout bootstrap ──────────────────────────────────
-  // Ensure brain directory structure exists (idempotent). Vault zone
-  // is created here so it's available before /vault init runs.
-  try {
-    const layout = ensureBrainLayout(ABRAIN_HOME);
-    if (layout.created.length > 0) {
-      console.error(`[abrain] brain layout: created ${layout.created.join(", ")}`);
+  let runtimeInitializationDone = false;
+  const initializeAbrainRuntimeAfterBarrier = (): void => {
+    if (runtimeInitializationDone) return;
+    runtimeInitializationDone = true;
+    try {
+      const layout = ensureBrainLayout(ABRAIN_HOME);
+      if (layout.created.length > 0) console.error(`[abrain] brain layout: created ${layout.created.join(", ")}`);
+      for (const warning of layout.warnings) console.error(`[abrain] brain layout warning: ${warning}`);
+    } catch (err: any) {
+      console.error(`[abrain] brain layout failed:`, err);
     }
-    for (const w of layout.warnings) {
-      console.error(`[abrain] brain layout warning: ${w}`);
+    try {
+      const result = ensureAbrainStateGitignored(ABRAIN_HOME);
+      if (result.updated) console.error(`[abrain] added .state/ to ${result.path}`);
+    } catch (err: any) {
+      console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
     }
-  } catch (err: any) {
-    console.error(`[abrain] brain layout failed:`, err);
-  }
-
-  // .state/ gitignore guard (P1-C audit fix 2026-05-16 round 3).
-  // Ensure `.state/` is in abrain `.gitignore` BEFORE any writer can
-  // produce orphan-rejects samples. Without this, an abrain repo that
-  // existed before /abrain bind would carry sanitized user input
-  // (title/body of route_rejected about-me samples) to the remote.
-  // Idempotent: only writes when line missing. Best-effort: a write
-  // failure logs but does not abort activation.
-  try {
-    const r = ensureAbrainStateGitignored(ABRAIN_HOME);
-    if (r.updated) console.error(`[abrain] added .state/ to ${r.path}`);
-  } catch (err: any) {
-    console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
-  }
-
-  try {
-    const hook = ensureAdr0039PrePushHook(ABRAIN_HOME);
-    if (!hook.ok && hook.warning) console.warn(`[abrain] ADR0039 pre-push hook warning: ${hook.warning}`);
-  } catch (err: any) {
-    console.warn(`[abrain] ADR0039 pre-push hook install failed (non-fatal): ${err?.message ?? err}`);
-  }
+    try {
+      const hook = ensureAdr0039PrePushHook(ABRAIN_HOME);
+      if (!hook.ok && hook.warning) console.warn(`[abrain] ADR0039 pre-push hook warning: ${hook.warning}`);
+    } catch (err: any) {
+      console.warn(`[abrain] ADR0039 pre-push hook install failed (non-fatal): ${err?.message ?? err}`);
+    }
+  };
+  // Explicit disabled mode preserves legacy activation behavior. Enabled mode
+  // may not mutate the Git worktree or hooks until canonical startup is ready.
+  if (!canonicalModeEnabled) initializeAbrainRuntimeAfterBarrier();
 
   // NOTE: startup git sync runs in the session_start event handler
   // below (not here at activate() time) so we can capture ctx.ui.notify
@@ -1440,8 +1460,9 @@ export default function activate(pi: ExtensionAPI): void {
   let capturedCwd: string = process.cwd();
   let pendingSelfHealTrigger: RuleInjectorSelfHealTrigger | undefined;
   let selfHealTimer: ReturnType<typeof setTimeout> | undefined;
+  let canonicalBarrierReady = !canonicalModeEnabled;
   const queueSelfHealFlush = (): void => {
-    if (selfHealTimer) return;
+    if (!canonicalBarrierReady || selfHealTimer) return;
     selfHealTimer = setTimeout(() => {
       selfHealTimer = undefined;
       const next = pendingSelfHealTrigger;
@@ -1498,9 +1519,24 @@ export default function activate(pi: ExtensionAPI): void {
         // Capture modelRegistry for the self-heal bridge (rule-injector → auto-refresh).
         if (ctx?.modelRegistry) capturedModelRegistry = ctx.modelRegistry;
         if (ctx?.cwd) capturedCwd = ctx.cwd;
-        queueSelfHealFlush();
         const notify = ctx?.ui?.notify?.bind(ctx.ui);
-        runStartupAutoSync({ notify, modelRegistry: ctx?.modelRegistry, cwd: ctx?.cwd });
+        if (canonicalModeEnabled) {
+          const startup = await (await getCanonicalGitRuntime({ abrainHome: ABRAIN_HOME })).awaitStartup();
+          if (startup.startup !== "ready") {
+            const message = `abrain canonical startup blocked: ${startup.blockedReason ?? "unknown"}`;
+            if (notify) notify(message, "warning");
+            else console.error(`[abrain] ${message}`);
+            return;
+          }
+          canonicalBarrierReady = true;
+          initializeAbrainRuntimeAfterBarrier();
+          queueSelfHealFlush();
+          // Enabled P1 mode retires startup legacy fetch/merge entirely.
+        } else {
+          queueSelfHealFlush();
+          // Explicit enabled=false preserves the legacy startup path.
+          runStartupAutoSync({ notify, modelRegistry: ctx?.modelRegistry, cwd: ctx?.cwd });
+        }
       } catch (err) {
         // Defensive: never let our sync trigger break the session.
         console.error(`[abrain] session_start auto-sync trigger threw:`, err);
@@ -2790,6 +2826,13 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
       return;
     }
     try {
+      // Fail before bindAbrainProject mutates either repository when settings
+      // are invalid. Only explicit valid enabled=false may use legacy commits.
+      const canonicalBindEnabled = canonicalGitRuntimeEnabled();
+      if (canonicalBindEnabled) {
+        const startup = await (await getCanonicalGitRuntime({ abrainHome: ABRAIN_HOME })).awaitStartup();
+        if (startup.startup !== "ready") throw new Error(startup.blockedReason ?? "canonical startup barrier blocked");
+      }
       const result = await bindAbrainProject({
         abrainHome: ABRAIN_HOME,
         cwd: commandCwd,
@@ -2809,12 +2852,18 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
           [".abrain-project.json"],
           `chore: 绑定 abrain 项目 ${result.projectId}`,
         ));
-      const abrainCommit = await gitSingleFlight(ABRAIN_HOME, async () =>
-        autoCommitPaths(
-          ABRAIN_HOME,
-          [".gitignore", `projects/${result.projectId}/_project.json`],
-          `project: 添加 ${result.projectId}`,
-        ));
+      const abrainCommit = canonicalBindEnabled
+        ? await canonicalAutoCommitAbrainPaths(
+            ABRAIN_HOME,
+            [".gitignore", `projects/${result.projectId}/_project.json`],
+            `project: add ${result.projectId}`,
+          )
+        : await gitSingleFlight(ABRAIN_HOME, async () =>
+            autoCommitPaths(
+              ABRAIN_HOME,
+              [".gitignore", `projects/${result.projectId}/_project.json`],
+              `project: 添加 ${result.projectId}`,
+            ));
       bootActiveProject = snapshotBootActiveProject(commandCwd);
       bootActiveProjectAt = Date.now();
       const commitWarning = autoCommitNeedsWarning(projectCommit) || autoCommitNeedsWarning(abrainCommit);

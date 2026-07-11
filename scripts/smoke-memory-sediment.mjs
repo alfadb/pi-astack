@@ -885,6 +885,7 @@ async function main() {
       transpileExtensions(hookOut);
       const fakeHome = path.join(hookRoot, "home");
       writeFile(path.join(fakeHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+        canonicalGitRuntime: { enabled: false, mode: "p1_controlled" },
         sediment: { enabled: true, gitCommit: false, minWindowChars: 0, autoLlmWriteEnabled: false },
       }, null, 2));
       const hookAbrain = path.join(hookRoot, "abrain");
@@ -4044,7 +4045,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       // (typing/confidence/provenance/no-target), and the deterministic
       // validation gate on degenerate bodies.
       {
-        const { _tryAutoWriteLaneForTests } = req("./sediment/index.js");
+        const { _tryAutoWriteLaneForTests, _shouldAdvanceAfterAutoOutcomeForTests } = req("./sediment/index.js");
         const userQuote = "所有 git.alfadb.cn 的 git 仓库必须使用 glab 工具管理，禁用裸 git/curl API";
         // window.text MUST contain the verbatim user_quote so the attribution guard
         // (only seed when the quote is grounded in the window) passes.
@@ -4166,11 +4167,32 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           modelRegistry: mockModelRegistry, signal: undefined, correlationId: "smoke-tier1-event-only:auto",
           abrainHome: eventOnlyTarget.abrainHome, projectId: eventOnlyTarget.projectId, correctionSignal: eventOnlySignal,
         });
-        assert(eventOnly.kind === "tier1_direct" && eventOnly.result.status === "deduped" && eventOnly.result.reason?.startsWith("constraint_evidence_event_captured"), `event-only mode must treat L1 capture as the Tier-1 outcome, got: ${JSON.stringify(eventOnly)}`);
+        assert(eventOnly.kind === "tier1_direct" && eventOnly.result.status === "deduped" && eventOnly.result.reason?.startsWith("constraint_compiler_publication_pending"), `event-only append must remain pending until compiler publication durability, got: ${JSON.stringify(eventOnly)}`);
+        assert(_shouldAdvanceAfterAutoOutcomeForTests(eventOnly) === false, "event-only append advanced the checkpoint before compiler publication");
         assert(fs.existsSync(path.join(eventOnlyTarget.abrainHome, "l1", "events")), "event-only mode must write L1 events");
         assert(!fs.existsSync(path.join(eventOnlyTarget.abrainHome, "rules")), "event-only mode must not write legacy rules");
-        const eventOnlyTier1Audit = fs.readFileSync(tier1AuditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((row) => row.session_id === "smoke-tier1-event-only" && row.operation === "tier1_direct_write");
-        assert(eventOnlyTier1Audit.length === 1 && eventOnlyTier1Audit[0].event_first_skipped_legacy_rule_write === true && eventOnlyTier1Audit[0].signal_consumed === true, `event-only audit must mark skipped legacy write: ${JSON.stringify(eventOnlyTier1Audit)}`);
+        let eventOnlyTier1Audit = fs.readFileSync(tier1AuditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((row) => row.session_id === "smoke-tier1-event-only" && row.operation === "tier1_direct_write");
+        assert(eventOnlyTier1Audit.length === 1 && eventOnlyTier1Audit[0].event_first_skipped_legacy_rule_write === true && eventOnlyTier1Audit[0].signal_consumed === false, `pending event-only audit must hold consumption: ${JSON.stringify(eventOnlyTier1Audit)}`);
+
+        const eventOnlyPublicationAudit = path.join(eventOnlyTarget.abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
+        writeFile(eventOnlyPublicationAudit, `${JSON.stringify({
+          schemaVersion: "constraint-shadow-auto-refresh/v1",
+          observedAtUtc: "2026-06-20T12:01:00.000Z",
+          ok: true,
+          status: "completed",
+          sourceEventId: eventOnly.result.dedupedAgainst,
+          publication: { status: "remote_durable", commit: "a".repeat(40), localCommit: "index_converged", drainStatus: "index_converged", pushStatus: "success", canonical: true },
+        })}\n`);
+        globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];
+        const eventOnlyDurable = await _tryAutoWriteLaneForTests({
+          cwd: aRoot, sessionId: "smoke-tier1-event-only", settings: eventOnlySettings, window: eventOnlyWin,
+          modelRegistry: mockModelRegistry, signal: undefined, correlationId: "smoke-tier1-event-only:auto-restart",
+          abrainHome: eventOnlyTarget.abrainHome, projectId: eventOnlyTarget.projectId, correctionSignal: eventOnlySignal,
+        });
+        assert(eventOnlyDurable.kind === "tier1_direct" && eventOnlyDurable.result.reason?.startsWith("constraint_compiler_publication_durable"), `durable compiler correlation was not consumed after restart: ${JSON.stringify(eventOnlyDurable)}`);
+        assert(_shouldAdvanceAfterAutoOutcomeForTests(eventOnlyDurable) === true, "durable compiler publication did not release the held checkpoint");
+        eventOnlyTier1Audit = fs.readFileSync(tier1AuditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter((row) => row.session_id === "smoke-tier1-event-only" && row.operation === "tier1_direct_write");
+        assert(eventOnlyTier1Audit.length === 2 && eventOnlyTier1Audit[1].signal_consumed === true, `durable event-only audit did not mark consumption: ${JSON.stringify(eventOnlyTier1Audit)}`);
 
         // (2) non-qualifying (task-local, conf 6) -> not Tier-1 -> extractor path -> llm_skip
         globalThis.__A2_INVOCATIONS__ = 0; globalThis.__A2_RESPONSES__ = ["SKIP"];

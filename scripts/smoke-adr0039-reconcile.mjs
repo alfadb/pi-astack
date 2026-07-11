@@ -9,6 +9,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { createJiti } from "jiti";
 import { runBackfill as runLegacyBackfill, buildLegacyImportBody, legacyKnowledgeEntries } from "./backfill-legacy-knowledge.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -20,6 +21,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
+const jiti = createJiti(import.meta.url, { interopDefault: true });
+const { checkAdr0039ReconcileGate, parseGitStatusPorcelainV1Z } = await jiti.import(path.join(repoRoot, "extensions", "abrain", "reconcile-gate.ts"));
 const settingsPath = path.resolve(repoRoot, "..", "..", "pi-astack-settings.json");
 
 function arg(name, fallback) {
@@ -552,20 +555,19 @@ function validateL1AppendOnlyOnPushedRange(abrainHome) {
 }
 
 function gitStatusPorcelain(cwd) {
-  try {
-    return String(fs.existsSync(path.join(cwd, ".git")) ? execFileSync("git", ["-C", cwd, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" }) : "");
-  } catch {
-    return "";
-  }
+  if (!fs.existsSync(path.join(cwd, ".git"))) return Buffer.alloc(0);
+  return execFileSync("git", ["-C", cwd, "status", "--porcelain=v1", "-z", "-uall"], { encoding: "buffer" });
 }
 
 function validateDirtyDerived(abrainHome) {
-  const status = gitStatusPorcelain(abrainHome);
+  const records = parseGitStatusPorcelainV1Z(gitStatusPorcelain(abrainHome));
   const failures = [];
-  for (const line of status.split("\n").filter(Boolean)) {
-    const rel = line.slice(3).trim();
-    if (rel.startsWith(".state/sediment/constraint-shadow/") || rel.startsWith(".state/sediment/knowledge-projection/") || rel.startsWith("l2/views/knowledge/") || rel.startsWith("l2/views/constraint/")) {
-      failures.push(`dirty_derived_view:${line}`);
+  for (const record of records) {
+    for (const rel of record.paths) {
+      if (rel.startsWith(".state/sediment/constraint-shadow/") || rel.startsWith(".state/sediment/knowledge-projection/") || rel.startsWith("l2/views/knowledge/") || rel.startsWith("l2/views/constraint/")) {
+        failures.push(`dirty_derived_view:${record.status} ${record.paths.join(" -> ")}`);
+        break;
+      }
     }
   }
   return { failures };
@@ -829,6 +831,69 @@ if (hasFlag("abrain")) {
 }
 
 console.log("ADR0039 reconcile smoke");
+
+// The incremental reconcile hint consumes porcelain v1 -z as bytes. Exercise
+// raw UTF-8, two-path records, malformed bytes/records, and canonical paths
+// directly so a future return to line/C-quote parsing cannot silently fast-path.
+{
+  const parsed = parseGitStatusPorcelainV1Z(Buffer.from("?? l2/views/知识/真实路径.md\0?? l2/views/keep trailing space \0", "utf8"));
+  if (parsed.length !== 2 || parsed[0].paths[0] !== "l2/views/知识/真实路径.md" || parsed[1].paths[0] !== "l2/views/keep trailing space ") {
+    console.log(`FAIL — porcelain parser lost UTF-8 or trimmed a path: ${JSON.stringify(parsed)}`);
+    process.exit(1);
+  }
+  const moved = parseGitStatusPorcelainV1Z(Buffer.from("R  l2/views/new.md\0l2/views/old.md\0C  l1/copy.md\0l1/source.md\0"));
+  if (moved.length !== 2 || moved[0].paths.join("|") !== "l2/views/new.md|l2/views/old.md" || moved[1].paths.join("|") !== "l1/copy.md|l1/source.md") {
+    console.log(`FAIL — porcelain parser mishandled rename/copy paths: ${JSON.stringify(moved)}`);
+    process.exit(1);
+  }
+  const rejected = [
+    Buffer.concat([Buffer.from("?? l2/"), Buffer.from([0xff, 0])]),
+    Buffer.from("?? /absolute\0"),
+    Buffer.from("?? l2/../escape\0"),
+    Buffer.from("?? l2\\windows\0"),
+    Buffer.from("?? l2//double\0"),
+    Buffer.from("?? l2/e\u0301.md\0", "utf8"),
+    Buffer.from("?? l2/incomplete"),
+    Buffer.from("R  l2/new.md\0"),
+  ];
+  for (const input of rejected) {
+    let didReject = false;
+    try { parseGitStatusPorcelainV1Z(input); } catch { didReject = true; }
+    if (!didReject) {
+      console.log(`FAIL — porcelain parser accepted invalid bytes/path/record: ${input.toString("hex")}`);
+      process.exit(1);
+    }
+  }
+  console.log("PASS — porcelain v1 -z parser preserves UTF-8/rename/copy and rejects invalid input.");
+}
+
+// With core.quotePath's text format this sole dirty path is C-quoted. The gate
+// must see its raw -z bytes and spawn the reconcile runner instead of fast-pathing.
+{
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-cquoted-gate-"));
+  execFileSync("git", ["-C", home, "init", "-q"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "config", "user.email", "adr0039@example.invalid"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "config", "user.name", "ADR0039"], { encoding: "utf8" });
+  writeFile(path.join(home, "README"), "baseline\n");
+  execFileSync("git", ["-C", home, "add", "README"], { encoding: "utf8" });
+  execFileSync("git", ["-C", home, "commit", "-q", "-m", "baseline"], { encoding: "utf8" });
+  const dirtyPath = path.join(home, "l2", "views", "knowledge", "仅有引号\"路径.md");
+  writeFile(dirtyPath, "dirty\n");
+  const textStatus = execFileSync("git", ["-C", home, "status", "--porcelain=v1", "-uall", "--", "l1", "l2"], { encoding: "utf8" });
+  if (!textStatus.includes('"')) {
+    console.log(`FAIL — C-quoted gate fixture was not quoted by text porcelain: ${JSON.stringify(textStatus)}`);
+    process.exit(1);
+  }
+  const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-cquoted-runner-"));
+  writeFile(path.join(fakeRoot, "scripts", "smoke-adr0039-reconcile.mjs"), 'console.log("CQUOTED_RUNNER_RAN");\n');
+  const gate = await checkAdr0039ReconcileGate({ abrainHome: home, repoRoot: fakeRoot });
+  if (!gate.ok || gate.details.fast_path || !gate.details.stdout.includes("CQUOTED_RUNNER_RAN") || !gate.details.dirtyDerivedPaths.includes("l2/views/knowledge/仅有引号\"路径.md")) {
+    console.log(`FAIL — sole C-quoted/UTF-8 dirty path did not run gate: ${JSON.stringify(gate)}`);
+    process.exit(1);
+  }
+  console.log("PASS — sole C-quoted UTF-8 dirty path runs the reconcile gate.");
+}
+
 const fixture = await buildFixtureTree();
 const stateFixtureOpts = (home) => ({ staleAfterMs: 24 * 60 * 60 * 1000, minCoverageRatio: 1, knowledgeLatestDir: path.join(home, ".state", "sediment", "knowledge-projection", "latest"), projectionMode: "single" });
 const clean = await reconcile(fixture.abrainHome, stateFixtureOpts(fixture.abrainHome));

@@ -40,6 +40,8 @@ function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
   }
   return {
     ...env,
+    LANG: "C",
+    LC_ALL: "C",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_SYSTEM: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
@@ -62,6 +64,7 @@ export type RecoveryEventType =
   | "index_converged"
   | "recovery_slot_aborted"
   | "recovery_episode_terminal"
+  | "push_intent"
   | "push_outcome";
 
 export class ConvergenceRecoveryError extends Error {
@@ -225,6 +228,7 @@ export interface FoldedRecoverySlot {
   converged?: RecoveryEvent;
   aborted?: RecoveryEvent;
   terminal?: RecoveryEvent;
+  pushIntent?: RecoveryEvent;
   pushOutcome?: RecoveryEvent;
 }
 
@@ -248,10 +252,25 @@ function hasValidPushOutcomeBody(event: RecoveryEvent): boolean {
     && GIT_OID_RE.test(event.body.target_commit);
 }
 
+function hasValidPushIntentBody(event: RecoveryEvent): boolean {
+  return hasExactBodyKeys(event, ["repo", "remote", "ref_name", "target_commit"])
+    && typeof event.body.repo === "string"
+    && path.isAbsolute(event.body.repo)
+    && typeof event.body.remote === "string"
+    && event.body.remote.length > 0
+    && event.body.remote.length <= 4096
+    && !/[\x00-\x1f\x7f]/.test(event.body.remote)
+    && typeof event.body.ref_name === "string"
+    && /^refs\/(heads|tags)\/[A-Za-z0-9._\/-]+$/.test(event.body.ref_name)
+    && !event.body.ref_name.includes("..")
+    && typeof event.body.target_commit === "string"
+    && GIT_OID_RE.test(event.body.target_commit);
+}
+
 function laneAllows(lane: RecoveryLane, type: RecoveryEventType): boolean {
   if (type === "recovery_slot_claimed" || type === "recovery_slot_aborted" || type === "recovery_episode_terminal") return true;
   if (lane === "drain") return type === "commit_prepared" || type === "commit_published" || type === "index_converged";
-  return lane === "push" && type === "push_outcome";
+  return lane === "push" && (type === "push_intent" || type === "push_outcome");
 }
 
 /** Aggregate content-addressed events first, then validate the state graph independent of scan order. */
@@ -278,15 +297,42 @@ export function foldRecoveryEvents(events: readonly RecoveryEvent[]): ReadonlyMa
     else if (event.event_type === "index_converged") slot.converged = uniqueEvent(slot.converged, event);
     else if (event.event_type === "recovery_slot_aborted") slot.aborted = uniqueEvent(slot.aborted, event);
     else if (event.event_type === "recovery_episode_terminal") slot.terminal = uniqueEvent(slot.terminal, event);
+    else if (event.event_type === "push_intent") slot.pushIntent = uniqueEvent(slot.pushIntent, event);
     else slot.pushOutcome = uniqueEvent(slot.pushOutcome, event);
     folded.set(event.slot, slot);
   }
 
   const slots = [...folded.keys()].sort((a, b) => a - b);
+  const pushIntents = slots.map((number) => folded.get(number)!.pushIntent).filter((item): item is RecoveryEvent => !!item);
+  if (pushIntents.length > 1) {
+    const first = pushIntents[0]!;
+    if (pushIntents.some((item) => canonicalizeJcs(item.body) !== canonicalizeJcs(first.body))) {
+      throw new ConvergenceRecoveryError("PUSH_INTENT_MISMATCH", "push episode contains conflicting durable intents");
+    }
+  }
+  const durablePushIntent = pushIntents[0];
+  if (durablePushIntent) {
+    const expectedEpisode = pushEpisodeIdentity({
+      repo_id: sha256Hex(path.resolve(String(durablePushIntent.body.repo))),
+      remote: String(durablePushIntent.body.remote),
+      ref_name: String(durablePushIntent.body.ref_name),
+      target_commit: String(durablePushIntent.body.target_commit),
+    });
+    if (durablePushIntent.episode_id !== expectedEpisode) {
+      throw new ConvergenceRecoveryError("PUSH_INTENT_EPISODE_MISMATCH", "push intent fields do not derive this episode identity");
+    }
+    if (durablePushIntent.slot !== 1) {
+      throw new ConvergenceRecoveryError("PUSH_INTENT_SLOT_MISMATCH", "durable push intent must be bound to slot 1");
+    }
+  }
+
   for (const number of slots) {
     const slot = folded.get(number)!;
     if (!slot.claimed && (slot.prepared || slot.published || slot.converged || slot.aborted || slot.terminal || slot.pushOutcome)) {
       throw new ConvergenceRecoveryError("RECOVERY_RESULT_WITHOUT_CLAIM", `slot ${number} has a result without a claim`);
+    }
+    if (slot.pushIntent && !hasValidPushIntentBody(slot.pushIntent)) {
+      throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", `slot ${number} has a malformed push intent`);
     }
     if (slot.published && !slot.prepared) throw new ConvergenceRecoveryError("RECOVERY_STATE_ORDER", `slot ${number} published without prepared`);
     if (slot.converged && !slot.published) throw new ConvergenceRecoveryError("RECOVERY_STATE_ORDER", `slot ${number} converged without published`);
@@ -305,6 +351,12 @@ export function foldRecoveryEvents(events: readonly RecoveryEvent[]): ReadonlyMa
     }
     if (slot.pushOutcome && !hasValidPushOutcomeBody(slot.pushOutcome)) {
       throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", `slot ${number} has a malformed push outcome`);
+    }
+    if (slot.pushOutcome) {
+      if (!durablePushIntent) throw new ConvergenceRecoveryError("PUSH_INTENT_MISSING", `slot ${number} has a push outcome without a durable intent`);
+      if (slot.pushOutcome.body.target_commit !== durablePushIntent.body.target_commit) {
+        throw new ConvergenceRecoveryError("PUSH_OUTCOME_TARGET_MISMATCH", `slot ${number} outcome target differs from durable push intent`);
+      }
     }
     if (slot.aborted && (!hasExactBodyKeys(slot.aborted, ["reason", "error_code"]) || slot.aborted.body.reason !== ABORT_REASON_CATEGORY || slot.aborted.body.error_code !== ABORT_ERROR_CODE)) {
       throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", `slot ${number} abort event is not deterministic`);
@@ -365,13 +417,17 @@ export interface RecoveryEpisodeQuarantine {
 
 export interface OpenRecoveryEpisodesResult {
   open: readonly RecoveryEpisodeCursor[];
+  terminal: readonly RecoveryEpisodeCursor[];
   quarantined: readonly RecoveryEpisodeQuarantine[];
 }
 
 /** Rebuild P1-S2 open drain/push episodes. Curator completion belongs to the
  * external E2 decision schema and is deliberately outside this recovery loop. */
-export async function recoverOpenRecoveryEpisodes(abrainHome: string, lane?: "drain" | "push"): Promise<OpenRecoveryEpisodesResult> {
-  const events = recoveryRecords(await scanWholeL1Validated({ abrainHome }));
+export function recoverOpenRecoveryEpisodesFromScan(
+  scan: Awaited<ReturnType<typeof scanWholeL1Validated>>,
+  lane?: "drain" | "push",
+): OpenRecoveryEpisodesResult {
+  const events = recoveryRecords(scan);
   const groups = new Map<string, RecoveryEvent[]>();
   for (const event of events) {
     if (event.lane === "curator" || (lane && event.lane !== lane)) continue;
@@ -382,12 +438,14 @@ export async function recoverOpenRecoveryEpisodes(abrainHome: string, lane?: "dr
     groups.set(key, group);
   }
   const open: RecoveryEpisodeCursor[] = [];
+  const terminal: RecoveryEpisodeCursor[] = [];
   const quarantined: RecoveryEpisodeQuarantine[] = [];
   for (const group of groups.values()) {
     const first = group[0]!;
     try {
       const cursor = recoveryEpisodeCursor(first.episode_id, first.lane, group);
-      if (!cursor.complete && !cursor.terminal) open.push(cursor);
+      if (cursor.terminal) terminal.push(cursor);
+      else if (!cursor.complete) open.push(cursor);
     } catch (error) {
       quarantined.push({
         status: "quarantined",
@@ -400,8 +458,13 @@ export async function recoverOpenRecoveryEpisodes(abrainHome: string, lane?: "dr
     }
   }
   open.sort((a, b) => compareAscii(`${a.lane}\0${a.episodeId}`, `${b.lane}\0${b.episodeId}`));
+  terminal.sort((a, b) => compareAscii(`${a.lane}\0${a.episodeId}`, `${b.lane}\0${b.episodeId}`));
   quarantined.sort((a, b) => compareAscii(`${a.lane}\0${a.episodeId}`, `${b.lane}\0${b.episodeId}`));
-  return { open: Object.freeze(open), quarantined: Object.freeze(quarantined) };
+  return { open: Object.freeze(open), terminal: Object.freeze(terminal), quarantined: Object.freeze(quarantined) };
+}
+
+export async function recoverOpenRecoveryEpisodes(abrainHome: string, lane?: "drain" | "push"): Promise<OpenRecoveryEpisodesResult> {
+  return recoverOpenRecoveryEpisodesFromScan(await scanWholeL1Validated({ abrainHome }), lane);
 }
 
 export interface ResolvedDrainEpisode {
@@ -482,6 +545,43 @@ export async function claimLaneSlot(options: Parameters<typeof claimRecoverySlot
   return claimRecoverySlot(options);
 }
 export const claimCuratorSlot = (options: Omit<Parameters<typeof claimRecoverySlot>[0], "lane">) => claimRecoverySlot({ ...options, lane: "curator" });
+
+export interface DurablePushIntent {
+  repo: string;
+  remote: string;
+  refName: string;
+  targetCommit: string;
+}
+
+export async function recordPushIntent(options: { abrainHome: string; episodeId: string } & DurablePushIntent): Promise<void> {
+  await appendRecoveryEvent({
+    abrainHome: options.abrainHome,
+    episodeId: options.episodeId,
+    lane: "push",
+    slot: 1,
+    eventType: "push_intent",
+    body: { repo: path.resolve(options.repo), remote: options.remote, ref_name: options.refName, target_commit: options.targetCommit },
+  });
+}
+
+export async function readPushIntent(abrainHome: string, episodeId: string): Promise<DurablePushIntent | undefined> {
+  const events = await readRecoveryEvents(abrainHome, episodeId, "push");
+  const intents = events.filter((event) => event.event_type === "push_intent");
+  if (intents.length === 0) return undefined;
+  const first = intents[0]!;
+  for (const event of intents.slice(1)) {
+    if (canonicalizeJcs(event.body) !== canonicalizeJcs(first.body)) {
+      throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", "push episode contains conflicting intents");
+    }
+  }
+  if (!hasValidPushIntentBody(first)) throw new ConvergenceRecoveryError("RECOVERY_STATE_INVARIANT", "push episode intent is malformed");
+  return {
+    repo: String(first.body.repo),
+    remote: String(first.body.remote),
+    refName: String(first.body.ref_name),
+    targetCommit: String(first.body.target_commit),
+  };
+}
 
 function preparedBody(prepared: PreparedExactCohortCommit, frozenIndexSnapshot: ReadonlyMap<string, string>): Record<string, JcsJsonValue> {
   return {
@@ -606,7 +706,17 @@ async function currentContainsPrepared(prepared: PreparedExactCohortCommit): Pro
 }
 
 /** Resume a claimed drain slot. A published fact never authorizes convergence against an unrelated current ref. */
-export async function recoverDrainSlot(options: { abrainHome: string; episodeId: string; slot: number }): Promise<DrainRecoveryAction> {
+export async function recoverDrainSlot(options: {
+  abrainHome: string;
+  episodeId: string;
+  slot: number;
+  /** Production orchestrators use this for a fail-closed index.lock/provenance
+   * check immediately before the update-ref CAS. Recovery owns the CAS; callers
+   * must not duplicate its publication algorithm. */
+  prePublishCheck?: () => Promise<void>;
+  /** Re-check shared-index safety immediately before convergence. */
+  preConvergeCheck?: () => Promise<void>;
+}): Promise<DrainRecoveryAction> {
   assertSlot("drain", options.slot);
   const state = foldRecoveryEvents(await readRecoveryEvents(options.abrainHome, options.episodeId, "drain")).get(options.slot);
   if (!state?.claimId) throw new ConvergenceRecoveryError("RECOVERY_SLOT_UNCLAIMED", "restart recovery requires a durable claim event");
@@ -626,6 +736,7 @@ export async function recoverDrainSlot(options: { abrainHome: string; episodeId:
     const current = await resolveRef(prepared.repo, prepared.refName);
     let outcome: "published" | "absorbed" | "conflict" = "conflict";
     if (current === prepared.frozenCommit) {
+      await options.prePublishCheck?.();
       const result = await publishExactCohortCommit({ repo: prepared.repo, refName: prepared.refName, candidate: prepared.candidate, frozenCommit: prepared.frozenCommit });
       outcome = result.status === "cas_conflict" ? "conflict" : result.status === "published" ? "published" : "absorbed";
     } else if (await currentContainsPrepared(prepared)) outcome = "absorbed";
@@ -640,17 +751,18 @@ export async function recoverDrainSlot(options: { abrainHome: string; episodeId:
       body: { candidate: prepared.candidate, publication_confirmed: true },
     });
   } else if (!await currentContainsPrepared(prepared)) {
-    if (await abortRecoverySlotAfterRefold({ ...options, lane: "drain" }) === "already_complete") return "already_complete";
-    return options.slot === RECOVERY_LANE_BUDGETS.drain ? "terminal" : "refreeze_required";
+    // Publication is an irreversible durable fact. Never abort or burn this
+    // slot after CAS; owner intervention must repair the ref and retry only
+    // index convergence against the same published candidate/cohort.
+    throw new ConvergenceRecoveryError(
+      "RECOVERY_PUBLISHED_REF_DIVERGED",
+      "published candidate/cohort is no longer contained by the configured ref",
+      { episodeId: options.episodeId, slot: options.slot, candidate: prepared.candidate },
+    );
   }
 
-  try {
-    await convergeExactCohortIndex({ repo: prepared.repo, refName: prepared.refName, cohortPaths: prepared.entries.map((entry) => entry.path), frozenIndexSnapshot: snapshot });
-  } catch (error) {
-    if (await abortRecoverySlotAfterRefold({ ...options, lane: "drain" }) === "already_complete") return "already_complete";
-    if (options.slot === RECOVERY_LANE_BUDGETS.drain) return "terminal";
-    throw error;
-  }
+  await options.preConvergeCheck?.();
+  await convergeExactCohortIndex({ repo: prepared.repo, refName: prepared.refName, cohortPaths: prepared.entries.map((entry) => entry.path), frozenIndexSnapshot: snapshot });
   await appendRecoveryEvent({
     ...options,
     lane: "drain",
@@ -780,6 +892,18 @@ export async function recoverPushSlot(options: { abrainHome: string; episodeId: 
 
 /** Resume an episode, burn a missing result, then execute only the continuous next slot. */
 export async function recoverPushEpisode(options: { abrainHome: string; episodeId: string; repo: string; remote: string; refName: string; targetCommit: string }): Promise<{ classification: PushClassification | "burned" | "complete" | "terminal" | "consumed"; targetCommit: string; slot: number | null; remoteContainsTarget: boolean } & Partial<PushTransportEvidence>> {
+  const intent = await readPushIntent(options.abrainHome, options.episodeId);
+  if (!intent) throw new ConvergenceRecoveryError("PUSH_INTENT_MISSING", "push execution requires a durable intent");
+  const expectedEpisode = pushEpisodeIdentity({ repo_id: sha256Hex(path.resolve(options.repo)), remote: intent.remote, ref_name: intent.refName, target_commit: intent.targetCommit });
+  if (
+    options.episodeId !== expectedEpisode
+    || path.resolve(intent.repo) !== path.resolve(options.repo)
+    || intent.remote !== options.remote
+    || intent.refName !== options.refName
+    || intent.targetCommit !== options.targetCommit
+  ) {
+    throw new ConvergenceRecoveryError("PUSH_INTENT_MISMATCH", "push execution arguments do not exactly match durable intent", { episodeId: options.episodeId });
+  }
   let cursor = recoveryEpisodeCursor(options.episodeId, "push", await readRecoveryEvents(options.abrainHome, options.episodeId, "push"));
   if (cursor.complete) return { classification: "complete", targetCommit: options.targetCommit, slot: cursor.lastClaimedSlot, remoteContainsTarget: true };
   if (cursor.terminal) return { classification: "terminal", targetCommit: options.targetCommit, slot: cursor.lastClaimedSlot, remoteContainsTarget: false };
@@ -798,6 +922,10 @@ export async function recoverPushEpisode(options: { abrainHome: string; episodeI
 
 /** Compatibility/competition surface. New orchestration should call recoverPushEpisode. */
 export async function runPushSlot(options: { abrainHome: string; episodeId: string; slot: number; repo: string; remote: string; refName: string; targetCommit: string }): Promise<({ classification: PushClassification | "consumed"; targetCommit: string; remoteContainsTarget: boolean } & Partial<PushTransportEvidence>)> {
+  const intent = await readPushIntent(options.abrainHome, options.episodeId);
+  if (!intent || path.resolve(intent.repo) !== path.resolve(options.repo) || intent.remote !== options.remote || intent.refName !== options.refName || intent.targetCommit !== options.targetCommit) {
+    throw new ConvergenceRecoveryError("PUSH_INTENT_MISMATCH", "push slot arguments do not exactly match durable intent");
+  }
   const claim = await claimRecoverySlot({ abrainHome: options.abrainHome, episodeId: options.episodeId, lane: "push", slot: options.slot });
   if (!claim.shouldExecute) return { classification: "consumed", targetCommit: options.targetCommit, remoteContainsTarget: false };
   return executeClaimedPushSlot(options);

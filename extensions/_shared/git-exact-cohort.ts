@@ -73,6 +73,8 @@ export class GitExactCohortError extends Error {
 }
 
 const GIT_ENV = Object.freeze({
+  LANG: "C",
+  LC_ALL: "C",
   GIT_TERMINAL_PROMPT: "0",
   GIT_CONFIG_GLOBAL: "/dev/null",
   GIT_CONFIG_SYSTEM: "/dev/null",

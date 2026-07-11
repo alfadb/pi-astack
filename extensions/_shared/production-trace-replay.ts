@@ -38,6 +38,7 @@ import {
   recoverDrainSlot,
   recoverPushEpisode,
   recordDrainPrepared,
+  recordPushIntent,
 } from "./convergence-recovery";
 
 const execFileAsync = promisify(execFile);
@@ -963,7 +964,7 @@ async function scenarioPushRetry(context: ScenarioContext): Promise<ScenarioResu
   const fixture = await setupScenario(context, "push-retry");
   await gitDir(fixture.remote, ["update-ref", "refs/heads/main", context.trace.source_parent], fixture.osHome);
   const pre = await scenarioFingerprint(fixture);
-  const episode = pushEpisodeIdentity({ repo_id: fixture.name, remote: fixture.remote, ref_name: "refs/heads/main", target_commit: context.trace.source_commit });
+  const episode = pushEpisodeIdentity({ repo_id: sha256Hex(path.resolve(fixture.repo)), remote: fixture.remote, ref_name: "refs/heads/main", target_commit: context.trace.source_commit });
   const lockPath = path.join(fixture.remote, "refs", "heads", "main.lock");
   const lockBytes = "P1B_RETRYABLE_REF_LOCK\n";
   await fsp.mkdir(path.dirname(lockPath), { recursive: true });
@@ -1028,7 +1029,7 @@ async function scenarioRemoteContained(context: ScenarioContext): Promise<Scenar
   const remoteBefore = (await gitDir(fixture.remote, ["rev-parse", "refs/heads/main"], fixture.osHome)).trim();
   const fetchHead = path.join(fixture.repo, ".git", "FETCH_HEAD");
   await fsp.rm(fetchHead, { force: true });
-  const episode = pushEpisodeIdentity({ repo_id: fixture.name, remote: fixture.remote, ref_name: "refs/heads/main", target_commit: context.trace.source_commit });
+  const episode = pushEpisodeIdentity({ repo_id: sha256Hex(path.resolve(fixture.repo)), remote: fixture.remote, ref_name: "refs/heads/main", target_commit: context.trace.source_commit });
   const result = await spawnWorker(context, fixture, workerConfig(context, fixture, "push", 1, { episode_id: episode, ref_name: "refs/heads/main", target_commit: context.trace.source_commit }));
   const remoteAfter = (await gitDir(fixture.remote, ["rev-parse", "refs/heads/main"], fixture.osHome)).trim();
   const post = await scenarioFingerprint(fixture);
@@ -1566,6 +1567,7 @@ export async function executeProductionTraceWorkerConfig(configPath: string): Pr
       result = { schema_version: WORKER_RESULT_SCHEMA, ok: true, pid: process.pid, operation: config.operation, action, assertions: { ...assertions, recovery_body_repo_contained: true } };
     } else if (config.operation === "push") {
       if (!config.ref_name || !config.target_commit) fail("P1B_WORKER_CONFIG_INVALID", "push config is incomplete");
+      await recordPushIntent({ abrainHome: config.abrain_home, episodeId: config.episode_id, repo: config.repo, remote: config.remote, refName: config.ref_name, targetCommit: config.target_commit });
       const push = await recoverPushEpisode({ abrainHome: config.abrain_home, episodeId: config.episode_id, repo: config.repo, remote: config.remote, refName: config.ref_name, targetCommit: config.target_commit });
       result = { schema_version: WORKER_RESULT_SCHEMA, ok: true, pid: process.pid, operation: config.operation, push: push as unknown as Record<string, unknown>, assertions };
     } else fail("P1B_WORKER_CONFIG_INVALID", `unsupported worker operation: ${String(config.operation)}`);

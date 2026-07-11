@@ -2,8 +2,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } from "./pi-ai-invoker";
 import { runConstraintShadowCompiler } from "./shadow-runner";
-import { commitAbrainDerivedOutputs } from "../writer";
+import { commitAbrainDerivedOutputs, type WriterPublicationResult } from "../writer";
 import { getDeviceId } from "../../_shared/causal-anchor";
+import { fsyncDirectory } from "../../_shared/durable-write";
 import { acquireFileLock, abrainSedimentLocksDir } from "../../_shared/runtime";
 import type { ConstraintShadowRunResult } from "./types";
 import type { SedimentSettings } from "../settings";
@@ -30,6 +31,7 @@ export interface ConstraintShadowAutoRefreshTrigger {
   modelRegistry?: unknown;
   reason: string;
   sourceEventId?: string;
+  sourceEventIds?: readonly string[];
   retryAttempt?: number;
 }
 
@@ -38,6 +40,7 @@ interface NeedsRefreshMarker {
   observedAtUtc: string;
   reason: string;
   sourceEventId: string | null;
+  sourceEventIds: readonly string[];
   modelRef: string;
 }
 
@@ -46,10 +49,15 @@ interface AutoRefreshGlobalState {
   inFlight?: Promise<void>;
   pending?: ConstraintShadowAutoRefreshTrigger;
   lastStartedMs?: number;
+  scheduleGeneration?: number;
+  markerWriteTail?: Promise<void>;
+  markerDirectorySyncForTests?: (dir: string) => Promise<void>;
+  compilerRunnerForTests?: (trigger: ConstraintShadowAutoRefreshTrigger) => Promise<ConstraintShadowRunResult>;
 }
 
 interface RunOnceOptions {
   scheduleOnLockContention?: boolean;
+  compilerRunnerForTests?: (trigger: ConstraintShadowAutoRefreshTrigger) => Promise<ConstraintShadowRunResult>;
 }
 
 const GLOBAL_KEY = "__piAstConstraintShadowAutoRefresh";
@@ -58,6 +66,30 @@ const LIVENESS_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
 const NEEDS_REFRESH_MAX_BYTES = 64 * 1024;
 const NEEDS_REFRESH_MAX_LINES = 200;
 const state: AutoRefreshGlobalState = ((globalThis as unknown as Record<string, AutoRefreshGlobalState>)[GLOBAL_KEY] ??= {});
+
+function triggerEventIds(trigger: ConstraintShadowAutoRefreshTrigger): string[] {
+  return Array.from(new Set([
+    ...(trigger.sourceEventIds ?? []),
+    ...(trigger.sourceEventId ? [trigger.sourceEventId] : []),
+  ])).sort();
+}
+
+function withEventIds(trigger: ConstraintShadowAutoRefreshTrigger, eventIds: readonly string[]): ConstraintShadowAutoRefreshTrigger {
+  const sourceEventIds = Object.freeze(Array.from(new Set(eventIds)).sort());
+  return {
+    ...trigger,
+    sourceEventIds,
+    sourceEventId: sourceEventIds.length === 1 ? sourceEventIds[0] : undefined,
+  };
+}
+
+function mergePendingTrigger(current: ConstraintShadowAutoRefreshTrigger | undefined, next: ConstraintShadowAutoRefreshTrigger): ConstraintShadowAutoRefreshTrigger {
+  if (!current) return withEventIds(next, triggerEventIds(next));
+  if (path.resolve(current.abrainHome) !== path.resolve(next.abrainHome)) {
+    throw new Error("constraint auto-refresh cannot debounce different abrain roots in one process");
+  }
+  return withEventIds(next, [...triggerEventIds(current), ...triggerEventIds(next)]);
+}
 
 function stateRoot(abrainHome: string): string {
   return path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh");
@@ -88,11 +120,13 @@ async function appendNeedsRefreshMarker(
 ): Promise<void> {
   const root = stateRoot(trigger.abrainHome);
   const markerPath = needsRefreshPath(trigger.abrainHome);
+  const sourceEventIds = triggerEventIds(trigger);
   const marker: NeedsRefreshMarker = {
     schemaVersion: "constraint-shadow-auto-refresh-needs-refresh/v1",
     observedAtUtc: new Date(observedAtMs).toISOString(),
     reason: trigger.reason,
-    sourceEventId: trigger.sourceEventId ?? null,
+    sourceEventId: sourceEventIds.length === 1 ? sourceEventIds[0]! : null,
+    sourceEventIds,
     modelRef,
   };
   await fs.mkdir(root, { recursive: true });
@@ -106,15 +140,29 @@ async function appendNeedsRefreshMarker(
 
   const lineCount = raw.split("\n").filter((line) => line.trim()).length;
   if (!raw || (Buffer.byteLength(raw, "utf-8") <= NEEDS_REFRESH_MAX_BYTES && lineCount <= NEEDS_REFRESH_MAX_LINES)) {
-    await fs.appendFile(markerPath, `${JSON.stringify(marker)}\n`, "utf-8");
+    const handle = await fs.open(markerPath, "a", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(marker)}\n`, "utf-8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await (state.markerDirectorySyncForTests ?? fsyncDirectory)(root);
     return;
   }
 
   const latest = latestNeedsRefreshMarker(raw);
   const compacted = `${latest ? `${JSON.stringify(latest)}\n` : ""}${JSON.stringify(marker)}\n`;
   const tmpPath = path.join(root, `.needs-refresh.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
-  await fs.writeFile(tmpPath, compacted, "utf-8");
+  const handle = await fs.open(tmpPath, "wx", 0o600);
+  try {
+    await handle.writeFile(compacted, "utf-8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
   await fs.rename(tmpPath, markerPath);
+  await (state.markerDirectorySyncForTests ?? fsyncDirectory)(root);
 }
 
 function parseNeedsRefreshMarker(value: unknown): NeedsRefreshMarker | null {
@@ -124,12 +172,18 @@ function parseNeedsRefreshMarker(value: unknown): NeedsRefreshMarker | null {
   if (typeof row.observedAtUtc !== "string" || !Number.isFinite(Date.parse(row.observedAtUtc))) return null;
   if (typeof row.reason !== "string") return null;
   if (row.sourceEventId !== null && row.sourceEventId !== undefined && typeof row.sourceEventId !== "string") return null;
+  if (row.sourceEventIds !== undefined && (!Array.isArray(row.sourceEventIds) || !row.sourceEventIds.every((value) => typeof value === "string"))) return null;
   if (typeof row.modelRef !== "string") return null;
+  const sourceEventIds = Array.from(new Set([
+    ...(Array.isArray(row.sourceEventIds) ? row.sourceEventIds as string[] : []),
+    ...(typeof row.sourceEventId === "string" ? [row.sourceEventId] : []),
+  ])).sort();
   return {
     schemaVersion: "constraint-shadow-auto-refresh-needs-refresh/v1",
     observedAtUtc: row.observedAtUtc,
     reason: row.reason,
-    sourceEventId: row.sourceEventId ?? null,
+    sourceEventId: sourceEventIds.length === 1 ? sourceEventIds[0]! : null,
+    sourceEventIds,
     modelRef: row.modelRef,
   };
 }
@@ -165,6 +219,88 @@ function markerObservedAfter(marker: NeedsRefreshMarker, timestampMs: number): b
   return Date.parse(marker.observedAtUtc) > timestampMs;
 }
 
+export interface ConstraintPublicationDurability {
+  durable: boolean;
+  required: "local_durable" | "remote_durable";
+  sourceEventId: string | null;
+  sourceEventIds?: readonly string[];
+  status?: string;
+  publication?: WriterPublicationResult;
+  observedAtUtc?: string;
+}
+
+function requiredPublicationDurability(): "local_durable" | "remote_durable" {
+  return process.env.PI_ABRAIN_NO_AUTOSYNC === "1" || process.env.PI_ABRAIN_DISABLED === "1"
+    ? "local_durable"
+    : "remote_durable";
+}
+
+function publicationSatisfiesDurability(publication: WriterPublicationResult | undefined, required: "local_durable" | "remote_durable"): boolean {
+  if (!publication) return false;
+  if (!publication.canonical) return publication.status === "clean" || publication.status === "local_durable" || publication.status === "remote_durable";
+  return required === "remote_durable"
+    ? publication.status === "remote_durable"
+    : publication.status === "local_durable" || publication.status === "remote_durable";
+}
+
+async function readAutoRefreshAuditRows(abrainHome: string): Promise<Record<string, unknown>[]> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(stateRoot(abrainHome), "audit.jsonl"), "utf-8");
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return [];
+    throw err;
+  }
+  const rows: Record<string, unknown>[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) rows.push(parsed as Record<string, unknown>);
+    } catch { /* malformed audit rows are never durability evidence */ }
+  }
+  return rows;
+}
+
+export async function readConstraintPublicationSetDurability(
+  abrainHome: string,
+  requestedEventIds: readonly string[],
+): Promise<ConstraintPublicationDurability> {
+  const required = requiredPublicationDurability();
+  const sourceEventIds = Object.freeze(Array.from(new Set(requestedEventIds)).sort());
+  const requested = new Set(sourceEventIds);
+  const rows = await readAutoRefreshAuditRows(abrainHome);
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index]!;
+    if (row.status !== "completed" || row.ok !== true) continue;
+    const rowIds = new Set([
+      ...(Array.isArray(row.sourceEventIds) ? row.sourceEventIds.filter((value): value is string => typeof value === "string") : []),
+      ...(typeof row.sourceEventId === "string" ? [row.sourceEventId] : []),
+    ]);
+    if (requested.size === 0 ? rowIds.size !== 0 : [...requested].some((eventId) => !rowIds.has(eventId))) continue;
+    const publication = row.publication && typeof row.publication === "object" && !Array.isArray(row.publication)
+      ? row.publication as unknown as WriterPublicationResult
+      : undefined;
+    return {
+      durable: publicationSatisfiesDurability(publication, required),
+      required,
+      sourceEventId: sourceEventIds.length === 1 ? sourceEventIds[0]! : null,
+      sourceEventIds,
+      status: String(row.status),
+      ...(publication ? { publication } : {}),
+      ...(typeof row.observedAtUtc === "string" ? { observedAtUtc: row.observedAtUtc } : {}),
+    };
+  }
+  return { durable: false, required, sourceEventId: sourceEventIds.length === 1 ? sourceEventIds[0]! : null, sourceEventIds };
+}
+
+export async function readConstraintPublicationDurability(
+  abrainHome: string,
+  sourceEventId: string | null,
+): Promise<ConstraintPublicationDurability> {
+  return readConstraintPublicationSetDurability(abrainHome, sourceEventId ? [sourceEventId] : []);
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -187,7 +323,7 @@ async function scheduleRecoverableRetry(
     retryAttempt,
     previousStatus,
   });
-  scheduleConstraintShadowAutoRefresh({ ...trigger, retryAttempt, reason: "previous_run_failed" });
+  await scheduleConstraintShadowAutoRefresh({ ...trigger, retryAttempt, reason: "previous_run_failed" });
 }
 
 async function hasReadableConstraintEvidenceEnvelope(
@@ -307,7 +443,29 @@ function compactResult(result: ConstraintShadowRunResult): Record<string, unknow
   };
 }
 
+async function projectionInputEventIds(
+  abrainHome: string,
+  projection: { eventId?: string } | undefined,
+  fallback: readonly string[],
+): Promise<string[]> {
+  const ids = new Set(fallback);
+  const eventId = projection?.eventId;
+  if (!eventId || !/^[0-9a-f]{64}$/.test(eventId)) return [...ids].sort();
+  const file = path.join(abrainHome, "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`);
+  try {
+    const envelope = JSON.parse(await fs.readFile(file, "utf-8")) as Record<string, any>;
+    for (const value of [...(envelope.body?.input_event_ids ?? []), ...(envelope.body?.causal_parents ?? [])]) {
+      if (typeof value === "string" && /^[0-9a-f]{64}$/.test(value)) ids.add(value);
+    }
+  } catch {
+    // The projection receipt validation remains fail-closed later; this helper
+    // only expands the explicit publication cohort.
+  }
+  return [...ids].sort();
+}
+
 async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: RunOnceOptions = {}): Promise<void> {
+  trigger = withEventIds(trigger, triggerEventIds(trigger));
   const auto = trigger.settings.constraintShadowCompiler.autoRefresh;
   const modelRef = defaultModelRef(trigger.settings);
   const startedAtMs = Date.now();
@@ -378,7 +536,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       });
     }
     if (options.scheduleOnLockContention) {
-      scheduleConstraintShadowAutoRefresh(trigger);
+      await scheduleConstraintShadowAutoRefresh(trigger);
     }
     return;
   }
@@ -417,7 +575,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       || auto.maxPromptChars
       || trigger.settings.constraintShadowCompiler.maxPromptChars
       || undefined;
-    const result = await runConstraintShadowCompiler({
+    const result = options.compilerRunnerForTests ? await options.compilerRunnerForTests(trigger) : await runConstraintShadowCompiler({
       abrainHome: trigger.abrainHome,
       cwd: trigger.cwd,
       activeProjectId: trigger.activeProjectId,
@@ -450,23 +608,93 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       l2OutputRoot: trigger.settings.constraintShadowCompiler.l2OutputRoot,
       deviceId: getDeviceId() ?? "unknown-device",
     });
-    terminalStatus = result.ok ? "completed" : "failed";
+    terminalStatus = result.ok ? undefined : "failed";
     await appendAuditLineNoThrow(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date().toISOString(),
-      ok: result.ok,
+      ok: false,
       reason: trigger.reason,
       sourceEventId: trigger.sourceEventId ?? null,
       modelRef,
-      status: terminalStatus,
+      status: result.ok ? "compiled_publication_pending" : "failed",
       durationMs: Date.now() - compileStartedAtMs,
       result: compactResult(result),
     });
-    // ADR0039 Part A: commit this background compile's derived l1/l2 (固化 L1
-    // projection event + L2 view + the triggering constraint-evidence event),
-    // which no agent_end create will sweep because the compile completes minutes
-    // later. no-throw + conditional, so it never disrupts the background flow.
-    await commitAbrainDerivedOutputs(trigger.abrainHome, "constraint-shadow-auto-refresh");
+    if (!result.ok) return;
+    if (trigger.settings.constraintShadowCompiler.l2OutputRoot === "repo" && !result.l2Projection) {
+      await appendAuditLineNoThrow(trigger.abrainHome, {
+        schemaVersion: "constraint-shadow-auto-refresh/v1",
+        observedAtUtc: new Date().toISOString(),
+        ok: false,
+        reason: trigger.reason,
+        sourceEventId: trigger.sourceEventId ?? null,
+        modelRef,
+        status: "publication_terminal",
+        terminalReason: "required_l2_output_missing",
+        result: compactResult(result),
+      });
+      return;
+    }
+    // Thread the exact trigger evidence, new projection envelope, and L2 view
+    // into one canonical transaction. Enabled mode never infers this cohort
+    // from status or a directory sweep.
+    const producedFilePaths: string[] = [];
+    const sourceEventIds = await projectionInputEventIds(trigger.abrainHome, result.l2Projection, triggerEventIds(trigger));
+    if (sourceEventIds.some((eventId) => !/^[0-9a-f]{64}$/.test(eventId))) {
+      throw new Error("constraint trigger sourceEventIds contain a non-SHA-256 event id");
+    }
+    for (const eventId of sourceEventIds) {
+      producedFilePaths.push(path.join(
+        trigger.abrainHome,
+        "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`,
+      ));
+    }
+    if (result.l2Projection) {
+      if (result.l2Projection.status !== "written" && result.l2Projection.status !== "unchanged") {
+        throw new Error(`constraint L2 projection is not publishable: ${result.l2Projection.status}`);
+      }
+      const eventId = result.l2Projection.eventId;
+      if (!eventId || !/^[0-9a-f]{64}$/.test(eventId)) throw new Error("constraint projection event id is missing or invalid");
+      producedFilePaths.push(path.join(
+        trigger.abrainHome,
+        "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`,
+      ));
+      producedFilePaths.push(path.join(trigger.abrainHome, result.l2Projection.l2RelativePath));
+    }
+    const publication = await commitAbrainDerivedOutputs(trigger.abrainHome, "constraint-shadow-auto-refresh", Array.from(new Set(producedFilePaths)))
+      ?? { status: "clean", commit: null, localCommit: "not_published", drainStatus: "legacy_test_adapter", canonical: false };
+    const requiredDurability = requiredPublicationDurability();
+    if (!publicationSatisfiesDurability(publication, requiredDurability)) {
+      terminalStatus = "failed";
+      await appendAuditLineNoThrow(trigger.abrainHome, {
+        schemaVersion: "constraint-shadow-auto-refresh/v1",
+        observedAtUtc: new Date().toISOString(),
+        ok: false,
+        reason: trigger.reason,
+        sourceEventId: sourceEventIds.length === 1 ? sourceEventIds[0]! : null,
+        sourceEventIds,
+        modelRef,
+        status: publication.status === "terminal_before_publish" ? "publication_terminal" : "publication_pending",
+        requiredDurability,
+        publication,
+      });
+    } else {
+      terminalStatus = "completed";
+      await appendAuditLineNoThrow(trigger.abrainHome, {
+        schemaVersion: "constraint-shadow-auto-refresh/v1",
+        observedAtUtc: new Date().toISOString(),
+        ok: true,
+        reason: trigger.reason,
+        sourceEventId: sourceEventIds.length === 1 ? sourceEventIds[0]! : null,
+        sourceEventIds,
+        modelRef,
+        status: "completed",
+        requiredDurability,
+        durationMs: Date.now() - compileStartedAtMs,
+        publication,
+        result: compactResult(result),
+      });
+    }
   } catch (err) {
     terminalStatus = "threw";
     await appendAuditLineNoThrow(trigger.abrainHome, {
@@ -501,10 +729,11 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       });
     }
     if (needsRefresh && markerObservedAfter(needsRefresh, compileStartedAtMs)) {
-      scheduleConstraintShadowAutoRefresh({
+      await scheduleConstraintShadowAutoRefresh({
         ...trigger,
         reason: needsRefresh.reason,
         sourceEventId: needsRefresh.sourceEventId ?? undefined,
+        sourceEventIds: needsRefresh.sourceEventIds,
       });
     } else if (terminalStatus === "failed" || terminalStatus === "threw") {
       await scheduleRecoverableRetry(trigger, modelRef, terminalStatus);
@@ -512,49 +741,98 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
   }
 }
 
-export function scheduleConstraintShadowAutoRefresh(trigger: ConstraintShadowAutoRefreshTrigger): { scheduled: boolean; reason: string } {
-  const auto = trigger.settings.constraintShadowCompiler.autoRefresh;
-  if (!trigger.settings.constraintShadowCompiler.enabled) return { scheduled: false, reason: "constraint_shadow_compiler_disabled" };
-  if (!auto.enabled) return { scheduled: false, reason: "auto_refresh_disabled" };
-
-  state.pending = trigger;
-  if (state.timer) clearTimeout(state.timer);
-
-  const now = Date.now();
-  const modelRef = defaultModelRef(trigger.settings);
-  void appendNeedsRefreshMarker(trigger, now, modelRef).catch((err) => {
-    void appendAuditLineNoThrow(trigger.abrainHome, {
-      schemaVersion: "constraint-shadow-auto-refresh/v1",
-      observedAtUtc: new Date().toISOString(),
-      ok: false,
-      reason: trigger.reason,
-      sourceEventId: trigger.sourceEventId ?? null,
-      modelRef,
-      status: "needs_refresh_marker_write_failed",
-      error: errorMessage(err),
-    });
-  });
-
-  const cooldownMs = Math.max(0, auto.minIntervalMs - (now - (state.lastStartedMs ?? 0)));
-  const delayMs = Math.max(0, auto.debounceMs, cooldownMs);
+function armScheduledRun(trigger: ConstraintShadowAutoRefreshTrigger, delayMs: number): void {
   state.timer = setTimeout(() => {
     state.timer = undefined;
     const next = state.pending;
     state.pending = undefined;
     if (!next) return;
     if (state.inFlight) {
-      state.pending = next;
-      state.inFlight.finally(() => scheduleConstraintShadowAutoRefresh(next));
+      state.pending = mergePendingTrigger(state.pending, next);
+      void state.inFlight.finally(() => {
+        const pending = state.pending;
+        if (pending) void scheduleConstraintShadowAutoRefresh(pending).catch(() => undefined);
+      });
       return;
     }
-    state.inFlight = runOnce(next, { scheduleOnLockContention: true }).finally(() => {
+    state.inFlight = runOnce(next, { scheduleOnLockContention: true, compilerRunnerForTests: state.compilerRunnerForTests }).finally(() => {
       state.inFlight = undefined;
-      if (state.pending) scheduleConstraintShadowAutoRefresh(state.pending);
+      const pending = state.pending;
+      if (pending) void scheduleConstraintShadowAutoRefresh(pending).catch(() => undefined);
     });
     state.inFlight.catch(() => undefined);
   }, delayMs);
+}
 
+export async function scheduleConstraintShadowAutoRefresh(trigger: ConstraintShadowAutoRefreshTrigger): Promise<{ scheduled: boolean; reason: string }> {
+  const auto = trigger.settings.constraintShadowCompiler.autoRefresh;
+  if (!trigger.settings.constraintShadowCompiler.enabled) return { scheduled: false, reason: "constraint_shadow_compiler_disabled" };
+  if (!auto.enabled) return { scheduled: false, reason: "auto_refresh_disabled" };
+
+  state.pending = mergePendingTrigger(state.pending, trigger);
+  if (state.timer) {
+    clearTimeout(state.timer);
+    state.timer = undefined;
+  }
+  const generation = (state.scheduleGeneration ?? 0) + 1;
+  state.scheduleGeneration = generation;
+  const pending = state.pending;
+  const now = Date.now();
+  const modelRef = defaultModelRef(pending.settings);
+  const markerWrite = (state.markerWriteTail ?? Promise.resolve())
+    .then(() => appendNeedsRefreshMarker(pending, now, modelRef));
+  state.markerWriteTail = markerWrite.catch(() => undefined);
+  try {
+    await markerWrite;
+  } catch (err) {
+    await appendAuditLineNoThrow(pending.abrainHome, {
+      schemaVersion: "constraint-shadow-auto-refresh/v1",
+      observedAtUtc: new Date().toISOString(),
+      ok: false,
+      reason: pending.reason,
+      sourceEventId: pending.sourceEventId ?? null,
+      sourceEventIds: triggerEventIds(pending),
+      modelRef,
+      status: "needs_refresh_marker_write_failed",
+      error: errorMessage(err),
+    });
+    return { scheduled: false, reason: "needs_refresh_marker_write_failed" };
+  }
+
+  // A later debounce call owns arming; its durable marker contains this full set.
+  if (generation !== state.scheduleGeneration) return { scheduled: true, reason: "superseded_by_newer_debounce" };
+  const cooldownMs = Math.max(0, auto.minIntervalMs - (now - (state.lastStartedMs ?? 0)));
+  const delayMs = Math.max(0, auto.debounceMs, cooldownMs);
+  armScheduledRun(pending, delayMs);
   return { scheduled: true, reason: delayMs > 0 ? "scheduled_debounced" : "scheduled_now" };
+}
+
+export async function resumeConstraintShadowAutoRefreshAtStartup(
+  trigger: ConstraintShadowAutoRefreshTrigger,
+): Promise<{ scheduled: boolean; reason: string; sourceEventId?: string; sourceEventIds?: readonly string[] }> {
+  const marker = await readLatestNeedsRefreshMarker(trigger.abrainHome);
+  if (!marker) return { scheduled: false, reason: "needs_refresh_marker_missing" };
+  const durability = await readConstraintPublicationSetDurability(trigger.abrainHome, marker.sourceEventIds);
+  if (durability.durable) return { scheduled: false, reason: "marker_already_durable", ...(marker.sourceEventId ? { sourceEventId: marker.sourceEventId } : {}), sourceEventIds: marker.sourceEventIds };
+  const scheduled = await scheduleConstraintShadowAutoRefresh({
+    ...trigger,
+    reason: marker.reason,
+    sourceEventId: marker.sourceEventId ?? undefined,
+    sourceEventIds: marker.sourceEventIds,
+  });
+  await appendAuditLineNoThrow(trigger.abrainHome, {
+    schemaVersion: "constraint-shadow-auto-refresh/v1",
+    observedAtUtc: new Date().toISOString(),
+    ok: scheduled.scheduled,
+    reason: marker.reason,
+    sourceEventId: marker.sourceEventId,
+    sourceEventIds: marker.sourceEventIds,
+    modelRef: marker.modelRef,
+    status: scheduled.scheduled ? "startup_retry_scheduled" : "startup_retry_skipped",
+    scheduleReason: scheduled.reason,
+    requiredDurability: durability.required,
+  });
+  return { ...scheduled, ...(marker.sourceEventId ? { sourceEventId: marker.sourceEventId } : {}), sourceEventIds: marker.sourceEventIds };
 }
 
 export async function ensureConstraintShadowLiveness(trigger: ConstraintShadowAutoRefreshTrigger): Promise<{ scheduled: boolean; reason: string; queuedEvents?: number; staleAgeMs?: number; queuedFallbackReason?: string }> {
@@ -562,9 +840,8 @@ export async function ensureConstraintShadowLiveness(trigger: ConstraintShadowAu
   if (!trigger.settings.constraintShadowCompiler.autoRefresh.enabled) return { scheduled: false, reason: "auto_refresh_disabled" };
 
   const observedMs = await latestCompiledViewObservedMs(trigger.abrainHome);
-  if (observedMs === undefined) return { scheduled: false, reason: "compiled_view_unreadable" };
-  const staleAgeMs = Date.now() - observedMs;
-  if (staleAgeMs < LIVENESS_STALE_AFTER_MS) return { scheduled: false, reason: "compiled_view_fresh", staleAgeMs };
+  const staleAgeMs = observedMs === undefined ? undefined : Date.now() - observedMs;
+  if (staleAgeMs !== undefined && staleAgeMs < LIVENESS_STALE_AFTER_MS) return { scheduled: false, reason: "compiled_view_fresh", staleAgeMs };
 
   const queued = await readQueuedConstraintEventCount(trigger.abrainHome);
   const { queuedEvents, fallbackReason: queuedFallbackReason } = queued;
@@ -596,7 +873,7 @@ export async function ensureConstraintShadowLiveness(trigger: ConstraintShadowAu
   const g = globalThis as typeof globalThis & { [LIVENESS_GLOBAL_KEY]?: boolean };
   if (g[LIVENESS_GLOBAL_KEY]) return { scheduled: false, reason: "liveness_recovery_already_attempted", queuedEvents, staleAgeMs, queuedFallbackReason };
 
-  const scheduled = scheduleConstraintShadowAutoRefresh({ ...trigger, reason: "liveness_recovery", sourceEventId: undefined });
+  const scheduled = await scheduleConstraintShadowAutoRefresh({ ...trigger, reason: "liveness_recovery", sourceEventId: undefined });
   if (scheduled.scheduled) g[LIVENESS_GLOBAL_KEY] = true;
   await appendAuditLineNoThrow(trigger.abrainHome, {
     schemaVersion: "constraint-shadow-auto-refresh/v1",
@@ -614,8 +891,27 @@ export async function ensureConstraintShadowLiveness(trigger: ConstraintShadowAu
   return { ...scheduled, queuedEvents, staleAgeMs, queuedFallbackReason };
 }
 
+export async function _scheduleConstraintShadowAutoRefreshWithCompilerForTests(
+  trigger: ConstraintShadowAutoRefreshTrigger,
+  compilerRunnerForTests: (trigger: ConstraintShadowAutoRefreshTrigger) => Promise<ConstraintShadowRunResult>,
+): Promise<{ scheduled: boolean; reason: string }> {
+  state.compilerRunnerForTests = compilerRunnerForTests;
+  return scheduleConstraintShadowAutoRefresh(trigger);
+}
+
 export async function _runConstraintShadowAutoRefreshNowForTests(trigger: ConstraintShadowAutoRefreshTrigger): Promise<void> {
   await runOnce(trigger);
+}
+
+export async function _runConstraintShadowAutoRefreshWithCompilerForTests(
+  trigger: ConstraintShadowAutoRefreshTrigger,
+  compilerRunnerForTests: (trigger: ConstraintShadowAutoRefreshTrigger) => Promise<ConstraintShadowRunResult>,
+): Promise<void> {
+  await runOnce(trigger, { compilerRunnerForTests });
+}
+
+export function _setConstraintShadowMarkerDirectorySyncForTests(sync?: (dir: string) => Promise<void>): void {
+  state.markerDirectorySyncForTests = sync;
 }
 
 export function _resetConstraintShadowAutoRefreshForTests(): void {
@@ -624,5 +920,9 @@ export function _resetConstraintShadowAutoRefreshForTests(): void {
   state.inFlight = undefined;
   state.pending = undefined;
   state.lastStartedMs = undefined;
+  state.scheduleGeneration = undefined;
+  state.markerWriteTail = undefined;
+  state.markerDirectorySyncForTests = undefined;
+  state.compilerRunnerForTests = undefined;
   delete (globalThis as typeof globalThis & { [LIVENESS_GLOBAL_KEY]?: boolean })[LIVENESS_GLOBAL_KEY];
 }

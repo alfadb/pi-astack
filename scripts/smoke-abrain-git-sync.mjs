@@ -153,6 +153,17 @@ fs.writeFileSync(
   path.join(sharedBridgeDir, "git-singleflight.js"),
   transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")),
 );
+fs.writeFileSync(
+  path.join(sharedBridgeDir, "git-z-parser.js"),
+  transpile(path.join(repoRoot, "extensions/_shared/git-z-parser.ts")),
+);
+// This suite verifies the legacy git-sync implementation. Production runtime
+// activation has its own exact-cohort smoke; pin this isolated fixture to the
+// explicit disabled boundary so it cannot accidentally take the new facade.
+fs.writeFileSync(
+  path.join(sharedBridgeDir, "canonical-git-runtime.js"),
+  `module.exports = { canonicalGitRuntimeEnabled: () => false, getCanonicalGitRuntime: async () => { throw new Error("disabled fixture"); } };\n`,
+);
 const gitSync = require(path.join(tmpDir, "git-sync.cjs"));
 
 // ── Set up fake remote (bare repo) ─────────────────────────────────
@@ -1073,6 +1084,34 @@ await asyncCheck("dirty-tree preflight does NOT clobber the uncommitted edit", a
   const log = git(sanityDev, ["log", "--oneline", "-10"]).stdout;
   if (log.includes("sanity remote")) {
     throw new Error(`preflight unexpectedly merged remote into local; log:\n${log}`);
+  }
+});
+
+console.log("\n[19] canonical facade consumed is pending/blocked, never noop");
+await asyncCheck("manual sync maps canonical consumed to failed and audits it", async () => {
+  const canonicalBridge = path.join(sharedBridgeDir, "canonical-git-runtime.js");
+  fs.writeFileSync(canonicalBridge, `
+module.exports = {
+  canonicalGitRuntimeEnabled: () => true,
+  getCanonicalGitRuntime: async () => ({
+    awaitStartup: async () => ({ startup: "ready" }),
+    recoverAtStartup: async () => {},
+    requestBacklogPreflight: async () => ({ status: "empty", statusHash: "fixture", receipts: [], ownership: {} }),
+    requestDrain: async () => ({ status: "empty", localCommit: "not_published" }),
+    requestPush: async () => ({ status: "consumed", targetCommit: "${"a".repeat(40)}", episodeId: "consumed-fixture", remoteContained: false, reason: "PUSH_SLOT_CONSUMED" }),
+    verifyRemoteConvergence: async () => { throw new Error("must not verify consumed push"); },
+  }),
+};
+`);
+  delete require.cache[require.resolve(canonicalBridge)];
+  delete require.cache[require.resolve(path.join(tmpDir, "git-sync.cjs"))];
+  const canonicalSync = require(path.join(tmpDir, "git-sync.cjs"));
+  const result = await canonicalSync.sync({ abrainHome: deviceA });
+  if (result.ok || result.events[0]?.result === "noop") throw new Error(`consumed was reported successful: ${JSON.stringify(result)}`);
+  if (result.events[0]?.reason !== "PUSH_SLOT_CONSUMED") throw new Error(`consumed reason not preserved: ${JSON.stringify(result)}`);
+  const rows = fs.readFileSync(path.join(deviceA, ".state", "git-sync.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+  if (!rows.some((row) => row.op === "sync" && row.reason === "PUSH_SLOT_CONSUMED" && row.result === "failed")) {
+    throw new Error("manual consumed result was not audited as failed");
   }
 });
 

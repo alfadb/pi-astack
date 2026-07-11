@@ -5,6 +5,7 @@
   "description": "Configuration schema for pi-astack extensions. Lives at ~/.pi/agent/pi-astack-settings.json. Each top-level key namespaces one extension; missing sections fall back to that extension's hardcoded DEFAULTS. To enable IDE autocomplete + validation, add \"$schema\": \"./path/to/pi-astack-settings.schema.json\" as the first field in your settings file.",
   "type": "object",
   "additionalProperties": false,
+  "required": ["canonicalGitRuntime"],
   "properties": {
     "$schema": {
       "type": "string",
@@ -64,6 +65,25 @@
               "description": "Maximum cumulative estimated prompt tokens per turn/module/operation/model key. Estimated as ceil(promptChars / 4). 0 disables this cumulative token cap. Without a causal turn identity, the same cap is process-local within a bounded fallback window."
             }
           }
+        }
+      }
+    },
+
+    "canonicalGitRuntime": {
+      "type": "object",
+      "description": "P1-A production canonical Git orchestrator kill switch. Missing or invalid values fail closed. Enabling transfers all abrain commit/push authority to the process-global exact-cohort runtime; legacy mutation paths may not run in parallel.",
+      "additionalProperties": false,
+      "required": ["enabled", "mode"],
+      "properties": {
+        "_comment": { "type": "string" },
+        "enabled": {
+          "type": "boolean",
+          "description": "Explicit activation switch. Keep false until the controlled production preflight and index.lock blocker are cleared."
+        },
+        "mode": {
+          "type": "string",
+          "const": "p1_controlled",
+          "description": "Pinned P1-A protocol mode. Unknown modes fail closed instead of falling back to legacy mutation."
         }
       }
     },

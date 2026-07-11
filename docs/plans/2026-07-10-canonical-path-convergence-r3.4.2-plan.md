@@ -32,12 +32,12 @@ updated: 2026-07-11
 > 本节是 living plan 的可重写热区。每次阶段切换、发现现场冲突或形成新阻塞时整节更新；不要在此冻结会快速过期的运行数量。
 
 - 当前阶段：P1 in progress；S3、S4、P1-S1-GIT 与 P1-B 已完成，R3.4.2 仍只直接授权 P1 的实现和真实取证，不授权 P2/P3/P4a/P4b 执行。
-- 基线与现场约束保持有效：P1 执行前 baseline dossier 为 `/home/worker/.pi/.pi-astack/reports/canonical-path-p1-baseline-2026-07-10.md`；Knowledge 保持 Git L2 `projection_only`，Constraint 保持 `.state` compiled bundle fail-closed read，production source HEAD 为 `a58a12a3a3f599fe386ef2a83ee78133f4c5e401`。
-- S3 完成（2026-07-10，pi-astack commit `e4124e6`）：中央 machine-readable schema-role registry、全部 whole-L1 写前/扫描前 fail-closed 验证与 machine transition-register consumer 已落地并通过 foundation/registry 验证。
-- S4 完成（2026-07-11）：真实外证为 `docs/evidence/2026-07-11-canonical-path-p1-s4-production-shadow-manifest.json`；Knowledge E1/attempt/E2/E3 与 Constraint committed genesis shadow 链完整，8 个 impact flags 全 false，phase leak 为 0，独立复核确认 P1-S4-SHADOW。
-- P1-B 完成（2026-07-11）：唯一权威 final 是 v7 report（exact SHA-256 `0a692f5cfbc65b718b4791fdcc967ca9a637b4ec585b0c68c9c804c5c2c45f56`，1954086 bytes，run `p1b-production-trace-final-v7`）及仓库内 `docs/evidence/2026-07-11-canonical-path-p1-b-production-trace-manifest.json`；真实 50-path production trace 在隔离环境完成 13/13 场景，13 个 impact flags 全 false，五项 artifact verification 全绿，invalidated attempts 为 0，最终审查确认 P1-B-TRACE 与 P1-S1-GIT 可勾选。
-- P1-S1-GIT 完成：v7 真实 trace 覆盖 temporary index、`write-tree`、exact diff/blob/mode/path、`commit-tree`、CAS、index convergence、owned conflict，以及 worktree/non-cohort stage 保持不变；P1-S2-RECOVERY 仅获得 drain/push/crash/restart 的 partial production evidence，curator slot 1..3 的 production evidence 尚缺，等待 P1-A。
-- 下一动作：P1-A controlled production drains；补齐当前/后续 drain、真实 restart、shadow-write→push、Constraint genesis 0-delta，并完成 curator 1..3 production evidence。
+- P1-A runtime wiring disabled candidate 已完成：唯一 production orchestrator 已接入 S1/S2、startup recovery、结构化 porcelain `-z` reconcile gate、writer/git-sync facade 与 fail-closed settings；production settings 仍为 `canonicalGitRuntime.enabled=false`，未启用、未重启、未执行 production mutation。
+- disabled candidate 已完成四轮独立审查并闭合审查项；最终收尾增加 artifact verifier 对 recovery/candidate 重算 sorted cohortPaths 与 report `execution.cohortPaths` 的 exact 比较、篡改负测、全 P1-A evidence UTF-16 code-unit 排序与跨 locale 非 ASCII 测试，以及 recovery/exact-cohort Git 子进程 `LANG=C`/`LC_ALL=C` 固定。
+- 2026-07-11 真实只读 preflight report 为 `/tmp/p1a-preflight-commit-candidate.json`（exact SHA-256 `58b1cebc7d92bd9f812903d75c931a43cade487046744f29f4e4e53f72c46b6d`，764024 bytes，implementation fingerprint `f67f81c1dc9fd3d64fd576b4d625d0e00db4ef358d04f0a6f3883de50f666297`）；ownership `accepted`，375/375 proofs、0 blocked，HEAD/ref/index/status/cohort/remote 双采样稳定，mutation false。
+- 同一 preflight 确认 production HEAD `a58a12a3a3f599fe386ef2a83ee78133f4c5e401`、ref `refs/heads/main`、origin/main `10bfaf359486a7d6e39179f2dd1b0dd2a00d7cca`、ahead 3/behind 0；blockers 精确为 `kill_switch_disabled`、`index_lock_file`、`execute_not_requested`。0-byte external `index.lock` 未被删除或改写。
+- disabled preflight manifest 已落盘为 `docs/evidence/2026-07-11-canonical-path-p1-a-disabled-preflight-manifest.json`，scope 仅为 `P1-A preflight only` 且 `non_acceptance=true`；它不满足、不勾选任何 P1-A criterion，manifest 自身不含 self-hash，等待 Git commit 外锚。
+- 下一动作严格由 owner 执行：安全处理 external `index.lock` 后重跑 preflight，commit/push disabled candidate，再启用 settings、真实重启，最后运行 `--execute` 取得 P1-A execution evidence；在此之前不得将 disabled preflight 计作 P1-A acceptance。
 
 ## Phase Table
 
@@ -89,7 +89,9 @@ updated: 2026-07-11
 
 ## Current Blockers
 
-- P1 无授权阻塞；S3/S4/S1/P1-B 已完成，P1-S2-RECOVERY 有 drain/push/crash/restart partial production evidence，但 curator slot 1..3 production evidence 尚缺；当前 blocker 与下一动作均为 P1-A controlled drains，不得误记为需要再次批准 P1。
+- P1 无新增授权阻塞；runtime wiring、startup recovery、结构化 `-z` gate 与 P1-A dossier 的 disabled candidate 已完成并通过四轮审查及相关 smoke。当前阻塞已从实现缺口收敛为 owner-controlled production release sequence。
+- production 0-byte `/home/worker/.abrain/.git/index.lock` 仍存在且本候选未删除、覆盖或绕过；owner 必须先确定其所有权并安全处理，然后重跑真实 preflight。该 lock 未处理前禁止启用、重启到 enabled runtime 或请求 `--execute`。
+- production HEAD 仍 ahead origin/main 3；只读 preflight 的 blockers 精确为 `kill_switch_disabled`、`index_lock_file`、`execute_not_requested`。后续顺序固定为 owner 处理 lock并重跑 preflight → commit/push disabled candidate → 启用 settings → 真实重启 → `--execute`；当前 manifest 是 non-acceptance，不得勾选任何 P1-A criterion。
 - P2、P3、P4a、P4b 均受新的独立 unanimous multi-T0 授权阻塞；准备设计、只读核验和测试脚手架不得被描述成已获执行授权。
 - P3 连续 7 日与 P4b 固定 14 日是不可压缩的真实日历门；等待更久不能替代规定的 verifier、query、chain、session_start、delta、restart、restore 等事件门，增加事件也不能缩短日历门。
 
@@ -108,6 +110,9 @@ updated: 2026-07-11
 - 2026-07-11：S1/S2 采用“GPT 实现 + 主会话审查 + Claude 独立审查 + GPT 修复 + Claude 最终复核”的闭环。首版 S2 将 recovery truth 写入自定义目录且 claim 含 owner identity，主会话拒绝该设计并要求全部状态进入标准 content-addressed L1 envelope、claim bytes 仅由 episode/lane/slot 决定。Claude 首轮进一步发现并发恢复会写出不同 authoritative result 从而永久毒化 fold、pending slot 可被跳过、drain episode 绑定 cohort root 会重置预算、unmerged index 可被覆盖、transient Git 错误会烧 slot；修复后 authoritative published/converged/abort/terminal body byte-stable，next-slot 阻止 pending，episode generation 由 genesis/previous closure 驱动，index 全路径预检后单锁批量更新。Claude 最终复核无 blocker，并识别 late abort 与 merge-base 非 1 错误两个窄窗口；二者随后修复，综合 smoke 增至 22/22。由于测试使用 synthetic temporary repositories，S1/S2 仅记为 P1-B 候选，不勾选 production acceptance criteria。
 - 2026-07-11：S4 production shadow 取证期间两次并发 production 写入使首批 dossier 按设计正确失败；稳定窗口最终 report exact SHA-256 为 `0e96b67150a6a57315a600726301565a0461d7ac29ecb211d131efd8e9122ca6`，manifest SHA-256 为 `fa884...`。外证证明 Knowledge E1/attempt/E2/E3、Constraint committed genesis rerender byte-equal、8 个 impact flags 全 false、phase leak 0，Claude 最终复核确认可勾选 P1-S4-SHADOW；该裁决只计 S4，明确不计 P1-B。
 - 2026-07-11：P1-B 多轮审查依次修复 source 回读、dossier shape validator、worker Git environment fail-closed、durable stderr 与 cache drift 语义；v4/v5 分别因 production/cache 并发漂移按设计 fail closed，v6/v7 在稳定窗口通过，`.state` 普通 cache 仅作 diagnostic 且不阻塞 acceptance，但 Constraint canonical read hash 仍是硬门；v7（report exact SHA-256 `0a692f5cfbc65b718b4791fdcc967ca9a637b4ec585b0c68c9c804c5c2c45f56`）是唯一权威 final，外证只计 P1-B 与其覆盖完整的 P1-S1-GIT，P1-S2-RECOVERY 仍等待 P1-A 补齐 curator 1..3 production evidence。
+- 2026-07-11：重启后预检 supersede“下一步直接 controlled drains”：S1/S2 仅有 helper+harness 且未接 runtime，sediment 仍执行旧 `git add`/`git commit`/`pushAsync`，startup 无 recovery；production HEAD `a58a12a` ahead 3、staged 0、tracked L2 19、untracked L1 272 加 L2 58且持续变化，production recovery/curator/genesis events 均为 0；自 2026-07-09 存在的 0-byte `index.lock` 不得清理；默认 C-quoted porcelain 使 reconcile gate 漏掉 13 个非 ASCII L2 路径。裁决为先实现唯一 orchestrator、startup recovery、结构化 `-z` gate 与 P1-A dossier，真实重启后再由 runtime 自动 drain；不得手工调用 helper 冒充自动 drain。该调整不修改任何 criterion、checkbox 或 Phase 授权。
+- 2026-07-11：上述 disabled candidate 已完成并经过四轮审查；收尾修复 artifact verifier 的 exact cohortPaths 绑定、所有 P1-A evidence 的显式 UTF-16 code-unit 排序及跨 locale 非 ASCII 覆盖，并将 convergence-recovery/git-exact-cohort Git stderr locale 固定为 C，同时保留 `GIT_*` scrub。相关 recovery 24/24、canonical runtime、foundation 18、git-sync 40、reconcile、constraint full 9/9、production-trace harness 8/8、audit/dispatch/memory/registry/diff smoke 全绿。
+- 2026-07-11：真实 production 只读 preflight 未带 `--execute`，report `/tmp/p1a-preflight-commit-candidate.json` exact SHA-256 为 `58b1cebc7d92bd9f812903d75c931a43cade487046744f29f4e4e53f72c46b6d`、764024 bytes、implementation fingerprint `f67f81c1dc9fd3d64fd576b4d625d0e00db4ef358d04f0a6f3883de50f666297`；ownership accepted 375/375、remote stable、mutation false，blockers 精确为 kill switch disabled、index lock file、execute not requested。仓库 manifest 仅声明 `P1-A preflight only`/`non_acceptance=true`，不勾 criterion；裁决为 owner 处理 lock 后重跑 preflight，再 commit/push、启用 settings、真实重启并 execute。
 
 ## Definition of Fully Complete
 

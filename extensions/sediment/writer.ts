@@ -40,6 +40,13 @@ import {
 import type { Jsonish } from "../memory/types";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { gitSingleFlight } from "../_shared/git-singleflight";
+import {
+  canonicalGitRuntimeEnabled,
+  createProducedArtifactReceipt,
+  getCanonicalGitRuntime,
+  type CanonicalGitRuntime,
+  type ProducedArtifact,
+} from "../_shared/canonical-git-runtime";
 // `slugify` is the free-text-to-bare-slug normalizer. We deliberately
 // do NOT use `normalizeBareSlug` here, because that one is designed
 // for path/wikilink/id inputs (`[[X]]`, `project:foo:bar`,
@@ -173,6 +180,18 @@ export interface ProjectEntryUpdateDraft {
   timelineAction?: string;
 }
 
+export type WriterPublicationStatus = "local_durable" | "remote_durable" | "durable_pending" | "clean" | "terminal_before_publish";
+
+export interface WriterPublicationResult {
+  status: WriterPublicationStatus;
+  commit: string | null;
+  localCommit: "not_published" | "published" | "index_converged";
+  drainStatus: string;
+  pushStatus?: string;
+  reason?: string;
+  canonical: boolean;
+}
+
 export interface WriteProjectEntryResult {
   slug: string;
   path: string;
@@ -181,6 +200,7 @@ export interface WriteProjectEntryResult {
   lintErrors?: number;
   lintWarnings?: number;
   gitCommit?: string | null;
+  publication?: WriterPublicationResult;
   auditPath?: string;
   deleteMode?: DeleteMode;
   sanitizedReplacements?: string[];
@@ -1151,6 +1171,121 @@ async function atomicWrite(file: string, content: string) {
   }
 }
 
+async function appendWriterPublicationAudit(abrainHome: string, publication: WriterPublicationResult, sourceId: string): Promise<void> {
+  try {
+    const stateDir = path.join(abrainHome, ".state");
+    await fs.mkdir(stateDir, { recursive: true });
+    await fs.appendFile(path.join(stateDir, "git-sync.jsonl"), `${JSON.stringify({
+      ...spreadAnchor(getCurrentAnchor()),
+      ts: new Date().toISOString(),
+      op: "writer_publication",
+      result: publication.status,
+      sourceId,
+      commit: publication.commit,
+      localCommit: publication.localCommit,
+      drainStatus: publication.drainStatus,
+      pushStatus: publication.pushStatus ?? null,
+      reason: publication.reason ?? null,
+      canonical: publication.canonical,
+    })}\n`, "utf-8");
+  } catch (error) {
+    console.error(`[sediment-writer] publication audit append failed: ${pushTriggerErrorSummary(error)}`);
+  }
+}
+
+function legacyPublication(commit: string | null): WriterPublicationResult {
+  return commit
+    ? { status: "local_durable", commit, localCommit: "index_converged", drainStatus: "legacy_commit", canonical: false }
+    : { status: "terminal_before_publish", commit: null, localCommit: "not_published", drainStatus: "legacy_commit_failed", reason: "git_commit_failed", canonical: false };
+}
+
+function publicationNeedsCleanup(publication: WriterPublicationResult): boolean {
+  return publication.canonical === false
+    && publication.status === "terminal_before_publish"
+    && publication.localCommit === "not_published";
+}
+
+function assertCanonicalWriterSettings(): void {
+  // The boolean is intentionally unused: evaluation validates the three-state
+  // settings gate before any filesystem mutation. Only valid disabled=false
+  // reaches the legacy boundary later in the commit helpers.
+  canonicalGitRuntimeEnabled();
+}
+
+async function canonicalCommitExplicitPaths(
+  abrainHome: string,
+  filePaths: readonly string[],
+  message: string,
+  sourceId: string,
+): Promise<WriterPublicationResult> {
+  let runtime: CanonicalGitRuntime;
+  let drained: Awaited<ReturnType<CanonicalGitRuntime["requestDrain"]>>;
+  try {
+    const receipts: ProducedArtifact[] = [];
+    for (const filePath of Array.from(new Set(filePaths.map((item) => path.resolve(item))))) {
+      const rel = path.relative(path.resolve(abrainHome), filePath);
+      if (!rel || rel === "." || rel === ".." || rel.startsWith(`..${path.sep}`)) continue;
+      receipts.push(await createProducedArtifactReceipt({ abrainHome, filePath, sourceIds: [sourceId] }));
+    }
+    if (receipts.length === 0) return { status: "clean", commit: null, localCommit: "not_published", drainStatus: "empty_receipt_cohort", canonical: true };
+    runtime = await getCanonicalGitRuntime({ abrainHome });
+    drained = await runtime.requestDrain(receipts, message);
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    const publication: WriterPublicationResult = {
+      status: code === "INDEX_LOCK_PRESENT" || code === "OWNED_INDEX_CONFLICT" || code === "RECOVERY_PUBLISHED_REF_DIVERGED"
+        ? "durable_pending"
+        : "terminal_before_publish",
+      commit: null,
+      localCommit: "not_published",
+      drainStatus: "threw",
+      reason: pushTriggerErrorSummary(error),
+      canonical: true,
+    };
+    await appendWriterPublicationAudit(abrainHome, publication, sourceId);
+    return publication;
+  }
+  let publication: WriterPublicationResult;
+  if (drained.status === "empty") {
+    if (!drained.commit) {
+      publication = { status: "clean", commit: null, localCommit: drained.localCommit, drainStatus: drained.status, canonical: true };
+    } else if (process.env.PI_ABRAIN_NO_AUTOSYNC === "1" || process.env.PI_ABRAIN_DISABLED === "1") {
+      publication = { status: "local_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: "policy_disabled", canonical: true };
+    } else {
+      try {
+        const pushed = await runtime.requestPush(drained.commit);
+        publication = pushed.status === "success"
+          ? { status: "remote_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: pushed.status, canonical: true }
+          : { status: "durable_pending", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: pushed.status, reason: pushed.reason ?? pushed.status, canonical: true };
+      } catch (error) {
+        publication = { status: "durable_pending", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: "threw", reason: pushTriggerErrorSummary(error), canonical: true };
+      }
+    }
+  } else if (drained.status !== "index_converged" || !drained.commit) {
+    publication = {
+      status: drained.status === "disabled" ? "terminal_before_publish" : "durable_pending",
+      commit: drained.commit ?? null,
+      localCommit: drained.localCommit,
+      drainStatus: drained.status,
+      reason: drained.reason ?? drained.status,
+      canonical: true,
+    };
+  } else if (process.env.PI_ABRAIN_NO_AUTOSYNC === "1" || process.env.PI_ABRAIN_DISABLED === "1") {
+    publication = { status: "local_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: "policy_disabled", canonical: true };
+  } else {
+    try {
+      const pushed = await runtime.requestPush(drained.commit);
+      publication = pushed.status === "success"
+        ? { status: "remote_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: pushed.status, canonical: true }
+        : { status: "durable_pending", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: pushed.status, reason: pushed.reason ?? pushed.status, canonical: true };
+    } catch (error) {
+      publication = { status: "durable_pending", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, pushStatus: "threw", reason: pushTriggerErrorSummary(error), canonical: true };
+    }
+  }
+  await appendWriterPublicationAudit(abrainHome, publication, sourceId);
+  return publication;
+}
+
 async function gitCommit(
   abrainHome: string,
   filePath: string,
@@ -1158,15 +1293,18 @@ async function gitCommit(
   op: string,
   projectId?: string,
   derivedFilePaths: string[] = [],
-): Promise<string | null> {
-  // PR-1 / P0.6a (ADR 0027 C2', 2026-06-10): serialize against git-sync's
-  // auto-merge/push AND the other writer-side commit helpers on the shared
-  // per-repo chain (_shared/git-singleflight) — closes the .git/index.lock
-  // race documented in abrain/git-sync.ts since 2026-05-17. The detached
-  // pushAsync fired at the end of the unlocked body is NOT awaited, so it
-  // chains BEHIND this op instead of self-deadlocking.
-  return gitSingleFlight(abrainHome, () =>
-    gitCommitUnlocked(abrainHome, filePath, slug, op, projectId, derivedFilePaths));
+): Promise<WriterPublicationResult> {
+  if (canonicalGitRuntimeEnabled()) {
+    const scopeTag = projectId ? `project:${projectId}` : "world";
+    return canonicalCommitExplicitPaths(
+      abrainHome,
+      [filePath, ...derivedFilePaths],
+      `sediment: ${op} ${slug} (${scopeTag})`,
+      `sediment:${op}:${scopeTag}:${slug}`,
+    );
+  }
+  return legacyPublication(await gitSingleFlight(abrainHome, () =>
+    gitCommitUnlocked(abrainHome, filePath, slug, op, projectId, derivedFilePaths)));
 }
 
 async function gitCommitUnlocked(
@@ -1235,9 +1373,18 @@ async function gitCommitMany(
   op: string,
   projectId?: string,
   derivedFilePaths: string[] = [],
-): Promise<string | null> {
-  return gitSingleFlight(abrainHome, () =>
-    gitCommitManyUnlocked(abrainHome, filePaths, slug, op, projectId, derivedFilePaths));
+): Promise<WriterPublicationResult> {
+  if (canonicalGitRuntimeEnabled()) {
+    const scopeTag = projectId ? `project:${projectId}` : "world";
+    return canonicalCommitExplicitPaths(
+      abrainHome,
+      [...filePaths, ...derivedFilePaths],
+      `sediment: ${op} ${slug} (${scopeTag})`,
+      `sediment:${op}:${scopeTag}:${slug}`,
+    );
+  }
+  return legacyPublication(await gitSingleFlight(abrainHome, () =>
+    gitCommitManyUnlocked(abrainHome, filePaths, slug, op, projectId, derivedFilePaths)));
 }
 
 async function gitCommitManyUnlocked(
@@ -1282,8 +1429,23 @@ async function gitCommitManyUnlocked(
 // fire-and-forget push path as gitCommitMany, CONDITIONAL on change (unchanged
 // compiler re-runs = zero churn / no empty commit) and NO-THROW (a failed commit
 // must never crash the background compile).
-export async function commitAbrainDerivedOutputs(abrainHome: string, reason: string): Promise<string | null> {
-  return gitSingleFlight(abrainHome, () => commitAbrainDerivedOutputsUnlocked(abrainHome, reason));
+export async function commitAbrainDerivedOutputs(
+  abrainHome: string,
+  reason: string,
+  producedFilePaths: readonly string[] = [],
+): Promise<WriterPublicationResult> {
+  if (canonicalGitRuntimeEnabled()) {
+    // Enabled runtime forbids status/directory harvesting. The projector must
+    // name every output created by this transaction.
+    if (producedFilePaths.length === 0) return { status: "terminal_before_publish", commit: null, localCommit: "not_published", drainStatus: "empty_projector_receipts", reason: "projector did not name outputs", canonical: true };
+    return canonicalCommitExplicitPaths(
+      abrainHome,
+      producedFilePaths,
+      `sediment: derived l1/l2 outputs (${reason})`,
+      `constraint-projector:${reason}`,
+    );
+  }
+  return legacyPublication(await gitSingleFlight(abrainHome, () => commitAbrainDerivedOutputsUnlocked(abrainHome, reason)));
 }
 
 async function commitAbrainDerivedOutputsUnlocked(abrainHome: string, reason: string): Promise<string | null> {
@@ -1481,6 +1643,7 @@ export async function deleteProjectEntry(
   // "git rm only when still archived".
   opts: WriteProjectEntryOptions & { reason?: string; mode?: DeleteMode; sessionId?: string; expected_status?: EntryStatus },
 ): Promise<WriteProjectEntryResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -1654,16 +1817,17 @@ export async function deleteProjectEntry(
     }
     if (!legacyMarkdownSkipped) await fs.unlink(lockedPath);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
-    const git = opts.settings.gitCommit
+    const publication: WriterPublicationResult = opts.settings.gitCommit
       ? legacyMarkdownSkipped
         ? await gitCommitMany(abrainHome, [], slug, "delete", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
         : await gitCommit(abrainHome, lockedPath, slug, "delete", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
-      : null;
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
     // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
     // (git add succeeded but git commit failed), reset the index to
     // prevent the staged deletion from being committed alongside a
     // later successful write — same ghost-file class bug as b40df1e.
-    if (opts.settings.gitCommit && git === null) {
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
       let knowledgeEvidenceCompensationGitCommit: string | null | undefined;
       let restoreMode = legacyMarkdownSkipped
@@ -1709,7 +1873,7 @@ export async function deleteProjectEntry(
         const compensationAppendRestoredProjection = knowledgeEvidenceCompensationEvent?.append.ok === true
           && knowledgeEvidenceCompensationEvent.projection?.status === "projected";
         if (compensationAppendRestoredProjection) {
-          knowledgeEvidenceCompensationGitCommit = await gitCommitMany(abrainHome, [], slug, "restore_after_delete_git_failure", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent, knowledgeEvidenceCompensationEvent));
+          knowledgeEvidenceCompensationGitCommit = (await gitCommitMany(abrainHome, [], slug, "restore_after_delete_git_failure", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent, knowledgeEvidenceCompensationEvent))).commit;
         }
         if (compensationAppendRestoredProjection && knowledgeEvidenceCompensationGitCommit) {
           restoreMode = "projection_only_compensation_committed";
@@ -1761,9 +1925,9 @@ export async function deleteProjectEntry(
         ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
         duration_ms: Date.now() - started,
       }));
-      return { slug, path: lockedPath, status: "rejected", reason: "git_commit_failed", gitCommit: git, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+      return { slug, path: lockedPath, status: "rejected", reason: "git_commit_failed", gitCommit: git, publication, auditPath, deleteMode: "hard", ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
     }
-    const result: WriteProjectEntryResult = { ...baseResult, gitCommit: git };
+    const result: WriteProjectEntryResult = { ...baseResult, gitCommit: git, publication };
     if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
       knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
         abrainHome,
@@ -1810,6 +1974,7 @@ export async function updateProjectEntry(
   patch: ProjectEntryUpdateDraft,
   opts: WriteProjectEntryOptions,
 ): Promise<WriteProjectEntryResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -2044,6 +2209,7 @@ export async function updateProjectEntry(
       const vectorIndexFile = path.join(abrainStateDir(abrainHome), "memory", "embeddings.json");
       const renameEventResult: WriteProjectEntryResult = { slug: requestedNewSlug, path: renamePlan.plan.entryNewPath, status: "updated", lintErrors, lintWarnings, gitCommit: null, sanitizedReplacements: merged.sanitizedReplacements, ...resultCtx };
       let applied: Awaited<ReturnType<typeof applyRenamePlan>>;
+      let renamePublication: WriterPublicationResult | undefined;
       try {
         applied = await applyRenamePlan(renamePlan.plan, {
           abrainHome,
@@ -2074,7 +2240,10 @@ export async function updateProjectEntry(
               }
             : undefined,
           onCommit: opts.settings.gitCommit
-            ? (paths) => gitCommitMany(abrainHome, paths, requestedNewSlug, "rename", opts.projectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
+            ? async (paths) => {
+                renamePublication = await gitCommitMany(abrainHome, paths, requestedNewSlug, "rename", opts.projectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent));
+                return renamePublication.commit;
+              }
             : undefined,
         });
       } catch (err: unknown) {
@@ -2105,9 +2274,9 @@ export async function updateProjectEntry(
           duration_ms: Date.now() - started,
           ...(opts.auditExtras ?? {}),
         }));
-        return { slug, path: target, status: "rejected", reason, lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+        return { slug, path: target, status: "rejected", reason, lintErrors, lintWarnings, ...(renamePublication ? { publication: renamePublication } : {}), auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
       }
-      const renameResult: WriteProjectEntryResult = { ...renameEventResult, gitCommit: applied.gitCommit ?? null };
+      const renameResult: WriteProjectEntryResult = { ...renameEventResult, gitCommit: applied.gitCommit ?? null, ...(renamePublication ? { publication: renamePublication } : {}) };
       if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
         knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
           abrainHome,
@@ -2196,16 +2365,17 @@ export async function updateProjectEntry(
       return { slug, path: target, status: "rejected", reason: "knowledge_evidence_append_failed", lintErrors, lintWarnings, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
     }
     if (!legacyMarkdownSkipped) await atomicWrite(target, merged.markdown);
-    const git = opts.settings.gitCommit
+    const publication: WriterPublicationResult = opts.settings.gitCommit
       ? legacyMarkdownSkipped
         ? await gitCommitMany(abrainHome, [], slug, operation, gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
         : await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
-      : null;
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
     // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
     // (git add succeeded but git commit failed), reset the index to
     // prevent the staged update from being committed alongside a later
     // successful write — same class of bug as b40df1e (create path).
-    if (opts.settings.gitCommit && git === null) {
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
       if (legacyMarkdownSkipped) {
         await resetKnowledgeEvidenceIndex(abrainHome, knowledgeEvidenceEvent);
@@ -2246,11 +2416,12 @@ export async function updateProjectEntry(
         duration_ms: Date.now() - started,
         ...(opts.auditExtras ?? {}),
       }));
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", lintErrors, lintWarnings, gitCommit: git, publication, auditPath, sanitizedReplacements: merged.sanitizedReplacements, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
     }
     const baseResult: WriteProjectEntryResult = {
       ...eventFirstResult,
       gitCommit: git,
+      publication,
     };
     if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
       knowledgeEvidenceEvent = await appendKnowledgeEvidenceForMarkdown({
@@ -2300,6 +2471,7 @@ export async function writeProjectEntry(
   draft: ProjectEntryDraft,
   opts: WriteProjectEntryOptions,
 ): Promise<WriteProjectEntryResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -2511,11 +2683,12 @@ export async function writeProjectEntry(
     const legacyMarkdownSkipped = shouldSkipKnowledgeLegacyMarkdownAfterEvent(opts.settings, knowledgeEvidenceEvent);
     if (!legacyMarkdownSkipped) await atomicWrite(target, markdown);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
-    git = opts.settings.gitCommit
+    const publication: WriterPublicationResult = opts.settings.gitCommit
       ? legacyMarkdownSkipped
         ? await gitCommitMany(abrainHome, [], slug, "create", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
         : await gitCommit(abrainHome, target, slug, "create", gitCommitProjectId, knowledgeEvidenceWrittenPaths(knowledgeEvidenceEvent))
-      : null;
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    git = publication.commit;
     // P2 fix (2026-05-14 audit): when gitCommit is enabled but returns null
     // (e.g. index.lock race, hook failure, EACCES), the markdown file is on
     // disk but git has no record. Without cleanup, the next write for this
@@ -2528,7 +2701,7 @@ export async function writeProjectEntry(
     // (staged add of a now-deleted file), leaving a "deleted" entry in git
     // history with no corresponding disk file — a silent wedge in the abrain
     // repo. git reset HEAD -- <rel> below cleans the index.
-    if (opts.settings.gitCommit && git === null) {
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       let knowledgeEvidenceCompensationEvent: AppendKnowledgeEvidenceForWriteResult | undefined;
       if (legacyMarkdownSkipped) {
         await resetKnowledgeEvidenceIndex(abrainHome, knowledgeEvidenceEvent);
@@ -2566,9 +2739,9 @@ export async function writeProjectEntry(
         ...(legacyMarkdownSkipped ? { legacy_markdown_write: legacyMarkdownSkippedAudit(knowledgeEvidenceEvent) } : {}),
         duration_ms: Date.now() - started,
       }));
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", auditPath, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", gitCommit: git, publication, auditPath, ...(knowledgeEvidenceEvent ? { knowledgeEvidenceEvent } : {}), ...resultCtx };
     }
-    const result: WriteProjectEntryResult = { ...baseResult, gitCommit: git };
+    const result: WriteProjectEntryResult = { ...baseResult, gitCommit: git, publication };
     if (opts.settings.knowledgeEvidenceEventWriter.enabled === true && !isKnowledgeEvidenceEventFirst(opts.settings)) {
       const eventResult = await appendKnowledgeEvidenceForWrite({
         abrainHome,
@@ -2687,6 +2860,7 @@ export interface WriteWorkflowResult {
   lintErrors?: number;
   lintWarnings?: number;
   gitCommit?: string | null;
+  publication?: WriterPublicationResult;
   auditPath?: string;
   sanitizedReplacements?: string[];
   validationErrors?: Array<{ field: string; message: string }>;
@@ -2809,10 +2983,12 @@ async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<strin
   return appendAbrainAudit(abrainHome, "workflow", event);
 }
 
-async function gitCommitAbrain(abrainHome: string, filePath: string, slug: string, label = "workflow"): Promise<string | null> {
-  // PR-1 / P0.6a: same shared-chain serialization as gitCommit above.
-  return gitSingleFlight(abrainHome, () =>
-    gitCommitAbrainUnlocked(abrainHome, filePath, slug, label));
+async function gitCommitAbrain(abrainHome: string, filePath: string, slug: string, label = "workflow"): Promise<WriterPublicationResult> {
+  if (canonicalGitRuntimeEnabled()) {
+    return canonicalCommitExplicitPaths(abrainHome, [filePath], `${label}: ${slug}`, `${label}:${slug}`);
+  }
+  return legacyPublication(await gitSingleFlight(abrainHome, () =>
+    gitCommitAbrainUnlocked(abrainHome, filePath, slug, label)));
 }
 
 async function gitCommitAbrainUnlocked(abrainHome: string, filePath: string, slug: string, label = "workflow"): Promise<string | null> {
@@ -2851,6 +3027,7 @@ export async function writeAbrainWorkflow(
   draft: WorkflowDraft,
   opts: WriteWorkflowOptions,
 ): Promise<WriteWorkflowResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const crossProject = draft.crossProject === true;
@@ -3043,7 +3220,10 @@ export async function writeAbrainWorkflow(
     await atomicWrite(target, markdown);
     // P2 fix (R6 audit): respect settings.gitCommit — don't force git commit
     // when user explicitly disabled it. Match writeProjectEntry behavior.
-    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, target, slug) : null;
+    const publication: WriterPublicationResult = opts.settings.gitCommit
+      ? await gitCommitAbrain(abrainHome, target, slug)
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
     // Round 9 P1 (deepseek R9 P1-3 fix): gitCommitAbrain swallows all
     // exceptions and returns null on any git failure (index.lock race,
     // commit hook fail, EACCES). Before this fix, a null git left an
@@ -3056,7 +3236,7 @@ export async function writeAbrainWorkflow(
     //
     // P4 fix (2026-05-14 R5 audit): also git reset HEAD to unstage
     // the ghost file from the index — same bug as writeProjectEntry.
-    if (git === null && opts.settings.gitCommit) {
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       const rel = path.relative(abrainHome, target);
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
       try { await fs.unlink(target); } catch { /* file may already be gone */ }
@@ -3077,6 +3257,8 @@ export async function writeAbrainWorkflow(
         path: target,
         status: "rejected",
         reason: "git_commit_failed",
+        gitCommit: git,
+        publication,
         auditPath,
         crossProject,
         projectId,
@@ -3101,6 +3283,7 @@ export async function writeAbrainWorkflow(
       lintErrors,
       lintWarnings,
       gitCommit: git,
+      publication,
       auditPath,
       sanitizedReplacements,
       crossProject,
@@ -3188,6 +3371,7 @@ export interface WriteRuleResult {
   lintErrors?: number;
   lintWarnings?: number;
   gitCommit?: string | null;
+  publication?: WriterPublicationResult;
   auditPath?: string;
   sanitizedReplacements?: string[];
   budgetTokens?: number;
@@ -3337,6 +3521,7 @@ async function applyTier2RulesLegacyWriteGate(args: {
 
 /** ADR 0023 D5: create a rule in ~/.abrain/[projects/<id>/]rules/<inject_mode>/. */
 export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions): Promise<WriteRuleResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const ruleScope: "global" | "project" = draft.scope === "global" ? "global" : "project";
@@ -3479,16 +3664,19 @@ export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions):
       return reject("duplicate_slug_race");
     }
     await atomicWrite(target, markdown);
-    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, target, slug, "rules") : null;
-    if (git === null && opts.settings.gitCommit) {
+    const publication: WriterPublicationResult = opts.settings.gitCommit
+      ? await gitCommitAbrain(abrainHome, target, slug, "rules")
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       const rel = path.relative(abrainHome, target);
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
       try { await fs.unlink(target); } catch { /* may be gone */ }
       const auditPath = await audit({ operation: "error", reason: "git_commit_failed_orphan_cleaned", target: path.relative(abrainHome, target) });
-      return { slug, path: target, status: "rejected", reason: "git_commit_failed", injectMode: effectiveInjectMode, ruleScope, projectId, auditPath, ...resultCtx };
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", injectMode: effectiveInjectMode, ruleScope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
     }
     const auditPath = await audit({ operation: "create", target: path.relative(abrainHome, target), lint_result: "pass", lint_warnings: lintWarnings, git_commit: git, budget_tokens: budget.tokens, budget_cap: cap, over_soft_budget: budget.overSoftBudget, routing_confidence: draft.routingConfidence, entry_confidence: draft.entryConfidence, routing_reason: safeDraft.routingReason });
-    return { slug, path: target, status: "created", injectMode: effectiveInjectMode, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, overSoftBudget: budget.overSoftBudget, ...resultCtx };
+    return { slug, path: target, status: "created", injectMode: effectiveInjectMode, ...(demotedFromAlways ? { demotedFrom: "always" as const } : {}), ruleScope, projectId, lintErrors, lintWarnings, gitCommit: git, publication, auditPath, sanitizedReplacements, budgetTokens: budget.tokens, budgetCap: cap, overSoftBudget: budget.overSoftBudget, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", reason: message, target: path.relative(abrainHome, target) });
@@ -3602,6 +3790,7 @@ export async function applyTier1RuleAdjudication(
   apply: Tier1RuleAdjudicationApply,
   opts: WriteRuleOptions,
 ): Promise<WriteRuleResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const { slug, scope, projectId } = target;
@@ -3713,16 +3902,19 @@ export async function applyTier1RuleAdjudication(
     patched = `${patched.trimEnd()}\n- ${ts} | ${sessionId || "sediment"} | ${noteKind} | ${note}\n`;
 
     await atomicWrite(found.path, patched);
-    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, `rules:${noteKind}`) : null;
-    if (git === null && opts.settings.gitCommit) {
+    const publication: WriterPublicationResult = opts.settings.gitCommit
+      ? await gitCommitAbrain(abrainHome, found.path, slug, `rules:${noteKind}`)
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       const rel = path.relative(abrainHome, found.path);
       try { await atomicWrite(found.path, raw); } catch { /* best-effort restore */ }
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
       const auditPath = await audit({ operation: "reject", reason: "git_commit_failed" });
-      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
     }
     const auditPath = await audit({ operation: apply.op === "merge" ? "merge" : "update", target: path.relative(abrainHome, found.path), git_commit: git, reason: reasonLine, ...(mergeJaccardVsOld !== undefined ? { merge_jaccard_vs_old: mergeJaccardVsOld } : {}) });
-    return { slug, path: found.path, status: "updated", reason: apply.op === "merge" ? "tier1_merged_body" : "tier1_evidence_appended", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+    return { slug, path: found.path, status: "updated", reason: apply.op === "merge" ? "tier1_merged_body" : "tier1_evidence_appended", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", reason: message });
@@ -3743,6 +3935,7 @@ export async function mutateRuleStatusContested(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -3765,16 +3958,19 @@ export async function mutateRuleStatusContested(
     if (!/^status:/m.test(patched)) patched = patched.replace(/^---\n/, `---\nstatus: ${yamlString("contested")}\n`);
     patched = `${patched.trimEnd()}\n- ${ts} | ${sessionId || "sediment"} | contested | ${reason.replace(/\n/g, " ")}\n`;
     await atomicWrite(found.path, patched);
-    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:contest") : null;
-    if (git === null && opts.settings.gitCommit) {
+    const publication: WriterPublicationResult = opts.settings.gitCommit
+      ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:contest")
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       const rel = path.relative(abrainHome, found.path);
       try { await atomicWrite(found.path, raw); } catch { /* best-effort restore of pre-contest content */ }
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
       const auditPath = await audit({ operation: "reject", op: "contest", reason: "git_commit_failed" });
-      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
     }
     const auditPath = await audit({ operation: "contest", inject_mode: found.injectMode, target: path.relative(abrainHome, found.path), git_commit: git, reason });
-    return { slug, path: found.path, status: "updated", reason: "contested", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+    return { slug, path: found.path, status: "updated", reason: "contested", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", op: "contest", reason: message });
@@ -3793,6 +3989,7 @@ export async function archiveAbrainRule(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -3823,20 +4020,23 @@ export async function archiveAbrainRule(
     if (!/^status:/m.test(patched)) patched = patched.replace(/^---\n/, `---\nstatus: ${yamlString("archived")}\n`);
     patched = `${patched.trimEnd()}\n- ${ts} | ${sessionId || "sediment"} | archived | ${reason.replace(/\n/g, " ")}\n`;
     await atomicWrite(found.path, patched);
-    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:archive") : null;
+    const publication: WriterPublicationResult = opts.settings.gitCommit
+      ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:archive")
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
     // Audit round-2 P0 (2026-06-07): git-failure rollback parity with
     // writeAbrainRule. Without it a failed commit left the file status-patched
     // + staged in the index and returned "archived" — the next successful
     // sediment write would carry the dirty archive as a ghost commit.
-    if (git === null && opts.settings.gitCommit) {
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       const rel = path.relative(abrainHome, found.path);
       try { await atomicWrite(found.path, raw); } catch { /* best-effort restore of pre-archive content */ }
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
       const auditPath = await audit({ operation: "reject", op: "archive", reason: "git_commit_failed" });
-      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
     }
     const auditPath = await audit({ operation: "archive", inject_mode: found.injectMode, target: path.relative(abrainHome, found.path), git_commit: git, reason });
-    return { slug, path: found.path, status: "archived", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+    return { slug, path: found.path, status: "archived", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", op: "archive", reason: message });
@@ -3854,6 +4054,7 @@ export async function deleteAbrainRule(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -3882,16 +4083,19 @@ export async function deleteAbrainRule(
     // deletion staged — unrecoverable data loss + a ghost deletion in the next commit.
     const originalRaw = await fs.readFile(found.path, "utf-8");
     await fs.unlink(found.path);
-    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:delete") : null;
-    if (git === null && opts.settings.gitCommit) {
+    const publication: WriterPublicationResult = opts.settings.gitCommit
+      ? await gitCommitAbrain(abrainHome, found.path, slug, "rules:delete")
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       const rel = path.relative(abrainHome, found.path);
       try { await atomicWrite(found.path, originalRaw); } catch { /* best-effort restore of deleted file */ }
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort unstage */ }
       const auditPath = await audit({ operation: "reject", op: "delete", reason: "git_commit_failed" });
-      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, auditPath, ...resultCtx };
+      return { slug, path: found.path, status: "rejected", reason: "git_commit_failed", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
     }
     const auditPath = await audit({ operation: "delete", inject_mode: found.injectMode, target: path.relative(abrainHome, found.path), git_commit: git });
-    return { slug, path: found.path, status: "deleted", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, auditPath, ...resultCtx };
+    return { slug, path: found.path, status: "deleted", injectMode: found.injectMode, ruleScope: scope, projectId, gitCommit: git, publication, auditPath, ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await audit({ operation: "error", op: "delete", reason: message });
@@ -3956,6 +4160,7 @@ export interface WriteAboutMeResult {
   lintErrors?: number;
   lintWarnings?: number;
   gitCommit?: string | null;
+  publication?: WriterPublicationResult;
   auditPath?: string;
   sanitizedReplacements?: string[];
   validationErrors?: Array<{ field: string; message: string }>;
@@ -4114,10 +4319,17 @@ async function gitCommitAbrainAboutMe(
   filePath: string,
   slug: string,
   region: AboutMeRegion,
-): Promise<string | null> {
-  // PR-1 / P0.6a: same shared-chain serialization as gitCommit above.
-  return gitSingleFlight(abrainHome, () =>
-    gitCommitAbrainAboutMeUnlocked(abrainHome, filePath, slug, region));
+): Promise<WriterPublicationResult> {
+  if (canonicalGitRuntimeEnabled()) {
+    return canonicalCommitExplicitPaths(
+      abrainHome,
+      [filePath],
+      `about-me: ${slug} [${region}] (lane=about_me)`,
+      `about-me:${region}:${slug}`,
+    );
+  }
+  return legacyPublication(await gitSingleFlight(abrainHome, () =>
+    gitCommitAbrainAboutMeUnlocked(abrainHome, filePath, slug, region)));
 }
 
 async function gitCommitAbrainAboutMeUnlocked(
@@ -4199,6 +4411,7 @@ export async function writeAbrainAboutMe(
   draft: AboutMeDraft,
   opts: WriteAboutMeOptions,
 ): Promise<WriteAboutMeResult> {
+  assertCanonicalWriterSettings();
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId ?? draft.sessionId;
@@ -4533,13 +4746,14 @@ export async function writeAbrainAboutMe(
       };
     }
     await atomicWrite(target, markdown);
-    const git = opts.settings.gitCommit
+    const publication: WriterPublicationResult = opts.settings.gitCommit
       ? await gitCommitAbrainAboutMe(abrainHome, target, slug, safeDraft.region)
-      : null;
+      : { status: "clean", commit: null, localCommit: "not_published", drainStatus: "git_commit_disabled", canonical: false };
+    const git = publication.commit;
     // Git rollback path (parity with writeAbrainWorkflow R9 P1-3 + R5
     // P4): if git commit fails we have an orphan markdown + staged
     // ghost. Clear both before returning rejected.
-    if (git === null && opts.settings.gitCommit) {
+    if (opts.settings.gitCommit && publicationNeedsCleanup(publication)) {
       const rel = path.relative(abrainHome, target);
       try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
       try { await fs.unlink(target); } catch { /* file may already be gone */ }
@@ -4560,6 +4774,8 @@ export async function writeAbrainAboutMe(
         status: "rejected",
         reason: "git_commit_failed",
         region: safeDraft.region,
+        gitCommit: git,
+        publication,
         auditPath,
         ...resultCtx,
       };
@@ -4585,6 +4801,7 @@ export async function writeAbrainAboutMe(
       lintErrors,
       lintWarnings,
       gitCommit: git,
+      publication,
       auditPath,
       sanitizedReplacements,
       ...resultCtx,

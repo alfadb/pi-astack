@@ -71,7 +71,7 @@ import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./stag
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
 import { appendTier1ConstraintEvidenceEvent } from "./constraint-evidence/integration";
-import { ensureConstraintShadowLiveness, scheduleConstraintShadowAutoRefresh } from "./constraint-compiler/auto-refresh";
+import { ensureConstraintShadowLiveness, readConstraintPublicationDurability, resumeConstraintShadowAutoRefreshAtStartup, scheduleConstraintShadowAutoRefresh, type ConstraintPublicationDurability } from "./constraint-compiler/auto-refresh";
 import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession, isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic } from "../_shared/pi-internals";
 import { getCurrentAnchor, getDeviceId, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
@@ -99,6 +99,7 @@ import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { loadAndValidateTransitionRegister } from "../_shared/transition-register";
+import { canonicalGitRuntimeEnabled, getCanonicalGitRuntime } from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 
@@ -523,6 +524,10 @@ function compactResultSummary(results: Array<WriteProjectEntryResult | WriteRule
 }
 
 function isCapturedTier1Result(result: WriteRuleResult): boolean {
+  // A Constraint Evidence Event append is only an input receipt. The signal is
+  // captured after the correlated compiler publication reaches the configured
+  // local/remote durability boundary.
+  if ((result.reason ?? "").startsWith("constraint_compiler_publication_pending:")) return false;
   // PR-4: "updated" = adjudication update/merge landed on the existing rule —
   // the directive is persisted there, same capture class as created.
   return result.status === "created" || result.status === "deduped" || result.status === "dry_run" || result.status === "updated";
@@ -1769,8 +1774,18 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         }
       }
 
-      // ADR 0025 P0: ensure the sidecar staging directory exists.
       const abrainHome = resolveAbrainHomeForSediment();
+      if (canonicalGitRuntimeEnabled()) {
+        const startup = await (await getCanonicalGitRuntime({ abrainHome })).awaitStartup();
+        if (startup.startup === "blocked") {
+          const message = `sediment canonical startup blocked: ${startup.blockedReason ?? "unknown"}`;
+          try { ctx.ui?.notify?.(message, "warning"); } catch { console.error(`[sediment] ${message}`); }
+          return;
+        }
+      }
+
+      // ADR 0025 P0: ensure the sidecar staging directory exists only after
+      // the shared recovery barrier has opened.
       await mkdir(abrainSedimentStagingPath(abrainHome), { recursive: true });
 
       const sessionId = readSessionId(ctx.sessionManager);
@@ -1798,7 +1813,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         applySedimentStatus(setStatus, sessionId, "idle");
       }
 
-      void ensureConstraintShadowLiveness({
+      const livenessTrigger = {
         abrainHome,
         cwd: path.resolve(ctx.cwd || process.cwd()),
         activeProjectId: undefined,
@@ -1806,8 +1821,12 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         settings,
         modelRegistry: ctx.modelRegistry,
         reason: "liveness_recovery",
-      }).catch((err) => {
-        console.error(`[sediment] constraint shadow liveness recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+      };
+      void (async () => {
+        const resumed = await resumeConstraintShadowAutoRefreshAtStartup(livenessTrigger);
+        if (!resumed.scheduled) await ensureConstraintShadowLiveness(livenessTrigger);
+      })().catch((err) => {
+        console.error(`[sediment] constraint shadow startup recovery failed: ${err instanceof Error ? err.message : String(err)}`);
       });
     },
   );
@@ -1984,6 +2003,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // which would cancel sediment mid-flight.
       const modelRegistry = ctx.modelRegistry;
       const settingsSnapshot = snapshotSedimentSettings(settings);
+
+      if (canonicalGitRuntimeEnabled()) {
+        const startup = await (await getCanonicalGitRuntime({ abrainHome: resolveAbrainHomeForSediment() })).awaitStartup();
+        if (startup.startup === "blocked") return;
+      }
 
       // Ephemeral sessions (`pi --print --no-session`, dispatch_agent
       // subprocess, CI / automation) refuse to run the deterministic
@@ -4805,7 +4829,8 @@ async function tryAutoWriteLane(args: {
     };
     let constraintEvidenceEvent: Awaited<ReturnType<typeof appendTier1ConstraintEvidenceEvent>> | undefined;
     let constraintEvidenceAppendError: string | undefined;
-    let constraintAutoRefreshSchedule: ReturnType<typeof scheduleConstraintShadowAutoRefresh> | undefined;
+    let constraintPublicationDurability: ConstraintPublicationDurability | undefined;
+    let constraintAutoRefreshSchedule: Awaited<ReturnType<typeof scheduleConstraintShadowAutoRefresh>> | undefined;
     if (settings.constraintEvidenceEventWriter.enabled === true) {
       try {
         constraintEvidenceEvent = await appendTier1ConstraintEvidenceEvent({
@@ -4822,16 +4847,22 @@ async function tryAutoWriteLane(args: {
           deviceId: getDeviceId(),
         });
         if (constraintEvidenceEvent.append.ok) {
-          constraintAutoRefreshSchedule = scheduleConstraintShadowAutoRefresh({
+          constraintPublicationDurability = await readConstraintPublicationDurability(
             abrainHome,
-            cwd,
-            activeProjectId: projectId,
-            knownProjectIds: Array.from(new Set([...(projectId ? [projectId] : []), ...listAbrainProjects(abrainHome)])).sort(),
-            settings,
-            modelRegistry: args.modelRegistry,
-            reason: "constraint_evidence_event_appended",
-            sourceEventId: constraintEvidenceEvent.append.eventId,
-          });
+            constraintEvidenceEvent.append.eventId ?? null,
+          );
+          if (!constraintPublicationDurability.durable) {
+            constraintAutoRefreshSchedule = await scheduleConstraintShadowAutoRefresh({
+              abrainHome,
+              cwd,
+              activeProjectId: projectId,
+              knownProjectIds: Array.from(new Set([...(projectId ? [projectId] : []), ...listAbrainProjects(abrainHome)])).sort(),
+              settings,
+              modelRegistry: args.modelRegistry,
+              reason: "constraint_evidence_event_appended",
+              sourceEventId: constraintEvidenceEvent.append.eventId,
+            });
+          }
         } else {
           constraintEvidenceAppendError = constraintEvidenceEvent.append.status;
         }
@@ -4896,11 +4927,14 @@ async function tryAutoWriteLane(args: {
         && settings.constraintEvidenceEventWriter.legacyRuleWriteOnSuccessfulEvent !== true
         && constraintEvidenceEvent?.append.ok === true
       ) {
+        const publicationDurable = constraintPublicationDurability?.durable === true;
         const result: WriteRuleResult = {
           slug: draft.title,
           path: "",
           status: "deduped",
-          reason: `constraint_evidence_event_captured:${constraintEvidenceEvent.append.status}`,
+          reason: publicationDurable
+            ? `constraint_compiler_publication_durable:${constraintEvidenceEvent.append.eventId}`
+            : `constraint_compiler_publication_pending:${constraintEvidenceEvent.append.eventId}`,
           dedupedAgainst: constraintEvidenceEvent.append.eventId,
           lane: "auto_write",
           sessionId,
@@ -4930,7 +4964,9 @@ async function tryAutoWriteLane(args: {
             diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
           },
           event_first_skipped_legacy_rule_write: true,
-          signal_consumed: true,
+          constraint_publication: constraintPublicationDurability ?? null,
+          ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
+          signal_consumed: publicationDurable,
           checkpoint_advanced: false,
           durationMs: Date.now() - writeStart,
         }).catch(() => {});

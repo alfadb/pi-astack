@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -115,6 +116,13 @@ exports.commitAbrainDerivedOutputs = async () => null;
 writeFile(path.join(outRoot, "_shared", "causal-anchor.js"), `
 exports.getDeviceId = () => "smoke-device";
 `);
+writeFile(path.join(outRoot, "_shared", "durable-write.js"), `
+const fs = require("node:fs/promises");
+exports.fsyncDirectory = async (dir) => {
+  const handle = await fs.open(dir, "r");
+  try { await handle.sync(); } finally { await handle.close(); }
+};
+`);
 writeFile(path.join(outRoot, "_shared", "runtime.js"), `
 const path = require("node:path");
 exports.abrainSedimentLocksDir = (abrainHome) => path.join(abrainHome, ".state", "locks");
@@ -124,9 +132,22 @@ exports.acquireFileLock = async () => ({ release: async () => undefined });
 const autoRefresh = require(path.join(outRoot, "sediment", "constraint-compiler", "auto-refresh.js"));
 const {
   ensureConstraintShadowLiveness,
+  readConstraintPublicationDurability,
+  resumeConstraintShadowAutoRefreshAtStartup,
+  _scheduleConstraintShadowAutoRefreshWithCompilerForTests,
   _runConstraintShadowAutoRefreshNowForTests,
+  _setConstraintShadowMarkerDirectorySyncForTests,
   _resetConstraintShadowAutoRefreshForTests,
 } = autoRefresh;
+
+if (process.argv.includes("--resume-worker")) {
+  const abrainHome = process.env.CONSTRAINT_RESUME_ABRAIN;
+  if (!abrainHome) throw new Error("CONSTRAINT_RESUME_ABRAIN is required");
+  const result = await resumeConstraintShadowAutoRefreshAtStartup(trigger(abrainHome, baseSettings(), { reason: "fresh-process-startup" }));
+  _resetConstraintShadowAutoRefreshForTests();
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+  process.exit(0);
+}
 
 const pending = [];
 let checkChain = Promise.resolve();
@@ -198,6 +219,94 @@ asyncCheck("liveness recovery schedules once for stale compiled view with queued
   const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
   const rows = readJsonlRows(auditFile);
   assert(rows.filter((row) => row.status === "liveness_recovery_scheduled" && row.reason === "liveness_recovery").length === 1, "expected exactly one liveness recovery audit row");
+  _resetConstraintShadowAutoRefreshForTests();
+});
+
+asyncCheck("timer is never armed before the needs-refresh marker is durable", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-marker-boundary-"));
+  writeFile(path.join(abrainHome, ".state"), "blocks marker directory creation\n");
+  let compilerRuns = 0;
+  const settings = baseSettings({ autoRefresh: { enabled: true, debounceMs: 0, minIntervalMs: 0, eventStaleAfterMs: 0, maxPromptChars: 1000 } });
+  const scheduled = await _scheduleConstraintShadowAutoRefreshWithCompilerForTests(
+    trigger(abrainHome, settings, { sourceEventId: "c".repeat(64) }),
+    async () => { compilerRuns += 1; throw new Error("timer crossed marker boundary"); },
+  );
+  assert(scheduled.scheduled === false && scheduled.reason === "needs_refresh_marker_write_failed", `marker failure did not fail scheduling: ${JSON.stringify(scheduled)}`);
+  await sleep(75);
+  assert(compilerRuns === 0, `compiler ran ${compilerRuns} time(s) before durable marker`);
+  _resetConstraintShadowAutoRefreshForTests();
+});
+
+asyncCheck("directory fsync failure never arms and a fresh process recovers the file-fsynced marker", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-marker-dir-sync-"));
+  const eventId = "d".repeat(64);
+  let compilerRuns = 0;
+  _setConstraintShadowMarkerDirectorySyncForTests(async () => { throw new Error("injected directory fsync failure"); });
+  const settings = baseSettings({ autoRefresh: { enabled: true, debounceMs: 0, minIntervalMs: 0, eventStaleAfterMs: 0, maxPromptChars: 1000 } });
+  const scheduled = await _scheduleConstraintShadowAutoRefreshWithCompilerForTests(
+    trigger(abrainHome, settings, { sourceEventId: eventId }),
+    async () => { compilerRuns += 1; throw new Error("timer crossed directory durability boundary"); },
+  );
+  assert(scheduled.scheduled === false && scheduled.reason === "needs_refresh_marker_write_failed", `directory sync failure did not block scheduling: ${JSON.stringify(scheduled)}`);
+  await sleep(75);
+  assert(compilerRuns === 0, `compiler ran ${compilerRuns} time(s) after directory sync failure`);
+  const markerFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
+  assert(readJsonlRows(markerFile).some((row) => row.sourceEventId === eventId), "file-fsynced marker was not left recoverable after directory sync failure");
+  _resetConstraintShadowAutoRefreshForTests();
+
+  const freshProcess = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--resume-worker"], {
+    env: { ...process.env, CONSTRAINT_RESUME_ABRAIN: abrainHome },
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  assert(freshProcess.status === 0, `fresh marker recovery failed: ${freshProcess.stdout}\n${freshProcess.stderr}`);
+  const resumed = JSON.parse(freshProcess.stdout.trim());
+  assert(resumed.scheduled === true && resumed.sourceEventId === eventId, `fresh process did not recover marker after directory sync failure: ${JSON.stringify(resumed)}`);
+  _resetConstraintShadowAutoRefreshForTests();
+});
+
+asyncCheck("startup resumes durable marker and pending publication cannot unlock it", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-startup-resume-"));
+  const eventId = "a".repeat(64);
+  const markerFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
+  const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
+  writeFile(markerFile, `${JSON.stringify({ schemaVersion: "constraint-shadow-auto-refresh-needs-refresh/v1", observedAtUtc: "2026-07-11T00:00:00.000Z", reason: "restart_fixture", sourceEventId: eventId, modelRef: "test/model" })}\n`);
+  writeFile(auditFile, `${JSON.stringify({ schemaVersion: "constraint-shadow-auto-refresh/v1", observedAtUtc: "2026-07-11T00:00:01.000Z", ok: true, status: "completed", sourceEventId: eventId, publication: { status: "durable_pending", commit: "b".repeat(40), localCommit: "index_converged", drainStatus: "index_converged", canonical: true } })}\n`);
+  const pendingDurability = await readConstraintPublicationDurability(abrainHome, eventId);
+  assert(pendingDurability.durable === false && pendingDurability.required === "remote_durable", `durable_pending incorrectly unlocked correlation: ${JSON.stringify(pendingDurability)}`);
+  const freshProcess = spawnSync(process.execPath, [fileURLToPath(import.meta.url), "--resume-worker"], {
+    env: { ...process.env, CONSTRAINT_RESUME_ABRAIN: abrainHome },
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  assert(freshProcess.status === 0, `fresh startup process failed: ${freshProcess.stdout}\n${freshProcess.stderr}`);
+  const resumed = JSON.parse(freshProcess.stdout.trim());
+  assert(resumed.scheduled === true && resumed.sourceEventId === eventId, `fresh process did not resume marker: ${JSON.stringify(resumed)}`);
+  assert(readJsonlRows(auditFile).some((row) => row.status === "startup_retry_scheduled" && row.sourceEventId === eventId), "startup retry audit missing");
+  _resetConstraintShadowAutoRefreshForTests();
+
+  fs.appendFileSync(auditFile, `${JSON.stringify({ schemaVersion: "constraint-shadow-auto-refresh/v1", observedAtUtc: "2026-07-11T00:00:02.000Z", ok: true, status: "completed", sourceEventId: eventId, publication: { status: "remote_durable", commit: "c".repeat(40), localCommit: "index_converged", drainStatus: "index_converged", pushStatus: "success", canonical: true } })}\n`);
+  const durable = await readConstraintPublicationDurability(abrainHome, eventId);
+  assert(durable.durable === true, `remote_durable correlation not recognized: ${JSON.stringify(durable)}`);
+  const settled = await resumeConstraintShadowAutoRefreshAtStartup(trigger(abrainHome, baseSettings(), { reason: "startup" }));
+  assert(settled.scheduled === false && settled.reason === "marker_already_durable", `durable marker was redundantly scheduled: ${JSON.stringify(settled)}`);
+  _resetConstraintShadowAutoRefreshForTests();
+});
+
+asyncCheck("first startup without a compiled view recovers from readable durable L1 evidence", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-first-startup-"));
+  writeFile(path.join(abrainHome, "l1", "events", "sha256", "cc", "event-first.json"), JSON.stringify({
+    schema: "constraint-evidence-envelope/v1",
+    event_id: "event-first",
+    body: { created_at_utc: new Date().toISOString() },
+  }, null, 2) + "\n");
+  const result = await ensureConstraintShadowLiveness(trigger(abrainHome, baseSettings(), { reason: "first-startup" }));
+  assert(result.scheduled === true && result.queuedEvents === 1, `first startup lost durable L1 evidence: ${JSON.stringify(result)}`);
+  assert(result.queuedFallbackReason === "event_coverage_missing", `first startup fallback reason missing: ${JSON.stringify(result)}`);
   _resetConstraintShadowAutoRefreshForTests();
 });
 

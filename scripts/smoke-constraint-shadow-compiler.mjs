@@ -3432,10 +3432,10 @@ checkAutoRefresh("auto-refresh lock contention marker schedules follow-up after 
     await _runConstraintShadowAutoRefreshNowForTests({
       ...trigger,
       reason: "contended_smoke",
-      sourceEventId: "event-contended-smoke",
+      sourceEventId: "d".repeat(64),
     });
     const markerRows = readJsonlRows(markerFile);
-    assert(markerRows.some((row) => row.reason === "contended_smoke" && row.sourceEventId === "event-contended-smoke"), "contended run did not persist needs-refresh marker");
+    assert(markerRows.some((row) => row.reason === "contended_smoke" && row.sourceEventId === "d".repeat(64)), "contended run did not persist needs-refresh marker");
 
     await holderRun;
     await waitFor("needs-refresh follow-up auto-refresh completion", () => readJsonlRows(auditFile).filter((row) => row.status === "completed").length >= 2, 5_000);
@@ -3444,7 +3444,7 @@ checkAutoRefresh("auto-refresh lock contention marker schedules follow-up after 
     const completedAfterFollowUp = rows.filter((row) => row.status === "completed").length;
     assert(rows.some((row) => row.status === "lock_contended" && row.reason === "contended_smoke"), "lock_contended audit missing for contended run");
     assert(rows.filter((row) => row.status === "started").length >= 2, "follow-up auto-refresh did not start after marker ledger check");
-    assert(readJsonlRows(markerFile).some((row) => row.reason === "contended_smoke" && row.sourceEventId === "event-contended-smoke"), "needs-refresh marker ledger should retain the contention marker");
+    assert(readJsonlRows(markerFile).some((row) => row.reason === "contended_smoke" && row.sourceEventId === "d".repeat(64)), "needs-refresh marker ledger should retain the contention marker");
     await sleep(100);
     assert(readJsonlRows(auditFile).filter((row) => row.status === "completed").length === completedAfterFollowUp, "old needs-refresh marker should not keep scheduling after a covering follow-up compile");
     assert(globalThis.__constraintShadowSmokePiAiCallCount >= 2, "expected holder and follow-up compiler invocations");
@@ -3492,13 +3492,13 @@ checkAutoRefresh("auto-refresh scheduler retries after lock contention marker", 
       getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fake" }),
     };
 
-    scheduleConstraintShadowAutoRefresh({
+    await scheduleConstraintShadowAutoRefresh({
       abrainHome,
       cwd: home,
       settings,
       modelRegistry: fakeRegistry,
       reason: "scheduler_retry_smoke",
-      sourceEventId: "event-scheduler-retry-smoke",
+      sourceEventId: "e".repeat(64),
     });
 
     await waitFor("scheduler lock contention marker", () => readJsonlRows(markerFile).some((row) => row.reason === "scheduler_retry_smoke"), 6_500);
@@ -3516,7 +3516,7 @@ checkAutoRefresh("auto-refresh scheduler retries after lock contention marker", 
   }
 });
 
-checkAutoRefresh("auto-refresh schedule API still returns scheduled status", () => {
+checkAutoRefresh("auto-refresh schedule API still returns scheduled status", async () => {
   _resetConstraintShadowAutoRefreshForTests();
   try {
     const settings = resolveSedimentSettingsWithConfig({
@@ -3528,7 +3528,7 @@ checkAutoRefresh("auto-refresh schedule API still returns scheduled status", () 
         },
       },
     });
-    const result = scheduleConstraintShadowAutoRefresh({
+    const result = await scheduleConstraintShadowAutoRefresh({
       abrainHome: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-schedule-")), "abrain"),
       cwd: os.tmpdir(),
       settings,
@@ -3565,7 +3565,7 @@ check("auto-refresh lock path is under abrainSedimentLocksDir", () => {
 check("auto-refresh lock does not cover debounce wait — only runOnce compilation", () => {
   const source = fs.readFileSync(path.join(repoRoot, "extensions", "sediment", "constraint-compiler", "auto-refresh.ts"), "utf8");
   // The lock acquisition must be inside runOnce, not in scheduleConstraintShadowAutoRefresh
-  const scheduleFn = source.slice(source.indexOf("export function scheduleConstraintShadowAutoRefresh"));
+  const scheduleFn = source.slice(source.indexOf("export async function scheduleConstraintShadowAutoRefresh"));
   assert(!scheduleFn.includes("acquireFileLock"), "scheduleConstraintShadowAutoRefresh must not acquire lock (debounce period)");
   // runOnce must have the lock
   const runOnceFn = source.slice(source.indexOf("async function runOnce"));

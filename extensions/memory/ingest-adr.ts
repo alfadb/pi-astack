@@ -7,6 +7,7 @@ import { parseDirectionImpact } from "./direction-impact";
 import { validateProjectEntryDraft } from "../sediment/validation";
 import type { SanitizeResult } from "../sediment/sanitizer";
 import { gitSingleFlight } from "../_shared/git-singleflight";
+import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentAuditPath } from "../_shared/runtime";
 
 /**
@@ -370,6 +371,9 @@ async function appendIngestAudit(
  * any failure triggers `git reset --hard <abrainPreSha>` rollback.
  */
 export async function runAdrIngest(opts: RunIngestOptions): Promise<IngestRunResult> {
+  if (canonicalGitRuntimeEnabled()) {
+    throw new Error("CANONICAL_ADR_INGEST_REQUIRES_EVENT_IMPORT: ADR ingest cannot write legacy Markdown while canonicalGitRuntime is enabled");
+  }
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
   const abrainHome = path.resolve(opts.abrainHome);
   const timestamp = opts.timestamp || new Date().toISOString();
