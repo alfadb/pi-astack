@@ -79,6 +79,8 @@ export interface DispatchReasoningTraceIo {
   open(file: string): Promise<DispatchReasoningTraceFileHandle>;
 }
 
+const POSIX_PRIVATE_MODES_SUPPORTED = process.platform !== "win32";
+
 const REAL_TRACE_IO: DispatchReasoningTraceIo = {
   mkdir: async (dir) => { await mkdir(dir, { recursive: true, mode: 0o700 }); },
   chmod,
@@ -106,7 +108,7 @@ async function validateExistingRetentionMetadata(metadataPath: string): Promise<
     if (held.size > 4096) throw new Error("retention metadata exceeds schema byte limit");
     const parsed = JSON.parse((await handle.readFile()).toString("utf8"));
     if (!validRetentionMetadata(parsed)) throw new Error("existing retention metadata fails reasoning-retention/v1 schema");
-    await handle.chmod(0o600);
+    if (POSIX_PRIVATE_MODES_SUPPORTED) await handle.chmod(0o600);
   } finally {
     await handle.close();
   }
@@ -125,7 +127,7 @@ async function ensureRetentionMetadata(dir: string): Promise<void> {
     if (!held.isFile()) throw new Error("new retention metadata is not a regular file");
     await handle.writeFile(RETENTION_BYTES);
     await handle.sync();
-    await handle.chmod(0o600);
+    if (POSIX_PRIVATE_MODES_SUPPORTED) await handle.chmod(0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     await validateExistingRetentionMetadata(metadataPath);
@@ -153,7 +155,7 @@ async function secureTraceDirectory(dir: string, projectRoot: string): Promise<v
   try {
     const held = await handle.stat();
     if (!held.isDirectory() || held.dev !== before.dev || held.ino !== before.ino) throw new Error("reasoning trace directory identity changed while opening");
-    await handle.chmod(0o700);
+    if (POSIX_PRIVATE_MODES_SUPPORTED) await handle.chmod(0o700);
   } finally {
     await handle.close();
   }
@@ -762,7 +764,9 @@ class FileDispatchReasoningTraceWriter implements DispatchReasoningTraceWriter {
         try { await this.io.chmod(dir, 0o700); } catch { /* best-effort mode repair */ }
       }
       this.fileHandle = await this.io.open(this.tracePath);
-      try { await this.fileHandle.chmod(0o600); } catch { /* best-effort mode repair */ }
+      if (this.io !== REAL_TRACE_IO || POSIX_PRIVATE_MODES_SUPPORTED) {
+        try { await this.fileHandle.chmod(0o600); } catch { /* best-effort mode repair */ }
+      }
       return this.fileHandle;
     } catch (error) {
       this.markWriteFailed(error, "open");

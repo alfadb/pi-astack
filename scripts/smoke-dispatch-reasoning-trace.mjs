@@ -23,6 +23,7 @@ const {
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-dispatch-reasoning-"));
 let passed = 0;
 let failed = 0;
+const POSIX_PRIVATE_MODES_SUPPORTED = process.platform !== "win32";
 
 async function check(name, fn) {
   try {
@@ -174,6 +175,20 @@ function replay(rows) {
 
 function sha256(text) {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function assertPosixMode(file, expected) {
+  if (POSIX_PRIVATE_MODES_SUPPORTED) assert.equal(fs.statSync(file).mode & 0o777, expected);
+}
+
+function assertNoWindowsEpermWarning(warnings, context) {
+  if (process.platform !== "win32") return;
+  for (const warning of warnings) {
+    assert.ok(
+      !warning.toLowerCase().includes("eperm"),
+      `${context}: real trace or retention write emitted a Windows EPERM warning: ${warning}`,
+    );
+  }
 }
 
 function faultInjectingIo(fault) {
@@ -579,14 +594,24 @@ await check("concurrent worker queues use separate files without cross-line cont
   assert.ok(bTrace.rows.every((row) => row.task_index === 1 && row.trace_id === b.traceId));
 });
 
-await check("trace permissions and directory retention metadata are 0700/0600 with pinned exemption", async () => {
-  const writer = makeWriter({ taskIndex: 6, taskCount: 7 });
-  start(writer, "response-mode");
-  delta(writer, "response-mode", "mode");
-  messageEnd(writer, "response-mode");
-  const summary = await endSettled(writer, { stopReason: "stop" });
+await check("trace and retention stay complete with POSIX private modes where supported", async () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => { warnings.push(args.map(String).join(" ")); };
+  let summary;
+  try {
+    const writer = makeWriter({ taskIndex: 6, taskCount: 7 });
+    start(writer, "response-mode");
+    delta(writer, "response-mode", "mode");
+    messageEnd(writer, "response-mode");
+    summary = await endSettled(writer, { stopReason: "stop" });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(summary.reasoning_trace_status, "complete");
   const { rows } = readTrace(summary.reasoning_trace_path);
   assert.ok(rows.length >= 5);
+  assert.equal(rows.at(-1)?.event_type, "trace_end");
   const traceDir = path.dirname(summary.reasoning_trace_path);
   const retentionPath = path.join(traceDir, ".retention.json");
   const retention = JSON.parse(fs.readFileSync(retentionPath, "utf8"));
@@ -597,9 +622,10 @@ await check("trace permissions and directory retention metadata are 0700/0600 wi
     pinned_exempt: true,
     automatic_gc: false,
   });
-  assert.equal(fs.statSync(traceDir).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(summary.reasoning_trace_path).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(retentionPath).mode & 0o777, 0o600);
+  assertPosixMode(traceDir, 0o700);
+  assertPosixMode(summary.reasoning_trace_path, 0o600);
+  assertPosixMode(retentionPath, 0o600);
+  assertNoWindowsEpermWarning(warnings, "real trace write");
 });
 
 await check("retention symlink or invalid existing JSON warns fail-open without chmod outside targets", async () => {
@@ -625,7 +651,7 @@ await check("retention symlink or invalid existing JSON warns fail-open without 
     const summary = await endSettled(writer, { stopReason: "stop" });
     assert.equal(summary.reasoning_trace_status, "complete");
     assert(fs.existsSync(summary.reasoning_trace_path));
-    assert.equal(fs.statSync(protectedPath).mode & 0o777, beforeMode);
+    if (POSIX_PRIVATE_MODES_SUPPORTED) assert.equal(fs.statSync(protectedPath).mode & 0o777, beforeMode);
     assert.equal(fs.readFileSync(protectedPath, "utf8"), beforeContent);
   }
 });

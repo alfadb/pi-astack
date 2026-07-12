@@ -30,6 +30,7 @@ process.on("exit", () => {
 });
 let passed = 0;
 let failed = 0;
+const POSIX_PRIVATE_MODES_SUPPORTED = process.platform !== "win32";
 
 async function check(name, fn) {
   try {
@@ -55,6 +56,21 @@ async function waitForStableWindow(file, stableMs, timeoutMs = stableMs + 5_000)
 
 function mode(file) {
   return fs.statSync(file).mode & 0o777;
+}
+
+function assertPosixMode(file, expected, message) {
+  if (POSIX_PRIVATE_MODES_SUPPORTED) assert.equal(mode(file), expected, message);
+}
+
+function assertNoWindowsCapabilityDiagnostic(diagnostics, context) {
+  if (process.platform !== "win32") return;
+  for (const item of diagnostics) {
+    const detail = `${item.operation} ${item.message}`;
+    assert.ok(
+      !(detail.toLowerCase().includes("eperm") && /fchmod|fsync/i.test(detail)),
+      `${context}: unsupported Windows durability operation leaked into diagnostics: ${detail}`,
+    );
+  }
 }
 
 function auditFiles(activePath) {
@@ -87,6 +103,10 @@ function childAppend(activePath, worker, count) {
           rotation: { enabled: true, maxBytes: 700, maxAgeMs: 86400000, lockTimeoutMs: 5000 },
         });
         if (!result.appended) throw new Error(JSON.stringify(result));
+        if (process.platform === "win32" && result.diagnostics.some((item) =>
+          item.message.toLowerCase().includes("eperm") && /fchmod|fsync/i.test(item.operation + " " + item.message))) {
+          throw new Error("unsupported Windows durability diagnostic: " + JSON.stringify(result.diagnostics));
+        }
         if (i % 5 === 0) await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 4)));
       }
     })().catch((error) => { console.error(error); process.exit(1); });
@@ -130,11 +150,11 @@ await check("six child processes append and rotate every unique JSON row exactly
   const files = auditFiles(active);
   assert(files.length > 2, "tiny threshold did not create archives");
   assert.equal(new Set(files.map((file) => path.basename(file))).size, files.length, "archive name collision");
-  for (const file of files) assert.equal(mode(file), 0o600, `bad file mode: ${file}`);
+  for (const file of files) assertPosixMode(file, 0o600, `bad file mode: ${file}`);
   const dir = path.dirname(active);
-  assert.equal(mode(dir), 0o700);
-  assert.equal(mode(path.join(dir, "archive")), 0o700);
-  assert.equal(mode(path.join(dir, ".audit.jsonl.generation.json")), 0o600);
+  assertPosixMode(dir, 0o700);
+  assertPosixMode(path.join(dir, "archive"), 0o700);
+  assertPosixMode(path.join(dir, ".audit.jsonl.generation.json"), 0o600);
 });
 
 await check("oversize row is complete, diagnosed, and rotated before the following row", async () => {
@@ -144,8 +164,10 @@ await check("oversize row is complete, diagnosed, and rotated before the followi
   const first = await appendRotatingJsonlLine(active, JSON.stringify(large), { sink: "oversize", rotation });
   assert(first.appended && first.oversize);
   assert(first.diagnostics.some((item) => item.code === "oversize_line"));
+  assertNoWindowsCapabilityDiagnostic(first.diagnostics, "oversize first append");
   const second = await appendRotatingJsonlLine(active, JSON.stringify({ id: "after" }), { sink: "oversize", rotation });
   assert(second.appended && second.rotated);
+  assertNoWindowsCapabilityDiagnostic(second.diagnostics, "oversize rotation");
   const rows = readAllRows(active);
   assert.deepEqual(new Set(rows.map((row) => row.id)), new Set(["large", "after"]));
   const archive = auditFiles(active).find((file) => file !== active);
@@ -187,7 +209,7 @@ await check("archive, generation meta, and transaction symlinks fail open withou
   const archiveResult = await appendRotatingJsonlLine(archiveActive, JSON.stringify({ id: "archive-safe-append" }), { sink: "unsafe-archive", rotation });
   assert(archiveResult.appended && !archiveResult.rotated);
   assert(archiveResult.diagnostics.some((item) => item.code === "recovery_failed"));
-  assert.equal(mode(archiveExternal), 0o755);
+  assertPosixMode(archiveExternal, 0o755);
   assert.deepEqual(fs.readdirSync(archiveExternal), []);
   assert.equal(JSON.parse(fs.readFileSync(archiveActive, "utf8")).id, "archive-safe-append");
 
@@ -206,7 +228,7 @@ await check("archive, generation meta, and transaction symlinks fail open withou
     assert(result.appended && !result.rotated, kind);
     assert(result.diagnostics.some((item) => item.code === "recovery_failed"), kind);
     assert.equal(fs.readFileSync(external, "utf8"), `${kind}-external-keep\n`, kind);
-    assert.equal(mode(external), 0o644, kind);
+    assertPosixMode(external, 0o644, kind);
     assert.equal(fs.lstatSync(sidecar).isSymbolicLink(), true, kind);
     assert.equal(JSON.parse(fs.readFileSync(active, "utf8")).id, `${kind}-safe-append`, kind);
   }
@@ -230,11 +252,12 @@ await check("every durable transaction phase recovers without row loss or genera
     assert(!result.rotated && result.diagnostics.some((item) => item.code === "rotation_failed"), phase);
     const marker = path.join(path.dirname(active), ".audit.jsonl.rotation-transaction.json");
     assert(fs.existsSync(marker), `${phase}: marker missing`);
-    assert.equal(mode(marker), 0o600, `${phase}: marker mode`);
+    assertPosixMode(marker, 0o600, `${phase}: marker mode`);
     assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).phase, phase);
 
     const recovered = await appendRotatingJsonlLine(active, JSON.stringify({ id: `after-${phase}` }), { sink: `crash-${phase}`, rotation });
     assert(recovered.appended, phase);
+    assertNoWindowsCapabilityDiagnostic(recovered.diagnostics, `${phase}: recovery`);
     assert.deepEqual(new Set(readAllRows(active).map((row) => row.id)), new Set([`before-${phase}`, `after-${phase}`]), phase);
     assert(!fs.existsSync(marker), `${phase}: marker not cleared`);
     const meta = JSON.parse(fs.readFileSync(path.join(path.dirname(active), ".audit.jsonl.generation.json"), "utf8"));
@@ -252,12 +275,21 @@ await check("late old-fd append keeps archive hot until seal captures the final 
   assert(rotated.rotated && rotated.archivePath);
   fs.writeSync(oldFd, `${JSON.stringify({ id: "late-old-fd" })}\n`);
   fs.closeSync(oldFd);
+  const archivedRows = fs.readFileSync(rotated.archivePath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(archivedRows.map((row) => row.id), ["before", "late-old-fd"]);
 
   const runSeal = (args, expectedStatus = 0) => {
     const result = spawnSync(process.execPath, [maintenanceCli, "seal", "--root", path.dirname(active), ...args], { cwd: repoRoot, encoding: "utf8" });
     assert.equal(result.status, expectedStatus, `stdout=${result.stdout}\nstderr=${result.stderr}`);
     return JSON.parse((result.stdout || result.stderr).trim());
   };
+  if (process.platform === "win32") {
+    const unsupported = runSeal(["--stable-ms", "100"], 1);
+    assert.equal(unsupported.ok, false);
+    assert.equal(unsupported.code, "MAINTENANCE_UNSUPPORTED");
+    assert.match(unsupported.message, /Linux open-directory-relative support/);
+    return;
+  }
   const stableMs = 100;
   const future = new Date(Date.now() + 60_000);
   fs.utimesSync(rotated.archivePath, future, future);

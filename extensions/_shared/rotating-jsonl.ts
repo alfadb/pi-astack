@@ -98,6 +98,20 @@ const ROTATION_LIMITS = {
 const SERIAL_CHAINS_KEY = Symbol.for("pi-astack/rotating-jsonl/process-local-chains/v1");
 const NOFOLLOW = fsSync.constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = fsSync.constants.O_DIRECTORY ?? 0;
+const POSIX_PRIVATE_MODES_SUPPORTED = process.platform !== "win32";
+const DIRECTORY_FSYNC_SUPPORTED = process.platform !== "win32";
+
+async function applyPrivateDirectoryMode(handle: fs.FileHandle): Promise<void> {
+  if (POSIX_PRIVATE_MODES_SUPPORTED) await handle.chmod(0o700);
+}
+
+async function applyPrivateFileMode(handle: fs.FileHandle): Promise<void> {
+  if (POSIX_PRIVATE_MODES_SUPPORTED) await handle.chmod(0o600);
+}
+
+async function syncDirectory(handle: fs.FileHandle): Promise<void> {
+  if (DIRECTORY_FSYNC_SUPPORTED) await handle.sync();
+}
 
 function serialChains(): Map<string, Promise<unknown>> {
   const global = globalThis as Record<symbol, unknown>;
@@ -232,7 +246,7 @@ async function openSafeDirectory(dir: string, create: boolean): Promise<HeldDire
       throw new Error(`directory identity changed while opening: ${resolved}`);
     }
     const directory = { path: resolved, handle, identity: identityOf(held) };
-    await handle.chmod(0o700);
+    await applyPrivateDirectoryMode(handle);
     await verifyHeldDirectory(directory);
     return directory;
   } catch (error) {
@@ -294,7 +308,7 @@ async function ensureActive(activePath: string): Promise<void> {
     0o600,
   );
   try {
-    await opened.handle.chmod(0o600);
+    await applyPrivateFileMode(opened.handle);
   } finally {
     await opened.handle.close();
   }
@@ -332,7 +346,7 @@ async function writeRegularAtomicNoFollow(file: string, content: string): Promis
     if (!tmpStat.isFile()) throw new Error(`temporary sidecar is not regular: ${tmpPath}`);
     const tmpIdentity = identityOf(tmpStat);
     await tmp.writeFile(content, "utf8");
-    await tmp.chmod(0o600);
+    await applyPrivateFileMode(tmp);
     await tmp.sync();
     await verifyHeldDirectory(directory);
     const currentIdentity = await lstatIdentity(file);
@@ -347,7 +361,7 @@ async function writeRegularAtomicNoFollow(file: string, content: string): Promis
       throw new Error(`sidecar publish identity mismatch: ${file}`);
     }
     await verifyHeldDirectory(directory);
-    await directory.handle.sync();
+    await syncDirectory(directory.handle);
   } finally {
     await tmp?.close().catch(() => undefined);
     if (!published) await fs.rm(tmpPath, { force: true }).catch(() => undefined);
@@ -359,7 +373,7 @@ async function chmodRegularNoFollow(file: string, expected?: FileIdentity): Prom
   const opened = await openRegularNoFollow(file, fsSync.constants.O_RDONLY);
   try {
     if (expected && !sameIdentity(opened.identity, expected)) throw new Error(`file identity mismatch before chmod: ${file}`);
-    await opened.handle.chmod(0o600);
+    await applyPrivateFileMode(opened.handle);
     const after = await opened.handle.stat();
     if (!after.isFile() || !sameIdentity(identityOf(after), opened.identity)) throw new Error(`file identity changed during chmod: ${file}`);
   } finally {
@@ -379,7 +393,7 @@ async function renameRegularNoFollow(source: string, destination: string, expect
       const anchoredSource = await anchoredDirectoryChild(sourceDirectory, path.basename(source));
       const anchoredDestination = await anchoredDirectoryChild(destinationDirectory, path.basename(destination));
       await fs.rename(anchoredSource, anchoredDestination);
-      await sourceOpened.handle.chmod(0o600);
+      await applyPrivateFileMode(sourceOpened.handle);
       const destinationStat = await fs.lstat(destination);
       if (destinationStat.isSymbolicLink() || !destinationStat.isFile() || !sameIdentity(identityOf(destinationStat), sourceOpened.identity)) {
         throw new Error(`destination identity mismatch after rename: ${destination}`);
@@ -746,7 +760,7 @@ async function acquireStrictRotationLock(lockPath: string): Promise<{ release():
   const lockIdentity = identityOf(stat);
   await handle.writeFile(`${JSON.stringify({ pid: process.pid, token: randomUUID(), created_at: new Date().toISOString(), label: "strict-maintenance-rotation" })}\n`);
   await handle.sync();
-  await handle.chmod(0o600);
+  await applyPrivateFileMode(handle);
   await handle.close();
   return {
     release: async () => {
@@ -815,7 +829,7 @@ async function appendInternal(activePath: string, serializedLine: string, option
     try {
       await opened.handle.writeFile(line, { encoding: "utf8" });
       appended = true;
-      try { await opened.handle.chmod(0o600); } catch (error) {
+      try { await applyPrivateFileMode(opened.handle); } catch (error) {
         rotationResult.diagnostics.push({ code: "permission_repair_failed", operation: "active_chmod", message: controlledMessage(error) });
       }
     } finally {
