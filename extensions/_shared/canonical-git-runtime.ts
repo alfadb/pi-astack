@@ -35,6 +35,22 @@ const GLOBAL_KEY = Symbol.for("pi-astack/canonical-git-runtime/v1");
 const API_VERSION = 1;
 const SETTINGS_MODE = "local_convergence_v2" as const;
 const MAX_DIAGNOSTIC_TAIL = 64;
+export const P1_RESTART_PROBE_ENV = "PI_ASTACK_P1_RESTART_PROBE" as const;
+export const CONTROLLED_STOP_AFTER_PREPARED = "CONTROLLED_STOP_AFTER_PREPARED" as const;
+const P1_RESTART_PROBE_VERSION = 1 as const;
+const P1_RESTART_PROBE_BOUNDARY = "commit_prepared" as const;
+const P1_RESTART_PROBE_MAX_LIFETIME_MS = 15 * 60 * 1_000;
+const OID_PATTERN = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const RUN_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+interface P1RestartProbe {
+  version: typeof P1_RESTART_PROBE_VERSION;
+  runId: string;
+  boundary: typeof P1_RESTART_PROBE_BOUNDARY;
+  expectedHead: string;
+  expiresAtUtc: string;
+  expiresAtMs: number;
+}
 
 export interface CanonicalGitRuntimeSettings {
   enabled: boolean;
@@ -92,6 +108,7 @@ export interface BacklogPreflightResult {
 export interface DrainResult {
   status: "disabled" | "empty" | "blocked" | "index_converged" | "consumed";
   commit?: string;
+  candidate?: string;
   episodeId?: string;
   slot?: number;
   localCommit: "not_published" | "published" | "index_converged";
@@ -151,20 +168,61 @@ interface GlobalRuntimeState {
   implementationFingerprint?: string;
   loadedProvenance?: readonly LoadedProvenanceEntry[];
   runtimes: Map<string, CanonicalGitRuntimeImpl>;
+  consumedP1RestartProbeRunIds: Set<string>;
 }
 
 function globalState(): GlobalRuntimeState {
   const global = globalThis as Record<symbol, unknown>;
   const existing = global[GLOBAL_KEY] as Partial<GlobalRuntimeState> | undefined;
   if (!existing) {
-    const created: GlobalRuntimeState = { apiVersion: API_VERSION, runtimes: new Map() };
+    const created: GlobalRuntimeState = { apiVersion: API_VERSION, runtimes: new Map(), consumedP1RestartProbeRunIds: new Set() };
     global[GLOBAL_KEY] = created;
     return created;
   }
   if (existing.apiVersion !== API_VERSION || !(existing.runtimes instanceof Map)) {
     throw new CanonicalGitRuntimeError("RUNTIME_SINGLETON_SPLIT", "incompatible process-global canonical runtime singleton");
   }
+  if (!(existing.consumedP1RestartProbeRunIds instanceof Set)) existing.consumedP1RestartProbeRunIds = new Set();
   return existing as GlobalRuntimeState;
+}
+
+function parseP1RestartProbe(raw: string | undefined, nowMs = Date.now()): P1RestartProbe | undefined {
+  if (raw === undefined) return undefined;
+  const fail = (message: string): never => {
+    throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_INVALID", `${P1_RESTART_PROBE_ENV} ${message}`);
+  };
+  if (!raw || raw.includes("\n") || raw.includes("\r")) fail("must be one non-empty JSON line");
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { fail("must be valid JSON"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail("must be an object");
+  const probe = value as Record<string, unknown>;
+  const expectedKeys = ["version", "runId", "boundary", "expectedHead", "expiresAtUtc"];
+  if (Object.keys(probe).join("\0") !== expectedKeys.join("\0")) fail(`must have exact ordered keys ${expectedKeys.join("/")}`);
+  if (probe.version !== P1_RESTART_PROBE_VERSION) fail(`version must be ${P1_RESTART_PROBE_VERSION}`);
+  const runId = typeof probe.runId === "string" && RUN_ID_PATTERN.test(probe.runId)
+    ? probe.runId
+    : fail("runId must be a canonical lowercase UUID");
+  if (probe.boundary !== P1_RESTART_PROBE_BOUNDARY) fail(`boundary must be ${P1_RESTART_PROBE_BOUNDARY}`);
+  const expectedHead = typeof probe.expectedHead === "string" && OID_PATTERN.test(probe.expectedHead)
+    ? probe.expectedHead
+    : fail("expectedHead must be a lowercase 40- or 64-hex Git OID");
+  const expiresAtUtc = typeof probe.expiresAtUtc === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(probe.expiresAtUtc)
+    ? probe.expiresAtUtc
+    : fail("expiresAtUtc must be canonical UTC with milliseconds");
+  const expiresAtMs = Date.parse(expiresAtUtc);
+  if (!Number.isFinite(expiresAtMs) || new Date(expiresAtMs).toISOString() !== expiresAtUtc) fail("expiresAtUtc is invalid");
+  if (expiresAtMs <= nowMs) fail("is expired");
+  if (expiresAtMs - nowMs > P1_RESTART_PROBE_MAX_LIFETIME_MS) fail("expiresAtUtc must be no more than 15 minutes in the future");
+  if (JSON.stringify({ version: P1_RESTART_PROBE_VERSION, runId, boundary: P1_RESTART_PROBE_BOUNDARY, expectedHead, expiresAtUtc }) !== raw) {
+    fail("must use the exact compact schema encoding");
+  }
+  return Object.freeze({ version: P1_RESTART_PROBE_VERSION, runId, boundary: P1_RESTART_PROBE_BOUNDARY, expectedHead, expiresAtUtc, expiresAtMs });
+}
+
+function assertP1RestartProbeFresh(probe: P1RestartProbe, nowMs = Date.now()): void {
+  if (probe.expiresAtMs <= nowMs) {
+    throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_EXPIRED", `${P1_RESTART_PROBE_ENV} expired before the prepared boundary`, { runId: probe.runId, expiresAtUtc: probe.expiresAtUtc });
+  }
 }
 
 function defaultSettingsPath(): string {
@@ -668,6 +726,35 @@ async function recomputeConstraintL2(repo: string, rel: string, bytes: Buffer, c
   return Object.freeze([latest.eventId]);
 }
 
+function assertP1RestartProbeSource(
+  probe: P1RestartProbe,
+  validated: readonly { receipt: ProducedArtifact; content?: Buffer }[],
+  context: CanonicalOwnershipContext,
+): void {
+  const knowledgeSources: Array<{ eventId: string; sourceRef: string | null; newlyProduced: boolean }> = [];
+  for (const item of validated) {
+    if (item.receipt.owner !== "knowledge_l1" || !item.content) continue;
+    const envelope = JSON.parse(item.content.toString("utf-8")) as Record<string, any>;
+    const body = envelope.body as Record<string, any>;
+    const producer = body?.producer;
+    const sourceRef = body?.source?.source_ref;
+    const eventId = path.basename(item.receipt.path, ".json");
+    const newlyProduced = !context.headPaths.has(item.receipt.path);
+    knowledgeSources.push({ eventId, sourceRef: typeof sourceRef === "string" ? sourceRef : null, newlyProduced });
+    if (
+      newlyProduced
+      && producer?.name === "sediment.knowledge-event-writer"
+      && typeof sourceRef === "string"
+      && sourceRef.startsWith("sediment:auto_write:")
+    ) return;
+  }
+  throw new CanonicalGitRuntimeError(
+    "P1_RESTART_PROBE_SOURCE_MISMATCH",
+    `${P1_RESTART_PROBE_ENV} requires a newly produced active Knowledge L1 receipt from sediment:auto_write`,
+    { runId: probe.runId, knowledgeSources },
+  );
+}
+
 async function validateReceipt(repo: string, receipt: ProducedArtifact, allowWriterTransaction: boolean, context?: CanonicalOwnershipContext): Promise<{ receipt: ProducedArtifact; content?: Buffer }> {
   if (!receipt || typeof receipt !== "object") throw new CanonicalGitRuntimeError("RECEIPT_INVALID", "artifact receipt must be an object");
   canonicalRelative(repo, path.join(repo, receipt.path));
@@ -900,14 +987,36 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   }
 
   async requestDrain(receipts: readonly ProducedArtifact[], message = "abrain: canonical artifact drain"): Promise<DrainResult> {
-    const startup = await this.awaitStartup();
+    // This is the only probe env read. Startup/recovery/backlog paths call the
+    // unlocked method directly and never observe or consume the probe.
+    const probe = parseP1RestartProbe(process.env[P1_RESTART_PROBE_ENV]);
+    if (probe) {
+      if (globalState().consumedP1RestartProbeRunIds.has(probe.runId)) {
+        return { status: "blocked", localCommit: "not_published", reason: "P1_RESTART_PROBE_RUN_ALREADY_CONSUMED" };
+      }
+      if (this.startupState !== "ready") {
+        throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_STEADY_STATE_REQUIRED", `${P1_RESTART_PROBE_ENV} may be armed only after startup is ready`, { runId: probe.runId, startup: this.startupState });
+      }
+    }
+    const startup = probe ? this.diagnostics() : await this.awaitStartup();
     if (startup.startup === "blocked") return { status: "blocked", localCommit: "not_published", reason: startup.blockedReason };
-    return gitSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message, true));
+    return gitSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message, true, probe));
   }
 
-  private async requestDrainUnlocked(receipts: readonly ProducedArtifact[], message: string, allowNextGeneration: boolean): Promise<DrainResult> {
+  private async requestDrainUnlocked(receipts: readonly ProducedArtifact[], message: string, allowNextGeneration: boolean, probe?: P1RestartProbe): Promise<DrainResult> {
+    if (probe && !allowNextGeneration) throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_PATH_INVALID", "restart probe reached a non-steady-state drain path");
+    if (probe && globalState().consumedP1RestartProbeRunIds.has(probe.runId)) {
+      return { status: "blocked", localCommit: "not_published", reason: "P1_RESTART_PROBE_RUN_ALREADY_CONSUMED" };
+    }
     if (!this.settings.enabled || !this.settings.valid) return { status: "disabled", localCommit: "not_published" };
     await this.mutationPreflight();
+    if (probe) {
+      assertP1RestartProbeFresh(probe);
+      const currentHead = await resolveRef(this.repo, this.options.refName);
+      if (currentHead !== probe.expectedHead) {
+        throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_HEAD_MISMATCH", `${P1_RESTART_PROBE_ENV} expectedHead does not match the current symbolic ref`, { runId: probe.runId, expectedHead: probe.expectedHead, currentHead });
+      }
+    }
     const seen = new Set<string>();
     const currentStatus = await statusSnapshot(this.repo);
     const frozen = this.frozenOwnershipContext;
@@ -921,6 +1030,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       seen.add(input.path);
       validated.push(await validateReceipt(this.repo, input, true, ownershipContext));
     }
+    if (probe) assertP1RestartProbeSource(probe, validated, ownershipContext);
     for (const item of validated) {
       if (item.receipt.owner !== "constraint_l1" || !item.content) continue;
       const envelope = JSON.parse(item.content.toString("utf-8")) as Record<string, any>;
@@ -966,18 +1076,37 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     }
     if (!validated.length) return { status: "empty", localCommit: "not_published" };
     const frozenCommit = await resolveRef(this.repo, this.options.refName);
+    if (probe) {
+      assertP1RestartProbeFresh(probe);
+      if (frozenCommit !== probe.expectedHead) {
+        throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_HEAD_MISMATCH", `${P1_RESTART_PROBE_ENV} expectedHead changed during the ownership freeze`, { runId: probe.runId, expectedHead: probe.expectedHead, currentHead: frozenCommit });
+      }
+    }
     const rawPlan: CohortPlanEntry[] = validated.map(({ receipt, content }) => receipt.op === "delete"
       ? { path: receipt.path, op: "delete" }
       : { path: receipt.path, op: "put", mode: receipt.mode!, content: content! });
     const plan = await pruneNoops(this.repo, frozenCommit, rawPlan);
     if (!plan.length) return { status: "empty", commit: frozenCommit, localCommit: "not_published" };
     const frozenIndexSnapshot = await snapshotIndexEntries(this.repo, plan.map((entry) => entry.path));
+    if (probe) assertP1RestartProbeFresh(probe);
     const episode = await resolveRecoveryEpisode({ abrainHome: this.repo, symbolicRef: this.options.refName, allowNextGeneration });
     const claim = await claimNextRecoverySlot({ abrainHome: this.repo, episodeId: episode.episodeId, lane: "drain" });
     if (!claim.shouldExecute || claim.slot === null) return { status: "consumed", episodeId: episode.episodeId, slot: claim.slot ?? undefined, localCommit: "not_published", reason: claim.status };
     await preflightSharedIndexLock(this.repo);
     const prepared = await prepareExactCohortCommit({ repo: this.repo, refName: this.options.refName, frozenCommit, plan, message });
     await recordDrainPrepared({ abrainHome: this.repo, episodeId: episode.episodeId, slot: claim.slot, prepared, frozenIndexSnapshot });
+    if (probe) {
+      globalState().consumedP1RestartProbeRunIds.add(probe.runId);
+      this.record({ operation: "drain", action: "controlled_stop_after_prepared", runId: probe.runId, episodeId: episode.episodeId, slot: claim.slot, candidate: prepared.candidate, cohort: prepared.cohortManifestRoot });
+      return {
+        status: "blocked",
+        candidate: prepared.candidate,
+        episodeId: episode.episodeId,
+        slot: claim.slot,
+        localCommit: "not_published",
+        reason: CONTROLLED_STOP_AFTER_PREPARED,
+      };
+    }
     let action: Awaited<ReturnType<typeof recoverDrainSlot>>;
     try {
       action = await recoverDrainSlot({

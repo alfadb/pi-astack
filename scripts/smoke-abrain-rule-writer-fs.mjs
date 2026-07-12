@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti/static";
 
@@ -61,6 +61,56 @@ const baseDraft = {
   zone: "rules", kind: "maxim", entryConfidence: 9, routingConfidence: 0.9,
   routingReason: "user said 永远", sessionId: "smoke",
 };
+
+const gitPublicationFixtureMode = process.env.PI_ASTACK_RULE_WRITER_FS_GIT_PUBLICATION_FIXTURE;
+if (gitPublicationFixtureMode) {
+  if (gitPublicationFixtureMode !== "canonical" && gitPublicationFixtureMode !== "legacy") {
+    throw new Error(`unknown git-publication fixture mode: ${gitPublicationFixtureMode}`);
+  }
+  const expectedCanonical = gitPublicationFixtureMode === "canonical";
+  const { canonicalGitRuntimeEnabled } = await jiti.import(`${repoRoot}/extensions/_shared/canonical-git-runtime.ts`);
+  assert(canonicalGitRuntimeEnabled() === expectedCanonical, `fixture settings did not select ${gitPublicationFixtureMode}`);
+  const fixtureSettings = { gitCommit: true, lockTimeoutMs: 5000 };
+
+  async function runOperation(operation) {
+    const home = freshHome();
+    execFileSync("git", ["-C", home, "init", "-q"]);
+    execFileSync("git", ["-C", home, "config", "user.email", "smoke@test"]);
+    execFileSync("git", ["-C", home, "config", "user.name", "smoke"]);
+    // A real HEAD keeps canonical blocking focused on its publication boundary,
+    // rather than the unrelated unborn-branch condition.
+    fs.writeFileSync(path.join(home, ".gitignore"), ".state/\n");
+    execFileSync("git", ["-C", home, "add", ".gitignore"]);
+    execFileSync("git", ["-C", home, "commit", "-qm", "fixture base"]);
+    if (!expectedCanonical) {
+      fs.writeFileSync(path.join(home, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    }
+
+    const slug = operation === "archive" ? "rollback-me" : "keep-me";
+    await writeAbrainRule(
+      { ...baseDraft, title: operation === "archive" ? "Rollback me" : "Keep me", body: `fixture ${operation} content must remain observable`, injectMode: "listed", scope: "global", kind: "pattern" },
+      { abrainHome: home, settings: SETTINGS },
+    );
+    const filePath = path.join(home, "rules", "listed", `${slug}.md`);
+    if (expectedCanonical) fs.writeFileSync(path.join(home, "publication-blocker.txt"), "fixture blocker\n");
+    const before = fs.readFileSync(filePath, "utf-8");
+    const result = operation === "archive"
+      ? await archiveAbrainRule(slug, "global", undefined, { abrainHome: home, settings: fixtureSettings, reason: "fixture" })
+      : await deleteAbrainRule(slug, "global", undefined, { abrainHome: home, settings: fixtureSettings });
+    return {
+      result,
+      existsAfter: fs.existsSync(filePath),
+      bytesAfter: fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf-8") : null,
+      before,
+    };
+  }
+
+  const reportPath = process.env.PI_ASTACK_RULE_WRITER_FS_GIT_PUBLICATION_REPORT;
+  if (!reportPath) throw new Error("git-publication fixture report path is required");
+  const report = { mode: gitPublicationFixtureMode, archive: await runOperation("archive"), delete: await runOperation("delete") };
+  fs.writeFileSync(reportPath, `${JSON.stringify(report)}\n`);
+  process.exit(0);
+}
 
 console.log("abrain rule writer — fs orchestration (ADR 0023 D5)");
 
@@ -330,42 +380,53 @@ await check("e2e: project rules-create routes to projects/<id>/rules + archive r
   assert(res[0].status === "archived", `e2e archive routed to rule writer: ${JSON.stringify(res[0])}`);
 });
 
-// ── audit round-2 P0: archive/delete roll back on git-commit failure ────────
-function gitHomeWithFailingCommit() {
-  const home = freshHome();
-  execFileSync("git", ["-C", home, "init", "-q"]);
-  execFileSync("git", ["-C", home, "config", "user.email", "smoke@test"]);
-  execFileSync("git", ["-C", home, "config", "user.name", "smoke"]);
-  const hookDir = path.join(home, ".git", "hooks");
-  fs.mkdirSync(hookDir, { recursive: true });
-  fs.writeFileSync(path.join(hookDir, "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-  return home;
+// ── Publication boundary: canonical durable-first vs legacy rollback ────────
+function runGitPublicationFixture(mode) {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-astack-rule-fs-${mode}-`));
+  const settingsPath = path.join(fixtureDir, "pi-astack-settings.json");
+  const reportPath = path.join(fixtureDir, "report.json");
+  fs.writeFileSync(settingsPath, `${JSON.stringify({ canonicalGitRuntime: { enabled: mode === "canonical", mode: "local_convergence_v2" } })}\n`);
+  try {
+    const child = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      env: {
+        ...process.env,
+        PI_ASTACK_SETTINGS_PATH: settingsPath,
+        PI_ASTACK_RULE_WRITER_FS_GIT_PUBLICATION_FIXTURE: mode,
+        PI_ASTACK_RULE_WRITER_FS_GIT_PUBLICATION_REPORT: reportPath,
+      },
+      encoding: "utf-8",
+    });
+    assert(child.status === 0, `${mode} fixture failed: ${child.stderr || child.stdout}`);
+    return JSON.parse(fs.readFileSync(reportPath, "utf-8"));
+  } finally {
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  }
 }
-const GIT_SETTINGS = { gitCommit: true, lockTimeoutMs: 5000 };
 
-await check("archive: git-commit failure rolls back (file stays active, status rejected)", async () => {
-  const home = gitHomeWithFailingCommit();
-  // seed without git so a file exists on disk
-  await writeAbrainRule({ ...baseDraft, title: "Rollback me", body: "this rule must survive a failed archive commit", injectMode: "listed", scope: "global", kind: "pattern" }, { abrainHome: home, settings: SETTINGS });
-  const fp = path.join(home, "rules", "listed", "rollback-me.md");
-  const before = fs.readFileSync(fp, "utf-8");
-  const r = await archiveAbrainRule("rollback-me", "global", undefined, { abrainHome: home, settings: GIT_SETTINGS, reason: "x" });
-  assert(r.status === "rejected" && r.reason === "git_commit_failed", `archive should reject on git fail: ${JSON.stringify(r)}`);
-  assert(fs.existsSync(fp), "file still present after rolled-back archive");
-  const after = fs.readFileSync(fp, "utf-8");
-  assert(!/status:\s*"?archived"?/.test(after), `status must be restored (not archived): ${after.split("\n").find((l) => l.startsWith("status"))}`);
-  assert(after === before, "content byte-identical to pre-archive");
+await check("canonical durable-first: blocked publication preserves archive/delete mutations", async () => {
+  const report = runGitPublicationFixture("canonical");
+  for (const [operation, outcome] of Object.entries({ archive: report.archive, delete: report.delete })) {
+    const publication = outcome.result.publication;
+    assert(outcome.result.status === (operation === "archive" ? "archived" : "deleted"), `${operation} must retain its top-level local mutation: ${JSON.stringify(outcome.result)}`);
+    // publication.status, rather than the top-level operation status, is the
+    // cross-Git durability judgment. Do not add a redundant result flag.
+    assert(publication?.canonical === true && publication.status === "durable_pending" && publication.localCommit === "not_published" && publication.drainStatus === "blocked", `${operation} canonical publication contract: ${JSON.stringify(publication)}`);
+    if (operation === "archive") {
+      assert(outcome.existsAfter && /status:\s*"?archived"?/.test(outcome.bytesAfter), "canonical archive must stay persisted without rollback");
+    } else {
+      assert(!outcome.existsAfter && outcome.bytesAfter === null, "canonical delete must stay removed without rollback");
+    }
+  }
 });
 
-await check("delete: git-commit failure restores the unlinked file (status rejected)", async () => {
-  const home = gitHomeWithFailingCommit();
-  await writeAbrainRule({ ...baseDraft, title: "Keep me", body: "this rule must survive a failed delete commit", injectMode: "listed", scope: "global", kind: "pattern" }, { abrainHome: home, settings: SETTINGS });
-  const fp = path.join(home, "rules", "listed", "keep-me.md");
-  const before = fs.readFileSync(fp, "utf-8");
-  const r = await deleteAbrainRule("keep-me", "global", undefined, { abrainHome: home, settings: GIT_SETTINGS });
-  assert(r.status === "rejected" && r.reason === "git_commit_failed", `delete should reject on git fail: ${JSON.stringify(r)}`);
-  assert(fs.existsSync(fp), "unlinked file restored after rolled-back delete");
-  assert(fs.readFileSync(fp, "utf-8") === before, "restored content byte-identical");
+await check("legacy rollback: failed git commit rejects archive/delete and restores bytes", async () => {
+  const report = runGitPublicationFixture("legacy");
+  for (const [operation, outcome] of Object.entries({ archive: report.archive, delete: report.delete })) {
+    const publication = outcome.result.publication;
+    assert(outcome.result.status === "rejected" && outcome.result.reason === "git_commit_failed", `${operation} legacy failure must reject: ${JSON.stringify(outcome.result)}`);
+    assert(publication?.canonical === false && publication.status === "terminal_before_publish" && publication.localCommit === "not_published", `${operation} legacy publication contract: ${JSON.stringify(publication)}`);
+    assert(outcome.existsAfter && outcome.bytesAfter === outcome.before, `${operation} legacy rollback must restore byte-identical file`);
+  }
 });
 
 // ── #1 escalate routing predicate (T0 consensus) ───────────────────────

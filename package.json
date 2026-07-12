@@ -175,6 +175,7 @@
     "smoke:outcome-classifier-enrich": "node scripts/smoke-outcome-classifier-enrich.mjs",
     "smoke:canonical-path-foundation": "node scripts/smoke-canonical-path-foundation.mjs",
     "smoke:canonical-git-runtime": "node scripts/smoke-canonical-git-runtime.mjs",
+    "smoke:p1-restart-prepared-stop-probe": "node scripts/smoke-p1-restart-prepared-stop-probe.mjs",
     "smoke:canonical-path-p1a": "node scripts/smoke-canonical-path-p1a.mjs",
     "smoke:production-existing-local-drain": "node scripts/smoke-production-existing-local-drain.mjs",
     "smoke:production-local-drain-next": "node scripts/smoke-production-local-drain-next.mjs",

@@ -41,10 +41,12 @@ import type { Jsonish } from "../memory/types";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { gitSingleFlight } from "../_shared/git-singleflight";
 import {
+  CONTROLLED_STOP_AFTER_PREPARED,
   canonicalGitRuntimeEnabled,
   createProducedArtifactReceipt,
   getCanonicalGitRuntime,
   type CanonicalGitRuntime,
+  type DrainResult,
   type ProducedArtifact,
 } from "../_shared/canonical-git-runtime";
 // `slugify` is the free-text-to-bare-slug normalizer. We deliberately
@@ -188,6 +190,9 @@ export interface WriterPublicationResult {
   localCommit: "not_published" | "published" | "index_converged";
   drainStatus: string;
   reason?: string;
+  episodeId?: string;
+  slot?: number;
+  candidate?: string;
   canonical: boolean;
 }
 
@@ -1170,6 +1175,11 @@ async function atomicWrite(file: string, content: string) {
   }
 }
 
+function shouldAppendWriterPublicationAudit(publication: WriterPublicationResult): boolean {
+  return publication.reason !== CONTROLLED_STOP_AFTER_PREPARED
+    && !publication.reason?.includes("P1_RESTART_PROBE_");
+}
+
 async function appendWriterPublicationAudit(abrainHome: string, publication: WriterPublicationResult, sourceId: string): Promise<void> {
   try {
     const stateDir = path.join(abrainHome, ".state");
@@ -1184,6 +1194,9 @@ async function appendWriterPublicationAudit(abrainHome: string, publication: Wri
       localCommit: publication.localCommit,
       drainStatus: publication.drainStatus,
       reason: publication.reason ?? null,
+      episodeId: publication.episodeId ?? null,
+      slot: publication.slot ?? null,
+      candidate: publication.candidate ?? null,
       canonical: publication.canonical,
     })}\n`, "utf-8");
   } catch (error) {
@@ -1208,6 +1221,26 @@ function assertCanonicalWriterSettings(): void {
   // settings gate before any filesystem mutation. Only valid disabled=false
   // reaches the legacy boundary later in the commit helpers.
   canonicalGitRuntimeEnabled();
+}
+
+export function writerPublicationFromCanonicalDrain(drained: DrainResult): WriterPublicationResult {
+  if (drained.status === "empty") {
+    return { status: "clean", commit: drained.commit ?? null, localCommit: drained.localCommit, drainStatus: drained.status, canonical: true };
+  }
+  if (drained.status !== "index_converged" || !drained.commit) {
+    return {
+      status: drained.status === "disabled" ? "terminal_before_publish" : "durable_pending",
+      commit: drained.commit ?? null,
+      localCommit: drained.localCommit,
+      drainStatus: drained.status,
+      reason: drained.reason ?? drained.status,
+      ...(drained.episodeId ? { episodeId: drained.episodeId } : {}),
+      ...(drained.slot !== undefined ? { slot: drained.slot } : {}),
+      ...(drained.candidate ? { candidate: drained.candidate } : {}),
+      canonical: true,
+    };
+  }
+  return { status: "local_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, canonical: true };
 }
 
 async function canonicalCommitExplicitPaths(
@@ -1240,29 +1273,17 @@ async function canonicalCommitExplicitPaths(
       reason: pushTriggerErrorSummary(error),
       canonical: true,
     };
-    await appendWriterPublicationAudit(abrainHome, publication, sourceId);
+    if (shouldAppendWriterPublicationAudit(publication)) await appendWriterPublicationAudit(abrainHome, publication, sourceId);
     return publication;
   }
-  let publication: WriterPublicationResult;
-  if (drained.status === "empty") {
-    publication = { status: "clean", commit: drained.commit ?? null, localCommit: drained.localCommit, drainStatus: drained.status, canonical: true };
-  } else if (drained.status !== "index_converged" || !drained.commit) {
-    publication = {
-      status: drained.status === "disabled" ? "terminal_before_publish" : "durable_pending",
-      commit: drained.commit ?? null,
-      localCommit: drained.localCommit,
-      drainStatus: drained.status,
-      reason: drained.reason ?? drained.status,
-      canonical: true,
-    };
-  } else {
-    publication = { status: "local_durable", commit: drained.commit, localCommit: "index_converged", drainStatus: drained.status, canonical: true };
+  const publication = writerPublicationFromCanonicalDrain(drained);
+  if (publication.status === "local_durable" && publication.commit) {
     // Device delivery is deliberately detached from canonical success. The
     // native git-sync audit owns delivery diagnostics and never changes this
     // local publication result.
-    void maybePushAbrainAsync(abrainHome, drained.commit);
+    void maybePushAbrainAsync(abrainHome, publication.commit);
   }
-  await appendWriterPublicationAudit(abrainHome, publication, sourceId);
+  if (shouldAppendWriterPublicationAudit(publication)) await appendWriterPublicationAudit(abrainHome, publication, sourceId);
   return publication;
 }
 
