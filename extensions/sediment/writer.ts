@@ -1176,7 +1176,8 @@ async function atomicWrite(file: string, content: string) {
 }
 
 function shouldAppendWriterPublicationAudit(publication: WriterPublicationResult): boolean {
-  return publication.reason !== CONTROLLED_STOP_AFTER_PREPARED
+  return publication.drainStatus !== "metadata_deferred"
+    && publication.reason !== CONTROLLED_STOP_AFTER_PREPARED
     && !publication.reason?.includes("P1_RESTART_PROBE_");
 }
 
@@ -1226,6 +1227,9 @@ function assertCanonicalWriterSettings(): void {
 export function writerPublicationFromCanonicalDrain(drained: DrainResult): WriterPublicationResult {
   if (drained.status === "empty") {
     return { status: "clean", commit: drained.commit ?? null, localCommit: drained.localCommit, drainStatus: drained.status, canonical: true };
+  }
+  if (drained.status === "metadata_deferred") {
+    return { status: "clean", commit: null, localCommit: "not_published", drainStatus: drained.status, canonical: true };
   }
   if (drained.status !== "index_converged" || !drained.commit) {
     return {

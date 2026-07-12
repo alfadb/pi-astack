@@ -388,7 +388,7 @@ export function autoCommitPaths(repoRoot: string, relPaths: string[], message: s
   }
 }
 
-async function canonicalAutoCommitAbrainPaths(repoRoot: string, relPaths: string[], message: string): Promise<AutoCommitResult> {
+export async function canonicalAutoCommitAbrainPaths(repoRoot: string, relPaths: string[], message: string): Promise<AutoCommitResult> {
   const root = path.resolve(repoRoot);
   const paths = Array.from(new Set(relPaths.map((item) => item.replace(/\\/g, "/")).filter(Boolean))).sort();
   const receipts = [];
@@ -404,6 +404,7 @@ async function canonicalAutoCommitAbrainPaths(repoRoot: string, relPaths: string
   if (startup.startup !== "ready") return { repoRoot: root, paths, status: "queued", detail: startup.blockedReason ?? "startup barrier blocked" };
   const drained = await runtime.requestDrain(receipts, message);
   if (drained.status === "empty") return { repoRoot: root, paths, status: "clean", commitSha: drained.commit };
+  if (drained.status === "metadata_deferred") return { repoRoot: root, paths, status: "clean", detail: drained.reason };
   if (drained.status !== "index_converged" || !drained.commit) return { repoRoot: root, paths, status: "queued", detail: drained.reason ?? drained.status };
   void pushAsync({ abrainHome: root });
   return { repoRoot: root, paths, status: "committed", commitSha: drained.commit };

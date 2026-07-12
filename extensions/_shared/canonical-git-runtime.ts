@@ -78,6 +78,37 @@ export interface ProducedArtifact {
   sourceIds: readonly string[];
 }
 
+const CANONICAL_CONTENT_OWNERS = new Set<ProducedArtifactOwner>([
+  "knowledge_l1",
+  "knowledge_l2",
+  "constraint_l1",
+  "constraint_l2",
+]);
+
+function isCanonicalContentOwner(owner: ProducedArtifactOwner): boolean {
+  return CANONICAL_CONTENT_OWNERS.has(owner);
+}
+
+type DrainGenerationPolicy = "steady_writer" | "startup_content_backlog";
+type ValidatedArtifact = { receipt: ProducedArtifact; content?: Buffer };
+
+/** Metadata-only means exactly a non-empty cohort of validated runtime metadata. */
+function isCanonicalMetadataOnlyCohort(artifacts: readonly ValidatedArtifact[] | readonly ProducedArtifact[]): boolean {
+  return artifacts.length > 0 && artifacts.every((artifact) => {
+    const receipt = "receipt" in artifact ? artifact.receipt : artifact;
+    return receipt.owner === "canonical_path_meta";
+  });
+}
+
+function survivingValidatedArtifacts(plan: readonly CohortPlanEntry[], validated: readonly ValidatedArtifact[]): ValidatedArtifact[] {
+  const byPath = new Map(validated.map((artifact) => [artifact.receipt.path, artifact]));
+  return plan.map((entry) => {
+    const artifact = byPath.get(entry.path);
+    if (!artifact) throw new CanonicalGitRuntimeError("PLAN_OWNER_UNVALIDATED", "surviving plan entry has no validated owner", { path: entry.path });
+    return artifact;
+  });
+}
+
 export interface LoadedProvenanceEntry {
   label: string;
   path: string;
@@ -106,7 +137,7 @@ export interface BacklogPreflightResult {
 }
 
 export interface DrainResult {
-  status: "disabled" | "empty" | "blocked" | "index_converged" | "consumed";
+  status: "disabled" | "empty" | "metadata_deferred" | "blocked" | "index_converged" | "consumed";
   commit?: string;
   candidate?: string;
   episodeId?: string;
@@ -888,8 +919,20 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
           await this.recoverAtStartupUnlocked();
           const backlog = await this.requestBacklogPreflightUnlocked();
           if (backlog.status === "ready") {
-            const drained = await this.requestDrainUnlocked(backlog.receipts, "startup-local-drain", false);
-            if (drained.status !== "index_converged" && drained.status !== "empty" && drained.status !== "consumed") throw new CanonicalGitRuntimeError("STARTUP_DRAIN_NOT_DURABLE", `startup local drain ended in ${drained.status}`, { drained });
+            // Backlog receipts were validated with allowWriterTransaction=false.
+            // This early skip avoids needless refreezes; the post-prune guard
+            // in requestDrainUnlocked remains authoritative.
+            if (isCanonicalMetadataOnlyCohort(backlog.receipts)) {
+              this.record({ operation: "startup_backlog", status: "metadata_deferred", receiptCount: backlog.receipts.length });
+            } else {
+              if (!backlog.receipts.some((receipt) => isCanonicalContentOwner(receipt.owner))) {
+                throw new CanonicalGitRuntimeError("STARTUP_CONTENT_AUTHORIZATION_REQUIRED", "startup generation requires validated Knowledge/Constraint L1/L2 content");
+              }
+              const drained = await this.requestDrainUnlocked(backlog.receipts, "startup-local-drain", "startup_content_backlog");
+              if (drained.status !== "index_converged" && drained.status !== "empty" && drained.status !== "metadata_deferred" && drained.status !== "consumed") {
+                throw new CanonicalGitRuntimeError("STARTUP_DRAIN_NOT_DURABLE", `startup local drain ended in ${drained.status}`, { drained });
+              }
+            }
           } else if (backlog.status === "blocked") throw new CanonicalGitRuntimeError("STARTUP_BACKLOG_BLOCKED", backlog.reason ?? "backlog preflight blocked");
           const finalRecovery = await recoverOpenRecoveryEpisodes(this.repo);
           if (finalRecovery.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", "active v2 recovery is malformed", { episodes: finalRecovery.quarantined.map((item) => item.episodeId) });
@@ -1000,11 +1043,11 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     }
     const startup = probe ? this.diagnostics() : await this.awaitStartup();
     if (startup.startup === "blocked") return { status: "blocked", localCommit: "not_published", reason: startup.blockedReason };
-    return gitSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message, true, probe));
+    return gitSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message, "steady_writer", probe));
   }
 
-  private async requestDrainUnlocked(receipts: readonly ProducedArtifact[], message: string, allowNextGeneration: boolean, probe?: P1RestartProbe): Promise<DrainResult> {
-    if (probe && !allowNextGeneration) throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_PATH_INVALID", "restart probe reached a non-steady-state drain path");
+  private async requestDrainUnlocked(receipts: readonly ProducedArtifact[], message: string, generationPolicy: DrainGenerationPolicy, probe?: P1RestartProbe): Promise<DrainResult> {
+    if (probe && generationPolicy !== "steady_writer") throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_PATH_INVALID", "restart probe reached a non-steady-state drain path");
     if (probe && globalState().consumedP1RestartProbeRunIds.has(probe.runId)) {
       return { status: "blocked", localCommit: "not_published", reason: "P1_RESTART_PROBE_RUN_ALREADY_CONSUMED" };
     }
@@ -1024,11 +1067,11 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     const ownershipContext = frozen?.statusHash === currentStatus.hash
       ? frozen.context
       : await buildCanonicalOwnershipContext({ abrainHome: this.repo });
-    const validated: Array<{ receipt: ProducedArtifact; content?: Buffer }> = [];
+    const validated: ValidatedArtifact[] = [];
     for (const input of receipts) {
       if (seen.has(input.path)) throw new CanonicalGitRuntimeError("RECEIPT_DUPLICATE", "duplicate artifact receipt", { path: input.path });
       seen.add(input.path);
-      validated.push(await validateReceipt(this.repo, input, true, ownershipContext));
+      validated.push(await validateReceipt(this.repo, input, generationPolicy === "steady_writer", ownershipContext));
     }
     if (probe) assertP1RestartProbeSource(probe, validated, ownershipContext);
     for (const item of validated) {
@@ -1087,9 +1130,21 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       : { path: receipt.path, op: "put", mode: receipt.mode!, content: content! });
     const plan = await pruneNoops(this.repo, frozenCommit, rawPlan);
     if (!plan.length) return { status: "empty", commit: frozenCommit, localCommit: "not_published" };
+    const surviving = survivingValidatedArtifacts(plan, validated);
+    if (isCanonicalMetadataOnlyCohort(surviving)) {
+      this.record({ operation: "drain", action: "metadata_deferred", generationPolicy, cohortSize: plan.length });
+      return {
+        status: "metadata_deferred",
+        localCommit: "not_published",
+        reason: "canonical recovery metadata awaits a content cohort",
+      };
+    }
+    if (generationPolicy === "startup_content_backlog" && !surviving.some((artifact) => isCanonicalContentOwner(artifact.receipt.owner))) {
+      throw new CanonicalGitRuntimeError("STARTUP_CONTENT_AUTHORIZATION_REQUIRED", "startup surviving plan requires validated Knowledge/Constraint L1/L2 content");
+    }
     const frozenIndexSnapshot = await snapshotIndexEntries(this.repo, plan.map((entry) => entry.path));
     if (probe) assertP1RestartProbeFresh(probe);
-    const episode = await resolveRecoveryEpisode({ abrainHome: this.repo, symbolicRef: this.options.refName, allowNextGeneration });
+    const episode = await resolveRecoveryEpisode({ abrainHome: this.repo, symbolicRef: this.options.refName });
     const claim = await claimNextRecoverySlot({ abrainHome: this.repo, episodeId: episode.episodeId, lane: "drain" });
     if (!claim.shouldExecute || claim.slot === null) return { status: "consumed", episodeId: episode.episodeId, slot: claim.slot ?? undefined, localCommit: "not_published", reason: claim.status };
     await preflightSharedIndexLock(this.repo);

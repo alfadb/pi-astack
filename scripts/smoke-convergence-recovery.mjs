@@ -252,11 +252,11 @@ await check("episode and claim identities exclude realpath/cohort and bind symbo
 
 await check("refreeze stays in one episode and consumes the next contiguous slot", async () => {
   const home = emptyHome("refreeze");
-  const episode = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main", allowNextGeneration: true });
+  const episode = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main" });
   const claim1 = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId: episode.episodeId, lane: "drain" });
   assert(claim1.slot === 1 && claim1.shouldExecute, "slot 1 not claimed");
   assert(await recovery.burnPendingRecoverySlot({ abrainHome: home, episodeId: episode.episodeId, lane: "drain" }) === 1, "slot 1 not burned");
-  const same = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main", allowNextGeneration: true });
+  const same = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main" });
   const claim2 = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId: same.episodeId, lane: "drain" });
   assert(same.episodeId === episode.episodeId && claim2.slot === 2, "refreeze reset episode/slot");
 });
@@ -271,7 +271,7 @@ await check("terminal is absorbing and does not auto-open a generation", async (
   }
   const cursor = recovery.recoveryEpisodeCursor(episodeId, "drain", await recovery.readRecoveryEvents(home, episodeId));
   assert(cursor.terminal && cursor.nextSlot === null, "terminal not absorbing");
-  const resolved = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main", allowNextGeneration: true });
+  const resolved = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main" });
   assert(resolved.status === "terminal" && resolved.episodeId === episodeId, "terminal auto-opened another generation");
 });
 
@@ -340,6 +340,8 @@ await check("prepared/published/index recovery converges without touching worktr
   const action = await recovery.recoverDrainSlot({ abrainHome: repo, repo, symbolicRef: "refs/heads/main", episodeId, slot: 1 });
   assert(action === "index_converged" && git(repo, "rev-parse", "HEAD") === prepared.prepared.candidate, "local recovery did not converge");
   assert(fs.readFileSync(path.join(repo, "base.txt"), "utf8") === worktreeBefore && !fs.existsSync(path.join(repo, "a.txt")), "worktree changed");
+  const advanced = await recovery.resolveRecoveryEpisode({ abrainHome: repo, symbolicRef: "refs/heads/main" });
+  assert(advanced.status === "new" && advanced.episodeId !== episodeId, "resolver did not derive the next generation from a converged closure");
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

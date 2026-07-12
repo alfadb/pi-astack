@@ -318,14 +318,13 @@ export async function recoverOpenRecoveryEpisodes(abrainHome: string): Promise<O
 export interface ResolvedDrainEpisode {
   episodeId: string;
   generationAnchor: string;
-  status: "new" | "open" | "complete" | "terminal";
+  status: "new" | "open" | "terminal";
 }
 
 export async function resolveRecoveryEpisode(options: {
   abrainHome: string;
   symbolicRef: string;
   genesisAnchor?: string;
-  allowNextGeneration?: boolean;
 }): Promise<ResolvedDrainEpisode> {
   assertSymbolicRef(options.symbolicRef);
   const events = recoveryRecords(await scanWholeL1Validated({ abrainHome: options.abrainHome }));
@@ -339,7 +338,6 @@ export async function resolveRecoveryEpisode(options: {
     const cursor = recoveryEpisodeCursor(episodeId, "drain", group);
     if (cursor.terminal) return { episodeId, generationAnchor, status: "terminal" };
     if (!cursor.complete) return { episodeId, generationAnchor, status: "open" };
-    if (!options.allowNextGeneration) return { episodeId, generationAnchor, status: "complete" };
     const closure = [...cursor.folded.values()].map((slot) => slot.converged).filter((event): event is RecoveryEvent => !!event)
       .sort((a, b) => a.slot - b.slot || compareCodeUnits(canonicalizeJcs(a), canonicalizeJcs(b)))[0];
     if (!closure) throw new ConvergenceRecoveryError("RECOVERY_EPISODE_CLOSURE_MISSING", "complete episode has no convergence event");
