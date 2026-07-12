@@ -7,7 +7,7 @@ updated: 2026-07-12
 
 # pi-astack canonical-path convergence R3.4.2 全阶段 Living Plan
 
-**状态：Active；当前阶段：CC-P1A-r8 production enabled / first local drain evidenced；P1 尚未完成。**
+**状态：Active；当前阶段：CC-P1A-r8 production enabled / CURRENT+NEXT+Curator isolation evidenced；P1 尚未完成。**
 
 本计划的决策基线是 2026-07-10 经 Fable、OpenAI、DeepSeek、Kimi、MiniMax、GLM 六个独立供应商七轮审查后全票 `ACCEPT` 的 **R3.4.2 累积规范**，即 R3.3、R3.3.1、R3.4、R3.4.1、R3.4.2 的合订状态。会话转写稿只保留决策来源和讨论脉络，不是唯一执行权威；每次实施和验收必须同时核对 [ADR 0039](../adr/0039-constraint-pipeline-reset.md)、[transition register](../transition-register.md)、[current state](../current-state.md)、[roadmap](../roadmap.md)、[2026-07-10 完整审计](/home/worker/.pi/.pi-astack/reports/pi-astack-full-audit-2026-07-10.md)、当前代码、live settings、实际文件和 Git 状态。文档与现场冲突时，按下文 Replanning Protocol 处理，不得用旧转写覆盖现场证据。
 
@@ -32,20 +32,20 @@ updated: 2026-07-12
 
 > 本节是 living plan 的可重写热区。每次阶段切换、发现现场冲突或形成新阻塞时整节更新；不要在此冻结会快速过期的运行数量。
 
-- 当前阶段：CC-P1A-r8 production enabled / first local drain evidenced；用户先通过本会话结构化选项明确授权启用 `local_convergence_v2` 并执行 production exact drain（允许真实 Git commit 与 best-effort device push），父仓提交 `498d257` 于 2026-07-12 10:13:06 +0800 固化 `canonicalGitRuntime.enabled=true`，当前 live settings 仍为 enabled + `local_convergence_v2`。R3.4.2 仍不授权 P2/P3/P4a/P4b。
+- 当前阶段：CC-P1A-r8 production enabled / CURRENT+NEXT+Curator isolation evidenced；用户先通过本会话结构化选项明确授权启用 `local_convergence_v2` 并执行 production exact drain（允许真实 Git commit 与 best-effort device push），父仓提交 `498d257` 于 2026-07-12 10:13:06 +0800 固化 `canonicalGitRuntime.enabled=true`，当前 live settings 仍为 enabled + `local_convergence_v2`。R3.4.2 仍不授权 P2/P3/P4a/P4b。
 - Incident：`c992ef6` 把 remote transport、credential broker、legacy terminal resolver 与 stable remote proof 接入 canonical runtime，使用户设备通信配置被误当作 canonical startup/push truth，并让旧 v1 push terminal/candidate gate 本地恢复。该路径已前向删除，不改历史、不删除旧 L1。
 - GPT + Claude 第七轮对 CC-P1A-r8 一致 `ACCEPT`。r8 将 canonical authority 收敛为 `local-drain-recovery-envelope/v2`、temporary-index exact commit、local CAS 与 shared-index convergence；remote delivery 不再参与 canonical result。
 - v1 `drain-recovery-envelope/v1` 由 registry 正式分类为 `legacy_read_only`：完整 envelope/JCS/hash/path/producer/event-type/exact-body 仍严格校验，write/fold/active ownership/backlog/tail 均禁用。真实旧 episode/intent/terminal/candidate IDs 已进入 fixture 回归，well-formed residue 不阻断 startup，malformed v1 仍 whole-L1 fail closed。
 - v2 episode identity 固定为 protocol/lane/symbolic-ref/generation-anchor，claim 固定为 episode/lane/slot；prepared 才绑定 frozen parent、exact cohort、candidate 与 frozen index。terminal 对当前 generation absorbing，startup 不自动创建下一 generation；后续显式 writer 可由 converged closure 派生下一 generation。
 - commit bytes 已 path-neutral 且 deterministic：固定 identity/timezone，date 从 frozen parent 派生，message 只由 protocol+OID-free semantic manifest 派生；同 object format/same graph 的不同 realpath clones 产生相同 candidate/event bytes，SHA-1/SHA-256 各自确定且跨格式 semantic manifest 相同。
 - device git-sync 仅执行原生 `git fetch`、`git merge --ff-only '@{upstream}'`、`git push`；每次 subprocess 使用 fresh inherited env + C locale + no prompt，不探测或 pin 用户 remote/upstream/auth/config。失败只写 `.state/git-sync.jsonl` 与用户 warning，不写 L1、不 gate local startup/drain。
-- 首笔获授权 production drain 已在重启后于 2026-07-12 10:14:07–10:14:12 +0800 技术完成：commit `ea1b9be1f49ffcf87f07ad94189c33126899ebe3`（parent `c043aa2…`）精确纳入 46 paths（28 Knowledge L1 + 18 L2），episode `ce3dd1…` slot 1 的 claim/prepared/published/index-converged 闭合，HEAD/ref/shared index/tracked worktree exact，active Knowledge backlog 为 0；legacy `1750…` 与四个本 episode recovery metadata 保持预期未跟踪。read-only existing-drain dossier 与 manifest 已固化在 [`docs/evidence`](../evidence/2026-07-12-canonical-path-p1-a-production-existing-local-drain-manifest.json)，device push success 仅作为 noncanonical observation。Curator 保持独立 pending criterion 与旧只读逻辑，未接 active v2。
+- 首笔获授权 production drain `ea1b9be1…` 已由 [existing-drain manifest](../evidence/2026-07-12-canonical-path-p1-a-production-existing-local-drain-manifest.json) 验收。后续滚动 drain 当前健康：[NEXT/Curator isolation manifest](../evidence/2026-07-12-canonical-path-p1-local-drain-next-curator-isolation-manifest.json) 严格重建 `ea1b9be1… → 781b584d… → 916de321… → 0a595671…` 的线性 ancestry、每代 exact prepared/commit/tree/blob/manifest、四事件 recovery closure、generation anchor 与 shared-index convergence；当前 live `HEAD=89de4468…` 可继续滚动，仅要求包含 candidate `0a595671…`，whole-L1 strict 与全局 recovery closure 均 green。NEXT acceptance anchor 是首笔后首个明确真实 `sediment:auto_write:*` source event `4250d277…` 触发的 `0a595671…`；`781b584d…`、`916de321…` 的 Knowledge source_ref 均为 `sediment:replay:*`，明确 rejected-as-acceptance anchors。legacy `1750…` 从每个中间/anchor cohort 排除并保持未跟踪。Curator active-v2 registry/runtime/production event 隔离已取证：v2 只有 drain lane/recovery event types/唯一 recovery producer，既有 Curator pending criterion 与只读 neighbor logic 保持，未接 production v2；`.state/staging` 数量既未观测也不是 criterion。device push 仍仅为 noncanonical observation。
 
 ## Phase Table
 
 | Phase | 状态 | 当前授权 | 前置 | 退出证据 | 下一授权 |
 |---|---|---|---|---|---|
-| P1 | authorized / production enabled；first local drain evidenced；仍 active | CC-P1A-r8 implementation + 用户单独结构化 production activation 授权 | active v2 registry/runtime/smoke green；settings enabled；首笔 drain dossier green | LOCAL-v2-RECOVERY、LOCAL-DRAIN-CURRENT/NEXT、LOCAL-RUNTIME-RESTART、NATIVE-GIT-BOUNDARY、CURATOR-PENDING 与 P1 close 均有匹配证据 | P2 与 P3 分别发起新的独立 unanimous multi-T0 gate；可在 P1 后并行 |
+| P1 | authorized / production enabled；CURRENT/NEXT + Curator isolation evidenced；仍 active | CC-P1A-r8 implementation + 用户单独结构化 production activation 授权 | active v2 registry/runtime/smoke green；settings enabled；CURRENT/NEXT dossier green | LOCAL-RUNTIME-RESTART 与 P1 close 仍需匹配证据；其余 P1 criteria 已取证 | P2 与 P3 分别发起新的独立 unanimous multi-T0 gate；可在 P1 后并行 |
 | P2 | blocked / not authorized | 无 | P1 完成；P2 新 T0 全票 | 全量 production byte equality；至少 3 条完整链且至少 1 条 live；冲突覆盖 | P4a 仍不得开始，等待 P3 也完成并另行授权 |
 | P3 | blocked / not authorized | 无 | P1 完成；P3 新 T0 全票；可与 P2 并行 | genesis 0-delta；K=5 真实 delta/replay；连续 7 个日历日每日 1 次 zero-drift verifier | P4a 仍不得开始，等待 P2 也完成并另行授权 |
 | P4a | blocked / not authorized | 无 | P2 与 P3 都完成；P4a 新 T0 全票 | live inventory、registry export、content-addressed snapshot+manifest、restore byte verify；只移不删 | 独立发起 P4b unanimous multi-T0 gate |
@@ -65,10 +65,10 @@ updated: 2026-07-12
 
 P1-B 历史证据 disposition：local crash windows、temporary-index、CAS、shared-index 与 path/hash fail-closed 证据继续有效；push retry、remote-contained 与 transport proof 仅保留为已完成历史观察，属于 r8 后 vestigial coverage，不再是 canonical runtime 或后续 local acceptance 的 gate。
 - [x] (LOCAL-DRAIN-CURRENT) 第一笔经单独授权的 production local drain 已处理执行时 active backlog，以 exact cohort、published commit、index convergence、无 worktree/non-cohort stage 损失和 v1 residue 保持未跟踪为不可变证据；不以 remote delivery 作为 canonical 验收条件。
-- [ ] (LOCAL-DRAIN-NEXT) 第一笔 local drain 后由一次真实后续 writer 触发下一 generation，自动 exact commit、CAS 与 index convergence；不得用人工重复第一 cohort 替代。
+- [x] (LOCAL-DRAIN-NEXT) 第一笔 local drain 后由一次真实后续 writer 触发下一 generation，自动 exact commit、CAS 与 index convergence；不得用人工重复第一 cohort 替代。
 - [ ] (LOCAL-RUNTIME-RESTART) production local runtime 跨过一次真实进程 restart，pending prepared/published window 可恢复，episode/slot 连续，startup 不触发 remote command，也不因旧 v1 terminal/candidate 或 delivery failure blocked。
 - [x] (NATIVE-GIT-BOUNDARY) device git-sync 的 production-independent fixture 证明精确 argv 为 fetch、ff-only upstream、push，fresh env 继承用户 device `GIT_*` 且不 pin/探测通信配置；auth/network/timeout/divergence 不写 L1、不回滚已成功 Git side effect、不 gate local drains/restart。
-- [ ] (CURATOR-PENDING) Curator 继续使用独立 pending criterion 与既有只读逻辑；在获得单独协议/production wiring 授权前不得进入 active local drain v2、不得伪装 production completion。
+- [x] (CURATOR-PENDING) Curator 继续使用独立 pending criterion 与既有只读逻辑；在获得单独协议/production wiring 授权前不得进入 active local drain v2、不得伪装 production completion。
 - [ ] (P1-CLOSE-GATE) P1 completion record 已引用 S3/S1/S4/P1-B 与全部 LOCAL-v2/LOCAL-DRAIN/LOCAL-RUNTIME/NATIVE-GIT/CURATOR criteria 的匹配证据并记录残余风险；P2 与 P3 均保持未执行，且分别创建“需新六供应商或同等独立 multi-T0 unanimous 授权”的 machine transition gate。
 - [ ] (P2-AUTH) P2 的候选 diff、P1 completion dossier、rollback/stop 条件与 production 取证方案已获新的六供应商或同等独立 multi-T0 unanimous 授权；该授权明确只覆盖 Knowledge fold-input truth cutover，不授权 P3/P4。
 - [ ] (P2-BYTE-EQUALITY) P2 对完整 production baseline 与 shadow accepted-decision fold 执行全量重投影并达到 byte-for-byte equality；输入集合、renderer/template 版本、bundle hash、差异命令与 zero-diff 结果固化为不可变 dossier。
@@ -99,15 +99,15 @@ P1-B 历史证据 disposition：local crash windows、temporary-index、CAS、sh
 2. **Registry/protocol**：v1 完整严格 `legacy_read_only`；active local drain v2 只含 drain/local events，unknown/malformed whole-L1 fail closed。
 3. **Local Git primitive/runtime**：验证 deterministic temporary-index commit、CAS、shared-index convergence、current/next generation、terminal absorbing 与 fresh-process restart；startup 不触 remote。
 4. **Writer/device boundary**：local success 只 fire-and-forget 唤醒 native git-sync；fake-git 精确验证 fetch、ff-only upstream、push 与 inherited device env，失败不写 L1、不 gate local result。
-5. **Curator boundary**：保持独立 pending criterion 与旧只读逻辑，不接 active v2。
-6. **Production activation**：用户已单独结构化授权并完成启用，LOCAL-DRAIN-CURRENT 已由 read-only existing-drain dossier 验收；LOCAL-DRAIN-NEXT 与 LOCAL-RUNTIME-RESTART 仍须各自真实发生并取证，remote 结果不进入 canonical gate。
+5. **Curator boundary**：独立 pending criterion、旧只读逻辑与 production active-v2 隔离已由 read-only dossier 验收；不接 active v2，`.state/staging` 数量不作为 criterion。
+6. **Production activation**：用户已单独结构化授权并完成启用，LOCAL-DRAIN-CURRENT 与首笔后首个合格真实 auto-write `LOCAL-DRAIN-NEXT` 均已由 read-only dossier 验收；`781b584d…`/`916de321…` replay drains 不计 NEXT acceptance。LOCAL-RUNTIME-RESTART 仍须独立真实发生并取证，remote 结果不进入 canonical gate。
 7. **P1 close**：匹配新 stable IDs 的证据落盘后停止，分别请求 P2/P3 新 T0 授权；不得自动越过授权门。
 
 ## Current Blockers
 
 - `canonicalGitRuntime.enabled=true` 已按用户单独结构化授权固化；首笔 production local drain 已有不可变 read-only dossier，不得把这一事实扩张为 P1 completion、P2/P3 授权或后续 generation/restart 证据。
-- production 后续 writer generation 与跨 pending window 的真实 runtime restart 尚未执行；不得把首笔 drain、temporary-repo smoke 或 goal wall-clock pause 计作 `LOCAL-DRAIN-NEXT` / `LOCAL-RUNTIME-RESTART`。
-- Curator production wiring 仍 pending，必须保持独立 criterion；不得为完成 local drain 而接入 active v2。
+- production 后续 writer generation 已由首笔后首个合格真实 auto-write drain `0a595671…` 完成；跨 pending window 的真实 runtime restart 尚未取证。不得把首笔 drain、temporary-repo smoke、滚动 generation 或 goal wall-clock pause 计作 `LOCAL-RUNTIME-RESTART`。
+- Curator isolation criterion 已通过；production v2 wiring 仍未授权并继续保持 absent。完成的是 pending/只读隔离边界，不是 Curator wiring；不得为完成其它 gate 而接入 active v2。
 - device remote/upstream/auth/SSH/helper/proxy/TLS/URL rewrite 与全部 device `GIT_*` 属用户责任，既不是 blocker，也不是 pi-astack 可检测、解释或修复的对象。0/0 只能记为 device infrastructure observation，不是 canonical truth。
 - P2、P3、P4a、P4b 均受新的独立 unanimous multi-T0 授权阻塞；P2/P3 本轮仍未授权。
 - P3 连续 7 日与 P4b 固定 14 日是不可压缩的真实日历门；等待更久不能替代规定事件门。
@@ -144,7 +144,8 @@ P1-B 历史证据 disposition：local crash windows、temporary-index、CAS、sh
 - 2026-07-12：`4c49584` 前向删除 ADR0039 hook installer 后发现 active hook path 仍有其精确遗留 artifact。裁决为在 abrain layout 初始化后执行一次 fail-soft migration：只用本地 Git structural command 定位 active `pre-push`，只在 regular file 整体 bytes 精确等于 `f97ff9c..c992ef6` 唯一已发布 body 模板（含安装时绑定的 package/abrain 绝对路径）时 unlink；marker-only、custom/modified、symlink、non-regular、missing 与权限/读取失败均不覆盖、不 chmod、不 rename，warning/audit 不记录 hook 内容。该 cleanup 只移除 pi-owned historical artifact，不安装 replacement、不进入 git-sync、remote proof、reconcile 或 canonical startup gate，也不构成 device transport management。临时仓库与 runtime 回归通过后，production active hook 被只读复核为 regular/non-symlink、420 bytes，actual/expected SHA-256 均为 `045b44ab3f5050ace484a987a39358a0a57eb58437d77e7b27232c466f1fa679`，随后仅该 hook 被删除并记录 redacted `.state` migration audit/marker；删除前后 HEAD、全 refs、index bytes 与 `l1/l2` NUL status 均精确不变，未运行 push/fetch。production acceptance 继续 paused，`canonicalGitRuntime.enabled=false` 保持。
 - 2026-07-12：后续 cleanup 审查以旧 installer 的真实写入边界 supersede 上条的 active-path 机制描述：installer 在 `core.hooksPath` 存在时跳过，故 migration 以 scrub 全部 inherited `GIT_*` 的 structural env 验证 abrain top-level 与 absolute git-dir，只检查 `<git-dir>/hooks/pre-push`，拒绝 hooks parent symlink/path escape，且仅在 `.state/` gitignore guard 成功后运行。exact 删除 audit 新增 actual body SHA-256、size、mode、dev/ino 及 fd/path identity verification；opened-fd/read-after `fstat` 与 unlink 前 `lstat` 缩小并检测可测试 TOCTOU 窗口，但 Node 无 fd-relative unlink，最终微窗口仍明确保留。上条 production 删除事实继续仅作为当时 operator attestation，不追溯升级为本次新增的 machine evidence。
 - 2026-07-12：用户在 production mutation 前通过本会话结构化选项明确选择“现在授权启用 `local_convergence_v2` 并执行 production exact drain；允许创建真实 Git commit 并触发 best-effort device push”。父仓 `498d257` 于 10:13:06 +0800 固化 enabled；治理 goal 于 10:13:41 因 wall-clock budget pause，但该 pause 是执行编排状态，不是对更早用户授权的撤销；重启后的 active runtime 于 10:14:07–10:14:12 完成 episode `ce3dd1…` slot 1 与 commit `ea1b9be…`，10:14:15 的 device push success 只记 infrastructure observation。盲审 reviewer 因隔离上下文看不到结构化选项而提出“缺授权”判断；该结论对会话授权事实不成立，但正确暴露出授权与 production 结果尚未固化到文件证据的治理缺口。
-- 2026-07-12：新增 `dossier:production-existing-local-drain` 只读 verifier 与 temp-repo tamper smoke；原始 pre-activation v5 artifact 以 exact SHA-256 `17628ce7999d74791c2075cb08f54984a83886632606154ddf19ecbdf2249506` 原字节固化。existing-drain report/manifest 对 preflight、46-entry prepared/commit/tree/blob/bytes、whole-L1、四事件 fold、HEAD/ref/index/worktree、active backlog 与 legacy exclusion 全部通过且两次 byte-stable；因此仅 `LOCAL-DRAIN-CURRENT` 改为 `[x]`。`LOCAL-DRAIN-NEXT`、`LOCAL-RUNTIME-RESTART`、`CURATOR-PENDING`、`P1-CLOSE-GATE` 保持 `[ ]`，P1 不得宣称完成。
+- 2026-07-12：新增 `dossier:production-existing-local-drain` 只读 verifier 与 temp-repo tamper smoke；原始 pre-activation v5 artifact 以 exact SHA-256 `17628ce7999d74791c2075cb08f54984a83886632606154ddf19ecbdf2249506` 原字节固化。existing-drain report/manifest 对 preflight、46-entry prepared/commit/tree/blob/bytes、whole-L1、四事件 fold、HEAD/ref/index/worktree、active backlog 与 legacy exclusion 全部通过且两次 byte-stable；因此 `LOCAL-DRAIN-CURRENT` 改为 `[x]`，当时其余后续 criteria 保持 `[ ]`。
+- 2026-07-12：新增 `dossier:production-local-drain-next` 与 temp-repo tamper smoke，固定 `ea1b9be1…` baseline、`0a595671…` candidate、source L1 `4250d277…`。只读 dossier 证明 `0a` 是首笔后首个由明确真实 `sediment:auto_write:*` 触发的合格 drain；`781b584d…`、`916de321…` 均因 `sediment:replay:*` 明确 rejected-as-acceptance。四代 ancestry/generation/recovery/exact cohort、candidate L2 watermark/event-set/output、current HEAD containment/whole-L1/index、legacy exclusion 全绿；Curator 独立 section 证明 registry active v2 仅 drain/recovery producer，production active v2 全为 drain，Curator 既有 pending/只读逻辑无 production v2 wiring，且不使用 `.state/staging` 数量。tamper smoke 覆盖 replay 冒充、broken ancestry/recovery、legacy 混入、L2 mismatch、candidate not contained。因此 `LOCAL-DRAIN-NEXT` 与 `CURATOR-PENDING` 改为 `[x]`；`LOCAL-RUNTIME-RESTART`、`P1-CLOSE-GATE` 保持 `[ ]`，P2/P3 仍未授权。
 
 ## Definition of Fully Complete
 

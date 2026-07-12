@@ -1,0 +1,470 @@
+{
+  "schemaVersion": "production-local-drain-next-curator-isolation-dossier/v1",
+  "status": "pass",
+  "factTimeUtc": "2026-07-12T03:19:24.009Z",
+  "mutationAttempted": false,
+  "scope": {
+    "acceptedCriteria": [
+      "LOCAL-DRAIN-NEXT",
+      "CURATOR-PENDING"
+    ],
+    "acceptanceMeaning": "first qualified real sediment:auto_write drain after the first production drain; curator isolation remains pending-by-design",
+    "exclusions": [
+      "LOCAL-RUNTIME-RESTART",
+      "P1-CLOSE-GATE",
+      "P2",
+      "P3"
+    ],
+    "devicePushCanonicalGate": false
+  },
+  "inputs": {
+    "baseline": "ea1b9be1f49ffcf87f07ad94189c33126899ebe3",
+    "candidate": "0a5956715c085e704b378531cb9b7c2d0731a1ac",
+    "sourceEventId": "4250d277cfe27789fe6e29534ee48a8a3319bc8031613b4027c0e546f8b9bedc",
+    "sourceL2Path": "l2/views/knowledge/latest/projects/pi-global/disabled-canonical-runtime-can-leave-valid-sediment-backlogs.md"
+  },
+  "rejectedAcceptanceAnchors": [
+    {
+      "candidate": "781b584d65b31e60d12ed4eedf1332b51d68c295",
+      "disposition": "rejected",
+      "reason": "direct Knowledge source_ref is sediment:replay:*"
+    },
+    {
+      "candidate": "916de3219d3f76bad4ee0d18d18410f2e3bd87dc",
+      "disposition": "rejected",
+      "reason": "direct Knowledge source_ref is sediment:replay:*"
+    }
+  ],
+  "sourceEvent": {
+    "eventId": "4250d277cfe27789fe6e29534ee48a8a3319bc8031613b4027c0e546f8b9bedc",
+    "relativePath": "l1/events/sha256/42/50/4250d277cfe27789fe6e29534ee48a8a3319bc8031613b4027c0e546f8b9bedc.json",
+    "envelopeSchema": "knowledge-evidence-envelope/v1",
+    "bodySchema": "knowledge-evidence-event/v1",
+    "eventType": "knowledge_entry_observed",
+    "producer": {
+      "name": "sediment.knowledge-event-writer",
+      "version": "adr0039-p5"
+    },
+    "createdAtUtc": "2026-07-12T03:19:24.009Z",
+    "sessionId": "019f4a62-f2a6-76f1-92b2-a640a2ac5dea",
+    "turnId": "unknown-turn",
+    "sourceRef": "sediment:auto_write:updated:disabled-canonical-runtime-can-leave-valid-sediment-backlogs",
+    "candidateId": "auto_write-6-76f1-92b2-a640a2ac5dea-69931aaf-mrh83gwt:c1"
+  },
+  "generationChain": [
+    {
+      "ordinal": 1,
+      "candidate": "ea1b9be1f49ffcf87f07ad94189c33126899ebe3",
+      "parent": "c043aa218b2ef20813452b2d7c292699132b7437",
+      "tree": "65003aa598a10e85e58e54fd5d5b601b216d4f39",
+      "episodeId": "ce3dd1d0405362b644c6929eaf93f0f6593db815a349e8781f3b7a74ca85f7ae",
+      "generationAnchor": "genesis",
+      "slot": 1,
+      "cohortManifestRoot": "435c2179d244fc915cf3e21294cc77d47efc847ceb579c7436ac3dad70ad36a3",
+      "entryCount": 46,
+      "recoveryEventIds": {
+        "commit_published": "4a1e2adc338e5fdc6d085ebc79a0e96a864b376614daa7876e79dacadfa4b2e9",
+        "recovery_slot_claimed": "609bed1208e8e34179c5a6324ab106dc8e59a71ec8e81048d9d50f36d7c6d30a",
+        "commit_prepared": "c64b2e45dcd3816fba2c6cfcafeb1c16a1f0afcafb73e6296b8b7ec0acf0499b",
+        "index_converged": "f564dbfd989b57ec2dbc6289cb70c1e9483b50b9dcfce3c1b7455762f886f5ef"
+      },
+      "directKnowledgeSources": [
+        {
+          "eventId": "10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb",
+          "sourceRef": "sediment:replay:updated:soft-delete-default-hard-delete-exceptions"
+        },
+        {
+          "eventId": "12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a",
+          "sourceRef": "sediment:replay:updated:pi-router-remaining-durable-verification-gaps"
+        },
+        {
+          "eventId": "261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e",
+          "sourceRef": "sediment:replay:updated:soft-delete-default-hard-delete-exceptions"
+        },
+        {
+          "eventId": "297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7",
+          "sourceRef": "sediment:replay:created:pi-astack-cross-vendor-review-caught-real-gate-regressions"
+        },
+        {
+          "eventId": "3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c",
+          "sourceRef": "sediment:auto_write:created:audit-retention-requires-authenticated-recoverable-deletion"
+        },
+        {
+          "eventId": "360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef",
+          "sourceRef": "sediment:auto_write:updated:audit-retention-requires-authenticated-recoverable-deletion"
+        },
+        {
+          "eventId": "429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9",
+          "sourceRef": "sediment:auto_write:updated:llm-audit-delta-aggregation-prevents-linear-log-growth"
+        },
+        {
+          "eventId": "4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19",
+          "sourceRef": "sediment:replay:created:pi-astack-runtime-hardening-review-loop-pattern"
+        },
+        {
+          "eventId": "4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c",
+          "sourceRef": "sediment:auto_write:updated:forward-deletion-of-hook-installers-requires-artifact-cleanup"
+        },
+        {
+          "eventId": "5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d",
+          "sourceRef": "sediment:auto_write:created:safe-cleanup-of-oversized-project-scoped-audits"
+        },
+        {
+          "eventId": "5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a",
+          "sourceRef": "sediment:auto_write:created:pi-router-v0-1-58-release-pipeline-hardening"
+        },
+        {
+          "eventId": "6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95",
+          "sourceRef": "sediment:replay:created:native-codex-context-boundary-probe"
+        },
+        {
+          "eventId": "6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413",
+          "sourceRef": "sediment:replay:created:pi-astack-runtime-hardening-review-loop-pattern"
+        },
+        {
+          "eventId": "7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0",
+          "sourceRef": "sediment:replay:created:pi-sub2api-gpt-5-6-context-requires-two-synchronized-overrides"
+        },
+        {
+          "eventId": "960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4",
+          "sourceRef": "sediment:replay:created:auto-compact-audit-rows-must-not-remain-permanently-sent"
+        },
+        {
+          "eventId": "ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607",
+          "sourceRef": "sediment:replay:created:native-codex-context-boundary-probe"
+        },
+        {
+          "eventId": "be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205",
+          "sourceRef": "sediment:auto_write:created:forward-deletion-of-hook-installers-requires-artifact-cleanup"
+        },
+        {
+          "eventId": "c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed",
+          "sourceRef": "sediment:replay:created:codex-跨厂商调用分为模型访问与编排语义"
+        },
+        {
+          "eventId": "c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830",
+          "sourceRef": "sediment:auto_write:created:canonical-git-transport-should-delegate-authentication"
+        },
+        {
+          "eventId": "c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2",
+          "sourceRef": "sediment:replay:created:pi-sub2api-gpt-5-6-context-requires-two-synchronized-overrides"
+        },
+        {
+          "eventId": "c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a",
+          "sourceRef": "sediment:auto_write:created:pi-astack-llm-audit-uses-bounded-aggregation-and-signed-retention"
+        },
+        {
+          "eventId": "cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40",
+          "sourceRef": "sediment:auto_write:created:llm-audit-delta-aggregation-prevents-linear-log-growth"
+        },
+        {
+          "eventId": "cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b",
+          "sourceRef": "sediment:replay:created:pi-astack-cross-vendor-review-caught-real-gate-regressions"
+        },
+        {
+          "eventId": "d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915",
+          "sourceRef": "sediment:replay:created:codex-多厂商-fork-应作为独立衍生项目"
+        },
+        {
+          "eventId": "ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4",
+          "sourceRef": "sediment:replay:created:codex-跨厂商调用分为模型访问与编排语义"
+        },
+        {
+          "eventId": "e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960",
+          "sourceRef": "sediment:auto_write:created:disabled-canonical-runtime-can-leave-valid-sediment-backlogs"
+        },
+        {
+          "eventId": "eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf",
+          "sourceRef": "sediment:replay:updated:pi-router-remaining-durable-verification-gaps"
+        },
+        {
+          "eventId": "ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68",
+          "sourceRef": "sediment:replay:updated:chatgpt-codex-oauth-rejects-explicit-truncation-fields"
+        }
+      ]
+    },
+    {
+      "ordinal": 2,
+      "candidate": "781b584d65b31e60d12ed4eedf1332b51d68c295",
+      "parent": "ea1b9be1f49ffcf87f07ad94189c33126899ebe3",
+      "tree": "27487efa2fe8cf0a1d2566d99449deabd4ada69a",
+      "episodeId": "5fb017cead6b719563d5a8eae2b4efae344f20530fa34d2acfae63ad5751ac94",
+      "generationAnchor": "f564dbfd989b57ec2dbc6289cb70c1e9483b50b9dcfce3c1b7455762f886f5ef",
+      "slot": 1,
+      "cohortManifestRoot": "2e49afd78816d77155321dad3c310077aded6c364bff94010868c9725405e7b4",
+      "entryCount": 7,
+      "recoveryEventIds": {
+        "recovery_slot_claimed": "0444db51a35d99a0feb56538ebb83615cb4a03f8dafaa9543e8c1bf415029c3c",
+        "index_converged": "724485c0932b2b23e4614dfdb9cefc536d34b04d014ffc6714365333811875a4",
+        "commit_published": "94b96ed1dbb36474e31c372de1b9ef7e33112d0cf5b7baafea8c9607e6988b1c",
+        "commit_prepared": "b482b6357527e50adb09160a6bdcb6bf5a49176a058ab847c7e5808e9995c175"
+      },
+      "directKnowledgeSources": [
+        {
+          "eventId": "c11091e6ec95543dbff1d705584b630c2b8880f4d9613b7a6087719c5c155a07",
+          "sourceRef": "sediment:replay:created:pi-astack-cross-vendor-review-caught-real-gate-regressions"
+        }
+      ]
+    },
+    {
+      "ordinal": 3,
+      "candidate": "916de3219d3f76bad4ee0d18d18410f2e3bd87dc",
+      "parent": "781b584d65b31e60d12ed4eedf1332b51d68c295",
+      "tree": "1449824d6aabda5e517c2d649ebeae98cee5e66a",
+      "episodeId": "6a67a2fbfb73b504258645ba64df3ccb3ac7d126440e14c0ab3e2e3b644a99d3",
+      "generationAnchor": "724485c0932b2b23e4614dfdb9cefc536d34b04d014ffc6714365333811875a4",
+      "slot": 1,
+      "cohortManifestRoot": "dfdfd2fce5f55800346dd2274629b950aa91ca7bd604af98f198a1954764efb1",
+      "entryCount": 7,
+      "recoveryEventIds": {
+        "commit_prepared": "361260b6357a30f8cabc3abb229bab0eabfce39d2c1e1ee3d53b006bbe5e25ab",
+        "index_converged": "3b070c9310f12d1cc2c2f05f1ddc1404fc0f5e79876ff3d5e450dd1b5bb7ccf7",
+        "commit_published": "90e44206cac08cd2767f0eda9ee2c6c36aa1769198d66b4e2565e0514ba5429c",
+        "recovery_slot_claimed": "9d9d92be44f4d72fa01021277e320e53fd4aa622a551d62c7c729bdaefda9e69"
+      },
+      "directKnowledgeSources": [
+        {
+          "eventId": "24232cd374c0a827411bf4af2584f53a7174039ba1cd6f3b6f163aeb719a06b9",
+          "sourceRef": "sediment:replay:created:pi-astack-runtime-hardening-review-loop-pattern"
+        }
+      ]
+    },
+    {
+      "ordinal": 4,
+      "candidate": "0a5956715c085e704b378531cb9b7c2d0731a1ac",
+      "parent": "916de3219d3f76bad4ee0d18d18410f2e3bd87dc",
+      "tree": "3b4e248e1e62bd3bcf7db3e75851a299e461b058",
+      "episodeId": "7e1d7f71a9f9b3c9cfd0300810e8a3a72d8b3ae3807745c9fecaed78993ecf04",
+      "generationAnchor": "3b070c9310f12d1cc2c2f05f1ddc1404fc0f5e79876ff3d5e450dd1b5bb7ccf7",
+      "slot": 1,
+      "cohortManifestRoot": "4caaf0072452f34ac076af1f92f5f2c38dff68a8f658bf339a1f6f74e859f293",
+      "entryCount": 7,
+      "recoveryEventIds": {
+        "index_converged": "1ed75f5f1b7e7b90acaeaa63cadb893143c389a8236a46fa2f2ce798bb392a58",
+        "commit_prepared": "1ee96644d1a4b84675bae8dca679c7830b24874dc8cd37d2497a122271d7ae9c",
+        "recovery_slot_claimed": "7ceee151ac784022a2d08fe9bd6080a69dadc0bf2ddd3080aedb6794409c81c8",
+        "commit_published": "aa69724ab0e0a51757d38e0376a9acab73619f235f24171deb1636dc5343e99d"
+      },
+      "directKnowledgeSources": [
+        {
+          "eventId": "4250d277cfe27789fe6e29534ee48a8a3319bc8031613b4027c0e546f8b9bedc",
+          "sourceRef": "sediment:auto_write:updated:disabled-canonical-runtime-can-leave-valid-sediment-backlogs"
+        }
+      ]
+    }
+  ],
+  "projection": {
+    "identity": "project:pi-global:disabled-canonical-runtime-can-leave-valid-sediment-backlogs",
+    "outputPath": "l2/views/knowledge/latest/projects/pi-global/disabled-canonical-runtime-can-leave-valid-sediment-backlogs.md",
+    "outputBytesSha256": "316a1ef9ab56916bbab81933b7c789643f7e13b21eec692196ecbe2f5067f62e",
+    "outputHash": "5dfa8ac91a156ecfad37a72285a6aae0397b79c409f8aed5c990ffe7a9d9560c",
+    "watermarkEventId": "4250d277cfe27789fe6e29534ee48a8a3319bc8031613b4027c0e546f8b9bedc",
+    "inputEventSetHash": "c41a62ef3c12c4444c2c49544cbb301ba047e8faf4c3e13db499ce40f3ee7d11",
+    "identityEventCount": 2,
+    "manifestPath": "l2/views/knowledge/latest/manifest.json",
+    "manifestBytesSha256": "6d7a3cfe35d8d76207c8d4700c178f57b56f7c346860b6757467fb3f480a2e57",
+    "manifestWinnerEventId": "4250d277cfe27789fe6e29534ee48a8a3319bc8031613b4027c0e546f8b9bedc",
+    "candidateKnowledgeEventCount": 4142
+  },
+  "currentRepository": {
+    "head": "89de4468ae01f3a23a974155259b22d9537b92c8",
+    "ref": "refs/heads/main",
+    "candidateContained": true,
+    "wholeL1": {
+      "all": 4255,
+      "selected": 4236,
+      "foldable": 4216,
+      "activeV2": 20,
+      "legacyReadOnly": 19,
+      "foreignSkipped": 0,
+      "phaseDisabledShadow": 0,
+      "tempResidue": 0
+    },
+    "status": [
+      {
+        "status": "??",
+        "path": "l1/events/sha256/17/50/1750cb2920b9a72284335107b13011bba21228b8ee0975a0d3a3bc3ae224fc3a.json"
+      },
+      {
+        "status": "??",
+        "path": "l1/events/sha256/2b/33/2b336de668c92df37b4a60c675f76205148d45152169867ff2a803e94b90eb64.json"
+      },
+      {
+        "status": "??",
+        "path": "l1/events/sha256/5a/ab/5aab894a46068a49d53868d966556ca47a4c1ebd57ac2aba5387cad692fe9297.json"
+      },
+      {
+        "status": "??",
+        "path": "l1/events/sha256/5e/26/5e260df6506505d9b17962660d606be2d04a559f71ea03b92f3799278860c26a.json"
+      },
+      {
+        "status": "??",
+        "path": "l1/events/sha256/83/af/83af858fcbdabb92cc42b9e412ca0b6cced5c01d422baf8b27b411eecc22e86a.json"
+      }
+    ],
+    "rollingRecovery": {
+      "open": 0,
+      "terminal": 0,
+      "quarantined": 0
+    }
+  },
+  "curatorIsolation": {
+    "activeV2Registration": {
+      "envelopeSchema": "local-drain-recovery-envelope/v2",
+      "bodySchema": "local-drain-recovery-event/v2",
+      "phase": "active",
+      "eventTypes": [
+        "recovery_slot_claimed",
+        "commit_prepared",
+        "commit_published",
+        "index_converged",
+        "recovery_slot_aborted",
+        "recovery_episode_terminal"
+      ],
+      "producers": [
+        "pi-astack.convergence-recovery"
+      ]
+    },
+    "productionActiveV2EventCount": 20,
+    "productionLanes": [
+      "drain"
+    ],
+    "productionProducers": [
+      "pi-astack.convergence-recovery@2.0.0"
+    ],
+    "phaseDisabledCuratorSchemas": [
+      "knowledge-apply-receipt/v1",
+      "knowledge-candidate-observation/v1",
+      "knowledge-curator-attempt/v1",
+      "knowledge-curator-decision/v1"
+    ],
+    "sourceSha256": {
+      "registry": "6fe00a95633e5fec3a8945c46b6da0054e5a895c7eb820d5d329bb414a487420",
+      "l1SchemaRegistry": "e829775f98af1c50303cd532f04fd99d64dbade4069e997cf4e46f1803d9c037",
+      "convergenceRecovery": "8dafb6ee1679eaaeb82ca92ca29977d9917082338cd9ccac4fe13fd8c13ddf57",
+      "canonicalGitRuntime": "808935d4f369be681b539032e147bc4107fe82ae8bfb222fa05a7363746ae5c2",
+      "curator": "a9a77f3093e36ed0d4f6915100959edd3c575e364637e0f828019d29e880c78c",
+      "curatorDecisionWriter": "91d89818f6eb54f1dad821e535eea5b1a7fd6cf56edbbef887b174c8276e38da"
+    },
+    "stagingCountsObserved": false,
+    "stagingCountsAreCriterion": false
+  },
+  "devicePushObservation": {
+    "canonicalGate": false,
+    "source": "local_tracking_ref_only_no_network",
+    "observed": true,
+    "trackingOid": "89de4468ae01f3a23a974155259b22d9537b92c8",
+    "containsCandidate": true
+  },
+  "verification": {
+    "baselineAcceptanceAnchorExact": true,
+    "candidateAcceptanceAnchorExact": true,
+    "sourceAcceptanceAnchorExact": true,
+    "replayCandidatesRejectedAsAcceptanceAnchors": true,
+    "candidateContainedByCurrentHead": true,
+    "baselineContainedByCandidate": true,
+    "currentProductionRefMain": true,
+    "currentWholeL1Strict": true,
+    "productionActiveV2AllDrainLane": true,
+    "productionActiveV2ProducerExact": true,
+    "productionActiveV2EventTypesRegistered": true,
+    "productionRollingRecoveryGloballyClosed": true,
+    "baselineToCandidateLinearChainExact": true,
+    "generation1SinglePrepared": true,
+    "generation1EpisodeIdentity": true,
+    "generation1RecoveryExactClosure": true,
+    "generation1RecoveryFoldComplete": true,
+    "generation1SlotOne": true,
+    "generation1ParentLinear": true,
+    "generation1TreeExact": true,
+    "generation1CommitProtocol": true,
+    "generation1ManifestExact": true,
+    "generation1EntriesCanonicalSortedUnique": true,
+    "generation1LegacyExcluded": true,
+    "generation1FrozenIndexSnapshotExact": true,
+    "generation1PreparedEqualsDiff": true,
+    "generation1TreeBlobBytesExact": true,
+    "generation1SharedIndexConvergenceEvent": true,
+    "generation2SinglePrepared": true,
+    "generation2EpisodeIdentity": true,
+    "generation2RecoveryExactClosure": true,
+    "generation2RecoveryFoldComplete": true,
+    "generation2SlotOne": true,
+    "generation2ParentLinear": true,
+    "generation2TreeExact": true,
+    "generation2CommitProtocol": true,
+    "generation2ManifestExact": true,
+    "generation2EntriesCanonicalSortedUnique": true,
+    "generation2LegacyExcluded": true,
+    "generation2FrozenIndexSnapshotExact": true,
+    "generation2PreparedEqualsDiff": true,
+    "generation2TreeBlobBytesExact": true,
+    "generation2SharedIndexConvergenceEvent": true,
+    "generation3SinglePrepared": true,
+    "generation3EpisodeIdentity": true,
+    "generation3RecoveryExactClosure": true,
+    "generation3RecoveryFoldComplete": true,
+    "generation3SlotOne": true,
+    "generation3ParentLinear": true,
+    "generation3TreeExact": true,
+    "generation3CommitProtocol": true,
+    "generation3ManifestExact": true,
+    "generation3EntriesCanonicalSortedUnique": true,
+    "generation3LegacyExcluded": true,
+    "generation3FrozenIndexSnapshotExact": true,
+    "generation3PreparedEqualsDiff": true,
+    "generation3TreeBlobBytesExact": true,
+    "generation3SharedIndexConvergenceEvent": true,
+    "generation4SinglePrepared": true,
+    "generation4EpisodeIdentity": true,
+    "generation4RecoveryExactClosure": true,
+    "generation4RecoveryFoldComplete": true,
+    "generation4SlotOne": true,
+    "generation4ParentLinear": true,
+    "generation4TreeExact": true,
+    "generation4CommitProtocol": true,
+    "generation4ManifestExact": true,
+    "generation4EntriesCanonicalSortedUnique": true,
+    "generation4LegacyExcluded": true,
+    "generation4FrozenIndexSnapshotExact": true,
+    "generation4PreparedEqualsDiff": true,
+    "generation4TreeBlobBytesExact": true,
+    "generation4SharedIndexConvergenceEvent": true,
+    "replay781RejectedDisposition": true,
+    "replay916RejectedDisposition": true,
+    "noEarlierEligibleAutoWriteGeneration": true,
+    "sourceEventPresentAndStrictValidated": true,
+    "sourceEventSchemaExact": true,
+    "sourceEventProducerExact": true,
+    "sourceEventTimestampExactIso": true,
+    "sourceEventSessionBound": true,
+    "sourceEventSourceRefAutoWrite": true,
+    "sourceEventDirectCandidateAddition": true,
+    "sourceEventBoundToCandidatePrepared": true,
+    "candidateFirstQualifiedRealAutoWriteDrain": true,
+    "sourceL2PathDirectCandidateDelta": true,
+    "sourceL2ExactFoldBytes": true,
+    "sourceL2WatermarkExact": true,
+    "sourceL2EventSetExact": true,
+    "sourceL2OutputHashExact": true,
+    "candidateKnowledgeManifestExact": true,
+    "sourceL2BoundToCandidatePrepared": true,
+    "manifestBoundToCandidatePrepared": true,
+    "currentSharedIndexEqualsHead": true,
+    "currentTrackedWorktreeClean": true,
+    "currentUntrackedOnlyValidatedRecoveryOrLegacy": true,
+    "legacy1750StrictValidUntracked": true,
+    "legacy1750ExcludedFromEveryAcceptanceCohort": true,
+    "curatorActiveV2RegistrationDrainOnly": true,
+    "curatorAbsentFromActiveV2ProducerCallerWriter": true,
+    "activeV2RuntimeLaneTypeDrainOnly": true,
+    "canonicalRuntimeHasNoCuratorProtocolCaller": true,
+    "curatorHasNoActiveV2ProtocolWiring": true,
+    "curatorReadOnlyNeighborLogicRetained": true,
+    "curatorCanonicalMetaSchemasRemainPhaseDisabled": true,
+    "curatorCriterionIndependentOfStagingCounts": true
+  },
+  "errors": [],
+  "dossierSelfHash": "35bec961d482fa46e3b92049e27125d56fb2900c07b56a0edd83de1a7f863315",
+  "dossierSelfHashRule": "sha256(RFC8785-JCS(report_without_dossierSelfHash_and_rule))"
+}

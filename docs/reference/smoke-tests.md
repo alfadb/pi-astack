@@ -69,6 +69,7 @@ npm run smoke:prompt-user-option-list
 npm run smoke:abrain-legacy-hook-cleanup
 npm run smoke:abrain-git-sync
 npm run smoke:production-existing-local-drain
+npm run smoke:production-local-drain-next
 npm run smoke:script-registry-drift
 ```
 

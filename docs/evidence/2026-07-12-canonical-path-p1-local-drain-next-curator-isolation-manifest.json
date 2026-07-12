@@ -1,0 +1,197 @@
+{
+  "schemaVersion": "production-local-drain-next-curator-isolation-evidence-manifest/v1",
+  "scope": {
+    "acceptedCriteria": [
+      "LOCAL-DRAIN-NEXT",
+      "CURATOR-PENDING"
+    ],
+    "acceptanceMeaning": "first qualified real sediment:auto_write drain after the first production drain; curator isolation remains pending-by-design",
+    "exclusions": [
+      "LOCAL-RUNTIME-RESTART",
+      "P1-CLOSE-GATE",
+      "P2",
+      "P3"
+    ],
+    "devicePushCanonicalGate": false
+  },
+  "report": {
+    "file": "2026-07-12-canonical-path-p1-local-drain-next-curator-isolation-report.json",
+    "exactBytesSha256": "c71962d8c56fc1dbe1a53aca0c4a0c0739b8080117ae017f09d79b61d5a34fc9",
+    "exactBytes": 21481,
+    "dossierSelfHash": "35bec961d482fa46e3b92049e27125d56fb2900c07b56a0edd83de1a7f863315",
+    "status": "pass"
+  },
+  "acceptanceAnchors": {
+    "baseline": "ea1b9be1f49ffcf87f07ad94189c33126899ebe3",
+    "candidate": "0a5956715c085e704b378531cb9b7c2d0731a1ac",
+    "sourceEventId": "4250d277cfe27789fe6e29534ee48a8a3319bc8031613b4027c0e546f8b9bedc"
+  },
+  "rejectedAcceptanceAnchors": [
+    {
+      "candidate": "781b584d65b31e60d12ed4eedf1332b51d68c295",
+      "disposition": "rejected",
+      "reason": "direct Knowledge source_ref is sediment:replay:*"
+    },
+    {
+      "candidate": "916de3219d3f76bad4ee0d18d18410f2e3bd87dc",
+      "disposition": "rejected",
+      "reason": "direct Knowledge source_ref is sediment:replay:*"
+    }
+  ],
+  "generationCandidates": [
+    "ea1b9be1f49ffcf87f07ad94189c33126899ebe3",
+    "781b584d65b31e60d12ed4eedf1332b51d68c295",
+    "916de3219d3f76bad4ee0d18d18410f2e3bd87dc",
+    "0a5956715c085e704b378531cb9b7c2d0731a1ac"
+  ],
+  "allVerificationBooleans": {
+    "baselineAcceptanceAnchorExact": true,
+    "candidateAcceptanceAnchorExact": true,
+    "sourceAcceptanceAnchorExact": true,
+    "replayCandidatesRejectedAsAcceptanceAnchors": true,
+    "candidateContainedByCurrentHead": true,
+    "baselineContainedByCandidate": true,
+    "currentProductionRefMain": true,
+    "currentWholeL1Strict": true,
+    "productionActiveV2AllDrainLane": true,
+    "productionActiveV2ProducerExact": true,
+    "productionActiveV2EventTypesRegistered": true,
+    "productionRollingRecoveryGloballyClosed": true,
+    "baselineToCandidateLinearChainExact": true,
+    "generation1SinglePrepared": true,
+    "generation1EpisodeIdentity": true,
+    "generation1RecoveryExactClosure": true,
+    "generation1RecoveryFoldComplete": true,
+    "generation1SlotOne": true,
+    "generation1ParentLinear": true,
+    "generation1TreeExact": true,
+    "generation1CommitProtocol": true,
+    "generation1ManifestExact": true,
+    "generation1EntriesCanonicalSortedUnique": true,
+    "generation1LegacyExcluded": true,
+    "generation1FrozenIndexSnapshotExact": true,
+    "generation1PreparedEqualsDiff": true,
+    "generation1TreeBlobBytesExact": true,
+    "generation1SharedIndexConvergenceEvent": true,
+    "generation2SinglePrepared": true,
+    "generation2EpisodeIdentity": true,
+    "generation2RecoveryExactClosure": true,
+    "generation2RecoveryFoldComplete": true,
+    "generation2SlotOne": true,
+    "generation2ParentLinear": true,
+    "generation2TreeExact": true,
+    "generation2CommitProtocol": true,
+    "generation2ManifestExact": true,
+    "generation2EntriesCanonicalSortedUnique": true,
+    "generation2LegacyExcluded": true,
+    "generation2FrozenIndexSnapshotExact": true,
+    "generation2PreparedEqualsDiff": true,
+    "generation2TreeBlobBytesExact": true,
+    "generation2SharedIndexConvergenceEvent": true,
+    "generation3SinglePrepared": true,
+    "generation3EpisodeIdentity": true,
+    "generation3RecoveryExactClosure": true,
+    "generation3RecoveryFoldComplete": true,
+    "generation3SlotOne": true,
+    "generation3ParentLinear": true,
+    "generation3TreeExact": true,
+    "generation3CommitProtocol": true,
+    "generation3ManifestExact": true,
+    "generation3EntriesCanonicalSortedUnique": true,
+    "generation3LegacyExcluded": true,
+    "generation3FrozenIndexSnapshotExact": true,
+    "generation3PreparedEqualsDiff": true,
+    "generation3TreeBlobBytesExact": true,
+    "generation3SharedIndexConvergenceEvent": true,
+    "generation4SinglePrepared": true,
+    "generation4EpisodeIdentity": true,
+    "generation4RecoveryExactClosure": true,
+    "generation4RecoveryFoldComplete": true,
+    "generation4SlotOne": true,
+    "generation4ParentLinear": true,
+    "generation4TreeExact": true,
+    "generation4CommitProtocol": true,
+    "generation4ManifestExact": true,
+    "generation4EntriesCanonicalSortedUnique": true,
+    "generation4LegacyExcluded": true,
+    "generation4FrozenIndexSnapshotExact": true,
+    "generation4PreparedEqualsDiff": true,
+    "generation4TreeBlobBytesExact": true,
+    "generation4SharedIndexConvergenceEvent": true,
+    "replay781RejectedDisposition": true,
+    "replay916RejectedDisposition": true,
+    "noEarlierEligibleAutoWriteGeneration": true,
+    "sourceEventPresentAndStrictValidated": true,
+    "sourceEventSchemaExact": true,
+    "sourceEventProducerExact": true,
+    "sourceEventTimestampExactIso": true,
+    "sourceEventSessionBound": true,
+    "sourceEventSourceRefAutoWrite": true,
+    "sourceEventDirectCandidateAddition": true,
+    "sourceEventBoundToCandidatePrepared": true,
+    "candidateFirstQualifiedRealAutoWriteDrain": true,
+    "sourceL2PathDirectCandidateDelta": true,
+    "sourceL2ExactFoldBytes": true,
+    "sourceL2WatermarkExact": true,
+    "sourceL2EventSetExact": true,
+    "sourceL2OutputHashExact": true,
+    "candidateKnowledgeManifestExact": true,
+    "sourceL2BoundToCandidatePrepared": true,
+    "manifestBoundToCandidatePrepared": true,
+    "currentSharedIndexEqualsHead": true,
+    "currentTrackedWorktreeClean": true,
+    "currentUntrackedOnlyValidatedRecoveryOrLegacy": true,
+    "legacy1750StrictValidUntracked": true,
+    "legacy1750ExcludedFromEveryAcceptanceCohort": true,
+    "curatorActiveV2RegistrationDrainOnly": true,
+    "curatorAbsentFromActiveV2ProducerCallerWriter": true,
+    "activeV2RuntimeLaneTypeDrainOnly": true,
+    "canonicalRuntimeHasNoCuratorProtocolCaller": true,
+    "curatorHasNoActiveV2ProtocolWiring": true,
+    "curatorReadOnlyNeighborLogicRetained": true,
+    "curatorCanonicalMetaSchemasRemainPhaseDisabled": true,
+    "curatorCriterionIndependentOfStagingCounts": true
+  },
+  "curatorIsolation": {
+    "activeV2Registration": {
+      "envelopeSchema": "local-drain-recovery-envelope/v2",
+      "bodySchema": "local-drain-recovery-event/v2",
+      "phase": "active",
+      "eventTypes": [
+        "recovery_slot_claimed",
+        "commit_prepared",
+        "commit_published",
+        "index_converged",
+        "recovery_slot_aborted",
+        "recovery_episode_terminal"
+      ],
+      "producers": [
+        "pi-astack.convergence-recovery"
+      ]
+    },
+    "productionActiveV2EventCount": 20,
+    "productionLanes": [
+      "drain"
+    ],
+    "productionProducers": [
+      "pi-astack.convergence-recovery@2.0.0"
+    ],
+    "phaseDisabledCuratorSchemas": [
+      "knowledge-apply-receipt/v1",
+      "knowledge-candidate-observation/v1",
+      "knowledge-curator-attempt/v1",
+      "knowledge-curator-decision/v1"
+    ],
+    "sourceSha256": {
+      "registry": "6fe00a95633e5fec3a8945c46b6da0054e5a895c7eb820d5d329bb414a487420",
+      "l1SchemaRegistry": "e829775f98af1c50303cd532f04fd99d64dbade4069e997cf4e46f1803d9c037",
+      "convergenceRecovery": "8dafb6ee1679eaaeb82ca92ca29977d9917082338cd9ccac4fe13fd8c13ddf57",
+      "canonicalGitRuntime": "808935d4f369be681b539032e147bc4107fe82ae8bfb222fa05a7363746ae5c2",
+      "curator": "a9a77f3093e36ed0d4f6915100959edd3c575e364637e0f828019d29e880c78c",
+      "curatorDecisionWriter": "91d89818f6eb54f1dad821e535eea5b1a7fd6cf56edbbef887b174c8276e38da"
+    },
+    "stagingCountsObserved": false,
+    "stagingCountsAreCriterion": false
+  },
+  "immutabilityAnchor": "Commit this report and manifest in pi-astack; the manifest intentionally claims no intrinsic digest."
+}

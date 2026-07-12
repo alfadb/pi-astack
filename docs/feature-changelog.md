@@ -26,7 +26,7 @@ ADR 0020 autosync 语义补全：`fetchAndFF` 在 fetch 后发现本地领先且
 不改变 ADR 0039 reconcile gate，不跳过 L1/L2 一致性检查，不在冲突或远端领先场景强推。
 
 ### 关联
-[ADR 0020](adr/0020-git-backed-autosync.md)；[ADR 0039](adr/0039-constraint-pipeline-reset.md)。
+[ADR 0020](adr/0020-abrain-auto-sync-to-remote.md)；[ADR 0039](adr/0039-constraint-pipeline-reset.md)。
 
 ## 2026-07-09 — accepted — 遗忘子系统收敛与 docs 冲突裁定
 
