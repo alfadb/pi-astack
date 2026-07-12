@@ -11,6 +11,16 @@ const execFileAsync = promisify(execFile);
 const GIT_OID_RE = /^[0-9a-f]{40,64}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
+export interface P1ADossierLegacyResidue {
+  path: string;
+  status: "??" | " M";
+  eventId: string;
+  envelopeSchema: string;
+  bodySchema: string;
+  eventType: string;
+  phase: "legacy_read_only";
+}
+
 export interface P1ADossierExecutionEvidence {
   candidate?: unknown;
   cohortManifestRoot?: unknown;
@@ -45,6 +55,37 @@ const VALIDATION_KEYS = [
   "boundedRecoveryTail", "recoveryClosed", "restartContinuity", "postStatusFreeze", "postOwnershipFreeze",
   "postHeadFreeze", "postIndexFreeze", "evidenceComplete",
 ] as const;
+const OWNERSHIP_PREFLIGHT_KEYS = ["status", "dirtyCount", "instrumentation", "ownerProofs", "blockedPaths", "legacyResidue"] as const;
+const LEGACY_RESIDUE_KEYS = ["path", "status", "eventId", "envelopeSchema", "bodySchema", "eventType", "phase"] as const;
+const L1_EVENT_PATH_RE = /^l1\/events\/sha256\/([0-9a-f]{2})\/([0-9a-f]{2})\/([0-9a-f]{64})\.json$/;
+const VERSIONED_SCHEMA_RE = /^[a-z0-9][a-z0-9-]*\/v[1-9][0-9]*$/;
+
+export function validateP1ADossierOwnershipPreflightEvidence(value: unknown): string[] {
+  const evidence = record(value);
+  if (!evidence) return ["ownership_preflight_evidence_missing"];
+  const errors: string[] = [];
+  if (!exactKeys(evidence, OWNERSHIP_PREFLIGHT_KEYS)) errors.push("ownership_preflight_shape_mismatch");
+  if (!Number.isSafeInteger(evidence.dirtyCount) || (evidence.dirtyCount as number) < 0) errors.push("ownership_dirty_count_invalid");
+  if (!record(evidence.instrumentation) || !Array.isArray(evidence.ownerProofs) || !Array.isArray(evidence.blockedPaths) || !Array.isArray(evidence.legacyResidue)) errors.push("ownership_preflight_arrays_invalid");
+  if (evidence.status !== "blocked" && evidence.status !== "accepted" && evidence.status !== "empty") errors.push("ownership_preflight_status_invalid");
+  const residues = Array.isArray(evidence.legacyResidue) ? evidence.legacyResidue : [];
+  let previous: string | null = null;
+  for (const value of residues) {
+    const residue = record(value);
+    if (!residue || !exactKeys(residue, LEGACY_RESIDUE_KEYS)) {
+      errors.push("legacy_residue_shape_mismatch");
+      continue;
+    }
+    const match = typeof residue.path === "string" ? L1_EVENT_PATH_RE.exec(residue.path) : null;
+    if (!match || match[1] !== match[3]!.slice(0, 2) || match[2] !== match[3]!.slice(2, 4) || residue.eventId !== match[3]) errors.push("legacy_residue_path_event_mismatch");
+    if (residue.status !== "??" && residue.status !== " M") errors.push("legacy_residue_status_invalid");
+    if (typeof residue.envelopeSchema !== "string" || !VERSIONED_SCHEMA_RE.test(residue.envelopeSchema) || typeof residue.bodySchema !== "string" || !VERSIONED_SCHEMA_RE.test(residue.bodySchema)) errors.push("legacy_residue_schema_invalid");
+    if (typeof residue.eventType !== "string" || !residue.eventType || residue.phase !== "legacy_read_only") errors.push("legacy_residue_classification_invalid");
+    if (previous !== null && typeof residue.path === "string" && compareUtf16CodeUnits(previous, residue.path) >= 0) errors.push("legacy_residue_order_invalid");
+    if (typeof residue.path === "string") previous = residue.path;
+  }
+  return [...new Set(errors)].sort(compareUtf16CodeUnits);
+}
 
 /** Local-only CC-P1A-r8 execution schema. Remote delivery fields are not
  * optional diagnostics: their presence is a schema error. */
@@ -165,7 +206,11 @@ export async function verifyP1ADossierExecutionArtifact(options: {
   const execution = record(report?.execution);
   const before = record(report?.before);
   const settings = record(report?.settings);
-  const errors = validateP1ADossierExecutionEvidence(execution);
+  const ownershipPreflight = record(report?.ownershipPreflight);
+  const errors = [
+    ...validateP1ADossierExecutionEvidence(execution),
+    ...validateP1ADossierOwnershipPreflightEvidence(ownershipPreflight),
+  ];
   const recomputed: Record<string, unknown> = {};
   const exactHash = computeP1ADossierReportExactHash(options.report);
   if (!SHA256_RE.test(options.expectedReportExactSha256) || exactHash !== options.expectedReportExactSha256) errors.push("report_exact_hash_mismatch");
@@ -228,6 +273,29 @@ export async function verifyP1ADossierExecutionArtifact(options: {
   try {
     const scan = await scanWholeL1Validated({ abrainHome: repo });
     recomputed.wholeL1 = { all: scan.all.length, activeV2: scan.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2").length, legacyReadOnly: scan.legacyReadOnly.length };
+    const beforeStatus = record(before?.status);
+    const statusRows = Array.isArray(beforeStatus?.records) ? beforeStatus.records : [];
+    const statusByPath = new Map<string, string>();
+    for (const value of statusRows) {
+      const row = record(value);
+      if (typeof row?.path === "string" && (row.status === "??" || row.status === " M")) statusByPath.set(row.path, row.status);
+    }
+    const expectedLegacyResidue = scan.legacyReadOnly.flatMap((item): P1ADossierLegacyResidue[] => {
+      const relativePath = item.relativePath;
+      const status = relativePath ? statusByPath.get(relativePath) : undefined;
+      if (!relativePath || (status !== "??" && status !== " M")) return [];
+      return [{
+        path: relativePath,
+        status,
+        eventId: item.eventId,
+        envelopeSchema: item.registration.envelope_schema,
+        bodySchema: item.registration.body_schema!,
+        eventType: String(item.body.event_type),
+        phase: "legacy_read_only",
+      }];
+    }).sort((left, right) => compareUtf16CodeUnits(left.path, right.path));
+    recomputed.legacyResidue = expectedLegacyResidue;
+    if (JSON.stringify(ownershipPreflight?.legacyResidue) !== JSON.stringify(expectedLegacyResidue)) errors.push("legacy_residue_recompute_mismatch");
     const recovery = recoverOpenRecoveryEpisodesFromScan(scan);
     recomputed.recovery = { open: recovery.open.length, terminal: recovery.terminal.length, quarantined: recovery.quarantined.length };
     if (recovery.terminal.length) errors.push("terminal_recovery_present");

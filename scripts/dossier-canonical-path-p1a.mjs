@@ -61,6 +61,18 @@ function lockSnapshot(gitDir) {
 }
 const l1RegistryDocument = JSON.parse(fs.readFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), "utf8"));
 
+function legacyResidueDetail(record, status) {
+  return {
+    path: record.relativePath,
+    status,
+    eventId: record.eventId,
+    envelopeSchema: record.registration.envelope_schema,
+    bodySchema: record.registration.body_schema ?? null,
+    eventType: record.body.event_type,
+    phase: record.registration.phase,
+  };
+}
+
 function ownershipProofDetail(abrainHome, proof) {
   if (proof.path.startsWith("l1/events/sha256/") && proof.op === "put") {
     const envelope = JSON.parse(fs.readFileSync(path.join(abrainHome, ...proof.path.split("/")), "utf8"));
@@ -168,7 +180,9 @@ before.recovery = recovery.recoverOpenRecoveryEpisodesFromScan(ownershipContextB
 async function captureOwnership(snapshot, context) {
   const ownerProofs = [];
   const blockedPaths = [];
+  const legacyResidue = [];
   const nonCohortPaths = [];
+  const legacyByPath = new Map(context.scan.legacyReadOnly.map((record) => [record.relativePath, record]));
   for (const row of snapshot.status.records) {
     const canonicalPath = row.paths.some((item) => item.startsWith("l1/") || item.startsWith("l2/"));
     if (!(row.x === " " || row.x === "?")) {
@@ -184,6 +198,11 @@ async function captureOwnership(snapshot, context) {
       blockedPaths.push({ path: row.path, status: row.status, reason: "status_record_not_accepted_for_readonly_ownership" });
       continue;
     }
+    const legacy = row.status !== " D" ? legacyByPath.get(row.path) : null;
+    if (legacy) {
+      legacyResidue.push(legacyResidueDetail(legacy, row.status));
+      continue;
+    }
     const filePath = path.join(abrainHome, ...row.path.split("/"));
     const op = row.status.includes("D") && !fs.existsSync(filePath) ? "delete" : "put";
     try {
@@ -195,8 +214,16 @@ async function captureOwnership(snapshot, context) {
   }
   ownerProofs.sort((a, b) => compareUtf16CodeUnits(a.path, b.path));
   blockedPaths.sort((a, b) => compareUtf16CodeUnits(a.path, b.path));
+  legacyResidue.sort((a, b) => compareUtf16CodeUnits(a.path, b.path));
   nonCohortPaths.sort(compareUtf16CodeUnits);
-  return { ownerProofs, blockedPaths, nonCohortPaths, hash: hash(JSON.stringify({ ownerProofs, blockedPaths, nonCohortPaths })) };
+  return {
+    ownerProofs,
+    blockedPaths,
+    legacyResidue,
+    nonCohortPaths,
+    hash: hash(JSON.stringify({ ownerProofs, blockedPaths, nonCohortPaths })),
+    legacyResidueHash: hash(JSON.stringify(legacyResidue)),
+  };
 }
 const ownershipBefore = await captureOwnership(before, ownershipContextBefore);
 const { ownerProofs, blockedPaths } = ownershipBefore;
@@ -217,10 +244,12 @@ const curatorAdapter = {
   reason: "curator remains outside active local drain v2 until separately authorized",
 };
 const preFreezeSecond = await captureSnapshot(abrainHome, before.status.records.flatMap((row) => row.paths), ownershipContextBefore.scan);
-const ownershipPreFreezeSecond = await captureOwnership(preFreezeSecond, ownershipContextBefore);
+const ownershipContextPreFreezeSecond = await runtimeModule.buildCanonicalOwnershipContext({ abrainHome });
+const ownershipPreFreezeSecond = await captureOwnership(preFreezeSecond, ownershipContextPreFreezeSecond);
 const preFreeze = {
   statusStable: before.status.sha256 === preFreezeSecond.status.sha256,
   ownershipStable: ownershipBefore.hash === ownershipPreFreezeSecond.hash,
+  legacyResidueStable: ownershipBefore.legacyResidueHash === ownershipPreFreezeSecond.legacyResidueHash,
   headStable: before.head === preFreezeSecond.head,
   indexStable: before.rawIndex?.bytesSha256 === preFreezeSecond.rawIndex?.bytesSha256,
   cohortStable: ownershipBefore.hash === ownershipPreFreezeSecond.hash,
@@ -228,16 +257,28 @@ const preFreeze = {
   secondStatusSha256: preFreezeSecond.status.sha256,
   firstOwnershipSha256: ownershipBefore.hash,
   secondOwnershipSha256: ownershipPreFreezeSecond.hash,
+  firstLegacyResidueSha256: ownershipBefore.legacyResidueHash,
+  secondLegacyResidueSha256: ownershipPreFreezeSecond.legacyResidueHash,
   firstCohortSha256: ownershipBefore.hash,
   secondCohortSha256: ownershipPreFreezeSecond.hash,
 };
+const ownershipPreflight = {
+  status: blockedPaths.length ? "blocked" : ownerProofs.length ? "accepted" : "empty",
+  dirtyCount: before.status.records.length,
+  instrumentation: ownershipContextBefore.instrumentation,
+  ownerProofs,
+  blockedPaths,
+  legacyResidue: ownershipBefore.legacyResidue,
+};
+const ownershipEvidenceErrors = dossierEvidence.validateP1ADossierOwnershipPreflightEvidence(ownershipPreflight);
 const blockers = [];
 if (!settings.valid) blockers.push(`settings_${settings.reason}`);
 else if (!settings.enabled) blockers.push("kill_switch_disabled");
 if (before.lock.exists || preFreezeSecond.lock.exists) blockers.push(`index_lock_${before.lock.kind ?? preFreezeSecond.lock.kind}`);
 if (provenanceError) blockers.push("provenance_unavailable");
 if (blockedPaths.length || ownershipPreFreezeSecond.blockedPaths.length) blockers.push("ownership_preflight_blocked");
-if (!preFreeze.statusStable || !preFreeze.ownershipStable || !preFreeze.headStable || !preFreeze.indexStable) blockers.push("pre_execute_freeze_drift");
+if (ownershipEvidenceErrors.length) blockers.push("ownership_evidence_invalid");
+if (!preFreeze.statusStable || !preFreeze.ownershipStable || !preFreeze.legacyResidueStable || !preFreeze.headStable || !preFreeze.indexStable) blockers.push("pre_execute_freeze_drift");
 if (before.recovery.quarantined.length) blockers.push("recovery_quarantined");
 if (before.recovery.terminal.length) blockers.push("owner_intervention_required");
 if (!execute) blockers.push("execute_not_requested");
@@ -340,6 +381,7 @@ const localPreflightChecks = {
   ownershipAccepted: blockedPaths.length === 0 && ownershipPreFreezeSecond.blockedPaths.length === 0,
   statusFreeze: preFreeze.statusStable,
   ownershipFreeze: preFreeze.ownershipStable,
+  legacyResidueFreeze: preFreeze.legacyResidueStable,
   headFreeze: preFreeze.headStable,
   indexFreeze: preFreeze.indexStable,
   recoveryReadable: before.recovery.quarantined.length === 0,
@@ -351,7 +393,7 @@ const localPreflight = {
   checks: localPreflightChecks,
 };
 const report = {
-  schemaVersion: "canonical-git-runtime-p1a-local-dossier/v4",
+  schemaVersion: "canonical-git-runtime-p1a-local-dossier/v5",
   generatedAtUtc: new Date().toISOString(),
   durationMs: Date.now() - dossierStartedMs,
   mode: execute ? "execute" : "preflight_read_only",
@@ -366,13 +408,8 @@ const report = {
   provenanceError,
   localPreflight,
   preFreeze,
-  ownershipPreflight: {
-    status: blockedPaths.length ? "blocked" : ownerProofs.length ? "accepted" : "empty",
-    dirtyCount: before.status.records.length,
-    instrumentation: ownershipContextBefore.instrumentation,
-    ownerProofs,
-    blockedPaths,
-  },
+  ownershipPreflight,
+  ownershipEvidenceErrors,
   before,
   after,
   afterFreezeSecond,
