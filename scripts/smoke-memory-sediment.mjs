@@ -360,6 +360,10 @@ ${body}
 async function main() {
   assertNoLegacyPackageScope();
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-"));
+  const savedSettingsPath = process.env.PI_ASTACK_SETTINGS_PATH;
+  const smokeSettingsPath = path.join(outRoot, "pi-astack-settings.json");
+  writeFile(smokeSettingsPath, `${JSON.stringify({ canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" } }, null, 2)}\n`);
+  process.env.PI_ASTACK_SETTINGS_PATH = smokeSettingsPath;
   const count = transpileExtensions(outRoot);
   const req = createRequire(path.join(outRoot, "runner.cjs"));
 
@@ -8692,6 +8696,8 @@ Body.
 
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));
   } finally {
+    if (savedSettingsPath === undefined) delete process.env.PI_ASTACK_SETTINGS_PATH;
+    else process.env.PI_ASTACK_SETTINGS_PATH = savedSettingsPath;
     if (process.env.PI_ASTACK_KEEP_SMOKE_TMP !== "1") fs.rmSync(outRoot, { recursive: true, force: true });
   }
 }

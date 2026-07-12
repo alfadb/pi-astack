@@ -71,6 +71,8 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 
 设计见 [ADR 0039](./adr/0039-constraint-pipeline-reset.md)。迁移原则：所有长期记忆域先追加 Evidence Event，再由域自适应 projector / compiler 生成 stable view；Constraint 是第一优先迁移域，不再是独立特例。迁移期不得继续扩大旧 raw `agent_end` 写时裁决特殊逻辑。
 
+Canonical-path R3.4.2 的 P1 当前为 **production enabled、首笔 local drain 已取证、但尚未完成**：`LOCAL-DRAIN-CURRENT` 已由 [existing-drain manifest](./evidence/2026-07-12-canonical-path-p1-a-production-existing-local-drain-manifest.json) 完成；`LOCAL-DRAIN-NEXT`、`LOCAL-RUNTIME-RESTART`、Curator wiring 与 P1 close 仍是明确前置。P2/P3 未获授权，不得因首笔 drain 通过而提前启动。
+
 | Phase | Intent | Notes |
 |---|---|---|
 | P0 freeze old write-time adjudication | 停止为旧 rules 写时路径新增语义特例，并停止为其它长期记忆域新增 raw context → canonical mutation 特例。 | 只允许安全/数据完整性修复；新语义边界进入 ADR 0039 projector / compiler 设计。 |

@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "production-existing-local-drain-evidence-manifest/v1",
+  "scope": {
+    "claim": "LOCAL-DRAIN-CURRENT only",
+    "exclusions": [
+      "LOCAL-DRAIN-NEXT",
+      "LOCAL-RUNTIME-RESTART",
+      "CURATOR-PENDING",
+      "P1-CLOSE-GATE"
+    ]
+  },
+  "report": {
+    "file": "2026-07-12-canonical-path-p1-a-production-existing-local-drain-report.json",
+    "exactBytesSha256": "827dc4413f18fb939ec88e3f1b432be7cd8f76a360fe89ad4e61b37144dc3792",
+    "exactBytes": 4336,
+    "dossierSelfHash": "5a1cef97fa43017ea343ccb8d3269bee3e2d14571324680d0acecf54266c00e2",
+    "status": "pass"
+  },
+  "inputs": {
+    "preflightArtifact": "2026-07-12-canonical-path-p1-a-production-preflight-v5.json",
+    "preflightArtifactSha256": "17628ce7999d74791c2075cb08f54984a83886632606154ddf19ecbdf2249506",
+    "expectedPreflightArtifactSha256": "17628ce7999d74791c2075cb08f54984a83886632606154ddf19ecbdf2249506",
+    "candidate": "ea1b9be1f49ffcf87f07ad94189c33126899ebe3"
+  },
+  "candidate": {
+    "oid": "ea1b9be1f49ffcf87f07ad94189c33126899ebe3",
+    "parent": "c043aa218b2ef20813452b2d7c292699132b7437",
+    "tree": "65003aa598a10e85e58e54fd5d5b601b216d4f39",
+    "cohortManifestRoot": "435c2179d244fc915cf3e21294cc77d47efc847ceb579c7436ac3dad70ad36a3",
+    "entryCount": 46,
+    "knowledgeL1Count": 28,
+    "knowledgeL2Count": 18
+  },
+  "recovery": {
+    "episodeId": "ce3dd1d0405362b644c6929eaf93f0f6593db815a349e8781f3b7a74ca85f7ae",
+    "slot": 1,
+    "eventIds": {
+      "commit_published": "4a1e2adc338e5fdc6d085ebc79a0e96a864b376614daa7876e79dacadfa4b2e9",
+      "recovery_slot_claimed": "609bed1208e8e34179c5a6324ab106dc8e59a71ec8e81048d9d50f36d7c6d30a",
+      "commit_prepared": "c64b2e45dcd3816fba2c6cfcafeb1c16a1f0afcafb73e6296b8b7ec0acf0499b",
+      "index_converged": "f564dbfd989b57ec2dbc6289cb70c1e9483b50b9dcfce3c1b7455762f886f5ef"
+    }
+  },
+  "allVerificationBooleans": {
+    "preflightArtifactSha256Exact": true,
+    "preflightV5ExactShape": true,
+    "preflightV5Schema": true,
+    "preflightReadOnlyNoMutation": true,
+    "preflightExpectedBlockers": true,
+    "preflightModeValidButDisabled": true,
+    "preflightLocalChecksAllGreen": true,
+    "preflightDoubleFreeze": true,
+    "preflight46ActiveOwnerProofs": true,
+    "preflightZeroBlocked": true,
+    "preflightOneLegacyResidue": true,
+    "preflightParentAndRef": true,
+    "wholeL1Strict": true,
+    "candidateHasSinglePreparedEvent": true,
+    "recoverySameEpisodeSlotOne": true,
+    "recoveryExactFourEvents": true,
+    "recoveryClaimDeterministic": true,
+    "recoveryFoldComplete": true,
+    "recoveryGloballyClosed": true,
+    "candidateParentExact": true,
+    "candidateTreeExact": true,
+    "candidateCommitProtocol": true,
+    "candidateManifestExact": true,
+    "prepared46CanonicalSortedUniqueEntries": true,
+    "preparedComposition28L1And18L2": true,
+    "preparedEqualsCommitDiff": true,
+    "preparedTreeBlobBytesIndexExact": true,
+    "preflightOwnersBindPreparedEntries": true,
+    "preparedFrozenIndexSnapshotExact": true,
+    "headRefCandidateExact": true,
+    "sharedIndexExact": true,
+    "trackedWorktreeExact": true,
+    "postStatusOnlyLegacyAndEpisodeRecovery": true,
+    "activeKnowledgeBacklogZero": true,
+    "legacy1750StrictValidUntracked": true,
+    "legacy1750ExcludedFromCohort": true
+  },
+  "devicePushObservationCanonicalGate": false,
+  "immutabilityAnchor": "The report and this manifest are intended to be committed in pi-astack; no intrinsic manifest digest is claimed."
+}

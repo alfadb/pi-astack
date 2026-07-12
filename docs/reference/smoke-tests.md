@@ -65,9 +65,10 @@ npm run smoke:abrain-rule-writer-fs
 npm run smoke:prompt-user
 npm run smoke:prompt-user-option-list
 
-# Legacy hook cleanup / native git-sync boundary changes
+# Legacy hook cleanup / native git-sync / production local-drain evidence changes
 npm run smoke:abrain-legacy-hook-cleanup
 npm run smoke:abrain-git-sync
+npm run smoke:production-existing-local-drain
 npm run smoke:script-registry-drift
 ```
 

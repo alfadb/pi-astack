@@ -1,0 +1,2546 @@
+{
+  "schemaVersion": "canonical-git-runtime-p1a-local-dossier/v5",
+  "generatedAtUtc": "2026-07-12T02:09:10.726Z",
+  "durationMs": 15104,
+  "mode": "preflight_read_only",
+  "status": "preflight-blocked",
+  "mutationAttempted": false,
+  "stopReason": "kill_switch_disabled",
+  "blockers": [
+    "kill_switch_disabled",
+    "execute_not_requested"
+  ],
+  "abrainHome": "/home/worker/.abrain",
+  "settings": {
+    "enabled": false,
+    "mode": "local_convergence_v2",
+    "valid": true,
+    "reason": "disabled",
+    "settingsPath": "/home/worker/.pi/agent/pi-astack-settings.json"
+  },
+  "loadedProvenance": [
+    {
+      "label": "abrain-index",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/abrain/index.ts",
+      "bytesSha256": "3bab758c47165f30a396404669a256bf0e33011822895baed193fb73f107baba",
+      "loadedBlobOid": "49361d51387ae634915ebb5204c9a5941f83a521",
+      "headBlobOid": "49361d51387ae634915ebb5204c9a5941f83a521"
+    },
+    {
+      "label": "constraint-auto-refresh",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/sediment/constraint-compiler/auto-refresh.ts",
+      "bytesSha256": "b8202f391b427dae64814a76fa0e545b009933fe48d8e4ff1bb1e2d7f95dc333",
+      "loadedBlobOid": "588405536a722a6c1d134636dcf15aa04ab454cf",
+      "headBlobOid": "588405536a722a6c1d134636dcf15aa04ab454cf"
+    },
+    {
+      "label": "constraint-normalizer",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/sediment/constraint-compiler/normalize.ts",
+      "bytesSha256": "0eb9c7bba1f1aa9832384f1be9c44cf5a6ac58213e8a9930b71c1ba4b82b963d",
+      "loadedBlobOid": "75def2a23d55d52ce97620c48590d66ff7267b90",
+      "headBlobOid": "75def2a23d55d52ce97620c48590d66ff7267b90"
+    },
+    {
+      "label": "constraint-projector",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/sediment/constraint-compiler/projection.ts",
+      "bytesSha256": "6d04d2009aa26cc57f31e957a930d8b227b6502343a6101d5a57a4bb2ccf8283",
+      "loadedBlobOid": "811efd7873c3884e673ade07d93e5a2702e092c3",
+      "headBlobOid": "811efd7873c3884e673ade07d93e5a2702e092c3"
+    },
+    {
+      "label": "constraint-renderer",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/sediment/constraint-compiler/render.ts",
+      "bytesSha256": "0f0a879771d85bc4c22f56e853bda6070b636cb035414530831dab53418e7ffa",
+      "loadedBlobOid": "094deb0e61381f26c14cca2f51569c3be103a829",
+      "headBlobOid": "094deb0e61381f26c14cca2f51569c3be103a829"
+    },
+    {
+      "label": "dossier-evidence-validator",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/p1a-dossier-evidence.ts",
+      "bytesSha256": "8376856ad73c9708f1599b25ef66fdb82aa366fb2b83937e9cfa89055d5b9022",
+      "loadedBlobOid": "c251ccd7cdaaf1d3c391cbd2c482fc55aa31de7d",
+      "headBlobOid": "fbec5c314b2f4c45a8a987fef0d7f8be25c0d71a"
+    },
+    {
+      "label": "durable-write",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/durable-write.ts",
+      "bytesSha256": "f7574b4e30ba9a160457ed88d57773d803909e361fb7805f08c83e9b0618ffdd",
+      "loadedBlobOid": "fc9f1261f89def84a5a018efa56c3b8d5be0727a",
+      "headBlobOid": "fc9f1261f89def84a5a018efa56c3b8d5be0727a"
+    },
+    {
+      "label": "exact",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/git-exact-cohort.ts",
+      "bytesSha256": "05b595ef524514f994ec25e1fae0a0272fb5267b7e7eea8e0eb990205c8dfc12",
+      "loadedBlobOid": "547096726e2c154785e96048ad79fd9571883745",
+      "headBlobOid": "547096726e2c154785e96048ad79fd9571883745"
+    },
+    {
+      "label": "git-sync",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/abrain/git-sync.ts",
+      "bytesSha256": "1d2628e0d859749e533e35968b2f530a22964f6ca629da4224d459a10a961572",
+      "loadedBlobOid": "cdfc634a32cc61794e4153c8d0b5cc8440d5153e",
+      "headBlobOid": "cdfc634a32cc61794e4153c8d0b5cc8440d5153e"
+    },
+    {
+      "label": "git-z-parser",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/git-z-parser.ts",
+      "bytesSha256": "6114730367d13a883315e9ede90e645310e3753757da2072134af95b3cc985e5",
+      "loadedBlobOid": "58e96ec42705cf08fe363f9faaf455c6166337ec",
+      "headBlobOid": "58e96ec42705cf08fe363f9faaf455c6166337ec"
+    },
+    {
+      "label": "jcs",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/jcs.ts",
+      "bytesSha256": "9fdb9f8c26bc9c5535c25c42eaf9034c7b6f3aa75468fdfbb1c8686cba690dab",
+      "loadedBlobOid": "75650717752a0b2580cd7dcad178e44c394d16c4",
+      "headBlobOid": "75650717752a0b2580cd7dcad178e44c394d16c4"
+    },
+    {
+      "label": "knowledge-evidence-renderer",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/sediment/knowledge-evidence.ts",
+      "bytesSha256": "6f9baa7a339ba7942fe113b0c1d556b9218e2c350c15ebb91d905e57d4fd7c76",
+      "loadedBlobOid": "8ea99d3dbe68e5b974b7179a3ef4826bd06b409d",
+      "headBlobOid": "8ea99d3dbe68e5b974b7179a3ef4826bd06b409d"
+    },
+    {
+      "label": "l1-registry-implementation",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/l1-schema-registry.ts",
+      "bytesSha256": "e829775f98af1c50303cd532f04fd99d64dbade4069e997cf4e46f1803d9c037",
+      "loadedBlobOid": "cdae53bec7fd53a2dc724d295c95740b95359c31",
+      "headBlobOid": "cdae53bec7fd53a2dc724d295c95740b95359c31"
+    },
+    {
+      "label": "memory-parser",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/memory/parser.ts",
+      "bytesSha256": "e7b2dac37adc1c0925e3b5b102053bf242c0efcbfc02b5a8576e51a34350c6da",
+      "loadedBlobOid": "1dcec302ded305657690b85ffa45a2eb5625061b",
+      "headBlobOid": "1dcec302ded305657690b85ffa45a2eb5625061b"
+    },
+    {
+      "label": "orchestrator",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/canonical-git-runtime.ts",
+      "bytesSha256": "808935d4f369be681b539032e147bc4107fe82ae8bfb222fa05a7363746ae5c2",
+      "loadedBlobOid": "522e1eca38c883e1a26cf4f7db66cde83f17c6c4",
+      "headBlobOid": "522e1eca38c883e1a26cf4f7db66cde83f17c6c4"
+    },
+    {
+      "label": "reconcile",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/abrain/reconcile-gate.ts",
+      "bytesSha256": "035ab5eab919058a2a4e4dd0a506cfbf5a489231d55a777a443409dc31a51ecf",
+      "loadedBlobOid": "bdac15b0e5b89e761ca8b6566c426b3210d68386",
+      "headBlobOid": "bdac15b0e5b89e761ca8b6566c426b3210d68386"
+    },
+    {
+      "label": "recovery",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/convergence-recovery.ts",
+      "bytesSha256": "8dafb6ee1679eaaeb82ca92ca29977d9917082338cd9ccac4fe13fd8c13ddf57",
+      "loadedBlobOid": "7261f05d79859b29522734c801ed73dc44fe27d5",
+      "headBlobOid": "7261f05d79859b29522734c801ed73dc44fe27d5"
+    },
+    {
+      "label": "registry",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/schemas/l1-schema-role-registry.json",
+      "bytesSha256": "6fe00a95633e5fec3a8945c46b6da0054e5a895c7eb820d5d329bb414a487420",
+      "loadedBlobOid": "60d8c31558b15ff3eb514d48cfd7756f3708c19c",
+      "headBlobOid": "60d8c31558b15ff3eb514d48cfd7756f3708c19c"
+    },
+    {
+      "label": "rename-wiring",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/memory/rename-entry.ts",
+      "bytesSha256": "8189795e0e2073337364649c2d2e2fc8baaa3fdd31d6b1048bb230699fffa89f",
+      "loadedBlobOid": "72976212ab479c4ee8d557508357e07d35c1450a",
+      "headBlobOid": "72976212ab479c4ee8d557508357e07d35c1450a"
+    },
+    {
+      "label": "sediment-index",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/sediment/index.ts",
+      "bytesSha256": "5ac6cd3abc873b81df66c0a553e6ced81185bc907c16a09c69cd4d258ba6d5b7",
+      "loadedBlobOid": "07c3623d5f1824b13211bc168d41d8b383db3bfa",
+      "headBlobOid": "07c3623d5f1824b13211bc168d41d8b383db3bfa"
+    },
+    {
+      "label": "settings",
+      "path": "/home/worker/.pi/agent/pi-astack-settings.json",
+      "bytesSha256": "bdbfc275303ca1426f7df6f8cfa9653831f46e18db47c1d39caa710d0653cd8c",
+      "loadedBlobOid": null,
+      "headBlobOid": null
+    },
+    {
+      "label": "settings-schema",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/pi-astack-settings.schema.json",
+      "bytesSha256": "0e96b536b4f3e3294ddfe936c55e4d953f963d2d92188a0a25d07e0e721f46ae",
+      "loadedBlobOid": "da9c548a9186dfb12f9010303e108d8616a15b4f",
+      "headBlobOid": "da9c548a9186dfb12f9010303e108d8616a15b4f"
+    },
+    {
+      "label": "singleflight",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/_shared/git-singleflight.ts",
+      "bytesSha256": "b829e3f07f6436037ed4f583426c61ed910571d0cc75137ec1e04890b3227048",
+      "loadedBlobOid": "92c5bb39defb5798587f553f6329dc1292769dd9",
+      "headBlobOid": "92c5bb39defb5798587f553f6329dc1292769dd9"
+    },
+    {
+      "label": "writer",
+      "path": "/home/worker/.pi/agent/skills/pi-astack/extensions/sediment/writer.ts",
+      "bytesSha256": "5d6c25280570cdccaec5723e77868bf27e198f62e75aa2e4d1a7d24aa83ff7b5",
+      "loadedBlobOid": "00ec3363e18871d72aaa1fe2945b2fb1dd9bc70a",
+      "headBlobOid": "00ec3363e18871d72aaa1fe2945b2fb1dd9bc70a"
+    }
+  ],
+  "implementationFingerprint": "63036c12acc1fb67179389c2e85dacecf0f9f5b48d8a5f6fa570c94fb0e25297",
+  "provenanceError": null,
+  "localPreflight": {
+    "status": "ready",
+    "checks": {
+      "runtimeModeLocalConvergenceV2": true,
+      "wholeL1Strict": true,
+      "ownershipAccepted": true,
+      "statusFreeze": true,
+      "ownershipFreeze": true,
+      "legacyResidueFreeze": true,
+      "headFreeze": true,
+      "indexFreeze": true,
+      "recoveryReadable": true,
+      "ownerInterventionFree": true,
+      "publicationBoundaryLocalRefCas": true
+    }
+  },
+  "preFreeze": {
+    "statusStable": true,
+    "ownershipStable": true,
+    "legacyResidueStable": true,
+    "headStable": true,
+    "indexStable": true,
+    "cohortStable": true,
+    "firstStatusSha256": "de0bbd79c7d300bbabaf890b4d49d7dcd3f69972b324a0bde67d4df7e0b298b3",
+    "secondStatusSha256": "de0bbd79c7d300bbabaf890b4d49d7dcd3f69972b324a0bde67d4df7e0b298b3",
+    "firstOwnershipSha256": "335b86dd3d732d9e54ef6a5ce503284e87fcb2cd78880d025894d185da1da716",
+    "secondOwnershipSha256": "335b86dd3d732d9e54ef6a5ce503284e87fcb2cd78880d025894d185da1da716",
+    "firstLegacyResidueSha256": "4a32a0ff3692986c157bc32f7fb15499e0d8c1da869e5f5adbf15cb1c8de1349",
+    "secondLegacyResidueSha256": "4a32a0ff3692986c157bc32f7fb15499e0d8c1da869e5f5adbf15cb1c8de1349",
+    "firstCohortSha256": "335b86dd3d732d9e54ef6a5ce503284e87fcb2cd78880d025894d185da1da716",
+    "secondCohortSha256": "335b86dd3d732d9e54ef6a5ce503284e87fcb2cd78880d025894d185da1da716"
+  },
+  "ownershipPreflight": {
+    "status": "accepted",
+    "dirtyCount": 47,
+    "instrumentation": {
+      "wholeL1Scans": 1,
+      "knowledgeIdentityCount": 3711,
+      "knowledgeFoldRenders": 3711,
+      "globalManifestRenders": 1,
+      "constraintDecisionRenders": 1,
+      "headMembershipQueries": 1,
+      "indexMembershipQueries": 1,
+      "elapsedMs": 3848
+    },
+    "ownerProofs": [
+      {
+        "path": "l1/events/sha256/10/80/10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4996,
+        "bytesSha256": "269e13ad8d09403f4337ca411536b64ac89b9ca9e3ecb044cee315db1961d258",
+        "sourceIds": [
+          "10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb",
+          "exactBytesSha256": "269e13ad8d09403f4337ca411536b64ac89b9ca9e3ecb044cee315db1961d258"
+        }
+      },
+      {
+        "path": "l1/events/sha256/12/db/12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4998,
+        "bytesSha256": "3caa58a3d4743f9a1ba72564ad26dae6effa466254b2345a37be1bd7f3a4efb7",
+        "sourceIds": [
+          "12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a",
+          "exactBytesSha256": "3caa58a3d4743f9a1ba72564ad26dae6effa466254b2345a37be1bd7f3a4efb7"
+        }
+      },
+      {
+        "path": "l1/events/sha256/26/17/261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4996,
+        "bytesSha256": "ba10d9dc1dce56bdc6fbaeba176bd36d029268c5cf30bc9d002900dc077e6752",
+        "sourceIds": [
+          "261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e",
+          "exactBytesSha256": "ba10d9dc1dce56bdc6fbaeba176bd36d029268c5cf30bc9d002900dc077e6752"
+        }
+      },
+      {
+        "path": "l1/events/sha256/29/7c/297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3609,
+        "bytesSha256": "3f02f196a7978dc249c1a7dcbcbd7ce0db4f4a69f0c33f542356a50b55123dfc",
+        "sourceIds": [
+          "297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7",
+          "exactBytesSha256": "3f02f196a7978dc249c1a7dcbcbd7ce0db4f4a69f0c33f542356a50b55123dfc"
+        }
+      },
+      {
+        "path": "l1/events/sha256/31/38/3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4564,
+        "bytesSha256": "85520a12dbbb856a0914ae0e4a8d68f8e529bb87907781f3a4cc08d2d968bf33",
+        "sourceIds": [
+          "3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c",
+          "exactBytesSha256": "85520a12dbbb856a0914ae0e4a8d68f8e529bb87907781f3a4cc08d2d968bf33"
+        }
+      },
+      {
+        "path": "l1/events/sha256/36/02/360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 5333,
+        "bytesSha256": "7deabc39a7dc3cb2648a109253420d6a60e34934d52cae2696bdee7e70a24f7e",
+        "sourceIds": [
+          "360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef",
+          "exactBytesSha256": "7deabc39a7dc3cb2648a109253420d6a60e34934d52cae2696bdee7e70a24f7e"
+        }
+      },
+      {
+        "path": "l1/events/sha256/42/95/429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4274,
+        "bytesSha256": "d0b07d4eaf16ad0a9857d901791f5b6aa2917067d8f6f80cb1a3527a6852fc43",
+        "sourceIds": [
+          "429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9",
+          "exactBytesSha256": "d0b07d4eaf16ad0a9857d901791f5b6aa2917067d8f6f80cb1a3527a6852fc43"
+        }
+      },
+      {
+        "path": "l1/events/sha256/4b/67/4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4234,
+        "bytesSha256": "a9a2dac4aef9aa1f1345924342fcdb2777480ec71a4fbe8753fe907768710d8b",
+        "sourceIds": [
+          "4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19",
+          "exactBytesSha256": "a9a2dac4aef9aa1f1345924342fcdb2777480ec71a4fbe8753fe907768710d8b"
+        }
+      },
+      {
+        "path": "l1/events/sha256/4f/ba/4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4439,
+        "bytesSha256": "93687498b435ad49f0fca3568cc29b79259de2ab66b9e16e2df80260e3bec131",
+        "sourceIds": [
+          "4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c",
+          "exactBytesSha256": "93687498b435ad49f0fca3568cc29b79259de2ab66b9e16e2df80260e3bec131"
+        }
+      },
+      {
+        "path": "l1/events/sha256/5b/8c/5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4264,
+        "bytesSha256": "b42785236a926a50f129d613c460b6e525055f67455eed9e087423915e184d3d",
+        "sourceIds": [
+          "5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d",
+          "exactBytesSha256": "b42785236a926a50f129d613c460b6e525055f67455eed9e087423915e184d3d"
+        }
+      },
+      {
+        "path": "l1/events/sha256/5e/71/5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3860,
+        "bytesSha256": "d89f7654cabb8007e30c6021c1bf5f11b5a7a09e8b34b283ebf147375f4f72f9",
+        "sourceIds": [
+          "5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a",
+          "exactBytesSha256": "d89f7654cabb8007e30c6021c1bf5f11b5a7a09e8b34b283ebf147375f4f72f9"
+        }
+      },
+      {
+        "path": "l1/events/sha256/65/69/6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4542,
+        "bytesSha256": "3713ba2b5a4dfb7862e935e8961816d47481c32acaaf3e71ae90037dd24b5e5c",
+        "sourceIds": [
+          "6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95",
+          "exactBytesSha256": "3713ba2b5a4dfb7862e935e8961816d47481c32acaaf3e71ae90037dd24b5e5c"
+        }
+      },
+      {
+        "path": "l1/events/sha256/6f/33/6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4234,
+        "bytesSha256": "479b70276aa8da56a550d11842d49159432e69fc13a2b56b2f162eeab4b69837",
+        "sourceIds": [
+          "6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413",
+          "exactBytesSha256": "479b70276aa8da56a550d11842d49159432e69fc13a2b56b2f162eeab4b69837"
+        }
+      },
+      {
+        "path": "l1/events/sha256/7c/a1/7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3985,
+        "bytesSha256": "56b27f72b5d250cc8c2d7fd008dc8ca8aae0bef7ea7d89cc259b991f1f6342a5",
+        "sourceIds": [
+          "7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0",
+          "exactBytesSha256": "56b27f72b5d250cc8c2d7fd008dc8ca8aae0bef7ea7d89cc259b991f1f6342a5"
+        }
+      },
+      {
+        "path": "l1/events/sha256/96/0a/960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3572,
+        "bytesSha256": "512d5bd8e533a4cea032c0a4a05417ef742da9e57150a323733a874334cd8153",
+        "sourceIds": [
+          "960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4",
+          "exactBytesSha256": "512d5bd8e533a4cea032c0a4a05417ef742da9e57150a323733a874334cd8153"
+        }
+      },
+      {
+        "path": "l1/events/sha256/ac/00/ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4542,
+        "bytesSha256": "f431f8fd5f161dddc406620469632773768b54b01cb86be965deab621331124f",
+        "sourceIds": [
+          "ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607",
+          "exactBytesSha256": "f431f8fd5f161dddc406620469632773768b54b01cb86be965deab621331124f"
+        }
+      },
+      {
+        "path": "l1/events/sha256/be/02/be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3959,
+        "bytesSha256": "8ef87c8f8a1b4264914cbef8b554a6a795eb365f1a1af980f2afc1300e598876",
+        "sourceIds": [
+          "be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205",
+          "exactBytesSha256": "8ef87c8f8a1b4264914cbef8b554a6a795eb365f1a1af980f2afc1300e598876"
+        }
+      },
+      {
+        "path": "l1/events/sha256/c1/0e/c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3563,
+        "bytesSha256": "f2b0bd89c84b556828d05b865b26c0a5bed2adde33a7a148a5f36498ae1da868",
+        "sourceIds": [
+          "c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed",
+          "exactBytesSha256": "f2b0bd89c84b556828d05b865b26c0a5bed2adde33a7a148a5f36498ae1da868"
+        }
+      },
+      {
+        "path": "l1/events/sha256/c4/ce/c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3914,
+        "bytesSha256": "efefb270e2c857dfebf45e84725ef09bad733c492e7d6059a61ca5edfa875161",
+        "sourceIds": [
+          "c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830",
+          "exactBytesSha256": "efefb270e2c857dfebf45e84725ef09bad733c492e7d6059a61ca5edfa875161"
+        }
+      },
+      {
+        "path": "l1/events/sha256/c4/f6/c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3985,
+        "bytesSha256": "d624290c452ee263fd7e31a9456fe584a27725c1ad85ee0b43f95f8088780913",
+        "sourceIds": [
+          "c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2",
+          "exactBytesSha256": "d624290c452ee263fd7e31a9456fe584a27725c1ad85ee0b43f95f8088780913"
+        }
+      },
+      {
+        "path": "l1/events/sha256/c7/91/c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 5051,
+        "bytesSha256": "13578af182837f35af659f988ba87afeb5d6ab607f185b108ab9abb91c1e03fd",
+        "sourceIds": [
+          "c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a",
+          "exactBytesSha256": "13578af182837f35af659f988ba87afeb5d6ab607f185b108ab9abb91c1e03fd"
+        }
+      },
+      {
+        "path": "l1/events/sha256/cb/49/cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3807,
+        "bytesSha256": "fff12683750c99db00f6307916a8fe06e756e76eb3f2e9eac9b4344835b50209",
+        "sourceIds": [
+          "cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40",
+          "exactBytesSha256": "fff12683750c99db00f6307916a8fe06e756e76eb3f2e9eac9b4344835b50209"
+        }
+      },
+      {
+        "path": "l1/events/sha256/cc/22/cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3609,
+        "bytesSha256": "c628403211d9eb19a5044af972c5a18e19da4988d9d17c825dc6d7e13bcff783",
+        "sourceIds": [
+          "cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b",
+          "exactBytesSha256": "c628403211d9eb19a5044af972c5a18e19da4988d9d17c825dc6d7e13bcff783"
+        }
+      },
+      {
+        "path": "l1/events/sha256/d9/f0/d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4180,
+        "bytesSha256": "a99ff02bd199db6b6b68b7d93754ab25aa7bbafd8f97877f4fefb123a8cfcb7a",
+        "sourceIds": [
+          "d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915",
+          "exactBytesSha256": "a99ff02bd199db6b6b68b7d93754ab25aa7bbafd8f97877f4fefb123a8cfcb7a"
+        }
+      },
+      {
+        "path": "l1/events/sha256/dd/d1/ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 3563,
+        "bytesSha256": "7aa6f5c675152d869ba5eff720da701947f70d0bd68f39da78cb2d351dfcfae0",
+        "sourceIds": [
+          "ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4",
+          "exactBytesSha256": "7aa6f5c675152d869ba5eff720da701947f70d0bd68f39da78cb2d351dfcfae0"
+        }
+      },
+      {
+        "path": "l1/events/sha256/e6/cc/e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4013,
+        "bytesSha256": "38b756551cf55e727aab408e1f3969c6b65567bf2b028a13fc46370e865c4c26",
+        "sourceIds": [
+          "e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960",
+          "exactBytesSha256": "38b756551cf55e727aab408e1f3969c6b65567bf2b028a13fc46370e865c4c26"
+        }
+      },
+      {
+        "path": "l1/events/sha256/eb/9d/eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4352,
+        "bytesSha256": "2ccf42b78055f7608ca3f191240749bae50708eae97be5a321b99ad59bcafa4b",
+        "sourceIds": [
+          "eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf",
+          "exactBytesSha256": "2ccf42b78055f7608ca3f191240749bae50708eae97be5a321b99ad59bcafa4b"
+        }
+      },
+      {
+        "path": "l1/events/sha256/ef/64/ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68.json",
+        "status": "??",
+        "owner": "knowledge_l1",
+        "op": "put",
+        "bytes": 4410,
+        "bytesSha256": "5240409d9bfa2be2f2686621c02b5404b3943b2df5bddbeda7d876f5fd7e9a2c",
+        "sourceIds": [
+          "ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68"
+        ],
+        "proof": {
+          "kind": "l1_registry_validation",
+          "registryId": "pi-astack-local-convergence-r8",
+          "envelopeSchema": "knowledge-evidence-envelope/v1",
+          "bodySchema": "knowledge-evidence-event/v1",
+          "eventType": "knowledge_entry_observed",
+          "producer": {
+            "name": "sediment.knowledge-event-writer",
+            "version": "adr0039-p5"
+          },
+          "registration": {
+            "domain": "knowledge",
+            "role": "canonical",
+            "phase": "active",
+            "foldEligible": true,
+            "producers": [
+              "sediment.knowledge-event-writer"
+            ]
+          },
+          "eventId": "ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68",
+          "exactBytesSha256": "5240409d9bfa2be2f2686621c02b5404b3943b2df5bddbeda7d876f5fd7e9a2c"
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/audit-retention-requires-authenticated-recoverable-deletion.md",
+        "status": "??",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 3819,
+        "bytesSha256": "8c6fa62534559c092a808aa610d3a90f52e5eef523b10ff39bea7591ee5b55cf",
+        "sourceIds": [
+          "3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c",
+          "360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "8c6fa62534559c092a808aa610d3a90f52e5eef523b10ff39bea7591ee5b55cf",
+          "recomputedSourceEventIds": [
+            "3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c",
+            "360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/canonical-git-transport-should-delegate-authentication.md",
+        "status": "??",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2440,
+        "bytesSha256": "7ca397c9d832a96058b48e3bdd267b7ee40dc1bf28b66f61fcaafd7f245b8835",
+        "sourceIds": [
+          "c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "7ca397c9d832a96058b48e3bdd267b7ee40dc1bf28b66f61fcaafd7f245b8835",
+          "recomputedSourceEventIds": [
+            "c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/chatgpt-codex-oauth-rejects-explicit-truncation-fields.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2896,
+        "bytesSha256": "a9d8d8ceea3cc74b4babf539e31251c13cb165bb9c32a5f6c9ff4ba90148e1c5",
+        "sourceIds": [
+          "125da617b6042152ea9cf9cfaae922366db98511ff99951c55505808a8ffefc3",
+          "37bb733c8c000ffa4e222e3ccb5deae04999805282cb1d2aed3ad117f3b0f16e",
+          "48540a5719d472401097b51fa9a218bbaa162e7bcd06cc39cba34ed3bc50c510",
+          "5367d00d5a6dcb6d6f30cae38aac7883f30447a6a15fa614c15e93ce18b9a421",
+          "6ddb469918cb8e0513906b4341b4f9dc1fb4b7a83a5876aaec849c9eb3b67fcd",
+          "7149cacf3896e488bca93d914168a2f9e9eacd69ad2215c9f47fca5dfaff38a3",
+          "a6ae2b974f4b108a987898b01ba6f642de57548cb9e0610afafe981dd0971af4",
+          "af91738d609a13325d22695b07e788e14bd5618c058bda25f34c70cdf3d7125e",
+          "b4189d4b09441b394bc0410ab0ce46531302804f8365114f846fecbd668f9e2b",
+          "c03d4f3ba300248dcf55019f0ce8035e95ab2f17cdf668010670f6c79a53429b",
+          "c78b250be21a1ab8564b4c11e3f39958bfd8398fc6e53b42b7a18232d359c5a6",
+          "ee3ecacc6cc0a410626b8ea6e4dd286ce5c61878b91e06313e3352ce6ae37cd8",
+          "ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "a9d8d8ceea3cc74b4babf539e31251c13cb165bb9c32a5f6c9ff4ba90148e1c5",
+          "recomputedSourceEventIds": [
+            "125da617b6042152ea9cf9cfaae922366db98511ff99951c55505808a8ffefc3",
+            "37bb733c8c000ffa4e222e3ccb5deae04999805282cb1d2aed3ad117f3b0f16e",
+            "48540a5719d472401097b51fa9a218bbaa162e7bcd06cc39cba34ed3bc50c510",
+            "5367d00d5a6dcb6d6f30cae38aac7883f30447a6a15fa614c15e93ce18b9a421",
+            "6ddb469918cb8e0513906b4341b4f9dc1fb4b7a83a5876aaec849c9eb3b67fcd",
+            "7149cacf3896e488bca93d914168a2f9e9eacd69ad2215c9f47fca5dfaff38a3",
+            "a6ae2b974f4b108a987898b01ba6f642de57548cb9e0610afafe981dd0971af4",
+            "af91738d609a13325d22695b07e788e14bd5618c058bda25f34c70cdf3d7125e",
+            "b4189d4b09441b394bc0410ab0ce46531302804f8365114f846fecbd668f9e2b",
+            "c03d4f3ba300248dcf55019f0ce8035e95ab2f17cdf668010670f6c79a53429b",
+            "c78b250be21a1ab8564b4c11e3f39958bfd8398fc6e53b42b7a18232d359c5a6",
+            "ee3ecacc6cc0a410626b8ea6e4dd286ce5c61878b91e06313e3352ce6ae37cd8",
+            "ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/codex-多厂商-fork-应作为独立衍生项目.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2700,
+        "bytesSha256": "61c39ec50b2b36d5df7c9316d1f1e7b87a3d5e122a64770d78204d4a8222c1fa",
+        "sourceIds": [
+          "37286852b8205bf774c449e825fa3138073dc4856f46efb62b61de462da5ea79",
+          "394539647d0b92ebdefba577fc761451c68b116238899181506f7e79ce2a3441",
+          "39f8271c51aa58c122ffac3dedea56f7e8cc384a4f2fe51568e01ffa27c65e0c",
+          "3d365f56f4312a21b3d3ab9afd0a420c64aed961d6aae68a7f83c1432f5638f9",
+          "3e51ef382afe4a172ebbffaede7237581ed1e56a00a2003d1264e006854148ee",
+          "7aac1bdbe99b9c1e081a7de3f0c8a61fc245e1e04b04989452ecbde150687034",
+          "88dae759e9e59b4481eb3077575feb675f08921f59ca3685146fccf75bedbf6d",
+          "9be5e551691a8f99df8f7350d2a79474c8c98e21fec8a40f350c7d65a4b524ed",
+          "d15ba043d496554072ef0190cc7c74bfe496bf47e0428d8120d3474570119313",
+          "d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915",
+          "ded3e3048d2ce91cd3330c15a795984c3768ae5ac82f513e352bc55a81c622fb",
+          "e126f642782067af320d9554e294c5ccb92aecdf7fbcd3ea406bf22d418c16c1"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "61c39ec50b2b36d5df7c9316d1f1e7b87a3d5e122a64770d78204d4a8222c1fa",
+          "recomputedSourceEventIds": [
+            "37286852b8205bf774c449e825fa3138073dc4856f46efb62b61de462da5ea79",
+            "394539647d0b92ebdefba577fc761451c68b116238899181506f7e79ce2a3441",
+            "39f8271c51aa58c122ffac3dedea56f7e8cc384a4f2fe51568e01ffa27c65e0c",
+            "3d365f56f4312a21b3d3ab9afd0a420c64aed961d6aae68a7f83c1432f5638f9",
+            "3e51ef382afe4a172ebbffaede7237581ed1e56a00a2003d1264e006854148ee",
+            "7aac1bdbe99b9c1e081a7de3f0c8a61fc245e1e04b04989452ecbde150687034",
+            "88dae759e9e59b4481eb3077575feb675f08921f59ca3685146fccf75bedbf6d",
+            "9be5e551691a8f99df8f7350d2a79474c8c98e21fec8a40f350c7d65a4b524ed",
+            "d15ba043d496554072ef0190cc7c74bfe496bf47e0428d8120d3474570119313",
+            "d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915",
+            "ded3e3048d2ce91cd3330c15a795984c3768ae5ac82f513e352bc55a81c622fb",
+            "e126f642782067af320d9554e294c5ccb92aecdf7fbcd3ea406bf22d418c16c1"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/codex-跨厂商调用分为模型访问与编排语义.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2053,
+        "bytesSha256": "11fa90c928968ab66b35362a034f882e3fa4e9374ac304869aa1e93f753ac5af",
+        "sourceIds": [
+          "07a10f7ce51fe46db1a451377f342ea0c8a33f2cbc485e453010d1552dff6806",
+          "09c7b5722885fef99f29b32feea1c82059c2286e0109bc80e20b47ad8a3a279f",
+          "0d1c1228d48601fdbfa02203a3aa9e709c2d9cae2e8d836b4f9d16a44afcb6b4",
+          "2fed6f5940bc69f906b5821234730b342641f11dc96c3f26e9ed16cba8471474",
+          "51c171309bebb2988de23a6570f959b273ddf1d46c3cc4bf1d3a23d5e6f99542",
+          "527958fa01e103957c7235a58a0060817453ed63080b3319c09d188e57aaee91",
+          "6fcb1e4ad52228d9ce4850adb62dbb20a05947894bddec2fe2ae472b20ee653e",
+          "89becc4026b732b97e4a6e37f65781d621878c3377022724f27274fed381d7de",
+          "b5cbadf6f06f1c6a1aa6b124ce15b61a85968d7cf90ff1b497424ff9168b46c1",
+          "c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed",
+          "ccd6d6f071433475bfaa6c8b79de14bf89842b8a4d4a91365bf01aaea665ab55",
+          "ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4",
+          "f3cc2fa8b8da685d945cfbbe2737fad6715e9e40e6e2bad95a56c37156cbd414"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "11fa90c928968ab66b35362a034f882e3fa4e9374ac304869aa1e93f753ac5af",
+          "recomputedSourceEventIds": [
+            "07a10f7ce51fe46db1a451377f342ea0c8a33f2cbc485e453010d1552dff6806",
+            "09c7b5722885fef99f29b32feea1c82059c2286e0109bc80e20b47ad8a3a279f",
+            "0d1c1228d48601fdbfa02203a3aa9e709c2d9cae2e8d836b4f9d16a44afcb6b4",
+            "2fed6f5940bc69f906b5821234730b342641f11dc96c3f26e9ed16cba8471474",
+            "51c171309bebb2988de23a6570f959b273ddf1d46c3cc4bf1d3a23d5e6f99542",
+            "527958fa01e103957c7235a58a0060817453ed63080b3319c09d188e57aaee91",
+            "6fcb1e4ad52228d9ce4850adb62dbb20a05947894bddec2fe2ae472b20ee653e",
+            "89becc4026b732b97e4a6e37f65781d621878c3377022724f27274fed381d7de",
+            "b5cbadf6f06f1c6a1aa6b124ce15b61a85968d7cf90ff1b497424ff9168b46c1",
+            "c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed",
+            "ccd6d6f071433475bfaa6c8b79de14bf89842b8a4d4a91365bf01aaea665ab55",
+            "ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4",
+            "f3cc2fa8b8da685d945cfbbe2737fad6715e9e40e6e2bad95a56c37156cbd414"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/disabled-canonical-runtime-can-leave-valid-sediment-backlogs.md",
+        "status": "??",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2525,
+        "bytesSha256": "84caf3110376402085ac8441e3d639ee88ca18ba8673d9cc328a63ceee66283f",
+        "sourceIds": [
+          "e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "84caf3110376402085ac8441e3d639ee88ca18ba8673d9cc328a63ceee66283f",
+          "recomputedSourceEventIds": [
+            "e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/forward-deletion-of-hook-installers-requires-artifact-cleanup.md",
+        "status": "??",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2932,
+        "bytesSha256": "aa861674758e32b9e586f071cc4a4015896c7fc85da7a845ca2d0210e8b65af0",
+        "sourceIds": [
+          "4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c",
+          "be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "aa861674758e32b9e586f071cc4a4015896c7fc85da7a845ca2d0210e8b65af0",
+          "recomputedSourceEventIds": [
+            "4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c",
+            "be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/llm-audit-delta-aggregation-prevents-linear-log-growth.md",
+        "status": "??",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2788,
+        "bytesSha256": "1869330cd0fe9d2f4fe80dae3d47751eea15d035ec914bd131e5f55dbab563c4",
+        "sourceIds": [
+          "429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9",
+          "cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "1869330cd0fe9d2f4fe80dae3d47751eea15d035ec914bd131e5f55dbab563c4",
+          "recomputedSourceEventIds": [
+            "429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9",
+            "cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/native-codex-context-boundary-probe.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 3095,
+        "bytesSha256": "769a4383c71289a0f3125ca0d12621d33936325351a6b5adbdfb916163069bd9",
+        "sourceIds": [
+          "0d12f170abafb86fcf27344b4d0f67e0e449bda0070067d1f99561fe4ec165ad",
+          "0e5fd0e70f9ad54b53d9b0a7874d178638a6ce0036ab0432ffae3c14ae68e736",
+          "25e25b6663611c3cfbbd07a7cd89cb9d2539c78f76fe095c0aa1879a96a95d7c",
+          "28e0ad6a92602e411c9f00bd16286ccd17a5c471a47f67e9510ed37847c6a5ff",
+          "40444bd9276463959baa7488d33f28451fa46312537a6eb00c01477f745a37bd",
+          "43e6c8e7253f81c10de5213921a38eaaf28094f829ed71936a33b57bce0133e6",
+          "586cda065ff8206d21466b8b2ca20b0cc8713fb7e8fd3666e8904da94edca8b1",
+          "6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95",
+          "83618b57c0c154aa85246f5cee1ce61934b76e3299c39726c4bd32e0c475be10",
+          "90edd20a40e360af0def958815007b53a726e1fb7324a3a5445656725baee9a8",
+          "ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607",
+          "dcba4c63c627e178b323391108a6768264d8b4f3752846c3abbb730818c129f9",
+          "f73a59e8b78127013541387d7fe6f94d36c71ed3c70dca8cf462082ff865fb38",
+          "fce2e45262e39dcd7aa7b4b6b51b3b9f801e6de671d5d88a85991ffce9a80d83"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "769a4383c71289a0f3125ca0d12621d33936325351a6b5adbdfb916163069bd9",
+          "recomputedSourceEventIds": [
+            "0d12f170abafb86fcf27344b4d0f67e0e449bda0070067d1f99561fe4ec165ad",
+            "0e5fd0e70f9ad54b53d9b0a7874d178638a6ce0036ab0432ffae3c14ae68e736",
+            "25e25b6663611c3cfbbd07a7cd89cb9d2539c78f76fe095c0aa1879a96a95d7c",
+            "28e0ad6a92602e411c9f00bd16286ccd17a5c471a47f67e9510ed37847c6a5ff",
+            "40444bd9276463959baa7488d33f28451fa46312537a6eb00c01477f745a37bd",
+            "43e6c8e7253f81c10de5213921a38eaaf28094f829ed71936a33b57bce0133e6",
+            "586cda065ff8206d21466b8b2ca20b0cc8713fb7e8fd3666e8904da94edca8b1",
+            "6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95",
+            "83618b57c0c154aa85246f5cee1ce61934b76e3299c39726c4bd32e0c475be10",
+            "90edd20a40e360af0def958815007b53a726e1fb7324a3a5445656725baee9a8",
+            "ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607",
+            "dcba4c63c627e178b323391108a6768264d8b4f3752846c3abbb730818c129f9",
+            "f73a59e8b78127013541387d7fe6f94d36c71ed3c70dca8cf462082ff865fb38",
+            "fce2e45262e39dcd7aa7b4b6b51b3b9f801e6de671d5d88a85991ffce9a80d83"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/pi-astack-cross-vendor-review-caught-real-gate-regressions.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2092,
+        "bytesSha256": "6b89666894e4984932e2f833bbd4e8d1c1022ad24ff20a92cea1913f79d1d255",
+        "sourceIds": [
+          "008acf4cea71217d0360e24e955157c94eacd13147a2aa0141d38c60a2dae21e",
+          "18bf2bdab2b9a5b696676bd2d8e526be19cfdd92fd9224c0629adc061441f2ba",
+          "1ae717630b5abbe46165b30496ae7d220c84c26bdeb1142c848dce670383d455",
+          "297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7",
+          "3168f36ab6e1f73869474ff97d6f1a7950a5acd9b8bc3da37be979e3214797e1",
+          "4a00a6a7b237b2d5be654b363d019b8a5d18c185d4c7e6618bed80fa3a3ee8ae",
+          "694a993d8448093028d268168a667046672bc2304a352adcdbfa9f029530a304",
+          "7cedace08b5ddb7de1294732b4dc2e3fe840967a4bea2c8d60c4aa7f63642ad2",
+          "7ffafbefbbc420b48962b7beb86827939d99fadb59a927d77515f89eb23a6e0b",
+          "a55ab292eecba71fc19119092d0121aab090e1c289cff07ed5e8485754eb9f84",
+          "a59663eb7dac83e76b2cf3837e7d92add531da2bf4af1cfde4468f98032f2178",
+          "a8ee35acb52ecff00181d8c946681395154d862919ddd81b098b8027d7b7cf3c",
+          "ae2f7a004bfb5420f3607cc0cc4ddb302f0b18c30a0895564bb9bc9c0436471e",
+          "af558145a2baf9804e4f7e944dc693e8134031a181cbfd559c29ccbe788a1169",
+          "b9ea09cbf9dd339cc977ace0cf280278c20f51dacdf1777a222f46cae7e9074e",
+          "bd6639ba2b350f9ff5aa97d086c554f1b37e8717002cd3034b8f29a1604a6369",
+          "bff5a504a2a636b05eea81fb5de6305bd3698d64b248ea2ce6bbc7f442869e3c",
+          "cc01435a64c081ddd1b003eeefb880b3209c36dd5cfe9ad87deb8bed479a0bfe",
+          "cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b",
+          "d5780e9c13db8a4f0a781d9b8a92d2717ac9e755f2aadce8d6e2f02789fb46e3",
+          "ea8fb457b8720ead2f684b4d3316b6a09fa7b7840c26c34e33ecc3a05ddcd6e2",
+          "f70d343ff0b4b6f83a1ea64a3f89f3cf3d670284eb46fb336073a6636ec9735a",
+          "fddfb5f941791c978fab2c1522ba5048a90845f85eb2695472b70e7d71815bdb"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "6b89666894e4984932e2f833bbd4e8d1c1022ad24ff20a92cea1913f79d1d255",
+          "recomputedSourceEventIds": [
+            "008acf4cea71217d0360e24e955157c94eacd13147a2aa0141d38c60a2dae21e",
+            "18bf2bdab2b9a5b696676bd2d8e526be19cfdd92fd9224c0629adc061441f2ba",
+            "1ae717630b5abbe46165b30496ae7d220c84c26bdeb1142c848dce670383d455",
+            "297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7",
+            "3168f36ab6e1f73869474ff97d6f1a7950a5acd9b8bc3da37be979e3214797e1",
+            "4a00a6a7b237b2d5be654b363d019b8a5d18c185d4c7e6618bed80fa3a3ee8ae",
+            "694a993d8448093028d268168a667046672bc2304a352adcdbfa9f029530a304",
+            "7cedace08b5ddb7de1294732b4dc2e3fe840967a4bea2c8d60c4aa7f63642ad2",
+            "7ffafbefbbc420b48962b7beb86827939d99fadb59a927d77515f89eb23a6e0b",
+            "a55ab292eecba71fc19119092d0121aab090e1c289cff07ed5e8485754eb9f84",
+            "a59663eb7dac83e76b2cf3837e7d92add531da2bf4af1cfde4468f98032f2178",
+            "a8ee35acb52ecff00181d8c946681395154d862919ddd81b098b8027d7b7cf3c",
+            "ae2f7a004bfb5420f3607cc0cc4ddb302f0b18c30a0895564bb9bc9c0436471e",
+            "af558145a2baf9804e4f7e944dc693e8134031a181cbfd559c29ccbe788a1169",
+            "b9ea09cbf9dd339cc977ace0cf280278c20f51dacdf1777a222f46cae7e9074e",
+            "bd6639ba2b350f9ff5aa97d086c554f1b37e8717002cd3034b8f29a1604a6369",
+            "bff5a504a2a636b05eea81fb5de6305bd3698d64b248ea2ce6bbc7f442869e3c",
+            "cc01435a64c081ddd1b003eeefb880b3209c36dd5cfe9ad87deb8bed479a0bfe",
+            "cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b",
+            "d5780e9c13db8a4f0a781d9b8a92d2717ac9e755f2aadce8d6e2f02789fb46e3",
+            "ea8fb457b8720ead2f684b4d3316b6a09fa7b7840c26c34e33ecc3a05ddcd6e2",
+            "f70d343ff0b4b6f83a1ea64a3f89f3cf3d670284eb46fb336073a6636ec9735a",
+            "fddfb5f941791c978fab2c1522ba5048a90845f85eb2695472b70e7d71815bdb"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/pi-astack-llm-audit-uses-bounded-aggregation-and-signed-retention.md",
+        "status": "??",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 3546,
+        "bytesSha256": "730931960554584b56e592ec568c9e81426169b54659b9a652f074d95a7083b4",
+        "sourceIds": [
+          "c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "730931960554584b56e592ec568c9e81426169b54659b9a652f074d95a7083b4",
+          "recomputedSourceEventIds": [
+            "c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/pi-astack-runtime-hardening-review-loop-pattern.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2740,
+        "bytesSha256": "d8ee2ccc3d29239fa49e823e261a9fc043c0d0cbcb0652e672a5997a03384dd9",
+        "sourceIds": [
+          "0e22fc47e24492e9612f27672e56c9d7df309d9d50ae18b438a2093bdc5e6c80",
+          "10fa33520c8e57a4606357ab5906a81b0223c21a8efd41c9c117dcffae8dcdaf",
+          "2409b2f60c05a1bee5ba4d53c12d54ad6906d8033f17f72cc09264ba4f42d1d8",
+          "37413991e42cd70e0e8ad9ee625494bdae907be8722a178623c7a359ebd4924d",
+          "4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19",
+          "6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413",
+          "75051d7a22d70a0b69fa4e8b112df4e60c92bd8ab5b1756fd533a004aab81538",
+          "7af7c0f1e2a3a6d2b9506862d9b4d612d0480ec0905f76a77242399db4639412",
+          "8f5940b549006074b8585543e41c0377fc5ad15b841a4dcb46666eadb8d77f51",
+          "9ab5c646fabf262919e7967d96a8e138eeb15acfcf65722d7b32f6c77b65b7af",
+          "a0d3b040946de57d50b59f33c662a7102940a859365ced15d9e9b96081bda795",
+          "a0d4828634b059f022fda466d878b3fa549be61afdbfc07eb91e5f627c59dd9e",
+          "a9f2c36d014abfe1dd8ae2a079236458a3d1b5d40e07a1945105689c3c538fd9",
+          "b3ca45c7fcdee551dc1ab4308b46971f51cee25fe9c4ebf27c875c8b082de972",
+          "ba9b2da5db60a5e7ab25b016f9c70f95535d3fb80c7844c2b734cd9e37923a0e",
+          "bb25722d65b74b378f945457c8cdcaecc65f5e7018a552bbb8c8c6a2f45f6c50",
+          "c0702ca90d2d2e818ceda25db80bfc118eb5386c50da90d77626687bedd73ff5",
+          "c915bb3364190389fc09cd5f84acc2b92feca9cc49b4bc0b2044c47f41ec0356",
+          "ccf596ab4000524a0895eecf1c986bf16cb1a857ca736456371ba2359c51cdd8",
+          "e6768631b164bba5f6a4c3e43ca04572ec86f70512405da4ce1ecf3d569e4862",
+          "eca855495618fe730245f60e13fe072fa02f366b23d30eb76547c72ac9a2d9bb",
+          "ede6570891518e435a30491c2a4196b8b3fed50d14b16e1b34823c3808842887",
+          "f9f922e8006a878b70a8bac3678be20291b85cfb43886656aa4f23bfceaded36"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "d8ee2ccc3d29239fa49e823e261a9fc043c0d0cbcb0652e672a5997a03384dd9",
+          "recomputedSourceEventIds": [
+            "0e22fc47e24492e9612f27672e56c9d7df309d9d50ae18b438a2093bdc5e6c80",
+            "10fa33520c8e57a4606357ab5906a81b0223c21a8efd41c9c117dcffae8dcdaf",
+            "2409b2f60c05a1bee5ba4d53c12d54ad6906d8033f17f72cc09264ba4f42d1d8",
+            "37413991e42cd70e0e8ad9ee625494bdae907be8722a178623c7a359ebd4924d",
+            "4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19",
+            "6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413",
+            "75051d7a22d70a0b69fa4e8b112df4e60c92bd8ab5b1756fd533a004aab81538",
+            "7af7c0f1e2a3a6d2b9506862d9b4d612d0480ec0905f76a77242399db4639412",
+            "8f5940b549006074b8585543e41c0377fc5ad15b841a4dcb46666eadb8d77f51",
+            "9ab5c646fabf262919e7967d96a8e138eeb15acfcf65722d7b32f6c77b65b7af",
+            "a0d3b040946de57d50b59f33c662a7102940a859365ced15d9e9b96081bda795",
+            "a0d4828634b059f022fda466d878b3fa549be61afdbfc07eb91e5f627c59dd9e",
+            "a9f2c36d014abfe1dd8ae2a079236458a3d1b5d40e07a1945105689c3c538fd9",
+            "b3ca45c7fcdee551dc1ab4308b46971f51cee25fe9c4ebf27c875c8b082de972",
+            "ba9b2da5db60a5e7ab25b016f9c70f95535d3fb80c7844c2b734cd9e37923a0e",
+            "bb25722d65b74b378f945457c8cdcaecc65f5e7018a552bbb8c8c6a2f45f6c50",
+            "c0702ca90d2d2e818ceda25db80bfc118eb5386c50da90d77626687bedd73ff5",
+            "c915bb3364190389fc09cd5f84acc2b92feca9cc49b4bc0b2044c47f41ec0356",
+            "ccf596ab4000524a0895eecf1c986bf16cb1a857ca736456371ba2359c51cdd8",
+            "e6768631b164bba5f6a4c3e43ca04572ec86f70512405da4ce1ecf3d569e4862",
+            "eca855495618fe730245f60e13fe072fa02f366b23d30eb76547c72ac9a2d9bb",
+            "ede6570891518e435a30491c2a4196b8b3fed50d14b16e1b34823c3808842887",
+            "f9f922e8006a878b70a8bac3678be20291b85cfb43886656aa4f23bfceaded36"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/pi-sub2api-gpt-5-6-context-requires-two-synchronized-overrides.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2469,
+        "bytesSha256": "016104757d7a6996b65ddb9ac20955deb23214a8c9a5ebaa79ee2a4b48e737bb",
+        "sourceIds": [
+          "002ac8317b5df13320ea1d193cd98a3199ab29470bad3ce4ad4e31f24a06342a",
+          "0fca4bcc80a1160e18bee5c1bb3da83f55b73dbb0eca5ef881b400dec29ccd1d",
+          "139a66b89bb42503218c3a64bad6c8b0cff39ae9f1bc64d8cbeb50a9bf55dccf",
+          "14dd232979c2349beeee0f445edbd94617dbbfc28c5182912556d56638c3969b",
+          "1abe100057ffbcbc65d3b1175486bb0b7a583e162b0d49fb2b01a71f724467d8",
+          "261e9aa567912c8ed31db89014de4569e0142e8f44eddbca122f5c657a20be95",
+          "462cef133b7479f7c3b00394edcd2bdbfc55111236c506309bd20f4c3223d6dd",
+          "59285558593173a3c10d2ae49c96847cbe91e9ff936a114d9c45e4ad9cc1047e",
+          "5cfc17330b6b172365870baf0954138c29007f5029277429e987c2eea973f2c6",
+          "5f43f640e996a09184527e20060931365c8f63a32cbd58c0e68ed51b65fb3a9b",
+          "7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0",
+          "8b4c2c771991b86807f56060872c85929dc26c6d05f9dfc3dbfb2493861cc7b8",
+          "9536cf32c9e7d1b40413a35881f3dcf7397cd020475cf652350d5fa233ffdcd4",
+          "a57a1e80b02594639555690c001f6c21cc054e428b2860d4e80d7d4ee97e41d0",
+          "c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2",
+          "d98a63518c2543656c813c82f6f69e4db404c40fda6d6ba91b36a52ef10b9865",
+          "dfbe62c2eb35bda527a2af011d22d230fbcadeff7c2902185875c0ca2334d1f9"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "016104757d7a6996b65ddb9ac20955deb23214a8c9a5ebaa79ee2a4b48e737bb",
+          "recomputedSourceEventIds": [
+            "002ac8317b5df13320ea1d193cd98a3199ab29470bad3ce4ad4e31f24a06342a",
+            "0fca4bcc80a1160e18bee5c1bb3da83f55b73dbb0eca5ef881b400dec29ccd1d",
+            "139a66b89bb42503218c3a64bad6c8b0cff39ae9f1bc64d8cbeb50a9bf55dccf",
+            "14dd232979c2349beeee0f445edbd94617dbbfc28c5182912556d56638c3969b",
+            "1abe100057ffbcbc65d3b1175486bb0b7a583e162b0d49fb2b01a71f724467d8",
+            "261e9aa567912c8ed31db89014de4569e0142e8f44eddbca122f5c657a20be95",
+            "462cef133b7479f7c3b00394edcd2bdbfc55111236c506309bd20f4c3223d6dd",
+            "59285558593173a3c10d2ae49c96847cbe91e9ff936a114d9c45e4ad9cc1047e",
+            "5cfc17330b6b172365870baf0954138c29007f5029277429e987c2eea973f2c6",
+            "5f43f640e996a09184527e20060931365c8f63a32cbd58c0e68ed51b65fb3a9b",
+            "7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0",
+            "8b4c2c771991b86807f56060872c85929dc26c6d05f9dfc3dbfb2493861cc7b8",
+            "9536cf32c9e7d1b40413a35881f3dcf7397cd020475cf652350d5fa233ffdcd4",
+            "a57a1e80b02594639555690c001f6c21cc054e428b2860d4e80d7d4ee97e41d0",
+            "c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2",
+            "d98a63518c2543656c813c82f6f69e4db404c40fda6d6ba91b36a52ef10b9865",
+            "dfbe62c2eb35bda527a2af011d22d230fbcadeff7c2902185875c0ca2334d1f9"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/safe-cleanup-of-oversized-project-scoped-audits.md",
+        "status": "??",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2803,
+        "bytesSha256": "a2efc38d013ed0b6e8d73394d01d30e1218f921d5766cbebe5b56202e59ca6b2",
+        "sourceIds": [
+          "5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "a2efc38d013ed0b6e8d73394d01d30e1218f921d5766cbebe5b56202e59ca6b2",
+          "recomputedSourceEventIds": [
+            "5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-global/soft-delete-default-hard-delete-exceptions.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 3503,
+        "bytesSha256": "1536486a7d7ebff7be694aa3157a323ccdb0eac4c0d662c0dd8ce89ee522adec",
+        "sourceIds": [
+          "10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb",
+          "21b1bf127a86366133cd4b6a972458b5e41d7387975bed65e236cb92fffcae88",
+          "261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e",
+          "2acf7609518fb22e5d384abdb232a291d1a05a59b9458e9bdbb7001275f8c296",
+          "2b630b5b3654d3bf335db7abd8c5ac0f9eda86edf824f1f28b290a077da7d244",
+          "316c0cc139babffdf1623a7a9dcc8a1eff1bd3df26d9f303f7f31e4041c71aea",
+          "31b7d7bd05c0d3182a8d01ccbeb61558c78c943f4ceb9dca49e9ea5108014ffa",
+          "3573ecdd483a4670f5c71cfe81be43dca5711b694bf6a28d3d11c3c12c0829a4",
+          "4222c42fb05f8e5b6dd2833e5ada887751d4f4b89db10e564b4fd715411c35e7",
+          "4486b9681442b5415f33e9d23759520fd3ed4764d7a119e181e2fcef79805327",
+          "4716a220778693f156bf4771f8bbea4ec071614a06aee78f326de3c69491f188",
+          "9ecb72e15c6adb074997b44f2d3bc0dc9d27387ef7b547256a22e1f610ba1569",
+          "c00148f26c54fddbb79b32c5b0f3dcf8be6a95bb0986b88ce81a7df80c0414d6",
+          "e3f814223e19399f1f5835f30bd0c0f8800bc7e3be486e6c3e8b1ae39a6d711b",
+          "eb28bf22d661f6cf5c247b264f1d39bc518f0eb41b632abd99e553dd419ba10c",
+          "f2ddaa62f15450b1fe35cedf3c3861a35c9346d3e0ae6bc106841ac2e8cf7f53",
+          "fd0b38eb1f2ccbe1837f349245a7035a7f6a2270355f513cace484320c0f92c4",
+          "fd5f49dfef51d77a8b09ce79f585928aab66ab78a266f8c62f5c968a8f99cc79"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "1536486a7d7ebff7be694aa3157a323ccdb0eac4c0d662c0dd8ce89ee522adec",
+          "recomputedSourceEventIds": [
+            "10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb",
+            "21b1bf127a86366133cd4b6a972458b5e41d7387975bed65e236cb92fffcae88",
+            "261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e",
+            "2acf7609518fb22e5d384abdb232a291d1a05a59b9458e9bdbb7001275f8c296",
+            "2b630b5b3654d3bf335db7abd8c5ac0f9eda86edf824f1f28b290a077da7d244",
+            "316c0cc139babffdf1623a7a9dcc8a1eff1bd3df26d9f303f7f31e4041c71aea",
+            "31b7d7bd05c0d3182a8d01ccbeb61558c78c943f4ceb9dca49e9ea5108014ffa",
+            "3573ecdd483a4670f5c71cfe81be43dca5711b694bf6a28d3d11c3c12c0829a4",
+            "4222c42fb05f8e5b6dd2833e5ada887751d4f4b89db10e564b4fd715411c35e7",
+            "4486b9681442b5415f33e9d23759520fd3ed4764d7a119e181e2fcef79805327",
+            "4716a220778693f156bf4771f8bbea4ec071614a06aee78f326de3c69491f188",
+            "9ecb72e15c6adb074997b44f2d3bc0dc9d27387ef7b547256a22e1f610ba1569",
+            "c00148f26c54fddbb79b32c5b0f3dcf8be6a95bb0986b88ce81a7df80c0414d6",
+            "e3f814223e19399f1f5835f30bd0c0f8800bc7e3be486e6c3e8b1ae39a6d711b",
+            "eb28bf22d661f6cf5c247b264f1d39bc518f0eb41b632abd99e553dd419ba10c",
+            "f2ddaa62f15450b1fe35cedf3c3861a35c9346d3e0ae6bc106841ac2e8cf7f53",
+            "fd0b38eb1f2ccbe1837f349245a7035a7f6a2270355f513cace484320c0f92c4",
+            "fd5f49dfef51d77a8b09ce79f585928aab66ab78a266f8c62f5c968a8f99cc79"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-router/auto-compact-audit-rows-must-not-remain-permanently-sent.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2078,
+        "bytesSha256": "53f858cc553eb7be3e400e96f55214a16a33d9ea2bc4ef21c31b18693f6406cb",
+        "sourceIds": [
+          "2295cfd935cb9157d3cb1cb56e6c868ec3872672c7e6644e7d3a514aa39c6cd6",
+          "34e75e38f4f92608ed07018795b4f119c14f673ea1ab00ba57ff920b22a3b1be",
+          "8585f1045c1162e8c112c7c2ae180ac97c1d7ba0ef4d6cb4cd432361e07c5398",
+          "960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4",
+          "c75dce5cf73cb070b1a16e896033f70fc2ab2715ffc7696e2131e1ad49caf096"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "53f858cc553eb7be3e400e96f55214a16a33d9ea2bc4ef21c31b18693f6406cb",
+          "recomputedSourceEventIds": [
+            "2295cfd935cb9157d3cb1cb56e6c868ec3872672c7e6644e7d3a514aa39c6cd6",
+            "34e75e38f4f92608ed07018795b4f119c14f673ea1ab00ba57ff920b22a3b1be",
+            "8585f1045c1162e8c112c7c2ae180ac97c1d7ba0ef4d6cb4cd432361e07c5398",
+            "960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4",
+            "c75dce5cf73cb070b1a16e896033f70fc2ab2715ffc7696e2131e1ad49caf096"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-router/pi-router-remaining-durable-verification-gaps.md",
+        "status": " M",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2879,
+        "bytesSha256": "61b8abcd548933ea643281206d4b659629a0ce6549857543920726eb527e0910",
+        "sourceIds": [
+          "0ae2dabe3a9cf063d471cbd0f4558e973bca11833970b5c307e031b52452445f",
+          "12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a",
+          "464b1051cfc345476c58557acda46db3ae967e0802fe55c77fa0fb602b5f56d6",
+          "52796a63d087d5a10a45f477001afedbfeef3ff5262453911efcf65f2c5eb735",
+          "52d2921da25a0ef82f70bb0312842e3807e514a2ed5034994a51418741532707",
+          "5413ecf69c7b6592c83d856ea95207c5ff4ca091fa970c31a4f49b7e3f697da2",
+          "618cd875177e22d97b16e1291b041736b348913c1a3328cb3c4681ca239b3250",
+          "67e475417040bf43e0496ded70730d11ee0bf1f10671e50ad648dc0079f0ec27",
+          "b032b7f51da22f0e9ec3b990503b352912b4d2127f76f07cc87d4f8a71b86f52",
+          "d2e902cb9add11e51213dae5a664f1d27079aec634d0393afeeb4d4530fcf522",
+          "d571a681b3341e17ea4ed7eb1c0a8ca86ed7b7fa65c235c17c5f8ca48bd72f92",
+          "eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf",
+          "f85ed7bb866ff210d7ab0d35915f2995fcb49a036728070feb8f7e34b3949a25"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "61b8abcd548933ea643281206d4b659629a0ce6549857543920726eb527e0910",
+          "recomputedSourceEventIds": [
+            "0ae2dabe3a9cf063d471cbd0f4558e973bca11833970b5c307e031b52452445f",
+            "12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a",
+            "464b1051cfc345476c58557acda46db3ae967e0802fe55c77fa0fb602b5f56d6",
+            "52796a63d087d5a10a45f477001afedbfeef3ff5262453911efcf65f2c5eb735",
+            "52d2921da25a0ef82f70bb0312842e3807e514a2ed5034994a51418741532707",
+            "5413ecf69c7b6592c83d856ea95207c5ff4ca091fa970c31a4f49b7e3f697da2",
+            "618cd875177e22d97b16e1291b041736b348913c1a3328cb3c4681ca239b3250",
+            "67e475417040bf43e0496ded70730d11ee0bf1f10671e50ad648dc0079f0ec27",
+            "b032b7f51da22f0e9ec3b990503b352912b4d2127f76f07cc87d4f8a71b86f52",
+            "d2e902cb9add11e51213dae5a664f1d27079aec634d0393afeeb4d4530fcf522",
+            "d571a681b3341e17ea4ed7eb1c0a8ca86ed7b7fa65c235c17c5f8ca48bd72f92",
+            "eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf",
+            "f85ed7bb866ff210d7ab0d35915f2995fcb49a036728070feb8f7e34b3949a25"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/pi-router/pi-router-v0-1-58-release-pipeline-hardening.md",
+        "status": "??",
+        "owner": "knowledge_l2",
+        "op": "put",
+        "bytes": 2417,
+        "bytesSha256": "8a8b9a6e7ab836767a8f54cd90b218d33195d2b6e613494981c1f4bafa12c1a8",
+        "sourceIds": [
+          "5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a"
+        ],
+        "proof": {
+          "kind": "l2_exact_recompute",
+          "renderer": "renderKnowledgeProjectionFromSet/identity-fold",
+          "operation": "put",
+          "exactBytesSha256": "8a8b9a6e7ab836767a8f54cd90b218d33195d2b6e613494981c1f4bafa12c1a8",
+          "recomputedSourceEventIds": [
+            "5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a"
+          ],
+          "exactByteEqualAccepted": true
+        }
+      }
+    ],
+    "blockedPaths": [],
+    "legacyResidue": [
+      {
+        "path": "l1/events/sha256/17/50/1750cb2920b9a72284335107b13011bba21228b8ee0975a0d3a3bc3ae224fc3a.json",
+        "status": "??",
+        "eventId": "1750cb2920b9a72284335107b13011bba21228b8ee0975a0d3a3bc3ae224fc3a",
+        "envelopeSchema": "drain-recovery-envelope/v1",
+        "bodySchema": "drain-recovery-event/v1",
+        "eventType": "push_terminal_resolution_candidate",
+        "phase": "legacy_read_only"
+      }
+    ]
+  },
+  "ownershipEvidenceErrors": [],
+  "before": {
+    "capturedAtUtc": "2026-07-12T02:08:55.897Z",
+    "head": "c043aa218b2ef20813452b2d7c292699132b7437",
+    "ref": "refs/heads/main",
+    "rawIndex": {
+      "path": "/home/worker/.abrain/.git/index",
+      "bytesSha256": "c7701d32ee127440f6bebecc2582f12305433b9f7b72a79bc1a747880d1190ab"
+    },
+    "lock": {
+      "exists": false,
+      "path": "/home/worker/.abrain/.git/index.lock",
+      "kind": null,
+      "bytes": null,
+      "sha256": null
+    },
+    "status": {
+      "bytes": 4665,
+      "sha256": "de0bbd79c7d300bbabaf890b4d49d7dcd3f69972b324a0bde67d4df7e0b298b3",
+      "records": [
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-global/chatgpt-codex-oauth-rejects-explicit-truncation-fields.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/chatgpt-codex-oauth-rejects-explicit-truncation-fields.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-global/codex-多厂商-fork-应作为独立衍生项目.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/codex-多厂商-fork-应作为独立衍生项目.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-global/codex-跨厂商调用分为模型访问与编排语义.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/codex-跨厂商调用分为模型访问与编排语义.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-global/native-codex-context-boundary-probe.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/native-codex-context-boundary-probe.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-global/pi-astack-cross-vendor-review-caught-real-gate-regressions.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/pi-astack-cross-vendor-review-caught-real-gate-regressions.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-global/pi-astack-runtime-hardening-review-loop-pattern.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/pi-astack-runtime-hardening-review-loop-pattern.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-global/pi-sub2api-gpt-5-6-context-requires-two-synchronized-overrides.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/pi-sub2api-gpt-5-6-context-requires-two-synchronized-overrides.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-global/soft-delete-default-hard-delete-exceptions.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/soft-delete-default-hard-delete-exceptions.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-router/auto-compact-audit-rows-must-not-remain-permanently-sent.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-router/auto-compact-audit-rows-must-not-remain-permanently-sent.md"
+          ]
+        },
+        {
+          "status": " M",
+          "x": " ",
+          "y": "M",
+          "path": "l2/views/knowledge/latest/projects/pi-router/pi-router-remaining-durable-verification-gaps.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-router/pi-router-remaining-durable-verification-gaps.md"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/10/80/10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/10/80/10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/12/db/12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/12/db/12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/17/50/1750cb2920b9a72284335107b13011bba21228b8ee0975a0d3a3bc3ae224fc3a.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/17/50/1750cb2920b9a72284335107b13011bba21228b8ee0975a0d3a3bc3ae224fc3a.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/26/17/261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/26/17/261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/29/7c/297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/29/7c/297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/31/38/3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/31/38/3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/36/02/360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/36/02/360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/42/95/429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/42/95/429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/4b/67/4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/4b/67/4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/4f/ba/4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/4f/ba/4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/5b/8c/5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/5b/8c/5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/5e/71/5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/5e/71/5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/65/69/6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/65/69/6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/6f/33/6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/6f/33/6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/7c/a1/7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/7c/a1/7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/96/0a/960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/96/0a/960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/ac/00/ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/ac/00/ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/be/02/be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/be/02/be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/c1/0e/c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/c1/0e/c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/c4/ce/c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/c4/ce/c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/c4/f6/c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/c4/f6/c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/c7/91/c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/c7/91/c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/cb/49/cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/cb/49/cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/cc/22/cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/cc/22/cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/d9/f0/d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/d9/f0/d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/dd/d1/ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/dd/d1/ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/e6/cc/e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/e6/cc/e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/eb/9d/eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/eb/9d/eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l1/events/sha256/ef/64/ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68.json",
+          "sourcePath": null,
+          "paths": [
+            "l1/events/sha256/ef/64/ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68.json"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l2/views/knowledge/latest/projects/pi-global/audit-retention-requires-authenticated-recoverable-deletion.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/audit-retention-requires-authenticated-recoverable-deletion.md"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l2/views/knowledge/latest/projects/pi-global/canonical-git-transport-should-delegate-authentication.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/canonical-git-transport-should-delegate-authentication.md"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l2/views/knowledge/latest/projects/pi-global/disabled-canonical-runtime-can-leave-valid-sediment-backlogs.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/disabled-canonical-runtime-can-leave-valid-sediment-backlogs.md"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l2/views/knowledge/latest/projects/pi-global/forward-deletion-of-hook-installers-requires-artifact-cleanup.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/forward-deletion-of-hook-installers-requires-artifact-cleanup.md"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l2/views/knowledge/latest/projects/pi-global/llm-audit-delta-aggregation-prevents-linear-log-growth.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/llm-audit-delta-aggregation-prevents-linear-log-growth.md"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l2/views/knowledge/latest/projects/pi-global/pi-astack-llm-audit-uses-bounded-aggregation-and-signed-retention.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/pi-astack-llm-audit-uses-bounded-aggregation-and-signed-retention.md"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l2/views/knowledge/latest/projects/pi-global/safe-cleanup-of-oversized-project-scoped-audits.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-global/safe-cleanup-of-oversized-project-scoped-audits.md"
+          ]
+        },
+        {
+          "status": "??",
+          "x": "?",
+          "y": "?",
+          "path": "l2/views/knowledge/latest/projects/pi-router/pi-router-v0-1-58-release-pipeline-hardening.md",
+          "sourcePath": null,
+          "paths": [
+            "l2/views/knowledge/latest/projects/pi-router/pi-router-v0-1-58-release-pipeline-hardening.md"
+          ]
+        }
+      ]
+    },
+    "pathEvidence": {
+      "l1/events/sha256/10/80/10804404874b4547e5a9a8b19b93bd38603f059037ce1abb9279b3fdfcd9adeb.json": {
+        "worktreeSha256": "269e13ad8d09403f4337ca411536b64ac89b9ca9e3ecb044cee315db1961d258",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/12/db/12db6b5463739d79e2fc3d6c53ae3ac05906702f682cc9bf96c0a605c219fe5a.json": {
+        "worktreeSha256": "3caa58a3d4743f9a1ba72564ad26dae6effa466254b2345a37be1bd7f3a4efb7",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/17/50/1750cb2920b9a72284335107b13011bba21228b8ee0975a0d3a3bc3ae224fc3a.json": {
+        "worktreeSha256": "90c20aa95997b024323b928300ab44a22ef441d5a90338bf3e604cda21f74c70",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/26/17/261778802ba11395578f473739fdf95b9d8675cd3e8d40629537011bce4d3e1e.json": {
+        "worktreeSha256": "ba10d9dc1dce56bdc6fbaeba176bd36d029268c5cf30bc9d002900dc077e6752",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/29/7c/297cec7c54d670ff292b3801ea6df28cc0875051d5bdf0dc5ad952c635f4dfc7.json": {
+        "worktreeSha256": "3f02f196a7978dc249c1a7dcbcbd7ce0db4f4a69f0c33f542356a50b55123dfc",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/31/38/3138a435590fae11a773c3205887e902892bbc9240f94bb80cc4dae1702bb03c.json": {
+        "worktreeSha256": "85520a12dbbb856a0914ae0e4a8d68f8e529bb87907781f3a4cc08d2d968bf33",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/36/02/360226bf61c54543dcb5db97a64ed00f3ad7906ef6fad5e478b5605f92e68bef.json": {
+        "worktreeSha256": "7deabc39a7dc3cb2648a109253420d6a60e34934d52cae2696bdee7e70a24f7e",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/42/95/429526d9ad9a9206d7e67658a6dc837586f676108a95b065dc5a979dee5aaee9.json": {
+        "worktreeSha256": "d0b07d4eaf16ad0a9857d901791f5b6aa2917067d8f6f80cb1a3527a6852fc43",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/4b/67/4b675c3387abb6d9ad4edfcddaa8ef330bf91ba57fef71ef9bf67c640ef36d19.json": {
+        "worktreeSha256": "a9a2dac4aef9aa1f1345924342fcdb2777480ec71a4fbe8753fe907768710d8b",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/4f/ba/4fba3c3def4c4a5ef8281f1ec951419cb74baa7640a003538b9e7ef25baa093c.json": {
+        "worktreeSha256": "93687498b435ad49f0fca3568cc29b79259de2ab66b9e16e2df80260e3bec131",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/5b/8c/5b8cc829165b46173f0e96a17a2b24cc7fe9d7c8c92db05919af88ba02bae55d.json": {
+        "worktreeSha256": "b42785236a926a50f129d613c460b6e525055f67455eed9e087423915e184d3d",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/5e/71/5e714b8781f6f4cbe5e14a7de138a3f191d0eec20af4b7732d41f16861cd6b8a.json": {
+        "worktreeSha256": "d89f7654cabb8007e30c6021c1bf5f11b5a7a09e8b34b283ebf147375f4f72f9",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/65/69/6569a6d3205c6745a319275b6ec7b790198d7adc2897ffd2f6019fdd57eb4e95.json": {
+        "worktreeSha256": "3713ba2b5a4dfb7862e935e8961816d47481c32acaaf3e71ae90037dd24b5e5c",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/6f/33/6f339e83bc1899ac6ffe00f0e20de6b9dfb5d8da9c5f40fd732fd7785be36413.json": {
+        "worktreeSha256": "479b70276aa8da56a550d11842d49159432e69fc13a2b56b2f162eeab4b69837",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/7c/a1/7ca14b258b34933881d7f93d9f1a43e4946530404ee72938f7aa201f0efb29e0.json": {
+        "worktreeSha256": "56b27f72b5d250cc8c2d7fd008dc8ca8aae0bef7ea7d89cc259b991f1f6342a5",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/96/0a/960a5b63aac188fbf63abeda23506950a86aa312be5032c2bc405c53d029bba4.json": {
+        "worktreeSha256": "512d5bd8e533a4cea032c0a4a05417ef742da9e57150a323733a874334cd8153",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/ac/00/ac00bb23a9f22ef056b7e74dbdb729a6b907aa4f67f029c7fdc3259a04798607.json": {
+        "worktreeSha256": "f431f8fd5f161dddc406620469632773768b54b01cb86be965deab621331124f",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/be/02/be027b8e2d854fa121d195a7e0d35e427e93c6e675f0fb3e3ad701135f6c1205.json": {
+        "worktreeSha256": "8ef87c8f8a1b4264914cbef8b554a6a795eb365f1a1af980f2afc1300e598876",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/c1/0e/c10efffa96f6f5406d2b477da990ec7afc2b5dc774b5db021bddb20f23aae4ed.json": {
+        "worktreeSha256": "f2b0bd89c84b556828d05b865b26c0a5bed2adde33a7a148a5f36498ae1da868",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/c4/ce/c4cee018d79359658392518645f663969b559a903e07033411b88d12dd4ac830.json": {
+        "worktreeSha256": "efefb270e2c857dfebf45e84725ef09bad733c492e7d6059a61ca5edfa875161",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/c4/f6/c4f663dd31078bbeff5450754d0407a78418dd6ce2dfd493721c21ef29e86cb2.json": {
+        "worktreeSha256": "d624290c452ee263fd7e31a9456fe584a27725c1ad85ee0b43f95f8088780913",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/c7/91/c791294301859dc478809ef8a8addd4a1f7e7cac394ae1f082ba7cab115f048a.json": {
+        "worktreeSha256": "13578af182837f35af659f988ba87afeb5d6ab607f185b108ab9abb91c1e03fd",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/cb/49/cb49e0a8392e5e929ba1d1a10d5afe4607ae0b09433a8a145b4b0b0e5521cc40.json": {
+        "worktreeSha256": "fff12683750c99db00f6307916a8fe06e756e76eb3f2e9eac9b4344835b50209",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/cc/22/cc22cf0f8c3e0cc40c3c327e420718581b79fd35ef5f7b1d91511999d417194b.json": {
+        "worktreeSha256": "c628403211d9eb19a5044af972c5a18e19da4988d9d17c825dc6d7e13bcff783",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/d9/f0/d9f0c94fefbe97f75d96a7db2bb0f525efdb829b3981750d10d1fc71ef08b915.json": {
+        "worktreeSha256": "a99ff02bd199db6b6b68b7d93754ab25aa7bbafd8f97877f4fefb123a8cfcb7a",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/dd/d1/ddd194cfc11b4c3dc431850ce8423417fdfce70442b6cc612ffcd99b1ec5c4e4.json": {
+        "worktreeSha256": "7aa6f5c675152d869ba5eff720da701947f70d0bd68f39da78cb2d351dfcfae0",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/e6/cc/e6cc52e4dfcf4715a6877efa0d075caa4a430e40dfd95833c713b06436f79960.json": {
+        "worktreeSha256": "38b756551cf55e727aab408e1f3969c6b65567bf2b028a13fc46370e865c4c26",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/eb/9d/eb9d84da8c068b40354a8bef295c7eb8f7142689cd60b48b97acf562ab1e76cf.json": {
+        "worktreeSha256": "2ccf42b78055f7608ca3f191240749bae50708eae97be5a321b99ad59bcafa4b",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l1/events/sha256/ef/64/ef64a64ca468b72a7af68a1c94977bf151f4e1319dd3629f4bbda7ef9a382a68.json": {
+        "worktreeSha256": "5240409d9bfa2be2f2686621c02b5404b3943b2df5bddbeda7d876f5fd7e9a2c",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/audit-retention-requires-authenticated-recoverable-deletion.md": {
+        "worktreeSha256": "8c6fa62534559c092a808aa610d3a90f52e5eef523b10ff39bea7591ee5b55cf",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/canonical-git-transport-should-delegate-authentication.md": {
+        "worktreeSha256": "7ca397c9d832a96058b48e3bdd267b7ee40dc1bf28b66f61fcaafd7f245b8835",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/chatgpt-codex-oauth-rejects-explicit-truncation-fields.md": {
+        "worktreeSha256": "a9d8d8ceea3cc74b4babf539e31251c13cb165bb9c32a5f6c9ff4ba90148e1c5",
+        "indexEntrySha256": "2418ab4d4b46dc7077c30579777e223fc02f70db967cc3eb2963bf7dbef7f7d7"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/codex-多厂商-fork-应作为独立衍生项目.md": {
+        "worktreeSha256": "61c39ec50b2b36d5df7c9316d1f1e7b87a3d5e122a64770d78204d4a8222c1fa",
+        "indexEntrySha256": "4971926e26ae3c46026631074860f37ebebcef36e566bdb0c4da3d615d66cbfb"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/codex-跨厂商调用分为模型访问与编排语义.md": {
+        "worktreeSha256": "11fa90c928968ab66b35362a034f882e3fa4e9374ac304869aa1e93f753ac5af",
+        "indexEntrySha256": "c1f61f37cc6bcec300bd54cc0deeb5d698e404ad6c3dc8446039643389781c9c"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/disabled-canonical-runtime-can-leave-valid-sediment-backlogs.md": {
+        "worktreeSha256": "84caf3110376402085ac8441e3d639ee88ca18ba8673d9cc328a63ceee66283f",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/forward-deletion-of-hook-installers-requires-artifact-cleanup.md": {
+        "worktreeSha256": "aa861674758e32b9e586f071cc4a4015896c7fc85da7a845ca2d0210e8b65af0",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/llm-audit-delta-aggregation-prevents-linear-log-growth.md": {
+        "worktreeSha256": "1869330cd0fe9d2f4fe80dae3d47751eea15d035ec914bd131e5f55dbab563c4",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/native-codex-context-boundary-probe.md": {
+        "worktreeSha256": "769a4383c71289a0f3125ca0d12621d33936325351a6b5adbdfb916163069bd9",
+        "indexEntrySha256": "e06eee8d518b9927f7157038c87b0519fc735f5bb9b046de89f4f926595dc9ff"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/pi-astack-cross-vendor-review-caught-real-gate-regressions.md": {
+        "worktreeSha256": "6b89666894e4984932e2f833bbd4e8d1c1022ad24ff20a92cea1913f79d1d255",
+        "indexEntrySha256": "bceca621e5276673472451c3012affbaa5844984cc850eedeec830b389f42b10"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/pi-astack-llm-audit-uses-bounded-aggregation-and-signed-retention.md": {
+        "worktreeSha256": "730931960554584b56e592ec568c9e81426169b54659b9a652f074d95a7083b4",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/pi-astack-runtime-hardening-review-loop-pattern.md": {
+        "worktreeSha256": "d8ee2ccc3d29239fa49e823e261a9fc043c0d0cbcb0652e672a5997a03384dd9",
+        "indexEntrySha256": "e2739a2c9939772dd1903a922cf49f5a14cd5ead1f7b2374c3789bd0dabae03c"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/pi-sub2api-gpt-5-6-context-requires-two-synchronized-overrides.md": {
+        "worktreeSha256": "016104757d7a6996b65ddb9ac20955deb23214a8c9a5ebaa79ee2a4b48e737bb",
+        "indexEntrySha256": "d1e92cd2cc5e9dac78785bfba3719a501761c1fa250684507a41cbc8adefd907"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/safe-cleanup-of-oversized-project-scoped-audits.md": {
+        "worktreeSha256": "a2efc38d013ed0b6e8d73394d01d30e1218f921d5766cbebe5b56202e59ca6b2",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "l2/views/knowledge/latest/projects/pi-global/soft-delete-default-hard-delete-exceptions.md": {
+        "worktreeSha256": "1536486a7d7ebff7be694aa3157a323ccdb0eac4c0d662c0dd8ce89ee522adec",
+        "indexEntrySha256": "01d45497f3cb0a810b6134785ac1a0c6a38fa7f1c8f8d68e8ea76265d03ac06a"
+      },
+      "l2/views/knowledge/latest/projects/pi-router/auto-compact-audit-rows-must-not-remain-permanently-sent.md": {
+        "worktreeSha256": "53f858cc553eb7be3e400e96f55214a16a33d9ea2bc4ef21c31b18693f6406cb",
+        "indexEntrySha256": "5ea701ae0c305d2006d41bf0475f3fcc3fc3befb4dbe1fc877e025489418ce70"
+      },
+      "l2/views/knowledge/latest/projects/pi-router/pi-router-remaining-durable-verification-gaps.md": {
+        "worktreeSha256": "61b8abcd548933ea643281206d4b659629a0ce6549857543920726eb527e0910",
+        "indexEntrySha256": "0ac65f3893b37927ff378f3ac2ba90bb00d45bc921db52c3f942d56fa5cd8cd1"
+      },
+      "l2/views/knowledge/latest/projects/pi-router/pi-router-v0-1-58-release-pipeline-hardening.md": {
+        "worktreeSha256": "8a8b9a6e7ab836767a8f54cd90b218d33195d2b6e613494981c1f4bafa12c1a8",
+        "indexEntrySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "readHashes": {
+      "knowledgeManifest": "2f663795613144c75aad727dfa04f9d3c593d409efb97b12ebfc7e8b71fb8148",
+      "constraintL2": "0deb05694eba7a578ef42abe49c5c30a3143b32919d0969e3658bff114ed3f71",
+      "registry": "6fe00a95633e5fec3a8945c46b6da0054e5a895c7eb820d5d329bb414a487420"
+    },
+    "recovery": {
+      "open": [],
+      "terminal": [],
+      "quarantined": []
+    }
+  },
+  "after": null,
+  "afterFreezeSecond": null,
+  "boundedRecoveryTail": [],
+  "curatorAdapter": {
+    "status": "pending",
+    "criterion": "CURATOR-PENDING",
+    "localDrainAllowed": true,
+    "reason": "curator remains outside active local drain v2 until separately authorized"
+  },
+  "execution": null
+}
