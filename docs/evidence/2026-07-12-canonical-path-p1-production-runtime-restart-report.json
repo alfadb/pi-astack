@@ -1,0 +1,214 @@
+{
+  "schemaVersion": "canonical-path-p1-production-runtime-restart-dossier/v1",
+  "status": "pass",
+  "mutationAttempted": false,
+  "networkAttempted": false,
+  "scope": {
+    "acceptedCriteria": [
+      "LOCAL-RUNTIME-RESTART"
+    ],
+    "exclusions": [
+      "P2",
+      "P3",
+      "P4a",
+      "P4b"
+    ],
+    "deviceTransportCanonicalGate": false
+  },
+  "facts": {
+    "episode": {
+      "episodeId": "7181b2b529198e66d5dea01bd491be69df40f0707e430a0f8a7e24c9893219e9",
+      "slot": 1,
+      "events": {
+        "index_converged": {
+          "eventId": "7fd5615a048801b4440228eb3614e9a512acbb9c31ba0e99b0f7b4b0659a8683",
+          "eventType": "index_converged",
+          "episodeId": "7181b2b529198e66d5dea01bd491be69df40f0707e430a0f8a7e24c9893219e9",
+          "slot": 1,
+          "relativePath": "l1/events/sha256/7f/d5/7fd5615a048801b4440228eb3614e9a512acbb9c31ba0e99b0f7b4b0659a8683.json"
+        },
+        "commit_prepared": {
+          "eventId": "b6c6ed419039bda16104f697b0dc324ea03bbb7bc36f496181c5b1b2b3c50f7f",
+          "eventType": "commit_prepared",
+          "episodeId": "7181b2b529198e66d5dea01bd491be69df40f0707e430a0f8a7e24c9893219e9",
+          "slot": 1,
+          "relativePath": "l1/events/sha256/b6/c6/b6c6ed419039bda16104f697b0dc324ea03bbb7bc36f496181c5b1b2b3c50f7f.json"
+        },
+        "commit_published": {
+          "eventId": "bb784d04616724b3db38bb6ef6ae12cf350c01c9dc4f88fce62e50f5f4deaa7c",
+          "eventType": "commit_published",
+          "episodeId": "7181b2b529198e66d5dea01bd491be69df40f0707e430a0f8a7e24c9893219e9",
+          "slot": 1,
+          "relativePath": "l1/events/sha256/bb/78/bb784d04616724b3db38bb6ef6ae12cf350c01c9dc4f88fce62e50f5f4deaa7c.json"
+        },
+        "recovery_slot_claimed": {
+          "eventId": "d9cc0415498a0949074f768daf638c343f5646195725a3c9153097ab5f7539c3",
+          "eventType": "recovery_slot_claimed",
+          "episodeId": "7181b2b529198e66d5dea01bd491be69df40f0707e430a0f8a7e24c9893219e9",
+          "slot": 1,
+          "relativePath": "l1/events/sha256/d9/cc/d9cc0415498a0949074f768daf638c343f5646195725a3c9153097ab5f7539c3.json"
+        }
+      }
+    },
+    "claimId": "907682a32d4a2d60bd9b582af3178cc4034c3926ad850c0a7d57ee6612f0a649",
+    "candidate": {
+      "oid": "4599d69b9f52015773a3033f5a3830497f0eb4b0",
+      "parent": "b2395d10676a9c2cd0f815a5c341fab53e13f92e",
+      "tree": "fd9c138fb529f508c6cde51c13ab9000b51240d6",
+      "cohortManifestRoot": "ba88c7932b9e89b9d33fbce355627c14f73fa8d8ae24e42091136781f050ab94",
+      "entries": [
+        {
+          "blobOid": "67040e72e3a9d6fdf9c94b52b89a5b4bd1caad0d",
+          "bytesSha256": "ba93c01d3f98125f1a8bec6948ea8018867aa1d3b6975b6cb68b7fafeef11dcc",
+          "mode": "100644",
+          "op": "put",
+          "path": "l1/events/sha256/0d/9d/0d9df863c2db351e33449443d93ec0c8b55fbd7df49c1556c8512ab11ec780f4.json",
+          "verifiedBytesSha256": "ba93c01d3f98125f1a8bec6948ea8018867aa1d3b6975b6cb68b7fafeef11dcc"
+        },
+        {
+          "blobOid": "23bf53ee4c46a7ebe7598652c7892d3a7e2e63cd",
+          "bytesSha256": "a049812a1b3d14f69d19e7f8b8d5a4653441e0168ee043cbae75b86401228404",
+          "mode": "100644",
+          "op": "put",
+          "path": "l1/events/sha256/20/e7/20e783df2c1d8d61fc887a84215995d228f84f256e888794aff730d349bafa92.json",
+          "verifiedBytesSha256": "a049812a1b3d14f69d19e7f8b8d5a4653441e0168ee043cbae75b86401228404"
+        },
+        {
+          "blobOid": "aa470fa3df70f59a1874311d4ed0b42bc929b45e",
+          "bytesSha256": "3c64ab8698cc0bca2f70c3e8c347f1a95e219a9e8cc1c8d295efc34ca3c9c9be",
+          "mode": "100644",
+          "op": "put",
+          "path": "l1/events/sha256/27/c6/27c6c875f5f46e4b7feec5a1930ac1782421592b9b74592e469120c223d51f30.json",
+          "verifiedBytesSha256": "3c64ab8698cc0bca2f70c3e8c347f1a95e219a9e8cc1c8d295efc34ca3c9c9be"
+        },
+        {
+          "blobOid": "54fd4360e377f463bcd947bd02c3a54551c7c121",
+          "bytesSha256": "4a6109a1ed28936465257c5760542618ca8144655122f58d5241c5c8a8bb44b4",
+          "mode": "100644",
+          "op": "put",
+          "path": "l1/events/sha256/4a/6b/4a6b27b961b193e71e1a2f0dd3d34ca4b527ae3693a62fd3078c60fa2ff9e862.json",
+          "verifiedBytesSha256": "4a6109a1ed28936465257c5760542618ca8144655122f58d5241c5c8a8bb44b4"
+        },
+        {
+          "blobOid": "671131a816afabc266a9b21d7a11ecd32ad279fb",
+          "bytesSha256": "eb2fcce57b1b5fc267bdf9e5fd8aa6b172e81a0a68e2e00f34e766c3827c1938",
+          "mode": "100644",
+          "op": "put",
+          "path": "l1/events/sha256/e3/ef/e3eff8f5adf24a187444c25701b4b8ad9ddb33e9e3625161499062bb617b3205.json",
+          "verifiedBytesSha256": "eb2fcce57b1b5fc267bdf9e5fd8aa6b172e81a0a68e2e00f34e766c3827c1938"
+        },
+        {
+          "blobOid": "627c7c68cff162888400b8d2d984c80c45a55728",
+          "bytesSha256": "4dee390297750a18576f118d83d810bc9ecd0c181d3f235cb27f1afd54acad04",
+          "mode": "100644",
+          "op": "put",
+          "path": "l2/views/knowledge/latest/manifest.json",
+          "verifiedBytesSha256": "4dee390297750a18576f118d83d810bc9ecd0c181d3f235cb27f1afd54acad04"
+        },
+        {
+          "blobOid": "7ad179c1d07459780518b4bbd24ab6361b34fcef",
+          "bytesSha256": "2e94bb1ee4347a96a75e0905c35c8ce66c50684128d12f56401f052f4b813d5d",
+          "mode": "100644",
+          "op": "put",
+          "path": "l2/views/knowledge/latest/projects/pi-global/restart-probes-require-an-isolated-canonical-backlog.md",
+          "verifiedBytesSha256": "2e94bb1ee4347a96a75e0905c35c8ce66c50684128d12f56401f052f4b813d5d"
+        }
+      ]
+    },
+    "source": {
+      "eventId": "0d9df863c2db351e33449443d93ec0c8b55fbd7df49c1556c8512ab11ec780f4",
+      "sourceRef": "sediment:auto_write:updated:restart-probes-require-an-isolated-canonical-backlog",
+      "producer": {
+        "name": "sediment.knowledge-event-writer",
+        "version": "adr0039-p5"
+      },
+      "relativePath": "l1/events/sha256/0d/9d/0d9df863c2db351e33449443d93ec0c8b55fbd7df49c1556c8512ab11ec780f4.json"
+    },
+    "timeline": {
+      "claimMtimeUtc": "2026-07-12T10:59:13.948Z",
+      "preparedMtimeUtc": "2026-07-12T10:59:14.358Z",
+      "freshSessionUtc": "2026-07-12T11:14:10.735Z",
+      "publishedMtimeUtc": "2026-07-12T11:14:19.676Z",
+      "convergedMtimeUtc": "2026-07-12T11:14:19.856Z",
+      "freshProcess": {
+        "launcherPid": 3180698,
+        "runtimePid": 3180700,
+        "processStartedAt": "2026-07-12T11:14:08.000Z",
+        "processStartEvidence": "operator-observed; durable session header begins at 2026-07-12T11:14:10.735Z",
+        "sessionId": "019f5608-e2af-7198-85a9-825f182e3c20",
+        "noProbeEnvironment": "operator-observed; session contains no probe token"
+      },
+      "canonicalRecoveryRemoteCommands": [],
+      "postReadyDeviceTransport": [
+        {
+          "ts": "2026-07-12T11:14:27.622Z",
+          "op": "fetch",
+          "result": "ok"
+        },
+        {
+          "ts": "2026-07-12T11:14:28.093Z",
+          "op": "push",
+          "result": "ok"
+        }
+      ]
+    },
+    "repository": {
+      "observedCheckpoint": {
+        "head": "8a57df7083b2761720646acc7ea85a2133062608",
+        "originMain": "8a57df7083b2761720646acc7ea85a2133062608",
+        "evidence": "request-time observation; both are verified ancestors of the live equal HEAD/origin refs"
+      },
+      "ref": "refs/heads/main",
+      "currentHeadContainsCandidate": true,
+      "currentHeadContainsObservedCheckpoint": true,
+      "currentHeadEqualsOriginMain": true,
+      "wholeL1Strict": true,
+      "sharedIndexEqualsHead": true
+    }
+  },
+  "residualRisk": {
+    "orderedOperatorReplacementProven": false,
+    "oldArmedProcessExitedBeforeFreshStart": false,
+    "freshProcessLaunchCause": "review dispatch unintentionally started a normal no-probe Pi process",
+    "disposition": "This weakens operator-sequence hygiene but does not change the durable same-pending-episode fresh-process recovery fact. The record must not be represented as an orderly operator replacement."
+  },
+  "verification": {
+    "wholeL1StrictValidation": true,
+    "allActiveV2TypesRegistered": true,
+    "episodeExactFourEventClosure": true,
+    "sameDrainLaneSlotOne": true,
+    "noAbortTerminalOrNewSlot": true,
+    "claimIdentityDeterministic": true,
+    "sameCandidateAcrossRecovery": true,
+    "publicationConfirmed": true,
+    "episodeFoldComplete": true,
+    "singleRealAutoWriteSourceDerivedFromL1": true,
+    "sourceProducerExact": true,
+    "candidateExactParent": true,
+    "candidateExactTree": true,
+    "candidateExactCohortHash": true,
+    "candidateDeterministicCommitBytes": true,
+    "candidateCohortSortedUnique": true,
+    "legacy1750Excluded": true,
+    "legacy1750StrictReadOnly": true,
+    "frozenIndexSnapshotExact": true,
+    "preparedEntriesEqualCandidateDiff": true,
+    "candidateExactBlobModeAndHash": true,
+    "observedCheckpointContainsCandidate": true,
+    "currentHeadContainsObservedCheckpoint": true,
+    "currentHeadContainsCandidate": true,
+    "currentHeadEqualsOriginMainObservation": true,
+    "sharedIndexEqualsHead": true,
+    "noGitReplaceRefs": true,
+    "freshSessionHeaderExact": true,
+    "preparedExistedBeforeFreshProcessBoundary": true,
+    "sameEpisodeRecoveredAfterFreshProcessBoundary": true,
+    "freshSessionHasNoProbeTokenObservation": true,
+    "freshRuntimePidCorroborated": true,
+    "canonicalRecoveryIssuedNoRemoteCommand": true,
+    "deviceTransportObservedOnlyAfterReady": true
+  },
+  "errors": [],
+  "dossierSelfHash": "d8d39b2229fc3bff37b9eeac7e8745f55d53a329392fb8f028b88eff8144d3c7",
+  "dossierSelfHashRule": "sha256(RFC8785-JCS(report_without_dossierSelfHash_and_rule))"
+}

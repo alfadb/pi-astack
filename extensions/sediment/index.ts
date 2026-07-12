@@ -99,13 +99,7 @@ import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { loadAndValidateTransitionRegister } from "../_shared/transition-register";
-import {
-  canonicalGitRuntimeEnabled,
-  getCanonicalGitRuntime,
-  getP1PreparedStopLatch,
-  resolveP1RestartProbeIsolation,
-  type P1RestartProbeIsolation,
-} from "../_shared/canonical-git-runtime";
+import { canonicalGitRuntimeEnabled, getCanonicalGitRuntime } from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 
@@ -229,29 +223,6 @@ const _G = globalThis as typeof globalThis & {
 if (_G.__sediment_inflightCount === undefined) _G.__sediment_inflightCount = 0;
 if (!_G.__sediment_multiViewReplayInFlight) _G.__sediment_multiViewReplayInFlight = new Map<string, Promise<void>>();
 const multiViewReplayInFlight = _G.__sediment_multiViewReplayInFlight;
-
-// Captured once per freshly loaded sediment module for probe diagnostics. The
-// production scheduling decision is still re-captured immutably at each
-// agent_end; this module snapshot is never used as a stale authorization.
-const sedimentModuleProbeIsolation = resolveP1RestartProbeIsolation();
-
-interface SedimentProbeTurnState {
-  readonly isolation: P1RestartProbeIsolation;
-  readonly preparedStopLatched: boolean;
-  readonly sideSchedulersEnabled: boolean;
-  readonly runId?: string;
-}
-
-function captureSedimentProbeTurnState(): SedimentProbeTurnState {
-  const isolation = resolveP1RestartProbeIsolation();
-  const latch = getP1PreparedStopLatch();
-  return Object.freeze({
-    isolation,
-    preparedStopLatched: !!latch,
-    sideSchedulersEnabled: !latch && !isolation.active,
-    ...(latch ? { runId: latch.runId } : isolation.active ? { runId: isolation.runId } : {}),
-  });
-}
 
 /** Status key for ctx.ui.setStatus(). */
 const SEDIMENT_STATUS_KEY = FOOTER_STATUS_KEYS.sediment;
@@ -1851,14 +1822,12 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         modelRegistry: ctx.modelRegistry,
         reason: "liveness_recovery",
       };
-      if (!sedimentModuleProbeIsolation.active && !getP1PreparedStopLatch()) {
-        void (async () => {
-          const resumed = await resumeConstraintShadowAutoRefreshAtStartup(livenessTrigger);
-          if (!resumed.scheduled) await ensureConstraintShadowLiveness(livenessTrigger);
-        })().catch((err) => {
-          console.error(`[sediment] constraint shadow startup recovery failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
-      }
+      void (async () => {
+        const resumed = await resumeConstraintShadowAutoRefreshAtStartup(livenessTrigger);
+        if (!resumed.scheduled) await ensureConstraintShadowLiveness(livenessTrigger);
+      })().catch((err) => {
+        console.error(`[sediment] constraint shadow startup recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
     },
   );
 
@@ -1938,21 +1907,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         };
       },
     ) => {
-      // Snapshot before any scheduler, staging, audit, checkpoint, or canonical
-      // work for this agent_end. Malformed/expired controls resolve inactive;
-      // requestDrain independently rejects them at its sole consume gate.
-      const probeTurn = captureSedimentProbeTurnState();
-      const probeIsolation = probeTurn.isolation;
-      if (probeTurn.preparedStopLatched) {
-        console.error(`[sediment] P1 prepared stop reached for run ${probeTurn.runId}; canonical agent_end work deferred until process exit`);
-        const sessionId = readSessionId(ctx.sessionManager);
-        const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
-        if (setStatusRaw) {
-          try { setStatusRaw(SEDIMENT_STATUS_KEY, renderSedimentStatus("completed", "prepared stop; restart pending")); } catch { /* best-effort */ }
-        }
-        return;
-      }
-
       if (isSubAgentBoundaryUntrusted()) {
         const cwd = path.resolve(ctx.cwd || process.cwd());
         const sessionId = readSessionId(ctx.sessionManager);
@@ -2157,7 +2111,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // 要求，条件句而非祈使句）。位置在 ephemeral guard + project binding
       // 之后：ephemeral/子代理进程不会误报，audit 落 canonical project root。
       // 进程内单次用 globalThis singleton（jiti 多副本防双发，同 heartbeat）。
-      if (!probeIsolation.active && shouldWarnUnconfiguredReviewers(settings) && !reviewerAdvisoryAlreadyShown()) {
+      if (shouldWarnUnconfiguredReviewers(settings) && !reviewerAdvisoryAlreadyShown()) {
         markReviewerAdvisoryShown();
         appendAudit(cwd, {
           operation: "multiview_reviewers_unconfigured",
@@ -2216,10 +2170,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         return;
       }
 
-      // Probe isolation pauses autonomous side lanes for this turn. This is a
-      // temporary diagnostic scheduling scaffold, not a security boundary.
-      // The normal Knowledge auto-write lane below remains enabled.
-      if (probeTurn.sideSchedulersEnabled) {
       // Outcome collection runs only after the turn is known healthy and the
       // launch cwd has been canonicalized to the bound project root. Aborted /
       // errored assistant messages can contain partial footnotes/tool traces;
@@ -2761,8 +2711,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         })();
       });
 
-      }
-
       const tStart = Date.now();
       const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
       const window = buildRunWindow(branch, checkpoint, settings);
@@ -2849,7 +2797,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // classifier is also disabled — a hard kill switch for users who explicitly
       // do not want sediment observing. `true` and `"staging-only"` both run the
       // classifier (staging-only writes provisional staging but skips curator/writer).
-      const classifierEnabled = settings.autoLlmWriteEnabled !== false && !probeIsolation.active;
+      const classifierEnabled = settings.autoLlmWriteEnabled !== false;
       // R6' window ownership (3-T0 P0 fix, 2026-06-10): staging suppression is
       // only safe when THIS window's lane will actually run the Tier-1 direct
       // writer. explicit/about_me windows and in-flight turns only park the
@@ -3062,12 +3010,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         return signal;
       };
 
-      if (probeIsolation.active && (drafts.length > 0 || aboutMeDrafts.length > 0)) {
-        console.error(`[sediment] P1 probe ${probeIsolation.runId}: explicit Lane A/G mutation deferred`);
-        applySedimentStatus(setStatus, sessionId, "completed", "probe isolation: explicit write deferred");
-        return;
-      }
-
       if (drafts.length === 0 && aboutMeDrafts.length === 0) {
         // Phase 1.4 A2 + UX fix: LLM auto-write lane is FIRE-AND-FORGET.
         //
@@ -3096,7 +3038,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         // more entries accumulated while it was running. If so, start
         // another cycle without waiting for the next agent_end.
         const scheduleDrainIfBacklog = () => {
-          if (getP1PreparedStopLatch()) return;
           // Only drain when the main-session LLM is NOT working
           // (agent_end fires and no new agent_start has followed).
           // If started > ended, the LLM is mid-response — the next
@@ -3165,12 +3106,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           const stored = takeSessionCorrectionForCurator(sessionId);
                           return stored ? recordConsumedSessionCorrection("drain", corrId, stored) : null;
                         })(),
-                        probeIsolation,
                       });
-                      if (getP1PreparedStopLatch()) {
-                        applySedimentStatus(setStatus, sessionId, "completed", "prepared stop; restart pending");
-                        return;
-                      }
                       // Known residual (3-T0 review 2026-06-10, accepted): a
                       // TRANSIENT tier1 reject in the main lane holds its
                       // checkpoint, but this drain pass has no classifier of
@@ -3473,12 +3409,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   signal: undefined, correlationId: shortCorrelationId, abrainHome, projectId,
                   branchEntries: branch, sessionManager: sessMgr,
                   correctionSignal: escForwarded ?? classifierResult.signal ?? undefined,
-                  probeIsolation,
                 });
-                if (getP1PreparedStopLatch()) {
-                  applySedimentStatus(setStatus, sessionId, "completed", "prepared stop; restart pending");
-                  return;
-                }
                 // No-loss invariant (audit P0, 2026-06-07, gpt-5.5 2 rounds): advance the
                 // checkpoint ONLY when the signal is safely CAPTURED — the curator persisted
                 // a rule (or it's a dedup hit, i.e. the rule already exists) OR the
@@ -3706,12 +3637,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 const stored = takeSessionCorrectionForCurator(sessionId);
                 return stored ? recordConsumedSessionCorrection("auto_write", autoCorrelationId, stored) : null;
               })(),
-              probeIsolation,
             });
-            if (getP1PreparedStopLatch()) {
-              applySedimentStatus(setStatus, sessionId, "completed", "prepared stop; restart pending");
-              return;
-            }
             const tAutoEnd = Date.now();
             checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto)
               && !holdForStagingOnlyParseFailure(auto, classifierResultMain, settings);
@@ -4839,22 +4765,9 @@ async function tryAutoWriteLane(args: {
    *  Injected into curator context for better update/merge decisions.
    *  null when classifier didn't run (ephemeral session) or found no signal. */
   correctionSignal?: CorrectionSignal | null;
-  /** Immutable scheduling snapshot captured at the triggering agent_end. */
-  probeIsolation?: P1RestartProbeIsolation;
-  /** Test-only model seam. Writer/runtime/scheduler logic remains production. */
-  _testOnly?: {
-    llmResult: LlmExtractorResult;
-    curatorDecisions: Array<Awaited<ReturnType<typeof curateProjectDraft>>>;
-    onL3Maintenance?: () => void;
-    onEmbeddingMaintenance?: () => void;
-  };
 }): Promise<AutoWriteLaneOutcome> {
   const { cwd, sessionId, settings, window, correlationId, abrainHome, projectId, branchEntries, sessionManager } = args;
   const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
-
-  if (getP1PreparedStopLatch()) {
-    return { kind: "ineligible", eligibility: { eligible: false, reason: "p1_prepared_stop_latched" } };
-  }
 
   // ADR 0025 §5.3 P5.5 tristate gate:
   //   - false          → skip (full kill switch, also gates classifier upstream)
@@ -4903,7 +4816,7 @@ async function tryAutoWriteLane(args: {
   }
 
   const tier1Signal = args.correctionSignal;
-  if (tier1Signal && !args.probeIsolation?.active && !args.tier1AlreadyCommitted && shouldEscalateToCurator(tier1Signal)) {
+  if (tier1Signal && !args.tier1AlreadyCommitted && shouldEscalateToCurator(tier1Signal)) {
     const writeStart = Date.now();
     const { draft, ruleScopeSource } = buildTier1RuleDraft(tier1Signal, sessionId, projectId);
     const tier1CandidateId = candidateIdFor(correlationId, -1);
@@ -5185,26 +5098,22 @@ async function tryAutoWriteLane(args: {
     }
   }
   let llmResult: LlmExtractorResult;
-  if (args._testOnly) {
-    llmResult = args._testOnly.llmResult;
-  } else {
-    try {
-      llmResult = await runLlmExtractor(window.text, {
-        settings,
-        modelRegistry: modelRegistry as Parameters<
-          typeof runLlmExtractor
-        >[1]["modelRegistry"],
-        signal: args.signal,
-        branchEntries,
-        continuationMessages,
-      });
-    } catch (e: any) {
-      llmResult = {
-        ok: false,
-        model: settings.extractorModel,
-        error: sanitizeAuditText(e?.message ?? "extractor threw", 500),
-      };
-    }
+  try {
+    llmResult = await runLlmExtractor(window.text, {
+      settings,
+      modelRegistry: modelRegistry as Parameters<
+        typeof runLlmExtractor
+      >[1]["modelRegistry"],
+      signal: args.signal,
+      branchEntries,
+      continuationMessages,
+    });
+  } catch (e: any) {
+    llmResult = {
+      ok: false,
+      model: settings.extractorModel,
+      error: sanitizeAuditText(e?.message ?? "extractor threw", 500),
+    };
   }
   const llmDurationMs = Date.now() - llmStart;
 
@@ -5268,14 +5177,13 @@ async function tryAutoWriteLane(args: {
     };
     let curated: Awaited<ReturnType<typeof curateProjectDraft>>;
     try {
-      const injected = args._testOnly?.curatorDecisions[i];
-      curated = injected ?? await curateProjectDraft(draft, {
+      curated = await curateProjectDraft(draft, {
         projectRoot: cwd,
         sedimentSettings: settings,
         memorySettings: resolveMemorySettings(),
         modelRegistry,
         signal: args.signal,
-        correctionSignal: args.probeIsolation?.active ? null : args.correctionSignal,
+        correctionSignal: args.correctionSignal,
         // §4.1.4: non-consuming read of this session's task-local working
         // set. Injected as NON-DURABLE context so the curator stays
         // consistent with how the user steered THIS session, without
@@ -5313,54 +5221,32 @@ async function tryAutoWriteLane(args: {
     for (const n of curated.audit.neighbors) {
       if (n.status) neighborStatusBySlug[n.slug] = n.status as EntryStatus;
     }
-    const probeDefersDecision = args.probeIsolation?.active && (
-      (curated.decision.op === "create" && curated.decision.zone === "rules")
-      || curated.decision.op === "archive"
-      || curated.decision.op === "delete"
-      || curated.decision.op === "supersede"
-      || curated.decision.op === "merge"
-      || (curated.decision.op === "update" && curated.decision.patch.status !== undefined)
-    );
-    if (probeDefersDecision) {
-      results.push({
-        slug: draft.title,
-        path: "",
-        status: "skipped",
-        reason: "p1_probe_isolation_deferred_rule_or_status_mutation",
-        lane: "auto_write",
+    results.push(
+      ...(await executeCuratorDecisionToBrain({
+        decision: curated.decision,
+        draft,
+        projectRoot: cwd,
+        abrainHome,
+        projectId,
+        settings,
+        dryRun: false,
+        auditContext,
         sessionId,
-        correlationId,
-        candidateId,
-      });
-      continue;
-    }
-    results.push(...(await executeCuratorDecisionToBrain({
-      decision: curated.decision,
-      draft,
-      projectRoot: cwd,
-      abrainHome,
-      projectId,
-      settings,
-      dryRun: false,
-      auditContext,
-      sessionId,
-      neighborStatusBySlug,
-      createTimelineNote: "captured from LLM auto-write extractor",
-      updateTimelineNote: curated.decision.rationale || "updated by sediment curator",
-      mergeTimelineNote: curated.decision.rationale || "merged by sediment curator",
-      archiveReason: curated.decision.op === "archive" ? curated.decision.reason || curated.decision.rationale || "archived by sediment curator" : undefined,
-      supersedeReason: curated.decision.op === "supersede" ? curated.decision.reason || curated.decision.rationale || "superseded by sediment curator" : undefined,
-      deleteReason: curated.decision.op === "delete" ? curated.decision.reason || curated.decision.rationale || "deleted by sediment curator" : undefined,
-    })));
-    if (getP1PreparedStopLatch()) break;
+        neighborStatusBySlug,
+        createTimelineNote: "captured from LLM auto-write extractor",
+        updateTimelineNote: curated.decision.rationale || "updated by sediment curator",
+        mergeTimelineNote: curated.decision.rationale || "merged by sediment curator",
+        archiveReason: curated.decision.op === "archive" ? curated.decision.reason || curated.decision.rationale || "archived by sediment curator" : undefined,
+        supersedeReason: curated.decision.op === "supersede" ? curated.decision.reason || curated.decision.rationale || "superseded by sediment curator" : undefined,
+        deleteReason: curated.decision.op === "delete" ? curated.decision.reason || curated.decision.rationale || "deleted by sediment curator" : undefined,
+      })),
+    );
   }
 
-  const preparedStopReached = getP1PreparedStopLatch() !== undefined;
-  const wrotePostWriteMaintenanceRelevant = !preparedStopReached && hasAdr0039L3RelevantWriteResult(results);
+  const wrotePostWriteMaintenanceRelevant = hasAdr0039L3RelevantWriteResult(results);
   // ADR 0039 L3: refresh the rebuildable SQLite mirror once after this
   // auto-write batch. Best-effort: L3 freshness must not block L1/L2 writes.
   if (wrotePostWriteMaintenanceRelevant) {
-    args._testOnly?.onL3Maintenance?.();
     await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
   }
 
@@ -5372,7 +5258,6 @@ async function tryAutoWriteLane(args: {
   // (provider+model set; DEFAULT is empty = disabled). content-hash gated +
   // scope-safe prune inside reconcileEmbeddings.
   if (wrotePostWriteMaintenanceRelevant && modelRegistry) {
-    args._testOnly?.onEmbeddingMaintenance?.();
     try {
       const memSettings = resolveMemorySettings();
       const emb = memSettings.embedding;
@@ -5447,12 +5332,6 @@ export function _resetAutoWriteStateForTests(): void {
  * model registry to lock the closure-arg threading invariant.
  */
 export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
-export function _probeIsolationStateForTests(): Readonly<{
-  module: P1RestartProbeIsolation;
-  turn: SedimentProbeTurnState;
-}> {
-  return Object.freeze({ module: sedimentModuleProbeIsolation, turn: captureSedimentProbeTurnState() });
-}
 export const _detectDirectiveRecallCandidatesForTests = detectDirectiveRecallCandidates;
 export const _shouldAdvanceAfterAutoOutcomeForTests = shouldAdvanceAfterAutoOutcome;
 export const _auditDirectiveRecallForTests = auditDirectiveRecall;
@@ -5549,7 +5428,7 @@ function scheduleMultiviewReplay(args: {
   abrainHome: string;
   projectId: string;
 }): void {
-  if (!args.enabled || !args.cwd || !args.sessionId || getP1PreparedStopLatch()) return;
+  if (!args.enabled || !args.cwd || !args.sessionId) return;
 
   // Staging is user-global under one abrain home. Key in-flight replay by
   // abrain+project binding rather than session so `/new` or two sessions

@@ -18,11 +18,9 @@ import {
 } from "./writer";
 import type { SedimentSettings } from "./settings";
 import type { EntryStatus } from "./validation";
-import { CONTROLLED_STOP_AFTER_PREPARED } from "../_shared/canonical-git-runtime";
 
 function hasGitCommitFailure(result: WriteProjectEntryResult, settings: SedimentSettings): boolean {
   return settings.gitCommit === true
-    && result.publication?.reason !== CONTROLLED_STOP_AFTER_PREPARED
     && result.status !== "rejected"
     && result.status !== "skipped"
     && result.status !== "dry_run"

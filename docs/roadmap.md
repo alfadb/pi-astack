@@ -71,7 +71,7 @@ Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-
 
 设计见 [ADR 0039](./adr/0039-constraint-pipeline-reset.md)。迁移原则：所有长期记忆域先追加 Evidence Event，再由域自适应 projector / compiler 生成 stable view；Constraint 是第一优先迁移域，不再是独立特例。迁移期不得继续扩大旧 raw `agent_end` 写时裁决特殊逻辑。
 
-Canonical-path R3.4.2 的 P1 当前为 **production enabled、CURRENT/NEXT 与 Curator isolation 已取证、但尚未完成**：`LOCAL-DRAIN-CURRENT` 已由 [existing-drain manifest](./evidence/2026-07-12-canonical-path-p1-a-production-existing-local-drain-manifest.json) 完成；`LOCAL-DRAIN-NEXT` 与 `CURATOR-PENDING` 已由 [NEXT/Curator isolation manifest](./evidence/2026-07-12-canonical-path-p1-local-drain-next-curator-isolation-manifest.json) 完成。NEXT acceptance anchor 固定为首笔后首个明确真实 `sediment:auto_write:*` 触发的 `0a595671…` / source L1 `4250d277…`；中间 `781b584d…`、`916de321…` 仅含 `sediment:replay:*` Knowledge source，不计 acceptance。`LOCAL-RUNTIME-RESTART` 与 P1 close 仍是明确前置；Curator production v2 wiring 仍未授权，完成的是隔离边界证明，不是 wiring。P2/P3 未获授权，不得提前启动。
+Canonical-path R3.4.2 的 P1 已 **production complete**：[existing-drain manifest](./evidence/2026-07-12-canonical-path-p1-a-production-existing-local-drain-manifest.json) 完成 `LOCAL-DRAIN-CURRENT`，[NEXT/Curator isolation manifest](./evidence/2026-07-12-canonical-path-p1-local-drain-next-curator-isolation-manifest.json) 完成 `LOCAL-DRAIN-NEXT` 与 `CURATOR-PENDING`，[runtime restart manifest](./evidence/2026-07-12-canonical-path-p1-production-runtime-restart-manifest.json) 完成 `LOCAL-RUNTIME-RESTART`；全部 stable criteria 与残余风险汇总在 [P1 completion record](./completions/2026-07-12-canonical-path-p1-completion.md)。一次性 probe 已前向删除，R2 startup content/metadata 修复保留。Curator production v2 wiring 仍未授权；P2/P3 继续 `blocked/not_authorized`，未启动且不得由 P1 completion 自动推进。
 
 | Phase | Intent | Notes |
 |---|---|---|

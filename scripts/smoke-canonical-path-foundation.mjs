@@ -335,7 +335,7 @@ await check("transition machine schema has stable unique IDs and exact canonical
   assert(summary.total === 22 && summary.active === 19 && summary.gated === 3, JSON.stringify(summary));
   assert(Object.isFrozen(register) && Object.isFrozen(register.transitions), "transition register is mutable");
   const canonical = Object.fromEntries(summary.canonicalPath.map((entry) => [entry.id, `${entry.phaseStatus}/${entry.authorizationStatus}`]));
-  assert(canonical["canonical_path.p1"] === "in_progress/authorized", "P1 status/auth mismatch");
+  assert(canonical["canonical_path.p1"] === "completed/authorized", "P1 status/auth mismatch");
   for (const phase of ["p2", "p3", "p4a", "p4b"]) {
     assert(canonical[`canonical_path.${phase}`] === "blocked/not_authorized", `${phase} status/auth mismatch`);
   }

@@ -11,6 +11,20 @@ status: active
 
 ---
 
+## 2026-07-12 — accepted — Canonical-path P1 production 收口
+
+### 变更
+Canonical-path R3.4.2 P1 完成 production 收口：新增只读 fresh-process recovery verifier、不可变 report/manifest 与 temp-repo tamper smoke；同一 pending episode 的 claim→prepared→published→converged、exact candidate/cohort、真实 auto-write source、legacy 排除、HEAD/index/whole-L1 与 remote-after-ready 边界均可重建。完成取证后，前向删除一次性 prepared-stop probe 的全部 runtime/scheduler/writer/audit/test/runbook surface，保留 R2 startup content/metadata 修复。
+
+### 残余风险
+旧 armed 进程当时未先确认退出，fresh no-probe process 由审查 dispatch 意外启动，因此证据只支持“same pending episode 的真实 fresh-process recovery”，不支持“有序 operator replacement”。device fetch/push 只在 canonical ready 后观察到，继续不作为 canonical gate。
+
+### 授权边界
+P1 completion record 引用全部 stable criteria。P2/P3 保持 `blocked/not_authorized`，未启动、未创建授权票；后续仍分别需要新的六供应商或同等独立 multi-T0 unanimous 授权。
+
+### 关联
+[P1 completion record](completions/2026-07-12-canonical-path-p1-completion.md)；[runtime restart manifest](evidence/2026-07-12-canonical-path-p1-production-runtime-restart-manifest.json)；[Living Plan](plans/2026-07-10-canonical-path-convergence-r3.4.2-plan.md)。
+
 ## 2026-07-09 — accepted — ADR 0020 autosync fetch 领先补推语义补全
 
 ### 变更

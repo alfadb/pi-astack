@@ -1,0 +1,77 @@
+{
+  "schemaVersion": "canonical-path-p1-production-runtime-restart-evidence-manifest/v1",
+  "scope": {
+    "acceptedCriteria": [
+      "LOCAL-RUNTIME-RESTART"
+    ],
+    "exclusions": [
+      "P2",
+      "P3",
+      "P4a",
+      "P4b"
+    ],
+    "deviceTransportCanonicalGate": false
+  },
+  "report": {
+    "file": "2026-07-12-canonical-path-p1-production-runtime-restart-report.json",
+    "exactBytesSha256": "971c33aaa64797db73533497ca570de4c288217d6b88a9e84c59ba199b362dbd",
+    "exactBytes": 9704,
+    "dossierSelfHash": "d8d39b2229fc3bff37b9eeac7e8745f55d53a329392fb8f028b88eff8144d3c7",
+    "status": "pass"
+  },
+  "derivedAnchors": {
+    "episodeId": "7181b2b529198e66d5dea01bd491be69df40f0707e430a0f8a7e24c9893219e9",
+    "eventIds": {
+      "index_converged": "7fd5615a048801b4440228eb3614e9a512acbb9c31ba0e99b0f7b4b0659a8683",
+      "commit_prepared": "b6c6ed419039bda16104f697b0dc324ea03bbb7bc36f496181c5b1b2b3c50f7f",
+      "commit_published": "bb784d04616724b3db38bb6ef6ae12cf350c01c9dc4f88fce62e50f5f4deaa7c",
+      "recovery_slot_claimed": "d9cc0415498a0949074f768daf638c343f5646195725a3c9153097ab5f7539c3"
+    },
+    "sourceEventId": "0d9df863c2db351e33449443d93ec0c8b55fbd7df49c1556c8512ab11ec780f4",
+    "candidate": "4599d69b9f52015773a3033f5a3830497f0eb4b0",
+    "observedCheckpointHead": "8a57df7083b2761720646acc7ea85a2133062608"
+  },
+  "allVerificationBooleans": {
+    "wholeL1StrictValidation": true,
+    "allActiveV2TypesRegistered": true,
+    "episodeExactFourEventClosure": true,
+    "sameDrainLaneSlotOne": true,
+    "noAbortTerminalOrNewSlot": true,
+    "claimIdentityDeterministic": true,
+    "sameCandidateAcrossRecovery": true,
+    "publicationConfirmed": true,
+    "episodeFoldComplete": true,
+    "singleRealAutoWriteSourceDerivedFromL1": true,
+    "sourceProducerExact": true,
+    "candidateExactParent": true,
+    "candidateExactTree": true,
+    "candidateExactCohortHash": true,
+    "candidateDeterministicCommitBytes": true,
+    "candidateCohortSortedUnique": true,
+    "legacy1750Excluded": true,
+    "legacy1750StrictReadOnly": true,
+    "frozenIndexSnapshotExact": true,
+    "preparedEntriesEqualCandidateDiff": true,
+    "candidateExactBlobModeAndHash": true,
+    "observedCheckpointContainsCandidate": true,
+    "currentHeadContainsObservedCheckpoint": true,
+    "currentHeadContainsCandidate": true,
+    "currentHeadEqualsOriginMainObservation": true,
+    "sharedIndexEqualsHead": true,
+    "noGitReplaceRefs": true,
+    "freshSessionHeaderExact": true,
+    "preparedExistedBeforeFreshProcessBoundary": true,
+    "sameEpisodeRecoveredAfterFreshProcessBoundary": true,
+    "freshSessionHasNoProbeTokenObservation": true,
+    "freshRuntimePidCorroborated": true,
+    "canonicalRecoveryIssuedNoRemoteCommand": true,
+    "deviceTransportObservedOnlyAfterReady": true
+  },
+  "residualRisk": {
+    "orderedOperatorReplacementProven": false,
+    "oldArmedProcessExitedBeforeFreshStart": false,
+    "freshProcessLaunchCause": "review dispatch unintentionally started a normal no-probe Pi process",
+    "disposition": "This weakens operator-sequence hygiene but does not change the durable same-pending-episode fresh-process recovery fact. The record must not be represented as an orderly operator replacement."
+  },
+  "immutabilityAnchor": "Commit this report and manifest in pi-astack; the manifest intentionally claims no intrinsic digest."
+}

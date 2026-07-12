@@ -69,6 +69,7 @@ const HUMAN_SECTIONS = Object.freeze([
 ]);
 const PHASE_STATUSES = Object.freeze([
   "in_progress",
+  "completed",
   "blocked",
   "ready_for_decision",
   "blocked_on_evidence",
@@ -249,7 +250,7 @@ export function summarizeTransitionRegister(register: TransitionRegister): Trans
 
 function validateCanonicalPathAuthorization(entries: readonly TransitionRegisterEntry[]): void {
   const expected = new Map<string, [string, string]>([
-    ["canonical_path.p1", ["in_progress", "authorized"]],
+    ["canonical_path.p1", ["completed", "authorized"]],
     ["canonical_path.p2", ["blocked", "not_authorized"]],
     ["canonical_path.p3", ["blocked", "not_authorized"]],
     ["canonical_path.p4a", ["blocked", "not_authorized"]],
