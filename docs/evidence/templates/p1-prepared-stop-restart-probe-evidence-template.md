@@ -25,6 +25,8 @@ This blank template is not evidence and must not change any acceptance checkbox.
 - Shared index SHA-256:
 - NUL status SHA-256:
 - Original writer cohort path/bytes manifest SHA-256:
+- Pending replay staging path/bytes/attempt fields manifest SHA-256:
+- Whole canonical L1/L2 plus staging fingerprint SHA-256:
 - Active recovery scan/fold SHA-256:
 
 ## Controlled stop
@@ -32,9 +34,15 @@ This blank template is not evidence and must not change any acceptance checkbox.
 - Writer publication status/reason/localCommit:
 - Episode ID / slot / candidate:
 - Candidate shape verification:
+- Triggering Knowledge `sediment:auto_write:*` source event ID:
+- Cohort exclusivity (trigger transaction + allowed canonical recovery metadata only):
+- Replay/staging/foreign trigger evidence absent:
 - HEAD unchanged:
 - Shared index unchanged:
 - Original writer cohort and unrelated worktree bytes unchanged:
+- Pending replay staging files byte-identical:
+- Pending replay `retry_attempts`/writer-attempt fields unchanged:
+- Post-stop second `agent_end` canonical+staging fingerprint unchanged:
 - Exact claim + prepared event IDs/body hashes:
 - Published/converged/abort/terminal absent:
 - Candidate not contained by symbolic ref:
@@ -51,6 +59,7 @@ This blank template is not evidence and must not change any acceptance checkbox.
 - Exact claim/prepared/published/converged event IDs/body hashes:
 - Abort/terminal/new slot absent:
 - Candidate cohort HEAD/index/worktree exact manifest SHA-256:
+- Pending staging snapshot unchanged through restart:
 - Git argv capture SHA-256:
 - Remote argv count (must be zero):
 - Device delivery excluded from acceptance:

@@ -45,6 +45,7 @@ import {
   canonicalGitRuntimeEnabled,
   createProducedArtifactReceipt,
   getCanonicalGitRuntime,
+  markP1PreparedStopReached,
   type CanonicalGitRuntime,
   type DrainResult,
   type ProducedArtifact,
@@ -193,6 +194,7 @@ export interface WriterPublicationResult {
   episodeId?: string;
   slot?: number;
   candidate?: string;
+  probeRunId?: string;
   canonical: boolean;
 }
 
@@ -1241,6 +1243,7 @@ export function writerPublicationFromCanonicalDrain(drained: DrainResult): Write
       ...(drained.episodeId ? { episodeId: drained.episodeId } : {}),
       ...(drained.slot !== undefined ? { slot: drained.slot } : {}),
       ...(drained.candidate ? { candidate: drained.candidate } : {}),
+      ...(drained.probeRunId ? { probeRunId: drained.probeRunId } : {}),
       canonical: true,
     };
   }
@@ -1281,6 +1284,12 @@ async function canonicalCommitExplicitPaths(
     return publication;
   }
   const publication = writerPublicationFromCanonicalDrain(drained);
+  if (publication.reason === CONTROLLED_STOP_AFTER_PREPARED) {
+    if (!publication.probeRunId) {
+      throw new Error("controlled prepared stop publication is missing probeRunId");
+    }
+    markP1PreparedStopReached(publication.probeRunId);
+  }
   if (publication.status === "local_durable" && publication.commit) {
     // Device delivery is deliberately detached from canonical success. The
     // native git-sync audit owns delivery diagnostics and never changes this

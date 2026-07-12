@@ -144,6 +144,16 @@ export interface DrainResult {
   slot?: number;
   localCommit: "not_published" | "published" | "index_converged";
   reason?: string;
+  probeRunId?: string;
+}
+
+export type P1RestartProbeIsolation =
+  | Readonly<{ active: false }>
+  | Readonly<{ active: true; runId: string; expiresAtUtc: string }>;
+
+export interface P1PreparedStopLatch {
+  readonly runId: string;
+  readonly state: "prepared_stop_reached";
 }
 
 export interface CanonicalOwnershipInstrumentation {
@@ -200,6 +210,7 @@ interface GlobalRuntimeState {
   loadedProvenance?: readonly LoadedProvenanceEntry[];
   runtimes: Map<string, CanonicalGitRuntimeImpl>;
   consumedP1RestartProbeRunIds: Set<string>;
+  preparedStopLatch?: P1PreparedStopLatch;
 }
 
 function globalState(): GlobalRuntimeState {
@@ -219,8 +230,8 @@ function globalState(): GlobalRuntimeState {
 
 function parseP1RestartProbe(raw: string | undefined, nowMs = Date.now()): P1RestartProbe | undefined {
   if (raw === undefined) return undefined;
-  const fail = (message: string): never => {
-    throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_INVALID", `${P1_RESTART_PROBE_ENV} ${message}`);
+  const fail = (message: string, code = "P1_RESTART_PROBE_INVALID"): never => {
+    throw new CanonicalGitRuntimeError(code, `${P1_RESTART_PROBE_ENV} ${message}`);
   };
   if (!raw || raw.includes("\n") || raw.includes("\r")) fail("must be one non-empty JSON line");
   let value: unknown;
@@ -242,12 +253,55 @@ function parseP1RestartProbe(raw: string | undefined, nowMs = Date.now()): P1Res
     : fail("expiresAtUtc must be canonical UTC with milliseconds");
   const expiresAtMs = Date.parse(expiresAtUtc);
   if (!Number.isFinite(expiresAtMs) || new Date(expiresAtMs).toISOString() !== expiresAtUtc) fail("expiresAtUtc is invalid");
-  if (expiresAtMs <= nowMs) fail("is expired");
+  if (expiresAtMs <= nowMs) fail("is expired", "P1_RESTART_PROBE_EXPIRED");
   if (expiresAtMs - nowMs > P1_RESTART_PROBE_MAX_LIFETIME_MS) fail("expiresAtUtc must be no more than 15 minutes in the future");
   if (JSON.stringify({ version: P1_RESTART_PROBE_VERSION, runId, boundary: P1_RESTART_PROBE_BOUNDARY, expectedHead, expiresAtUtc }) !== raw) {
     fail("must use the exact compact schema encoding");
   }
   return Object.freeze({ version: P1_RESTART_PROBE_VERSION, runId, boundary: P1_RESTART_PROBE_BOUNDARY, expectedHead, expiresAtUtc, expiresAtMs });
+}
+
+/**
+ * Read-only probe visibility for sediment scheduling isolation. This resolver
+ * deliberately knows nothing about Git, startup state, source receipts, or
+ * consume state; requestDrain remains the sole probe mutation/consume gate.
+ */
+export function resolveP1RestartProbeIsolation(
+  raw = process.env[P1_RESTART_PROBE_ENV],
+  nowMs = Date.now(),
+): P1RestartProbeIsolation {
+  try {
+    const probe = parseP1RestartProbe(raw, nowMs);
+    return probe
+      ? Object.freeze({ active: true, runId: probe.runId, expiresAtUtc: probe.expiresAtUtc })
+      : Object.freeze({ active: false });
+  } catch (error) {
+    const code = (error as { code?: unknown })?.code;
+    if (code === "P1_RESTART_PROBE_INVALID" || code === "P1_RESTART_PROBE_EXPIRED") {
+      return Object.freeze({ active: false });
+    }
+    throw error;
+  }
+}
+
+export function getP1PreparedStopLatch(): P1PreparedStopLatch | undefined {
+  return globalState().preparedStopLatch;
+}
+
+export function markP1PreparedStopReached(runId: string): P1PreparedStopLatch {
+  if (!RUN_ID_PATTERN.test(runId)) {
+    throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_LATCH_INVALID", "prepared-stop latch requires a canonical lowercase UUID", { runId });
+  }
+  const state = globalState();
+  if (!state.preparedStopLatch) {
+    state.preparedStopLatch = Object.freeze({ runId, state: "prepared_stop_reached" });
+  } else if (state.preparedStopLatch.runId !== runId) {
+    throw new CanonicalGitRuntimeError("P1_RESTART_PROBE_LATCH_CONFLICT", "process already reached prepared stop for a different run", {
+      existingRunId: state.preparedStopLatch.runId,
+      runId,
+    });
+  }
+  return state.preparedStopLatch;
 }
 
 function assertP1RestartProbeFresh(probe: P1RestartProbe, nowMs = Date.now()): void {
@@ -1160,6 +1214,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         slot: claim.slot,
         localCommit: "not_published",
         reason: CONTROLLED_STOP_AFTER_PREPARED,
+        probeRunId: probe.runId,
       };
     }
     let action: Awaited<ReturnType<typeof recoverDrainSlot>>;

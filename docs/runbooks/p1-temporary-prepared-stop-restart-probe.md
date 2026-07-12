@@ -52,6 +52,10 @@ Do not invoke replay, backlog drain, explicit recovery, or a manual writer opera
 
 ## Prepared stop gate
 
+The armed sediment process captures the strict probe isolation at module load and again at every `agent_end`. While the exact probe is active, the normal Knowledge auto-write lane remains available, but autonomous side schedulers are paused for that turn: Lane R replay, staging resolver/age-out/promotion, archive reactivation, forgetting/status mutation, constraint auto-refresh/follow-up, side L3/embedding maintenance, and related autonomous diagnostic scheduling. Explicit Lane A/G, Tier-1 direct, and rule/status mutation paths benignly defer before mutation. This temporary scheduler list is diagnostic isolation for the one-shot probe; it is not a security boundary.
+
+The first writer publication with `reason=CONTROLLED_STOP_AFTER_PREPARED` sets a process-global immutable `{runId,state:"prepared_stop_reached"}` latch. The current auto-write candidate loop stops immediately, does not run recursive drain/L3/embedding/publication audit, and every later `agent_end` defers all canonical and staging work until process exit. A multi-candidate auto-write batch may therefore process only the first candidate that reaches the prepared boundary.
+
 The writer result must report all of the following in one result:
 
 - `publication.status = durable_pending`
@@ -59,7 +63,10 @@ The writer result must report all of the following in one result:
 - `publication.localCommit = not_published`
 - non-empty `publication.episodeId`, integer `publication.slot`, and `publication.candidate`
 - current HEAD still equals `EXPECTED_HEAD`
+- the exact prepared cohort contains only the one triggering `sediment:auto_write:*` Knowledge writer transaction plus canonical recovery metadata allowed by the existing runtime; no replay/staging/foreign cohort is represented as trigger evidence
 - the shared index bytes and original writer cohort worktree bytes are unchanged
+- all pre-existing pending replay staging files are byte-identical, including `retry_attempts` and writer-attempt fields
+- a second post-stop `agent_end` leaves the whole canonical L1/L2 plus staging fingerprint unchanged
 - active recovery records for that episode/slot are exactly one `recovery_slot_claimed` and one `commit_prepared`
 - there is no `commit_published`, `index_converged`, `recovery_slot_aborted`, or `recovery_episode_terminal`
 - candidate is not contained by `refs/heads/main`
@@ -101,9 +108,11 @@ Fill [the evidence template](../evidence/templates/p1-prepared-stop-restart-prob
 
 After accepted evidence is independently reviewed, delete all temporary probe surfaces in a separate authorized change:
 
-- constants, parser, consumed-run set, source gate, and prepared-stop return in `extensions/_shared/canonical-git-runtime.ts`;
+- constants, strict parser integration, read-only isolation resolver/types, process-global prepared-stop latch, consumed-run set, source gate, `probeRunId`, and prepared-stop return in `extensions/_shared/canonical-git-runtime.ts`;
+- writer latch publication mapping and controlled-stop missing-commit exception in `extensions/sediment/writer.ts` and `extensions/sediment/curator-decision-writer.ts`;
+- sediment module/`agent_end` isolation snapshots, side-scheduler gates, explicit/Tier-1/rule-status defers, candidate-loop break, recursive-drain/L3/embedding gates, post-stop `agent_end` early return, and temporary test exports/hooks in `extensions/sediment/index.ts`;
 - temporary coordinate fields/mapping only if no durable API consumer remains;
-- `scripts/smoke-p1-restart-prepared-stop-probe.mjs` and its package script;
+- `scripts/smoke-p1-restart-prepared-stop-probe.mjs` and its package script, including resolver/scheduler/staging/latch/foreign-ABORT cases;
 - this runbook and its evidence template;
 - the temporary Decision Log entry, only by an append-only superseding entry, never by rewriting history.
 
