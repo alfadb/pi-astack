@@ -53,6 +53,7 @@ fs.copyFileSync(path.join(sharedTarget, "runtime.cjs"), path.join(sharedTarget, 
 // (lock routing is part of /abrain bind's commit path now).
 fs.writeFileSync(path.join(sharedTarget, "causal-anchor.cjs"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
 fs.writeFileSync(path.join(sharedTarget, "pi-internals.cjs"), `module.exports = { isSubAgentSession: () => false };\n`);
+fs.writeFileSync(path.join(sharedTarget, "llm-audit.cjs"), `module.exports = { auditStreamSimple: async () => ({ stopReason: "error", content: [] }) };\n`);
 fs.writeFileSync(path.join(sharedTarget, "git-singleflight.cjs"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
 fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
 fs.copyFileSync(path.join(tmpDir, "reconcile-gate.cjs"), path.join(tmpDir, "reconcile-gate.js"));
@@ -73,6 +74,7 @@ for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "b
   const compiled = transpile(path.join(repoRoot, "extensions/abrain", `${file}.ts`))
     .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
     .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
+    .replace(/require\("\.\.\/_shared\/llm-audit"\)/g, 'require("./_shared/llm-audit.cjs")')
     .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")');
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
