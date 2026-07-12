@@ -64,6 +64,17 @@ npm run smoke:abrain-vault-grant-isolation
 npm run smoke:abrain-rule-writer-fs
 npm run smoke:prompt-user
 npm run smoke:prompt-user-option-list
+
+# Legacy hook cleanup / native git-sync boundary changes
+npm run smoke:abrain-legacy-hook-cleanup
+npm run smoke:abrain-git-sync
+npm run smoke:script-registry-drift
+```
+
+The retained ADR0039 standalone CLI is an operator-invoked local integrity checker, not a hook or live runtime/device-sync gate:
+
+```bash
+npm run check:adr0039-integrity
 ```
 
 For doc-only changes, run at least `npm run smoke:paths` if paths/runtime references were touched. For memory/sediment/vault changes, run the relevant subset above plus any command-specific smoke. For sanitizer or sediment secret-boundary changes, run `npm run smoke:memory` because it covers typed placeholders, prompt redaction, audit raw_text/error redaction, trigger phrase sanitization, and `memory_search` query redaction.

@@ -464,10 +464,11 @@ function scanConstraintEvidenceEvents(abrainHome) {
 }
 
 // Returns { present, warnings(advisory, never blocks), liveness(standalone
-// reconcile non-zero, NOT push-blocking) }. The constraint shadow bundle lives
-// under gitignored .state, so NOTHING here is push-blocking (ADR0039 §6 accepts
-// stale). §12 dead-projector + unknown L1 schema are surfaced as liveness so a
-// standalone `reconcile:adr0039` (CI) goes red without blocking pushes.
+// reconcile non-zero, excluded from the local integrity result) }. The
+// constraint shadow bundle lives under gitignored .state, so its stale signals
+// remain advisory for the manual checker (ADR0039 §6 accepts stale). §12
+// dead-projector + unknown L1 schema are surfaced as liveness for standalone
+// `reconcile:adr0039` (CI), while the manual integrity mode reports them only.
 function validateConstraintShadow(abrainHome, opts) {
   const latest = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
   if (!fs.existsSync(latest)) return { present: false, warnings: [], liveness: [] };
@@ -532,10 +533,11 @@ function validateConstraintShadow(abrainHome, opts) {
 // files under l1/. Modify/delete/copy/type-change of an existing L1 event breaks
 // the content-addressed immutable-by-path invariant on PUSHED content = blocker.
 // Logic lives here (single source of truth; standalone reconcile surfaces it) and
-// is enforced at pre-push via the existing spawn. Graceful skip+WARN when not a
-// git repo or origin/main is unavailable (fresh clone / first push) so CI after
-// a clean push does not go permanently red. Dirty derived checks still run
-// independently even when this pushed range cannot be computed. --no-renames =>
+// is enforced by the existing manual checker spawn. Graceful skip+WARN when
+// not a git repo or origin/main is unavailable (fresh clone / first push) so CI
+// after a clean push does not go permanently red. Dirty derived checks still
+// run independently even when this comparison range cannot be computed.
+// --no-renames =>
 // a rename shows as D+A; the D blocks.
 function validateL1AppendOnlyOnPushedRange(abrainHome) {
   if (!fs.existsSync(path.join(abrainHome, ".git"))) return { failures: [], warnings: ["l1_append_only: skipped:not_a_git_repo"] };
@@ -725,9 +727,10 @@ async function reconcile(abrainHome, opts = loadRuntimeThresholds()) {
   if (l3.counts && Number(l3.counts.searchCorpusRows ?? 0) !== Number(knowledge.searchCorpusRows ?? 0)) {
     l3SearchCorpusFailures.push(`adr0039-l3: search_corpus_row_mismatch:${l3.counts.searchCorpusRows ?? 0}:${knowledge.searchCorpusRows ?? 0}`);
   }
-  // blocker tier = PUSHED-content integrity only (drives pre-push block + standalone non-zero).
+  // blocker tier = content-integrity findings (drives manual checker non-zero).
   const failures = [...l1.failures, ...knowledge.failures, ...constraintL2.failures, ...l3.failures, ...l3SearchCorpusFailures, ...dirty.failures, ...l1AppendOnly.failures];
-  // liveness tier = standalone reconcile non-zero (CI alarm) but NOT push-blocking (gitignored .state).
+  // liveness tier = standalone reconcile non-zero (CI alarm), but excluded from
+  // manual checker failure status because it concerns gitignored .state.
   const liveness = [...(constraint.liveness ?? [])];
   // advisory tier = WARN only, never affects exit code.
   const warnings = [...(constraint.warnings ?? []), ...(l1AppendOnly.warnings ?? [])];
@@ -757,10 +760,10 @@ function printResult(result) {
     for (const failure of result.failures) console.log(`  FAIL  ${failure}`);
     console.log(`FAIL — ${result.failures.length} reconcile blocker(s) failed.`);
   } else {
-    console.log("PASS — ADR0039 reconcile push-gate checks passed.");
+    console.log("PASS — ADR0039 local integrity checks passed.");
   }
   if ((result.liveness ?? []).length) {
-    console.log(`LIVENESS — ${result.liveness.length} non-blocking projector-liveness signal(s) (standalone reconcile non-zero; not push-blocking).`);
+    console.log(`LIVENESS — ${result.liveness.length} projector-liveness signal(s) reported separately; excluded from local integrity status.`);
   }
 }
 
@@ -824,8 +827,9 @@ if (hasFlag("abrain")) {
   const abrainHome = path.resolve(expandHome(arg("abrain", path.join(os.homedir(), ".abrain"))));
   const result = await reconcile(abrainHome);
   printResult(result);
-  // pre-push passes --push-gate-only: only blocker-tier (pushed content) blocks.
-  // standalone (CI): blocker + liveness (§12 dead-projector / unknown schema) -> non-zero.
+  // The manual checker passes --push-gate-only for compatibility: only
+  // content-integrity findings affect its exit status. Standalone CI mode also
+  // includes liveness (§12 dead-projector / unknown schema) in its non-zero result.
   const exitNonZero = pushGateOnly ? result.failures.length > 0 : (result.failures.length + result.liveness.length) > 0;
   process.exit(exitNonZero ? 1 : 0);
 }
@@ -1211,8 +1215,9 @@ console.log("PASS — B1 Knowledge L2 migrates to git-trackable l2/ namespace (f
   console.log("PASS — B3 legacy_import backfill reaches 1.0 coverage, append-only, idempotent, strict-verifiable.");
 }
 
-// B4: pre-push hardblock rejects a dirty derived L2 view; PI_SKIP_L2_CHECK=1
-// overrides with an auditable diagnostic (not a .state no-op — l2/ is tracked).
+// B4: the local integrity checker rejects a dirty derived L2 view;
+// PI_SKIP_L2_CHECK=1 overrides with an auditable diagnostic (not a .state
+// no-op — l2/ is tracked).
 {
   const b4 = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-b4-"));
   execFileSync("git", ["-C", b4, "init"], { encoding: "utf8" });
@@ -1223,21 +1228,21 @@ console.log("PASS — B1 Knowledge L2 migrates to git-trackable l2/ namespace (f
   execFileSync("git", ["-C", b4, "commit", "-m", "baseline"], { encoding: "utf8" });
   // uncommitted (hand-edited) derived L2 view => dirty_derived_view
   writeFile(path.join(b4, "l2", "views", "knowledge", "_dirty.txt"), "hand edit\n");
-  const prepush = path.join(repoRoot, "scripts", "pre-push-adr0039-reconcile.mjs");
-  const runPrepush = (env) => {
+  const manualChecker = path.join(repoRoot, "scripts", "pre-push-adr0039-reconcile.mjs");
+  const runManualChecker = (env) => {
     try {
-      execFileSync(process.execPath, [prepush, "--abrain", b4], { encoding: "utf8", env: { ...process.env, ...env }, stdio: "pipe" });
+      execFileSync(process.execPath, [manualChecker, "--abrain", b4], { encoding: "utf8", env: { ...process.env, ...env }, stdio: "pipe" });
       return 0;
     } catch (err) {
       return typeof err.status === "number" ? err.status : 1;
     }
   };
-  if (runPrepush({ PI_SKIP_L2_CHECK: "" }) === 0) {
-    console.log("FAIL — B4 pre-push did not block a dirty derived L2 view");
+  if (runManualChecker({ PI_SKIP_L2_CHECK: "" }) === 0) {
+    console.log("FAIL — B4 local integrity checker did not reject a dirty derived L2 view");
     process.exit(1);
   }
-  if (runPrepush({ PI_SKIP_L2_CHECK: "1" }) !== 0) {
-    console.log("FAIL — B4 PI_SKIP_L2_CHECK=1 did not override the block");
+  if (runManualChecker({ PI_SKIP_L2_CHECK: "1" }) !== 0) {
+    console.log("FAIL — B4 PI_SKIP_L2_CHECK=1 did not override the local integrity finding");
     process.exit(1);
   }
   const overrideLog = path.join(b4, ".state", "sediment", "adr0039-l3", "prepush-overrides.jsonl");
@@ -1245,6 +1250,6 @@ console.log("PASS — B1 Knowledge L2 migrates to git-trackable l2/ namespace (f
     console.log("FAIL — B4 override did not record an auditable diagnostic");
     process.exit(1);
   }
-  console.log("PASS — B4 pre-push hardblock rejects dirty L2; PI_SKIP_L2_CHECK=1 overrides with audit.");
+  console.log("PASS — B4 local integrity checker rejects dirty L2; PI_SKIP_L2_CHECK=1 overrides with audit.");
 }
 process.exit(0);

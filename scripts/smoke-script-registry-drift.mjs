@@ -113,6 +113,27 @@ const retiredPackageRefs = Object.entries(packageScripts).filter(([, command]) =
 check("retired P1-B runtime trace artifacts stay forward-deleted", retiredOnDisk.length === 0, retiredOnDisk.join("\n"));
 check("package scripts do not resurrect retired P1-B runtime trace entrypoints", retiredPackageRefs.length === 0, retiredPackageRefs.map(([name, command]) => `${name}=${command}`).join("\n"));
 
+check("retired prepush alias stays removed", packageScripts["prepush:adr0039"] === undefined);
+check(
+  "standalone ADR0039 checker has a neutral manual-check alias",
+  packageScripts["check:adr0039-integrity"] === "node scripts/pre-push-adr0039-reconcile.mjs --abrain ~/.abrain",
+  String(packageScripts["check:adr0039-integrity"] ?? "missing"),
+);
+const manualCheckerSource = fs.readFileSync(path.join(repoRoot, "scripts/pre-push-adr0039-reconcile.mjs"), "utf8");
+check("standalone ADR0039 checker is not documented as a live hook/runtime gate", manualCheckerSource.includes("manual local integrity checker") && !manualCheckerSource.includes("called by pushAsync") && !manualCheckerSource.includes("git push"));
+check(
+  "ADR0039 manual checker output uses local-integrity wording",
+  manualCheckerSource.includes("PASS — ADR0039 local integrity check passed.") &&
+    !manualCheckerSource.includes("PASS — ADR0039 pre-push blocker passed."),
+);
+const reconcileSmokeSource = fs.readFileSync(path.join(repoRoot, "scripts/smoke-adr0039-reconcile.mjs"), "utf8");
+check(
+  "ADR0039 reconcile runner output avoids push-gate/pre-push wording",
+  reconcileSmokeSource.includes("PASS — ADR0039 local integrity checks passed.") &&
+    !reconcileSmokeSource.includes("PASS — ADR0039 reconcile push-gate checks passed.") &&
+    !reconcileSmokeSource.includes("PASS — B4 pre-push hardblock"),
+);
+
 console.log(`\nsummary: smoke_files=${smokeFiles.length} smoke_scripts=${registeredSmoke.length} dossier_files=${dossierFiles.length} dossier_scripts=${registeredDossiers.length}`);
 if (failures.length) {
   console.log(`FAIL — ${failures.length} registry drift check(s) failed.`);

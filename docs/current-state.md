@@ -74,7 +74,7 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 | 过渡态登记 | 当前 shadow/observe/dogfood/gated-defer 面以 [`docs/transition-register.machine.json`](./transition-register.machine.json) 为 machine source of truth；[`docs/transition-register.md`](./transition-register.md) 是确定性人类可读镜像。新增过渡态必须先登记稳定 ID、退出条件、授权与复审字段。 |
 | workflows | `~/.abrain/workflows/` 或 `~/.abrain/projects/<id>/workflows/`。 |
 | `.pensieve/` | legacy 只读迁移源；sediment 不再写入。 |
-| 跨设备同步 | sediment commit 后后台 push、启动 `fetch` 后先试 `merge --ff-only`，分叉时退到确定性 `merge --no-ff`（git 自带 3-way）；**LLM 解冲突被明确拒绝（知识库幻觉风险），真冲突 abort 并向用户出 runbook**（ADR 0020）。 |
+| 跨设备同步与 hook 边界 | device delivery 只使用用户环境中的原生 `git fetch`、`git merge --ff-only '@{upstream}'`、`git push`，失败仅作 `.state` audit / warning，不进入 canonical truth 或 local startup gate。pi 不管理 remote、upstream、auth、transport config 或 hooks。`4c49584` 删除旧 ADR0039 hook installer 后，遗留 artifact 只通过一次性 startup migration 处理：`.state/` gitignore guard 成功后，以删除全部 inherited `GIT_*` 的 local structural env 验证 abrain top-level/absolute git-dir，只检查历史默认 `<git-dir>/hooks/pre-push`，忽略 `core.hooksPath`；仅 regular file 整体 bytes 精确等于唯一已发布 pi body 才 unlink，且 audit 记录 actual hash/size/mode/dev/ino 而不记录 path/content。custom、modified、hook/parent symlink、non-regular 与 unreadable artifact 一律保留。opened-fd `fstat`、read 后 `fstat` 与 unlink 前 path `lstat` 会检测已覆盖竞态，但 Node 没有 fd-relative unlink，不能宣称消除最终微窗口。这是 pi-owned artifact removal，不是 device transport management。 |
 
 > 各区 writer 覆盖状态、Lane G 进度等以代码 + `docs/roadmap.md` 为准。
 

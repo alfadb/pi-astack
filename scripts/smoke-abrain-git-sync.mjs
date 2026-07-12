@@ -237,8 +237,9 @@ await check("git-sync, caller, and writer retain neutral native delivery boundar
   const source = files.map((file) => fs.readFileSync(path.join(root, file), "utf8")).join("\n");
   for (const forbidden of ["remote get-url", "origin/main", "HEAD:main", "main:main", "conflictPaths", "enqueued push", "queued for push", "auto-merge", "auto-merged", "self-heal bridge", "Self-heal", "resolveDerivedL2", "ensureAdr0039PrePushHook", "checkAdr0039ReconcileGate"]) assert(!source.includes(forbidden), `delivery boundary retained ${forbidden}`);
   const nativeSource = fs.readFileSync(path.join(root, "extensions/abrain/git-sync.ts"), "utf8");
-  for (const forbidden of ["canonical-git-runtime", "GIT_CONFIG_COUNT", "GIT_SSH_COMMAND", "remote get-url", "remote -v"]) assert(!nativeSource.includes(forbidden), `native delivery interpreted user-owned configuration via ${forbidden}`);
+  for (const forbidden of ["canonical-git-runtime", "GIT_CONFIG_COUNT", "GIT_SSH_COMMAND", "remote get-url", "remote -v", "push_blocked_reconcile", "consecutivePushBlockedReconcile"]) assert(!nativeSource.includes(forbidden), `native delivery retained dead or user-configuration-coupled token ${forbidden}`);
   const callerSource = fs.readFileSync(path.join(root, "extensions/abrain/index.ts"), "utf8");
+  assert(!callerSource.includes("consecutivePushBlockedReconcile") && !callerSource.includes("push_blocked_reconcile"), "caller retained dead reconcile-blocked status handling");
   assert(callerSource.includes("gitSync({ abrainHome: ABRAIN_HOME })") && callerSource.includes('event.op === "fetch"'), "startup does not consume the fetch event from the complete device-sync sequence");
   assert(!callerSource.includes("fetchAndFF({ abrainHome: ABRAIN_HOME })") && !callerSource.includes("pushAsync({ abrainHome: ABRAIN_HOME })"), "startup restored split or duplicate device operations");
   assert(callerSource.includes('fetchEvent?.result === "diverged"') && callerSource.includes("Startup continues; use /abrain sync to retry."), "startup divergence/failure warning regressed to silent handling");

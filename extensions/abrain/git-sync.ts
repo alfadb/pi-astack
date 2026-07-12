@@ -24,7 +24,7 @@ export { redactCredentials };
 
 export type GitSyncNotifyType = "info" | "warning" | "error";
 export type GitSyncOp = "push" | "fetch" | "sync";
-export type GitSyncResult = "ok" | "noop" | "skipped" | "conflict" | "diverged" | "push_rejected" | "push_blocked_reconcile" | "timeout" | "failed";
+export type GitSyncResult = "ok" | "noop" | "skipped" | "conflict" | "diverged" | "push_rejected" | "timeout" | "failed";
 
 export interface GitSyncEvent {
   ts: string;
@@ -52,7 +52,6 @@ export interface AbrainSyncStatus {
   behind: number;
   lastPush?: GitSyncEvent;
   lastFetch?: GitSyncEvent;
-  consecutivePushBlockedReconcile?: number;
 }
 
 function freshGitEnvironment(): NodeJS.ProcessEnv {

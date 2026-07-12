@@ -35,10 +35,10 @@ readKnowledgeStableViewStores：
 
 - `npm run dossier:adr0039-phase-c-flip-probe`（projection 胜出 + 无 l2 泄漏 + fallback）。
 - `npm run dossier:adr0039-reindex-ab`（blocker②④ 质量门 0 content-loss）。
-- `npm run prepush:adr0039`（l1↔l2 reconcile + dirty-view）。
+- `npm run check:adr0039-integrity`（手动 local integrity checker：l1↔l2 reconcile + dirty-view；不是 live hook/runtime gate）。
 - 检查 `.state/sediment/knowledge-projection/overlay-budget.jsonl`（overlay 溢出，预期但 stable-view 胜出故惰性）。
 - memory_search recall 人工抽查（注意 LLM-search [] 混淆需先排除）。
-- 回归触发（任一）→ 单 flag 回 `legacy`：①质量门回归 ②recall 退化 ③prepush 反复 dirty-block
+- 回归触发（任一）→ 单 flag 回 `legacy`：①质量门回归 ②recall 退化 ③手动 integrity checker 反复报告 dirty view
   ④projection 胜出探针 fail ⑤sidecar/writer 提交分叉。
 
 ## 进入 projection_only 的门（step 2，未到）

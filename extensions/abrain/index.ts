@@ -50,6 +50,7 @@ import {
 } from "./vault-writer";
 import { releaseSecret, vaultFilePath, type ReleaseSecretResult } from "./vault-reader";
 import {
+  cleanupLegacyAdr0039PrePushHook,
   ensureAbrainStateGitignored,
   ensureBrainLayout,
 } from "./brain-layout";
@@ -1388,11 +1389,26 @@ export default function activate(pi: ExtensionAPI): void {
     } catch (err: any) {
       console.error(`[abrain] brain layout failed:`, err);
     }
+    // Cleanup may append audit/marker files under .state, so it is eligible
+    // only after the ignore guard has completed successfully.
+    let stateGitignoreGuardReady = false;
     try {
       const result = ensureAbrainStateGitignored(ABRAIN_HOME);
+      stateGitignoreGuardReady = true;
       if (result.updated) console.error(`[abrain] added .state/ to ${result.path}`);
     } catch (err: any) {
       console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
+    }
+    if (stateGitignoreGuardReady) {
+      try {
+        const cleanup = cleanupLegacyAdr0039PrePushHook(ABRAIN_HOME);
+        if (cleanup.removed) console.error(`[abrain] removed exact pi-owned legacy ADR0039 pre-push hook`);
+        else if (cleanup.warning) console.warn(`[abrain] ${cleanup.warning}`);
+      } catch (err: any) {
+        // Defense in depth: the helper is fail-soft, and this migration must
+        // never become a canonical or local startup gate.
+        console.warn(`[abrain] legacy ADR0039 hook cleanup failed (non-fatal): ${err?.message ?? err}`);
+      }
     }
   };
   // Explicit disabled mode preserves legacy activation behavior. Enabled mode
@@ -2751,13 +2767,9 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
       console.error(`[abrain] getGitSyncStatus failed:`, msg);
     }
     const syncMsg = syncStatus ? formatSyncStatus(syncStatus) : "";
-    const reconcileBlocked = (syncStatus?.consecutivePushBlockedReconcile ?? 0) >= 3;
-    if (reconcileBlocked) {
-      console.warn(`[abrain] ADR0039 push gate has blocked ${syncStatus?.consecutivePushBlockedReconcile} consecutive push attempts; reproject L2 from L1 before retrying auto-sync.`);
-    }
     // A failed or divergent configured-upstream update needs user attention.
     const lastFetchResult = syncStatus?.lastFetch?.result;
-    const needsAttention = (lastFetchResult !== undefined && !["ok", "noop", "skipped"].includes(lastFetchResult)) || reconcileBlocked;
+    const needsAttention = lastFetchResult !== undefined && !["ok", "noop", "skipped"].includes(lastFetchResult);
     const fullMsg = syncMsg ? `${bindingMsg}\n\n${syncMsg}` : bindingMsg;
     ui.notify(fullMsg, needsAttention ? "warning" : (current.activeProject ? "info" : "warning"));
     return;
