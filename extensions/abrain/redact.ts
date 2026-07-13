@@ -152,12 +152,10 @@ export function redactPromptParams(p: PromptUserParams): PromptUserParams {
     if (q.options !== undefined) out.options = q.options.map(redactOption);
     return out;
   };
-  const out: PromptUserParams = {
+  return {
     reason: scrub(p.reason),
     questions: p.questions.map(redactQuestion),
   };
-  if (p.timeoutSec !== undefined) out.timeoutSec = p.timeoutSec;
-  return out;
 }
 
 /**

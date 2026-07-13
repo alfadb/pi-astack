@@ -45,7 +45,7 @@ export interface PromptUserCtx {
   ui: {
     custom?: (
       factory: PromptDialogFactory,
-      opts: { overlay: true; overlayOptions?: Record<string, unknown> },
+      opts: { overlay: boolean; overlayOptions?: Record<string, unknown> },
     ) => Promise<RawDialogResult | null>;
     select?: (
       title: string,
@@ -107,7 +107,7 @@ export interface PromptAuditSink {
   }): void;
   recordResult(ev: {
     id: string;
-    outcome: "answered" | "rejected" | "timeout" | "cancelled" | "ui_unavailable";
+    outcome: "answered" | "rejected" | "cancelled" | "ui_unavailable";
     durationMs: number;
     /** Per-question metadata. Secrets carry only `lengthBucket`. */
     perQuestion: Array<{
@@ -186,7 +186,6 @@ export async function askPromptUser(
 ): Promise<PromptUserResult> {
   const startedAt = Date.now();
   const variant = options.variant ?? "question";
-  const timeoutSec = params.timeoutSec ?? 600;
 
   // ADR 0022 P1-fix (OPUS review): re-run redactPromptParams at the
   // service entry as defense-in-depth. handler.ts already calls it,
@@ -196,10 +195,7 @@ export async function askPromptUser(
   // no-op on the second sweep.
   params = redactPromptParams(params);
 
-  const handle = acquirePending({
-    timeoutSec,
-    upstreamSignal: ctx.signal,
-  });
+  const handle = acquirePending({ upstreamSignal: ctx.signal });
 
   // ── Audit: prompt_user_ask ──
   audit.recordAsk({
@@ -212,16 +208,14 @@ export async function askPromptUser(
 
   // ── Resolve helper that also writes the result audit row ──
   const finalizeWithAudit = (result: PromptUserResult): PromptUserResult => {
-    const outcome: "answered" | "rejected" | "timeout" | "cancelled" | "ui_unavailable" =
+    const outcome: "answered" | "rejected" | "cancelled" | "ui_unavailable" =
       result.ok
         ? "answered"
-        : result.reason === "timeout"
-          ? "timeout"
-          : result.reason === "user-rejected"
-            ? "rejected"
-            : result.reason === "ui-unavailable"
-              ? "ui_unavailable"
-              : "cancelled";
+        : result.reason === "user-rejected"
+          ? "rejected"
+          : result.reason === "ui-unavailable"
+            ? "ui_unavailable"
+            : "cancelled";
     const perQuestion = params.questions.map((q) => {
       if (q.type === "secret") {
         // For secret: NEVER record raw. We MAY have a length bucket
@@ -271,13 +265,12 @@ export async function askPromptUser(
     // PRIMARY PATH ──────────────────────────────────────────────────
     // Pump dialog result through the manager promise. We do NOT await
     // ctx.ui.custom directly; instead the factory's `done(...)` callback
-    // resolves the manager handle. This means timeout / signal / shutdown
-    // all win the race uniformly without needing custom() to be
-    // cancellable.
+    // resolves the manager handle. This means signal / shutdown can end
+    // the wait without requiring custom() itself to be cancellable.
     //
     // R8 (post-T0 OPUS xhigh P1#1, 2026-05-18): capture both the
     // dialog root (for __wipeSecrets) and pi's `done` callback so
-    // manager-side terminal resolutions (timeout / signal abort /
+    // manager-side terminal resolutions (signal abort /
     // cancelAllPending) can ACTIVELY tear down both the dialog's
     // secret buffers and pi's editor-region overlay. Without this,
     // MaskedInput.buffer would linger holding plaintext until the
@@ -285,7 +278,7 @@ export async function askPromptUser(
     // an INV-C violation window of seconds to minutes.
     let customPromise: Promise<unknown> | null = null;
     let dialogRoot: { __wipeSecrets?: () => void } | null = null;
-    let dialogDone: ((v: unknown) => void) | null = null;
+    let dialogDone: ((v: RawDialogResult | null) => void) | null = null;
     try {
       customPromise = ctx.ui.custom(
         (tui, theme, kb, done) => {
@@ -315,8 +308,8 @@ export async function askPromptUser(
         //      ADR 0022 §D7 当时对 ctx.ui.custom 默认行为的误读
         //      (`overlay: false` 才是 pi 默认);
         //   3. UX — overlay 遮挡上方对话流,inline 自然融入消息流;
-        //   4. ADR §D7 主路径 5 条理由 (紧凑布局 / chip / variant /
-        //      keybindings / countdown) 在 inline 下全部成立 ——
+        //   4. ADR §D7 主路径的布局 / chip / variant / keybinding
+        //      理由在 inline 下全部成立 ——
         //      <PromptDialog> 组件代码完全不变,只是宿主容器换了。
         // 三个 variant (question / vault_release / bash_output_release)
         // 一起改为 inline,保持视觉路径一致。
@@ -336,8 +329,8 @@ export async function askPromptUser(
     // R8 (post-T0 OPUS xhigh P1#1): register a disposer that runs on
     // every terminal resolution. Success path runs it AFTER the
     // PromptDialog already wiped its own state (idempotent re-wipe);
-    // timeout / signal / shutdown paths rely on this as the ONLY
-    // wipe hook. The disposer is also responsible for tearing down
+    // signal / shutdown paths rely on this as the ONLY wipe hook. The
+    // disposer is also responsible for tearing down
     // pi's editor region by calling the captured `done(null)`.
     handle.registerDisposer(() => {
       try { dialogRoot?.__wipeSecrets?.(); } catch { /* best-effort */ }
@@ -460,8 +453,8 @@ async function chainedFallback(
   const answers: Record<string, string[]> = {};
   for (const q of params.questions) {
     if (handle.signal.aborted) {
-      // Manager already resolved with timeout/cancelled; nothing more
-      // to do. Return promise so caller sees the manager's verdict.
+      // Manager already resolved as cancelled; nothing more to do.
+      // Return the promise so caller sees the manager's verdict.
       return handle.promise;
     }
     if (q.type === "single") {

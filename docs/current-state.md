@@ -154,4 +154,4 @@ sed -n '1,140p' docs/reference/smoke-tests.md   # 完整列表与推荐子集
 
 ## 10. `prompt_user`
 
-已 ship；LLM 契约 + 信任/隐私边界见 [ADR 0022](./adr/0022-prompt-user-tool.md) / `requirements.md` REQ-008；INV 覆盖与 smoke 以 `package.json` + ADR 0022 为准。
+已 ship；LLM 契约 + 信任/隐私边界见 [ADR 0022](./adr/0022-prompt-user-tool.md) / `requirements.md` REQ-008。当前等待语义由 [ADR 0041](./adr/0041-prompt-user-indefinite-wait.md) 修订：不暴露 timeout/deadline，用户不回答就持续 pending；用户取消/Esc、turn `ctx.signal` abort、`session_shutdown` 仍终止。INV 覆盖与 smoke 以 `package.json` 为准。

@@ -7,16 +7,15 @@
  *     rejects schema-invalid with `detail:"another prompt is pending"`
  *     when the count is already 1.
  *
- *   - INV-B (no pending-forever path): every pending entry registers
- *     three independent cancel sources:
+ *   - Explicit termination: every pending entry listens for
+ *     `ctx.signal` abort and can be drained by `cancelAllPending(reason)`
+ *     from the session_shutdown finalizer. User submit / Cancel / Esc
+ *     resolves through the service. With no such event, the prompt stays
+ *     pending indefinitely.
  *
- *       1. `ctx.signal` abort  → resolves with `cancelled`
- *       2. `setTimeout(timeoutSec)` → resolves with `timeout`
- *       3. `cancelAllPending(reason)` from session_shutdown finalizer
- *
- *     All three converge on the same `resolveOnce(result)` so the
- *     consumer never sees a double-resolve, and the timer / signal
- *     listener are torn down deterministically.
+ *     All terminal paths converge on the same `resolveOnce(result)` so
+ *     the consumer never sees a double-resolve and signal listeners are
+ *     torn down deterministically.
  *
  *   - INV-K (compaction defer): `compaction-tuner` queries
  *     `getPendingPromptCount()` at `agent_end` to decide whether to
@@ -36,16 +35,14 @@ import type { PromptUserFailureReason, PromptUserResult } from "./types";
 interface PendingPrompt {
   id: string;
   startedAt: number;
-  timeoutSec: number;
   /** AbortController used to propagate cancellation to the UI overlay
    * and any awaited primitive inside the service layer. */
   abortController: AbortController;
   /** Cleared once `resolveOnce` runs. Idempotent: subsequent calls
    * no-op. */
   resolveOnce: (result: PromptUserResult) => void;
-  /** Disposers torn down by `resolveOnce`. They include the timeout
-   * handle, the upstream signal listener, and (when wired) the
-   * overlay's `handle.close()`. */
+  /** Disposers torn down by `resolveOnce`. They include the upstream
+   * signal listener and (when wired) the overlay's `handle.close()`. */
   disposers: Array<() => void>;
 }
 
@@ -82,13 +79,11 @@ export function getPendingPromptCount(): number {
 export function snapshotPending(): Array<{
   id: string;
   ageMs: number;
-  timeoutSec: number;
 }> {
   const now = Date.now();
   return Array.from(pending.values()).map((p) => ({
     id: p.id,
     ageMs: now - p.startedAt,
-    timeoutSec: p.timeoutSec,
   }));
 }
 
@@ -99,7 +94,7 @@ export function snapshotPending(): Array<{
  *   - kicking off the UI overlay and pumping its `done(answer)` into
  *     `resolve({ ok: true, ... })`
  *   - registering the overlay's `handle.close` via
- *     `registerDisposer` so timeout / shutdown also tears down the UI
+ *     `registerDisposer` so abort / shutdown also tears down the UI
  *
  * Returns:
  *   - `promise`: resolved exactly once (multiple resolve attempts after
@@ -108,17 +103,14 @@ export function snapshotPending(): Array<{
  *   - `signal`: AbortSignal that fires when any of the cancel sources
  *     trip. Pass this to the overlay so it tears down on shutdown.
  *   - `id`: unique identifier (also used as the audit event id).
- *   - `registerDisposer(fn)`: register a teardown step (overlay close,
- *     extra timer, etc.) that runs after any terminal resolution.
+ *   - `registerDisposer(fn)`: register a teardown step (for example,
+ *     overlay close) that runs after any terminal resolution.
  *
- * The function itself wires up:
- *   - Upstream signal (`opts.upstreamSignal`) → fires `cancelled`
- *   - `opts.timeoutSec` → fires `timeout`
- *
- * Both teardown via `disposers` so the global state stays clean.
+ * The function wires the upstream signal (`opts.upstreamSignal`) to a
+ * `cancelled` result. Its listener tears down via `disposers` so the
+ * global state stays clean.
  */
 export interface AcquireOptions {
-  timeoutSec: number;
   upstreamSignal?: AbortSignal;
 }
 
@@ -130,7 +122,7 @@ export interface AcquireHandle {
   registerDisposer: (fn: () => void) => void;
 }
 
-export function acquirePending(opts: AcquireOptions): AcquireHandle {
+export function acquirePending(opts: AcquireOptions = {}): AcquireHandle {
   const id = genId();
   const startedAt = Date.now();
   const abortController = new AbortController();
@@ -165,35 +157,11 @@ export function acquirePending(opts: AcquireOptions): AcquireHandle {
   const entry: PendingPrompt = {
     id,
     startedAt,
-    timeoutSec: opts.timeoutSec,
     abortController,
     resolveOnce,
     disposers: [],
   };
   pending.set(id, entry);
-
-  // Wire timeout (using setTimeout because Node's max timeout is well
-  // above our 1800s ceiling — no overflow path).
-  //
-  // We deliberately do NOT call `timer.unref()`. Under Node 24 an
-  // unref'd timer can let the event loop be declared idle while an
-  // `await handle.promise` is in flight on the only awaiting frame,
-  // producing "unsettled top-level await" warnings and premature
-  // process exits in smoke fixtures. Keeping the timer ref'd means the
-  // event loop stays alive until either the timeout fires or some
-  // other source (signal abort, `cancelAllPending`) tears it down via
-  // `clearTimeout` in the disposer below. In production this is also
-  // strictly safer: session_shutdown always drains pending prompts
-  // before pi exits, so a ref'd timer is never what holds pi open.
-  const timeoutMs = opts.timeoutSec * 1000;
-  const timer = setTimeout(() => {
-    resolveOnce({
-      ok: false,
-      reason: "timeout",
-      durationMs: Date.now() - startedAt,
-    });
-  }, timeoutMs);
-  entry.disposers.push(() => clearTimeout(timer));
 
   // Wire upstream signal (ctx.signal). If it fires we resolve with
   // `cancelled`. If the upstream is already aborted we resolve on the

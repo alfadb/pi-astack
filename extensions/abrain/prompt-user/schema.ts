@@ -30,7 +30,6 @@
  *   - VALID_TYPES                 (4 种合法类型)
  *   - FORBIDDEN_TOP_LEVEL_KEYS    (INV-G 拒 vault 字段)
  *   - hasControlChars             (TUI 安全: \n\r\t 造布局攻击)
- *   - timeoutSec clamp [30, 1800] (防 0 / Infinity 误传)
  *
  * INV-G: refuse any vault-shaped field (`key`, `scope`) at the
  * schema boundary, not later. Closes the door on a future LLM
@@ -63,9 +62,6 @@ export const MIN_QUESTIONS = 1;
 export const MAX_QUESTIONS = 4;
 export const MIN_OPTIONS = 2;
 export const MAX_OPTIONS = 4;
-export const DEFAULT_TIMEOUT_SEC = 600;
-export const MIN_TIMEOUT_SEC = 30;
-export const MAX_TIMEOUT_SEC = 1800;
 
 export const VALID_TYPES: readonly PromptUserQuestionType[] = [
   "single",
@@ -90,9 +86,7 @@ function hasControlChars(s: string): boolean {
 export interface ValidationResult {
   ok: boolean;
   errors: string[];
-  /** Echo of the validated params with `timeoutSec` clamped to the
-   * documented range. Only present when `ok === true`. The handler uses
-   * this clamped copy so downstream code never has to re-clamp. */
+  /** Sanitized structural copy. Only present when `ok === true`. */
   normalized?: PromptUserParams;
 }
 
@@ -192,7 +186,7 @@ function validateQuestion(
     let recommendedCount = 0;
     qq.options.forEach((opt, j) => {
       validateOption(opt, idx, j, errors);
-      const o = opt as Record<string, unknown>;
+      const o = opt as unknown as Record<string, unknown>;
       if (typeof o.label === "string") {
         const key = o.label.trim().toLowerCase();
         if (seenLabels.has(key)) {
@@ -223,10 +217,8 @@ function validateQuestion(
 /**
  * Validate raw `prompt_user(params)` call arguments.
  *
- * On success returns `{ ok: true, normalized }` where `normalized`
- * carries a `timeoutSec` clamped to `[MIN_TIMEOUT_SEC, MAX_TIMEOUT_SEC]`
- * (defaulting to `DEFAULT_TIMEOUT_SEC` when omitted). Other fields
- * are echoed verbatim — redaction is the next layer's job.
+ * On success returns `{ ok: true, normalized }`. Supported fields are
+ * copied explicitly; redaction is the next layer's job.
  *
  * On failure returns `{ ok: false, errors }` with one or more
  * human-readable strings. The handler joins them into the
@@ -275,19 +267,6 @@ export function validatePromptUserParams(raw: unknown): ValidationResult {
     p.questions.forEach((q, i) => validateQuestion(q, i, seenIds, errors));
   }
 
-  // timeoutSec (optional, clamped)
-  let timeoutSec = DEFAULT_TIMEOUT_SEC;
-  if (p.timeoutSec !== undefined) {
-    if (typeof p.timeoutSec !== "number" || !Number.isFinite(p.timeoutSec)) {
-      errors.push("params.timeoutSec: must be a finite number if present");
-    } else {
-      timeoutSec = Math.max(
-        MIN_TIMEOUT_SEC,
-        Math.min(MAX_TIMEOUT_SEC, Math.floor(p.timeoutSec)),
-      );
-    }
-  }
-
   // R7.2: 删除 4KB payload 总长度检查。仍保留 JSON-serializable 检查
   // (防 circular ref) —— 这不是长度限制,是结构完整性。
   try {
@@ -303,7 +282,6 @@ export function validatePromptUserParams(raw: unknown): ValidationResult {
   const normalized: PromptUserParams = {
     reason: p.reason as string,
     questions: p.questions as PromptUserQuestion[],
-    timeoutSec,
   };
   return { ok: true, errors: [], normalized };
 }

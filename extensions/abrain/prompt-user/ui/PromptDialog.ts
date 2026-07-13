@@ -1034,8 +1034,8 @@ export function buildPromptDialog(args: BuildDialogArgs): PiTuiContainer {
   // teardown on the root container so service.ts can register it as a
   // manager disposer. Pre-fix the only callers were finishWithSubmit /
   // finishWithCancel — reached EXCLUSIVELY through user Enter / Esc.
-  // Manager-side terminal events (timeout, ctx.signal abort, session
-  // shutdown via cancelAllPending) settled the promise BUT never
+  // Manager-side terminal events (ctx.signal abort and session shutdown
+  // via cancelAllPending) settled the promise BUT never
   // touched the dialog, leaving MaskedInput.buffer (and pasteBuffer)
   // holding plaintext until the user noticed the stale dialog — a
   // window of seconds-to-minutes. That violates INV-C ("secret raw

@@ -1944,12 +1944,12 @@ export default function activate(pi: ExtensionAPI): void {
         "(framework choice, irreversible deploy confirmation, ambiguous spec clarification). " +
         "NOT a substitute for thinking out loud. Sub-pi processes register no prompt_user tool.",
       promptSnippet:
-        "prompt_user({ reason, questions: [{ id, header, question, type, options? }], timeoutSec? })",
+        "prompt_user({ reason, questions: [{ id, header, question, type, options? }] })",
       promptGuidelines: [
         // R7.2 (2026-05-17): 以下 guideline 随 schema 简化同步。原
         // "header ≤ 12 cells / option labels 1-5 words" 被删除 —
         // validator R7.2 不再强制 (用户要求 LLM 自决长度)。
-        "Issue a single prompt_user call with multiple questions[] rather than chaining calls. Concurrent prompts are rejected (INV-I).",
+        "Issue a single prompt_user call with multiple questions[] rather than chaining calls. Concurrent prompts are rejected (INV-I). The call waits for the user until they answer or explicitly cancel; turn/session abort still terminates it.",
         "reason explains why you must pause (e.g. 'project framework choice affects scaffolding'), not a re-statement of the questions.",
         "Keep header / label / description-equivalent text short but length is up to you \u2014 the UI wraps automatically. CJK and ASCII both render correctly.",
         "option.label is the displayed text AND the canonical answer value. If you want to convey a tradeoff, write it directly in the label (e.g. 'TypeScript \u2014 \u5f3a\u7c7b\u578b\u5168\u6808'); the UI wraps long labels onto multiple lines.",
@@ -1998,10 +1998,6 @@ export default function activate(pi: ExtensionAPI): void {
               },
               required: ["id", "header", "question", "type"],
             },
-          },
-          timeoutSec: {
-            type: "number",
-            description: "Clamped to [30, 1800]; default 600.",
           },
         },
         required: ["reason", "questions"],

@@ -18,7 +18,7 @@
  *     - reject header > 12 display cells (CJK width counted as 2)
  *     - reject id failing regex
  *     - reject > 4KB total params payload
- *     - clamp timeoutSec to [30, 1800]
+ *     - normalized params expose no timeout/deadline field
  *
  *   redaction (INV-D, R4 fix — covers all 5 user-visible fields):
  *     - redactCredentials runs on reason / header / question /
@@ -281,29 +281,13 @@ check("schema: id failing regex → schema-invalid", () => {
   if (r.ok) throw new Error("expected reject");
 });
 
-check("schema: timeoutSec clamped to [30, 1800]", () => {
-  const r1 = schema.validatePromptUserParams({
-    reason: "x", timeoutSec: 1,
-    questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
-  });
-  if (!r1.ok || r1.normalized.timeoutSec !== 30) {
-    throw new Error(`low not clamped: ${r1.normalized?.timeoutSec}`);
-  }
-  const r2 = schema.validatePromptUserParams({
-    reason: "x", timeoutSec: 99999,
-    questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
-  });
-  if (!r2.ok || r2.normalized.timeoutSec !== 1800) {
-    throw new Error(`high not clamped: ${r2.normalized?.timeoutSec}`);
-  }
-});
-
-check("schema: default timeoutSec = 600 when omitted", () => {
+check("schema: normalized params expose no timeout/deadline field", () => {
   const r = schema.validatePromptUserParams({
     reason: "x",
     questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
   });
-  if (!r.ok || r.normalized.timeoutSec !== 600) throw new Error("default missing");
+  if (!r.ok) throw new Error(r.errors.join(","));
+  if ("timeoutSec" in r.normalized) throw new Error("timeoutSec leaked into normalized params");
 });
 
 check("schema: control char in reason → schema-invalid", () => {
@@ -373,7 +357,6 @@ check("R7.2 INV-D: redactPromptParams covers 4 user-visible fields (reason / hea
         { label: "no" },
       ],
     }],
-    timeoutSec: 600,
   };
   const after = handlerMod.redactPromptParams(before);
   const all = JSON.stringify(after);
@@ -558,7 +541,6 @@ await asyncCheck("happy path: single question → ok:true, answers as array (INV
         id: "pick", header: "h", question: "q?", type: "single",
         options: [{ label: "yes" }, { label: "no" }],
       }],
-      timeoutSec: 30,
     },
     undefined,
     { ui, hasUI: true },
@@ -628,7 +610,7 @@ await asyncCheck("P1-fix: INV-I concurrent reject also calls recordBlocked", asy
   };
   const deps = { ...handlerDeps, dialog: { buildDialog: () => ({}) } };
   const firstPromise = handlerMod.executePromptUserTool(
-    { reason: "first", timeoutSec: 30, questions: [{ id: "a", header: "h", question: "q?", type: "text" }] },
+    { reason: "first", questions: [{ id: "a", header: "h", question: "q?", type: "text" }] },
     undefined,
     { ui, hasUI: true },
     deps,
@@ -677,7 +659,6 @@ await asyncCheck("INV-I: concurrent prompt_user returns distinctive detail", asy
   const firstPromise = handlerMod.executePromptUserTool(
     {
       reason: "first",
-      timeoutSec: 30,
       questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
     },
     undefined,
@@ -732,7 +713,6 @@ await asyncCheck("P1-fix: fallback multi walks each option through ui.confirm", 
   const json = await handlerMod.executePromptUserTool(
     {
       reason: "pick frameworks",
-      timeoutSec: 30,
       questions: [{
         id: "frameworks", header: "Pick", question: "Which?", type: "multi",
         options: [{ label: "yes" }, { label: "no" }],
@@ -770,7 +750,6 @@ await asyncCheck("P1-fix: fallback multi WITHOUT ctx.ui.confirm → ui-unavailab
   const json = await handlerMod.executePromptUserTool(
     {
       reason: "x",
-      timeoutSec: 30,
       questions: [{
         id: "a", header: "h", question: "q?", type: "multi",
         options: [{ label: "yes" }, { label: "no" }],
@@ -798,7 +777,6 @@ await asyncCheck("P1-fix: fallback single still works (regression check after mu
   const json = await handlerMod.executePromptUserTool(
     {
       reason: "pick one",
-      timeoutSec: 30,
       questions: [{
         id: "x", header: "h", question: "q?", type: "single",
         options: [{ label: "yes" }, { label: "no" }],
@@ -846,7 +824,6 @@ await asyncCheck("P1-fix: service.askPromptUser entry re-runs redactPromptParams
     {
       reason: "connect to https://user:secret@example.com/repo",  // raw credential
       questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
-      timeoutSec: 30,
     },
     deps,
     audit,
@@ -883,7 +860,6 @@ await asyncCheck("soft cap: 3rd call in same session has detail batching warning
   };
   const mkParams = () => ({
     reason: "x",
-    timeoutSec: 30,
     questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
   });
   await handlerMod.executePromptUserTool(mkParams(), undefined, { ui, hasUI: true }, deps);
@@ -902,7 +878,7 @@ await asyncCheck("soft cap: 3rd call in same session has detail batching warning
 //
 // Pre-fix: MaskedInput.wipe() was reached ONLY via the wizard's
 // Enter/Esc handlers (finishWithSubmit / finishWithCancel). When the
-// MANAGER side settled the promise (timeout / ctx.signal abort /
+// MANAGER side settled the promise (ctx.signal abort /
 // cancelAllPending), the dialog stayed on screen with the secret
 // buffer intact. INV-C "secret raw never leaves PromptDialog closure"
 // was violated for a window of seconds to minutes.
@@ -911,15 +887,15 @@ await asyncCheck("soft cap: 3rd call in same session has detail batching warning
 // __wipeSecrets) and the pi-side `done` callback, then registers a
 // manager disposer that calls both on EVERY terminal resolution.
 
-await asyncCheck("R8 P1#1: timeout fires → service.ts disposer calls dialog.__wipeSecrets + done(null)", async () => {
+await asyncCheck("R8 P1#1: session drain → service.ts disposer calls dialog.__wipeSecrets + done(null)", async () => {
   manager.__resetForTests();
   handlerMod.resetSoftCapCounter();
   let wipeCalls = 0;
   let doneCalls = [];
   const ui = {
     custom: (factory) => {
-      // Never resolve from the factory — hold the dialog open so the
-      // manager's timeout is the ONLY source of resolution.
+      // Never resolve from the factory; hold the dialog open until the
+      // simulated session shutdown drains pending prompts.
       return new Promise(() => {
         factory({}, {}, {}, (v) => { doneCalls.push(v); });
       });
@@ -938,10 +914,6 @@ await asyncCheck("R8 P1#1: timeout fires → service.ts disposer calls dialog.__
       },
     },
   };
-  // timeoutSec is clamped to [30, 1800] in schema, but service / handler
-  // pass through whatever the schema returned. Use the lowest valid
-  // value the schema accepts (30) but then trigger cancelAllPending
-  // shortly after so we don't actually wait 30 seconds.
   const promise = handlerMod.executePromptUserTool(
     {
       reason: "test INV-C teardown",
@@ -951,7 +923,6 @@ await asyncCheck("R8 P1#1: timeout fires → service.ts disposer calls dialog.__
         question: "Enter:",
         type: "secret",
       }],
-      timeoutSec: 30,
     },
     undefined,
     { ui, hasUI: true },
@@ -997,7 +968,6 @@ await asyncCheck("R8 P1#1: ctx.signal abort → disposer fires teardown", async 
     {
       reason: "test signal abort",
       questions: [{ id: "s", header: "h", question: "q?", type: "secret" }],
-      timeoutSec: 30,
     },
     ac.signal,
     { ui, hasUI: true, signal: ac.signal },
@@ -1052,7 +1022,6 @@ await asyncCheck("R8 P1#1: successful submit → disposer still runs (idempotent
     {
       reason: "test successful path disposer",
       questions: [{ id: "s", header: "h", question: "q?", type: "secret" }],
-      timeoutSec: 30,
     },
     undefined,
     { ui, hasUI: true },

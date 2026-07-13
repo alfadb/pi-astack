@@ -66,9 +66,9 @@ canonical_for: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, RE
 ## REQ-008 — prompt_user 与 vault_release 语义边界分离（ADR 0022）
 - status: active · priority: P1 · applies_to: prompt_user, vault_release, sediment, audit
 - human_intent: "等用户决策"与"释放敏感数据并授权"是两种语义，不能混；用户不为大脑管理被弹窗。
-- agent_obligation: prompt_user 仅用于任务相关具体决策，写 **audit-only**（不写 markdown，sediment 下个 `agent_end` 取问答对）；vault_release 保持独立 LLM-facing tool；二者可共享 UI substrate 但 LLM-facing API 分开；是否调用 prompt_user 由 LLM 判断，不自动化。
-- acceptance: prompt_user 不释放/不写 secret 明文（`type:secret` 仅返 `[REDACTED_SECRET:<id>]`）；并发 pending ≤ 1；vault_release 仍是审批数据流出的唯一弹窗。
-- forbidden: 合并 prompt_user 与 vault_release 的 LLM-facing API；用 prompt_user 做大脑管理审批；自动触发 prompt_user（如"消息>N 字符就问"）。
+- agent_obligation: prompt_user 仅用于任务相关具体决策，写 **audit-only**（不写 markdown，sediment 下个 `agent_end` 取问答对）；vault_release 保持独立 LLM-facing tool；二者可共享 UI substrate 但 LLM-facing API 分开；是否调用 prompt_user 由 LLM 判断，不自动化；提问后无期限等待用户回答。
+- acceptance: prompt_user 不释放/不写 secret 明文（`type:secret` 仅返 `[REDACTED_SECRET:<id>]`）；并发 pending ≤ 1；经过任意时长不自动结束，只有用户提交/取消或 turn abort/session shutdown 才终止；vault_release 仍是审批数据流出的唯一弹窗。
+- forbidden: 合并 prompt_user 与 vault_release 的 LLM-facing API；用 prompt_user 做大脑管理审批；自动触发 prompt_user（如"消息>N 字符就问"）；暴露 deadline/timeout 参数、默认超时、倒计时或 elapsed-time 终态。
 
 ## REQ-009 — 记忆检索是 accuracy-contract（ADR 0015）
 - status: active · priority: P1 · applies_to: memory, sediment

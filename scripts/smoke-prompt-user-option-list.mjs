@@ -547,7 +547,7 @@ check("R7.4: MaskedInput wipe() also clears pasteBuffer", () => {
 function buildWizard(questions, variant = "question") {
   let resolved = null;
   const root = buildPromptDialog({
-    params: { reason: "test", questions, timeoutSec: 30 },
+    params: { reason: "test", questions },
     variant,
     tui: { requestRender: () => {} },
     theme: fullTheme,
@@ -568,7 +568,7 @@ function buildWizard(questions, variant = "question") {
 function renderRoot(questions, variant, reason = "test reason", extra) {
   let resolved = null;
   const root = buildPromptDialog({
-    params: { reason, questions, timeoutSec: 30 },
+    params: { reason, questions },
     variant,
     tui: { requestRender: () => {} },
     theme: fullTheme,
@@ -1304,7 +1304,7 @@ check("Batch B (i) post-audit: vault hint actually compacts at 40-col render wid
     params: { reason: "test", questions: [
       { id: "q", header: "h", question: "q?", type: "single",
         options: [{ label: "No" }, { label: "Yes once" }] }
-    ], timeoutSec: 30 },
+    ] },
     variant: "vault_release",
     tui: { requestRender: () => {} },
     theme: fullTheme,
@@ -1351,7 +1351,7 @@ check("Batch B (i) post-audit: question variant 40-col render keeps default sing
     params: { reason: "test", questions: [
       { id: "q", header: "h", question: "q?", type: "single",
         options: [{ label: "A" }, { label: "B" }] }
-    ], timeoutSec: 30 },
+    ] },
     variant: "question",
     tui: { requestRender: () => {} },
     theme: fullTheme,

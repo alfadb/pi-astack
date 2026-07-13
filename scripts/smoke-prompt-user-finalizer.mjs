@@ -2,12 +2,11 @@
 /**
  * Smoke test: prompt_user lifecycle finalizers (ADR 0022 P2).
  *
- * Verifies INV-B (no pending-forever path) + INV-K (compaction defer)
- * by exercising each of the three independent cancel sources:
+ * Verifies explicit prompt termination + INV-K (compaction defer):
  *
  *   1. `ctx.signal` abort           → resolves with `cancelled`
- *   2. `setTimeout(timeoutSec)`     → resolves with `timeout`
- *   3. `cancelAllPending(reason)`   → resolves with the given reason
+ *   2. `cancelAllPending(reason)`   → resolves with the given reason
+ *   3. no terminal event            → remains pending indefinitely
  *
  * Plus:
  *   - acquirePending exposes a resolve callback that is idempotent
@@ -71,21 +70,25 @@ const manager = require(path.join(tmpDir, "prompt-user", "manager"));
 console.log(`Smoke: prompt_user finalizer + lifecycle (ADR 0022 P2)`);
 console.log(`tmpDir=${tmpDir}\n`);
 
-// ── 1. Timeout resolves automatically ─────────────────────────────
+// ── 1. No automatic timeout ───────────────────────────────────────
 
-await asyncCheck("INV-B: setTimeout fires → ok:false, reason:'timeout'", async () => {
+await asyncCheck("no terminal event: prompt remains pending until explicit cancel", async () => {
   manager.__resetForTests();
-  // 30s is the minimum timeoutSec the schema accepts, but the manager
-  // entry point doesn't validate — it just uses what's given. Use a
-  // tiny value (40ms) so the smoke is fast.
-  const handle = manager.acquirePending({ timeoutSec: 0.04 });
+  const handle = manager.acquirePending();
   if (manager.getPendingPromptCount() !== 1) {
     throw new Error(`expected 1 pending, got ${manager.getPendingPromptCount()}`);
   }
+  const observed = await Promise.race([
+    handle.promise.then(() => "settled"),
+    new Promise((resolve) => setTimeout(() => resolve("pending"), 80)),
+  ]);
+  if (observed !== "pending") throw new Error("prompt settled without a terminal event");
+  if (manager.getPendingPromptCount() !== 1) throw new Error("pending entry drained itself");
+  manager.cancelAllPending("cancelled");
   const result = await handle.promise;
-  if (result.ok) throw new Error(`expected ok:false, got ${JSON.stringify(result)}`);
-  if (result.reason !== "timeout") throw new Error(`reason=${result.reason}`);
-  if (typeof result.durationMs !== "number") throw new Error("durationMs missing");
+  if (result.ok || result.reason !== "cancelled") {
+    throw new Error(`explicit cancel result=${JSON.stringify(result)}`);
+  }
   if (manager.getPendingPromptCount() !== 0) {
     throw new Error(`pending should drain to 0, got ${manager.getPendingPromptCount()}`);
   }
@@ -96,7 +99,7 @@ await asyncCheck("INV-B: setTimeout fires → ok:false, reason:'timeout'", async
 await asyncCheck("INV-B: ctx.signal abort → ok:false, reason:'cancelled'", async () => {
   manager.__resetForTests();
   const ac = new AbortController();
-  const handle = manager.acquirePending({ timeoutSec: 60, upstreamSignal: ac.signal });
+  const handle = manager.acquirePending({ upstreamSignal: ac.signal });
   setTimeout(() => ac.abort(), 20);
   const result = await handle.promise;
   if (result.reason !== "cancelled") throw new Error(`reason=${result.reason}`);
@@ -107,7 +110,7 @@ await asyncCheck("INV-B: pre-aborted signal still resolves (microtask path)", as
   manager.__resetForTests();
   const ac = new AbortController();
   ac.abort();
-  const handle = manager.acquirePending({ timeoutSec: 60, upstreamSignal: ac.signal });
+  const handle = manager.acquirePending({ upstreamSignal: ac.signal });
   // Must still observe an awaitable promise first — the resolution is
   // posted via queueMicrotask, NOT synchronous.
   const result = await handle.promise;
@@ -118,21 +121,13 @@ await asyncCheck("INV-B: pre-aborted signal still resolves (microtask path)", as
 
 await asyncCheck("INV-B: cancelAllPending('cancelled') drains pending Map", async () => {
   manager.__resetForTests();
-  const handle = manager.acquirePending({ timeoutSec: 60 });
+  const handle = manager.acquirePending({});
   if (manager.getPendingPromptCount() !== 1) throw new Error("setup failed");
   const cancelled = manager.cancelAllPending("cancelled");
   if (cancelled !== 1) throw new Error(`cancelAllPending returned ${cancelled}`);
   const result = await handle.promise;
   if (result.reason !== "cancelled") throw new Error(`reason=${result.reason}`);
   if (manager.getPendingPromptCount() !== 0) throw new Error("pending not drained");
-});
-
-await asyncCheck("INV-B: cancelAllPending with custom reason propagates", async () => {
-  manager.__resetForTests();
-  const handle = manager.acquirePending({ timeoutSec: 60 });
-  manager.cancelAllPending("timeout");
-  const result = await handle.promise;
-  if (result.reason !== "timeout") throw new Error(`reason=${result.reason}`);
 });
 
 await asyncCheck("INV-B: cancelAllPending on empty Map → 0, no throw", async () => {
@@ -145,11 +140,11 @@ await asyncCheck("INV-B: cancelAllPending on empty Map → 0, no throw", async (
 
 await asyncCheck("resolveOnce is idempotent (double-call is no-op)", async () => {
   manager.__resetForTests();
-  const handle = manager.acquirePending({ timeoutSec: 60 });
+  const handle = manager.acquirePending({});
   handle.resolve({ ok: true, answers: { x: ["1"] }, durationMs: 5 });
   // Second resolve attempt with different shape — should NOT change
   // the awaited result.
-  handle.resolve({ ok: false, reason: "timeout", durationMs: 999 });
+  handle.resolve({ ok: false, reason: "cancelled", durationMs: 999 });
   const result = await handle.promise;
   if (!result.ok) throw new Error("idempotency broke; second resolve overrode first");
   if (result.durationMs !== 5) throw new Error(`durationMs=${result.durationMs}`);
@@ -157,7 +152,7 @@ await asyncCheck("resolveOnce is idempotent (double-call is no-op)", async () =>
 
 await asyncCheck("cancelAllPending after resolve is a no-op", async () => {
   manager.__resetForTests();
-  const handle = manager.acquirePending({ timeoutSec: 60 });
+  const handle = manager.acquirePending({});
   handle.resolve({ ok: true, answers: {}, durationMs: 0 });
   await handle.promise;
   const n = manager.cancelAllPending("cancelled");
@@ -169,7 +164,7 @@ await asyncCheck("cancelAllPending after resolve is a no-op", async () => {
 await asyncCheck("registerDisposer fires once on terminal resolution", async () => {
   manager.__resetForTests();
   let fired = 0;
-  const handle = manager.acquirePending({ timeoutSec: 60 });
+  const handle = manager.acquirePending({});
   handle.registerDisposer(() => { fired += 1; });
   handle.resolve({ ok: true, answers: {}, durationMs: 0 });
   await handle.promise;
@@ -181,7 +176,7 @@ await asyncCheck("registerDisposer fires once on terminal resolution", async () 
 await asyncCheck("registerDisposer AFTER resolve runs inline immediately", async () => {
   manager.__resetForTests();
   let fired = 0;
-  const handle = manager.acquirePending({ timeoutSec: 60 });
+  const handle = manager.acquirePending({});
   handle.resolve({ ok: true, answers: {}, durationMs: 0 });
   await handle.promise;
   handle.registerDisposer(() => { fired += 1; });
@@ -190,7 +185,7 @@ await asyncCheck("registerDisposer AFTER resolve runs inline immediately", async
 
 await asyncCheck("disposer throw does not strand pending Map", async () => {
   manager.__resetForTests();
-  const handle = manager.acquirePending({ timeoutSec: 60 });
+  const handle = manager.acquirePending({});
   handle.registerDisposer(() => { throw new Error("boom"); });
   handle.resolve({ ok: true, answers: {}, durationMs: 0 });
   await handle.promise;
@@ -199,42 +194,29 @@ await asyncCheck("disposer throw does not strand pending Map", async () => {
   }
 });
 
-// ── 6. AbortSignal usability ──────────────────────────────────────
+// ── 6. snapshotPending diagnostics ────────────────────────────────
 
-await asyncCheck("handle.signal aborts when timeout fires", async () => {
+await asyncCheck("snapshotPending returns shape {id, ageMs}", async () => {
   manager.__resetForTests();
-  const handle = manager.acquirePending({ timeoutSec: 0.04 });
-  const aborted = new Promise((resolve) => {
-    handle.signal.addEventListener("abort", () => resolve(true), { once: true });
-    setTimeout(() => resolve(false), 200);
-  });
-  await handle.promise;
-  if (!(await aborted)) throw new Error("handle.signal never fired abort");
-});
-
-// ── 7. snapshotPending diagnostics ────────────────────────────────
-
-await asyncCheck("snapshotPending returns shape {id, ageMs, timeoutSec}", async () => {
-  manager.__resetForTests();
-  const handle = manager.acquirePending({ timeoutSec: 60 });
+  const handle = manager.acquirePending();
   const snap = manager.snapshotPending();
   if (snap.length !== 1) throw new Error(`length=${snap.length}`);
   const entry = snap[0];
   if (!entry.id?.startsWith("pu_")) throw new Error(`id=${entry.id}`);
   if (typeof entry.ageMs !== "number") throw new Error("ageMs not number");
-  if (entry.timeoutSec !== 60) throw new Error(`timeoutSec=${entry.timeoutSec}`);
+  if ("timeoutSec" in entry) throw new Error("timeoutSec leaked into diagnostics");
   handle.resolve({ ok: false, reason: "cancelled", durationMs: 0 });
   await handle.promise;
 });
 
-// ── 8. getPendingPromptCount monotonically tracks Map ─────────────
+// ── 7. getPendingPromptCount monotonically tracks Map ─────────────
 
 await asyncCheck("getPendingPromptCount tracks Map size deterministically", async () => {
   manager.__resetForTests();
   if (manager.getPendingPromptCount() !== 0) throw new Error("non-zero at start");
-  const h1 = manager.acquirePending({ timeoutSec: 60 });
+  const h1 = manager.acquirePending({});
   if (manager.getPendingPromptCount() !== 1) throw new Error("expected 1 after first");
-  const h2 = manager.acquirePending({ timeoutSec: 60 });
+  const h2 = manager.acquirePending({});
   if (manager.getPendingPromptCount() !== 2) throw new Error("expected 2 after second");
   h1.resolve({ ok: false, reason: "cancelled", durationMs: 0 });
   await h1.promise;

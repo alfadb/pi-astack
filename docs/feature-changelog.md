@@ -11,6 +11,20 @@ status: active
 
 ---
 
+## 2026-07-13 — accepted — ADR 0041 prompt_user 无期限等待
+
+### 变更
+`prompt_user` 不再暴露 `timeoutSec` 或任何 deadline 参数；删除默认超时、clamp、timer、倒计时与 `timeout` 终态。用户不回答时工具持续 pending，不把沉默解释为拒绝或允许继续。
+
+### 验收边界
+用户提交正常返回；用户取消/Esc 返回 `user-rejected`；turn `ctx.signal` abort 与 `session_shutdown`/显式 drain 返回 `cancelled`。所有终态仍先执行 disposer，擦除 PromptDialog 组件本地 secret/paste buffer 并关闭 editor region；并发 pending ≤ 1 与 compaction defer 不变。聚焦 smoke 必须证明经过观察窗口不会自动 settle，并证明 abort/shutdown 仍清理 pending 和 secret buffer。
+
+### 非目标
+不修改 `vault_release` 的授权语义，不放宽 sub-agent/UI/concurrency gate，不改变 secret placeholder/audit 边界，不修改历史 ADR 0022 正文；由 ADR 0041 对其 timeout 小节建立窄 supersede 关系。
+
+### 关联
+[ADR 0041](adr/0041-prompt-user-indefinite-wait.md)；[REQ-008](requirements.md#req-008--prompt_user-与-vault_release-语义边界分离adr-0022)；[current-state.md](current-state.md#10-prompt_user)。
+
 ## 2026-07-12 — accepted — Canonical-path P1 production 收口
 
 ### 变更

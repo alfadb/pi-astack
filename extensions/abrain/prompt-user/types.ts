@@ -97,22 +97,20 @@ export interface PromptUserQuestion {
  * sediment audit. Same redaction pass as other user-visible fields.
  *
  * `questions.length` ∈ [1, 4] (§D1). 5+ rejected as `schema-invalid`.
- *
- * `timeoutSec` clamped to [30, 1800], default 600 (§D1 / §D8.4).
+ * The call waits until the user answers or an explicit cancellation path
+ * fires; callers cannot impose a deadline.
  */
 export interface PromptUserParams {
   reason: string;
   questions: PromptUserQuestion[];
-  timeoutSec?: number;
 }
 
 /**
- * Why a `prompt_user` call did not produce an answer. Exactly 6 in P0
- * (ADR 0022 §D1). Adding new reasons requires updating handler audit,
- * smoke fixtures, and LLM-facing tool description simultaneously.
+ * Why a `prompt_user` call did not produce an answer. Adding new reasons
+ * requires updating handler audit, smoke fixtures, and the LLM-facing tool
+ * description simultaneously.
  *
  *   - `user-rejected`:    user pressed Esc / clicked Reject
- *   - `timeout`:          `timeoutSec` elapsed with no answer
  *   - `ui-unavailable`:   `!ctx.hasUI`, or `ctx.ui.custom` unavailable
  *                         AND `type:"secret"` was requested (no
  *                         masked input via chained fallback)
@@ -129,7 +127,6 @@ export interface PromptUserParams {
  */
 export type PromptUserFailureReason =
   | "user-rejected"
-  | "timeout"
   | "ui-unavailable"
   | "subagent-blocked"
   | "schema-invalid"

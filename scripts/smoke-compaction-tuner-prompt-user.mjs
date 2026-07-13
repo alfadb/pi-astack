@@ -193,13 +193,13 @@ check("real manager.getPendingPromptCount integrates with the helper", () => {
     if (isPendingPromptUserBlocking() !== false) {
       throw new Error("with 0 pending, helper should be false");
     }
-    const handle = manager.acquirePending({ timeoutSec: 60 });
+    const handle = manager.acquirePending({});
     if (isPendingPromptUserBlocking() !== true) {
       throw new Error("with 1 pending, helper should be true");
     }
     // Two concurrent (INV-I will reject the LLM path, but at the
     // manager level you CAN have 2 pending via different callers).
-    const handle2 = manager.acquirePending({ timeoutSec: 60 });
+    const handle2 = manager.acquirePending({});
     if (isPendingPromptUserBlocking() !== true) {
       throw new Error("with 2 pending, helper still true");
     }
