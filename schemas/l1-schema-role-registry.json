@@ -1,6 +1,6 @@
 {
   "schema_version": "l1-schema-role-registry/v1",
-  "registry_id": "pi-astack-local-convergence-r8",
+  "registry_id": "pi-astack-local-convergence-r9",
   "storage": {
     "root_relative_path": "l1/events/sha256",
     "canonicalization": "RFC8785-JCS",
@@ -62,6 +62,66 @@
       "producers": [
         "sediment.constraint-compiler"
       ]
+    },
+    {
+      "envelope_schema": "proposition-evidence-envelope/v1",
+      "body_schema": "proposition-evidence-event/v1",
+      "domain": "proposition",
+      "role": "evidence",
+      "phase": "defined_inactive",
+      "write_enabled": false,
+      "fold_eligible": false,
+      "event_types": [
+        "proposition_observed"
+      ],
+      "producers": [
+        "pi-astack.proposition-schema-contract",
+        "pi-astack.proposition-production-evidence-writer"
+      ]
+    },
+    {
+      "envelope_schema": "proposition-lifecycle-envelope/v1",
+      "body_schema": "proposition-lifecycle-event/v1",
+      "domain": "proposition",
+      "role": "meta",
+      "phase": "defined_inactive",
+      "write_enabled": false,
+      "fold_eligible": false,
+      "event_types": [
+        "proposition_retract_declared",
+        "proposition_rescope_declared",
+        "proposition_supersede_declared",
+        "proposition_archive_declared",
+        "proposition_reactivate_declared",
+        "proposition_cutover_declared"
+      ],
+      "producers": [
+        "pi-astack.proposition-schema-contract"
+      ]
+    },
+    {
+      "envelope_schema": "proposition-genesis-envelope/v1",
+      "body_schema": "proposition-genesis-event/v1",
+      "domain": "proposition",
+      "role": "meta",
+      "phase": "defined_inactive",
+      "write_enabled": false,
+      "fold_eligible": false,
+      "event_types": [
+        "proposition_genesis_declared"
+      ],
+      "producers": [
+        "pi-astack.proposition-schema-contract",
+        "pi-astack.proposition-production-genesis-writer"
+      ]
+    },
+    {
+      "envelope_schema": "proposition-projection-envelope/v1",
+      "domain": "proposition",
+      "role": "meta",
+      "phase": "phase_disabled",
+      "write_enabled": false,
+      "fold_eligible": false
     },
     {
       "envelope_schema": "knowledge-candidate-observation/v1",

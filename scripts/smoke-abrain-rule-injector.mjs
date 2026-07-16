@@ -78,12 +78,16 @@ function stageModuleTree(outRoot) {
   const files = [
     ["extensions/abrain/rule-injector/index.ts", "abrain/rule-injector/index.js"],
     ["extensions/abrain/rule-injector/dualread-audit.ts", "abrain/rule-injector/dualread-audit.js"],
+    ["extensions/abrain/rule-injector/proposition-policy-stable-view-reader.ts", "abrain/rule-injector/proposition-policy-stable-view-reader.js"],
+    ["extensions/abrain/rule-injector/proposition-policy-stable-view-runtime-audit.ts", "abrain/rule-injector/proposition-policy-stable-view-runtime-audit.js"],
     ["extensions/abrain/brain-layout.ts", "abrain/brain-layout.js"],
     ["extensions/abrain/reconcile-gate.ts", "abrain/reconcile-gate.js"],
     ["extensions/_shared/footer-status.ts", "_shared/footer-status.js"],
     ["extensions/_shared/runtime.ts", "_shared/runtime.js"],
     ["extensions/_shared/durable-write.ts", "_shared/durable-write.js"],
     ["extensions/_shared/jcs.ts", "_shared/jcs.js"],
+    ["extensions/_shared/proposition.ts", "_shared/proposition.js"],
+    ["extensions/_shared/proposition-policy-stable-view-contract.ts", "_shared/proposition-policy-stable-view-contract.js"],
     ["extensions/_shared/l1-schema-registry.ts", "_shared/l1-schema-registry.js"],
     ["extensions/memory/parser.ts", "memory/parser.js"],
     // ADR 0034 P1: parser.ts now imports ./direction-impact

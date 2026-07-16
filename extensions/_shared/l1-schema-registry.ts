@@ -2,10 +2,11 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { canonicalizeJcs, jcsSha256Hex, sha256Hex } from "./jcs";
+import { isPropositionEnvelopeSchema, validatePropositionBodyForEnvelope } from "./proposition";
 
-export type L1SchemaDomain = "knowledge" | "constraint" | "canonical_path";
+export type L1SchemaDomain = "knowledge" | "constraint" | "canonical_path" | "proposition";
 export type L1SchemaRole = "canonical" | "evidence" | "meta";
-export type L1SchemaPhase = "active" | "legacy_read_only" | "phase_disabled";
+export type L1SchemaPhase = "active" | "legacy_read_only" | "phase_disabled" | "defined_inactive";
 
 export interface L1SchemaRegistration {
   envelope_schema: string;
@@ -59,7 +60,7 @@ export interface ValidatedL1Envelope {
   filePath?: string;
 }
 
-export type L1ScanClassification = "selected" | "foreign-skip" | "legacy-read-only" | "phase-disabled-shadow";
+export type L1ScanClassification = "selected" | "foreign-skip" | "legacy-read-only" | "phase-disabled-shadow" | "defined-inactive-shadow";
 
 export interface ValidatedL1ScanRecord extends ValidatedL1Envelope {
   classification: L1ScanClassification;
@@ -81,6 +82,7 @@ export interface WholeL1ScanResult {
   foreignSkipped: readonly ValidatedL1ScanRecord[];
   legacyReadOnly: readonly ValidatedL1ScanRecord[];
   phaseDisabledShadow: readonly ValidatedL1ScanRecord[];
+  definedInactiveShadow: readonly ValidatedL1ScanRecord[];
   /**
    * Crash residue of the durable atomic write protocol (`.{name}.….tmp`
    * dotfiles that never got renamed into place). These are not events and
@@ -149,9 +151,9 @@ export function validateL1SchemaRegistry(input: unknown): L1SchemaRoleRegistry {
     const envelopeSchema = versionedName(item.envelope_schema, `${at}.envelope_schema`);
     if (envelopeSchemas.has(envelopeSchema)) throw failure("L1_REGISTRY_DUPLICATE", `duplicate envelope schema ${envelopeSchema}`);
     envelopeSchemas.add(envelopeSchema);
-    const domain = oneOf(item.domain, ["knowledge", "constraint", "canonical_path"] as const, `${at}.domain`);
+    const domain = oneOf(item.domain, ["knowledge", "constraint", "canonical_path", "proposition"] as const, `${at}.domain`);
     const role = oneOf(item.role, ["canonical", "evidence", "meta"] as const, `${at}.role`);
-    const phase = oneOf(item.phase, ["active", "legacy_read_only", "phase_disabled"] as const, `${at}.phase`);
+    const phase = oneOf(item.phase, ["active", "legacy_read_only", "phase_disabled", "defined_inactive"] as const, `${at}.phase`);
     const writeEnabled = boolean(item.write_enabled, `${at}.write_enabled`);
     const foldEligible = boolean(item.fold_eligible, `${at}.fold_eligible`);
     const bodySchema = item.body_schema === undefined ? undefined : versionedName(item.body_schema, `${at}.body_schema`);
@@ -159,13 +161,16 @@ export function validateL1SchemaRegistry(input: unknown): L1SchemaRoleRegistry {
     const producers = item.producers === undefined ? undefined : uniqueStrings(item.producers, `${at}.producers`);
     const bodyDomainPath = item.body_domain_path === undefined ? undefined : dottedPath(item.body_domain_path, `${at}.body_domain_path`);
 
-    if (phase === "active" || phase === "legacy_read_only") {
+    if (phase === "active" || phase === "legacy_read_only" || phase === "defined_inactive") {
       if (!bodySchema || !eventTypes?.length || !producers?.length) {
         throw failure("L1_REGISTRY_INVALID", `${at} registered body contract requires body_schema, event_types, and producers`);
       }
       if (phase === "active" && !writeEnabled) throw failure("L1_REGISTRY_INVALID", `${at} active registration must enable writes`);
       if (phase === "legacy_read_only" && (writeEnabled || foldEligible || role !== "meta")) {
         throw failure("L1_REGISTRY_INVALID", `${at} legacy-read-only registration must be non-writable, non-foldable meta`);
+      }
+      if (phase === "defined_inactive" && (writeEnabled || foldEligible)) {
+        throw failure("L1_REGISTRY_INVALID", `${at} defined-inactive registration must be non-writable and non-foldable`);
       }
       if (bodySchemas.has(bodySchema)) throw failure("L1_REGISTRY_DUPLICATE", `duplicate body schema ${bodySchema}`);
       bodySchemas.add(bodySchema);
@@ -272,7 +277,17 @@ export function validateL1Envelope(
     throw failure("L1_HASH_MISMATCH", "body_hash does not match RFC8785/JCS body hash", { expected: bodyHash, actual: computedBodyHash });
   }
 
-  if (registration.phase === "active" || registration.phase === "legacy_read_only") validateActiveBodyContract(body, registration);
+  if (registration.phase === "active" || registration.phase === "legacy_read_only" || registration.phase === "defined_inactive") validateActiveBodyContract(body, registration);
+  if (isPropositionEnvelopeSchema(registration.envelope_schema)) {
+    try {
+      validatePropositionBodyForEnvelope(registration.envelope_schema, body);
+    } catch (err) {
+      throw failure("L1_BODY_SHAPE_MISMATCH", "proposition body contract validation failed", {
+        error: errorMessage(err),
+        propositionCode: err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "unknown",
+      });
+    }
+  }
   if (registration.envelope_schema === "drain-recovery-envelope/v1") validateDrainRecoveryBody(body, 1);
   if (registration.envelope_schema === "local-drain-recovery-envelope/v2") validateDrainRecoveryBody(body, 2);
   validateExpectation(registration, body, options.expected);
@@ -370,6 +385,7 @@ export async function scanWholeL1Validated(options: WholeL1ScanOptions): Promise
     foreignSkipped: Object.freeze(all.filter((item) => item.classification === "foreign-skip")),
     legacyReadOnly: Object.freeze(all.filter((item) => item.classification === "legacy-read-only")),
     phaseDisabledShadow: Object.freeze(all.filter((item) => item.classification === "phase-disabled-shadow")),
+    definedInactiveShadow: Object.freeze(all.filter((item) => item.classification === "defined-inactive-shadow")),
     tempResidue: Object.freeze(tempResidue.slice().sort(compareCodeUnits)),
   };
   return deepFreeze(result);
@@ -670,6 +686,7 @@ function validateExpectation(registration: L1SchemaRegistration, body: Record<st
 
 function classifyScanRecord(registration: L1SchemaRegistration, options: WholeL1ScanOptions): L1ScanClassification {
   if (registration.phase === "phase_disabled") return "phase-disabled-shadow";
+  if (registration.phase === "defined_inactive") return "defined-inactive-shadow";
   if (registration.phase === "legacy_read_only") return "legacy-read-only";
   const domainMatch = !options.domains?.length || options.domains.includes(registration.domain);
   const roleMatch = !options.roles?.length || options.roles.includes(registration.role);
@@ -760,7 +777,7 @@ async function assertWritePathNoSymlink(abrainHome: string, targetPath: string):
 
 function emptyScanResult(): WholeL1ScanResult {
   const empty = Object.freeze([]) as readonly ValidatedL1ScanRecord[];
-  return deepFreeze({ all: empty, selected: empty, foldable: empty, foreignSkipped: empty, legacyReadOnly: empty, phaseDisabledShadow: empty, tempResidue: Object.freeze([]) as readonly string[] });
+  return deepFreeze({ all: empty, selected: empty, foldable: empty, foreignSkipped: empty, legacyReadOnly: empty, phaseDisabledShadow: empty, definedInactiveShadow: empty, tempResidue: Object.freeze([]) as readonly string[] });
 }
 
 function failure(code: string, message: string, detail?: Record<string, unknown>): L1SchemaRegistryError {

@@ -34,6 +34,18 @@ import {
   runRuleInjectorDualReadAudit,
   type RuleInjectorDualReadAuditSettings,
 } from "./dualread-audit";
+import {
+  readPropositionPolicyStableViewForRuntime,
+  resolvePropositionPolicyStableViewInjectionSettings,
+  selectPropositionPolicyStableViewSession,
+  type PropositionPolicyStableViewInjectionSettings,
+  type PropositionPolicyStableViewRuntimeReadResult,
+  type PropositionPolicyStableViewSelection,
+} from "./proposition-policy-stable-view-reader";
+import {
+  appendPropositionPolicyStableViewRuntimeAudit,
+  buildPropositionPolicyStableViewRuntimeAuditRow,
+} from "./proposition-policy-stable-view-runtime-audit";
 
 /** ADR 0028 §12.3: the rules injection-budget axis is INJECT-MODE (values
  *  always/listed), renamed away from "tier" to stop colliding with the GTIER
@@ -64,6 +76,7 @@ export interface RuleInjectorSettings {
   maxCatalogTriggerChars: number;
   dualReadAudit: RuleInjectorDualReadAuditSettings;
   compiledViewInjection: RuleInjectorCompiledViewInjectionSettings;
+  propositionPolicyStableViewInjection: PropositionPolicyStableViewInjectionSettings;
 }
 
 export interface RuleEntry {
@@ -143,9 +156,19 @@ const DEFAULT_SETTINGS: RuleInjectorSettings = {
   maxCatalogTriggerChars: 160,
   dualReadAudit: resolveRuleInjectorDualReadAuditSettings(undefined),
   compiledViewInjection: DEFAULT_COMPILED_VIEW_INJECTION,
+  propositionPolicyStableViewInjection: resolvePropositionPolicyStableViewInjectionSettings(undefined),
 };
 
 let cachedRules: RuleScanCache | null = null;
+
+interface PolicyFooterState {
+  sessionId: string;
+  text: string;
+}
+
+// Final per-session policy selection. Footer refresh paths must preserve this
+// after before_agent_start has chosen the actual injected source.
+let policyFooterState: PolicyFooterState | null = null;
 
 // ── Self-heal: async constraint shadow recompile when compiled view is unavailable ──
 // Set by abrain/index.ts at activation time (dependency injection bridge).
@@ -266,6 +289,7 @@ export function resolveRuleInjectorSettings(): RuleInjectorSettings {
     maxCatalogTriggerChars: Math.max(40, Math.floor(asNumber(cfg.maxCatalogTriggerChars, DEFAULT_SETTINGS.maxCatalogTriggerChars))),
     dualReadAudit: resolveRuleInjectorDualReadAuditSettings(cfg.dualReadAudit),
     compiledViewInjection: resolveCompiledViewInjectionSettings(cfg.compiledViewInjection),
+    propositionPolicyStableViewInjection: resolvePropositionPolicyStableViewInjectionSettings(cfg.propositionPolicyStableViewInjection),
   };
 }
 
@@ -538,6 +562,13 @@ export function composeRuleInjection(cache: RuleScanCache): string {
     composeRuleSection(cache),
     END_ABRAIN_RULES,
   ].join("\n");
+}
+
+export function composePropositionPolicyStableViewInjection(
+  nonce: string,
+  result: Extract<PropositionPolicyStableViewRuntimeReadResult, { ok: true }>,
+): string {
+  return `${BEGIN_ABRAIN_RULES} session=${nonce} source=proposition-policy-stable-view bundle=${result.bundleHash} (auto-managed by sediment, do not edit by hand) -->\n${result.viewMd}${END_ABRAIN_RULES}`;
 }
 
 type CompiledRuleCounts = { always: number; listed: number; total: number };
@@ -906,7 +937,70 @@ function legacyFooterText(cache: RuleScanCache | null): string {
   return `${warn ? "⚠️" : "🧠"} rules: legacy ${counts.always} always, ${counts.listed} listed`;
 }
 
+function compiledFooterText(
+  compiled: Extract<CompiledViewReadResult, { ok: true }>,
+  detail?: string,
+): string {
+  const effectiveRatio = compiled.injectableCoverageRatio ?? compiled.coverageRatio;
+  const effectiveCoverage = effectiveRatio === undefined ? "unknown" : `${Math.round(effectiveRatio * 100)}%`;
+  const strictCoverage = compiled.coverageRatio !== undefined && compiled.injectableCoverageRatio !== undefined && compiled.coverageRatio !== compiled.injectableCoverageRatio
+    ? `, strict ${Math.round(compiled.coverageRatio * 100)}%`
+    : "";
+  return `🧠 rules: compiled ${compiled.counts.always} always, ${compiled.counts.listed} listed (${effectiveCoverage} injectable${strictCoverage}${compiled.stale ? ", stale" : ""}${detail ? `, ${detail}` : ""})`;
+}
+
+function runtimeResultFooterText(
+  cache: RuleScanCache | null,
+  result: RuntimeRuleInjectionResult,
+  detail?: string,
+): string {
+  if (result.decision === "compiled_injected" && result.compiled.ok) {
+    return compiledFooterText(result.compiled, detail);
+  }
+  if (result.decision === "fail_closed_drop" && result.compiled.ok === false) {
+    return `⚠️ rules: compiled view ${result.compiled.reason}${detail ? ` (${detail})` : ""}`;
+  }
+  const legacy = legacyFooterText(cache);
+  return detail ? `${legacy} (${detail})` : legacy;
+}
+
+function alignPolicyFooterSession(selection: PropositionPolicyStableViewSelection): void {
+  if (!selection.selected || !selection.sessionId) {
+    policyFooterState = null;
+    return;
+  }
+  if (policyFooterState?.sessionId !== selection.sessionId) policyFooterState = null;
+}
+
+function setPolicyStableFooter(
+  result: Extract<PropositionPolicyStableViewRuntimeReadResult, { ok: true }>,
+): void {
+  const itemLabel = result.itemCount === 1 ? "item" : "items";
+  policyFooterState = {
+    sessionId: result.sessionId,
+    text: `🧠 rules: policy stable-view ${result.itemCount} ${itemLabel} (${result.viewBytes} B, bundle ${result.bundleHash.slice(0, 8)}…)`,
+  };
+}
+
+function setPolicyFallbackFooter(args: {
+  selection: PropositionPolicyStableViewSelection;
+  reason: string;
+  cache: RuleScanCache | null;
+  normalResult?: RuntimeRuleInjectionResult;
+  detail?: string;
+}): void {
+  if (!args.selection.selected || !args.selection.sessionId) return;
+  const normalText = args.normalResult
+    ? runtimeResultFooterText(args.cache, args.normalResult, args.detail)
+    : legacyFooterText(args.cache);
+  policyFooterState = {
+    sessionId: args.selection.sessionId,
+    text: `${normalText}; policy fallback: ${args.reason}`,
+  };
+}
+
 function runtimeFooterText(cache: RuleScanCache | null, settings: RuleInjectorSettings, detail?: string): string {
+  if (policyFooterState) return policyFooterState.text;
   if (cache) {
     const compiled = readCompiledRuleInjectionForRuntime({
       abrainHome: cache.abrainHome,
@@ -914,14 +1008,7 @@ function runtimeFooterText(cache: RuleScanCache | null, settings: RuleInjectorSe
       settings: settings.compiledViewInjection,
       activeProjectId: cache.activeProjectId,
     });
-    if (compiled.ok) {
-      const effectiveRatio = compiled.injectableCoverageRatio ?? compiled.coverageRatio;
-      const effectiveCoverage = effectiveRatio === undefined ? "unknown" : `${Math.round(effectiveRatio * 100)}%`;
-      const strictCoverage = compiled.coverageRatio !== undefined && compiled.injectableCoverageRatio !== undefined && compiled.coverageRatio !== compiled.injectableCoverageRatio
-        ? `, strict ${Math.round(compiled.coverageRatio * 100)}%`
-        : "";
-      return `🧠 rules: compiled ${compiled.counts.always} always, ${compiled.counts.listed} listed (${effectiveCoverage} injectable${strictCoverage}${compiled.stale ? ", stale" : ""}${detail ? `, ${detail}` : ""})`;
-    }
+    if (compiled.ok) return compiledFooterText(compiled, detail);
     maybeScheduleSelfHeal({
       abrainHome: cache.abrainHome,
       cwd: cache.cwd,
@@ -1122,6 +1209,12 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     // is main-session-only.
     if (isSubAgentSession(ctx)) return;
 
+    const propositionSelection = selectPropositionPolicyStableViewSession({
+      settings: settings.propositionPolicyStableViewInjection,
+      sessionManager: ctx?.sessionManager,
+    });
+    alignPolicyFooterSession(propositionSelection);
+
     try {
       ensureRuleDirs(ABRAIN_HOME);
       const runtime = resolveRuntimeRuleInjectorSettings(settings, ctx);
@@ -1145,7 +1238,10 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     } catch (e: unknown) {
       cachedRules = null;
       const msg = e instanceof Error ? e.message : String(e);
-      try { ctx?.ui?.setStatus?.(RULE_STATUS_KEY, `⚠️ rules: ${msg.slice(0, 40)}`); } catch { /* ignore */ }
+      if (policyFooterState) setFooterStatus(ctx, null, settings);
+      else {
+        try { ctx?.ui?.setStatus?.(RULE_STATUS_KEY, `⚠️ rules: ${msg.slice(0, 40)}`); } catch { /* ignore */ }
+      }
       try { ctx?.ui?.notify?.(`abrain rules: scan failed — ${msg}`, "warning"); } catch { /* ignore */ }
     }
   });
@@ -1157,31 +1253,112 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     if (isSubAgentSession(ctx)) return undefined;
 
     const current = event.systemPrompt ?? "";
-    if (current.includes(BEGIN_ABRAIN_RULES)) return undefined;
+    const propositionSelection = selectPropositionPolicyStableViewSession({
+      settings: settings.propositionPolicyStableViewInjection,
+      sessionManager: ctx?.sessionManager,
+    });
+    alignPolicyFooterSession(propositionSelection);
     const runtime = resolveRuntimeRuleInjectorSettings(settings, ctx);
+    const appendRuntimeAudit = (args: {
+      decision: "policy_stable_view_injected" | "normal_path_fallback";
+      reason: string;
+      renderedPrompt: string;
+      stableView?: Extract<PropositionPolicyStableViewRuntimeReadResult, { ok: true }>;
+    }): void => {
+      if (!propositionSelection.selected || !propositionSelection.sessionId) return;
+      // Pi exposes the expanded user text here, but it appends the current user
+      // message to SessionManager only after all before_agent_start handlers.
+      // The current message-entry id is therefore unavailable at this hook.
+      const audit = appendPropositionPolicyStableViewRuntimeAudit(buildPropositionPolicyStableViewRuntimeAuditRow({
+        sessionId: propositionSelection.sessionId,
+        latestUserText: typeof event.prompt === "string" ? event.prompt : "",
+        decision: args.decision,
+        reason: args.reason,
+        renderedPrompt: args.renderedPrompt,
+        ...(args.stableView ? { stableView: args.stableView } : {}),
+      }));
+      if (!audit.ok) {
+        try { console.error(`pi-astack: ADR0040 runtime audit write failed: ${audit.error}`); } catch { /* best-effort */ }
+        try { ctx?.ui?.notify?.(`abrain rules: ADR0040 runtime audit write failed: ${audit.error}`, "warning"); } catch { /* best-effort */ }
+      }
+    };
+    if (current.includes(BEGIN_ABRAIN_RULES)) {
+      appendRuntimeAudit({
+        decision: current.includes("source=proposition-policy-stable-view")
+          ? "policy_stable_view_injected"
+          : "normal_path_fallback",
+        reason: "existing_rule_fence",
+        renderedPrompt: current,
+      });
+      setFooterStatus(ctx, cachedRules, runtime.settings);
+      return undefined;
+    }
     if (!cachedRules || path.resolve(ctx?.cwd || process.cwd()) !== cachedRules.cwd) {
       try {
         cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtime.settings });
       } catch {
+        cachedRules = null;
+        setPolicyFallbackFooter({
+          selection: propositionSelection,
+          reason: "rule_scan_failed",
+          cache: null,
+        });
+        setFooterStatus(ctx, null, runtime.settings);
+        appendRuntimeAudit({ decision: "normal_path_fallback", reason: "rule_scan_failed", renderedPrompt: current });
         return undefined;
       }
     }
-    if (!hasAnyRules(cachedRules) && !runtime.settings.compiledViewInjection.enabled) return undefined;
-    const result = decideRuntimeRuleInjection({
-      cache: cachedRules,
-      globalSettings: settings,
-      runtimeSettings: runtime.settings,
-      liveCanary: runtime.liveCanary,
+    const propositionStableView = readPropositionPolicyStableViewForRuntime({
+      abrainHome: cachedRules.abrainHome,
+      settings: settings.propositionPolicyStableViewInjection,
+      sessionManager: ctx?.sessionManager,
+      activeProjectId: cachedRules.activeProjectId,
     });
-    if (!result.injection) {
-      if (runtime.liveCanary.active && !result.compiled.ok) {
-        const detail = `live canary fail-closed: ${result.compiled.reason}`;
-        setFooterStatus(ctx, cachedRules, runtime.settings, detail);
-        try { ctx?.ui?.notify?.(`abrain rules: ${detail}`, "warning"); } catch { /* best-effort */ }
+    let finalPrompt = current;
+    let handlerResult: { systemPrompt: string } | undefined;
+    let normalResult: RuntimeRuleInjectionResult | undefined;
+    let footerDetail: string | undefined;
+    let auditDecision: "policy_stable_view_injected" | "normal_path_fallback" = "normal_path_fallback";
+    if (propositionStableView.ok) {
+      const injection = composePropositionPolicyStableViewInjection(cachedRules.nonce, propositionStableView);
+      finalPrompt = `${current}\n\n${injection}`;
+      handlerResult = { systemPrompt: finalPrompt };
+      auditDecision = "policy_stable_view_injected";
+      setPolicyStableFooter(propositionStableView);
+    } else if (hasAnyRules(cachedRules) || runtime.settings.compiledViewInjection.enabled) {
+      normalResult = decideRuntimeRuleInjection({
+        cache: cachedRules,
+        globalSettings: settings,
+        runtimeSettings: runtime.settings,
+        liveCanary: runtime.liveCanary,
+      });
+      if (!normalResult.injection) {
+        if (runtime.liveCanary.active && normalResult.compiled.ok === false) {
+          footerDetail = `live canary fail-closed: ${normalResult.compiled.reason}`;
+          try { ctx?.ui?.notify?.(`abrain rules: ${footerDetail}`, "warning"); } catch { /* best-effort */ }
+        }
+      } else {
+        finalPrompt = `${current}\n\n${normalResult.injection}`;
+        handlerResult = { systemPrompt: finalPrompt };
       }
-      return undefined;
     }
-    return { systemPrompt: `${current}\n\n${result.injection}` };
+    if (!propositionStableView.ok) {
+      setPolicyFallbackFooter({
+        selection: propositionSelection,
+        reason: propositionStableView.reason,
+        cache: cachedRules,
+        ...(normalResult ? { normalResult } : {}),
+        ...(footerDetail ? { detail: footerDetail } : {}),
+      });
+    }
+    setFooterStatus(ctx, cachedRules, runtime.settings, footerDetail);
+    appendRuntimeAudit({
+      decision: auditDecision,
+      reason: propositionStableView.reason,
+      renderedPrompt: finalPrompt,
+      ...(propositionStableView.ok ? { stableView: propositionStableView } : {}),
+    });
+    return handlerResult;
   });
 
   if (typeof maybePi.registerCommand !== "function") return;
