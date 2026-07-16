@@ -41,8 +41,8 @@ export const READONLY_TOOLS = new Set([
   "read", "grep", "find", "ls",
   "web_search", "web_fetch",
   "memory_search", "memory_get", "memory_decide",
-  // opus R1 F2: dispatch KNOWN_TOOLS additionally accepts memory_list —
-  // keep the requestable read-only surface aligned.
+  // memory_list is an opt-in read tool: dispatch accepts the exact name when
+  // the target sub-agent session actually registers it.
   "memory_list",
 ]);
 

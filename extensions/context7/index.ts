@@ -22,10 +22,10 @@
  * apiKey, apiKeyEnv, timeout). Default enabled; key resolved from the
  * unified ~/.pi/secrets.json via the apiKey "!command" channel.
  *
- * Sub-agent exposure: context7_resolve / context7_docs are added to
- * dispatch KNOWN_TOOLS (callers CAN pass them via tools=...) but are
- * deliberately kept OUT of the default sub-agent allowlist, matching
- * how memory_list is gated — sub-agents opt in explicitly.
+ * Sub-agent exposure: context7_resolve / context7_docs are deliberately kept
+ * OUT of the default sub-agent tool set. Callers can opt in explicitly when
+ * the target sub-agent loader actually registers them; dispatch validates the
+ * created session registry instead of maintaining a static allowlist.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

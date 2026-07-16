@@ -10,9 +10,9 @@
  *   - C1' L1↔L2 共生 + Tier-2 worker 应能读外部环境 → web_search /
  *     web_fetch 是 sub-agent default-allowlist 成员
  *   - C3' infra 层 structured → tool schema 化（不走 bash + skill 脚本）
- *   - extensions/dispatch/index.ts KNOWN_TOOLS + default allowlist
- *     patched in the same commit; sub-agents get these tools without
- *     an explicit `tools` allowlist parameter.
+ *   - extensions/dispatch/index.ts default tool set was patched in the same
+ *     commit; explicit requests now resolve against each target sub-agent
+ *     session's actual registry, with no static dispatch allowlist.
  *
  * Backend swap: built-in is Brave (~80 LOC direct HTTP call); future
  * providers (Google CSE / Kagi / Bing / Serper / Tavily / Jina Reader /

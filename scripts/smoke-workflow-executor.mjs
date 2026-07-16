@@ -493,7 +493,7 @@ await check("gpt R1 B1: --yes parsing is quote-aware (quoted '--yes' is path dat
   assert(p.confirmed === false && p.malformed === true, "stray quote glued to flag → malformed");
 });
 
-await check("ADR 0033 tool surface: workflow tools registered; sub-agents cannot request them; constants drift-locked", async () => {
+await check("ADR 0033 tool surface: workflow_run structurally disabled; other names registry-gated; constants drift-locked", async () => {
   const src = fs.readFileSync(path.join(repoRoot, "extensions/workflow/index.ts"), "utf-8");
   for (const tool of ["workflow_validate", "workflow_list", "workflow_run"]) {
     assert(new RegExp(`name:\\s*[\"']${tool}[\"']`).test(src), `${tool} registered as LLM tool`);
@@ -503,8 +503,9 @@ await check("ADR 0033 tool surface: workflow tools registered; sub-agents cannot
   assert(workflowRunToolBlock && !/--yes/.test(workflowRunToolBlock), "workflow_run tool path has no --yes gate");
   assert(/Math\.min\(WORKFLOW_MAX_CONCURRENCY,\s*DISPATCH_MAX_CONCURRENCY\)/.test(src), "production call site clamps to both caps");
   const dispatchSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
-  const knownToolsBlock = dispatchSrc.match(/const KNOWN_TOOLS = new Set\(\[[\s\S]*?\]\);/)?.[0] ?? "";
-  assert(!/workflow_validate|workflow_list|workflow_run/.test(knownToolsBlock), "workflow tools are main-session only: not in dispatch KNOWN_TOOLS (N2)");
+  const disabledToolsBlock = dispatchSrc.match(/const DISABLED_SUBAGENT_TOOLS = \[[\s\S]*?\] as const;/)?.[0] ?? "";
+  assert(/workflow_run/.test(disabledToolsBlock), "workflow_run remains structurally disabled for sub-agents");
+  assert(!/workflow_validate|workflow_list/.test(disabledToolsBlock), "read-only workflow tools are resolved dynamically when explicitly requested");
   // literal-equality lock: dsl mirror === dispatch constant.
   const dm = /export const MAX_CONCURRENCY = (\d+);/.exec(dispatchSrc);
   assert(dm && Number(dm[1]) === D.WORKFLOW_MAX_CONCURRENCY, `dispatch MAX_CONCURRENCY (${dm?.[1]}) must equal dsl WORKFLOW_MAX_CONCURRENCY (${D.WORKFLOW_MAX_CONCURRENCY})`);
@@ -531,7 +532,8 @@ await check("§8 API boundary: production runner uses dispatch's exported runInP
   assert(!/createAgentSession/.test(src), "workflow/index.ts must not re-implement the session loop");
   const dispatchSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
   assert(/export async function runInProcess\(/.test(dispatchSrc), "dispatch exports runInProcess");
-  assert(/export function validateTools\(/.test(dispatchSrc), "dispatch exports validateTools (nested/unknown universal check)");
+  assert(/export function validateTools\(/.test(dispatchSrc), "dispatch exports validateTools (structural disabled-tool check)");
+  assert(/export function validateSessionToolRegistry\(/.test(dispatchSrc), "dispatch exports target-session registry validation");
   assert(/export function enforceMutatingEnvGate\(/.test(dispatchSrc), "dispatch exports enforceMutatingEnvGate (W9 env gate, decoupled from validateTools 2026-06-16)");
   assert(/enforceMutatingEnvGate\(req\.tools\)/.test(src), "workflow production runner enforces the W9 mutating env gate locally (not inherited from validateTools)");
   assert(/Symbol\.for\("pi-astack\/dispatch\/shared-infra\/v1"\)/.test(dispatchSrc), "shared infra is globalThis singleton (jiti copy safety)");

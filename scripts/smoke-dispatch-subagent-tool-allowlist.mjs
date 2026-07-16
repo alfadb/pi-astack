@@ -1,165 +1,270 @@
 #!/usr/bin/env node
-// Smoke test: verify the DISPATCH SIDE keeps main-session-only tools
-// (vault_release / prompt_user) out of sub-agent reach.
-//
-// SCOPE / WHAT THIS PROVES (read carefully — it is narrow on purpose):
-// This is a STRUCTURAL source-text check of extensions/dispatch/index.ts.
-// It proves the dispatch side will not REQUEST or DEFAULT to vault_release/
-// prompt_user, and that createAgentSession is actually called WITH a `tools`
-// allowlist. It does NOT, by itself, prove the pi SDK enforces that allowlist
-// exclusively — that property lives in the SDK (agent-session.js
-// `allowedToolNames` filter, verified by 3-T0 review against pi 0.75.x:
-// dist/core/agent-session.js:1802-1814) and would only regress on an SDK
-// upgrade. A BEHAVIORAL test (register a fake `vault_release`, build a
-// session with tools:["read"], assert getActiveToolNames() excludes it) is
-// the recommended follow-up to pin the SDK half; see TODO at bottom.
-//
-// Therefore: green here means "dispatch will not hand vault_release to a
-// sub-agent", NOT "vault is fully isolated from sub-agents". A default
-// sub-agent still has `read`/`grep` and can read same-user files (incl.
-// encrypted vault artifacts) by absolute path — that is ADR 0014 §invariant
-// #1 layer-2 residual surface, out of scope for this smoke.
-//
-// Structural philosophy mirrors smoke-vault-subpi-isolation.mjs.
+/**
+ * Dispatch sub-agent tool-registry smoke.
+ *
+ * Covers both halves of the contract:
+ *   - dispatch keeps only the six structural denials and wires them through
+ *     validateTools + createAgentSession({ excludeTools })
+ *   - requested names are validated against the created target session before
+ *     prompt(), including tools registered dynamically by an extension factory
+ */
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
+  SessionManager,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { createJiti } from "jiti";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 const dispatchPath = resolve(repoRoot, "extensions/dispatch/index.ts");
+const src = readFileSync(dispatchPath, "utf8");
+const jiti = createJiti(import.meta.url);
+const dispatch = await jiti.import(dispatchPath);
 
 let pass = 0;
 let fail = 0;
-function ok(msg) { pass++; console.log(`  ✓ ${msg}`); }
-function bad(msg) { fail++; console.log(`  ✗ ${msg}`); }
-
-const src = readFileSync(dispatchPath, "utf8");
-
-const FORBIDDEN = ["vault_release", "prompt_user"];
-// Sanity anchors: tools that MUST stay present, so a parse miss (empty
-// capture) can't make the "forbidden absent" checks vacuously pass.
-const EXPECTED_PRESENT = ["read", "memory_search"];
-
-// ── (a) KNOWN_TOOLS excludes the forbidden tools ────────────────────────
-const knownMatch = src.match(/const KNOWN_TOOLS = new Set\(\[([\s\S]*?)\]\)/);
-if (!knownMatch) {
-  bad("(a) could not locate KNOWN_TOOLS set literal — dispatch source shape changed");
-} else {
-  const body = knownMatch[1];
-  for (const t of EXPECTED_PRESENT) {
-    if (body.includes(`"${t}"`)) ok(`(a) KNOWN_TOOLS contains sanity anchor "${t}"`);
-    else bad(`(a) KNOWN_TOOLS missing sanity anchor "${t}" — parse likely wrong, results untrustworthy`);
-  }
-  for (const t of FORBIDDEN) {
-    if (body.includes(`"${t}"`)) bad(`(a) KNOWN_TOOLS MUST NOT contain "${t}" — callers could then request it via tools=`);
-    else ok(`(a) KNOWN_TOOLS excludes "${t}" (caller cannot request it)`);
-  }
+function ok(message) { pass++; console.log(`  ✓ ${message}`); }
+function bad(message) { fail++; console.log(`  ✗ ${message}`); }
+function check(condition, success, failure = success) {
+  if (condition) ok(success);
+  else bad(failure);
 }
 
-// ── (b) shared default allowlist excludes the forbidden tools ──────────
-// Current dispatch source centralizes the default allowlist in
-// DEFAULT_SUBAGENT_TOOLS and reuses it from runInProcess + dispatch_parallel.
-// This smoke should pin the default capability boundary, not require stale
-// duplicated inline strings.
-const defaultConstMatch = src.match(/const DEFAULT_SUBAGENT_TOOLS\s*=\s*"([^"]+)"/);
-if (!defaultConstMatch) {
-  bad("(b) could not locate DEFAULT_SUBAGENT_TOOLS constant — dispatch source shape changed");
-} else {
-  const list = defaultConstMatch[1].split(",").map((s) => s.trim());
-  ok("(b) DEFAULT_SUBAGENT_TOOLS constant found");
-  for (const t of EXPECTED_PRESENT) {
-    if (list.includes(t)) ok(`(b) default allowlist contains sanity anchor "${t}"`);
-    else bad(`(b) default allowlist missing sanity anchor "${t}" — parse likely wrong`);
-  }
-  for (const t of FORBIDDEN) {
-    if (list.includes(t)) bad(`(b) default allowlist MUST NOT contain "${t}"`);
-    else ok(`(b) default allowlist excludes "${t}"`);
-  }
-}
-
-const defaultUses = [
-  ["runInProcess", /toolAllowlist\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/],
-  ["dispatch_parallel", /t\.tools\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/],
+const EXPECTED_DEFAULT = [
+  "read", "grep", "find", "ls",
+  "web_search", "web_fetch",
+  "memory_search", "memory_get", "memory_decide",
 ];
-for (const [label, re] of defaultUses) {
-  if (re.test(src)) ok(`(b) ${label} reuses DEFAULT_SUBAGENT_TOOLS`);
-  else bad(`(b) ${label} does not reuse DEFAULT_SUBAGENT_TOOLS`);
+const DISABLED = [
+  "dispatch_agent",
+  "dispatch_parallel",
+  "dispatch_hub",
+  "workflow_run",
+  "prompt_user",
+  "vault_release",
+];
+
+console.log("\n  source contract:");
+check(!src.includes("KNOWN_TOOLS"), "static KNOWN_TOOLS allowlist removed");
+
+const disabledMatch = src.match(/const DISABLED_SUBAGENT_TOOLS = \[([\s\S]*?)\] as const;/);
+if (!disabledMatch) {
+  bad("could not locate DISABLED_SUBAGENT_TOOLS");
+} else {
+  const actual = [...disabledMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  check(
+    JSON.stringify(actual) === JSON.stringify(DISABLED),
+    "structural disabled set is exactly the six required tools",
+    `structural disabled set drifted: ${actual.join(", ")}`,
+  );
 }
 
-// ── (c) validateTools rejects anything not in KNOWN_TOOLS ───────────────
-if (/if\s*\(\s*!\s*KNOWN_TOOLS\.has\(\s*name\s*\)\s*\)/.test(src)) {
-  ok("(c) validateTools rejects tools not in KNOWN_TOOLS (!KNOWN_TOOLS.has(name) guard present)");
+const defaultMatch = src.match(/const DEFAULT_SUBAGENT_TOOLS\s*=\s*"([^"]+)"/);
+if (!defaultMatch) {
+  bad("could not locate DEFAULT_SUBAGENT_TOOLS");
 } else {
-  bad("(c) validateTools MISSING the !KNOWN_TOOLS.has(name) rejection guard");
+  const actual = defaultMatch[1].split(",");
+  check(
+    JSON.stringify(actual) === JSON.stringify(EXPECTED_DEFAULT),
+    "DEFAULT_SUBAGENT_TOOLS remains unchanged",
+    `default tools drifted: ${actual.join(", ")}`,
+  );
 }
 
-// ── (f) nested-dispatch still rejected; (g) mutating NO LONGER gated ─────
-// (2026-06-16) the dispatch swarm dropped the PI_MULTI_AGENT_ALLOW_MUTATING
-// gate: workers may receive bash/edit/write via explicit tools=. The ONLY
-// hard boundary left in validateTools is nested-dispatch + unknown-tool.
-// (The workflow channel keeps its W9 env gate via enforceMutatingEnvGate,
-//  verified separately in smoke-workflow-executor.)
-const vtMatch = src.match(/export function validateTools\(toolsStr[\s\S]*?\n}/);
-if (!vtMatch) {
-  bad("(f/g) could not locate validateTools body — dispatch source shape changed");
-} else {
-  const vt = vtMatch[0];
-  if (/dispatch_agent|dispatch_parallel/.test(vt) && /nested dispatch not allowed/.test(vt)) {
-    ok("(f) validateTools rejects nested dispatch (recursion / runaway-fanout boundary kept)");
-  } else {
-    bad("(f) validateTools MISSING nested-dispatch rejection — the one boundary that must stay");
+check(
+  /excludeTools:\s*\[\.\.\.DISABLED_SUBAGENT_TOOLS\]/.test(src),
+  "createAgentSession applies the disabled set through excludeTools",
+);
+check(
+  !/\bpi\.getAllTools\s*\(/.test(src),
+  "dispatch never treats the parent ExtensionAPI registry as authoritative",
+);
+
+const createIndex = src.indexOf("const result = await createAgentSession({");
+const registryIndex = src.indexOf("validateSessionToolRegistry(session, tools)", createIndex);
+const promptIndex = src.indexOf("await session.prompt(prompt)", createIndex);
+check(
+  createIndex >= 0 && registryIndex > createIndex && promptIndex > registryIndex,
+  "target-session registry validation runs after creation and before prompt",
+);
+const rejectionBlock = src.slice(registryIndex, promptIndex);
+check(
+  /session\.dispose\(\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
+  "registry rejection disposes the target session and returns tool_rejected",
+);
+check(
+  /SettingsManager\.create[\s\S]*?projectTrusted:\s*false/.test(src),
+  "shared sub-agent loader remains projectTrusted:false",
+);
+
+console.log("\n  parser and structural validation:");
+const resolvedDefault = dispatch.resolveSubAgentTools(undefined);
+check(
+  JSON.stringify(resolvedDefault) === JSON.stringify(EXPECTED_DEFAULT),
+  "undefined tools resolves to the unchanged default set",
+);
+const exactNames = dispatch.resolveSubAgentTools(" read,read, Read , dynamic_extension_tool, dynamic_extension_tool ");
+check(
+  JSON.stringify(exactNames) === JSON.stringify(["read", "Read", "dynamic_extension_tool"]),
+  "tool parsing trims and exact-deduplicates without case normalization",
+);
+for (const name of DISABLED) {
+  const verdict = dispatch.validateTools(`  ${name.toUpperCase()}  `);
+  check(!verdict.ok, `validateTools denies ${name} case-insensitively`);
+}
+for (const name of ["dynamic_extension_tool", "lsp_diagnostics", "lsp_diagnosticz", "goal_set", "workflow_validate", "bash"]) {
+  const verdict = dispatch.validateTools(name);
+  check(verdict.ok, `validateTools defers non-disabled name ${name} to target registry`);
+}
+
+console.log("\n  real target-session registry:");
+const dynamicNames = [
+  "web_search",
+  "web_fetch",
+  "memory_search",
+  "memory_get",
+  "memory_decide",
+  "dynamic_extension_tool",
+  "lsp_diagnostics",
+  ...DISABLED,
+];
+const settingsManager = SettingsManager.inMemory();
+const resourceLoader = new DefaultResourceLoader({
+  cwd: repoRoot,
+  agentDir: resolve(repoRoot, ".dispatch-smoke-agent-not-present"),
+  settingsManager,
+  noSkills: true,
+  noPromptTemplates: true,
+  noThemes: true,
+  noContextFiles: true,
+  extensionFactories: [(pi) => {
+    for (const name of dynamicNames) {
+      pi.registerTool({
+        name,
+        label: name,
+        description: `Smoke tool ${name}`,
+        parameters: Type.Object({}),
+        async execute() {
+          return { content: [{ type: "text", text: name }], details: {} };
+        },
+      });
+    }
+  }],
+});
+await resourceLoader.reload();
+
+const typo = "lsp_diagnosticz";
+const requested = [...EXPECTED_DEFAULT, "dynamic_extension_tool", "lsp_diagnostics", typo, ...DISABLED];
+const { session } = await createAgentSession({
+  cwd: repoRoot,
+  tools: requested,
+  excludeTools: DISABLED,
+  resourceLoader,
+  settingsManager,
+  sessionManager: SessionManager.inMemory(repoRoot),
+});
+
+try {
+  const available = session.getAllTools().map((tool) => tool.name);
+  const active = session.getActiveToolNames();
+
+  check(
+    dispatch.validateSessionToolRegistry(session, EXPECTED_DEFAULT).ok,
+    "unchanged default set validates against a target registry that registers it",
+  );
+  check(
+    available.includes("dynamic_extension_tool") && active.includes("dynamic_extension_tool"),
+    "dynamically registered extension tool is explicitly requestable and active",
+  );
+  check(
+    dispatch.validateSessionToolRegistry(session, ["lsp_diagnostics"]).ok,
+    "lsp_diagnostics is accepted when the target loader actually registers it",
+  );
+
+  const typoVerdict = dispatch.validateSessionToolRegistry(
+    session,
+    [...EXPECTED_DEFAULT, "dynamic_extension_tool", "lsp_diagnostics", typo],
+  );
+  check(!typoVerdict.ok, "misspelled tool is rejected by the target registry");
+  check(
+    typoVerdict.reason?.includes(typo) &&
+      typoVerdict.reason?.includes("Available tools:") &&
+      typoVerdict.reason?.includes("lsp_diagnostics"),
+    "tool_rejected reason names the typo and target session's available tools",
+  );
+
+  const caseVerdict = dispatch.validateSessionToolRegistry(session, ["Dynamic_Extension_Tool"]);
+  check(!caseVerdict.ok, "non-denylisted tool names retain SDK case-sensitive matching");
+
+  for (const name of DISABLED) {
+    check(
+      !available.includes(name) && !active.includes(name),
+      `excludeTools keeps registered ${name} unavailable`,
+    );
   }
-  if (/PI_MULTI_AGENT_ALLOW_MUTATING/.test(vt)) {
-    bad("(g) validateTools still gates mutating via PI_MULTI_AGENT_ALLOW_MUTATING — swarm edit/write must be ungated here (moved to workflow's enforceMutatingEnvGate)");
-  } else {
-    ok("(g) validateTools does NOT gate bash/edit/write (swarm editing allowed; env gate removed 2026-06-16)");
+} finally {
+  session.dispose();
+}
+
+console.log("\n  configured global loader:");
+const globalSettingsPath = resolve(getAgentDir(), "settings.json");
+let hasPiLsp = false;
+try {
+  const globalSettings = JSON.parse(readFileSync(globalSettingsPath, "utf8"));
+  hasPiLsp = Array.isArray(globalSettings.packages) &&
+    globalSettings.packages.some((entry) => typeof entry === "string" && entry.includes("pi-lsp"));
+} catch {
+  // A package checkout need not have a global pi installation.
+}
+
+if (!hasPiLsp) {
+  ok("pi-lsp is not configured globally; real lsp_diagnostics probe skipped");
+} else {
+  const cwd = process.cwd();
+  const globalSettingsManager = SettingsManager.create(cwd, getAgentDir(), { projectTrusted: false });
+  const globalResourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    settingsManager: globalSettingsManager,
+    noExtensions: false,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+  });
+  await globalResourceLoader.reload();
+  const { session: globalSession } = await createAgentSession({
+    cwd,
+    tools: ["lsp_diagnostics"],
+    excludeTools: DISABLED,
+    resourceLoader: globalResourceLoader,
+    settingsManager: globalSettingsManager,
+    sessionManager: SessionManager.inMemory(cwd),
+  });
+  try {
+    check(
+      globalResourceLoader.getExtensions().errors.length === 0 &&
+        dispatch.validateSessionToolRegistry(globalSession, ["lsp_diagnostics"]).ok,
+      "configured global pi-lsp registers usable lsp_diagnostics in the target session",
+    );
+  } finally {
+    globalSession.dispose();
   }
 }
 
-// ── (d) createAgentSession is actually CALLED WITH a `tools` allowlist ───
-// This is load-bearing: if `tools` is dropped from the call, the SDK falls
-// back to enabling ALL extension tools (incl. abrain's vault_release) — and
-// checks (a)/(b) would still pass green. So assert the wiring exists.
-// (gpt-5.5 P1)
-let wiredTools = false;
-let idx = src.indexOf("createAgentSession({");
-while (idx !== -1) {
-  const blockEnd = src.indexOf("});", idx);
-  const block = src.slice(idx, blockEnd === -1 ? idx + 600 : blockEnd);
-  if (/(^|[\s,{])tools\s*[,:]/.test(block)) { wiredTools = true; break; }
-  idx = src.indexOf("createAgentSession({", idx + 1);
-}
-if (wiredTools) {
-  ok("(d) createAgentSession is called WITH `tools` (allowlist actually wired into the session)");
-} else {
-  bad("(d) createAgentSession call does NOT pass `tools` — SDK would enable ALL extension tools incl. vault_release");
-}
-
-// ── (e) the design-intent comment documents the exclusion ───────────────
-if (/vault_release:\s*secret release, main-session-only/.test(src)) {
-  ok('(e) "Deliberately NOT included" comment documents vault_release exclusion');
-} else {
-  bad('(e) missing the comment documenting vault_release/prompt_user as deliberately excluded');
-}
-
-// ── Summary ─────────────────────────────────────────────────────────────
 console.log();
 if (fail === 0) {
-  console.log(`✅ dispatch sub-agent tool allowlist: all ${pass} checks passed`);
-  console.log("   (vault_release/prompt_user not requestable via tools= and absent from all defaults;");
-  console.log("    SDK-side exclusivity of allowedToolNames is verified separately — see header TODO)");
+  console.log(`✅ dispatch sub-agent dynamic tool registry: all ${pass} checks passed`);
   process.exit(0);
-} else {
-  console.error(`❌ dispatch sub-agent tool allowlist: ${fail} failure(s) out of ${pass + fail}`);
-  process.exit(1);
 }
 
-// TODO(behavioral): add a companion smoke that registers a fake "vault_release"
-// extension tool, calls createAgentSession({ tools: ["read"], resourceLoader,
-// sessionManager: SessionManager.inMemory() }), and asserts
-// session.getActiveToolNames() / getAllTools() exclude "vault_release". That
-// pins the SDK allowedToolNames filter and would catch an SDK upgrade that
-// made `tools` additive — the one regression class this structural smoke
-// cannot see. (Opus + gpt-5.5 T0 recommendation, 2026-05-31.)
+console.error(`❌ dispatch sub-agent dynamic tool registry: ${fail} failure(s) out of ${pass + fail}`);
+process.exit(1);

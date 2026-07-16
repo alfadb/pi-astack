@@ -6,9 +6,9 @@
  * Validates:
  *   - file structure (types/registry/settings + brave provider +
  *     html-to-markdown utility + url-guard SSRF defense)
- *   - dispatch KNOWN_TOOLS includes web_search/web_fetch
- *   - dispatch default allowlist includes web_search/web_fetch (4 sites,
- *     no orphan)
+ *   - dispatch default tools include web_search/web_fetch (4 sites, no orphan)
+ *   - dispatch uses target-session registry validation instead of a static
+ *     tool-name allowlist
  *   - source-string-level invariants (sub-pi guard, missing-key error,
  *     provider switch fallback, signal pass-through, untrusted-content
  *     framing, SSRF guard wired, content-type whitelist, streamed body)
@@ -52,18 +52,14 @@ for (const f of expectedFiles) {
   else failMsg(`missing: ${f}`);
 }
 
-// 2. dispatch KNOWN_TOOLS + default allowlist patches ───────────
+// 2. dispatch default tools + dynamic registry validation ───────
 
 console.log("\n  dispatch/index.ts patches (ADR 0027 PR-A):");
 const dispatchSrc = read("extensions/dispatch/index.ts");
 
-if (/const KNOWN_TOOLS = new Set\(\[[\s\S]*?"web_search"[\s\S]*?\]\)/.test(dispatchSrc)) {
-  ok("KNOWN_TOOLS contains web_search");
-} else failMsg("KNOWN_TOOLS does NOT contain web_search");
-
-if (/const KNOWN_TOOLS = new Set\(\[[\s\S]*?"web_fetch"[\s\S]*?\]\)/.test(dispatchSrc)) {
-  ok("KNOWN_TOOLS contains web_fetch");
-} else failMsg("KNOWN_TOOLS does NOT contain web_fetch");
+if (!/const KNOWN_TOOLS\b/.test(dispatchSrc) && /validateSessionToolRegistry\(session, tools\)/.test(dispatchSrc)) {
+  ok("dispatch resolves web tools through the target session registry (no static allowlist)");
+} else failMsg("dispatch still depends on a static tool allowlist or lacks target registry validation");
 
 // Default-allowlist sites should all be patched. Total
 // `read,grep,find,ls` occurrences MUST equal patched (= 0 orphan).

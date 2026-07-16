@@ -83,7 +83,7 @@ await check("machine-turn detector: continuation user turn true; normal user tur
   assert(G.isCurrentTurnGoalContinuation({}) === true, "unreadable branch fail-closed");
 });
 
-await check("goal tools registered and excluded from dispatch KNOWN_TOOLS; machine-turn helper imports shared prefix", async () => {
+await check("goal tools registered and not structurally disabled by dispatch; machine-turn helper imports shared prefix", async () => {
   const src = fs.readFileSync(path.join(repoRoot, "extensions/goal/index.ts"), "utf-8");
   for (const t of ["goal_status", "goal_set", "goal_pause", "goal_resume", "goal_clear"]) {
     assert(src.includes(`"${t}"`) || src.includes(`'${t}'`), `${t} registered or enumerated for registration`);
@@ -93,8 +93,8 @@ await check("goal tools registered and excluded from dispatch KNOWN_TOOLS; machi
   assert(/const r = await actGoal\(parsed\.sub, ctx\)/.test(src), "slash pause/resume/clear share tool helper (resume machine-turn check cannot drift)");
   assert(/goal event log append FAILED — unreadable-doc pause/.test(src), "doc-unreadable pause checks event append result");
   const dispatch = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
-  const block = dispatch.match(/const KNOWN_TOOLS = new Set\(\[[\s\S]*?\]\);/)?.[0] ?? "";
-  assert(!/goal_status|goal_set|goal_pause|goal_resume|goal_clear/.test(block), "goal tools not in sub-agent allowlist");
+  const disabledBlock = dispatch.match(/const DISABLED_SUBAGENT_TOOLS = \[[\s\S]*?\] as const;/)?.[0] ?? "";
+  assert(disabledBlock && !/goal_status|goal_set|goal_pause|goal_resume|goal_clear/.test(disabledBlock), "goal tools are not structurally disabled for explicit registry-validated requests");
 });
 
 console.log(failures === 0 ? `PASS — ${total} checks (goal doc/tools).` : `FAIL — ${failures}/${total} checks failed.`);

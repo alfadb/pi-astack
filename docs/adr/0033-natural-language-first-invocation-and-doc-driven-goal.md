@@ -82,7 +82,7 @@ status: accepted
 
 ### 2.2 边界约束
 
-- **仅主会话（N2）**：10 个工具不进入 dispatch `KNOWN_TOOLS`（子 agent 永远无法获得——与 vault_release/prompt_user 同列；机制为既有 allowlist 排除式设计，非新设施；smoke 锁定集合断言）。stage 内 dispatch 硬拒（M1）不变，故 workflow 不能嵌套 workflow，goal_set 也不可能出现在 stage 子 agent 中。
+- **dispatch 暴露边界（N2，2026-07-16 修订）**：dispatch 不再维护静态工具 allowlist；`workflow_run` 进入最小结构禁用集合，故 stage 仍不能嵌套 workflow，`workflow_validate`/`workflow_list` 与 goal 工具则仅在显式请求且目标 sub-agent session 实际注册时可用。`vault_release`/`prompt_user` 仍分别因密钥边界与不可完成用户交互而结构禁用。
 - **机器 turn 拒绝面 = `goal_set`/`goal_resume` 两个**（§1.3）。
 - **用户中断**：`workflow_run` 必须把 tool execute 的 `signal` 线程进 `executeWorkflow`（用户 abort → run cancelled，C5 语义现成）。
 - **同 turn 多次调用**：允许，互相独立（与 dispatch_parallel 同等待遇，合议 M3/deepseek）；自然边界 = 每次调用同步阻塞至终态、每次启动/结束均有 tell、用户随时可中断、不另设次数硬限。
@@ -143,7 +143,7 @@ status: accepted
 | W1' | §1.3 措辞替换 W1（机器 turn 拒绝面 = set/resume；继承 W1 终态不可复活 smoke） | smoke：机器 turn 内 set/resume 拒绝且零副作用 + 状态机终态 checks |
 | W7' | 声明图执行前固定（持久化 artifact）；dry-run 校验为 workflow_run **工具内机器门**（执行前必过、失败必不执行）；引擎零拓扑自由度；执行子集仅被声明策略裁剪（合议 RC3/opus：删去"呈现+显式 invoke"两子句） | PR-9 dry-run smoke 沿用（拓扑校验 + dispatch 硬拒），去掉三闸断言 |
 | N1 | goal/workflow 能力面禁**调用确认弹窗**（gate-b/c 式 per-run 人肉点头）；全局真不可逆操作 prompt_user 判断规范与 0032 §8 on_fail 人工路径**保留**（合议 RC4/opus：与禁面区分） | code review + smoke：新工具实现无 invocation-confirmation 调用 |
-| N2 | 8 个新工具不进 dispatch KNOWN_TOOLS（仅主会话） | smoke：KNOWN_TOOLS 集合断言 |
+| N2 | dispatch 无静态工具 allowlist；`workflow_run` 结构禁用，其余 goal/workflow 名称按目标 session registry 动态校验 | smoke：禁用集合精确断言 + 目标 registry 行为检查 |
 | N3 | workflow_run 内置确定性校验不可绕过（执行前必过，失败必不执行；enabled=false → 结构化拒绝不调 runner） | smoke：invalid doc / disabled → tool error 且零 runner 调用 |
 | N4 | judge 读 doc 为认知层 DATA 输入；输出空间不扩张；`</goal-doc>` 转义 + 回声 framing 必在 | smoke：doc 含 `</goal-doc>` 注入/伪 transcript/伪 verdict JSON 时 parse 仍闭合于三值；framing 文本存在性断言 |
 | N5 | 进程级全局并发 ≤ MAX_CONCURRENCY，跨所有并发 workflow run 共享（W12 口径升级） | smoke：双 run 并发计数 |

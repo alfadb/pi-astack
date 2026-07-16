@@ -4,8 +4,8 @@
  *
  * Validates (source-level, no real network by default):
  *   - file structure (index/settings/client/secret)
- *   - dispatch KNOWN_TOOLS includes context7_resolve/context7_docs, and
- *     they are NOT in the default sub-agent allowlist (opt-in only)
+ *   - dispatch resolves explicitly requested context7 tools from the target
+ *     session registry, and keeps them out of the default set (opt-in only)
  *   - settings schema + live settings.json wiring (context7 section,
  *     explicit enabled kill-switch, key via secrets.json command channel)
  *   - client invariants (v2 endpoints, Bearer auth, untrusted framing,
@@ -45,15 +45,12 @@ for (const f of expectedFiles) {
   else failMsg(`missing: ${f}`);
 }
 
-// 2. dispatch KNOWN_TOOLS + allowlist gating ────────────────────
+// 2. dispatch target-registry + default gating ──────────────────
 console.log("\n  dispatch/index.ts wiring:");
 const dispatchSrc = read("extensions/dispatch/index.ts");
-if (/const KNOWN_TOOLS = new Set\(\[[\s\S]*?"context7_resolve"[\s\S]*?\]\)/.test(dispatchSrc)) {
-  ok("KNOWN_TOOLS contains context7_resolve");
-} else failMsg("KNOWN_TOOLS missing context7_resolve");
-if (/const KNOWN_TOOLS = new Set\(\[[\s\S]*?"context7_docs"[\s\S]*?\]\)/.test(dispatchSrc)) {
-  ok("KNOWN_TOOLS contains context7_docs");
-} else failMsg("KNOWN_TOOLS missing context7_docs");
+if (!/const KNOWN_TOOLS\b/.test(dispatchSrc) && /validateSessionToolRegistry\(session, tools\)/.test(dispatchSrc)) {
+  ok("explicit context7 requests use target-session registry validation");
+} else failMsg("dispatch static allowlist remains or target-session validation is missing");
 // Opt-in only: must NOT appear in any default allowlist string.
 if (!/read,grep,find,ls[^"']*context7/.test(dispatchSrc)) {
   ok("context7 tools kept OUT of default sub-agent allowlist (opt-in)");

@@ -153,10 +153,10 @@ if (defaultConstMatch) {
   bad("could not locate DEFAULT_SUBAGENT_TOOLS constant");
 }
 
-if (/toolAllowlist\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/.test(disSrc) && /t\.tools\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/.test(disSrc)) {
-  ok("dispatch runInProcess and dispatch_parallel reuse DEFAULT_SUBAGENT_TOOLS");
+if (/resolveSubAgentTools\(toolAllowlist\)/.test(disSrc) && /t\.tools\s*\|\|\s*DEFAULT_SUBAGENT_TOOLS/.test(disSrc)) {
+  ok("dispatch runInProcess and dispatch_parallel preserve DEFAULT_SUBAGENT_TOOLS semantics");
 } else {
-  bad("dispatch default allowlist is not reused from DEFAULT_SUBAGENT_TOOLS in both call paths");
+  bad("dispatch default tool set is not preserved in both call paths");
 }
 
 // memory_list explicitly NOT in default (T0 consensus: too broad)
@@ -167,11 +167,13 @@ if (memListMatch) {
   ok("memory_list correctly EXCLUDED from default allowlist (DeepSeek + GPT-5.5 vote)");
 }
 
-// KNOWN_TOOLS should still include memory_list (callers can opt in explicitly)
-if (/KNOWN_TOOLS[\s\S]{0,500}memory_list/.test(disSrc)) {
-  ok("memory_list remains in KNOWN_TOOLS for explicit opt-in");
+// memory_list is eligible for explicit opt-in through target-session registry
+// validation; it must not be added to the structural disabled set.
+const disabledBlock = disSrc.match(/const DISABLED_SUBAGENT_TOOLS = \[[\s\S]*?\] as const;/)?.[0] ?? "";
+if (!disabledBlock.includes("memory_list") && /validateSessionToolRegistry\(session, tools\)/.test(disSrc)) {
+  ok("memory_list remains eligible for explicit target-registry opt-in");
 } else {
-  bad("memory_list missing from KNOWN_TOOLS — caller can no longer pass it");
+  bad("memory_list was structurally disabled or target-registry validation is missing");
 }
 
 // ── Summary ────────────────────────────────────────────────────

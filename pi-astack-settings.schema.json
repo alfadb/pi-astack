@@ -1970,7 +1970,7 @@
     },
     "context7": {
       "type": "object",
-      "description": "Context7 library-docs tools (extensions/context7/). Registers two pi tools — context7_resolve and context7_docs — over Context7's public REST API (Upstash), injecting up-to-date, version-specific library documentation + code examples so the LLM stops hallucinating stale APIs. pi ships no native MCP (docs/usage.md:303), so this is a thin HTTP wrapper, structurally a sibling of webSearch. Added to dispatch KNOWN_TOOLS (sub-agents can opt in via tools=...) but kept out of the default sub-agent allowlist.",
+      "description": "Context7 library-docs tools (extensions/context7/). Registers two pi tools — context7_resolve and context7_docs — over Context7's public REST API (Upstash), injecting up-to-date, version-specific library documentation + code examples so the LLM stops hallucinating stale APIs. pi ships no native MCP (docs/usage.md:303), so this is a thin HTTP wrapper, structurally a sibling of webSearch. Sub-agents can opt in via tools= when the target session actually registers them; they remain outside the default sub-agent tool set.",
       "additionalProperties": false,
       "properties": {
         "_comment": {

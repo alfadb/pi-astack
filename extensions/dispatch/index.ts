@@ -126,38 +126,19 @@ export function providerFromModel(model: string): string {
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
 const DEFAULT_SUBAGENT_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide";
 
-/** Known tool names accepted by validateTools — used to reject unknown
- *  names early (SDK would silently ignore them, leaving the sub-agent
- *  with zero tools and a confusing "I don't have access to tools"
- *  response).
- *
- *  Members:
- *  - read/bash/edit/write/grep/find/ls — pi SDK built-in base tools
- *    (must stay in sync with createCodingTools / createReadOnlyTools)
- *  - web_search/web_fetch — pi-astack web-search extension (ADR 0027
- *    PR-A: L2 worker read tools, exposed to sub-agents by default)
- *  - memory_search/memory_get/memory_list/memory_activity/memory_decide —
- *    pi-astack abrain extension (ADR 0027 PR-B: L2 workers grown on L1 hub
- *    need brain read access for the symbiosis loop)
- *  - vision — pi-astack vision extension (image analysis, read-only)
- *  - context7_resolve/context7_docs — pi-astack context7 extension
- *    (up-to-date library docs). In KNOWN_TOOLS so sub-agents CAN opt in
- *    via explicit tools=..., but kept OUT of the default allowlist below
- *    (same gating as memory_list — narrow, opt-in capability)
- *
- *  Deliberately NOT included (extension-loaded but kept out of sub-agents):
- *  - vault_release: secret release, main-session-only (ADR 0014 §6)
- *  - prompt_user: user interaction, sub-agent can't reach user
- *  - imagine: image generation, expensive + main-session-only by design
- *  - dispatch_agent/dispatch_parallel: nested dispatch forbidden (would
- *    explode token cost + violate ADR 0027 C5 fail-fast invariant) */
-const KNOWN_TOOLS = new Set([
-  "read", "bash", "edit", "write", "grep", "find", "ls",
-  "web_search", "web_fetch",
-  "memory_search", "memory_get", "memory_list", "memory_activity", "memory_decide",
-  "vision",
-  "context7_resolve", "context7_docs",
-]);
+/** Minimal structural boundary applied before session creation and again by
+ *  the SDK execution layer through excludeTools. Dispatch does not maintain a
+ *  static allowlist: every other explicitly requested name is resolved against
+ *  the target sub-agent session's actual tool registry after creation. */
+const DISABLED_SUBAGENT_TOOLS = [
+  "dispatch_agent",
+  "dispatch_parallel",
+  "dispatch_hub",
+  "workflow_run",
+  "prompt_user",
+  "vault_release",
+] as const;
+const DISABLED_SUBAGENT_TOOL_NAMES = new Set<string>(DISABLED_SUBAGENT_TOOLS);
 
 // ── ADR 0027 C6a: dispatch audit log ────────────────────────────
 
@@ -727,10 +708,28 @@ interface ToolValidation {
   reason?: string;
 }
 
-// Universal sub-agent tool validation: reject nested dispatch (capability
-// boundary — sub-agents never spawn sub-agents; prevents runaway fan-out) and
-// unknown tool names. Exported; the workflow runner reuses it for those two
-// universal checks.
+function parseToolCsv(toolsStr: string): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const rawName of toolsStr.split(",")) {
+    const name = rawName.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
+/** Resolve the exact SDK tool names for a sub-agent session. Tool names remain
+ *  case-sensitive; trim and exact-value deduplication are the only changes. */
+export function resolveSubAgentTools(toolsStr: string | undefined): string[] {
+  return parseToolCsv(toolsStr || DEFAULT_SUBAGENT_TOOLS);
+}
+
+// Universal structural validation. Sub-agents cannot orchestrate another
+// dispatch/workflow run, interact with the user, or cross the vault boundary.
+// All other names are accepted here and checked against the target session's
+// actual registry after createAgentSession() has loaded its extensions.
 //
 // NOTE (2026-06-16): mutating tools (bash/edit/write) are NO LONGER gated here.
 // The dispatch swarm may receive them via explicit `tools=`. Rationale: brain
@@ -743,18 +742,43 @@ interface ToolValidation {
 export function validateTools(toolsStr: string | undefined): ToolValidation {
   if (!toolsStr) return { ok: true };
 
-  const names = toolsStr.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
-
-  for (const name of names) {
-    if (name === "dispatch_agent" || name === "dispatch_parallel") {
-      return { ok: false, reason: `nested dispatch not allowed` };
-    }
-    if (!KNOWN_TOOLS.has(name)) {
-      return { ok: false, reason: `unknown tool "${name}". Known tools: ${[...KNOWN_TOOLS].join(", ")}` };
+  for (const name of parseToolCsv(toolsStr)) {
+    if (DISABLED_SUBAGENT_TOOL_NAMES.has(name.toLowerCase())) {
+      return { ok: false, reason: `tool "${name}" is disabled for sub-agents` };
     }
   }
 
   return { ok: true };
+}
+
+interface SessionToolRegistryView {
+  getAllTools(): Array<{ name: string }>;
+  getActiveToolNames(): string[];
+}
+
+/** Validate only against the newly created target session. The parent
+ *  ExtensionAPI registry is intentionally not consulted: global loader state,
+ *  project trust, extension kill-switches, and SDK filtering can all differ. */
+export function validateSessionToolRegistry(
+  session: SessionToolRegistryView,
+  requestedTools: readonly string[],
+): ToolValidation {
+  const availableTools = [...new Set(session.getAllTools().map((tool) => tool.name))].sort();
+  const activeTools = [...new Set(session.getActiveToolNames())].sort();
+  const available = new Set(availableTools);
+  const active = new Set(activeTools);
+  const unavailable = requestedTools.filter((name) => !available.has(name) || !active.has(name));
+  if (unavailable.length === 0) return { ok: true };
+
+  const quoted = unavailable.map((name) => `"${name}"`).join(", ");
+  return {
+    ok: false,
+    reason:
+      `requested tool${unavailable.length === 1 ? "" : "s"} ${quoted} ` +
+      `not both registered and active in target sub-agent session. ` +
+      `Available tools: ${availableTools.join(", ") || "(none)"}. ` +
+      `Active tools: ${activeTools.join(", ") || "(none)"}`,
+  };
 }
 
 // ADR 0033 W9 triple-explicit: the WORKFLOW channel (NOT the dispatch swarm)
@@ -782,7 +806,7 @@ function normalizeTaskProfile(raw: unknown): "read_only" | "research" | "impleme
 }
 
 function toolNamesFromAllowlist(toolsStr: string | undefined): string[] {
-  return (toolsStr || DEFAULT_SUBAGENT_TOOLS).split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+  return resolveSubAgentTools(toolsStr).map((name) => name.toLowerCase());
 }
 
 export function inferTaskGovernorProfile(toolsStr?: string, taskProfile?: string): DispatchTaskGovernorProfile {
@@ -831,7 +855,7 @@ export function evaluateTaskGovernor(
 type FailureType =
   // pre-flight: failed before any LLM call
   | "model_not_found"   // model string couldn't be resolved in registry
-  | "tool_rejected"     // validateTools rejected the tool allowlist
+  | "tool_rejected"     // structural validation or target registry rejected tools
   | "auth"              // API key missing, expired, or permission denied (HTTP 401/403)
   // in-flight transient: pi-ai's auto_retry already burned attempts; surfaced after retries exhausted
   | "rate_limit"        // HTTP 429 / quota exceeded
@@ -1323,16 +1347,16 @@ function getSharedInfra(): Promise<{
  * SECURITY (ADR 0014): v3 in-process dispatch does NOT provide the OS-level
  * process isolation that v2 subprocess spawn did. Sub-agents share the
  * parent's memory space, AuthStorage, and file system view. Mitigations:
- *   - `tools` allowlist is EXCLUSIVE: createAgentSession exposes only the
- *     listed tools, so extension-registered tools (vault_release,
- *     prompt_user) are NOT callable even though noExtensions:false loads
- *     the full extension stack. KNOWN_TOOLS also excludes them, so a caller
- *     cannot request them via `tools=`. (Was noExtensions:true in v2;
- *     replaced by allowlist + isSubAgentSession guards — see getSharedInfra
- *     and scripts/smoke-dispatch-subagent-tool-allowlist.mjs.)
+ *   - `tools` remains an EXCLUSIVE SDK allowlist, while excludeTools applies
+ *     the structural disabled set at the execution layer. vault_release and
+ *     prompt_user are rejected before creation and excluded again even though
+ *     noExtensions:false loads the full extension stack. Every other name is
+ *     accepted dynamically only when the created target session reports it in
+ *     getAllTools()/getActiveToolNames(). (Was noExtensions:true in v2;
+ *     replaced by registry validation + SDK filters + isSubAgentSession guards.)
  *   - default allowlist is read-only (callers opt into bash/edit/write via tools=)
  *   - `SessionManager.inMemory()` prevents session file writes
- *   - nested dispatch is unconditionally rejected (no sub-agent fan-out)
+ *   - nested/indirect orchestration, user interaction, and vault release are disabled
  * This is acceptable because typical dispatch usage calls remote LLM APIs
  * for analysis; mutating workers are an explicit, caller-granted opt-in.
  */
@@ -1503,12 +1527,10 @@ export async function runInProcess(
   //     (memory_decide).
   //   - DeepSeek + GPT-5.5 T0 votes both flagged memory_list as too wide.
   //
-  // Caller can always override with explicit `tools=...`. memory_list is
-  // in KNOWN_TOOLS so callers wanting it can pass it explicitly.
-  const tools = (toolAllowlist || DEFAULT_SUBAGENT_TOOLS)
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
+  // Caller can always override with explicit `tools=...`. Any exact name,
+  // including memory_list or a dynamically registered extension tool, is
+  // eligible when the target session actually registers and activates it.
+  const tools = resolveSubAgentTools(toolAllowlist);
   const dispatchSettings = readDispatchSettings();
   const governorProfile = inferTaskGovernorProfile(toolAllowlist, heartbeatCtx?.taskProfile);
   const governorEmittedStages = new Set<DispatchTaskGovernorStage>();
@@ -1740,6 +1762,7 @@ export async function runInProcess(
         model,
         thinkingLevel: thinking as any, // "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
         tools,
+        excludeTools: [...DISABLED_SUBAGENT_TOOLS],
         modelRegistry: refreshedModelRegistry,
         settingsManager,
         resourceLoader,
@@ -1747,6 +1770,23 @@ export async function runInProcess(
       });
       session = result.session;
       recordProgress("session_created");
+
+      // SDK silently ignores unknown allowlist entries. Fail before prompt()
+      // using this target session's post-loader registry, never the parent pi
+      // registry. This also verifies DEFAULT_SUBAGENT_TOOLS on default calls.
+      const sessionToolCheck = validateSessionToolRegistry(session, tools);
+      if (!sessionToolCheck.ok) {
+        try { session.dispose(); } catch { /* disposal attempted; preserve rejection */ }
+        signal.removeEventListener("abort", onAbort);
+        return {
+          output: "",
+          error: `tool_rejected: ${sessionToolCheck.reason}`,
+          failureType: "tool_rejected",
+          durationMs: Date.now() - start,
+          toolCallCount,
+        };
+      }
+      recordProgress("tool_registry_validated");
       installMaxOutputTokensOnSession(session, effectiveMaxOutputTokens);
 
       // If aborted during session creation, bail.
@@ -2241,12 +2281,12 @@ export default function (pi: ExtensionAPI) {
       "(calling dispatch_agent N times runs them serially, wasting wall-clock time). " +
       "The sub-agent is an independent in-process AgentSession (not a subprocess), capable of multi-turn " +
       "tool calling (read, grep, find, ls by default; bash/edit/write available via explicit tools=). " +
-      "Nested dispatch is always rejected.",
+      "Nested/indirect orchestration, prompt_user, and vault_release are always rejected.",
     promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?) — SINGLE task only",
     promptGuidelines: [
       "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_parallel.",
       "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_parallel which runs them in parallel (~30s).",
-      "Sub-agents default to read,grep,find,ls,web_search,web_fetch + memory read. To let a worker edit code, pass tools= including bash/edit/write (swarm editing is allowed; only nested dispatch is rejected).",
+      "Sub-agents default to read,grep,find,ls,web_search,web_fetch + memory read. To let a worker edit code, pass tools= including bash/edit/write; requested names must exist in that worker session's registry.",
       "The sub-agent is an independent AgentSession — its context does NOT count against your token budget.",
       "Output budget is internal: dispatch always sends the model registry maxTokens as the provider request cap; callers cannot lower it.",
     ],
@@ -2255,7 +2295,7 @@ export default function (pi: ExtensionAPI) {
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
       name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
-      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). bash/edit/write are available when explicitly listed; nested dispatch_agent/dispatch_parallel is always rejected." })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). Registered extension tools and bash/edit/write may be requested explicitly; dispatch_agent/dispatch_parallel/dispatch_hub/workflow_run/prompt_user/vault_release are disabled." })),
       taskProfile: Type.Optional(Type.String({ description: "Optional deterministic budget profile: reviewer/read_only, research, implementation, or heavy. Mutating tools without an explicit implementation/heavy profile use mutating-default." })),
       profile: Type.Optional(Type.String({ description: "Alias for taskProfile." })),
       timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
@@ -2548,7 +2588,7 @@ export default function (pi: ExtensionAPI) {
       "Run multiple sub-agents IN PARALLEL. Each is an independent in-process AgentSession. " +
       "Results are collected when ALL complete. This is the primary tool for " +
       "multi-model analysis — do NOT call dispatch_agent N times instead. " +
-      "bash/edit/write available via explicit per-task tools=; nested dispatch rejected. " +
+      "bash/edit/write and registered extension tools are available via explicit per-task tools=; structural disabled tools are rejected. " +
       `Up to ${MAX_PARALLEL} tasks per call; same-provider tasks are capped by dispatch.maxProviderConcurrency (default 4).`,
     promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
@@ -2565,7 +2605,7 @@ export default function (pi: ExtensionAPI) {
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
           name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
-          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide)." })),
+          tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). Names must be registered in the target session; structural disabled tools are rejected." })),
           taskProfile: Type.Optional(Type.String({ description: "Optional deterministic budget profile: reviewer/read_only, research, implementation, or heavy." })),
           profile: Type.Optional(Type.String({ description: "Alias for taskProfile." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),

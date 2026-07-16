@@ -14,8 +14,9 @@
  *   - workflow_run may be called from foreground main-session turns,
  *     including goal continuation turns. Only authority-creating goal tools
  *     are rejected in machine turns (PR-13).
- *   - The tool is NOT added to dispatch KNOWN_TOOLS; sub-agents cannot call
- *     it via the exclusive allowlist (N2).
+ *   - workflow_run remains in dispatch's structural disabled set, so a stage
+ *     cannot launch an indirect workflow. Read-only workflow tool names are
+ *     otherwise subject to the target sub-agent registry like other tools.
  */
 
 import { randomUUID } from "node:crypto";
