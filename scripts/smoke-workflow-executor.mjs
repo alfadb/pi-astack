@@ -186,16 +186,24 @@ await check("governance terminal is non-retryable and governance fields reach st
   let calls = 0;
   const governance = {
     worker_run_id: "worker-gov-1",
-    rule_version: "dispatch-worker-run-governor/v1",
+    rule_version: "dispatch-worker-run-governor/v2",
     profile: "read_only",
-    counters: { provider_request_count: 5, provider_retry_count: 5 },
-    thresholds: { provider_retry_limit: 4 },
+    counters: {
+      provider_request_count: 5,
+      provider_retry_count: 5,
+      provider_retry_consecutive_count: 5,
+      provider_retry_window_observation_count: 5,
+      provider_retry_window_retry_count: 5,
+      provider_retry_window_progress_count: 0,
+    },
+    thresholds: { provider_retry_limit: 4, provider_retry_window_size: 14, provider_retry_window_limit: 10 },
     terminal: {
       signal: "provider_retry",
       termination_source: "worker_run_governor",
       failureType: "provider_retry_budget_exceeded",
       count: 5,
       limit: 4,
+      budget_kind: "consecutive",
       action: "abort_session_return_bounded_partial",
     },
   };
@@ -217,6 +225,7 @@ await check("governance terminal is non-retryable and governance fields reach st
   assert(r.stages.a.worker_run_governance?.worker_run_id === "worker-gov-1", JSON.stringify(r.stages.a));
   const row = rows.find((item) => item.event === "stage_terminal" && item.stage === "a");
   assert(row?.worker_run_governance?.terminal?.termination_source === "worker_run_governor", JSON.stringify(row));
+  assert(row?.worker_run_governance?.rule_version === "dispatch-worker-run-governor/v2" && row?.worker_run_governance?.terminal?.budget_kind === "consecutive", JSON.stringify(row));
 });
 
 await check("degrade policy preserves bounded governance partial in output file", async () => {

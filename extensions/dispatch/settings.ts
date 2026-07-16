@@ -86,10 +86,20 @@ function asPositiveInt(value: unknown, fallback: number): number {
   return n;
 }
 
+function isPositiveBudget(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 10_000;
+}
+
+function isProviderRetryWindowSize(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 2 && value <= 10_000;
+}
+
+function isProviderRetryWindowLimit(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 9_999;
+}
+
 function asPositiveBudget(value: unknown, fallback: number): number {
-  const n = typeof value === "number" ? value : NaN;
-  if (!Number.isInteger(n) || n < 1 || n > 10_000) return fallback;
-  return n;
+  return isPositiveBudget(value) ? value : fallback;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -116,6 +126,25 @@ function resolveWorkerRunGovernor(raw: unknown): WorkerRunGovernorSettings {
   const readChurn = asRecord(tools.sameFileSmallReadChurn);
   const schemaStorm = asRecord(tools.schemaErrorStorm);
   const def = DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS;
+
+  const rawWindowSize = provider.providerRetryWindowSize;
+  const rawWindowLimit = provider.providerRetryWindowLimit;
+  const rawWindowSizeValid = isProviderRetryWindowSize(rawWindowSize);
+  const rawWindowLimitValid = isProviderRetryWindowLimit(rawWindowLimit);
+  let providerRetryWindowSize = def.providerBudgets.providerRetryWindowSize;
+  let providerRetryWindowLimit = def.providerBudgets.providerRetryWindowLimit;
+  if (rawWindowSizeValid && rawWindowLimitValid) {
+    if (rawWindowLimit < rawWindowSize) {
+      providerRetryWindowSize = rawWindowSize;
+      providerRetryWindowLimit = rawWindowLimit;
+    }
+  } else if (rawWindowSizeValid) {
+    providerRetryWindowSize = rawWindowSize;
+    providerRetryWindowLimit = Math.min(def.providerBudgets.providerRetryWindowLimit, rawWindowSize - 1);
+  } else if (rawWindowLimitValid && rawWindowLimit < providerRetryWindowSize) {
+    providerRetryWindowLimit = rawWindowLimit;
+  }
+
   return {
     enabled: boolOr(rec.enabled, def.enabled),
     visibleText: {
@@ -125,6 +154,8 @@ function resolveWorkerRunGovernor(raw: unknown): WorkerRunGovernorSettings {
     providerBudgets: {
       enabled: boolOr(provider.enabled, def.providerBudgets.enabled),
       providerRetryLimit: asPositiveBudget(provider.providerRetryLimit, def.providerBudgets.providerRetryLimit),
+      providerRetryWindowSize,
+      providerRetryWindowLimit,
       emptyVisibleRetryLimit: asPositiveBudget(provider.emptyVisibleRetryLimit, def.providerBudgets.emptyVisibleRetryLimit),
       fullOutputCapLimit: asPositiveBudget(provider.fullOutputCapLimit, def.providerBudgets.fullOutputCapLimit),
       fullOutputUsageRatio: boundedNumber(provider.fullOutputUsageRatio, def.providerBudgets.fullOutputUsageRatio, 0.5, 1),

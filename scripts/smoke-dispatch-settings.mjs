@@ -119,7 +119,12 @@ check("valid override is honored", () => {
     maxProviderConcurrency: 7,
     auditRotation: { enabled: false, maxBytes: 1234, maxAgeMs: 5678, lockTimeoutMs: 99 },
     workerRunGovernor: {
-      providerBudgets: { providerRetryLimit: 9, fullOutputUsageRatio: 0.99 },
+      providerBudgets: {
+        providerRetryLimit: 9,
+        providerRetryWindowSize: 20,
+        providerRetryWindowLimit: 12,
+        fullOutputUsageRatio: 0.99,
+      },
       visibleText: { abortOnRepeat: false },
     },
   } });
@@ -129,7 +134,12 @@ check("valid override is honored", () => {
   if (JSON.stringify(resolved.auditRotation) !== JSON.stringify({ enabled: false, maxBytes: 1234, maxAgeMs: 5678, lockTimeoutMs: 99 })) {
     throw new Error(`audit rotation override not honored: ${JSON.stringify(resolved.auditRotation)}`);
   }
-  if (resolved.workerRunGovernor.providerBudgets.providerRetryLimit !== 9 || resolved.workerRunGovernor.providerBudgets.fullOutputUsageRatio !== 0.99) {
+  if (
+    resolved.workerRunGovernor.providerBudgets.providerRetryLimit !== 9 ||
+    resolved.workerRunGovernor.providerBudgets.providerRetryWindowSize !== 20 ||
+    resolved.workerRunGovernor.providerBudgets.providerRetryWindowLimit !== 12 ||
+    resolved.workerRunGovernor.providerBudgets.fullOutputUsageRatio !== 0.99
+  ) {
     throw new Error(`workerRunGovernor provider override not honored: ${JSON.stringify(resolved.workerRunGovernor)}`);
   }
   if (resolved.workerRunGovernor.visibleText.abortOnRepeat !== false) {
@@ -142,8 +152,71 @@ check("workerRunGovernor defaults are enabled and bounded", () => {
   if (!cfg.enabled || !cfg.visibleText.enabled || !cfg.visibleText.abortOnRepeat || !cfg.providerBudgets.enabled || !cfg.toolObservers.enabled) {
     throw new Error(`expected enabled defaults: ${JSON.stringify(cfg)}`);
   }
-  if (cfg.providerBudgets.providerRetryLimit !== 4 || cfg.providerBudgets.emptyVisibleRetryLimit !== 2 || cfg.providerBudgets.fullOutputCapLimit !== 2) {
+  if (
+    cfg.providerBudgets.providerRetryLimit !== 4 ||
+    cfg.providerBudgets.providerRetryWindowSize !== 14 ||
+    cfg.providerBudgets.providerRetryWindowLimit !== 10 ||
+    cfg.providerBudgets.emptyVisibleRetryLimit !== 2 ||
+    cfg.providerBudgets.fullOutputCapLimit !== 2
+  ) {
     throw new Error(`narrow budget defaults drifted: ${JSON.stringify(cfg.providerBudgets)}`);
+  }
+});
+
+check("invalid retry-window values and combinations fall back without affecting other valid settings", () => {
+  const invalidSize = resolveDispatchSettings({ dispatch: { workerRunGovernor: { providerBudgets: {
+    providerRetryLimit: 9, providerRetryWindowSize: 0, providerRetryWindowLimit: 8, fullOutputUsageRatio: 0.99,
+  } } } }).workerRunGovernor.providerBudgets;
+  if (invalidSize.providerRetryWindowSize !== 14 || invalidSize.providerRetryWindowLimit !== 8 || invalidSize.providerRetryLimit !== 9 || invalidSize.fullOutputUsageRatio !== 0.99) {
+    throw new Error(`invalid size fallback polluted valid settings: ${JSON.stringify(invalidSize)}`);
+  }
+
+  const invalidLimit = resolveDispatchSettings({ dispatch: { workerRunGovernor: { providerBudgets: {
+    providerRetryLimit: 9, providerRetryWindowSize: 5, providerRetryWindowLimit: 0, fullOutputUsageRatio: 0.99,
+  } } } }).workerRunGovernor.providerBudgets;
+  if (invalidLimit.providerRetryWindowSize !== 5 || invalidLimit.providerRetryWindowLimit !== 4 || invalidLimit.providerRetryLimit !== 9 || invalidLimit.fullOutputUsageRatio !== 0.99) {
+    throw new Error(`invalid limit fallback did not preserve valid size and unrelated settings: ${JSON.stringify(invalidLimit)}`);
+  }
+
+  const invalidCombination = resolveDispatchSettings({ dispatch: { workerRunGovernor: { providerBudgets: {
+    providerRetryLimit: 9, providerRetryWindowSize: 8, providerRetryWindowLimit: 8, fullOutputUsageRatio: 0.99,
+  } } } }).workerRunGovernor.providerBudgets;
+  if (invalidCombination.providerRetryWindowSize !== 14 || invalidCombination.providerRetryWindowLimit !== 10 || invalidCombination.providerRetryLimit !== 9 || invalidCombination.fullOutputUsageRatio !== 0.99) {
+    throw new Error(`invalid combination fallback polluted valid settings: ${JSON.stringify(invalidCombination)}`);
+  }
+});
+
+check("retry-window runtime bounds match schema bounds and always preserve limit < size", () => {
+  const schemaProvider = JSON.parse(schemaText).properties.dispatch.properties.workerRunGovernor.properties.providerBudgets.properties;
+  const sizeSchema = schemaProvider.providerRetryWindowSize;
+  const limitSchema = schemaProvider.providerRetryWindowLimit;
+  if (sizeSchema.minimum !== 2 || sizeSchema.maximum !== 10000 || limitSchema.minimum !== 1 || limitSchema.maximum !== 9999) {
+    throw new Error(`unexpected schema bounds: ${JSON.stringify({ sizeSchema, limitSchema })}`);
+  }
+
+  const resolveWindow = (providerBudgets) => resolveDispatchSettings({
+    dispatch: { workerRunGovernor: { providerBudgets } },
+  }).workerRunGovernor.providerBudgets;
+  for (const [size, limit] of [[2, 1], [10000, 9999]]) {
+    const resolved = resolveWindow({ providerRetryWindowSize: size, providerRetryWindowLimit: limit });
+    if (resolved.providerRetryWindowSize !== size || resolved.providerRetryWindowLimit !== limit) {
+      throw new Error(`valid boundary pair was not preserved: ${JSON.stringify({ size, limit, resolved })}`);
+    }
+  }
+
+  const boundaryCases = [
+    { providerRetryWindowSize: 1, providerRetryWindowLimit: 1 },
+    { providerRetryWindowSize: 10001, providerRetryWindowLimit: 1 },
+    { providerRetryWindowSize: 2, providerRetryWindowLimit: 0 },
+    { providerRetryWindowSize: 10000, providerRetryWindowLimit: 10000 },
+    { providerRetryWindowSize: 0, providerRetryWindowLimit: 14 },
+  ];
+  for (const input of boundaryCases) {
+    const resolved = resolveWindow(input);
+    const { providerRetryWindowSize: size, providerRetryWindowLimit: limit } = resolved;
+    if (!(Number.isInteger(size) && Number.isInteger(limit) && size >= 2 && size <= 10000 && limit >= 1 && limit <= 9999 && limit < size)) {
+      throw new Error(`runtime emitted an invalid retry window: ${JSON.stringify({ input, resolved })}`);
+    }
   }
 });
 
@@ -152,7 +225,8 @@ check("nested invalid workerRunGovernor values fall back independently", () => {
     enabled: "yes",
     visibleText: { enabled: 1, abortOnRepeat: null },
     providerBudgets: {
-      enabled: [], providerRetryLimit: 0, emptyVisibleRetryLimit: 2.5,
+      enabled: [], providerRetryLimit: 0, providerRetryWindowSize: 0,
+      providerRetryWindowLimit: 10001, emptyVisibleRetryLimit: 2.5,
       fullOutputCapLimit: 10001, fullOutputUsageRatio: 0.49,
     },
     toolObservers: {
@@ -188,6 +262,9 @@ check("auditRotation and workerRunGovernor schema validate nested bounds and rej
     const node = provider.properties[key];
     if (node.type !== "integer" || node.minimum !== 1 || node.maximum !== 10000) throw new Error(`invalid provider budget schema: ${key}`);
   }
+  if (provider.properties.providerRetryWindowSize.minimum !== 2 || provider.properties.providerRetryWindowSize.maximum !== 10000 || provider.properties.providerRetryWindowSize.default !== 14) throw new Error("retry window size schema bounds drifted");
+  if (provider.properties.providerRetryWindowLimit.minimum !== 1 || provider.properties.providerRetryWindowLimit.maximum !== 9999 || provider.properties.providerRetryWindowLimit.default !== 10) throw new Error("retry window limit schema bounds drifted");
+  if (!provider.description.includes("1 <= limit < providerRetryWindowSize")) throw new Error("retry window relational constraint missing from schema description");
   if (readChurn.properties.overlapRatio.minimum !== 0.5 || readChurn.properties.overlapRatio.maximum !== 1) throw new Error("overlap ratio schema bounds drifted");
 });
 

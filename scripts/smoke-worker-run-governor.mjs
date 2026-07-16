@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Offline Phase-1 worker-run governance smoke. No provider or network calls. */
+/** Offline worker-run governor v2 smoke, plus a local faux AgentSession race. */
 
 import fs from "node:fs";
 import os from "node:os";
@@ -170,7 +170,7 @@ async function realAgentSessionEmptyRaceSmoke() {
   }
 }
 
-console.log("worker-run governor Phase 1 smoke\n");
+console.log("worker-run governor v2 smoke\n");
 console.log("[visible exact-tail]");
 for (const period of [1, 7, 80, 144, 1000, 4096]) {
   const chars = threshold(period) + period + 512;
@@ -282,17 +282,81 @@ const provider = new G.WorkerRunGovernor("provider-run", "read_only", defaults, 
 const requestedCap = provider.observe({ signal: "requested_output_cap", requestedOutputCap: 128000 });
 for (let i = 0; i < 20; i++) provider.observe({ signal: "provider_request" }, 1001 + i);
 check("provider request count and requested output cap are observe-only", requestedCap?.mode === "observe" && !provider.terminalDecision && provider.snapshot().counters.provider_request_count === 20 && provider.snapshot().requested_output_cap === 128000);
-let retryDecision;
-for (let i = 1; i <= 14; i++) {
-  if (i <= 4) {
-    provider.observeToolStart("read", { path: "a.ts", offset: i * 100, limit: 100 }, `tool-${i}`);
-    provider.observeToolEnd("read", { content: [{ type: "text", text: "ok" }] }, false, `tool-${i}`);
-    provider.observe({ signal: "assistant_response", action: "audit_response_no_budget_reset" });
-  }
-  const next = provider.observe({ signal: "provider_retry" }, 1100 + i);
-  if (next?.mode === "abort") { retryDecision = next; break; }
+
+const observeAssistant = (governor, message) => governor.observe({
+  signal: "assistant_response",
+  providerProgress: D.isProviderProgressAssistantMessage(message),
+  action: "smoke_observe_assistant_response",
+});
+const cleanVisible = (text = "recovered") => ({ stopReason: "stop", content: [{ type: "text", text }] });
+
+const sparse = new G.WorkerRunGovernor("provider-sparse", "read_only", defaults, root);
+let sparseRetry;
+for (let i = 0; i < 5; i++) {
+  sparseRetry = sparse.observe({ signal: "provider_retry" });
+  observeAssistant(sparse, cleanVisible(`recovered-${i}`));
 }
-check("cumulative provider retry stops on fifth across tool use/success responses", retryDecision?.failureType === "provider_retry_budget_exceeded" && retryDecision.count === 5 && provider.snapshot().counters.successful_tool_response_count === 4 && provider.snapshot().counters.assistant_response_count === 4, JSON.stringify(retryDecision));
+const sparseCounters = sparse.snapshot().counters;
+check("sparse fifth lifetime retry reports the consecutive budget without terminating", !sparse.terminalDecision && sparseRetry?.mode === "observe" && sparseRetry.count === 1 && sparseRetry.limit === 4 && sparseRetry.counters.provider_retry_count === 5 && sparseRetry.counters.provider_retry_consecutive_count === 1 && sparseCounters.provider_retry_count === 5 && sparseCounters.provider_retry_consecutive_count === 0, JSON.stringify({ decision: sparseRetry, snapshot: sparse.snapshot() }));
+
+const consecutive = new G.WorkerRunGovernor("provider-consecutive", "read_only", defaults, root);
+let consecutiveDecision;
+for (let i = 0; i < 5; i++) consecutiveDecision = consecutive.observe({ signal: "provider_retry" });
+check("consecutive fifth retry terminates", consecutiveDecision?.failureType === "provider_retry_budget_exceeded" && consecutiveDecision.budget_kind === "consecutive" && consecutiveDecision.count === 5 && consecutiveDecision.limit === 4, JSON.stringify(consecutiveDecision));
+
+const resetThenConsecutive = new G.WorkerRunGovernor("provider-reset-then-consecutive", "read_only", defaults, root);
+for (let i = 0; i < 4; i++) resetThenConsecutive.observe({ signal: "provider_retry" });
+observeAssistant(resetThenConsecutive, cleanVisible("progress resets the first streak"));
+let resetThenConsecutiveDecision;
+for (let i = 0; i < 5; i++) resetThenConsecutiveDecision = resetThenConsecutive.observe({ signal: "provider_retry" });
+check("progress resets the streak and the fifth retry in the new consecutive run terminates", resetThenConsecutiveDecision?.mode === "abort" && resetThenConsecutiveDecision.budget_kind === "consecutive" && resetThenConsecutiveDecision.count === 5 && resetThenConsecutiveDecision.limit === 4 && resetThenConsecutiveDecision.counters.provider_retry_count === 9, JSON.stringify(resetThenConsecutiveDecision));
+
+function replayRetryWindow(id, observations) {
+  const governor = new G.WorkerRunGovernor(id, "read_only", defaults, root);
+  let decision;
+  for (const observation of observations) {
+    decision = observation === "r"
+      ? governor.observe({ signal: "provider_retry" })
+      : observeAssistant(governor, cleanVisible());
+    if (decision?.mode === "abort") break;
+  }
+  return { governor, decision };
+}
+const tenOfFourteen = replayRetryWindow("provider-window-10", "rrrprrrprrprrp");
+check("10 retries in 14 observations do not terminate", !tenOfFourteen.governor.terminalDecision && tenOfFourteen.governor.snapshot().counters.provider_retry_window_retry_count === 10 && tenOfFourteen.governor.snapshot().counters.provider_retry_window_observation_count === 14, JSON.stringify(tenOfFourteen.governor.snapshot()));
+const elevenOfFourteen = replayRetryWindow("provider-window-11", "rrrprrrprrrprr");
+check("11 retries in 14 observations terminate on rolling budget", elevenOfFourteen.decision?.failureType === "provider_retry_budget_exceeded" && elevenOfFourteen.decision.budget_kind === "rolling_window" && elevenOfFourteen.decision.count === 11 && elevenOfFourteen.decision.limit === 10 && elevenOfFourteen.decision.window_size === 14, JSON.stringify(elevenOfFourteen.decision));
+
+const alternatingErrors = new G.WorkerRunGovernor("provider-alternating-errors", "read_only", defaults, root);
+let alternatingDecision;
+for (let i = 0; i < 5; i++) {
+  observeAssistant(alternatingErrors, { stopReason: "error", errorMessage: "HTTP 503", content: [{ type: "text", text: "partial" }] });
+  alternatingDecision = alternatingErrors.observe({ signal: "provider_retry" });
+}
+check("captured alternating error-response/retry replay still terminates", alternatingDecision?.budget_kind === "consecutive" && alternatingDecision.count === 5, JSON.stringify(alternatingDecision));
+
+const nonProgressMessages = [
+  { stopReason: "stop", content: [{ type: "thinking", thinking: "internal only" }] },
+  { stopReason: "stop", content: [{ type: "text", text: "   " }] },
+  { stopReason: "error", errorMessage: "HTTP 503", content: [{ type: "text", text: "partial" }] },
+  { stopReason: "abort", content: [{ type: "text", text: "partial" }] },
+  { stopReason: "length", content: [{ type: "text", text: "partial" }] },
+];
+const nonProgressDecisions = nonProgressMessages.map((message, index) => {
+  const governor = new G.WorkerRunGovernor(`provider-non-progress-${index}`, "read_only", defaults, root);
+  for (let i = 0; i < 4; i++) governor.observe({ signal: "provider_retry" });
+  observeAssistant(governor, message);
+  return governor.observe({ signal: "provider_retry" });
+});
+check("thinking-only, empty-visible, error, abort, and length responses do not reset consecutive retry budget", nonProgressMessages.every((message) => !D.isProviderProgressAssistantMessage(message)) && nonProgressDecisions.every((decision) => decision?.budget_kind === "consecutive" && decision.count === 5), JSON.stringify(nonProgressDecisions));
+check("clean toolUse or pi-ai stop with visible text is provider progress", D.isProviderProgressAssistantMessage({ stopReason: "toolUse", content: [{ type: "thinking", thinking: "x" }] }) && D.isProviderProgressAssistantMessage(cleanVisible()) && !D.isProviderProgressAssistantMessage({ stopReason: "toolUse", errorMessage: "failed" }));
+check("non-normalized end_turn spellings are not provider progress", !D.isProviderProgressAssistantMessage({ stopReason: "end_turn", content: [{ type: "text", text: "done" }] }) && !D.isProviderProgressAssistantMessage({ stopReason: "endTurn", content: [{ type: "text", text: "done" }] }));
+
+const toolSuccess = new G.WorkerRunGovernor("provider-tool-success", "read_only", defaults, root);
+for (let i = 0; i < 4; i++) toolSuccess.observe({ signal: "provider_retry" });
+toolSuccess.observeToolEnd("read", { content: [{ type: "text", text: "ok" }] }, false, "tool-ok");
+const afterToolSuccess = toolSuccess.observe({ signal: "provider_retry" });
+check("successful tool response is not double-counted as provider progress", afterToolSuccess?.budget_kind === "consecutive" && toolSuccess.snapshot().counters.successful_tool_response_count === 1 && toolSuccess.snapshot().counters.provider_retry_window_progress_count === 0, JSON.stringify(afterToolSuccess));
 
 for (const [signal, failureType] of [
   ["empty_visible_retry", "empty_visible_retry_budget_exceeded"],
@@ -314,9 +378,10 @@ check("explicit length and max_tokens remain full-cap hits without usage", D.isF
 
 const taskGovernor = new G.WorkerRunGovernor("task-run", "implementation", defaults);
 const checkpoint = taskGovernor.observe({ signal: "task_governor_checkpoint", count: 120, limit: 120, terminal: false });
+const freshAuth = taskGovernor.observe({ signal: "task_governor_fresh_auth", count: 240, limit: 240, terminal: false, action: "audit_fresh_auth_due_continue_to_hard" });
 const hard = taskGovernor.observe({ signal: "task_governor_hard", count: 360, limit: 360, terminal: true, failureType: "tool_budget_exceeded" });
 const afterHard = taskGovernor.observe({ signal: "provider_retry" });
-check("task-governor stages enter the unified owner", checkpoint?.mode === "observe" && hard?.mode === "abort" && hard.termination_source === "worker_run_governor");
+check("fresh_auth is observe-only and hard remains the unified terminal", checkpoint?.mode === "observe" && freshAuth?.mode === "observe" && freshAuth.failureType === undefined && freshAuth.action === "audit_fresh_auth_due_continue_to_hard" && hard?.mode === "abort" && hard.termination_source === "worker_run_governor");
 check("first terminal wins idempotently", taskGovernor.terminalDecision === hard && afterHard === undefined);
 
 const pagination = new G.WorkerRunGovernor("pagination", "read_only", defaults, root);
@@ -377,6 +442,8 @@ const audit = G.buildWorkerRunAuditEvent(auditDecision, {
 });
 const auditJson = JSON.stringify(audit);
 check("worker_run_event carries correlation, counters, thresholds, terminal source", audit.row_kind === "worker_run_event" && audit.dispatch_tool_call_id === "tool-call-1" && audit.workflow_run_id === "wf-1" && audit.worker_run_id === "audit-run" && audit.counters && audit.thresholds && audit.termination_source === "worker_run_governor");
+const rollingAudit = G.buildWorkerRunAuditEvent(elevenOfFourteen.decision);
+check("rolling retry audit uniquely explains the terminal budget", rollingAudit.rule_version === "dispatch-worker-run-governor/v2" && rollingAudit.budget_kind === "rolling_window" && rollingAudit.window_size === 14 && rollingAudit.count === 11 && rollingAudit.limit === 10 && rollingAudit.counters.provider_retry_count === 11 && rollingAudit.counters.provider_retry_consecutive_count === 2 && rollingAudit.counters.provider_retry_window_retry_count === 11 && rollingAudit.counters.provider_retry_window_progress_count === 3 && rollingAudit.thresholds.provider_retry_limit === 4 && rollingAudit.thresholds.provider_retry_window_size === 14 && rollingAudit.thresholds.provider_retry_window_limit === 10, JSON.stringify(rollingAudit));
 for (const forbidden of ["prompt", "text", "tool_output", "reasoning", "credential", "secret-value"]) {
   check(`worker_run_event excludes ${forbidden}`, !auditJson.toLowerCase().includes(`\"${forbidden}\"`));
 }

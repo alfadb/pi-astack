@@ -10,7 +10,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import * as path from "node:path";
 
-export const WORKER_RUN_GOVERNOR_RULE_VERSION = "dispatch-worker-run-governor/v1";
+export const WORKER_RUN_GOVERNOR_RULE_VERSION = "dispatch-worker-run-governor/v2";
 export const TOOL_OBSERVER_COVERAGE = "post_execution_only";
 
 export type WorkerGovernorFailureType =
@@ -39,6 +39,10 @@ export type WorkerGovernorSignal =
 export interface WorkerRunGovernorCounters {
   provider_request_count: number;
   provider_retry_count: number;
+  provider_retry_consecutive_count: number;
+  provider_retry_window_observation_count: number;
+  provider_retry_window_retry_count: number;
+  provider_retry_window_progress_count: number;
   assistant_response_count: number;
   empty_visible_retry_count: number;
   full_output_cap_hit_count: number;
@@ -54,6 +58,8 @@ export interface WorkerRunGovernorCounters {
 
 export interface WorkerRunGovernorThresholds {
   provider_retry_limit: number;
+  provider_retry_window_size: number;
+  provider_retry_window_limit: number;
   empty_visible_retry_limit: number;
   full_output_cap_limit: number;
   full_output_usage_ratio: number;
@@ -70,6 +76,8 @@ export interface WorkerRunGovernorSettings {
   providerBudgets: {
     enabled: boolean;
     providerRetryLimit: number;
+    providerRetryWindowSize: number;
+    providerRetryWindowLimit: number;
     emptyVisibleRetryLimit: number;
     fullOutputCapLimit: number;
     fullOutputUsageRatio: number;
@@ -97,6 +105,8 @@ export const DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS: WorkerRunGovernorSettings = {
   providerBudgets: {
     enabled: true,
     providerRetryLimit: 4,
+    providerRetryWindowSize: 14,
+    providerRetryWindowLimit: 10,
     emptyVisibleRetryLimit: 2,
     fullOutputCapLimit: 2,
     fullOutputUsageRatio: 0.98,
@@ -131,6 +141,8 @@ export interface WorkerRunGovernorDecision {
   failureType?: WorkerGovernorFailureType;
   count?: number;
   limit?: number;
+  budget_kind?: "consecutive" | "rolling_window";
+  window_size?: number;
   action: string;
   hash?: string;
   shape?: string;
@@ -168,6 +180,8 @@ export function buildWorkerRunAuditEvent(
     ...(decision.failureType ? { failure_type: decision.failureType } : {}),
     ...(decision.count !== undefined ? { count: decision.count } : {}),
     ...(decision.limit !== undefined ? { limit: decision.limit } : {}),
+    ...(decision.budget_kind ? { budget_kind: decision.budget_kind } : {}),
+    ...(decision.window_size !== undefined ? { window_size: decision.window_size } : {}),
     ...(decision.hash ? { hash: decision.hash } : {}),
     ...(decision.shape ? { shape: decision.shape } : {}),
     ...(decision.coverage ? { coverage: decision.coverage } : {}),
@@ -195,6 +209,8 @@ export interface WorkerRunGovernanceSummary {
     failureType: WorkerGovernorFailureType;
     count?: number;
     limit?: number;
+    budget_kind?: "consecutive" | "rolling_window";
+    window_size?: number;
     action: string;
     hash?: string;
     shape?: string;
@@ -213,6 +229,7 @@ export interface WorkerGovernorSignalInput {
   coverage?: typeof TOOL_OBSERVER_COVERAGE;
   toolCallId?: string;
   requestedOutputCap?: number;
+  providerProgress?: boolean;
 }
 
 interface ReadCoverage {
@@ -223,6 +240,10 @@ function freshCounters(): WorkerRunGovernorCounters {
   return {
     provider_request_count: 0,
     provider_retry_count: 0,
+    provider_retry_consecutive_count: 0,
+    provider_retry_window_observation_count: 0,
+    provider_retry_window_retry_count: 0,
+    provider_retry_window_progress_count: 0,
     assistant_response_count: 0,
     empty_visible_retry_count: 0,
     full_output_cap_hit_count: 0,
@@ -331,6 +352,7 @@ export class WorkerRunGovernor {
   private readonly thresholds: WorkerRunGovernorThresholds;
   private readonly readCoverage = new Map<string, ReadCoverage>();
   private readonly schemaFailures = new Map<string, number>();
+  private readonly providerRetryWindow: Array<"retry" | "progress"> = [];
   private resolveTermination!: (decision: WorkerRunGovernorDecision) => void;
   private terminal: WorkerRunGovernorDecision | undefined;
   private requestedOutputCap: number | undefined;
@@ -345,6 +367,8 @@ export class WorkerRunGovernor {
     this.startedAt = now;
     this.thresholds = {
       provider_retry_limit: settings.providerBudgets.providerRetryLimit,
+      provider_retry_window_size: settings.providerBudgets.providerRetryWindowSize,
+      provider_retry_window_limit: settings.providerBudgets.providerRetryWindowLimit,
       empty_visible_retry_limit: settings.providerBudgets.emptyVisibleRetryLimit,
       full_output_cap_limit: settings.providerBudgets.fullOutputCapLimit,
       full_output_usage_ratio: settings.providerBudgets.fullOutputUsageRatio,
@@ -364,18 +388,39 @@ export class WorkerRunGovernor {
     if (this.terminal) return undefined;
     if (!this.settings.enabled && !input.signal.startsWith("task_governor_")) return undefined;
     this.applyCounter(input.signal);
+    if (input.signal === "provider_retry") this.recordProviderRetryObservation("retry");
+    if (input.signal === "assistant_response" && input.providerProgress === true) {
+      this.recordProviderRetryObservation("progress");
+    }
     if (input.requestedOutputCap !== undefined) this.requestedOutputCap = input.requestedOutputCap;
 
     let count = input.count ?? this.countForSignal(input.signal);
     let limit = input.limit;
     let terminal = input.terminal === true;
     let failureType = input.failureType;
+    let budgetKind: WorkerRunGovernorDecision["budget_kind"];
+    let windowSize: number | undefined;
 
     if (this.settings.enabled && this.settings.providerBudgets.enabled) {
       if (input.signal === "provider_retry") {
-        limit = this.settings.providerBudgets.providerRetryLimit;
-        terminal = (count ?? 0) > limit;
-        if (terminal) failureType = "provider_retry_budget_exceeded";
+        const consecutiveLimit = this.settings.providerBudgets.providerRetryLimit;
+        const windowLimit = this.settings.providerBudgets.providerRetryWindowLimit;
+        count = this.counters.provider_retry_consecutive_count;
+        limit = consecutiveLimit;
+        if (this.counters.provider_retry_consecutive_count > consecutiveLimit) {
+          count = this.counters.provider_retry_consecutive_count;
+          limit = consecutiveLimit;
+          terminal = true;
+          failureType = "provider_retry_budget_exceeded";
+          budgetKind = "consecutive";
+        } else if (this.counters.provider_retry_window_retry_count > windowLimit) {
+          count = this.counters.provider_retry_window_retry_count;
+          limit = windowLimit;
+          terminal = true;
+          failureType = "provider_retry_budget_exceeded";
+          budgetKind = "rolling_window";
+          windowSize = this.settings.providerBudgets.providerRetryWindowSize;
+        }
       } else if (input.signal === "empty_visible_retry") {
         limit = this.settings.providerBudgets.emptyVisibleRetryLimit;
         terminal = (count ?? 0) > limit;
@@ -410,6 +455,8 @@ export class WorkerRunGovernor {
       ...(failureType ? { failureType } : {}),
       ...(count !== undefined ? { count } : {}),
       ...(limit !== undefined ? { limit } : {}),
+      ...(budgetKind ? { budget_kind: budgetKind } : {}),
+      ...(windowSize !== undefined ? { window_size: windowSize } : {}),
       action: input.action ?? (terminal ? "abort_session_return_bounded_partial" : "audit_only"),
       ...(input.hash ? { hash: input.hash } : {}),
       ...(input.shape ? { shape: input.shape } : {}),
@@ -509,12 +556,26 @@ export class WorkerRunGovernor {
           failureType: terminal.failureType,
           ...(terminal.count !== undefined ? { count: terminal.count } : {}),
           ...(terminal.limit !== undefined ? { limit: terminal.limit } : {}),
+          ...(terminal.budget_kind ? { budget_kind: terminal.budget_kind } : {}),
+          ...(terminal.window_size !== undefined ? { window_size: terminal.window_size } : {}),
           action: terminal.action,
           ...(terminal.hash ? { hash: terminal.hash } : {}),
           ...(terminal.shape ? { shape: terminal.shape } : {}),
         },
       } : {}),
     };
+  }
+
+  private recordProviderRetryObservation(observation: "retry" | "progress"): void {
+    if (observation === "retry") this.counters.provider_retry_consecutive_count++;
+    else this.counters.provider_retry_consecutive_count = 0;
+
+    this.providerRetryWindow.push(observation);
+    const maxSize = this.settings.providerBudgets.providerRetryWindowSize;
+    if (this.providerRetryWindow.length > maxSize) this.providerRetryWindow.shift();
+    this.counters.provider_retry_window_observation_count = this.providerRetryWindow.length;
+    this.counters.provider_retry_window_retry_count = this.providerRetryWindow.filter((item) => item === "retry").length;
+    this.counters.provider_retry_window_progress_count = this.providerRetryWindow.length - this.counters.provider_retry_window_retry_count;
   }
 
   private applyCounter(signal: WorkerGovernorSignal): void {

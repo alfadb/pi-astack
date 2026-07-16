@@ -787,7 +787,7 @@ function toolNamesFromAllowlist(toolsStr: string | undefined): string[] {
 
 export function inferTaskGovernorProfile(toolsStr?: string, taskProfile?: string): DispatchTaskGovernorProfile {
   const explicit = normalizeTaskProfile(taskProfile);
-  if (explicit === "implementation" || explicit === "research") return explicit;
+  if (explicit) return explicit;
   const hasMutatingTool = toolNamesFromAllowlist(toolsStr).some((name) => MUTATING_TOOLS.has(name));
   if (hasMutatingTool) return "mutating_default";
   return "read_only";
@@ -813,8 +813,8 @@ export function evaluateTaskGovernor(
   if (toolCallCount >= limits.hard) {
     return { profile, stage: "hard", limit: limits.hard, terminal: true, failureType: "tool_budget_exceeded" };
   }
-  if (limits.freshAuth !== undefined && toolCallCount >= limits.freshAuth) {
-    return { profile, stage: "fresh_auth", limit: limits.freshAuth, terminal: true, failureType: "guardrail_stop" };
+  if (limits.freshAuth !== undefined && toolCallCount >= limits.freshAuth && !emittedStages.has("fresh_auth")) {
+    return { profile, stage: "fresh_auth", limit: limits.freshAuth, terminal: false };
   }
   if (toolCallCount >= limits.auditPause && !emittedStages.has("audit_pause")) {
     return { profile, stage: "audit_pause", limit: limits.auditPause, terminal: false };
@@ -842,7 +842,7 @@ type FailureType =
   | "agent_error"       // generic agent stopReason="error" (no specific classification)
   | "retry_exhausted"   // pi-ai auto_retry exhausted maxRetries
   | "truncated"         // stopReason="length" (max tokens) or "abort" (provider cut stream)
-  | "guardrail_stop"    // deterministic governor stopped for partial return / fresh-auth boundary
+  | "guardrail_stop"    // retained for historical governor result/audit compatibility
   | "tool_budget_exceeded" // deterministic governor hard cap exceeded
   | "repetitive_output"
   | "provider_retry_budget_exceeded"
@@ -979,6 +979,20 @@ function assistantVisibleText(message: { content?: Array<{ type?: string; text?:
     .join("");
 }
 
+const NORMAL_PROVIDER_STOP_REASONS = new Set(["stop"]);
+
+export function isProviderProgressAssistantMessage(message: {
+  content?: Array<{ type?: string; text?: unknown }>;
+  stopReason?: unknown;
+  errorMessage?: unknown;
+} | null | undefined): boolean {
+  if (!message || (message.errorMessage !== undefined && message.errorMessage !== null)) return false;
+  if (message.stopReason === "toolUse") return true;
+  return typeof message.stopReason === "string" &&
+    NORMAL_PROVIDER_STOP_REASONS.has(message.stopReason) &&
+    assistantVisibleText(message).trim().length > 0;
+}
+
 function appendUtf8Bounded(
   prefix: string,
   prefixBytes: number,
@@ -1048,7 +1062,7 @@ function governanceFailureMessage(decision: WorkerRunGovernorDecision): string {
     case "provider_retry_budget_exceeded": return `provider retry budget exceeded: ${decision.count} retries > limit ${decision.limit}`;
     case "empty_visible_retry_budget_exceeded": return `empty visible output retry budget exceeded: ${decision.count} failures > limit ${decision.limit}`;
     case "full_output_cap_budget_exceeded": return `full output cap budget exceeded: ${decision.count} cap hits > limit ${decision.limit}`;
-    case "guardrail_stop": return `task governor fresh-auth boundary reached at ${decision.count} tool calls; partial output returned`;
+    case "guardrail_stop": return `historical task governor guardrail reached at ${decision.count} tool calls; partial output returned`;
     case "tool_budget_exceeded": return `task governor hard tool budget reached at ${decision.count} tool calls; partial output returned`;
     default: return "worker run governor stopped the session; bounded partial output returned";
   }
@@ -1790,7 +1804,11 @@ export async function runInProcess(
               terminal: verdict.terminal,
               ...(verdict.failureType ? { failureType: verdict.failureType as WorkerGovernorFailureType } : {}),
               ...(typeof event.toolCallId === "string" ? { toolCallId: event.toolCallId } : {}),
-              action: verdict.terminal ? "abort_session_return_bounded_partial" : "audit_task_governor_stage_no_abort",
+              action: verdict.stage === "fresh_auth"
+                ? "audit_fresh_auth_due_continue_to_hard"
+                : verdict.terminal
+                  ? "abort_session_return_bounded_partial"
+                  : "audit_task_governor_stage_no_abort",
             }));
             try {
               heartbeatCtx?.onProgress?.({
@@ -1846,9 +1864,13 @@ export async function runInProcess(
             };
           }
           stopReason = event.message.stopReason;
+          const providerProgress = isProviderProgressAssistantMessage(event.message);
           emitWorkerRunDecision(workerGovernor.observe({
             signal: "assistant_response",
-            action: "audit_response_no_budget_reset",
+            providerProgress,
+            action: providerProgress
+              ? "audit_provider_progress_reset_retry_streak"
+              : "audit_assistant_response_no_provider_progress",
           }));
           if (event.message.errorMessage === RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR) {
             const emptyDecision = workerGovernor.observe({
@@ -1888,7 +1910,7 @@ export async function runInProcess(
           });
           emitWorkerRunDecision(workerGovernor.observe({
             signal: "provider_retry",
-            action: "count_cumulative_provider_retry",
+            action: "audit_provider_retry_against_consecutive_and_rolling_budgets",
           }));
         }
         if (eventType === "auto_retry_end") {

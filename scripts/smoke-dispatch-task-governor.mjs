@@ -27,20 +27,30 @@ const ok = (cond, msg) => {
   if (!cond) fails++;
 };
 
-function verdictAt(profile, count) {
+function verdictsThrough(profile, count) {
   const emitted = new Set();
-  let last;
+  const verdicts = [];
   for (let i = 1; i <= count; i++) {
-    last = evaluateTaskGovernor(DEFAULT_DISPATCH_SETTINGS.taskGovernor, profile, i, emitted);
-    if (last.stage && !last.terminal) emitted.add(last.stage);
-    if (last.terminal) return last;
+    const verdict = evaluateTaskGovernor(DEFAULT_DISPATCH_SETTINGS.taskGovernor, profile, i, emitted);
+    if (verdict.stage) {
+      verdicts.push(verdict);
+      emitted.add(verdict.stage);
+    }
+    if (verdict.terminal) break;
   }
-  return last;
+  return verdicts;
+}
+
+function verdictAt(profile, count) {
+  return verdictsThrough(profile, count).at(-1);
 }
 
 ok(inferTaskGovernorProfile(undefined, undefined) === "read_only", "default worker profile is read_only");
-ok(inferTaskGovernorProfile("read,grep,bash", undefined) === "mutating_default", "mutating tools infer mutating_default");
+ok(inferTaskGovernorProfile("read,grep,bash", undefined) === "mutating_default", "mutating tools infer mutating_default without an explicit profile");
+ok(inferTaskGovernorProfile("read,bash", "read_only") === "read_only", "explicit read_only overrides mutating-tool inference");
+ok(inferTaskGovernorProfile("read,bash", "reviewer") === "read_only", "explicit reviewer alias overrides mutating-tool inference");
 ok(inferTaskGovernorProfile("read,edit", "implementation") === "implementation", "explicit implementation overrides mutating-default inference");
+ok(inferTaskGovernorProfile("read,bash", "heavy") === "implementation", "explicit heavy alias overrides mutating-default inference");
 ok(inferTaskGovernorProfile("read,grep", "research") === "research", "explicit research profile is honored");
 
 {
@@ -50,13 +60,14 @@ ok(inferTaskGovernorProfile("read,grep", "research") === "research", "explicit r
   const audit = evaluateTaskGovernor(DEFAULT_DISPATCH_SETTINGS.taskGovernor, "read_only", 90, new Set(["checkpoint"]));
   ok(audit.stage === "audit_pause" && !audit.terminal && audit.limit === 90, "read_only audit_pause at 90 is non-terminal");
 
-  const stop120 = verdictAt("read_only", 120);
-  ok(stop120.stage === "fresh_auth" && stop120.terminal && stop120.failureType === "guardrail_stop" && stop120.limit === 120, "read_only reaches fresh-auth guardrail at 120");
+  const through121 = verdictsThrough("read_only", 121);
+  const freshAuth = through121.filter((verdict) => verdict.stage === "fresh_auth");
+  ok(freshAuth.length === 1 && !freshAuth[0].terminal && freshAuth[0].failureType === undefined && freshAuth[0].limit === 120, "read_only emits fresh_auth once as a non-terminal checkpoint");
 
-  const stop121 = verdictAt("read_only", 121);
-  ok(stop121.stage === "fresh_auth" && stop121.terminal && stop121.failureType === "guardrail_stop", "read_only at 121 remains guardrail_stop partial-return path");
+  const hard180 = verdictAt("read_only", 180);
+  ok(hard180.stage === "hard" && hard180.terminal && hard180.failureType === "tool_budget_exceeded" && hard180.limit === 180, "read_only hard-stops at 180 after continuing past fresh_auth");
 
-  ok(DEFAULT_DISPATCH_SETTINGS.taskGovernor.profiles.read_only.hard === 180, "read_only hard cap remains configured at 180 for future grant flow");
+  ok(DEFAULT_DISPATCH_SETTINGS.taskGovernor.profiles.read_only.hard === 180, "read_only hard cap remains configured at 180");
 }
 
 {
