@@ -14,13 +14,12 @@
  *  5. /curator-reload registered with feature detection.
  *  6. Plan A intact: DEFAULTS holds no model strategy data (empty objects),
  *     and buildAvailableModelsBlock has the size===0 no-op guard.
- *  7. Responsibility boundaries stay split: non-GPT hints are judgment-oriented,
- *     GPT hints are execution-oriented but may also be used for judgment-oriented tasks,
- *     including research, discussion, classification, synthesis, decision-making, solution evaluation,
- *     architecture critique, and independent review of completed task results or final diffs;
- *     runtime selection guidance mirrors both phrases without blurring coding, log review, or concrete implementation.
+ *  7. Responsibility permissions are entirely driven by the live curated
+ *     per-model hints. Runtime selection guidance must not embed a model-
+ *     specific execution exception.
  */
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -29,10 +28,29 @@ const src = readFileSync(
   join(root, "extensions/model-curator/index.ts"),
   "utf8",
 );
-const settings = JSON.parse(readFileSync(
-  join(root, "..", "..", "pi-astack-settings.json"),
-  "utf8",
-));
+const fixtureRoot = mkdtempSync(join(tmpdir(), "pi-astack-model-curator-live-reapply-"));
+const fixtureSettingsPath = join(fixtureRoot, "pi-astack-settings.json");
+const fixtureSettings = {
+  modelCurator: {
+    providers: {
+      alpha: ["executor"],
+      beta: ["reviewer"],
+      gamma: ["conditional-executor"],
+    },
+    hints: {
+      "alpha/executor": "Permitted responsibilities: execution and judgment.",
+      "beta/reviewer": "Permitted responsibilities: judgment only.",
+      "gamma/conditional-executor": "Permitted responsibilities: execution only when isolated and rollbackable.",
+    },
+    tiers: {
+      flagship: { label: "T0", models: ["alpha/executor", "beta/reviewer", "gamma/conditional-executor"] },
+      standard: { label: "T1", models: ["alpha/executor"] },
+      fast: { label: "T2", models: ["beta/reviewer"] },
+    },
+  },
+};
+writeFileSync(fixtureSettingsPath, `${JSON.stringify(fixtureSettings, null, 2)}\n`);
+const settings = JSON.parse(readFileSync(fixtureSettingsPath, "utf8"));
 
 let failures = 0;
 function ok(msg) { console.log(`  ✓ ${msg}`); }
@@ -158,36 +176,27 @@ assert(
     [...actualHintKeys].every((key) => expectedHintKeys.has(key)),
   "provider/model entries and hint keys stay in exact one-to-one sync",
 );
-const nonGptHints = Object.entries(hints)
-  .filter(([model]) => !model.startsWith("openai/"))
-  .map(([, hint]) => hint);
-const gptHints = Object.entries(hints)
-  .filter(([model]) => model.startsWith("openai/"))
-  .map(([, hint]) => hint);
+const responsibilityHints = Object.values(hints);
 assert(
-  nonGptHints.length > 0 && nonGptHints.every((hint) =>
-    hint.includes("Use only for judgment-oriented tasks") &&
-    hint.includes("do not use for coding, log review, or concrete implementation."),
+  responsibilityHints.length === 3 && responsibilityHints.every((hint) =>
+    typeof hint === "string" && hint.includes("Permitted responsibilities:"),
   ),
-  "all non-GPT curated hints limit work to judgment-oriented tasks",
-);
-const gptJudgmentClause = "GPT models may also be used for judgment-oriented tasks, including research, discussion, classification, synthesis, decision-making, solution evaluation, architecture critique, and independent review of completed task results or final diffs.";
-assert(
-  gptHints.length > 0 && gptHints.every((hint) =>
-    hint.includes("Assign execution-oriented tasks, including coding, log review, and concrete implementation, exclusively to GPT models.") &&
-    hint.includes(gptJudgmentClause) &&
-    !hint.includes("Use only for"),
-  ),
-  "all GPT curated hints reserve execution work to GPT without restricting GPT to it",
+  "temporary fixture supplies explicit responsibility permissions for every curated model",
 );
 assert(
-  src.toLowerCase().includes("assign execution-oriented tasks, including coding, log review, and concrete implementation, exclusively to gpt models") &&
-    src.includes(gptJudgmentClause) &&
-    src.includes("Use non-GPT curated models only for judgment-oriented tasks, including research, discussion, classification, synthesis, decision-making, solution evaluation, architecture critique, and independent review of completed task results or final diffs; see each model's hint for permitted examples and boundaries;"),
-  "runtime selection guidance preserves the execution and judgment boundary",
+  !src.includes("controlled execution exception") && !src.includes("sole execution exception"),
+  "runtime source contains no model-specific execution exception",
+);
+const responsibilityClause = "for curated models, derive execution and judgment responsibility permissions from the live per-model hint.";
+assert(
+  src.includes(responsibilityClause) &&
+    src.includes("only when that hint explicitly permits them and its stated conditions are met") &&
+    src.includes("do not infer permission from a provider or model family"),
+  "runtime selection guidance follows live hint permissions without provider/model-family inference",
 );
 
 console.log("");
+rmSync(fixtureRoot, { recursive: true, force: true });
 if (failures > 0) {
   console.error(`${failures} assertion(s) FAILED`);
   process.exit(1);

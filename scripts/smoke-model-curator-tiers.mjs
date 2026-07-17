@@ -3,16 +3,15 @@
  * smoke-model-curator-tiers — verify the REQUIRED `modelCurator.tiers`
  * field on the model-curator extension.
  *
- * 1. loadTiersOrThrow succeeds with the real pi-astack-settings.json
- *    (settings has tiers) and returns all three tiers with non-empty models.
+ * 1. loadTiersOrThrow succeeds with a temporary, hermetic settings fixture
+ *    and returns all configured tiers with non-empty models.
  * 2. loadTiersOrThrow THROWS CuratorConfigError if the tiers block is
  *    missing, empty, or any tier has an empty models array.
  * 3. buildAvailableModelsBlock renders a "Tier roster" section BEFORE the
  *    per-provider detail table when tiers are present.
- * 4. The roster output names every flagship model and the cross-vendor
- *    selection guidance sentence.
- * 5. Tiers are passed through without affecting the per-model hint table
- *    (regression: hints still render).
+ * 4. The fixed runtime-routing authority terminates the curator snapshot;
+ *    the snapshot is appended after already-composed rule injection content.
+ * 5. The multi-vendor roster and per-model hints remain selectable/rendered.
  */
 
 import { createRequire } from "node:module";
@@ -34,14 +33,44 @@ function check(name, ok, why = "") {
   else { fail++; console.log(`  ✗ ${name}${why ? `  ← ${why}` : ""}`); }
 }
 
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-model-curator-tiers-"));
+const fixtureSettingsPath = path.join(fixtureRoot, "pi-astack-settings.json");
+const fixtureSettings = {
+  modelCurator: {
+    providers: {
+      alpha: ["executor"],
+      beta: ["reviewer"],
+      gamma: ["candidate"],
+    },
+    hints: {
+      "alpha/executor": "Permitted responsibilities: execution and judgment.",
+      "beta/reviewer": "Permitted responsibilities: judgment only.",
+      "gamma/candidate": "Permitted responsibilities: judgment, subject to review conditions.",
+    },
+    imageGen: { "alpha/image": "fixture image generation" },
+    tiers: {
+      flagship: { label: "T0", models: ["alpha/executor", "beta/reviewer", "gamma/candidate"] },
+      flagship_candidate: { label: "T0 candidate", models: ["gamma/candidate"] },
+      standard: { label: "T1", models: ["alpha/executor"] },
+      fast: { label: "T2", models: ["beta/reviewer"] },
+    },
+  },
+};
+fs.writeFileSync(fixtureSettingsPath, `${JSON.stringify(fixtureSettings, null, 2)}\n`);
+const savedSettingsPath = process.env.PI_ASTACK_SETTINGS_PATH;
+process.env.PI_ASTACK_SETTINGS_PATH = fixtureSettingsPath;
+
 const curator = jiti(path.join(repoRoot, "extensions/model-curator/index.ts"));
-const { loadTiersOrThrow, buildAvailableModelsBlock } = curator.__TEST;
-const { resolveConfig } = curator.__TEST;
+const {
+  validateTiersOrThrow,
+  loadTiersOrThrow,
+  buildAvailableModelsBlock,
+  appendAvailableModelsSnapshot,
+  INJECT_MARKER,
+} = curator.__TEST;
+const { MODEL_ROUTING_RUNTIME_AUTHORITY } = curator;
 
-const realSettingsPath = path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");
-const realSettings = JSON.parse(fs.readFileSync(realSettingsPath, "utf-8"));
-
-console.log("[1] loadTiersOrThrow against real pi-astack-settings.json");
+console.log("[1] loadTiersOrThrow against temporary settings fixture");
 {
   const tiers = loadTiersOrThrow();
   const names = Object.keys(tiers);
@@ -52,75 +81,44 @@ console.log("[1] loadTiersOrThrow against real pi-astack-settings.json");
   check("fast tier present", typeof tiers.fast === "object");
 }
 
-console.log("\n[2] loadTiersOrThrow fails closed when tiers is missing / empty / malformed");
+console.log("\n[2] tier validation fails closed without mutating live settings");
 {
-  const originalTiers = realSettings.modelCurator?.tiers;
-  function withTiers(tiers) {
-    return {
-      ...realSettings,
-      modelCurator: { ...(realSettings.modelCurator ?? {}), tiers },
-    };
-  }
-  // We test the function by invoking resolveConfig-like logic: the function
-  // reads from PI_STACK_SETTINGS_PATH. Write a tmp file, swap the env, then
-  // re-import. Since the import is cached, we instead exercise the same
-  // logic via a re-read of the real file but monkey-patching in-place
-  // (the file watcher in curator is mtime-gated, so we save / restore).
-  const tmp = path.join(os.tmpdir(), `pi-astack-curator-${Date.now()}.json`);
-  function withFile(content) {
-    fs.writeFileSync(realSettingsPath, JSON.stringify(content, null, 2));
-  }
-  function restore() {
-    fs.writeFileSync(realSettingsPath, JSON.stringify({
-      ...realSettings,
-      modelCurator: { ...(realSettings.modelCurator ?? {}), tiers: originalTiers },
-    }, null, 2));
-    if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
+  function rejected(value) {
+    try {
+      validateTiersOrThrow(value, "smoke fixture");
+      return null;
+    } catch (error) {
+      return error;
+    }
   }
 
-  try {
-    // Missing tiers
-    withFile({ ...realSettings, modelCurator: { ...(realSettings.modelCurator ?? {}), tiers: undefined } });
-    let threw = null;
-    try { loadTiersOrThrow(); } catch (e) { threw = e; }
-    check("missing tiers throws", threw !== null);
-    check("error name is CuratorConfigError", threw?.name === "CuratorConfigError");
-    check("error mentions REQUIRED", /REQUIRED/i.test(String(threw?.message ?? "")));
+  let threw = rejected(undefined);
+  check("missing tiers throws", threw !== null);
+  check("error name is CuratorConfigError", threw?.name === "CuratorConfigError");
+  check("error mentions REQUIRED", /REQUIRED/i.test(String(threw?.message ?? "")));
 
-    // Empty tiers object
-    withFile(withTiers({}));
-    threw = null;
-    try { loadTiersOrThrow(); } catch (e) { threw = e; }
-    check("empty tiers throws", threw !== null);
-    check("error name is CuratorConfigError", threw?.name === "CuratorConfigError");
+  threw = rejected({});
+  check("empty tiers throws", threw !== null);
+  check("error name is CuratorConfigError", threw?.name === "CuratorConfigError");
 
-    // Tier with empty models array
-    withFile(withTiers({ flagship: { label: "T0", models: [] } }));
-    threw = null;
-    try { loadTiersOrThrow(); } catch (e) { threw = e; }
-    check("tier with empty models throws", threw !== null);
-    check("error name is CuratorConfigError", threw?.name === "CuratorConfigError");
-    check("error message names the tier", /"flagship"/.test(String(threw?.message ?? "")));
+  threw = rejected({ flagship: { label: "T0", models: [] } });
+  check("tier with empty models throws", threw !== null);
+  check("error name is CuratorConfigError", threw?.name === "CuratorConfigError");
+  check("error message names the tier", /"flagship"/.test(String(threw?.message ?? "")));
 
-    // Tiers is not an object (e.g. an array)
-    withFile(withTiers([]));
-    threw = null;
-    try { loadTiersOrThrow(); } catch (e) { threw = e; }
-    check("non-object tiers throws", threw !== null);
-  } finally {
-    restore();
-  }
+  threw = rejected([]);
+  check("non-object tiers throws", threw !== null);
 }
 
 console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-provider table");
 {
   // Re-load the real tiers after restore() above
   const tiers = loadTiersOrThrow();
-  const curatedProviders = new Set(Object.keys(realSettings.modelCurator?.providers ?? {}));
+  const curatedProviders = new Set(Object.keys(fixtureSettings.modelCurator.providers));
   const reg = {
     getAvailable: () => {
       const a = [];
-      for (const [provider, ids] of Object.entries(realSettings.modelCurator?.providers ?? {})) {
+      for (const [provider, ids] of Object.entries(fixtureSettings.modelCurator.providers)) {
         for (const id of ids) {
           a.push({
             provider, id,
@@ -135,8 +133,8 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
       return a;
     },
   };
-  const hints = realSettings.modelCurator?.hints ?? {};
-  const block = buildAvailableModelsBlock(reg, hints, curatedProviders, tiers, realSettings.modelCurator?.imageGen);
+  const hints = fixtureSettings.modelCurator.hints;
+  const block = buildAvailableModelsBlock(reg, hints, curatedProviders, tiers, fixtureSettings.modelCurator.imageGen);
   if (!block) {
     check("block is non-null", false, "buildAvailableModelsBlock returned null");
   } else {
@@ -150,16 +148,44 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
       !tiers.flagship_candidate || block.includes("do NOT count these as primary T0 voters"));
     check("block contains the cross-vendor selection guidance",
       block.includes("two models from the same vendor"));
+    const firstProviderTable = Math.min(
+      ...[...curatedProviders].map((provider) => block.indexOf(`### ${provider} _(`)),
+    );
     check("roster is rendered BEFORE the per-provider table",
-      block.indexOf("### Tier roster") < block.indexOf("### anthropic"));
+      block.indexOf("### Tier roster") < firstProviderTable);
     check("flagship_candidate renders between flagship and standard when present",
       !tiers.flagship_candidate || (block.indexOf("**flagship**") < block.indexOf("**flagship_candidate**") && block.indexOf("**flagship_candidate**") < block.indexOf("**standard**")));
     check("hints still render (regression: per-model table)",
       block.includes("| model | reasoning | image-in | $/1M in | hint |"));
+
+    const flagshipProviders = new Set((tiers.flagship?.models ?? []).map((model) => model.split("/")[0]));
+    check("flagship roster retains at least three selectable providers", flagshipProviders.size >= 3);
+    check("every flagship provider still has a rendered provider section",
+      [...flagshipProviders].every((provider) => block.includes(`### ${provider} _(`)));
+    check("snapshot contains the exact fixed runtime authority text",
+      block.includes(MODEL_ROUTING_RUNTIME_AUTHORITY));
+    check("runtime authority terminates the curator snapshot",
+      block.trimEnd().endsWith(MODEL_ROUTING_RUNTIME_AUTHORITY));
+    check("selection guidance derives responsibility from live per-model hints",
+      block.includes("derive execution and judgment responsibility permissions from the live per-model hint") &&
+        block.includes("do not infer permission from a provider or model family"));
+
+    const ruleInjection = "<!-- BEGIN_ABRAIN_RULES session=smoke -->\nRULE\n<!-- END_ABRAIN_RULES -->";
+    const prompt = appendAvailableModelsSnapshot(ruleInjection, block);
+    const snapshot = prompt.slice(prompt.indexOf(INJECT_MARKER));
+    check("capability snapshot loads after already-composed rule injection",
+      prompt.indexOf(INJECT_MARKER) > prompt.indexOf("<!-- END_ABRAIN_RULES -->"));
+    check("appending the snapshot preserves earlier prompt content",
+      prompt.startsWith(ruleInjection));
+    check("runtime authority terminates the appended curator snapshot",
+      snapshot.trimEnd().endsWith(MODEL_ROUTING_RUNTIME_AUTHORITY));
   }
 }
 
 console.log("");
 console.log(`pass=${pass}, fail=${fail}`);
+if (savedSettingsPath === undefined) delete process.env.PI_ASTACK_SETTINGS_PATH;
+else process.env.PI_ASTACK_SETTINGS_PATH = savedSettingsPath;
+fs.rmSync(fixtureRoot, { recursive: true, force: true });
 if (fail > 0) process.exit(1);
 process.exit(0);

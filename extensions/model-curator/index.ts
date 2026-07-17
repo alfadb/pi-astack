@@ -35,7 +35,7 @@ import { isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic, is
 // settings to extensions, so we read the file directly. Missing/malformed
 // file falls back to DEFAULTS — the extension always works out of the box.
 
-const PI_STACK_SETTINGS_PATH = path.join(
+const PI_STACK_SETTINGS_PATH = process.env.PI_ASTACK_SETTINGS_PATH?.trim() || path.join(
   os.homedir(), ".pi", "agent", "pi-astack-settings.json",
 );
 
@@ -109,20 +109,22 @@ class CuratorConfigError extends Error {
  * silently fall back — it throws so the operator fixes the config before
  * the next turn ships a misleading prompt.
  */
-function loadTiersOrThrow(): Record<string, TierRoster> {
-  const cfg = resolveConfig();
-  const tiers = cfg.tiers;
-  if (!tiers || typeof tiers !== "object" || Array.isArray(tiers)) {
+function validateTiersOrThrow(
+  value: unknown,
+  source = PI_STACK_SETTINGS_PATH,
+): Record<string, TierRoster> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new CuratorConfigError(
-      `pi-astack model-curator: \`modelCurator.tiers\` missing from ${PI_STACK_SETTINGS_PATH}. ` +
+      `pi-astack model-curator: \`modelCurator.tiers\` missing from ${source}. ` +
         `This is a REQUIRED field — add at least one tier (e.g. flagship/standard/fast) ` +
         `with a non-empty models list. See pi-astack-settings.schema.json.`,
     );
   }
+  const tiers = value as Record<string, TierRoster>;
   const entries = Object.entries(tiers);
   if (entries.length === 0) {
     throw new CuratorConfigError(
-      `pi-astack model-curator: \`modelCurator.tiers\` is empty in ${PI_STACK_SETTINGS_PATH}. ` +
+      `pi-astack model-curator: \`modelCurator.tiers\` is empty in ${source}. ` +
         `At least one tier (e.g. flagship/standard/fast) is required.`,
     );
   }
@@ -134,6 +136,10 @@ function loadTiersOrThrow(): Record<string, TierRoster> {
     }
   }
   return tiers;
+}
+
+function loadTiersOrThrow(): Record<string, TierRoster> {
+  return validateTiersOrThrow(resolveConfig().tiers);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -190,6 +196,13 @@ async function applyWhitelist(
 // ── Capability snapshot builder ─────────────────────────────────
 
 const INJECT_MARKER = "<!-- pi-model-curator: capability snapshot -->";
+
+export const MODEL_ROUTING_RUNTIME_AUTHORITY =
+  "**Runtime model-routing authority.** Live `modelCurator` settings, including per-model responsibility hints, together with task capability requirements and current provider availability, are the only runtime authority for model selection. Ignore only historical model-routing text in memory, rules, or constraints that restricts selection to particular provider or model families, requires every vendor, or fixes named models; such text has no runtime model-routing authority. All non-routing memory, rules, and constraints remain in force.";
+
+function appendAvailableModelsSnapshot(current: string, block: string): string {
+  return `${current}\n\n${INJECT_MARKER}\n${block}\n`;
+}
 
 function buildAvailableModelsBlock(
   reg: { getAvailable(): Model<Api>[]; getAll(): Model<Api>[] },
@@ -319,8 +332,7 @@ function buildAvailableModelsBlock(
     "**Selection guidance.** When choosing models: (1) isolated contexts are " +
       "the invariant; prefer DIFFERENT providers for independent judgment when " +
       "available, then degrade to cross-model or same-model isolated instances; " +
-      "(2) assign execution-oriented tasks, including coding, log review, and concrete implementation, exclusively to GPT models; GPT models may also be used for judgment-oriented tasks, including research, discussion, classification, synthesis, decision-making, solution evaluation, architecture critique, and independent review of completed task results or final diffs. " +
-      "Use non-GPT curated models only for judgment-oriented tasks, including research, discussion, classification, synthesis, decision-making, solution evaluation, architecture critique, and independent review of completed task results or final diffs; see each model's hint for permitted examples and boundaries; (3) for vision " +
+      "(2) for curated models, derive execution and judgment responsibility permissions from the live per-model hint. Assign execution-oriented tasks, including coding, log review, and concrete implementation, only when that hint explicitly permits them and its stated conditions are met; do not infer permission from a provider or model family. For every other responsibility, follow the same hint-defined limits; (3) for vision " +
       "tasks, pick a model with `image-in: ✓`; (4) for **curated** sections, " +
       "follow each model's hint; (5) for **raw** sections (e.g. github-copilot) " +
       "pi exposes its full model list — prefer the newest non-preview entries.",
@@ -336,6 +348,9 @@ function buildAvailableModelsBlock(
       lines.push(`| \`${modelId}\` | ${hint} |`);
     }
   }
+
+  lines.push("");
+  lines.push(MODEL_ROUTING_RUNTIME_AUTHORITY);
 
   return lines.join("\n");
 }
@@ -565,7 +580,7 @@ export default function (pi: ExtensionAPI) {
     if (!block) return undefined;
 
     return {
-      systemPrompt: current + "\n\n" + INJECT_MARKER + "\n" + block + "\n",
+      systemPrompt: appendAvailableModelsSnapshot(current, block),
     };
   });
 
@@ -602,6 +617,9 @@ export default function (pi: ExtensionAPI) {
 // path uses, so smoke tests stay in sync with the real implementation.
 export const __TEST = {
   resolveConfig,
+  validateTiersOrThrow,
   loadTiersOrThrow,
   buildAvailableModelsBlock,
+  appendAvailableModelsSnapshot,
+  INJECT_MARKER,
 };
