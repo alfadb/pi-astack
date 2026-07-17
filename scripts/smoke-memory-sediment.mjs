@@ -162,9 +162,17 @@ function transpileExtensions(outRoot) {
       throw new Error(`Strict parse of ${path.relative(repoRoot, srcPath)} failed: ${err && err.stack ? err.stack : err}`);
     }
     writeFile(outPath, transpiled.outputText);
-    {
-      const leafSrcPath = path.join(extRoot, "abrain", "rule-injector", "dualread-audit.ts");
-      const leafOutPath = path.join(outRoot, "abrain", "rule-injector", "dualread-audit.js");
+    // Keep the staged rule-injector import closure loadable. The stable-view
+    // reader's shared contract is already included by the staged `_shared`
+    // tree; the runtime audit is loaded but its disabled fixture path never
+    // appends an audit row.
+    for (const leaf of [
+      "dualread-audit.ts",
+      "proposition-policy-stable-view-reader.ts",
+      "proposition-policy-stable-view-runtime-audit.ts",
+    ]) {
+      const leafSrcPath = path.join(extRoot, "abrain", "rule-injector", leaf);
+      const leafOutPath = path.join(outRoot, "abrain", "rule-injector", leaf.replace(/\.ts$/, ".js"));
       const leafTranspiled = ts.transpileModule(fs.readFileSync(leafSrcPath, "utf-8"), {
         compilerOptions: {
           target: ts.ScriptTarget.ES2022,
@@ -361,9 +369,47 @@ async function main() {
   assertNoLegacyPackageScope();
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-"));
   const savedSettingsPath = process.env.PI_ASTACK_SETTINGS_PATH;
+  const savedAbrainRoot = process.env.ABRAIN_ROOT;
+  const savedHome = process.env.HOME;
   const smokeSettingsPath = path.join(outRoot, "pi-astack-settings.json");
-  writeFile(smokeSettingsPath, `${JSON.stringify({ canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" } }, null, 2)}\n`);
+  const smokeAbrainRoot = path.join(outRoot, "abrain");
+  const smokeHome = path.join(outRoot, "home");
+  const productionSettingsPath = path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");
+  let sourceSettings = {};
+  try {
+    sourceSettings = JSON.parse(fs.readFileSync(productionSettingsPath, "utf-8"));
+  } catch {
+    // Fresh-clone smoke still exercises defaults when no source settings exist.
+  }
+  const sourceSediment = sourceSettings.sediment && typeof sourceSettings.sediment === "object"
+    ? sourceSettings.sediment
+    : {};
+  const sourceRuleInjector = sourceSettings.ruleInjector && typeof sourceSettings.ruleInjector === "object"
+    ? sourceSettings.ruleInjector
+    : {};
+  const sourceStableViewInjection = sourceRuleInjector.propositionPolicyStableViewInjection
+    && typeof sourceRuleInjector.propositionPolicyStableViewInjection === "object"
+    ? sourceRuleInjector.propositionPolicyStableViewInjection
+    : {};
+  const smokeSettings = {
+    ...sourceSettings,
+    canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" },
+    sediment: { ...sourceSediment, enabled: true },
+    ruleInjector: {
+      ...sourceRuleInjector,
+      propositionPolicyStableViewInjection: { ...sourceStableViewInjection, enabled: false },
+    },
+  };
+  const smokeSettingsJson = `${JSON.stringify(smokeSettings, null, 2)}\n`;
+  writeFile(smokeSettingsPath, smokeSettingsJson);
+  fs.mkdirSync(smokeAbrainRoot, { recursive: true });
+  fs.mkdirSync(smokeHome, { recursive: true });
+  // Some older staged loaders resolve only through os.homedir(); mirror the
+  // same temporary settings there rather than ever consulting user settings.
+  writeFile(path.join(smokeHome, ".pi", "agent", "pi-astack-settings.json"), smokeSettingsJson);
   process.env.PI_ASTACK_SETTINGS_PATH = smokeSettingsPath;
+  process.env.ABRAIN_ROOT = smokeAbrainRoot;
+  process.env.HOME = smokeHome;
   const count = transpileExtensions(outRoot);
   const req = createRequire(path.join(outRoot, "runner.cjs"));
 
@@ -1500,7 +1546,7 @@ Original Pensieve seed content.
     execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: root });
     execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: root });
 
-    const sanitize = sanitizeForMemory("/home/worker a@example.com 127.0.0.1");
+    const sanitize = sanitizeForMemory(`${os.homedir()} a@example.com 127.0.0.1`);
     assert(sanitize.ok && sanitize.replacements.includes("home_path") && sanitize.replacements.includes("email") && sanitize.replacements.includes("ip_address"), "sanitize replacements failed");
 
     // Post-2026-05-13 cutover: writer requires explicit abrainHome + projectId.
@@ -2427,7 +2473,7 @@ END_MEMORY`;
       const localDsn = sanitizeForMemory("redis://localhost:6379 is the local cache endpoint");
       assert(!localDsn.replacements.some((r) => r.startsWith("credential:")), `local DSN without userinfo must not be treated as credential URL: ${JSON.stringify(localDsn)}`);
       // Negative: ordinary IP/email/$HOME paths still get non-secret scrub only.
-      const benign = sanitizeForMemory("user@example.com on 127.0.0.1 at /home/worker/projects");
+      const benign = sanitizeForMemory(`user@example.com on 127.0.0.1 at ${os.homedir()}/projects`);
       assert(benign.ok && !benign.replacements.some((r) => r.startsWith("credential:")), `benign content should pass without credential marker: ${JSON.stringify(benign)}`);
 
       // Round 8 P1 (opus R8 audit): credential pattern coverage gaps.
@@ -2552,7 +2598,7 @@ END_MEMORY`;
       }, { projectRoot: g8Root, abrainHome: g8Target.abrainHome, projectId: g8Target.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
       assert(ok.status === "created", `trigger phrase scrub write should succeed: ${JSON.stringify(ok)}`);
       const okWritten = fs.readFileSync(ok.path, "utf-8");
-      assert(okWritten.includes("$HOME") && !okWritten.includes("/home/worker") && !okWritten.includes(`${require("node:os").homedir()}/projects`), "trigger phrase $HOME scrub did not redact");
+      assert(okWritten.includes("$HOME") && !okWritten.includes(os.homedir()) && !okWritten.includes(`${require("node:os").homedir()}/projects`), "trigger phrase $HOME scrub did not redact");
     }
 
     // Prompt strengthening (role-aware boundary + durability test).
@@ -7582,6 +7628,7 @@ Body.
       {
         const { buildGraphSnapshot, checkBacklinks } = req("./memory/graph.js");
         const csAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-crossscope-abrain-"));
+        const previousCsAbrainRoot = process.env.ABRAIN_ROOT;
         process.env.ABRAIN_ROOT = csAbrain;
         try {
           const projectId = "cs-test";
@@ -7653,7 +7700,8 @@ Body.
           );
           fs.rmSync(legacyParent, { recursive: true, force: true });
         } finally {
-          delete process.env.ABRAIN_ROOT;
+          if (previousCsAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+          else process.env.ABRAIN_ROOT = previousCsAbrainRoot;
           fs.rmSync(csAbrain, { recursive: true, force: true });
         }
       }
@@ -7709,6 +7757,7 @@ Body.
       {
         const { buildGraphSnapshot } = req("./memory/graph.js");
         const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-explicit-prefix-"));
+        const previousExplicitAbrainRoot = process.env.ABRAIN_ROOT;
         process.env.ABRAIN_ROOT = home;
         try {
           const projectId = "explicit-test";
@@ -7740,7 +7789,8 @@ Body.
             `explicit prefix routing: dead_links should be [alfadb, does-not-exist] (unknown prefix + explicit-typo), got ${JSON.stringify(dl)}`,
           );
         } finally {
-          delete process.env.ABRAIN_ROOT;
+          if (previousExplicitAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+          else process.env.ABRAIN_ROOT = previousExplicitAbrainRoot;
           fs.rmSync(home, { recursive: true, force: true });
         }
       }
@@ -7753,6 +7803,7 @@ Body.
       {
         const { scanRewritePlan, applyRewritePlan } = req("./memory/rewrite-cross-scope.js");
         const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-rewrite-"));
+        const previousRewriteAbrainRoot = process.env.ABRAIN_ROOT;
         process.env.ABRAIN_ROOT = home;
         try {
           const projectId = "rw-test";
@@ -7890,7 +7941,8 @@ Body.
             `idempotence broken: second scan produced ${plan2.totalChanges} changes: ${JSON.stringify(plan2.entries.flatMap((e) => e.changes))}`,
           );
         } finally {
-          delete process.env.ABRAIN_ROOT;
+          if (previousRewriteAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+          else process.env.ABRAIN_ROOT = previousRewriteAbrainRoot;
           fs.rmSync(home, { recursive: true, force: true });
         }
       }
@@ -8698,6 +8750,10 @@ Body.
   } finally {
     if (savedSettingsPath === undefined) delete process.env.PI_ASTACK_SETTINGS_PATH;
     else process.env.PI_ASTACK_SETTINGS_PATH = savedSettingsPath;
+    if (savedAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+    else process.env.ABRAIN_ROOT = savedAbrainRoot;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
     if (process.env.PI_ASTACK_KEEP_SMOKE_TMP !== "1") fs.rmSync(outRoot, { recursive: true, force: true });
   }
 }

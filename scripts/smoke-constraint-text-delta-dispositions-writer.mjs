@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const writerScript = path.join(repoRoot, "scripts", "write-constraint-text-delta-dispositions.mjs");
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const failures = [];
 let total = 0;
 
@@ -47,6 +48,22 @@ function writeJsonl(file, rows) {
   writeFile(file, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
 }
 
+function ruleMarkdown({ id, title, status = "active", kind = "preference", confidence = 8, injectMode = "always", body }) {
+  return [
+    "---",
+    `id: ${id}`,
+    `title: ${JSON.stringify(title)}`,
+    `status: ${status}`,
+    `kind: ${kind}`,
+    `confidence: ${confidence}`,
+    `inject_mode: ${injectMode}`,
+    "---",
+    "",
+    body,
+    "",
+  ].join("\n");
+}
+
 function sidecarPath(abrainHome) {
   return path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest", "text-delta-dispositions.json");
 }
@@ -56,6 +73,27 @@ function makeFixture() {
   const abrainHome = path.join(root, "abrain");
   const shadowRoot = path.join(abrainHome, ".state", "sediment", "constraint-shadow");
   const latestDir = path.join(shadowRoot, "latest");
+  // The review-pack entrypoint applies a seven-day window using its own
+  // clock. Keep fixture rows comfortably inside that window on every run.
+  const fixtureNowMs = Date.now();
+  const refreshObservedAtUtc = new Date(fixtureNowMs - (6 * 24 * 60 * 60 * 1000)).toISOString();
+  const latestAuditObservedAtUtc = new Date(fixtureNowMs - (5 * 24 * 60 * 60 * 1000)).toISOString();
+
+  writeFile(path.join(abrainHome, "rules", "always", "semantic-fixture.md"), ruleMarkdown({
+    id: "rule:global:always:semantic-fixture",
+    title: "Semantic fixture",
+    body: "Legacy semantic fixture body.",
+  }));
+  writeFile(path.join(abrainHome, "rules", "always", "semantic-fixture-alt.md"), ruleMarkdown({
+    id: "rule:global:always:semantic-fixture-alt",
+    title: "Alternate semantic fixture",
+    body: "Legacy alternate semantic fixture body.",
+  }));
+  writeFile(path.join(abrainHome, "rules", "always", "normalization-fixture.md"), ruleMarkdown({
+    id: "rule:global:always:normalization-fixture",
+    title: "Normalization fixture",
+    body: "Legacy normalization fixture body.",
+  }));
 
   writeJson(path.join(latestDir, "decision.json"), {
     schemaVersion: "constraint-shadow-decision/v1",
@@ -90,7 +128,7 @@ function makeFixture() {
   writeJsonl(path.join(shadowRoot, "auto-refresh", "audit.jsonl"), [
     {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
-      observedAtUtc: "2026-07-06T00:00:00.000Z",
+      observedAtUtc: refreshObservedAtUtc,
       status: "completed",
       ok: true,
       result: { ok: true, inputRootHash: "refresh-input-fixture" },
@@ -100,7 +138,7 @@ function makeFixture() {
   writeJsonl(path.join(shadowRoot, "session-start-dualread", "audit.jsonl"), [
     {
       schemaVersion: "rule-injector-dualread-audit/v1",
-      observedAtUtc: "2026-07-06T00:01:00.000Z",
+      observedAtUtc: latestAuditObservedAtUtc,
       cwd: "/fixture/project",
       activeProjectId: "fixture-project",
       status: "delta",
@@ -139,7 +177,12 @@ function makeFixture() {
     },
   ]);
 
-  return { root, abrainHome, sidecar: sidecarPath(abrainHome) };
+  return {
+    root,
+    abrainHome,
+    sidecar: sidecarPath(abrainHome),
+    latestAuditObservedAtUtc,
+  };
 }
 
 function runWriter(fixture, args = []) {
@@ -204,7 +247,8 @@ check("first write creates semantic_equivalent sidecar item", () => {
   assert(item.sourceRecordId === "rule:global:always:semantic-fixture", `source mismatch: ${JSON.stringify(item)}`);
   assert(item.legacyHash === "legacy-semantic-hash" && item.shadowHash === "shadow-semantic-hash", `hash mismatch: ${JSON.stringify(item)}`);
   assert(item.disposition === "semantic_equivalent", `disposition mismatch: ${JSON.stringify(item)}`);
-  assert(/^semantic-review-pack:2026-07-06T00:01:00\.000Z$/.test(item.reviewRef), `reviewRef mismatch: ${JSON.stringify(item)}`);
+  assert(Date.now() - Date.parse(fixture.latestAuditObservedAtUtc) < SEVEN_DAYS_MS, "fixture audit row fell outside the default seven-day window");
+  assert(item.reviewRef === `semantic-review-pack:${fixture.latestAuditObservedAtUtc}`, `reviewRef mismatch: ${JSON.stringify(item)}`);
   assert(item.reason === "multi-model semantic review accepted equivalent", `reason mismatch: ${JSON.stringify(item)}`);
   assert(typeof item.reviewedAtUtc === "string" && !Number.isNaN(Date.parse(item.reviewedAtUtc)), `reviewedAtUtc invalid: ${JSON.stringify(item)}`);
 });
