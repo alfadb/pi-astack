@@ -70,6 +70,7 @@ const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-constraint-evid
 for (const file of [
   "extensions/_shared/durable-write.ts",
   "extensions/_shared/jcs.ts",
+  "extensions/_shared/proposition.ts",
   "extensions/_shared/l1-schema-registry.ts",
   "extensions/sediment/constraint-evidence/types.ts",
   "extensions/sediment/constraint-evidence/canonical-json.ts",
@@ -424,6 +425,24 @@ check("append writer returns idempotent duplicate for identical event", async ()
   assert(first.ok && first.status === "appended", "first append did not write");
   assert(second.ok && second.status === "idempotent_duplicate", "second append was not idempotent");
   assert(second.diagnostics.some((diagnostic) => diagnostic.code === "CE_APPEND_IDEMPOTENT_DUPLICATE"), "missing duplicate diagnostic");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("append writer atomically coalesces concurrent identical events", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-abrain-"));
+  const body = fixtureBody({ device_event_seq: 106 });
+  const expected = constraintEvidenceEnvelopeJson(createConstraintEvidenceEnvelope(body));
+  const results = await Promise.all(
+    Array.from({ length: 8 }, () => appendConstraintEvidenceEvent({ abrainHome, body })),
+  );
+  const appended = results.filter((result) => result.ok && result.status === "appended");
+  const idempotent = results.filter((result) => result.ok && result.status === "idempotent_duplicate");
+  assert(appended.length === 1, `expected exactly one appended result: ${JSON.stringify(results.map((result) => result.status))}`);
+  assert(idempotent.length === results.length - 1, `expected all remaining results to be idempotent: ${JSON.stringify(results.map((result) => result.status))}`);
+  const eventPath = appended[0].filePath;
+  assert(fs.readFileSync(eventPath, "utf8") === expected, "concurrent append final bytes differ from canonical envelope");
+  const temps = listFiles(abrainHome).filter((file) => file.endsWith(".tmp"));
+  assert(temps.length === 0, `temporary files left behind after concurrent append: ${temps.join(",")}`);
   fs.rmSync(abrainHome, { recursive: true, force: true });
 });
 

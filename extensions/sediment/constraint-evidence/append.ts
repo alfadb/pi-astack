@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { durableAtomicWriteFile } from "../../_shared/durable-write";
+import { durableAtomicCreateFile } from "../../_shared/durable-write";
 import { validateL1WritePreflight } from "../../_shared/l1-schema-registry";
 import { makeConstraintEvidenceDiagnostic } from "./diagnostics";
 import {
@@ -156,22 +156,22 @@ export async function appendConstraintEvidenceEvent(options: AppendConstraintEvi
   const content = constraintEvidenceEnvelopeJson(envelope);
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    const existing = await readExisting(filePath);
-    if (existing !== null) {
-      if (existing === content) {
-        return {
-          ok: true,
-          status: "idempotent_duplicate",
-          eventId,
-          filePath,
-          envelope,
-          diagnostics: [makeConstraintEvidenceDiagnostic({
-            code: "CE_APPEND_IDEMPOTENT_DUPLICATE",
-            message: "constraint evidence event already exists with identical content",
-            eventIds: [eventId],
-          })],
-        };
-      }
+    const createStatus = await writeDurableEvidenceFile(filePath, content);
+    if (createStatus === "identical") {
+      return {
+        ok: true,
+        status: "idempotent_duplicate",
+        eventId,
+        filePath,
+        envelope,
+        diagnostics: [makeConstraintEvidenceDiagnostic({
+          code: "CE_APPEND_IDEMPOTENT_DUPLICATE",
+          message: "constraint evidence event already exists with identical content",
+          eventIds: [eventId],
+        })],
+      };
+    }
+    if (createStatus === "collision") {
       return {
         ok: false,
         status: "collision",
@@ -186,8 +186,6 @@ export async function appendConstraintEvidenceEvent(options: AppendConstraintEvi
         })],
       };
     }
-
-    await writeDurableEvidenceFile(filePath, content);
 
     return {
       ok: true,
@@ -218,17 +216,8 @@ export async function appendConstraintEvidenceEvent(options: AppendConstraintEvi
   }
 }
 
-async function readExisting(filePath: string): Promise<string | null> {
-  try {
-    return await fs.readFile(filePath, "utf-8");
-  } catch (err) {
-    if (isNodeError(err) && err.code === "ENOENT") return null;
-    throw err;
-  }
-}
-
-async function writeDurableEvidenceFile(filePath: string, content: string): Promise<void> {
-  await durableAtomicWriteFile(filePath, content);
+async function writeDurableEvidenceFile(filePath: string, content: string): Promise<"created" | "identical" | "collision"> {
+  return durableAtomicCreateFile(filePath, content);
 }
 
 function blockedAuditData(body: ConstraintEvidenceEventBodyV1, eventId: string): Record<string, unknown> {
@@ -240,8 +229,4 @@ function blockedAuditData(body: ConstraintEvidenceEventBodyV1, eventId: string):
     intendedBodyHash,
     retryEligible: false,
   };
-}
-
-function isNodeError(err: unknown): err is NodeJS.ErrnoException {
-  return !!err && typeof err === "object" && "code" in err;
 }
