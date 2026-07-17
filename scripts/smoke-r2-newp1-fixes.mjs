@@ -302,6 +302,7 @@ const decide = loadCJS(
   decidePath,
   new Map([
     ["../_shared/causal-anchor", anchor],
+    ["../_shared/llm-audit", { auditStreamSimple: async () => ({ stopReason: "error", content: [] }) }],
     ["../sediment/outcome-collector", {}],
     ["../sediment/sanitizer", { sanitizeForMemory: (s) => ({ ok: true, text: s }) }],
     ["./settings", {}],

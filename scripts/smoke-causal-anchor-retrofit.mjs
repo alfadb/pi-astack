@@ -78,7 +78,7 @@ const writers = [
     file: "extensions/abrain/git-sync.ts",
     label: "abrain git-sync.jsonl (local audit)",
     auditFile: "~/.abrain/.state/git-sync.jsonl",
-    anchorWindow: /const enriched = \{[\s\S]{0,400}spreadAnchor\(getCurrentAnchor\(\)\)[\s\S]{0,400}\.\.\.event,\s*\};/,
+    anchorWindow: /JSON\.stringify\(\{\s*\.\.\.spreadAnchor\(getCurrentAnchor\(\)\),\s*\.\.\.event\s*\}\)/,
   },
   {
     file: "extensions/abrain/vault-writer.ts",

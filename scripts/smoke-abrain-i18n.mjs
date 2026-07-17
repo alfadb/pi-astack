@@ -48,7 +48,13 @@ function transpile(srcPath) {
 }
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-i18n-"));
-fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpile(path.join(repoRoot, "extensions/abrain/i18n.ts")));
+fs.writeFileSync(
+  path.join(tmpDir, "llm-audit.cjs"),
+  `module.exports = { auditStreamSimple: async () => ({ stopReason: "error", content: [] }) };\n`,
+);
+const i18nCjs = transpile(path.join(repoRoot, "extensions/abrain/i18n.ts"))
+  .replace(/require\("\.\.\/_shared\/llm-audit"\)/g, 'require("./llm-audit.cjs")');
+fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), i18nCjs);
 const i18n = require(path.join(tmpDir, "i18n.cjs"));
 
 console.log("abrain — vault prompt localizer");

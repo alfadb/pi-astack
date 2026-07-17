@@ -77,8 +77,13 @@ const jiti = createJiti(import.meta.url, {
 });
 process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
 const smokeHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-pr1-home-"));
+const smokeSettingsPath = path.join(smokeHome, ".pi", "agent", "pi-astack-settings.json");
+const smokeAbrainRoot = path.join(smokeHome, ".abrain");
 process.env.HOME = smokeHome;
-writeFile(path.join(smokeHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+process.env.PI_ASTACK_SETTINGS_PATH = smokeSettingsPath;
+process.env.ABRAIN_ROOT = smokeAbrainRoot;
+fs.mkdirSync(smokeAbrainRoot, { recursive: true });
+writeFile(smokeSettingsPath, JSON.stringify({
   canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" },
   sediment: {
     enabled: true,

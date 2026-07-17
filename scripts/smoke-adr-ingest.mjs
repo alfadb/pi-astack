@@ -78,6 +78,11 @@ function validDraft(slug, heading, extra = {}) {
 }
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-ingest-build-"));
+const settingsPath = path.join(tmp, "pi-astack-settings.json");
+fs.writeFileSync(settingsPath, JSON.stringify({
+  canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" },
+}));
+process.env.PI_ASTACK_SETTINGS_PATH = settingsPath;
 transpileDirs(tmp, ["_shared", "memory", "sediment"]);
 
 const ingest = require(path.join(tmp, "memory", "ingest-adr.js"));

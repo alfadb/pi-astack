@@ -626,9 +626,9 @@ function compiledOnlyDetails(input: {
       ? input.dispositions?.get(compiledOnlyDispositionKey({
         sourceRecordId,
         constraintId,
-        bodyHash: detail.bodyHash,
-        inputRootHash: input.inputRootHash,
-        validationHash: input.validationHash,
+        bodyHash: detail.bodyHash!,
+        inputRootHash: input.inputRootHash!,
+        validationHash: input.validationHash!,
         scope: detail.scope,
         injectMode,
       }))

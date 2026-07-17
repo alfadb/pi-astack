@@ -830,8 +830,8 @@ function appendLiveCanaryAudit(args: {
     effectiveFallbackToLegacyOnError: args.result.settings.compiledViewInjection.fallbackToLegacyOnError,
     decision: args.result.decision,
     compiledStatus: compiled.ok ? "ok" : "failed",
-    reason: compiled.ok ? null : compiled.reason,
-    compiledError: compiled.ok ? null : compiled.error ?? null,
+    reason: compiled.ok === false ? compiled.reason : null,
+    compiledError: compiled.ok === false ? compiled.error ?? null : null,
     coverageRatio: compiled.coverageRatio ?? null,
     injectableCoverageRatio: compiled.injectableCoverageRatio ?? null,
     stale: compiled.stale ?? null,
@@ -870,7 +870,7 @@ export function decideRuntimeRuleInjection(args: {
     activeProjectId: args.cache.activeProjectId,
     compiledViewEnabled: args.runtimeSettings.compiledViewInjection.enabled,
     compiledOk: compiled.ok,
-    reason: compiled.reason,
+    reason: compiled.ok === false ? compiled.reason : "ok",
   });
   let result: RuntimeRuleInjectionResult;
   if (compiled.ok) {

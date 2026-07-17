@@ -120,7 +120,8 @@ for (const file of [
     // ADR 0027 causal-anchor: git-sync.ts + vault-writer.ts now import
     // `../_shared/causal-anchor`. Rewrite uniformly; harmless no-op for files
     // that don't import it today.
-    .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")');
+    .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
+    .replace(/require\("\.\.\/_shared\/llm-audit"\)/g, 'require("./_shared/llm-audit.cjs")');
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
@@ -135,6 +136,8 @@ fs.copyFileSync(path.join(tmpDir, "_shared", "git-singleflight.cjs"), path.join(
 // plus a pi-internals stub so isSubAgentSession resolves without pulling the full pi runtime.
 fs.writeFileSync(path.join(tmpDir, "_shared", "pi-internals.cjs"), "module.exports = { isSubAgentSession: () => false };\n");
 fs.copyFileSync(path.join(tmpDir, "_shared", "pi-internals.cjs"), path.join(tmpDir, "_shared", "pi-internals.js"));
+fs.writeFileSync(path.join(tmpDir, "_shared", "llm-audit.cjs"), `module.exports = { auditStreamSimple: async () => ({ stopReason: "error", content: [] }) };\n`);
+fs.copyFileSync(path.join(tmpDir, "_shared", "llm-audit.cjs"), path.join(tmpDir, "_shared", "llm-audit.js"));
 fs.writeFileSync(path.join(tmpDir, "_shared", "causal-anchor.cjs"), transpile(path.join(repoRoot, "extensions/_shared/causal-anchor.ts")));
 fs.copyFileSync(path.join(tmpDir, "_shared", "causal-anchor.cjs"), path.join(tmpDir, "_shared", "causal-anchor.js"));
 fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
