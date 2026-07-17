@@ -178,6 +178,7 @@ const replayRunId = arg("run-id", `${new Date().toISOString().replace(/[-:.]/g, 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-audit-replay-stage-"));
 for (const file of [
   "extensions/_shared/jcs.ts",
+  "extensions/_shared/proposition.ts",
   "extensions/_shared/l1-schema-registry.ts",
   "extensions/sediment/constraint-evidence/types.ts",
   "extensions/sediment/constraint-evidence/canonical-json.ts",

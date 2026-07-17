@@ -92,6 +92,20 @@ export interface WholeL1ScanResult {
   tempResidue: readonly string[];
 }
 
+interface L1ScanFileSystem {
+  readdir(dir: string, options: { withFileTypes: true }): Promise<fs.Dirent[]>;
+  lstat(file: string): Promise<fs.Stats>;
+  realpath(file: string): Promise<string>;
+  readFile(file: string, encoding: BufferEncoding): Promise<string>;
+}
+
+const nodeL1ScanFileSystem: L1ScanFileSystem = {
+  readdir: (dir, options) => fsp.readdir(dir, options),
+  lstat: (file) => fsp.lstat(file),
+  realpath: (file) => fsp.realpath(file),
+  readFile: (file, encoding) => fsp.readFile(file, encoding),
+};
+
 export class L1SchemaRegistryError extends Error {
   readonly code: string;
   readonly detail?: Readonly<Record<string, unknown>>;
@@ -343,27 +357,50 @@ export async function validateL1WritePreflight(options: {
 }
 
 export async function scanWholeL1Validated(options: WholeL1ScanOptions): Promise<WholeL1ScanResult> {
+  return scanWholeL1ValidatedWithFileSystem(options, nodeL1ScanFileSystem);
+}
+
+async function scanWholeL1ValidatedWithFileSystem(options: WholeL1ScanOptions, scanFs: L1ScanFileSystem): Promise<WholeL1ScanResult> {
   const registry = options.registry ?? loadL1SchemaRegistry(options.registryPath);
   const abrainHome = path.resolve(options.abrainHome);
   const root = path.resolve(abrainHome, ...registry.storage.root_relative_path.split("/"));
   const maxEventBytes = options.maxEventBytes ?? 16 * 1024 * 1024;
   if (!Number.isSafeInteger(maxEventBytes) || maxEventBytes <= 0) throw failure("L1_SCAN_INVALID_OPTIONS", "maxEventBytes must be a positive safe integer");
-  if (!(await exists(root))) return emptyScanResult();
-  const rootReal = await assertExistingDirectoryChainNoSymlink(abrainHome, root);
-  const { files, tempResidue } = await listContentAddressedFiles(root, rootReal);
+  if (!(await exists(root, scanFs))) return emptyScanResult();
+  const rootReal = await assertExistingDirectoryChainNoSymlink(abrainHome, root, scanFs);
+  const { files, tempResidue } = await listContentAddressedFiles(root, rootReal, scanFs);
   const records: ValidatedL1ScanRecord[] = [];
   const seenEventIds = new Set<string>();
 
   for (const file of files) {
-    const stat = await fsp.lstat(file);
+    let stat: fs.Stats;
+    try {
+      stat = await scanFs.lstat(file);
+    } catch (err) {
+      if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during scan: ${relativeUnix(abrainHome, file)}`, { error: errorMessage(err) });
+      throw err;
+    }
     if (!stat.isFile()) throw failure("L1_NON_REGULAR", `event path is not a regular file: ${file}`);
     if (stat.size > maxEventBytes) throw failure("L1_EVENT_TOO_LARGE", `event exceeds ${maxEventBytes} bytes: ${file}`, { size: stat.size });
-    const real = await fsp.realpath(file);
+    let real: string;
+    try {
+      real = await scanFs.realpath(file);
+    } catch (err) {
+      if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during realpath: ${relativeUnix(abrainHome, file)}`, { error: errorMessage(err) });
+      throw err;
+    }
     if (!isPathInside(rootReal, real)) throw failure("L1_PATH_ESCAPE", `event realpath escapes L1 root: ${file}`, { real });
     const relativePath = relativeUnix(abrainHome, file);
+    let raw: string;
+    try {
+      raw = await scanFs.readFile(file, "utf-8");
+    } catch (err) {
+      if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during read: ${relativePath}`, { error: errorMessage(err) });
+      throw failure("L1_ENVELOPE_INVALID", `event could not be read: ${relativePath}`, { error: errorMessage(err) });
+    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await fsp.readFile(file, "utf-8"));
+      parsed = JSON.parse(raw);
     } catch (err) {
       throw failure("L1_ENVELOPE_INVALID", `event is not valid JSON: ${relativePath}`, { error: errorMessage(err) });
     }
@@ -694,29 +731,40 @@ function classifyScanRecord(registration: L1SchemaRegistration, options: WholeL1
 }
 
 const DURABLE_WRITE_TEMP_RESIDUE = /^\.[0-9a-f]{64}\.json\.\d+\.\d+\.[0-9a-f]+\.tmp$/;
+const CANONICAL_L1_EVENT_LEAF = /^[0-9a-f]{64}\.json$/;
 
-async function listContentAddressedFiles(root: string, rootReal: string): Promise<{ files: string[]; tempResidue: string[] }> {
+async function listContentAddressedFiles(root: string, rootReal: string, scanFs: L1ScanFileSystem): Promise<{ files: string[]; tempResidue: string[] }> {
   const files: string[] = [];
   const tempResidue: string[] = [];
-  const first = await sortedDirents(root);
+  const first = await sortedDirents(root, scanFs);
   for (const firstShard of first) {
     const firstPath = path.join(root, firstShard.name);
-    await assertShardDirectory(firstShard, firstPath, rootReal, 1);
-    const second = await sortedDirents(firstPath);
+    await assertShardDirectory(firstShard, firstPath, rootReal, 1, scanFs);
+    const second = await sortedDiscoveredShardDirents(firstPath, 1, scanFs);
     for (const secondShard of second) {
       const secondPath = path.join(firstPath, secondShard.name);
-      await assertShardDirectory(secondShard, secondPath, rootReal, 2);
-      const leaves = await sortedDirents(secondPath);
+      await assertShardDirectory(secondShard, secondPath, rootReal, 2, scanFs);
+      const leaves = await sortedDiscoveredShardDirents(secondPath, 2, scanFs);
       for (const leaf of leaves) {
         const file = path.join(secondPath, leaf.name);
-        const stat = await fsp.lstat(file);
-        if (stat.isSymbolicLink()) throw failure("L1_SYMLINK_REJECTED", `symlink in L1 event tree: ${file}`);
-        if (!stat.isFile()) throw failure("L1_NON_REGULAR", `non-regular entry in L1 event shard: ${file}`);
         if (DURABLE_WRITE_TEMP_RESIDUE.test(leaf.name)) {
+          const stat = await lstatIfPresent(file, scanFs);
+          if (!stat) continue;
+          if (stat.isSymbolicLink()) throw failure("L1_SYMLINK_REJECTED", `symlink in L1 event tree: ${file}`);
+          if (!stat.isFile()) throw failure("L1_NON_REGULAR", `non-regular entry in L1 event shard: ${file}`);
           tempResidue.push(file);
           continue;
         }
-        if (!/^[0-9a-f]{64}\.json$/.test(leaf.name)) throw failure("L1_PATH_MISMATCH", `invalid L1 event filename: ${file}`);
+        if (!CANONICAL_L1_EVENT_LEAF.test(leaf.name)) throw failure("L1_PATH_MISMATCH", `invalid L1 event filename: ${file}`);
+        let stat: fs.Stats;
+        try {
+          stat = await scanFs.lstat(file);
+        } catch (err) {
+          if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `canonical event disappeared during discovery: ${file}`, { error: errorMessage(err) });
+          throw err;
+        }
+        if (stat.isSymbolicLink()) throw failure("L1_SYMLINK_REJECTED", `symlink in L1 event tree: ${file}`);
+        if (!stat.isFile()) throw failure("L1_NON_REGULAR", `non-regular entry in L1 event shard: ${file}`);
         files.push(file);
       }
     }
@@ -724,27 +772,39 @@ async function listContentAddressedFiles(root: string, rootReal: string): Promis
   return { files, tempResidue };
 }
 
-async function assertShardDirectory(entry: fs.Dirent, fullPath: string, rootReal: string, depth: number): Promise<void> {
-  const stat = await fsp.lstat(fullPath);
+async function assertShardDirectory(entry: fs.Dirent, fullPath: string, rootReal: string, depth: number, scanFs: L1ScanFileSystem): Promise<void> {
+  if (!/^[0-9a-f]{2}$/.test(entry.name)) throw failure("L1_PATH_MISMATCH", `invalid shard name at depth ${depth}: ${fullPath}`);
+  let stat: fs.Stats;
+  try {
+    stat = await scanFs.lstat(fullPath);
+  } catch (err) {
+    if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `discovered canonical shard disappeared during depth ${depth} validation: ${fullPath}`, { error: errorMessage(err) });
+    throw err;
+  }
   if (stat.isSymbolicLink()) throw failure("L1_SYMLINK_REJECTED", `symlink in L1 shard tree: ${fullPath}`);
   if (!stat.isDirectory()) throw failure("L1_NON_REGULAR", `expected shard directory at depth ${depth}: ${fullPath}`);
-  if (!/^[0-9a-f]{2}$/.test(entry.name)) throw failure("L1_PATH_MISMATCH", `invalid shard name at depth ${depth}: ${fullPath}`);
-  const real = await fsp.realpath(fullPath);
+  let real: string;
+  try {
+    real = await scanFs.realpath(fullPath);
+  } catch (err) {
+    if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `discovered canonical shard disappeared during depth ${depth} realpath: ${fullPath}`, { error: errorMessage(err) });
+    throw err;
+  }
   if (!isPathInside(rootReal, real)) throw failure("L1_PATH_ESCAPE", `shard realpath escapes L1 root: ${fullPath}`, { real });
 }
 
-async function assertExistingDirectoryChainNoSymlink(abrainHome: string, root: string): Promise<string> {
+async function assertExistingDirectoryChainNoSymlink(abrainHome: string, root: string, scanFs: L1ScanFileSystem): Promise<string> {
   const relative = path.relative(abrainHome, root);
   if (relative.startsWith("..") || path.isAbsolute(relative)) throw failure("L1_PATH_ESCAPE", "L1 root escapes abrainHome");
   let current = abrainHome;
   for (const component of ["", ...relative.split(path.sep).filter(Boolean)]) {
     if (component) current = path.join(current, component);
-    const stat = await fsp.lstat(current);
+    const stat = await scanFs.lstat(current);
     if (stat.isSymbolicLink()) throw failure("L1_SYMLINK_REJECTED", `symlink in L1 root chain: ${current}`);
     if (!stat.isDirectory()) throw failure("L1_NON_REGULAR", `L1 root component is not a directory: ${current}`);
   }
-  const abrainReal = await fsp.realpath(abrainHome);
-  const rootReal = await fsp.realpath(root);
+  const abrainReal = await scanFs.realpath(abrainHome);
+  const rootReal = await scanFs.realpath(root);
   if (!isPathInside(abrainReal, rootReal)) throw failure("L1_PATH_ESCAPE", "L1 root realpath escapes abrainHome", { rootReal, abrainReal });
   return rootReal;
 }
@@ -862,13 +922,31 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-async function sortedDirents(dir: string): Promise<fs.Dirent[]> {
-  return (await fsp.readdir(dir, { withFileTypes: true })).sort((left: fs.Dirent, right: fs.Dirent) => compareCodeUnits(left.name, right.name));
+async function sortedDirents(dir: string, scanFs: L1ScanFileSystem): Promise<fs.Dirent[]> {
+  return (await scanFs.readdir(dir, { withFileTypes: true })).sort((left: fs.Dirent, right: fs.Dirent) => compareCodeUnits(left.name, right.name));
 }
 
-async function exists(file: string): Promise<boolean> {
+async function sortedDiscoveredShardDirents(dir: string, depth: number, scanFs: L1ScanFileSystem): Promise<fs.Dirent[]> {
   try {
-    await fsp.lstat(file);
+    return await sortedDirents(dir, scanFs);
+  } catch (err) {
+    if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `discovered canonical shard disappeared before depth ${depth} contents could be read: ${dir}`, { error: errorMessage(err) });
+    throw err;
+  }
+}
+
+async function lstatIfPresent(file: string, scanFs: L1ScanFileSystem): Promise<fs.Stats | null> {
+  try {
+    return await scanFs.lstat(file);
+  } catch (err) {
+    if (isEnoent(err)) return null;
+    throw err;
+  }
+}
+
+async function exists(file: string, scanFs: L1ScanFileSystem): Promise<boolean> {
+  try {
+    await scanFs.lstat(file);
     return true;
   } catch (err) {
     if (isNodeError(err) && err.code === "ENOENT") return false;
@@ -878,6 +956,10 @@ async function exists(file: string): Promise<boolean> {
 
 function isNodeError(err: unknown): err is NodeJS.ErrnoException {
   return !!err && typeof err === "object" && "code" in err;
+}
+
+function isEnoent(err: unknown): boolean {
+  return isNodeError(err) && err.code === "ENOENT";
 }
 
 function errorMessage(err: unknown): string {
@@ -893,3 +975,8 @@ function deepFreeze<T>(value: T): T {
 }
 
 export { sha256Hex };
+
+export const __TEST = {
+  scanWholeL1ValidatedWithFileSystem,
+  nodeL1ScanFileSystem,
+};

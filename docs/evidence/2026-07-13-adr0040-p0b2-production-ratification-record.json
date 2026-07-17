@@ -1,0 +1,80 @@
+{
+  "schema_version": "proposition-p0b2-production-ratification-record/v1",
+  "record_canonicalization": "RFC8785-JCS",
+  "record_hash_algorithm": "sha256",
+  "record_hash_scope": "sha256 over RFC8785-JCS UTF-8 bytes of this ratification record object with record_hash omitted",
+  "record_hash": "dcb516b937e5033642ecbbaf7f356f8bb4156c5877217269d6b04eacbf271d83",
+  "record_kind": "real_user_ratification",
+  "synthetic_fixture": false,
+  "synthetic_fixture_scope": {
+    "valid_for": "production",
+    "not_valid_for_abrain_home": null
+  },
+  "preview_dossier": {
+    "schema_version": "proposition-p0b2-production-preview-dossier/v1",
+    "dossier_hash": "68151ee7cba08585ea1bb4627371087b751bba29309dac0d88165e3781a82043",
+    "event_id": "3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3",
+    "canonical_envelope_bytes_sha256": "d9c811f6cef676031a1513e6b1c09f2501b32ff4ea459cca3275c31d56176da5",
+    "target_path": "/home/worker/.abrain/l1/events/sha256/39/75/3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3.json",
+    "relative_path": "l1/events/sha256/39/75/3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3.json"
+  },
+  "post_execute_dossier_output": {
+    "path": "/home/worker/.pi/agent/skills/pi-astack/docs/evidence/2026-07-13-adr0040-p0b2-production-post-execute-dossier.json",
+    "repo_relative_path": "docs/evidence/2026-07-13-adr0040-p0b2-production-post-execute-dossier.json",
+    "repo_relative_path_sha256": "cae1754ceafab7cf45545e91bf9811b2f5e1756576143591bed853cf68f677d1"
+  },
+  "authorization_evidence": {
+    "evidence_kind": "explicit_user_ratification",
+    "authorized_by": "user",
+    "transcript_evidence": {
+      "session_jsonl_path": "/home/worker/.pi/agent/sessions/--home-worker-.pi--/2026-07-12T13-55-08-627Z_019f569c-40d3-73f0-9a5f-666b395f6b9a.jsonl",
+      "session_jsonl_relative_path": "--home-worker-.pi--/2026-07-12T13-55-08-627Z_019f569c-40d3-73f0-9a5f-666b395f6b9a.jsonl",
+      "session_id": "019f569c-40d3-73f0-9a5f-666b395f6b9a",
+      "message_id": "c393bab3",
+      "message_parent_id": "3e3a5ef1",
+      "message_line_number": 126,
+      "timestamp": "2026-07-13T06:51:31.018Z",
+      "role": "user",
+      "text_sha256": "8569e90eeb7c0f69e51eb9e1a9856981caf77d3c13980824aec9f944e8570b81",
+      "transcript_prefix_sha256": "9c9b1903a317a62636dd8c1a9267d398a5208af699e74322ff39396418e772c7",
+      "authorization_causal_anchor": {
+        "raw": "<causal_anchor session_id=\"019f569c-40d3-73f0-9a5f-666b395f6b9a\" turn_id=\"0\" subturn=\"1\" sub_agent_label=\"dispatch_agent\"/>",
+        "raw_sha256": "2728bed70480bb0b10e54cb93199fd74baa3cccffa0615bc37817648f1b67634",
+        "session_id": "019f569c-40d3-73f0-9a5f-666b395f6b9a",
+        "turn_id": "0",
+        "subturn": "1",
+        "sub_agent_label": "dispatch_agent"
+      }
+    }
+  },
+  "authorized_actions": [
+    {
+      "action": "append_l1_event",
+      "cardinality": "exactly_one",
+      "abrain_home": "/home/worker/.abrain",
+      "target_path": "/home/worker/.abrain/l1/events/sha256/39/75/3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3.json",
+      "relative_path": "l1/events/sha256/39/75/3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3.json",
+      "event_id": "3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3",
+      "canonical_envelope_bytes_sha256": "d9c811f6cef676031a1513e6b1c09f2501b32ff4ea459cca3275c31d56176da5",
+      "allowed_write_statuses": [
+        "created",
+        "identical"
+      ],
+      "prohibited_mutation_classes": [
+        "l2",
+        "state",
+        "rules",
+        "knowledge",
+        "projects",
+        "legacy"
+      ]
+    }
+  ],
+  "constraints": {
+    "no_l2_state_legacy_mutation": true,
+    "generic_write_gate_must_remain": "L1_SCHEMA_WRITE_DISABLED",
+    "post_execute_dossier_outside_abrain": true,
+    "no_runtime_read_flip": true,
+    "no_legacy_authority_retirement": true
+  }
+}

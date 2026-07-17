@@ -215,6 +215,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-dossier-s
 for (const file of [
   "extensions/_shared/durable-write.ts",
   "extensions/_shared/jcs.ts",
+  "extensions/_shared/proposition.ts",
   "extensions/_shared/l1-schema-registry.ts",
   "extensions/sediment/constraint-evidence/types.ts",
   "extensions/sediment/constraint-evidence/canonical-json.ts",

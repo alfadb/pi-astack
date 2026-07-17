@@ -41,6 +41,11 @@
   },
   {
     "file": "extensions/abrain/rule-injector/index.ts",
+    "pattern": "let policyFooterState",
+    "reason": "Session-local footer display state is used only by the activated abrain module copy; split helper-only imports can lose footer persistence but cannot cross session authority or enable writes."
+  },
+  {
+    "file": "extensions/abrain/rule-injector/index.ts",
     "pattern": "let scheduleSelfHeal",
     "reason": "Existing rule-injector self-heal scheduler hook shared with abrain startup wiring; split instances degrade scheduling but do not bypass sub-agent guards."
   },

@@ -82,6 +82,7 @@ const PHASE_STATUSES = Object.freeze([
 ]);
 const AUTHORIZATION_STATUSES = Object.freeze([
   "authorized",
+  "design_authorized",
   "not_authorized",
   "separate_authorization_required",
   "blocked_on_prerequisite",

@@ -11,6 +11,34 @@ status: active
 
 ---
 
+## 2026-07-17 — accepted — ADR 0040 lifecycle freshness closure
+
+### 变更
+
+ADR0040 lifecycle freshness control plane采用独立 head freshness/safety pointer 与 selection activation pointer，staged append由retained OFD lock、S0-S4 recovery FSM及acyclic intent/proof/head/selection closure保护。Real policy proposition append与runtime-inert D3 generation-0 publication分别经独立授权完成。
+
+### 验收边界
+
+Published selection闭合production proposition source、policy candidate与stable item，但不连接Knowledge pull、Policy push、`session_start`、canonical L2或其它runtime consumer；未改变legacy authority。P1 consumer flip、P3与P4仍需独立授权。
+
+### 关联
+
+[D3 lifecycle freshness design](notes/adr0040-d3-lifecycle-freshness-design.md)；[D3-PUB completion](notes/2026-07-17-adr0040-d3-pub-production-completion.md)；[post-publication dossier](evidence/2026-07-17-adr0040-d3-pub-production-post-publication-dossier.json)；[transition register](transition-register.md)。
+
+## 2026-07-14 — accepted — ADR 0040 deterministic pull/policy projections and confined publication
+
+### 变更
+
+Knowledge pull与Policy push均从统一 proposition/lifecycle SOT生成独立deterministic projection。Pull保留可检索命题而不派生push authority；Policy candidate只表达`relevance_only_no_injection_verdict`，并按固定九阶段首因全序排除不合格source。Policy publication使用static-plan authorization、verified-FD confinement、exact drift/protected-state validation及五项verdict AND。
+
+### 验收边界
+
+Projection与publication不启用generic proposition writes，不把candidate或published shadow解释为runtime injection authority，也不授权任何consumer read flip。长期契约见 [proposition contracts](notes/adr0040-proposition-contracts.md) 与 [D3 lifecycle freshness design](notes/adr0040-d3-lifecycle-freshness-design.md)；machine evidence由 [transition register](transition-register.md) 指向canonical plan、ratification、intent与post dossier。
+
+### 关联
+
+[Proposition contracts](notes/adr0040-proposition-contracts.md)；[P2a.2 plan/reviews/intent](evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/)；[P2a.2 post dossier](evidence/2026-07-14-adr0040-p2a2-production-post-execution-dossier.json)；[transition register](transition-register.md)。
+
 ## 2026-07-13 — accepted — ADR 0041 prompt_user 无期限等待
 
 ### 变更
@@ -24,6 +52,22 @@ status: active
 
 ### 关联
 [ADR 0041](adr/0041-prompt-user-indefinite-wait.md)；[REQ-008](requirements.md#req-008--prompt_user-与-vault_release-语义边界分离adr-0022)；[current-state.md](current-state.md#10-prompt_user)。
+
+## 2026-07-12 — accepted — ADR 0040 unified proposition and authorization contracts
+
+### 变更
+
+ADR0040将durable cognitive content统一为append-only L1 Evidence SOT上的typed proposition，并共享retract/rescope/supersede/archive/reactivate lifecycle。`defined_inactive`允许完整schema声明但保持non-writable/non-foldable；production genesis以binding manifest固定创建时registry/schema provenance，后续event显式绑定epoch/genesis。Canonical facts不包含`injectMode`、always、priority或session-start eligibility。
+
+Production dedicated writer只能重建frozen tuple，并通过trusted transcript ratification、no-replace intent和exact recovery执行；不存在env/force/raw-text bypass。既有rules、constraint evidence与compiled rules不迁移、不自动激活进新policy view。
+
+### 验收边界
+
+ADR acceptance与任一阶段completion都不授权下一阶段、runtime read flip或legacy retirement；每个读取面独立授权。机器状态与证据由transition register维护，不在changelog复制hash和阶段流水。
+
+### 关联
+
+[ADR 0040](adr/0040-unified-proposition-evidence-model.md)；[proposition contracts](notes/adr0040-proposition-contracts.md)；[requirements](requirements.md)；[transition register](transition-register.md)。
 
 ## 2026-07-12 — accepted — Canonical-path P1 production 收口
 

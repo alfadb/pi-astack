@@ -45,18 +45,31 @@ const LIVE = new Set([
   "stage0-nonactive",
 ]);
 
+// These gates consume a bound pre-publication production state and become
+// invalid after their immutable production target or source successor exists.
+// Keep their direct registry aliases for explicit runs against that prestate.
+const PRE_PUBLICATION_ONLY = new Set([
+  "proposition-lifecycle-freshness-d3-pub",
+  "proposition-policy-push-publication-p2a21",
+  "proposition-policy-push-live-publication-p2a22",
+]);
+
 const args = process.argv.slice(2);
 const withLive = args.includes("--live");
 const onlyLive = args.includes("--only-live");
 const timeoutArg = args.find((a) => a.startsWith("--timeout="));
 const offlineTimeoutSec = timeoutArg ? Number(timeoutArg.split("=")[1]) : 120;
 const liveTimeoutSec = Math.max(offlineTimeoutSec, 300);
+const OFFLINE_TIMEOUT_MINIMUMS = new Map([
+  ["proposition-lifecycle-freshness-d3-wf", 360],
+]);
 
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
 const allSmokes = Object.keys(pkg.scripts || {})
   .filter((k) => k.startsWith("smoke:"))
   .map((k) => ({ name: k.slice("smoke:".length), cmd: pkg.scripts[k] }))
-  .filter((s) => s.name !== "all"); // never recurse into this runner
+  .filter((s) => s.name !== "all") // never recurse into this runner
+  .filter((s) => !PRE_PUBLICATION_ONLY.has(s.name));
 
 // Parse `node scripts/<file>.mjs` out of the npm script body so we can spawn
 // node directly (skips per-test npm overhead).
@@ -69,22 +82,30 @@ function classify(name) {
   return LIVE.has(name) ? "live" : "offline";
 }
 
+function timeoutFor(name, lane) {
+  if (lane === "live") return liveTimeoutSec;
+  return Math.max(offlineTimeoutSec, OFFLINE_TIMEOUT_MINIMUMS.get(name) ?? offlineTimeoutSec);
+}
+
 let selected = allSmokes;
 if (onlyLive) selected = allSmokes.filter((s) => classify(s.name) === "live");
 else if (!withLive) selected = allSmokes.filter((s) => classify(s.name) === "offline");
 
 selected.sort((a, b) => a.name.localeCompare(b.name));
 
+const offlineTimeoutOverrides = [...OFFLINE_TIMEOUT_MINIMUMS]
+  .map(([name, seconds]) => `${name}=${Math.max(offlineTimeoutSec, seconds)}s`)
+  .join(", ");
 console.log(`smoke-all — ${selected.length} smoke(s) selected ` +
   `(${onlyLive ? "live only" : withLive ? "offline + live" : "offline only"}; ` +
-  `offline timeout ${offlineTimeoutSec}s, live timeout ${liveTimeoutSec}s)\n`);
+  `offline timeout default ${offlineTimeoutSec}s, per-name ${offlineTimeoutOverrides}, live timeout ${liveTimeoutSec}s)\n`);
 
 const results = [];
 for (const s of selected) {
   const lane = classify(s.name);
+  const timeoutSec = timeoutFor(s.name, lane);
   const file = parseNodeScript(s.cmd);
-  if (!file) { results.push({ name: s.name, lane, status: "SKIP-UNPARSEABLE" }); continue; }
-  const timeoutSec = lane === "live" ? liveTimeoutSec : offlineTimeoutSec;
+  if (!file) { results.push({ name: s.name, lane, status: "SKIP-UNPARSEABLE", timeoutSec }); continue; }
   const started = Date.now();
   const run = spawnSync("node", [file], {
     cwd: repoRoot,
@@ -99,10 +120,10 @@ for (const s of selected) {
   else status = "FAIL";
   const out = ((run.stdout || "") + (run.stderr || ""));
   const skipped = status === "PASS" && /\bSKIP:/.test(out);
-  results.push({ name: s.name, lane, status: skipped ? "SKIP" : status, ms, out });
+  results.push({ name: s.name, lane, status: skipped ? "SKIP" : status, ms, out, timeoutSec });
   const tag = skipped ? "SKIP" : status;
   const icon = tag === "PASS" ? "ok  " : tag === "SKIP" ? "skip" : tag === "TIMEOUT" ? "time" : "FAIL";
-  console.log(`  ${icon}  [${lane}] ${s.name} (${(ms / 1000).toFixed(1)}s)`);
+  console.log(`  ${icon}  [${lane}] ${s.name} (${(ms / 1000).toFixed(1)}s; timeout ${timeoutSec}s)`);
   if (status === "FAIL") {
     const tail = out.trim().split(/\n/).slice(-4).map((l) => "        | " + l).join("\n");
     if (tail) console.log(tail);
@@ -117,6 +138,7 @@ const liveTimeout = results.filter((r) => r.lane === "live" && r.status === "TIM
 
 const counts = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});
 console.log(`\nsummary: ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+console.log(`timeouts: offline-default=${offlineTimeoutSec}s, ${offlineTimeoutOverrides}, live=${liveTimeoutSec}s`);
 if (liveTimeout.length) console.log(`live timeouts (warn, not gating): ${liveTimeout.map((r) => r.name).join(", ")}`);
 
 const hardFail = [...offlineBad, ...liveFail];

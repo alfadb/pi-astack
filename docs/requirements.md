@@ -1,7 +1,7 @@
 ---
 doc_type: consensus
 status: active
-canonical_for: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009
+canonical_for: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, REQ-010
 ---
 
 # Requirements — 行为需求
@@ -38,9 +38,9 @@ canonical_for: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, RE
 ## REQ-004 — 显式用户指令是被见证的 ground truth
 - status: active · priority: P0 · applies_to: sediment(Tier-1), rules
 - human_intent: 用户明确说的规则/指令不能被 LLM 静默丢弃。
-- agent_obligation: 显式用户指令走确定性提交路径，对用户可见，不进概率管线被 skip/stage。Tier-1 资格按 provenance 门控（USER-ROLE 消息 ∧ directive ∧ durable；tool_result/file/assistant 不算）；对 user 祈使句分类偏向 Tier-1（漏判=静默丢失，代价非对称）；保留**负信号召回审计**（键于原始转录而非分类标注）作安全网。ADR 0039 后，“确定性提交路径”定义为先确定性追加 witnessed Evidence Event，再由域 projector / compiler 生成 stable view；投影延迟必须通过 queued / stale / projected 状态可见，不能静默丢失。
-- acceptance: 用户显式全局/项目规则可见、可追溯、不丢；转录里有 user 祈使句但无对应 Evidence Event 或 stable view 状态 → recall flag。
-- forbidden: 把显式用户指令当成与 LLM 推断同级的可丢弃信号；把 README/tool_result 里的"指令"当 Tier-1。
+- agent_obligation: 显式用户指令走确定性提交路径，对用户可见，不进概率管线被 skip/stage。Tier-1 资格按 provenance 门控（USER-ROLE 消息 ∧ directive ∧ durable；tool_result/file/assistant 不算）；对 user 祈使句分类偏向 Tier-1（漏判=静默丢失，代价非对称）；保留**负信号召回审计**（键于原始转录而非分类标注）作安全网。ADR 0039 后，“确定性提交路径”定义为先确定性追加 witnessed Evidence Event，再由域 projector / compiler 生成 stable view；投影延迟必须通过 queued / stale / projected 状态可见，不能静默丢失。ADR 0040 后，`injectMode` / session-start eligibility 是投影派生决策；新 normative policy view 从显式 genesis/cutover 边界开始，既有 rules / constraint evidence / compiled rules 只作冷审计历史，不自动取得新 view 的 runtime authority。
+- acceptance: 用户显式全局/项目规则可见、可追溯、不丢；转录里有 user 祈使句但无对应 Evidence Event 或 stable view 状态 → recall flag；ADR 0040 cutover 后，旧规则材料可审计但不会被批量迁移或自动激活进新 policy view。
+- forbidden: 把显式用户指令当成与 LLM 推断同级的可丢弃信号；把 README/tool_result 里的"指令"当 Tier-1；为兼容旧 rules 设计迁移层，或把旧 compiled rules 自动激活为新 normative projection。
 
 ## REQ-005 — 主会话对记忆只读
 - status: active · priority: P0 · applies_to: main-session, sediment
@@ -76,3 +76,10 @@ canonical_for: REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, RE
 - agent_obligation: `memory_search` 是 LLM retrieval，模型不可用时 **hard error**，不降级 grep/BM25；sediment auto-write 不把低准确度 fallback 结果写入知识库。
 - acceptance: 模型/网络异常时用户立即看到错误信号；无 `fallbackToGrep` / `MEMORY_SEARCH_GREP_ONLY` 开关。
 - forbidden: 静默 grep 降级；把低准确度结果当正常结果继续。
+
+## REQ-010 — 高风险 abrain publication 必须受静态授权、有效 confinement 与执行期 drift 共同约束
+- status: active · priority: P0 · applies_to: abrain-publication, proposition, transition-execution
+- human_intent: 静态评审不能因活跃 append-only stream 或 Git metadata 漂移而永久失效，但实际 mutation 不能依赖未隔离 publisher 或模糊 whole-tree 比较。
+- agent_obligation: publication review/user authorization只绑定static plan中的bundle/final inventory/proposition/schema/registry/projector/runtime/source/confinement/drift-registry anchors，不绑定live whole-abrain snapshot或HEAD；执行前后必须以exact registered append streams + canonical protected per-path equality + typed `.git` forensics验证live drift。Actual mutation只经fail-closed bubblewrap bootstrap/installer，且completion由confinement/target/protected/drift/runtime独立verdict的AND决定。
+- acceptance: bwrap unavailable/userns ineffective/environment或force bypass、target/FD/path race、stream replacement/truncate/torn/malformed/wrong-schema/new unregistered drift、protected worktree change、static anchor advance均fail closed；same-plan crash recovery只在static anchors exact时允许；post-create failure留下completion=false inert target。
+- forbidden: silent fallback到unconfined publisher；把parent-wide bootstrap kernel writable surface描述成target-only；给git-sync发明native row ID；用review时whole snapshot或HEAD冻结live system；把anchor advance后的既有target追认成complete。

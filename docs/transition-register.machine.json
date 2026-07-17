@@ -1,7 +1,7 @@
 {
   "schema_version": "transition-register/v1",
   "register_id": "pi-astack-transition-register",
-  "updated": "2026-07-12",
+  "updated": "2026-07-17",
   "review_policy": {
     "cadence": "biweekly",
     "default_owner": "pi-astack-maintainers",
@@ -206,6 +206,474 @@
       "renewal_count": 0,
       "risk_class": "critical",
       "next_action": "先重跑 compile 确认，再评估 flip。"
+    },
+    {
+      "id": "proposition.adr0040-p0a",
+      "partition": "proposition",
+      "title": "ADR0040 P0a/P0b1 schema+sandbox genesis",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-12",
+      "review_by": "2026-07-24",
+      "current": "P0a repo-side proposition contracts and P0b.1 sandbox genesis remain completed. The production genesis binding hashes are immutable historical provenance; P1b later added only its dedicated producer to the inactive evidence allowlist and updated current registry/schema anchors without rewriting genesis or enabling generic writes. Runtime read/write authority is unchanged.",
+      "exit": [
+        "proposition evidence/lifecycle/genesis contract 以 defined_inactive 注册且 generic 写入 preflight 继续 L1_SCHEMA_WRITE_DISABLED",
+        "production genesis contract binds registry_id、registry canonical/file SHA-256、proposition schema contract hash 与 binding manifest hash",
+        "sandbox smoke 证明 exactly-one inactive genesis、selected/foldable=0、evidence/lifecycle/projection=0、idempotent rerun identical、epoch drift/conflict fail-closed、reader byte-identical、无 L2/state/legacy mutation",
+        "P0a/P0b1 note/changelog/roadmap 登记完成且未声明 runtime 切换"
+      ],
+      "evidence": [
+        "ADR 0040",
+        "docs/notes/adr0040-proposition-contracts.md",
+        "schemas/l1-schema-role-registry.json",
+        "extensions/_shared/proposition.ts",
+        "extensions/_shared/proposition-genesis-writer.ts",
+        "scripts/smoke-proposition-p0a.mjs",
+        "scripts/smoke-proposition-p0b1.mjs",
+        "scripts/dossier-proposition-p0b1-sandbox.mjs"
+      ],
+      "owner": "adr0040-p0a-p0b1",
+      "consumer": [
+        "L1 schema registry",
+        "proposition validator smoke",
+        "sandbox production genesis dossier",
+        "future P0b2 production genesis gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "保持 P0a/P0b1 completed；P0b2 已在独立授权下完成，后续状态按各自 stable ID 单独门控。"
+    },
+    {
+      "id": "proposition.adr0040-p0b2-production-genesis",
+      "partition": "proposition",
+      "title": "ADR0040 P0b2 real production genesis append",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-13",
+      "review_by": "2026-07-24",
+      "current": "ADR0040 P0b2 real /home/worker/.abrain production genesis append completed under transcript-backed user ratification. The executor bound preview dossier hash 68151ee7cba08585ea1bb4627371087b751bba29309dac0d88165e3781a82043, event id 3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3, canonical envelope bytes SHA-256 d9c811f6cef676031a1513e6b1c09f2501b32ff4ea459cca3275c31d56176da5, target path, post dossier output, session-relative JSONL, target user message id c393bab3 / parent 3e3a5ef1 / line 126 / timestamp 2026-07-13T06:51:31.018Z, prefix byte SHA-256 9c9b1903a317a62636dd8c1a9267d398a5208af699e74322ff39396418e772c7, and exactly-one append action. Production CLI first status was created and immediate target rerun was identical. Post dossier validator passed, target bytes match preview exactly, selected/foldable sets are unchanged, generic proposition write gate remains L1_SCHEMA_WRITE_DISABLED, and L2/.state/rules/knowledge/projects surfaces are unchanged. The event remains the unique inert defined-inactive production genesis; P1a, the P1b non-empty shadow experiment, P2a.1, and inert P2a.2 production publication later completed under their own authorizations. P1 consumer parity/read flip, P2b stable view, P3 runtime flips, and P4 legacy retirement remain separately gated.",
+      "exit": [
+        "DONE: transcript-backed real_user_ratification record created from the current session JSONL and bound exact preview dossier hash, event id, canonical bytes, target, output, session relative path, target message id/parent/line/timestamp, prefix byte SHA-256, and exactly-one append action",
+        "DONE: executor preflight verified target/post dossier/intent absence, zero existing proposition events, hard real abrain, output path, ratification self-hash, and generic gate disabled before the first production write",
+        "DONE: authorized production execute CLI created the fixed L1 production genesis event, immediate no-replace target rerun returned identical, readback was byte-identical, and post dossier self-hash/validator passed",
+        "DONE: mutation inventory shows exactly one L1 event file create plus the required shard directory; selected/foldable event sets and L2/.state/rules/knowledge/projects surfaces remained unchanged",
+        "ONGOING: P1a, P1b shadow experiment, P2a.1, and inert P2a.2 publication later completed under separate authorizations; P1 consumer parity/read flip, P2b stable view, P3 runtime flips, P4 legacy retirement, and generic proposition writes remain separately gated"
+      ],
+      "evidence": [
+        "docs/notes/adr0040-proposition-contracts.md",
+        "docs/evidence/2026-07-13-adr0040-p0b2-production-preview-dossier.json",
+        "extensions/_shared/proposition-production-preview.ts",
+        "extensions/_shared/proposition-production-execute.ts",
+        "scripts/smoke-proposition-p0b1.mjs",
+        "scripts/smoke-proposition-p0b2-preview.mjs",
+        "scripts/smoke-proposition-p0b2-execute-sandbox.mjs",
+        "scripts/dossier-proposition-p0b1-sandbox.mjs",
+        "scripts/dossier-proposition-p0b2-production-preview.mjs",
+        "scripts/execute-proposition-p0b2-production-genesis.mjs",
+        "docs/evidence/2026-07-13-adr0040-p0b2-production-ratification-record.json",
+        "docs/evidence/adr0040-p0b2-execution-intent-3975b8c76dbad212-cae1754ceafab7cf.json",
+        "docs/evidence/2026-07-13-adr0040-p0b2-production-post-execute-dossier.json",
+        "/home/worker/.abrain/l1/events/sha256/39/75/3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3.json"
+      ],
+      "owner": "adr0040-p0b2-production-genesis",
+      "consumer": [
+        "production abrain L1 append gate",
+        "ratification record validator",
+        "future proposition projector gates",
+        "runtime read-flip authorization gate"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "P0, P1 shadows, P2a.1, and inert P2a.2 publication are complete. Keep P1 consumer parity/read flip, generic writes, P2b, P3, and P4 separately blocked."
+    },
+    {
+      "id": "proposition.adr0040-p1a-knowledge-pull-shadow-foundation",
+      "partition": "proposition",
+      "title": "ADR0040 P1a Knowledge pull shadow foundation",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-13",
+      "review_by": "2026-07-24",
+      "current": "Repo-side shared lifecycle/effective-state resolver and proposition Knowledge pull shadow schema/validator/projector/CLI/smoke are complete. P1a T0 review initially BLOCKED the v1 completion evidence for dossier ancestor-symlink containment, incomplete mutation-inventory semantics, and latest bundle identity validation; the superseding v3 production evidence (dossier schema v2, self-hash bbda73093e7732a944c084e15a82782ee6a111b1c2d7e59d8ad60a9eb175f376) closes that chain. The P1a completion bundle 3128c070a434e69b6945834818b8aab9caf63288d590815de5dcb14e5bd98b34 remains retained as byte-identical historical genesis-only/zero-card evidence. P1b later published the separately authorized one-card shadow bundle 7ec9bab9b741d078c917e6f8cd97cbb46d1f3a3c046e0f7f7bac1730edf0d139. No runtime consumer is wired.",
+      "exit": [
+        "DONE: whole-L1 is read only through scanWholeL1Validated and only fixed-epoch defined-inactive proposition genesis/evidence/lifecycle records are consumed; legacy events never enter",
+        "DONE: shared resolver supports retract/rescope/supersede/archive/reactivate with an explicit operation/target matrix and fails closed on topology, causal, epoch, unknown-parent, cycle and ambiguous-state faults",
+        "DONE: cards preserve exact statement/modality/language/source/facets/scope/lifecycle without deriving push authority; sensitive or unresolved records produce text-free exclusions/diagnostics",
+        "DONE: RFC8785/JCS bundle bytes are permutation/rebuild stable and atomically published outside L1/L2 with no runtime consumer",
+        "DONE: superseding v3 production evidence (dossier schema v2) proves source remains one genesis, selected/foldable zero, generic gate disabled, full protected abrain outside the exact shadow prefix unchanged, exact shadow inventory accepted, and the later repo evidence write separately tracked/excluded from the abrain-only claim"
+      ],
+      "evidence": [
+        "docs/notes/adr0040-proposition-contracts.md",
+        "docs/evidence/2026-07-13-adr0040-p1a-production-shadow-dossier-v3.json",
+        "extensions/_shared/proposition-lifecycle-resolver.ts",
+        "extensions/_shared/proposition-knowledge-shadow.ts",
+        "scripts/project-proposition-knowledge-shadow.mjs",
+        "scripts/smoke-proposition-knowledge-shadow-p1a.mjs",
+        "/home/worker/.abrain/.state/sediment/proposition-knowledge-shadow/v1/latest/manifest.json"
+      ],
+      "owner": "adr0040-p1a-knowledge-pull-shadow",
+      "consumer": [
+        "explicit shadow CLI",
+        "offline artifact validator",
+        "transition evidence review"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep the foundation reproducible and consumer-free. The P1b non-empty shadow experiment is complete; any memory/search consumer parity proposal or runtime read flip remains separately unauthorized."
+    },
+    {
+      "id": "proposition.adr0040-p1b-knowledge-pull-consumer",
+      "partition": "proposition",
+      "title": "ADR0040 P1b non-empty Knowledge pull shadow experiment",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-13",
+      "review_by": "2026-07-24",
+      "current": "Completed and authorized only as the ADR0040 P1b non-empty Knowledge pull shadow experiment. Trusted-session message acffc6fc / parent a55219f1 / line 173 / timestamp 2026-07-13T14:43:00.992Z exactly matched the frozen v2 template; ratification record hash is 7aa67e2815bcb4748a84d9fe4e0eabc92cbcc8241f831d09a085e72c0c33ec33. The single production CLI execution created event beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585 and immediately reran identical, then published exact one-card bundle 7ec9bab9b741d078c917e6f8cd97cbb46d1f3a3c046e0f7f7bac1730edf0d139 and latest. Post dossier a8ab9f8e65975fe425405b218b9fb3ff24ed5ef905419948026ccbb5f5e66cfe validates genesis+one evidence, selected/foldable zero, generic gate L1_SCHEMA_WRITE_DISABLED, and unchanged protected surfaces. Memory/search and every live consumer remain disconnected; P1 consumer parity/read flip is not complete. P2a.1 later completed only its repo-side projector/read-only preview, while P2a.2 later completed inert publication and P2b/P3/P4 remain blocked.",
+      "exit": [
+        "DONE: R4 six-vendor unanimous design acceptance and superseding v2 preview bind the fixed tuple and deterministic expected one-card shadow",
+        "DONE: fresh exact trusted-session ratification record binds message id/parent/line/timestamp, raw-equals-normalized text SHA-256, exact transcript prefix bytes/hash, preview/event/target/output, both authorized actions, and all shadow hashes",
+        "DONE: preflight verified target/intent/post absent, exact genesis plus zero evidence, existing zero-card shadow, generic L1_SCHEMA_WRITE_DISABLED, fixed output paths, and protected production boundaries",
+        "DONE: the only production CLI execution created the fixed L1 event, immediate target rerun returned identical, created the self-hashed intent before append, published exact bundle/latest, and no-replace created the valid post dossier",
+        "DONE: read-only recovery verification validates intent/ratification/post self-hashes and bindings, whole-L1 genesis plus one evidence, selected/foldable zero, exact one card with zero exclusions/diagnostics, and unchanged L2/live-consumer/legacy authority",
+        "BOUNDARY: completed/authorized means only the non-empty pull-shadow experiment; P2a.1 and inert P2a.2 publication later completed separately. P1 consumer parity, P2b, and every runtime read flip remain separately authorized"
+      ],
+      "evidence": [
+        "ADR 0040",
+        "docs/notes/adr0040-proposition-contracts.md",
+        "docs/evidence/2026-07-13-adr0040-p1b-production-preview-dossier-v2.json",
+        "docs/evidence/2026-07-13-adr0040-p1b-production-ratification-record.json",
+        "docs/evidence/adr0040-p1b-execution-intent-beee43be3ca23c25-d4afb8ed0567e552.json",
+        "docs/evidence/2026-07-13-adr0040-p1b-production-post-execute-dossier.json",
+        "/home/worker/.abrain/l1/events/sha256/be/ee/beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585.json",
+        "/home/worker/.abrain/.state/sediment/proposition-knowledge-shadow/v1/latest/manifest.json",
+        "extensions/_shared/proposition-evidence-writer.ts",
+        "extensions/_shared/proposition-p1b-transcript.ts",
+        "extensions/_shared/proposition-p1b-production-preview.ts",
+        "extensions/_shared/proposition-p1b-production-execute.ts",
+        "scripts/dossier-proposition-p1b-production-preview.mjs",
+        "scripts/execute-proposition-p1b-production-evidence.mjs",
+        "scripts/smoke-proposition-p1b.mjs"
+      ],
+      "owner": "adr0040-p1b-knowledge-pull-consumer",
+      "consumer": [
+        "explicit shadow CLI",
+        "offline artifact validator",
+        "transition evidence review"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep the completed one-card shadow experiment consumer-free. Separately review memory/search parity before any P1 runtime flip; P2a.1/P2a.2 completion does not change this, and generic writes plus P2b/P3/P4 remain blocked."
+    },
+    {
+      "id": "proposition.adr0040-p2a1-policy-push-projector-preview",
+      "partition": "proposition",
+      "title": "ADR0040 P2a.1 policy push projector + read-only preview",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-13",
+      "review_by": "2026-07-24",
+      "current": "Repo-side deterministic policy push candidate projector and real read-only production preview remain completed and consumer-free. The P2a.1 T0 BLOCK is remediated by semantic-complete evidence/lifecycle/source-resolution validation, all 36 precedence pairs plus all 9 suffix combinations, a TypeScript-AST dependency graph from all 25 package runtime roots bound to the frozen P1b extension-list hash, and a transitive exact-byte source inventory. Production remains exact zero entries, one statement-free exclusion, and one matching diagnostic for event beee43be because consumer_hints.policy=false. Authoritative v3 dossier 188c7948df5f6b4d60291f9f736895fcb0935bc6f72dc088f48370219e353ee6 binds preserved v1/v2 history and proves full abrain equality plus empty policy-shadow prefixes. No policy shadow was published and no runtime consumer is wired.",
+      "exit": [
+        "DONE: projector consumes only whole-L1 validated fixed-epoch defined-inactive proposition records and directly reuses the shared lifecycle resolver",
+        "DONE: bundle output source IDs exactly partition resolver-derived evidence IDs; statement-free source-resolution inventory replays contiguous lifecycle topology, terminal, disposition, and activation standalone",
+        "DONE: all 36 earlier/later stage pairs and all 9 suffix combinations assert the exact first exclusion reason",
+        "DONE: fully rehashed omission/extra/duplicate/fabricated-terminal/foreign/reordered/gapped adversarial bundles are rejected",
+        "DONE: AST dependency graph covers all 25 package pi.extensions runtime roots, rejects transitive re-export and unresolved dynamic loader fixtures, and matches frozen P1b JCS hash d080b5c01c980a5633d9ee251bd21c251e47b4fcf71fd82dd1fc4c995d7a1d6d",
+        "DONE: manifest and dossier bind transitive exact-byte source inventory without claiming standalone reproduction",
+        "DONE: superseding v3 real preview proves exact production 0/1/1, selected/foldable zero, generic gate disabled, projection envelope phase-disabled, full abrain equality, broad policy shadow prefix absence before/after, and no publication"
+      ],
+      "evidence": [
+        "ADR 0040",
+        "docs/notes/adr0040-proposition-contracts.md",
+        "docs/evidence/2026-07-14-adr0040-p2a1-production-preview-dossier-v3.json",
+        "docs/evidence/2026-07-13-adr0040-p2a1-production-preview-dossier-v2.json",
+        "docs/evidence/2026-07-13-adr0040-p2a1-production-preview-dossier.json",
+        "extensions/_shared/proposition-policy-push-shadow.ts",
+        "extensions/_shared/proposition-policy-push-shadow-preview.ts",
+        "extensions/_shared/typescript-static-dependency-graph.ts",
+        "scripts/dossier-proposition-policy-push-shadow-preview.mjs",
+        "scripts/smoke-proposition-policy-push-shadow-p2a1.mjs"
+      ],
+      "owner": "adr0040-p2a1-policy-push-preview",
+      "consumer": [
+        "explicit read-only preview CLI",
+        "offline artifact validator",
+        "transition evidence review"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep P2a.1 build-only and consumer-free. P2a.2 later completed inert publication under separate evidence and authorization; P2b/P3/P4 remain blocked."
+    },
+    {
+      "id": "proposition.adr0040-p2a21-policy-push-publication-contract-preview",
+      "partition": "proposition",
+      "title": "ADR0040 P2a.2.1 policy push publication contract + read-only preview",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-14",
+      "review_by": "2026-07-24",
+      "current": "Completed and authorized only for the root-cause-repaired repo contract, temp-sandbox mutation/SIGKILL suite, canonical planned-diff generator, and historical real production read-only v3 preview. The semantic bundle is dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0 with exact production 0/1/1. The canonical v1 plan content/raw hashes are 4abcb8e5a1074f03e1fd0c907c46c5b2949bb8abca8a0e80e53040ea86577b32 and 7cd37d339625be77a11bc2c51a9abcf2a95776d8433f9fdaa1ce83fc9acbbe8f. Target absence and whole-abrain equality are historical preview facts; actual P2a.2 later completed under its own authorization and evidence.",
+      "exit": [
+        "DONE: deterministic planned-publication-diff binds the exact bundle, hard target, absent whole-abrain prestate, exact final mutation inventory, and protected prestate",
+        "DONE: intent and exact authorization text bind six fixed-order durable review paths/raw hashes/vendor/model/verdict/common diff hash; publisher rereads all bytes and recomputes the current diff before mutation",
+        "DONE: review files are accurately described as artifact bytes plus trusted-user attestation, not cryptographic vendor provenance",
+        "DONE: lock-free deterministic no-replace publication converges and fresh subprocesses recover from SIGKILL at staging-partial, bundle-ready, and complete/latest without lock or staging residue",
+        "DONE: source closure explicitly separates per-executable TS AST graphs from a closed-world inventory of JS CLIs, smoke, package scripts, schema, and reachable TS bytes",
+        "DONE: authoritative v3 production preview proves exact target absent and whole /home/worker/.abrain byte-identical with no carveout; historical v1/v2 bytes are preserved",
+        "SATISFIED LATER: actual P2a.2 used the superseding static-v2 plan, six-review byte evidence, and fresh exact trusted role=user attestation and authorization"
+      ],
+      "evidence": [
+        "ADR 0040",
+        "docs/notes/adr0040-proposition-contracts.md",
+        "docs/evidence/2026-07-14-adr0040-p2a21-production-read-only-preview-dossier-v3.json",
+        "docs/evidence/2026-07-14-adr0040-p2a21-production-read-only-preview-dossier-v2.json",
+        "docs/evidence/2026-07-14-adr0040-p2a21-production-read-only-preview-dossier.json",
+        "extensions/_shared/proposition-policy-push-shadow.ts",
+        "extensions/_shared/proposition-policy-push-publication-evidence.ts",
+        "extensions/_shared/proposition-policy-push-shadow-publication.ts",
+        "extensions/_shared/proposition-policy-push-shadow-publication-preview.ts",
+        "scripts/smoke-proposition-policy-push-publication-p2a21.mjs",
+        "scripts/generate-proposition-policy-push-planned-diff.mjs",
+        "scripts/dossier-proposition-policy-push-publication-preview.mjs",
+        "scripts/publish-proposition-policy-push-shadow.mjs"
+      ],
+      "owner": "adr0040-p2a21-policy-push-publication-contract",
+      "consumer": [
+        "explicit default-denied publication CLI",
+        "standalone offline bundle validator",
+        "read-only transition evidence review"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep P2a.2.1 bytes immutable as historical evidence. P2a.2.2 superseded its v1 plan for the completed P2a.2 authorization; do not reuse the historical whole-snapshot plan."
+    },
+    {
+      "id": "proposition.adr0040-p2a22-live-system-publication-contract-preview",
+      "partition": "proposition",
+      "title": "ADR0040 P2a.2.2 live-system publication contract + read-only preview",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-14",
+      "review_by": "2026-07-24",
+      "current": "Completed and authorized only for the repo-side live-system contract, temp-sandbox bwrap/mutation/race/SIGKILL tests, static publication-plan/v2 generation, and historical real production read-only previews. The final static plan self/raw hashes are 3177101400ceed3b5da86d6d6d99a1b269d8deef9b9bd418cfbaa33ad0c91f0a and 20f400af40eb9119d17c1fb9b26eb0b2383777fd364f37b326cad4ca1875b408. Its production nonzero append replay later passed with dossier self/raw hashes 3cffac9192f8dcb40a967871781ee1f486ee74670f1ba9f789985fbf2d065e70 and 79f91ff3e32714643f0ab2bfe7346296cc2980f4332675ed69d9a6fc57730f16. Preview target absence was historical; actual P2a.2 later completed under a separate authorization. Runtime reachability remains false.",
+      "exit": [
+        "DONE: static publication-plan/v2 binds exact bundle/final inventory, proposition/schema/registry/projector/runtime anchors, exact package commands and production CLI, a 22-row source inventory, real runtime/publication dependency graphs, exact drift registry, and bwrap/Node/Git/helper executable hashes without binding live whole-tree snapshot or HEAD",
+        "DONE: exact three-stream execution contract pins regular non-symlink dev/inode/prefix/cutoff, rechecks every named path after FD reads, rejects terminal rename/symlink swaps, and validates complete path-specific JSONL suffix rows with byte offsets/raw hashes/native IDs where present and no invented git-sync ID",
+        "DONE: effective bubblewrap preflight proves read-only host, namespace/network isolation, zero capabilities, cleared caller environment, unrelated FD closure, and no unconstrained fallback; bwrap executes from its verified FD and binds exact opened Node/helper objects",
+        "DONE: bootstrap parent/ancestor proof permits only exact parent/v1 creation and rejects v2, siblings, metadata changes, arbitrary descendants, and residue before and after mutation; installer uses verified target bind-fd as its only writable host bind",
+        "DONE: lock-free no-replace transaction makes all staging ENOENT races bounded-convergent and passes four SIGKILL transitions plus 10 repetitions x 8 processes with exact inventory and no residue",
+        "DONE: Git regular rows hash race-safe bytes, including same-size rewrite detection; real read-only preview records five independent true verdicts, exact target absence, protected equality, and a quiescent zero-suffix production window without claiming append liveness or actual publication acceptance",
+        "SATISFIED LATER: actual P2a.2 used six exact v2 review bytes and fresh exact trusted role=user authorization over the static v2 plan; no historical v1 plan authorization was reused"
+      ],
+      "evidence": [
+        "ADR 0040",
+        "docs/notes/adr0040-proposition-contracts.md",
+        "docs/evidence/2026-07-14-adr0040-p2a22-live-publication-read-only-preview-dossier-v2.json",
+        "docs/evidence/2026-07-14-adr0040-p2a22-live-publication-read-only-preview-dossier.json",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/publication-plan-v2.json",
+        "extensions/_shared/proposition-policy-push-live-publication-plan.ts",
+        "extensions/_shared/proposition-policy-push-live-publication.ts",
+        "scripts/proposition-policy-push-bootstrap-helper.mjs",
+        "scripts/proposition-policy-push-installer-helper.mjs",
+        "scripts/proposition-policy-push-confinement-probe.mjs",
+        "scripts/smoke-proposition-policy-push-live-publication-p2a22.mjs",
+        "scripts/generate-proposition-policy-push-publication-plan-v2.mjs",
+        "scripts/preview-proposition-policy-push-live-publication.mjs",
+        "scripts/publish-proposition-policy-push-shadow.mjs"
+      ],
+      "owner": "adr0040-p2a22-live-system-publication-contract",
+      "consumer": [
+        "fixed-path default-denied confined publication orchestrator",
+        "static v2 plan reviewer",
+        "read-only transition evidence review"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep P2a.2.2 preview evidence immutable. Actual P2a.2 is complete; runtime consumer work remains separately gated under P2b/P3."
+    },
+    {
+      "id": "proposition.adr0040-p2a2-policy-push-shadow-publication",
+      "partition": "proposition",
+      "title": "ADR0040 P2a.2 actual policy push shadow publication",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-13",
+      "review_by": "2026-07-24",
+      "current": "ADR0040 P2a.2 actual production shadow publication completed under exact role=user authorization after a second-round six-vendor unanimous SIGN. The inert target /home/worker/.abrain/.state/sediment/proposition-policy-push-shadow/v1 now contains exact bundle dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0 and latest; inventory hash is ee29acf5f4fc106156999f6685baf407eaf1aa523e6d2f5a292de3d4be4edb4d. Static plan raw/self hashes are 20f400af40eb9119d17c1fb9b26eb0b2383777fd364f37b326cad4ca1875b408 and 3177101400ceed3b5da86d6d6d99a1b269d8deef9b9bd418cfbaa33ad0c91f0a; intent raw/self hashes are 834915e4f5a865c1995a75236e3fb2be58db9976ce2dc9ba5b984de1e57b8c98 and 526319ea35218e6c24a9641f605e1de6ec672a7486b6e14a307cdc934065b330. The accepted nonzero replay dossier raw/self hashes are 79f91ff3e32714643f0ab2bfe7346296cc2980f4332675ed69d9a6fc57730f16 and 3cffac9192f8dcb40a967871781ee1f486ee74670f1ba9f789985fbf2d065e70. Corrected post dossier raw/self hashes are 8deffe753352e18296ac4b53b417f1f1300389a0f1e001f36e46a192d0e7f0a7 and 3ee5e8b668ad60d12137429e35abfb7ea1a6a524033011c4f7d90020d1fc3515. Runtime consumer is false and restart was not required.",
+      "exit": [
+        "DONE: final static publication-plan/v2 raw/self hashes 20f400af40eb9119d17c1fb9b26eb0b2383777fd364f37b326cad4ca1875b408 / 3177101400ceed3b5da86d6d6d99a1b269d8deef9b9bd418cfbaa33ad0c91f0a passed second-round six-vendor unanimous SIGN",
+        "DONE: fresh exact trusted role=user authorization created publication-intent/v3 raw/self hashes 834915e4f5a865c1995a75236e3fb2be58db9976ce2dc9ba5b984de1e57b8c98 / 526319ea35218e6c24a9641f605e1de6ec672a7486b6e14a307cdc934065b330",
+        "DONE: real production nonzero append replay accepted with raw/self hashes 79f91ff3e32714643f0ab2bfe7346296cc2980f4332675ed69d9a6fc57730f16 / 3cffac9192f8dcb40a967871781ee1f486ee74670f1ba9f789985fbf2d065e70",
+        "DONE: confined production execution passed independent confinement/target/protected/drift/runtime verdicts and published exact inert bundle/latest with inventory hash ee29acf5f4fc106156999f6685baf407eaf1aa523e6d2f5a292de3d4be4edb4d",
+        "DONE: corrected post dossier raw/self hashes 8deffe753352e18296ac4b53b417f1f1300389a0f1e001f36e46a192d0e7f0a7 / 3ee5e8b668ad60d12137429e35abfb7ea1a6a524033011c4f7d90020d1fc3515 validate completion",
+        "BOUNDARY: publication is inert; runtime consumer remains false, restart was not required, and P2b/P3/P4 remain separately blocked"
+      ],
+      "evidence": [
+        "ADR 0040",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/publication-plan-v2.json",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/v2-reviews/01-anthropic.json",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/v2-reviews/02-deepseek.json",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/v2-reviews/03-minimax.json",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/v2-reviews/04-moonshot.json",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/v2-reviews/05-openai.json",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/v2-reviews/06-zai.json",
+        "docs/evidence/adr0040-p2a2-publication-review-dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0/publication-intent-v3.json",
+        "docs/evidence/2026-07-14-adr0040-p2a22-production-nonzero-append-replay-dossier.json",
+        "docs/evidence/2026-07-14-adr0040-p2a2-production-post-execution-dossier.json",
+        "/home/worker/.abrain/.state/sediment/proposition-policy-push-shadow/v1/latest/manifest.json"
+      ],
+      "owner": "adr0040-p2a2-policy-push-publication",
+      "consumer": [
+        "future explicitly authorized policy shadow publisher",
+        "offline shadow reader only"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep the published bundle inert and consumer-free. P2b stable-view work and every P3 runtime read flip require separate authorization; P4 remains blocked."
+    },
+    {
+      "id": "proposition.adr0040-p2b1-stable-view-compiler-substrate",
+      "partition": "proposition",
+      "title": "ADR0040 P2b.1 repo/sandbox stable-view compiler substrate",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-14",
+      "review_by": "2026-07-24",
+      "current": "Completed as the historical six-path repo/sandbox deterministic compiler substrate and real read-only empty-source preview. The frozen P2a 0/1/1 source compiled to ready_empty with zero items and zero injectable bytes; whole abrain and P2a inventory remained unchanged, temp artifacts were removed, and runtime reachability was false. Real append and D3 shadow/WF/PUB later completed only under their own authorizations.",
+      "exit": [
+        "DONE: exact six-path create set implemented without package, registry, runtime, or existing source/test mutation",
+        "DONE: focused synthetic/adversarial smokes and effective-bwrap read-only real P2a preview passed",
+        "DONE: canonical plan and preview dossier self-hashes validate; later P2b/D3 completion is recorded under its own authorization and evidence"
+      ],
+      "evidence": [
+        "docs/notes/2026-07-14-adr0040-p2b1-stable-view-design.md",
+        "docs/evidence/adr0040-p2b1-stable-view-design/implementation-authorization-plan.json",
+        "docs/evidence/2026-07-14-adr0040-p2b1-production-read-only-preview-dossier.json"
+      ],
+      "owner": "adr0040-p2b1-stable-view-compiler-substrate",
+      "consumer": [
+        "explicit repo/sandbox compiler CLI",
+        "offline artifact validator",
+        "transition evidence review"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep the P2b.1 plan and empty-source preview immutable as historical substrate evidence; later real append and D3 completion do not rewrite this phase's original non-production scope."
+    },
+    {
+      "id": "proposition.adr0040-p2b-policy-push-stable-view",
+      "partition": "proposition",
+      "title": "ADR0040 P2b Policy/Constraint stable-view compile + parity",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-13",
+      "review_by": "2026-07-24",
+      "current": "Real policy append, D3 shadow, D3-WF sandbox replay, and D3-PUB generation-0 publication are completed under separate exact authorizations. The production v2 closure contains 3 input events, 1 active policy candidate, and 1 stable item; intent, proof, committed head, and selection validate, first publication returned published, and exact replay returned identical. The D3 selection is runtime-inert and no live consumer reads it.",
+      "exit": [
+        "DONE: real policy proposition event 1c8cc5d23110f44affb574598e65027ac350373b86c651c4ed1354ad171685a6 completed from S2 recovery to clean S4 with ratification and terminal post dossier",
+        "DONE: D3 shadow dual-pointer control plane and real production read-only preview completed without production mutation",
+        "DONE: D3-WF OFD-fenced staged append/replay completed in a system-temp sandbox without production mutation",
+        "DONE: D3-PUB generation 0 published intent 2175f55c4cbcbea6355557db597cc70f2008f6b147c7292cd7bb189b60ddc5e1, proof d47fe0eac9aac077c25abb172c0992ab7e378ac7886983a0f08779fbc0e1a2f2, head fd717f2ab5acb59267bd7ff8377a5197cf500c42fcb60b837eeabf0d077bcfea, and selection 94edfbbdf354c7df5a45337fb29365f67e12c6a792f924805cf874fe1f42ae35 with exact 3/1/1 artifacts and identical replay",
+        "BOUNDARY: completion covers only the runtime-inert artifact closure; P1 consumer parity/read flip, every P3 runtime consumer, and P4 legacy authority retirement remain separately gated"
+      ],
+      "evidence": [
+        "ADR 0040",
+        "docs/evidence/2026-07-14-adr0040-real-policy-proposition-append-production-ratification-record.json",
+        "docs/evidence/2026-07-16-adr0040-real-policy-proposition-append-s2-recovery-ready-dossier.json",
+        "docs/evidence/2026-07-14-adr0040-real-policy-proposition-append-production-post-execute-dossier.json",
+        "docs/notes/adr0040-d3-lifecycle-freshness-design.md",
+        "docs/evidence/2026-07-17-adr0040-d3-wf-sandbox-replay-dossier.json",
+        "docs/notes/2026-07-17-adr0040-d3-pub-production-completion.md",
+        "docs/evidence/2026-07-17-adr0040-d3-pub-production-ratification-record.json",
+        "docs/evidence/2026-07-17-adr0040-d3-pub-production-post-publication-dossier.json",
+        "/home/worker/.abrain/.state/sediment/proposition-lifecycle-freshness/v2/selections/current.json"
+      ],
+      "owner": "adr0040-p2b-policy-push-stable-view",
+      "consumer": [
+        "offline D3 published-closure reader",
+        "future separately authorized runtime consumers"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep the published D3 selection runtime-inert. Do not rerun the pre-publication D3-PUB gate after selection exists; any runtime consumer/read flip remains P3 and requires separate authorization and rollback evidence."
+    },
+    {
+      "id": "proposition.adr0040-p3-runtime-read-flips",
+      "partition": "proposition",
+      "title": "ADR0040 P3 runtime consumer read flips",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "blocked",
+      "authorization_status": "separate_authorization_required",
+      "entered": "2026-07-13",
+      "review_by": "2026-07-24",
+      "current": "The D3 generation-0 selection exists and validates, but no Knowledge pull, Policy push, session_start, canonical L2 or other runtime consumer reads it. Each future consumer remains an independent decision.",
+      "exit": [
+        "complete prerequisite projector phase for the specific consumer",
+        "obtain a separate explicit read-flip authorization for that consumer",
+        "record consumer-specific rollback and fail-closed behavior before mutation"
+      ],
+      "evidence": [
+        "ADR 0040",
+        "scripts/smoke-proposition-knowledge-shadow-p1a.mjs",
+        "docs/evidence/2026-07-13-adr0040-p1a-production-shadow-dossier-v3.json"
+      ],
+      "owner": "adr0040-p3-runtime-read-flips",
+      "consumer": [
+        "future runtime consumers"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Remain blocked; do not combine consumer read flips into one authorization."
+    },
+    {
+      "id": "proposition.adr0040-p4-legacy-authority-retirement",
+      "partition": "proposition",
+      "title": "ADR0040 P4 legacy authority retirement",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "blocked",
+      "authorization_status": "separate_authorization_required",
+      "entered": "2026-07-13",
+      "review_by": "2026-07-24",
+      "current": "Legacy rules, constraint evidence, compiled rules and existing Knowledge runtime authority are unchanged. P1a/P1b do not migrate, transform, activate, archive or delete them.",
+      "exit": [
+        "complete all prerequisite consumer decisions",
+        "obtain separate explicit legacy authority retirement authorization",
+        "retain cold audit history and prove no legacy material is converted into proposition authority"
+      ],
+      "evidence": [
+        "ADR 0040 no-migration cutover",
+        "docs/evidence/2026-07-13-adr0040-p1a-production-shadow-dossier-v3.json"
+      ],
+      "owner": "adr0040-p4-legacy-authority-retirement",
+      "consumer": [
+        "legacy authority governance"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Remain blocked; no archive, delete, migration or authority change is authorized."
     },
     {
       "id": "dispatch.hub-dogfood",

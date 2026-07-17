@@ -110,6 +110,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | 0038 | IDE / host 边界 | pi 引入除 CLI/TUI 外的第二个 host（原规划为 0028，因 0028 已被 ground-truth-tiered 重构占用而改号） |
 | [0034](./0034-abrain-mechanism-ingest-and-rationale-rendering.md) | **abrain mechanism-ingest + direction_impact + rationale 渲染（Phase-2 keystone）** | Accepted（2026-06-13，3×T0 一致 ratify）；解锁 ADR 机制物理瘦身/归档 + `README.md` §4 承重墙渲染；主会话只写代码，真实写入由 sediment lane 落地 |
 | [0039](./0039-constraint-pipeline-reset.md) | **Unified Evidence Architecture** | Accepted（2026-06-19，原 Constraint-only 版本 2026-06-18 accepted；统一架构修订经 4×T0 R2 全部 SIGN）；所有长期记忆先追加 Evidence Event，再由域自适应 projector / compiler 生成 stable view |
+| [0040](./0040-unified-proposition-evidence-model.md) | **Unified Proposition Evidence Model** | Accepted（2026-07-12）；统一 proposition/lifecycle SOT、no-migration cutover 与逐读取面授权边界 |
 | [0041](./0041-prompt-user-indefinite-wait.md) | **prompt_user 无期限等待** | Accepted（2026-07-13，用户直接决策）；仅 supersede ADR 0022 的 timeout 参数、默认值、timer、倒计时与 timeout 终态，保留主动取消/abort/shutdown 及全部隐私边界 |
 
 → [ADR 0027 §6](./0027-coupled-stigmergic-dual-loop-agent-system.md#6-推到独立子-adr-的能力点)
@@ -141,6 +142,8 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 
 > **ADR 0039 统一证据架构修订了 0014 / 0023 / 0028 的写入与存储口径**：旧 "Markdown + git 是 source of truth" 与 active rule 直写表述按 evidence → projector / compiler → stable view 读；canonical memory 是 append-only evidence 的物化投影，不再是实时写时语义裁决直接修改的本体。详见 [ADR 0039 §9](./0039-constraint-pipeline-reset.md#9-对既有-adr-的修订)。
 
+> **ADR 0040 继承 ADR 0039 的 L1/L2/L3 与确定性原则，但 supersede 域级 canonical 本体 / store / lifecycle 口径**：用户侧持久认知内容可统称知识，内部唯一 canonical 真相源是 append-only L1 Evidence SOT；新 normative policy view 采用 no-migration cutover，旧 rules / constraint evidence / compiled rules 只作冷审计历史，不自动获得新 runtime authority。详见 [ADR 0040](./0040-unified-proposition-evidence-model.md)。
+
 > **已删除的 gbrain 时代 ADR**（0002 / 0004 / 0005 / 0007 / 0008 / 0011 / 0012 + 0024-r5 快照）：架构已迁至 markdown+git，叙事见 [../memory-architecture.md](../memory-architecture.md)，逐字原文见 git history。编号刻意不连续、不留 stub（降噪）。
 
 ---
@@ -155,6 +158,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 - **2026-06-15** ADR 0031 完全自治自标定遗忘 **accepted**（5×T0 设计盲议 + 3×T0 文本盲审 R2 收敛 P0=0；人类设零可调策略 + INV-REVERSIBLE-AUTONOMY 可逆地板）
 - **2026-06-18** ADR 0039 Constraint Pipeline Reset **accepted**（4×T0 多轮讨论 + 草稿 R2 全部 SIGN；Constraint Draft/Event append-only + 后台 compiler + Compiled Constraint View）
 - **2026-06-19** ADR 0039 Unified Evidence Architecture 修订 **accepted**（4×T0 R2 全部 SIGN；原 Constraint-only 路线被全第二大脑记忆系统的 evidence → projector / compiler → stable view 架构吸收）
+- **2026-07-12** ADR 0040 Unified Proposition Evidence Model **accepted**（六厂商 T0 三轮一致 + owner ratify；统一 proposition/lifecycle SOT，no-migration cutover 与逐读取面授权）
 - **2026-07-13** ADR 0041 `prompt_user` indefinite wait **accepted**（用户直接决策；移除 elapsed-time 终止面，保留用户取消、turn abort、session shutdown 与 secret wipe）
 
 实施时间线请看 [`docs/current-state.md`](../current-state.md)、`docs/audits/` 与 git history，不写进 ADR 导览。

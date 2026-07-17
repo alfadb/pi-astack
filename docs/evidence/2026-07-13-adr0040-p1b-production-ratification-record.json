@@ -1,0 +1,74 @@
+{
+  "schema_version": "proposition-p1b-production-ratification-record/v1",
+  "canonicalization": "RFC8785-JCS",
+  "hash_algorithm": "sha256",
+  "record_hash_scope": "sha256 over RFC8785-JCS UTF-8 bytes of this ratification record object with record_hash omitted",
+  "record_hash": "7aa67e2815bcb4748a84d9fe4e0eabc92cbcc8241f831d09a085e72c0c33ec33",
+  "record_kind": "real_user_ratification",
+  "synthetic_fixture": false,
+  "preview": {
+    "schema_version": "proposition-p1b-production-preview-dossier/v2",
+    "dossier_hash": "74f87839b029208093f7c37d3705e9f8d008e8bbd81872e0f09f75b529b4b4b0",
+    "event_id": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585",
+    "canonical_envelope_bytes_sha256": "872d68f57fc6f8c194c6afa428863c43b4f588c21dae7451d396a4b1c7f8d35b",
+    "target_path": "/home/worker/.abrain/l1/events/sha256/be/ee/beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585.json",
+    "relative_path": "l1/events/sha256/be/ee/beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585.json",
+    "expected_shadow_bundle_hash": "7ec9bab9b741d078c917e6f8cd97cbb46d1f3a3c046e0f7f7bac1730edf0d139"
+  },
+  "post_execute_dossier": {
+    "path": "/home/worker/.pi/agent/skills/pi-astack/docs/evidence/2026-07-13-adr0040-p1b-production-post-execute-dossier.json",
+    "repo_relative_path": "docs/evidence/2026-07-13-adr0040-p1b-production-post-execute-dossier.json",
+    "repo_relative_path_sha256": "d4afb8ed0567e5524718dae3cf7b0aafec4d4dd6a62f8888d02bf54f82f16188"
+  },
+  "authorization_evidence": {
+    "evidence_kind": "explicit_user_ratification",
+    "authorized_by": "user",
+    "transcript_evidence": {
+      "session_jsonl_path": "/home/worker/.pi/agent/sessions/--home-worker-.pi--/2026-07-12T13-55-08-627Z_019f569c-40d3-73f0-9a5f-666b395f6b9a.jsonl",
+      "session_jsonl_relative_path": "--home-worker-.pi--/2026-07-12T13-55-08-627Z_019f569c-40d3-73f0-9a5f-666b395f6b9a.jsonl",
+      "session_id": "019f569c-40d3-73f0-9a5f-666b395f6b9a",
+      "message_id": "acffc6fc",
+      "message_parent_id": "a55219f1",
+      "message_line_number": 173,
+      "timestamp": "2026-07-13T14:43:00.992Z",
+      "role": "user",
+      "text_sha256": "a6a03be7154bec4dcb564cc9555ab5e5d8cad019fbc4220fc9c6783e4516584a",
+      "transcript_prefix_bytes": 2041371,
+      "transcript_prefix_sha256": "667645dfecf0ae7481bbfe6a9465751ecac417f86cb8e505c46312cace983993"
+    }
+  },
+  "authorized_actions": [
+    {
+      "action": "append_fixed_l1_event",
+      "cardinality": "exactly_one",
+      "abrain_home": "/home/worker/.abrain",
+      "target_path": "/home/worker/.abrain/l1/events/sha256/be/ee/beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585.json",
+      "relative_path": "l1/events/sha256/be/ee/beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585.json",
+      "event_id": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585",
+      "canonical_envelope_bytes_sha256": "872d68f57fc6f8c194c6afa428863c43b4f588c21dae7451d396a4b1c7f8d35b",
+      "allowed_write_statuses": [
+        "created",
+        "identical"
+      ]
+    },
+    {
+      "action": "publish_deterministic_shadow_bundle",
+      "cardinality": "exactly_one",
+      "root_relative_path": ".state/sediment/proposition-knowledge-shadow/v1",
+      "bundle_hash": "7ec9bab9b741d078c917e6f8cd97cbb46d1f3a3c046e0f7f7bac1730edf0d139",
+      "manifest_sha256": "326744c6d59afc750681494f9947e01cdafcf4b081f6267607975d87158c4f54",
+      "cards_sha256": "ae8602fc19f38376338c2b4350c048214a3f8981076512e55fcd513002aee45e",
+      "diagnostics_sha256": "2cc0d8df63e7aab5eb67233207750783ca9f0a0b14a989ac9db670920a5c23dc",
+      "exclusions_sha256": "288aa5e5f8093f78b0b71ea1e080c232fa0f0294a07048f67e0a72ec48afce2d",
+      "latest_pointer": ".state/sediment/proposition-knowledge-shadow/v1/latest"
+    }
+  ],
+  "constraints": {
+    "generic_write_gate_must_remain": "L1_SCHEMA_WRITE_DISABLED",
+    "no_l2_write": true,
+    "no_live_consumer_wiring": true,
+    "no_legacy_mutation": true,
+    "no_registry_mutation": true,
+    "no_environment_or_force_bypass": true
+  }
+}

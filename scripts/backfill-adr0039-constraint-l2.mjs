@@ -87,6 +87,7 @@ function loadProjectionModule() {
   // Full transitive dependency tree of constraint-compiler/projection.ts.
   for (const src of [
     "extensions/_shared/jcs.ts",
+    "extensions/_shared/proposition.ts",
     "extensions/_shared/l1-schema-registry.ts",
     "extensions/sediment/sanitizer.ts",
     "extensions/sediment/constraint-evidence/types.ts",

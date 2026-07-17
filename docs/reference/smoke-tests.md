@@ -23,6 +23,8 @@ For the default smoke gate, run the package alias instead of expanding it manual
 npm run smoke:all
 ```
 
+`smoke:proposition-lifecycle-freshness-d3-pub` remains registered for pre-publication reproducibility but is intentionally excluded from `smoke:all`: the production selection now exists, so that real pre-publication preview gate must not be rerun as a post-publication check. Published closure is verified read-only through the frozen capsule clean-tree reader and the canonical post-publication dossier. P2a.2.1 (`smoke:proposition-policy-push-publication-p2a21`) and P2a.2.2 (`smoke:proposition-policy-push-live-publication-p2a22`) have the same pre-publication-only status: run either explicitly and only against its phase-bound production state, including the active production L1 and its bound frozen historical baseline.
+
 ## Live prompt dossiers
 
 Live LLM prompt dossiers are not default release gates. They usually require configured provider credentials/network and are registered under `dossier:*`, not `smoke:*`.

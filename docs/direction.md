@@ -1,7 +1,7 @@
 ---
 doc_type: consensus
 status: active
-canonical_for: INV-INVISIBILITY, INV-AUTONOMY, INV-IMPLICIT-GROUND-TRUTH, INV-ACTIVE-CORRECTION, INV-MAIN-SESSION-READ-ONLY, INV-GROUND-TRUTH-TIERED, INV-DUAL-INVARIANT, INV-USER-NOT-WORKER, INV-TELL-NOT-ASK, INV-COST-NOT-A-GATE, INV-GIT-IS-RECOVERY, INV-SYNC-DETERMINISTIC-MERGE, INV-REVERSIBLE-AUTONOMY
+canonical_for: INV-INVISIBILITY, INV-AUTONOMY, INV-IMPLICIT-GROUND-TRUTH, INV-ACTIVE-CORRECTION, INV-MAIN-SESSION-READ-ONLY, INV-GROUND-TRUTH-TIERED, INV-DUAL-INVARIANT, INV-USER-NOT-WORKER, INV-TELL-NOT-ASK, INV-COST-NOT-A-GATE, INV-GIT-IS-RECOVERY, INV-SYNC-DETERMINISTIC-MERGE, INV-LIVE-PUBLICATION-CONFINEMENT, INV-REVERSIBLE-AUTONOMY
 ---
 
 # Direction - 不变量 / 取舍 / 走偏信号(承重墙)
@@ -36,9 +36,13 @@ canonical_for: INV-INVISIBILITY, INV-AUTONOMY, INV-IMPLICIT-GROUND-TRUTH, INV-AC
 ### INV-GROUND-TRUTH-TIERED(真实信号分层,ADR 0028 + ADR 0039)
 **显式用户指令是"被见证的 ground truth"**:确定性提交、对用户可见、**永不被 LLM skip/stage 丢弃**;它**不走**与 LLM 推断知识相同的概率管线。ADR 0039 后,确定性提交先表现为 witnessed Evidence Event 持久化,再由域 projector / compiler 生成 stable view;投影延迟必须通过 queued / stale / projected 状态可见,不能静默丢失。
 **分层按 provenance 门控**:Tier-1(确定性提交)当且仅当 verbatim 落在 **USER-ROLE 消息** ∧ is_directive ∧ durable;content-in-transcript / tool_result / file / assistant turn **不是** Tier-1(挡掉 README "always use Yarn" 注入陷阱),落 Tier-2 由 curator 可 skip。代价非对称(过度提升有界、漏判=静默丢失)→ 对 user 祈使句分类偏向 Tier-1。
+**ADR 0040 切换边界**:用户侧所有持久认知内容可统称为知识;内部 canonical 真相源收敛到 append-only L1 Evidence SOT。`injectMode` / session-start eligibility 是 projector 派生决策,不是写时事实。既有 rules / constraint evidence / compiled rules 不迁移、不转换、不自动激活进新 normative projection;新 policy view 从显式 genesis/cutover 边界开始,旧材料只保留冷审计历史。
 
 ### INV-SYNC-DETERMINISTIC-MERGE(同步只走确定性合并,ADR 0020)
 跨设备同步以前提是用户已在每台设备 clone 并配置 repo；pi-astack 只调用 native `git fetch`、对已配置 upstream 执行 `ff-only`，再 `git push`。发生 divergence 时由用户人工处理；pi-astack 不自动合并，也不管理 transport。**LLM 合并冲突被明确拒绝**--知识库里一句幻觉就污染基底且事后难查。
+
+### INV-LIVE-PUBLICATION-CONFINEMENT（live abrain publication 必须静态授权且执行期隔离，ADR 0040）
+对live abrain的高风险publication不得把review-time whole-tree snapshot或Git HEAD当授权事实，也不得由同一unconfined进程直接mutation。Review/user gate绑定static semantic/runtime/source/confinement anchors与exact drift registry；执行期另以registered append-only streams、canonical protected path equality与typed Git forensics判断live drift。Actual write只经fail-closed effective sandbox；confinement、target、protected、drift、runtime任一false都不能complete或追认target。该结构属于infra授权/落盘边界，不是认知层机械裁决，不违反AI-Native原则。
 
 ### 信任 × 影响半径(ADR 0013)
 门的严格度 ∝ (1-信任) × 影响半径;用户亲手输入 > 用户调用 > LLM 后台;不存在用户→world 的直接自动写。

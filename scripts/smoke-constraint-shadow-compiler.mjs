@@ -116,6 +116,7 @@ for (const file of [
   "extensions/_shared/runtime.ts",
   "extensions/_shared/durable-write.ts",
   "extensions/_shared/jcs.ts",
+  "extensions/_shared/proposition.ts",
   "extensions/_shared/l1-schema-registry.ts",
   "extensions/memory/settings.ts",
   "extensions/memory/utils.ts",

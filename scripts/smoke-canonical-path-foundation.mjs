@@ -13,6 +13,7 @@ const require = createRequire(import.meta.url);
 const { createJiti } = require("jiti");
 const jiti = createJiti(repoRoot, { interopDefault: true });
 const l1 = jiti(path.join(repoRoot, "extensions/_shared/l1-schema-registry.ts"));
+const durable = jiti(path.join(repoRoot, "extensions/_shared/durable-write.ts"));
 const transition = jiti(path.join(repoRoot, "extensions/_shared/transition-register.ts"));
 const jcs = jiti(path.join(repoRoot, "extensions/_shared/jcs.ts"));
 
@@ -111,18 +112,41 @@ function standardEnvelopes() {
   ];
 }
 
+function immediate() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function strictDurableResidueName(eventId, loop, index) {
+  const nonce = (loop * 32 + index).toString(16).padStart(16, "0");
+  return `.${eventId}.json.${process.pid}.${Date.now() + loop}.${nonce}.tmp`;
+}
+
+async function scanWithoutRawEnoent(options, label) {
+  try {
+    return await l1.scanWholeL1Validated(options);
+  } catch (err) {
+    const text = String(err?.stack || err?.message || err);
+    if (err?.code === "ENOENT" || text.includes("ENOENT: no such file or directory")) {
+      throw new Error(`${label}: raw ENOENT escaped scanWholeL1Validated: ${text}`);
+    }
+    throw err;
+  }
+}
+
 console.log("canonical-path P1-S3 foundation smoke");
 
 await check("registry loads, validates, freezes, and declares only approved schema names", () => {
   const registry = l1.loadL1SchemaRegistry();
-  assert(registry.entries.length === 10, `expected 10 entries, got ${registry.entries.length}`);
+  assert(registry.entries.length === 14, `expected 14 entries, got ${registry.entries.length}`);
   assert(Object.isFrozen(registry) && Object.isFrozen(registry.entries), "registry is mutable");
   const active = l1.lookupL1SchemaRoles(registry, { phase: "active" });
   const legacy = l1.lookupL1SchemaRoles(registry, { phase: "legacy_read_only" });
   const future = l1.lookupL1SchemaRoles(registry, { phase: "phase_disabled" });
+  const definedInactive = l1.lookupL1SchemaRoles(registry, { phase: "defined_inactive" });
   assert(active.length === 4, `expected 4 active entries, got ${active.length}`);
   assert(legacy.length === 1, `expected 1 legacy-read-only entry, got ${legacy.length}`);
-  assert(future.length === 5, `expected 5 future entries, got ${future.length}`);
+  assert(future.length === 6, `expected 6 future entries, got ${future.length}`);
+  assert(definedInactive.length === 3, `expected 3 defined-inactive entries, got ${definedInactive.length}`);
   const drainRecovery = active.find((entry) => entry.envelope_schema === "local-drain-recovery-envelope/v2");
   assert(drainRecovery && drainRecovery.role === "meta" && !drainRecovery.fold_eligible && drainRecovery.write_enabled, "local-drain-recovery-envelope/v2 must be active write-enabled meta-only");
   assert(legacy[0].envelope_schema === "drain-recovery-envelope/v1" && !legacy[0].write_enabled && !legacy[0].fold_eligible, "drain-recovery-envelope/v1 must be strict legacy read-only");
@@ -133,8 +157,16 @@ await check("registry loads, validates, freezes, and declares only approved sche
     "knowledge-candidate-observation/v1",
     "knowledge-curator-attempt/v1",
     "knowledge-curator-decision/v1",
+    "proposition-projection-envelope/v1",
   ]), `future schema names drifted: ${JSON.stringify(futureNames)}`);
   assert(future.every((entry) => entry.role === "meta" && !entry.write_enabled && !entry.fold_eligible), "future entries are not disabled meta-only declarations");
+  const propositionContracts = definedInactive.map((entry) => entry.envelope_schema).sort();
+  assert(JSON.stringify(propositionContracts) === JSON.stringify([
+    "proposition-evidence-envelope/v1",
+    "proposition-genesis-envelope/v1",
+    "proposition-lifecycle-envelope/v1",
+  ]), `defined-inactive proposition schemas drifted: ${JSON.stringify(propositionContracts)}`);
+  assert(definedInactive.every((entry) => entry.domain === "proposition" && !entry.write_enabled && !entry.fold_eligible && entry.body_schema && entry.event_types?.length && entry.producers?.length), "defined-inactive proposition contracts are not complete disabled declarations");
 });
 
 await check("registry rejects duplicate envelope and body registrations", async () => {
@@ -276,6 +308,42 @@ await check("whole-L1 scan tolerates durable-write temp residue but fails other 
   }
 });
 
+await check("whole-L1 scanner retains canonical visibility while tolerating only durable temp-leaf disappearance", async () => {
+  const home = tempHome("scanner-race");
+  try {
+    const envelope = standardEnvelopes()[0];
+    const content = `${JSON.stringify(envelope)}\n`;
+    const targetPath = l1.expectedL1EventPath(home, envelope.event_id);
+    const shardDir = path.dirname(targetPath);
+    fs.mkdirSync(shardDir, { recursive: true });
+    const firstStatus = await durable.durableAtomicCreateFile(targetPath, content, { mode: 0o600 });
+    assert(firstStatus === "created", `initial durable create status=${firstStatus}`);
+
+    for (let loop = 0; loop < 50; loop += 1) {
+      const residues = [];
+      for (let index = 0; index < 8; index += 1) {
+        const residue = path.join(shardDir, strictDurableResidueName(envelope.event_id, loop, index));
+        fs.writeFileSync(residue, "partial", "utf8");
+        residues.push(residue);
+      }
+      const writers = Array.from({ length: 4 }, () => durable.durableAtomicCreateFile(targetPath, content, { mode: 0o600 }));
+      const scan = scanWithoutRawEnoent({ abrainHome: home }, `loop ${loop}`);
+      await immediate();
+      await Promise.all(residues.map((file) => fs.promises.rm(file, { force: true })));
+      const result = await scan;
+      const statuses = await Promise.all(writers);
+      assert(statuses.every((status) => status === "identical"), `loop ${loop}: non-identical durable status ${statuses.join(",")}`);
+      assert(result.all.some((record) => record.eventId === envelope.event_id), `loop ${loop}: canonical target missing from scan`);
+    }
+
+    const final = await scanWithoutRawEnoent({ abrainHome: home }, "final");
+    assert(final.all.length === 1 && final.all[0].eventId === envelope.event_id, "final canonical target did not validate");
+    assert(final.tempResidue.length === 0, `final temp residue remained: ${JSON.stringify(final.tempResidue)}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 await check("writer preflight accepts active schema and rejects phase-disabled future schema", async () => {
   const home = tempHome("writer");
   try {
@@ -332,12 +400,28 @@ await check("whole-L1 scan rejects non-regular event-tree entries", async () => 
 await check("transition machine schema has stable unique IDs and exact canonical phase authorization", () => {
   const register = transition.loadTransitionRegister();
   const summary = transition.summarizeTransitionRegister(register);
-  assert(summary.total === 22 && summary.active === 19 && summary.gated === 3, JSON.stringify(summary));
+  assert(summary.total === 34 && summary.active === 31 && summary.gated === 3, JSON.stringify(summary));
   assert(Object.isFrozen(register) && Object.isFrozen(register.transitions), "transition register is mutable");
   const canonical = Object.fromEntries(summary.canonicalPath.map((entry) => [entry.id, `${entry.phaseStatus}/${entry.authorizationStatus}`]));
   assert(canonical["canonical_path.p1"] === "completed/authorized", "P1 status/auth mismatch");
   for (const phase of ["p2", "p3", "p4a", "p4b"]) {
     assert(canonical[`canonical_path.${phase}`] === "blocked/not_authorized", `${phase} status/auth mismatch`);
+  }
+  const proposition = Object.fromEntries(register.transitions
+    .filter((entry) => entry.partition === "proposition")
+    .map((entry) => [entry.id, `${entry.phase_status}/${entry.authorization_status}`]));
+  assert(proposition["proposition.adr0040-p1a-knowledge-pull-shadow-foundation"] === "completed/authorized", "ADR0040 P1a status/auth mismatch");
+  assert(proposition["proposition.adr0040-p1b-knowledge-pull-consumer"] === "completed/authorized", "ADR0040 P1b shadow experiment status/auth mismatch");
+  const p1b = register.transitions.find((entry) => entry.id === "proposition.adr0040-p1b-knowledge-pull-consumer");
+  assert(p1b.current.includes("P1 consumer parity/read flip is not complete"), "ADR0040 P1b completion lost the consumer/read-flip boundary");
+  assert(proposition["proposition.adr0040-p2a1-policy-push-projector-preview"] === "completed/authorized", "ADR0040 P2a.1 status/auth mismatch");
+  assert(proposition["proposition.adr0040-p2a21-policy-push-publication-contract-preview"] === "completed/authorized", "ADR0040 P2a.2.1 contract status/auth mismatch");
+  assert(proposition["proposition.adr0040-p2a2-policy-push-shadow-publication"] === "completed/authorized", "ADR0040 P2a.2 publication status/auth mismatch");
+  assert(proposition["proposition.adr0040-p2b-policy-push-stable-view"] === "completed/authorized", "ADR0040 P2b/D3 completion status/auth mismatch");
+  const p2b = register.transitions.find((entry) => entry.id === "proposition.adr0040-p2b-policy-push-stable-view");
+  assert(p2b.current.includes("D3-PUB") && p2b.current.includes("runtime-inert"), "ADR0040 P2b completion lost the D3-PUB runtime boundary");
+  for (const phase of ["p3-runtime-read-flips", "p4-legacy-authority-retirement"]) {
+    assert(proposition[`proposition.adr0040-${phase}`] === "blocked/separate_authorization_required", `ADR0040 ${phase} status/auth mismatch`);
   }
   for (const entry of register.transitions) {
     for (const field of ["entered", "review_by", "exit", "evidence", "owner", "consumer", "renewal_count", "risk_class"]) {
@@ -370,7 +454,7 @@ await check("deterministic transition CLI and read-only startup consumer are wir
   });
   assert(run.status === 0, run.stderr || `CLI status ${run.status}`);
   const output = JSON.parse(run.stdout);
-  assert(output.total === 22 && output.canonicalPath.length === 5, run.stdout);
+  assert(output.total === 34 && output.active === 31 && output.gated === 3 && output.canonicalPath.length === 5, run.stdout);
   const startupSource = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf8");
   assert(startupSource.includes("loadAndValidateTransitionRegister();"), "session startup does not consume machine transition register");
   assert(startupSource.includes("transition register invalid"), "startup validation failure is not surfaced");

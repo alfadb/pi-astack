@@ -70,6 +70,7 @@ function loadKnowledgeModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-l3-autosync-mod-"));
   stageTs(outRoot, "extensions/_shared/durable-write.ts");
   stageTs(outRoot, "extensions/_shared/jcs.ts");
+  stageTs(outRoot, "extensions/_shared/proposition.ts");
   stageTs(outRoot, "extensions/_shared/l1-schema-registry.ts");
   fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
   fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));

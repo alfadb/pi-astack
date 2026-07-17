@@ -1,0 +1,543 @@
+{
+  "schema_version": "proposition-p1b-production-preview-dossier/v1",
+  "canonicalization": "RFC8785-JCS",
+  "hash_algorithm": "sha256",
+  "dossier_hash_scope": "sha256 over RFC8785-JCS UTF-8 bytes of this dossier object with dossier_hash omitted",
+  "dossier_hash": "40ed913881b58ff796c630e3e6fa52c2b8003901081154d4f234255355d291e5",
+  "mode": "read_only_preview",
+  "authorization": {
+    "design_authorized": true,
+    "production_execution_authorized": false,
+    "authorization_status": "not_execution_authorized",
+    "production_executor_must_fail_without_fresh_exact_ratification": true,
+    "generic_write_enablement_authorized": false,
+    "runtime_consumer_authorized": false,
+    "l2_write_authorized": false,
+    "legacy_mutation_authorized": false,
+    "preview_cli": "scripts/dossier-proposition-p1b-production-preview.mjs",
+    "output_path": "/home/worker/.pi/agent/skills/pi-astack/docs/evidence/2026-07-13-adr0040-p1b-production-preview-dossier.json"
+  },
+  "review": {
+    "phase": "ADR0040-P1b",
+    "round": "R4",
+    "result": "unanimous_ACCEPT",
+    "vendors": [
+      "OpenAI",
+      "Anthropic",
+      "DeepSeek",
+      "Moonshot",
+      "MiniMax",
+      "Z.ai"
+    ],
+    "accepted_scope": "repo_plus_read_only_preview_only"
+  },
+  "attestation": {
+    "session_jsonl_path": "/home/worker/.pi/agent/sessions/--home-worker-.pi--/2026-07-12T13-55-08-627Z_019f569c-40d3-73f0-9a5f-666b395f6b9a.jsonl",
+    "session_jsonl_relative_path": "--home-worker-.pi--/2026-07-12T13-55-08-627Z_019f569c-40d3-73f0-9a5f-666b395f6b9a.jsonl",
+    "session_id": "019f569c-40d3-73f0-9a5f-666b395f6b9a",
+    "message_id": "e5b235e8",
+    "message_parent_id": "9c56c7f4",
+    "message_line_number": 145,
+    "timestamp": "2026-07-13T09:49:06.627Z",
+    "role": "user",
+    "text_sha256": "1634963e1472039c00d260957afa05eb9f8b9d35f969ace6cead73fb1657b087",
+    "transcript_prefix_bytes": 1697806,
+    "transcript_prefix_sha256": "d5b78fd92274c8dd0f7737d3ccc45072cafea95a758b16137fa694274e8ab7dd",
+    "exact_full_attestation_text": "我确认以下内容是我的持久架构主张：统一真相源、不同消费投影是第一要务。",
+    "exact_full_attestation_text_sha256": "1634963e1472039c00d260957afa05eb9f8b9d35f969ace6cead73fb1657b087",
+    "quote_text": "统一真相源、不同消费投影是第一要务。",
+    "quote_sha256": "b594404b6394f21f1e702b9af24ae5f5b371497492e29dfe8a16f1b9357217db",
+    "source_event_id_policy": "null_transcript_id_is_trigger_ref_only"
+  },
+  "tuple": {
+    "event_id": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585",
+    "body_hash": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585",
+    "canonical_envelope_bytes_sha256": "872d68f57fc6f8c194c6afa428863c43b4f588c21dae7451d396a4b1c7f8d35b",
+    "canonical_envelope_bytes_utf8": "{\"body\":{\"epoch\":{\"epoch_id\":\"adr0040-production-genesis-v1\",\"genesis_event_id\":\"3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3\"},\"event_schema_version\":\"proposition-evidence-event/v1\",\"event_type\":\"proposition_observed\",\"facets\":{\"confidence\":{\"basis\":\"witnessed\",\"score\":1},\"consumer_hints\":{\"notes\":[],\"policy\":false,\"retrieval\":true},\"contestability\":{\"counterevidence_event_ids\":[],\"status\":\"uncontested\"},\"lineage\":{\"causal_parents\":[],\"derives_from\":[],\"supersedes\":[]},\"maturity\":{\"review_state\":\"reviewed\",\"state\":\"accepted\"},\"provenance_authority\":{\"authority_kind\":\"user_attested\",\"quote_sha256\":\"b594404b6394f21f1e702b9af24ae5f5b371497492e29dfe8a16f1b9357217db\",\"source_event_id\":null,\"source_kind\":\"user\"},\"sensitivity\":{\"classification\":\"public\",\"handling\":\"none\"},\"spatial_scope\":{\"domain\":null,\"project_id\":null,\"scope_level\":\"global\"},\"temporal_horizon\":{\"horizon\":\"durable\",\"valid_from\":null,\"valid_until\":null},\"trigger\":{\"trigger_kind\":\"user_directive\",\"trigger_ref\":\"session:019f569c-40d3-73f0-9a5f-666b395f6b9a/message:e5b235e8\"}},\"producer\":{\"name\":\"pi-astack.proposition-production-evidence-writer\",\"version\":\"adr0040-production-evidence-writer/v1\"},\"proposition\":{\"language\":\"zh\",\"modality\":\"normative\",\"statement\":\"统一真相源、不同消费投影是第一要务。\"}},\"body_hash\":\"beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585\",\"canonicalization\":\"RFC8785-JCS\",\"event_id\":\"beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585\",\"hash_alg\":\"sha256\",\"schema\":\"proposition-evidence-envelope/v1\"}\n",
+    "relative_path": "l1/events/sha256/be/ee/beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585.json",
+    "target_path": "/home/worker/.abrain/l1/events/sha256/be/ee/beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585.json",
+    "target_absent": true,
+    "envelope": {
+      "schema": "proposition-evidence-envelope/v1",
+      "canonicalization": "RFC8785-JCS",
+      "hash_alg": "sha256",
+      "event_id": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585",
+      "body_hash": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585",
+      "body": {
+        "event_schema_version": "proposition-evidence-event/v1",
+        "event_type": "proposition_observed",
+        "producer": {
+          "name": "pi-astack.proposition-production-evidence-writer",
+          "version": "adr0040-production-evidence-writer/v1"
+        },
+        "epoch": {
+          "epoch_id": "adr0040-production-genesis-v1",
+          "genesis_event_id": "3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3"
+        },
+        "proposition": {
+          "statement": "统一真相源、不同消费投影是第一要务。",
+          "modality": "normative",
+          "language": "zh"
+        },
+        "facets": {
+          "provenance_authority": {
+            "source_kind": "user",
+            "authority_kind": "user_attested",
+            "source_event_id": null,
+            "quote_sha256": "b594404b6394f21f1e702b9af24ae5f5b371497492e29dfe8a16f1b9357217db"
+          },
+          "spatial_scope": {
+            "scope_level": "global",
+            "project_id": null,
+            "domain": null
+          },
+          "temporal_horizon": {
+            "horizon": "durable",
+            "valid_from": null,
+            "valid_until": null
+          },
+          "trigger": {
+            "trigger_kind": "user_directive",
+            "trigger_ref": "session:019f569c-40d3-73f0-9a5f-666b395f6b9a/message:e5b235e8"
+          },
+          "maturity": {
+            "state": "accepted",
+            "review_state": "reviewed"
+          },
+          "contestability": {
+            "status": "uncontested",
+            "counterevidence_event_ids": []
+          },
+          "confidence": {
+            "score": 1,
+            "basis": "witnessed"
+          },
+          "sensitivity": {
+            "classification": "public",
+            "handling": "none"
+          },
+          "consumer_hints": {
+            "retrieval": true,
+            "policy": false,
+            "notes": []
+          },
+          "lineage": {
+            "causal_parents": [],
+            "derives_from": [],
+            "supersedes": []
+          }
+        }
+      }
+    },
+    "source_event_id_is_null": true,
+    "trigger_ref": "session:019f569c-40d3-73f0-9a5f-666b395f6b9a/message:e5b235e8",
+    "fixed_tuple_only": true
+  },
+  "registry": {
+    "path": "/home/worker/.pi/agent/skills/pi-astack/schemas/l1-schema-role-registry.json",
+    "current": {
+      "registry_id": "pi-astack-local-convergence-r9",
+      "registry_canonical_sha256": "fcc0389c2a703f0ea5b5a73c9bb8eace7891a14f7fb85416e2dff1a1a62b5b78",
+      "registry_file_sha256": "1780f3745fbe251a10ae797f23106290f7df70c13a979514ac0bbb2a3f30246d",
+      "proposition_schema_contract_hash": "4b7a9d28b64040eb55471b72e865ed11970d11be223979fb1566ebe65ab46d2e",
+      "binding_manifest_hash": "82fbc4c1ed1751328d4b9ce25423e5d9d752f55b8626680058ef8de03b717a89",
+      "proposition_schema_contract": {
+        "schema_version": "proposition-schema-contract/v1",
+        "canonicalization": "RFC8785-JCS",
+        "hash_algorithm": "sha256",
+        "hash_scope": "sha256 over RFC8785-JCS UTF-8 bytes of this proposition schema contract object",
+        "registry_id": "pi-astack-local-convergence-r9",
+        "storage_root_relative_path": "l1/events/sha256",
+        "entries": [
+          {
+            "envelope_schema": "proposition-evidence-envelope/v1",
+            "body_schema": "proposition-evidence-event/v1",
+            "domain": "proposition",
+            "role": "evidence",
+            "phase": "defined_inactive",
+            "write_enabled": false,
+            "fold_eligible": false,
+            "event_types": [
+              "proposition_observed"
+            ],
+            "producers": [
+              "pi-astack.proposition-production-evidence-writer",
+              "pi-astack.proposition-schema-contract"
+            ]
+          },
+          {
+            "envelope_schema": "proposition-genesis-envelope/v1",
+            "body_schema": "proposition-genesis-event/v1",
+            "domain": "proposition",
+            "role": "meta",
+            "phase": "defined_inactive",
+            "write_enabled": false,
+            "fold_eligible": false,
+            "event_types": [
+              "proposition_genesis_declared"
+            ],
+            "producers": [
+              "pi-astack.proposition-production-genesis-writer",
+              "pi-astack.proposition-schema-contract"
+            ]
+          },
+          {
+            "envelope_schema": "proposition-lifecycle-envelope/v1",
+            "body_schema": "proposition-lifecycle-event/v1",
+            "domain": "proposition",
+            "role": "meta",
+            "phase": "defined_inactive",
+            "write_enabled": false,
+            "fold_eligible": false,
+            "event_types": [
+              "proposition_archive_declared",
+              "proposition_cutover_declared",
+              "proposition_reactivate_declared",
+              "proposition_rescope_declared",
+              "proposition_retract_declared",
+              "proposition_supersede_declared"
+            ],
+            "producers": [
+              "pi-astack.proposition-schema-contract"
+            ]
+          },
+          {
+            "envelope_schema": "proposition-projection-envelope/v1",
+            "body_schema": null,
+            "domain": "proposition",
+            "role": "meta",
+            "phase": "phase_disabled",
+            "write_enabled": false,
+            "fold_eligible": false,
+            "event_types": [],
+            "producers": []
+          }
+        ]
+      },
+      "proposition_schema_contract_ref": {
+        "schema_version": "proposition-schema-contract/v1",
+        "schema_contract_hash": "4b7a9d28b64040eb55471b72e865ed11970d11be223979fb1566ebe65ab46d2e",
+        "envelope_schemas": [
+          "proposition-evidence-envelope/v1",
+          "proposition-genesis-envelope/v1",
+          "proposition-lifecycle-envelope/v1",
+          "proposition-projection-envelope/v1"
+        ],
+        "body_schemas": [
+          "proposition-evidence-event/v1",
+          "proposition-genesis-event/v1",
+          "proposition-lifecycle-event/v1"
+        ],
+        "event_types": [
+          "proposition_archive_declared",
+          "proposition_cutover_declared",
+          "proposition_genesis_declared",
+          "proposition_observed",
+          "proposition_reactivate_declared",
+          "proposition_rescope_declared",
+          "proposition_retract_declared",
+          "proposition_supersede_declared"
+        ],
+        "producers": [
+          "pi-astack.proposition-production-evidence-writer",
+          "pi-astack.proposition-production-genesis-writer",
+          "pi-astack.proposition-schema-contract"
+        ]
+      }
+    },
+    "production_genesis_historical_provenance": {
+      "registry_id": "pi-astack-local-convergence-r9",
+      "registry_canonical_sha256": "6f82d86ccfadb9eefc89501febf7bd94cca8fd4bb45190e797c7ed4b911580e0",
+      "registry_file_sha256": "e89cb9009d7180bf1fab0fd285bc2832ec2d2a8f8d7663260eeb85182599f6d2",
+      "proposition_schema_contract_hash": "18bbb496bfc0ec977b916f8869dbbb6f9e3dcd72e8edd1a829a9f40832eee32a",
+      "binding_manifest_hash": "173b3ece666c5a18455d66e08480cf99c3e44ce8e604b0711f44d1fae7fe2a2f",
+      "proposition_schema_contract_ref": {
+        "schema_version": "proposition-schema-contract/v1",
+        "schema_contract_hash": "18bbb496bfc0ec977b916f8869dbbb6f9e3dcd72e8edd1a829a9f40832eee32a",
+        "envelope_schemas": [
+          "proposition-evidence-envelope/v1",
+          "proposition-genesis-envelope/v1",
+          "proposition-lifecycle-envelope/v1",
+          "proposition-projection-envelope/v1"
+        ],
+        "body_schemas": [
+          "proposition-evidence-event/v1",
+          "proposition-genesis-event/v1",
+          "proposition-lifecycle-event/v1"
+        ],
+        "event_types": [
+          "proposition_archive_declared",
+          "proposition_cutover_declared",
+          "proposition_genesis_declared",
+          "proposition_observed",
+          "proposition_reactivate_declared",
+          "proposition_rescope_declared",
+          "proposition_retract_declared",
+          "proposition_supersede_declared"
+        ],
+        "producers": [
+          "pi-astack.proposition-production-genesis-writer",
+          "pi-astack.proposition-schema-contract"
+        ]
+      }
+    },
+    "historical_binding_is_not_current_registry_invariant": true,
+    "evidence_registration": {
+      "envelope_schema": "proposition-evidence-envelope/v1",
+      "body_schema": "proposition-evidence-event/v1",
+      "domain": "proposition",
+      "role": "evidence",
+      "phase": "defined_inactive",
+      "write_enabled": false,
+      "fold_eligible": false,
+      "event_types": [
+        "proposition_observed"
+      ],
+      "producers": [
+        "pi-astack.proposition-schema-contract",
+        "pi-astack.proposition-production-evidence-writer"
+      ]
+    },
+    "generic_validateL1WritePreflight": {
+      "code": "L1_SCHEMA_WRITE_DISABLED"
+    }
+  },
+  "production_prestate": {
+    "exact_genesis_plus_zero_evidence": true,
+    "proposition_count": 1,
+    "production_genesis_count": 1,
+    "evidence_count": 0,
+    "lifecycle_count": 0,
+    "projection_count": 0,
+    "selected_count": 0,
+    "foldable_count": 0,
+    "target_absent": true
+  },
+  "existing_shadow": {
+    "root_relative_path": ".state/sediment/proposition-knowledge-shadow/v1",
+    "bundle_hash": "3128c070a434e69b6945834818b8aab9caf63288d590815de5dcb14e5bd98b34",
+    "manifest_exact_bytes_sha256": "245505097dc59643e7714ab5aa8a61bb60630d2feabeac5a84a55a80601d0a2d",
+    "artifact_rows": [
+      {
+        "bytes": 204,
+        "name": "cards.json",
+        "sha256": "69c36fba214e1f83fe55641c93db3f44cb31d6c6a401f1c5f8699004fedfec87"
+      },
+      {
+        "bytes": 216,
+        "name": "diagnostics.json",
+        "sha256": "2cc0d8df63e7aab5eb67233207750783ca9f0a0b14a989ac9db670920a5c23dc"
+      },
+      {
+        "bytes": 214,
+        "name": "exclusions.json",
+        "sha256": "288aa5e5f8093f78b0b71ea1e080c232fa0f0294a07048f67e0a72ec48afce2d"
+      }
+    ],
+    "card_count": 0,
+    "source_event_count": 1,
+    "no_runtime_consumer": true
+  },
+  "expected_post_shadow": {
+    "bundle_hash": "7ec9bab9b741d078c917e6f8cd97cbb46d1f3a3c046e0f7f7bac1730edf0d139",
+    "manifest_exact_bytes_sha256": "326744c6d59afc750681494f9947e01cdafcf4b081f6267607975d87158c4f54",
+    "artifact_rows": [
+      {
+        "name": "cards.json",
+        "sha256": "ae8602fc19f38376338c2b4350c048214a3f8981076512e55fcd513002aee45e",
+        "bytes": 2619
+      },
+      {
+        "name": "diagnostics.json",
+        "sha256": "2cc0d8df63e7aab5eb67233207750783ca9f0a0b14a989ac9db670920a5c23dc",
+        "bytes": 216
+      },
+      {
+        "name": "exclusions.json",
+        "sha256": "288aa5e5f8093f78b0b71ea1e080c232fa0f0294a07048f67e0a72ec48afce2d",
+        "bytes": 214
+      }
+    ],
+    "artifact_exact_bytes_sha256": {
+      "cards": "ae8602fc19f38376338c2b4350c048214a3f8981076512e55fcd513002aee45e",
+      "diagnostics": "2cc0d8df63e7aab5eb67233207750783ca9f0a0b14a989ac9db670920a5c23dc",
+      "exclusions": "288aa5e5f8093f78b0b71ea1e080c232fa0f0294a07048f67e0a72ec48afce2d"
+    },
+    "source_event_count": 2,
+    "source_genesis_count": 1,
+    "source_evidence_count": 1,
+    "source_selected_count": 0,
+    "source_foldable_count": 0,
+    "card_count": 1,
+    "exclusion_count": 0,
+    "diagnostic_count": 0,
+    "disposition_reason": "post_genesis_propositions_resolved",
+    "expected_card": {
+      "card_schema_version": "proposition-knowledge-pull-shadow-card/v1",
+      "card_id": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585",
+      "source_event_id": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585",
+      "source_epoch": {
+        "epoch_id": "adr0040-production-genesis-v1",
+        "genesis_event_id": "3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3"
+      },
+      "statement": "统一真相源、不同消费投影是第一要务。",
+      "modality": "normative",
+      "language": "zh",
+      "original_facets": {
+        "confidence": {
+          "basis": "witnessed",
+          "score": 1
+        },
+        "consumer_hints": {
+          "notes": [],
+          "policy": false,
+          "retrieval": true
+        },
+        "contestability": {
+          "counterevidence_event_ids": [],
+          "status": "uncontested"
+        },
+        "lineage": {
+          "causal_parents": [],
+          "derives_from": [],
+          "supersedes": []
+        },
+        "maturity": {
+          "review_state": "reviewed",
+          "state": "accepted"
+        },
+        "provenance_authority": {
+          "authority_kind": "user_attested",
+          "quote_sha256": "b594404b6394f21f1e702b9af24ae5f5b371497492e29dfe8a16f1b9357217db",
+          "source_event_id": null,
+          "source_kind": "user"
+        },
+        "sensitivity": {
+          "classification": "public",
+          "handling": "none"
+        },
+        "spatial_scope": {
+          "domain": null,
+          "project_id": null,
+          "scope_level": "global"
+        },
+        "temporal_horizon": {
+          "horizon": "durable",
+          "valid_from": null,
+          "valid_until": null
+        },
+        "trigger": {
+          "trigger_kind": "user_directive",
+          "trigger_ref": "session:019f569c-40d3-73f0-9a5f-666b395f6b9a/message:e5b235e8"
+        }
+      },
+      "effective_facets": {
+        "confidence": {
+          "basis": "witnessed",
+          "score": 1
+        },
+        "consumer_hints": {
+          "notes": [],
+          "policy": false,
+          "retrieval": true
+        },
+        "contestability": {
+          "counterevidence_event_ids": [],
+          "status": "uncontested"
+        },
+        "lineage": {
+          "causal_parents": [],
+          "derives_from": [],
+          "supersedes": []
+        },
+        "maturity": {
+          "review_state": "reviewed",
+          "state": "accepted"
+        },
+        "provenance_authority": {
+          "authority_kind": "user_attested",
+          "quote_sha256": "b594404b6394f21f1e702b9af24ae5f5b371497492e29dfe8a16f1b9357217db",
+          "source_event_id": null,
+          "source_kind": "user"
+        },
+        "sensitivity": {
+          "classification": "public",
+          "handling": "none"
+        },
+        "spatial_scope": {
+          "domain": null,
+          "project_id": null,
+          "scope_level": "global"
+        },
+        "temporal_horizon": {
+          "horizon": "durable",
+          "valid_from": null,
+          "valid_until": null
+        },
+        "trigger": {
+          "trigger_kind": "user_directive",
+          "trigger_ref": "session:019f569c-40d3-73f0-9a5f-666b395f6b9a/message:e5b235e8"
+        }
+      },
+      "scope": {
+        "domain": null,
+        "project_id": null,
+        "scope_level": "global"
+      },
+      "lifecycle": {
+        "disposition": "active",
+        "activation": "original",
+        "lineage_event_ids": [],
+        "lineage": [],
+        "terminal_event_id": "beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585"
+      }
+    },
+    "bytes": {
+      "cards.json": "{\"cards\":[{\"card_id\":\"beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585\",\"card_schema_version\":\"proposition-knowledge-pull-shadow-card/v1\",\"effective_facets\":{\"confidence\":{\"basis\":\"witnessed\",\"score\":1},\"consumer_hints\":{\"notes\":[],\"policy\":false,\"retrieval\":true},\"contestability\":{\"counterevidence_event_ids\":[],\"status\":\"uncontested\"},\"lineage\":{\"causal_parents\":[],\"derives_from\":[],\"supersedes\":[]},\"maturity\":{\"review_state\":\"reviewed\",\"state\":\"accepted\"},\"provenance_authority\":{\"authority_kind\":\"user_attested\",\"quote_sha256\":\"b594404b6394f21f1e702b9af24ae5f5b371497492e29dfe8a16f1b9357217db\",\"source_event_id\":null,\"source_kind\":\"user\"},\"sensitivity\":{\"classification\":\"public\",\"handling\":\"none\"},\"spatial_scope\":{\"domain\":null,\"project_id\":null,\"scope_level\":\"global\"},\"temporal_horizon\":{\"horizon\":\"durable\",\"valid_from\":null,\"valid_until\":null},\"trigger\":{\"trigger_kind\":\"user_directive\",\"trigger_ref\":\"session:019f569c-40d3-73f0-9a5f-666b395f6b9a/message:e5b235e8\"}},\"language\":\"zh\",\"lifecycle\":{\"activation\":\"original\",\"disposition\":\"active\",\"lineage\":[],\"lineage_event_ids\":[],\"terminal_event_id\":\"beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585\"},\"modality\":\"normative\",\"original_facets\":{\"confidence\":{\"basis\":\"witnessed\",\"score\":1},\"consumer_hints\":{\"notes\":[],\"policy\":false,\"retrieval\":true},\"contestability\":{\"counterevidence_event_ids\":[],\"status\":\"uncontested\"},\"lineage\":{\"causal_parents\":[],\"derives_from\":[],\"supersedes\":[]},\"maturity\":{\"review_state\":\"reviewed\",\"state\":\"accepted\"},\"provenance_authority\":{\"authority_kind\":\"user_attested\",\"quote_sha256\":\"b594404b6394f21f1e702b9af24ae5f5b371497492e29dfe8a16f1b9357217db\",\"source_event_id\":null,\"source_kind\":\"user\"},\"sensitivity\":{\"classification\":\"public\",\"handling\":\"none\"},\"spatial_scope\":{\"domain\":null,\"project_id\":null,\"scope_level\":\"global\"},\"temporal_horizon\":{\"horizon\":\"durable\",\"valid_from\":null,\"valid_until\":null},\"trigger\":{\"trigger_kind\":\"user_directive\",\"trigger_ref\":\"session:019f569c-40d3-73f0-9a5f-666b395f6b9a/message:e5b235e8\"}},\"scope\":{\"domain\":null,\"project_id\":null,\"scope_level\":\"global\"},\"source_epoch\":{\"epoch_id\":\"adr0040-production-genesis-v1\",\"genesis_event_id\":\"3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3\"},\"source_event_id\":\"beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585\",\"statement\":\"统一真相源、不同消费投影是第一要务。\"}],\"epoch_id\":\"adr0040-production-genesis-v1\",\"genesis_event_id\":\"3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3\",\"schema_version\":\"proposition-knowledge-pull-shadow-cards/v1\"}\n",
+      "diagnostics.json": "{\"diagnostics\":[],\"epoch_id\":\"adr0040-production-genesis-v1\",\"genesis_event_id\":\"3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3\",\"schema_version\":\"proposition-knowledge-pull-shadow-diagnostics/v1\"}\n",
+      "exclusions.json": "{\"epoch_id\":\"adr0040-production-genesis-v1\",\"exclusions\":[],\"genesis_event_id\":\"3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3\",\"schema_version\":\"proposition-knowledge-pull-shadow-exclusions/v1\"}\n",
+      "manifest.json": "{\"artifacts\":[{\"bytes\":2619,\"name\":\"cards.json\",\"sha256\":\"ae8602fc19f38376338c2b4350c048214a3f8981076512e55fcd513002aee45e\"},{\"bytes\":216,\"name\":\"diagnostics.json\",\"sha256\":\"2cc0d8df63e7aab5eb67233207750783ca9f0a0b14a989ac9db670920a5c23dc\"},{\"bytes\":214,\"name\":\"exclusions.json\",\"sha256\":\"288aa5e5f8093f78b0b71ea1e080c232fa0f0294a07048f67e0a72ec48afce2d\"}],\"authority\":\"shadow_pull_only_no_runtime_consumer\",\"bundle_hash\":\"7ec9bab9b741d078c917e6f8cd97cbb46d1f3a3c046e0f7f7bac1730edf0d139\",\"canonicalization\":\"RFC8785-JCS\",\"epoch\":{\"epoch_id\":\"adr0040-production-genesis-v1\",\"genesis_event_id\":\"3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3\"},\"hash_algorithm\":\"sha256\",\"operation_target_matrix\":{\"archive\":{\"replacement_target_kind\":null,\"result\":\"archived\",\"state_target_kinds\":[\"evidence\",\"rescope\",\"reactivate\"],\"target_count\":1},\"reactivate\":{\"replacement_target_kind\":null,\"result\":\"active\",\"state_target_kinds\":[\"retract\",\"archive\"],\"target_count\":1},\"rescope\":{\"replacement_target_kind\":null,\"result\":\"active\",\"state_target_kinds\":[\"evidence\",\"rescope\",\"reactivate\"],\"target_count\":1},\"retract\":{\"replacement_target_kind\":null,\"result\":\"retracted\",\"state_target_kinds\":[\"evidence\",\"rescope\",\"reactivate\"],\"target_count\":1},\"supersede\":{\"replacement_target_kind\":\"evidence\",\"result\":\"superseded\",\"state_target_kinds\":[\"evidence\",\"rescope\",\"reactivate\"],\"target_count\":2}},\"projection_envelope_contract\":{\"body_schema\":null,\"envelope_schema\":\"proposition-projection-envelope/v1\",\"fold_eligible\":false,\"phase\":\"phase_disabled\",\"write_enabled\":false},\"result\":{\"card_count\":1,\"diagnostic_count\":0,\"disposition_reason\":\"post_genesis_propositions_resolved\",\"exclusion_count\":0},\"schema_version\":\"proposition-knowledge-pull-shadow-manifest/v1\",\"source\":{\"consumed_classification\":\"defined-inactive-shadow\",\"consumed_envelope_schemas\":[\"proposition-evidence-envelope/v1\",\"proposition-genesis-envelope/v1\",\"proposition-lifecycle-envelope/v1\"],\"input_event_ids\":[\"3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3\",\"beee43be3ca23c25c77981349cb378a91948d84f6ca92cc5777d066514651585\"],\"input_event_ids_hash\":\"80de821038b3cfe4ec7b571ab88177be6af2b0fa4d5193d533092859b6a747bc\",\"non_proposition_event_consumed_count\":0,\"proposition_contract_file_sha256\":\"e08efd8f6ec9a9f4668cf36df81d421841dae19603c61c6ee52c42f3ac743766\",\"proposition_event_count\":2,\"proposition_evidence_count\":1,\"proposition_foldable_count\":0,\"proposition_genesis_count\":1,\"proposition_lifecycle_count\":0,\"proposition_selected_count\":0,\"registry_file_sha256\":\"1780f3745fbe251a10ae797f23106290f7df70c13a979514ac0bbb2a3f30246d\",\"scanner\":\"scanWholeL1Validated\",\"whole_l1\":true}}\n"
+    }
+  },
+  "sandbox_equivalence": {
+    "sandbox_only": true,
+    "sandbox_removed_after": true,
+    "genesis_event_id_equal": true,
+    "evidence_event_id_equal": true,
+    "evidence_canonical_bytes_equal": true,
+    "first_write_status": "created",
+    "immediate_rerun_status": "identical",
+    "generic_write_gate": "L1_SCHEMA_WRITE_DISABLED"
+  },
+  "mutation_proof": {
+    "scope": "whole_real_abrain_before_after_preview",
+    "before": {
+      "schema_version": "proposition-p1b-whole-abrain-snapshot/v1",
+      "scope": "all_abrain_entries",
+      "entry_count": 23750,
+      "directory_count": 5138,
+      "file_count": 18611,
+      "symlink_count": 1,
+      "bytes": 406132670,
+      "rows_hash": "8354b7a5ec9e6eb69ab550b75abf954dd6eff32d8555013b1b86ed5c54fe14e6",
+      "snapshot_hash": "6af8c0b38e26d23ee3f8a0571020557398da6916d440e7a0f1b13d59343e3704"
+    },
+    "after": {
+      "schema_version": "proposition-p1b-whole-abrain-snapshot/v1",
+      "scope": "all_abrain_entries",
+      "entry_count": 23750,
+      "directory_count": 5138,
+      "file_count": 18611,
+      "symlink_count": 1,
+      "bytes": 406132670,
+      "rows_hash": "8354b7a5ec9e6eb69ab550b75abf954dd6eff32d8555013b1b86ed5c54fe14e6",
+      "snapshot_hash": "6af8c0b38e26d23ee3f8a0571020557398da6916d440e7a0f1b13d59343e3704"
+    },
+    "unchanged": true,
+    "target_absent_after": true,
+    "real_abrain_files_created": [],
+    "real_abrain_files_modified": [],
+    "real_abrain_files_removed": [],
+    "repo_dossier_write_occurs_after_this_proof": true
+  }
+}

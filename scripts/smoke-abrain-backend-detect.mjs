@@ -452,6 +452,8 @@ const vaultBashSrc = path.join(repoRoot, "extensions/abrain/vault-bash.ts");
 const brainLayoutSrc = path.join(repoRoot, "extensions/abrain/brain-layout.ts");
 const ruleInjectorSrc = path.join(repoRoot, "extensions/abrain/rule-injector/index.ts");
 const ruleInjectorDualReadAuditSrc = path.join(repoRoot, "extensions/abrain/rule-injector/dualread-audit.ts");
+const ruleInjectorStableViewReaderSrc = path.join(repoRoot, "extensions/abrain/rule-injector/proposition-policy-stable-view-reader.ts");
+const ruleInjectorStableViewRuntimeAuditSrc = path.join(repoRoot, "extensions/abrain/rule-injector/proposition-policy-stable-view-runtime-audit.ts");
 fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapSrc));
 fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
@@ -518,6 +520,11 @@ const sharedTargetDir = path.join(tmpDir, "_shared");
 fs.mkdirSync(sharedTargetDir, { recursive: true });
 fs.writeFileSync(path.join(sharedTargetDir, "runtime.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/runtime.ts")));
 fs.copyFileSync(path.join(sharedTargetDir, "runtime.cjs"), path.join(sharedTargetDir, "runtime.js"));
+for (const moduleName of ["jcs", "proposition-policy-stable-view-contract"]) {
+  const cjsPath = path.join(sharedTargetDir, `${moduleName}.cjs`);
+  fs.writeFileSync(cjsPath, transpileTsToCjs(path.join(repoRoot, "extensions/_shared", `${moduleName}.ts`)));
+  fs.copyFileSync(cjsPath, path.join(sharedTargetDir, `${moduleName}.js`));
+}
 fs.writeFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
 fs.copyFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), path.join(sharedTargetDir, "git-singleflight.js"));
 fs.writeFileSync(path.join(sharedTargetDir, "causal-anchor.cjs"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
@@ -559,13 +566,24 @@ fs.copyFileSync(footerStatusPath, path.join(sharedTargetDir, "footer-status.js")
 const ruleInjectorDualReadAuditCompiled = transpileTsToCjs(ruleInjectorDualReadAuditSrc);
 fs.writeFileSync(path.join(tmpDir, "rule-injector", "dualread-audit.cjs"), ruleInjectorDualReadAuditCompiled);
 fs.copyFileSync(path.join(tmpDir, "rule-injector", "dualread-audit.cjs"), path.join(tmpDir, "rule-injector", "dualread-audit.js"));
+const ruleInjectorStableViewReaderCompiled = transpileTsToCjs(ruleInjectorStableViewReaderSrc)
+  .replace(/require\("\.\.\/\.\.\/_shared\/proposition-policy-stable-view-contract"\)/g, 'require("../_shared/proposition-policy-stable-view-contract.cjs")');
+fs.writeFileSync(path.join(tmpDir, "rule-injector", "proposition-policy-stable-view-reader.cjs"), ruleInjectorStableViewReaderCompiled);
+fs.copyFileSync(path.join(tmpDir, "rule-injector", "proposition-policy-stable-view-reader.cjs"), path.join(tmpDir, "rule-injector", "proposition-policy-stable-view-reader.js"));
+const ruleInjectorStableViewRuntimeAuditCompiled = transpileTsToCjs(ruleInjectorStableViewRuntimeAuditSrc)
+  .replace(/require\("\.\.\/\.\.\/_shared\/jcs"\)/g, 'require("../_shared/jcs.cjs")')
+  .replace(/require\("\.\/proposition-policy-stable-view-reader"\)/g, 'require("./proposition-policy-stable-view-reader.cjs")');
+fs.writeFileSync(path.join(tmpDir, "rule-injector", "proposition-policy-stable-view-runtime-audit.cjs"), ruleInjectorStableViewRuntimeAuditCompiled);
+fs.copyFileSync(path.join(tmpDir, "rule-injector", "proposition-policy-stable-view-runtime-audit.cjs"), path.join(tmpDir, "rule-injector", "proposition-policy-stable-view-runtime-audit.js"));
 let ruleInjectorCompiled = transpileTsToCjs(ruleInjectorSrc)
   .replace(/require\("\.\.\/\.\.\/_shared\/footer-status"\)/g, 'require("../_shared/footer-status.cjs")')
   .replace(/require\("\.\.\/\.\.\/_shared\/runtime"\)/g, 'require("../_shared/runtime.cjs")')
   .replace(/require\("\.\.\/\.\.\/_shared\/pi-internals"\)/g, 'require("../_shared/pi-internals.cjs")')
   .replace(/require\("\.\.\/\.\.\/memory\/parser"\)/g, 'require("../memory/parser.cjs")')
   .replace(/require\("\.\.\/\.\.\/memory\/utils"\)/g, 'require("../memory/utils.cjs")')
-  .replace(/require\("\.\/dualread-audit"\)/g, 'require("./dualread-audit.cjs")');
+  .replace(/require\("\.\/dualread-audit"\)/g, 'require("./dualread-audit.cjs")')
+  .replace(/require\("\.\/proposition-policy-stable-view-reader"\)/g, 'require("./proposition-policy-stable-view-reader.cjs")')
+  .replace(/require\("\.\/proposition-policy-stable-view-runtime-audit"\)/g, 'require("./proposition-policy-stable-view-runtime-audit.cjs")');
 fs.writeFileSync(path.join(tmpDir, "rule-injector", "index.cjs"), ruleInjectorCompiled);
 fs.copyFileSync(path.join(tmpDir, "rule-injector", "index.cjs"), path.join(tmpDir, "rule-injector", "index.js"));
 fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), 'module.exports = require("./rule-injector/index.cjs");\n');

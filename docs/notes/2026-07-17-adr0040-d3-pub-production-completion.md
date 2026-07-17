@@ -1,0 +1,16 @@
+---
+doc_type: completion
+status: completed
+---
+
+# ADR0040 D3-PUB production generation-0 completion
+
+D3-PUB generation 0 is completed and authorized only as a runtime-inert production publication at `/home/worker/.abrain/.state/sediment/proposition-lifecycle-freshness/v2`. The pre-publication gate froze this exact generation-0 boundary without appending L1, updating legacy P2a/stable pointers, changing runtime/configuration/git state, or invoking the production publisher before the standalone grant. The [source capsule](../evidence/2026-07-17-adr0040-d3-pub-source-capsule.json), [static plan](../evidence/2026-07-17-adr0040-d3-pub-static-plan.json), and [pre-publication dossier](../evidence/2026-07-17-adr0040-d3-pub-execution-ready-dossier.json) retain their original bytes and pre-authorization claims.
+
+The trusted transcript authorization coordinate is `b0caa4a3572ec2141d19336479172f13aaae23b10338bb93a53d344431108439`; the [post-publication ratification record](../evidence/2026-07-17-adr0040-d3-pub-production-ratification-record.json) has raw/self SHA-256 `8bfec44fff968e5e837cf6c15dc45d543ed8980aa371d514b09ba1d8f70854a8` / `2b71c40eaad7ea291d3adcc183fa2506c983bbc1c476dc8ac2d94206916a252a`. It binds session `019f6b11-db90-7128-b1bd-b602b2a87a9c`, the dossier and grant message coordinates, transcript prefix and parent-chain hashes, the first `published` observation, and a later exact `identical` replay.
+
+The published DAG closes as intent `2175f55c4cbcbea6355557db597cc70f2008f6b147c7292cd7bb189b60ddc5e1` -> proof `d47fe0eac9aac077c25abb172c0992ab7e378ac7886983a0f08779fbc0e1a2f2` -> committed head `fd717f2ab5acb59267bd7ff8377a5197cf500c42fcb60b837eeabf0d077bcfea` -> selection `94edfbbdf354c7df5a45337fb29365f67e12c6a792f924805cf874fe1f42ae35`. Mutation inventory is `81de3a59e6a6e595140f5a80adf14b57f627949b8f39ac6ba6294b118f3961e6`, artifact set is `f6f0f46ebeb51d8e4f9010c83833bb0c7e7b9701d2bb8bac07490bcd18673e85`, P2a bundle is `1768de48d0c3bcb2c1e12605829d22e307973605f5c648c66c3c610bf3f40f34`, and stable bundle is `6a74d84818ea9ab9702c472bd38a96b31eec60f73d4d2adf9402967ca42a7398`. The selected result is generation/sequence `0/0` with 3 input events, 1 active policy candidate, and 1 stable item.
+
+The v2 tree contains 17 directories and 18 files; the family snapshot contains only `v2`, and `v1` remains absent. Publication-window snapshots prove production L1, legacy P2a, legacy stable, configuration, and live Git unchanged. A frozen-capsule clean-tree invocation of `readPublishedD3PubSelection` revalidated the same closure read-only and removed its temporary reconstruction. The canonical [post-publication dossier](../evidence/2026-07-17-adr0040-d3-pub-production-post-publication-dossier.json) has raw/self SHA-256 `2e0fce509021f8cd132a4c49ac48e04aa5ff1b513aafb87e0fd0387e5000cb48` / `c19c016f6c9f0e540779897ffa9cf05c632b1579b8289fdd762d089b29d506b2`.
+
+This completion did not append production L1, modify legacy P2a/stable pointers, change configuration or legacy authority, connect a runtime consumer, restart a process, commit, or push. D3-SSR and every runtime read flip remain separate authorization surfaces; the presence of selection blocks reuse of the pre-publication gate for supersession.
