@@ -104,7 +104,29 @@ function canonicalDeferredBindChild(repo, config, rel) {
 }
 async function activeRecoveryRecords(repo) {
   const scan = await l1.scanWholeL1Validated({ abrainHome: repo });
-  return scan.selected.filter((record) => record.registration.envelope_schema === "local-drain-recovery-envelope/v2");
+  return scan.selected.filter((record) => record.registration.envelope_schema === "local-drain-recovery-envelope/v3");
+}
+function operationFor(prepared, snapshot) {
+  return recovery.recoveryOperationV3({
+    symbolicRef: "refs/heads/main",
+    baseCommit: prepared.frozenCommit,
+    cohortSemanticRoot: prepared.cohortManifestRoot,
+    frozenIndexSnapshotRoot: recovery.frozenIndexSnapshotRootV3(prepared.entries, snapshot),
+  });
+}
+async function prepareOperationForFile(repo, relative) {
+  const content = fs.readFileSync(path.join(repo, ...relative.split("/")));
+  const frozen = git(repo, "rev-parse", "HEAD");
+  const snapshot = await cohort.snapshotIndexEntries(repo, [relative]);
+  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan: [{ path: relative, op: "put", content }], message: "ignored", protocolVersion: cohort.LOCAL_DRAIN_PROTOCOL_V3 });
+  return { prepared, snapshot, operation: operationFor(prepared, snapshot) };
+}
+async function terminalizeOperation(repo, operation) {
+  for (let slot = 1; slot <= recovery.RECOVERY_LANE_BUDGETS.drain; slot += 1) {
+    const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+    assert(claim.status === "acquired" && claim.slot === slot, `terminal fixture did not acquire slot ${slot}`);
+    await recovery.recoverDrainSlotV3({ abrainHome: repo, repo, operation, slot });
+  }
 }
 function repositoryFingerprint(repo) {
   const head = git(repo, "rev-parse", "HEAD");
@@ -124,7 +146,7 @@ function repositoryFingerprint(repo) {
   return crypto.createHash("sha256").update(JSON.stringify({ head, status, index, events })).digest("hex");
 }
 
-console.log("smoke: canonical local Git runtime v2");
+console.log("smoke: canonical local Git runtime U* / recovery v3");
 const sharedEnabledSettings = settings("shared-enabled", true);
 
 await check("settings accept only disabled/enabled local_convergence_v2 shape", () => {
@@ -378,15 +400,17 @@ await check("canonical bind helper publishes its exact abrain writer transaction
   assert(JSON.stringify(committedPaths) === JSON.stringify(["projects/canonical-bind/_project.json"]), `canonical bind helper commit was not exact: ${JSON.stringify(committedPaths)}`);
 });
 
-await check("fresh process restarts and recovers prepared local slot without remote", async () => {
+await check("fresh process restarts and recovers prepared v3 slot without remote", async () => {
   const repo = initRepo("restart");
   const file = path.join(repo, "restart.txt"); fs.writeFileSync(file, "restart\n");
   const frozen = git(repo, "rev-parse", "HEAD");
   const snapshot = await cohort.snapshotIndexEntries(repo, ["restart.txt"]);
-  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan: [{ path: "restart.txt", op: "put", content: "restart\n" }], message: "ignored" });
-  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
-  await recovery.claimRecoverySlot({ abrainHome: repo, episodeId, lane: "drain", slot: 1 });
-  await recovery.recordDrainPrepared({ abrainHome: repo, episodeId, slot: 1, prepared, frozenIndexSnapshot: snapshot });
+  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan: [{ path: "restart.txt", op: "put", content: "restart\n" }], message: "ignored", protocolVersion: cohort.LOCAL_DRAIN_PROTOCOL_V3 });
+  const operation = operationFor(prepared, snapshot);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(operation);
+  const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  assert(claim.slot === 1 && claim.shouldExecute, "v3 restart claim missing");
+  await recovery.recordDrainPreparedV3({ abrainHome: repo, operation, slot: 1, prepared, frozenIndexSnapshot: snapshot });
   const config = settings("restart", true);
   const child = startupChild(repo, config);
   assert(child.status === 0, `restart child failed: ${child.stderr}`);
@@ -394,46 +418,155 @@ await check("fresh process restarts and recovers prepared local slot without rem
   assert(diagnostics.startup === "ready", `restart blocked: ${diagnostics.blockedReason}`);
   assert(diagnostics.tail.some((row) => row.operation === "startup_backlog" && row.status === "metadata_deferred"), "prepared recovery metadata was not explicitly deferred");
   assert(git(repo, "rev-parse", "HEAD") === prepared.candidate, "restart did not publish candidate");
-  const events = await recovery.readRecoveryEvents(repo, episodeId);
-  assert(recovery.foldRecoveryEvents(events).get(1).converged, "restart did not publish index_converged");
+  const events = await recovery.readRecoveryEventsV3(repo, episodeId);
+  assert(recovery.foldRecoveryEventsV3(events).get(1).converged, "restart did not publish v3 index_converged");
   const preparedRecords = (await activeRecoveryRecords(repo)).filter((record) => record.body.event_type === "commit_prepared");
-  assert(preparedRecords.length === 1 && preparedRecords[0].body.episode_id === episodeId, "prepared recovery opened another generation");
+  assert(preparedRecords.length === 1 && preparedRecords[0].body.episode_id === episodeId, "prepared recovery opened another operation");
 });
 
-await check("claimed-without-prepared burns the pending slot and does not claim the next slot", async () => {
+await check("v3 startup keeps a prepared stale-base operation fail-closed", async () => {
+  const repo = initRepo("prepared-stale-base");
+  const frozen = git(repo, "rev-parse", "HEAD");
+  const snapshot = await cohort.snapshotIndexEntries(repo, ["prepared-stale.txt"]);
+  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan: [{ path: "prepared-stale.txt", op: "put", content: "prepared stale\n" }], message: "ignored", protocolVersion: cohort.LOCAL_DRAIN_PROTOCOL_V3 });
+  const operation = operationFor(prepared, snapshot);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(operation);
+  const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  await recovery.recordDrainPreparedV3({ abrainHome: repo, operation, slot: claim.slot, prepared, frozenIndexSnapshot: snapshot });
+  fs.writeFileSync(path.join(repo, "concurrent.txt"), "concurrent\n");
+  git(repo, "add", "concurrent.txt");
+  execFileSync("git", ["-C", repo, "commit", "-qm", "concurrent"], { env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", GIT_AUTHOR_DATE: "1700000001 +0000", GIT_COMMITTER_DATE: "1700000001 +0000" } });
+  const headBefore = git(repo, "rev-parse", "HEAD");
+  const child = startupChild(repo);
+  assert(child.status === 0, `stale prepared startup process failed: ${child.stderr}`);
+  const diagnostics = JSON.parse(child.stdout);
+  assert(diagnostics.startup === "blocked" && (diagnostics.blockedReason ?? "").includes("RECOVERY_V3_STALE_BASE"), `stale prepared startup did not fail closed: ${diagnostics.blockedReason}`);
+  const state = recovery.foldRecoveryEventsV3(await recovery.readRecoveryEventsV3(repo, episodeId)).get(1);
+  assert(state.prepared && !state.aborted && !state.terminal && !state.published, "stale prepared evidence was burned or falsely published");
+  assert(git(repo, "rev-parse", "HEAD") === headBefore, "stale prepared startup moved HEAD");
+});
+
+await check("same-process request recovers a claim-only slot and continues in the next exact-operation slot", async () => {
+  const repo = initRepo("same-process-claim-only");
+  const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+  assert((await runtime.awaitStartup()).startup === "ready", "claim-only fixture startup failed");
+  const relative = "claim-only-same-process.txt";
+  const file = path.join(repo, relative);
+  fs.writeFileSync(file, "claim only same process\n");
+  const fixture = await prepareOperationForFile(repo, relative);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(fixture.operation);
+  const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation: fixture.operation });
+  assert(claim.status === "acquired" && claim.slot === 1, "claim-only fixture did not acquire slot 1");
+  const receipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: file, sourceIds: ["fixture:claim-only-same-process"] });
+  const drained = await runtime.requestDrain([receipt], "same-process claim-only retry");
+  assert(drained.status === "index_converged" && drained.episodeId === episodeId && drained.slot === 2, `claim-only request did not continue in slot 2: ${JSON.stringify(drained)}`);
+  const events = await recovery.readRecoveryEventsV3(repo, episodeId);
+  const folded = recovery.foldRecoveryEventsV3(events);
+  assert(folded.get(1).aborted && !folded.get(1).prepared, "claim-only slot was not durably aborted before retry");
+  assert(folded.get(2).converged && !folded.get(2).aborted, "next slot did not converge");
+  assert(new Set(events.map((event) => event.episode_id)).size === 1 && !events.some((event) => event.event_type === "recovery_episode_terminal"), "same-process retry escaped the episode or wrote terminal");
+});
+
+await check("same-process request never burns a stale prepared slot", async () => {
+  const repo = initRepo("same-process-prepared-stale");
+  const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+  assert((await runtime.awaitStartup()).startup === "ready", "prepared-stale fixture startup failed");
+  const relative = "prepared-stale-same-process.txt";
+  const file = path.join(repo, relative);
+  fs.writeFileSync(file, "prepared stale same process\n");
+  const fixture = await prepareOperationForFile(repo, relative);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(fixture.operation);
+  const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation: fixture.operation });
+  await recovery.recordDrainPreparedV3({ abrainHome: repo, operation: fixture.operation, slot: claim.slot, prepared: fixture.prepared, frozenIndexSnapshot: fixture.snapshot });
+  fs.writeFileSync(path.join(repo, "concurrent-same-process.txt"), "concurrent\n");
+  git(repo, "add", "concurrent-same-process.txt");
+  execFileSync("git", ["-C", repo, "commit", "-qm", "concurrent same-process"], { env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", GIT_AUTHOR_DATE: "1700000002 +0000", GIT_COMMITTER_DATE: "1700000002 +0000" } });
+  const receipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: file, sourceIds: ["fixture:prepared-stale-same-process"] });
+  let code = null;
+  try { await runtime.requestDrain([receipt], "prepared stale same-process retry"); } catch (error) { code = error.code; }
+  assert(code === "RECOVERY_V3_CONCURRENT_OPERATION", `prepared stale request returned ${code}`);
+  const state = recovery.foldRecoveryEventsV3(await recovery.readRecoveryEventsV3(repo, episodeId)).get(1);
+  assert(state.prepared && !state.aborted && !state.terminal && !state.published, "prepared stale request burned or falsely published the slot");
+});
+
+await check("terminal exact-operation content blocks request with owner alert and no new episode", async () => {
+  const repo = initRepo("terminal-content-request");
+  const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+  assert((await runtime.awaitStartup()).startup === "ready", "terminal request fixture startup failed");
+  const knowledge = writeKnowledge(repo, 60);
+  const fixture = await prepareOperationForFile(repo, knowledge.relativePath);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(fixture.operation);
+  await terminalizeOperation(repo, fixture.operation);
+  const before = (await activeRecoveryRecords(repo)).map((record) => record.eventId).sort();
+  const receipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: knowledge.file, sourceIds: [knowledge.eventId] });
+  const result = await runtime.requestDrain([receipt], "terminal exact content request");
+  assert(result.status === "blocked" && result.ownerAlert === true && result.episodeId === episodeId && /RECOVERY_V3_TERMINAL_CONTENT_BACKLOG/.test(result.reason ?? ""), `terminal request was not owner-blocked: ${JSON.stringify(result)}`);
+  assert(fs.existsSync(knowledge.file) && git(repo, "status", "--porcelain", "--", knowledge.relativePath).startsWith("?? "), "terminal request consumed or removed content");
+  assert(JSON.stringify((await activeRecoveryRecords(repo)).map((record) => record.eventId).sort()) === JSON.stringify(before), "terminal request created a new episode or recovery event");
+});
+
+await check("terminal exact-operation content blocks startup with owner alert and no new episode", async () => {
+  const repo = initRepo("terminal-content-startup");
+  const knowledge = writeKnowledge(repo, 61);
+  const fixture = await prepareOperationForFile(repo, knowledge.relativePath);
+  await terminalizeOperation(repo, fixture.operation);
+  const before = repositoryFingerprint(repo);
+  const child = startupChild(repo);
+  assert(child.status === 0, `terminal startup child failed: ${child.stderr}`);
+  const diagnostics = JSON.parse(child.stdout);
+  assert(diagnostics.startup === "blocked" && diagnostics.ownerAlert === true && /RECOVERY_V3_TERMINAL_CONTENT_BACKLOG/.test(diagnostics.blockedReason ?? ""), `terminal startup was not owner-blocked: ${diagnostics.blockedReason}`);
+  assert(repositoryFingerprint(repo) === before && fs.existsSync(knowledge.file), "terminal startup changed content, HEAD, index, or recovery events");
+});
+
+await check("v3 claim-only startup burns a bounded budget to one durable idempotent terminal", async () => {
   const repo = initRepo("claimed-without-prepared");
-  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
-  await recovery.claimRecoverySlot({ abrainHome: repo, episodeId, lane: "drain", slot: 1 });
+  const frozen = git(repo, "rev-parse", "HEAD");
+  const snapshot = await cohort.snapshotIndexEntries(repo, ["claim-only.txt"]);
+  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan: [{ path: "claim-only.txt", op: "put", content: "claim only\n" }], message: "ignored", protocolVersion: cohort.LOCAL_DRAIN_PROTOCOL_V3 });
+  const operation = operationFor(prepared, snapshot);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(operation);
+  await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
   const headBefore = git(repo, "rev-parse", "HEAD");
   const child = startupChild(repo);
   assert(child.status === 0, `claimed-only startup failed: ${child.stderr}`);
   const diagnostics = JSON.parse(child.stdout);
   assert(diagnostics.startup === "ready", `claimed-only startup blocked: ${diagnostics.blockedReason}`);
-  assert(diagnostics.tail.some((row) => row.operation === "recover_drain" && row.slot === 1 && row.action === "burned"), "pending slot was not burned first");
+  assert(diagnostics.tail.some((row) => row.operation === "recover_drain_v3" && row.slot === 1 && row.action === "burned"), "pending v3 slot was not burned first");
   assert(diagnostics.tail.some((row) => row.operation === "startup_backlog" && row.status === "metadata_deferred"), "burn metadata was not deferred");
-  const events = await recovery.readRecoveryEvents(repo, episodeId);
-  const folded = recovery.foldRecoveryEvents(events);
-  assert(events.filter((event) => event.event_type === "recovery_slot_claimed").length === 1, "startup claimed the next slot");
-  assert(folded.get(1).aborted && !folded.get(2), "slot 1 was not the only burned slot");
+  const events = await recovery.readRecoveryEventsV3(repo, episodeId);
+  const folded = recovery.foldRecoveryEventsV3(events);
+  assert(events.filter((event) => event.event_type === "recovery_slot_claimed").length === 5, "startup did not consume the exact v3 slot budget");
+  assert(events.filter((event) => event.event_type === "recovery_slot_aborted").length === 5, "startup did not durably burn every unprepared slot");
+  assert(events.filter((event) => event.event_type === "recovery_episode_terminal").length === 1 && folded.get(5).terminal, "budget exhaustion did not durably write terminal");
   assert(git(repo, "rev-parse", "HEAD") === headBefore, "claimed-only recovery changed HEAD");
+  const afterFirst = repositoryFingerprint(repo);
+  const second = startupChild(repo);
+  assert(second.status === 0 && JSON.parse(second.stdout).startup === "ready", `terminal replay failed: ${second.stderr || second.stdout}`);
+  assert(JSON.stringify(repositoryFingerprint(repo)) === JSON.stringify(afterFirst), "terminal replay was not idempotent");
 });
 
-await check("terminal is absorbing and blocks startup content without new events", async () => {
+await check("explicit v3 terminal is inert and later content starts a distinct exact operation", async () => {
   const repo = initRepo("terminal-content");
-  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  const frozen = git(repo, "rev-parse", "HEAD");
+  const snapshot = await cohort.snapshotIndexEntries(repo, ["terminal.txt"]);
+  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan: [{ path: "terminal.txt", op: "put", content: "terminal\n" }], message: "ignored", protocolVersion: cohort.LOCAL_DRAIN_PROTOCOL_V3 });
+  const operation = operationFor(prepared, snapshot);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(operation);
   for (let slot = 1; slot <= 5; slot += 1) {
-    const claim = await recovery.claimNextRecoverySlot({ abrainHome: repo, episodeId, lane: "drain" });
-    assert(claim.shouldExecute && claim.slot === slot, `terminal fixture did not claim slot ${slot}`);
-    await recovery.burnPendingRecoverySlot({ abrainHome: repo, episodeId, lane: "drain" });
+    const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+    assert(claim.shouldExecute && claim.slot === slot, `terminal fixture did not claim v3 slot ${slot}`);
+    await recovery.recoverDrainSlotV3({ abrainHome: repo, repo, operation, slot });
   }
+  const oldEvents = (await activeRecoveryRecords(repo)).filter((record) => record.body.episode_id === episodeId).map((record) => record.eventId).sort();
   writeKnowledge(repo, 6);
   const headBefore = git(repo, "rev-parse", "HEAD");
-  const eventsBefore = (await activeRecoveryRecords(repo)).map((record) => record.eventId).sort();
   const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
   const startup = await runtime.awaitStartup();
-  assert(startup.startup === "blocked" && /OWNER_INTERVENTION_REQUIRED/.test(startup.blockedReason ?? ""), "terminal content did not block startup");
-  assert(git(repo, "rev-parse", "HEAD") === headBefore, "terminal content crossed the absorbing frontier");
-  assert(JSON.stringify((await activeRecoveryRecords(repo)).map((record) => record.eventId).sort()) === JSON.stringify(eventsBefore), "terminal startup wrote recovery events");
+  assert(startup.startup === "ready", `historical terminal blocked later content: ${startup.blockedReason}`);
+  assert(git(repo, "rev-parse", "HEAD") !== headBefore, "later content did not start a distinct v3 operation");
+  const records = await activeRecoveryRecords(repo);
+  assert(oldEvents.every((id) => records.some((record) => record.eventId === id)), "historical terminal episode was rewritten");
+  assert(records.some((record) => record.body.episode_id !== episodeId && record.body.event_type === "index_converged"), "later content did not converge under a distinct operation");
 });
 
 await check("empty startup emits no recovery event", async () => {

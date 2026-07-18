@@ -155,14 +155,14 @@ try {
   check("currentProductionRefMain", currentRef === "refs/heads/main", "current_ref_not_main");
 
   scan = await l1.scanWholeL1Validated({ abrainHome: abrain });
-  wholeL1 = { all: scan.all.length, selected: scan.selected.length, foldable: scan.foldable.length, activeV2: scan.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2").length, legacyReadOnly: scan.legacyReadOnly.length, foreignSkipped: scan.foreignSkipped.length, phaseDisabledShadow: scan.phaseDisabledShadow.length, tempResidue: scan.tempResidue.length };
+  wholeL1 = { all: scan.all.length, selected: scan.selected.length, foldable: scan.foldable.length, historicalV2: scan.all.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2").length, legacyReadOnly: scan.legacyReadOnly.length, foreignSkipped: scan.foreignSkipped.length, phaseDisabledShadow: scan.phaseDisabledShadow.length, tempResidue: scan.tempResidue.length };
   check("currentWholeL1Strict", true);
 
   const recordsById = new Map(scan.all.map((item) => [item.eventId, item]));
-  const activeV2 = scan.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2");
-  check("productionActiveV2AllDrainLane", activeV2.length > 0 && activeV2.every((item) => item.body.lane === "drain"), "active_v2_non_drain_lane_present");
-  check("productionActiveV2ProducerExact", activeV2.every((item) => item.body.producer?.name === "pi-astack.convergence-recovery" && item.body.producer?.version === "2.0.0"), "active_v2_producer_mismatch");
-  check("productionActiveV2EventTypesRegistered", activeV2.every((item) => ACTIVE_V2_TYPES.includes(item.body.event_type)), "active_v2_event_type_mismatch");
+  const historicalV2 = scan.all.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2");
+  check("productionHistoricalV2AllDrainLane", historicalV2.length > 0 && historicalV2.every((item) => item.body.lane === "drain"), "historical_v2_non_drain_lane_present");
+  check("productionHistoricalV2ProducerExact", historicalV2.every((item) => item.body.producer?.name === "pi-astack.convergence-recovery" && item.body.producer?.version === "2.0.0"), "historical_v2_producer_mismatch");
+  check("productionHistoricalV2EventTypesRegistered", historicalV2.every((item) => ACTIVE_V2_TYPES.includes(item.body.event_type)), "historical_v2_event_type_mismatch");
   const recovered = recovery.recoverOpenRecoveryEpisodesFromScan(scan);
   check("productionRollingRecoveryGloballyClosed", recovered.open.length === 0 && recovered.terminal.length === 0 && recovered.quarantined.length === 0, "production_recovery_not_globally_closed");
 
@@ -171,13 +171,13 @@ try {
 
   let generationAnchor = "genesis";
   for (const [ordinal, oid] of EXPECTED_CHAIN.entries()) {
-    const preparedRecords = activeV2.filter((item) => item.body.event_type === "commit_prepared" && item.body.body?.candidate === oid);
+    const preparedRecords = historicalV2.filter((item) => item.body.event_type === "commit_prepared" && item.body.body?.candidate === oid);
     check(`generation${ordinal + 1}SinglePrepared`, preparedRecords.length === 1, `generation_${ordinal + 1}_prepared_missing_or_ambiguous`);
     if (preparedRecords.length !== 1) continue;
     const preparedRecord = preparedRecords[0];
     const prepared = preparedRecord.body.body;
     const episodeId = preparedRecord.body.episode_id;
-    const episodeRecords = activeV2.filter((item) => item.body.episode_id === episodeId);
+    const episodeRecords = historicalV2.filter((item) => item.body.episode_id === episodeId);
     const episodeEvents = episodeRecords.map((item) => item.body);
     const eventTypes = episodeEvents.map((item) => item.event_type).sort(compare);
     const eventIds = Object.fromEntries(episodeRecords.map((item) => [item.body.event_type, item.eventId]));
@@ -256,7 +256,7 @@ try {
   sourceTimestamp = sourceBody?.created_at_utc ?? null;
   const sourcePath = l1.expectedL1EventRelativePath(sourceEventId);
   const candidateDiff = parseDiff(gitBuffer(abrain, ["diff-tree", "-r", "-z", "--no-commit-id", "--no-renames", `${candidate}^`, candidate]));
-  const candidatePrepared = activeV2.find((item) => item.body.event_type === "commit_prepared" && item.body.body?.candidate === candidate)?.body.body;
+  const candidatePrepared = historicalV2.find((item) => item.body.event_type === "commit_prepared" && item.body.body?.candidate === candidate)?.body.body;
   check("sourceEventPresentAndStrictValidated", Boolean(sourceRecord), "source_event_not_in_current_whole_l1");
   check("sourceEventSchemaExact", sourceRecord?.registration.envelope_schema === "knowledge-evidence-envelope/v1" && sourceBody?.event_schema_version === "knowledge-evidence-event/v1" && sourceBody?.event_type === "knowledge_entry_observed", "source_event_schema_mismatch");
   check("sourceEventProducerExact", sourceBody?.producer?.name === "sediment.knowledge-event-writer" && sourceBody?.producer?.version === "adr0039-p5", "source_event_producer_mismatch");
@@ -303,15 +303,15 @@ try {
   };
 
   currentStatus = parser.parseGitStatusPorcelainV1Z(gitBuffer(abrain, ["status", "--porcelain=v1", "-z", "-uall", "--ignore-submodules=none"])).map((row) => ({ status: row.status, path: row.path }));
-  const activeV2Paths = new Set(activeV2.map((item) => item.relativePath));
-  const allowedUntracked = new Set([LEGACY_PATH, ...activeV2Paths]);
+  const historicalV2Paths = new Set(historicalV2.map((item) => item.relativePath));
+  const allowedUntracked = new Set([LEGACY_PATH, ...historicalV2Paths]);
   check("currentSharedIndexEqualsHead", gitOk(abrain, ["diff-index", "--cached", "--quiet", currentHead, "--"]) && gitText(abrain, ["ls-files", "-u"]) === "", "current_shared_index_drift");
   check("currentTrackedWorktreeClean", gitOk(abrain, ["diff-files", "--quiet", "--"]), "current_tracked_worktree_drift");
   check("currentUntrackedOnlyValidatedRecoveryOrLegacy", currentStatus.every((row) => row.status === "??" && allowedUntracked.has(row.path)), "current_untracked_active_backlog_or_foreign_path");
   const legacy = scan.legacyReadOnly.find((item) => item.eventId === LEGACY_ID);
   check("legacy1750StrictValidUntracked", Boolean(legacy) && legacy.relativePath === LEGACY_PATH && legacy.registration.phase === "legacy_read_only" && legacy.registration.write_enabled === false && legacy.registration.fold_eligible === false && currentStatus.some((row) => row.path === LEGACY_PATH && row.status === "??"), "legacy_1750_invalid_or_not_untracked");
   check("legacy1750ExcludedFromEveryAcceptanceCohort", chainFacts.every((item) => {
-    const prepared = activeV2.find((record) => record.body.event_type === "commit_prepared" && record.body.body?.candidate === item.candidate)?.body.body;
+    const prepared = historicalV2.find((record) => record.body.event_type === "commit_prepared" && record.body.body?.candidate === item.candidate)?.body.body;
     return prepared && !prepared.entries.some((entry) => entry.path === LEGACY_PATH);
   }), "legacy_1750_mixed_into_acceptance_chain");
 
@@ -323,16 +323,18 @@ try {
   const curatorWriterPath = path.join(root, "extensions/sediment/curator-decision-writer.ts");
   const registryBytes = fs.readFileSync(registryPath);
   const registry = l1.loadL1SchemaRegistry(registryPath);
-  const activeRegistration = registry.entries.find((item) => item.envelope_schema === "local-drain-recovery-envelope/v2");
+  const historicalRegistration = registry.entries.find((item) => item.envelope_schema === "local-drain-recovery-envelope/v2");
+  const activeRegistration = registry.entries.find((item) => item.envelope_schema === "local-drain-recovery-envelope/v3");
   const recoverySource = fs.readFileSync(recoveryPath, "utf8");
   const registrySource = fs.readFileSync(registrySourcePath, "utf8");
   const runtimeSource = fs.readFileSync(runtimePath, "utf8");
   const curatorSource = fs.readFileSync(curatorPath, "utf8");
   const curatorWriterSource = fs.readFileSync(curatorWriterPath, "utf8");
   const phaseDisabledCuratorSchemas = registry.entries.filter((item) => item.envelope_schema.startsWith("knowledge-") && ["knowledge-candidate-observation/v1", "knowledge-curator-attempt/v1", "knowledge-curator-decision/v1", "knowledge-apply-receipt/v1"].includes(item.envelope_schema));
-  check("curatorActiveV2RegistrationDrainOnly", activeRegistration?.phase === "active" && activeRegistration.domain === "canonical_path" && activeRegistration.role === "meta" && activeRegistration.write_enabled === true && activeRegistration.fold_eligible === false && sameArray([...activeRegistration.event_types], ACTIVE_V2_TYPES), "curator_active_v2_registration_not_drain_only");
-  check("curatorAbsentFromActiveV2ProducerCallerWriter", activeRegistration?.producers?.length === 1 && activeRegistration.producers[0] === "pi-astack.convergence-recovery" && !JSON.stringify(activeRegistration).toLowerCase().includes("curator"), "curator_present_in_active_v2_registration");
-  check("activeV2RuntimeLaneTypeDrainOnly", recoverySource.includes('export const RECOVERY_LANE_BUDGETS = Object.freeze({ drain: 5 } as const)') && recoverySource.includes('export type RecoveryLane = "drain"') && registrySource.includes('version === 2 ? lane !== "drain"'), "active_v2_runtime_lane_not_drain_only");
+  check("curatorHistoricalV2RegistrationReadOnly", historicalRegistration?.phase === "legacy_read_only" && historicalRegistration.domain === "canonical_path" && historicalRegistration.role === "meta" && historicalRegistration.write_enabled === false && historicalRegistration.fold_eligible === false && sameArray([...historicalRegistration.event_types], ACTIVE_V2_TYPES), "curator_historical_v2_registration_not_read_only");
+  check("curatorActiveV3RegistrationDrainOnly", activeRegistration?.phase === "active" && activeRegistration.domain === "canonical_path" && activeRegistration.role === "meta" && activeRegistration.write_enabled === true && activeRegistration.fold_eligible === false && sameArray([...activeRegistration.event_types], ACTIVE_V2_TYPES), "curator_active_v3_registration_not_drain_only");
+  check("curatorAbsentFromRecoveryProducerCallerWriter", activeRegistration?.producers?.length === 1 && activeRegistration.producers[0] === "pi-astack.convergence-recovery" && !JSON.stringify(activeRegistration).toLowerCase().includes("curator"), "curator_present_in_active_v3_registration");
+  check("activeV3RuntimeLaneTypeDrainOnly", recoverySource.includes('export const RECOVERY_LANE_BUDGETS = Object.freeze({ drain: 5 } as const)') && recoverySource.includes('export type RecoveryLane = "drain"') && recoverySource.includes('const ENVELOPE_SCHEMA_V3 = "local-drain-recovery-envelope/v3"') && registrySource.includes('version >= 2 ? lane !== "drain"'), "active_v3_runtime_lane_not_drain_only");
   check("canonicalRuntimeHasNoCuratorProtocolCaller", !runtimeSource.toLowerCase().includes("curator"), "canonical_runtime_curator_caller_present");
   check("curatorHasNoActiveV2ProtocolWiring", !curatorSource.includes("local-drain-recovery") && !curatorSource.includes("convergence-recovery") && !curatorWriterSource.includes("local-drain-recovery") && !curatorWriterSource.includes("convergence-recovery") && !curatorWriterSource.includes("appendRecoveryEvent"), "curator_active_v2_protocol_wiring_present");
   check("curatorReadOnlyNeighborLogicRetained", curatorSource.includes("relevantEntriesForCurator") && curatorSource.includes("READ-ONLY reference"), "curator_read_only_neighbor_logic_missing");
@@ -340,16 +342,23 @@ try {
   const dossierSource = fs.readFileSync(fileURLToPath(import.meta.url), "utf8");
   check("curatorCriterionIndependentOfStagingCounts", !/^import .*staging-loader/m.test(dossierSource), "curator_isolation_uses_staging_count");
   curatorFacts = {
-    activeV2Registration: {
+    historicalV2Registration: {
+      envelopeSchema: historicalRegistration?.envelope_schema ?? null,
+      bodySchema: historicalRegistration?.body_schema ?? null,
+      phase: historicalRegistration?.phase ?? null,
+      eventTypes: historicalRegistration?.event_types ?? null,
+      producers: historicalRegistration?.producers ?? null,
+    },
+    activeV3Registration: {
       envelopeSchema: activeRegistration?.envelope_schema ?? null,
       bodySchema: activeRegistration?.body_schema ?? null,
       phase: activeRegistration?.phase ?? null,
       eventTypes: activeRegistration?.event_types ?? null,
       producers: activeRegistration?.producers ?? null,
     },
-    productionActiveV2EventCount: activeV2.length,
-    productionLanes: [...new Set(activeV2.map((item) => item.body.lane))].sort(compare),
-    productionProducers: [...new Set(activeV2.map((item) => `${item.body.producer?.name}@${item.body.producer?.version}`))].sort(compare),
+    productionHistoricalV2EventCount: historicalV2.length,
+    productionLanes: [...new Set(historicalV2.map((item) => item.body.lane))].sort(compare),
+    productionProducers: [...new Set(historicalV2.map((item) => `${item.body.producer?.name}@${item.body.producer?.version}`))].sort(compare),
     phaseDisabledCuratorSchemas: phaseDisabledCuratorSchemas.map((item) => item.envelope_schema).sort(compare),
     sourceSha256: {
       registry: sha256(registryBytes),

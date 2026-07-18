@@ -103,9 +103,9 @@ let facts = null;
 try {
   const scan = await l1.scanWholeL1Validated({ abrainHome: abrain });
   check("wholeL1StrictValidation", true);
-  const active = scan.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2");
-  check("allActiveV2TypesRegistered", active.every((item) => ACTIVE_TYPES.has(item.body.event_type)), "active_v2_event_type_unknown");
-  const episode = active.filter((item) => item.body.episode_id === EPISODE);
+  const historicalV2 = scan.all.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2");
+  check("allHistoricalV2TypesRegistered", historicalV2.every((item) => ACTIVE_TYPES.has(item.body.event_type)), "historical_v2_event_type_unknown");
+  const episode = historicalV2.filter((item) => item.body.episode_id === EPISODE);
   const byType = new Map(episode.map((item) => [item.body.event_type, item]));
   const types = episode.map((item) => item.body.event_type).sort(compare);
   check("episodeExactFourEventClosure", episode.length === 4 && JSON.stringify(types) === JSON.stringify(EXPECTED_TYPES), "episode_event_set_not_exact");
@@ -173,7 +173,7 @@ try {
   const replaceRefs = gitText(abrain, ["for-each-ref", "--format=%(refname)", "refs/replace"]);
   check("noGitReplaceRefs", replaceRefs === "", "git_replace_ref_present");
   const timelineRecords = await l1.scanWholeL1Validated({ abrainHome: timelineRoot });
-  const timelineEpisode = timelineRecords.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2" && item.body.episode_id === EPISODE);
+  const timelineEpisode = timelineRecords.all.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2" && item.body.episode_id === EPISODE);
   const timelineByType = new Map(timelineEpisode.map((item) => [item.body.event_type, item]));
   const claimMs = eventTimeMs(timelineRoot, timelineByType.get("recovery_slot_claimed"));
   const preparedMs = eventTimeMs(timelineRoot, timelineByType.get("commit_prepared"));

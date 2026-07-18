@@ -22,7 +22,7 @@ export interface L1SchemaRegistration {
 }
 
 export interface L1SchemaRoleRegistry {
-  schema_version: "l1-schema-role-registry/v1";
+  schema_version: "l1-schema-role-registry/v2";
   registry_id: string;
   storage: {
     root_relative_path: "l1/events/sha256";
@@ -144,7 +144,9 @@ export function loadL1SchemaRegistry(registryPath = defaultL1SchemaRegistryPath(
 
 export function validateL1SchemaRegistry(input: unknown): L1SchemaRoleRegistry {
   const root = record(input, "L1_REGISTRY_INVALID", "registry must be an object");
-  exactString(root.schema_version, "l1-schema-role-registry/v1", "schema_version");
+  // The v2 registry is an intentional compatibility barrier: pre-U* readers
+  // know only v1 and therefore reject the registry before seeing v3 events.
+  exactString(root.schema_version, "l1-schema-role-registry/v2", "schema_version");
   nonEmptyString(root.registry_id, "registry_id");
   const storage = record(root.storage, "L1_REGISTRY_INVALID", "storage must be an object");
   exactString(storage.root_relative_path, "l1/events/sha256", "storage.root_relative_path");
@@ -212,7 +214,7 @@ export function validateL1SchemaRegistry(input: unknown): L1SchemaRoleRegistry {
   });
 
   return deepFreeze({
-    schema_version: "l1-schema-role-registry/v1" as const,
+    schema_version: "l1-schema-role-registry/v2" as const,
     registry_id: root.registry_id as string,
     storage: {
       root_relative_path: "l1/events/sha256" as const,
@@ -304,6 +306,7 @@ export function validateL1Envelope(
   }
   if (registration.envelope_schema === "drain-recovery-envelope/v1") validateDrainRecoveryBody(body, 1);
   if (registration.envelope_schema === "local-drain-recovery-envelope/v2") validateDrainRecoveryBody(body, 2);
+  if (registration.envelope_schema === "local-drain-recovery-envelope/v3") validateDrainRecoveryBody(body, 3);
   validateExpectation(registration, body, options.expected);
 
   const expectedRelative = expectedL1EventRelativePath(eventId);
@@ -466,6 +469,10 @@ function recoveryString(value: unknown, at: string, pattern?: RegExp): string {
 
 /** Lexical, clone-neutral path contract shared by recovery schema validation,
  * exact-cohort preparation, and restart decoding. */
+export function isGitOid(value: unknown): value is string {
+  return typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value);
+}
+
 export function isCanonicalCohortPath(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.startsWith("/") || value.endsWith("/") || value.includes("\\") || value.includes("\0")) return false;
   const segments = value.split("/");
@@ -488,7 +495,7 @@ function validatePreparedEntries(value: unknown, at: string, requireSorted: bool
     paths.push(rel);
     previous = rel;
     if (entry.op === "put") {
-      if ((entry.mode !== "100644" && entry.mode !== "100755") || typeof entry.blobOid !== "string" || !/^[0-9a-f]{40,64}$/.test(entry.blobOid) || typeof entry.bytesSha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.bytesSha256)) {
+      if ((entry.mode !== "100644" && entry.mode !== "100755") || !isGitOid(entry.blobOid) || typeof entry.bytesSha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.bytesSha256)) {
         throw failure("L1_BODY_SHAPE_MISMATCH", `${at}[${index}] put fields are invalid`);
       }
     } else if (entry.op === "delete") {
@@ -502,6 +509,10 @@ const LEGACY_RECOVERY_EPISODE_DOMAIN = "pi-astack/adr0027-c6/recovery-episode/v1
 const LEGACY_PUSH_EPISODE_V2_DOMAIN = "pi-astack/adr0027-c6/push-episode/v2";
 const LEGACY_RECOVERY_CLAIM_DOMAIN = "pi-astack/adr0027-c6/recovery-claim/v1";
 const LOCAL_RECOVERY_CLAIM_DOMAIN = "pi-astack/local-drain/recovery-claim/v2";
+const LOCAL_RECOVERY_PROTOCOL_V3 = "local-drain-recovery/v3";
+const LOCAL_RECOVERY_CLAIM_V3_DOMAIN = "pi-astack/local-drain/recovery-claim/v3";
+const LOCAL_COHORT_MANIFEST_V3_DOMAIN = "pi-astack/local-drain/cohort-semantic-manifest/v3";
+const LOCAL_FROZEN_INDEX_SNAPSHOT_V3_DOMAIN = "pi-astack/local-drain/frozen-index-snapshot/v3";
 const PUSH_SCOPE_KEYS = ["repo_id", "remote", "ref_name", "target_commit", "remote_url_id", "transport_policy_id"] as const;
 const PUSH_OUTCOME_V2_KEYS = [
   "classification", "command_exit_code", "error_code", "ref_name", "remote", "remote_contains_target",
@@ -525,25 +536,43 @@ function validateLegacyRemoteScope(payload: Record<string, unknown>, at: string)
   for (const key of ["repo_id", "remote_url_id", "transport_policy_id"]) recoveryString(payload[key], `${at}.${key}`, /^[0-9a-f]{64}$/);
   validateRecoveryRemote(payload.remote, `${at}.remote`, true);
   validateRecoveryRef(payload.ref_name, `${at}.ref_name`, true);
-  recoveryString(payload.target_commit, `${at}.target_commit`, /^[0-9a-f]{40,64}$/);
+  if (!isGitOid(payload.target_commit)) throw failure("L1_BODY_SHAPE_MISMATCH", `${at}.target_commit is invalid`);
 }
 
-function validateDrainRecoveryBody(body: Record<string, unknown>, version: 1 | 2): void {
-  exactKeys(body, ["event_schema_version", "event_type", "producer", "episode_id", "lane", "slot", "body"], "recovery event");
-  const expectedSchema = version === 1 ? "drain-recovery-event/v1" : "local-drain-recovery-event/v2";
+function validateDrainRecoveryBody(body: Record<string, unknown>, version: 1 | 2 | 3): void {
+  exactKeys(body, version === 3
+    ? ["event_schema_version", "event_type", "producer", "episode_id", "lane", "slot", "operation", "body"]
+    : ["event_schema_version", "event_type", "producer", "episode_id", "lane", "slot", "body"], "recovery event");
+  const expectedSchema = version === 1 ? "drain-recovery-event/v1" : `local-drain-recovery-event/v${version}`;
   exactString(body.event_schema_version, expectedSchema, "recovery event.event_schema_version", "L1_SCHEMA_ROLE_MISMATCH");
   const producer = record(body.producer, "L1_PRODUCER_MISMATCH", "recovery event.producer must be an object");
   exactKeys(producer, ["name", "version"], "recovery event.producer");
   exactString(producer.name, "pi-astack.convergence-recovery", "recovery event.producer.name", "L1_PRODUCER_MISMATCH");
-  exactString(producer.version, version === 1 ? "1.0.0" : "2.0.0", "recovery event.producer.version", "L1_PRODUCER_MISMATCH");
+  exactString(producer.version, `${version}.0.0`, "recovery event.producer.version", "L1_PRODUCER_MISMATCH");
   const episodeId = recoveryString(body.episode_id, "recovery event.episode_id", /^[0-9a-f]{64}$/);
   const lane = body.lane;
-  if (version === 2 ? lane !== "drain" : lane !== "drain" && lane !== "push" && lane !== "curator") throw failure("L1_BODY_SHAPE_MISMATCH", "recovery event.lane is invalid");
+  if (version >= 2 ? lane !== "drain" : lane !== "drain" && lane !== "push" && lane !== "curator") throw failure("L1_BODY_SHAPE_MISMATCH", "recovery event.lane is invalid");
+  let operation: Record<string, unknown> | null = null;
+  if (version === 3) {
+    operation = record(body.operation, "L1_BODY_SHAPE_MISMATCH", "recovery event.operation must be an object");
+    exactKeys(operation, ["protocol_version", "symbolic_ref", "base_commit", "cohort_semantic_root", "frozen_index_snapshot_root"], "recovery event.operation");
+    exactString(operation.protocol_version, LOCAL_RECOVERY_PROTOCOL_V3, "recovery event.operation.protocol_version", "L1_BODY_SHAPE_MISMATCH");
+    const symbolic = recoveryString(operation.symbolic_ref, "recovery event.operation.symbolic_ref", /^refs\/[A-Za-z0-9._\/-]+$|^HEAD$/);
+    if (symbolic.includes("..") || symbolic.endsWith("/")) throw failure("L1_BODY_SHAPE_MISMATCH", "recovery event.operation.symbolic_ref is invalid");
+    if (!isGitOid(operation.base_commit)) throw failure("L1_BODY_SHAPE_MISMATCH", "recovery event.operation.base_commit is invalid");
+    recoveryString(operation.cohort_semantic_root, "recovery event.operation.cohort_semantic_root", /^[0-9a-f]{64}$/);
+    recoveryString(operation.frozen_index_snapshot_root, "recovery event.operation.frozen_index_snapshot_root", /^[0-9a-f]{64}$/);
+    const expectedEpisodeId = jcsSha256Hex(operation);
+    if (episodeId !== expectedEpisodeId) throw failure("L1_BODY_SHAPE_MISMATCH", "v3 episode_id does not bind the exact operation");
+  }
   const slot = body.slot;
   if (!Number.isInteger(slot) || (slot as number) < 1 || (slot as number) > (lane === "curator" ? 3 : 5)) throw failure("L1_BODY_SHAPE_MISMATCH", "recovery event.slot is invalid");
   const payload = record(body.body, "L1_BODY_SHAPE_MISMATCH", "recovery event.body must be an object");
   const eventType = recoveryString(body.event_type, "recovery event.event_type");
-  const oid = (value: unknown, at: string) => recoveryString(value, at, /^[0-9a-f]{40,64}$/);
+  const oid = (value: unknown, at: string): string => {
+    if (!isGitOid(value)) throw failure("L1_BODY_SHAPE_MISMATCH", `${at} is invalid`);
+    return value;
+  };
   const hash = (value: unknown, at: string) => recoveryString(value, at, /^[0-9a-f]{64}$/);
   const common = eventType === "recovery_slot_claimed" || eventType === "recovery_slot_aborted" || eventType === "recovery_episode_terminal";
   const drain = eventType === "commit_prepared" || eventType === "commit_published" || eventType === "index_converged";
@@ -552,7 +581,7 @@ function validateDrainRecoveryBody(body: Record<string, unknown>, version: 1 | 2
 
   if (eventType === "recovery_slot_claimed") {
     exactKeys(payload, ["claim_id"], "recovery claim body");
-    const domain = version === 1 ? LEGACY_RECOVERY_CLAIM_DOMAIN : LOCAL_RECOVERY_CLAIM_DOMAIN;
+    const domain = version === 1 ? LEGACY_RECOVERY_CLAIM_DOMAIN : version === 2 ? LOCAL_RECOVERY_CLAIM_DOMAIN : LOCAL_RECOVERY_CLAIM_V3_DOMAIN;
     const expected = jcsSha256Hex({ domain, episode_id: episodeId, lane, slot });
     if (payload.claim_id !== expected) throw failure("L1_BODY_SHAPE_MISMATCH", "claim_id does not derive from episode/lane/slot");
     return;
@@ -585,19 +614,37 @@ function validateDrainRecoveryBody(body: Record<string, unknown>, version: 1 | 2
     const symbolic = recoveryString(version === 1 ? payload.ref_name : payload.symbolic_ref, "symbolic ref", /^refs\/[A-Za-z0-9._\/-]+$|^HEAD$/);
     if (symbolic.includes("..") || symbolic.endsWith("/")) throw failure("L1_BODY_SHAPE_MISMATCH", "symbolic ref is invalid");
     oid(payload.frozen_commit, "frozen_commit"); oid(payload.new_tree, "new_tree"); oid(payload.candidate, "candidate"); hash(payload.cohort_manifest_root, "cohort_manifest_root");
-    const entryPaths = validatePreparedEntries(payload.entries, "entries", version === 2);
+    const entryPaths = validatePreparedEntries(payload.entries, "entries", version >= 2);
     const entrySet = new Set(entryPaths);
     const snapshot = record(payload.frozen_index_snapshot, "L1_BODY_SHAPE_MISMATCH", "frozen_index_snapshot must be an object");
     const snapshotKeys = Object.keys(snapshot);
     if (snapshotKeys.some((key) => !isCanonicalCohortPath(key) || !entrySet.has(key))) throw failure("L1_BODY_SHAPE_MISMATCH", "frozen_index_snapshot contains a non-cohort or non-canonical path");
-    if (version === 2 && (snapshotKeys.length !== entryPaths.length || entryPaths.some((key) => !Object.hasOwn(snapshot, key)))) throw failure("L1_BODY_SHAPE_MISMATCH", "active frozen_index_snapshot keys must exactly equal entries paths");
+    if (version >= 2 && (snapshotKeys.length !== entryPaths.length || entryPaths.some((key) => !Object.hasOwn(snapshot, key)))) throw failure("L1_BODY_SHAPE_MISMATCH", "active frozen_index_snapshot keys must exactly equal entries paths");
     for (const [key, value] of Object.entries(snapshot)) {
-      if (version === 2 && value === null) continue;
-      recoveryString(value, `frozen_index_snapshot.${key}`, /^(?:100644|100755|120000|160000) [0-9a-f]{40,64} 0$/);
+      if (version >= 2 && value === null) continue;
+      recoveryString(value, `frozen_index_snapshot.${key}`, /^(?:100644|100755|120000|160000) (?:[0-9a-f]{40}|[0-9a-f]{64}) 0$/);
+    }
+    if (version === 3) {
+      if (!operation) throw failure("L1_BODY_SHAPE_MISMATCH", "v3 prepared event has no operation");
+      const semanticEntries = (payload.entries as Record<string, unknown>[]).map((entry) => ({
+        path: entry.path,
+        op: entry.op,
+        mode: entry.mode,
+        bytes_sha256: entry.bytesSha256,
+      }));
+      const cohortSemanticRoot = sha256Hex(`${LOCAL_COHORT_MANIFEST_V3_DOMAIN}\n${JSON.stringify({ protocol: LOCAL_RECOVERY_PROTOCOL_V3, entries: semanticEntries })}`);
+      if (payload.symbolic_ref !== operation.symbolic_ref || payload.frozen_commit !== operation.base_commit || payload.cohort_manifest_root !== operation.cohort_semantic_root || cohortSemanticRoot !== operation.cohort_semantic_root) {
+        throw failure("L1_BODY_SHAPE_MISMATCH", "v3 prepared event does not bind its exact operation");
+      }
+      const frozenIndexSnapshotRoot = jcsSha256Hex({
+        domain: LOCAL_FROZEN_INDEX_SNAPSHOT_V3_DOMAIN,
+        entries: entryPaths.map((key) => ({ path: key, value: snapshot[key] ?? null })),
+      });
+      if (frozenIndexSnapshotRoot !== operation.frozen_index_snapshot_root) throw failure("L1_BODY_SHAPE_MISMATCH", "v3 frozen index snapshot root mismatch");
     }
     return;
   }
-  if (version === 2) throw failure("L1_EVENT_TYPE_MISMATCH", `event type is not valid for local drain v2: ${eventType}`);
+  if (version >= 2) throw failure("L1_EVENT_TYPE_MISMATCH", `event type is not valid for local drain v${version}: ${eventType}`);
 
   if (eventType === "push_intent") {
     if (Object.hasOwn(payload, "scope_version")) {

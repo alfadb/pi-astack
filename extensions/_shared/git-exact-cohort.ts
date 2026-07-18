@@ -106,7 +106,10 @@ function gitEnvironment(extraEnv: Readonly<Record<string, string>> = {}): NodeJS
 }
 
 const COHORT_MANIFEST_DOMAIN = "pi-astack/local-drain/cohort-semantic-manifest/v2";
-const LOCAL_DRAIN_PROTOCOL = "local-drain-recovery/v2";
+const COHORT_MANIFEST_DOMAIN_V3 = "pi-astack/local-drain/cohort-semantic-manifest/v3";
+export const LOCAL_DRAIN_PROTOCOL_V2 = "local-drain-recovery/v2" as const;
+export const LOCAL_DRAIN_PROTOCOL_V3 = "local-drain-recovery/v3" as const;
+export type LocalDrainProtocolVersion = typeof LOCAL_DRAIN_PROTOCOL_V2 | typeof LOCAL_DRAIN_PROTOCOL_V3;
 const DRAIN_IDENTITY = Object.freeze({
   name: "pi-astack-local-drain",
   email: "local-drain@pi-astack.invalid",
@@ -194,22 +197,32 @@ export function validateCohortPlan(entries: readonly CohortPlanEntry[]): readonl
   return [...entries].sort((a, b) => compareAscii(a.path, b.path));
 }
 
-export function stableCohortSemanticManifest(entries: readonly PreparedCohortEntry[]): Readonly<Record<string, unknown>> {
+export function stableCohortSemanticManifest(entries: readonly PreparedCohortEntry[], protocolVersion: LocalDrainProtocolVersion = LOCAL_DRAIN_PROTOCOL_V2): Readonly<Record<string, unknown>> {
   return Object.freeze({
-    protocol: LOCAL_DRAIN_PROTOCOL,
+    protocol: protocolVersion,
     entries: Object.freeze([...entries]
       .sort((a, b) => compareAscii(a.path, b.path))
       .map((entry) => Object.freeze({ path: entry.path, op: entry.op, mode: entry.mode, bytes_sha256: entry.bytesSha256 }))),
   });
 }
 
-export function cohortManifestRoot(entries: readonly PreparedCohortEntry[]): string {
-  return sha256Hex(`${COHORT_MANIFEST_DOMAIN}\n${JSON.stringify(stableCohortSemanticManifest(entries))}`);
+export function cohortManifestRoot(entries: readonly PreparedCohortEntry[], protocolVersion: LocalDrainProtocolVersion = LOCAL_DRAIN_PROTOCOL_V2): string {
+  const domain = protocolVersion === LOCAL_DRAIN_PROTOCOL_V3 ? COHORT_MANIFEST_DOMAIN_V3 : COHORT_MANIFEST_DOMAIN;
+  return sha256Hex(`${domain}\n${JSON.stringify(stableCohortSemanticManifest(entries, protocolVersion))}`);
 }
 
-export function deterministicDrainCommitMessage(manifestRoot: string): string {
+export function cohortPlanSemanticRoot(entries: readonly CohortPlanEntry[], protocolVersion: LocalDrainProtocolVersion): string {
+  const normalized = validateCohortPlan(entries).map((entry): PreparedCohortEntry => {
+    if (entry.op === "delete") return { path: entry.path, op: "delete", mode: "000000", blobOid: "", bytesSha256: "" };
+    const bytes = typeof entry.content === "string" ? Buffer.from(entry.content, "utf-8") : entry.content!;
+    return { path: entry.path, op: "put", mode: entry.mode ?? "100644", blobOid: "", bytesSha256: sha256Hex(bytes) };
+  });
+  return cohortManifestRoot(normalized, protocolVersion);
+}
+
+export function deterministicDrainCommitMessage(manifestRoot: string, protocolVersion: LocalDrainProtocolVersion = LOCAL_DRAIN_PROTOCOL_V2): string {
   if (!/^[0-9a-f]{64}$/.test(manifestRoot)) throw new GitExactCohortError("COHORT_MANIFEST_INVALID", "manifest root must be SHA-256 hex");
-  return `pi-astack local drain\n\nprotocol: ${LOCAL_DRAIN_PROTOCOL}\nmanifest: ${manifestRoot}`;
+  return `pi-astack local drain\n\nprotocol: ${protocolVersion}\nmanifest: ${manifestRoot}`;
 }
 
 export async function resolveRef(repo: string, refName: string): Promise<string> {
@@ -257,6 +270,7 @@ export async function prepareExactCohortCommit(options: {
   frozenCommit: string;
   plan: readonly CohortPlanEntry[];
   message: string;
+  protocolVersion?: LocalDrainProtocolVersion;
 }): Promise<PreparedExactCohortCommit> {
   const repo = path.resolve(options.repo);
   const plan = validateCohortPlan(options.plan);
@@ -315,13 +329,14 @@ export async function prepareExactCohortCommit(options: {
       }
     }
 
-    const manifestRoot = cohortManifestRoot(prepared);
+    const protocolVersion = options.protocolVersion ?? LOCAL_DRAIN_PROTOCOL_V2;
+    const manifestRoot = cohortManifestRoot(prepared, protocolVersion);
     const parentEpochText = (await git(repo, ["show", "-s", "--format=%ct", options.frozenCommit])).trim();
     const parentEpoch = /^\d+$/.test(parentEpochText) ? parentEpochText : "0";
     const stableDate = `${parentEpoch} +0000`;
     // `options.message` is intentionally excluded from commit bytes. It is a
     // caller diagnostic only; protocol + semantic manifest define the commit.
-    const candidate = (await git(repo, ["commit-tree", newTree, "-p", options.frozenCommit, "-m", deterministicDrainCommitMessage(manifestRoot)], {
+    const candidate = (await git(repo, ["commit-tree", newTree, "-p", options.frozenCommit, "-m", deterministicDrainCommitMessage(manifestRoot, protocolVersion)], {
       GIT_AUTHOR_NAME: DRAIN_IDENTITY.name,
       GIT_AUTHOR_EMAIL: DRAIN_IDENTITY.email,
       GIT_AUTHOR_DATE: stableDate,

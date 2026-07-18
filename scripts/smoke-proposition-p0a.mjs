@@ -246,7 +246,7 @@ await check("registry stays backward-compatible and adds only disabled propositi
     "constraint-evidence-envelope/v1",
     "constraint-projection-envelope/v1",
     "knowledge-evidence-envelope/v1",
-    "local-drain-recovery-envelope/v2",
+    "local-drain-recovery-envelope/v3",
   ]), `active schemas changed: ${JSON.stringify(activeNames)}`);
   const defined = l1.lookupL1SchemaRoles(registry, { domain: "proposition", phase: "defined_inactive" });
   assert(defined.length === 3, `defined-inactive proposition count=${defined.length}`);

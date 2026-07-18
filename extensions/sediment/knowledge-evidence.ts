@@ -2,6 +2,11 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicWriteFile } from "../_shared/durable-write";
+import {
+  CURRENT_KNOWLEDGE_L2,
+  knowledgeProjectionEntryRelativePathV1,
+  knowledgeProjectionManifestRelativePathV1,
+} from "../_shared/canonical-l2-contract";
 import { canonicalizeJcs, normalizeJcsValueOmittingUndefined, type JcsJsonValue } from "../_shared/jcs";
 import { scanWholeL1Validated, validateL1WritePreflight } from "../_shared/l1-schema-registry";
 import { slugify } from "../memory/utils";
@@ -463,14 +468,14 @@ function renderKnowledgeProjectionMarkdownBytes(
     `status: ${payload.status}`,
     `confidence: ${payload.confidence}`,
     `provenance: ${markdownString(payload.provenance)}`,
-    "schema_version: 1",
+    `schema_version: ${CURRENT_KNOWLEDGE_L2.entrySchemaVersion}`,
     `title: ${markdownString(payload.title)}`,
     `created: ${created}`,
     `updated: ${updated}`,
-    `sediment_projection: knowledge-evidence/v1`,
-    `sediment_projector: knowledge-projector`,
-    `sediment_projector_version: adr0039-p5`,
-    `sediment_template_version: knowledge-markdown/v1`,
+    `sediment_projection: ${CURRENT_KNOWLEDGE_L2.projection}`,
+    `sediment_projector: ${CURRENT_KNOWLEDGE_L2.projector}`,
+    `sediment_projector_version: ${CURRENT_KNOWLEDGE_L2.projectorVersion}`,
+    `sediment_template_version: ${CURRENT_KNOWLEDGE_L2.templateVersion}`,
     `sediment_input_event_set_hash: ${setHash}`,
     `sediment_output_hash: ${outputHash}`,
     `sediment_watermark_event_id: ${eventId}`,
@@ -620,8 +625,8 @@ export async function reprojectAllKnowledge(
     try {
       const proj = renderKnowledgeProjectionFromSet(nodes);
       const body = nodes[0]!.body;
-      const projectPart = body.scope.kind === "world" ? "world" : `projects/${body.scope.project_id || "unknown"}`;
-      const outputPath = path.join(latestDir, projectPart, `${body.payload.slug}.md`);
+      const relative = knowledgeProjectionEntryRelativePathV1({ scopeKind: body.scope.kind, projectId: body.scope.project_id, slug: body.payload.slug });
+      const outputPath = path.join(projectionRoot, ...relative.split("/"));
       await fs.mkdir(path.dirname(outputPath), { recursive: true });
       if (proj.kind === "delete") {
         await fs.rm(outputPath, { force: true });
@@ -638,7 +643,7 @@ export async function reprojectAllKnowledge(
   }
   if (allNodes.length > 0) {
     await fs.mkdir(latestDir, { recursive: true });
-    const manifestPath = path.join(latestDir, "manifest.json");
+    const manifestPath = path.join(projectionRoot, ...knowledgeProjectionManifestRelativePathV1().split("/"));
     await fs.writeFile(manifestPath, renderKnowledgeProjectionManifestFromSet(allNodes).json, "utf-8");
     writtenPaths.push(manifestPath);
     await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
@@ -713,7 +718,7 @@ export interface KnowledgeEvidenceL1Head {
 }
 
 export interface KnowledgeProjectionManifestV1 {
-  schemaVersion: "knowledge-projection-manifest/v1";
+  schemaVersion: typeof CURRENT_KNOWLEDGE_L2.manifestSchemaVersion;
   updatedAtUtc: string;
   latestEventId: string;
   latestOutputPath: string;
@@ -789,11 +794,9 @@ export function renderKnowledgeProjectionManifestFromSet(
   });
   const winner = winnerNodes[winnerNodes.length - 1]!;
   const body = winner.body;
-  const outputPath = body.scope.kind === "world"
-    ? `latest/world/${body.payload.slug}.md`
-    : `latest/projects/${body.scope.project_id || "unknown"}/${body.payload.slug}.md`;
+  const outputPath = knowledgeProjectionEntryRelativePathV1({ scopeKind: body.scope.kind, projectId: body.scope.project_id, slug: body.payload.slug });
   const manifest: KnowledgeProjectionManifestV1 = {
-    schemaVersion: "knowledge-projection-manifest/v1",
+    schemaVersion: CURRENT_KNOWLEDGE_L2.manifestSchemaVersion,
     updatedAtUtc: body.created_at_utc,
     latestEventId: winner.eventId,
     latestOutputPath: outputPath,
@@ -830,11 +833,9 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
   if (!args.settings.knowledgeProjector.enabled) return { ok: false, status: "disabled" };
   const body = args.envelope.body;
   if (body.event_schema_version !== "knowledge-evidence-event/v1" || body.intent.domain_hint !== "knowledge") return { ok: false, status: "invalid" };
-  const projectPart = body.scope.kind === "world" ? "world" : `projects/${body.scope.project_id || "unknown"}`;
   const root = stateRoot(args.abrainHome, args.settings);
-  const outputRoot = path.join(root, "latest", projectPart);
-  const outputPath = path.join(outputRoot, `${body.payload.slug}.md`);
-  const manifestPath = path.join(root, "latest", "manifest.json");
+  const outputPath = path.join(root, ...knowledgeProjectionEntryRelativePathV1({ scopeKind: body.scope.kind, projectId: body.scope.project_id, slug: body.payload.slug }).split("/"));
+  const manifestPath = path.join(root, ...knowledgeProjectionManifestRelativePathV1().split("/"));
   if (!isPathInside(root, outputPath) || !isPathInside(root, manifestPath)) return { ok: false, status: "invalid", error: "projection path escaped state root" };
   try {
     await fs.mkdir(path.dirname(outputPath), { recursive: true });

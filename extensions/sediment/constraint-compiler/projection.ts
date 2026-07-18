@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { CURRENT_CONSTRAINT_L2 } from "../../_shared/canonical-l2-contract";
 import { validateL1WritePreflight } from "../../_shared/l1-schema-registry";
 import { canonicalJson, canonicalJsonValue } from "../constraint-evidence/canonical-json";
 import { constraintEvidenceEventPath, sha256Hex } from "../constraint-evidence/hash-envelope";
@@ -21,7 +22,7 @@ export const CONSTRAINT_PROJECTION_EVENT_SCHEMA_VERSION = "constraint-projection
 export const CONSTRAINT_PROJECTION_CANONICALIZATION = "RFC8785-JCS";
 export const CONSTRAINT_PROJECTION_HASH_ALG = "sha256";
 // Must equal TEMPLATE_VERSION in render.ts (the renderer that produces L2 bytes).
-export const CONSTRAINT_L2_RENDER_TEMPLATE_VERSION = "constraint-shadow-render/v1";
+export const CONSTRAINT_L2_RENDER_TEMPLATE_VERSION = CURRENT_CONSTRAINT_L2.templateVersion;
 
 export interface ConstraintProjectionProvenance {
   model: string;
@@ -86,7 +87,7 @@ export function normalizeDecisionForProjection(decision: ValidatedConstraintComp
 }
 
 export function constraintL2RelativePath(): string {
-  return "l2/views/constraint/latest/compiled-view.md";
+  return CURRENT_CONSTRAINT_L2.canonicalPath;
 }
 
 export type ConstraintProjectionAppendStatus =

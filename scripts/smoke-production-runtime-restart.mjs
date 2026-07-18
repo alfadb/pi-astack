@@ -6,10 +6,12 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-runtime-restart-smoke-"));
 const verifier = path.join(root, "scripts/dossier-production-runtime-restart.mjs");
 const source = path.resolve(process.env.PI_ASTACK_RUNTIME_RESTART_SOURCE ?? "/home/worker/.abrain");
 const session = "/home/worker/.pi/agent/sessions/--home-worker-.pi--/2026-07-12T11-14-10-735Z_019f5608-e2af-7198-85a9-825f182e3c20.jsonl";
-const dispatchAudit = "/home/worker/.pi/.pi-astack/dispatch/audit.jsonl";
+const historicalReport = JSON.parse(fs.readFileSync(path.join(root, "docs/evidence/2026-07-12-canonical-path-p1-production-runtime-restart-report.json"), "utf8"));
+const dispatchAudit = path.join(tmp, "dispatch-audit.jsonl");
 const sourceEventPath = "l1/events/sha256/0d/9d/0d9df863c2db351e33449443d93ec0c8b55fbd7df49c1556c8512ab11ec780f4.json";
 const publishedPath = "l1/events/sha256/bb/78/bb784d04616724b3db38bb6ef6ae12cf350c01c9dc4f88fce62e50f5f4deaa7c.json";
 const episodePaths = [
@@ -20,7 +22,8 @@ const episodePaths = [
 ];
 const legacyPath = "l1/events/sha256/17/50/1750cb2920b9a72284335107b13011bba21228b8ee0975a0d3a3bc3ae224fc3a.json";
 const candidate = "4599d69b9f52015773a3033f5a3830497f0eb4b0";
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-runtime-restart-smoke-"));
+const freshProcess = historicalReport.facts.timeline.freshProcess;
+fs.writeFileSync(dispatchAudit, `${JSON.stringify({ pid: freshProcess.runtimePid, session_id: freshProcess.sessionId })}\n`);
 let passed = 0;
 
 function assert(value, message) { if (!value) throw new Error(message); }

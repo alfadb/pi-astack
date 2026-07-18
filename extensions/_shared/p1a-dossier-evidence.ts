@@ -5,10 +5,9 @@ import { promisify } from "node:util";
 import { foldRecoveryEvents, recoverOpenRecoveryEpisodesFromScan, readRecoveryEvents } from "./convergence-recovery";
 import { cohortManifestRoot, verifyCandidateShape, type PreparedExactCohortCommit } from "./git-exact-cohort";
 import { sha256Hex } from "./jcs";
-import { isCanonicalCohortPath, scanWholeL1Validated } from "./l1-schema-registry";
+import { isCanonicalCohortPath, isGitOid, scanWholeL1Validated } from "./l1-schema-registry";
 
 const execFileAsync = promisify(execFile);
-const GIT_OID_RE = /^[0-9a-f]{40,64}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 
 export interface P1ADossierLegacyResidue {
@@ -94,7 +93,7 @@ export function validateP1ADossierExecutionEvidence(value: unknown): string[] {
   if (!evidence) return ["execution_evidence_missing"];
   const errors: string[] = [];
   if (!exactKeys(evidence, EXECUTION_KEYS)) errors.push("execution_shape_mismatch");
-  const candidate = typeof evidence.candidate === "string" && GIT_OID_RE.test(evidence.candidate) ? evidence.candidate : null;
+  const candidate = isGitOid(evidence.candidate) ? evidence.candidate : null;
   const cohort = typeof evidence.cohortManifestRoot === "string" && SHA256_RE.test(evidence.cohortManifestRoot) ? evidence.cohortManifestRoot : null;
   const paths = Array.isArray(evidence.cohortPaths) ? evidence.cohortPaths : [];
   const published = record(evidence.published);
@@ -272,7 +271,12 @@ export async function verifyP1ADossierExecutionArtifact(options: {
 
   try {
     const scan = await scanWholeL1Validated({ abrainHome: repo });
-    recomputed.wholeL1 = { all: scan.all.length, activeV2: scan.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2").length, legacyReadOnly: scan.legacyReadOnly.length };
+    recomputed.wholeL1 = {
+      all: scan.all.length,
+      historicalV2: scan.all.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2").length,
+      activeV3: scan.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v3").length,
+      legacyReadOnly: scan.legacyReadOnly.length,
+    };
     const beforeStatus = record(before?.status);
     const statusRows = Array.isArray(beforeStatus?.records) ? beforeStatus.records : [];
     const statusByPath = new Map<string, string>();

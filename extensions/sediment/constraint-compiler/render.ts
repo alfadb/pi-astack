@@ -1,3 +1,4 @@
+import { CURRENT_CONSTRAINT_L2 } from "../../_shared/canonical-l2-contract";
 import type {
   ConstraintDecisionExclusion,
   ConstraintDecisionUnresolved,
@@ -7,7 +8,7 @@ import type {
 } from "./types";
 import { sha256Hex, stableCanonicalize } from "./normalize";
 
-const TEMPLATE_VERSION = "constraint-shadow-render/v1";
+const TEMPLATE_VERSION = CURRENT_CONSTRAINT_L2.templateVersion;
 
 // ADR0039 §4.3 strict determinism: locale-independent codepoint ordering so the
 // same decision renders byte-identical L2 on any machine/locale. Keys are ASCII
@@ -129,7 +130,7 @@ export function renderConstraintShadowView(decision: ValidatedConstraintCompiler
 }
 
 export interface RenderedConstraintL2View {
-  schemaVersion: "constraint-l2-view/v1";
+  schemaVersion: typeof CURRENT_CONSTRAINT_L2.schemaVersion;
   inputRootHash: string;
   decisionHash: string;
   projectionEventId: string;
@@ -153,9 +154,9 @@ export function renderConstraintL2View(decision: ValidatedConstraintCompilerDeci
   const decisionHash = sha256Hex(stableCanonicalize(decision));
   const lines: string[] = [
     "---",
-    "schema_version: constraint-l2-view/v1",
+    `schema_version: ${CURRENT_CONSTRAINT_L2.schemaVersion}`,
     "view: compiled_constraint",
-    "projector: constraint-compiler",
+    `projector: ${CURRENT_CONSTRAINT_L2.projector}`,
     `template_version: ${TEMPLATE_VERSION}`,
     `input_root_hash: ${decision.inputRootHash}`,
     `decision_hash: ${decisionHash}`,
@@ -171,7 +172,7 @@ export function renderConstraintL2View(decision: ValidatedConstraintCompilerDeci
   const canonicalOutputHash = sha256Hex(pendingMarkdown.replace("canonical_output_hash: __PENDING__", "canonical_output_hash: "));
   const markdown = pendingMarkdown.replace("canonical_output_hash: __PENDING__", `canonical_output_hash: ${canonicalOutputHash}`);
   return {
-    schemaVersion: "constraint-l2-view/v1",
+    schemaVersion: CURRENT_CONSTRAINT_L2.schemaVersion,
     inputRootHash: decision.inputRootHash,
     decisionHash,
     projectionEventId,

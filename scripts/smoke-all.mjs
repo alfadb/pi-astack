@@ -62,6 +62,7 @@ const offlineTimeoutSec = timeoutArg ? Number(timeoutArg.split("=")[1]) : 120;
 const liveTimeoutSec = Math.max(offlineTimeoutSec, 300);
 const OFFLINE_TIMEOUT_MINIMUMS = new Map([
   ["proposition-lifecycle-freshness-d3-wf", 360],
+  ["recovery-u-star-production-readonly", 1800],
 ]);
 
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));

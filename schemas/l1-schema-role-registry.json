@@ -1,6 +1,6 @@
 {
-  "schema_version": "l1-schema-role-registry/v1",
-  "registry_id": "pi-astack-local-convergence-r9",
+  "schema_version": "l1-schema-role-registry/v2",
+  "registry_id": "pi-astack-local-convergence-u-star-v3",
   "storage": {
     "root_relative_path": "l1/events/sha256",
     "canonicalization": "RFC8785-JCS",
@@ -190,6 +190,26 @@
     {
       "envelope_schema": "local-drain-recovery-envelope/v2",
       "body_schema": "local-drain-recovery-event/v2",
+      "domain": "canonical_path",
+      "role": "meta",
+      "phase": "legacy_read_only",
+      "write_enabled": false,
+      "fold_eligible": false,
+      "event_types": [
+        "recovery_slot_claimed",
+        "commit_prepared",
+        "commit_published",
+        "index_converged",
+        "recovery_slot_aborted",
+        "recovery_episode_terminal"
+      ],
+      "producers": [
+        "pi-astack.convergence-recovery"
+      ]
+    },
+    {
+      "envelope_schema": "local-drain-recovery-envelope/v3",
+      "body_schema": "local-drain-recovery-event/v3",
       "domain": "canonical_path",
       "role": "meta",
       "phase": "active",

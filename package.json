@@ -182,6 +182,7 @@
     "smoke:production-runtime-restart": "node scripts/smoke-production-runtime-restart.mjs",
     "smoke:canonical-path-shadow": "node scripts/smoke-canonical-path-shadow.mjs",
     "smoke:convergence-recovery": "node scripts/smoke-convergence-recovery.mjs",
+    "smoke:recovery-u-star-production-readonly": "node scripts/smoke-recovery-u-star-production-readonly.mjs",
     "smoke:script-registry-drift": "node scripts/smoke-script-registry-drift.mjs",
     "smoke:constraint-shadow-compiler": "node scripts/smoke-constraint-shadow-compiler.mjs",
     "smoke:constraint-shadow-liveness-recovery": "node scripts/smoke-constraint-shadow-liveness-recovery.mjs",

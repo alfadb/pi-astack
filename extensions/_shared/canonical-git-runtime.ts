@@ -5,8 +5,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import {
+  CONSTRAINT_L2_V1,
+  KNOWLEDGE_L2_V1,
+  canonicalKnowledgeManifestRelativePathV1,
+} from "./canonical-l2-contract";
+import {
+  cohortPlanSemanticRoot,
+  LOCAL_DRAIN_PROTOCOL_V3,
   prepareExactCohortCommit,
-  refContainsCohort,
   resolveRef,
   snapshotIndexEntries,
   type CohortPlanEntry,
@@ -14,14 +20,22 @@ import {
 import { gitSingleFlight } from "./git-singleflight";
 import { parseGitStatusPorcelainV1Z, type GitPorcelainV1Record } from "./git-z-parser";
 import {
-  claimNextRecoverySlot,
-  foldRecoveryEvents,
-  readRecoveryEvents,
-  recoverDrainSlot,
-  recoverOpenRecoveryEpisodes,
-  recordDrainPrepared,
-  resolveRecoveryEpisode,
+  RECOVERY_LANE_BUDGETS,
+  claimNextRecoverySlotV3,
+  foldRecoveryEventsV3,
+  frozenIndexSnapshotRootV3,
+  readRecoveryEventsV3,
+  recoverDrainSlotV3,
+  recoverOpenRecoveryEpisodesV3FromScan,
+  recoveryEpisodeCursorV3,
+  recordDrainPreparedV3,
+  recoveryEpisodeIdentityV3,
+  recoveryOperationV3,
 } from "./convergence-recovery";
+import {
+  classifyRecoveryHistory,
+  type CombinedRecoveryHistoryResult,
+} from "./recovery-history-classifier";
 import {
   loadL1SchemaRegistry,
   scanWholeL1Validated,
@@ -107,6 +121,7 @@ export interface CanonicalRuntimeDiagnostics {
   settings: CanonicalGitRuntimeSettings;
   startup: "not_started" | "running" | "ready" | "blocked";
   blockedReason?: string;
+  ownerAlert?: true;
   loadedProvenance: readonly LoadedProvenanceEntry[];
   implementationFingerprint: string;
   tail: readonly Record<string, unknown>[];
@@ -128,6 +143,7 @@ export interface DrainResult {
   slot?: number;
   localCommit: "not_published" | "published" | "index_converged";
   reason?: string;
+  ownerAlert?: true;
 }
 
 export interface CanonicalOwnershipInstrumentation {
@@ -317,6 +333,9 @@ function sourcePaths(sourceRoot: string, settingsPath: string): Array<[string, s
     ["singleflight", path.join(sourceRoot, "extensions/_shared/git-singleflight.ts")],
     ["git-z-parser", path.join(sourceRoot, "extensions/_shared/git-z-parser.ts")],
     ["recovery", path.join(sourceRoot, "extensions/_shared/convergence-recovery.ts")],
+    ["recovery-history-classifier", path.join(sourceRoot, "extensions/_shared/recovery-history-classifier.ts")],
+    ["canonical-l2-contract", path.join(sourceRoot, "extensions/_shared/canonical-l2-contract.ts")],
+    ["canonical-l2-reconciler", path.join(sourceRoot, "extensions/_shared/canonical-l2-reconciler.ts")],
     ["exact", path.join(sourceRoot, "extensions/_shared/git-exact-cohort.ts")],
     ["durable-write", path.join(sourceRoot, "extensions/_shared/durable-write.ts")],
     ["jcs", path.join(sourceRoot, "extensions/_shared/jcs.ts")],
@@ -444,7 +463,7 @@ function canonicalRelative(repo: string, file: string): string {
 function ownerForRelative(rel: string): ProducedArtifactOwner {
   if (rel.startsWith("l1/events/sha256/")) return "canonical_path_meta";
   if (rel.startsWith("l2/views/knowledge/")) return "knowledge_l2";
-  if (rel === "l2/views/constraint/latest/compiled-view.md") return "constraint_l2";
+  if (rel === CONSTRAINT_L2_V1.canonicalPath) return "constraint_l2";
   return "writer_transaction";
 }
 
@@ -547,7 +566,7 @@ async function isLegacyReadOnlyL1(repo: string, rel: string): Promise<boolean> {
 }
 
 function knowledgeIdentityFromL2Path(rel: string): string {
-  const prefix = "l2/views/knowledge/latest/";
+  const prefix = `${KNOWLEDGE_L2_V1.canonicalRoot}/`;
   if (!rel.startsWith(prefix) || !rel.endsWith(".md")) throw new CanonicalGitRuntimeError("KNOWLEDGE_L2_PATH", "unexpected knowledge L2 path", { rel });
   const parts = rel.slice(prefix.length, -3).split("/");
   if (parts.length === 2 && parts[0] === "world") return `world::${parts[1]}`;
@@ -709,7 +728,7 @@ async function recomputeKnowledgeL2(repo: string, rel: string, bytes: Buffer | u
 }
 
 async function recomputeKnowledgeManifest(repo: string, rel: string, bytes: Buffer, context?: CanonicalOwnershipContext): Promise<readonly string[]> {
-  if (rel !== "l2/views/knowledge/latest/manifest.json") throw new CanonicalGitRuntimeError("KNOWLEDGE_MANIFEST_PATH", "unexpected knowledge manifest path", { rel });
+  if (rel !== canonicalKnowledgeManifestRelativePathV1()) throw new CanonicalGitRuntimeError("KNOWLEDGE_MANIFEST_PATH", "unexpected knowledge manifest path", { rel });
   const knowledge = await import("../sediment/knowledge-evidence");
   const cached = context?._knowledgeManifest;
   const nodes = cached?.nodes ?? await knowledge.collectAllKnowledgeEventNodes(repo);
@@ -727,7 +746,7 @@ async function recomputeKnowledgeManifest(repo: string, rel: string, bytes: Buff
 }
 
 async function recomputeConstraintL2(repo: string, rel: string, bytes: Buffer, context?: CanonicalOwnershipContext): Promise<readonly string[]> {
-  if (rel !== "l2/views/constraint/latest/compiled-view.md") throw new CanonicalGitRuntimeError("CONSTRAINT_L2_PATH", "unexpected constraint L2 path", { rel });
+  if (rel !== CONSTRAINT_L2_V1.canonicalPath) throw new CanonicalGitRuntimeError("CONSTRAINT_L2_PATH", "unexpected constraint L2 path", { rel });
   if (context?._constraint) {
     if (!bytes.equals(Buffer.from(context._constraint.markdown, "utf-8"))) {
       throw new CanonicalGitRuntimeError("CONSTRAINT_L2_MISMATCH", "constraint L2 is not byte-equal to latest projection decision", { rel, eventId: context._constraint.projectionEventId });
@@ -759,7 +778,7 @@ async function validateReceipt(repo: string, receipt: ProducedArtifact, allowWri
   } else if (receipt.path.startsWith("l2/views/knowledge/") && receipt.path.endsWith(".md")) {
     expectedOwner = "knowledge_l2";
     sourceIds = await recomputeKnowledgeL2(repo, receipt.path, content, context);
-  } else if (receipt.path === "l2/views/knowledge/latest/manifest.json") {
+  } else if (receipt.path === canonicalKnowledgeManifestRelativePathV1()) {
     if (!content) throw new CanonicalGitRuntimeError("KNOWLEDGE_MANIFEST_DELETE_FORBIDDEN", "knowledge manifest deletion is not a projector transaction");
     expectedOwner = "knowledge_l2";
     sourceIds = await recomputeKnowledgeManifest(repo, receipt.path, content, context);
@@ -786,6 +805,21 @@ export async function proveCanonicalArtifactOwnership(options: {
   if (path.resolve(options.abrainHome) !== repo) throw new CanonicalGitRuntimeError("OWNERSHIP_CONTEXT_REPO_MISMATCH", "ownership context belongs to a different repository");
   const receipt = await createProducedArtifactReceipt({ abrainHome: repo, filePath: options.filePath, op: options.op });
   return (await validateReceipt(repo, receipt, false, options.context)).receipt;
+}
+
+function quarantineReason(protocol: "v2" | "v3", items: readonly { episodeId: string; errorCode: string; message: string; detail?: string }[]): string {
+  return items.map((item) => `${protocol}:${item.episodeId}:${item.errorCode}:${item.detail ?? "no-detail"}:${item.message}`).join(" | ");
+}
+
+async function classifyHistoricalRecovery(repo: string, scan: WholeL1ScanResult, head: string): Promise<CombinedRecoveryHistoryResult> {
+  const history = await classifyRecoveryHistory({ repo, scan, head });
+  if (history.status !== "accepted" || !history.v3) {
+    const summary = history.quarantined.map((item) => `${item.protocol}:${item.episodeId}:${item.errorCode}:${item.detail ?? "no-detail"}:${item.message}`).join(" | ");
+    throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", `combined historical classification failed: ${summary}`, {
+      quarantined: history.quarantined,
+    });
+  }
+  return history;
 }
 
 async function pruneNoops(repo: string, frozen: string, plan: readonly CohortPlanEntry[]): Promise<CohortPlanEntry[]> {
@@ -823,6 +857,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   private startupState: CanonicalRuntimeDiagnostics["startup"] = "not_started";
   private startupPromise?: Promise<CanonicalRuntimeDiagnostics>;
   private blockedReason?: string;
+  private ownerAlert = false;
   private frozenOwnershipContext?: { statusHash: string; context: CanonicalOwnershipContext };
   private readonly tail: Record<string, unknown>[] = [];
 
@@ -847,6 +882,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       settings: this.settings,
       startup: this.startupState,
       ...(this.blockedReason ? { blockedReason: this.blockedReason } : {}),
+      ...(this.ownerAlert ? { ownerAlert: true as const } : {}),
       loadedProvenance: this.loadedProvenance,
       implementationFingerprint: this.implementationFingerprint,
       tail: Object.freeze(this.tail.slice()),
@@ -872,6 +908,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         }
         this.startupState = "running";
         this.blockedReason = undefined;
+        this.ownerAlert = false;
         try {
           await this.recoverAtStartupUnlocked();
           const backlog = await this.requestBacklogPreflightUnlocked();
@@ -887,19 +924,22 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
               }
               const drained = await this.requestDrainUnlocked(backlog.receipts, "startup-local-drain", "startup_content_backlog");
               if (drained.status !== "index_converged" && drained.status !== "empty" && drained.status !== "metadata_deferred" && drained.status !== "consumed") {
-                throw new CanonicalGitRuntimeError("STARTUP_DRAIN_NOT_DURABLE", `startup local drain ended in ${drained.status}`, { drained });
+                throw new CanonicalGitRuntimeError("STARTUP_DRAIN_NOT_DURABLE", `startup local drain ended in ${drained.status}: ${drained.reason ?? "no reason"}`, { drained });
               }
             }
           } else if (backlog.status === "blocked") throw new CanonicalGitRuntimeError("STARTUP_BACKLOG_BLOCKED", backlog.reason ?? "backlog preflight blocked");
-          const finalRecovery = await recoverOpenRecoveryEpisodes(this.repo);
-          if (finalRecovery.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", "active v2 recovery is malformed", { episodes: finalRecovery.quarantined.map((item) => item.episodeId) });
-          if (finalRecovery.terminal.length) throw new CanonicalGitRuntimeError("OWNER_INTERVENTION_REQUIRED", "active v2 terminal is absorbing for the current generation", { episodes: finalRecovery.terminal.map((item) => item.episodeId) });
+          const finalScan = await scanWholeL1Validated({ abrainHome: this.repo });
+          const finalHead = await resolveRef(this.repo, this.options.refName);
+          await classifyHistoricalRecovery(this.repo, finalScan, finalHead);
+          const finalRecovery = recoverOpenRecoveryEpisodesV3FromScan(finalScan);
+          if (finalRecovery.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", `active v3 recovery classification failed: ${quarantineReason("v3", finalRecovery.quarantined)}`, { protocol: "v3", quarantined: finalRecovery.quarantined });
           this.startupState = "ready";
           this.record({ operation: "startup", status: "local_ready" });
         } catch (error) {
           this.startupState = "blocked";
           this.blockedReason = error instanceof Error ? error.message : String(error);
-          this.record({ operation: "startup", status: "blocked", reason: this.blockedReason });
+          this.ownerAlert = this.blockedReason.includes("owner_alert=true");
+          this.record({ operation: "startup", status: "blocked", reason: this.blockedReason, ...(this.ownerAlert ? { ownerAlert: true } : {}) });
         }
         return this.diagnostics();
       });
@@ -913,21 +953,40 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
 
   private async recoverAtStartupUnlocked(): Promise<void> {
     await this.mutationPreflight();
-    const recovered = await recoverOpenRecoveryEpisodes(this.repo);
-    if (recovered.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", "active v2 recovery is malformed", { episodes: recovered.quarantined.map((item) => item.episodeId) });
-    if (recovered.terminal.length) throw new CanonicalGitRuntimeError("OWNER_INTERVENTION_REQUIRED", "active v2 terminal is absorbing for the current generation", { episodes: recovered.terminal.map((item) => item.episodeId) });
-    for (const cursor of recovered.open) {
-      if (cursor.pendingSlot === null) continue;
-      const action = await recoverDrainSlot({
-        abrainHome: this.repo,
-        repo: this.repo,
-        symbolicRef: this.options.refName,
-        episodeId: cursor.episodeId,
-        slot: cursor.pendingSlot,
-        prePublishCheck: () => this.mutationPreflight(),
-        preConvergeCheck: () => preflightSharedIndexLock(this.repo),
-      });
-      this.record({ operation: "recover_drain", episodeId: cursor.episodeId, slot: cursor.pendingSlot, action });
+    const head = await resolveRef(this.repo, this.options.refName);
+    const scan = await scanWholeL1Validated({ abrainHome: this.repo });
+    const combined = await classifyHistoricalRecovery(this.repo, scan, head);
+    const history = combined.v2;
+    const v3History = combined.v3!;
+    this.record({ operation: "classify_v2_history", status: "accepted", episodes: history.episodes.length, joins: history.joins.length, consumed: history.consumedEventIds.length, writableFrontierCount: history.writableFrontierCount });
+    this.record({ operation: "classify_v3_history", status: "accepted", candidates: v3History.candidates.length, joins: v3History.joins.length, open: v3History.openEpisodeIds.length, terminal: v3History.terminalEpisodeIds.length });
+    const recovered = recoverOpenRecoveryEpisodesV3FromScan(scan);
+    if (recovered.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", `active v3 recovery classification failed: ${quarantineReason("v3", recovered.quarantined)}`, { protocol: "v3", quarantined: recovered.quarantined });
+    for (const initial of recovered.open) {
+      let settled = false;
+      for (let step = 0; step < RECOVERY_LANE_BUDGETS.drain * 2 + 2; step += 1) {
+        const cursor = recoveryEpisodeCursorV3(initial.episodeId, initial.operation, await readRecoveryEventsV3(this.repo, initial.episodeId));
+        if (cursor.complete || cursor.terminal) { settled = true; break; }
+        let slot = cursor.pendingSlot;
+        if (slot === null) {
+          const claim = await claimNextRecoverySlotV3({ abrainHome: this.repo, operation: cursor.operation });
+          if (claim.status === "complete" || claim.status === "terminal") { settled = true; break; }
+          slot = claim.slot;
+        }
+        const action = await recoverDrainSlotV3({
+          abrainHome: this.repo,
+          repo: this.repo,
+          operation: cursor.operation,
+          slot,
+          prePublishCheck: () => this.mutationPreflight(),
+          preConvergeCheck: () => preflightSharedIndexLock(this.repo),
+        });
+        this.record({ operation: "recover_drain_v3", episodeId: cursor.episodeId, slot, action });
+      }
+      const final = recoveryEpisodeCursorV3(initial.episodeId, initial.operation, await readRecoveryEventsV3(this.repo, initial.episodeId));
+      if (!settled && !final.complete && !final.terminal) {
+        throw new CanonicalGitRuntimeError("RECOVERY_V3_LIVENESS", "startup could not settle an open v3 episode within its fixed slot budget", { episodeId: initial.episodeId, lastClaimedSlot: final.lastClaimedSlot });
+      }
     }
   }
 
@@ -988,7 +1047,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
 
   async requestDrain(receipts: readonly ProducedArtifact[], message = "abrain: canonical artifact drain"): Promise<DrainResult> {
     const startup = await this.awaitStartup();
-    if (startup.startup === "blocked") return { status: "blocked", localCommit: "not_published", reason: startup.blockedReason };
+    if (startup.startup === "blocked") return { status: "blocked", localCommit: "not_published", reason: startup.blockedReason, ...(startup.ownerAlert ? { ownerAlert: true } : {}) };
     return gitSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message, "steady_writer"));
   }
 
@@ -1056,9 +1115,9 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     const rawPlan: CohortPlanEntry[] = validated.map(({ receipt, content }) => receipt.op === "delete"
       ? { path: receipt.path, op: "delete" }
       : { path: receipt.path, op: "put", mode: receipt.mode!, content: content! });
-    const plan = await pruneNoops(this.repo, frozenCommit, rawPlan);
+    let plan = await pruneNoops(this.repo, frozenCommit, rawPlan);
     if (!plan.length) return { status: "empty", commit: frozenCommit, localCommit: "not_published" };
-    const surviving = survivingValidatedArtifacts(plan, validated);
+    let surviving = survivingValidatedArtifacts(plan, validated);
     if (isCanonicalMetadataOnlyCohort(surviving)) {
       this.record({ operation: "drain", action: "metadata_deferred", generationPolicy, cohortSize: plan.length });
       return {
@@ -1067,23 +1126,102 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         reason: "canonical recovery metadata awaits a content cohort",
       };
     }
+
+    // V3 genesis is authorized only against a base whose complete v2 history
+    // already passes U* classification. This check occurs before claim, blob,
+    // tree, or commit-object creation.
+    const genesisScan = await scanWholeL1Validated({ abrainHome: this.repo });
+    await classifyHistoricalRecovery(this.repo, genesisScan, frozenCommit);
+    const activeV3 = recoverOpenRecoveryEpisodesV3FromScan(genesisScan);
+    if (activeV3.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", `v3 genesis rejected by malformed active history: ${quarantineReason("v3", activeV3.quarantined)}`, { protocol: "v3", quarantined: activeV3.quarantined });
+
+    let frozenIndexSnapshot = await snapshotIndexEntries(this.repo, plan.map((entry) => entry.path));
+    let operation = recoveryOperationV3({
+      symbolicRef: this.options.refName,
+      baseCommit: frozenCommit,
+      cohortSemanticRoot: cohortPlanSemanticRoot(plan, LOCAL_DRAIN_PROTOCOL_V3),
+      frozenIndexSnapshotRoot: frozenIndexSnapshotRootV3(plan, frozenIndexSnapshot),
+    });
+    let episodeId = recoveryEpisodeIdentityV3(operation);
+    let matchedExisting = [...activeV3.open, ...activeV3.terminal].find((cursor) => cursor.episodeId === episodeId);
+
+    // Recovery rows written after an exact operation was frozen are not part
+    // of that operation's cohort. Excluding only that episode's own rows lets
+    // an in-process retry reconstruct the original operation while retaining
+    // predecessor metadata that was already part of the frozen cohort.
+    if (!matchedExisting) {
+      for (const cursor of [...activeV3.open, ...activeV3.terminal]) {
+        const ownPaths = new Set(genesisScan.selected
+          .filter((record) => record.registration.envelope_schema === "local-drain-recovery-envelope/v3" && record.body.episode_id === cursor.episodeId)
+          .map((record) => record.relativePath));
+        const candidateRawPlan = rawPlan.filter((entry) => !ownPaths.has(entry.path));
+        const candidatePlan = await pruneNoops(this.repo, frozenCommit, candidateRawPlan);
+        if (!candidatePlan.length) continue;
+        const candidateSnapshot = await snapshotIndexEntries(this.repo, candidatePlan.map((entry) => entry.path));
+        const candidateOperation = recoveryOperationV3({
+          symbolicRef: this.options.refName,
+          baseCommit: frozenCommit,
+          cohortSemanticRoot: cohortPlanSemanticRoot(candidatePlan, LOCAL_DRAIN_PROTOCOL_V3),
+          frozenIndexSnapshotRoot: frozenIndexSnapshotRootV3(candidatePlan, candidateSnapshot),
+        });
+        if (recoveryEpisodeIdentityV3(candidateOperation) !== cursor.episodeId) continue;
+        plan = candidatePlan;
+        frozenIndexSnapshot = candidateSnapshot;
+        operation = candidateOperation;
+        episodeId = cursor.episodeId;
+        matchedExisting = cursor;
+        break;
+      }
+    }
+
+    surviving = survivingValidatedArtifacts(plan, validated);
     if (generationPolicy === "startup_content_backlog" && !surviving.some((artifact) => isCanonicalContentOwner(artifact.receipt.owner))) {
       throw new CanonicalGitRuntimeError("STARTUP_CONTENT_AUTHORIZATION_REQUIRED", "startup surviving plan requires validated Knowledge/Constraint L1/L2 content");
     }
-    const frozenIndexSnapshot = await snapshotIndexEntries(this.repo, plan.map((entry) => entry.path));
-    const episode = await resolveRecoveryEpisode({ abrainHome: this.repo, symbolicRef: this.options.refName });
-    const claim = await claimNextRecoverySlot({ abrainHome: this.repo, episodeId: episode.episodeId, lane: "drain" });
-    if (!claim.shouldExecute || claim.slot === null) return { status: "consumed", episodeId: episode.episodeId, slot: claim.slot ?? undefined, localCommit: "not_published", reason: claim.status };
-    await preflightSharedIndexLock(this.repo);
-    const prepared = await prepareExactCohortCommit({ repo: this.repo, refName: this.options.refName, frozenCommit, plan, message });
-    await recordDrainPrepared({ abrainHome: this.repo, episodeId: episode.episodeId, slot: claim.slot, prepared, frozenIndexSnapshot });
-    let action: Awaited<ReturnType<typeof recoverDrainSlot>>;
-    try {
-      action = await recoverDrainSlot({
+    if (matchedExisting?.terminal) {
+      const reason = "RECOVERY_V3_TERMINAL_CONTENT_BACKLOG: exact v3 operation is terminal; owner intervention required, owner_alert=true, content retained";
+      this.record({ operation: "drain_v3", episodeId, action: "terminal_content_blocked", ownerAlert: true });
+      return { status: "blocked", episodeId, localCommit: "not_published", reason, ownerAlert: true };
+    }
+    const competing = activeV3.open.filter((cursor) => cursor.episodeId !== episodeId);
+    if (competing.length) throw new CanonicalGitRuntimeError("RECOVERY_V3_CONCURRENT_OPERATION", "another exact v3 operation has an unresolved retry frontier", { episodeId, competing: competing.map((cursor) => cursor.episodeId) });
+
+    let claim = await claimNextRecoverySlotV3({ abrainHome: this.repo, operation });
+    for (let step = 0; step < RECOVERY_LANE_BUDGETS.drain + 1 && claim.status !== "acquired"; step += 1) {
+      if (claim.status === "terminal") {
+        const reason = "RECOVERY_V3_TERMINAL_CONTENT_BACKLOG: exact v3 operation is terminal; owner intervention required, owner_alert=true, content retained";
+        this.record({ operation: "drain_v3", episodeId, action: "terminal_content_blocked", ownerAlert: true });
+        return { status: "blocked", episodeId, localCommit: "not_published", reason, ownerAlert: true };
+      }
+      if (claim.status === "complete") return { status: "consumed", episodeId, localCommit: "not_published", reason: claim.status };
+      const action = await recoverDrainSlotV3({
         abrainHome: this.repo,
         repo: this.repo,
-        symbolicRef: this.options.refName,
-        episodeId: episode.episodeId,
+        operation,
+        slot: claim.slot,
+        prePublishCheck: () => this.mutationPreflight(),
+        preConvergeCheck: () => preflightSharedIndexLock(this.repo),
+      });
+      this.record({ operation: "recover_drain_v3", episodeId, slot: claim.slot, action, source: "request_drain" });
+      if (action === "index_converged" || action === "already_complete") {
+        return { status: "index_converged", commit: await resolveRef(this.repo, this.options.refName), episodeId, slot: claim.slot, localCommit: "index_converged" };
+      }
+      if (action === "terminal") {
+        const reason = "RECOVERY_V3_TERMINAL_CONTENT_BACKLOG: exact v3 operation exhausted its retry budget; owner intervention required, owner_alert=true, content retained";
+        return { status: "blocked", episodeId, slot: claim.slot, localCommit: "not_published", reason, ownerAlert: true };
+      }
+      claim = await claimNextRecoverySlotV3({ abrainHome: this.repo, operation });
+    }
+    if (claim.status !== "acquired" || !claim.shouldExecute) throw new CanonicalGitRuntimeError("RECOVERY_V3_LIVENESS", "request drain could not acquire the next exact-operation slot");
+    await preflightSharedIndexLock(this.repo);
+    const prepared = await prepareExactCohortCommit({ repo: this.repo, refName: this.options.refName, frozenCommit, plan, message, protocolVersion: LOCAL_DRAIN_PROTOCOL_V3 });
+    await recordDrainPreparedV3({ abrainHome: this.repo, operation, slot: claim.slot, prepared, frozenIndexSnapshot });
+    let action: Awaited<ReturnType<typeof recoverDrainSlotV3>>;
+    try {
+      action = await recoverDrainSlotV3({
+        abrainHome: this.repo,
+        repo: this.repo,
+        operation,
         slot: claim.slot,
         prePublishCheck: async () => {
           await this.mutationPreflight();
@@ -1093,26 +1231,25 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       });
     } catch (error) {
       const current = await resolveRef(this.repo, this.options.refName);
-      const refPublished = await gitIsAncestor(this.repo, prepared.candidate, current)
-        || await refContainsCohort(this.repo, this.options.refName, prepared.entries);
+      const refPublished = await gitIsAncestor(this.repo, prepared.candidate, current);
       let durablePublishedFact = false;
       try {
-        const state = foldRecoveryEvents(await readRecoveryEvents(this.repo, episode.episodeId, "drain")).get(claim.slot);
+        const state = foldRecoveryEventsV3(await readRecoveryEventsV3(this.repo, episodeId)).get(claim.slot);
         durablePublishedFact = !!state?.published && !state.aborted;
       } catch {
-        // Ref/cohort containment below remains an independent irreversible
-        // publication fact even when recovery metadata itself is quarantined.
+        // Candidate ancestry remains an independent irreversible publication
+        // fact even when recovery metadata itself is quarantined.
       }
       if (refPublished || durablePublishedFact) {
         const reason = error instanceof Error ? error.message : String(error);
-        this.record({ operation: "drain", episodeId: episode.episodeId, slot: claim.slot, action: "published_pending", candidate: prepared.candidate, cohort: prepared.cohortManifestRoot, reason });
-        return { status: "blocked", commit: prepared.candidate, episodeId: episode.episodeId, slot: claim.slot, localCommit: "published", reason };
+        this.record({ operation: "drain_v3", episodeId, slot: claim.slot, action: "published_pending", candidate: prepared.candidate, cohort: prepared.cohortManifestRoot, reason });
+        return { status: "blocked", commit: prepared.candidate, episodeId, slot: claim.slot, localCommit: "published", reason };
       }
       throw error;
     }
-    this.record({ operation: "drain", episodeId: episode.episodeId, slot: claim.slot, action, candidate: prepared.candidate, cohort: prepared.cohortManifestRoot });
-    if (action !== "index_converged" && action !== "already_complete") return { status: "blocked", episodeId: episode.episodeId, slot: claim.slot, localCommit: "not_published", reason: action };
-    return { status: "index_converged", commit: await resolveRef(this.repo, this.options.refName), episodeId: episode.episodeId, slot: claim.slot, localCommit: "index_converged" };
+    this.record({ operation: "drain_v3", episodeId, slot: claim.slot, action, candidate: prepared.candidate, cohort: prepared.cohortManifestRoot });
+    if (action !== "index_converged" && action !== "already_complete") return { status: "blocked", episodeId, slot: claim.slot, localCommit: "not_published", reason: action };
+    return { status: "index_converged", commit: await resolveRef(this.repo, this.options.refName), episodeId, slot: claim.slot, localCommit: "index_converged" };
   }
 
 }

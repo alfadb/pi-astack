@@ -216,12 +216,12 @@ try {
 
   scan = await l1.scanWholeL1Validated({ abrainHome: abrain });
   check("wholeL1Strict", true);
-  preparedRecord = scan.selected.find((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2" && item.body.event_type === "commit_prepared" && item.body.body?.candidate === candidate);
-  check("candidateHasSinglePreparedEvent", Boolean(preparedRecord) && scan.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2" && item.body.event_type === "commit_prepared" && item.body.body?.candidate === candidate).length === 1, "prepared_event_missing_or_ambiguous");
+  preparedRecord = scan.all.find((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2" && item.body.event_type === "commit_prepared" && item.body.body?.candidate === candidate);
+  check("candidateHasSinglePreparedEvent", Boolean(preparedRecord) && scan.all.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2" && item.body.event_type === "commit_prepared" && item.body.body?.candidate === candidate).length === 1, "prepared_event_missing_or_ambiguous");
   if (!preparedRecord) throw new Error("prepared event unavailable");
   const episodeId = preparedRecord.body.episode_id;
   const slot = preparedRecord.body.slot;
-  const episodeRecords = scan.selected.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2" && item.body.episode_id === episodeId);
+  const episodeRecords = scan.all.filter((item) => item.registration.envelope_schema === "local-drain-recovery-envelope/v2" && item.body.episode_id === episodeId);
   episodeEvents = episodeRecords.map((item) => item.body);
   eventIds = Object.fromEntries(episodeRecords.map((item) => [item.body.event_type, item.eventId]));
   prepared = preparedRecord.body.body;

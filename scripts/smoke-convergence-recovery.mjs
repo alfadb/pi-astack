@@ -11,6 +11,11 @@ const require = createRequire(import.meta.url);
 const { createJiti } = require("jiti");
 const jiti = createJiti(root, { interopDefault: true });
 const recovery = jiti(path.join(root, "extensions/_shared/convergence-recovery.ts"));
+const history = jiti(path.join(root, "extensions/_shared/recovery-history-classifier.ts"));
+const l2Contract = jiti(path.join(root, "extensions/_shared/canonical-l2-contract.ts"));
+const l2Reconciler = jiti(path.join(root, "extensions/_shared/canonical-l2-reconciler.ts"));
+const knowledgeRenderer = jiti(path.join(root, "extensions/sediment/knowledge-evidence.ts"));
+const constraintRenderer = jiti(path.join(root, "extensions/sediment/constraint-compiler/render.ts"));
 const cohort = jiti(path.join(root, "extensions/_shared/git-exact-cohort.ts"));
 const l1 = jiti(path.join(root, "extensions/_shared/l1-schema-registry.ts"));
 const jcs = jiti(path.join(root, "extensions/_shared/jcs.ts"));
@@ -42,6 +47,11 @@ function initRepo(name, format = "sha1") {
   });
   return repo;
 }
+function commitFixture(repo, message, epoch = "1700000030") {
+  execFileSync("git", ["-C", repo, "commit", "-qm", message], {
+    env: { ...process.env, LANG: "C", LC_ALL: "C", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", GIT_AUTHOR_DATE: `${epoch} +0000`, GIT_COMMITTER_DATE: `${epoch} +0000` },
+  });
+}
 function emptyHome(name) {
   const home = path.join(tmp, name);
   fs.mkdirSync(path.join(home, "l1/events/sha256"), { recursive: true });
@@ -66,17 +76,28 @@ function legacyEnvelope(event) {
 function legacyEvent(episodeId, slot, eventType, body) {
   return { event_schema_version: "drain-recovery-event/v1", event_type: eventType, producer: { name: "pi-astack.convergence-recovery", version: "1.0.0" }, episode_id: episodeId, lane: "push", slot, body };
 }
+function operationFor(prepared) {
+  return recovery.recoveryOperationV3({
+    symbolicRef: "refs/heads/main",
+    baseCommit: prepared.frozen,
+    cohortSemanticRoot: prepared.prepared.cohortManifestRoot,
+    frozenIndexSnapshotRoot: recovery.frozenIndexSnapshotRootV3(prepared.prepared.entries, prepared.snapshot),
+  });
+}
 async function activePreparedFixture(name) {
   const repo = initRepo(`${name}-repo`);
-  const prepared = await prepare(repo);
-  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
-  await recovery.recordDrainPrepared({ abrainHome: repo, episodeId, slot: 1, prepared: prepared.prepared, frozenIndexSnapshot: prepared.snapshot });
+  const prepared = await prepare(repo, "ignored caller message", cohort.LOCAL_DRAIN_PROTOCOL_V3);
+  const operation = operationFor(prepared);
+  const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  assert(claim.slot === 1 && claim.shouldExecute, "active v3 prepared fixture claim missing");
+  await recovery.recordDrainPreparedV3({ abrainHome: repo, operation, slot: 1, prepared: prepared.prepared, frozenIndexSnapshot: prepared.snapshot });
   const scan = await l1.scanWholeL1Validated({ abrainHome: repo });
   const record = scan.all.find((item) => item.body.event_type === "commit_prepared");
-  assert(record, "active prepared fixture missing");
-  return { repo, event: structuredClone(record.body), envelope: structuredClone(record.envelope) };
+  const claimRecord = scan.all.find((item) => item.body.event_type === "recovery_slot_claimed");
+  assert(record && claimRecord, "active prepared fixture missing");
+  return { repo, operation, event: structuredClone(record.body), envelope: structuredClone(record.envelope), claimEvent: structuredClone(claimRecord.body) };
 }
-async function prepare(repo, message = "ignored caller message") {
+async function prepare(repo, message = "ignored caller message", protocolVersion = cohort.LOCAL_DRAIN_PROTOCOL_V2) {
   const frozen = git(repo, "rev-parse", "HEAD");
   const plan = [
     { path: "Z.txt", op: "put", content: "z\n" },
@@ -84,18 +105,41 @@ async function prepare(repo, message = "ignored caller message") {
     { path: "\u4e2d.txt", op: "put", content: "unicode\n" },
   ];
   const snapshot = await cohort.snapshotIndexEntries(repo, plan.map((item) => item.path));
-  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan, message });
+  const prepared = await cohort.prepareExactCohortCommit({ repo, refName: "refs/heads/main", frozenCommit: frozen, plan, message, protocolVersion });
   return { frozen, plan, snapshot, prepared };
 }
 
-console.log("smoke: local drain recovery v2");
+async function abortPreparedPermutation(name, abortFirst) {
+  const repo = initRepo(name);
+  const prepared = await prepare(repo, name, cohort.LOCAL_DRAIN_PROTOCOL_V3);
+  const operation = operationFor(prepared);
+  const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  const abort = () => recovery.appendRecoveryEventV3({ abrainHome: repo, operation, slot: claim.slot, eventType: "recovery_slot_aborted", body: { reason: "recovery_slot_aborted", error_code: "RECOVERY_SLOT_ABORTED" } });
+  const recordPrepared = () => recovery.recordDrainPreparedV3({ abrainHome: repo, operation, slot: claim.slot, prepared: prepared.prepared, frozenIndexSnapshot: prepared.snapshot });
+  if (abortFirst) { await abort(); await recordPrepared(); }
+  else { await recordPrepared(); await abort(); }
+  return { repo, operation, episodeId: claim.episodeId, prepared };
+}
 
-await check("registry declares v1 legacy_read_only and v2 active/write-only", () => {
+console.log("smoke: U* v2 history reader + v3 local drain recovery");
+
+await check("registry makes v1/v2 legacy read-only and v3 the only active recovery writer", () => {
   const registry = l1.loadL1SchemaRegistry();
-  const old = registry.entries.find((entry) => entry.envelope_schema === "drain-recovery-envelope/v1");
-  const active = registry.entries.find((entry) => entry.envelope_schema === "local-drain-recovery-envelope/v2");
-  assert(old?.phase === "legacy_read_only" && !old.write_enabled && !old.fold_eligible, "v1 disposition mismatch");
-  assert(active?.phase === "active" && active.write_enabled && !active.fold_eligible, "v2 disposition mismatch");
+  const v1 = registry.entries.find((entry) => entry.envelope_schema === "drain-recovery-envelope/v1");
+  const v2 = registry.entries.find((entry) => entry.envelope_schema === "local-drain-recovery-envelope/v2");
+  const v3 = registry.entries.find((entry) => entry.envelope_schema === "local-drain-recovery-envelope/v3");
+  assert(registry.schema_version === "l1-schema-role-registry/v2", "old reader compatibility barrier missing");
+  assert(v1?.phase === "legacy_read_only" && v2?.phase === "legacy_read_only" && !v1.write_enabled && !v2.write_enabled, "v1/v2 disposition mismatch");
+  assert(v3?.phase === "active" && v3.write_enabled && !v3.fold_eligible, "v3 disposition mismatch");
+});
+
+await check("v2 writer is rejected before creating an event path", async () => {
+  const home = emptyHome("v2-write-rejected");
+  const before = fs.readdirSync(path.join(home, "l1/events/sha256")).length;
+  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  await expectCode("L1_SCHEMA_WRITE_DISABLED", () => recovery.claimRecoverySlot({ abrainHome: home, episodeId, lane: "drain", slot: 1 }));
+  await expectCode("L1_SCHEMA_WRITE_DISABLED", () => recovery.recoverDrainSlot({ abrainHome: home, repo: home, symbolicRef: "refs/heads/main", episodeId, slot: 1 }));
+  assert(fs.readdirSync(path.join(home, "l1/events/sha256")).length === before, "rejected v2 writer created a shard");
 });
 
 await check("real legacy IDs strict-validate but stay outside active scan/fold", async () => {
@@ -211,13 +255,13 @@ await check("legacy v1 exact-body mutation table fails whole-L1 closed", async (
   }
 });
 
-await check("active v2 prepared paths/snapshot fail closed in registry and recovery decoder", async () => {
+await check("active v3 prepared paths/snapshot fail closed in registry and recovery decoder", async () => {
   const base = await activePreparedFixture("prepared-path-contract");
   const basePayload = base.envelope.body.body;
   const entryPaths = basePayload.entries.map((entry) => entry.path);
   assert(JSON.stringify(Object.keys(basePayload.frozen_index_snapshot)) === JSON.stringify(entryPaths), "active snapshot is not total over entries");
   assert(Object.values(basePayload.frozen_index_snapshot).every((value) => value === null), "absent index entries must serialize as null");
-  recovery.decodePreparedRecoveryEvent(base.event, base.repo, "refs/heads/main");
+  recovery.decodePreparedRecoveryEvent(base.event, base.repo, "refs/heads/main", cohort.LOCAL_DRAIN_PROTOCOL_V3);
 
   const mutations = [
     ["absolute entry", (payload) => { payload.entries[0].path = "/home/worker/.abrain/private-path.txt"; }],
@@ -231,6 +275,9 @@ await check("active v2 prepared paths/snapshot fail closed in registry and recov
     ["unsorted entries", (payload) => { payload.entries.reverse(); }],
     ["duplicate entry", (payload) => { payload.entries.splice(1, 0, structuredClone(payload.entries[0])); }],
     ["invalid snapshot value", (payload) => { payload.frozen_index_snapshot[payload.entries[0].path] = "100644 not-an-oid 0"; }],
+    ["41 digit candidate oid", (payload) => { payload.candidate = "a".repeat(41); }],
+    ["63 digit blob oid", (payload) => { payload.entries[0].blobOid = "b".repeat(63); }],
+    ["41 digit snapshot oid", (payload) => { payload.frozen_index_snapshot[payload.entries[0].path] = `100644 ${"c".repeat(41)} 0`; }],
   ];
   for (const [name, mutate] of mutations) {
     const bad = structuredClone(base.envelope);
@@ -239,40 +286,165 @@ await check("active v2 prepared paths/snapshot fail closed in registry and recov
     const home = emptyHome(`active-bad-${String(name).replace(/[^a-z]+/gi, "-")}`);
     writeEnvelope(home, bad);
     await expectCode("L1_BODY_SHAPE_MISMATCH", () => l1.scanWholeL1Validated({ abrainHome: home }));
-    await expectCode("RECOVERY_PREPARED_INVALID", () => Promise.resolve(recovery.decodePreparedRecoveryEvent(bad.body, base.repo, "refs/heads/main")));
+    await expectCode("RECOVERY_PREPARED_INVALID", () => Promise.resolve(recovery.decodePreparedRecoveryEvent(bad.body, base.repo, "refs/heads/main", cohort.LOCAL_DRAIN_PROTOCOL_V3)));
   }
 });
 
-await check("episode and claim identities exclude realpath/cohort and bind symbolic generation slot", () => {
+await check("v3 frozen snapshot root is independently bound and Git OIDs are exactly 40 or 64 hex", async () => {
+  for (const length of [40, 64]) recovery.recoveryOperationV3({ symbolicRef: "refs/heads/main", baseCommit: "a".repeat(length), cohortSemanticRoot: "b".repeat(64), frozenIndexSnapshotRoot: "c".repeat(64) });
+  for (const length of [41, 42, 63]) await expectCode("RECOVERY_BASE_INVALID", () => Promise.resolve(recovery.recoveryOperationV3({ symbolicRef: "refs/heads/main", baseCommit: "a".repeat(length), cohortSemanticRoot: "b".repeat(64), frozenIndexSnapshotRoot: "c".repeat(64) })));
+
+  const base = await activePreparedFixture("snapshot-root-tamper");
+  const bad = structuredClone(base.envelope);
+  bad.body.operation.frozen_index_snapshot_root = "f".repeat(64);
+  bad.body.episode_id = recovery.recoveryEpisodeIdentityV3(bad.body.operation);
+  rehash(bad);
+  const home = emptyHome("snapshot-root-tamper-home");
+  writeEnvelope(home, bad);
+  await expectCode("L1_BODY_SHAPE_MISMATCH", () => l1.scanWholeL1Validated({ abrainHome: home }));
+  const claimEvent = structuredClone(base.claimEvent);
+  claimEvent.operation = structuredClone(bad.body.operation);
+  claimEvent.episode_id = bad.body.episode_id;
+  claimEvent.body.claim_id = recovery.recoveryClaimIdV3(claimEvent.episode_id, claimEvent.slot);
+  await expectCode("RECOVERY_OPERATION_INVARIANT", () => Promise.resolve(recovery.foldRecoveryEventsV3([claimEvent, bad.body])));
+});
+
+await check("historical v1 L2 uses its preserved reconciler and future live versions fail coverage smoke", async () => {
+  const knowledgeBody = {
+    created_at_utc: "2026-01-02T03:04:05.000Z", device_id: "device-fixture", device_event_seq: 1, causal_parents: [], session_id: "session", turn_id: "turn",
+    intent: { operation_hint: "create" }, scope: { kind: "project", project_id: "project-fixture" },
+    payload: { slug: "versioned", title: "Versioned", kind: "fact", status: "active", confidence: 8, provenance: "fixture", compiled_truth: "Versioned body.", trigger_phrases: ["v1"], derives_from: [], timeline_note: "fixture" },
+  };
+  const node = { eventId: "1".repeat(64), body: knowledgeBody };
+  const liveKnowledge = knowledgeRenderer.renderKnowledgeProjectionFromSet([node]).markdown;
+  const legacyKnowledge = l2Reconciler.__TEST.renderKnowledgeProjectionFromSetV1([node]).markdown;
+  assert(liveKnowledge === legacyKnowledge, "current knowledge v1 renderer drifted from preserved reconciler");
+  const liveManifest = knowledgeRenderer.renderKnowledgeProjectionManifestFromSet([node]).json;
+  assert(liveManifest === l2Reconciler.__TEST.renderKnowledgeManifestFromSetV1([node]), "current knowledge v1 manifest drifted from preserved reconciler");
+
+  const decision = { inputRootHash: "2".repeat(64), constraints: [], unresolved: [], exclusions: [] };
+  const liveConstraint = constraintRenderer.renderConstraintL2View(decision, "3".repeat(64)).markdown;
+  assert(liveConstraint === l2Reconciler.__TEST.renderConstraintL2V1(decision), "current constraint v1 renderer drifted from preserved reconciler");
+  const selected = l2Reconciler.selectCanonicalL2ReconcilerVersions({ knowledgeMarkdown: [legacyKnowledge], knowledgeManifest: liveManifest, constraintMarkdown: liveConstraint, constraintSourceTemplateVersions: [l2Contract.CONSTRAINT_L2_V1.templateVersion] });
+  assert(selected.knowledgeVersion === l2Contract.KNOWLEDGE_L2_V1.reconcilerVersion && selected.constraintVersion === l2Contract.CONSTRAINT_L2_V1.reconcilerVersion, "historical v1 output did not select v1 reconcilers");
+  l2Reconciler.assertCanonicalL2ReconcilerCoverage();
+  await expectCode("RECOVERY_L2_RECONCILER_UNSUPPORTED", () => Promise.resolve(l2Reconciler.selectCanonicalL2ReconcilerVersions({ knowledgeMarkdown: [legacyKnowledge.replace("sediment_template_version: knowledge-markdown/v1", "sediment_template_version: knowledge-markdown/v2")], knowledgeManifest: liveManifest, constraintMarkdown: liveConstraint, constraintSourceTemplateVersions: [l2Contract.CONSTRAINT_L2_V1.templateVersion] })));
+  await expectCode("RECOVERY_L2_RECONCILER_COVERAGE", () => Promise.resolve(l2Reconciler.assertCanonicalL2ReconcilerCoverage({ knowledgeVersion: "knowledge-l2-reconciler/v2", constraintVersion: l2Contract.CONSTRAINT_L2_V1.reconcilerVersion })));
+});
+
+await check("v2 history identity stays stable while every v3 operation field changes episode identity", () => {
   const one = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
   const two = recovery.recoveryEpisodeIdentity({ protocol_version: "local-drain-recovery/v2", lane: "drain", symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
-  assert(one === two && /^[0-9a-f]{64}$/.test(one), "episode identity mismatch");
-  assert(recovery.recoveryClaimId(one, "drain", 1) !== recovery.recoveryClaimId(one, "drain", 2), "slot not bound into claim");
+  assert(one === two && /^[0-9a-f]{64}$/.test(one), "v2 history identity mismatch");
+  const base = { symbolicRef: "refs/heads/main", baseCommit: "1".repeat(40), cohortSemanticRoot: "2".repeat(64), frozenIndexSnapshotRoot: "3".repeat(64) };
+  const id = recovery.recoveryEpisodeIdentityV3(recovery.recoveryOperationV3(base));
+  for (const changed of [
+    { ...base, symbolicRef: "refs/heads/other" },
+    { ...base, baseCommit: "4".repeat(40) },
+    { ...base, cohortSemanticRoot: "5".repeat(64) },
+    { ...base, frozenIndexSnapshotRoot: "6".repeat(64) },
+  ]) assert(recovery.recoveryEpisodeIdentityV3(recovery.recoveryOperationV3(changed)) !== id, "v3 operation field did not change episode identity");
+  assert(recovery.recoveryClaimIdV3(id, 1) !== recovery.recoveryClaimIdV3(id, 2), "v3 slot not bound into claim");
 });
 
-await check("refreeze stays in one episode and consumes the next contiguous slot", async () => {
-  const home = emptyHome("refreeze");
-  const episode = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main" });
-  const claim1 = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId: episode.episodeId, lane: "drain" });
-  assert(claim1.slot === 1 && claim1.shouldExecute, "slot 1 not claimed");
-  assert(await recovery.burnPendingRecoverySlot({ abrainHome: home, episodeId: episode.episodeId, lane: "drain" }) === 1, "slot 1 not burned");
-  const same = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main" });
-  const claim2 = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId: same.episodeId, lane: "drain" });
-  assert(same.episodeId === episode.episodeId && claim2.slot === 2, "refreeze reset episode/slot");
+await check("v3 retries stay in one exact operation and consume contiguous slots", async () => {
+  const repo = initRepo("v3-retry");
+  const prepared = await prepare(repo, "v3 retry", cohort.LOCAL_DRAIN_PROTOCOL_V3);
+  const operation = operationFor(prepared);
+  const claim1 = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  assert(claim1.slot === 1 && claim1.shouldExecute, "v3 slot 1 not claimed");
+  assert(await recovery.recoverDrainSlotV3({ abrainHome: repo, repo, operation, slot: 1 }) === "burned", "v3 claimed-only slot not burned");
+  const claim2 = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  assert(claim2.episodeId === claim1.episodeId && claim2.slot === 2 && claim2.shouldExecute, "v3 retry escaped exact operation or skipped slot");
 });
 
-await check("terminal is absorbing and does not auto-open a generation", async () => {
-  const home = emptyHome("terminal");
-  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
-  for (let slot = 1; slot <= 5; slot++) {
-    const claim = await recovery.claimNextRecoverySlot({ abrainHome: home, episodeId, lane: "drain" });
-    assert(claim.slot === slot, `slot ${slot} not claimed`);
-    await recovery.burnPendingRecoverySlot({ abrainHome: home, episodeId, lane: "drain" });
+await check("v3 stale abort never negates one shape-valid prepared event in either event order", async () => {
+  for (const abortFirst of [true, false]) {
+    const fixture = await abortPreparedPermutation(`abort-prepared-${abortFirst ? "first" : "last"}`, abortFirst);
+    const events = await recovery.readRecoveryEventsV3(fixture.repo, fixture.episodeId);
+    const claim = events.find((event) => event.event_type === "recovery_slot_claimed");
+    const preparedEvent = events.find((event) => event.event_type === "commit_prepared");
+    const abort = events.find((event) => event.event_type === "recovery_slot_aborted");
+    for (const order of [[claim, abort, preparedEvent], [preparedEvent, claim, abort]]) {
+      const state = recovery.foldRecoveryEventsV3(order).get(1);
+      assert(state.prepared && state.staleAbort && !state.aborted, `stale abort won in permutation ${abortFirst}:${order.map((event) => event.event_type).join(",")}`);
+    }
+    assert(await recovery.recoverDrainSlotV3({ abrainHome: fixture.repo, repo: fixture.repo, operation: fixture.operation, slot: 1 }) === "index_converged", "stale abort prevented prepared recovery");
+    const final = recovery.foldRecoveryEventsV3(await recovery.readRecoveryEventsV3(fixture.repo, fixture.episodeId)).get(1);
+    assert(final.converged && final.staleAbort && !final.aborted, "convergence lost stale-abort diagnostic semantics");
   }
-  const cursor = recovery.recoveryEpisodeCursor(episodeId, "drain", await recovery.readRecoveryEvents(home, episodeId));
-  assert(cursor.terminal && cursor.nextSlot === null, "terminal not absorbing");
-  const resolved = await recovery.resolveRecoveryEpisode({ abrainHome: home, symbolicRef: "refs/heads/main" });
-  assert(resolved.status === "terminal" && resolved.episodeId === episodeId, "terminal auto-opened another generation");
+});
+
+await check("conflicting prepared events quarantine with bounded event-id detail and v3 API enforces v2 prerequisite", async () => {
+  const fixture = await abortPreparedPermutation("conflicting-prepared", false);
+  const events = await recovery.readRecoveryEventsV3(fixture.repo, fixture.episodeId);
+  const preparedEvent = events.find((event) => event.event_type === "commit_prepared");
+  const conflictingBody = structuredClone(preparedEvent.body);
+  conflictingBody.candidate = conflictingBody.candidate === "f".repeat(40) ? "e".repeat(40) : "f".repeat(40);
+  const conflicting = await recovery.appendRecoveryEventV3({ abrainHome: fixture.repo, operation: fixture.operation, slot: 1, eventType: "commit_prepared", body: conflictingBody });
+  const firstPreparedId = l1.canonicalL1BodyHash(preparedEvent);
+  const recovered = recovery.recoverOpenRecoveryEpisodesV3FromScan(await l1.scanWholeL1Validated({ abrainHome: fixture.repo }));
+  assert(recovered.quarantined.length === 1 && recovered.quarantined[0].errorCode === "RECOVERY_EVENT_INVARIANT", "conflicting prepared objects were not quarantined");
+  const detail = recovered.quarantined[0].detail ?? "";
+  assert(detail.length > 0 && detail.length <= 512 && detail.includes(firstPreparedId) && detail.includes(conflicting.eventId), `event-id detail missing or unbounded: ${detail}`);
+  assert(!detail.includes(fixture.repo) && !(recovered.quarantined[0].message ?? "").includes(fixture.repo), "diagnostic leaked an absolute repo path");
+
+  const direct = await history.classifyV3RecoveryHistory({ repo: fixture.repo });
+  assert(direct.status === "quarantined" && direct.quarantined[0].errorCode === "RECOVERY_V2_PREREQUISITE", "v3 classifier accepted a call without v2-clean proof");
+  const combined = await history.classifyRecoveryHistory({ repo: fixture.repo });
+  assert(combined.status === "quarantined" && combined.quarantined[0].protocol === "v3" && combined.quarantined[0].detail === detail, "combined gate lost v3 detail/protocol");
+});
+
+await check("combined history gate accepts clean history and merge-only additions cannot evade retention", async () => {
+  const clean = initRepo("combined-clean");
+  const accepted = await history.classifyRecoveryHistory({ repo: clean });
+  assert(accepted.status === "accepted" && accepted.v2.status === "accepted" && accepted.v3?.status === "accepted", "combined clean gate did not accept");
+  const staleEpisode = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "stale-proof" });
+  const staleClaim = { event_schema_version: "local-drain-recovery-event/v2", event_type: "recovery_slot_claimed", producer: { name: "pi-astack.convergence-recovery", version: "2.0.0" }, episode_id: staleEpisode, lane: "drain", slot: 1, body: { claim_id: recovery.recoveryClaimId(staleEpisode, "drain", 1) } };
+  const staleHash = l1.canonicalL1BodyHash(staleClaim);
+  writeEnvelope(clean, { schema: "local-drain-recovery-envelope/v2", canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: staleHash, body_hash: staleHash, body: staleClaim });
+  const staleProof = await history.classifyV3RecoveryHistory({ repo: clean, acceptedV2: accepted.v2, scan: await l1.scanWholeL1Validated({ abrainHome: clean }) });
+  assert(staleProof.status === "quarantined" && staleProof.quarantined[0].errorCode === "RECOVERY_V2_PREREQUISITE", "v3 accepted a v2 proof from a stale scan");
+
+  const repo = initRepo("merge-only-add");
+  const base = git(repo, "rev-parse", "HEAD");
+  git(repo, "checkout", "-q", "-b", "side", base);
+  fs.writeFileSync(path.join(repo, "side.txt"), "side\n"); git(repo, "add", "side.txt"); commitFixture(repo, "side", "1700000040");
+  git(repo, "checkout", "-q", "main");
+  fs.writeFileSync(path.join(repo, "main.txt"), "main\n"); git(repo, "add", "main.txt"); commitFixture(repo, "main", "1700000041");
+  execFileSync("git", ["-C", repo, "merge", "-q", "--no-ff", "--no-commit", "side"], { env: { ...process.env, LANG: "C", LC_ALL: "C" } });
+  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
+  const bodies = [
+    { event_schema_version: "local-drain-recovery-event/v2", event_type: "recovery_slot_claimed", producer: { name: "pi-astack.convergence-recovery", version: "2.0.0" }, episode_id: episodeId, lane: "drain", slot: 1, body: { claim_id: recovery.recoveryClaimId(episodeId, "drain", 1) } },
+    { event_schema_version: "local-drain-recovery-event/v2", event_type: "recovery_slot_aborted", producer: { name: "pi-astack.convergence-recovery", version: "2.0.0" }, episode_id: episodeId, lane: "drain", slot: 1, body: { reason: "recovery_slot_aborted", error_code: "RECOVERY_SLOT_ABORTED" } },
+    { event_schema_version: "local-drain-recovery-event/v2", event_type: "recovery_episode_terminal", producer: { name: "pi-astack.convergence-recovery", version: "2.0.0" }, episode_id: episodeId, lane: "drain", slot: 1, body: { reason: "owner_intervention_required", owner_alert: true } },
+  ];
+  const files = bodies.map((body) => { const bodyHash = l1.canonicalL1BodyHash(body); return writeEnvelope(repo, { schema: "local-drain-recovery-envelope/v2", canonicalization: "RFC8785-JCS", hash_alg: "sha256", event_id: bodyHash, body_hash: bodyHash, body }); });
+  git(repo, "add", "l1/events/sha256"); commitFixture(repo, "merge with recovery additions", "1700000042");
+  const merge = git(repo, "rev-parse", "HEAD");
+  const relative = path.relative(repo, files[0]).split(path.sep).join("/");
+  assert(git(repo, "log", "--format=%H", "--full-history", "--diff-filter=A", "HEAD", "--", relative) === "", "fixture no longer demonstrates default merge add omission");
+  assert(git(repo, "log", "-m", "--format=%H", "--full-history", "--diff-filter=A", "HEAD", "--", relative).split("\n").filter(Boolean).every((oid) => oid === merge), "-m did not expose merge-only addition");
+  for (const file of files) fs.rmSync(file);
+  git(repo, "add", "-u", "l1/events/sha256"); commitFixture(repo, "drop merge-only recovery", "1700000043");
+  const dropped = await history.classifyRecoveryHistory({ repo });
+  assert(dropped.status === "quarantined" && dropped.quarantined.some((item) => item.errorCode === "RECOVERY_REACHABLE_L1_DROPPED"), `merge-only drop evaded retention: ${JSON.stringify(dropped.quarantined)}`);
+});
+
+await check("v3 terminal is absorbing for its exact operation", async () => {
+  const repo = initRepo("v3-terminal");
+  const prepared = await prepare(repo, "v3 terminal", cohort.LOCAL_DRAIN_PROTOCOL_V3);
+  const operation = operationFor(prepared);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(operation);
+  for (let slot = 1; slot <= 5; slot++) {
+    const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+    assert(claim.slot === slot, `v3 slot ${slot} not claimed`);
+    await recovery.recoverDrainSlotV3({ abrainHome: repo, repo, operation, slot });
+  }
+  const cursor = recovery.recoveryEpisodeCursorV3(episodeId, operation, await recovery.readRecoveryEventsV3(repo, episodeId));
+  assert(cursor.terminal && cursor.nextSlot === null, "v3 terminal not absorbing");
+  const next = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  assert(next.status === "terminal" && !next.shouldExecute, "v3 terminal reopened exact operation");
 });
 
 await check("same-format clones produce byte-equal commit and recovery events across realpaths", async () => {
@@ -281,19 +453,20 @@ await check("same-format clones produce byte-equal commit and recovery events ac
   const b = path.join(tmp, "clone-b");
   execFileSync("git", ["clone", "-q", "--no-hardlinks", seed, a]);
   execFileSync("git", ["clone", "-q", "--no-hardlinks", seed, b]);
-  const pa = await prepare(a, "caller A");
-  const pb = await prepare(b, "caller B");
+  const pa = await prepare(a, "caller A", cohort.LOCAL_DRAIN_PROTOCOL_V3);
+  const pb = await prepare(b, "caller B", cohort.LOCAL_DRAIN_PROTOCOL_V3);
   assert(pa.prepared.candidate === pb.prepared.candidate, "caller message/realpath changed candidate OID");
   assert(pa.prepared.cohortManifestRoot === pb.prepared.cohortManifestRoot, "semantic manifest changed");
-  const homeA = emptyHome("events-a");
-  const homeB = emptyHome("events-b");
-  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
-  await recovery.claimRecoverySlot({ abrainHome: homeA, episodeId, lane: "drain", slot: 1 });
-  await recovery.claimRecoverySlot({ abrainHome: homeB, episodeId, lane: "drain", slot: 1 });
-  await recovery.recordDrainPrepared({ abrainHome: homeA, episodeId, slot: 1, prepared: pa.prepared, frozenIndexSnapshot: pa.snapshot });
-  await recovery.recordDrainPrepared({ abrainHome: homeB, episodeId, slot: 1, prepared: pb.prepared, frozenIndexSnapshot: pb.snapshot });
-  const eventsA = await recovery.readRecoveryEvents(homeA, episodeId);
-  const eventsB = await recovery.readRecoveryEvents(homeB, episodeId);
+  const operationA = operationFor(pa);
+  const operationB = operationFor(pb);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(operationA);
+  assert(episodeId === recovery.recoveryEpisodeIdentityV3(operationB), "clone-neutral v3 operation identity changed");
+  await recovery.claimNextRecoverySlotV3({ abrainHome: a, operation: operationA });
+  await recovery.claimNextRecoverySlotV3({ abrainHome: b, operation: operationB });
+  await recovery.recordDrainPreparedV3({ abrainHome: a, operation: operationA, slot: 1, prepared: pa.prepared, frozenIndexSnapshot: pa.snapshot });
+  await recovery.recordDrainPreparedV3({ abrainHome: b, operation: operationB, slot: 1, prepared: pb.prepared, frozenIndexSnapshot: pb.snapshot });
+  const eventsA = await recovery.readRecoveryEventsV3(a, episodeId);
+  const eventsB = await recovery.readRecoveryEventsV3(b, episodeId);
   assert(JSON.stringify(eventsA) === JSON.stringify(eventsB), "shared recovery bytes contain realpath");
   assert(!JSON.stringify(eventsA).includes(a) && !JSON.stringify(eventsA).includes(b), "prepared event leaked absolute path");
 });
@@ -330,18 +503,65 @@ await check("SHA-1 and SHA-256 are deterministic per format with equal OID-free 
   assert(one.prepared.candidate !== three.prepared.candidate, "cross-format OIDs unexpectedly equal");
 });
 
-await check("prepared/published/index recovery converges without touching worktree", async () => {
+await check("incomparable complete v3 candidates require and accept a certified semantic join", async () => {
+  const repo = initRepo("v3-semantic-join");
+  const base = git(repo, "rev-parse", "HEAD");
+  const candidates = [];
+  for (const branch of ["device-a", "device-b"]) {
+    git(repo, "checkout", "-q", "-b", branch, base);
+    const relative = `${branch}.txt`;
+    fs.writeFileSync(path.join(repo, relative), `${branch}\n`);
+    const snapshot = await cohort.snapshotIndexEntries(repo, [relative]);
+    const prepared = await cohort.prepareExactCohortCommit({ repo, refName: `refs/heads/${branch}`, frozenCommit: base, plan: [{ path: relative, op: "put", content: `${branch}\n` }], message: "ignored", protocolVersion: cohort.LOCAL_DRAIN_PROTOCOL_V3 });
+    const operation = recovery.recoveryOperationV3({ symbolicRef: `refs/heads/${branch}`, baseCommit: base, cohortSemanticRoot: prepared.cohortManifestRoot, frozenIndexSnapshotRoot: recovery.frozenIndexSnapshotRootV3(prepared.entries, snapshot) });
+    const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+    await recovery.recordDrainPreparedV3({ abrainHome: repo, operation, slot: claim.slot, prepared, frozenIndexSnapshot: snapshot });
+    assert(await recovery.recoverDrainSlotV3({ abrainHome: repo, repo, operation, slot: claim.slot }) === "index_converged", `${branch} did not converge`);
+    git(repo, "add", "l1/events/sha256");
+    execFileSync("git", ["-C", repo, "commit", "-qm", `${branch} metadata tail`], { env: { ...process.env, LANG: "C", LC_ALL: "C", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", GIT_AUTHOR_DATE: "1700000010 +0000", GIT_COMMITTER_DATE: "1700000010 +0000" } });
+    candidates.push(prepared.candidate);
+  }
+  git(repo, "checkout", "-q", "device-a");
+  execFileSync("git", ["-C", repo, "merge", "-q", "--no-ff", "device-b", "-m", "certified v3 semantic join"], { env: { ...process.env, LANG: "C", LC_ALL: "C", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", GIT_AUTHOR_DATE: "1700000020 +0000", GIT_COMMITTER_DATE: "1700000020 +0000" } });
+  const classified = await history.classifyRecoveryHistory({ repo });
+  assert(classified.status === "accepted" && classified.v3?.candidates.length === 2 && classified.v3.joins.length === 1, `v3 semantic join was not certified: ${JSON.stringify(classified.quarantined)}`);
+  assert(JSON.stringify(classified.v3.candidates.map((item) => item.candidate).sort()) === JSON.stringify(candidates.sort()), "v3 candidate set drifted");
+});
+
+await check("v3 stale-device CAS conflict fails closed without publication metadata", async () => {
+  const repo = initRepo("v3-stale-device");
+  const prepared = await prepare(repo, "v3 stale", cohort.LOCAL_DRAIN_PROTOCOL_V3);
+  const operation = operationFor(prepared);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(operation);
+  const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  assert(claim.slot === 1 && claim.shouldExecute, "stale-device v3 claim missing");
+  await recovery.recordDrainPreparedV3({ abrainHome: repo, operation, slot: 1, prepared: prepared.prepared, frozenIndexSnapshot: prepared.snapshot });
+  fs.writeFileSync(path.join(repo, "concurrent.txt"), "concurrent\n");
+  git(repo, "add", "concurrent.txt");
+  execFileSync("git", ["-C", repo, "commit", "-qm", "concurrent publication"], {
+    env: { ...process.env, LANG: "C", LC_ALL: "C", GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid", GIT_AUTHOR_DATE: "1700000001 +0000", GIT_COMMITTER_DATE: "1700000001 +0000" },
+  });
+  const concurrentHead = git(repo, "rev-parse", "HEAD");
+  await expectCode("RECOVERY_V3_STALE_BASE", () => recovery.recoverDrainSlotV3({ abrainHome: repo, repo, operation, slot: 1 }));
+  const folded = recovery.foldRecoveryEventsV3(await recovery.readRecoveryEventsV3(repo, episodeId)).get(1);
+  assert(git(repo, "rev-parse", "HEAD") === concurrentHead, "stale-device recovery moved current ref");
+  assert(folded.prepared && !folded.published && !folded.converged, "stale-device recovery wrote false publication metadata");
+});
+
+await check("v3 prepared/published/index recovery converges without touching worktree", async () => {
   const repo = initRepo("recover-local");
-  const prepared = await prepare(repo);
-  const episodeId = recovery.drainEpisodeIdentity({ symbolic_ref: "refs/heads/main", generation_anchor: "genesis" });
-  await recovery.claimRecoverySlot({ abrainHome: repo, episodeId, lane: "drain", slot: 1 });
-  await recovery.recordDrainPrepared({ abrainHome: repo, episodeId, slot: 1, prepared: prepared.prepared, frozenIndexSnapshot: prepared.snapshot });
+  const prepared = await prepare(repo, "v3 recovery", cohort.LOCAL_DRAIN_PROTOCOL_V3);
+  const operation = operationFor(prepared);
+  const episodeId = recovery.recoveryEpisodeIdentityV3(operation);
+  const claim = await recovery.claimNextRecoverySlotV3({ abrainHome: repo, operation });
+  assert(claim.slot === 1 && claim.shouldExecute, "v3 recovery claim missing");
+  await recovery.recordDrainPreparedV3({ abrainHome: repo, operation, slot: 1, prepared: prepared.prepared, frozenIndexSnapshot: prepared.snapshot });
   const worktreeBefore = fs.readFileSync(path.join(repo, "base.txt"), "utf8");
-  const action = await recovery.recoverDrainSlot({ abrainHome: repo, repo, symbolicRef: "refs/heads/main", episodeId, slot: 1 });
-  assert(action === "index_converged" && git(repo, "rev-parse", "HEAD") === prepared.prepared.candidate, "local recovery did not converge");
+  const action = await recovery.recoverDrainSlotV3({ abrainHome: repo, repo, operation, slot: 1 });
+  assert(action === "index_converged" && git(repo, "rev-parse", "HEAD") === prepared.prepared.candidate, "v3 local recovery did not converge");
   assert(fs.readFileSync(path.join(repo, "base.txt"), "utf8") === worktreeBefore && !fs.existsSync(path.join(repo, "a.txt")), "worktree changed");
-  const advanced = await recovery.resolveRecoveryEpisode({ abrainHome: repo, symbolicRef: "refs/heads/main" });
-  assert(advanced.status === "new" && advanced.episodeId !== episodeId, "resolver did not derive the next generation from a converged closure");
+  const cursor = recovery.recoveryEpisodeCursorV3(episodeId, operation, await recovery.readRecoveryEventsV3(repo, episodeId));
+  assert(cursor.complete && cursor.nextSlot === null, "v3 complete operation retained a writable frontier");
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });
