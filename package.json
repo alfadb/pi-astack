@@ -186,6 +186,8 @@
     "smoke:constraint-shadow-compiler": "node scripts/smoke-constraint-shadow-compiler.mjs",
     "smoke:constraint-shadow-liveness-recovery": "node scripts/smoke-constraint-shadow-liveness-recovery.mjs",
     "smoke:constraint-l2-repo-preflight": "node scripts/smoke-constraint-l2-repo-preflight.mjs",
+    "smoke:constraint-l2-merge-conflict-recovery": "node scripts/smoke-constraint-l2-merge-conflict-recovery.mjs",
+    "recover:constraint-l2-merge-conflict": "node scripts/recover-constraint-l2-merge-conflict.mjs",
     "verify:constraint-l2-flip": "node scripts/verify-constraint-l2-flip.mjs --abrain ~/.abrain",
     "smoke:constraint-evidence-event": "node scripts/smoke-constraint-evidence-event.mjs",
     "smoke:proposition-p0a": "node scripts/smoke-proposition-p0a.mjs",

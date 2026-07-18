@@ -152,6 +152,17 @@ export interface CanonicalOwnershipContext {
   readonly _constraint?: { sourceIds: readonly string[]; markdown: string; projectionEventId: string };
 }
 
+export interface CanonicalConstraintL2ProjectionRender {
+  readonly repo: string;
+  readonly projectionEventId: string;
+  readonly createdAtUtc: string;
+  readonly sourceIds: readonly string[];
+  readonly markdown: string;
+  readonly bytes: number;
+  readonly bytesSha256: string;
+  readonly decisionHash: string;
+}
+
 export interface CanonicalGitRuntimeOptions {
   abrainHome: string;
   settingsPath?: string;
@@ -548,6 +559,60 @@ function nulPaths(buffer: Buffer): string[] {
   return buffer.toString("utf-8").split("\0").filter(Boolean);
 }
 
+async function renderLatestConstraintProjectionFromScan(
+  repo: string,
+  scan: WholeL1ScanResult,
+): Promise<CanonicalConstraintL2ProjectionRender | null> {
+  const projection = await import("../sediment/constraint-compiler/projection");
+  const projections = scan.selected.filter((record) => (
+    record.registration.domain === "constraint"
+    && record.registration.role === "canonical"
+    && record.registration.envelope_schema === projection.CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION
+  ));
+  const latestId = projection.selectLatestConstraintProjectionEventId(projections.map((record) => ({
+    eventId: record.eventId,
+    createdAtUtc: String(record.body.created_at_utc ?? ""),
+  })));
+  if (!latestId) return null;
+  const matches = projections.filter((record) => record.eventId === latestId);
+  if (matches.length !== 1) {
+    throw new CanonicalGitRuntimeError("CONSTRAINT_L2_LATEST_AMBIGUOUS", "latest constraint projection event is not unique", {
+      eventId: latestId,
+      matches: matches.length,
+    });
+  }
+  const latest = matches[0]!;
+  const render = await import("../sediment/constraint-compiler/render");
+  const decision = projection.normalizeDecisionForProjection(latest.body.validated_decision as never) as never;
+  const rendered = render.renderConstraintL2View(decision, latest.eventId);
+  const markdownBytes = Buffer.from(rendered.markdown, "utf-8");
+  const sourceIds = Array.from(new Set([
+    latest.eventId,
+    ...(Array.isArray(latest.body.input_event_ids) ? latest.body.input_event_ids : []),
+    ...(Array.isArray(latest.body.causal_parents) ? latest.body.causal_parents : []),
+  ].filter((value): value is string => typeof value === "string"))).sort(compareAscii);
+  return Object.freeze({
+    repo,
+    projectionEventId: latest.eventId,
+    createdAtUtc: String(latest.body.created_at_utc ?? ""),
+    sourceIds: Object.freeze(sourceIds),
+    markdown: rendered.markdown,
+    bytes: markdownBytes.length,
+    bytesSha256: sha256Hex(markdownBytes),
+    decisionHash: rendered.decisionHash,
+  });
+}
+
+export async function renderLatestCanonicalConstraintL2Projection(options: {
+  abrainHome: string;
+}): Promise<CanonicalConstraintL2ProjectionRender> {
+  const repo = await repoRealpath(options.abrainHome);
+  const scan = await scanWholeL1Validated({ abrainHome: repo, domains: ["constraint"], roles: ["canonical"] });
+  const rendered = await renderLatestConstraintProjectionFromScan(repo, scan);
+  if (!rendered) throw new CanonicalGitRuntimeError("CONSTRAINT_L2_UNOWNED", "constraint L2 has no canonical projection event");
+  return rendered;
+}
+
 export async function buildCanonicalOwnershipContext(options: { abrainHome: string }): Promise<CanonicalOwnershipContext> {
   const started = Date.now();
   const repo = await repoRealpath(options.abrainHome);
@@ -571,26 +636,14 @@ export async function buildCanonicalOwnershipContext(options: { abrainHome: stri
     ? { nodes: Object.freeze(knowledgeNodes.slice()), rendered: knowledge.renderKnowledgeProjectionManifestFromSet(knowledgeNodes) }
     : undefined;
 
-  const projections = scan.selected.filter((record) => record.registration.envelope_schema === "constraint-projection-envelope/v1");
-  projections.sort((left, right) => {
-    const leftAt = String(left.body.created_at_utc ?? "");
-    const rightAt = String(right.body.created_at_utc ?? "");
-    return compareAscii(rightAt, leftAt) || compareAscii(right.eventId, left.eventId);
-  });
-  let constraint: CanonicalOwnershipContext["_constraint"];
-  if (projections.length) {
-    const latest = projections[0]!;
-    const projection = await import("../sediment/constraint-compiler/projection");
-    const render = await import("../sediment/constraint-compiler/render");
-    const decision = projection.normalizeDecisionForProjection(latest.body.validated_decision as never) as never;
-    const rendered = render.renderConstraintL2View(decision, latest.eventId);
-    const sourceIds = Array.from(new Set([
-      latest.eventId,
-      ...(Array.isArray(latest.body.input_event_ids) ? latest.body.input_event_ids : []),
-      ...(Array.isArray(latest.body.causal_parents) ? latest.body.causal_parents : []),
-    ].filter((value): value is string => typeof value === "string"))).sort(compareAscii);
-    constraint = { sourceIds: Object.freeze(sourceIds), markdown: rendered.markdown, projectionEventId: latest.eventId };
-  }
+  const renderedConstraint = await renderLatestConstraintProjectionFromScan(repo, scan);
+  const constraint: CanonicalOwnershipContext["_constraint"] = renderedConstraint
+    ? {
+      sourceIds: renderedConstraint.sourceIds,
+      markdown: renderedConstraint.markdown,
+      projectionEventId: renderedConstraint.projectionEventId,
+    }
+    : undefined;
 
   const [headRaw, indexRaw] = await Promise.all([
     gitBuffer(repo, ["ls-tree", "-r", "-z", "--name-only", "HEAD"]),
@@ -682,22 +735,12 @@ async function recomputeConstraintL2(repo: string, rel: string, bytes: Buffer, c
     return context._constraint.sourceIds;
   }
   const scan = await scanWholeL1Validated({ abrainHome: repo, domains: ["constraint"], roles: ["canonical"] });
-  const projections = scan.selected.filter((record) => record.registration.envelope_schema === "constraint-projection-envelope/v1");
-  if (projections.length === 0) throw new CanonicalGitRuntimeError("CONSTRAINT_L2_UNOWNED", "constraint L2 has no committed-or-worktree projection decision");
-  projections.sort((left, right) => {
-    const leftAt = String(left.body.created_at_utc ?? "");
-    const rightAt = String(right.body.created_at_utc ?? "");
-    return compareAscii(rightAt, leftAt) || compareAscii(right.eventId, left.eventId);
-  });
-  const latest = projections[0]!;
-  const projection = await import("../sediment/constraint-compiler/projection");
-  const render = await import("../sediment/constraint-compiler/render");
-  const decision = projection.normalizeDecisionForProjection(latest.body.validated_decision as never) as never;
-  const rendered = render.renderConstraintL2View(decision, latest.eventId);
+  const rendered = await renderLatestConstraintProjectionFromScan(repo, scan);
+  if (!rendered) throw new CanonicalGitRuntimeError("CONSTRAINT_L2_UNOWNED", "constraint L2 has no committed-or-worktree projection decision");
   if (!bytes.equals(Buffer.from(rendered.markdown, "utf-8"))) {
-    throw new CanonicalGitRuntimeError("CONSTRAINT_L2_MISMATCH", "constraint L2 is not byte-equal to latest projection decision", { rel, eventId: latest.eventId });
+    throw new CanonicalGitRuntimeError("CONSTRAINT_L2_MISMATCH", "constraint L2 is not byte-equal to latest projection decision", { rel, eventId: rendered.projectionEventId });
   }
-  return Object.freeze([latest.eventId]);
+  return Object.freeze([rendered.projectionEventId]);
 }
 
 async function validateReceipt(repo: string, receipt: ProducedArtifact, allowWriterTransaction: boolean, context?: CanonicalOwnershipContext): Promise<{ receipt: ProducedArtifact; content?: Buffer }> {

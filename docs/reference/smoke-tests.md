@@ -81,6 +81,8 @@ The retained ADR0039 standalone CLI is an operator-invoked local integrity check
 npm run check:adr0039-integrity
 ```
 
+`recover:constraint-l2-merge-conflict` previews machine JSON by default and, only with explicit `--write`, replaces the unmerged Constraint compiled view from canonical L1 while leaving Knowledge, the index, and the active merge unresolved; its isolated boundary is covered by `smoke:constraint-l2-merge-conflict-recovery`.
+
 For doc-only changes, run at least `npm run smoke:paths` if paths/runtime references were touched. For memory/sediment/vault changes, run the relevant subset above plus any command-specific smoke. For sanitizer or sediment secret-boundary changes, run `npm run smoke:memory` because it covers typed placeholders, prompt redaction, audit raw_text/error redaction, trigger phrase sanitization, and `memory_search` query redaction.
 
 ## Historical note
