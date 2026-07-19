@@ -1882,7 +1882,7 @@
               "description": "Provider retry termination uses both a consecutive limit and a rolling observation window. providerRetryWindowLimit must satisfy 1 <= limit < providerRetryWindowSize; invalid values or combinations fall back safely at runtime without changing unrelated valid settings.",
               "properties": {
                 "enabled": { "type": "boolean", "default": true },
-                "providerRetryLimit": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 4, "description": "Maximum consecutive provider retries; the next retry terminates the worker." },
+                "providerRetryLimit": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 7, "description": "Maximum consecutive provider retries; default 7 allows retries 1-7 and terminates the worker on retry 8." },
                 "providerRetryWindowSize": { "type": "integer", "minimum": 2, "maximum": 10000, "default": 14, "description": "Capacity of the rolling provider retry/progress observation window. Must be greater than providerRetryWindowLimit." },
                 "providerRetryWindowLimit": { "type": "integer", "minimum": 1, "maximum": 9999, "default": 10, "description": "Maximum retries in the rolling observation window; the next retry terminates the worker. Must be less than providerRetryWindowSize." },
                 "emptyVisibleRetryLimit": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 2 },

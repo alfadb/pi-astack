@@ -174,7 +174,7 @@ check("workerRunGovernor defaults are enabled and bounded", () => {
     throw new Error(`expected enabled defaults: ${JSON.stringify(cfg)}`);
   }
   if (
-    cfg.providerBudgets.providerRetryLimit !== 4 ||
+    cfg.providerBudgets.providerRetryLimit !== 7 ||
     cfg.providerBudgets.providerRetryWindowSize !== 14 ||
     cfg.providerBudgets.providerRetryWindowLimit !== 10 ||
     cfg.providerBudgets.emptyVisibleRetryLimit !== 2 ||
@@ -279,6 +279,7 @@ check("auditRotation and workerRunGovernor schema validate nested bounds and rej
     if (node.type !== "object" || node.additionalProperties !== false) throw new Error(`nested object is not strict: ${JSON.stringify(node)}`);
   }
   if (provider.properties.fullOutputUsageRatio.minimum !== 0.5 || provider.properties.fullOutputUsageRatio.maximum !== 1) throw new Error("usage ratio schema bounds drifted");
+  if (provider.properties.providerRetryLimit.default !== 7) throw new Error("provider retry limit schema default drifted");
   for (const key of ["providerRetryLimit", "emptyVisibleRetryLimit", "fullOutputCapLimit"]) {
     const node = provider.properties[key];
     if (node.type !== "integer" || node.minimum !== 1 || node.maximum !== 10000) throw new Error(`invalid provider budget schema: ${key}`);

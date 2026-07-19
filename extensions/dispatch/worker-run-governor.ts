@@ -100,7 +100,7 @@ export const DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS: WorkerRunGovernorSettings = {
   visibleText: { enabled: true, abortOnRepeat: true },
   providerBudgets: {
     enabled: true,
-    providerRetryLimit: 4,
+    providerRetryLimit: 7,
     providerRetryWindowSize: 14,
     providerRetryWindowLimit: 10,
     emptyVisibleRetryLimit: 2,
