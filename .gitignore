@@ -12,7 +12,7 @@ node_modules/
 
 # sediment 的 pending queue（如有人在仓内本地起 sediment）
 .sediment-pending.jsonl
-package-lock.json
+/skills/browser-tools/package-lock.json
 
 # classifier smoke test artifacts (contains raw LLM output)
 smoke-classifier-results.json

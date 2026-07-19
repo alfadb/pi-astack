@@ -214,6 +214,7 @@
     "dossier:proposition-lifecycle-freshness-d3-v2-session-start-execution-ready": "node scripts/dossier-proposition-lifecycle-freshness-d3-v2-session-start-execution-ready.mjs",
     "smoke:proposition-lifecycle-freshness-d3-v2-session-start-r4": "node scripts/smoke-proposition-lifecycle-freshness-d3-v2-session-start-r4.mjs",
     "generate:proposition-lifecycle-freshness-d3-v2-session-start-r4-manifest": "node scripts/generate-proposition-lifecycle-freshness-d3-v2-session-start-r4-manifest.mjs",
+    "verify:proposition-lifecycle-freshness-d3-v2-session-start-r4-adapter-manifest": "node scripts/generate-proposition-lifecycle-freshness-d3-v2-session-start-manifest.mjs --verify docs/evidence/2026-07-19-adr0040-d3-v2-session-start-r4-adapter-manifest.json",
     "dossier:proposition-lifecycle-freshness-d3-v2-session-start-r4-execution-ready": "node scripts/dossier-proposition-lifecycle-freshness-d3-v2-session-start-r4-execution-ready.mjs",
     "operate:proposition-lifecycle-freshness-d3-v2-session-start-r4": "node scripts/operate-proposition-lifecycle-freshness-d3-v2-session-start-r4.mjs",
     "smoke:adr0039-l3-autosync": "node scripts/smoke-adr0039-l3-autosync.mjs",

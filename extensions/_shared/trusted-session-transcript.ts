@@ -48,6 +48,7 @@ interface ParsedRow {
 interface ParsedTrustedSession {
   raw: Buffer;
   sessionId: string;
+  headerSha256: string;
   dev: number;
   ino: number;
   rows: readonly ParsedRow[];
@@ -138,7 +139,18 @@ export function captureTrustedSessionPrefixBinding(args: {
   prefixBytes?: number;
   maxBytes?: number;
 }): Readonly<{ path: string; dev: number; ino: number; prefix_bytes: number; prefix_sha256: string }> {
-  const parsed = readTrustedPersistedSession(args);
+  const attestation = captureTrustedSessionPrefixAttestation(args);
+  return Object.freeze({ path: attestation.path, dev: attestation.dev, ino: attestation.ino, prefix_bytes: attestation.prefix_bytes, prefix_sha256: attestation.prefix_sha256 });
+}
+
+export function captureTrustedSessionPrefixAttestation(args: {
+  sessionsRoot: string;
+  sessionPath: string;
+  expectedSessionId: string;
+  prefixBytes?: number;
+  maxBytes?: number;
+}): Readonly<{ path: string; dev: number; ino: number; session_id: string; header_sha256: string; prefix_bytes: number; prefix_sha256: string }> {
+  const parsed = readTrustedPersistedSession({ ...args, readPrefixBytes: args.prefixBytes });
   const prefixBytes = args.prefixBytes ?? parsed.raw.length;
   if (!Number.isSafeInteger(prefixBytes) || prefixBytes < 1 || prefixBytes > parsed.raw.length) {
     fail("TRUSTED_TRANSCRIPT_PREFIX", "requested session prefix is outside the trusted file");
@@ -147,6 +159,8 @@ export function captureTrustedSessionPrefixBinding(args: {
     path: path.resolve(args.sessionPath),
     dev: parsed.dev,
     ino: parsed.ino,
+    session_id: parsed.sessionId,
+    header_sha256: parsed.headerSha256,
     prefix_bytes: prefixBytes,
     prefix_sha256: sha256Hex(parsed.raw.subarray(0, prefixBytes)),
   });
@@ -189,13 +203,15 @@ function readTrustedPersistedSession(args: {
   sessionPath: string;
   expectedSessionId: string;
   maxBytes?: number;
+  readPrefixBytes?: number;
 }): ParsedTrustedSession {
   const root = path.resolve(args.sessionsRoot);
   const sessionPath = path.resolve(args.sessionPath);
   assertNoSymlinkDirectoryTree(root);
   const rootReal = fs.realpathSync.native(root);
-  if (rootReal !== root || !inside(root, sessionPath) || !path.basename(sessionPath).includes(args.expectedSessionId)) {
-    fail("TRUSTED_TRANSCRIPT_PATH", "session path is outside the exact trusted sessions root or filename does not bind session_id");
+  const expectedSuffix = `_${args.expectedSessionId}.jsonl`;
+  if (rootReal !== root || !inside(root, sessionPath) || !path.basename(sessionPath).endsWith(expectedSuffix)) {
+    fail("TRUSTED_TRANSCRIPT_PATH", "session path is outside the exact trusted sessions root or basename does not end with the exact _<sessionId>.jsonl suffix");
   }
   assertNoSymlinkAncestors(sessionPath);
   const named = fs.lstatSync(sessionPath);
@@ -207,12 +223,20 @@ function readTrustedPersistedSession(args: {
   const fd = fs.openSync(sessionPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const before = fs.fstatSync(fd);
-    const raw = fs.readFileSync(fd);
+    const prefixBytes = args.readPrefixBytes;
+    if (prefixBytes !== undefined && (!Number.isSafeInteger(prefixBytes) || prefixBytes < 1 || prefixBytes > before.size)) {
+      fail("TRUSTED_TRANSCRIPT_PREFIX", "requested session prefix is outside the trusted file");
+    }
+    const raw = prefixBytes === undefined ? fs.readFileSync(fd) : readExactPrefix(fd, prefixBytes);
     const after = fs.fstatSync(fd);
     const namedAfter = fs.lstatSync(sessionPath);
-    if (!sameIdentity(before, after) || !sameIdentity(after, namedAfter) || raw.length !== before.size) {
-      fail("TRUSTED_TRANSCRIPT_RACE", "session JSONL changed while reading");
-    }
+    const stableIdentity = prefixBytes === undefined
+      ? sameIdentity(before, after) && sameIdentity(after, namedAfter)
+      : sameNodeIdentity(before, after) && sameNodeIdentity(after, namedAfter);
+    const stableExtent = prefixBytes === undefined
+      ? raw.length === before.size && after.size === before.size
+      : raw.length === prefixBytes && before.size >= prefixBytes && after.size >= prefixBytes;
+    if (!stableIdentity || !stableExtent) fail("TRUSTED_TRANSCRIPT_RACE", "session JSONL identity or required extent changed while reading");
     return parseTrustedSession(raw, args.expectedSessionId, before.dev, before.ino);
   } finally { fs.closeSync(fd); }
 }
@@ -221,6 +245,7 @@ function parseTrustedSession(raw: Buffer, expectedSessionId: string, dev: number
   const lines = splitJsonl(raw);
   if (lines.length === 0) fail("TRUSTED_TRANSCRIPT_EMPTY", "session JSONL is empty");
   let sessionId: string | null = null;
+  let headerSha256: string | null = null;
   const rows: ParsedRow[] = [];
   const byId = new Map<string, ParsedRow>();
   const seen = new Set<string>();
@@ -229,14 +254,24 @@ function parseTrustedSession(raw: Buffer, expectedSessionId: string, dev: number
     try { value = asRecord(parseJsonRejectDuplicateKeys(line.raw), `transcript line ${line.line}`); }
     catch (error) { fail("TRUSTED_TRANSCRIPT_JSON", "session JSONL contains invalid or duplicate-key JSON", { line: line.line, error: message(error) }); }
     if (value.type === "session") {
-      if (line.line !== 1 || sessionId !== null || typeof value.id !== "string" || !value.id) fail("TRUSTED_TRANSCRIPT_HEADER", "session header is invalid");
+      assertAllowedRequiredKeys(value, ["type", "version", "id", "timestamp", "cwd"], ["parentSession"], `session header line ${line.line}`);
+      if (line.line !== 1 || sessionId !== null || value.version !== 3 || typeof value.id !== "string" || !value.id
+        || typeof value.timestamp !== "string" || !Number.isFinite(Date.parse(value.timestamp))
+        || typeof value.cwd !== "string" || !path.isAbsolute(value.cwd)) {
+        fail("TRUSTED_TRANSCRIPT_HEADER", "session header is invalid or not the trusted pi v3 shape");
+      }
+      if (value.parentSession !== undefined && (typeof value.parentSession !== "string" || !value.parentSession)) {
+        fail("TRUSTED_TRANSCRIPT_HEADER", "session header parentSession must be non-empty when present");
+      }
       sessionId = value.id;
+      headerSha256 = sha256Hex(line.raw);
       seen.add(value.id);
       continue;
     }
     if (typeof value.type !== "string" || !KNOWN_ENTRY_TYPES.has(value.type)) {
       fail("TRUSTED_TRANSCRIPT_ENTRY_TYPE", "session JSONL contains an unknown entry type", { line: line.line, type: value.type });
     }
+    validateEntryShape(value, line.line);
     const id = requireNonempty(value.id, `line ${line.line} id`);
     if (seen.has(id)) fail("TRUSTED_TRANSCRIPT_DUPLICATE_ID", "session JSONL contains a duplicate entry id", { id, line: line.line });
     const parentId = value.parentId === null ? null : requireNonempty(value.parentId, `line ${line.line} parentId`);
@@ -264,7 +299,8 @@ function parseTrustedSession(raw: Buffer, expectedSessionId: string, dev: number
     cursor = byId.get(cursor.parentId);
     if (!cursor) fail("TRUSTED_TRANSCRIPT_CHAIN", "active parent chain is broken");
   }
-  return deepFreeze({ raw, sessionId, dev, ino, rows, activeRows: reversed.reverse() });
+  if (!headerSha256) fail("TRUSTED_TRANSCRIPT_HEADER", "session header hash is unavailable");
+  return deepFreeze({ raw, sessionId, headerSha256, dev, ino, rows, activeRows: reversed.reverse() });
 }
 
 function buildCoordinate(parsed: ParsedTrustedSession, sessionPath: string, target: ParsedRow, text: string, current = true): TrustedSessionUserCoordinate {
@@ -293,6 +329,52 @@ function buildCoordinate(parsed: ParsedTrustedSession, sessionPath: string, targ
     caller_supplied_raw_text: false as const,
   };
   return validateTrustedSessionUserCoordinate({ ...base, coordinate_hash: jcsSha256Hex(base) });
+}
+
+function validateEntryShape(value: Record<string, unknown>, line: number): void {
+  const common = ["type", "id", "parentId", "timestamp"];
+  if (value.type === "message") {
+    assertAllowedRequiredKeys(value, [...common, "message"], [], `message line ${line}`);
+    const message = asRecord(value.message, `line ${line} message`);
+    const role = requireNonempty(message.role, `line ${line} message.role`);
+    if (role === "user") {
+      assertAllowedRequiredKeys(message, ["role", "content", "timestamp"], [], `user message line ${line}`);
+    } else if (role === "assistant") {
+      assertAllowedRequiredKeys(message, ["role", "content", "timestamp", "api", "provider", "model", "usage", "stopReason"], ["responseId", "errorMessage"], `assistant message line ${line}`);
+    } else if (role === "toolResult") {
+      assertAllowedRequiredKeys(message, ["role", "content", "timestamp", "toolCallId", "toolName", "isError"], ["details"], `tool result line ${line}`);
+    } else {
+      fail("TRUSTED_TRANSCRIPT_MESSAGE_ROLE", "session JSONL contains an unsupported message role", { line, role });
+    }
+    if (!Array.isArray(message.content)) fail("TRUSTED_TRANSCRIPT_JSON", `line ${line} message.content must be an array`);
+  } else if (value.type === "model_change") {
+    assertAllowedRequiredKeys(value, [...common, "provider", "modelId"], [], `model_change line ${line}`);
+  } else if (value.type === "thinking_level_change") {
+    assertAllowedRequiredKeys(value, [...common, "thinkingLevel"], [], `thinking_level_change line ${line}`);
+  } else if (value.type === "compaction") {
+    assertAllowedRequiredKeys(value, [...common, "summary", "firstKeptEntryId", "tokensBefore"], ["details", "fromHook"], `compaction line ${line}`);
+  } else if (value.type === "branch_summary") {
+    assertAllowedRequiredKeys(value, [...common, "summary", "fromId"], [], `branch_summary line ${line}`);
+  } else if (value.type === "custom") {
+    assertAllowedRequiredKeys(value, [...common, "customType", "data"], [], `custom line ${line}`);
+  } else if (value.type === "custom_message") {
+    assertAllowedRequiredKeys(value, [...common, "customType", "content", "display"], ["details"], `custom_message line ${line}`);
+  } else if (value.type === "label") {
+    assertAllowedRequiredKeys(value, [...common, "targetId", "label"], [], `label line ${line}`);
+  } else if (value.type === "session_info") {
+    assertAllowedRequiredKeys(value, common, ["name"], `session_info line ${line}`);
+  }
+  requireNonempty(value.timestamp, `line ${line} timestamp`);
+  if (!Number.isFinite(Date.parse(String(value.timestamp)))) fail("TRUSTED_TRANSCRIPT_JSON", `line ${line} timestamp is invalid`);
+}
+
+function assertAllowedRequiredKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[], label: string): void {
+  const allowed = new Set([...required, ...optional]);
+  const missing = required.filter((key) => !Object.prototype.hasOwnProperty.call(value, key));
+  const extra = Object.keys(value).filter((key) => !allowed.has(key));
+  if (missing.length > 0 || extra.length > 0) {
+    fail("TRUSTED_TRANSCRIPT_SCHEMA_CLOSED", `${label} keys differ`, { missing, extra });
+  }
 }
 
 function exactSingleText(content: unknown): string {
@@ -338,7 +420,18 @@ function assertNoSymlinkAncestors(file: string): void {
     if (stat.isSymbolicLink() || !stat.isDirectory()) fail("TRUSTED_TRANSCRIPT_PATH", "session path has a symlink or non-directory ancestor", { current });
   }
 }
-function sameIdentity(left: fs.Stats, right: fs.Stats): boolean { return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && left.uid === right.uid && left.gid === right.gid && left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs; }
+function readExactPrefix(fd: number, bytes: number): Buffer {
+  const raw = Buffer.allocUnsafe(bytes);
+  let offset = 0;
+  while (offset < bytes) {
+    const count = fs.readSync(fd, raw, offset, bytes - offset, offset);
+    if (count === 0) fail("TRUSTED_TRANSCRIPT_RACE", "session JSONL ended before the frozen prefix");
+    offset += count;
+  }
+  return raw;
+}
+function sameNodeIdentity(left: fs.Stats, right: fs.Stats): boolean { return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && left.uid === right.uid && left.gid === right.gid; }
+function sameIdentity(left: fs.Stats, right: fs.Stats): boolean { return sameNodeIdentity(left, right) && left.size === right.size && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs; }
 function inside(parent: string, child: string): boolean { const relative = path.relative(parent, child); return relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative); }
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void { const actual = Object.keys(value).sort(); const wanted = [...expected].sort(); if (canonicalizeJcs(actual) !== canonicalizeJcs(wanted)) fail("TRUSTED_TRANSCRIPT_COORDINATE", `${label} keys differ`, { actual, expected: wanted }); }
 function asRecord(value: unknown, label: string): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) fail("TRUSTED_TRANSCRIPT_JSON", `${label} must be an object`); return value as Record<string, unknown>; }
