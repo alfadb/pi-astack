@@ -33,6 +33,10 @@ import { canonicalizeJcs, jcsSha256Hex, sha256Hex } from "./jcs";
 
 export const D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA =
   "adr0040-d3-v2-session-start-activation-object/v1" as const;
+export const D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA =
+  "adr0040-d3-v2-session-start-r4-activation-object/v1" as const;
+export const D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA =
+  "adr0040-d3-v2-session-start-r4-settings-binding/v1" as const;
 export const D3_V2_SESSION_START_ACTIVATION_TEMPLATE_SCHEMA =
   "adr0040-d3-v2-session-start-activation-object-template/v1" as const;
 export const D3_V2_SESSION_START_DEFAULT_ACTIVATION_ROOT = path.join(
@@ -72,6 +76,7 @@ export const D3_V2_SESSION_START_SETTINGS_MUTATION_KEYS = Object.freeze([
   "expectedIntentHash",
   "adapterManifestHash",
   "activationObjectPath",
+  "r4Binding",
   "maxReadBytes",
 ] as const);
 
@@ -91,6 +96,17 @@ const BOUND_KEYS = Object.freeze([
   "session_file",
   "quarantine_target",
   "executable",
+] as const);
+
+const R4_BOUND_KEYS = Object.freeze([
+  ...BOUND_KEYS,
+  "operation_id",
+  "intent_hash",
+  "operator_manifest_hash",
+  "execution_dossier_hash",
+  "settings_pre_raw_sha256",
+  "settings_post_raw_sha256",
+  "source_closure_hash",
 ] as const);
 
 const TEMPLATE_KEYS = Object.freeze([
@@ -141,8 +157,15 @@ export interface D3V2ActivationD3Identities {
   selection_seq: number;
 }
 
+export interface D3V2R4SettingsBinding {
+  schema_version: typeof D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA;
+  controlRoot: string;
+  operatorManifestHash: string;
+  settingsPath: string;
+}
+
 export interface D3V2BoundActivationObject {
-  schema_version: typeof D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA;
+  schema_version: typeof D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA | typeof D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA;
   mode: "bound";
   authorization_status: "AUTHORIZED";
   session_id: string;
@@ -158,6 +181,13 @@ export interface D3V2BoundActivationObject {
   quarantine_target: string;
   executable: true;
   activation_object_hash: string;
+  operation_id?: string;
+  intent_hash?: string;
+  operator_manifest_hash?: string;
+  execution_dossier_hash?: string;
+  settings_pre_raw_sha256?: string;
+  settings_post_raw_sha256?: string;
+  source_closure_hash?: string;
 }
 
 export function resolveD3V2SessionStartActivationRoot(override?: string): string {
@@ -321,6 +351,15 @@ export function buildD3V2SessionStartActivationObject(args: {
   sessionFile?: D3V2ActivationSessionFileBinding | null;
   quarantineTarget?: string | null;
   mode?: "bound" | "template";
+  r4?: Readonly<{
+    operation_id: string;
+    intent_hash: string;
+    operator_manifest_hash: string;
+    execution_dossier_hash: string;
+    settings_pre_raw_sha256: string;
+    settings_post_raw_sha256: string;
+    source_closure_hash: string;
+  }>;
 }): Readonly<Record<string, unknown>> {
   assertHash(args.adapterManifestHash, "adapterManifestHash");
   for (const field of [
@@ -362,9 +401,15 @@ export function buildD3V2SessionStartActivationObject(args: {
     // Template may carry a nonce; if present it must still be a safe hash component.
     assertSafeActivationNonceComponent(args.activationNonce);
   }
+  if (args.r4 && mode !== "bound") fail("activation_invalid", "R4 activation metadata requires mode=bound");
+  if (args.r4) {
+    for (const [field, value] of Object.entries(args.r4)) assertHash(value, `r4.${field}`);
+  }
   const schema = mode === "template"
     ? D3_V2_SESSION_START_ACTIVATION_TEMPLATE_SCHEMA
-    : D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA;
+    : args.r4
+      ? D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA
+      : D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA;
   const authorizationCoordinate = args.authorizationCoordinate
     ? deepFreeze({ ...args.authorizationCoordinate })
     : null;
@@ -387,6 +432,7 @@ export function buildD3V2SessionStartActivationObject(args: {
     session_file: args.sessionFile ? deepFreeze({ ...args.sessionFile }) : null,
     quarantine_target: args.quarantineTarget ?? null,
     executable: args.authorizationStatus === "AUTHORIZED" && mode === "bound",
+    ...(args.r4 ? { ...args.r4 } : {}),
   };
   return deepFreeze({ ...base, activation_object_hash: computeD3V2ActivationObjectHash(base) });
 }
@@ -608,16 +654,18 @@ export function captureSessionFileBinding(sessionFilePath: string): D3V2Activati
 }
 
 function validateBoundActivationShape(record: Record<string, unknown>): D3V2BoundActivationObject {
+  const isR4 = record.schema_version === D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA;
+  const expectedKeys = isR4 ? R4_BOUND_KEYS : BOUND_KEYS;
   for (const key of Object.keys(record)) {
     if (key === "activation_object_hash") continue;
-    if (!(BOUND_KEYS as readonly string[]).includes(key)) {
+    if (!(expectedKeys as readonly string[]).includes(key)) {
       fail("activation_schema_closed", `unknown activation field: ${key}`);
     }
   }
-  for (const key of BOUND_KEYS) {
+  for (const key of expectedKeys) {
     if (!(key in record)) fail("activation_schema_closed", `missing required activation field: ${key}`);
   }
-  if (record.schema_version !== D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA) fail("activation_schema_invalid", "schema differs");
+  if (!isR4 && record.schema_version !== D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA) fail("activation_schema_invalid", "schema differs");
   if (record.mode !== "bound") fail("activation_not_bound", "mode must be bound");
   if (record.authorization_status !== "AUTHORIZED") fail("activation_not_authorized", "authorization_status must be AUTHORIZED");
   if (record.executable !== true) fail("activation_not_executable", "executable must be true");
@@ -654,8 +702,17 @@ function validateBoundActivationShape(record: Record<string, unknown>): D3V2Boun
     prefix_bytes: requireNonNegInt(sessionFileRaw.prefix_bytes, "session_file.prefix_bytes"),
     prefix_sha256: requireHash(sessionFileRaw.prefix_sha256, "session_file.prefix_sha256"),
   };
+  const r4 = isR4 ? {
+    operation_id: requireHash(record.operation_id, "operation_id"),
+    intent_hash: requireHash(record.intent_hash, "intent_hash"),
+    operator_manifest_hash: requireHash(record.operator_manifest_hash, "operator_manifest_hash"),
+    execution_dossier_hash: requireHash(record.execution_dossier_hash, "execution_dossier_hash"),
+    settings_pre_raw_sha256: requireHash(record.settings_pre_raw_sha256, "settings_pre_raw_sha256"),
+    settings_post_raw_sha256: requireHash(record.settings_post_raw_sha256, "settings_post_raw_sha256"),
+    source_closure_hash: requireHash(record.source_closure_hash, "source_closure_hash"),
+  } : {};
   return deepFreeze({
-    schema_version: D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA,
+    schema_version: isR4 ? D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA : D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA,
     mode: "bound",
     authorization_status: "AUTHORIZED",
     session_id: String(record.session_id),
@@ -674,6 +731,7 @@ function validateBoundActivationShape(record: Record<string, unknown>): D3V2Boun
     quarantine_target: requireAbsolute(record.quarantine_target, "quarantine_target"),
     executable: true,
     activation_object_hash: requireHash(record.activation_object_hash, "activation_object_hash"),
+    ...r4,
   });
 }
 
@@ -716,6 +774,7 @@ export function normalizeSettingsMutationClosed(
       if (key in input) out[key] = (input as Record<string, unknown>)[key];
     }
     if ("selector" in out) out.selector = normalizeSelector(out.selector);
+    if ("r4Binding" in out && out.r4Binding != null) out.r4Binding = normalizeR4SettingsBinding(out.r4Binding);
     if ("expectedIntentHash" in out && out.expectedIntentHash != null) {
       out.expectedIntentHash = requireHash(out.expectedIntentHash, "expectedIntentHash");
     } else if ("expectedIntentHash" in out) {
@@ -737,6 +796,7 @@ export function normalizeSettingsMutationClosed(
     activationObjectPath: typeof input.activationObjectPath === "string" && input.activationObjectPath.trim()
       ? input.activationObjectPath.trim()
       : null,
+    r4Binding: input.r4Binding == null ? null : normalizeR4SettingsBinding(input.r4Binding),
     maxReadBytes: typeof input.maxReadBytes === "number" && Number.isFinite(input.maxReadBytes)
       ? Math.floor(input.maxReadBytes)
       : null,
@@ -759,14 +819,33 @@ export function normalizeSettingsMutationClosed(
     if (out.expectedIntentHash != null && (typeof out.expectedIntentHash !== "string" || !HASH.test(out.expectedIntentHash as string))) {
       fail("activation_settings_mutation_invalid", "settings_mutation.expectedIntentHash invalid");
     }
-    if (typeof out.activationObjectPath !== "string" || !path.isAbsolute(out.activationObjectPath as string)) {
-      fail("activation_settings_mutation_invalid", "bound settings_mutation.activationObjectPath must be absolute");
+    const r4Binding = out.r4Binding as D3V2R4SettingsBinding | null;
+    if (r4Binding) {
+      if (out.activationObjectPath !== null) fail("activation_settings_mutation_invalid", "R4 settings must not carry activationObjectPath");
+    } else if (typeof out.activationObjectPath !== "string" || !path.isAbsolute(out.activationObjectPath as string)) {
+      fail("activation_settings_mutation_invalid", "legacy bound settings_mutation.activationObjectPath must be absolute");
     }
     if (typeof out.maxReadBytes !== "number" || !Number.isSafeInteger(out.maxReadBytes) || (out.maxReadBytes as number) < 1) {
       fail("activation_settings_mutation_invalid", "bound settings_mutation.maxReadBytes required");
     }
   }
   return out;
+}
+
+function normalizeR4SettingsBinding(value: unknown): D3V2R4SettingsBinding {
+  const binding = asRecord(value, "settings_mutation.r4Binding");
+  const keys = Object.keys(binding).sort();
+  const expected = ["controlRoot", "operatorManifestHash", "schema_version", "settingsPath"].sort();
+  if (canonicalizeJcs(keys) !== canonicalizeJcs(expected)) fail("activation_settings_mutation_closed", "r4Binding keys differ");
+  if (binding.schema_version !== D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA) fail("activation_settings_mutation_invalid", "r4Binding schema differs");
+  if (typeof binding.controlRoot !== "string" || !path.isAbsolute(binding.controlRoot)) fail("activation_settings_mutation_invalid", "r4Binding.controlRoot must be absolute");
+  if (typeof binding.settingsPath !== "string" || !path.isAbsolute(binding.settingsPath)) fail("activation_settings_mutation_invalid", "r4Binding.settingsPath must be absolute");
+  return deepFreeze({
+    schema_version: D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA,
+    controlRoot: path.resolve(binding.controlRoot),
+    operatorManifestHash: requireHash(binding.operatorManifestHash, "r4Binding.operatorManifestHash"),
+    settingsPath: path.resolve(binding.settingsPath),
+  });
 }
 
 function normalizeSelector(value: unknown): { session_ids: string[] } {
@@ -778,14 +857,13 @@ function normalizeSelector(value: unknown): { session_ids: string[] } {
   for (const key of Object.keys(sel)) {
     if (key !== "session_ids") fail("activation_settings_mutation_closed", `settings_mutation.selector unknown field: ${key}`);
   }
-  const ids = Array.isArray(sel.session_ids)
-    ? sel.session_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim())
-    : [];
-  // Preserve order but de-dupe for stable equality with live resolver output.
-  // R3.7: each selector session_id must also be a single safe filename component.
+  if (!Array.isArray(sel.session_ids)) {
+    fail("activation_settings_mutation_invalid", "settings_mutation.selector.session_ids must be an array");
+  }
+  // R3.9/R4: validate each original identity. Never trim or rewrite it.
   const seen = new Set<string>();
   const session_ids: string[] = [];
-  for (const id of ids) {
+  for (const id of sel.session_ids) {
     assertSafeSessionIdComponent(id, "settings_mutation.selector.session_ids[]");
     if (!seen.has(id)) { seen.add(id); session_ids.push(id); }
   }

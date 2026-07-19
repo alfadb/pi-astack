@@ -1,7 +1,7 @@
 {
   "schema_version": "transition-register/v1",
   "register_id": "pi-astack-transition-register",
-  "updated": "2026-07-17",
+  "updated": "2026-07-19",
   "review_policy": {
     "cadence": "biweekly",
     "default_owner": "pi-astack-maintainers",
@@ -628,10 +628,10 @@
       "authorization_status": "separate_authorization_required",
       "entered": "2026-07-19",
       "review_by": "2026-07-26",
-      "current": "S0+S1/R3.9 implementation and execution-ready dossier exist for the D3-v2 session_start consumer (adapter, control module, exclusive runtime audit, activation-object template, sandbox rollback operator with Linux retained parent-fd path safety closing check-after ancestor-swap). Live selector remains default-off; candidate session is unresolved/NOT_AUTHORIZED; production rollback is default-deny. S2 activation is not authorized.",
+      "current": "R4 production create/bind operator is implemented and execution-ready on top of immutable R3.9: bind-existing-only target session prefix, trusted latest standalone role=user execute/continue authorization, operation-id-derived create-only intent/AUTHORIZED activation/commit receipt, retained-parent-FD no-replace publication, duplicate-key-rejecting settings OFD/CAS, exact runtime four-face gate, and explicit continue recovery matrix. Committed production preview is read-only and zero-write. Live v2 key remains absent; no production object or session/settings mutation was performed. S2 remains NOT_AUTHORIZED.",
       "exit": [
-        "obtain a separate explicit S2 activation authorization bound to a frozen activation object with a real or explicit candidate session id",
-        "prove selected-path success injects one fence and selected-path failure is zero-injection with no ADR0039 fallback",
+        "publish the R4 source closure at a clean commit and obtain the exact fresh initial S2 transcript authorization bound by the operator tuple",
+        "execute create/bind only through the fixed production CLI and prove the later runtime audit authorizes one exact fence while every partial state remains selected-zero",
         "keep aggregate P3 blocked until each consumer is independently authorized"
       ],
       "evidence": [
@@ -641,7 +641,14 @@
         "scripts/smoke-proposition-lifecycle-freshness-d3-v2-session-start.mjs",
         "scripts/smoke-proposition-lifecycle-freshness-d3-pub-post-publication.mjs",
         "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start.ts",
-        "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-control.ts"
+        "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-control.ts",
+        "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.ts",
+        "docs/notes/2026-07-19-adr0040-d3-v2-session-start-r4-design.md",
+        "docs/notes/2026-07-19-adr0040-d3-v2-session-start-r4-execution-ready.md",
+        "docs/evidence/2026-07-19-adr0040-d3-v2-session-start-r4-operator-manifest.json",
+        "docs/evidence/2026-07-19-adr0040-d3-v2-session-start-r4-execution-ready-dossier.json",
+        "docs/evidence/2026-07-19-adr0040-d3-v2-session-start-r4-production-read-only-preview.json",
+        "scripts/smoke-proposition-lifecycle-freshness-d3-v2-session-start-r4.mjs"
       ],
       "owner": "adr0040-p3-d3-v2-session-start",
       "consumer": [
@@ -649,10 +656,10 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "Remain blocked; do not enable selector, create a live session, or call production rollback without a fresh independent authorization.",
+      "next_action": "Remain blocked. Use the clean published R4 release as the source_commit binding and require the exact fresh trusted-session execute authorization before create/bind. Do not create/rewrite a session, mutate live settings, create production intent/activation/receipt/audit state, or invoke rollback without that new authorization.",
       "status": "blocked",
       "gate": "separate_authorization_required",
-      "summary": "S1/R3.9 execution-ready code+tests+dossier present. Door1 reuses activation closed-schema validator; stateRoot===rollback_target; intent parent_hash chain; sandbox hard-path covers real control roots; R3.5 path preflight retained. R3.6 closes OpenAI check-after ancestor-swap window via Linux retained parent-directory FD walk (/proc/self/fd/<parentFd>/<basename> for lstat/open/mkdir; next-layer fd opened before previous released; any symlink refused; target parent fd held during create/write). ensureDirectoryChainNoSymlink/atomicDurableWrite/quarantine rename all use procfd-relative paths (dual parent fds for quarantine); settings read/write anchored; non-Linux/proc unavailable fail-closed; Linux boundary documented; closed-set one-shot sandbox-only test hook (env token). RENAME_NOREPLACE dest-race residual remains honest. Live selector default-off/absent; dossier NOT_AUTHORIZED/executable=false/candidate null. S2 and aggregate P3 not authorized. Real hard-path production rollback never called this turn."
+      "summary": "R4 bind-existing-only production operator and runtime receipt gate are implemented over immutable R3.9. Fresh execute/continue authority comes only from exact trusted persisted-session transcript coordinates; operation_id is SHA256(JCS(full authorization tuple)); intent, one-shot AUTHORIZED activation, and exactly-once receipt are fixed create-only files published via retained parent FD and hardlink no-replace. Settings uses duplicate-key rejection, retained-parent OFD cooperative lock, full identity/raw CAS, immediate preimage recheck, anchored rename/fsync, and exact post readback with an explicit non-cooperative-writer residual. Enabled runtime requires exact settings+intent+activation+receipt/session/operation/source closure and otherwise selected-zero with no ADR0039 fallback. Sandbox recovery and adversarial suites plus real production read-only preview are present. No live key, production control object, session mutation, audit append, or rollback occurred; S2 and aggregate P3 remain NOT_AUTHORIZED / separate_authorization_required."
     },
     {
       "id": "proposition.adr0040-p3-runtime-read-flips",
@@ -664,7 +671,7 @@
       "authorization_status": "separate_authorization_required",
       "entered": "2026-07-13",
       "review_by": "2026-07-24",
-      "current": "Aggregate P3 remains blocked. The D3-v2 session_start consumer has an S1 execution-ready implementation under proposition.adr0040-p3-d3-v2-session-start but is still NOT_AUTHORIZED for S2. No Knowledge pull, Policy push, canonical L2 or other runtime consumer reads the published D3 selection. Each consumer remains an independent decision.",
+      "current": "Aggregate P3 remains blocked. The D3-v2 session_start consumer now has an R4 bind-existing production create/bind operator and exact runtime receipt gate, but live v2 settings remain absent and S2 is still NOT_AUTHORIZED. No Knowledge pull, Policy push, canonical L2 or other runtime consumer reads the published D3 selection. Each consumer remains an independent decision.",
       "exit": [
         "complete prerequisite projector phase for the specific consumer",
         "obtain a separate explicit read-flip authorization for that consumer",
@@ -674,7 +681,8 @@
         "ADR 0040",
         "scripts/smoke-proposition-knowledge-shadow-p1a.mjs",
         "docs/evidence/2026-07-13-adr0040-p1a-production-shadow-dossier-v3.json",
-        "docs/evidence/2026-07-19-adr0040-d3-v2-session-start-execution-ready-dossier.json"
+        "docs/evidence/2026-07-19-adr0040-d3-v2-session-start-execution-ready-dossier.json",
+        "docs/evidence/2026-07-19-adr0040-d3-v2-session-start-r4-execution-ready-dossier.json"
       ],
       "owner": "adr0040-p3-runtime-read-flips",
       "consumer": [

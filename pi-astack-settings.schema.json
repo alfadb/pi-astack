@@ -1187,13 +1187,17 @@
         "propositionLifecycleFreshnessD3V2SessionStartInjection": {
           "type": "object",
           "default": { "enabled": false, "selector": { "session_ids": [] }, "maxReadBytes": 65536 },
-          "description": "ADR0040 D3-v2 session_start single-consumer adapter (R3.8). Default-off with empty selector. When enabled=true, activationObjectPath + activationObjectHash are required and must pin a bound AUTHORIZED activation object under the controlled activation root. Selected sessions are v2-only. Success injects one exact fence bound to activation_nonce/activation_object_hash/selection/head/proof/stable/adapter_manifest after exclusive v2-only runtime audit append. Selected-path failure yields sanitized zero rule injection with no v1/compiled/legacy fallback. Unselected sessions keep the existing non-v2 path byte-identical. Publication age/mtime is diagnostic only. Selector session_ids reuse the safe single path-component rule (maxLength 128, ASCII [A-Za-z0-9._-], reject '.'/'..'). Runtime fail-closes unsafe selectors to disabled/empty without throw.",
+          "description": "ADR0040 D3-v2 session_start single-consumer adapter. Legacy R3.9 enabled mode requires activationObjectPath+activationObjectHash. R4 enabled mode instead requires r4Binding and admits injection only after the exact settings+intent+AUTHORIZED activation+commit receipt runtime gate closes; partial or mismatched selected state is zero-injection with no ADR0039 fallback.",
           "additionalProperties": false,
           "allOf": [
             {
               "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
               "then": {
-                "required": ["expectedSelectionHash", "expectedHeadHash", "expectedProofHash", "expectedStableBundleHash", "adapterManifestHash", "activationObjectPath", "activationObjectHash"]
+                "required": ["expectedSelectionHash", "expectedHeadHash", "expectedProofHash", "expectedStableBundleHash", "adapterManifestHash"],
+                "oneOf": [
+                  { "required": ["activationObjectPath", "activationObjectHash"], "not": { "required": ["r4Binding"] } },
+                  { "required": ["r4Binding"], "not": { "anyOf": [{ "required": ["activationObjectPath"] }, { "required": ["activationObjectHash"] }] } }
+                ]
               }
             }
           ],
@@ -1232,7 +1236,18 @@
             "expectedIntentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Optional exact published D3 intent identity. When present, runtime compares intent_hash." },
             "adapterManifestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact JCS self-hash (manifest_hash) of the D3-v2 session_start adapter static dependency closure. Live hook must rebuild+validate the current manifest and pass this hash to the reader; settings self-compare alone is not sufficient." },
             "activationObjectPath": { "type": "string", "minLength": 1, "description": "Absolute path to the bound activation object under the controlled activation root. Required when enabled=true." },
-            "activationObjectHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact activation_object_hash pin (self-hash of the activation object without the hash field). Required when enabled=true. Runtime verifies settings pin == object self-hash. The activation object itself must not embed this pin." },
+            "activationObjectHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Legacy R3.9 activation self-hash pin. Forbidden in R4 receipt-gated mode." },
+            "r4Binding": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["schema_version", "controlRoot", "operatorManifestHash", "settingsPath"],
+              "properties": {
+                "schema_version": { "const": "adr0040-d3-v2-session-start-r4-settings-binding/v1" },
+                "controlRoot": { "type": "string", "minLength": 1, "description": "Fixed R4 intent/activation/receipt control root. Runtime never creates it." },
+                "operatorManifestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "settingsPath": { "type": "string", "minLength": 1, "description": "Exact settings file whose raw postimage is receipt-bound." }
+              }
+            },
             "maxReadBytes": { "type": "number", "default": 65536, "minimum": 1024, "maximum": 262144, "description": "Maximum injectable payload bytes after project-scope filtering." }
           }
         }

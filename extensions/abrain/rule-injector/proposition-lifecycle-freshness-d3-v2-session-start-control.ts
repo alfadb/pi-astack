@@ -31,6 +31,7 @@ import {
   type D3V2SessionStartSelection,
   type D3V2OwnFenceExpectation,
 } from "../../_shared/proposition-lifecycle-freshness-d3-v2-session-start";
+import { evaluateD3V2R4RuntimeGate } from "../../_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4";
 import {
   appendD3V2SessionStartRuntimeAudit,
   buildD3V2SessionStartRuntimeAuditRow,
@@ -155,17 +156,33 @@ export function decideD3V2SessionStartControl(args: D3V2SessionStartControlConte
     });
   }
 
-  const loaded = resolveSelectedBoundActivation({
-    settings: args.settings,
-    activationRoot: args.activationRoot,
-  });
-  if (!loaded.ok) {
-    return zero(selected, loaded.reason, sanitizedBase, {
-      error: loaded.error,
+  let activation: D3V2BoundActivationObject;
+  if (args.settings.r4Binding) {
+    const gate = evaluateD3V2R4RuntimeGate({
+      settings: args.settings,
+      sessionManager: args.sessionManager,
       adapterManifestHash,
     });
+    if (!gate.ok) {
+      return zero(selected, gate.reason, sanitizedBase, {
+        error: gate.error,
+        adapterManifestHash,
+      });
+    }
+    activation = gate.activation;
+  } else {
+    const loaded = resolveSelectedBoundActivation({
+      settings: args.settings,
+      activationRoot: args.activationRoot,
+    });
+    if (!loaded.ok) {
+      return zero(selected, loaded.reason, sanitizedBase, {
+        error: loaded.error,
+        adapterManifestHash,
+      });
+    }
+    activation = loaded.activation;
   }
-  const activation = loaded.activation;
   const activationNonce = activation.activation_nonce;
 
   // Halt / taint before D3.

@@ -44,6 +44,8 @@ import {
   joinUnderRootContained,
   assertResolvedPathContainedUnderRoot,
   D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA,
+  D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA,
+  D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA,
   D3_V2_SESSION_START_ACTIVATION_TEMPLATE_SCHEMA,
   D3_V2_SESSION_START_SETTINGS_MUTATION_KEYS,
   D3_V2_SESSION_START_DEFAULT_ACTIVATION_ROOT,
@@ -52,6 +54,7 @@ import {
   D3_V2_SAFE_PATH_COMPONENT_RE,
   type D3V2BoundActivationObject,
   type D3V2ActivationD3Identities,
+  type D3V2R4SettingsBinding,
 } from "./proposition-lifecycle-freshness-d3-v2-session-start-activation";
 import {
   composeD3V2ExactFence,
@@ -144,6 +147,8 @@ export {
   parseAllAbrainRuleFences,
   D3_V2_SESSION_START_SOURCE_MARKER,
   D3_V2_SESSION_START_ACTIVATION_OBJECT_SCHEMA,
+  D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA,
+  D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA,
   D3_V2_SESSION_START_ACTIVATION_TEMPLATE_SCHEMA,
   D3_V2_SESSION_START_SETTINGS_MUTATION_KEYS,
   D3_V2_SESSION_START_DEFAULT_ACTIVATION_ROOT,
@@ -161,7 +166,7 @@ export {
   D3_V2_ROLLBACK_FACES,
 };
 export type { D3V2R36TestAncestorSwapHook, D3V2RetainedDirFd };
-export type { D3V2BoundActivationObject, D3V2ActivationD3Identities, D3V2OwnFenceExpectation };
+export type { D3V2BoundActivationObject, D3V2ActivationD3Identities, D3V2R4SettingsBinding, D3V2OwnFenceExpectation };
 
 export const D3_V2_SESSION_START_CONTROL_ROOT_RELATIVE =
   ".state/sediment/proposition-lifecycle-freshness/v2" as const;
@@ -173,6 +178,14 @@ export const D3_V2_SESSION_START_FENCE_MODULE =
   "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-fence.ts" as const;
 export const D3_V2_SESSION_START_ROLLBACK_MODULE =
   "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-rollback.ts" as const;
+export const D3_V2_SESSION_START_R4_MODULE =
+  "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.ts" as const;
+export const D3_V2_SESSION_START_TRUSTED_TRANSCRIPT_MODULE =
+  "extensions/_shared/trusted-session-transcript.ts" as const;
+export const D3_V2_SESSION_START_STRICT_JSON_MODULE =
+  "extensions/_shared/strict-json.ts" as const;
+export const D3_V2_SESSION_START_CREATE_ONLY_MODULE =
+  "extensions/_shared/retained-fd-create-only.ts" as const;
 export const D3_V2_SESSION_START_ADAPTER_MANIFEST_SCHEMA =
   "adr0040-d3-v2-session-start-adapter-manifest/v1" as const;
 export const D3_V2_SESSION_START_FORENSIC_SCHEMA =
@@ -205,6 +218,10 @@ export const D3_V2_SESSION_START_CRITICAL_REQUIRED_PATHS = Object.freeze([
   D3_V2_SESSION_START_ACTIVATION_MODULE,
   D3_V2_SESSION_START_FENCE_MODULE,
   D3_V2_SESSION_START_ROLLBACK_MODULE,
+  D3_V2_SESSION_START_R4_MODULE,
+  D3_V2_SESSION_START_TRUSTED_TRANSCRIPT_MODULE,
+  D3_V2_SESSION_START_STRICT_JSON_MODULE,
+  D3_V2_SESSION_START_CREATE_ONLY_MODULE,
   D3_V2_SESSION_START_CONTROL_MODULE,
   D3_V2_SESSION_START_RUNTIME_AUDIT_MODULE,
   D3_V2_SESSION_START_RULE_INJECTOR_INDEX,
@@ -222,6 +239,7 @@ export const D3_V2_SESSION_START_ADAPTER_ROOTS = Object.freeze([
   D3_V2_SESSION_START_ACTIVATION_MODULE,
   D3_V2_SESSION_START_FENCE_MODULE,
   D3_V2_SESSION_START_ROLLBACK_MODULE,
+  D3_V2_SESSION_START_R4_MODULE,
   D3_V2_SESSION_START_CONTROL_MODULE,
   D3_V2_SESSION_START_RUNTIME_AUDIT_MODULE,
   D3_V2_SESSION_START_CONTEXT_PACKER,
@@ -251,14 +269,13 @@ export interface D3V2SessionStartInjectionSettings {
   adapterManifestHash: string | null;
   activationObjectPath: string | null;
   activationObjectHash: string | null;
+  r4Binding: D3V2R4SettingsBinding | null;
   maxReadBytes: number;
 }
 
-export interface D3V2SessionStartSelection {
-  selected: boolean;
-  reason: "disabled" | "ephemeral_session" | "unselected_session" | "selected";
-  sessionId?: string;
-}
+export type D3V2SessionStartSelection =
+  | { selected: false; reason: "disabled" | "ephemeral_session" | "unselected_session"; sessionId?: string }
+  | { selected: true; reason: "selected"; sessionId: string };
 
 export type D3V2SessionStartRuntimeReadResult =
   | {
@@ -355,6 +372,7 @@ export function resolveD3V2SessionStartInjectionSettings(value: unknown): D3V2Se
       adapterManifestHash: hashOrNull(cfg.adapterManifestHash),
       activationObjectPath: null,
       activationObjectHash: null,
+      r4Binding: null,
       maxReadBytes,
     };
   }
@@ -365,12 +383,15 @@ export function resolveD3V2SessionStartInjectionSettings(value: unknown): D3V2Se
     ? cfg.activationObjectPath.trim()
     : null;
   const activationObjectHash = hashOrNull(cfg.activationObjectHash);
+  const r4Binding = resolveR4SettingsBindingOptional(cfg.r4Binding);
   if (enabled) {
-    if (!activationObjectPath || !path.isAbsolute(activationObjectPath)) {
-      fail("settings_activation_required", "enabled=true requires absolute activationObjectPath");
-    }
-    if (!activationObjectHash) {
-      fail("settings_activation_required", "enabled=true requires activationObjectHash");
+    if (r4Binding) {
+      if (activationObjectPath || activationObjectHash) fail("settings_activation_required", "R4 enabled settings must not carry legacy activation pins");
+    } else {
+      if (!activationObjectPath || !path.isAbsolute(activationObjectPath)) {
+        fail("settings_activation_required", "legacy enabled=true requires absolute activationObjectPath");
+      }
+      if (!activationObjectHash) fail("settings_activation_required", "legacy enabled=true requires activationObjectHash");
     }
   }
   return {
@@ -384,6 +405,7 @@ export function resolveD3V2SessionStartInjectionSettings(value: unknown): D3V2Se
     adapterManifestHash: hashOrNull(cfg.adapterManifestHash),
     activationObjectPath,
     activationObjectHash,
+    r4Binding,
     maxReadBytes,
   };
 }
@@ -577,6 +599,15 @@ export function buildD3V2SessionStartActivationObject(args: {
   } | null;
   quarantineTarget?: string | null;
   mode?: "bound" | "template";
+  r4?: Readonly<{
+    operation_id: string;
+    intent_hash: string;
+    operator_manifest_hash: string;
+    execution_dossier_hash: string;
+    settings_pre_raw_sha256: string;
+    settings_post_raw_sha256: string;
+    source_closure_hash: string;
+  }>;
 }): Readonly<Record<string, unknown>> {
   return buildActivationObjectImpl(args);
 }
@@ -603,8 +634,11 @@ export function readD3V2SessionStartForRuntime(args: {
       || !args.settings.adapterManifestHash) {
       return { ok: false, reason: "expected_binding_missing", sessionId };
     }
-    if (!args.settings.activationObjectPath || !args.settings.activationObjectHash) {
+    if (!args.settings.r4Binding && (!args.settings.activationObjectPath || !args.settings.activationObjectHash)) {
       return { ok: false, reason: "activation_binding_missing", sessionId };
+    }
+    if (args.settings.r4Binding && !args.activation) {
+      return { ok: false, reason: "r4_runtime_gate_required", sessionId };
     }
     if (typeof args.adapterManifestHash !== "string" || !HASH.test(args.adapterManifestHash)) {
       return { ok: false, reason: "adapter_manifest_hash_required", sessionId, error: "live hook must pass validated current adapterManifestHash" };
@@ -616,12 +650,15 @@ export function readD3V2SessionStartForRuntime(args: {
 
     // Load + validate bound activation (settings pin == object hash inside loader).
     const activation = args.activation ?? loadD3V2SessionStartBoundActivationObject({
-      activationObjectPath: args.settings.activationObjectPath,
-      activationObjectHash: args.settings.activationObjectHash,
+      activationObjectPath: args.settings.activationObjectPath!,
+      activationObjectHash: args.settings.activationObjectHash!,
       activationRoot: args.activationRoot,
     });
-    if (activation.activation_object_hash !== args.settings.activationObjectHash) {
+    if (!args.settings.r4Binding && activation.activation_object_hash !== args.settings.activationObjectHash) {
       fail("activation_settings_pin_mismatch", "runtime settings pin does not equal activation object hash");
+    }
+    if (args.settings.r4Binding && activation.schema_version !== D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA) {
+      fail("r4_activation_required", "R4 settings require an R4 receipt-gated activation object");
     }
 
     // Halt / taint check BEFORE D3 read.
@@ -691,6 +728,7 @@ export function readD3V2SessionStartForRuntime(args: {
       expectedIntentHash: args.settings.expectedIntentHash,
       adapterManifestHash: args.settings.adapterManifestHash,
       activationObjectPath: args.settings.activationObjectPath,
+      r4Binding: args.settings.r4Binding,
       maxReadBytes: args.settings.maxReadBytes,
     }, { requireExecutableShape: true });
     assertBoundActivationMatchesRuntime({
@@ -1004,6 +1042,23 @@ function exactDirectory(input: string, label: string): string {
     fail("directory_unsafe", `${label} must be an exact directory`, { resolved });
   }
   return resolved;
+}
+function resolveR4SettingsBindingOptional(value: unknown): D3V2R4SettingsBinding | null {
+  if (value == null) return null;
+  const record = asRecord(value, "r4Binding");
+  const actual = Object.keys(record).sort(compareCodeUnits);
+  const expected = ["controlRoot", "operatorManifestHash", "schema_version", "settingsPath"].sort(compareCodeUnits);
+  if (canonicalizeJcs(actual) !== canonicalizeJcs(expected)) fail("settings_r4_binding_invalid", "r4Binding keys differ");
+  if (record.schema_version !== D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA) fail("settings_r4_binding_invalid", "r4Binding schema differs");
+  if (typeof record.controlRoot !== "string" || !path.isAbsolute(record.controlRoot)) fail("settings_r4_binding_invalid", "r4Binding.controlRoot must be absolute");
+  if (typeof record.settingsPath !== "string" || !path.isAbsolute(record.settingsPath)) fail("settings_r4_binding_invalid", "r4Binding.settingsPath must be absolute");
+  assertHash(record.operatorManifestHash, "r4Binding.operatorManifestHash");
+  return deepFreeze({
+    schema_version: D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA,
+    controlRoot: path.resolve(record.controlRoot),
+    operatorManifestHash: String(record.operatorManifestHash),
+    settingsPath: path.resolve(record.settingsPath),
+  });
 }
 function hashOrNull(value: unknown): string | null {
   return typeof value === "string" && HASH.test(value) ? value : null;

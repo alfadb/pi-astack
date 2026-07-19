@@ -99,6 +99,10 @@ function stageModuleTree(outRoot) {
     ["extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-activation.ts", "_shared/proposition-lifecycle-freshness-d3-v2-session-start-activation.js"],
     ["extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-fence.ts", "_shared/proposition-lifecycle-freshness-d3-v2-session-start-fence.js"],
     ["extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-rollback.ts", "_shared/proposition-lifecycle-freshness-d3-v2-session-start-rollback.js"],
+    ["extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.ts", "_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.js"],
+    ["extensions/_shared/retained-fd-create-only.ts", "_shared/retained-fd-create-only.js"],
+    ["extensions/_shared/strict-json.ts", "_shared/strict-json.js"],
+    ["extensions/_shared/trusted-session-transcript.ts", "_shared/trusted-session-transcript.js"],
     ["extensions/memory/parser.ts", "memory/parser.js"],
     // ADR 0034 P1: parser.ts now imports ./direction-impact
     // (parseDirectionImpact). Stage it so the transpiled require resolves.

@@ -1249,6 +1249,15 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     // watcher. Nonce comes from the bound activation object (never random).
     if (d3v2Selection.selected) {
       alignPolicyFooterSession(d3v2Selection);
+      // R4 performs its exact settings+intent+activation+receipt gate in
+      // before_agent_start immediately before any D3 read. session_start must
+      // not load or create activation state and must not fall through to ADR0039.
+      if (settings.propositionLifecycleFreshnessD3V2SessionStartInjection.r4Binding) {
+        cachedRules = null;
+        captureRulesFooterSetter(ctx);
+        try { ctx?.ui?.setStatus?.(RULE_STATUS_KEY, "🧠 rules: d3-v2 R4 selected (receipt gate pending)"); } catch { /* ignore */ }
+        return;
+      }
       try {
         const cwd = ctx?.cwd || process.cwd();
         const activeProjectId = resolveD3V2SessionStartActiveProjectId({

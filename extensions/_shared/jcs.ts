@@ -45,7 +45,7 @@ function normalize(value: unknown, at: string, omitUndefinedObjectProperties: bo
     if (prototype !== Object.prototype && prototype !== null) {
       throw new Error(`JCS rejects non-plain object at ${at}`);
     }
-    const output: Record<string, JcsJsonValue> = {};
+    const output = Object.create(null) as Record<string, JcsJsonValue>;
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
       assertValidUnicode(key, `${at} key`);
       const child = (value as Record<string, unknown>)[key];
