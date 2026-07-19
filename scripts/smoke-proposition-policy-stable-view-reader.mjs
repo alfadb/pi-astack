@@ -427,6 +427,8 @@ function stageRuleInjector(outRoot) {
     ["extensions/abrain/rule-injector/dualread-audit.ts", "abrain/rule-injector/dualread-audit.js"],
     ["extensions/abrain/rule-injector/proposition-policy-stable-view-reader.ts", "abrain/rule-injector/proposition-policy-stable-view-reader.js"],
     ["extensions/abrain/rule-injector/proposition-policy-stable-view-runtime-audit.ts", "abrain/rule-injector/proposition-policy-stable-view-runtime-audit.js"],
+    ["extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-runtime-audit.ts", "abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-runtime-audit.js"],
+    ["extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-control.ts", "abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-control.js"],
     ["extensions/_shared/footer-status.ts", "_shared/footer-status.js"],
     ["extensions/_shared/runtime.ts", "_shared/runtime.js"],
     ["extensions/_shared/durable-write.ts", "_shared/durable-write.js"],
@@ -434,6 +436,14 @@ function stageRuleInjector(outRoot) {
     ["extensions/_shared/proposition.ts", "_shared/proposition.js"],
     ["extensions/_shared/proposition-policy-stable-view-contract.ts", "_shared/proposition-policy-stable-view-contract.js"],
     ["extensions/_shared/l1-schema-registry.ts", "_shared/l1-schema-registry.js"],
+    ["extensions/_shared/canonical-l2-contract.ts", "_shared/canonical-l2-contract.js"],
+    ["extensions/_shared/retained-directory-ofd-lock.ts", "_shared/retained-directory-ofd-lock.js"],
+    ["extensions/_shared/proposition-lifecycle-freshness-production-core.ts", "_shared/proposition-lifecycle-freshness-production-core.js"],
+    ["extensions/_shared/typescript-static-dependency-graph.ts", "_shared/typescript-static-dependency-graph.js"],
+    ["extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start.ts", "_shared/proposition-lifecycle-freshness-d3-v2-session-start.js"],
+    ["extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-activation.ts", "_shared/proposition-lifecycle-freshness-d3-v2-session-start-activation.js"],
+    ["extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-fence.ts", "_shared/proposition-lifecycle-freshness-d3-v2-session-start-fence.js"],
+    ["extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-rollback.ts", "_shared/proposition-lifecycle-freshness-d3-v2-session-start-rollback.js"],
     ["extensions/memory/parser.ts", "memory/parser.js"],
     ["extensions/memory/direction-impact.ts", "memory/direction-impact.js"],
     ["extensions/memory/utils.ts", "memory/utils.js"],
@@ -443,6 +453,16 @@ function stageRuleInjector(outRoot) {
   ];
   writeFile(path.join(outRoot, "_shared", "pi-internals.js"), `module.exports = {
   isSubAgentSession: (ctx) => ctx && ctx.__subagent === true,
+};\n`);
+  // Default-off D3-v2 adapter pulls typescript only for static graph tooling; fixture never builds manifests.
+  writeFile(path.join(outRoot, "node_modules", "typescript", "package.json"), JSON.stringify({ name: "typescript", main: "index.js" }));
+  writeFile(path.join(outRoot, "node_modules", "typescript", "index.js"), `module.exports = {
+  ScriptTarget: { ES2022: 9 },
+  ModuleKind: { CommonJS: 1, ESNext: 99 },
+  ModuleResolutionKind: { NodeNext: 99 },
+  createSourceFile() { return { statements: [], forEachChild() {} }; },
+  createProgram() { return { getSourceFile() { return null; }, getTypeChecker() { return { getSymbolAtLocation() { return null; } }; } }; },
+  sys: { fileExists() { return false; }, readFile() { return undefined; }, writeFile() {}, resolvePath(p) { return p; } },
 };\n`);
   for (const [source, target] of files) writeFile(path.join(outRoot, target), transpile(path.join(repoRoot, source)));
   fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });

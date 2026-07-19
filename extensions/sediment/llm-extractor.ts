@@ -128,19 +128,24 @@ export interface LlmExtractorAuditSummary {
  *  Trade-off: sanitizing changes bytes → KV cache miss.
  *  If pi's own session sanitizer is confirmed adequate, this can be
  *  disabled via settings.skipContinuationSanitize. */
+function stripThenSanitizeText(text: string): string {
+  // Same strip logic as normal window path: only selected activation nonce.
+  const stripped = stripCurrentRuleInjection(text, getCurrentRuleInjectionNonce());
+  const result = sanitizeForMemory(stripped);
+  return result.ok ? (result.text ?? stripped) : stripped;
+}
+
 function sanitizeContinuationMessages(messages: any[]): any[] {
   return messages.map((m) => {
     const content = m?.content;
     if (!content) return m;
     if (typeof content === "string") {
-      const result = sanitizeForMemory(content);
-      return { ...m, content: result.ok ? (result.text ?? content) : content };
+      return { ...m, content: stripThenSanitizeText(content) };
     }
     if (Array.isArray(content)) {
       const sanitized = content.map((part: any) => {
         if (part?.type === "text" && typeof part.text === "string") {
-          const result = sanitizeForMemory(part.text);
-          return { ...part, text: result.ok ? (result.text ?? part.text) : part.text };
+          return { ...part, text: stripThenSanitizeText(part.text) };
         }
         return part;
       });
@@ -506,8 +511,27 @@ export async function runLlmExtractor(
     //
     // Credential sanitization is controlled by skipContinuationSanitize.
     // Default ON (secure); disable for air-gapped deployments.
+    // Even when credential sanitize is skipped, still strip selected activation
+    // rule fences from provider message text parts (same strip as normal window).
     const messages = deps.settings.skipContinuationSanitize
-      ? (deps.continuationMessages as any[])
+      ? (deps.continuationMessages as any[]).map((m) => {
+          const content = m?.content;
+          if (typeof content === "string") {
+            return { ...m, content: stripCurrentRuleInjection(content, getCurrentRuleInjectionNonce()) };
+          }
+          if (Array.isArray(content)) {
+            return {
+              ...m,
+              content: content.map((part: any) => {
+                if (part?.type === "text" && typeof part.text === "string") {
+                  return { ...part, text: stripCurrentRuleInjection(part.text, getCurrentRuleInjectionNonce()) };
+                }
+                return part;
+              }),
+            };
+          }
+          return m;
+        })
       : sanitizeContinuationMessages(deps.continuationMessages as any[]);
     const continuationPrompt = buildLlmExtractorContinuationInstruction();
     promptChars = continuationPrompt.length; // approximate; messages chars tracked via estimatedTokens

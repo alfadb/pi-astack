@@ -402,7 +402,7 @@ await check("whole-L1 scan rejects non-regular event-tree entries", async () => 
 await check("transition machine schema has stable unique IDs and exact canonical phase authorization", () => {
   const register = transition.loadTransitionRegister();
   const summary = transition.summarizeTransitionRegister(register);
-  assert(summary.total === 34 && summary.active === 31 && summary.gated === 3, JSON.stringify(summary));
+  assert(summary.total === 35 && summary.active === 32 && summary.gated === 3, JSON.stringify(summary));
   assert(Object.isFrozen(register) && Object.isFrozen(register.transitions), "transition register is mutable");
   const canonical = Object.fromEntries(summary.canonicalPath.map((entry) => [entry.id, `${entry.phaseStatus}/${entry.authorizationStatus}`]));
   assert(canonical["canonical_path.p1"] === "completed/authorized", "P1 status/auth mismatch");
@@ -422,9 +422,13 @@ await check("transition machine schema has stable unique IDs and exact canonical
   assert(proposition["proposition.adr0040-p2b-policy-push-stable-view"] === "completed/authorized", "ADR0040 P2b/D3 completion status/auth mismatch");
   const p2b = register.transitions.find((entry) => entry.id === "proposition.adr0040-p2b-policy-push-stable-view");
   assert(p2b.current.includes("D3-PUB") && p2b.current.includes("runtime-inert"), "ADR0040 P2b completion lost the D3-PUB runtime boundary");
-  for (const phase of ["p3-runtime-read-flips", "p4-legacy-authority-retirement"]) {
+  for (const phase of ["p3-d3-v2-session-start", "p3-runtime-read-flips", "p4-legacy-authority-retirement"]) {
     assert(proposition[`proposition.adr0040-${phase}`] === "blocked/separate_authorization_required", `ADR0040 ${phase} status/auth mismatch`);
   }
+  const d3v2 = register.transitions.find((entry) => entry.id === "proposition.adr0040-p3-d3-v2-session-start");
+  assert(d3v2 && d3v2.phase_status === "blocked" && d3v2.authorization_status === "separate_authorization_required", "ADR0040 D3-v2 session_start must remain blocked/separate_authorization_required");
+  // Loader does not expose free-form summary; machine JSON next_action/current still load.
+  assert(d3v2.current && /S0\+S1|execution-ready|session_start/.test(d3v2.current), "ADR0040 D3-v2 session_start current lost S1 execution-ready boundary");
   for (const entry of register.transitions) {
     for (const field of ["entered", "review_by", "exit", "evidence", "owner", "consumer", "renewal_count", "risk_class"]) {
       assert(Object.hasOwn(entry, field), `${entry.id} missing ${field}`);
@@ -456,7 +460,7 @@ await check("deterministic transition CLI and read-only startup consumer are wir
   });
   assert(run.status === 0, run.stderr || `CLI status ${run.status}`);
   const output = JSON.parse(run.stdout);
-  assert(output.total === 34 && output.active === 31 && output.gated === 3 && output.canonicalPath.length === 5, run.stdout);
+  assert(output.total === 35 && output.active === 32 && output.gated === 3 && output.canonicalPath.length === 5, run.stdout);
   const startupSource = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf8");
   assert(startupSource.includes("loadAndValidateTransitionRegister();"), "session startup does not consume machine transition register");
   assert(startupSource.includes("transition register invalid"), "startup validation failure is not surfaced");

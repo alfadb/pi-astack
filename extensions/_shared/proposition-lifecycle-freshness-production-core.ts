@@ -386,6 +386,21 @@ export function readPublishedD3PubSelection(targetRootInput: string): Readonly<R
   const proofArtifacts = validateProductionArtifactSet(proof.artifact_set);
   const proofSource = validateProductionSourceSnapshot(proof.source_snapshot);
   if (proofArtifacts.artifact_set_hash !== head.artifact_set_hash || proofArtifacts.p2a.bundle_hash !== artifactClosure.p2a.bundle_hash || proofArtifacts.stable.bundle_hash !== artifactClosure.stable.bundle_hash || proofSource.snapshot_hash !== head.source_snapshot_hash) fail("D3_PUB_CLOSURE_INVALID", "proof source/artifact bytes differ from selected head and bundles");
+  // Exact-byte compare proof-embedded artifacts against on-disk selected bundles.
+  // Bundle-hash equality alone is insufficient against leaf-level tampering.
+  for (const family of ["p2a", "stable"] as const) {
+    const disk = artifactClosure[family];
+    const embedded = proofArtifacts[family];
+    if (disk.bundle_hash !== embedded.bundle_hash) fail("D3_PUB_CLOSURE_INVALID", `${family} proof/disk bundle_hash differs`);
+    const diskNames = Object.keys(disk.artifacts).sort(compare);
+    const embeddedNames = Object.keys(embedded.artifacts).sort(compare);
+    if (canonicalizeJcs(diskNames) !== canonicalizeJcs(embeddedNames)) fail("D3_PUB_CLOSURE_INVALID", `${family} proof/disk artifact inventory differs`);
+    for (const name of diskNames) {
+      if (disk.artifacts[name] !== embedded.artifacts[name]) {
+        fail("D3_PUB_CLOSURE_INVALID", `${family} proof-embedded artifact differs from disk by exact bytes`, { name });
+      }
+    }
+  }
   return deepFreeze({ head_pointer: hp, selection_pointer: sp, intent, head, proof, selection, artifact_closure: artifactClosure });
 }
 
@@ -712,6 +727,32 @@ function validateProductionArtifactBundle(bundleInput: unknown, family: "p2a" | 
   for (const [name, raw] of Object.entries(artifacts)) if (typeof raw !== "string" || (name.endsWith(".json") && canonicalJson(JSON.parse(raw)) !== raw)) fail("D3_PUB_ARTIFACT_INVALID", `${family} artifact bytes are invalid`, { name });
   const manifest = asRecord(JSON.parse(artifacts["manifest.json"]!), `${family} wrapper manifest`);
   if (manifest.schema_version !== expectedSchema || manifest.authority !== D3_PUB_AUTHORITY || manifest.source_truth !== D3_PUB_SOURCE_TRUTH || manifest.bundle_hash !== bundle.bundle_hash) fail("D3_PUB_ARTIFACT_INVALID", `${family} wrapper authority/source differs`);
+  // Recompute every non-manifest leaf's bytes/raw_sha256 and require exact match
+  // against wrapper artifact_rows. Bundle-hash alone does not catch leaf drift
+  // if a tampered leaf is also reflected into a rehashed wrapper inconsistently
+  // across proof vs disk; this check binds the rows to the leaf payloads.
+  const leafNames = names.filter((name) => name !== "manifest.json");
+  const recomputedRows = leafNames.slice().sort(compare).map((name) => artifactRow(name, artifacts[name]!));
+  const declaredRows = asArray(manifest.artifact_rows, `${family} wrapper artifact_rows`);
+  if (declaredRows.length !== recomputedRows.length) fail("D3_PUB_ARTIFACT_INVALID", `${family} artifact_rows length differs from leaf inventory`);
+  for (const [index, declaredRaw] of declaredRows.entries()) {
+    const declared = asRecord(declaredRaw, `${family} artifact_rows[${index}]`);
+    const expected = recomputedRows[index]!;
+    if (declared.name !== expected.name
+      || Number(declared.bytes) !== expected.bytes
+      || String(declared.raw_sha256) !== expected.raw_sha256) {
+      fail("D3_PUB_ARTIFACT_INVALID", `${family} artifact_rows leaf bytes/hash differ from recomputed leaf`, { name: expected.name });
+    }
+  }
+  if (family === "stable") {
+    const render = asRecord(manifest.render, "stable wrapper render");
+    const viewMd = artifacts["view.md"]!;
+    if (render.name !== "view.md"
+      || Number(render.bytes) !== Buffer.byteLength(viewMd)
+      || String(render.raw_sha256) !== sha256Hex(viewMd)) {
+      fail("D3_PUB_ARTIFACT_INVALID", "stable wrapper render does not rebind view.md bytes");
+    }
+  }
   const base = { ...manifest }; delete base.bundle_hash;
   if (jcsSha256Hex(base) !== bundle.bundle_hash) fail("D3_PUB_ARTIFACT_INVALID", `${family} wrapper self hash differs`);
   return bundle;

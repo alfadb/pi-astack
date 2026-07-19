@@ -162,14 +162,15 @@ function transpileExtensions(outRoot) {
       throw new Error(`Strict parse of ${path.relative(repoRoot, srcPath)} failed: ${err && err.stack ? err.stack : err}`);
     }
     writeFile(outPath, transpiled.outputText);
-    // Keep the staged rule-injector import closure loadable. The stable-view
-    // reader's shared contract is already included by the staged `_shared`
-    // tree; the runtime audit is loaded but its disabled fixture path never
-    // appends an audit row.
+    // Keep the staged rule-injector import closure loadable. Shared D3-v2
+    // modules are already included by the staged `_shared` tree; disabled
+    // fixture paths never append either runtime audit.
     for (const leaf of [
       "dualread-audit.ts",
       "proposition-policy-stable-view-reader.ts",
       "proposition-policy-stable-view-runtime-audit.ts",
+      "proposition-lifecycle-freshness-d3-v2-runtime-audit.ts",
+      "proposition-lifecycle-freshness-d3-v2-session-start-control.ts",
     ]) {
       const leafSrcPath = path.join(extRoot, "abrain", "rule-injector", leaf);
       const leafOutPath = path.join(outRoot, "abrain", "rule-injector", leaf.replace(/\.ts$/, ".js"));
@@ -212,6 +213,18 @@ function transpileExtensions(outRoot) {
     writeFile(outPath, transpiled.outputText);
     count++;
   }
+
+  // The default-off D3-v2 adapter loads TypeScript only for static graph
+  // tooling; this fixture never builds a manifest.
+  writeFile(path.join(outRoot, "node_modules", "typescript", "package.json"), JSON.stringify({ name: "typescript", main: "index.js" }));
+  writeFile(path.join(outRoot, "node_modules", "typescript", "index.js"), `module.exports = {
+  ScriptTarget: { ES2022: 9 },
+  ModuleKind: { CommonJS: 1, ESNext: 99 },
+  ModuleResolutionKind: { NodeNext: 99 },
+  createSourceFile() { return { statements: [], forEachChild() {} }; },
+  createProgram() { return { getSourceFile() { return null; }, getTypeChecker() { return { getSymbolAtLocation() { return null; } }; } }; },
+  sys: { fileExists() { return false; }, readFile() { return undefined; }, writeFile() {}, resolvePath(p) { return p; } },
+};\n`);
 
   // Minimal typebox subset for registerTool schemas.
   //

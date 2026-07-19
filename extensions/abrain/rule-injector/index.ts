@@ -46,6 +46,20 @@ import {
   appendPropositionPolicyStableViewRuntimeAudit,
   buildPropositionPolicyStableViewRuntimeAuditRow,
 } from "./proposition-policy-stable-view-runtime-audit";
+import {
+  composeD3V2SessionStartInjection,
+  resolveD3V2SessionStartInjectionSettings,
+  selectD3V2SessionStartSession,
+  stripSelectedActivationRuleFence,
+  type D3V2SessionStartInjectionSettings,
+  type D3V2SessionStartRuntimeReadResult,
+} from "../../_shared/proposition-lifecycle-freshness-d3-v2-session-start";
+import {
+  decideD3V2SessionStartControl,
+  resolveSelectedBoundActivation,
+  resolveD3V2SessionStartActivationNonce,
+  resolveD3V2SessionStartActiveProjectId,
+} from "./proposition-lifecycle-freshness-d3-v2-session-start-control";
 
 /** ADR 0028 §12.3: the rules injection-budget axis is INJECT-MODE (values
  *  always/listed), renamed away from "tier" to stop colliding with the GTIER
@@ -77,6 +91,7 @@ export interface RuleInjectorSettings {
   dualReadAudit: RuleInjectorDualReadAuditSettings;
   compiledViewInjection: RuleInjectorCompiledViewInjectionSettings;
   propositionPolicyStableViewInjection: PropositionPolicyStableViewInjectionSettings;
+  propositionLifecycleFreshnessD3V2SessionStartInjection: D3V2SessionStartInjectionSettings;
 }
 
 export interface RuleEntry {
@@ -133,8 +148,6 @@ export const BEGIN_ABRAIN_RULES = "<!-- BEGIN_ABRAIN_RULES";
 export const END_ABRAIN_RULES = "<!-- END_ABRAIN_RULES -->";
 export const RULE_STATUS_KEY = FOOTER_STATUS_KEYS.abrainRules;
 
-const RULE_FENCE_RE = /<!-- BEGIN_ABRAIN_RULES session=([0-9a-f]+)[^>]*-->[\s\S]*?<!-- END_ABRAIN_RULES -->/g;
-
 const DEFAULT_COMPILED_VIEW_LIVE_CANARY: RuleInjectorCompiledViewLiveCanarySettings = {
   enabled: false,
   sessionIds: [],
@@ -157,6 +170,7 @@ const DEFAULT_SETTINGS: RuleInjectorSettings = {
   dualReadAudit: resolveRuleInjectorDualReadAuditSettings(undefined),
   compiledViewInjection: DEFAULT_COMPILED_VIEW_INJECTION,
   propositionPolicyStableViewInjection: resolvePropositionPolicyStableViewInjectionSettings(undefined),
+  propositionLifecycleFreshnessD3V2SessionStartInjection: resolveD3V2SessionStartInjectionSettings(undefined),
 };
 
 let cachedRules: RuleScanCache | null = null;
@@ -290,6 +304,9 @@ export function resolveRuleInjectorSettings(): RuleInjectorSettings {
     dualReadAudit: resolveRuleInjectorDualReadAuditSettings(cfg.dualReadAudit),
     compiledViewInjection: resolveCompiledViewInjectionSettings(cfg.compiledViewInjection),
     propositionPolicyStableViewInjection: resolvePropositionPolicyStableViewInjectionSettings(cfg.propositionPolicyStableViewInjection),
+    propositionLifecycleFreshnessD3V2SessionStartInjection: resolveD3V2SessionStartInjectionSettings(
+      cfg.propositionLifecycleFreshnessD3V2SessionStartInjection,
+    ),
   };
 }
 
@@ -570,6 +587,8 @@ export function composePropositionPolicyStableViewInjection(
 ): string {
   return `${BEGIN_ABRAIN_RULES} session=${nonce} source=proposition-policy-stable-view bundle=${result.bundleHash} (auto-managed by sediment, do not edit by hand) -->\n${result.viewMd}${END_ABRAIN_RULES}`;
 }
+
+export { composeD3V2SessionStartInjection };
 
 type CompiledRuleCounts = { always: number; listed: number; total: number };
 
@@ -903,10 +922,10 @@ export function decideRuntimeRuleInjection(args: {
 
 
 export function stripCurrentRuleInjection(text: string, nonce: string | undefined | null): string {
-  if (!text || !nonce) return text;
-  return text.replace(RULE_FENCE_RE, (match, seenNonce) => {
-    return seenNonce === nonce ? "\n[ABRAIN_RULES_SECTION_REMOVED]\n" : match;
-  });
+  // Shared strip used by context-packer + llm-extractor (normal window and
+  // continuation text parts). Only the selected activation nonce is removed;
+  // unselected/foreign markers remain byte-stable evidence.
+  return stripSelectedActivationRuleFence(text, nonce);
 }
 
 export function getCurrentRuleInjectionNonce(): string | undefined {
@@ -964,7 +983,7 @@ function runtimeResultFooterText(
   return detail ? `${legacy} (${detail})` : legacy;
 }
 
-function alignPolicyFooterSession(selection: PropositionPolicyStableViewSelection): void {
+function alignPolicyFooterSession(selection: { selected: boolean; sessionId?: string }): void {
   if (!selection.selected || !selection.sessionId) {
     policyFooterState = null;
     return;
@@ -982,20 +1001,32 @@ function setPolicyStableFooter(
   };
 }
 
+function setD3V2SessionStartFooter(
+  result: Extract<D3V2SessionStartRuntimeReadResult, { ok: true }>,
+): void {
+  const itemLabel = result.itemCount === 1 ? "item" : "items";
+  policyFooterState = {
+    sessionId: result.sessionId,
+    text: `🧠 rules: d3-v2 ${result.itemCount} ${itemLabel} (${result.viewBytes} B, selection ${result.selectionHash.slice(0, 8)}…)`,
+  };
+}
+
 function setPolicyFallbackFooter(args: {
-  selection: PropositionPolicyStableViewSelection;
+  selection: { selected: boolean; sessionId?: string };
   reason: string;
   cache: RuleScanCache | null;
   normalResult?: RuntimeRuleInjectionResult;
   detail?: string;
+  label?: string;
 }): void {
   if (!args.selection.selected || !args.selection.sessionId) return;
   const normalText = args.normalResult
     ? runtimeResultFooterText(args.cache, args.normalResult, args.detail)
     : legacyFooterText(args.cache);
+  const label = args.label ?? "policy fallback";
   policyFooterState = {
     sessionId: args.selection.sessionId,
-    text: `${normalText}; policy fallback: ${args.reason}`,
+    text: `${normalText}; ${label}: ${args.reason}`,
   };
 }
 
@@ -1209,6 +1240,55 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     // is main-session-only.
     if (isSubAgentSession(ctx)) return;
 
+    const d3v2Selection = selectD3V2SessionStartSession({
+      settings: settings.propositionLifecycleFreshnessD3V2SessionStartInjection,
+      sessionManager: ctx?.sessionManager,
+    });
+
+    // Selected v2 early divert: no legacy scan, no dual-read, no project-rule
+    // watcher. Nonce comes from the bound activation object (never random).
+    if (d3v2Selection.selected) {
+      alignPolicyFooterSession(d3v2Selection);
+      try {
+        const cwd = ctx?.cwd || process.cwd();
+        const activeProjectId = resolveD3V2SessionStartActiveProjectId({
+          abrainHome: ABRAIN_HOME,
+          cwd,
+        });
+        const loaded = resolveSelectedBoundActivation({
+          settings: settings.propositionLifecycleFreshnessD3V2SessionStartInjection,
+        });
+        if (!loaded.ok) {
+          cachedRules = null;
+          try { ctx?.ui?.setStatus?.(RULE_STATUS_KEY, `⚠️ d3-v2: ${loaded.reason.slice(0, 40)}`); } catch { /* ignore */ }
+          return;
+        }
+        const nonce = resolveD3V2SessionStartActivationNonce(loaded.activation);
+        // Minimal cache so footer helpers / strip use the activation nonce; no scan.
+        cachedRules = {
+          abrainHome: ABRAIN_HOME,
+          cwd: path.resolve(cwd),
+          nonce,
+          globalAlways: [],
+          globalListed: [],
+          projectAlways: [],
+          projectListed: [],
+          warnings: [],
+          scannedAt: new Date().toISOString(),
+          ...(activeProjectId ? { activeProjectId } : {}),
+        };
+        captureRulesFooterSetter(ctx);
+        try {
+          ctx?.ui?.setStatus?.(RULE_STATUS_KEY, "🧠 rules: d3-v2 selected (pending turn)");
+        } catch { /* ignore */ }
+      } catch (e: unknown) {
+        cachedRules = null;
+        const msg = e instanceof Error ? e.message : String(e);
+        try { ctx?.ui?.setStatus?.(RULE_STATUS_KEY, `⚠️ d3-v2: ${msg.slice(0, 40)}`); } catch { /* ignore */ }
+      }
+      return;
+    }
+
     const propositionSelection = selectPropositionPolicyStableViewSession({
       settings: settings.propositionPolicyStableViewInjection,
       sessionManager: ctx?.sessionManager,
@@ -1253,22 +1333,87 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     if (isSubAgentSession(ctx)) return undefined;
 
     const current = event.systemPrompt ?? "";
+    const cwd = ctx?.cwd || process.cwd();
+
+    // Selected v2 early divert via dedicated control module. Any failure is
+    // zero-injection with no v1/compiled/legacy fallback. Foreign/malformed
+    // fences are sanitized in-memory only.
+    const d3v2RepoRoot = process.env.PI_ASTACK_D3V2_REPO_ROOT
+      ? path.resolve(process.env.PI_ASTACK_D3V2_REPO_ROOT)
+      : path.resolve(path.join(__dirname, "..", "..", ".."));
+    const d3v2Decision = decideD3V2SessionStartControl({
+      repoRoot: d3v2RepoRoot,
+      abrainHome: ABRAIN_HOME,
+      cwd,
+      settings: settings.propositionLifecycleFreshnessD3V2SessionStartInjection,
+      sessionManager: ctx?.sessionManager,
+      currentSystemPrompt: current,
+      latestUserText: typeof event.prompt === "string" ? event.prompt : "",
+      ...(process.env.PI_ASTACK_D3V2_CONTROL_ROOT
+        ? { controlRoot: process.env.PI_ASTACK_D3V2_CONTROL_ROOT }
+        : {}),
+      ...(process.env.PI_ASTACK_D3V2_AUDIT_FILE
+        ? { auditFile: process.env.PI_ASTACK_D3V2_AUDIT_FILE }
+        : {}),
+      ...(process.env.PI_ASTACK_D3V2_ACTIVATION_ROOT
+        ? { activationRoot: process.env.PI_ASTACK_D3V2_ACTIVATION_ROOT }
+        : {}),
+    });
+    if (d3v2Decision.kind !== "unselected") {
+      alignPolicyFooterSession(d3v2Decision.selection);
+      if (d3v2Decision.kind === "selected_injected") {
+        // Keep cachedRules.nonce identical to fence/audit activation_nonce.
+        if (cachedRules) cachedRules.nonce = d3v2Decision.activationNonce;
+        else {
+          cachedRules = {
+            abrainHome: ABRAIN_HOME,
+            cwd: path.resolve(cwd),
+            nonce: d3v2Decision.activationNonce,
+            globalAlways: [],
+            globalListed: [],
+            projectAlways: [],
+            projectListed: [],
+            warnings: [],
+            scannedAt: new Date().toISOString(),
+          };
+        }
+        setD3V2SessionStartFooter(d3v2Decision.result);
+        try {
+          ctx?.ui?.setStatus?.(RULE_STATUS_KEY,
+            `🧠 rules: d3-v2 ${d3v2Decision.result.itemCount} item(s) (${d3v2Decision.result.viewBytes} B)`);
+        } catch { /* ignore */ }
+        return { systemPrompt: d3v2Decision.systemPrompt };
+      }
+      // selected_zero_injection — fail closed, no fallback.
+      // If sanitized systemPrompt is present it MUST be returned (foreign/malformed cleanup).
+      if (d3v2Decision.activationNonce && cachedRules) {
+        cachedRules.nonce = d3v2Decision.activationNonce;
+      }
+      try {
+        ctx?.ui?.setStatus?.(RULE_STATUS_KEY, `⚠️ d3-v2 zero-inject: ${d3v2Decision.reason.slice(0, 48)}`);
+      } catch { /* ignore */ }
+      if (d3v2Decision.audit && !d3v2Decision.audit.ok) {
+        try { console.error(`pi-astack: ADR0040 D3-v2 runtime audit write failed: ${d3v2Decision.audit.error}`); } catch { /* best-effort */ }
+      }
+      if (typeof d3v2Decision.systemPrompt === "string") {
+        return { systemPrompt: d3v2Decision.systemPrompt };
+      }
+      return undefined;
+    }
+
     const propositionSelection = selectPropositionPolicyStableViewSession({
       settings: settings.propositionPolicyStableViewInjection,
       sessionManager: ctx?.sessionManager,
     });
     alignPolicyFooterSession(propositionSelection);
     const runtime = resolveRuntimeRuleInjectorSettings(settings, ctx);
-    const appendRuntimeAudit = (args: {
+    const appendV1RuntimeAudit = (args: {
       decision: "policy_stable_view_injected" | "normal_path_fallback";
       reason: string;
       renderedPrompt: string;
       stableView?: Extract<PropositionPolicyStableViewRuntimeReadResult, { ok: true }>;
     }): void => {
       if (!propositionSelection.selected || !propositionSelection.sessionId) return;
-      // Pi exposes the expanded user text here, but it appends the current user
-      // message to SessionManager only after all before_agent_start handlers.
-      // The current message-entry id is therefore unavailable at this hook.
       const audit = appendPropositionPolicyStableViewRuntimeAudit(buildPropositionPolicyStableViewRuntimeAuditRow({
         sessionId: propositionSelection.sessionId,
         latestUserText: typeof event.prompt === "string" ? event.prompt : "",
@@ -1283,7 +1428,7 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       }
     };
     if (current.includes(BEGIN_ABRAIN_RULES)) {
-      appendRuntimeAudit({
+      appendV1RuntimeAudit({
         decision: current.includes("source=proposition-policy-stable-view")
           ? "policy_stable_view_injected"
           : "normal_path_fallback",
@@ -1293,9 +1438,9 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       setFooterStatus(ctx, cachedRules, runtime.settings);
       return undefined;
     }
-    if (!cachedRules || path.resolve(ctx?.cwd || process.cwd()) !== cachedRules.cwd) {
+    if (!cachedRules || path.resolve(cwd) !== cachedRules.cwd) {
       try {
-        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtime.settings });
+        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd, settings: runtime.settings });
       } catch {
         cachedRules = null;
         setPolicyFallbackFooter({
@@ -1303,21 +1448,23 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
           reason: "rule_scan_failed",
           cache: null,
         });
+        appendV1RuntimeAudit({ decision: "normal_path_fallback", reason: "rule_scan_failed", renderedPrompt: current });
         setFooterStatus(ctx, null, runtime.settings);
-        appendRuntimeAudit({ decision: "normal_path_fallback", reason: "rule_scan_failed", renderedPrompt: current });
         return undefined;
       }
     }
+
+    let finalPrompt = current;
+    let handlerResult: { systemPrompt: string } | undefined;
+    let normalResult: RuntimeRuleInjectionResult | undefined;
+    let footerDetail: string | undefined;
+
     const propositionStableView = readPropositionPolicyStableViewForRuntime({
       abrainHome: cachedRules.abrainHome,
       settings: settings.propositionPolicyStableViewInjection,
       sessionManager: ctx?.sessionManager,
       activeProjectId: cachedRules.activeProjectId,
     });
-    let finalPrompt = current;
-    let handlerResult: { systemPrompt: string } | undefined;
-    let normalResult: RuntimeRuleInjectionResult | undefined;
-    let footerDetail: string | undefined;
     let auditDecision: "policy_stable_view_injected" | "normal_path_fallback" = "normal_path_fallback";
     if (propositionStableView.ok) {
       const injection = composePropositionPolicyStableViewInjection(cachedRules.nonce, propositionStableView);
@@ -1352,7 +1499,7 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       });
     }
     setFooterStatus(ctx, cachedRules, runtime.settings, footerDetail);
-    appendRuntimeAudit({
+    appendV1RuntimeAudit({
       decision: auditDecision,
       reason: propositionStableView.reason,
       renderedPrompt: finalPrompt,

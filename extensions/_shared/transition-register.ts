@@ -65,6 +65,7 @@ const HUMAN_SECTIONS = Object.freeze([
   "Canonical path 阶段门",
   "已就绪待决策",
   "滞留需推进",
+  "已收口",
   "健康 gated-defer",
 ]);
 const PHASE_STATUSES = Object.freeze([
