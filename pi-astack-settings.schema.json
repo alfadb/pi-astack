@@ -1769,17 +1769,17 @@
         "taskGovernor": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Deterministic per-worker tool-call budget for dispatch/workflow bounded workers. This does not apply to the main session and does not call an LLM audit. Checkpoint, auditPause, and freshAuth emit non-terminal audit/progress events; hard aborts the sub-agent and returns partial output.",
+          "description": "Deterministic per-worker tool-call audit thresholds for dispatch/workflow workers. This does not apply to the main session and does not call an LLM audit. Checkpoint, auditPause, and freshAuth each emit one non-terminal audit/progress event; cumulative tool-call count never terminates a worker.",
           "properties": {
             "enabled": {
               "type": "boolean",
               "default": true,
-              "description": "Kill switch for deterministic sub-agent task budgets. Default true."
+              "description": "Kill switch for deterministic sub-agent tool-count audit stages. Default true."
             },
             "profiles": {
               "type": "object",
               "additionalProperties": false,
-              "description": "Optional overrides for per-profile tool-call limits. Omitted profiles use runtime defaults.",
+              "description": "Optional overrides for per-profile non-terminal tool-call thresholds. Omitted profiles use runtime defaults.",
               "properties": {
                 "read_only": { "$ref": "#/definitions/dispatchTaskGovernorLimits" },
                 "research": { "$ref": "#/definitions/dispatchTaskGovernorLimits" },
@@ -1787,10 +1787,10 @@
                 "mutating_default": { "$ref": "#/definitions/dispatchTaskGovernorLimits" }
               },
               "default": {
-                "read_only": { "checkpoint": 60, "auditPause": 90, "freshAuth": 120, "hard": 180 },
-                "research": { "checkpoint": 80, "auditPause": 120, "freshAuth": 160, "hard": 240 },
-                "implementation": { "checkpoint": 120, "auditPause": 180, "freshAuth": 240, "hard": 360 },
-                "mutating_default": { "checkpoint": 60, "auditPause": 100, "hard": 120 }
+                "read_only": { "checkpoint": 60, "auditPause": 90, "freshAuth": 120 },
+                "research": { "checkpoint": 80, "auditPause": 120, "freshAuth": 160 },
+                "implementation": { "checkpoint": 120, "auditPause": 180, "freshAuth": 240 },
+                "mutating_default": { "checkpoint": 60, "auditPause": 100, "freshAuth": 120 }
               }
             }
           }
@@ -2009,12 +2009,11 @@
     "dispatchTaskGovernorLimits": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Tool-call thresholds for a dispatch task-governor profile. checkpoint, auditPause, and freshAuth are non-terminal audit/progress checkpoints emitted once per run. hard is a terminal budget-exceeded stop.",
+      "description": "Non-terminal tool-call audit thresholds for a dispatch task-governor profile. checkpoint, auditPause, and freshAuth are each emitted once per run; counts above the final threshold remain audit-only.",
       "properties": {
         "checkpoint": { "type": "integer", "minimum": 1 },
         "auditPause": { "type": "integer", "minimum": 1 },
-        "freshAuth": { "type": "integer", "minimum": 1 },
-        "hard": { "type": "integer", "minimum": 1 }
+        "freshAuth": { "type": "integer", "minimum": 1 }
       }
     }
   }

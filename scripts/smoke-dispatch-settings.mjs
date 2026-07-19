@@ -147,6 +147,27 @@ check("valid override is honored", () => {
   }
 });
 
+check("taskGovernor exposes only three non-terminal thresholds and ignores legacy hard input", () => {
+  const schema = JSON.parse(schemaText);
+  const taskGovernorSchema = schema.properties.dispatch.properties.taskGovernor;
+  const limitsSchema = schema.definitions.dispatchTaskGovernorLimits;
+  if ("hard" in limitsSchema.properties) throw new Error("active task-governor schema still exposes hard");
+  if (JSON.stringify(Object.keys(limitsSchema.properties).sort()) !== JSON.stringify(["auditPause", "checkpoint", "freshAuth"])) {
+    throw new Error(`unexpected task-governor thresholds: ${JSON.stringify(limitsSchema.properties)}`);
+  }
+  for (const [profile, limits] of Object.entries(taskGovernorSchema.properties.profiles.default)) {
+    if ("hard" in limits || typeof limits.freshAuth !== "number") {
+      throw new Error(`profile ${profile} does not use the three-stage audit contract: ${JSON.stringify(limits)}`);
+    }
+  }
+  const resolved = resolveDispatchSettings({ dispatch: { taskGovernor: { profiles: {
+    read_only: { checkpoint: 11, auditPause: 22, freshAuth: 33, hard: 1 },
+  } } } });
+  if (JSON.stringify(resolved.taskGovernor.profiles.read_only) !== JSON.stringify({ checkpoint: 11, auditPause: 22, freshAuth: 33 })) {
+    throw new Error(`legacy hard affected runtime resolution: ${JSON.stringify(resolved.taskGovernor.profiles.read_only)}`);
+  }
+});
+
 check("workerRunGovernor defaults are enabled and bounded", () => {
   const cfg = resolveDispatchSettings({}).workerRunGovernor;
   if (!cfg.enabled || !cfg.visibleText.enabled || !cfg.visibleText.abortOnRepeat || !cfg.providerBudgets.enabled || !cfg.toolObservers.enabled) {

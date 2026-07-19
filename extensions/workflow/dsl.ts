@@ -26,10 +26,15 @@
  * that is PR-10 (after the dispatch shared-runner API extraction).
  */
 
+import {
+  resolveDispatchTaskProfileAliases,
+  type DispatchTaskProfile,
+} from "../dispatch/task-profile";
+
 export const WORKFLOW_SCHEMA_VERSION = 1 as const;
 
 /** Mirrors extensions/dispatch/index.ts MAX_CONCURRENCY (=4). This module
- *  stays dispatch-free so smoke can import it without the pi SDK; drift is
+ *  stays pi-SDK-free so smoke can import it without the pi SDK; drift is
  *  closed by (a) the production call site (workflow/index.ts) clamping to
  *  min(WORKFLOW_MAX_CONCURRENCY, dispatch.MAX_CONCURRENCY) and (b) a
  *  literal-equality lock in smoke-workflow-executor.mjs. */
@@ -67,8 +72,8 @@ export interface WorkflowStage {
   thinking?: string;
   prompt?: string;
   tools?: string[];
-  taskProfile?: string;
-  profile?: string;
+  taskProfile?: DispatchTaskProfile;
+  profile?: DispatchTaskProfile;
   mutating?: boolean;
   needs?: string[];
   on_fail?: OnFail;
@@ -171,12 +176,10 @@ export function validateWorkflow(doc: WorkflowDoc, opts: { readOnly: boolean }):
   const mutatingStages: string[] = [];
 
   const validateToolsAndFlags = (s: WorkflowStage, where: string) => {
-    const rawProfile = s.taskProfile ?? s.profile;
-    if (rawProfile !== undefined) {
-      const p = typeof rawProfile === "string" ? rawProfile.trim().toLowerCase().replace(/[ -]/g, "_") : "";
-      if (!["read_only", "readonly", "reviewer", "review", "research", "implementation", "heavy"].includes(p)) {
-        err(`${where}: taskProfile/profile must be one of reviewer/read_only, research, implementation, or heavy`);
-      }
+    try {
+      resolveDispatchTaskProfileAliases(s.taskProfile, s.profile);
+    } catch (error) {
+      err(`${where}: ${error instanceof Error ? error.message : String(error)}`);
     }
     let hasMutatingTool = false;
     if (s.tools !== undefined) {

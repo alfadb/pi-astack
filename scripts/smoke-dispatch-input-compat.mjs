@@ -71,10 +71,12 @@ function loadModuleFromString(code, fakePath) {
 }
 
 const inputCompatSrc = path.join(repoRoot, "extensions/dispatch/input-compat.ts");
+const taskProfileSrc = path.join(repoRoot, "extensions/dispatch/task-profile.ts");
 const compiled = transpileTsToCjs(inputCompatSrc);
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-input-compat-"));
 const tmpFile = path.join(tmpDir, "input-compat.cjs");
 fs.writeFileSync(tmpFile, compiled);
+fs.writeFileSync(path.join(tmpDir, "task-profile.js"), transpileTsToCjs(taskProfileSrc));
 const { coerceTasksParam, normalizeTaskSpec } = loadModuleFromString(
   compiled,
   tmpFile,
@@ -141,6 +143,37 @@ check("undefined input returns []", () => {
 check("normalizeTaskSpec preserves optional tool-block display name", () => {
   const r = normalizeTaskSpec({ model: "provider-a/model-a", thinking: "high", prompt: "hi", name: "schema audit" });
   if (r.name !== "schema audit") throw new Error(`name lost: ${JSON.stringify(r)}`);
+});
+
+for (const profile of ["reviewer", "read_only", "research", "implementation", "heavy"]) {
+  check(`normalizeTaskSpec accepts legal profile ${profile}`, () => {
+    const r = normalizeTaskSpec({ model: "x/y", prompt: "p", taskProfile: profile });
+    if (r.taskProfile !== profile) throw new Error(`profile changed: ${JSON.stringify(r)}`);
+  });
+}
+
+for (const profile of ["reviewer/read_only", "implementation/heavy", "review", "readonly"]) {
+  check(`normalizeTaskSpec rejects illegal profile ${profile}`, () => {
+    let error;
+    try { normalizeTaskSpec({ model: "x/y", prompt: "p", taskProfile: profile }); } catch (caught) { error = caught; }
+    if (!error) throw new Error("expected profile rejection");
+  });
+}
+
+check("illegal taskProfile does not silently override legal profile alias", () => {
+  let error;
+  try {
+    normalizeTaskSpec({ model: "x/y", prompt: "p", taskProfile: "reviewer/read_only", profile: "research" });
+  } catch (caught) { error = caught; }
+  if (!error) throw new Error("expected invalid primary field rejection");
+});
+
+check("conflicting legal taskProfile/profile aliases are rejected", () => {
+  let error;
+  try {
+    normalizeTaskSpec({ model: "x/y", prompt: "p", taskProfile: "research", profile: "heavy" });
+  } catch (caught) { error = caught; }
+  if (!error) throw new Error("expected alias conflict rejection");
 });
 
 // ── prepareArguments behavior under the bug payload ─────────────

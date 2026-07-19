@@ -11,6 +11,11 @@
  *  - task array coercion (single task → [task])
  */
 
+import {
+  resolveDispatchTaskProfileAliases,
+  type DispatchTaskProfile,
+} from "./task-profile";
+
 // ── types ──────────────────────────────────────────────────────
 
 export interface TaskSpec {
@@ -22,7 +27,7 @@ export interface TaskSpec {
   role?: string;
   tools?: string;
   timeoutMs?: number;
-  taskProfile?: string;
+  taskProfile?: DispatchTaskProfile;
 }
 
 // ── core: unwrap stringified values ────────────────────────────
@@ -94,7 +99,7 @@ export function normalizeTaskSpec(raw: unknown): TaskSpec {
     role: t.role ? String(t.role) : undefined,
     tools: normalizeTools(t.tools),
     timeoutMs: normalizeTimeout(t.timeoutMs),
-    taskProfile: typeof t.taskProfile === "string" ? t.taskProfile : (typeof t.profile === "string" ? t.profile : undefined),
+    taskProfile: resolveDispatchTaskProfileAliases(t.taskProfile, t.profile),
   };
 }
 

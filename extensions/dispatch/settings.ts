@@ -12,13 +12,12 @@ import {
 
 export type DispatchTaskGovernorProfile = "read_only" | "research" | "implementation" | "mutating_default";
 
-export type DispatchTaskGovernorStage = "checkpoint" | "audit_pause" | "fresh_auth" | "hard";
+export type DispatchTaskGovernorStage = "checkpoint" | "audit_pause" | "fresh_auth";
 
 export interface DispatchTaskGovernorLimits {
   checkpoint: number;
   auditPause: number;
-  freshAuth?: number;
-  hard: number;
+  freshAuth: number;
 }
 
 export interface DispatchTaskGovernorSettings {
@@ -34,10 +33,10 @@ export interface DispatchSettings {
 }
 
 export const DEFAULT_TASK_GOVERNOR_PROFILES: Record<DispatchTaskGovernorProfile, DispatchTaskGovernorLimits> = {
-  read_only: { checkpoint: 60, auditPause: 90, freshAuth: 120, hard: 180 },
-  research: { checkpoint: 80, auditPause: 120, freshAuth: 160, hard: 240 },
-  implementation: { checkpoint: 120, auditPause: 180, freshAuth: 240, hard: 360 },
-  mutating_default: { checkpoint: 60, auditPause: 100, hard: 120 },
+  read_only: { checkpoint: 60, auditPause: 90, freshAuth: 120 },
+  research: { checkpoint: 80, auditPause: 120, freshAuth: 160 },
+  implementation: { checkpoint: 120, auditPause: 180, freshAuth: 240 },
+  mutating_default: { checkpoint: 60, auditPause: 100, freshAuth: 120 },
 };
 
 export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
@@ -195,10 +194,7 @@ function resolveTaskGovernor(raw: unknown): DispatchTaskGovernorSettings {
     profiles[profile] = {
       checkpoint: asPositiveBudget(rawLimits.checkpoint, fallback.checkpoint),
       auditPause: asPositiveBudget(rawLimits.auditPause, fallback.auditPause),
-      ...(fallback.freshAuth !== undefined || rawLimits.freshAuth !== undefined
-        ? { freshAuth: asPositiveBudget(rawLimits.freshAuth, fallback.freshAuth ?? fallback.hard) }
-        : {}),
-      hard: asPositiveBudget(rawLimits.hard, fallback.hard),
+      freshAuth: asPositiveBudget(rawLimits.freshAuth, fallback.freshAuth),
     };
   }
   return {

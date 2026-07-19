@@ -207,7 +207,6 @@ export const NON_RETRYABLE_GOVERNANCE_FAILURES = new Set([
   "empty_visible_retry_budget_exceeded",
   "full_output_cap_budget_exceeded",
   "guardrail_stop",
-  "tool_budget_exceeded",
 ]);
 
 export function isNonRetryableGovernanceFailure(failureType: string | undefined): boolean {

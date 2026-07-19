@@ -398,12 +398,13 @@ check("ordinary stop at usage ratio remains a full-cap hit", D.isFullOutputCapHi
 check("explicit length and max_tokens remain full-cap hits without usage", D.isFullOutputCapHit("length", undefined, undefined, 0.98) && D.isFullOutputCapHit("max_tokens", undefined, undefined, 0.98));
 
 const taskGovernor = new G.WorkerRunGovernor("task-run", "implementation", defaults);
-const checkpoint = taskGovernor.observe({ signal: "task_governor_checkpoint", count: 120, limit: 120, terminal: false });
-const freshAuth = taskGovernor.observe({ signal: "task_governor_fresh_auth", count: 240, limit: 240, terminal: false, action: "audit_fresh_auth_due_continue_to_hard" });
-const hard = taskGovernor.observe({ signal: "task_governor_hard", count: 360, limit: 360, terminal: true, failureType: "tool_budget_exceeded" });
-const afterHard = taskGovernor.observe({ signal: "provider_retry" });
-check("fresh_auth is observe-only and hard remains the unified terminal", checkpoint?.mode === "observe" && freshAuth?.mode === "observe" && freshAuth.failureType === undefined && freshAuth.action === "audit_fresh_auth_due_continue_to_hard" && hard?.mode === "abort" && hard.termination_source === "worker_run_governor");
-check("first terminal wins idempotently", taskGovernor.terminalDecision === hard && afterHard === undefined);
+const checkpoint = taskGovernor.observe({ signal: "task_governor_checkpoint", count: 120, limit: 120 });
+const auditPause = taskGovernor.observe({ signal: "task_governor_audit_pause", count: 180, limit: 180 });
+const freshAuth = taskGovernor.observe({ signal: "task_governor_fresh_auth", count: 240, limit: 240, action: "audit_fresh_auth_due_no_total_tool_limit" });
+for (let i = 0; i < 1000; i++) taskGovernor.observeToolStart("ls", {}, `tool-${i}`);
+check("task-governor stages remain observe-only", checkpoint?.mode === "observe" && auditPause?.mode === "observe" && freshAuth?.mode === "observe" && freshAuth.failureType === undefined && freshAuth.action === "audit_fresh_auth_due_no_total_tool_limit");
+check("1000 cumulative tool calls remain non-terminal and auditable", !taskGovernor.terminalDecision && taskGovernor.snapshot().counters.tool_call_count === 1000, JSON.stringify(taskGovernor.snapshot()));
+check("task-governor stage counters record each emitted stage once", taskGovernor.snapshot().counters.task_governor_checkpoint_count === 1 && taskGovernor.snapshot().counters.task_governor_audit_pause_count === 1 && taskGovernor.snapshot().counters.task_governor_fresh_auth_count === 1, JSON.stringify(taskGovernor.snapshot().counters));
 
 const pagination = new G.WorkerRunGovernor("pagination", "read_only", defaults, root);
 let paginationObservation;

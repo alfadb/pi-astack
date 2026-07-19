@@ -228,6 +228,11 @@ await check("governance terminal is non-retryable and governance fields reach st
   assert(row?.worker_run_governance?.rule_version === "dispatch-worker-run-governor/v2" && row?.worker_run_governance?.terminal?.budget_kind === "consecutive", JSON.stringify(row));
 });
 
+await check("retired cumulative tool budget is not an active workflow governance terminal", async () => {
+  assert(!E.isNonRetryableGovernanceFailure("tool_budget_exceeded"), "retired tool budget must not remain in the active non-retryable set");
+  assert(E.isNonRetryableGovernanceFailure("guardrail_stop"), "historical guardrail result parsing remains supported");
+});
+
 await check("degrade policy preserves bounded governance partial in output file", async () => {
   const runDir = tmpRunDir();
   let calls = 0;

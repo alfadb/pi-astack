@@ -82,6 +82,17 @@ const inputCompatOut = ts.transpileModule(fs.readFileSync(inputCompatSrc, "utf8"
 fs.writeFileSync(path.join(tmpDir, "input-compat.cjs"), inputCompatOut.outputText);
 fs.copyFileSync(path.join(tmpDir, "input-compat.cjs"), path.join(tmpDir, "input-compat.js"));
 
+// Stage the shared task-profile contract imported by both dispatch and input-compat.
+const taskProfileSrc = path.join(repoRoot, "extensions/dispatch/task-profile.ts");
+const taskProfileOut = ts.transpileModule(fs.readFileSync(taskProfileSrc, "utf8"), {
+  compilerOptions: {
+    module: ts.ModuleKind.CommonJS,
+    target: ts.ScriptTarget.ES2022,
+    esModuleInterop: true,
+  },
+});
+fs.writeFileSync(path.join(tmpDir, "task-profile.js"), taskProfileOut.outputText);
+
 // Stage dispatch/settings.ts so the transpiled module can resolve the
 // new live-read concurrency helper.
 const dispatchSettingsSrc = path.join(repoRoot, "extensions/dispatch/settings.ts");

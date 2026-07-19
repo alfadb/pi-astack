@@ -3,8 +3,8 @@
  *
  * One instance owns one and only one governance termination promise. External
  * parent abort and wall-clock timeouts remain lifecycle owners outside this
- * module. Task-governor verdicts, provider budgets, visible repetition, and
- * bounded tool observations enter here as signals; first terminal wins.
+ * module. Task-governor audit stages, provider budgets, visible repetition,
+ * and bounded tool observations enter here as signals; first terminal wins.
  */
 
 import { createHmac, randomBytes } from "node:crypto";
@@ -17,9 +17,7 @@ export type WorkerGovernorFailureType =
   | "repetitive_output"
   | "provider_retry_budget_exceeded"
   | "empty_visible_retry_budget_exceeded"
-  | "full_output_cap_budget_exceeded"
-  | "guardrail_stop"
-  | "tool_budget_exceeded";
+  | "full_output_cap_budget_exceeded";
 
 export type WorkerGovernorSignal =
   | "requested_output_cap"
@@ -32,7 +30,6 @@ export type WorkerGovernorSignal =
   | "task_governor_checkpoint"
   | "task_governor_audit_pause"
   | "task_governor_fresh_auth"
-  | "task_governor_hard"
   | "same_file_small_read_churn"
   | "schema_error_storm";
 
@@ -53,7 +50,6 @@ export interface WorkerRunGovernorCounters {
   task_governor_checkpoint_count: number;
   task_governor_audit_pause_count: number;
   task_governor_fresh_auth_count: number;
-  task_governor_hard_count: number;
 }
 
 export interface WorkerRunGovernorThresholds {
@@ -221,7 +217,6 @@ export interface WorkerGovernorSignalInput {
   signal: WorkerGovernorSignal;
   count?: number;
   limit?: number;
-  terminal?: boolean;
   failureType?: WorkerGovernorFailureType;
   action?: string;
   hash?: string;
@@ -254,7 +249,6 @@ function freshCounters(): WorkerRunGovernorCounters {
     task_governor_checkpoint_count: 0,
     task_governor_audit_pause_count: 0,
     task_governor_fresh_auth_count: 0,
-    task_governor_hard_count: 0,
   };
 }
 
@@ -396,7 +390,7 @@ export class WorkerRunGovernor {
 
     let count = input.count ?? this.countForSignal(input.signal);
     let limit = input.limit;
-    let terminal = input.terminal === true;
+    let terminal = false;
     let failureType = input.failureType;
     let budgetKind: WorkerRunGovernorDecision["budget_kind"];
     let windowSize: number | undefined;
@@ -435,13 +429,6 @@ export class WorkerRunGovernor {
       terminal = this.settings.enabled && this.settings.visibleText.enabled && this.settings.visibleText.abortOnRepeat;
       if (terminal) failureType = "repetitive_output";
     }
-    if (input.signal.startsWith("task_governor_") && input.terminal === true) {
-      // Existing task-governor enablement is evaluated by its caller. This
-      // preserves old settings compatibility even if new Phase-1 signals are
-      // otherwise disabled.
-      terminal = true;
-    }
-
     const decision: WorkerRunGovernorDecision = {
       worker_run_id: this.workerRunId,
       rule_version: WORKER_RUN_GOVERNOR_RULE_VERSION,
@@ -588,7 +575,6 @@ export class WorkerRunGovernor {
       case "task_governor_checkpoint": this.counters.task_governor_checkpoint_count++; break;
       case "task_governor_audit_pause": this.counters.task_governor_audit_pause_count++; break;
       case "task_governor_fresh_auth": this.counters.task_governor_fresh_auth_count++; break;
-      case "task_governor_hard": this.counters.task_governor_hard_count++; break;
     }
   }
 
@@ -604,7 +590,6 @@ export class WorkerRunGovernor {
       case "task_governor_checkpoint": return this.counters.task_governor_checkpoint_count;
       case "task_governor_audit_pause": return this.counters.task_governor_audit_pause_count;
       case "task_governor_fresh_auth": return this.counters.task_governor_fresh_auth_count;
-      case "task_governor_hard": return this.counters.task_governor_hard_count;
       default: return undefined;
     }
   }
