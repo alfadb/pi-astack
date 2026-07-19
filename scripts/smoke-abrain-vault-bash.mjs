@@ -56,6 +56,10 @@ fs.writeFileSync(
   path.join(sharedDir, "causal-anchor.js"),
   "exports.getCurrentAnchor = () => undefined;\nexports.spreadAnchor = () => ({});\n",
 );
+fs.writeFileSync(
+  path.join(sharedDir, "runtime.js"),
+  "exports.computeAbrainStateGitignoreNext = (raw) => /(^|\\n)\\.state\\/?(\\n|$)/.test(raw) ? null : `${raw}${raw && !raw.endsWith('\\n') ? '\\n' : ''}.state/\\n`;\n",
+);
 // ADR 0019: vault-reader.ts + keychain.ts now import from ./backend-detect.
 for (const file of ["backend-detect", "vault-bash", "vault-reader", "vault-writer", "keychain"]) {
   fs.writeFileSync(path.join(moduleDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));

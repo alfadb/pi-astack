@@ -694,9 +694,11 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       });
       return;
     }
-    // Thread the exact trigger evidence, new projection envelope, and L2 view
-    // into one canonical transaction. Enabled mode never infers this cohort
-    // from status or a directory sweep.
+    // The successful compile above is the first canonical worktree mutation
+    // in this lane; earlier writes are ignored .state locks/markers/audit only.
+    // Thread its exact trigger evidence, projection envelope, and L2 view into
+    // the immediately following commitAbrainDerivedOutputs startup/drain
+    // barrier. Enabled mode never infers this cohort from status or a sweep.
     const producedFilePaths: string[] = [];
     const sourceEventIds = await projectionInputEventIds(trigger.abrainHome, result.l2Projection, triggerEventIds(trigger));
     if (sourceEventIds.some((eventId) => !/^[0-9a-f]{64}$/.test(eventId))) {

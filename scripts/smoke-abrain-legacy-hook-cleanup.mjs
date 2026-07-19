@@ -269,16 +269,19 @@ await check("unreadable exact hook fails soft when POSIX permissions are enforce
   }
 });
 
-await check("startup runs cleanup only after the .state gitignore guard succeeds", () => {
+await check("startup establishes .state gitignore before exposure and keeps cleanup behind safety", () => {
   const indexSource = fs.readFileSync(path.join(root, "extensions/abrain/index.ts"), "utf8");
-  const layoutCall = indexSource.indexOf("ensureBrainLayout(ABRAIN_HOME)");
-  const gitignoreCall = indexSource.indexOf("ensureAbrainStateGitignored(ABRAIN_HOME)");
-  const readyAssignment = indexSource.indexOf("stateGitignoreGuardReady = true", gitignoreCall);
-  const readyBranch = indexSource.indexOf("if (stateGitignoreGuardReady)", readyAssignment);
-  const cleanupCall = indexSource.indexOf("cleanupLegacyAdr0039PrePushHook(ABRAIN_HOME)", readyBranch);
-  assert(layoutCall >= 0 && gitignoreCall > layoutCall && readyAssignment > gitignoreCall, "gitignore guard is not established after layout");
-  assert(readyBranch > readyAssignment && cleanupCall > readyBranch, "cleanup is not conditional on successful gitignore guard completion");
-  assert(indexSource.slice(gitignoreCall, readyBranch).includes("catch"), "gitignore guard failure no longer remains non-fatal");
+  const safetyStart = indexSource.indexOf("export function establishAbrainLocalSafetyPrerequisites");
+  const layoutCall = indexSource.indexOf("ensureBrainLayout(resolved)", safetyStart);
+  const gitignoreCall = indexSource.indexOf("ensureAbrainStateGitignored(resolved)", layoutCall);
+  const readyState = indexSource.indexOf('status: "ready"', gitignoreCall);
+  const activationCall = indexSource.indexOf("const localSafety = establishAbrainLocalSafetyPrerequisites(ABRAIN_HOME)", readyState);
+  const postBarrierStart = indexSource.indexOf("const initializeAbrainRuntimeAfterBarrier", activationCall);
+  const safetyCheck = indexSource.indexOf("getAbrainLocalSafetyStatus(ABRAIN_HOME).status", postBarrierStart);
+  const cleanupCall = indexSource.indexOf("cleanupLegacyAdr0039PrePushHook(ABRAIN_HOME)", safetyCheck);
+  assert(safetyStart >= 0 && layoutCall > safetyStart && gitignoreCall > layoutCall && readyState > gitignoreCall, "synchronous layout/gitignore safety order drifted");
+  assert(activationCall > readyState && postBarrierStart > activationCall, "activation no longer establishes safety before post-barrier initialization");
+  assert(safetyCheck > postBarrierStart && cleanupCall > safetyCheck, "cleanup is not conditional on current local safety after the canonical barrier");
   assert(indexSource.slice(cleanupCall, indexSource.indexOf("  };", cleanupCall)).includes("catch"), "cleanup failure no longer remains non-fatal");
 });
 

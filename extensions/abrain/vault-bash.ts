@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { validateKey, type VaultScope } from "./vault-writer";
 import { releaseSecret, redactWithReleasedSecrets, type ReleaseSecretResult } from "./vault-reader";
+import { computeAbrainStateGitignoreNext } from "../_shared/runtime";
 
 /**
  * Stable enum values for vault bash output authorization (deciding
@@ -209,6 +210,26 @@ export function existingGlobalVaultKey(abrainHome: string, varName: string): str
   return existingVaultKey(abrainHome, "global", varName);
 }
 
+export function assertAbrainStateIgnoredBeforeVaultTempWrite(abrainHome: string): void {
+  const resolved = path.resolve(abrainHome);
+  const gitignorePath = path.join(resolved, ".gitignore");
+  let fd: number | undefined;
+  let raw: string;
+  try {
+    fd = fs.openSync(gitignorePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new Error("not a regular file");
+    raw = fs.readFileSync(fd, "utf8");
+  } catch (error) {
+    throw new Error(`vault temp write blocked: cannot verify regular non-symlink .state/ ignore at ${gitignorePath}: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  if (computeAbrainStateGitignoreNext(raw) !== null) {
+    throw new Error(`vault temp write blocked: .state/ is not ignored by ${gitignorePath}`);
+  }
+}
+
 export function writeVaultEnvFile(stateDir: string, vars: VaultBashEnvVar[]): string {
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const file = path.join(stateDir, `vault-env-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.sh`);
@@ -296,7 +317,12 @@ export function buildBootVaultBashDeps(opts: PrepareBootVaultBashOptions): Vault
       return globalKey ? { scope: "global", key: globalKey } : undefined;
     },
     releaseKey: (match) => releaseSecret({ abrainHome: opts.abrainHome, scope: match.scope, key: match.key }),
-    writeEnvFile: (vars) => writeVaultEnvFile(opts.stateDir, vars),
+    writeEnvFile: (vars) => {
+      // This is the last check before plaintext reaches a temporary file. It
+      // protects direct callers as well as the TUI tool_call path.
+      assertAbrainStateIgnoredBeforeVaultTempWrite(opts.abrainHome);
+      return writeVaultEnvFile(opts.stateDir, vars);
+    },
     pvaultBlockReason: projectId
       ? undefined
       : "$PVAULT_* requires a strict active project binding. Run /abrain bind (or use $GVAULT_* for global secrets).",

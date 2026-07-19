@@ -591,6 +591,59 @@ async function atomicWriteText(file: string, content: string): Promise<void> {
   }
 }
 
+/** Read an optional regular file through a retained descriptor. O_NOFOLLOW is
+ * used when available; the named-file identity checks preserve fail-closed
+ * behavior on platforms where Node does not expose that flag. */
+export function readOptionalRegularFileNoFollowSync(file: string): string | undefined {
+  const resolved = path.resolve(file);
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let namedBefore: fs.BigIntStats | undefined;
+  if (fs.constants.O_NOFOLLOW === undefined) {
+    try {
+      namedBefore = fs.lstatSync(resolved, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+      throw error;
+    }
+    if (namedBefore.isSymbolicLink() || !namedBefore.isFile()) {
+      throw new Error(`expected a regular non-symlink file: ${resolved}`);
+    }
+  }
+
+  let fd: number;
+  try {
+    fd = fs.openSync(resolved, fs.constants.O_RDONLY | noFollow);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true });
+    if (!opened.isFile()
+      || (namedBefore && (opened.dev !== namedBefore.dev || opened.ino !== namedBefore.ino))) {
+      throw new Error(`expected a stable regular non-symlink file: ${resolved}`);
+    }
+    const raw = fs.readFileSync(fd);
+    const after = fs.fstatSync(fd, { bigint: true });
+    const namedAfter = fs.lstatSync(resolved, { bigint: true });
+    if (after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.size !== opened.size
+      || after.mtimeNs !== opened.mtimeNs
+      || after.ctimeNs !== opened.ctimeNs
+      || BigInt(raw.length) !== opened.size
+      || namedAfter.isSymbolicLink()
+      || !namedAfter.isFile()
+      || namedAfter.dev !== after.dev
+      || namedAfter.ino !== after.ino) {
+      throw new Error(`file changed while read: ${resolved}`);
+    }
+    return raw.toString("utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 // ── .state/ gitignore shared logic ────────────────────────────────────
 //
 // P1-2 audit fix 2026-05-16 (round 4 opus-4-7 + deepseek-v4-pro):
@@ -879,7 +932,7 @@ export async function bindAbrainProject(opts: {
     // ensureAbrainStateGitignored() composes the same helper from
     // brain-layout.ts; both paths now share one source of truth.
     const abrainGitignorePath = path.join(path.resolve(opts.abrainHome), ".gitignore");
-    const gitignoreRaw = exists(abrainGitignorePath) ? read(abrainGitignorePath, "utf-8") : "";
+    const gitignoreRaw = readOptionalRegularFileNoFollowSync(abrainGitignorePath) ?? "";
     const gitignoreToWrite = computeAbrainStateGitignoreNext(gitignoreRaw);
     const abrainGitignoreUpdated = gitignoreToWrite !== null;
 

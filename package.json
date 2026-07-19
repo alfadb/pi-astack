@@ -177,6 +177,7 @@
     "smoke:canonical-path-foundation": "node scripts/smoke-canonical-path-foundation.mjs",
     "smoke:l1-schema-registry-faults": "node scripts/smoke-l1-schema-registry-faults.mjs",
     "smoke:canonical-git-runtime": "node scripts/smoke-canonical-git-runtime.mjs",
+    "smoke:canonical-session-start": "node scripts/smoke-canonical-session-start.mjs",
     "smoke:canonical-path-p1a": "node scripts/smoke-canonical-path-p1a.mjs",
     "smoke:production-existing-local-drain": "node scripts/smoke-production-existing-local-drain.mjs",
     "smoke:production-local-drain-next": "node scripts/smoke-production-local-drain-next.mjs",

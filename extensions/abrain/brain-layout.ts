@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { computeAbrainStateGitignoreNext } from "../_shared/runtime";
+import { computeAbrainStateGitignoreNext, readOptionalRegularFileNoFollowSync } from "../_shared/runtime";
 
 /**
  * All top-level zone directory names. Ordered for readability in ls output.
@@ -459,7 +459,7 @@ export function ensureBrainLayout(abrainHome: string): { created: string[]; warn
 export function ensureAbrainStateGitignored(abrainHome: string): { updated: boolean; path: string } {
   const resolved = path.resolve(abrainHome);
   const gitignorePath = path.join(resolved, ".gitignore");
-  const raw = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, "utf-8") : "";
+  const raw = readOptionalRegularFileNoFollowSync(gitignorePath) ?? "";
   // Single-source-of-truth: regex + line text live in _shared/runtime.ts
   // (P1-2 audit fix 2026-05-16 round 4). bindAbrainProject uses the same
   // helper via the async path; this function is the sync activate-time

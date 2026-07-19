@@ -44,6 +44,7 @@ import {
   canonicalGitRuntimeEnabled,
   createProducedArtifactReceipt,
   getCanonicalGitRuntime,
+  getCanonicalStartupPromise,
   type CanonicalGitRuntime,
   type DrainResult,
   type ProducedArtifact,
@@ -1214,11 +1215,20 @@ function publicationNeedsCleanup(publication: WriterPublicationResult): boolean 
     && publication.localCommit === "not_published";
 }
 
-function assertCanonicalWriterSettings(): void {
-  // The boolean is intentionally unused: evaluation validates the three-state
-  // settings gate before any filesystem mutation. Only valid disabled=false
-  // reaches the legacy boundary later in the commit helpers.
-  canonicalGitRuntimeEnabled();
+async function assertCanonicalWriterSettings(
+  abrainHome: string,
+  settings: Pick<SedimentSettings, "gitCommit">,
+): Promise<void> {
+  // gitCommit:false is the established non-Git writer contract used by temp
+  // fixtures and embedders. It bypasses the canonical Git gate completely.
+  if (settings.gitCommit === false) return;
+  // Enabled/default production writers validate the three-state settings gate
+  // before mutation, then consume the shared Path A startup promise.
+  if (!canonicalGitRuntimeEnabled()) return;
+  const startup = await getCanonicalStartupPromise({ abrainHome: path.resolve(abrainHome) });
+  if (startup.startup !== "ready") {
+    throw new Error(`canonical startup barrier blocked: ${startup.blockedReason ?? "unknown"}`);
+  }
 }
 
 export function writerPublicationFromCanonicalDrain(drained: DrainResult): WriterPublicationResult {
@@ -1264,13 +1274,14 @@ async function canonicalCommitExplicitPaths(
     drained = await runtime.requestDrain(receipts, message);
   } catch (error) {
     const code = (error as { code?: string })?.code;
+    const recoverable = code === "INDEX_LOCK_PRESENT"
+      || code === "OWNED_INDEX_CONFLICT"
+      || code === "RECOVERY_PUBLISHED_REF_DIVERGED";
     const publication: WriterPublicationResult = {
-      status: code === "INDEX_LOCK_PRESENT" || code === "OWNED_INDEX_CONFLICT" || code === "RECOVERY_PUBLISHED_REF_DIVERGED"
-        ? "durable_pending"
-        : "terminal_before_publish",
+      status: recoverable ? "durable_pending" : "terminal_before_publish",
       commit: null,
       localCommit: "not_published",
-      drainStatus: "threw",
+      drainStatus: recoverable ? "blocked" : "threw",
       reason: pushTriggerErrorSummary(error),
       canonical: true,
     };
@@ -1436,6 +1447,10 @@ export async function commitAbrainDerivedOutputs(
   producedFilePaths: readonly string[] = [],
 ): Promise<WriterPublicationResult> {
   if (canonicalGitRuntimeEnabled()) {
+    // This is the post-mutation barrier for constraint auto-refresh: the
+    // explicit receipt drain awaits runtime startup before publishing. The
+    // surrounding agent_end only writes ignored .state markers before this
+    // projector path, so it does not need a second canonical worktree barrier.
     // Enabled runtime forbids status/directory harvesting. The projector must
     // name every output created by this transaction.
     if (producedFilePaths.length === 0) return { status: "terminal_before_publish", commit: null, localCommit: "not_published", drainStatus: "empty_projector_receipts", reason: "projector did not name outputs", canonical: true };
@@ -1644,7 +1659,7 @@ export async function deleteProjectEntry(
   // "git rm only when still archived".
   opts: WriteProjectEntryOptions & { reason?: string; mode?: DeleteMode; sessionId?: string; expected_status?: EntryStatus },
 ): Promise<WriteProjectEntryResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -1975,7 +1990,7 @@ export async function updateProjectEntry(
   patch: ProjectEntryUpdateDraft,
   opts: WriteProjectEntryOptions,
 ): Promise<WriteProjectEntryResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -2472,7 +2487,7 @@ export async function writeProjectEntry(
   draft: ProjectEntryDraft,
   opts: WriteProjectEntryOptions,
 ): Promise<WriteProjectEntryResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -3028,7 +3043,7 @@ export async function writeAbrainWorkflow(
   draft: WorkflowDraft,
   opts: WriteWorkflowOptions,
 ): Promise<WriteWorkflowResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const crossProject = draft.crossProject === true;
@@ -3522,7 +3537,7 @@ async function applyTier2RulesLegacyWriteGate(args: {
 
 /** ADR 0023 D5: create a rule in ~/.abrain/[projects/<id>/]rules/<inject_mode>/. */
 export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions): Promise<WriteRuleResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const ruleScope: "global" | "project" = draft.scope === "global" ? "global" : "project";
@@ -3791,7 +3806,7 @@ export async function applyTier1RuleAdjudication(
   apply: Tier1RuleAdjudicationApply,
   opts: WriteRuleOptions,
 ): Promise<WriteRuleResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const { slug, scope, projectId } = target;
@@ -3936,7 +3951,7 @@ export async function mutateRuleStatusContested(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -3990,7 +4005,7 @@ export async function archiveAbrainRule(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -4055,7 +4070,7 @@ export async function deleteAbrainRule(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -4412,7 +4427,7 @@ export async function writeAbrainAboutMe(
   draft: AboutMeDraft,
   opts: WriteAboutMeOptions,
 ): Promise<WriteAboutMeResult> {
-  assertCanonicalWriterSettings();
+  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId ?? draft.sessionId;

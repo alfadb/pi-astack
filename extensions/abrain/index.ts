@@ -77,7 +77,16 @@ import {
   type ResolveActiveProjectResult,
 } from "../_shared/runtime";
 import { gitSingleFlight } from "../_shared/git-singleflight";
-import { canonicalGitRuntimeEnabled, createProducedArtifactReceipt, getCanonicalGitRuntime } from "../_shared/canonical-git-runtime";
+import {
+  canonicalGitRuntimeEnabled,
+  createProducedArtifactReceipt,
+  getCanonicalGitRuntime,
+  getCanonicalStartupPromise,
+  reportCanonicalStartupConsumer,
+  scheduleCanonicalStartupConsumer,
+  setCanonicalStartupReporter,
+  type CanonicalStartupHostMode,
+} from "../_shared/canonical-git-runtime";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
 import type { SedimentSettings } from "../sediment/settings";
@@ -108,6 +117,96 @@ const ABRAIN_HOME = process.env.ABRAIN_ROOT
   : path.join(os.homedir(), ".abrain");
 const STATE_DIR = path.join(ABRAIN_HOME, ".state");
 const VAULT_DISABLED_FLAG = path.join(STATE_DIR, "vault-disabled");
+const ABRAIN_STARTUP_CONSUMER = "abrain-runtime";
+const ABRAIN_LOCAL_SAFETY_KEY = Symbol.for("pi-astack/abrain-local-safety/v1");
+const ABRAIN_PROCESS_STATE_KEY = Symbol.for("pi-astack/abrain-process-state/v1");
+
+interface AbrainProcessState {
+  startupAutoSyncDone: boolean;
+}
+
+function abrainProcessState(): AbrainProcessState {
+  const global = globalThis as Record<symbol, unknown>;
+  const existing = global[ABRAIN_PROCESS_STATE_KEY] as AbrainProcessState | undefined;
+  if (existing) return existing;
+  const created: AbrainProcessState = { startupAutoSyncDone: false };
+  global[ABRAIN_PROCESS_STATE_KEY] = created;
+  return created;
+}
+
+export interface AbrainLocalSafetyStatus {
+  status: "ready" | "blocked";
+  abrainHome: string;
+  gitignorePath?: string;
+  layoutWarnings: readonly string[];
+  blockedReason?: string;
+}
+
+function abrainLocalSafetyStates(): Map<string, AbrainLocalSafetyStatus> {
+  const global = globalThis as Record<symbol, unknown>;
+  const existing = global[ABRAIN_LOCAL_SAFETY_KEY];
+  if (existing instanceof Map) return existing as Map<string, AbrainLocalSafetyStatus>;
+  const created = new Map<string, AbrainLocalSafetyStatus>();
+  global[ABRAIN_LOCAL_SAFETY_KEY] = created;
+  return created;
+}
+
+/** Establish the small local safety envelope synchronously, before pi can
+ * expose an interactive writer. Full canonical recovery remains separate. */
+export function establishAbrainLocalSafetyPrerequisites(abrainHome = ABRAIN_HOME): AbrainLocalSafetyStatus {
+  const resolved = path.resolve(abrainHome);
+  try {
+    const layout = ensureBrainLayout(resolved);
+    const ignored = ensureAbrainStateGitignored(resolved);
+    const ready: AbrainLocalSafetyStatus = Object.freeze({
+      status: "ready",
+      abrainHome: resolved,
+      gitignorePath: ignored.path,
+      layoutWarnings: Object.freeze(layout.warnings.slice()),
+    });
+    abrainLocalSafetyStates().set(resolved, ready);
+    if (layout.created.length > 0) console.error(`[abrain] brain layout: created ${layout.created.join(", ")}`);
+    for (const warning of layout.warnings) console.error(`[abrain] brain layout warning: ${warning}`);
+    if (ignored.updated) console.error(`[abrain] added .state/ to ${ignored.path}`);
+    return ready;
+  } catch (error) {
+    const blocked: AbrainLocalSafetyStatus = Object.freeze({
+      status: "blocked",
+      abrainHome: resolved,
+      layoutWarnings: Object.freeze([]),
+      blockedReason: error instanceof Error ? error.message : String(error),
+    });
+    abrainLocalSafetyStates().set(resolved, blocked);
+    console.error(`[abrain] local startup safety blocked: ${blocked.blockedReason}`);
+    return blocked;
+  }
+}
+
+export function getAbrainLocalSafetyStatus(abrainHome = ABRAIN_HOME): AbrainLocalSafetyStatus {
+  const resolved = path.resolve(abrainHome);
+  return abrainLocalSafetyStates().get(resolved) ?? Object.freeze({
+    status: "blocked" as const,
+    abrainHome: resolved,
+    layoutWarnings: Object.freeze([]),
+    blockedReason: "local startup safety prerequisites have not run",
+  });
+}
+
+function assertAbrainLocalWriteSafety(abrainHome = ABRAIN_HOME): void {
+  const safety = getAbrainLocalSafetyStatus(abrainHome);
+  if (safety.status !== "ready") {
+    throw new Error(`abrain local write safety blocked: ${safety.blockedReason ?? "unknown"}`);
+  }
+}
+
+async function awaitAbrainCanonicalWriteBarrier(abrainHome = ABRAIN_HOME): Promise<void> {
+  assertAbrainLocalWriteSafety(abrainHome);
+  if (!canonicalGitRuntimeEnabled()) return;
+  const startup = await getCanonicalStartupPromise({ abrainHome });
+  if (startup.startup !== "ready") {
+    throw new Error(startup.blockedReason ?? "canonical startup barrier blocked");
+  }
+}
 
 // ── Sub-pi enforce constants ────────────────────────────────────────────
 
@@ -236,7 +335,7 @@ interface CommandRegistry {
 interface EventRegistry {
   on?: (
     event: string,
-    handler: (event: any, ctx: { cwd?: string; ui?: VaultReleaseUi; signal?: AbortSignal; modelRegistry?: unknown; sessionManager?: unknown }) => Promise<unknown> | unknown,
+    handler: (event: any, ctx: { cwd?: string; mode?: CanonicalStartupHostMode; ui?: VaultReleaseUi; signal?: AbortSignal; modelRegistry?: unknown; sessionManager?: unknown }) => Promise<unknown> | unknown,
   ) => void;
 }
 
@@ -509,18 +608,6 @@ export function secretDefaultRejection(reason: string): string {
 
 let bootActiveProject: ResolveActiveProjectResult | null = null;
 let bootActiveProjectAt: number | null = null;
-
-/**
- * Module-level guard so the startup auto-sync runs exactly once per pi
- * process even though we register the trigger on `session_start` (which
- * fires once per session, including session switches / fork / restart).
- *
- * 2026-05-17 Round 5 UX fix: startup sync moved from activate() top-level
- * (no ctx, raw console.error) to session_start (ctx.ui.notify available,
- * pi TUI styled output). This flag is the gate that prevents repeated
- * sync attempts on every new session within the same pi process.
- */
-let startupAutoSyncDone = false;
 
 function snapshotBootActiveProject(cwd = process.cwd()): ResolveActiveProjectResult {
   return resolveActiveProject(cwd, { abrainHome: ABRAIN_HOME });
@@ -802,6 +889,13 @@ function scopeAuditLabel(scope: VaultScope): string {
 }
 
 function safeAuditAppend(ev: Parameters<typeof appendVaultReadAudit>[1]): void {
+  // Never create .state audit bytes unless the synchronous .gitignore safety
+  // envelope was established. The triggering operation may still fail closed.
+  const safety = getAbrainLocalSafetyStatus(ABRAIN_HOME);
+  if (safety.status !== "ready") {
+    try { process.stderr.write(`abrain vault audit skipped: ${safety.blockedReason ?? "local write safety unavailable"}\n`); } catch {}
+    return;
+  }
   // Audit failures must never break vault read paths — they're observability,
   // not enforcement. Swallow + best-effort log via stderr if anything throws.
   appendVaultReadAudit(ABRAIN_HOME, ev).catch((err) => {
@@ -1288,6 +1382,9 @@ export default function activate(pi: ExtensionAPI): void {
   // Resolve once at activation. Invalid/missing/unreadable canonical settings
   // abort every abrain startup/bind/sync writer path instead of selecting legacy.
   const canonicalModeEnabled = canonicalGitRuntimeEnabled();
+  // This is intentionally synchronous and bounded. Vault and audit writers
+  // can become callable as soon as activate() returns, before Path A recovery.
+  const localSafety = establishAbrainLocalSafetyPrerequisites(ABRAIN_HOME);
 
   // Boot-time snapshot per ADR 0017: active project identity comes from
   // strict binding, not bash `cd`. Only /abrain bind may refresh it
@@ -1300,15 +1397,17 @@ export default function activate(pi: ExtensionAPI): void {
   // reconcile scans vault dirs for encrypted files missing audit rows
   // (crash between atomic rename and vault-events append) and inserts
   // recovered_missing_audit entries. Safe no-op when vault not yet init'd.
-  reconcile(ABRAIN_HOME)
-    .then(({ recovered, scanned }) => {
-      if (recovered > 0) {
-        console.error(`[abrain] reconcile: recovered ${recovered} missing audit rows (${scanned} files scanned)`);
-      }
-    })
-    .catch((err) => {
-      console.error(`[abrain] reconcile failed:`, err);
-    });
+  if (localSafety.status === "ready") {
+    reconcile(ABRAIN_HOME)
+      .then(({ recovered, scanned }) => {
+        if (recovered > 0) {
+          console.error(`[abrain] reconcile: recovered ${recovered} missing audit rows (${scanned} files scanned)`);
+        }
+      })
+      .catch((err) => {
+        console.error(`[abrain] reconcile failed:`, err);
+      });
+  }
 
   // ── Startup device sync (ADR 0020) ──────────────────────────
   // Fire-and-forget device delivery runs fetch -> ff-only configured upstream
@@ -1320,32 +1419,31 @@ export default function activate(pi: ExtensionAPI): void {
   // intercalated with pi's TUI rendering. Sediment uses `ctx.ui.notify`
   // (which the pi TUI styles per `type` and integrates with the chat
   // stream); abrain should too. But `activate(pi)` has no ctx — we get
-  // ctx only inside an event handler. So we register a one-shot
-  // `session_start` listener whose ctx.ui.notify/modelRegistry/cwd we capture
-  // early and pass into `runStartupAutoSync(...)`. Headless/RPC mode (no ui)
-  // falls back to console.error so the audit trail still surfaces.
+  // ctx only inside an event handler. The `session_start` listener refreshes
+  // the process-global reporter and
+  // process-stable modelRegistry/cwd snapshot. Detached completion resolves the
+  // latest reporter after /new, /resume, or /reload, with stderr fallback.
   //
   // runStartupAutoSync is invoked at session_start after activate() finishes,
   // so the `.state/` gitignore guard has already run.
   const runStartupAutoSync = (args: {
-    notify?: (msg: string, type?: GitSyncNotifyType) => void;
     modelRegistry?: unknown;
     cwd?: string;
   } = {}): void => {
-    if (startupAutoSyncDone) return;
-    startupAutoSyncDone = true;
+    const processState = abrainProcessState();
+    if (processState.startupAutoSyncDone) return;
+    processState.startupAutoSyncDone = true;
     if (process.env.PI_ABRAIN_NO_AUTOSYNC === "1") return;
 
-    // Capture-and-bind pattern (mirrors sediment writer.ts): bind notify
-    // synchronously so any subsequent ctx-staleness during our async
-    // work doesn't blow up the announce path. If notify is missing
-    // (headless/RPC/print mode), fall back to console.error so the
-    // audit trail still surfaces somewhere a user can find it.
+    // Resolve the reporter at delivery time. A captured ctx.ui becomes stale
+    // across /new, /resume, and /reload while this detached sync is running.
     const announce = (msg: string, type: GitSyncNotifyType = "info"): void => {
-      if (args.notify) {
-        try { args.notify(msg, type); return; } catch { /* fall through to console */ }
-      }
-      console.error(`[abrain] ${msg}`);
+      reportCanonicalStartupConsumer({
+        runtime: { abrainHome: ABRAIN_HOME },
+        consumerId: ABRAIN_STARTUP_CONSUMER,
+        message: msg,
+        type,
+      });
     };
 
     gitSync({ abrainHome: ABRAIN_HOME })
@@ -1381,40 +1479,19 @@ export default function activate(pi: ExtensionAPI): void {
 
   let runtimeInitializationDone = false;
   const initializeAbrainRuntimeAfterBarrier = (): void => {
-    if (runtimeInitializationDone) return;
+    if (runtimeInitializationDone || getAbrainLocalSafetyStatus(ABRAIN_HOME).status !== "ready") return;
     runtimeInitializationDone = true;
     try {
-      const layout = ensureBrainLayout(ABRAIN_HOME);
-      if (layout.created.length > 0) console.error(`[abrain] brain layout: created ${layout.created.join(", ")}`);
-      for (const warning of layout.warnings) console.error(`[abrain] brain layout warning: ${warning}`);
+      const cleanup = cleanupLegacyAdr0039PrePushHook(ABRAIN_HOME);
+      if (cleanup.removed) console.error(`[abrain] removed exact pi-owned legacy ADR0039 pre-push hook`);
+      else if (cleanup.warning) console.warn(`[abrain] ${cleanup.warning}`);
     } catch (err: any) {
-      console.error(`[abrain] brain layout failed:`, err);
-    }
-    // Cleanup may append audit/marker files under .state, so it is eligible
-    // only after the ignore guard has completed successfully.
-    let stateGitignoreGuardReady = false;
-    try {
-      const result = ensureAbrainStateGitignored(ABRAIN_HOME);
-      stateGitignoreGuardReady = true;
-      if (result.updated) console.error(`[abrain] added .state/ to ${result.path}`);
-    } catch (err: any) {
-      console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
-    }
-    if (stateGitignoreGuardReady) {
-      try {
-        const cleanup = cleanupLegacyAdr0039PrePushHook(ABRAIN_HOME);
-        if (cleanup.removed) console.error(`[abrain] removed exact pi-owned legacy ADR0039 pre-push hook`);
-        else if (cleanup.warning) console.warn(`[abrain] ${cleanup.warning}`);
-      } catch (err: any) {
-        // Defense in depth: the helper is fail-soft, and this migration must
-        // never become a canonical or local startup gate.
-        console.warn(`[abrain] legacy ADR0039 hook cleanup failed (non-fatal): ${err?.message ?? err}`);
-      }
+      // Defense in depth: the helper is fail-soft, and this migration must
+      // never become a canonical or local startup gate.
+      console.warn(`[abrain] legacy ADR0039 hook cleanup failed (non-fatal): ${err?.message ?? err}`);
     }
   };
-  // Explicit disabled mode preserves legacy activation behavior. Enabled mode
-  // may not mutate the Git worktree or hooks until canonical startup is ready.
-  if (!canonicalModeEnabled) initializeAbrainRuntimeAfterBarrier();
+  if (!canonicalModeEnabled && localSafety.status === "ready") initializeAbrainRuntimeAfterBarrier();
 
   // NOTE: startup git sync runs in the session_start event handler
   // below (not here at activate() time) so we can capture ctx.ui.notify
@@ -1479,40 +1556,60 @@ export default function activate(pi: ExtensionAPI): void {
   const vaultBashShellPath = resolveWindowsVaultBashPath();
 
   if (typeof eventRegistry.on === "function") {
-    // Startup git sync trigger (Round 5 UX fix, 2026-05-17). We capture
-    // ctx.ui.notify/modelRegistry/cwd SYNCHRONOUSLY at handler entry
-    // (sediment's stale-ctx pattern) and pass them into runStartupAutoSync. The
-    // module-level startupAutoSyncDone flag ensures this runs exactly
-    // once per pi process even though session_start fires on every new
-    // session / fork / restart. Headless/RPC mode (no ctx.ui) falls back
+    // Startup git sync trigger (Round 5 UX fix, 2026-05-17). We refresh
+    // the current reporter plus process-stable modelRegistry/cwd at handler
+    // entry. The process-global guard ensures this runs exactly once even
+    // when /reload creates a new module instance and session_start fires for
+    // every new session / fork / restart. Headless mode falls back
     // to console.error inside announce(). Never throws to pi runtime.
     eventRegistry.on("session_start", async (_event, ctx) => {
       try {
         if (isSubAgentSession(ctx as unknown as { sessionManager?: unknown })) return;
-        // Capture modelRegistry for rule-injector compiled-view refresh.
+        // Capture only process-stable values. The shared reporter is replaced on
+        // every /new, /resume, and /reload; no continuation closes over ctx.ui.
         if (ctx?.modelRegistry) capturedModelRegistry = ctx.modelRegistry;
         if (ctx?.cwd) capturedCwd = ctx.cwd;
         const notify = ctx?.ui?.notify?.bind(ctx.ui);
-        if (canonicalModeEnabled) {
-          const startup = await (await getCanonicalGitRuntime({ abrainHome: ABRAIN_HOME })).awaitStartup();
-          if (startup.startup !== "ready") {
-            const message = `abrain canonical startup blocked: ${startup.blockedReason ?? "unknown"}`;
-            if (notify) notify(message, "warning");
-            else console.error(`[abrain] ${message}`);
-            return;
-          }
-          canonicalBarrierReady = true;
-          initializeAbrainRuntimeAfterBarrier();
-          queueSelfHealFlush();
-        } else {
-          queueSelfHealFlush();
+        const runtime = { abrainHome: ABRAIN_HOME };
+        const currentSafety = getAbrainLocalSafetyStatus(ABRAIN_HOME);
+        setCanonicalStartupReporter({ runtime, consumerId: ABRAIN_STARTUP_CONSUMER, reporter: notify });
+        if (currentSafety.status !== "ready") {
+          reportCanonicalStartupConsumer({
+            runtime,
+            consumerId: ABRAIN_STARTUP_CONSUMER,
+            message: `abrain local startup safety blocked: ${currentSafety.blockedReason ?? "unknown"}`,
+            type: "error",
+          });
         }
-        // Device delivery runs outside the canonical startup barrier. Its
-        // result is advisory and cannot change local convergence success.
-        runStartupAutoSync({ notify, modelRegistry: ctx?.modelRegistry, cwd: ctx?.cwd });
+        if (canonicalModeEnabled) {
+          await scheduleCanonicalStartupConsumer({
+            runtime,
+            consumerId: ABRAIN_STARTUP_CONSUMER,
+            mode: ctx?.mode,
+            reporter: notify,
+            blockedMessage: (startup) => `abrain canonical startup blocked: ${startup.blockedReason ?? "unknown"}`,
+            errorMessage: (error) => `abrain canonical startup continuation threw: ${error instanceof Error ? error.message : String(error)}`,
+            onReady: () => {
+              if (getAbrainLocalSafetyStatus(ABRAIN_HOME).status !== "ready") return;
+              canonicalBarrierReady = true;
+              initializeAbrainRuntimeAfterBarrier();
+              queueSelfHealFlush();
+              // Device delivery remains advisory and follows full Path A proof.
+              runStartupAutoSync({ modelRegistry: capturedModelRegistry, cwd: capturedCwd });
+            },
+          });
+        } else if (currentSafety.status === "ready") {
+          queueSelfHealFlush();
+          runStartupAutoSync({ modelRegistry: capturedModelRegistry, cwd: capturedCwd });
+        }
       } catch (err) {
         // Defensive: never let our sync trigger break the session.
-        console.error(`[abrain] session_start auto-sync trigger threw:`, err);
+        reportCanonicalStartupConsumer({
+          runtime: { abrainHome: ABRAIN_HOME },
+          consumerId: ABRAIN_STARTUP_CONSUMER,
+          message: `abrain session_start trigger threw: ${err instanceof Error ? err.message : String(err)}`,
+          type: "error",
+        });
       }
       // ADR 0022 housekeeping batch A (b) (2026-05-19): vault dialog
       // builder telemetry. If activate() detected that pi-tui /
@@ -1701,6 +1798,10 @@ export default function activate(pi: ExtensionAPI): void {
         required: ["key"],
       },
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        try { assertAbrainLocalWriteSafety(); }
+        catch (error) {
+          return toolJson({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
         const key = String(params.key ?? "").trim();
         // Accept both flat (scope/reason at top level — preferred) and legacy
         // nested options.{scope,reason}. The flat form is the canonical schema;
@@ -2227,6 +2328,7 @@ export default function activate(pi: ExtensionAPI): void {
             handleStatus(ctx.ui);
             return;
           case "init":
+            await awaitAbrainCanonicalWriteBarrier();
             await handleInit(trimmed.slice("init".length).trim(), ctx.ui);
             return;
           default:
@@ -2549,6 +2651,7 @@ function renderListing(scope: VaultScope): string {
 }
 
 async function handleSecret(args: string, ui: { notify(message: string, type?: string): void }): Promise<void> {
+  assertAbrainLocalWriteSafety();
   // Pre-flight: vault must be initialized
   const backend = readBackendFile(ABRAIN_HOME);
   if (!backend) {
@@ -2594,6 +2697,7 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       return;
     }
     try {
+      await awaitAbrainCanonicalWriteBarrier();
       const result = await writeSecret({
         abrainHome: ABRAIN_HOME,
         scope: resolved.scope,
@@ -2674,6 +2778,7 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       return;
     }
     try {
+      await awaitAbrainCanonicalWriteBarrier();
       const result = await forgetSecret(ABRAIN_HOME, resolved.scope, key);
       const label = scopeReadableLabel(resolved.scope);
       // Round 7 P0 (gpt-5.5): forget outcome is tri-state. "absent" is a
@@ -2772,7 +2877,9 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     return;
   }
   if (sub === "sync") {
-    // Manual /abrain sync: fetch + ff-pull + push in one call (ADR 0020).
+    // Manual sync mutates local Git state. In canonical mode it consumes the
+    // same Path A startup promise as session_start and all canonical writers.
+    await awaitAbrainCanonicalWriteBarrier();
     ui.notify("abrain: syncing with the configured upstream...", "info");
     const result = await gitSync({ abrainHome: ABRAIN_HOME });
     ui.notify(result.summary, result.ok ? "info" : "warning");
@@ -2791,11 +2898,8 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     try {
       // Fail before bindAbrainProject mutates either repository when settings
       // are invalid. Only explicit valid enabled=false may use legacy commits.
+      await awaitAbrainCanonicalWriteBarrier();
       const canonicalBindEnabled = canonicalGitRuntimeEnabled();
-      if (canonicalBindEnabled) {
-        const startup = await (await getCanonicalGitRuntime({ abrainHome: ABRAIN_HOME })).awaitStartup();
-        if (startup.startup !== "ready") throw new Error(startup.blockedReason ?? "canonical startup barrier blocked");
-      }
       const result = await bindAbrainProject({
         abrainHome: ABRAIN_HOME,
         cwd: commandCwd,

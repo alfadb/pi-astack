@@ -232,6 +232,25 @@ await check("bindAbrainProject creates manifest + registry + local-map", async (
   if (!/(^|\n)\.state\/(\n|$)/.test(gitignore)) throw new Error(`abrain .gitignore should ignore .state/: ${gitignore}`);
 });
 
+await check("bindAbrainProject rejects a symlink .gitignore before portable writes", async () => {
+  const guardedHome = fs.mkdtempSync(path.join(tmpDir, "bind-gitignore-guard-home-"));
+  const root = fs.mkdtempSync(path.join(tmpDir, "bind-gitignore-guard-root-"));
+  const foreign = path.join(tmpDir, "bind-gitignore-foreign");
+  const foreignRaw = "foreign\n";
+  fs.writeFileSync(foreign, foreignRaw);
+  fs.symlinkSync(foreign, path.join(guardedHome, ".gitignore"));
+  let blocked = false;
+  try {
+    await runtime.bindAbrainProject({ abrainHome: guardedHome, cwd: root, projectId: "guarded-project" });
+  } catch (error) {
+    blocked = ["ELOOP", "regular non-symlink"].some((token) => String(error).includes(token));
+  }
+  if (!blocked) throw new Error("symlink .gitignore was accepted");
+  if (fs.readFileSync(foreign, "utf8") !== foreignRaw) throw new Error("foreign symlink target changed");
+  if (fs.existsSync(runtime.abrainProjectManifestPath(root))) throw new Error("manifest was written after unsafe .gitignore");
+  if (fs.existsSync(runtime.abrainProjectRegistryPath(guardedHome, "guarded-project"))) throw new Error("registry was written after unsafe .gitignore");
+});
+
 await check("bindAbrainProject is idempotent and refreshes existing path", async () => {
   const root = fs.mkdtempSync(path.join(tmpDir, "bind-refresh-"));
   await runtime.bindAbrainProject({ abrainHome, cwd: root, projectId: "refresh-project", now: "2026-05-12T21:00:00.000+08:00" });

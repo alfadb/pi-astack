@@ -11,8 +11,9 @@
  *     vault: PromptDialog overlay failed to load ... ui.select fallback
  *
  * The vault overlay only needs pi-tui plus a simple DynamicBorder. This
- * smoke drives the real activate() path through jiti and asserts that
- * the overlay builder initializes without setting startup telemetry.
+ * smoke drives the real activate() path through jiti, asserts that the
+ * overlay builder initializes without setting startup telemetry, and locks
+ * the TUI canonical-startup scheduler's non-blocking/error behavior.
  */
 
 import fs from "node:fs";
@@ -33,7 +34,15 @@ process.env.PI_ABRAIN_NO_AUTOSYNC = "1";
 
 const jiti = createJiti(import.meta.url, { interopDefault: true });
 const indexModule = await jiti.import(path.join(repoRoot, "extensions/abrain/index.ts"));
+const canonicalModule = await jiti.import(path.join(repoRoot, "extensions/_shared/canonical-git-runtime.ts"));
 const activate = indexModule.default ?? indexModule;
+
+if (!canonicalModule.canonicalStartupRunsInBackground("tui") || !canonicalModule.canonicalStartupRunsInBackground("rpc")) {
+  throw new Error("interactive canonical startup policy must include TUI and RPC");
+}
+if (canonicalModule.canonicalStartupRunsInBackground("json") || canonicalModule.canonicalStartupRunsInBackground("print")) {
+  throw new Error("JSON and print canonical startup must remain awaited");
+}
 
 const handlers = new Map();
 const registeredTools = [];

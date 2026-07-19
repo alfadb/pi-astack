@@ -68,7 +68,7 @@ if (gitPublicationFixtureMode) {
     throw new Error(`unknown git-publication fixture mode: ${gitPublicationFixtureMode}`);
   }
   const expectedCanonical = gitPublicationFixtureMode === "canonical";
-  const { canonicalGitRuntimeEnabled } = await jiti.import(`${repoRoot}/extensions/_shared/canonical-git-runtime.ts`);
+  const { canonicalGitRuntimeEnabled, getCanonicalStartupPromise } = await jiti.import(`${repoRoot}/extensions/_shared/canonical-git-runtime.ts`);
   assert(canonicalGitRuntimeEnabled() === expectedCanonical, `fixture settings did not select ${gitPublicationFixtureMode}`);
   const fixtureSettings = { gitCommit: true, lockTimeoutMs: 5000 };
 
@@ -84,6 +84,9 @@ if (gitPublicationFixtureMode) {
     execFileSync("git", ["-C", home, "commit", "-qm", "fixture base"]);
     if (!expectedCanonical) {
       fs.writeFileSync(path.join(home, ".git", "hooks", "pre-commit"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    } else {
+      const startup = await getCanonicalStartupPromise({ abrainHome: home });
+      assert(startup.startup === "ready", `canonical fixture startup blocked: ${startup.blockedReason}`);
     }
 
     const slug = operation === "archive" ? "rollback-me" : "keep-me";
@@ -92,8 +95,8 @@ if (gitPublicationFixtureMode) {
       { abrainHome: home, settings: SETTINGS },
     );
     const filePath = path.join(home, "rules", "listed", `${slug}.md`);
-    if (expectedCanonical) fs.writeFileSync(path.join(home, "publication-blocker.txt"), "fixture blocker\n");
     const before = fs.readFileSync(filePath, "utf-8");
+    if (expectedCanonical) fs.writeFileSync(path.join(home, ".git", "index.lock"), "fixture lock\n");
     const result = operation === "archive"
       ? await archiveAbrainRule(slug, "global", undefined, { abrainHome: home, settings: fixtureSettings, reason: "fixture" })
       : await deleteAbrainRule(slug, "global", undefined, { abrainHome: home, settings: fixtureSettings });

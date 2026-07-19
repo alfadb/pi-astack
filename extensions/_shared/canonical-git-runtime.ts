@@ -127,6 +127,25 @@ export interface CanonicalRuntimeDiagnostics {
   tail: readonly Record<string, unknown>[];
 }
 
+export type CanonicalStartupHostMode = "tui" | "rpc" | "json" | "print";
+export type CanonicalStartupNotificationType = "info" | "warning" | "error";
+export type CanonicalStartupReporter = (message: string, type: CanonicalStartupNotificationType) => void;
+type CanonicalStartupTaskScheduler = (task: () => void) => unknown;
+
+interface CanonicalStartupConsumerInvocation {
+  onReady: (diagnostics: CanonicalRuntimeDiagnostics) => Promise<void> | void;
+  onBlocked?: (diagnostics: CanonicalRuntimeDiagnostics) => Promise<void> | void;
+  blockedMessage: (diagnostics: CanonicalRuntimeDiagnostics) => string;
+  errorMessage: (error: unknown) => string;
+}
+
+interface CanonicalStartupConsumerState {
+  reporter?: CanonicalStartupReporter;
+  latest?: CanonicalStartupConsumerInvocation;
+  scheduled: boolean;
+  running?: Promise<void>;
+}
+
 export interface BacklogPreflightResult {
   status: "ready" | "empty" | "blocked";
   statusHash: string;
@@ -210,19 +229,28 @@ interface GlobalRuntimeState {
   implementationFingerprint?: string;
   loadedProvenance?: readonly LoadedProvenanceEntry[];
   runtimes: Map<string, CanonicalGitRuntimeImpl>;
+  startupPromises: Map<string, Promise<CanonicalRuntimeDiagnostics>>;
+  startupConsumers: Map<string, CanonicalStartupConsumerState>;
 }
 
 function globalState(): GlobalRuntimeState {
   const global = globalThis as Record<symbol, unknown>;
   const existing = global[GLOBAL_KEY] as Partial<GlobalRuntimeState> | undefined;
   if (!existing) {
-    const created: GlobalRuntimeState = { apiVersion: API_VERSION, runtimes: new Map() };
+    const created: GlobalRuntimeState = {
+      apiVersion: API_VERSION,
+      runtimes: new Map(),
+      startupPromises: new Map(),
+      startupConsumers: new Map(),
+    };
     global[GLOBAL_KEY] = created;
     return created;
   }
   if (existing.apiVersion !== API_VERSION || !(existing.runtimes instanceof Map)) {
     throw new CanonicalGitRuntimeError("RUNTIME_SINGLETON_SPLIT", "incompatible process-global canonical runtime singleton");
   }
+  if (!(existing.startupPromises instanceof Map)) existing.startupPromises = new Map();
+  if (!(existing.startupConsumers instanceof Map)) existing.startupConsumers = new Map();
   return existing as GlobalRuntimeState;
 }
 
@@ -1288,8 +1316,181 @@ export async function getCanonicalGitRuntime(options: CanonicalGitRuntimeOptions
   return runtime;
 }
 
+function canonicalStartupKey(options: CanonicalGitRuntimeOptions): string {
+  return JSON.stringify([
+    path.resolve(options.abrainHome),
+    path.resolve(options.settingsPath ?? defaultSettingsPath()),
+    path.resolve(options.sourceRoot ?? path.join(__dirname, "..", "..")),
+    options.refName ?? "refs/heads/main",
+  ]);
+}
+
+function canonicalStartupConsumerKey(options: CanonicalGitRuntimeOptions, consumerId: string): string {
+  return `${canonicalStartupKey(options)}\0${consumerId}`;
+}
+
+function startupConsumerState(options: CanonicalGitRuntimeOptions, consumerId: string): CanonicalStartupConsumerState {
+  const state = globalState();
+  const key = canonicalStartupConsumerKey(options, consumerId);
+  const existing = state.startupConsumers.get(key);
+  if (existing) return existing;
+  const created: CanonicalStartupConsumerState = { scheduled: false };
+  state.startupConsumers.set(key, created);
+  return created;
+}
+
+function reportCanonicalStartupState(
+  state: CanonicalStartupConsumerState,
+  message: string,
+  type: CanonicalStartupNotificationType,
+): void {
+  if (state.reporter) {
+    try {
+      state.reporter(message, type);
+      return;
+    } catch {
+      // A session replacement may invalidate the previous UI between events.
+      // The next session_start replaces reporter; stderr remains reliable now.
+    }
+  }
+  console.error(`[canonical-startup] ${message}`);
+}
+
+/** Return the one process-global in-flight/successful startup promise for this
+ * runtime. Rejections are evicted so a repaired repo can retry in-process. */
+export function getCanonicalStartupPromise(options: CanonicalGitRuntimeOptions): Promise<CanonicalRuntimeDiagnostics> {
+  const state = globalState();
+  const key = canonicalStartupKey(options);
+  const existing = state.startupPromises.get(key);
+  if (existing) return existing;
+  const created = (async () => (await getCanonicalGitRuntime(options)).awaitStartup())();
+  state.startupPromises.set(key, created);
+  void created.catch(() => {
+    // Identity guard prevents an older rejection from deleting a replacement
+    // promise installed for the same key (the promise-cache ABA race).
+    if (state.startupPromises.get(key) === created) state.startupPromises.delete(key);
+  });
+  return created;
+}
+
+/** Refresh the current session's reporter without retaining it in a pending task. */
+export function setCanonicalStartupReporter(options: {
+  runtime: CanonicalGitRuntimeOptions;
+  consumerId: string;
+  reporter?: CanonicalStartupReporter;
+}): void {
+  startupConsumerState(options.runtime, options.consumerId).reporter = options.reporter;
+}
+
+/** Report through the most recently registered session UI, with stderr fallback. */
+export function reportCanonicalStartupConsumer(options: {
+  runtime: CanonicalGitRuntimeOptions;
+  consumerId: string;
+  message: string;
+  type: CanonicalStartupNotificationType;
+}): void {
+  reportCanonicalStartupState(
+    startupConsumerState(options.runtime, options.consumerId),
+    options.message,
+    options.type,
+  );
+}
+
+/** TUI and RPC are long-lived interactive hosts. Their session_start hooks
+ * must expose the editor/protocol before full local recovery completes. */
+export function canonicalStartupRunsInBackground(mode: CanonicalStartupHostMode | undefined): boolean {
+  return mode === "tui" || mode === "rpc";
+}
+
+function launchCanonicalStartupConsumer(
+  runtime: CanonicalGitRuntimeOptions,
+  consumerId: string,
+  state: CanonicalStartupConsumerState,
+): Promise<void> {
+  state.scheduled = false;
+  if (state.running) return state.running;
+  const running = (async () => {
+    let diagnostics: CanonicalRuntimeDiagnostics;
+    try {
+      diagnostics = await getCanonicalStartupPromise(runtime);
+    } catch (error) {
+      const latest = state.latest;
+      state.latest = undefined;
+      reportCanonicalStartupState(
+        state,
+        latest?.errorMessage(error) ?? `canonical startup threw: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+      return;
+    }
+
+    // Repeated /new, /resume, or /reload calls replace a pending continuation.
+    // If another session starts while onReady is running, execute the new latest
+    // continuation next; no task ever retains a session-bound UI object.
+    while (state.latest) {
+      const invocation = state.latest;
+      state.latest = undefined;
+      try {
+        if (diagnostics.startup === "ready") await invocation.onReady(diagnostics);
+        else {
+          await invocation.onBlocked?.(diagnostics);
+          reportCanonicalStartupState(state, invocation.blockedMessage(diagnostics), "warning");
+        }
+      } catch (error) {
+        reportCanonicalStartupState(state, invocation.errorMessage(error), "error");
+      }
+    }
+  })().finally(() => {
+    state.running = undefined;
+    if (state.latest && !state.scheduled) {
+      state.scheduled = true;
+      queueMicrotask(() => { void launchCanonicalStartupConsumer(runtime, consumerId, state); });
+    }
+  });
+  state.running = running;
+  return running;
+}
+
+/** Schedule one named post-barrier consumer. Pending calls for the same
+ * consumer are coalesced to the latest session continuation and reporter. */
+export function scheduleCanonicalStartupConsumer(options: {
+  runtime: CanonicalGitRuntimeOptions;
+  consumerId: string;
+  mode?: CanonicalStartupHostMode;
+  reporter?: CanonicalStartupReporter;
+  onReady: (diagnostics: CanonicalRuntimeDiagnostics) => Promise<void> | void;
+  onBlocked?: (diagnostics: CanonicalRuntimeDiagnostics) => Promise<void> | void;
+  blockedMessage?: (diagnostics: CanonicalRuntimeDiagnostics) => string;
+  errorMessage?: (error: unknown) => string;
+  schedule?: CanonicalStartupTaskScheduler;
+}): Promise<void> {
+  const state = startupConsumerState(options.runtime, options.consumerId);
+  state.reporter = options.reporter;
+  state.latest = {
+    onReady: options.onReady,
+    onBlocked: options.onBlocked,
+    blockedMessage: options.blockedMessage ?? ((diagnostics) => `canonical startup blocked: ${diagnostics.blockedReason ?? "unknown"}`),
+    errorMessage: options.errorMessage ?? ((error) => `canonical startup continuation threw: ${error instanceof Error ? error.message : String(error)}`),
+  };
+
+  if (!canonicalStartupRunsInBackground(options.mode)) {
+    return launchCanonicalStartupConsumer(options.runtime, options.consumerId, state);
+  }
+  if (!state.running && !state.scheduled) {
+    state.scheduled = true;
+    const schedule = options.schedule ?? ((task: () => void) => setImmediate(task));
+    try {
+      schedule(() => { void launchCanonicalStartupConsumer(options.runtime, options.consumerId, state); });
+    } catch (error) {
+      reportCanonicalStartupState(state, state.latest.errorMessage(error), "error");
+      queueMicrotask(() => { void launchCanonicalStartupConsumer(options.runtime, options.consumerId, state); });
+    }
+  }
+  return Promise.resolve();
+}
+
 export async function awaitCanonicalGitStartup(options: CanonicalGitRuntimeOptions): Promise<CanonicalRuntimeDiagnostics> {
-  return (await getCanonicalGitRuntime(options)).awaitStartup();
+  return getCanonicalStartupPromise(options);
 }
 
 export async function requestCanonicalDrain(options: CanonicalGitRuntimeOptions & { receipts: readonly ProducedArtifact[]; message?: string }): Promise<DrainResult> {

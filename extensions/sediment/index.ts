@@ -99,7 +99,12 @@ import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { loadAndValidateTransitionRegister } from "../_shared/transition-register";
-import { canonicalGitRuntimeEnabled, getCanonicalGitRuntime } from "../_shared/canonical-git-runtime";
+import {
+  canonicalGitRuntimeEnabled,
+  getCanonicalStartupPromise,
+  scheduleCanonicalStartupConsumer,
+  type CanonicalStartupHostMode,
+} from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 
@@ -1749,6 +1754,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           notify?(message: string, type?: "info" | "warning" | "error"): void;
         };
         cwd?: string;
+        mode?: CanonicalStartupHostMode;
         modelRegistry?: unknown;
       },
     ) => {
@@ -1775,19 +1781,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       }
 
       const abrainHome = resolveAbrainHomeForSediment();
-      if (canonicalGitRuntimeEnabled()) {
-        const startup = await (await getCanonicalGitRuntime({ abrainHome })).awaitStartup();
-        if (startup.startup === "blocked") {
-          const message = `sediment canonical startup blocked: ${startup.blockedReason ?? "unknown"}`;
-          try { ctx.ui?.notify?.(message, "warning"); } catch { console.error(`[sediment] ${message}`); }
-          return;
-        }
-      }
-
-      // ADR 0025 P0: ensure the sidecar staging directory exists only after
-      // the shared recovery barrier has opened.
-      await mkdir(abrainSedimentStagingPath(abrainHome), { recursive: true });
-
       const sessionId = readSessionId(ctx.sessionManager);
       const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
       const setStatus = setStatusRaw
@@ -1797,37 +1790,54 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             } catch {}
           }
         : undefined;
-      // Always refresh globalThis.__sediment_latestSetStatus so bg work
-      // from a PREVIOUS session (whose module was torn down by pi on
-      // /new) can still reach the current footer. Same for
-      // currentSessionId — used by maybeSetIdleIfNoInflight to tell
-      // same-session vs cross-session bg completion apart.
+      // Footer-only setup is safe before canonical recovery and makes the
+      // current session replace stale global UI bindings immediately.
       _G.__sediment_latestSetStatus = setStatus;
       stashConstraintCompileSetStatus(setStatusRaw);
       _G.__sediment_currentSessionId = sessionId;
 
       if ((_G.__sediment_inflightCount ?? 0) > 0 || multiViewReplayInFlight.size > 0) {
-        // Inflight bg work from previous session — show running, NOT idle.
         applySedimentStatus(setStatus, sessionId, "running", "prev session");
       } else {
         applySedimentStatus(setStatus, sessionId, "idle");
       }
 
-      const livenessTrigger = {
-        abrainHome,
-        cwd: path.resolve(ctx.cwd || process.cwd()),
-        activeProjectId: undefined,
-        knownProjectIds: listAbrainProjects(abrainHome),
-        settings,
-        modelRegistry: ctx.modelRegistry,
-        reason: "liveness_recovery",
+      const cwd = path.resolve(ctx.cwd || process.cwd());
+      const modelRegistry = ctx.modelRegistry;
+      const initializeAfterCanonicalBarrier = async (): Promise<void> => {
+        // No sediment directory or liveness writer is allowed before Path A.
+        await mkdir(abrainSedimentStagingPath(abrainHome), { recursive: true });
+        const livenessTrigger = {
+          abrainHome,
+          cwd,
+          activeProjectId: undefined,
+          knownProjectIds: listAbrainProjects(abrainHome),
+          settings,
+          modelRegistry,
+          reason: "liveness_recovery",
+        };
+        void (async () => {
+          const resumed = await resumeConstraintShadowAutoRefreshAtStartup(livenessTrigger);
+          if (!resumed.scheduled) await ensureConstraintShadowLiveness(livenessTrigger);
+        })().catch((err) => {
+          console.error(`[sediment] constraint shadow startup recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
       };
-      void (async () => {
-        const resumed = await resumeConstraintShadowAutoRefreshAtStartup(livenessTrigger);
-        if (!resumed.scheduled) await ensureConstraintShadowLiveness(livenessTrigger);
-      })().catch((err) => {
-        console.error(`[sediment] constraint shadow startup recovery failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
+
+      if (canonicalGitRuntimeEnabled()) {
+        const notify = ctx.ui?.notify?.bind(ctx.ui);
+        await scheduleCanonicalStartupConsumer({
+          runtime: { abrainHome },
+          consumerId: "sediment-runtime",
+          mode: ctx.mode,
+          reporter: notify,
+          blockedMessage: (startup) => `sediment canonical startup blocked: ${startup.blockedReason ?? "unknown"}`,
+          errorMessage: (error) => `sediment canonical startup continuation threw: ${error instanceof Error ? error.message : String(error)}`,
+          onReady: initializeAfterCanonicalBarrier,
+        });
+      } else {
+        await initializeAfterCanonicalBarrier();
+      }
     },
   );
 
@@ -2005,8 +2015,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const settingsSnapshot = snapshotSedimentSettings(settings);
 
       if (canonicalGitRuntimeEnabled()) {
-        const startup = await (await getCanonicalGitRuntime({ abrainHome: resolveAbrainHomeForSediment() })).awaitStartup();
-        if (startup.startup === "blocked") return;
+        const startup = await getCanonicalStartupPromise({ abrainHome: resolveAbrainHomeForSediment() });
+        if (startup.startup !== "ready") return;
       }
 
       // Ephemeral sessions (`pi --print --no-session`, dispatch_agent
