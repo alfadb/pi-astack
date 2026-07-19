@@ -2,16 +2,24 @@
 // embedding endpoint 从 pi-astack-settings.json → memory.embedding 解析，避免
 // 非 chat 模型进入通用模型清单。
 //
-// 用法: const { registry, embedKey } = makeOracleRegistry(MODELS_JSON);
+// pi 0.80.10: ModelRegistry.create(AuthStorage.create(), path) 已移除。
+// 公开契约 = ModelRuntime.create({ modelsPath }) + new ModelRegistry(runtime)。
+//
+// 用法: const { registry, embedKey } = await makeOracleRegistry(MODELS_JSON);
 //       if (!embedKey) { console.log("SKIP — no embedding key"); process.exit(0); }
 //       ... llmSearchEntriesWithVerdict(corpus, params, settings, registry)
 import fs from "node:fs";
 import { execSync } from "node:child_process";
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { embeddingConfig } from "./_embedding-config.mjs";
 
-export function makeOracleRegistry(modelsJsonPath) {
-  const real = ModelRegistry.create(AuthStorage.create(), modelsJsonPath);
+/**
+ * Build a ModelRegistry-compatible facade for oracle/smoke scripts.
+ * Awaits ModelRuntime.create so models.json is loaded before first find().
+ */
+export async function makeOracleRegistry(modelsJsonPath) {
+  const runtime = await ModelRuntime.create({ modelsPath: modelsJsonPath });
+  const real = new ModelRegistry(runtime);
   const MODELS = JSON.parse(fs.readFileSync(modelsJsonPath, "utf8"));
   const resolveKey = (provider) => {
     const ref = MODELS.providers?.[provider]?.apiKey || "";
@@ -37,5 +45,5 @@ export function makeOracleRegistry(modelsJsonPath) {
       return key ? { ok: true, apiKey: key, headers: {} } : real.getApiKeyAndHeaders(m);
     },
   };
-  return { registry, real, MODELS, resolveKey, embedBase, embedKey };
+  return { registry, real, runtime, MODELS, resolveKey, embedBase, embedKey };
 }

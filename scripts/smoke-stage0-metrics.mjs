@@ -29,7 +29,7 @@ const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/me
 const { memorySearchMetricsPath } = await jiti.import(path.join(repoRoot, "extensions/_shared/runtime.ts"));
 
 // 模型无关 registry: chat 从 models.json 解析，embedding 从 memory.embedding 专用配置解析。
-const { registry } = makeOracleRegistry(MODELS_JSON);
+const { registry } = await makeOracleRegistry(MODELS_JSON);
 
 // corpus: world(knowledge) — 小且快, stage0 字段齐全即可
 const corpus = [];

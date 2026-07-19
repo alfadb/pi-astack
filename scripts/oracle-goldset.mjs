@@ -48,7 +48,7 @@ const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 
 // 模型无关 registry: 从 models.json 解析 baseUrl+apiKey(!command 从 secrets.json), 任何已配 key 的 provider 都能跑(见 _oracle-registry.mjs)
-const { registry, embedKey: EMBED_KEY } = makeOracleRegistry(MODELS_JSON);
+const { registry, embedKey: EMBED_KEY } = await makeOracleRegistry(MODELS_JSON);
 
 const baseSettings = resolveSettings();
 function walkMd(dir) { const o = []; if (!fs.existsSync(dir)) return o; for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const p = path.join(dir, e.name); if (e.isDirectory()) o.push(...walkMd(p)); else if (e.name.endsWith(".md") && !e.name.startsWith("_")) o.push(p); } return o; }

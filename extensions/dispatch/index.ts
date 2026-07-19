@@ -27,7 +27,7 @@
  *   dispatch_parallel — parallel tasks (max 16)
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -1192,11 +1192,88 @@ function resolveModel(
   return (modelRegistry as any).find?.(provider, modelId);
 }
 
-function refreshModelRegistry(modelRegistry: any): any {
-  if (modelRegistry && typeof modelRegistry.refresh === "function") {
-    modelRegistry.refresh();
+/**
+ * pi 0.80.10+: ModelRegistry.refresh() reloads models.json asynchronously.
+ * Await before any synchronous find/getAll so sub-agents see the parent catalog.
+ *
+ * Concurrent runInProcess calls share one in-flight refresh per registry
+ * instance. The inflight map lives on globalThis[Symbol.for(...)] WeakMap so
+ * jiti moduleCache:false copies of this module still coalesce. Slot is cleared
+ * after settle (success or failure) so later calls re-run and failures retry.
+ */
+const _MODEL_REGISTRY_REFRESH_SINGLEFLIGHT_KEY = Symbol.for(
+  "pi-astack/dispatch/model-registry-refresh-singleflight/v1",
+);
+
+function _modelRegistryRefreshInflight(): WeakMap<object, Promise<unknown>> {
+  const g = globalThis as Record<symbol, unknown>;
+  let map = g[_MODEL_REGISTRY_REFRESH_SINGLEFLIGHT_KEY] as
+    | WeakMap<object, Promise<unknown>>
+    | undefined;
+  if (!(map instanceof WeakMap)) {
+    map = new WeakMap<object, Promise<unknown>>();
+    g[_MODEL_REGISTRY_REFRESH_SINGLEFLIGHT_KEY] = map;
   }
+  return map;
+}
+
+export async function refreshModelRegistry(modelRegistry: any): Promise<any> {
+  if (!modelRegistry || typeof modelRegistry.refresh !== "function") {
+    return modelRegistry;
+  }
+  // Only object registries can be WeakMap keys; primitives fall through to a
+  // direct await (tests/mocks almost always pass objects).
+  if (typeof modelRegistry !== "object" && typeof modelRegistry !== "function") {
+    await modelRegistry.refresh();
+    return modelRegistry;
+  }
+  const inflight = _modelRegistryRefreshInflight();
+  let pending = inflight.get(modelRegistry as object);
+  if (!pending) {
+    const created = Promise.resolve()
+      .then(() => modelRegistry.refresh())
+      .finally(() => {
+        if (inflight.get(modelRegistry as object) === created) {
+          inflight.delete(modelRegistry as object);
+        }
+      });
+    pending = created;
+    inflight.set(modelRegistry as object, created);
+  }
+  await pending;
   return modelRegistry;
+}
+
+/**
+ * Resolve the parent ModelRuntime that createAgentSession must inherit.
+ *
+ * pi 0.80.10 replaced createAgentSession modelRegistry option with
+ * modelRuntime. ExtensionContext still exposes the
+ * ModelRegistry facade; the underlying runtime is the public instance field
+ * `registry.runtime` (JS-visible; d.ts marks it private). Sub-agents must
+ * share this runtime so in-memory auth overlays and parent credentials apply.
+ *
+ * Single path only — no legacy AuthStorage/ModelRegistry.create fallback.
+ */
+export function resolveParentModelRuntime(modelRegistry: unknown): ModelRuntime {
+  if (modelRegistry == null || typeof modelRegistry !== "object") {
+    throw new Error(
+      "dispatch: parent modelRegistry is missing; cannot resolve ModelRuntime for createAgentSession (requires pi >= 0.80.10)",
+    );
+  }
+  const runtime = (modelRegistry as { runtime?: unknown }).runtime;
+  if (
+    runtime == null
+    || typeof runtime !== "object"
+    || typeof (runtime as { getModel?: unknown }).getModel !== "function"
+    || typeof (runtime as { reloadConfig?: unknown }).reloadConfig !== "function"
+  ) {
+    throw new Error(
+      "dispatch: parent ModelRegistry.runtime is not a ModelRuntime; " +
+      "sub-agent sessions cannot inherit parent auth/model overlay (requires pi >= 0.80.10 ModelRegistry facade)",
+    );
+  }
+  return runtime as ModelRuntime;
 }
 
 export function resolveMaxOutputTokens(model: any): number | undefined {
@@ -1487,10 +1564,10 @@ export async function runInProcess(
     };
   };
 
-  const refreshedModelRegistry = refreshModelRegistry(modelRegistry);
+  const refreshedModelRegistry = await refreshModelRegistry(modelRegistry);
   let toolCallCount = 0;
 
-  // Resolve model
+  // Resolve model against the awaited-refreshed parent registry.
   const model = resolveModel(modelStr, refreshedModelRegistry);
   if (!model) {
     return finalizeReasoningTrace({
@@ -1757,13 +1834,16 @@ export async function runInProcess(
       const subAgentSm = SessionManager.inMemory(process.cwd());
       markSessionAsSubAgent(subAgentSm);
 
-      // Create session
+      // Create session. pi 0.80.10 createAgentSession takes modelRuntime (not
+      // modelRegistry). Inherit the parent's ModelRuntime so memory overlays,
+      // runtime API keys, and models.json composition stay shared.
+      const parentModelRuntime = resolveParentModelRuntime(refreshedModelRegistry);
       const result = await createAgentSession({
         model,
         thinkingLevel: thinking as any, // "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
         tools,
         excludeTools: [...DISABLED_SUBAGENT_TOOLS],
-        modelRegistry: refreshedModelRegistry,
+        modelRuntime: parentModelRuntime,
         settingsManager,
         resourceLoader,
         sessionManager: subAgentSm,

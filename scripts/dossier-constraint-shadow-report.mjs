@@ -186,7 +186,7 @@ fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), 
 writeFile(path.join(tmp, "_shared", "pi-internals.js"), "exports.isSubAgentSession = () => false;\n");
 
 const modelsJsonPath = path.join(agentDir, "models.json");
-const { registry } = makeOracleRegistry(modelsJsonPath);
+const { registry } = await makeOracleRegistry(modelsJsonPath);
 const { listAbrainProjects } = require(path.join(tmp, "_shared", "runtime.js"));
 const { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } = require(path.join(tmp, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(tmp, "sediment", "constraint-compiler", "shadow-runner.js"));

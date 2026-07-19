@@ -94,7 +94,7 @@ if (!active) {
 }
 const projectId = active.projectId;
 const settings = sedimentSettings.resolveSedimentSettings();
-const { registry } = makeOracleRegistry(modelsJsonPath);
+const { registry } = await makeOracleRegistry(modelsJsonPath);
 const ledgerPath = promotion.stagingPromotionLedgerPath();
 const stagingPath = path.join(abrainHome, ".state", "sediment", "staging");
 const ledgerBefore = readJsonl(ledgerPath);

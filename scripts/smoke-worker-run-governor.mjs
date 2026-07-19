@@ -100,9 +100,14 @@ async function realAgentSessionEmptyRaceSmoke() {
     retry: { enabled: true, maxRetries: 8, baseDelayMs: 1 },
     compaction: { enabled: false },
   });
-  const authStorage = Pi.AuthStorage.inMemory();
-  authStorage.setRuntimeApiKey("faux", "offline-smoke-key");
-  const modelRegistry = Pi.ModelRegistry.inMemory(authStorage);
+  // pi 0.80.10: AuthStorage / ModelRegistry.inMemory are no longer the public
+  // createAgentSession path. Use ModelRuntime + registerProvider so faux has
+  // configured auth (setRuntimeApiKey alone is not enough — getAuth requires
+  // the provider to exist in the runtime catalog).
+  if (typeof Pi.ModelRuntime?.create !== "function") {
+    throw new Error("ModelRuntime.create missing — need @earendil-works/pi-coding-agent >= 0.80.10");
+  }
+  const modelRuntime = await Pi.ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
   const resourceLoader = new Pi.DefaultResourceLoader({
     cwd: root,
     agentDir: fs.mkdtempSync(path.join(os.tmpdir(), "worker-governor-agent-")),
@@ -121,6 +126,23 @@ async function realAgentSessionEmptyRaceSmoke() {
   await resourceLoader.reload();
 
   const faux = Faux.registerFauxProvider({ tokensPerSecond: 0 });
+  const fauxModel = faux.getModel();
+  modelRuntime.registerProvider("faux", {
+    baseUrl: fauxModel.baseUrl,
+    api: fauxModel.api,
+    apiKey: "offline-smoke-key",
+    authHeader: true,
+    models: [{
+      id: fauxModel.id,
+      name: fauxModel.name,
+      api: fauxModel.api,
+      reasoning: false,
+      input: ["text", "image"],
+      cost: fauxModel.cost,
+      contextWindow: fauxModel.contextWindow,
+      maxTokens: fauxModel.maxTokens,
+    }],
+  });
   faux.setResponses(Array.from({ length: 8 }, () => Faux.fauxAssistantMessage([{ type: "text", text: "" }])));
   const governor = new G.WorkerRunGovernor("real-agent-empty", "read_only", G.DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS, root);
   let session;
@@ -131,9 +153,8 @@ async function realAgentSessionEmptyRaceSmoke() {
   try {
     ({ session } = await Pi.createAgentSession({
       cwd: root,
-      model: faux.getModel(),
-      authStorage,
-      modelRegistry,
+      model: fauxModel,
+      modelRuntime,
       settingsManager,
       resourceLoader,
       sessionManager: Pi.SessionManager.inMemory(root),

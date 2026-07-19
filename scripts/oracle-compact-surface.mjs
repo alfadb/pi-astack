@@ -16,7 +16,7 @@ import { embeddingConfig } from "./_embedding-config.mjs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -28,7 +28,8 @@ const { llmSearchEntriesWithVerdict } = await jiti.import(path.join(repoRoot, "e
 const { parseEntry } = await jiti.import(path.join(repoRoot, "extensions/memory/parser.ts"));
 const { resolveSettings } = await jiti.import(path.join(repoRoot, "extensions/memory/settings.ts"));
 
-const realRegistry = ModelRegistry.create(AuthStorage.create(), MODELS_JSON);
+const realRuntime = await ModelRuntime.create({ modelsPath: MODELS_JSON });
+const realRegistry = new ModelRegistry(realRuntime);
 const EMBEDDING = embeddingConfig();
 const registry = {
   find: (p, id) => (p === "embedding" ? { __embed: true, provider: p, id, baseUrl: EMBEDDING.baseUrl } : realRegistry.find(p, id)),

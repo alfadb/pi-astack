@@ -163,6 +163,7 @@
     "smoke:compaction-tuner-vault-defer": "node scripts/smoke-compaction-tuner-vault-defer.mjs",
     "smoke:compaction-tuner-backoff": "node scripts/smoke-compaction-tuner-backoff.mjs",
     "smoke:compaction-tuner-turn-boundary": "node scripts/smoke-compaction-tuner-turn-boundary.mjs",
+    "smoke:pi-08010-compat": "node scripts/smoke-pi-08010-compat.mjs",
     "smoke:compaction-tuner-openai-remote-compact": "node scripts/smoke-compaction-tuner-openai-remote-compact.mjs",
     "smoke:openai-service-tier": "node scripts/smoke-openai-service-tier.mjs",
     "smoke:persistent-input-history": "node scripts/smoke-persistent-input-history.mjs",
@@ -305,14 +306,17 @@
     "openai": "6.26.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.80.2",
+    "@earendil-works/pi-agent-core": "0.80.10",
+    "@earendil-works/pi-ai": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-tui": "0.80.10",
     "jiti": "2.7.0",
     "typescript": "6.0.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.80.0 <1.0.0",
-    "@earendil-works/pi-ai": ">=0.80.0",
-    "@earendil-works/pi-tui": ">=0.80.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.10 <1.0.0",
+    "@earendil-works/pi-ai": ">=0.80.10 <1.0.0",
+    "@earendil-works/pi-tui": ">=0.80.10 <1.0.0",
     "typebox": "*"
   }
 }

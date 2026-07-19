@@ -80,19 +80,37 @@ check("normalizeTaskSpec ignores caller maxOutputTokens", () => {
   if ("maxOutputTokens" in task) throw new Error("caller budget must not survive normalization");
 });
 
-check("runInProcess refreshes modelRegistry before resolving maxTokens", () => {
-  if (!/function refreshModelRegistry\(modelRegistry: any\): any \{[\s\S]{0,180}?modelRegistry\.refresh\(\);[\s\S]{0,80}?return modelRegistry;[\s\S]{0,10}?\}/.test(dispatchSrc)) {
-    throw new Error("modelRegistry refresh helper missing");
+check("runInProcess awaits modelRegistry.refresh then passes parent ModelRuntime", () => {
+  if (!/export async function refreshModelRegistry\(modelRegistry: any\): Promise<any>/.test(dispatchSrc)) {
+    throw new Error("async modelRegistry refresh helper missing (must be exported)");
   }
-  const refreshIdx = dispatchSrc.search(/const refreshedModelRegistry = refreshModelRegistry\(modelRegistry\);/);
+  if (!/model-registry-refresh-singleflight/.test(dispatchSrc) || !/WeakMap/.test(dispatchSrc)) {
+    throw new Error("refresh must singleflight via globalThis Symbol.for WeakMap");
+  }
+  if (!/await pending/.test(dispatchSrc) && !/await modelRegistry\.refresh\(\)/.test(dispatchSrc)) {
+    throw new Error("refresh helper must await Promise refresh / inflight");
+  }
+  if (!/export function resolveParentModelRuntime\(modelRegistry: unknown\): (unknown|ModelRuntime)/.test(dispatchSrc)) {
+    throw new Error("resolveParentModelRuntime helper missing");
+  }
+  if (!/\(modelRegistry as \{ runtime\?: unknown \}\)\.runtime|modelRegistry\.runtime/.test(dispatchSrc)) {
+    throw new Error("parent ModelRuntime must be taken from registry.runtime");
+  }
+  const refreshIdx = dispatchSrc.search(/const refreshedModelRegistry = await refreshModelRegistry\(modelRegistry\);/);
   const resolveIdx = dispatchSrc.search(/const model = resolveModel\(modelStr, refreshedModelRegistry\);/);
+  const runtimeIdx = dispatchSrc.search(/const parentModelRuntime = resolveParentModelRuntime\(refreshedModelRegistry\);/);
   const createSessionIdx = dispatchSrc.search(/await createAgentSession\(/);
-  if (refreshIdx < 0 || resolveIdx < 0 || createSessionIdx < 0) throw new Error("could not locate refresh lifecycle sites");
-  if (!(refreshIdx < resolveIdx && resolveIdx < createSessionIdx)) {
-    throw new Error("modelRegistry must refresh before model resolution and session creation");
+  if (refreshIdx < 0 || resolveIdx < 0 || runtimeIdx < 0 || createSessionIdx < 0) {
+    throw new Error("could not locate refresh / runtime / session lifecycle sites");
   }
-  if (!/modelRegistry: refreshedModelRegistry,/.test(dispatchSrc)) {
-    throw new Error("createAgentSession must receive the refreshed registry");
+  if (!(refreshIdx < resolveIdx && resolveIdx < runtimeIdx && runtimeIdx < createSessionIdx)) {
+    throw new Error("must await refresh → resolve model → resolve parent runtime → createAgentSession");
+  }
+  if (!/modelRuntime: parentModelRuntime,/.test(dispatchSrc)) {
+    throw new Error("createAgentSession must receive parent ModelRuntime");
+  }
+  if (/modelRegistry: refreshedModelRegistry,/.test(dispatchSrc)) {
+    throw new Error("createAgentSession must not pass stale modelRegistry option on pi 0.80.10+");
   }
 });
 

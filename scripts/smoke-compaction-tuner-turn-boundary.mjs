@@ -72,15 +72,30 @@ check("patch anchors on AgentSession._buildRuntime and _emit", () => {
   }
 });
 
-check("patch installs prepareNextTurn and createLoopConfig wrappers", () => {
+check("patch installs prepareNextTurnWithContext chain without createLoopConfig override", () => {
+  if (!/agent\.prepareNextTurnWithContext\s*=\s*async/.test(internalsSrc)) {
+    throw new Error("agent.prepareNextTurnWithContext wrapper missing");
+  }
   if (!/agent\.prepareNextTurn\s*=\s*async/.test(internalsSrc)) {
-    throw new Error("agent.prepareNextTurn wrapper missing");
+    throw new Error("agent.prepareNextTurn legacy wrapper missing");
   }
-  if (!/agent\.createLoopConfig\s*=/.test(internalsSrc)) {
-    throw new Error("agent.createLoopConfig wrapper missing");
+  if (/agent\.createLoopConfig\s*=/.test(internalsSrc)) {
+    throw new Error("turn-boundary must not override createLoopConfig (bypasses host prepareNextTurnWithContext / maxTokens wrappers)");
   }
-  if (!/Object\.prototype\.hasOwnProperty\.call\(agentRecord, TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_ORIGINAL\)/.test(internalsSrc)) {
+  if (!/mergeTurnBoundaryUpdate/.test(internalsSrc)) {
+    throw new Error("host/compaction merge helper missing");
+  }
+  if (!/runHostThenCompaction/.test(internalsSrc) || !/TURN_BOUNDARY_AGENT_REENTRY/.test(internalsSrc)) {
+    throw new Error("turn-boundary must use per-agent reentry mark + single host/compaction entry");
+  }
+  if (!/Object\.prototype\.hasOwnProperty\.call\(\s*agentRecord,\s*TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_ORIGINAL/.test(internalsSrc)) {
     throw new Error("prepareNextTurn original capture must distinguish absent from stored undefined");
+  }
+  if (!/TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_WITH_CONTEXT_ORIGINAL/.test(internalsSrc)) {
+    throw new Error("prepareNextTurnWithContext original capture symbol missing");
+  }
+  if (!/AgentSession\._installAgentNextTurnRefresh/.test(internalsSrc)) {
+    throw new Error("verifyPiInternals must probe host prepareNextTurnWithContext installer");
   }
 });
 
@@ -467,7 +482,7 @@ await checkAsync("InteractiveMode.handleEvent passes through non-compaction_end 
   }
 });
 
-await checkAsync("prepareNextTurn forwards real turn context through createLoopConfig", async () => {
+await checkAsync("createLoopConfig prefers prepareNextTurnWithContext and forwards real turn context", async () => {
   _resetTurnBoundaryCompactionHooksForTests();
   const observed = [];
   installTurnBoundaryCompactionPatch("smoke-loop-context", {
@@ -484,9 +499,14 @@ await checkAsync("prepareNextTurn forwards real turn context through createLoopC
   });
   const session = { agent, _runAutoCompaction: async () => false };
   AgentSession.prototype._buildRuntime.call(session, { activeToolNames: [] });
-  agent.prepareNextTurn = async (ctx) => {
+  // Capture after patch install: createLoopConfig must call WithContext, not a forced prepareNextTurn.
+  const wrappedWithContext = agent.prepareNextTurnWithContext;
+  if (typeof wrappedWithContext !== "function") {
+    throw new Error("prepareNextTurnWithContext was not installed by turn-boundary patch");
+  }
+  agent.prepareNextTurnWithContext = async (ctx, signal) => {
     observed.push(ctx);
-    return undefined;
+    return wrappedWithContext.call(agent, ctx, signal);
   };
   const config = agent.createLoopConfig();
   await runAgentLoop(
@@ -518,12 +538,96 @@ await checkAsync("prepareNextTurn forwards real turn context through createLoopC
   );
   const ctx = observed[0];
   if (!ctx || !Array.isArray(ctx.newMessages) || ctx.newMessages.length !== 2) {
-    throw new Error(`prepareNextTurn did not receive real nextTurnContext: ${JSON.stringify(ctx)}`);
+    throw new Error(`prepareNextTurnWithContext did not receive real nextTurnContext: ${JSON.stringify(ctx)}`);
   }
   if (ctx.message?.role !== "assistant") throw new Error("nextTurnContext.message missing assistant");
 });
 
-await checkAsync("versioned prepareNextTurn reinstall does not capture old wrapper as original", async () => {
+await checkAsync("prepareNextTurnWithContext chains host refresh then compaction and preserves host fields", async () => {
+  _resetTurnBoundaryCompactionHooksForTests();
+  let hostCalls = 0;
+  let compactCalls = 0;
+  installTurnBoundaryCompactionPatch("smoke-host-chain", {
+    shouldCompact: () => ({
+      decision: "trigger",
+      sessionId: "sess-host-chain",
+      usage: { tokens: 90, contextWindow: 100, percent: 90 },
+    }),
+  });
+
+  const hostModel = { provider: "host", id: "refreshed" };
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: "agent-sys",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "u" }], timestamp: 1 },
+        { role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "big" }], timestamp: 2 },
+      ],
+      tools: [{ name: "read", description: "r", parameters: { type: "object", properties: {}, required: [] } }],
+      model: { provider: "p", id: "m" },
+      thinkingLevel: "low",
+    },
+  });
+  // Simulate host AgentSession._installAgentNextTurnRefresh before _buildRuntime patch runs.
+  agent.prepareNextTurnWithContext = async (turn, _signal) => {
+    hostCalls++;
+    const previousContext = turn?.context ?? { messages: agent.state.messages.slice() };
+    return {
+      context: {
+        ...previousContext,
+        systemPrompt: "host-refreshed-sys",
+        tools: [{ name: "host-tool" }],
+      },
+      model: hostModel,
+      thinkingLevel: "high",
+    };
+  };
+  const session = {
+    agent,
+    model: { provider: "p", id: "m", contextWindow: 100 },
+    thinkingLevel: "low",
+    isCompacting: false,
+    _runAutoCompaction: async () => {
+      compactCalls++;
+      agent.state.messages = [
+        { role: "user", content: [{ type: "text", text: "u" }], timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "summary" }], timestamp: 3 },
+      ];
+      return true;
+    },
+  };
+  AgentSession.prototype._buildRuntime.call(session, { activeToolNames: [] });
+  const update = await agent.prepareNextTurnWithContext({
+    message: agent.state.messages.at(-1),
+    toolResults: [agent.state.messages.at(-1)],
+    context: {
+      systemPrompt: "stale",
+      messages: agent.state.messages.slice(),
+      tools: agent.state.tools.slice(),
+    },
+    newMessages: agent.state.messages.slice(),
+  }, new AbortController().signal);
+
+  if (hostCalls !== 1) throw new Error(`expected host prepareNextTurnWithContext once, got ${hostCalls}`);
+  if (compactCalls !== 1) throw new Error(`expected compaction once, got ${compactCalls}`);
+  if (!update) throw new Error("expected merged turn update");
+  if (update.context?.systemPrompt !== "host-refreshed-sys") {
+    throw new Error(`host systemPrompt not preserved: ${update.context?.systemPrompt}`);
+  }
+  if (!Array.isArray(update.context?.tools) || update.context.tools[0]?.name !== "host-tool") {
+    throw new Error(`host tools not preserved: ${JSON.stringify(update.context?.tools)}`);
+  }
+  if (update.model !== hostModel) throw new Error("host model not preserved");
+  if (update.thinkingLevel !== "high") throw new Error(`host thinkingLevel not preserved: ${update.thinkingLevel}`);
+  if (!Array.isArray(update.context?.messages) || update.context.messages.length !== 2) {
+    throw new Error(`compaction messages missing: ${JSON.stringify(update.context?.messages)}`);
+  }
+  if (update.context.messages.at(-1)?.content?.[0]?.text !== "summary") {
+    throw new Error("compaction messages not applied");
+  }
+});
+
+await checkAsync("versioned prepareNextTurnWithContext reinstall does not capture old wrapper as original", async () => {
   _resetTurnBoundaryCompactionHooksForTests();
   let decisions = 0;
   installTurnBoundaryCompactionPatch("smoke-versioned-reinstall", {
@@ -548,15 +652,271 @@ await checkAsync("versioned prepareNextTurn reinstall does not capture old wrapp
     _runAutoCompaction: async () => true,
   };
   AgentSession.prototype._buildRuntime.call(session, { activeToolNames: [] });
-  const oldWrapper = agent.prepareNextTurn;
+  const oldWrapper = agent.prepareNextTurnWithContext;
   const installedSym = Symbol.for("pi-astack.turn-boundary-compaction.agent.installed");
-  const originalSym = Symbol.for("pi-astack.turn-boundary-compaction.agent.prepareNextTurn.original");
+  const originalSym = Symbol.for("pi-astack.turn-boundary-compaction.agent.prepareNextTurnWithContext.original");
   agent[installedSym] = "older-version";
   AgentSession.prototype._buildRuntime.call(session, { activeToolNames: [] });
-  if (agent.prepareNextTurn === oldWrapper) throw new Error("version mismatch did not reinstall prepareNextTurn wrapper");
+  if (agent.prepareNextTurnWithContext === oldWrapper) throw new Error("version mismatch did not reinstall prepareNextTurnWithContext wrapper");
   if (agent[originalSym] !== undefined) throw new Error("stored undefined original was overwritten by old wrapper");
-  await agent.prepareNextTurn(new AbortController().signal);
+  await agent.prepareNextTurnWithContext({
+    context: { messages: agent.state.messages.slice() },
+    newMessages: agent.state.messages.slice(),
+  }, new AbortController().signal);
   if (decisions !== 1) throw new Error(`expected one shouldCompact call after reinstall, got ${decisions}`);
+});
+
+await checkAsync("host original prepareNextTurnWithContext dynamically calling prepareNextTurn runs host+compaction once each", async () => {
+  _resetTurnBoundaryCompactionHooksForTests();
+  let hostCalls = 0;
+  let originalPrepareCalls = 0;
+  let compactCalls = 0;
+  installTurnBoundaryCompactionPatch("smoke-host-dynamic-reentry", {
+    shouldCompact: () => ({
+      decision: "trigger",
+      sessionId: "sess-reentry",
+      usage: { tokens: 90, contextWindow: 100, percent: 90 },
+    }),
+  });
+
+  const hostModel = { provider: "host", id: "reentry" };
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: "agent-sys",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "u" }], timestamp: 1 },
+        { role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "big" }], timestamp: 2 },
+      ],
+      tools: [{ name: "read", description: "r", parameters: { type: "object", properties: {}, required: [] } }],
+      model: { provider: "p", id: "m" },
+      thinkingLevel: "low",
+    },
+  });
+  // Pre-existing prepareNextTurn (captured as original by the patch).
+  agent.prepareNextTurn = async (_signal) => {
+    originalPrepareCalls++;
+    return undefined;
+  };
+  // Simulate host _installAgentNextTurnRefresh previous chain that DYNAMICALLY
+  // looks up agent.prepareNextTurn (not a closed-over original).
+  agent.prepareNextTurnWithContext = async (turn, signal) => {
+    hostCalls++;
+    await agent.prepareNextTurn?.(signal);
+    const previousContext = turn?.context ?? { messages: agent.state.messages.slice() };
+    return {
+      context: {
+        ...previousContext,
+        systemPrompt: "host-reentry-sys",
+        tools: [{ name: "host-tool" }],
+      },
+      model: hostModel,
+      thinkingLevel: "high",
+    };
+  };
+  const session = {
+    agent,
+    model: { provider: "p", id: "m", contextWindow: 100 },
+    thinkingLevel: "low",
+    isCompacting: false,
+    _runAutoCompaction: async () => {
+      compactCalls++;
+      agent.state.messages = [
+        { role: "user", content: [{ type: "text", text: "u" }], timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "summary" }], timestamp: 3 },
+      ];
+      return true;
+    },
+  };
+  AgentSession.prototype._buildRuntime.call(session, { activeToolNames: [] });
+  const update = await agent.prepareNextTurnWithContext({
+    message: agent.state.messages.at(-1),
+    toolResults: [agent.state.messages.at(-1)],
+    context: {
+      systemPrompt: "stale",
+      messages: agent.state.messages.slice(),
+      tools: agent.state.tools.slice(),
+    },
+    newMessages: agent.state.messages.slice(),
+  }, new AbortController().signal);
+
+  if (hostCalls !== 1) throw new Error(`expected host WithContext once, got ${hostCalls}`);
+  if (originalPrepareCalls !== 1) {
+    throw new Error(`expected original prepareNextTurn once via host dynamic call, got ${originalPrepareCalls}`);
+  }
+  if (compactCalls !== 1) throw new Error(`expected compaction once (no dual), got ${compactCalls}`);
+  if (update?.context?.systemPrompt !== "host-reentry-sys") {
+    throw new Error(`host systemPrompt lost: ${update?.context?.systemPrompt}`);
+  }
+  if (update?.context?.messages?.at(-1)?.content?.[0]?.text !== "summary") {
+    throw new Error("compaction messages not applied under reentry");
+  }
+});
+
+await checkAsync("legacy-only prepareNextTurn still runs compaction without host WithContext", async () => {
+  _resetTurnBoundaryCompactionHooksForTests();
+  let compactCalls = 0;
+  let legacyHostCalls = 0;
+  installTurnBoundaryCompactionPatch("smoke-legacy-only", {
+    shouldCompact: () => ({
+      decision: "trigger",
+      sessionId: "sess-legacy",
+      usage: { tokens: 90, contextWindow: 100, percent: 90 },
+    }),
+  });
+
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: "sys",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "u" }], timestamp: 1 },
+        { role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "big" }], timestamp: 2 },
+      ],
+      tools: [],
+      model: { provider: "p", id: "m" },
+      thinkingLevel: "low",
+    },
+  });
+  // Pre-0.80.10 host: only prepareNextTurn exists (no WithContext).
+  agent.prepareNextTurn = async (_signal) => {
+    legacyHostCalls++;
+    return {
+      context: {
+        systemPrompt: "legacy-host-sys",
+        messages: agent.state.messages.slice(),
+        tools: [],
+      },
+      thinkingLevel: "medium",
+    };
+  };
+  delete agent.prepareNextTurnWithContext;
+  const session = {
+    agent,
+    model: { provider: "p", id: "m", contextWindow: 100 },
+    thinkingLevel: "low",
+    isCompacting: false,
+    _runAutoCompaction: async () => {
+      compactCalls++;
+      agent.state.messages = [
+        { role: "user", content: [{ type: "text", text: "u" }], timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "legacy-summary" }], timestamp: 3 },
+      ];
+      return true;
+    },
+  };
+  AgentSession.prototype._buildRuntime.call(session, { activeToolNames: [] });
+  const update = await agent.prepareNextTurn(new AbortController().signal);
+  if (legacyHostCalls !== 1) throw new Error(`expected legacy host prepareNextTurn once, got ${legacyHostCalls}`);
+  if (compactCalls !== 1) throw new Error(`legacy-only must still compact once, got ${compactCalls}`);
+  if (update?.context?.systemPrompt !== "legacy-host-sys") {
+    throw new Error(`legacy host systemPrompt lost: ${update?.context?.systemPrompt}`);
+  }
+  if (update?.context?.messages?.at(-1)?.content?.[0]?.text !== "legacy-summary") {
+    throw new Error("legacy compaction messages missing");
+  }
+});
+
+await checkAsync("v3 createLoopConfig residual still yields host refresh + compaction once each (no maxTokens clobber)", async () => {
+  _resetTurnBoundaryCompactionHooksForTests();
+  let hostCalls = 0;
+  let compactCalls = 0;
+  let maxTokensSeen;
+  installTurnBoundaryCompactionPatch("smoke-v3-residual-clc", {
+    shouldCompact: () => ({
+      decision: "trigger",
+      sessionId: "sess-v3-residual",
+      usage: { tokens: 90, contextWindow: 100, percent: 90 },
+    }),
+  });
+
+  const hostModel = { provider: "host", id: "v3-residual" };
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: "agent-sys",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "u" }], timestamp: 1 },
+        { role: "toolResult", toolCallId: "t1", toolName: "read", content: [{ type: "text", text: "big" }], timestamp: 2 },
+      ],
+      tools: [{ name: "read", description: "r", parameters: { type: "object", properties: {}, required: [] } }],
+      model: { provider: "p", id: "m" },
+      thinkingLevel: "low",
+    },
+  });
+
+  // Residual v3 turn-boundary createLoopConfig wrapper (forces prepareNextTurn on
+  // the loop config). Must remain intact so dispatch maxTokens wrappers compose.
+  const originalCreateLoopConfig = agent.createLoopConfig.bind(agent);
+  agent.createLoopConfig = (...args) => {
+    const config = originalCreateLoopConfig(...args);
+    if (!config || typeof config !== "object") return config;
+    // Simulate dispatch maxTokens wrapper layered with residual v3:
+    const withMax = { ...config, maxTokens: 12345 };
+    withMax.prepareNextTurn = async (turnContext) => await agent.prepareNextTurn?.(turnContext, agent);
+    return withMax;
+  };
+
+  // Host refresh installed before patch (like AgentSession._installAgentNextTurnRefresh).
+  agent.prepareNextTurnWithContext = async (turn, signal) => {
+    hostCalls++;
+    // Dynamic reentry into prepareNextTurn — residual v3 path also uses this.
+    await agent.prepareNextTurn?.(signal);
+    const previousContext = turn?.context ?? { messages: agent.state.messages.slice() };
+    return {
+      context: {
+        ...previousContext,
+        systemPrompt: "host-v3-sys",
+        tools: [{ name: "host-tool" }],
+      },
+      model: hostModel,
+      thinkingLevel: "high",
+    };
+  };
+
+  const session = {
+    agent,
+    model: { provider: "p", id: "m", contextWindow: 100 },
+    thinkingLevel: "low",
+    isCompacting: false,
+    _runAutoCompaction: async () => {
+      compactCalls++;
+      agent.state.messages = [
+        { role: "user", content: [{ type: "text", text: "u" }], timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "v3-summary" }], timestamp: 3 },
+      ];
+      return true;
+    },
+  };
+  AgentSession.prototype._buildRuntime.call(session, { activeToolNames: [] });
+
+  // Residual createLoopConfig must still be the outer wrapper (not restored/removed).
+  const config = agent.createLoopConfig();
+  maxTokensSeen = config?.maxTokens;
+  if (maxTokensSeen !== 12345) {
+    throw new Error(`maxTokens wrapper clobbered by turn-boundary: ${maxTokensSeen}`);
+  }
+  if (typeof config.prepareNextTurn !== "function") {
+    throw new Error("residual v3 createLoopConfig prepareNextTurn missing");
+  }
+
+  const update = await config.prepareNextTurn({
+    message: agent.state.messages.at(-1),
+    toolResults: [agent.state.messages.at(-1)],
+    context: {
+      systemPrompt: "stale",
+      messages: agent.state.messages.slice(),
+      tools: agent.state.tools.slice(),
+    },
+    newMessages: agent.state.messages.slice(),
+  });
+
+  if (hostCalls !== 1) throw new Error(`expected host refresh once under v3 residual, got ${hostCalls}`);
+  if (compactCalls !== 1) throw new Error(`expected compaction once under v3 residual, got ${compactCalls}`);
+  if (update?.context?.systemPrompt !== "host-v3-sys") {
+    throw new Error(`host systemPrompt lost under v3 residual: ${update?.context?.systemPrompt}`);
+  }
+  if (update?.model !== hostModel) throw new Error("host model lost under v3 residual");
+  if (update?.context?.messages?.at(-1)?.content?.[0]?.text !== "v3-summary") {
+    throw new Error("compaction messages missing under v3 residual");
+  }
 });
 
 await checkAsync("prepareNextTurn respects aborted agent signal before compaction", async () => {

@@ -10,7 +10,7 @@
  *   parity   = stage0 最终 hits 与 baseline hits 的重合(Jaccard)
  * coverage 高(≥95%)即 stage0 不丢 full-body 会选的条目 → 召回 parity。
  *
- * 用真实 ModelRegistry(AuthStorage.create + models.json)跑真实 LLM。
+ * 用真实 ModelRegistry(ModelRuntime.create + models.json)跑真实 LLM。
  * 需要 stage1/stage2 model 的 auth 已配。离线工具, 不在交互路。
  */
 import { createJiti } from "jiti";
@@ -38,7 +38,7 @@ const MODELS_JSON = path.join(os.homedir(), ".pi", "agent", "models.json");
 // (同 smoke-stage0-pool) —— 否则 query embed 失败会熔断成 sparse_fallback,
 // 测不到真实 dense hybrid。
 // 模型无关 registry: 从 models.json 解析 baseUrl+apiKey(!command 从 secrets.json), 任何已配 key 的 provider 都能跑(见 _oracle-registry.mjs)
-const { registry, embedKey: EMBED_KEY } = makeOracleRegistry(MODELS_JSON);
+const { registry, embedKey: EMBED_KEY } = await makeOracleRegistry(MODELS_JSON);
 if (!EMBED_KEY) { console.log("oracle: SKIP — no embedding key in ~/.pi/secrets.json(dense 会熔断)"); process.exit(0); }
 
 const baseSettings = resolveSettings();

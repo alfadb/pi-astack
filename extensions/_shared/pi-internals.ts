@@ -54,10 +54,19 @@ type AgentLoopTurnUpdate = {
 
 type PrepareNextTurnFn = (signalOrContext?: AbortSignal | PrepareNextTurnContext, signalSource?: AbortSignalSource) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 
+type PrepareNextTurnWithContextFn = (
+  context: PrepareNextTurnContext,
+  signal?: AbortSignal,
+) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+
 type PrepareNextTurnContext = {
   message?: unknown;
   toolResults?: unknown[];
-  context?: { messages?: unknown[] };
+  context?: {
+    systemPrompt?: string;
+    messages?: unknown[];
+    tools?: unknown[];
+  };
   newMessages?: unknown[];
 };
 
@@ -66,6 +75,8 @@ type InteractiveHandleEventFn = (event: Record<string, unknown>) => Promise<void
 interface InternalAgentLike {
   createLoopConfig?: (...args: unknown[]) => unknown;
   prepareNextTurn?: PrepareNextTurnFn;
+  /** pi >= 0.80.10 host refresh hook; preferred over prepareNextTurn by agent-core createLoopConfig. */
+  prepareNextTurnWithContext?: PrepareNextTurnWithContextFn;
   state?: {
     systemPrompt?: string;
     messages?: unknown[];
@@ -133,10 +144,15 @@ const TURN_BOUNDARY_BUILD_RUNTIME_PATCHED = Symbol.for("pi-astack.turn-boundary-
 const TURN_BOUNDARY_ORIGINAL_BUILD_RUNTIME = Symbol.for("pi-astack.turn-boundary-compaction.AgentSession._buildRuntime.original");
 const TURN_BOUNDARY_EMIT_PATCHED = Symbol.for("pi-astack.turn-boundary-compaction.AgentSession._emit.patched");
 const TURN_BOUNDARY_ORIGINAL_EMIT = Symbol.for("pi-astack.turn-boundary-compaction.AgentSession._emit.original");
-const TURN_BOUNDARY_PATCH_VERSION = "2026-07-10.turn-boundary-compaction.v3";
+const TURN_BOUNDARY_PATCH_VERSION = "2026-07-19.turn-boundary-compaction.v4";
 const TURN_BOUNDARY_INSTALLED_AGENT = Symbol.for("pi-astack.turn-boundary-compaction.agent.installed");
 const TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_ORIGINAL = Symbol.for("pi-astack.turn-boundary-compaction.agent.prepareNextTurn.original");
-const TURN_BOUNDARY_AGENT_CREATE_LOOP_CONFIG_ORIGINAL = Symbol.for("pi-astack.turn-boundary-compaction.agent.createLoopConfig.original");
+const TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_WITH_CONTEXT_ORIGINAL = Symbol.for("pi-astack.turn-boundary-compaction.agent.prepareNextTurnWithContext.original");
+/** Per-agent reentry mark: host original prepareNextTurnWithContext may dynamically
+ *  call agent.prepareNextTurn (0.80.10 _installAgentNextTurnRefresh captures a
+ *  dynamic this.agent.prepareNextTurn lookup). Without this mark both wrappers
+ *  would each run compaction. */
+const TURN_BOUNDARY_AGENT_REENTRY = Symbol.for("pi-astack.turn-boundary-compaction.agent.reentry");
 const INTERACTIVE_HANDLE_EVENT_PATCHED = Symbol.for("pi-astack.turn-boundary-compaction.InteractiveMode.handleEvent.patched");
 const INTERACTIVE_ORIGINAL_HANDLE_EVENT = Symbol.for("pi-astack.turn-boundary-compaction.InteractiveMode.handleEvent.original");
 const TURN_BOUNDARY_GLOBAL_STATE = Symbol.for("pi-astack.turn-boundary-compaction.global-state");
@@ -322,8 +338,35 @@ function isPrepareNextTurnContext(value: unknown): value is PrepareNextTurnConte
   return !!value && typeof value === "object" && ("context" in value || "newMessages" in value || "toolResults" in value);
 }
 
-function isLoopConfig(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object";
+/**
+ * Merge host prepareNextTurn* refresh with turn-boundary compaction.
+ *
+ * Host (AgentSession._installAgentNextTurnRefresh) owns systemPrompt/tools/
+ * model/thinkingLevel refresh. Compaction owns post-summary messages. Do not
+ * let compaction clobber host refresh fields, and do not replace createLoopConfig
+ * (that would bypass prepareNextTurnWithContext and break maxTokens wrappers).
+ */
+function mergeTurnBoundaryUpdate(
+  hostUpdate: AgentLoopTurnUpdate | undefined,
+  compactionUpdate: AgentLoopTurnUpdate | undefined,
+): AgentLoopTurnUpdate | undefined {
+  if (!compactionUpdate) return hostUpdate;
+  if (!hostUpdate) return compactionUpdate;
+  const hostContext = hostUpdate.context;
+  const compactionContext = compactionUpdate.context;
+  return {
+    ...hostUpdate,
+    ...compactionUpdate,
+    context: hostContext || compactionContext
+      ? {
+          systemPrompt: hostContext?.systemPrompt ?? compactionContext?.systemPrompt ?? "",
+          messages: compactionContext?.messages ?? hostContext?.messages ?? [],
+          tools: hostContext?.tools ?? compactionContext?.tools ?? [],
+        }
+      : undefined,
+    model: hostUpdate.model ?? compactionUpdate.model,
+    thinkingLevel: hostUpdate.thinkingLevel ?? compactionUpdate.thinkingLevel,
+  };
 }
 
 function installPrepareNextTurnOnSession(session: InternalAgentSessionLike): void {
@@ -332,43 +375,116 @@ function installPrepareNextTurnOnSession(session: InternalAgentSessionLike): voi
   const agentRecord = agent as InternalAgentLike & Record<PropertyKey, unknown>;
   if (agentRecord[TURN_BOUNDARY_INSTALLED_AGENT] === TURN_BOUNDARY_PATCH_VERSION) return;
 
-  const hasOriginalPrepareNextTurn = Object.prototype.hasOwnProperty.call(agentRecord, TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_ORIGINAL);
+  // Capture originals once. hasOwnProperty distinguishes "stored undefined"
+  // (no prior hook) from "not yet captured" so versioned reinstall cannot
+  // chain our own previous wrapper as the host original.
+  const hasOriginalWithContext = Object.prototype.hasOwnProperty.call(
+    agentRecord,
+    TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_WITH_CONTEXT_ORIGINAL,
+  );
+  const originalPrepareNextTurnWithContext = hasOriginalWithContext
+    ? agentRecord[TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_WITH_CONTEXT_ORIGINAL] as PrepareNextTurnWithContextFn | undefined
+    : typeof agent.prepareNextTurnWithContext === "function"
+      ? agent.prepareNextTurnWithContext.bind(agent)
+      : undefined;
+  if (!hasOriginalWithContext) {
+    agentRecord[TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_WITH_CONTEXT_ORIGINAL] = originalPrepareNextTurnWithContext;
+  }
+
+  const hasOriginalPrepareNextTurn = Object.prototype.hasOwnProperty.call(
+    agentRecord,
+    TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_ORIGINAL,
+  );
   const originalPrepareNextTurn = hasOriginalPrepareNextTurn
     ? agentRecord[TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_ORIGINAL] as PrepareNextTurnFn | undefined
-    : typeof agent.prepareNextTurn === "function" ? agent.prepareNextTurn.bind(agent) : undefined;
+    : typeof agent.prepareNextTurn === "function"
+      ? agent.prepareNextTurn.bind(agent)
+      : undefined;
   if (!hasOriginalPrepareNextTurn) {
     agentRecord[TURN_BOUNDARY_AGENT_PREPARE_NEXT_TURN_ORIGINAL] = originalPrepareNextTurn;
   }
-  if (typeof agent.createLoopConfig === "function") {
-    const originalCreateLoopConfig = agentRecord[TURN_BOUNDARY_AGENT_CREATE_LOOP_CONFIG_ORIGINAL] as ((...args: unknown[]) => unknown) | undefined
-      ?? agent.createLoopConfig.bind(agent);
-    agentRecord[TURN_BOUNDARY_AGENT_CREATE_LOOP_CONFIG_ORIGINAL] = originalCreateLoopConfig;
-    agent.createLoopConfig = (...args: unknown[]) => {
-      const config = originalCreateLoopConfig(...args);
-      if (!isLoopConfig(config) || typeof agent.prepareNextTurn !== "function") return config;
-      config.prepareNextTurn = async (turnContext?: PrepareNextTurnContext) => await agent.prepareNextTurn?.(turnContext, agent as AbortSignalSource);
-      return config;
-    };
-  }
 
   agentRecord[TURN_BOUNDARY_INSTALLED_AGENT] = TURN_BOUNDARY_PATCH_VERSION;
-  agent.prepareNextTurn = async (signalOrContext?: AbortSignal | PrepareNextTurnContext, signalSource?: AbortSignalSource) => {
-    const signal = isAbortSignal(signalOrContext) ? signalOrContext : signalSource?.signal ?? agent.signal;
-    let previousUpdate: AgentLoopTurnUpdate | undefined;
-    if (originalPrepareNextTurn) {
-      previousUpdate = await originalPrepareNextTurn(isPrepareNextTurnContext(signalOrContext) && signal ? signal : signalOrContext, signalSource);
-    }
-    if (signal?.aborted) return previousUpdate;
 
-    const ourUpdate = await runTurnBoundaryCompaction(session, signal);
-    if (!ourUpdate) return previousUpdate;
-    return {
-      ...previousUpdate,
-      ...ourUpdate,
-      context: ourUpdate.context ?? previousUpdate?.context,
-      model: ourUpdate.model ?? previousUpdate?.model,
-      thinkingLevel: ourUpdate.thinkingLevel ?? previousUpdate?.thinkingLevel,
-    };
+  // Single entry for host refresh + compaction. Both prepareNextTurn* wrappers
+  // share this so a host original that dynamically re-enters the other method
+  // cannot double-run compaction. We deliberately do NOT wrap createLoopConfig:
+  // residual v3 wrappers and dispatch maxTokens compose via agent methods.
+  async function invokeOriginalHost(
+    kind: "withContext" | "prepareNextTurn",
+    context: PrepareNextTurnContext | undefined,
+    signal: AbortSignal | undefined,
+    signalSource: AbortSignalSource | undefined,
+    /** On reentry, never cross-call the other original: host WithContext that
+     *  dynamically invokes agent.prepareNextTurn would otherwise recurse forever
+     *  when prepareNextTurn falls back into original WithContext. */
+    allowCrossFallback: boolean,
+  ): Promise<AgentLoopTurnUpdate | undefined> {
+    if (kind === "withContext") {
+      if (originalPrepareNextTurnWithContext) {
+        return await originalPrepareNextTurnWithContext(context!, signal);
+      }
+      if (allowCrossFallback && originalPrepareNextTurn) {
+        // Pre-0.80.10 hosts only exposed prepareNextTurn(signal).
+        return await originalPrepareNextTurn(signal);
+      }
+      return undefined;
+    }
+    if (originalPrepareNextTurn) {
+      return await originalPrepareNextTurn(signal, signalSource);
+    }
+    if (allowCrossFallback && originalPrepareNextTurnWithContext) {
+      return await originalPrepareNextTurnWithContext(
+        { context: { messages: agent.state?.messages?.slice() ?? [] }, newMessages: [] },
+        signal,
+      );
+    }
+    return undefined;
+  }
+
+  async function runHostThenCompaction(
+    kind: "withContext" | "prepareNextTurn",
+    context: PrepareNextTurnContext | undefined,
+    signal: AbortSignal | undefined,
+    signalSource?: AbortSignalSource,
+  ): Promise<AgentLoopTurnUpdate | undefined> {
+    // Nested call from host original (or our other wrapper): only invoke the
+    // captured host original for THIS kind — never a second compaction pass,
+    // and never cross-fallback into the other original (infinite reentry).
+    if (agentRecord[TURN_BOUNDARY_AGENT_REENTRY]) {
+      return invokeOriginalHost(kind, context, signal, signalSource, false);
+    }
+    agentRecord[TURN_BOUNDARY_AGENT_REENTRY] = true;
+    try {
+      const hostUpdate = await invokeOriginalHost(kind, context, signal, signalSource, true);
+      if (signal?.aborted) return hostUpdate;
+      const compactionUpdate = await runTurnBoundaryCompaction(session, signal);
+      return mergeTurnBoundaryUpdate(hostUpdate, compactionUpdate);
+    } finally {
+      agentRecord[TURN_BOUNDARY_AGENT_REENTRY] = false;
+    }
+  }
+
+  // Primary path on pi >= 0.80.10: agent-core createLoopConfig prefers
+  // prepareNextTurnWithContext over prepareNextTurn.
+  agent.prepareNextTurnWithContext = async (context: PrepareNextTurnContext, signal?: AbortSignal) => {
+    const effectiveSignal = signal ?? agent.signal;
+    return runHostThenCompaction("withContext", context, effectiveSignal);
+  };
+
+  // Legacy/direct-call path: older hosts and existing smokes that invoke
+  // prepareNextTurn(...) still get compaction. When a turn context is passed,
+  // prefer the WithContext chain so host refresh stays consistent.
+  agent.prepareNextTurn = async (
+    signalOrContext?: AbortSignal | PrepareNextTurnContext,
+    signalSource?: AbortSignalSource,
+  ) => {
+    if (isPrepareNextTurnContext(signalOrContext)) {
+      const signal = signalSource?.signal ?? agent.signal;
+      return agent.prepareNextTurnWithContext?.(signalOrContext, signal);
+    }
+    const signal = isAbortSignal(signalOrContext) ? signalOrContext : signalSource?.signal ?? agent.signal;
+    return runHostThenCompaction("prepareNextTurn", undefined, signal, signalSource);
   };
 }
 
@@ -584,7 +700,9 @@ export function verifyPiInternals(opts: PiInternalsOptions = {}): {
   });
 
   // Check 2: AgentSession internals used by compaction-tuner's turn-boundary patch.
-  const agentSessionProto = (AgentSession as unknown as { prototype?: InternalAgentSessionLike }).prototype;
+  const agentSessionProto = (AgentSession as unknown as {
+    prototype?: InternalAgentSessionLike & { _installAgentNextTurnRefresh?: unknown };
+  }).prototype;
   results.push({
     api: "AgentSession._buildRuntime",
     available: typeof agentSessionProto?._buildRuntime === "function",
@@ -596,6 +714,12 @@ export function verifyPiInternals(opts: PiInternalsOptions = {}): {
   results.push({
     api: "AgentSession._emit",
     available: typeof agentSessionProto?._emit === "function",
+  });
+  // 0.80.10 contract: host installs prepareNextTurnWithContext via this hook.
+  // Drift here means turn-boundary can no longer chain host systemPrompt/tools refresh.
+  results.push({
+    api: "AgentSession._installAgentNextTurnRefresh",
+    available: typeof agentSessionProto?._installAgentNextTurnRefresh === "function",
   });
   const interactiveModeProto = (InteractiveMode as unknown as { prototype?: InternalInteractiveModeLike }).prototype;
   results.push({
