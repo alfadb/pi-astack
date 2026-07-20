@@ -2,14 +2,18 @@
  * sediment extension for pi-astack — project-only markdown writer.
  *
  * agent_end pipeline (in order):
- *   1. Synchronous ctx capture (cwd / branch / sessionId / notify) to
- *      survive stale-ctx invalidation during async work.
- *   2. Ephemeral session early-return (--no-session, dispatch_agent
- *      subprocesses, CI). Records a single audit row and returns.
- *   3. buildRunWindow over the per-session checkpoint slot.
- *   4. parseExplicitMemoryBlocks (deterministic, fence-aware). Always
+ *   1. The awaited pi handler snapshots plain session/event inputs, enqueues
+ *      them in a process-level coalescing serial queue, and returns without
+ *      awaiting canonical startup or any sediment I/O/LLM work.
+ *   2. The detached worker awaits canonical startup, claims the latest full
+ *      branch snapshot for that session, and restores the trigger-time anchor.
+ *      Per-session checkpoint replay makes pre-claim coalescing lossless.
+ *   3. Ephemeral sessions (--no-session, dispatch_agent subprocesses, CI)
+ *      record one audit row and return from the detached worker.
+ *   4. buildRunWindow over the per-session checkpoint slot.
+ *   5. parseExplicitMemoryBlocks (deterministic, fence-aware). Always
  *      attempted. If hit, write each block via writeProjectEntry.
- *   5. When (4) yielded zero blocks AND autoLlmWriteEnabled gates pass,
+ *   6. When (5) yielded zero blocks AND autoLlmWriteEnabled gates pass,
  *      the LLM auto-write lane runs in the background. ADR 0016 changes
  *      the default posture from mechanical semantic gates to an LLM-curator
  *      posture: the LLM decides whether a durable candidate is worth
@@ -19,7 +23,7 @@
  *      Git history + audit are the rollback surface; hard gates are only
  *      standard write-side defenses (sensitive-info sanitizer, schema,
  *      lint, lock, atomic write, audit).
- *   6. Lane A advances checkpoint after terminal write outcomes. Lane C
+ *   7. Lane A advances checkpoint after terminal write outcomes. Lane C
  *      advances only on SAFE-CAPTURE outcomes (PR-5 de-stale 2026-06-10 —
  *      the pre-ADR-0028 "optimistically advances before bg work" behavior
  *      is gone): main/drain lanes via shouldAdvanceAfterAutoOutcome, the
@@ -28,7 +32,7 @@
  *      safely-staged advance paths). Known accepted residual: the drain pass
  *      has no classifier of its own (3-T0 2026-06-10; R3' recall flag is
  *      the designed net).
- *   7. Audit row.
+ *   8. Audit row.
  */
 
 import { createHash } from "node:crypto";
@@ -38,12 +42,17 @@ import { mkdir } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildPromptVersionAudit, resolveSedimentSettings, type SedimentSettings } from "./settings";
 import {
+  buildDurableCandidateKey,
   buildRunWindow,
+  checkpointAdvancedSince,
+  checkpointHasProcessedKey,
   checkpointSummary,
   entryToText,
+  lineagePatchForBranch,
   loadSessionCheckpoint,
   saveSessionCheckpoint,
   type RunWindow,
+  type SedimentCheckpoint,
 } from "./checkpoint";
 import { curateProjectDraft, type CuratorAudit } from "./curator";
 import type { EntryStatus } from "./validation";
@@ -102,11 +111,22 @@ import { loadAndValidateTransitionRegister } from "../_shared/transition-registe
 import {
   canonicalGitRuntimeEnabled,
   getCanonicalStartupPromise,
+  reportCanonicalStartupConsumer,
   scheduleCanonicalStartupConsumer,
   type CanonicalStartupHostMode,
 } from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
+import {
+  detachedAgentEndQueueStats,
+  enqueueDetachedAgentEnd,
+  resetDetachedAgentEndQueueForTests,
+  waitForDetachedAgentEndQueueIdle,
+  wakeParkedDetachedAgentEnd,
+} from "./agent-end-queue";
+
+/** Per-turn window budget for frozen-snapshot backlog inside one queue claim. */
+const AGENT_END_BACKLOG_WINDOWS_PER_TURN = 8;
 
 // ---------------------------------------------------------------
 // Phase 1.4 A2 / ADR 0016: in-process bg work tracking.
@@ -125,12 +145,62 @@ import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRul
  * on a 30s LLM call (observed live post-A2: pi shows "Working" for
  * the entire LLM duration if we await here).
  *
- * If a NEW agent_end fires while the previous turn's bg work is
- * still running, we silently do nothing for the new turn: no audit,
- * no checkpoint advance. The next agent_end after the bg worker drains
- * starts from the checkpoint advanced by that previous sediment run.
+ * The outer detached agent_end queue waits for this per-session promise before
+ * claiming another pass. A newer agent_end remains in the queue's coalesced
+ * pending slot and is replayed from the durable checkpoint after this work.
  */
 const autoWriteInFlight = new Map<string, Promise<void>>();
+
+/**
+ * Per-session tracked set for ALL window-bound child work belonging to the
+ * current agent_end pass: correctionPromise, staging/audit follow-ups that
+ * must complete before the outer queue claims the next pass for this session,
+ * and any other fire-and-forget promise the pass schedules against the same
+ * window. autoWriteInFlight remains the authoritative "Lane C still owns the
+ * window" map; this set is the broader join surface for queue serialisation.
+ *
+ * Keys are `session:<id>` or `resource:<resourceKey>` so waits never join
+ * unrelated multiViewReplay / foreign-session work.
+ */
+const sessionPassTrackedWork = new Map<string, Set<Promise<unknown>>>();
+
+function sessionTrackKey(sessionId: string): string {
+  return `session:${sessionId}`;
+}
+
+function resourceTrackKey(resourceKey: string): string {
+  return `resource:${resourceKey}`;
+}
+
+function trackKeyedWork<T>(key: string | undefined, work: Promise<T>): Promise<T> {
+  if (!key) return work;
+  let set = sessionPassTrackedWork.get(key);
+  if (!set) {
+    set = new Set();
+    sessionPassTrackedWork.set(key, set);
+  }
+  set.add(work);
+  // then(cleanup, cleanup) — NOT void work.finally — so a rejected work
+  // promise cannot create an unhandledRejection via a voided finally-chain
+  // under Node --unhandled-rejections=strict. The original `work` is still
+  // returned so callers retain reject semantics / allSettled join.
+  const cleanup = () => {
+    set!.delete(work);
+    if (set!.size === 0) sessionPassTrackedWork.delete(key);
+  };
+  void work.then(cleanup, cleanup);
+  return work;
+}
+
+function trackSessionPassWork<T>(sessionId: string | undefined, work: Promise<T>): Promise<T> {
+  if (!sessionId) return work;
+  return trackKeyedWork(sessionTrackKey(sessionId), work);
+}
+
+function trackResourcePassWork<T>(resourceKey: string | undefined, work: Promise<T>): Promise<T> {
+  if (!resourceKey) return work;
+  return trackKeyedWork(resourceTrackKey(resourceKey), work);
+}
 
 type DeferredStopReason = "agent_error" | "agent_aborted";
 
@@ -211,6 +281,7 @@ const sessionAgentCycle = new Map<string, { started: number; ended: number; drai
  */
 const _G = globalThis as typeof globalThis & {
   __sediment_latestSetStatus?: ((msg?: string) => void) | undefined;
+  __sediment_latestNotify?: ((message: string, type?: string) => void) | undefined;
   __sediment_inflightCount?: number;
   __sediment_multiViewReplayInFlight?: Map<string, Promise<void>>;
   /** sessionId of the CURRENT foreground session (updated by
@@ -238,6 +309,337 @@ function resolveAbrainHomeForSediment(): string {
     : path.join(os.homedir(), ".abrain");
 }
 
+type AgentEndMessageSnapshot = Readonly<{
+  role?: string;
+  stopReason?: string;
+  errorMessage?: string;
+}>;
+
+export interface SedimentAgentEndSnapshotForTests {
+  readonly cwd: string;
+  readonly sessionId?: string;
+  readonly sessionFile?: string;
+  readonly branchEntries: readonly unknown[];
+  readonly messages: readonly AgentEndMessageSnapshot[];
+  readonly modelRegistry?: unknown;
+  readonly anchor: ReturnType<typeof getCurrentAnchor>;
+  readonly boundaryUntrusted: boolean;
+  readonly boundaryDiagnostic?: ReturnType<typeof getSubAgentBoundaryUntrustedDiagnostic>;
+}
+
+interface SedimentAgentEndTestHooks {
+  waitUntilReady?: (snapshot: SedimentAgentEndSnapshotForTests) => Promise<boolean>;
+  run?: (snapshot: SedimentAgentEndSnapshotForTests) => Promise<void | { more: true }>;
+}
+
+let sedimentAgentEndTestHooks: SedimentAgentEndTestHooks | undefined;
+
+function dynamicSedimentNotify(message: string, type?: string): void {
+  const reporter = _G.__sediment_latestNotify;
+  if (!reporter) return;
+  try { reporter(message, type); } catch { /* stale current UI is best-effort */ }
+}
+
+function dynamicSedimentSetStatus(message?: string): void {
+  const reporter = _G.__sediment_latestSetStatus;
+  if (!reporter) return;
+  try { reporter(message); } catch { /* stale current UI is best-effort */ }
+}
+
+function refreshSedimentReporter(ui: {
+  notify?(message: string, type?: string): void;
+  setStatus?(extId: string, message?: string): void;
+} | undefined): void {
+  const notify = ui?.notify?.bind(ui);
+  _G.__sediment_latestNotify = notify
+    ? (message: string, type?: string) => {
+        try { notify(message, type); } catch { /* replaced session UI may already be stale */ }
+      }
+    : undefined;
+  const setStatusRaw = ui?.setStatus?.bind(ui);
+  _G.__sediment_latestSetStatus = setStatusRaw
+    ? (message?: string) => {
+        try { setStatusRaw(SEDIMENT_STATUS_KEY, message); } catch { /* replaced session UI may already be stale */ }
+      }
+    : undefined;
+  stashConstraintCompileSetStatus(setStatusRaw);
+}
+
+/**
+ * Honest bound for detached agent_end snapshots: structuredClone of the full
+ * branch is O(branch size). Typical interactive sessions stay well under the
+ * 100ms handler budget; multi-MB / multi-10k-entry branches are NOT guaranteed
+ * <100ms. We record approx bytes + latency for observability and never claim
+ * a hard bound the runtime cannot keep.
+ */
+const cloneMetrics = {
+  lastBytes: 0,
+  lastMs: 0,
+  maxBytes: 0,
+  maxMs: 0,
+  samples: 0,
+};
+
+function estimateBranchBytes(branch: unknown[]): number {
+  // Cheap structural estimate — not a full JSON stringify on the hot path.
+  let bytes = 0;
+  for (const entry of branch) {
+    if (entry == null) continue;
+    if (typeof entry === "string") {
+      bytes += entry.length;
+      continue;
+    }
+    if (typeof entry !== "object") {
+      bytes += 8;
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.id === "string") bytes += record.id.length;
+    const message = record.message;
+    if (message && typeof message === "object") {
+      const content = (message as Record<string, unknown>).content;
+      if (typeof content === "string") bytes += content.length;
+      else if (Array.isArray(content)) {
+        for (const part of content) {
+          if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
+            bytes += ((part as { text: string }).text).length;
+          }
+        }
+      }
+    }
+    bytes += 64; // structural overhead allowance per entry
+  }
+  return bytes;
+}
+
+function cloneDetachedBranch(branch: unknown[]): unknown[] {
+  const started = performance.now();
+  const approxBytes = estimateBranchBytes(branch);
+  try {
+    const cloned = structuredClone(branch);
+    const ms = performance.now() - started;
+    cloneMetrics.lastBytes = approxBytes;
+    cloneMetrics.lastMs = ms;
+    cloneMetrics.maxBytes = Math.max(cloneMetrics.maxBytes, approxBytes);
+    cloneMetrics.maxMs = Math.max(cloneMetrics.maxMs, ms);
+    cloneMetrics.samples += 1;
+    return cloned;
+  } catch {
+    const seen = new WeakSet<object>();
+    const json = JSON.stringify(branch, (_key, value: unknown) => {
+      if (typeof value === "bigint") return value.toString();
+      if (typeof value === "function" || typeof value === "symbol") return undefined;
+      if (value && typeof value === "object") {
+        if (seen.has(value)) return "[Circular]";
+        seen.add(value);
+      }
+      return value;
+    });
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) throw new Error("session branch snapshot did not clone to an array");
+    const ms = performance.now() - started;
+    cloneMetrics.lastBytes = approxBytes;
+    cloneMetrics.lastMs = ms;
+    cloneMetrics.maxBytes = Math.max(cloneMetrics.maxBytes, approxBytes);
+    cloneMetrics.maxMs = Math.max(cloneMetrics.maxMs, ms);
+    cloneMetrics.samples += 1;
+    return parsed;
+  }
+}
+
+export function _detachedBranchCloneMetricsForTests(): Readonly<typeof cloneMetrics> {
+  return Object.freeze({ ...cloneMetrics });
+}
+
+function captureSedimentAgentEndSnapshot(
+  event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> },
+  ctx: {
+    cwd?: string;
+    sessionManager?: {
+      getBranch(): unknown[];
+      getSessionId?(): string | undefined | null;
+      getSessionFile?(): string | undefined | null;
+    };
+    modelRegistry?: unknown;
+  },
+): SedimentAgentEndSnapshotForTests | undefined {
+  const sm = ctx.sessionManager;
+  if (!sm?.getBranch) return undefined;
+  let branchEntries: unknown[];
+  try { branchEntries = cloneDetachedBranch(sm.getBranch()); }
+  catch { return undefined; }
+  let sessionFile: string | undefined;
+  try {
+    const value = sm.getSessionFile?.();
+    if (typeof value === "string" && value) sessionFile = value;
+  } catch { /* ephemeral/stale-at-entry */ }
+  const boundaryUntrusted = isSubAgentBoundaryUntrusted();
+  return Object.freeze({
+    cwd: path.resolve(ctx.cwd || process.cwd()),
+    sessionId: readSessionId(sm),
+    sessionFile,
+    branchEntries: Object.freeze(branchEntries),
+    messages: Object.freeze((event.messages ?? []).map((message) => Object.freeze({
+      ...(typeof message.role === "string" ? { role: message.role } : {}),
+      ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
+      ...(typeof message.errorMessage === "string" ? { errorMessage: message.errorMessage } : {}),
+    }))),
+    modelRegistry: ctx.modelRegistry,
+    anchor: getCurrentAnchor(),
+    boundaryUntrusted,
+    ...(boundaryUntrusted ? { boundaryDiagnostic: getSubAgentBoundaryUntrustedDiagnostic() } : {}),
+  });
+}
+
+function detachedSessionManager(snapshot: SedimentAgentEndSnapshotForTests) {
+  return {
+    getBranch: () => snapshot.branchEntries.slice(),
+    getSessionId: () => snapshot.sessionId,
+    getSessionFile: () => snapshot.sessionFile,
+  };
+}
+
+async function waitForDetachedSedimentWorkIdle(
+  sessionId: string | undefined,
+  resourceKey?: string,
+): Promise<void> {
+  // Wait ONLY for the current session / resource. Never join global
+  // multiViewReplayInFlight — session A hanging replay must not block B.
+  for (;;) {
+    const autoWrite = sessionId ? autoWriteInFlight.get(sessionId) : undefined;
+    const tracked = [
+      ...(sessionId ? [...(sessionPassTrackedWork.get(sessionTrackKey(sessionId)) ?? [])] : []),
+      ...(resourceKey ? [...(sessionPassTrackedWork.get(resourceTrackKey(resourceKey)) ?? [])] : []),
+    ];
+    const pending = [
+      ...(autoWrite ? [autoWrite] : []),
+      ...tracked,
+    ];
+    if (pending.length === 0) return;
+    await Promise.allSettled(pending);
+  }
+}
+
+async function waitForSedimentAgentEndStartup(snapshot: SedimentAgentEndSnapshotForTests): Promise<boolean> {
+  if (sedimentAgentEndTestHooks?.waitUntilReady) {
+    return sedimentAgentEndTestHooks.waitUntilReady(snapshot);
+  }
+  if (!canonicalGitRuntimeEnabled()) return true;
+  const runtime = { abrainHome: resolveAbrainHomeForSediment() };
+  const startup = await getCanonicalStartupPromise(runtime);
+  if (startup.startup === "ready") return true;
+  reportCanonicalStartupConsumer({
+    runtime,
+    consumerId: "sediment-runtime",
+    message: `sediment agent_end deferred queue blocked: ${startup.blockedReason ?? "unknown"}`,
+    type: "warning",
+  });
+  return false;
+}
+
+async function auditSedimentAgentEndQueueError(snapshot: SedimentAgentEndSnapshotForTests, error: unknown): Promise<void> {
+  const message = sanitizeAuditText(error instanceof Error ? error.message : String(error), 500);
+  console.error(`[sediment] detached agent_end job failed: ${message}`);
+  dynamicSedimentNotify(`sediment background job failed: ${message}`, "error");
+  await appendAudit(snapshot.cwd, {
+    operation: "skip",
+    lane: "system",
+    reason: "agent_end_queue_job_failed",
+    session_id: snapshot.sessionId,
+    error: message,
+    checkpoint_advanced: false,
+    background_async: true,
+  }).catch(() => {});
+}
+
+async function auditSedimentAgentEndQueueNotReady(
+  snapshot: SedimentAgentEndSnapshotForTests,
+  info: { key: string; version: number },
+): Promise<void> {
+  await appendAudit(snapshot.cwd, {
+    operation: "skip",
+    lane: "system",
+    reason: "agent_end_queue_not_ready",
+    session_id: snapshot.sessionId,
+    queue_key: info.key,
+    queue_version: info.version,
+    parked: true,
+    checkpoint_advanced: false,
+    background_async: true,
+    clone_metrics: {
+      last_bytes: cloneMetrics.lastBytes,
+      last_ms: Number(cloneMetrics.lastMs.toFixed(3)),
+      max_bytes: cloneMetrics.maxBytes,
+      max_ms: Number(cloneMetrics.maxMs.toFixed(3)),
+      samples: cloneMetrics.samples,
+    },
+  }).catch(() => {});
+}
+
+async function auditSedimentAgentEndParkEvicted(
+  snapshot: SedimentAgentEndSnapshotForTests,
+  info: { key: string; version: number; reason: "ttl" | "count" | "bytes" },
+): Promise<void> {
+  await appendAudit(snapshot.cwd, {
+    operation: "skip",
+    lane: "system",
+    reason: "agent_end_queue_park_evicted",
+    session_id: snapshot.sessionId,
+    queue_key: info.key,
+    queue_version: info.version,
+    eviction_reason: info.reason,
+    parked: false,
+    checkpoint_advanced: false,
+    background_async: true,
+  }).catch(() => {});
+}
+
+/** Advance watermark with v3 lineage + optional durable candidate keys. */
+async function saveSessionCheckpointWithLineage(
+  projectRoot: string,
+  sessionId: string | undefined,
+  branch: readonly unknown[],
+  lastProcessedEntryId: string,
+  options?: { processedCandidateKeys?: string[] },
+): Promise<void> {
+  if (!sessionId) return;
+  const previous = await loadSessionCheckpoint(projectRoot, sessionId);
+  await saveSessionCheckpoint(projectRoot, sessionId, {
+    lastProcessedEntryId,
+    ...lineagePatchForBranch(branch as unknown[], {
+      previous,
+      processedCandidateKeys: options?.processedCandidateKeys,
+    }),
+  });
+}
+
+function frozenBranchTipId(branch: readonly unknown[]): string | undefined {
+  for (let i = branch.length - 1; i >= 0; i -= 1) {
+    const entry = branch[i];
+    if (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string") {
+      return (entry as { id: string }).id;
+    }
+  }
+  return undefined;
+}
+
+async function frozenSnapshotStillHasBacklog(
+  projectRoot: string,
+  sessionId: string | undefined,
+  branch: readonly unknown[],
+  settings: SedimentSettings,
+): Promise<boolean> {
+  if (!sessionId) return false;
+  const tipId = frozenBranchTipId(branch);
+  if (!tipId) return false;
+  const cp = await loadSessionCheckpoint(projectRoot, sessionId);
+  if (cp.lastProcessedEntryId === tipId) return false;
+  const win = buildRunWindow(branch as unknown[], cp, settings, { backlogOrder: "oldest" });
+  if (win.skipReason === "lineage_unproven" || win.skipReason === "branch_switched") return false;
+  if (win.skipReason === "no_new_entries" || !win.lastEntryId) return false;
+  return true;
+}
+
 /**
  * Footer status state machine for the sediment extension.
  *
@@ -246,9 +648,8 @@ function resolveAbrainHomeForSediment(): string {
  *             or the last activity already flushed back to idle on
  *             a fresh agent_start).
  *
- *   running   The agent_end handler is currently running the explicit
- *             write loop (synchronous, fast) OR has scheduled
- *             background LLM auto-write that is still in flight.
+ *   running   The detached agent_end worker is running an explicit write
+ *             loop or has scheduled LLM auto-write that is still in flight.
  *
  *   completed The most recent extraction finished successfully
  *             (writes succeeded, lint clean, audit row written) or
@@ -1464,6 +1865,11 @@ function shouldAdvanceAfterAboutMeResults(results: WriteAboutMeResult[]): boolea
     "duplicate_slug_race",
     "validation_error",
     "route_rejected",
+    // Recovery path: sample already on disk (content-addressed) but the
+    // processed key / watermark was not recorded (crash between sample write
+    // and checkpoint save). Retry is a no-op at the file layer and must still
+    // count as terminal so the key can be saved and the watermark can advance.
+    "route_rejected_idempotent",
     "lint_error",
   ]);
   return results.every((result) => {
@@ -1480,12 +1886,64 @@ function safeAuditIdPart(value: string | undefined, fallback: string): string {
   return (cleaned || fallback).slice(-24);
 }
 
+/**
+ * Stable correlation id for a lane+window (no Date.now / random).
+ * Audit rows and durable candidate keys both derive from this so retries
+ * of the same source window collapse instead of minting new identities.
+ */
 function makeCorrelationId(
   lane: "explicit" | "auto_write" | "about_me" | "replay",
   sessionId: string,
-  window: Pick<RunWindow, "lastEntryId">,
+  window: Pick<RunWindow, "lastEntryId" | "lastProcessedEntryId" | "entries">,
 ): string {
-  return `${lane}-${safeAuditIdPart(sessionId, "session")}-${safeAuditIdPart(window.lastEntryId, "entry")}-${Date.now().toString(36)}`;
+  const entryIds = Array.isArray(window.entries)
+    ? window.entries
+      .map((entry) => (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
+        ? (entry as { id: string }).id
+        : ""))
+      .filter(Boolean)
+    : [];
+  const sourcePart = entryIds.length > 0
+    ? createHash("sha256").update(entryIds.join("\0")).digest("hex").slice(0, 12)
+    : safeAuditIdPart(window.lastEntryId ?? window.lastProcessedEntryId, "entry");
+  return `${lane}-${safeAuditIdPart(sessionId, "session")}-${sourcePart}`;
+}
+
+function sourceEntryIdsFromWindow(window: Pick<RunWindow, "entries" | "lastEntryId">): string[] {
+  const ids = Array.isArray(window.entries)
+    ? window.entries
+      .map((entry) => (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
+        ? (entry as { id: string }).id
+        : ""))
+      .filter(Boolean)
+    : [];
+  if (ids.length > 0) return ids;
+  return window.lastEntryId ? [window.lastEntryId] : [];
+}
+
+function durableCandidateKeyFor(args: {
+  sessionId: string;
+  window: Pick<RunWindow, "entries" | "lastEntryId">;
+  lane: string;
+  candidateIndex: number;
+  title?: string;
+  body?: string;
+}): string {
+  return buildDurableCandidateKey({
+    sessionId: args.sessionId,
+    sourceEntryIds: sourceEntryIdsFromWindow(args.window),
+    lane: args.lane,
+    candidateIndex: args.candidateIndex,
+    title: args.title,
+    body: args.body,
+  });
+}
+
+/** Stable numeric epoch for ABOUT-ME staging (no wall-clock). */
+function stableAboutMeSessionEpoch(sessionId: string, window: Pick<RunWindow, "entries" | "lastEntryId">): number {
+  const material = `${sessionId}\0${sourceEntryIdsFromWindow(window).join("\0")}`;
+  const hex = createHash("sha256").update(material).digest("hex").slice(0, 12);
+  return Number.parseInt(hex, 16);
 }
 
 function makeShortWindow(window: RunWindow): RunWindow {
@@ -1764,6 +2222,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
+      refreshSedimentReporter(ctx.ui);
 
       // Canonical-path R3.4.2 P1-S3: validate the repo-owned machine
       // transition source at startup. This is read-only and warning-only; it
@@ -1822,6 +2281,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         })().catch((err) => {
           console.error(`[sediment] constraint shadow startup recovery failed: ${err instanceof Error ? err.message : String(err)}`);
         });
+        // Production startup ready → wake every parked agent_end. Active
+        // windows do not lose the wake (queue version-bumps in-flight keys).
+        try { wakeParkedDetachedAgentEnd(); } catch { /* best-effort */ }
       };
 
       if (canonicalGitRuntimeEnabled()) {
@@ -1894,15 +2356,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
   pi.on(
     "agent_end",
-    async (
-      event: {
-        messages?: ReadonlyArray<{
-          role?: string;
-          stopReason?: string;
-          errorMessage?: string;
-        }>;
-      },
-      ctx: {
+    (
+      event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> },
+      liveCtx: {
         cwd?: string;
         sessionManager?: {
           getBranch(): unknown[];
@@ -1910,114 +2366,99 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           getSessionFile?(): string | undefined | null;
         };
         modelRegistry?: unknown;
-        signal?: AbortSignal;
         ui?: {
           notify(message: string, type?: string): void;
           setStatus?(extId: string, message?: string): void;
         };
       },
     ) => {
-      if (isSubAgentBoundaryUntrusted()) {
-        const cwd = path.resolve(ctx.cwd || process.cwd());
-        const sessionId = readSessionId(ctx.sessionManager);
-        const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
-        const message = `sediment: sub-agent boundary untrusted; blocked agent_end writes (${diagnostic?.reason ?? "unknown"})`;
-        console.error(`[sediment] ${message}`);
-        try { ctx.ui?.notify?.(message, "error"); } catch { /* best-effort */ }
-        const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
-        const setStatus = setStatusRaw
-          ? (msg?: string) => {
-              try { setStatusRaw(SEDIMENT_STATUS_KEY, msg); } catch { /* best-effort */ }
-            }
-          : undefined;
-        applySedimentStatus(setStatus, sessionId, "failed", "subagent_boundary_untrusted");
-        await appendAudit(cwd, {
-          operation: "skip",
-          lane: "system",
-          reason: "subagent_boundary_untrusted",
-          session_id: sessionId,
-          boundary_diagnostic: diagnostic,
-          checkpoint_advanced: false,
-        }).catch(() => {});
-        return;
+      // pi awaits agent_end listeners before agent_settled. This handler must
+      // therefore do only bounded synchronous capture and enqueue work.
+      const boundaryUntrusted = isSubAgentBoundaryUntrusted();
+      if (!boundaryUntrusted && isSubAgentSession(liveCtx)) return;
+      if (!boundaryUntrusted && !resolveSedimentSettings().enabled) return;
+      refreshSedimentReporter(liveCtx.ui);
+      const snapshot = captureSedimentAgentEndSnapshot(event, liveCtx);
+      if (!snapshot) return;
+
+      if (snapshot.sessionId) {
+        const cycle = sessionAgentCycle.get(snapshot.sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
+        cycle.ended += 1;
+        sessionAgentCycle.set(snapshot.sessionId, cycle);
       }
 
-      // ADR 0027 PR-B (critical): sub-agent output is a tool product, not
-      // user conversation. Letting sediment extract from it would pollute
-      // the brain with LLM-reasoning artifacts instead of user implicit
-      // ground truth signal (violates ADR 0025 INV-IMPLICIT-GROUND-TRUTH).
-      // This is the v3 in-process replacement for PI_ABRAIN_DISABLED env
-      // gate from the v2 subprocess model.
-      if (isSubAgentSession(ctx)) return;
+      const queueKey = snapshot.sessionId
+        ? `session:${snapshot.sessionId}`
+        : `ephemeral:${snapshot.sessionFile ?? snapshot.cwd}`;
+      enqueueDetachedAgentEnd({
+        key: queueKey,
+        approxBytes: estimateBranchBytes(snapshot.branchEntries as unknown[]),
+        waitUntilReady: () => waitForSedimentAgentEndStartup(snapshot),
+        onNotReady: (info) => auditSedimentAgentEndQueueNotReady(snapshot, info),
+        onParkEvicted: (info) => auditSedimentAgentEndParkEvicted(snapshot, info),
+        run: async () => {
+          // Each claimed pass gets a fresh drain budget so ready-pending
+          // continuation can keep walking the frozen snapshot tip.
+          if (snapshot.sessionId) {
+            const cycle = sessionAgentCycle.get(snapshot.sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
+            cycle.drainCount = 0;
+            sessionAgentCycle.set(snapshot.sessionId, cycle);
+          }
+          if (snapshot.boundaryUntrusted) {
+            const diagnostic = snapshot.boundaryDiagnostic;
+            const message = `sediment: sub-agent boundary untrusted; blocked agent_end writes (${diagnostic?.reason ?? "unknown"})`;
+            console.error(`[sediment] ${message}`);
+            dynamicSedimentNotify(message, "error");
+            applySedimentStatus(dynamicSedimentSetStatus, snapshot.sessionId, "failed", "subagent_boundary_untrusted");
+            await appendAudit(snapshot.cwd, {
+              operation: "skip",
+              lane: "system",
+              reason: "subagent_boundary_untrusted",
+              session_id: snapshot.sessionId,
+              boundary_diagnostic: diagnostic,
+              checkpoint_advanced: false,
+              background_async: true,
+            }).catch(() => {});
+            return;
+          }
+          if (sedimentAgentEndTestHooks?.run) {
+            const hookResult = await sedimentAgentEndTestHooks.run(snapshot);
+            return hookResult;
+          }
 
-      // ADR 0027 PR-B+ R1 P0-β: snapshot anchor at handler entry. The
-      // body below kicks off fire-and-forget bg work (Lane C extractor,
-      // curator, aggregator scheduler) that may run for ~60s and still
-      // call getCurrentAnchor() after the user submits the NEXT prompt.
-      // Without this scope, those late writes would carry turn N+1's
-      // anchor for work triggered by turn N — wrong join key.
-      // AsyncLocalStorage propagates the snapshot through await chains
-      // AND through fire-and-forget promises created inside this closure.
-      // ALL existing `return;` statements below return from the inner
-      // async fn; the outer handler returns the runWithTriggerAnchor
-      // promise which resolves to the inner result — same observable
-      // behavior.
-      return runWithTriggerAnchor(getCurrentAnchor(), async () => {
+          const event = { messages: snapshot.messages };
+          const ctx = {
+            cwd: snapshot.cwd,
+            sessionManager: detachedSessionManager(snapshot),
+            modelRegistry: snapshot.modelRegistry,
+          };
+
+          // Preserve the trigger-time C6 anchor across every detached child
+          // promise created by this pass.
+          // Capture resolved project root + start watermark for ready-pending
+          // livelock guard (more=true only when THIS pass advanced durable CP).
+          let passProjectRoot: string | undefined;
+          let passStartCheckpoint: SedimentCheckpoint | undefined;
+          let passResourceKey: string | undefined;
+          await runWithTriggerAnchor(snapshot.anchor, async () => {
 
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
 
-      // Capture everything we need from `ctx` SYNCHRONOUSLY before the first
-      // await. pi may invalidate ctx ("stale ctx") if newSession/fork/reload
-      // happens during our async work; touching ctx after invalidation
-      // throws "Extension error: stale ctx". Capturing values upfront makes
-      // the rest of the handler ctx-independent.
-      let cwd = path.resolve(ctx.cwd || process.cwd());
-      if (!ctx.sessionManager?.getBranch) return;
-      let branch: unknown[];
-      try {
-        branch = ctx.sessionManager.getBranch();
-      } catch {
-        // ctx already stale at hook entry — skip silently.
-        return;
-      }
-      const sessionId = readSessionId(ctx.sessionManager);
-      // Track agent_end for drain-loop gating (only drain when LLM not working).
-      if (sessionId) {
-        const c = sessionAgentCycle.get(sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
-        c.ended++;
-        sessionAgentCycle.set(sessionId, c);
-      }
-      // Capture getBranch for drain-loop re-reads (bg work outlives ctx).
-      const getBranch = ctx.sessionManager.getBranch.bind(ctx.sessionManager);
-      // Capture sessionManager for continuation-call extractor (bg work outlives ctx).
-      const sessMgr = ctx.sessionManager;
-      const notify = ctx.ui?.notify?.bind(ctx.ui);
-      // setStatus is ctx.ui.setStatus; we need to bind it AND tolerate
-      // older pi versions where the method is missing. Wrap in a
-      // try/catch so a stale-ctx late call cannot throw out of bg work.
-      const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
-      const setStatus = setStatusRaw
-        ? (msg?: string) => {
-            try {
-              setStatusRaw(SEDIMENT_STATUS_KEY, msg);
-            } catch {}
-          }
-        : undefined;
-      // Capture EVERY ctx field we'll need post-await synchronously.
-      // pi may invalidate ctx ("stale ctx") between any await pair if a
-      // newSession/fork/reload/process-shutdown race fires; touching
-      // ctx after invalidation throws "Extension error: stale ctx". Do NOT
-      // pass ctx.signal into fire-and-forget LLM work: it is tied to the
-      // foreground turn lifecycle and gets aborted when the user continues,
-      // which would cancel sediment mid-flight.
-      const modelRegistry = ctx.modelRegistry;
+      // All values below come from the plain enqueue-time snapshot. No
+      // session-bound ctx/UI object survives into this detached pass.
+      let cwd = snapshot.cwd;
+      const branch = snapshot.branchEntries.slice();
+      const sessionId = snapshot.sessionId;
+      const getBranch = ctx.sessionManager.getBranch;
+      // Continuation-call caching requires a live SessionManager. Detached
+      // passes deliberately omit it rather than retain a stale session object;
+      // branchEntries still provide the extractor's full transcript context.
+      const sessMgr = undefined;
+      const notify = dynamicSedimentNotify;
+      const setStatus = dynamicSedimentSetStatus;
+      const modelRegistry = snapshot.modelRegistry;
       const settingsSnapshot = snapshotSedimentSettings(settings);
-
-      if (canonicalGitRuntimeEnabled()) {
-        const startup = await getCanonicalStartupPromise({ abrainHome: resolveAbrainHomeForSediment() });
-        if (startup.startup !== "ready") return;
-      }
 
       // Ephemeral sessions (`pi --print --no-session`, dispatch_agent
       // subprocess, CI / automation) refuse to run the deterministic
@@ -2113,6 +2554,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // is no longer a sediment write substrate).
       const projectId = binding.activeProject.projectId;
       const abrainHome = resolveAbrainHomeForSediment();
+      // Ready-pending livelock guard: record canonical project-root checkpoint
+      // watermark/lineage at pass start (NOT snapshot.cwd subdirectory).
+      passProjectRoot = cwd;
+      passStartCheckpoint = await loadSessionCheckpoint(cwd, sessionId);
+      passResourceKey = `${path.resolve(abrainHome)}:${projectId}:${path.resolve(cwd)}`;
 
       // PR-B1 (2026-06-12 plan, reviewerProviders 复核降级项; 盲审收敛 BUG-1):
       // an EMPTY multiView.reviewerProviders silently degrades every
@@ -2698,8 +3144,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               ?? result.reactivated_slugs.map((slug) => ({ slug, scope: "project" as const }));
             if (
               !result.skipped &&
-              reactivatedEntries.length > 0 &&
-              ctx.ui?.notify
+              reactivatedEntries.length > 0
             ) {
               const lines: string[] = [
                 `Sediment archive-reactivation (bg): ${reactivatedEntries.length} entr${reactivatedEntries.length === 1 ? "y" : "ies"} reactivated`,
@@ -2709,7 +3154,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 lines.push(`  ↑ [${scopeLabel}] reactivated  ${re.slug}`);
               }
               try {
-                ctx.ui.notify(lines.join("\n"), "info");
+                notify(lines.join("\n"), "info");
               } catch {
                 // Notify is best-effort; never let UI error kill the
                 // background lane.
@@ -2723,7 +3168,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
       const tStart = Date.now();
       const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
-      const window = buildRunWindow(branch, checkpoint, settings);
+      const window = buildRunWindow(branch, checkpoint, settings, { backlogOrder: "oldest" });
       const tWindowBuilt = Date.now();
       const summary = checkpointSummary(window);
       const entryBreakdown = countEntryTypes(window.entries);
@@ -2732,9 +3177,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         const pendingDeferred = deferredStopBySession.get(sessionId);
         const checkpointAdvanced = !!window.lastEntryId;
         if (window.lastEntryId)
-          await saveSessionCheckpoint(cwd, sessionId, {
-            lastProcessedEntryId: window.lastEntryId,
-          });
+          await saveSessionCheckpointWithLineage(cwd, sessionId, branch, window.lastEntryId);
         await appendAudit(cwd, {
           operation: "skip",
           lane: "window",
@@ -2821,7 +3264,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // both directions fail open (staging written + direct write dedups).
       const directLaneOwnsWindow = classifierLane === "auto_write" && !autoWriteInFlight.has(sessionId);
       if (branch && classifierEnabled) {
-        correctionPromise = (async () => {
+        correctionPromise = trackSessionPassWork(sessionId, (async () => {
           let relatedEntries: RelatedEntryCard[] = [];
           try {
             const memSettings = resolveMemorySettings();
@@ -2937,8 +3380,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             });
           }).catch(() => {});
           return cr;
-        })();
-        // Don't await — fire-and-forget. Auto-write lane will await it.
+        })());
+        // Don't await — tracked in sessionPassTrackedWork so the outer queue
+        // cannot claim the next pass until correction/staging settle. Auto-write
+        // lane still awaits it for signal forwarding.
       }
 
       const writeCorrectionDispatchAudit = (
@@ -3052,12 +3497,12 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // (agent_end fires and no new agent_start has followed).
           // If started > ended, the LLM is mid-response — the next
           // agent_end will trigger sediment naturally.
-          // Drain cap: at most 3 drain cycles per agent_end to prevent
-          // budget exhaustion from log-monitor or continuous-input loops.
-          const MAX_DRAIN_PER_CYCLE = 3;
+          // Per-claim backlog budget (AGENT_END_BACKLOG_WINDOWS_PER_TURN):
+          // when exhausted with frozen tip still ahead, the outer run returns
+          // more=true and the queue yields to the next macro tick.
           const cyc = sessionAgentCycle.get(sessionId);
           if (!cyc || cyc.started > cyc.ended) return;
-          if (cyc.drainCount >= MAX_DRAIN_PER_CYCLE) return;
+          if (cyc.drainCount >= AGENT_END_BACKLOG_WINDOWS_PER_TURN) return;
           cyc.drainCount++;
 
           let branchNow: unknown[];
@@ -3076,11 +3521,12 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             applySedimentStatus(setStatus, sessionId, "failed", `branch: ${message.slice(0, 40)}`);
             return;
           }
-          loadSessionCheckpoint(cwd, sessionId)
+          let drainProbe!: Promise<void>;
+          drainProbe = loadSessionCheckpoint(cwd, sessionId)
             .then((cp) => {
               const latestCycle = sessionAgentCycle.get(sessionId);
               if (!latestCycle || latestCycle.started > latestCycle.ended) return;
-              const win = buildRunWindow(branchNow, cp, settings);
+              const win = buildRunWindow(branchNow, cp, settings, { backlogOrder: "oldest" });
               if (win.skipReason || !win.lastEntryId) return; // no backlog
               applySedimentStatus(setStatus, sessionId, "running", "drain");
               const corrId = makeCorrelationId(
@@ -3097,6 +3543,183 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               let bg!: Promise<void>;
               bg = (async () => {
                 try {
+                  // Drain chunks 2..N must apply the same deterministic
+                  // parseExplicitMemoryBlocks / parseExplicitAboutMeBlocks path
+                  // as the main lane. Explicit fences are ground truth and must
+                  // never depend on the LLM probabilistic extractor path.
+                  // Per-candidate durable idempotency keys ensure failed-replay
+                  // does not re-apply side effects when the writer already has a
+                  // duplicate/terminal outcome recorded on the checkpoint.
+                  const drainCp = await loadSessionCheckpoint(cwd, sessionId);
+                  const drainExplicitDrafts = parseExplicitMemoryBlocks(win.text);
+                  const drainAboutMeDrafts = parseExplicitAboutMeBlocks(win.text);
+                  if (drainExplicitDrafts.length > 0 || drainAboutMeDrafts.length > 0) {
+                    const explicitCorrId = makeCorrelationId("explicit", sessionId, win);
+                    const aboutMeCorrId = makeCorrelationId("about_me", sessionId, win);
+                    const explicitResults: WriteProjectEntryResult[] = [];
+                    const appliedKeys: string[] = [];
+                    for (const [i, draft] of drainExplicitDrafts.entries()) {
+                      const candidateId = candidateIdFor(explicitCorrId, i);
+                      const idemKey = durableCandidateKeyFor({
+                        sessionId,
+                        window: win,
+                        lane: "explicit",
+                        candidateIndex: i,
+                        title: draft.title,
+                        body: draft.body ?? draft.compiledTruth,
+                      });
+                      if (checkpointHasProcessedKey(drainCp, idemKey)) {
+                        explicitResults.push({
+                          slug: draft.title,
+                          path: "",
+                          status: "skipped",
+                          reason: "checkpoint_idempotent",
+                        } as WriteProjectEntryResult);
+                        continue;
+                      }
+                      const auditContext: WriterAuditContext = {
+                        lane: "explicit",
+                        sessionId,
+                        correlationId: explicitCorrId,
+                        candidateId,
+                      };
+                      const result = await writeProjectEntry(
+                        {
+                          ...draft,
+                          sessionId,
+                          timelineNote: draft.timelineNote || "captured from explicit MEMORY block (drain)",
+                        },
+                        { projectRoot: cwd, abrainHome, projectId, settings, dryRun: false, auditContext },
+                      );
+                      explicitResults.push(result);
+                      // Terminal outcomes (incl. duplicate_slug) record durable progress.
+                      if (shouldAdvanceAfterResults([result])) appliedKeys.push(idemKey);
+                    }
+                    const aboutMeResults: WriteAboutMeResult[] = [];
+                    let aboutMeIdx = 0;
+                    const aboutMeEpoch = stableAboutMeSessionEpoch(sessionId, win);
+                    for (const fence of drainAboutMeDrafts) {
+                      if (!fence.region || !LANE_G_ALLOWED_REGIONS.includes(fence.region as AboutMeRegion)) continue;
+                      const candidateIndex = aboutMeIdx++;
+                      const candidateId = candidateIdFor(aboutMeCorrId, candidateIndex);
+                      const idemKey = durableCandidateKeyFor({
+                        sessionId,
+                        window: win,
+                        lane: "about_me",
+                        candidateIndex,
+                        title: fence.title,
+                        body: fence.body,
+                      });
+                      if (checkpointHasProcessedKey(drainCp, idemKey)) {
+                        aboutMeResults.push({
+                          slug: fence.title,
+                          path: "",
+                          status: "skipped",
+                          reason: "checkpoint_idempotent",
+                        } as WriteAboutMeResult);
+                        continue;
+                      }
+                      const draftDoc: AboutMeDraft = {
+                        title: fence.title,
+                        body: fence.body,
+                        region: fence.region as AboutMeRegion,
+                        routingConfidence: fence.routingConfidence ?? 1.0,
+                        routeCandidates: [fence.region as AboutMeRegion],
+                        routingReason: "user-attested via MEMORY-ABOUT-ME fence (drain)",
+                        triggerPhrases: fence.triggerPhrases,
+                        tags: fence.tags,
+                        status: (fence.status as AboutMeDraft["status"]) || undefined,
+                        timelineNote: fence.timelineNote,
+                        sessionId,
+                        stagingProjectId: projectId,
+                        stagingSessionEpoch: aboutMeEpoch,
+                      };
+                      const auditContext: WriterAuditContext = {
+                        lane: "about_me",
+                        sessionId,
+                        correlationId: aboutMeCorrId,
+                        candidateId,
+                      };
+                      const aboutMeWriteResult = await writeAbrainAboutMe(draftDoc, {
+                        abrainHome,
+                        settings,
+                        dryRun: false,
+                        auditContext,
+                      });
+                      aboutMeResults.push(aboutMeWriteResult);
+                      if (shouldAdvanceAfterAboutMeResults([aboutMeWriteResult])) appliedKeys.push(idemKey);
+                    }
+                    if (hasAdr0039L3RelevantWriteResult(explicitResults)) {
+                      await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
+                    }
+                    const checkpointAdvanced =
+                      (explicitResults.length === 0 || shouldAdvanceAfterResults(explicitResults))
+                      && (aboutMeResults.length === 0 || shouldAdvanceAfterAboutMeResults(aboutMeResults));
+                    if (checkpointAdvanced && win.lastEntryId) {
+                      await saveSessionCheckpointWithLineage(cwd, sessionId, branchNow, win.lastEntryId, {
+                        processedCandidateKeys: appliedKeys,
+                      });
+                    } else if (appliedKeys.length > 0) {
+                      // Partial durable progress without watermark advance:
+                      // still record lineage-aware candidate keys so retries
+                      // skip already-terminal writers.
+                      const prev = await loadSessionCheckpoint(cwd, sessionId);
+                      await saveSessionCheckpoint(cwd, sessionId, {
+                        ...prev,
+                        ...lineagePatchForBranch(branchNow, {
+                          previous: prev,
+                          processedCandidateKeys: appliedKeys,
+                        }),
+                      });
+                    }
+                    await appendAudit(cwd, {
+                      operation: "explicit_extract",
+                      lane: "explicit",
+                      session_id: sessionId,
+                      ...checkpointSummary(win),
+                      extractor: "explicit_marker",
+                      parser_version: PARSER_VERSION,
+                      settings_snapshot: settingsSnapshot,
+                      correlation_id: explicitCorrId,
+                      about_me_correlation_id: aboutMeCorrId,
+                      candidate_count: drainExplicitDrafts.length + drainAboutMeDrafts.length,
+                      results: explicitResults.map(resultSummary),
+                      about_me_results: aboutMeResults.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason })),
+                      processed_candidate_keys: appliedKeys,
+                      checkpoint_advanced: checkpointAdvanced,
+                      background_async: true,
+                      drain: true,
+                    }).catch(() => {});
+                    await auditDirectiveRecall({
+                      cwd,
+                      sessionId,
+                      window: win,
+                      lane: "drain",
+                      correlationId: explicitCorrId,
+                      coveredTexts: drainExplicitDrafts
+                        .map((draft, i) => {
+                          const result = explicitResults[i];
+                          if (result && (result.status === "created" || result.status === "updated" || result.status === "merged")) {
+                            return draft.compiledTruth || draft.title || "";
+                          }
+                          return "";
+                        })
+                        .filter(Boolean),
+                      demote: { abrainHome, settings, modelRegistry, notify },
+                    }).catch(() => {});
+                    applySedimentStatus(
+                      setStatus,
+                      sessionId,
+                      explicitResults.some((r) => r.status === "rejected")
+                        || aboutMeResults.some((r) => r.status === "rejected")
+                        || !checkpointAdvanced
+                        ? "failed"
+                        : "completed",
+                      compactResultSummary(explicitResults),
+                    );
+                    return;
+                  }
+
                   const auto = await tryAutoWriteLane({
                         cwd,
                         sessionId,
@@ -3124,9 +3747,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                       // held window with only the R3' recall flag as the net.
                       const checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto);
                       if (checkpointAdvanced && win.lastEntryId) {
-                        await saveSessionCheckpoint(cwd, sessionId, {
-                          lastProcessedEntryId: win.lastEntryId,
-                        });
+                        await saveSessionCheckpointWithLineage(cwd, sessionId, branchNow, win.lastEntryId);
                       }
                       await auditDirectiveRecall({
                         cwd,
@@ -3328,6 +3949,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
               autoWriteInFlight.set(sessionId, bg);
               bg.catch(() => {});
+              return bg;
             })
             .catch((err: unknown) => {
               // R8 P1 (deepseek): loadSessionCheckpoint failures (corrupt
@@ -3342,7 +3964,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 drain: true,
               }).catch(() => {});
               applySedimentStatus(setStatus, sessionId, "failed", `cp_load: ${message.slice(0, 40)}`);
+            })
+            .finally(() => {
+              if (autoWriteInFlight.get(sessionId) === drainProbe) autoWriteInFlight.delete(sessionId);
             });
+          // Register the checkpoint probe itself so the outer process queue
+          // cannot claim a later pass in the async gap before a drain bg
+          // promise is installed (or the no-backlog decision settles).
+          autoWriteInFlight.set(sessionId, drainProbe);
         };
 
         if (autoWriteInFlight.has(sessionId)) {
@@ -3436,8 +4065,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 const terminalReject = auto.kind === "tier1_direct" && isTerminalTier1Reject(auto.result);
                 const safelyStaged = classifierResult.stagingWritten === true;
                 const advance = !transient && (captured || terminalReject || safelyStaged);
-                if (advance) {
-                  await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: effectiveWindow.lastEntryId });
+                if (advance && effectiveWindow.lastEntryId) {
+                  await saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId);
                   await recordDeferredRecoveryIfNeeded({ cwd, sessionId, window: effectiveWindow, checkpointAdvanced: true, lane: "auto_write", correlationId: shortCorrelationId });
                 }
                 await auditDirectiveRecall({
@@ -3492,10 +4121,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               const forwarded = recordCorrectionDispatch("auto_write", shortCorrelationId, classifierResult, false);
               const signalFound = classifierResult?.signal?.signal_found === true;
               checkpointAdvanced = !!(classifierResult?.ok && classifierResult.signal && !signalFound);
-              if (checkpointAdvanced) {
-                await saveSessionCheckpoint(cwd, sessionId, {
-                  lastProcessedEntryId: effectiveWindow.lastEntryId,
-                });
+              if (checkpointAdvanced && effectiveWindow.lastEntryId) {
+                await saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId);
                 // F3a (PR-A1): the no-signal advance is the one short-lane exit
                 // that permanently skips the window. R3' demands the transcript-
                 // keyed recall scan run before it scrolls away — a classifier
@@ -3626,7 +4253,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               abrainHome,
               projectId,
               branchEntries: branch,
-              sessionManager: sessMgr, // captured, not ctx.sessionManager (stale ctx risk)
+              sessionManager: sessMgr, // intentionally undefined in detached passes; no stale SessionManager retention
               // PR-A2 (F5): Tier-1 hit no longer preempts the window — the
               // lane re-enters for the extractor pass (R1' disjoint authority).
               tier1ExtractorFollowUp: true,
@@ -3652,9 +4279,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto)
               && !holdForStagingOnlyParseFailure(auto, classifierResultMain, settings);
             if (checkpointAdvanced && effectiveWindow.lastEntryId) {
-              await saveSessionCheckpoint(cwd, sessionId, {
-                lastProcessedEntryId: effectiveWindow.lastEntryId,
-              });
+              await saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId);
             }
             await auditDirectiveRecall({
               cwd,
@@ -4036,6 +4661,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
       // ── Lane A (MEMORY:) ─────────────────────────────────────────
       const results: WriteProjectEntryResult[] = [];
+      // Durable keys for terminal success / terminal duplicate only. Partial
+      // window failures still persist these without advancing watermark
+      // (aligned with drain lane).
+      const appliedKeys: string[] = [];
       let tWriteStart = 0;
       let tWriteEnd = 0;
       let explicitCorrelationId: string | undefined;
@@ -4047,24 +4676,44 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           sessionId,
           window,
         );
+        const explicitCp = await loadSessionCheckpoint(cwd, sessionId);
         for (const [i, draft] of drafts.entries()) {
+          const idemKey = durableCandidateKeyFor({
+            sessionId,
+            window,
+            lane: "explicit",
+            candidateIndex: i,
+            title: draft.title,
+            body: draft.body ?? draft.compiledTruth,
+          });
+          if (checkpointHasProcessedKey(explicitCp, idemKey)) {
+            results.push({
+              slug: draft.title,
+              path: "",
+              status: "skipped",
+              reason: "checkpoint_idempotent",
+            } as WriteProjectEntryResult);
+            continue;
+          }
           const auditContext: WriterAuditContext = {
             lane: "explicit",
             sessionId,
             correlationId: explicitCorrelationId,
             candidateId: candidateIdFor(explicitCorrelationId, i),
           };
-          results.push(
-            await writeProjectEntry( /* writer-call: auto-write-block */
-              {
-                ...draft,
-                sessionId,
-                timelineNote:
-                  draft.timelineNote || "captured from explicit MEMORY block",
-              },
-              { projectRoot: cwd, abrainHome, projectId, settings, dryRun: false, auditContext },
-            ),
+          const result = await writeProjectEntry( /* writer-call: auto-write-block */
+            {
+              ...draft,
+              sessionId,
+              timelineNote:
+                draft.timelineNote || "captured from explicit MEMORY block",
+            },
+            { projectRoot: cwd, abrainHome, projectId, settings, dryRun: false, auditContext },
           );
+          results.push(result);
+          // Terminal durable success / terminal duplicate → record key.
+          // Transient rejects (e.g. git_commit_failed) do NOT record keys.
+          if (shouldAdvanceAfterResults([result])) appliedKeys.push(idemKey);
         }
         tWriteEnd = Date.now();
         laneAShouldAdvance = shouldAdvanceAfterResults(results);
@@ -4107,12 +4756,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           sessionId,
           window,
         );
-        // One epoch per agent_end batch — staging filenames already use
-        // independent Date.now() + 8-hex randomBytes suffix to defeat
-        // intra-batch collisions, so sharing the epoch across candidates
-        // is fine and keeps the batch traceable in audit/logs.
-        const aboutMeSessionEpoch = Date.now();
+        // Stable epoch for the source window (no wall-clock): staging path is
+        // content-addressed, so HOLD/retry reuses the same file/commit target.
+        const aboutMeSessionEpoch = stableAboutMeSessionEpoch(sessionId, window);
         let candidateIndex = 0;
+        const aboutMeCp = await loadSessionCheckpoint(cwd, sessionId);
         for (const fence of aboutMeDrafts) {
           // Defensive: extractor already rejects fences with missing /
           // unknown region (parseAboutMeBlock returns null), but the
@@ -4125,6 +4773,24 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               markerIndex: fence.markerIndex,
               reason: "missing_or_invalid_region",
             });
+            continue;
+          }
+          const thisIndex = candidateIndex++;
+          const aboutIdemKey = durableCandidateKeyFor({
+            sessionId,
+            window,
+            lane: "about_me",
+            candidateIndex: thisIndex,
+            title: fence.title,
+            body: fence.body,
+          });
+          if (checkpointHasProcessedKey(aboutMeCp, aboutIdemKey)) {
+            aboutMeResults.push({
+              slug: fence.title,
+              path: "",
+              status: "skipped",
+              reason: "checkpoint_idempotent",
+            } as WriteAboutMeResult);
             continue;
           }
           const draftDoc: AboutMeDraft = {
@@ -4152,7 +4818,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             lane: "about_me",
             sessionId,
             correlationId: aboutMeCorrelationId,
-            candidateId: candidateIdFor(aboutMeCorrelationId, candidateIndex++),
+            candidateId: candidateIdFor(aboutMeCorrelationId, thisIndex),
           };
           const aboutMeWriteResult = await writeAbrainAboutMe(draftDoc, {
             abrainHome,
@@ -4164,6 +4830,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           if (aboutMeWriteResult.status === "created") {
             aboutMeCoveredBodies.push(draftDoc.body || draftDoc.title);
           }
+          // Terminal durable success / terminal duplicate → record key.
+          // Transient rejects (e.g. git_commit_failed) do NOT record keys.
+          if (shouldAdvanceAfterAboutMeResults([aboutMeWriteResult])) appliedKeys.push(aboutIdemKey);
         }
         tAboutMeEnd = Date.now();
         laneGShouldAdvance = shouldAdvanceAfterAboutMeResults(aboutMeResults);
@@ -4188,10 +4857,25 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       }
 
       // ── Combined checkpoint advance ─────────────────────────────
+      // Align with drain: full advance only when every explicit/ABOUT-ME
+      // candidate in the window is terminal. Partial durable progress
+      // (some terminal success/duplicate, some transient fail) still
+      // persists processedCandidateKeys WITHOUT advancing lastProcessedEntryId
+      // so retries skip already-applied candidates.
       const combinedShouldAdvance = laneAShouldAdvance && laneGShouldAdvance;
-      if (combinedShouldAdvance) {
+      if (combinedShouldAdvance && effectiveWindow.lastEntryId) {
+        await saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId, {
+          processedCandidateKeys: appliedKeys,
+        });
+      } else if (appliedKeys.length > 0) {
+        // Partial durable progress without watermark advance.
+        const prev = await loadSessionCheckpoint(cwd, sessionId);
         await saveSessionCheckpoint(cwd, sessionId, {
-          lastProcessedEntryId: effectiveWindow.lastEntryId,
+          ...prev,
+          ...lineagePatchForBranch(branch, {
+            previous: prev,
+            processedCandidateKeys: appliedKeys,
+          }),
         });
       }
 
@@ -4261,6 +4945,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // gives operators a consistent picture of disk state.
           checkpoint_advanced: combinedShouldAdvance,
           lane_advance_decision: laneAShouldAdvance,
+          // Partial durable keys may be saved even when watermark holds.
+          processed_candidate_keys: appliedKeys,
         });
       }
 
@@ -4321,6 +5007,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           },
           checkpoint_advanced: combinedShouldAdvance,
           lane_advance_decision: laneGShouldAdvance,
+          processed_candidate_keys: appliedKeys,
         });
       }
 
@@ -4336,8 +5023,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       }
 
       // ── Notify (one notification per active lane) ────────────────
-      // Use captured `notify` (ctx.ui.notify pre-bound) rather than ctx.ui
-      // directly, so a late ctx invalidation does not throw here.
+      // Resolve notify dynamically so detached work never retains a stale UI.
       if (notify) {
         if (drafts.length > 0) {
           try {
@@ -4387,7 +5073,43 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         applySedimentStatus(setStatus, sessionId, "completed", compactCombined);
       }
 
-      }); // end runWithTriggerAnchor — ADR 0027 PR-B+ R1 P0-β trigger-time scope
+          }); // end trigger-time C6 anchor scope
+          // The legacy Lane C implementation intentionally detaches its LLM
+          // promise. Keep the process queue's single-consumer guarantee by
+          // waiting here, outside pi's handler, before claiming another pass.
+          // Wait ONLY this session + its resource-keyed multiViewReplay work.
+          await waitForDetachedSedimentWorkIdle(snapshot.sessionId, passResourceKey);
+
+          // Ready-pending: more=true ONLY when THIS pass's durable checkpoint
+          // actually advanced AND the frozen tip is still ahead. No-progress
+          // paths (agent_aborted / error / project_not_bound / disabled /
+          // transient HOLD) complete the slot — never tight-spin. Budget
+          // exhaustion yields via queue setImmediate (next macro tick).
+          const backlogSettings = resolveSedimentSettings();
+          if (
+            backlogSettings.enabled
+            && snapshot.sessionId
+            && passProjectRoot
+            && passStartCheckpoint
+          ) {
+            const endCheckpoint = await loadSessionCheckpoint(passProjectRoot, snapshot.sessionId);
+            const advanced = checkpointAdvancedSince(passStartCheckpoint, endCheckpoint);
+            if (
+              advanced
+              && await frozenSnapshotStillHasBacklog(
+                passProjectRoot,
+                snapshot.sessionId,
+                snapshot.branchEntries,
+                backlogSettings,
+              )
+            ) {
+              // Budget enforced via drainCount; more=true yields (setImmediate).
+              return { more: true as const };
+            }
+          }
+        },
+        onError: (error) => auditSedimentAgentEndQueueError(snapshot, error),
+      });
     },
   );
 }
@@ -5323,13 +6045,33 @@ function snapshotSedimentSettings(
 export function _resetAutoWriteStateForTests(): void {
   autoWriteInFlight.clear();
   multiViewReplayInFlight.clear();
+  sessionPassTrackedWork.clear();
   sedimentStatusBySession.clear();
   sessionAgentCycle.clear();
   sessionCorrectionWorkingSet.clear();
   sessionTaskLocalSet.clear();
   deferredStopBySession.clear();
+  sedimentAgentEndTestHooks = undefined;
+  _G.__sediment_latestNotify = undefined;
+  _G.__sediment_latestSetStatus = undefined;
+  _G.__sediment_currentSessionId = undefined;
+  _G.__sediment_inflightCount = 0;
   _resetWarnedApisForTests();
 }
+
+export function _setSedimentAgentEndTestHooksForTests(hooks: SedimentAgentEndTestHooks | undefined): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("sediment agent_end test hooks require PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  sedimentAgentEndTestHooks = hooks;
+}
+
+export function _resetDetachedAgentEndQueueForTests(): void {
+  resetDetachedAgentEndQueueForTests();
+}
+
+export const _detachedAgentEndQueueStatsForTests = detachedAgentEndQueueStats;
+export const _wakeParkedDetachedAgentEndForTests = wakeParkedDetachedAgentEnd;
 
 /**
  * Test-only export of `tryAutoWriteLane` so smoke can drive the
@@ -5345,6 +6087,7 @@ export function _resetAutoWriteStateForTests(): void {
 export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
 export const _detectDirectiveRecallCandidatesForTests = detectDirectiveRecallCandidates;
 export const _shouldAdvanceAfterAutoOutcomeForTests = shouldAdvanceAfterAutoOutcome;
+export const _shouldAdvanceAfterAboutMeResultsForTests = shouldAdvanceAfterAboutMeResults;
 export const _auditDirectiveRecallForTests = auditDirectiveRecall;
 export const _applyRuleOutcomeEdgeForTests = applyRuleOutcomeEdge;
 export function _refreshRuleCacheForOutcomeEdgeTests(args: Parameters<typeof scanRules>[0]): void {
@@ -5365,8 +6108,17 @@ export const _taskLocalCapsForTests = {
  * on audit rows produced asynchronously.
  */
 export async function _waitForAutoWriteIdleForTests(): Promise<void> {
-  while (autoWriteInFlight.size > 0 || multiViewReplayInFlight.size > 0) {
-    await Promise.allSettled([...autoWriteInFlight.values(), ...multiViewReplayInFlight.values()]);
+  await waitForDetachedAgentEndQueueIdle();
+  for (;;) {
+    const tracked = [...sessionPassTrackedWork.values()].flatMap((set) => [...set]);
+    // Tests may still want global settle, but production wait paths never
+    // join multiViewReplayInFlight across sessions.
+    if (autoWriteInFlight.size === 0 && multiViewReplayInFlight.size === 0 && tracked.length === 0) return;
+    await Promise.allSettled([
+      ...autoWriteInFlight.values(),
+      ...multiViewReplayInFlight.values(),
+      ...tracked,
+    ]);
   }
 }
 
@@ -5447,13 +6199,19 @@ function scheduleMultiviewReplay(args: {
   const replayCwd = args.cwd;
   const replaySessionId = args.sessionId;
   const replayKey = `${path.resolve(args.abrainHome)}:${args.projectId}:${path.resolve(replayCwd)}`;
-  if (multiViewReplayInFlight.has(replayKey)) return;
+  const existingReplay = multiViewReplayInFlight.get(replayKey);
+  if (existingReplay) {
+    // Same resource already running: this session must track/await the shared
+    // promise (waitForDetachedSedimentWorkIdle(session, resourceKey)), not skip.
+    trackResourcePassWork(replayKey, trackSessionPassWork(replaySessionId, existingReplay));
+    return;
+  }
 
   // Re-bind for the closure to avoid any subsequent scope mutation.
   const { settings, modelRegistry, abrainHome, projectId } = args;
 
   let replayPromise!: Promise<void>;
-  replayPromise = (async () => {
+  replayPromise = trackResourcePassWork(replayKey, trackSessionPassWork(replaySessionId, (async () => {
     try {
       const memSettings = resolveMemorySettings();
       const replayResult: ReplayBatchResult = await replayMultiviewPending({
@@ -5606,8 +6364,9 @@ function scheduleMultiviewReplay(args: {
       }
       maybeSetIdleIfNoInflight(replaySessionId);
     }
-  })();
+  })()));
   multiViewReplayInFlight.set(replayKey, replayPromise);
+  // Rejection is tracked via session/resource helpers; surface remains bounded.
   replayPromise.catch(() => {});
 }
 

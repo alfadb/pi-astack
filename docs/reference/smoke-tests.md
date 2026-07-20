@@ -58,6 +58,8 @@ npm run smoke:tier1-directive-defer
 npm run smoke:pr1-adr0028
 npm run smoke:evolution-ledger
 npm run smoke:memory-path-a
+npm run smoke:sediment-agent-end-queue
+npm run smoke:startup-classify-outside-barrier
 npm run smoke:staging-resolver
 npm run smoke:outcome-classifier-enrich
 npm run smoke:archive-reactivation
@@ -82,11 +84,21 @@ npm run smoke:abrain-legacy-hook-cleanup
 npm run smoke:abrain-device-join
 npm run smoke:abrain-git-sync
 npm run smoke:canonical-git-runtime
+npm run smoke:recovery-history-batch
+npm run smoke:convergence-recovery
 npm run smoke:production-metadata-prejoin
 npm run smoke:production-existing-local-drain
 npm run smoke:production-local-drain-next
 npm run smoke:script-registry-drift
 ```
+
+`smoke:sediment-agent-end-queue` drives the real registered extension handler through an awaited fake pi runner. It injects delayed and never-settling startup gates, asserts typical <100ms return with a 5,000-entry branch snapshot (clone bytes/latency metrics recorded; no false hard bound for multi-MB branches), verifies pre-claim coalescing and post-claim ordering, replays 43 entries oldest-first across count/char caps with exact-once ordering, proves same-lineage compaction oldest replay + legacy/unproven lineage fail-closed + branch-switch fail-closed, `ready=false→park→wake` and parked TTL eviction with audit, ready-pending backlog ≥12 windows without a next `agent_end`, multi-session never-ready non-blocking concurrency, global cross-key concurrency cap, `--unhandled-rejections=strict` classifier/correction reject containment with onError/audit, rejects retained ctx/session/UI surfaces, and proves audited rejection containment plus later-job recovery without `unhandledRejection`.
+
+`smoke:memory` / sediment writer regressions also cover: ABOUT-ME staging basename free of wall-clock date/`Date.now`/random (fake clock 2026-01-01→01-02 same draft/session/source → 0 new files/commits, `staging_idempotent`); staging auditable metadata in frontmatter; main-lane partial-window `processedCandidateKeys` without watermark advance when candidate1 succeeds and candidate2 is transient, then retry skips candidate1 and advances after candidate2 success.
+
+`smoke:startup-classify-outside-barrier` is the multi-process cold-start gate: process A deliberately delays immutable recovery-history classification >30s outside the mutation barrier (`PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS`); process B acquires the OFD barrier as a concurrent writer without `CANONICAL_MUTATION_BUSY`; a second fixture runs a **real git commit** during outside classification (HEAD/status drift) and requires post-drift startup to become ready (no permanently cached blocked park). Final startup is ready and the first repo is clean. Smoke-all gives this test a 180s offline minimum (two classify delays).
+
+`smoke:recovery-history-batch` creates a real 4,000-blob Git fixture and requires byte equality with exactly one `cat-file --batch` spawn per 4,000-object operation, independently covering historical snapshot reads and prepared-cohort validation. It also covers missing/non-blob objects, truncated bodies, bad delimiters, blob/output bounds, pre-spawn abort, child-process kill/reap on timeout, and ring-buffer property tests (every header/body/delimiter cut point, random multi-chunk cuts, multi-record, 1-byte grow+compact). `smoke:convergence-recovery` separately locks shared per-commit validation Promise reuse across certified-join and HEAD validation. `smoke:recovery-u-star-production-readonly` production-derived startup children use an explicit hard timeout ≤300s (`PI_ASTACK_PRODUCTION_STARTUP_TIMEOUT_MS`, default 300000) with progress logs; they must not be left unbounded.
 
 `smoke:abrain-device-join` is the focused isolated protocol gate: it creates only temporary repositories and covers deterministic divergence, tracked L2 manifest rebuild, real legacy ignored-manifest adoption with different disk bytes and ignore cleanup, ordinary ignored-create rejection before journal/CAS, ordinary tracked operations and directory/file transitions, fail-closed conflicts, `.state/` retention, changed-gitlink rejection before CAS, journal crash and validated atomic-temp recovery, unknown-dirty rejection, cross-process OFD exclusion, long-compile lock scope, retry after startup barrier timeout, legacy-writer/join exclusion, detached-context lease invalidation, CAS races, and bounded exact-OID push retry. `smoke:abrain-git-sync` uses real temporary bare remotes and proves writer delivery performs fetch/join before exact-OID push.
 

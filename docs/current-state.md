@@ -116,9 +116,11 @@ LLM 只用：`memory_search` / `memory_get` / `memory_list` / `memory_decide` / 
 
 sediment 是**唯一 dedicated writer**（主会话不直接写记忆，REQ-005）。稳定契约：
 
+- pi 会 await `agent_end`；sediment handler 只捕获 plain full-branch/session/event/anchor snapshot 并同步 enqueue，绝不等待 canonical startup、Git、classifier、curator 或 projector。Process-level queue **同 key 串行、跨 key 有全局并发上限**；同 repo 写由 resource 锁串行。startup pending 时同 session 仅保留最新 full-branch snapshot；`ready=false` park（count/bytes/TTL 有界 + eviction audit），production `onReady` wake；blocked startup 可重试 eviction。gate ready=true 后原子 claim；checkpoint 未追上冻结 tip 时 ready-pending 续排。checkpoint v3：lineage + per-candidate idempotency；same-lineage compaction oldest 重放，fork/unproven legacy fail-closed。主/drain 对 MEMORY/ABOUT-ME 对称：terminal 成功/duplicate 立即记 `processedCandidateKeys`，partial 失败不推进 watermark。ABOUT-ME staging 路径 content-addressed（无 wall-clock），跨日同 candidate 幂等。window-bound child work 按 session/resource key 跟踪，wait 不跨 session 互挡。rejection catch+audit（含 `--unhandled-rejections=strict`）。structuredClone 记录 bytes/latency；典型交互 <100ms，超大 branch 不做虚假保证。
 - 写入前 sanitizer 把 credential/secret-like 串替换为 `[SECRET:<type>]`，不因 pattern 命中阻断整轮；LLM extractor 只收 redacted transcript，被要求保留 typed placeholder、**不得还原 raw secret**（redaction 不可逆）。
 - curator 决定 `create/update/merge/archive/supersede/delete/skip`；writer 上锁、lint、atomic write、append audit、best-effort git commit；audit raw/error/candidate title 均存 redacted form。
 - git commit 失败时不会回滚已写 markdown、event 或 projection；会尽力清理 git index，避免下次 commit 携带 ghost changes。
+- canonical recovery history 的 whole-L1/L2 validation 对每个 commit 复用同一 Promise；historical snapshot 与大 prepared cohort 的 blob bytes 均由单个 `git cat-file --batch` 读取（单次拷贝 + ring buffer + cut-point property tests）；OID cache key 含 statusHash。**Cold-start 不可变 classification 在 mutation barrier 外执行**：`headBefore→scan/status→headAfter` 冻结，获锁后重检，freeze 异常也进 barrier 判定；漂移有界重算，稳定才 mutation。禁止靠提高 30s timeout 掩盖长分类。
 
 > pipeline 步骤、写入路径表、锁路径以代码（`extensions/sediment/index.ts`、`extensions/sediment/writer.ts`、`extensions/sediment/checkpoint.ts` 与 `extensions/_shared/sync-file-lock.ts`）为准。
 

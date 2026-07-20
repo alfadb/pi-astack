@@ -11,6 +11,26 @@ status: active
 
 ---
 
+## 2026-07-20 — accepted — Awaited agent_end liveness, outside-barrier recovery classification, parked readiness
+
+### 变更
+
+Sediment 的 `agent_end` 从 awaited inline pipeline 改为 plain snapshot + process-level multi-key queue：handler 在交互预算内返回；**同 key 串行、跨 key 有全局并发上限**（默认 4），同 repo 写仍由 resource 锁串行。startup pending 时同 session 的 full-branch snapshot 可合并到最新版本；`waitUntilReady=false` **park**（不 claim/complete/delete；count/bytes/TTL 有界 + eviction audit），production `onReady` 调 `wakeParkedDetachedAgentEnd`（active 窗口 version-bump 不丢 wake）。blocked/drift-exhausted startup **可重试 eviction**，不得永久缓存导致 park 永远。durable per-session checkpoint v3 记录 branch lineage + per-candidate idempotency keys：same-lineage compaction 可 oldest 重放；fork/branch-switch 与 unproven legacy **fail-closed 不前移**。queue job 在 checkpoint 未追上冻结 snapshot tip 时 `more:true` ready-pending 续排（>10 windows 无需下一 agent_end）。`trackSessionPassWork` 用 `then(cleanup,cleanup)` 防 strict unhandledRejection；wait 仅等当前 session/resource，不等全局 multiViewReplay。**主 lane 与 drain 对齐**：每个 terminal durable 成功/terminal duplicate 的 explicit MEMORY / ABOUT-ME candidate 立即累计 `processedCandidateKeys`（v3 lineage），即使同窗另一 candidate transient 失败导致 watermark 不推进；失败 candidate 不记 key；partial key 保存不推进 `lastProcessedEntryId`。ABOUT-ME staging basename 仅由稳定 session/source/content hash 派生（无 wall-clock 日期 / `Date.now` / random），跨日同 candidate `staging_idempotent`；可审计元数据进 frontmatter。后台 rejection catch+audit，UI 只走动态当前 reporter。
+
+Canonical **startup 不可变 recovery-history classification 移出 mutation barrier**：`headBefore→scan/status→headAfter` 冻结（HEAD 变即 drift）；cache key 含 statusHash；freeze/scan 异常也进 barrier 稳定重抓（漂移重试 / 稳定 fail-closed）。batch parser 单次拷贝 + 容量倍增 ring buffer；property tests 覆盖 header/body/delimiter 全切点、随机切点、多 record、grow+compact。
+
+### 验收边界
+
+真实 extension handler 典型 <100ms 返回（诚实边界：超大 branch 不做虚假保证）。`ready=false→park→wake`；ready-pending ≥12 windows 无下一 agent_end 全序推进；`--unhandled-rejections=strict` 下 classifier/correction reject 进程不崩且 onError/audit 收到。lineage fail-closed + same-lineage compaction + branch-switch 行为测试。全局并发 cap=2 实测。至少 4000 blob + ring-buffer property tests。多进程 cold-start + **真实 writer commit 造成 HEAD 漂移**后仍可 settle 且 post-drift startup ready。memory/sediment、recovery、canonical、device/git-sync、production-readonly 不回归。
+
+### 残余与非目标
+
+`agent_settled` 不是替代触发器。本批不修改 `~/.abrain` production data。structuredClone 对 multi-MB / multi-10k-entry branch 不保证 <100ms。checkpoint lineage 的 processedCandidateKeys 是有界 rolling set，不是无限历史；writer 自身 duplicate terminal 仍是最终幂等网。v3 join search 仍是 O(pairs×merges)。device-join 路径上部分 classification 仍可能在已持有 barrier 的 mutation 流程内；cold-start awaitStartup 是锁外分类权威路径。真实 extension worker 对 LLM auto-write 大 backlog 的 end-to-end 时延未做硬 SLA。
+
+### 关联
+
+[ADR 0027 C6](adr/0027-coupled-stigmergic-dual-loop-agent-system.md#c6新--跨-l1l2-causal-trace-共享-session-id--turn-id-锚点)；[REQ-002](requirements.md#req-002--运行状态可见管理负担隐身)；[REQ-004](requirements.md#req-004--显式用户指令是被见证的-ground-truth)；[Smoke reference](reference/smoke-tests.md)。
+
 ## 2026-07-20 — accepted — Abrain automatic multi-device convergence
 
 ### 变更

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
@@ -17,10 +18,31 @@ import {
  * captured by session A is meaningless when applied to session B's branch
  * (B would fall through to the compaction-fallback path and either replay
  * everything or only the latest entry).
+ *
+ * schema v3 adds branch lineage + durable candidate idempotency keys so a
+ * watermark that disappears (compaction) can prove same-lineage oldest
+ * replay, while fork/branch-switch and unprovable legacy slots fail closed
+ * instead of silently re-executing non-idempotent side effects.
  */
 export interface SedimentCheckpoint {
   lastProcessedEntryId?: string;
   updatedAt?: string;
+  /**
+   * Hash of the ordered entry-id spine observed when the watermark was last
+   * advanced. Used to prove same-lineage compaction vs fork/branch switch.
+   */
+  branchLineageKey?: string;
+  /** Tip entry id of the branch spine at last advance (lineage witness). */
+  branchTipId?: string;
+  /** Ordered entry ids present on the branch at last advance (bounded). */
+  branchEntryIds?: string[];
+  /**
+   * Durable per-candidate / source-window idempotency keys already applied.
+   * Bounded rolling set; writers still provide their own terminal dedupe.
+   */
+  processedCandidateKeys?: string[];
+  /** True only when lineage fields were written by a v3-aware saver. */
+  lineageRecorded?: boolean;
 }
 
 /** On-disk format. Wraps per-session slots in a versioned envelope. */
@@ -29,7 +51,11 @@ interface CheckpointFile {
   sessions: Record<string, SedimentCheckpoint>;
 }
 
-const CHECKPOINT_SCHEMA_VERSION = 2;
+const CHECKPOINT_SCHEMA_VERSION = 3;
+/** Keep a bounded spine so checkpoint files stay small on long sessions. */
+const MAX_BRANCH_ENTRY_IDS = 256;
+/** Rolling idempotency key bound. */
+const MAX_PROCESSED_CANDIDATE_KEYS = 512;
 const STALE_SESSION_DAYS = 90;
 const CHECKPOINT_LOCK_TIMEOUT_MS = 5_000;
 const CHECKPOINT_LOCK_STEAL_AFTER_MS = 30_000;
@@ -51,7 +77,11 @@ export interface RunWindow {
   checkpointFound: boolean;
   lastProcessedEntryId?: string;
   lastEntryId?: string;
-  skipReason?: "no_new_entries" | "window_too_small";
+  skipReason?: "no_new_entries" | "window_too_small" | "lineage_unproven" | "branch_switched";
+  /** Lineage decision for diagnostics / audit. */
+  lineageStatus?: "matched" | "compacted_same_lineage" | "branch_switched" | "unproven_legacy" | "fresh";
+  /** Snapshot of checkpoint idempotency keys for this window build. */
+  processedCandidateKeys?: string[];
 }
 
 export function checkpointPath(projectRoot: string): string {
@@ -59,7 +89,9 @@ export function checkpointPath(projectRoot: string): string {
 }
 
 /**
- * Coerce any on-disk shape (v1 raw or v2 envelope) into a CheckpointFile.
+ * Coerce any on-disk shape (v1 raw, v2 envelope, or v3 envelope) into a CheckpointFile.
+ * Legacy slots keep their watermark but are NOT marked lineageRecorded — callers
+ * must fail closed on invisible watermarks until a v3-aware save records lineage.
  */
 function upgradeCheckpoint(raw: unknown): CheckpointFile {
   if (raw && typeof raw === "object" && (raw as any).schema_version === CHECKPOINT_SCHEMA_VERSION && (raw as any).sessions) {
@@ -67,17 +99,206 @@ function upgradeCheckpoint(raw: unknown): CheckpointFile {
   }
   const out: CheckpointFile = { schema_version: CHECKPOINT_SCHEMA_VERSION, sessions: {} };
   if (raw && typeof raw === "object") {
-    const v1 = raw as Record<string, unknown>;
+    const envelope = raw as Record<string, unknown>;
+    if (envelope.sessions && typeof envelope.sessions === "object") {
+      // v2 → v3: preserve per-session slots without inventing lineage proof.
+      for (const [id, sess] of Object.entries(envelope.sessions as Record<string, unknown>)) {
+        if (!sess || typeof sess !== "object") continue;
+        const s = sess as Record<string, unknown>;
+        out.sessions[id] = {
+          ...(typeof s.lastProcessedEntryId === "string" ? { lastProcessedEntryId: s.lastProcessedEntryId } : {}),
+          ...(typeof s.updatedAt === "string" ? { updatedAt: s.updatedAt } : {}),
+          ...(typeof s.branchLineageKey === "string" ? { branchLineageKey: s.branchLineageKey } : {}),
+          ...(typeof s.branchTipId === "string" ? { branchTipId: s.branchTipId } : {}),
+          ...(Array.isArray(s.branchEntryIds)
+            ? { branchEntryIds: s.branchEntryIds.filter((x): x is string => typeof x === "string") }
+            : {}),
+          ...(Array.isArray(s.processedCandidateKeys)
+            ? { processedCandidateKeys: s.processedCandidateKeys.filter((x): x is string => typeof x === "string") }
+            : {}),
+          ...(s.lineageRecorded === true ? { lineageRecorded: true } : {}),
+        };
+      }
+      return out;
+    }
+    const v1 = envelope;
     const last = typeof v1.lastProcessedEntryId === "string" ? v1.lastProcessedEntryId : undefined;
     if (last) {
       const slot = typeof v1.sessionId === "string" && v1.sessionId ? v1.sessionId : LEGACY_SLOT;
       out.sessions[slot] = {
         lastProcessedEntryId: last,
         updatedAt: typeof v1.updatedAt === "string" ? v1.updatedAt : formatLocalIsoTimestamp(),
+        // lineageRecorded intentionally omitted → fail-closed on invisible watermark
       };
     }
   }
   return out;
+}
+
+function entryId(entry: unknown): string | undefined {
+  if (entry && typeof entry === "object" && "id" in entry) {
+    const id = (entry as { id?: unknown }).id;
+    return typeof id === "string" ? id : undefined;
+  }
+  return undefined;
+}
+
+function entryIdsOf(branch: unknown[]): string[] {
+  const ids: string[] = [];
+  for (const entry of branch) {
+    const id = entryId(entry);
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+/** Stable hash of an ordered entry-id spine (lineage key). */
+export function computeBranchLineageKey(branchOrIds: unknown[] | string[]): string {
+  const ids = Array.isArray(branchOrIds) && branchOrIds.length > 0 && typeof branchOrIds[0] === "string"
+    ? branchOrIds as string[]
+    : entryIdsOf(branchOrIds as unknown[]);
+  return createHash("sha256").update(ids.join("\0")).digest("hex");
+}
+
+/**
+ * Prove whether the current branch is the same lineage as the checkpoint
+ * (exact match or compaction that dropped a prefix/middle while retaining
+ * a contiguous suffix of the recorded spine), vs a fork/branch switch.
+ */
+export function classifyCheckpointLineage(
+  branch: unknown[],
+  checkpoint: SedimentCheckpoint,
+): {
+  status: NonNullable<RunWindow["lineageStatus"]>;
+  allowOldestFullReplay: boolean;
+} {
+  const currentIds = entryIdsOf(branch);
+  if (!checkpoint.lastProcessedEntryId) {
+    return { status: "fresh", allowOldestFullReplay: true };
+  }
+  if (currentIds.includes(checkpoint.lastProcessedEntryId)) {
+    return { status: "matched", allowOldestFullReplay: true };
+  }
+  // Watermark invisible. Only allow full oldest replay when v3 lineage was
+  // recorded and the current branch is a compaction of that spine (every
+  // remaining id was present in the recorded spine, order preserved as a
+  // subsequence). Fork/branch-switch or legacy unproven → fail closed.
+  if (!checkpoint.lineageRecorded || !checkpoint.branchEntryIds?.length) {
+    // Invisible watermark without v3 lineage proof: fail closed for this pass
+    // (no silent full-branch re-exec). Recovery is a new session/branch
+    // checkpoint key, not permanent silent skip of the same slot forever.
+    return { status: "unproven_legacy", allowOldestFullReplay: false };
+  }
+  const recorded = checkpoint.branchEntryIds;
+  const recordedSet = new Set(recorded);
+  if (currentIds.length === 0) {
+    return { status: "compacted_same_lineage", allowOldestFullReplay: true };
+  }
+  if (!currentIds.every((id) => recordedSet.has(id))) {
+    // Fork / branch switch: do NOT permanently strand the session at 0-entry.
+    // Allow oldest replay of the NEW branch spine; durable candidate keys
+    // (and writer terminal dedupe) prevent re-side-effects on retry. The next
+    // watermark advance re-binds lineage to this branch via lineagePatchForBranch.
+    return { status: "branch_switched", allowOldestFullReplay: true };
+  }
+  // Remaining ids must appear in the same relative order as the recorded spine.
+  let cursor = 0;
+  for (const id of currentIds) {
+    const at = recorded.indexOf(id, cursor);
+    if (at < 0) return { status: "branch_switched", allowOldestFullReplay: false };
+    cursor = at + 1;
+  }
+  return { status: "compacted_same_lineage", allowOldestFullReplay: true };
+}
+
+/** Build the lineage fields that must accompany a watermark advance. */
+export function lineagePatchForBranch(
+  branch: unknown[],
+  extra?: { processedCandidateKeys?: string[]; previous?: SedimentCheckpoint },
+): Pick<
+  SedimentCheckpoint,
+  "branchLineageKey" | "branchTipId" | "branchEntryIds" | "lineageRecorded" | "processedCandidateKeys"
+> {
+  const ids = entryIdsOf(branch);
+  const boundedIds = ids.length > MAX_BRANCH_ENTRY_IDS ? ids.slice(-MAX_BRANCH_ENTRY_IDS) : ids;
+  const prevKeys = extra?.previous?.processedCandidateKeys ?? [];
+  const nextKeys = [...prevKeys, ...(extra?.processedCandidateKeys ?? [])];
+  const uniqueKeys: string[] = [];
+  const seen = new Set<string>();
+  for (let i = nextKeys.length - 1; i >= 0; i -= 1) {
+    const key = nextKeys[i]!;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueKeys.push(key);
+    if (uniqueKeys.length >= MAX_PROCESSED_CANDIDATE_KEYS) break;
+  }
+  uniqueKeys.reverse();
+  return {
+    branchLineageKey: computeBranchLineageKey(boundedIds),
+    branchTipId: boundedIds[boundedIds.length - 1],
+    branchEntryIds: boundedIds,
+    lineageRecorded: true,
+    processedCandidateKeys: uniqueKeys,
+  };
+}
+
+/** True when a durable candidate key was already applied under this checkpoint. */
+export function checkpointHasProcessedKey(checkpoint: SedimentCheckpoint, key: string): boolean {
+  return Boolean(key) && Boolean(checkpoint.processedCandidateKeys?.includes(key));
+}
+
+function normalizeCandidateText(value: string | undefined): string {
+  return (value ?? "").normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Stable durable candidate idempotency key.
+ *
+ * MUST NOT include Date.now / random / correlation timestamps. Built from
+ * sessionId + ordered source entry ids (or their hash) + lane + candidate
+ * index + normalized title/body hash so main/drain retries and ABOUT-ME
+ * staging re-entry share one key across process restarts.
+ */
+export function buildDurableCandidateKey(args: {
+  sessionId: string;
+  sourceEntryIds: readonly string[];
+  lane: string;
+  candidateIndex: number;
+  title?: string;
+  body?: string;
+}): string {
+  const sourceHash = createHash("sha256")
+    .update(args.sourceEntryIds.join("\0"))
+    .digest("hex")
+    .slice(0, 16);
+  const contentHash = createHash("sha256")
+    .update(`${normalizeCandidateText(args.title)}\0${normalizeCandidateText(args.body)}`)
+    .digest("hex")
+    .slice(0, 24);
+  const material = [
+    args.sessionId || "session",
+    sourceHash,
+    args.lane || "lane",
+    String(Math.max(0, Math.floor(args.candidateIndex))),
+    contentHash,
+  ].join("\0");
+  return createHash("sha256").update(material).digest("hex");
+}
+
+/** Compare two checkpoints for durable progress (watermark and/or keys/lineage). */
+export function checkpointAdvancedSince(
+  before: SedimentCheckpoint,
+  after: SedimentCheckpoint,
+): boolean {
+  if ((after.lastProcessedEntryId ?? "") !== (before.lastProcessedEntryId ?? "")) return true;
+  if ((after.branchLineageKey ?? "") !== (before.branchLineageKey ?? "")) return true;
+  if ((after.branchTipId ?? "") !== (before.branchTipId ?? "")) return true;
+  const beforeKeys = before.processedCandidateKeys ?? [];
+  const afterKeys = after.processedCandidateKeys ?? [];
+  if (afterKeys.length > beforeKeys.length) return true;
+  if (afterKeys.some((key) => !beforeKeys.includes(key))) return true;
+  if (after.lineageRecorded === true && before.lineageRecorded !== true) return true;
+  return false;
 }
 
 /** Drop session slots whose `updatedAt` is more than STALE_SESSION_DAYS old. */
@@ -209,14 +430,6 @@ export async function saveCheckpoint(projectRoot: string, checkpoint: SedimentCh
     file.sessions[LEGACY_SLOT] = { ...checkpoint, updatedAt: formatLocalIsoTimestamp() };
     await atomicWriteCheckpoint(projectRoot, file);
   });
-}
-
-function entryId(entry: unknown): string | undefined {
-  if (entry && typeof entry === "object" && "id" in entry) {
-    const id = (entry as { id?: unknown }).id;
-    return typeof id === "string" ? id : undefined;
-  }
-  return undefined;
 }
 
 function textFromContent(content: unknown): string {
@@ -364,20 +577,46 @@ export function buildRunWindow(
   branch: unknown[],
   checkpoint: SedimentCheckpoint,
   settings: SedimentSettings,
+  options: { backlogOrder?: "newest" | "oldest" } = {},
 ): RunWindow {
   const lastProcessed = checkpoint.lastProcessedEntryId;
   const ids = branch.map(entryId);
   const lastIndex = lastProcessed ? ids.indexOf(lastProcessed) : -1;
   const checkpointFound = !lastProcessed || lastIndex >= 0;
 
+  const oldestFirst = options.backlogOrder === "oldest";
+  const lineage = classifyCheckpointLineage(branch, checkpoint);
   let candidates: unknown[];
   if (!lastProcessed) {
     candidates = branch;
   } else if (lastIndex >= 0) {
     candidates = branch.slice(lastIndex + 1);
+  } else if (oldestFirst) {
+    // Watermark invisible. Same-lineage compaction and branch-switch recovery
+    // may oldest-replay; unprovable legacy fail closed (no silent full-branch
+    // re-execution of non-idempotent side effects — use a new session/branch
+    // checkpoint key for recovery).
+    if (!lineage.allowOldestFullReplay) {
+      return {
+        entries: [],
+        text: "",
+        chars: 0,
+        totalBranchEntries: branch.length,
+        candidateEntries: 0,
+        includedEntries: 0,
+        checkpointFound: false,
+        lastProcessedEntryId: lastProcessed,
+        skipReason: "lineage_unproven",
+        lineageStatus: lineage.status,
+        processedCandidateKeys: checkpoint.processedCandidateKeys?.slice(),
+      };
+    }
+    // branch_switched recovery: reset to this branch's oldest; callers must
+    // check durable processedCandidateKeys before applying side effects.
+    candidates = branch;
   } else {
-    // Compaction/branch fallback: avoid replaying an entire old branch if the
-    // checkpoint disappeared. Keep only the latest entry as a conservative window.
+    // Newest-first legacy fallback: keep only the latest entry as a
+    // conservative window when the watermark disappeared.
     candidates = branch.length > 0 ? [branch[branch.length - 1]] : [];
   }
 
@@ -392,25 +631,39 @@ export function buildRunWindow(
       checkpointFound,
       lastProcessedEntryId: lastProcessed,
       skipReason: "no_new_entries",
+      lineageStatus: lineage.status,
+      processedCandidateKeys: checkpoint.processedCandidateKeys?.slice(),
     };
   }
 
   const maxEntries = Math.max(1, settings.maxWindowEntries);
-  const limitedByCount = candidates.slice(-maxEntries);
-  const selectedNewestFirst: unknown[] = [];
+  const limitedByCount = oldestFirst ? candidates.slice(0, maxEntries) : candidates.slice(-maxEntries);
+  const selected: unknown[] = [];
   let chars = 0;
 
-  for (let i = limitedByCount.length - 1; i >= 0; i--) {
-    const entry = limitedByCount[i];
-    const rawRendered = entryToText(entry);
-    const rendered = truncateEntryText(entry, rawRendered, settings.maxEntryChars);
-    if (selectedNewestFirst.length > 0 && chars + rendered.length > settings.maxWindowChars) break;
-    selectedNewestFirst.push(entry);
-    chars += rendered.length;
-    if (chars >= settings.maxWindowChars) break;
+  if (oldestFirst) {
+    for (const entry of limitedByCount) {
+      const rawRendered = entryToText(entry);
+      const rendered = truncateEntryText(entry, rawRendered, settings.maxEntryChars);
+      if (selected.length > 0 && chars + rendered.length > settings.maxWindowChars) break;
+      selected.push(entry);
+      chars += rendered.length;
+      if (chars >= settings.maxWindowChars) break;
+    }
+  } else {
+    for (let i = limitedByCount.length - 1; i >= 0; i--) {
+      const entry = limitedByCount[i];
+      const rawRendered = entryToText(entry);
+      const rendered = truncateEntryText(entry, rawRendered, settings.maxEntryChars);
+      if (selected.length > 0 && chars + rendered.length > settings.maxWindowChars) break;
+      selected.push(entry);
+      chars += rendered.length;
+      if (chars >= settings.maxWindowChars) break;
+    }
+    selected.reverse();
   }
 
-  const entries = selectedNewestFirst.reverse();
+  const entries = selected;
   const text = entries.map((entry) => truncateEntryText(entry, entryToText(entry), settings.maxEntryChars)).join("\n\n");
   const lastEntryId = entryId(entries[entries.length - 1]);
   const finalChars = text.length;
@@ -426,6 +679,8 @@ export function buildRunWindow(
     lastProcessedEntryId: lastProcessed,
     lastEntryId,
     skipReason: finalChars < settings.minWindowChars ? "window_too_small" : undefined,
+    lineageStatus: lineage.status,
+    processedCandidateKeys: checkpoint.processedCandidateKeys?.slice(),
   };
 }
 

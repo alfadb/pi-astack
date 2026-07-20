@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -150,8 +150,12 @@ function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function failure(code: string, message: string, detail?: Record<string, unknown>): RecoveryHistoryClassificationError {
+  return new RecoveryHistoryClassificationError(code, message, detail);
+}
+
 function fail(code: string, message: string, detail?: Record<string, unknown>): never {
-  throw new RecoveryHistoryClassificationError(code, message, detail);
+  throw failure(code, message, detail);
 }
 
 function eventId(row: V2Record): string {
@@ -243,6 +247,267 @@ function parseEpisode(episodeId: string, rows: V2Record[]): ParsedEpisode {
   return { episodeId, status: completeSlot === null ? "terminal" : "complete", rows, candidates, consumed, closures: [] };
 }
 
+const GIT_BATCH_DEFAULT_TIMEOUT_MS = 60_000;
+const GIT_BATCH_DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
+const GIT_BATCH_DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024 * 1024;
+const GIT_BATCH_MAX_STDERR_BYTES = 1024 * 1024;
+const GIT_BATCH_MAX_HEADER_BYTES = 256;
+
+interface GitBatchLimits {
+  timeoutMs?: number;
+  maxBlobBytes?: number;
+  maxOutputBytes?: number;
+  signal?: AbortSignal;
+}
+
+interface NormalizedGitBatchLimits {
+  timeoutMs: number;
+  maxBlobBytes: number;
+  maxOutputBytes: number;
+}
+
+const recoveryHistoryTestStats = {
+  catFileBatchSpawns: 0,
+  wholeValidationRuns: 0,
+  wholeValidationCacheHits: 0,
+};
+
+function normalizeGitBatchLimits(options: GitBatchLimits = {}): NormalizedGitBatchLimits {
+  const timeoutMs = options.timeoutMs ?? GIT_BATCH_DEFAULT_TIMEOUT_MS;
+  const maxBlobBytes = options.maxBlobBytes ?? GIT_BATCH_DEFAULT_MAX_BLOB_BYTES;
+  const maxOutputBytes = options.maxOutputBytes ?? GIT_BATCH_DEFAULT_MAX_OUTPUT_BYTES;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) fail("RECOVERY_GIT_BATCH_LIMIT_INVALID", "cat-file batch timeout must be a positive safe integer", { timeoutMs });
+  if (!Number.isSafeInteger(maxBlobBytes) || maxBlobBytes <= 0) fail("RECOVERY_GIT_BATCH_LIMIT_INVALID", "cat-file batch blob limit must be a positive safe integer", { maxBlobBytes });
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) fail("RECOVERY_GIT_BATCH_LIMIT_INVALID", "cat-file batch output limit must be a positive safe integer", { maxOutputBytes });
+  return { timeoutMs, maxBlobBytes, maxOutputBytes };
+}
+
+/**
+ * Streaming cat-file --batch parser.
+ *
+ * Incoming data chunks are copied once into a capacity-doubling ring buffer
+ * (no per-chunk Buffer.concat O(n²) path, no second defensive Buffer.from on
+ * the socket chunk). Parsed blob bodies are isolated with a single copy at
+ * commit time so callers own independent Buffers.
+ */
+class GitCatFileBatchParser {
+  private readonly requests: readonly string[];
+  private readonly limits: NormalizedGitBatchLimits;
+  private readonly results = new Map<string, Buffer>();
+  private buffer = Buffer.alloc(0);
+  private length = 0;
+  private readOffset = 0;
+  private requestIndex = 0;
+  private body: { oid: string; size: number } | undefined;
+  private outputBytes = 0;
+
+  constructor(requests: readonly string[], limits: NormalizedGitBatchLimits) {
+    this.requests = requests;
+    this.limits = limits;
+  }
+
+  private get available(): number {
+    return this.length - this.readOffset;
+  }
+
+  private ensureCapacity(additional: number): void {
+    const need = this.length + additional;
+    if (need <= this.buffer.length) return;
+    // Compact consumed prefix first when that frees enough room.
+    if (this.readOffset > 0 && need - this.readOffset <= this.buffer.length) {
+      this.buffer.copyWithin(0, this.readOffset, this.length);
+      this.length -= this.readOffset;
+      this.readOffset = 0;
+      if (this.length + additional <= this.buffer.length) return;
+    } else if (this.readOffset > 0) {
+      this.buffer.copyWithin(0, this.readOffset, this.length);
+      this.length -= this.readOffset;
+      this.readOffset = 0;
+    }
+    let capacity = this.buffer.length || 4096;
+    const target = this.length + additional;
+    while (capacity < target) capacity *= 2;
+    const next = Buffer.allocUnsafe(capacity);
+    if (this.length > 0) this.buffer.copy(next, 0, 0, this.length);
+    this.buffer = next;
+  }
+
+  private compactIfNeeded(): void {
+    if (this.readOffset === 0) return;
+    if (this.readOffset < 64 * 1024 && this.available > 0) return;
+    if (this.available === 0) {
+      this.readOffset = 0;
+      this.length = 0;
+      return;
+    }
+    this.buffer.copyWithin(0, this.readOffset, this.length);
+    this.length -= this.readOffset;
+    this.readOffset = 0;
+  }
+
+  push(chunk: Buffer): void {
+    if (!chunk.length) return;
+    this.outputBytes += chunk.length;
+    if (this.outputBytes > this.limits.maxOutputBytes) {
+      fail("RECOVERY_GIT_BATCH_OUTPUT_LIMIT", "cat-file --batch exceeded the bounded stdout budget", {
+        maxOutputBytes: this.limits.maxOutputBytes,
+        observedBytes: this.outputBytes,
+      });
+    }
+    // Single copy of the socket chunk into the owned ring buffer.
+    this.ensureCapacity(chunk.length);
+    chunk.copy(this.buffer, this.length);
+    this.length += chunk.length;
+    this.parseAvailable();
+  }
+
+  finish(): Map<string, Buffer> {
+    this.parseAvailable();
+    if (this.body || this.requestIndex !== this.requests.length) {
+      fail("RECOVERY_GIT_BATCH_SHORT_READ", "cat-file --batch ended before every declared blob body was read", {
+        expectedObjects: this.requests.length,
+        completedObjects: this.requestIndex,
+        pendingOid: this.body?.oid ?? this.requests[this.requestIndex] ?? null,
+        bufferedBytes: this.available,
+      });
+    }
+    if (this.available !== 0) {
+      fail("RECOVERY_GIT_BATCH_TRAILING_BYTES", "cat-file --batch emitted bytes after the final response", {
+        trailingBytes: this.available,
+      });
+    }
+    return new Map(this.results);
+  }
+
+  private parseAvailable(): void {
+    for (;;) {
+      if (!this.body) {
+        if (this.requestIndex >= this.requests.length) return;
+        const view = this.buffer.subarray(this.readOffset, this.length);
+        const newline = view.indexOf(0x0a);
+        if (newline < 0) {
+          if (this.available > GIT_BATCH_MAX_HEADER_BYTES) {
+            fail("RECOVERY_GIT_BATCH_HEADER_INVALID", "cat-file --batch header exceeded its bounded length", { headerBytes: this.available });
+          }
+          return;
+        }
+        if (newline > GIT_BATCH_MAX_HEADER_BYTES) {
+          fail("RECOVERY_GIT_BATCH_HEADER_INVALID", "cat-file --batch header exceeded its bounded length", { headerBytes: newline });
+        }
+        const requested = this.requests[this.requestIndex]!;
+        const header = view.subarray(0, newline).toString("ascii");
+        this.readOffset += newline + 1;
+        if (header === `${requested} missing`) {
+          fail("RECOVERY_GIT_BATCH_MISSING", "cat-file --batch reported a missing object", { oid: requested, requestIndex: this.requestIndex });
+        }
+        const match = /^([0-9a-f]+) ([^ ]+) ([0-9]+)$/.exec(header);
+        if (!match) fail("RECOVERY_GIT_BATCH_HEADER_INVALID", "cat-file --batch returned a malformed header", { requestIndex: this.requestIndex, header });
+        const [, oid, type, rawSize] = match;
+        if (oid !== requested) fail("RECOVERY_GIT_BATCH_OID_MISMATCH", "cat-file --batch response did not match request order", { requested, actual: oid, requestIndex: this.requestIndex });
+        if (type !== "blob") fail("RECOVERY_GIT_BATCH_TYPE_MISMATCH", "cat-file --batch object is not a blob", { oid, type, requestIndex: this.requestIndex });
+        const size = Number(rawSize);
+        if (!Number.isSafeInteger(size) || size < 0 || String(size) !== rawSize) {
+          fail("RECOVERY_GIT_BATCH_SIZE_INVALID", "cat-file --batch declared an invalid object size", { oid, rawSize });
+        }
+        if (size > this.limits.maxBlobBytes) {
+          fail("RECOVERY_GIT_BATCH_BLOB_LIMIT", "cat-file --batch blob exceeded the per-object bound", { oid, size, maxBlobBytes: this.limits.maxBlobBytes });
+        }
+        this.body = { oid, size };
+      }
+
+      const body = this.body;
+      if (this.available < body.size + 1) return;
+      if (this.buffer[this.readOffset + body.size] !== 0x0a) {
+        fail("RECOVERY_GIT_BATCH_DELIMITER_INVALID", "cat-file --batch blob body lacks the required trailing newline", { oid: body.oid, size: body.size });
+      }
+      // One isolation copy of the body; callers own the resulting Buffer.
+      this.results.set(body.oid, Buffer.from(this.buffer.subarray(this.readOffset, this.readOffset + body.size)));
+      this.readOffset += body.size + 1;
+      this.requestIndex += 1;
+      this.body = undefined;
+      this.compactIfNeeded();
+    }
+  }
+}
+
+async function readGitBlobsBatch(repo: string, objectIds: readonly string[], options: GitBatchLimits = {}): Promise<Map<string, Buffer>> {
+  const requests = [...new Set(objectIds)];
+  for (const oid of requests) {
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) {
+      fail("RECOVERY_GIT_BATCH_REQUEST_INVALID", "cat-file --batch request is not an exact Git object id", { oid });
+    }
+  }
+  if (!requests.length) return new Map();
+  const limits = normalizeGitBatchLimits(options);
+  if (options.signal?.aborted) fail("RECOVERY_GIT_BATCH_ABORTED", "cat-file --batch was aborted before spawn");
+
+  recoveryHistoryTestStats.catFileBatchSpawns += 1;
+  const child = spawn("git", ["-C", repo, "--literal-pathspecs", "cat-file", "--batch"], {
+    env: gitEnvironment(),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const parser = new GitCatFileBatchParser(requests, limits);
+  return new Promise<Map<string, Buffer>>((resolve, reject) => {
+    let settled = false;
+    let stderrBytes = 0;
+    const stderrChunks: Buffer[] = [];
+    let timeout: NodeJS.Timeout | undefined;
+
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const rejectOnce = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+      reject(error);
+    };
+    const onAbort = () => rejectOnce(failure("RECOVERY_GIT_BATCH_ABORTED", "cat-file --batch was aborted"));
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    timeout = setTimeout(() => {
+      rejectOnce(failure("RECOVERY_GIT_BATCH_TIMEOUT", "cat-file --batch exceeded its timeout", { timeoutMs: limits.timeoutMs }));
+    }, limits.timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      // parser.push performs the single owned copy; do not double-Buffer here.
+      try { parser.push(chunk); }
+      catch (error) { rejectOnce(error); }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      stderrBytes += chunk.length;
+      if (stderrBytes > GIT_BATCH_MAX_STDERR_BYTES) {
+        rejectOnce(failure("RECOVERY_GIT_BATCH_STDERR_LIMIT", "cat-file --batch exceeded the bounded stderr budget", { stderrBytes }));
+        return;
+      }
+      stderrChunks.push(Buffer.from(chunk));
+    });
+    child.once("error", (error) => rejectOnce(failure("RECOVERY_GIT_BATCH_SPAWN_FAILED", error.message)));
+    child.stdin.once("error", (error) => rejectOnce(failure("RECOVERY_GIT_BATCH_STDIN_FAILED", error.message)));
+    child.once("close", (code, signal) => {
+      if (settled) return;
+      if (code !== 0) {
+        const stderr = Buffer.concat(stderrChunks).toString("utf-8").slice(0, 1000);
+        rejectOnce(failure("RECOVERY_GIT_BATCH_EXIT_FAILED", "cat-file --batch exited unsuccessfully", { code, signal, stderr }));
+        return;
+      }
+      try {
+        const result = parser.finish();
+        settled = true;
+        cleanup();
+        resolve(result);
+      } catch (error) {
+        rejectOnce(error);
+      }
+    });
+
+    child.stdin.end(`${requests.join("\n")}\n`);
+  });
+}
+
 async function gitText(repo: string, args: readonly string[], timeout = 60_000): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", repo, "--literal-pathspecs", ...args], {
     env: gitEnvironment(),
@@ -273,13 +538,13 @@ async function resolveCommit(repo: string, revision: string): Promise<string> {
   return (await gitText(repo, ["rev-parse", "--verify", `${revision}^{commit}`])).trim();
 }
 
-async function commitParents(repo: string, commit: string): Promise<string[]> {
+async function commitParentsUncached(repo: string, commit: string): Promise<string[]> {
   const line = (await gitText(repo, ["rev-list", "--parents", "-n", "1", commit])).trim().split(/\s+/);
   if (line[0] !== commit) fail("RECOVERY_GIT_GRAPH_INVALID", "git returned the wrong commit while reading parents", { commit, line });
   return line.slice(1);
 }
 
-async function treeEntries(repo: string, commit: string, prefix: string): Promise<Map<string, TreeEntry>> {
+async function treeEntriesUncached(repo: string, commit: string, prefix: string): Promise<Map<string, TreeEntry>> {
   const raw = await gitBuffer(repo, ["ls-tree", "-r", "-z", commit, "--", prefix]);
   const result = new Map<string, TreeEntry>();
   for (const record of raw.toString("utf-8").split("\0").filter(Boolean)) {
@@ -290,6 +555,15 @@ async function treeEntries(repo: string, commit: string, prefix: string): Promis
     result.set(relative, Object.freeze({ mode: meta[0]!, type: meta[1]!, oid: meta[2]!, path: relative }));
   }
   return result;
+}
+
+/** Uncached fallback for call sites outside a classification SnapshotCache. */
+async function commitParents(repo: string, commit: string): Promise<string[]> {
+  return commitParentsUncached(repo, commit);
+}
+
+async function treeEntries(repo: string, commit: string, prefix: string): Promise<Map<string, TreeEntry>> {
+  return treeEntriesUncached(repo, commit, prefix);
 }
 
 function sameTreeEntry(left: TreeEntry, right: TreeEntry): boolean {
@@ -303,17 +577,20 @@ function exactTreeMap(left: ReadonlyMap<string, TreeEntry>, right: ReadonlyMap<s
   });
 }
 
-async function truePathIntroductionCommits(repo: string, commits: readonly string[], relativePath: string): Promise<string[]> {
+async function truePathIntroductionCommits(repo: string, commits: readonly string[], relativePath: string, snapshots?: SnapshotCache): Promise<string[]> {
   const introduced: string[] = [];
   for (const commit of commits) {
-    const parents = await commitParents(repo, commit);
-    const inherited = (await Promise.all(parents.map(async (parent) => (await treeEntries(repo, parent, relativePath)).has(relativePath)))).some(Boolean);
+    const parents = snapshots ? await snapshots.commitParents(commit) : await commitParents(repo, commit);
+    const inherited = (await Promise.all(parents.map(async (parent) => {
+      const tree = snapshots ? await snapshots.treeEntries(parent, relativePath) : await treeEntries(repo, parent, relativePath);
+      return tree.has(relativePath);
+    }))).some(Boolean);
     if (!inherited) introduced.push(commit);
   }
   return introduced;
 }
 
-async function eventIntroductionCommits(repo: string, head: string, row: V2Record): Promise<string[]> {
+async function eventIntroductionCommits(repo: string, head: string, row: V2Record, snapshots?: SnapshotCache): Promise<string[]> {
   const relativePath = row.record.relativePath;
   if (!relativePath) fail("RECOVERY_EVENT_PATH_MISSING", "validated v2 event has no relative path", { eventId: eventId(row) });
   // -m is required for merge commits: without it Git emits no path diff for a
@@ -322,21 +599,21 @@ async function eventIntroductionCommits(repo: string, head: string, row: V2Recor
   const mutated = [...new Set((await gitText(repo, ["log", "-m", "--format=%H", "--full-history", "--diff-filter=MD", head, "--", relativePath])).trim().split("\n").filter(Boolean))];
   if (mutated.length) fail("RECOVERY_L1_HISTORY_MUTATED", "content-addressed v2 object was modified or deleted in reachable history", { eventId: eventId(row), relativePath, commits: mutated });
   const addDiffCommits = [...new Set((await gitText(repo, ["log", "-m", "--format=%H", "--full-history", "--diff-filter=A", head, "--", relativePath])).trim().split("\n").filter(Boolean))];
-  const introduced = await truePathIntroductionCommits(repo, addDiffCommits, relativePath);
+  const introduced = await truePathIntroductionCommits(repo, addDiffCommits, relativePath, snapshots);
   if (!introduced.length) fail("RECOVERY_EVENT_UNCOMMITTED", "v2 history object is not introduced by any HEAD ancestor", { eventId: eventId(row), relativePath });
   return introduced;
 }
 
-async function branchLabelForCandidate(repo: string, head: string, rows: CandidateRows): Promise<string> {
+async function branchLabelForCandidate(repo: string, head: string, rows: CandidateRows, snapshots: SnapshotCache): Promise<string> {
   const introductions = new Set<string>();
   for (const row of [rows.prepared, rows.published, rows.converged]) {
-    for (const commit of await eventIntroductionCommits(repo, head, row)) introductions.add(commit);
+    for (const commit of await eventIntroductionCommits(repo, head, row, snapshots)) introductions.add(commit);
   }
   const commits = [...introductions];
   const maximal = [];
   for (const candidate of commits) {
     let descendantOfAll = true;
-    for (const other of commits) if (!await isAncestor(repo, other, candidate)) descendantOfAll = false;
+    for (const other of commits) if (!await snapshots.isAncestor(other, candidate)) descendantOfAll = false;
     if (descendantOfAll) maximal.push(candidate);
   }
   if (maximal.length !== 1) fail("RECOVERY_BRANCH_PROVENANCE_AMBIGUOUS", "candidate-specific closure bytes do not have one deterministic branch-introducing label", { eventIds: [eventId(rows.prepared), eventId(rows.published), eventId(rows.converged)], introductions: commits, maximal });
@@ -356,14 +633,14 @@ function parseRawDiff(raw: Buffer): Map<string, { oldMode: string; newMode: stri
   return result;
 }
 
-async function validateCandidate(repo: string, head: string, episodeId: string, slot: number, row: V2Record): Promise<{ candidate: string; frozenCommit: string }> {
+async function validateCandidate(repo: string, head: string, episodeId: string, slot: number, row: V2Record, snapshots: SnapshotCache): Promise<{ candidate: string; frozenCommit: string }> {
   const decoded = decodePreparedRecoveryEvent(row.event, repo, SYMBOLIC_REF);
   const prepared = decoded.prepared;
   if (cohortManifestRoot(prepared.entries) !== prepared.cohortManifestRoot) fail("RECOVERY_COHORT_ROOT_INVALID", "prepared cohort semantic root does not match entries", { episodeId, slot, candidate: prepared.candidate });
-  if (!await isAncestor(repo, prepared.candidate, head)) fail("RECOVERY_CANDIDATE_NOT_ANCESTOR", "closure candidate is not a current HEAD ancestor", { episodeId, slot, candidate: prepared.candidate, head });
+  if (!await snapshots.isAncestor(prepared.candidate, head)) fail("RECOVERY_CANDIDATE_NOT_ANCESTOR", "closure candidate is not a current HEAD ancestor", { episodeId, slot, candidate: prepared.candidate, head });
   const [candidateTree, parents, parentEpoch, commitBytes] = await Promise.all([
     gitText(repo, ["rev-parse", "--verify", `${prepared.candidate}^{tree}`]).then((value) => value.trim()),
-    commitParents(repo, prepared.candidate),
+    snapshots.commitParents(prepared.candidate),
     gitText(repo, ["show", "-s", "--format=%ct", prepared.frozenCommit]).then((value) => value.trim()),
     gitBuffer(repo, ["cat-file", "commit", prepared.candidate]),
   ]);
@@ -375,11 +652,11 @@ async function validateCandidate(repo: string, head: string, episodeId: string, 
 
   const diff = parseRawDiff(await gitBuffer(repo, ["diff-tree", "-r", "-z", "--no-commit-id", "--no-renames", prepared.frozenCommit, prepared.candidate]));
   if (diff.size !== prepared.entries.length) fail("RECOVERY_CANDIDATE_DIFF_INVALID", "candidate exact diff size does not match prepared entries", { episodeId, slot, candidate: prepared.candidate, expected: prepared.entries.length, actual: diff.size });
-  for (const entry of prepared.entries) await validatePreparedEntry(repo, episodeId, slot, prepared.candidate, entry, diff.get(entry.path));
+  await validatePreparedEntries(repo, episodeId, slot, prepared.candidate, prepared.entries, diff, (objectIds) => snapshots.readBlobs(objectIds));
   return { candidate: prepared.candidate, frozenCommit: prepared.frozenCommit };
 }
 
-async function validateCandidateV3(repo: string, head: string, episodeId: string, slot: number, event: RecoveryEventV3): Promise<{ candidate: string; baseCommit: string }> {
+async function validateCandidateV3(repo: string, head: string, episodeId: string, slot: number, event: RecoveryEventV3, snapshots: SnapshotCache): Promise<{ candidate: string; baseCommit: string }> {
   const decoded = decodePreparedRecoveryEvent(event, repo, event.operation.symbolic_ref, LOCAL_DRAIN_PROTOCOL_V3);
   const prepared = decoded.prepared;
   const semanticRoot = cohortManifestRoot(prepared.entries, LOCAL_DRAIN_PROTOCOL_V3);
@@ -393,10 +670,10 @@ async function validateCandidateV3(repo: string, head: string, episodeId: string
   ) {
     fail("RECOVERY_OPERATION_INVARIANT", "v3 candidate validation independently rejected prepared/operation binding", { episodeId, slot, candidate: prepared.candidate, snapshotRoot, operationSnapshotRoot: event.operation.frozen_index_snapshot_root });
   }
-  if (!await isAncestor(repo, prepared.candidate, head)) fail("RECOVERY_CANDIDATE_NOT_ANCESTOR", "v3 closure candidate is not a current HEAD ancestor", { episodeId, slot, candidate: prepared.candidate, head });
+  if (!await snapshots.isAncestor(prepared.candidate, head)) fail("RECOVERY_CANDIDATE_NOT_ANCESTOR", "v3 closure candidate is not a current HEAD ancestor", { episodeId, slot, candidate: prepared.candidate, head });
   const [candidateTree, parents, parentEpoch, commitBytes] = await Promise.all([
     gitText(repo, ["rev-parse", "--verify", `${prepared.candidate}^{tree}`]).then((value) => value.trim()),
-    commitParents(repo, prepared.candidate),
+    snapshots.commitParents(prepared.candidate),
     gitText(repo, ["show", "-s", "--format=%ct", prepared.frozenCommit]).then((value) => value.trim()),
     gitBuffer(repo, ["cat-file", "commit", prepared.candidate]),
   ]);
@@ -406,44 +683,65 @@ async function validateCandidateV3(repo: string, head: string, episodeId: string
   if (commitBytes.toString("utf-8") !== expectedCommit) fail("RECOVERY_CANDIDATE_METADATA_INVALID", "v3 candidate commit bytes are not deterministic", { episodeId, slot, candidate: prepared.candidate });
   const diff = parseRawDiff(await gitBuffer(repo, ["diff-tree", "-r", "-z", "--no-commit-id", "--no-renames", prepared.frozenCommit, prepared.candidate]));
   if (diff.size !== prepared.entries.length) fail("RECOVERY_CANDIDATE_DIFF_INVALID", "v3 candidate exact diff size does not match prepared entries", { episodeId, slot, candidate: prepared.candidate, expected: prepared.entries.length, actual: diff.size });
-  for (const entry of prepared.entries) await validatePreparedEntry(repo, episodeId, slot, prepared.candidate, entry, diff.get(entry.path));
+  await validatePreparedEntries(repo, episodeId, slot, prepared.candidate, prepared.entries, diff, (objectIds) => snapshots.readBlobs(objectIds));
   return { candidate: prepared.candidate, baseCommit: prepared.frozenCommit };
 }
 
-async function validatePreparedEntry(repo: string, episodeId: string, slot: number, candidate: string, entry: PreparedCohortEntry, diff: { oldMode: string; newMode: string; oldOid: string; newOid: string; status: string } | undefined): Promise<void> {
-  if (!diff) fail("RECOVERY_CANDIDATE_DIFF_INVALID", "prepared path is absent from candidate diff", { episodeId, slot, candidate, path: entry.path });
-  if (entry.op === "delete") {
-    if (diff.status !== "D" || diff.newMode !== "000000") fail("RECOVERY_CANDIDATE_DIFF_INVALID", "prepared delete does not match candidate diff", { episodeId, slot, candidate, path: entry.path, diff });
-    return;
+async function validatePreparedEntries(
+  repo: string,
+  episodeId: string,
+  slot: number,
+  candidate: string,
+  entries: readonly PreparedCohortEntry[],
+  diff: Map<string, { oldMode: string; newMode: string; oldOid: string; newOid: string; status: string }>,
+  readBlobs: (objectIds: readonly string[]) => Promise<Map<string, Buffer>> = (objectIds) => readGitBlobsBatch(repo, objectIds),
+): Promise<void> {
+  const putEntries: PreparedCohortEntry[] = [];
+  for (const entry of entries) {
+    const row = diff.get(entry.path);
+    if (!row) fail("RECOVERY_CANDIDATE_DIFF_INVALID", "prepared path is absent from candidate diff", { episodeId, slot, candidate, path: entry.path });
+    if (entry.op === "delete") {
+      if (row.status !== "D" || row.newMode !== "000000") fail("RECOVERY_CANDIDATE_DIFF_INVALID", "prepared delete does not match candidate diff", { episodeId, slot, candidate, path: entry.path, diff: row });
+      continue;
+    }
+    if ((row.status !== "A" && row.status !== "M") || row.newMode !== entry.mode || row.newOid !== entry.blobOid) fail("RECOVERY_CANDIDATE_DIFF_INVALID", "prepared put does not match candidate diff", { episodeId, slot, candidate, path: entry.path, diff: row, entry });
+    putEntries.push(entry);
   }
-  if ((diff.status !== "A" && diff.status !== "M") || diff.newMode !== entry.mode || diff.newOid !== entry.blobOid) fail("RECOVERY_CANDIDATE_DIFF_INVALID", "prepared put does not match candidate diff", { episodeId, slot, candidate, path: entry.path, diff, entry });
-  const bytes = await gitBuffer(repo, ["cat-file", "blob", entry.blobOid]);
-  if (sha256Hex(bytes) !== entry.bytesSha256) fail("RECOVERY_CANDIDATE_BLOB_INVALID", "prepared byte hash does not match candidate blob", { episodeId, slot, candidate, path: entry.path, blobOid: entry.blobOid });
+
+  const blobs = await readBlobs(putEntries.map((entry) => entry.blobOid));
+  for (const entry of putEntries) {
+    const bytes = blobs.get(entry.blobOid);
+    if (!bytes || sha256Hex(bytes) !== entry.bytesSha256) fail("RECOVERY_CANDIDATE_BLOB_INVALID", "prepared byte hash does not match candidate blob", { episodeId, slot, candidate, path: entry.path, blobOid: entry.blobOid });
+  }
 }
 
-async function assertAntichain(repo: string, labels: readonly string[], episodeId: string, slot: number): Promise<void> {
+async function assertAntichain(labels: readonly string[], episodeId: string, slot: number, snapshots: SnapshotCache): Promise<void> {
   for (let left = 0; left < labels.length; left += 1) {
     for (let right = left + 1; right < labels.length; right += 1) {
-      if (await isAncestor(repo, labels[left]!, labels[right]!) || await isAncestor(repo, labels[right]!, labels[left]!)) fail("RECOVERY_SAME_BRANCH_CONFLICT", "conflicting closure bytes are comparable in branch ancestry", { episodeId, slot, left: labels[left], right: labels[right] });
+      if (await snapshots.isAncestor(labels[left]!, labels[right]!) || await snapshots.isAncestor(labels[right]!, labels[left]!)) {
+        fail("RECOVERY_SAME_BRANCH_CONFLICT", "conflicting closure bytes are comparable in branch ancestry", { episodeId, slot, left: labels[left], right: labels[right] });
+      }
     }
   }
 }
 
 async function findCertifiedJoin(repo: string, head: string, episodeId: string, slot: number, labels: readonly string[], snapshots: SnapshotCache): Promise<CertifiedSemanticJoin> {
-  await assertAntichain(repo, labels, episodeId, slot);
-  const merges = (await gitText(repo, ["rev-list", "--merges", "--reverse", head])).trim().split("\n").filter(Boolean);
+  await assertAntichain(labels, episodeId, slot, snapshots);
+  // Pure graph facts for a fixed HEAD are memoized on SnapshotCache so the
+  // O(pairs × merges) v3 join search does not re-spawn merge-base/ls-tree.
+  const merges = await snapshots.mergeCommits(head);
   const validationErrors: Array<{ merge: string; error: string }> = [];
   for (const merge of merges) {
-    if (!(await Promise.all(labels.map((label) => isAncestor(repo, label, merge)))).every(Boolean)) continue;
-    const parents = await commitParents(repo, merge);
+    if (!(await Promise.all(labels.map((label) => snapshots.isAncestor(label, merge)))).every(Boolean)) continue;
+    const parents = await snapshots.commitParents(merge);
     if (parents.length < 2) continue;
     const coverage: boolean[][] = [];
-    for (const parent of parents) coverage.push(await Promise.all(labels.map((label) => isAncestor(repo, label, parent))));
+    for (const parent of parents) coverage.push(await Promise.all(labels.map((label) => snapshots.isAncestor(label, parent))));
     if (labels.some((_, index) => !coverage.some((row) => row[index]))) continue;
     const relevantIndexes = coverage.map((row, index) => row.some(Boolean) ? index : -1).filter((index) => index >= 0);
     if (relevantIndexes.length < 2 || relevantIndexes.some((index) => coverage[index]!.every(Boolean))) continue;
     const relevantParents = relevantIndexes.map((index) => parents[index]!);
-    const parentTrees = await Promise.all(relevantParents.map((parent) => treeEntries(repo, parent, L1_PREFIX)));
+    const parentTrees = await Promise.all(relevantParents.map((parent) => snapshots.treeEntries(parent, L1_PREFIX)));
     const union = new Map<string, TreeEntry>();
     let conflict = false;
     for (const tree of parentTrees) {
@@ -454,7 +752,7 @@ async function findCertifiedJoin(repo: string, head: string, episodeId: string, 
       }
     }
     if (conflict) continue;
-    const joinedL1 = await treeEntries(repo, merge, L1_PREFIX);
+    const joinedL1 = await snapshots.treeEntries(merge, L1_PREFIX);
     if (!exactTreeMap(union, joinedL1)) continue;
     try {
       const l2Count = await snapshots.validateWholeL1AndL2(merge);
@@ -471,38 +769,142 @@ async function findCertifiedJoin(repo: string, head: string, episodeId: string, 
 class SnapshotCache {
   readonly repo: string;
   readonly roots = new Map<string, string>();
-  readonly scans = new Map<string, WholeL1ScanResult>();
+  readonly snapshots = new Map<string, Promise<{ root: string; scan: WholeL1ScanResult }>>();
+  readonly validations = new Map<string, Promise<number>>();
   readonly objectFormat: Promise<string>;
+  private readonly blobBytes = new Map<string, Buffer>();
+  private blobCacheBytes = 0;
+  private readonly ancestry = new Map<string, Promise<boolean>>();
+  private readonly mergeLists = new Map<string, Promise<readonly string[]>>();
+  private readonly parents = new Map<string, Promise<readonly string[]>>();
+  private readonly trees = new Map<string, Promise<Map<string, TreeEntry>>>();
 
   constructor(repo: string) {
     this.repo = repo;
     this.objectFormat = gitText(repo, ["rev-parse", "--show-object-format"]).then((value) => value.trim());
   }
 
+  isAncestor(maybeAncestor: string, descendant: string): Promise<boolean> {
+    if (maybeAncestor === descendant) return Promise.resolve(true);
+    const key = `${maybeAncestor}\0${descendant}`;
+    const existing = this.ancestry.get(key);
+    if (existing) return existing;
+    const created = isAncestor(this.repo, maybeAncestor, descendant);
+    this.ancestry.set(key, created);
+    return created;
+  }
+
+  mergeCommits(head: string): Promise<readonly string[]> {
+    const existing = this.mergeLists.get(head);
+    if (existing) return existing;
+    const created = gitText(this.repo, ["rev-list", "--merges", "--reverse", head]).then((raw) => Object.freeze(raw.trim().split("\n").filter(Boolean)));
+    this.mergeLists.set(head, created);
+    return created;
+  }
+
+  commitParents(commit: string): Promise<readonly string[]> {
+    const existing = this.parents.get(commit);
+    if (existing) return existing;
+    const created = commitParentsUncached(this.repo, commit).then((value) => Object.freeze(value));
+    this.parents.set(commit, created);
+    return created;
+  }
+
+  treeEntries(commit: string, prefix: string): Promise<Map<string, TreeEntry>> {
+    const key = `${commit}\0${prefix}`;
+    const existing = this.trees.get(key);
+    if (existing) return existing;
+    const created = treeEntriesUncached(this.repo, commit, prefix);
+    this.trees.set(key, created);
+    return created;
+  }
+
+  canonicalL2TreeEntries(commit: string): Promise<Map<string, TreeEntry>> {
+    return canonicalL2TreeEntriesFrom(this, commit);
+  }
+
   async dispose(): Promise<void> {
-    await Promise.all([...this.roots.values()].map((root) => fsp.rm(root, { recursive: true, force: true })));
+    // The number of certified joins is history-dependent. Remove snapshots
+    // serially instead of creating another unbounded Promise.all fan-out.
+    for (const root of this.roots.values()) {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+    this.blobBytes.clear();
+    this.blobCacheBytes = 0;
+    this.ancestry.clear();
+    this.mergeLists.clear();
+    this.parents.clear();
+    this.trees.clear();
   }
 
-  async snapshot(commit: string): Promise<{ root: string; scan: WholeL1ScanResult }> {
-    const existingRoot = this.roots.get(commit);
-    const existingScan = this.scans.get(commit);
-    if (existingRoot && existingScan) return { root: existingRoot, scan: existingScan };
+  async readBlobs(objectIds: readonly string[]): Promise<Map<string, Buffer>> {
+    const requested = [...new Set(objectIds)];
+    const missing = requested.filter((oid) => !this.blobBytes.has(oid));
+    const loaded = await readGitBlobsBatch(this.repo, missing);
+    for (const [oid, bytes] of loaded) {
+      if (this.blobBytes.has(oid)) continue;
+      const nextBytes = this.blobCacheBytes + bytes.length;
+      if (nextBytes > GIT_BATCH_DEFAULT_MAX_OUTPUT_BYTES) {
+        fail("RECOVERY_GIT_BATCH_OUTPUT_LIMIT", "classification blob cache exceeded its bounded byte budget", {
+          maxOutputBytes: GIT_BATCH_DEFAULT_MAX_OUTPUT_BYTES,
+          observedBytes: nextBytes,
+        });
+      }
+      this.blobBytes.set(oid, bytes);
+      this.blobCacheBytes = nextBytes;
+    }
+    const result = new Map<string, Buffer>();
+    for (const oid of requested) {
+      const bytes = this.blobBytes.get(oid);
+      if (!bytes) fail("RECOVERY_GIT_BATCH_SHORT_READ", "classification blob cache omitted a requested object", { oid });
+      result.set(oid, bytes);
+    }
+    return result;
+  }
+
+  snapshot(commit: string): Promise<{ root: string; scan: WholeL1ScanResult }> {
+    const existing = this.snapshots.get(commit);
+    if (existing) return existing;
+    const created = this.createSnapshot(commit);
+    // Rejections remain cached for this immutable classification run. Retrying
+    // the same commit in the same proof could turn one I/O fault into divergent
+    // v2/v3 verdicts. A new top-level classification gets a fresh cache.
+    this.snapshots.set(commit, created);
+    return created;
+  }
+
+  private async createSnapshot(commit: string): Promise<{ root: string; scan: WholeL1ScanResult }> {
     const root = await fsp.mkdtemp(path.join(os.tmpdir(), "pi-astack-history-snapshot-"));
-    const archivePath = path.join(root, "l1.tar");
-    const archive = await gitBuffer(this.repo, ["archive", "--format=tar", commit, "l1"]);
-    await fsp.writeFile(archivePath, archive);
-    await execFileAsync("tar", ["-xf", archivePath, "-C", root], { env: gitEnvironment(), timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
-    await fsp.rm(archivePath, { force: true });
-    const scan = await scanWholeL1Validated({ abrainHome: root });
     this.roots.set(commit, root);
-    this.scans.set(commit, scan);
-    return { root, scan };
+    const archivePath = path.join(root, "l1.tar");
+    try {
+      const archive = await gitBuffer(this.repo, ["archive", "--format=tar", commit, "l1"]);
+      await fsp.writeFile(archivePath, archive);
+      await execFileAsync("tar", ["-xf", archivePath, "-C", root], { env: gitEnvironment(), timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+      const scan = await scanWholeL1Validated({ abrainHome: root });
+      return { root, scan };
+    } finally {
+      await fsp.rm(archivePath, { force: true });
+    }
   }
 
-  async validateWholeL1AndL2(commit: string): Promise<number> {
+  validateWholeL1AndL2(commit: string): Promise<number> {
+    const existing = this.validations.get(commit);
+    if (existing) {
+      recoveryHistoryTestStats.wholeValidationCacheHits += 1;
+      return existing;
+    }
+    recoveryHistoryTestStats.wholeValidationRuns += 1;
+    const created = this.validateWholeL1AndL2Uncached(commit);
+    // Failures are intentionally sticky for this cache lifetime; see snapshot().
+    this.validations.set(commit, created);
+    return created;
+  }
+
+  private async validateWholeL1AndL2Uncached(commit: string): Promise<number> {
     const { scan } = await this.snapshot(commit);
-    const actual = await canonicalL2TreeEntries(this.repo, commit);
-    const expected = await buildExpectedL2(this.repo, scan, actual);
+    const actual = await this.canonicalL2TreeEntries(commit);
+    const expected = await buildExpectedL2(this.repo, scan, actual, (objectIds) => this.readBlobs(objectIds));
     if (actual.size !== expected.size) fail("RECOVERY_L2_PROJECTION_DRIFT", "L2 tree path count is not the deterministic whole-L1 rebuild", { commit, expected: expected.size, actual: actual.size, missing: [...expected.keys()].filter((key) => !actual.has(key)).slice(0, 10), extra: [...actual.keys()].filter((key) => !expected.has(key)).slice(0, 10) });
     const format = await this.objectFormat;
     for (const [relative, bytes] of expected) {
@@ -519,25 +921,41 @@ function gitBlobOid(bytes: Buffer, format: string): string {
   return createHash(format).update(Buffer.from(`blob ${bytes.length}\0`)).update(bytes).digest("hex");
 }
 
-async function canonicalL2TreeEntries(repo: string, commit: string): Promise<Map<string, TreeEntry>> {
-  const knowledge = await treeEntries(repo, commit, `${KNOWLEDGE_L2_V1.canonicalRoot}/`);
-  const constraint = await treeEntries(repo, commit, `${CONSTRAINT_L2_V1.canonicalRoot}/`);
+// Attached to SnapshotCache so L2 tree walks reuse the same ls-tree memo table
+// as certified-join search within one classification run.
+async function canonicalL2TreeEntriesFrom(snapshots: SnapshotCache, commit: string): Promise<Map<string, TreeEntry>> {
+  const knowledge = await snapshots.treeEntries(commit, `${KNOWLEDGE_L2_V1.canonicalRoot}/`);
+  const constraint = await snapshots.treeEntries(commit, `${CONSTRAINT_L2_V1.canonicalRoot}/`);
   return new Map([...knowledge, ...constraint]);
 }
 
-async function buildExpectedL2(repo: string, scan: WholeL1ScanResult, actual: ReadonlyMap<string, TreeEntry>): Promise<Map<string, Buffer>> {
+async function buildExpectedL2(
+  repo: string,
+  scan: WholeL1ScanResult,
+  actual: ReadonlyMap<string, TreeEntry>,
+  readBlobs: (objectIds: readonly string[]) => Promise<Map<string, Buffer>> = (objectIds) => readGitBlobsBatch(repo, objectIds),
+): Promise<Map<string, Buffer>> {
   assertCanonicalL2ReconcilerCoverage();
   const manifestPath = canonicalKnowledgeManifestRelativePathV1();
   const knowledgeMarkdownEntries = [...actual.values()]
     .filter((entry) => entry.path.startsWith(`${KNOWLEDGE_L2_V1.canonicalRoot}/`) && entry.path.endsWith(".md"))
     .sort((left, right) => compareCodeUnits(left.path, right.path));
-  const knowledgeMarkdown = await Promise.all(knowledgeMarkdownEntries.map((entry) => gitBuffer(repo, ["cat-file", "blob", entry.oid]).then((bytes) => bytes.toString("utf-8"))));
   const manifestEntry = actual.get(manifestPath);
   const constraintEntry = actual.get(CONSTRAINT_L2_V1.canonicalPath);
-  const [knowledgeManifest, constraintMarkdown] = await Promise.all([
-    manifestEntry ? gitBuffer(repo, ["cat-file", "blob", manifestEntry.oid]).then((bytes) => bytes.toString("utf-8")) : null,
-    constraintEntry ? gitBuffer(repo, ["cat-file", "blob", constraintEntry.oid]).then((bytes) => bytes.toString("utf-8")) : null,
+  const blobs = await readBlobs([
+    ...knowledgeMarkdownEntries.map((entry) => entry.oid),
+    ...(manifestEntry ? [manifestEntry.oid] : []),
+    ...(constraintEntry ? [constraintEntry.oid] : []),
   ]);
+  const blobText = (entry: TreeEntry | undefined): string | null => {
+    if (!entry) return null;
+    const bytes = blobs.get(entry.oid);
+    if (!bytes) fail("RECOVERY_GIT_BATCH_SHORT_READ", "validated batch result omitted a requested L2 blob", { oid: entry.oid, path: entry.path });
+    return bytes.toString("utf-8");
+  };
+  const knowledgeMarkdown = knowledgeMarkdownEntries.map((entry) => blobText(entry)!);
+  const knowledgeManifest = blobText(manifestEntry);
+  const constraintMarkdown = blobText(constraintEntry);
   const constraintSourceTemplateVersions = scan.selected
     .filter((record) => record.registration.envelope_schema === "constraint-projection-envelope/v1")
     .map((record) => String(record.body.template_version ?? ""));
@@ -545,17 +963,17 @@ async function buildExpectedL2(repo: string, scan: WholeL1ScanResult, actual: Re
   return new Map(buildCanonicalL2V1(scan));
 }
 
-async function assertReachableRecoveryRetention(repo: string, head: string): Promise<void> {
+async function assertReachableRecoveryRetention(repo: string, head: string, snapshots?: SnapshotCache): Promise<void> {
   const introduced = new Set((await gitText(repo, ["log", "-m", "--format=", "--name-only", "--full-history", "--diff-filter=A", head, "--", L1_PREFIX]))
     .split("\n")
     .map((value) => value.trim())
     .filter((value) => value.startsWith(L1_PREFIX)));
-  const current = await treeEntries(repo, head, L1_PREFIX);
+  const current = snapshots ? await snapshots.treeEntries(head, L1_PREFIX) : await treeEntries(repo, head, L1_PREFIX);
   const missing = [...introduced].filter((relative) => !current.has(relative)).sort(compareCodeUnits);
   const missingRecovery: string[] = [];
   for (const relative of missing) {
     const addDiffCommits = [...new Set((await gitText(repo, ["log", "-m", "--format=%H", "--full-history", "--diff-filter=A", head, "--", relative])).trim().split("\n").filter(Boolean))];
-    const introducedAt = (await truePathIntroductionCommits(repo, addDiffCommits, relative)).at(-1);
+    const introducedAt = (await truePathIntroductionCommits(repo, addDiffCommits, relative, snapshots)).at(-1);
     if (!introducedAt) continue;
     let parsed: unknown;
     try { parsed = JSON.parse((await gitBuffer(repo, ["show", `${introducedAt}:${relative}`])).toString("utf-8")); }
@@ -566,9 +984,9 @@ async function assertReachableRecoveryRetention(repo: string, head: string): Pro
   if (missingRecovery.length) fail("RECOVERY_REACHABLE_L1_DROPPED", "current HEAD dropped recovery objects introduced by its reachable branch history", { head, introduced: introduced.size, current: current.size, missingRecovery: missingRecovery.slice(0, 20) });
 }
 
-async function assertCurrentRetainsJoin(repo: string, head: string, join: CertifiedSemanticJoin): Promise<void> {
-  const joined = await treeEntries(repo, join.mergeCommit, L1_PREFIX);
-  const current = await treeEntries(repo, head, L1_PREFIX);
+async function assertCurrentRetainsJoin(repo: string, head: string, join: CertifiedSemanticJoin, snapshots: SnapshotCache): Promise<void> {
+  const joined = await snapshots.treeEntries(join.mergeCommit, L1_PREFIX);
+  const current = await snapshots.treeEntries(head, L1_PREFIX);
   for (const [relative, entry] of joined) {
     const retained = current.get(relative);
     if (!retained || !sameTreeEntry(entry, retained)) fail("RECOVERY_JOIN_NOT_RETAINED", "current HEAD dropped or mutated a certified join L1 object", { head, join: join.mergeCommit, path: relative, expected: entry, actual: retained ?? null });
@@ -598,10 +1016,9 @@ function quarantine(head: string, error: unknown): V2RecoveryHistoryResult {
   return Object.freeze({ status: "quarantined", head, episodes: Object.freeze([]), joins: Object.freeze([]), consumedEventIds: Object.freeze([]), writableFrontierCount: 0, quarantined: Object.freeze([item]) });
 }
 
-export async function classifyV3RecoveryHistory(options: { repo: string; acceptedV2: V2RecoveryHistoryResult; scan?: WholeL1ScanResult; head?: string }): Promise<V3RecoveryHistoryResult> {
+async function classifyV3RecoveryHistoryWithSnapshots(options: { repo: string; acceptedV2: V2RecoveryHistoryResult; scan?: WholeL1ScanResult; head?: string }, snapshots: SnapshotCache): Promise<V3RecoveryHistoryResult> {
   const repo = path.resolve(options.repo);
   const head = await resolveCommit(repo, options.head ?? "HEAD");
-  const snapshots = new SnapshotCache(repo);
   try {
     const scan = options.scan ?? await scanWholeL1Validated({ abrainHome: repo });
     const scanV2EventIds = scan.all
@@ -643,7 +1060,7 @@ export async function classifyV3RecoveryHistory(options: { repo: string; accepte
       if (convergedSlots.length !== 1) fail("RECOVERY_CLOSURE_INCOMPLETE", "complete v3 episode does not have exactly one closure", { episodeId: cursor.episodeId, convergedSlots: convergedSlots.map(([slot]) => slot) });
       const [slot, state] = convergedSlots[0]!;
       if (!state.prepared) fail("RECOVERY_CLOSURE_INCOMPLETE", "complete v3 episode has no prepared object", { episodeId: cursor.episodeId, slot });
-      const validated = await validateCandidateV3(repo, head, cursor.episodeId, slot, state.prepared);
+      const validated = await validateCandidateV3(repo, head, cursor.episodeId, slot, state.prepared, snapshots);
       candidates.push(Object.freeze({ episodeId: cursor.episodeId, slot, candidate: validated.candidate, baseCommit: validated.baseCommit }));
     }
     candidates.sort((left, right) => compareCodeUnits(left.candidate, right.candidate));
@@ -653,7 +1070,7 @@ export async function classifyV3RecoveryHistory(options: { repo: string; accepte
     for (let left = 0; left < candidates.length; left += 1) {
       for (let right = left + 1; right < candidates.length; right += 1) {
         const a = candidates[left]!; const b = candidates[right]!;
-        if (await isAncestor(repo, a.candidate, b.candidate) || await isAncestor(repo, b.candidate, a.candidate)) continue;
+        if (await snapshots.isAncestor(a.candidate, b.candidate) || await snapshots.isAncestor(b.candidate, a.candidate)) continue;
         const labels = [a.candidate, b.candidate].sort(compareCodeUnits);
         const certified = await findCertifiedJoin(repo, head, `${a.episodeId}+${b.episodeId}`, Math.max(a.slot, b.slot), labels, snapshots);
         const key = `${certified.mergeCommit}\0${certified.branchLabels.join("\0")}`;
@@ -661,7 +1078,7 @@ export async function classifyV3RecoveryHistory(options: { repo: string; accepte
       }
     }
     if (joins.length) {
-      for (const join of joins) await assertCurrentRetainsJoin(repo, head, join);
+      for (const join of joins) await assertCurrentRetainsJoin(repo, head, join, snapshots);
       await snapshots.validateWholeL1AndL2(head);
     }
     return Object.freeze({
@@ -680,18 +1097,24 @@ export async function classifyV3RecoveryHistory(options: { repo: string; accepte
     const episodeId = typeof typed.detail?.episodeId === "string" ? typed.detail.episodeId : "history";
     const item: RecoveryHistoryQuarantine = recoveryQuarantineDiagnostic(episodeId, typed);
     return Object.freeze({ status: "quarantined", head, candidates: Object.freeze([]), joins: Object.freeze([]), openEpisodeIds: Object.freeze([]), terminalEpisodeIds: Object.freeze([]), quarantined: Object.freeze([item]) });
+  }
+}
+
+export async function classifyV3RecoveryHistory(options: { repo: string; acceptedV2: V2RecoveryHistoryResult; scan?: WholeL1ScanResult; head?: string }): Promise<V3RecoveryHistoryResult> {
+  const snapshots = new SnapshotCache(path.resolve(options.repo));
+  try {
+    return await classifyV3RecoveryHistoryWithSnapshots(options, snapshots);
   } finally {
     await snapshots.dispose();
   }
 }
 
-export async function classifyV2RecoveryHistory(options: { repo: string; scan?: WholeL1ScanResult; head?: string; symbolicRef?: string }): Promise<V2RecoveryHistoryResult> {
+async function classifyV2RecoveryHistoryWithSnapshots(options: { repo: string; scan?: WholeL1ScanResult; head?: string; symbolicRef?: string }, snapshots: SnapshotCache): Promise<V2RecoveryHistoryResult> {
   const repo = path.resolve(options.repo);
   const head = await resolveCommit(repo, options.head ?? "HEAD");
-  const snapshots = new SnapshotCache(repo);
   try {
     const scan = options.scan ?? await scanWholeL1Validated({ abrainHome: repo });
-    await assertReachableRecoveryRetention(repo, head);
+    await assertReachableRecoveryRetention(repo, head, snapshots);
     const rows = v2Records(scan);
     if (!rows.length) return Object.freeze({ status: "accepted", head, episodes: Object.freeze([]), joins: Object.freeze([]), consumedEventIds: Object.freeze([]), writableFrontierCount: 0, quarantined: Object.freeze([]), [V2_ACCEPTED_BRAND]: true });
     const grouped = new Map<string, V2Record[]>();
@@ -703,12 +1126,12 @@ export async function classifyV2RecoveryHistory(options: { repo: string; scan?: 
       const divergentSlots = new Set([...new Set(episode.candidates.map((candidate) => candidate.slot))]
         .filter((slot) => episode.candidates.filter((candidate) => candidate.slot === slot).length > 1));
       for (const candidate of episode.candidates) {
-        const shape = await validateCandidate(repo, head, episode.episodeId, candidate.slot, candidate.rows.prepared);
+        const shape = await validateCandidate(repo, head, episode.episodeId, candidate.slot, candidate.rows.prepared, snapshots);
         // Complete single-closure leaves may have their four metadata objects
         // in the worktree tail awaiting a future content drain. Git provenance
         // is authority only for partitioning conflicting bytes.
         const label = divergentSlots.has(candidate.slot)
-          ? await branchLabelForCandidate(repo, head, candidate.rows)
+          ? await branchLabelForCandidate(repo, head, candidate.rows, snapshots)
           : shape.candidate;
         episode.closures.push(Object.freeze({
           episodeId: episode.episodeId,
@@ -751,7 +1174,7 @@ export async function classifyV2RecoveryHistory(options: { repo: string; scan?: 
       }
     }
     if (joins.length) {
-      for (const join of joins) await assertCurrentRetainsJoin(repo, head, join);
+      for (const join of joins) await assertCurrentRetainsJoin(repo, head, join, snapshots);
       await snapshots.validateWholeL1AndL2(head);
     }
 
@@ -767,6 +1190,13 @@ export async function classifyV2RecoveryHistory(options: { repo: string; scan?: 
     return Object.freeze({ status: "accepted", head, episodes: Object.freeze(episodes), joins: Object.freeze(joins), consumedEventIds: Object.freeze(consumedEventIds), writableFrontierCount: 0, quarantined: Object.freeze([]), [V2_ACCEPTED_BRAND]: true });
   } catch (error) {
     return quarantine(head, error);
+  }
+}
+
+export async function classifyV2RecoveryHistory(options: { repo: string; scan?: WholeL1ScanResult; head?: string; symbolicRef?: string }): Promise<V2RecoveryHistoryResult> {
+  const snapshots = new SnapshotCache(path.resolve(options.repo));
+  try {
+    return await classifyV2RecoveryHistoryWithSnapshots(options, snapshots);
   } finally {
     await snapshots.dispose();
   }
@@ -776,25 +1206,95 @@ export async function classifyRecoveryHistory(options: { repo: string; scan?: Wh
   const repo = path.resolve(options.repo);
   const head = await resolveCommit(repo, options.head ?? "HEAD");
   const scan = options.scan ?? await scanWholeL1Validated({ abrainHome: repo });
-  const v2 = await classifyV2RecoveryHistory({ repo, scan, head, symbolicRef: options.symbolicRef });
-  if (v2.status !== "accepted") {
-    return Object.freeze({
-      status: "quarantined",
-      head,
-      v2,
-      v3: null,
-      quarantined: Object.freeze(v2.quarantined.map((item) => Object.freeze({ ...item, protocol: "v2" as const }))),
-    });
+  const snapshots = new SnapshotCache(repo);
+  try {
+    const v2 = await classifyV2RecoveryHistoryWithSnapshots({ repo, scan, head, symbolicRef: options.symbolicRef }, snapshots);
+    if (v2.status !== "accepted") {
+      return Object.freeze({
+        status: "quarantined",
+        head,
+        v2,
+        v3: null,
+        quarantined: Object.freeze(v2.quarantined.map((item) => Object.freeze({ ...item, protocol: "v2" as const }))),
+      });
+    }
+    const v3 = await classifyV3RecoveryHistoryWithSnapshots({ repo, scan, head, acceptedV2: v2 }, snapshots);
+    if (v3.status !== "accepted") {
+      return Object.freeze({
+        status: "quarantined",
+        head,
+        v2,
+        v3,
+        quarantined: Object.freeze(v3.quarantined.map((item) => Object.freeze({ ...item, protocol: "v3" as const }))),
+      });
+    }
+    return Object.freeze({ status: "accepted", head, v2, v3, quarantined: Object.freeze([]) });
+  } finally {
+    await snapshots.dispose();
   }
-  const v3 = await classifyV3RecoveryHistory({ repo, scan, head, acceptedV2: v2 });
-  if (v3.status !== "accepted") {
-    return Object.freeze({
-      status: "quarantined",
-      head,
-      v2,
-      v3,
-      quarantined: Object.freeze(v3.quarantined.map((item) => Object.freeze({ ...item, protocol: "v3" as const }))),
-    });
+}
+
+export async function _readGitBlobsBatchForTests(
+  repo: string,
+  objectIds: readonly string[],
+  options: GitBatchLimits = {},
+): Promise<Map<string, Buffer>> {
+  return readGitBlobsBatch(repo, objectIds, options);
+}
+
+export function _parseGitCatFileBatchForTests(
+  objectIds: readonly string[],
+  chunks: readonly Buffer[],
+  options: Pick<GitBatchLimits, "maxBlobBytes" | "maxOutputBytes"> = {},
+): Map<string, Buffer> {
+  const requests = [...new Set(objectIds)];
+  const parser = new GitCatFileBatchParser(requests, normalizeGitBatchLimits(options));
+  for (const chunk of chunks) parser.push(chunk);
+  return parser.finish();
+}
+
+export async function _validateWholeL1AndL2CacheForTests(repo: string, commit = "HEAD"): Promise<{ samePromise: boolean; count: number }> {
+  const resolved = await resolveCommit(path.resolve(repo), commit);
+  const snapshots = new SnapshotCache(path.resolve(repo));
+  try {
+    const first = snapshots.validateWholeL1AndL2(resolved);
+    const second = snapshots.validateWholeL1AndL2(resolved);
+    const count = await first;
+    await second;
+    return { samePromise: first === second, count };
+  } finally {
+    await snapshots.dispose();
   }
-  return Object.freeze({ status: "accepted", head, v2, v3, quarantined: Object.freeze([]) });
+}
+
+export function _recoveryHistoryBatchStatsForTests(): Readonly<typeof recoveryHistoryTestStats> {
+  return Object.freeze({ ...recoveryHistoryTestStats });
+}
+
+export function _resetRecoveryHistoryBatchStatsForTests(): void {
+  recoveryHistoryTestStats.catFileBatchSpawns = 0;
+  recoveryHistoryTestStats.wholeValidationRuns = 0;
+  recoveryHistoryTestStats.wholeValidationCacheHits = 0;
+}
+
+export async function _validatePreparedEntriesForTests(
+  repo: string,
+  entries: readonly PreparedCohortEntry[],
+  diff: Map<string, { oldMode: string; newMode: string; oldOid: string; newOid: string; status: string }>,
+): Promise<void> {
+  await validatePreparedEntries(repo, "test-episode", 0, "test-candidate", entries, diff);
+}
+
+export async function _readGitBlobBatchesThroughCacheForTests(
+  repo: string,
+  batches: readonly (readonly string[])[],
+): Promise<readonly Map<string, Buffer>[]> {
+  const snapshots = new SnapshotCache(path.resolve(repo));
+  try {
+    const results: Map<string, Buffer>[] = [];
+    for (const objectIds of batches) results.push(await snapshots.readBlobs(objectIds));
+    return Object.freeze(results);
+  } finally {
+    await snapshots.dispose();
+  }
 }

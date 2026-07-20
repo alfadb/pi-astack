@@ -22,6 +22,7 @@ import {
 } from "./git-exact-cohort";
 import { gitSingleFlight } from "./git-singleflight";
 import {
+  CanonicalMutationBarrierError,
   canonicalMutationBarrierHeld,
   withCanonicalMutationBarrier,
   withCanonicalMutationBarrierInSingleFlight,
@@ -926,6 +927,20 @@ function recoveryHistoryScanRoot(scan: WholeL1ScanResult): string {
   ])));
 }
 
+/**
+ * Test/multi-process harness only. When set, cold-start classification sleeps
+ * this many ms OUTSIDE the mutation barrier so a concurrent writer can prove
+ * it is not CANONICAL_MUTATION_BUSY during long classification.
+ * Production never sets PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS.
+ */
+function startupClassificationDelayMs(): number {
+  const raw = process.env.PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS;
+  if (raw === undefined || raw === "") return 0;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(Math.floor(value), 120_000);
+}
+
 async function pruneNoops(repo: string, frozen: string, plan: readonly CohortPlanEntry[]): Promise<CohortPlanEntry[]> {
   const pruned: CohortPlanEntry[] = [];
   for (const entry of plan) {
@@ -963,7 +978,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   private blockedReason?: string;
   private ownerAlert = false;
   private frozenOwnershipContext?: { statusHash: string; context: CanonicalOwnershipContext };
-  private recoveryHistoryCache?: { head: string; scanRoot: string; result: CombinedRecoveryHistoryResult };
+  private recoveryHistoryCache?: { head: string; scanRoot: string; statusHash: string; result: CombinedRecoveryHistoryResult };
   private readonly tail: Record<string, unknown>[] = [];
 
   constructor(args: { repo: string; options: CanonicalGitRuntimeOptions; settings: CanonicalGitRuntimeSettings; sourceRoot: string; provenance: readonly LoadedProvenanceEntry[] }) {
@@ -980,12 +995,23 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     if (this.tail.length > MAX_DIAGNOSTIC_TAIL) this.tail.splice(0, this.tail.length - MAX_DIAGNOSTIC_TAIL);
   }
 
-  private async classifyHistoricalRecoveryCached(scan: WholeL1ScanResult, head: string): Promise<CombinedRecoveryHistoryResult> {
+  private async classifyHistoricalRecoveryCached(
+    scan: WholeL1ScanResult,
+    head: string,
+    statusHash?: string,
+  ): Promise<CombinedRecoveryHistoryResult> {
     const scanRoot = recoveryHistoryScanRoot(scan);
+    const resolvedStatusHash = statusHash ?? (await statusSnapshot(this.repo)).hash;
     const cached = this.recoveryHistoryCache;
-    if (cached?.head === head && cached.scanRoot === scanRoot) return cached.result;
+    if (
+      cached?.head === head
+      && cached.scanRoot === scanRoot
+      && cached.statusHash === resolvedStatusHash
+    ) {
+      return cached.result;
+    }
     const result = await classifyHistoricalRecovery(this.repo, scan, head);
-    this.recoveryHistoryCache = { head, scanRoot, result };
+    this.recoveryHistoryCache = { head, scanRoot, statusHash: resolvedStatusHash, result };
     return result;
   }
 
@@ -1012,19 +1038,197 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     await preflightSharedIndexLock(this.repo);
   }
 
+  /**
+   * Startup freezes immutable recovery-history inputs and classifies OUTSIDE
+   * the canonical mutation barrier, then acquires the barrier only for
+   * recovery/index/ref/worktree mutation. After the barrier is held, HEAD +
+   * whole-L1 scan root + status ownership inputs are rechecked; drift releases
+   * the barrier and bounds a recompute. Classification failure also rechecks
+   * first: drift → retry, stable → fail-closed. This keeps multi-minute
+   * classification off the 30s OFD lock so concurrent writers/startups do not
+   * observe CANONICAL_MUTATION_BUSY solely because another process is classifying.
+   */
   awaitStartup(): Promise<CanonicalRuntimeDiagnostics> {
     if (!this.startupPromise) {
-      const created = gitSingleFlight(this.repo, () => withCanonicalMutationBarrierInSingleFlight(this.repo, async () => {
-        if (!this.settings.enabled || !this.settings.valid) {
-          this.startupState = "ready";
-          this.record({ operation: "startup", status: "legacy_boundary", reason: this.settings.reason });
-          return this.diagnostics();
-        }
-        this.startupState = "running";
-        this.blockedReason = undefined;
-        this.ownerAlert = false;
+      const created = this.runStartupOutsideMutationBarrier();
+      this.startupPromise = created;
+      void created.then(
+        (diag) => {
+          // blocked / drift-exhausted must NOT permanently cache: next enqueue
+          // or consumer re-entry re-runs startup (park must not freeze forever).
+          if (diag.startup === "blocked" && this.startupPromise === created) {
+            this.startupPromise = undefined;
+            if (this.startupState === "blocked") this.startupState = "not_started";
+          }
+        },
+        () => {
+          // Barrier acquisition rejects before the startup body's blocked-state
+          // conversion. Evict that rejected instance promise so a repaired or
+          // newly-uncontended repository can retry in this process.
+          if (this.startupPromise === created) this.startupPromise = undefined;
+        },
+      );
+    }
+    return this.startupPromise;
+  }
+
+  private async freezeStartupClassificationInputs(): Promise<{
+    head: string;
+    scan: WholeL1ScanResult;
+    scanRoot: string;
+    statusHash: string;
+  }> {
+    // headBefore → scan/status → headAfter. Any HEAD movement during freeze is drift.
+    const headBefore = await resolveRef(this.repo, this.options.refName);
+    const scan = await scanWholeL1Validated({ abrainHome: this.repo });
+    const scanRoot = recoveryHistoryScanRoot(scan);
+    const statusHash = (await statusSnapshot(this.repo)).hash;
+    const headAfter = await resolveRef(this.repo, this.options.refName);
+    if (headBefore !== headAfter) {
+      throw new CanonicalGitRuntimeError(
+        "STARTUP_CLASSIFY_INPUT_DRIFT",
+        "HEAD drifted during freeze of outside immutable classification inputs",
+        { headBefore, headAfter, scanRoot, statusHash },
+      );
+    }
+    return { head: headAfter, scan, scanRoot, statusHash };
+  }
+
+  private async assertStartupClassificationInputsStable(frozen: {
+    head: string;
+    scanRoot: string;
+    statusHash: string;
+  }): Promise<void> {
+    const currentHead = await resolveRef(this.repo, this.options.refName);
+    const currentScan = await scanWholeL1Validated({ abrainHome: this.repo });
+    const currentScanRoot = recoveryHistoryScanRoot(currentScan);
+    const currentStatusHash = (await statusSnapshot(this.repo)).hash;
+    if (currentHead !== frozen.head || currentScanRoot !== frozen.scanRoot || currentStatusHash !== frozen.statusHash) {
+      throw new CanonicalGitRuntimeError("STARTUP_CLASSIFY_INPUT_DRIFT", "HEAD/scan-root/status drifted after outside immutable classification", {
+        frozenHead: frozen.head,
+        currentHead,
+        frozenScanRoot: frozen.scanRoot,
+        currentScanRoot,
+        frozenStatusHash: frozen.statusHash,
+        currentStatusHash,
+      });
+    }
+  }
+
+  private async classifyStartupHistoryOutsideBarrier(
+    scan: WholeL1ScanResult,
+    head: string,
+    statusHash: string,
+  ): Promise<CombinedRecoveryHistoryResult> {
+    const delayMs = startupClassificationDelayMs();
+    if (delayMs > 0) {
+      this.record({ operation: "startup_classify", status: "test_delay", delayMs });
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+    }
+    return this.classifyHistoricalRecoveryCached(scan, head, statusHash);
+  }
+
+  private async runStartupOutsideMutationBarrier(): Promise<CanonicalRuntimeDiagnostics> {
+    if (!this.settings.enabled || !this.settings.valid) {
+      this.startupState = "ready";
+      this.record({ operation: "startup", status: "legacy_boundary", reason: this.settings.reason });
+      return this.diagnostics();
+    }
+
+    this.startupState = "running";
+    this.blockedReason = undefined;
+    this.ownerAlert = false;
+
+    const MAX_DRIFT_RETRIES = 4;
+    const barrierOptions = this.options.startupBarrierTimeoutMs === undefined
+      ? {}
+      : { timeoutMs: this.options.startupBarrierTimeoutMs };
+
+    for (let attempt = 0; attempt < MAX_DRIFT_RETRIES; attempt += 1) {
+      let frozen: { head: string; scan: WholeL1ScanResult; scanRoot: string; statusHash: string } | undefined;
+      let freezeError: unknown;
+      try {
+        frozen = await this.freezeStartupClassificationInputs();
+      } catch (error) {
+        freezeError = error;
+        this.record({
+          operation: "startup",
+          status: "freeze_inputs_failed",
+          attempt,
+          reason: error instanceof Error ? error.message : String(error),
+          ...(error instanceof CanonicalGitRuntimeError ? { code: error.code, detail: error.detail } : {}),
+        });
+      }
+
+      let classificationError: unknown;
+      if (frozen && !freezeError) {
         try {
+          // Populates recoveryHistoryCache for the under-barrier cache hit path.
+          await this.classifyStartupHistoryOutsideBarrier(frozen.scan, frozen.head, frozen.statusHash);
+          this.record({
+            operation: "startup_classify",
+            status: "outside_barrier_ok",
+            attempt,
+            head: frozen.head,
+            scanRoot: frozen.scanRoot,
+            statusHash: frozen.statusHash,
+          });
+        } catch (error) {
+          classificationError = error;
+          this.record({
+            operation: "startup_classify",
+            status: "outside_barrier_failed",
+            attempt,
+            head: frozen.head,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      try {
+        return await gitSingleFlight(this.repo, () => withCanonicalMutationBarrierInSingleFlight(this.repo, async () => {
+          // Freeze/scan exceptions also enter the barrier for a stable recheck:
+          // drift → retry outside; stable exception → fail-closed.
+          if (freezeError) {
+            if (freezeError instanceof CanonicalGitRuntimeError && freezeError.code === "STARTUP_CLASSIFY_INPUT_DRIFT") {
+              this.recoveryHistoryCache = undefined;
+              throw freezeError;
+            }
+            try {
+              const refrozen = await this.freezeStartupClassificationInputs();
+              this.recoveryHistoryCache = undefined;
+              throw new CanonicalGitRuntimeError(
+                "STARTUP_CLASSIFY_INPUT_DRIFT",
+                "freeze/scan failed outside barrier but inputs stabilised under barrier; retrying",
+                { prior: freezeError instanceof Error ? freezeError.message : String(freezeError), head: refrozen.head },
+              );
+            } catch (inner) {
+              if (inner instanceof CanonicalGitRuntimeError && inner.code === "STARTUP_CLASSIFY_INPUT_DRIFT") {
+                this.recoveryHistoryCache = undefined;
+                throw inner;
+              }
+              throw freezeError;
+            }
+          }
+
+          // Always recheck frozen inputs under the barrier before any
+          // fail-closed decision or mutation. Drift releases the barrier
+          // (throw STARTUP_CLASSIFY_INPUT_DRIFT) for a bounded outside retry.
+          try {
+            await this.assertStartupClassificationInputsStable(frozen!);
+          } catch (error) {
+            this.recoveryHistoryCache = undefined;
+            throw error;
+          }
+
+          if (classificationError) {
+            // Stable inputs + classification failure → fail-closed (no mutation).
+            throw classificationError;
+          }
+
           await recoverDeviceJoinJournal({ repo: this.repo });
+          // recoverAtStartupUnlocked re-reads head/scan; cache hit keeps the
+          // under-barrier window short after the outside classification.
           await this.recoverAtStartupUnlocked();
           const backlog = await this.requestBacklogPreflightUnlocked();
           if (backlog.status === "ready") {
@@ -1043,30 +1247,67 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
               }
             }
           } else if (backlog.status === "blocked") throw new CanonicalGitRuntimeError("STARTUP_BACKLOG_BLOCKED", backlog.reason ?? "backlog preflight blocked");
+
+          // Final post-mutation classification: if head/scan match the frozen
+          // inputs the outside result is reused via cache; otherwise classify
+          // under the barrier only for the (usually small) residual delta.
+          // Large post-mutation reclassify is rare on cold start with empty backlog.
           const finalScan = await scanWholeL1Validated({ abrainHome: this.repo });
           const finalHead = await resolveRef(this.repo, this.options.refName);
-          await this.classifyHistoricalRecoveryCached(finalScan, finalHead);
+          const finalStatusHash = (await statusSnapshot(this.repo)).hash;
+          await this.classifyHistoricalRecoveryCached(finalScan, finalHead, finalStatusHash);
           const finalRecovery = recoverOpenRecoveryEpisodesV3FromScan(finalScan);
-          if (finalRecovery.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", `active v3 recovery classification failed: ${quarantineReason("v3", finalRecovery.quarantined)}`, { protocol: "v3", quarantined: finalRecovery.quarantined });
+          if (finalRecovery.quarantined.length) {
+            throw new CanonicalGitRuntimeError(
+              "RECOVERY_QUARANTINED",
+              `active v3 recovery classification failed: ${quarantineReason("v3", finalRecovery.quarantined)}`,
+              { protocol: "v3", quarantined: finalRecovery.quarantined },
+            );
+          }
           this.startupState = "ready";
-          this.record({ operation: "startup", status: "local_ready" });
-        } catch (error) {
-          this.startupState = "blocked";
-          this.blockedReason = error instanceof Error ? error.message : String(error);
-          this.ownerAlert = this.blockedReason.includes("owner_alert=true");
-          this.record({ operation: "startup", status: "blocked", reason: this.blockedReason, ...(this.ownerAlert ? { ownerAlert: true } : {}) });
+          this.record({ operation: "startup", status: "local_ready", attempt });
+          return this.diagnostics();
+        }, barrierOptions));
+      } catch (error) {
+        if (error instanceof CanonicalMutationBarrierError) {
+          // Preserve rejection+eviction semantics for barrier acquisition.
+          throw error;
         }
+        if (
+          error instanceof CanonicalGitRuntimeError
+          && error.code === "STARTUP_CLASSIFY_INPUT_DRIFT"
+          && attempt < MAX_DRIFT_RETRIES - 1
+        ) {
+          this.record({
+            operation: "startup",
+            status: "classify_input_drift_retry",
+            attempt,
+            reason: error.message,
+            detail: error.detail,
+          });
+          continue;
+        }
+        this.startupState = "blocked";
+        this.blockedReason = error instanceof Error ? error.message : String(error);
+        this.ownerAlert = this.blockedReason.includes("owner_alert=true");
+        this.record({
+          operation: "startup",
+          status: "blocked",
+          reason: this.blockedReason,
+          attempt,
+          ...(error instanceof CanonicalGitRuntimeError && error.code === "STARTUP_CLASSIFY_INPUT_DRIFT"
+            ? { drift_exhausted: true }
+            : {}),
+          ...(this.ownerAlert ? { ownerAlert: true } : {}),
+        });
         return this.diagnostics();
-      }, this.options.startupBarrierTimeoutMs === undefined ? {} : { timeoutMs: this.options.startupBarrierTimeoutMs }));
-      this.startupPromise = created;
-      void created.catch(() => {
-        // Barrier acquisition rejects before the startup body's blocked-state
-        // conversion. Evict that rejected instance promise so a repaired or
-        // newly-uncontended repository can retry in this process.
-        if (this.startupPromise === created) this.startupPromise = undefined;
-      });
+      }
     }
-    return this.startupPromise;
+
+    this.startupState = "blocked";
+    this.blockedReason = "STARTUP_CLASSIFY_INPUT_DRIFT: exceeded bounded recompute attempts";
+    this.record({ operation: "startup", status: "blocked", reason: this.blockedReason, drift_exhausted: true });
+    return this.diagnostics();
   }
 
   async recoverAtStartup(): Promise<void> {
@@ -1680,11 +1921,20 @@ export function getCanonicalStartupPromise(options: CanonicalGitRuntimeOptions):
   if (existing) return existing;
   const created = (async () => (await getCanonicalGitRuntime(options)).awaitStartup())();
   state.startupPromises.set(key, created);
-  void created.catch(() => {
-    // Identity guard prevents an older rejection from deleting a replacement
-    // promise installed for the same key (the promise-cache ABA race).
-    if (state.startupPromises.get(key) === created) state.startupPromises.delete(key);
-  });
+  void created.then(
+    (diag) => {
+      // blocked is retryable: park forever is forbidden. Evict so the next
+      // enqueue / consumer re-entry re-runs startup against a repaired repo.
+      if (diag.startup === "blocked" && state.startupPromises.get(key) === created) {
+        state.startupPromises.delete(key);
+      }
+    },
+    () => {
+      // Identity guard prevents an older rejection from deleting a replacement
+      // promise installed for the same key (the promise-cache ABA race).
+      if (state.startupPromises.get(key) === created) state.startupPromises.delete(key);
+    },
+  );
   return created;
 }
 

@@ -504,6 +504,7 @@ await check("SHA-1 and SHA-256 are deterministic per format with equal OID-free 
 });
 
 await check("incomparable complete v3 candidates require and accept a certified semantic join", async () => {
+  history._resetRecoveryHistoryBatchStatsForTests();
   const repo = initRepo("v3-semantic-join");
   const base = git(repo, "rev-parse", "HEAD");
   const candidates = [];
@@ -526,6 +527,9 @@ await check("incomparable complete v3 candidates require and accept a certified 
   const classified = await history.classifyRecoveryHistory({ repo });
   assert(classified.status === "accepted" && classified.v3?.candidates.length === 2 && classified.v3.joins.length === 1, `v3 semantic join was not certified: ${JSON.stringify(classified.quarantined)}`);
   assert(JSON.stringify(classified.v3.candidates.map((item) => item.candidate).sort()) === JSON.stringify(candidates.sort()), "v3 candidate set drifted");
+  const stats = history._recoveryHistoryBatchStatsForTests();
+  assert(stats.wholeValidationRuns === 1, `same merge/head validation ran ${stats.wholeValidationRuns} times`);
+  assert(stats.wholeValidationCacheHits >= 1, "findCertifiedJoin/head validation did not share the commit Promise cache");
 });
 
 await check("v3 stale-device CAS conflict fails closed without publication metadata", async () => {

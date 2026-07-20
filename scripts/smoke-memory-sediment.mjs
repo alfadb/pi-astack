@@ -447,9 +447,15 @@ async function main() {
     const { validateRouteDecision, applyStagingDowngrade, RouterError, LANE_G_ALLOWED_REGIONS, ROUTING_CONFIDENCE_THRESHOLD } = req("./sediment/about-me-router.js");
     // ADR 0021 G2 helpers (2026-05-20): parseAboutMeArgs / deriveAboutMeTitle /
     // buildAboutMeFence are exported from sediment/index.ts for the
-    // /about-me slash. shouldAdvanceAfterAboutMeResults is internal; we
-    // re-exercise its semantics through the writer in this smoke.
-    const { parseAboutMeArgs, deriveAboutMeTitle, buildAboutMeFence } = req("./sediment/index.js");
+    // /about-me slash. shouldAdvanceAfterAboutMeResults is internal; smoke
+    // re-exercises writer outcomes and uses the test export to pin terminal
+    // recovery semantics (route_rejected_idempotent → advance key/watermark).
+    const {
+      parseAboutMeArgs,
+      deriveAboutMeTitle,
+      buildAboutMeFence,
+      _shouldAdvanceAfterAboutMeResultsForTests,
+    } = req("./sediment/index.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     const { knowledgeEvidenceEventPath, readKnowledgeProjectionStores, readKnowledgeStableViewStores } = req("./sediment/knowledge-evidence.js");
     // P2 fix (2026-05-14): smoke tests don't use real git repos, so disable
@@ -999,6 +1005,7 @@ async function main() {
             ui: { notify() {}, setStatus(_key, msg) { boundStatuses.push(msg); } },
           },
         );
+        await hookReq("./sediment/index.js")._waitForAutoWriteIdleForTests();
         const boundAudit = path.join(boundRoot, ".pi-astack", "sediment", "audit.jsonl");
         const boundSubAudit = path.join(boundRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
         assert(fs.existsSync(boundAudit), `bound unhealthy audit must land at project root: ${boundAudit}`);
@@ -1061,6 +1068,7 @@ async function main() {
             ui: { notify() {}, setStatus(_key, msg) { unboundStatuses.push(msg); } },
           },
         );
+        await hookReq("./sediment/index.js")._waitForAutoWriteIdleForTests();
         const unboundAudit = path.join(unboundRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
         assert(fs.existsSync(unboundAudit), `unbound audit must be visible at launch cwd: ${unboundAudit}`);
         const unboundRows = fs.readFileSync(unboundAudit, "utf-8").trim().split("\n").map(JSON.parse);
@@ -1102,6 +1110,7 @@ async function main() {
             ui: { notify() {}, setStatus() {} },
           },
         );
+        await hookReq("./sediment/index.js")._waitForAutoWriteIdleForTests();
         const unconfAudit = path.join(unconfRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
         assert(fs.existsSync(unconfAudit), `path_unconfirmed audit must be visible at launch cwd: ${unconfAudit}`);
         const unconfRows = fs.readFileSync(unconfAudit, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
@@ -1138,6 +1147,7 @@ async function main() {
             ui: { notify() {}, setStatus() {} },
           },
         );
+        await hookReq("./sediment/index.js")._waitForAutoWriteIdleForTests();
         const noregAudit = path.join(noregRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
         assert(fs.existsSync(noregAudit), `registry_missing audit must be visible at launch cwd: ${noregAudit}`);
         const noregRows = fs.readFileSync(noregAudit, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
@@ -2260,9 +2270,9 @@ Original Pensieve seed content.
     assert(cpAAfterEphemeral.lastProcessedEntryId === "entryA-99", "ephemeral save must not affect any persisted session slot");
     const cpEph = await loadSessionCheckpoint(concRoot, undefined);
     assert(!cpEph.lastProcessedEntryId, "ephemeral load must return empty checkpoint regardless of file content");
-    // Verify on-disk shape: schema_version 2 + sessions map with both keys.
+    // Verify on-disk shape: schema_version 3 + sessions map with both keys.
     const cpDiskRaw = JSON.parse(fs.readFileSync(path.join(concRoot, ".pi-astack", "sediment", "checkpoint.json"), "utf-8"));
-    assert(cpDiskRaw.schema_version === 2, `expected checkpoint schema_version=2, got ${cpDiskRaw.schema_version}`);
+    assert(cpDiskRaw.schema_version === 3, `expected checkpoint schema_version=3, got ${cpDiskRaw.schema_version}`);
     assert(cpDiskRaw.sessions && cpDiskRaw.sessions["session-A"]?.lastProcessedEntryId === "entryA-99", "on-disk session A slot missing");
     assert(cpDiskRaw.sessions["session-B"]?.lastProcessedEntryId === "entryB-42", "on-disk session B slot missing");
 
@@ -2344,8 +2354,249 @@ Original Pensieve seed content.
     assert(v1Loaded.lastProcessedEntryId === "legacy-77", `v1 LEGACY slot not adopted by new session, got ${v1Loaded.lastProcessedEntryId}`);
     await saveSessionCheckpoint(v1Root, "new-session", { lastProcessedEntryId: "new-78" });
     const v1AfterAdoption = JSON.parse(fs.readFileSync(path.join(v1Root, ".pi-astack", "sediment", "checkpoint.json"), "utf-8"));
+    assert(v1AfterAdoption.schema_version === 3, `v1 upgrade must land as schema_version=3, got ${v1AfterAdoption.schema_version}`);
     assert(!v1AfterAdoption.sessions["_legacy"], "_legacy slot must be cleared after adoption");
     assert(v1AfterAdoption.sessions["new-session"]?.lastProcessedEntryId === "new-78", "v1 carry-over not persisted under new session");
+    // Legacy adopted slot is NOT lineageRecorded until a v3-aware save with branch.
+    assert(v1AfterAdoption.sessions["new-session"]?.lineageRecorded !== true, "bare watermark save must not invent lineage proof");
+
+    // v3 lineage helper + durable candidate keys + partial-failure retry.
+    const {
+      lineagePatchForBranch,
+      buildDurableCandidateKey,
+      checkpointHasProcessedKey,
+      checkpointAdvancedSince,
+      computeBranchLineageKey,
+    } = req("./sediment/checkpoint.js");
+    const v3Root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-v3-cp-"));
+    fs.mkdirSync(path.join(v3Root, ".pensieve"), { recursive: true });
+    const v3Branch = [
+      { id: "v3-e1", type: "message", message: { role: "user", content: "a" } },
+      { id: "v3-e2", type: "message", message: { role: "assistant", content: "b" } },
+      { id: "v3-e3", type: "message", message: { role: "user", content: "c" } },
+    ];
+    const keyA = buildDurableCandidateKey({
+      sessionId: "v3-sess",
+      sourceEntryIds: ["v3-e1", "v3-e2"],
+      lane: "explicit",
+      candidateIndex: 0,
+      title: "Partial Retry Fact",
+      body: "body-a",
+    });
+    const keyB = buildDurableCandidateKey({
+      sessionId: "v3-sess",
+      sourceEntryIds: ["v3-e1", "v3-e2"],
+      lane: "explicit",
+      candidateIndex: 1,
+      title: "Second Fact",
+      body: "body-b",
+    });
+    assert(keyA !== keyB, "distinct candidates must get distinct durable keys");
+    const beforeCp = await loadSessionCheckpoint(v3Root, "v3-sess");
+    // Partial progress: only keyA applied, watermark not yet at tip.
+    await saveSessionCheckpoint(v3Root, "v3-sess", {
+      lastProcessedEntryId: "v3-e2",
+      ...lineagePatchForBranch(v3Branch.slice(0, 2), {
+        previous: beforeCp,
+        processedCandidateKeys: [keyA],
+      }),
+    });
+    const midCp = await loadSessionCheckpoint(v3Root, "v3-sess");
+    assert(midCp.lineageRecorded === true, "lineage-aware save must set lineageRecorded");
+    assert(midCp.branchLineageKey === computeBranchLineageKey(["v3-e1", "v3-e2"]), "branchLineageKey mismatch");
+    assert(checkpointHasProcessedKey(midCp, keyA), "partial keyA must be durable");
+    assert(!checkpointHasProcessedKey(midCp, keyB), "keyB must not be marked before apply");
+    assert(checkpointAdvancedSince(beforeCp, midCp), "partial save must count as durable progress");
+    // Retry full writer window: re-applying keyA is a no-op at checkpoint layer;
+    // only keyB is new. Prefix timeline/staging counts must not grow for keyA.
+    const retryKeys = [keyA, keyB].filter((k) => !checkpointHasProcessedKey(midCp, k));
+    assert(retryKeys.length === 1 && retryKeys[0] === keyB, `retry must only apply unprocessed keys, got ${JSON.stringify(retryKeys)}`);
+    await saveSessionCheckpoint(v3Root, "v3-sess", {
+      lastProcessedEntryId: "v3-e3",
+      ...lineagePatchForBranch(v3Branch, {
+        previous: midCp,
+        processedCandidateKeys: retryKeys,
+      }),
+    });
+    const endCp = await loadSessionCheckpoint(v3Root, "v3-sess");
+    assert(endCp.lastProcessedEntryId === "v3-e3", "retry must advance watermark to tip");
+    assert(checkpointHasProcessedKey(endCp, keyA) && checkpointHasProcessedKey(endCp, keyB), "both keys durable after retry");
+    const endDisk = JSON.parse(fs.readFileSync(path.join(v3Root, ".pi-astack", "sediment", "checkpoint.json"), "utf-8"));
+    assert(endDisk.schema_version === 3, `v3 writer must persist schema_version=3, got ${endDisk.schema_version}`);
+    // processedCandidateKeys is a set: re-saving keyA must not duplicate.
+    const keyACount = (endCp.processedCandidateKeys || []).filter((k) => k === keyA).length;
+    assert(keyACount === 1, `keyA must appear once after partial retry, count=${keyACount}`);
+    fs.rmSync(v3Root, { recursive: true, force: true });
+
+    // Main-lane (non-drain) partial-window contract — mirrors drain semantics:
+    // same window candidate1 terminal success + candidate2 transient → watermark
+    // does NOT advance but key1 is durable; retry skips candidate1 (no rewrite)
+    // and after candidate2 success advances. Check timeline/staging counts.
+    // Source structure: main handler must persist partial keys without watermark.
+    {
+      const indexSource = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
+      // Locate the main (non-drain) combined checkpoint block — the drain
+      // block also has `else if (appliedKeys.length > 0)` so require both
+      // the main-lane appliedKeys declaration near Lane A and the partial save.
+      assert(
+        /const appliedKeys: string\[\] = \[\];[\s\S]*?Combined checkpoint advance[\s\S]*?else if \(appliedKeys\.length > 0\)/.test(indexSource),
+        "main lane must declare appliedKeys and partial-save without watermark (drain-aligned)",
+      );
+      assert(
+        !/const explicitKeys = drafts\.map/.test(indexSource),
+        "main lane must not re-derive ALL draft keys on full advance; only terminal appliedKeys",
+      );
+
+      const partialRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-main-partial-"));
+      const partialAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-main-partial-abrain-"));
+      execFileSync("git", ["-C", partialAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", partialAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", partialAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", partialAbrain, "config", "commit.gpgsign", "false"]);
+      fs.mkdirSync(path.join(partialRoot, ".pensieve"), { recursive: true });
+      const partialSettings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: true };
+      const partialBranch = [
+        { id: "main-e1", type: "message", message: { role: "user", content: "remember two facts" } },
+        { id: "main-e2", type: "message", message: { role: "assistant", content: "ok" } },
+      ];
+      const partialSession = "main-partial-sess";
+      const key1 = buildDurableCandidateKey({
+        sessionId: partialSession,
+        sourceEntryIds: ["main-e1", "main-e2"],
+        lane: "explicit",
+        candidateIndex: 0,
+        title: "Main Partial Fact One",
+        body: "# Main Partial Fact One\n\nFirst candidate durable success body for partial-window regression.",
+      });
+      const key2 = buildDurableCandidateKey({
+        sessionId: partialSession,
+        sourceEntryIds: ["main-e1", "main-e2"],
+        lane: "explicit",
+        candidateIndex: 1,
+        title: "Main Partial Fact Two",
+        body: "# Main Partial Fact Two\n\nSecond candidate that first fails transiently then succeeds.",
+      });
+      assert(key1 !== key2, "main partial keys must be distinct");
+
+      // candidate1: durable success via real writer.
+      const c1 = await writeProjectEntry({
+        title: "Main Partial Fact One",
+        kind: "fact",
+        status: "active",
+        confidence: 5,
+        compiledTruth: "# Main Partial Fact One\n\nFirst candidate durable success body for partial-window regression.",
+        sessionId: partialSession,
+        timelineNote: "main partial candidate1",
+      }, {
+        projectRoot: partialRoot,
+        abrainHome: partialAbrain,
+        projectId: "main-partial-proj",
+        settings: partialSettings,
+        dryRun: false,
+      });
+      assert(c1.status === "created", `candidate1 must create: ${JSON.stringify(c1)}`);
+      const timelineAfterC1 = (fs.readFileSync(c1.path, "utf-8").match(/## Timeline[\s\S]*/)?.[0] || "").split("\n").filter((l) => l.startsWith("- ")).length;
+      const commitsAfterC1 = execFileSync("git", ["-C", partialAbrain, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+
+      // candidate2: transient fail (gitCommit required but no .git) — HOLD.
+      const failAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-main-partial-fail-"));
+      // no git init → git_commit_failed (transient)
+      const c2fail = await writeProjectEntry({
+        title: "Main Partial Fact Two",
+        kind: "fact",
+        status: "active",
+        confidence: 5,
+        compiledTruth: "# Main Partial Fact Two\n\nSecond candidate that first fails transiently then succeeds.",
+        sessionId: partialSession,
+        timelineNote: "main partial candidate2 fail",
+      }, {
+        projectRoot: partialRoot,
+        abrainHome: failAbrain,
+        projectId: "main-partial-proj",
+        settings: partialSettings,
+        dryRun: false,
+      });
+      assert(c2fail.status === "rejected" && c2fail.reason === "git_commit_failed",
+        `candidate2 first pass must be transient git_commit_failed: ${JSON.stringify(c2fail)}`);
+
+      // Main-lane partial save: only key1, NO watermark advance (lastEntryId stays undefined / prior).
+      const beforePartial = await loadSessionCheckpoint(partialRoot, partialSession);
+      assert(!beforePartial.lastProcessedEntryId, "fresh partial session has no watermark");
+      const appliedKeysPass1 = [key1]; // only terminal durable success; failed candidate2 not recorded
+      await saveSessionCheckpoint(partialRoot, partialSession, {
+        ...beforePartial,
+        // intentionally omit lastProcessedEntryId advance
+        ...lineagePatchForBranch(partialBranch, {
+          previous: beforePartial,
+          processedCandidateKeys: appliedKeysPass1,
+        }),
+      });
+      const midPartial = await loadSessionCheckpoint(partialRoot, partialSession);
+      assert(!midPartial.lastProcessedEntryId, "partial key save must NOT advance lastProcessedEntryId");
+      assert(checkpointHasProcessedKey(midPartial, key1), "key1 must be durable after partial pass");
+      assert(!checkpointHasProcessedKey(midPartial, key2), "failed candidate2 must not record key");
+      assert(midPartial.lineageRecorded === true, "partial save still records lineage fields");
+
+      // Retry: candidate1 is checkpoint_idempotent (no rewrite); candidate2 succeeds; watermark advances.
+      const retryKeys = [key1, key2].filter((k) => !checkpointHasProcessedKey(midPartial, k));
+      assert(retryKeys.length === 1 && retryKeys[0] === key2, `retry must only apply key2, got ${JSON.stringify(retryKeys)}`);
+      // Re-attempt candidate1 write: main lane would skip via checkpoint_idempotent;
+      // writer-level terminal duplicate_slug must not rewrite timeline/commits.
+      const c1Retry = await writeProjectEntry({
+        title: "Main Partial Fact One",
+        kind: "fact",
+        status: "active",
+        confidence: 5,
+        compiledTruth: "# Main Partial Fact One\n\nFirst candidate durable success body for partial-window regression.",
+        sessionId: partialSession,
+        timelineNote: "main partial candidate1 retry MUST NOT rewrite",
+      }, {
+        projectRoot: partialRoot,
+        abrainHome: partialAbrain,
+        projectId: "main-partial-proj",
+        settings: partialSettings,
+        dryRun: false,
+      });
+      assert(
+        c1Retry.status === "rejected" && c1Retry.reason === "duplicate_slug",
+        `candidate1 retry must be terminal duplicate_slug (no rewrite): ${JSON.stringify(c1Retry)}`,
+      );
+      const timelineAfterRetry = (fs.readFileSync(c1.path, "utf-8").match(/## Timeline[\s\S]*/)?.[0] || "").split("\n").filter((l) => l.startsWith("- ")).length;
+      assert(timelineAfterRetry === timelineAfterC1, `candidate1 timeline must not grow on retry: before=${timelineAfterC1} after=${timelineAfterRetry}`);
+      const commitsAfterRetry = execFileSync("git", ["-C", partialAbrain, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+      assert(commitsAfterRetry === commitsAfterC1, `candidate1 retry must not add commits: before=${commitsAfterC1} after=${commitsAfterRetry}`);
+
+      const c2ok = await writeProjectEntry({
+        title: "Main Partial Fact Two",
+        kind: "fact",
+        status: "active",
+        confidence: 5,
+        compiledTruth: "# Main Partial Fact Two\n\nSecond candidate that first fails transiently then succeeds.",
+        sessionId: partialSession,
+        timelineNote: "main partial candidate2 success",
+      }, {
+        projectRoot: partialRoot,
+        abrainHome: partialAbrain,
+        projectId: "main-partial-proj",
+        settings: partialSettings,
+        dryRun: false,
+      });
+      assert(c2ok.status === "created", `candidate2 retry must create: ${JSON.stringify(c2ok)}`);
+
+      await saveSessionCheckpoint(partialRoot, partialSession, {
+        lastProcessedEntryId: "main-e2",
+        ...lineagePatchForBranch(partialBranch, {
+          previous: midPartial,
+          processedCandidateKeys: retryKeys,
+        }),
+      });
+      const endPartial = await loadSessionCheckpoint(partialRoot, partialSession);
+      assert(endPartial.lastProcessedEntryId === "main-e2", "full success must advance watermark to tip");
+      assert(checkpointHasProcessedKey(endPartial, key1) && checkpointHasProcessedKey(endPartial, key2), "both keys durable after full success");
+      fs.rmSync(partialRoot, { recursive: true, force: true });
+      fs.rmSync(partialAbrain, { recursive: true, force: true });
+      fs.rmSync(failAbrain, { recursive: true, force: true });
+    }
 
     const marker = `MEMORY:
 title: Explicit Candidate
@@ -5335,23 +5586,153 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       assert(amR2.status === "rejected" && amR2.reason === "route_rejected", `chosen∉candidates must route_reject: ${JSON.stringify(amR2)}`);
       assert(amR2.routeRejected && amR2.routeRejected.rule === 2, `routeRejected.rule must be 2, got ${JSON.stringify(amR2.routeRejected)}`);
 
-      // P2-A audit fix 2026-05-16: rejected sample filename must contain
-      // the 4-segment shape `<date>--<pid>--<epoch>--<Date.now()>.md`.
-      // The earlier P0-3 fix relies on Date.now() suffix to defeat same
-      // pid+epoch+date collisions; regressing to a 3-segment filename
-      // would silently overwrite.
+      // Content-addressed rejected sample: same basename shape as normal
+      // staging (`<epoch>--<sha24>.md`). No wall-clock date / pid /
+      // Date.now / randomBytes — same candidate always lands on one path.
       const rejectedDir = path.join(amHome, "projects", "smoke-project", "observations", "staging", "rejected");
       assert(fs.existsSync(rejectedDir), `rejected dir must exist after route_rejected with stagingProjectId: ${rejectedDir}`);
       const rejectedFiles = fs.readdirSync(rejectedDir).filter((f) => f.endsWith(".md"));
       assert(rejectedFiles.length >= 1, `rejected dir must hold ≥1 file, got ${rejectedFiles.length}`);
-      // Pattern: YYYY-MM-DD--<pid>--<epoch>--<ms>.md (4 `--` segments).
-      // P1-B audit fix 2026-05-16 round 3 regression: filename ends with
-      // an 8-hex crypto suffix (`--${randomBytes(4).toString("hex")}.md`)
-      // so concurrent same-ms writes don't collide.
       assert(
-        rejectedFiles.every((f) => /^\d{4}-\d{2}-\d{2}--\d+--\d+--\d+--[0-9a-f]{8}\.md$/.test(f)),
-        `rejected filenames must have 5-segment shape <date>--<pid>--<epoch>--<ms>--<hex8>.md (P0-3 + P1-B), got: ${rejectedFiles.join(", ")}`,
+        rejectedFiles.every((f) => /^\d+--[0-9a-f]{24}\.md$/.test(f)),
+        `rejected filenames must be content-addressed <epoch>--<sha24>.md (no date/pid/random): ${rejectedFiles.join(", ")}`,
       );
+      assert(fs.existsSync(amR2.path), `route_rejected result.path must point at sample: ${amR2.path}`);
+      assert(path.dirname(amR2.path) === rejectedDir, `route_rejected sample must live under rejected/: ${amR2.path}`);
+      const amR2Text = fs.readFileSync(amR2.path, "utf-8");
+      assert(/^captured_at: /m.test(amR2Text), `route_rejected sample frontmatter must keep captured_at audit field:\n${amR2Text}`);
+      assert(/^route_rejected_content_key: [0-9a-f]{24}$/m.test(amR2Text), `route_rejected sample must carry content key:\n${amR2Text}`);
+
+      // Same-candidate retry must be idempotent (no new file/commit).
+      const rejectedCountBeforeRetry = rejectedFiles.length;
+      const gitLogBeforeRejectRetry = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+      const amR2Retry = await writeAbrainAboutMe(
+        { title: "chosen not in candidates", body: "x".repeat(50), region: "identity", routingConfidence: 0.9, routeCandidates: ["skills"], routingReason: "synthetic-malformed", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000000 },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amR2Retry.status === "rejected" && amR2Retry.reason === "route_rejected_idempotent", `same route_rejected candidate must be idempotent: ${JSON.stringify(amR2Retry)}`);
+      assert(amR2Retry.path === amR2.path, `idempotent route_rejected must reuse stable path: ${amR2Retry.path} vs ${amR2.path}`);
+      const rejectedCountAfterRetry = fs.readdirSync(rejectedDir).filter((f) => f.endsWith(".md")).length;
+      assert(rejectedCountAfterRetry === rejectedCountBeforeRetry, `route_rejected retry must not grow files: before=${rejectedCountBeforeRetry} after=${rejectedCountAfterRetry}`);
+      const gitLogAfterRejectRetry = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+      assert(gitLogAfterRejectRetry === gitLogBeforeRejectRetry, `route_rejected retry must not create a commit: before=${gitLogBeforeRejectRetry} after=${gitLogAfterRejectRetry}`);
+
+      // Recovery: first route_rejected sample already on disk, but checkpoint /
+      // processed key never landed (crash between sample write and save).
+      // Retry must return route_rejected_idempotent AND be terminal so the
+      // key can be saved and the watermark can advance — without growing
+      // files or commits. Mirrors stable-sample recovery for staging_idempotent
+      // (status=skipped advances) and route_rejected (first-write terminal).
+      {
+        const recoveryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-am-rr-idem-cp-"));
+        const recoverySession = "about-me-route-rejected-idempotent-recovery";
+        // lineagePatchForBranch expects the session branch entry list (ids),
+        // same shape as the main partial-window checkpoint smoke above.
+        const recoveryBranch = [
+          { id: "am-rr-recovery-1", type: "message", message: { role: "user", content: "route rejected recovery" } },
+          { id: "am-rr-recovery-tip", type: "message", message: { role: "assistant", content: "ack" } },
+        ];
+        const recoveryKey = "about_me:route-rejected-recovery-key";
+        const recoveryDraft = {
+          title: "route rejected recovery missing key",
+          body: "z".repeat(50),
+          region: "identity",
+          routingConfidence: 0.9,
+          routeCandidates: ["skills"],
+          routingReason: "recovery-malformed",
+          stagingProjectId: "smoke-project",
+          stagingSessionEpoch: 1700000000888,
+          sessionId: recoverySession,
+        };
+        // First write: durable sample lands; simulate missing checkpoint key
+        // by never recording recoveryKey (fresh session has no watermark).
+        const firstReject = await writeAbrainAboutMe(recoveryDraft, { abrainHome: amHome, settings: amSettings });
+        assert(firstReject.status === "rejected" && firstReject.reason === "route_rejected", `recovery first write must route_reject: ${JSON.stringify(firstReject)}`);
+        assert(_shouldAdvanceAfterAboutMeResultsForTests([firstReject]) === true, `first route_rejected must be terminal for key/watermark advance`);
+        const beforeCp = await loadSessionCheckpoint(recoveryRoot, recoverySession);
+        assert(!beforeCp.lastProcessedEntryId, "recovery session starts with no watermark");
+        assert(!checkpointHasProcessedKey(beforeCp, recoveryKey), "recovery session starts without processed key");
+        const recoveryRejectedDir = path.join(amHome, "projects", "smoke-project", "observations", "staging", "rejected");
+        const filesBeforeRecoveryRetry = fs.readdirSync(recoveryRejectedDir).filter((f) => f.endsWith(".md")).length;
+        const commitsBeforeRecoveryRetry = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+        const sampleBefore = fs.readFileSync(firstReject.path, "utf-8");
+
+        // Retry with sample present + key still missing → idempotent + terminal.
+        const recoveryRetry = await writeAbrainAboutMe(recoveryDraft, { abrainHome: amHome, settings: amSettings });
+        assert(recoveryRetry.status === "rejected" && recoveryRetry.reason === "route_rejected_idempotent", `recovery retry must be route_rejected_idempotent: ${JSON.stringify(recoveryRetry)}`);
+        assert(recoveryRetry.path === firstReject.path, `recovery retry must reuse stable path: ${recoveryRetry.path} vs ${firstReject.path}`);
+        assert(_shouldAdvanceAfterAboutMeResultsForTests([recoveryRetry]) === true, `route_rejected_idempotent must be terminal so missing key can be saved and watermark can advance`);
+        const filesAfterRecoveryRetry = fs.readdirSync(recoveryRejectedDir).filter((f) => f.endsWith(".md")).length;
+        const commitsAfterRecoveryRetry = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+        assert(filesAfterRecoveryRetry === filesBeforeRecoveryRetry, `recovery retry must not grow rejected files: before=${filesBeforeRecoveryRetry} after=${filesAfterRecoveryRetry}`);
+        assert(commitsAfterRecoveryRetry === commitsBeforeRecoveryRetry, `recovery retry must not create a commit: before=${commitsBeforeRecoveryRetry} after=${commitsAfterRecoveryRetry}`);
+        assert(fs.readFileSync(firstReject.path, "utf-8") === sampleBefore, `recovery retry must not rewrite existing sample content`);
+
+        // Lane G post-terminal: record processed key + advance watermark.
+        await saveSessionCheckpoint(recoveryRoot, recoverySession, {
+          lastProcessedEntryId: "am-rr-recovery-tip",
+          ...lineagePatchForBranch(recoveryBranch, {
+            previous: beforeCp,
+            processedCandidateKeys: [recoveryKey],
+          }),
+        });
+        const afterCp = await loadSessionCheckpoint(recoveryRoot, recoverySession);
+        assert(afterCp.lastProcessedEntryId === "am-rr-recovery-tip", `terminal route_rejected_idempotent must allow watermark advance: ${JSON.stringify(afterCp)}`);
+        assert(checkpointHasProcessedKey(afterCp, recoveryKey), `terminal route_rejected_idempotent must allow processed key save`);
+        fs.rmSync(recoveryRoot, { recursive: true, force: true });
+      }
+
+      // Cross-day same route_rejected candidate (fake clock) must stay
+      // route_rejected_idempotent — path/file/commit counts do not grow.
+      {
+        const RealDate = Date;
+        const fakeNow = { ms: Date.parse("2026-03-01T12:00:00.000Z") };
+        class FakeDate extends RealDate {
+          constructor(...args) {
+            if (args.length === 0) super(fakeNow.ms);
+            else super(...args);
+          }
+          static now() { return fakeNow.ms; }
+        }
+        FakeDate.UTC = RealDate.UTC;
+        FakeDate.parse = RealDate.parse;
+        globalThis.Date = FakeDate;
+        try {
+          const crossDayRejectDraft = {
+            title: "cross-day route_rejected sample",
+            body: "r".repeat(50),
+            region: "identity",
+            routingConfidence: 0.9,
+            routeCandidates: ["skills"],
+            routingReason: "cross-day-malformed",
+            stagingProjectId: "smoke-project",
+            stagingSessionEpoch: 1700000000777,
+            sessionId: "smoke-cross-day-reject",
+          };
+          const day1 = await writeAbrainAboutMe(crossDayRejectDraft, { abrainHome: amHome, settings: amSettings });
+          assert(day1.status === "rejected" && day1.reason === "route_rejected", `cross-day route_rejected day1 must reject: ${JSON.stringify(day1)}`);
+          assert(!path.basename(day1.path).startsWith("2026-03-01"), `route_rejected basename must not start with wall-clock date: ${path.basename(day1.path)}`);
+          assert(/^\d+--[0-9a-f]{24}\.md$/.test(path.basename(day1.path)), `route_rejected basename must be content-addressed: ${path.basename(day1.path)}`);
+          const day1Files = fs.readdirSync(rejectedDir).filter((f) => f.endsWith(".md")).length;
+          const day1Commits = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+          const day1Captured = fs.readFileSync(day1.path, "utf-8");
+          assert(/^captured_at: /m.test(day1Captured), `day1 sample must keep captured_at:\n${day1Captured}`);
+          // Advance fake clock to next calendar day.
+          fakeNow.ms = Date.parse("2026-03-02T12:00:00.000Z");
+          const day2 = await writeAbrainAboutMe(crossDayRejectDraft, { abrainHome: amHome, settings: amSettings });
+          assert(day2.status === "rejected" && day2.reason === "route_rejected_idempotent", `cross-day route_rejected retry must be route_rejected_idempotent: ${JSON.stringify(day2)}`);
+          assert(day2.path === day1.path, `cross-day route_rejected path must be identical: ${day2.path} vs ${day1.path}`);
+          const day2Files = fs.readdirSync(rejectedDir).filter((f) => f.endsWith(".md")).length;
+          const day2Commits = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+          assert(day2Files === day1Files, `cross-day route_rejected must add 0 files: day1=${day1Files} day2=${day2Files}`);
+          assert(day2Commits === day1Commits, `cross-day route_rejected must add 0 commits: day1=${day1Commits} day2=${day2Commits}`);
+          // Path unchanged; original captured_at preserved (no rewrite).
+          const day2Captured = fs.readFileSync(day2.path, "utf-8");
+          assert(day2Captured === day1Captured, `idempotent route_rejected must not rewrite sample content`);
+        } finally {
+          globalThis.Date = RealDate;
+        }
+      }
 
       // P1-E audit fix 2026-05-16 regression: route_rejected without
       // stagingProjectId must land in <abrainHome>/.state/sediment/
@@ -5365,6 +5746,20 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       assert(fs.existsSync(orphanDir), `orphan-rejects dir must be created when stagingProjectId absent (P1-E): ${orphanDir}`);
       const orphanFiles = fs.readdirSync(orphanDir).filter((f) => f.endsWith(".md"));
       assert(orphanFiles.length >= 1, `orphan-rejects must hold ≥1 sample, got ${orphanFiles.length}`);
+      assert(
+        orphanFiles.every((f) => /^\d+--[0-9a-f]{24}\.md$/.test(f)),
+        `orphan-rejects filenames must be content-addressed <epoch>--<sha24>.md: ${orphanFiles.join(", ")}`,
+      );
+      // Orphan same-candidate retry is also idempotent.
+      const orphanBefore = orphanFiles.length;
+      const amR2OrphanRetry = await writeAbrainAboutMe(
+        { title: "chosen not in candidates orphan", body: "x".repeat(50), region: "identity", routingConfidence: 0.9, routeCandidates: ["skills"], routingReason: "synthetic-orphan" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amR2OrphanRetry.status === "rejected" && amR2OrphanRetry.reason === "route_rejected_idempotent", `orphan route_rejected retry must be idempotent: ${JSON.stringify(amR2OrphanRetry)}`);
+      assert(amR2OrphanRetry.path === amR2Orphan.path, `orphan idempotent path must match: ${amR2OrphanRetry.path} vs ${amR2Orphan.path}`);
+      const orphanAfter = fs.readdirSync(orphanDir).filter((f) => f.endsWith(".md")).length;
+      assert(orphanAfter === orphanBefore, `orphan retry must not grow files: before=${orphanBefore} after=${orphanAfter}`);
 
       // P1-C audit fix 2026-05-16 regression: out-of-range / non-finite
       // routingConfidence must fail-fast as validation_error — symmetric
@@ -5391,32 +5786,96 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       );
       assert(amVaultReject.status === "rejected" && amVaultReject.reason === "validation_error" && amVaultReject.validationErrors.some((e) => e.field === "region"), `region=vault must reject (ADR 0021 inv #4): ${JSON.stringify(amVaultReject)}`);
 
-      // P0-A audit fix 2026-05-16 regression: staging happy path must
-      // include Date.now() in the filename. Two staging writes with the
-      // SAME pid + sessionEpoch + date land in DIFFERENT files (not
-      // silent overwrite). Previously the filename was
-      // `<date>--<pid>--<epoch>.md` and the second write would rename
-      // over the first via atomicWrite.
+      // Content-addressed staging: distinct title/body → distinct files even
+      // with the same session epoch. Retry of the SAME candidate reuses one
+      // path (no duplicate file/commit on HOLD+retry). Basename has NO
+      // wall-clock date / Date.now / random — only stable epoch + content hash.
       const stagingDir = path.join(amHome, "projects", "smoke-project", "observations", "staging");
       const stagingBefore = fs.existsSync(stagingDir) ? fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md")).length : 0;
       const amStg1 = await writeAbrainAboutMe(
-        { title: "first low-conf sample", body: "x".repeat(50), region: "identity", routingConfidence: 0.3, routeCandidates: ["identity", "habits"], routingReason: "first-ambiguous", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000099 },
+        { title: "first low-conf sample", body: "x".repeat(50), region: "identity", routingConfidence: 0.3, routeCandidates: ["identity", "habits"], routingReason: "first-ambiguous", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000099, sessionId: "smoke-am-stg" },
         { abrainHome: amHome, settings: amSettings },
       );
       const amStg2 = await writeAbrainAboutMe(
-        { title: "second low-conf sample", body: "y".repeat(50), region: "identity", routingConfidence: 0.3, routeCandidates: ["identity", "habits"], routingReason: "second-ambiguous", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000099 /* same epoch! */ },
+        { title: "second low-conf sample", body: "y".repeat(50), region: "identity", routingConfidence: 0.3, routeCandidates: ["identity", "habits"], routingReason: "second-ambiguous", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000099 /* same epoch! */, sessionId: "smoke-am-stg" },
         { abrainHome: amHome, settings: amSettings },
       );
       assert(amStg1.status === "created" && amStg2.status === "created", `both staging writes must succeed: ${JSON.stringify({a:amStg1, b:amStg2})}`);
-      assert(amStg1.path !== amStg2.path, `P0-A: same-epoch staging writes MUST have distinct paths, got identical: ${amStg1.path}`);
+      assert(amStg1.path !== amStg2.path, `distinct candidates MUST have distinct staging paths, got identical: ${amStg1.path}`);
       const stagingAfter = fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md")).length;
-      assert(stagingAfter - stagingBefore >= 2, `staging dir must hold both writes (no silent overwrite): before=${stagingBefore} after=${stagingAfter}`);
-      // Both must match 5-segment filename shape (P1-B regression: hex suffix).
+      assert(stagingAfter - stagingBefore >= 2, `staging dir must hold both writes: before=${stagingBefore} after=${stagingAfter}`);
+      // Content-addressed filename: <epoch>--<contentHash24>.md (NO wall-clock date).
       const stgFiles = fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md"));
       assert(
-        stgFiles.every((f) => /^\d{4}-\d{2}-\d{2}--\d+--\d+--\d+--[0-9a-f]{8}\.md$/.test(f)),
-        `staging filenames must be 5-segment <date>--<pid>--<epoch>--<ms>--<hex8>.md (P0-A + P1-B): ${stgFiles.join(", ")}`,
+        stgFiles.every((f) => /^\d+--[0-9a-f]{24}\.md$/.test(f)),
+        `staging filenames must be content-addressed <epoch>--<sha24>.md (no date): ${stgFiles.join(", ")}`,
       );
+      // Auditable capture metadata lives in frontmatter, not the path.
+      const stg1Text = fs.readFileSync(amStg1.path, "utf-8");
+      assert(/^staging_project_id: smoke-project$/m.test(stg1Text), `staging frontmatter must carry staging_project_id:\n${stg1Text}`);
+      assert(/^staging_session_epoch: 1700000000099$/m.test(stg1Text), `staging frontmatter must carry staging_session_epoch:\n${stg1Text}`);
+      assert(/^session_id: smoke-am-stg$/m.test(stg1Text), `staging frontmatter must carry session_id:\n${stg1Text}`);
+      assert(/^staging_content_key: [0-9a-f]{24}$/m.test(stg1Text), `staging frontmatter must carry staging_content_key:\n${stg1Text}`);
+      assert(/^captured_at: /m.test(stg1Text), `staging frontmatter must carry captured_at wall-clock for audit:\n${stg1Text}`);
+      // Partial-failure retry of the SAME candidate must not grow file/commit count.
+      const stagingCountBeforeRetry = fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md")).length;
+      const gitLogBeforeRetry = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+      const amStg1Retry = await writeAbrainAboutMe(
+        { title: "first low-conf sample", body: "x".repeat(50), region: "identity", routingConfidence: 0.3, routeCandidates: ["identity", "habits"], routingReason: "first-ambiguous", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000099, sessionId: "smoke-am-stg" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amStg1Retry.status === "skipped" && amStg1Retry.reason === "staging_idempotent", `retry same staging candidate must skip: ${JSON.stringify(amStg1Retry)}`);
+      assert(amStg1Retry.path === amStg1.path, `retry must reuse stable staging path: ${amStg1Retry.path} vs ${amStg1.path}`);
+      const stagingCountAfterRetry = fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md")).length;
+      assert(stagingCountAfterRetry === stagingCountBeforeRetry, `staging file count must not grow on retry: before=${stagingCountBeforeRetry} after=${stagingCountAfterRetry}`);
+      const gitLogAfterRetry = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+      assert(gitLogAfterRetry === gitLogBeforeRetry, `staging retry must not create a new commit: before=${gitLogBeforeRetry} after=${gitLogAfterRetry}`);
+
+      // Cross-day same draft/session/source must stay staging_idempotent
+      // (fake clock 2026-01-01 → 2026-01-02). Basename must not include wall-clock date.
+      const RealDate = Date;
+      const fakeNow = { ms: Date.parse("2026-01-01T12:00:00.000Z") };
+      class FakeDate extends RealDate {
+        constructor(...args) {
+          if (args.length === 0) super(fakeNow.ms);
+          else super(...args);
+        }
+        static now() { return fakeNow.ms; }
+      }
+      FakeDate.UTC = RealDate.UTC;
+      FakeDate.parse = RealDate.parse;
+      globalThis.Date = FakeDate;
+      let crossDayPath;
+      try {
+        const crossDayDraft = {
+          title: "cross-day stable staging sample",
+          body: "z".repeat(50),
+          region: "identity",
+          routingConfidence: 0.3,
+          routeCandidates: ["identity", "habits"],
+          routingReason: "cross-day-ambiguous",
+          stagingProjectId: "smoke-project",
+          stagingSessionEpoch: 4242424242,
+          sessionId: "smoke-cross-day",
+        };
+        const day1 = await writeAbrainAboutMe(crossDayDraft, { abrainHome: amHome, settings: amSettings });
+        assert(day1.status === "created", `cross-day day1 must create: ${JSON.stringify(day1)}`);
+        assert(!path.basename(day1.path).startsWith("2026-01-01"), `basename must not start with wall-clock date: ${path.basename(day1.path)}`);
+        crossDayPath = day1.path;
+        const day1Files = fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md")).length;
+        const day1Commits = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+        // Advance fake clock to next calendar day.
+        fakeNow.ms = Date.parse("2026-01-02T12:00:00.000Z");
+        const day2 = await writeAbrainAboutMe(crossDayDraft, { abrainHome: amHome, settings: amSettings });
+        assert(day2.status === "skipped" && day2.reason === "staging_idempotent", `cross-day retry must be staging_idempotent: ${JSON.stringify(day2)}`);
+        assert(day2.path === crossDayPath, `cross-day path must be identical: ${day2.path} vs ${crossDayPath}`);
+        const day2Files = fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md")).length;
+        const day2Commits = execFileSync("git", ["-C", amHome, "log", "--oneline"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean).length;
+        assert(day2Files === day1Files, `cross-day must add 0 staging files: day1=${day1Files} day2=${day2Files}`);
+        assert(day2Commits === day1Commits, `cross-day must add 0 commits: day1=${day1Commits} day2=${day2Commits}`);
+      } finally {
+        globalThis.Date = RealDate;
+      }
 
       // P0-1 audit fix 2026-05-16 round 3 regression: router downgrade
       // to staging when caller did NOT supply stagingProjectId must be
@@ -5887,7 +6346,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       //   routeCandidates: [region]
       //   routingReason: fallback string
       //   stagingProjectId: <active project id>
-      //   stagingSessionEpoch: Date.now() (per agent_end batch)
+      //   stagingSessionEpoch: stable hash of sessionId+source entry ids (no wall-clock)
       // Verify that a fence WITHOUT explicit confidence/reason results
       // in a written entry with confidence=1.00 and the expected fallback
       // reason. This is the contract sediment guarantees to the slash.

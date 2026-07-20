@@ -127,9 +127,31 @@ async function expectQuarantine(repo, expectedCodes) {
   assert(expectedCodes.some((code) => result.quarantined.some((item) => item.errorCode === code || item.message.includes(code))), `unexpected quarantine: ${JSON.stringify(result.quarantined)}`);
   return result;
 }
-function startupChild(repo, settingsPath) {
+const STARTUP_CHILD_TIMEOUT_MS = Math.min(
+  300_000,
+  Math.max(1_000, Number(process.env.PI_ASTACK_PRODUCTION_STARTUP_TIMEOUT_MS || 300_000) || 300_000),
+);
+function startupChild(repo, settingsPath, label = "startup") {
+  const started = Date.now();
+  console.log(`  … ${label} child begin (timeout_ms=${STARTUP_CHILD_TIMEOUT_MS})`);
   const code = `const {createJiti}=require('jiti');const p=require('path');(async()=>{const j=createJiti(${JSON.stringify(sourceRoot)},{interopDefault:true});const m=j(p.join(${JSON.stringify(sourceRoot)},'extensions/_shared/canonical-git-runtime.ts'));const r=await m.getCanonicalGitRuntime({abrainHome:${JSON.stringify(repo)},settingsPath:${JSON.stringify(settingsPath)},sourceRoot:${JSON.stringify(sourceRoot)}});process.stdout.write(JSON.stringify(await r.awaitStartup()));})().catch(e=>{console.error(e);process.exit(1)});`;
-  return spawnSync(process.execPath, ["-e", code], { cwd: sourceRoot, encoding: "utf8", env: gitEnv, maxBuffer: 256 * 1024 * 1024 });
+  const child = spawnSync(process.execPath, ["-e", code], {
+    cwd: sourceRoot,
+    encoding: "utf8",
+    env: gitEnv,
+    maxBuffer: 256 * 1024 * 1024,
+    timeout: STARTUP_CHILD_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+  });
+  const elapsed = Date.now() - started;
+  if (child.error && child.error.code === "ETIMEDOUT") {
+    throw new Error(`${label} child exceeded ${STARTUP_CHILD_TIMEOUT_MS}ms (elapsed=${elapsed}ms)`);
+  }
+  if (child.signal) {
+    throw new Error(`${label} child killed by ${child.signal} after ${elapsed}ms`);
+  }
+  console.log(`  … ${label} child end status=${child.status} elapsed_ms=${elapsed}`);
+  return child;
 }
 function removeRepo(repo) { fs.rmSync(repo, { recursive: true, force: true }); }
 
@@ -188,9 +210,9 @@ const runtimeSettingsPath = path.join(tmp, "runtime-settings.json");
 fs.writeFileSync(runtimeSettingsPath, `${JSON.stringify({ canonicalGitRuntime: { enabled: true, mode: "local_convergence_v2" } }, null, 2)}\n`);
 await check("repeated startup on a production-derived clone is deterministic and idempotent", () => {
   const before = repositoryFingerprint(seed);
-  const first = startupChild(seed, runtimeSettingsPath);
+  const first = startupChild(seed, runtimeSettingsPath, "production-derived-startup-1");
   const middle = repositoryFingerprint(seed);
-  const second = startupChild(seed, runtimeSettingsPath);
+  const second = startupChild(seed, runtimeSettingsPath, "production-derived-startup-2");
   const after = repositoryFingerprint(seed);
   assert(first.status === 0 && second.status === 0, `production-derived startup failed: ${first.stderr || second.stderr}`);
   const a = JSON.parse(first.stdout); const b = JSON.parse(second.stdout);

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
@@ -4305,8 +4305,9 @@ function validateAboutMeDraft(draft: AboutMeDraft): Array<{ field: string; messa
       issues.push({ field: "status", message: `status must be one of: ${ENTRY_STATUSES.join(", ")}` });
     }
   }
-  // Staging requires a project id + session epoch to land in the right
-  // staging file (per ADR 0014 §3.5: <YYYY-MM-DD>--<pid>--<sessionEpoch>.md).
+  // Staging requires a project id + session epoch to land in the stable
+  // content-addressed path (<sessionEpoch>--<contentHash24>.md). Wall-clock
+  // date/pid/random are intentionally NOT part of the basename.
   if (draft.region === "staging") {
     if (typeof draft.stagingProjectId !== "string" || draft.stagingProjectId.length === 0) {
       issues.push({ field: "stagingProjectId", message: "stagingProjectId is required when region=staging" });
@@ -4380,6 +4381,18 @@ function buildAboutMeMarkdown(draft: AboutMeDraft, slug: string): string {
   fmLines.push(...yamlList("route_candidates", draft.routeCandidates));
   fmLines.push(`routing_reason: ${yamlString(draft.routingReason)}`);
   fmLines.push(`routing_confidence: ${conf2dp}`);
+  // Staging path is content-addressed (no wall-clock). Capture-time / session
+  // audit fields live here so humans and tools can still reconstruct origin
+  // without reading entropy from the filename.
+  if (draft.region === "staging") {
+    if (draft.stagingProjectId) fmLines.push(`staging_project_id: ${yamlString(draft.stagingProjectId)}`);
+    if (typeof draft.stagingSessionEpoch === "number" && Number.isFinite(draft.stagingSessionEpoch)) {
+      fmLines.push(`staging_session_epoch: ${draft.stagingSessionEpoch}`);
+    }
+    if (draft.sessionId) fmLines.push(`session_id: ${yamlString(draft.sessionId)}`);
+    fmLines.push(`staging_content_key: ${yamlString(stableAboutMeContentKey(draft, slug))}`);
+    fmLines.push(`captured_at: ${yamlString(timestamp)}`);
+  }
   fmLines.push("---");
 
   // Body normalization: ensure `# <title>` heading; escape bare `---`
@@ -4445,32 +4458,145 @@ async function gitCommitAbrainAboutMeUnlocked(
   }
 }
 
-/** Resolve target file path for given draft. Staging path is
- *  date+pid+epoch keyed per ADR 0014 §3.5. */
+/** Resolve target file path for given draft.
+ *  Staging basenames are stable content-addressed keys (no wall-clock).
+ *  Auditable capture metadata lives in frontmatter/body, not the path.
+ */
+/**
+ * Stable staging basename for ABOUT-ME retries / cross-day re-entry.
+ *
+ * Derived ONLY from stable session / source-candidate / content material:
+ *   projectId + stagingSessionEpoch + sessionId + slug + normalized title/body
+ * NEVER Date.now / random / wall-clock date. Same candidate → same path so a
+ * HOLD/retry or next-day re-entry reuses one file/commit target
+ * (`staging_idempotent`). Distinct candidates still diverge via content hash.
+ */
+function stableAboutMeStagingMaterial(draft: AboutMeDraft, slug: string): string {
+  return [
+    draft.stagingProjectId ?? "project",
+    String(draft.stagingSessionEpoch ?? 0),
+    draft.sessionId ?? "session",
+    slug,
+    (draft.title ?? "").normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase(),
+    (draft.body ?? "").normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase(),
+  ].join("\0");
+}
+
+function stableAboutMeContentKey(draft: AboutMeDraft, slug: string): string {
+  return createHash("sha256").update(stableAboutMeStagingMaterial(draft, slug)).digest("hex").slice(0, 24);
+}
+
+function stableAboutMeStagingBasename(draft: AboutMeDraft, slug: string): string {
+  const contentKey = stableAboutMeContentKey(draft, slug);
+  // epoch is itself a stable hash of session+source entries (main/drain lanes).
+  return `${draft.stagingSessionEpoch ?? 0}--${contentKey}.md`;
+}
+
+/**
+ * Stable route_rejected sample basename — same content-addressed shape as
+ * normal staging (`<epoch>--<sha24>.md`), never date/pid/Date.now/random.
+ *
+ * Material covers the necessary distinguisher set for a rejected candidate:
+ *   project + session epoch + sessionId + slug + region + route candidates
+ *   + route reason + router rule/message + normalized title/body
+ * Same candidate (incl. cross-day retry) → same path → idempotent reuse.
+ */
+function stableAboutMeRouteRejectedMaterial(
+  draft: AboutMeDraft,
+  slug: string,
+  router: { rule: number; message: string },
+): string {
+  const candidates = (draft.routeCandidates ?? [])
+    .map(String)
+    .slice()
+    .sort()
+    .join(",");
+  const norm = (s: string): string =>
+    s.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+  return [
+    draft.stagingProjectId ?? "orphan",
+    String(draft.stagingSessionEpoch ?? 0),
+    draft.sessionId ?? "session",
+    slug,
+    String(draft.region ?? ""),
+    candidates,
+    norm(draft.routingReason ?? ""),
+    String(router.rule),
+    norm(router.message ?? ""),
+    norm(draft.title ?? ""),
+    norm(draft.body ?? ""),
+  ].join("\0");
+}
+
+function stableAboutMeRouteRejectedContentKey(
+  draft: AboutMeDraft,
+  slug: string,
+  router: { rule: number; message: string },
+): string {
+  return createHash("sha256")
+    .update(stableAboutMeRouteRejectedMaterial(draft, slug, router))
+    .digest("hex")
+    .slice(0, 24);
+}
+
+function stableAboutMeRouteRejectedBasename(
+  draft: AboutMeDraft,
+  slug: string,
+  router: { rule: number; message: string },
+): string {
+  const contentKey = stableAboutMeRouteRejectedContentKey(draft, slug, router);
+  return `${draft.stagingSessionEpoch ?? 0}--${contentKey}.md`;
+}
+
+function buildAboutMeRouteRejectedSample(
+  draft: AboutMeDraft,
+  slug: string,
+  router: { rule: number; message: string },
+  orphan: boolean,
+): string {
+  const timestamp = nowIso();
+  const contentKey = stableAboutMeRouteRejectedContentKey(draft, slug, router);
+  const conf2dp = Number.isFinite(draft.routingConfidence)
+    ? draft.routingConfidence.toFixed(2)
+    : String(draft.routingConfidence);
+  const fmLines: string[] = [
+    "---",
+    `lane: about_me`,
+    `kind: route_rejected_sample`,
+    `router_rule: ${router.rule}`,
+    `reason: ${yamlString(router.message)}`,
+    `region: ${yamlString(String(draft.region ?? ""))}`,
+    `routing_confidence: ${conf2dp}`,
+    `routing_reason: ${yamlString(draft.routingReason ?? "")}`,
+    ...yamlList("route_candidates", draft.routeCandidates ?? []),
+  ];
+  if (draft.stagingProjectId) fmLines.push(`staging_project_id: ${yamlString(draft.stagingProjectId)}`);
+  if (typeof draft.stagingSessionEpoch === "number" && Number.isFinite(draft.stagingSessionEpoch)) {
+    fmLines.push(`staging_session_epoch: ${draft.stagingSessionEpoch}`);
+  }
+  if (draft.sessionId) fmLines.push(`session_id: ${yamlString(draft.sessionId)}`);
+  if (orphan) fmLines.push(`orphan: true`);
+  fmLines.push(`route_rejected_content_key: ${yamlString(contentKey)}`);
+  // captured_at is audit-only wall-clock; basename stays content-addressed.
+  fmLines.push(`captured_at: ${yamlString(timestamp)}`);
+  fmLines.push("---");
+  const heading = orphan
+    ? "# orphan rejected about-me sample (no project anchor)"
+    : "# rejected about-me sample";
+  return `${fmLines.join("\n")}\n\n${heading}\n\n${draft.title}\n\n${draft.body}\n`;
+}
+
 function resolveAboutMeTarget(abrainHome: string, draft: AboutMeDraft, slug: string): { dir: string; file: string } {
   if (draft.region === "staging") {
     const projectId = draft.stagingProjectId!;
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     const stagingDir = path.join(
       abrainProjectDir(abrainHome, projectId),
       "observations",
       "staging",
     );
-    // P0-A audit fix 2026-05-16: include Date.now() in the filename so
-    // two staging writes within the same pi session (same epoch) on the
-    // same day from the same pid land in distinct files.
-    //
-    // P1-B audit fix 2026-05-16 (round 3 opus-4-6): add an 8-hex-char
-    // crypto-random suffix because Date.now() resolution is ms and not
-    // monotonic across NTP adjustments — a `Promise.all([write(A),
-    // write(B)])` with same pid+epoch+ms still collided previously,
-    // P0-A's fix did not cover that. randomBytes(4) gives 2^32 entropy
-    // per file; collision is astronomically unlikely. Date.now() is kept
-    // for human readability of recency in `ls -1` listings.
-    const file = path.join(
-      stagingDir,
-      `${today}--${process.pid}--${draft.stagingSessionEpoch}--${Date.now()}--${randomBytes(4).toString("hex")}.md`,
-    );
+    // Content-addressed stable path: retries of the same candidate land on
+    // the same file (no duplicate staging files/commits on HOLD+retry).
+    const file = path.join(stagingDir, stableAboutMeStagingBasename(draft, slug));
     return { dir: stagingDir, file };
   }
   const dir = abrainAboutMeDirByRegion(abrainHome, draft.region);
@@ -4619,28 +4745,17 @@ async function writeAbrainAboutMeUnlocked(
     const err = e instanceof RouterError ? e : new RouterError(0, e instanceof Error ? e.message : String(e));
     // Per ADR 0014 §3.5: write a route_rejected audit row AND drop the
     // original input into staging/rejected/ so the sample isn't silently
-    // lost. Staging-rejected files are best-effort (no lock; small).
-    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
-      operation: "route_rejected",
-      reason: err.message,
-      router_rule: err.rule,
-      title: draft.title,
-      region: draft.region,
-      routing_confidence: draft.routingConfidence,
-      duration_ms: Date.now() - started,
-      ...resultCtx,
-    });
+    // lost. Sample basenames are content-addressed (same shape as normal
+    // staging: <epoch>--<sha24>.md) — no wall-clock / pid / random — so a
+    // same-candidate cross-day retry is idempotent (no new file/commit).
+    const slug = slugify(draft.title || "about-me");
+    const routerInfo = { rule: err.rule, message: err.message };
+    const basename = stableAboutMeRouteRejectedBasename(draft, slug, routerInfo);
+    let samplePath = abrainHome;
+    let alreadyExists = false;
+
     if (draft.stagingProjectId) {
       try {
-        // P0-3 (2026-05-15) + P1-B/P2-A (2026-05-16 round 3):
-        // Filename shape `<date>--<pid>--<epoch>--<ms>--<hex8>.md`.
-        // Date.now() gives ms-resolution wall time (NOT monotonic — NTP
-        // step can roll back); the 8-hex-char crypto suffix
-        // (2^32 entropy) makes same-ms collisions astronomically
-        // unlikely under Promise.all concurrency. We use plain
-        // fs.writeFile (not `wx`) because the sample file is diagnostic
-        // only — the audit row above is the canonical record.
-        const today = new Date().toISOString().slice(0, 10);
         const rejectedDir = path.join(
           abrainProjectDir(abrainHome, draft.stagingProjectId),
           "observations",
@@ -4648,41 +4763,77 @@ async function writeAbrainAboutMeUnlocked(
           "rejected",
         );
         await fs.mkdir(rejectedDir, { recursive: true });
-        const sample = path.join(
-          rejectedDir,
-          `${today}--${process.pid}--${draft.stagingSessionEpoch ?? "none"}--${Date.now()}--${randomBytes(4).toString("hex")}.md`,
-        );
-        await fs.writeFile(
-          sample,
-          `# rejected about-me sample\n\nrouter_rule: ${err.rule}\nreason: ${err.message}\nregion: ${draft.region}\nconfidence: ${draft.routingConfidence}\n\n---\n\n${draft.title}\n\n${draft.body}\n`,
-          "utf-8",
-        );
+        const sample = path.join(rejectedDir, basename);
+        samplePath = sample;
+        if (fsSync.existsSync(sample)) {
+          alreadyExists = true;
+        } else {
+          await fs.writeFile(
+            sample,
+            buildAboutMeRouteRejectedSample(draft, slug, routerInfo, false),
+            "utf-8",
+          );
+        }
       } catch { /* best-effort */ }
     } else {
       // P1-E audit fix 2026-05-16: caller without a project anchor still
-      // gets sample preservation, just under an abrain-home-level orphan
-      // dir. Without this branch a route_rejected with stagingProjectId
-      // missing would silently lose the input — violating ADR 0014 §3.5
-      // "避免静默丢入作样本". orphan-rejects lives under .state/ so it's
-      // local-only (not committed to abrain git), matching the sample
-      // file's diagnostic-only role.
+      // gets sample preservation under .state/sediment/orphan-rejects/.
+      // Basename is the same content-addressed shape as project rejects.
       try {
-        const today = new Date().toISOString().slice(0, 10);
         const orphanDir = path.join(abrainHome, ".state", "sediment", "orphan-rejects");
         await fs.mkdir(orphanDir, { recursive: true });
-        // P1-B audit fix 2026-05-16 (round 3): add crypto-random suffix
-        // for the same reasons as staging happy + reject paths.
-        const sample = path.join(orphanDir, `${today}--${process.pid}--${Date.now()}--${randomBytes(4).toString("hex")}.md`);
-        await fs.writeFile(
-          sample,
-          `# orphan rejected about-me sample (no project anchor)\n\nrouter_rule: ${err.rule}\nreason: ${err.message}\nregion: ${draft.region}\nconfidence: ${draft.routingConfidence}\n\n---\n\n${draft.title}\n\n${draft.body}\n`,
-          "utf-8",
-        );
+        const sample = path.join(orphanDir, basename);
+        samplePath = sample;
+        if (fsSync.existsSync(sample)) {
+          alreadyExists = true;
+        } else {
+          await fs.writeFile(
+            sample,
+            buildAboutMeRouteRejectedSample(draft, slug, routerInfo, true),
+            "utf-8",
+          );
+        }
       } catch { /* best-effort */ }
     }
+
+    if (alreadyExists) {
+      const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+        operation: "skip",
+        reason: "route_rejected_idempotent",
+        router_rule: err.rule,
+        title: draft.title,
+        region: draft.region,
+        target: path.relative(abrainHome, samplePath),
+        routing_confidence: draft.routingConfidence,
+        duration_ms: Date.now() - started,
+        ...resultCtx,
+      });
+      return {
+        slug,
+        path: samplePath,
+        status: "rejected",
+        reason: "route_rejected_idempotent",
+        region: draft.region,
+        routeRejected: { rule: err.rule, message: err.message },
+        auditPath,
+        ...resultCtx,
+      };
+    }
+
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "route_rejected",
+      reason: err.message,
+      router_rule: err.rule,
+      title: draft.title,
+      region: draft.region,
+      target: samplePath === abrainHome ? undefined : path.relative(abrainHome, samplePath),
+      routing_confidence: draft.routingConfidence,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
     return {
-      slug: slugify(draft.title || "about-me"),
-      path: abrainHome,
+      slug,
+      path: samplePath,
       status: "rejected",
       reason: "route_rejected",
       region: draft.region,
@@ -4754,8 +4905,29 @@ async function writeAbrainAboutMeUnlocked(
   const { dir: targetDir, file: target } = resolveAboutMeTarget(abrainHome, safeDraft, slug);
   await fs.mkdir(targetDir, { recursive: true });
 
-  // 6. Dedupe (skip for staging — staging files are time-keyed, not
-  // slug-keyed; multiple staging samples per day are append-style).
+  // Staging is content-addressed: a HOLD/retry of the same candidate must
+  // not create a second file or git commit. Existing stable path → skipped.
+  if (safeDraft.region === "staging" && fsSync.existsSync(target)) {
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "skip",
+      reason: "staging_idempotent",
+      target: path.relative(abrainHome, target),
+      region: safeDraft.region,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "skipped",
+      reason: "staging_idempotent",
+      region: safeDraft.region,
+      auditPath,
+      ...resultCtx,
+    };
+  }
+
+  // 6. Dedupe across identity/skills/habits zones (staging uses content key).
   if (safeDraft.region !== "staging" && aboutMeSlugCollidesAcrossZones(abrainHome, slug)) {
     const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
       operation: "reject",
