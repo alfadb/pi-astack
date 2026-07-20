@@ -24,6 +24,7 @@ import {
   sanitizeManagedRuleFences,
   selectD3V2SessionStartSession,
   validateD3V2SessionStartAdapterManifest,
+  isD3V2R42SettingsBinding,
   classifyManagedSuffix,
   type D3V2BoundActivationObject,
   type D3V2SessionStartInjectionSettings,
@@ -37,9 +38,22 @@ import {
   buildD3V2SessionStartRuntimeAuditRow,
   type D3V2SessionStartRuntimeAuditAppendResult,
 } from "./proposition-lifecycle-freshness-d3-v2-runtime-audit";
+import type { decideD3V2R42RuntimeControl } from "./proposition-lifecycle-freshness-d3-v2-session-start-r42-runtime-control";
 
 export const D3_V2_SESSION_START_CONTROL_SOURCE_MARKER =
   "source=proposition-lifecycle-freshness-d3-v2" as const;
+
+type D3V2R42RuntimeControl = typeof decideD3V2R42RuntimeControl;
+
+function loadD3V2R42RuntimeControl(): D3V2R42RuntimeControl {
+  const runtimeControl = require("./proposition-lifecycle-freshness-d3-v2-session-start-r42-runtime-control") as {
+    decideD3V2R42RuntimeControl?: D3V2R42RuntimeControl;
+  };
+  if (typeof runtimeControl.decideD3V2R42RuntimeControl !== "function") {
+    throw new Error("R4.2 runtime control module has no decision entrypoint");
+  }
+  return runtimeControl.decideD3V2R42RuntimeControl;
+}
 
 export interface D3V2SessionStartControlContext {
   repoRoot: string;
@@ -69,6 +83,8 @@ export type D3V2SessionStartControlDecision =
     audit?: D3V2SessionStartRuntimeAuditAppendResult;
     adapterManifestHash?: string;
     activationNonce?: string;
+    runtimeEnablePreview?: Readonly<Record<string, unknown>>;
+    runtimeEnableAuthorizationPhrase?: string;
   }
   | {
     kind: "selected_injected";
@@ -78,7 +94,8 @@ export type D3V2SessionStartControlDecision =
     adapterManifestHash: string;
     activationNonce: string;
     activationObjectHash: string;
-    audit: D3V2SessionStartRuntimeAuditAppendResult;
+    audit?: D3V2SessionStartRuntimeAuditAppendResult;
+    runtimeAuditObjectHash?: string;
     idempotent: boolean;
   };
 
@@ -146,6 +163,38 @@ export function decideD3V2SessionStartControl(args: D3V2SessionStartControlConte
 
   // Always sanitize-capable base: foreign/malformed removal is in-memory only.
   const sanitizedBase = sanitizeManagedRuleFences(args.currentSystemPrompt);
+
+  if (isD3V2R42SettingsBinding(args.settings.r4Binding)) {
+    const activeProjectId = resolveD3V2SessionStartActiveProjectId({ abrainHome: args.abrainHome, cwd: args.cwd });
+    const r42 = loadD3V2R42RuntimeControl()({
+      repoRoot: args.repoRoot,
+      abrainHome: args.abrainHome,
+      settings: args.settings,
+      sessionManager: args.sessionManager,
+      activeProjectId,
+      currentSystemPrompt: args.currentSystemPrompt,
+      ...(args.controlRoot ? { controlRoot: args.controlRoot } : {}),
+    });
+    if (!r42.ok) {
+      return zero(selected, r42.reason, r42.systemPrompt, {
+        error: r42.error,
+        adapterManifestHash: args.settings.adapterManifestHash ?? undefined,
+        runtimeEnablePreview: r42.runtimeEnablePreview,
+        runtimeEnableAuthorizationPhrase: r42.runtimeEnableAuthorizationPhrase,
+      });
+    }
+    return {
+      kind: "selected_injected",
+      selection: selected,
+      systemPrompt: r42.systemPrompt,
+      result: r42.result,
+      adapterManifestHash: r42.adapterManifestHash,
+      activationNonce: r42.activationNonce,
+      activationObjectHash: r42.activationObjectHash,
+      runtimeAuditObjectHash: r42.auditObjectHash,
+      idempotent: r42.idempotent,
+    };
+  }
 
   let adapterManifestHash: string;
   try {
@@ -366,6 +415,8 @@ function zero(
     audit?: D3V2SessionStartRuntimeAuditAppendResult;
     adapterManifestHash?: string;
     activationNonce?: string;
+    runtimeEnablePreview?: Readonly<Record<string, unknown>>;
+    runtimeEnableAuthorizationPhrase?: string;
   } = {},
 ): Extract<D3V2SessionStartControlDecision, { kind: "selected_zero_injection" }> {
   return {

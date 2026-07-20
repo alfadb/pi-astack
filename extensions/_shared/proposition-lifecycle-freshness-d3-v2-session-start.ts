@@ -258,6 +258,20 @@ export const D3_V2_SESSION_START_ADAPTER_EXPLICIT_FILES = Object.freeze([
 
 const HASH = /^[0-9a-f]{64}$/;
 
+export const D3_V2_SESSION_START_R42_SETTINGS_BINDING_SCHEMA =
+  "adr0040-d3-v2-session-start-r4.2-settings-binding/v1" as const;
+
+export interface D3V2R42SettingsBinding {
+  schema_version: typeof D3_V2_SESSION_START_R42_SETTINGS_BINDING_SCHEMA;
+  controlRoot: string;
+  operatorManifestHash: string;
+  settingsPath: string;
+  static_contract_hash: string;
+  commit_token: string;
+}
+
+export type D3V2SessionStartRuntimeSettingsBinding = D3V2R4SettingsBinding | D3V2R42SettingsBinding;
+
 export interface D3V2SessionStartInjectionSettings {
   enabled: boolean;
   selector: { session_ids: string[] };
@@ -269,8 +283,25 @@ export interface D3V2SessionStartInjectionSettings {
   adapterManifestHash: string | null;
   activationObjectPath: string | null;
   activationObjectHash: string | null;
-  r4Binding: D3V2R4SettingsBinding | null;
+  r4Binding: D3V2SessionStartRuntimeSettingsBinding | null;
   maxReadBytes: number;
+}
+
+export interface D3V2R42RuntimeActivation {
+  schema_version: "adr0040-d3-v2-session-start-r4.2-bound-activation/v1";
+  mode: "bound";
+  authorization_status: "AUTHORIZED";
+  session_id: string;
+  activation_nonce: string;
+  initial_coordinate_hash: string;
+  d3_identities: D3V2ActivationD3Identities;
+  adapter_manifest_hash: string;
+  audit_target: string;
+  rollback_target: string;
+  session_file: D3V2BoundActivationObject["session_file"];
+  quarantine_target: string;
+  executable: true;
+  activation_object_hash: string;
 }
 
 export type D3V2SessionStartSelection =
@@ -397,11 +428,11 @@ export function resolveD3V2SessionStartInjectionSettings(value: unknown): D3V2Se
   return {
     enabled,
     selector: { session_ids: sessionIds },
-    expectedSelectionHash: hashOrNull(cfg.expectedSelectionHash),
-    expectedHeadHash: hashOrNull(cfg.expectedHeadHash),
-    expectedProofHash: hashOrNull(cfg.expectedProofHash),
-    expectedStableBundleHash: hashOrNull(cfg.expectedStableBundleHash),
-    expectedIntentHash: hashOrNull(cfg.expectedIntentHash),
+    expectedSelectionHash: hashOrNull(isD3V2R42SettingsBinding(r4Binding) ? cfg.selectionHash : cfg.expectedSelectionHash),
+    expectedHeadHash: hashOrNull(isD3V2R42SettingsBinding(r4Binding) ? cfg.headHash : cfg.expectedHeadHash),
+    expectedProofHash: hashOrNull(isD3V2R42SettingsBinding(r4Binding) ? cfg.proofHash : cfg.expectedProofHash),
+    expectedStableBundleHash: hashOrNull(isD3V2R42SettingsBinding(r4Binding) ? cfg.stableBundleHash : cfg.expectedStableBundleHash),
+    expectedIntentHash: hashOrNull(isD3V2R42SettingsBinding(r4Binding) ? cfg.intentHash : cfg.expectedIntentHash),
     adapterManifestHash: hashOrNull(cfg.adapterManifestHash),
     activationObjectPath,
     activationObjectHash,
@@ -621,6 +652,7 @@ export function readD3V2SessionStartForRuntime(args: {
   controlRoot?: string;
   adapterManifestHash?: string;
   activation?: D3V2BoundActivationObject;
+  r42Activation?: D3V2R42RuntimeActivation;
   activationRoot?: string;
 }): D3V2SessionStartRuntimeReadResult {
   const selection = selectD3V2SessionStartSession({ settings: args.settings, sessionManager: args.sessionManager });
@@ -634,10 +666,12 @@ export function readD3V2SessionStartForRuntime(args: {
       || !args.settings.adapterManifestHash) {
       return { ok: false, reason: "expected_binding_missing", sessionId };
     }
+    const r42 = isD3V2R42SettingsBinding(args.settings.r4Binding);
     if (!args.settings.r4Binding && (!args.settings.activationObjectPath || !args.settings.activationObjectHash)) {
       return { ok: false, reason: "activation_binding_missing", sessionId };
     }
-    if (args.settings.r4Binding && !args.activation) {
+    if (r42 && !args.r42Activation) return { ok: false, reason: "r42_runtime_gate_required", sessionId };
+    if (args.settings.r4Binding && !r42 && !args.activation) {
       return { ok: false, reason: "r4_runtime_gate_required", sessionId };
     }
     if (typeof args.adapterManifestHash !== "string" || !HASH.test(args.adapterManifestHash)) {
@@ -649,16 +683,21 @@ export function readD3V2SessionStartForRuntime(args: {
     }
 
     // Load + validate bound activation (settings pin == object hash inside loader).
-    const activation = args.activation ?? loadD3V2SessionStartBoundActivationObject({
-      activationObjectPath: args.settings.activationObjectPath!,
-      activationObjectHash: args.settings.activationObjectHash!,
-      activationRoot: args.activationRoot,
-    });
+    const activation: D3V2BoundActivationObject | D3V2R42RuntimeActivation = r42
+      ? args.r42Activation!
+      : args.activation ?? loadD3V2SessionStartBoundActivationObject({
+        activationObjectPath: args.settings.activationObjectPath!,
+        activationObjectHash: args.settings.activationObjectHash!,
+        activationRoot: args.activationRoot,
+      });
     if (!args.settings.r4Binding && activation.activation_object_hash !== args.settings.activationObjectHash) {
       fail("activation_settings_pin_mismatch", "runtime settings pin does not equal activation object hash");
     }
-    if (args.settings.r4Binding && activation.schema_version !== D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA) {
+    if (args.settings.r4Binding && !r42 && activation.schema_version !== D3_V2_SESSION_START_R4_ACTIVATION_OBJECT_SCHEMA) {
       fail("r4_activation_required", "R4 settings require an R4 receipt-gated activation object");
+    }
+    if (r42 && (activation.schema_version !== "adr0040-d3-v2-session-start-r4.2-bound-activation/v1" || activation.session_id !== sessionId || activation.executable !== true)) {
+      fail("r42_activation_required", "R4.2 settings require the terminal-gated R4.2 activation object");
     }
 
     // Halt / taint check BEFORE D3 read.
@@ -717,28 +756,37 @@ export function readD3V2SessionStartForRuntime(args: {
       selection_seq: selectionSeq,
     };
 
-    // settings_mutation expected from live settings (closed-schema norm; never embeds activationObjectHash).
-    const settingsMutationExpected = normalizeSettingsMutationClosed({
-      enabled: true,
-      selector: { session_ids: [...args.settings.selector.session_ids] },
-      expectedSelectionHash: args.settings.expectedSelectionHash,
-      expectedHeadHash: args.settings.expectedHeadHash,
-      expectedProofHash: args.settings.expectedProofHash,
-      expectedStableBundleHash: args.settings.expectedStableBundleHash,
-      expectedIntentHash: args.settings.expectedIntentHash,
-      adapterManifestHash: args.settings.adapterManifestHash,
-      activationObjectPath: args.settings.activationObjectPath,
-      r4Binding: args.settings.r4Binding,
-      maxReadBytes: args.settings.maxReadBytes,
-    }, { requireExecutableShape: true });
-    assertBoundActivationMatchesRuntime({
-      activation,
-      sessionId,
-      adapterManifestHash,
-      d3Identities,
-      settingsMutationExpected,
-      sessionManager: args.sessionManager,
-    });
+    if (r42) {
+      for (const field of ["selection_hash", "head_hash", "proof_hash", "intent_hash", "stable_bundle_hash", "p2a_bundle_hash", "generation", "selection_seq"] as const) {
+        if (activation.d3_identities[field] !== d3Identities[field]) fail("r42_activation_d3_mismatch", `R4.2 activation d3_identities.${field} differs from current D3`);
+      }
+      const manager = args.sessionManager as { getSessionFile?(): unknown } | undefined;
+      const sessionFile = manager?.getSessionFile?.();
+      if (typeof sessionFile !== "string" || path.resolve(sessionFile) !== activation.session_file.path) fail("r42_activation_session_mismatch", "R4.2 activation target session file differs");
+    } else {
+      // R4/R4.1 settings_mutation remains the legacy closed-schema comparison.
+      const settingsMutationExpected = normalizeSettingsMutationClosed({
+        enabled: true,
+        selector: { session_ids: [...args.settings.selector.session_ids] },
+        expectedSelectionHash: args.settings.expectedSelectionHash,
+        expectedHeadHash: args.settings.expectedHeadHash,
+        expectedProofHash: args.settings.expectedProofHash,
+        expectedStableBundleHash: args.settings.expectedStableBundleHash,
+        expectedIntentHash: args.settings.expectedIntentHash,
+        adapterManifestHash: args.settings.adapterManifestHash,
+        activationObjectPath: args.settings.activationObjectPath,
+        r4Binding: args.settings.r4Binding,
+        maxReadBytes: args.settings.maxReadBytes,
+      }, { requireExecutableShape: true });
+      assertBoundActivationMatchesRuntime({
+        activation: activation as D3V2BoundActivationObject,
+        sessionId,
+        adapterManifestHash,
+        d3Identities,
+        settingsMutationExpected,
+        sessionManager: args.sessionManager,
+      });
+    }
     if (activation.adapter_manifest_hash !== adapterManifestHash) {
       fail("activation_manifest_mismatch", "activation adapter_manifest_hash differs");
     }
@@ -821,7 +869,9 @@ export function readD3V2SessionStartForRuntime(args: {
       adapterManifestHash,
       activationObjectHash: activation.activation_object_hash,
       activationNonce: activation.activation_nonce,
-      authorizationCoordinateHash: activation.authorization_coordinate_hash,
+      authorizationCoordinateHash: "initial_coordinate_hash" in activation
+        ? activation.initial_coordinate_hash
+        : activation.authorization_coordinate_hash,
       sourcePath: path.join(controlRoot, "stable", "v1", "bundles", stableBundleHash, "view.md"),
       viewMd,
       viewBytes,
@@ -1043,22 +1093,42 @@ function exactDirectory(input: string, label: string): string {
   }
   return resolved;
 }
-function resolveR4SettingsBindingOptional(value: unknown): D3V2R4SettingsBinding | null {
+function resolveR4SettingsBindingOptional(value: unknown): D3V2SessionStartRuntimeSettingsBinding | null {
   if (value == null) return null;
   const record = asRecord(value, "r4Binding");
   const actual = Object.keys(record).sort(compareCodeUnits);
-  const expected = ["controlRoot", "operatorManifestHash", "schema_version", "settingsPath"].sort(compareCodeUnits);
+  const r42 = record.schema_version === D3_V2_SESSION_START_R42_SETTINGS_BINDING_SCHEMA;
+  const expected = (r42
+    ? ["controlRoot", "operatorManifestHash", "schema_version", "settingsPath", "static_contract_hash", "commit_token"]
+    : ["controlRoot", "operatorManifestHash", "schema_version", "settingsPath"]
+  ).sort(compareCodeUnits);
   if (canonicalizeJcs(actual) !== canonicalizeJcs(expected)) fail("settings_r4_binding_invalid", "r4Binding keys differ");
-  if (record.schema_version !== D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA) fail("settings_r4_binding_invalid", "r4Binding schema differs");
-  if (typeof record.controlRoot !== "string" || !path.isAbsolute(record.controlRoot)) fail("settings_r4_binding_invalid", "r4Binding.controlRoot must be absolute");
-  if (typeof record.settingsPath !== "string" || !path.isAbsolute(record.settingsPath)) fail("settings_r4_binding_invalid", "r4Binding.settingsPath must be absolute");
+  if (!r42 && record.schema_version !== D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA) fail("settings_r4_binding_invalid", "r4Binding schema differs");
+  if (typeof record.controlRoot !== "string" || !path.isAbsolute(record.controlRoot) || path.resolve(record.controlRoot) !== record.controlRoot) fail("settings_r4_binding_invalid", "r4Binding.controlRoot must be normalized absolute");
+  if (typeof record.settingsPath !== "string" || !path.isAbsolute(record.settingsPath) || path.resolve(record.settingsPath) !== record.settingsPath) fail("settings_r4_binding_invalid", "r4Binding.settingsPath must be normalized absolute");
   assertHash(record.operatorManifestHash, "r4Binding.operatorManifestHash");
+  if (r42) {
+    assertHash(record.static_contract_hash, "r4Binding.static_contract_hash");
+    assertHash(record.commit_token, "r4Binding.commit_token");
+    return deepFreeze({
+      schema_version: D3_V2_SESSION_START_R42_SETTINGS_BINDING_SCHEMA,
+      controlRoot: record.controlRoot,
+      operatorManifestHash: String(record.operatorManifestHash),
+      settingsPath: record.settingsPath,
+      static_contract_hash: String(record.static_contract_hash),
+      commit_token: String(record.commit_token),
+    });
+  }
   return deepFreeze({
     schema_version: D3_V2_SESSION_START_R4_SETTINGS_BINDING_SCHEMA,
-    controlRoot: path.resolve(record.controlRoot),
+    controlRoot: record.controlRoot,
     operatorManifestHash: String(record.operatorManifestHash),
-    settingsPath: path.resolve(record.settingsPath),
+    settingsPath: record.settingsPath,
   });
+}
+
+export function isD3V2R42SettingsBinding(value: D3V2SessionStartRuntimeSettingsBinding | null): value is D3V2R42SettingsBinding {
+  return value?.schema_version === D3_V2_SESSION_START_R42_SETTINGS_BINDING_SCHEMA;
 }
 function hashOrNull(value: unknown): string | null {
   return typeof value === "string" && HASH.test(value) ? value : null;

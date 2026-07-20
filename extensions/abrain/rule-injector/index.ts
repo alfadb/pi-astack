@@ -48,6 +48,7 @@ import {
 } from "./proposition-policy-stable-view-runtime-audit";
 import {
   composeD3V2SessionStartInjection,
+  D3_V2_SESSION_START_R42_SETTINGS_BINDING_SCHEMA,
   resolveD3V2SessionStartInjectionSettings,
   selectD3V2SessionStartSession,
   stripSelectedActivationRuleFence,
@@ -297,6 +298,11 @@ function resolveCompiledViewInjectionSettings(value: unknown): RuleInjectorCompi
 export function resolveRuleInjectorSettings(): RuleInjectorSettings {
   const root = loadPiStackSettings();
   const cfg = asObject(root.ruleInjector);
+  const stableViewRaw = asObject(cfg.propositionPolicyStableViewInjection);
+  const stableViewR4Binding = asObject(stableViewRaw.r4Binding);
+  const d3SessionStartRaw = stableViewR4Binding.schema_version === D3_V2_SESSION_START_R42_SETTINGS_BINDING_SCHEMA
+    ? cfg.propositionPolicyStableViewInjection
+    : cfg.propositionLifecycleFreshnessD3V2SessionStartInjection;
   return {
     enabled: asBoolean(cfg.enabled, DEFAULT_SETTINGS.enabled),
     maxCatalogSummaryChars: Math.max(80, Math.floor(asNumber(cfg.maxCatalogSummaryChars, DEFAULT_SETTINGS.maxCatalogSummaryChars))),
@@ -304,9 +310,7 @@ export function resolveRuleInjectorSettings(): RuleInjectorSettings {
     dualReadAudit: resolveRuleInjectorDualReadAuditSettings(cfg.dualReadAudit),
     compiledViewInjection: resolveCompiledViewInjectionSettings(cfg.compiledViewInjection),
     propositionPolicyStableViewInjection: resolvePropositionPolicyStableViewInjectionSettings(cfg.propositionPolicyStableViewInjection),
-    propositionLifecycleFreshnessD3V2SessionStartInjection: resolveD3V2SessionStartInjectionSettings(
-      cfg.propositionLifecycleFreshnessD3V2SessionStartInjection,
-    ),
+    propositionLifecycleFreshnessD3V2SessionStartInjection: resolveD3V2SessionStartInjectionSettings(d3SessionStartRaw),
   };
 }
 
@@ -1400,6 +1404,16 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
       }
       try {
         ctx?.ui?.setStatus?.(RULE_STATUS_KEY, `⚠️ d3-v2 zero-inject: ${d3v2Decision.reason.slice(0, 48)}`);
+        if (d3v2Decision.runtimeEnablePreview) {
+          const phrase = d3v2Decision.runtimeEnableAuthorizationPhrase
+            ?? (typeof d3v2Decision.runtimeEnablePreview.exact_authorization_phrase === "string"
+              ? d3v2Decision.runtimeEnablePreview.exact_authorization_phrase
+              : "");
+          ctx?.ui?.notify?.(
+            `R4.2 runtime enable preview:\n${JSON.stringify(d3v2Decision.runtimeEnablePreview, null, 2)}${phrase ? `\n\nExact authorization phrase:\n${phrase}` : ""}`,
+            "warning",
+          );
+        }
       } catch { /* ignore */ }
       if (d3v2Decision.audit && !d3v2Decision.audit.ok) {
         try { console.error(`pi-astack: ADR0040 D3-v2 runtime audit write failed: ${d3v2Decision.audit.error}`); } catch { /* best-effort */ }
