@@ -222,6 +222,20 @@ function requireGit(cwd, args, label) {
   assert(!result.error && result.status === 0, `${label}: ${result.error?.message ?? result.stderr.toString("utf8")}`);
   return result.stdout;
 }
+function inspectActualHeadClosure(bundle) {
+  const head = requireGit(repoRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "cannot resolve actual closure HEAD").toString("utf8").trim();
+  const artifactPaths = Object.values(ARTIFACT_PATHS).filter((relative) => relative !== ARTIFACT_PATHS.post_dossier);
+  const paths = [...new Set([...artifactPaths, ...bundle.source.value.closure_rows.map((row) => row.relative_path)])].sort();
+  const rows = paths.map((relative) => {
+    const tracked = spawnSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", relative], { encoding: "buffer" }).status === 0;
+    const status = spawnSync("git", ["-C", repoRoot, "status", "--porcelain=v1", "--untracked-files=all", "--", relative], { encoding: "buffer" });
+    const headBlob = spawnSync("git", ["-C", repoRoot, "cat-file", "blob", `${head}:${relative}`], { encoding: "buffer" });
+    let live;
+    try { live = fs.readFileSync(path.join(repoRoot, ...relative.split("/"))); } catch {}
+    return { relative_path: relative, tracked, clean: status.status === 0 && status.stdout.length === 0, live_equals_head: headBlob.status === 0 && Buffer.isBuffer(live) && live.equals(headBlob.stdout) };
+  });
+  return { head, paths: rows, ready: rows.every((row) => row.tracked && row.clean && row.live_equals_head) };
+}
 function createIndexSnapshotRepo(label) {
   const root = path.join(tmp, label);
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -1084,26 +1098,48 @@ try {
     expectFailure(() => scanControlInventory(f.contract), ["CONTROL_BOUND"]);
   });
 
-  await check("source guard rejects current uncommitted R4.2 closure and cannot accept caller commit/abbrev/null", () => {
+  await check("source guard follows actual HEAD closure cleanliness and rejects caller commit substitution", () => {
     const bundle = loadAndValidateStaticBundle(repoRoot);
-    const head = spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
-    expectFailure(() => sourceGuard(repoRoot, head, bundle), ["SHADOW", "BLOB"]);
-    for (const value of [null, "HEAD", head.slice(0, 12), head.toUpperCase()]) expectFailure(() => sourceGuard(repoRoot, value, bundle), ["GIT_COMMIT"]);
+    const actual = inspectActualHeadClosure(bundle);
+    if (actual.ready) {
+      const guarded = sourceGuard(repoRoot, actual.head, bundle);
+      assert(guarded.source_guard_passed === true && guarded.source_commit === actual.head && guarded.path_count === actual.paths.length);
+    } else expectFailure(() => sourceGuard(repoRoot, actual.head, bundle), ["SHADOW", "BLOB"]);
+    expectFailure(() => sourceGuard(repoRoot, null, bundle), ["GIT_COMMIT"]);
+    expectFailure(() => sourceGuard(repoRoot, actual.head.slice(0, 12), bundle), ["GIT_COMMIT"]);
+    const parent = spawnSync("git", ["-C", repoRoot, "rev-parse", "--verify", "HEAD^1^{commit}"], { encoding: "utf8" });
+    const wrongFullCommit = parent.status === 0 ? parent.stdout.trim() : "0".repeat(40);
+    expectFailure(() => sourceGuard(repoRoot, wrongFullCommit, bundle), [parent.status === 0 ? "SOURCE_HEAD" : "SOURCE_COMMIT_OBJECT"]);
   });
 
-  await check("real production default CLI preview is zero-write, non-authoritative and S2_NOT_AUTHORIZED", () => {
-    const protectedPaths = [PRODUCTION.settings_path, PRODUCTION.target_session_path, PRODUCTION.authorization_session_path, PRODUCTION.control_root, PRODUCTION.rollback_root, PRODUCTION.runtime_audit_root];
+  await check("real production default and initial previews prove clean closure or fail closed without writes", () => {
+    const bundle = loadAndValidateStaticBundle(repoRoot);
+    const actual = inspectActualHeadClosure(bundle);
+    const authorityRoots = [PRODUCTION.control_root, PRODUCTION.rollback_root, PRODUCTION.runtime_audit_root];
+    const protectedPaths = [PRODUCTION.settings_path, PRODUCTION.target_session_path, PRODUCTION.authorization_session_path, ...authorityRoots];
     const before = protectedSnapshot(protectedPaths);
+    assert(protectedSnapshot(authorityRoots).every((entry) => entry.type === "absent"), "production authority root exists before preview");
     const cli = path.join(repoRoot, "scripts/operate-proposition-lifecycle-freshness-d3-v2-session-start-r4.2.mjs");
     const result = spawnSync(process.execPath, [cli], { cwd: repoRoot, encoding: "utf8", timeout: 600000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
-    const after = protectedSnapshot(protectedPaths);
     assert(result.status === 0, result.stderr);
     const report = parseStrictJson(result.stdout);
-    assert(report.schema_version === SCHEMAS.dynamic_report && report.authoritative === false && report.source_readiness.ready === false);
-    assert(canonicalizeJcs(before) === canonicalizeJcs(after), "production preview changed protected state");
-    const denied = spawnSync(process.execPath, [cli, "--execute"], { cwd: repoRoot, encoding: "utf8", timeout: 600000 });
-    assert(denied.status === 2 && parseStrictJson(denied.stdout).status === "ZERO_WRITE_HALT");
-    assert(canonicalizeJcs(after) === canonicalizeJcs(protectedSnapshot(protectedPaths)), "denied execute changed production state");
+    assert(report.schema_version === SCHEMAS.dynamic_report && report.authoritative === false);
+    assert(report.control_readiness.control_root_absent === true && report.control_readiness.rollback_root_absent === true && report.control_readiness.runtime_audit_root_absent === true);
+    assert(report.source_readiness.ready === actual.ready && report.source_readiness.source_commit === actual.head, "default preview source readiness differs from actual HEAD closure");
+    const initial = spawnSync(process.execPath, [cli, "--initial-preview"], { cwd: repoRoot, encoding: "utf8", timeout: 600000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+    const initialReport = parseStrictJson(initial.stdout);
+    if (actual.ready) {
+      assert(initial.status === 0, initial.stderr);
+      assert(initialReport.schema_version === SCHEMAS.initial_dynamic_preview && initialReport.authoritative === false);
+      assert(initialReport.closure_readiness.ready === true && initialReport.source_commit === actual.head);
+      assert(typeof initialReport.exact_authorization_phrase === "string" && initialReport.exact_authorization_phrase.length > 0, "initial preview omitted exact authorization phrase");
+    } else {
+      assert(bundle.dossier.value.stage_state === "S2_NOT_AUTHORIZED", "dirty closure did not remain S2_NOT_AUTHORIZED");
+      assert(initial.status === 2 && initialReport.status === "ZERO_WRITE_HALT" && /^R42_SOURCE_(?:SHADOW|LIVE_BLOB|BLOB)$/.test(initialReport.error_code), `unexpected dirty-closure halt: ${initial.stdout}`);
+      assert(/^R42_SOURCE_(?:SHADOW|LIVE_BLOB|BLOB)$/.test(report.source_readiness.reason), `unexpected source readiness reason: ${report.source_readiness.reason}`);
+    }
+    assert(canonicalizeJcs(before) === canonicalizeJcs(protectedSnapshot(protectedPaths)), "production previews changed protected state");
+    assert(protectedSnapshot(authorityRoots).every((entry) => entry.type === "absent"), "production preview materialized an authority root");
   });
 
   await check("default dynamic report remains independent of unrelated settings bytes and static artifacts stay byte-identical", () => {
