@@ -23,7 +23,17 @@ For the default smoke gate, run the package alias instead of expanding it manual
 npm run smoke:all
 ```
 
-`smoke:proposition-lifecycle-freshness-d3-pub` remains registered for pre-publication reproducibility but is intentionally excluded from `smoke:all`: the production selection now exists, so that real pre-publication preview gate must not be rerun as a post-publication check. Published closure is verified read-only by `smoke:proposition-lifecycle-freshness-d3-pub-post-publication` (included in the ordinary offline gate) plus the frozen capsule clean-tree reader and the canonical post-publication dossier. `smoke:proposition-lifecycle-freshness-d3-v2-session-start` covers the R3.3 default-off D3-v2 session_start adapter (bound activation + settings_mutation closed equality, exact fence/strip, nested/orphan sanitizer outside-byte preservation, fakePi E2E, host wiring predicate, v2-only audit adversarial, halt/pending-intent/quarantine rollback crash windows, production-mode /tmp triple-auth positive) and v1/v2 isolation without enabling any live selector. P2a.2.1 (`smoke:proposition-policy-push-publication-p2a21`) and P2a.2.2 (`smoke:proposition-policy-push-live-publication-p2a22`) have the same pre-publication-only status: run either explicitly and only against its phase-bound production state, including the active production L1 and its bound frozen historical baseline.
+`smoke:proposition-lifecycle-freshness-d3-pub` remains registered for historical pre-publication reproducibility but is intentionally excluded from `smoke:all`. D3-v2 adapter smokes now verify retained historical/offline code only; D3 has no production rule-injection call edge or runtime authority. P2a.2.1 (`smoke:proposition-policy-push-publication-p2a21`) and P2a.2.2 (`smoke:proposition-policy-push-live-publication-p2a22`) are also historical phase-bound checks and must not be interpreted as current runtime gates.
+
+The ADR0040 production full-flip gate is:
+
+```bash
+npm run smoke:proposition-policy-stable-view-publisher  # /tmp-only concurrency/crash publication
+npm run smoke:proposition-policy-stable-view-reader     # strict reader + fresh-session staged E2E
+npm run smoke:abrain-rule-injector                       # sole-source call graph + sanitation
+```
+
+These smokes never invoke real production publication. The operator-only production command is `npm run publish:proposition-policy-stable-view -- --mode production`.
 
 ## Live prompt dossiers
 
