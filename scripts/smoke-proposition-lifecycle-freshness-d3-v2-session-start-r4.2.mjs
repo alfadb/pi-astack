@@ -4,7 +4,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import {
   DYNAMIC_SENTINEL,
@@ -79,8 +78,6 @@ import {
 } from "../extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2.mjs";
 
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
-const require = createRequire(import.meta.url);
-const ts = require("typescript");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-r4.2-smoke-"));
 let passed = 0;
 const failures = [];
@@ -257,10 +254,10 @@ function replaceExact(file, before, after) {
 process.stdout.write("ADR0040 D3-v2 session_start R4.2 smoke\n");
 let artifactBundle;
 try {
-  await check("content-only generator builds three standalone manifests and six-artifact hash DAG without source commit fixed point", async () => {
+  await check("historical six artifacts remain cold-auditable while retired production sources fail closed before regeneration", async () => {
     const committed = loadAndValidateStaticBundle(repoRoot);
     artifactBundle = {
-      source_snapshot: "index",
+      source_snapshot: "historical",
       values: {
         source_manifest: committed.source.value,
         adapter_manifest: committed.adapter.value,
@@ -278,18 +275,12 @@ try {
         static_preview_template: committed.preview.raw,
       },
     };
-    for (const relative of ["extensions/_shared/canonical-git-runtime.ts", "extensions/_shared/runtime.ts", "extensions/sediment/writer.ts"]) {
-      const indexed = spawnSync("git", ["-C", repoRoot, "cat-file", "blob", `:${relative}`], { encoding: "buffer" });
-      assert(indexed.status === 0, `cannot read smoke index blob ${relative}`);
-      const row = artifactBundle.values.source_manifest.closure_rows.find((item) => item.relative_path === relative);
-      assert(row?.raw_sha256 === sha256(indexed.stdout), `index snapshot row used non-index bytes for ${relative}`);
-      const liveHash = sha256(fs.readFileSync(path.join(repoRoot, relative)));
-      if (liveHash !== row.raw_sha256) assert(row.raw_sha256 !== liveHash, `dirty live bytes leaked into index snapshot for ${relative}`);
+    const artifactEntries = Object.entries(ARTIFACT_PATHS).filter(([name]) => name !== "post_dossier");
+    for (const [name, relative] of artifactEntries) {
+      const live = fs.readFileSync(path.join(repoRoot, relative));
+      assert(live.equals(artifactBundle.raws[name]), `${name} is not the cold-audited historical artifact`);
+      assert(requireGit(repoRoot, ["cat-file", "blob", `:${relative}`], `cannot read historical ${name} from index`).equals(live), `${name} differs between worktree and index`);
     }
-    const summary = spawnSync(process.execPath, [path.join(repoRoot, GENERATOR_PATH), "--summary", "--source-snapshot=index"], { cwd: repoRoot, encoding: "utf8", timeout: 600000 });
-    assert(summary.status === 0 && parseStrictJson(summary.stdout).source_snapshot === "index", summary.stderr || "index snapshot CLI summary failed");
-    const verify = spawnSync(process.execPath, [path.join(repoRoot, GENERATOR_PATH), "--verify", "--source-snapshot=index"], { cwd: repoRoot, encoding: "utf8", timeout: 600000 });
-    assert(verify.status === 0 && parseStrictJson(verify.stdout).source_snapshot === "index", verify.stderr || "index snapshot CLI verify failed");
     for (const kind of ["source", "adapter", "operator"]) validateStandaloneManifest(artifactBundle.values[`${kind}_manifest`], kind);
     validateStaticContract(artifactBundle.values.static_contract, { source: artifactBundle.values.source_manifest, adapter: artifactBundle.values.adapter_manifest, operator: artifactBundle.values.operator_manifest });
     const text = Object.values(artifactBundle.raws).map((raw) => raw.toString("utf8")).join("\n");
@@ -301,56 +292,31 @@ try {
     }
 
     const { buildTypescriptStaticDependencyGraph } = await loadTypescriptModule("extensions/_shared/typescript-static-dependency-graph.ts");
-    const graph = buildTypescriptStaticDependencyGraph({
-      repoRoot,
-      roots: ["extensions/abrain/rule-injector/index.ts"],
-    });
-    const compiledRoot = path.join(tmp, "commonjs-rule-injector");
-    const requiredRuntimePaths = [
+    const graph = buildTypescriptStaticDependencyGraph({ repoRoot, roots: ["extensions/abrain/rule-injector/index.ts"] });
+    const historicalRuntimePaths = [
       "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-r42-runtime-control.ts",
       "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2-core.mjs",
       "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2-staged-publication.mjs",
       "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2.mjs",
     ];
     const graphPaths = new Set(graph.files.map((row) => row.path));
-    for (const relative of requiredRuntimePaths) assert(graphPaths.has(relative), `CommonJS graph omitted ${relative}`);
-    for (const row of graph.files) {
-      const source = path.join(repoRoot, row.path);
-      const isTypescript = /\.(?:ts|mts|cts)$/.test(row.path);
-      const targetRelative = isTypescript ? row.path.replace(/\.(?:ts|mts|cts)$/, ".js") : row.path;
-      const target = path.join(compiledRoot, targetRelative);
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      if (isTypescript) {
-        const output = ts.transpileModule(fs.readFileSync(source, "utf8"), {
-          compilerOptions: {
-            target: ts.ScriptTarget.ES2022,
-            module: ts.ModuleKind.CommonJS,
-            moduleResolution: ts.ModuleResolutionKind.NodeNext,
-            esModuleInterop: true,
-            skipLibCheck: true,
-          },
-        }).outputText;
-        fs.writeFileSync(target, output, "utf8");
-      } else fs.copyFileSync(source, target);
+    for (const relative of historicalRuntimePaths) assert(!graphPaths.has(relative), `production successor graph still reaches retired D3 runtime ${relative}`);
+    assert(graphPaths.has("extensions/abrain/rule-injector/proposition-policy-stable-view-reader.ts"), "production successor graph omitted Policy stable-view reader");
+
+    const unavailableHistoricalSource = historicalRuntimePaths[0];
+    for (const command of ["--verify", "--write"]) {
+      const root = createIndexSnapshotRepo(`retired-source-closure-${command.slice(2)}`);
+      const baseline = Object.fromEntries(artifactEntries.map(([name, relative]) => [name, fs.readFileSync(path.join(root, relative))]));
+      const indexBaseline = Object.fromEntries(artifactEntries.map(([name, relative]) => [name, requireGit(root, ["cat-file", "blob", `:${relative}`], `cannot capture historical ${name}`)]));
+      fs.unlinkSync(path.join(root, unavailableHistoricalSource));
+      const result = spawnSync(process.execPath, [path.join(root, GENERATOR_PATH), command], { cwd: root, encoding: "utf8", timeout: 600000 });
+      const unavailableStem = unavailableHistoricalSource.replace(/\.ts$/, "");
+      assert(result.status !== 0 && result.stderr.includes("ENOENT") && result.stderr.includes(unavailableStem), `${command} did not fail closed on retired historical source: ${result.stdout}${result.stderr}`);
+      for (const [name, relative] of artifactEntries) {
+        assert(fs.readFileSync(path.join(root, relative)).equals(baseline[name]), `${command} changed historical ${name} bytes`);
+        assert(requireGit(root, ["cat-file", "blob", `:${relative}`], `cannot re-read historical ${name}`).equals(indexBaseline[name]), `${command} staged historical ${name}`);
+      }
     }
-    // The extension host supplies pi internals through jiti; the CommonJS
-    // fixture keeps the same explicit host boundary as the main injector smoke.
-    fs.writeFileSync(path.join(compiledRoot, "extensions/_shared/pi-internals.js"), `module.exports = {
-  markSessionAsSubAgent: () => {},
-  isSubAgentSession: () => false,
-};\n`, "utf8");
-    const schemaTarget = path.join(compiledRoot, "schemas/l1-schema-role-registry.json");
-    fs.mkdirSync(path.dirname(schemaTarget), { recursive: true });
-    fs.copyFileSync(path.join(repoRoot, "schemas/l1-schema-role-registry.json"), schemaTarget);
-    const compiledIndex = path.join(compiledRoot, "extensions/abrain/rule-injector/index.js");
-    const compiledR42 = path.join(compiledRoot, "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-r42-runtime-control.js");
-    const loaded = spawnSync(process.execPath, ["-e", `const main=require(${JSON.stringify(compiledIndex)});const r42=require(${JSON.stringify(compiledR42)});if(typeof main.default!=="function"||typeof main.scanRules!=="function"||typeof r42.decideD3V2R42RuntimeControl!=="function")process.exit(9);`], {
-      cwd: compiledRoot,
-      encoding: "utf8",
-      env: { ...process.env, NODE_PATH: [path.join(repoRoot, "node_modules"), process.env.NODE_PATH].filter(Boolean).join(path.delimiter) },
-      timeout: 120000,
-    });
-    assert(loaded.status === 0, `CommonJS main/R4.2 load failed: ${loaded.stderr || loaded.stdout}`);
   });
 
   await check("static manifest projections are six-field identities and R4.1 publication is absent from adapter dependencies", () => {
@@ -360,27 +326,26 @@ try {
     assert(!pins.includes("retained-fd-create-only") && !pins.includes("session-start-r4.ts"), "R4.1 publication dependency pin leaked");
   });
 
-  await check("forged legacy child env at the exact live root cannot bypass index parent isolation under unstaged semantic drift", () => {
-    const root = createIndexSnapshotRepo("index-live-semantic-drift");
+  await check("forged legacy child env cannot bypass the index parent or regenerate artifacts after historical closure drift", () => {
+    const root = createIndexSnapshotRepo("index-historical-closure-drift");
     const generator = path.join(root, GENERATOR_PATH);
-    const core = path.join(root, "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2-core.mjs");
+    const historicalSource = "scripts/smoke-proposition-lifecycle-freshness-d3-v2-session-start-r4.2.mjs";
     const artifactEntries = Object.entries(ARTIFACT_PATHS).filter(([name]) => name !== "post_dossier");
     const baseline = Object.fromEntries(artifactEntries.map(([name, relative]) => [name, fs.readFileSync(path.join(root, relative))]));
-    replaceExact(generator, 'selection_hash: "94edfbbdf354c7df5a45337fb29365f67e12c6a792f924805cf874fe1f42ae35"', `selection_hash: "${"a".repeat(64)}"`);
-    replaceExact(core, 'export const REVISION = "R4.2";', 'export const REVISION = "R4.2-live-poison";');
+    const indexBaseline = Object.fromEntries(artifactEntries.map(([name, relative]) => [name, requireGit(root, ["cat-file", "blob", `:${relative}`], `cannot capture staged ${name}`)]));
+    fs.appendFileSync(path.join(root, historicalSource), "\n// historical source closure drift fixture\n");
+    requireGit(root, ["add", "--", historicalSource], "cannot stage historical source closure drift");
     const registryBefore = worktreeRegistry(root);
     const env = { ...process.env, PI_ASTACK_R42_INDEX_SNAPSHOT_CHILD: root };
-    const write = spawnSync(process.execPath, [generator, "--write", "--source-snapshot=index"], { cwd: root, encoding: "utf8", env, timeout: 600000 });
-    assert(write.status === 0 && parseStrictJson(write.stdout).source_snapshot === "index", write.stderr || "isolated index write failed under live drift");
-    for (const [name, relative] of artifactEntries) {
-      assert(fs.readFileSync(path.join(root, relative)).equals(baseline[name]), `${name} live bytes changed under unstaged semantic drift`);
-      assert(requireGit(root, ["cat-file", "blob", `:${relative}`], `cannot read staged ${name}`).equals(baseline[name]), `${name} staged bytes changed under unstaged semantic drift`);
-    }
-    assert(spawnSync("git", ["-C", root, "diff", "--quiet", "--", GENERATOR_PATH, "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2-core.mjs"]).status === 1, "live semantic drift was not retained as unstaged dirt");
-    assert(spawnSync("git", ["-C", root, "diff", "--cached", "--quiet", "--", GENERATOR_PATH, "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2-core.mjs"]).status === 0, "index semantic sources were changed by write");
     const verify = spawnSync(process.execPath, [generator, "--verify", "--source-snapshot=index"], { cwd: root, encoding: "utf8", env, timeout: 600000 });
-    assert(verify.status === 0 && parseStrictJson(verify.stdout).source_snapshot === "index", verify.stderr || "isolated index verify failed under live drift");
-    assert(worktreeRegistry(root).equals(registryBefore), "index execution leaked a detached worktree registration");
+    assert(verify.status !== 0 && /source_manifest bytes differ from content-only rebuild/.test(verify.stderr), `forged child env bypassed index parent isolation: ${verify.stdout}${verify.stderr}`);
+    for (const [name, relative] of artifactEntries) {
+      assert(fs.readFileSync(path.join(root, relative)).equals(baseline[name]), `${name} live bytes changed after failed historical verify`);
+      assert(requireGit(root, ["cat-file", "blob", `:${relative}`], `cannot re-read staged ${name}`).equals(indexBaseline[name]), `${name} was generated or staged after failed historical verify`);
+    }
+    const staged = requireGit(root, ["diff", "--cached", "--name-only", "-z"], "cannot inspect staged historical drift").toString("utf8").split("\0").filter(Boolean);
+    assert(staged.length === 1 && staged[0] === historicalSource, `failed historical verify staged unexpected paths: ${staged.join(",")}`);
+    assert(worktreeRegistry(root).equals(registryBefore), "failed historical verify leaked a detached worktree registration");
   });
 
   await check("nonartifact index drift during the artifact copy/stage window fails the complete expected-index comparison", () => {
@@ -1069,15 +1034,27 @@ try {
     for (const name of Object.keys(artifactBundle.raws)) assert(fs.readFileSync(path.join(repoRoot, ARTIFACT_PATHS[name])).equals(artifactBundle.raws[name]), `${name} committed bytes differ`);
   });
 
-  await check("sourceGuard accepts a clean temporary Git tree with exact generated artifacts and closure bytes", () => {
-    const cleanRoot = path.join(tmp, "clean-source-git"); fs.mkdirSync(cleanRoot, { recursive: true, mode: 0o700 });
+  await check("sourceGuard accepts a reconstructible historical closure or fails closed on retired source drift", () => {
+    const reconstructed = [];
+    let unavailableRow;
     for (const row of artifactBundle.values.source_manifest.closure_rows) {
-      const source = path.join(repoRoot, row.relative_path); const target = path.join(cleanRoot, row.relative_path);
-      const live = fs.readFileSync(source);
-      const raw = sha256(live) === row.raw_sha256
-        ? live
-        : spawnSync("git", ["-C", repoRoot, "cat-file", "blob", `HEAD:${row.relative_path}`], { encoding: "buffer" }).stdout;
-      assert(sha256(raw) === row.raw_sha256, `cannot reconstruct manifest row ${row.relative_path}`);
+      const live = fs.readFileSync(path.join(repoRoot, row.relative_path));
+      const headRaw = spawnSync("git", ["-C", repoRoot, "cat-file", "blob", `HEAD:${row.relative_path}`], { encoding: "buffer" }).stdout;
+      const indexRaw = spawnSync("git", ["-C", repoRoot, "cat-file", "blob", `:${row.relative_path}`], { encoding: "buffer" }).stdout;
+      const raw = [live, headRaw, indexRaw].find((candidate) => sha256(candidate) === row.raw_sha256);
+      if (!raw) { unavailableRow = row; break; }
+      reconstructed.push([row, raw]);
+    }
+    if (unavailableRow) {
+      const bundle = loadAndValidateStaticBundle(repoRoot);
+      const head = requireGit(repoRoot, ["rev-parse", "--verify", "HEAD^{commit}"], "cannot resolve retired source HEAD").toString("utf8").trim();
+      expectFailure(() => sourceGuard(repoRoot, head, bundle), ["SHADOW", "BLOB"]);
+      return;
+    }
+
+    const cleanRoot = path.join(tmp, "clean-source-git"); fs.mkdirSync(cleanRoot, { recursive: true, mode: 0o700 });
+    for (const [row, raw] of reconstructed) {
+      const target = path.join(cleanRoot, row.relative_path);
       fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, raw);
     }
     for (const [name, raw] of Object.entries(artifactBundle.raws)) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** ADR0040 restricted stable-view publisher. Preview is the default; production is transcript-gated. */
+/** ADR0040 production stable-view publisher. Preview remains the default. */
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -22,7 +22,6 @@ const mode = argument("mode", "preview");
 if (mode !== "preview" && mode !== "production") throw new Error("--mode must be preview or production");
 const sourceAbrainHome = path.resolve(argument("source-abrain", publisher.PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME));
 const sandbox = argument("sandbox-abrain");
-const transcript = argument("authorization-transcript");
 
 try {
   const result = await publisher.publishPropositionPolicyStableView({
@@ -30,7 +29,6 @@ try {
     sourceAbrainHome,
     repoRoot,
     ...(sandbox ? { sandboxAbrainHome: path.resolve(sandbox) } : {}),
-    ...(transcript ? { authorizationTranscriptPath: path.resolve(transcript) } : {}),
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {

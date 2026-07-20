@@ -7,7 +7,7 @@ export const PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_UTF8_BYTES = 196_608 as
 export const PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES = 262_144 as const;
 
 export const PROPOSITION_POLICY_STABLE_VIEW_COMPILER_MANIFEST_SCHEMA = "proposition-policy-stable-view-manifest/v1" as const;
-export const PROPOSITION_POLICY_STABLE_VIEW_COMPILER_MANIFEST_AUTHORITY = "non_authoritative_repo_sandbox_only_no_runtime_consumer" as const;
+export const PROPOSITION_POLICY_STABLE_VIEW_COMPILER_MANIFEST_AUTHORITY = "production_policy_projection_for_sole_persisted_main_session_rule_source" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_COMPILER_MANIFEST_HASH_SCOPE = "sha256 over RFC8785-JCS UTF-8 bytes of this manifest object with manifest_hash omitted" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_COMPILER_ARTIFACT_NAMES = Object.freeze([
   "view.json",

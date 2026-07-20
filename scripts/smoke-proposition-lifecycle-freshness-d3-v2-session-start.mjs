@@ -199,7 +199,8 @@ try {
     assert(manifest.graph.explicit_files.includes(adapter.D3_V2_SESSION_START_SETTINGS_SCHEMA));
     assert(paths.has(adapter.D3_V2_SESSION_START_ABRAIN_HOST_ENTRY), "host entry missing from graph");
     const wiring = adapter.evaluateD3V2SessionStartHostWiringPredicate(repoRoot);
-    assert(wiring.ok, `host wiring predicate failed: ${JSON.stringify(wiring)}`);
+    assert(wiring.ok === false && wiring.registers_session_start_surface === false,
+      `retired D3 host wiring unexpectedly remains reachable: ${JSON.stringify(wiring)}`);
   });
 
   await check("enabled=true without activation path/hash fails closed at settings resolve", () => {
@@ -539,7 +540,12 @@ try {
     assert(unselected.kind === "unselected");
   });
 
-  await check("real fakePi E2E: load default export, capture handlers, session_start+before_agent_start", async () => {
+  await check("production fakePi boundary: retained D3 settings cannot restore a runtime call edge", async () => {
+    const injectorSource = fs.readFileSync(path.join(repoRoot, "extensions/abrain/rule-injector/index.ts"), "utf8");
+    assert(!injectorSource.includes("proposition-lifecycle-freshness-d3-v2-session-start-control"), "D3 control import remains in production injector");
+    assert(!injectorSource.includes("decideD3V2SessionStartControl") && !injectorSource.includes("selectD3V2SessionStartSession"),
+      "D3 runtime symbols remain in production injector");
+    return;
     const controlRoot = cloneProductionRoot("fakepi");
     const act = writeBoundActivation({
       label: "fakepi", sessionId, sessionFile,
@@ -1945,17 +1951,12 @@ try {
     assert(adapter.isSafeSessionIdComponent("../escape") === false, "isSafe rejects traversal");
     assert(adapter.isSafeSessionIdComponent(".") === false, "isSafe rejects dot");
 
-    // --- Schema surface: v2 selector items carry maxLength 128 + ASCII pattern + reject ./.. ---
+    // --- Production schema retirement: historical adapter validators remain code-only. ---
     const schemaRaw = fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf8");
     const schema = JSON.parse(schemaRaw);
-    const v2Items = schema?.properties?.ruleInjector?.properties
-      ?.propositionLifecycleFreshnessD3V2SessionStartInjection?.properties
-      ?.selector?.properties?.session_ids?.items;
-    assert(v2Items && v2Items.maxLength === 128, "schema session_ids items maxLength 128");
-    const allOf = Array.isArray(v2Items.allOf) ? v2Items.allOf : [];
-    assert(allOf.some((c) => c && c.pattern === "^[A-Za-z0-9._-]+$"), "schema ASCII pattern present");
-    assert(allOf.some((c) => c && c.not && Array.isArray(c.not.enum) && c.not.enum.includes(".") && c.not.enum.includes("..")),
-      "schema rejects '.' and '..'");
+    const v2Config = schema?.properties?.ruleInjector?.properties
+      ?.propositionLifecycleFreshnessD3V2SessionStartInjection;
+    assert(v2Config === undefined, "retired D3 runtime configuration remains in production schema");
 
     // --- Live resolve: unsafe selector fail-closed to disabled/empty/cleared pins, never throws ---
     // R3.9: empty / pure whitespace / leading-trailing whitespace are NOT ignored and NOT trimmed.
@@ -2206,7 +2207,12 @@ try {
     assert(!fs.existsSync(path.join(externalDir, "q-escape.jsonl")), "external quarantine must not be created");
   });
 
-  await check("dossier continuous build/verify stability (R3.9)", () => {
+  await check("historical execution-ready dossier remains frozen after production host retirement", () => {
+    const wiring = adapter.evaluateD3V2SessionStartHostWiringPredicate(repoRoot);
+    assert(wiring.ok === false && wiring.registers_session_start_surface === false, "current host unexpectedly satisfies the historical D3 execution predicate");
+    const frozen = path.join(repoRoot, "docs/evidence/2026-07-19-adr0040-d3-v2-session-start-execution-ready-dossier.json");
+    assert(fs.existsSync(frozen) && fs.lstatSync(frozen).isFile(), "frozen historical D3 dossier is missing");
+    return;
     const dossierScript = path.join(repoRoot, "scripts/dossier-proposition-lifecycle-freshness-d3-v2-session-start-execution-ready.mjs");
     const t1 = path.join(tmpRoot, "dossier-stability-a.json");
     const t2 = path.join(tmpRoot, "dossier-stability-b.json");

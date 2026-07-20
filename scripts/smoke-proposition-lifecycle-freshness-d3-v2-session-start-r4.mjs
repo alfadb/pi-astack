@@ -350,7 +350,7 @@ try {
     }
   });
 
-  await check("real production default preview is exact frozen bytes, protected-zero-write, and strace has no mutating syscall", () => {
+  await check("immutable R4 production preview is exact before successors or fail-closed after successor source drift, always zero-write", () => {
     const paths = evidence.protectedD3V2R4ProductionPaths(repoRoot);
     assert(!paths.includes(path.resolve(r4.D3_V2_R4_PRODUCTION_AUTHORIZATION_SESSION_PATH)), "active authorization transcript entered generic stable snapshot");
     assert(!paths.includes(path.resolve(path.dirname(r4.D3_V2_R4_PRODUCTION_AUTHORIZATION_SESSION_PATH))), "active authorization transcript parent entered generic stable snapshot");
@@ -360,16 +360,21 @@ try {
     const syscalls = "open,openat,openat2,creat,rename,renameat,renameat2,unlink,unlinkat,mkdir,mkdirat,rmdir,link,linkat,symlink,symlinkat,truncate,ftruncate,chmod,fchmod,chown,fchown,fsync,fdatasync,mknod,mknodat";
     const result = spawnSync("strace", ["-f", "-qq", "-o", trace, "-e", `trace=${syscalls}`, process.execPath, cli], { cwd: repoRoot, encoding: "utf8", timeout: 600000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
     const after = core.captureProtectedPrestate(paths);
-    assert(result.status === 0, result.stderr);
-    const committed = fs.readFileSync(path.join(repoRoot, r4.D3_V2_R4_PREVIEW_RELATIVE), "utf8");
-    assert(result.stdout === committed, "CLI preview bytes differ from frozen preview evidence");
-    const preview = JSON.parse(result.stdout);
-    assert(preview.authorization_status === "NOT_AUTHORIZED" && preview.status === "S2_NOT_AUTHORIZED" && preview.revision === "R4.1" && preview.executable === false);
-    assert(preview.target_session_binding.session_id !== preview.authorization_transcript_binding.session_id);
-    assert(preview.preview_stability_policy.authorization_session.includes("append_tolerant_frozen_prefix"));
-    assert(Object.values(preview.assertions).every((value) => value === true), "preview contains a false or literal-placeholder assertion");
-    assert(preview.authorization_transcript_binding.session_file.session_id === preview.authorization_transcript_binding.session_id);
-    assert(/^[0-9a-f]{64}$/.test(preview.authorization_transcript_binding.session_file.header_sha256));
+    if (result.status === 0) {
+      const committed = fs.readFileSync(path.join(repoRoot, r4.D3_V2_R4_PREVIEW_RELATIVE), "utf8");
+      assert(result.stdout === committed, "CLI preview bytes differ from frozen preview evidence");
+      const preview = JSON.parse(result.stdout);
+      assert(preview.authorization_status === "NOT_AUTHORIZED" && preview.status === "S2_NOT_AUTHORIZED" && preview.revision === "R4.1" && preview.executable === false);
+      assert(preview.target_session_binding.session_id !== preview.authorization_transcript_binding.session_id);
+      assert(preview.preview_stability_policy.authorization_session.includes("append_tolerant_frozen_prefix"));
+      assert(Object.values(preview.assertions).every((value) => value === true), "preview contains a false or literal-placeholder assertion");
+      assert(preview.authorization_transcript_binding.session_file.session_id === preview.authorization_transcript_binding.session_id);
+      assert(/^[0-9a-f]{64}$/.test(preview.authorization_transcript_binding.session_file.header_sha256));
+    } else {
+      const successor = path.join(repoRoot, "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2.mjs");
+      assert(fs.existsSync(successor) && result.stderr.includes("R4_EVIDENCE_MANIFEST"), result.stderr);
+      assert(result.stdout === "", "failed-closed immutable R4 preview emitted an authoritative-looking payload");
+    }
     assert(canonicalizeJcs(before) === canonicalizeJcs(after), "real production preview changed protected paths");
     const traceRaw = fs.readFileSync(trace, "utf8");
     const mutating = traceRaw.split("\n").filter((line) => /\b(creat|rename(?:at2?)?|unlink(?:at)?|mkdir(?:at)?|rmdir|link(?:at)?|symlink(?:at)?|truncate|ftruncate|chmod|fchmod|chown|fchown|fsync|fdatasync|mknod(?:at)?)\(/.test(line) || (!line.includes('"/dev/null"') && /\bopen(?:at2?|)\(.*O_(?:WRONLY|RDWR|CREAT|TRUNC|APPEND)/.test(line)));

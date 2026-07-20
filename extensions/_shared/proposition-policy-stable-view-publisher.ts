@@ -31,6 +31,10 @@ import {
   buildTypescriptStaticDependencyGraph,
   validateTypescriptStaticDependencyGraph,
 } from "./typescript-static-dependency-graph";
+import {
+  acquireRetainedDirectoryOfdLock,
+  type RetainedDirectoryOfdLock,
+} from "./retained-directory-ofd-lock";
 
 export const PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_ROOT_RELATIVE = ".state/sediment/proposition-policy-stable-view/v1" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME = "/home/worker/.abrain" as const;
@@ -38,15 +42,22 @@ export const PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_TARGET = `${PROPOSI
 export const PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_MANIFEST_SCHEMA = "proposition-policy-stable-view-publication-manifest/v2" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_PROFILE_RELATIVE = "schemas/proposition-policy-stable-view-compile-profile-v1.json" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_PUBLISHER_RELATIVE = "extensions/_shared/proposition-policy-stable-view-publisher.ts" as const;
-export const PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORIZATION_TEXT = "确认发布当前 ADR0040 Policy stable view。" as const;
-export const PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORIZATION_MAX_AGE_MS = 5 * 60 * 1_000;
+export const PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_LOCK_ROOT = "/home/worker/.abrain/.state/sediment" as const;
+export const PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORITY = "production_policy_stable_view_sole_rule_source_for_all_persisted_main_sessions" as const;
 
 const MANIFEST_HASH_SCOPE = "sha256 over RFC8785-JCS UTF-8 bytes of this manifest object with bundle_hash and manifest_hash omitted" as const;
 const ARTIFACT_NAMES = Object.freeze(["diagnostics.json", "manifest.json", "parity.json", "view.json", "view.md"] as const);
 const NON_MANIFEST_ARTIFACT_NAMES = Object.freeze(["diagnostics.json", "parity.json", "view.json", "view.md"] as const);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const PRODUCTION_SESSION_ROOT = "/home/worker/.pi/agent/sessions" as const;
-const AUTHORIZATION_FUTURE_TOLERANCE_MS = 30_000;
+const PROPOSITION_POLICY_STABLE_VIEW_MAX_WHOLE_L1_FILES = 1_000_000;
+const PRODUCTION_LOCK_CAPABILITY = Symbol("proposition-policy-stable-view-production-lock");
+
+type PublisherCrashPoint = "before_bundle_rename" | "after_bundle_rename" | "before_latest_rename" | "after_latest_rename";
+interface PublisherTestHooks {
+  afterFirstSourceScan?(): void;
+  afterProjectionBeforeSecondSourceScan?(): void;
+  atCrashPoint?(point: PublisherCrashPoint): void;
+}
 
 type ArtifactName = typeof ARTIFACT_NAMES[number];
 export type StableViewPublicationMode = "preview" | "production";
@@ -92,13 +103,10 @@ export class PropositionPolicyStableViewPublisherError extends Error {
   }
 }
 
-export function buildStableViewProductionAuthorizationText(): string {
-  return PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORIZATION_TEXT;
-}
-
 export async function buildPropositionPolicyStableViewBundle(options: {
   sourceAbrainHome: string;
   repoRoot: string;
+  hooks?: PublisherTestHooks;
 }): Promise<PropositionPolicyStableViewBundle> {
   const sourceAbrainHome = assertExactDirectory(options.sourceAbrainHome, "source abrain home");
   const repoRoot = assertExactDirectory(options.repoRoot, "repository root");
@@ -107,27 +115,32 @@ export async function buildPropositionPolicyStableViewBundle(options: {
   const profileRaw = readCanonicalJsonFile(profilePath, "compile profile");
   const profile = validateStableViewCompileProfile(profileRaw.parsed);
 
-  const firstProjection = await buildPropositionPolicyPushShadow({ abrainHome: sourceAbrainHome, repoRoot, registryPath });
-  validateGeneralProjection(firstProjection);
-  const sourceRows = readCanonicalL1Rows(sourceAbrainHome, firstProjection.manifest.source.input_event_ids);
-  const secondProjection = await buildPropositionPolicyPushShadow({ abrainHome: sourceAbrainHome, repoRoot, registryPath });
-  validateGeneralProjection(secondProjection);
-  if (firstProjection.manifest.bundle_hash !== secondProjection.manifest.bundle_hash
-    || !sameBundleBytes(firstProjection, secondProjection)) {
-    fail("SOURCE_RACE", "P2a projection changed while source provenance was captured");
+  const inventoryA = readWholeCanonicalL1Inventory(sourceAbrainHome);
+  options.hooks?.afterFirstSourceScan?.();
+  const projection = await buildPropositionPolicyPushShadow({ abrainHome: sourceAbrainHome, repoRoot, registryPath });
+  validateGeneralProjection(projection);
+  options.hooks?.afterProjectionBeforeSecondSourceScan?.();
+  const inventoryB = readWholeCanonicalL1Inventory(sourceAbrainHome);
+  if (stableViewCanonicalizeJcs(inventoryA) !== stableViewCanonicalizeJcs(inventoryB)) {
+    fail("SOURCE_RACE", "whole canonical L1 inventory or raw bytes changed while the projection was built");
   }
-  const sourceRowsAfter = readCanonicalL1Rows(sourceAbrainHome, secondProjection.manifest.source.input_event_ids);
-  if (stableViewCanonicalizeJcs(sourceRows) !== stableViewCanonicalizeJcs(sourceRowsAfter)) {
-    fail("SOURCE_RACE", "canonical L1 raw bytes changed while the projection was built");
+  const inputIdSet = new Set(projection.manifest.source.input_event_ids);
+  const capturedSourceRows = inventoryB.filter((row) => inputIdSet.has(row.event_id));
+  if (capturedSourceRows.length !== inputIdSet.size) {
+    fail("SOURCE_RACE", "projection input IDs are not an exact subset of the captured whole-L1 inventory");
+  }
+  const sourceRows = readCanonicalL1Rows(sourceAbrainHome, projection.manifest.source.input_event_ids);
+  if (stableViewCanonicalizeJcs(sourceRows) !== stableViewCanonicalizeJcs(capturedSourceRows)) {
+    fail("SOURCE_RACE", "canonical projection input bytes changed after the whole-L1 B snapshot");
   }
 
   const request = deepFreeze({
-    source_bundle_hash: secondProjection.manifest.bundle_hash,
+    source_bundle_hash: projection.manifest.bundle_hash,
     source: {
-      entries: secondProjection.entries,
-      exclusions: secondProjection.exclusions,
-      diagnostics: secondProjection.diagnostics,
-      manifest: secondProjection.manifest,
+      entries: projection.entries,
+      exclusions: projection.exclusions,
+      diagnostics: projection.diagnostics,
+      manifest: projection.manifest,
     },
     compile_profile: profile,
     mode: "real" as const,
@@ -145,7 +158,7 @@ export async function buildPropositionPolicyStableViewBundle(options: {
   const parity = parseCanonicalJson(evaluation.artifacts["parity.json"], "compiler parity") as Record<string, unknown>;
   const conservation = asRecord(parity.source_conservation, "compiler parity.source_conservation");
   const dispositions = asArray(conservation.dispositions, "compiler parity.source_conservation.dispositions").map((raw, index) => asRecord(raw, `compiler disposition[${index}]`));
-  const candidateIds = new Set(secondProjection.entries.entries.map((entry) => entry.source_event_id));
+  const candidateIds = new Set(projection.entries.entries.map((entry) => entry.source_event_id));
   const candidateDispositions = dispositions
     .filter((row) => candidateIds.has(String(row.source_event_id)))
     .map((row) => ({ source_event_id: String(row.source_event_id), disposition: String(row.disposition) }))
@@ -184,14 +197,14 @@ export async function buildPropositionPolicyStableViewBundle(options: {
     "view.md": evaluation.artifacts["view.md"],
   } as const;
   const artifactRows = NON_MANIFEST_ARTIFACT_NAMES.map((name) => artifactRow(name, preliminary[name]));
-  const inputEventIds = secondProjection.manifest.source.input_event_ids;
+  const inputEventIds = projection.manifest.source.input_event_ids;
   const manifestBase = deepFreeze({
     schema_version: PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_MANIFEST_SCHEMA,
     canonicalization: "RFC8785-JCS",
     hash_algorithm: "sha256",
     bundle_hash_scope: MANIFEST_HASH_SCOPE,
     manifest_hash_scope: MANIFEST_HASH_SCOPE,
-    authority: "bounded_multi_item_persisted_session_canary_default_off",
+    authority: PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORITY,
     canonical_source: {
       truth: "canonical_production_l1_only",
       input_event_count: inputEventIds.length,
@@ -200,30 +213,30 @@ export async function buildPropositionPolicyStableViewBundle(options: {
       input_event_rows: sourceRows,
       input_event_rows_hash: stableViewJcsSha256Hex(sourceRows),
       physical_accounting: {
-        genesis_event_ids: [secondProjection.manifest.epoch.genesis_event_id],
-        genesis_event_ids_hash: stableViewJcsSha256Hex([secondProjection.manifest.epoch.genesis_event_id]),
-        evidence_event_ids: secondProjection.manifest.source.evidence_event_ids,
-        evidence_event_ids_hash: secondProjection.manifest.source.evidence_event_ids_hash,
-        lifecycle_event_ids: secondProjection.manifest.source.lifecycle_event_ids,
-        lifecycle_event_ids_hash: secondProjection.manifest.source.lifecycle_event_ids_hash,
-        observed_only_event_ids: [secondProjection.manifest.epoch.genesis_event_id, ...secondProjection.manifest.source.lifecycle_event_ids].sort(compareCodeUnits),
-        observed_only_event_ids_hash: stableViewJcsSha256Hex([secondProjection.manifest.epoch.genesis_event_id, ...secondProjection.manifest.source.lifecycle_event_ids].sort(compareCodeUnits)),
+        genesis_event_ids: [projection.manifest.epoch.genesis_event_id],
+        genesis_event_ids_hash: stableViewJcsSha256Hex([projection.manifest.epoch.genesis_event_id]),
+        evidence_event_ids: projection.manifest.source.evidence_event_ids,
+        evidence_event_ids_hash: projection.manifest.source.evidence_event_ids_hash,
+        lifecycle_event_ids: projection.manifest.source.lifecycle_event_ids,
+        lifecycle_event_ids_hash: projection.manifest.source.lifecycle_event_ids_hash,
+        observed_only_event_ids: [projection.manifest.epoch.genesis_event_id, ...projection.manifest.source.lifecycle_event_ids].sort(compareCodeUnits),
+        observed_only_event_ids_hash: stableViewJcsSha256Hex([projection.manifest.epoch.genesis_event_id, ...projection.manifest.source.lifecycle_event_ids].sort(compareCodeUnits)),
       },
     },
     projection: {
       builder: "buildPropositionPolicyPushShadow",
-      bundle_hash: secondProjection.manifest.bundle_hash,
+      bundle_hash: projection.manifest.bundle_hash,
       source_counts: {
-        proposition_event_count: secondProjection.manifest.source.proposition_event_count,
-        proposition_genesis_count: secondProjection.manifest.source.proposition_genesis_count,
-        proposition_evidence_count: secondProjection.manifest.source.proposition_evidence_count,
-        proposition_lifecycle_count: secondProjection.manifest.source.proposition_lifecycle_count,
-        proposition_selected_count: secondProjection.manifest.source.proposition_selected_count,
-        proposition_foldable_count: secondProjection.manifest.source.proposition_foldable_count,
+        proposition_event_count: projection.manifest.source.proposition_event_count,
+        proposition_genesis_count: projection.manifest.source.proposition_genesis_count,
+        proposition_evidence_count: projection.manifest.source.proposition_evidence_count,
+        proposition_lifecycle_count: projection.manifest.source.proposition_lifecycle_count,
+        proposition_selected_count: projection.manifest.source.proposition_selected_count,
+        proposition_foldable_count: projection.manifest.source.proposition_foldable_count,
       },
-      result: secondProjection.manifest.result,
-      source_resolution_inventory_hash: secondProjection.manifest.source.source_resolution_inventory_hash,
-      artifact_rows: secondProjection.manifest.artifacts,
+      result: projection.manifest.result,
+      source_resolution_inventory_hash: projection.manifest.source.source_resolution_inventory_hash,
+      artifact_rows: projection.manifest.artifacts,
     },
     candidate_dispositions: {
       basis: PROPOSITION_POLICY_STABLE_VIEW_POLICY_SET_DECISION,
@@ -278,7 +291,7 @@ export async function buildPropositionPolicyStableViewBundle(options: {
     bundle_hash: manifestHash,
     artifacts,
     manifest,
-    source_bundle: secondProjection,
+    source_bundle: projection,
   });
   validatePropositionPolicyStableViewBundle(bundle);
   return bundle;
@@ -311,33 +324,38 @@ export async function publishPropositionPolicyStableView(options: {
   sourceAbrainHome: string;
   repoRoot: string;
   sandboxAbrainHome?: string;
-  authorizationTranscriptPath?: string;
 }): Promise<PropositionPolicyStableViewPublicationResult> {
   const sourceAbrainHome = path.resolve(options.sourceAbrainHome);
-  const previewedBundle = await buildPropositionPolicyStableViewBundle({ sourceAbrainHome, repoRoot: options.repoRoot });
-  let targetAbrainHome: string;
-  let productionBinding: ReturnType<typeof buildProductionPublicationBinding> | undefined;
   if (options.mode === "production") {
     if (sourceAbrainHome !== PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME) {
-      fail("NOT_AUTHORIZED", "production mode is fixed to /home/worker/.abrain");
+      fail("PRODUCTION_TARGET_INVALID", "production mode is fixed to /home/worker/.abrain");
     }
-    productionBinding = buildProductionPublicationBinding(previewedBundle);
-    validateProductionPublicationBinding(productionBinding, previewedBundle);
-    if (!options.authorizationTranscriptPath) {
-      fail("NOT_AUTHORIZED", "production publication requires a persisted transcript containing the short exact authorization sentence");
-    }
-    verifyProductionAuthorization(options.authorizationTranscriptPath, Date.now());
-    targetAbrainHome = assertExactDirectory(PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME, "production abrain home");
-  } else {
-    if (!options.sandboxAbrainHome) fail("SANDBOX_REQUIRED", "preview mode requires an explicit sandbox abrain home");
-    targetAbrainHome = assertSandboxDirectory(options.sandboxAbrainHome);
-    if (targetAbrainHome === PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME) {
-      fail("SANDBOX_REQUIRED", "preview mode cannot target the production abrain home");
+    const targetAbrainHome = assertExactDirectory(PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME, "production abrain home");
+    const lock = acquireProductionPublicationLock(PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_LOCK_ROOT);
+    try {
+      const bundle = await buildPropositionPolicyStableViewBundle({ sourceAbrainHome, repoRoot: options.repoRoot });
+      const productionBinding = buildProductionPublicationBinding(bundle);
+      validateProductionPublicationBinding(productionBinding, bundle);
+      const result = materializeBundle({
+        mode: "production",
+        targetAbrainHome,
+        bundle,
+        productionLockCapability: PRODUCTION_LOCK_CAPABILITY,
+      });
+      validateProductionPublicationResult(productionBinding, result);
+      return result;
+    } finally {
+      lock.close();
     }
   }
-  const result = materializeBundle({ mode: options.mode, targetAbrainHome, bundle: previewedBundle });
-  if (productionBinding) validateProductionPublicationResult(productionBinding, result);
-  return result;
+
+  if (!options.sandboxAbrainHome) fail("SANDBOX_REQUIRED", "preview mode requires an explicit sandbox abrain home");
+  const targetAbrainHome = assertSandboxDirectory(options.sandboxAbrainHome);
+  if (targetAbrainHome === PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME) {
+    fail("SANDBOX_REQUIRED", "preview mode cannot target the production abrain home");
+  }
+  const bundle = await buildPropositionPolicyStableViewBundle({ sourceAbrainHome, repoRoot: options.repoRoot });
+  return materializeBundle({ mode: "preview", targetAbrainHome, bundle });
 }
 
 function validateGeneralProjection(bundle: PropositionPolicyPushBundle): void {
@@ -360,7 +378,7 @@ function validatePublicationManifest(
     || manifest.hash_algorithm !== "sha256"
     || manifest.bundle_hash_scope !== MANIFEST_HASH_SCOPE
     || manifest.manifest_hash_scope !== MANIFEST_HASH_SCOPE
-    || manifest.authority !== "bounded_multi_item_persisted_session_canary_default_off"
+    || manifest.authority !== PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORITY
     || manifest.bundle_hash !== expectedBundleHash
     || manifest.manifest_hash !== expectedBundleHash) {
     fail("MANIFEST_IDENTITY_INVALID", "publication manifest identity differs");
@@ -739,15 +757,34 @@ function assertPublicationAcceptanceEnvelope(bundle: PropositionPolicyStableView
   }
 }
 
+function acquireProductionPublicationLock(lockRoot: string): RetainedDirectoryOfdLock & { status: "ACQUIRED"; fd: number } {
+  const lock = acquireRetainedDirectoryOfdLock(lockRoot);
+  if (lock.status === "BUSY" || lock.fd === null) fail("LOCK_BUSY", "another stable-view publisher holds the exclusive production lock");
+  const named = fs.lstatSync(lockRoot);
+  const opened = fs.fstatSync(lock.fd);
+  if (named.isSymbolicLink() || !named.isDirectory() || !opened.isDirectory()
+    || named.dev !== opened.dev || named.ino !== opened.ino) {
+    lock.close();
+    fail("LOCK_IDENTITY_DRIFT", "production publication lock identity changed after acquisition");
+  }
+  return lock as RetainedDirectoryOfdLock & { status: "ACQUIRED"; fd: number };
+}
+
 function materializeBundle(options: {
   mode: StableViewPublicationMode;
   targetAbrainHome: string;
   bundle: PropositionPolicyStableViewMvpBundle;
+  productionLockCapability?: symbol;
+  hooks?: PublisherTestHooks;
 }): PropositionPolicyStableViewPublicationResult {
+  if (options.mode === "production" && options.productionLockCapability !== PRODUCTION_LOCK_CAPABILITY) {
+    fail("PRODUCTION_LOCK_REQUIRED", "production materialization is reachable only inside the exclusive publisher lock");
+  }
   assertPublicationAcceptanceEnvelope(options.bundle);
   validatePropositionPolicyStableViewBundle(options.bundle);
   const targetRoot = path.join(options.targetAbrainHome, ...PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_ROOT_RELATIVE.split("/"));
   ensureDirectoryChainNoSymlink(options.targetAbrainHome, targetRoot);
+  cleanupAbandonedPublicationTemps(targetRoot);
   const allowedRootEntries = new Set(["bundles", "latest"]);
   for (const name of fs.readdirSync(targetRoot)) {
     if (!allowedRootEntries.has(name)) fail("PUBLICATION_FOREIGN_STATE", "stable-view root contains a foreign entry", { name });
@@ -758,65 +795,66 @@ function materializeBundle(options: {
     if (!SHA256_PATTERN.test(name)) fail("PUBLICATION_FOREIGN_STATE", "bundles root contains a non-content-addressed entry", { name });
     assertExactDirectory(path.join(bundlesRoot, name), "existing content-addressed bundle");
   }
+
   const bundleDir = path.join(bundlesRoot, options.bundle.bundle_hash);
-  const existing = lstatIfPresent(bundleDir);
   let status: "created" | "identical";
-  if (existing) {
+  if (lstatIfPresent(bundleDir)) {
     assertExactPublishedBundle(bundleDir, options.bundle.artifacts);
     status = "identical";
   } else {
     const stagingRoot = path.join(targetRoot, `.staging-${options.bundle.bundle_hash}-${process.pid}-${randomBytes(8).toString("hex")}`);
     fs.mkdirSync(stagingRoot, { mode: 0o700 });
+    let renamed = false;
     try {
       for (const name of ARTIFACT_NAMES) writeExclusiveFile(path.join(stagingRoot, name), options.bundle.artifacts[name]);
       fsyncDirectory(stagingRoot);
+      assertExactPublishedBundle(stagingRoot, options.bundle.artifacts);
+      options.hooks?.atCrashPoint?.("before_bundle_rename");
       try {
-        fs.mkdirSync(bundleDir, { mode: 0o700 });
+        fs.renameSync(stagingRoot, bundleDir);
+        renamed = true;
+        status = "created";
       } catch (error) {
-        if (!isCode(error, "EEXIST")) throw error;
-      }
-      const names = fs.readdirSync(bundleDir);
-      if (names.length !== 0) {
+        if (!isCode(error, "EEXIST") && !isCode(error, "ENOTEMPTY")) throw error;
         assertExactPublishedBundle(bundleDir, options.bundle.artifacts);
-      } else {
-        for (const name of ARTIFACT_NAMES) {
-          try {
-            fs.linkSync(path.join(stagingRoot, name), path.join(bundleDir, name));
-          } catch (error) {
-            if (!isCode(error, "EEXIST")) throw error;
-            const actual = readExactRegularFile(path.join(bundleDir, name), Number.MAX_SAFE_INTEGER);
-            if (actual !== options.bundle.artifacts[name]) fail("PUBLICATION_COLLISION", "no-replace artifact collision", { name });
-          }
-        }
-        fsyncDirectory(bundleDir);
-        fsyncDirectory(bundlesRoot);
-        assertExactPublishedBundle(bundleDir, options.bundle.artifacts);
+        status = "identical";
       }
-      status = "created";
+      options.hooks?.atCrashPoint?.("after_bundle_rename");
+      fsyncDirectory(bundleDir);
+      fsyncDirectory(bundlesRoot);
+      assertExactPublishedBundle(bundleDir, options.bundle.artifacts);
     } finally {
-      fs.rmSync(stagingRoot, { recursive: true, force: true });
+      if (!renamed) fs.rmSync(stagingRoot, { recursive: true, force: true });
       fsyncDirectory(targetRoot);
     }
   }
 
+  // latest is the only authority pointer. It is changed only after a complete,
+  // fsynced, strictly validated content-addressed bundle exists.
+  assertExactPublishedBundle(bundleDir, options.bundle.artifacts);
   const latest = path.join(targetRoot, "latest");
   const latestValue = `bundles/${options.bundle.bundle_hash}`;
   const latestStat = lstatIfPresent(latest);
-  if (!latestStat) {
-    fs.symlinkSync(latestValue, latest, "dir");
-    fsyncDirectory(targetRoot);
-  } else {
+  let replaceLatest = latestStat === null;
+  if (latestStat) {
     if (!latestStat.isSymbolicLink()) fail("PUBLICATION_LATEST_UNSAFE", "latest exists as a non-symlink");
     const current = fs.readlinkSync(latest);
     if (!/^bundles\/[0-9a-f]{64}$/.test(current) || path.isAbsolute(current) || current.includes("..")) {
       fail("PUBLICATION_LATEST_UNSAFE", "latest is not a direct relative content-addressed symlink", { current });
     }
-    if (current !== latestValue || options.mode === "production") {
-      const temporary = path.join(targetRoot, `.latest-${process.pid}-${randomBytes(8).toString("hex")}`);
-      fs.symlinkSync(latestValue, temporary, "dir");
-      try { fs.renameSync(temporary, latest); } finally { fs.rmSync(temporary, { force: true }); }
-      fsyncDirectory(targetRoot);
+    replaceLatest = current !== latestValue || options.mode === "production";
+  }
+  if (replaceLatest) {
+    const temporary = path.join(targetRoot, `.latest-${process.pid}-${randomBytes(8).toString("hex")}`);
+    fs.symlinkSync(latestValue, temporary, "dir");
+    try {
+      options.hooks?.atCrashPoint?.("before_latest_rename");
+      fs.renameSync(temporary, latest);
+      options.hooks?.atCrashPoint?.("after_latest_rename");
+    } finally {
+      fs.rmSync(temporary, { force: true });
     }
+    fsyncDirectory(targetRoot);
   }
   assertExactLatest(latest, latestValue);
   assertExactPublishedBundle(bundleDir, options.bundle.artifacts);
@@ -842,14 +880,65 @@ function materializeBundle(options: {
   });
 }
 
-function readCanonicalL1Rows(abrainHome: string, eventIds: readonly string[]): readonly Readonly<Record<string, unknown>>[] {
+function cleanupAbandonedPublicationTemps(targetRoot: string): void {
+  for (const name of fs.readdirSync(targetRoot)) {
+    const staging = /^\.staging-[0-9a-f]{64}-[0-9]+-[0-9a-f]{16}$/.test(name);
+    const latest = /^\.latest-[0-9]+-[0-9a-f]{16}$/.test(name);
+    if (!staging && !latest) continue;
+    const target = path.join(targetRoot, name);
+    const stat = fs.lstatSync(target);
+    if (staging && !stat.isSymbolicLink() && stat.isDirectory()) fs.rmSync(target, { recursive: true, force: true });
+    else if (latest && stat.isSymbolicLink()) fs.unlinkSync(target);
+    else fail("PUBLICATION_FOREIGN_STATE", "abandoned publication temp has an unsafe type", { name });
+  }
+  fsyncDirectory(targetRoot);
+}
+
+function readWholeCanonicalL1Inventory(abrainHome: string) {
+  const eventsRoot = path.join(abrainHome, "l1", "events", "sha256");
+  assertExactDirectory(eventsRoot, "canonical L1 events root");
+  const rows: Array<{ event_id: string; relative_path: string; bytes: number; raw_sha256: string }> = [];
+  for (const first of fs.readdirSync(eventsRoot).sort(compareCodeUnits)) {
+    if (!/^[0-9a-f]{2}$/.test(first)) fail("L1_INVENTORY_LAYOUT", "canonical L1 first-level shard is invalid", { first });
+    const firstDir = path.join(eventsRoot, first);
+    assertExactDirectory(firstDir, "canonical L1 first-level shard");
+    for (const second of fs.readdirSync(firstDir).sort(compareCodeUnits)) {
+      if (!/^[0-9a-f]{2}$/.test(second)) fail("L1_INVENTORY_LAYOUT", "canonical L1 second-level shard is invalid", { first, second });
+      const secondDir = path.join(firstDir, second);
+      assertExactDirectory(secondDir, "canonical L1 second-level shard");
+      for (const name of fs.readdirSync(secondDir).sort(compareCodeUnits)) {
+        const match = /^([0-9a-f]{64})\.json$/.exec(name);
+        if (!match || match[1]!.slice(0, 2) !== first || match[1]!.slice(2, 4) !== second) {
+          fail("L1_INVENTORY_LAYOUT", "canonical L1 event path is not content-addressed", { first, second, name });
+        }
+        if (rows.length >= PROPOSITION_POLICY_STABLE_VIEW_MAX_WHOLE_L1_FILES) {
+          fail("L1_INVENTORY_LIMIT", "whole L1 inventory exceeds the publication infrastructure limit", {
+            limit: PROPOSITION_POLICY_STABLE_VIEW_MAX_WHOLE_L1_FILES,
+          });
+        }
+        const eventId = match[1]!;
+        const file = path.join(secondDir, name);
+        const raw = readExactRegularFile(file, 16 * 1024 * 1024);
+        rows.push({
+          event_id: eventId,
+          relative_path: path.relative(abrainHome, file).split(path.sep).join("/"),
+          bytes: Buffer.byteLength(raw),
+          raw_sha256: stableViewSha256Hex(raw),
+        });
+      }
+    }
+  }
+  return deepFreeze(rows);
+}
+
+function readCanonicalL1Rows(abrainHome: string, eventIds: readonly string[]) {
   return deepFreeze(eventIds.map((eventId) => {
     const file = expectedL1EventPath(abrainHome, eventId);
     const raw = readExactRegularFile(file, 16 * 1024 * 1024);
     let parsed: Record<string, unknown>;
-    try { parsed = JSON.parse(raw) as Record<string, unknown>; } catch { fail("L1_RAW_INVALID", "canonical L1 event is not JSON", { eventId }); }
+    try { parsed = JSON.parse(raw) as Record<string, unknown>; } catch { fail("L1_RAW_INVALID", "canonical projection input event is not JSON", { eventId }); }
     if (parsed.event_id !== eventId || canonicalL1EnvelopeJson(parsed) !== raw) {
-      fail("L1_RAW_NONCANONICAL", "canonical L1 event bytes are not exact JCS plus LF", { eventId });
+      fail("L1_RAW_NONCANONICAL", "canonical projection input event bytes are not exact JCS plus LF", { eventId });
     }
     return {
       event_id: eventId,
@@ -924,41 +1013,6 @@ function validateProductionPublicationResult(
     || stableViewCanonicalizeJcs(result.artifact_rows) !== stableViewCanonicalizeJcs(expectedArtifactRows)) {
     fail("PRODUCTION_BINDING_INVALID", "production result differs from the internally derived preview and mutation inventory binding");
   }
-}
-
-function verifyProductionAuthorizationCandidate(eventValue: unknown, nowMs: number, latestRoleUser: boolean): void {
-  const event = asRecordOptional(eventValue);
-  const message = asRecordOptional(event?.message);
-  const content = Array.isArray(message?.content) ? message.content : [];
-  const textPart = content.length === 1 ? asRecordOptional(content[0]) : undefined;
-  const exactTextPart = textPart
-    && stableViewCanonicalizeJcs(Object.keys(textPart).sort(compareCodeUnits)) === stableViewCanonicalizeJcs(["text", "type"]);
-  if (!latestRoleUser || event?.type !== "message" || message?.role !== "user" || !exactTextPart
-    || textPart?.type !== "text" || textPart.text !== PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORIZATION_TEXT) {
-    fail("NOT_AUTHORIZED", "latest role=user message is not the standalone exact short production authorization");
-  }
-  const timestampMs = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
-  const ageMs = nowMs - timestampMs;
-  if (!Number.isFinite(timestampMs) || !Number.isFinite(ageMs)
-    || ageMs < -AUTHORIZATION_FUTURE_TOLERANCE_MS
-    || ageMs > PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORIZATION_MAX_AGE_MS) {
-    fail("NOT_AUTHORIZED", "latest exact role=user production authorization is not fresh");
-  }
-}
-
-function verifyProductionAuthorization(transcriptPath: string, nowMs: number): void {
-  const sessionsRoot = assertExactDirectory(PRODUCTION_SESSION_ROOT, "production session root");
-  const resolvedTranscript = path.resolve(transcriptPath);
-  if (!pathInside(sessionsRoot, resolvedTranscript) || resolvedTranscript === sessionsRoot || !resolvedTranscript.endsWith(".jsonl")) {
-    fail("NOT_AUTHORIZED", "production authorization transcript must be a persisted JSONL below the fixed pi sessions root");
-  }
-  const raw = readExactRegularFile(resolvedTranscript, 16 * 1024 * 1024);
-  const events = raw.trimEnd().split("\n").filter(Boolean).map((line, index) => {
-    try { return JSON.parse(line) as Record<string, unknown>; } catch { fail("NOT_AUTHORIZED", "authorization transcript contains invalid JSON", { line: index + 1 }); }
-  });
-  const latestRoleUser = events.filter((event) => event.type === "message" && asRecordOptional(event.message)?.role === "user").at(-1);
-  if (!latestRoleUser) fail("NOT_AUTHORIZED", "production authorization transcript has no role=user message");
-  verifyProductionAuthorizationCandidate(latestRoleUser, nowMs, true);
 }
 
 function assertExactPublishedBundle(bundleDir: string, expected: Readonly<Record<ArtifactName, string>>): void {
@@ -1132,7 +1186,39 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-export const __TEST = Object.freeze({ materializeBundle, verifyProductionAuthorizationCandidate });
+async function publishSandboxProductionForTests(options: {
+  sourceAbrainHome: string;
+  targetAbrainHome: string;
+  repoRoot: string;
+  hooks?: PublisherTestHooks;
+}): Promise<PropositionPolicyStableViewPublicationResult> {
+  const targetAbrainHome = assertSandboxDirectory(options.targetAbrainHome);
+  const lockRoot = path.join(targetAbrainHome, ".state", "sediment");
+  assertExactDirectory(lockRoot, "sandbox production lock root");
+  const lock = acquireProductionPublicationLock(lockRoot);
+  try {
+    const bundle = await buildPropositionPolicyStableViewBundle({
+      sourceAbrainHome: options.sourceAbrainHome,
+      repoRoot: options.repoRoot,
+      ...(options.hooks ? { hooks: options.hooks } : {}),
+    });
+    return materializeBundle({
+      mode: "production",
+      targetAbrainHome,
+      bundle,
+      productionLockCapability: PRODUCTION_LOCK_CAPABILITY,
+      ...(options.hooks ? { hooks: options.hooks } : {}),
+    });
+  } finally {
+    lock.close();
+  }
+}
+
+export const __TEST = Object.freeze({
+  acquireProductionPublicationLock,
+  materializeBundle,
+  publishSandboxProductionForTests,
+});
 
 function fail(code: string, message: string, detail?: Record<string, unknown>): never {
   throw new PropositionPolicyStableViewPublisherError(code, message, detail);

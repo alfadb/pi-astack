@@ -1018,45 +1018,40 @@
 
     "ruleInjector": {
       "type": "object",
-      "description": "ADR 0023-R5/0028 read-only abrain rules catalog injection. Scans ~/.abrain/rules/{always,listed} plus active-project rules and appends compact catalog rows to the main-session system prompt; full rule bodies are read on demand from full_rule_path. This is a read path only: no rule write/promote/veto lifecycle UI.",
+      "description": "ADR0040 production rule injection. Every persisted main session reads only the content-addressed proposition policy stable-view latest; subagents and ephemeral sessions receive no rule injection. Legacy rule/compiled/D3 helpers are retained only as offline historical diagnostics and are unreachable from the production hook.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
 
-        "enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable session-start rules catalog scan + before_agent_start system-prompt injection. Sub-pi still disables via PI_ABRAIN_DISABLED=1."
-        },
         "maxCatalogSummaryChars": {
           "type": "number",
           "default": 220,
           "minimum": 80,
-          "description": "Maximum must_do_summary characters per injected catalog row. Full rule bodies remain on disk and are read via full_rule_path when needed."
+          "description": "Historical offline catalog diagnostic formatting limit; it does not affect production injection."
         },
         "maxCatalogTriggerChars": {
           "type": "number",
           "default": 160,
           "minimum": 40,
-          "description": "Maximum applies_when / trigger_phrases characters per injected catalog row. This is formatting only, not a write or recall gate."
+          "description": "Historical offline catalog diagnostic formatting limit; it is not a production selection or authority gate."
         },
         "dualReadAudit": {
           "type": "object",
           "default": { "enabled": false },
-          "description": "ADR 0039 P3a default-off session_start dual-read audit. When enabled, legacy rules remain the only injected runtime truth; the injector also reads constraint-shadow latest artifacts and writes delta rows under ~/.abrain/.state/sediment/constraint-shadow/session-start-dualread/.",
+          "description": "Historical offline dual-read diagnostic configuration. The production session hook does not execute this path.",
           "additionalProperties": false,
           "properties": {
             "_comment": { "type": "string" },
             "enabled": {
               "type": "boolean",
               "default": false,
-              "description": "Explicit default-off runtime guard. false means no shadow artifact read and no dual-read audit write."
+              "description": "Default-off switch for explicit offline diagnostic runs. It has no production hook call edge and cannot affect rule authority."
             },
             "maxReadBytes": {
               "type": "number",
               "default": 1000000,
               "minimum": 1000,
-              "description": "Maximum bytes read per shadow artifact JSON file during session_start audit. Oversized artifacts record shadow_invalid and do not affect legacy injection."
+              "description": "Maximum bytes read per shadow artifact JSON file during an explicit offline diagnostic run."
             },
             "staleAfterMs": {
               "type": "number",
@@ -1066,189 +1061,20 @@
             }
           }
         },
-        "compiledViewInjection": {
-          "type": "object",
-          "default": { "enabled": false },
-          "description": "ADR 0039 compiled Constraint view injection. When enabled, the rule injector reads constraint-shadow latest compiled-view artifacts and can fall back to legacy rule injection.",
-          "additionalProperties": false,
-          "properties": {
-            "_comment": { "type": "string" },
-            "enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "Explicit runtime guard. false keeps legacy rule injection as the only injected truth."
-            },
-            "fallbackToLegacyOnError": {
-              "type": "boolean",
-              "default": true,
-              "description": "When true, compiled-view read errors fall back to legacy rule injection. Set false only after reconcile and coverage checks are stable."
-            },
-            "requireFresh": {
-              "type": "boolean",
-              "default": true,
-              "description": "When true, stale compiled views are rejected before injection."
-            },
-            "staleAfterMs": {
-              "type": "number",
-              "default": 86400000,
-              "minimum": 0,
-              "description": "Maximum compiled-view artifact age accepted by runtime injection."
-            },
-            "maxReadBytes": {
-              "type": "number",
-              "default": 1000000,
-              "minimum": 1000,
-              "description": "Maximum bytes read per compiled-view artifact."
-            },
-            "minCoverageRatio": {
-              "type": "number",
-              "default": 1,
-              "minimum": 0,
-              "maximum": 1,
-              "description": "Minimum event coverage ratio required before compiled-view injection is accepted."
-            },
-            "liveCanary": {
-              "type": "object",
-              "default": { "enabled": false, "sessionIds": [] },
-              "description": "Default-off session-scoped live canary for ADR0039 compiled-view injection. When enabled, only exact matches in sessionIds for persisted sessions with a session file opt into true fail-closed compiled injection: the effective runtime compiledViewInjection is enabled and fallbackToLegacyOnError is false for that session only. Ephemeral sessions and nonmatching sessions keep global behavior.",
-              "additionalProperties": false,
-              "properties": {
-                "_comment": { "type": "string" },
-                "enabled": {
-                  "type": "boolean",
-                  "default": false,
-                  "description": "Explicit default-off guard. false means no session canary override and no session-live-canary audit writes."
-                },
-                "sessionIds": {
-                  "type": "array",
-                  "default": [],
-                  "items": { "type": "string" },
-                  "description": "Exact persisted pi session ids allowed to opt into the live canary. A session id is ignored unless sessionManager.getSessionFile() returns a path, so ephemeral sessions cannot opt in."
-                }
-              }
-            }
-          }
-        },
         "propositionPolicyStableViewInjection": {
           "type": "object",
-          "default": { "enabled": false, "selector": { "session_ids": [] }, "maxSelectionAgeMs": 300000, "maxReadBytes": 65536 },
-          "description": "ADR0040 restricted single-consumer MVP stable-view reader. Success replaces the existing rule injection with one ADR0040 fence. Disabled, unselected, expired, hash-mismatched, or invalid reads return to the unchanged ADR0039 compiled/legacy decision path. The short selection-age window is a controlled MVP canary bound, not complete L1 lifecycle freshness.",
+          "default": { "maxReadBytes": 262144 },
+          "description": "ADR0040 production stable-view reader infrastructure limits. Every persisted main session uses the content-addressed latest production bundle as its sole rule source; staleness is diagnostic only and invalid/missing latest produces loud zero injection.",
           "additionalProperties": false,
-          "allOf": [
-            {
-              "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
-              "then": { "required": ["expectedBundleHash"] }
-            }
-          ],
           "properties": {
             "_comment": { "type": "string" },
-            "enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "One-command rollback guard. false makes this reader unreachable and preserves the existing rule injection path."
-            },
-            "selector": {
-              "type": "object",
-              "default": { "session_ids": [] },
-              "description": "Exact persisted main-session selector. No wildcard, project, path, or ephemeral-session selector is supported.",
-              "additionalProperties": false,
-              "properties": {
-                "session_ids": {
-                  "type": "array",
-                  "default": [],
-                  "uniqueItems": true,
-                  "items": { "type": "string", "minLength": 1 },
-                  "description": "Explicit persisted pi session ids eligible for the ADR0040 MVP reader."
-                }
-              },
-              "required": ["session_ids"]
-            },
-            "expectedBundleHash": {
-              "type": "string",
-              "pattern": "^[0-9a-f]{64}$",
-              "description": "Exact content-addressed bundle selected by this runtime authorization. Enabling the reader without this artifact binding is invalid and also fails closed at runtime."
-            },
-            "maxSelectionAgeMs": {
-              "type": "integer",
-              "default": 300000,
-              "minimum": 1000,
-              "maximum": 3600000,
-              "description": "Maximum age of the latest symlink publication, measured from the newer of its lstat mtime/ctime. This bounds the MVP canary window only; it does not replace L1 lifecycle freshness."
-            },
             "maxReadBytes": {
               "type": "number",
-              "default": 65536,
+              "default": 262144,
               "minimum": 1024,
               "maximum": 262144,
-              "description": "Maximum total bytes across the exact five stable-view artifacts. Runtime resolution also clamps to this upper bound."
+              "description": "Infrastructure safety bound across the exact five stable-view artifacts; this is not a selection or authority gate."
             }
-          }
-        },
-        "propositionLifecycleFreshnessD3V2SessionStartInjection": {
-          "type": "object",
-          "default": { "enabled": false, "selector": { "session_ids": [] }, "maxReadBytes": 65536 },
-          "description": "ADR0040 D3-v2 session_start single-consumer adapter. Legacy R3.9 enabled mode requires activationObjectPath+activationObjectHash. R4 enabled mode instead requires r4Binding and admits injection only after the exact settings+intent+AUTHORIZED activation+commit receipt runtime gate closes; partial or mismatched selected state is zero-injection with no ADR0039 fallback.",
-          "additionalProperties": false,
-          "allOf": [
-            {
-              "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
-              "then": {
-                "required": ["expectedSelectionHash", "expectedHeadHash", "expectedProofHash", "expectedStableBundleHash", "adapterManifestHash"],
-                "oneOf": [
-                  { "required": ["activationObjectPath", "activationObjectHash"], "not": { "required": ["r4Binding"] } },
-                  { "required": ["r4Binding"], "not": { "anyOf": [{ "required": ["activationObjectPath"] }, { "required": ["activationObjectHash"] }] } }
-                ]
-              }
-            }
-          ],
-          "properties": {
-            "_comment": { "type": "string" },
-            "enabled": { "type": "boolean", "default": false, "description": "One-command rollback guard. false keeps D3-v2 session_start unreachable. enabled=true requires activationObjectPath+activationObjectHash." },
-            "selector": {
-              "type": "object",
-              "default": { "session_ids": [] },
-              "description": "Exact persisted main-session selector. No wildcard, project, path, or ephemeral-session selector is supported. Each session_id must be a single safe filename component (R3.8).",
-              "additionalProperties": false,
-              "properties": {
-                "session_ids": {
-                  "type": "array",
-                  "default": [],
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128,
-                    "allOf": [
-                      { "pattern": "^[A-Za-z0-9._-]+$" },
-                      { "not": { "enum": [".", ".."] } }
-                    ],
-                    "description": "Single safe filename component session id (ASCII [A-Za-z0-9._-], length 1..128, not '.'/'..')."
-                  },
-                  "description": "Explicit persisted pi session ids eligible for the D3-v2 session_start adapter. Each item is a single safe path component (maxLength 128); runtime fail-closes any unsafe entry to disabled/empty selector."
-                }
-              },
-              "required": ["session_ids"]
-            },
-            "expectedSelectionHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact published D3 selection identity authorized for this consumer." },
-            "expectedHeadHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact published D3 committed head identity." },
-            "expectedProofHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact published D3 proof identity." },
-            "expectedStableBundleHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact selected stable bundle identity." },
-            "expectedIntentHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Optional exact published D3 intent identity. When present, runtime compares intent_hash." },
-            "adapterManifestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact JCS self-hash (manifest_hash) of the D3-v2 session_start adapter static dependency closure. Live hook must rebuild+validate the current manifest and pass this hash to the reader; settings self-compare alone is not sufficient." },
-            "activationObjectPath": { "type": "string", "minLength": 1, "description": "Absolute path to the bound activation object under the controlled activation root. Required when enabled=true." },
-            "activationObjectHash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Legacy R3.9 activation self-hash pin. Forbidden in R4 receipt-gated mode." },
-            "r4Binding": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["schema_version", "controlRoot", "operatorManifestHash", "settingsPath"],
-              "properties": {
-                "schema_version": { "const": "adr0040-d3-v2-session-start-r4-settings-binding/v1" },
-                "controlRoot": { "type": "string", "minLength": 1, "description": "Fixed R4 intent/activation/receipt control root. Runtime never creates it." },
-                "operatorManifestHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-                "settingsPath": { "type": "string", "minLength": 1, "description": "Exact settings file whose raw postimage is receipt-bound." }
-              }
-            },
-            "maxReadBytes": { "type": "number", "default": 65536, "minimum": 1024, "maximum": 262144, "description": "Maximum injectable payload bytes after project-scope filtering." }
           }
         }
       }

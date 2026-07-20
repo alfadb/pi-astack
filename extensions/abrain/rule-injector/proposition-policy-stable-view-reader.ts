@@ -17,11 +17,9 @@ import {
 export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_ROOT_RELATIVE = ".state/sediment/proposition-policy-stable-view/v1" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MANIFEST_SCHEMA = "proposition-policy-stable-view-publication-manifest/v2" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MAX_READ_BYTES_LIMIT = PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES;
-export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MIN_SELECTION_AGE_MS = 1_000 as const;
-export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MAX_SELECTION_AGE_MS = 60 * 60 * 1_000;
+export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_STALE_DIAGNOSTIC_AFTER_MS = 24 * 60 * 60 * 1_000;
 
-const DEFAULT_MAX_READ_BYTES = 65_536;
-const DEFAULT_MAX_SELECTION_AGE_MS = 5 * 60 * 1_000;
+const DEFAULT_MAX_READ_BYTES = PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES;
 const MANIFEST_HASH_SCOPE = "sha256 over RFC8785-JCS UTF-8 bytes of this manifest object with bundle_hash and manifest_hash omitted";
 const POLICY_SET_DECISION = "validated_active_original_policy_candidates";
 const POLICY_SET_DECISION_SCHEMA = "proposition-policy-stable-view-policy-set-decision/v1";
@@ -29,6 +27,7 @@ const EMPTY_DECISION = "empty-source/no-decision/v1";
 const ACCEPTED_PROFILE_HASH = "aa229d1703e2856ec92a19ff171fe49a145459a915500f362a20b4b2625d8ecd";
 const PROFILE_RELATIVE = "schemas/proposition-policy-stable-view-compile-profile-v1.json";
 const PUBLISHER_RELATIVE = "extensions/_shared/proposition-policy-stable-view-publisher.ts";
+const PRODUCTION_AUTHORITY = "production_policy_stable_view_sole_rule_source_for_all_persisted_main_sessions";
 const ARTIFACT_NAMES = Object.freeze(["diagnostics.json", "manifest.json", "parity.json", "view.json", "view.md"] as const);
 const NON_MANIFEST_NAMES = Object.freeze(["diagnostics.json", "parity.json", "view.json", "view.md"] as const);
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -39,19 +38,20 @@ export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MAX_PAYLOAD_BYTES = PROPOSIT
 type ArtifactName = typeof ARTIFACT_NAMES[number];
 
 export interface PropositionPolicyStableViewInjectionSettings {
-  enabled: boolean;
-  selector: {
-    session_ids: string[];
-  };
-  expectedBundleHash: string | null;
-  maxSelectionAgeMs: number;
   maxReadBytes: number;
 }
 
 export interface PropositionPolicyStableViewSelection {
   selected: boolean;
-  reason: "disabled" | "ephemeral_session" | "unselected_session" | "selected";
+  reason: "ephemeral_session" | "persisted_main_session";
   sessionId?: string;
+}
+
+interface SelectionDiagnostic {
+  bundleHash?: string;
+  selectionPublishedAtMs?: number;
+  selectionAgeMs?: number;
+  selectionStale?: boolean;
 }
 
 export type PropositionPolicyStableViewRuntimeReadResult =
@@ -64,16 +64,17 @@ export type PropositionPolicyStableViewRuntimeReadResult =
     sourcePath: string;
     selectionPublishedAtMs: number;
     selectionAgeMs: number;
+    selectionStale: boolean;
     viewMd: string;
     viewBytes: number;
     itemCount: number;
   }
-  | {
+  | ({
     ok: false;
     reason: string;
     sessionId?: string;
     error?: string;
-  };
+  } & SelectionDiagnostic);
 
 export class PropositionPolicyStableViewReaderError extends Error {
   readonly code: string;
@@ -87,62 +88,39 @@ export class PropositionPolicyStableViewReaderError extends Error {
 
 export function resolvePropositionPolicyStableViewInjectionSettings(value: unknown): PropositionPolicyStableViewInjectionSettings {
   const cfg = recordOptional(value) ?? {};
-  const selector = recordOptional(cfg.selector) ?? {};
-  const sessionIds = Array.isArray(selector.session_ids)
-    ? [...new Set(selector.session_ids
-      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-      .map((item) => item.trim()))]
-    : [];
   const requestedMax = typeof cfg.maxReadBytes === "number" && Number.isFinite(cfg.maxReadBytes)
     ? Math.floor(cfg.maxReadBytes)
     : DEFAULT_MAX_READ_BYTES;
-  const requestedMaxAge = typeof cfg.maxSelectionAgeMs === "number" && Number.isFinite(cfg.maxSelectionAgeMs)
-    ? Math.floor(cfg.maxSelectionAgeMs)
-    : DEFAULT_MAX_SELECTION_AGE_MS;
   return {
-    enabled: cfg.enabled === true,
-    selector: { session_ids: sessionIds },
-    expectedBundleHash: typeof cfg.expectedBundleHash === "string" && SHA256_PATTERN.test(cfg.expectedBundleHash)
-      ? cfg.expectedBundleHash
-      : null,
-    maxSelectionAgeMs: Math.max(
-      PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MIN_SELECTION_AGE_MS,
-      Math.min(PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MAX_SELECTION_AGE_MS, requestedMaxAge),
-    ),
     maxReadBytes: Math.max(1_024, Math.min(PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MAX_READ_BYTES_LIMIT, requestedMax)),
   };
 }
 
 export function selectPropositionPolicyStableViewSession(args: {
-  settings: PropositionPolicyStableViewInjectionSettings;
+  settings?: PropositionPolicyStableViewInjectionSettings;
   sessionManager?: unknown;
 }): PropositionPolicyStableViewSelection {
-  if (!args.settings.enabled) return { selected: false, reason: "disabled" };
-  const manager = args.sessionManager as { getSessionId?(): unknown; getSessionFile?(): unknown } | undefined;
-  if (!manager || typeof manager.getSessionId !== "function" || typeof manager.getSessionFile !== "function") {
-    return { selected: false, reason: "ephemeral_session" };
-  }
-  let sessionId: string;
-  let sessionFile: string;
+  const manager = args.sessionManager as {
+    isPersisted?(): unknown;
+    getSessionId?(): unknown;
+    getSessionFile?(): unknown;
+  } | undefined;
+  if (!manager || typeof manager.getSessionId !== "function") return { selected: false, reason: "ephemeral_session" };
   try {
     const rawId = manager.getSessionId();
-    const rawFile = manager.getSessionFile();
-    if (typeof rawId !== "string" || !rawId.trim() || typeof rawFile !== "string" || !rawFile.trim()) {
-      return { selected: false, reason: "ephemeral_session" };
-    }
-    sessionId = rawId.trim();
-    sessionFile = path.resolve(rawFile);
-    const stat = fs.lstatSync(sessionFile);
-    if (stat.isSymbolicLink() || !stat.isFile() || fs.realpathSync(sessionFile) !== sessionFile) {
-      return { selected: false, reason: "ephemeral_session", sessionId };
-    }
+    if (typeof rawId !== "string" || rawId.length === 0) return { selected: false, reason: "ephemeral_session" };
+    const persisted = typeof manager.isPersisted === "function"
+      ? manager.isPersisted() === true
+      : (() => {
+        if (typeof manager.getSessionFile !== "function") return false;
+        const file = manager.getSessionFile();
+        return typeof file === "string" && file.length > 0;
+      })();
+    if (!persisted) return { selected: false, reason: "ephemeral_session", sessionId: rawId };
+    return { selected: true, reason: "persisted_main_session", sessionId: rawId };
   } catch {
     return { selected: false, reason: "ephemeral_session" };
   }
-  if (!args.settings.selector.session_ids.includes(sessionId)) {
-    return { selected: false, reason: "unselected_session", sessionId };
-  }
-  return { selected: true, reason: "selected", sessionId };
 }
 
 export function readPropositionPolicyStableViewForRuntime(args: {
@@ -151,10 +129,14 @@ export function readPropositionPolicyStableViewForRuntime(args: {
   sessionManager?: unknown;
   activeProjectId?: string;
   nowMs?: number;
+  /** Test-only observation point after the immutable latest target is captured. */
+  hooks?: { afterLatestCapture?: (latestValue: string) => void };
 }): PropositionPolicyStableViewRuntimeReadResult {
   const selection = selectPropositionPolicyStableViewSession({ settings: args.settings, sessionManager: args.sessionManager });
-  if (!selection.selected || !selection.sessionId) return { ok: false, reason: selection.reason, ...(selection.sessionId ? { sessionId: selection.sessionId } : {}) };
-  if (!args.settings.expectedBundleHash) return { ok: false, reason: "expected_bundle_hash_missing", sessionId: selection.sessionId };
+  if (!selection.selected || !selection.sessionId) {
+    return { ok: false, reason: selection.reason, ...(selection.sessionId ? { sessionId: selection.sessionId } : {}) };
+  }
+  let diagnostic: SelectionDiagnostic = {};
   try {
     const abrainHome = exactDirectory(args.abrainHome.replace(/^~(?=$|\/)/, os.homedir()), "abrain home");
     const root = path.join(abrainHome, ...PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_ROOT_RELATIVE.split("/"));
@@ -163,23 +145,34 @@ export function readPropositionPolicyStableViewForRuntime(args: {
     if (canonicalize(rootNames) !== canonicalize(["bundles", "latest"])) fail("foreign_root", "stable-view root is not exact bundles plus latest");
     const bundlesRoot = path.join(root, "bundles");
     exactDirectory(bundlesRoot, "stable-view bundles root");
+
+    // Capture latest exactly once. Every subsequent read is anchored to this
+    // immutable content-addressed directory even if latest advances concurrently.
     const latest = path.join(root, "latest");
     assertAncestorsNoSymlink(latest);
-    const latestStat = fs.lstatSync(latest);
+    let latestStat: fs.Stats;
+    try { latestStat = fs.lstatSync(latest); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") fail("latest_missing", "stable-view latest is missing");
+      throw error;
+    }
     if (!latestStat.isSymbolicLink()) fail("latest_not_symlink", "stable-view latest is not a symlink");
-    // This bounds canary exposure; it is not a substitute for L1 lifecycle freshness.
-    const selectionPublishedAtMs = Math.max(latestStat.mtimeMs, latestStat.ctimeMs);
-    const selectionAgeMs = Math.max(0, (args.nowMs ?? Date.now()) - selectionPublishedAtMs);
-    if (!Number.isFinite(selectionPublishedAtMs) || !Number.isFinite(selectionAgeMs)) fail("selection_time_invalid", "latest symlink publication time is invalid");
-    if (selectionAgeMs > args.settings.maxSelectionAgeMs) fail("selection_expired", "latest symlink publication is outside the bounded canary window");
     const latestValue = fs.readlinkSync(latest);
     const match = /^bundles\/([0-9a-f]{64})$/.exec(latestValue);
     if (!match || path.isAbsolute(latestValue) || latestValue.includes("..")) fail("latest_invalid", "latest is not a direct relative content-addressed reference");
+    args.hooks?.afterLatestCapture?.(latestValue);
     const bundleHash = match[1]!;
-    if (bundleHash !== args.settings.expectedBundleHash) fail("unexpected_bundle_hash", "latest target is not the exact runtime-configured bundle");
+    const selectionPublishedAtMs = Math.max(latestStat.mtimeMs, latestStat.ctimeMs);
+    const selectionAgeMs = Math.max(0, (args.nowMs ?? Date.now()) - selectionPublishedAtMs);
+    if (!Number.isFinite(selectionPublishedAtMs) || !Number.isFinite(selectionAgeMs)) fail("selection_time_invalid", "latest publication time is invalid");
+    diagnostic = {
+      bundleHash,
+      selectionPublishedAtMs,
+      selectionAgeMs,
+      selectionStale: selectionAgeMs > PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_STALE_DIAGNOSTIC_AFTER_MS,
+    };
+
     const bundleDir = path.join(bundlesRoot, bundleHash);
     exactDirectory(bundleDir, "stable-view bundle");
-    if (fs.realpathSync(latest) !== bundleDir) fail("latest_target_invalid", "latest does not resolve to its named direct bundle");
     const names = fs.readdirSync(bundleDir).sort(compareCodeUnits);
     if (canonicalize(names) !== canonicalize([...ARTIFACT_NAMES].sort(compareCodeUnits))) fail("partial_or_foreign", "stable-view bundle is not exact all-five");
 
@@ -190,11 +183,9 @@ export function readPropositionPolicyStableViewForRuntime(args: {
       const stat = exactRegularFile(file, "stable-view artifact");
       totalBytes += stat.size;
       if (stat.size > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_UTF8_BYTES
-        || totalBytes > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES) {
-        fail("oversize", "stable-view artifact or all-five set exceeds the absolute hard limit");
-      }
-      if (stat.size > args.settings.maxReadBytes || totalBytes > args.settings.maxReadBytes) {
-        fail("oversize", "stable-view artifact set exceeds configured maxReadBytes");
+        || totalBytes > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES
+        || stat.size > args.settings.maxReadBytes || totalBytes > args.settings.maxReadBytes) {
+        fail("oversize", "stable-view artifact set exceeds its hard read envelope");
       }
       artifacts[name] = fs.readFileSync(file, "utf8");
     }
@@ -214,6 +205,7 @@ export function readPropositionPolicyStableViewForRuntime(args: {
       sourcePath: path.join(bundleDir, "view.md"),
       selectionPublishedAtMs,
       selectionAgeMs,
+      selectionStale: diagnostic.selectionStale === true,
       viewMd: rendered.viewMd,
       viewBytes: rendered.viewBytes,
       itemCount: rendered.itemCount,
@@ -223,7 +215,8 @@ export function readPropositionPolicyStableViewForRuntime(args: {
       ok: false,
       reason: error instanceof PropositionPolicyStableViewReaderError ? error.code : "read_failed",
       sessionId: selection.sessionId,
-      error: error instanceof Error ? error.message : String(error),
+      ...diagnostic,
+      error: controlledError(error),
     };
   }
 }
@@ -240,7 +233,7 @@ function validateManifest(input: {
     || manifest.hash_algorithm !== "sha256"
     || manifest.bundle_hash_scope !== MANIFEST_HASH_SCOPE
     || manifest.manifest_hash_scope !== MANIFEST_HASH_SCOPE
-    || manifest.authority !== "bounded_multi_item_persisted_session_canary_default_off"
+    || manifest.authority !== PRODUCTION_AUTHORITY
     || manifest.bundle_hash !== input.bundleHash
     || manifest.manifest_hash !== input.bundleHash) fail("manifest_identity", "manifest identity, directory hash, or authority differs");
   const manifestBase = clone(manifest);
@@ -789,6 +782,13 @@ function assertSha256(value: unknown, at: string): asserts value is string {
 
 function clone<T>(value: T): T {
   return JSON.parse(canonicalize(value)) as T;
+}
+
+function controlledError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error))
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\/home\/[^/\s]+/g, "~")
+    .slice(0, 256);
 }
 
 function compareCodeUnits(left: string, right: string): number {

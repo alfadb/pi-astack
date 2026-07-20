@@ -210,7 +210,10 @@ try {
   assert(diagnostics.tail.some((row) => row.operation === "startup" && row.status === "local_ready"), "full Path A local_ready proof missing");
   await printWait;
   assert(printReady, "print post-barrier continuation did not run");
-  await new Promise((resolve) => setImmediate(resolve));
+  const stagingDeadline = Date.now() + 1_000;
+  while (!fs.existsSync(stagingPath) && Date.now() < stagingDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   assert(fs.existsSync(stagingPath), "sediment post-barrier initialization did not run");
 
   const writeResult = await writerPromise;

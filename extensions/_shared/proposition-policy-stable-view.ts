@@ -50,7 +50,7 @@ const OUTPUT_DIAGNOSTIC_SEVERITY = "info" as const;
 const OUTPUT_EXCLUSION_FILTER_STAGE = "stable_view_disposition" as const;
 const OUTPUT_EXCLUSION_REASON_CODE = "disposition_excluded" as const;
 const OUTPUT_RENDERER = "ordered-statements-double-newline-terminal-newline-v1" as const;
-const OUTPUT_AUTHORITY = "non_authoritative_repo_sandbox_only_no_runtime_consumer" as const;
+const OUTPUT_AUTHORITY = "production_policy_projection_for_sole_persisted_main_session_rule_source" as const;
 const FIXTURE_DECISION_IDENTITY_SCHEMA = "proposition-policy-stable-view-fixture-decision-identity/v1" as const;
 const REJECTED_OUTCOME_CODES = new Set([
   "array_expected", "artifact_bytes_invalid", "artifact_jcs_invalid", "artifact_json_invalid", "artifact_semantic_mismatch",

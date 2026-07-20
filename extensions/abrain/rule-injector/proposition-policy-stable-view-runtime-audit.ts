@@ -2,10 +2,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { canonicalizeJcs, sha256Hex } from "../../_shared/jcs";
+import { getCurrentAnchor, spreadAnchor } from "../../_shared/causal-anchor";
 import type { PropositionPolicyStableViewRuntimeReadResult } from "./proposition-policy-stable-view-reader";
 
 export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_AUDIT_SCHEMA = "adr0040-policy-stable-view-runtime-audit" as const;
-export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_AUDIT_VERSION = 1 as const;
+export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_AUDIT_VERSION = 2 as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_AUDIT_MAX_BYTES = 8 * 1024 * 1024;
 export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_AUDIT_FILE = path.join(
   os.homedir(),
@@ -19,6 +20,7 @@ const END_FENCE_MARKER = "<!-- END_ABRAIN_RULES -->";
 const POLICY_STABLE_MARKER = "source=proposition-policy-stable-view";
 const COMPILED_MARKER = "source=constraint-shadow-compiled-view";
 const LEGACY_CATALOG_MARKER = "## Rules Catalog\n";
+const D3_MARKER = "source=proposition-lifecycle-freshness-d3-v2";
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = fs.constants.O_DIRECTORY ?? 0;
 const AUDIT_KEYS = new Set([
@@ -27,6 +29,8 @@ const AUDIT_KEYS = new Set([
   "timestamp",
   "pid",
   "session_id",
+  "turn_id",
+  "causal_anchor",
   "latest_user_message_id",
   "latest_user_text_sha256",
   "latest_user_text_bytes",
@@ -37,6 +41,9 @@ const AUDIT_KEYS = new Set([
   "view_md_hash",
   "view_bytes",
   "item_count",
+  "selection_published_at_ms",
+  "selection_age_ms",
+  "selection_stale",
   "rendered_prompt_sha256",
   "rendered_prompt_bytes",
   "begin_fence_count",
@@ -44,9 +51,8 @@ const AUDIT_KEYS = new Set([
   "contains_policy_stable_marker",
   "contains_compiled_marker",
   "contains_legacy_catalog_marker",
+  "contains_d3_marker",
 ]);
-
-type StableViewSuccess = Extract<PropositionPolicyStableViewRuntimeReadResult, { ok: true }>;
 
 export interface PropositionPolicyStableViewRuntimeAuditRow {
   schema: typeof PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_AUDIT_SCHEMA;
@@ -54,16 +60,21 @@ export interface PropositionPolicyStableViewRuntimeAuditRow {
   timestamp: string;
   pid: number;
   session_id: string;
+  turn_id: number | null;
+  causal_anchor: Readonly<Record<string, unknown>> | null;
   latest_user_message_id?: string;
   latest_user_text_sha256: string;
   latest_user_text_bytes: number;
-  decision: "policy_stable_view_injected" | "normal_path_fallback";
+  decision: "policy_stable_view_injected" | "policy_stable_view_rejected";
   reason: string;
   bundle_hash: string | null;
   manifest_hash: string | null;
   view_md_hash: string | null;
   view_bytes: number | null;
   item_count: number | null;
+  selection_published_at_ms: number | null;
+  selection_age_ms: number | null;
+  selection_stale: boolean | null;
   rendered_prompt_sha256: string;
   rendered_prompt_bytes: number;
   begin_fence_count: number;
@@ -71,6 +82,7 @@ export interface PropositionPolicyStableViewRuntimeAuditRow {
   contains_policy_stable_marker: boolean;
   contains_compiled_marker: boolean;
   contains_legacy_catalog_marker: boolean;
+  contains_d3_marker: boolean;
 }
 
 export type PropositionPolicyStableViewRuntimeAuditAppendResult =
@@ -84,26 +96,33 @@ export function buildPropositionPolicyStableViewRuntimeAuditRow(args: {
   decision: PropositionPolicyStableViewRuntimeAuditRow["decision"];
   reason: string;
   renderedPrompt: string;
-  stableView?: StableViewSuccess;
+  readResult: PropositionPolicyStableViewRuntimeReadResult;
   nowMs?: number;
 }): PropositionPolicyStableViewRuntimeAuditRow {
-  const stable = args.stableView;
+  const anchor = getCurrentAnchor();
+  const stable = args.readResult.ok ? args.readResult : undefined;
+  const diagnostic = args.readResult;
   return {
     schema: PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_AUDIT_SCHEMA,
     version: PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_AUDIT_VERSION,
     timestamp: new Date(args.nowMs ?? Date.now()).toISOString(),
     pid: process.pid,
     session_id: args.sessionId,
+    turn_id: anchor?.session_id === args.sessionId ? anchor.turn_id : null,
+    causal_anchor: anchor ? spreadAnchor(anchor) : null,
     ...(args.latestUserMessageId ? { latest_user_message_id: args.latestUserMessageId } : {}),
     latest_user_text_sha256: sha256Hex(args.latestUserText),
     latest_user_text_bytes: Buffer.byteLength(args.latestUserText, "utf8"),
     decision: args.decision,
     reason: args.reason,
-    bundle_hash: stable?.bundleHash ?? null,
+    bundle_hash: diagnostic.bundleHash ?? null,
     manifest_hash: stable?.manifestHash ?? null,
     view_md_hash: stable ? sha256Hex(stable.viewMd) : null,
     view_bytes: stable?.viewBytes ?? null,
     item_count: stable?.itemCount ?? null,
+    selection_published_at_ms: diagnostic.selectionPublishedAtMs ?? null,
+    selection_age_ms: diagnostic.selectionAgeMs ?? null,
+    selection_stale: diagnostic.selectionStale ?? null,
     rendered_prompt_sha256: sha256Hex(args.renderedPrompt),
     rendered_prompt_bytes: Buffer.byteLength(args.renderedPrompt, "utf8"),
     begin_fence_count: countLiteral(args.renderedPrompt, BEGIN_FENCE_MARKER),
@@ -111,6 +130,7 @@ export function buildPropositionPolicyStableViewRuntimeAuditRow(args: {
     contains_policy_stable_marker: args.renderedPrompt.includes(POLICY_STABLE_MARKER),
     contains_compiled_marker: args.renderedPrompt.includes(COMPILED_MARKER),
     contains_legacy_catalog_marker: args.renderedPrompt.includes(LEGACY_CATALOG_MARKER),
+    contains_d3_marker: args.renderedPrompt.includes(D3_MARKER),
   };
 }
 
