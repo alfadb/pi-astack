@@ -657,32 +657,15 @@ export function readOptionalRegularFileNoFollowSync(file: string): string | unde
 export const ABRAIN_STATE_GITIGNORE_LINE = ".state/\n";
 export const ABRAIN_STATE_GITIGNORE_REGEX: RegExp = /(^|\n)\.state\/?(\n|$)/;
 
-// ADR 0039: the knowledge projection manifest is a per-device watermark
-// (latestEventId + updatedAtUtc), rewritten on every knowledge write and read
-// only by LOCAL diagnostics / L3 rebuild (adr0039-l3.ts). It has NO
-// cross-device meaning. When git-tracked it conflicts on EVERY concurrent
-// multi-device knowledge write (both devices rewrite the same lines),
-// stalling auto-sync's 3-way merge. Ignoring it means a divergent merge only
-// ever touches disjoint content-addressed L1 events + per-slug L2 entry files
-// (which merge cleanly unless the SAME slug was edited on both devices).
-export const ABRAIN_KNOWLEDGE_MANIFEST_GITIGNORE_LINE = "l2/views/knowledge/latest/manifest.json\n";
-export const ABRAIN_KNOWLEDGE_MANIFEST_GITIGNORE_REGEX: RegExp = /(^|\n)l2\/views\/knowledge\/latest\/manifest\.json(\n|$)/;
-
-// NOTE: l2/views/constraint/ is intentionally NOT ignored here. A fresh T0
-// panel recommended untracking it (same conflict class as the manifest), but
-// that reverses the deliberate 2026-06-20 4/4 decision to ship the compiled
-// constraint view as a git-tracked SHADOW toward a future gated read-flip
-// (docs/notes/2026-06-20-adr0039-constraint-l2-*). The concurrent-compile
-// conflict vector is real but lower-frequency and shadow-only (runtime reads
-// .state); resolving the tension is deferred to a context-complete decision.
+// Canonical L2, including the knowledge manifest, remains tracked. Device
+// convergence rebuilds every registered L2 path from the complete union L1;
+// only runtime state is excluded from canonical Git history.
 const ABRAIN_REQUIRED_GITIGNORES: ReadonlyArray<{ regex: RegExp; line: string }> = [
   { regex: ABRAIN_STATE_GITIGNORE_REGEX, line: ABRAIN_STATE_GITIGNORE_LINE },
-  { regex: ABRAIN_KNOWLEDGE_MANIFEST_GITIGNORE_REGEX, line: ABRAIN_KNOWLEDGE_MANIFEST_GITIGNORE_LINE },
 ];
 
-/** Returns the gitignore content with every required abrain ignore ensured
- *  (`.state/` + the per-device knowledge manifest), or null if all are
- *  already present. Pure: no I/O. */
+/** Returns the gitignore content with the required `.state/` ignore ensured,
+ *  or null when it is already present. Pure: no I/O. */
 export function computeAbrainStateGitignoreNext(raw: string): string | null {
   let next = raw;
   let changed = false;

@@ -565,7 +565,32 @@ export interface ConstraintShadowRunOptions {
   // as an immutable L1 projection event and render the deterministic L2 view to
   // git-tracked l2/views/constraint/ (SHADOW; injection still reads .state).
   l2OutputRoot?: "state" | "repo";
+  /** Return a frozen deterministic projection plan instead of mutating repo L1/L2. */
+  deferRepoProjection?: boolean;
   deviceId?: string;
+}
+
+export interface ConstraintRepoProjectionPlan {
+  schemaVersion: "constraint-repo-projection-plan/v1";
+  inputRootHash: string;
+  inputEventIds: readonly string[];
+  decision: ValidatedConstraintCompilerDecision;
+  provenance: {
+    model: string;
+    prompt_hash: string;
+    input_hash: string;
+    raw_output_hash: string;
+    parsed_output_hash?: string;
+    acceptance: "accepted_for_event_append";
+  };
+  createdAtUtc: string;
+  deviceId: string;
+  producerVersion: string;
+}
+
+export interface ConstraintShadowInputSnapshot {
+  inputRootHash: string;
+  inputEventIds: readonly string[];
 }
 
 export interface ConstraintShadowRunArtifacts {
@@ -588,6 +613,7 @@ export type ConstraintShadowRunResult = {
   mergedSourceVerifier?: ConstraintMergedSourceVerifierReport;
   diagnostics: ConstraintShadowDiagnostic[];
   artifacts?: ConstraintShadowRunArtifacts;
+  repoProjectionPlan?: ConstraintRepoProjectionPlan;
   l2Projection?: {
     status: string;
     eventId?: string;

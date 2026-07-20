@@ -39,7 +39,7 @@ canonical_for: INV-INVISIBILITY, INV-AUTONOMY, INV-IMPLICIT-GROUND-TRUTH, INV-AC
 **ADR 0040 切换边界**:用户侧所有持久认知内容可统称为知识;内部 canonical 真相源收敛到 append-only L1 Evidence SOT。`injectMode` / session-start eligibility 是 projector 派生决策,不是写时事实。既有 rules / constraint evidence / compiled rules 不迁移、不转换、不自动激活进新 normative projection;新 policy view 从显式 genesis/cutover 边界开始,旧材料只保留冷审计历史。
 
 ### INV-SYNC-DETERMINISTIC-MERGE(同步只走确定性合并,ADR 0020)
-跨设备同步以前提是用户已在每台设备 clone 并配置 repo；pi-astack 只调用 native `git fetch`、对已配置 upstream 执行 `ff-only`，再 `git push`。发生 divergence 时由用户人工处理；pi-astack 不自动合并，也不管理 transport。**LLM 合并冲突被明确拒绝**--知识库里一句幻觉就污染基底且事后难查。
+跨设备同步以前提是用户已在每台设备 clone 并配置 repo；pi-astack 调用 native `git fetch`，对唯一 merge-base 的完整 `B/H/U` trees 执行确定性 device join，再以 exact OID 推送到已配置 upstream。L1 两侧只允许 add-only，同路径新增必须 mode/blob 相同；注册 L2 完全忽略双亲并从 union L1 经版本化 reconciler 重建；其余 tracked path 只作文件级三方选择，双侧不同即 typed fail-closed。系统不管理 remote/auth/transport，网络与认证失败 fail-soft；真实内容冲突不交给用户日常人工合并，也不自动猜测。**`merge-tree`、rebase、force push 与 LLM 合并均明确拒绝**--知识库里一句幻觉就会污染基底且事后难查。
 
 ### INV-LIVE-PUBLICATION-CONFINEMENT（live abrain publication 必须静态授权且执行期隔离，ADR 0040）
 对live abrain的高风险publication不得把review-time whole-tree snapshot或Git HEAD当授权事实，也不得由同一unconfined进程直接mutation。Review/user gate绑定static semantic/runtime/source/confinement anchors与exact drift registry；执行期另以registered append-only streams、canonical protected path equality与typed Git forensics判断live drift。Actual write只经fail-closed effective sandbox；confinement、target、protected、drift、runtime任一false都不能complete或追认target。该结构属于infra授权/落盘边界，不是认知层机械裁决，不违反AI-Native原则。

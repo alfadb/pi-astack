@@ -87,6 +87,16 @@ for (const file of [
 }
 fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
 fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
+writeFile(path.join(outRoot, "_shared", "canonical-mutation-barrier.js"), `
+exports.withCanonicalMutationBarrier = async (_repo, operation) => operation();
+exports.withoutCanonicalMutationBarrierContext = (operation) => operation();
+`);
+writeFile(path.join(outRoot, "_shared", "canonical-git-runtime.js"), `
+exports.calls = [];
+exports.createProducedArtifactReceipt = async (options) => { exports.calls.push({ op: "receipt", filePath: options.filePath }); return { path: options.filePath, op: "put", mode: "100644", bytes: 1, bytesSha256: "fixture", owner: "constraint_l1", sourceIds: options.sourceIds }; };
+exports.getCanonicalGitRuntime = async () => ({ requestDrain: async (receipts) => { exports.calls.push({ op: "drain", receipts: receipts.length }); return { status: "index_converged", commit: "a".repeat(40), localCommit: "index_converged" }; } });
+exports.getCanonicalStartupPromise = async () => ({ startup: "ready" });
+`);
 
 const { canonicalJson, canonicalJsonValue } = require(path.join(outRoot, "sediment", "constraint-evidence", "canonical-json.js"));
 const {
@@ -667,6 +677,29 @@ check("runtime integration appends L1 event and state audit idempotently", async
   assert(!fs.existsSync(path.join(abrainHome, "rules")), "runtime append created canonical rules tree");
   const statusLines = fs.readFileSync(path.join(abrainHome, ".state", "sediment", "constraint-events", "runtime", "projection-status.jsonl"), "utf8").trim().split("\n");
   assert(statusLines.length === 2, "runtime status should record both attempts");
+  fs.rmSync(abrainHome, { recursive: true, force: true });
+});
+
+check("runtime integration holds the canonical publication path through immediate source-event drain", async () => {
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-evidence-canonical-publish-"));
+  const runtime = require(path.join(outRoot, "_shared", "canonical-git-runtime.js"));
+  runtime.calls.length = 0;
+  const result = await appendTier1ConstraintEvidenceEvent({
+    abrainHome,
+    canonicalPublish: true,
+    signal: { user_quote: "Always keep exact source events.", correction_intent: "new preference", scope_description: "all projects", confidence: 9, provenance: "user-expressed" },
+    draft: { title: "Exact source event", body: "Always keep exact source events before projection publication.", entryConfidence: 9 },
+    sessionId: "canonical-session",
+    turnId: "canonical-turn",
+    projectId: "pi-global",
+    cwd: repoRoot,
+    createdAtUtc: "2026-07-20T00:00:00.000Z",
+    correlationId: "canonical-correlation",
+    candidateId: "tier1-direct:canonical",
+    deviceId: "runtime-device",
+  });
+  assert(result.append.ok, "canonical source event append failed");
+  assert(JSON.stringify(runtime.calls.map((row) => row.op)) === JSON.stringify(["receipt", "drain"]), `canonical source event was not drained immediately: ${JSON.stringify(runtime.calls)}`);
   fs.rmSync(abrainHome, { recursive: true, force: true });
 });
 

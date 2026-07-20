@@ -458,7 +458,11 @@ fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapS
 fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-reader.cjs"), transpileTsToCjs(vaultReaderSrc));
-fs.writeFileSync(path.join(tmpDir, "vault-bash.cjs"), transpileTsToCjs(vaultBashSrc));
+fs.writeFileSync(
+  path.join(tmpDir, "vault-bash.cjs"),
+  transpileTsToCjs(vaultBashSrc)
+    .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")'),
+);
 // brain-layout.ts now imports `../_shared/runtime` (P1-2 audit fix 2026-05-16
 // round 4: computeAbrainStateGitignoreNext helper). Mirror the same
 // require-path rewrite we apply to index.ts so brain-layout.cjs can
@@ -477,7 +481,9 @@ fs.writeFileSync(
   path.join(tmpDir, "git-sync.cjs"),
   transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts"))
     .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
-    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")'),
+    .replace(/require\("\.\.\/_shared\/device-join-coordinator"\)/g, 'require("./_shared/device-join-coordinator.cjs")')
+    .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+    .replace(/require\("\.\.\/_shared\/canonical-git-runtime"\)/g, 'require("./_shared/canonical-git-runtime.cjs")'),
 );
 // ADR 0022 P3b: index.ts imports ./vault-authorize for PromptDialog overlay
 // path. Stage the transpiled module alongside the other abrain helpers.
@@ -527,6 +533,21 @@ for (const moduleName of ["jcs", "proposition-policy-stable-view-contract"]) {
 }
 fs.writeFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
 fs.copyFileSync(path.join(sharedTargetDir, "git-singleflight.cjs"), path.join(sharedTargetDir, "git-singleflight.js"));
+fs.writeFileSync(
+  path.join(sharedTargetDir, "device-join-coordinator.cjs"),
+  `exports.prepareDeviceJoin = async function () { throw new Error("device join not exercised in backend smoke"); };\nexports.publishPreparedDeviceJoin = async function () { throw new Error("device join not exercised in backend smoke"); };\n`,
+);
+fs.copyFileSync(path.join(sharedTargetDir, "device-join-coordinator.cjs"), path.join(sharedTargetDir, "device-join-coordinator.js"));
+fs.writeFileSync(
+  path.join(sharedTargetDir, "canonical-mutation-barrier.cjs"),
+  `exports.withCanonicalMutationBarrier = async function (_repo, operation) { return operation(); };\nexports.withoutCanonicalMutationBarrierContext = function (operation) { return operation(); };\n`,
+);
+fs.copyFileSync(path.join(sharedTargetDir, "canonical-mutation-barrier.cjs"), path.join(sharedTargetDir, "canonical-mutation-barrier.js"));
+fs.writeFileSync(
+  path.join(sharedTargetDir, "canonical-git-runtime.cjs"),
+  `exports.canonicalGitRuntimeEnabled = function () { return false; };\nexports.getCanonicalStartupPromise = async function () { return { startup: "ready" }; };\nexports.reportCanonicalStartupConsumer = function () {};\nexports.setCanonicalStartupReporter = function () {};\nexports.scheduleCanonicalStartupConsumer = async function (options) { await options.onReady({ startup: "ready" }); };\nexports.createProducedArtifactReceipt = async function () { throw new Error("canonical runtime disabled in backend smoke"); };\nexports.getCanonicalGitRuntime = async function () { throw new Error("canonical runtime disabled in backend smoke"); };\n`,
+);
+fs.copyFileSync(path.join(sharedTargetDir, "canonical-git-runtime.cjs"), path.join(sharedTargetDir, "canonical-git-runtime.js"));
 fs.writeFileSync(path.join(sharedTargetDir, "causal-anchor.cjs"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
 fs.copyFileSync(path.join(sharedTargetDir, "causal-anchor.cjs"), path.join(sharedTargetDir, "causal-anchor.js"));
 fs.writeFileSync(
@@ -604,6 +625,8 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector/index.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
   .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+  .replace(/require\("\.\.\/_shared\/canonical-mutation-barrier"\)/g, 'require("./_shared/canonical-mutation-barrier.cjs")')
+  .replace(/require\("\.\.\/_shared\/canonical-git-runtime"\)/g, 'require("./_shared/canonical-git-runtime.cjs")')
   .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);

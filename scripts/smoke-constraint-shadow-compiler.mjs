@@ -115,6 +115,7 @@ const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-constraint-shad
 for (const file of [
   "extensions/_shared/runtime.ts",
   "extensions/_shared/durable-write.ts",
+  "extensions/_shared/canonical-l2-contract.ts",
   "extensions/_shared/jcs.ts",
   "extensions/_shared/proposition.ts",
   "extensions/_shared/l1-schema-registry.ts",
@@ -192,6 +193,13 @@ exports.streamSimple = function streamSimple() {
 // Stub writer module for auto-refresh (commitAbrainDerivedOutputs is best-effort, not needed in smoke)
 writeFile(path.join(outRoot, "sediment", "writer.js"), `
 exports.commitAbrainDerivedOutputs = async () => null;
+`);
+writeFile(path.join(outRoot, "_shared", "canonical-mutation-barrier.js"), `
+exports.withCanonicalMutationBarrier = async (_repo, operation) => operation();
+`);
+writeFile(path.join(outRoot, "_shared", "canonical-git-runtime.js"), `
+exports.canonicalGitRuntimeEnabled = () => false;
+exports.getCanonicalStartupPromise = async () => ({ startup: "ready" });
 `);
 
 // Stub causal-anchor for auto-refresh (getDeviceId)

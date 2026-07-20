@@ -116,6 +116,13 @@ exports.commitAbrainDerivedOutputs = async () => null;
 writeFile(path.join(outRoot, "_shared", "causal-anchor.js"), `
 exports.getDeviceId = () => "smoke-device";
 `);
+writeFile(path.join(outRoot, "_shared", "canonical-mutation-barrier.js"), `
+exports.withCanonicalMutationBarrier = async (_repo, operation) => operation();
+`);
+writeFile(path.join(outRoot, "_shared", "canonical-git-runtime.js"), `
+exports.canonicalGitRuntimeEnabled = () => false;
+exports.getCanonicalStartupPromise = async () => ({ startup: "ready" });
+`);
 writeFile(path.join(outRoot, "_shared", "durable-write.js"), `
 const fs = require("node:fs/promises");
 exports.fsyncDirectory = async (dir) => {

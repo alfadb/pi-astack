@@ -4855,6 +4855,7 @@ async function tryAutoWriteLane(args: {
           correlationId,
           candidateId: tier1EvidenceCandidateId,
           deviceId: getDeviceId(),
+          canonicalPublish: canonicalGitRuntimeEnabled(),
         });
         if (constraintEvidenceEvent.append.ok) {
           constraintPublicationDurability = await readConstraintPublicationDurability(

@@ -77,13 +77,22 @@ npm run smoke:abrain-rule-writer-fs
 npm run smoke:prompt-user
 npm run smoke:prompt-user-option-list
 
-# Legacy hook cleanup / native git-sync / production local-drain evidence changes
+# Legacy hook cleanup / deterministic device join / production local-drain evidence changes
 npm run smoke:abrain-legacy-hook-cleanup
+npm run smoke:abrain-device-join
 npm run smoke:abrain-git-sync
+npm run smoke:canonical-git-runtime
+npm run smoke:production-metadata-prejoin
 npm run smoke:production-existing-local-drain
 npm run smoke:production-local-drain-next
 npm run smoke:script-registry-drift
 ```
+
+`smoke:abrain-device-join` is the focused isolated protocol gate: it creates only temporary repositories and covers deterministic divergence, tracked L2 manifest rebuild, real legacy ignored-manifest adoption with different disk bytes and ignore cleanup, ordinary ignored-create rejection before journal/CAS, ordinary tracked operations and directory/file transitions, fail-closed conflicts, `.state/` retention, changed-gitlink rejection before CAS, journal crash and validated atomic-temp recovery, unknown-dirty rejection, cross-process OFD exclusion, long-compile lock scope, retry after startup barrier timeout, legacy-writer/join exclusion, detached-context lease invalidation, CAS races, and bounded exact-OID push retry. `smoke:abrain-git-sync` uses real temporary bare remotes and proves writer delivery performs fetch/join before exact-OID push.
+
+`smoke:production-metadata-prejoin` is a production-derived conditional gate and remains in `smoke:all`. When the configured production source has only the exact registry-validated untracked v1/v2/v3 `1/4/4` recovery cohort, it clones that prestate into a temporary worktree and proves pre-join checkpoint/index convergence without changing the source. After that prestate has been consumed, it skips clone replay only after validating a clean worktree including untracked files, an exact corresponding metadata-checkpoint semantic manifest in reachable history, a subsequent deterministic device join, a tracked and non-ignored Knowledge manifest, and `HEAD` equality with the configured upstream using local refs only; it prints `SKIP:` and exits successfully. Partial cohorts, unrelated untracked files, tracked dirty state, stale/missing upstream refs, and incomplete or unknown publication evidence fail closed. No network fetch is performed. A separate parent process enforces a 360-second hard timeout by default (`PI_ASTACK_PRODUCTION_REPLAY_TIMEOUT_MS` accepts 1,000-600,000 milliseconds).
+
+After deploying a build that introduces the OFD barrier, restart every already-running pi instance before treating these guarantees as active.
 
 The retained ADR0039 standalone CLI is an operator-invoked local integrity checker, not a hook or live runtime/device-sync gate:
 

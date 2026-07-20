@@ -107,9 +107,14 @@ function gitEnvironment(extraEnv: Readonly<Record<string, string>> = {}): NodeJS
 
 const COHORT_MANIFEST_DOMAIN = "pi-astack/local-drain/cohort-semantic-manifest/v2";
 const COHORT_MANIFEST_DOMAIN_V3 = "pi-astack/local-drain/cohort-semantic-manifest/v3";
+const METADATA_CHECKPOINT_MANIFEST_DOMAIN_V1 = "pi-astack/local-drain/metadata-checkpoint-semantic-manifest/v1";
 export const LOCAL_DRAIN_PROTOCOL_V2 = "local-drain-recovery/v2" as const;
 export const LOCAL_DRAIN_PROTOCOL_V3 = "local-drain-recovery/v3" as const;
-export type LocalDrainProtocolVersion = typeof LOCAL_DRAIN_PROTOCOL_V2 | typeof LOCAL_DRAIN_PROTOCOL_V3;
+export const LOCAL_DRAIN_METADATA_CHECKPOINT_PROTOCOL_V1 = "local-drain-metadata-checkpoint/v1" as const;
+export type LocalDrainProtocolVersion =
+  | typeof LOCAL_DRAIN_PROTOCOL_V2
+  | typeof LOCAL_DRAIN_PROTOCOL_V3
+  | typeof LOCAL_DRAIN_METADATA_CHECKPOINT_PROTOCOL_V1;
 const DRAIN_IDENTITY = Object.freeze({
   name: "pi-astack-local-drain",
   email: "local-drain@pi-astack.invalid",
@@ -207,7 +212,11 @@ export function stableCohortSemanticManifest(entries: readonly PreparedCohortEnt
 }
 
 export function cohortManifestRoot(entries: readonly PreparedCohortEntry[], protocolVersion: LocalDrainProtocolVersion = LOCAL_DRAIN_PROTOCOL_V2): string {
-  const domain = protocolVersion === LOCAL_DRAIN_PROTOCOL_V3 ? COHORT_MANIFEST_DOMAIN_V3 : COHORT_MANIFEST_DOMAIN;
+  const domain = protocolVersion === LOCAL_DRAIN_PROTOCOL_V3
+    ? COHORT_MANIFEST_DOMAIN_V3
+    : protocolVersion === LOCAL_DRAIN_METADATA_CHECKPOINT_PROTOCOL_V1
+      ? METADATA_CHECKPOINT_MANIFEST_DOMAIN_V1
+      : COHORT_MANIFEST_DOMAIN;
   return sha256Hex(`${domain}\n${JSON.stringify(stableCohortSemanticManifest(entries, protocolVersion))}`);
 }
 

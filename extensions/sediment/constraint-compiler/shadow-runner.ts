@@ -22,7 +22,9 @@ import type {
   ConstraintEventCoverageReport,
   ConstraintLegacyParallelDeltaReport,
   ConstraintMergedSourceVerifierReport,
+  ConstraintRepoProjectionPlan,
   ConstraintShadowDiagnostic,
+  ConstraintShadowInputSnapshot,
   ConstraintShadowRunArtifacts,
   ConstraintShadowRunOptions,
   ConstraintShadowRunResult,
@@ -241,7 +243,12 @@ function dedupeDiagnostics(diagnostics: ConstraintShadowDiagnostic[]): Constrain
   return output;
 }
 
-export async function runConstraintShadowCompiler(options: ConstraintShadowRunOptions): Promise<ConstraintShadowRunResult> {
+type ConstraintShadowInputOptions = Pick<
+  ConstraintShadowRunOptions,
+  "abrainHome" | "cwd" | "activeProjectId" | "knownProjectIds" | "includeProjects" | "includeStatuses" | "normalizeOptions"
+>;
+
+async function collectConstraintShadowInputs(options: ConstraintShadowInputOptions) {
   const scan = await scanLegacyConstraintSources({
     abrainHome: options.abrainHome,
     cwd: options.cwd,
@@ -256,6 +263,41 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     knownProjectIds: options.knownProjectIds,
     ...(options.normalizeOptions ?? {}),
   });
+  return { scan, eventScan, sources, normalized };
+}
+
+export async function captureConstraintShadowInputSnapshot(options: ConstraintShadowInputOptions): Promise<ConstraintShadowInputSnapshot> {
+  const { eventScan, normalized } = await collectConstraintShadowInputs(options);
+  return Object.freeze({
+    inputRootHash: normalized.inputRootHash,
+    inputEventIds: Object.freeze(eventScan.events.map((event) => event.eventId).sort()),
+  });
+}
+
+export async function materializeConstraintRepoProjection(options: {
+  abrainHome: string;
+  plan: ConstraintRepoProjectionPlan;
+}): Promise<{ status: string; eventId?: string; l2RelativePath: string; decisionHash: string }> {
+  const { plan } = options;
+  if (plan.schemaVersion !== "constraint-repo-projection-plan/v1"
+    || plan.inputRootHash !== plan.decision.inputRootHash
+    || plan.provenance.input_hash !== plan.inputRootHash) {
+    throw new Error("constraint repo projection plan binding is invalid");
+  }
+  const fixate = await fixateConstraintDecisionAndRenderL2({
+    abrainHome: options.abrainHome,
+    decision: plan.decision,
+    provenance: plan.provenance,
+    inputEventIds: [...plan.inputEventIds],
+    createdAtUtc: plan.createdAtUtc,
+    deviceId: plan.deviceId,
+    producerVersion: plan.producerVersion,
+  });
+  return { status: fixate.status, eventId: fixate.eventId, l2RelativePath: fixate.l2RelativePath, decisionHash: fixate.decisionHash };
+}
+
+export async function runConstraintShadowCompiler(options: ConstraintShadowRunOptions): Promise<ConstraintShadowRunResult> {
+  const { scan, eventScan, sources, normalized } = await collectConstraintShadowInputs(options);
   const diagnostics: ConstraintShadowDiagnostic[] = dedupeDiagnostics([...scan.warnings, ...eventScan.diagnostics, ...normalized.diagnostics]);
   const runId = options.runId ?? nowRunId(normalized.inputRootHash);
 
@@ -464,30 +506,30 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     };
   }
 
-  // ADR0039 Constraint L2 (NS-2/FIX-1): 固化 the validated decision as an
-  // immutable L1 projection event + render the deterministic git-tracked L2 view
-  // (SHADOW — runtime injection still reads the .state bundle; no read-flip).
-  // Best-effort: failure records status but never breaks the shadow run.
+  // Freeze the deterministic repo write as data. Auto-refresh materializes this
+  // plan only after entering the canonical mutation barrier and revalidating the
+  // compiler input/HEAD freeze; direct callers preserve the historical inline path.
+  const repoProjectionPlan: ConstraintRepoProjectionPlan | undefined = options.l2OutputRoot === "repo" ? Object.freeze({
+    schemaVersion: "constraint-repo-projection-plan/v1" as const,
+    inputRootHash: normalized.inputRootHash,
+    inputEventIds: Object.freeze(eventScan.events.map((event) => event.eventId).sort()),
+    decision,
+    provenance: Object.freeze({
+      model: options.modelRef ?? "",
+      prompt_hash: prompt.promptHash,
+      input_hash: normalized.inputRootHash,
+      raw_output_hash: compile.rawOutputHash ?? "",
+      ...(decision.validationHash ? { parsed_output_hash: decision.validationHash } : {}),
+      acceptance: "accepted_for_event_append" as const,
+    }),
+    createdAtUtc: new Date().toISOString(),
+    deviceId: options.deviceId ?? "unknown-device",
+    producerVersion: ARTIFACT_SCHEMA_VERSION,
+  }) : undefined;
   let l2Projection: { status: string; eventId?: string; l2RelativePath: string; decisionHash: string } | undefined;
-  if (options.l2OutputRoot === "repo") {
+  if (repoProjectionPlan && !options.deferRepoProjection) {
     try {
-      const fixate = await fixateConstraintDecisionAndRenderL2({
-        abrainHome: options.abrainHome,
-        decision,
-        provenance: {
-          model: options.modelRef ?? "",
-          prompt_hash: prompt.promptHash,
-          input_hash: normalized.inputRootHash,
-          raw_output_hash: compile.rawOutputHash ?? "",
-          ...(decision.validationHash ? { parsed_output_hash: decision.validationHash } : {}),
-          acceptance: "accepted_for_event_append",
-        },
-        inputEventIds: eventScan.events.map((event) => event.eventId),
-        createdAtUtc: new Date().toISOString(),
-        deviceId: options.deviceId ?? "unknown-device",
-        producerVersion: ARTIFACT_SCHEMA_VERSION,
-      });
-      l2Projection = { status: fixate.status, eventId: fixate.eventId, l2RelativePath: fixate.l2RelativePath, decisionHash: fixate.decisionHash };
+      l2Projection = await materializeConstraintRepoProjection({ abrainHome: options.abrainHome, plan: repoProjectionPlan });
     } catch (err) {
       l2Projection = { status: `threw:${(err instanceof Error ? err.message : String(err)).slice(0, 160)}`, l2RelativePath: "l2/views/constraint/latest/compiled-view.md", decisionHash: "" };
     }
@@ -517,6 +559,7 @@ export async function runConstraintShadowCompiler(options: ConstraintShadowRunOp
     ...(validatedMergedSourceVerifier ? { mergedSourceVerifier: validatedMergedSourceVerifier } : {}),
     diagnostics: l2WriteFailed ? dedupeDiagnostics([...allDiagnostics, l2WriteFailed]) : allDiagnostics,
     ...(artifactResult?.ok ? { artifacts: artifactResult.artifacts } : {}),
+    ...(repoProjectionPlan ? { repoProjectionPlan } : {}),
     ...(l2Projection ? { l2Projection } : {}),
   };
 }

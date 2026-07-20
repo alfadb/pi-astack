@@ -168,6 +168,20 @@ await check("settings accept only disabled/enabled local_convergence_v2 shape", 
   assert(!Object.hasOwn(schema.properties, "transport") && schema.properties.mode.const === "local_convergence_v2", "schema retained transport/old mode");
 });
 
+await check("pre-join settlement rejects invalid canonical settings without mutation", async () => {
+  const repo = initRepo("invalid-settings-prejoin");
+  const invalid = path.join(tmp, "invalid-settings-prejoin.json");
+  fs.writeFileSync(invalid, '{"canonicalGitRuntime":{"enabled":true,"mode":"wrong"}}\n');
+  const before = repositoryFingerprint(repo);
+  let error;
+  try {
+    const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: invalid, sourceRoot: root });
+    await runtime.settleForDeviceJoin();
+  } catch (caught) { error = caught; }
+  assert(error?.code === "CANONICAL_GIT_SETTINGS_INVALID", `invalid settings bypassed pre-join settlement: ${error}`);
+  assert(repositoryFingerprint(repo) === before, "invalid settings rejection changed HEAD/index/status/L1");
+});
+
 await check("runtime source has no remote operation/import boundary", () => {
   const source = fs.readFileSync(path.join(root, "extensions/_shared/canonical-git-runtime.ts"), "utf8");
   for (const forbidden of ["canonical-git-transport", "legacy-terminal-resolver", "ls-remote", "requestPush", "verifyRemoteConvergence", "git-sync.jsonl"]) assert(!source.includes(forbidden), `runtime contains ${forbidden}`);
@@ -222,9 +236,15 @@ await check("malformed v1 still blocks whole runtime startup", async () => {
   const bad = structuredClone(fixture.envelopes[0]);
   bad.body.body.extra = true; bad.body_hash = l1.canonicalL1BodyHash(bad.body); bad.event_id = bad.body_hash;
   writeEnvelope(repo, bad);
+  const headBefore = git(repo, "rev-parse", "HEAD");
+  const indexBefore = git(repo, "ls-files", "--stage", "-z");
   const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
   const startup = await runtime.awaitStartup();
   assert(startup.startup === "blocked" && /L1_BODY_SHAPE_MISMATCH/.test(startup.blockedReason ?? ""), "malformed v1 did not block startup");
+  let settleError;
+  try { await runtime.settleForDeviceJoin(); } catch (error) { settleError = error; }
+  assert(settleError && /L1_BODY_SHAPE_MISMATCH/.test(String(settleError)), `malformed v1 passed pre-join settlement: ${settleError}`);
+  assert(git(repo, "rev-parse", "HEAD") === headBefore && git(repo, "ls-files", "--stage", "-z") === indexBefore, "malformed v1 rejection mutated HEAD/index");
 });
 
 await check("steady-state strict Knowledge writes create current and next generations", async () => {
@@ -274,6 +294,67 @@ await check("startup content backlog opens one generation and absorbs the prior 
     assert(metadataDiagnostics.tail.some((row) => row.operation === "startup_backlog" && row.status === "metadata_deferred"), `restart ${restart + 1} lacks metadata_deferred diagnostic`);
     assert(repositoryFingerprint(repo) === stableBefore, `metadata-only restart ${restart + 1} changed HEAD/events/claims`);
   }
+});
+
+await check("pre-join checkpoints validated recovery metadata and fresh startup recovers its post-CAS index", async () => {
+  const repo = initRepo("prejoin-metadata-checkpoint");
+  const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+  assert((await runtime.awaitStartup()).startup === "ready", "metadata checkpoint fixture startup failed");
+  const knowledge = writeKnowledge(repo, 69);
+  const receipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: knowledge.file, sourceIds: [knowledge.eventId] });
+  const drained = await runtime.requestDrain([receipt], "create checkpoint metadata tail");
+  assert(drained.status === "index_converged" && drained.commit && drained.episodeId, `metadata checkpoint fixture did not drain: ${JSON.stringify(drained)}`);
+  const tail = (await activeRecoveryRecords(repo))
+    .filter((record) => record.body.episode_id === drained.episodeId)
+    .map((record) => record.relativePath)
+    .sort();
+  assert(tail.length === 4, `metadata checkpoint fixture tail is not exact: ${tail.length}`);
+  const deferred = startupChild(repo);
+  assert(deferred.status === 0, `metadata checkpoint deferred startup failed: ${deferred.stderr}`);
+  assert(JSON.parse(deferred.stdout).tail.some((row) => row.operation === "startup_backlog" && row.status === "metadata_deferred"), "startup no longer deferred a metadata-only tail");
+
+  const idsBefore = (await l1.scanWholeL1Validated({ abrainHome: repo })).all.map((record) => record.eventId).sort();
+  const parent = git(repo, "rev-parse", "HEAD");
+  await runtime.settleForDeviceJoin();
+  const checkpoint = git(repo, "rev-parse", "HEAD");
+  assert(checkpoint !== parent, "pre-join did not publish a metadata checkpoint");
+  assert(git(repo, "show", "-s", "--format=%B", checkpoint).includes("protocol: local-drain-metadata-checkpoint/v1"), "checkpoint commit protocol is not explicit");
+  const committed = git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", checkpoint).split("\n").filter(Boolean).sort();
+  assert(JSON.stringify(committed) === JSON.stringify(tail), `metadata checkpoint cohort is not exact: ${JSON.stringify(committed)}`);
+  assert(git(repo, "status", "--porcelain=v1", "-uall") === "", "metadata checkpoint did not converge the shared index");
+  const idsAfter = (await l1.scanWholeL1Validated({ abrainHome: repo })).all.map((record) => record.eventId).sort();
+  assert(JSON.stringify(idsAfter) === JSON.stringify(idsBefore), "metadata checkpoint created or deleted recovery L1");
+
+  git(repo, "read-tree", `${checkpoint}^`);
+  assert(git(repo, "status", "--porcelain=v1", "-uall") !== "", "post-CAS/pre-index crash fixture is not dirty");
+  const recovered = startupChild(repo);
+  assert(recovered.status === 0, `metadata checkpoint recovery child failed: ${recovered.stderr}`);
+  const diagnostics = JSON.parse(recovered.stdout);
+  assert(diagnostics.startup === "ready", `metadata checkpoint recovery blocked: ${diagnostics.blockedReason}`);
+  assert(diagnostics.tail.some((row) => row.operation === "metadata_checkpoint" && row.status === "index_recovered"), "fresh startup did not report checkpoint index recovery");
+  assert(git(repo, "rev-parse", "HEAD") === checkpoint && git(repo, "status", "--porcelain=v1", "-uall") === "", "checkpoint recovery changed HEAD or stayed dirty");
+  const recoveredIds = (await l1.scanWholeL1Validated({ abrainHome: repo })).all.map((record) => record.eventId).sort();
+  assert(JSON.stringify(recoveredIds) === JSON.stringify(idsBefore), "checkpoint recovery changed the L1 inventory");
+});
+
+await check("pre-join rejects unknown dirty beside validated metadata without mutation", async () => {
+  const repo = initRepo("prejoin-metadata-unknown-dirty");
+  const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+  assert((await runtime.awaitStartup()).startup === "ready", "unknown-dirty fixture startup failed");
+  const knowledge = writeKnowledge(repo, 70);
+  const receipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: knowledge.file, sourceIds: [knowledge.eventId] });
+  const drained = await runtime.requestDrain([receipt], "create unknown-dirty metadata tail");
+  assert(drained.status === "index_converged" && drained.episodeId, `unknown-dirty fixture did not drain: ${JSON.stringify(drained)}`);
+  const tail = (await activeRecoveryRecords(repo)).filter((record) => record.body.episode_id === drained.episodeId);
+  assert(tail.length === 4, `unknown-dirty fixture tail is not exact: ${tail.length}`);
+  fs.writeFileSync(path.join(repo, "unknown-dirty.txt"), "must remain dirty\n");
+  const before = repositoryFingerprint(repo);
+  let error;
+  try { await runtime.settleForDeviceJoin(); } catch (caught) { error = caught; }
+  assert(/DEVICE_JOIN_BACKLOG_BLOCKED.*ARTIFACT_UNOWNED/.test(String(error)), `unknown dirty path passed pre-join settlement: ${error}`);
+  assert(repositoryFingerprint(repo) === before, "unknown dirty rejection changed HEAD/index/status/L1 bytes");
+  assert(fs.readFileSync(path.join(repo, "unknown-dirty.txt"), "utf8") === "must remain dirty\n", "unknown dirty path was consumed or deleted");
+  assert(tail.every((record) => fs.existsSync(path.join(repo, ...record.relativePath.split("/")))), "validated metadata event was deleted on rejection");
 });
 
 await check("steady writer_transaction commits exactly, then Knowledge opens the next generation and absorbs its metadata tail", async () => {

@@ -1,8 +1,16 @@
+import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } from "./pi-ai-invoker";
-import { runConstraintShadowCompiler } from "./shadow-runner";
+import {
+  captureConstraintShadowInputSnapshot,
+  materializeConstraintRepoProjection,
+  runConstraintShadowCompiler,
+} from "./shadow-runner";
 import { commitAbrainDerivedOutputs, type WriterPublicationResult, type WriterPublicationStatus } from "../writer";
+import { withCanonicalMutationBarrier } from "../../_shared/canonical-mutation-barrier";
+import { canonicalGitRuntimeEnabled, getCanonicalStartupPromise } from "../../_shared/canonical-git-runtime";
 import { getDeviceId } from "../../_shared/causal-anchor";
 import { fsyncDirectory } from "../../_shared/durable-write";
 import { acquireFileLock, abrainSedimentLocksDir } from "../../_shared/runtime";
@@ -60,6 +68,7 @@ interface RunOnceOptions {
   compilerRunnerForTests?: (trigger: ConstraintShadowAutoRefreshTrigger) => Promise<ConstraintShadowRunResult>;
 }
 
+const execFileAsync = promisify(execFile);
 const GLOBAL_KEY = "__piAstConstraintShadowAutoRefresh";
 const LIVENESS_GLOBAL_KEY = Symbol.for("pi-astack.constraint-shadow.liveness-recovery");
 const LIVENESS_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
@@ -364,6 +373,22 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+async function constraintRepoHead(abrainHome: string): Promise<string> {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith("GIT_") && value !== undefined) env[key] = value;
+  }
+  const { stdout } = await execFileAsync("git", ["-C", path.resolve(abrainHome), "rev-parse", "--verify", "HEAD^{commit}"], {
+    env: { ...env, LANG: "C", LC_ALL: "C", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_TERMINAL_PROMPT: "0" },
+    encoding: "utf-8",
+    timeout: 5_000,
+    maxBuffer: 128 * 1024,
+  });
+  const head = stdout.trim();
+  if (!/^[0-9a-f]{40,64}$/.test(head)) throw new Error("constraint auto-refresh could not freeze a canonical HEAD");
+  return head;
+}
+
 async function scheduleRecoverableRetry(
   trigger: ConstraintShadowAutoRefreshTrigger,
   modelRef: string,
@@ -524,6 +549,14 @@ async function projectionInputEventIds(
 }
 
 async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: RunOnceOptions = {}): Promise<void> {
+  if (canonicalGitRuntimeEnabled()) {
+    const startup = await getCanonicalStartupPromise({ abrainHome: path.resolve(trigger.abrainHome) });
+    if (startup.startup !== "ready") throw new Error(`canonical startup barrier blocked: ${startup.blockedReason ?? "unknown"}`);
+  }
+  return runOnceUnlocked(trigger, options);
+}
+
+async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, options: RunOnceOptions = {}): Promise<void> {
   trigger = withEventIds(trigger, triggerEventIds(trigger));
   const auto = trigger.settings.constraintShadowCompiler.autoRefresh;
   const modelRef = defaultModelRef(trigger.settings);
@@ -634,13 +667,23 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       || auto.maxPromptChars
       || trigger.settings.constraintShadowCompiler.maxPromptChars
       || undefined;
-    const result = options.compilerRunnerForTests ? await options.compilerRunnerForTests(trigger) : await runConstraintShadowCompiler({
+    const canonicalMode = canonicalGitRuntimeEnabled();
+    const frozenHead = await constraintRepoHead(trigger.abrainHome).catch((error) => {
+      if (canonicalMode) throw error;
+      // Historical non-Git legacy adapters cannot publish a real commit; keep
+      // their compiler-only behavior while production Git homes retain HEAD CAS.
+      return null;
+    });
+    const inputOptions = {
       abrainHome: trigger.abrainHome,
       cwd: trigger.cwd,
       activeProjectId: trigger.activeProjectId,
       knownProjectIds: trigger.knownProjectIds,
-      includeProjects: trigger.activeProjectId ? [trigger.activeProjectId] : "active",
-      includeStatuses: "all",
+      includeProjects: trigger.activeProjectId ? [trigger.activeProjectId] : "active" as const,
+      includeStatuses: "all" as const,
+    };
+    const result = options.compilerRunnerForTests ? await options.compilerRunnerForTests(trigger) : await runConstraintShadowCompiler({
+      ...inputOptions,
       maxPromptChars: auto.maxPromptChars || trigger.settings.constraintShadowCompiler.maxPromptChars || undefined,
       eventStaleAfterMs: auto.eventStaleAfterMs,
       modelRef,
@@ -665,6 +708,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       } : {}),
       writeArtifacts: true,
       l2OutputRoot: trigger.settings.constraintShadowCompiler.l2OutputRoot,
+      deferRepoProjection: true,
       deviceId: getDeviceId() ?? "unknown-device",
     });
     terminalStatus = result.ok ? undefined : "failed";
@@ -680,7 +724,8 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
       result: compactResult(result),
     });
     if (!result.ok) return;
-    if (trigger.settings.constraintShadowCompiler.l2OutputRoot === "repo" && !result.l2Projection) {
+    if (trigger.settings.constraintShadowCompiler.l2OutputRoot === "repo" && !result.repoProjectionPlan) {
+      terminalStatus = "failed";
       await appendAuditLineNoThrow(trigger.abrainHome, {
         schemaVersion: "constraint-shadow-auto-refresh/v1",
         observedAtUtc: new Date().toISOString(),
@@ -689,41 +734,65 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
         sourceEventId: trigger.sourceEventId ?? null,
         modelRef,
         status: "publication_terminal",
-        terminalReason: "required_l2_output_missing",
+        terminalReason: "required_l2_projection_plan_missing",
         result: compactResult(result),
       });
       return;
     }
-    // The successful compile above is the first canonical worktree mutation
-    // in this lane; earlier writes are ignored .state locks/markers/audit only.
-    // Thread its exact trigger evidence, projection envelope, and L2 view into
-    // the immediately following commitAbrainDerivedOutputs startup/drain
-    // barrier. Enabled mode never infers this cohort from status or a sweep.
-    const producedFilePaths: string[] = [];
-    const sourceEventIds = await projectionInputEventIds(trigger.abrainHome, result.l2Projection, triggerEventIds(trigger));
-    if (sourceEventIds.some((eventId) => !/^[0-9a-f]{64}$/.test(eventId))) {
-      throw new Error("constraint trigger sourceEventIds contain a non-SHA-256 event id");
-    }
-    for (const eventId of sourceEventIds) {
-      producedFilePaths.push(path.join(
-        trigger.abrainHome,
-        "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`,
-      ));
-    }
-    if (result.l2Projection) {
-      if (result.l2Projection.status !== "written" && result.l2Projection.status !== "unchanged") {
-        throw new Error(`constraint L2 projection is not publishable: ${result.l2Projection.status}`);
+
+    const stage = await withCanonicalMutationBarrier(trigger.abrainHome, async () => {
+      if (frozenHead !== null && await constraintRepoHead(trigger.abrainHome) !== frozenHead) {
+        throw new Error("constraint auto-refresh HEAD drifted during compile");
       }
-      const eventId = result.l2Projection.eventId;
-      if (!eventId || !/^[0-9a-f]{64}$/.test(eventId)) throw new Error("constraint projection event id is missing or invalid");
-      producedFilePaths.push(path.join(
-        trigger.abrainHome,
-        "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`,
-      ));
-      producedFilePaths.push(path.join(trigger.abrainHome, result.l2Projection.l2RelativePath));
-    }
-    const publication = await commitAbrainDerivedOutputs(trigger.abrainHome, "constraint-shadow-auto-refresh", Array.from(new Set(producedFilePaths)))
-      ?? { status: "clean", commit: null, localCommit: "not_published", drainStatus: "legacy_test_adapter", canonical: false };
+      const refreshedInput = await captureConstraintShadowInputSnapshot(inputOptions);
+      if (refreshedInput.inputRootHash !== result.inputRootHash) {
+        throw new Error("constraint auto-refresh inputRootHash drifted during compile");
+      }
+      let l2Projection: { status: string; eventId?: string; l2RelativePath: string; decisionHash: string } | undefined;
+      if (result.repoProjectionPlan) {
+        if (JSON.stringify(refreshedInput.inputEventIds) !== JSON.stringify(result.repoProjectionPlan.inputEventIds)) {
+          throw new Error("constraint auto-refresh input event set drifted during compile");
+        }
+        l2Projection = await materializeConstraintRepoProjection({
+          abrainHome: trigger.abrainHome,
+          plan: result.repoProjectionPlan,
+        });
+        if (l2Projection.status !== "written" && l2Projection.status !== "unchanged") {
+          throw new Error(`constraint L2 projection is not publishable: ${l2Projection.status}`);
+        }
+      }
+
+      const producedFilePaths: string[] = [];
+      const sourceEventIds = await projectionInputEventIds(trigger.abrainHome, l2Projection, triggerEventIds(trigger));
+      if (sourceEventIds.some((eventId) => !/^[0-9a-f]{64}$/.test(eventId))) {
+        throw new Error("constraint trigger sourceEventIds contain a non-SHA-256 event id");
+      }
+      for (const eventId of sourceEventIds) {
+        producedFilePaths.push(path.join(
+          trigger.abrainHome,
+          "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`,
+        ));
+      }
+      if (l2Projection) {
+        const eventId = l2Projection.eventId;
+        if (l2Projection.status === "written" && (!eventId || !/^[0-9a-f]{64}$/.test(eventId))) {
+          throw new Error("constraint projection event id is missing or invalid");
+        }
+        if (eventId) {
+          producedFilePaths.push(path.join(
+            trigger.abrainHome,
+            "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`,
+          ));
+        }
+        producedFilePaths.push(path.join(trigger.abrainHome, l2Projection.l2RelativePath));
+      }
+      const publication = await commitAbrainDerivedOutputs(trigger.abrainHome, "constraint-shadow-auto-refresh", Array.from(new Set(producedFilePaths)))
+        ?? { status: "clean", commit: null, localCommit: "not_published", drainStatus: "legacy_test_adapter", canonical: false };
+      return { sourceEventIds, l2Projection, publication };
+    });
+
+    const { sourceEventIds, publication } = stage;
+    const publishedResult = stage.l2Projection ? { ...result, l2Projection: stage.l2Projection } : result;
     const requiredDurability = requiredPublicationDurability();
     if (!publicationSatisfiesDurability(publication, requiredDurability)) {
       terminalStatus = "failed";
@@ -753,7 +822,7 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
         requiredDurability,
         durationMs: Date.now() - compileStartedAtMs,
         publication,
-        result: compactResult(result),
+        result: compactResult(publishedResult),
       });
     }
   } catch (err) {

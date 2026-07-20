@@ -39,7 +39,11 @@ import {
 } from "../memory/rename-entry";
 import type { Jsonish } from "../memory/types";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
-import { gitSingleFlight } from "../_shared/git-singleflight";
+import {
+  canonicalMutationBarrierHeld,
+  withCanonicalMutationBarrier,
+  withoutCanonicalMutationBarrierContext,
+} from "../_shared/canonical-mutation-barrier";
 import {
   canonicalGitRuntimeEnabled,
   createProducedArtifactReceipt,
@@ -1231,6 +1235,21 @@ async function assertCanonicalWriterSettings(
   }
 }
 
+async function withCanonicalWriterMutation<T>(
+  abrainHome: string,
+  settings: Pick<SedimentSettings, "gitCommit">,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await assertCanonicalWriterSettings(abrainHome, settings);
+  if (settings.gitCommit === false) return operation();
+  return withCanonicalMutationBarrier(abrainHome, operation);
+}
+
+async function withLegacyWriterCommitBarrier<T>(abrainHome: string, operation: () => Promise<T>): Promise<T> {
+  if (canonicalMutationBarrierHeld(abrainHome)) return operation();
+  return withCanonicalMutationBarrier(abrainHome, operation);
+}
+
 export function writerPublicationFromCanonicalDrain(drained: DrainResult): WriterPublicationResult {
   if (drained.status === "empty") {
     return { status: "clean", commit: drained.commit ?? null, localCommit: drained.localCommit, drainStatus: drained.status, canonical: true };
@@ -1316,7 +1335,7 @@ async function gitCommit(
       `sediment:${op}:${scopeTag}:${slug}`,
     );
   }
-  return legacyPublication(await gitSingleFlight(abrainHome, () =>
+  return legacyPublication(await withLegacyWriterCommitBarrier(abrainHome, () =>
     gitCommitUnlocked(abrainHome, filePath, slug, op, projectId, derivedFilePaths)));
 }
 
@@ -1369,8 +1388,10 @@ async function maybePushAbrainAsync(abrainHome: string, sha: string | null): Pro
         await appendPushTriggerFailureAudit(abrainHome, new Error("git-sync pushAsync unavailable"));
         return;
       }
-      gitSync.pushAsync({ abrainHome }).catch((err: unknown) => {
-        void appendPushTriggerFailureAudit(abrainHome, err);
+      withoutCanonicalMutationBarrierContext(() => {
+        gitSync.pushAsync({ abrainHome }).catch((err: unknown) => {
+          void appendPushTriggerFailureAudit(abrainHome, err);
+        });
       });
     } catch (err) {
       await appendPushTriggerFailureAudit(abrainHome, err);
@@ -1395,7 +1416,7 @@ async function gitCommitMany(
       `sediment:${op}:${scopeTag}:${slug}`,
     );
   }
-  return legacyPublication(await gitSingleFlight(abrainHome, () =>
+  return legacyPublication(await withLegacyWriterCommitBarrier(abrainHome, () =>
     gitCommitManyUnlocked(abrainHome, filePaths, slug, op, projectId, derivedFilePaths)));
 }
 
@@ -1461,7 +1482,7 @@ export async function commitAbrainDerivedOutputs(
       `constraint-projector:${reason}`,
     );
   }
-  return legacyPublication(await gitSingleFlight(abrainHome, () => commitAbrainDerivedOutputsUnlocked(abrainHome, reason)));
+  return legacyPublication(await withLegacyWriterCommitBarrier(abrainHome, () => commitAbrainDerivedOutputsUnlocked(abrainHome, reason)));
 }
 
 async function commitAbrainDerivedOutputsUnlocked(abrainHome: string, reason: string): Promise<string | null> {
@@ -1651,6 +1672,13 @@ export async function supersedeProjectEntry(
 
 export async function deleteProjectEntry(
   slugRaw: string,
+  opts: WriteProjectEntryOptions & { reason?: string; mode?: DeleteMode; sessionId?: string; expected_status?: EntryStatus },
+): Promise<WriteProjectEntryResult> {
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => deleteProjectEntryUnlocked(slugRaw, opts));
+}
+
+async function deleteProjectEntryUnlocked(
+  slugRaw: string,
   // `expected_status` is the CAS precondition (same semantics as
   // ProjectEntryUpdateDraft.expected_status): when set, the delete is
   // rejected (status_precondition_failed) unless the entry's current on-disk
@@ -1659,7 +1687,6 @@ export async function deleteProjectEntry(
   // "git rm only when still archived".
   opts: WriteProjectEntryOptions & { reason?: string; mode?: DeleteMode; sessionId?: string; expected_status?: EntryStatus },
 ): Promise<WriteProjectEntryResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -1990,7 +2017,14 @@ export async function updateProjectEntry(
   patch: ProjectEntryUpdateDraft,
   opts: WriteProjectEntryOptions,
 ): Promise<WriteProjectEntryResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => updateProjectEntryUnlocked(slugRaw, patch, opts));
+}
+
+async function updateProjectEntryUnlocked(
+  slugRaw: string,
+  patch: ProjectEntryUpdateDraft,
+  opts: WriteProjectEntryOptions,
+): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -2487,7 +2521,13 @@ export async function writeProjectEntry(
   draft: ProjectEntryDraft,
   opts: WriteProjectEntryOptions,
 ): Promise<WriteProjectEntryResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => writeProjectEntryUnlocked(draft, opts));
+}
+
+async function writeProjectEntryUnlocked(
+  draft: ProjectEntryDraft,
+  opts: WriteProjectEntryOptions,
+): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
@@ -3003,7 +3043,7 @@ async function gitCommitAbrain(abrainHome: string, filePath: string, slug: strin
   if (canonicalGitRuntimeEnabled()) {
     return canonicalCommitExplicitPaths(abrainHome, [filePath], `${label}: ${slug}`, `${label}:${slug}`);
   }
-  return legacyPublication(await gitSingleFlight(abrainHome, () =>
+  return legacyPublication(await withLegacyWriterCommitBarrier(abrainHome, () =>
     gitCommitAbrainUnlocked(abrainHome, filePath, slug, label)));
 }
 
@@ -3043,7 +3083,13 @@ export async function writeAbrainWorkflow(
   draft: WorkflowDraft,
   opts: WriteWorkflowOptions,
 ): Promise<WriteWorkflowResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => writeAbrainWorkflowUnlocked(draft, opts));
+}
+
+async function writeAbrainWorkflowUnlocked(
+  draft: WorkflowDraft,
+  opts: WriteWorkflowOptions,
+): Promise<WriteWorkflowResult> {
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const crossProject = draft.crossProject === true;
@@ -3537,7 +3583,10 @@ async function applyTier2RulesLegacyWriteGate(args: {
 
 /** ADR 0023 D5: create a rule in ~/.abrain/[projects/<id>/]rules/<inject_mode>/. */
 export async function writeAbrainRule(draft: RuleDraft, opts: WriteRuleOptions): Promise<WriteRuleResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => writeAbrainRuleUnlocked(draft, opts));
+}
+
+async function writeAbrainRuleUnlocked(draft: RuleDraft, opts: WriteRuleOptions): Promise<WriteRuleResult> {
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const ruleScope: "global" | "project" = draft.scope === "global" ? "global" : "project";
@@ -3806,7 +3855,14 @@ export async function applyTier1RuleAdjudication(
   apply: Tier1RuleAdjudicationApply,
   opts: WriteRuleOptions,
 ): Promise<WriteRuleResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => applyTier1RuleAdjudicationUnlocked(target, apply, opts));
+}
+
+async function applyTier1RuleAdjudicationUnlocked(
+  target: { slug: string; scope: "global" | "project"; projectId?: string },
+  apply: Tier1RuleAdjudicationApply,
+  opts: WriteRuleOptions,
+): Promise<WriteRuleResult> {
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const { slug, scope, projectId } = target;
@@ -3951,7 +4007,15 @@ export async function mutateRuleStatusContested(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => mutateRuleStatusContestedUnlocked(slug, scope, projectId, opts));
+}
+
+async function mutateRuleStatusContestedUnlocked(
+  slug: string,
+  scope: "global" | "project",
+  projectId: string | undefined,
+  opts: MutateRuleOptions,
+): Promise<WriteRuleResult> {
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -4005,7 +4069,15 @@ export async function archiveAbrainRule(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => archiveAbrainRuleUnlocked(slug, scope, projectId, opts));
+}
+
+async function archiveAbrainRuleUnlocked(
+  slug: string,
+  scope: "global" | "project",
+  projectId: string | undefined,
+  opts: MutateRuleOptions,
+): Promise<WriteRuleResult> {
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -4070,7 +4142,15 @@ export async function deleteAbrainRule(
   projectId: string | undefined,
   opts: MutateRuleOptions,
 ): Promise<WriteRuleResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => deleteAbrainRuleUnlocked(slug, scope, projectId, opts));
+}
+
+async function deleteAbrainRuleUnlocked(
+  slug: string,
+  scope: "global" | "project",
+  projectId: string | undefined,
+  opts: MutateRuleOptions,
+): Promise<WriteRuleResult> {
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId;
@@ -4344,7 +4424,7 @@ async function gitCommitAbrainAboutMe(
       `about-me:${region}:${slug}`,
     );
   }
-  return legacyPublication(await gitSingleFlight(abrainHome, () =>
+  return legacyPublication(await withLegacyWriterCommitBarrier(abrainHome, () =>
     gitCommitAbrainAboutMeUnlocked(abrainHome, filePath, slug, region)));
 }
 
@@ -4427,7 +4507,13 @@ export async function writeAbrainAboutMe(
   draft: AboutMeDraft,
   opts: WriteAboutMeOptions,
 ): Promise<WriteAboutMeResult> {
-  await assertCanonicalWriterSettings(opts.abrainHome, opts.settings);
+  return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => writeAbrainAboutMeUnlocked(draft, opts));
+}
+
+async function writeAbrainAboutMeUnlocked(
+  draft: AboutMeDraft,
+  opts: WriteAboutMeOptions,
+): Promise<WriteAboutMeResult> {
   const started = Date.now();
   const abrainHome = path.resolve(opts.abrainHome);
   const sessionId = opts.auditContext?.sessionId ?? draft.sessionId;

@@ -5,6 +5,15 @@ import { sanitizeForMemory, type SanitizeResult } from "../sanitizer";
 import { sha256Hex } from "./hash-envelope";
 import type { ConstraintEvidenceEventBodyV1, ConstraintEvidenceScopeContext } from "./types";
 import { CONSTRAINT_EVIDENCE_EVENT_SCHEMA_VERSION } from "./types";
+import {
+  withCanonicalMutationBarrier,
+  withoutCanonicalMutationBarrierContext,
+} from "../../_shared/canonical-mutation-barrier";
+import {
+  createProducedArtifactReceipt,
+  getCanonicalGitRuntime,
+  getCanonicalStartupPromise,
+} from "../../_shared/canonical-git-runtime";
 
 export interface ConstraintEvidenceTier1SignalInput {
   user_quote?: string | null;
@@ -45,6 +54,7 @@ export interface BuildTier1ConstraintEvidenceEventOptions {
 
 export interface AppendTier1ConstraintEvidenceEventOptions extends BuildTier1ConstraintEvidenceEventOptions {
   abrainHome: string;
+  canonicalPublish?: boolean;
 }
 
 export interface AppendTier1ConstraintEvidenceEventResult {
@@ -57,10 +67,34 @@ export interface AppendTier1ConstraintEvidenceEventResult {
 export async function appendTier1ConstraintEvidenceEvent(
   options: AppendTier1ConstraintEvidenceEventOptions,
 ): Promise<AppendTier1ConstraintEvidenceEventResult> {
-  const body = buildTier1ConstraintEvidenceEventBody(options);
-  const append = await appendConstraintEvidenceEvent({ abrainHome: options.abrainHome, body });
-  const state = await writeRuntimeState({ ...options, body, append });
-  return { body, append, ...state };
+  const appendAndRecord = async (): Promise<AppendTier1ConstraintEvidenceEventResult> => {
+    const body = buildTier1ConstraintEvidenceEventBody(options);
+    const append = await appendConstraintEvidenceEvent({ abrainHome: options.abrainHome, body });
+    const state = await writeRuntimeState({ ...options, body, append });
+    if (options.canonicalPublish && append.ok && append.filePath) {
+      const receipt = await createProducedArtifactReceipt({
+        abrainHome: options.abrainHome,
+        filePath: append.filePath,
+        sourceIds: append.eventId ? [append.eventId] : [],
+      });
+      const runtime = await getCanonicalGitRuntime({ abrainHome: options.abrainHome });
+      const drained = await runtime.requestDrain([receipt], "constraint-evidence: witnessed Tier-1 event");
+      if (drained.status !== "index_converged" && drained.status !== "empty" && drained.status !== "metadata_deferred" && drained.status !== "consumed") {
+        throw new Error(`constraint evidence canonical drain ended in ${drained.status}: ${drained.reason ?? "no reason"}`);
+      }
+      if (drained.status === "index_converged" && drained.commit
+        && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1" && process.env.PI_ABRAIN_DISABLED !== "1") {
+        void withoutCanonicalMutationBarrierContext(() => import("../../abrain/git-sync")
+          .then((gitSync) => gitSync.pushAsync({ abrainHome: options.abrainHome }))
+          .catch(() => undefined));
+      }
+    }
+    return { body, append, ...state };
+  };
+  if (!options.canonicalPublish) return appendAndRecord();
+  const startup = await getCanonicalStartupPromise({ abrainHome: path.resolve(options.abrainHome) });
+  if (startup.startup !== "ready") throw new Error(`canonical startup barrier blocked: ${startup.blockedReason ?? "unknown"}`);
+  return withCanonicalMutationBarrier(options.abrainHome, appendAndRecord);
 }
 
 export function buildTier1ConstraintEvidenceEventBody(

@@ -193,6 +193,14 @@ await asyncCheck("[8] git-sync._queueDepth() sees ops from other copies", async 
   );
   fs.writeFileSync(path.join(sharedBridgeDir, "git-singleflight.js"), sfSource);
   fs.writeFileSync(
+    path.join(sharedBridgeDir, "device-join-coordinator.js"),
+    `module.exports = { prepareDeviceJoin: async () => { throw new Error("unused fixture stub"); }, publishPreparedDeviceJoin: async () => { throw new Error("unused fixture stub"); } };\n`,
+  );
+  fs.writeFileSync(
+    path.join(sharedBridgeDir, "canonical-git-runtime.js"),
+    `module.exports = { getCanonicalGitRuntime: async () => { throw new Error("unused fixture stub"); }, resolveCanonicalGitRuntimeSettings: () => ({ enabled: false, valid: true }) };\n`,
+  );
+  fs.writeFileSync(
     path.join(tmpDir, "git-sync.cjs"),
     transpile(path.join(repoRoot, "extensions/abrain/git-sync.ts")),
   );

@@ -43,7 +43,7 @@ function initRepo(repo, withIgnore = true) {
   fs.mkdirSync(repo, { recursive: true });
   git(repo, "init", "-q", "-b", "main");
   fs.writeFileSync(path.join(repo, "base.txt"), "base\n");
-  if (withIgnore) fs.writeFileSync(path.join(repo, ".gitignore"), ".state/\nl2/views/knowledge/latest/manifest.json\n");
+  if (withIgnore) fs.writeFileSync(path.join(repo, ".gitignore"), ".state/\n");
   commit(repo, "base", "base.txt", ...(withIgnore ? [".gitignore"] : []));
 }
 
@@ -132,7 +132,7 @@ try {
   const symlinkHome = path.join(tmp, "symlink-abrain");
   fs.mkdirSync(symlinkHome);
   const foreignIgnore = path.join(tmp, "foreign-gitignore");
-  fs.writeFileSync(foreignIgnore, ".state/\nl2/views/knowledge/latest/manifest.json\n");
+  fs.writeFileSync(foreignIgnore, ".state/\n");
   fs.symlinkSync(foreignIgnore, path.join(symlinkHome, ".gitignore"));
   const symlinkSafety = abrainModule.establishAbrainLocalSafetyPrerequisites(symlinkHome);
   assert(symlinkSafety.status === "blocked", "symlink .gitignore was accepted as local safety");

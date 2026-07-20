@@ -78,6 +78,10 @@ import {
 } from "../_shared/runtime";
 import { gitSingleFlight } from "../_shared/git-singleflight";
 import {
+  withCanonicalMutationBarrier,
+  withoutCanonicalMutationBarrierContext,
+} from "../_shared/canonical-mutation-barrier";
+import {
   canonicalGitRuntimeEnabled,
   createProducedArtifactReceipt,
   getCanonicalGitRuntime,
@@ -505,7 +509,9 @@ export async function canonicalAutoCommitAbrainPaths(repoRoot: string, relPaths:
   if (drained.status === "empty") return { repoRoot: root, paths, status: "clean", commitSha: drained.commit };
   if (drained.status === "metadata_deferred") return { repoRoot: root, paths, status: "clean", detail: drained.reason };
   if (drained.status !== "index_converged" || !drained.commit) return { repoRoot: root, paths, status: "queued", detail: drained.reason ?? drained.status };
-  void pushAsync({ abrainHome: root });
+  withoutCanonicalMutationBarrierContext(() => {
+    void pushAsync({ abrainHome: root });
+  });
   return { repoRoot: root, paths, status: "committed", commitSha: drained.commit };
 }
 
@@ -1410,9 +1416,9 @@ export default function activate(pi: ExtensionAPI): void {
   }
 
   // ── Startup device sync (ADR 0020) ──────────────────────────
-  // Fire-and-forget device delivery runs fetch -> ff-only configured upstream
-  // -> push. Divergence and delivery failures are user-visible warnings, while
-  // the detached result never gates canonical startup or local convergence.
+  // Fire-and-forget device delivery runs fetch -> deterministic device join
+  // -> exact-OID push. Content conflicts and delivery failures are user-visible
+  // warnings, while network/auth failures never gate local canonical startup.
   //
   // Startup sync used to emit `console.
   // error(...)` lines, which is the raw stderr path — ugly and
@@ -1448,9 +1454,12 @@ export default function activate(pi: ExtensionAPI): void {
 
     gitSync({ abrainHome: ABRAIN_HOME })
       .then(async (result) => {
-        const fetchEvent = result.events.find((event) => event.op === "fetch");
-        if (fetchEvent) {
-          await maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(fetchEvent, {
+        const fetchEvents = result.events.filter((event) => event.op === "fetch");
+        const fetchEvent = fetchEvents.at(-1);
+        const convergedFetch = fetchEvents.slice().reverse().find((event) => event.result === "ok" && (event.merged ?? 0) > 0);
+        const refreshEvent = convergedFetch ?? fetchEvent;
+        if (refreshEvent) {
+          await maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync(refreshEvent, {
             abrainHome: ABRAIN_HOME,
             cwd: args.cwd,
             activeProject: bootActiveProject,
@@ -1459,15 +1468,15 @@ export default function activate(pi: ExtensionAPI): void {
           });
         }
 
-        if (fetchEvent?.result === "ok" && (fetchEvent.merged ?? 0) > 0) {
-          announce(`abrain: fast-forwarded ${fetchEvent.merged} commit(s) from the configured upstream`, "info");
-        } else if (fetchEvent?.result === "diverged") {
-          announce(`abrain: configured upstream has diverged - ${fetchEvent.error || "fast-forward unavailable"}. Run /abrain sync after resolving the branch state.`, "warning");
+        if (convergedFetch) {
+          announce(`abrain: converged ${convergedFetch.merged} commit(s) from the configured upstream`, "info");
+        } else if (fetchEvent?.result === "conflict") {
+          announce(`abrain: deterministic device join blocked by a real content conflict - ${fetchEvent.error || "typed conflict"}. Canonical mutation remains fail-closed.`, "warning");
         } else if (fetchEvent && fetchEvent.result !== "ok" && fetchEvent.result !== "noop" && fetchEvent.result !== "skipped") {
-          announce(`abrain: device fetch/fast-forward ${fetchEvent.result} - ${fetchEvent.error || "unknown"}. Startup continues; use /abrain sync to retry.`, "warning");
+          announce(`abrain: device fetch/join ${fetchEvent.result} - ${fetchEvent.error || "unknown"}. Startup continues; convergence will retry later.`, "warning");
         }
 
-        const pushEvent = result.events.find((event) => event.op === "push");
+        const pushEvent = result.events.filter((event) => event.op === "push").at(-1);
         if (pushEvent && pushEvent.result !== "ok" && pushEvent.result !== "noop" && pushEvent.result !== "skipped") {
           announce(`abrain: device push ${pushEvent.result} - ${pushEvent.error || "unknown"}. Local startup remains available; use /abrain sync to retry.`, "warning");
         }
@@ -2900,37 +2909,36 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
       // are invalid. Only explicit valid enabled=false may use legacy commits.
       await awaitAbrainCanonicalWriteBarrier();
       const canonicalBindEnabled = canonicalGitRuntimeEnabled();
-      const result = await bindAbrainProject({
-        abrainHome: ABRAIN_HOME,
-        cwd: commandCwd,
-        projectId: parsed.projectId,
-      });
-      // PR-1 R2 review fix (gpt-5.5 BLOCKING-1, 2026-06-10): autoCommitPaths
-      // is execFileSync (blocks the event loop while running), but a bg
-      // sediment commit / detached device push subprocess spawned
-      // before this handler ran keeps executing in the kernel and can still
-      // contend the abrain `.git/index.lock`. Enqueue through the shared
-      // per-repo chain so we don't START until prior abrain git ops settled.
-      // autoCommitPaths keeps its sync signature (smoke-abrain-secret-scope
-      // exercises it directly); serialization lives at this call site.
-      const projectCommit = await gitSingleFlight(result.projectRoot, async () =>
-        autoCommitPaths(
+      const bindAndCommit = async () => {
+        const result = await bindAbrainProject({
+          abrainHome: ABRAIN_HOME,
+          cwd: commandCwd,
+          projectId: parsed.projectId,
+        });
+        // The project repository has its own single-flight key. The abrain
+        // worktree write and canonical drain remain inside one OFD barrier.
+        const commitProjectManifest = async () => autoCommitPaths(
           result.projectRoot,
           [".abrain-project.json"],
           `chore: 绑定 abrain 项目 ${result.projectId}`,
-        ));
-      const abrainCommit = canonicalBindEnabled
-        ? await canonicalAutoCommitAbrainPaths(
-            ABRAIN_HOME,
-            [".gitignore", `projects/${result.projectId}/_project.json`],
-            `project: add ${result.projectId}`,
-          )
-        : await gitSingleFlight(ABRAIN_HOME, async () =>
-            autoCommitPaths(
+        );
+        const projectCommit = path.resolve(result.projectRoot) === path.resolve(ABRAIN_HOME)
+          ? await commitProjectManifest()
+          : await gitSingleFlight(result.projectRoot, commitProjectManifest);
+        const abrainCommit = canonicalBindEnabled
+          ? await canonicalAutoCommitAbrainPaths(
+              ABRAIN_HOME,
+              [".gitignore", `projects/${result.projectId}/_project.json`],
+              `project: add ${result.projectId}`,
+            )
+          : autoCommitPaths(
               ABRAIN_HOME,
               [".gitignore", `projects/${result.projectId}/_project.json`],
               `project: 添加 ${result.projectId}`,
-            ));
+            );
+        return { result, projectCommit, abrainCommit };
+      };
+      const { result, projectCommit, abrainCommit } = await withCanonicalMutationBarrier(ABRAIN_HOME, bindAndCommit);
       bootActiveProject = snapshotBootActiveProject(commandCwd);
       bootActiveProjectAt = Date.now();
       const commitWarning = autoCommitNeedsWarning(projectCommit) || autoCommitNeedsWarning(abrainCommit);

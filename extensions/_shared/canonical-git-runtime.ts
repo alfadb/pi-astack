@@ -11,14 +11,23 @@ import {
 } from "./canonical-l2-contract";
 import {
   cohortPlanSemanticRoot,
+  convergeExactCohortIndex,
+  LOCAL_DRAIN_METADATA_CHECKPOINT_PROTOCOL_V1,
   LOCAL_DRAIN_PROTOCOL_V3,
   prepareExactCohortCommit,
+  publishExactCohortCommit,
   resolveRef,
   snapshotIndexEntries,
   type CohortPlanEntry,
 } from "./git-exact-cohort";
 import { gitSingleFlight } from "./git-singleflight";
+import {
+  canonicalMutationBarrierHeld,
+  withCanonicalMutationBarrier,
+  withCanonicalMutationBarrierInSingleFlight,
+} from "./canonical-mutation-barrier";
 import { parseGitStatusPorcelainV1Z, type GitPorcelainV1Record } from "./git-z-parser";
+import { recoverDeviceJoinJournal } from "./device-join-coordinator";
 import {
   RECOVERY_LANE_BUDGETS,
   claimNextRecoverySlotV3,
@@ -49,6 +58,11 @@ const GLOBAL_KEY = Symbol.for("pi-astack/canonical-git-runtime/v1");
 const API_VERSION = 1;
 const SETTINGS_MODE = "local_convergence_v2" as const;
 const MAX_DIAGNOSTIC_TAIL = 64;
+const RECOVERY_METADATA_ENVELOPE_SCHEMAS = new Set([
+  "drain-recovery-envelope/v1",
+  "local-drain-recovery-envelope/v2",
+  "local-drain-recovery-envelope/v3",
+]);
 
 export interface CanonicalGitRuntimeSettings {
   enabled: boolean;
@@ -89,6 +103,14 @@ function isCanonicalContentOwner(owner: ProducedArtifactOwner): boolean {
 
 type DrainGenerationPolicy = "steady_writer" | "startup_content_backlog";
 type ValidatedArtifact = { receipt: ProducedArtifact; content?: Buffer };
+type RecoveryMetadataRecord = WholeL1ScanResult["all"][number];
+
+interface RecoveryMetadataCheckpointBacklog {
+  readonly head: string;
+  readonly statusHash: string;
+  readonly scan: WholeL1ScanResult;
+  readonly artifacts: readonly ValidatedArtifact[];
+}
 
 /** Metadata-only means exactly a non-empty cohort of validated runtime metadata. */
 function isCanonicalMetadataOnlyCohort(artifacts: readonly ValidatedArtifact[] | readonly ProducedArtifact[]): boolean {
@@ -203,6 +225,8 @@ export interface CanonicalGitRuntimeOptions {
   settingsPath?: string;
   sourceRoot?: string;
   refName?: string;
+  /** Primarily for bounded hosts/tests; production defaults to the barrier's 30s timeout. */
+  startupBarrierTimeoutMs?: number;
 }
 
 export interface CanonicalGitRuntime {
@@ -210,6 +234,7 @@ export interface CanonicalGitRuntime {
   recoverAtStartup(): Promise<void>;
   requestDrain(receipts: readonly ProducedArtifact[], message?: string): Promise<DrainResult>;
   requestBacklogPreflight(): Promise<BacklogPreflightResult>;
+  settleForDeviceJoin(): Promise<void>;
   diagnostics(): CanonicalRuntimeDiagnostics;
 }
 
@@ -359,6 +384,9 @@ function sourcePaths(sourceRoot: string, settingsPath: string): Array<[string, s
     ["orchestrator", path.join(sourceRoot, "extensions/_shared/canonical-git-runtime.ts")],
     ["dossier-evidence-validator", path.join(sourceRoot, "extensions/_shared/p1a-dossier-evidence.ts")],
     ["singleflight", path.join(sourceRoot, "extensions/_shared/git-singleflight.ts")],
+    ["mutation-barrier", path.join(sourceRoot, "extensions/_shared/canonical-mutation-barrier.ts")],
+    ["retained-directory-ofd-lock", path.join(sourceRoot, "extensions/_shared/retained-directory-ofd-lock.ts")],
+    ["device-join-coordinator", path.join(sourceRoot, "extensions/_shared/device-join-coordinator.ts")],
     ["git-z-parser", path.join(sourceRoot, "extensions/_shared/git-z-parser.ts")],
     ["recovery", path.join(sourceRoot, "extensions/_shared/convergence-recovery.ts")],
     ["recovery-history-classifier", path.join(sourceRoot, "extensions/_shared/recovery-history-classifier.ts")],
@@ -375,6 +403,7 @@ function sourcePaths(sourceRoot: string, settingsPath: string): Array<[string, s
     ["constraint-renderer", path.join(sourceRoot, "extensions/sediment/constraint-compiler/render.ts")],
     ["constraint-normalizer", path.join(sourceRoot, "extensions/sediment/constraint-compiler/normalize.ts")],
     ["constraint-auto-refresh", path.join(sourceRoot, "extensions/sediment/constraint-compiler/auto-refresh.ts")],
+    ["constraint-event-integration", path.join(sourceRoot, "extensions/sediment/constraint-evidence/integration.ts")],
     ["git-sync", path.join(sourceRoot, "extensions/abrain/git-sync.ts")],
     ["abrain-index", path.join(sourceRoot, "extensions/abrain/index.ts")],
     ["sediment-index", path.join(sourceRoot, "extensions/sediment/index.ts")],
@@ -591,6 +620,43 @@ async function isLegacyReadOnlyL1(repo: string, rel: string): Promise<boolean> {
   catch (error) { throw new CanonicalGitRuntimeError("L1_INVALID", "L1 artifact is not valid JSON", { rel, error: String(error) }); }
   const validated = validateL1Envelope(parsed, { registry: loadL1SchemaRegistry(), abrainHome: repo, filePath: path.join(repo, rel), relativePath: rel });
   return validated.registration.phase === "legacy_read_only";
+}
+
+function isRecoveryMetadataRecord(record: RecoveryMetadataRecord | undefined): record is RecoveryMetadataRecord {
+  return !!record
+    && record.registration.domain === "canonical_path"
+    && record.registration.role === "meta"
+    && (record.registration.phase === "active" || record.registration.phase === "legacy_read_only")
+    && RECOVERY_METADATA_ENVELOPE_SCHEMAS.has(record.registration.envelope_schema);
+}
+
+async function validateRecoveryMetadataArtifact(repo: string, record: RecoveryMetadataRecord): Promise<ValidatedArtifact> {
+  const rel = record.relativePath;
+  if (!rel || !isRecoveryMetadataRecord(record)) {
+    throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_OWNER_INVALID", "metadata checkpoint record has no strict recovery ownership");
+  }
+  const filePath = path.join(repo, ...rel.split("/"));
+  const rawReceipt = await createProducedArtifactReceipt({ abrainHome: repo, filePath, owner: "canonical_path_meta", sourceIds: [record.eventId] });
+  const content = await readArtifactBytes(repo, rawReceipt);
+  if (!content) throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_DELETE_FORBIDDEN", "recovery metadata checkpoint is append-only", { path: rel });
+  let parsed: unknown;
+  try { parsed = JSON.parse(content.toString("utf-8")); }
+  catch { throw new CanonicalGitRuntimeError("L1_INVALID", "recovery metadata checkpoint artifact is not JSON", { path: rel }); }
+  const live = validateL1Envelope(parsed, {
+    registry: loadL1SchemaRegistry(),
+    abrainHome: repo,
+    filePath,
+    relativePath: rel,
+  });
+  if (!isRecoveryMetadataRecord({ ...record, registration: live.registration } as RecoveryMetadataRecord)
+    || live.eventId !== record.eventId
+    || live.envelopeHash !== record.envelopeHash) {
+    throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_OWNERSHIP_DRIFT", "recovery metadata ownership changed after whole-L1 validation", { path: rel });
+  }
+  return {
+    receipt: Object.freeze({ ...rawReceipt, owner: "canonical_path_meta", sourceIds: Object.freeze([record.eventId]) }),
+    content,
+  };
 }
 
 function knowledgeIdentityFromL2Path(rel: string): string {
@@ -850,6 +916,16 @@ async function classifyHistoricalRecovery(repo: string, scan: WholeL1ScanResult,
   return history;
 }
 
+function recoveryHistoryScanRoot(scan: WholeL1ScanResult): string {
+  return sha256Hex(JSON.stringify(scan.all.map((record) => [
+    record.relativePath ?? null,
+    record.eventId,
+    record.envelopeHash,
+    record.classification,
+    record.registration.envelope_schema,
+  ])));
+}
+
 async function pruneNoops(repo: string, frozen: string, plan: readonly CohortPlanEntry[]): Promise<CohortPlanEntry[]> {
   const pruned: CohortPlanEntry[] = [];
   for (const entry of plan) {
@@ -887,6 +963,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   private blockedReason?: string;
   private ownerAlert = false;
   private frozenOwnershipContext?: { statusHash: string; context: CanonicalOwnershipContext };
+  private recoveryHistoryCache?: { head: string; scanRoot: string; result: CombinedRecoveryHistoryResult };
   private readonly tail: Record<string, unknown>[] = [];
 
   constructor(args: { repo: string; options: CanonicalGitRuntimeOptions; settings: CanonicalGitRuntimeSettings; sourceRoot: string; provenance: readonly LoadedProvenanceEntry[] }) {
@@ -901,6 +978,15 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   private record(row: Record<string, unknown>): void {
     this.tail.push(Object.freeze({ at: new Date().toISOString(), ...row }));
     if (this.tail.length > MAX_DIAGNOSTIC_TAIL) this.tail.splice(0, this.tail.length - MAX_DIAGNOSTIC_TAIL);
+  }
+
+  private async classifyHistoricalRecoveryCached(scan: WholeL1ScanResult, head: string): Promise<CombinedRecoveryHistoryResult> {
+    const scanRoot = recoveryHistoryScanRoot(scan);
+    const cached = this.recoveryHistoryCache;
+    if (cached?.head === head && cached.scanRoot === scanRoot) return cached.result;
+    const result = await classifyHistoricalRecovery(this.repo, scan, head);
+    this.recoveryHistoryCache = { head, scanRoot, result };
+    return result;
   }
 
   diagnostics(): CanonicalRuntimeDiagnostics {
@@ -928,7 +1014,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
 
   awaitStartup(): Promise<CanonicalRuntimeDiagnostics> {
     if (!this.startupPromise) {
-      this.startupPromise = gitSingleFlight(this.repo, async () => {
+      const created = gitSingleFlight(this.repo, () => withCanonicalMutationBarrierInSingleFlight(this.repo, async () => {
         if (!this.settings.enabled || !this.settings.valid) {
           this.startupState = "ready";
           this.record({ operation: "startup", status: "legacy_boundary", reason: this.settings.reason });
@@ -938,6 +1024,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         this.blockedReason = undefined;
         this.ownerAlert = false;
         try {
+          await recoverDeviceJoinJournal({ repo: this.repo });
           await this.recoverAtStartupUnlocked();
           const backlog = await this.requestBacklogPreflightUnlocked();
           if (backlog.status === "ready") {
@@ -958,7 +1045,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
           } else if (backlog.status === "blocked") throw new CanonicalGitRuntimeError("STARTUP_BACKLOG_BLOCKED", backlog.reason ?? "backlog preflight blocked");
           const finalScan = await scanWholeL1Validated({ abrainHome: this.repo });
           const finalHead = await resolveRef(this.repo, this.options.refName);
-          await classifyHistoricalRecovery(this.repo, finalScan, finalHead);
+          await this.classifyHistoricalRecoveryCached(finalScan, finalHead);
           const finalRecovery = recoverOpenRecoveryEpisodesV3FromScan(finalScan);
           if (finalRecovery.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", `active v3 recovery classification failed: ${quarantineReason("v3", finalRecovery.quarantined)}`, { protocol: "v3", quarantined: finalRecovery.quarantined });
           this.startupState = "ready";
@@ -970,20 +1057,29 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
           this.record({ operation: "startup", status: "blocked", reason: this.blockedReason, ...(this.ownerAlert ? { ownerAlert: true } : {}) });
         }
         return this.diagnostics();
+      }, this.options.startupBarrierTimeoutMs === undefined ? {} : { timeoutMs: this.options.startupBarrierTimeoutMs }));
+      this.startupPromise = created;
+      void created.catch(() => {
+        // Barrier acquisition rejects before the startup body's blocked-state
+        // conversion. Evict that rejected instance promise so a repaired or
+        // newly-uncontended repository can retry in this process.
+        if (this.startupPromise === created) this.startupPromise = undefined;
       });
     }
     return this.startupPromise;
   }
 
   async recoverAtStartup(): Promise<void> {
-    return gitSingleFlight(this.repo, () => this.recoverAtStartupUnlocked());
+    if (canonicalMutationBarrierHeld(this.repo)) return this.recoverAtStartupUnlocked();
+    return gitSingleFlight(this.repo, () => withCanonicalMutationBarrierInSingleFlight(this.repo, () => this.recoverAtStartupUnlocked()));
   }
 
   private async recoverAtStartupUnlocked(): Promise<void> {
     await this.mutationPreflight();
+    await this.recoverMetadataCheckpointIndexUnlocked();
     const head = await resolveRef(this.repo, this.options.refName);
     const scan = await scanWholeL1Validated({ abrainHome: this.repo });
-    const combined = await classifyHistoricalRecovery(this.repo, scan, head);
+    const combined = await this.classifyHistoricalRecoveryCached(scan, head);
     const history = combined.v2;
     const v3History = combined.v3!;
     this.record({ operation: "classify_v2_history", status: "accepted", episodes: history.episodes.length, joins: history.joins.length, consumed: history.consumedEventIds.length, writableFrontierCount: history.writableFrontierCount });
@@ -1016,6 +1112,195 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         throw new CanonicalGitRuntimeError("RECOVERY_V3_LIVENESS", "startup could not settle an open v3 episode within its fixed slot budget", { episodeId: initial.episodeId, lastClaimedSlot: final.lastClaimedSlot });
       }
     }
+  }
+
+  private async recoveryMetadataArtifactsForStatus(
+    status: { rows: readonly GitPorcelainV1Record[] },
+    scan: WholeL1ScanResult,
+    head: string,
+  ): Promise<ValidatedArtifact[]> {
+    const records = new Map(scan.all.map((record) => [record.relativePath, record]));
+    const artifacts: ValidatedArtifact[] = [];
+    for (const row of status.rows) {
+      if (row.sourcePath || row.paths.length !== 1 || row.status !== "??") {
+        throw new CanonicalGitRuntimeError(
+          "DEVICE_JOIN_METADATA_DIRTY_UNKNOWN",
+          "metadata checkpoint accepts only untracked recovery-event puts",
+          { path: row.path, status: row.status, sourcePath: row.sourcePath ?? null },
+        );
+      }
+      const record = records.get(row.path);
+      if (!isRecoveryMetadataRecord(record)) {
+        throw new CanonicalGitRuntimeError(
+          "DEVICE_JOIN_METADATA_DIRTY_UNKNOWN",
+          "dirty path is not strictly validated recovery metadata",
+          { path: row.path, status: row.status },
+        );
+      }
+      if ((await git(this.repo, ["ls-tree", head, "--", row.path], 5_000)).trim()) {
+        throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_NOT_ADD_ONLY", "metadata checkpoint path already exists in HEAD", { path: row.path });
+      }
+      artifacts.push(await validateRecoveryMetadataArtifact(this.repo, record));
+    }
+    const index = await snapshotIndexEntries(this.repo, artifacts.map((artifact) => artifact.receipt.path));
+    if (index.size) {
+      throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_INDEX_DIRTY", "metadata checkpoint path already exists in the shared index", {
+        paths: [...index.keys()].sort(compareAscii),
+      });
+    }
+    return artifacts.sort((left, right) => compareAscii(left.receipt.path, right.receipt.path));
+  }
+
+  private async freezeRecoveryMetadataCheckpointBacklogUnlocked(): Promise<RecoveryMetadataCheckpointBacklog> {
+    await this.mutationPreflight();
+    const head = await resolveRef(this.repo, this.options.refName);
+    const firstStatus = await statusSnapshot(this.repo);
+    const firstScan = await scanWholeL1Validated({ abrainHome: this.repo });
+    await this.classifyHistoricalRecoveryCached(firstScan, head);
+    const firstArtifacts = await this.recoveryMetadataArtifactsForStatus(firstStatus, firstScan, head);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const secondStatus = await statusSnapshot(this.repo);
+    if (firstStatus.hash !== secondStatus.hash) {
+      throw new CanonicalGitRuntimeError("STATUS_DRIFT", "repository status changed while freezing the metadata checkpoint");
+    }
+    const secondHead = await resolveRef(this.repo, this.options.refName);
+    if (secondHead !== head) throw new CanonicalGitRuntimeError("HEAD_DRIFT", "HEAD changed while freezing the metadata checkpoint", { frozen: head, current: secondHead });
+    const secondScan = await scanWholeL1Validated({ abrainHome: this.repo });
+    await this.classifyHistoricalRecoveryCached(secondScan, head);
+    const artifacts = await this.recoveryMetadataArtifactsForStatus(secondStatus, secondScan, head);
+    if (artifacts.length !== firstArtifacts.length) throw new CanonicalGitRuntimeError("OWNERSHIP_DRIFT", "metadata checkpoint cohort size changed during freeze");
+    for (let index = 0; index < artifacts.length; index += 1) {
+      const first = firstArtifacts[index]!;
+      const second = artifacts[index]!;
+      if (JSON.stringify(first.receipt) !== JSON.stringify(second.receipt) || !first.content?.equals(second.content!)) {
+        throw new CanonicalGitRuntimeError("OWNERSHIP_DRIFT", "metadata checkpoint receipt changed during freeze", { path: second.receipt.path });
+      }
+    }
+    return Object.freeze({ head, statusHash: secondStatus.hash, scan: secondScan, artifacts: Object.freeze(artifacts) });
+  }
+
+  /** A metadata checkpoint is self-describing in HEAD. If CAS succeeded before
+   * a crash but the shared index did not converge, reconstruct the exact
+   * add-only cohort from HEAD and finish only that index transition. */
+  private async recoverMetadataCheckpointIndexUnlocked(): Promise<void> {
+    const head = await resolveRef(this.repo, this.options.refName);
+    const parentLine = (await git(this.repo, ["rev-list", "--parents", "-n", "1", head], 5_000)).trim().split(/\s+/);
+    if (parentLine.length !== 2 || parentLine[0] !== head) return;
+    const parent = parentLine[1]!;
+    const paths = nulPaths(await gitBuffer(this.repo, ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z", parent, head]));
+    if (!paths.length) return;
+
+    const scan = await scanWholeL1Validated({ abrainHome: this.repo });
+    const records = new Map(scan.all.map((record) => [record.relativePath, record]));
+    if (paths.some((rel) => !isRecoveryMetadataRecord(records.get(rel)))) return;
+    await this.classifyHistoricalRecoveryCached(scan, head);
+
+    const artifacts: ValidatedArtifact[] = [];
+    const targets = new Map<string, string>();
+    for (const rel of paths.sort(compareAscii)) {
+      if ((await git(this.repo, ["ls-tree", parent, "--", rel], 5_000)).trim()) return;
+      const record = records.get(rel)!;
+      const artifact = await validateRecoveryMetadataArtifact(this.repo, record);
+      const treeLine = (await git(this.repo, ["ls-tree", head, "--", rel], 5_000)).trim();
+      const tab = treeLine.indexOf("\t");
+      const meta = tab < 0 ? [] : treeLine.slice(0, tab).split(/\s+/);
+      if (meta.length !== 3 || meta[1] !== "blob" || meta[0] !== artifact.receipt.mode || meta[2] === undefined) return;
+      const headBytes = await gitBuffer(this.repo, ["show", `${head}:${rel}`], 5_000);
+      if (!artifact.content?.equals(headBytes)) {
+        throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_WORKTREE_DRIFT", "checkpoint worktree bytes differ from HEAD", { path: rel });
+      }
+      targets.set(rel, `${meta[0]} ${meta[2]} 0`);
+      artifacts.push(artifact);
+    }
+
+    const currentIndex = await snapshotIndexEntries(this.repo, paths);
+    if (paths.every((rel) => currentIndex.get(rel) === targets.get(rel))) return;
+    const allowed = new Set(paths);
+    const status = await statusSnapshot(this.repo);
+    for (const row of status.rows) {
+      if (row.paths.some((rel) => !allowed.has(rel))) {
+        throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_RECOVERY_DIRTY_UNKNOWN", "unknown dirty path blocks metadata checkpoint index recovery", { path: row.path, status: row.status });
+      }
+    }
+
+    const plan: CohortPlanEntry[] = artifacts.map(({ receipt, content }) => ({ path: receipt.path, op: "put", mode: receipt.mode!, content: content! }));
+    const prepared = await prepareExactCohortCommit({
+      repo: this.repo,
+      refName: this.options.refName,
+      frozenCommit: parent,
+      plan,
+      message: "recover metadata checkpoint index",
+      protocolVersion: LOCAL_DRAIN_METADATA_CHECKPOINT_PROTOCOL_V1,
+    });
+    if (prepared.candidate !== head) return;
+    await preflightSharedIndexLock(this.repo);
+    await convergeExactCohortIndex({ repo: this.repo, refName: this.options.refName, cohortPaths: paths, frozenIndexSnapshot: new Map() });
+    const after = await statusSnapshot(this.repo);
+    if (after.rows.length) throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_RECOVERY_INCOMPLETE", "metadata checkpoint index recovery did not restore a clean repository");
+    this.record({ operation: "metadata_checkpoint", status: "index_recovered", commit: head, cohortSize: paths.length });
+  }
+
+  private async checkpointRecoveryMetadataForDeviceJoinUnlocked(): Promise<string | null> {
+    const backlog = await this.freezeRecoveryMetadataCheckpointBacklogUnlocked();
+    if (!backlog.artifacts.length) return null;
+    const plan: CohortPlanEntry[] = backlog.artifacts.map(({ receipt, content }) => ({
+      path: receipt.path,
+      op: "put",
+      mode: receipt.mode!,
+      content: content!,
+    }));
+    const frozenIndexSnapshot = await snapshotIndexEntries(this.repo, plan.map((entry) => entry.path));
+    if (frozenIndexSnapshot.size) throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_INDEX_DIRTY", "metadata checkpoint freeze found staged cohort paths");
+    const prepared = await prepareExactCohortCommit({
+      repo: this.repo,
+      refName: this.options.refName,
+      frozenCommit: backlog.head,
+      plan,
+      message: "device join recovery metadata checkpoint",
+      protocolVersion: LOCAL_DRAIN_METADATA_CHECKPOINT_PROTOCOL_V1,
+    });
+
+    const final = await this.freezeRecoveryMetadataCheckpointBacklogUnlocked();
+    if (final.head !== backlog.head || final.statusHash !== backlog.statusHash || final.artifacts.length !== backlog.artifacts.length) {
+      throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_FREEZE_DRIFT", "metadata checkpoint changed before CAS");
+    }
+    for (let index = 0; index < final.artifacts.length; index += 1) {
+      const before = backlog.artifacts[index]!;
+      const after = final.artifacts[index]!;
+      if (JSON.stringify(before.receipt) !== JSON.stringify(after.receipt) || !before.content?.equals(after.content!)) {
+        throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_FREEZE_DRIFT", "metadata checkpoint bytes changed before CAS", { path: after.receipt.path });
+      }
+    }
+
+    const published = await publishExactCohortCommit({
+      repo: this.repo,
+      refName: this.options.refName,
+      candidate: prepared.candidate,
+      frozenCommit: prepared.frozenCommit,
+    });
+    if ((published.status !== "published" && published.status !== "already_published") || published.currentRef !== prepared.candidate) {
+      throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_CAS_CONFLICT", "metadata checkpoint lost its local ref CAS", { published });
+    }
+    await preflightSharedIndexLock(this.repo);
+    await convergeExactCohortIndex({
+      repo: this.repo,
+      refName: this.options.refName,
+      cohortPaths: prepared.entries.map((entry) => entry.path),
+      frozenIndexSnapshot,
+    });
+    const finalHead = await resolveRef(this.repo, this.options.refName);
+    const finalScan = await scanWholeL1Validated({ abrainHome: this.repo });
+    await this.classifyHistoricalRecoveryCached(finalScan, finalHead);
+    const beforeIds = backlog.scan.all.map((record) => record.eventId).sort(compareAscii);
+    const afterIds = finalScan.all.map((record) => record.eventId).sort(compareAscii);
+    if (finalHead !== prepared.candidate || JSON.stringify(beforeIds) !== JSON.stringify(afterIds)) {
+      throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_VERIFY_FAILED", "metadata checkpoint changed HEAD or recovery event inventory unexpectedly");
+    }
+    const finalStatus = await statusSnapshot(this.repo);
+    if (finalStatus.rows.length) throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_VERIFY_DIRTY", "metadata checkpoint did not leave a clean repository");
+    this.record({ operation: "metadata_checkpoint", status: "index_converged", commit: prepared.candidate, cohortSize: prepared.entries.length });
+    return prepared.candidate;
   }
 
   requestBacklogPreflight(): Promise<BacklogPreflightResult> {
@@ -1076,7 +1361,36 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   async requestDrain(receipts: readonly ProducedArtifact[], message = "abrain: canonical artifact drain"): Promise<DrainResult> {
     const startup = await this.awaitStartup();
     if (startup.startup === "blocked") return { status: "blocked", localCommit: "not_published", reason: startup.blockedReason, ...(startup.ownerAlert ? { ownerAlert: true } : {}) };
-    return gitSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message, "steady_writer"));
+    if (canonicalMutationBarrierHeld(this.repo)) return this.requestDrainUnlocked(receipts, message, "steady_writer");
+    return gitSingleFlight(this.repo, () => withCanonicalMutationBarrierInSingleFlight(this.repo, () => this.requestDrainUnlocked(receipts, message, "steady_writer")));
+  }
+
+  async settleForDeviceJoin(): Promise<void> {
+    if (!this.settings.valid) {
+      throw new CanonicalGitRuntimeError(
+        "CANONICAL_GIT_SETTINGS_INVALID",
+        `canonicalGitRuntime settings are ${this.settings.reason}: ${this.settings.settingsPath}`,
+        { reason: this.settings.reason, settingsPath: this.settings.settingsPath },
+      );
+    }
+    if (!this.settings.enabled) return;
+    const settle = async () => {
+      await this.recoverAtStartupUnlocked();
+      const backlog = await this.requestBacklogPreflightUnlocked();
+      if (backlog.status === "blocked") throw new CanonicalGitRuntimeError("DEVICE_JOIN_BACKLOG_BLOCKED", backlog.reason ?? "canonical backlog preflight blocked");
+      if (backlog.status === "ready" && !isCanonicalMetadataOnlyCohort(backlog.receipts)) {
+        if (!backlog.receipts.some((receipt) => isCanonicalContentOwner(receipt.owner))) {
+          throw new CanonicalGitRuntimeError("DEVICE_JOIN_CONTENT_AUTHORIZATION_REQUIRED", "device join may drain only validated Knowledge/Constraint L1/L2 backlog");
+        }
+        const drained = await this.requestDrainUnlocked(backlog.receipts, "device-join-canonical-drain", "startup_content_backlog");
+        if (!["index_converged", "empty", "metadata_deferred", "consumed"].includes(drained.status)) {
+          throw new CanonicalGitRuntimeError("DEVICE_JOIN_DRAIN_NOT_DURABLE", `canonical drain ended in ${drained.status}: ${drained.reason ?? "no reason"}`);
+        }
+      }
+      await this.checkpointRecoveryMetadataForDeviceJoinUnlocked();
+    };
+    if (canonicalMutationBarrierHeld(this.repo)) return settle();
+    return withCanonicalMutationBarrier(this.repo, settle);
   }
 
   private async requestDrainUnlocked(receipts: readonly ProducedArtifact[], message: string, generationPolicy: DrainGenerationPolicy): Promise<DrainResult> {
@@ -1159,7 +1473,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     // already passes U* classification. This check occurs before claim, blob,
     // tree, or commit-object creation.
     const genesisScan = await scanWholeL1Validated({ abrainHome: this.repo });
-    await classifyHistoricalRecovery(this.repo, genesisScan, frozenCommit);
+    await this.classifyHistoricalRecoveryCached(genesisScan, frozenCommit);
     const activeV3 = recoverOpenRecoveryEpisodesV3FromScan(genesisScan);
     if (activeV3.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", `v3 genesis rejected by malformed active history: ${quarantineReason("v3", activeV3.quarantined)}`, { protocol: "v3", quarantined: activeV3.quarantined });
 
@@ -1322,6 +1636,7 @@ function canonicalStartupKey(options: CanonicalGitRuntimeOptions): string {
     path.resolve(options.settingsPath ?? defaultSettingsPath()),
     path.resolve(options.sourceRoot ?? path.join(__dirname, "..", "..")),
     options.refName ?? "refs/heads/main",
+    options.startupBarrierTimeoutMs ?? null,
   ]);
 }
 

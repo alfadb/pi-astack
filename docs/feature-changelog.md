@@ -11,6 +11,24 @@ status: active
 
 ---
 
+## 2026-07-20 — accepted — Abrain automatic multi-device convergence
+
+### 变更
+
+Abrain device delivery从`fetch + ff-only + push`升级为自动确定性收敛：唯一merge-base完整tree join、L1 add-only精确并集、注册L2从union L1版本化全量重建、普通tracked路径文件级三方选择，以及exact-OID upstream push。真实双侧内容冲突typed fail-closed；merge-tree、rebase、force push与LLM merge不进入协议。
+
+### 验收边界
+
+per-repo OFD barrier覆盖`gitCommit:true` canonical/legacy writer、projector确定性落盘+commit/CAS与join mutation；constraint LLM compile/verifier保留专用compiler lock但在OFD外运行，publish前重验冻结HEAD和input root/event set。global singleton lease兼容jiti module copies且阻止detached continuation继承已释放锁，bind detached push显式退出barrier ALS。完整`H -> M` journal支持CAS各崩溃窗口恢复，publish前验证全部delta path；普通ignored碰撞pre-CAS拒绝，仅registered L2旧untracked+ignored投影可安全迁移并清旧manifest ignore行。恢复只接受exact H/M，且只清理与journal M blob前缀验证一致的协议atomic temp；未知dirty保持fail-closed。清journal前验证HEAD/index/全部tracked worktree及L1/L2。writer delivery与push rejection均执行有界fetch/join/push；网络、认证与timeout保持fail-soft。`l2/views/knowledge/latest/manifest.json`继续作为tracked canonical L2。startup barrier获取超时的rejected promise可在同进程重试。首次切换必须重启所有旧实例。
+
+### 非目标
+
+不管理remote、upstream、认证、transport或hooks；不把真实内容冲突交给LLM或日常用户人工合并；不修改`~/.abrain`生产数据。
+
+### 关联
+
+[ADR 0020](adr/0020-abrain-auto-sync-to-remote.md)；[Direction](direction.md#inv-sync-deterministic-merge同步只走确定性合并adr-0020)；[Smoke reference](reference/smoke-tests.md)。
+
 ## 2026-07-17 — accepted — ADR 0040 lifecycle freshness closure
 
 ### 变更
