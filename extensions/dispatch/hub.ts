@@ -8,12 +8,15 @@
  * aggregate. This is NOT advisory-shadow: the assignment is executed, so the
  * online evaluation harness (ADR 0030 §5) gets real outcomes to judge.
  *
- * Cage (ADR 0030 §4): worker count hard-capped at HARD_MAX_WORKERS; workers
- * read-only by default (WORKER_TOOLS + hub prompt — not a hard tool cap; same
- * posture as dispatch after the 2026-06-16 env-gate removal); NO cost gate
- * (INV-COST-NOT-A-GATE — cost is report-only);
- * dispatch.hub.enabled default false (tool is not registered when off);
- * vendor diversity is preferred and flagged in audit, but isolation is the invariant.
+ * Cage (ADR 0030 §4): worker count hard-capped at HARD_MAX_WORKERS; hub planner
+ * and its dispatched workers are STRUCTURALLY pinned to HUB_TOOLS / WORKER_TOOLS
+ * read-only allowlists (planner-emitted `tools` cannot grant bash/edit/write or
+ * any other extra capability — fail-closed ignore+audit at validate, re-asserted
+ * at execute). This is hub-local: direct dispatch_agent/dispatch_parallel still
+ * allow explicit implementation tools. NO cost gate (INV-COST-NOT-A-GATE — cost
+ * is report-only); dispatch.hub.enabled default false (tool is not registered
+ * when off); vendor diversity is preferred and flagged in audit, but isolation
+ * is the invariant.
  *
  * This module keeps all decision logic in PURE, offline-testable functions
  * (selection / parse / validate / audit-row builders). The orchestration
@@ -51,6 +54,14 @@ type HubToolRenderer = (...args: any[]) => unknown;
  *  gate. settings.dispatch.hub.maxWorkers is clamped to [1, HARD_MAX_WORKERS]
  *  so config can only LOWER it, never raise past the焊死 ceiling. */
 export const HARD_MAX_WORKERS = 8;
+
+/** Fixed read-only allowlist for hub-dispatched workers (ADR 0030 cage).
+ *  Structural pin — planner `tools` cannot expand past this set. */
+export const WORKER_TOOLS =
+  "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide";
+
+/** Fixed read-only allowlist for the hub planner call itself. */
+export const HUB_TOOLS = "read,grep,find,ls,memory_search,memory_get";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -187,7 +198,8 @@ export function buildHubPlanPrompt(opts: {
     "- Isolated worker contexts are the invariant. Prefer DIFFERENT vendors across workers for judgment-heavy tasks when available.",
     `- You (the hub) are vendor "${hubVendor}". For independent-review tasks, prefer workers from OTHER vendors; when unavailable, use cross-model or same-model isolated workers and note the downgrade in rationale.`,
     "- Write a focused, self-contained prompt for each worker (they share NO context with each other).",
-    "- Workers are read-only sub-agents (read/grep/find/ls + optional web/memory). They cannot edit/spawn.",
+    "- Workers are STRUCTURALLY read-only sub-agents (fixed allowlist: read/grep/find/ls + web/memory). They cannot edit/write/bash/spawn.",
+    "- Do NOT emit a per-worker tools field. Any tools request outside the fixed read-only allowlist is ignored (fail-closed); capability cannot be expanded.",
     "",
     "Available models:",
     ...roster.map((m) => `  - ${m}`),
@@ -225,6 +237,64 @@ export function extractFirstJsonObject(text: string): string | undefined {
   return undefined;
 }
 
+/** Split a comma-separated tool CSV into trimmed non-empty names. */
+export function parseHubToolNames(toolsStr: string | undefined): string[] {
+  if (!toolsStr || typeof toolsStr !== "string") return [];
+  return toolsStr.split(",").map((t) => t.trim()).filter(Boolean);
+}
+
+/**
+ * Structural hub tool cage (validate-layer, fail-closed ignore+audit).
+ *
+ * Planner-emitted `tools` MUST NOT grant capability outside the fixed
+ * allowlist. Any non-allowlisted name is recorded in `extras` + `warnings`;
+ * execution tools are always the fixed allowlist CSV. Missing/empty tools
+ * → pin to allowlist with no warning.
+ *
+ * Direct dispatch_agent/dispatch_parallel are unaffected — this helper is
+ * hub-local.
+ */
+export function cageHubTools(
+  requested: string | undefined,
+  allowlistCsv: string,
+): { tools: string; warnings: string[]; extras: string[] } {
+  const allowNames = parseHubToolNames(allowlistCsv);
+  const allowSet = new Set(allowNames.map((n) => n.toLowerCase()));
+  const extras: string[] = [];
+  for (const name of parseHubToolNames(requested)) {
+    if (!allowSet.has(name.toLowerCase())) extras.push(name);
+  }
+  const warnings: string[] = [];
+  if (extras.length > 0) {
+    warnings.push(
+      `hub tools cage: planner requested non-allowlisted tool(s) [${extras.join(", ")}]; ignored, pinned to read-only allowlist`,
+    );
+  }
+  return { tools: allowlistCsv, warnings, extras };
+}
+
+/**
+ * Execution-layer secondary defense against parser/validate regression.
+ * Returns ok:false (fail-closed refuse) if `tools` contains any name outside
+ * the allowlist — callers MUST NOT run the worker with escaped tools.
+ * On ok, always re-pins to the fixed allowlist CSV.
+ */
+export function assertHubToolsAllowlist(
+  tools: string | undefined,
+  allowlistCsv: string,
+): { ok: true; tools: string } | { ok: false; reason: string; extras: string[] } {
+  const allowSet = new Set(parseHubToolNames(allowlistCsv).map((n) => n.toLowerCase()));
+  const extras = parseHubToolNames(tools).filter((n) => !allowSet.has(n.toLowerCase()));
+  if (extras.length > 0) {
+    return {
+      ok: false,
+      reason: `hub execution cage: tools escape read-only allowlist: ${extras.join(", ")}`,
+      extras,
+    };
+  }
+  return { ok: true, tools: allowlistCsv };
+}
+
 export function parseHubPlan(text: string): { ok: true; plan: HubPlan } | { ok: false; error: string } {
   const json = extractFirstJsonObject(text);
   if (!json) return { ok: false, error: "no JSON object found in hub output" };
@@ -244,6 +314,8 @@ export function parseHubPlan(text: string): { ok: true; plan: HubPlan } | { ok: 
     const role = typeof wr.role === "string" ? wr.role.trim() : "";
     const prompt = typeof wr.prompt === "string" ? wr.prompt : "";
     if (!model || !prompt) continue;
+    // Preserve planner-emitted tools for cage inspection in validateHubPlan.
+    // Capability is NOT granted here — validate pins to WORKER_TOOLS fail-closed.
     workers.push({
       model,
       role: role || "worker",
@@ -283,6 +355,14 @@ export function validateHubPlan(plan: HubPlan, opts: {
     warnings.push(`hub proposed ${valid.length} workers; capped to ${cap} (HARD_MAX_WORKERS=${HARD_MAX_WORKERS})`);
     valid = valid.slice(0, cap);
   }
+
+  // Structural read-only cage: pin every surviving worker to WORKER_TOOLS.
+  // Planner tools may be inspected for audit warnings but never expand capability.
+  valid = valid.map((w) => {
+    const caged = cageHubTools(w.tools, WORKER_TOOLS);
+    for (const warn of caged.warnings) warnings.push(warn);
+    return { ...w, tools: caged.tools };
+  });
 
   const hubVendor = vendorOf(hubModel);
   const sameVendorAsHub = valid.filter((w) => vendorOf(w.model) === hubVendor).length;
@@ -467,9 +547,6 @@ export interface HubDeps {
   readConfig: () => { hub: HubSettings; roster: string[]; flagshipModels: string[]; maxProviderConcurrency: number };
 }
 
-const WORKER_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide";
-const HUB_TOOLS = "read,grep,find,ls,memory_search,memory_get";
-
 /** Register dispatch_hub IFF settings.dispatch.hub.enabled === true.
  *  Default-off → the tool surface is absent (ADR 0030 §4 kill-switch). */
 export function registerHubTool(pi: { registerTool: (def: unknown) => void }, deps: HubDeps): boolean {
@@ -612,13 +689,26 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
       // MAJOR fix (cross-vendor audit): the planning call MUST be try/catch'd —
       // runInProcess can REJECT (getSharedInfra failure / undefined modelRegistry);
       // an unguarded reject would crash the whole tool + skip the audit (C5 breach).
+      // Structural pin: hub planner is always HUB_TOOLS (read-only). Re-assert
+      // via the execution cage so a future constant/parser regression fail-closes.
+      const hubToolsCheck = assertHubToolsAllowlist(HUB_TOOLS, HUB_TOOLS);
+      if (!hubToolsCheck.ok) {
+        return failPlanning(
+          `hub planner tool cage rejected: ${hubToolsCheck.reason}`,
+          "tool_rejected",
+          "",
+          undefined,
+          0,
+        );
+      }
+
       let hubRes: { output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } };
       try {
         hubRes = await runWithTriggerAnchor(hubAnchor, () =>
           deps.runInProcess(
             hubModel, hubCfg.thinking,
             hubAnchor ? `${formatAnchorPromptBlock(hubAnchor)}\n\n${planPrompt}` : planPrompt,
-            signal, timeoutMs, modelRegistry, HUB_TOOLS,
+            signal, timeoutMs, modelRegistry, hubToolsCheck.tools,
             {
               anchor: hubAnchor,
               projectRoot,
@@ -741,39 +831,47 @@ export function registerHubTool(pi: { registerTool: (def: unknown) => void }, de
               workerIndex: i, workerCount: total, model: t.model, role: t.role, promptChars: t.prompt.length,
             }));
             let res: { output: string; error?: string; failureType?: string; durationMs: number; usage?: { input: number; output: number; cost: number } };
-            const toolCheck = deps.validateTools(t.tools ?? WORKER_TOOLS);
-            if (!toolCheck.ok) {
-              res = { output: "", error: `worker[${i}] tool rejected: ${toolCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
+            // Execution-layer secondary cage: refuse if tools escaped the fixed
+            // read-only allowlist (parser/validate regression guard). On ok,
+            // re-pin to WORKER_TOOLS — never honor planner-expanded tools.
+            const cageCheck = assertHubToolsAllowlist(t.tools, WORKER_TOOLS);
+            if (!cageCheck.ok) {
+              res = { output: "", error: `worker[${i}] tool cage rejected: ${cageCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
             } else {
-              try {
-                res = await runWithTriggerAnchor(subAnchor, () =>
-                  deps.runInProcess(
-                    t.model, t.thinking ?? "high",
-                    subAnchor ? `${formatAnchorPromptBlock(subAnchor)}\n\n${t.prompt}` : t.prompt,
-                    signal, timeoutMs, modelRegistry, t.tools ?? WORKER_TOOLS,
-                    {
-                      anchor: subAnchor,
-                      projectRoot,
-                      taskProfile: t.taskProfile,
-                      reasoningTrace: {
-                        dispatchToolCallId: toolCallId,
-                        taskIndex: i,
-                        taskCount: total,
+              const toolCheck = deps.validateTools(cageCheck.tools);
+              if (!toolCheck.ok) {
+                res = { output: "", error: `worker[${i}] tool rejected: ${toolCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
+              } else {
+                try {
+                  res = await runWithTriggerAnchor(subAnchor, () =>
+                    deps.runInProcess(
+                      t.model, t.thinking ?? "high",
+                      subAnchor ? `${formatAnchorPromptBlock(subAnchor)}\n\n${t.prompt}` : t.prompt,
+                      signal, timeoutMs, modelRegistry, cageCheck.tools,
+                      {
+                        anchor: subAnchor,
+                        projectRoot,
+                        taskProfile: t.taskProfile,
+                        reasoningTrace: {
+                          dispatchToolCallId: toolCallId,
+                          taskIndex: i,
+                          taskCount: total,
+                        },
+                        ...(progressTask
+                          ? { onProgress: (p) => progress.applyRunProgress(progressTask, p) }
+                          : {}),
                       },
-                      ...(progressTask
-                        ? { onProgress: (p) => progress.applyRunProgress(progressTask, p) }
-                        : {}),
-                    },
-                  ),
-                );
-              } catch (err) {
-                res = {
-                  output: "",
-                  error: `worker crashed: ${(err as Error)?.message ?? String(err)}`,
-                  failureType: "crash",
-                  durationMs: 0,
-                  ...deps.reasoningTraceFields(err),
-                };
+                    ),
+                  );
+                } catch (err) {
+                  res = {
+                    output: "",
+                    error: `worker crashed: ${(err as Error)?.message ?? String(err)}`,
+                    failureType: "crash",
+                    durationMs: 0,
+                    ...deps.reasoningTraceFields(err),
+                  };
+                }
               }
             }
             if (progressTask) {

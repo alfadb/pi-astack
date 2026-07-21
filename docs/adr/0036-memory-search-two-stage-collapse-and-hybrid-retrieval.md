@@ -9,6 +9,8 @@ status: accepted
 - Date: 2026-06-14
 - Supersedes-direction: 承接 ADR 0035(stage0 embedding 候选检索); 本 ADR 修订 stage1 的存废
 
+> **2026-07-21 实现对齐 walk-back**：stage0 的生产实现不是 rank-score fusion。`orderStage0Candidates` 按固定顺序、allow-set 过滤与 bounded dedup 组池：dense 先占候选窗口（为 freshness 预留槽位），按更新时间把 stale/missing 填入该窗口，再依次追加剩余 dense、sparse、剩余 stale，直到 `stage0MaxCandidates`。本注只校正文档契约，不改变排序算法。
+
 ## 1. 问题: stage1 LLM 是冗余环节, 不是 stage1 surface 太大
 
 ADR 0035 把 stage1 候选面从全库缩到 stage0 向量候选(≤400), 但 stage1 仍用 full-body LLM 从 400 选 50(~324K token/次, cache 命中 0.2%), path-A 每轮 + sediment 去重每轮高频调用, 成本主体。P8 试图用紧凑 surface 压 stage1(83% token 但生产模型 flash recall 掉 13 点), 5×T0 设计 review 一致判定 P8 是绕路: **stage0 的 dense 向量已把候选排好序, stage1 LLM 再从 400 选 50 是在重做 dense 已经做得更好的事 —— stage1 这一层本身冗余, 该删而非压缩。**
@@ -18,7 +20,7 @@ ADR 0035 把 stage1 候选面从全库缩到 stage0 向量候选(≤400), 但 st
 5×T0(opus / gpt-5.5 / deepseek-v4-pro / kimi-k2.6 / minimax-M3)开放讨论后的收敛方向, 按 ROI:
 
 - **(主)两阶段塌缩**: `stage0 hybrid → top-K → stage2 full-body 精排 top-10`, 删 stage1 LLM。stage0 已排序, 直取 top-K 喂 stage2; 安全网 verdict=none 时才回退 stage1 LLM 救场(低频)。
-- **(补盲)BM25 复活**: `search.ts` 已有完整 TF-IDF/BM25 死代码; 当前 `sparseMatchSlugs` 是朴素子串(无 IDF, 中文几乎随机)。用 char n-gram BM25(CJK bigram/trigram, 纯 JS 零依赖)补 dense 的精确符号/短 query/中文盲区, 与 dense 用 RRF 融合。
+- **(补盲)BM25 复活**: `search.ts` 已有完整 TF-IDF/BM25 死代码; 当前 `sparseMatchSlugs` 是朴素子串(无 IDF, 中文几乎随机)。用 char n-gram BM25(CJK bigram/trigram, 纯 JS 零依赖)补 dense 的精确符号/短 query/中文盲区；生产候选池按本 ADR 顶部的有序 hybrid 规则追加 sparse，不做分数融合。
 - **(质量)多向量解 3500 截断**: 单向量截断是强迫 stage1 存在的根因之一; head/tail 或 meta/body/timeline 多向量, reconcile 时一次性付(embedding cost≈0)。从 ADR 0035 §7 deferred 提到本 ADR 主线。
 - **(路由)query 路由**: 规则 regex(非 LLM) —— exact lookup(slug/ADR编号)直接 findEntry 跳 LLM; 符号 query sparse-first; 语义 query dense-first。
 - **(路由)sediment dedup 走 dense-only**: 最高频 stage1 调用是 sediment 去重(每轮 agent_end), 本质近重检测, dense cosine 是最佳工具; 走 dense top-10~20 → LLM 只判 merge, 不走 full-body。dedup 评价≠search 评价(false-merge → corpus corruption, 比漏召严重)。

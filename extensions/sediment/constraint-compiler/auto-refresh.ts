@@ -15,7 +15,7 @@ import { getDeviceId } from "../../_shared/causal-anchor";
 import { fsyncDirectory } from "../../_shared/durable-write";
 import { acquireFileLock, abrainSedimentLocksDir } from "../../_shared/runtime";
 import type { ConstraintShadowRunResult } from "./types";
-import type { SedimentSettings } from "../settings";
+import { resolveSedimentSettings, type SedimentSettings } from "../settings";
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
@@ -61,10 +61,10 @@ interface AutoRefreshGlobalState {
   markerWriteTail?: Promise<void>;
   markerDirectorySyncForTests?: (dir: string) => Promise<void>;
   compilerRunnerForTests?: (trigger: ConstraintShadowAutoRefreshTrigger) => Promise<ConstraintShadowRunResult>;
+  settingsResolverForTests?: () => SedimentSettings;
 }
 
 interface RunOnceOptions {
-  scheduleOnLockContention?: boolean;
   compilerRunnerForTests?: (trigger: ConstraintShadowAutoRefreshTrigger) => Promise<ConstraintShadowRunResult>;
 }
 
@@ -75,6 +75,36 @@ const LIVENESS_STALE_AFTER_MS = 6 * 60 * 60 * 1000;
 const NEEDS_REFRESH_MAX_BYTES = 64 * 1024;
 const NEEDS_REFRESH_MAX_LINES = 200;
 const state: AutoRefreshGlobalState = ((globalThis as unknown as Record<string, AutoRefreshGlobalState>)[GLOBAL_KEY] ??= {});
+
+type LiveAutoRefreshTrigger =
+  | { enabled: true; trigger: ConstraintShadowAutoRefreshTrigger }
+  | { enabled: false; reason: "settings_unavailable" | "constraint_shadow_compiler_disabled" | "auto_refresh_disabled" };
+
+function cancelScheduledAutoRefresh(): void {
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = undefined;
+  state.pending = undefined;
+  state.scheduleGeneration = (state.scheduleGeneration ?? 0) + 1;
+}
+
+function resolveLiveAutoRefreshTrigger(trigger: ConstraintShadowAutoRefreshTrigger): LiveAutoRefreshTrigger {
+  let settings: SedimentSettings;
+  try {
+    settings = (state.settingsResolverForTests ?? resolveSedimentSettings)();
+  } catch {
+    cancelScheduledAutoRefresh();
+    return { enabled: false, reason: "settings_unavailable" };
+  }
+  if (!settings.constraintShadowCompiler.enabled) {
+    cancelScheduledAutoRefresh();
+    return { enabled: false, reason: "constraint_shadow_compiler_disabled" };
+  }
+  if (!settings.constraintShadowCompiler.autoRefresh.enabled) {
+    cancelScheduledAutoRefresh();
+    return { enabled: false, reason: "auto_refresh_disabled" };
+  }
+  return { enabled: true, trigger: { ...trigger, settings } };
+}
 
 function triggerEventIds(trigger: ConstraintShadowAutoRefreshTrigger): string[] {
   return Array.from(new Set([
@@ -111,7 +141,7 @@ function needsRefreshPath(abrainHome: string): string {
 async function appendAuditLine(abrainHome: string, row: Record<string, unknown>): Promise<void> {
   const root = stateRoot(abrainHome);
   await fs.mkdir(root, { recursive: true });
-  await fs.appendFile(path.join(root, "audit.jsonl"), `${JSON.stringify(row)}\n`, "utf-8");
+  await fs.appendFile(path.join(root, "audit.jsonl"), `${JSON.stringify({ ...row, pid: process.pid })}\n`, "utf-8");
 }
 
 async function appendAuditLineNoThrow(abrainHome: string, row: Record<string, unknown>): Promise<void> {
@@ -394,6 +424,10 @@ async function scheduleRecoverableRetry(
   modelRef: string,
   previousStatus: string,
 ): Promise<void> {
+  const live = resolveLiveAutoRefreshTrigger(trigger);
+  if (!live.enabled) return;
+  trigger = live.trigger;
+  modelRef = defaultModelRef(trigger.settings);
   if ((trigger.retryAttempt ?? 0) >= 1) return;
   const retryAttempt = (trigger.retryAttempt ?? 0) + 1;
   await appendAuditLineNoThrow(trigger.abrainHome, {
@@ -549,6 +583,9 @@ async function projectionInputEventIds(
 }
 
 async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: RunOnceOptions = {}): Promise<void> {
+  const live = resolveLiveAutoRefreshTrigger(trigger);
+  if (!live.enabled) return;
+  trigger = live.trigger;
   if (canonicalGitRuntimeEnabled()) {
     const startup = await getCanonicalStartupPromise({ abrainHome: path.resolve(trigger.abrainHome) });
     if (startup.startup !== "ready") throw new Error(`canonical startup barrier blocked: ${startup.blockedReason ?? "unknown"}`);
@@ -557,9 +594,11 @@ async function runOnce(trigger: ConstraintShadowAutoRefreshTrigger, options: Run
 }
 
 async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, options: RunOnceOptions = {}): Promise<void> {
-  trigger = withEventIds(trigger, triggerEventIds(trigger));
-  const auto = trigger.settings.constraintShadowCompiler.autoRefresh;
-  const modelRef = defaultModelRef(trigger.settings);
+  const live = resolveLiveAutoRefreshTrigger(trigger);
+  if (!live.enabled) return;
+  trigger = withEventIds(live.trigger, triggerEventIds(live.trigger));
+  let auto = trigger.settings.constraintShadowCompiler.autoRefresh;
+  let modelRef = defaultModelRef(trigger.settings);
   const startedAtMs = Date.now();
   let compileStartedAtMs = startedAtMs;
   let terminalStatus: "completed" | "failed" | "threw" | undefined;
@@ -591,6 +630,7 @@ async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, opti
     await scheduleRecoverableRetry(trigger, modelRef, "model_registry_unavailable");
     return;
   }
+  const modelRegistry = trigger.modelRegistry;
 
   // Cross-process mutual exclusion: only one pi instance compiles at a time.
   // The lock covers the actual compile/commit section, not the debounce wait.
@@ -604,6 +644,10 @@ async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, opti
       label: "constraint-shadow-auto-refresh",
     });
   } catch {
+    const contendedLive = resolveLiveAutoRefreshTrigger(trigger);
+    if (!contendedLive.enabled) return;
+    trigger = withEventIds(contendedLive.trigger, triggerEventIds(contendedLive.trigger));
+    modelRef = defaultModelRef(trigger.settings);
     await appendAuditLineNoThrow(trigger.abrainHome, {
       schemaVersion: "constraint-shadow-auto-refresh/v1",
       observedAtUtc: new Date().toISOString(),
@@ -627,12 +671,17 @@ async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, opti
         error: errorMessage(err),
       });
     }
-    if (options.scheduleOnLockContention) {
-      await scheduleConstraintShadowAutoRefresh(trigger);
-    }
     return;
   }
 
+  const lockedLive = resolveLiveAutoRefreshTrigger(trigger);
+  if (!lockedLive.enabled) {
+    await lockHandle.release().catch(() => undefined);
+    return;
+  }
+  trigger = withEventIds(lockedLive.trigger, triggerEventIds(lockedLive.trigger));
+  auto = trigger.settings.constraintShadowCompiler.autoRefresh;
+  modelRef = defaultModelRef(trigger.settings);
   compileStartedAtMs = Date.now();
   state.lastStartedMs = compileStartedAtMs;
 
@@ -690,7 +739,7 @@ async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, opti
       maxCompileRetries: trigger.settings.constraintShadowCompiler.maxCompileRetries,
       escalationModelRef: trigger.settings.constraintShadowCompiler.escalationModelRef || undefined,
       compilerInvoker: createPiAiConstraintCompilerInvoker({
-        modelRegistry: trigger.modelRegistry,
+        modelRegistry,
         defaultModelRef: modelRef,
         timeoutMs: trigger.settings.constraintShadowCompiler.timeoutMs,
         maxRetries: trigger.settings.constraintShadowCompiler.maxRetries,
@@ -698,7 +747,7 @@ async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, opti
       ...(verifierSettings.enabled ? {
         generateMergedSourceVerifier: true,
         verifierInvoker: createPiAiMergedSourceVerifierInvoker({
-          modelRegistry: trigger.modelRegistry,
+          modelRegistry,
           defaultModelRef: verifierModelRef,
           timeoutMs: trigger.settings.constraintShadowCompiler.timeoutMs,
           maxRetries: trigger.settings.constraintShadowCompiler.maxRetries,
@@ -843,6 +892,10 @@ async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, opti
     compileStatus?.(undefined);
     // Release the cross-process lock before scheduling any follow-up compile.
     if (lockHandle) await lockHandle.release().catch(() => undefined);
+    const live = resolveLiveAutoRefreshTrigger(trigger);
+    if (!live.enabled) return;
+    trigger = live.trigger;
+    modelRef = defaultModelRef(trigger.settings);
     let needsRefresh: NeedsRefreshMarker | undefined;
     try {
       needsRefresh = await readLatestNeedsRefreshMarker(trigger.abrainHome);
@@ -874,9 +927,12 @@ async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, opti
 function armScheduledRun(trigger: ConstraintShadowAutoRefreshTrigger, delayMs: number): void {
   state.timer = setTimeout(() => {
     state.timer = undefined;
-    const next = state.pending;
+    const queued = state.pending;
+    if (!queued) return;
+    const live = resolveLiveAutoRefreshTrigger(queued);
+    if (!live.enabled) return;
+    const next = live.trigger;
     state.pending = undefined;
-    if (!next) return;
     if (state.inFlight) {
       state.pending = mergePendingTrigger(state.pending, next);
       void state.inFlight.finally(() => {
@@ -885,7 +941,7 @@ function armScheduledRun(trigger: ConstraintShadowAutoRefreshTrigger, delayMs: n
       });
       return;
     }
-    state.inFlight = runOnce(next, { scheduleOnLockContention: true, compilerRunnerForTests: state.compilerRunnerForTests }).finally(() => {
+    state.inFlight = runOnce(next, { compilerRunnerForTests: state.compilerRunnerForTests }).finally(() => {
       state.inFlight = undefined;
       const pending = state.pending;
       if (pending) void scheduleConstraintShadowAutoRefresh(pending).catch(() => undefined);
@@ -895,9 +951,9 @@ function armScheduledRun(trigger: ConstraintShadowAutoRefreshTrigger, delayMs: n
 }
 
 export async function scheduleConstraintShadowAutoRefresh(trigger: ConstraintShadowAutoRefreshTrigger): Promise<{ scheduled: boolean; reason: string }> {
-  const auto = trigger.settings.constraintShadowCompiler.autoRefresh;
-  if (!trigger.settings.constraintShadowCompiler.enabled) return { scheduled: false, reason: "constraint_shadow_compiler_disabled" };
-  if (!auto.enabled) return { scheduled: false, reason: "auto_refresh_disabled" };
+  const live = resolveLiveAutoRefreshTrigger(trigger);
+  if (!live.enabled) return { scheduled: false, reason: live.reason };
+  trigger = live.trigger;
 
   state.pending = mergePendingTrigger(state.pending, trigger);
   if (state.timer) {
@@ -931,15 +987,22 @@ export async function scheduleConstraintShadowAutoRefresh(trigger: ConstraintSha
 
   // A later debounce call owns arming; its durable marker contains this full set.
   if (generation !== state.scheduleGeneration) return { scheduled: true, reason: "superseded_by_newer_debounce" };
+  const armedLive = resolveLiveAutoRefreshTrigger(state.pending ?? pending);
+  if (!armedLive.enabled) return { scheduled: false, reason: armedLive.reason };
+  const armed = armedLive.trigger;
+  const auto = armed.settings.constraintShadowCompiler.autoRefresh;
   const cooldownMs = Math.max(0, auto.minIntervalMs - (now - (state.lastStartedMs ?? 0)));
   const delayMs = Math.max(0, auto.debounceMs, cooldownMs);
-  armScheduledRun(pending, delayMs);
+  armScheduledRun(armed, delayMs);
   return { scheduled: true, reason: delayMs > 0 ? "scheduled_debounced" : "scheduled_now" };
 }
 
 export async function resumeConstraintShadowAutoRefreshAtStartup(
   trigger: ConstraintShadowAutoRefreshTrigger,
 ): Promise<{ scheduled: boolean; reason: string; sourceEventId?: string; sourceEventIds?: readonly string[] }> {
+  const live = resolveLiveAutoRefreshTrigger(trigger);
+  if (!live.enabled) return { scheduled: false, reason: live.reason };
+  trigger = live.trigger;
   const marker = await readLatestNeedsRefreshMarker(trigger.abrainHome);
   if (!marker) return { scheduled: false, reason: "needs_refresh_marker_missing" };
   const durability = await readConstraintPublicationSetDurability(trigger.abrainHome, marker.sourceEventIds);
@@ -966,8 +1029,9 @@ export async function resumeConstraintShadowAutoRefreshAtStartup(
 }
 
 export async function ensureConstraintShadowLiveness(trigger: ConstraintShadowAutoRefreshTrigger): Promise<{ scheduled: boolean; reason: string; queuedEvents?: number; staleAgeMs?: number; queuedFallbackReason?: string }> {
-  if (!trigger.settings.constraintShadowCompiler.enabled) return { scheduled: false, reason: "constraint_shadow_compiler_disabled" };
-  if (!trigger.settings.constraintShadowCompiler.autoRefresh.enabled) return { scheduled: false, reason: "auto_refresh_disabled" };
+  const live = resolveLiveAutoRefreshTrigger(trigger);
+  if (!live.enabled) return { scheduled: false, reason: live.reason };
+  trigger = live.trigger;
 
   const observedMs = await latestCompiledViewObservedMs(trigger.abrainHome);
   const staleAgeMs = observedMs === undefined ? undefined : Date.now() - observedMs;
@@ -1044,6 +1108,10 @@ export function _setConstraintShadowMarkerDirectorySyncForTests(sync?: (dir: str
   state.markerDirectorySyncForTests = sync;
 }
 
+export function _setConstraintShadowSettingsResolverForTests(resolver?: () => SedimentSettings): void {
+  state.settingsResolverForTests = resolver;
+}
+
 export function _resetConstraintShadowAutoRefreshForTests(): void {
   if (state.timer) clearTimeout(state.timer);
   state.timer = undefined;
@@ -1054,5 +1122,6 @@ export function _resetConstraintShadowAutoRefreshForTests(): void {
   state.markerWriteTail = undefined;
   state.markerDirectorySyncForTests = undefined;
   state.compilerRunnerForTests = undefined;
+  state.settingsResolverForTests = undefined;
   delete (globalThis as typeof globalThis & { [LIVENESS_GLOBAL_KEY]?: boolean })[LIVENESS_GLOBAL_KEY];
 }

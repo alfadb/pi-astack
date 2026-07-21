@@ -339,14 +339,79 @@ export function loadGoalFile(cwd: string, sessionId: string): GoalState | null {
   }
 }
 
-/** Atomic write (tmp + rename) — a torn goal file must never poison
- *  injection; loadGoalFile fail-closes to null on parse errors anyway. */
-export async function saveGoalFile(cwd: string, state: GoalState): Promise<boolean> {
+function goalStateCasValue(state: GoalState): Record<string, unknown> {
+  const source = getGoalSource(state);
+  return {
+    schema_version: state.schema_version,
+    goal_id: state.goal_id,
+    session_id: state.session_id,
+    objective: state.objective,
+    source: source.type === "doc"
+      ? {
+        type: "doc",
+        doc_path: source.doc_path,
+        doc_display_path: source.doc_display_path,
+        doc_hash: source.doc_hash,
+      }
+      : { type: "objective" },
+    success_criteria: [...state.success_criteria],
+    status: state.status,
+    budget: {
+      max_continuations: state.budget.max_continuations,
+      max_wall_minutes: state.budget.max_wall_minutes,
+    },
+    counters: { continuations_used: state.counters.continuations_used },
+    anchor: state.anchor,
+    created: state.created,
+    updated: state.updated,
+    status_note: state.status_note,
+  };
+}
+
+/** Exact logical-state comparison for compensating Goal events and view CAS.
+ * `updated` is intentionally included: a same-goal/same-counter progress
+ * update must make an old continuation precharge ineligible for rollback. */
+export function goalStateMatchesCas(actual: GoalState | null, expected: GoalState): actual is GoalState {
+  if (!actual) return false;
+  return JSON.stringify(goalStateCasValue(actual)) === JSON.stringify(goalStateCasValue(expected));
+}
+
+interface GoalFileWriteLocks {
+  tails: Map<string, Promise<void>>;
+}
+
+const GOAL_FILE_WRITE_LOCKS = Symbol.for("pi-astack/goal/file-write-locks/v1");
+const goalFileLockHost = globalThis as typeof globalThis & Record<PropertyKey, unknown>;
+
+function goalFileWriteLocks(): GoalFileWriteLocks {
+  const current = goalFileLockHost[GOAL_FILE_WRITE_LOCKS] as GoalFileWriteLocks | undefined;
+  if (current) return current;
+  const created: GoalFileWriteLocks = { tails: new Map() };
+  goalFileLockHost[GOAL_FILE_WRITE_LOCKS] = created;
+  return created;
+}
+
+async function withGoalFileWriteLock<T>(target: string, work: () => Promise<T>): Promise<T> {
+  const locks = goalFileWriteLocks();
+  const previous = locks.tails.get(target) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  locks.tails.set(target, current);
+  await previous.catch(() => undefined);
+  try {
+    return await work();
+  } finally {
+    release();
+    if (locks.tails.get(target) === current) locks.tails.delete(target);
+  }
+}
+
+async function writeGoalFileUnlocked(cwd: string, state: GoalState): Promise<boolean> {
   try {
     const dir = goalDir(cwd);
     await fsp.mkdir(dir, { recursive: true });
     const target = goalFilePath(cwd, state.session_id);
-    const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+    const tmp = `${target}.tmp-${process.pid}-${Date.now()}-${randomBytes(3).toString("hex")}`;
     await fsp.writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
     await fsp.rename(tmp, target);
     return true;
@@ -355,16 +420,45 @@ export async function saveGoalFile(cwd: string, state: GoalState): Promise<boole
   }
 }
 
+/** Atomic write (tmp + rename) — a torn goal file must never poison
+ *  injection; loadGoalFile fail-closes to null on parse errors anyway. */
+export async function saveGoalFile(cwd: string, state: GoalState): Promise<boolean> {
+  const target = goalFilePath(cwd, state.session_id);
+  return withGoalFileWriteLock(target, () => writeGoalFileUnlocked(cwd, state));
+}
+
+export type GoalFileCasResult = "saved" | "mismatch" | "write_failed";
+
+/** Compare-and-swap a materialized Goal view under the same process-global
+ * lock used by ordinary writes. The expected full state includes `updated`,
+ * status, budgets, and source metadata, so restoration cannot erase newer
+ * progress merely because goal_id/counter happen to match. */
+export async function saveGoalFileIfCurrent(
+  cwd: string,
+  expected: GoalState,
+  next: GoalState,
+): Promise<GoalFileCasResult> {
+  const target = goalFilePath(cwd, expected.session_id);
+  return withGoalFileWriteLock(target, async () => {
+    const current = loadGoalFile(cwd, expected.session_id);
+    if (!goalStateMatchesCas(current, expected)) return "mismatch";
+    return await writeGoalFileUnlocked(cwd, next) ? "saved" : "write_failed";
+  });
+}
+
 /** Remove the materialized view for one session (reconcile: the current
  *  branch carries NO goal events → the view is stale by definition —
  *  e.g. /tree switched to a pre-goal branch point). Best-effort. */
 export async function removeGoalFile(cwd: string, sessionId: string): Promise<boolean> {
-  try {
-    await fsp.unlink(goalFilePath(cwd, sessionId));
-    return true;
-  } catch {
-    return false;
-  }
+  const target = goalFilePath(cwd, sessionId);
+  return withGoalFileWriteLock(target, async () => {
+    try {
+      await fsp.unlink(target);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /** GC stale materialized views. mtime-based (plan: "按 mtime + session 不存在
@@ -413,18 +507,40 @@ export function appendGoalOutcome(cwd: string, row: Record<string, unknown>): bo
   }
 }
 
+/** Detached auto-continue and delivery audit. This ledger is deliberately
+ * separate from outcome-ledger: transport failures are operational facts,
+ * not goal outcomes. */
+export function appendGoalAutoContinueAudit(cwd: string, row: Record<string, unknown>): boolean {
+  try {
+    fs.mkdirSync(goalDir(cwd), { recursive: true });
+    fs.appendFileSync(path.join(goalDir(cwd), "auto-continue-ledger.jsonl"), `${JSON.stringify(row)}\n`, "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── event-source replay (fork/resume reconcile) ────────────────────────
 
 /** Replay pi-goal-event entries (event source) to the latest state.
- *  Each event carries a full state snapshot (`data.state`) — replay is
- *  last-write-wins, no folding needed. Malformed entries are skipped. */
+ * Ordinary events carry a full state snapshot and are last-write-wins.
+ * `continuation_restore` is a compensating CAS event: it applies only when
+ * replay has reached the exact precharged state recorded in `cas_expected`.
+ * This keeps the original debit event immutable while making restoration
+ * deterministic across fork/resume/reload and harmless after newer events. */
 export function replayGoalEvents(entries: unknown[]): GoalState | null {
   let latest: GoalState | null = null;
   for (const e of entries) {
-    const entry = e as { type?: string; customType?: string; data?: { state?: GoalState } };
+    const entry = e as { type?: string; customType?: string; data?: { action?: unknown; state?: GoalState; cas_expected?: GoalState } };
     if (entry?.type !== "custom" || entry.customType !== GOAL_EVENT_TYPE) continue;
     const s = normalizeGoalState(entry.data?.state);
-    if (s) latest = s;
+    if (!s) continue;
+    if (entry.data?.action === "continuation_restore") {
+      const expected = normalizeGoalState(entry.data.cas_expected);
+      if (expected && goalStateMatchesCas(latest, expected)) latest = s;
+      continue;
+    }
+    latest = s;
   }
   return latest;
 }

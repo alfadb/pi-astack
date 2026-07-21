@@ -135,7 +135,7 @@ elp.appendSupersededFrontmatterProposals({
   ok(statusOf("sup-b") === "pending", "E2 review_required proposal remains pending and unexecuted");
 }
 
-// ---- 6) executor gates: lane_required + kind_mismatch + enabled=false strict-off ----
+// ---- 6) executor gates: lane_required + invalid/mismatched durable kind + enabled=false strict-off ----
 appendRawProposal({ slug: "lane-a", kind: "anti-pattern", reason: "affirm_stale", evidence_source: "aggregator_promoted_advisory", evidence_type: "version_stale", evidence_key: "lane-a" });
 {
   const arc = mkArchive({ ok: true, status: "archived" });
@@ -152,9 +152,9 @@ appendRawProposal({ slug: "unknown-a", kind: "emerging-kind", reason: "affirm_su
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
   const audit = readJsonl(fx.forgettingDryRunAuditPath()).at(-1);
   const unknownSkip = audit?.skipped?.find((s) => s.slug === "unknown-a");
-  ok(arc.calls.length === 0 && (r.demoted?.length ?? 0) === 0, "unknown kind + valid evidence(non-E1) → no mutation");
-  ok(unknownSkip?.skip_reason === "lane_required" && unknownSkip?.durable_kind === "emerging-kind", "unknown kind + valid evidence(non-E1) → lane_required audit with durable_kind");
-  ok(statusOf("unknown-a") === "pending", "unknown kind lane_required proposal remains pending");
+  ok(arc.calls.length === 0 && (r.demoted?.length ?? 0) === 0, "invalid durable kind + valid evidence → no mutation");
+  ok(unknownSkip?.skip_reason === "invalid_durable_kind" && unknownSkip?.raw_kind === "emerging-kind" && !("durable_kind" in (unknownSkip ?? {})), "invalid durable kind fails closed and remains diagnostic-only");
+  ok(statusOf("unknown-a") === "pending", "invalid durable kind proposal remains pending");
 }
 writeDurableKind("mismatch-a", "smell");
 appendRawProposal({ slug: "mismatch-a", kind: "fact", reason: "affirm_superseded", evidence_source: "aggregator_promoted_advisory", evidence_type: "superseded_by", evidence_key: "mismatch-a" });
@@ -165,6 +165,70 @@ appendRawProposal({ slug: "mismatch-a", kind: "fact", reason: "affirm_superseded
   ok(arc.calls.length === 0 && (r.demoted?.length ?? 0) === 0, "kind_mismatch → no mutation");
   ok(audit?.row_kind === "executor_gate_skip" && audit.skip_reasons?.includes("kind_mismatch"), "kind_mismatch audit written");
   ok(statusOf("mismatch-a") === "pending", "kind_mismatch proposal remains pending");
+}
+
+// ---- 6.5) decay writer -> executor: legacy repair, verified kind, and replay ----
+writeDurableKind("legacy-decay-a", "fact");
+appendRawProposal({ slug: "legacy-decay-a", kind: "outcome_entry", reason: "affirm_superseded", evidence_source: "decay", evidence_type: "superseded_by", evidence_key: "legacy-decay-a" });
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  const repaired = elp.readLifecycleProposals(pr).find((x) => x.slug === "legacy-decay-a");
+  ok(r.legacy_kind_compatibility?.repaired === 1 && arc.calls.includes("legacy-decay-a"), "legacy decay outcome_entry is repaired from durable kind before execution");
+  ok(repaired?.kind === "fact" && repaired?.kind_resolution?.action === "legacy_decay_kind_repaired" && repaired.status === "executed", "legacy repair is structured/auditable and preserves executable proposal semantics");
+}
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  ok(arc.calls.length === 0 && r.legacy_kind_compatibility?.repaired === 0 && r.legacy_kind_compatibility?.retired === 0, "legacy compatibility replay is idempotent after execution");
+}
+const unresolvedLegacySlugs = ["legacy-decay-missing-a", "legacy-decay-missing-b", "legacy-decay-missing-c", "legacy-decay-missing-d"];
+for (const slug of unresolvedLegacySlugs) appendRawProposal({ slug, kind: "outcome_entry", reason: "affirm_superseded", evidence_source: "decay", evidence_type: "superseded_by", evidence_key: slug });
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  const retired = elp.readLifecycleProposals(pr).filter((x) => unresolvedLegacySlugs.includes(x.slug));
+  ok(r.legacy_kind_compatibility?.retired === 3 && r.legacy_kind_compatibility?.deferred === 1 && arc.calls.length === 0, "legacy rows without a durable kind retire under the fixed three-row compatibility cap");
+  ok(retired.filter((x) => x.status === "failed" && x.kind_resolution?.action === "legacy_decay_kind_retired").length === 3, "retired legacy rows carry structured terminal audit state");
+}
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  const retired = elp.readLifecycleProposals(pr).filter((x) => unresolvedLegacySlugs.includes(x.slug));
+  ok(r.legacy_kind_compatibility?.retired === 1 && retired.every((x) => x.status === "failed") && arc.calls.length === 0, "next bounded pass retires the deferred legacy row without executing it");
+}
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  ok(r.legacy_kind_compatibility?.retired === 0 && arc.calls.length === 0, "terminal legacy rows are not retried on later executor runs");
+}
+writeDurableKind("legacy-decay-missing-a", "fact");
+{
+  const recovered = elp.appendDecayDemoteProposals({
+    projectRoot: pr,
+    now: new Date(NOW),
+    assessments: [{ slug: "legacy-decay-missing-a", decay_score: 0.9, would_demote: true, demote_evidence_type: "superseded_by", primary_driver: "supersede", falsifier: "new evidence restores freshness" }],
+  });
+  const pending = elp.readLifecycleProposals(pr).filter((x) => x.slug === "legacy-decay-missing-a" && x.status === "pending");
+  ok(recovered.proposals_appended === 1 && pending.length === 1 && pending[0]?.kind === "fact", "a terminal legacy row does not de-duplicate a later verified decay proposal");
+}
+writeDurableKind("fresh-decay-a", "smell");
+{
+  const writerResult = elp.appendDecayDemoteProposals({
+    projectRoot: pr,
+    now: new Date(NOW),
+    assessments: [{ slug: "fresh-decay-a", decay_score: 0.9, would_demote: true, demote_evidence_type: "superseded_by", primary_driver: "supersede", falsifier: "new evidence restores freshness" }],
+  });
+  const row = elp.readLifecycleProposals(pr).find((x) => x.slug === "fresh-decay-a");
+  ok(writerResult.proposals_appended === 1 && row?.kind === "smell", "decay writer emits the verified durable kind rather than outcome_entry");
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  ok(arc.calls.includes("fresh-decay-a") && r.demoted?.includes("fresh-decay-a") && statusOf("fresh-decay-a") === "executed", "verified decay kind passes unchanged through executor gates");
+}
+{
+  const arc = mkArchive({ ok: true, status: "archived" });
+  const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
+  ok(arc.calls.length === 0 && (r.demoted?.length ?? 0) === 0, "verified decay proposal duplicate run is a no-op");
 }
 {
   const auditBefore = readJsonl(fx.forgettingDryRunAuditPath()).length;

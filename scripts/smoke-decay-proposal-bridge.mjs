@@ -4,7 +4,8 @@
  *
  * Uses a temporary ABRAIN_ROOT so the proposal sidecar stays sandboxed. Locks:
  *   - only truth-change-backed would_demote=true assessments become archive proposals
- *   - source/evidence fields carry decay audit context
+ *   - source/evidence fields carry decay audit context and the verified durable kind
+ *   - missing/invalid durable frontmatter fails closed (no guessed kind)
  *   - slug de-duplication suppresses pending and executed archive proposals
  *   - per-run cap is bounded at 3
  */
@@ -38,6 +39,10 @@ const projectA = path.join(tmp, "project-a");
 const projectB = path.join(tmp, "project-b");
 const projectC = path.join(tmp, "project-c");
 const now = new Date("2026-07-08T00:00:00Z");
+const writeDurableEntry = (projectRoot, slug, kind) => {
+  fs.mkdirSync(projectRoot, { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, `${slug}.md`), `---\nid: project:decay-smoke:${slug}\nkind: ${kind}\nstatus: active\n---\n# ${slug}\n`);
+};
 const assess = (slug, demote_evidence_type = "superseded_by", extra = {}) => ({
   slug,
   decay_score: 0.82,
@@ -50,6 +55,8 @@ const assess = (slug, demote_evidence_type = "superseded_by", extra = {}) => ({
 });
 
 try {
+  writeDurableEntry(projectA, "old-superseded", "fact");
+  writeDurableEntry(projectA, "stale-version", "smell");
   ok(entryLifecycleProposalsPath().startsWith(tmp), "sandbox sidecar path is under temporary ABRAIN_ROOT");
 
   const aggregatorSrc = fs.readFileSync(path.join(repoRoot, "extensions/sediment/aggregator.ts"), "utf-8");
@@ -77,11 +84,14 @@ try {
   const sup = rows.find((r) => r.slug === "old-superseded");
   const stale = rows.find((r) => r.slug === "stale-version");
   ok(rows.length === 2, "usage-only, false, and invalid-slug assessments are not proposed", JSON.stringify(rows));
-  ok(sup?.op === "archive" && sup.reason === "affirm_superseded" && sup.status === "pending", "superseded_by maps to pending archive/affirm_superseded", JSON.stringify(sup));
-  ok(stale?.reason === "affirm_stale" && stale.evidence_type === "version_stale", "version_stale maps to affirm_stale with evidence_type", JSON.stringify(stale));
+  ok(sup?.op === "archive" && sup.reason === "affirm_superseded" && sup.status === "pending" && sup.kind === "fact", "superseded_by maps to a pending archive with verified fact kind", JSON.stringify(sup));
+  ok(stale?.reason === "affirm_stale" && stale.evidence_type === "version_stale" && stale.kind === "smell", "version_stale maps to affirm_stale with verified smell kind", JSON.stringify(stale));
   ok(sup?.evidence_source === "decay" && sup.evidence_key === "decay:old-superseded:superseded_by:supersede", "proposal carries source=decay and stable evidence_key", JSON.stringify(sup));
   ok(sup?.expected_status === "active" && sup.disposition === "execution_ready", "executor gates remain active CAS + execution_ready", JSON.stringify(sup));
   ok(typeof sup?.independent_evidence === "string" && sup.independent_evidence.includes("decay_score=0.820") && sup.independent_evidence.includes("primary_driver=supersede"), "decay audit evidence is carried in independent_evidence", JSON.stringify(sup));
+
+  const missingKind = appendDecayDemoteProposals({ projectRoot: projectA, now, assessments: [assess("missing-durable-kind")] });
+  ok(missingKind.proposals_appended === 0 && missingKind.skipped_missing_durable_kind === 1, "missing durable frontmatter does not guess a decay proposal kind", JSON.stringify(missingKind));
 
   const replay = appendDecayDemoteProposals({ projectRoot: projectA, now, assessments: [assess("old-superseded"), assess("stale-version", "version_stale")] });
   ok(replay.proposals_appended === 0 && replay.skipped_duplicate_slug === 2, "pending archive proposal slugs are not proposed again", JSON.stringify(replay));
@@ -94,6 +104,7 @@ try {
     JSON.stringify({ changedEvidenceReplay, oldSupersededRows }),
   );
 
+  for (const slug of ["a", "b", "c", "d", "e"]) writeDurableEntry(projectB, `cap-${slug}`, "fact");
   const capped = appendDecayDemoteProposals({
     projectRoot: projectB,
     now,
@@ -104,6 +115,7 @@ try {
   ok(capped.proposals_appended === 3 && capped.limited === 2 && capped.max_per_run === 3, "per-run cap clamps to three proposals", JSON.stringify(capped));
   ok(cappedRows.length === 3 && cappedRows.every((r) => r.evidence_source === "decay"), "only capped rows land for the project", JSON.stringify(cappedRows));
 
+  writeDurableEntry(projectC, "processed-once", "fact");
   const once = appendDecayDemoteProposals({ projectRoot: projectC, now, assessments: [assess("processed-once")] });
   ok(once.proposals_appended === 1, "setup executed-proposal duplicate test", JSON.stringify(once));
   const marked = markProposalsExecuted(projectC, ["processed-once"]);

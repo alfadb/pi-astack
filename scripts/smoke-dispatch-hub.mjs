@@ -24,11 +24,16 @@ const hub = await jiti.import(`${repoRoot}/extensions/dispatch/hub.ts`);
 
 const {
   HARD_MAX_WORKERS,
+  WORKER_TOOLS,
+  HUB_TOOLS,
   resolveHubSettings,
   flattenRoster,
   selectHubModel,
   buildHubPlanPrompt,
   extractFirstJsonObject,
+  parseHubToolNames,
+  cageHubTools,
+  assertHubToolsAllowlist,
   parseHubPlan,
   validateHubPlan,
   buildHubDecisionRow,
@@ -84,6 +89,8 @@ ok(prompt.includes("anthropic/claude-opus-4-8"), "plan prompt lists roster model
 ok(prompt.includes("1..4 workers"), "plan prompt states the worker cap");
 ok(prompt.includes('vendor "deepseek"'), "plan prompt tells hub its own vendor (for cross-vendor preference)");
 ok(prompt.includes("Isolated worker contexts are the invariant"), "plan prompt states isolated contexts are the invariant");
+ok(prompt.includes("STRUCTURALLY read-only") || prompt.includes("fixed allowlist"), "plan prompt states structural read-only cage");
+ok(prompt.includes("tools field") || prompt.includes("capability cannot be expanded"), "plan prompt warns tools cannot expand capability");
 
 // ── extractFirstJsonObject ──
 ok(extractFirstJsonObject('prefix {"a":1} suffix') === '{"a":1}', "extracts first balanced object");
@@ -101,6 +108,44 @@ ok(parseHubPlan('{"workers":[{"role":"r"}]}').ok === false, "worker without mode
 const partial = parseHubPlan('{"workers":[{"model":"a/b","prompt":"p"},{"model":"","prompt":"p2"}]}');
 ok(partial.ok && partial.plan.workers.length === 1, "drops workers missing model, keeps valid (role defaults)");
 ok(partial.ok && partial.plan.workers[0].role === "worker", "missing role defaults to 'worker'");
+const withTools = parseHubPlan('{"workers":[{"model":"a/b","prompt":"p","tools":"bash,edit,write"}],"rationale":"x"}');
+ok(withTools.ok && withTools.plan.workers[0].tools === "bash,edit,write", "parseHubPlan preserves planner tools for cage inspection (does not grant)");
+
+// ── Hub tool cage constants + pure helpers ──
+ok(typeof WORKER_TOOLS === "string" && WORKER_TOOLS.includes("read") && WORKER_TOOLS.includes("memory_decide"), "WORKER_TOOLS is the fixed worker read-only allowlist");
+ok(typeof HUB_TOOLS === "string" && HUB_TOOLS.includes("read") && !HUB_TOOLS.includes("bash"), "HUB_TOOLS is the fixed planner read-only allowlist");
+ok(!parseHubToolNames(WORKER_TOOLS).includes("bash"), "WORKER_TOOLS excludes bash");
+ok(!parseHubToolNames(WORKER_TOOLS).includes("edit"), "WORKER_TOOLS excludes edit");
+ok(!parseHubToolNames(WORKER_TOOLS).includes("write"), "WORKER_TOOLS excludes write");
+ok(parseHubToolNames(" read, ,bash ").join("|") === "read|bash", "parseHubToolNames trims and drops empties");
+
+// cageHubTools: missing → pin; mutating/unknown → ignore+audit pin; pure subset still pins to full allowlist
+const cageNone = cageHubTools(undefined, WORKER_TOOLS);
+ok(cageNone.tools === WORKER_TOOLS && cageNone.extras.length === 0 && cageNone.warnings.length === 0, "cage: missing tools → pin WORKER_TOOLS, no warning");
+const cageMut = cageHubTools("bash,edit,write", WORKER_TOOLS);
+ok(cageMut.tools === WORKER_TOOLS, "cage: bash/edit/write → still WORKER_TOOLS (no capability grant)");
+ok(cageMut.extras.includes("bash") && cageMut.extras.includes("edit") && cageMut.extras.includes("write"), "cage: records bash/edit/write as extras");
+ok(cageMut.warnings.some((w) => w.includes("non-allowlisted") && w.includes("bash")), "cage: audits mutating tools request");
+const cageMixed = cageHubTools("read,bash,grep", WORKER_TOOLS);
+ok(cageMixed.tools === WORKER_TOOLS && cageMixed.extras.includes("bash") && !cageMixed.extras.includes("read"), "cage: mixed tools strips only extras, pins allowlist");
+const cageUnknown = cageHubTools("foo_tool,read", WORKER_TOOLS);
+ok(cageUnknown.tools === WORKER_TOOLS && cageUnknown.extras.includes("foo_tool"), "cage: unknown tools ignored + audited");
+const cageReadonly = cageHubTools("read,grep,find,ls", WORKER_TOOLS);
+ok(cageReadonly.tools === WORKER_TOOLS && cageReadonly.extras.length === 0, "cage: normal read-only request → pin allowlist, no extras");
+const cageHub = cageHubTools("bash", HUB_TOOLS);
+ok(cageHub.tools === HUB_TOOLS && cageHub.extras.includes("bash"), "cage: hub planner allowlist also rejects bash");
+
+// assertHubToolsAllowlist: execution-layer secondary defense (fail-closed refuse)
+const assertOk = assertHubToolsAllowlist(WORKER_TOOLS, WORKER_TOOLS);
+ok(assertOk.ok === true && assertOk.tools === WORKER_TOOLS, "assert: allowlisted tools ok and re-pinned");
+ok(assertHubToolsAllowlist(undefined, WORKER_TOOLS).ok === true, "assert: missing tools ok (pin)");
+ok(assertHubToolsAllowlist("read,grep", WORKER_TOOLS).ok === true, "assert: pure subset ok (still re-pins to full allowlist)");
+const assertMut = assertHubToolsAllowlist("bash,edit,write", WORKER_TOOLS);
+ok(assertMut.ok === false && assertMut.extras.includes("bash"), "assert: bash/edit/write refused at execution cage");
+const assertMixed = assertHubToolsAllowlist("read,bash", WORKER_TOOLS);
+ok(assertMixed.ok === false && assertMixed.reason.includes("escape"), "assert: mixed tools fail-closed refuse");
+const assertUnknown = assertHubToolsAllowlist("ghost_tool", WORKER_TOOLS);
+ok(assertUnknown.ok === false && assertUnknown.extras.includes("ghost_tool"), "assert: unknown tools refused");
 
 // ── validateHubPlan: drop unknown models, cap, same-vendor flag ──
 const vRoster = ["anthropic/claude-opus-4-8", "openai/gpt-5.5", "deepseek/deepseek-v4-pro"];
@@ -128,6 +173,32 @@ ok(vs.sameVendorAsHub === 1, "counts workers sharing the hub vendor (self-talk s
 ok(vs.planDiversity === "cross-vendor", "cross-vendor worker plans are marked");
 ok(vs.warnings.some((w) => w.includes("self-talk")), "warns about same-vendor self-talk (flag, not reject)");
 ok(vs.workers.length === 2, "same-vendor workers are FLAGGED not dropped (ADR 0030 §7)");
+
+// validateHubPlan structural tools cage: planner tools never expand capability
+const planMutTools = {
+  workers: [
+    { model: "openai/gpt-5.5", role: "r", prompt: "p", tools: "bash,edit,write" },
+    { model: "openai/gpt-5.5", role: "r2", prompt: "p2", tools: "read,bash,grep" },
+    { model: "openai/gpt-5.5", role: "r3", prompt: "p3", tools: "ghost_tool" },
+    { model: "openai/gpt-5.5", role: "r4", prompt: "p4" },
+    { model: "openai/gpt-5.5", role: "r5", prompt: "p5", tools: "read,grep,find,ls" },
+  ],
+  rationale: "probe",
+};
+const vt = validateHubPlan(planMutTools, { roster: vRoster, hubModel: "deepseek/deepseek-v4-pro", maxWorkers: 8 });
+ok(vt.workers.length === 5, "tools-cage validate keeps all roster-valid workers");
+ok(vt.workers.every((w) => w.tools === WORKER_TOOLS), "tools-cage validate pins EVERY worker to WORKER_TOOLS");
+ok(!vt.workers.some((w) => /bash|edit|write|ghost_tool/i.test(w.tools ?? "")), "tools-cage validate grants no mutating/unknown tools");
+ok(vt.warnings.filter((w) => w.includes("non-allowlisted")).length >= 3, "tools-cage validate audits mutating/mixed/unknown requests");
+ok(vt.warnings.some((w) => w.includes("bash") && w.includes("edit") && w.includes("write")), "tools-cage validate warns on pure bash/edit/write plan");
+
+// Source wiring: execute path must re-assert cage (secondary defense) and never pass planner tools through
+ok(/assertHubToolsAllowlist\(\s*t\.tools\s*,\s*WORKER_TOOLS\s*\)/.test(hubSrc), "execute re-asserts worker tools via assertHubToolsAllowlist");
+ok(/assertHubToolsAllowlist\(\s*HUB_TOOLS\s*,\s*HUB_TOOLS\s*\)/.test(hubSrc), "execute re-asserts hub planner tools via assertHubToolsAllowlist");
+ok(!/t\.tools\s*\?\?\s*WORKER_TOOLS/.test(hubSrc), "execute must not pass planner tools via t.tools ?? WORKER_TOOLS");
+ok(/cageCheck\.tools/.test(hubSrc), "execute passes caged tools into runInProcess");
+ok(/hubToolsCheck\.tools/.test(hubSrc), "execute passes caged hub planner tools into runInProcess");
+ok(/tool cage rejected/.test(hubSrc), "execute fail-closes with tool cage rejected on allowlist escape");
 
 // ── audit row builders (additive row_kinds) ──
 const dec = buildHubDecisionRow({

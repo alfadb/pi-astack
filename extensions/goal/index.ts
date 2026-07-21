@@ -1,11 +1,11 @@
 /**
  * goal extension — PR-6 / P1a (impl-plan 2026-06-10 Phase P1).
  *
- * Scope of THIS PR: state + /goal commands + per-turn injection. NO
- * auto-continue — `agent_end` is deliberately not subscribed; the
- * continuation judge, budget pre-decrement re-entrancy guard, and the
- * `[pi-goal-continuation goal_id=...]` provenance isolation all land in
- * PR-7 behind `goal.autoContinue` (default off).
+ * Current scope: state + /goal commands + per-turn injection + PR-7
+ * auto-continue behind `goal.autoContinue` (default off). `agent_end`
+ * captures an immutable snapshot and returns after a process-level keyed
+ * queue enqueue; judge, persistence, and acknowledged continuation delivery
+ * run detached from pi's awaited lifecycle chain.
  *
  * Behavior:
  *   - /goal set <objective> [--criteria="a;b"] [--max-continuations=N]
@@ -32,11 +32,20 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCurrentAnchor } from "../_shared/causal-anchor";
 import { isGoalContinuationText, parseGoalContinuationMessage } from "../_shared/goal-continuation";
 import { isSubAgentSession } from "../_shared/pi-internals";
+import { cancelKeyedDetached, enqueueKeyedDetached, waitForKeyedDetachedIdle } from "../_shared/keyed-detached-queue";
 import { wrapVolatile } from "../_shared/volatile-suffix";
 import { Type } from "typebox";
-import { runAutoContinueOnce } from "./continue";
-import { packGoalJudgeWindow, runGoalJudge } from "./judge";
+import { runGoalAutoContinueSnapshot, type GoalAutoContinueSnapshot } from "./auto-continue-worker";
 import {
+  getGoalSessionRuntimeEpoch,
+  GOAL_CONTINUATION_ACK_TYPE,
+  observeGoalContinuationUserMessage,
+  registerGoalSessionRuntime,
+  unregisterGoalSessionRuntime,
+} from "./delivery";
+import { packGoalJudgeWindow } from "./judge";
+import {
+  appendGoalAutoContinueAudit,
   appendGoalOutcome,
   applyGoalAction,
   formatGoalBlock,
@@ -78,9 +87,8 @@ import { runEvidenceCmd, fileContentSha, resolveFileFacts } from "./exec";
 
 // ── settings ───────────────────────────────────────────────────────────
 
-const PI_STACK_SETTINGS_PATH = path.join(
-  os.homedir(), ".pi", "agent", "pi-astack-settings.json",
-);
+const PI_STACK_SETTINGS_PATH = process.env.PI_ASTACK_SETTINGS_PATH?.trim()
+  || path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");
 
 interface GoalSettings {
   enabled: boolean;
@@ -262,16 +270,36 @@ export function goalAutoContinueSkipReason(event: unknown): "no_assistant" | "as
 
 export function hasUnconsumedGoalContinuation(branch: unknown[], goalId: string, opts?: { now?: number; maxPendingAgeMs?: number }): boolean {
   let latestIntentHash: string | undefined;
+  let latestIntentDeliveryId: string | undefined;
   let latestIntentIndex = -1;
   let latestIntentTs: number | undefined;
   let latestConsumedIndex = -1;
   for (let i = 0; i < branch.length; i++) {
-    const entry = branch[i] as { type?: string; customType?: string; data?: { goal_id?: unknown; message_hash?: unknown; ts?: unknown }; message?: { role?: string; content?: unknown } };
+    const entry = branch[i] as {
+      type?: string;
+      customType?: string;
+      data?: { action?: unknown; goal_id?: unknown; message_hash?: unknown; delivery_id?: unknown; send_attempted?: unknown; ts?: unknown };
+      message?: { role?: string; content?: unknown };
+    };
     if (entry?.type === "custom" && entry.customType === "pi-goal-continuation" && entry.data?.goal_id === goalId && typeof entry.data.message_hash === "string") {
       latestIntentHash = entry.data.message_hash;
+      latestIntentDeliveryId = typeof entry.data.delivery_id === "string" ? entry.data.delivery_id : undefined;
       latestIntentIndex = i;
       latestConsumedIndex = -1;
       latestIntentTs = typeof entry.data.ts === "string" ? Date.parse(entry.data.ts) : undefined;
+      continue;
+    }
+    if (
+      entry?.type === "custom"
+      && entry.customType === GOAL_EVENT_TYPE
+      && entry.data?.action === "continuation_restore"
+      && entry.data.send_attempted === false
+      && typeof entry.data.delivery_id === "string"
+      && entry.data.delivery_id === latestIntentDeliveryId
+    ) {
+      // The immutable restore event also releases an intent whose direct call
+      // provably never happened. A later intent resets latestConsumedIndex.
+      latestConsumedIndex = i;
       continue;
     }
     if (entry?.type === "message" && entry.message?.role === "user") {
@@ -295,91 +323,6 @@ export function hasUnconsumedGoalContinuation(branch: unknown[], goalId: string,
   return true;
 }
 
-const GOAL_CONTINUATION_IDLE_TIMEOUT_MS = 30_000;
-const GOAL_CONTINUATION_IDLE_POLL_MS = 100;
-
-export type DeferredGoalContinuationResult =
-  | { action: "sent_direct" }
-  | { action: "queued_followup"; reason: "idle_timeout" | "direct_send_failed" }
-  | { action: "abandoned"; reason: "state_changed" | "send_failed" };
-
-export interface DeferredGoalContinuationDeps {
-  message: string;
-  goalId: string;
-  expectedContinuationsUsed: number;
-  appendIntent: () => void;
-  loadState: () => GoalState | null;
-  isIdle: () => boolean;
-  hasPendingMessages?: () => boolean;
-  /** May return a promise (pi.sendUserMessage is async): awaited so a
-   *  rejection — e.g. the idle-check→send race where a user prompt just
-   *  started and prompt() throws — is handled here instead of becoming an
-   *  unhandled rejection. */
-  sendDirect: (message: string) => void | Promise<void>;
-  sendFollowUp: (message: string) => void | Promise<void>;
-  notify: (message: string, type?: string) => void;
-  timeoutMs?: number;
-  pollMs?: number;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-}
-
-export async function scheduleGoalContinuationAfterIdle(deps: DeferredGoalContinuationDeps): Promise<DeferredGoalContinuationResult> {
-  deps.appendIntent();
-  const timeoutMs = deps.timeoutMs ?? GOAL_CONTINUATION_IDLE_TIMEOUT_MS;
-  const pollMs = deps.pollMs ?? GOAL_CONTINUATION_IDLE_POLL_MS;
-  const now = deps.now ?? (() => Date.now());
-  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
-  const started = now();
-
-  // Cross a timer boundary so sendUserMessage never runs synchronously inside
-  // the agent_end handler even if ctx.isIdle() already reports true.
-  await sleep(0);
-
-  for (;;) {
-    let idle = false;
-    let pending = false;
-    try { idle = deps.isIdle(); } catch { idle = false; }
-    try { pending = deps.hasPendingMessages?.() ?? false; } catch { pending = true; }
-    if (idle && !pending) break;
-    if (now() - started >= timeoutMs) {
-      deps.notify("goal auto-continue delayed send timed out waiting for idle; queued as follow-up instead", "warning");
-      try {
-        await deps.sendFollowUp(deps.message);
-      } catch (err) {
-        deps.notify(`goal auto-continue follow-up queueing failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
-        return { action: "abandoned", reason: "send_failed" };
-      }
-      return { action: "queued_followup", reason: "idle_timeout" };
-    }
-    await sleep(Math.max(1, Math.min(pollMs, timeoutMs - (now() - started))));
-  }
-
-  const latest = deps.loadState();
-  if (!latest || latest.goal_id !== deps.goalId || latest.status !== "active" || latest.counters.continuations_used !== deps.expectedContinuationsUsed) {
-    deps.notify("goal auto-continue delayed send abandoned: goal state changed before idle", "info");
-    return { action: "abandoned", reason: "state_changed" };
-  }
-
-  try {
-    await deps.sendDirect(deps.message);
-  } catch (directErr) {
-    // Race window: a user prompt can start between the idle check and the
-    // send, making the bare prompt() path throw. Degrade to followUp
-    // queueing (drained at that turn's end) — never worse than the old
-    // behavior, never an unhandled rejection.
-    deps.notify(`goal auto-continue direct send failed (${directErr instanceof Error ? directErr.message : String(directErr)}); queued as follow-up instead`, "warning");
-    try {
-      await deps.sendFollowUp(deps.message);
-    } catch (fallbackErr) {
-      deps.notify(`goal auto-continue follow-up fallback also failed: ${fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)}`, "warning");
-      return { action: "abandoned", reason: "send_failed" };
-    }
-    return { action: "queued_followup", reason: "direct_send_failed" };
-  }
-  return { action: "sent_direct" };
-}
-
 function wrapText(text: string, details: unknown, isError = false) {
   return { content: [{ type: "text" as const, text }], details, ...(isError ? { isError: true } : {}) };
 }
@@ -394,6 +337,23 @@ function readSessionId(sm: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function goalDetachedQueueKey(sessionId: string): string {
+  return `goal-auto-continue:${sessionId}`;
+}
+
+function immutableSnapshot<T>(value: T): T {
+  const cloned = structuredClone(value);
+  const seen = new WeakSet<object>();
+  const freeze = (current: unknown): void => {
+    if (!current || typeof current !== "object" || seen.has(current as object)) return;
+    seen.add(current as object);
+    for (const child of Object.values(current as Record<string, unknown>)) freeze(child);
+    Object.freeze(current);
+  };
+  freeze(cloned);
+  return cloned;
 }
 
 // ── extension entry ────────────────────────────────────────────────────
@@ -426,6 +386,81 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
   };
+
+  // Runtime capabilities are process-registered by epoch. Detached jobs keep
+  // only immutable data and resolve the current narrow binding at each side
+  // effect, so a reload can never reuse stale pi/ctx/UI objects.
+  const runtimeEpochs = new Map<string, number>();
+  pi.on("session_start", (_event, ctx) => {
+    if (isSubAgentSession(ctx as never)) return;
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (!sessionId) return;
+    const previous = runtimeEpochs.get(sessionId);
+    if (previous !== undefined) unregisterGoalSessionRuntime(sessionId, previous);
+    const isIdle = ctx.isIdle;
+    const hasPendingMessages = ctx.hasPendingMessages;
+    const epoch = registerGoalSessionRuntime(sessionId, {
+      modelRegistry: ctx.modelRegistry,
+      appendEntry: (customType, data) => pi.appendEntry(customType, data),
+      isIdle,
+      hasPendingMessages,
+      sendUserMessage: (message) => pi.sendUserMessage(message),
+    });
+    runtimeEpochs.set(sessionId, epoch);
+  });
+
+  pi.on("message_end", (event, ctx) => {
+    const message = (event as { message?: { role?: string; content?: unknown } }).message;
+    if (message?.role !== "user") return;
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (!sessionId) return;
+    const observed = observeGoalContinuationUserMessage(sessionId, extractMessageText(message.content));
+    if (!observed) return;
+    for (const deliveryId of observed.deliveryIds) {
+      try {
+        pi.appendEntry(GOAL_CONTINUATION_ACK_TYPE, {
+          goal_id: observed.goalId,
+          session_id: sessionId,
+          delivery_id: deliveryId,
+          message_hash: observed.messageHash,
+          ack: "user_message_end",
+          ts: new Date().toISOString(),
+        });
+      } catch (error) {
+        appendGoalAutoContinueAudit(ctx.cwd ?? process.cwd(), {
+          type: "goal_auto_continue",
+          operation: "continuation_delivery",
+          outcome: "ack_entry_append_failed",
+          session_id: sessionId,
+          goal_id: observed.goalId,
+          delivery_id: deliveryId,
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+          ts: new Date().toISOString(),
+        });
+      }
+    }
+  });
+
+  pi.on("session_before_tree", (_event, ctx) => {
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (sessionId) cancelKeyedDetached(goalDetachedQueueKey(sessionId), "session_tree_switch");
+  });
+
+  pi.on("session_shutdown", (event, ctx) => {
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (!sessionId) return;
+    const queueKey = goalDetachedQueueKey(sessionId);
+    cancelKeyedDetached(queueKey, `session_${String((event as { reason?: unknown }).reason ?? "shutdown")}`);
+    const epoch = runtimeEpochs.get(sessionId);
+    if (epoch !== undefined) {
+      runtimeEpochs.delete(sessionId);
+      // Keep only appendEntry alive until cancelled work records any pre-send
+      // compensation. Delivery sees the aborted signal and cannot cross the
+      // send boundary. If reload has already registered a newer epoch, the
+      // epoch guard makes this delayed unregister a no-op.
+      void waitForKeyedDetachedIdle(queueKey).finally(() => unregisterGoalSessionRuntime(sessionId, epoch));
+    }
+  });
 
   const setGoal = async (args: { objective?: string; doc?: string; criteria?: string[]; maxContinuations?: number; maxMinutes?: number }, ctx: any) => {
     const settings = resolveGoalSettings();
@@ -760,12 +795,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── PR-7 auto-continue (goal.autoContinue, default OFF) ──
-  // Re-entrancy shape: the continuation turn re-enters agent_end by
-  // design; the loop is bounded because the budget counter is
-  // PRE-DECREMENTED and persisted before each send (continue.ts). The
-  // in-flight set guards against overlapping agent_end emissions only.
-  const autoContinueInFlight = new Set<string>();
-  pi.on("agent_end", async (event, ctx) => {
+  // The awaited pi hook does only synchronous capture + enqueue. Network,
+  // persistence, delivery acknowledgement, and auditing run in the process-
+  // level per-session serial queue after this handler has returned.
+  pi.on("agent_end", (event, ctx) => {
     const settings = resolveGoalSettings();
     if (!settings.enabled || !settings.autoContinue) return;
     if (isSubAgentSession(ctx as never)) return;
@@ -774,108 +807,75 @@ export default function (pi: ExtensionAPI) {
     if (!sessionId) return;
     const state = loadGoalFile(cwd, sessionId);
     if (!state || state.status !== "active") return;
-    if (ctx.signal?.aborted) {
-      const stopped = { ...state, status: "paused" as const, status_note: "stopped: user abort/ESC", updated: new Date().toISOString() };
-      const evOk = appendGoalEvent("stop", stopped);
-      if (!evOk) try { ctx.ui?.notify?.("goal event log append FAILED — stop may not survive reconcile", "warning" as never); } catch { /* noop */ }
-      await saveGoalFile(cwd, stopped);
-      try { ctx.ui?.notify?.("goal stopped: user abort/ESC", "info" as never); } catch { /* noop */ }
-      return;
-    }
-    const skipReason = goalAutoContinueSkipReason(event);
-    if (skipReason) {
-      try { ctx.ui?.notify?.(`goal auto-continue skipped: ${skipReason}`, "info" as never); } catch { /* noop */ }
-      return;
-    }
+    const runtimeEpoch = getGoalSessionRuntimeEpoch(sessionId);
+    if (runtimeEpoch === undefined) return;
+
     const branch = (ctx.sessionManager as unknown as { getBranch?(): unknown[] })?.getBranch?.() ?? [];
-    if (hasUnconsumedGoalContinuation(branch, state.goal_id, { maxPendingAgeMs: settings.pendingContinuationStaleMinutes * 60_000 })) {
-      try { ctx.ui?.notify?.("goal auto-continue skipped: pending continuation already queued", "info" as never); } catch { /* noop */ }
-      return;
-    }
-    if (autoContinueInFlight.has(sessionId)) return;
-    autoContinueInFlight.add(sessionId);
-    try {
-      const source = getGoalSource(state);
-      let goalDoc: { path: string; content: string; truncated?: boolean } | undefined;
-      let judgeLedger: string | undefined;
-      if (source.type === "doc") {
-        const doc = readGoalDoc(source.doc_path);
-        if (!doc.ok) {
-          const paused = { ...state, status: "paused" as const, status_note: `goal doc unreadable: ${doc.error}`, updated: new Date().toISOString() };
-          const evOk = appendGoalEvent("pause", paused);
-          if (!evOk) try { ctx.ui?.notify?.("goal event log append FAILED — unreadable-doc pause may not survive reconcile", "warning" as never); } catch { /* noop */ }
-          const saved = await saveGoalFile(cwd, paused);
-          if (!saved) try { ctx.ui?.notify?.("goal view write FAILED — unreadable-doc pause may not be visible until retry", "warning" as never); } catch { /* noop */ }
-          try { ctx.ui?.notify?.(`goal paused: document unreadable (${doc.error})`, "warning" as never); } catch { /* noop */ }
-          return;
-        }
+    const source = getGoalSource(state);
+    let goalDoc: { path: string; content: string; truncated?: boolean } | undefined;
+    let goalDocError: string | undefined;
+    let judgeLedger: string | undefined;
+    if (source.type === "doc") {
+      const doc = readGoalDoc(source.doc_path);
+      if (doc.ok) {
         goalDoc = { path: source.doc_display_path, content: doc.text, ...(doc.truncated ? { truncated: true } : {}) };
         judgeLedger = buildJudgeLedger(source.doc_path, branch, cwd, state.goal_id);
+      } else {
+        goalDocError = doc.error;
       }
-      await runAutoContinueOnce({
-        state,
-        judge: () => runGoalJudge(
-          {
-            objective: state.objective,
-            successCriteria: state.success_criteria,
-            ...(goalDoc ? { goalDoc } : {}),
-            ...(judgeLedger ? { evidenceLedger: judgeLedger } : {}),
-            recentTranscript: packGoalJudgeWindow(branch),
-            continuationsUsed: state.counters.continuations_used,
-            maxContinuations: state.budget.max_continuations,
-          },
-          { judgeModel: settings.judgeModel, judgeTimeoutMs: settings.judgeTimeoutMs, modelRegistry: ctx.modelRegistry },
-        ),
-        sendContinuation: (message) => {
-          const expectedContinuationsUsed = state.counters.continuations_used + 1;
-          void scheduleGoalContinuationAfterIdle({
-            message,
-            goalId: state.goal_id,
-            expectedContinuationsUsed,
-            appendIntent: () => {
-              // §P1 hard-constraint 2b (gpt R1): DEDICATED event-layer ledger —
-              // record the SEND INTENT before dispatch. During the delayed
-              // idle window this also keeps the pending-continuation gate shut.
-              try {
-                (pi as unknown as { appendEntry?: (t: string, d: unknown) => void }).appendEntry?.("pi-goal-continuation", {
-                  goal_id: state.goal_id,
-                  session_id: sessionId,
-                  continuations_used: expectedContinuationsUsed,
-                  message_hash: createHash("sha256").update(message, "utf-8").digest("hex").slice(0, 12),
-                  ts: new Date().toISOString(),
-                });
-              } catch { /* ledger is best-effort */ }
-            },
-            loadState: () => loadGoalFile(cwd, sessionId),
-            isIdle: () => ctx.isIdle(),
-            hasPendingMessages: () => ctx.hasPendingMessages(),
-            sendDirect: (m) => pi.sendUserMessage(m),
-            sendFollowUp: (m) => pi.sendUserMessage(m, { deliverAs: "followUp" }),
-            notify: (msg, type) => { try { ctx.ui?.notify?.(msg, type as never); } catch { /* ui may be absent in print mode */ } },
-          }).catch((err) => {
-            try { ctx.ui?.notify?.(`goal auto-continue delayed send failed: ${err instanceof Error ? err.message : String(err)}`, "warning" as never); } catch { /* noop */ }
-          });
-        },
-        isStillActive: async (next) => {
-          if (ctx.signal?.aborted) {
-            const stopped = { ...next, status: "paused" as const, status_note: "stopped: user abort/ESC", updated: new Date().toISOString() };
-            const evOk = appendGoalEvent("stop", stopped);
-            if (!evOk) try { ctx.ui?.notify?.("goal event log append FAILED — stop may not survive reconcile", "warning" as never); } catch { /* noop */ }
-            await saveGoalFile(cwd, stopped);
-            return false;
-          }
-          const latest = loadGoalFile(cwd, sessionId);
-          return !!latest && latest.goal_id === next.goal_id && latest.status === "active" && latest.counters.continuations_used === next.counters.continuations_used;
-        },
-        notify: (msg, type) => { try { ctx.ui?.notify?.(msg, type as never); } catch { /* ui may be absent in print mode */ } },
-        appendEvent: appendGoalEvent,
-        saveState: (s) => saveGoalFile(cwd, s),
-        appendOutcome: (row) => { appendGoalOutcome(cwd, row as unknown as Record<string, unknown>); },
-      });
-    } catch { /* auto-continue is best-effort bg work; never break agent_end */ }
-    finally {
-      autoContinueInFlight.delete(sessionId);
     }
+    const branchTip = branch.length > 0
+      ? String((branch[branch.length - 1] as { id?: unknown }).id ?? branch.length)
+      : "empty";
+    const capturedAt = new Date().toISOString();
+    const maxPendingAgeMs = settings.pendingContinuationStaleMinutes * 60_000;
+    const snapshot = immutableSnapshot<GoalAutoContinueSnapshot>({
+      sessionId,
+      cwd,
+      runtimeEpoch,
+      capturedAt,
+      dedupeKey: `${state.goal_id}:${state.counters.continuations_used}:${branchTip}`,
+      triggerAborted: ctx.signal?.aborted === true,
+      skipReason: goalAutoContinueSkipReason(event),
+      pendingContinuationAtTrigger: hasUnconsumedGoalContinuation(branch, state.goal_id, { maxPendingAgeMs }),
+      pendingContinuationStaleMs: maxPendingAgeMs,
+      state,
+      judgeInput: {
+        objective: state.objective,
+        successCriteria: [...state.success_criteria],
+        ...(goalDoc ? { goalDoc } : {}),
+        ...(judgeLedger ? { evidenceLedger: judgeLedger } : {}),
+        recentTranscript: packGoalJudgeWindow(branch),
+        continuationsUsed: state.counters.continuations_used,
+        maxContinuations: state.budget.max_continuations,
+      },
+      judgeModel: settings.judgeModel,
+      judgeTimeoutMs: settings.judgeTimeoutMs,
+      ...(goalDocError ? { goalDocError } : {}),
+    });
+
+    if (snapshot.triggerAborted) {
+      // ESC is a stop request, not a coalescible observation. Cancel an older
+      // judge/delivery first so this stop snapshot becomes the next pass.
+      cancelKeyedDetached(goalDetachedQueueKey(sessionId), "user_abort");
+    }
+    enqueueKeyedDetached({
+      key: goalDetachedQueueKey(sessionId),
+      dedupeKey: snapshot.dedupeKey,
+      run: (signal) => runGoalAutoContinueSnapshot(snapshot, signal).then(() => undefined),
+      onError: (error) => {
+        appendGoalAutoContinueAudit(snapshot.cwd, {
+          type: "goal_auto_continue",
+          operation: "detached_queue",
+          outcome: "job_failed",
+          session_id: snapshot.sessionId,
+          goal_id: snapshot.state.goal_id,
+          snapshot_dedupe_key: snapshot.dedupeKey,
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+          ts: new Date().toISOString(),
+        });
+      },
+    });
   });
 
   // Fork/resume reconcile (events win) + stale view GC.

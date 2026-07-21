@@ -34,12 +34,33 @@ import { withFileLock, atomicWriteText } from "../_shared/sync-file-lock";
 import type { Jsonish, MemoryEntry, RelationEdge } from "../memory/types";
 import type { LifecycleProposal, PromotedAdvisory } from "./aggregator-llm";
 import { normalizeAssessment, type EntryDecayAssessment } from "./decay-shadow";
+import { ENTRY_KINDS, type EntryKind } from "./validation";
 
 export type LifecycleProposalReason = LifecycleProposal["reason"] | "superseded_no_successor";
 export type LifecycleProposalStatus = "pending" | "executed" | "failed";
 export type LifecycleProposalDisposition = "execution_ready" | "review_required";
 export type LifecycleProposalExpectedStatus = "active" | "superseded";
 export type LifecycleProposalEvidenceSource = "aggregator_promoted_advisory" | "frontmatter_superseded" | "decay";
+export type DurableKindSource = "canonical_frontmatter" | "project_frontmatter" | "project_root_frontmatter";
+export type DurableKindResolutionReason = "missing_durable_entry" | "missing_durable_kind" | "invalid_durable_kind" | "ambiguous_durable_kind";
+
+export interface DurableKindResolution {
+  kind?: EntryKind;
+  /** Invalid raw frontmatter is diagnostic-only; never accepted by the writer. */
+  raw_kind?: string;
+  source?: DurableKindSource;
+  reason?: DurableKindResolutionReason;
+}
+
+/** Persistent audit of the bounded repair for legacy decay rows. */
+export interface LifecycleProposalKindResolution {
+  schema_version: 1;
+  action: "legacy_decay_kind_repaired" | "legacy_decay_kind_retired";
+  resolved_at: string;
+  source?: DurableKindSource;
+  durable_kind?: EntryKind;
+  reason?: DurableKindResolutionReason;
+}
 
 export interface EntryLifecycleProposalRow {
   schema_version: 1;
@@ -70,6 +91,8 @@ export interface EntryLifecycleProposalRow {
   target_slug?: string;
   /** Explicit marker for curator/manual review queues. */
   review_required?: boolean;
+  /** Structured audit for the bounded legacy decay kind compatibility repair. */
+  kind_resolution?: LifecycleProposalKindResolution;
   /** normalizeRow 保留磁盘状态: executor transitions pending -> executed/failed. */
   status: LifecycleProposalStatus;
 }
@@ -123,8 +146,33 @@ export interface AppendDecayDemoteProposalsResult extends AppendLifecycleProposa
   eligible: number;
   limited: number;
   skipped_duplicate_slug: number;
+  skipped_missing_durable_kind: number;
+  skipped_invalid_durable_kind: number;
   max_per_run: number;
   appended_slugs: string[];
+  legacy_kind_compatibility: ReconcileLegacyDecayProposalKindsResult;
+}
+
+export interface ReconcileLegacyDecayProposalKindsOptions {
+  projectRoot: string;
+  now?: Date;
+}
+
+export interface ReconcileLegacyDecayProposalKindsResult {
+  ok: boolean;
+  written: boolean;
+  rows_total: number;
+  considered: number;
+  repaired: number;
+  retired: number;
+  deferred: number;
+  max_per_run: number;
+  repaired_slugs: string[];
+  retired_slugs: string[];
+  /** Non-empty JSONL lines that prevented a fail-closed full rewrite. */
+  invalid_json_lines: number;
+  invalid_json_line_numbers: number[];
+  error?: string;
 }
 
 interface AppendRowsOptions {
@@ -141,6 +189,8 @@ interface AppendRowsResult extends AppendLifecycleProposalsResult {
 const PROPOSALS_MAX_ROWS = 1000;
 const PROPOSALS_TAIL_READ_BYTES = 2 * 1024 * 1024;
 const STRING_FIELD_MAX_CHARS = 1_000;
+const DECAY_COMPAT_MAX_PER_RUN = 3;
+const ENTRY_KIND_SET: ReadonlySet<string> = new Set(ENTRY_KINDS);
 
 export function entryLifecycleProposalsPath(): string {
   ensureUserGlobalSidecarMigrated();
@@ -181,10 +231,68 @@ function readJsonlTail<T = Record<string, unknown>>(filePath: string, maxBytes =
   }
 }
 
+interface FullJsonlRewriteRead<T> {
+  rows: T[];
+  row_count: number;
+  invalid_json_lines: number;
+  invalid_json_line_numbers: number[];
+  error?: string;
+}
+
+/** A rewrite must start from the complete bounded sidecar, never a tail view.
+ * Refuse over-limit or malformed files instead of silently dropping any rows. */
+function readJsonlForFullRewrite<T = Record<string, unknown>>(filePath: string): FullJsonlRewriteRead<T> {
+  try {
+    if (!fs.existsSync(filePath)) return { rows: [], row_count: 0, invalid_json_lines: 0, invalid_json_line_numbers: [] };
+    const nonEmptyLines = fs.readFileSync(filePath, "utf-8").split("\n")
+      .map((line, index) => ({ line: line.trim(), line_number: index + 1 }))
+      .filter(({ line }) => Boolean(line));
+    if (nonEmptyLines.length > PROPOSALS_MAX_ROWS) {
+      return { rows: [], row_count: nonEmptyLines.length, invalid_json_lines: 0, invalid_json_line_numbers: [], error: "proposal_row_limit_exceeded" };
+    }
+    const rows: T[] = [];
+    const invalidJsonLineNumbers: number[] = [];
+    for (const { line, line_number } of nonEmptyLines) {
+      try { rows.push(JSON.parse(line) as T); } catch { invalidJsonLineNumbers.push(line_number); }
+    }
+    return {
+      rows,
+      row_count: nonEmptyLines.length,
+      invalid_json_lines: invalidJsonLineNumbers.length,
+      invalid_json_line_numbers: invalidJsonLineNumbers,
+      ...(invalidJsonLineNumbers.length > 0 ? { error: "proposal_jsonl_parse_failed" } : {}),
+    };
+  } catch (e) {
+    return { rows: [], row_count: 0, invalid_json_lines: 0, invalid_json_line_numbers: [], error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 function validReason(value: unknown): LifecycleProposalReason | undefined {
   return value === "affirm_stale" || value === "affirm_superseded" || value === "affirm_echo_chamber" || value === "superseded_no_successor"
     ? value
     : undefined;
+}
+
+function validDurableKind(value: unknown): EntryKind | undefined {
+  return typeof value === "string" && ENTRY_KIND_SET.has(value) ? value as EntryKind : undefined;
+}
+
+function normalizeKindResolution(value: unknown): LifecycleProposalKindResolution | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const r = value as Record<string, unknown>;
+  const action = r.action === "legacy_decay_kind_repaired" || r.action === "legacy_decay_kind_retired" ? r.action : undefined;
+  const source = r.source === "canonical_frontmatter" || r.source === "project_frontmatter" || r.source === "project_root_frontmatter" ? r.source : undefined;
+  const reason = r.reason === "missing_durable_entry" || r.reason === "missing_durable_kind" || r.reason === "invalid_durable_kind" || r.reason === "ambiguous_durable_kind" ? r.reason : undefined;
+  const durableKind = validDurableKind(r.durable_kind);
+  if (r.schema_version !== 1 || !action || typeof r.resolved_at !== "string") return undefined;
+  return {
+    schema_version: 1,
+    action,
+    resolved_at: r.resolved_at,
+    ...(source ? { source } : {}),
+    ...(durableKind ? { durable_kind: durableKind } : {}),
+    ...(reason ? { reason } : {}),
+  };
 }
 
 function lifecycleEvidenceType(reason: LifecycleProposalReason, source?: LifecycleProposalEvidenceSource, targetSlug?: string): string {
@@ -216,6 +324,7 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
       : r.evidence_source === "decay"
         ? "decay"
         : undefined;
+  const kindResolution = normalizeKindResolution(r.kind_resolution);
   const normalized: EntryLifecycleProposalRow = {
     schema_version: 1,
     ts: typeof r.ts === "string" ? r.ts : formatLocalIsoTimestamp(),
@@ -234,6 +343,7 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
     ...(typeof r.target_slug === "string" && r.target_slug ? { target_slug: r.target_slug } : {}),
     ...(typeof r.supersedes_proposal_id === "string" && r.supersedes_proposal_id ? { supersedes_proposal_id: r.supersedes_proposal_id } : {}),
     ...(r.review_required === true ? { review_required: true } : {}),
+    ...(kindResolution ? { kind_resolution: kindResolution } : {}),
     status: (r.status === "executed" || r.status === "failed") ? r.status : "pending",
   };
   normalized.evidence_type = typeof r.evidence_type === "string" && r.evidence_type ? r.evidence_type : lifecycleEvidenceType(normalized.reason, normalized.evidence_source, normalized.target_slug);
@@ -290,9 +400,13 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
         return row;
       });
       const archiveSlugs = options.dedupeArchiveBySlug
-        ? new Set(reconciledExisting.filter((row) => row.project_root === pr && row.op === "archive" && !!row.slug).map((row) => row.slug as string))
+        ? new Set(reconciledExisting.filter((row) => row.project_root === pr && row.op === "archive" && row.status !== "failed" && !!row.slug).map((row) => row.slug as string))
         : undefined;
-      const seen = new Set(reconciledExisting.map(proposalIdentity));
+      // A terminal legacy decay row must not suppress a later assessment after
+      // the entry finally gains a verifiable durable kind.
+      const seen = new Set(reconciledExisting
+        .filter((row) => !(options.dedupeArchiveBySlug && row.evidence_source === "decay" && row.status === "failed"))
+        .map(proposalIdentity));
       const newRows: EntryLifecycleProposalRow[] = [];
       let limited = 0;
       let skippedDuplicateSlug = 0;
@@ -350,6 +464,120 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
       skipped_duplicate_slug: 0,
       appended_slugs: [],
     };
+  }
+}
+
+/** Repair the historical `decay + pending + outcome_entry` schema defect in a
+ * bounded, idempotent pass. Rewrites read the complete sidecar only when its
+ * non-empty JSONL line count is within PROPOSALS_MAX_ROWS; an over-limit file
+ * is left untouched. A durable kind is required; unresolved rows become
+ * terminal so the executor never audits the same impossible mismatch forever. */
+export function reconcileLegacyDecayProposalKinds(options: ReconcileLegacyDecayProposalKindsOptions): ReconcileLegacyDecayProposalKindsResult {
+  const projectRoot = normalizeProjectRoot(options.projectRoot);
+  const now = options.now ?? new Date();
+  const resolvedAt = formatLocalIsoTimestamp(now);
+  const empty = (error?: string, invalidJsonLines = 0, invalidJsonLineNumbers: number[] = []): ReconcileLegacyDecayProposalKindsResult => ({
+    ok: !error,
+    written: false,
+    rows_total: 0,
+    considered: 0,
+    repaired: 0,
+    retired: 0,
+    deferred: 0,
+    max_per_run: DECAY_COMPAT_MAX_PER_RUN,
+    repaired_slugs: [],
+    retired_slugs: [],
+    invalid_json_lines: invalidJsonLines,
+    invalid_json_line_numbers: invalidJsonLineNumbers,
+    ...(error ? { error } : {}),
+  });
+  if (!projectRoot) return empty();
+
+  try {
+    const durableKinds = durableKindResolutions(projectRoot);
+    const locked = withFileLock(entryLifecycleProposalsLockPath(), () => {
+      const loaded = readJsonlForFullRewrite<unknown>(entryLifecycleProposalsPath());
+      if (loaded.error) {
+        return {
+          error: loaded.error,
+          rows_total: loaded.row_count,
+          invalid_json_lines: loaded.invalid_json_lines,
+          invalid_json_line_numbers: loaded.invalid_json_line_numbers,
+        };
+      }
+      const existing = loaded.rows
+        .map(normalizeRow)
+        .filter((row): row is EntryLifecycleProposalRow => row !== null);
+      const candidates = existing.filter((row) =>
+        row.project_root === projectRoot &&
+        row.status === "pending" &&
+        row.op === "archive" &&
+        row.evidence_source === "decay" &&
+        row.kind === "outcome_entry" &&
+        !!row.slug,
+      );
+      const selected = new Set(candidates.slice(0, DECAY_COMPAT_MAX_PER_RUN));
+      const repairedSlugs: string[] = [];
+      const retiredSlugs: string[] = [];
+      const next = existing.map((row) => {
+        if (!selected.has(row)) return row;
+        const resolution = durableKinds.get(normalizeRelationTarget(row.slug ?? "")) ?? { reason: "missing_durable_entry" as const };
+        if (resolution.kind) {
+          repairedSlugs.push(row.slug as string);
+          return {
+            ...row,
+            kind: resolution.kind,
+            kind_resolution: {
+              schema_version: 1,
+              action: "legacy_decay_kind_repaired" as const,
+              resolved_at: resolvedAt,
+              ...(resolution.source ? { source: resolution.source } : {}),
+              durable_kind: resolution.kind,
+            },
+          };
+        }
+        retiredSlugs.push(row.slug as string);
+        return {
+          ...row,
+          status: "failed" as const,
+          message: clip(`${row.message ?? ""} legacy_decay_kind_unresolved=${resolution.reason ?? "missing_durable_entry"}`),
+          kind_resolution: {
+            schema_version: 1,
+            action: "legacy_decay_kind_retired" as const,
+            resolved_at: resolvedAt,
+            ...(resolution.source ? { source: resolution.source } : {}),
+            reason: resolution.reason ?? "missing_durable_entry",
+          },
+        };
+      });
+      const written = repairedSlugs.length > 0 || retiredSlugs.length > 0;
+      if (written) {
+        const enriched = next.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
+        atomicWriteText(entryLifecycleProposalsPath(), enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
+      }
+      return {
+        written,
+        rows_total: next.length,
+        considered: candidates.length,
+        repaired: repairedSlugs.length,
+        retired: retiredSlugs.length,
+        deferred: Math.max(0, candidates.length - DECAY_COMPAT_MAX_PER_RUN),
+        repaired_slugs: repairedSlugs,
+        retired_slugs: retiredSlugs,
+        invalid_json_lines: 0,
+        invalid_json_line_numbers: [],
+      };
+    });
+    if (!locked.ok) return empty("proposal_lock_contention");
+    if ("error" in locked.value) {
+      return {
+        ...empty(locked.value.error, locked.value.invalid_json_lines, locked.value.invalid_json_line_numbers),
+        rows_total: locked.value.rows_total,
+      };
+    }
+    return { ok: true, max_per_run: DECAY_COMPAT_MAX_PER_RUN, ...locked.value };
+  } catch (e) {
+    return empty(e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -412,18 +640,34 @@ function decayEvidenceText(a: EntryDecayAssessment): string {
  */
 export function appendDecayDemoteProposals(options: AppendDecayDemoteProposalsOptions): AppendDecayDemoteProposalsResult {
   const projectRoot = normalizeProjectRoot(options.projectRoot);
-  const ts = formatLocalIsoTimestamp(options.now ?? new Date());
-  const maxPerRun = Math.max(0, Math.min(3, Math.floor(options.maxPerRun ?? 3)));
+  const now = options.now ?? new Date();
+  const ts = formatLocalIsoTimestamp(now);
+  const maxPerRun = Math.max(0, Math.min(DECAY_COMPAT_MAX_PER_RUN, Math.floor(options.maxPerRun ?? DECAY_COMPAT_MAX_PER_RUN)));
+  const legacyKindCompatibility = reconcileLegacyDecayProposalKinds({ projectRoot, now });
+  const durableKinds = durableKindResolutions(projectRoot);
   const normalized = (Array.isArray(options.assessments) ? options.assessments : [])
     .map(normalizeAssessment)
     .filter((a): a is EntryDecayAssessment => !!a && a.would_demote === true && a.demote_evidence_type !== null);
+  const eligible: Array<{ assessment: EntryDecayAssessment; kind: EntryKind }> = [];
+  let skippedMissingDurableKind = 0;
+  let skippedInvalidDurableKind = 0;
+  for (const assessment of normalized) {
+    const resolution = durableKinds.get(normalizeRelationTarget(assessment.slug)) ?? { reason: "missing_durable_entry" as const };
+    if (resolution.kind) {
+      eligible.push({ assessment, kind: resolution.kind });
+    } else if (resolution.reason === "missing_durable_entry" || resolution.reason === "missing_durable_kind") {
+      skippedMissingDurableKind++;
+    } else {
+      skippedInvalidDurableKind++;
+    }
+  }
 
-  const rows: EntryLifecycleProposalRow[] = normalized.map((a) => ({
+  const rows: EntryLifecycleProposalRow[] = eligible.map(({ assessment: a, kind }) => ({
     schema_version: 1,
     ts,
     project_root: projectRoot,
     slug: a.slug,
-    kind: "outcome_entry",
+    kind,
     op: "archive",
     reason: decayReason(a),
     independent_evidence: clip(decayEvidenceText(a)),
@@ -441,11 +685,14 @@ export function appendDecayDemoteProposals(options: AppendDecayDemoteProposalsOp
     ...appended,
     source: "decay",
     considered: Array.isArray(options.assessments) ? options.assessments.length : 0,
-    eligible: normalized.length,
+    eligible: eligible.length,
     limited: appended.limited ?? 0,
     skipped_duplicate_slug: appended.skipped_duplicate_slug ?? 0,
+    skipped_missing_durable_kind: skippedMissingDurableKind,
+    skipped_invalid_durable_kind: skippedInvalidDurableKind,
     max_per_run: maxPerRun,
     appended_slugs: appended.appended_slugs ?? [],
+    legacy_kind_compatibility: legacyKindCompatibility,
   };
 }
 
@@ -614,7 +861,7 @@ function markdownEntrySlug(file: string, fm: Record<string, Jsonish>): string {
 
 function readMarkdownEntries(root: string): SupersededFrontmatterEntry[] {
   const out: SupersededFrontmatterEntry[] = [];
-  const skip = new Set([".git", ".state", "staging", "workflows", "rules", "vault"]);
+  const skip = new Set([".git", ".state", ".pi-astack", "node_modules", "staging", "workflows", "rules", "vault"]);
   const walk = (dir: string) => {
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -651,6 +898,59 @@ function scanMarkdownEntries(legacyRoot: string, canonicalRoot?: string): Supers
     }
   }
   return Array.from(bySlug.values());
+}
+
+function durableKindsFromFrontmatter(entries: SupersededFrontmatterEntry[], source: DurableKindSource): Map<string, DurableKindResolution> {
+  const observed = new Map<string, Array<{ raw: string | undefined; kind: EntryKind | undefined }>>();
+  for (const entry of entries) {
+    const slug = normalizeRelationTarget(entry.slug);
+    if (!slug) continue;
+    const raw = scalarString(entry.frontmatter?.kind);
+    const values = observed.get(slug) ?? [];
+    values.push({ raw, kind: validDurableKind(raw) });
+    observed.set(slug, values);
+  }
+  const resolved = new Map<string, DurableKindResolution>();
+  for (const [slug, values] of observed) {
+    const kinds = [...new Set(values.map((value) => value.kind).filter((kind): kind is EntryKind => !!kind))];
+    if (values.some((value) => value.raw === undefined)) {
+      resolved.set(slug, { source, reason: "missing_durable_kind" });
+    } else if (values.some((value) => !value.kind)) {
+      const rawKinds = [...new Set(values.map((value) => value.raw).filter((raw): raw is string => !!raw))];
+      resolved.set(slug, { source, reason: "invalid_durable_kind", ...(rawKinds.length === 1 ? { raw_kind: rawKinds[0] } : {}) });
+    } else if (kinds.length === 1) {
+      resolved.set(slug, { source, kind: kinds[0] });
+    } else {
+      resolved.set(slug, { source, reason: "ambiguous_durable_kind" });
+    }
+  }
+  return resolved;
+}
+
+function durableKindResolutions(projectRoot: string): Map<string, DurableKindResolution> {
+  const project = normalizeProjectRoot(projectRoot);
+  const resolved = durableKindsFromFrontmatter(readMarkdownEntries(project), "project_root_frontmatter");
+  try {
+    const abrainHome = path.resolve(resolveUserGlobalAbrainHome());
+    const projectId = resolveActiveProject(project, { abrainHome }).activeProject?.projectId;
+    if (!projectId) return resolved;
+    for (const [slug, resolution] of durableKindsFromFrontmatter(readMarkdownEntries(abrainProjectDir(abrainHome, projectId)), "project_frontmatter")) {
+      resolved.set(slug, resolution);
+    }
+    for (const [slug, resolution] of durableKindsFromFrontmatter(readMarkdownEntries(path.join(abrainHome, "l2", "views", "knowledge", "latest", "projects", projectId)), "canonical_frontmatter")) {
+      resolved.set(slug, resolution);
+    }
+  } catch { /* unresolved durable kind is fail-closed for new decay rows */ }
+  return resolved;
+}
+
+/** Read only an explicit, valid `kind:` from the current durable frontmatter.
+ * Canonical L2 wins over project storage, which wins over a local project-root
+ * fixture/store. This deliberately never infers kind from a directory. */
+export function resolveDurableEntryKind(projectRoot: string, slug: string): DurableKindResolution {
+  const normalizedSlug = normalizeRelationTarget(slug);
+  if (!normalizedSlug) return { reason: "missing_durable_entry" };
+  return durableKindResolutions(projectRoot).get(normalizedSlug) ?? { reason: "missing_durable_entry" };
 }
 
 /** Scan canonical project markdown frontmatter directly. This deliberately does

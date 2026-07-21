@@ -16,6 +16,7 @@
  *     writes durable markdown; proposal generation status is always "pending"
  */
 
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -85,6 +86,7 @@ const syncFileLockStub = {
   withFileLock: (_lockPath, fn) => ({ ok: true, value: fn() }),
   atomicWriteText: (file, content) => fs.writeFileSync(file, content),
 };
+const validationStub = { ENTRY_KINDS: ["maxim", "decision", "anti-pattern", "pattern", "fact", "preference", "smell"] };
 const decayShadowStub = {
   normalizeAssessment: (raw) => {
     if (!raw || typeof raw !== "object" || !raw.slug) return null;
@@ -107,8 +109,13 @@ const mod = loadCJS(transpile(modulePath), path.join(tmpDir, "entry-lifecycle-pr
   ["../_shared/causal-anchor", causalAnchorStub],
   ["../_shared/sync-file-lock", syncFileLockStub],
   ["./decay-shadow", decayShadowStub],
+  ["./validation", validationStub],
 ]));
-const { entryLifecycleProposalsPath, appendLifecycleProposals, appendSupersededFrontmatterProposals, appendSupersededMarkdownFrontmatterProposals, readLifecycleProposals } = mod;
+const { entryLifecycleProposalsPath, appendLifecycleProposals, appendSupersededFrontmatterProposals, appendSupersededMarkdownFrontmatterProposals, readLifecycleProposals, reconcileLegacyDecayProposalKinds, resolveDurableEntryKind } = mod;
+
+function sha256File(file) {
+  return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
 
 function promotedWithProposal(slug, op, reason, evidence_type) {
   return {
@@ -296,6 +303,26 @@ check("canonical markdown bridge reads block-list superseded_by", () => {
   if (r3.e1_count !== 0 || r3.e2_count !== 0 || r3.proposals_appended !== 0) throw new Error(`canonical archived overlay must skip legacy superseded edge: ${JSON.stringify(r3)}`);
 });
 
+check("durable kind resolution prefers canonical frontmatter", () => {
+  const projectRoot = path.join(tmpDir, "kind-priority-project");
+  const writeEntry = (dir, kind) => {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "priority-kind.md"), [
+      "---",
+      "id: project:smoke-project:priority-kind",
+      `kind: ${kind}`,
+      "status: active",
+      "---",
+      "# Priority kind",
+    ].join("\n"));
+  };
+  writeEntry(projectRoot, "fact");
+  writeEntry(path.join(tmpDir, "abrain", "projects", "smoke-project"), "smell");
+  writeEntry(path.join(tmpDir, "abrain", "l2", "views", "knowledge", "latest", "projects", "smoke-project"), "decision");
+  const resolved = resolveDurableEntryKind(projectRoot, "priority-kind");
+  if (resolved.kind !== "decision" || resolved.source !== "canonical_frontmatter") throw new Error(`canonical kind must win: ${JSON.stringify(resolved)}`);
+});
+
 check("frontmatter bridge second replay appends zero rows", () => {
   const before = readLifecycleProposals(projectA).length;
   const r = appendSupersededFrontmatterProposals({
@@ -310,6 +337,77 @@ check("frontmatter bridge second replay appends zero rows", () => {
   if (!r.ok || r.proposals_appended !== 0 || r.written !== false) throw new Error(`expected idempotent no-op, got ${JSON.stringify(r)}`);
   if (readLifecycleProposals(projectA).length !== before) throw new Error("idempotent bridge replay changed row count");
 });
+
+check("legacy decay reconciliation preserves the head beyond the tail-read window", () => {
+  fs.mkdirSync(projectA, { recursive: true });
+  fs.writeFileSync(path.join(projectA, "tail-window-legacy.md"), [
+    "---",
+    "id: project:smoke-project:tail-window-legacy",
+    "kind: fact",
+    "status: active",
+    "---",
+    "# Tail window legacy",
+  ].join("\n"));
+  const padding = "x".repeat(2_200);
+  const common = {
+    schema_version: 1,
+    ts: "2026-06-04T14:00:00.000Z",
+    project_root: path.resolve(projectA),
+    op: "archive",
+    reason: "affirm_superseded",
+    independent_evidence: "fixture",
+    falsifier: "fixture",
+    disposition: "execution_ready",
+    expected_status: "active",
+    evidence_source: "decay",
+    message: padding,
+  };
+  const rows = Array.from({ length: 999 }, (_, i) => ({ ...common, slug: i === 0 ? "head-before-tail" : `filler-${i}`, kind: "fact", status: "executed" }));
+  rows.push({ ...common, slug: "tail-window-legacy", kind: "outcome_entry", status: "pending" });
+  const file = entryLifecycleProposalsPath();
+  fs.writeFileSync(file, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+  if (fs.statSync(file).size <= 2 * 1024 * 1024) throw new Error("fixture must exceed the historical 2 MiB tail window");
+
+  const reconciled = reconcileLegacyDecayProposalKinds({ projectRoot: projectA, now: new Date("2026-06-04T14:00:00Z") });
+  const persisted = fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  if (!reconciled.ok || reconciled.repaired !== 1 || persisted.length !== 1000) throw new Error(`full bounded reconciliation failed: ${JSON.stringify(reconciled)}`);
+  if (persisted[0]?.slug !== "head-before-tail") throw new Error("tail-window reconciliation dropped the sidecar head");
+  if (persisted.at(-1)?.slug !== "tail-window-legacy" || persisted.at(-1)?.kind !== "fact") throw new Error(`legacy tail row was not repaired: ${JSON.stringify(persisted.at(-1))}`);
+});
+
+for (const [position, lineNumber] of [["head", 1], ["middle", 2], ["tail", 3]]) {
+  check(`legacy decay reconciliation fails closed for a corrupt ${position} JSONL row`, () => {
+    const file = entryLifecycleProposalsPath();
+    const legacy = {
+      schema_version: 1,
+      ts: "2026-06-04T15:00:00.000Z",
+      project_root: path.resolve(projectA),
+      slug: "tail-window-legacy",
+      kind: "outcome_entry",
+      op: "archive",
+      reason: "affirm_superseded",
+      independent_evidence: "fixture",
+      falsifier: "fixture",
+      disposition: "execution_ready",
+      expected_status: "active",
+      evidence_source: "decay",
+      status: "pending",
+    };
+    const corrupt = "{not valid json";
+    const lines = position === "head"
+      ? [corrupt, JSON.stringify(legacy), JSON.stringify({ ...legacy, slug: "valid-tail", status: "executed", kind: "fact" })]
+      : position === "middle"
+        ? [JSON.stringify(legacy), corrupt, JSON.stringify({ ...legacy, slug: "valid-tail", status: "executed", kind: "fact" })]
+        : [JSON.stringify(legacy), JSON.stringify({ ...legacy, slug: "valid-middle", status: "executed", kind: "fact" }), corrupt];
+    fs.writeFileSync(file, `${lines.join("\n")}\n`);
+    const before = sha256File(file);
+    const reconciled = reconcileLegacyDecayProposalKinds({ projectRoot: projectA, now: new Date("2026-06-04T15:00:00Z") });
+    const after = sha256File(file);
+    if (reconciled.ok || reconciled.written || reconciled.error !== "proposal_jsonl_parse_failed") throw new Error(`corrupt JSONL must fail closed: ${JSON.stringify(reconciled)}`);
+    if (reconciled.rows_total !== 3 || reconciled.invalid_json_lines !== 1 || JSON.stringify(reconciled.invalid_json_line_numbers) !== JSON.stringify([lineNumber])) throw new Error(`corrupt JSONL diagnostics wrong: ${JSON.stringify(reconciled)}`);
+    if (before !== after) throw new Error(`corrupt ${position} JSONL changed despite fail-closed reconciliation`);
+  });
+}
 
 console.log("\nSource-level boundary guards (§8 Observation ≠ Authorization)");
 

@@ -28,7 +28,7 @@ export interface SearchSettings {
   stage0MaxCandidates: number;      // hybrid union 候选面硬上限(~300, 成本旋钮)
   stage0InsufficientPoolK: number;  // 候选池 < K 触发安全网有界扩召(~5)
   stage0EmbedTimeoutMs: number;     // query embed 短超时(~10s; 失败即熔断 sparse)
-  stage0StaleFloorRatio: number;    // P6: stale/missing 保底预算占 maxCand 比例(freshness 不变量)
+  stage0StaleFloorRatio: number;    // P6: stale/missing 在 direct-to-stage2 window 的保底比例(freshness 不变量)
   stage1CompactSurface: boolean;    // P8: stage1 用紧凑 surface(meta+summary, 无 compiledTruth/timeline)做粗筛
   stage1Skip: boolean;              // ADR 0036: 跳过 stage1 LLM, stage0 top-K 直出 stage2(两阶段塔缩)
   sparseBM25: boolean;             // ADR 0036: sparse 用 char n-gram BM25(补中文/符号)替朴素子串
@@ -61,11 +61,12 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage0MaxCandidates: 400,
   stage0InsufficientPoolK: 5,
   stage0EmbedTimeoutMs: 10_000,
-  // P6(4×T0 REVISE-B 共识): stale/missing(刚写/改写未索引) 保底预算 floor,
-  // 不可被 dense/sparse 填满 maxCand 挤出 —— 兑现 ADR §4 freshness 不变量
-  // (“新写 entry 下次 search 立即可召回”)。floor 是下限不是上限: 超 floor
-  // 的 stale 仍可补到 maxCand(不独立砸一刀, deepseek 反对 20% 上限的点)。
-  // 0.1 × 400 = 40 槽: 正常 stale ≤几条全进, 冷启动/provider 宕机时限其不挤爆 relevance。
+  // P6(4×T0 REVISE-B 共识): stale/missing(刚写/改写未索引) 在直通 stage2
+  // 窗口保底，不可被先行 dense 填满该窗口挤出 —— 兑现 ADR §4 freshness 不变量
+  // (“新写 entry 下次 search 立即可召回”)。floor 是窗口下限不是全池上限: 超 floor
+  // 的 stale 仍可在 sparse 之后补到 maxCand(不独立砸一刀, deepseek 反对 20% 上限的点)。
+  // 0.1 × max(stage1Limit=50, stage2Limit=10) = 5 槽；正常 stale ≤几条全进，
+  // stale-heavy 时仍为 dense 保留窗口多数槽位。
   stage0StaleFloorRatio: 0.1,
   // P8(dark-launch, 默认 off): stage1 surface 紧凑化。stage0 已缩候选数(库→400),
   // 但 stage1 仍喚 full-body(compiledTruth+timeline ~810 token/entry ×400=324K, cache
@@ -79,7 +80,8 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // ADR 0036(dark-launch, 默认 off): sparse 用 char n-gram BM25 替朴素子串。
   // 现 sparseMatchSlugs 的 term regex /[a-z0-9].../ 对中文零匹配 —— 中文 query
   // 的 sparse 通道完全失效。BM25(ASCII 标识符 + CJK bigram + IDF 加权 + 字段
-  // 权重)补 dense 的中文/精确符号/短 query 盲区, 与 dense RRF 融合。
+  // 权重)补 dense 的中文/精确符号/短 query 盲区；按 stage0 有序 hybrid 规则在
+  // dense 与 freshness window 之后追加，不做 rank-score fusion。
   sparseBM25: false,
   bestEffortOnNone: false,
   // ADR 0036 P5(dark-launch, 默认 off): toolSearch 精确查找路由。query 经规则 regex
@@ -87,7 +89,7 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   // adr-NNNN-* slug 时, 直接返回该 entry 跳过两次 LLM 调用(省成本+延迟)。仅 toolSearch
   // 适用(path-A/decide/dedup/correction 的 query 永不是裸 slug)。无匹配则 fall-through
   // 正常检索 —— 精确直查是“锦上添花快路径”, 永不抑制召回。语义/符号 query 路由偏置
-  // (sparse-first/dense-first)留待 stage0 RRF 权重调参, 不在此 flag 内。
+  // (sparse-first/dense-first)若未来需要，须另行设计；当前固定顺序不由此 flag 调参。
   queryRouting: false,
   // ADR 0036 P4 条件1(dedup 分离): 默认 false(maxsim)。sedimentDedup profile 钉 true
   // —— multiVector flip 后 dedup 用 chunk0(head)聚合, 不让共享尾段 chunk 的 distinct entry

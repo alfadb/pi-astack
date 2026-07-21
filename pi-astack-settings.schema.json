@@ -400,8 +400,12 @@
         "constraintShadowCompiler": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ADR 0039 P1/P4 constraint shadow compiler report and runtime auto-refresh. Manual entries may call a real LLM and write only ~/.abrain/.state/sediment/constraint-shadow/** artifacts; auto-refresh is guarded separately.",
+          "description": "ADR 0039 retained constraint compiler and separately gated automatic scheduling substrate. Explicit dossier/compiler runs remain available when autoRefresh is false; production write/startup/sync/repair triggers require separate re-authorization through autoRefresh.enabled.",
           "properties": {
+            "_comment": {
+              "type": "string",
+              "description": "Free-form operator note. Use it to record why manual compiler capability is retained while automatic production scheduling is disabled."
+            },
             "enabled": {
               "type": "boolean",
               "default": false,
@@ -475,12 +479,12 @@
               "type": "object",
               "additionalProperties": false,
               "default": { "enabled": false },
-              "description": "ADR 0039 P4 runtime refresh after successful Constraint Evidence Event append. It is debounce/single-flight guarded and writes only derived constraint-shadow artifacts.",
+              "description": "Retained ADR 0039 automatic scheduling substrate for successful Constraint Evidence Event append, startup marker/liveness recovery, startup Git sync, and compiled-view repair. Production should keep this false for explicit on-demand operation; false does not disable the compiler, dossier, audit readers, Constraint events, or L2 projection capability.",
               "properties": {
                 "enabled": {
                   "type": "boolean",
                   "default": false,
-                  "description": "Explicit runtime guard for live shadow refresh. false keeps manual-only operation."
+                  "description": "Single production kill switch for every automatic shadow compile trigger. false keeps explicit dossier/compiler commands and audit/migration code available while making event-write, startup, sync, and repair scheduling return auto_refresh_disabled."
                 },
                 "debounceMs": {
                   "type": "number",
@@ -1136,7 +1140,7 @@
 
         "search": {
           "type": "object",
-          "description": "LLM-driven memory_search settings (ADR 0015 two-stage rerank, extended by ADR 0035 stage0 embedding retrieval + ADR 0036 two-stage collapse). Current pipeline: stage0 = embedding dense retrieval plus sparse BM25 RRF candidate pool (stage0Enabled, default on); stage1 = LLM coarse candidate selection (skippable via stage1Skip); stage2 = LLM full-content rerank (final ranker). The stageN model/limit/thinking fields configure the LLM stages; the stage0* fields configure embedding retrieval. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
+          "description": "LLM-driven memory_search settings (ADR 0015 two-stage rerank, extended by ADR 0035 stage0 embedding retrieval + ADR 0036 two-stage collapse). Current pipeline: stage0 is an ordered candidate pool: dense leads the stage1/stage2 window, stale/missing entries fill its freshness reserve by recency, then remaining dense, sparse BM25, and remaining stale entries append with allow-set filtering, deduplication, and a hard cap; stage1 = LLM coarse candidate selection (skippable via stage1Skip); stage2 = LLM full-content rerank (final ranker). The stageN model/limit/thinking fields configure the LLM stages; the stage0* fields configure embedding retrieval. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
           "additionalProperties": false,
           "properties": {
             "_comment": { "type": "string" },
@@ -1179,7 +1183,7 @@
             "stage0Enabled": {
               "type": "boolean",
               "default": true,
-              "description": "ADR 0035 P5: enable stage0 embedding+sparse candidate retrieval as the default production recall surface. Dense embedding retrieval and sparse BM25 are fused via RRF into a bounded candidate pool, replacing full-corpus full-body fan-out. Set false to emergency-rollback to full-corpus full-body."
+              "description": "ADR 0035 P5: enable the default stage0 ordered hybrid candidate surface. Dense leads the direct-to-stage2 window; stale/missing entries reserve recency-ordered slots in that window; remaining dense, sparse BM25, then remaining stale append with allow-set filtering and bounded deduplication. Set false to emergency-rollback to full-corpus full-body."
             },
             "stage0PoolLimit": {
               "type": "number",
@@ -1210,7 +1214,7 @@
               "default": 0.1,
               "minimum": 0,
               "maximum": 1,
-              "description": "ADR 0035 P6 freshness invariant: floor budget (as a fraction of stage0MaxCandidates) reserved for stale/missing (just-written, not-yet-indexed) entries so they cannot be crowded out of the candidate pool by dense/sparse hits. A lower bound, not a cap."
+              "description": "ADR 0035 P6 freshness invariant: fraction of the direct-to-stage2 candidate window (max(stage1Limit, stage2Limit)) reserved for recency-ordered stale/missing (just-written, not-yet-indexed) entries so dense hits cannot crowd them out of that window. A lower bound for the window, not a cap on stale entries in the full pool."
             },
             "stage1CompactSurface": {
               "type": "boolean",
@@ -1220,12 +1224,12 @@
             "stage1Skip": {
               "type": "boolean",
               "default": false,
-              "description": "ADR 0036 runtime kill-switch: skip the stage1 LLM candidate-selection layer entirely — stage0 dense top-K feeds stage2 rerank directly (two-stage collapse). Code DEFAULT stays false; settings flips it true (current production). Safety-net retry forces stage1 back on verdict=none / pool<K. Set false here to instant-rollback if recall regresses."
+              "description": "ADR 0036 runtime kill-switch: skip the stage1 LLM candidate-selection layer entirely — the ordered stage0 top-K feeds stage2 rerank directly (two-stage collapse). Code DEFAULT stays false; settings flips it true (current production). Safety-net retry forces stage1 back on verdict=none / pool<K. Set false here to instant-rollback if recall regresses."
             },
             "sparseBM25": {
               "type": "boolean",
               "default": false,
-              "description": "ADR 0036: use char-ngram BM25 (ASCII identifier + CJK bigram + IDF + high-signal-field x3) for the stage0 sparse arm instead of naive substring matching (which returns zero matches for Chinese queries). Read paths only (search/path-A/decide/correction); curator dedup pins this false. Code DEFAULT false; settings flips it true (current production)."
+              "description": "ADR 0036: use char-ngram BM25 (ASCII identifier + CJK bigram + IDF + high-signal-field x3) for the stage0 sparse arm instead of naive substring matching (which returns zero matches for Chinese queries). Its ordered append follows the dense and freshness-window arms. sedimentDedup inherits this setting after its dedicated validation; Code DEFAULT false, settings flips it true in current production."
             },
             "bestEffortOnNone": {
               "type": "boolean",

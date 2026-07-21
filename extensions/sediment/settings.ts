@@ -62,7 +62,9 @@ export interface SedimentSettings {
   curatorModel: string;
   curatorTimeoutMs: number;
   curatorMaxRetries: number;
-  /** ADR 0039 P1/P4: constraint shadow compiler and runtime auto-refresh. */
+  /** ADR 0039 P1/P4: retained constraint compiler plus separately gated
+   *  auto-refresh substrate. Production keeps autoRefresh disabled unless an
+   *  operator explicitly re-authorizes automatic write/startup triggers. */
   constraintShadowCompiler: {
     enabled: boolean;
     model: string;
@@ -92,6 +94,8 @@ export interface SedimentSettings {
       model: string;
       maxPromptChars: number;
     };
+    /** Legacy automatic scheduling substrate for event-write, startup, sync,
+     *  and repair triggers. false leaves explicit dossier/compiler runs intact. */
     autoRefresh: {
       enabled: boolean;
       debounceMs: number;

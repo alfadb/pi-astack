@@ -488,6 +488,7 @@ await check("simulated long constraint compile does not hold the canonical OFD b
     modelRegistry: { find() { return {}; }, async getApiKeyAndHeaders() { return { ok: true, apiKey: "fixture" }; } },
     reason: "barrier_scope_smoke",
   };
+  autoRefresh._setConstraintShadowSettingsResolverForTests(() => trigger.settings);
   const compileRun = autoRefresh._runConstraintShadowAutoRefreshWithCompilerForTests(trigger, async () => {
     compileStarted();
     await compileGate;

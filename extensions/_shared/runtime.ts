@@ -731,25 +731,26 @@ async function releaseFileLockIfOwner(lockPath: string, token: string): Promise<
   } catch {}
 }
 
-async function tryStealStaleFileLock(lockPath: string, staleMs: number): Promise<boolean> {
+async function tryStealAbandonedFileLock(lockPath: string, staleMs: number): Promise<boolean> {
   const fsPromises = await import("node:fs/promises");
   let raw: string;
-  let statMtimeMs: number;
+  let observedStat: Awaited<ReturnType<typeof fsPromises.stat>>;
   try {
-    const stat = await fsPromises.stat(lockPath);
-    statMtimeMs = stat.mtimeMs;
-    if (Date.now() - statMtimeMs <= staleMs) return false;
+    observedStat = await fsPromises.stat(lockPath);
     raw = await fsPromises.readFile(lockPath, "utf-8");
   } catch {
     return false;
   }
 
   const record = parseFileLockRecord(raw);
-  if (pidAppearsAlive(record.pid)) return false;
+  const hasOwnerPid = Number.isInteger(record.pid) && (record.pid ?? 0) > 0;
+  if (hasOwnerPid && pidAppearsAlive(record.pid)) return false;
+  const confirmedDeadOwner = hasOwnerPid;
+  if (!confirmedDeadOwner && Date.now() - observedStat.mtimeMs <= staleMs) return false;
 
-  // Owner-token guard: re-read immediately before unlink so a stale-lock
-  // stealer never deletes a fresh lock that appeared between stat/read and
-  // unlink. Legacy token-less locks fall back to exact raw-content match.
+  // Owner-token plus inode guard: re-read immediately before unlink so a
+  // stealer does not delete a successor lock that replaced the observed path.
+  // Legacy token-less records fall back to exact raw-content identity.
   try {
     const currentRaw = await fsPromises.readFile(lockPath, "utf-8");
     const current = parseFileLockRecord(currentRaw);
@@ -759,7 +760,10 @@ async function tryStealStaleFileLock(lockPath: string, staleMs: number): Promise
       return false;
     }
     const currentStat = await fsPromises.stat(lockPath);
-    if (Date.now() - currentStat.mtimeMs <= staleMs) return false;
+    if (currentStat.dev !== observedStat.dev || currentStat.ino !== observedStat.ino) return false;
+    const currentHasOwnerPid = Number.isInteger(current.pid) && (current.pid ?? 0) > 0;
+    if (currentHasOwnerPid && pidAppearsAlive(current.pid)) return false;
+    if (!currentHasOwnerPid && Date.now() - currentStat.mtimeMs <= staleMs) return false;
     await fsPromises.unlink(lockPath);
     return true;
   } catch {
@@ -805,7 +809,7 @@ export async function acquireFileLock(lockPath: string, opts: FileLockOptions): 
       };
     } catch (err: any) {
       if (err?.code !== "EEXIST") throw err;
-      await tryStealStaleFileLock(lockPath, opts.staleMs);
+      if (await tryStealAbandonedFileLock(lockPath, opts.staleMs)) continue;
       if (Date.now() - start > opts.timeoutMs) throw new Error(`${opts.label ?? "file"} lock timeout after ${opts.timeoutMs}ms: ${lockPath}`);
       await new Promise((resolve) => setTimeout(resolve, retryMs));
     }

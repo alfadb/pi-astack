@@ -692,7 +692,8 @@ export function sparseMatchSlugs(query: string, corpus: MemoryEntry[]): string[]
 // dense 领跑窗口(windowSize - floorReserveInWindow), 再把最近变更 stale 填进窗口尾
 // 预留(仍在 top-windowSize → 新写 entry 必进窗口, freshness 不变量), 之后
 // dense/sparse/剩余 stale 填到 maxCand 供 three-stage(stage1 看全池, 顺序无关)。
-// stage1Skip 直取 slice(0, candidateLimit) 时窗口由 dense 主导, stale-heavy 不再挤出 dense top-K。
+// stage1Skip 直取 slice(0, candidateLimit) 时窗口由 dense 主导并保留 stale 槽位，
+// stale-heavy 不再挤出 dense top-K。
 export function orderStage0Candidates(
   denseSlugs: string[],
   sparseSlugs: string[],
@@ -872,7 +873,8 @@ async function runTwoStageSearch(
   if (settings.search.stage1Skip) {
     // ADR 0036 两阶段塔缩(5×T0 共识): stage0 已按 dense 排序, stage1 LLM 从
     // 候选选 top-K 与 dense 排序高度冲退。跳过 stage1, 直取 stage0 top-K 喚 stage2
-    // 精排(省 ~324K token)。candidates 顺序 = stage0 ordered(floor→dense→sparse→stale)。
+    // 精排(省 ~324K token)。candidates 顺序 = dense window lead → recency stale reserve
+    // → remaining dense → sparse → remaining stale（每步 bounded dedup）。
     candidates = candidateEntries.slice(0, candidateLimit);
   } else {
     const indexText = buildLlmIndexText(candidateEntries, settings.search.stage1CompactSurface);

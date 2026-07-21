@@ -332,6 +332,20 @@ await check("file lock release does not delete another owner's lock", async () =
   fs.rmSync(lockPath, { force: true });
 });
 
+await check("file lock immediately recovers a fresh lock owned by a dead pid", async () => {
+  const lockPath = path.join(tmpDir, "locks", "dead-fresh.lock");
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999999, token: "dead-owner", created_at: new Date().toISOString() }) + "\n");
+  const started = Date.now();
+  const handle = await runtime.acquireFileLock(lockPath, { timeoutMs: 500, staleMs: 30 * 60 * 1_000, retryMs: 10, label: "smoke-dead" });
+  const elapsedMs = Date.now() - started;
+  const record = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+  if (record.token === "dead-owner") throw new Error("dead owner lock was not replaced");
+  if (elapsedMs >= 500) throw new Error(`dead owner recovery waited for timeout: ${elapsedMs}ms`);
+  await handle.release();
+  if (fs.existsSync(lockPath)) throw new Error("recovered dead-owner lock was not releasable");
+});
+
 await check("file lock does not steal stale lock from a live pid", async () => {
   const lockPath = path.join(tmpDir, "locks", "live-stale.lock");
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });

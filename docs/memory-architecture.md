@@ -30,7 +30,7 @@ status: active
 - project SOT = `<project>/.pensieve/`
 - gbrain world store
 - `.gbrain-source`/`.gbrain-cache`/`.gbrain-scratch`
-- grep/BM25/RRF graceful fallback
+- grep/BM25 或 rank-score fusion 的 graceful fallback
 - promotion gates / project→world promote lane
 - Phase 1-6 roadmap checklist
 - `.pensieve/config.yml` project identity

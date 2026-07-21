@@ -84,7 +84,11 @@ function baseSettings(overrides = {}) {
   };
 }
 
+let liveSettingsForSmoke;
+
 function trigger(abrainHome, settings, extra = {}) {
+  liveSettingsForSmoke = settings;
+  _setConstraintShadowSettingsResolverForTests(() => liveSettingsForSmoke);
   return {
     abrainHome,
     cwd: abrainHome,
@@ -110,6 +114,9 @@ exports.createPiAiMergedSourceVerifierInvoker = () => async () => ({ ok: false, 
 writeFile(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"), `
 exports.runConstraintShadowCompiler = async () => { throw new Error("compiler should not run in liveness smoke"); };
 `);
+writeFile(path.join(outRoot, "sediment", "settings.js"), `
+exports.resolveSedimentSettings = () => { throw new Error("smoke must install a live settings resolver"); };
+`);
 writeFile(path.join(outRoot, "sediment", "writer.js"), `
 exports.commitAbrainDerivedOutputs = async () => null;
 `);
@@ -133,7 +140,11 @@ exports.fsyncDirectory = async (dir) => {
 writeFile(path.join(outRoot, "_shared", "runtime.js"), `
 const path = require("node:path");
 exports.abrainSedimentLocksDir = (abrainHome) => path.join(abrainHome, ".state", "locks");
-exports.acquireFileLock = async () => ({ release: async () => undefined });
+exports.acquireFileLock = async () => {
+  globalThis.__constraintShadowSmokeLockAttempts = (globalThis.__constraintShadowSmokeLockAttempts || 0) + 1;
+  if (globalThis.__constraintShadowSmokeLockContended) throw new Error("injected lock contention");
+  return { release: async () => undefined };
+};
 `);
 
 const autoRefresh = require(path.join(outRoot, "sediment", "constraint-compiler", "auto-refresh.js"));
@@ -144,6 +155,7 @@ const {
   _scheduleConstraintShadowAutoRefreshWithCompilerForTests,
   _runConstraintShadowAutoRefreshNowForTests,
   _setConstraintShadowMarkerDirectorySyncForTests,
+  _setConstraintShadowSettingsResolverForTests,
   _resetConstraintShadowAutoRefreshForTests,
 } = autoRefresh;
 
@@ -169,6 +181,107 @@ function asyncCheck(name, fn) {
   );
   pending.push(checkChain);
 }
+
+asyncCheck("live kill-switch cancels a pending timer before compiler work", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-live-kill-switch-"));
+  const enabled = baseSettings({ autoRefresh: { enabled: true, debounceMs: 80, minIntervalMs: 0, eventStaleAfterMs: 1000, maxPromptChars: 1000 } });
+  const queuedTrigger = trigger(abrainHome, enabled, { reason: "live_kill_switch" });
+  let compilerRuns = 0;
+  const scheduled = await _scheduleConstraintShadowAutoRefreshWithCompilerForTests(
+    queuedTrigger,
+    async () => { compilerRuns += 1; throw new Error("compiler ran after live disable"); },
+  );
+  assert(scheduled.scheduled === true, `initial schedule failed: ${JSON.stringify(scheduled)}`);
+
+  liveSettingsForSmoke = baseSettings({ autoRefresh: { enabled: false, debounceMs: 0, minIntervalMs: 0, eventStaleAfterMs: 1000, maxPromptChars: 1000 } });
+  await sleep(160);
+  assert(compilerRuns === 0, `disabled timer started ${compilerRuns} compiler run(s)`);
+
+  const markerFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
+  const markerCount = readJsonlRows(markerFile).length;
+  const stopped = await _scheduleConstraintShadowAutoRefreshWithCompilerForTests(
+    queuedTrigger,
+    async () => { compilerRuns += 1; throw new Error("disabled reschedule compiled"); },
+  );
+  assert(stopped.scheduled === false && stopped.reason === "auto_refresh_disabled", `stale trigger escaped live kill-switch: ${JSON.stringify(stopped)}`);
+  assert(readJsonlRows(markerFile).length === markerCount, "disabled reschedule appended another needs-refresh marker");
+  assert(compilerRuns === 0, "disabled reschedule invoked compiler");
+  _resetConstraintShadowAutoRefreshForTests();
+});
+
+asyncCheck("live kill-switch drops a pending next round after an in-flight compile", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-inflight-kill-switch-"));
+  const enabled = baseSettings({ autoRefresh: { enabled: true, debounceMs: 0, minIntervalMs: 0, eventStaleAfterMs: 1000, maxPromptChars: 1000 } });
+  let compilerRuns = 0;
+  let releaseCompile;
+  const compileGate = new Promise((resolve) => { releaseCompile = resolve; });
+  const runner = async () => {
+    compilerRuns += 1;
+    await compileGate;
+    return { ok: false, inputRootHash: "inflight-fixture", sourceCount: 0, diagnostics: [] };
+  };
+  const firstTrigger = trigger(abrainHome, enabled, { reason: "inflight_first" });
+  const first = await _scheduleConstraintShadowAutoRefreshWithCompilerForTests(firstTrigger, runner);
+  assert(first.scheduled === true, `first in-flight round did not schedule: ${JSON.stringify(first)}`);
+  await waitFor("first in-flight compiler round", () => compilerRuns === 1);
+
+  const second = await _scheduleConstraintShadowAutoRefreshWithCompilerForTests({ ...firstTrigger, reason: "inflight_pending" }, runner);
+  assert(second.scheduled === true, `pending round did not schedule: ${JSON.stringify(second)}`);
+  await sleep(25);
+  liveSettingsForSmoke = baseSettings({ autoRefresh: { enabled: false, debounceMs: 0, minIntervalMs: 0, eventStaleAfterMs: 1000, maxPromptChars: 1000 } });
+  releaseCompile();
+  await sleep(150);
+  assert(compilerRuns === 1, `kill-switch allowed ${compilerRuns} compiler rounds instead of stopping after the in-flight round`);
+  _resetConstraintShadowAutoRefreshForTests();
+});
+
+asyncCheck("lock contention is terminal in-process, audited once with pid, and never compiles", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  globalThis.__constraintShadowSmokeLockAttempts = 0;
+  globalThis.__constraintShadowSmokeLockContended = true;
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-bounded-contention-"));
+  const settings = baseSettings({ autoRefresh: { enabled: true, debounceMs: 0, minIntervalMs: 0, eventStaleAfterMs: 1000, maxPromptChars: 1000 } });
+  let compilerRuns = 0;
+  try {
+    const scheduled = await _scheduleConstraintShadowAutoRefreshWithCompilerForTests(
+      trigger(abrainHome, settings, { reason: "bounded_contention" }),
+      async () => { compilerRuns += 1; throw new Error("contended run compiled"); },
+    );
+    assert(scheduled.scheduled === true, `contention fixture did not schedule: ${JSON.stringify(scheduled)}`);
+    const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
+    await waitFor("terminal lock contention audit", () => readJsonlRows(auditFile).some((row) => row.status === "lock_contended"));
+    await sleep(150);
+    const contentionRows = readJsonlRows(auditFile).filter((row) => row.status === "lock_contended");
+    assert(contentionRows.length === 1, `lock contention audit repeated ${contentionRows.length} times`);
+    assert(contentionRows[0].pid === process.pid, `lock contention audit pid mismatch: ${JSON.stringify(contentionRows[0])}`);
+    assert(globalThis.__constraintShadowSmokeLockAttempts === 1, `lock retried ${globalThis.__constraintShadowSmokeLockAttempts} times`);
+    assert(compilerRuns === 0, `contention produced ${compilerRuns} compiler run(s)`);
+
+    globalThis.__constraintShadowSmokeLockContended = false;
+    await sleep(100);
+    assert(globalThis.__constraintShadowSmokeLockAttempts === 1, "lock release caused an unbounded in-process retry");
+    assert(compilerRuns === 0, "lock release caused a new compile without startup/manual recovery");
+  } finally {
+    globalThis.__constraintShadowSmokeLockContended = false;
+    _resetConstraintShadowAutoRefreshForTests();
+  }
+});
+
+asyncCheck("disabled startup resume skips marker and audit work", async () => {
+  _resetConstraintShadowAutoRefreshForTests();
+  const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "constraint-disabled-startup-"));
+  const eventId = "f".repeat(64);
+  const markerFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
+  writeFile(markerFile, `${JSON.stringify({ schemaVersion: "constraint-shadow-auto-refresh-needs-refresh/v1", observedAtUtc: new Date().toISOString(), reason: "disabled_startup", sourceEventId: eventId, sourceEventIds: [eventId], modelRef: "test/model" })}\n`);
+  const disabled = baseSettings({ autoRefresh: { enabled: false, debounceMs: 0, minIntervalMs: 0, eventStaleAfterMs: 1000, maxPromptChars: 1000 } });
+  const result = await resumeConstraintShadowAutoRefreshAtStartup(trigger(abrainHome, disabled, { reason: "startup" }));
+  assert(result.scheduled === false && result.reason === "auto_refresh_disabled", `disabled startup did not skip directly: ${JSON.stringify(result)}`);
+  const auditFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "audit.jsonl");
+  assert(readJsonlRows(auditFile).length === 0, "disabled startup appended retry/skip audit rows");
+  _resetConstraintShadowAutoRefreshForTests();
+});
 
 asyncCheck("guard early return audits model_registry_unavailable and schedules bounded retry", async () => {
   _resetConstraintShadowAutoRefreshForTests();

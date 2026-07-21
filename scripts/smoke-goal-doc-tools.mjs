@@ -91,7 +91,8 @@ await check("goal tools registered and not structurally disabled by dispatch; ma
   assert(src.includes("isGoalContinuationText") && src.includes("machine_turn_rejected"), "machine turn reject helper present");
   assert(/args\.doc && args\.objective[\s\S]*kind:\s*["']invalid_args["']/.test(src), "goal_set tool enforces doc/objective mutual exclusion");
   assert(/const r = await actGoal\(parsed\.sub, ctx\)/.test(src), "slash pause/resume/clear share tool helper (resume machine-turn check cannot drift)");
-  assert(/goal event log append FAILED — unreadable-doc pause/.test(src), "doc-unreadable pause checks event append result");
+  const worker = fs.readFileSync(path.join(repoRoot, "extensions/goal/auto-continue-worker.ts"), "utf-8");
+  assert(worker.includes("doc_pause_event_append_failed") && worker.includes("runtime.appendEntry(GOAL_EVENT_TYPE"), "detached doc-unreadable pause checks and audits event append failure");
   const dispatch = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
   const disabledBlock = dispatch.match(/const DISABLED_SUBAGENT_TOOLS = \[[\s\S]*?\] as const;/)?.[0] ?? "";
   assert(disabledBlock && !/goal_status|goal_set|goal_pause|goal_resume|goal_clear/.test(disabledBlock), "goal tools are not structurally disabled for explicit registry-validated requests");

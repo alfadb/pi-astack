@@ -225,7 +225,7 @@ const { buildConstraintCompilerPrompt } = require(path.join(outRoot, "sediment",
 const { parseConstraintCompilerDecision, runConstraintCompilerWithInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "llm-compiler.js"));
 const { createPiAiConstraintCompilerInvoker, createPiAiMergedSourceVerifierInvoker } = require(path.join(outRoot, "sediment", "constraint-compiler", "pi-ai-invoker.js"));
 const { runConstraintShadowCompiler } = require(path.join(outRoot, "sediment", "constraint-compiler", "shadow-runner.js"));
-const { scheduleConstraintShadowAutoRefresh, _runConstraintShadowAutoRefreshNowForTests, _resetConstraintShadowAutoRefreshForTests } = require(path.join(outRoot, "sediment", "constraint-compiler", "auto-refresh.js"));
+const { scheduleConstraintShadowAutoRefresh, _runConstraintShadowAutoRefreshNowForTests, _setConstraintShadowSettingsResolverForTests, _resetConstraintShadowAutoRefreshForTests } = require(path.join(outRoot, "sediment", "constraint-compiler", "auto-refresh.js"));
 const { acquireFileLock, abrainSedimentLocksDir } = require(path.join(outRoot, "_shared", "runtime.js"));
 const { CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION, selectLatestConstraintProjectionEventId } = require(path.join(outRoot, "sediment", "constraint-compiler", "projection.js"));
 const { renderConstraintL2View } = require(path.join(outRoot, "sediment", "constraint-compiler", "render.js"));
@@ -3359,6 +3359,8 @@ checkAutoRefresh("auto-refresh runOnce acquires and releases cross-process lock"
       },
     });
 
+    _setConstraintShadowSettingsResolverForTests(() => settings);
+
     // We need a modelRegistry-like object for the runOnce to pass the gate
     const fakeRegistry = {
       find: () => ({ id: "test/model" }),
@@ -3382,6 +3384,7 @@ checkAutoRefresh("auto-refresh runOnce acquires and releases cross-process lock"
     const lastRow = JSON.parse(lines[lines.length - 1]);
     assert(lastRow.status === "lock_contended", `expected lock_contended, got ${lastRow.status}`);
     assert(lastRow.ok === false, "lock_contended row should be ok=false");
+    assert(lastRow.pid === process.pid, `lock_contended row pid mismatch: ${lastRow.pid}`);
 
     const markerFile = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
     assert(fs.existsSync(markerFile), "needs-refresh marker should exist after lock contention");
@@ -3423,6 +3426,7 @@ checkAutoRefresh("auto-refresh lock contention marker schedules follow-up after 
         },
       },
     });
+    _setConstraintShadowSettingsResolverForTests(() => settings);
     const fakeRegistry = {
       find: () => ({ id: "test/model" }),
       getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fake" }),
@@ -3465,7 +3469,7 @@ checkAutoRefresh("auto-refresh lock contention marker schedules follow-up after 
   }
 });
 
-checkAutoRefresh("auto-refresh scheduler retries after lock contention marker", async () => {
+checkAutoRefresh("auto-refresh scheduler stops after one external lock contention", async () => {
   _resetConstraintShadowAutoRefreshForTests();
   const oldDelays = globalThis.__constraintShadowSmokePiAiDelaysMs;
   const oldDelay = globalThis.__constraintShadowSmokePiAiDelayMs;
@@ -3496,6 +3500,7 @@ checkAutoRefresh("auto-refresh scheduler retries after lock contention marker", 
         },
       },
     });
+    _setConstraintShadowSettingsResolverForTests(() => settings);
     const fakeRegistry = {
       find: () => ({ id: "test/model" }),
       getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "fake" }),
@@ -3513,9 +3518,12 @@ checkAutoRefresh("auto-refresh scheduler retries after lock contention marker", 
     await waitFor("scheduler lock contention marker", () => readJsonlRows(markerFile).some((row) => row.reason === "scheduler_retry_smoke"), 6_500);
     await waitFor("scheduler lock contention audit", () => readJsonlRows(auditFile).some((row) => row.status === "lock_contended" && row.reason === "scheduler_retry_smoke"), 6_500);
 
+    const contentionCount = readJsonlRows(auditFile).filter((row) => row.status === "lock_contended" && row.reason === "scheduler_retry_smoke").length;
+    assert(contentionCount === 1, `expected one lock_contended row, got ${contentionCount}`);
     await holder.release();
-    await waitFor("scheduler retry completion", () => readJsonlRows(auditFile).some((row) => row.status === "completed"), 6_500);
-    assert(globalThis.__constraintShadowSmokePiAiCallCount >= 1, "scheduler retry did not invoke compiler after lock released");
+    await sleep(250);
+    assert(!readJsonlRows(auditFile).some((row) => row.status === "completed"), "external lock release triggered an unbounded retry compile");
+    assert(globalThis.__constraintShadowSmokePiAiCallCount === 0, "compiler ran after terminal external lock contention");
   } finally {
     await holder.release().catch(() => undefined);
     globalThis.__constraintShadowSmokePiAiDelaysMs = oldDelays;
@@ -3537,6 +3545,7 @@ checkAutoRefresh("auto-refresh schedule API still returns scheduled status", asy
         },
       },
     });
+    _setConstraintShadowSettingsResolverForTests(() => settings);
     const result = await scheduleConstraintShadowAutoRefresh({
       abrainHome: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "constraint-shadow-schedule-")), "abrain"),
       cwd: os.tmpdir(),

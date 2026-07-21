@@ -29,6 +29,7 @@
  */
 
 import { formatGoalContinuationMessage } from "../_shared/goal-continuation";
+import type { GoalContinuationDeliveryPhase } from "./delivery";
 import type { GoalJudgeResult } from "./judge";
 import type { GoalState } from "./state";
 
@@ -40,6 +41,7 @@ export type AutoContinueAction =
   | "achieved"
   | "blocked_paused"
   | "stopped_before_send"
+  | "delivery_unconfirmed"
   | "continued";
 
 export interface GoalOutcomeRow {
@@ -53,18 +55,53 @@ export interface GoalOutcomeRow {
   ts: string;
 }
 
+export type AutoContinuePreSendPhase = GoalContinuationDeliveryPhase | "budget_persist" | "pre_send_gate";
+
+export interface ContinuationPrechargeRestoreRequest {
+  expectedState: GoalState;
+  restoredState: GoalState;
+  detail: string;
+  phase: AutoContinuePreSendPhase;
+  deliveryId?: string;
+}
+
+export interface ContinuationPrechargeRestoreResult {
+  restored: boolean;
+  detail: string;
+}
+
+export interface AutoContinueResult {
+  action: AutoContinueAction;
+  detail?: string;
+  send_attempted?: boolean;
+  phase?: AutoContinuePreSendPhase;
+  budget_restored?: boolean;
+  restore_detail?: string;
+  delivery_id?: string;
+}
+
 export interface AutoContinueDeps {
   state: GoalState;
   now?: Date;
   /** Cognitive layer (wraps runGoalJudge; injectable for smoke). */
   judge: () => Promise<GoalJudgeResult>;
-  /** Sends the continuation user message (wraps pi.sendUserMessage). */
-  sendContinuation: (message: string) => void | Promise<void>;
+  /** Attempts one continuation delivery and resolves only after an observable
+   *  message acknowledgement or an audited terminal failure/timeout. */
+  sendContinuation: (message: string) => Promise<{
+    acknowledged: boolean;
+    detail: string;
+    sendAttempted?: boolean;
+    phase?: GoalContinuationDeliveryPhase;
+    deliveryId?: string;
+  }>;
   /** Last-chance gate after budget pre-decrement: lets /goal stop win before send. */
   isStillActive?: (state: GoalState) => boolean | Promise<boolean>;
+  /** Appends a compensating CAS event and restores the view only if it still
+   * exactly equals this pass's precharge. Omission fails closed (no rollback). */
+  restorePrecharge?: (request: ContinuationPrechargeRestoreRequest) => Promise<ContinuationPrechargeRestoreResult>;
   notify: (msg: string, type?: string) => void;
   /** Event-first persistence pair (same contract as the /goal commands). */
-  appendEvent: (action: string, state: GoalState) => boolean;
+  appendEvent: (action: string, state: GoalState, metadata?: Record<string, unknown>) => boolean;
   saveState: (state: GoalState) => Promise<boolean>;
   appendOutcome: (row: GoalOutcomeRow) => void;
 }
@@ -84,7 +121,7 @@ function outcomeRow(state: GoalState, outcome: GoalOutcomeRow["outcome"], reason
 
 /** One agent_end pass of the auto-continue loop. Caller guarantees:
  *  autoContinue enabled, persisted session, not a sub-agent, state loaded. */
-export async function runAutoContinueOnce(deps: AutoContinueDeps): Promise<{ action: AutoContinueAction; detail?: string }> {
+export async function runAutoContinueOnce(deps: AutoContinueDeps): Promise<AutoContinueResult> {
   const now = deps.now ?? new Date();
   const state = deps.state;
   if (state.status !== "active") return { action: "skipped_inactive" };
@@ -128,6 +165,14 @@ export async function runAutoContinueOnce(deps: AutoContinueDeps): Promise<{ act
   }
   const d = judged.decision;
 
+  // The judge is the longest await in this pass. Re-check before ANY verdict
+  // side effect so a user pause/stop, goal replacement, reload, or tree switch
+  // that happened while judging cannot be overwritten by this stale snapshot.
+  if (deps.isStillActive && !(await deps.isStillActive(state))) {
+    deps.notify("goal auto-continue stopped after judge: goal state changed", "info");
+    return { action: "stopped_before_send", detail: "stale_after_judge" };
+  }
+
   if (d.verdict === "achieved") {
     const achieved: GoalState = { ...state, status: "achieved", status_note: d.reason.slice(0, 300), updated: now.toISOString() };
     deps.appendEvent("achieved", achieved);
@@ -150,7 +195,27 @@ export async function runAutoContinueOnce(deps: AutoContinueDeps): Promise<{ act
     counters: { ...state.counters, continuations_used: state.counters.continuations_used + 1 },
     updated: now.toISOString(),
   };
-  const evOk = deps.appendEvent("continuation", next);
+  const prechargeId = `${state.session_id}:${state.goal_id}:${next.counters.continuations_used}`;
+  const restore = async (
+    detail: string,
+    phase: AutoContinuePreSendPhase,
+    deliveryId?: string,
+  ): Promise<ContinuationPrechargeRestoreResult> => {
+    if (!deps.restorePrecharge) return { restored: false, detail: "restore_unavailable" };
+    try {
+      return await deps.restorePrecharge({
+        expectedState: next,
+        restoredState: state,
+        detail,
+        phase,
+        ...(deliveryId ? { deliveryId } : {}),
+      });
+    } catch (error) {
+      return { restored: false, detail: `restore_failed:${error instanceof Error ? error.message : String(error)}`.slice(0, 300) };
+    }
+  };
+
+  const evOk = deps.appendEvent("continuation", next, { precharge_id: prechargeId });
   if (!evOk) {
     // ADR 0032 W3 (gpt 合议 RC): the EVENT is the source of truth — if the
     // pre-decrement could not reach the event log, the next session-start
@@ -162,19 +227,69 @@ export async function runAutoContinueOnce(deps: AutoContinueDeps): Promise<{ act
   }
   const saved = await deps.saveState(next);
   if (!saved) {
-    // The decremented budget could not be persisted → sending anyway would
-    // risk an unbounded loop on a broken fs. Fail-closed: no continuation.
+    // The event debit exists but the view write failed. Append a compensating
+    // CAS event so replay cannot permanently charge a continuation that was
+    // never attempted; the live view CAS may legitimately report mismatch.
+    const restored = await restore("budget_persist_failed", "budget_persist");
     deps.notify("goal auto-continue aborted: budget persist failed (would risk unbounded loop)", "warning");
-    return { action: "judge_failed", detail: "budget_persist_failed" };
+    return {
+      action: "judge_failed",
+      detail: "budget_persist_failed",
+      send_attempted: false,
+      phase: "budget_persist",
+      budget_restored: restored.restored,
+      restore_detail: restored.detail,
+    };
   }
   const instruction = d.next_step ?? "Continue working toward the goal; state ACHIEVED or BLOCKED explicitly when true.";
   if (deps.isStillActive && !(await deps.isStillActive(next))) {
+    const restored = await restore("stopped_before_send", "pre_send_gate");
     deps.notify("goal auto-continue stopped before queuing follow-up", "info");
-    return { action: "stopped_before_send", detail: "stopped_before_send" };
+    return {
+      action: "stopped_before_send",
+      detail: "stopped_before_send",
+      send_attempted: false,
+      phase: "pre_send_gate",
+      budget_restored: restored.restored,
+      restore_detail: restored.detail,
+    };
   }
-  await deps.sendContinuation(formatGoalContinuationMessage(state.goal_id, instruction));
-  // "queued" wording (gpt R2): sendUserMessage is fire-and-forget — this
-  // tell means "intent recorded + message queued", not "delivered".
-  deps.notify(`▶️ goal auto-continue queued ${next.counters.continuations_used}/${state.budget.max_continuations}: ${instruction.slice(0, 120)}`, "info");
-  return { action: "continued", detail: instruction };
+  const delivery = await deps.sendContinuation(formatGoalContinuationMessage(state.goal_id, instruction));
+  if (!delivery.acknowledged) {
+    // Missing metadata is treated as attempted for compatibility and safety.
+    // Only explicit, known pre-send phases may compensate the precharge.
+    const sendAttempted = delivery.sendAttempted !== false;
+    const phase = delivery.phase;
+    const recoverable = !sendAttempted && phase !== undefined
+      && phase !== "claim"
+      && phase !== "send_call"
+      && phase !== "ack_wait"
+      && phase !== "acknowledged";
+    const restored = recoverable
+      ? await restore(delivery.detail, phase, delivery.deliveryId)
+      : { restored: false, detail: sendAttempted ? "send_attempted_no_rollback" : "phase_not_recoverable" };
+    deps.notify(
+      sendAttempted
+        ? `goal continuation delivery unconfirmed (${delivery.detail}); retry suppressed`
+        : `goal continuation was not sent (${delivery.detail}); budget restore ${restored.restored ? "applied" : `skipped (${restored.detail})`}`,
+      "warning",
+    );
+    return {
+      action: "delivery_unconfirmed",
+      detail: delivery.detail,
+      send_attempted: sendAttempted,
+      ...(phase ? { phase } : {}),
+      budget_restored: restored.restored,
+      restore_detail: restored.detail,
+      ...(delivery.deliveryId ? { delivery_id: delivery.deliveryId } : {}),
+    };
+  }
+  deps.notify(`goal auto-continue acknowledged ${next.counters.continuations_used}/${state.budget.max_continuations}: ${instruction.slice(0, 120)}`, "info");
+  return {
+    action: "continued",
+    detail: instruction,
+    send_attempted: delivery.sendAttempted ?? true,
+    ...(delivery.phase ? { phase: delivery.phase } : {}),
+    ...(delivery.deliveryId ? { delivery_id: delivery.deliveryId } : {}),
+  };
 }

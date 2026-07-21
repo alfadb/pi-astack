@@ -162,6 +162,18 @@ const EXT_COUNT_RE = /(\d+)\s*(?:个|个独立的)?\s*(?:extension|extensions|�
 const GOVERNANCE_DOCS = ["docs/direction.md", "docs/requirements.md", "docs/vision.md"];
 const FEATURE_CHANGELOG = "docs/feature-changelog.md";
 const ADR_STATUS_RE = /^[+-]status:\s*\S+/m;
+// Active stage0 contracts must describe the production ordered hybrid, not a
+// rank-score fusion. Historical evidence and archive records are deliberately
+// outside this list and retain their original wording plus any walk-back note.
+const ACTIVE_STAGE0_CONTRACT_FILES = [
+  "docs/adr/0035-memory-stage1-embedding-candidate-retrieval.md",
+  "docs/adr/0036-memory-search-two-stage-collapse-and-hybrid-retrieval.md",
+  "docs/architecture/memory.md",
+  "docs/memory-architecture.md",
+  "extensions/memory/settings.ts",
+  "pi-astack-settings.schema.json",
+];
+const STAGE0_RANK_FUSION_RE = /\brrf\b|reciprocal[ -]?rank(?:[ -]?fusion)?/i;
 
 const anchorCache = new Map();
 function anchorsFor(file) {
@@ -285,6 +297,14 @@ for (const file of listCanonicalDocs()) {
   EXT_COUNT_RE.lastIndex = 0;
   while ((m = EXT_COUNT_RE.exec(prose))) {
     req006(file, `hardcoded count "${m[0].trim()}" at line ${lineOf(prose, m.index)} (code-mirror smell — derive from ls extensions/)`);
+  }
+}
+
+for (const relativePath of ACTIVE_STAGE0_CONTRACT_FILES) {
+  const file = path.join(repoRoot, relativePath);
+  const raw = fs.readFileSync(file, "utf8");
+  if (STAGE0_RANK_FUSION_RE.test(raw)) {
+    err(file, "active stage0 contract must describe ordered hybrid candidate assembly, not rank-score fusion");
   }
 }
 

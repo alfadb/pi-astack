@@ -174,6 +174,33 @@ await check("replayGoalEvents: last event wins, malformed skipped, none -> null"
   assert(S.replayGoalEvents(entries.slice(0, 1)) === null, "pre-goal branch slice -> null");
 });
 
+await check("continuation_restore replay is CAS-based and preserves debit history", async () => {
+  const original = S.newGoalState({ sessionId: "s-cas", objective: "restore replay" });
+  const precharged = {
+    ...original,
+    counters: { ...original.counters, continuations_used: 1 },
+    updated: new Date(Date.parse(original.updated) + 1_000).toISOString(),
+  };
+  const restoredEvent = {
+    type: "custom",
+    customType: S.GOAL_EVENT_TYPE,
+    data: { action: "continuation_restore", state: original, cas_expected: precharged },
+  };
+  const base = [
+    { type: "custom", customType: S.GOAL_EVENT_TYPE, data: { action: "set", state: original } },
+    { type: "custom", customType: S.GOAL_EVENT_TYPE, data: { action: "continuation", state: precharged } },
+  ];
+  assert(S.goalStateMatchesCas(S.replayGoalEvents([...base, restoredEvent]), original), "matching replay applies compensation");
+  const progressed = {
+    ...precharged,
+    status_note: "newer progress",
+    updated: new Date(Date.parse(precharged.updated) + 1_000).toISOString(),
+  };
+  const progressEvent = { type: "custom", customType: S.GOAL_EVENT_TYPE, data: { action: "progress", state: progressed } };
+  assert(S.goalStateMatchesCas(S.replayGoalEvents([...base, progressEvent, restoredEvent]), progressed), "late compensation cannot overwrite progress");
+  assert(base.length === 2, "original continuation event remains immutable");
+});
+
 await check("removeGoalFile deletes the stale view (no-events reconcile path)", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-goal-rm-"));
   const st = S.newGoalState({ sessionId: "sess-x", objective: "obj" });

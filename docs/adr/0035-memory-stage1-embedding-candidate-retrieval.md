@@ -5,7 +5,7 @@ status: accepted
 
 # ADR 0035 - memory stage1 从 full-body 全库海选改为 embedding 候选检索(sublinear retrieval)
 
-- **状态**:Accepted(2026-06-13;3×T0 跨厂商盲审 opus-4-8 / gpt-5.5 / deepseek-v4-pro 一致 RATIFY WITH REVISIONS,修订集已并入——§2 安全网双触发 + provider 熔断、§3 证据正偏披露 + 端到端 oracle 列为转产硬门、§4 content-hash 失效 + embedding-model 版本戳 + freshness 原子协议。设计基线,未实现)。
+- **状态**:Accepted(2026-06-13;3×T0 跨厂商盲审 opus-4-8 / gpt-5.5 / deepseek-v4-pro 一致 RATIFY WITH REVISIONS,修订集已并入——§2 安全网双触发 + provider 熔断、§3 证据正偏披露 + 端到端 oracle 列为转产硬门、§4 content-hash 失效 + embedding-model 版本戳 + freshness 原子协议)。**实现状态（2026-07-21 澄清，消歧）**：runtime 检索栈**已 ship 并进入生产**（stage0 hybrid dense+sparse+stale floor 候选召回 + stage2 full-content LLM 精排；以 `docs/current-state.md` Memory read path 与代码为准）。仍未完成的是 **ADR 文档 slim + mechanism ingest 入 abrain**（与 ADR 0036/0037 同属 `memory.adr0035-0037-slim-ingest` 过渡面，类 ADR 0034 文档侧工作）——**不得**把 “slim+ingest 未完成” 读成 “本 ADR 设计未实现 / runtime 未 ship”。
 - **依赖**:[ADR 0015](0015-memory-search-llm-driven-retrieval.md)(已 archived,机制 ingest 入 abrain;本 ADR **supersede 其 stage1 候选面决策**,对应 abrain slug `stage1-uses-full-body-candidate-surface` 与 `full-body-stage1-prioritizes-recall-over-cache-compactness`,但**保留**其双阶段框架 `two-stage-search-separates-recall-from-precision`、result-cache 禁令 `result-cache-breaks-memory-freshness`、freshness 契约 `fresh-search-surface-preserves-new-entry-recall`、accuracy-is-contract 立场)、[ADR 0003](0003-main-session-read-only.md)(主会话只读 / sediment 单写,embedding 增量写归 sediment 侧)。
 - **触发**:2026-06-13 stage1 候选面从 frontmatter 索引切到 `full_body_v3`(把全库 active entry 全文塞进一个 flash prompt),当天即引入 O(库规模 × 搜索频率)成本回归——sub2api `usage_logs` 实测单日 deepseek-v4-flash 104 次 search、5290 万 token、$7.97 ≈ ¥57;prefix KV cache 命中率从 frontmatter 时代的 99.8% 崩到 12.5%(每次 fresh 生成 + sediment 每 agent_end 写入打散 prefix)。该切换直接违背既有 anti-pattern `whole-vault-llm-recall-does-not-scale`(全库 LLM 召回在 1000+ 条崩溃),而库已 2215 条 active / ~184 万 token。
 - **反方向澄清**:不走"库治理压缩"(归档/删除低价值条目去缩小候选面)——违背第二大脑自我演化原则(`knowledge-base-self-evolving`),且自我演化保证库高质量但不保证库变小(2215 → 未来上万),检索架构本身必须 sublinear。
@@ -27,7 +27,7 @@ frontmatter 索引被换掉的理由(召回准确率不足)是真实的——`fu
 `query → embedding → 余弦 top-N 候选池(+ 精确字段 sparse 补盲) → full-body 仅喂这 N 条给 stage1 LLM 精选 → stage2 精排`
 
 - **dense 主召回**:query 与每条 entry 各算一个向量,余弦相似度取 top-N。成本 O(N) 与库规模解耦——库从 2215 涨到上万,stage1 喂给 LLM 的 token 不变。
-- **hybrid 补盲**:embedding 对否定 / 反义 / 罕见专名(ADR 编号、函数名、错误码、slug)/ 极短 query 有盲区,用 trigger_phrases / slug / 精确字段做字符级 sparse 信号融合(如 RRF 或加权 boost),不作主召回、只补漏。
+- **hybrid 补盲**:embedding 对否定 / 反义 / 罕见专名(ADR 编号、函数名、错误码、slug)/ 极短 query 有盲区,用 trigger_phrases / slug / 精确字段做字符级 sparse 信号补漏,不作主召回。**2026-07-21 实现对齐 walk-back**：曾开放的 score-fusion 例子不是生产契约；当前实现以固定顺序、allow-set 过滤和 bounded dedup 把 dense、freshness reserve、sparse、剩余 stale 组为候选池，具体以 `llm-search.ts::orderStage0Candidates` 为准。
 - **候选集 N**:初始取 **100**(见 §3 实测,related-recall 98.0%);N 是召回/成本旋钮,灰度期 A/B 收敛(初始值非定论,正式收敛准则见 §7)。
 - **embedding 模型可配置、首选 doubao-embedding-vision**:架构决策是"stage1 候选面走向量检索",embedding provider 是可替换实现参数(settings 配置)。首个落地选 doubao-embedding-vision——当前 sub2api 上游唯一现成可达(方舟 Coding Plan,Bailian/阿里删除、gemini 不可调度、无真 OpenAI apikey),走订阅而非 metered,实测召回达标(§3)。长期可替换为 text-embedding-v4(需恢复 Bailian)或 Gemini Embedding 2(cross-lingual 公榜更强),provider 切换不改架构。**须先核实方舟 Coding Plan sub2api ToS 是否限定 coding 工具用途**——若禁后台 / agent-memory 用途(参照 GLM Coding Plan 同类 caveat),则首选回退到恢复 Bailian text-embedding-v4。
 

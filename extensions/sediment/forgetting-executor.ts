@@ -23,7 +23,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { userGlobalSedimentDir, ensureUserGlobalSidecarMigrated, formatLocalIsoTimestamp } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
-import { readLifecycleProposals, markProposalsExecuted, type LifecycleProposalExpectedStatus } from "./entry-lifecycle-proposals";
+import { readLifecycleProposals, markProposalsExecuted, reconcileLegacyDecayProposalKinds, resolveDurableEntryKind, type LifecycleProposalExpectedStatus, type ReconcileLegacyDecayProposalKindsResult } from "./entry-lifecycle-proposals";
 import { getEntryTelemetry, setEntryHysteresis } from "./entry-telemetry";
 import { resurrectionRateReport } from "./resurrection-rate-monitor";
 import { kindDistributionReport, type KindDistributionBucket } from "./kind-distribution-monitor";
@@ -64,7 +64,7 @@ export interface HysteresisState {
   holdout_until?: string;
 }
 export interface DemoteDecision { slug: string; kind: string; reason: string; expected_status?: LifecycleProposalExpectedStatus; proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; }
-export interface DemoteSkip { slug: string; skip_reason: "cooldown" | "holdout" | "batch_cap" | "resurrection_backoff" | "no_slug" | "invalid_evidence" | "kind_mismatch" | "lane_required"; proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; durable_kind?: string; }
+export interface DemoteSkip { slug: string; skip_reason: "cooldown" | "holdout" | "batch_cap" | "resurrection_backoff" | "no_slug" | "invalid_evidence" | "invalid_durable_kind" | "kind_mismatch" | "lane_required"; proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; durable_kind?: string; raw_kind?: string; }
 export interface DemotePlan {
   demote: DemoteDecision[];
   skipped: DemoteSkip[];
@@ -186,60 +186,15 @@ function idempotencyKey(projectRoot: string, kind: string, ids: string[]): strin
   return `forgetting-${kind}-${stableHash([path.resolve(projectRoot), kind, ...ids])}`;
 }
 
-function skipMeta(p: { proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; durable_kind?: string }) {
+function skipMeta(p: { proposal_id?: string; evidence_source?: string; evidence_key?: string; evidence_type?: string; durable_kind?: string; raw_kind?: string }) {
   return {
     ...(p.proposal_id ? { proposal_id: p.proposal_id } : {}),
     ...(p.evidence_source ? { evidence_source: p.evidence_source } : {}),
     ...(p.evidence_key ? { evidence_key: p.evidence_key } : {}),
     ...(p.evidence_type ? { evidence_type: p.evidence_type } : {}),
     ...(p.durable_kind ? { durable_kind: p.durable_kind } : {}),
+    ...(p.raw_kind ? { raw_kind: p.raw_kind } : {}),
   };
-}
-
-function splitFrontmatter(raw: string): string {
-  const m = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(raw.replace(/\r\n/g, "\n"));
-  return m?.[1] ?? "";
-}
-
-function frontmatterScalar(frontmatter: string, key: string): string {
-  const re = new RegExp(`^${key}:\\s*(.*)$`, "m");
-  const m = re.exec(frontmatter);
-  return (m?.[1] ?? "").trim().replace(/^['\"]|['\"]$/g, "");
-}
-
-function frontmatterSlug(frontmatter: string, file: string): string {
-  const id = frontmatterScalar(frontmatter, "id");
-  return (id.split(":").filter(Boolean).pop() || path.basename(file, ".md")).toLowerCase();
-}
-
-function readDurableEntryKind(projectRoot: string, slug: string): string | undefined {
-  const roots = [projectRoot, process.env.ABRAIN_ROOT ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, process.env.HOME ?? "") : path.join(process.env.HOME ?? "", ".abrain")];
-  const wanted = slug.toLowerCase();
-  const skipDirs = new Set([".git", ".state", "node_modules", "vault", "staging"]);
-  for (const root of roots) {
-    const walk = (dir: string): string | undefined => {
-      let entries: fs.Dirent[];
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return undefined; }
-      for (const ent of entries) {
-        if (skipDirs.has(ent.name)) continue;
-        const p = path.join(dir, ent.name);
-        if (ent.isDirectory()) {
-          const found = walk(p);
-          if (found) return found;
-          continue;
-        }
-        if (!ent.isFile() || !p.endsWith(".md")) continue;
-        try {
-          const fm = splitFrontmatter(fs.readFileSync(p, "utf-8"));
-          if (frontmatterSlug(fm, p) === wanted) return frontmatterScalar(fm, "kind") || undefined;
-        } catch { /* ignore unreadable markdown */ }
-      }
-      return undefined;
-    };
-    const found = walk(path.resolve(root));
-    if (found) return found;
-  }
-  return undefined;
 }
 
 function isFrontmatterSupersededE1(target: DemoteDecision): boolean {
@@ -259,7 +214,14 @@ function validateExecutorGate(projectRoot: string, plan: DemotePlan, now: Date):
       continue;
     }
     const e1 = isFrontmatterSupersededE1(target);
-    const durableKind = readDurableEntryKind(projectRoot, target.slug);
+    const durableResolution = resolveDurableEntryKind(projectRoot, target.slug);
+    // raw_kind is diagnostic-only: an invalid durable declaration never gains
+    // execution authority by matching or differing from the proposal kind.
+    if (durableResolution.reason === "invalid_durable_kind") {
+      skipped.push({ slug: target.slug, skip_reason: "invalid_durable_kind", ...skipMeta({ ...target, raw_kind: durableResolution.raw_kind }) });
+      continue;
+    }
+    const durableKind = durableResolution.kind;
     if (durableKind && durableKind !== target.kind) {
       skipped.push({ slug: target.slug, skip_reason: "kind_mismatch", ...skipMeta({ ...target, durable_kind: durableKind }) });
       continue;
@@ -489,6 +451,7 @@ export interface ForgettingExecutorResult {
   dry_run: true; // skeleton 恒 dry-run
   reason?: string;
   plan?: DemotePlan;
+  legacy_kind_compatibility?: ReconcileLegacyDecayProposalKindsResult;
 }
 
 /** Read-only / dry-run 入口:flag on 时读 proposal+hysteresis+resurrection → 算 plan +
@@ -501,6 +464,7 @@ export function runForgettingExecutorDryRun(
   if (!settings.forgetting?.enabled) return { ok: true, enabled: false, dry_run: true, reason: "forgetting_disabled" };
   if (!projectRoot) return { ok: true, enabled: true, dry_run: true, reason: "no_project_root" };
   try {
+    const legacyKindCompatibility = reconcileLegacyDecayProposalKinds({ projectRoot, now });
     const proposals: ArchiveProposalInput[] = executableArchiveProposals(projectRoot);
 
     const hysteresisBySlug: Record<string, HysteresisState> = {};
@@ -520,7 +484,7 @@ export function runForgettingExecutorDryRun(
     }), now);
     evaluateKindDistributionAudit(projectRoot, now);
     appendDryRunAudit(projectRoot, plan, now);
-    return { ok: true, enabled: true, dry_run: true, plan };
+    return { ok: true, enabled: true, dry_run: true, plan, legacy_kind_compatibility: legacyKindCompatibility };
   } catch (e) {
     return { ok: false, enabled: true, dry_run: true, reason: e instanceof Error ? e.message : String(e) };
   }
@@ -540,6 +504,7 @@ export interface ForgettingExecutorRealResult {
   failed?: { slug: string; error: string }[];
   abandoned?: string[]; // CAS reject(条目非 active)→ 放弃重试的 proposal
   circuit_breaker?: CircuitBreakerStatus;
+  legacy_kind_compatibility?: ReconcileLegacyDecayProposalKindsResult;
 }
 
 /** Real-capable 入口(orchestrator 用)。未注入 archiveEntry → 退化为
@@ -555,6 +520,7 @@ export async function runForgettingExecutor(
   if (!settings.forgetting?.enabled) return { ok: true, enabled: false, dry_run: true, reason: "forgetting_disabled" };
   if (!projectRoot) return { ok: true, enabled: true, dry_run: true, reason: "no_project_root" };
   try {
+    const legacyKindCompatibility = reconcileLegacyDecayProposalKinds({ projectRoot, now });
     const proposals: ArchiveProposalInput[] = executableArchiveProposals(projectRoot);
 
     const hysteresisBySlug: Record<string, HysteresisState> = {};
@@ -577,13 +543,13 @@ export async function runForgettingExecutor(
     const wantReal = typeof deps.archiveEntry === "function";
     if (!wantReal) {
       appendDryRunAudit(projectRoot, plan, now);
-      return { ok: true, enabled: true, dry_run: true, plan };
+      return { ok: true, enabled: true, dry_run: true, plan, legacy_kind_compatibility: legacyKindCompatibility };
     }
 
     const breaker = evalCircuitBreaker(now.getTime(), deps.activeCorpusSize, plan.demote.length);
     if (breaker.tripped) {
       appendRealAudit(projectRoot, plan, [], [], [], breaker, now);
-      return { ok: true, enabled: true, dry_run: true, reason: `circuit_breaker_${breaker.reason}`, plan, circuit_breaker: breaker };
+      return { ok: true, enabled: true, dry_run: true, reason: `circuit_breaker_${breaker.reason}`, plan, circuit_breaker: breaker, legacy_kind_compatibility: legacyKindCompatibility };
     }
 
     const demoted: string[] = [];
@@ -617,7 +583,7 @@ export async function runForgettingExecutor(
     }
     appendRealAudit(projectRoot, plan, demoted, failed, abandoned, breaker, now);
     appendDemoteActionSummary(projectRoot, plan, demoted, failed, abandoned, breaker, now);
-    return { ok: true, enabled: true, dry_run: false, plan, demoted, failed, abandoned, circuit_breaker: breaker };
+    return { ok: true, enabled: true, dry_run: false, plan, demoted, failed, abandoned, circuit_breaker: breaker, legacy_kind_compatibility: legacyKindCompatibility };
   } catch (e) {
     return { ok: false, enabled: true, dry_run: true, reason: e instanceof Error ? e.message : String(e) };
   }

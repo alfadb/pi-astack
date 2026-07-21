@@ -1,7 +1,7 @@
 {
   "schema_version": "transition-register/v1",
   "register_id": "pi-astack-transition-register",
-  "updated": "2026-07-19",
+  "updated": "2026-07-21",
   "review_policy": {
     "cadence": "biweekly",
     "default_owner": "pi-astack-maintainers",
@@ -187,8 +187,8 @@
       "phase_status": "blocked_on_evidence",
       "authorization_status": "separate_authorization_required",
       "entered": "2026-07-08",
-      "review_by": "2026-07-24",
-      "current": "数据门总体达标，但一次 compiler validation failure 后的第 29 条 evidence 待投影。",
+      "review_by": "2026-08-04",
+      "current": "Historical dual-read / compiler evidence gates remain noted, but production session rule authority has moved to ADR0040 Policy stable-view. This face no longer controls live session injection; residual dual-read/compiler retirement still needs explicit disposition without implying constraint-shadow is current rule authority.",
       "exit": [
         "重跑 compile 成功并确认第 29 条 evidence 已投影",
         "明确记录 flip/retirement 授权、回滚条件与 R 轮边界"
@@ -205,7 +205,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "先重跑 compile 确认，再评估 flip。"
+      "next_action": "Disposition residual dual-read/compiler artifacts only; do not treat this face as session rule authority or as undoing the Policy stable-view flip."
     },
     {
       "id": "proposition.adr0040-p0a",
@@ -588,8 +588,8 @@
       "phase_status": "completed",
       "authorization_status": "authorized",
       "entered": "2026-07-13",
-      "review_by": "2026-07-24",
-      "current": "Real policy append, D3 shadow, D3-WF sandbox replay, and D3-PUB generation-0 publication are completed under separate exact authorizations. The production v2 closure contains 3 input events, 1 active policy candidate, and 1 stable item; intent, proof, committed head, and selection validate, first publication returned published, and exact replay returned identical. The D3 selection is runtime-inert and no live consumer reads it.",
+      "review_by": "2026-08-04",
+      "current": "Real policy append, D3 shadow, D3-WF sandbox replay, and D3-PUB generation-0 publication completed under separate exact authorizations as the compile/parity substrate. The historical D3 selection pointer remains a published artifact, but production session_start rule authority later flipped under the separate completed entry `proposition.adr0040-policy-stable-view-runtime-flip` (2026-07-20 full flip + 2026-07-21 auto recovery). D3-v2 session_start adapter and residual non-Policy P3 consumers stay blocked.",
       "exit": [
         "DONE: real policy proposition event 1c8cc5d23110f44affb574598e65027ac350373b86c651c4ed1354ad171685a6 completed from S2 recovery to clean S4 with ratification and terminal post dossier",
         "DONE: D3 shadow dual-pointer control plane and real production read-only preview completed without production mutation",
@@ -616,7 +616,40 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "Keep the published D3 selection runtime-inert. Do not rerun the pre-publication D3-PUB gate after selection exists; any runtime consumer/read flip remains P3 and requires separate authorization and rollback evidence."
+      "next_action": "Keep P2b substrate evidence immutable. Policy stable-view runtime flip is tracked under its own completed ID; D3-v2 and residual P3/canonical read flips remain separately blocked."
+    },
+    {
+      "id": "proposition.adr0040-policy-stable-view-runtime-flip",
+      "partition": "proposition",
+      "title": "ADR0040 Policy stable-view runtime flip",
+      "human_section": "已收口",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-20",
+      "review_by": "2026-08-04",
+      "current": "2026-07-20 production full flip completed and authorized: every persisted main session reads only the strictly validated content-addressed Policy stable view under current ABRAIN_ROOT or HOME/.abrain; ephemeral main sessions and subagents are excluded. 2026-07-21 user full-auto derived-publication authorization further allows canonical-ready detached deterministic rebuild from whole-L1 -> P2a -> fixed profile -> production publisher, with automatic latest switch after strict compile and recovered only after strict runtime reader returns selected_valid. Production acceptance recorded recovery initial read_failed -> status recovered -> final selected_valid, and a subsequent real-turn runtime audit recorded policy_stable_view_injected / selected_valid. This flip is NOT the D3-v2 session_start consumer path and does NOT authorize D3-v2, Knowledge pull, canonical L2, or other residual P3/canonical read flips.",
+      "exit": [
+        "DONE: production session_start rule authority is only the content-addressed Policy stable-view bundle under proposition-policy-stable-view/v1/latest",
+        "DONE: no production fallback to compiled-view, D3, or legacy rules; invalid/missing is loud zero injection",
+        "DONE: 2026-07-21 automatic recovery authorization bound to canonical-ready detached rebuild + strict selected_valid readback",
+        "BOUNDARY: D3-v2 session_start, aggregate residual P3 runtime consumer flips, and canonical_path subsequent read flips remain separately blocked"
+      ],
+      "evidence": [
+        "ADR 0040 Implementation status / session_start contract",
+        "docs/current-state.md ADR0040 Policy/session-start push",
+        "full-enable Policy stable view commit",
+        "automatic policy stable-view recovery commit",
+        "live ruleInjector.propositionPolicyStableViewInjection settings",
+        "production proposition-policy-stable-view/v1/latest"
+      ],
+      "owner": "adr0040-policy-stable-view-runtime-flip",
+      "consumer": [
+        "rule-injector session_start Policy stable-view reader"
+      ],
+      "renewal_count": 0,
+      "risk_class": "critical",
+      "next_action": "Keep Policy stable-view as the sole production session rule authority. Do not treat this completion as D3-v2, Knowledge pull, canonical L2, or any other residual P3/canonical read-flip authorization."
     },
     {
       "id": "proposition.adr0040-p3-d3-v2-session-start",
@@ -628,7 +661,7 @@
       "authorization_status": "separate_authorization_required",
       "entered": "2026-07-19",
       "review_by": "2026-07-26",
-      "current": "R4.1 execution-ready locally corrects the published-but-non-authorizing R4 over immutable R3.9. Target session 019f6f1d-cc5c-7fcf-bcee-18dd618656ff and authorization session 019f77f6-899b-7fa0-ad5f-e1d8bb1ceadc remain distinct. The independent R4.1 adapter evidence is the exact 82-file live rebuild (self 47ca017012d46a9a68e4081353c39882febe37824c4cd09b8985469434e40f1c, graph b8cd87198c002a94d8384d39e2002331b4f1d222ca5d88168260396d5ae9ab75); operator manifest self is 0f799e266a8726685b177aca94351e4e413d78c850d76dc29762258f3d3c6907; dossier/preview self hashes are 1312f357170499438bf096400073fac910d4782a1ae3d578add7e790920e4842 / cf66f1ccdeb53504a19e42d1a0d0144ff771a12a5713ca02eca851c9563904a2. Generic preview snapshots cover stable settings/D3/Git/control/rollback/audit/quarantine/target surfaces; the active authorization transcript uses an append-tolerant frozen prefix/dev/ino/header/session-ID attestation. Live settings prestate is 64b5045111148e8d9828e6da70d591d23f491029ca873b2575fd945c15ba43d5, live v2 remains absent, and S2 remains NOT_AUTHORIZED.",
+      "current": "Still blocked / separate_authorization_required. R4.1 remains local execution-ready evidence only; live v2 settings key is absent and S2 is NOT_AUTHORIZED. The 2026-07-20/21 Policy stable-view runtime flip completed on a different production path (direct content-addressed stable-view reader) and does NOT authorize, complete, or replace this D3-v2 session_start consumer face. Aggregate residual P3 and canonical subsequent read flips also remain blocked.",
       "exit": [
         "publish the R4.1 source closure, including tracked root package-lock.json and exact HEAD blobs for every critical/graph file, then obtain the exact fresh initial S2 authorization from the independent authorization transcript",
         "execute create/bind only through the fixed production CLI and prove the later runtime audit authorizes one exact fence while every partial state remains selected-zero",
@@ -657,7 +690,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "Remain blocked. Commit/publish R4.1 separately, then use that exact HEAD source closure as source_commit and require a fresh authorization coordinate from session 019f77f6-899b-7fa0-ad5f-e1d8bb1ceadc before binding target 019f6f1d-cc5c-7fcf-bcee-18dd618656ff. Do not execute/continue, mutate live settings/session/control/D3/.abrain, or invoke rollback in this correction round.",
+      "next_action": "Remain blocked. Do not execute/continue D3-v2 bind from Policy stable-view completion. Any future D3-v2 work still needs its own published source closure and fresh independent authorization.",
       "status": "blocked",
       "gate": "separate_authorization_required",
       "summary": "R4.1 keeps target and authorization sessions independent and adds a separate exact-live R4.1 adapter evidence file instead of reusing the immutable R3.9 path with a new identity. Adapter evidence validation is closed/self-hashed/exact-live and participates in the operator critical graph and execute/continue HEAD evidence gate. Preview executable assertions bind stable generic surfaces, complete target identity/bytes, and append-tolerant authorization prefix/dev/ino/header/session ID; strace supplies operator no-write evidence. Settings generation is byte-gated before dossier/preview overwrite and preserves all non-v2 deep semantics. The cooperative settings CAS still honestly retains the non-cooperative writer race residual. No live write, execute/continue, rollback, commit, or push occurred; S2 and aggregate P3 remain NOT_AUTHORIZED / separate_authorization_required."
@@ -671,8 +704,8 @@
       "phase_status": "blocked",
       "authorization_status": "separate_authorization_required",
       "entered": "2026-07-13",
-      "review_by": "2026-07-24",
-      "current": "Aggregate P3 remains blocked. The D3-v2 session_start consumer now has an R4.1 corrected bind-existing production create/bind operator and exact runtime receipt gate, but live v2 settings remain absent and S2 is still NOT_AUTHORIZED. No Knowledge pull, Policy push, canonical L2 or other runtime consumer reads the published D3 selection. Each consumer remains an independent decision.",
+      "review_by": "2026-08-04",
+      "current": "Policy stable-view session_start runtime flip is completed/authorized under `proposition.adr0040-policy-stable-view-runtime-flip` and is NOT part of this residual aggregate. This residual P3 face remains blocked / separate_authorization_required for every other runtime consumer: Knowledge pull, D3-v2 session_start adapter path, canonical L2 authority flip, and any non-Policy read consumer. Do not combine residual consumers into one authorization, and do not back-interpret the Policy flip as blanket P3 authorization.",
       "exit": [
         "complete prerequisite projector phase for the specific consumer",
         "obtain a separate explicit read-flip authorization for that consumer",
@@ -691,7 +724,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "Remain blocked; do not combine consumer read flips into one authorization."
+      "next_action": "Remain blocked for residual consumers only. Require per-consumer projector prerequisites, independent authorization, and rollback/fail-closed evidence. Policy stable-view is already live and must not be re-gated here."
     },
     {
       "id": "proposition.adr0040-p4-legacy-authority-retirement",
@@ -730,24 +763,25 @@
       "phase_status": "dogfood",
       "authorization_status": "authorized",
       "entered": "2026-07-08",
-      "review_by": "2026-07-15",
-      "current": "material 模式离线判定已启用判定回填格式，需继续积累真实盲判。",
+      "review_by": "2026-08-04",
+      "current": "Material offline judgment ledger has exactly 1/20 recorded judgment (`hub-judgments.jsonl`, final_verdict=human_better, 2026-07-08). The 2026-07-15 fail-closed gate required ≥1 real material judgment before that date: SATISFIED by the 2026-07-08 judgment — do NOT claim a 07-15 zero-judgment violation or auto-disable solely on that expired date. Quality gate for default-on is NOT met (need ≥20 material judgments and hub quality ≥ human-pick; current sole verdict is human_better). review_by 2026-07-15 is expired and renewed for continued dogfood observation. Hub planner/workers are now structurally pinned to fixed read-only HUB_TOOLS/WORKER_TOOLS allowlists (cage; planner tools cannot expand capability).",
       "exit": [
         "累计至少 20 次 material 判定且质量不低于 human-pick",
         "30 天无新判定触发告警与重评"
       ],
       "evidence": [
         "ADR 0030 walkback",
-        "hub-judgments.jsonl",
-        "2026-07-08 governance audit"
+        "hub-judgments.jsonl (1 material; final_verdict=human_better)",
+        "2026-07-08 governance audit",
+        "extensions/dispatch/hub.ts structural HUB_TOOLS/WORKER_TOOLS cage"
       ],
       "owner": "dispatch-hub",
       "consumer": [
         "dispatch hub quality gate"
       ],
-      "renewal_count": 0,
+      "renewal_count": 1,
       "risk_class": "high",
-      "next_action": "继续回填 material 判定；触发 stale/fail-closed 条件时处理开关。"
+      "next_action": "Continue material judgment backfill toward ≥20; do not flip default-on while quality is human_better / sample <20. Keep structural read-only cage; treat expired 07-15 review_by as renewal trigger, not as proof of the zero-judgment fail-closed condition."
     },
     {
       "id": "forgetting.upstream-wiring",
@@ -758,8 +792,8 @@
       "phase_status": "in_progress",
       "authorization_status": "authorized",
       "entered": "2026-07-08",
-      "review_by": "2026-07-24",
-      "current": "decay→lifecycle_proposal 已接线，等待 executor 受控消费。",
+      "review_by": "2026-08-04",
+      "current": "decay→lifecycle_proposal wiring remains landed. 2026-07-21 durable-kind / legacy compatibility repair: proposals resolve kind from durable frontmatter (canonical/project/project-root), repair or retire legacy decay rows missing/invalid kind with structured kind_resolution audit, and skip new decay demote proposals without a valid durable kind. Exit still requires a controlled executor consumption batch with demote ledger + reactivation window auditability.",
       "exit": [
         "executor 消费一个受控批次",
         "demote ledger 与 reactivation window 可审计"
@@ -768,7 +802,8 @@
         "entry-lifecycle-proposals ledger",
         "forgetting-demote-ledger",
         "aggregator run ledger",
-        "decay-shadow audit"
+        "decay-shadow audit",
+        "extensions/sediment/entry-lifecycle-proposals.ts durable kind + legacy repair"
       ],
       "owner": "sediment-forgetting",
       "consumer": [
@@ -776,7 +811,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "high",
-      "next_action": "用小批量验证 executor 消费链路。"
+      "next_action": "Run a small controlled executor batch after durable-kind compatibility; verify demote ledger and reactivation window remain auditable."
     },
     {
       "id": "memory.dedup-archived-dense",
@@ -893,8 +928,8 @@
       "phase_status": "blocked",
       "authorization_status": "separate_authorization_required",
       "entered": "2026-07-08",
-      "review_by": "2026-07-24",
-      "current": "Constraint runtime 仍读 .state compiled view；Git L2 仅为投影/审计面。",
+      "review_by": "2026-08-04",
+      "current": "Production session_start rule authority is the ADR0040 Policy stable-view, not constraint-shadow compiled-view and not git L2 constraint view. This residual face tracks any future decision about residual constraint compiled-view materializations / audit projection alignment; it is not the current session rule authority gate.",
       "exit": [
         "门控元数据进入 Git L2",
         "preflight smoke 通过",
@@ -911,7 +946,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "设计并执行 .state→Git L2 read-flip 复审。"
+      "next_action": "Do not describe constraint-shadow or git L2 compiled-view as live session rule authority. Only advance residual projection/audit alignment under separate review."
     },
     {
       "id": "constraint.dual-read-audit-retirement",
@@ -1003,10 +1038,11 @@
       "phase_status": "blocked_on_definition",
       "authorization_status": "not_applicable",
       "entered": "2026-07-08",
-      "review_by": "2026-07-24",
-      "current": "slim 与 ingest 尚未形成可退出的验收闭环。",
+      "review_by": "2026-08-04",
+      "current": "Runtime implementation for ADR 0035/0036/0037 retrieval stack is already shipped in production (stage0 hybrid + stage2 LLM rerank; see current-state Memory read path). This transition face tracks only the remaining ADR document slim + mechanism-ingest into abrain (same class of work as ADR 0034), which is still open — do not read 'slim+ingest incomplete' as 'runtime unimplemented'.",
       "exit": [
-        "slim/ingest 验收口径、数据样本与回滚边界齐备"
+        "ADR 0035/0036/0037 document slim banners + mechanism ingest into abrain completed or explicitly deferred with sediment-lane go/no-go",
+        "acceptance samples and rollback/staleness boundary for the ingest lane recorded"
       ],
       "evidence": [
         "ADR 0035/0036/0037 implementation records",
@@ -1018,7 +1054,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "medium",
-      "next_action": "汇总三项实态并拆出最小验收批次。"
+      "next_action": "Keep runtime truth in code/current-state. Plan the document slim+ingest batch separately; do not block retrieval runtime on this face."
     },
     {
       "id": "outcome.unknown-attribution",

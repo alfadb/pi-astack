@@ -161,7 +161,25 @@ export function parseGoalJudgeVerdict(rawText: string): GoalJudgeDecision | null
   return { verdict, reason, ...(nextStep ? { next_step: nextStep } : {}) };
 }
 
-/** Run the judge LLM call (closed verdict space; deterministic fallback on parse/transport failure). */
+function awaitAbortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("aborted"));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason ?? new Error("aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Run the judge LLM call under one deadline covering auth and transport. */
 export async function runGoalJudge(
   input: GoalJudgeInput,
   deps: { judgeModel: string; judgeTimeoutMs: number; modelRegistry: unknown; signal?: AbortSignal },
@@ -178,12 +196,39 @@ export async function runGoalJudge(
   if (!m) return fail(`invalid model ref: ${modelRef}`);
   const model = registry.find(m[1], m[2]);
   if (!model) return fail("model not found");
-  const auth = await registry.getApiKeyAndHeaders(model);
-  if (!auth.ok || !auth.apiKey) return fail(auth.error ?? "auth unavailable");
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error("goal_judge_timeout"));
+  }, Math.max(1, deps.judgeTimeoutMs));
+  const onParentAbort = (): void => controller.abort(deps.signal?.reason ?? new Error("goal_judge_cancelled"));
+  if (deps.signal?.aborted) onParentAbort();
+  else deps.signal?.addEventListener("abort", onParentAbort, { once: true });
+
+  let auth: { ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string };
+  try {
+    auth = await awaitAbortable(registry.getApiKeyAndHeaders(model), controller.signal);
+  } catch (error) {
+    clearTimeout(timeout);
+    deps.signal?.removeEventListener("abort", onParentAbort);
+    if (timedOut) return fail("judge_timeout");
+    if (controller.signal.aborted) return fail("judge_cancelled");
+    return fail((error instanceof Error ? error.message : String(error)).slice(0, 500));
+  }
+  if (!auth.ok || !auth.apiKey) {
+    clearTimeout(timeout);
+    deps.signal?.removeEventListener("abort", onParentAbort);
+    return fail(auth.error ?? "auth unavailable");
+  }
 
   const prompt = buildGoalJudgePrompt(input);
   const promptSan = sanitizeForMemory(prompt);
-  if (!promptSan.ok) return fail(promptSan.error || "prompt sanitize failed");
+  if (!promptSan.ok) {
+    clearTimeout(timeout);
+    deps.signal?.removeEventListener("abort", onParentAbort);
+    return fail(promptSan.error || "prompt sanitize failed");
+  }
 
   let rawText = "";
   try {
@@ -193,19 +238,24 @@ export async function runGoalJudge(
         opts: { messages: unknown[] },
         config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
       ): { result(): Promise<{ errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
-    } = await import("@earendil-works/pi-ai/compat");
-    const result = await auditStreamSimple(
+    } = await awaitAbortable(import("@earendil-works/pi-ai/compat"), controller.signal);
+    const result = await awaitAbortable(auditStreamSimple(
       process.cwd(),
       { module: "goal", operation: "judge", model_ref: modelRef, prompt_chars: (promptSan.text ?? prompt).length },
       piAi,
       model,
       { messages: [{ role: "user", content: [{ type: "text", text: promptSan.text ?? prompt }] }] },
-      { apiKey: auth.apiKey, headers: auth.headers, signal: deps.signal, timeoutMs: deps.judgeTimeoutMs, maxRetries: 0 },
-    );
+      { apiKey: auth.apiKey, headers: auth.headers, signal: controller.signal, timeoutMs: deps.judgeTimeoutMs, maxRetries: 0 },
+    ), controller.signal);
     if (result.errorMessage) return fail(result.errorMessage.slice(0, 500));
     rawText = result.content?.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "";
   } catch (e: unknown) {
+    if (timedOut) return fail("judge_timeout");
+    if (controller.signal.aborted) return fail("judge_cancelled");
     return fail((e instanceof Error ? e.message : String(e)).slice(0, 500));
+  } finally {
+    clearTimeout(timeout);
+    deps.signal?.removeEventListener("abort", onParentAbort);
   }
 
   const decision = parseGoalJudgeVerdict(rawText);
