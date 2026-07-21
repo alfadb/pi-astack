@@ -12,6 +12,8 @@
  * 4. The fixed runtime-routing authority terminates the curator snapshot;
  *    the snapshot is appended after already-composed rule injection content.
  * 5. The multi-vendor roster and per-model hints remain selectable/rendered.
+ * 6. The live config recommends Grok for deterministic execution while every
+ *    other curated non-GPT model remains judgment-only.
  */
 
 import { createRequire } from "node:module";
@@ -58,6 +60,8 @@ const fixtureSettings = {
 };
 fs.writeFileSync(fixtureSettingsPath, `${JSON.stringify(fixtureSettings, null, 2)}\n`);
 const savedSettingsPath = process.env.PI_ASTACK_SETTINGS_PATH;
+const liveSettingsPath = savedSettingsPath?.trim() || path.resolve(repoRoot, "..", "..", "pi-astack-settings.json");
+const liveSettings = JSON.parse(fs.readFileSync(liveSettingsPath, "utf8"));
 process.env.PI_ASTACK_SETTINGS_PATH = fixtureSettingsPath;
 
 const curator = jiti(path.join(repoRoot, "extensions/model-curator/index.ts"));
@@ -169,6 +173,9 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
     check("selection guidance derives responsibility from live per-model hints",
       block.includes("derive execution and judgment responsibility permissions from the live per-model hint") &&
         block.includes("do not infer permission from a provider or model family"));
+    check("selection guidance authorizes execution only when the live hint explicitly permits it",
+      block.includes("Assign execution-oriented tasks, including coding, log review, and concrete implementation") &&
+        block.includes("only when that hint explicitly permits them and its stated conditions are met"));
 
     const ruleInjection = "<!-- BEGIN_ABRAIN_RULES session=smoke -->\nRULE\n<!-- END_ABRAIN_RULES -->";
     const prompt = appendAvailableModelsSnapshot(ruleInjection, block);
@@ -180,6 +187,32 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
     check("runtime authority terminates the appended curator snapshot",
       snapshot.trimEnd().endsWith(MODEL_ROUTING_RUNTIME_AUTHORITY));
   }
+}
+
+console.log("\n[4] live responsibility hints recommend Grok execution and keep other non-GPT models judgment-only");
+{
+  const liveHints = liveSettings.modelCurator?.hints ?? {};
+  const grokHint = liveHints["xai/grok-4.5"];
+  check("live Grok hint explicitly recommends deterministic task execution",
+    typeof grokHint === "string" && grokHint.includes("Recommended deterministic task execution model."));
+  check("live Grok hint names the deterministic execution scope and acceptance boundary",
+    typeof grokHint === "string" &&
+      grokHint.includes("rollbackable deterministic tasks with clear goals and acceptance criteria") &&
+      grokHint.includes("coding, log review, and concrete implementation"));
+  check("live Grok hint retains judgment and independent-review responsibilities",
+    typeof grokHint === "string" &&
+      grokHint.includes("judgment-oriented tasks") &&
+      grokHint.includes("independent review of completed task results or final diffs"));
+
+  const otherNonGptHints = Object.entries(liveHints).filter(
+    ([model]) => !model.startsWith("openai/") && model !== "xai/grok-4.5",
+  );
+  check("every other curated non-GPT model remains judgment-only",
+    otherNonGptHints.length > 0 && otherNonGptHints.every(([, hint]) =>
+      typeof hint === "string" &&
+        hint.includes("Use only for judgment-oriented tasks") &&
+        hint.includes("do not use for coding, log review, or concrete implementation")
+    ));
 }
 
 console.log("");
