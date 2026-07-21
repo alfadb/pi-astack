@@ -50,6 +50,7 @@ export function loadKnowledgeModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-backfill-"));
   stage(outRoot, "extensions/_shared/durable-write.ts");
   stage(outRoot, "extensions/_shared/jcs.ts");
+  stage(outRoot, "extensions/_shared/canonical-l2-contract.ts");
   stage(outRoot, "extensions/_shared/proposition.ts");
   stage(outRoot, "extensions/_shared/l1-schema-registry.ts");
   fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });

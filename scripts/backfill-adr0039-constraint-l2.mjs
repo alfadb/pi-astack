@@ -86,7 +86,9 @@ function loadProjectionModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-constraint-projection-"));
   // Full transitive dependency tree of constraint-compiler/projection.ts.
   for (const src of [
+    "extensions/_shared/durable-write.ts",
     "extensions/_shared/jcs.ts",
+    "extensions/_shared/canonical-l2-contract.ts",
     "extensions/_shared/proposition.ts",
     "extensions/_shared/l1-schema-registry.ts",
     "extensions/sediment/sanitizer.ts",

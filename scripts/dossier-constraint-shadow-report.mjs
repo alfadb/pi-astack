@@ -144,6 +144,7 @@ for (const file of [
   "extensions/_shared/rotating-jsonl.ts",
   "extensions/_shared/llm-audit.ts",
   "extensions/_shared/jcs.ts",
+  "extensions/_shared/canonical-l2-contract.ts",
   "extensions/_shared/proposition.ts",
   "extensions/_shared/l1-schema-registry.ts",
   "extensions/memory/settings.ts",

@@ -69,6 +69,7 @@ function loadKnowledgeEvidenceModule() {
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-knowledge-evidence-"));
   stageTs(outRoot, "extensions/_shared/durable-write.ts");
   stageTs(outRoot, "extensions/_shared/jcs.ts");
+  stageTs(outRoot, "extensions/_shared/canonical-l2-contract.ts");
   stageTs(outRoot, "extensions/_shared/proposition.ts");
   stageTs(outRoot, "extensions/_shared/l1-schema-registry.ts");
   fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
@@ -95,6 +96,7 @@ function loadConstraintRenderModule() {
   if (_constraintRenderModule) return _constraintRenderModule;
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "adr0039-constraint-render-"));
   stageTs(outRoot, "extensions/sediment/sanitizer.ts");
+  stageTs(outRoot, "extensions/_shared/canonical-l2-contract.ts");
   stageTs(outRoot, "extensions/sediment/constraint-compiler/types.ts");
   stageTs(outRoot, "extensions/sediment/constraint-compiler/diagnostics.ts");
   stageTs(outRoot, "extensions/sediment/constraint-compiler/normalize.ts");

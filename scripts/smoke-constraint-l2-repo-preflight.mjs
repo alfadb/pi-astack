@@ -57,7 +57,7 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
 
 const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-l2-preflight-"));
 for (const file of [
-  "extensions/_shared/runtime.ts", "extensions/_shared/durable-write.ts", "extensions/_shared/jcs.ts", "extensions/_shared/proposition.ts", "extensions/_shared/l1-schema-registry.ts",
+  "extensions/_shared/runtime.ts", "extensions/_shared/durable-write.ts", "extensions/_shared/jcs.ts", "extensions/_shared/canonical-l2-contract.ts", "extensions/_shared/proposition.ts", "extensions/_shared/l1-schema-registry.ts",
   "extensions/memory/settings.ts", "extensions/memory/utils.ts", "extensions/memory/direction-impact.ts", "extensions/memory/parser.ts",
   "extensions/sediment/settings.ts", "extensions/sediment/knowledge-evidence.ts", "extensions/sediment/sanitizer.ts",
   "extensions/sediment/constraint-compiler/types.ts",
