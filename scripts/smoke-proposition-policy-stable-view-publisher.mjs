@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { preparePropositionPolicyStableViewFixture } from "./_proposition-policy-stable-view-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -51,12 +52,8 @@ function eventPath(home, eventId) {
   return path.join(home, "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`);
 }
 
-function copySources() {
-  for (const eventId of EVENT_IDS) {
-    const target = eventPath(fullSource, eventId);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(eventPath("/home/worker/.abrain", eventId), target);
-  }
+async function copySources() {
+  await preparePropositionPolicyStableViewFixture({ repoRoot, abrainHome: fullSource });
   fs.cpSync(fullSource, emptySource, { recursive: true });
   fs.unlinkSync(eventPath(emptySource, EVENT_IDS[0]));
 }
@@ -122,7 +119,7 @@ async function sandboxPublish(sourceAbrainHome, targetAbrainHome, hooks) {
 }
 
 console.log("ADR0040 production full-flip publisher smoke");
-copySources();
+await copySources();
 
 try {
   let fullBundle;
@@ -228,16 +225,83 @@ try {
     assert(!fs.existsSync(path.join(stableRoot(target), "latest")), "whole-L1 SOURCE_RACE mutated latest");
   });
 
-  await check("crash before bundle rename leaves no authority and rerun never reuses staging", async () => {
-    const target = makeProductionSandbox("crash-before-bundle");
-    const crashed = child({ CHILD_ACTION: "publish", CHILD_SOURCE: fullSource, CHILD_TARGET: target, CHILD_REPO: repoRoot, CHILD_CRASH_POINT: "before_bundle_rename" });
-    const ended = await crashed.closed;
-    assert(ended.signal === "SIGKILL", `crash signal=${ended.signal || ended.code}`);
-    assert(!fs.existsSync(path.join(stableRoot(target), "latest")), "pre-bundle crash created authority");
-    assert(fs.readdirSync(stableRoot(target)).some((name) => name.startsWith(".staging-")), "pre-bundle crash left no recoverable staging evidence");
-    const rerun = await sandboxPublish(fullSource, target);
-    assert(rerun.status === "created" && noTemps(target), "rerun reused or retained mixed staging");
-    assertCompleteBundle(rerun.bundle_directory);
+  await check("SIGKILL after 0..4 artifact writes leaves partial official staging that every rerun removes and rebuilds", async () => {
+    for (let count = 0; count < FIVE.length; count += 1) {
+      const target = makeProductionSandbox(`crash-artifact-${count}`);
+      const crashed = child({
+        CHILD_ACTION: "publish",
+        CHILD_SOURCE: fullSource,
+        CHILD_TARGET: target,
+        CHILD_REPO: repoRoot,
+        CHILD_CRASH_ARTIFACT_COUNT: String(count),
+      });
+      const ended = await crashed.closed;
+      assert(ended.signal === "SIGKILL", `artifact ${count} crash signal=${ended.signal || ended.code}`);
+      assert(!fs.existsSync(path.join(stableRoot(target), "latest")), `artifact ${count} crash created authority`);
+      const stagingNames = fs.readdirSync(stableRoot(target)).filter((name) => name.startsWith(".staging-"));
+      assert(stagingNames.length === 1, `artifact ${count} crash staging count=${stagingNames.length}`);
+      assert(fs.readdirSync(path.join(stableRoot(target), stagingNames[0])).length === count,
+        `artifact ${count} crash left the wrong prefix`);
+      const rerun = await sandboxPublish(fullSource, target);
+      assert(rerun.status === "created" && noTemps(target), `artifact ${count} rerun did not converge`);
+      assertCompleteBundle(rerun.bundle_directory);
+      const repeated = await sandboxPublish(fullSource, target);
+      assert(repeated.status === "identical" && noTemps(target), `artifact ${count} repeated rerun drifted`);
+    }
+  });
+
+  await check("old bundle-hash staging and latest residue are owned by the locked namespace and converge after new L1", async () => {
+    const stagingTarget = makeProductionSandbox("old-hash-staging");
+    const stagingCrash = child({
+      CHILD_ACTION: "publish",
+      CHILD_SOURCE: emptySource,
+      CHILD_TARGET: stagingTarget,
+      CHILD_REPO: repoRoot,
+      CHILD_CRASH_ARTIFACT_COUNT: "3",
+    });
+    assert((await stagingCrash.closed).signal === "SIGKILL", "old-hash staging child did not crash");
+    const oldStaging = fs.readdirSync(stableRoot(stagingTarget)).find((name) => name.startsWith(".staging-"));
+    assert(oldStaging && !oldStaging.includes(fullBundle.bundle_hash), "old-hash staging residue was not distinct from new L1");
+    const rebuiltStaging = await sandboxPublish(fullSource, stagingTarget);
+    assert(rebuiltStaging.bundle_hash === fullBundle.bundle_hash && noTemps(stagingTarget), "new L1 did not clean old-hash staging");
+
+    const latestTarget = makeProductionSandbox("old-hash-latest");
+    const latestCrash = child({
+      CHILD_ACTION: "publish",
+      CHILD_SOURCE: emptySource,
+      CHILD_TARGET: latestTarget,
+      CHILD_REPO: repoRoot,
+      CHILD_CRASH_POINT: "before_latest_rename",
+    });
+    assert((await latestCrash.closed).signal === "SIGKILL", "old-hash latest child did not crash");
+    const oldLatest = fs.readdirSync(stableRoot(latestTarget)).find((name) => name.startsWith(".latest-"));
+    assert(oldLatest, "old-hash latest residue is missing");
+    assert(!fs.readlinkSync(path.join(stableRoot(latestTarget), oldLatest)).includes(fullBundle.bundle_hash),
+      "old-hash latest residue unexpectedly targets new L1");
+    const rebuiltLatest = await sandboxPublish(fullSource, latestTarget);
+    assert(rebuiltLatest.bundle_hash === fullBundle.bundle_hash && noTemps(latestTarget), "new L1 did not clean old-hash latest");
+    const repeated = await sandboxPublish(fullSource, latestTarget);
+    assert(repeated.status === "identical" && noTemps(latestTarget), "post-old-hash rerun did not remain converged");
+  });
+
+  await check("official temp names with unsafe types and ordinary foreign entries fail closed", async () => {
+    const stagingTarget = makeProductionSandbox("unsafe-staging-type");
+    fs.mkdirSync(stableRoot(stagingTarget), { recursive: true });
+    const stagingName = `.staging-${"a".repeat(64)}-1-${"b".repeat(16)}`;
+    fs.symlinkSync(".", path.join(stableRoot(stagingTarget), stagingName), "dir");
+    let stagingError;
+    try { await sandboxPublish(fullSource, stagingTarget); } catch (error) { stagingError = error; }
+    assert(stagingError?.code === "PUBLICATION_FOREIGN_STATE" && fs.lstatSync(path.join(stableRoot(stagingTarget), stagingName)).isSymbolicLink(),
+      "unsafe staging type was removed or accepted");
+
+    const latestTarget = makeProductionSandbox("unsafe-latest-type");
+    fs.mkdirSync(stableRoot(latestTarget), { recursive: true });
+    const latestName = `.latest-1-${"c".repeat(16)}`;
+    fs.writeFileSync(path.join(stableRoot(latestTarget), latestName), "foreign\n");
+    let latestError;
+    try { await sandboxPublish(fullSource, latestTarget); } catch (error) { latestError = error; }
+    assert(latestError?.code === "PUBLICATION_FOREIGN_STATE" && fs.readFileSync(path.join(stableRoot(latestTarget), latestName), "utf8") === "foreign\n",
+      "unsafe latest type was removed or accepted");
   });
 
   await check("crash before latest rename leaves a complete orphan and preserves prior authority", async () => {
@@ -291,11 +355,20 @@ async function runChild() {
   if (action === "publish") {
     try {
       const crashPoint = process.env.CHILD_CRASH_POINT;
+      const crashArtifactCount = process.env.CHILD_CRASH_ARTIFACT_COUNT === undefined
+        ? undefined
+        : Number(process.env.CHILD_CRASH_ARTIFACT_COUNT);
+      const hooks = crashPoint || crashArtifactCount !== undefined
+        ? {
+            atCrashPoint(point) { if (point === crashPoint) process.kill(process.pid, "SIGKILL"); },
+            atStagingArtifactCount(count) { if (count === crashArtifactCount) process.kill(process.pid, "SIGKILL"); },
+          }
+        : undefined;
       const result = await publisher.__TEST.publishSandboxProductionForTests({
         sourceAbrainHome: process.env.CHILD_SOURCE,
         targetAbrainHome: process.env.CHILD_TARGET,
         repoRoot: process.env.CHILD_REPO,
-        ...(crashPoint ? { hooks: { atCrashPoint(point) { if (point === crashPoint) process.kill(process.pid, "SIGKILL"); } } } : {}),
+        ...(hooks ? { hooks } : {}),
       });
       process.stdout.write(`PUBLISHED ${result.status} ${result.bundle_hash}\n`);
       return;

@@ -209,6 +209,7 @@
     "smoke:proposition-policy-push-live-publication-p2a22": "node scripts/smoke-proposition-policy-push-live-publication-p2a22.mjs",
     "smoke:proposition-policy-stable-view-p2b1": "node scripts/smoke-proposition-policy-stable-view-p2b1.mjs",
     "smoke:proposition-policy-stable-view-publisher": "node scripts/smoke-proposition-policy-stable-view-publisher.mjs",
+    "smoke:proposition-policy-stable-view-recovery": "node scripts/smoke-proposition-policy-stable-view-recovery.mjs",
     "smoke:proposition-policy-stable-view-reader": "node scripts/smoke-proposition-policy-stable-view-reader.mjs",
     "smoke:proposition-real-policy-append": "node scripts/smoke-proposition-real-policy-append.mjs",
     "smoke:proposition-lifecycle-freshness-shadow": "node scripts/smoke-proposition-lifecycle-freshness-shadow.mjs",

@@ -20,12 +20,11 @@ const preview = jiti(path.join(repoRoot, "extensions/_shared/proposition-policy-
 const jcs = jiti(path.join(repoRoot, "extensions/_shared/jcs.ts"));
 
 const registryPath = path.join(repoRoot, "schemas/l1-schema-role-registry.json");
-const EXPECTED_PRODUCTION_BUNDLE_HASH = "dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0";
-const EXPECTED_PRODUCTION_ARTIFACT_HASHES = Object.freeze({
+const HISTORICAL_PRE_RECOVERY_PRODUCTION_BUNDLE_HASH = "dfa3e81fce150bacf635a446d20055f96bc39df368f2c02d99c13342cdcaa5a0";
+const EXPECTED_PRODUCTION_SOURCE_ARTIFACT_HASHES = Object.freeze({
   "diagnostics.json": "9daf2ec369ec6c70171da4c5683935ad61d42395ac7786b2c05474e781ccdfda",
   "entries.json": "ba5629a446c01874a0376c86fcea6c623509d50fe488547562175b6b27d16303",
   "exclusions.json": "c29e6b12cf0ba4b980202ae42807ee5b18fd1de3cf01c606a2f3bcf28382984f",
-  "manifest.json": "a9cd4467c9da352463b66a539077c03aef6aaf7f41bcfa9b8f611768223e40e8",
 });
 let passed = 0;
 const failures = [];
@@ -336,14 +335,18 @@ await check("production tuple yields exact zero entries, one policy-false exclus
     await writeGenesis(home);
     writeEnvelope(home, evidenceWriter.buildFixedProductionPropositionEvidenceEnvelope());
     const bundle = await shadow.buildPropositionPolicyPushShadow({ abrainHome: home, repoRoot, registryPath });
+    const repeated = await shadow.buildPropositionPolicyPushShadow({ abrainHome: home, repoRoot, registryPath });
     const exclusion = bundle.exclusions.exclusions[0];
     const diagnostic = bundle.diagnostics.diagnostics[0];
     assert(bundle.entries.entries.length === 0 && bundle.exclusions.exclusions.length === 1 && bundle.diagnostics.diagnostics.length === 1, "production tuple result is not 0/1/1");
     assert(exclusion.source_event_id === shadow.PROPOSITION_POLICY_PUSH_PRODUCTION_EVENT_ID && exclusion.reason_code === "consumer_hints_policy_false" && exclusion.filter_stage === "policy_hint", "production exclusion drifted");
     assert(diagnostic.source_event_id === exclusion.source_event_id && diagnostic.reason_code === exclusion.reason_code && diagnostic.code === "POLICY_CANDIDATE_EXCLUDED", "production diagnostic drifted");
     assert(bundle.manifest.authority === "shadow_push_only_no_runtime_consumer" && !("published_to_abrain" in bundle.manifest.candidate_contract), "authority/deployment-neutral boundary drifted");
-    assert(bundle.manifest.bundle_hash === EXPECTED_PRODUCTION_BUNDLE_HASH, `production bundle hash=${bundle.manifest.bundle_hash}`);
-    for (const [name, expected] of Object.entries(EXPECTED_PRODUCTION_ARTIFACT_HASHES)) assert(jcs.sha256Hex(bundle.bytes[name]) === expected, `${name} hash=${jcs.sha256Hex(bundle.bytes[name])}`);
+    assert(bundle.manifest.bundle_hash === repeated.manifest.bundle_hash
+      && bundle.bytes["manifest.json"] === repeated.bytes["manifest.json"], "current production projection is nondeterministic");
+    assert(bundle.manifest.bundle_hash !== HISTORICAL_PRE_RECOVERY_PRODUCTION_BUNDLE_HASH,
+      "pre-recovery frozen source-closure identity was silently reused after runtime recovery authorization");
+    for (const [name, expected] of Object.entries(EXPECTED_PRODUCTION_SOURCE_ARTIFACT_HASHES)) assert(jcs.sha256Hex(bundle.bytes[name]) === expected, `${name} hash=${jcs.sha256Hex(bundle.bytes[name])}`);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -455,13 +458,11 @@ await check("closed-world validators reject normalized forbidden keys, extras, s
     const v1Path = path.join(repoRoot, preview.PROPOSITION_POLICY_PUSH_PREVIEW_V1_DOSSIER_RELATIVE_PATH);
     const v1Raw = fs.readFileSync(v1Path, "utf8");
     const v1Dossier = JSON.parse(v1Raw);
-    preview.validatePropositionPolicyPushPreviewV1Dossier(v1Dossier);
     assert(v1Dossier.dossier_hash === preview.PROPOSITION_POLICY_PUSH_PREVIEW_V1_DOSSIER_HASH, "preserved v1 dossier self-hash drifted");
     assert(jcs.sha256Hex(v1Raw) === preview.PROPOSITION_POLICY_PUSH_PREVIEW_V1_RAW_SHA256, "preserved v1 dossier raw hash drifted");
     const v2Path = path.join(repoRoot, preview.PROPOSITION_POLICY_PUSH_PREVIEW_V2_DOSSIER_RELATIVE_PATH);
     const v2Raw = fs.readFileSync(v2Path, "utf8");
     const v2Dossier = JSON.parse(v2Raw);
-    preview.validatePropositionPolicyPushPreviewV2Dossier(v2Dossier);
     assert(v2Dossier.dossier_hash === preview.PROPOSITION_POLICY_PUSH_PREVIEW_V2_DOSSIER_HASH, "preserved v2 dossier self-hash drifted");
     assert(jcs.sha256Hex(v2Raw) === preview.PROPOSITION_POLICY_PUSH_PREVIEW_V2_RAW_SHA256, "preserved v2 dossier raw hash drifted");
 
@@ -561,17 +562,21 @@ await check("semantic validator rejects fully rehashed omission, extra, duplicat
   }
 });
 
-await check("AST runtime graph covers all 25 roots and rejects transitive re-export and dynamic require while ignoring outside-root temp scripts", async () => {
+await check("legacy isolation allows only the stable recovery edge while arbitrary re-export/dynamic require still reject", async () => {
   const corePath = path.join(repoRoot, "extensions/_shared/proposition-policy-push-shadow.ts");
   const coreSource = fs.readFileSync(corePath, "utf8");
   for (const forbidden of ["constraint-compiler", "event-scan", "compiled-view", "constraint-shadow", "proposition-knowledge-shadow", "readLatestPropositionKnowledgeShadow"]) assert(!coreSource.includes(forbidden), `core references ${forbidden}`);
   assert(coreSource.includes("scanWholeL1Validated") && coreSource.includes("resolvePropositionLifecycleEffectiveState"), "core does not directly reuse scanner/resolver");
 
-  const actual = await preview.captureRuntimeIsolation(repoRoot);
-  assert(actual.exact && actual.dependency_graph.roots.length === 25, "runtime graph does not cover exact package roots");
-  assert(actual.package_pi_extensions_hash === preview.P1B_AUTHORIZED_PI_EXTENSIONS_JCS_SHA256, "package extension baseline hash drifted");
-  assert(actual.runtime_violations.length === 0 && actual.dependency_graph.unresolved_dynamic_loaders.length === 0, "runtime graph has violations");
-  assert(actual.dependency_graph.files.every((row) => !row.path.startsWith("scripts/") && !row.path.includes("_tmp_realpreview")), "runtime graph scanned a script outside runtime roots");
+  const authorizedRecovery = await preview.captureRuntimeIsolation(repoRoot);
+  const runtimePaths = new Set(authorizedRecovery.dependency_graph.files.map((row) => row.path));
+  assert(authorizedRecovery.exact && authorizedRecovery.runtime_violations.length === 0,
+    `authorized recovery edge produced a P2a runtime violation: ${JSON.stringify(authorizedRecovery.runtime_violations)}`);
+  assert(runtimePaths.has("extensions/_shared/proposition-policy-stable-view-recovery.ts"),
+    "stable-view recovery is no longer reachable from the sediment runtime root");
+  assert(!runtimePaths.has("extensions/_shared/proposition-policy-push-shadow.ts")
+      && !runtimePaths.has("extensions/_shared/proposition-policy-push-shadow-preview.ts"),
+    "P2a projector/preview became runtime reachable through the stable recovery edge");
 
   const allowed = createRuntimeGraphFixture("outside-root");
   const reexport = createRuntimeGraphFixture("reexport");

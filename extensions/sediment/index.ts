@@ -117,6 +117,7 @@ import {
 } from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
+import { schedulePropositionPolicyStableViewRecovery } from "../_shared/proposition-policy-stable-view-recovery";
 import {
   detachedAgentEndQueueStats,
   enqueueDetachedAgentEnd,
@@ -2263,9 +2264,28 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
       const cwd = path.resolve(ctx.cwd || process.cwd());
       const modelRegistry = ctx.modelRegistry;
-      const initializeAfterCanonicalBarrier = async (): Promise<void> => {
-        // No sediment directory or liveness writer is allowed before Path A.
+      const initializeAfterCanonicalBarrier = async (canonicalReady = false): Promise<void> => {
+        // Canonical mode reaches this initializer only after Path A; legacy
+        // mode retains its existing staging/liveness setup without publication.
+        // Creating staging also establishes the publisher's exact OFD lock root
+        // on a virgin abrain before its detached child can acquire that lock.
         await mkdir(abrainSedimentStagingPath(abrainHome), { recursive: true });
+
+        if (canonicalReady) {
+          // Only canonical-ready may own the one-shot derived Policy
+          // publication. The recovery promise retains only roots and never
+          // captures ctx or UI.
+          void schedulePropositionPolicyStableViewRecovery({
+            abrainHome,
+            repoRoot: path.resolve(__dirname, "..", ".."),
+          }).then((result) => {
+            if (result.status === "failed") {
+              console.error(`[sediment] proposition policy stable-view recovery failed: ${result.error_code ?? result.reason}: ${result.error_message ?? "unknown"}`);
+            }
+          }).catch((error) => {
+            console.error(`[sediment] proposition policy stable-view recovery scheduling failed: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
         const livenessTrigger = {
           abrainHome,
           cwd,
@@ -2295,7 +2315,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           reporter: notify,
           blockedMessage: (startup) => `sediment canonical startup blocked: ${startup.blockedReason ?? "unknown"}`,
           errorMessage: (error) => `sediment canonical startup continuation threw: ${error instanceof Error ? error.message : String(error)}`,
-          onReady: initializeAfterCanonicalBarrier,
+          onReady: () => initializeAfterCanonicalBarrier(true),
         });
       } else {
         await initializeAfterCanonicalBarrier();

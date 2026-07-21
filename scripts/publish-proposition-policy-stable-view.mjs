@@ -20,7 +20,7 @@ function argument(name, fallback) {
 
 const mode = argument("mode", "preview");
 if (mode !== "preview" && mode !== "production") throw new Error("--mode must be preview or production");
-const sourceAbrainHome = path.resolve(argument("source-abrain", publisher.PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME));
+const sourceAbrainHome = path.resolve(argument("source-abrain", publisher.resolvePropositionPolicyStableViewCurrentAbrainHome()));
 const sandbox = argument("sandbox-abrain");
 
 try {

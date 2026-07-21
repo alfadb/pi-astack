@@ -35,14 +35,14 @@ import {
   acquireRetainedDirectoryOfdLock,
   type RetainedDirectoryOfdLock,
 } from "./retained-directory-ofd-lock";
+import { resolvePropositionPolicyStableViewCurrentAbrainHome } from "./proposition-policy-stable-view-root";
+
+export { resolvePropositionPolicyStableViewCurrentAbrainHome } from "./proposition-policy-stable-view-root";
 
 export const PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_ROOT_RELATIVE = ".state/sediment/proposition-policy-stable-view/v1" as const;
-export const PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME = "/home/worker/.abrain" as const;
-export const PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_TARGET = `${PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME}/${PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_ROOT_RELATIVE}` as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_MANIFEST_SCHEMA = "proposition-policy-stable-view-publication-manifest/v2" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_PROFILE_RELATIVE = "schemas/proposition-policy-stable-view-compile-profile-v1.json" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_PUBLISHER_RELATIVE = "extensions/_shared/proposition-policy-stable-view-publisher.ts" as const;
-export const PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_LOCK_ROOT = "/home/worker/.abrain/.state/sediment" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_AUTHORITY = "production_policy_stable_view_sole_rule_source_for_all_persisted_main_sessions" as const;
 
 const MANIFEST_HASH_SCOPE = "sha256 over RFC8785-JCS UTF-8 bytes of this manifest object with bundle_hash and manifest_hash omitted" as const;
@@ -56,6 +56,7 @@ type PublisherCrashPoint = "before_bundle_rename" | "after_bundle_rename" | "bef
 interface PublisherTestHooks {
   afterFirstSourceScan?(): void;
   afterProjectionBeforeSecondSourceScan?(): void;
+  atStagingArtifactCount?(count: number): void;
   atCrashPoint?(point: PublisherCrashPoint): void;
 }
 
@@ -325,17 +326,22 @@ export async function publishPropositionPolicyStableView(options: {
   repoRoot: string;
   sandboxAbrainHome?: string;
 }): Promise<PropositionPolicyStableViewPublicationResult> {
-  const sourceAbrainHome = path.resolve(options.sourceAbrainHome);
+  const sourceAbrainHome = assertExactDirectory(options.sourceAbrainHome, "source abrain home");
+  const currentAbrainHome = resolvePropositionPolicyStableViewCurrentAbrainHome();
   if (options.mode === "production") {
-    if (sourceAbrainHome !== PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME) {
-      fail("PRODUCTION_TARGET_INVALID", "production mode is fixed to /home/worker/.abrain");
+    const targetAbrainHome = assertExactDirectory(currentAbrainHome, "production abrain home");
+    if (sourceAbrainHome !== targetAbrainHome) {
+      fail("PRODUCTION_ROOT_MISMATCH", "production source and target must both equal the caller's current abrain root", {
+        sourceAbrainHome,
+        currentAbrainHome: targetAbrainHome,
+      });
     }
-    const targetAbrainHome = assertExactDirectory(PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME, "production abrain home");
-    const lock = acquireProductionPublicationLock(PROPOSITION_POLICY_STABLE_VIEW_PRODUCTION_LOCK_ROOT);
+    const lockRoot = assertExactDirectory(path.join(targetAbrainHome, ".state", "sediment"), "production publication lock root");
+    const lock = acquireProductionPublicationLock(lockRoot);
     try {
       const bundle = await buildPropositionPolicyStableViewBundle({ sourceAbrainHome, repoRoot: options.repoRoot });
-      const productionBinding = buildProductionPublicationBinding(bundle);
-      validateProductionPublicationBinding(productionBinding, bundle);
+      const productionBinding = buildProductionPublicationBinding(targetAbrainHome, bundle);
+      validateProductionPublicationBinding(productionBinding, targetAbrainHome, bundle);
       const result = materializeBundle({
         mode: "production",
         targetAbrainHome,
@@ -351,8 +357,8 @@ export async function publishPropositionPolicyStableView(options: {
 
   if (!options.sandboxAbrainHome) fail("SANDBOX_REQUIRED", "preview mode requires an explicit sandbox abrain home");
   const targetAbrainHome = assertSandboxDirectory(options.sandboxAbrainHome);
-  if (targetAbrainHome === PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME) {
-    fail("SANDBOX_REQUIRED", "preview mode cannot target the production abrain home");
+  if (targetAbrainHome === currentAbrainHome) {
+    fail("SANDBOX_REQUIRED", "preview mode cannot target the caller's current production abrain home");
   }
   const bundle = await buildPropositionPolicyStableViewBundle({ sourceAbrainHome, repoRoot: options.repoRoot });
   return materializeBundle({ mode: "preview", targetAbrainHome, bundle });
@@ -806,7 +812,11 @@ function materializeBundle(options: {
     fs.mkdirSync(stagingRoot, { mode: 0o700 });
     let renamed = false;
     try {
-      for (const name of ARTIFACT_NAMES) writeExclusiveFile(path.join(stagingRoot, name), options.bundle.artifacts[name]);
+      options.hooks?.atStagingArtifactCount?.(0);
+      for (const [index, name] of ARTIFACT_NAMES.entries()) {
+        writeExclusiveFile(path.join(stagingRoot, name), options.bundle.artifacts[name]);
+        options.hooks?.atStagingArtifactCount?.(index + 1);
+      }
       fsyncDirectory(stagingRoot);
       assertExactPublishedBundle(stagingRoot, options.bundle.artifacts);
       options.hooks?.atCrashPoint?.("before_bundle_rename");
@@ -881,15 +891,32 @@ function materializeBundle(options: {
 }
 
 function cleanupAbandonedPublicationTemps(targetRoot: string): void {
+  const stagingPattern = /^\.staging-[0-9a-f]{64}-[0-9]+-[0-9a-f]{16}$/;
+  const latestPattern = /^\.latest-[0-9]+-[0-9a-f]{16}$/;
   for (const name of fs.readdirSync(targetRoot)) {
-    const staging = /^\.staging-[0-9a-f]{64}-[0-9]+-[0-9a-f]{16}$/.test(name);
-    const latest = /^\.latest-[0-9]+-[0-9a-f]{16}$/.test(name);
-    if (!staging && !latest) continue;
     const target = path.join(targetRoot, name);
-    const stat = fs.lstatSync(target);
-    if (staging && !stat.isSymbolicLink() && stat.isDirectory()) fs.rmSync(target, { recursive: true, force: true });
-    else if (latest && stat.isSymbolicLink()) fs.unlinkSync(target);
-    else fail("PUBLICATION_FOREIGN_STATE", "abandoned publication temp has an unsafe type", { name });
+    if (stagingPattern.test(name)) {
+      const stat = fs.lstatSync(target);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        fail("PUBLICATION_FOREIGN_STATE", "abandoned staging entry has an unsafe type", { name });
+      }
+      // The exact randomized namespace is publisher-owned while the production
+      // OFD lock is held. A crash can leave any all-five prefix for an older
+      // source hash, so safe-type directories are removed as one unit.
+      fs.rmSync(target, { recursive: true, force: true });
+      continue;
+    }
+    if (latestPattern.test(name)) {
+      const stat = fs.lstatSync(target);
+      if (!stat.isSymbolicLink()) {
+        fail("PUBLICATION_FOREIGN_STATE", "abandoned latest entry has an unsafe type", { name });
+      }
+      fs.unlinkSync(target);
+      continue;
+    }
+    if (name.startsWith(".staging-") || name.startsWith(".latest-")) {
+      fail("PUBLICATION_FOREIGN_STATE", "publication temp residue is outside the exact managed namespace", { name });
+    }
   }
   fsyncDirectory(targetRoot);
 }
@@ -949,10 +976,14 @@ function readCanonicalL1Rows(abrainHome: string, eventIds: readonly string[]) {
   }));
 }
 
-function buildProductionPublicationBinding(bundle: PropositionPolicyStableViewMvpBundle) {
-  const bundlesRoot = path.join(PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_TARGET, "bundles");
+function buildProductionPublicationBinding(
+  productionAbrainHome: string,
+  bundle: PropositionPolicyStableViewMvpBundle,
+) {
+  const targetRoot = path.join(productionAbrainHome, ...PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_ROOT_RELATIVE.split("/"));
+  const bundlesRoot = path.join(targetRoot, "bundles");
   const bundleDirectory = path.join(bundlesRoot, bundle.bundle_hash);
-  const latestSymlink = path.join(PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_TARGET, "latest");
+  const latestSymlink = path.join(targetRoot, "latest");
   const latestValue = `bundles/${bundle.bundle_hash}`;
   const sourceProjectionBundleHash = bundle.source_bundle.manifest.bundle_hash;
   assertSha256(sourceProjectionBundleHash, "source projection bundle hash");
@@ -960,14 +991,14 @@ function buildProductionPublicationBinding(bundle: PropositionPolicyStableViewMv
     schema_version: "proposition-policy-stable-view-production-binding/v1",
     previewed_bundle_hash: bundle.bundle_hash,
     source_projection_bundle_hash: sourceProjectionBundleHash,
-    source_abrain_home: PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_ABRAIN_HOME,
-    target_root: PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_TARGET,
+    source_abrain_home: productionAbrainHome,
+    target_root: targetRoot,
     bundle_directory: bundleDirectory,
     latest_symlink: latestSymlink,
     latest_value: latestValue,
     mutation_inventory: {
       durable_rows: [
-        { path: PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_TARGET, kind: "directory", operation: "ensure_exact" },
+        { path: targetRoot, kind: "directory", operation: "ensure_exact" },
         { path: bundlesRoot, kind: "directory", operation: "ensure_exact" },
         { path: bundleDirectory, kind: "directory", operation: "create_if_absent_or_verify_exact" },
         ...ARTIFACT_NAMES.map((name) => ({
@@ -979,7 +1010,7 @@ function buildProductionPublicationBinding(bundle: PropositionPolicyStableViewMv
         })),
         { path: latestSymlink, kind: "symlink", operation: "create_or_atomic_replace", symlink_value: latestValue },
       ],
-      transient_parent: PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_HARD_TARGET,
+      transient_parent: targetRoot,
       transient_prefixes: [`.staging-${bundle.bundle_hash}-`, ".latest-"],
       cleanup_required: true,
     },
@@ -989,9 +1020,10 @@ function buildProductionPublicationBinding(bundle: PropositionPolicyStableViewMv
 
 function validateProductionPublicationBinding(
   binding: ReturnType<typeof buildProductionPublicationBinding>,
+  productionAbrainHome: string,
   bundle: PropositionPolicyStableViewMvpBundle,
 ): void {
-  const expected = buildProductionPublicationBinding(bundle);
+  const expected = buildProductionPublicationBinding(productionAbrainHome, bundle);
   if (stableViewCanonicalizeJcs(binding) !== stableViewCanonicalizeJcs(expected)) {
     fail("PRODUCTION_BINDING_INVALID", "internally derived production bundle, source projection, paths, or mutation inventory changed");
   }

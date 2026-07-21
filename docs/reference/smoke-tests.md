@@ -29,11 +29,13 @@ The ADR0040 production full-flip gate is:
 
 ```bash
 npm run smoke:proposition-policy-stable-view-publisher  # /tmp-only concurrency/crash publication
+npm run smoke:proposition-policy-stable-view-recovery   # /tmp-only auto-rebuild/root/lock/adversarial recovery
 npm run smoke:proposition-policy-stable-view-reader     # strict reader + fresh-session staged E2E
 npm run smoke:abrain-rule-injector                       # sole-source call graph + sanitation
+npm run smoke:canonical-session-start                   # canonical-ready detached scheduling + strict post-read
 ```
 
-These smokes never invoke real production publication. The operator-only production command is `npm run publish:proposition-policy-stable-view -- --mode production`.
+These smokes never target a live abrain; their production-mode calls bind only to generated roots below the system temp directory. Canonical-ready recovery is automatic under the 2026-07-21 user authorization. The manual diagnostic rerun command remains `npm run publish:proposition-policy-stable-view -- --mode production` and resolves production from `ABRAIN_ROOT` or `HOME/.abrain`.
 
 ## Live prompt dossiers
 

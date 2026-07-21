@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { preparePropositionPolicyStableViewFixture } from "./_proposition-policy-stable-view-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -54,12 +55,8 @@ function eventPath(home, eventId) {
   return path.join(home, "l1", "events", "sha256", eventId.slice(0, 2), eventId.slice(2, 4), `${eventId}.json`);
 }
 
-function copySources() {
-  for (const eventId of EVENT_IDS) {
-    const target = eventPath(fullSource, eventId);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(eventPath("/home/worker/.abrain", eventId), target);
-  }
+async function copySources() {
+  await preparePropositionPolicyStableViewFixture({ repoRoot, abrainHome: fullSource });
   fs.cpSync(fullSource, emptySource, { recursive: true });
   fs.unlinkSync(eventPath(emptySource, EVENT_IDS[0]));
   fs.mkdirSync(published, { recursive: true });
@@ -203,7 +200,7 @@ function writeOldRuntimeSources(home) {
 }
 
 console.log("ADR0040 production full-flip reader/runtime smoke");
-copySources();
+await copySources();
 
 try {
   await check("publisher prepares strict one-item and empty production bundles in disposable sandboxes", async () => {

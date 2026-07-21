@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { preparePropositionPolicyStableViewFixture } from "./_proposition-policy-stable-view-fixture.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -73,6 +74,8 @@ async function fire(handlers, name, event, ctx) {
 
 try {
   initRepo(abrainHome, false);
+  await preparePropositionPolicyStableViewFixture({ repoRoot: root, abrainHome, createSedimentRoot: false });
+  commit(abrainHome, "canonical proposition fixture", "l1");
   fs.writeFileSync(settingsPath, `${JSON.stringify({
     canonicalGitRuntime: { enabled: true, mode: "local_convergence_v2" },
   }, null, 2)}\n`);
@@ -88,6 +91,8 @@ try {
   const vaultBash = await jiti.import(path.join(root, "extensions/abrain/vault-bash.ts"));
   const writer = await jiti.import(path.join(root, "extensions/sediment/writer.ts"));
   const runtimePaths = await jiti.import(path.join(root, "extensions/_shared/runtime.ts"));
+  const stableRecovery = await jiti.import(path.join(root, "extensions/_shared/proposition-policy-stable-view-recovery.ts"));
+  const stableReader = await jiti.import(path.join(root, "extensions/abrain/rule-injector/proposition-policy-stable-view-reader.ts"));
 
   assert(canonical.canonicalStartupRunsInBackground("tui"), "TUI startup policy is blocking");
   assert(canonical.canonicalStartupRunsInBackground("rpc"), "RPC startup policy is blocking");
@@ -177,6 +182,8 @@ try {
   assert(sharedA === sharedB, "abrain and sediment did not share one startup promise");
 
   const stagingPath = runtimePaths.abrainSedimentStagingPath(abrainHome);
+  const sedimentRoot = path.dirname(stagingPath);
+  assert(!fs.existsSync(sedimentRoot), "virgin sediment root was initialized before canonical barrier");
   assert(!fs.existsSync(stagingPath), "sediment staging initialized before canonical barrier");
 
   const workflowPath = path.join(abrainHome, "workflows", "canonical-session-start-writer.md");
@@ -208,6 +215,21 @@ try {
   const diagnostics = await sharedA;
   assert(diagnostics.startup === "ready", `real canonical startup blocked: ${diagnostics.blockedReason}`);
   assert(diagnostics.tail.some((row) => row.operation === "startup" && row.status === "local_ready"), "full Path A local_ready proof missing");
+  const recoveryDeadline = Date.now() + 15_000;
+  let stableRecoveryResult;
+  while (Date.now() < recoveryDeadline) {
+    stableRecoveryResult = stableRecovery.getPropositionPolicyStableViewRecoveryDiagnostics(abrainHome).latest;
+    if (stableRecoveryResult) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert(stableRecoveryResult?.status === "recovered", `detached stable recovery=${JSON.stringify(stableRecoveryResult)}`);
+  const stableRead = stableReader.readPropositionPolicyStableViewForRuntime({
+    abrainHome,
+    settings: { maxReadBytes: 262144 },
+    sessionManager,
+  });
+  assert(stableRead.ok && stableRead.reason === "selected_valid" && stableRead.bundleHash === stableRecoveryResult.bundle_hash,
+    `post-recovery strict read=${JSON.stringify(stableRead)}`);
   await printWait;
   assert(printReady, "print post-barrier continuation did not run");
   const stagingDeadline = Date.now() + 1_000;
@@ -285,9 +307,34 @@ try {
   assert(fallbackReady, "scheduler failure did not fall back to microtask startup");
   assert(schedulerErrors.some((row) => row.type === "error" && row.message.includes("scheduler-smoke")), "scheduler error was not reported");
 
+  // Legacy initialization still creates staging and starts constraint recovery,
+  // but it has no canonical-ready proof for derived Policy publication.
+  const disabledHome = path.join(tmp, "canonical-disabled");
+  initRepo(disabledHome);
+  await preparePropositionPolicyStableViewFixture({ repoRoot: root, abrainHome: disabledHome, createSedimentRoot: false });
+  commit(disabledHome, "canonical-disabled proposition fixture", "l1");
+  fs.writeFileSync(settingsPath, `${JSON.stringify({
+    canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" },
+  }, null, 2)}\n`);
+  process.env.ABRAIN_ROOT = disabledHome;
+  await fire(sedimentPi.handlers, "session_start", { reason: "canonical-disabled" }, {
+    ...ctx,
+    sessionManager: {
+      ...sessionManager,
+      getSessionId: () => "canonical-disabled-session-start-smoke",
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const disabledStaging = runtimePaths.abrainSedimentStagingPath(disabledHome);
+  const disabledStableRoot = path.join(disabledHome, ".state", "sediment", "proposition-policy-stable-view", "v1");
+  const disabledRecovery = stableRecovery.getPropositionPolicyStableViewRecoveryDiagnostics(disabledHome);
+  assert(fs.existsSync(disabledStaging), "canonical-disabled initialization did not retain staging setup");
+  assert(!disabledRecovery.scheduled && !disabledRecovery.latest && !fs.existsSync(disabledStableRoot),
+    `canonical-disabled session_start scheduled stable recovery: ${JSON.stringify(disabledRecovery)}`);
+
   console.log("canonical session_start integration: ok");
   console.log(`  tui_handler_ms=${tuiHandlerMs.toFixed(1)}`);
-  console.log(`  shared_startup=${diagnostics.startup} tail=${diagnostics.tail.length}`);
+  console.log(`  shared_startup=${diagnostics.startup} tail=${diagnostics.tail.length} stable_recovery=${stableRecoveryResult.status}`);
   console.log(`  writer=${writeResult.status} staging_after_barrier=${fs.existsSync(stagingPath)}`);
   console.log(`  notifications=${notifications.length} statuses=${statusRows.length}`);
 } finally {

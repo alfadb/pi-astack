@@ -85,7 +85,11 @@ pi-astack 的运行时配置不走 `piStack` namespace，也不依赖官方 sett
 
 ### ADR0040 production Policy stable view
 
-Production rule authority 已完成 full-flip 实现：`~/.abrain/.state/sediment/proposition-policy-stable-view/v1/latest` 指向的 immutable all-five bundle 是所有 persisted main session 的唯一注入源。runtime 捕获 `latest` 一次后严格验证 bundle、hash/schema、whole-L1 provenance、scope、budget 与 render；不读取 compiled-view、D3 或 legacy rules，不接受 selector、expected hash 或 selection age 授权门。ephemeral main session 与 subagent 不注入。
+Production rule authority 已完成 full-flip 实现：当前 `ABRAIN_ROOT`（未设置时为 `HOME/.abrain`）下 `.state/sediment/proposition-policy-stable-view/v1/latest` 指向的 immutable all-five bundle 是所有 persisted main session 的唯一注入源。runtime 捕获 `latest` 一次后严格验证 bundle、hash/schema、whole-L1 provenance、scope、budget 与 render；不读取 compiled-view、D3 或 legacy rules，不接受 selector、expected hash 或 selection age 授权门。ephemeral main session 与 subagent 不注入。
+
+2026-07-21 用户直接授权该 derived publication 的完全自动恢复：canonical startup/recovery 证明 ready 后，后台任务从 current canonical whole-L1 strict scan 经正式 P2a projection、固定 compile profile 与 production publisher 重建；strict compile 成功后自动发布并原子切换 `latest`，无需每设备人工 grant。TUI/RPC `session_start` 不等待该任务，同一 root 进程内 singleflight，跨进程由 publisher OFD lock 收敛。reader 本身仍无写权限且不 lazy repair；publication 后必须由同一 strict runtime reader 验证 `selected_valid` 才报告 recovered。
+
+2026-07-21 真实生产验收已完成：recovery audit 从 initial `read_failed` 收敛为 status `recovered`、final `selected_valid`，bundle 为 `028c8d0354f31eae97269d66991d7fedcbd57aad0badbd45e31ca287046f7a2d`。下一真实 turn 的 runtime audit 为 `policy_stable_view_injected` / `selected_valid`，item=1、view=341 bytes、fence=1/1，compiled、D3、legacy markers 均为 false。
 
 失败矩阵：
 
@@ -93,24 +97,26 @@ Production rule authority 已完成 full-flip 实现：`~/.abrain/.state/sedimen
 |---|---|
 | strict-valid、fresh | exact-one `source=proposition-policy-stable-view` fence |
 | strict-valid、stale | 继续注入同一稳定 bundle，同时显示 stale footer/diagnostic |
-| missing / partial / foreign / hash-schema-provenance-budget invalid | 清理所有历史 managed fence，loud zero injection；不 fallback |
+| missing / partial / foreign / hash-schema-provenance-budget invalid | 当前 read 清理所有历史 managed fence并 loud zero injection；不 fallback；canonical-ready 后 detached recovery 仅对可安全收敛状态尝试确定性重建，敌对/foreign 残留保持 fail-closed |
 | ephemeral main / subagent | 不注入；不写 Policy runtime audit |
 
-Runtime audit 写入 `~/.pi/.pi-astack/adr0040-policy-stable-view-runtime-audit.jsonl`。关键字段包括 `session_id` / `turn_id` / `causal_anchor`、`latest_user_message_id` 与 user-text hash/bytes、`decision` / `reason`、bundle/manifest/view identity、item/byte counts、selection age/stale diagnostic、rendered prompt hash/bytes、fence counts，以及 stable/compiled/legacy/D3 marker booleans。
+Runtime audit 写入 `~/.pi/.pi-astack/adr0040-policy-stable-view-runtime-audit.jsonl`。关键字段包括 `session_id` / `turn_id` / `causal_anchor`、`latest_user_message_id` 与 user-text hash/bytes、`decision` / `reason`、bundle/manifest/view identity、item/byte counts、selection age/stale diagnostic、rendered prompt hash/bytes、fence counts，以及 stable/compiled/legacy/D3 marker booleans。恢复终态另写入当前 abrain root 的 `.state/sediment/proposition-policy-stable-view-recovery/v1/audit.jsonl`，并有 256 KiB hard cap 与 64-row 进程诊断 tail。
 
 操作命令：
 
 ```bash
 # 完整 sandbox acceptance；不会写 production target
 npm run smoke:proposition-policy-stable-view-publisher
+npm run smoke:proposition-policy-stable-view-recovery
 npm run smoke:proposition-policy-stable-view-reader
 npm run smoke:abrain-rule-injector
+npm run smoke:canonical-session-start
 
-# 真实 production publication；固定读取/写入 /home/worker/.abrain
+# 手动诊断/重跑入口；production root 动态取 ABRAIN_ROOT 或 HOME/.abrain
 npm run publish:proposition-policy-stable-view -- --mode production
 ```
 
-2026-07-20 full-flip 代码、配置与 sandbox acceptance 已完成。旧 publisher smoke 在 transcript gate 删除后仍执行 production mode，已意外 materialize/refresh 真实 target；因此当前不是“尚未发布”，而是正式 main-session acceptance 与 runtime restart 尚未完成。生产发布无 rollback path，重复运行只会验证/复用 content-addressed bundle 并原子刷新 `latest`。
+生产发布没有 legacy rollback/fallback path；重复运行只验证或复用 content-addressed bundle 并原子刷新 `latest`。自动恢复只处理可由 current canonical proposition L1 和固定 deterministic compiler 证明的派生状态；不会删除不安全 symlink、foreign root entry、内容寻址 collision 或无法证明归属的残留。
 
 ### Windows 支持边界
 
