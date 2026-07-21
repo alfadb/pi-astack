@@ -1,22 +1,23 @@
 #!/usr/bin/env node
-/**
- * Multi-process cold-start: process A deliberately delays immutable
- * recovery-history classification >30s OUTSIDE the mutation barrier.
- * Process B (writer / concurrent startup) must NOT observe
- * CANONICAL_MUTATION_BUSY and both end consistent with no long-term lock hold.
- */
+/** Multi-process startup busy retry, outside-final-classification, and barrier backoff gate. */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { performance } from "node:perf_hooks";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const { createJiti } = require("jiti");
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-startup-classify-outside-"));
+const jiti = createJiti(root, { interopDefault: true });
+const runtimeModule = jiti(path.join(root, "extensions/_shared/canonical-git-runtime.ts"));
+const barrier = jiti(path.join(root, "extensions/_shared/canonical-mutation-barrier.ts"));
+const l1 = jiti(path.join(root, "extensions/_shared/l1-schema-registry.ts"));
+const recovery = jiti(path.join(root, "extensions/_shared/convergence-recovery.ts"));
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-startup-busy-retry-"));
+const settingsPath = path.join(tmp, "enabled.json");
+const pendingChildren = new Set();
 const gitEnv = {
   ...process.env,
   LANG: "C",
@@ -37,24 +38,72 @@ function initRepo(name) {
   const repo = path.join(tmp, name);
   fs.mkdirSync(repo, { recursive: true });
   git(repo, "init", "-q", "-b", "main");
-  git(repo, "config", "user.name", "Classify Outside Fixture");
-  git(repo, "config", "user.email", "classify-outside@example.invalid");
-  fs.writeFileSync(path.join(repo, "README"), "classify-outside\n");
-  execFileSync("git", ["-C", repo, "add", "README"], { env: gitEnv });
+  git(repo, "config", "user.name", "Startup Busy Fixture");
+  git(repo, "config", "user.email", "startup-busy@example.invalid");
+  fs.writeFileSync(path.join(repo, ".gitignore"), ".state/\n");
+  fs.writeFileSync(path.join(repo, "README"), "startup busy retry\n");
+  git(repo, "add", ".gitignore", "README");
   execFileSync("git", ["-C", repo, "commit", "-qm", "init"], {
     env: {
       ...gitEnv,
-      GIT_AUTHOR_NAME: "Classify Outside Fixture",
-      GIT_AUTHOR_EMAIL: "classify-outside@example.invalid",
-      GIT_COMMITTER_NAME: "Classify Outside Fixture",
-      GIT_COMMITTER_EMAIL: "classify-outside@example.invalid",
+      GIT_AUTHOR_NAME: "Startup Busy Fixture",
+      GIT_AUTHOR_EMAIL: "startup-busy@example.invalid",
+      GIT_COMMITTER_NAME: "Startup Busy Fixture",
+      GIT_COMMITTER_EMAIL: "startup-busy@example.invalid",
+      GIT_AUTHOR_DATE: "1700000000 +0000",
+      GIT_COMMITTER_DATE: "1700000000 +0000",
     },
   });
   return repo;
 }
 
-function childOutput(child) {
-  return new Promise((resolve, reject) => {
+function writeKnowledge(repo, seq) {
+  const body = {
+    event_schema_version: "knowledge-evidence-event/v1",
+    event_type: "knowledge_entry_observed",
+    created_at_utc: `2026-07-21T00:00:${String(seq).padStart(2, "0")}.000Z`,
+    device_id: "startup-busy-fixture",
+    device_event_seq: seq,
+    producer_nonce: `startup-busy-${seq}`,
+    causal_parents: [],
+    session_id: "startup-busy-session",
+    turn_id: `turn-${seq}`,
+    actor: { role: "assistant", id: "sediment" },
+    source: { channel: "agent_end", source_ref: `sediment:auto_write:created:startup-busy-${seq}` },
+    intent: { domain_hint: "knowledge", operation_hint: "create", confidence: 0.9 },
+    scope: { kind: "project", project_id: "pi-astack" },
+    payload: {
+      slug: `startup-busy-${seq}`,
+      title: `Startup Busy ${seq}`,
+      kind: "knowledge",
+      status: "active",
+      provenance: "synthetic-smoke",
+      confidence: 9,
+      compiled_truth: `# Startup Busy ${seq}\n\nSynthetic startup retry fixture.`,
+      trigger_phrases: ["startup busy retry"],
+      derives_from: [],
+    },
+    sanitizer: { sanitizer_name: "fixture", sanitizer_version: "v1", status: "passed", replacements_count: 0 },
+    legacy_parallel_write: { attempted: false, status: "skipped", reason: "fixture" },
+    producer: { name: "sediment.knowledge-event-writer", version: "adr0039-p5" },
+  };
+  const eventId = l1.canonicalL1BodyHash(body);
+  const relative = l1.expectedL1EventRelativePath(eventId);
+  const file = path.join(repo, ...relative.split("/"));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify({
+    schema: "knowledge-evidence-envelope/v1",
+    canonicalization: "RFC8785-JCS",
+    hash_alg: "sha256",
+    event_id: eventId,
+    body_hash: eventId,
+    body,
+  })}\n`);
+  return { eventId, relative };
+}
+
+function childResult(child) {
+  const promise = new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -65,261 +114,323 @@ function childOutput(child) {
       else reject(new Error(`child exit ${code}/${signal}: ${stderr || stdout}`));
     });
   });
+  pendingChildren.add(promise);
+  void promise.finally(() => pendingChildren.delete(promise)).catch(() => {});
+  return promise;
 }
 
-const CLASSIFY_DELAY_MS = 35_000;
-const BARRIER_TIMEOUT_MS = 30_000;
+async function waitFor(label, predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+function barrierHolder(repo, holdMs, marker) {
+  const code = `
+const {createJiti}=require("jiti");
+const fs=require("fs"),path=require("path");
+const j=createJiti(${JSON.stringify(root)},{interopDefault:true});
+const barrier=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-mutation-barrier.ts"));
+(async()=>barrier.withCanonicalMutationBarrier(${JSON.stringify(repo)},async()=>{
+  fs.writeFileSync(${JSON.stringify(marker)},"held\\n");
+  await new Promise(resolve=>setTimeout(resolve,${holdMs}));
+}))().catch(error=>{console.error(error);process.exit(1)});
+`;
+  return spawn(process.execPath, ["-e", code], { cwd: root, env: gitEnv, stdio: ["ignore", "pipe", "pipe"] });
+}
 
 try {
-  const repo = initRepo("cold-start");
-  const settingsPath = path.join(tmp, "enabled.json");
   fs.writeFileSync(settingsPath, `${JSON.stringify({
     canonicalGitRuntime: { enabled: true, mode: "local_convergence_v2" },
   }, null, 2)}\n`);
 
-  const marker = path.join(tmp, "classifier-started.marker");
-  // Process A: long classification outside barrier (env delay).
-  // Emits "classify_begin" then delays, then awaitStartup.
-  const processACode = `
-const { createJiti } = require("jiti");
-const fs = require("fs");
-const path = require("path");
-const jiti = createJiti(${JSON.stringify(root)}, { interopDefault: true });
-const runtime = jiti(path.join(${JSON.stringify(root)}, "extensions/_shared/canonical-git-runtime.ts"));
-const barrier = jiti(path.join(${JSON.stringify(root)}, "extensions/_shared/canonical-mutation-barrier.ts"));
-(async () => {
-  process.stdout.write("A_begin\\n");
-  fs.writeFileSync(${JSON.stringify(marker)}, String(Date.now()));
-  // Prove we are NOT holding the barrier during the delay window.
-  const heldBefore = barrier.canonicalMutationBarrierHeld(${JSON.stringify(repo)});
-  process.stdout.write("A_held_before=" + heldBefore + "\\n");
-  const r = await runtime.getCanonicalGitRuntime({
-    abrainHome: ${JSON.stringify(repo)},
-    settingsPath: ${JSON.stringify(settingsPath)},
-    sourceRoot: ${JSON.stringify(root)},
-    startupBarrierTimeoutMs: ${BARRIER_TIMEOUT_MS},
+  // A performs a real startup drain and advances HEAD. B times out on A's
+  // mutation barrier, retries inside one shared promise from a new freeze, and
+  // reaches ready while A's long final classification is outside the barrier.
+  const repo = initRepo("two-startups");
+  const knowledge = writeKnowledge(repo, 1);
+  const headBefore = git(repo, "rev-parse", "HEAD");
+  const mutationMarker = path.join(tmp, "a-mutation-held.marker");
+  const finalMarker = path.join(tmp, "a-final-classify.marker");
+  const barrierTimeoutMs = 100;
+  const mutationHoldMs = 1_500;
+  const finalClassifyDelayMs = 3_000;
+  const optionsLiteral = JSON.stringify({
+    abrainHome: repo,
+    settingsPath,
+    sourceRoot: root,
+    startupBarrierTimeoutMs: barrierTimeoutMs,
+    startupBusyBudgetMs: 3_000,
+    startupBusyInitialBackoffMs: 20,
+    startupBusyMaxBackoffMs: 80,
   });
-  const diag = await r.awaitStartup();
-  process.stdout.write("A_startup=" + diag.startup + "\\n");
-  process.stdout.write("A_done\\n");
-})().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
-`;
 
+  const processACode = `
+const {createJiti}=require("jiti");
+const path=require("path");
+const j=createJiti(${JSON.stringify(root)},{interopDefault:true});
+const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-git-runtime.ts"));
+(async()=>{
+  const options=${optionsLiteral};
+  const instance=await runtime.getCanonicalGitRuntime(options);
+  const diagnostics=await instance.awaitStartup();
+  if(diagnostics.startup!=="ready")throw new Error(diagnostics.blockedReason||diagnostics.startup);
+  await instance.settleForDeviceJoin();
+  process.stdout.write(JSON.stringify({startup:diagnostics.startup,tail:diagnostics.tail}));
+})().catch(error=>{console.error(error);process.exit(1)});
+`;
   const childA = spawn(process.execPath, ["-e", processACode], {
     cwd: root,
     env: {
       ...gitEnv,
-      PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS: String(CLASSIFY_DELAY_MS),
+      PI_ASTACK_ENABLE_TEST_HOOKS: "1",
+      PI_ASTACK_STARTUP_MUTATION_HOLD_DELAY_MS: String(mutationHoldMs),
+      PI_ASTACK_STARTUP_MUTATION_HOLD_MARKER: mutationMarker,
+      PI_ASTACK_STARTUP_FINAL_CLASSIFY_DELAY_MS: String(finalClassifyDelayMs),
+      PI_ASTACK_STARTUP_FINAL_CLASSIFY_MARKER: finalMarker,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const aDone = childOutput(childA);
+  const aDone = childResult(childA);
+  await waitFor("A real mutation hold", () => fs.existsSync(mutationMarker));
+  const mutationHead = git(repo, "rev-parse", "HEAD");
+  assert(mutationHead !== headBefore, "A did not advance HEAD before holding the mutation barrier");
 
-  // Wait until A has started its outside-barrier classification delay.
-  const waitStart = Date.now();
-  while (!fs.existsSync(marker)) {
-    if (Date.now() - waitStart > 10_000) throw new Error("process A never wrote classifier-started marker");
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  // Give A a moment to enter the delay (after freeze inputs).
-  await new Promise((resolve) => setTimeout(resolve, 200));
-
-  // Process B: concurrent writer under barrier — must acquire within 30s.
   const processBCode = `
-const { createJiti } = require("jiti");
-const path = require("path");
-const jiti = createJiti(${JSON.stringify(root)}, { interopDefault: true });
-const barrier = jiti(path.join(${JSON.stringify(root)}, "extensions/_shared/canonical-mutation-barrier.ts"));
-(async () => {
-  const started = Date.now();
-  process.stdout.write("B_begin\\n");
-  await barrier.withCanonicalMutationBarrier(${JSON.stringify(repo)}, async () => {
-    process.stdout.write("B_acquired ms=" + (Date.now() - started) + "\\n");
-    // Brief critical section; must not see long-term hold from A.
-    await new Promise((r) => setTimeout(r, 50));
-    process.stdout.write("B_release\\n");
-  }, { timeoutMs: ${BARRIER_TIMEOUT_MS} });
-  process.stdout.write("B_done\\n");
-})().catch((error) => {
-  process.stdout.write("B_error=" + (error && error.code ? error.code : error) + "\\n");
-  console.error(error);
-  process.exit(1);
-});
+const {createJiti}=require("jiti");
+const path=require("path");
+const j=createJiti(${JSON.stringify(root)},{interopDefault:true});
+const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-git-runtime.ts"));
+(async()=>{
+  const options=${optionsLiteral};
+  options.startupRetryRandom=()=>0;
+  const first=runtime.getCanonicalStartupPromise(options);
+  const second=runtime.getCanonicalStartupPromise(options);
+  if(first!==second)throw new Error("startup promise was not shared");
+  const diagnostics=await first;
+  process.stdout.write(JSON.stringify({shared:true,startup:diagnostics.startup,blockedReason:diagnostics.blockedReason||null,tail:diagnostics.tail}));
+})().catch(error=>{console.error(error);process.exit(1)});
 `;
-
-  const bStarted = performance.now();
   const childB = spawn(process.execPath, ["-e", processBCode], {
     cwd: root,
     env: gitEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const bResult = await childOutput(childB);
-  const bMs = performance.now() - bStarted;
-  assert(!bResult.stdout.includes("CANONICAL_MUTATION_BUSY"), `process B saw CANONICAL_MUTATION_BUSY during A's classification: ${bResult.stdout}\n${bResult.stderr}`);
-  assert(bResult.stdout.includes("B_acquired"), `process B did not acquire barrier: ${bResult.stdout}\n${bResult.stderr}`);
-  assert(bResult.stdout.includes("B_done"), `process B did not complete: ${bResult.stdout}`);
-  assert(bMs < BARRIER_TIMEOUT_MS, `process B took ${bMs.toFixed(0)}ms (>= barrier timeout) — A likely held the lock during classification`);
+  const bDone = childResult(childB);
 
-  // Concurrent startup from process C while A still classifying should also not busy-fail on the lock
-  // solely due to classification (may still serialize on mutation briefly at the end).
-  const stillClassifying = Date.now() - Number(fs.readFileSync(marker, "utf8")) < CLASSIFY_DELAY_MS - 5_000;
-  if (stillClassifying) {
-    const processCCode = `
-const { createJiti } = require("jiti");
-const path = require("path");
-const jiti = createJiti(${JSON.stringify(root)}, { interopDefault: true });
-const runtime = jiti(path.join(${JSON.stringify(root)}, "extensions/_shared/canonical-git-runtime.ts"));
-(async () => {
-  const r = await runtime.getCanonicalGitRuntime({
-    abrainHome: ${JSON.stringify(repo)},
-    settingsPath: ${JSON.stringify(settingsPath)},
-    sourceRoot: ${JSON.stringify(root)},
-    startupBarrierTimeoutMs: ${BARRIER_TIMEOUT_MS},
+  await waitFor("A outside final classification", () => fs.existsSync(finalMarker));
+  // B may still own its own short recovery phase. Wait for it so the probe
+  // isolates A's final-classification lock scope instead of measuring B.
+  const bResult = await bDone;
+  const probeStarted = Date.now();
+  await barrier.withCanonicalMutationBarrier(repo, async () => {
+    fs.writeFileSync(path.join(repo, "final-drift.txt"), "real writer during outside final classification\n");
+    git(repo, "add", "final-drift.txt");
+    git(repo, "commit", "-qm", "real final tuple drift", "--", "final-drift.txt");
+  }, {
+    timeoutMs: 500,
+    retryMs: 10,
+    maxRetryMs: 50,
   });
-  const diag = await r.awaitStartup();
-  process.stdout.write("C_startup=" + diag.startup + "\\n");
-})().catch((error) => {
-  process.stdout.write("C_error=" + (error && error.code ? error.code : String(error && error.message || error)) + "\\n");
-  console.error(error);
-  process.exit(1);
-});
-`;
-    const childC = spawn(process.execPath, ["-e", processCCode], {
-      cwd: root,
-      env: gitEnv, // no classify delay
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const cResult = await childOutput(childC);
-    assert(!String(cResult.stdout + cResult.stderr).includes("CANONICAL_MUTATION_BUSY"), `process C busy during A classify: ${cResult.stdout}\n${cResult.stderr}`);
-    assert(cResult.stdout.includes("C_startup=ready") || cResult.stdout.includes("C_startup=blocked"), `process C unexpected: ${cResult.stdout}`);
-  }
+  const finalOutsideProbeMs = Date.now() - probeStarted;
+  assert(finalOutsideProbeMs < 500, `final classification still held the barrier for ${finalOutsideProbeMs}ms`);
 
   const aResult = await aDone;
-  assert(aResult.stdout.includes("A_held_before=false"), `process A held barrier before classify: ${aResult.stdout}`);
-  assert(aResult.stdout.includes("A_startup=ready") || aResult.stdout.includes("A_startup=blocked"), `process A did not settle: ${aResult.stdout}\n${aResult.stderr}`);
-  assert(aResult.stdout.includes("A_done"), `process A incomplete: ${aResult.stdout}`);
+  const a = JSON.parse(aResult.stdout);
+  const b = JSON.parse(bResult.stdout);
+  assert(a.startup === "ready", `A did not become ready: ${aResult.stdout}\n${aResult.stderr}`);
+  assert(b.shared && b.startup === "ready", `B shared startup did not become ready: ${bResult.stdout}\n${bResult.stderr}`);
+  assert(b.tail.some((row) => row.status === "canonical_mutation_busy_retry"), "B never exercised runtime-level CANONICAL_MUTATION_BUSY retry");
+  assert(b.tail.filter((row) => row.phase === "freeze_initial" && row.status === "enter").length >= 2, "B reused its old frozen tuple after busy");
+  assert(a.tail.some((row) => row.phase === "classify_final" && row.status === "test_delay"), "A did not exercise delayed final classification");
+  assert(a.tail.some((row) => row.status === "classify_input_drift_retry"), "A published ready without recomputing the drifted final tuple");
+  const mutationCohort = git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", mutationHead).split("\n").filter(Boolean).sort();
+  assert(JSON.stringify(mutationCohort) === JSON.stringify([knowledge.relative]), `A startup mutation cohort drifted: ${JSON.stringify(mutationCohort)}`);
+  assert(git(repo, "status", "--porcelain=v1", "-uall") === "", "concurrent startups did not leave a clean repository after settlement");
+  const finalScan = await l1.scanWholeL1Validated({ abrainHome: repo });
+  const finalRecovery = recovery.recoverOpenRecoveryEpisodesV3FromScan(finalScan);
+  assert(finalRecovery.open.length === 0 && finalRecovery.quarantined.length === 0, "final recovery cohort is open or quarantined");
 
-  // Final consistency: a fresh no-delay startup is ready and repo is clean.
-  const jiti = createJiti(root, { interopDefault: true });
-  const runtime = jiti(path.join(root, "extensions/_shared/canonical-git-runtime.ts"));
-  // Clear process-local runtime cache by using a new process for final check.
-  const finalCode = `
-const { createJiti } = require("jiti");
-const path = require("path");
-const jiti = createJiti(${JSON.stringify(root)}, { interopDefault: true });
-const runtime = jiti(path.join(${JSON.stringify(root)}, "extensions/_shared/canonical-git-runtime.ts"));
-(async () => {
-  const r = await runtime.getCanonicalGitRuntime({
-    abrainHome: ${JSON.stringify(repo)},
-    settingsPath: ${JSON.stringify(settingsPath)},
-    sourceRoot: ${JSON.stringify(root)},
-  });
-  const diag = await r.awaitStartup();
-  process.stdout.write(JSON.stringify({ startup: diag.startup, blockedReason: diag.blockedReason || null }));
-})().catch((e) => { console.error(e); process.exit(1); });
-`;
-  const finalChild = spawn(process.execPath, ["-e", finalCode], {
-    cwd: root,
-    env: gitEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const finalResult = await childOutput(finalChild);
-  const finalDiag = JSON.parse(finalResult.stdout);
-  assert(finalDiag.startup === "ready", `final startup not ready: ${JSON.stringify(finalDiag)}`);
-  const status = git(repo, "status", "--porcelain");
-  assert(status === "", `repo left dirty after concurrent startup/writer: ${status}`);
-
-  // Real canonical writer commit during outside classification must surface as
-  // drift (HEAD/status change), not merely a sleep-barrier race. Process D
-  // commits while A is still delayed outside the barrier; A must settle without
-  // permanent hang, and a fresh startup afterward must be ready.
-  const repo2 = initRepo("drift-writer");
-  const marker2 = path.join(tmp, "drift-classifier-started.marker");
-  const processDriftA = `
-const { createJiti } = require("jiti");
-const fs = require("fs");
-const path = require("path");
-const jiti = createJiti(${JSON.stringify(root)}, { interopDefault: true });
-const runtime = jiti(path.join(${JSON.stringify(root)}, "extensions/_shared/canonical-git-runtime.ts"));
-(async () => {
-  fs.writeFileSync(${JSON.stringify(marker2)}, String(Date.now()));
-  const r = await runtime.getCanonicalGitRuntime({
-    abrainHome: ${JSON.stringify(repo2)},
-    settingsPath: ${JSON.stringify(settingsPath)},
-    sourceRoot: ${JSON.stringify(root)},
-    startupBarrierTimeoutMs: ${BARRIER_TIMEOUT_MS},
-  });
-  const diag = await r.awaitStartup();
-  const tail = (diag.tail || []).map((row) => row.status + ":" + (row.operation || "")).join(",");
-  process.stdout.write("D_A_startup=" + diag.startup + "\\n");
-  process.stdout.write("D_A_tail=" + tail + "\\n");
-  process.stdout.write("D_A_done\\n");
-})().catch((error) => { console.error(error); process.exit(1); });
-`;
-  const childDriftA = spawn(process.execPath, ["-e", processDriftA], {
-    cwd: root,
-    env: { ...gitEnv, PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS: String(CLASSIFY_DELAY_MS) },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const driftADone = childOutput(childDriftA);
-  const driftWaitStart = Date.now();
-  while (!fs.existsSync(marker2)) {
-    if (Date.now() - driftWaitStart > 10_000) throw new Error("drift process A never started");
-    await new Promise((resolve) => setTimeout(resolve, 20));
+  // Low-level timeout remains authoritative. Normal multi-waiter callers share
+  // one process-local poller; captured sleeps prove capped exponential backoff.
+  const barrierRepo = initRepo("barrier-backoff");
+  const barrierMarker = path.join(tmp, "barrier-backoff-holder.marker");
+  const holder = barrierHolder(barrierRepo, 350, barrierMarker);
+  const holderDone = childResult(holder);
+  await waitFor("barrier backoff holder", () => fs.existsSync(barrierMarker));
+  let lowLevelError;
+  try {
+    await barrier.withCanonicalMutationBarrierInSingleFlight(barrierRepo, async () => {}, {
+      timeoutMs: 35,
+      retryMs: 10,
+      maxRetryMs: 40,
+      random: () => 1,
+    });
+  } catch (error) {
+    lowLevelError = error;
   }
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  // Real writer: commit a new tracked file so HEAD + status hash move.
-  fs.writeFileSync(path.join(repo2, "drift-l1.txt"), `drift-${Date.now()}\n`);
-  execFileSync("git", ["-C", repo2, "add", "drift-l1.txt"], { env: gitEnv });
-  execFileSync("git", ["-C", repo2, "commit", "-qm", "real writer drift commit"], {
-    env: {
-      ...gitEnv,
-      GIT_AUTHOR_NAME: "Drift Writer",
-      GIT_AUTHOR_EMAIL: "drift@example.invalid",
-      GIT_COMMITTER_NAME: "Drift Writer",
-      GIT_COMMITTER_EMAIL: "drift@example.invalid",
-    },
-  });
-  const headAfterWriter = git(repo2, "rev-parse", "HEAD");
-  assert(/^[0-9a-f]{40}$/.test(headAfterWriter), "writer commit did not advance HEAD");
-  const driftAResult = await driftADone;
-  assert(driftAResult.stdout.includes("D_A_done"), `drift A incomplete: ${driftAResult.stdout}\n${driftAResult.stderr}`);
-  assert(
-    /D_A_startup=(ready|blocked)/.test(driftAResult.stdout),
-    `drift A did not settle: ${driftAResult.stdout}`,
-  );
-  // Fresh process after real writer drift must not hang on a permanently cached blocked promise.
-  const postDriftCode = `
-const { createJiti } = require("jiti");
-const path = require("path");
-const jiti = createJiti(${JSON.stringify(root)}, { interopDefault: true });
-const runtime = jiti(path.join(${JSON.stringify(root)}, "extensions/_shared/canonical-git-runtime.ts"));
-(async () => {
-  const r = await runtime.getCanonicalGitRuntime({
-    abrainHome: ${JSON.stringify(repo2)},
-    settingsPath: ${JSON.stringify(settingsPath)},
-    sourceRoot: ${JSON.stringify(root)},
-  });
-  const diag = await r.awaitStartup();
-  process.stdout.write("post_drift_startup=" + diag.startup + "\\n");
-})().catch((e) => { console.error(e); process.exit(1); });
-`;
-  const postDriftChild = spawn(process.execPath, ["-e", postDriftCode], {
-    cwd: root,
-    env: gitEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const postDriftResult = await childOutput(postDriftChild);
-  assert(postDriftResult.stdout.includes("post_drift_startup=ready"), `post-drift startup not ready: ${postDriftResult.stdout}\n${postDriftResult.stderr}`);
+  assert(lowLevelError?.code === "CANONICAL_MUTATION_BUSY", `low-level timeout semantics changed: ${lowLevelError}`);
 
-  console.log("startup classify outside barrier: ok");
-  const aStartupMatch = aResult.stdout.match(/A_startup=(\w+)/);
-  const driftStartupMatch = driftAResult.stdout.match(/D_A_startup=(\w+)/);
-  console.log(`  classify_delay_ms=${CLASSIFY_DELAY_MS} writer_ms=${bMs.toFixed(0)} A_startup=${aStartupMatch ? aStartupMatch[1] : "?"}`);
-  console.log(`  real_writer_drift_startup=${driftStartupMatch ? driftStartupMatch[1] : "?"} post_drift=ready`);
+  const delays = [];
+  let probes = 0;
+  const waiterOptions = {
+    timeoutMs: 1_000,
+    retryMs: 10,
+    maxRetryMs: 40,
+    random: () => 1,
+    onProbe: () => { probes += 1; },
+    sleep: async (delayMs) => {
+      delays.push(delayMs);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    },
+  };
+  const waiterOrder = [];
+  await Promise.all([0, 1, 2].map((id) => barrier.withCanonicalMutationBarrier(barrierRepo, async () => {
+    waiterOrder.push(id);
+  }, waiterOptions)));
+  await holderDone;
+  assert(JSON.stringify(waiterOrder) === JSON.stringify([0, 1, 2]), `multi-waiter single-flight order drifted: ${waiterOrder}`);
+  assert(delays.length >= 3 && delays[0] === 10 && delays[1] === 20 && delays[2] === 40, `barrier backoff is not exponential/capped: ${delays}`);
+  assert(delays.every((delay) => delay <= 40), `barrier backoff exceeded cap: ${delays}`);
+  assert(probes === delays.length + 3, `multi-waiter polling multiplied unexpectedly: probes=${probes} delays=${delays.length}`);
+
+  // A permanent holder exhausts a short monotonic total budget into typed
+  // deferred diagnostics. No retry timer remains; holder release plus a later
+  // lifecycle consumer invocation starts a new freeze and reaches ready.
+  const deferredRepo = initRepo("deferred-retry");
+  const deferredMarker = path.join(tmp, "deferred-holder.marker");
+  const deferredHolder = barrierHolder(deferredRepo, 650, deferredMarker);
+  const deferredHolderDone = childResult(deferredHolder);
+  await waitFor("deferred holder", () => fs.existsSync(deferredMarker));
+  let activeSleeps = 0;
+  let maxActiveSleeps = 0;
+  const activeTimeoutsBefore = process.getActiveResourcesInfo().filter((name) => name === "Timeout").length;
+  const deferredOptions = {
+    abrainHome: deferredRepo,
+    settingsPath,
+    sourceRoot: root,
+    startupBarrierTimeoutMs: 30,
+    startupBusyBudgetMs: 140,
+    startupBusyInitialBackoffMs: 10,
+    startupBusyMaxBackoffMs: 20,
+    startupRetryRandom: () => 0,
+    startupRetrySleep: (delayMs) => new Promise((resolve) => {
+      activeSleeps += 1;
+      maxActiveSleeps = Math.max(maxActiveSleeps, activeSleeps);
+      setTimeout(() => { activeSleeps -= 1; resolve(); }, delayMs);
+    }),
+  };
+  const staleReports = [];
+  const currentReports = [];
+  const blockedDiagnostics = [];
+  let abrainReady = 0;
+  let sedimentReady = 0;
+  const sharedDeferred = runtimeModule.getCanonicalStartupPromise(deferredOptions);
+  assert(sharedDeferred === runtimeModule.getCanonicalStartupPromise(deferredOptions), "deferred startup did not share one promise");
+  const abrainFirst = runtimeModule.scheduleCanonicalStartupConsumer({
+    runtime: deferredOptions,
+    consumerId: "abrain-runtime",
+    mode: "json",
+    reporter: (message, type) => staleReports.push({ consumer: "abrain", message, type }),
+    onReady: () => { abrainReady += 1; },
+    onBlocked: (diagnostics) => { blockedDiagnostics.push(diagnostics); },
+  });
+  const sedimentFirst = runtimeModule.scheduleCanonicalStartupConsumer({
+    runtime: deferredOptions,
+    consumerId: "sediment-runtime",
+    mode: "json",
+    reporter: (message, type) => staleReports.push({ consumer: "sediment", message, type }),
+    onReady: () => { sedimentReady += 1; },
+    onBlocked: (diagnostics) => { blockedDiagnostics.push(diagnostics); },
+  });
+  runtimeModule.setCanonicalStartupReporter({ runtime: deferredOptions, consumerId: "abrain-runtime", reporter: (message, type) => currentReports.push({ consumer: "abrain", message, type }) });
+  runtimeModule.setCanonicalStartupReporter({ runtime: deferredOptions, consumerId: "sediment-runtime", reporter: (message, type) => currentReports.push({ consumer: "sediment", message, type }) });
+  const deferred = await sharedDeferred;
+  await Promise.all([abrainFirst, sedimentFirst]);
+  assert(deferred.startup === "deferred" && deferred.deferredReason === "CANONICAL_MUTATION_BUSY" && deferred.retryable === true, `busy budget did not return typed deferred diagnostics: ${JSON.stringify(deferred)}`);
+  assert(blockedDiagnostics.length === 2 && blockedDiagnostics.every((item) => item.startup === "deferred"), "both consumers did not observe the shared deferred result");
+  assert(staleReports.length === 0, "deferred delivery retained stale reporters");
+  assert(currentReports.every((row) => row.type !== "error"), `transient busy emitted a red error: ${JSON.stringify(currentReports)}`);
+  assert(maxActiveSleeps === 1 && activeSleeps === 0, `startup retry timers leaked or multiplied: active=${activeSleeps} max=${maxActiveSleeps}`);
+  await new Promise((resolve) => setImmediate(resolve));
+  const activeTimeoutsAfter = process.getActiveResourcesInfo().filter((name) => name === "Timeout").length;
+  assert(activeTimeoutsAfter <= activeTimeoutsBefore, `deferred startup leaked Timeout resources: before=${activeTimeoutsBefore} after=${activeTimeoutsAfter}`);
+  assert(abrainReady === 0 && sedimentReady === 0, "deferred startup ran an onReady continuation");
+
+  await deferredHolderDone;
+  await Promise.all([
+    runtimeModule.scheduleCanonicalStartupConsumer({
+      runtime: deferredOptions,
+      consumerId: "abrain-runtime",
+      mode: "json",
+      reporter: (message, type) => currentReports.push({ consumer: "abrain", message, type }),
+      onReady: () => { abrainReady += 1; },
+    }),
+    runtimeModule.scheduleCanonicalStartupConsumer({
+      runtime: deferredOptions,
+      consumerId: "sediment-runtime",
+      mode: "json",
+      reporter: (message, type) => currentReports.push({ consumer: "sediment", message, type }),
+      onReady: () => { sedimentReady += 1; },
+    }),
+  ]);
+  assert(abrainReady === 1 && sedimentReady === 1, `external lifecycle retry did not run each onReady once: ${abrainReady}/${sedimentReady}`);
+  assert(git(deferredRepo, "status", "--porcelain=v1", "-uall") === "", "deferred retry left repository dirty");
+
+  // Terminal notifications are scoped to one startup-promise generation. Two
+  // consumers share attempt 1 and emit one error. After an in-process repair
+  // reaches ready, attempt 2 gets one new error and never calls stale reporters.
+  const missingRepo = path.join(tmp, "missing-terminal-repo");
+  const terminalOptions = { abrainHome: missingRepo, settingsPath, sourceRoot: root };
+  const attempt1Reports = [];
+  const attempt2Reports = [];
+  let terminalReady = 0;
+  const scheduleTerminalConsumers = (reports) => Promise.all([
+    runtimeModule.scheduleCanonicalStartupConsumer({
+      runtime: terminalOptions,
+      consumerId: "terminal-abrain",
+      mode: "json",
+      reporter: (message, type) => reports.push({ consumer: "abrain", message, type }),
+      onReady: () => { terminalReady += 1; },
+      errorMessage: () => "consumer-specific-error-must-not-leak",
+    }),
+    runtimeModule.scheduleCanonicalStartupConsumer({
+      runtime: terminalOptions,
+      consumerId: "terminal-sediment",
+      mode: "json",
+      reporter: (message, type) => reports.push({ consumer: "sediment", message, type }),
+      onReady: () => { terminalReady += 1; },
+      errorMessage: () => "consumer-specific-error-must-not-leak",
+    }),
+  ]);
+
+  await scheduleTerminalConsumers(attempt1Reports);
+  const attempt1Errors = attempt1Reports.filter((row) => row.type === "error");
+  assert(attempt1Errors.length === 1, `attempt 1 terminal notification was not deduplicated: ${JSON.stringify(attempt1Reports)}`);
+
+  initRepo("missing-terminal-repo");
+  const repairedRuntime = await runtimeModule.getCanonicalGitRuntime(terminalOptions);
+  const repaired = await repairedRuntime.awaitStartup();
+  assert(repaired.startup === "ready", `terminal fixture did not recover in process: ${JSON.stringify(repaired)}`);
+
+  fs.writeFileSync(settingsPath, '{"canonicalGitRuntime":{"enabled":true,"mode":"invalid-after-ready"}}\n');
+  await scheduleTerminalConsumers(attempt2Reports);
+  const attempt2Errors = attempt2Reports.filter((row) => row.type === "error");
+  const terminalErrors = [...attempt1Errors, ...attempt2Errors];
+  assert(terminalReady === 0, "terminal failure consumer unexpectedly ran onReady");
+  assert(attempt1Reports.length === 1, `attempt 2 reached a stale reporter: ${JSON.stringify(attempt1Reports)}`);
+  assert(attempt2Errors.length === 1, `attempt 2 terminal notification was not deduplicated: ${JSON.stringify(attempt2Reports)}`);
+  assert(terminalErrors.length === 2, `fresh startup attempts did not emit exactly two total errors: ${JSON.stringify(terminalErrors)}`);
+  assert(terminalErrors.every((row) => row.message.startsWith("canonical startup failed:") && !row.message.includes("consumer-specific")), "terminal notification was not generic");
+
+  console.log("startup busy retry and outside final classification: ok");
+  console.log(`  A_head_advanced=${mutationHead !== headBefore} B_busy_retries=${b.tail.filter((row) => row.status === "canonical_mutation_busy_retry").length} final_probe_ms=${finalOutsideProbeMs}`);
+  console.log(`  barrier_probes=${probes} delays=${delays.join(",")} deferred_retries=${deferred.tail.filter((row) => row.status === "canonical_mutation_busy_retry").length}`);
+  console.log(`  onReady=abrain:${abrainReady},sediment:${sedimentReady} terminal_attempt_errors=${attempt1Errors.length}+${attempt2Errors.length}`);
 } finally {
+  await Promise.allSettled([...pendingChildren]);
   fs.rmSync(tmp, { recursive: true, force: true });
 }

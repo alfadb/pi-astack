@@ -510,21 +510,32 @@ await check("simulated long constraint compile does not hold the canonical OFD b
   assert(String(writerOutput).includes("start") && String(writerOutput).includes("end"), "cross-process writer did not complete during compile");
 });
 
-await check("startup barrier timeout rejection is evicted and retry succeeds", async () => {
+await check("startup retries low-level barrier timeouts inside one shared promise", async () => {
   const repo = initRepo("startup-timeout-retry");
   const enabledSettings = path.join(tmp, "startup-timeout-enabled.json");
   fs.writeFileSync(enabledSettings, '{"canonicalGitRuntime":{"enabled":true,"mode":"local_convergence_v2"}}\n');
   const marker = path.join(tmp, "startup-timeout-holder.marker");
-  const holder = barrierChild(repo, 2_000, marker);
+  const holder = barrierChild(repo, 500, marker);
   const holderDone = childOutput(holder);
   await waitFor("startup timeout holder", () => fs.existsSync(marker));
-  const options = { abrainHome: repo, settingsPath: enabledSettings, sourceRoot: root, startupBarrierTimeoutMs: 25 };
-  let firstError;
-  try { await canonicalRuntime.getCanonicalStartupPromise(options); } catch (error) { firstError = error; }
-  expectCode(firstError, "CANONICAL_MUTATION_BUSY");
+  const options = {
+    abrainHome: repo,
+    settingsPath: enabledSettings,
+    sourceRoot: root,
+    startupBarrierTimeoutMs: 25,
+    startupBusyBudgetMs: 2_000,
+    startupBusyInitialBackoffMs: 10,
+    startupBusyMaxBackoffMs: 40,
+    startupRetryRandom: () => 0,
+  };
+  const first = canonicalRuntime.getCanonicalStartupPromise(options);
+  const shared = canonicalRuntime.getCanonicalStartupPromise(options);
+  assert(first === shared, "busy startup created more than one process-local promise");
+  const retried = await first;
   await holderDone;
-  const retried = await canonicalRuntime.getCanonicalStartupPromise(options);
-  assert(retried.startup === "ready", `startup retry stayed rejected/blocked: ${retried.blockedReason}`);
+  assert(retried.startup === "ready", `startup retry stayed deferred/blocked: ${retried.blockedReason}`);
+  assert(retried.tail.some((row) => row.status === "canonical_mutation_busy_retry"), "startup did not record an internal busy retry");
+  assert(retried.tail.filter((row) => row.phase === "freeze_initial" && row.status === "enter").length >= 2, "busy retry reused the old startup tuple");
 });
 
 await check("legacy writer holds the canonical barrier against an automatic join", async () => {

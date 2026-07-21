@@ -11,6 +11,26 @@ status: active
 
 ---
 
+## 2026-07-21 — accepted — Concurrent startup busy retry and post-mutation classification lock scope
+
+### 变更
+
+Canonical startup 改为显式 phase machine：锁外 initial freeze/classify；锁内复验后只做 journal bootstrap；锁外 recovery classify；再次入锁复验并做 metadata index/recovery/backlog mutation，同时冻结 final `HEAD + scanRoot + statusHash`；锁外 final classify；最后入锁复验 tuple 且确认无 open/quarantined recovery 才发布 ready。任何 drift 都释放 barrier 后从 initial freeze 独立有界重算，未验证状态不得宣称 ready。
+
+startup runtime 仅捕获 `CANONICAL_MUTATION_BUSY`，在不消耗 drift 次数的 monotonic 总预算内（生产默认 10 分钟，单次 barrier timeout 仍默认 30 秒）使用 exponential backoff+jitter；每次重试 fresh freeze，同 startup key 维持单 shared promise 与最多一个 timer。预算耗尽不 reject：返回 typed `startup=deferred/deferredReason=CANONICAL_MUTATION_BUSY/retryable=true` diagnostics，清 timer、逐出 instance/global promise，等待后续 session/agent-end lifecycle 再触发。未知异常仍 reject fail-closed。底层 OFD barrier probe 从固定 25ms 改为 capped exponential backoff+jitter，并保留可注入 random/sleep/now/probe 与单调用 timeout 语义。terminal startup rejection 按 key 最多一条 generic error；abrain/sediment continuation 继续读取动态最新 reporter。
+
+### 验收边界
+
+真实两个 startup 子进程：A 从有效 Knowledge backlog 执行真实 drain、推进 HEAD 并延迟 mutation phase；B 的同一 shared promise 经低层 timeout 后 fresh-freeze 重试并 ready。A 的 final classification 延迟超过单次 timeout 时，独立 barrier probe 仍在毫秒级获得锁并提交真实 tracked HEAD drift；A 必须拒绝 stale final tuple、重算后才 ready。最终 checkpoint 后 repo clean、exact content cohort 与 recovery closure 正确。永久 holder + 短总预算必须 deferred、无 red error/并发 timer；holder 自然释放后外部 consumer trigger 使 abrain/sediment `onReady` 各一次。多 waiter 的 probe 数只对应 process-local 首 waiter 的指数退避加各 waiter 成功 probe；低层 timeout 仍返回 `CANONICAL_MUTATION_BUSY`。canonical runtime/session-start/device-join/git-sync/sediment smoke 不回归。
+
+### 残余与非目标
+
+本变更不修改 `~/.abrain`，不管理或中止既有 pi 进程，不改变 device-join 显式 settlement 的同步分类边界。由于 canonical runtime 与 mutation barrier 属于 R4.2 source closure，六个 committed evidence inputs 从本次 exact index snapshot 重新生成并一同发布。
+
+### 关联
+
+[ADR 0027 C6](adr/0027-coupled-stigmergic-dual-loop-agent-system.md#c6新--跨-l1l2-causal-trace-共享-session-id--turn-id-锚点)；[Current state](current-state.md)；[Smoke reference](reference/smoke-tests.md)。
+
 ## 2026-07-20 — accepted — Awaited agent_end liveness, outside-barrier recovery classification, parked readiness
 
 ### 变更

@@ -34,7 +34,19 @@ function barrierState(): CanonicalMutationBarrierState {
 
 const heldRepositories = barrierState().heldRepositories;
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_RETRY_MS = 25;
+const DEFAULT_RETRY_INITIAL_MS = 25;
+const DEFAULT_RETRY_MAX_MS = 1_000;
+
+export interface CanonicalMutationBarrierOptions {
+  timeoutMs?: number;
+  /** Backward-compatible name for the first retry delay. */
+  retryMs?: number;
+  maxRetryMs?: number;
+  random?: () => number;
+  sleep?: (delayMs: number) => Promise<void>;
+  now?: () => number;
+  onProbe?: (probe: number) => void;
+}
 
 export class CanonicalMutationBarrierError extends Error {
   readonly code: string;
@@ -56,18 +68,39 @@ export function canonicalMutationBarrierHeld(repo: string): boolean {
   return heldRepositories.getStore()?.get(canonicalKey(repo))?.active === true;
 }
 
-async function acquireWithRetry(repo: string, timeoutMs: number, retryMs: number): Promise<RetainedDirectoryOfdLock & { status: "ACQUIRED" }> {
-  const deadline = Date.now() + timeoutMs;
+function boundedJitter(baseMs: number, random: () => number): number {
+  const sample = Math.min(1, Math.max(0, random()));
+  return Math.max(1, Math.floor(baseMs * (0.5 + sample * 0.5)));
+}
+
+async function acquireWithRetry(
+  repo: string,
+  options: CanonicalMutationBarrierOptions,
+): Promise<RetainedDirectoryOfdLock & { status: "ACQUIRED" }> {
+  const timeoutMs = Math.max(0, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const retryInitialMs = Math.max(1, options.retryMs ?? DEFAULT_RETRY_INITIAL_MS);
+  const retryMaxMs = Math.max(retryInitialMs, options.maxRetryMs ?? DEFAULT_RETRY_MAX_MS);
+  const random = options.random ?? Math.random;
+  const sleep = options.sleep ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const now = options.now ?? Date.now;
+  const deadline = now() + timeoutMs;
+  let probe = 0;
   for (;;) {
+    probe += 1;
+    options.onProbe?.(probe);
     const lock = acquireRetainedDirectoryOfdLock(repo);
     if (lock.status === "ACQUIRED") return lock as RetainedDirectoryOfdLock & { status: "ACQUIRED" };
-    if (Date.now() >= deadline) {
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
       throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_BUSY", "timed out waiting for the per-repository OFD mutation barrier", {
         repo,
         timeoutMs,
+        probes: probe,
       });
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, retryMs));
+    const exponent = Math.min(30, probe - 1);
+    const cappedBaseMs = Math.min(retryMaxMs, retryInitialMs * (2 ** exponent));
+    await sleep(Math.min(remainingMs, boundedJitter(cappedBaseMs, random)));
   }
 }
 
@@ -79,11 +112,11 @@ async function acquireWithRetry(repo: string, timeoutMs: number, retryMs: number
 export async function withCanonicalMutationBarrierInSingleFlight<T>(
   repoInput: string,
   operation: () => Promise<T>,
-  options: { timeoutMs?: number; retryMs?: number } = {},
+  options: CanonicalMutationBarrierOptions = {},
 ): Promise<T> {
   const repo = canonicalKey(repoInput);
   if (canonicalMutationBarrierHeld(repo)) return operation();
-  const lock = await acquireWithRetry(repo, options.timeoutMs ?? DEFAULT_TIMEOUT_MS, options.retryMs ?? DEFAULT_RETRY_MS);
+  const lock = await acquireWithRetry(repo, options);
   const parent = heldRepositories.getStore();
   const held = new Map(parent ?? []);
   const lease: BarrierLease = { active: true };
@@ -103,7 +136,7 @@ export async function withCanonicalMutationBarrierInSingleFlight<T>(
 export function withCanonicalMutationBarrier<T>(
   repoInput: string,
   operation: () => Promise<T>,
-  options: { timeoutMs?: number; retryMs?: number } = {},
+  options: CanonicalMutationBarrierOptions = {},
 ): Promise<T> {
   const repo = canonicalKey(repoInput);
   if (canonicalMutationBarrierHeld(repo)) return operation();

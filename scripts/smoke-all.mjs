@@ -67,10 +67,10 @@ const OFFLINE_TIMEOUT_MINIMUMS = new Map([
   // needs headroom for two startups + classification + tamper clones (~7–8 min
   // observed). Keep this well below the old unbounded 1800s hang budget.
   ["recovery-u-star-production-readonly", 900],
-  // Multi-process cold-start deliberately delays classification >30s outside
-  // the mutation barrier twice (busy-writer fixture + real-writer drift fixture),
-  // then joins concurrent writer + final startup.
-  ["startup-classify-outside-barrier", 300],
+  // Real multi-process startup mutation/busy retry plus delayed final
+  // classification outside the barrier, permanent-holder deferred recovery,
+  // low-level timeout, and deterministic multi-waiter backoff probes.
+  ["startup-classify-outside-barrier", 180],
 ]);
 
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
