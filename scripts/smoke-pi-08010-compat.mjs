@@ -1,21 +1,25 @@
 #!/usr/bin/env node
 /**
- * Smoke: pi 0.80.10 compatibility contracts for pi-astack.
+ * Smoke: current pi install target and backward-compatible peer contracts.
+ *
+ * Install target: 0.81.1. Peer floor: >=0.80.10 <1.0.0.
  *
  * Covers more than source-regex:
- *   1) package.json is the publish contract: pin four @earendil-works packages to 0.80.10
- *      for install (devDependencies) and declare peer floor >=0.80.10 (ModelRuntime API)
+ *   1) package.json is the publish contract: pin four @earendil-works packages to
+ *      the current install target and retain the ModelRuntime-compatible peer floor
  *   2) resolveParentModelRuntime requires registry.runtime and rejects stale facades
  *   3) refreshModelRegistry awaits Promise refresh with per-registry singleflight
- *   4) Against a real >=0.80.10 host, prepareNextTurnWithContext installer exists and
- *      ModelRegistry.refresh returns a Promise; soft-skip is forbidden for critical probes
+ *   4) Against a real host at the install target or newer,
+ *      prepareNextTurnWithContext exists and ModelRegistry.refresh returns a Promise;
+ *      soft-skip is forbidden for critical probes
  *   5) parent ModelRuntime E2E: real createAgentSession inherits registry.runtime
  *   6) recursive legacy AuthStorage/ModelRegistry factory scan on extensions+scripts
  *
  * package-lock.json is gitignored and is NOT a release gate. When present locally it is
  * checked as a soft consistency signal; absence or drift never fails the smoke.
  *
- * Host path: PI_08010_ROOT (package root) > resolvable package > fixed Volta path last.
+ * Host path: PI_COMPAT_ROOT > legacy PI_08010_ROOT > resolvable package >
+ * local node_modules > fixed Volta path last.
  */
 
 import fs from "node:fs";
@@ -53,11 +57,26 @@ async function checkAsync(name, fn) {
   }
 }
 
-function versionInPeerRange(v) {
+function parseVersion(v) {
   const m = String(v).match(/^(\d+)\.(\d+)\.(\d+)/);
-  if (!m) return false;
-  const [maj, min, pat] = m.slice(1).map(Number);
+  return m ? m.slice(1).map(Number) : null;
+}
+
+function versionInPeerRange(v) {
+  const parsed = parseVersion(v);
+  if (!parsed) return false;
+  const [maj, min, pat] = parsed;
   return maj === 0 && ((min === 80 && pat >= 10) || min > 80);
+}
+
+function versionAtLeast(v, floor) {
+  const actual = parseVersion(v);
+  const required = parseVersion(floor);
+  if (!actual || !required) return false;
+  for (let i = 0; i < 3; i++) {
+    if (actual[i] !== required[i]) return actual[i] > required[i];
+  }
+  return true;
 }
 
 function readPkgVersion(pkgPath) {
@@ -93,15 +112,16 @@ function packageRootFromResolved(resolvedUrlOrPath) {
 }
 
 /**
- * Prefer PI_08010_ROOT, then import-resolvable package, then local node_modules,
- * and only then the fixed Volta image path.
+ * Prefer PI_COMPAT_ROOT, retain PI_08010_ROOT as a legacy alias, then try an
+ * import-resolvable package, local node_modules, and the fixed Volta image path.
  */
 function resolveHostCodingAgent() {
   const tried = [];
-  if (process.env.PI_08010_ROOT) {
-    const root = path.resolve(process.env.PI_08010_ROOT);
-    tried.push(`PI_08010_ROOT=${root}`);
-    if (fs.existsSync(path.join(root, "package.json"))) return { root, source: "PI_08010_ROOT", tried };
+  for (const envName of ["PI_COMPAT_ROOT", "PI_08010_ROOT"]) {
+    if (!process.env[envName]) continue;
+    const root = path.resolve(process.env[envName]);
+    tried.push(`${envName}=${root}`);
+    if (fs.existsSync(path.join(root, "package.json"))) return { root, source: envName, tried };
   }
 
   try {
@@ -150,10 +170,8 @@ function walkFiles(dir, pred, out = []) {
   return out;
 }
 
-console.log("Smoke: pi 0.80.10 compat\n");
-
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
-const TARGET = "0.80.10";
+const TARGET = "0.81.1";
 const PEER_FLOOR = ">=0.80.10 <1.0.0";
 const EAR = [
   "@earendil-works/pi-agent-core",
@@ -168,7 +186,41 @@ const PEER_EAR = [
   "@earendil-works/pi-tui",
 ];
 
-check("package.json pins four earendil packages to 0.80.10 for install", () => {
+function hostPackageVersion(hostRoot, name) {
+  if (name === "@earendil-works/pi-coding-agent") {
+    return readPkgVersion(path.join(hostRoot, "package.json"));
+  }
+  const unscoped = name.slice("@earendil-works/".length);
+  const candidates = [
+    path.join(hostRoot, "node_modules", name, "package.json"),
+    path.join(path.dirname(hostRoot), unscoped, "package.json"),
+  ];
+  for (const candidate of candidates) {
+    const version = readPkgVersion(candidate);
+    if (version != null) return version;
+  }
+  return null;
+}
+
+function formatVersions(readVersion) {
+  return EAR.map((name) => `${name}@${readVersion(name) ?? "not installed"}`).join(", ");
+}
+
+console.log(`Smoke: pi install target ${TARGET}; peer floor ${PEER_FLOOR}\n`);
+const initialHost = resolveHostCodingAgent();
+console.log(
+  `  note  actual host via ${initialHost.source ?? "unresolved"}: ${initialHost.root ?? "not found"}`,
+);
+console.log(
+  `  note  actual host package versions: ${formatVersions((name) =>
+    initialHost.root ? hostPackageVersion(initialHost.root, name) : null)}`,
+);
+console.log(
+  `  note  actual local package versions: ${formatVersions((name) =>
+    readPkgVersion(path.join(repoRoot, "node_modules", name, "package.json")))}`,
+);
+
+check(`package.json pins four earendil packages to ${TARGET} for install`, () => {
   for (const name of EAR) {
     const v = pkg.devDependencies?.[name];
     if (v !== TARGET) throw new Error(`${name} devDependency is ${v}, want ${TARGET}`);
@@ -185,6 +237,15 @@ check("package.json peerDependencies floor ModelRuntime-compatible >=0.80.10", (
     if (/^>=0\.80\.0\b/.test(String(v)) && !/^>=0\.80\.10\b/.test(String(v))) {
       throw new Error(`${name} peer still allows 0.80.0-class hosts: ${v}`);
     }
+  }
+});
+
+check(`host target floor detects versions below ${TARGET}`, () => {
+  if (versionAtLeast("0.81.0", TARGET)) {
+    throw new Error(`0.81.0 must be rejected as older than install target ${TARGET}`);
+  }
+  if (!versionAtLeast(TARGET, TARGET)) {
+    throw new Error(`install target ${TARGET} must satisfy its own floor`);
   }
 });
 
@@ -218,7 +279,7 @@ if (fs.existsSync(lockPath)) {
     if (notes.length) {
       console.log(`  warn  package-lock.json (advisory only; not a gate): ${notes.join("; ")}`);
     } else {
-      console.log("  ok    package-lock.json (advisory) matches 0.80.10 pins / peers");
+      console.log(`  ok    package-lock.json (advisory) matches ${TARGET} pins / ${PEER_FLOOR} peers`);
     }
   } catch (err) {
     console.log(`  warn  package-lock.json unreadable (advisory only): ${err.message}`);
@@ -227,7 +288,7 @@ if (fs.existsSync(lockPath)) {
   console.log("  skip  package-lock.json (gitignored; not a release contract)");
 }
 
-check("host resolver prefers PI_08010_ROOT / resolvable package before volta fallback", () => {
+check("host resolver prefers PI_COMPAT_ROOT / legacy alias / resolvable package before fallback", () => {
   const resolved = resolveHostCodingAgent();
   if (!resolved.root) {
     throw new Error(`could not resolve host coding-agent; tried: ${resolved.tried.join(" | ")}`);
@@ -240,23 +301,49 @@ check("host resolver prefers PI_08010_ROOT / resolvable package before volta fal
   if (!fs.existsSync(path.join(resolved.root, "package.json"))) {
     throw new Error(`resolved host root missing package.json: ${resolved.root}`);
   }
+
+  const savedCompatRoot = process.env.PI_COMPAT_ROOT;
+  const savedLegacyRoot = process.env.PI_08010_ROOT;
+  try {
+    process.env.PI_COMPAT_ROOT = resolved.root;
+    process.env.PI_08010_ROOT = resolved.root;
+    const preferred = resolveHostCodingAgent();
+    if (preferred.source !== "PI_COMPAT_ROOT") {
+      throw new Error(`PI_COMPAT_ROOT did not win precedence; source=${preferred.source}`);
+    }
+    delete process.env.PI_COMPAT_ROOT;
+    const legacy = resolveHostCodingAgent();
+    if (legacy.source !== "PI_08010_ROOT") {
+      throw new Error(`legacy PI_08010_ROOT alias did not resolve; source=${legacy.source}`);
+    }
+  } finally {
+    if (savedCompatRoot === undefined) delete process.env.PI_COMPAT_ROOT;
+    else process.env.PI_COMPAT_ROOT = savedCompatRoot;
+    if (savedLegacyRoot === undefined) delete process.env.PI_08010_ROOT;
+    else process.env.PI_08010_ROOT = savedLegacyRoot;
+  }
+
   console.log(`  note  host root via ${resolved.source}: ${resolved.root}`);
 });
 
-check("host/resolvable install provides >=0.80.10 <1", () => {
+check(`host install meets target >=${TARGET} and peer range ${PEER_FLOOR}`, () => {
   const { root } = resolveHostCodingAgent();
   if (!root) throw new Error("no host coding-agent root");
   const v = readPkgVersion(path.join(root, "package.json"));
   if (!versionInPeerRange(v)) {
-    throw new Error(`host pi-coding-agent@${v} at ${root} outside peer range >=0.80.10 <1`);
+    throw new Error(`host pi-coding-agent@${v} at ${root} outside peer range ${PEER_FLOOR}`);
   }
-  // Sibling packages when present under the same node_modules tree.
-  const siblingRoot = path.dirname(root);
+  if (!versionAtLeast(v, TARGET)) {
+    throw new Error(`host target too old: pi-coding-agent@${v} at ${root}; need >=${TARGET}`);
+  }
   for (const name of EAR) {
     if (name === "@earendil-works/pi-coding-agent") continue;
-    const sv = readPkgVersion(path.join(siblingRoot, name, "package.json"));
+    const sv = hostPackageVersion(root, name);
     if (sv != null && !versionInPeerRange(sv)) {
-      throw new Error(`host sibling ${name}@${sv} outside peer range`);
+      throw new Error(`host package ${name}@${sv} outside peer range ${PEER_FLOOR}`);
+    }
+    if (sv != null && !versionAtLeast(sv, TARGET)) {
+      throw new Error(`host package target too old: ${name}@${sv}; need >=${TARGET}`);
     }
   }
 });
@@ -419,9 +506,14 @@ await checkAsync("host critical probe: ModelRegistry.refresh Promise + prepareNe
   if (!hostRoot) throw new Error(`could not resolve pi-coding-agent; tried: ${tried.join(" | ")}`);
   const hostPkg = JSON.parse(fs.readFileSync(path.join(hostRoot, "package.json"), "utf8"));
   if (!versionInPeerRange(hostPkg.version)) {
-    // Critical probe must NOT soft-pass on pre-0.80.10 hosts.
     throw new Error(
-      `host critical probe refused soft-pass: resolved ${hostPkg.version} via ${source} at ${hostRoot} (need >=0.80.10 <1)`,
+      `host critical probe refused soft-pass: resolved ${hostPkg.version} via ${source} at ${hostRoot} ` +
+        `(outside peer range ${PEER_FLOOR})`,
+    );
+  }
+  if (!versionAtLeast(hostPkg.version, TARGET)) {
+    throw new Error(
+      `host critical probe target too old: resolved ${hostPkg.version} via ${source} at ${hostRoot}; need >=${TARGET}`,
     );
   }
   const indexUrl = pathToFileURL(path.join(hostRoot, "dist/index.js")).href;
@@ -432,20 +524,23 @@ await checkAsync("host critical probe: ModelRegistry.refresh Promise + prepareNe
   const runtime = await Pi.ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
   const registry = new Pi.ModelRegistry(runtime);
   const refreshed = registry.refresh();
-  if (!(refreshed instanceof Promise)) throw new Error("ModelRegistry.refresh must return Promise on 0.80.10");
+  if (!(refreshed instanceof Promise)) throw new Error(`ModelRegistry.refresh must return Promise on host target ${TARGET}`);
   await refreshed;
   if (registry.runtime !== runtime) throw new Error("ModelRegistry.runtime must be the parent ModelRuntime instance");
 
   const proto = Pi.AgentSession?.prototype;
   if (typeof proto?._installAgentNextTurnRefresh !== "function") {
-    throw new Error("AgentSession._installAgentNextTurnRefresh missing on host >=0.80.10");
+    throw new Error(`AgentSession._installAgentNextTurnRefresh missing on host target >=${TARGET}`);
   }
   // Confirm agent-core createLoopConfig prefers WithContext (via nested dep when present).
   const agentCorePkg = path.join(hostRoot, "node_modules/@earendil-works/pi-agent-core/package.json");
   if (fs.existsSync(agentCorePkg)) {
     const ac = JSON.parse(fs.readFileSync(agentCorePkg, "utf8"));
     if (!versionInPeerRange(ac.version)) {
-      throw new Error(`host nested pi-agent-core is ${ac.version}, need >=0.80.10`);
+      throw new Error(`host nested pi-agent-core@${ac.version} outside peer range ${PEER_FLOOR}`);
+    }
+    if (!versionAtLeast(ac.version, TARGET)) {
+      throw new Error(`host nested pi-agent-core target too old: ${ac.version}; need >=${TARGET}`);
     }
   }
 });
@@ -455,7 +550,10 @@ await checkAsync("parent ModelRuntime E2E: createAgentSession holds same runtime
   if (!hostRoot) throw new Error(`could not resolve host; tried: ${tried.join(" | ")}`);
   const hostPkg = JSON.parse(fs.readFileSync(path.join(hostRoot, "package.json"), "utf8"));
   if (!versionInPeerRange(hostPkg.version)) {
-    throw new Error(`E2E refused soft-pass on host ${hostPkg.version} via ${source}`);
+    throw new Error(`E2E refused soft-pass on host ${hostPkg.version} via ${source}; peer range is ${PEER_FLOOR}`);
+  }
+  if (!versionAtLeast(hostPkg.version, TARGET)) {
+    throw new Error(`E2E host target too old: ${hostPkg.version} via ${source}; need >=${TARGET}`);
   }
 
   const indexUrl = pathToFileURL(path.join(hostRoot, "dist/index.js")).href;
@@ -491,7 +589,7 @@ await checkAsync("parent ModelRuntime E2E: createAgentSession holds same runtime
   const resolveParent = mod.resolveParentModelRuntime;
   if (typeof resolveParent !== "function") throw new Error("resolveParentModelRuntime missing");
 
-  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-08010-e2e-"));
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-compat-e2e-"));
   const faux = Faux.registerFauxProvider({ tokensPerSecond: 0 });
   let session;
   let child;
@@ -543,7 +641,7 @@ await checkAsync("parent ModelRuntime E2E: createAgentSession holds same runtime
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPromptOverride: () => "pi-08010 parent ModelRuntime e2e",
+      systemPromptOverride: () => `pi ${TARGET} parent ModelRuntime e2e`,
     });
     await resourceLoader.reload();
 

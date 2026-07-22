@@ -358,6 +358,8 @@ function buildAvailableModelsBlock(
 // ── Extension entry ─────────────────────────────────────────────
 
 interface CuratorRegistryLike {
+  /** pi >= 0.80.10; optional so older host facades remain supported. */
+  refresh?(): Promise<void>;
   getAll(): Model<Api>[];
   getAvailable?(): Model<Api>[];
   getApiKeyAndHeaders(m: Model<Api>): Promise<{
@@ -390,7 +392,9 @@ export default function (pi: ExtensionAPI) {
   let lastAppliedMtimeMs: number | null = null;
   let appliedProviderNames: string[] = [];
   // Original built-in catalog, captured on the FIRST application BEFORE any
-  // whitelist replaces provider model sets. Re-applies resolve keep-lists
+  // whitelist replaces provider model sets. pi 0.81.x starts its background
+  // model refresh after session_start, so the first capture explicitly awaits
+  // registry.refresh() when the host exposes it. Re-applies resolve keep-lists
   // against this cache so we never unregister-then-re-register (which would
   // expose raw built-ins during the auth await window and fail open if auth
   // resolution failed mid-apply — T0 audit P0). registerProvider() is an
@@ -434,7 +438,20 @@ export default function (pi: ExtensionAPI) {
     // re-apply) instead of producing a misleading prompt at the next turn.
     loadTiersOrThrow();
 
-    builtinCatalog ??= reg.getAll();
+    if (builtinCatalog === null) {
+      if (typeof reg.refresh === "function") {
+        try {
+          await reg.refresh();
+        } catch (e: unknown) {
+          const message = e instanceof Error ? e.message : String(e);
+          console.error(
+            `[model-curator] WARN initial registry refresh failed; ` +
+              `continuing with current catalog snapshot: ${message}`,
+          );
+        }
+      }
+      builtinCatalog = reg.getAll();
+    }
     const allBuiltin = builtinCatalog;
 
     // Providers we previously curated that are no longer in settings:

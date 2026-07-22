@@ -2,14 +2,16 @@
 /**
  * Smoke: model-curator live re-apply (3-T0 consensus 2026-06-10).
  *
- * Source-level assertions that lock the invariants from the T0 audit:
+ * Source and executable behavior assertions that lock the invariants from the T0 audit:
  *  1. P0 mtime lost-update: mtime snapshot is taken BEFORE resolveConfig()
  *     inside doApplyAllWhitelists, and the watermark is assigned from the
  *     snapshot (not a fresh stat).
  *  2. P0 serialization: concurrent applies coalesce on an in-flight promise.
- *  3. P1 fail-open root-cause: re-applies resolve keep-lists against a cached
- *     builtinCatalog; active providers are NEVER unregister-then-re-registered
- *     (the only unregisterProvider call targets providers REMOVED from settings).
+ *  3. P1 fail-open root-cause: the first catalog snapshot awaits an optional
+ *     async registry refresh, then re-applies resolve keep-lists against that
+ *     cached builtinCatalog; refresh failure warns and uses the current snapshot.
+ *     Active providers are NEVER unregister-then-re-registered (the only
+ *     unregisterProvider call targets providers REMOVED from settings).
  *  4. Sub-agent guard on the before_agent_start re-apply path.
  *  5. /curator-reload registered with feature detection.
  *  6. Plan A intact: DEFAULTS holds no model strategy data (empty objects),
@@ -22,6 +24,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createJiti } from "jiti";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = readFileSync(
@@ -86,11 +89,24 @@ assert(
   "concurrent applies coalesce on in-flight promise",
 );
 
-// ── 3. cached catalog + no unregister-first (P1 root-cause) ─────
-assert(
-  /builtinCatalog \?\?= reg\.getAll\(\)/.test(src),
-  "built-in catalog cached on first apply",
-);
+// ── 3. refreshed cached catalog + no unregister-first (P1) ─────
+{
+  const body = src.slice(src.indexOf("async function doApplyAllWhitelists"));
+  const iRefresh = body.indexOf("await reg.refresh()");
+  const iSnapshot = body.indexOf("builtinCatalog = reg.getAll()");
+  assert(/refresh\?\(\): Promise<void>/.test(src), "registry refresh contract is optional for older hosts");
+  assert(iRefresh !== -1, "first catalog capture awaits registry refresh");
+  assert(iSnapshot !== -1, "built-in catalog cached on first apply");
+  assert(
+    iRefresh !== -1 && iSnapshot !== -1 && iRefresh < iSnapshot,
+    "registry refresh settles before the initial getAll snapshot",
+  );
+  assert(
+    /WARN initial registry refresh failed/.test(body) &&
+      /continuing with current catalog snapshot/.test(body),
+    "initial refresh failure has an explicit fail-open warning",
+  );
+}
 {
   // Every unregisterProvider call site must live inside the removed-from-
   // settings branch; there must be no unconditional unregister of active
@@ -109,6 +125,118 @@ assert(
     /appliedProviderNames = \[\.\.\.registered, \.\.\.previouslyApplied\]/.test(src),
   "tracking preserves last-good registrations on kept=0 (auth fail)",
 );
+
+// Exercise the real extension factory and session_start handler. This avoids
+// duplicating the production cache/refresh implementation in the smoke.
+{
+  const savedSettingsPath = process.env.PI_ASTACK_SETTINGS_PATH;
+  process.env.PI_ASTACK_SETTINGS_PATH = fixtureSettingsPath;
+  const jiti = createJiti(import.meta.url, { moduleCache: false });
+  const curatorModule = await jiti.import(
+    join(root, "extensions/model-curator/index.ts"),
+  );
+  const activateCurator = curatorModule.default;
+
+  function harness() {
+    const handlers = new Map();
+    const registrations = [];
+    const pi = {
+      on(name, handler) { handlers.set(name, handler); },
+      registerProvider(name, config) { registrations.push({ name, config }); },
+      unregisterProvider() {},
+      registerCommand() {},
+    };
+    activateCurator(pi);
+    return { handlers, registrations };
+  }
+
+  function fixtureModel(provider = "alpha", id = "executor") {
+    return {
+      provider,
+      id,
+      name: id,
+      api: "openai-completions",
+      baseUrl: "https://example.invalid/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 1000,
+      maxTokens: 100,
+    };
+  }
+
+  assert(typeof activateCurator === "function", "real curator extension factory loads");
+
+  const first = harness();
+  const order = [];
+  let releaseRefresh;
+  let catalog = [];
+  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+  const firstRegistry = {
+    async refresh() {
+      order.push("refresh-start");
+      await refreshGate;
+      catalog = [
+        fixtureModel(),
+        fixtureModel("beta", "reviewer"),
+        fixtureModel("gamma", "conditional-executor"),
+      ];
+      order.push("refresh-end");
+    },
+    getAll() { order.push("getAll"); return catalog; },
+    async getApiKeyAndHeaders() { return { ok: true, apiKey: "fixture-key" }; },
+  };
+  const firstApply = first.handlers.get("session_start")(
+    {},
+    { modelRegistry: firstRegistry, sessionManager: {}, hasUI: false },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert(order.join(",") === "refresh-start", "first apply does not read catalog while refresh is pending");
+  assert(first.registrations.length === 0, "first apply does not register from a pre-refresh snapshot");
+  releaseRefresh();
+  await firstApply;
+  assert(
+    order.join(",") === "refresh-start,refresh-end,getAll",
+    "first apply reads catalog only after async refresh settles",
+  );
+  assert(
+    first.registrations.some(({ name }) => name === "alpha"),
+    "post-refresh catalog is used by the real whitelist path",
+  );
+
+  const fallback = harness();
+  const warnings = [];
+  let fallbackGetAllCalls = 0;
+  const previousConsoleError = console.error;
+  console.error = (...args) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    await fallback.handlers.get("session_start")(
+      {},
+      {
+        modelRegistry: {
+          async refresh() { throw new Error("refresh-boom"); },
+          getAll() { fallbackGetAllCalls++; return [fixtureModel()]; },
+          async getApiKeyAndHeaders() { return { ok: true, apiKey: "fixture-key" }; },
+        },
+        sessionManager: {},
+        hasUI: false,
+      },
+    );
+  } finally {
+    console.error = previousConsoleError;
+    if (savedSettingsPath === undefined) delete process.env.PI_ASTACK_SETTINGS_PATH;
+    else process.env.PI_ASTACK_SETTINGS_PATH = savedSettingsPath;
+  }
+  assert(
+    warnings.some((line) => line.includes("WARN initial registry refresh failed") && line.includes("refresh-boom")),
+    "refresh rejection emits an explicit warning with the cause",
+  );
+  assert(fallbackGetAllCalls === 1, "refresh rejection falls back to exactly one current catalog snapshot");
+  assert(
+    fallback.registrations.some(({ name }) => name === "alpha"),
+    "refresh rejection does not disable curator whitelist application",
+  );
+}
 
 // ── 4. sub-agent guard on re-apply path ─────────────────────────
 {
